@@ -15,7 +15,7 @@ public sealed class ChunkLoadSystem : ISystem
     private const int LoadsPerFrame = 4;
 
     private readonly EntitySet      _cameras;
-    private readonly ChunkManager   _manager;
+    private readonly StaticWorld    _manager;
     private readonly IWorldGenerator _generator;
     private readonly int            _xzRadius;
     private readonly int            _yRadius;
@@ -23,7 +23,7 @@ public sealed class ChunkLoadSystem : ISystem
     private readonly Queue<ChunkPosition> _loadQueue = new();
     private ChunkPosition _lastCamChunk = new(int.MinValue, int.MinValue, int.MinValue);
 
-    public ChunkLoadSystem(World world, ChunkManager manager, IWorldGenerator generator,
+    public ChunkLoadSystem(World world, StaticWorld manager, IWorldGenerator generator,
                            int xzRadius = 5, int yRadius = 2)
     {
         _cameras   = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();

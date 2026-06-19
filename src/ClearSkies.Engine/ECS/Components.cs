@@ -1,4 +1,5 @@
 using ClearSkies.Engine.Rendering;
+using ClearSkies.Engine.Voxels;
 
 namespace ClearSkies.Engine.ECS;
 
@@ -6,6 +7,15 @@ namespace ClearSkies.Engine.ECS;
 public struct MeshRenderer
 {
     public GpuMesh Mesh;
+
+    /// <summary>Opaque group-2 light bind group handle (per-chunk light buffer). 0 = shared full-bright.</summary>
+    public nint LightBindGroup;
+}
+
+/// <summary>Tags the root entity of a dynamic voxel grid, carrying a reference to its data/body.</summary>
+public struct DynamicGridComponent
+{
+    public DynamicGrid Grid;
 }
 
 /// <summary>Marks an entity as a camera. Only the first active camera is used for rendering.</summary>

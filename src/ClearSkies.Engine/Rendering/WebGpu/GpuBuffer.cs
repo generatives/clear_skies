@@ -43,6 +43,14 @@ public sealed unsafe class GpuBuffer : IDisposable
     public static GpuBuffer CreateUniform(GpuContext ctx, ulong size)
         => Create(ctx, Align4(size), BufferUsage.Uniform | BufferUsage.CopyDst);
 
+    /// <summary>Storage buffer for compute (read/write in shaders, uploadable and copyable for readback).</summary>
+    public static GpuBuffer CreateStorage(GpuContext ctx, ulong size)
+        => Create(ctx, Align4(size), BufferUsage.Storage | BufferUsage.CopyDst | BufferUsage.CopySrc);
+
+    /// <summary>CPU-mappable destination buffer used to read compute results back (debug/self-test).</summary>
+    public static GpuBuffer CreateReadback(GpuContext ctx, ulong size)
+        => Create(ctx, Align4(size), BufferUsage.MapRead | BufferUsage.CopyDst);
+
     public void Write<T>(ulong offset, ReadOnlySpan<T> data) where T : unmanaged
     {
         fixed (T* p = data)

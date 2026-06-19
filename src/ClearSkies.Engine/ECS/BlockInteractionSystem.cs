@@ -1,6 +1,7 @@
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Input;
 using ClearSkies.Engine.Math;
+using ClearSkies.Engine.Physics;
 using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Rendering.WebGpu;
 using ClearSkies.Engine.Voxels;
@@ -11,17 +12,20 @@ using Silk.NET.Maths;
 namespace ClearSkies.Engine.ECS;
 
 /// <summary>
-/// Casts a ray from the active camera each frame. Left-click breaks the targeted block;
-/// right-click places a new stone block on the face the ray hit.
-/// The targeted face is highlighted with a coloured outline; a crosshair is always shown
-/// at the screen centre.
+/// Casts a ray from the active camera each frame against the static world and every dynamic grid,
+/// picking the nearest hit. Left-click breaks the targeted block; right-click places a stone block on
+/// the hit face. Editing routes to whichever volume was hit, so dynamic grids are edited exactly like
+/// terrain. The targeted face is highlighted (following the grid if it is one); a crosshair is always
+/// shown at the screen centre.
 /// </summary>
 public sealed class BlockInteractionSystem : ISystem, IDisposable
 {
-    private const float ReachBlocks = 8f;
+    private const float ReachBlocks = 32f;
 
     private readonly EntitySet    _cameras;
-    private readonly ChunkManager _manager;
+    private readonly EntitySet    _grids;
+    private readonly StaticWorld  _staticWorld;
+    private readonly PhysicsWorld _physics;
     private readonly InputManager _input;
 
     private readonly GpuMesh _faceMesh;
@@ -29,19 +33,25 @@ public sealed class BlockInteractionSystem : ISystem, IDisposable
     private readonly GpuMesh _crosshairMesh;
     private readonly Entity  _crosshairEntity;
 
-    // Cached to avoid re-uploading vertices every frame when the target hasn't changed.
+    // Cached so face vertices are only re-uploaded when the targeted cell/volume changes.
     private Vector3D<int> _lastBlock;
     private Vector3D<int> _lastNormal;
-    private bool          _lastHadTarget;
+    private object?       _lastVolume;
+    private bool          _faceVisible;
 
     public Vector3D<int>? TargetBlock  { get; private set; }
     public Vector3D<int>? TargetNormal { get; private set; }
 
-    public BlockInteractionSystem(World world, ChunkManager manager, InputManager input, Renderer renderer)
+    // Block placed by right-click; toggle Stone/Lamp with the L key (Lamp tests block-light flood).
+    private BlockId _placeBlock = BlockId.Stone;
+
+    public BlockInteractionSystem(World world, StaticWorld staticWorld, PhysicsWorld physics, InputManager input, Renderer renderer)
     {
-        _cameras = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
-        _manager = manager;
-        _input   = input;
+        _cameras     = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
+        _grids       = world.GetEntities().With<DynamicGridComponent>().AsSet();
+        _staticWorld = staticWorld;
+        _physics     = physics;
+        _input       = input;
 
         // Face outline entity: the WireframeRenderer component is added/removed to show/hide.
         _faceMesh   = BuildFaceMesh(renderer);
@@ -59,30 +69,75 @@ public sealed class BlockInteractionSystem : ISystem, IDisposable
         TargetBlock  = null;
         TargetNormal = null;
 
-        if (!_input.CursorCaptured ||
-            !TryGetCameraRay(out var origin, out var dir) ||
-            !VoxelRaycaster.Cast(_manager, origin, dir, ReachBlocks, out var block, out var normal))
+        if (!_input.CursorCaptured || !TryGetCameraRay(out var origin, out var dir))
         {
             HideFace();
             return;
         }
 
-        TargetBlock  = block;
-        TargetNormal = normal;
-        ShowFace(block, normal);
+        // Find the nearest hit across the static world and every dynamic grid.
+        float        bestDist   = float.MaxValue;
+        ChunkVolume? bestVolume = null;
+        Vector3D<int> bestBlock  = default, bestNormal = default;
+        bool          bestIsGrid = false;
+        Vector3D<float>    gridPos = default, gridCom = default;
+        Quaternion<float>  gridRot = Quaternion<float>.Identity;
+
+        if (VoxelRaycaster.Cast(_staticWorld, origin, dir, ReachBlocks, out var sb, out var sn, out var sd) && sd < bestDist)
+        {
+            bestDist = sd; bestVolume = _staticWorld; bestBlock = sb; bestNormal = sn; bestIsGrid = false;
+        }
+
+        foreach (ref readonly Entity e in _grids.GetEntities())
+        {
+            var grid = e.Get<DynamicGridComponent>().Grid;
+            if (!grid.BodyCreated) continue;
+
+            var (p, q) = _physics.GetBodyPose(grid.Body);
+            var gp  = PhysicsConv.ToSilk(p);
+            var gr  = PhysicsConv.ToSilk(q);
+            var com = PhysicsConv.ToSilk(grid.CenterOfMass);
+            var inv = Conjugate(gr);
+
+            // Transform the ray into grid-local space: localPoint = com + R⁻¹·(world − gridPos).
+            var lo = com + Vec.Rotate(inv, origin - gp);
+            var ld = Vec.Rotate(inv, dir);
+
+            if (VoxelRaycaster.Cast(grid, lo, ld, ReachBlocks, out var gb, out var gn, out var gd) && gd < bestDist)
+            {
+                bestDist = gd; bestVolume = grid; bestBlock = gb; bestNormal = gn; bestIsGrid = true;
+                gridPos = gp; gridRot = gr; gridCom = com;
+            }
+        }
+
+        if (bestVolume is null)
+        {
+            HideFace();
+            return;
+        }
+
+        TargetBlock  = bestBlock;
+        TargetNormal = bestNormal;
+        ShowFace(bestVolume, bestBlock, bestNormal, bestIsGrid, gridPos, gridRot, gridCom);
+
+        if (_input.WasKeyPressed(Key.L))
+        {
+            _placeBlock = _placeBlock == BlockId.Stone ? BlockId.Lamp : BlockId.Stone;
+            Console.WriteLine($"[place] selected block: {_placeBlock}");
+        }
 
         if (_input.WasMouseButtonPressed(MouseButton.Left))
         {
-            _manager.SetBlockWorld(block.X, block.Y, block.Z, BlockId.Air);
-            Console.WriteLine($"[break] ({block.X},{block.Y},{block.Z})");
+            bestVolume.SetBlock(bestBlock.X, bestBlock.Y, bestBlock.Z, BlockId.Air);
+            Console.WriteLine($"[break] {(bestIsGrid ? "grid" : "world")} ({bestBlock.X},{bestBlock.Y},{bestBlock.Z})");
         }
         else if (_input.WasMouseButtonPressed(MouseButton.Right))
         {
-            var p = block + normal;
-            if (_manager.GetBlockWorld(p.X, p.Y, p.Z) == BlockId.Air)
+            var t = bestBlock + bestNormal;
+            if (bestVolume.GetBlock(t.X, t.Y, t.Z) == BlockId.Air)
             {
-                _manager.SetBlockWorld(p.X, p.Y, p.Z, BlockId.Stone);
-                Console.WriteLine($"[place] ({p.X},{p.Y},{p.Z})");
+                bestVolume.SetBlock(t.X, t.Y, t.Z, _placeBlock);
+                Console.WriteLine($"[place] {_placeBlock} in {(bestIsGrid ? "grid" : "world")} ({t.X},{t.Y},{t.Z})");
             }
         }
     }
@@ -99,26 +154,45 @@ public sealed class BlockInteractionSystem : ISystem, IDisposable
 
     private void HideFace()
     {
-        if (_lastHadTarget)
+        if (_faceVisible)
         {
             _faceEntity.Remove<WireframeRenderer>();
-            _lastHadTarget = false;
+            _faceVisible = false;
+            _lastVolume  = null;
         }
     }
 
-    private void ShowFace(Vector3D<int> block, Vector3D<int> normal)
+    private void ShowFace(ChunkVolume volume, Vector3D<int> block, Vector3D<int> normal,
+                          bool isGrid, Vector3D<float> gridPos, Quaternion<float> gridRot, Vector3D<float> gridCom)
     {
-        if (!_lastHadTarget || block != _lastBlock || normal != _lastNormal)
+        // Corners are in the volume's local space; re-upload only when the cell or volume changes.
+        if (!_faceVisible || block != _lastBlock || normal != _lastNormal || !ReferenceEquals(volume, _lastVolume))
         {
             UploadFaceVertices(block, normal);
             _lastBlock  = block;
             _lastNormal = normal;
+            _lastVolume = volume;
         }
 
-        if (!_lastHadTarget)
+        // Map the local-space face into the world. For a grid: world = gridPos + R·(local − com),
+        // expressed as a Transform of rotation R and position gridPos − R·com. For the static world the
+        // local space is world space, so the transform is identity.
+        ref var t = ref _faceEntity.Get<Transform>();
+        if (isGrid)
+        {
+            t.Rotation = gridRot;
+            t.Position = gridPos - Vec.Rotate(gridRot, gridCom);
+        }
+        else
+        {
+            t.Rotation = Quaternion<float>.Identity;
+            t.Position = Vector3D<float>.Zero;
+        }
+
+        if (!_faceVisible)
         {
             _faceEntity.Set(new WireframeRenderer { Mesh = _faceMesh });
-            _lastHadTarget = true;
+            _faceVisible = true;
         }
     }
 
@@ -132,13 +206,13 @@ public sealed class BlockInteractionSystem : ISystem, IDisposable
 
         Span<Vertex> verts = stackalloc Vertex[4];
         for (int i = 0; i < 4; i++)
-            verts[i] = new Vertex { Position = corners[i], Normal = faceNormal, Color = color };
+            verts[i] = new Vertex(corners[i], faceNormal, color); // Light=(1,0) full-bright via ctor
 
         _faceMesh.VertexBuffer.Write<Vertex>(0, verts);
     }
 
-    /// <summary>Computes the 4 world-space corners of the face indicated by <paramref name="normal"/>,
-    /// slightly offset outward to prevent z-fighting.</summary>
+    /// <summary>Computes the 4 corners (in the hit volume's local space) of the face indicated by
+    /// <paramref name="normal"/>, slightly offset outward to prevent z-fighting.</summary>
     private static void GetFaceCorners(Vector3D<int> block, Vector3D<int> normal, Span<Vector3D<float>> out4)
     {
         const float eps = 0.002f;
@@ -174,7 +248,10 @@ public sealed class BlockInteractionSystem : ISystem, IDisposable
     private static GpuMesh BuildFaceMesh(Renderer renderer)
     {
         // 4 placeholder vertices updated at runtime via QueueWriteBuffer.
-        var verts = new Vertex[4];
+        var n = Vector3D<float>.UnitY;
+        var c = Vector3D<float>.One;
+        var verts = new[] { new Vertex(default, n, c), new Vertex(default, n, c),
+                            new Vertex(default, n, c), new Vertex(default, n, c) };
         uint[] tris  = { 0, 1, 2, 0, 2, 3 };             // 2 dummy triangles (never drawn solid)
         uint[] edges = { 0, 1,  1, 2,  2, 3,  3, 0 };    // 4 border edges
         return renderer.UploadMesh(verts, tris, edges);
@@ -196,14 +273,14 @@ public sealed class BlockInteractionSystem : ISystem, IDisposable
         // 8 verts: left arm (0-1), right arm (2-3), bottom arm (4-5), top arm (6-7)
         var verts = new Vertex[]
         {
-            new() { Position = new(-hw,  0,  0), Normal = n, Color = white },
-            new() { Position = new(-gw,  0,  0), Normal = n, Color = white },
-            new() { Position = new( gw,  0,  0), Normal = n, Color = white },
-            new() { Position = new( hw,  0,  0), Normal = n, Color = white },
-            new() { Position = new(  0, -hh, 0), Normal = n, Color = white },
-            new() { Position = new(  0, -gh, 0), Normal = n, Color = white },
-            new() { Position = new(  0,  gh, 0), Normal = n, Color = white },
-            new() { Position = new(  0,  hh, 0), Normal = n, Color = white },
+            new(new(-hw,  0,  0), n, white),
+            new(new(-gw,  0,  0), n, white),
+            new(new( gw,  0,  0), n, white),
+            new(new( hw,  0,  0), n, white),
+            new(new(  0, -hh, 0), n, white),
+            new(new(  0, -gh, 0), n, white),
+            new(new(  0,  gh, 0), n, white),
+            new(new(  0,  hh, 0), n, white),
         };
 
         uint[] tris  = { 0, 1, 2,  1, 2, 3,  4, 5, 6,  5, 6, 7 }; // dummy solid
@@ -212,7 +289,9 @@ public sealed class BlockInteractionSystem : ISystem, IDisposable
         return renderer.UploadMesh(verts, tris, edges);
     }
 
-    // ── Camera ray ────────────────────────────────────────────────────────────
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private static Quaternion<float> Conjugate(Quaternion<float> q) => new(-q.X, -q.Y, -q.Z, q.W);
 
     private bool TryGetCameraRay(out Vector3D<float> origin, out Vector3D<float> dir)
     {

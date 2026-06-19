@@ -7,6 +7,11 @@ namespace ClearSkies.Engine.Voxels;
 /// Converts a ChunkData (plus its six optional loaded neighbours) into an efficient triangle mesh
 /// using greedy quad merging. Outputs vertices in chunk-local space [0, ChunkData.Size]; the
 /// chunk entity's Transform.Position places it in the world.
+///
+/// Meshing is light-independent: faces merge purely on <see cref="BlockId"/>. Lighting is applied in
+/// the fragment shader, which samples the chunk light buffer at the air-side voxel using the
+/// interpolated chunk-local position and the face normal — so a merged quad no longer needs per-cell
+/// light in its merge key.
 /// </summary>
 public sealed class GreedyMesher
 {
@@ -32,9 +37,8 @@ public sealed class GreedyMesher
     private readonly bool[]    _consumed = new bool   [ChunkData.Size * ChunkData.Size];
 
     /// <summary>
-    /// Mesh <paramref name="chunk"/>. Neighbour parameters are the adjacent loaded chunks for each
-    /// axis direction; pass <c>null</c> for any unloaded neighbour — those border faces will be
-    /// shown rather than culled.
+    /// Mesh <paramref name="chunk"/>. Neighbour ChunkData parameters are for face-culling only;
+    /// pass <c>null</c> for any unloaded neighbour (its side is treated as open air).
     /// </summary>
     public (Vertex[] vertices, uint[] indices) Mesh(
         ChunkData  chunk,
@@ -42,8 +46,7 @@ public sealed class GreedyMesher
         ChunkData? nY, ChunkData? pY,
         ChunkData? nZ, ChunkData? pZ)
     {
-        // neighbors[i] is the chunk adjacent in Faces[i]'s direction.
-        // Order: +X, -X, +Y, -Y, +Z, -Z
+        // Array order matches Faces[] (fi=0:+X, fi=1:-X, fi=2:+Y, fi=3:-Y, fi=4:+Z, fi=5:-Z).
         ChunkData?[] neighbors = { pX, nX, pY, nY, pZ, nZ };
 
         var verts   = new List<Vertex>();
@@ -61,26 +64,20 @@ public sealed class GreedyMesher
                 Array.Clear(_mask,     0, _mask.Length);
                 Array.Clear(_consumed, 0, _consumed.Length);
 
+                // adjSlice is constant for all (u,v) at this face/slice.
+                int adjSlice = slice + (face.FaceOffset == 1 ? 1 : -1);
+
                 for (int u = 0; u < sz; u++)
                 for (int v = 0; v < sz; v++)
                 {
-                    // Block whose face we are evaluating
                     var blockId = GetBlock(chunk, face, slice, u, v);
                     if (!BlockRegistry.Get(blockId).IsSolid) continue;
 
-                    // The block on the other side of this face
-                    int adjSlice = slice + (face.FaceOffset == 1 ? 1 : -1);
                     BlockId adjId;
-
                     if (adjSlice < 0 || adjSlice >= sz)
                     {
-                        // Border — consult the adjacent chunk (null → treat as Air → show face)
-                        if (nb == null)
-                        {
-                            adjId = BlockId.Air;
-                        }
-                        else
-                        {
+                        if (nb == null) adjId = BlockId.Air;
+                        else {
                             int nbSlice = face.FaceOffset == 1 ? 0 : sz - 1;
                             adjId = GetBlock(nb, face, nbSlice, u, v);
                         }
@@ -90,26 +87,25 @@ public sealed class GreedyMesher
                         adjId = GetBlock(chunk, face, adjSlice, u, v);
                     }
 
-                    // Face is visible only when the adjacent block is not solid
                     if (!BlockRegistry.Get(adjId).IsSolid)
                         _mask[u + v * sz] = blockId;
                 }
 
-                // ── Greedy merge ─────────────────────────────────────────────────────
+                // ── Greedy merge (block id only) ─────────────────────────────────────
                 for (int v = 0; v < sz; v++)
                 for (int u = 0; u < sz; u++)
                 {
                     BlockId start = _mask[u + v * sz];
                     if (start == BlockId.Air || _consumed[u + v * sz]) continue;
 
-                    // Expand width along U
+                    // Expand width along U (same block)
                     int du = 1;
                     while (u + du < sz
                         && _mask[(u + du) + v * sz] == start
                         && !_consumed[(u + du) + v * sz])
                         du++;
 
-                    // Expand height along V
+                    // Expand height along V (all cells in the row must match)
                     int dv = 1;
                     bool canExpand = true;
                     while (canExpand && v + dv < sz)
@@ -127,7 +123,6 @@ public sealed class GreedyMesher
                     for (int du2 = 0; du2 < du; du2++)
                         _consumed[(u + du2) + (v + dv2) * sz] = true;
 
-                    // Emit a quad for this merged rectangle
                     EmitQuad(verts, indices, face, slice + face.FaceOffset, u, v, du, dv,
                              BlockRegistry.Get(start).Color);
                 }
@@ -139,7 +134,6 @@ public sealed class GreedyMesher
 
     private static BlockId GetBlock(ChunkData chunk, in FaceDesc face, int slice, int u, int v)
     {
-        // Map abstract (d=slice, u=u, v=v) back to concrete (x, y, z)
         Span<int> p = stackalloc int[3];
         p[face.D] = slice;
         p[face.U] = u;
@@ -154,12 +148,9 @@ public sealed class GreedyMesher
     {
         var normal = new Vector3D<float>(face.Normal.X, face.Normal.Y, face.Normal.Z);
 
-        // Two corner orderings, both CCW from outside — which to use depends on the face
-        // direction (established by cross-product analysis during design).
         Vector3D<float> c0, c1, c2, c3;
         if (!face.Flip)
         {
-            // CCW pattern A: 0=(u0,v0), 1=(u0,v0+dv), 2=(u0+du,v0+dv), 3=(u0+du,v0)
             c0 = MakePos(face, fp, u0,      v0);
             c1 = MakePos(face, fp, u0,      v0 + dv);
             c2 = MakePos(face, fp, u0 + du, v0 + dv);
@@ -167,7 +158,6 @@ public sealed class GreedyMesher
         }
         else
         {
-            // CCW pattern B: 0=(u0,v0), 1=(u0+du,v0), 2=(u0+du,v0+dv), 3=(u0,v0+dv)
             c0 = MakePos(face, fp, u0,      v0);
             c1 = MakePos(face, fp, u0 + du, v0);
             c2 = MakePos(face, fp, u0 + du, v0 + dv);
@@ -180,7 +170,6 @@ public sealed class GreedyMesher
         verts.Add(new Vertex { Position = c2, Normal = normal, Color = color });
         verts.Add(new Vertex { Position = c3, Normal = normal, Color = color });
 
-        // Two triangles sharing the diagonal c0→c2
         indices.Add(b);     indices.Add(b + 1); indices.Add(b + 2);
         indices.Add(b);     indices.Add(b + 2); indices.Add(b + 3);
     }

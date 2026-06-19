@@ -1,5 +1,10 @@
 # Clear Skies — Lighting System Design
 
+> **SUPERSEDED.** This three-tier CPU design has been replaced by the GPU pipeline in
+> `lighting_design_details.md` (the authoritative lighting design). Kept for history and rationale —
+> the radius-gate, broadphase, and known-limitation discussions still inform the GPU plan's culling
+> phase, but the tiered CPU model and motion-invariance-as-principle no longer drive implementation.
+
 ## Goal
 
 Minecraft-style per-voxel lighting (BFS flood-fill, smooth per-vertex shading, ambient occlusion) extended to a world of freely-moving, freely-rotating dynamic voxel grids (airships). Light must propagate correctly *within* a grid and *between* grids: a torch on one airship must illuminate and cast shadows onto other airships and the static terrain, and occlusion must respect real geometry as ships tilt and turn.

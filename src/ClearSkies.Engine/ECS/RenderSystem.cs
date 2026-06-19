@@ -3,6 +3,7 @@ using ClearSkies.Engine.Math;
 using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Rendering.WebGpu;
 using DefaultEcs;
+using Silk.NET.Maths;
 
 namespace ClearSkies.Engine.ECS;
 
@@ -31,8 +32,9 @@ public sealed class RenderSystem : ISystem
 
         var uniform = new CameraUniform
         {
-            View = camera.GetView(camTransform),
-            Projection = camera.GetProjection(_renderer.AspectRatio),
+            View         = camera.GetView(camTransform),
+            Projection   = camera.GetProjection(_renderer.AspectRatio),
+            SunDirection = Vector3D.Normalize(new Vector3D<float>(-0.4f, -1f, -0.3f)),
         };
 
         if (!_renderer.BeginFrame())
@@ -44,7 +46,7 @@ public sealed class RenderSystem : ISystem
         {
             ref readonly var t  = ref e.Get<Transform>();
             ref readonly var mr = ref e.Get<MeshRenderer>();
-            _renderer.DrawMesh(mr.Mesh, t.ToMatrix());
+            _renderer.DrawMesh(mr.Mesh, t.ToMatrix(), mr.LightBindGroup);
         }
 
         // Wireframe overlays drawn on top (pipeline switches mid-pass then restores).

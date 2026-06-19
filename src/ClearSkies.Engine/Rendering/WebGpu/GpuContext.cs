@@ -3,6 +3,7 @@ using ClearSkies.Engine.Windowing;
 using Silk.NET.Core.Native;
 using Silk.NET.Maths;
 using Silk.NET.WebGPU;
+using Silk.NET.WebGPU.Extensions.WGPU;
 
 namespace ClearSkies.Engine.Rendering.WebGpu;
 
@@ -14,6 +15,8 @@ public sealed unsafe class GpuContext : IDisposable
 {
     private readonly WebGPU _api;
     private readonly bool _logErrors;
+
+    private Wgpu _wgpu = null!;   // wgpu-native extension (DevicePoll); set in Init
 
     private Instance* _instance;
     private Adapter* _adapter;
@@ -78,6 +81,7 @@ public sealed unsafe class GpuContext : IDisposable
         if (_device == null)
             throw new InvalidOperationException("Failed to create WebGPU device.");
         _queue = _api.DeviceGetQueue(_device);
+        _wgpu = new Wgpu(_api.Context);
 
         if (_logErrors)
         {
@@ -173,6 +177,41 @@ public sealed unsafe class GpuContext : IDisposable
         _api.SurfacePresent(_surface);
         if (_currentView != null) { _api.TextureViewRelease(_currentView); _currentView = null; }
         if (_currentTexture != null) { _api.TextureRelease(_currentTexture); _currentTexture = null; }
+    }
+
+    // ── Compute support ──────────────────────────────────────────────────────────
+
+    /// <summary>Flush submitted GPU work; with <paramref name="wait"/> blocks until the queue drains
+    /// (needed so a mapped readback callback actually fires under wgpu-native).</summary>
+    internal void Poll(bool wait = true) => _wgpu.DevicePoll(_device, new Silk.NET.Core.Bool32(wait), null);
+
+    /// <summary>Encodes and submits a single GPU→GPU buffer copy.</summary>
+    internal void CopyBufferToBuffer(GpuBuffer src, GpuBuffer dst, ulong size)
+    {
+        var encDesc = new CommandEncoderDescriptor();
+        var enc = _api.DeviceCreateCommandEncoder(_device, &encDesc);
+        _api.CommandEncoderCopyBufferToBuffer(enc, src.Handle, 0, dst.Handle, 0, size);
+        var cmdDesc = new CommandBufferDescriptor();
+        var cmd = _api.CommandEncoderFinish(enc, &cmdDesc);
+        _api.QueueSubmit(_queue, 1, &cmd);
+        _api.CommandBufferRelease(cmd);
+        _api.CommandEncoderRelease(enc);
+    }
+
+    /// <summary>Maps a readback buffer and copies <paramref name="byteCount"/> bytes to managed memory.
+    /// Blocks (polls) until the map completes. Debug/self-test use only.</summary>
+    internal byte[] ReadBuffer(GpuBuffer readback, int byteCount)
+    {
+        bool done = false;
+        var cb = PfnBufferMapCallback.From((status, _) => done = true);
+        _api.BufferMapAsync(readback.Handle, MapMode.Read, 0, (nuint)byteCount, cb, null);
+        while (!done) Poll(true);
+
+        void* ptr = _api.BufferGetConstMappedRange(readback.Handle, 0, (nuint)byteCount);
+        var outBytes = new byte[byteCount];
+        new ReadOnlySpan<byte>(ptr, byteCount).CopyTo(outBytes);
+        _api.BufferUnmap(readback.Handle);
+        return outBytes;
     }
 
     public void Dispose()

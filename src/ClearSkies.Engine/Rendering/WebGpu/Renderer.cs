@@ -14,31 +14,69 @@ public sealed unsafe class Renderer : IDisposable
 {
     private const int MaxObjects = 4096;
     private const ulong ModelStride = 256;   // >= minUniformBufferOffsetAlignment
-    private const ulong CameraSize = 128;    // two mat4x4<f32>
+    private const ulong CameraSize = 144;    // two mat4x4<f32> + vec4<f32> sun direction
     private const ulong ModelSize = 64;      // one mat4x4<f32>
 
     private const string Wgsl = @"
-struct Camera { view: mat4x4<f32>, proj: mat4x4<f32> };
+const CHUNK: i32 = 32;
+const AMBIENT_SKY: f32 = 6.0 / 15.0; // keep in sync with ChunkGpuResources.AmbientSky & flood WGSL
+
+// sunDir.xyz = unit vector FROM sun TOWARD scene. w = padding.
+struct Camera { view: mat4x4<f32>, proj: mat4x4<f32>, sunDir: vec4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
 struct Model { model: mat4x4<f32> };
 @group(1) @binding(0) var<uniform> model: Model;
+// Per-chunk light field, 1 u32 per voxel: bits 0-7 = sky (0-15), bits 8-15 = block (0-15).
+// Indexed x + 32*(y + 32*z), matching ChunkData.Index. (Phase 4.1: a shared full-bright buffer.)
+@group(2) @binding(0) var<storage, read> light: array<u32>;
 
 struct VSOut {
-    @builtin(position) pos: vec4<f32>,
-    @location(0) color: vec3<f32>,
+    @builtin(position) pos:         vec4<f32>,
+    @location(0)       color:       vec3<f32>,
+    @location(1)       worldNormal: vec3<f32>,
+    @location(2)       localPos:    vec3<f32>,  // chunk-local position
+    @location(3)       localNormal: vec3<f32>,  // chunk-local (axis-aligned) face normal
 };
 
 @vertex
-fn vs_main(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>, @location(2) color: vec3<f32>) -> VSOut {
+fn vs_main(
+    @location(0) position: vec3<f32>,
+    @location(1) normal:   vec3<f32>,
+    @location(2) color:    vec3<f32>
+) -> VSOut {
     var o: VSOut;
-    o.pos = camera.proj * camera.view * model.model * vec4<f32>(position, 1.0);
-    o.color = color;
+    o.pos         = camera.proj * camera.view * model.model * vec4<f32>(position, 1.0);
+    o.color       = color;
+    o.worldNormal = (model.model * vec4<f32>(normal, 0.0)).xyz;
+    o.localPos    = position;
+    o.localNormal = normal;
     return o;
+}
+
+// Light of the air-side voxel adjacent to this surface fragment (chunk-local). Stepping half a voxel
+// along the face normal lands inside the air cell whose light shades the face.
+fn sampleLight(localPos: vec3<f32>, localNormal: vec3<f32>) -> vec2<f32> {
+    let air = vec3<i32>(floor(localPos + 0.5 * localNormal));
+    if (air.x < 0 || air.x >= CHUNK ||
+        air.y < 0 || air.y >= CHUNK ||
+        air.z < 0 || air.z >= CHUNK) {
+        return vec2<f32>(AMBIENT_SKY, 0.0); // outside this chunk → ambient (cross-chunk in a later cut)
+    }
+    let idx    = air.x + CHUNK * (air.y + CHUNK * air.z);
+    let packed = light[u32(idx)];
+    let sky    = f32(packed & 0xFFu) / 15.0;
+    let blk    = f32((packed >> 8u) & 0xFFu) / 15.0;
+    return vec2<f32>(sky, blk);
 }
 
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
-    return vec4<f32>(in.color, 1.0);
+    let l      = sampleLight(in.localPos, in.localNormal);
+    let worldN = normalize(in.worldNormal);
+    let sun    = max(dot(worldN, -(camera.sunDir.xyz)), 0.0);
+    let skyLit = l.x * (0.35 + 0.65 * sun);
+    let lit    = max(skyLit, l.y);
+    return vec4<f32>(in.color * lit, 1.0);
 }
 ";
 
@@ -48,6 +86,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     private ShaderModule* _shader;
     private BindGroupLayout* _cameraLayout;
     private BindGroupLayout* _modelLayout;
+    private BindGroupLayout* _lightLayout;
     private PipelineLayout* _pipelineLayout;
     private RenderPipeline* _pipeline;
     private RenderPipeline* _wireframePipeline;
@@ -58,9 +97,11 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     private readonly GpuBuffer _cameraBuffer;
     private readonly GpuBuffer _hudCameraBuffer; // permanently holds identity view+proj
     private readonly GpuBuffer _modelBuffer;
+    private GpuBuffer _fullBrightLight = null!;  // Phase 4.1: shared sky=15 buffer for all draws
     private BindGroup* _cameraBindGroup;
     private BindGroup* _hudCameraBindGroup;
     private BindGroup* _modelBindGroup;
+    private BindGroup* _lightBindGroup;
 
     private CommandEncoder* _encoder;
     private RenderPassEncoder* _pass;
@@ -109,7 +150,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         var camEntry = new BindGroupLayoutEntry
         {
             Binding = 0,
-            Visibility = ShaderStage.Vertex,
+            Visibility = ShaderStage.Vertex | ShaderStage.Fragment, // fragment reads sunDir
             Buffer = new BufferBindingLayout { Type = BufferBindingType.Uniform, HasDynamicOffset = false, MinBindingSize = CameraSize },
         };
         var camDesc = new BindGroupLayoutDescriptor { EntryCount = 1, Entries = &camEntry };
@@ -124,10 +165,20 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         var modelDesc = new BindGroupLayoutDescriptor { EntryCount = 1, Entries = &modelEntry };
         _modelLayout = _api.DeviceCreateBindGroupLayout(_ctx.Device, &modelDesc);
 
-        BindGroupLayout** layouts = stackalloc BindGroupLayout*[2];
+        var lightEntry = new BindGroupLayoutEntry
+        {
+            Binding = 0,
+            Visibility = ShaderStage.Fragment,
+            Buffer = new BufferBindingLayout { Type = BufferBindingType.ReadOnlyStorage, HasDynamicOffset = false, MinBindingSize = 0 },
+        };
+        var lightDesc = new BindGroupLayoutDescriptor { EntryCount = 1, Entries = &lightEntry };
+        _lightLayout = _api.DeviceCreateBindGroupLayout(_ctx.Device, &lightDesc);
+
+        BindGroupLayout** layouts = stackalloc BindGroupLayout*[3];
         layouts[0] = _cameraLayout;
         layouts[1] = _modelLayout;
-        var plDesc = new PipelineLayoutDescriptor { BindGroupLayoutCount = 2, BindGroupLayouts = layouts };
+        layouts[2] = _lightLayout;
+        var plDesc = new PipelineLayoutDescriptor { BindGroupLayoutCount = 3, BindGroupLayouts = layouts };
         _pipelineLayout = _api.DeviceCreatePipelineLayout(_ctx.Device, &plDesc);
     }
 
@@ -191,6 +242,18 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         var modelEntry = new BindGroupEntry { Binding = 0, Buffer = _modelBuffer.Handle, Offset = 0, Size = ModelSize };
         var modelDesc = new BindGroupDescriptor { Layout = _modelLayout, EntryCount = 1, Entries = &modelEntry };
         _modelBindGroup = _api.DeviceCreateBindGroup(_ctx.Device, &modelDesc);
+
+        // Phase 4.1: one shared full-bright (sky=15) light buffer bound for every draw, proving the
+        // fragment-sampling path. Phase 4.2 replaces this with per-chunk flooded buffers.
+        const int voxels = 32 * 32 * 32;
+        _fullBrightLight = GpuBuffer.CreateStorage(_ctx, (ulong)(voxels * sizeof(uint)));
+        var full = new uint[voxels];
+        Array.Fill(full, 15u); // sky=15, block=0
+        _fullBrightLight.Write<uint>(0, full);
+
+        var lightEntry = new BindGroupEntry { Binding = 0, Buffer = _fullBrightLight.Handle, Offset = 0, Size = _fullBrightLight.SizeBytes };
+        var lightDesc  = new BindGroupDescriptor { Layout = _lightLayout, EntryCount = 1, Entries = &lightEntry };
+        _lightBindGroup = _api.DeviceCreateBindGroup(_ctx.Device, &lightDesc);
     }
 
     public GpuMesh UploadMesh(ReadOnlySpan<Vertex> vertices, ReadOnlySpan<uint> indices)
@@ -315,6 +378,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         _pass = _api.CommandEncoderBeginRenderPass(_encoder, &passDesc);
         _api.RenderPassEncoderSetPipeline(_pass, WireframeMode ? _wireframePipeline : _pipeline);
         _api.RenderPassEncoderSetBindGroup(_pass, 0, _cameraBindGroup, 0, null);
+        // Group 2 (light) is the same for every draw in Phase 4.1 and persists across pipeline
+        // switches (all pipelines share the layout), so bind it once here.
+        _api.RenderPassEncoderSetBindGroup(_pass, 2, _lightBindGroup, 0, null);
         return true;
     }
 
@@ -325,7 +391,18 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         _cameraBuffer.Write<CameraUniform>(0, s);
     }
 
-    public void DrawMesh(GpuMesh mesh, in Mat4 model)
+    /// <summary>Creates a group-2 (light) bind group over <paramref name="lightBuffer"/>; returns an
+    /// opaque handle. The caller owns its lifetime (release via the buffer's owner).</summary>
+    public nint CreateLightBindGroup(GpuBuffer lightBuffer)
+    {
+        var entry = new BindGroupEntry { Binding = 0, Buffer = lightBuffer.Handle, Offset = 0, Size = lightBuffer.SizeBytes };
+        var desc  = new BindGroupDescriptor { Layout = _lightLayout, EntryCount = 1, Entries = &entry };
+        return (nint)_api.DeviceCreateBindGroup(_ctx.Device, &desc);
+    }
+
+    /// <summary>Draws a mesh. <paramref name="lightBindGroup"/> binds group 2 (per-chunk light);
+    /// 0 falls back to the shared full-bright buffer (debug meshes, chunks without residency yet).</summary>
+    public void DrawMesh(GpuMesh mesh, in Mat4 model, nint lightBindGroup = 0)
     {
         if (_drawIndex >= MaxObjects)
             return;
@@ -337,6 +414,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 
         uint dynOffset = (uint)offset;
         _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset);
+        var lbg = lightBindGroup != 0 ? (BindGroup*)lightBindGroup : _lightBindGroup;
+        _api.RenderPassEncoderSetBindGroup(_pass, 2, lbg, 0, null);
         _api.RenderPassEncoderSetVertexBuffer(_pass, 0, mesh.VertexBuffer.Handle, 0, mesh.VertexBuffer.SizeBytes);
 
         var idxBuf   = WireframeMode ? mesh.WireframeBuffer : mesh.IndexBuffer;
@@ -369,6 +448,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         _cameraBuffer.Dispose();
         _hudCameraBuffer.Dispose();
         _modelBuffer.Dispose();
+        _fullBrightLight.Dispose();
         if (_hudPipeline        != null) _api.RenderPipelineRelease(_hudPipeline);
         if (_wireframePipeline  != null) _api.RenderPipelineRelease(_wireframePipeline);
         if (_pipeline           != null) _api.RenderPipelineRelease(_pipeline);

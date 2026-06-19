@@ -9,16 +9,24 @@ namespace ClearSkies.Engine.Voxels;
 /// </summary>
 public static class VoxelRaycaster
 {
+    /// <summary>
+    /// Casts against a single <see cref="ChunkVolume"/> in that volume's own coordinate space. For a
+    /// rotated dynamic grid the caller transforms <paramref name="origin"/>/<paramref name="dir"/> into
+    /// grid-local space first; because that transform is a rigid motion (no scale), the returned
+    /// <paramref name="hitDistance"/> is identical in world space and can be compared across volumes.
+    /// </summary>
     public static bool Cast(
-        ChunkManager        manager,
+        ChunkVolume         volume,
         Vector3D<float>     origin,
         Vector3D<float>     dir,
         float               maxDist,
         out Vector3D<int>   hitBlock,
-        out Vector3D<int>   hitNormal)
+        out Vector3D<int>   hitNormal,
+        out float           hitDistance)
     {
-        hitBlock  = default;
-        hitNormal = default;
+        hitBlock    = default;
+        hitNormal   = default;
+        hitDistance = 0f;
 
         int x = (int)MathF.Floor(origin.X);
         int y = (int)MathF.Floor(origin.Y);
@@ -40,7 +48,7 @@ public static class VoxelRaycaster
         for (;;)
         {
             // Check the current cell.
-            var id = manager.GetBlockWorld(x, y, z);
+            var id = volume.GetBlock(x, y, z);
             if (id != BlockId.Air && BlockRegistry.Get(id).IsSolid)
             {
                 hitBlock  = new(x, y, z);
@@ -48,12 +56,13 @@ public static class VoxelRaycaster
                 return true;
             }
 
-            // Advance to the next nearest cell boundary.
-            // tx/ty/tz are the distances to the next crossing on each axis; the smallest
-            // is the next step. If that distance already exceeds maxDist we are done.
+            // Advance to the next nearest cell boundary. tx/ty/tz are the distances to the next
+            // crossing on each axis; the smallest is the next step and the distance at which we
+            // enter the next cell. If that distance already exceeds maxDist we are done.
             if (tx < ty && tx < tz)
             {
                 if (tx > maxDist) return false;
+                hitDistance = tx;
                 x      += sx;
                 normal  = new(-sx, 0, 0);
                 tx     += dx;
@@ -61,6 +70,7 @@ public static class VoxelRaycaster
             else if (ty < tz)
             {
                 if (ty > maxDist) return false;
+                hitDistance = ty;
                 y      += sy;
                 normal  = new(0, -sy, 0);
                 ty     += dy;
@@ -68,6 +78,7 @@ public static class VoxelRaycaster
             else
             {
                 if (tz > maxDist) return false;
+                hitDistance = tz;
                 z      += sz;
                 normal  = new(0, 0, -sz);
                 tz     += dz;

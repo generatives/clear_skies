@@ -57,7 +57,7 @@ A terrain voxel system with chunk management, meshing, and world generation.
 
 ## Milestone 3: Physics & Dynamic Voxels
 
-Introduce BepuPhysics2 and the dynamic voxel grid system that airships will use. This comes before lighting so the lighting system can be built against real dynamic grids from the start (see the three-tier design in `lighting_design.md`).
+Introduce BepuPhysics2 and the dynamic voxel grid system that airships will use. This comes before lighting so the lighting system can be built against real dynamic grids from the start (see the GPU lighting design in `lighting_design_details.md`).
 
 ### Phase 3.1 — Physics Integration
 - BepuPhysics2 simulation ticking in a fixed-timestep system
@@ -88,32 +88,39 @@ Introduce BepuPhysics2 and the dynamic voxel grid system that airships will use.
 
 ---
 
-## Milestone 4: Lighting
+## Milestone 4: Lighting (GPU)
 
-Per-vertex lighting that matches Minecraft's style, extended to the dynamic voxel grids built in Milestone 3. **See `lighting_design.md` for the full design, rationale, optimizations, and known limitations.** The phases below implement its three-tier model: static world BFS, motion-invariant local BFS per dynamic grid, and radius-gated shadow-map injection for cross-grid light.
+Minecraft-style per-voxel lighting extended to the dynamic voxel grids built in Milestone 3, computed on the GPU. **See `lighting_design_details.md` for the full design, rationale, and trade-offs** (it supersedes the earlier three-tier CPU design in `lighting_design.md`). Light is GPU-resident and sampled in the **fragment shader** (so meshes never re-bake on light change); shadow-map rendering, light injection, and BFS flood all run as GPU passes. One uniform mechanism handles the sun and lamps alike, and every volume can shade every other. See `milestone4_plan.md` for the detailed phasing.
 
-### Phase 4.1 — Static World Light Propagation (Tier 1)
-- Sunlight (top-down flood fill, per-column heightmap) and block-emitted light (point flood fill)
-- Store light level per-voxel; bake into chunk mesh vertices
-- Smooth lighting: average light level across shared vertices
-- Incremental remove/relight passes on block change (no full re-bake)
+### Phase 4.0 — GPU compute & voxel-data infrastructure
+- Compute pipeline support in the renderer (storage buffers/textures, compute bind groups, dispatch) — net-new
+- Per-chunk GPU residency: opacity buffer + light buffer (sky + block channels), double-buffered for ping-pong
+- Keep GPU opacity/block data in sync with CPU `SetBlock` edits
 
-### Phase 4.2 — Ambient Occlusion
-- Per-vertex AO from neighbour block occupancy
-- Multiply into final vertex colour
+### Phase 4.1 — Fragment-shader light sampling
+- Remove per-vertex light + light from the greedy merge key (meshing becomes light-independent)
+- Fragment samples the chunk light buffer at the air-side voxel (offset by normal), smoothed and opacity-masked
+- Validate against a full-bright buffer (world looks identical) before any flood exists
 
-### Phase 4.3 — Dynamic Grid Interior Lighting (Tier 2)
-- Each `DynamicGrid` owns a lighting grid in its own local, axis-aligned frame
-- BFS flood-fill in local space → motion-invariant (recomputed only on block change, never on movement)
-- Light sources as registered emitters (position, colour, radius); intra-grid shadows are exact for free
+### Phase 4.2 — GPU BFS flood + block light (lamps)
+- Max-relaxation flood: global ping-pong storage buffers, one pass per dispatch, ~15 passes, opacity-blocked
+- Inject `Lamp` emitters; clear → inject → flood from scratch at 1–2 Hz (no incremental removal in v1)
 
-### Phase 4.4 — Cross-Grid Light via Shadow-Map Injection (Tier 3)
-- Radius gate: only lights whose radius intersects another grid generate a shadow map (broadphase query via BepuPhysics2)
-- Render directional shadow frustum aimed at the intersecting grid; inject direct light into the target grid's lighting volume (bounded to light radius); local BFS diffuses it
-- Hard cap on simultaneous shadow-casting lights with graceful demotion to local-BFS-only
-- Known limitation: cross-grid *indirect* (around-corner) flood is not represented — see `lighting_design.md`
+### Phase 4.3 — Sky & sun
+- Sky channel = ambient sky-exposure (soft) + direct sun via a shadow map (sharp, occluded)
+- Combine with the existing N·L term + ambient floor; one coarse sun map now, cascades later
 
-**Milestone 4 exit criterion:** Placed torches illuminate surroundings; AO visible in corners; sunlight shades underground spaces; a torch on a dynamic grid casts light and shadows onto nearby static terrain and other grids.
+### Phase 4.4 — Cross-grid & dynamic lights (unified)
+- Lights from other volumes (and the sun) are depth-tested and injected into a target volume, then flooded locally — same inject+flood path everywhere
+- All grids shade all grids; grids cast sun shadows on terrain (naive/unbounded for now)
+
+### Phase 4.5 — Ambient occlusion
+- AO via the fragment path (baked AO channel or in-shader from the opacity neighbourhood), same air-side sampling
+
+### Phase 4.6 — Culling & change detection
+- Dirty tracking, broadphase radius-gating of shadow maps, static bake/cache — recover steady-state cost from the naive "re-flood everything at 2 Hz" baseline
+
+**Milestone 4 exit criterion:** Placed lamps illuminate surroundings; AO visible in corners; sunlight shades underground spaces and undersides; a lamp on a dynamic grid casts light and shadows onto nearby static terrain and other grids; a grid casts a sun shadow on the ground.
 
 ---
 

@@ -1,5 +1,6 @@
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.ECS;
+using ClearSkies.Engine.Rendering.WebGpu;
 using ClearSkies.Engine.Voxels;
 using ClearSkies.Game;
 using ClearSkies.Game.Generation;
@@ -7,12 +8,23 @@ using Silk.NET.Input;
 
 using var host = new EngineHost(new EngineOptions("Clear Skies", 1280, 720, LogGpuErrors: true));
 
-var chunkManager = new ChunkManager(host.World);
+// Phase 4.0: prove the GPU compute path (upload → dispatch → readback) before building lighting on it.
+GpuComputeSelfTest.Run(host.Context);
+
+var staticWorld = new StaticWorld(host.World);
 var worldGen     = new SkyWorldGenerator();
+var lightSystem  = new LightSystem(staticWorld);
+var meshSystem   = new ChunkMeshSystem(staticWorld, host.Renderer);
 
 host.AddSystem(new FreeFlyCameraSystem(host.World, host.Input), SystemStage.Logic);
-host.AddSystem(new ChunkLoadSystem(host.World, chunkManager, worldGen, xzRadius: 5, yRadius: 2), SystemStage.Logic);
-host.AddSystem(new BlockInteractionSystem(host.World, chunkManager, host.Input, host.Renderer), SystemStage.Logic);
+host.AddSystem(new ChunkLoadSystem(host.World, staticWorld, worldGen, xzRadius: 3, yRadius: 2), SystemStage.Logic);
+host.AddSystem(new StaticColliderSystem(staticWorld, host.Physics), SystemStage.Logic);
+host.AddSystem(new GridShapeSystem(host.World, host.Physics), SystemStage.Logic);          // build/update grid bodies (pre-step)
+host.AddSystem(new PlayerGridControlSystem(host.World, host.Physics, host.Input), SystemStage.Logic); // apply forces (pre-step)
+host.AddSystem(new PhysicsSystem(host.Physics, host.Time.FixedStep), SystemStage.Logic);   // step simulation
+host.AddSystem(new GridTransformSystem(host.World, host.Physics), SystemStage.Logic);      // sync grid chunks (post-step)
+host.AddSystem(new DebugDropSystem(host.World, host.Physics, host.Input, lightSystem, meshSystem, host.Renderer), SystemStage.Logic);
+host.AddSystem(new BlockInteractionSystem(host.World, staticWorld, host.Physics, host.Input, host.Renderer), SystemStage.Logic);
 host.AddSystem(new LambdaSystem(() =>
 {
     if (host.Input.WasKeyPressed(Key.Tab))
@@ -21,7 +33,11 @@ host.AddSystem(new LambdaSystem(() =>
         Console.WriteLine($"[debug] wireframe: {host.Renderer.WireframeMode}");
     }
 }), SystemStage.Logic);
-host.AddSystem(new ChunkMeshSystem(chunkManager, host.Renderer), SystemStage.PreRender);
+host.AddSystem(new GpuResidencySystem(host.World, staticWorld, host.Context), SystemStage.PreRender);
+host.AddSystem(new GpuLightSystem(host.World, staticWorld, host.Context), SystemStage.PreRender); // block-light flood
+// CPU LightSystem retired in Phase 4.1 — lighting is now GPU-sampled.
+// lightSystem is still constructed for DebugDropSystem's grid registration but no longer scheduled.
+host.AddSystem(meshSystem, SystemStage.PreRender);
 host.AddSystem(new RenderSystem(host.World, host.Renderer), SystemStage.Render);
 
 TestScene.Build(host);
