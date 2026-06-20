@@ -6,16 +6,14 @@ using DefaultEcs;
 namespace ClearSkies.Engine.ECS;
 
 /// <summary>
-/// Phase 4.2: runs the GPU block-light flood for chunks whose blocks changed. For each dirty chunk
-/// (with GPU residency and current opacity), it clears+injects lamp emission and floods. Block light is
-/// static unless edited, so this is edit-driven (no per-frame re-flood) — the GPU analogue of "bake
-/// once". Runs after <c>GpuResidencySystem</c> (opacity must be uploaded first) and processes the static
-/// world plus every dynamic grid.
+/// Runs the per-volume GPU block-light flood whenever any chunk in the volume has changed.
+/// One flood covers the entire <see cref="ChunkVolume"/> buffer, so light propagates across chunk
+/// boundaries naturally. Floods at most one volume per frame to keep the GPU busy without stalling.
+///
+/// Runs after <c>GpuResidencySystem</c> (opacity must be uploaded and RenderBindGroup created first).
 /// </summary>
 public sealed class GpuLightSystem : ISystem, IDisposable
 {
-    private const int FloodsPerFrame = 4;
-
     private readonly ChunkVolume   _staticWorld;
     private readonly EntitySet     _grids;
     private readonly GpuLightFlood _flood;
@@ -29,28 +27,36 @@ public sealed class GpuLightSystem : ISystem, IDisposable
 
     public void Update(float dt)
     {
-        int budget = FloodsPerFrame;
-
-        if (!Process(_staticWorld, ref budget)) return;
+        if (FloodVolume(_staticWorld)) return;
 
         foreach (ref readonly Entity e in _grids.GetEntities())
-            if (!Process(e.Get<DynamicGridComponent>().Grid, ref budget)) return;
+            if (FloodVolume(e.Get<DynamicGridComponent>().Grid)) return;
     }
 
-    private bool Process(ChunkVolume vol, ref int budget)
+    /// <summary>
+    /// Floods the volume if any chunk is dirty and GPU residency is ready.
+    /// Returns true if a flood was submitted (at most 1 per Update call).
+    /// </summary>
+    private bool FloodVolume(ChunkVolume vol)
     {
-        foreach (var (_, entry) in vol.All)
+        if (vol.VolumeGpu == null) return false;                   // GPU buffers not yet allocated
+        if (vol.VolumeGpu.OpacityDirty) return false;             // opacity upload still pending
+        if (vol.VolumeGpu.RenderBindGroup == 0) return false;     // render bind group not yet ready
+
+        // Check if any chunk needs a flood (block edit, CPU light change, or initial load).
+        bool anyDirty = false;
+        foreach (var (_, e) in vol.All)
         {
-            if (!entry.NeedsFlood) continue;
-            if (entry.Gpu == null) continue;       // no residency yet (empty chunk, or budget-delayed)
-            if (entry.NeedsGpuUpload) continue;     // wait until opacity is uploaded this/next frame
-
-            _flood.Flood(entry.Gpu, entry.Data);
-            entry.NeedsFlood = false;
-
-            if (--budget <= 0) return false;
+            if (e.NeedsFlood && !e.NeedsGpuUpload) { anyDirty = true; break; }
         }
-        return true;
+        if (!anyDirty) return false;
+
+        _flood.Flood(vol.VolumeGpu, vol.All);
+
+        // Clear flood flags on all chunks — the entire volume was re-flooded.
+        foreach (var (_, e) in vol.All) e.NeedsFlood = false;
+
+        return true; // one flood per Update
     }
 
     public void Dispose() => _flood.Dispose();

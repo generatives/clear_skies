@@ -38,7 +38,6 @@ public sealed class StaticWorld : ChunkVolume
                 entry.Entity.Remove<MeshRenderer>();
             entry.Mesh.Dispose();
         }
-        entry.Gpu?.Dispose();
         if (entry.Entity.IsAlive)
             entry.Entity.Dispose();
 

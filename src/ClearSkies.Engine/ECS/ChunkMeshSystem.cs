@@ -7,9 +7,9 @@ namespace ClearSkies.Engine.ECS;
 
 /// <summary>
 /// Each frame, remeshes up to <c>MeshesPerFrame</c> chunks that are flagged dirty across all
-/// registered <see cref="ChunkVolume"/>s (the static world plus any dynamic grids), uploads the
-/// result to GPU, and hands it back to the owning volume. The per-frame budget is shared across
-/// every volume.
+/// registered <see cref="ChunkVolume"/>s. Uploads the result to GPU and hands it back to the owning
+/// volume along with the chunk's volume-space base coordinates (used by the fragment shader to map
+/// local position → volume-space light sample).
 /// </summary>
 public sealed class ChunkMeshSystem : ISystem
 {
@@ -42,9 +42,9 @@ public sealed class ChunkMeshSystem : ISystem
         foreach (var volume in _volumes)
         foreach (var (pos, entry) in volume.All)
         {
-            if (!entry.NeedsRemesh) continue; // meshing is light-independent — no relight gate
+            if (!entry.NeedsRemesh) continue;
 
-            // Fast path: pure air chunk — skip the greedy mesher entirely (~0.03ms vs ~11ms).
+            // Fast path: pure air chunk.
             if (!entry.Data.HasAnySolid())
             {
                 entry.Mesh?.Dispose();
@@ -52,12 +52,11 @@ public sealed class ChunkMeshSystem : ISystem
                 entry.NeedsRemesh = false;
                 if (entry.Entity.Has<MeshRenderer>())
                     entry.Entity.Remove<MeshRenderer>();
-                continue; // don't count against budget; these are cheap
+                continue;
             }
 
             _sw.Restart();
 
-            // Neighbour ChunkData is for face-culling at chunk borders.
             var (verts, idxs) = _mesher.Mesh(
                 entry.Data,
                 volume.GetData(pos.Offset(-1, 0, 0)), volume.GetData(pos.Offset( 1, 0, 0)),
@@ -69,7 +68,6 @@ public sealed class ChunkMeshSystem : ISystem
 
             if (verts.Length == 0)
             {
-                // Chunk had solids but they're all occluded — no faces visible.
                 entry.Mesh?.Dispose();
                 entry.Mesh        = null;
                 entry.NeedsRemesh = false;
@@ -79,17 +77,24 @@ public sealed class ChunkMeshSystem : ISystem
                 continue;
             }
 
-            var mesh = _renderer.UploadMesh(verts, idxs);
+            var mesh      = _renderer.UploadMesh(verts, idxs);
             long uploadMs = _sw.ElapsedMilliseconds;
 
-            // Per-chunk light binding: created once per chunk over its LightA buffer (stable). The
-            // flood always leaves its result in LightA, so this binding stays valid. Falls back to
-            // the shared full-bright buffer (handle 0) until GPU residency exists for this chunk.
-            if (entry.Gpu != null && entry.Gpu.RenderBindGroup == 0)
-                entry.Gpu.RenderBindGroup = _renderer.CreateLightBindGroup(entry.Gpu.LightA);
-            nint lbg = entry.Gpu?.RenderBindGroup ?? 0;
+            // Compute chunk-space base and volume size from the current VolumeGpuResources.
+            // Falls back to 0,0,0 / 32,32,32 if GPU residency isn't ready yet
+            // (full-bright buffer handles the 0-31 range just fine).
+            int cbx = 0, cby = 0, cbz = 0;
+            int vsx = ChunkData.Size, vsy = ChunkData.Size, vsz = ChunkData.Size;
+            if (volume.VolumeGpu != null)
+            {
+                var (bx, by, bz) = volume.VolumeGpu.ChunkVoxelBase(pos);
+                cbx = bx; cby = by; cbz = bz;
+                vsx = volume.VolumeGpu.VW;
+                vsy = volume.VolumeGpu.VH;
+                vsz = volume.VolumeGpu.VD;
+            }
 
-            volume.SetMesh(pos, mesh, lbg);
+            volume.SetMesh(pos, mesh, cbx, cby, cbz, vsx, vsy, vsz);
             _totalMeshed++;
 
             if (meshMs + uploadMs > 5)

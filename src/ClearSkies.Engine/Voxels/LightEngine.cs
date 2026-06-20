@@ -8,6 +8,10 @@ namespace ClearSkies.Engine.Voxels;
 /// </summary>
 public sealed class LightEngine
 {
+    /// <summary>Maximum sky-light level. 15 = full sun; lower values dim the sun globally without
+    /// changing attenuation behaviour (light still propagates the same way, just from a lower peak).</summary>
+    public const byte BaseSkyLevel = 10;
+
     private static readonly (int dx, int dy, int dz)[] Dirs6 =
     [
         ( 1, 0, 0), (-1, 0, 0),
@@ -43,7 +47,7 @@ public sealed class LightEngine
         {
             int wx = ox + lx, wz = oz + lz;
             byte skyLevel = (above == null || above.NeedsRelight)
-                ? (byte)15
+                ? BaseSkyLevel
                 : above.Light.GetSky(lx, 0, lz);
 
             for (int ly = sz - 1; ly >= 0; ly--)
@@ -57,8 +61,8 @@ public sealed class LightEngine
                 }
                 else
                 {
-                    byte newSky = skyLevel == 15 ? (byte)15
-                                                 : (byte)System.Math.Max(0, skyLevel - 1);
+                    byte newSky = skyLevel == BaseSkyLevel ? BaseSkyLevel
+                                                           : (byte)System.Math.Max(0, skyLevel - 1);
                     if (newSky > 0)
                     {
                         vol.SetSkyLight(wx, wy, wz, newSky);
@@ -159,6 +163,8 @@ public sealed class LightEngine
         for (int z = cz - R; z <= cz + R; z++)
         {
             byte skyLevel = vol.GetSkyLight(x, cy + R + 1, z); // from above the region
+            // GetSkyLight returns 15 for unloaded chunks; clamp to BaseSkyLevel for consistency.
+            if (skyLevel > BaseSkyLevel) skyLevel = BaseSkyLevel;
             for (int y = cy + R; y >= cy - R; y--)
             {
                 var def = BlockRegistry.Get(vol.GetBlock(x, y, z));
@@ -168,8 +174,8 @@ public sealed class LightEngine
                 }
                 else
                 {
-                    byte newSky = skyLevel == 15 ? (byte)15
-                                                 : (byte)System.Math.Max(0, skyLevel - 1);
+                    byte newSky = skyLevel == BaseSkyLevel ? BaseSkyLevel
+                                                           : (byte)System.Math.Max(0, skyLevel - 1);
                     if (newSky > 0 && vol.SetSkyLight(x, y, z, newSky))
                         skyQ.Enqueue((x, y, z));
                     skyLevel = newSky;
@@ -244,15 +250,16 @@ public sealed class LightEngine
                 int nx = x + dx, ny = y + dy, nz = z + dz;
                 if (BlockRegistry.Get(vol.GetBlock(nx, ny, nz)).Opacity >= 15) continue;
 
-                // Sunlight (level 15) doesn't attenuate going straight down.
-                byte newLevel = (current == 15 && dy == -1)
-                    ? (byte)15
+                // Full outdoor sky (BaseSkyLevel) doesn't attenuate going straight down.
+                byte newLevel = (current == BaseSkyLevel && dy == -1)
+                    ? BaseSkyLevel
                     : (byte)System.Math.Max(0, current - 1);
 
                 if (newLevel > vol.GetSkyLight(nx, ny, nz))
                 {
-                    vol.SetSkyLight(nx, ny, nz, newLevel);
-                    if (newLevel > 0) q.Enqueue((nx, ny, nz));
+                    // Only enqueue if the chunk is loaded (SetSkyLight returns false for unloaded).
+                    if (vol.SetSkyLight(nx, ny, nz, newLevel) && newLevel > 0)
+                        q.Enqueue((nx, ny, nz));
                 }
             }
         }
@@ -271,11 +278,12 @@ public sealed class LightEngine
                 int nx = x + dx, ny = y + dy, nz = z + dz;
                 if (BlockRegistry.Get(vol.GetBlock(nx, ny, nz)).Opacity >= 15) continue;
 
-                if (nextLevel > vol.GetBlockLight(nx, ny, nz))
-                {
-                    vol.SetBlockLight(nx, ny, nz, nextLevel);
+                // Guard: only propagate if the neighbour has less light, and only into loaded chunks.
+                // Without the SetBlockLight-returns-true guard, the BFS fans out exponentially into
+                // unloaded space because GetBlockLight returns 0 for every unloaded position.
+                if (nextLevel > vol.GetBlockLight(nx, ny, nz) &&
+                    vol.SetBlockLight(nx, ny, nz, nextLevel))
                     q.Enqueue((nx, ny, nz, nextLevel));
-                }
             }
         }
     }

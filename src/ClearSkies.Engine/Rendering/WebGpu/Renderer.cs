@@ -14,28 +14,33 @@ public sealed unsafe class Renderer : IDisposable
 {
     private const int MaxObjects = 4096;
     private const ulong ModelStride = 256;   // >= minUniformBufferOffsetAlignment
-    private const ulong CameraSize = 144;    // two mat4x4<f32> + vec4<f32> sun direction
-    private const ulong ModelSize = 64;      // one mat4x4<f32>
+    private const ulong CameraSize  = 144;   // two mat4x4<f32> + vec4<f32> sun direction
+    private const ulong ModelSize   = 96;    // mat4x4<f32> + vec3<i32> chunkBase + vec3<i32> volSize (each padded to 16B)
 
+    // Ambient fallback (sky=6/15) for fragments whose air-side voxel is outside the volume buffer
+    // (e.g. non-chunk draws, or volume not yet initialised).
     private const string Wgsl = @"
-const CHUNK: i32 = 32;
-const AMBIENT_SKY: f32 = 6.0 / 15.0; // keep in sync with ChunkGpuResources.AmbientSky & flood WGSL
+const AMBIENT_SKY: f32 = 10.0 / 15.0; // matches LightEngine.BaseSkyLevel
 
-// sunDir.xyz = unit vector FROM sun TOWARD scene. w = padding.
 struct Camera { view: mat4x4<f32>, proj: mat4x4<f32>, sunDir: vec4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
-struct Model { model: mat4x4<f32> };
+
+// model: world transform. chunkBase: this chunk's voxel origin in the volume. volSize: volume dims in voxels.
+// vec3<i32> in a WGSL uniform struct is padded to 16 bytes (same as vec4).
+struct Model { model: mat4x4<f32>, chunkBase: vec3<i32>, _p0: i32, volSize: vec3<i32>, _p1: i32 };
 @group(1) @binding(0) var<uniform> model: Model;
-// Per-chunk light field, 1 u32 per voxel: bits 0-7 = sky (0-15), bits 8-15 = block (0-15).
-// Indexed x + 32*(y + 32*z), matching ChunkData.Index. (Phase 4.1: a shared full-bright buffer.)
+
+// Per-volume light field (entire ChunkVolume in one buffer).
+// 1 u32 per voxel: bits 0-7 = sky (0-15), bits 8-15 = block (0-15).
+// Index: vx + volSize.x * (vy + volSize.y * vz) where (vx,vy,vz) = chunkBase + localAir.
 @group(2) @binding(0) var<storage, read> light: array<u32>;
 
 struct VSOut {
     @builtin(position) pos:         vec4<f32>,
     @location(0)       color:       vec3<f32>,
     @location(1)       worldNormal: vec3<f32>,
-    @location(2)       localPos:    vec3<f32>,  // chunk-local position
-    @location(3)       localNormal: vec3<f32>,  // chunk-local (axis-aligned) face normal
+    @location(2)       localPos:    vec3<f32>,
+    @location(3)       localNormal: vec3<f32>,
 };
 
 @vertex
@@ -53,17 +58,20 @@ fn vs_main(
     return o;
 }
 
-// Light of the air-side voxel adjacent to this surface fragment (chunk-local). Stepping half a voxel
-// along the face normal lands inside the air cell whose light shades the face.
+// Samples the volume light buffer at the air-side voxel for this fragment.
 fn sampleLight(localPos: vec3<f32>, localNormal: vec3<f32>) -> vec2<f32> {
-    let air = vec3<i32>(floor(localPos + 0.5 * localNormal));
-    if (air.x < 0 || air.x >= CHUNK ||
-        air.y < 0 || air.y >= CHUNK ||
-        air.z < 0 || air.z >= CHUNK) {
-        return vec2<f32>(AMBIENT_SKY, 0.0); // outside this chunk → ambient (cross-chunk in a later cut)
+    // Step half a voxel along the face normal to land in the adjacent air cell.
+    let localAir = vec3<i32>(floor(localPos + 0.5 * localNormal));
+    let volAir   = model.chunkBase + localAir;
+
+    // Out-of-volume → ambient fallback (covers non-chunk draws and volume edges).
+    if (volAir.x < 0 || volAir.x >= model.volSize.x ||
+        volAir.y < 0 || volAir.y >= model.volSize.y ||
+        volAir.z < 0 || volAir.z >= model.volSize.z) {
+        return vec2<f32>(AMBIENT_SKY, 0.0);
     }
-    let idx    = air.x + CHUNK * (air.y + CHUNK * air.z);
-    let packed = light[u32(idx)];
+    let idx    = u32(volAir.x + model.volSize.x * (volAir.y + model.volSize.y * volAir.z));
+    let packed = light[idx];
     let sky    = f32(packed & 0xFFu) / 15.0;
     let blk    = f32((packed >> 8u) & 0xFFu) / 15.0;
     return vec2<f32>(sky, blk);
@@ -159,7 +167,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         var modelEntry = new BindGroupLayoutEntry
         {
             Binding = 0,
-            Visibility = ShaderStage.Vertex,
+            Visibility = ShaderStage.Vertex | ShaderStage.Fragment, // fragment reads chunkBase/volSize
             Buffer = new BufferBindingLayout { Type = BufferBindingType.Uniform, HasDynamicOffset = true, MinBindingSize = ModelSize },
         };
         var modelDesc = new BindGroupLayoutDescriptor { EntryCount = 1, Entries = &modelEntry };
@@ -284,9 +292,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         if (_drawIndex >= MaxObjects) return;
 
         ulong offset = (ulong)_drawIndex * ModelStride;
-        Span<Mat4> s = stackalloc Mat4[1];
-        s[0] = model;
-        _modelBuffer.Write<Mat4>(offset, s);
+        Span<ModelUniform> s = stackalloc ModelUniform[1];
+        s[0] = ModelUniform.Default(model);
+        _modelBuffer.Write<ModelUniform>(offset, s);
 
         uint dynOffset = (uint)offset;
         _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset);
@@ -315,9 +323,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         if (_drawIndex >= MaxObjects) return;
 
         ulong offset = (ulong)_drawIndex * ModelStride;
-        Span<Mat4> s = stackalloc Mat4[1];
-        s[0] = model;
-        _modelBuffer.Write<Mat4>(offset, s);
+        Span<ModelUniform> s = stackalloc ModelUniform[1];
+        s[0] = ModelUniform.Default(model);
+        _modelBuffer.Write<ModelUniform>(offset, s);
 
         uint dynOffset = (uint)offset;
         _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset);
@@ -400,17 +408,27 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         return (nint)_api.DeviceCreateBindGroup(_ctx.Device, &desc);
     }
 
-    /// <summary>Draws a mesh. <paramref name="lightBindGroup"/> binds group 2 (per-chunk light);
-    /// 0 falls back to the shared full-bright buffer (debug meshes, chunks without residency yet).</summary>
-    public void DrawMesh(GpuMesh mesh, in Mat4 model, nint lightBindGroup = 0)
+    /// <summary>
+    /// Draws a mesh with per-volume lighting. <paramref name="lightBindGroup"/> (group 2) should be the
+    /// volume's LightA bind group; 0 falls back to the shared full-bright buffer.
+    /// <paramref name="chunkBase"/> is the chunk's voxel origin within the volume;
+    /// <paramref name="volSize"/> is the volume dimensions in voxels.
+    /// </summary>
+    public void DrawMesh(GpuMesh mesh, in Mat4 model, nint lightBindGroup,
+                         int cbx, int cby, int cbz,
+                         int vsx, int vsy, int vsz)
     {
-        if (_drawIndex >= MaxObjects)
-            return;
+        if (_drawIndex >= MaxObjects) return;
 
         ulong offset = (ulong)_drawIndex * ModelStride;
-        Span<Mat4> s = stackalloc Mat4[1];
-        s[0] = model;
-        _modelBuffer.Write<Mat4>(offset, s);
+        Span<ModelUniform> s = stackalloc ModelUniform[1];
+        s[0] = new ModelUniform
+        {
+            Model      = model,
+            ChunkBaseX = cbx, ChunkBaseY = cby, ChunkBaseZ = cbz, _Pad0 = 0,
+            VolSizeX   = vsx, VolSizeY   = vsy, VolSizeZ   = vsz, _Pad1 = 0,
+        };
+        _modelBuffer.Write<ModelUniform>(offset, s);
 
         uint dynOffset = (uint)offset;
         _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset);
@@ -439,6 +457,25 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         _encoder = null;
 
         _ctx.Present();
+    }
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct ModelUniform
+    {
+        public Mat4 Model;
+        // WGSL pads vec3<i32> to 16 bytes, so each vec3 needs an explicit int pad.
+        public int ChunkBaseX, ChunkBaseY, ChunkBaseZ, _Pad0;
+        public int VolSizeX,   VolSizeY,   VolSizeZ,   _Pad1;
+        // sizeof = 64 + 16 + 16 = 96 == ModelSize
+
+        /// <summary>Safe default for non-chunk draws: chunkBase=(0,0,0), volSize=(32,32,32).
+        /// Keeps the fragment shader from sampling out-of-bounds on the full-bright buffer.</summary>
+        public static ModelUniform Default(in Mat4 m) => new()
+        {
+            Model      = m,
+            ChunkBaseX = 0, ChunkBaseY = 0, ChunkBaseZ = 0, _Pad0 = 0,
+            VolSizeX   = 32, VolSizeY  = 32, VolSizeZ  = 32, _Pad1 = 0,
+        };
     }
 
     public void OnResize(Vector2D<int> size) => _ctx.Configure(size);

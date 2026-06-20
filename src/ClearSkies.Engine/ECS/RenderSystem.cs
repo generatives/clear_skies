@@ -44,9 +44,12 @@ public sealed class RenderSystem : ISystem
 
         foreach (ref readonly Entity e in _meshes.GetEntities())
         {
-            ref readonly var t  = ref e.Get<Transform>();
-            ref readonly var mr = ref e.Get<MeshRenderer>();
-            _renderer.DrawMesh(mr.Mesh, t.ToMatrix(), mr.LightBindGroup);
+            ref readonly var t   = ref e.Get<Transform>();
+            ref readonly var mr  = ref e.Get<MeshRenderer>();
+            nint lbg = mr.VolumeGpu?.RenderBindGroup ?? 0;
+            _renderer.DrawMesh(mr.Mesh, t.ToMatrix(), lbg,
+                               mr.ChunkBaseX, mr.ChunkBaseY, mr.ChunkBaseZ,
+                               mr.VolSizeX,   mr.VolSizeY,   mr.VolSizeZ);
         }
 
         // Wireframe overlays drawn on top (pipeline switches mid-pass then restores).

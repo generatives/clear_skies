@@ -6,65 +6,82 @@ using DefaultEcs;
 namespace ClearSkies.Engine.ECS;
 
 /// <summary>
-/// Phase 4.0: keeps per-chunk GPU lighting buffers resident and their opacity bitset in sync with block
-/// edits. For every chunk that has solids and is flagged <see cref="ChunkEntry.NeedsGpuUpload"/>, it
-/// lazily allocates <see cref="ChunkGpuResources"/> and uploads the opacity bitset. Empty chunks are
-/// skipped (no residency until they contain solids). The static world is processed plus every dynamic
-/// grid (discovered via <see cref="DynamicGridComponent"/>, like <c>GridTransformSystem</c>).
+/// Keeps <see cref="VolumeGpuResources"/> in sync with loaded chunks each PreRender tick.
 ///
-/// Nothing reads the light buffers yet — the GPU flood that consumes them arrives in Phase 4.2.
+/// Responsibilities:
+/// 1. Create the per-volume GPU buffer on first load.
+/// 2. Expand the buffer (reallocate) when new chunks extend beyond the current bounds.
+/// 3. Upload each dirty chunk's opacity slice on block edits, up to <see cref="UploadsPerFrame"/> per frame.
+/// 4. Ensure the volume's render bind group (LightA → group 2) is created.
 /// </summary>
 public sealed class GpuResidencySystem : ISystem
 {
-    // Bound first-frame allocation cost (each upload creates ~260 KB of buffers + a 4 KB write).
-    private const int UploadsPerFrame = 16;
+    private const int UploadsPerFrame = 8;
 
-    private readonly ChunkVolume _staticWorld;
     private readonly GpuContext  _ctx;
+    private readonly Renderer    _renderer;
+    private readonly ChunkVolume _staticWorld;
     private readonly EntitySet   _grids;
 
-    public GpuResidencySystem(World world, ChunkVolume staticWorld, GpuContext ctx)
+    public GpuResidencySystem(World ecsWorld, StaticWorld staticWorld, GpuContext ctx, Renderer renderer)
     {
-        _staticWorld = staticWorld;
         _ctx         = ctx;
-        _grids       = world.GetEntities().With<DynamicGridComponent>().AsSet();
+        _renderer    = renderer;
+        _staticWorld = staticWorld;
+        _grids       = ecsWorld.GetEntities().With<DynamicGridComponent>().AsSet();
     }
 
     public void Update(float dt)
     {
         int budget = UploadsPerFrame;
-
-        if (!Process(_staticWorld, ref budget)) return;
-
+        ProcessVolume(_staticWorld, ref budget);
         foreach (ref readonly Entity e in _grids.GetEntities())
-            if (!Process(e.Get<DynamicGridComponent>().Grid, ref budget)) return;
+        {
+            if (budget <= 0) break;
+            ProcessVolume(e.Get<DynamicGridComponent>().Grid, ref budget);
+        }
     }
 
-    // Returns false when the per-frame budget is exhausted (stop for this frame).
-    private bool Process(ChunkVolume vol, ref int budget)
+    private void ProcessVolume(ChunkVolume vol, ref int budget)
     {
-        foreach (var (_, entry) in vol.All)
+        if (vol.LoadedCount == 0) return;
+
+        EnsureVolumeExists(vol);
+        var gpu = vol.VolumeGpu!;
+
+        // Expand bounds if any loaded chunk now lies outside the allocated range.
+        if (gpu.EnsureContains(vol.BoundsMin, vol.BoundsMax))
+        {
+            // Reallocation invalidates all chunk slices — mark them all dirty.
+            foreach (var (_, e) in vol.All)
+            {
+                e.NeedsGpuUpload = true;
+                e.NeedsFlood     = true;
+            }
+            vol.MarkAllRemesh(); // MeshRenderer.ChunkBase/VolSize are now stale
+        }
+
+        // Upload opacity for dirty chunks (budgeted).
+        foreach (var (pos, entry) in vol.All)
         {
             if (!entry.NeedsGpuUpload) continue;
+            if (budget <= 0) break;
 
-            // No GPU residency for empty chunks yet; revisit when the flood needs air-chunk light (4.2).
-            if (!entry.Data.HasAnySolid())
-            {
-                entry.NeedsGpuUpload = false;
-                continue;
-            }
-
-            bool justCreated = entry.Gpu == null;
-            entry.Gpu ??= ChunkGpuResources.Create(_ctx);
-            entry.Gpu.UploadOpacity(entry.Data);
+            gpu.UpdateChunkOpacity(pos, entry.Data);
             entry.NeedsGpuUpload = false;
-
-            // If residency lagged behind meshing, force a remesh so ChunkMeshSystem attaches the
-            // per-chunk light bind group (otherwise the chunk would stay on the full-bright fallback).
-            if (justCreated) entry.NeedsRemesh = true;
-
-            if (--budget <= 0) return false;
+            budget--;
         }
-        return true;
+
+        gpu.UploadOpacityIfDirty();
+
+        // Create / recreate the fragment-shader render bind group for LightA.
+        if (gpu.RenderBindGroup == 0)
+            gpu.RenderBindGroup = _renderer.CreateLightBindGroup(gpu.LightA);
+    }
+
+    private void EnsureVolumeExists(ChunkVolume vol)
+    {
+        if (vol.VolumeGpu != null) return;
+        vol.VolumeGpu = VolumeGpuResources.Create(_ctx, vol.BoundsMin, vol.BoundsMax);
     }
 }

@@ -3,70 +3,77 @@ using ClearSkies.Engine.Rendering.WebGpu;
 namespace ClearSkies.Engine.Voxels;
 
 /// <summary>
-/// GPU block-light flood for a single chunk (Phase 4.2 cut 2, intra-chunk only).
+/// GPU light flood for a <see cref="VolumeGpuResources"/>. Operates on the entire volume buffer in one
+/// set of dispatches, so light crosses chunk boundaries naturally. Each cycle: upload seed → ping-pong
+/// max-relaxation passes → result in LightA (what the renderer samples).
 ///
-/// Cycle per dirty chunk: clear+inject lamp emission into <see cref="ChunkGpuResources.LightA"/>, then
-/// run a fixed number of max-relaxation passes ping-ponging A↔B. Light propagates −1 per air step and
-/// is blocked by opacity. An even pass count leaves the result back in LightA (what the renderer
-/// samples). Cross-chunk propagation (light crossing chunk borders) is a later cut — neighbours outside
-/// the chunk currently contribute nothing, so lamps near a chunk edge don't spill into the next chunk.
-///
-/// Light buffer packing per voxel (u32): bits 0-7 sky (0-15), bits 8-15 block (0-15).
+/// Sky channel (bits 0-7): seeded from CPU <see cref="LightData"/> sky values each cycle; preserved
+/// unchanged through all flood passes (GPU sky flood deferred to Phase 4.3).
+/// Block channel (bits 8-15): seeded from emitter emission; max-relaxation propagates it through air.
 /// </summary>
 internal sealed class GpuLightFlood : IDisposable
 {
-    // Block light reaches at most its emission level (≤15) → that many propagation steps. Even count
-    // so the final write lands in LightA. 16 ≥ 15 covers the max radius.
+    // 16 passes → max propagation radius 15 (max emission). Even pass count → result lands in LightA.
     private const int Passes = 16;
 
     private const string Wgsl = @"
-const CHUNK: i32 = 32;
-const AMBIENT_SKY: u32 = 6u; // keep in sync with ChunkGpuResources.AmbientSky & render WGSL
+// Volume dims passed as a small storage buffer to avoid shader recompilation on resize.
+struct Dims { w: u32, h: u32, d: u32, pad: u32 };
 
-@group(0) @binding(0) var<storage, read>       src: array<u32>;
-@group(0) @binding(1) var<storage, read_write> dst: array<u32>;
+@group(0) @binding(0) var<storage, read>       src:     array<u32>;
+@group(0) @binding(1) var<storage, read_write> dst:     array<u32>;
 @group(0) @binding(2) var<storage, read>       opacity: array<u32>;
+@group(0) @binding(3) var<storage, read>       dims:    Dims;
 
-fn flatIndex(x: i32, y: i32, z: i32) -> i32 { return x + CHUNK * (y + CHUNK * z); }
+fn idx3(x: i32, y: i32, z: i32) -> i32 {
+    return x + i32(dims.w) * (y + i32(dims.h) * z);
+}
+
+fn inVol(x: i32, y: i32, z: i32) -> bool {
+    return x >= 0 && x < i32(dims.w) &&
+           y >= 0 && y < i32(dims.h) &&
+           z >= 0 && z < i32(dims.d);
+}
 
 fn isOpaque(i: i32) -> bool {
     return ((opacity[u32(i) >> 5u] >> (u32(i) & 31u)) & 1u) == 1u;
 }
 
-// Block light of a voxel (0 if outside this chunk — intra-chunk flood only).
 fn blockAt(x: i32, y: i32, z: i32) -> u32 {
-    if (x < 0 || x >= CHUNK || y < 0 || y >= CHUNK || z < 0 || z >= CHUNK) { return 0u; }
-    return (src[u32(flatIndex(x, y, z))] >> 8u) & 0xFFu;
+    if (!inVol(x, y, z)) { return 0u; }
+    return (src[u32(idx3(x, y, z))] >> 8u) & 0xFFu;
 }
 
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let x = i32(gid.x); let y = i32(gid.y); let z = i32(gid.z);
-    if (x >= CHUNK || y >= CHUNK || z >= CHUNK) { return; }
-    let i = flatIndex(x, y, z);
+    if (!inVol(x, y, z)) { return; }
+    let i = idx3(x, y, z);
 
-    let self_block = (src[u32(i)] >> 8u) & 0xFFu;
+    let sv  = src[u32(i)];
+    let sky = sv & 0xFFu;          // CPU sky: preserved through all passes
+    let blk = (sv >> 8u) & 0xFFu;
 
-    // Solid voxels keep their seeded block (emitters hold their emission; walls hold 0) and never
-    // relay neighbour light, so light cannot pass through walls. Sky is 0 inside solids.
+    // Solid voxels: sky=0 inside solid, keep seeded emission. No relay.
     if (isOpaque(i)) {
-        dst[u32(i)] = self_block << 8u;
+        dst[u32(i)] = blk << 8u;
         return;
     }
 
-    // Air voxel: brightest of (own value) and (each neighbour − 1).
-    let nb = max(max(max(blockAt(x + 1, y, z), blockAt(x - 1, y, z)),
-                     max(blockAt(x, y + 1, z), blockAt(x, y - 1, z))),
-                 max(blockAt(x, y, z + 1), blockAt(x, y, z - 1)));
-    var b = self_block;
+    // Air voxel: max-relaxation propagation for block channel; sky is passed through unchanged.
+    let nb = max(max(max(blockAt(x+1,y,z), blockAt(x-1,y,z)),
+                     max(blockAt(x,y+1,z), blockAt(x,y-1,z))),
+                 max(blockAt(x,y,z+1), blockAt(x,y,z-1)));
+    var b = blk;
     if (nb > 0u) { b = max(b, nb - 1u); }
-
-    dst[u32(i)] = AMBIENT_SKY | (b << 8u);
+    dst[u32(i)] = sky | (b << 8u);
 }";
 
-    private readonly GpuContext     _ctx;
+    private readonly GpuContext      _ctx;
     private readonly ComputePipeline _pipeline;
-    private readonly uint[]          _seed = new uint[ChunkGpuResources.VoxelCount];
+
+    // Reusable seed buffer (avoids per-cycle allocation). Grown lazily.
+    private uint[] _seedBuf = Array.Empty<uint>();
 
     public GpuLightFlood(GpuContext ctx)
     {
@@ -74,31 +81,32 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         _pipeline = new ComputePipeline(ctx, Wgsl, "main");
     }
 
-    /// <summary>Clears + injects lamp emission, then floods. Result ends in <c>gpu.LightA</c>.</summary>
-    public void Flood(ChunkGpuResources gpu, ChunkData data)
+    /// <summary>
+    /// Builds the light seed from <paramref name="vol"/>'s CPU chunk data, uploads it to LightA,
+    /// then runs the ping-pong flood. Result ends in LightA.
+    /// </summary>
+    public void Flood(VolumeGpuResources vol, IEnumerable<KeyValuePair<ChunkPosition, ChunkEntry>> chunks)
     {
-        // Clear + inject: block = emission for emitters, 0 otherwise. Sky is filled by the flood.
-        for (int z = 0; z < ChunkData.Size; z++)
-        for (int y = 0; y < ChunkData.Size; y++)
-        for (int x = 0; x < ChunkData.Size; x++)
-        {
-            byte emission = BlockRegistry.Get(data.Get(x, y, z)).LightEmission;
-            _seed[ChunkData.Index(x, y, z)] = (uint)emission << 8;
-        }
-        gpu.LightA.Write<uint>(0, _seed);
+        // Grow seed buffer if volume expanded.
+        if (_seedBuf.Length < vol.TotalVoxels)
+            _seedBuf = new uint[vol.TotalVoxels];
 
-        // even pass (p=0): read A → write B; odd pass (p=15): read B → write A → result in LightA.
-        gpu.FloodBindEven = EnsureBind(gpu.FloodBindEven, gpu.LightA, gpu.LightB, gpu.Opacity);
-        gpu.FloodBindOdd  = EnsureBind(gpu.FloodBindOdd,  gpu.LightB, gpu.LightA, gpu.Opacity);
+        vol.BuildLightSeed(chunks, _seedBuf);
+        vol.LightA.Write<uint>(0, _seedBuf.AsSpan(0, vol.TotalVoxels));
 
-        const uint groups = ChunkData.Size / 4; // workgroup_size 4 → 8 groups per axis
-        _pipeline.DispatchPingPong(gpu.FloodBindEven, gpu.FloodBindOdd, groups, groups, groups, Passes);
+        // Lazily create bind groups. Recreate whenever they were invalidated (resize → 0).
+        if (vol.FloodBindEven == 0)
+            vol.FloodBindEven = _pipeline.CreateBindGroupHandle(
+                new (uint, GpuBuffer)[] { (0u, vol.LightA), (1u, vol.LightB), (2u, vol.Opacity), (3u, vol.Dims) });
+        if (vol.FloodBindOdd == 0)
+            vol.FloodBindOdd = _pipeline.CreateBindGroupHandle(
+                new (uint, GpuBuffer)[] { (0u, vol.LightB), (1u, vol.LightA), (2u, vol.Opacity), (3u, vol.Dims) });
+
+        uint gx = (uint)(vol.VW / 4);
+        uint gy = (uint)(vol.VH / 4);
+        uint gz = (uint)(vol.VD / 4);
+        _pipeline.DispatchPingPong(vol.FloodBindEven, vol.FloodBindOdd, gx, gy, gz, Passes);
     }
-
-    private nint EnsureBind(nint existing, GpuBuffer read, GpuBuffer write, GpuBuffer opacity)
-        => existing != 0
-            ? existing
-            : _pipeline.CreateBindGroupHandle(new (uint, GpuBuffer)[] { (0u, read), (1u, write), (2u, opacity) });
 
     public void Dispose() => _pipeline.Dispose();
 }
