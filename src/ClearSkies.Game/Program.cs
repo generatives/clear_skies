@@ -13,7 +13,6 @@ GpuComputeSelfTest.Run(host.Context);
 
 var staticWorld = new StaticWorld(host.World);
 var worldGen     = new SkyWorldGenerator();
-var lightSystem  = new LightSystem(staticWorld);
 var meshSystem   = new ChunkMeshSystem(staticWorld, host.Renderer);
 
 host.AddSystem(new FreeFlyCameraSystem(host.World, host.Input), SystemStage.Logic);
@@ -23,9 +22,8 @@ host.AddSystem(new GridShapeSystem(host.World, host.Physics), SystemStage.Logic)
 host.AddSystem(new PlayerGridControlSystem(host.World, host.Physics, host.Input), SystemStage.Logic);
 host.AddSystem(new PhysicsSystem(host.Physics, host.Time.FixedStep), SystemStage.Logic);
 host.AddSystem(new GridTransformSystem(host.World, host.Physics), SystemStage.Logic);
-host.AddSystem(new DebugDropSystem(host.World, host.Physics, host.Input, lightSystem, meshSystem, host.Renderer), SystemStage.Logic);
+host.AddSystem(new DebugDropSystem(host.World, host.Physics, host.Input, meshSystem, host.Renderer), SystemStage.Logic);
 host.AddSystem(new BlockInteractionSystem(host.World, staticWorld, host.Physics, host.Input, host.Renderer), SystemStage.Logic);
-host.AddSystem(lightSystem, SystemStage.Logic); // CPU sky BFS — seeds GPU flood each cycle
 host.AddSystem(new LambdaSystem(() =>
 {
     if (host.Input.WasKeyPressed(Key.Tab))

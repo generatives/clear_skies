@@ -53,6 +53,10 @@ public sealed class FreeFlyCameraSystem : ISystem
             if (_input.IsKeyDown(Key.A)) move -= right;
             if (_input.IsKeyDown(Key.Space)) move += up;
             if (_input.IsKeyDown(Key.ShiftLeft) || _input.IsKeyDown(Key.ShiftRight)) move -= up;
+            if (_input.IsKeyDown(Key.E)) c.MoveSpeed += 2;
+            if (_input.IsKeyDown(Key.Q)) c.MoveSpeed -= 2;
+
+            c.MoveSpeed = MathF.Max(2f, c.MoveSpeed);
 
             if (move.LengthSquared > 1e-6f)
                 t.Position += Vector3D.Normalize(move) * c.MoveSpeed * dt;

@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(dotnet add *)",
-      "Bash(dotnet build *)"
+      "Bash(dotnet build *)",
+      "PowerShell($ErrorActionPreference='SilentlyContinue'; $p = Start-Process -FilePath \"dotnet\" -ArgumentList \"run --project C:\\\\Users\\\\Decla\\\\Repos\\\\clear_skies\\\\src\\\\ClearSkies.Game --no-build\" -RedirectStandardError \"C:\\\\Users\\\\Decla\\\\Repos\\\\clear_skies\\\\_err.log\" -RedirectStandardOutput \"C:\\\\Users\\\\Decla\\\\Repos\\\\clear_skies\\\\_out.log\" -PassThru; Start-Sleep -Seconds 12; if\\(!$p.HasExited\\){ Stop-Process -Id $p.Id -Force; \"killed after 12s \\(was still running = good\\)\" } else { \"exited early with code $\\($p.ExitCode\\)\" })",
+      "PowerShell(dotnet build *)"
     ]
   }
 }

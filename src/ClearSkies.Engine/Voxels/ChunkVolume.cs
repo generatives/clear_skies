@@ -24,62 +24,35 @@ public class ChunkVolume
     internal ChunkPosition BoundsMax { get; private set; }
     private bool _boundsInitialised;
 
-    /// <summary>Block edits whose light must be recomputed. Drained by LightSystem each frame.</summary>
-    internal Queue<(int x, int y, int z)> RelightQueue { get; } = new();
-
     public ChunkVolume(World world) => _world = world;
 
     public int  LoadedCount                => _chunks.Count;
     public bool IsLoaded(ChunkPosition pos) => _chunks.ContainsKey(pos);
 
+    /// <summary>
+    /// Computes the AABB (inclusive, chunk coords) of the <b>currently loaded</b> chunks. Unlike
+    /// <see cref="BoundsMin"/>/<see cref="BoundsMax"/> (which only ever grow), this shrinks as chunks
+    /// unload, so the GPU volume can be windowed around the camera instead of growing without bound.
+    /// </summary>
+    internal bool TryGetLoadedBounds(out ChunkPosition min, out ChunkPosition max)
+    {
+        if (_chunks.Count == 0) { min = max = default; return false; }
+        int nx = int.MaxValue, ny = int.MaxValue, nz = int.MaxValue;
+        int xx = int.MinValue, xy = int.MinValue, xz = int.MinValue;
+        foreach (var pos in _chunks.Keys)
+        {
+            if (pos.X < nx) nx = pos.X; if (pos.X > xx) xx = pos.X;
+            if (pos.Y < ny) ny = pos.Y; if (pos.Y > xy) xy = pos.Y;
+            if (pos.Z < nz) nz = pos.Z; if (pos.Z > xz) xz = pos.Z;
+        }
+        min = new ChunkPosition(nx, ny, nz);
+        max = new ChunkPosition(xx, xy, xz);
+        return true;
+    }
+
     public ChunkData?    GetData(ChunkPosition pos) => _chunks.TryGetValue(pos, out var e) ? e.Data : null;
     internal ChunkEntry? GetEntry(ChunkPosition pos) => _chunks.TryGetValue(pos, out var e) ? e : null;
     internal IEnumerable<KeyValuePair<ChunkPosition, ChunkEntry>> All => _chunks;
-    internal IEnumerable<KeyValuePair<ChunkPosition, ChunkEntry>> AllByDescendingY =>
-        _chunks.OrderByDescending(kv => kv.Key.Y);
-
-    // ── CPU light access (used by LightEngine) ─────────────────────────────
-
-    internal (byte sky, byte block) GetLight(int x, int y, int z)
-    {
-        var (cp, lx, ly, lz) = Decompose(x, y, z);
-        if (!_chunks.TryGetValue(cp, out var e)) return (15, 0);
-        return (e.Light.GetSky(lx, ly, lz), e.Light.GetBlock(lx, ly, lz));
-    }
-
-    internal byte GetSkyLight(int x, int y, int z)
-    {
-        var (cp, lx, ly, lz) = Decompose(x, y, z);
-        return _chunks.TryGetValue(cp, out var e) ? e.Light.GetSky(lx, ly, lz) : LightEngine.BaseSkyLevel;
-    }
-
-    internal byte GetBlockLight(int x, int y, int z)
-    {
-        var (cp, lx, ly, lz) = Decompose(x, y, z);
-        return _chunks.TryGetValue(cp, out var e) ? e.Light.GetBlock(lx, ly, lz) : (byte)0;
-    }
-
-    /// <summary>Sets CPU sky light; flags the volume for GPU re-flood. No re-mesh (GPU samples buffers).</summary>
-    internal bool SetSkyLight(int x, int y, int z, byte value)
-    {
-        var (cp, lx, ly, lz) = Decompose(x, y, z);
-        if (!_chunks.TryGetValue(cp, out var e)) return false;
-        if (e.Light.GetSky(lx, ly, lz) == value) return false;
-        e.Light.SetSky(lx, ly, lz, value);
-        e.NeedsFlood = true;
-        return true;
-    }
-
-    /// <summary>Sets CPU block light; flags the volume for GPU re-flood. No re-mesh.</summary>
-    internal bool SetBlockLight(int x, int y, int z, byte value)
-    {
-        var (cp, lx, ly, lz) = Decompose(x, y, z);
-        if (!_chunks.TryGetValue(cp, out var e)) return false;
-        if (e.Light.GetBlock(lx, ly, lz) == value) return false;
-        e.Light.SetBlock(lx, ly, lz, value);
-        e.NeedsFlood = true;
-        return true;
-    }
 
     // ── Block access ───────────────────────────────────────────────────────
 
@@ -99,7 +72,6 @@ public class ChunkVolume
         entry.NeedsRecollide = true;
         entry.NeedsGpuUpload = true;
         entry.NeedsFlood     = true;
-        RelightQueue.Enqueue((x, y, z));
 
         // Adjacent-chunk face-cull + flood invalidation.
         if (lx == 0)                  TryMarkBoth(cp.Offset(-1,  0,  0));
@@ -194,11 +166,5 @@ public class ChunkVolume
     protected void TryMark(ChunkPosition pos)
     {
         if (_chunks.TryGetValue(pos, out var e)) e.NeedsRemesh = true;
-    }
-
-    /// <summary>Sets NeedsRemesh on all loaded chunks (used after volume resize).</summary>
-    internal void MarkAllRemesh()
-    {
-        foreach (var (_, e) in _chunks) e.NeedsRemesh = true;
     }
 }

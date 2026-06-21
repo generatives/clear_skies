@@ -35,10 +35,10 @@ public sealed class PlayerGridControlSystem : ISystem
         if (_input.IsKeyDown(Key.Down))     dir.Z += 1f;
         if (_input.IsKeyDown(Key.Left))     dir.X -= 1f;
         if (_input.IsKeyDown(Key.Right))    dir.X += 1f;
-        if (_input.IsKeyDown(Key.PageUp))   dir.Y += 1f;
-        if (_input.IsKeyDown(Key.PageDown)) dir.Y -= 1f;
+        if (_input.IsKeyDown(Key.I))        dir.Y += 1f;
+        if (_input.IsKeyDown(Key.K))        dir.Y -= 1f;
 
-        bool stop  = _input.WasKeyPressed(Key.End);
+        bool stop  = _input.WasKeyPressed(Key.Semicolon);
         bool moving = dir != Vector3.Zero;
         if (!moving && !stop) return;
         if (moving) dir = Vector3.Normalize(dir);

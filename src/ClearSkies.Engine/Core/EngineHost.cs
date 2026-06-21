@@ -34,7 +34,7 @@ public sealed class EngineHost : IDisposable
         Context = GpuContext.Create(Window, options);
         Renderer = new Renderer(Context);
         Input = new InputManager(Window);
-        Physics = new PhysicsWorld(new System.Numerics.Vector3(0f, -10f, 0f));
+        Physics = new PhysicsWorld(new System.Numerics.Vector3(0f, 0f, 0f));
         Time = new Time();
 
         Window.Update += OnUpdate;

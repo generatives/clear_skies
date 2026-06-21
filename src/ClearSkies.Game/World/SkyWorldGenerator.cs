@@ -12,7 +12,7 @@ namespace ClearSkies.Game.Generation;
 public sealed class SkyWorldGenerator : IWorldGenerator
 {
     // Two island layers in world-space Y.
-    private static readonly float[] IslandCentres = { 12f, 108f };
+    private static readonly float[] IslandCentres = { 12f };
 
     public void Generate(ChunkData data, ChunkPosition pos)
     {

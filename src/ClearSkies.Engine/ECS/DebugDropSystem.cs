@@ -24,19 +24,17 @@ public sealed class DebugDropSystem : ISystem
     private readonly World           _world;
     private readonly PhysicsWorld    _physics;
     private readonly InputManager    _input;
-    private readonly LightSystem     _lightSystem;
     private readonly ChunkMeshSystem _meshSystem;
     private readonly EntitySet       _cameras;
     private readonly GpuMesh         _cubeMesh;
 
     private readonly List<(BodyHandle body, Entity entity)> _spawned = new();
 
-    public DebugDropSystem(World world, PhysicsWorld physics, InputManager input, LightSystem lightSystem, ChunkMeshSystem meshSystem, Renderer renderer)
+    public DebugDropSystem(World world, PhysicsWorld physics, InputManager input, ChunkMeshSystem meshSystem, Renderer renderer)
     {
         _world       = world;
         _physics     = physics;
         _input       = input;
-        _lightSystem = lightSystem;
         _meshSystem  = meshSystem;
         _cameras     = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
 
@@ -62,7 +60,7 @@ public sealed class DebugDropSystem : ISystem
         if (_input.WasKeyPressed(Key.G) && TryGetCamera(out var gt))
         {
             var spawn = gt.Position + Vec.Rotate(gt.Rotation, new Vector3D<float>(0, 0, -3));
-            DynamicGridFactory.SpawnSingleBlock(_world, _lightSystem, _meshSystem, new PhysVec(spawn.X, spawn.Y, spawn.Z), BlockId.Stone);
+            DynamicGridFactory.SpawnSingleBlock(_world, _meshSystem, new PhysVec(spawn.X, spawn.Y, spawn.Z), BlockId.Stone);
             Console.WriteLine($"[debug] spawned grid at ({spawn.X:0.0},{spawn.Y:0.0},{spawn.Z:0.0})");
         }
 

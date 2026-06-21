@@ -21,7 +21,18 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
 {
     private const int S = ChunkData.Size; // 32
 
-    public const uint AmbientSky = LightEngine.BaseSkyLevel; // fill before first real flood
+    /// <summary>u32 words of opacity per chunk: 32³ bits / 32 = 1024. Opacity is stored <b>chunk-major</b>
+    /// (one contiguous 1024-word slice per chunk) so a single chunk's opacity uploads as one contiguous
+    /// write instead of re-uploading the whole volume bitset.</summary>
+    public const int WordsPerChunk = (S * S * S) / 32; // 1024
+
+    /// <summary>Ambient sky level injected from every face of the volume. Carries through open air with no
+    /// attenuation along each sweep direction; relaxation then loses 1 per step into occluded pockets. This
+    /// is soft fill light only — direct sun is a separate world-space shadow term in the renderer. Baked
+    /// into the flood shaders and used as the pre-first-flood ambient fill.</summary>
+    public const byte BaseSkyLevel = 10;
+
+    public const uint AmbientSky = BaseSkyLevel; // fill before first real flood
 
     private readonly GpuContext _ctx;
 
@@ -34,12 +45,23 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
     public int VH => DY * S;
     public int VD => DZ * S;
     public int TotalVoxels    => VW * VH * VD;
-    public int TotalOpacityWords => (TotalVoxels + 31) / 32;
+    public int TotalOpacityWords => DX * DY * DZ * WordsPerChunk; // chunk-major
 
     public GpuBuffer Opacity { get; private set; } = null!;
     public GpuBuffer LightA  { get; private set; } = null!;
     public GpuBuffer LightB  { get; private set; } = null!;
     public GpuBuffer Dims    { get; private set; } = null!; // [VW, VH, VD, 0]
+
+    /// <summary>Per-volume sparse emitter list buffer: pairs of (volume-voxel-index, level) as u32, packed.
+    /// Sized to the largest emitter count seen; grown lazily. 0-length until first emitter cycle.</summary>
+    public GpuBuffer? Emitters { get; private set; }
+    public int EmitterCapacity { get; private set; }
+
+    /// <summary>Ambient sky-sweep bind group (group 0). 0 = not created yet / stale after resize.</summary>
+    public nint SkySweepBind { get; set; }
+
+    /// <summary>Per-emitter scatter bind group (group 0). 0 = not created / stale after resize or emitter grow.</summary>
+    public nint ScatterBind { get; set; }
 
     /// <summary>Flood ping-pong bind groups (group 0). 0 = not created yet / stale after resize.</summary>
     public nint FloodBindEven { get; set; }
@@ -47,10 +69,6 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
 
     /// <summary>Fragment-shader bind group over <see cref="LightA"/> (group 2). 0 = not created yet / stale.</summary>
     public nint RenderBindGroup { get; set; }
-
-    // CPU shadow of the opacity bitset — updated on every SetBlock, uploaded before flood.
-    private uint[] _opacityShadow = Array.Empty<uint>();
-    public bool OpacityDirty { get; set; }
 
     private VolumeGpuResources(GpuContext ctx) => _ctx = ctx;
 
@@ -62,22 +80,15 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
         return v;
     }
 
-    /// <summary>
-    /// Expands the volume to cover <paramref name="newMin"/>/<paramref name="newMax"/> if they fall
-    /// outside the current bounds. Returns true if a reallocation occurred (caller should re-upload all
-    /// chunk data and mark all chunks for remesh).
-    /// </summary>
-    public bool EnsureContains(ChunkPosition newMin, ChunkPosition newMax)
-    {
-        if (newMin.X >= Min.X && newMin.Y >= Min.Y && newMin.Z >= Min.Z &&
-            newMax.X < Min.X + DX && newMax.Y < Min.Y + DY && newMax.Z < Min.Z + DZ)
-            return false; // already fits
+    /// <summary>True if the current allocation fully covers the inclusive chunk AABB [min, max].</summary>
+    public bool Covers(ChunkPosition min, ChunkPosition max)
+        => min.X >= Min.X && max.X < Min.X + DX &&
+           min.Y >= Min.Y && max.Y < Min.Y + DY &&
+           min.Z >= Min.Z && max.Z < Min.Z + DZ;
 
-        Allocate(
-            new ChunkPosition(System.Math.Min(newMin.X, Min.X), System.Math.Min(newMin.Y, Min.Y), System.Math.Min(newMin.Z, Min.Z)),
-            new ChunkPosition(System.Math.Max(newMax.X, Min.X + DX - 1), System.Math.Max(newMax.Y, Min.Y + DY - 1), System.Math.Max(newMax.Z, Min.Z + DZ - 1)));
-        return true;
-    }
+    /// <summary>Reallocates the volume to exactly cover [min, max] (inclusive chunk coords). All buffers are
+    /// recreated empty and all bind groups invalidated; the caller must re-upload every chunk and re-flood.</summary>
+    public void Reallocate(ChunkPosition min, ChunkPosition max) => Allocate(min, max);
 
     private void Allocate(ChunkPosition min, ChunkPosition max)
     {
@@ -92,11 +103,14 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
         int total    = TotalVoxels;
         int opWords  = TotalOpacityWords;
 
-        _opacityShadow = new uint[opWords];
         Opacity = GpuBuffer.CreateStorage(_ctx, (ulong)(opWords * sizeof(uint)));
         LightA  = GpuBuffer.CreateStorage(_ctx, (ulong)(total  * sizeof(uint)));
         LightB  = GpuBuffer.CreateStorage(_ctx, (ulong)(total  * sizeof(uint)));
         Dims    = GpuBuffer.CreateStorage(_ctx, 4 * sizeof(uint));
+
+        // Fresh opacity buffer is all-air (0); GpuResidencySystem re-uploads every chunk's slice (it marks
+        // them all NeedsGpuUpload on a realloc).
+        Opacity.Write<uint>(0, new uint[opWords]);
 
         // Dim buffer: [VW, VH, VD, 0]
         Span<uint> d = stackalloc uint[4] { (uint)VW, (uint)VH, (uint)VD, 0u };
@@ -106,8 +120,6 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
         var fill = new uint[total];
         Array.Fill(fill, AmbientSky);
         LightA.Write<uint>(0, fill);
-
-        OpacityDirty = true;
     }
 
     // ── Bounds helpers ────────────────────────────────────────────────────────
@@ -121,65 +133,66 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
     public (int bx, int by, int bz) ChunkVoxelBase(ChunkPosition pos)
         => ((pos.X - Min.X) * S, (pos.Y - Min.Y) * S, (pos.Z - Min.Z) * S);
 
-    // ── Opacity ───────────────────────────────────────────────────────────────
+    // ── Opacity (chunk-major) + emitters ───────────────────────────────────────
 
-    /// <summary>Updates this chunk's bits in the CPU opacity shadow. Call <see cref="UploadOpacityIfDirty"/> to sync GPU.</summary>
-    public void UpdateChunkOpacity(ChunkPosition pos, ChunkData data)
+    // Reusable scratch for one chunk's opacity slice (avoids per-upload allocation).
+    private readonly uint[] _chunkWords = new uint[WordsPerChunk];
+
+    /// <summary>Chunk-major slot index for a chunk: cx + DX*(cy + DY*cz) from <see cref="Min"/>.</summary>
+    public int ChunkSlot(ChunkPosition pos)
     {
-        if (!Contains(pos)) return;
-        var (bx, by, bz) = ChunkVoxelBase(pos);
-        for (int lz = 0; lz < S; lz++)
-        for (int ly = 0; ly < S; ly++)
-        for (int lx = 0; lx < S; lx++)
-        {
-            int vi = (bx + lx) + VW * ((by + ly) + VH * (bz + lz));
-            if (BlockRegistry.Get(data.Get(lx, ly, lz)).Opacity >= 15)
-                _opacityShadow[vi >> 5] |=  1u << (vi & 31);
-            else
-                _opacityShadow[vi >> 5] &= ~(1u << (vi & 31));
-        }
-        OpacityDirty = true;
+        int cx = pos.X - Min.X, cy = pos.Y - Min.Y, cz = pos.Z - Min.Z;
+        return cx + DX * (cy + DY * cz);
     }
-
-    /// <summary>Uploads the CPU opacity shadow to GPU if dirty.</summary>
-    public void UploadOpacityIfDirty()
-    {
-        if (!OpacityDirty) return;
-        Opacity.Write<uint>(0, _opacityShadow);
-        OpacityDirty = false;
-    }
-
-    // ── Light seed ────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Builds the per-cycle light seed into <paramref name="buf"/> (caller allocates, length = TotalVoxels).
-    /// Each voxel: bits 0-7 = CPU sky from <see cref="ChunkEntry.Light"/>, bits 8-15 = block emission.
-    /// Unloaded slots stay 0.
+    /// Rebuilds this chunk's opacity slice and emitter list from its block data, then uploads the slice as
+    /// one contiguous 1024-word write into the chunk-major opacity buffer. Replaces the old whole-volume
+    /// re-upload: only the edited chunk's slice touches the GPU.
     /// </summary>
-    public void BuildLightSeed(IEnumerable<KeyValuePair<ChunkPosition, ChunkEntry>> chunks, uint[] buf)
+    public void UpdateChunkOpacity(ChunkPosition pos, ChunkEntry entry)
     {
-        Array.Clear(buf, 0, buf.Length);
-        foreach (var (pos, entry) in chunks)
+        if (!Contains(pos)) return;
+        var data = entry.Data;
+        entry.Emitters.Clear();
+
+        for (int lz = 0; lz < S; lz++)
+        for (int ly = 0; ly < S; ly++)
         {
-            if (!Contains(pos)) continue;
-            if (entry.NeedsRelight) continue; // CPU light not yet initialised → leave 0 (floods as dark)
-            var (bx, by, bz) = ChunkVoxelBase(pos);
-            for (int lz = 0; lz < S; lz++)
-            for (int ly = 0; ly < S; ly++)
+            uint bits = 0u;
             for (int lx = 0; lx < S; lx++)
             {
-                int vi       = (bx + lx) + VW * ((by + ly) + VH * (bz + lz));
-                byte sky     = entry.Light.GetSky(lx, ly, lz);
-                byte emis    = BlockRegistry.Get(entry.Data.Get(lx, ly, lz)).LightEmission;
-                buf[vi]      = (uint)sky | ((uint)emis << 8);
+                var def = BlockRegistry.Get(data.Get(lx, ly, lz));
+                if (def.Opacity >= 15) bits |= 1u << lx;
+                if (def.LightEmission > 0)
+                    entry.Emitters.Add(new EmitterVoxel((byte)lx, (byte)ly, (byte)lz, def.LightEmission));
             }
+            _chunkWords[ly + S * lz] = bits; // local word: lx is the in-word bit, (ly + 32*lz) is the word
         }
+
+        ulong byteOffset = (ulong)ChunkSlot(pos) * WordsPerChunk * sizeof(uint);
+        Opacity.Write<uint>(byteOffset, _chunkWords);
+    }
+
+    /// <summary>Ensures the emitter buffer holds at least <paramref name="count"/> entries (2 u32 each),
+    /// growing (reallocating) if needed and invalidating the stale scatter bind group.</summary>
+    public void EnsureEmitterCapacity(int count)
+    {
+        if (Emitters != null && count <= EmitterCapacity) return;
+        int cap = EmitterCapacity == 0 ? 64 : EmitterCapacity;
+        while (cap < count) cap *= 2;
+        Emitters?.Dispose();
+        Emitters = GpuBuffer.CreateStorage(_ctx, (ulong)(cap * 2 * sizeof(uint)));
+        EmitterCapacity = cap;
+        if (ScatterBind != 0) { _ctx.Api.BindGroupRelease((BindGroup*)ScatterBind); ScatterBind = 0; }
     }
 
     // ── Bind group lifecycle ──────────────────────────────────────────────────
 
     public void ReleaseBindGroups()
     {
+        if (SkySweepBind   != 0) { _ctx.Api.BindGroupRelease((BindGroup*)SkySweepBind);   SkySweepBind   = 0; }
+        if (ScatterBind   != 0) { _ctx.Api.BindGroupRelease((BindGroup*)ScatterBind);   ScatterBind   = 0; }
         if (FloodBindEven != 0) { _ctx.Api.BindGroupRelease((BindGroup*)FloodBindEven); FloodBindEven = 0; }
         if (FloodBindOdd  != 0) { _ctx.Api.BindGroupRelease((BindGroup*)FloodBindOdd);  FloodBindOdd  = 0; }
         if (RenderBindGroup != 0) { _ctx.Api.BindGroupRelease((BindGroup*)RenderBindGroup); RenderBindGroup = 0; }
@@ -192,5 +205,6 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
         LightA?.Dispose();
         LightB?.Dispose();
         Dims?.Dispose();
+        Emitters?.Dispose();
     }
 }

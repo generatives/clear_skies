@@ -31,12 +31,26 @@ public sealed class RenderSystem : ISystem
         if (!TryGetActiveCamera(out var camTransform, out var camera))
             return;
 
+        var sunDir = Vector3D.Normalize(new Vector3D<float>(-0.4f, -1f, -0.3f));
+
         var uniform = new CameraUniform
         {
-            View         = camera.GetView(camTransform),
-            Projection   = camera.GetProjection(_renderer.AspectRatio),
-            SunDirection = Vector3D.Normalize(new Vector3D<float>(-0.4f, -1f, -0.3f)),
+            View          = camera.GetView(camTransform),
+            Projection    = camera.GetProjection(_renderer.AspectRatio),
+            SunDirection  = sunDir,
+            LightViewProj = BuildLightViewProj(sunDir, camTransform.Position),
         };
+
+        // Camera uniform carries lightViewProj, which the shadow pass's depth shader reads — write it
+        // before the shadow pass, then render all casters from the sun's POV into the shadow map.
+        _renderer.SetCameraUniform(uniform);
+        _renderer.BeginShadowPass();
+        foreach (ref readonly Entity e in _meshes.GetEntities())
+        {
+            ref readonly var t = ref e.Get<Transform>();
+            _renderer.DrawShadowMesh(e.Get<MeshRenderer>().Mesh, t.ToMatrix());
+        }
+        _renderer.EndShadowPass();
 
         if (!_renderer.BeginFrame())
             return;
@@ -82,6 +96,19 @@ public sealed class RenderSystem : ISystem
         }
 
         _renderer.EndFrame();
+    }
+
+    // Orthographic light-space matrix for the directional sun, framing a box around the camera so the
+    // shadow map covers the loaded region at high texel density. ~160-unit radius ≈ the load region plus
+    // margin; 2048² map → ~6 texels/voxel.
+    private static Mat4 BuildLightViewProj(Vector3D<float> sunDir, Vector3D<float> cameraPos)
+    {
+        const float radius = 160f;
+        var eye = cameraPos - sunDir * radius;
+        var up  = MathF.Abs(sunDir.Y) > 0.99f ? new Vector3D<float>(0, 0, 1) : new Vector3D<float>(0, 1, 0);
+        var view = Mat4.LookAtRh(eye, cameraPos, up);
+        var proj = Mat4.OrthoRhZo(-radius, radius, -radius, radius, 0.1f, 2f * radius);
+        return Mat4.Multiply(proj, view);
     }
 
     private bool TryGetActiveCamera(out Transform transform, out Camera camera)

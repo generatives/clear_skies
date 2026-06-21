@@ -75,8 +75,14 @@ public sealed unsafe class GpuContext : IDisposable
         if (_adapter == null)
             throw new InvalidOperationException("No suitable WebGPU adapter found.");
 
+        // Request the adapter's full supported limits so large per-volume light/opacity storage buffers are
+        // allowed (the default maxStorageBufferBindingSize of 128 MiB is exceeded by a modest voxel volume).
+        var supported = new SupportedLimits();
+        _api.AdapterGetLimits(_adapter, &supported);
+        var required = new RequiredLimits { Limits = supported.Limits };
+
         // Request device + queue.
-        var deviceDesc = new DeviceDescriptor();
+        var deviceDesc = new DeviceDescriptor { RequiredLimits = &required };
         _api.AdapterRequestDevice(_adapter, &deviceDesc, PfnRequestDeviceCallback.From(HandleDevice), null);
         if (_device == null)
             throw new InvalidOperationException("Failed to create WebGPU device.");

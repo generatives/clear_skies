@@ -14,15 +14,16 @@ public sealed unsafe class Renderer : IDisposable
 {
     private const int MaxObjects = 4096;
     private const ulong ModelStride = 256;   // >= minUniformBufferOffsetAlignment
-    private const ulong CameraSize  = 144;   // two mat4x4<f32> + vec4<f32> sun direction
+    private const ulong CameraSize  = 208;   // three mat4x4<f32> (view, proj, lightViewProj) + vec4<f32> sun direction
     private const ulong ModelSize   = 96;    // mat4x4<f32> + vec3<i32> chunkBase + vec3<i32> volSize (each padded to 16B)
 
     // Ambient fallback (sky=6/15) for fragments whose air-side voxel is outside the volume buffer
     // (e.g. non-chunk draws, or volume not yet initialised).
     private const string Wgsl = @"
-const AMBIENT_SKY: f32 = 10.0 / 15.0; // matches LightEngine.BaseSkyLevel
+const AMBIENT_SKY: f32 = 10.0 / 15.0; // matches VolumeGpuResources.BaseSkyLevel
+const MIN_AMBIENT: f32 = 0.12;        // floor so no geometry is ever fully black
 
-struct Camera { view: mat4x4<f32>, proj: mat4x4<f32>, sunDir: vec4<f32> };
+struct Camera { view: mat4x4<f32>, proj: mat4x4<f32>, sunDir: vec4<f32>, lightViewProj: mat4x4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
 // model: world transform. chunkBase: this chunk's voxel origin in the volume. volSize: volume dims in voxels.
@@ -34,6 +35,9 @@ struct Model { model: mat4x4<f32>, chunkBase: vec3<i32>, _p0: i32, volSize: vec3
 // 1 u32 per voxel: bits 0-7 = sky (0-15), bits 8-15 = block (0-15).
 // Index: vx + volSize.x * (vy + volSize.y * vz) where (vx,vy,vz) = chunkBase + localAir.
 @group(2) @binding(0) var<storage, read> light: array<u32>;
+
+// Directional-sun shadow map, rendered depth-only from the sun's POV (see SunShadowPass).
+@group(3) @binding(0) var shadowMap: texture_depth_2d;
 
 struct VSOut {
     @builtin(position) pos:         vec4<f32>,
@@ -77,13 +81,49 @@ fn sampleLight(localPos: vec3<f32>, localNormal: vec3<f32>) -> vec2<f32> {
     return vec2<f32>(sky, blk);
 }
 
+// Hard sun-shadow test for the voxel this face belongs to. The air-side voxel CENTER (not the smoothly
+// interpolated fragment position) is projected into light space and depth-tested, so the whole face shares
+// one lit/shadowed result → blocky, voxel-resolution shadows. Returns 1.0 lit, 0.0 shadowed.
+fn sunShadow(localPos: vec3<f32>, localNormal: vec3<f32>) -> f32 {
+    // Centre of the open air cell in front of this face, in world space.
+    let localCenter = floor(localPos + 0.5 * localNormal) + vec3<f32>(0.5);
+    let worldCenter = (model.model * vec4<f32>(localCenter, 1.0)).xyz;
+
+    let clip = camera.lightViewProj * vec4<f32>(worldCenter, 1.0);
+    let ndc  = clip.xyz / clip.w;                       // depth already in [0,1] (ortho ZO)
+    let uv   = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+
+    // Outside the shadow frustum → assume lit (the map follows the camera; distant geometry is unshadowed).
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ndc.z > 1.0 || ndc.z < 0.0) {
+        return 1.0;
+    }
+
+    let dims  = vec2<f32>(textureDimensions(shadowMap));
+    let texel = vec2<i32>(uv * dims);
+    let nearest = textureLoad(shadowMap, texel, 0);     // closest caster depth from the sun
+    // Small constant bias on top of the pipeline's slope bias and the half-voxel test offset.
+    if (ndc.z > nearest + 0.0015) { return 0.0; }
+    return 1.0;
+}
+
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let l      = sampleLight(in.localPos, in.localNormal);
     let worldN = normalize(in.worldNormal);
-    let sun    = max(dot(worldN, -(camera.sunDir.xyz)), 0.0);
-    let skyLit = l.x * (0.35 + 0.65 * sun);
-    let lit    = max(skyLit, l.y);
+
+    // Soft ambient fill (sky flood from all six faces, max BASE_SKY/15).
+    let ambient = l.x;
+
+    // Direct sun at full brightness (1.0 == light level 15): Lambertian on the surface normal, gated by the
+    // world-space shadow map at voxel resolution. Faces deep in shadow get no sun.
+    let ndotl     = max(dot(worldN, -(camera.sunDir.xyz)), 0.0);
+    let directSun = ndotl * sunShadow(in.localPos, in.localNormal);
+
+    // Sky contribution = the brighter of soft ambient and sharp direct sun.
+    let skyTerm = max(ambient, directSun);
+
+    // Final = brightest of sky, block light, and the minimum ambient floor (geometry never fully dark).
+    let lit = max(max(skyTerm, l.y), MIN_AMBIENT);
     return vec4<f32>(in.color * lit, 1.0);
 }
 ";
@@ -95,10 +135,14 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     private BindGroupLayout* _cameraLayout;
     private BindGroupLayout* _modelLayout;
     private BindGroupLayout* _lightLayout;
+    private BindGroupLayout* _shadowLayout;
     private PipelineLayout* _pipelineLayout;
     private RenderPipeline* _pipeline;
     private RenderPipeline* _wireframePipeline;
     private RenderPipeline* _hudPipeline;
+
+    private SunShadowPass _shadow = null!;
+    private BindGroup* _shadowBindGroup;
 
     public bool WireframeMode { get; set; }
 
@@ -127,6 +171,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         _pipeline          = CreatePipeline(PrimitiveTopology.TriangleList, CullMode.Back);
         _wireframePipeline = CreatePipeline(PrimitiveTopology.LineList,     CullMode.None);
         _hudPipeline       = CreatePipeline(PrimitiveTopology.LineList,     CullMode.None, depthTest: false);
+
+        // Sun shadow pass shares the camera + model bind-group layouts (its depth shader reads both).
+        _shadow = new SunShadowPass(ctx, _cameraLayout, _modelLayout);
 
         _cameraBuffer    = GpuBuffer.CreateUniform(ctx, CameraSize);
         _hudCameraBuffer = GpuBuffer.CreateUniform(ctx, CameraSize);
@@ -182,11 +229,22 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         var lightDesc = new BindGroupLayoutDescriptor { EntryCount = 1, Entries = &lightEntry };
         _lightLayout = _api.DeviceCreateBindGroupLayout(_ctx.Device, &lightDesc);
 
-        BindGroupLayout** layouts = stackalloc BindGroupLayout*[3];
+        // Group 3: the sun shadow map, sampled via textureLoad (no sampler needed → hard, voxel-res shadows).
+        var shadowEntry = new BindGroupLayoutEntry
+        {
+            Binding    = 0,
+            Visibility = ShaderStage.Fragment,
+            Texture    = new TextureBindingLayout { SampleType = TextureSampleType.Depth, ViewDimension = TextureViewDimension.Dimension2D, Multisampled = false },
+        };
+        var shadowDesc = new BindGroupLayoutDescriptor { EntryCount = 1, Entries = &shadowEntry };
+        _shadowLayout = _api.DeviceCreateBindGroupLayout(_ctx.Device, &shadowDesc);
+
+        BindGroupLayout** layouts = stackalloc BindGroupLayout*[4];
         layouts[0] = _cameraLayout;
         layouts[1] = _modelLayout;
         layouts[2] = _lightLayout;
-        var plDesc = new PipelineLayoutDescriptor { BindGroupLayoutCount = 3, BindGroupLayouts = layouts };
+        layouts[3] = _shadowLayout;
+        var plDesc = new PipelineLayoutDescriptor { BindGroupLayoutCount = 4, BindGroupLayouts = layouts };
         _pipelineLayout = _api.DeviceCreatePipelineLayout(_ctx.Device, &plDesc);
     }
 
@@ -262,6 +320,11 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         var lightEntry = new BindGroupEntry { Binding = 0, Buffer = _fullBrightLight.Handle, Offset = 0, Size = _fullBrightLight.SizeBytes };
         var lightDesc  = new BindGroupDescriptor { Layout = _lightLayout, EntryCount = 1, Entries = &lightEntry };
         _lightBindGroup = _api.DeviceCreateBindGroup(_ctx.Device, &lightDesc);
+
+        // Group 3: the shadow map depth view (same texture the shadow pass renders into).
+        var shadowEntry = new BindGroupEntry { Binding = 0, TextureView = _shadow.DepthView };
+        var shadowDesc  = new BindGroupDescriptor { Layout = _shadowLayout, EntryCount = 1, Entries = &shadowEntry };
+        _shadowBindGroup = _api.DeviceCreateBindGroup(_ctx.Device, &shadowDesc);
     }
 
     public GpuMesh UploadMesh(ReadOnlySpan<Vertex> vertices, ReadOnlySpan<uint> indices)
@@ -350,6 +413,40 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         return lines;
     }
 
+    /// <summary>
+    /// Opens the sun shadow depth pass. Call after <see cref="SetCameraUniform"/> (the shadow shader reads
+    /// <c>lightViewProj</c> from the camera uniform) and before <see cref="BeginFrame"/>. Follow with
+    /// <see cref="DrawShadowMesh"/> for every opaque caster, then <see cref="EndShadowPass"/>.
+    /// </summary>
+    public void BeginShadowPass()
+    {
+        _shadow.Begin();
+        _api.RenderPassEncoderSetBindGroup(_shadow.Pass, 0, _cameraBindGroup, 0, null);
+        _drawIndex = 0;
+    }
+
+    /// <summary>Renders one caster into the shadow map. Reuses the dynamic-offset model buffer (the same
+    /// slot is overwritten with full data for the main pass, which is submitted later).</summary>
+    public void DrawShadowMesh(GpuMesh mesh, in Mat4 model)
+    {
+        if (_drawIndex >= MaxObjects) return;
+
+        ulong offset = (ulong)_drawIndex * ModelStride;
+        Span<ModelUniform> s = stackalloc ModelUniform[1];
+        s[0] = ModelUniform.Default(model);
+        _modelBuffer.Write<ModelUniform>(offset, s);
+
+        uint dynOffset = (uint)offset;
+        _api.RenderPassEncoderSetBindGroup(_shadow.Pass, 1, _modelBindGroup, 1, &dynOffset);
+        _api.RenderPassEncoderSetVertexBuffer(_shadow.Pass, 0, mesh.VertexBuffer.Handle, 0, mesh.VertexBuffer.SizeBytes);
+        _api.RenderPassEncoderSetIndexBuffer(_shadow.Pass, mesh.IndexBuffer.Handle, IndexFormat.Uint32, 0, mesh.IndexBuffer.SizeBytes);
+        _api.RenderPassEncoderDrawIndexed(_shadow.Pass, mesh.IndexCount, 1, 0, 0, 0);
+        _drawIndex++;
+    }
+
+    /// <summary>Ends and submits the shadow pass so the map is ready for the main pass to sample.</summary>
+    public void EndShadowPass() => _shadow.End();
+
     public bool BeginFrame()
     {
         if (!_ctx.AcquireCurrentView())
@@ -389,6 +486,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         // Group 2 (light) is the same for every draw in Phase 4.1 and persists across pipeline
         // switches (all pipelines share the layout), so bind it once here.
         _api.RenderPassEncoderSetBindGroup(_pass, 2, _lightBindGroup, 0, null);
+        // Group 3 (sun shadow map) is constant for the frame; bind once.
+        _api.RenderPassEncoderSetBindGroup(_pass, 3, _shadowBindGroup, 0, null);
         return true;
     }
 
@@ -486,6 +585,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         _hudCameraBuffer.Dispose();
         _modelBuffer.Dispose();
         _fullBrightLight.Dispose();
+        _shadow.Dispose();
         if (_hudPipeline        != null) _api.RenderPipelineRelease(_hudPipeline);
         if (_wireframePipeline  != null) _api.RenderPipelineRelease(_wireframePipeline);
         if (_pipeline           != null) _api.RenderPipelineRelease(_pipeline);

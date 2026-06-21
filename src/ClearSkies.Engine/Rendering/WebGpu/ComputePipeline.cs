@@ -101,6 +101,10 @@ public sealed unsafe class ComputePipeline : IDisposable
         _api.CommandEncoderRelease(enc);
     }
 
+    /// <summary>As <see cref="Dispatch(BindGroup*,uint,uint,uint)"/> but takes an opaque bind-group handle.</summary>
+    public void Dispatch(nint bindGroup, uint groupsX, uint groupsY, uint groupsZ)
+        => Dispatch((BindGroup*)bindGroup, groupsX, groupsY, groupsZ);
+
     /// <summary>Encodes and submits a one-shot dispatch of (groupsX, groupsY, groupsZ) workgroups.</summary>
     public void Dispatch(BindGroup* bindGroup, uint groupsX, uint groupsY = 1, uint groupsZ = 1)
     {

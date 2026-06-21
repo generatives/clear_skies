@@ -6,9 +6,10 @@ using DefaultEcs;
 namespace ClearSkies.Engine.ECS;
 
 /// <summary>
-/// Runs the per-volume GPU block-light flood whenever any chunk in the volume has changed.
-/// One flood covers the entire <see cref="ChunkVolume"/> buffer, so light propagates across chunk
-/// boundaries naturally. Floods at most one volume per frame to keep the GPU busy without stalling.
+/// Runs the per-volume GPU light flood whenever any chunk in the volume has changed. The flood is scoped
+/// to the bounding box of the dirty chunks (see <see cref="FloodVolume"/>), so a single edit relights only
+/// its neighbourhood rather than the whole volume; light still crosses chunk boundaries within the region.
+/// Floods at most one volume per frame to keep the GPU busy without stalling.
 ///
 /// Runs after <c>GpuResidencySystem</c> (opacity must be uploaded and RenderBindGroup created first).
 /// </summary>
@@ -34,32 +35,47 @@ public sealed class GpuLightSystem : ISystem, IDisposable
     }
 
     /// <summary>
-    /// Floods the volume if any chunk is dirty and GPU residency is ready.
-    /// Returns true if a flood was submitted (at most 1 per Update call).
+    /// Floods the volume if any chunk is dirty and GPU residency is ready. The flood is scoped to the
+    /// bounding box of dirty chunks (Phase 4.6 culling): full-height in Y (sky occlusion is a vertical
+    /// column effect) and the dirty X/Z footprint plus a one-chunk lateral margin (≥ the max propagation
+    /// radius of 15) so the relaxation's border reads stay correct. Returns true if a flood was submitted.
     /// </summary>
     private bool FloodVolume(ChunkVolume vol)
     {
-        if (vol.VolumeGpu == null) return false;                   // GPU buffers not yet allocated
-        if (vol.VolumeGpu.OpacityDirty) return false;             // opacity upload still pending
-        if (vol.VolumeGpu.RenderBindGroup == 0) return false;     // render bind group not yet ready
+        var gpu = vol.VolumeGpu;
+        if (gpu == null) return false;                   // GPU buffers not yet allocated
+        if (gpu.RenderBindGroup == 0) return false;      // render bind group not yet ready
 
-        // Check if any chunk needs a flood (block edit, CPU light change, or initial load).
-        bool anyDirty = false;
-        foreach (var (_, e) in vol.All)
+        // Dirty chunk X/Z footprint (in chunk offsets from the volume Min). Only chunks whose opacity is
+        // already uploaded count — a chunk still awaiting upload keeps its flag and is picked up next cycle.
+        int minCX = int.MaxValue, minCZ = int.MaxValue, maxCX = int.MinValue, maxCZ = int.MinValue;
+        foreach (var (pos, e) in vol.All)
         {
-            if (e.NeedsFlood && !e.NeedsGpuUpload) { anyDirty = true; break; }
+            if (!e.NeedsFlood || e.NeedsGpuUpload) continue;
+            int cx = pos.X - gpu.Min.X, cz = pos.Z - gpu.Min.Z;
+            if (cx < minCX) minCX = cx; if (cx > maxCX) maxCX = cx;
+            if (cz < minCZ) minCZ = cz; if (cz > maxCZ) maxCZ = cz;
         }
-        if (!anyDirty) return false;
+        if (maxCX < minCX) return false; // nothing dirty (and ready)
 
-        _flood.Flood(vol.VolumeGpu, vol.All);
+        // Expand by a one-chunk lateral margin, clamp to the volume.
+        minCX = System.Math.Max(0, minCX - 1); maxCX = System.Math.Min(gpu.DX - 1, maxCX + 1);
+        minCZ = System.Math.Max(0, minCZ - 1); maxCZ = System.Math.Min(gpu.DZ - 1, maxCZ + 1);
 
-        // Clear the flood flag only on chunks that were fully represented in this flood: opacity
-        // uploaded AND CPU light initialised. A chunk still awaiting either was flooded with stale
-        // data (e.g. air where solid will be → sky leaking down onto an island underside), so we
-        // KEEP its flag set. Once its data lands it triggers a corrective reflood, instead of being
-        // permanently stuck with the wrong lighting (the cause of persistent bands / flat undersides).
+        const int S = ChunkData.Size; // 32
+        var region = new FloodRegion(
+            Ox: minCX * S, Oy: 0, Oz: minCZ * S,
+            Sx: (maxCX - minCX + 1) * S, Sy: gpu.VH, Sz: (maxCZ - minCZ + 1) * S);
+
+        _flood.Flood(gpu, vol.All, region);
+
+        // Clear the flood flag only on chunks fully represented in this flood: their opacity is uploaded.
+        // (Sky + block are derived entirely on the GPU from opacity + emission, so opacity readiness is
+        // the only requirement.) A chunk still awaiting its opacity upload was flooded as air, so we KEEP
+        // its flag set; once the upload lands it triggers a corrective reflood instead of being stuck
+        // with the wrong lighting (the cause of flat-lit undersides / seams during loading).
         foreach (var (_, e) in vol.All)
-            if (!e.NeedsGpuUpload && !e.NeedsRelight)
+            if (!e.NeedsGpuUpload)
                 e.NeedsFlood = false;
 
         return true; // one flood per Update

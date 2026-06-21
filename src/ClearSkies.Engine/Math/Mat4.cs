@@ -28,6 +28,21 @@ public struct Mat4
         return m;
     }
 
+    /// <summary>Right-handed orthographic projection with a [0,1] depth range (WebGPU/D3D convention).
+    /// Used for the directional-sun shadow map.</summary>
+    public static Mat4 OrthoRhZo(float left, float right, float bottom, float top, float near, float far)
+    {
+        Mat4 m = default;
+        m.M0  = 2f / (right - left);
+        m.M5  = 2f / (top - bottom);
+        m.M10 = 1f / (near - far);
+        m.M12 = -(right + left) / (right - left);
+        m.M13 = -(top + bottom) / (top - bottom);
+        m.M14 = near / (near - far);
+        m.M15 = 1f;
+        return m;
+    }
+
     /// <summary>Right-handed look-at (camera looks down -Z).</summary>
     public static Mat4 LookAtRh(Vector3D<float> eye, Vector3D<float> target, Vector3D<float> up)
     {
