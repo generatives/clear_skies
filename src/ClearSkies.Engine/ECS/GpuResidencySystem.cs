@@ -103,8 +103,8 @@ public sealed class GpuResidencySystem : ISystem
             budget--;
         }
 
-        // Create / recreate the fragment-shader render bind group for LightA.
+        // Create / recreate the fragment-shader render bind group for LightA + Opacity (AO).
         if (gpu.RenderBindGroup == 0)
-            gpu.RenderBindGroup = _renderer.CreateLightBindGroup(gpu.LightA);
+            gpu.RenderBindGroup = _renderer.CreateLightBindGroup(gpu.LightA, gpu.Opacity);
     }
 }

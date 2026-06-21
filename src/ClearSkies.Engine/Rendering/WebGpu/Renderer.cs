@@ -22,6 +22,8 @@ public sealed unsafe class Renderer : IDisposable
     private const string Wgsl = @"
 const AMBIENT_SKY: f32 = 10.0 / 15.0; // matches VolumeGpuResources.BaseSkyLevel
 const MIN_AMBIENT: f32 = 0.12;        // floor so no geometry is ever fully black
+const AO_MIN: f32 = 0.45;             // darkest ambient-occluded corner (1 = no AO)
+const WPC: i32 = 1024;                // u32 opacity words per 32³ chunk (VolumeGpuResources.WordsPerChunk)
 
 struct Camera { view: mat4x4<f32>, proj: mat4x4<f32>, sunDir: vec4<f32>, lightViewProj: mat4x4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -35,6 +37,10 @@ struct Model { model: mat4x4<f32>, chunkBase: vec3<i32>, _p0: i32, volSize: vec3
 // 1 u32 per voxel: bits 0-7 = sky (0-15), bits 8-15 = block (0-15).
 // Index: vx + volSize.x * (vy + volSize.y * vz) where (vx,vy,vz) = chunkBase + localAir.
 @group(2) @binding(0) var<storage, read> light: array<u32>;
+
+// Per-volume opacity bitset (chunk-major, 1 bit/voxel), same buffer the flood reads. Sampled for in-shader
+// ambient occlusion of the air-side cell's neighbourhood.
+@group(2) @binding(1) var<storage, read> opacity: array<u32>;
 
 // Directional-sun shadow map, rendered depth-only from the sun's POV (see SunShadowPass).
 @group(3) @binding(0) var shadowMap: texture_depth_2d;
@@ -106,6 +112,51 @@ fn sunShadow(localPos: vec3<f32>, localNormal: vec3<f32>) -> f32 {
     return 1.0;
 }
 
+// Chunk-major opacity test (matches the flood shader): slot = cx + DX*(cy + DY*cz); word = ly + 32*lz; bit = lx.
+fn isSolid(v: vec3<i32>) -> bool {
+    if (v.x < 0 || v.x >= model.volSize.x ||
+        v.y < 0 || v.y >= model.volSize.y ||
+        v.z < 0 || v.z >= model.volSize.z) { return false; } // out of volume → treat as open (no AO at borders)
+    let dx   = model.volSize.x >> 5;
+    let dy   = model.volSize.y >> 5;
+    let slot = (v.x >> 5) + dx * ((v.y >> 5) + dy * (v.z >> 5));
+    let word = slot * WPC + ((v.y & 31) + 32 * (v.z & 31));
+    let bit  = u32(v.x & 31);
+    return ((opacity[u32(word)] >> bit) & 1u) == 1u;
+}
+
+fn occ(v: vec3<i32>) -> f32 { return select(0.0, 1.0, isSolid(v)); }
+
+// Standard voxel corner AO: a corner flanked by two solids is fully dark; otherwise it dims by how many of the
+// two sides + diagonal are solid.
+fn vAO(s1: f32, s2: f32, c: f32) -> f32 {
+    if (s1 > 0.5 && s2 > 0.5) { return 0.0; }
+    return (3.0 - (s1 + s2 + c)) / 3.0;
+}
+
+// Smooth ambient occlusion sampled from the opacity neighbourhood of the air-side cell. The face's two in-plane
+// axes give four corner AO values (from the side + diagonal neighbours); the fragment's fractional position
+// within the cell bilerps between them, so AO stays smooth across a greedy-merged quad and is light-independent.
+fn computeAO(localPos: vec3<f32>, localNormal: vec3<f32>) -> f32 {
+    let air = model.chunkBase + vec3<i32>(floor(localPos + 0.5 * localNormal));
+    let n   = abs(localNormal);
+    var T: vec3<i32>; var B: vec3<i32>;
+    if (n.x > 0.5)      { T = vec3<i32>(0, 1, 0); B = vec3<i32>(0, 0, 1); }
+    else if (n.y > 0.5) { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 0, 1); }
+    else                { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 1, 0); }
+
+    let tm = occ(air - T); let tp = occ(air + T);
+    let bm = occ(air - B); let bp = occ(air + B);
+    let ao00 = vAO(tm, bm, occ(air - T - B));
+    let ao10 = vAO(tp, bm, occ(air + T - B));
+    let ao01 = vAO(tm, bp, occ(air - T + B));
+    let ao11 = vAO(tp, bp, occ(air + T + B));
+
+    let s = fract(dot(localPos, vec3<f32>(T)));
+    let t = fract(dot(localPos, vec3<f32>(B)));
+    return mix(mix(ao00, ao10, s), mix(ao01, ao11, s), t);
+}
+
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let l      = sampleLight(in.localPos, in.localNormal);
@@ -124,7 +175,10 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 
     // Final = brightest of sky, block light, and the minimum ambient floor (geometry never fully dark).
     let lit = max(max(skyTerm, l.y), MIN_AMBIENT);
-    return vec4<f32>(in.color * lit, 1.0);
+
+    // Ambient occlusion darkens inner corners / block junctions; lerp from AO_MIN so corners aren't pure black.
+    let aoFactor = mix(AO_MIN, 1.0, computeAO(in.localPos, in.localNormal));
+    return vec4<f32>(in.color * lit * aoFactor, 1.0);
 }
 ";
 
@@ -150,6 +204,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     private readonly GpuBuffer _hudCameraBuffer; // permanently holds identity view+proj
     private readonly GpuBuffer _modelBuffer;
     private GpuBuffer _fullBrightLight = null!;  // Phase 4.1: shared sky=15 buffer for all draws
+    private GpuBuffer _fullAirOpacity = null!;   // all-air opacity for the fallback (non-chunk) light bind group
     private BindGroup* _cameraBindGroup;
     private BindGroup* _hudCameraBindGroup;
     private BindGroup* _modelBindGroup;
@@ -220,13 +275,21 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         var modelDesc = new BindGroupLayoutDescriptor { EntryCount = 1, Entries = &modelEntry };
         _modelLayout = _api.DeviceCreateBindGroupLayout(_ctx.Device, &modelDesc);
 
-        var lightEntry = new BindGroupLayoutEntry
+        // Group 2: per-volume light (binding 0) + opacity (binding 1), both read-only storage in the fragment.
+        BindGroupLayoutEntry* lightEntries = stackalloc BindGroupLayoutEntry[2];
+        lightEntries[0] = new BindGroupLayoutEntry
         {
             Binding = 0,
             Visibility = ShaderStage.Fragment,
             Buffer = new BufferBindingLayout { Type = BufferBindingType.ReadOnlyStorage, HasDynamicOffset = false, MinBindingSize = 0 },
         };
-        var lightDesc = new BindGroupLayoutDescriptor { EntryCount = 1, Entries = &lightEntry };
+        lightEntries[1] = new BindGroupLayoutEntry
+        {
+            Binding = 1,
+            Visibility = ShaderStage.Fragment,
+            Buffer = new BufferBindingLayout { Type = BufferBindingType.ReadOnlyStorage, HasDynamicOffset = false, MinBindingSize = 0 },
+        };
+        var lightDesc = new BindGroupLayoutDescriptor { EntryCount = 2, Entries = lightEntries };
         _lightLayout = _api.DeviceCreateBindGroupLayout(_ctx.Device, &lightDesc);
 
         // Group 3: the sun shadow map, sampled via textureLoad (no sampler needed → hard, voxel-res shadows).
@@ -317,8 +380,15 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         Array.Fill(full, 15u); // sky=15, block=0
         _fullBrightLight.Write<uint>(0, full);
 
-        var lightEntry = new BindGroupEntry { Binding = 0, Buffer = _fullBrightLight.Handle, Offset = 0, Size = _fullBrightLight.SizeBytes };
-        var lightDesc  = new BindGroupDescriptor { Layout = _lightLayout, EntryCount = 1, Entries = &lightEntry };
+        // All-air opacity (one 32³ chunk's worth of words) so the fallback's AO sampling sees no occluders.
+        const int opWords = voxels / 32;
+        _fullAirOpacity = GpuBuffer.CreateStorage(_ctx, (ulong)(opWords * sizeof(uint)));
+        _fullAirOpacity.Write<uint>(0, new uint[opWords]);
+
+        BindGroupEntry* lightEntries = stackalloc BindGroupEntry[2];
+        lightEntries[0] = new BindGroupEntry { Binding = 0, Buffer = _fullBrightLight.Handle, Offset = 0, Size = _fullBrightLight.SizeBytes };
+        lightEntries[1] = new BindGroupEntry { Binding = 1, Buffer = _fullAirOpacity.Handle, Offset = 0, Size = _fullAirOpacity.SizeBytes };
+        var lightDesc  = new BindGroupDescriptor { Layout = _lightLayout, EntryCount = 2, Entries = lightEntries };
         _lightBindGroup = _api.DeviceCreateBindGroup(_ctx.Device, &lightDesc);
 
         // Group 3: the shadow map depth view (same texture the shadow pass renders into).
@@ -498,12 +568,15 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         _cameraBuffer.Write<CameraUniform>(0, s);
     }
 
-    /// <summary>Creates a group-2 (light) bind group over <paramref name="lightBuffer"/>; returns an
-    /// opaque handle. The caller owns its lifetime (release via the buffer's owner).</summary>
-    public nint CreateLightBindGroup(GpuBuffer lightBuffer)
+    /// <summary>Creates a group-2 bind group over a volume's <paramref name="lightBuffer"/> (binding 0) and
+    /// <paramref name="opacityBuffer"/> (binding 1, for in-shader AO); returns an opaque handle. The caller
+    /// owns its lifetime (release via the buffer's owner).</summary>
+    public nint CreateLightBindGroup(GpuBuffer lightBuffer, GpuBuffer opacityBuffer)
     {
-        var entry = new BindGroupEntry { Binding = 0, Buffer = lightBuffer.Handle, Offset = 0, Size = lightBuffer.SizeBytes };
-        var desc  = new BindGroupDescriptor { Layout = _lightLayout, EntryCount = 1, Entries = &entry };
+        BindGroupEntry* entries = stackalloc BindGroupEntry[2];
+        entries[0] = new BindGroupEntry { Binding = 0, Buffer = lightBuffer.Handle,   Offset = 0, Size = lightBuffer.SizeBytes };
+        entries[1] = new BindGroupEntry { Binding = 1, Buffer = opacityBuffer.Handle, Offset = 0, Size = opacityBuffer.SizeBytes };
+        var desc = new BindGroupDescriptor { Layout = _lightLayout, EntryCount = 2, Entries = entries };
         return (nint)_api.DeviceCreateBindGroup(_ctx.Device, &desc);
     }
 
@@ -585,6 +658,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         _hudCameraBuffer.Dispose();
         _modelBuffer.Dispose();
         _fullBrightLight.Dispose();
+        _fullAirOpacity.Dispose();
         _shadow.Dispose();
         if (_hudPipeline        != null) _api.RenderPipelineRelease(_hudPipeline);
         if (_wireframePipeline  != null) _api.RenderPipelineRelease(_wireframePipeline);

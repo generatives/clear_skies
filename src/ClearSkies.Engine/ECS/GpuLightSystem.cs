@@ -96,6 +96,7 @@ public sealed class GpuLightSystem : ISystem, IDisposable
 
             // Lamps from OTHER volumes that reach this one, with their reach AABB in this volume's voxel space.
             bool hasPose = TryPose(vol, out var vp, out var vr, out var vc);
+            var localUp = hasPose ? Vec.Rotate(Conjugate(vr), WorldUp) : WorldUp;
             FloodRegion? current = null;
             var reaching = new List<(WorldLamp lamp, int ax, int ay, int az, int sx, int sy, int sz)>();
             if (hasPose)
@@ -120,7 +121,7 @@ public sealed class GpuLightSystem : ISystem, IDisposable
             if (region is not { } reg) continue; // no lamps now and none before
 
             // Recompute the region from scratch, injecting each reaching lamp between clear/scatter and relax.
-            _flood.PrepareRegion(gpu, vol.All, reg);
+            _flood.PrepareRegion(gpu, vol.All, reg, localUp);
             foreach (var (lamp, ax, ay, az, sx, sy, sz) in reaching)
             {
                 LightShadowPass.BuildFaceMatrices(lamp.World, lamp.Level, faceVP);
@@ -206,6 +207,13 @@ public sealed class GpuLightSystem : ISystem, IDisposable
 
     /// <summary>Pose of a volume: a dynamic grid's body pose + centre-of-mass, or identity for the static world.
     /// Returns false for a grid whose body isn't created yet (skip it this cycle).</summary>
+    private static readonly Vector3D<float> WorldUp = new(0f, 1f, 0f);
+
+    /// <summary>World-up expressed in a volume's local frame — drives the ambient sky sweep direction so a
+    /// rotated grid's sky shading still comes from the world sky. Identity (+Y) for the static world.</summary>
+    private Vector3D<float> LocalUp(ChunkVolume vol)
+        => TryPose(vol, out _, out var rot, out _) ? Vec.Rotate(Conjugate(rot), WorldUp) : WorldUp;
+
     private bool TryPose(ChunkVolume vol, out Vector3D<float> pos, out Quaternion<float> rot, out Vector3D<float> com)
     {
         if (vol is DynamicGrid g)
@@ -286,7 +294,7 @@ public sealed class GpuLightSystem : ISystem, IDisposable
             Ox: minCX * S, Oy: 0, Oz: minCZ * S,
             Sx: (maxCX - minCX + 1) * S, Sy: gpu.VH, Sz: (maxCZ - minCZ + 1) * S);
 
-        _flood.Flood(gpu, vol.All, region);
+        _flood.Flood(gpu, vol.All, region, LocalUp(vol));
 
         foreach (var (_, e) in vol.All)
             if (!e.NeedsGpuUpload)
