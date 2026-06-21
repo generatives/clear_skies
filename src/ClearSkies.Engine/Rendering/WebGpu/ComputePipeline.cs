@@ -72,6 +72,29 @@ public sealed unsafe class ComputePipeline : IDisposable
         => (nint)CreateBindGroup(entries);
 
     /// <summary>
+    /// Creates a group-0 bind group mixing buffer bindings with a single texture-view binding (the depth
+    /// cube map sampled by the cross-volume light injection pass). <paramref name="texView"/> is a raw
+    /// <c>TextureView*</c> handle. Returns an opaque handle the caller releases.
+    /// </summary>
+    public nint CreateBindGroupHandle(ReadOnlySpan<(uint binding, GpuBuffer buffer)> buffers, uint texBinding, nint texView)
+    {
+        int n = buffers.Length + 1;
+        BindGroupEntry* arr = stackalloc BindGroupEntry[n];
+        for (int i = 0; i < buffers.Length; i++)
+            arr[i] = new BindGroupEntry
+            {
+                Binding = buffers[i].binding,
+                Buffer  = buffers[i].buffer.Handle,
+                Offset  = 0,
+                Size    = buffers[i].buffer.SizeBytes,
+            };
+        arr[buffers.Length] = new BindGroupEntry { Binding = texBinding, TextureView = (TextureView*)texView };
+
+        var desc = new BindGroupDescriptor { Layout = _layout, EntryCount = (uint)n, Entries = arr };
+        return (nint)_api.DeviceCreateBindGroup(_ctx.Device, &desc);
+    }
+
+    /// <summary>
     /// Records <paramref name="passes"/> dispatches into one command encoder, alternating between the two
     /// bind groups each pass (ping-pong). Each pass is its own compute pass, so WebGPU inserts the
     /// storage-buffer barrier between them. With an even <paramref name="passes"/> the final write lands

@@ -1,4 +1,7 @@
+using System.Runtime.InteropServices;
+using ClearSkies.Engine.Math;
 using ClearSkies.Engine.Rendering.WebGpu;
+using Silk.NET.Maths;
 
 namespace ClearSkies.Engine.Voxels;
 
@@ -207,15 +210,79 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     dst[u32(i)] = s | (b << 8u);
 }";
 
+    // ── Cross-volume injection (Phase 4.4): depth-tested point-lamp light from another volume ─────────
+    // Per voxel in the lamp's AABB: transform voxel-centre → world, attenuate by distance (1/voxel, matching
+    // the flood), then find the cube face whose frustum owns the lamp→voxel direction and hard depth-test
+    // against that face's stored nearest-caster depth. Visible → write into the block channel (max), preserving
+    // the swept sky channel. Occluded → skip (the source volume's hull, the target's own walls, and every other
+    // grid are all in the cube map, so the shadow is cross-volume exact). The relaxation pass then fills pockets.
+    private static readonly string InjectWgsl = @"
+struct Params {
+    voxelToWorld: mat4x4<f32>,
+    faceVP:       array<mat4x4<f32>, 6>,
+    lampWorld:    vec4<f32>,   // xyz lamp position
+    region:       vec4<i32>,   // ox, oy, oz, mapSize
+    sizev:        vec4<i32>,   // sx, sy, sz, _
+    vol:          vec4<i32>,   // VW, VH, VD, _
+    misc:         vec4<f32>,   // radius, level, bias, _
+};
+
+@group(0) @binding(0) var<storage, read_write> light:   array<u32>;
+@group(0) @binding(1) var                      distMap: texture_2d_array<f32>;
+@group(0) @binding(2) var<uniform>             p:       Params;
+
+const SELF_RADIUS: f32 = 1.0; // ignore occluders within this of the lamp (its own block walls)
+
+@compute @workgroup_size(4, 4, 4)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let x = p.region.x + i32(gid.x);
+    let y = p.region.y + i32(gid.y);
+    let z = p.region.z + i32(gid.z);
+    if (x >= p.region.x + p.sizev.x || y >= p.region.y + p.sizev.y || z >= p.region.z + p.sizev.z) { return; }
+    if (x < 0 || x >= p.vol.x || y < 0 || y >= p.vol.y || z < 0 || z >= p.vol.z) { return; }
+
+    let vc    = vec3<f32>(f32(x) + 0.5, f32(y) + 0.5, f32(z) + 0.5);
+    let world = (p.voxelToWorld * vec4<f32>(vc, 1.0)).xyz;
+    let dist  = length(world - p.lampWorld.xyz);
+    if (dist > p.misc.x) { return; }                       // outside reach
+
+    let contrib = i32(round(p.misc.y - dist));             // attenuation, 1 per voxel
+    if (contrib <= 0) { return; }
+
+    let mapSize = f32(p.region.w);
+    var lit = false;
+    for (var f = 0; f < 6; f = f + 1) {
+        let clip = p.faceVP[f] * vec4<f32>(world, 1.0);
+        if (clip.w <= 0.0) { continue; }
+        let ndc = clip.xyz / clip.w;
+        if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) { continue; }
+        let uv    = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+        let texel = clamp(vec2<i32>(uv * mapSize), vec2<i32>(0), vec2<i32>(i32(mapSize) - 1));
+        let nearest = textureLoad(distMap, texel, f, 0).r; // nearest caster distance from the lamp
+        // Occluded only if a real surface (past the lamp's own block) is closer than this voxel.
+        let occluded = nearest > SELF_RADIUS && nearest < dist - p.misc.z;
+        lit = !occluded;
+        break;                                             // exactly one face owns this direction
+    }
+    if (!lit) { return; }
+
+    let i   = u32(x + p.vol.x * (y + p.vol.y * z));
+    let cur = (light[i] >> 8u) & 0xFFu;
+    let nb  = u32(contrib);
+    if (nb > cur) { light[i] = (light[i] & 0xFFu) | (nb << 8u); } // keep sky, set block channel
+}";
+
     private readonly GpuContext      _ctx;
     private readonly ComputePipeline _skySweep;
     private readonly ComputePipeline _scatter;
     private readonly ComputePipeline _pipeline;
+    private readonly ComputePipeline _inject;
 
     // Shared param buffers (rewritten per flood). Shared across volumes is safe: only one volume floods per
     // frame and the contents are set immediately before that volume's dispatches.
     private readonly GpuBuffer _sweepParam;  // (axis, fromMax, clear, pad)
     private readonly GpuBuffer _regionParam; // (ox, oy, oz, count, sx, sy, sz, pad)
+    private readonly GpuBuffer _injectParam; // InjectParams (528 bytes), rewritten per injected lamp
 
     // Reusable CPU scratch for the emitter scatter list (pairs of voxelIndex, level). Grown lazily.
     private uint[] _emitterScratch = Array.Empty<uint>();
@@ -226,23 +293,38 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         _skySweep    = new ComputePipeline(ctx, SweepWgsl,   "main");
         _scatter     = new ComputePipeline(ctx, ScatterWgsl, "main");
         _pipeline    = new ComputePipeline(ctx, FloodWgsl,   "main");
+        _inject      = new ComputePipeline(ctx, InjectWgsl,  "main");
         _sweepParam  = GpuBuffer.CreateStorage(ctx, 4 * sizeof(uint));
         _regionParam = GpuBuffer.CreateStorage(ctx, 8 * sizeof(uint));
+        _injectParam = GpuBuffer.CreateUniform(ctx, (ulong)Marshal.SizeOf<InjectParams>());
     }
 
     /// <summary>
     /// Floods <paramref name="region"/> of <paramref name="vol"/>: sky sweep (clear) → emitter scatter →
-    /// LightA→LightB copy → relaxation ping-pong. Result ends in LightA.
+    /// LightA→LightB copy → relaxation ping-pong. Result ends in LightA. For cross-volume light, call
+    /// <see cref="PrepareRegion"/>, then <see cref="Inject"/> once per reaching lamp, then
+    /// <see cref="FinishRegion"/> instead — injection must land after the clear/scatter and before the relax.
     /// </summary>
     public void Flood(VolumeGpuResources vol, IEnumerable<KeyValuePair<ChunkPosition, ChunkEntry>> chunks, FloodRegion region)
     {
-        // 1) Gather in-region emitters into the scatter list and upload.
+        PrepareRegion(vol, chunks, region);
+        FinishRegion(vol, region);
+    }
+
+    /// <summary>
+    /// First half of a flood: gather + upload in-region emitters, write the region params, ensure bind groups,
+    /// run the ambient sky sweep (clear mode — this is what resets the region) and the emitter scatter. After
+    /// this, LightA holds swept sky + local block seeds in the region; cross-volume <see cref="Inject"/> calls
+    /// may add to the block channel before <see cref="FinishRegion"/> relaxes.
+    /// </summary>
+    public void PrepareRegion(VolumeGpuResources vol, IEnumerable<KeyValuePair<ChunkPosition, ChunkEntry>> chunks, FloodRegion region)
+    {
         int n = GatherEmitters(vol, chunks, region);
         vol.EnsureEmitterCapacity(System.Math.Max(n, 1));
         if (n > 0)
             vol.Emitters!.Write<uint>(0, _emitterScratch.AsSpan(0, n * 2));
 
-        // 2) Region params (count rides along for the scatter pass).
+        // Region params (count rides along for the scatter pass).
         Span<uint> r = stackalloc uint[8]
         {
             (uint)region.Ox, (uint)region.Oy, (uint)region.Oz, (uint)n,
@@ -250,7 +332,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         };
         _regionParam.Write<uint>(0, r);
 
-        // 3) Lazily (re)create bind groups; reset to 0 on resize / emitter grow.
+        // Lazily (re)create bind groups; reset to 0 on resize / emitter grow.
         if (vol.SkySweepBind == 0)
             vol.SkySweepBind = _skySweep.CreateBindGroupHandle(
                 new (uint, GpuBuffer)[] { (0u, vol.LightA), (1u, vol.Opacity), (2u, vol.Dims), (3u, _sweepParam), (4u, _regionParam) });
@@ -264,23 +346,63 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             vol.FloodBindOdd = _pipeline.CreateBindGroupHandle(
                 new (uint, GpuBuffer)[] { (0u, vol.LightB), (1u, vol.LightA), (2u, vol.Opacity), (3u, vol.Dims), (4u, _regionParam) });
 
-        // 4) Ambient sky sweep — −Y (top-down), clear mode, over the region's XZ footprint. This resets the
-        //    region (sky overwritten, block zeroed). Only the top sweep is enabled (matches prior behaviour);
-        //    if more directions are added, only the first should use clear mode.
+        // Ambient sky sweep — −Y (top-down), clear mode, over the region's XZ footprint. This resets the region
+        // (sky overwritten, block zeroed). Only the top sweep is enabled; if more directions are added, only the
+        // first should use clear mode.
         DispatchSweep(vol, axis: 1u, fromMax: 1u, clear: 1u,
                       gx: CeilDiv((uint)region.Sx, 8u), gy: CeilDiv((uint)region.Sz, 8u));
 
-        // 5) Scatter emitters into the (now reset) region.
+        // Scatter local emitters into the (now reset) region.
         if (n > 0)
             _scatter.Dispatch(vol.ScatterBind, CeilDiv((uint)n, 64u), 1u, 1u);
+    }
 
-        // 6) Make both ping-pong buffers agree everywhere, so the region reads correct, stable values just
-        //    outside its border on every relaxation pass (whether the src is LightA or LightB).
+    /// <summary>
+    /// Second half of a flood: make both ping-pong buffers agree everywhere (so region border reads are stable),
+    /// then run the relaxation ping-pong over the region. Result ends in LightA.
+    /// </summary>
+    public void FinishRegion(VolumeGpuResources vol, FloodRegion region)
+    {
         _ctx.CopyBufferToBuffer(vol.LightA, vol.LightB, vol.LightA.SizeBytes);
-
-        // 7) Relaxation flood over the region — ping-pong, even passes → result in LightA.
         _pipeline.DispatchPingPong(vol.FloodBindEven, vol.FloodBindOdd,
             CeilDiv((uint)region.Sx, 4u), CeilDiv((uint)region.Sy, 4u), CeilDiv((uint)region.Sz, 4u), Passes);
+    }
+
+    /// <summary>
+    /// Injects one cross-volume point lamp into <paramref name="vol"/>'s block channel using a depth test
+    /// against its already-rendered cube map (<paramref name="depthArrayView"/>, a six-layer
+    /// <c>texture_depth_2d_array</c>). Must be called between <see cref="PrepareRegion"/> and
+    /// <see cref="FinishRegion"/>. <paramref name="voxelToWorld"/> maps a volume voxel centre to world space;
+    /// <paramref name="faceVP"/> are the six face view-projections used to render the cube. The dispatch covers
+    /// the lamp's reach AABB (origin <paramref name="ax"/>,<paramref name="ay"/>,<paramref name="az"/>, size
+    /// <paramref name="sx"/>,<paramref name="sy"/>,<paramref name="sz"/>) in volume voxels.
+    /// </summary>
+    public void Inject(VolumeGpuResources vol, nint depthArrayView, in Mat4 voxelToWorld, ReadOnlySpan<Mat4> faceVP,
+                       Vector3D<float> lampWorld, int level, float radius,
+                       int ax, int ay, int az, int sx, int sy, int sz)
+    {
+        if (sx <= 0 || sy <= 0 || sz <= 0) return;
+
+        var pr = new InjectParams
+        {
+            VoxelToWorld = voxelToWorld,
+            F0 = faceVP[0], F1 = faceVP[1], F2 = faceVP[2], F3 = faceVP[3], F4 = faceVP[4], F5 = faceVP[5],
+            LampX = lampWorld.X, LampY = lampWorld.Y, LampZ = lampWorld.Z, LampW = 0f,
+            Ox = ax, Oy = ay, Oz = az, MapSize = (int)Rendering.WebGpu.LightShadowPass.MapSize,
+            Sx = sx, Sy = sy, Sz = sz, SizePad = 0,
+            VW = vol.VW, VH = vol.VH, VD = vol.VD, VolPad = 0,
+            // Bias is a linear-distance tolerance (half a voxel): a surface must be at least this much closer
+            // than the voxel to count as an occluder, so a lit voxel's own backing solid doesn't self-shadow it.
+            Radius = radius, Level = level, Bias = 0.5f, MiscPad = 0f,
+        };
+        Span<InjectParams> sp = stackalloc InjectParams[1] { pr };
+        _injectParam.Write<InjectParams>(0, sp);
+
+        if (vol.InjectBind == 0)
+            vol.InjectBind = _inject.CreateBindGroupHandle(
+                new (uint, GpuBuffer)[] { (0u, vol.LightA), (2u, _injectParam) }, 1u, depthArrayView);
+
+        _inject.Dispatch(vol.InjectBind, CeilDiv((uint)sx, 4u), CeilDiv((uint)sy, 4u), CeilDiv((uint)sz, 4u));
     }
 
     /// <summary>
@@ -336,7 +458,23 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         _skySweep.Dispose();
         _scatter.Dispose();
         _pipeline.Dispose();
+        _inject.Dispose();
         _sweepParam.Dispose();
         _regionParam.Dispose();
+        _injectParam.Dispose();
+    }
+
+    /// <summary>Uniform block for the injection pass (528 bytes). Field order/padding match the WGSL
+    /// <c>Params</c> std140 layout: a mat4, six face mat4s, then five vec4s (vec4&lt;i32&gt; / vec4&lt;f32&gt;).</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    private struct InjectParams
+    {
+        public Mat4 VoxelToWorld;
+        public Mat4 F0, F1, F2, F3, F4, F5;
+        public float LampX, LampY, LampZ, LampW;   // vec4<f32> lampWorld
+        public int   Ox, Oy, Oz, MapSize;          // vec4<i32> region
+        public int   Sx, Sy, Sz, SizePad;          // vec4<i32> sizev
+        public int   VW, VH, VD, VolPad;           // vec4<i32> vol
+        public float Radius, Level, Bias, MiscPad; // vec4<f32> misc
     }
 }

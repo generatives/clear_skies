@@ -70,6 +70,11 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
     /// <summary>Fragment-shader bind group over <see cref="LightA"/> (group 2). 0 = not created yet / stale.</summary>
     public nint RenderBindGroup { get; set; }
 
+    /// <summary>Cross-volume injection bind group (LightA + lamp cube map + inject params). 0 = not created /
+    /// stale after resize. The cube-map texture view is constant (one shared <c>LightShadowPass</c>), so this
+    /// only needs recreating when LightA is reallocated.</summary>
+    public nint InjectBind { get; set; }
+
     private VolumeGpuResources(GpuContext ctx) => _ctx = ctx;
 
     /// <summary>Allocates a new volume covering [min, max] (chunk coordinates, inclusive).</summary>
@@ -196,6 +201,7 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
         if (FloodBindEven != 0) { _ctx.Api.BindGroupRelease((BindGroup*)FloodBindEven); FloodBindEven = 0; }
         if (FloodBindOdd  != 0) { _ctx.Api.BindGroupRelease((BindGroup*)FloodBindOdd);  FloodBindOdd  = 0; }
         if (RenderBindGroup != 0) { _ctx.Api.BindGroupRelease((BindGroup*)RenderBindGroup); RenderBindGroup = 0; }
+        if (InjectBind    != 0) { _ctx.Api.BindGroupRelease((BindGroup*)InjectBind);    InjectBind    = 0; }
     }
 
     public void Dispose()
