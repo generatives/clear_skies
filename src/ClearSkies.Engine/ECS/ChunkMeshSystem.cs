@@ -80,21 +80,9 @@ public sealed class ChunkMeshSystem : ISystem
             var mesh      = _renderer.UploadMesh(verts, idxs);
             long uploadMs = _sw.ElapsedMilliseconds;
 
-            // Compute chunk-space base and volume size from the current VolumeGpuResources.
-            // Falls back to 0,0,0 / 32,32,32 if GPU residency isn't ready yet
-            // (full-bright buffer handles the 0-31 range just fine).
-            int cbx = 0, cby = 0, cbz = 0;
-            int vsx = ChunkData.Size, vsy = ChunkData.Size, vsz = ChunkData.Size;
-            if (volume.VolumeGpu != null)
-            {
-                var (bx, by, bz) = volume.VolumeGpu.ChunkVoxelBase(pos);
-                cbx = bx; cby = by; cbz = bz;
-                vsx = volume.VolumeGpu.VW;
-                vsy = volume.VolumeGpu.VH;
-                vsz = volume.VolumeGpu.VD;
-            }
-
-            volume.SetMesh(pos, mesh, cbx, cby, cbz, vsx, vsy, vsz);
+            // The chunk's voxel base and the volume dims are derived live at draw time from the volume's
+            // GPU resources (see RenderSystem), so a volume reallocation needs no remesh here.
+            volume.SetMesh(pos, mesh);
             _totalMeshed++;
 
             if (meshMs + uploadMs > 5)

@@ -52,13 +52,14 @@ public sealed class GpuResidencySystem : ISystem
         // Expand bounds if any loaded chunk now lies outside the allocated range.
         if (gpu.EnsureContains(vol.BoundsMin, vol.BoundsMax))
         {
-            // Reallocation invalidates all chunk slices — mark them all dirty.
+            // Reallocation creates fresh, empty light/opacity buffers — every chunk must re-upload its
+            // opacity and re-flood. No remesh needed: the mesh geometry is unchanged, and the shader's
+            // chunkBase/volSize are derived live from the (resized) volume at draw time (see RenderSystem).
             foreach (var (_, e) in vol.All)
             {
                 e.NeedsGpuUpload = true;
                 e.NeedsFlood     = true;
             }
-            vol.MarkAllRemesh(); // MeshRenderer.ChunkBase/VolSize are now stale
         }
 
         // Upload opacity for dirty chunks (budgeted).

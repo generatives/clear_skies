@@ -7,16 +7,22 @@ namespace ClearSkies.Engine.Voxels;
 /// set of dispatches, so light crosses chunk boundaries naturally. Each cycle: upload seed → ping-pong
 /// max-relaxation passes → result in LightA (what the renderer samples).
 ///
-/// Sky channel (bits 0-7): seeded from CPU <see cref="LightData"/> sky values each cycle; preserved
-/// unchanged through all flood passes (GPU sky flood deferred to Phase 4.3).
+/// Sky channel (bits 0-7): the CPU column pass seeds each chunk's vertical sky (load-order-safe); the
+/// flood then max-relaxes it across the whole volume so it converges over chunk boundaries — full sun
+/// (<see cref="LightEngine.BaseSkyLevel"/>) passes straight down through air without attenuation, every
+/// other direction loses 1 per step. This is what removes the per-chunk-boundary sky seams.
 /// Block channel (bits 8-15): seeded from emitter emission; max-relaxation propagates it through air.
 /// </summary>
 internal sealed class GpuLightFlood : IDisposable
 {
-    // 16 passes → max propagation radius 15 (max emission). Even pass count → result lands in LightA.
+    // 16 passes → max propagation radius 15 (max emission, and >= BaseSkyLevel for sky horizontal
+    // bleed). Even pass count → result lands in LightA.
     private const int Passes = 16;
 
-    private const string Wgsl = @"
+    // BaseSkyLevel baked into the shader as the "full sun" sentinel (passes straight down unattenuated).
+    private static readonly string Wgsl = @"
+const BASE_SKY: u32 = " + LightEngine.BaseSkyLevel + @"u;
+
 // Volume dims passed as a small storage buffer to avoid shader recompilation on resize.
 struct Dims { w: u32, h: u32, d: u32, pad: u32 };
 
@@ -44,6 +50,11 @@ fn blockAt(x: i32, y: i32, z: i32) -> u32 {
     return (src[u32(idx3(x, y, z))] >> 8u) & 0xFFu;
 }
 
+fn skyAt(x: i32, y: i32, z: i32) -> u32 {
+    if (!inVol(x, y, z)) { return 0u; }
+    return src[u32(idx3(x, y, z))] & 0xFFu;
+}
+
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let x = i32(gid.x); let y = i32(gid.y); let z = i32(gid.z);
@@ -51,7 +62,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = idx3(x, y, z);
 
     let sv  = src[u32(i)];
-    let sky = sv & 0xFFu;          // CPU sky: preserved through all passes
+    let sky = sv & 0xFFu;
     let blk = (sv >> 8u) & 0xFFu;
 
     // Solid voxels: sky=0 inside solid, keep seeded emission. No relay.
@@ -60,13 +71,26 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    // Air voxel: max-relaxation propagation for block channel; sky is passed through unchanged.
+    // ── Block channel: max-relaxation, loses 1 per step in all directions ──
     let nb = max(max(max(blockAt(x+1,y,z), blockAt(x-1,y,z)),
                      max(blockAt(x,y+1,z), blockAt(x,y-1,z))),
                  max(blockAt(x,y,z+1), blockAt(x,y,z-1)));
     var b = blk;
     if (nb > 0u) { b = max(b, nb - 1u); }
-    dst[u32(i)] = sky | (b << 8u);
+
+    // ── Sky channel: max-relaxation across the volume (converges chunk boundaries) ──
+    // Full sun from directly above passes straight down with no attenuation; everything else loses 1.
+    var s  = sky;                       // CPU column-pass seed
+    let up = skyAt(x, y + 1, z);
+    if (up >= BASE_SKY) { s = max(s, up); }
+    else if (up > 0u)   { s = max(s, up - 1u); }
+
+    let side = max(max(max(skyAt(x-1,y,z), skyAt(x+1,y,z)),
+                       max(skyAt(x,y,z-1), skyAt(x,y,z+1))),
+                   skyAt(x, y - 1, z));
+    if (side > 0u) { s = max(s, side - 1u); }
+
+    dst[u32(i)] = s | (b << 8u);
 }";
 
     private readonly GpuContext      _ctx;

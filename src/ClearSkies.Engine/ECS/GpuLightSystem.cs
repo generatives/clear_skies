@@ -53,8 +53,14 @@ public sealed class GpuLightSystem : ISystem, IDisposable
 
         _flood.Flood(vol.VolumeGpu, vol.All);
 
-        // Clear flood flags on all chunks — the entire volume was re-flooded.
-        foreach (var (_, e) in vol.All) e.NeedsFlood = false;
+        // Clear the flood flag only on chunks that were fully represented in this flood: opacity
+        // uploaded AND CPU light initialised. A chunk still awaiting either was flooded with stale
+        // data (e.g. air where solid will be → sky leaking down onto an island underside), so we
+        // KEEP its flag set. Once its data lands it triggers a corrective reflood, instead of being
+        // permanently stuck with the wrong lighting (the cause of persistent bands / flat undersides).
+        foreach (var (_, e) in vol.All)
+            if (!e.NeedsGpuUpload && !e.NeedsRelight)
+                e.NeedsFlood = false;
 
         return true; // one flood per Update
     }

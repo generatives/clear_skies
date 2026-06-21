@@ -2,6 +2,7 @@ using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Math;
 using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Rendering.WebGpu;
+using ClearSkies.Engine.Voxels;
 using DefaultEcs;
 using Silk.NET.Maths;
 
@@ -46,10 +47,22 @@ public sealed class RenderSystem : ISystem
         {
             ref readonly var t   = ref e.Get<Transform>();
             ref readonly var mr  = ref e.Get<MeshRenderer>();
-            nint lbg = mr.VolumeGpu?.RenderBindGroup ?? 0;
-            _renderer.DrawMesh(mr.Mesh, t.ToMatrix(), lbg,
-                               mr.ChunkBaseX, mr.ChunkBaseY, mr.ChunkBaseZ,
-                               mr.VolSizeX,   mr.VolSizeY,   mr.VolSizeZ);
+
+            // Derive chunkBase + volume dims live from the current volume state. This stays correct
+            // across volume reallocations (which move every chunk's base and resize the volume)
+            // without needing to remesh. Fallback for non-chunk meshes: base 0, size 32 (full-bright).
+            nint lbg = 0;
+            int cbx = 0, cby = 0, cbz = 0;
+            int vsx = ChunkData.Size, vsy = ChunkData.Size, vsz = ChunkData.Size;
+            if (mr.VolumeGpu is { } gpu)
+            {
+                lbg = gpu.RenderBindGroup;
+                var (bx, by, bz) = gpu.ChunkVoxelBase(mr.ChunkPos);
+                cbx = bx; cby = by; cbz = bz;
+                vsx = gpu.VW; vsy = gpu.VH; vsz = gpu.VD;
+            }
+
+            _renderer.DrawMesh(mr.Mesh, t.ToMatrix(), lbg, cbx, cby, cbz, vsx, vsy, vsz);
         }
 
         // Wireframe overlays drawn on top (pipeline switches mid-pass then restores).

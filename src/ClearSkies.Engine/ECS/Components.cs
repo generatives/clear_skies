@@ -12,15 +12,14 @@ public struct MeshRenderer
     public GpuMesh Mesh;
 
     /// <summary>Owning volume's GPU resources. The renderer reads <c>VolumeGpu.RenderBindGroup</c> for the
-    /// light buffer. Null for non-chunk meshes (debug cubes, etc.) — uses the shared full-bright fallback.</summary>
+    /// light buffer, and derives this chunk's voxel base + the volume dims from it live each draw. Null for
+    /// non-chunk meshes (debug cubes, etc.) — uses the shared full-bright fallback.</summary>
     internal VolumeGpuResources? VolumeGpu;
 
-    /// <summary>This chunk's voxel origin within the volume (volume-space). Used by the fragment shader to
-    /// map local position → volume-space light sample.</summary>
-    public int ChunkBaseX, ChunkBaseY, ChunkBaseZ;
-
-    /// <summary>Volume size in voxels (VW, VH, VD). Written into the model uniform each draw.</summary>
-    public int VolSizeX, VolSizeY, VolSizeZ;
+    /// <summary>This chunk's position in the volume. The fragment-shader chunkBase and volSize are computed
+    /// from this against <see cref="VolumeGpu"/> at draw time, so a volume reallocation (which moves every
+    /// chunk's base and changes the dims) needs no remesh — the geometry is unchanged.</summary>
+    public ChunkPosition ChunkPos;
 }
 
 /// <summary>Tags the root entity of a dynamic voxel grid, carrying a reference to its data/body.</summary>

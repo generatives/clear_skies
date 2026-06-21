@@ -110,9 +110,7 @@ public class ChunkVolume
         if (lz == ChunkData.Size - 1) TryMarkBoth(cp.Offset( 0,  0,  1));
     }
 
-    public void SetMesh(ChunkPosition pos, GpuMesh mesh,
-                        int chunkBaseX, int chunkBaseY, int chunkBaseZ,
-                        int volSizeX,   int volSizeY,   int volSizeZ)
+    public void SetMesh(ChunkPosition pos, GpuMesh mesh)
     {
         if (!_chunks.TryGetValue(pos, out var entry)) return;
         entry.Mesh?.Dispose();
@@ -120,10 +118,9 @@ public class ChunkVolume
         entry.NeedsRemesh = false;
         entry.Entity.Set(new MeshRenderer
         {
-            Mesh       = mesh,
-            VolumeGpu  = VolumeGpu,
-            ChunkBaseX = chunkBaseX, ChunkBaseY = chunkBaseY, ChunkBaseZ = chunkBaseZ,
-            VolSizeX   = volSizeX,   VolSizeY   = volSizeY,   VolSizeZ   = volSizeZ,
+            Mesh      = mesh,
+            VolumeGpu = VolumeGpu,
+            ChunkPos  = pos,
         });
     }
 
