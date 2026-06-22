@@ -42,10 +42,10 @@ internal sealed class GpuLightFlood : IDisposable
 
     // ── Ambient sky sweep: one thread per line along the swept axis, loops along it ───────────────
     // Sweep { axis, fromMax, clear, level } selects the direction, whether to overwrite (clear) or max-merge,
-    // and the sky level injected from the sky-facing end. To keep ambient correct as a grid rotates, world-up
-    // (in the volume's local frame) is decomposed into up to three axis sweeps, each weighted by alignment and
-    // max-merged (see GpuLightFlood.SkySweeps); for the static world this is the single +Y top-down sweep.
-    // Region scopes which lines run and which cells are written.
+    // and the sky level injected from the sky-facing end. Ambient is isotropic: GpuLightFlood.SkySweep runs all
+    // six axis-face sweeps at identical strength, max-merged, so a cell open to space along any direction gets
+    // full sky (rotation-invariant; the N·L sun term handles directional shading). Region scopes which lines
+    // run and which cells are written.
     private static readonly string SweepWgsl = @"
 const WPC: i32 = " + WordsPerChunk + @";
 
@@ -307,10 +307,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     /// <see cref="PrepareRegion"/>, then <see cref="Inject"/> once per reaching lamp, then
     /// <see cref="FinishRegion"/> instead — injection must land after the clear/scatter and before the relax.
     /// </summary>
-    public void Flood(VolumeGpuResources vol, IEnumerable<KeyValuePair<ChunkPosition, ChunkEntry>> chunks,
-                      FloodRegion region, Vector3D<float> localUp)
+    public void Flood(VolumeGpuResources vol, IEnumerable<KeyValuePair<ChunkPosition, ChunkEntry>> chunks, FloodRegion region)
     {
-        PrepareRegion(vol, chunks, region, localUp);
+        PrepareRegion(vol, chunks, region);
         FinishRegion(vol, region);
     }
 
@@ -320,8 +319,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     /// this, LightA holds swept sky + local block seeds in the region; cross-volume <see cref="Inject"/> calls
     /// may add to the block channel before <see cref="FinishRegion"/> relaxes.
     /// </summary>
-    public void PrepareRegion(VolumeGpuResources vol, IEnumerable<KeyValuePair<ChunkPosition, ChunkEntry>> chunks,
-                              FloodRegion region, Vector3D<float> localUp)
+    public void PrepareRegion(VolumeGpuResources vol, IEnumerable<KeyValuePair<ChunkPosition, ChunkEntry>> chunks, FloodRegion region)
     {
         int n = GatherEmitters(vol, chunks, region);
         vol.EnsureEmitterCapacity(System.Math.Max(n, 1));
@@ -350,10 +348,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             vol.FloodBindOdd = _pipeline.CreateBindGroupHandle(
                 new (uint, GpuBuffer)[] { (0u, vol.LightB), (1u, vol.LightA), (2u, vol.Opacity), (3u, vol.Dims), (4u, _regionParam) });
 
-        // Ambient sky sweep(s) along world-up (in this volume's frame). The first (strongest) sweep runs in
-        // clear mode, resetting the region (sky overwritten, block zeroed); any others max-merge. This is what
-        // makes grid ambient track world-up under rotation.
-        SkySweeps(vol, region, localUp);
+        // Isotropic ambient sky: sweep from all 6 axis faces at identical strength, max-merged, so a cell open
+        // to space along any direction gets full sky. The first sweep runs in clear mode (resets the region —
+        // sky overwritten, block zeroed); the rest merge. This is orientation-independent (so grids need no
+        // rotation reflood); the N·L sun term supplies all directional shading.
+        SkySweep(vol, region);
 
         // Scatter local emitters into the (now reset) region.
         if (n > 0)
@@ -447,39 +446,30 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         Array.Resize(ref _emitterScratch, cap);
     }
 
-    /// <summary>
-    /// Runs the ambient sky sweep(s) for a volume. World-up expressed in the volume's local frame
-    /// (<paramref name="localUp"/>) is split into its axis components; each axis with a meaningful component
-    /// gets one sweep, entering from the face world-up points toward (<c>fromMax</c>) and injecting a level
-    /// scaled by that component's magnitude. Sweeps are processed strongest-first: the first runs in clear mode
-    /// (resetting the region — sky overwritten, block zeroed), the rest max-merge. For an axis-aligned up
-    /// (the static world, or an unrotated grid) this is exactly one full-strength top-down sweep.
-    /// </summary>
-    private void SkySweeps(VolumeGpuResources vol, FloodRegion region, Vector3D<float> localUp)
+    // The six axis-face sweep directions: (axis, fromMax) for ±X, ±Y, ±Z.
+    private static readonly (uint axis, uint fromMax)[] SixDirections =
     {
-        Span<float> comp  = stackalloc float[3] { localUp.X, localUp.Y, localUp.Z };
-        Span<int>   order = stackalloc int[3] { 0, 1, 2 };
-        // Sort axes by |component| descending (3 elements → trivial selection sort).
-        for (int i = 0; i < 3; i++)
-            for (int j = i + 1; j < 3; j++)
-                if (MathF.Abs(comp[order[j]]) > MathF.Abs(comp[order[i]]))
-                    (order[i], order[j]) = (order[j], order[i]);
+        (0u, 0u), (0u, 1u), (1u, 0u), (1u, 1u), (2u, 0u), (2u, 1u),
+    };
 
-        bool first = true;
-        foreach (int a in order)
+    /// <summary>
+    /// Isotropic ambient sky sweep: runs all six axis-face sweeps at identical full strength, max-merged, so a
+    /// cell open to space along any cardinal direction gets full <see cref="VolumeGpuResources.BaseSkyLevel"/>.
+    /// The first sweep clears (resets the region — sky overwritten, block zeroed); the rest merge. No world-up
+    /// dependence, so it is rotation-invariant; the fragment N·L term provides directional sun shading.
+    /// </summary>
+    private void SkySweep(VolumeGpuResources vol, FloodRegion region)
+    {
+        for (int k = 0; k < SixDirections.Length; k++)
         {
-            float c = comp[a];
-            uint level = (uint)MathF.Round(VolumeGpuResources.BaseSkyLevel * MathF.Abs(c));
-            if (level == 0) continue;                    // negligible alignment with world-up → skip
-
-            uint fromMax = c > 0f ? 1u : 0u;             // sky enters from the +axis face when up points +axis
+            var (axis, fromMax) = SixDirections[k];
             uint gx, gy;
-            if (a == 0)      { gx = CeilDiv((uint)region.Sy, 8u); gy = CeilDiv((uint)region.Sz, 8u); }
-            else if (a == 1) { gx = CeilDiv((uint)region.Sx, 8u); gy = CeilDiv((uint)region.Sz, 8u); }
-            else             { gx = CeilDiv((uint)region.Sx, 8u); gy = CeilDiv((uint)region.Sy, 8u); }
+            if (axis == 0)      { gx = CeilDiv((uint)region.Sy, 8u); gy = CeilDiv((uint)region.Sz, 8u); }
+            else if (axis == 1) { gx = CeilDiv((uint)region.Sx, 8u); gy = CeilDiv((uint)region.Sz, 8u); }
+            else                { gx = CeilDiv((uint)region.Sx, 8u); gy = CeilDiv((uint)region.Sy, 8u); }
 
-            DispatchSweep(vol, (uint)a, fromMax, clear: first ? 1u : 0u, level: level, gx: gx, gy: gy);
-            first = false;
+            DispatchSweep(vol, axis, fromMax, clear: k == 0 ? 1u : 0u,
+                          level: VolumeGpuResources.BaseSkyLevel, gx: gx, gy: gy);
         }
     }
 
