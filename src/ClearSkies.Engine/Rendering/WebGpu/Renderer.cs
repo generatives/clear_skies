@@ -24,6 +24,9 @@ const AMBIENT_SKY: f32 = 10.0 / 15.0; // matches VolumeGpuResources.BaseSkyLevel
 const MIN_AMBIENT: f32 = 0.12;        // floor so no geometry is ever fully black
 const AO_MIN: f32 = 0.45;             // darkest ambient-occluded corner (1 = no AO)
 const WPC: i32 = 1024;                // u32 opacity words per 32³ chunk (VolumeGpuResources.WordsPerChunk)
+const SHADOW_BIAS: f32 = 0.0015;          // depth bias suppressing self-shadow acne
+const SMOOTH_RADIUS: i32 = 2;     // in-plane light/shadow smoothing radius (cells) → (2R+1)^2 taps. Larger = smoother
+                                  // (and softer shadows), but a radius wider than a shadow feature washes it out.
 
 struct Camera { view: mat4x4<f32>, proj: mat4x4<f32>, sunDir: vec4<f32>, lightViewProj: mat4x4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -68,50 +71,6 @@ fn vs_main(
     return o;
 }
 
-// Samples the volume light buffer at the air-side voxel for this fragment.
-fn sampleLight(localPos: vec3<f32>, localNormal: vec3<f32>) -> vec2<f32> {
-    // Step half a voxel along the face normal to land in the adjacent air cell.
-    let localAir = vec3<i32>(floor(localPos + 0.5 * localNormal));
-    let volAir   = model.chunkBase + localAir;
-
-    // Out-of-volume → ambient fallback (covers non-chunk draws and volume edges).
-    if (volAir.x < 0 || volAir.x >= model.volSize.x ||
-        volAir.y < 0 || volAir.y >= model.volSize.y ||
-        volAir.z < 0 || volAir.z >= model.volSize.z) {
-        return vec2<f32>(AMBIENT_SKY, 0.0);
-    }
-    let idx    = u32(volAir.x + model.volSize.x * (volAir.y + model.volSize.y * volAir.z));
-    let packed = light[idx];
-    let sky    = f32(packed & 0xFFu) / 15.0;
-    let blk    = f32((packed >> 8u) & 0xFFu) / 15.0;
-    return vec2<f32>(sky, blk);
-}
-
-// Hard sun-shadow test for the voxel this face belongs to. The air-side voxel CENTER (not the smoothly
-// interpolated fragment position) is projected into light space and depth-tested, so the whole face shares
-// one lit/shadowed result → blocky, voxel-resolution shadows. Returns 1.0 lit, 0.0 shadowed.
-fn sunShadow(localPos: vec3<f32>, localNormal: vec3<f32>) -> f32 {
-    // Centre of the open air cell in front of this face, in world space.
-    let localCenter = floor(localPos + 0.5 * localNormal) + vec3<f32>(0.5);
-    let worldCenter = (model.model * vec4<f32>(localCenter, 1.0)).xyz;
-
-    let clip = camera.lightViewProj * vec4<f32>(worldCenter, 1.0);
-    let ndc  = clip.xyz / clip.w;                       // depth already in [0,1] (ortho ZO)
-    let uv   = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
-
-    // Outside the shadow frustum → assume lit (the map follows the camera; distant geometry is unshadowed).
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ndc.z > 1.0 || ndc.z < 0.0) {
-        return 1.0;
-    }
-
-    let dims  = vec2<f32>(textureDimensions(shadowMap));
-    let texel = vec2<i32>(uv * dims);
-    let nearest = textureLoad(shadowMap, texel, 0);     // closest caster depth from the sun
-    // Small constant bias on top of the pipeline's slope bias and the half-voxel test offset.
-    if (ndc.z > nearest + 0.0015) { return 0.0; }
-    return 1.0;
-}
-
 // Chunk-major opacity test (matches the flood shader): slot = cx + DX*(cy + DY*cz); word = ly + 32*lz; bit = lx.
 fn isSolid(v: vec3<i32>) -> bool {
     if (v.x < 0 || v.x >= model.volSize.x ||
@@ -126,6 +85,93 @@ fn isSolid(v: vec3<i32>) -> bool {
 }
 
 fn occ(v: vec3<i32>) -> f32 { return select(0.0, 1.0, isSolid(v)); }
+
+// Light (sky, block) in 0..1 at a single volume voxel. Out-of-volume → ambient fallback.
+fn lightAt(vol: vec3<i32>) -> vec2<f32> {
+    if (vol.x < 0 || vol.x >= model.volSize.x ||
+        vol.y < 0 || vol.y >= model.volSize.y ||
+        vol.z < 0 || vol.z >= model.volSize.z) {
+        return vec2<f32>(AMBIENT_SKY, 0.0);
+    }
+    let idx    = u32(vol.x + model.volSize.x * (vol.y + model.volSize.y * vol.z));
+    let packed = light[idx];
+    return vec2<f32>(f32(packed & 0xFFu) / 15.0, f32((packed >> 8u) & 0xFFu) / 15.0);
+}
+
+// Per-voxel (blocky) directional-sun visibility: 1.0 if the cell centre is lit, 0.0 if shadowed. lvpModel is the
+// precomputed lightViewProj * model; localCenter is the cell centre in chunk-local space. Sampling the air-cell
+// centre (well off any caster surface) keeps this acne-free and snapped to voxel resolution — the same hard,
+// blocky test as before; the gradient comes from averaging neighbouring cells (below), not from PCF.
+fn sunVisAt(lvpModel: mat4x4<f32>, localCenter: vec3<f32>) -> f32 {
+    let clip = lvpModel * vec4<f32>(localCenter, 1.0);
+    let ndc  = clip.xyz / clip.w;                       // depth already in [0,1] (ortho ZO)
+    let uv   = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    // Outside the shadow frustum → assume lit (the map follows the camera; distant geometry is unshadowed).
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ndc.z > 1.0 || ndc.z < 0.0) {
+        return 1.0;
+    }
+    let dimI    = vec2<i32>(textureDimensions(shadowMap));
+    let texel   = clamp(vec2<i32>(uv * vec2<f32>(dimI)), vec2<i32>(0, 0), dimI - vec2<i32>(1, 1));
+    let nearest = textureLoad(shadowMap, texel, 0);
+    return select(0.0, 1.0, ndc.z <= nearest + SHADOW_BIAS);
+}
+
+// Smoothed surface lighting at the air-side of this fragment: sky + block light (each 0..1) and directional-sun
+// visibility (1 lit … 0 shadowed). Both are a gaussian-weighted average of the in-plane neighbourhood of air
+// cells, centred on the fragment's CONTINUOUS position in the face plane — so the result is a smooth function of
+// position (no per-cell banding) that ramps over several voxels (no sudden jumps as light/shadow boundaries move).
+// Opaque cells are dropped so neither bleeds through walls. The sun is still a blocky per-voxel test (sunVisAt);
+// the gaussian only widens the transition between lit and shadowed voxels. wantSun lets faces turned from the sun
+// skip the (costly) shadow taps. Light and sun get independent gaussian widths (LIGHT_SIGMA / SUN_SIGMA).
+// Separable smoothing window: 1 at the centre, falling to 0 — with ZERO SLOPE — at the kernel edge (|d| = R+0.5).
+// C1 everywhere, so (a) the reconstructed light is slope-continuous → no Mach banding (bright/dark lines) at cell
+// edges, and (b) a cell entering/leaving the finite window contributes ~0, so nothing pops as the sample point or
+// a moving shadow crosses a cell boundary. A truncated gaussian fails (b) — its edge weight is non-zero — which is
+// what made shadows pulse/'open and close' as objects moved.
+fn smoothW(d: f32) -> f32 {
+    let a = clamp(abs(d) / (f32(SMOOTH_RADIUS) + 0.5), 0.0, 1.0);
+    return 1.0 - a * a * (3.0 - 2.0 * a);
+}
+
+struct Lit { sky: f32, blk: f32, sun: f32 };
+fn sampleLit(localPos: vec3<f32>, localNormal: vec3<f32>, wantSun: bool) -> Lit {
+    let localAir = vec3<i32>(floor(localPos + 0.5 * localNormal));
+    let air = model.chunkBase + localAir;
+    let n   = abs(localNormal);
+    var T: vec3<i32>; var B: vec3<i32>;
+    if (n.x > 0.5)      { T = vec3<i32>(0, 1, 0); B = vec3<i32>(0, 0, 1); }
+    else if (n.y > 0.5) { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 0, 1); }
+    else                { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 1, 0); }
+
+    let lvpModel = camera.lightViewProj * model.model;
+    // Fragment offset from the centre cell's centre, along each in-plane axis (in cells, range [-0.5, 0.5)).
+    let du = fract(dot(localPos, vec3<f32>(T))) - 0.5;
+    let dv = fract(dot(localPos, vec3<f32>(B))) - 0.5;
+
+    var accL = vec2<f32>(0.0, 0.0); var sumL = 0.0;
+    var accS = 0.0;
+    for (var i = -SMOOTH_RADIUS; i <= SMOOTH_RADIUS; i = i + 1) {
+        for (var j = -SMOOTH_RADIUS; j <= SMOOTH_RADIUS; j = j + 1) {
+            let cell = air + i * T + j * B;
+            if (isSolid(cell)) { continue; }            // opaque → no light/shadow contribution
+            let w = smoothW(du - f32(i)) * smoothW(dv - f32(j));
+            if (w <= 0.0) { continue; }
+
+            accL += w * lightAt(cell);
+            sumL += w;
+            if (wantSun) {
+                accS += w * sunVisAt(lvpModel, vec3<f32>(localAir + i * T + j * B) + vec3<f32>(0.5));
+            }
+        }
+    }
+
+    let lv = accL / max(sumL, 1e-4);              // same weight set drives light + sun, so sumL normalises both
+    var o: Lit;
+    o.sky = lv.x;
+    o.blk = lv.y;
+    o.sun = select(1.0, accS / max(sumL, 1e-4), wantSun);
+    return o;
+}
 
 // Standard voxel corner AO: a corner flanked by two solids is fully dark; otherwise it dims by how many of the
 // two sides + diagonal are solid.
@@ -159,22 +205,22 @@ fn computeAO(localPos: vec3<f32>, localNormal: vec3<f32>) -> f32 {
 
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
-    let l      = sampleLight(in.localPos, in.localNormal);
     let worldN = normalize(in.worldNormal);
+    let ndotl  = max(dot(worldN, -(camera.sunDir.xyz)), 0.0);
+    let s      = sampleLit(in.localPos, in.localNormal, ndotl > 0.0);
 
     // Soft ambient fill (sky flood from all six faces, max BASE_SKY/15).
-    let ambient = l.x;
+    let ambient = s.sky;
 
     // Direct sun at full brightness (1.0 == light level 15): Lambertian on the surface normal, gated by the
-    // world-space shadow map at voxel resolution. Faces deep in shadow get no sun.
-    let ndotl     = max(dot(worldN, -(camera.sunDir.xyz)), 0.0);
-    let directSun = ndotl * sunShadow(in.localPos, in.localNormal);
+    // smoothed (blocky-but-gradient) voxel sun visibility. Faces turned from the sun get no sun.
+    let directSun = ndotl * s.sun;
 
-    // Sky contribution = the brighter of soft ambient and sharp direct sun.
+    // Sky contribution = the brighter of soft ambient and direct sun.
     let skyTerm = max(ambient, directSun);
 
     // Final = brightest of sky, block light, and the minimum ambient floor (geometry never fully dark).
-    let lit = max(max(skyTerm, l.y), MIN_AMBIENT);
+    let lit = max(max(skyTerm, s.blk), MIN_AMBIENT);
 
     // Ambient occlusion darkens inner corners / block junctions; lerp from AO_MIN so corners aren't pure black.
     let aoFactor = mix(AO_MIN, 1.0, computeAO(in.localPos, in.localNormal));

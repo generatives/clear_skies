@@ -108,7 +108,20 @@ public sealed class RenderSystem : ISystem
         var up  = MathF.Abs(sunDir.Y) > 0.99f ? new Vector3D<float>(0, 0, 1) : new Vector3D<float>(0, 1, 0);
         var view = Mat4.LookAtRh(eye, cameraPos, up);
         var proj = Mat4.OrthoRhZo(-radius, radius, -radius, radius, 0.1f, 2f * radius);
-        return Mat4.Multiply(proj, view);
+        var lvp  = Mat4.Multiply(proj, view);
+
+        // Texel-snap the light frustum: the eye tracks the camera, so without snapping the projected world
+        // slides sub-texel every frame and shadow edges shimmer/crawl even on a static scene. Project the world
+        // origin into light clip space, quantise its XY to whole shadow-map texels, and fold the correction back
+        // into the clip-space translation so the world→texel mapping only ever moves in whole-texel steps.
+        const float mapSize = SunShadowPass.MapSize;
+        float ox = lvp.M12, oy = lvp.M13;            // origin (0,0,0) → clip-space xy (ortho, w = 1)
+        float halfTexels = mapSize * 0.5f;           // clip [-1,1] spans mapSize texels
+        float dx = (MathF.Round(ox * halfTexels) - ox * halfTexels) / halfTexels;
+        float dy = (MathF.Round(oy * halfTexels) - oy * halfTexels) / halfTexels;
+        lvp.M12 += dx;
+        lvp.M13 += dy;
+        return lvp;
     }
 
     private bool TryGetActiveCamera(out Transform transform, out Camera camera)
