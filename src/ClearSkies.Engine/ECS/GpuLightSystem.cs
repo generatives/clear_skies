@@ -39,8 +39,10 @@ public sealed class GpuLightSystem : ISystem, IDisposable
     private readonly EntitySet      _grids;
     private readonly EntitySet      _meshes;
     private readonly PhysicsWorld   _physics;
+    private readonly Renderer       _renderer;
     private readonly GpuLightFlood  _flood;
     private readonly LightShadowPass _lightShadow;
+    private readonly GpuSunVisPass  _sunVis;
 
     private float _relightTimer;
 
@@ -52,18 +54,24 @@ public sealed class GpuLightSystem : ISystem, IDisposable
 
     private readonly record struct WorldLamp(ChunkVolume Source, Vector3D<float> World, int Level);
 
-    public GpuLightSystem(World world, ChunkVolume staticWorld, GpuContext ctx, PhysicsWorld physics)
+    public GpuLightSystem(World world, ChunkVolume staticWorld, GpuContext ctx, PhysicsWorld physics, Renderer renderer)
     {
         _staticWorld = staticWorld;
         _physics     = physics;
+        _renderer    = renderer;
         _grids       = world.GetEntities().With<DynamicGridComponent>().AsSet();
         _meshes      = world.GetEntities().With<Transform>().With<MeshRenderer>().AsSet();
         _flood       = new GpuLightFlood(ctx);
         _lightShadow = new LightShadowPass(ctx);
+        _sunVis      = new GpuSunVisPass(ctx);
     }
 
     public void Update(float dt)
     {
+        // Per-voxel sun visibility: recompute every frame from the (previous frame's) sun shadow map, for every
+        // volume. Independent of the flood — separate buffer, separate cadence.
+        UpdateSunVisibility();
+
         // Cross-volume relight on the fixed cadence (moving lamps + cross-grid light).
         _relightTimer += dt;
         if (_relightTimer >= RelightPeriod)
@@ -76,6 +84,38 @@ public sealed class GpuLightSystem : ISystem, IDisposable
         if (FloodVolume(_staticWorld)) return;
         foreach (ref readonly Entity e in _grids.GetEntities())
             if (FloodVolume(e.Get<DynamicGridComponent>().Grid)) return;
+    }
+
+    // ── Per-voxel sun visibility ──────────────────────────────────────────────
+
+    /// <summary>
+    /// Recomputes per-voxel directional-sun visibility for every volume against the world-space sun shadow map.
+    /// Runs in PreRender, so it reads the <i>previous</i> frame's shadow map + light matrix (the renderer renders
+    /// the new one later this frame in the Render stage). They're a matched pair (both from last frame), and with
+    /// texel-snapping the static-world shadow is stable between frames, so the one-frame lag is invisible. The
+    /// fragment shader then samples <c>SunVis</c> instead of doing per-pixel PCF.
+    /// </summary>
+    private void UpdateSunVisibility()
+    {
+        nint shadowView = _renderer.ShadowDepthView;
+        if (shadowView == 0) return;
+        var lvp = _renderer.LastLightViewProj;
+
+        SunVisVolume(_staticWorld, lvp, shadowView);
+        foreach (ref readonly Entity e in _grids.GetEntities())
+            SunVisVolume(e.Get<DynamicGridComponent>().Grid, lvp, shadowView);
+    }
+
+    private void SunVisVolume(ChunkVolume vol, in Mat4 lvp, nint shadowView)
+    {
+        var gpu = vol.VolumeGpu;
+        if (gpu == null || gpu.RenderBindGroup == 0) return; // not yet resident (SunVis allocated with the rest)
+        if (!TryPose(vol, out var p, out var r, out var c)) return;
+
+        var voxelToWorld = VoxelToWorld(gpu, p, r, c);
+        // Whole volume each frame; non-surface/out-of-frustum voxels early-out cheaply in the shader.
+        var region = new FloodRegion(0, 0, 0, gpu.VW, gpu.VH, gpu.VD);
+        _sunVis.Compute(gpu, shadowView, lvp, voxelToWorld, region);
     }
 
     // ── Cross-volume relight ──────────────────────────────────────────────────
@@ -299,5 +339,6 @@ public sealed class GpuLightSystem : ISystem, IDisposable
     {
         _flood.Dispose();
         _lightShadow.Dispose();
+        _sunVis.Dispose();
     }
 }

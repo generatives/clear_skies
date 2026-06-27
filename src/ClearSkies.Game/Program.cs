@@ -33,7 +33,7 @@ host.AddSystem(new LambdaSystem(() =>
     }
 }), SystemStage.Logic);
 host.AddSystem(new GpuResidencySystem(host.World, staticWorld, host.Context, host.Renderer), SystemStage.PreRender);
-host.AddSystem(new GpuLightSystem(host.World, staticWorld, host.Context, host.Physics), SystemStage.PreRender);
+host.AddSystem(new GpuLightSystem(host.World, staticWorld, host.Context, host.Physics, host.Renderer), SystemStage.PreRender);
 host.AddSystem(meshSystem, SystemStage.PreRender);
 host.AddSystem(new RenderSystem(host.World, host.Renderer), SystemStage.Render);
 

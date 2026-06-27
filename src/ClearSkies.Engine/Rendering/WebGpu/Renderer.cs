@@ -20,13 +20,15 @@ public sealed unsafe class Renderer : IDisposable
     // Ambient fallback (sky=6/15) for fragments whose air-side voxel is outside the volume buffer
     // (e.g. non-chunk draws, or volume not yet initialised).
     private const string Wgsl = @"
-const AMBIENT_SKY: f32 = 10.0 / 15.0; // matches VolumeGpuResources.BaseSkyLevel
+const AMBIENT_SKY: f32 = 3.0 / 15.0;  // matches VolumeGpuResources.BaseSkyLevel (out-of-volume fallback)
+const SUN_STRENGTH: f32 = 3.0 / 15.0; // direct-sun cap (level 3) — kept low so lamp/block light dominates
 const MIN_AMBIENT: f32 = 0.12;        // floor so no geometry is ever fully black
 const AO_MIN: f32 = 0.45;             // darkest ambient-occluded corner (1 = no AO)
 const WPC: i32 = 1024;                // u32 opacity words per 32³ chunk (VolumeGpuResources.WordsPerChunk)
-const SHADOW_BIAS: f32 = 0.0015;          // depth bias suppressing self-shadow acne
 const SMOOTH_RADIUS: i32 = 2;     // in-plane light/shadow smoothing radius (cells) → (2R+1)^2 taps. Larger = smoother
                                   // (and softer shadows), but a radius wider than a shadow feature washes it out.
+                                  // Sun visibility is sampled from the precomputed per-voxel `sunvis` buffer; the
+                                  // shadow-map PCF now lives in GpuSunVisPass (PCF radius + bias are set there).
 
 struct Camera { view: mat4x4<f32>, proj: mat4x4<f32>, sunDir: vec4<f32>, lightViewProj: mat4x4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -45,7 +47,12 @@ struct Model { model: mat4x4<f32>, chunkBase: vec3<i32>, _p0: i32, volSize: vec3
 // ambient occlusion of the air-side cell's neighbourhood.
 @group(2) @binding(1) var<storage, read> opacity: array<u32>;
 
-// Directional-sun shadow map, rendered depth-only from the sun's POV (see SunShadowPass).
+// Per-voxel directional-sun visibility (0-255, 255 = fully lit), precomputed each frame by GpuSunVisPass from
+// the world-space sun shadow map. Volume-linear like `light`. Sampling this replaces the old per-fragment PCF.
+@group(2) @binding(2) var<storage, read> sunvis: array<u32>;
+
+// Directional-sun shadow map, rendered depth-only from the sun's POV (see SunShadowPass). Still bound for the
+// depth pass; the main fragment now reads precomputed `sunvis` instead of sampling this directly.
 @group(3) @binding(0) var shadowMap: texture_depth_2d;
 
 struct VSOut {
@@ -98,31 +105,27 @@ fn lightAt(vol: vec3<i32>) -> vec2<f32> {
     return vec2<f32>(f32(packed & 0xFFu) / 15.0, f32((packed >> 8u) & 0xFFu) / 15.0);
 }
 
-// Per-voxel (blocky) directional-sun visibility: 1.0 if the cell centre is lit, 0.0 if shadowed. lvpModel is the
-// precomputed lightViewProj * model; localCenter is the cell centre in chunk-local space. Sampling the air-cell
-// centre (well off any caster surface) keeps this acne-free and snapped to voxel resolution — the same hard,
-// blocky test as before; the gradient comes from averaging neighbouring cells (below), not from PCF.
-fn sunVisAt(lvpModel: mat4x4<f32>, localCenter: vec3<f32>) -> f32 {
-    let clip = lvpModel * vec4<f32>(localCenter, 1.0);
-    let ndc  = clip.xyz / clip.w;                       // depth already in [0,1] (ortho ZO)
-    let uv   = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
-    // Outside the shadow frustum → assume lit (the map follows the camera; distant geometry is unshadowed).
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ndc.z > 1.0 || ndc.z < 0.0) {
+// Directional-sun visibility (1 lit … 0 shadowed) at a volume voxel, read from the per-voxel `sunvis` buffer
+// that GpuSunVisPass precomputed from the shadow map this frame. Out-of-volume → lit. Replaces the old
+// per-fragment PCF: the PCF now happens once per surface voxel in the compute pass, and the fragment just reads
+// (and blends neighbours, in sampleLit) the stored value — cheap, and a continuous edge that doesn't breathe.
+fn sunVisAt(vol: vec3<i32>) -> f32 {
+    if (vol.x < 0 || vol.x >= model.volSize.x ||
+        vol.y < 0 || vol.y >= model.volSize.y ||
+        vol.z < 0 || vol.z >= model.volSize.z) {
         return 1.0;
     }
-    let dimI    = vec2<i32>(textureDimensions(shadowMap));
-    let texel   = clamp(vec2<i32>(uv * vec2<f32>(dimI)), vec2<i32>(0, 0), dimI - vec2<i32>(1, 1));
-    let nearest = textureLoad(shadowMap, texel, 0);
-    return select(0.0, 1.0, ndc.z <= nearest + SHADOW_BIAS);
+    let idx = u32(vol.x + model.volSize.x * (vol.y + model.volSize.y * vol.z));
+    return f32(sunvis[idx]) / 255.0;
 }
 
 // Smoothed surface lighting at the air-side of this fragment: sky + block light (each 0..1) and directional-sun
 // visibility (1 lit … 0 shadowed). Both are a gaussian-weighted average of the in-plane neighbourhood of air
 // cells, centred on the fragment's CONTINUOUS position in the face plane — so the result is a smooth function of
 // position (no per-cell banding) that ramps over several voxels (no sudden jumps as light/shadow boundaries move).
-// Opaque cells are dropped so neither bleeds through walls. The sun is still a blocky per-voxel test (sunVisAt);
-// the gaussian only widens the transition between lit and shadowed voxels. wantSun lets faces turned from the sun
-// skip the (costly) shadow taps. Light and sun get independent gaussian widths (LIGHT_SIGMA / SUN_SIGMA).
+// Opaque cells are dropped so neither bleeds through walls. The sun reads precomputed per-voxel visibility
+// (sunVisAt → the `sunvis` buffer); the gaussian blends neighbouring cells so the lit/shadow transition is a
+// smooth, continuous function of position. wantSun lets faces turned from the sun skip the sun samples.
 // Separable smoothing window: 1 at the centre, falling to 0 — with ZERO SLOPE — at the kernel edge (|d| = R+0.5).
 // C1 everywhere, so (a) the reconstructed light is slope-continuous → no Mach banding (bright/dark lines) at cell
 // edges, and (b) a cell entering/leaving the finite window contributes ~0, so nothing pops as the sample point or
@@ -143,7 +146,6 @@ fn sampleLit(localPos: vec3<f32>, localNormal: vec3<f32>, wantSun: bool) -> Lit 
     else if (n.y > 0.5) { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 0, 1); }
     else                { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 1, 0); }
 
-    let lvpModel = camera.lightViewProj * model.model;
     // Fragment offset from the centre cell's centre, along each in-plane axis (in cells, range [-0.5, 0.5)).
     let du = fract(dot(localPos, vec3<f32>(T))) - 0.5;
     let dv = fract(dot(localPos, vec3<f32>(B))) - 0.5;
@@ -160,7 +162,7 @@ fn sampleLit(localPos: vec3<f32>, localNormal: vec3<f32>, wantSun: bool) -> Lit 
             accL += w * lightAt(cell);
             sumL += w;
             if (wantSun) {
-                accS += w * sunVisAt(lvpModel, vec3<f32>(localAir + i * T + j * B) + vec3<f32>(0.5));
+                accS += w * sunVisAt(cell);
             }
         }
     }
@@ -212,9 +214,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // Soft ambient fill (sky flood from all six faces, max BASE_SKY/15).
     let ambient = s.sky;
 
-    // Direct sun at full brightness (1.0 == light level 15): Lambertian on the surface normal, gated by the
-    // smoothed (blocky-but-gradient) voxel sun visibility. Faces turned from the sun get no sun.
-    let directSun = ndotl * s.sun;
+    // Direct sun capped at SUN_STRENGTH (level 3): Lambertian on the surface normal, gated by the smoothed
+    // voxel sun visibility. Kept dim (with the sky fill) so the lamp/block-light system dominates the scene.
+    let directSun = ndotl * s.sun * SUN_STRENGTH;
 
     // Sky contribution = the brighter of soft ambient and direct sun.
     let skyTerm = max(ambient, directSun);
@@ -251,6 +253,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     private readonly GpuBuffer _modelBuffer;
     private GpuBuffer _fullBrightLight = null!;  // Phase 4.1: shared sky=15 buffer for all draws
     private GpuBuffer _fullAirOpacity = null!;   // all-air opacity for the fallback (non-chunk) light bind group
+    private GpuBuffer _fullLitSunVis = null!;    // all-lit (255) sun visibility for the fallback light bind group
     private BindGroup* _cameraBindGroup;
     private BindGroup* _hudCameraBindGroup;
     private BindGroup* _modelBindGroup;
@@ -321,8 +324,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         var modelDesc = new BindGroupLayoutDescriptor { EntryCount = 1, Entries = &modelEntry };
         _modelLayout = _api.DeviceCreateBindGroupLayout(_ctx.Device, &modelDesc);
 
-        // Group 2: per-volume light (binding 0) + opacity (binding 1), both read-only storage in the fragment.
-        BindGroupLayoutEntry* lightEntries = stackalloc BindGroupLayoutEntry[2];
+        // Group 2: per-volume light (binding 0) + opacity (binding 1) + sun visibility (binding 2), all
+        // read-only storage in the fragment.
+        BindGroupLayoutEntry* lightEntries = stackalloc BindGroupLayoutEntry[3];
         lightEntries[0] = new BindGroupLayoutEntry
         {
             Binding = 0,
@@ -335,7 +339,13 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             Visibility = ShaderStage.Fragment,
             Buffer = new BufferBindingLayout { Type = BufferBindingType.ReadOnlyStorage, HasDynamicOffset = false, MinBindingSize = 0 },
         };
-        var lightDesc = new BindGroupLayoutDescriptor { EntryCount = 2, Entries = lightEntries };
+        lightEntries[2] = new BindGroupLayoutEntry
+        {
+            Binding = 2,
+            Visibility = ShaderStage.Fragment,
+            Buffer = new BufferBindingLayout { Type = BufferBindingType.ReadOnlyStorage, HasDynamicOffset = false, MinBindingSize = 0 },
+        };
+        var lightDesc = new BindGroupLayoutDescriptor { EntryCount = 3, Entries = lightEntries };
         _lightLayout = _api.DeviceCreateBindGroupLayout(_ctx.Device, &lightDesc);
 
         // Group 3: the sun shadow map, sampled via textureLoad (no sampler needed → hard, voxel-res shadows).
@@ -431,10 +441,17 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         _fullAirOpacity = GpuBuffer.CreateStorage(_ctx, (ulong)(opWords * sizeof(uint)));
         _fullAirOpacity.Write<uint>(0, new uint[opWords]);
 
-        BindGroupEntry* lightEntries = stackalloc BindGroupEntry[2];
+        // All-lit sun visibility (255) for the fallback (non-chunk) draws — no sun shadowing.
+        _fullLitSunVis = GpuBuffer.CreateStorage(_ctx, (ulong)(voxels * sizeof(uint)));
+        var litVis = new uint[voxels];
+        Array.Fill(litVis, 255u);
+        _fullLitSunVis.Write<uint>(0, litVis);
+
+        BindGroupEntry* lightEntries = stackalloc BindGroupEntry[3];
         lightEntries[0] = new BindGroupEntry { Binding = 0, Buffer = _fullBrightLight.Handle, Offset = 0, Size = _fullBrightLight.SizeBytes };
         lightEntries[1] = new BindGroupEntry { Binding = 1, Buffer = _fullAirOpacity.Handle, Offset = 0, Size = _fullAirOpacity.SizeBytes };
-        var lightDesc  = new BindGroupDescriptor { Layout = _lightLayout, EntryCount = 2, Entries = lightEntries };
+        lightEntries[2] = new BindGroupEntry { Binding = 2, Buffer = _fullLitSunVis.Handle, Offset = 0, Size = _fullLitSunVis.SizeBytes };
+        var lightDesc  = new BindGroupDescriptor { Layout = _lightLayout, EntryCount = 3, Entries = lightEntries };
         _lightBindGroup = _api.DeviceCreateBindGroup(_ctx.Device, &lightDesc);
 
         // Group 3: the shadow map depth view (same texture the shadow pass renders into).
@@ -612,17 +629,28 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         Span<CameraUniform> s = stackalloc CameraUniform[1];
         s[0] = camera;
         _cameraBuffer.Write<CameraUniform>(0, s);
+        LastLightViewProj = camera.LightViewProj;
     }
 
-    /// <summary>Creates a group-2 bind group over a volume's <paramref name="lightBuffer"/> (binding 0) and
-    /// <paramref name="opacityBuffer"/> (binding 1, for in-shader AO); returns an opaque handle. The caller
-    /// owns its lifetime (release via the buffer's owner).</summary>
-    public nint CreateLightBindGroup(GpuBuffer lightBuffer, GpuBuffer opacityBuffer)
+    /// <summary>The sun light-space view-projection from the most recent <see cref="SetCameraUniform"/> — the
+    /// matrix the current shadow map was rendered with. The sun-vis compute pass projects voxels through this.</summary>
+    public Mat4 LastLightViewProj { get; private set; }
+
+    /// <summary>Opaque handle to the sun shadow-map depth view (a <c>texture_depth_2d</c>), bound by the
+    /// sun-vis compute pass. Constant for the renderer's lifetime.</summary>
+    internal nint ShadowDepthView => (nint)_shadow.DepthView;
+
+    /// <summary>Creates a group-2 bind group over a volume's <paramref name="lightBuffer"/> (binding 0),
+    /// <paramref name="opacityBuffer"/> (binding 1, for in-shader AO) and <paramref name="sunVisBuffer"/>
+    /// (binding 2, per-voxel sun visibility); returns an opaque handle. The caller owns its lifetime
+    /// (release via the buffer's owner).</summary>
+    public nint CreateLightBindGroup(GpuBuffer lightBuffer, GpuBuffer opacityBuffer, GpuBuffer sunVisBuffer)
     {
-        BindGroupEntry* entries = stackalloc BindGroupEntry[2];
+        BindGroupEntry* entries = stackalloc BindGroupEntry[3];
         entries[0] = new BindGroupEntry { Binding = 0, Buffer = lightBuffer.Handle,   Offset = 0, Size = lightBuffer.SizeBytes };
         entries[1] = new BindGroupEntry { Binding = 1, Buffer = opacityBuffer.Handle, Offset = 0, Size = opacityBuffer.SizeBytes };
-        var desc = new BindGroupDescriptor { Layout = _lightLayout, EntryCount = 2, Entries = entries };
+        entries[2] = new BindGroupEntry { Binding = 2, Buffer = sunVisBuffer.Handle,  Offset = 0, Size = sunVisBuffer.SizeBytes };
+        var desc = new BindGroupDescriptor { Layout = _lightLayout, EntryCount = 3, Entries = entries };
         return (nint)_api.DeviceCreateBindGroup(_ctx.Device, &desc);
     }
 
@@ -705,6 +733,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         _modelBuffer.Dispose();
         _fullBrightLight.Dispose();
         _fullAirOpacity.Dispose();
+        _fullLitSunVis.Dispose();
         _shadow.Dispose();
         if (_hudPipeline        != null) _api.RenderPipelineRelease(_hudPipeline);
         if (_wireframePipeline  != null) _api.RenderPipelineRelease(_wireframePipeline);

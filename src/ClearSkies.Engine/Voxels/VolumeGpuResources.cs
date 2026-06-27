@@ -30,7 +30,7 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
     /// attenuation along each sweep direction; relaxation then loses 1 per step into occluded pockets. This
     /// is soft fill light only — direct sun is a separate world-space shadow term in the renderer. Baked
     /// into the flood shaders and used as the pre-first-flood ambient fill.</summary>
-    public const byte BaseSkyLevel = 10;
+    public const byte BaseSkyLevel = 3;
 
     public const uint AmbientSky = BaseSkyLevel; // fill before first real flood
 
@@ -51,6 +51,11 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
     public GpuBuffer LightA  { get; private set; } = null!;
     public GpuBuffer LightB  { get; private set; } = null!;
     public GpuBuffer Dims    { get; private set; } = null!; // [VW, VH, VD, 0]
+
+    /// <summary>Per-voxel directional-sun visibility (0-255, 255 = fully lit), volume-linear like LightA.
+    /// Recomputed each frame by <c>GpuSunVisPass</c> from the world-space sun shadow map; sampled by the
+    /// fragment shader (group 2, binding 2) instead of doing per-pixel PCF. Prefilled 255 (lit) on allocate.</summary>
+    public GpuBuffer SunVis  { get; private set; } = null!;
 
     /// <summary>Per-volume sparse emitter list buffer: pairs of (volume-voxel-index, level) as u32, packed.
     /// Sized to the largest emitter count seen; grown lazily. 0-length until first emitter cycle.</summary>
@@ -75,6 +80,11 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
     /// only needs recreating when LightA is reallocated.</summary>
     public nint InjectBind { get; set; }
 
+    /// <summary>Sun-visibility compute bind group (SunVis + Opacity + sun shadow map + params). 0 = not created /
+    /// stale after resize. The shadow-map view is constant (one shared <c>SunShadowPass</c>), so this only needs
+    /// recreating when the volume buffers are reallocated.</summary>
+    public nint SunVisBind { get; set; }
+
     private VolumeGpuResources(GpuContext ctx) => _ctx = ctx;
 
     /// <summary>Allocates a new volume covering [min, max] (chunk coordinates, inclusive).</summary>
@@ -98,7 +108,7 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
     private void Allocate(ChunkPosition min, ChunkPosition max)
     {
         ReleaseBindGroups();
-        Opacity?.Dispose(); LightA?.Dispose(); LightB?.Dispose(); Dims?.Dispose();
+        Opacity?.Dispose(); LightA?.Dispose(); LightB?.Dispose(); Dims?.Dispose(); SunVis?.Dispose();
 
         Min = min;
         DX  = max.X - min.X + 1;
@@ -111,6 +121,7 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
         Opacity = GpuBuffer.CreateStorage(_ctx, (ulong)(opWords * sizeof(uint)));
         LightA  = GpuBuffer.CreateStorage(_ctx, (ulong)(total  * sizeof(uint)));
         LightB  = GpuBuffer.CreateStorage(_ctx, (ulong)(total  * sizeof(uint)));
+        SunVis  = GpuBuffer.CreateStorage(_ctx, (ulong)(total  * sizeof(uint)));
         Dims    = GpuBuffer.CreateStorage(_ctx, 4 * sizeof(uint));
 
         // Fresh opacity buffer is all-air (0); GpuResidencySystem re-uploads every chunk's slice (it marks
@@ -125,6 +136,10 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
         var fill = new uint[total];
         Array.Fill(fill, AmbientSky);
         LightA.Write<uint>(0, fill);
+
+        // Pre-fill SunVis fully lit (255) so geometry is sunlit before the first sun-vis pass runs.
+        Array.Fill(fill, 255u);
+        SunVis.Write<uint>(0, fill);
     }
 
     // ── Bounds helpers ────────────────────────────────────────────────────────
@@ -202,6 +217,7 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
         if (FloodBindOdd  != 0) { _ctx.Api.BindGroupRelease((BindGroup*)FloodBindOdd);  FloodBindOdd  = 0; }
         if (RenderBindGroup != 0) { _ctx.Api.BindGroupRelease((BindGroup*)RenderBindGroup); RenderBindGroup = 0; }
         if (InjectBind    != 0) { _ctx.Api.BindGroupRelease((BindGroup*)InjectBind);    InjectBind    = 0; }
+        if (SunVisBind    != 0) { _ctx.Api.BindGroupRelease((BindGroup*)SunVisBind);    SunVisBind    = 0; }
     }
 
     public void Dispose()
@@ -210,6 +226,7 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
         Opacity?.Dispose();
         LightA?.Dispose();
         LightB?.Dispose();
+        SunVis?.Dispose();
         Dims?.Dispose();
         Emitters?.Dispose();
     }
