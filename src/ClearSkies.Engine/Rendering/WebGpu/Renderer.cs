@@ -21,8 +21,9 @@ public sealed unsafe class Renderer : IDisposable
     // (e.g. non-chunk draws, or volume not yet initialised).
     private const string Wgsl = @"
 const AMBIENT_SKY: f32 = 3.0 / 15.0;  // matches VolumeGpuResources.BaseSkyLevel (out-of-volume fallback)
-const SUN_STRENGTH: f32 = 3.0 / 15.0; // direct-sun cap (level 3) — kept low so lamp/block light dominates
-const MIN_AMBIENT: f32 = 0.12;        // floor so no geometry is ever fully black
+const SUN_STRENGTH: f32 = 1.0;        // direct sun at full brightness (level 15); paired with the dim sky fill
+                                      // + low MIN_AMBIENT so shadows stay dark for the lamp/block system to fill
+const MIN_AMBIENT: f32 = 0.05;        // floor so no geometry is ever fully black
 const AO_MIN: f32 = 0.45;             // darkest ambient-occluded corner (1 = no AO)
 const WPC: i32 = 1024;                // u32 opacity words per 32³ chunk (VolumeGpuResources.WordsPerChunk)
 const SMOOTH_RADIUS: i32 = 2;     // in-plane light/shadow smoothing radius (cells) → (2R+1)^2 taps. Larger = smoother
@@ -200,8 +201,12 @@ fn computeAO(localPos: vec3<f32>, localNormal: vec3<f32>) -> f32 {
     let ao01 = vAO(tm, bp, occ(air - T + B));
     let ao11 = vAO(tp, bp, occ(air + T + B));
 
-    let s = fract(dot(localPos, vec3<f32>(T)));
-    let t = fract(dot(localPos, vec3<f32>(B)));
+    // Smoothstep the bilinear weights so the reconstructed AO is slope-continuous (C1) across cell boundaries:
+    // each cell's patch meets its neighbour with zero slope. Plain fract bilinear is only C0, so the slope jumps
+    // where the AO ramp meets the un-occluded plateau — the eye reads that slope discontinuity as a 'bright line'
+    // at the far edge of the AO. Same zero-slope trick the light smoothing (smoothW) uses to avoid Mach banding.
+    let s = smoothstep(0.0, 1.0, fract(dot(localPos, vec3<f32>(T))));
+    let t = smoothstep(0.0, 1.0, fract(dot(localPos, vec3<f32>(B))));
     return mix(mix(ao00, ao10, s), mix(ao01, ao11, s), t);
 }
 

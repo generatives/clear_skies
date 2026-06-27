@@ -30,6 +30,7 @@ internal sealed class GpuSunVisPass : IDisposable
 
     private static readonly string Wgsl = @"
 const WPC: i32 = " + WordsPerChunk + @";
+const SURFACE_OFFSET: f32 = 0.4;   // how far (voxels) to nudge the sample toward adjacent solid faces (< 0.5)
 
 struct Params {
     lightViewProj: mat4x4<f32>,
@@ -68,13 +69,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Only air cells touching a solid (the lit surface shell) need a real shadow test; everything else
     // (interior solids, open air) defaults to fully lit. This keeps the per-frame cost on the surface only.
     if (isOpaque(x, y, z)) { sunvis[i] = 255u; return; }
-    let surface = isOpaque(x + 1, y, z) || isOpaque(x - 1, y, z) ||
-                  isOpaque(x, y + 1, z) || isOpaque(x, y - 1, z) ||
-                  isOpaque(x, y, z + 1) || isOpaque(x, y, z - 1);
-    if (!surface) { sunvis[i] = 255u; return; }
+    let sxn = isOpaque(x - 1, y, z); let sxp = isOpaque(x + 1, y, z);
+    let syn = isOpaque(x, y - 1, z); let syp = isOpaque(x, y + 1, z);
+    let szn = isOpaque(x, y, z - 1); let szp = isOpaque(x, y, z + 1);
+    if (!(sxn || sxp || syn || syp || szn || szp)) { sunvis[i] = 255u; return; }
 
-    // Cell centre → world → light clip space.
-    let vc    = vec3<f32>(f32(x) + 0.5, f32(y) + 0.5, f32(z) + 0.5);
+    // Sample point: voxel centre nudged TOWARD each adjacent solid face. Testing the bare voxel centre (½ a
+    // voxel off the surface) lifts a concave-corner sample out of the wall's contact shadow, so the shadow gets
+    // 'sucked in' / pulled tight to walls at elevation changes. Nudging toward the solid faces drops the sample
+    // to just above a floor (and into the concave corner beside a wall), where the contact shadow actually is,
+    // so shadows reach the wall. The nudge stays < ½ so the point never leaves the air voxel (still acne-safe).
+    var nudge = vec3<f32>(0.0, 0.0, 0.0);
+    if (sxn) { nudge.x = nudge.x - 1.0; }  if (sxp) { nudge.x = nudge.x + 1.0; }
+    if (syn) { nudge.y = nudge.y - 1.0; }  if (syp) { nudge.y = nudge.y + 1.0; }
+    if (szn) { nudge.z = nudge.z - 1.0; }  if (szp) { nudge.z = nudge.z + 1.0; }
+    let vc = vec3<f32>(f32(x) + 0.5, f32(y) + 0.5, f32(z) + 0.5) + nudge * SURFACE_OFFSET;
     let world = (p.voxelToWorld * vec4<f32>(vc, 1.0)).xyz;
     let clip  = p.lightViewProj * vec4<f32>(world, 1.0);
     if (clip.w <= 0.0) { sunvis[i] = 255u; return; }
