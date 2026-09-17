@@ -1,3 +1,6 @@
+using System;
+using System.Runtime.InteropServices;
+
 namespace ClearSkies.Engine.Voxels;
 
 public sealed class ChunkData
@@ -23,5 +26,18 @@ public sealed class ChunkData
         for (int i = 0; i < _blocks.Length; i++)
             if (_blocks[i] != BlockId.Air) return true;
         return false;
+    }
+
+    /// <summary>Zero-copy raw byte view of the block array, for bulk serialization.</summary>
+    internal ReadOnlySpan<byte> AsBytes() => MemoryMarshal.Cast<BlockId, byte>(_blocks);
+
+    /// <summary>Overwrites every block from a raw byte buffer previously produced by <see cref="AsBytes"/>.
+    /// Does not touch <see cref="IsDirty"/> — the caller decides what that should be afterward.</summary>
+    internal void LoadBytes(ReadOnlySpan<byte> bytes)
+    {
+        var dst = MemoryMarshal.Cast<BlockId, byte>(_blocks);
+        if (bytes.Length != dst.Length)
+            throw new ArgumentException($"Expected {dst.Length} bytes, got {bytes.Length}.", nameof(bytes));
+        bytes.CopyTo(dst);
     }
 }

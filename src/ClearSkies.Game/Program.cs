@@ -46,3 +46,5 @@ host.AddSystem(new RenderSystem(host.World, host.Renderer, host.Gui, host.Time),
 TestScene.Build(host);
 
 host.Run();
+
+staticWorld.SaveAllDirty(); // graceful-exit flush; unload/autosave already cover the running game

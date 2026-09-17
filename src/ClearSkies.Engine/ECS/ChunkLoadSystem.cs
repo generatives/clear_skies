@@ -16,6 +16,10 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 {
     private const int LoadsPerFrame = 4;
 
+    /// <summary>Seconds between periodic flushes of any currently-loaded dirty chunks — crash/power-loss
+    /// safety for edits to chunks that stay loaded (never unload) for a long time.</summary>
+    private const float AutosaveInterval = 30f;
+
     private readonly EntitySet      _cameras;
     private readonly StaticWorld    _manager;
     private readonly IWorldGenerator _generator;
@@ -24,6 +28,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 
     private readonly Queue<ChunkPosition> _loadQueue = new();
     private ChunkPosition _lastCamChunk = new(int.MinValue, int.MinValue, int.MinValue);
+    private float _autosaveTimer;
 
     public ChunkLoadSystem(World world, StaticWorld manager, IWorldGenerator generator,
                            int xzRadius = 5, int yRadius = 2)
@@ -42,10 +47,20 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     {
         ImGui.Text($"Queued: {_loadQueue.Count}");
         ImGui.Text($"Loaded: {_manager.LoadedCount}");
+        ImGui.Text($"Autosave in: {System.Math.Max(0f, AutosaveInterval - _autosaveTimer):F0}s");
     }
 
     public void Update(float dt)
     {
+        // Crash/power-loss safety: flush dirty chunks on a fixed cadence regardless of camera/streaming
+        // state, so edits to a chunk that never unloads aren't only ever saved on graceful exit.
+        _autosaveTimer += dt;
+        if (_autosaveTimer >= AutosaveInterval)
+        {
+            _autosaveTimer = 0f;
+            _manager.SaveAllDirty();
+        }
+
         if (!TryGetCameraPos(out var camPos)) return;
 
         var camChunk = WorldToChunk(camPos);
