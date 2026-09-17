@@ -15,9 +15,10 @@ host.Renderer.LoadTextureAtlas(
 // Phase 4.0: prove the GPU compute path (upload → dispatch → readback) before building lighting on it.
 GpuComputeSelfTest.Run(host.Context);
 
-var staticWorld = new StaticWorld(host.World);
-var worldGen     = new SkyWorldGenerator();
-var meshSystem   = new ChunkMeshSystem(staticWorld, host.Renderer);
+var staticWorld   = new StaticWorld(host.World);
+var worldGen      = new SkyWorldGenerator();
+var meshSystem    = new ChunkMeshSystem(staticWorld, host.Renderer);
+var gridSelection = new GridSelection(host.World);
 
 host.AddSystem(host.Gui, SystemStage.Input); // opens ImGui's frame before Logic/PreRender systems run
 
@@ -27,7 +28,8 @@ host.AddSystem(new GridShapeSystem(host.World, host.Physics), SystemStage.Logic)
 host.AddSystem(new PlayerGridControlSystem(host.World, host.Physics, host.Input), SystemStage.Logic);
 host.AddSystem(host.Physics, SystemStage.Logic); // steps the simulation once bodies/impulses for this frame are in
 host.AddSystem(new GridTransformSystem(host.World, host.Physics), SystemStage.Logic);
-host.AddSystem(new PlayerInputSystem(host.World, staticWorld, host.Physics, host.Input, meshSystem, host.Renderer), SystemStage.Logic);
+host.AddSystem(new PlayerInputSystem(host.World, staticWorld, host.Physics, host.Input, meshSystem, host.Renderer, gridSelection), SystemStage.Logic);
+host.AddSystem(new GridPersistenceSystem(host.World, meshSystem, host.Physics, gridSelection), SystemStage.Logic);
 host.AddSystem(new LambdaSystem(() =>
 {
     if (host.Input.WasKeyPressed(Key.Tab))

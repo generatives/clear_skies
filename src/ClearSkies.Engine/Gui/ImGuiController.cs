@@ -115,6 +115,11 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     /// <see cref="InputManager.UiWantsMouse"/>; this property is kept for callers that want the raw flag.</summary>
     public bool WantCaptureMouse { get; private set; }
 
+    /// <summary>True when ImGui wants to consume keyboard input this frame (a text field or other
+    /// widget has focus) — same "previous frame's layout" caveat as <see cref="WantCaptureMouse"/>.
+    /// Also published into <see cref="InputManager.UiWantsKeyboard"/> each frame.</summary>
+    public bool WantCaptureKeyboard { get; private set; }
+
     // Debug UI is easy to read at a distance / on a hi-DPI display this way; bump this if it still
     // feels small. Scales both the font (drawn glyphs) and widget metrics (padding, spacing, etc.)
     // so the two stay proportional.
@@ -232,6 +237,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         ImGui.NewFrame();
         WantCaptureMouse = io.WantCaptureMouse;
         _input.UiWantsMouse = WantCaptureMouse;
+        WantCaptureKeyboard = io.WantCaptureKeyboard;
+        _input.UiWantsKeyboard = WantCaptureKeyboard;
 
         if (_input.WasKeyPressed(Key.F1))
         {

@@ -28,6 +28,13 @@ public struct DynamicGridComponent
     public DynamicGrid Grid;
 }
 
+/// <summary>Marker flag: set on exactly one DynamicGrid's root entity at a time — the grid whose
+/// blocks a UI action (e.g. Save) currently operates on. See <see cref="GridSelection"/> for the
+/// invariant-preserving mutator.</summary>
+public struct SelectedGridComponent
+{
+}
+
 /// <summary>Marks an entity as a camera. Only the first active camera is used for rendering.</summary>
 public struct CameraComponent
 {

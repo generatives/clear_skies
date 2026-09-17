@@ -16,7 +16,7 @@ namespace ClearSkies.Engine.ECS;
 
 /// <summary>
 /// The single system for all first-person player input: WASD/QE + mouse-look move the camera,
-/// G spawns a single-block dynamic grid in front of it, and left/right click break/place blocks
+/// G spawns a single-block dynamic grid in front of it, and left/right click place/break blocks
 /// on whichever volume (static world or dynamic grid) the camera is aimed at. The targeted face is
 /// highlighted and a crosshair is always shown at the screen centre.
 /// </summary>
@@ -31,6 +31,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
     private readonly PhysicsWorld _physics;
     private readonly InputManager _input;
     private readonly ChunkMeshSystem _meshSystem;
+    private readonly GridSelection   _selection;
 
     private readonly GpuMesh _faceMesh;
     private readonly Entity  _faceEntity;
@@ -50,7 +51,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
     private BlockId _placeBlock = BlockId.Stone;
 
     public PlayerInputSystem(World world, StaticWorld staticWorld, PhysicsWorld physics, InputManager input,
-                              ChunkMeshSystem meshSystem, Renderer renderer)
+                              ChunkMeshSystem meshSystem, Renderer renderer, GridSelection selection)
     {
         _world       = world;
         _cameras     = world.GetEntities().With<Transform>().With<CameraComponent>().With<FreeFlyController>().AsSet();
@@ -59,6 +60,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
         _physics     = physics;
         _input       = input;
         _meshSystem  = meshSystem;
+        _selection   = selection;
 
         // Face outline entity: the WireframeRenderer component is added/removed to show/hide.
         _faceMesh   = BuildFaceMesh(renderer);
@@ -95,7 +97,11 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
         if (_input.WasKeyPressed(Key.Escape) && _input.CursorCaptured)
             _input.CursorCaptured = false;
         else if (_input.WasMouseButtonPressed(MouseButton.Left) && !_input.CursorCaptured)
+        {
             _input.CursorCaptured = true;
+            // Swallow this click so the same press that recaptures the cursor doesn't also place a block.
+            _input.ConsumeMouseButtonPress(MouseButton.Left);
+        }
 
         foreach (ref readonly Entity e in _cameras.GetEntities())
         {
@@ -137,11 +143,11 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
 
     private void UpdateBlockSpawning()
     {
-        if (!_input.WasKeyPressed(Key.G) || !TryGetActiveCamera(out var t))
+        if (!_input.WasKeyPressed(Key.G) || !CameraUtil.TryGetActive(_cameras, out var t))
             return;
 
-        var spawn = t.Position + Vec.Rotate(t.Rotation, new Vector3D<float>(0, 0, -3));
-        DynamicGridFactory.SpawnSingleBlock(_world, _meshSystem, new PhysVec(spawn.X, spawn.Y, spawn.Z), BlockId.Stone);
+        var spawn = CameraUtil.SpawnPointInFrontOf(t);
+        DynamicGridFactory.SpawnSingleBlock(_world, _meshSystem, _selection, new PhysVec(spawn.X, spawn.Y, spawn.Z), BlockId.Stone);
         Console.WriteLine($"[spawn] grid at ({spawn.X:0.0},{spawn.Y:0.0},{spawn.Z:0.0})");
     }
 
@@ -161,6 +167,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
         // Find the nearest hit across the static world and every dynamic grid.
         float        bestDist   = float.MaxValue;
         ChunkVolume? bestVolume = null;
+        Entity       bestGridEntity = default;
         Vector3D<int> bestBlock  = default, bestNormal = default;
         bool          bestIsGrid = false;
         Vector3D<float>    gridPos = default, gridCom = default;
@@ -189,6 +196,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
             if (VoxelRaycaster.Cast(grid, lo, ld, ReachBlocks, out var gb, out var gn, out var gd) && gd < bestDist)
             {
                 bestDist = gd; bestVolume = grid; bestBlock = gb; bestNormal = gn; bestIsGrid = true;
+                bestGridEntity = e;
                 gridPos = gp; gridRot = gr; gridCom = com;
             }
         }
@@ -216,16 +224,31 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
 
         if (_input.WasMouseButtonPressed(MouseButton.Left))
         {
-            bestVolume.SetBlock(bestBlock.X, bestBlock.Y, bestBlock.Z, BlockId.Air);
-            Console.WriteLine($"[break] {(bestIsGrid ? "grid" : "world")} ({bestBlock.X},{bestBlock.Y},{bestBlock.Z})");
-        }
-        else if (_input.WasMouseButtonPressed(MouseButton.Right))
-        {
             var t = bestBlock + bestNormal;
             if (bestVolume.GetBlock(t.X, t.Y, t.Z) == BlockId.Air)
             {
                 bestVolume.SetBlock(t.X, t.Y, t.Z, _placeBlock);
+                if (bestIsGrid) _selection.Select(bestGridEntity);
                 Console.WriteLine($"[place] {_placeBlock} in {(bestIsGrid ? "grid" : "world")} ({t.X},{t.Y},{t.Z})");
+            }
+        }
+        else if (_input.WasMouseButtonPressed(MouseButton.Right))
+        {
+            bestVolume.SetBlock(bestBlock.X, bestBlock.Y, bestBlock.Z, BlockId.Air);
+            Console.WriteLine($"[break] {(bestIsGrid ? "grid" : "world")} ({bestBlock.X},{bestBlock.Y},{bestBlock.Z})");
+
+            if (bestIsGrid)
+            {
+                var grid = (DynamicGrid)bestVolume;
+                if (grid.IsEmpty())
+                {
+                    DynamicGridFactory.Despawn(_physics, _meshSystem, grid);
+                    HideFace(); // the outlined face no longer has a volume behind it
+                }
+                else
+                {
+                    _selection.Select(bestGridEntity);
+                }
             }
         }
     }
@@ -380,17 +403,6 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private static Quaternion<float> Conjugate(Quaternion<float> q) => new(-q.X, -q.Y, -q.Z, q.W);
-
-    private bool TryGetActiveCamera(out Transform transform)
-    {
-        foreach (ref readonly Entity e in _cameras.GetEntities())
-        {
-            ref readonly var cc = ref e.Get<CameraComponent>();
-            if (cc.Active) { transform = e.Get<Transform>(); return true; }
-        }
-        transform = default;
-        return false;
-    }
 
     private bool TryGetCameraRay(out Vector3D<float> origin, out Vector3D<float> dir)
     {

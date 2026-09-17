@@ -29,6 +29,14 @@ public class ChunkVolume
     public int  LoadedCount                => _chunks.Count;
     public bool IsLoaded(ChunkPosition pos) => _chunks.ContainsKey(pos);
 
+    /// <summary>True if every loaded chunk is entirely air (no solid blocks anywhere in the volume).</summary>
+    public bool IsEmpty()
+    {
+        foreach (var entry in _chunks.Values)
+            if (entry.Data.HasAnySolid()) return false;
+        return true;
+    }
+
     /// <summary>
     /// Computes the AABB (inclusive, chunk coords) of the <b>currently loaded</b> chunks. Unlike
     /// <see cref="BoundsMin"/>/<see cref="BoundsMax"/> (which only ever grow), this shrinks as chunks

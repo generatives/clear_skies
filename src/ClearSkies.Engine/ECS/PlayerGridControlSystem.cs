@@ -8,24 +8,25 @@ using Silk.NET.Input;
 namespace ClearSkies.Engine.ECS;
 
 /// <summary>
-/// Test-harness controls that apply to <b>every</b> dynamic grid at once. Arrow keys push horizontally
-/// (world X/Z), Page Up / Page Down push vertically, and End halts all motion. Impulses are scaled by
-/// each grid's mass so the applied acceleration is consistent regardless of grid size. Runs just before
-/// <see cref="PhysicsWorld"/> steps so the impulses are integrated by the following step.
+/// Test-harness controls that apply only to the <see cref="SelectedGridComponent">Selected Grid</see>.
+/// Arrow keys push horizontally (world X/Z), Page Up / Page Down push vertically, and End halts all
+/// motion. Impulses are scaled by the grid's mass so the applied acceleration is consistent regardless
+/// of grid size. Runs just before <see cref="PhysicsWorld"/> steps so the impulses are integrated by
+/// the following step.
 /// </summary>
 public sealed class PlayerGridControlSystem : ISystem
 {
     private const float Acceleration = 25f; // units/s² applied while a direction key is held
 
-    private readonly EntitySet    _grids;
+    private readonly EntitySet    _selectedGrid;
     private readonly PhysicsWorld _physics;
     private readonly InputManager _input;
 
     public PlayerGridControlSystem(World world, PhysicsWorld physics, InputManager input)
     {
-        _physics = physics;
-        _input   = input;
-        _grids   = world.GetEntities().With<DynamicGridComponent>().AsSet();
+        _physics      = physics;
+        _input        = input;
+        _selectedGrid = world.GetEntities().With<DynamicGridComponent>().With<SelectedGridComponent>().AsSet();
     }
 
     public void Update(float dt)
@@ -43,7 +44,7 @@ public sealed class PlayerGridControlSystem : ISystem
         if (!moving && !stop) return;
         if (moving) dir = Vector3.Normalize(dir);
 
-        foreach (ref readonly Entity e in _grids.GetEntities())
+        foreach (ref readonly Entity e in _selectedGrid.GetEntities())
         {
             var grid = e.Get<DynamicGridComponent>().Grid;
             if (!grid.BodyCreated) continue;

@@ -21,6 +21,11 @@ public sealed class InputManager : IDisposable
     /// (for example) "recapture the cursor for camera look".</summary>
     public bool UiWantsMouse { get; set; }
 
+    /// <summary>Set each frame from <c>ImGuiController.WantCaptureKeyboard</c> (true while an ImGui
+    /// widget such as a text field has keyboard focus). While true, key queries report nothing
+    /// pressed/held, so typing a grid save name doesn't also move the camera, spawn blocks, etc.</summary>
+    public bool UiWantsKeyboard { get; set; }
+
     private readonly HashSet<Key> _justPressed = new();
     private readonly HashSet<MouseButton> _justMousePressed = new();
     private System.Numerics.Vector2 _accumDelta;
@@ -57,10 +62,15 @@ public sealed class InputManager : IDisposable
         _accumDelta = System.Numerics.Vector2.Zero;
     }
 
-    public bool IsKeyDown(Key key) => _keyboard?.IsKeyPressed(key) ?? false;
+    public bool IsKeyDown(Key key) => !UiWantsKeyboard && (_keyboard?.IsKeyPressed(key) ?? false);
 
-    public bool WasKeyPressed(Key key) => _justPressed.Contains(key);
+    public bool WasKeyPressed(Key key) => !UiWantsKeyboard && _justPressed.Contains(key);
     public bool WasMouseButtonPressed(MouseButton button) => !UiWantsMouse && _justMousePressed.Contains(button);
+
+    /// <summary>Discards this frame's "just pressed" edge for a button, so later queries this same
+    /// frame (e.g. block-editing) don't also react to a click already consumed for something else
+    /// (e.g. recapturing the cursor).</summary>
+    public void ConsumeMouseButtonPress(MouseButton button) => _justMousePressed.Remove(button);
 
     public Vector2D<float> MouseDelta => UiWantsMouse ? Vector2D<float>.Zero : new(_accumDelta.X, _accumDelta.Y);
 

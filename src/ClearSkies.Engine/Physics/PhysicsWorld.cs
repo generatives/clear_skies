@@ -138,6 +138,11 @@ public sealed class PhysicsWorld : ISystem, IDisposable
         => Simulation.Bodies.Add(BodyDescription.CreateDynamic(
             new RigidPose(position), inertia, new CollidableDescription(shape, 0.1f), new BodyActivityDescription(0.01f)));
 
+    /// <summary>Removes a dynamic body. Callers that created it via <see cref="AddDynamicBody"/> with a
+    /// compound shape should read the shape with <see cref="GetBodyShape"/> first, then pass it to
+    /// <see cref="RemoveCompound"/> after this call to also free the shape.</summary>
+    public void RemoveBody(BodyHandle handle) => Simulation.Bodies.Remove(handle);
+
     public TypedIndex GetBodyShape(BodyHandle handle) => Simulation.Bodies[handle].Collidable.Shape;
 
     public void SetBodyShape(BodyHandle handle, TypedIndex shape, BodyInertia inertia)
