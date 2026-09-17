@@ -8,6 +8,10 @@ using Silk.NET.Input;
 
 using var host = new EngineHost(new EngineOptions("Clear Skies", 1280, 720, LogGpuErrors: true));
 
+host.Renderer.LoadTextureAtlas(
+    Path.Combine(AppContext.BaseDirectory, "Resources", "spritesheet_tiles.png"),
+    Path.Combine(AppContext.BaseDirectory, "Resources", "spritesheet_tiles.xml"));
+
 // Phase 4.0: prove the GPU compute path (upload → dispatch → readback) before building lighting on it.
 GpuComputeSelfTest.Run(host.Context);
 

@@ -9,10 +9,15 @@ public static class BlockRegistry
     static BlockRegistry()
     {
         Register(new BlockDef { Id = BlockId.Air,   Name = "Air",   Color = default,                   IsSolid = false, LightEmission = 0,  Opacity = 0  });
-        Register(new BlockDef { Id = BlockId.Grass, Name = "Grass", Color = new(0.35f, 0.75f, 0.25f), IsSolid = true,  LightEmission = 0,  Opacity = 15 });
-        Register(new BlockDef { Id = BlockId.Dirt,  Name = "Dirt",  Color = new(0.55f, 0.38f, 0.22f), IsSolid = true,  LightEmission = 0,  Opacity = 15 });
-        Register(new BlockDef { Id = BlockId.Stone, Name = "Stone", Color = new(0.52f, 0.52f, 0.55f), IsSolid = true,  LightEmission = 0,  Opacity = 15 });
+        Register(new BlockDef { Id = BlockId.Grass, Name = "Grass", Color = new(0.35f, 0.75f, 0.25f), IsSolid = true,  LightEmission = 0,  Opacity = 15,
+            Texture = "dirt_grass", TextureTop = "grass_top", TextureBottom = "dirt" });
+        Register(new BlockDef { Id = BlockId.Dirt,  Name = "Dirt",  Color = new(0.55f, 0.38f, 0.22f), IsSolid = true,  LightEmission = 0,  Opacity = 15,
+            Texture = "dirt" });
+        Register(new BlockDef { Id = BlockId.Stone, Name = "Stone", Color = new(0.52f, 0.52f, 0.55f), IsSolid = true,  LightEmission = 0,  Opacity = 15,
+            Texture = "stone" });
         Register(new BlockDef { Id = BlockId.Lamp,  Name = "Lamp",  Color = new(1.00f, 0.95f, 0.80f), IsSolid = true,  LightEmission = 14, Opacity = 15 });
+        Register(new BlockDef { Id = BlockId.Wood,  Name = "Wood",  Color = new(0.55f, 0.40f, 0.25f), IsSolid = true,  LightEmission = 0,  Opacity = 15,
+            Texture = "wood" });
     }
 
     private static void Register(BlockDef def) => Defs[(byte)def.Id] = def;

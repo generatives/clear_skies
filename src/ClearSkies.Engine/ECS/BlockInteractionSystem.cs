@@ -122,7 +122,12 @@ public sealed class BlockInteractionSystem : ISystem, IDisposable
 
         if (_input.WasKeyPressed(Key.L))
         {
-            _placeBlock = _placeBlock == BlockId.Stone ? BlockId.Lamp : BlockId.Stone;
+            _placeBlock = _placeBlock switch
+            {
+                BlockId.Stone => BlockId.Wood,
+                BlockId.Wood  => BlockId.Lamp,
+                _             => BlockId.Stone,
+            };
             Console.WriteLine($"[place] selected block: {_placeBlock}");
         }
 

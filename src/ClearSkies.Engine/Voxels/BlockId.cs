@@ -7,4 +7,5 @@ public enum BlockId : byte
     Dirt  = 2,
     Stone = 3,
     Lamp  = 4,
+    Wood  = 5,
 }

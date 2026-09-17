@@ -1,3 +1,4 @@
+using ClearSkies.Engine.Rendering;
 using Silk.NET.Core.Native;
 using Silk.NET.WebGPU;
 
@@ -101,9 +102,9 @@ fn vs_main(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {
 
     private RenderPipeline* CreatePipeline()
     {
-        // Only position is needed; the full 36-byte vertex stride is kept so chunk/cube meshes bind as-is.
+        // Only position is needed; the full Vertex stride is kept so chunk/cube meshes bind as-is.
         var posAttr  = new VertexAttribute { Format = VertexFormat.Float32x3, Offset = 0, ShaderLocation = 0 };
-        var vbLayout = new VertexBufferLayout { ArrayStride = 36, StepMode = VertexStepMode.Vertex, AttributeCount = 1, Attributes = &posAttr };
+        var vbLayout = new VertexBufferLayout { ArrayStride = Vertex.SizeBytes, StepMode = VertexStepMode.Vertex, AttributeCount = 1, Attributes = &posAttr };
 
         var vsEntry     = (byte*)SilkMarshal.StringToPtr("vs_main", NativeStringEncoding.UTF8);
         var vertexState = new VertexState { Module = _shader, EntryPoint = vsEntry, BufferCount = 1, Buffers = &vbLayout };

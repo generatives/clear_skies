@@ -17,7 +17,7 @@ public sealed class ChunkMeshSystem : ISystem
 
     private readonly List<ChunkVolume> _volumes = new();
     private readonly Renderer     _renderer;
-    private readonly GreedyMesher _mesher = new();
+    private readonly GreedyMesher _mesher;
 
     private readonly Stopwatch _sw = new();
     private int _totalMeshed;
@@ -26,6 +26,7 @@ public sealed class ChunkMeshSystem : ISystem
     {
         _volumes.Add(initial);
         _renderer = renderer;
+        _mesher   = new GreedyMesher(renderer.Atlas);
     }
 
     public void RegisterVolume(ChunkVolume volume)

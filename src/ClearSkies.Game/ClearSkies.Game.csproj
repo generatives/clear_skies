@@ -4,6 +4,10 @@
     <ProjectReference Include="..\ClearSkies.Engine\ClearSkies.Engine.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="Resources\**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net8.0</TargetFramework>

@@ -36,6 +36,13 @@ public sealed class GreedyMesher
     private readonly BlockId[] _mask     = new BlockId[ChunkData.Size * ChunkData.Size];
     private readonly bool[]    _consumed = new bool   [ChunkData.Size * ChunkData.Size];
 
+    private readonly TextureAtlas? _atlas;
+
+    public GreedyMesher(TextureAtlas? atlas = null)
+    {
+        _atlas = atlas;
+    }
+
     /// <summary>
     /// Mesh <paramref name="chunk"/>. Neighbour ChunkData parameters are for face-culling only;
     /// pass <c>null</c> for any unloaded neighbour (its side is treated as open air).
@@ -123,8 +130,12 @@ public sealed class GreedyMesher
                     for (int du2 = 0; du2 < du; du2++)
                         _consumed[(u + du2) + (v + dv2) * sz] = true;
 
-                    EmitQuad(verts, indices, face, slice + face.FaceOffset, u, v, du, dv,
-                             BlockRegistry.Get(start).Color);
+                    ref readonly var def = ref BlockRegistry.Get(start);
+                    float layer = -1f;
+                    if (_atlas != null && _atlas.TryGetLayer(def.GetFaceTexture(face.Normal), out int l))
+                        layer = l;
+
+                    EmitQuad(verts, indices, face, slice + face.FaceOffset, u, v, du, dv, def.Color, layer);
                 }
             }
         }
@@ -144,17 +155,22 @@ public sealed class GreedyMesher
     private static void EmitQuad(
         List<Vertex> verts, List<uint> indices,
         in FaceDesc face, int fp, int u0, int v0, int du, int dv,
-        Vector3D<float> color)
+        Vector3D<float> color, float textureLayer)
     {
         var normal = new Vector3D<float>(face.Normal.X, face.Normal.Y, face.Normal.Z);
 
         Vector3D<float> c0, c1, c2, c3;
+        Vector3D<float> uv0, uv1, uv2, uv3;
         if (!face.Flip)
         {
             c0 = MakePos(face, fp, u0,      v0);
             c1 = MakePos(face, fp, u0,      v0 + dv);
             c2 = MakePos(face, fp, u0 + du, v0 + dv);
             c3 = MakePos(face, fp, u0 + du, v0);
+            uv0 = MakeUv(face, u0,      v0,      textureLayer);
+            uv1 = MakeUv(face, u0,      v0 + dv, textureLayer);
+            uv2 = MakeUv(face, u0 + du, v0 + dv, textureLayer);
+            uv3 = MakeUv(face, u0 + du, v0,      textureLayer);
         }
         else
         {
@@ -162,16 +178,33 @@ public sealed class GreedyMesher
             c1 = MakePos(face, fp, u0 + du, v0);
             c2 = MakePos(face, fp, u0 + du, v0 + dv);
             c3 = MakePos(face, fp, u0,      v0 + dv);
+            uv0 = MakeUv(face, u0,      v0,      textureLayer);
+            uv1 = MakeUv(face, u0 + du, v0,      textureLayer);
+            uv2 = MakeUv(face, u0 + du, v0 + dv, textureLayer);
+            uv3 = MakeUv(face, u0,      v0 + dv, textureLayer);
         }
 
         uint b = (uint)verts.Count;
-        verts.Add(new Vertex { Position = c0, Normal = normal, Color = color });
-        verts.Add(new Vertex { Position = c1, Normal = normal, Color = color });
-        verts.Add(new Vertex { Position = c2, Normal = normal, Color = color });
-        verts.Add(new Vertex { Position = c3, Normal = normal, Color = color });
+        verts.Add(new Vertex { Position = c0, Normal = normal, Color = color, Uv = uv0 });
+        verts.Add(new Vertex { Position = c1, Normal = normal, Color = color, Uv = uv1 });
+        verts.Add(new Vertex { Position = c2, Normal = normal, Color = color, Uv = uv2 });
+        verts.Add(new Vertex { Position = c3, Normal = normal, Color = color, Uv = uv3 });
 
         indices.Add(b);     indices.Add(b + 1); indices.Add(b + 2);
         indices.Add(b);     indices.Add(b + 2); indices.Add(b + 3);
+    }
+
+    // Tile-space UV. Texture V must track world-up (Y) on every SIDE face so "up" in the sprite (row 0,
+    // v=0) lands at the top of the block, regardless of which position axis (face.U or face.V) happens to
+    // carry Y for that face direction — for +X/-X, Y is face.U; for +Z/-Z, Y is face.V. It's also negated,
+    // since image row 0 (v=0) is the sprite's TOP but increasing world Y is "up": without the negation a
+    // block's bottom (low Y) would sample v≈0 (sprite top) and its top would sample v≈1 (sprite bottom) —
+    // upside down. Top/bottom faces (+Y/-Y) never carry Y in either axis, so they pass through unchanged.
+    private static Vector3D<float> MakeUv(in FaceDesc face, int u, int v, float layer)
+    {
+        if (face.U == 1) return new Vector3D<float>(v, -u, layer);
+        if (face.V == 1) return new Vector3D<float>(u, -v, layer);
+        return new Vector3D<float>(u, v, layer);
     }
 
     private static Vector3D<float> MakePos(in FaceDesc face, int fp, int u, int v)

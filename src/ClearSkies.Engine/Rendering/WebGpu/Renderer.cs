@@ -24,7 +24,8 @@ const AMBIENT_SKY: f32 = 3.0 / 15.0;  // matches VolumeGpuResources.BaseSkyLevel
 const SUN_STRENGTH: f32 = 1.0;        // direct sun at full brightness (level 15); paired with the dim sky fill
                                       // + low MIN_AMBIENT so shadows stay dark for the lamp/block system to fill
 const MIN_AMBIENT: f32 = 0.05;        // floor so no geometry is ever fully black
-const AO_MIN: f32 = 0.45;             // darkest ambient-occluded corner (1 = no AO)
+const AO_MIN: f32 = 0.15;             // darkest ambient-occluded corner (1 = no AO). Exaggerated for evaluation;
+                                      // 0.45 is the subtler default.
 const WPC: i32 = 1024;                // u32 opacity words per 32³ chunk (VolumeGpuResources.WordsPerChunk)
 const SMOOTH_RADIUS: i32 = 2;     // in-plane light/shadow smoothing radius (cells) → (2R+1)^2 taps. Larger = smoother
                                   // (and softer shadows), but a radius wider than a shadow feature washes it out.
@@ -56,19 +57,28 @@ struct Model { model: mat4x4<f32>, chunkBase: vec3<i32>, _p0: i32, volSize: vec3
 // depth pass; the main fragment now reads precomputed `sunvis` instead of sampling this directly.
 @group(3) @binding(0) var shadowMap: texture_depth_2d;
 
+// Block texture array: each layer is one named sprite from the spritesheet (TextureAtlas), sized
+// TileSize² and nearest-filtered. Vertex UV is (u, v, layer): u/v are tile-space (not normalized),
+// wrapped per-fragment with fract() so a texture repeats once per block regardless of how large a
+// greedy-merged quad is; layer < 0 means untextured — use the vertex color instead (see fs_main).
+@group(4) @binding(0) var atlasTex:  texture_2d_array<f32>;
+@group(4) @binding(1) var atlasSamp: sampler;
+
 struct VSOut {
     @builtin(position) pos:         vec4<f32>,
     @location(0)       color:       vec3<f32>,
     @location(1)       worldNormal: vec3<f32>,
     @location(2)       localPos:    vec3<f32>,
     @location(3)       localNormal: vec3<f32>,
+    @location(4)       uv:          vec3<f32>,
 };
 
 @vertex
 fn vs_main(
     @location(0) position: vec3<f32>,
     @location(1) normal:   vec3<f32>,
-    @location(2) color:    vec3<f32>
+    @location(2) color:    vec3<f32>,
+    @location(3) uv:       vec3<f32>
 ) -> VSOut {
     var o: VSOut;
     o.pos         = camera.proj * camera.view * model.model * vec4<f32>(position, 1.0);
@@ -76,6 +86,7 @@ fn vs_main(
     o.worldNormal = (model.model * vec4<f32>(normal, 0.0)).xyz;
     o.localPos    = position;
     o.localNormal = normal;
+    o.uv          = uv;
     return o;
 }
 
@@ -106,18 +117,17 @@ fn lightAt(vol: vec3<i32>) -> vec2<f32> {
     return vec2<f32>(f32(packed & 0xFFu) / 15.0, f32((packed >> 8u) & 0xFFu) / 15.0);
 }
 
-// Directional-sun visibility (1 lit … 0 shadowed) at a volume voxel, read from the per-voxel `sunvis` buffer
-// that GpuSunVisPass precomputed from the shadow map this frame. Out-of-volume → lit. Replaces the old
-// per-fragment PCF: the PCF now happens once per surface voxel in the compute pass, and the fragment just reads
-// (and blends neighbours, in sampleLit) the stored value — cheap, and a continuous edge that doesn't breathe.
-fn sunVisAt(vol: vec3<i32>) -> f32 {
+// Raw per-voxel directional-sun visibility from the `sunvis` buffer that GpuSunVisPass precomputed this frame.
+// 0-254 = shadowed…lit; 255 = SKIP SENTINEL ('no surface shadow sample here' — open air / out of volume). The
+// sun blend in sampleLit skips 255 so open-air cells past a convex edge don't wash the shadow out before the
+// edge. Out-of-volume also returns 255 (skip). The PCF happens once per surface voxel in the compute pass.
+fn sunRaw(vol: vec3<i32>) -> u32 {
     if (vol.x < 0 || vol.x >= model.volSize.x ||
         vol.y < 0 || vol.y >= model.volSize.y ||
         vol.z < 0 || vol.z >= model.volSize.z) {
-        return 1.0;
+        return 255u;
     }
-    let idx = u32(vol.x + model.volSize.x * (vol.y + model.volSize.y * vol.z));
-    return f32(sunvis[idx]) / 255.0;
+    return sunvis[u32(vol.x + model.volSize.x * (vol.y + model.volSize.y * vol.z))];
 }
 
 // Smoothed surface lighting at the air-side of this fragment: sky + block light (each 0..1) and directional-sun
@@ -152,7 +162,7 @@ fn sampleLit(localPos: vec3<f32>, localNormal: vec3<f32>, wantSun: bool) -> Lit 
     let dv = fract(dot(localPos, vec3<f32>(B))) - 0.5;
 
     var accL = vec2<f32>(0.0, 0.0); var sumL = 0.0;
-    var accS = 0.0;
+    var accS = 0.0; var sumS = 0.0;              // sun gets its own sum: open-air cells (sentinel) are skipped
     for (var i = -SMOOTH_RADIUS; i <= SMOOTH_RADIUS; i = i + 1) {
         for (var j = -SMOOTH_RADIUS; j <= SMOOTH_RADIUS; j = j + 1) {
             let cell = air + i * T + j * B;
@@ -163,16 +173,20 @@ fn sampleLit(localPos: vec3<f32>, localNormal: vec3<f32>, wantSun: bool) -> Lit 
             accL += w * lightAt(cell);
             sumL += w;
             if (wantSun) {
-                accS += w * sunVisAt(cell);
+                let sv = sunRaw(cell);
+                if (sv < 255u) {                        // 255 = no surface sample here → don't bias the blend
+                    accS += w * f32(sv) / 254.0;        // (so shadows reach convex edges instead of stopping short)
+                    sumS += w;
+                }
             }
         }
     }
 
-    let lv = accL / max(sumL, 1e-4);              // same weight set drives light + sun, so sumL normalises both
+    let lv = accL / max(sumL, 1e-4);
     var o: Lit;
     o.sky = lv.x;
     o.blk = lv.y;
-    o.sun = select(1.0, accS / max(sumL, 1e-4), wantSun);
+    o.sun = select(1.0, accS / max(sumS, 1e-4), wantSun && sumS > 0.0);
     return o;
 }
 
@@ -231,7 +245,14 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 
     // Ambient occlusion darkens inner corners / block junctions; lerp from AO_MIN so corners aren't pure black.
     let aoFactor = mix(AO_MIN, 1.0, computeAO(in.localPos, in.localNormal));
-    return vec4<f32>(in.color * lit * aoFactor, 1.0);
+
+    // Sample unconditionally (avoids implicit-derivative issues from branching on a per-fragment value) and
+    // select against the vertex color for untextured blocks (uv.z < 0, the no-texture sentinel).
+    let layer     = max(i32(round(in.uv.z)), 0);
+    let texColor  = textureSample(atlasTex, atlasSamp, fract(in.uv.xy), layer).rgb;
+    let baseColor = select(in.color, texColor, in.uv.z >= 0.0);
+
+    return vec4<f32>(baseColor * lit * aoFactor, 1.0);
 }
 ";
 
@@ -243,6 +264,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     private BindGroupLayout* _modelLayout;
     private BindGroupLayout* _lightLayout;
     private BindGroupLayout* _shadowLayout;
+    private BindGroupLayout* _atlasLayout;
     private PipelineLayout* _pipelineLayout;
     private RenderPipeline* _pipeline;
     private RenderPipeline* _wireframePipeline;
@@ -250,6 +272,15 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 
     private SunShadowPass _shadow = null!;
     private BindGroup* _shadowBindGroup;
+
+    // Block texture array (TextureAtlas → GPU). Constructed with a 1x1 white fallback so BeginFrame
+    // always has a valid group-4 bind group; LoadTextureAtlas replaces it with the real spritesheet.
+    private Texture*     _atlasTexture;
+    private TextureView* _atlasTextureView;
+    private Sampler*     _atlasSampler;
+    private BindGroup*   _atlasBindGroup;
+
+    public TextureAtlas? Atlas { get; private set; }
 
     public bool WireframeMode { get; set; }
 
@@ -288,6 +319,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         _hudCameraBuffer = GpuBuffer.CreateUniform(ctx, CameraSize);
         _modelBuffer     = GpuBuffer.CreateUniform(ctx, ModelStride * MaxObjects);
         CreateBindGroups();
+        CreateFallbackAtlas();
 
         // Pre-load identity matrices; never overwritten after this.
         Span<CameraUniform> id = stackalloc CameraUniform[1];
@@ -363,22 +395,41 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         var shadowDesc = new BindGroupLayoutDescriptor { EntryCount = 1, Entries = &shadowEntry };
         _shadowLayout = _api.DeviceCreateBindGroupLayout(_ctx.Device, &shadowDesc);
 
-        BindGroupLayout** layouts = stackalloc BindGroupLayout*[4];
+        // Group 4: block texture array (binding 0) + a filtering sampler (binding 1).
+        BindGroupLayoutEntry* atlasEntries = stackalloc BindGroupLayoutEntry[2];
+        atlasEntries[0] = new BindGroupLayoutEntry
+        {
+            Binding    = 0,
+            Visibility = ShaderStage.Fragment,
+            Texture    = new TextureBindingLayout { SampleType = TextureSampleType.Float, ViewDimension = TextureViewDimension.Dimension2DArray, Multisampled = false },
+        };
+        atlasEntries[1] = new BindGroupLayoutEntry
+        {
+            Binding    = 1,
+            Visibility = ShaderStage.Fragment,
+            Sampler    = new SamplerBindingLayout { Type = SamplerBindingType.Filtering },
+        };
+        var atlasDesc = new BindGroupLayoutDescriptor { EntryCount = 2, Entries = atlasEntries };
+        _atlasLayout = _api.DeviceCreateBindGroupLayout(_ctx.Device, &atlasDesc);
+
+        BindGroupLayout** layouts = stackalloc BindGroupLayout*[5];
         layouts[0] = _cameraLayout;
         layouts[1] = _modelLayout;
         layouts[2] = _lightLayout;
         layouts[3] = _shadowLayout;
-        var plDesc = new PipelineLayoutDescriptor { BindGroupLayoutCount = 4, BindGroupLayouts = layouts };
+        layouts[4] = _atlasLayout;
+        var plDesc = new PipelineLayoutDescriptor { BindGroupLayoutCount = 5, BindGroupLayouts = layouts };
         _pipelineLayout = _api.DeviceCreatePipelineLayout(_ctx.Device, &plDesc);
     }
 
     private RenderPipeline* CreatePipeline(PrimitiveTopology topology, CullMode cullMode, bool depthTest = true)
     {
-        VertexAttribute* attrs = stackalloc VertexAttribute[3];
+        VertexAttribute* attrs = stackalloc VertexAttribute[4];
         attrs[0] = new VertexAttribute { Format = VertexFormat.Float32x3, Offset = 0,  ShaderLocation = 0 };
         attrs[1] = new VertexAttribute { Format = VertexFormat.Float32x3, Offset = 12, ShaderLocation = 1 };
         attrs[2] = new VertexAttribute { Format = VertexFormat.Float32x3, Offset = 24, ShaderLocation = 2 };
-        var vbLayout = new VertexBufferLayout { ArrayStride = 36, StepMode = VertexStepMode.Vertex, AttributeCount = 3, Attributes = attrs };
+        attrs[3] = new VertexAttribute { Format = VertexFormat.Float32x3, Offset = 36, ShaderLocation = 3 };
+        var vbLayout = new VertexBufferLayout { ArrayStride = Vertex.SizeBytes, StepMode = VertexStepMode.Vertex, AttributeCount = 4, Attributes = attrs };
 
         var vsEntry = (byte*)SilkMarshal.StringToPtr("vs_main", NativeStringEncoding.UTF8);
         var fsEntry = (byte*)SilkMarshal.StringToPtr("fs_main", NativeStringEncoding.UTF8);
@@ -463,6 +514,90 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         var shadowEntry = new BindGroupEntry { Binding = 0, TextureView = _shadow.DepthView };
         var shadowDesc  = new BindGroupDescriptor { Layout = _shadowLayout, EntryCount = 1, Entries = &shadowEntry };
         _shadowBindGroup = _api.DeviceCreateBindGroup(_ctx.Device, &shadowDesc);
+    }
+
+    /// <summary>1x1 white single-layer array texture, bound as group 4 until <see cref="LoadTextureAtlas"/>
+    /// replaces it — keeps every draw's texture sample well-defined (white, so untextured blocks are
+    /// unaffected since they select the vertex color anyway) before the real spritesheet is loaded.</summary>
+    private void CreateFallbackAtlas()
+    {
+        var white = new byte[] { 255, 255, 255, 255 };
+        BuildAtlasTexture(1, 1, new[] { white });
+    }
+
+    /// <summary>Loads <paramref name="pngPath"/>/<paramref name="xmlPath"/> as the block texture array
+    /// (see <see cref="TextureAtlas"/>), replacing the fallback (or a previously loaded atlas). Must be
+    /// called before any chunk referencing a real block texture is meshed, since <see cref="GreedyMesher"/>
+    /// resolves texture names to layer indices via <see cref="Atlas"/> at mesh time.</summary>
+    public void LoadTextureAtlas(string pngPath, string xmlPath)
+    {
+        Atlas = new TextureAtlas(pngPath, xmlPath);
+        var layers = new byte[Atlas.LayerCount][];
+        for (int i = 0; i < layers.Length; i++) layers[i] = Atlas.GetLayerPixels(i);
+        BuildAtlasTexture(Atlas.TileSize, Atlas.TileSize, layers);
+    }
+
+    private void BuildAtlasTexture(int tileWidth, int tileHeight, byte[][] layers)
+    {
+        if (_atlasBindGroup   != null) _api.BindGroupRelease(_atlasBindGroup);
+        if (_atlasSampler     != null) _api.SamplerRelease(_atlasSampler);
+        if (_atlasTextureView != null) _api.TextureViewRelease(_atlasTextureView);
+        if (_atlasTexture     != null) _api.TextureRelease(_atlasTexture);
+
+        var texDesc = new TextureDescriptor
+        {
+            Usage         = TextureUsage.TextureBinding | TextureUsage.CopyDst,
+            Dimension     = TextureDimension.Dimension2D,
+            Size          = new Extent3D((uint)tileWidth, (uint)tileHeight, (uint)layers.Length),
+            Format        = TextureFormat.Rgba8Unorm,
+            MipLevelCount = 1,
+            SampleCount   = 1,
+        };
+        _atlasTexture = _api.DeviceCreateTexture(_ctx.Device, &texDesc);
+
+        for (uint layer = 0; layer < layers.Length; layer++)
+        {
+            fixed (byte* data = layers[layer])
+            {
+                var dest = new ImageCopyTexture { Texture = _atlasTexture, MipLevel = 0, Origin = new Origin3D(0, 0, layer), Aspect = TextureAspect.All };
+                var dataLayout = new TextureDataLayout { Offset = 0, BytesPerRow = (uint)(tileWidth * 4), RowsPerImage = (uint)tileHeight };
+                var writeSize = new Extent3D((uint)tileWidth, (uint)tileHeight, 1);
+                _api.QueueWriteTexture(_ctx.Queue, &dest, data, (nuint)layers[layer].Length, &dataLayout, &writeSize);
+            }
+        }
+
+        var viewDesc = new TextureViewDescriptor
+        {
+            Format          = TextureFormat.Rgba8Unorm,
+            Dimension       = TextureViewDimension.Dimension2DArray,
+            BaseMipLevel    = 0,
+            MipLevelCount   = 1,
+            BaseArrayLayer  = 0,
+            ArrayLayerCount = (uint)layers.Length,
+            Aspect          = TextureAspect.All,
+        };
+        _atlasTextureView = _api.TextureCreateView(_atlasTexture, &viewDesc);
+
+        var samplerDesc = new SamplerDescriptor
+        {
+            AddressModeU  = AddressMode.Repeat,
+            AddressModeV  = AddressMode.Repeat,
+            AddressModeW  = AddressMode.Repeat,
+            MagFilter     = FilterMode.Nearest,
+            MinFilter     = FilterMode.Nearest,
+            MipmapFilter  = MipmapFilterMode.Nearest,
+            LodMinClamp   = 0,
+            LodMaxClamp   = 1,
+            Compare       = CompareFunction.Undefined,
+            MaxAnisotropy = 1,
+        };
+        _atlasSampler = _api.DeviceCreateSampler(_ctx.Device, &samplerDesc);
+
+        BindGroupEntry* entries = stackalloc BindGroupEntry[2];
+        entries[0] = new BindGroupEntry { Binding = 0, TextureView = _atlasTextureView };
+        entries[1] = new BindGroupEntry { Binding = 1, Sampler = _atlasSampler };
+        var desc = new BindGroupDescriptor { Layout = _atlasLayout, EntryCount = 2, Entries = entries };
+        _atlasBindGroup = _api.DeviceCreateBindGroup(_ctx.Device, &desc);
     }
 
     public GpuMesh UploadMesh(ReadOnlySpan<Vertex> vertices, ReadOnlySpan<uint> indices)
@@ -626,6 +761,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         _api.RenderPassEncoderSetBindGroup(_pass, 2, _lightBindGroup, 0, null);
         // Group 3 (sun shadow map) is constant for the frame; bind once.
         _api.RenderPassEncoderSetBindGroup(_pass, 3, _shadowBindGroup, 0, null);
+        // Group 4 (block texture array) is constant for the frame; bind once.
+        _api.RenderPassEncoderSetBindGroup(_pass, 4, _atlasBindGroup, 0, null);
         return true;
     }
 
@@ -740,6 +877,10 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         _fullAirOpacity.Dispose();
         _fullLitSunVis.Dispose();
         _shadow.Dispose();
+        if (_atlasBindGroup   != null) _api.BindGroupRelease(_atlasBindGroup);
+        if (_atlasSampler     != null) _api.SamplerRelease(_atlasSampler);
+        if (_atlasTextureView != null) _api.TextureViewRelease(_atlasTextureView);
+        if (_atlasTexture     != null) _api.TextureRelease(_atlasTexture);
         if (_hudPipeline        != null) _api.RenderPipelineRelease(_hudPipeline);
         if (_wireframePipeline  != null) _api.RenderPipelineRelease(_wireframePipeline);
         if (_pipeline           != null) _api.RenderPipelineRelease(_pipeline);

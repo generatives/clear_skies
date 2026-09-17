@@ -66,8 +66,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (x < 0 || x >= p.dims.x || y < 0 || y >= p.dims.y || z < 0 || z >= p.dims.z) { return; }
     let i = u32(x + p.dims.x * (y + p.dims.y * z));
 
-    // Only air cells touching a solid (the lit surface shell) need a real shadow test; everything else
-    // (interior solids, open air) defaults to fully lit. This keeps the per-frame cost on the surface only.
+    // Only air cells touching a solid (the lit surface shell) need a real shadow test. Everything else (interior
+    // solids, open air) is written as 255 = the SKIP SENTINEL: 'no surface shadow sample here'. The fragment's
+    // sun blend skips 255 (like it skips solids) instead of treating it as lit — otherwise open-air cells just
+    // past a convex edge would read 'lit' and wash the shadow out before it reaches the edge. Computed visibility
+    // is 0-254; only solids/open-air get 255.
     if (isOpaque(x, y, z)) { sunvis[i] = 255u; return; }
     let sxn = isOpaque(x - 1, y, z); let sxp = isOpaque(x + 1, y, z);
     let syn = isOpaque(x, y - 1, z); let syp = isOpaque(x, y + 1, z);
@@ -86,11 +89,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let vc = vec3<f32>(f32(x) + 0.5, f32(y) + 0.5, f32(z) + 0.5) + nudge * SURFACE_OFFSET;
     let world = (p.voxelToWorld * vec4<f32>(vc, 1.0)).xyz;
     let clip  = p.lightViewProj * vec4<f32>(world, 1.0);
-    if (clip.w <= 0.0) { sunvis[i] = 255u; return; }
+    if (clip.w <= 0.0) { sunvis[i] = 254u; return; }   // surface cell, but behind the light → lit
     let ndc   = clip.xyz / clip.w;
     let uv    = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
-        sunvis[i] = 255u; return;   // outside the shadow frustum → lit
+        sunvis[i] = 254u; return;   // surface cell outside the shadow frustum → lit (254, not the 255 sentinel)
     }
 
     // PCF: tent-weighted kernel of shadow-map texels around the projected centre (sub-voxel soft edge).
@@ -111,7 +114,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             sum += w;
         }
     }
-    sunvis[i] = u32(round(clamp(vis / sum, 0.0, 1.0) * 255.0));
+    sunvis[i] = u32(round(clamp(vis / sum, 0.0, 1.0) * 254.0));   // 0-254; 255 reserved as the skip sentinel
 }";
 
     private readonly GpuContext      _ctx;

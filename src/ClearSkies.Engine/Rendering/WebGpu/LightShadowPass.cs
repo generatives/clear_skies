@@ -191,7 +191,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     private RenderPipeline* CreatePipeline()
     {
         var posAttr  = new VertexAttribute { Format = VertexFormat.Float32x3, Offset = 0, ShaderLocation = 0 };
-        var vbLayout = new VertexBufferLayout { ArrayStride = 36, StepMode = VertexStepMode.Vertex, AttributeCount = 1, Attributes = &posAttr };
+        var vbLayout = new VertexBufferLayout { ArrayStride = Vertex.SizeBytes, StepMode = VertexStepMode.Vertex, AttributeCount = 1, Attributes = &posAttr };
 
         var vsEntry     = (byte*)SilkMarshal.StringToPtr("vs_main", NativeStringEncoding.UTF8);
         var fsEntry     = (byte*)SilkMarshal.StringToPtr("fs_main", NativeStringEncoding.UTF8);
