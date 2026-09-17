@@ -759,7 +759,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             DepthSlice = uint.MaxValue, // WGPU_DEPTH_SLICE_UNDEFINED
             LoadOp = LoadOp.Clear,
             StoreOp = StoreOp.Store,
-            ClearValue = new Color { R = 0.10, G = 0.12, B = 0.16, A = 1.0 },
+            // Clear to a sky-blue colour
+            ClearValue = new Color { R = 0.10, G = 0.3078, B = 0.4804, A = 1.0 },
         };
         var depthAtt = new RenderPassDepthStencilAttachment
         {
