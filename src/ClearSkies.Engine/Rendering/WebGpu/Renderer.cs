@@ -653,13 +653,17 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 
     /// <summary>
     /// Switches to the HUD pipeline (depth always passes, no depth writes) and binds the identity camera.
-    /// Uses a dedicated buffer that never changes, so the world camera uniform is not touched.
+    /// Uses a dedicated buffer that never changes, so the world camera uniform is not touched. Also rebinds
+    /// the full-bright fallback light group (group 2), which world draws may have swapped for a per-chunk
+    /// buffer — otherwise the shared fs_main shader would tint HUD geometry with whatever chunk lighting was
+    /// last bound instead of drawing it at full brightness.
     /// Call this after all world-space draws; follow with <see cref="DrawHudMesh"/> calls.
     /// </summary>
     public void BeginHudPass()
     {
         _api.RenderPassEncoderSetPipeline(_pass, _hudPipeline);
         _api.RenderPassEncoderSetBindGroup(_pass, 0, _hudCameraBindGroup, 0, null);
+        _api.RenderPassEncoderSetBindGroup(_pass, 2, _lightBindGroup, 0, null);
     }
 
     /// <summary>Draws a mesh using the HUD pipeline and its wireframe indices. Call after <see cref="BeginHudPass"/>.</summary>

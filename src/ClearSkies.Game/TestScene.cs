@@ -19,7 +19,7 @@ public static class TestScene
         cam.Set(new CameraComponent { Camera = new Camera(), Active = true });
         cam.Set(new FreeFlyController
         {
-            MoveSpeed       = 30f,
+            MoveSpeed       = 10f,
             LookSensitivity = 0.0025f,
             Yaw             = MathF.PI,  // face +Z (yaw=π rotates default -Z forward to +Z)
             Pitch           = -0.45f,    // ~26° downward — sees island surface at ~75 units ahead

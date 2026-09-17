@@ -122,6 +122,8 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
             var right = Vec.Rotate(t.Rotation, new Vector3D<float>(1, 0, 0));
             var up = new Vector3D<float>(0, 1, 0);
 
+            bool speedUp = false;
+
             var move = Vector3D<float>.Zero;
             if (_input.IsKeyDown(Key.W)) move += forward;
             if (_input.IsKeyDown(Key.S)) move -= forward;
@@ -131,11 +133,14 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
             if (_input.IsKeyDown(Key.ShiftLeft) || _input.IsKeyDown(Key.ShiftRight)) move -= up;
             if (_input.IsKeyDown(Key.E)) c.MoveSpeed += 2;
             if (_input.IsKeyDown(Key.Q)) c.MoveSpeed -= 2;
+            if (_input.IsKeyDown(Key.ControlLeft) || _input.IsKeyDown(Key.ControlRight)) speedUp = true;
 
             c.MoveSpeed = MathF.Max(2f, c.MoveSpeed);
 
+            float speed = speedUp ? c.MoveSpeed * 3f : c.MoveSpeed;
+
             if (move.LengthSquared > 1e-6f)
-                t.Position += Vector3D.Normalize(move) * c.MoveSpeed * dt;
+                t.Position += Vector3D.Normalize(move) * speed * dt;
         }
     }
 
