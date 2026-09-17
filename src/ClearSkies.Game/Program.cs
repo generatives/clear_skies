@@ -19,15 +19,13 @@ var staticWorld = new StaticWorld(host.World);
 var worldGen     = new SkyWorldGenerator();
 var meshSystem   = new ChunkMeshSystem(staticWorld, host.Renderer);
 
-host.AddSystem(new FreeFlyCameraSystem(host.World, host.Input), SystemStage.Logic);
 host.AddSystem(new ChunkLoadSystem(host.World, staticWorld, worldGen, xzRadius: 3, yRadius: 2), SystemStage.Logic);
 host.AddSystem(new StaticColliderSystem(staticWorld, host.Physics), SystemStage.Logic);
 host.AddSystem(new GridShapeSystem(host.World, host.Physics), SystemStage.Logic);
 host.AddSystem(new PlayerGridControlSystem(host.World, host.Physics, host.Input), SystemStage.Logic);
 host.AddSystem(new PhysicsSystem(host.Physics, host.Time.FixedStep), SystemStage.Logic);
 host.AddSystem(new GridTransformSystem(host.World, host.Physics), SystemStage.Logic);
-host.AddSystem(new DebugDropSystem(host.World, host.Physics, host.Input, meshSystem, host.Renderer), SystemStage.Logic);
-host.AddSystem(new BlockInteractionSystem(host.World, staticWorld, host.Physics, host.Input, host.Renderer), SystemStage.Logic);
+host.AddSystem(new PlayerInputSystem(host.World, staticWorld, host.Physics, host.Input, meshSystem, host.Renderer), SystemStage.Logic);
 host.AddSystem(new LambdaSystem(() =>
 {
     if (host.Input.WasKeyPressed(Key.Tab))

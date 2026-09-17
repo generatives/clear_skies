@@ -8,25 +8,27 @@ using ClearSkies.Engine.Voxels;
 using DefaultEcs;
 using Silk.NET.Input;
 using Silk.NET.Maths;
+using PhysVec = System.Numerics.Vector3;
 
 namespace ClearSkies.Engine.ECS;
 
 /// <summary>
-/// Casts a ray from the active camera each frame against the static world and every dynamic grid,
-/// picking the nearest hit. Left-click breaks the targeted block; right-click places a stone block on
-/// the hit face. Editing routes to whichever volume was hit, so dynamic grids are edited exactly like
-/// terrain. The targeted face is highlighted (following the grid if it is one); a crosshair is always
-/// shown at the screen centre.
+/// The single system for all first-person player input: WASD/QE + mouse-look move the camera,
+/// G spawns a single-block dynamic grid in front of it, and left/right click break/place blocks
+/// on whichever volume (static world or dynamic grid) the camera is aimed at. The targeted face is
+/// highlighted and a crosshair is always shown at the screen centre.
 /// </summary>
-public sealed class BlockInteractionSystem : ISystem, IDisposable
+public sealed class PlayerInputSystem : ISystem, IDisposable
 {
     private const float ReachBlocks = 32f;
 
+    private readonly World        _world;
     private readonly EntitySet    _cameras;
     private readonly EntitySet    _grids;
     private readonly StaticWorld  _staticWorld;
     private readonly PhysicsWorld _physics;
     private readonly InputManager _input;
+    private readonly ChunkMeshSystem _meshSystem;
 
     private readonly GpuMesh _faceMesh;
     private readonly Entity  _faceEntity;
@@ -42,16 +44,19 @@ public sealed class BlockInteractionSystem : ISystem, IDisposable
     public Vector3D<int>? TargetBlock  { get; private set; }
     public Vector3D<int>? TargetNormal { get; private set; }
 
-    // Block placed by right-click; toggle Stone/Lamp with the L key (Lamp tests block-light flood).
+    // Block placed by right-click; toggle Stone/Wood/Lamp with the L key (Lamp tests block-light flood).
     private BlockId _placeBlock = BlockId.Stone;
 
-    public BlockInteractionSystem(World world, StaticWorld staticWorld, PhysicsWorld physics, InputManager input, Renderer renderer)
+    public PlayerInputSystem(World world, StaticWorld staticWorld, PhysicsWorld physics, InputManager input,
+                              ChunkMeshSystem meshSystem, Renderer renderer)
     {
-        _cameras     = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
+        _world       = world;
+        _cameras     = world.GetEntities().With<Transform>().With<CameraComponent>().With<FreeFlyController>().AsSet();
         _grids       = world.GetEntities().With<DynamicGridComponent>().AsSet();
         _staticWorld = staticWorld;
         _physics     = physics;
         _input       = input;
+        _meshSystem  = meshSystem;
 
         // Face outline entity: the WireframeRenderer component is added/removed to show/hide.
         _faceMesh   = BuildFaceMesh(renderer);
@@ -65,6 +70,73 @@ public sealed class BlockInteractionSystem : ISystem, IDisposable
     }
 
     public void Update(float dt)
+    {
+        UpdateCameraMovement(dt);
+        UpdateBlockSpawning();
+        UpdateBlockEditing();
+    }
+
+    // ── Movement + camera ────────────────────────────────────────────────────
+
+    private void UpdateCameraMovement(float dt)
+    {
+        // Esc unlocks the cursor; clicking the window re-locks it.
+        if (_input.WasKeyPressed(Key.Escape) && _input.CursorCaptured)
+            _input.CursorCaptured = false;
+        else if (_input.WasMouseButtonPressed(MouseButton.Left) && !_input.CursorCaptured)
+            _input.CursorCaptured = true;
+
+        foreach (ref readonly Entity e in _cameras.GetEntities())
+        {
+            ref var t = ref e.Get<Transform>();
+            ref var c = ref e.Get<FreeFlyController>();
+
+            if (_input.CursorCaptured)
+            {
+                var delta = _input.MouseDelta;
+                c.Yaw -= delta.X * c.LookSensitivity;
+                c.Pitch -= delta.Y * c.LookSensitivity;
+                float limit = MathF.PI / 2f - 0.01f;
+                c.Pitch = System.Math.Clamp(c.Pitch, -limit, limit);
+                t.Rotation = Quaternion<float>.CreateFromYawPitchRoll(c.Yaw, c.Pitch, 0f);
+            }
+
+            var forward = Vec.Rotate(t.Rotation, new Vector3D<float>(0, 0, -1));
+            var right = Vec.Rotate(t.Rotation, new Vector3D<float>(1, 0, 0));
+            var up = new Vector3D<float>(0, 1, 0);
+
+            var move = Vector3D<float>.Zero;
+            if (_input.IsKeyDown(Key.W)) move += forward;
+            if (_input.IsKeyDown(Key.S)) move -= forward;
+            if (_input.IsKeyDown(Key.D)) move += right;
+            if (_input.IsKeyDown(Key.A)) move -= right;
+            if (_input.IsKeyDown(Key.Space)) move += up;
+            if (_input.IsKeyDown(Key.ShiftLeft) || _input.IsKeyDown(Key.ShiftRight)) move -= up;
+            if (_input.IsKeyDown(Key.E)) c.MoveSpeed += 2;
+            if (_input.IsKeyDown(Key.Q)) c.MoveSpeed -= 2;
+
+            c.MoveSpeed = MathF.Max(2f, c.MoveSpeed);
+
+            if (move.LengthSquared > 1e-6f)
+                t.Position += Vector3D.Normalize(move) * c.MoveSpeed * dt;
+        }
+    }
+
+    // ── Block spawning ───────────────────────────────────────────────────────
+
+    private void UpdateBlockSpawning()
+    {
+        if (!_input.WasKeyPressed(Key.G) || !TryGetActiveCamera(out var t))
+            return;
+
+        var spawn = t.Position + Vec.Rotate(t.Rotation, new Vector3D<float>(0, 0, -3));
+        DynamicGridFactory.SpawnSingleBlock(_world, _meshSystem, new PhysVec(spawn.X, spawn.Y, spawn.Z), BlockId.Stone);
+        Console.WriteLine($"[spawn] grid at ({spawn.X:0.0},{spawn.Y:0.0},{spawn.Z:0.0})");
+    }
+
+    // ── Block editing ────────────────────────────────────────────────────────
+
+    private void UpdateBlockEditing()
     {
         TargetBlock  = null;
         TargetNormal = null;
@@ -297,6 +369,17 @@ public sealed class BlockInteractionSystem : ISystem, IDisposable
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private static Quaternion<float> Conjugate(Quaternion<float> q) => new(-q.X, -q.Y, -q.Z, q.W);
+
+    private bool TryGetActiveCamera(out Transform transform)
+    {
+        foreach (ref readonly Entity e in _cameras.GetEntities())
+        {
+            ref readonly var cc = ref e.Get<CameraComponent>();
+            if (cc.Active) { transform = e.Get<Transform>(); return true; }
+        }
+        transform = default;
+        return false;
+    }
 
     private bool TryGetCameraRay(out Vector3D<float> origin, out Vector3D<float> dir)
     {
