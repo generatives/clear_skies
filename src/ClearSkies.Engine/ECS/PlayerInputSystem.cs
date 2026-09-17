@@ -318,7 +318,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
         GetFaceCorners(block, normal, corners);
 
         var faceNormal = new Vector3D<float>(normal.X, normal.Y, normal.Z);
-        var color      = new Vector3D<float>(1f, 0.45f, 0f); // orange
+        var color      = new Vector3D<float>(1f, 0f, 0f); // red
 
         Span<Vertex> verts = stackalloc Vertex[4];
         for (int i = 0; i < 4; i++)
@@ -377,32 +377,38 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
 
     private static GpuMesh BuildCrosshairMesh(Renderer renderer)
     {
-        // NDC coordinates for a classic gap-crosshair on a 1280×720 viewport.
-        const float hw = 12f / 640f;  // half-arm width  (≈12 px horizontal)
-        const float hh = 12f / 360f;  // half-arm height (≈12 px vertical)
-        const float gw =  4f / 640f;  // gap radius x
-        const float gh =  4f / 360f;  // gap radius y
+        // NDC coordinates for a classic gap-crosshair on a 1280×720 viewport, built as filled quads
+        // (not a GPU line list, whose width is fixed at 1px) so the arms have real on-screen thickness.
+        const float hw = 15f / 640f;  // arm half-length, horizontal arms (X)
+        const float hh = 15f / 360f;  // arm half-length, vertical arms (Y)
+        const float gw =  4f / 640f;  // gap half-length, X
+        const float gh =  4f / 360f;  // gap half-length, Y
+        const float tw =  1.0f / 640f; // arm half-thickness, X (thickness of the vertical arms)
+        const float th =  1.0f / 360f; // arm half-thickness, Y (thickness of the horizontal arms)
 
         var white = new Vector3D<float>(1f, 1f, 1f);
         var n     = Vector3D<float>.Zero;
 
-        // 8 verts: left arm (0-1), right arm (2-3), bottom arm (4-5), top arm (6-7)
-        var verts = new Vertex[]
+        Vertex V(float x, float y) => new(new(x, y, 0), n, white);
+
+        // 4 quads (4 verts each): left arm, right arm, bottom arm, top arm.
+        var verts = new[]
         {
-            new(new(-hw,  0,  0), n, white),
-            new(new(-gw,  0,  0), n, white),
-            new(new( gw,  0,  0), n, white),
-            new(new( hw,  0,  0), n, white),
-            new(new(  0, -hh, 0), n, white),
-            new(new(  0, -gh, 0), n, white),
-            new(new(  0,  gh, 0), n, white),
-            new(new(  0,  hh, 0), n, white),
+            V(-hw, -th), V(-gw, -th), V(-gw, th), V(-hw, th),
+            V( gw, -th), V( hw, -th), V( hw, th), V( gw, th),
+            V(-tw, -hh), V( tw, -hh), V( tw, -gh), V(-tw, -gh),
+            V(-tw,  gh), V( tw,  gh), V( tw,  hh), V(-tw,  hh),
         };
 
-        uint[] tris  = { 0, 1, 2,  1, 2, 3,  4, 5, 6,  5, 6, 7 }; // dummy solid
-        uint[] edges = { 0, 1,  2, 3,  4, 5,  6, 7 };               // 4 line segments
+        uint[] tris =
+        {
+            0, 1, 2,  0, 2, 3,
+            4, 5, 6,  4, 6, 7,
+            8, 9, 10, 8, 10, 11,
+            12, 13, 14, 12, 14, 15,
+        };
 
-        return renderer.UploadMesh(verts, tris, edges);
+        return renderer.UploadMesh(verts, tris);
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

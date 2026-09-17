@@ -319,7 +319,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         CreateLayouts();
         _pipeline          = CreatePipeline(PrimitiveTopology.TriangleList, CullMode.Back);
         _wireframePipeline = CreatePipeline(PrimitiveTopology.LineList,     CullMode.None);
-        _hudPipeline       = CreatePipeline(PrimitiveTopology.LineList,     CullMode.None, depthTest: false);
+        _hudPipeline       = CreatePipeline(PrimitiveTopology.TriangleList, CullMode.None, depthTest: false);
 
         // Sun shadow pass shares the camera + model bind-group layouts (its depth shader reads both).
         _shadow = new SunShadowPass(ctx, _cameraLayout, _modelLayout);
@@ -630,7 +630,10 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     /// <summary>
     /// Draws <paramref name="mesh"/> using the wireframe pipeline and wireframe index buffer, regardless
     /// of the current <see cref="WireframeMode"/>, then restores the previous pipeline.
-    /// Intended for overlay elements (selection highlight, debug gizmos).
+    /// Intended for overlay elements (selection highlight, debug gizmos). Rebinds the full-bright fallback
+    /// light group (group 2) first so the highlight always reads as bright/legible instead of picking up
+    /// the real (possibly shadowed) lighting of the block it outlines; a following <see cref="DrawMesh"/>
+    /// call rebinds its own chunk's light buffer, so this doesn't leak into subsequent world draws.
     /// </summary>
     public void DrawMeshWireframe(GpuMesh mesh, in Mat4 model)
     {
@@ -643,6 +646,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 
         uint dynOffset = (uint)offset;
         _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset);
+        _api.RenderPassEncoderSetBindGroup(_pass, 2, _lightBindGroup, 0, null);
         _api.RenderPassEncoderSetVertexBuffer(_pass, 0, mesh.VertexBuffer.Handle, 0, mesh.VertexBuffer.SizeBytes);
         _api.RenderPassEncoderSetPipeline(_pass, _wireframePipeline);
         _api.RenderPassEncoderSetIndexBuffer(_pass, mesh.WireframeBuffer.Handle, IndexFormat.Uint32, 0, mesh.WireframeBuffer.SizeBytes);
@@ -666,7 +670,11 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         _api.RenderPassEncoderSetBindGroup(_pass, 2, _lightBindGroup, 0, null);
     }
 
-    /// <summary>Draws a mesh using the HUD pipeline and its wireframe indices. Call after <see cref="BeginHudPass"/>.</summary>
+    /// <summary>
+    /// Draws a mesh using the HUD pipeline and its solid (triangle) indices. Call after
+    /// <see cref="BeginHudPass"/>. Solid triangles rather than a GPU line list so HUD shapes (e.g. the
+    /// crosshair) render at an actual on-screen thickness — WebGPU line width is fixed at 1px.
+    /// </summary>
     public void DrawHudMesh(GpuMesh mesh, in Mat4 model)
     {
         if (_drawIndex >= MaxObjects) return;
@@ -679,8 +687,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         uint dynOffset = (uint)offset;
         _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset);
         _api.RenderPassEncoderSetVertexBuffer(_pass, 0, mesh.VertexBuffer.Handle, 0, mesh.VertexBuffer.SizeBytes);
-        _api.RenderPassEncoderSetIndexBuffer(_pass, mesh.WireframeBuffer.Handle, IndexFormat.Uint32, 0, mesh.WireframeBuffer.SizeBytes);
-        _api.RenderPassEncoderDrawIndexed(_pass, mesh.WireframeIndexCount, 1, 0, 0, 0);
+        _api.RenderPassEncoderSetIndexBuffer(_pass, mesh.IndexBuffer.Handle, IndexFormat.Uint32, 0, mesh.IndexBuffer.SizeBytes);
+        _api.RenderPassEncoderDrawIndexed(_pass, mesh.IndexCount, 1, 0, 0, 0);
         _drawIndex++;
     }
 
