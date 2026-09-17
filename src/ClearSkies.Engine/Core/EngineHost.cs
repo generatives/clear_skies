@@ -1,3 +1,4 @@
+using ClearSkies.Engine.Gui;
 using ClearSkies.Engine.Input;
 using ClearSkies.Engine.Physics;
 using ClearSkies.Engine.Rendering.WebGpu;
@@ -23,6 +24,7 @@ public sealed class EngineHost : IDisposable
     public InputManager Input { get; }
     public PhysicsWorld Physics { get; }
     public Time Time { get; }
+    public ImGuiController Gui { get; }
 
     public EngineHost(EngineOptions options)
     {
@@ -34,8 +36,9 @@ public sealed class EngineHost : IDisposable
         Context = GpuContext.Create(Window, options);
         Renderer = new Renderer(Context);
         Input = new InputManager(Window);
-        Physics = new PhysicsWorld(new System.Numerics.Vector3(0f, 0f, 0f));
         Time = new Time();
+        Physics = new PhysicsWorld(new System.Numerics.Vector3(0f, 0f, 0f), Time.FixedStep);
+        Gui = new ImGuiController(Renderer, Input);
 
         Window.Update += OnUpdate;
         Window.Render += OnRender;
@@ -75,6 +78,7 @@ public sealed class EngineHost : IDisposable
     public void Dispose()
     {
         Physics.Dispose();
+        Gui.Dispose();
         Renderer.Dispose();
         Context.Dispose();
         Input.Dispose();

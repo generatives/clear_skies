@@ -11,6 +11,16 @@ public sealed class InputManager : IDisposable
     private readonly IKeyboard? _keyboard;
     private readonly IMouse? _mouse;
 
+    /// <summary>The underlying Silk.NET input context, for callers that need raw device access
+    /// (e.g. <see cref="Gui.ImGuiController"/> wiring text/key events) without opening a second,
+    /// independent context via <c>window.CreateInput()</c>.</summary>
+    internal IInputContext Native => _input;
+
+    /// <summary>Set each frame from <c>ImGuiController.WantCaptureMouse</c>. While true, mouse-button
+    /// queries report nothing pressed, so a click on an ImGui panel isn't also read by game systems as
+    /// (for example) "recapture the cursor for camera look".</summary>
+    public bool UiWantsMouse { get; set; }
+
     private readonly HashSet<Key> _justPressed = new();
     private readonly HashSet<MouseButton> _justMousePressed = new();
     private System.Numerics.Vector2 _accumDelta;
@@ -50,9 +60,9 @@ public sealed class InputManager : IDisposable
     public bool IsKeyDown(Key key) => _keyboard?.IsKeyPressed(key) ?? false;
 
     public bool WasKeyPressed(Key key) => _justPressed.Contains(key);
-    public bool WasMouseButtonPressed(MouseButton button) => _justMousePressed.Contains(button);
+    public bool WasMouseButtonPressed(MouseButton button) => !UiWantsMouse && _justMousePressed.Contains(button);
 
-    public Vector2D<float> MouseDelta => new(_accumDelta.X, _accumDelta.Y);
+    public Vector2D<float> MouseDelta => UiWantsMouse ? Vector2D<float>.Zero : new(_accumDelta.X, _accumDelta.Y);
 
     public bool CursorCaptured
     {

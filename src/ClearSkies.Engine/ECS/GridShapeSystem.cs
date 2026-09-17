@@ -8,7 +8,7 @@ namespace ClearSkies.Engine.ECS;
 
 /// <summary>
 /// Rebuilds each dynamic grid's BepuPhysics collision shape (and inertia) from its block occupancy
-/// whenever <see cref="DynamicGrid.ShapeDirty"/> is set. Runs before <see cref="PhysicsSystem"/> so the
+/// whenever <see cref="DynamicGrid.ShapeDirty"/> is set. Runs before <see cref="PhysicsWorld"/> steps so the
 /// body is current before the step. When the centre of mass shifts on rebuild, the body origin is
 /// moved to track it so existing geometry stays fixed in world space.
 /// </summary>

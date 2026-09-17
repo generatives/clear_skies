@@ -7,7 +7,7 @@ using Silk.NET.Maths;
 namespace ClearSkies.Engine.ECS;
 
 /// <summary>
-/// Syncs each dynamic grid's chunk entities to its rigid-body pose. Runs after <see cref="PhysicsSystem"/>.
+/// Syncs each dynamic grid's chunk entities to its rigid-body pose. Runs after <see cref="PhysicsWorld"/> steps.
 /// Every chunk is carried rigidly by the grid pose: world = bodyPos + R·(chunkLocalOrigin − centreOfMass),
 /// with the same centre-of-mass offset the physics compound was recentered by, so meshes and colliders
 /// stay aligned.

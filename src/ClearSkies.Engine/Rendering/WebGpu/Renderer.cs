@@ -301,6 +301,15 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 
     public float AspectRatio => _ctx.Size.Y <= 0 ? 1f : (float)_ctx.Size.X / _ctx.Size.Y;
 
+    /// <summary>The GPU context backing this renderer (device/queue/surface format), for callers that
+    /// need to build their own pipeline against the same swapchain — e.g. <see cref="Gui.ImGuiController"/>.</summary>
+    internal GpuContext Context => _ctx;
+
+    /// <summary>The render pass currently open between <see cref="BeginFrame"/> and <see cref="EndFrame"/>.
+    /// Null outside a frame. Lets <see cref="Gui.ImGuiController"/> submit its own draw calls into the same
+    /// pass, after the HUD pass and before <see cref="EndFrame"/> closes it.</summary>
+    internal RenderPassEncoder* CurrentPass => _pass;
+
     public Renderer(GpuContext ctx)
     {
         _ctx = ctx;

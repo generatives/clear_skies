@@ -6,22 +6,34 @@ using BepuPhysics.CollisionDetection;
 using BepuPhysics.Constraints;
 using BepuUtilities;
 using BepuUtilities.Memory;
+using ClearSkies.Engine.Core;
 
 namespace ClearSkies.Engine.Physics;
 
 /// <summary>
 /// Owns the BepuPhysics2 <see cref="Simulation"/> and its <see cref="BufferPool"/>, and exposes a
-/// small façade for the rest of the engine: stepping, dynamic body creation, pose readback, and
-/// per-box static terrain colliders. All public coordinates use System.Numerics (the Bepu domain);
-/// callers convert via <see cref="PhysicsConv"/>.
+/// small façade for the rest of the engine: dynamic body creation, pose readback, and per-box static
+/// terrain colliders. All public coordinates use System.Numerics (the Bepu domain); callers convert
+/// via <see cref="PhysicsConv"/>.
+///
+/// Doubles as the <see cref="ISystem"/> that steps the simulation: <see cref="Update"/> advances it
+/// on a fixed timestep decoupled from the variable frame rate, accumulating frame delta and stepping
+/// in fixed increments (capped per frame to avoid a "spiral of death" after a long stall). Register it
+/// with <c>AddSystem(host.Physics, SystemStage.Logic)</c> at the point in the Logic stage where physics
+/// should step — after systems that create bodies or apply impulses, before systems that read poses.
 /// </summary>
-public sealed class PhysicsWorld : IDisposable
+public sealed class PhysicsWorld : ISystem, IDisposable
 {
+    private const int MaxStepsPerFrame = 5;
+
     public Simulation Simulation { get; }
     private readonly BufferPool _pool = new();
+    private readonly float _fixedStep;
+    private float _accumulator;
 
-    public PhysicsWorld(Vector3 gravity)
+    public PhysicsWorld(Vector3 gravity, float fixedStep)
     {
+        _fixedStep = fixedStep;
         Simulation = Simulation.Create(
             _pool,
             new VoxelNarrowPhaseCallbacks(new SpringSettings(30, 1)),
@@ -29,7 +41,21 @@ public sealed class PhysicsWorld : IDisposable
             new SolveDescription(velocityIterationCount: 8, substepCount: 1));
     }
 
-    public void Step(float dt) => Simulation.Timestep(dt);
+    public void Update(float dt)
+    {
+        _accumulator += dt;
+
+        int steps = 0;
+        while (_accumulator >= _fixedStep && steps < MaxStepsPerFrame)
+        {
+            Simulation.Timestep(_fixedStep);
+            _accumulator -= _fixedStep;
+            steps++;
+        }
+
+        // If we hit the cap and still have a large backlog, drop it rather than chase forever.
+        if (_accumulator > _fixedStep) _accumulator = 0f;
+    }
 
     // ── Dynamic bodies ──────────────────────────────────────────────────────────
 

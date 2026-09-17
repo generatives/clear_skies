@@ -11,7 +11,7 @@ namespace ClearSkies.Engine.ECS;
 /// Test-harness controls that apply to <b>every</b> dynamic grid at once. Arrow keys push horizontally
 /// (world X/Z), Page Up / Page Down push vertically, and End halts all motion. Impulses are scaled by
 /// each grid's mass so the applied acceleration is consistent regardless of grid size. Runs just before
-/// <see cref="PhysicsSystem"/> so the impulses are integrated by the following step.
+/// <see cref="PhysicsWorld"/> steps so the impulses are integrated by the following step.
 /// </summary>
 public sealed class PlayerGridControlSystem : ISystem
 {

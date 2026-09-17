@@ -1,4 +1,5 @@
 using ClearSkies.Engine.Core;
+using ClearSkies.Engine.Gui;
 using ClearSkies.Engine.Math;
 using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Rendering.WebGpu;
@@ -16,10 +17,12 @@ public sealed class RenderSystem : ISystem
     private readonly EntitySet _wireframes;
     private readonly EntitySet _huds;
     private readonly Renderer _renderer;
+    private readonly ImGuiController _gui;
 
-    public RenderSystem(World world, Renderer renderer)
+    public RenderSystem(World world, Renderer renderer, ImGuiController gui)
     {
         _renderer   = renderer;
+        _gui        = gui;
         _cameras    = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
         _meshes     = world.GetEntities().With<Transform>().With<MeshRenderer>().AsSet();
         _wireframes = world.GetEntities().With<Transform>().With<WireframeRenderer>().AsSet();
@@ -29,7 +32,10 @@ public sealed class RenderSystem : ISystem
     public void Update(float dt)
     {
         if (!TryGetActiveCamera(out var camTransform, out var camera))
+        {
+            _gui.EndFrame(); // close the ImGui frame EngineHost opened even when nothing else renders
             return;
+        }
 
         var sunDir = Vector3D.Normalize(new Vector3D<float>(-0.4f, -1f, -0.3f));
 
@@ -53,7 +59,10 @@ public sealed class RenderSystem : ISystem
         _renderer.EndShadowPass();
 
         if (!_renderer.BeginFrame())
+        {
+            _gui.EndFrame();
             return;
+        }
 
         _renderer.SetCameraUniform(uniform);
 
@@ -95,6 +104,8 @@ public sealed class RenderSystem : ISystem
             _renderer.DrawHudMesh(hr.Mesh, Mat4.Identity);
         }
 
+        // ImGui draws last, on top of everything, in the same pass.
+        _gui.EndFrame();
         _renderer.EndFrame();
     }
 
