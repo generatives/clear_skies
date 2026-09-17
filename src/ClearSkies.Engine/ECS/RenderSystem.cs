@@ -5,12 +5,13 @@ using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Rendering.WebGpu;
 using ClearSkies.Engine.Voxels;
 using DefaultEcs;
+using ImGuiNET;
 using Silk.NET.Maths;
 
 namespace ClearSkies.Engine.ECS;
 
 /// <summary>Builds the camera uniform and issues a draw call per <see cref="MeshRenderer"/> entity.</summary>
-public sealed class RenderSystem : ISystem
+public sealed class RenderSystem : ISystem, IDebugUiSystem
 {
     private readonly EntitySet _cameras;
     private readonly EntitySet _meshes;
@@ -18,15 +19,28 @@ public sealed class RenderSystem : ISystem
     private readonly EntitySet _huds;
     private readonly Renderer _renderer;
     private readonly ImGuiController _gui;
+    private readonly Time _time;
 
-    public RenderSystem(World world, Renderer renderer, ImGuiController gui)
+    public RenderSystem(World world, Renderer renderer, ImGuiController gui, Time time)
     {
         _renderer   = renderer;
         _gui        = gui;
+        _time       = time;
         _cameras    = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
         _meshes     = world.GetEntities().With<Transform>().With<MeshRenderer>().AsSet();
         _wireframes = world.GetEntities().With<Transform>().With<WireframeRenderer>().AsSet();
         _huds       = world.GetEntities().With<HudRenderer>().AsSet();
+    }
+
+    // ── debug UI ─────────────────────────────────────────────────────────────
+    public string DebugName => "Renderer";
+
+    public void DrawDebugUi()
+    {
+        ImGui.Text($"{_time.FramesPerSecond} fps");
+        bool wireframe = _renderer.WireframeMode;
+        if (ImGui.Checkbox("Wireframe", ref wireframe))
+            _renderer.WireframeMode = wireframe;
     }
 
     public void Update(float dt)

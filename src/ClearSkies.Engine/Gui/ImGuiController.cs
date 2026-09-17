@@ -22,6 +22,10 @@ namespace ClearSkies.Engine.Gui;
 /// this always opens the frame before any system builds ImGui widgets or reads
 /// <see cref="InputManager.UiWantsMouse"/>.
 ///
+/// Also owns the "Systems" debug menu bar (F1 to toggle): any system implementing
+/// <see cref="IDebugUiSystem"/> is auto-registered by <c>EngineHost.AddSystem</c> and gets an entry
+/// in the "Systems" dropdown that opens/closes its own panel — see <see cref="RegisterDebugUi"/>.
+///
 /// <see cref="EndFrame"/> is a separate, non-<see cref="ISystem"/> call: it must run after all
 /// world/HUD geometry for the frame has been drawn (i.e. after <see cref="Renderer.BeginFrame"/> and
 /// any <see cref="Renderer.DrawMesh"/>/<see cref="Renderer.DrawHudMesh"/> calls) and before
@@ -100,11 +104,21 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 
     private float _scrollX, _scrollY;
 
+    // ── "Systems" menu bar (see IDebugUiSystem) ─────────────────────────────────
+    private readonly List<IDebugUiSystem> _debugUiSystems = new();
+    private readonly Dictionary<string, bool> _debugUiVisible = new();
+    private bool _menuVisible;
+
     /// <summary>True when ImGui wants to consume mouse input this frame (hovering/dragging/clicking a
     /// widget) — reflects the previous frame's layout, since it's set inside <see cref="Update"/> before
     /// this frame's <c>ImGui.*</c> calls run. <see cref="Update"/> also publishes this into
     /// <see cref="InputManager.UiWantsMouse"/>; this property is kept for callers that want the raw flag.</summary>
     public bool WantCaptureMouse { get; private set; }
+
+    // Debug UI is easy to read at a distance / on a hi-DPI display this way; bump this if it still
+    // feels small. Scales both the font (drawn glyphs) and widget metrics (padding, spacing, etc.)
+    // so the two stay proportional.
+    private const float UiScale = 2f;
 
     public ImGuiController(Renderer renderer, InputManager input)
     {
@@ -118,12 +132,66 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 
         var io = ImGui.GetIO();
         io.ConfigFlags |= ImGuiConfigFlags.NavEnableKeyboard;
+        io.FontGlobalScale = UiScale;
         // NOT setting RendererHasVtxOffset — ImGui splits meshes to keep VtxOffset==0, so every
         // index we re-base is relative to the current draw list's base vertex only.
+
+        ImGui.GetStyle().ScaleAllSizes(UiScale);
 
         CreatePipeline();
         UploadFontAtlas();
         WireInput();
+    }
+
+    // ── "Systems" menu bar ───────────────────────────────────────────────────
+
+    /// <summary>Registers a system's debug panel. Called automatically by <c>EngineHost.AddSystem</c>
+    /// for any system implementing <see cref="IDebugUiSystem"/> — no need to call this directly.</summary>
+    public void RegisterDebugUi(IDebugUiSystem system)
+    {
+        _debugUiSystems.Add(system);
+        _debugUiVisible[system.DebugName] = false;
+    }
+
+    /// <summary>Draws the top "Systems" menu bar and any currently-checked panels. Each menu item
+    /// toggles independently (multi-select). Only called while <see cref="_menuVisible"/> is true.</summary>
+    private void DrawSystemsMenu()
+    {
+        if (ImGui.BeginMainMenuBar())
+        {
+            if (ImGui.BeginMenu("Systems"))
+            {
+                foreach (IDebugUiSystem sys in _debugUiSystems)
+                {
+                    bool visible = _debugUiVisible[sys.DebugName];
+                    if (ImGui.MenuItem(sys.DebugName, string.Empty, visible))
+                        _debugUiVisible[sys.DebugName] = !visible;
+                }
+                ImGui.EndMenu();
+            }
+            ImGui.EndMainMenuBar();
+        }
+
+        foreach (IDebugUiSystem sys in _debugUiSystems)
+        {
+            if (!_debugUiVisible[sys.DebugName]) continue;
+
+            // A default starting size (~5 text lines tall, reasonably wide) so panels aren't tiny
+            // single-line slivers before the user has resized them. GetTextLineHeightWithSpacing()
+            // already reflects the current font scale, so this stays "5 lines" if UiScale changes.
+            // FirstUseEver: only applied the first time this window opens (or with no saved layout);
+            // a user resize afterward sticks for the rest of the session.
+            float lineHeight = ImGui.GetTextLineHeightWithSpacing();
+            var defaultSize = new Vector2(420f, lineHeight * 5f + ImGui.GetFrameHeightWithSpacing());
+            ImGui.SetNextWindowSize(defaultSize, ImGuiCond.FirstUseEver);
+
+            bool open = true;
+            if (ImGui.Begin(sys.DebugName, ref open))
+                sys.DrawDebugUi();
+            ImGui.End();
+
+            if (!open) _debugUiVisible[sys.DebugName] = false;
+        }
     }
 
     // ── per-frame API ────────────────────────────────────────────────────────
@@ -132,7 +200,11 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     /// state, calls <c>ImGui.NewFrame()</c>, then publishes <see cref="WantCaptureMouse"/> into
     /// <see cref="InputManager.UiWantsMouse"/> for the rest of the frame's systems to read. Register
     /// this at <see cref="SystemStage.Input"/> so it always runs before any system builds ImGui
-    /// widgets or reads input.</summary>
+    /// widgets or reads input.
+    ///
+    /// Also owns the F1 hotkey: toggles the "Systems" menu bar and, alongside it, mouse capture
+    /// (releasing the cursor so panels are actually clickable, same as the FPS-look toggle it
+    /// replaces).</summary>
     public void Update(float dt)
     {
         ImGui.SetCurrentContext(_imguiCtx);
@@ -160,6 +232,14 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         ImGui.NewFrame();
         WantCaptureMouse = io.WantCaptureMouse;
         _input.UiWantsMouse = WantCaptureMouse;
+
+        if (_input.WasKeyPressed(Key.F1))
+        {
+            _menuVisible = !_menuVisible;
+            _input.CursorCaptured = !_menuVisible;
+        }
+        if (_menuVisible)
+            DrawSystemsMenu();
     }
 
     /// <summary>Finalises ImGui's frame and submits its draw data into <see cref="Renderer.CurrentPass"/>.

@@ -24,7 +24,7 @@ const AMBIENT_SKY: f32 = 3.0 / 15.0;  // matches VolumeGpuResources.BaseSkyLevel
 const SUN_STRENGTH: f32 = 1.0;        // direct sun at full brightness (level 15); paired with the dim sky fill
                                       // + low MIN_AMBIENT so shadows stay dark for the lamp/block system to fill
 const MIN_AMBIENT: f32 = 0.05;        // floor so no geometry is ever fully black
-const AO_MIN: f32 = 0.15;             // darkest ambient-occluded corner (1 = no AO). Exaggerated for evaluation;
+const AO_MIN: f32 = 0.45;             // darkest ambient-occluded corner (1 = no AO). 0.15 provides exaggeration for evaluation;
                                       // 0.45 is the subtler default.
 const WPC: i32 = 1024;                // u32 opacity words per 32³ chunk (VolumeGpuResources.WordsPerChunk)
 const SMOOTH_RADIUS: i32 = 2;     // in-plane light/shadow smoothing radius (cells) → (2R+1)^2 taps. Larger = smoother

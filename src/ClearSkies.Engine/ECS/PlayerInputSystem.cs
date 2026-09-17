@@ -1,4 +1,5 @@
 using ClearSkies.Engine.Core;
+using ClearSkies.Engine.Gui;
 using ClearSkies.Engine.Input;
 using ClearSkies.Engine.Math;
 using ClearSkies.Engine.Physics;
@@ -6,6 +7,7 @@ using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Rendering.WebGpu;
 using ClearSkies.Engine.Voxels;
 using DefaultEcs;
+using ImGuiNET;
 using Silk.NET.Input;
 using Silk.NET.Maths;
 using PhysVec = System.Numerics.Vector3;
@@ -18,7 +20,7 @@ namespace ClearSkies.Engine.ECS;
 /// on whichever volume (static world or dynamic grid) the camera is aimed at. The targeted face is
 /// highlighted and a crosshair is always shown at the screen centre.
 /// </summary>
-public sealed class PlayerInputSystem : ISystem, IDisposable
+public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
 {
     private const float ReachBlocks = 32f;
 
@@ -74,6 +76,15 @@ public sealed class PlayerInputSystem : ISystem, IDisposable
         UpdateCameraMovement(dt);
         UpdateBlockSpawning();
         UpdateBlockEditing();
+    }
+
+    // ── debug UI ─────────────────────────────────────────────────────────────
+    public string DebugName => "Player Input";
+
+    public void DrawDebugUi()
+    {
+        ImGui.Text(TargetBlock is { } b ? $"Target: ({b.X}, {b.Y}, {b.Z})" : "Target: none");
+        ImGui.Text($"Place block: {_placeBlock}");
     }
 
     // ── Movement + camera ────────────────────────────────────────────────────

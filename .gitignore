@@ -131,3 +131,6 @@ $RECYCLE.BIN/
 .DS_Store
 
 _NCrunch*
+
+# Dear ImGui runtime layout cache (auto-saved per-user window positions/sizes)
+imgui.ini

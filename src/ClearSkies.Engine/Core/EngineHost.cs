@@ -45,7 +45,11 @@ public sealed class EngineHost : IDisposable
         Window.Resize += Renderer.OnResize;
     }
 
-    public void AddSystem(ISystem system, SystemStage stage) => _systems.Add((system, stage));
+    public void AddSystem(ISystem system, SystemStage stage)
+    {
+        _systems.Add((system, stage));
+        if (system is IDebugUiSystem debugUi) Gui.RegisterDebugUi(debugUi);
+    }
 
     public void Run()
     {

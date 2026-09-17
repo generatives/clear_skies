@@ -1,7 +1,9 @@
 using ClearSkies.Engine.Core;
+using ClearSkies.Engine.Gui;
 using ClearSkies.Engine.Voxels;
 using ClearSkies.Engine.Generation;
 using DefaultEcs;
+using ImGuiNET;
 using Silk.NET.Maths;
 
 namespace ClearSkies.Engine.ECS;
@@ -10,7 +12,7 @@ namespace ClearSkies.Engine.ECS;
 /// Tracks the active camera's chunk position each frame and queues chunk load/unload
 /// operations so only a small batch is processed per frame (throttled by LoadsPerFrame).
 /// </summary>
-public sealed class ChunkLoadSystem : ISystem
+public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 {
     private const int LoadsPerFrame = 4;
 
@@ -31,6 +33,15 @@ public sealed class ChunkLoadSystem : ISystem
         _generator = generator;
         _xzRadius  = xzRadius;
         _yRadius   = yRadius;
+    }
+
+    // ── debug UI ─────────────────────────────────────────────────────────────
+    public string DebugName => "Chunk Loading";
+
+    public void DrawDebugUi()
+    {
+        ImGui.Text($"Queued: {_loadQueue.Count}");
+        ImGui.Text($"Loaded: {_manager.LoadedCount}");
     }
 
     public void Update(float dt)
