@@ -118,6 +118,21 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
         int total    = TotalVoxels;
         int opWords  = TotalOpacityWords;
 
+        // LightA/LightB/SunVis are the largest buffers here (1 u32/voxel each) and scale with the cube of
+        // the view-distance radii — a radius increase that looks modest in chunks can jump this well past
+        // the adapter's actual max buffer size (a hard native limit; exceeding it is an unrecoverable wgpu
+        // validation error, not a catchable .NET one, and cascades into "invalid buffer" / "invalid bind
+        // group" / "invalid command encoder" errors that don't obviously point back here). Check up front
+        // so a too-large view distance fails with a clear, actionable message instead.
+        ulong lightBufferBytes = (ulong)total * sizeof(uint);
+        ulong maxBufferSize = System.Math.Min(_ctx.AdapterLimits.MaxBufferSize, _ctx.AdapterLimits.MaxStorageBufferBindingSize);
+        if (lightBufferBytes > maxBufferSize)
+            throw new InvalidOperationException(
+                $"GPU light volume too large: {DX}x{DY}x{DZ} chunks needs a {lightBufferBytes:N0}-byte light " +
+                $"buffer, but this device's max buffer size is {maxBufferSize:N0} bytes. Reduce ChunkLoadSystem's " +
+                $"xzRadius/yRadius (or GpuResidencySystem.WindowMargin) so (2*xzRadius+1+2*margin)^2 * " +
+                $"(2*yRadius+1+2*margin) * 32768 * 4 stays under that limit.");
+
         Opacity = GpuBuffer.CreateStorage(_ctx, (ulong)(opWords * sizeof(uint)));
         LightA  = GpuBuffer.CreateStorage(_ctx, (ulong)(total  * sizeof(uint)));
         LightB  = GpuBuffer.CreateStorage(_ctx, (ulong)(total  * sizeof(uint)));

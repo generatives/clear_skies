@@ -32,11 +32,13 @@ host.AddSystem(host.Gui, SystemStage.Input); // opens ImGui's frame before Logic
 
 var physicsBody = new PhysicsBodySystem(host.World, staticWorld, host.Physics);
 
-// View distance: xzRadius=8/yRadius=3 (was 3/2) — a ~2.7x linear increase, backed by the single-threaded
-// generation/meshing/collision speedups in GenerationBenchmark. This roughly quadruples the GPU-resident
-// volume (GpuResidencySystem windows loaded chunks + a margin), so if VRAM or frame time becomes an issue
-// at this setting, that's the next thing to check before going further.
-host.AddSystem(new ChunkLoadSystem(host.World, staticWorld, worldGen, xzRadius: 8, yRadius: 3), SystemStage.Logic);
+// View distance: xzRadius=4/yRadius=2 (was 3/2). Verified crash-free and smooth at this setting; a bigger
+// jump (tried 8/3) hit two real problems: the GPU device was silently capped at a 256 MiB max buffer size
+// (fixed in GpuContext — see AdapterLimits), and even past that, single-digit FPS from the GPU light flood
+// recomputing a much larger dirty region during the load-in burst plus the per-frame full-chunk scans in
+// ChunkMeshSystem/GpuResidencySystem/GpuLightSystem/PhysicsBodySystem (see the deferred dirty-queue task).
+// Pushing further needs that follow-up work, not just a bigger radius.
+host.AddSystem(new ChunkLoadSystem(host.World, staticWorld, worldGen, xzRadius: 4, yRadius: 2), SystemStage.Logic);
 host.AddSystem(physicsBody, SystemStage.Logic);
 host.AddSystem(new PlayerGridControlSystem(host.World, host.Physics, host.Input), SystemStage.Logic);
 
