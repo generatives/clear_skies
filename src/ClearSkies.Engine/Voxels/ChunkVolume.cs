@@ -76,10 +76,11 @@ public class ChunkVolume
         if (!_chunks.TryGetValue(cp, out var entry)) return;
 
         entry.Data.Set(lx, ly, lz, id, facing);
-        entry.NeedsRemesh    = true;
-        entry.NeedsRecollide = true;
-        entry.NeedsGpuUpload = true;
-        entry.NeedsFlood     = true;
+        entry.NeedsRemesh         = true;
+        entry.NeedsRecollide      = true;
+        entry.NeedsGpuUpload      = true;
+        entry.NeedsFlood          = true;
+        entry.PackedOpacityWords  = null; // block data actually changed -- cached opacity is stale
 
         // Adjacent-chunk face-cull + flood invalidation.
         if (lx == 0)                  TryMarkBoth(cp.Offset(-1,  0,  0));

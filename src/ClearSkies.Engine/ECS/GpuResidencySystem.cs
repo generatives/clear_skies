@@ -79,9 +79,15 @@ public sealed class GpuResidencySystem : ISystem
                 g.Reallocate(tmin, tmax);
                 long reallocMs = sw.ElapsedMilliseconds;
 
-                // Fresh, empty buffers. Re-upload every loaded chunk's opacity NOW (each is a cheap ~4 KB
-                // contiguous write) rather than draining it at UploadsPerFrame — that avoids a long window of
-                // half-uploaded opacity, which during travel would never settle before the next re-window.
+                // Fresh, empty buffers. Re-upload every loaded chunk's opacity NOW rather than draining it at
+                // UploadsPerFrame: the Opacity buffer is sampled directly every frame for ambient occlusion
+                // (independent of the light flood), so any loaded chunk left un-uploaded reads as all-air —
+                // no occlusion — until its turn comes up, which at a few thousand loaded chunks would show as
+                // the whole reallocated area flashing to full brightness for the better part of a second.
+                // Affordable to do synchronously because UpdateChunkOpacity skips recomputing the packed words
+                // for any chunk whose block data hasn't actually changed since its last upload (see
+                // ChunkEntry.PackedOpacityWords) — the common case here, since a reallocation is triggered by
+                // the loaded window moving, not by edits.
                 foreach (var (pos, e) in vol.All)
                 {
                     g.UpdateChunkOpacity(pos, e);
