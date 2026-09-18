@@ -22,19 +22,16 @@ var gridSelection = new GridSelection(host.World);
 
 host.AddSystem(host.Gui, SystemStage.Input); // opens ImGui's frame before Logic/PreRender systems run
 
-var staticColliders = new StaticColliderSystem(staticWorld, host.Physics);
+var physicsBody = new PhysicsBodySystem(host.World, staticWorld, host.Physics);
 
 host.AddSystem(new ChunkLoadSystem(host.World, staticWorld, worldGen, xzRadius: 3, yRadius: 2), SystemStage.Logic);
-host.AddSystem(staticColliders, SystemStage.Logic);
-host.AddSystem(new GridShapeSystem(host.World, host.Physics), SystemStage.Logic);
+host.AddSystem(physicsBody, SystemStage.Logic);
 host.AddSystem(new PlayerGridControlSystem(host.World, host.Physics, host.Input), SystemStage.Logic);
 
 // Milestone 5: airship flight (velocity control law + Fan/Buoyant propulsion, merged into one system —
 // see AirshipFlightSystem), before the physics step so its impulses are integrated this same tick.
-// gridPilot is constructed here (needed for AirshipFlightSystem's constructor) but registered later, once
-// the grid pose for this frame is fresh (no one-frame camera-follow lag).
-var gridPilot = new GridPilotSystem(host.World, host.Input, host.Physics, staticWorld, staticColliders);
-var airshipFlight = new AirshipFlightSystem(host.World, host.Physics, host.Input, gridPilot);
+var gridPilot = new GridPilotSystem(host.World, host.Input, host.Physics, staticWorld, physicsBody);
+var airshipFlight = new AirshipFlightSystem(host.World, host.Physics, host.Input);
 host.AddSystem(airshipFlight, SystemStage.Logic);
 
 host.AddSystem(host.Physics, SystemStage.Logic); // steps the simulation once bodies/impulses for this frame are in

@@ -62,3 +62,9 @@ public struct FreeFlyController
     public float Yaw;
     public float Pitch;
 }
+
+/// <summary>Tag: set on exactly one DynamicGrid's root entity while GridPilotSystem is piloting it.
+/// Read by AirshipFlightSystem to decide whether to take velocity targets from player input.</summary>
+public struct PilotedComponent
+{
+}

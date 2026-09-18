@@ -12,8 +12,9 @@ namespace ClearSkies.Engine.ECS;
 /// <summary>
 /// Full airship flight pipeline (Milestone 5 Phases 5.3/5.4), per dynamic grid each tick: first a
 /// desired-velocity control law (self-leveling always; forward/right/vertical/yaw velocity targets from
-/// player input when the grid is the one <see cref="GridPilotSystem"/> is piloting, zero otherwise — the
-/// grid just holds position/heading), then immediately realizing that desired force/torque by
+/// player input when the grid carries <see cref="PilotedComponent"/> (set by <see cref="GridPilotSystem"/>
+/// while it's piloting that grid), zero otherwise — the grid just holds position/heading), then
+/// immediately realizing that desired force/torque by
 /// distributing it across the grid's Fan/Buoyant blocks (or applying it directly in "free propulsion"
 /// debug mode). Previously two systems (a control system computing desired force/torque into a
 /// <c>DynamicGrid</c> field, and a propulsion system consuming it next) — merged into one because nothing
@@ -54,7 +55,6 @@ public sealed class AirshipFlightSystem : ISystem
     private readonly EntitySet       _grids;
     private readonly PhysicsWorld    _physics;
     private readonly InputManager    _input;
-    private readonly GridPilotSystem _pilot;
 
     // ── control law tuning ──────────────────────────────────────────────────
     // Self-level (pitch/roll) — always on.
@@ -97,12 +97,11 @@ public sealed class AirshipFlightSystem : ISystem
     // (delivered ≈ everything available, still short of desired).
     private float _lastDesiredForceY, _lastDeliveredForceY;
 
-    public AirshipFlightSystem(World world, PhysicsWorld physics, InputManager input, GridPilotSystem pilot)
+    public AirshipFlightSystem(World world, PhysicsWorld physics, InputManager input)
     {
         _grids   = world.GetEntities().With<DynamicGridComponent>().AsSet();
         _physics = physics;
         _input   = input;
-        _pilot   = pilot;
     }
 
     public void Update(float dt)
@@ -122,7 +121,7 @@ public sealed class AirshipFlightSystem : ISystem
             gridsProcessed++;
 
             // ── control law: this tick's desired force/torque ──────────────────
-            bool piloted = _pilot.IsPiloting(e);
+            bool piloted = e.Has<PilotedComponent>();
 
             var (pos, rot) = _physics.GetBodyPose(grid.Body);
             var linVel = _physics.GetBodyLinearVelocity(grid.Body);

@@ -11,7 +11,7 @@ public readonly struct BlockDef
     public byte            LightEmission  { get; init; } // 0-15; seeds block-light BFS when placed
     public byte            Opacity        { get; init; } // 0=transparent, 15=fully opaque (light blocked)
 
-    // Density used for dynamic-grid mass (GridShapeSystem): a box's mass = its volume * this. Air is 0;
+    // Density used for dynamic-grid mass (PhysicsBodySystem): a box's mass = its volume * this. Air is 0;
     // every solid block should be > 0 so it contributes to the compound's mass and centre of mass.
     public float            Weight         { get; init; }
 

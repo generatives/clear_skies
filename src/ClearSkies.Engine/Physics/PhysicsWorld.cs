@@ -162,7 +162,7 @@ public sealed class PhysicsWorld : ISystem, IDisposable
 
     /// <summary>
     /// Builds a dynamic compound from boxes given in the grid's local space (centre + size + mass —
-    /// callers derive mass from per-block-type density; see GridShapeSystem). Returns the shape index,
+    /// callers derive mass from per-block-type density; see PhysicsBodySystem). Returns the shape index,
     /// its computed inertia, and the centre of mass in local space. The children are recentered around
     /// the CoM by Bepu, so render offsets must subtract the same CoM.
     /// </summary>

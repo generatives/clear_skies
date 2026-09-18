@@ -12,7 +12,7 @@ public static class DynamicGridFactory
     /// <summary>
     /// Spawns a grid from an arbitrary set of grid-local voxels, centred at <paramref name="spawnWorld"/>.
     /// Registers the grid with the mesh system (so its chunks mesh; GPU lighting and body creation follow
-    /// automatically next frame via GpuLightSystem/GridShapeSystem) and marks it the Selected Grid.
+    /// automatically next frame via GpuLightSystem/PhysicsBodySystem) and marks it the Selected Grid.
     /// </summary>
     public static DynamicGrid SpawnFromVoxels(
         World world, ChunkMeshSystem meshSystem, GridSelection selection,

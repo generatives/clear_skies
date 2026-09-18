@@ -26,7 +26,7 @@ public sealed class DynamicGrid : ChunkVolume
     /// <summary>Centre of mass in grid-local space, updated on every shape rebuild. Render offsets subtract this.</summary>
     public PhysVec CenterOfMass { get; internal set; }
 
-    /// <summary>Set when block occupancy changes; consumed by GridShapeSystem to rebuild the body shape + inertia.</summary>
+    /// <summary>Set when block occupancy changes; consumed by PhysicsBodySystem to rebuild the body shape + inertia.</summary>
     public bool ShapeDirty { get; internal set; } = true;
 
     /// <summary>True while the grid is frozen in place (Phase 5.1 "lock"): its body is kinematic (zero
@@ -39,10 +39,10 @@ public sealed class DynamicGrid : ChunkVolume
     /// grid spawns locked by default; unlocked via the End key.</summary>
     public bool Locked { get; internal set; } = true;
 
-    /// <summary>Inertia last computed by GridShapeSystem from block occupancy; restored on unlock.</summary>
+    /// <summary>Inertia last computed by PhysicsBodySystem from block occupancy; restored on unlock.</summary>
     public BodyInertia Inertia { get; internal set; }
 
-    /// <summary>Count of Buoyant voxels, cached by GridShapeSystem whenever the shape rebuilds (block
+    /// <summary>Count of Buoyant voxels, cached by PhysicsBodySystem whenever the shape rebuilds (block
     /// occupancy is the only thing that changes it, so it doesn't need a per-tick scan). Read by
     /// AirshipFlightSystem to feedforward-cancel Buoyant's constant lift alongside gravity, so the
     /// vertical hold converges to true zero instead of drifting against whichever one it didn't cancel.</summary>

@@ -34,7 +34,7 @@ public sealed class GridPilotSystem : ISystem
     private readonly InputManager _input;
     private readonly PhysicsWorld _physics;
     private readonly StaticWorld  _staticWorld;
-    private readonly StaticColliderSystem _staticColliders;
+    private readonly PhysicsBodySystem _physicsBody;
 
     private readonly Entity _pilotCamera;
 
@@ -43,12 +43,12 @@ public sealed class GridPilotSystem : ISystem
     private GridCameraMode _cameraMode = GridCameraMode.ThirdPerson;
 
     public GridPilotSystem(World world, InputManager input, PhysicsWorld physics,
-                            StaticWorld staticWorld, StaticColliderSystem staticColliders)
+                            StaticWorld staticWorld, PhysicsBodySystem physicsBody)
     {
         _input           = input;
         _physics         = physics;
         _staticWorld     = staticWorld;
-        _staticColliders = staticColliders;
+        _physicsBody     = physicsBody;
         _freeFlyCameras  = world.GetEntities().With<Transform>().With<CameraComponent>().With<FreeFlyController>().AsSet();
         _selectedGrid    = world.GetEntities().With<DynamicGridComponent>().With<SelectedGridComponent>().AsSet();
 
@@ -56,10 +56,6 @@ public sealed class GridPilotSystem : ISystem
         _pilotCamera.Set(Transform.Identity);
         _pilotCamera.Set(new CameraComponent { Camera = new Camera(), Active = false });
     }
-
-    /// <summary>True if <paramref name="gridRoot"/> is the grid currently being piloted — read by
-    /// AirshipFlightSystem to decide whether to take velocity targets from player input.</summary>
-    public bool IsPiloting(Entity gridRoot) => _isPiloting && _pilotedGridRoot == gridRoot;
 
     public void Update(float dt)
     {
@@ -90,6 +86,7 @@ public sealed class GridPilotSystem : ISystem
 
             _pilotedGridRoot = e;
             _isPiloting = true;
+            e.Set(new PilotedComponent());
 
             foreach (ref readonly Entity cam in _freeFlyCameras.GetEntities())
             {
@@ -104,6 +101,8 @@ public sealed class GridPilotSystem : ISystem
 
     private void StopPiloting()
     {
+        if (_pilotedGridRoot.IsAlive) _pilotedGridRoot.Remove<PilotedComponent>();
+
         _isPiloting = false;
         _pilotedGridRoot = default;
 
@@ -214,7 +213,7 @@ public sealed class GridPilotSystem : ISystem
                     (int)MathF.Floor(pos.Y / ChunkData.Size),
                     (int)MathF.Floor(pos.Z / ChunkData.Size));
                 bool chunkLoaded = _staticWorld.IsLoaded(chunkPos);
-                bool hasCollider = _staticColliders.HasCollider(chunkPos);
+                bool hasCollider = _physicsBody.HasCollider(chunkPos);
                 ImGui.Text($"Grid's chunk {chunkPos}: loaded={chunkLoaded}  hasCollider={hasCollider}");
             }
             break;
