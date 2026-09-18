@@ -36,9 +36,15 @@ public sealed class GreedyMesher
         new(new( 0,0,-1),d:2, u:0, v:1, faceOffset:0, flip:false),  // -Z
     };
 
-    // Reusable scratch buffers — mesher is single-threaded per chunk.
+    // Reusable scratch buffers — mesher is single-threaded per chunk. verts/indices are cleared and
+    // refilled each Mesh() call rather than reallocated, so their backing arrays stabilize at whatever
+    // the largest chunk seen needs instead of re-growing (doubling + copying) from empty every call.
+    // Safe to hand back directly: callers (ChunkMeshSystem) upload the span to the GPU synchronously
+    // before this mesher is invoked again.
     private readonly MaskCell[] _mask     = new MaskCell[ChunkData.Size * ChunkData.Size];
     private readonly bool[]     _consumed = new bool    [ChunkData.Size * ChunkData.Size];
+    private readonly List<Vertex> _verts   = new();
+    private readonly List<uint>   _indices = new();
 
     private readonly TextureAtlas? _atlas;
 
@@ -49,9 +55,10 @@ public sealed class GreedyMesher
 
     /// <summary>
     /// Mesh <paramref name="chunk"/>. Neighbour ChunkData parameters are for face-culling only;
-    /// pass <c>null</c> for any unloaded neighbour (its side is treated as open air).
+    /// pass <c>null</c> for any unloaded neighbour (its side is treated as open air). The returned lists
+    /// are reused scratch buffers (see field docs) — consume them before calling Mesh() again.
     /// </summary>
-    public (Vertex[] vertices, uint[] indices) Mesh(
+    public (List<Vertex> vertices, List<uint> indices) Mesh(
         ChunkData  chunk,
         ChunkData? nX, ChunkData? pX,
         ChunkData? nY, ChunkData? pY,
@@ -60,8 +67,10 @@ public sealed class GreedyMesher
         // Array order matches Faces[] (fi=0:+X, fi=1:-X, fi=2:+Y, fi=3:-Y, fi=4:+Z, fi=5:-Z).
         ChunkData?[] neighbors = { pX, nX, pY, nY, pZ, nZ };
 
-        var verts   = new List<Vertex>();
-        var indices = new List<uint>();
+        var verts   = _verts;
+        var indices = _indices;
+        verts.Clear();
+        indices.Clear();
         int sz      = ChunkData.Size;
 
         for (int fi = 0; fi < Faces.Length; fi++)
@@ -157,25 +166,29 @@ public sealed class GreedyMesher
             }
         }
 
-        return (verts.ToArray(), indices.ToArray());
+        return (verts, indices);
     }
 
+    // face.D/U/V are always a permutation of {0,1,2} (x,y,z); resolving the three coordinates with a
+    // direct branch instead of a stackalloc'd Span avoids a per-voxel indirect-index round trip in what
+    // is by far the hottest loop in meshing (called twice — self + adjacent — for every voxel of every
+    // slice of every face: 6 * 32 * 32 * 32 = ~196k times per chunk).
     private static BlockId GetBlock(ChunkData chunk, in FaceDesc face, int slice, int u, int v)
     {
-        Span<int> p = stackalloc int[3];
-        p[face.D] = slice;
-        p[face.U] = u;
-        p[face.V] = v;
-        return chunk.Get(p[0], p[1], p[2]);
+        int x, y, z;
+        if (face.D == 0)      { x = slice; y = u; z = v; }
+        else if (face.D == 1) { y = slice; x = u; z = v; }
+        else                  { z = slice; x = u; y = v; }
+        return chunk.Get(x, y, z);
     }
 
     private static Facing GetFacing(ChunkData chunk, in FaceDesc face, int slice, int u, int v)
     {
-        Span<int> p = stackalloc int[3];
-        p[face.D] = slice;
-        p[face.U] = u;
-        p[face.V] = v;
-        return chunk.GetFacing(p[0], p[1], p[2]);
+        int x, y, z;
+        if (face.D == 0)      { x = slice; y = u; z = v; }
+        else if (face.D == 1) { y = slice; x = u; z = v; }
+        else                  { z = slice; x = u; y = v; }
+        return chunk.GetFacing(x, y, z);
     }
 
     private static void EmitQuad(
@@ -235,11 +248,11 @@ public sealed class GreedyMesher
 
     private static Vector3D<float> MakePos(in FaceDesc face, int fp, int u, int v)
     {
-        Span<float> p = stackalloc float[3];
-        p[face.D] = fp;
-        p[face.U] = u;
-        p[face.V] = v;
-        return new(p[0], p[1], p[2]);
+        float x, y, z;
+        if (face.D == 0)      { x = fp; y = u; z = v; }
+        else if (face.D == 1) { y = fp; x = u; z = v; }
+        else                  { z = fp; x = u; y = v; }
+        return new(x, y, z);
     }
 
     private readonly struct FaceDesc
