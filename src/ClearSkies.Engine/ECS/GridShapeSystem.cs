@@ -35,7 +35,7 @@ public sealed class GridShapeSystem : ISystem
             // Gather merged boxes across all chunks, expressed in grid-local space. Each box is
             // homogeneous in BlockId (see VoxelBoxDecomposer), so its mass is volume * that block's
             // Weight — real per-block-type density instead of uniform volume. Also tally Buoyant voxel
-            // count here (AirshipControlSystem's feedforward) since we're already walking every box.
+            // count here (AirshipFlightSystem's feedforward) since we're already walking every box.
             _boxes.Clear();
             int buoyantCount = 0;
             foreach (var (pos, entry) in grid.All)

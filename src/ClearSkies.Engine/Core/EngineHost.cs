@@ -39,7 +39,7 @@ public sealed class EngineHost : IDisposable
         Time = new Time();
         // Milestone 5 airships need real gravity for weight/lift to mean anything (a Buoyant block
         // counteracting nothing is meaningless). Gentler than Earth to fit the "magical steampunk sky
-        // world" and give Fan/Buoyant tuning room (see AirshipPropulsionSystem's debug sliders).
+        // world" and give Fan/Buoyant tuning room (see AirshipFlightSystem's debug sliders).
         Physics = new PhysicsWorld(new System.Numerics.Vector3(0f, -6f, 0f), Time.FixedStep);
         Gui = new ImGuiController(Renderer, Input);
 

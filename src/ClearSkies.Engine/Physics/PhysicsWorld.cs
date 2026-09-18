@@ -103,7 +103,7 @@ public sealed class PhysicsWorld : ISystem, IDisposable
 
     /// <summary>Applies an impulse at a world-space offset from the body's centre of mass, inducing
     /// torque for free (torque impulse = offset × impulse, converted to an angular velocity change via
-    /// the body's current world inverse inertia tensor). Used by AirshipPropulsionSystem so a Fan or
+    /// the body's current world inverse inertia tensor). Used by AirshipFlightSystem so a Fan or
     /// Buoyant block's own position drives both translation and rotation.</summary>
     public void ApplyLinearImpulse(BodyHandle handle, Vector3 impulse, Vector3 worldOffsetFromCenterOfMass)
     {

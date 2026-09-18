@@ -1,5 +1,4 @@
 using ClearSkies.Engine.Core;
-using ClearSkies.Engine.Gui;
 using ClearSkies.Engine.Input;
 using ClearSkies.Engine.Math;
 using ClearSkies.Engine.Physics;
@@ -24,7 +23,7 @@ public enum GridCameraMode { ThirdPerson, Locked }
 /// raycasts from it) that is toggled <see cref="CameraComponent.Active"/> in place of the free-fly
 /// camera while piloting — the single-active-camera convention already used everywhere else.
 /// </summary>
-public sealed class GridPilotSystem : ISystem, IDebugUiSystem
+public sealed class GridPilotSystem : ISystem
 {
     private const float ThirdPersonBack = 16f;
     private const float ThirdPersonUp   = 8f;
@@ -59,7 +58,7 @@ public sealed class GridPilotSystem : ISystem, IDebugUiSystem
     }
 
     /// <summary>True if <paramref name="gridRoot"/> is the grid currently being piloted — read by
-    /// AirshipControlSystem to decide whether to take velocity targets from player input.</summary>
+    /// AirshipFlightSystem to decide whether to take velocity targets from player input.</summary>
     public bool IsPiloting(Entity gridRoot) => _isPiloting && _pilotedGridRoot == gridRoot;
 
     public void Update(float dt)
@@ -185,8 +184,7 @@ public sealed class GridPilotSystem : ISystem, IDebugUiSystem
     }
 
     // ── debug UI ─────────────────────────────────────────────────────────────
-    public string DebugName => "Grid Pilot";
-
+    // Drawn as a section inside AirshipDebugPanel's combined "Airship" window, not its own panel.
     public void DrawDebugUi()
     {
         ImGui.Text(_isPiloting ? $"Piloting — camera: {_cameraMode}" : "Not piloting");

@@ -20,7 +20,7 @@ public static class BlockRegistry
             Texture = "wood" });
 
         // Milestone 5: minimal airship blocks. Fan applies thrust along its Facing; Buoyant applies
-        // constant passive lift. See AirshipPropulsionSystem / AirshipControlSystem. Fan's thrust-exit
+        // constant passive lift. See AirshipFlightSystem. Fan's thrust-exit
         // face (its Top, which BlockDef orients to wherever the voxel's Facing points) gets a distinct
         // texture so you can see which way it'll push just by looking at it; every other face uses the
         // plain metal housing.

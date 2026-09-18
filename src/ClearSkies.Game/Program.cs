@@ -29,22 +29,23 @@ host.AddSystem(staticColliders, SystemStage.Logic);
 host.AddSystem(new GridShapeSystem(host.World, host.Physics), SystemStage.Logic);
 host.AddSystem(new PlayerGridControlSystem(host.World, host.Physics, host.Input), SystemStage.Logic);
 
-// Milestone 5: airship control (desired-velocity law) + propulsion (Fan/Buoyant impulses), both before
-// the physics step so their impulses are integrated this same tick. gridPilot/airshipPropulsion are
-// constructed here (they need to exist for AirshipControlSystem's constructor) but registered later —
-// gridPilot after the grid pose for this frame is fresh (no one-frame camera-follow lag), and
-// airshipPropulsion after AirshipControlSystem so its Fan-block allocation sees this tick's fresh
-// DesiredForce/Torque, not last tick's.
+// Milestone 5: airship flight (velocity control law + Fan/Buoyant propulsion, merged into one system —
+// see AirshipFlightSystem), before the physics step so its impulses are integrated this same tick.
+// gridPilot is constructed here (needed for AirshipFlightSystem's constructor) but registered later, once
+// the grid pose for this frame is fresh (no one-frame camera-follow lag).
 var gridPilot = new GridPilotSystem(host.World, host.Input, host.Physics, staticWorld, staticColliders);
-var airshipPropulsion = new AirshipPropulsionSystem(host.World, host.Physics);
-host.AddSystem(new AirshipControlSystem(host.World, host.Physics, host.Input, gridPilot, airshipPropulsion), SystemStage.Logic);
-host.AddSystem(airshipPropulsion, SystemStage.Logic);
+var airshipFlight = new AirshipFlightSystem(host.World, host.Physics, host.Input, gridPilot);
+host.AddSystem(airshipFlight, SystemStage.Logic);
 
 host.AddSystem(host.Physics, SystemStage.Logic); // steps the simulation once bodies/impulses for this frame are in
 host.AddSystem(new GridTransformSystem(host.World, host.Physics), SystemStage.Logic);
 host.AddSystem(gridPilot, SystemStage.Logic);
 host.AddSystem(new PlayerInputSystem(host.World, staticWorld, host.Physics, host.Input, meshSystem, host.Renderer, gridSelection), SystemStage.Logic);
-host.AddSystem(new GridPersistenceSystem(host.World, meshSystem, host.Physics, gridSelection), SystemStage.Logic);
+var gridPersistence = new GridPersistenceSystem(host.World, meshSystem, host.Physics, gridSelection);
+host.AddSystem(gridPersistence, SystemStage.Logic);
+// The airship-related debug panels above (Pilot/Flight/Save-Load) drew into their own separate "Systems"
+// menu windows; combined here into one "Airship" window so they read as one feature.
+host.AddSystem(new AirshipDebugPanel(gridPilot, airshipFlight, gridPersistence), SystemStage.Logic);
 host.AddSystem(new LambdaSystem(() =>
 {
     if (host.Input.WasKeyPressed(Key.Tab))

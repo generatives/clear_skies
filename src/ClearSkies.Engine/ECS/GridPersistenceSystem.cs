@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using ClearSkies.Engine.Core;
-using ClearSkies.Engine.Gui;
 using ClearSkies.Engine.Physics;
 using ClearSkies.Engine.Voxels;
 using DefaultEcs;
@@ -16,7 +15,7 @@ namespace ClearSkies.Engine.ECS;
 /// grid back in, spawned in front of the player (same placement as the G-key spawn). All work happens
 /// inside DrawDebugUi in response to button clicks — there is no continuous per-frame Update logic.
 /// </summary>
-public sealed class GridPersistenceSystem : ISystem, IDebugUiSystem
+public sealed class GridPersistenceSystem : ISystem
 {
     private readonly World _world;
     private readonly ChunkMeshSystem _meshSystem;
@@ -48,8 +47,7 @@ public sealed class GridPersistenceSystem : ISystem, IDebugUiSystem
     public void Update(float dt) { } // all work is UI-button-driven; see DrawDebugUi.
 
     // ── debug UI ─────────────────────────────────────────────────────────────
-    public string DebugName => "Grid Save/Load";
-
+    // Drawn as a section inside AirshipDebugPanel's combined "Airship" window, not its own panel.
     public void DrawDebugUi()
     {
         bool hasSelection = TryGetSelectedGrid(out _);

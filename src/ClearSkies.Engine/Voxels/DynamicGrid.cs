@@ -42,14 +42,9 @@ public sealed class DynamicGrid : ChunkVolume
     /// <summary>Inertia last computed by GridShapeSystem from block occupancy; restored on unlock.</summary>
     public BodyInertia Inertia { get; internal set; }
 
-    /// <summary>World-space force/torque AirshipControlSystem wants this tick. Transient — recomputed
-    /// every tick and consumed the same tick by AirshipPropulsionSystem; meaningless between ticks.</summary>
-    public PhysVec DesiredForce { get; internal set; }
-    public PhysVec DesiredTorque { get; internal set; }
-
     /// <summary>Count of Buoyant voxels, cached by GridShapeSystem whenever the shape rebuilds (block
     /// occupancy is the only thing that changes it, so it doesn't need a per-tick scan). Read by
-    /// AirshipControlSystem to feedforward-cancel Buoyant's constant lift alongside gravity, so the
+    /// AirshipFlightSystem to feedforward-cancel Buoyant's constant lift alongside gravity, so the
     /// vertical hold converges to true zero instead of drifting against whichever one it didn't cancel.</summary>
     public int BuoyantBlockCount { get; internal set; }
 
