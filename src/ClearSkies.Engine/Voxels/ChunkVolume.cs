@@ -70,12 +70,12 @@ public class ChunkVolume
         return GetData(cp)?.Get(lx, ly, lz) ?? BlockId.Air;
     }
 
-    public virtual void SetBlock(int x, int y, int z, BlockId id)
+    public virtual void SetBlock(int x, int y, int z, BlockId id, Facing facing = Facing.Up)
     {
         var (cp, lx, ly, lz) = Decompose(x, y, z);
         if (!_chunks.TryGetValue(cp, out var entry)) return;
 
-        entry.Data.Set(lx, ly, lz, id);
+        entry.Data.Set(lx, ly, lz, id, facing);
         entry.NeedsRemesh    = true;
         entry.NeedsRecollide = true;
         entry.NeedsGpuUpload = true;

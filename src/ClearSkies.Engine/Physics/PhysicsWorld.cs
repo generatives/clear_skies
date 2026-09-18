@@ -27,12 +27,14 @@ public sealed class PhysicsWorld : ISystem, IDisposable
     private const int MaxStepsPerFrame = 5;
 
     public Simulation Simulation { get; }
+    public Vector3 Gravity { get; }
     private readonly BufferPool _pool = new();
     private readonly float _fixedStep;
     private float _accumulator;
 
     public PhysicsWorld(Vector3 gravity, float fixedStep)
     {
+        Gravity = gravity;
         _fixedStep = fixedStep;
         Simulation = Simulation.Create(
             _pool,
@@ -99,6 +101,38 @@ public sealed class PhysicsWorld : ISystem, IDisposable
         body.ApplyLinearImpulse(impulse);
     }
 
+    /// <summary>Applies an impulse at a world-space offset from the body's centre of mass, inducing
+    /// torque for free (torque impulse = offset × impulse, converted to an angular velocity change via
+    /// the body's current world inverse inertia tensor). Used by AirshipPropulsionSystem so a Fan or
+    /// Buoyant block's own position drives both translation and rotation.</summary>
+    public void ApplyLinearImpulse(BodyHandle handle, Vector3 impulse, Vector3 worldOffsetFromCenterOfMass)
+    {
+        var body = Simulation.Bodies[handle];
+        body.Awake = true;
+        body.ApplyLinearImpulse(impulse);
+        body.ApplyAngularImpulse(Vector3.Cross(worldOffsetFromCenterOfMass, impulse));
+    }
+
+    public Vector3 GetBodyLinearVelocity(BodyHandle handle)  => Simulation.Bodies[handle].Velocity.Linear;
+    public Vector3 GetBodyAngularVelocity(BodyHandle handle) => Simulation.Bodies[handle].Velocity.Angular;
+
+    /// <summary>Applies a pure torque impulse at the body's centre of mass (no linear effect). Used by
+    /// the "free propulsion" debug mode to move a grid directly from its desired force/torque, without
+    /// needing Fan blocks to realize it.</summary>
+    public void ApplyAngularImpulse(BodyHandle handle, Vector3 angularImpulse)
+    {
+        var body = Simulation.Bodies[handle];
+        body.Awake = true;
+        body.ApplyAngularImpulse(angularImpulse);
+    }
+
+    public void SetBodyAngularVelocity(BodyHandle handle, Vector3 angularVelocity)
+    {
+        var body = Simulation.Bodies[handle];
+        body.Velocity.Angular = angularVelocity;
+        body.Awake = true;
+    }
+
     /// <summary>Zeroes a body's linear and angular velocity (and keeps it awake).</summary>
     public void StopBody(BodyHandle handle)
     {
@@ -108,25 +142,36 @@ public sealed class PhysicsWorld : ISystem, IDisposable
         body.Awake = true;
     }
 
+    /// <summary>Toggles a body between kinematic (zero inverse mass/inertia — ignores gravity and
+    /// impulses, per <see cref="VoxelPoseCallbacks.IntegrateVelocityForKinematics"/>) and dynamic.
+    /// Zeroes velocity either way. <paramref name="dynamicInertia"/> is only used when un-locking
+    /// (<paramref name="kinematic"/> false) — pass the inertia last computed for this body's shape.</summary>
+    public void SetBodyKinematic(BodyHandle handle, bool kinematic, BodyInertia dynamicInertia)
+    {
+        var body = Simulation.Bodies[handle];
+        body.Velocity.Linear  = Vector3.Zero;
+        body.Velocity.Angular = Vector3.Zero;
+        body.SetLocalInertia(kinematic ? default : dynamicInertia);
+        body.Awake = true;
+    }
+
     // ── Dynamic compounds (voxel grids) ──────────────────────────────────────────
 
     // Tracks the children buffer for each compound shape so it can be torn down on rebuild/removal.
     private readonly Dictionary<uint, Buffer<CompoundChild>> _compoundChildren = new();
 
     /// <summary>
-    /// Builds a dynamic compound from boxes given in the grid's local space (centre + size). Returns the
-    /// shape index, its computed inertia, and the centre of mass in local space. The children are
-    /// recentered around the CoM by Bepu, so render offsets must subtract the same CoM.
+    /// Builds a dynamic compound from boxes given in the grid's local space (centre + size + mass —
+    /// callers derive mass from per-block-type density; see GridShapeSystem). Returns the shape index,
+    /// its computed inertia, and the centre of mass in local space. The children are recentered around
+    /// the CoM by Bepu, so render offsets must subtract the same CoM.
     /// </summary>
     public (TypedIndex shape, BodyInertia inertia, Vector3 centerOfMass) BuildDynamicCompound(
-        IReadOnlyList<(Vector3 center, Vector3 size)> boxes)
+        IReadOnlyList<(Vector3 center, Vector3 size, float mass)> boxes)
     {
         using var builder = new CompoundBuilder(_pool, Simulation.Shapes, boxes.Count);
-        foreach (var (center, size) in boxes)
-        {
-            float weight = size.X * size.Y * size.Z; // uniform density
-            builder.Add(new Box(size.X, size.Y, size.Z), new RigidPose(center), weight);
-        }
+        foreach (var (center, size, mass) in boxes)
+            builder.Add(new Box(size.X, size.Y, size.Z), new RigidPose(center), mass);
         builder.BuildDynamicCompound(out var children, out var inertia, out var centerOfMass);
 
         var shape = Simulation.Shapes.Add(new Compound(children));
@@ -149,7 +194,10 @@ public sealed class PhysicsWorld : ISystem, IDisposable
     {
         var body = Simulation.Bodies[handle];
         body.SetShape(shape);
-        body.LocalInertia = inertia;
+        // SetLocalInertia, not the LocalInertia property (a raw ref-return onto the body's memory) —
+        // see SetBodyKinematic's note; this path also crosses the kinematic/dynamic boundary whenever
+        // a locked grid's shape is rebuilt (block edit), so it needs the same proper transition call.
+        body.SetLocalInertia(inertia);
         body.Awake = true;
     }
 
@@ -198,7 +246,10 @@ public sealed class PhysicsWorld : ISystem, IDisposable
     }
 }
 
-/// <summary>Material + filtering rules. Permissive: any pair involving a dynamic body collides.</summary>
+/// <summary>Material + filtering rules. Fully permissive — every candidate pair the broad phase hands
+/// us generates contacts (it already excludes static-static pairs on its own, since neither side can
+/// move). Was previously gated on "at least one side is Dynamic," written before locked (kinematic)
+/// grids existed; that gate silently dropped Kinematic-vs-Static contacts.</summary>
 internal struct VoxelNarrowPhaseCallbacks : INarrowPhaseCallbacks
 {
     public SpringSettings ContactSpringiness;
@@ -224,7 +275,7 @@ internal struct VoxelNarrowPhaseCallbacks : INarrowPhaseCallbacks
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public readonly bool AllowContactGeneration(int workerIndex, CollidableReference a, CollidableReference b, ref float speculativeMargin)
-        => a.Mobility == CollidableMobility.Dynamic || b.Mobility == CollidableMobility.Dynamic;
+        => true;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public readonly bool AllowContactGeneration(int workerIndex, CollidablePair pair, int childIndexA, int childIndexB)

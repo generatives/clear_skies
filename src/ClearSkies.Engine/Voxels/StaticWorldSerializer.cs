@@ -3,15 +3,15 @@ using System.IO;
 namespace ClearSkies.Engine.Voxels;
 
 /// <summary>
-/// Reads/writes a single static-world chunk's raw 32x32x32 block array to/from a small binary format.
-/// One file per chunk; the chunk position is implied entirely by the filename (see
+/// Reads/writes a single static-world chunk's raw 32x32x32 block (+ facing, since v2) array to/from a
+/// small binary format. One file per chunk; the chunk position is implied entirely by the filename (see
 /// <see cref="StaticWorld"/>), so no position is stored in the payload itself.
 /// </summary>
 internal static class StaticWorldSerializer
 {
     // "CSCD" ClearSkies Chunk Data — 4 literal ASCII bytes so the format is identifiable in a hex viewer.
     private static readonly byte[] Magic = { (byte)'C', (byte)'S', (byte)'C', (byte)'D' };
-    private const ushort Version = 1;
+    private const ushort Version = 2; // v1: blocks only. v2: + a facing byte per voxel.
     private const int PayloadBytes = ChunkData.Size * ChunkData.Size * ChunkData.Size;
 
     public static void Save(ChunkData data, string filePath)
@@ -20,7 +20,8 @@ internal static class StaticWorldSerializer
         using var bw = new BinaryWriter(fs);
         bw.Write(Magic);
         bw.Write(Version);
-        bw.Write(data.AsBytes());
+        bw.Write(data.BlocksAsBytes());
+        bw.Write(data.FacingsAsBytes());
     }
 
     /// <summary>Loads bytes into <paramref name="data"/> in place. Returns false (leaving
@@ -36,14 +37,22 @@ internal static class StaticWorldSerializer
             throw new InvalidDataException($"Not a ClearSkies chunk file: {filePath}");
 
         ushort version = br.ReadUInt16();
-        if (version != Version)
+        if (version != 1 && version != Version)
             throw new InvalidDataException($"Unsupported chunk save version {version}: {filePath}");
 
-        byte[] payload = br.ReadBytes(PayloadBytes);
-        if (payload.Length != PayloadBytes)
-            throw new InvalidDataException($"Truncated chunk file (expected {PayloadBytes} bytes, got {payload.Length}): {filePath}");
+        byte[] blockPayload = br.ReadBytes(PayloadBytes);
+        if (blockPayload.Length != PayloadBytes)
+            throw new InvalidDataException($"Truncated chunk file (expected {PayloadBytes} bytes, got {blockPayload.Length}): {filePath}");
+        data.LoadBlockBytes(blockPayload);
 
-        data.LoadBytes(payload);
+        if (version >= 2)
+        {
+            byte[] facingPayload = br.ReadBytes(PayloadBytes);
+            if (facingPayload.Length == PayloadBytes)
+                data.LoadFacingBytes(facingPayload);
+        }
+        // v1 files have no facing payload — every voxel keeps ChunkData's default facing.
+
         return true;
     }
 

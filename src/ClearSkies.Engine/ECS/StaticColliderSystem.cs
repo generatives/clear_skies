@@ -1,8 +1,10 @@
 using System.Diagnostics;
 using BepuPhysics;
 using ClearSkies.Engine.Core;
+using ClearSkies.Engine.Gui;
 using ClearSkies.Engine.Physics;
 using ClearSkies.Engine.Voxels;
+using ImGuiNET;
 using PhysVec = System.Numerics.Vector3;
 
 namespace ClearSkies.Engine.ECS;
@@ -13,7 +15,7 @@ namespace ClearSkies.Engine.ECS;
 /// boxes via <see cref="VoxelBoxDecomposer"/>. Owns the per-chunk <see cref="StaticHandle"/> lists
 /// itself and reconciles them against the loaded set, so chunk unloads need no physics coupling.
 /// </summary>
-public sealed class StaticColliderSystem : ISystem
+public sealed class StaticColliderSystem : ISystem, IDebugUiSystem
 {
     private const int CollidersPerFrame = 4;
 
@@ -51,7 +53,7 @@ public sealed class StaticColliderSystem : ISystem
                 var boxes = _decomposer.Decompose(entry.Data);
                 handles ??= new List<StaticHandle>();
                 var o = pos.WorldOrigin;
-                _physics.AddStaticBoxes(boxes, new PhysVec(o.X, o.Y, o.Z), handles);
+                _physics.AddStaticBoxes(boxes.ConvertAll(b => (b.center, b.size)), new PhysVec(o.X, o.Y, o.Z), handles);
                 long ms = _sw.ElapsedMilliseconds;
 
                 _colliders[pos] = handles;
@@ -81,5 +83,23 @@ public sealed class StaticColliderSystem : ISystem
             _colliders.Remove(pos);
         }
         _stale.Clear();
+    }
+
+    /// <summary>True if <paramref name="pos"/> currently has at least one static collider box
+    /// registered. Used by GridPilotSystem's diagnostics to check whether the ground under a falling
+    /// grid is actually collidable, as opposed to just loaded/rendered.</summary>
+    public bool HasCollider(ChunkPosition pos) => _colliders.TryGetValue(pos, out var h) && h.Count > 0;
+
+    // ── debug UI ─────────────────────────────────────────────────────────────
+    public string DebugName => "Static Colliders";
+
+    public void DrawDebugUi()
+    {
+        int totalBoxes = 0;
+        foreach (var handles in _colliders.Values) totalBoxes += handles.Count;
+
+        ImGui.Text($"Chunks with colliders: {_colliders.Count}");
+        ImGui.Text($"Total static collider boxes: {totalBoxes}");
+        ImGui.Text($"Chunks built (lifetime): {_totalBuilt}");
     }
 }

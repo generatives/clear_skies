@@ -124,61 +124,59 @@ Minecraft-style per-voxel lighting extended to the dynamic voxel grids built in 
 
 ---
 
-## Milestone 5: Multiplayer
+## Milestone 5: First Airship Systems
 
-Add a client-server architecture. All prior systems become authoritative on the server. This comes before airships so the airship simulation (Milestone 6) is built server-authoritative from the start rather than retrofitted onto single-player code.
+Layer game logic on top of dynamic voxel grids to make airships fly. This is a prototype/debug level system so there isn't a power network, limited fuel, many block types, etc.
 
-### Phase 5.1 — Network Architecture
+### Phase 5.1 — Debug Control
+- A way of "taking control" of a Dyamic Grid
+- Two camera options: a "third person" above and behind the grid and another that locks the camera in place relative to the grid as it moves
+- A key press to enable
+- A way of "locking" a dynamic grid so it stops moving around. Also a way of righting a grid (resetting rotation)
+
+### Phase 5.3 — Lift & Thrust Blocks
+- Buoyant Block: applies upward force proportional to block count
+- Fan: applies horizontal force in block's facing direction
+- Debug UI elements to control force generated, per block
+- We will need to add the concept of block rotation
+- We will need to add an "block entity" concept to allow some blocks to have extended state. This state should be handled when saving and loading 
+
+### Phase 5.4 — Control System
+- When a dynamic grid is "active" the various fans should be used to stabilize the ship, both in rotation and position
+- When the player enters control mode the fans should be used to execute the player's control inputs
+
+### Phase 5.5 — Airship Feel & Tuning
+- Mass distribution calculated from block positions (centre of mass)
+- Tune lift/drag constants so ships feel weighty but controllable
+- Test with asymmetric builds to verify tilt and stabilizer response
+
+**Milestone 5 exit criterion:** Build an airship in-world, power it up, and pilot it between two islands — with a second player aboard seeing the ride in sync.
+
+---
+
+## Milestone 6: Multiplayer
+
+Add a client-server architecture. All prior systems become authoritative on the server. This comes after airships so the airship simulation (Milestone 5) is built so we have meaningful game features to design the system around.
+
+### Phase 6.1 — Network Architecture
 - Split the single `Game` executable (from Milestone 1) into `Client` and `Server` projects over the shared `Engine`/`Game` code
 - Define client/server roles: server owns simulation; clients send input, receive state
 - Choose transport (e.g. Silk.NET networking or a standalone library like LiteNetLib)
 - Connect two clients; sync a moving rigid body
 
-### Phase 5.2 — World State Sync
+### Phase 6.2 — World State Sync
 - Chunk data: server streams chunks to clients on enter; delta-sync block changes
 - Dynamic grid sync: server sends transform + block state; clients interpolate
 
-### Phase 5.3 — Player & Input
+### Phase 6.3 — Player & Input
 - Server-authoritative player positions with client-side prediction
 - General input forwarded to server; server applies to the simulation (extended to airship controls in Milestone 6)
 
-### Phase 5.4 — Latency Hiding
+### Phase 6.4 — Latency Hiding
 - Client-side interpolation for remote entities
 - Lag compensation for block placement raycasts
 
-**Milestone 5 exit criterion:** Two players on the same server move through a shared world, edit blocks, and see each other and a shared dynamic grid moving in real time.
-
----
-
-## Milestone 6: Airship Systems
-
-Layer game logic on top of dynamic voxel grids to make airships fly. All simulation runs server-authoritative on the foundation from Milestone 5; control input arrives over the network.
-
-### Phase 6.1 — Power System
-- `PowerNetwork` component attached to each `DynamicGrid`
-- Blocks register as producers (Engine, Magic Generator) or consumers (Fan, Jet, etc.)
-- Fuel inventory; engines burn fuel to charge batteries; batteries discharge to consumers
-- Power availability gates whether a consumer block is active
-
-### Phase 6.2 — Lift & Thrust Blocks
-- Buoyant Block: applies upward force proportional to block count
-- Magic Levitator: alternative arcane lift source
-- Fan: applies horizontal force in block's facing direction
-- Jet: higher-force directional thrust, higher power cost
-
-### Phase 6.3 — Control Blocks
-- Stabilizer: PID controller applying torque to counteract tilt
-- Height Controller: drives lift blocks to hold target altitude
-- Heading Controller: drives fans/jets to hold target heading
-- Speed Controller: drives thrust to hold target speed
-- Pilot Block: player entity attaches here; manual control input (forwarded via Milestone 5's input path) overrides controllers
-
-### Phase 6.4 — Airship Feel & Tuning
-- Mass distribution calculated from block positions (centre of mass)
-- Tune lift/drag constants so ships feel weighty but controllable
-- Test with asymmetric builds to verify tilt and stabilizer response
-
-**Milestone 6 exit criterion:** Build an airship in-world, power it up, and pilot it between two islands — with a second player aboard seeing the ride in sync.
+**Milestone 6 exit criterion:** Two players on the same server move through a shared world, edit blocks, and see each other and a shared dynamic grid moving in real time.
 
 ---
 

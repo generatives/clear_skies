@@ -47,8 +47,15 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
     public Vector3D<int>? TargetBlock  { get; private set; }
     public Vector3D<int>? TargetNormal { get; private set; }
 
-    // Block placed by right-click; toggle Stone/Wood/Lamp with the L key (Lamp tests block-light flood).
-    private BlockId _placeBlock = BlockId.Stone;
+    // Block placed by left-click on an air cell. Cycle with L, or pick directly from the "Place block"
+    // dropdown in DrawDebugUi — both keep _placeIndex/_placeBlock in sync.
+    private static readonly BlockId[] PlaceableBlocks =
+        { BlockId.Stone, BlockId.Wood, BlockId.Grass, BlockId.Dirt, BlockId.Lamp, BlockId.Fan, BlockId.Buoyant };
+    private static readonly string[] PlaceableNames =
+        Array.ConvertAll(PlaceableBlocks, id => BlockRegistry.Get(id).Name);
+
+    private int _placeIndex = 0; // index into PlaceableBlocks
+    private BlockId _placeBlock = PlaceableBlocks[0];
 
     public PlayerInputSystem(World world, StaticWorld staticWorld, PhysicsWorld physics, InputManager input,
                               ChunkMeshSystem meshSystem, Renderer renderer, GridSelection selection)
@@ -86,7 +93,9 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
     public void DrawDebugUi()
     {
         ImGui.Text(TargetBlock is { } b ? $"Target: ({b.X}, {b.Y}, {b.Z})" : "Target: none");
-        ImGui.Text($"Place block: {_placeBlock}");
+        if (ImGui.Combo("Place block", ref _placeIndex, PlaceableNames, PlaceableNames.Length))
+            _placeBlock = PlaceableBlocks[_placeIndex];
+        ImGui.TextDisabled("(or press L to cycle)");
     }
 
     // ── Movement + camera ────────────────────────────────────────────────────
@@ -105,6 +114,11 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
 
         foreach (ref readonly Entity e in _cameras.GetEntities())
         {
+            // Skip the free-fly camera while it isn't the active render camera (e.g. while piloting a
+            // grid) — otherwise it keeps reading the same WASD/mouse input in the background and drifts
+            // far away, so releasing control (GridPilotSystem re-activating it) "teleports" the view.
+            if (!e.Get<CameraComponent>().Active) continue;
+
             ref var t = ref e.Get<Transform>();
             ref var c = ref e.Get<FreeFlyController>();
 
@@ -218,12 +232,8 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
 
         if (_input.WasKeyPressed(Key.L))
         {
-            _placeBlock = _placeBlock switch
-            {
-                BlockId.Stone => BlockId.Wood,
-                BlockId.Wood  => BlockId.Lamp,
-                _             => BlockId.Stone,
-            };
+            _placeIndex = (_placeIndex + 1) % PlaceableBlocks.Length;
+            _placeBlock = PlaceableBlocks[_placeIndex];
             Console.WriteLine($"[place] selected block: {_placeBlock}");
         }
 
@@ -232,7 +242,11 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
             var t = bestBlock + bestNormal;
             if (bestVolume.GetBlock(t.X, t.Y, t.Z) == BlockId.Air)
             {
-                bestVolume.SetBlock(t.X, t.Y, t.Z, _placeBlock);
+                // Facing = away from the face it was placed on (bestNormal already is exactly one of
+                // the 6 axis directions), so e.g. a Fan placed against a ship's east wall faces east —
+                // away from the ship, not wherever the camera happened to be pointed.
+                var facing = FacingExtensions.FromNormal(bestNormal);
+                bestVolume.SetBlock(t.X, t.Y, t.Z, _placeBlock, facing);
                 if (bestIsGrid) _selection.Select(bestGridEntity);
                 Console.WriteLine($"[place] {_placeBlock} in {(bestIsGrid ? "grid" : "world")} ({t.X},{t.Y},{t.Z})");
             }

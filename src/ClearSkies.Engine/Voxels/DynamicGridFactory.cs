@@ -16,13 +16,13 @@ public static class DynamicGridFactory
     /// </summary>
     public static DynamicGrid SpawnFromVoxels(
         World world, ChunkMeshSystem meshSystem, GridSelection selection,
-        PhysVec spawnWorld, IEnumerable<(int X, int Y, int Z, BlockId Id)> voxels)
+        PhysVec spawnWorld, IEnumerable<(int X, int Y, int Z, BlockId Id, Facing Facing)> voxels)
     {
         var grid = new DynamicGrid(world, spawnWorld);
-        foreach (var (x, y, z, id) in voxels)
+        foreach (var (x, y, z, id, facing) in voxels)
         {
             if (id == BlockId.Air) continue; // defensive; saved files shouldn't contain air entries
-            grid.SetBlock(x, y, z, id);
+            grid.SetBlock(x, y, z, id, facing);
         }
         meshSystem.RegisterVolume(grid);
         selection.Select(grid.Root);
@@ -33,8 +33,8 @@ public static class DynamicGridFactory
     /// <paramref name="spawnWorld"/>.</summary>
     public static DynamicGrid SpawnSingleBlock(
         World world, ChunkMeshSystem meshSystem, GridSelection selection,
-        PhysVec spawnWorld, BlockId block)
-        => SpawnFromVoxels(world, meshSystem, selection, spawnWorld, new[] { (0, 0, 0, block) });
+        PhysVec spawnWorld, BlockId block, Facing facing = Facing.Up)
+        => SpawnFromVoxels(world, meshSystem, selection, spawnWorld, new[] { (0, 0, 0, block, facing) });
 
     /// <summary>
     /// Tears a grid down: unregisters it from meshing, removes its physics body and shape (if a body

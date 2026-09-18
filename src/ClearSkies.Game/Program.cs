@@ -22,12 +22,27 @@ var gridSelection = new GridSelection(host.World);
 
 host.AddSystem(host.Gui, SystemStage.Input); // opens ImGui's frame before Logic/PreRender systems run
 
+var staticColliders = new StaticColliderSystem(staticWorld, host.Physics);
+
 host.AddSystem(new ChunkLoadSystem(host.World, staticWorld, worldGen, xzRadius: 3, yRadius: 2), SystemStage.Logic);
-host.AddSystem(new StaticColliderSystem(staticWorld, host.Physics), SystemStage.Logic);
+host.AddSystem(staticColliders, SystemStage.Logic);
 host.AddSystem(new GridShapeSystem(host.World, host.Physics), SystemStage.Logic);
 host.AddSystem(new PlayerGridControlSystem(host.World, host.Physics, host.Input), SystemStage.Logic);
+
+// Milestone 5: airship control (desired-velocity law) + propulsion (Fan/Buoyant impulses), both before
+// the physics step so their impulses are integrated this same tick. gridPilot/airshipPropulsion are
+// constructed here (they need to exist for AirshipControlSystem's constructor) but registered later —
+// gridPilot after the grid pose for this frame is fresh (no one-frame camera-follow lag), and
+// airshipPropulsion after AirshipControlSystem so its Fan-block allocation sees this tick's fresh
+// DesiredForce/Torque, not last tick's.
+var gridPilot = new GridPilotSystem(host.World, host.Input, host.Physics, staticWorld, staticColliders);
+var airshipPropulsion = new AirshipPropulsionSystem(host.World, host.Physics);
+host.AddSystem(new AirshipControlSystem(host.World, host.Physics, host.Input, gridPilot, airshipPropulsion), SystemStage.Logic);
+host.AddSystem(airshipPropulsion, SystemStage.Logic);
+
 host.AddSystem(host.Physics, SystemStage.Logic); // steps the simulation once bodies/impulses for this frame are in
 host.AddSystem(new GridTransformSystem(host.World, host.Physics), SystemStage.Logic);
+host.AddSystem(gridPilot, SystemStage.Logic);
 host.AddSystem(new PlayerInputSystem(host.World, staticWorld, host.Physics, host.Input, meshSystem, host.Renderer, gridSelection), SystemStage.Logic);
 host.AddSystem(new GridPersistenceSystem(host.World, meshSystem, host.Physics, gridSelection), SystemStage.Logic);
 host.AddSystem(new LambdaSystem(() =>

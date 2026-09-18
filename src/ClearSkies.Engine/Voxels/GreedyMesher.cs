@@ -8,8 +8,12 @@ namespace ClearSkies.Engine.Voxels;
 /// using greedy quad merging. Outputs vertices in chunk-local space [0, ChunkData.Size]; the
 /// chunk entity's Transform.Position places it in the world.
 ///
-/// Meshing is light-independent: faces merge purely on <see cref="BlockId"/>. Lighting is applied in
-/// the fragment shader, which samples the chunk light buffer at the air-side voxel using the
+/// Meshing is light-independent: faces merge on <see cref="BlockId"/> plus, only for block types whose
+/// appearance depends on orientation (<see cref="BlockDef.HasOrientedTexture"/>, e.g. Fan), which
+/// <see cref="FaceRole"/> this face plays for the voxel's stored Facing — so two adjacent oriented
+/// blocks facing different ways still mesh as separate quads where that matters, but every other block
+/// type merges exactly as before. Lighting is applied
+/// in the fragment shader, which samples the chunk light buffer at the air-side voxel using the
 /// interpolated chunk-local position and the face normal — so a merged quad no longer needs per-cell
 /// light in its merge key.
 /// </summary>
@@ -33,8 +37,8 @@ public sealed class GreedyMesher
     };
 
     // Reusable scratch buffers — mesher is single-threaded per chunk.
-    private readonly BlockId[] _mask     = new BlockId[ChunkData.Size * ChunkData.Size];
-    private readonly bool[]    _consumed = new bool   [ChunkData.Size * ChunkData.Size];
+    private readonly MaskCell[] _mask     = new MaskCell[ChunkData.Size * ChunkData.Size];
+    private readonly bool[]     _consumed = new bool    [ChunkData.Size * ChunkData.Size];
 
     private readonly TextureAtlas? _atlas;
 
@@ -68,7 +72,7 @@ public sealed class GreedyMesher
             for (int slice = 0; slice < sz; slice++)
             {
                 // ── Build the 2-D face mask for this slice ──────────────────────────
-                Array.Clear(_mask,     0, _mask.Length);
+                Array.Clear(_mask,     0, _mask.Length); // default(MaskCell) == MaskCell.Air (Id=0=Air, Role=Side)
                 Array.Clear(_consumed, 0, _consumed.Length);
 
                 // adjSlice is constant for all (u,v) at this face/slice.
@@ -95,17 +99,28 @@ public sealed class GreedyMesher
                     }
 
                     if (!BlockRegistry.Get(adjId).IsSolid)
-                        _mask[u + v * sz] = blockId;
+                    {
+                        // Only look up this voxel's Facing (and classify this face's role) for block
+                        // types whose Top/Bottom textures actually depend on orientation — every other
+                        // block keeps merging purely by BlockId regardless of whatever Facing is stored.
+                        var role = FaceRole.Side;
+                        if (BlockRegistry.Get(blockId).HasOrientedTexture)
+                        {
+                            var voxelFacing = GetFacing(chunk, face, slice, u, v);
+                            role = BlockDef.GetFaceRole(face.Normal, voxelFacing);
+                        }
+                        _mask[u + v * sz] = new MaskCell(blockId, role);
+                    }
                 }
 
-                // ── Greedy merge (block id only) ─────────────────────────────────────
+                // ── Greedy merge (block id + facing-match) ───────────────────────────
                 for (int v = 0; v < sz; v++)
                 for (int u = 0; u < sz; u++)
                 {
-                    BlockId start = _mask[u + v * sz];
-                    if (start == BlockId.Air || _consumed[u + v * sz]) continue;
+                    MaskCell start = _mask[u + v * sz];
+                    if (start.Id == BlockId.Air || _consumed[u + v * sz]) continue;
 
-                    // Expand width along U (same block)
+                    // Expand width along U (same cell)
                     int du = 1;
                     while (u + du < sz
                         && _mask[(u + du) + v * sz] == start
@@ -130,9 +145,11 @@ public sealed class GreedyMesher
                     for (int du2 = 0; du2 < du; du2++)
                         _consumed[(u + du2) + (v + dv2) * sz] = true;
 
-                    ref readonly var def = ref BlockRegistry.Get(start);
+                    ref readonly var def = ref BlockRegistry.Get(start.Id);
+                    string? texName = def.GetFaceTexture(start.Role);
+
                     float layer = -1f;
-                    if (_atlas != null && _atlas.TryGetLayer(def.GetFaceTexture(face.Normal), out int l))
+                    if (_atlas != null && _atlas.TryGetLayer(texName, out int l))
                         layer = l;
 
                     EmitQuad(verts, indices, face, slice + face.FaceOffset, u, v, du, dv, def.Color, layer);
@@ -150,6 +167,15 @@ public sealed class GreedyMesher
         p[face.U] = u;
         p[face.V] = v;
         return chunk.Get(p[0], p[1], p[2]);
+    }
+
+    private static Facing GetFacing(ChunkData chunk, in FaceDesc face, int slice, int u, int v)
+    {
+        Span<int> p = stackalloc int[3];
+        p[face.D] = slice;
+        p[face.U] = u;
+        p[face.V] = v;
+        return chunk.GetFacing(p[0], p[1], p[2]);
     }
 
     private static void EmitQuad(
@@ -229,5 +255,22 @@ public sealed class GreedyMesher
         {
             Normal = normal; D = d; U = u; V = v; FaceOffset = faceOffset; Flip = flip;
         }
+    }
+
+    /// <summary>Greedy-merge key for one visible face cell: which block, and (only meaningful for
+    /// block types with HasOrientedTexture) which texture role this face plays for that voxel's
+    /// Facing. default(MaskCell) == Air/Side, used as the mask's "empty" sentinel.</summary>
+    private readonly struct MaskCell : IEquatable<MaskCell>
+    {
+        public readonly BlockId Id;
+        public readonly FaceRole Role;
+
+        public MaskCell(BlockId id, FaceRole role) { Id = id; Role = role; }
+
+        public bool Equals(MaskCell other) => Id == other.Id && Role == other.Role;
+        public override bool Equals(object? obj) => obj is MaskCell m && Equals(m);
+        public override int GetHashCode() => HashCode.Combine(Id, Role);
+        public static bool operator ==(MaskCell a, MaskCell b) => a.Equals(b);
+        public static bool operator !=(MaskCell a, MaskCell b) => !a.Equals(b);
     }
 }

@@ -2,10 +2,12 @@ namespace ClearSkies.Engine.Voxels;
 
 public enum BlockId : byte
 {
-    Air   = 0,
-    Grass = 1,
-    Dirt  = 2,
-    Stone = 3,
-    Lamp  = 4,
-    Wood  = 5,
+    Air     = 0,
+    Grass   = 1,
+    Dirt    = 2,
+    Stone   = 3,
+    Lamp    = 4,
+    Wood    = 5,
+    Fan     = 6,
+    Buoyant = 7,
 }
