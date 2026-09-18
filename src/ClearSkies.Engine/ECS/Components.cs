@@ -68,3 +68,10 @@ public struct FreeFlyController
 public struct PilotedComponent
 {
 }
+
+/// <summary>Tag: set on the free-fly camera entity while GridPilotSystem is flying it along a
+/// piloted DynamicGrid. PlayerInputSystem skips WASD/mouse-look for a camera carrying this
+/// component.</summary>
+public struct CameraGridFollowComponent
+{
+}

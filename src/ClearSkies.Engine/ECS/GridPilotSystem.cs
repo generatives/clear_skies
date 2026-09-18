@@ -18,16 +18,17 @@ public enum GridCameraMode { ThirdPerson, Locked }
 /// Debug "take control" of a DynamicGrid (Milestone 5 Phase 5.1). <c>F</c> toggles piloting the
 /// currently Selected Grid; <c>C</c> swaps between third-person and locked camera modes while
 /// piloting; <c>End</c> toggles Lock on the Selected Grid (freezes it in place — kinematic, ignores
-/// gravity/impulses); <c>Home</c> resets the Selected Grid's rotation to upright. Owns a dedicated
-/// pilot camera entity (no <see cref="FreeFlyController"/>, so PlayerInputSystem never drives or
-/// raycasts from it) that is toggled <see cref="CameraComponent.Active"/> in place of the free-fly
-/// camera while piloting — the single-active-camera convention already used everywhere else.
+/// gravity/impulses); <c>Home</c> resets the Selected Grid's rotation to upright. Piloting drives
+/// the same free-fly camera entity the player always uses — no separate camera entity is created
+/// or swapped in — so chunk streaming, raycasting, etc. keep tracking one stable Entity the whole
+/// time. <see cref="CameraGridFollowComponent"/> is set on that entity while piloting so
+/// <see cref="PlayerInputSystem"/> stops reading WASD/mouse-look into it.
 /// </summary>
 public sealed class GridPilotSystem : ISystem
 {
     private const float ThirdPersonBack = 16f;
-    private const float ThirdPersonUp   = 8f;
-    private const float LockedUp        = 2f;
+    private const float ThirdPersonUp   = 4f;
+    private const float LockedUp        = 1f;
 
     private readonly EntitySet    _freeFlyCameras;
     private readonly EntitySet    _selectedGrid;
@@ -36,11 +37,16 @@ public sealed class GridPilotSystem : ISystem
     private readonly StaticWorld  _staticWorld;
     private readonly PhysicsBodySystem _physicsBody;
 
-    private readonly Entity _pilotCamera;
-
+    private Entity _followedCamera;
     private Entity _pilotedGridRoot;
     private bool   _isPiloting;
     private GridCameraMode _cameraMode = GridCameraMode.ThirdPerson;
+
+    // Mouse-look offset applied on top of the grid's own rotation (see UpdateCameraFollow), so
+    // looking around while piloting orbits the camera around the ship and keeps that same
+    // relative bearing as the ship turns, instead of snapping back to dead-behind every frame.
+    private float _localYaw;
+    private float _localPitch;
 
     public GridPilotSystem(World world, InputManager input, PhysicsWorld physics,
                             StaticWorld staticWorld, PhysicsBodySystem physicsBody)
@@ -51,10 +57,6 @@ public sealed class GridPilotSystem : ISystem
         _physicsBody     = physicsBody;
         _freeFlyCameras  = world.GetEntities().With<Transform>().With<CameraComponent>().With<FreeFlyController>().AsSet();
         _selectedGrid    = world.GetEntities().With<DynamicGridComponent>().With<SelectedGridComponent>().AsSet();
-
-        _pilotCamera = world.CreateEntity();
-        _pilotCamera.Set(Transform.Identity);
-        _pilotCamera.Set(new CameraComponent { Camera = new Camera(), Active = false });
     }
 
     public void Update(float dt)
@@ -74,7 +76,10 @@ public sealed class GridPilotSystem : ISystem
         HandleLockAndRight();
 
         if (_isPiloting)
-            UpdatePilotCamera();
+        {
+            UpdateLookInput();
+            UpdateCameraFollow();
+        }
     }
 
     private void TryStartPiloting()
@@ -87,16 +92,30 @@ public sealed class GridPilotSystem : ISystem
             _pilotedGridRoot = e;
             _isPiloting = true;
             e.Set(new PilotedComponent());
+            _localYaw = 0f;
+            _localPitch = 0f;
 
             foreach (ref readonly Entity cam in _freeFlyCameras.GetEntities())
             {
-                ref var cc = ref cam.Get<CameraComponent>();
-                cc.Active = false;
+                _followedCamera = cam;
+                cam.Set(new CameraGridFollowComponent());
+                break; // only one free-fly camera exists today
             }
-            ref var pilotCc = ref _pilotCamera.Get<CameraComponent>();
-            pilotCc.Active = true;
             return;
         }
+    }
+
+    private void UpdateLookInput()
+    {
+        if (!_input.CursorCaptured || !_followedCamera.IsAlive) return;
+
+        float sensitivity = _followedCamera.Get<FreeFlyController>().LookSensitivity;
+        var delta = _input.MouseDelta;
+        _localYaw -= delta.X * sensitivity;
+        _localPitch -= delta.Y * sensitivity;
+
+        float limit = MathF.PI / 2f - 0.01f;
+        _localPitch = System.Math.Clamp(_localPitch, -limit, limit);
     }
 
     private void StopPiloting()
@@ -106,34 +125,24 @@ public sealed class GridPilotSystem : ISystem
         _isPiloting = false;
         _pilotedGridRoot = default;
 
-        ref var pilotCc = ref _pilotCamera.Get<CameraComponent>();
-        pilotCc.Active = false;
-
-        // Snapshot before handing control back, so the free-fly camera picks up exactly where you
-        // were looking from while piloting — same world position and facing — instead of snapping
-        // back to wherever it was parked before you started (it's been frozen there the whole time).
-        var pilotTransform = _pilotCamera.Get<Transform>();
-        var pilotForward = Vec.Rotate(pilotTransform.Rotation, new Vector3D<float>(0, 0, -1));
-
-        foreach (ref readonly Entity cam in _freeFlyCameras.GetEntities())
+        if (_followedCamera.IsAlive)
         {
-            ref var cc = ref cam.Get<CameraComponent>();
-            cc.Active = true;
-
-            ref var t = ref cam.Get<Transform>();
-            t.Position = pilotTransform.Position;
-            t.Rotation = pilotTransform.Rotation;
+            _followedCamera.Remove<CameraGridFollowComponent>();
 
             // FreeFlyController reconstructs Rotation from Yaw/Pitch on the next mouse-look update, so
-            // both must be re-derived here too — otherwise the very first mouse move snaps the view
-            // back to whatever stale Yaw/Pitch it had before piloting. Matches the exact convention
-            // PlayerInputSystem builds Rotation with: forward = (-sin(yaw)cos(pitch), sin(pitch), -cos(yaw)cos(pitch)).
-            ref var c = ref cam.Get<FreeFlyController>();
-            c.Pitch = MathF.Asin(System.Math.Clamp(pilotForward.Y, -1f, 1f));
-            c.Yaw   = MathF.Atan2(-pilotForward.X, -pilotForward.Z);
+            // both must be re-derived here from the camera's current facing — otherwise the very first
+            // mouse move snaps the view back to whatever stale Yaw/Pitch it had before piloting. Matches
+            // the exact convention PlayerInputSystem builds Rotation with:
+            // forward = (-sin(yaw)cos(pitch), sin(pitch), -cos(yaw)cos(pitch)).
+            var rotation = _followedCamera.Get<Transform>().Rotation;
+            var forward = Vec.Rotate(rotation, new Vector3D<float>(0, 0, -1));
 
-            break; // only one free-fly camera exists today
+            ref var c = ref _followedCamera.Get<FreeFlyController>();
+            c.Pitch = MathF.Asin(System.Math.Clamp(forward.Y, -1f, 1f));
+            c.Yaw   = MathF.Atan2(-forward.X, -forward.Z);
         }
+
+        _followedCamera = default;
     }
 
     private void HandleLockAndRight()
@@ -163,9 +172,9 @@ public sealed class GridPilotSystem : ISystem
         }
     }
 
-    private void UpdatePilotCamera()
+    private void UpdateCameraFollow()
     {
-        if (!_pilotedGridRoot.IsAlive) return;
+        if (!_pilotedGridRoot.IsAlive || !_followedCamera.IsAlive) return;
         var grid = _pilotedGridRoot.Get<DynamicGridComponent>().Grid;
         if (!grid.BodyCreated) return;
 
@@ -173,13 +182,18 @@ public sealed class GridPilotSystem : ISystem
         var gridPos = PhysicsConv.ToSilk(pos);
         var gridRot = PhysicsConv.ToSilk(rot);
 
+        // lookRot first (relative to the ship's own facing), then gridRot on top — so panning the
+        // mouse orbits the camera around the ship, and turning the ship carries that bearing with it.
+        var lookRot = Quaternion<float>.CreateFromYawPitchRoll(_localYaw, _localPitch, 0f);
+        var cameraRot = gridRot * lookRot;
+
         var localOffset = _cameraMode == GridCameraMode.ThirdPerson
             ? new Vector3D<float>(0, ThirdPersonUp, ThirdPersonBack)
             : new Vector3D<float>(0, LockedUp, 0);
 
-        ref var t = ref _pilotCamera.Get<Transform>();
-        t.Position = gridPos + Vec.Rotate(gridRot, localOffset);
-        t.Rotation = gridRot;
+        ref var t = ref _followedCamera.Get<Transform>();
+        t.Position = gridPos + Vec.Rotate(cameraRot, localOffset);
+        t.Rotation = cameraRot;
     }
 
     // ── debug UI ─────────────────────────────────────────────────────────────
@@ -189,6 +203,7 @@ public sealed class GridPilotSystem : ISystem
         ImGui.Text(_isPiloting ? $"Piloting — camera: {_cameraMode}" : "Not piloting");
         ImGui.Text("F: take/release control of the Selected Grid");
         ImGui.Text("C: swap third-person / locked camera (while piloting)");
+        ImGui.Text("Mouse: look around, relative to the ship's own facing");
         ImGui.Text("W/S: forward/back   A/D: left/right   Space/Shift: up/down   Q/E: yaw");
         ImGui.Separator();
         ImGui.Text("End: toggle Lock on the Selected Grid");

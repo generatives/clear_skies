@@ -114,10 +114,10 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
 
         foreach (ref readonly Entity e in _cameras.GetEntities())
         {
-            // Skip the free-fly camera while it isn't the active render camera (e.g. while piloting a
-            // grid) — otherwise it keeps reading the same WASD/mouse input in the background and drifts
-            // far away, so releasing control (GridPilotSystem re-activating it) "teleports" the view.
-            if (!e.Get<CameraComponent>().Active) continue;
+            // Skip the camera while GridPilotSystem is flying it along a piloted grid — otherwise it
+            // keeps reading the same WASD/mouse input in the background and fights the ship-following
+            // position/rotation being written elsewhere.
+            if (e.Has<CameraGridFollowComponent>()) continue;
 
             ref var t = ref e.Get<Transform>();
             ref var c = ref e.Get<FreeFlyController>();
