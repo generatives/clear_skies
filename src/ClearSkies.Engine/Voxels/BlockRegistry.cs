@@ -13,8 +13,10 @@ public static class BlockRegistry
             Texture = "dirt_grass", TextureTop = "grass_top", TextureBottom = "dirt" });
         Register(new BlockDef { Id = BlockId.Dirt,  Name = "Dirt",  Color = new(0.55f, 0.38f, 0.22f), IsSolid = true,  LightEmission = 0,  Opacity = 15, Weight = 2,
             Texture = "dirt" });
-        Register(new BlockDef { Id = BlockId.Stone, Name = "Stone", Color = new(0.52f, 0.52f, 0.55f), IsSolid = true,  LightEmission = 0,  Opacity = 15, Weight = 6,
-            Texture = "stone" });
+        // Deep/foundation fill (island core, dome underside, subsurface everywhere) — "greystone" is a
+        // darker, more foundational-looking tile than "stone", which is reserved for mountain surfaces.
+        Register(new BlockDef { Id = BlockId.Stone, Name = "Stone", Color = new(0.42f, 0.45f, 0.47f), IsSolid = true,  LightEmission = 0,  Opacity = 15, Weight = 6,
+            Texture = "greystone" });
         Register(new BlockDef { Id = BlockId.Lamp,  Name = "Lamp",  Color = new(1.00f, 0.95f, 0.80f), IsSolid = true,  LightEmission = 14, Opacity = 15, Weight = 3 });
         Register(new BlockDef { Id = BlockId.Wood,  Name = "Wood",  Color = new(0.55f, 0.40f, 0.25f), IsSolid = true,  LightEmission = 0,  Opacity = 15, Weight = 1,
             Texture = "wood" });
@@ -34,10 +36,17 @@ public static class BlockRegistry
             Texture = "dirt_sand", TextureTop = "sand", TextureBottom = "dirt" });
         Register(new BlockDef { Id = BlockId.Water, Name = "Water", Color = new(0.20f, 0.45f, 0.85f), IsSolid = true, LightEmission = 0, Opacity = 15, Weight = 3,
             Texture = "water" });
+        // Plain "snow" on every face: a thick snowpack should read as snow all the way round, not a
+        // rock/snow blend on the sides (that blend texture is reserved for a thin single-layer cap —
+        // SkyWorldGenerator now always gives Snow multiple layers of depth, so this is the common case).
         Register(new BlockDef { Id = BlockId.Snow,  Name = "Snow",  Color = new(0.95f, 0.97f, 1.00f), IsSolid = true, LightEmission = 0, Opacity = 15, Weight = 6,
-            Texture = "stone_snow", TextureTop = "snow", TextureBottom = "stone" });
-        Register(new BlockDef { Id = BlockId.Rock,  Name = "Rock",  Color = new(0.45f, 0.43f, 0.40f), IsSolid = true, LightEmission = 0, Opacity = 15, Weight = 6,
-            Texture = "rock" });
+            Texture = "snow" });
+        // Mountain-surface bare rock, one shade lighter than the Stone foundation beneath it. ("rock" is
+        // a decorative, mostly-transparent overlay sprite meant to be composited over another texture,
+        // not a standalone block face — with no alpha-blend pipeline it shows its dark "empty" fill
+        // instead, so it's not used here.)
+        Register(new BlockDef { Id = BlockId.Rock,  Name = "Rock",  Color = new(0.52f, 0.52f, 0.55f), IsSolid = true, LightEmission = 0, Opacity = 15, Weight = 6,
+            Texture = "stone" });
     }
 
     private static void Register(BlockDef def) => Defs[(byte)def.Id] = def;

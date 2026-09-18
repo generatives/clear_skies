@@ -216,13 +216,17 @@ public sealed class SkyWorldGenerator : IWorldGenerator
 
         // ── Lakes: independent low-frequency field, interior only, away from rims and mountains. ──
         float lakeField = _lakeNoise.GetNoise(wx + offX, wz + offZ) * 0.5f + 0.5f;
-        bool isLake = lakeField > 0.62f && t < 0.70f && mtn < 0.3f;
+        bool isLake = lakeField > 0.55f && t < 0.75f && mtn < 0.3f;
 
         if (isLake)
         {
+            // Water surface stays flush with the surrounding rim (topY), not recessed below it — a
+            // recessed lip put a solid overhang around every shore, and the renderer's per-fragment
+            // light sampler averages nearby *open* neighbour cells: a fragment whose whole local
+            // neighbourhood reads solid gets zero light (pure black) regardless of texture.
             float lakeCarve = Lerp(2f, 14f, Saturate((lakeField - 0.62f) / 0.38f));
             float lakeFloorY = topY - lakeCarve;
-            float waterSurfaceY = topY - 1f;
+            float waterSurfaceY = topY;
             FillLakeColumn(data, lx, lz, originY, bottomY, lakeFloorY, waterSurfaceY);
         }
         else
@@ -252,17 +256,23 @@ public sealed class SkyWorldGenerator : IWorldGenerator
 
     private static void FillLandColumn(ChunkData data, int lx, int lz, int originY, float bottomY, float topY, BlockId topBlock)
     {
+        // Depth is measured from the floored (integer) surface height, not the raw continuous topY:
+        // using the continuous value here made the fractional part of topY — which drifts smoothly
+        // across gently-sloped terrain — decide Grass vs. Dirt at the surface, producing coherent
+        // banding wherever the slope was gentle (plains). Anchoring to floor(topY) makes the topmost
+        // solid voxel always depth 0, eliminating that drift.
+        float topFloor = MathF.Floor(topY);
         int yStart = Math.Max(0, (int)MathF.Floor(bottomY) - originY);
-        int yEnd = Math.Min(ChunkData.Size - 1, (int)MathF.Floor(topY) - originY);
+        int yEnd = Math.Min(ChunkData.Size - 1, (int)topFloor - originY);
 
         for (int ly = yStart; ly <= yEnd; ly++)
         {
-            float depthFromTop = topY - (originY + ly);
+            float depthFromTop = topFloor - (originY + ly);
             BlockId id = topBlock switch
             {
                 BlockId.Grass => depthFromTop < 0.5f ? BlockId.Grass : depthFromTop < 2.5f ? BlockId.Dirt : BlockId.Stone,
                 BlockId.Sand  => depthFromTop < 2.0f ? BlockId.Sand  : depthFromTop < 3.0f ? BlockId.Dirt : BlockId.Stone,
-                BlockId.Snow  => depthFromTop < 1.0f ? BlockId.Snow  : BlockId.Stone,
+                BlockId.Snow  => depthFromTop < 3.0f ? BlockId.Snow  : BlockId.Stone,
                 BlockId.Rock  => depthFromTop < 2.0f ? BlockId.Rock  : BlockId.Stone,
                 _             => BlockId.Stone,
             };
@@ -272,6 +282,7 @@ public sealed class SkyWorldGenerator : IWorldGenerator
 
     private static void FillLakeColumn(ChunkData data, int lx, int lz, int originY, float bottomY, float lakeFloorY, float waterSurfaceY)
     {
+        float floorFloor = MathF.Floor(lakeFloorY);
         int yStart = Math.Max(0, (int)MathF.Floor(bottomY) - originY);
         int yEnd = Math.Min(ChunkData.Size - 1, (int)MathF.Floor(waterSurfaceY) - originY);
 
@@ -279,13 +290,14 @@ public sealed class SkyWorldGenerator : IWorldGenerator
         {
             float wy = originY + ly;
             BlockId id;
-            if (wy > lakeFloorY)
+            if (wy > floorFloor)
             {
                 id = BlockId.Water;
             }
             else
             {
-                float depthFromFloor = lakeFloorY - wy;
+                // Same floor-anchored depth as FillLandColumn, to avoid sand/dirt/stone banding on the lake bed.
+                float depthFromFloor = floorFloor - wy;
                 id = depthFromFloor < 1f ? BlockId.Sand : depthFromFloor < 2f ? BlockId.Dirt : BlockId.Stone;
             }
             data.Set(lx, ly, lz, id);
