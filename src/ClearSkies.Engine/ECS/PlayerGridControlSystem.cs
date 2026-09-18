@@ -16,7 +16,7 @@ namespace ClearSkies.Engine.ECS;
 /// </summary>
 public sealed class PlayerGridControlSystem : ISystem
 {
-    private const float Acceleration = 25f; // units/s² applied while a direction key is held
+    private const float Acceleration = 15f; // units/s² applied while a direction key is held
 
     private readonly EntitySet    _selectedGrid;
     private readonly PhysicsWorld _physics;

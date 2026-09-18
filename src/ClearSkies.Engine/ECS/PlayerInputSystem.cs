@@ -61,7 +61,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
                               ChunkMeshSystem meshSystem, Renderer renderer, GridSelection selection)
     {
         _world       = world;
-        _cameras     = world.GetEntities().With<Transform>().With<CameraComponent>().With<FreeFlyController>().AsSet();
+        _cameras     = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
         _grids       = world.GetEntities().With<DynamicGridComponent>().AsSet();
         _staticWorld = staticWorld;
         _physics     = physics;
@@ -82,7 +82,6 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
 
     public void Update(float dt)
     {
-        UpdateCameraMovement(dt);
         UpdateBlockSpawning();
         UpdateBlockEditing();
     }
@@ -96,66 +95,6 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
         if (ImGui.Combo("Place block", ref _placeIndex, PlaceableNames, PlaceableNames.Length))
             _placeBlock = PlaceableBlocks[_placeIndex];
         ImGui.TextDisabled("(or press L to cycle)");
-    }
-
-    // ── Movement + camera ────────────────────────────────────────────────────
-
-    private void UpdateCameraMovement(float dt)
-    {
-        // Esc unlocks the cursor; clicking the window re-locks it.
-        if (_input.WasKeyPressed(Key.Escape) && _input.CursorCaptured)
-            _input.CursorCaptured = false;
-        else if (_input.WasMouseButtonPressed(MouseButton.Left) && !_input.CursorCaptured)
-        {
-            _input.CursorCaptured = true;
-            // Swallow this click so the same press that recaptures the cursor doesn't also place a block.
-            _input.ConsumeMouseButtonPress(MouseButton.Left);
-        }
-
-        foreach (ref readonly Entity e in _cameras.GetEntities())
-        {
-            // Skip the camera while GridPilotSystem is flying it along a piloted grid — otherwise it
-            // keeps reading the same WASD/mouse input in the background and fights the ship-following
-            // position/rotation being written elsewhere.
-            if (e.Has<CameraGridFollowComponent>()) continue;
-
-            ref var t = ref e.Get<Transform>();
-            ref var c = ref e.Get<FreeFlyController>();
-
-            if (_input.CursorCaptured)
-            {
-                var delta = _input.MouseDelta;
-                c.Yaw -= delta.X * c.LookSensitivity;
-                c.Pitch -= delta.Y * c.LookSensitivity;
-                float limit = MathF.PI / 2f - 0.01f;
-                c.Pitch = System.Math.Clamp(c.Pitch, -limit, limit);
-                t.Rotation = Quaternion<float>.CreateFromYawPitchRoll(c.Yaw, c.Pitch, 0f);
-            }
-
-            var forward = Vec.Rotate(t.Rotation, new Vector3D<float>(0, 0, -1));
-            var right = Vec.Rotate(t.Rotation, new Vector3D<float>(1, 0, 0));
-            var up = new Vector3D<float>(0, 1, 0);
-
-            bool speedUp = false;
-
-            var move = Vector3D<float>.Zero;
-            if (_input.IsKeyDown(Key.W)) move += forward;
-            if (_input.IsKeyDown(Key.S)) move -= forward;
-            if (_input.IsKeyDown(Key.D)) move += right;
-            if (_input.IsKeyDown(Key.A)) move -= right;
-            if (_input.IsKeyDown(Key.Space)) move += up;
-            if (_input.IsKeyDown(Key.ShiftLeft) || _input.IsKeyDown(Key.ShiftRight)) move -= up;
-            if (_input.IsKeyDown(Key.E)) c.MoveSpeed += 2;
-            if (_input.IsKeyDown(Key.Q)) c.MoveSpeed -= 2;
-            if (_input.IsKeyDown(Key.ControlLeft) || _input.IsKeyDown(Key.ControlRight)) speedUp = true;
-
-            c.MoveSpeed = MathF.Max(2f, c.MoveSpeed);
-
-            float speed = speedUp ? c.MoveSpeed * 3f : c.MoveSpeed;
-
-            if (move.LengthSquared > 1e-6f)
-                t.Position += Vector3D.Normalize(move) * speed * dt;
-        }
     }
 
     // ── Block spawning ───────────────────────────────────────────────────────

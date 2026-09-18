@@ -28,6 +28,11 @@ host.AddSystem(new ChunkLoadSystem(host.World, staticWorld, worldGen, xzRadius: 
 host.AddSystem(physicsBody, SystemStage.Logic);
 host.AddSystem(new PlayerGridControlSystem(host.World, host.Physics, host.Input), SystemStage.Logic);
 
+// Character controller (ported from BepuPhysics2's own Demos/Demos/Characters — see
+// Physics/Characters/): motion goals (WASD/jump/mode toggle) must be set before the physics step
+// so Simulation.Timestep's CollisionsDetected analysis sees them this same tick.
+host.AddSystem(new PlayerMovementSystem(host.World, host.Input), SystemStage.Logic);
+
 // Milestone 5: airship flight (velocity control law + Fan/Buoyant propulsion, merged into one system —
 // see AirshipFlightSystem), before the physics step so its impulses are integrated this same tick.
 var gridPilot = new GridPilotSystem(host.World, host.Input, host.Physics, staticWorld, physicsBody);
@@ -37,6 +42,7 @@ host.AddSystem(airshipFlight, SystemStage.Logic);
 host.AddSystem(host.Physics, SystemStage.Logic); // steps the simulation once bodies/impulses for this frame are in
 host.AddSystem(new GridTransformSystem(host.World, host.Physics), SystemStage.Logic);
 host.AddSystem(new HierarchyTransformSystem(host.World), SystemStage.Logic);
+host.AddSystem(new CharacterCameraSyncSystem(host.World), SystemStage.Logic); // reads the capsule's post-physics pose into Transform
 host.AddSystem(gridPilot, SystemStage.Logic);
 host.AddSystem(new PlayerInputSystem(host.World, staticWorld, host.Physics, host.Input, meshSystem, host.Renderer, gridSelection), SystemStage.Logic);
 var gridPersistence = new GridPersistenceSystem(host.World, meshSystem, host.Physics, gridSelection);

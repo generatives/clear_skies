@@ -1,3 +1,4 @@
+using ClearSkies.Engine.Physics.Characters;
 using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Voxels;
 
@@ -54,13 +55,37 @@ public struct HudRenderer
     public GpuMesh Mesh;
 }
 
-/// <summary>Free-fly camera control parameters and accumulated look angles.</summary>
+/// <summary>Free-fly (noclip) camera movement speed. See <see cref="MouseLookComponent"/> for the
+/// look-angle state shared with the physics-driven walking mode.</summary>
 public struct FreeFlyController
 {
     public float MoveSpeed;
-    public float LookSensitivity;
+}
+
+/// <summary>Accumulated mouse-look angles, shared by every camera movement mode (free-fly,
+/// walking, grid-piloting) since they all just rotate the same camera Transform.</summary>
+public struct MouseLookComponent
+{
     public float Yaw;
     public float Pitch;
+    public float LookSensitivity;
+}
+
+/// <summary>Tags the camera entity with its walking character body. See
+/// <see cref="CharacterCameraSyncSystem"/> (pose readback) and
+/// <see cref="PlayerMovementSystem"/> (input → motion goals).</summary>
+public struct CharacterControllerComponent
+{
+    public PlayerCharacter Character;
+    public float EyeHeight;
+}
+
+/// <summary>Movement-mode toggle on the camera entity: true = free-fly noclip (today's default
+/// behaviour, no collision/gravity), false = physics-driven walking via
+/// <see cref="CharacterControllerComponent"/>. Toggled with V (see PlayerMovementSystem).</summary>
+public struct CharacterModeComponent
+{
+    public bool FreeFly;
 }
 
 /// <summary>Tag: set on exactly one DynamicGrid's root entity while GridPilotSystem is piloting it.

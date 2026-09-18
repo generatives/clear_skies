@@ -7,6 +7,7 @@ using BepuPhysics.Constraints;
 using BepuUtilities;
 using BepuUtilities.Memory;
 using ClearSkies.Engine.Core;
+using ClearSkies.Engine.Physics.Characters;
 
 namespace ClearSkies.Engine.Physics;
 
@@ -28,6 +29,15 @@ public sealed class PhysicsWorld : ISystem, IDisposable
 
     public Simulation Simulation { get; }
     public Vector3 Gravity { get; }
+
+    /// <summary>Manages capsule player/NPC characters riding on top of the simulation — see
+    /// <c>Physics/Characters/</c> (ported from BepuPhysics2's own Demos/Demos/Characters, v2.4.0).
+    /// Support detection and the character motion constraint hook themselves into
+    /// <see cref="Simulation"/>'s narrow phase and Timestepper events once <see cref="Simulation.Create"/>
+    /// calls <see cref="VoxelNarrowPhaseCallbacks.Initialize"/> below — <see cref="Update"/> needs no
+    /// changes to drive it.</summary>
+    public CharacterControllers Characters { get; }
+
     private readonly BufferPool _pool = new();
     private readonly float _fixedStep;
     private float _accumulator;
@@ -36,9 +46,10 @@ public sealed class PhysicsWorld : ISystem, IDisposable
     {
         Gravity = gravity;
         _fixedStep = fixedStep;
+        Characters = new CharacterControllers(_pool);
         Simulation = Simulation.Create(
             _pool,
-            new VoxelNarrowPhaseCallbacks(new SpringSettings(30, 1)),
+            new VoxelNarrowPhaseCallbacks(new SpringSettings(30, 1)) { Characters = Characters },
             new VoxelPoseCallbacks(gravity, linearDamping: 0.03f, angularDamping: 0.03f),
             new SolveDescription(velocityIterationCount: 8, substepCount: 1));
     }
@@ -256,6 +267,11 @@ internal struct VoxelNarrowPhaseCallbacks : INarrowPhaseCallbacks
     public float MaximumRecoveryVelocity;
     public float FrictionCoefficient;
 
+    /// <summary>Set by <see cref="PhysicsWorld"/>'s constructor. Ported from BepuPhysics2's own
+    /// CharacterNarrowphaseCallbacks (see Physics/Characters/) — forwards Initialize and reports
+    /// every contact manifold to it so it can detect ground support for registered characters.</summary>
+    public CharacterControllers? Characters;
+
     public VoxelNarrowPhaseCallbacks(SpringSettings contactSpringiness, float maximumRecoveryVelocity = 2f, float frictionCoefficient = 1f)
     {
         ContactSpringiness = contactSpringiness;
@@ -271,6 +287,7 @@ internal struct VoxelNarrowPhaseCallbacks : INarrowPhaseCallbacks
             MaximumRecoveryVelocity = 2f;
             FrictionCoefficient = 1f;
         }
+        Characters?.Initialize(simulation);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -288,6 +305,10 @@ internal struct VoxelNarrowPhaseCallbacks : INarrowPhaseCallbacks
         pairMaterial.FrictionCoefficient = FrictionCoefficient;
         pairMaterial.MaximumRecoveryVelocity = MaximumRecoveryVelocity;
         pairMaterial.SpringSettings = ContactSpringiness;
+        // No-ops unless this pair involves a registered character, in which case it records the
+        // support candidate and zeroes FrictionCoefficient (the character motion constraint takes
+        // over holding it to the surface, so raw contact friction would only fight the constraint).
+        Characters?.TryReportContacts(pair, ref manifold, workerIndex, ref pairMaterial);
         return true;
     }
 
@@ -295,7 +316,7 @@ internal struct VoxelNarrowPhaseCallbacks : INarrowPhaseCallbacks
     public readonly bool ConfigureContactManifold(int workerIndex, CollidablePair pair, int childIndexA, int childIndexB, ref ConvexContactManifold manifold)
         => true;
 
-    public void Dispose() { }
+    public void Dispose() => Characters?.Dispose();
 }
 
 /// <summary>Applies constant gravity and light damping each substep (vectorised callback).</summary>

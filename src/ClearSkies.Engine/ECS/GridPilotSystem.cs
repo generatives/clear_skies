@@ -109,7 +109,7 @@ public sealed class GridPilotSystem : ISystem
     {
         if (!_input.CursorCaptured || !_followedCamera.IsAlive) return;
 
-        float sensitivity = _followedCamera.Get<FreeFlyController>().LookSensitivity;
+        float sensitivity = _followedCamera.Get<MouseLookComponent>().LookSensitivity;
         var delta = _input.MouseDelta;
         _localYaw -= delta.X * sensitivity;
         _localPitch -= delta.Y * sensitivity;
@@ -129,17 +129,17 @@ public sealed class GridPilotSystem : ISystem
         {
             _followedCamera.Remove<CameraGridFollowComponent>();
 
-            // FreeFlyController reconstructs Rotation from Yaw/Pitch on the next mouse-look update, so
+            // MouseLookComponent reconstructs Rotation from Yaw/Pitch on the next mouse-look update, so
             // both must be re-derived here from the camera's current facing — otherwise the very first
             // mouse move snaps the view back to whatever stale Yaw/Pitch it had before piloting. Matches
-            // the exact convention PlayerInputSystem builds Rotation with:
+            // the exact convention PlayerMovementSystem builds Rotation with:
             // forward = (-sin(yaw)cos(pitch), sin(pitch), -cos(yaw)cos(pitch)).
             var rotation = _followedCamera.Get<Transform>().Rotation;
             var forward = Vec.Rotate(rotation, new Vector3D<float>(0, 0, -1));
 
-            ref var c = ref _followedCamera.Get<FreeFlyController>();
-            c.Pitch = MathF.Asin(System.Math.Clamp(forward.Y, -1f, 1f));
-            c.Yaw   = MathF.Atan2(-forward.X, -forward.Z);
+            ref var look = ref _followedCamera.Get<MouseLookComponent>();
+            look.Pitch = MathF.Asin(System.Math.Clamp(forward.Y, -1f, 1f));
+            look.Yaw   = MathF.Atan2(-forward.X, -forward.Z);
         }
 
         _followedCamera = default;
