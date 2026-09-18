@@ -27,6 +27,17 @@ public static class BlockRegistry
         Register(new BlockDef { Id = BlockId.Fan,     Name = "Fan",     Color = new(0.85f, 0.55f, 0.15f), IsSolid = true, LightEmission = 0, Opacity = 15, Weight = 3,
             Texture = "metal", TextureTop = "thruster" });
         Register(new BlockDef { Id = BlockId.Buoyant, Name = "Buoyant", Color = new(0.55f, 0.85f, 1.00f), IsSolid = true, LightEmission = 0, Opacity = 15, Weight = 1 });
+
+        // Floating-island world-gen biome blocks. Water is opaque (no alpha-blend render pipeline
+        // exists yet) — it renders, collides, and blocks movement like ordinary solid ground.
+        Register(new BlockDef { Id = BlockId.Sand,  Name = "Sand",  Color = new(0.76f, 0.70f, 0.50f), IsSolid = true, LightEmission = 0, Opacity = 15, Weight = 2,
+            Texture = "dirt_sand", TextureTop = "sand", TextureBottom = "dirt" });
+        Register(new BlockDef { Id = BlockId.Water, Name = "Water", Color = new(0.20f, 0.45f, 0.85f), IsSolid = true, LightEmission = 0, Opacity = 15, Weight = 3,
+            Texture = "water" });
+        Register(new BlockDef { Id = BlockId.Snow,  Name = "Snow",  Color = new(0.95f, 0.97f, 1.00f), IsSolid = true, LightEmission = 0, Opacity = 15, Weight = 6,
+            Texture = "stone_snow", TextureTop = "snow", TextureBottom = "stone" });
+        Register(new BlockDef { Id = BlockId.Rock,  Name = "Rock",  Color = new(0.45f, 0.43f, 0.40f), IsSolid = true, LightEmission = 0, Opacity = 15, Weight = 6,
+            Texture = "rock" });
     }
 
     private static void Register(BlockDef def) => Defs[(byte)def.Id] = def;

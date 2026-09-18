@@ -63,7 +63,7 @@ host.AddSystem(new GpuLightSystem(host.World, staticWorld, host.Context, host.Ph
 host.AddSystem(meshSystem, SystemStage.PreRender);
 host.AddSystem(new RenderSystem(host.World, host.Renderer, host.Gui, host.Time), SystemStage.Render);
 
-TestScene.Build(host);
+TestScene.Build(host, worldGen.Seed);
 
 host.Run();
 

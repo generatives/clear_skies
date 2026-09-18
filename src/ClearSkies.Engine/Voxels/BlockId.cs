@@ -10,4 +10,8 @@ public enum BlockId : byte
     Wood    = 5,
     Fan     = 6,
     Buoyant = 7,
+    Sand    = 8,
+    Water   = 9,
+    Snow    = 10,
+    Rock    = 11,
 }

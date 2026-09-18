@@ -4,6 +4,7 @@ using ClearSkies.Engine.Core;
 using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Physics.Characters;
 using ClearSkies.Engine.Rendering;
+using ClearSkies.Game.Generation;
 using Silk.NET.Maths;
 
 namespace ClearSkies.Game;
@@ -12,13 +13,27 @@ namespace ClearSkies.Game;
 /// plus its walking character body (toggle with V — see PlayerMovementSystem).</summary>
 public static class TestScene
 {
-    public static void Build(EngineHost host)
+    // Fallback spawn if no island is found nearby at all (astronomically unlikely given islands
+    // are seeded across the whole plane, but keeps this well-defined).
+    private static readonly Vector3D<float> FallbackSpawn = new(16f, 45f, -30f);
+
+    public static void Build(EngineHost host, ulong worldSeed)
     {
         var cam = host.World.CreateEntity();
         var camTransform = Transform.Identity;
-        // Positioned behind the origin, facing +Z so the first loaded chunks (Z>0) are
-        // directly in front of the camera. Pitch tilts down to see island tops at ~75 units ahead.
-        camTransform.Position = new Vector3D<float>(16f, 45f, -30f);
+
+        // Find the nearest island to the default spawn area and stand off south of it, so the
+        // player always starts overlooking real terrain instead of empty sky (region cells are
+        // sparsely populated — ~55% chance each — so the origin cell itself often has none).
+        if (TryFindNearestIsland(worldSeed, FallbackSpawn.X, FallbackSpawn.Z, out var island))
+        {
+            float standoff = island.Radius * 0.6f + 40f;
+            camTransform.Position = new Vector3D<float>(island.CenterX, island.BaseY + 40f, island.CenterZ - standoff);
+        }
+        else
+        {
+            camTransform.Position = FallbackSpawn;
+        }
         cam.Set(camTransform);
         cam.Set(new CameraComponent { Camera = new Camera(), Active = true });
         cam.Set(new MouseLookComponent
@@ -50,5 +65,52 @@ public static class TestScene
         cam.Set(new CharacterModeComponent { FreeFly = true }); // start in FreeFly — zero regression risk vs. today
 
         host.Input.CursorCaptured = true;
+    }
+
+    /// <summary>
+    /// Spirals outward over region cells (see <see cref="RegionGrid"/>) from the cell containing
+    /// (aroundX, aroundZ) looking for the closest island center. Once at least one island is found,
+    /// searches one extra ring beyond it — an island can sit near its cell's edge, so a slightly
+    /// farther ring can still hold something physically closer.
+    /// </summary>
+    private static bool TryFindNearestIsland(ulong worldSeed, float aroundX, float aroundZ, out IslandDef nearest)
+    {
+        int cellX = (int)MathF.Floor(aroundX) >> RegionGrid.CellShift;
+        int cellZ = (int)MathF.Floor(aroundZ) >> RegionGrid.CellShift;
+
+        nearest = default;
+        bool found = false;
+        float bestDistSq = float.MaxValue;
+        int foundAtRing = -1;
+        Span<IslandDef> islands = stackalloc IslandDef[4];
+
+        for (int ring = 0; ring <= 32; ring++)
+        {
+            if (foundAtRing >= 0 && ring > foundAtRing + 1) break;
+
+            for (int dx = -ring; dx <= ring; dx++)
+            for (int dz = -ring; dz <= ring; dz++)
+            {
+                if (System.Math.Max(System.Math.Abs(dx), System.Math.Abs(dz)) != ring) continue; // ring perimeter only
+
+                int n = RegionGrid.ResolveIslandsForCell(worldSeed, cellX + dx, cellZ + dz, islands);
+                for (int i = 0; i < n; i++)
+                {
+                    float ddx = islands[i].CenterX - aroundX;
+                    float ddz = islands[i].CenterZ - aroundZ;
+                    float distSq = ddx * ddx + ddz * ddz;
+                    if (distSq < bestDistSq)
+                    {
+                        bestDistSq = distSq;
+                        nearest = islands[i];
+                        found = true;
+                    }
+                }
+            }
+
+            if (found && foundAtRing < 0) foundAtRing = ring;
+        }
+
+        return found;
     }
 }
