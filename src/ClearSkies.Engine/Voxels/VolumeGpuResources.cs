@@ -41,6 +41,11 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
     public int DY { get; private set; } // volume height in chunks
     public int DZ { get; private set; } // volume depth  in chunks
 
+    /// <summary>Bumped every <see cref="Allocate"/> (fresh buffers, all bind groups invalidated). Lets a
+    /// multi-frame in-progress GPU light relax (see GpuLightSystem) detect that this volume was reallocated
+    /// out from under it and abandon cleanly instead of resuming against brand-new, unrelated buffers.</summary>
+    public int Generation { get; private set; }
+
     public int VW => DX * S; // voxels
     public int VH => DY * S;
     public int VD => DZ * S;
@@ -109,6 +114,7 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
     {
         ReleaseBindGroups();
         Opacity?.Dispose(); LightA?.Dispose(); LightB?.Dispose(); Dims?.Dispose(); SunVis?.Dispose();
+        Generation++;
 
         Min = min;
         DX  = max.X - min.X + 1;
@@ -147,14 +153,12 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
         Span<uint> d = stackalloc uint[4] { (uint)VW, (uint)VH, (uint)VD, 0u };
         Dims.Write<uint>(0, d);
 
-        // Pre-fill LightA with dim ambient so chunks look reasonable before first flood.
-        var fill = new uint[total];
-        Array.Fill(fill, AmbientSky);
-        LightA.Write<uint>(0, fill);
-
-        // Pre-fill SunVis fully lit (255) so geometry is sunlit before the first sun-vis pass runs.
-        Array.Fill(fill, 255u);
-        SunVis.Write<uint>(0, fill);
+        // Pre-fill LightA (dim ambient) and SunVis (fully lit) so chunks look reasonable before the first
+        // flood/sun-vis pass, entirely on the GPU (see GpuBufferFill) — for a large volume, a CPU-side fill
+        // array plus the QueueWriteBuffer transfer to upload it costs tens of milliseconds of CPU-to-GPU
+        // bandwidth, all landing on the single frame that triggered this (re)allocation.
+        _ctx.BufferFill.FillU32(LightA, AmbientSky, total);
+        _ctx.BufferFill.FillU32(SunVis, 255u, total);
     }
 
     // ── Bounds helpers ────────────────────────────────────────────────────────

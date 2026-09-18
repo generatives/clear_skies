@@ -42,6 +42,13 @@ public sealed unsafe class GpuContext : IDisposable
     /// as an unrecoverable native validation error rather than a catchable .NET exception.</summary>
     public Limits AdapterLimits { get; private set; }
 
+    private GpuBufferFill? _bufferFill;
+
+    /// <summary>Shared GPU-side buffer-fill utility (see <see cref="GpuBufferFill"/>) — one shader/pipeline for
+    /// the whole app, reused across every <c>VolumeGpuResources</c> instance (static world + each grid) rather
+    /// than compiling one per volume.</summary>
+    public GpuBufferFill BufferFill => _bufferFill ??= new GpuBufferFill(this);
+
     internal WebGPU Api => _api;
     internal Device* Device => _device;
     internal Queue* Queue => _queue;
@@ -239,6 +246,7 @@ public sealed unsafe class GpuContext : IDisposable
 
     public void Dispose()
     {
+        _bufferFill?.Dispose();
         if (_depthView != null) _api.TextureViewRelease(_depthView);
         if (_depthTexture != null) _api.TextureRelease(_depthTexture);
         if (_instance != null) _api.InstanceRelease(_instance);

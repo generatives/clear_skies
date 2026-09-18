@@ -75,8 +75,9 @@ public sealed class GpuResidencySystem : ISystem
             // wastefully large (e.g. after teleporting away from a previously explored region).
             if (!g.Covers(lmin, lmax) || cur > tgt * ShrinkFactor)
             {
-                Console.WriteLine($"[gpu-realloc] {(vol == _staticWorld ? "static" : "grid")} cur={g.DX}x{g.DY}x{g.DZ} -> new={tmax.X-tmin.X+1}x{tmax.Y-tmin.Y+1}x{tmax.Z-tmin.Z+1} loaded={vol.LoadedCount} lmin={lmin} lmax={lmax}");
+                var sw = System.Diagnostics.Stopwatch.StartNew();
                 g.Reallocate(tmin, tmax);
+                long reallocMs = sw.ElapsedMilliseconds;
 
                 // Fresh, empty buffers. Re-upload every loaded chunk's opacity NOW (each is a cheap ~4 KB
                 // contiguous write) rather than draining it at UploadsPerFrame — that avoids a long window of
@@ -87,6 +88,8 @@ public sealed class GpuResidencySystem : ISystem
                     e.NeedsGpuUpload = false;
                     e.NeedsFlood     = true;
                 }
+                long totalMs = sw.ElapsedMilliseconds;
+                Console.WriteLine($"[gpu-realloc] {(vol == _staticWorld ? "static" : "grid")} cur={g.DX}x{g.DY}x{g.DZ} -> new={tmax.X-tmin.X+1}x{tmax.Y-tmin.Y+1}x{tmax.Z-tmin.Z+1} loaded={vol.LoadedCount} allocMs={reallocMs} totalMs={totalMs}");
             }
         }
 
