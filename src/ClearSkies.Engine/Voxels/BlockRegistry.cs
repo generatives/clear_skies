@@ -25,7 +25,7 @@ public static class BlockRegistry
         // texture so you can see which way it'll push just by looking at it; every other face uses the
         // plain metal housing.
         Register(new BlockDef { Id = BlockId.Fan,     Name = "Fan",     Color = new(0.85f, 0.55f, 0.15f), IsSolid = true, LightEmission = 0, Opacity = 15, Weight = 3,
-            Texture = "brick_red", TextureTop = "cactus_inside" });
+            Texture = "metal", TextureTop = "thruster" });
         Register(new BlockDef { Id = BlockId.Buoyant, Name = "Buoyant", Color = new(0.55f, 0.85f, 1.00f), IsSolid = true, LightEmission = 0, Opacity = 15, Weight = 1 });
     }
 

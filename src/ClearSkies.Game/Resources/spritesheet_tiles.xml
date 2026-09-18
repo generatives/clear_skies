@@ -84,4 +84,6 @@
 	<SubTexture name="wheat_stage4.png" x="0" y="256" width="128" height="128"/>
 	<SubTexture name="wood.png" x="0" y="128" width="128" height="128"/>
 	<SubTexture name="wood_red.png" x="0" y="0" width="128" height="128"/>
+	<SubTexture name="metal.png" x="1024" y="640" width="128" height="128"/>
+	<SubTexture name="thruster.png" x="1024" y="768" width="128" height="128"/>
 </TextureAtlas>

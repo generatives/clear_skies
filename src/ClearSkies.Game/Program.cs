@@ -36,6 +36,7 @@ host.AddSystem(airshipFlight, SystemStage.Logic);
 
 host.AddSystem(host.Physics, SystemStage.Logic); // steps the simulation once bodies/impulses for this frame are in
 host.AddSystem(new GridTransformSystem(host.World, host.Physics), SystemStage.Logic);
+host.AddSystem(new HierarchyTransformSystem(host.World), SystemStage.Logic);
 host.AddSystem(gridPilot, SystemStage.Logic);
 host.AddSystem(new PlayerInputSystem(host.World, staticWorld, host.Physics, host.Input, meshSystem, host.Renderer, gridSelection), SystemStage.Logic);
 var gridPersistence = new GridPersistenceSystem(host.World, meshSystem, host.Physics, gridSelection);
