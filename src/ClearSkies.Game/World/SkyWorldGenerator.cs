@@ -65,11 +65,16 @@ public sealed class SkyWorldGenerator : IWorldGenerator
         _maskNoise.SetFractalOctaves(2);
         _maskNoise.SetFrequency(0.003f);
 
+        // Higher frequency than the original 0.008 (shorter wavelength) keeps any single "above
+        // threshold" patch of this field small — the old low frequency could stay elevated across huge
+        // contiguous stretches, producing lakes that just kept going. 0.014 (down from 0.02, ~1.4x
+        // longer wavelength) roughly doubles typical lake area (area scales with wavelength squared)
+        // while keeping that same bound in place.
         _lakeNoise = new FastNoiseLite(unchecked((int)(seed + 4)));
         _lakeNoise.SetNoiseType(FastNoiseLite.NoiseType.OpenSimplex2);
         _lakeNoise.SetFractalType(FastNoiseLite.FractalType.FBm);
-        _lakeNoise.SetFractalOctaves(3);
-        _lakeNoise.SetFrequency(0.008f);
+        _lakeNoise.SetFractalOctaves(4);
+        _lakeNoise.SetFrequency(0.014f);
 
         _edgeNoise = new FastNoiseLite(unchecked((int)(seed + 5)));
         _edgeNoise.SetNoiseType(FastNoiseLite.NoiseType.OpenSimplex2);
@@ -242,26 +247,51 @@ public sealed class SkyWorldGenerator : IWorldGenerator
         float topY = island.BaseY + surfaceBase + terrain * amplitude;
         if (topY <= bottomY) topY = bottomY + 1f; // guard against extreme parameter combinations
 
-        // ── Lakes: independent low-frequency field, interior only, away from rims and mountains. ──
-        float lakeField = _lakeNoise.GetNoise(wx + offX, wz + offZ) * 0.5f + 0.5f;
-        bool isLake = lakeField > 0.55f && t < 0.75f && mtn < 0.3f;
+        // Right at the rim, both bottomY and topY converge toward baseY (that's the intended taper-to-
+        // nothing edge), but that leaves a band of columns only 1-2 blocks thick — too thin to read as
+        // real ground, and since they fall entirely within the beach depth range they show up as odd
+        // isolated sand nubs. Treat anything under a minimum thickness as not part of the island at all.
+        if (topY - bottomY < 3f) return false;
 
-        if (isLake)
+        // ── Lakes: independent low-frequency field, interior only, away from rims and mountains. The
+        // water surface is flat (not following the noisy topY — an undulating lake just reads as sloped
+        // ground with a blue tint), but its level tracks the LOCAL smooth terrain baseline (surfaceBase,
+        // the radial-only, noise-free component of topY) minus a fixed margin, rather than one constant
+        // per island — a single global level looked flush with the ground wherever the local plains
+        // happened to already sit near it. The margin (3, was 7 — that read as a deep pit) just needs to
+        // clear the ordinary noise wobble so a lake still reads as recessed at typical low dips, not a
+        // full basin.
+        //
+        // lakeBlend is continuous (not a hard in/out boolean): as lakeField rises through the shore
+        // band, the land height eases down toward lakeLevel — a gentle bank leading down to the water —
+        // rather than jumping straight from full terrain height to flat water at a single threshold
+        // (which read as a sheer cliff around every lake). Once the blended height actually reaches
+        // lakeLevel the column is committed to being water, with a carved floor beneath it.
+        float lakeField = _lakeNoise.GetNoise(wx + offX, wz + offZ) * 0.5f + 0.5f;
+        float lakeLevel = island.BaseY + surfaceBase - 3f;
+
+        float lakeBlend = Smoothstep(0.60f, 0.78f, lakeField); // raised from 0.40/0.60 — fewer, smaller lakes
+        lakeBlend *= 1f - Smoothstep(0.68f, 0.78f, t);   // fade out near the rim
+        lakeBlend *= 1f - Smoothstep(0.25f, 0.35f, mtn); // fade out approaching mountains
+
+        if (lakeBlend > 0f && topY > lakeLevel)
         {
-            // Water surface stays flush with the surrounding rim (topY), not recessed below it — a
-            // recessed lip put a solid overhang around every shore, and the renderer's per-fragment
-            // light sampler averages nearby *open* neighbour cells: a fragment whose whole local
-            // neighbourhood reads solid gets zero light (pure black) regardless of texture.
-            float lakeCarve = Lerp(2f, 14f, Saturate((lakeField - 0.62f) / 0.38f));
-            float lakeFloorY = topY - lakeCarve;
-            float waterSurfaceY = topY;
-            FillLakeColumn(data, lx, lz, originY, bottomY, lakeFloorY, waterSurfaceY);
+            float blendedTopY = Lerp(topY, lakeLevel, lakeBlend);
+            if (blendedTopY <= lakeLevel + 0.5f)
+            {
+                float lakeCarve = Lerp(2f, 14f, Saturate((lakeField - 0.78f) / 0.22f));
+                float lakeFloorY = MathF.Max(bottomY + 1f, lakeLevel - lakeCarve);
+                FillLakeColumn(data, lx, lz, originY, bottomY, lakeFloorY, lakeLevel);
+                return true;
+            }
+
+            BlockId bankBlock = PickTopBlock(t, blendedTopY, island, mtn);
+            FillLandColumn(data, lx, lz, originY, bottomY, blendedTopY, bankBlock);
+            return true;
         }
-        else
-        {
-            BlockId topBlock = PickTopBlock(t, topY, island, mtn);
-            FillLandColumn(data, lx, lz, originY, bottomY, topY, topBlock);
-        }
+
+        BlockId topBlock = PickTopBlock(t, topY, island, mtn);
+        FillLandColumn(data, lx, lz, originY, bottomY, topY, topBlock);
 
         return true;
     }

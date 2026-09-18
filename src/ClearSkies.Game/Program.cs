@@ -32,11 +32,10 @@ host.AddSystem(host.Gui, SystemStage.Input); // opens ImGui's frame before Logic
 
 var physicsBody = new PhysicsBodySystem(host.World, staticWorld, host.Physics);
 
-// View distance: xzRadius=8/yRadius=3 (was 3/2) — a ~2.7x linear increase, backed by the single-threaded
-// generation/meshing/collision speedups in GenerationBenchmark. This roughly quadruples the GPU-resident
-// volume (GpuResidencySystem windows loaded chunks + a margin), so if VRAM or frame time becomes an issue
-// at this setting, that's the next thing to check before going further.
-host.AddSystem(new ChunkLoadSystem(host.World, staticWorld, worldGen, xzRadius: 8, yRadius: 3), SystemStage.Logic);
+// View distance: xzRadius=8/yRadius=3 caused WGPU validation errors / crashes (likely the GPU-resident
+// light/opacity volume outgrowing a buffer limit at that window size — see GpuResidencySystem). Dialed
+// back to 4/2 (up from the original 3/2) until that's root-caused.
+host.AddSystem(new ChunkLoadSystem(host.World, staticWorld, worldGen, xzRadius: 4, yRadius: 2), SystemStage.Logic);
 host.AddSystem(physicsBody, SystemStage.Logic);
 host.AddSystem(new PlayerGridControlSystem(host.World, host.Physics, host.Input), SystemStage.Logic);
 
