@@ -33,6 +33,18 @@ public sealed class GpuLightSystem : ISystem, IDisposable
     /// (see lighting_design_details.md); moving lamps update within one period.</summary>
     private const float RelightPeriod = 0.5f; // 2 Hz
 
+    /// <summary>Cap on a local-edit flood region's XZ span, in chunks (Y is always full-height — see
+    /// FloodVolume's doc comment). Without this, a load-in burst that dirties most of the loaded footprint at
+    /// once forces one flood covering nearly the whole volume; chunks outside the capped window stay dirty and
+    /// get swept up by a later call, so a big dirty footprint is processed as several smaller ones over several
+    /// frames instead of one huge one on a single frame.</summary>
+    private const int MaxFloodChunksXZ = 8;
+
+    /// <summary>Relaxation passes run per frame for a local-edit flood, out of GpuLightFlood.Passes total.
+    /// Must evenly divide Passes (each call needs an even count — see GpuLightFlood.RelaxPasses). Spreads one
+    /// region's convergence across multiple frames instead of paying for all of it on the frame it starts.</summary>
+    private const int RelaxPassesPerFrame = 4;
+
     private const int S = ChunkData.Size; // 32
 
     private readonly ChunkVolume    _staticWorld;
@@ -51,6 +63,14 @@ public sealed class GpuLightSystem : ISystem, IDisposable
     private readonly List<WorldLamp>               _lamps    = new();
     private readonly List<(GpuMesh mesh, Mat4 model)> _casters = new();
     private readonly Dictionary<ChunkVolume, FloodRegion> _prevCrossRegion = new();
+
+    // In-progress local-edit flood (see FloodVolume) — at most one at a time, since only one volume floods
+    // per Update() call. Null/_relaxVol == null means nothing is mid-relax.
+    private ChunkVolume?        _relaxVol;
+    private FloodRegion         _relaxRegion;
+    private int                 _relaxGeneration;
+    private int                 _relaxPassesLeft;
+    private List<ChunkPosition>? _relaxChunks;
 
     private readonly record struct WorldLamp(ChunkVolume Source, Vector3D<float> World, int Level);
 
@@ -295,44 +315,147 @@ public sealed class GpuLightSystem : ISystem, IDisposable
         return new FloodRegion(minX, 0, minZ, maxX - minX, vh, maxZ - minZ);
     }
 
-    // ── Local-edit flood (unchanged behaviour) ────────────────────────────────
+    // ── Local-edit flood ────────────────────────────────────────────────────
 
     /// <summary>
-    /// Floods the volume if any chunk is dirty and GPU residency is ready. The flood is scoped to the
-    /// bounding box of dirty chunks: full-height in Y (sky occlusion is a vertical column effect) and the dirty
-    /// X/Z footprint plus a one-chunk lateral margin (≥ the max propagation radius of 15) so the relaxation's
-    /// border reads stay correct. Returns true if a flood was submitted.
+    /// Advances the volume's local-edit flood by one frame's worth of work and returns true if anything was
+    /// submitted. Two things can happen:
+    ///
+    /// <para><b>Continue an in-progress relax</b> (see <see cref="_relaxVol"/>): a previous call started
+    /// flooding a region but its 16 relaxation passes didn't all fit in one frame's budget
+    /// (<see cref="RelaxPassesPerFrame"/>) — run the next batch. Aborts (discarding progress) if the volume
+    /// was reallocated since (its buffers are fresh/reset, so resuming would relax garbage); the affected
+    /// chunks are still flagged dirty and get pursued fresh next time.</para>
+    ///
+    /// <para><b>Start a new region</b>, otherwise: bounding box of dirty chunks, full-height in Y (sky
+    /// occlusion is a vertical column effect) and the dirty X/Z footprint plus a one-chunk lateral margin
+    /// (≥ the max propagation radius of 15) so the relaxation's border reads stay correct — then capped to
+    /// <see cref="MaxFloodChunksXZ"/> so a load-in burst that dirties most of the loaded footprint doesn't
+    /// force one region covering nearly the whole volume. Only the chunks that actually fall inside the
+    /// (possibly capped) region are recorded to have their NeedsFlood flag cleared on completion; any dirty
+    /// chunk the cap left out stays dirty for a later call.</para>
     /// </summary>
     private bool FloodVolume(ChunkVolume vol)
     {
+        if (_relaxVol == vol)
+            return ContinueRelax(vol);
+        if (_relaxVol != null)
+            return false; // a different volume is mid-relax this cycle; this one waits its turn
+
         var gpu = vol.VolumeGpu;
         if (gpu == null) return false;                   // GPU buffers not yet allocated
         if (gpu.RenderBindGroup == 0) return false;      // render bind group not yet ready
 
+        // Also track the dirty chunk nearest the volume centre (≈ camera, since GpuResidencySystem keeps the
+        // window centred on loaded chunks) as a seed for capping below. During normal streaming the dirty set
+        // is typically a thin ring at the edge of the loaded volume (MarkNeighboursDirty on each newly-added
+        // chunk), not a filled area — its bounding box spans the whole loaded volume even though the ring
+        // itself is thin, so capping a window around the *bbox's own midpoint* can land in the ring's empty
+        // interior with no dirty chunks in it at all, making an entire multi-frame relax cycle a no-op that
+        // silently never converges. Anchoring on an actual dirty chunk guarantees real progress every cycle.
         int minCX = int.MaxValue, minCZ = int.MaxValue, maxCX = int.MinValue, maxCZ = int.MinValue;
+        int centerCX = gpu.DX / 2, centerCZ = gpu.DZ / 2;
+        ChunkPosition? seedPos = null;
+        int bestDist = int.MaxValue;
         foreach (var (pos, e) in vol.All)
         {
             if (!e.NeedsFlood || e.NeedsGpuUpload) continue;
             int cx = pos.X - gpu.Min.X, cz = pos.Z - gpu.Min.Z;
             if (cx < minCX) minCX = cx; if (cx > maxCX) maxCX = cx;
             if (cz < minCZ) minCZ = cz; if (cz > maxCZ) maxCZ = cz;
+
+            int d = (cx - centerCX) * (cx - centerCX) + (cz - centerCZ) * (cz - centerCZ);
+            if (d < bestDist) { bestDist = d; seedPos = pos; }
         }
-        if (maxCX < minCX) return false; // nothing dirty (and ready)
+        if (seedPos is not { } seed) return false; // nothing dirty (and ready)
 
         minCX = System.Math.Max(0, minCX - 1); maxCX = System.Math.Min(gpu.DX - 1, maxCX + 1);
         minCZ = System.Math.Max(0, minCZ - 1); maxCZ = System.Math.Min(gpu.DZ - 1, maxCZ + 1);
+
+        // Cap the window, centred on the seed chunk (not the bbox's own midpoint — see above).
+        if (maxCX - minCX + 1 > MaxFloodChunksXZ)
+        {
+            int seedCX = seed.X - gpu.Min.X;
+            minCX = System.Math.Clamp(seedCX - MaxFloodChunksXZ / 2, minCX, maxCX - MaxFloodChunksXZ + 1);
+            maxCX = minCX + MaxFloodChunksXZ - 1;
+        }
+        if (maxCZ - minCZ + 1 > MaxFloodChunksXZ)
+        {
+            int seedCZ = seed.Z - gpu.Min.Z;
+            minCZ = System.Math.Clamp(seedCZ - MaxFloodChunksXZ / 2, minCZ, maxCZ - MaxFloodChunksXZ + 1);
+            maxCZ = minCZ + MaxFloodChunksXZ - 1;
+        }
 
         var region = new FloodRegion(
             Ox: minCX * S, Oy: 0, Oz: minCZ * S,
             Sx: (maxCX - minCX + 1) * S, Sy: gpu.VH, Sz: (maxCZ - minCZ + 1) * S);
 
-        _flood.Flood(gpu, vol.All, region);
+        // Exactly which dirty chunks fall inside the (possibly capped) region — only these get NeedsFlood
+        // cleared once the relax finishes, regardless of what else is dirty elsewhere in the volume.
+        var chunks = new List<ChunkPosition>();
+        foreach (var (pos, e) in vol.All)
+        {
+            if (!e.NeedsFlood || e.NeedsGpuUpload) continue;
+            int cx = pos.X - gpu.Min.X, cz = pos.Z - gpu.Min.Z;
+            if (cx >= minCX && cx <= maxCX && cz >= minCZ && cz <= maxCZ)
+                chunks.Add(pos);
+        }
 
-        foreach (var (_, e) in vol.All)
-            if (!e.NeedsGpuUpload)
+        _flood.PrepareRegion(gpu, vol.All, region);
+        _flood.BeginRelax(gpu);
+
+        int firstBatch = System.Math.Min(RelaxPassesPerFrame, GpuLightFlood.Passes);
+        _flood.RelaxPasses(gpu, region, firstBatch);
+        int remaining = GpuLightFlood.Passes - firstBatch;
+
+        if (remaining <= 0)
+        {
+            FinishChunks(vol, chunks);
+        }
+        else
+        {
+            _relaxVol = vol; _relaxRegion = region; _relaxGeneration = gpu.Generation;
+            _relaxPassesLeft = remaining; _relaxChunks = chunks;
+        }
+
+        return true;
+    }
+
+    private bool ContinueRelax(ChunkVolume vol)
+    {
+        var gpu = vol.VolumeGpu;
+        if (gpu == null || gpu.Generation != _relaxGeneration)
+        {
+            // Reallocated mid-relax: LightA/LightB are fresh/reset, so there's nothing sensible to resume.
+            // The chunks we were relaxing are still NeedsFlood=true (never cleared) and get retried fresh.
+            _relaxVol = null; _relaxChunks = null;
+            return false;
+        }
+
+        int passes = System.Math.Min(RelaxPassesPerFrame, _relaxPassesLeft);
+        _flood.RelaxPasses(gpu, _relaxRegion, passes);
+        _relaxPassesLeft -= passes;
+
+        if (_relaxPassesLeft <= 0)
+        {
+            FinishChunks(vol, _relaxChunks!);
+            _relaxVol = null; _relaxChunks = null;
+        }
+
+        return true;
+    }
+
+    /// <summary>Clears NeedsFlood for exactly the given chunks, skipping any that unloaded mid-relax (gone from
+    /// the volume) or were edited again mid-relax (NeedsGpuUpload still true — stays dirty for a fresh reflood
+    /// once its opacity upload catches up, since this relax may have run against a mix of old/new opacity).</summary>
+    private static void FinishChunks(ChunkVolume vol, List<ChunkPosition> chunks)
+    {
+        foreach (var pos in chunks)
+        {
+            var e = vol.GetEntry(pos);
+            if (e != null && !e.NeedsGpuUpload)
                 e.NeedsFlood = false;
-
-        return true; // one flood per Update
+        }
     }
 
     public void Dispose()

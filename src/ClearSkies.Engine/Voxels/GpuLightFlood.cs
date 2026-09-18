@@ -35,8 +35,9 @@ internal readonly record struct FloodRegion(int Ox, int Oy, int Oz, int Sx, int 
 internal sealed class GpuLightFlood : IDisposable
 {
     // 16 passes → max propagation radius 15 (max emission, and >= BaseSkyLevel for sky ambient bleed).
-    // Even pass count → result lands in LightA.
-    private const int Passes = 16;
+    // Even pass count → result lands in LightA. Public so GpuLightSystem can split this total across several
+    // frames (see RelaxPasses) instead of always paying for all 16 in one call.
+    public const int Passes = 16;
 
     private const int WordsPerChunk = VolumeGpuResources.WordsPerChunk; // 1024
 
@@ -326,13 +327,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (n > 0)
             vol.Emitters!.Write<uint>(0, _emitterScratch.AsSpan(0, n * 2));
 
-        // Region params (count rides along for the scatter pass).
-        Span<uint> r = stackalloc uint[8]
-        {
-            (uint)region.Ox, (uint)region.Oy, (uint)region.Oz, (uint)n,
-            (uint)region.Sx, (uint)region.Sy, (uint)region.Sz, 0u,
-        };
-        _regionParam.Write<uint>(0, r);
+        WriteRegionParam(region, n);
 
         // Lazily (re)create bind groups; reset to 0 on resize / emitter grow.
         if (vol.SkySweepBind == 0)
@@ -361,13 +356,50 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     /// <summary>
     /// Second half of a flood: make both ping-pong buffers agree everywhere (so region border reads are stable),
-    /// then run the relaxation ping-pong over the region. Result ends in LightA.
+    /// then run all <see cref="Passes"/> of the relaxation ping-pong over the region in one call. Result ends in
+    /// LightA. Used by the cross-volume relight path, which already runs at a throttled cadence over a
+    /// lamp-bounded region. For the bulk local-edit flood (which can end up covering a much larger region during
+    /// a load-in burst), <see cref="GpuLightSystem"/> instead calls <see cref="BeginRelax"/> once followed by
+    /// several <see cref="RelaxPasses"/> calls spread across frames.
     /// </summary>
     public void FinishRegion(VolumeGpuResources vol, FloodRegion region)
     {
-        _ctx.CopyBufferToBuffer(vol.LightA, vol.LightB, vol.LightA.SizeBytes);
+        BeginRelax(vol);
+        RelaxPasses(vol, region, Passes);
+    }
+
+    /// <summary>
+    /// Copies LightA into LightB so both ping-pong buffers agree outside the region (stable border reads) before
+    /// relaxation starts. Call once per flood, before the first <see cref="RelaxPasses"/> call — never between
+    /// resumed calls for the same flood, since that would overwrite whatever the previous batch just computed.
+    /// </summary>
+    public void BeginRelax(VolumeGpuResources vol) => _ctx.CopyBufferToBuffer(vol.LightA, vol.LightB, vol.LightA.SizeBytes);
+
+    /// <summary>
+    /// Runs <paramref name="passCount"/> relaxation passes over <paramref name="region"/>. Safe to split a
+    /// flood's total pass budget across several calls (e.g. one on each of several frames) as long as every
+    /// individual call's <paramref name="passCount"/> is even — each call's internal pass counter restarts at
+    /// 0 (see <see cref="ComputePipeline.DispatchPingPong"/>), which only lines up correctly with the ping-pong
+    /// buffer state left by the previous call if that call also ended on an even count (landing in LightA, which
+    /// this call's first — "even" — pass then reads from). Re-writes the shared region-param buffer itself
+    /// (rather than assuming it still holds this region from an earlier call), since other work — the
+    /// cross-volume relight cadence, or another volume's flood — can run between resumed calls and overwrite it.
+    /// </summary>
+    public void RelaxPasses(VolumeGpuResources vol, FloodRegion region, int passCount)
+    {
+        WriteRegionParam(region, 0); // count is only read by the scatter pass; harmless here
         _pipeline.DispatchPingPong(vol.FloodBindEven, vol.FloodBindOdd,
-            CeilDiv((uint)region.Sx, 4u), CeilDiv((uint)region.Sy, 4u), CeilDiv((uint)region.Sz, 4u), Passes);
+            CeilDiv((uint)region.Sx, 4u), CeilDiv((uint)region.Sy, 4u), CeilDiv((uint)region.Sz, 4u), passCount);
+    }
+
+    private void WriteRegionParam(FloodRegion region, int count)
+    {
+        Span<uint> r = stackalloc uint[8]
+        {
+            (uint)region.Ox, (uint)region.Oy, (uint)region.Oz, (uint)count,
+            (uint)region.Sx, (uint)region.Sy, (uint)region.Sz, 0u,
+        };
+        _regionParam.Write<uint>(0, r);
     }
 
     /// <summary>

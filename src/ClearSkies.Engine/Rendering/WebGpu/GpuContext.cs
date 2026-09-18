@@ -36,6 +36,19 @@ public sealed unsafe class GpuContext : IDisposable
     public TextureFormat DepthFormat => TextureFormat.Depth32float;
     public Vector2D<int> Size { get; private set; }
 
+    /// <summary>The adapter's own reported limits (see <see cref="Init"/> — the device is created requesting
+    /// exactly these, not wgpu's conservative portability defaults). Callers sizing a large buffer (e.g. a
+    /// per-volume voxel light buffer) should check against this before allocating, since exceeding it fails
+    /// as an unrecoverable native validation error rather than a catchable .NET exception.</summary>
+    public Limits AdapterLimits { get; private set; }
+
+    private GpuBufferFill? _bufferFill;
+
+    /// <summary>Shared GPU-side buffer-fill utility (see <see cref="GpuBufferFill"/>) — one shader/pipeline for
+    /// the whole app, reused across every <c>VolumeGpuResources</c> instance (static world + each grid) rather
+    /// than compiling one per volume.</summary>
+    public GpuBufferFill BufferFill => _bufferFill ??= new GpuBufferFill(this);
+
     internal WebGPU Api => _api;
     internal Device* Device => _device;
     internal Queue* Queue => _queue;
@@ -80,6 +93,17 @@ public sealed unsafe class GpuContext : IDisposable
         var supported = new SupportedLimits();
         _api.AdapterGetLimits(_adapter, &supported);
         var required = new RequiredLimits { Limits = supported.Limits };
+
+        // MaxBufferSize specifically comes back from AdapterGetLimits as WGPU's "undefined" sentinel
+        // (ulong.MaxValue) on at least some backends, even though MaxStorageBufferBindingSize is populated
+        // with a real value. Requesting an undefined limit does NOT ask the device for "whatever the adapter
+        // supports" — it silently leaves that one limit at wgpu-native's built-in default (256 MiB), which a
+        // volume well within MaxStorageBufferBindingSize can still exceed. A storage buffer can never usefully
+        // need to be larger than MaxStorageBufferBindingSize anyway, so request that as the floor for MaxBufferSize.
+        if (required.Limits.MaxBufferSize == ulong.MaxValue || required.Limits.MaxBufferSize < required.Limits.MaxStorageBufferBindingSize)
+            required.Limits.MaxBufferSize = required.Limits.MaxStorageBufferBindingSize;
+
+        AdapterLimits = required.Limits;
 
         // Request device + queue.
         var deviceDesc = new DeviceDescriptor { RequiredLimits = &required };
@@ -222,6 +246,7 @@ public sealed unsafe class GpuContext : IDisposable
 
     public void Dispose()
     {
+        _bufferFill?.Dispose();
         if (_depthView != null) _api.TextureViewRelease(_depthView);
         if (_depthTexture != null) _api.TextureRelease(_depthTexture);
         if (_instance != null) _api.InstanceRelease(_instance);

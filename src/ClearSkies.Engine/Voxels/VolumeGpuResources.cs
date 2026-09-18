@@ -41,6 +41,11 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
     public int DY { get; private set; } // volume height in chunks
     public int DZ { get; private set; } // volume depth  in chunks
 
+    /// <summary>Bumped every <see cref="Allocate"/> (fresh buffers, all bind groups invalidated). Lets a
+    /// multi-frame in-progress GPU light relax (see GpuLightSystem) detect that this volume was reallocated
+    /// out from under it and abandon cleanly instead of resuming against brand-new, unrelated buffers.</summary>
+    public int Generation { get; private set; }
+
     public int VW => DX * S; // voxels
     public int VH => DY * S;
     public int VD => DZ * S;
@@ -109,6 +114,7 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
     {
         ReleaseBindGroups();
         Opacity?.Dispose(); LightA?.Dispose(); LightB?.Dispose(); Dims?.Dispose(); SunVis?.Dispose();
+        Generation++;
 
         Min = min;
         DX  = max.X - min.X + 1;
@@ -117,6 +123,21 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
 
         int total    = TotalVoxels;
         int opWords  = TotalOpacityWords;
+
+        // LightA/LightB/SunVis are the largest buffers here (1 u32/voxel each) and scale with the cube of
+        // the view-distance radii — a radius increase that looks modest in chunks can jump this well past
+        // the adapter's actual max buffer size (a hard native limit; exceeding it is an unrecoverable wgpu
+        // validation error, not a catchable .NET one, and cascades into "invalid buffer" / "invalid bind
+        // group" / "invalid command encoder" errors that don't obviously point back here). Check up front
+        // so a too-large view distance fails with a clear, actionable message instead.
+        ulong lightBufferBytes = (ulong)total * sizeof(uint);
+        ulong maxBufferSize = System.Math.Min(_ctx.AdapterLimits.MaxBufferSize, _ctx.AdapterLimits.MaxStorageBufferBindingSize);
+        if (lightBufferBytes > maxBufferSize)
+            throw new InvalidOperationException(
+                $"GPU light volume too large: {DX}x{DY}x{DZ} chunks needs a {lightBufferBytes:N0}-byte light " +
+                $"buffer, but this device's max buffer size is {maxBufferSize:N0} bytes. Reduce ChunkLoadSystem's " +
+                $"xzRadius/yRadius (or GpuResidencySystem.WindowMargin) so (2*xzRadius+1+2*margin)^2 * " +
+                $"(2*yRadius+1+2*margin) * 32768 * 4 stays under that limit.");
 
         Opacity = GpuBuffer.CreateStorage(_ctx, (ulong)(opWords * sizeof(uint)));
         LightA  = GpuBuffer.CreateStorage(_ctx, (ulong)(total  * sizeof(uint)));
@@ -132,14 +153,12 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
         Span<uint> d = stackalloc uint[4] { (uint)VW, (uint)VH, (uint)VD, 0u };
         Dims.Write<uint>(0, d);
 
-        // Pre-fill LightA with dim ambient so chunks look reasonable before first flood.
-        var fill = new uint[total];
-        Array.Fill(fill, AmbientSky);
-        LightA.Write<uint>(0, fill);
-
-        // Pre-fill SunVis fully lit (255) so geometry is sunlit before the first sun-vis pass runs.
-        Array.Fill(fill, 255u);
-        SunVis.Write<uint>(0, fill);
+        // Pre-fill LightA (dim ambient) and SunVis (fully lit) so chunks look reasonable before the first
+        // flood/sun-vis pass, entirely on the GPU (see GpuBufferFill) — for a large volume, a CPU-side fill
+        // array plus the QueueWriteBuffer transfer to upload it costs tens of milliseconds of CPU-to-GPU
+        // bandwidth, all landing on the single frame that triggered this (re)allocation.
+        _ctx.BufferFill.FillU32(LightA, AmbientSky, total);
+        _ctx.BufferFill.FillU32(SunVis, 255u, total);
     }
 
     // ── Bounds helpers ────────────────────────────────────────────────────────
