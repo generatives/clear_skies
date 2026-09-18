@@ -63,12 +63,26 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
 
         // Camera uniform carries lightViewProj, which the shadow pass's depth shader reads — write it
         // before the shadow pass, then render all casters from the sun's POV into the shadow map.
+        //
+        // Every loaded chunk mesh gets a MeshRenderer (see ChunkVolume.SetMesh) — with no culling, at a
+        // large view distance that meant drawing every loaded chunk twice a frame (shadow + main pass)
+        // regardless of whether it was anywhere near visible, the dominant per-frame cost once generation/
+        // meshing/lighting throughput stopped being the bottleneck. Frustum-cull both passes: the shadow
+        // pass against the sun's own (much smaller, fixed-radius — see BuildLightViewProj) orthographic
+        // volume, the main pass against the camera's. Every chunk mesh is exactly ChunkData.Size local
+        // units on a side (GreedyMesher's local space), so the world AABB is just that box transformed by
+        // the entity's own model matrix (handles rotation for a dynamic grid's chunks too, not just the
+        // static world's axis-aligned ones).
+        var lightFrustum = Frustum.FromViewProjection(uniform.LightViewProj);
+
         _renderer.SetCameraUniform(uniform);
         _renderer.BeginShadowPass();
         foreach (ref readonly Entity e in _meshes.GetEntities())
         {
             ref readonly var t = ref e.Get<Transform>();
-            _renderer.DrawShadowMesh(e.Get<MeshRenderer>().Mesh, t.ToMatrix());
+            var model = t.ToMatrix();
+            if (!ChunkBoundsIntersect(model, lightFrustum)) continue;
+            _renderer.DrawShadowMesh(e.Get<MeshRenderer>().Mesh, model);
         }
         _renderer.EndShadowPass();
 
@@ -80,10 +94,15 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
 
         _renderer.SetCameraUniform(uniform);
 
+        var camFrustum = Frustum.FromViewProjection(Mat4.Multiply(uniform.Projection, uniform.View));
+
         foreach (ref readonly Entity e in _meshes.GetEntities())
         {
             ref readonly var t   = ref e.Get<Transform>();
             ref readonly var mr  = ref e.Get<MeshRenderer>();
+
+            var model = t.ToMatrix();
+            if (!ChunkBoundsIntersect(model, camFrustum)) continue;
 
             // Derive chunkBase + volume dims live from the current volume state. This stays correct
             // across volume reallocations (which move every chunk's base and resize the volume)
@@ -99,7 +118,7 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
                 vsx = gpu.VW; vsy = gpu.VH; vsz = gpu.VD;
             }
 
-            _renderer.DrawMesh(mr.Mesh, t.ToMatrix(), lbg, cbx, cby, cbz, vsx, vsy, vsz);
+            _renderer.DrawMesh(mr.Mesh, model, lbg, cbx, cby, cbz, vsx, vsy, vsz);
         }
 
         // Wireframe overlays drawn on top (pipeline switches mid-pass then restores).
@@ -121,6 +140,25 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
         // ImGui draws last, on top of everything, in the same pass.
         _gui.EndFrame();
         _renderer.EndFrame();
+    }
+
+    /// <summary>True if the chunk-sized ([0,ChunkData.Size] local space, per GreedyMesher) box placed by
+    /// <paramref name="model"/> intersects <paramref name="frustum"/>. Transforms all 8 local corners rather
+    /// than assuming axis-alignment, since a dynamic grid's chunks are rotated (the static world's aren't,
+    /// but there's no cheap way to tell which case this is from the matrix alone, and 8 corner transforms
+    /// per chunk per frame is negligible next to the draw call it decides whether to skip).</summary>
+    private static bool ChunkBoundsIntersect(in Mat4 model, in Frustum frustum)
+    {
+        const float S = ChunkData.Size;
+        Vector3D<float> min = new(float.MaxValue), max = new(float.MinValue);
+        for (int i = 0; i < 8; i++)
+        {
+            var local = new Vector3D<float>((i & 1) != 0 ? S : 0f, (i & 2) != 0 ? S : 0f, (i & 4) != 0 ? S : 0f);
+            var world = model.TransformPoint(local);
+            min = Vector3D.Min(min, world);
+            max = Vector3D.Max(max, world);
+        }
+        return frustum.Intersects(min, max);
     }
 
     // Orthographic light-space matrix for the directional sun, framing a box around the camera so the

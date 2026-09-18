@@ -357,9 +357,17 @@ public sealed class GpuLightSystem : ISystem, IDisposable
         int centerCX = gpu.DX / 2, centerCZ = gpu.DZ / 2;
         ChunkPosition? seedPos = null;
         int bestDist = int.MaxValue;
+        bool anyPendingUpload = false;
         foreach (var (pos, e) in vol.All)
         {
-            if (!e.NeedsFlood || e.NeedsGpuUpload) continue;
+            // A chunk with a pending opacity upload has stale (usually all-air, post-reallocation) data in
+            // the Opacity buffer the flood shaders actually read. Flooding a region that overlaps ANY such
+            // chunk -- not just one that's itself due for reflooding -- would read it as non-occluding and
+            // let ambient sky light flash straight through terrain that just hasn't had its real opacity
+            // written back yet. So: don't flood this volume AT ALL while anything in it is upload-pending,
+            // even chunks this cycle wouldn't otherwise have touched.
+            if (e.NeedsGpuUpload) { anyPendingUpload = true; continue; }
+            if (!e.NeedsFlood) continue;
             int cx = pos.X - gpu.Min.X, cz = pos.Z - gpu.Min.Z;
             if (cx < minCX) minCX = cx; if (cx > maxCX) maxCX = cx;
             if (cz < minCZ) minCZ = cz; if (cz > maxCZ) maxCZ = cz;
@@ -367,6 +375,7 @@ public sealed class GpuLightSystem : ISystem, IDisposable
             int d = (cx - centerCX) * (cx - centerCX) + (cz - centerCZ) * (cz - centerCZ);
             if (d < bestDist) { bestDist = d; seedPos = pos; }
         }
+        if (anyPendingUpload) return false; // wait for GpuResidencySystem's upload backlog to fully drain first
         if (seedPos is not { } seed) return false; // nothing dirty (and ready)
 
         minCX = System.Math.Max(0, minCX - 1); maxCX = System.Math.Min(gpu.DX - 1, maxCX + 1);

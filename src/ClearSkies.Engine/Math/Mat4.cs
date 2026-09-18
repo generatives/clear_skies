@@ -88,6 +88,13 @@ public struct Mat4
         return m;
     }
 
+    /// <summary>Transforms a point (implicit w=1), dropping the result's w — correct for any affine
+    /// (translation/rotation/scale) matrix, which every model matrix in this engine is.</summary>
+    public readonly Vector3D<float> TransformPoint(Vector3D<float> p) => new(
+        M0 * p.X + M4 * p.Y + M8  * p.Z + M12,
+        M1 * p.X + M5 * p.Y + M9  * p.Z + M13,
+        M2 * p.X + M6 * p.Y + M10 * p.Z + M14);
+
     /// <summary>Matrix product (a * b): applies b first, then a, in column-vector convention.</summary>
     public static Mat4 Multiply(in Mat4 a, in Mat4 b)
     {

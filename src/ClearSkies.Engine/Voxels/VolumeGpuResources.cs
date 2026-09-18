@@ -174,9 +174,6 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
 
     // ── Opacity (chunk-major) + emitters ───────────────────────────────────────
 
-    // Reusable scratch for one chunk's opacity slice (avoids per-upload allocation).
-    private readonly uint[] _chunkWords = new uint[WordsPerChunk];
-
     /// <summary>Chunk-major slot index for a chunk: cx + DX*(cy + DY*cz) from <see cref="Min"/>.</summary>
     public int ChunkSlot(ChunkPosition pos)
     {
@@ -185,32 +182,41 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
     }
 
     /// <summary>
-    /// Rebuilds this chunk's opacity slice and emitter list from its block data, then uploads the slice as
-    /// one contiguous 1024-word write into the chunk-major opacity buffer. Replaces the old whole-volume
-    /// re-upload: only the edited chunk's slice touches the GPU.
+    /// Uploads this chunk's opacity slice as one contiguous 1024-word write into the chunk-major opacity
+    /// buffer, and rebuilds its emitter list. Recomputes the packed words from block data only when
+    /// <see cref="ChunkEntry.PackedOpacityWords"/> is null (first upload, or invalidated by a real edit — see
+    /// <c>ChunkVolume.SetBlock</c>); otherwise this call was triggered by a GPU volume reallocation, where the
+    /// bits themselves haven't changed and only need re-transmitting into the fresh buffer, so it skips
+    /// straight to the write. That keeps re-uploading every loaded chunk after a reallocation cheap enough to
+    /// do in one frame — see <see cref="ChunkEntry.PackedOpacityWords"/> for why that matters.
     /// </summary>
     public void UpdateChunkOpacity(ChunkPosition pos, ChunkEntry entry)
     {
         if (!Contains(pos)) return;
-        var data = entry.Data;
-        entry.Emitters.Clear();
 
-        for (int lz = 0; lz < S; lz++)
-        for (int ly = 0; ly < S; ly++)
+        if (entry.PackedOpacityWords is not { } words)
         {
-            uint bits = 0u;
-            for (int lx = 0; lx < S; lx++)
+            words = entry.PackedOpacityWords = new uint[WordsPerChunk];
+            var data = entry.Data;
+            entry.Emitters.Clear();
+
+            for (int lz = 0; lz < S; lz++)
+            for (int ly = 0; ly < S; ly++)
             {
-                var def = BlockRegistry.Get(data.Get(lx, ly, lz));
-                if (def.Opacity >= 15) bits |= 1u << lx;
-                if (def.LightEmission > 0)
-                    entry.Emitters.Add(new EmitterVoxel((byte)lx, (byte)ly, (byte)lz, def.LightEmission));
+                uint bits = 0u;
+                for (int lx = 0; lx < S; lx++)
+                {
+                    var def = BlockRegistry.Get(data.Get(lx, ly, lz));
+                    if (def.Opacity >= 15) bits |= 1u << lx;
+                    if (def.LightEmission > 0)
+                        entry.Emitters.Add(new EmitterVoxel((byte)lx, (byte)ly, (byte)lz, def.LightEmission));
+                }
+                words[ly + S * lz] = bits; // local word: lx is the in-word bit, (ly + 32*lz) is the word
             }
-            _chunkWords[ly + S * lz] = bits; // local word: lx is the in-word bit, (ly + 32*lz) is the word
         }
 
         ulong byteOffset = (ulong)ChunkSlot(pos) * WordsPerChunk * sizeof(uint);
-        Opacity.Write<uint>(byteOffset, _chunkWords);
+        Opacity.Write<uint>(byteOffset, words);
     }
 
     /// <summary>Ensures the emitter buffer holds at least <paramref name="count"/> entries (2 u32 each),
