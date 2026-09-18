@@ -36,6 +36,11 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
     private readonly ComputePipeline _pipeline;
     private readonly GpuBuffer       _param;
 
+    // Volume (re)allocation can now happen for more than one volume's background prep at once (see
+    // VolumeGpuResources.Prepare, called from a background Task per volume in GpuResidencySystem) — guards
+    // the single shared _param buffer above from two concurrent FillU32 calls stomping each other's write.
+    private readonly object _lock = new();
+
     public GpuBufferFill(GpuContext ctx)
     {
         _ctx      = ctx;
@@ -54,12 +59,15 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
         uint groupsX = System.Math.Min(totalGroups, 65535u);
         uint groupsY = (totalGroups + groupsX - 1) / groupsX;
 
-        Span<uint> p = stackalloc uint[4] { value, (uint)count, groupsX, 0u };
-        _param.Write<uint>(0, p);
+        lock (_lock)
+        {
+            Span<uint> p = stackalloc uint[4] { value, (uint)count, groupsX, 0u };
+            _param.Write<uint>(0, p);
 
-        var bind = _pipeline.CreateBindGroup(new (uint, GpuBuffer)[] { (0u, target), (1u, _param) });
-        _pipeline.Dispatch(bind, groupsX, groupsY, 1u);
-        _ctx.Api.BindGroupRelease(bind);
+            var bind = _pipeline.CreateBindGroup(new (uint, GpuBuffer)[] { (0u, target), (1u, _param) });
+            _pipeline.Dispatch(bind, groupsX, groupsY, 1u);
+            _ctx.Api.BindGroupRelease(bind);
+        }
     }
 
     public void Dispose()

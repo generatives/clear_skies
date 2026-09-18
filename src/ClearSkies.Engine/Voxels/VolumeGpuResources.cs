@@ -106,23 +106,60 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
            min.Y >= Min.Y && max.Y < Min.Y + DY &&
            min.Z >= Min.Z && max.Z < Min.Z + DZ;
 
-    /// <summary>Reallocates the volume to exactly cover [min, max] (inclusive chunk coords). All buffers are
-    /// recreated empty and all bind groups invalidated; the caller must re-upload every chunk and re-flood.</summary>
+    /// <summary>Reallocates the volume to exactly cover [min, max] (inclusive chunk coords), synchronously on
+    /// the calling thread. All buffers are recreated empty and all bind groups invalidated; the caller must
+    /// re-upload every chunk and re-flood. Used only for the very first allocation of a volume (nothing is
+    /// rendering from it yet, so there's nothing to double-buffer against) — see <see cref="Prepare"/> /
+    /// <see cref="AdoptPrepared"/> for the background path used by re-windowing a live volume.</summary>
     public void Reallocate(ChunkPosition min, ChunkPosition max) => Allocate(min, max);
 
-    private void Allocate(ChunkPosition min, ChunkPosition max)
+    private void Allocate(ChunkPosition min, ChunkPosition max) => AdoptPrepared(Prepare(_ctx, min, max));
+
+    /// <summary>
+    /// The raw buffers for a volume window [min, max], created and pre-filled but not yet installed into any
+    /// live <see cref="VolumeGpuResources"/> instance. Building these (mainly the <c>CreateStorage</c> calls —
+    /// tens to ~100ms for a few-hundred-MB window at a few thousand loaded chunks) touches no state belonging
+    /// to a live volume or its chunks, so it's safe to run on a background thread (see GpuResidencySystem)
+    /// while the current volume keeps rendering unaffected; only <see cref="AdoptPrepared"/> — a cheap
+    /// pointer-swap plus disposing the old buffers — needs to happen on the main thread.
+    /// </summary>
+    public sealed class PreparedBuffers
     {
-        ReleaseBindGroups();
-        Opacity?.Dispose(); LightA?.Dispose(); LightB?.Dispose(); Dims?.Dispose(); SunVis?.Dispose();
-        Generation++;
+        public ChunkPosition Min;
+        public int DX, DY, DZ;
+        public GpuBuffer Opacity = null!, LightA = null!, LightB = null!, SunVis = null!, Dims = null!;
 
-        Min = min;
-        DX  = max.X - min.X + 1;
-        DY  = max.Y - min.Y + 1;
-        DZ  = max.Z - min.Z + 1;
+        public bool Contains(ChunkPosition pos)
+            => pos.X >= Min.X && pos.X < Min.X + DX &&
+               pos.Y >= Min.Y && pos.Y < Min.Y + DY &&
+               pos.Z >= Min.Z && pos.Z < Min.Z + DZ;
 
-        int total    = TotalVoxels;
-        int opWords  = TotalOpacityWords;
+        private int ChunkSlot(ChunkPosition pos)
+        {
+            int cx = pos.X - Min.X, cy = pos.Y - Min.Y, cz = pos.Z - Min.Z;
+            return cx + DX * (cy + DY * cz);
+        }
+
+        /// <summary>Writes one chunk's already-packed opacity words into this window's Opacity buffer (a
+        /// background-thread-safe counterpart to <see cref="UpdateChunkOpacity"/> — takes the words directly
+        /// instead of a live <see cref="ChunkEntry"/>, so it never touches ECS/ChunkVolume state).</summary>
+        public void WriteChunkOpacity(ChunkPosition pos, uint[] words)
+        {
+            if (!Contains(pos)) return;
+            ulong byteOffset = (ulong)ChunkSlot(pos) * WordsPerChunk * sizeof(uint);
+            Opacity.Write<uint>(byteOffset, words);
+        }
+    }
+
+    /// <summary>Builds a fresh, standalone set of buffers for [min, max] — everything <see cref="Allocate"/>
+    /// used to do, minus touching <c>this</c>. Safe to call from a background thread.</summary>
+    public static PreparedBuffers Prepare(GpuContext ctx, ChunkPosition min, ChunkPosition max)
+    {
+        int dx = max.X - min.X + 1;
+        int dy = max.Y - min.Y + 1;
+        int dz = max.Z - min.Z + 1;
+        int total   = dx * S * dy * S * dz * S;
+        int opWords = dx * dy * dz * WordsPerChunk;
 
         // LightA/LightB/SunVis are the largest buffers here (1 u32/voxel each) and scale with the cube of
         // the view-distance radii — a radius increase that looks modest in chunks can jump this well past
@@ -131,34 +168,61 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
         // group" / "invalid command encoder" errors that don't obviously point back here). Check up front
         // so a too-large view distance fails with a clear, actionable message instead.
         ulong lightBufferBytes = (ulong)total * sizeof(uint);
-        ulong maxBufferSize = System.Math.Min(_ctx.AdapterLimits.MaxBufferSize, _ctx.AdapterLimits.MaxStorageBufferBindingSize);
+        ulong maxBufferSize = System.Math.Min(ctx.AdapterLimits.MaxBufferSize, ctx.AdapterLimits.MaxStorageBufferBindingSize);
         if (lightBufferBytes > maxBufferSize)
             throw new InvalidOperationException(
-                $"GPU light volume too large: {DX}x{DY}x{DZ} chunks needs a {lightBufferBytes:N0}-byte light " +
+                $"GPU light volume too large: {dx}x{dy}x{dz} chunks needs a {lightBufferBytes:N0}-byte light " +
                 $"buffer, but this device's max buffer size is {maxBufferSize:N0} bytes. Reduce ChunkLoadSystem's " +
                 $"xzRadius/yRadius (or GpuResidencySystem.WindowMargin) so (2*xzRadius+1+2*margin)^2 * " +
                 $"(2*yRadius+1+2*margin) * 32768 * 4 stays under that limit.");
 
-        Opacity = GpuBuffer.CreateStorage(_ctx, (ulong)(opWords * sizeof(uint)));
-        LightA  = GpuBuffer.CreateStorage(_ctx, (ulong)(total  * sizeof(uint)));
-        LightB  = GpuBuffer.CreateStorage(_ctx, (ulong)(total  * sizeof(uint)));
-        SunVis  = GpuBuffer.CreateStorage(_ctx, (ulong)(total  * sizeof(uint)));
-        Dims    = GpuBuffer.CreateStorage(_ctx, 4 * sizeof(uint));
+        var p = new PreparedBuffers { Min = min, DX = dx, DY = dy, DZ = dz };
+        p.Opacity = GpuBuffer.CreateStorage(ctx, (ulong)(opWords * sizeof(uint)));
+        p.LightA  = GpuBuffer.CreateStorage(ctx, (ulong)(total  * sizeof(uint)));
+        p.LightB  = GpuBuffer.CreateStorage(ctx, (ulong)(total  * sizeof(uint)));
+        p.SunVis  = GpuBuffer.CreateStorage(ctx, (ulong)(total  * sizeof(uint)));
+        p.Dims    = GpuBuffer.CreateStorage(ctx, 4 * sizeof(uint));
 
-        // Fresh opacity buffer is all-air (0); GpuResidencySystem re-uploads every chunk's slice (it marks
-        // them all NeedsGpuUpload on a realloc).
-        Opacity.Write<uint>(0, new uint[opWords]);
+        // Fresh opacity buffer is all-air (0); caller re-uploads every chunk's slice via WriteChunkOpacity.
+        p.Opacity.Write<uint>(0, new uint[opWords]);
 
         // Dim buffer: [VW, VH, VD, 0]
-        Span<uint> d = stackalloc uint[4] { (uint)VW, (uint)VH, (uint)VD, 0u };
-        Dims.Write<uint>(0, d);
+        Span<uint> d = stackalloc uint[4] { (uint)(dx * S), (uint)(dy * S), (uint)(dz * S), 0u };
+        p.Dims.Write<uint>(0, d);
 
         // Pre-fill LightA (dim ambient) and SunVis (fully lit) so chunks look reasonable before the first
         // flood/sun-vis pass, entirely on the GPU (see GpuBufferFill) — for a large volume, a CPU-side fill
         // array plus the QueueWriteBuffer transfer to upload it costs tens of milliseconds of CPU-to-GPU
-        // bandwidth, all landing on the single frame that triggered this (re)allocation.
-        _ctx.BufferFill.FillU32(LightA, AmbientSky, total);
-        _ctx.BufferFill.FillU32(SunVis, 255u, total);
+        // bandwidth, which running this on a background thread (see GpuResidencySystem) keeps off the frame
+        // that triggered the (re)allocation.
+        ctx.BufferFill.FillU32(p.LightA, AmbientSky, total);
+        ctx.BufferFill.FillU32(p.SunVis, 255u, total);
+
+        return p;
+    }
+
+    /// <summary>Installs a background-<see cref="Prepare"/>d buffer set as this volume's current one: disposes
+    /// the old buffers (a refcount release — safe even if the GPU has not finished with in-flight commands
+    /// that reference them, see <see cref="GpuBuffer.Dispose"/>), invalidates every bind group, and bumps
+    /// <see cref="Generation"/> so any in-progress relax against the old buffers (see GpuLightSystem) aborts
+    /// cleanly instead of resuming against unrelated fresh ones. Cheap (pointer swaps only) — meant to run on
+    /// the main thread on the frame the background prep finishes.</summary>
+    public void AdoptPrepared(PreparedBuffers prepared)
+    {
+        ReleaseBindGroups();
+        Opacity?.Dispose(); LightA?.Dispose(); LightB?.Dispose(); Dims?.Dispose(); SunVis?.Dispose();
+        Generation++;
+
+        Min = prepared.Min;
+        DX  = prepared.DX;
+        DY  = prepared.DY;
+        DZ  = prepared.DZ;
+
+        Opacity = prepared.Opacity;
+        LightA  = prepared.LightA;
+        LightB  = prepared.LightB;
+        SunVis  = prepared.SunVis;
+        Dims    = prepared.Dims;
     }
 
     // ── Bounds helpers ────────────────────────────────────────────────────────
