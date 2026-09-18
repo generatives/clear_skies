@@ -23,7 +23,9 @@ namespace ClearSkies.Engine.ECS;
 /// </summary>
 public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
 {
-    private const int CollidersPerFrame = 4;
+    // Box decomposition averages ~120us per non-empty chunk (see GenerationBenchmark) — much cheaper
+    // than meshing, so this can run well ahead of MeshesPerFrame without becoming the new bottleneck.
+    private const int CollidersPerFrame = 8;
 
     private readonly EntitySet         _grids;
     private readonly StaticWorld       _world;

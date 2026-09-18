@@ -31,6 +31,13 @@ public sealed class SkyWorldGenerator : IWorldGenerator
     private readonly FastNoiseLite _warpNoise;   // domain warp for non-circular footprints
     private readonly FastNoiseLite _bumpNoise;   // small-scale underside crags
 
+    // Single-slot cache for RegionGrid cell resolution (see ResolveIslandsCached). Only valid because
+    // Generate() is called from a single thread today; parallelizing generation later needs this made
+    // thread-local (or dropped) rather than shared.
+    private int _cachedCellX = int.MinValue, _cachedCellZ = int.MinValue;
+    private int _cachedIslandCount;
+    private readonly IslandDef[] _cachedIslands = new IslandDef[MaxIslandsPerCell];
+
     public SkyWorldGenerator(ulong seed = 1337)
     {
         _seed = seed;
@@ -91,11 +98,13 @@ public sealed class SkyWorldGenerator : IWorldGenerator
 
         // Cheap reject #1: resolve this chunk's region cell once. Most of the world has no island
         // cluster in its cell at all — that's the common case, and it costs one hash plus a few PRNG
-        // draws, no noise evaluation.
+        // draws, no noise evaluation. Region cells (4096 blocks) are far larger than a chunk (32 blocks),
+        // so every chunk in a vertical stack (same X/Z, different Y) and most horizontal neighbours
+        // resolve to the same cell — cached below so that repeated work isn't redone per chunk.
         Span<IslandDef> islandBuf = stackalloc IslandDef[MaxIslandsPerCell];
         int centerX = originX + ChunkData.Size / 2;
         int centerZ = originZ + ChunkData.Size / 2;
-        int islandCount = RegionGrid.ResolveIslands(_seed, centerX, centerZ, islandBuf);
+        int islandCount = ResolveIslandsCached(centerX, centerZ, islandBuf);
         if (islandCount == 0) return;
 
         // Cheap reject #2: bounding-volume check per island against this chunk's AABB before any
@@ -135,6 +144,25 @@ public sealed class SkyWorldGenerator : IWorldGenerator
                     break; // fixed island priority order — first owner wins
             }
         }
+    }
+
+    /// <summary>Resolves the island cluster for the region cell containing world (wx, wz), reusing the
+    /// last result when the query falls in the same cell as last time (see <see cref="_cachedCellX"/>).</summary>
+    private int ResolveIslandsCached(int wx, int wz, Span<IslandDef> outIslands)
+    {
+        int cellX = wx >> RegionGrid.CellShift;
+        int cellZ = wz >> RegionGrid.CellShift;
+
+        if (cellX != _cachedCellX || cellZ != _cachedCellZ)
+        {
+            _cachedCellX = cellX;
+            _cachedCellZ = cellZ;
+            _cachedIslandCount = RegionGrid.ResolveIslandsForCell(_seed, cellX, cellZ, _cachedIslands);
+        }
+
+        for (int i = 0; i < _cachedIslandCount; i++)
+            outIslands[i] = _cachedIslands[i];
+        return _cachedIslandCount;
     }
 
     // ── Per-column shaping ──────────────────────────────────────────────────────

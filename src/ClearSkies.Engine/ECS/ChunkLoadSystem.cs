@@ -1,3 +1,4 @@
+using System.Linq;
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Gui;
 using ClearSkies.Engine.Voxels;
@@ -14,7 +15,10 @@ namespace ClearSkies.Engine.ECS;
 /// </summary>
 public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 {
-    private const int LoadsPerFrame = 4;
+    // Generate() now averages ~100us (p99 ~1.1ms) per chunk after the meshing/generation perf pass —
+    // see GenerationBenchmark. 16/frame budgets ~1.6ms typical, leaving headroom for meshing/physics/GPU
+    // work in the same frame; was 4 when the pipeline was slower.
+    private const int LoadsPerFrame = 16;
 
     /// <summary>Seconds between periodic flushes of any currently-loaded dirty chunks — crash/power-loss
     /// safety for edits to chunks that stay loaded (never unload) for a long time.</summary>
@@ -25,6 +29,13 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     private readonly IWorldGenerator _generator;
     private readonly int            _xzRadius;
     private readonly int            _yRadius;
+
+    /// <summary>Every (dx,dy,dz) offset within the load radii, precomputed once and sorted closest-first
+    /// (same weighting as before: y counts 4x). The shape never changes at runtime, so RebuildLoadQueue
+    /// just filters this instead of re-collecting and re-sorting the whole radius on every chunk-boundary
+    /// crossing — that sort was O(volume log volume) with a fresh allocation each time, paid every time the
+    /// camera crosses into a new chunk, and volume grows as (2*xzRadius+1)^2*(2*yRadius+1).</summary>
+    private readonly (int dx, int dy, int dz)[] _offsetsByDistance;
 
     private readonly Queue<ChunkPosition> _loadQueue = new();
     private ChunkPosition _lastCamChunk = new(int.MinValue, int.MinValue, int.MinValue);
@@ -38,6 +49,19 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         _generator = generator;
         _xzRadius  = xzRadius;
         _yRadius   = yRadius;
+        _offsetsByDistance = BuildOffsetsByDistance(xzRadius, yRadius);
+    }
+
+    private static (int dx, int dy, int dz)[] BuildOffsetsByDistance(int xzRadius, int yRadius)
+    {
+        var offsets = new List<(int dx, int dy, int dz, int dist)>();
+        for (int dy = -yRadius; dy <= yRadius; dy++)
+        for (int dx = -xzRadius; dx <= xzRadius; dx++)
+        for (int dz = -xzRadius; dz <= xzRadius; dz++)
+            offsets.Add((dx, dy, dz, dx * dx + dy * dy * 4 + dz * dz)); // y weighted less
+
+        offsets.Sort((a, b) => a.dist.CompareTo(b.dist));
+        return offsets.Select(o => (o.dx, o.dy, o.dz)).ToArray();
     }
 
     // ── debug UI ─────────────────────────────────────────────────────────────
@@ -93,23 +117,14 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     {
         _loadQueue.Clear();
 
-        // Spiral outward from the camera for better perceived load-in.
-        var candidates = new List<(ChunkPosition pos, int dist)>();
-
-        for (int dy = -_yRadius; dy <= _yRadius; dy++)
-        for (int dx = -_xzRadius; dx <= _xzRadius; dx++)
-        for (int dz = -_xzRadius; dz <= _xzRadius; dz++)
+        // Spiral outward from the camera for better perceived load-in — offsets are already sorted
+        // closest-first (see _offsetsByDistance), so this is just a filter, no per-crossing sort/alloc.
+        foreach (var (dx, dy, dz) in _offsetsByDistance)
         {
             var p = center.Offset(dx, dy, dz);
             if (!_manager.IsLoaded(p))
-                candidates.Add((p, dx * dx + dy * dy * 4 + dz * dz)); // y weighted less
+                _loadQueue.Enqueue(p);
         }
-
-        // Sort closest-first so the camera's immediate surroundings load first.
-        candidates.Sort((a, b) => a.dist.CompareTo(b.dist));
-
-        foreach (var (pos, _) in candidates)
-            _loadQueue.Enqueue(pos);
     }
 
     private void UnloadDistant(ChunkPosition center)

@@ -3,8 +3,16 @@ using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Rendering.WebGpu;
 using ClearSkies.Engine.Voxels;
 using ClearSkies.Game;
+using ClearSkies.Game.Diagnostics;
 using ClearSkies.Game.Generation;
 using Silk.NET.Input;
+
+// Headless perf harness (see GenerationBenchmark) — no GPU/window needed, so this runs before EngineHost.
+if (args.Contains("--benchmark"))
+{
+    GenerationBenchmark.Run();
+    return;
+}
 
 using var host = new EngineHost(new EngineOptions("Clear Skies", 1280, 720, LogGpuErrors: true));
 
@@ -24,7 +32,11 @@ host.AddSystem(host.Gui, SystemStage.Input); // opens ImGui's frame before Logic
 
 var physicsBody = new PhysicsBodySystem(host.World, staticWorld, host.Physics);
 
-host.AddSystem(new ChunkLoadSystem(host.World, staticWorld, worldGen, xzRadius: 3, yRadius: 2), SystemStage.Logic);
+// View distance: xzRadius=8/yRadius=3 (was 3/2) — a ~2.7x linear increase, backed by the single-threaded
+// generation/meshing/collision speedups in GenerationBenchmark. This roughly quadruples the GPU-resident
+// volume (GpuResidencySystem windows loaded chunks + a margin), so if VRAM or frame time becomes an issue
+// at this setting, that's the next thing to check before going further.
+host.AddSystem(new ChunkLoadSystem(host.World, staticWorld, worldGen, xzRadius: 8, yRadius: 3), SystemStage.Logic);
 host.AddSystem(physicsBody, SystemStage.Logic);
 host.AddSystem(new PlayerGridControlSystem(host.World, host.Physics, host.Input), SystemStage.Logic);
 

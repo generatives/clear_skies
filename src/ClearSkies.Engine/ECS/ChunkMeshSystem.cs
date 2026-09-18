@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Rendering.WebGpu;
 using ClearSkies.Engine.Voxels;
@@ -13,7 +14,10 @@ namespace ClearSkies.Engine.ECS;
 /// </summary>
 public sealed class ChunkMeshSystem : ISystem
 {
-    private const int MeshesPerFrame = 2;
+    // Mesh() dropped from ~1.7ms to ~0.75ms avg per non-empty chunk after removing the mesher's
+    // per-voxel stackalloc/Span indirection (see GenerationBenchmark) — 4/frame keeps roughly the same
+    // per-frame time budget the old MeshesPerFrame=2 spent, at 2x the throughput.
+    private const int MeshesPerFrame = 4;
 
     private readonly List<ChunkVolume> _volumes = new();
     private readonly Renderer     _renderer;
@@ -67,7 +71,7 @@ public sealed class ChunkMeshSystem : ISystem
             long meshMs = _sw.ElapsedMilliseconds;
             _sw.Restart();
 
-            if (verts.Length == 0)
+            if (verts.Count == 0)
             {
                 entry.Mesh?.Dispose();
                 entry.Mesh        = null;
@@ -78,7 +82,7 @@ public sealed class ChunkMeshSystem : ISystem
                 continue;
             }
 
-            var mesh      = _renderer.UploadMesh(verts, idxs);
+            var mesh      = _renderer.UploadMesh(CollectionsMarshal.AsSpan(verts), CollectionsMarshal.AsSpan(idxs));
             long uploadMs = _sw.ElapsedMilliseconds;
 
             // The chunk's voxel base and the volume dims are derived live at draw time from the volume's
@@ -87,7 +91,7 @@ public sealed class ChunkMeshSystem : ISystem
             _totalMeshed++;
 
             if (meshMs + uploadMs > 5)
-                Console.WriteLine($"[mesh] chunk {pos} | {verts.Length} verts | mesh={meshMs}ms upload={uploadMs}ms | total={_totalMeshed}");
+                Console.WriteLine($"[mesh] chunk {pos} | {verts.Count} verts | mesh={meshMs}ms upload={uploadMs}ms | total={_totalMeshed}");
 
             if (++built >= MeshesPerFrame)
                 return;
