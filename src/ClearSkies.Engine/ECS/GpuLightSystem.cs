@@ -1,11 +1,15 @@
 using ClearSkies.Engine.Core;
+using ClearSkies.Engine.Gui;
 using ClearSkies.Engine.Math;
 using ClearSkies.Engine.Physics;
 using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Rendering.WebGpu;
 using ClearSkies.Engine.Voxels;
 using DefaultEcs;
+using ImGuiNET;
 using Silk.NET.Maths;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
 
 namespace ClearSkies.Engine.ECS;
 
@@ -27,7 +31,7 @@ namespace ClearSkies.Engine.ECS;
 /// Runs after <c>GpuResidencySystem</c> (opacity uploaded + RenderBindGroup created first) and before the mesh
 /// system / RenderSystem.
 /// </summary>
-public sealed class GpuLightSystem : ISystem, IDisposable
+public sealed class GpuLightSystem : ISystem, IDisposable, IDebugUiSystem
 {
     /// <summary>Cross-volume relight cadence. The naive v1 re-floods affected regions from scratch at this rate
     /// (see lighting_design_details.md); moving lamps update within one period.</summary>
@@ -55,8 +59,48 @@ public sealed class GpuLightSystem : ISystem, IDisposable
     private readonly GpuLightFlood  _flood;
     private readonly LightShadowPass _lightShadow;
     private readonly GpuSunVisPass  _sunVis;
+    private readonly GpuRayLightPass _rayLight;
 
     private float _relightTimer;
+
+    // ── Ray-traced prototype toggle (see plan doc) ──────────────────────────────
+    // A/B switch: when true, bypasses the flood/cube-map/shadow-map path entirely and dispatches
+    // GpuRayLightPass for every loaded volume instead. When false, behaves exactly as before —
+    // zero regression risk.
+    private bool _rayTracedLighting;
+
+    // Ray-traced lamp pass's flat ambient (0-15, Minecraft-style level — see GpuRayLightPass.DispatchLamps),
+    // debug-panel adjustable. Deliberately its own setting, decoupled from VolumeGpuResources.BaseSkyLevel
+    // (the old flood's ambient, unaffected by this).
+    private float _ambientLevel = 2f;
+
+    // Reused scratch for the ray-traced path (avoid per-frame allocation). _slotGpu[i] is the
+    // VolumeGpuResources backing _slots[i] (0..volumeCount-1), so the per-volume dispatch knows which
+    // SunVis/LightA buffer to write into — RayVolumeSlot itself only carries what the shader needs.
+    // _slotPos/_slotRot/_slotCom mirror the same indices with the volume's raw pose (not baked into a
+    // Mat4), needed separately to call LampAabb when building each volume's filtered lamp sublist.
+    private readonly RayVolumeSlot[] _slots = new RayVolumeSlot[GpuRayLightPass.MaxRayVolumes];
+    private readonly VolumeGpuResources?[] _slotGpu = new VolumeGpuResources?[GpuRayLightPass.MaxRayVolumes];
+    private readonly ChunkVolume?[] _slotVol = new ChunkVolume?[GpuRayLightPass.MaxRayVolumes];
+    private readonly Vector3D<float>[] _slotPos = new Vector3D<float>[GpuRayLightPass.MaxRayVolumes];
+    private readonly Quaternion<float>[] _slotRot = new Quaternion<float>[GpuRayLightPass.MaxRayVolumes];
+    private readonly Vector3D<float>[] _slotCom = new Vector3D<float>[GpuRayLightPass.MaxRayVolumes];
+    private readonly List<Vector4D<float>> _volumeLampScratch = new();
+    private bool _loggedTooManyVolumes;
+
+    // ── Perf pass (task 6, see plan doc): CPU-side submission timing only. WebGPU's queue is
+    // asynchronous, so a CPU Stopwatch around Dispatch() measures encoding + submission cost, NOT actual
+    // GPU execution time — real GPU cost would need timestamp queries, which this prototype doesn't have.
+    // Still a real, useful number: it's the cost of NOT caching the ray pass's bind groups (see
+    // GpuRayLightPass's "rebuild every dispatch" decision) plus everything else on the CPU side of these
+    // paths. Compare against the Renderer panel's FPS counter for a total-cost (CPU+GPU) signal.
+    private const double EmaAlpha = 0.1;
+    private readonly Stopwatch _sunTimer = new();
+    private readonly Stopwatch _lampTimer = new();
+    private readonly Stopwatch _oldPathTimer = new();
+    private double _rtSunMsEma, _rtLampMsEma, _oldPathMsEma;
+
+    private static double Ema(double prev, double sample) => prev <= 0.0 ? sample : prev + EmaAlpha * (sample - prev);
 
     // Reused scratch (avoid per-cycle allocation).
     private readonly List<ChunkVolume>             _volumes  = new();
@@ -84,26 +128,156 @@ public sealed class GpuLightSystem : ISystem, IDisposable
         _flood       = new GpuLightFlood(ctx);
         _lightShadow = new LightShadowPass(ctx);
         _sunVis      = new GpuSunVisPass(ctx);
+        _rayLight    = new GpuRayLightPass(ctx);
+    }
+
+    // ── Debug UI ─────────────────────────────────────────────────────────────
+    public string DebugName => "GPU Lighting (Ray-Traced Prototype)";
+
+    public void DrawDebugUi()
+    {
+        ImGui.Checkbox("Ray-Traced Lighting (A/B)", ref _rayTracedLighting);
+        ImGui.Separator();
+        ImGui.Text($"Old path (sun-vis + cross-volume + flood): {_oldPathMsEma:F2} ms/frame");
+        ImGui.Text($"Ray-traced sun dispatch:                   {_rtSunMsEma:F2} ms/frame");
+        ImGui.Text($"Ray-traced lamp dispatch:                  {_rtLampMsEma:F2} ms/frame");
+        ImGui.TextDisabled("CPU submission time only (queue is async) — compare FPS for total GPU+CPU cost.");
+
+        ImGui.Separator();
+        ImGui.Text("Lighting settings");
+        ImGui.SliderFloat("Ambient level (ray-traced only)", ref _ambientLevel, 0f, 15f, "%.0f");
+
+        float sunLevel = SunLight.Level;
+        if (ImGui.SliderFloat("Sun level", ref sunLevel, 0f, 15f, "%.0f")) SunLight.Level = sunLevel;
+
+        float azimuth = SunLight.AzimuthDegrees;
+        if (ImGui.SliderFloat("Sun azimuth", ref azimuth, 0f, 360f, "%.0f°")) SunLight.AzimuthDegrees = azimuth;
+
+        float elevation = SunLight.ElevationDegrees;
+        if (ImGui.SliderFloat("Sun elevation", ref elevation, -90f, 90f, "%.0f°")) SunLight.ElevationDegrees = elevation;
+
+        ImGui.TextDisabled("Sun level/azimuth/elevation affect BOTH lighting paths (shared SunLight); ambient is ray-traced only.");
     }
 
     public void Update(float dt)
     {
-        // Per-voxel sun visibility: recompute every frame from the (previous frame's) sun shadow map, for every
-        // volume. Independent of the flood — separate buffer, separate cadence.
-        UpdateSunVisibility();
+        if (_rayTracedLighting) { UpdateRayTracedLighting(); return; } // old path fully bypassed — see plan doc
 
-        // Cross-volume relight on the fixed cadence (moving lamps + cross-grid light).
-        _relightTimer += dt;
-        if (_relightTimer >= RelightPeriod)
+        _oldPathTimer.Restart();
+        try
         {
-            _relightTimer = 0f;
-            CrossVolumeRelight();
+            // Per-voxel sun visibility: recompute every frame from the (previous frame's) sun shadow map, for
+            // every volume. Independent of the flood — separate buffer, separate cadence.
+            UpdateSunVisibility();
+
+            // Cross-volume relight on the fixed cadence (moving lamps + cross-grid light).
+            _relightTimer += dt;
+            if (_relightTimer >= RelightPeriod)
+            {
+                _relightTimer = 0f;
+                CrossVolumeRelight();
+            }
+
+            // Responsive local-edit floods: one volume per frame.
+            if (FloodVolume(_staticWorld)) return;
+            foreach (ref readonly Entity e in _grids.GetEntities())
+                if (FloodVolume(e.Get<DynamicGridComponent>().Grid)) return;
+        }
+        finally
+        {
+            _oldPathTimer.Stop();
+            _oldPathMsEma = Ema(_oldPathMsEma, _oldPathTimer.Elapsed.TotalMilliseconds);
+        }
+    }
+
+    // ── Ray-traced prototype (A/B toggle) ───────────────────────────────────────
+
+    /// <summary>
+    /// Ray-traced sun + lamp lighting for every loaded volume (static world + up to
+    /// <see cref="GpuRayLightPass.MaxRayVolumes"/>-1 ships), replacing <see cref="UpdateSunVisibility"/> /
+    /// <see cref="CrossVolumeRelight"/> / the local-edit flood entirely while the toggle is on. Each
+    /// volume's sun and lamp rays test occlusion against every OTHER loaded volume's occupancy too (see
+    /// GpuRayLightPass.anyOccluderAlongSegment), so a ship correctly shadows terrain and terrain/other
+    /// ships correctly shadow it, and lamps on any volume correctly light and shadow any other. No AO, no
+    /// bounce, no color: the lamp pass writes a flat ambient sky byte (no flood dependency), so LightA is
+    /// fully self-contained and recomputed from scratch every frame — nothing here reads its own previous
+    /// value.
+    /// </summary>
+    private void UpdateRayTracedLighting()
+    {
+        int volumeCount = 0;
+        if (FillSlot(_staticWorld, volumeCount)) volumeCount++;
+
+        int gridsSeen = 0;
+        foreach (ref readonly Entity e in _grids.GetEntities())
+        {
+            gridsSeen++;
+            if (volumeCount >= GpuRayLightPass.MaxRayVolumes) continue; // still counted below, for the overflow log
+            if (FillSlot(e.Get<DynamicGridComponent>().Grid, volumeCount)) volumeCount++;
         }
 
-        // Responsive local-edit floods: one volume per frame.
-        if (FloodVolume(_staticWorld)) return;
-        foreach (ref readonly Entity e in _grids.GetEntities())
-            if (FloodVolume(e.Get<DynamicGridComponent>().Grid)) return;
+        if (gridsSeen + 1 > GpuRayLightPass.MaxRayVolumes && !_loggedTooManyVolumes)
+        {
+            _loggedTooManyVolumes = true;
+            Console.WriteLine(
+                $"[ray-lighting] {gridsSeen + 1} volumes loaded, only the first {GpuRayLightPass.MaxRayVolumes} " +
+                "get ray-traced lighting this session — the rest keep whatever SunVis/LightA they last had.");
+        }
+
+        // Every frame now (not the old 2 Hz cadence) — cheap at prototype lamp counts, and the lamp pass
+        // needs a fresh world-space list every dispatch since nothing here is cached across frames.
+        GatherLamps();
+
+        _sunTimer.Reset();
+        _lampTimer.Reset();
+        for (int i = 0; i < volumeCount; i++)
+        {
+            var gpu = _slotGpu[i]!;
+
+            _sunTimer.Start();
+            _rayLight.DispatchSun(_slots, volumeCount, i, gpu.SunVis, SunLight.Direction);
+            _sunTimer.Stop();
+
+            // Filter to lamps that can plausibly reach this volume at all (LampAabb as a boolean
+            // prefilter — the sub-box it also returns isn't used, since the dispatch always covers the
+            // whole target volume, not a lamp-bounded region). No same-volume skip: a volume's own lamps
+            // go through the identical world-space test as any other volume's, unlike CrossVolumeRelight.
+            // Not included in _lampTimer — this is CPU-side list building, not dispatch submission.
+            _volumeLampScratch.Clear();
+            foreach (var lamp in _lamps)
+            {
+                if (_volumeLampScratch.Count >= GpuRayLightPass.MaxLampsPerDispatch) break;
+                if (!LampAabb(_slotVol[i]!, gpu, _slotPos[i], _slotRot[i], _slotCom[i], lamp,
+                              out _, out _, out _, out _, out _, out _))
+                    continue;
+                _volumeLampScratch.Add(new Vector4D<float>(lamp.World.X, lamp.World.Y, lamp.World.Z, lamp.Level));
+            }
+
+            _lampTimer.Start();
+            _rayLight.DispatchLamps(_slots, volumeCount, i, gpu.LightA, CollectionsMarshal.AsSpan(_volumeLampScratch), (int)_ambientLevel);
+            _lampTimer.Stop();
+        }
+        _rtSunMsEma = Ema(_rtSunMsEma, _sunTimer.Elapsed.TotalMilliseconds);
+        _rtLampMsEma = Ema(_rtLampMsEma, _lampTimer.Elapsed.TotalMilliseconds);
+    }
+
+    /// <summary>Fills <see cref="_slots"/>[<paramref name="index"/>] (and its matching <see cref="_slotGpu"/>/
+    /// <see cref="_slotVol"/>/<see cref="_slotPos"/>/<see cref="_slotRot"/>/<see cref="_slotCom"/> entries)
+    /// from <paramref name="vol"/>'s current GPU resources and physics pose. Returns false (leaving the
+    /// slot untouched) if the volume isn't ready yet — same gating <see cref="SunVisVolume"/> already uses.</summary>
+    private bool FillSlot(ChunkVolume vol, int index)
+    {
+        var gpu = vol.VolumeGpu;
+        if (gpu == null || gpu.RenderBindGroup == 0) return false;
+        if (!TryPose(vol, out var pos, out var rot, out var com)) return false;
+
+        _slots[index] = new RayVolumeSlot(
+            gpu.Opacity, VoxelToWorld(gpu, pos, rot, com), WorldToVoxelMatrix(gpu, pos, rot, com),
+            gpu.VW, gpu.VH, gpu.VD);
+        _slotGpu[index] = gpu;
+        _slotVol[index] = vol;
+        _slotPos[index] = pos; _slotRot[index] = rot; _slotCom[index] = com;
+        return true;
     }
 
     // ── Per-voxel sun visibility ──────────────────────────────────────────────
@@ -301,6 +475,19 @@ public sealed class GpuLightSystem : ISystem, IDisposable
         return local - Min32(gpu);
     }
 
+    /// <summary>Mat4-returning sibling of <see cref="WorldToVoxel"/>, for the ray-traced pass — the shader
+    /// needs the whole transform (to rotate ray directions too, not just transform one point), not a
+    /// single-point helper. Built analytically since the transform is rigid: rotation is orthonormal, so
+    /// its conjugate quaternion is its inverse, and there's no scale to invert.
+    /// voxel = T(com−Min·32) · R⁻¹ · T(−pos) · world</summary>
+    private static Mat4 WorldToVoxelMatrix(VolumeGpuResources gpu, Vector3D<float> pos, Quaternion<float> rot, Vector3D<float> com)
+    {
+        var min32 = Min32(gpu);
+        var rInv  = Mat4.FromQuaternion(Conjugate(rot));
+        var t0    = Mat4.Translation(com - min32);
+        return Mat4.Multiply(Mat4.Multiply(t0, rInv), Mat4.Translation(-pos));
+    }
+
     private static Vector3D<float> Min32(VolumeGpuResources gpu)
         => new(gpu.Min.X * S, gpu.Min.Y * S, gpu.Min.Z * S);
 
@@ -472,5 +659,6 @@ public sealed class GpuLightSystem : ISystem, IDisposable
         _flood.Dispose();
         _lightShadow.Dispose();
         _sunVis.Dispose();
+        _rayLight.Dispose();
     }
 }

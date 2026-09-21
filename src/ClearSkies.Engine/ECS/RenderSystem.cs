@@ -51,13 +51,14 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
             return;
         }
 
-        var sunDir = Vector3D.Normalize(new Vector3D<float>(-0.4f, -1f, -0.3f));
+        var sunDir = SunLight.Direction;
 
         var uniform = new CameraUniform
         {
             View          = camera.GetView(camTransform),
             Projection    = camera.GetProjection(_renderer.AspectRatio),
             SunDirection  = sunDir,
+            SunStrength   = SunLight.Strength,
             LightViewProj = BuildLightViewProj(sunDir, camTransform.Position),
         };
 

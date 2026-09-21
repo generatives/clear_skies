@@ -17,7 +17,10 @@ public static class TestScene
     // are seeded across the whole plane, but keeps this well-defined).
     private static readonly Vector3D<float> FallbackSpawn = new(16f, 45f, -30f);
 
-    public static void Build(EngineHost host, ulong worldSeed)
+    /// <summary>Builds the scene and returns the resolved camera spawn position, so callers (e.g. the
+    /// ray-traced lighting prototype's test ship — see the plan doc) can place things relative to it
+    /// without re-deriving island geometry via <see cref="TryFindNearestIsland"/>.</summary>
+    public static Vector3D<float> Build(EngineHost host, ulong worldSeed)
     {
         var cam = host.World.CreateEntity();
         var camTransform = Transform.Identity;
@@ -65,6 +68,7 @@ public static class TestScene
         cam.Set(new CharacterModeComponent { FreeFly = true }); // start in FreeFly — zero regression risk vs. today
 
         host.Input.CursorCaptured = true;
+        return camTransform.Position;
     }
 
     /// <summary>

@@ -21,16 +21,12 @@ public sealed unsafe class Renderer : IDisposable
     // (e.g. non-chunk draws, or volume not yet initialised).
     private const string Wgsl = @"
 const AMBIENT_SKY: f32 = 3.0 / 15.0;  // matches VolumeGpuResources.BaseSkyLevel (out-of-volume fallback)
-const SUN_STRENGTH: f32 = 1.0;        // direct sun at full brightness (level 15); paired with the dim sky fill
-                                      // + low MIN_AMBIENT so shadows stay dark for the lamp/block system to fill
-const MIN_AMBIENT: f32 = 0.05;        // floor so no geometry is ever fully black
-const AO_MIN: f32 = 0.45;             // darkest ambient-occluded corner (1 = no AO). 0.15 provides exaggeration for evaluation;
+// Direct-sun brightness now comes from camera.sunDir.w (SunLight.Strength, debug-panel adjustable) instead
+// of a fixed const — originally unused vec4 padding, repurposed so the GPU Lighting debug panel can dial it.
+const MIN_AMBIENT: f32 = 0.00;        // floor so no geometry is ever fully black
+const AO_MIN: f32 = 0.15;             // darkest ambient-occluded corner (1 = no AO). 0.15 provides exaggeration for evaluation;
                                       // 0.45 is the subtler default.
 const WPC: i32 = 1024;                // u32 opacity words per 32³ chunk (VolumeGpuResources.WordsPerChunk)
-const SMOOTH_RADIUS: i32 = 2;     // in-plane light/shadow smoothing radius (cells) → (2R+1)^2 taps. Larger = smoother
-                                  // (and softer shadows), but a radius wider than a shadow feature washes it out.
-                                  // Sun visibility is sampled from the precomputed per-voxel `sunvis` buffer; the
-                                  // shadow-map PCF now lives in GpuSunVisPass (PCF radius + bias are set there).
 
 struct Camera { view: mat4x4<f32>, proj: mat4x4<f32>, sunDir: vec4<f32>, lightViewProj: mat4x4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -130,63 +126,74 @@ fn sunRaw(vol: vec3<i32>) -> u32 {
     return sunvis[u32(vol.x + model.volSize.x * (vol.y + model.volSize.y * vol.z))];
 }
 
-// Smoothed surface lighting at the air-side of this fragment: sky + block light (each 0..1) and directional-sun
-// visibility (1 lit … 0 shadowed). Both are a gaussian-weighted average of the in-plane neighbourhood of air
-// cells, centred on the fragment's CONTINUOUS position in the face plane — so the result is a smooth function of
-// position (no per-cell banding) that ramps over several voxels (no sudden jumps as light/shadow boundaries move).
-// Opaque cells are dropped so neither bleeds through walls. The sun reads precomputed per-voxel visibility
-// (sunVisAt → the `sunvis` buffer); the gaussian blends neighbouring cells so the lit/shadow transition is a
-// smooth, continuous function of position. wantSun lets faces turned from the sun skip the sun samples.
-// Separable smoothing window: 1 at the centre, falling to 0 — with ZERO SLOPE — at the kernel edge (|d| = R+0.5).
-// C1 everywhere, so (a) the reconstructed light is slope-continuous → no Mach banding (bright/dark lines) at cell
-// edges, and (b) a cell entering/leaving the finite window contributes ~0, so nothing pops as the sample point or
-// a moving shadow crosses a cell boundary. A truncated gaussian fails (b) — its edge weight is non-zero — which is
-// what made shadows pulse/'open and close' as objects moved.
-fn smoothW(d: f32) -> f32 {
-    let a = clamp(abs(d) / (f32(SMOOTH_RADIUS) + 0.5), 0.0, 1.0);
-    return 1.0 - a * a * (3.0 - 2.0 * a);
-}
+// Minecraft-style smooth lighting at the air side of this fragment: sky + block light (each 0..1) and sun
+// visibility (1 lit … 0 shadowed). Each of the 4 corners of the fragment's cell face averages the air cells
+// sharing that corner — the fragment's own air cell, the two beside it in the face plane, and the diagonal —
+// and the fragment interpolates the 4 corner values by its position on the face (Minecraft does this per
+// vertex; greedy-merged quads have no per-cell vertices, so it is done per fragment instead). Only cells on
+// the SAME surface count (air with a solid directly behind along the face normal), and the diagonal is used
+// only if at least one side cell is (Minecraft's corner rule), so light never reaches around an edge or
+// through a corner. SMOOTH_LIGHT = false falls back to the flat per-cell value.
+const SMOOTH_LIGHT: bool = true;
 
 struct Lit { sky: f32, blk: f32, sun: f32 };
+
+fn onSurface(c: vec3<i32>, N: vec3<i32>) -> bool { return !isSolid(c) && isSolid(c - N); }
+
+// (sky, block, sun) averaged over the usable cells at one corner. Sun skips 255 (no-sample) cells.
+fn cornerLit(air: vec3<i32>, s1: vec3<i32>, s2: vec3<i32>, dg: vec3<i32>, N: vec3<i32>, wantSun: bool) -> vec3<f32> {
+    let inc1 = onSurface(s1, N);
+    let inc2 = onSurface(s2, N);
+    let incD = (inc1 || inc2) && onSurface(dg, N);
+    var cells = array<vec3<i32>, 4>(air, s1, s2, dg);
+    var inc = array<bool, 4>(true, inc1, inc2, incD);
+    var accL = vec2<f32>(0.0, 0.0); var nL = 0.0;
+    var accS = 0.0; var nS = 0.0;
+    for (var k = 0; k < 4; k = k + 1) {
+        if (!inc[k]) { continue; }
+        accL += lightAt(cells[k]);
+        nL += 1.0;
+        if (wantSun) {
+            let sv = sunRaw(cells[k]);
+            if (sv < 255u) { accS += f32(sv) / 254.0; nS += 1.0; }
+        }
+    }
+    let l = accL / nL;
+    return vec3<f32>(l.x, l.y, select(1.0, accS / max(nS, 1.0), nS > 0.0));
+}
+
 fn sampleLit(localPos: vec3<f32>, localNormal: vec3<f32>, wantSun: bool) -> Lit {
-    let localAir = vec3<i32>(floor(localPos + 0.5 * localNormal));
-    let air = model.chunkBase + localAir;
-    let n   = abs(localNormal);
+    let air = model.chunkBase + vec3<i32>(floor(localPos + 0.5 * localNormal));
+    var o: Lit;
+
+    if (!SMOOTH_LIGHT) {
+        let la = lightAt(air);
+        o.sky = la.x;
+        o.blk = la.y;
+        let sv = sunRaw(air);
+        o.sun = select(1.0, f32(sv) / 254.0, wantSun && sv < 255u);
+        return o;
+    }
+
+    let N = vec3<i32>(round(localNormal));
+    let n = abs(localNormal);
     var T: vec3<i32>; var B: vec3<i32>;
     if (n.x > 0.5)      { T = vec3<i32>(0, 1, 0); B = vec3<i32>(0, 0, 1); }
     else if (n.y > 0.5) { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 0, 1); }
     else                { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 1, 0); }
 
-    // Fragment offset from the centre cell's centre, along each in-plane axis (in cells, range [-0.5, 0.5)).
-    let du = fract(dot(localPos, vec3<f32>(T))) - 0.5;
-    let dv = fract(dot(localPos, vec3<f32>(B))) - 0.5;
+    let c00 = cornerLit(air, air - T, air - B, air - T - B, N, wantSun);
+    let c10 = cornerLit(air, air + T, air - B, air + T - B, N, wantSun);
+    let c01 = cornerLit(air, air - T, air + B, air - T + B, N, wantSun);
+    let c11 = cornerLit(air, air + T, air + B, air + T + B, N, wantSun);
 
-    var accL = vec2<f32>(0.0, 0.0); var sumL = 0.0;
-    var accS = 0.0; var sumS = 0.0;              // sun gets its own sum: open-air cells (sentinel) are skipped
-    for (var i = -SMOOTH_RADIUS; i <= SMOOTH_RADIUS; i = i + 1) {
-        for (var j = -SMOOTH_RADIUS; j <= SMOOTH_RADIUS; j = j + 1) {
-            let cell = air + i * T + j * B;
-            if (isSolid(cell)) { continue; }            // opaque → no light/shadow contribution
-            let w = smoothW(du - f32(i)) * smoothW(dv - f32(j));
-            if (w <= 0.0) { continue; }
-
-            accL += w * lightAt(cell);
-            sumL += w;
-            if (wantSun) {
-                let sv = sunRaw(cell);
-                if (sv < 255u) {                        // 255 = no surface sample here → don't bias the blend
-                    accS += w * f32(sv) / 254.0;        // (so shadows reach convex edges instead of stopping short)
-                    sumS += w;
-                }
-            }
-        }
-    }
-
-    let lv = accL / max(sumL, 1e-4);
-    var o: Lit;
-    o.sky = lv.x;
-    o.blk = lv.y;
-    o.sun = select(1.0, accS / max(sumS, 1e-4), wantSun && sumS > 0.0);
+    // Plain bilinear across the cell face, like Minecraft's per-vertex interpolation.
+    let s = fract(dot(localPos, vec3<f32>(T)));
+    let t = fract(dot(localPos, vec3<f32>(B)));
+    let v = mix(mix(c00, c10, s), mix(c01, c11, s), t);
+    o.sky = v.x;
+    o.blk = v.y;
+    o.sun = select(1.0, v.z, wantSun);
     return o;
 }
 
@@ -218,7 +225,7 @@ fn computeAO(localPos: vec3<f32>, localNormal: vec3<f32>) -> f32 {
     // Smoothstep the bilinear weights so the reconstructed AO is slope-continuous (C1) across cell boundaries:
     // each cell's patch meets its neighbour with zero slope. Plain fract bilinear is only C0, so the slope jumps
     // where the AO ramp meets the un-occluded plateau — the eye reads that slope discontinuity as a 'bright line'
-    // at the far edge of the AO. Same zero-slope trick the light smoothing (smoothW) uses to avoid Mach banding.
+    // at the far edge of the AO.
     let s = smoothstep(0.0, 1.0, fract(dot(localPos, vec3<f32>(T))));
     let t = smoothstep(0.0, 1.0, fract(dot(localPos, vec3<f32>(B))));
     return mix(mix(ao00, ao10, s), mix(ao01, ao11, s), t);
@@ -233,9 +240,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // Soft ambient fill (sky flood from all six faces, max BASE_SKY/15).
     let ambient = s.sky;
 
-    // Direct sun capped at SUN_STRENGTH (level 3): Lambertian on the surface normal, gated by the smoothed
-    // voxel sun visibility. Kept dim (with the sky fill) so the lamp/block-light system dominates the scene.
-    let directSun = ndotl * s.sun * SUN_STRENGTH;
+    // Direct sun capped at camera.sunDir.w (SunLight.Strength): Lambertian on the surface normal, gated by
+    // the smoothed voxel sun visibility.
+    let directSun = ndotl * s.sun * camera.sunDir.w;
 
     // Sky contribution = the brighter of soft ambient and direct sun.
     let skyTerm = max(ambient, directSun);
