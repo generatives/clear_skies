@@ -23,9 +23,14 @@ namespace ClearSkies.Engine.Physics;
 /// with <c>AddSystem(host.Physics, SystemStage.Logic)</c> at the point in the Logic stage where physics
 /// should step — after systems that create bodies or apply impulses, before systems that read poses.
 /// </summary>
-public sealed class PhysicsWorld : ISystem, IDisposable
+public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
 {
     private const int MaxStepsPerFrame = 5;
+
+    // Debug-panel stats: fixed steps run last frame and smoothed cost of one step.
+    private readonly System.Diagnostics.Stopwatch _stepTimer = new();
+    private int _stepsLastFrame;
+    private double _stepMs;
 
     public Simulation Simulation { get; }
     public Vector3 Gravity { get; }
@@ -61,13 +66,34 @@ public sealed class PhysicsWorld : ISystem, IDisposable
         int steps = 0;
         while (_accumulator >= _fixedStep && steps < MaxStepsPerFrame)
         {
+            _stepTimer.Restart();
             Simulation.Timestep(_fixedStep);
+            _stepMs += 0.1 * (_stepTimer.Elapsed.TotalMilliseconds - _stepMs);
             _accumulator -= _fixedStep;
             steps++;
         }
+        _stepsLastFrame = steps;
 
         // If we hit the cap and still have a large backlog, drop it rather than chase forever.
         if (_accumulator > _fixedStep) _accumulator = 0f;
+    }
+
+    // ── Debug UI ────────────────────────────────────────────────────────────────
+    public string DebugName => "Physics";
+
+    public void DrawDebugUi()
+    {
+        ImGuiNET.ImGui.Text($"Steps last frame: {_stepsLastFrame} (max {MaxStepsPerFrame}), one step: {_stepMs:F2} ms");
+        ImGuiNET.ImGui.Text($"Awake bodies: {Simulation.Bodies.ActiveSet.Count}, statics: {Simulation.Statics.Count}, " +
+                            $"constraints: {Simulation.Solver.CountConstraints()}");
+        ref var set = ref Simulation.Bodies.ActiveSet;
+        for (int i = 0; i < set.Count && i < 16; i++)
+        {
+            var body = Simulation.Bodies[set.IndexToHandle[i]];
+            var p = body.Pose.Position;
+            ImGuiNET.ImGui.Text($"  body {set.IndexToHandle[i].Value}: at ({p.X:F0}, {p.Y:F0}, {p.Z:F0}), " +
+                                $"constraints {body.Constraints.Count}, kinematic {body.Kinematic}");
+        }
     }
 
     // ── Dynamic bodies ──────────────────────────────────────────────────────────

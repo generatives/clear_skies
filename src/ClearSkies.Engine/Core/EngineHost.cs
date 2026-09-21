@@ -46,13 +46,21 @@ public sealed class EngineHost : IDisposable
         Window.Update += OnUpdate;
         Window.Render += OnRender;
         Window.Resize += Renderer.OnResize;
+
+        Gui.RegisterDebugUi(new FrameTimingsPanel(this));
     }
 
     public void AddSystem(ISystem system, SystemStage stage)
     {
         _systems.Add((system, stage));
+        _systemMs.Add(0.0);
         if (system is IDebugUiSystem debugUi) Gui.RegisterDebugUi(debugUi);
     }
+
+    // Per-system CPU time (ms, smoothed), parallel to _systems.
+    private readonly List<double> _systemMs = new();
+    private readonly System.Diagnostics.Stopwatch _systemTimer = new();
+    private const double TimingSmoothing = 0.05;
 
     public void Run()
     {
@@ -77,9 +85,45 @@ public sealed class EngineHost : IDisposable
 
     private void RunStage(SystemStage stage, float dt)
     {
-        foreach (var (system, s) in _systems)
-            if (s == stage)
-                system.Update(dt);
+        for (int i = 0; i < _systems.Count; i++)
+        {
+            var (system, s) = _systems[i];
+            if (s != stage) continue;
+            _systemTimer.Restart();
+            system.Update(dt);
+            double ms = _systemTimer.Elapsed.TotalMilliseconds;
+            _systemMs[i] += TimingSmoothing * (ms - _systemMs[i]);
+        }
+    }
+
+    /// <summary>Debug panel listing each system's CPU time per frame, slowest first. GPU work isn't timed
+    /// directly: if the frame takes much longer than the CPU total, the difference is GPU time (or vsync),
+    /// and it usually shows up inside RenderSystem, where the frame waits to present.</summary>
+    private sealed class FrameTimingsPanel : IDebugUiSystem
+    {
+        private readonly EngineHost _host;
+        public FrameTimingsPanel(EngineHost host) => _host = host;
+        public string DebugName => "Frame timings";
+
+        public void DrawDebugUi()
+        {
+            var h = _host;
+            double total = 0;
+            var rows = new List<(string name, double ms)>(h._systems.Count);
+            for (int i = 0; i < h._systems.Count; i++)
+            {
+                var (system, stage) = h._systems[i];
+                rows.Add(($"{system.GetType().Name} ({stage})", h._systemMs[i]));
+                total += h._systemMs[i];
+            }
+            rows.Sort((a, b) => b.ms.CompareTo(a.ms));
+
+            double frameMs = h.Time.FramesPerSecond > 0 ? 1000.0 / h.Time.FramesPerSecond : 0;
+            ImGuiNET.ImGui.Text($"Frame: {frameMs:F1} ms ({h.Time.FramesPerSecond} fps), systems CPU total: {total:F1} ms");
+            ImGuiNET.ImGui.Separator();
+            foreach (var (name, ms) in rows)
+                ImGuiNET.ImGui.Text($"{ms,7:F2} ms  {name}");
+        }
     }
 
     public void Dispose()

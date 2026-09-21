@@ -50,6 +50,10 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
     /// opacity (the ray-traced pass's surface-brick list) know when to rebuild it.</summary>
     public int OpacityVersion { get; private set; }
 
+    /// <summary>Chunks whose opacity was uploaded since the consumer last cleared this (edits and loads). The
+    /// ray-traced lighting pass drains it each frame to know which occluders changed.</summary>
+    public List<ChunkPosition> ChangedChunks { get; } = new();
+
     public int VW => DX * S; // voxels
     public int VH => DY * S;
     public int VD => DZ * S;
@@ -120,6 +124,7 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
         Opacity?.Dispose(); LightA?.Dispose(); LightB?.Dispose(); Dims?.Dispose(); SunVis?.Dispose();
         Generation++;
         OpacityVersion++;
+        ChangedChunks.Clear(); // a new allocation relights everything anyway
 
         Min = min;
         DX  = max.X - min.X + 1;
@@ -224,6 +229,7 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
         ulong byteOffset = (ulong)ChunkSlot(pos) * WordsPerChunk * sizeof(uint);
         Opacity.Write<uint>(byteOffset, words);
         OpacityVersion++;
+        ChangedChunks.Add(pos);
     }
 
     /// <summary>Per-8³-brick "any opaque" / "any non-opaque" bits (bit = bx + 4*(by + 4*bz)) from a chunk's

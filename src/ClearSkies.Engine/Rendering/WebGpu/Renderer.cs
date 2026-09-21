@@ -14,7 +14,7 @@ public sealed unsafe class Renderer : IDisposable
 {
     private const int MaxObjects = 4096;
     private const ulong ModelStride = 256;   // >= minUniformBufferOffsetAlignment
-    private const ulong CameraSize  = 208;   // three mat4x4<f32> (view, proj, lightViewProj) + vec4<f32> sun direction
+    private const ulong CameraSize  = 224;   // three mat4x4<f32> (view, proj, lightViewProj) + vec4<f32> sun direction + vec4<f32> light params
     private const ulong ModelSize   = 96;    // mat4x4<f32> + vec3<i32> chunkBase + vec3<i32> volSize (each padded to 16B)
 
     // Ambient fallback (sky=6/15) for fragments whose air-side voxel is outside the volume buffer
@@ -28,7 +28,8 @@ const AO_MIN: f32 = 0.15;             // darkest ambient-occluded corner (1 = no
                                       // 0.45 is the subtler default.
 const WPC: i32 = 1024;                // u32 opacity words per 32³ chunk (VolumeGpuResources.WordsPerChunk)
 
-struct Camera { view: mat4x4<f32>, proj: mat4x4<f32>, sunDir: vec4<f32>, lightViewProj: mat4x4<f32> };
+// lightParams.x: ray AO strength (0 = off; the old lighting path never writes the AO bits).
+struct Camera { view: mat4x4<f32>, proj: mat4x4<f32>, sunDir: vec4<f32>, lightViewProj: mat4x4<f32>, lightParams: vec4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
 // model: world transform. chunkBase: this chunk's voxel origin in the volume. volSize: volume dims in voxels.
@@ -101,7 +102,8 @@ fn isSolid(v: vec3<i32>) -> bool {
 
 fn occ(v: vec3<i32>) -> f32 { return select(0.0, 1.0, isSolid(v)); }
 
-// Light (sky, block) in 0..1 at a single volume voxel. Out-of-volume → ambient fallback.
+// Light (sky, block) in 0..1 at a single volume voxel. Out-of-volume → ambient fallback. Sky is scaled by the
+// ray AO occlusion in bits 16-23 (0 = open), weighted by camera.lightParams.x.
 fn lightAt(vol: vec3<i32>) -> vec2<f32> {
     if (vol.x < 0 || vol.x >= model.volSize.x ||
         vol.y < 0 || vol.y >= model.volSize.y ||
@@ -110,7 +112,9 @@ fn lightAt(vol: vec3<i32>) -> vec2<f32> {
     }
     let idx    = u32(vol.x + model.volSize.x * (vol.y + model.volSize.y * vol.z));
     let packed = light[idx];
-    return vec2<f32>(f32(packed & 0xFFu) / 15.0, f32((packed >> 8u) & 0xFFu) / 15.0);
+    let rayOcc = f32((packed >> 16u) & 0xFFu) / 255.0;
+    let sky    = f32(packed & 0xFFu) / 15.0 * (1.0 - camera.lightParams.x * rayOcc);
+    return vec2<f32>(sky, f32((packed >> 8u) & 0xFFu) / 15.0);
 }
 
 // Raw per-voxel directional-sun visibility from the `sunvis` buffer that GpuSunVisPass precomputed this frame.

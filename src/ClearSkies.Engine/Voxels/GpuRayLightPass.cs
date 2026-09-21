@@ -369,7 +369,9 @@ fn lampVoxel(x: i32, y: i32, z: i32) {
     let sxn = isOpaqueInVolume(ti, x - 1, y, z); let sxp = isOpaqueInVolume(ti, x + 1, y, z);
     let syn = isOpaqueInVolume(ti, x, y - 1, z); let syp = isOpaqueInVolume(ti, x, y + 1, z);
     let szn = isOpaqueInVolume(ti, x, y, z - 1); let szp = isOpaqueInVolume(ti, x, y, z + 1);
-    if (!(sxn || sxp || syn || syp || szn || szp)) { light[i] = ambient; return; } // deep interior air: flat ambient only
+    // Bits 16-23 hold the AO pass's occlusion, which this pass keeps: AO is traced on its own schedule.
+    let keep = light[i] & 0xFFFF0000u;
+    if (!(sxn || sxp || syn || syp || szn || szp)) { light[i] = keep | ambient; return; } // deep interior air: flat ambient only
 
     let world = (voxelToWorldOf(ti) * vec4<f32>(f32(x) + 0.5, f32(y) + 0.5, f32(z) + 0.5, 1.0)).xyz;
 
@@ -386,7 +388,72 @@ fn lampVoxel(x: i32, y: i32, z: i32) {
             best = max(best, u32(contribF));
         }
     }
-    light[i] = ambient | (min(best, 15u) << 8u);
+    light[i] = keep | ambient | (min(best, 15u) << 8u);
+}
+
+// Ray ambient occlusion: how much of the sphere around a surface air voxel is enclosed by its own grid's
+// blocks within AO_MAX voxels. Flat open ground sees about half the sphere (the other half is the ground), so
+// the open fraction is measured against AO_OPEN_REF: that much open or more reads as unoccluded, a cave or a
+// sealed room reads as fully occluded. Rays stay in the voxel's own grid (a ship does not darken the ground),
+// so the result only changes when that grid's blocks change, never when anything moves. Stored as occlusion
+// (0 = open) in bits 16-23 of the light word; the fragment shader scales the ambient (sky) term by it.
+const AO_RAYS: i32 = 64;
+const AO_MAX: f32 = 16.0;
+const AO_OPEN_REF: f32 = 0.5;
+
+// Nearest-hit is not needed, only whether any block lies within AO_MAX. Single-axis steps (no tie
+// handling): a ray slipping through a diagonal gap is harmless for an averaged occlusion value.
+fn aoOccluded(ti: i32, o: vec3<f32>, d: vec3<f32>, dims: vec3<i32>) -> bool {
+    var voxel = vec3<i32>(floor(o));
+    let stepX: i32 = select(-1, 1, d.x > 0.0);
+    let stepY: i32 = select(-1, 1, d.y > 0.0);
+    let stepZ: i32 = select(-1, 1, d.z > 0.0);
+    var tMaxX: f32 = select(1e30, ((f32(voxel.x) + select(0.0, 1.0, d.x > 0.0)) - o.x) / d.x, abs(d.x) > 1e-8);
+    var tMaxY: f32 = select(1e30, ((f32(voxel.y) + select(0.0, 1.0, d.y > 0.0)) - o.y) / d.y, abs(d.y) > 1e-8);
+    var tMaxZ: f32 = select(1e30, ((f32(voxel.z) + select(0.0, 1.0, d.z > 0.0)) - o.z) / d.z, abs(d.z) > 1e-8);
+    for (var iter = 0; iter < 64; iter = iter + 1) {
+        if (min(tMaxX, min(tMaxY, tMaxZ)) > AO_MAX) { return false; }
+        if (tMaxX <= tMaxY && tMaxX <= tMaxZ) {
+            voxel.x = voxel.x + stepX;
+            tMaxX = ((f32(voxel.x) + select(0.0, 1.0, d.x > 0.0)) - o.x) / d.x;
+        } else if (tMaxY <= tMaxZ) {
+            voxel.y = voxel.y + stepY;
+            tMaxY = ((f32(voxel.y) + select(0.0, 1.0, d.y > 0.0)) - o.y) / d.y;
+        } else {
+            voxel.z = voxel.z + stepZ;
+            tMaxZ = ((f32(voxel.z) + select(0.0, 1.0, d.z > 0.0)) - o.z) / d.z;
+        }
+        if (voxel.x < 0 || voxel.x >= dims.x || voxel.y < 0 || voxel.y >= dims.y || voxel.z < 0 || voxel.z >= dims.z) { return false; }
+        if (isOpaqueInVolume(ti, voxel.x, voxel.y, voxel.z)) { return true; }
+    }
+    return false;
+}
+
+fn aoVoxel(x: i32, y: i32, z: i32) {
+    let ti = p.counts.y;
+    let dims = dimsOf(ti);
+    if (x >= dims.x || y >= dims.y || z >= dims.z) { return; }
+    let i = u32(x + dims.x * (y + dims.y * z));
+    if (isOpaqueInVolume(ti, x, y, z)) { return; } // the lamp pass zeroes solid cells
+
+    let surface = isOpaqueInVolume(ti, x - 1, y, z) || isOpaqueInVolume(ti, x + 1, y, z) ||
+                  isOpaqueInVolume(ti, x, y - 1, z) || isOpaqueInVolume(ti, x, y + 1, z) ||
+                  isOpaqueInVolume(ti, x, y, z - 1) || isOpaqueInVolume(ti, x, y, z + 1);
+    var occ = 0.0;
+    if (surface) {
+        let o = vec3<f32>(f32(x) + 0.5, f32(y) + 0.5, f32(z) + 0.5);
+        var open = 0;
+        for (var k = 0; k < AO_RAYS; k = k + 1) {
+            // Fibonacci sphere: evenly spread, fixed directions.
+            let cy = 1.0 - 2.0 * (f32(k) + 0.5) / f32(AO_RAYS);
+            let r = sqrt(max(0.0, 1.0 - cy * cy));
+            let phi = f32(k) * 2.39996323;
+            let d = vec3<f32>(r * cos(phi), cy, r * sin(phi));
+            if (!aoOccluded(ti, o, d, dims)) { open = open + 1; }
+        }
+        occ = 1.0 - clamp(f32(open) / f32(AO_RAYS) / AO_OPEN_REF, 0.0, 1.0);
+    }
+    light[i] = (light[i] & 0xFF00FFFFu) | (u32(round(occ * 255.0)) << 16u);
 }
 
 // Work is driven by the target volume's surface-brick list (built on the CPU, see GpuLightSystem): one
@@ -423,11 +490,24 @@ fn lamp_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg
     let z = b.z + i32(lid.z);
     lampVoxel(x, y, z);
     lampVoxel(x, y, z + 4);
+}
+
+@compute @workgroup_size(8, 8, 4)
+fn ao_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
+           @builtin(local_invocation_id) lid: vec3<u32>) {
+    let b = brickBase(wid, nwg);
+    if (b.w == 0) { return; }
+    let x = b.x + i32(lid.x);
+    let y = b.y + i32(lid.y);
+    let z = b.z + i32(lid.z);
+    aoVoxel(x, y, z);
+    aoVoxel(x, y, z + 4);
 }";
 
     private readonly GpuContext _ctx;
     private readonly ComputePipeline _sunPipeline;
     private readonly ComputePipeline _lampPipeline;
+    private readonly ComputePipeline _aoPipeline;
     private readonly GpuBuffer _param;
     private readonly GpuBuffer _dummyOpacity; // padding for unused volume slots (never solid)
     private readonly GpuBuffer _lampList;     // scratch: this dispatch's filtered lamp list (xyz, w=level)
@@ -438,6 +518,7 @@ fn lamp_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg
         _ctx = ctx;
         _sunPipeline  = new ComputePipeline(ctx, Wgsl, "sun_main");
         _lampPipeline = new ComputePipeline(ctx, Wgsl, "lamp_main");
+        _aoPipeline   = new ComputePipeline(ctx, Wgsl, "ao_main");
         _param = GpuBuffer.CreateUniform(ctx, (ulong)Marshal.SizeOf<RayParams>());
         _dummyOpacity = GpuBuffer.CreateStorage(ctx, sizeof(uint));
         _dummyOpacity.Write<uint>(0, new uint[1]);
@@ -527,6 +608,31 @@ fn lamp_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg
         _ctx.Api.BindGroupRelease((BindGroup*)bg);
     }
 
+    /// <summary>
+    /// Ray ambient occlusion for the listed bricks of <paramref name="targetIdx"/>: short rays in the target's
+    /// own grid only, written to bits 16-23 of <paramref name="targetLight"/> (the other bits are kept).
+    /// </summary>
+    public void DispatchAo(ReadOnlySpan<RayVolumeSlot> slots, int volumeCount, int targetIdx,
+                           GpuBuffer targetLight, GpuBuffer brickList, int brickCount)
+    {
+        if (volumeCount <= 0 || targetIdx < 0 || targetIdx >= volumeCount) return;
+        var target = slots[targetIdx];
+        if (target.VW <= 0 || target.VH <= 0 || target.VD <= 0 || brickCount <= 0) return;
+
+        WriteParams(slots, volumeCount, targetIdx, Vector3D<float>.Zero, lampCount: 0, ambientLevel: 0, brickCount);
+
+        var entries = new (uint, GpuBuffer)[8];
+        for (int i = 0; i < MaxRayVolumes; i++)
+            entries[i] = ((uint)i, i < volumeCount ? slots[i].Opacity : _dummyOpacity);
+        entries[5] = (6u, targetLight);
+        entries[6] = (8u, _param);
+        entries[7] = (9u, brickList);
+
+        nint bg = _aoPipeline.CreateBindGroupHandle(entries);
+        DispatchBricks(_aoPipeline, bg, brickCount);
+        _ctx.Api.BindGroupRelease((BindGroup*)bg);
+    }
+
     private void WriteParams(ReadOnlySpan<RayVolumeSlot> slots, int volumeCount, int targetIdx, Vector3D<float> sunDir,
                              int lampCount, int ambientLevel, int brickCount)
     {
@@ -577,6 +683,7 @@ fn lamp_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg
     {
         _sunPipeline.Dispose();
         _lampPipeline.Dispose();
+        _aoPipeline.Dispose();
         _param.Dispose();
         _dummyOpacity.Dispose();
         _lampList.Dispose();
