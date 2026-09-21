@@ -3,6 +3,7 @@ using ClearSkies.Engine.Voxels;
 using Silk.NET.Core.Native;
 using Silk.NET.Maths;
 using Silk.NET.WebGPU;
+using System.Diagnostics;
 
 namespace ClearSkies.Engine.Rendering.WebGpu;
 
@@ -29,7 +30,8 @@ const NO_SURFACE: u32 = " + GridStore.NoSurface + @"u;
 const SLOT_WORDS: u32 = " + GridStore.WordsPerSlot + @"u;
 const EMPTY_DISPLAY: u32 = 0x3000u;   // no light storage: full sun, no light, no AO
 
-// sunDir.w: sun strength (SunLight.Strength). lightParams.x: ray AO strength, .z: ambient (0-1), .y/.w unused.
+// sunDir.w: sun strength (SunLight.Strength). lightParams.x: ray AO strength, .y: 1 = reference light path (see
+// shadeFast), .z: ambient (0-1), .w unused.
 struct Camera { view: mat4x4<f32>, proj: mat4x4<f32>, sunDir: vec4<f32>, lightParams: vec4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
@@ -113,18 +115,23 @@ fn isSolid(v: vec3<i32>) -> bool {
 
 fn occ(v: vec3<i32>) -> f32 { return select(0.0, 1.0, isSolid(v)); }
 
-// Display value of voxel v; a voxel with no light storage reads as sun and ambient only.
-fn displayAt(v: vec3<i32>) -> u32 {
-    let i = entryOf(v >> vec3<u32>(5u));
-    if (i < 0) { return EMPTY_DISPLAY; }
+// Light slot of the brick holding voxel v, whose chunk-table entry is i (entryOf), or NO_SURFACE.
+fn brickSlot(i: i32, v: vec3<i32>) -> u32 {
+    if (i < 0) { return NO_SURFACE; }
     let l = v & vec3<i32>(31);
     let b = (l.x >> 3u) + 4 * ((l.y >> 3u) + 4 * (l.z >> 3u));
-    let s = brickTable[u32(i * 64 + b)];
+    return brickTable[u32(i * 64 + b)];
+}
+
+// Display value of voxel v stored in light slot s; no light storage reads as sun and ambient only.
+fn slotDisplay(s: u32, v: vec3<i32>) -> u32 {
     if (s == NO_SURFACE) { return EMPTY_DISPLAY; }
-    let lb = l & vec3<i32>(7);
+    let lb = v & vec3<i32>(7);
     let k = u32(lb.x + 8 * (lb.y + 8 * lb.z));
     return (lightPool[s * SLOT_WORDS + (k >> 1u)] >> ((k & 1u) * 16u)) & 0xFFFFu;
 }
+
+fn displayAt(v: vec3<i32>) -> u32 { return slotDisplay(brickSlot(entryOf(v >> vec3<u32>(5u)), v), v); }
 
 fn decodeLevel(c: u32) -> f32 { let f = f32(c) / 15.0; return f * f; }
 
@@ -248,6 +255,128 @@ fn computeAO(localPos: vec3<f32>, localNormal: vec3<f32>) -> f32 {
     return mix(mix(ao00, ao10, s), mix(ao01, ao11, s), t);
 }
 
+// ── Fast path ────────────────────────────────────────────────────────────────────────────────────────────────
+// sampleLit + computeAO above, written for clarity, look the same few cells up over and over: ~32 isSolid and ~16
+// displayAt per fragment, each walking grid → chunk table → pool again. shadeFast gives the same result from
+// one chunk-table lookup, one 27-bit solid mask of the air cell's 3x3x3 neighbourhood (9 occupancy words when it
+// lies inside one chunk) and one decode per in-plane cell (the brick slot is shared while cells stay in the air
+// cell's brick). camera.lightParams.y > 0.5 selects the reference path instead, for A/B comparison.
+
+// Bit of offset d (each component -1..1) in a neighbourhood mask.
+fn nbit(d: vec3<i32>) -> u32 { return u32((d.x + 1) + 3 * (d.y + 1) + 9 * (d.z + 1)); }
+fn maskSolid(m: u32, d: vec3<i32>) -> bool { return ((m >> nbit(d)) & 1u) == 1u; }
+
+// Solid mask of the 27 voxels around air (air's own chunk-table entry is i).
+fn solidMask(air: vec3<i32>, i: i32) -> u32 {
+    let l = air & vec3<i32>(31);
+    if (all(l >= vec3<i32>(1)) && all(l <= vec3<i32>(30))) {
+        // Whole neighbourhood in air's chunk: one occupancy row word per (dy, dz), 3 bits from each.
+        if (i < 0) { return 0u; }
+        let code = chunkTable[2 * i].x;
+        if (code < 0) { return select(0u, 0x7FFFFFFu, code == OCC_ALL_SOLID); }
+        let base = code * WPC + l.y - 1 + 32 * (l.z - 1);
+        var m = 0u;
+        for (var dz = 0; dz < 3; dz = dz + 1) {
+            for (var dy = 0; dy < 3; dy = dy + 1) {
+                let w = occPool[u32(base + dy + 32 * dz)];
+                m = m | (((w >> u32(l.x - 1)) & 7u) << u32(3 * dy + 9 * dz));
+            }
+        }
+        return m;
+    }
+    // Chunk border: per voxel.
+    var m = 0u;
+    for (var k = 0; k < 27; k = k + 1) {
+        let d = vec3<i32>(k % 3, (k / 3) % 3, k / 9) - vec3<i32>(1);
+        if (isSolid(air + d)) { m = m | (1u << u32(k)); }
+    }
+    return m;
+}
+
+// One in-plane cell's (sky, r, g, b), sun and weight (0 when not included in the smoothing).
+struct WCell { a: vec4<f32>, sun: f32, w: f32 };
+
+fn weighed(inc: bool, v: vec3<i32>, homeBrick: vec3<i32>, homeSlot: u32) -> WCell {
+    var r: WCell;
+    if (!inc) { r.a = vec4<f32>(0.0); r.sun = 0.0; r.w = 0.0; return r; }
+    var d: u32;
+    if (all((v >> vec3<u32>(3u)) == homeBrick)) { d = slotDisplay(homeSlot, v); } else { d = displayAt(v); }
+    r.a = vec4<f32>(camera.lightParams.z * (1.0 - camera.lightParams.x * f32(d >> 14u) / 3.0),
+                    decodeLevel(d & 15u), decodeLevel((d >> 4u) & 15u), decodeLevel((d >> 8u) & 15u));
+    r.sun = f32((d >> 12u) & 3u) / 3.0;
+    r.w = 1.0;
+    return r;
+}
+
+struct Corner4 { a: vec4<f32>, sun: f32 };
+
+fn avg4(p: WCell, q: WCell, r: WCell, s: WCell) -> Corner4 {
+    let n = p.w + q.w + r.w + s.w; // >= 1: the air cell is always included
+    var c: Corner4;
+    c.a = (p.a + q.a + r.a + s.a) / n;
+    c.sun = (p.sun + q.sun + r.sun + s.sun) / n;
+    return c;
+}
+
+struct Shade { sky: f32, rgb: vec3<f32>, sun: f32, ao: f32 };
+
+fn shadeFast(localPos: vec3<f32>, localNormal: vec3<f32>) -> Shade {
+    let air = model.chunk * 32 + vec3<i32>(floor(localPos + 0.5 * localNormal));
+    let N = vec3<i32>(round(localNormal));
+    let n = abs(localNormal);
+    var T: vec3<i32>; var B: vec3<i32>;
+    if (n.x > 0.5)      { T = vec3<i32>(0, 1, 0); B = vec3<i32>(0, 0, 1); }
+    else if (n.y > 0.5) { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 0, 1); }
+    else                { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 1, 0); }
+
+    let ai = entryOf(air >> vec3<u32>(5u));
+    let m = solidMask(air, ai);
+    let hb = air >> vec3<u32>(3u);
+    let hs = brickSlot(ai, air);
+
+    // Air-layer solids around the cell (AO, and the first half of onSurface).
+    let sTm = maskSolid(m, -T);     let sTp = maskSolid(m, T);
+    let sBm = maskSolid(m, -B);     let sBp = maskSolid(m, B);
+    let sMM = maskSolid(m, -T - B); let sPM = maskSolid(m, T - B);
+    let sMP = maskSolid(m, -T + B); let sPP = maskSolid(m, T + B);
+
+    // onSurface: open, with a solid directly behind along the normal. Diagonals need a side cell (corner rule).
+    let oTm = !sTm && maskSolid(m, -T - N);     let oTp = !sTp && maskSolid(m, T - N);
+    let oBm = !sBm && maskSolid(m, -B - N);     let oBp = !sBp && maskSolid(m, B - N);
+    let oMM = (oTm || oBm) && !sMM && maskSolid(m, -T - B - N);
+    let oPM = (oTp || oBm) && !sPM && maskSolid(m, T - B - N);
+    let oMP = (oTm || oBp) && !sMP && maskSolid(m, -T + B - N);
+    let oPP = (oTp || oBp) && !sPP && maskSolid(m, T + B - N);
+
+    let cC  = weighed(true, air, hb, hs);
+    let cTm = weighed(oTm, air - T, hb, hs);     let cTp = weighed(oTp, air + T, hb, hs);
+    let cBm = weighed(oBm, air - B, hb, hs);     let cBp = weighed(oBp, air + B, hb, hs);
+    let cMM = weighed(oMM, air - T - B, hb, hs); let cPM = weighed(oPM, air + T - B, hb, hs);
+    let cMP = weighed(oMP, air - T + B, hb, hs); let cPP = weighed(oPP, air + T + B, hb, hs);
+
+    let c00 = avg4(cC, cTm, cBm, cMM);
+    let c10 = avg4(cC, cTp, cBm, cPM);
+    let c01 = avg4(cC, cTm, cBp, cMP);
+    let c11 = avg4(cC, cTp, cBp, cPP);
+
+    let ft = fract(dot(localPos, vec3<f32>(T)));
+    let fb = fract(dot(localPos, vec3<f32>(B)));
+    var o: Shade;
+    let a = mix(mix(c00.a, c10.a, ft), mix(c01.a, c11.a, ft), fb);
+    o.sky = a.x;
+    o.rgb = a.yzw;
+    o.sun = mix(mix(c00.sun, c10.sun, ft), mix(c01.sun, c11.sun, ft), fb);
+
+    let ao00 = vAO(select(0.0, 1.0, sTm), select(0.0, 1.0, sBm), select(0.0, 1.0, sMM));
+    let ao10 = vAO(select(0.0, 1.0, sTp), select(0.0, 1.0, sBm), select(0.0, 1.0, sPM));
+    let ao01 = vAO(select(0.0, 1.0, sTm), select(0.0, 1.0, sBp), select(0.0, 1.0, sMP));
+    let ao11 = vAO(select(0.0, 1.0, sTp), select(0.0, 1.0, sBp), select(0.0, 1.0, sPP));
+    let s = smoothstep(0.0, 1.0, ft);
+    let t = smoothstep(0.0, 1.0, fb);
+    o.ao = mix(mix(ao00, ao10, s), mix(ao01, ao11, s), t);
+    return o;
+}
+
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // Sample unconditionally (avoids implicit-derivative issues from branching on a per-fragment value) and
@@ -261,7 +390,16 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 
     let worldN = normalize(in.worldNormal);
     let ndotl  = max(dot(worldN, -(camera.sunDir.xyz)), 0.0);
-    let s      = sampleLit(in.localPos, in.localNormal);
+    var s: Lit;
+    var ao: f32;
+    if (camera.lightParams.y > 0.5) {
+        s  = sampleLit(in.localPos, in.localNormal);
+        ao = computeAO(in.localPos, in.localNormal);
+    } else {
+        let f = shadeFast(in.localPos, in.localNormal);
+        s.sky = f.sky; s.rgb = f.rgb; s.sun = f.sun;
+        ao = f.ao;
+    }
 
     // Direct sun capped at camera.sunDir.w (SunLight.Strength): Lambertian on the surface normal, gated by
     // the smoothed voxel sun visibility.
@@ -274,7 +412,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let lit = max(max(vec3<f32>(skyTerm), s.rgb), vec3<f32>(MIN_AMBIENT));
 
     // Ambient occlusion darkens inner corners / block junctions; lerp from AO_MIN so corners aren't pure black.
-    let aoFactor = mix(AO_MIN, 1.0, computeAO(in.localPos, in.localNormal));
+    let aoFactor = mix(AO_MIN, 1.0, ao);
 
     return vec4<f32>(baseColor * lit * aoFactor, 1.0);
 }
@@ -319,6 +457,15 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     private CommandEncoder* _encoder;
     private RenderPassEncoder* _pass;
     private int _drawIndex;
+    private readonly ModelUniform[] _modelStaging = new ModelUniform[MaxObjects];
+
+    /// <summary>Smoothed CPU time blocked acquiring the swapchain image / presenting it. Under vsync (Fifo) this is
+    /// where waiting on the GPU shows up, so a large value here means GPU-bound rather than CPU-bound.</summary>
+    public double AcquireMs { get; private set; }
+    public double PresentMs { get; private set; }
+
+    /// <summary>Draw calls issued last frame.</summary>
+    public int DrawCount { get; private set; }
 
     public float AspectRatio => _ctx.Size.Y <= 0 ? 1f : (float)_ctx.Size.X / _ctx.Size.Y;
 
@@ -623,12 +770,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     {
         if (_drawIndex >= MaxObjects) return;
 
-        ulong offset = (ulong)_drawIndex * ModelStride;
-        Span<ModelUniform> s = stackalloc ModelUniform[1];
-        s[0] = ModelUniform.Default(model);
-        _modelBuffer.Write<ModelUniform>(offset, s);
-
-        uint dynOffset = (uint)offset;
+        uint dynOffset = StageModel(ModelUniform.Default(model));
         _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset);
         _api.RenderPassEncoderSetVertexBuffer(_pass, 0, mesh.VertexBuffer.Handle, 0, mesh.VertexBuffer.SizeBytes);
         _api.RenderPassEncoderSetPipeline(_pass, _wireframePipeline);
@@ -659,12 +801,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     {
         if (_drawIndex >= MaxObjects) return;
 
-        ulong offset = (ulong)_drawIndex * ModelStride;
-        Span<ModelUniform> s = stackalloc ModelUniform[1];
-        s[0] = ModelUniform.Default(model);
-        _modelBuffer.Write<ModelUniform>(offset, s);
-
-        uint dynOffset = (uint)offset;
+        uint dynOffset = StageModel(ModelUniform.Default(model));
         _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset);
         _api.RenderPassEncoderSetVertexBuffer(_pass, 0, mesh.VertexBuffer.Handle, 0, mesh.VertexBuffer.SizeBytes);
         _api.RenderPassEncoderSetIndexBuffer(_pass, mesh.IndexBuffer.Handle, IndexFormat.Uint32, 0, mesh.IndexBuffer.SizeBytes);
@@ -689,7 +826,10 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 
     public bool BeginFrame()
     {
-        if (!_ctx.AcquireCurrentView())
+        long t0 = Stopwatch.GetTimestamp();
+        bool acquired = _ctx.AcquireCurrentView();
+        AcquireMs = Ema(AcquireMs, Stopwatch.GetElapsedTime(t0).TotalMilliseconds);
+        if (!acquired)
         {
             _ctx.Configure(_ctx.Size);
             return false;
@@ -747,12 +887,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     {
         if (_drawIndex >= MaxObjects) return;
 
-        ulong offset = (ulong)_drawIndex * ModelStride;
-        Span<ModelUniform> s = stackalloc ModelUniform[1];
-        s[0] = new ModelUniform { Model = model, ChunkX = chunk.X, ChunkY = chunk.Y, ChunkZ = chunk.Z, Grid = grid };
-        _modelBuffer.Write<ModelUniform>(offset, s);
-
-        uint dynOffset = (uint)offset;
+        uint dynOffset = StageModel(new ModelUniform { Model = model, ChunkX = chunk.X, ChunkY = chunk.Y, ChunkZ = chunk.Z, Grid = grid });
         _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset);
         _api.RenderPassEncoderSetVertexBuffer(_pass, 0, mesh.VertexBuffer.Handle, 0, mesh.VertexBuffer.SizeBytes);
 
@@ -763,11 +898,22 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         _drawIndex++;
     }
 
+    /// <summary>Stages this draw's model uniform for <see cref="EndFrame"/>'s single upload; returns its dynamic offset.</summary>
+    private uint StageModel(in ModelUniform u)
+    {
+        _modelStaging[_drawIndex] = u;
+        return (uint)((ulong)_drawIndex * ModelStride);
+    }
+
     public void EndFrame()
     {
         _api.RenderPassEncoderEnd(_pass);
         _api.RenderPassEncoderRelease(_pass);
         _pass = null;
+
+        // One upload for every draw's model uniform (queue writes land before the submit below), instead of a
+        // QueueWriteBuffer per draw.
+        if (_drawIndex > 0) _modelBuffer.Write<ModelUniform>(0, _modelStaging.AsSpan(0, _drawIndex));
 
         var cmdDesc = new CommandBufferDescriptor();
         var cmd = _api.CommandEncoderFinish(_encoder, &cmdDesc);
@@ -776,16 +922,22 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         _api.CommandEncoderRelease(_encoder);
         _encoder = null;
 
+        long t0 = Stopwatch.GetTimestamp();
         _ctx.Present();
+        PresentMs = Ema(PresentMs, Stopwatch.GetElapsedTime(t0).TotalMilliseconds);
+        DrawCount = _drawIndex;
     }
 
-    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private static double Ema(double prev, double sample) => prev + 0.05 * (sample - prev);
+
+    // Padded to ModelStride so the staging array's layout is the uniform buffer's, dynamic-offset slots included.
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential, Size = (int)ModelStride)]
     private struct ModelUniform
     {
         public Mat4 Model;
         public int ChunkX, ChunkY, ChunkZ, Grid;
         public int _Pad0, _Pad1, _Pad2, _Pad3;
-        // sizeof = 64 + 16 + 16 = 96 == ModelSize
+        // 64 + 16 + 16 = 96 == ModelSize bytes the shader reads, padded to ModelStride
 
         /// <summary>Non-chunk draws: no grid, drawn full-bright.</summary>
         public static ModelUniform Default(in Mat4 m) => new() { Model = m, Grid = -1 };

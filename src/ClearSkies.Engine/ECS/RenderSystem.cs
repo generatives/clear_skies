@@ -35,12 +35,26 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
     // ── debug UI ─────────────────────────────────────────────────────────────
     public string DebugName => "Renderer";
 
+    // A/B switches for the chunk pass's performance work (see Update and the shader's shadeFast).
+    private bool _sortFrontToBack = true;
+    private bool _referenceLighting;
+
+    // One visible chunk draw, collected so they can be issued nearest first.
+    private readonly record struct ChunkDraw(float DistSq, GpuMesh Mesh, Mat4 Model, int Grid, ChunkPosition Chunk);
+    private readonly List<ChunkDraw> _draws = new();
+    private static readonly Comparison<ChunkDraw> NearestFirst = (a, b) => a.DistSq.CompareTo(b.DistSq);
+
     public void DrawDebugUi()
     {
         ImGui.Text($"{_time.FramesPerSecond} fps");
+        ImGui.Text($"Draw calls: {_renderer.DrawCount:N0} ({_draws.Count:N0} chunks visible of {_meshes.Count:N0})");
+        ImGui.Text($"Swapchain acquire wait: {_renderer.AcquireMs:F2} ms, present: {_renderer.PresentMs:F2} ms");
+        ImGui.TextDisabled("A large acquire/present wait means the frame is waiting on the GPU (vsync is on).");
         bool wireframe = _renderer.WireframeMode;
         if (ImGui.Checkbox("Wireframe", ref wireframe))
             _renderer.WireframeMode = wireframe;
+        ImGui.Checkbox("Draw chunks front to back", ref _sortFrontToBack);
+        ImGui.Checkbox("Reference (slow) light + AO shader path", ref _referenceLighting);
     }
 
     public void Update(float dt)
@@ -59,6 +73,7 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
             SunStrength    = SunLight.Strength,
             RayAoStrength  = RayLightingSettings.AoStrength,
             Ambient        = RayLightingSettings.Ambient,
+            ReferenceLighting = _referenceLighting ? 1f : 0f,
         };
 
         if (!_renderer.BeginFrame())
@@ -74,6 +89,10 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
         // just that box transformed by the entity's own model matrix (handles a dynamic grid's rotation too).
         var camFrustum = Frustum.FromViewProjection(Mat4.Multiply(uniform.Projection, uniform.View));
 
+        // Drawn nearest first, so the depth test rejects hidden fragments before the (expensive) lighting shader
+        // runs on them instead of shading them and overwriting them later.
+        _draws.Clear();
+        var half = new Vector3D<float>(ChunkData.Size * 0.5f);
         foreach (ref readonly Entity e in _meshes.GetEntities())
         {
             ref readonly var t   = ref e.Get<Transform>();
@@ -82,8 +101,12 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
             var model = t.ToMatrix();
             if (!ChunkBoundsIntersect(model, camFrustum)) continue;
 
-            _renderer.DrawMesh(mr.Mesh, model, mr.Grid?.Index ?? -1, mr.ChunkPos);
+            float distSq = Vector3D.DistanceSquared(model.TransformPoint(half), camTransform.Position);
+            _draws.Add(new ChunkDraw(distSq, mr.Mesh, model, mr.Grid?.Index ?? -1, mr.ChunkPos));
         }
+        if (_sortFrontToBack) _draws.Sort(NearestFirst);
+        foreach (var d in _draws)
+            _renderer.DrawMesh(d.Mesh, d.Model, d.Grid, d.Chunk);
 
         // Wireframe overlays drawn on top (pipeline switches mid-pass then restores).
         foreach (ref readonly Entity e in _wireframes.GetEntities())
