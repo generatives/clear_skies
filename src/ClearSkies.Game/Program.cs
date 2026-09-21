@@ -45,7 +45,7 @@ var physicsBody = new PhysicsBodySystem(host.World, staticWorld, host.Physics);
 // recomputing a much larger dirty region during the load-in burst plus the per-frame full-chunk scans in
 // ChunkMeshSystem/GpuResidencySystem/GpuLightSystem/PhysicsBodySystem (see the deferred dirty-queue task).
 // Pushing further needs that follow-up work, not just a bigger radius.
-const int ViewXz = 8, ViewY = 3;
+const int ViewXz = 16, ViewY = 5;
 host.AddSystem(new ChunkLoadSystem(host.World, staticWorld, worldGen, xzRadius: ViewXz, yRadius: ViewY), SystemStage.Logic);
 
 // Shared GPU voxel storage for lighting (world + ships). ChunkLoadSystem unloads past radius + 1, so the loaded

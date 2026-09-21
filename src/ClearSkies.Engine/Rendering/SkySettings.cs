@@ -22,19 +22,19 @@ public static class SkySettings
     public static bool CloudsEnabled = true;
 
     /// <summary>0-1: the fraction of cloud-layer cells that are cloud (see <c>CloudLayer</c>).</summary>
-    public static float CloudCoverage = 0.4f;
+    public static float CloudCoverage = 0.1f;
 
     /// <summary>World Y of the cloud layer's underside; islands top out well below the default.</summary>
     public static float CloudAltitude = 300f;
 
     /// <summary>Blocks per second the cloud layer drifts along +X.</summary>
-    public static float WindSpeed = 3f;
+    public static float WindSpeed = 1.5f;
 
     /// <summary>Where horizontal fog begins, as a fraction of <see cref="LoadedHorizontal"/>; it is total at 1.</summary>
-    public static float FogStartFraction = 0.55f;
+    public static float FogStartFraction = 0.85f;
 
     /// <summary>Where vertical fog begins, as a fraction of <see cref="LoadedVertical"/>; it is total at 1.</summary>
-    public static float VerticalFogStartFraction = 0.6f;
+    public static float VerticalFogStartFraction = 0.75f;
 
     /// <summary>Guaranteed-loaded distance from the camera, in blocks: horizontally and vertically. The load region is
     /// a box of chunks around the camera's chunk, so its nearest edge is at least radius * chunk size away.</summary>
