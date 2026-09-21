@@ -8,12 +8,13 @@ using BepuUtilities;
 using BepuUtilities.Memory;
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Physics.Characters;
+using ClearSkies.Engine.Voxels;
 
 namespace ClearSkies.Engine.Physics;
 
 /// <summary>
 /// Owns the BepuPhysics2 <see cref="Simulation"/> and its <see cref="BufferPool"/>, and exposes a
-/// small façade for the rest of the engine: dynamic body creation, pose readback, and per-box static
+/// small façade for the rest of the engine: dynamic body creation, pose readback, and per-chunk static
 /// terrain colliders. All public coordinates use System.Numerics (the Bepu domain); callers convert
 /// via <see cref="PhysicsConv"/>.
 ///
@@ -250,30 +251,35 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
         Simulation.Shapes.Remove(shape);
     }
 
-    // ── Static terrain colliders (one Box static per merged box) ──────────────────
+    // ── Static terrain colliders (one BigCompound static per chunk) ───────────────
 
-    /// <summary>Adds one static box per entry of <paramref name="boxes"/> (local centre + size),
-    /// offset by <paramref name="origin"/>, appending their handles to <paramref name="outHandles"/>.</summary>
-    public void AddStaticBoxes(IReadOnlyList<(Vector3 center, Vector3 size)> boxes, Vector3 origin, List<StaticHandle> outHandles)
+    /// <summary>Adds a single static whose shape is a <see cref="BigCompound"/> of one box child per
+    /// entry of <paramref name="boxes"/> (centre + size, local to <paramref name="origin"/>). One static
+    /// per chunk keeps the broad phase small — the compound's own internal tree handles the per-box
+    /// culling — instead of inserting every merged box as its own static.</summary>
+    public StaticHandle AddStaticCompound(IReadOnlyList<(Vector3 center, Vector3 size, BlockId id)> boxes, Vector3 origin)
     {
-        foreach (var (center, size) in boxes)
+        _pool.Take<CompoundChild>(boxes.Count, out var children);
+        for (int i = 0; i < boxes.Count; i++)
         {
-            var shapeIndex = Simulation.Shapes.Add(new Box(size.X, size.Y, size.Z));
-            var handle = Simulation.Statics.Add(new StaticDescription(origin + center, shapeIndex));
-            outHandles.Add(handle);
+            var (center, size, _) = boxes[i];
+            children[i] = new CompoundChild
+            {
+                LocalPose  = new RigidPose(center),
+                ShapeIndex = Simulation.Shapes.Add(new Box(size.X, size.Y, size.Z)),
+            };
         }
+        var shape = Simulation.Shapes.Add(new BigCompound(children, Simulation.Shapes, _pool));
+        return Simulation.Statics.Add(new StaticDescription(origin, shape));
     }
 
-    /// <summary>Removes the given statics and their (convex, dispose-free) shapes, then clears the list.</summary>
-    public void RemoveStatics(List<StaticHandle> handles)
+    /// <summary>Removes a static created by <see cref="AddStaticCompound"/>, along with its compound
+    /// shape, child boxes, children buffer and acceleration tree.</summary>
+    public void RemoveStaticCompound(StaticHandle handle)
     {
-        foreach (var h in handles)
-        {
-            var shapeIndex = Simulation.Statics[h].Shape;
-            Simulation.Statics.Remove(h);
-            Simulation.Shapes.Remove(shapeIndex);
-        }
-        handles.Clear();
+        var shape = Simulation.Statics[handle].Shape;
+        Simulation.Statics.Remove(handle);
+        Simulation.Shapes.RecursivelyRemoveAndDispose(shape, _pool);
     }
 
     public void Dispose()

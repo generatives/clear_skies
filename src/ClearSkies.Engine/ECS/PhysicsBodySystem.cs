@@ -33,7 +33,8 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
     private readonly VoxelBoxDecomposer _decomposer = new();
     private readonly List<(Vector3 center, Vector3 size, float mass)> _dynamicBoxes = new();
 
-    private readonly Dictionary<ChunkPosition, List<StaticHandle>> _colliders = new();
+    // One BigCompound static per non-empty chunk; box count kept only for the debug panel.
+    private readonly Dictionary<ChunkPosition, (StaticHandle handle, int boxes)> _colliders = new();
     private readonly List<ChunkPosition> _stale = new();
 
     private readonly Stopwatch _sw = new();
@@ -61,29 +62,25 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
         {
             if (!entry.NeedsRecollide) continue;
 
-            // Drop any existing colliders for this chunk before rebuilding.
-            _colliders.TryGetValue(pos, out var handles);
-            if (handles is { Count: > 0 }) _physics.RemoveStatics(handles);
+            // Drop any existing collider for this chunk before rebuilding.
+            if (_colliders.Remove(pos, out var old)) _physics.RemoveStaticCompound(old.handle);
 
             if (entry.Data.HasAnySolid())
             {
                 _sw.Restart();
                 var boxes = _decomposer.Decompose(entry.Data);
-                handles ??= new List<StaticHandle>();
-                var o = pos.WorldOrigin;
-                _physics.AddStaticBoxes(boxes.ConvertAll(b => (b.center, b.size)), new PhysVec(o.X, o.Y, o.Z), handles);
+                if (boxes.Count > 0)
+                {
+                    var o = pos.WorldOrigin;
+                    _colliders[pos] = (_physics.AddStaticCompound(boxes, new PhysVec(o.X, o.Y, o.Z)), boxes.Count);
+                }
                 long ms = _sw.ElapsedMilliseconds;
 
-                _colliders[pos] = handles;
                 _totalBuilt++;
                 built++;
 
                 if (ms > 2)
                     Console.WriteLine($"[collide] chunk {pos} | {boxes.Count} boxes | {ms}ms | total={_totalBuilt}");
-            }
-            else
-            {
-                _colliders.Remove(pos);
             }
 
             entry.NeedsRecollide = false;
@@ -96,17 +93,16 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
 
         foreach (var pos in _stale)
         {
-            if (_colliders.TryGetValue(pos, out var handles))
-                _physics.RemoveStatics(handles);
-            _colliders.Remove(pos);
+            if (_colliders.Remove(pos, out var c))
+                _physics.RemoveStaticCompound(c.handle);
         }
         _stale.Clear();
     }
 
-    /// <summary>True if <paramref name="pos"/> currently has at least one static collider box
-    /// registered. Used by GridPilotSystem's diagnostics to check whether the ground under a falling
-    /// grid is actually collidable, as opposed to just loaded/rendered.</summary>
-    public bool HasCollider(ChunkPosition pos) => _colliders.TryGetValue(pos, out var h) && h.Count > 0;
+    /// <summary>True if <paramref name="pos"/> currently has a static collider registered. Used by
+    /// GridPilotSystem's diagnostics to check whether the ground under a falling grid is actually
+    /// collidable, as opposed to just loaded/rendered.</summary>
+    public bool HasCollider(ChunkPosition pos) => _colliders.ContainsKey(pos);
 
     // ── dynamic grid bodies (moved from GridShapeSystem) ────────────────────────
     private void UpdateDynamicGrids()
@@ -180,10 +176,10 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
     public void DrawDebugUi()
     {
         int totalBoxes = 0;
-        foreach (var handles in _colliders.Values) totalBoxes += handles.Count;
+        foreach (var c in _colliders.Values) totalBoxes += c.boxes;
 
-        ImGui.Text($"Chunks with colliders: {_colliders.Count}");
-        ImGui.Text($"Total static collider boxes: {totalBoxes}");
+        ImGui.Text($"Chunks with colliders (one BigCompound static each): {_colliders.Count}");
+        ImGui.Text($"Total compound child boxes: {totalBoxes}");
         ImGui.Text($"Chunks built (lifetime): {_totalBuilt}");
     }
 }
