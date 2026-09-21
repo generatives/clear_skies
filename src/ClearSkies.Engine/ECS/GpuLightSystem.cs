@@ -16,8 +16,9 @@ namespace ClearSkies.Engine.ECS;
 /// Ray-traced voxel lighting (see the "Ray-Traced Voxel Lighting" design doc). Every frame: pose each grid (the
 /// static world and every ship) in the shared <see cref="GridStore"/>, work out which surface bricks' lighting
 /// can have changed, and dispatch <see cref="GpuRayLightPass"/>'s sun, lamp and bounce passes over just those.
-/// Each ray tests occlusion against every grid, so ships shadow terrain and each other, and lamps on any grid light
-/// any other. Change tracking and dispatch: GpuLightSystem.RayDirty.cs.
+/// Rays test occlusion against every grid that can reach them, so ships shadow terrain and each other, and lamps on
+/// any grid light any other. Change tracking and dispatch: GpuLightSystem.RayDirty.cs; per-chunk grid and lamp
+/// lists: GpuLightSystem.Lists.cs.
 ///
 /// Runs after <c>GpuResidencySystem</c> (occupancy and light storage up to date) and before RenderSystem.
 /// </summary>
@@ -82,7 +83,6 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
 
     private readonly List<LitGrid>             _lit   = new();
     private readonly List<WorldLamp>           _lamps = new();
-    private readonly List<Vector4D<float>>     _lampVecs = new(); // two per lamp: (world, level), (colour, 0)
 
     // Grid/Local identify the lamp block (grid index, grid-space voxel), so a lamp riding a moving ship stays the
     // same lamp; World is where it is this frame.
@@ -135,6 +135,8 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         ImGui.TextDisabled($"Bricks bounced this frame: {_lastBounceTotal:N0}, plus near-camera repeats: {_lastNearTotal:N0}, waiting: {_lastBounceWaiting:N0}");
         ImGui.TextDisabled($"  full relight: {(_dbgFullReason == "" ? "no" : _dbgFullReason)}, new bricks: {_dbgNewSlots}");
         ImGui.TextDisabled($"  world chunks changed: {_dbgChangedChunks}, ships moved: {_dbgShipsMoved}, lamp changes: {_dbgLampChanges}");
+        ImGui.TextDisabled($"Chunk lists: {_dbgListChunks:N0} chunks, avg {(_dbgListChunks > 0 ? (float)_dbgListGrids / _dbgListChunks : 0f):F1} grids " +
+                           $"and {(_dbgListChunks > 0 ? (float)_dbgListLamps / _dbgListChunks : 0f):F1} lamps each (of {_lit.Count} grids, {_lamps.Count} lamps)");
         ImGui.TextDisabled($"Light pool: {_store.LightSlotsInUse:N0} / {_store.LightSlotCapacity:N0} bricks " +
                            $"({(long)_store.LightSlotCapacity * GridStore.SlotBytes / (1024 * 1024)} MB), high water {_store.LightSlotHighWater:N0}");
         ImGui.TextDisabled($"Occupancy pool: {_store.OccSlotsInUse:N0} / {_store.OccSlotCapacity:N0} chunks " +
@@ -169,7 +171,6 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     }
 
     private bool _probeRequested;
-
     /// <summary>Debug: reads back the world grid descriptor, the camera chunk's table entry and one of its
     /// light bricks, and prints them next to the CPU mirror.</summary>
     private void Probe()
@@ -208,7 +209,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         {
             if (_store.SlotGrid[s] < 0) continue;
             var c = _store.SlotChunk[s];
-            if ((int)info[4 * s] != (_store.SlotGrid[s] | (_store.SlotBrick[s] << 8)) || (int)info[4 * s + 1] != c.X ||
+            if ((int)info[4 * s] != (_store.SlotBrick[s] | (_store.SlotGrid[s] << 6)) || (int)info[4 * s + 1] != c.X ||
                 (int)info[4 * s + 2] != c.Y || (int)info[4 * s + 3] != c.Z) badInfo++;
         }
         Console.WriteLine($"[probe] slotInfo mismatches: {badInfo} of {hw}; last frame relit={_lastDirtyTotal} bounced={_lastBounceTotal}");
@@ -248,7 +249,6 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     private void GatherLamps()
     {
         _lamps.Clear();
-        _lampVecs.Clear();
         foreach (var lg in _lit)
             foreach (var (cpos, entry) in lg.Vol.All)
             {
@@ -261,8 +261,6 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
                     var col = BlockRegistry.Get(em.Block).EffectiveLightColor;
                     var voxel = new Vector3D<int>(cpos.X * ChunkData.Size + em.Lx, cpos.Y * ChunkData.Size + em.Ly, cpos.Z * ChunkData.Size + em.Lz);
                     _lamps.Add(new WorldLamp(world, em.Level, col, lg.Handle.Index, voxel));
-                    _lampVecs.Add(new Vector4D<float>(world.X, world.Y, world.Z, em.Level));
-                    _lampVecs.Add(new Vector4D<float>(col.X, col.Y, col.Z, 0f));
                 }
             }
     }

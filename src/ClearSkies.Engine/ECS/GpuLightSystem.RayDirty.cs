@@ -165,53 +165,62 @@ public sealed partial class GpuLightSystem
         _bounceTimer.Reset();
         _lastBounceTotal = 0;
         _lastNearTotal = 0;
-        int gridCount = _store.GridCount;
         bool haveCam = CameraUtil.TryGetActive(_cameras, out var cam);
 
-        // Order: sun (display sun bits) -> clear bounce where a light was removed -> compose what changed (so the
-        // bounce pass reads current direct light, not last frame's) -> bounce (accumulation; reads the display at its
-        // hits) -> compose again (display colour and AO, from lamp rays plus the new bounce). Every brick whose sun or
-        // bounce changed is recomposed.
+        // All of this frame's work is chosen first (it depends only on CPU state), so the per-chunk lists can be built
+        // once for every chunk any pass touches. Then the order is: sun (display sun bits) -> clear bounce where light
+        // may have dropped -> compose what changed (so the bounce pass reads current direct light, not last frame's)
+        // -> bounce (accumulation; reads the display at its hits) -> compose again (display colour and AO, from lamp
+        // rays plus the new bounce). Every brick whose sun or bounce changed is recomposed.
         _composeCount = 0;
         int n = BuildLightWork(cam.Position);
         _lastDirtyTotal = n;
         HoldBounce(hold, _bounceRechangeN, bounceReset);
-        if (n > 0)
-        {
-            AddCompose(_scratch.AsSpan(0, n), 1);
-            _sunTimer.Start();
-            _rayLight.DispatchSun(_store, gridCount, sunDir, _lightWork!, n);
-            _sunTimer.Stop();
-        }
+        if (n > 0) AddCompose(_scratch.AsSpan(0, n), 1);
 
         CollectBounceClears(hold);
-        if (_clearSlots.Count > 0)
+        int nClear = _clearSlots.Count;
+        if (nClear > 0)
         {
-            var words = new uint[_clearSlots.Count];
+            var words = new uint[nClear];
             for (int k = 0; k < words.Length; k++) words[k] = (uint)_clearSlots[k];
             _clearWork = UploadWords(_clearWork, words);
-            _rayLight.DispatchClearBounce(_store, _clearWork, words.Length);
             AddCompose(words, 1);
         }
-        if (_composeCount > 0 && bounceOn)
+        int preCompose = _composeCount;
+
+        int nb = 0;
+        if (bounceOn)
+        {
+            float nearR = haveCam && _bounceNearRepeats > 1 ? _bounceNearRadius : -1f;
+            nb = BuildBounceWork(cam.Position, nearR);
+            _lastBounceTotal = nb;
+            if (nb > 0) AddCompose(_scratch.AsSpan(0, 2 * nb), 2);
+        }
+
+        BuildLists(_composeList.AsSpan(0, _composeCount), sunDir);
+
+        if (n > 0)
+        {
+            _sunTimer.Start();
+            _rayLight.DispatchSun(_store, sunDir, _lightWork!, n);
+            _sunTimer.Stop();
+        }
+        if (nClear > 0) _rayLight.DispatchClearBounce(_store, _clearWork!, nClear);
+        if (preCompose > 0 && bounceOn)
         {
             _lampTimer.Start();
-            _composeWork = UploadWords(_composeWork, _composeList.AsSpan(0, _composeCount));
-            _rayLight.DispatchCompose(_store, gridCount, CollectionsMarshal.AsSpan(_lampVecs),
-                                      _bounceEnabled ? _bounceScale : 0f, _composeWork, _composeCount);
+            _composeWork = UploadWords(_composeWork, _composeList.AsSpan(0, preCompose));
+            _rayLight.DispatchCompose(_store, _bounceEnabled ? _bounceScale : 0f, _composeWork, preCompose);
             _lampTimer.Stop();
         }
 
         if (bounceOn)
         {
-            float nearR = haveCam && _bounceNearRepeats > 1 ? _bounceNearRadius : -1f;
-            int nb = BuildBounceWork(cam.Position, nearR);
-            _lastBounceTotal = nb;
             if (nb > 0)
             {
-                AddCompose(_scratch.AsSpan(0, 2 * nb), 2);
                 _bounceTimer.Start();
-                _rayLight.DispatchBounce(_store, gridCount, sunDir, SunLight.Strength, _bounceAlbedo, _bounceRays,
+                _rayLight.DispatchBounce(_store, sunDir, SunLight.Strength, _bounceAlbedo, _bounceRays,
                                          _bounceCycle, _bounceWork!, nb);
 
                 // Extra evaluations of the held bricks near the camera, in the same frame. Each reads the previous
@@ -231,12 +240,12 @@ public sealed partial class GpuLightSystem
                     {
                         int nr = UploadNearRepeat(r);
                         if (nr == 0) break;
-                        ComposeNear(gridCount);
-                        _rayLight.DispatchBounce(_store, gridCount, sunDir, SunLight.Strength, _bounceAlbedo, _bounceRays,
+                        ComposeNear();
+                        _rayLight.DispatchBounce(_store, sunDir, SunLight.Strength, _bounceAlbedo, _bounceRays,
                                                  _bounceCycle, _nearWork!, nr);
                         _lastNearTotal += nr;
                     }
-                    ComposeNear(gridCount);
+                    ComposeNear();
                 }
                 _bounceTimer.Stop();
             }
@@ -251,8 +260,7 @@ public sealed partial class GpuLightSystem
         {
             _lampTimer.Start();
             _composeWork = UploadWords(_composeWork, _composeList.AsSpan(0, _composeCount));
-            _rayLight.DispatchCompose(_store, gridCount, CollectionsMarshal.AsSpan(_lampVecs),
-                                      _bounceEnabled ? _bounceScale : 0f, _composeWork, _composeCount);
+            _rayLight.DispatchCompose(_store, _bounceEnabled ? _bounceScale : 0f, _composeWork, _composeCount);
             _lampTimer.Stop();
         }
 
@@ -464,8 +472,19 @@ public sealed partial class GpuLightSystem
     /// shade something), the bounce along the sweep is cleared too.</summary>
     private void MarkSunShadow(Vector3D<float> mn, Vector3D<float> mx, Vector3D<float> sunDir, bool darkens)
     {
+        // Ships: one test each against the whole sweep (the box moved along the sun direction, padded like the world
+        // copies below and like MarkRegion's ship test), so the cost doesn't multiply by the number of sweep steps.
+        var half = (mx - mn) * 0.5f + new Vector3D<float>(SweepPad + 1.5f);
+        var centre = (mn + mx) * 0.5f;
+        foreach (var lg in _lit)
+        {
+            if (lg.Handle.IsWorld || !lg.Handle.HasSolid) continue;
+            var st = _gridStates[lg.Handle];
+            if (!st.LightAll && RayHitsBox(centre, sunDir, st.CurWorldMin - half, st.CurWorldMax + half)) st.LightAll = true;
+        }
+
         var world = _staticWorld.Gpu;
-        if (!world.HasBox) return;
+        if (!world.HasBox || !_gridStates.TryGetValue(world, out var worldState)) return;
         var wMin = world.BoxMin.WorldOrigin;
         var wMax = world.BoxMax.WorldOrigin + new Vector3D<float>(S);
         var pad  = new Vector3D<float>(SweepPad);
@@ -479,7 +498,7 @@ public sealed partial class GpuLightSystem
                 (sunDir.Y > 0 && a.Y > wMax.Y) || (sunDir.Y < 0 && b.Y < wMin.Y) ||
                 (sunDir.Z > 0 && a.Z > wMax.Z) || (sunDir.Z < 0 && b.Z < wMin.Z))
                 break; // moving away from the world and already past it
-            MarkRegion(a, b);
+            if (!worldState.LightAll) MarkWorldBox(world, a, b);
             if (darkens) ClearBounceAround(a, b);
         }
     }
@@ -773,11 +792,10 @@ public sealed partial class GpuLightSystem
     private int[] _nearStamp = Array.Empty<int>();
     private GpuBuffer? _nearComposeWork;
 
-    private void ComposeNear(int gridCount)
+    private void ComposeNear()
     {
         _lampTimer.Start();
-        _rayLight.DispatchCompose(_store, gridCount, CollectionsMarshal.AsSpan(_lampVecs),
-                                  _bounceEnabled ? _bounceScale : 0f, _nearComposeWork!, _nearCount);
+        _rayLight.DispatchCompose(_store, _bounceEnabled ? _bounceScale : 0f, _nearComposeWork!, _nearCount);
         _lampTimer.Stop();
     }
 

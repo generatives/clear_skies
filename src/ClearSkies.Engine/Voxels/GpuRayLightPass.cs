@@ -10,7 +10,8 @@ namespace ClearSkies.Engine.Voxels;
 /// Ray-traced voxel lighting over the shared <see cref="GridStore"/>: sun visibility and point-lamp shadows (any-hit
 /// DDA), and bounce light + ray AO (nearest-hit DDA), for every grid at once. A ray is carried into each grid's own
 /// voxel space and walked there, so ships shadow terrain, terrain shadows ships, and lamps on any grid light any
-/// other.
+/// other. Which grids and lamps a voxel tests comes from its chunk's list (<see cref="UploadLists"/>), so the cost
+/// per voxel doesn't grow with the number of ships or lamps elsewhere.
 ///
 /// <para>Work is a list of light slots (surface bricks) from any grid: one workgroup per brick, 256 threads each
 /// owning two voxels — one display word and two accumulation words (see the light layout in the WGSL). Passes run as
@@ -19,10 +20,6 @@ namespace ClearSkies.Engine.Voxels;
 /// </summary>
 internal sealed unsafe class GpuRayLightPass : IDisposable
 {
-    /// <summary>Cap on the lamp list <see cref="DispatchCompose"/> uploads; every lamp is tested (distance first)
-    /// by every voxel in the work list. Truncated, with a one-time log, rather than exceeded.</summary>
-    public const int MaxLamps = 256;
-
     private static readonly string Wgsl = @"
 struct GridDesc {
     v2w: mat4x4<f32>,
@@ -34,7 +31,7 @@ struct GridDesc {
 
 struct Params {
     sunDir: vec4<f32>,
-    counts: vec4<i32>,  // x: grid descriptor count, y: lamp count, z: work entries this dispatch
+    counts: vec4<i32>,  // y: word offset of the lamp records in lists, z: work entries this dispatch
     bounce: vec4<f32>,  // x: albedo (fraction of incoming light a surface re-emits), y: sun strength (0-1),
                         // z: bounce display scale (0 = bounce off)
     bounce2: vec4<f32>, // x: rays per evaluation, y: evaluations per full ray set (cycle)
@@ -47,7 +44,7 @@ struct Params {
 @group(0) @binding(4) var<storage, read> slotInfo: array<vec4<i32>>;
 @group(0) @binding(5) var<storage, read> grids: array<GridDesc>;
 @group(0) @binding(6) var<storage, read> work: array<u32>;
-@group(0) @binding(7) var<storage, read> lamps: array<vec4<f32>>; // per lamp: (xyz world pos, w level = reach), (rgb colour 0-1, 0)
+@group(0) @binding(7) var<storage, read> lists: array<u32>;
 @group(0) @binding(8) var<uniform> p: Params;
 
 const WPC: i32 = " + GridStore.WordsPerChunk + @";
@@ -253,6 +250,22 @@ fn slabClip(o: vec3<f32>, d: vec3<f32>, lo: vec3<f32>, hi: vec3<f32>, tLo: f32, 
     return ClipResult(true, t0, t1);
 }
 
+// ── Per-chunk lists ───────────────────────────────────────────────────────────────────────────────────────
+// Clustered shading with the chunk as the cluster. The CPU rebuilds these every frame for the chunks that have work
+// (GpuLightSystem.Lists.cs), so a voxel only traces the grids and lamps that can reach its chunk instead of every
+// grid and lamp there is. Layout of lists:
+//   [0, 2)                 the empty list (no grids, no lamps), for chunks with no list this frame;
+//   [2, 2 + table size)    per chunk-table entry, the offset of that chunk's list;
+//   [p.counts.y, ...)      lamp records, 8 words each: world position xyz, level (= reach), colour rgb, 0 (f32 bits);
+//   then the lists: grid count, grid indices, lamp count, lamp indices.
+// A chunk's grids are every grid whose solid can block a ray from it: the world, its own grid, and any ship near
+// it or between it and the sun.
+fn listOf(g: i32, v: vec3<i32>) -> u32 {
+    let i = entryOf(g, v >> vec3<u32>(5u));
+    if (i < 0) { return 0u; }
+    return lists[2u + u32(i)];
+}
+
 fn inBounds(v: vec3<i32>, lo: vec3<i32>, hi: vec3<i32>) -> bool {
     return all(v >= lo) && all(v < hi);
 }
@@ -343,14 +356,16 @@ fn ddaMarch(g: i32, o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, lo: vec3<i32>,
     return false;
 }
 
-// Any-hit occlusion test across every grid. worldDir must be unit length; rigid transforms preserve distance, so
-// segLen (a world-space length) bounds the walk identically in every grid's own voxel space once the direction is
-// rotated into it.
+// Any-hit occlusion test across the grids of a chunk's list. worldDir must be unit length; rigid transforms preserve
+// distance, so segLen (a world-space length) bounds the walk identically in every grid's own voxel space once the
+// direction is rotated into it.
 // skipOrigin: ignore the cell containing worldOrigin in any grid the ray starts inside (clip.t0 == 0) — used for
 // lamp rays, which start at the lamp's own opaque block.
-fn anyOccluderAlongSegment(worldOrigin: vec3<f32>, worldDir: vec3<f32>, segLen: f32, skipOrigin: bool) -> bool {
+fn anyOccluderAlongSegment(list: u32, worldOrigin: vec3<f32>, worldDir: vec3<f32>, segLen: f32, skipOrigin: bool) -> bool {
     if (segLen <= 0.0) { return false; }
-    for (var gi = 0; gi < p.counts.x; gi = gi + 1) {
+    let count = lists[list];
+    for (var k = 0u; k < count; k = k + 1u) {
+        let gi = i32(lists[list + 1u + k]);
         let gd = grids[gi];
         if (gd.table.y <= 0) { continue; }
         let lo = (gd.w2v * vec4<f32>(worldOrigin, 1.0)).xyz;
@@ -372,10 +387,10 @@ struct Item { g: i32, v0: vec3<i32>, disp: i32, acc: i32 }; // v0: the thread's 
 
 fn itemOf(slot: u32, t: u32) -> Item {
     let info = slotInfo[slot];
-    let b = info.x >> 8u;
+    let b = info.x & 63;
     let k = i32(t) * 2;
     var it: Item;
-    it.g = info.x & 255;
+    it.g = info.x >> 6u;
     it.v0 = info.yzw * 32 + vec3<i32>(b & 3, (b >> 2u) & 3, b >> 4u) * 8 + vec3<i32>(k & 7, (k >> 3u) & 7, k >> 6u);
     it.disp = i32(slot) * SLOT_WORDS + i32(t);
     it.acc = i32(slot) * SLOT_WORDS + ACC_BASE + k;
@@ -400,7 +415,7 @@ fn hasSolidNeighbour(g: i32, v: vec3<i32>) -> bool {
 
 // Sun visibility of a surface air voxel, 0 (shadowed) to 3 (lit). Anything else reads 3: the fragment shader only
 // blends cells on the face's own surface, so the value never shows.
-fn sunLevel(g: i32, v: vec3<i32>) -> u32 {
+fn sunLevel(g: i32, v: vec3<i32>, list: u32) -> u32 {
     if (isSolid(g, v) || !hasSolidNeighbour(g, v)) { return 3u; }
 
     // Nudge the sample point toward adjacent solid faces so contact shadows reach the foot of a wall instead of
@@ -422,7 +437,7 @@ fn sunLevel(g: i32, v: vec3<i32>) -> u32 {
         let jitter = select(0.0, SUN_JITTER, SUN_SAMPLES > 1); // a single ray uses the unjittered nudged centre
         let sp = clamp(vc + offs[s] * jitter, cellLo, cellHi);
         let world = (v2w * vec4<f32>(sp, 1.0)).xyz;
-        if (!anyOccluderAlongSegment(world, -p.sunDir.xyz, SUN_MAX_DISTANCE, false)) { lit = lit + 1u; }
+        if (!anyOccluderAlongSegment(list, world, -p.sunDir.xyz, SUN_MAX_DISTANCE, false)) { lit = lit + 1u; }
     }
     return u32(round(f32(lit) * 3.0 / f32(SUN_SAMPLES)));
 }
@@ -433,27 +448,32 @@ fn sun_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg:
     let wi = wid.x + wid.y * nwg.x;
     if (wi >= u32(p.counts.z)) { return; }
     let it = itemOf(work[wi], t);
-    let s0 = sunLevel(it.g, it.v0);
-    let s1 = sunLevel(it.g, it.v0 + vec3<i32>(1, 0, 0));
+    let list = listOf(it.g, it.v0);
+    let s0 = sunLevel(it.g, it.v0, list);
+    let s1 = sunLevel(it.g, it.v0 + vec3<i32>(1, 0, 0), list);
     let old = lightPool[it.disp] & ~((3u << 12u) | (3u << 28u));
     lightPool[it.disp] = old | (s0 << 12u) | (s1 << 28u);
 }
 
 // ── Lamps and composition ─────────────────────────────────────────────────────────────────────────────────
 
-// Point-lamp light (linear 0-1 per channel) at air voxel v. Every lamp against every grid, no same-grid special
+// Point-lamp light (linear 0-1 per channel) at air voxel v, from the lamps in its chunk's list. No same-grid special
 // case: a lamp on this very grid goes through the identical world-space any-hit test as a lamp on another grid
 // entirely. Rays are traced FROM the lamp TO the voxel over the full distance, skipping only the lamp's own
 // starting cell. (Shortening the ray by a fixed radius instead let exact 45-degree rays stop inside an open
 // diagonal cell before reaching the lamp cell's edge/corner, so the face blocks covering the lamp were never on
 // the tested segment and light leaked through the diagonals.) Each lamp falls off one level per block from its
 // level, times its colour; per channel the brightest lamp wins.
-fn lampLight(g: i32, v: vec3<i32>) -> vec3<f32> {
+fn lampLight(g: i32, v: vec3<i32>, list: u32) -> vec3<f32> {
     let world = (grids[g].v2w * vec4<f32>(vec3<f32>(v) + vec3<f32>(0.5), 1.0)).xyz;
     var best = vec3<f32>(0.0);
-    for (var k = 0; k < p.counts.y; k = k + 1) {
-        let lamp = lamps[2 * k];
-        let col = lamps[2 * k + 1].xyz;
+    let lampList = list + 1u + lists[list];
+    let count = lists[lampList];
+    for (var k = 0u; k < count; k = k + 1u) {
+        let r = u32(p.counts.y) + 8u * lists[lampList + 1u + k];
+        let lamp = vec4<f32>(bitcast<f32>(lists[r]), bitcast<f32>(lists[r + 1u]), bitcast<f32>(lists[r + 2u]),
+                             bitcast<f32>(lists[r + 3u]));
+        let col = vec3<f32>(bitcast<f32>(lists[r + 4u]), bitcast<f32>(lists[r + 5u]), bitcast<f32>(lists[r + 6u]));
         let toLamp = lamp.xyz - world;
         let dist = length(toLamp);
         if (dist > lamp.w) { continue; }               // level doubles as reach radius
@@ -461,7 +481,7 @@ fn lampLight(g: i32, v: vec3<i32>) -> vec3<f32> {
         let c = vec3<f32>(contribF) * col;
         if (contribF <= 0.0 || all(c <= best)) { continue; }
 
-        if (!anyOccluderAlongSegment(lamp.xyz, -toLamp / dist, dist, true)) {
+        if (!anyOccluderAlongSegment(list, lamp.xyz, -toLamp / dist, dist, true)) {
             best = max(best, c);
         }
     }
@@ -470,10 +490,10 @@ fn lampLight(g: i32, v: vec3<i32>) -> vec3<f32> {
 
 // The voxel's display half: its lamp light (traced now) and stored bounce (times the display scale, p.bounce.z)
 // combined per channel by max, the stored AO quantised to 2 bits, and the given sun level.
-fn composeVoxel(g: i32, v: vec3<i32>, acc: u32, sun: u32) -> u32 {
+fn composeVoxel(g: i32, v: vec3<i32>, acc: u32, sun: u32, list: u32) -> u32 {
     if (isSolid(g, v) || !hasSolidNeighbour(g, v)) { return sun << 12u; }
     let bounce = vec3<f32>(f32(acc & 0xFFu), f32((acc >> 8u) & 0xFFu), f32((acc >> 16u) & 0xFFu)) / 255.0 * p.bounce.z;
-    let rgb = max(lampLight(g, v), bounce);
+    let rgb = max(lampLight(g, v, list), bounce);
     let ao = u32(round(f32(acc >> 24u) / 255.0 * 3.0));
     return encodeLevel(rgb.r) | (encodeLevel(rgb.g) << 4u) | (encodeLevel(rgb.b) << 8u) | (sun << 12u) | (ao << 14u);
 }
@@ -485,14 +505,15 @@ fn compose_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) 
     if (wi >= u32(p.counts.z)) { return; }
     let it = itemOf(work[wi], t);
     let old = lightPool[it.disp];
-    let d0 = composeVoxel(it.g, it.v0, lightPool[it.acc], (old >> 12u) & 3u);
-    let d1 = composeVoxel(it.g, it.v0 + vec3<i32>(1, 0, 0), lightPool[it.acc + 1], (old >> 28u) & 3u);
+    let list = listOf(it.g, it.v0);
+    let d0 = composeVoxel(it.g, it.v0, lightPool[it.acc], (old >> 12u) & 3u, list);
+    let d1 = composeVoxel(it.g, it.v0 + vec3<i32>(1, 0, 0), lightPool[it.acc + 1], (old >> 28u) & 3u, list);
     lightPool[it.disp] = d0 | (d1 << 16u);
 }
 
 // ── Bounce (one-hop indirect light, multi-hop through re-evaluation) ─────────────────────────────────────
 // Each evaluation, a surface air voxel fires p.bounce2.x short rays (up to BOUNCE_MAX), cosine-distributed
-// around its surface normal, through every grid: one slice of a fixed per-voxel direction set that a full
+// around its surface normal, through its chunk's grids: one slice of a fixed per-voxel direction set that a full
 // cycle of p.bounce2.y evaluations covers (see bounceVoxel). At each ray's nearest hit it reads the light
 // arriving at the hit face from the air cell in front of it: the brighter of that cell's direct sun
 // (visibility x strength x the face's N.L), its lamp light and its own stored bounce; a miss reads 0. The
@@ -597,7 +618,7 @@ fn pcg(v: u32) -> u32 {
 fn rand01(h: u32) -> f32 { return f32(pcg(h) & 0xFFFFFFu) / 16777216.0; }
 
 // Blends one evaluation into the voxel's accumulation word (bounce RGB and AO) and returns the new word.
-fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, slice: i32) -> u32 {
+fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, slice: i32, list: u32) -> u32 {
     if (isSolid(g, v)) { return word; }
 
     let sxn = isSolid(g, v - vec3<i32>(1, 0, 0)); let sxp = isSolid(g, v + vec3<i32>(1, 0, 0));
@@ -652,7 +673,9 @@ fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, slice: i32) -> u32 {
         var bestT = BOUNCE_MAX;
         var bestG = -1;
         var best: Hit;
-        for (var gi = 0; gi < p.counts.x; gi = gi + 1) {
+        let gridCount = lists[list];
+        for (var gk = 0u; gk < gridCount; gk = gk + 1u) {
+            let gi = i32(lists[list + 1u + gk]);
             let gd = grids[gi];
             if (gd.table.y <= 0) { continue; }
             let lo = (gd.w2v * vec4<f32>(origin, 1.0)).xyz;
@@ -696,8 +719,9 @@ fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) n
     let cycle = max(u32(p.bounce2.y), 1u);
     let alpha = max(1.0 / f32(cycle), 1.0 / (f32(nu) + 1.0));
     let slice = i32(nu % cycle);
-    lightPool[it.acc]     = bounceVoxel(it.g, it.v0, lightPool[it.acc], alpha, slice);
-    lightPool[it.acc + 1] = bounceVoxel(it.g, it.v0 + vec3<i32>(1, 0, 0), lightPool[it.acc + 1], alpha, slice);
+    let list = listOf(it.g, it.v0);
+    lightPool[it.acc]     = bounceVoxel(it.g, it.v0, lightPool[it.acc], alpha, slice, list);
+    lightPool[it.acc + 1] = bounceVoxel(it.g, it.v0 + vec3<i32>(1, 0, 0), lightPool[it.acc + 1], alpha, slice, list);
 }
 
 // Drops the stored bounce of the listed slots (keeping AO), where a light was removed or dimmed. Bounce there feeds
@@ -720,13 +744,13 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
     private readonly ComputePipeline _bouncePipeline;
     private readonly ComputePipeline _clearPipeline;
     private readonly GpuBuffer _param;
-    private readonly GpuBuffer _lampList;     // this frame's lamps: (xyz world, w level), (rgb colour, 0)
-    private bool _loggedTooManyLamps;
+    private GpuBuffer _lists;                 // this frame's per-chunk grid and lamp lists (see the WGSL)
+    private int _lampBase;
 
     // Bindings each entry point uses (auto layouts only contain what the entry point references).
-    private static readonly uint[] SunBindings    = { 0, 1, 3, 4, 5, 6, 8 };
+    private static readonly uint[] SunBindings    = { 0, 1, 3, 4, 5, 6, 7, 8 };
     private static readonly uint[] ComposeBindings = { 0, 1, 3, 4, 5, 6, 7, 8 };
-    private static readonly uint[] BounceBindings = { 0, 1, 2, 3, 4, 5, 6, 8 };
+    private static readonly uint[] BounceBindings = { 0, 1, 2, 3, 4, 5, 6, 7, 8 };
     private static readonly uint[] ClearBindings  = { 3, 6, 8 };
 
     public GpuRayLightPass(GpuContext ctx)
@@ -736,46 +760,47 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
         _composePipeline = new ComputePipeline(ctx, Wgsl, "compose_main");
         _bouncePipeline = new ComputePipeline(ctx, Wgsl, "bounce_main");
         _clearPipeline  = new ComputePipeline(ctx, Wgsl, "clear_main");
-        _param    = GpuBuffer.CreateUniform(ctx, (ulong)Marshal.SizeOf<RayParams>());
-        _lampList = GpuBuffer.CreateStorage(ctx, (ulong)MaxLamps * 32);
+        _param = GpuBuffer.CreateUniform(ctx, (ulong)Marshal.SizeOf<RayParams>());
+        _lists = GpuBuffer.CreateStorage(ctx, 65536);
+    }
+
+    /// <summary>Uploads this frame's per-chunk lists (layout in the WGSL), which every later dispatch reads.
+    /// <paramref name="lampBase"/> is the word offset of the lamp records.</summary>
+    public void UploadLists(ReadOnlySpan<uint> words, int lampBase)
+    {
+        ulong bytes = (ulong)words.Length * sizeof(uint);
+        if (_lists.SizeBytes < bytes)
+        {
+            _lists.Dispose();
+            _lists = GpuBuffer.CreateStorage(_ctx, bytes * 2);
+        }
+        _lists.Write<uint>(0, words);
+        _lampBase = lampBase;
     }
 
     /// <summary>Clears the stored bounce (not AO) of the listed slots (see clear_main).</summary>
     public void DispatchClearBounce(GridStore store, GpuBuffer work, int count)
     {
         if (count <= 0) return;
-        WriteParams(Vector3D<float>.Zero, 0, 0, count, default, default);
+        WriteParams(Vector3D<float>.Zero, count, default, default);
         Dispatch(_clearPipeline, ClearBindings, store, work, count);
     }
 
     /// <summary>Sun visibility for the <paramref name="count"/> light slots listed in <paramref name="work"/>.</summary>
-    public void DispatchSun(GridStore store, int gridCount, Vector3D<float> sunDir, GpuBuffer work, int count)
+    public void DispatchSun(GridStore store, Vector3D<float> sunDir, GpuBuffer work, int count)
     {
         if (count <= 0) return;
-        WriteParams(sunDir, gridCount, 0, count, default, default);
+        WriteParams(sunDir, count, default, default);
         Dispatch(_sunPipeline, SunBindings, store, work, count);
     }
 
-    /// <summary>Composes the displayed light of the listed slots: lamp light (traced now, every lamp tested by every
-    /// voxel, most rejected by distance before any ray) combined with the stored bounce times
-    /// <paramref name="bounceScale"/>, plus the stored AO and the sun level already in place. Run it after the sun and
-    /// bounce passes. <paramref name="lamps"/> holds two entries per lamp: (xyz world position, level), (rgb colour, 0).</summary>
-    public void DispatchCompose(GridStore store, int gridCount, ReadOnlySpan<Vector4D<float>> lamps, float bounceScale,
-                                GpuBuffer work, int count)
+    /// <summary>Composes the displayed light of the listed slots: lamp light (traced now, from the lamps in each
+    /// chunk's list) combined with the stored bounce times <paramref name="bounceScale"/>, plus the stored AO and the
+    /// sun level already in place. Run it after the sun and bounce passes.</summary>
+    public void DispatchCompose(GridStore store, float bounceScale, GpuBuffer work, int count)
     {
         if (count <= 0) return;
-        int lampCount = lamps.Length / 2;
-        if (lampCount > MaxLamps)
-        {
-            if (!_loggedTooManyLamps)
-            {
-                _loggedTooManyLamps = true;
-                Console.WriteLine($"[ray-lighting] {lampCount} lamps loaded; only the first {MaxLamps} light anything.");
-            }
-            lampCount = MaxLamps;
-        }
-        if (lampCount > 0) _lampList.Write<Vector4D<float>>(0, lamps.Slice(0, 2 * lampCount));
-        WriteParams(Vector3D<float>.Zero, gridCount, lampCount, count, new Vector4D<float>(0f, 0f, bounceScale, 0f), default);
+        WriteParams(Vector3D<float>.Zero, count, new Vector4D<float>(0f, 0f, bounceScale, 0f), default);
         Dispatch(_composePipeline, ComposeBindings, store, work, count);
     }
 
@@ -785,11 +810,11 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
     /// evaluations since that brick changed). Each voxel's fixed direction set is <paramref name="rays"/> x
     /// <paramref name="cycle"/> directions, one slice of <paramref name="rays"/> per evaluation.
     /// </summary>
-    public void DispatchBounce(GridStore store, int gridCount, Vector3D<float> sunDir, float sunStrength,
+    public void DispatchBounce(GridStore store, Vector3D<float> sunDir, float sunStrength,
                                float albedo, int rays, int cycle, GpuBuffer work, int count)
     {
         if (count <= 0) return;
-        WriteParams(sunDir, gridCount, 0, count,
+        WriteParams(sunDir, count,
                     new Vector4D<float>(albedo, sunStrength, 0f, 0f), new Vector4D<float>(rays, cycle, 0f, 0f));
         Dispatch(_bouncePipeline, BounceBindings, store, work, count);
     }
@@ -807,7 +832,7 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
                 4 => store.SlotInfo,
                 5 => store.Grids,
                 6 => work,
-                7 => _lampList,
+                7 => _lists,
                 _ => _param,
             });
         nint bg = pipeline.CreateBindGroupHandle(entries);
@@ -820,14 +845,13 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
         _ctx.Api.BindGroupRelease((BindGroup*)bg);
     }
 
-    private void WriteParams(Vector3D<float> sunDir, int gridCount, int lampCount, int workCount,
-                             Vector4D<float> bounce, Vector4D<float> bounce2)
+    private void WriteParams(Vector3D<float> sunDir, int workCount, Vector4D<float> bounce, Vector4D<float> bounce2)
     {
         Span<RayParams> sp = stackalloc RayParams[1];
         sp[0] = new RayParams
         {
             Sun = new Vector4D<float>(sunDir.X, sunDir.Y, sunDir.Z, 0f),
-            GridCount = gridCount, LampCount = lampCount, WorkCount = workCount,
+            LampBase = _lampBase, WorkCount = workCount,
             Bounce = bounce, Bounce2 = bounce2,
         };
         _param.Write<RayParams>(0, sp);
@@ -840,7 +864,7 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
         _bouncePipeline.Dispose();
         _clearPipeline.Dispose();
         _param.Dispose();
-        _lampList.Dispose();
+        _lists.Dispose();
     }
 
     /// <summary>Uniform block (64 bytes); matches WGSL <c>Params</c>.</summary>
@@ -848,7 +872,7 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
     private struct RayParams
     {
         public Vector4D<float> Sun;
-        public int GridCount, LampCount, WorkCount, Pad;
+        public int Unused, LampBase, WorkCount, Pad;
         public Vector4D<float> Bounce;    // albedo, sun strength, bounce display scale, unused
         public Vector4D<float> Bounce2;   // rays per evaluation, cycle
     }

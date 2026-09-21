@@ -64,7 +64,8 @@ internal sealed class ChunkRecord
 /// <item>a light pool of <see cref="WordsPerSlot"/>-word brick slots, allocated only for bricks that contain a
 /// surface air voxel: per voxel a 16-bit display value (RGB 4 bits each, sun 2 bits, AO 2 bits — the only part the
 /// fragment shader reads) and a 32-bit accumulation word (bounce RGB and AO, 8 bits each). See GpuRayLightPass;</item>
-/// <item>per light slot, its grid, chunk and brick (so a work list is just slot numbers);</item>
+/// <item>per light slot, its grid, chunk and brick — <c>(brick | grid &lt;&lt; 6, cx, cy, cz)</c> — so a work
+/// list is just slot numbers;</item>
 /// <item>per grid, its transforms, table section and voxel bounds.</item>
 /// </list>
 /// Nothing here reallocates as the camera moves: loads and unloads take and return slots, and only a pool that
@@ -79,7 +80,6 @@ public sealed class GridStore : IDisposable
     /// accumulation words.</summary>
     public const int WordsPerSlot = 768;
     public const int SlotBytes = WordsPerSlot * 4;
-    public const int MaxGrids = 64;
 
     // Chunk-table occupancy codes (entry.x). >= 0 is an occupancy slot.
     public const int OccUnloaded = -1, OccAllAir = -2, OccAllSolid = -3;
@@ -106,7 +106,7 @@ public sealed class GridStore : IDisposable
     internal GpuBuffer BrickTable { get; private set; }
     internal GpuBuffer LightPool { get; private set; }
     internal GpuBuffer SlotInfo { get; private set; }
-    internal GpuBuffer Grids { get; }
+    internal GpuBuffer Grids { get; private set; }
 
     /// <summary>Bumped whenever a buffer above is replaced (pool growth). Bind groups over them are stale.</summary>
     public int BindingVersion { get; private set; }
@@ -114,6 +114,9 @@ public sealed class GridStore : IDisposable
     private int _occCapacity, _occNext;
     private readonly Stack<int> _occFree = new();
     private int _tableCapacity;
+
+    /// <summary>Chunk-table entries the tables currently hold (any entry index is below this).</summary>
+    internal int TableCapacity => _tableCapacity;
     private readonly List<(int start, int count)> _tableFree = new();
     private int _tableNext;
     private int _lightCapacity, _lightNext;
@@ -125,8 +128,9 @@ public sealed class GridStore : IDisposable
     internal byte[] SlotBrick = Array.Empty<byte>();
     private int[] _slotListPos = Array.Empty<int>();
 
-    private readonly GridHandle?[] _grids = new GridHandle?[MaxGrids];
-    private readonly GridDesc[] _descs = new GridDesc[MaxGrids];
+    // Grid registry; grows (with the descriptor buffer) when every index is taken, so there is no ship limit.
+    private GridHandle?[] _grids = new GridHandle?[16];
+    private GridDesc[] _descs = new GridDesc[16];
     private readonly Vector3D<int> _worldTableDims;
 
     /// <summary>Light slots allocated since the lighting system last drained this. They hold
@@ -181,7 +185,7 @@ public sealed class GridStore : IDisposable
         BrickTable = GpuBuffer.CreateStorage(ctx, (ulong)_tableCapacity * 64 * 4);
         LightPool  = GpuBuffer.CreateStorage(ctx, (ulong)_lightCapacity * SlotBytes);
         SlotInfo   = GpuBuffer.CreateStorage(ctx, (ulong)_lightCapacity * 16);
-        Grids      = GpuBuffer.CreateStorage(ctx, (ulong)MaxGrids * (ulong)Marshal.SizeOf<GridDesc>());
+        Grids      = GpuBuffer.CreateStorage(ctx, (ulong)_descs.Length * (ulong)Marshal.SizeOf<GridDesc>());
         ResizeSlotMirror(_lightCapacity);
 
         _emptyBrick = new uint[WordsPerSlot];
@@ -197,7 +201,14 @@ public sealed class GridStore : IDisposable
     {
         if (g.Index >= 0) return;
         int idx = Array.IndexOf(_grids, null);
-        if (idx < 0) throw new InvalidOperationException($"More than {MaxGrids} voxel grids loaded.");
+        if (idx < 0)
+        {
+            idx = _grids.Length;
+            Array.Resize(ref _grids, idx * 2);
+            Array.Resize(ref _descs, idx * 2);
+            Grids = Grow(Grids, (ulong)_descs.Length * (ulong)Marshal.SizeOf<GridDesc>());
+            Console.WriteLine($"[grid-store] grid table grown to {_grids.Length} grids");
+        }
         _grids[idx] = g;
         g.Index = idx;
         g.IsWorld = isWorld;
@@ -217,7 +228,7 @@ public sealed class GridStore : IDisposable
         g.Index = -1;
     }
 
-    internal GridHandle? GridAt(int index) => index >= 0 && index < MaxGrids ? _grids[index] : null;
+    internal GridHandle? GridAt(int index) => index >= 0 && index < _grids.Length ? _grids[index] : null;
 
     /// <summary>Sets a grid's transforms for this frame's descriptor upload (see <see cref="UploadGrids"/>).</summary>
     internal void SetPose(GridHandle g, in Mat4 voxelToWorld, in Mat4 worldToVoxel)
@@ -227,16 +238,12 @@ public sealed class GridStore : IDisposable
         g.Posed = true;
     }
 
-    /// <summary>Descriptor count the shaders loop over (highest registered index + 1), as of the last
-    /// <see cref="UploadGrids"/>.</summary>
-    internal int GridCount { get; private set; }
-
     /// <summary>Writes every registered grid's descriptor (transforms, table section, voxel bounds). Grids not
     /// posed since the last upload get an empty table, which hides them.</summary>
     internal void UploadGrids()
     {
         int count = 0;
-        for (int i = 0; i < MaxGrids; i++)
+        for (int i = 0; i < _grids.Length; i++)
         {
             var g = _grids[i];
             if (g == null) { _descs[i] = default; continue; }
@@ -256,7 +263,6 @@ public sealed class GridStore : IDisposable
             else { d.MinX = d.MinY = d.MinZ = 0; d.MaxX = d.MaxY = d.MaxZ = 0; }
         }
         if (count > 0) Grids.Write<GridDesc>(0, _descs.AsSpan(0, count));
-        GridCount = count;
     }
 
     // ── Chunk upload / removal ────────────────────────────────────────────────
@@ -669,7 +675,7 @@ public sealed class GridStore : IDisposable
         _slotListPos[slot] = g.Slots.Count;
         g.Slots.Add(slot);
 
-        Span<int> info = stackalloc int[4] { g.Index | (brick << 8), pos.X, pos.Y, pos.Z };
+        Span<int> info = stackalloc int[4] { brick | (g.Index << 6), pos.X, pos.Y, pos.Z };
         SlotInfo.Write<int>((ulong)slot * 16, info);
         LightPool.Write<uint>((ulong)slot * SlotBytes, _emptyBrick);
         NewSlots.Add(slot);
