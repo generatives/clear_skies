@@ -40,7 +40,7 @@ var physicsBody = new PhysicsBodySystem(host.World, staticWorld, host.Physics);
 // recomputing a much larger dirty region during the load-in burst plus the per-frame full-chunk scans in
 // ChunkMeshSystem/GpuResidencySystem/GpuLightSystem/PhysicsBodySystem (see the deferred dirty-queue task).
 // Pushing further needs that follow-up work, not just a bigger radius.
-host.AddSystem(new ChunkLoadSystem(host.World, staticWorld, worldGen, xzRadius: 4, yRadius: 2), SystemStage.Logic);
+host.AddSystem(new ChunkLoadSystem(host.World, staticWorld, worldGen, xzRadius: 8, yRadius: 3), SystemStage.Logic);
 host.AddSystem(physicsBody, SystemStage.Logic);
 host.AddSystem(new PlayerGridControlSystem(host.World, host.Physics, host.Input), SystemStage.Logic);
 

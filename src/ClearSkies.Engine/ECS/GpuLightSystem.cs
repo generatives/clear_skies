@@ -60,6 +60,7 @@ public sealed class GpuLightSystem : ISystem, IDisposable, IDebugUiSystem
     private readonly LightShadowPass _lightShadow;
     private readonly GpuSunVisPass  _sunVis;
     private readonly GpuRayLightPass _rayLight;
+    private readonly GpuContext     _ctx;
 
     private float _relightTimer;
 
@@ -87,6 +88,19 @@ public sealed class GpuLightSystem : ISystem, IDisposable, IDebugUiSystem
     private readonly Vector3D<float>[] _slotCom = new Vector3D<float>[GpuRayLightPass.MaxRayVolumes];
     private readonly List<Vector4D<float>> _volumeLampScratch = new();
     private bool _loggedTooManyVolumes;
+
+    // Per-volume surface-brick work lists for the ray-traced passes (see SurfaceBricksFor). Rebuilt only when
+    // the volume's opacity, allocation, or loaded-chunk count changes.
+    private sealed class SurfaceBricks : IDisposable
+    {
+        public GpuBuffer? Buffer;
+        public int Count, Capacity;
+        public uint[] Scratch = new uint[4096];
+        public int BuiltGeneration = -1, BuiltVersion = -1, BuiltLoaded = -1;
+        public void Dispose() => Buffer?.Dispose();
+    }
+    private readonly Dictionary<ChunkVolume, SurfaceBricks> _surfaceBricks = new();
+    private int _lastBrickTotal, _lastVoxelTotal;
 
     // ── Perf pass (task 6, see plan doc): CPU-side submission timing only. WebGPU's queue is
     // asynchronous, so a CPU Stopwatch around Dispatch() measures encoding + submission cost, NOT actual
@@ -129,6 +143,7 @@ public sealed class GpuLightSystem : ISystem, IDisposable, IDebugUiSystem
         _lightShadow = new LightShadowPass(ctx);
         _sunVis      = new GpuSunVisPass(ctx);
         _rayLight    = new GpuRayLightPass(ctx);
+        _ctx         = ctx;
     }
 
     // ── Debug UI ─────────────────────────────────────────────────────────────
@@ -146,6 +161,9 @@ public sealed class GpuLightSystem : ISystem, IDisposable, IDebugUiSystem
         ImGui.Separator();
         ImGui.Text("Lighting settings");
         ImGui.SliderFloat("Ambient level (ray-traced only)", ref _ambientLevel, 0f, 15f, "%.0f");
+        if (_rayTracedLighting && _lastVoxelTotal > 0)
+            ImGui.TextDisabled($"Surface bricks: {_lastBrickTotal:N0} ({_lastBrickTotal * 512L:N0} voxels of {_lastVoxelTotal:N0}, " +
+                               $"{100.0 * _lastBrickTotal * 512 / _lastVoxelTotal:F1}%)");
 
         float sunLevel = SunLight.Level;
         if (ImGui.SliderFloat("Sun level", ref sunLevel, 0f, 15f, "%.0f")) SunLight.Level = sunLevel;
@@ -228,20 +246,28 @@ public sealed class GpuLightSystem : ISystem, IDisposable, IDebugUiSystem
         // needs a fresh world-space list every dispatch since nothing here is cached across frames.
         GatherLamps();
 
+        DropStaleSurfaceBricks(volumeCount);
+
         _sunTimer.Reset();
         _lampTimer.Reset();
+        _lastBrickTotal = 0;
+        _lastVoxelTotal = 0;
         for (int i = 0; i < volumeCount; i++)
         {
             var gpu = _slotGpu[i]!;
+            var bricks = SurfaceBricksFor(_slotVol[i]!, gpu);
+            _lastBrickTotal += bricks.Count;
+            _lastVoxelTotal += gpu.TotalVoxels;
+            if (bricks.Count == 0) continue;
 
             _sunTimer.Start();
-            _rayLight.DispatchSun(_slots, volumeCount, i, gpu.SunVis, SunLight.Direction);
+            _rayLight.DispatchSun(_slots, volumeCount, i, gpu.SunVis, SunLight.Direction, bricks.Buffer!, bricks.Count);
             _sunTimer.Stop();
 
             // Filter to lamps that can plausibly reach this volume at all (LampAabb as a boolean
-            // prefilter — the sub-box it also returns isn't used, since the dispatch always covers the
-            // whole target volume, not a lamp-bounded region). No same-volume skip: a volume's own lamps
-            // go through the identical world-space test as any other volume's, unlike CrossVolumeRelight.
+            // prefilter — the sub-box it also returns isn't used; work is chosen by the surface-brick list).
+            // No same-volume skip: a volume's own lamps go through the identical world-space test as any
+            // other volume's, unlike CrossVolumeRelight.
             // Not included in _lampTimer — this is CPU-side list building, not dispatch submission.
             _volumeLampScratch.Clear();
             foreach (var lamp in _lamps)
@@ -254,11 +280,97 @@ public sealed class GpuLightSystem : ISystem, IDisposable, IDebugUiSystem
             }
 
             _lampTimer.Start();
-            _rayLight.DispatchLamps(_slots, volumeCount, i, gpu.LightA, CollectionsMarshal.AsSpan(_volumeLampScratch), (int)_ambientLevel);
+            _rayLight.DispatchLamps(_slots, volumeCount, i, gpu.LightA, CollectionsMarshal.AsSpan(_volumeLampScratch), (int)_ambientLevel,
+                                    bricks.Buffer!, bricks.Count);
             _lampTimer.Stop();
         }
         _rtSunMsEma = Ema(_rtSunMsEma, _sunTimer.Elapsed.TotalMilliseconds);
         _rtLampMsEma = Ema(_rtLampMsEma, _lampTimer.Elapsed.TotalMilliseconds);
+    }
+
+    // Brick bit layout within a chunk: bit = bx + 4*(by + 4*bz), bricks 8³, 4 per axis.
+    private const ulong BxLo = 0x1111111111111111UL, BxHi = 0x8888888888888888UL; // bricks with bx == 0 / 3
+    private const ulong ByLo = 0x000F000F000F000FUL, ByHi = 0xF000F000F000F000UL; // by == 0 / 3
+    private const ulong BzLo = 0x000000000000FFFFUL, BzHi = 0xFFFF000000000000UL; // bz == 0 / 3
+
+    /// <summary>
+    /// The volume's surface-brick work list, rebuilt when its opacity, allocation or loaded-chunk count changed.
+    /// A brick is listed if it contains air and there is solid in it or in a face-adjacent brick (including
+    /// across chunk boundaries) — a conservative superset of the bricks holding a surface air voxel, since a
+    /// voxel's six neighbours are all in its own brick or a face-adjacent one. Chunks whose opacity hasn't been
+    /// uploaded yet are skipped; their upload bumps OpacityVersion, which triggers the rebuild that adds them.
+    /// </summary>
+    private SurfaceBricks SurfaceBricksFor(ChunkVolume vol, VolumeGpuResources gpu)
+    {
+        if (!_surfaceBricks.TryGetValue(vol, out var sb)) { sb = new SurfaceBricks(); _surfaceBricks[vol] = sb; }
+        if (sb.BuiltGeneration == gpu.Generation && sb.BuiltVersion == gpu.OpacityVersion && sb.BuiltLoaded == vol.LoadedCount)
+            return sb;
+
+        int n = 0;
+        foreach (var (pos, e) in vol.All)
+        {
+            if (e.PackedOpacityWords == null || !gpu.Contains(pos)) continue;
+            ulong active = ActiveBricks(vol, pos, e);
+            if (active == 0) continue;
+
+            var (vx, vy, vz) = gpu.ChunkVoxelBase(pos);
+            uint bx0 = (uint)vx >> 3, by0 = (uint)vy >> 3, bz0 = (uint)vz >> 3;
+            while (active != 0)
+            {
+                int b = System.Numerics.BitOperations.TrailingZeroCount(active);
+                active &= active - 1;
+                if (n == sb.Scratch.Length) Array.Resize(ref sb.Scratch, n * 2);
+                sb.Scratch[n++] = (bx0 + (uint)(b & 3)) | ((by0 + (uint)((b >> 2) & 3)) << 10) | ((bz0 + (uint)(b >> 4)) << 20);
+            }
+        }
+
+        if (n > sb.Capacity)
+        {
+            sb.Buffer?.Dispose();
+            sb.Capacity = System.Math.Max(n, System.Math.Max(1024, sb.Capacity * 2));
+            sb.Buffer = GpuBuffer.CreateStorage(_ctx, (ulong)sb.Capacity * sizeof(uint));
+        }
+        if (n > 0) sb.Buffer!.Write<uint>(0, sb.Scratch.AsSpan(0, n));
+
+        sb.Count = n;
+        sb.BuiltGeneration = gpu.Generation;
+        sb.BuiltVersion    = gpu.OpacityVersion;
+        sb.BuiltLoaded     = vol.LoadedCount;
+        return sb;
+    }
+
+    private static ulong ActiveBricks(ChunkVolume vol, ChunkPosition pos, ChunkEntry e)
+    {
+        ulong s = e.BrickSolidMask;
+        ulong near = s
+            | ((s >> 1) & ~BxHi) | ((s << 1) & ~BxLo)   // solid at bx+1 / bx-1 within the chunk
+            | ((s >> 4) & ~ByHi) | ((s << 4) & ~ByLo)   // by±1
+            | (s >> 16) | (s << 16);                    // bz±1 (out-of-chunk bits shift out on their own)
+        near |= (NeighbourSolid(vol, pos,  1, 0, 0) & BxLo) << 3;   // neighbour's bx=0 borders our bx=3
+        near |= (NeighbourSolid(vol, pos, -1, 0, 0) & BxHi) >> 3;
+        near |= (NeighbourSolid(vol, pos, 0,  1, 0) & ByLo) << 12;
+        near |= (NeighbourSolid(vol, pos, 0, -1, 0) & ByHi) >> 12;
+        near |= (NeighbourSolid(vol, pos, 0, 0,  1) & BzLo) << 48;
+        near |= (NeighbourSolid(vol, pos, 0, 0, -1) & BzHi) >> 48;
+        return e.BrickAirMask & near;
+    }
+
+    private static ulong NeighbourSolid(ChunkVolume vol, ChunkPosition pos, int dx, int dy, int dz)
+    {
+        var n = vol.GetEntry(new ChunkPosition(pos.X + dx, pos.Y + dy, pos.Z + dz));
+        return n?.PackedOpacityWords != null ? n.BrickSolidMask : 0UL;
+    }
+
+    /// <summary>Disposes brick lists for volumes no longer being lit (e.g. a despawned ship).</summary>
+    private void DropStaleSurfaceBricks(int volumeCount)
+    {
+        if (_surfaceBricks.Count <= volumeCount) return;
+        foreach (var vol in _surfaceBricks.Keys.ToList())
+        {
+            if (Array.IndexOf(_slotVol, vol, 0, volumeCount) >= 0) continue;
+            _surfaceBricks[vol].Dispose();
+            _surfaceBricks.Remove(vol);
+        }
     }
 
     /// <summary>Fills <see cref="_slots"/>[<paramref name="index"/>] (and its matching <see cref="_slotGpu"/>/
@@ -660,5 +772,6 @@ public sealed class GpuLightSystem : ISystem, IDisposable, IDebugUiSystem
         _lightShadow.Dispose();
         _sunVis.Dispose();
         _rayLight.Dispose();
+        foreach (var sb in _surfaceBricks.Values) sb.Dispose();
     }
 }

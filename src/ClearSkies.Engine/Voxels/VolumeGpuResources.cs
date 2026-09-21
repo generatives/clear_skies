@@ -46,6 +46,10 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
     /// out from under it and abandon cleanly instead of resuming against brand-new, unrelated buffers.</summary>
     public int Generation { get; private set; }
 
+    /// <summary>Bumped on every opacity upload and every (re)allocation, so consumers that derive data from
+    /// opacity (the ray-traced pass's surface-brick list) know when to rebuild it.</summary>
+    public int OpacityVersion { get; private set; }
+
     public int VW => DX * S; // voxels
     public int VH => DY * S;
     public int VD => DZ * S;
@@ -115,6 +119,7 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
         ReleaseBindGroups();
         Opacity?.Dispose(); LightA?.Dispose(); LightB?.Dispose(); Dims?.Dispose(); SunVis?.Dispose();
         Generation++;
+        OpacityVersion++;
 
         Min = min;
         DX  = max.X - min.X + 1;
@@ -213,10 +218,32 @@ internal sealed unsafe class VolumeGpuResources : IDisposable
                 }
                 words[ly + S * lz] = bits; // local word: lx is the in-word bit, (ly + 32*lz) is the word
             }
+            (entry.BrickSolidMask, entry.BrickAirMask) = BrickMasks(words);
         }
 
         ulong byteOffset = (ulong)ChunkSlot(pos) * WordsPerChunk * sizeof(uint);
         Opacity.Write<uint>(byteOffset, words);
+        OpacityVersion++;
+    }
+
+    /// <summary>Per-8³-brick "any opaque" / "any non-opaque" bits (bit = bx + 4*(by + 4*bz)) from a chunk's
+    /// packed opacity words. Each word is one x-row, so a brick's x-slice of a row is one byte of it.</summary>
+    private static (ulong solid, ulong air) BrickMasks(uint[] words)
+    {
+        ulong solid = 0, air = 0;
+        for (int lz = 0; lz < S; lz++)
+        for (int ly = 0; ly < S; ly++)
+        {
+            uint w = words[ly + S * lz];
+            int rowBase = 4 * ((ly >> 3) + 4 * (lz >> 3));
+            for (int bx = 0; bx < 4; bx++)
+            {
+                uint b = (w >> (bx * 8)) & 0xFFu;
+                if (b != 0)    solid |= 1UL << (rowBase + bx);
+                if (b != 0xFF) air   |= 1UL << (rowBase + bx);
+            }
+        }
+        return (solid, air);
     }
 
     /// <summary>Ensures the emitter buffer holds at least <paramref name="count"/> entries (2 u32 each),

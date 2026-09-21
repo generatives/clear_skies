@@ -35,6 +35,12 @@ internal sealed class ChunkEntry
     /// until the real data lands.</summary>
     public uint[]? PackedOpacityWords { get; set; }
 
+    /// <summary>One bit per 8³ brick of this chunk (bit = bx + 4*(by + 4*bz)): brick contains any opaque
+    /// voxel / any non-opaque voxel. Computed alongside <see cref="PackedOpacityWords"/>; used to build the
+    /// ray-traced lighting pass's surface-brick work list.</summary>
+    public ulong BrickSolidMask { get; set; }
+    public ulong BrickAirMask   { get; set; }
+
     /// <summary>Set on creation and every block edit (or CPU light change); cleared after the volume flood re-runs.</summary>
     public bool NeedsFlood { get; set; } = true;
 

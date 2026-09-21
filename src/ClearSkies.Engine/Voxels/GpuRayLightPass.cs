@@ -61,6 +61,7 @@ struct Params {
     dims0: vec4<i32>, dims1: vec4<i32>, dims2: vec4<i32>, dims3: vec4<i32>, dims4: vec4<i32>,
     sunDir: vec4<f32>,
     counts: vec4<i32>, // volumeCount, targetVolIdx, lampCount (unused by sun_main), ambientLevel (0-15, lamp_main only)
+    bricks: vec4<i32>, // x: number of entries in brickList for this dispatch
 };
 
 @group(0) @binding(0) var<storage, read> opacity0: array<u32>;
@@ -72,6 +73,7 @@ struct Params {
 @group(0) @binding(6) var<storage, read_write> light: array<u32>;
 @group(0) @binding(7) var<storage, read> lamps: array<vec4<f32>>; // xyz world pos, w level (also doubles as radius)
 @group(0) @binding(8) var<uniform> p: Params;
+@group(0) @binding(9) var<storage, read> brickList: array<u32>;   // target volume's surface bricks
 
 const WPC: i32 = " + VolumeGpuResources.WordsPerChunk + @";
 const SUN_MAX_DISTANCE: f32 = 2000.0;
@@ -307,13 +309,9 @@ fn anyOccluderAlongSegment(worldOrigin: vec3<f32>, worldDir: vec3<f32>, segLen: 
     return false;
 }
 
-@compute @workgroup_size(4, 4, 4)
-fn sun_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn sunVoxel(x: i32, y: i32, z: i32) {
     let ti = p.counts.y;
     let dims = dimsOf(ti);
-    let x = i32(gid.x);
-    let y = i32(gid.y);
-    let z = i32(gid.z);
     if (x >= dims.x || y >= dims.y || z >= dims.z) { return; }
     let i = u32(x + dims.x * (y + dims.y * z));
 
@@ -359,14 +357,10 @@ fn sun_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 // starting cell. (Shortening the ray by a fixed radius instead let exact 45-degree rays stop inside an open
 // diagonal cell before reaching the lamp cell's edge/corner, so the face blocks covering the lamp were
 // never on the tested segment and light leaked through the diagonals.)
-@compute @workgroup_size(4, 4, 4)
-fn lamp_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn lampVoxel(x: i32, y: i32, z: i32) {
     let ti = p.counts.y;
     let ambient: u32 = u32(clamp(p.counts.w, 0, 15));
     let dims = dimsOf(ti);
-    let x = i32(gid.x);
-    let y = i32(gid.y);
-    let z = i32(gid.z);
     if (x >= dims.x || y >= dims.y || z >= dims.z) { return; }
     let i = u32(x + dims.x * (y + dims.y * z));
 
@@ -393,6 +387,42 @@ fn lamp_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
     light[i] = ambient | (min(best, 15u) << 8u);
+}
+
+// Work is driven by the target volume's surface-brick list (built on the CPU, see GpuLightSystem): one
+// workgroup per 8x8x8 brick that can contain a surface air voxel, instead of one thread per voxel of the
+// whole volume. 256 threads per workgroup, each covering two voxels (z and z+4). Brick entries pack the
+// brick's coordinates in bricks as x | y<<10 | z<<20. The list can exceed the 65535 per-dimension dispatch
+// limit, so it is dispatched as a 2D grid and flattened here.
+fn brickBase(wid: vec3<u32>, nwg: vec3<u32>) -> vec4<i32> {
+    let bi = wid.x + wid.y * nwg.x;
+    if (bi >= u32(p.bricks.x)) { return vec4<i32>(0, 0, 0, 0); }
+    let e = brickList[bi];
+    return vec4<i32>(i32(e & 1023u) * 8, i32((e >> 10u) & 1023u) * 8, i32((e >> 20u) & 1023u) * 8, 1);
+}
+
+@compute @workgroup_size(8, 8, 4)
+fn sun_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
+            @builtin(local_invocation_id) lid: vec3<u32>) {
+    let b = brickBase(wid, nwg);
+    if (b.w == 0) { return; }
+    let x = b.x + i32(lid.x);
+    let y = b.y + i32(lid.y);
+    let z = b.z + i32(lid.z);
+    sunVoxel(x, y, z);
+    sunVoxel(x, y, z + 4);
+}
+
+@compute @workgroup_size(8, 8, 4)
+fn lamp_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
+             @builtin(local_invocation_id) lid: vec3<u32>) {
+    let b = brickBase(wid, nwg);
+    if (b.w == 0) { return; }
+    let x = b.x + i32(lid.x);
+    let y = b.y + i32(lid.y);
+    let z = b.z + i32(lid.z);
+    lampVoxel(x, y, z);
+    lampVoxel(x, y, z + 4);
 }";
 
     private readonly GpuContext _ctx;
@@ -423,23 +453,33 @@ fn lamp_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     /// 0/254 = hard shadowed/lit).
     /// </summary>
     public void DispatchSun(ReadOnlySpan<RayVolumeSlot> slots, int volumeCount, int targetIdx,
-                            GpuBuffer targetSunVis, Vector3D<float> sunDir)
+                            GpuBuffer targetSunVis, Vector3D<float> sunDir, GpuBuffer brickList, int brickCount)
     {
         if (volumeCount <= 0 || targetIdx < 0 || targetIdx >= volumeCount) return;
         var target = slots[targetIdx];
-        if (target.VW <= 0 || target.VH <= 0 || target.VD <= 0) return;
+        if (target.VW <= 0 || target.VH <= 0 || target.VD <= 0 || brickCount <= 0) return;
 
-        WriteParams(slots, volumeCount, targetIdx, sunDir, lampCount: 0, ambientLevel: 0);
+        WriteParams(slots, volumeCount, targetIdx, sunDir, lampCount: 0, ambientLevel: 0, brickCount);
 
-        var entries = new (uint, GpuBuffer)[7];
+        var entries = new (uint, GpuBuffer)[8];
         for (int i = 0; i < MaxRayVolumes; i++)
             entries[i] = ((uint)i, i < volumeCount ? slots[i].Opacity : _dummyOpacity);
         entries[5] = (5u, targetSunVis);
         entries[6] = (8u, _param);
+        entries[7] = (9u, brickList);
 
         nint bg = _sunPipeline.CreateBindGroupHandle(entries);
-        _sunPipeline.Dispatch(bg, CeilDiv((uint)target.VW, 4u), CeilDiv((uint)target.VH, 4u), CeilDiv((uint)target.VD, 4u));
+        DispatchBricks(_sunPipeline, bg, brickCount);
         _ctx.Api.BindGroupRelease((BindGroup*)bg);
+    }
+
+    // One workgroup per brick, as a 2D grid since a big volume's list can exceed the 65535-per-dimension limit.
+    private static void DispatchBricks(ComputePipeline pipeline, nint bindGroup, int brickCount)
+    {
+        const int MaxPerDim = 65535;
+        uint gx = (uint)System.Math.Min(brickCount, MaxPerDim);
+        uint gy = CeilDiv((uint)brickCount, gx);
+        pipeline.Dispatch(bindGroup, gx, gy, 1u);
     }
 
     /// <summary>
@@ -452,11 +492,12 @@ fn lamp_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     /// no dependency on the flood having run.
     /// </summary>
     public void DispatchLamps(ReadOnlySpan<RayVolumeSlot> slots, int volumeCount, int targetIdx,
-                              GpuBuffer targetLight, ReadOnlySpan<Vector4D<float>> lamps, int ambientLevel)
+                              GpuBuffer targetLight, ReadOnlySpan<Vector4D<float>> lamps, int ambientLevel,
+                              GpuBuffer brickList, int brickCount)
     {
         if (volumeCount <= 0 || targetIdx < 0 || targetIdx >= volumeCount) return;
         var target = slots[targetIdx];
-        if (target.VW <= 0 || target.VH <= 0 || target.VD <= 0) return;
+        if (target.VW <= 0 || target.VH <= 0 || target.VD <= 0 || brickCount <= 0) return;
 
         int lampCount = lamps.Length;
         if (lampCount > MaxLampsPerDispatch)
@@ -471,21 +512,23 @@ fn lamp_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (lampCount > 0)
             _lampList.Write<Vector4D<float>>(0, lamps.Slice(0, lampCount));
 
-        WriteParams(slots, volumeCount, targetIdx, Vector3D<float>.Zero, lampCount, ambientLevel);
+        WriteParams(slots, volumeCount, targetIdx, Vector3D<float>.Zero, lampCount, ambientLevel, brickCount);
 
-        var entries = new (uint, GpuBuffer)[8];
+        var entries = new (uint, GpuBuffer)[9];
         for (int i = 0; i < MaxRayVolumes; i++)
             entries[i] = ((uint)i, i < volumeCount ? slots[i].Opacity : _dummyOpacity);
         entries[5] = (6u, targetLight);
         entries[6] = (7u, _lampList);
         entries[7] = (8u, _param);
+        entries[8] = (9u, brickList);
 
         nint bg = _lampPipeline.CreateBindGroupHandle(entries);
-        _lampPipeline.Dispatch(bg, CeilDiv((uint)target.VW, 4u), CeilDiv((uint)target.VH, 4u), CeilDiv((uint)target.VD, 4u));
+        DispatchBricks(_lampPipeline, bg, brickCount);
         _ctx.Api.BindGroupRelease((BindGroup*)bg);
     }
 
-    private void WriteParams(ReadOnlySpan<RayVolumeSlot> slots, int volumeCount, int targetIdx, Vector3D<float> sunDir, int lampCount, int ambientLevel)
+    private void WriteParams(ReadOnlySpan<RayVolumeSlot> slots, int volumeCount, int targetIdx, Vector3D<float> sunDir,
+                             int lampCount, int ambientLevel, int brickCount)
     {
         var pr = new RayParams();
         SetSlot(ref pr, 0, volumeCount > 0 ? slots[0] : default);
@@ -495,6 +538,7 @@ fn lamp_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         SetSlot(ref pr, 4, volumeCount > 4 ? slots[4] : default);
         pr.SunX = sunDir.X; pr.SunY = sunDir.Y; pr.SunZ = sunDir.Z; pr.SunPad = 0f;
         pr.VolumeCount = volumeCount; pr.TargetIdx = targetIdx; pr.LampCount = lampCount; pr.AmbientLevel = ambientLevel;
+        pr.BrickCount = brickCount;
 
         Span<RayParams> sp = stackalloc RayParams[1] { pr };
         _param.Write<RayParams>(0, sp);
@@ -554,5 +598,6 @@ fn lamp_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         public int VW4, VH4, VD4, Pad4;
         public float SunX, SunY, SunZ, SunPad;
         public int VolumeCount, TargetIdx, LampCount, AmbientLevel;
+        public int BrickCount, BrickPad0, BrickPad1, BrickPad2;   // vec4<i32> bricks
     }
 }
