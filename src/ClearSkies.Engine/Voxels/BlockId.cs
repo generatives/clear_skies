@@ -14,4 +14,7 @@ public enum BlockId : byte
     Water   = 9,
     Snow    = 10,
     Rock    = 11,
+    RedLamp   = 12,
+    GreenLamp = 13,
+    BlueLamp  = 14,
 }

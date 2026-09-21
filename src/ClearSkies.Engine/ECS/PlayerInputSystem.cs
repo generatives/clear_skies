@@ -50,7 +50,8 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
     // Block placed by left-click on an air cell. Cycle with L, or pick directly from the "Place block"
     // dropdown in DrawDebugUi — both keep _placeIndex/_placeBlock in sync.
     private static readonly BlockId[] PlaceableBlocks =
-        { BlockId.Stone, BlockId.Wood, BlockId.Grass, BlockId.Dirt, BlockId.Lamp, BlockId.Fan, BlockId.Buoyant };
+        { BlockId.Stone, BlockId.Wood, BlockId.Grass, BlockId.Dirt, BlockId.Lamp, BlockId.RedLamp, BlockId.GreenLamp,
+          BlockId.BlueLamp, BlockId.Fan, BlockId.Buoyant };
     private static readonly string[] PlaceableNames =
         Array.ConvertAll(PlaceableBlocks, id => BlockRegistry.Get(id).Name);
 

@@ -58,7 +58,6 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
             SunDirection   = SunLight.Direction,
             SunStrength    = SunLight.Strength,
             RayAoStrength  = RayLightingSettings.AoStrength,
-            RayBounceScale = RayLightingSettings.BounceScale,
             Ambient        = RayLightingSettings.Ambient,
         };
 

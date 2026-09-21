@@ -84,6 +84,7 @@ public class ChunkVolume
         entry.NeedsRecollide      = true;
         entry.NeedsGpuUpload      = true;
         entry.PackedOpacityWords  = null; // block data actually changed -- cached opacity is stale
+        entry.AddEdit(lx, ly, lz, placedSolid: BlockRegistry.Get(id).Opacity >= 15);
 
         // Adjacent-chunk face-cull invalidation.
         if (lx == 0)                  TryMark(cp.Offset(-1,  0,  0));

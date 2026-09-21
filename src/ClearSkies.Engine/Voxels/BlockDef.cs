@@ -8,7 +8,11 @@ public readonly struct BlockDef
     public string          Name           { get; init; }
     public Vector3D<float> Color          { get; init; }
     public bool            IsSolid        { get; init; }
-    public byte            LightEmission  { get; init; } // 0-15; seeds block-light BFS when placed
+    public byte            LightEmission  { get; init; } // 0-15: a lamp's brightness at its own block, and its reach
+    public Vector3D<float> LightColor     { get; init; } // 0-1 per channel, scales LightEmission; default = white
+
+    /// The colour a light-emitting block actually lights with (white when <see cref="LightColor"/> is unset).
+    public Vector3D<float> EffectiveLightColor => LightColor == default ? Vector3D<float>.One : LightColor;
     public byte            Opacity        { get; init; } // 0=transparent, 15=fully opaque (light blocked)
 
     // Density used for dynamic-grid mass (PhysicsBodySystem): a box's mass = its volume * this. Air is 0;

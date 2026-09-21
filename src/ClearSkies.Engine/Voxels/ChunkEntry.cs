@@ -3,8 +3,9 @@ using DefaultEcs;
 
 namespace ClearSkies.Engine.Voxels;
 
-/// <summary>A light-emitting voxel within a chunk: chunk-local coordinates + emission level.</summary>
-internal readonly record struct EmitterVoxel(byte Lx, byte Ly, byte Lz, byte Level);
+/// <summary>A light-emitting voxel within a chunk: chunk-local coordinates, emission level and block (for its
+/// light colour).</summary>
+internal readonly record struct EmitterVoxel(byte Lx, byte Ly, byte Lz, byte Level, BlockId Block);
 
 internal sealed class ChunkEntry
 {
@@ -33,6 +34,26 @@ internal sealed class ChunkEntry
     /// get light storage.</summary>
     public ulong BrickSolidMask { get; set; }
     public ulong BrickAirMask   { get; set; }
+
+    /// <summary>Chunk-local bounds (inclusive) of the blocks edited since the last GPU upload, so lighting relights
+    /// around just those instead of the whole chunk. <see cref="HasEdits"/> false: nothing edited (a fresh load).</summary>
+    public bool HasEdits { get; private set; }
+    public (int X, int Y, int Z) EditMin { get; private set; }
+    public (int X, int Y, int Z) EditMax { get; private set; }
+
+    /// <summary>Whether any of those edits placed a light-blocking block (which can darken, and so leave stale
+    /// bounce light behind); breaking blocks can only brighten.</summary>
+    public bool EditsAddedSolid { get; private set; }
+
+    public void AddEdit(int lx, int ly, int lz, bool placedSolid)
+    {
+        if (placedSolid) EditsAddedSolid = true;
+        if (!HasEdits) { EditMin = EditMax = (lx, ly, lz); HasEdits = true; return; }
+        EditMin = (System.Math.Min(EditMin.X, lx), System.Math.Min(EditMin.Y, ly), System.Math.Min(EditMin.Z, lz));
+        EditMax = (System.Math.Max(EditMax.X, lx), System.Math.Max(EditMax.Y, ly), System.Math.Max(EditMax.Z, lz));
+    }
+
+    public void ClearEdits() { HasEdits = false; EditsAddedSolid = false; }
 
     public ChunkEntry(ChunkData data, Entity entity)
     {

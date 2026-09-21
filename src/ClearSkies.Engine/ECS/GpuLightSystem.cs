@@ -40,10 +40,14 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
 
     // Bounce (GpuRayLightPass bounce_main): albedo feeds the pass (changing it re-evaluates everything); each voxel
     // has a fixed set of rays x cycle directions, one slice of rays per evaluation, blended as a running average
-    // over the first cycle and then with a weight of one cycle; hold frames is how many evaluations a changed
-    // area gets (rounded up to whole cycles); scale only multiplies the stored value in the fragment shader.
+    // over the first cycle and then with a weight of one cycle; the hold is how many evaluations a changed area gets
+    // (rounded up to whole cycles), counting near-camera repeats, so one near the camera can finish in one frame;
+    // scale multiplies the stored bounce when the display is composed.
     private bool _bounceEnabled = true;
     private float _bounceAlbedo = 0.5f;
+    // With the hold at one full cycle and as many near-camera evaluations as the cycle, a change near the camera runs
+    // exactly its full ray set in one frame and stops. Farther away, one evaluation per frame averages the set in over
+    // cycle frames; cycle 1 (all rays each evaluation) would make those exact every frame too, at cycle x the rays.
     private int _bounceRays = 8;
     private int _bounceCycle = 4;   // evaluations per full ray set: each voxel's fixed set is rays x cycle directions
     private int _bounceHoldFrames = 4;
@@ -56,6 +60,11 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     // Held bricks within this many voxels of the camera are evaluated this many times per frame.
     private int _bounceNearRepeats = 4;
     private float _bounceNearRadius = 64f;
+
+    // Per-frame work caps (world bricks, nearest the camera first; the rest wait for later frames). Ships are always
+    // relit and bounced whole, on top of these.
+    private int _maxRelitPerFrame = 1024;
+    private int _maxBouncedPerFrame = 4096;
 
     // CPU-side submission timing only: WebGPU's queue is asynchronous, so a Stopwatch around Dispatch() measures
     // encoding + submission, not GPU execution. Compare against the Renderer panel's FPS for total cost.
@@ -73,9 +82,12 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
 
     private readonly List<LitGrid>             _lit   = new();
     private readonly List<WorldLamp>           _lamps = new();
-    private readonly List<Vector4D<float>>     _lampVecs = new();
+    private readonly List<Vector4D<float>>     _lampVecs = new(); // two per lamp: (world, level), (colour, 0)
 
-    private readonly record struct WorldLamp(Vector3D<float> World, int Level);
+    // Grid/Local identify the lamp block (grid index, grid-space voxel), so a lamp riding a moving ship stays the
+    // same lamp; World is where it is this frame.
+    private readonly record struct WorldLamp(Vector3D<float> World, int Level, Vector3D<float> Color,
+                                             int Grid, Vector3D<int> Local);
 
     public GpuLightSystem(World world, ChunkVolume staticWorld, GpuContext ctx, PhysicsWorld physics, GridStore store)
     {
@@ -97,7 +109,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         ImGui.SameLine();
         if (ImGui.Button("Probe (console)")) _probeRequested = true;
         ImGui.Text($"Sun dispatch:            {_rtSunMsEma:F2} ms/frame");
-        ImGui.Text($"Lamp dispatch:           {_rtLampMsEma:F2} ms/frame");
+        ImGui.Text($"Compose (lamps) dispatch: {_rtLampMsEma:F2} ms/frame");
         ImGui.Text($"Bounce + AO dispatch:    {_rtBounceMsEma:F2} ms/frame");
         ImGui.TextDisabled("CPU submission time only (queue is async) — compare FPS for total GPU+CPU cost.");
 
@@ -110,19 +122,21 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         ImGui.SliderInt("Bounce rays per evaluation", ref _bounceRays, 1, 32);
         ImGui.SliderInt("Evaluations per full ray set", ref _bounceCycle, 1, 16);
         ImGui.TextDisabled($"  = {_bounceRays * _bounceCycle} fixed directions per voxel");
-        ImGui.SliderInt("Bounce hold frames", ref _bounceHoldFrames, 1, 64);
+        ImGui.SliderInt("Bounce evaluations after a change", ref _bounceHoldFrames, 1, 64);
         ImGui.SliderInt("Bounce re-change restart count", ref _bounceRechangeN, 0, 16);
         ImGui.SliderInt("Near-camera evaluations per frame", ref _bounceNearRepeats, 1, 4);
         ImGui.SliderFloat("Near-camera radius", ref _bounceNearRadius, 8f, 256f, "%.0f");
         ImGui.SliderFloat("Bounce display scale", ref _bounceScale, 0f, 4f, "%.2f");
 
         ImGui.Separator();
-        ImGui.TextDisabled($"Bricks relit this frame: {_lastDirtyTotal:N0} of {_store.LightSlotsInUse:N0} surface bricks");
-        ImGui.TextDisabled($"Bricks bounced this frame: {_lastBounceTotal:N0}, plus near-camera repeats: {_lastNearTotal:N0}");
+        ImGui.SliderInt("Max bricks relit per frame", ref _maxRelitPerFrame, 64, 16384);
+        ImGui.SliderInt("Max bricks bounced per frame", ref _maxBouncedPerFrame, 64, 32768);
+        ImGui.TextDisabled($"Bricks relit this frame: {_lastDirtyTotal:N0} of {_store.LightSlotsInUse:N0} surface bricks, waiting: {_lastRelitWaiting:N0}");
+        ImGui.TextDisabled($"Bricks bounced this frame: {_lastBounceTotal:N0}, plus near-camera repeats: {_lastNearTotal:N0}, waiting: {_lastBounceWaiting:N0}");
         ImGui.TextDisabled($"  full relight: {(_dbgFullReason == "" ? "no" : _dbgFullReason)}, new bricks: {_dbgNewSlots}");
         ImGui.TextDisabled($"  world chunks changed: {_dbgChangedChunks}, ships moved: {_dbgShipsMoved}, lamp changes: {_dbgLampChanges}");
         ImGui.TextDisabled($"Light pool: {_store.LightSlotsInUse:N0} / {_store.LightSlotCapacity:N0} bricks " +
-                           $"({(long)_store.LightSlotCapacity * GridStore.VoxelsPerBrick * 4 / (1024 * 1024)} MB), high water {_store.LightSlotHighWater:N0}");
+                           $"({(long)_store.LightSlotCapacity * GridStore.SlotBytes / (1024 * 1024)} MB), high water {_store.LightSlotHighWater:N0}");
         ImGui.TextDisabled($"Occupancy pool: {_store.OccSlotsInUse:N0} / {_store.OccSlotCapacity:N0} chunks " +
                            $"({(long)_store.OccSlotCapacity * GridStore.WordsPerChunk * 4 / (1024 * 1024)} MB)");
 
@@ -142,7 +156,6 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         // AO is measured by the bounce rays, so it goes with them.
         RayLightingSettings.Ambient     = _ambientLevel / 15f;
         RayLightingSettings.AoStrength  = _bounceEnabled ? _aoStrength : 0f;
-        RayLightingSettings.BounceScale = _bounceEnabled ? _bounceScale : 0f;
 
         _lit.Clear();
         AddLit(_staticWorld);
@@ -152,7 +165,8 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
 
         GatherLamps();
         RayTracedDispatch(); // change tracking + dispatch: see GpuLightSystem.RayDirty.cs
-        if (_probeRequested) { _probeRequested = false; Probe(); }    }
+        if (_probeRequested) { _probeRequested = false; Probe(); }
+    }
 
     private bool _probeRequested;
 
@@ -183,13 +197,11 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         Console.WriteLine($"[probe] gpu desc table=({(int)desc[32]},{(int)desc[33]},{(int)desc[34]},{(int)desc[35]}) bmin=({(int)desc[36]},{(int)desc[37]},{(int)desc[38]}) bmax=({(int)desc[40]},{(int)desc[41]},{(int)desc[42]})");
         if (rec == null) { Console.WriteLine("[probe] no lit chunk under camera"); return; }
 
-        var e = Read(_store.ChunkTable, (ulong)rec.TableIndex * 16, 4);
-        Console.WriteLine($"[probe] chunk {rec.Pos.X},{rec.Pos.Y},{rec.Pos.Z} tableIdx={rec.TableIndex} occ={rec.OccSlot} surface={rec.Surface:X16}; gpu entry=({(int)e[0]},{(int)e[1]},{(int)e[2]},{(int)e[3]})");
-        int b = System.Numerics.BitOperations.TrailingZeroCount(rec.Surface);
-        int slot = rec.BrickSlots![b];
-        var run = Read(_store.BrickTable, (ulong)rec.TableIndex * 256, 64);
+        var e = Read(_store.ChunkTable, (ulong)rec.TableIndex * GridStore.ChunkEntryBytes, 8);
+        Console.WriteLine($"[probe] chunk {rec.Pos.X},{rec.Pos.Y},{rec.Pos.Z} tableIdx={rec.TableIndex} occ={rec.OccSlot} solid={rec.Solid:X16}; " +
+                          $"gpu entry=({(int)e[0]},{(int)e[1]},{(int)e[2]},{(int)e[3]}) solid={((ulong)e[5] << 32 | e[4]):X16}");
         int hw = _store.LightSlotHighWater;
-        var words = Read(_store.LightPool, 0, hw * 512);
+        var pool = Read(_store.LightPool, 0, hw * GridStore.WordsPerSlot);
         var info = Read(_store.SlotInfo, 0, hw * 4);
         int badInfo = 0;
         for (int s = 0; s < hw; s++)
@@ -201,39 +213,25 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         }
         Console.WriteLine($"[probe] slotInfo mismatches: {badInfo} of {hw}; last frame relit={_lastDirtyTotal} bounced={_lastBounceTotal}");
 
-        // Per-grid sun samples, and one known surface voxel of the world.
-        var perGrid = new int[GridStore.MaxGrids];
+        // Per voxel of every live slot: display sun/RGB/AO and accumulated bounce.
+        long voxels = 0, shadowed = 0, lit = 0, ao = 0, bounce = 0, coloured = 0;
         for (int s = 0; s < hw; s++)
         {
             if (_store.SlotGrid[s] < 0) continue;
-            for (int k = 0; k < 512; k++) if ((words[s * 512 + k] & 0xFF) < 255) { perGrid[_store.SlotGrid[s]]++; }
-        }
-        Console.WriteLine($"[probe] sun samples by grid: world={perGrid[0]} grid1={perGrid[1]}");
-        var entry = _staticWorld.GetEntry(rec.Pos);
-        if (entry?.PackedOpacityWords is { } ow)
-        {
-            bool Solid(int x, int y, int z) => ((ow[y + 32 * z] >> x) & 1u) != 0;
-            for (int z = 1; z < 31; z++) for (int y = 1; y < 31; y++) for (int x = 1; x < 31; x++)
+            int b0 = s * GridStore.WordsPerSlot;
+            for (int k = 0; k < 512; k++)
             {
-                if (Solid(x, y, z) || !Solid(x, y - 1, z)) continue;
-                int bb = (x >> 3) + 4 * ((y >> 3) + 4 * (z >> 3));
-                int sl = rec.BrickSlots![bb];
-                uint w = sl >= 0 ? words[sl * 512 + (x & 7) + 8 * ((y & 7) + 8 * (z & 7))] : 0xDEADu;
-                Console.WriteLine($"[probe] surface voxel local {x},{y},{z} brick {bb} slot {sl}: word={w:X8}");
-                goto done;
+                uint d = (pool[b0 + (k >> 1)] >> (16 * (k & 1))) & 0xFFFF;
+                uint acc = pool[b0 + 256 + k];
+                voxels++;
+                if (((d >> 12) & 3) < 3) shadowed++;
+                if ((d & 0xFFF) != 0) lit++;
+                if ((d & 15) != ((d >> 4) & 15) || (d & 15) != ((d >> 8) & 15)) coloured++;
+                if ((d >> 14) != 0) ao++;
+                if ((acc & 0xFFFFFF) != 0) bounce++;
             }
-            done:;
         }
-        int empty = 0, sunSamples = 0, shadowed = 0, lamp = 0, ao = 0, bounce = 0;
-        foreach (var w in words)
-        {
-            if (w == GridStore.EmptyLightWord) empty++;
-            if ((w & 0xFF) < 255) { sunSamples++; if ((w & 0xFF) < 128) shadowed++; }
-            if (((w >> 8) & 0xFF) != 0) lamp++;
-            if (((w >> 16) & 0xFF) != 0) ao++;
-            if ((w >> 24) != 0) bounce++;
-        }
-        Console.WriteLine($"[probe] brick {b} slot={slot} gpu brickTable[{b}]={(int)run[b]}; words: empty={empty} sun={sunSamples} shadowed={shadowed} lamp={lamp} ao={ao} bounce={bounce}; dirty lists: held={_heldList.Count}");
+        Console.WriteLine($"[probe] voxels={voxels} sun-shadowed={shadowed} rgb-lit={lit} coloured={coloured} ao={ao} bounce={bounce} held={_heldList.Count}");
     }
 
     /// <summary>Poses a registered grid for this frame (a ship whose body doesn't exist yet stays hidden).</summary>
@@ -260,8 +258,11 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
                 {
                     var local = origin + new Vector3D<float>(em.Lx + 0.5f, em.Ly + 0.5f, em.Lz + 0.5f);
                     var world = lg.VoxelToWorld.TransformPoint(local);
-                    _lamps.Add(new WorldLamp(world, em.Level));
+                    var col = BlockRegistry.Get(em.Block).EffectiveLightColor;
+                    var voxel = new Vector3D<int>(cpos.X * ChunkData.Size + em.Lx, cpos.Y * ChunkData.Size + em.Ly, cpos.Z * ChunkData.Size + em.Lz);
+                    _lamps.Add(new WorldLamp(world, em.Level, col, lg.Handle.Index, voxel));
                     _lampVecs.Add(new Vector4D<float>(world.X, world.Y, world.Z, em.Level));
+                    _lampVecs.Add(new Vector4D<float>(col.X, col.Y, col.Z, 0f));
                 }
             }
     }
@@ -303,5 +304,8 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         _lightWork?.Dispose();
         _bounceWork?.Dispose();
         _nearWork?.Dispose();
+        _composeWork?.Dispose();
+        _nearComposeWork?.Dispose();
+        _clearWork?.Dispose();
     }
 }

@@ -61,8 +61,9 @@ internal sealed class ChunkRecord
 /// world's section toroidal around the camera. The coordinate is a tag, so a wrapped lookup that lands on a
 /// different chunk reads as unloaded instead of aliasing onto it;</item>
 /// <item>a brick table (64 entries per chunk entry) giving each 8³ brick's light slot, or <see cref="NoSurface"/>;</item>
-/// <item>a light pool of 512-word brick slots, allocated only for bricks that contain a surface air voxel. One
-/// u32 per voxel: bits 0-7 sun visibility (0-254, 255 = no sample), 8-15 lamp level, 16-23 AO, 24-31 bounce;</item>
+/// <item>a light pool of <see cref="WordsPerSlot"/>-word brick slots, allocated only for bricks that contain a
+/// surface air voxel: per voxel a 16-bit display value (RGB 4 bits each, sun 2 bits, AO 2 bits — the only part the
+/// fragment shader reads) and a 32-bit accumulation word (bounce RGB and AO, 8 bits each). See GpuRayLightPass;</item>
 /// <item>per light slot, its grid, chunk and brick (so a work list is just slot numbers);</item>
 /// <item>per grid, its transforms, table section and voxel bounds.</item>
 /// </list>
@@ -73,14 +74,23 @@ public sealed class GridStore : IDisposable
 {
     public const int WordsPerChunk = 1024;
     public const int VoxelsPerBrick = 512;
+
+    /// <summary>Light-pool words per brick slot: 256 display words (two 16-bit voxels each) then 512
+    /// accumulation words.</summary>
+    public const int WordsPerSlot = 768;
+    public const int SlotBytes = WordsPerSlot * 4;
     public const int MaxGrids = 64;
 
     // Chunk-table occupancy codes (entry.x). >= 0 is an occupancy slot.
     public const int OccUnloaded = -1, OccAllAir = -2, OccAllSolid = -3;
     public const uint NoSurface = 0xFFFFFFFFu;
 
-    /// <summary>A fresh light word: no sun sample, no lamp, no AO, no bounce — reads as ambient only.</summary>
-    public const uint EmptyLightWord = 0x000000FFu;
+    /// <summary>Chunk-table entry: two vec4&lt;i32&gt; — (occupancy slot or code, cx, cy, cz) and (solid brick
+    /// mask low, high, 0, 0).</summary>
+    public const int ChunkEntryBytes = 32;
+
+    /// <summary>A fresh display word (two voxels): full sun, no light, no AO — ambient and sun only.</summary>
+    public const uint EmptyDisplayPair = 0x30003000u;
 
     private const int S = ChunkData.Size;
     private const int UnusedTag = int.MinValue;
@@ -120,12 +130,14 @@ public sealed class GridStore : IDisposable
     private readonly Vector3D<int> _worldTableDims;
 
     /// <summary>Light slots allocated since the lighting system last drained this. They hold
-    /// <see cref="EmptyLightWord"/> and need lighting.</summary>
+    /// <see cref="EmptyDisplayPair"/> and zeroed accumulation, and need lighting.</summary>
     internal List<int> NewSlots { get; } = new();
 
-    /// <summary>Chunks whose occupancy changed (upload, edit or unload) since the lighting system last drained
-    /// this, with whether they had or have any solid (an all-air change can't have changed any shadow).</summary>
-    internal List<(GridHandle grid, ChunkPosition pos, bool solid)> ChangedChunks { get; } = new();
+    /// <summary>Occupancy changes since the lighting system last drained this: the grid-space voxel box that changed
+    /// (the edited blocks' bounds for an edit, the whole chunk for a load or unload), and whether the chunk had or has
+    /// any solid (an all-air change can't have changed any shadow), and whether it was an edit that placed a
+    /// light-blocking block (the only kind of change that can darken what was already lit).</summary>
+    internal List<(GridHandle grid, Vector3D<float> min, Vector3D<float> max, bool solid, bool darkens)> ChangedChunks { get; } = new();
 
     public int LightSlotsInUse => _lightNext - _lightFree.Count;
     public int LightSlotCapacity => _lightCapacity;
@@ -154,26 +166,26 @@ public sealed class GridStore : IDisposable
         _occCapacity   = System.Math.Min(worldEntries, columns * OccSlotsPerColumn) + 512;
         _tableCapacity = worldEntries + 4096;
         _lightCapacity = columns * LightBricksPerColumn + 2048;
-        int maxLight = (int)System.Math.Min(maxBytes / (VoxelsPerBrick * 4), int.MaxValue);
+        int maxLight = (int)System.Math.Min(maxBytes / SlotBytes, int.MaxValue);
         if (_lightCapacity > maxLight)
         {
             Console.WriteLine($"[grid-store] light pool estimate of {_lightCapacity} bricks exceeds this device's max buffer size; starting at {maxLight}.");
             _lightCapacity = maxLight;
         }
         Console.WriteLine($"[grid-store] {columns} chunk columns: light pool {_lightCapacity} bricks " +
-                          $"({(ulong)_lightCapacity * VoxelsPerBrick * 4 / (1024 * 1024)} MB), occupancy {_occCapacity} chunks " +
+                          $"({(ulong)_lightCapacity * SlotBytes / (1024 * 1024)} MB), occupancy {_occCapacity} chunks " +
                           $"({(ulong)_occCapacity * WordsPerChunk * 4 / (1024 * 1024)} MB)");
 
         OccPool    = GpuBuffer.CreateStorage(ctx, (ulong)_occCapacity * WordsPerChunk * 4);
-        ChunkTable = GpuBuffer.CreateStorage(ctx, (ulong)_tableCapacity * 16);
+        ChunkTable = GpuBuffer.CreateStorage(ctx, (ulong)_tableCapacity * ChunkEntryBytes);
         BrickTable = GpuBuffer.CreateStorage(ctx, (ulong)_tableCapacity * 64 * 4);
-        LightPool  = GpuBuffer.CreateStorage(ctx, (ulong)_lightCapacity * VoxelsPerBrick * 4);
+        LightPool  = GpuBuffer.CreateStorage(ctx, (ulong)_lightCapacity * SlotBytes);
         SlotInfo   = GpuBuffer.CreateStorage(ctx, (ulong)_lightCapacity * 16);
         Grids      = GpuBuffer.CreateStorage(ctx, (ulong)MaxGrids * (ulong)Marshal.SizeOf<GridDesc>());
         ResizeSlotMirror(_lightCapacity);
 
-        _emptyBrick = new uint[VoxelsPerBrick];
-        Array.Fill(_emptyBrick, EmptyLightWord);
+        _emptyBrick = new uint[WordsPerSlot];
+        Array.Fill(_emptyBrick, EmptyDisplayPair, 0, 256);
 
         ClearTableRange(0, _tableCapacity);
         _tableNext = 0;
@@ -256,6 +268,20 @@ public sealed class GridStore : IDisposable
         if (g.Index < 0) Register(g, isWorld: false);
         var words = PackChunk(entry);
 
+        // A chunk already uploaded that was edited changed only within its edit bounds; anything else is new.
+        bool wasUploaded = g.Chunks.TryGetValue(pos, out var existing) && !existing.Virtual;
+        var origin = pos.WorldOrigin;
+        var changedMin = origin;
+        var changedMax = origin + new Vector3D<float>(S);
+        bool darkens = false;
+        if (wasUploaded && entry.HasEdits)
+        {
+            changedMin = origin + new Vector3D<float>(entry.EditMin.X, entry.EditMin.Y, entry.EditMin.Z);
+            changedMax = origin + new Vector3D<float>(entry.EditMax.X + 1, entry.EditMax.Y + 1, entry.EditMax.Z + 1);
+            darkens = entry.EditsAddedSolid;
+        }
+        entry.ClearEdits();
+
         var rec = EnsureRecord(g, pos);
         if (rec == null) return;
         bool hadSolid = rec.Solid != 0;
@@ -286,7 +312,7 @@ public sealed class GridStore : IDisposable
 
         RefreshSurfaceAround(g, rec);
         g.Version++;
-        ChangedChunks.Add((g, pos, hadSolid || rec.Solid != 0));
+        ChangedChunks.Add((g, changedMin, changedMax, hadSolid || rec.Solid != 0, darkens));
     }
 
     /// <summary>Drops a chunk that unloaded.</summary>
@@ -303,7 +329,7 @@ public sealed class GridStore : IDisposable
             if (g.Chunks.TryGetValue(pos.Offset(dx, dy, dz), out var n)) RefreshSurface(g, n);
         }
         g.Version++;
-        ChangedChunks.Add((g, pos, hadSolid));
+        ChangedChunks.Add((g, pos.WorldOrigin, pos.WorldOrigin + new Vector3D<float>(S), hadSolid, false));
     }
 
     /// <summary>The light slot holding brick (bx,by,bz) of chunk <paramref name="pos"/>, or -1.</summary>
@@ -329,7 +355,7 @@ public sealed class GridStore : IDisposable
                 var def = BlockRegistry.Get(data.Get(lx, ly, lz));
                 if (def.Opacity >= 15) bits |= 1u << lx;
                 if (def.LightEmission > 0)
-                    entry.Emitters.Add(new EmitterVoxel((byte)lx, (byte)ly, (byte)lz, def.LightEmission));
+                    entry.Emitters.Add(new EmitterVoxel((byte)lx, (byte)ly, (byte)lz, def.LightEmission, def.Id));
             }
             words[ly + S * lz] = bits; // lx is the in-word bit, (ly + 32*lz) is the word
         }
@@ -395,8 +421,8 @@ public sealed class GridStore : IDisposable
         }
         rec.Surface = 0;
         // Tag the entry unused so a lookup of this position (or of whatever wraps onto it) reads unloaded.
-        Span<int> e = stackalloc int[4] { OccUnloaded, UnusedTag, UnusedTag, UnusedTag };
-        ChunkTable.Write<int>((ulong)rec.TableIndex * 16, e);
+        Span<int> e = stackalloc int[8] { OccUnloaded, UnusedTag, UnusedTag, UnusedTag, 0, 0, 0, 0 };
+        ChunkTable.Write<int>((ulong)rec.TableIndex * ChunkEntryBytes, e);
         Array.Fill(_brickRun, NoSurface);
         BrickTable.Write<uint>((ulong)rec.TableIndex * 64 * 4, _brickRun);
     }
@@ -466,13 +492,13 @@ public sealed class GridStore : IDisposable
 
     private void ClearTableRange(int start, int count)
     {
-        var entries = new int[count * 4];
+        var entries = new int[count * 8];
         for (int i = 0; i < count; i++)
         {
-            entries[4 * i] = OccUnloaded;
-            entries[4 * i + 1] = entries[4 * i + 2] = entries[4 * i + 3] = UnusedTag;
+            entries[8 * i] = OccUnloaded;
+            entries[8 * i + 1] = entries[8 * i + 2] = entries[8 * i + 3] = UnusedTag;
         }
-        ChunkTable.Write<int>((ulong)start * 16, entries);
+        ChunkTable.Write<int>((ulong)start * ChunkEntryBytes, entries);
         var bricks = new uint[count * 64];
         Array.Fill(bricks, NoSurface);
         BrickTable.Write<uint>((ulong)start * 64 * 4, bricks);
@@ -484,8 +510,10 @@ public sealed class GridStore : IDisposable
                  : rec.Solid == 0 ? OccAllAir
                  : rec.Air == 0 ? OccAllSolid
                  : OccUnloaded;
-        Span<int> e = stackalloc int[4] { code, rec.Pos.X, rec.Pos.Y, rec.Pos.Z };
-        ChunkTable.Write<int>((ulong)rec.TableIndex * 16, e);
+        // Second half: which 8³ bricks hold any solid, so rays can step over empty bricks whole.
+        Span<int> e = stackalloc int[8] { code, rec.Pos.X, rec.Pos.Y, rec.Pos.Z,
+                                          (int)(uint)rec.Solid, (int)(uint)(rec.Solid >> 32), 0, 0 };
+        ChunkTable.Write<int>((ulong)rec.TableIndex * ChunkEntryBytes, e);
     }
 
     private void WriteBrickRun(ChunkRecord rec)
@@ -643,7 +671,7 @@ public sealed class GridStore : IDisposable
 
         Span<int> info = stackalloc int[4] { g.Index | (brick << 8), pos.X, pos.Y, pos.Z };
         SlotInfo.Write<int>((ulong)slot * 16, info);
-        LightPool.Write<uint>((ulong)slot * VoxelsPerBrick * 4, _emptyBrick);
+        LightPool.Write<uint>((ulong)slot * SlotBytes, _emptyBrick);
         NewSlots.Add(slot);
         return slot;
     }
@@ -667,18 +695,18 @@ public sealed class GridStore : IDisposable
     {
         int cap = _lightCapacity * 2;
         ulong maxBytes = System.Math.Min(_ctx.AdapterLimits.MaxBufferSize, _ctx.AdapterLimits.MaxStorageBufferBindingSize);
-        if ((ulong)cap * VoxelsPerBrick * 4 > maxBytes)
+        if ((ulong)cap * SlotBytes > maxBytes)
             throw new InvalidOperationException($"Light pool would need {cap} brick slots, over this device's max buffer size.");
-        LightPool = Grow(LightPool, (ulong)cap * VoxelsPerBrick * 4);
+        LightPool = Grow(LightPool, (ulong)cap * SlotBytes);
         SlotInfo  = Grow(SlotInfo, (ulong)cap * 16);
         _lightCapacity = cap;
         ResizeSlotMirror(cap);
-        Console.WriteLine($"[grid-store] light pool grown to {cap} brick slots ({(ulong)cap * VoxelsPerBrick * 4 / (1024 * 1024)} MB)");
+        Console.WriteLine($"[grid-store] light pool grown to {cap} brick slots ({(ulong)cap * SlotBytes / (1024 * 1024)} MB)");
     }
 
     private void GrowTables(int cap)
     {
-        ChunkTable = Grow(ChunkTable, (ulong)cap * 16);
+        ChunkTable = Grow(ChunkTable, (ulong)cap * ChunkEntryBytes);
         BrickTable = Grow(BrickTable, (ulong)cap * 64 * 4);
         int old = _tableCapacity;
         _tableCapacity = cap;

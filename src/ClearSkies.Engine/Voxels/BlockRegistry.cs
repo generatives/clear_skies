@@ -18,6 +18,13 @@ public static class BlockRegistry
         Register(new BlockDef { Id = BlockId.Stone, Name = "Stone", Color = new(0.42f, 0.45f, 0.47f), IsSolid = true,  LightEmission = 0,  Opacity = 15, Weight = 6,
             Texture = "greystone" });
         Register(new BlockDef { Id = BlockId.Lamp,  Name = "Lamp",  Color = new(1.00f, 0.95f, 0.80f), IsSolid = true,  LightEmission = 14, Opacity = 15, Weight = 3 });
+        // Coloured lamps (ray-traced RGB light). Untextured: their flat Color shows what they emit.
+        Register(new BlockDef { Id = BlockId.RedLamp,   Name = "Red Lamp",   Color = new(1.00f, 0.25f, 0.20f), IsSolid = true, LightEmission = 14, Opacity = 15, Weight = 3,
+            LightColor = new(1.00f, 0.20f, 0.15f) });
+        Register(new BlockDef { Id = BlockId.GreenLamp, Name = "Green Lamp", Color = new(0.30f, 1.00f, 0.35f), IsSolid = true, LightEmission = 14, Opacity = 15, Weight = 3,
+            LightColor = new(0.20f, 1.00f, 0.25f) });
+        Register(new BlockDef { Id = BlockId.BlueLamp,  Name = "Blue Lamp",  Color = new(0.30f, 0.45f, 1.00f), IsSolid = true, LightEmission = 14, Opacity = 15, Weight = 3,
+            LightColor = new(0.20f, 0.35f, 1.00f) });
         Register(new BlockDef { Id = BlockId.Wood,  Name = "Wood",  Color = new(0.55f, 0.40f, 0.25f), IsSolid = true,  LightEmission = 0,  Opacity = 15, Weight = 1,
             Texture = "wood" });
 

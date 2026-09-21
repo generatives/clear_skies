@@ -26,9 +26,10 @@ const WPC: i32 = " + GridStore.WordsPerChunk + @";
 const OCC_UNLOADED: i32 = " + GridStore.OccUnloaded + @";
 const OCC_ALL_SOLID: i32 = " + GridStore.OccAllSolid + @";
 const NO_SURFACE: u32 = " + GridStore.NoSurface + @"u;
-const EMPTY_LIGHT: u32 = " + GridStore.EmptyLightWord + @"u;
+const SLOT_WORDS: u32 = " + GridStore.WordsPerSlot + @"u;
+const EMPTY_DISPLAY: u32 = 0x3000u;   // no light storage: full sun, no light, no AO
 
-// sunDir.w: sun strength (SunLight.Strength). lightParams.x: ray AO strength, .y: bounce scale, .z: ambient (0-1).
+// sunDir.w: sun strength (SunLight.Strength). lightParams.x: ray AO strength, .z: ambient (0-1), .y/.w unused.
 struct Camera { view: mat4x4<f32>, proj: mat4x4<f32>, sunDir: vec4<f32>, lightParams: vec4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
@@ -37,9 +38,10 @@ struct Camera { view: mat4x4<f32>, proj: mat4x4<f32>, sunDir: vec4<f32>, lightPa
 struct Model { model: mat4x4<f32>, chunk: vec3<i32>, grid: i32, _pad: vec4<i32> };
 @group(1) @binding(0) var<uniform> model: Model;
 
-// The shared voxel storage (see GridStore): occupancy pool, chunk table ((occupancy slot or code, chunk tag)),
-// brick table (light slot per 8³ brick), light pool (one word per voxel of each surface brick: bits 0-7 sun
-// visibility 0-254 / 255 no sample, 8-15 lamp level, 16-23 ray AO, 24-31 bounce) and grid descriptors.
+// The shared voxel storage (see GridStore): occupancy pool, chunk table ((occupancy slot or code, chunk tag), then
+// ray-only data), brick table (light slot per 8³ brick), light pool and grid descriptors. Only a slot's display half
+// is read here: one u16 per voxel, two per word — bits 0-3 R, 4-7 G, 8-11 B (lamp + bounce, square-curve encoded),
+// 12-13 sun visibility (0-3), 14-15 ray AO occlusion (0-3).
 struct GridDesc { v2w: mat4x4<f32>, w2v: mat4x4<f32>, table: vec4<i32>, bmin: vec4<i32>, bmax: vec4<i32> };
 @group(2) @binding(0) var<storage, read> occPool: array<u32>;
 @group(2) @binding(1) var<storage, read> chunkTable: array<vec4<i32>>;
@@ -92,7 +94,7 @@ fn entryOf(c: vec3<i32>) -> i32 {
     let t = grids[model.grid].table;
     if (t.y <= 0) { return -1; }
     let idx = t.x + wrapi(c.x, t.y) + t.y * (wrapi(c.y, t.z) + t.z * wrapi(c.z, t.w));
-    let e = chunkTable[idx];
+    let e = chunkTable[2 * idx]; // entries are two vec4s; the second (solid-brick mask) is only for rays
     if (e.y != c.x || e.z != c.y || e.w != c.z) { return -1; }
     return idx;
 }
@@ -101,7 +103,7 @@ fn entryOf(c: vec3<i32>) -> i32 {
 fn isSolid(v: vec3<i32>) -> bool {
     let i = entryOf(v >> vec3<u32>(5u));
     if (i < 0) { return false; }
-    let code = chunkTable[i].x;
+    let code = chunkTable[2 * i].x;
     if (code >= 0) {
         let l = v & vec3<i32>(31);
         return ((occPool[u32(code * WPC + l.y + 32 * l.z)] >> u32(l.x)) & 1u) == 1u;
@@ -111,29 +113,32 @@ fn isSolid(v: vec3<i32>) -> bool {
 
 fn occ(v: vec3<i32>) -> f32 { return select(0.0, 1.0, isSolid(v)); }
 
-// Light word of voxel v; a voxel with no light storage reads as ambient only.
-fn lightWord(v: vec3<i32>) -> u32 {
+// Display value of voxel v; a voxel with no light storage reads as sun and ambient only.
+fn displayAt(v: vec3<i32>) -> u32 {
     let i = entryOf(v >> vec3<u32>(5u));
-    if (i < 0) { return EMPTY_LIGHT; }
+    if (i < 0) { return EMPTY_DISPLAY; }
     let l = v & vec3<i32>(31);
     let b = (l.x >> 3u) + 4 * ((l.y >> 3u) + 4 * (l.z >> 3u));
     let s = brickTable[u32(i * 64 + b)];
-    if (s == NO_SURFACE) { return EMPTY_LIGHT; }
+    if (s == NO_SURFACE) { return EMPTY_DISPLAY; }
     let lb = l & vec3<i32>(7);
-    return lightPool[s * 512u + u32(lb.x + 8 * (lb.y + 8 * lb.z))];
+    let k = u32(lb.x + 8 * (lb.y + 8 * lb.z));
+    return (lightPool[s * SLOT_WORDS + (k >> 1u)] >> ((k & 1u) * 16u)) & 0xFFFFu;
 }
 
-// (sky, block, sun visibility 0-1, has-sun-sample) at one voxel. Sky is the flat ambient scaled by the ray AO
-// occlusion, weighted by camera.lightParams.x. Bounce light is indirect light with no direction, so it joins the
-// block channel by max, like a lamp's. Sun 255 = no sample (not a surface voxel), which the blend skips.
-fn litAt(v: vec3<i32>) -> vec4<f32> {
-    let w = lightWord(v);
-    let rayOcc = f32((w >> 16u) & 0xFFu) / 255.0;
-    let sky    = camera.lightParams.z * (1.0 - camera.lightParams.x * rayOcc);
-    let bounce = f32(w >> 24u) / 255.0 * camera.lightParams.y;
-    let blk    = max(f32((w >> 8u) & 0xFFu) / 15.0, bounce);
-    let sv     = w & 0xFFu;
-    return vec4<f32>(sky, blk, f32(sv) / 254.0, select(0.0, 1.0, sv < 255u));
+fn decodeLevel(c: u32) -> f32 { let f = f32(c) / 15.0; return f * f; }
+
+// One cell's light: sky (the flat ambient scaled by the ray AO occlusion, weighted by camera.lightParams.x), RGB
+// (lamp and bounce light) and sun visibility 0-1.
+struct Cell { sky: f32, rgb: vec3<f32>, sun: f32 };
+
+fn cellAt(v: vec3<i32>) -> Cell {
+    let d = displayAt(v);
+    var c: Cell;
+    c.sky = camera.lightParams.z * (1.0 - camera.lightParams.x * f32(d >> 14u) / 3.0);
+    c.rgb = vec3<f32>(decodeLevel(d & 15u), decodeLevel((d >> 4u) & 15u), decodeLevel((d >> 8u) & 15u));
+    c.sun = f32((d >> 12u) & 3u) / 3.0;
+    return c;
 }
 
 // Minecraft-style smooth lighting at the air side of this fragment: sky + block light (each 0..1) and sun
@@ -146,29 +151,33 @@ fn litAt(v: vec3<i32>) -> vec4<f32> {
 // through a corner. SMOOTH_LIGHT = false falls back to the flat per-cell value.
 const SMOOTH_LIGHT: bool = true;
 
-struct Lit { sky: f32, blk: f32, sun: f32 };
+struct Lit { sky: f32, rgb: vec3<f32>, sun: f32 };
 
 fn onSurface(c: vec3<i32>, N: vec3<i32>) -> bool { return !isSolid(c) && isSolid(c - N); }
 
-// (sky, block, sun) averaged over the usable cells at one corner. Sun skips cells with no sample.
-fn cornerLit(air: vec3<i32>, s1: vec3<i32>, s2: vec3<i32>, dg: vec3<i32>, N: vec3<i32>) -> vec3<f32> {
+// (sky, r, g, b, sun) averaged over the usable cells at one corner.
+struct Corner { a: vec4<f32>, sun: f32 };
+
+fn cornerLit(air: vec3<i32>, s1: vec3<i32>, s2: vec3<i32>, dg: vec3<i32>, N: vec3<i32>) -> Corner {
     let inc1 = onSurface(s1, N);
     let inc2 = onSurface(s2, N);
     let incD = (inc1 || inc2) && onSurface(dg, N);
     var cells = array<vec3<i32>, 4>(air, s1, s2, dg);
     var inc = array<bool, 4>(true, inc1, inc2, incD);
-    var accL = vec2<f32>(0.0, 0.0); var nL = 0.0;
-    var accS = 0.0; var nS = 0.0;
+    var acc = vec4<f32>(0.0);
+    var accS = 0.0;
+    var n = 0.0;
     for (var k = 0; k < 4; k = k + 1) {
         if (!inc[k]) { continue; }
-        let la = litAt(cells[k]);
-        accL += la.xy;
-        nL += 1.0;
-        accS += la.z * la.w;
-        nS += la.w;
+        let c = cellAt(cells[k]);
+        acc += vec4<f32>(c.sky, c.rgb);
+        accS += c.sun;
+        n += 1.0;
     }
-    let l = accL / nL;
-    return vec3<f32>(l.x, l.y, select(1.0, accS / max(nS, 1.0), nS > 0.0));
+    var r: Corner;
+    r.a = acc / n;
+    r.sun = accS / n;
+    return r;
 }
 
 fn sampleLit(localPos: vec3<f32>, localNormal: vec3<f32>) -> Lit {
@@ -176,10 +185,10 @@ fn sampleLit(localPos: vec3<f32>, localNormal: vec3<f32>) -> Lit {
     var o: Lit;
 
     if (!SMOOTH_LIGHT) {
-        let la = litAt(air);
-        o.sky = la.x;
-        o.blk = la.y;
-        o.sun = select(1.0, la.z, la.w > 0.5);
+        let c = cellAt(air);
+        o.sky = c.sky;
+        o.rgb = c.rgb;
+        o.sun = c.sun;
         return o;
     }
 
@@ -198,10 +207,10 @@ fn sampleLit(localPos: vec3<f32>, localNormal: vec3<f32>) -> Lit {
     // Plain bilinear across the cell face, like Minecraft's per-vertex interpolation.
     let s = fract(dot(localPos, vec3<f32>(T)));
     let t = fract(dot(localPos, vec3<f32>(B)));
-    let v = mix(mix(c00, c10, s), mix(c01, c11, s), t);
-    o.sky = v.x;
-    o.blk = v.y;
-    o.sun = v.z;
+    let a = mix(mix(c00.a, c10.a, s), mix(c01.a, c11.a, s), t);
+    o.sky = a.x;
+    o.rgb = a.yzw;
+    o.sun = mix(mix(c00.sun, c10.sun, s), mix(c01.sun, c11.sun, s), t);
     return o;
 }
 
@@ -261,8 +270,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // Sky contribution = the brighter of ambient and direct sun.
     let skyTerm = max(s.sky, directSun);
 
-    // Final = brightest of sky, block light, and the minimum ambient floor.
-    let lit = max(max(skyTerm, s.blk), MIN_AMBIENT);
+    // Final, per channel = brightest of sky, lamp/bounce light, and the minimum ambient floor.
+    let lit = max(max(vec3<f32>(skyTerm), s.rgb), vec3<f32>(MIN_AMBIENT));
 
     // Ambient occlusion darkens inner corners / block junctions; lerp from AO_MIN so corners aren't pure black.
     let aoFactor = mix(AO_MIN, 1.0, computeAO(in.localPos, in.localNormal));
