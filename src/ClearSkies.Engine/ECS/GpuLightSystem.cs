@@ -152,8 +152,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
 
         GatherLamps();
         RayTracedDispatch(); // change tracking + dispatch: see GpuLightSystem.RayDirty.cs
-        if (_probeRequested) { _probeRequested = false; Probe(); }
-    }
+        if (_probeRequested) { _probeRequested = false; Probe(); }    }
 
     private bool _probeRequested;
 

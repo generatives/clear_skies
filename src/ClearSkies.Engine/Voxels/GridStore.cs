@@ -85,6 +85,10 @@ public sealed class GridStore : IDisposable
     private const int S = ChunkData.Size;
     private const int UnusedTag = int.MinValue;
 
+    // Initial pool sizing per chunk column of the world table (measured peaks x ~1.3-1.5 headroom).
+    private const int OccSlotsPerColumn = 4;
+    private const int LightBricksPerColumn = 96;
+
     private readonly GpuContext _ctx;
 
     internal GpuBuffer OccPool { get; private set; }
@@ -141,9 +145,24 @@ public sealed class GridStore : IDisposable
         _worldTableDims = worldTableChunks;
         int worldEntries = worldTableChunks.X * worldTableChunks.Y * worldTableChunks.Z;
 
-        _occCapacity   = worldEntries + 512;
+        // Pools start sized to the view distance so they don't grow (a copy + rebind hitch) during normal play.
+        // Surfaces are mostly horizontal, so what fills them scales with chunk columns, not the table's height.
+        // Measured at the 8/3 view radius (19x19 columns): peaks of ~2.6 non-uniform chunks and ~72 surface bricks
+        // per column. Ships get a fixed extra allowance on top.
+        int columns = worldTableChunks.X * worldTableChunks.Z;
+        ulong maxBytes = System.Math.Min(ctx.AdapterLimits.MaxBufferSize, ctx.AdapterLimits.MaxStorageBufferBindingSize);
+        _occCapacity   = System.Math.Min(worldEntries, columns * OccSlotsPerColumn) + 512;
         _tableCapacity = worldEntries + 4096;
-        _lightCapacity = 32768;  // 64 MB; the 8/3 view radius settles around 17-20k surface bricks
+        _lightCapacity = columns * LightBricksPerColumn + 2048;
+        int maxLight = (int)System.Math.Min(maxBytes / (VoxelsPerBrick * 4), int.MaxValue);
+        if (_lightCapacity > maxLight)
+        {
+            Console.WriteLine($"[grid-store] light pool estimate of {_lightCapacity} bricks exceeds this device's max buffer size; starting at {maxLight}.");
+            _lightCapacity = maxLight;
+        }
+        Console.WriteLine($"[grid-store] {columns} chunk columns: light pool {_lightCapacity} bricks " +
+                          $"({(ulong)_lightCapacity * VoxelsPerBrick * 4 / (1024 * 1024)} MB), occupancy {_occCapacity} chunks " +
+                          $"({(ulong)_occCapacity * WordsPerChunk * 4 / (1024 * 1024)} MB)");
 
         OccPool    = GpuBuffer.CreateStorage(ctx, (ulong)_occCapacity * WordsPerChunk * 4);
         ChunkTable = GpuBuffer.CreateStorage(ctx, (ulong)_tableCapacity * 16);
