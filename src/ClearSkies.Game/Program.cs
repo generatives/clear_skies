@@ -39,8 +39,8 @@ host.AddSystem(host.Gui, SystemStage.Input); // opens ImGui's frame before Logic
 
 var physicsBody = new PhysicsBodySystem(host.World, staticWorld, host.Physics);
 
-// View distance: xzRadius=4/yRadius=2 (was 3/2). Verified crash-free and smooth at this setting; a bigger
-// jump (tried 8/3) hit two real problems: the GPU device was silently capped at a 256 MiB max buffer size
+// View distance: xzRadius=16/yRadius=3 (was 8/3). Verified crash-free and smooth at this setting; a bigger
+// jump (tried 16/3) hit two real problems: the GPU device was silently capped at a 256 MiB max buffer size
 // (fixed in GpuContext — see AdapterLimits), and even past that, single-digit FPS from the GPU light flood
 // recomputing a much larger dirty region during the load-in burst plus the per-frame full-chunk scans in
 // ChunkMeshSystem/GpuResidencySystem/GpuLightSystem/PhysicsBodySystem (see the deferred dirty-queue task).
