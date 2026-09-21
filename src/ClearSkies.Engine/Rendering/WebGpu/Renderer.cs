@@ -16,7 +16,7 @@ public sealed unsafe class Renderer : IDisposable
 {
     private const int MaxObjects = 4096;
     private const ulong ModelStride = 256;   // >= minUniformBufferOffsetAlignment
-    private const ulong CameraSize  = 160;   // two mat4x4<f32> (view, proj) + vec4<f32> sun direction + vec4<f32> light params
+    private const ulong CameraSize  = 224;   // two mat4x4<f32> (view, proj) + six vec4<f32> (sun, light params, camera position, fog, zenith, horizon)
     private const ulong ModelSize   = 96;    // mat4x4<f32> + vec3<i32> chunk + i32 grid + vec4<i32> padding
 
     private static readonly string Wgsl = @"
@@ -31,9 +31,61 @@ const SLOT_WORDS: u32 = " + GridStore.WordsPerSlot + @"u;
 const EMPTY_DISPLAY: u32 = 0x3000u;   // no light storage: full sun, no light, no AO
 
 // sunDir.w: sun strength (SunLight.Strength). lightParams.x: ray AO strength, .y: 1 = reference light path (see
-// shadeFast), .z: ambient (0-1), .w unused.
-struct Camera { view: mat4x4<f32>, proj: mat4x4<f32>, sunDir: vec4<f32>, lightParams: vec4<f32> };
+// shadeFast), .z: ambient (0-1), .w unused. camPos.xyz: camera world position. fog: horizontal start/end, vertical
+// start/end (blocks from the camera). zenith/horizon.rgb: the sky gradient (see SkySettings).
+struct Camera {
+    view: mat4x4<f32>, proj: mat4x4<f32>, sunDir: vec4<f32>, lightParams: vec4<f32>,
+    camPos: vec4<f32>, fog: vec4<f32>, zenith: vec4<f32>, horizon: vec4<f32>,
+};
 @group(0) @binding(0) var<uniform> camera: Camera;
+
+// Sky colour seen along world direction dir (unit): horizon haze blending up to the zenith colour, deepening a
+// little below the horizon (the open void under the islands) so looking down doesn't read as flat grey, plus a
+// soft glow around the sun. The sun disc itself is added only by fs_sky, so fogged terrain in front of the sun
+// picks up the glow but not a disc.
+fn skyColor(dir: vec3<f32>) -> vec3<f32> {
+    let up   = clamp(dir.y, -1.0, 1.0);
+    let hz   = camera.horizon.rgb;
+    let zn   = camera.zenith.rgb;
+    var c    = mix(hz, zn, sqrt(max(up, 0.0)));
+    c        = mix(c, mix(hz, zn, 0.35), pow(max(-up, 0.0), 0.6));
+    let toSun = max(dot(dir, -camera.sunDir.xyz), 0.0);
+    let glow  = 0.35 * pow(toSun, 8.0) + 0.25 * pow(toSun, 64.0);
+    return c + vec3<f32>(1.0, 0.9, 0.7) * glow * camera.sunDir.w;
+}
+
+// Fades a lit surface colour at worldPos into the sky behind it. Horizontal and vertical distance are faded
+// separately because the loaded world is a box much shorter than it is wide (see SkySettings); either one
+// reaching its end hides the surface completely, which is where the loaded world stops.
+fn applyFog(color: vec3<f32>, worldPos: vec3<f32>) -> vec3<f32> {
+    let d = worldPos - camera.camPos.xyz;
+    let f = max(smoothstep(camera.fog.x, camera.fog.y, length(d.xz)),
+                smoothstep(camera.fog.z, camera.fog.w, abs(d.y)));
+    return mix(color, skyColor(normalize(d)), f);
+}
+
+// Background: one full-screen triangle at the far plane, drawn after the world with depth test LessEqual so it only
+// shades pixels nothing else covered. Each vertex carries its world-space view ray (camera rotation only).
+struct SkyOut { @builtin(position) pos: vec4<f32>, @location(0) dir: vec3<f32> };
+
+@vertex
+fn vs_sky(@builtin(vertex_index) i: u32) -> SkyOut {
+    let ndc = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u)) * 2.0 - 1.0;
+    let viewRay = vec3<f32>(ndc.x / camera.proj[0][0], ndc.y / camera.proj[1][1], -1.0);
+    let rot = mat3x3<f32>(camera.view[0].xyz, camera.view[1].xyz, camera.view[2].xyz);
+    var o: SkyOut;
+    o.pos = vec4<f32>(ndc, 1.0, 1.0);
+    o.dir = transpose(rot) * viewRay;
+    return o;
+}
+
+@fragment
+fn fs_sky(in: SkyOut) -> @location(0) vec4<f32> {
+    let dir   = normalize(in.dir);
+    let toSun = dot(dir, -camera.sunDir.xyz);
+    let disc  = smoothstep(0.9992, 0.9996, toSun) * camera.sunDir.w;
+    return vec4<f32>(skyColor(dir) + vec3<f32>(1.0, 0.95, 0.85) * disc, 1.0);
+}
 
 // model: world transform. chunk: this chunk's coordinate in its grid. grid: the grid's index in the GridStore, or
 // -1 for a non-chunk draw (drawn full-bright).
@@ -65,6 +117,7 @@ struct VSOut {
     @location(2)       localPos:    vec3<f32>,
     @location(3)       localNormal: vec3<f32>,
     @location(4)       uv:          vec3<f32>,
+    @location(5)       worldPos:    vec3<f32>,
 };
 
 @vertex
@@ -75,7 +128,9 @@ fn vs_main(
     @location(3) uv:       vec3<f32>
 ) -> VSOut {
     var o: VSOut;
-    o.pos         = camera.proj * camera.view * model.model * vec4<f32>(position, 1.0);
+    let world     = model.model * vec4<f32>(position, 1.0);
+    o.pos         = camera.proj * camera.view * world;
+    o.worldPos    = world.xyz;
     o.color       = color;
     o.worldNormal = (model.model * vec4<f32>(normal, 0.0)).xyz;
     o.localPos    = position;
@@ -414,7 +469,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // Ambient occlusion darkens inner corners / block junctions; lerp from AO_MIN so corners aren't pure black.
     let aoFactor = mix(AO_MIN, 1.0, ao);
 
-    return vec4<f32>(baseColor * lit * aoFactor, 1.0);
+    return vec4<f32>(applyFog(baseColor * lit * aoFactor, in.worldPos), 1.0);
 }
 ";
 
@@ -430,6 +485,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     private RenderPipeline* _pipeline;
     private RenderPipeline* _wireframePipeline;
     private RenderPipeline* _hudPipeline;
+    private RenderPipeline* _skyPipeline;
 
     // Block texture array (TextureAtlas → GPU). Constructed with a 1x1 white fallback so BeginFrame
     // always has a valid group-3 bind group; LoadTextureAtlas replaces it with the real spritesheet.
@@ -488,6 +544,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         _pipeline          = CreatePipeline(PrimitiveTopology.TriangleList, CullMode.Back);
         _wireframePipeline = CreatePipeline(PrimitiveTopology.LineList,     CullMode.None);
         _hudPipeline       = CreatePipeline(PrimitiveTopology.TriangleList, CullMode.None, depthTest: false);
+        _skyPipeline       = CreateSkyPipeline();
 
         _cameraBuffer    = GpuBuffer.CreateUniform(ctx, CameraSize);
         _hudCameraBuffer = GpuBuffer.CreateUniform(ctx, CameraSize);
@@ -613,6 +670,49 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
                 StripIndexFormat = IndexFormat.Undefined,
                 FrontFace        = FrontFace.Ccw,
                 CullMode         = cullMode,
+            },
+            DepthStencil = &depth,
+            Multisample  = new MultisampleState { Count = 1, Mask = ~0u, AlphaToCoverageEnabled = false },
+            Fragment     = &fragmentState,
+        };
+        var pipeline = _api.DeviceCreateRenderPipeline(_ctx.Device, &desc);
+
+        SilkMarshal.Free((nint)vsEntry);
+        SilkMarshal.Free((nint)fsEntry);
+        return pipeline;
+    }
+
+    /// <summary>The background pass (vs_sky/fs_sky): a vertex-buffer-free full-screen triangle at the far plane that
+    /// only fills pixels still at the cleared depth, without writing depth.</summary>
+    private RenderPipeline* CreateSkyPipeline()
+    {
+        var vsEntry = (byte*)SilkMarshal.StringToPtr("vs_sky", NativeStringEncoding.UTF8);
+        var fsEntry = (byte*)SilkMarshal.StringToPtr("fs_sky", NativeStringEncoding.UTF8);
+
+        var vertexState   = new VertexState { Module = _shader, EntryPoint = vsEntry, BufferCount = 0, Buffers = null };
+        var colorTarget   = new ColorTargetState { Format = _ctx.SurfaceFormat, Blend = null, WriteMask = ColorWriteMask.All };
+        var fragmentState = new FragmentState { Module = _shader, EntryPoint = fsEntry, TargetCount = 1, Targets = &colorTarget };
+
+        var keep  = StencilOperation.Keep;
+        var depth = new DepthStencilState
+        {
+            Format            = _ctx.DepthFormat,
+            DepthWriteEnabled = false,
+            DepthCompare      = CompareFunction.LessEqual,
+            StencilFront = new StencilFaceState { Compare = CompareFunction.Always, FailOp = keep, DepthFailOp = keep, PassOp = keep },
+            StencilBack  = new StencilFaceState { Compare = CompareFunction.Always, FailOp = keep, DepthFailOp = keep, PassOp = keep },
+        };
+
+        var desc = new RenderPipelineDescriptor
+        {
+            Layout    = _pipelineLayout,
+            Vertex    = vertexState,
+            Primitive = new PrimitiveState
+            {
+                Topology         = PrimitiveTopology.TriangleList,
+                StripIndexFormat = IndexFormat.Undefined,
+                FrontFace        = FrontFace.Ccw,
+                CullMode         = CullMode.None,
             },
             DepthStencil = &depth,
             Multisample  = new MultisampleState { Count = 1, Mask = ~0u, AlphaToCoverageEnabled = false },
@@ -781,6 +881,24 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     }
 
     /// <summary>
+    /// Fills every pixel the world didn't cover with the sky gradient and sun (see the shader's fs_sky). Call after
+    /// the world draws, so the depth test skips covered pixels, and before overlays and the HUD.
+    /// </summary>
+    public void DrawSky()
+    {
+        if (_drawIndex >= MaxObjects) return;
+
+        // The sky shader only reads the camera, but the shared pipeline layout needs group 1 bound for any draw
+        // (it isn't yet if no chunk was drawn this frame).
+        uint dynOffset = StageModel(ModelUniform.Default(Mat4.Identity));
+        _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset);
+        _api.RenderPassEncoderSetPipeline(_pass, _skyPipeline);
+        _api.RenderPassEncoderDraw(_pass, 3, 1, 0, 0);
+        _api.RenderPassEncoderSetPipeline(_pass, WireframeMode ? _wireframePipeline : _pipeline);
+        _drawIndex++;
+    }
+
+    /// <summary>
     /// Switches to the HUD pipeline (depth always passes, no depth writes) and binds the identity camera.
     /// Uses a dedicated buffer that never changes, so the world camera uniform is not touched. HUD draws have no
     /// grid, so they render full-bright.
@@ -846,7 +964,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             DepthSlice = uint.MaxValue, // WGPU_DEPTH_SLICE_UNDEFINED
             LoadOp = LoadOp.Clear,
             StoreOp = StoreOp.Store,
-            // Clear to a sky-blue colour
+            // Sky blue; DrawSky paints over whatever the world leaves uncovered.
             ClearValue = new Color { R = 0.10, G = 0.3078, B = 0.4804, A = 1.0 },
         };
         var depthAtt = new RenderPassDepthStencilAttachment
@@ -955,6 +1073,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         if (_atlasSampler     != null) _api.SamplerRelease(_atlasSampler);
         if (_atlasTextureView != null) _api.TextureViewRelease(_atlasTextureView);
         if (_atlasTexture     != null) _api.TextureRelease(_atlasTexture);
+        if (_skyPipeline        != null) _api.RenderPipelineRelease(_skyPipeline);
         if (_hudPipeline        != null) _api.RenderPipelineRelease(_hudPipeline);
         if (_wireframePipeline  != null) _api.RenderPipelineRelease(_wireframePipeline);
         if (_pipeline           != null) _api.RenderPipelineRelease(_pipeline);

@@ -55,7 +55,18 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
             _renderer.WireframeMode = wireframe;
         ImGui.Checkbox("Draw chunks front to back", ref _sortFrontToBack);
         ImGui.Checkbox("Reference (slow) light + AO shader path", ref _referenceLighting);
+
+        ImGui.SeparatorText("Sky & fog");
+        ImGui.Checkbox("Distance fog", ref SkySettings.FogEnabled);
+        ImGui.SliderFloat("Fog start (horizontal)", ref SkySettings.FogStartFraction, 0f, 0.95f);
+        ImGui.SliderFloat("Fog start (vertical)", ref SkySettings.VerticalFogStartFraction, 0f, 0.95f);
+        ImGui.TextDisabled($"Fraction of the loaded distance ({SkySettings.LoadedHorizontal:F0} blocks across, " +
+                           $"{SkySettings.LoadedVertical:F0} up/down); fog is total at the edge.");
+        ImGui.ColorEdit3("Zenith", ref SkySettings.ZenithColor);
+        ImGui.ColorEdit3("Horizon / fog", ref SkySettings.HorizonColor);
     }
+
+    private static Vector3D<float> ToVector3D(System.Numerics.Vector3 v) => new(v.X, v.Y, v.Z);
 
     public void Update(float dt)
     {
@@ -74,7 +85,23 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
             RayAoStrength  = RayLightingSettings.AoStrength,
             Ambient        = RayLightingSettings.Ambient,
             ReferenceLighting = _referenceLighting ? 1f : 0f,
+            CameraPosition = camTransform.Position,
+            ZenithColor    = ToVector3D(SkySettings.ZenithColor),
+            HorizonColor   = ToVector3D(SkySettings.HorizonColor),
         };
+        if (SkySettings.FogEnabled)
+        {
+            uniform.FogHorizontalEnd   = SkySettings.LoadedHorizontal;
+            uniform.FogHorizontalStart = SkySettings.LoadedHorizontal * SkySettings.FogStartFraction;
+            uniform.FogVerticalEnd     = SkySettings.LoadedVertical;
+            uniform.FogVerticalStart   = SkySettings.LoadedVertical * SkySettings.VerticalFogStartFraction;
+        }
+        else
+        {
+            // Past the far plane: never reached, so nothing fogs.
+            uniform.FogHorizontalStart = uniform.FogVerticalStart = 1e8f;
+            uniform.FogHorizontalEnd   = uniform.FogVerticalEnd   = 2e8f;
+        }
 
         if (!_renderer.BeginFrame())
         {
@@ -107,6 +134,9 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
         if (_sortFrontToBack) _draws.Sort(NearestFirst);
         foreach (var d in _draws)
             _renderer.DrawMesh(d.Mesh, d.Model, d.Grid, d.Chunk);
+
+        // Sky after the world, so it only shades the pixels the world left uncovered.
+        _renderer.DrawSky();
 
         // Wireframe overlays drawn on top (pipeline switches mid-pass then restores).
         foreach (ref readonly Entity e in _wireframes.GetEntities())

@@ -1,6 +1,7 @@
 using System.Linq;
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Gui;
+using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Voxels;
 using ClearSkies.Engine.Generation;
 using DefaultEcs;
@@ -50,6 +51,10 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         _xzRadius  = xzRadius;
         _yRadius   = yRadius;
         _offsetsByDistance = BuildOffsetsByDistance(xzRadius, yRadius);
+
+        // The camera is somewhere inside the centre chunk, so the load region's nearest edge is at least
+        // radius * chunk size away; the distance fog is fitted to fade out by there.
+        SkySettings.SetLoadedExtent(xzRadius * ChunkData.Size, yRadius * ChunkData.Size);
     }
 
     private static (int dx, int dy, int dz)[] BuildOffsetsByDistance(int xzRadius, int yRadius)
