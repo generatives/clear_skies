@@ -563,7 +563,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         _wireframePipeline = CreatePipeline(PrimitiveTopology.LineList,     CullMode.None);
         _hudPipeline       = CreatePipeline(PrimitiveTopology.TriangleList, CullMode.None, depthTest: false);
         _skyPipeline       = CreateSkyPipeline();
-        _cloudPipeline     = CreatePipeline(PrimitiveTopology.TriangleList, CullMode.Back, fragmentEntry: "fs_cloud");
+        _cloudPipeline     = CreatePipeline(PrimitiveTopology.TriangleList, CullMode.None, fragmentEntry: "fs_cloud");
 
         _cameraBuffer    = GpuBuffer.CreateUniform(ctx, CameraSize);
         _hudCameraBuffer = GpuBuffer.CreateUniform(ctx, CameraSize);
