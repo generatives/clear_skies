@@ -16,8 +16,12 @@ public class ChunkVolume
     private protected readonly Dictionary<ChunkPosition, ChunkEntry> _chunks = new();
     protected readonly World _world;
 
-    /// <summary>GPU-resident buffers for the entire volume. Created/resized by GpuResidencySystem.</summary>
-    internal VolumeGpuResources? VolumeGpu { get; set; }
+    /// <summary>This volume's registration in the shared GPU voxel storage (see <see cref="GridStore"/>), kept in
+    /// sync by GpuResidencySystem.</summary>
+    public GridHandle Gpu { get; } = new();
+
+    /// <summary>Chunks removed since GpuResidencySystem last drained this, so their GPU storage is released.</summary>
+    internal List<ChunkPosition> RemovedChunks { get; } = new();
 
     /// <summary>Current axis-aligned bounding box of loaded chunks (inclusive).</summary>
     internal ChunkPosition BoundsMin { get; private set; }
@@ -79,16 +83,15 @@ public class ChunkVolume
         entry.NeedsRemesh         = true;
         entry.NeedsRecollide      = true;
         entry.NeedsGpuUpload      = true;
-        entry.NeedsFlood          = true;
         entry.PackedOpacityWords  = null; // block data actually changed -- cached opacity is stale
 
-        // Adjacent-chunk face-cull + flood invalidation.
-        if (lx == 0)                  TryMarkBoth(cp.Offset(-1,  0,  0));
-        if (lx == ChunkData.Size - 1) TryMarkBoth(cp.Offset( 1,  0,  0));
-        if (ly == 0)                  TryMarkBoth(cp.Offset( 0, -1,  0));
-        if (ly == ChunkData.Size - 1) TryMarkBoth(cp.Offset( 0,  1,  0));
-        if (lz == 0)                  TryMarkBoth(cp.Offset( 0,  0, -1));
-        if (lz == ChunkData.Size - 1) TryMarkBoth(cp.Offset( 0,  0,  1));
+        // Adjacent-chunk face-cull invalidation.
+        if (lx == 0)                  TryMark(cp.Offset(-1,  0,  0));
+        if (lx == ChunkData.Size - 1) TryMark(cp.Offset( 1,  0,  0));
+        if (ly == 0)                  TryMark(cp.Offset( 0, -1,  0));
+        if (ly == ChunkData.Size - 1) TryMark(cp.Offset( 0,  1,  0));
+        if (lz == 0)                  TryMark(cp.Offset( 0,  0, -1));
+        if (lz == ChunkData.Size - 1) TryMark(cp.Offset( 0,  0,  1));
     }
 
     public void SetMesh(ChunkPosition pos, GpuMesh mesh)
@@ -99,9 +102,9 @@ public class ChunkVolume
         entry.NeedsRemesh = false;
         entry.Entity.Set(new MeshRenderer
         {
-            Mesh      = mesh,
-            VolumeGpu = VolumeGpu,
-            ChunkPos  = pos,
+            Mesh     = mesh,
+            Grid     = Gpu,
+            ChunkPos = pos,
         });
     }
 
@@ -164,12 +167,6 @@ public class ChunkVolume
         TryMark(pos.Offset( 1,  0,  0)); TryMark(pos.Offset(-1,  0,  0));
         TryMark(pos.Offset( 0,  1,  0)); TryMark(pos.Offset( 0, -1,  0));
         TryMark(pos.Offset( 0,  0,  1)); TryMark(pos.Offset( 0,  0, -1));
-    }
-
-    // Re-mesh + re-flood the neighbour chunk (face-cull and light both need it).
-    private void TryMarkBoth(ChunkPosition pos)
-    {
-        if (_chunks.TryGetValue(pos, out var e)) { e.NeedsRemesh = true; e.NeedsFlood = true; }
     }
 
     protected void TryMark(ChunkPosition pos)

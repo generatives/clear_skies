@@ -1,5 +1,4 @@
 using System.Runtime.InteropServices;
-using ClearSkies.Engine.Math;
 using ClearSkies.Engine.Rendering.WebGpu;
 using Silk.NET.Maths;
 using Silk.NET.WebGPU;
@@ -8,217 +7,151 @@ using ComputePipeline = ClearSkies.Engine.Rendering.WebGpu.ComputePipeline;
 namespace ClearSkies.Engine.Voxels;
 
 /// <summary>
-/// One volume's descriptor for <see cref="GpuRayLightPass"/>: its opacity buffer, its voxel&lt;-&gt;world
-/// transforms (rigid — rotation + translation, no scale), and its dimensions. Built fresh each frame by
-/// <c>GpuLightSystem</c> from a <see cref="VolumeGpuResources"/> and the owning grid's physics pose (or
-/// identity pose for the static world).
-/// </summary>
-internal readonly struct RayVolumeSlot
-{
-    public readonly GpuBuffer Opacity;
-    public readonly Mat4 VoxelToWorld;
-    public readonly Mat4 WorldToVoxel;
-    public readonly int VW, VH, VD;
-
-    public RayVolumeSlot(GpuBuffer opacity, Mat4 voxelToWorld, Mat4 worldToVoxel, int vw, int vh, int vd)
-    {
-        Opacity = opacity;
-        VoxelToWorld = voxelToWorld;
-        WorldToVoxel = worldToVoxel;
-        VW = vw; VH = vh; VD = vd;
-    }
-}
-
-/// <summary>
-/// Prototype ray-traced hard-shadow lighting — see the "Multi-Grid Ray-Traced Hard-Shadow Lighting
-/// Prototype" plan doc. Sun visibility only so far: an any-hit DDA ray march against voxel occupancy,
-/// looped across up to <see cref="MaxRayVolumes"/> loaded volumes (static world + ships) at once, so a
-/// ray started in one volume is correctly occluded by another. Replaces the shadow-map + PCF path in
-/// <c>GpuSunVisPass</c> when <c>GpuLightSystem</c>'s ray-traced toggle is on — everything else (AO,
-/// bounce, color, lamp shadows) is deliberately out of scope for this pass; see the plan doc.
+/// Ray-traced voxel lighting over the shared <see cref="GridStore"/>: sun visibility and point-lamp shadows (any-hit
+/// DDA), and bounce light + ray AO (nearest-hit DDA), for every grid at once. A ray is carried into each grid's own
+/// voxel space and walked there, so ships shadow terrain, terrain shadows ships, and lamps on any grid light any
+/// other.
 ///
-/// <para>WGSL has no bindless storage-buffer arrays, so each of the fixed <see cref="MaxRayVolumes"/>
-/// slots gets its own <c>@binding(N)</c> opacity declaration baked into the shader source at construction
-/// time; unused slots (fewer than <see cref="MaxRayVolumes"/> volumes loaded) are padded with a shared
-/// dummy all-zero (never-solid) buffer, so the pipeline never needs rebuilding as the loaded volume count
-/// changes — only which buffers are bound.</para>
+/// <para>Work is a list of light slots (surface bricks) from any grid: one workgroup per brick, 256 threads each
+/// covering two voxels. Every pass writes only its own byte of the voxel's light word (sun 0-7, lamp 8-15, AO 16-23,
+/// bounce 24-31), and passes run as separate submissions, so no word is written by two threads at once.</para>
 /// </summary>
 internal sealed unsafe class GpuRayLightPass : IDisposable
 {
-    /// <summary>Static world + up to this many ships. Keeps this pass's dispatches under WebGPU's
-    /// spec-default 8-storage-buffers-per-stage limit (6 for the sun pass: 5 opacity + 1 output) without
-    /// relying on non-default adapter limits.</summary>
-    public const int MaxRayVolumes = 5;
-
-    /// <summary>Cap on the per-target-volume filtered lamp list <see cref="DispatchLamps"/> uploads.
-    /// Generous for prototype test scenes; truncated (with a one-time log) rather than exceeded.</summary>
-    public const int MaxLampsPerDispatch = 64;
+    /// <summary>Cap on the lamp list <see cref="DispatchLamps"/> uploads; every lamp is tested (distance first)
+    /// by every voxel in the work list. Truncated, with a one-time log, rather than exceeded.</summary>
+    public const int MaxLamps = 256;
 
     private static readonly string Wgsl = @"
+struct GridDesc {
+    v2w: mat4x4<f32>,
+    w2v: mat4x4<f32>,
+    table: vec4<i32>,  // x: chunk-table base, yzw: section dims in chunks (0 = unused descriptor)
+    bmin: vec4<i32>,   // voxel bounds [bmin, bmax) of the grid's chunks, grid space
+    bmax: vec4<i32>,
+};
+
 struct Params {
-    voxelToWorld0: mat4x4<f32>, voxelToWorld1: mat4x4<f32>, voxelToWorld2: mat4x4<f32>, voxelToWorld3: mat4x4<f32>, voxelToWorld4: mat4x4<f32>,
-    worldToVoxel0: mat4x4<f32>, worldToVoxel1: mat4x4<f32>, worldToVoxel2: mat4x4<f32>, worldToVoxel3: mat4x4<f32>, worldToVoxel4: mat4x4<f32>,
-    dims0: vec4<i32>, dims1: vec4<i32>, dims2: vec4<i32>, dims3: vec4<i32>, dims4: vec4<i32>,
     sunDir: vec4<f32>,
-    counts: vec4<i32>, // volumeCount, targetVolIdx, lampCount (unused by sun_main), ambientLevel (0-15, lamp_main only)
-    bricks: vec4<i32>, // x: number of entries in brickList for this dispatch
-    bounce: vec4<f32>, // x: albedo (fraction of incoming light a surface re-emits), y: sun strength (0-1),
-                       // z, w: unused
+    counts: vec4<i32>,  // x: grid descriptor count, y: lamp count, z: work entries this dispatch
+    bounce: vec4<f32>,  // x: albedo (fraction of incoming light a surface re-emits), y: sun strength (0-1)
     bounce2: vec4<f32>, // x: rays per evaluation, y: evaluations per full ray set (cycle)
 };
 
-@group(0) @binding(0) var<storage, read> opacity0: array<u32>;
-@group(0) @binding(1) var<storage, read> opacity1: array<u32>;
-@group(0) @binding(2) var<storage, read> opacity2: array<u32>;
-@group(0) @binding(3) var<storage, read> opacity3: array<u32>;
-@group(0) @binding(4) var<storage, read> opacity4: array<u32>;
-@group(0) @binding(5) var<storage, read_write> sunvis: array<u32>;
-@group(0) @binding(6) var<storage, read_write> light: array<u32>;
+@group(0) @binding(0) var<storage, read> occPool: array<u32>;
+@group(0) @binding(1) var<storage, read> chunkTable: array<vec4<i32>>;
+@group(0) @binding(2) var<storage, read> brickTable: array<u32>;
+@group(0) @binding(3) var<storage, read_write> lightPool: array<u32>;
+@group(0) @binding(4) var<storage, read> slotInfo: array<vec4<i32>>;
+@group(0) @binding(5) var<storage, read> grids: array<GridDesc>;
+@group(0) @binding(6) var<storage, read> work: array<u32>;
 @group(0) @binding(7) var<storage, read> lamps: array<vec4<f32>>; // xyz world pos, w level (also doubles as radius)
 @group(0) @binding(8) var<uniform> p: Params;
-@group(0) @binding(9) var<storage, read> brickList: array<u32>;   // target volume's surface bricks
-// bounce_main only: every volume's light and sun visibility, so a ray can read the light where it hits any
-// grid. Light is read_write because the target volume's own buffer is one of them (a buffer can't be bound
-// twice when one binding is writable); only the target's is written.
-@group(0) @binding(10) var<storage, read_write> lightv0: array<u32>;
-@group(0) @binding(11) var<storage, read_write> lightv1: array<u32>;
-@group(0) @binding(12) var<storage, read_write> lightv2: array<u32>;
-@group(0) @binding(13) var<storage, read_write> lightv3: array<u32>;
-@group(0) @binding(14) var<storage, read_write> lightv4: array<u32>;
-@group(0) @binding(15) var<storage, read> sunv0: array<u32>;
-@group(0) @binding(16) var<storage, read> sunv1: array<u32>;
-@group(0) @binding(17) var<storage, read> sunv2: array<u32>;
-@group(0) @binding(18) var<storage, read> sunv3: array<u32>;
-@group(0) @binding(19) var<storage, read> sunv4: array<u32>;
 
-const WPC: i32 = " + VolumeGpuResources.WordsPerChunk + @";
+const WPC: i32 = " + GridStore.WordsPerChunk + @";
+const OCC_UNLOADED: i32 = " + GridStore.OccUnloaded + @";
+const OCC_ALL_SOLID: i32 = " + GridStore.OccAllSolid + @";
+const NO_SURFACE: u32 = " + GridStore.NoSurface + @"u;
 const SUN_MAX_DISTANCE: f32 = 2000.0;
 const SURFACE_OFFSET: f32 = 0.4;
 const SUN_SAMPLES: i32 = 4;      // sun rays per surface voxel: 1 (from the nudged centre) or up to 4 (offset table size)
 const SUN_JITTER: f32 = 0.25;    // how far (voxels) each sample point is offset from the nudged centre, per axis
-// Flat ambient for the lamp pass's sky byte (no flood running while this pass is active) now comes from
-// p.counts.w (GpuLightSystem's debug-panel-adjustable ambient level, 0-15), decoupled from
-// VolumeGpuResources.BaseSkyLevel (the old flood's ambient, still used when the toggle is off).
 // ddaMarch: axes within this of the step minimum are treated as tied (corner-cutting fix). Generous, not a
 // tight float-epsilon — lamp/surface positions are usually voxel-centred, so exact ties are the COMMON
 // case, and the world-to-local transform's own rounding can perturb an exact tie past a tiny epsilon.
 // Widening this costs a few extra (correct) opacity reads on genuinely near-tied rays; it can't cause false
 // blocking, since the extra checks still test real occupancy, not a blanket geometric rule.
 const TIE_EPS: f32 = 1e-2;
+const DDA_MAX_STEPS: i32 = 1024;
 
-// Chunk-major opacity bit test (matches GpuLightFlood.isOpaque / GpuSunVisPass.isOpaque), one copy per
-// fixed volume slot since WGSL can't parameterize which storage binding a function reads.
-fn isOpaque0(x: i32, y: i32, z: i32) -> bool {
-    if (x < 0 || x >= p.dims0.x || y < 0 || y >= p.dims0.y || z < 0 || z >= p.dims0.z) { return false; }
-    let dx = p.dims0.x >> 5; let dy = p.dims0.y >> 5;
-    let slot = (x >> 5) + dx * ((y >> 5) + dy * (z >> 5));
-    let word = slot * WPC + ((y & 31) + 32 * (z & 31));
-    return ((opacity0[u32(word)] >> u32(x & 31)) & 1u) == 1u;
-}
-fn isOpaque1(x: i32, y: i32, z: i32) -> bool {
-    if (x < 0 || x >= p.dims1.x || y < 0 || y >= p.dims1.y || z < 0 || z >= p.dims1.z) { return false; }
-    let dx = p.dims1.x >> 5; let dy = p.dims1.y >> 5;
-    let slot = (x >> 5) + dx * ((y >> 5) + dy * (z >> 5));
-    let word = slot * WPC + ((y & 31) + 32 * (z & 31));
-    return ((opacity1[u32(word)] >> u32(x & 31)) & 1u) == 1u;
-}
-fn isOpaque2(x: i32, y: i32, z: i32) -> bool {
-    if (x < 0 || x >= p.dims2.x || y < 0 || y >= p.dims2.y || z < 0 || z >= p.dims2.z) { return false; }
-    let dx = p.dims2.x >> 5; let dy = p.dims2.y >> 5;
-    let slot = (x >> 5) + dx * ((y >> 5) + dy * (z >> 5));
-    let word = slot * WPC + ((y & 31) + 32 * (z & 31));
-    return ((opacity2[u32(word)] >> u32(x & 31)) & 1u) == 1u;
-}
-fn isOpaque3(x: i32, y: i32, z: i32) -> bool {
-    if (x < 0 || x >= p.dims3.x || y < 0 || y >= p.dims3.y || z < 0 || z >= p.dims3.z) { return false; }
-    let dx = p.dims3.x >> 5; let dy = p.dims3.y >> 5;
-    let slot = (x >> 5) + dx * ((y >> 5) + dy * (z >> 5));
-    let word = slot * WPC + ((y & 31) + 32 * (z & 31));
-    return ((opacity3[u32(word)] >> u32(x & 31)) & 1u) == 1u;
-}
-fn isOpaque4(x: i32, y: i32, z: i32) -> bool {
-    if (x < 0 || x >= p.dims4.x || y < 0 || y >= p.dims4.y || z < 0 || z >= p.dims4.z) { return false; }
-    let dx = p.dims4.x >> 5; let dy = p.dims4.y >> 5;
-    let slot = (x >> 5) + dx * ((y >> 5) + dy * (z >> 5));
-    let word = slot * WPC + ((y & 31) + 32 * (z & 31));
-    return ((opacity4[u32(word)] >> u32(x & 31)) & 1u) == 1u;
+// ── Storage lookups ───────────────────────────────────────────────────────────────────────────────────────
+
+// a mod n in [0, n). Unsigned arithmetic only: signed % returns wrong results for negative operands on at least
+// one backend (measured: -1887 % 19 gave 0), which broke every lookup at negative coordinates.
+fn wrapi(a: i32, n: i32) -> i32 {
+    let un = u32(n);
+    if (a >= 0) { return i32(u32(a) % un); }
+    return n - 1 - i32(u32(-(a + 1)) % un);
 }
 
-fn isOpaqueInVolume(volIdx: i32, x: i32, y: i32, z: i32) -> bool {
-    switch (volIdx) {
-        case 0: { return isOpaque0(x, y, z); }
-        case 1: { return isOpaque1(x, y, z); }
-        case 2: { return isOpaque2(x, y, z); }
-        case 3: { return isOpaque3(x, y, z); }
-        case 4: { return isOpaque4(x, y, z); }
-        default: { return false; }
+// Chunk-table entry index of chunk c in grid g, or -1 when that chunk isn't stored. The table wraps, so the
+// entry's own coordinate tag decides whether it really is this chunk.
+fn entryOf(g: i32, c: vec3<i32>) -> i32 {
+    let t = grids[g].table;
+    if (t.y <= 0) { return -1; }
+    let idx = t.x + wrapi(c.x, t.y) + t.y * (wrapi(c.y, t.z) + t.z * wrapi(c.z, t.w));
+    let e = chunkTable[idx];
+    if (e.y != c.x || e.z != c.y || e.w != c.z) { return -1; }
+    return idx;
+}
+
+fn occCode(g: i32, c: vec3<i32>) -> i32 {
+    let i = entryOf(g, c);
+    if (i < 0) { return OCC_UNLOADED; }
+    return chunkTable[i].x;
+}
+
+// Voxel v (grid space) against its chunk's occupancy code: a pool slot, or uniform / unloaded.
+fn solidIn(code: i32, v: vec3<i32>) -> bool {
+    if (code >= 0) {
+        let l = v & vec3<i32>(31);
+        return ((occPool[u32(code * WPC + l.y + 32 * l.z)] >> u32(l.x)) & 1u) == 1u;
     }
+    return code == OCC_ALL_SOLID;
 }
 
-fn dimsOf(volIdx: i32) -> vec3<i32> {
-    switch (volIdx) {
-        case 0: { return p.dims0.xyz; }
-        case 1: { return p.dims1.xyz; }
-        case 2: { return p.dims2.xyz; }
-        case 3: { return p.dims3.xyz; }
-        case 4: { return p.dims4.xyz; }
-        default: { return vec3<i32>(0, 0, 0); }
-    }
+fn isSolid(g: i32, v: vec3<i32>) -> bool { return solidIn(occCode(g, v >> vec3<u32>(5u)), v); }
+
+// As isSolid, re-looking the chunk up only when v is in a different chunk from the last call (DDA loops).
+fn solidCached(g: i32, v: vec3<i32>, cc: ptr<function, vec3<i32>>, code: ptr<function, i32>) -> bool {
+    let c = v >> vec3<u32>(5u);
+    if (any(c != *cc)) { *cc = c; *code = occCode(g, c); }
+    return solidIn(*code, v);
 }
 
-fn voxelToWorldOf(volIdx: i32) -> mat4x4<f32> {
-    switch (volIdx) {
-        case 0: { return p.voxelToWorld0; }
-        case 1: { return p.voxelToWorld1; }
-        case 2: { return p.voxelToWorld2; }
-        case 3: { return p.voxelToWorld3; }
-        case 4: { return p.voxelToWorld4; }
-        default: { return mat4x4<f32>(vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0)); }
-    }
-}
-
-fn worldToVoxelOf(volIdx: i32) -> mat4x4<f32> {
-    switch (volIdx) {
-        case 0: { return p.worldToVoxel0; }
-        case 1: { return p.worldToVoxel1; }
-        case 2: { return p.worldToVoxel2; }
-        case 3: { return p.worldToVoxel3; }
-        case 4: { return p.worldToVoxel4; }
-        default: { return mat4x4<f32>(vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0)); }
-    }
+// Index into lightPool of voxel v in grid g, or -1 if it has no light storage.
+fn lightIndex(g: i32, v: vec3<i32>) -> i32 {
+    let i = entryOf(g, v >> vec3<u32>(5u));
+    if (i < 0) { return -1; }
+    let l = v & vec3<i32>(31);
+    let b = (l.x >> 3u) + 4 * ((l.y >> 3u) + 4 * (l.z >> 3u));
+    let s = brickTable[u32(i * 64 + b)];
+    if (s == NO_SURFACE) { return -1; }
+    let lb = l & vec3<i32>(7);
+    return i32(s) * 512 + lb.x + 8 * (lb.y + 8 * lb.z);
 }
 
 struct ClipResult { hit: bool, t0: f32, t1: f32 };
 
-// Ray/AABB slab test against [0,dims), intersected with the caller's [tLo,tHi]. o/d are already in this
-// volume's own local (voxel) space. Unrolled per axis (no dynamic vector-component indexing).
-fn slabClip(o: vec3<f32>, d: vec3<f32>, dims: vec3<i32>, tLo: f32, tHi: f32) -> ClipResult {
+// Ray/AABB slab test against [lo,hi), intersected with the caller's [tLo,tHi]. o/d are already in the grid's
+// own voxel space. Unrolled per axis (no dynamic vector-component indexing).
+fn slabClip(o: vec3<f32>, d: vec3<f32>, lo: vec3<f32>, hi: vec3<f32>, tLo: f32, tHi: f32) -> ClipResult {
     var t0 = tLo;
     var t1 = tHi;
 
     if (abs(d.x) < 1e-8) {
-        if (o.x < 0.0 || o.x > f32(dims.x)) { return ClipResult(false, 0.0, 0.0); }
+        if (o.x < lo.x || o.x > hi.x) { return ClipResult(false, 0.0, 0.0); }
     } else {
-        var ta = (0.0 - o.x) / d.x;
-        var tb = (f32(dims.x) - o.x) / d.x;
+        var ta = (lo.x - o.x) / d.x;
+        var tb = (hi.x - o.x) / d.x;
         if (ta > tb) { let tmp = ta; ta = tb; tb = tmp; }
         t0 = max(t0, ta); t1 = min(t1, tb);
         if (t0 > t1) { return ClipResult(false, 0.0, 0.0); }
     }
     if (abs(d.y) < 1e-8) {
-        if (o.y < 0.0 || o.y > f32(dims.y)) { return ClipResult(false, 0.0, 0.0); }
+        if (o.y < lo.y || o.y > hi.y) { return ClipResult(false, 0.0, 0.0); }
     } else {
-        var ta = (0.0 - o.y) / d.y;
-        var tb = (f32(dims.y) - o.y) / d.y;
+        var ta = (lo.y - o.y) / d.y;
+        var tb = (hi.y - o.y) / d.y;
         if (ta > tb) { let tmp = ta; ta = tb; tb = tmp; }
         t0 = max(t0, ta); t1 = min(t1, tb);
         if (t0 > t1) { return ClipResult(false, 0.0, 0.0); }
     }
     if (abs(d.z) < 1e-8) {
-        if (o.z < 0.0 || o.z > f32(dims.z)) { return ClipResult(false, 0.0, 0.0); }
+        if (o.z < lo.z || o.z > hi.z) { return ClipResult(false, 0.0, 0.0); }
     } else {
-        var ta = (0.0 - o.z) / d.z;
-        var tb = (f32(dims.z) - o.z) / d.z;
+        var ta = (lo.z - o.z) / d.z;
+        var tb = (hi.z - o.z) / d.z;
         if (ta > tb) { let tmp = ta; ta = tb; tb = tmp; }
         t0 = max(t0, ta); t1 = min(t1, tb);
         if (t0 > t1) { return ClipResult(false, 0.0, 0.0); }
@@ -226,15 +159,20 @@ fn slabClip(o: vec3<f32>, d: vec3<f32>, dims: vec3<i32>, tLo: f32, tHi: f32) -> 
     return ClipResult(true, t0, t1);
 }
 
-// Amanatides-Woo DDA over [t0,t1] of a ray already clipped to this volume's box. Boundaries are
-// recomputed from the origin every step (not accumulated with a running delta) — accumulation drifts over
-// long rays, and sun rays run the length of the loaded volume. Any-hit: returns on the first occupied
-// voxel. Bounded to 512 steps (generous for any realistic window) so a DDA bug hangs a ray, not the GPU.
-fn ddaMarch(volIdx: i32, o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, dims: vec3<i32>, skipStart: bool) -> bool {
+fn inBounds(v: vec3<i32>, lo: vec3<i32>, hi: vec3<i32>) -> bool {
+    return all(v >= lo) && all(v < hi);
+}
+
+// Amanatides-Woo DDA over [t0,t1] of a ray already clipped to grid g's box. Boundaries are recomputed from the
+// origin every step (not accumulated with a running delta) — accumulation drifts over long rays, and sun rays
+// run the length of the loaded area. Any-hit: returns on the first occupied voxel. Bounded to DDA_MAX_STEPS so a
+// DDA bug hangs a ray, not the GPU.
+fn ddaMarch(g: i32, o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, lo: vec3<i32>, hi: vec3<i32>, skipStart: bool) -> bool {
     if (t0 >= t1) { return false; }
-    let dimsF = vec3<f32>(dims);
-    let p0 = clamp(o + d * t0, vec3<f32>(0.0), dimsF - vec3<f32>(0.0001));
-    var voxel = clamp(vec3<i32>(floor(p0)), vec3<i32>(0), dims - vec3<i32>(1));
+    let p0 = clamp(o + d * t0, vec3<f32>(lo), vec3<f32>(hi) - vec3<f32>(0.0001));
+    var voxel = clamp(vec3<i32>(floor(p0)), lo, hi - vec3<i32>(1));
+    var cc = vec3<i32>(voxel >> vec3<u32>(5u));
+    var code = occCode(g, cc);
 
     let stepX: i32 = select(-1, 1, d.x > 0.0);
     let stepY: i32 = select(-1, 1, d.y > 0.0);
@@ -246,9 +184,9 @@ fn ddaMarch(volIdx: i32, o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, dims: vec
 
     // skipStart: the ray begins inside a cell that must not count as its own occluder (a lamp's own opaque
     // block). Skipping that one cell, rather than shortening the ray, keeps the exit from it fully tested.
-    if (!skipStart && isOpaqueInVolume(volIdx, voxel.x, voxel.y, voxel.z)) { return true; }
+    if (!skipStart && solidCached(g, voxel, &cc, &code)) { return true; }
 
-    for (var iter = 0; iter < 512; iter = iter + 1) {
+    for (var iter = 0; iter < DDA_MAX_STEPS; iter = iter + 1) {
         let tMin = min(tMaxX, min(tMaxY, tMaxZ));
         if (tMin >= t1) { return false; }
 
@@ -259,10 +197,7 @@ fn ddaMarch(volIdx: i32, o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, dims: vec
         // open only along its own direction — that rule can't tell a gap between two blocks from a plain
         // hallway wall). Tie detection only fires for a ray whose OWN trajectory is near the critical diagonal
         // angle, so a ray travelling straight down an open corridor never ties and is untouched; only rays
-        // actually grazing a corner get the extra check. TIE_EPS is generous (not a tight float-epsilon)
-        // because lamp/surface positions are usually voxel-centred, so exact ties are the COMMON case here
-        // (rational direction ratios), and the world-to-local transform's rounding can perturb an exact tie
-        // by more than a tiny epsilon.
+        // actually grazing a corner get the extra check.
         let tieX = abs(tMaxX - tMin) < TIE_EPS;
         let tieY = abs(tMaxY - tMin) < TIE_EPS;
         let tieZ = abs(tMaxZ - tMin) < TIE_EPS;
@@ -277,26 +212,26 @@ fn ddaMarch(volIdx: i32, o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, dims: vec
         // cell — a 2-way tie has 2 intermediate cells + 1 diagonal, a 3-way tie has 6 intermediate + 1
         // diagonal. Re-testing the same cell across branches is harmless (just a redundant opacity read).
         if (tieX && tieY) {
-            if (isOpaqueInVolume(volIdx, nvx, voxel.y, voxel.z)) { return true; }
-            if (isOpaqueInVolume(volIdx, voxel.x, nvy, voxel.z)) { return true; }
+            if (solidCached(g, vec3<i32>(nvx, voxel.y, voxel.z), &cc, &code)) { return true; }
+            if (solidCached(g, vec3<i32>(voxel.x, nvy, voxel.z), &cc, &code)) { return true; }
         }
         if (tieX && tieZ) {
-            if (isOpaqueInVolume(volIdx, nvx, voxel.y, voxel.z)) { return true; }
-            if (isOpaqueInVolume(volIdx, voxel.x, voxel.y, nvz)) { return true; }
+            if (solidCached(g, vec3<i32>(nvx, voxel.y, voxel.z), &cc, &code)) { return true; }
+            if (solidCached(g, vec3<i32>(voxel.x, voxel.y, nvz), &cc, &code)) { return true; }
         }
         if (tieY && tieZ) {
-            if (isOpaqueInVolume(volIdx, voxel.x, nvy, voxel.z)) { return true; }
-            if (isOpaqueInVolume(volIdx, voxel.x, voxel.y, nvz)) { return true; }
+            if (solidCached(g, vec3<i32>(voxel.x, nvy, voxel.z), &cc, &code)) { return true; }
+            if (solidCached(g, vec3<i32>(voxel.x, voxel.y, nvz), &cc, &code)) { return true; }
         }
         if (tieX && tieY && tieZ) {
-            if (isOpaqueInVolume(volIdx, nvx, nvy, voxel.z)) { return true; }
-            if (isOpaqueInVolume(volIdx, nvx, voxel.y, nvz)) { return true; }
-            if (isOpaqueInVolume(volIdx, voxel.x, nvy, nvz)) { return true; }
+            if (solidCached(g, vec3<i32>(nvx, nvy, voxel.z), &cc, &code)) { return true; }
+            if (solidCached(g, vec3<i32>(nvx, voxel.y, nvz), &cc, &code)) { return true; }
+            if (solidCached(g, vec3<i32>(voxel.x, nvy, nvz), &cc, &code)) { return true; }
         }
 
         voxel = vec3<i32>(nvx, nvy, nvz);
-        if (voxel.x < 0 || voxel.x >= dims.x || voxel.y < 0 || voxel.y >= dims.y || voxel.z < 0 || voxel.z >= dims.z) { return false; }
-        if (isOpaqueInVolume(volIdx, voxel.x, voxel.y, voxel.z)) { return true; }
+        if (!inBounds(voxel, lo, hi)) { return false; }
+        if (solidCached(g, voxel, &cc, &code)) { return true; }
 
         if (tieX) { tMaxX = select(1e30, ((f32(voxel.x) + select(0.0, 1.0, d.x > 0.0)) - o.x) / d.x, abs(d.x) > 1e-8); }
         if (tieY) { tMaxY = select(1e30, ((f32(voxel.y) + select(0.0, 1.0, d.y > 0.0)) - o.y) / d.y, abs(d.y) > 1e-8); }
@@ -305,58 +240,76 @@ fn ddaMarch(volIdx: i32, o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, dims: vec
     return false;
 }
 
-// Any-hit occlusion test across every loaded volume. worldDir must be unit length; rigid transforms
-// preserve distance, so segLen (a world-space length) bounds the walk identically in every volume's own
-// local space once the direction is rotated into it.
-// skipOrigin: ignore the cell containing worldOrigin in any volume the ray starts inside (clip.t0 == 0) —
-// used for lamp rays, which start at the lamp's own opaque block.
+// Any-hit occlusion test across every grid. worldDir must be unit length; rigid transforms preserve distance, so
+// segLen (a world-space length) bounds the walk identically in every grid's own voxel space once the direction is
+// rotated into it.
+// skipOrigin: ignore the cell containing worldOrigin in any grid the ray starts inside (clip.t0 == 0) — used for
+// lamp rays, which start at the lamp's own opaque block.
 fn anyOccluderAlongSegment(worldOrigin: vec3<f32>, worldDir: vec3<f32>, segLen: f32, skipOrigin: bool) -> bool {
     if (segLen <= 0.0) { return false; }
-    for (var vi = 0; vi < p.counts.x; vi = vi + 1) {
-        let w2v = worldToVoxelOf(vi);
-        let lo = (w2v * vec4<f32>(worldOrigin, 1.0)).xyz;
-        let ld = (w2v * vec4<f32>(worldDir, 0.0)).xyz; // w=0 drops translation: rotation-only direction transform
-        let dims = dimsOf(vi);
-        let clip = slabClip(lo, ld, dims, 0.0, segLen);
+    for (var gi = 0; gi < p.counts.x; gi = gi + 1) {
+        let gd = grids[gi];
+        if (gd.table.y <= 0) { continue; }
+        let lo = (gd.w2v * vec4<f32>(worldOrigin, 1.0)).xyz;
+        let ld = (gd.w2v * vec4<f32>(worldDir, 0.0)).xyz; // w=0 drops translation: rotation-only direction transform
+        let clip = slabClip(lo, ld, vec3<f32>(gd.bmin.xyz), vec3<f32>(gd.bmax.xyz), 0.0, segLen);
         if (!clip.hit) { continue; }
         let skip = skipOrigin && clip.t0 <= 1e-4;
-        if (ddaMarch(vi, lo, ld, clip.t0, clip.t1, dims, skip)) { return true; }
+        if (ddaMarch(gi, lo, ld, clip.t0, clip.t1, gd.bmin.xyz, gd.bmax.xyz, skip)) { return true; }
     }
     return false;
 }
 
-fn sunVoxel(x: i32, y: i32, z: i32) {
-    let ti = p.counts.y;
-    let dims = dimsOf(ti);
-    if (x >= dims.x || y >= dims.y || z >= dims.z) { return; }
-    let i = u32(x + dims.x * (y + dims.y * z));
+// ── Work items ────────────────────────────────────────────────────────────────────────────────────────────
 
-    // Surface-air-voxel-only, exactly like GpuSunVisPass: everything else gets the 255 sentinel the
-    // fragment shader already knows to exclude from its blend rather than treat as lit.
-    if (isOpaqueInVolume(ti, x, y, z)) { sunvis[i] = 255u; return; }
-    let sxn = isOpaqueInVolume(ti, x - 1, y, z); let sxp = isOpaqueInVolume(ti, x + 1, y, z);
-    let syn = isOpaqueInVolume(ti, x, y - 1, z); let syp = isOpaqueInVolume(ti, x, y + 1, z);
-    let szn = isOpaqueInVolume(ti, x, y, z - 1); let szp = isOpaqueInVolume(ti, x, y, z + 1);
-    if (!(sxn || sxp || syn || syp || szn || szp)) { sunvis[i] = 255u; return; }
+struct Brick { g: i32, origin: vec3<i32>, base: i32 }; // base: the brick's first word in lightPool
 
-    // Nudge the sample point toward adjacent solid faces (same as GpuSunVisPass) so contact shadows reach
-    // the foot of a wall instead of being tested from the bare voxel centre.
-    var nudge = vec3<f32>(0.0, 0.0, 0.0);
-    if (sxn) { nudge.x = nudge.x - 1.0; } if (sxp) { nudge.x = nudge.x + 1.0; }
-    if (syn) { nudge.y = nudge.y - 1.0; } if (syp) { nudge.y = nudge.y + 1.0; }
-    if (szn) { nudge.z = nudge.z - 1.0; } if (szp) { nudge.z = nudge.z + 1.0; }
-    let vc = vec3<f32>(f32(x) + 0.5, f32(y) + 0.5, f32(z) + 0.5) + nudge * SURFACE_OFFSET;
+fn brickOf(slot: u32) -> Brick {
+    let info = slotInfo[slot];
+    let b = info.x >> 8u;
+    var br: Brick;
+    br.g = info.x & 255;
+    br.origin = info.yzw * 32 + vec3<i32>(b & 3, (b >> 2u) & 3, b >> 4u) * 8;
+    br.base = i32(slot) * 512;
+    return br;
+}
 
-    // SUN_SAMPLES rays from points spread through the voxel (a tetrahedral pattern, clamped to stay inside
-    // this air cell), stored as the lit fraction. A single binary ray per voxel made a moving caster's shadow
-    // edge jump a whole voxel at a time; fractional coverage moves it in quarter steps, which the fragment
-    // blend then smooths.
+fn surfaceNudge(g: i32, v: vec3<i32>) -> vec3<f32> {
+    var n = vec3<f32>(0.0);
+    if (isSolid(g, v - vec3<i32>(1, 0, 0))) { n.x = n.x - 1.0; } if (isSolid(g, v + vec3<i32>(1, 0, 0))) { n.x = n.x + 1.0; }
+    if (isSolid(g, v - vec3<i32>(0, 1, 0))) { n.y = n.y - 1.0; } if (isSolid(g, v + vec3<i32>(0, 1, 0))) { n.y = n.y + 1.0; }
+    if (isSolid(g, v - vec3<i32>(0, 0, 1))) { n.z = n.z - 1.0; } if (isSolid(g, v + vec3<i32>(0, 0, 1))) { n.z = n.z + 1.0; }
+    return n;
+}
+
+fn hasSolidNeighbour(g: i32, v: vec3<i32>) -> bool {
+    return isSolid(g, v - vec3<i32>(1, 0, 0)) || isSolid(g, v + vec3<i32>(1, 0, 0)) ||
+           isSolid(g, v - vec3<i32>(0, 1, 0)) || isSolid(g, v + vec3<i32>(0, 1, 0)) ||
+           isSolid(g, v - vec3<i32>(0, 0, 1)) || isSolid(g, v + vec3<i32>(0, 0, 1));
+}
+
+// ── Sun ───────────────────────────────────────────────────────────────────────────────────────────────────
+
+// Sun visibility (0-254 lit fraction) of surface air voxels into bits 0-7; everything else gets the 255 'no
+// sample' sentinel the fragment shader excludes from its blend rather than treating as lit.
+fn sunVoxel(g: i32, v: vec3<i32>, li: i32) {
+    let old = lightPool[li] & 0xFFFFFF00u;
+    if (isSolid(g, v) || !hasSolidNeighbour(g, v)) { lightPool[li] = old | 255u; return; }
+
+    // Nudge the sample point toward adjacent solid faces so contact shadows reach the foot of a wall instead of
+    // being tested from the bare voxel centre.
+    let vc = vec3<f32>(v) + vec3<f32>(0.5) + surfaceNudge(g, v) * SURFACE_OFFSET;
+
+    // SUN_SAMPLES rays from points spread through the voxel (a tetrahedral pattern, clamped to stay inside this
+    // air cell), stored as the lit fraction. A single binary ray per voxel made a moving caster's shadow edge
+    // jump a whole voxel at a time; fractional coverage moves it in quarter steps, which the fragment blend then
+    // smooths.
     var offs = array<vec3<f32>, 4>(
         vec3<f32>( 1.0,  1.0,  1.0), vec3<f32>( 1.0, -1.0, -1.0),
         vec3<f32>(-1.0,  1.0, -1.0), vec3<f32>(-1.0, -1.0,  1.0));
-    let cellLo = vec3<f32>(f32(x), f32(y), f32(z)) + vec3<f32>(0.02);
-    let cellHi = vec3<f32>(f32(x), f32(y), f32(z)) + vec3<f32>(0.98);
-    let v2w = voxelToWorldOf(ti);
+    let cellLo = vec3<f32>(v) + vec3<f32>(0.02);
+    let cellHi = vec3<f32>(v) + vec3<f32>(0.98);
+    let v2w = grids[g].v2w;
     var lit = 0u;
     for (var s = 0; s < SUN_SAMPLES; s = s + 1) {
         let jitter = select(0.0, SUN_JITTER, SUN_SAMPLES > 1); // a single ray uses the unjittered nudged centre
@@ -364,83 +317,62 @@ fn sunVoxel(x: i32, y: i32, z: i32) {
         let world = (v2w * vec4<f32>(sp, 1.0)).xyz;
         if (!anyOccluderAlongSegment(world, -p.sunDir.xyz, SUN_MAX_DISTANCE, false)) { lit = lit + 1u; }
     }
-    sunvis[i] = u32(round(f32(lit) * 254.0 / f32(SUN_SAMPLES))); // 0-254; 255 stays the skip sentinel
+    lightPool[li] = old | u32(round(f32(lit) * 254.0 / f32(SUN_SAMPLES)));
 }
 
-// Point-lamp shadows, every lamp against every loaded volume, no same-volume special case: a lamp on this
-// very volume goes through the identical world-space any-hit test as a lamp on another volume entirely.
-// Rays are traced FROM the lamp TO the surface voxel over the full distance, skipping only the lamp's own
-// starting cell. (Shortening the ray by a fixed radius instead let exact 45-degree rays stop inside an open
-// diagonal cell before reaching the lamp cell's edge/corner, so the face blocks covering the lamp were
-// never on the tested segment and light leaked through the diagonals.)
-fn lampVoxel(x: i32, y: i32, z: i32) {
-    let ti = p.counts.y;
-    let ambient: u32 = u32(clamp(p.counts.w, 0, 15));
-    let dims = dimsOf(ti);
-    if (x >= dims.x || y >= dims.y || z >= dims.z) { return; }
-    let i = u32(x + dims.x * (y + dims.y * z));
+// ── Lamps ─────────────────────────────────────────────────────────────────────────────────────────────────
 
-    if (isOpaqueInVolume(ti, x, y, z)) { light[i] = 0u; return; }
+// Point-lamp shadows, every lamp against every grid, no same-grid special case: a lamp on this very grid goes
+// through the identical world-space any-hit test as a lamp on another grid entirely. Rays are traced FROM the
+// lamp TO the surface voxel over the full distance, skipping only the lamp's own starting cell. (Shortening the
+// ray by a fixed radius instead let exact 45-degree rays stop inside an open diagonal cell before reaching the
+// lamp cell's edge/corner, so the face blocks covering the lamp were never on the tested segment and light leaked
+// through the diagonals.) Brightest lamp wins, into bits 8-15.
+fn lampVoxel(g: i32, v: vec3<i32>, li: i32) {
+    let old = lightPool[li] & 0xFFFF00FFu;
+    if (isSolid(g, v) || !hasSolidNeighbour(g, v)) { lightPool[li] = old; return; }
 
-    let sxn = isOpaqueInVolume(ti, x - 1, y, z); let sxp = isOpaqueInVolume(ti, x + 1, y, z);
-    let syn = isOpaqueInVolume(ti, x, y - 1, z); let syp = isOpaqueInVolume(ti, x, y + 1, z);
-    let szn = isOpaqueInVolume(ti, x, y, z - 1); let szp = isOpaqueInVolume(ti, x, y, z + 1);
-    // Bits 16-23 hold the AO pass's occlusion, which this pass keeps: AO is traced on its own schedule.
-    let keep = light[i] & 0xFFFF0000u;
-    if (!(sxn || sxp || syn || syp || szn || szp)) { light[i] = keep | ambient; return; } // deep interior air: flat ambient only
-
-    let world = (voxelToWorldOf(ti) * vec4<f32>(f32(x) + 0.5, f32(y) + 0.5, f32(z) + 0.5, 1.0)).xyz;
-
+    let world = (grids[g].v2w * vec4<f32>(vec3<f32>(v) + vec3<f32>(0.5), 1.0)).xyz;
     var best: u32 = 0u;
-    for (var li = 0; li < p.counts.z; li = li + 1) {
-        let lamp = lamps[li];
+    for (var k = 0; k < p.counts.y; k = k + 1) {
+        let lamp = lamps[k];
         let toLamp = lamp.xyz - world;
         let dist = length(toLamp);
         if (dist > lamp.w) { continue; }               // level doubles as reach radius
-        let contribF = round(lamp.w - dist);            // 1-per-voxel falloff (matches GpuLightFlood.Inject)
-        if (contribF <= 0.0) { continue; }
+        let contribF = round(lamp.w - dist);            // 1-per-voxel falloff
+        if (contribF <= 0.0 || u32(contribF) <= best) { continue; }
 
         if (!anyOccluderAlongSegment(lamp.xyz, -toLamp / dist, dist, true)) {
-            best = max(best, u32(contribF));
+            best = u32(contribF);
         }
     }
-    light[i] = keep | ambient | (min(best, 15u) << 8u);
+    lightPool[li] = old | (min(best, 15u) << 8u);
 }
 
-// Work is driven by the target volume's surface-brick list (built on the CPU, see GpuLightSystem): one
-// workgroup per 8x8x8 brick that can contain a surface air voxel, instead of one thread per voxel of the
-// whole volume. 256 threads per workgroup, each covering two voxels (z and z+4). Brick entries pack the
-// brick's coordinates in bricks as x | y<<10 | z<<20. The list can exceed the 65535 per-dimension dispatch
-// limit, so it is dispatched as a 2D grid and flattened here.
-fn brickBase(wid: vec3<u32>, nwg: vec3<u32>) -> vec4<i32> {
-    let bi = wid.x + wid.y * nwg.x;
-    if (bi >= u32(p.bricks.x)) { return vec4<i32>(0, 0, 0, 0); }
-    let e = brickList[bi];
-    return vec4<i32>(i32(e & 1023u) * 8, i32((e >> 10u) & 1023u) * 8, i32((e >> 20u) & 1023u) * 8, 1);
-}
-
+// One workgroup per brick: 256 threads, each covering voxels (x, y, z) and (x, y, z + 4) of it. The work list can
+// exceed the 65535 per-dimension dispatch limit, so it is dispatched as a 2D grid and flattened here.
 @compute @workgroup_size(8, 8, 4)
 fn sun_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
             @builtin(local_invocation_id) lid: vec3<u32>) {
-    let b = brickBase(wid, nwg);
-    if (b.w == 0) { return; }
-    let x = b.x + i32(lid.x);
-    let y = b.y + i32(lid.y);
-    let z = b.z + i32(lid.z);
-    sunVoxel(x, y, z);
-    sunVoxel(x, y, z + 4);
+    let wi = wid.x + wid.y * nwg.x;
+    if (wi >= u32(p.counts.z)) { return; }
+    let br = brickOf(work[wi]);
+    let l = vec3<i32>(lid);
+    let li = br.base + l.x + 8 * (l.y + 8 * l.z);
+    sunVoxel(br.g, br.origin + l, li);
+    sunVoxel(br.g, br.origin + l + vec3<i32>(0, 0, 4), li + 256);
 }
 
 @compute @workgroup_size(8, 8, 4)
 fn lamp_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
              @builtin(local_invocation_id) lid: vec3<u32>) {
-    let b = brickBase(wid, nwg);
-    if (b.w == 0) { return; }
-    let x = b.x + i32(lid.x);
-    let y = b.y + i32(lid.y);
-    let z = b.z + i32(lid.z);
-    lampVoxel(x, y, z);
-    lampVoxel(x, y, z + 4);
+    let wi = wid.x + wid.y * nwg.x;
+    if (wi >= u32(p.counts.z)) { return; }
+    let br = brickOf(work[wi]);
+    let l = vec3<i32>(lid);
+    let li = br.base + l.x + 8 * (l.y + 8 * l.z);
+    lampVoxel(br.g, br.origin + l, li);
+    lampVoxel(br.g, br.origin + l + vec3<i32>(0, 0, 4), li + 256);
 }
 
 // ── Bounce (one-hop indirect light, multi-hop through re-evaluation) ─────────────────────────────────────
@@ -464,56 +396,24 @@ fn lamp_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg
 const BOUNCE_MAX: f32 = 16.0;
 const BOUNCE_MAX_RAYS: i32 = 32;
 
-fn lightvRead(vi: i32, idx: u32) -> u32 {
-    switch (vi) {
-        case 0: { return lightv0[idx]; }
-        case 1: { return lightv1[idx]; }
-        case 2: { return lightv2[idx]; }
-        case 3: { return lightv3[idx]; }
-        case 4: { return lightv4[idx]; }
-        default: { return 0u; }
-    }
-}
+struct Hit { hit: bool, t: f32, cell: vec3<i32>, front: bool, n: vec3<f32> }; // cell: air cell in front of the hit face (front = false: none); n: face normal (grid space)
 
-fn lightvWrite(vi: i32, idx: u32, v: u32) {
-    switch (vi) {
-        case 0: { lightv0[idx] = v; }
-        case 1: { lightv1[idx] = v; }
-        case 2: { lightv2[idx] = v; }
-        case 3: { lightv3[idx] = v; }
-        case 4: { lightv4[idx] = v; }
-        default: { }
-    }
-}
-
-fn sunvRead(vi: i32, idx: u32) -> u32 {
-    switch (vi) {
-        case 0: { return sunv0[idx]; }
-        case 1: { return sunv1[idx]; }
-        case 2: { return sunv2[idx]; }
-        case 3: { return sunv3[idx]; }
-        case 4: { return sunv4[idx]; }
-        default: { return 255u; }
-    }
-}
-
-struct Hit { hit: bool, t: f32, cell: vec3<i32>, n: vec3<f32> }; // cell: air cell in front of the hit face; n: face normal (local)
-
-// Nearest-hit DDA over [t0,t1] in one volume. Single-axis steps, no tie handling (a ray slipping through a
-// diagonal gap only nudges an averaged value). A ray that enters this volume straight into a solid cell hits
-// with its front cell outside the volume, which reads as unlit.
-fn ddaNearest(vi: i32, o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, dims: vec3<i32>) -> Hit {
+// Nearest-hit DDA over [t0,t1] in one grid. Single-axis steps, no tie handling (a ray slipping through a
+// diagonal gap only nudges an averaged value). A ray that enters this grid straight into a solid cell hits
+// with no front cell, which reads as unlit.
+fn ddaNearest(g: i32, o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, lo: vec3<i32>, hi: vec3<i32>) -> Hit {
     var h: Hit;
     h.hit = false;
     if (t0 >= t1) { return h; }
-    let dimsF = vec3<f32>(dims);
-    let p0 = clamp(o + d * t0, vec3<f32>(0.0), dimsF - vec3<f32>(0.0001));
-    var voxel = clamp(vec3<i32>(floor(p0)), vec3<i32>(0), dims - vec3<i32>(1));
+    let p0 = clamp(o + d * t0, vec3<f32>(lo), vec3<f32>(hi) - vec3<f32>(0.0001));
+    var voxel = clamp(vec3<i32>(floor(p0)), lo, hi - vec3<i32>(1));
+    var cc = vec3<i32>(voxel >> vec3<u32>(5u));
+    var code = occCode(g, cc);
     let stepX: i32 = select(-1, 1, d.x > 0.0);
     let stepY: i32 = select(-1, 1, d.y > 0.0);
     let stepZ: i32 = select(-1, 1, d.z > 0.0);
-    if (isOpaqueInVolume(vi, voxel.x, voxel.y, voxel.z)) {
-        h.hit = true; h.t = t0; h.cell = vec3<i32>(-1, -1, -1); h.n = -d;
+    if (solidCached(g, voxel, &cc, &code)) {
+        h.hit = true; h.t = t0; h.front = false; h.n = -d;
         return h;
     }
     var tMaxX: f32 = select(1e30, ((f32(voxel.x) + select(0.0, 1.0, d.x > 0.0)) - o.x) / d.x, abs(d.x) > 1e-8);
@@ -537,27 +437,27 @@ fn ddaNearest(vi: i32, o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, dims: vec3<
             tMaxZ = ((f32(voxel.z) + select(0.0, 1.0, d.z > 0.0)) - o.z) / d.z;
         }
         if (t >= t1) { return h; }
-        if (voxel.x < 0 || voxel.x >= dims.x || voxel.y < 0 || voxel.y >= dims.y || voxel.z < 0 || voxel.z >= dims.z) { return h; }
-        if (isOpaqueInVolume(vi, voxel.x, voxel.y, voxel.z)) {
-            h.hit = true; h.t = t; h.cell = prev; h.n = n;
+        if (!inBounds(voxel, lo, hi)) { return h; }
+        if (solidCached(g, voxel, &cc, &code)) {
+            h.hit = true; h.t = t; h.cell = prev; h.front = true; h.n = n;
             return h;
         }
     }
     return h;
 }
 
-// Light (0-1) arriving at the hit face from the air cell in front of it, in volume vi.
-fn radianceAt(vi: i32, cell: vec3<i32>, nLocal: vec3<f32>) -> f32 {
-    let dims = dimsOf(vi);
-    if (cell.x < 0 || cell.x >= dims.x || cell.y < 0 || cell.y >= dims.y || cell.z < 0 || cell.z >= dims.z) { return 0.0; }
-    let idx = u32(cell.x + dims.x * (cell.y + dims.y * cell.z));
-    let word = lightvRead(vi, idx);
+// Light (0-1) arriving at the hit face from the air cell in front of it, in grid g.
+fn radianceAt(g: i32, h: Hit) -> f32 {
+    if (!h.front) { return 0.0; }
+    let li = lightIndex(g, h.cell);
+    if (li < 0) { return 0.0; }
+    let word = lightPool[li];
     let blk = f32((word >> 8u) & 0xFFu) / 15.0;
     let bnc = f32(word >> 24u) / 255.0;
     var sun = 0.0;
-    let sv = sunvRead(vi, idx);
+    let sv = word & 0xFFu;
     if (sv < 255u) {
-        let nW = normalize((voxelToWorldOf(vi) * vec4<f32>(nLocal, 0.0)).xyz);
+        let nW = normalize((grids[g].v2w * vec4<f32>(h.n, 0.0)).xyz);
         sun = f32(sv) / 254.0 * p.bounce.y * max(dot(nW, -p.sunDir.xyz), 0.0);
     }
     return max(sun, max(blk, bnc));
@@ -571,17 +471,13 @@ fn pcg(v: u32) -> u32 {
 
 fn rand01(h: u32) -> f32 { return f32(pcg(h) & 0xFFFFFFu) / 16777216.0; }
 
-fn bounceVoxel(x: i32, y: i32, z: i32, alpha: f32, slice: i32) {
-    let ti = p.counts.y;
-    let dims = dimsOf(ti);
-    if (x >= dims.x || y >= dims.y || z >= dims.z) { return; }
-    let i = u32(x + dims.x * (y + dims.y * z));
-    if (isOpaqueInVolume(ti, x, y, z)) { return; }
+fn bounceVoxel(g: i32, v: vec3<i32>, li: i32, alpha: f32, slice: i32) {
+    if (isSolid(g, v)) { return; }
+    let word = lightPool[li];
 
-    let sxn = isOpaqueInVolume(ti, x - 1, y, z); let sxp = isOpaqueInVolume(ti, x + 1, y, z);
-    let syn = isOpaqueInVolume(ti, x, y - 1, z); let syp = isOpaqueInVolume(ti, x, y + 1, z);
-    let szn = isOpaqueInVolume(ti, x, y, z - 1); let szp = isOpaqueInVolume(ti, x, y, z + 1);
-    let word = lightvRead(ti, i);
+    let sxn = isSolid(g, v - vec3<i32>(1, 0, 0)); let sxp = isSolid(g, v + vec3<i32>(1, 0, 0));
+    let syn = isSolid(g, v - vec3<i32>(0, 1, 0)); let syp = isSolid(g, v + vec3<i32>(0, 1, 0));
+    let szn = isSolid(g, v - vec3<i32>(0, 0, 1)); let szp = isSolid(g, v + vec3<i32>(0, 0, 1));
     var bounce8 = 0.0;   // non-surface air: no bounce, no occlusion
     var occ8 = 0.0;
     if (sxn || sxp || syn || syp || szn || szp) {
@@ -599,13 +495,13 @@ fn bounceVoxel(x: i32, y: i32, z: i32, alpha: f32, slice: i32) {
         let tx = normalize(cross(up, nLoc));
         let ty = cross(nLoc, tx);
 
-        let v2w = voxelToWorldOf(ti);
-        let origin = (v2w * vec4<f32>(f32(x) + 0.5, f32(y) + 0.5, f32(z) + 0.5, 1.0)).xyz;
+        let v2w = grids[g].v2w;
+        let origin = (v2w * vec4<f32>(vec3<f32>(v) + vec3<f32>(0.5), 1.0)).xyz;
         // Each voxel has one fixed set of rays * cycle directions, set by its position alone: a cosine-weighted
         // Fibonacci spiral (evenly spread, far less noisy than random directions), twisted and shifted per voxel
         // so neighbours differ. Evaluation n fires slice n mod cycle; slices interleave (direction j = k*cycle +
         // slice), so each one spans the whole hemisphere coarsely and a full cycle covers the complete set.
-        let seed = pcg(u32(x) ^ pcg(u32(y) ^ pcg(u32(z))));
+        let seed = pcg(u32(v.x) ^ pcg(u32(v.y) ^ pcg(u32(v.z))));
         let twist = rand01(seed) * 6.2831853;
         let shift = rand01(seed + 1u);
         var sumL = 0.0;
@@ -620,8 +516,8 @@ fn bounceVoxel(x: i32, y: i32, z: i32, alpha: f32, slice: i32) {
             var dl: vec3<f32>;
             if (hasN) {
                 let r = sqrt(u1);                                   // cosine-weighted hemisphere
-                let h = sqrt(max(0.0, 1.0 - u1));
-                dl = tx * (r * cos(phi)) + ty * (r * sin(phi)) + nLoc * h;
+                let hh = sqrt(max(0.0, 1.0 - u1));
+                dl = tx * (r * cos(phi)) + ty * (r * sin(phi)) + nLoc * hh;
             } else {
                 let cz = 1.0 - 2.0 * u1;                            // uniform sphere
                 let r = sqrt(max(0.0, 1.0 - cz * cz));
@@ -630,19 +526,19 @@ fn bounceVoxel(x: i32, y: i32, z: i32, alpha: f32, slice: i32) {
 
             let dw = (v2w * vec4<f32>(dl, 0.0)).xyz;
             var bestT = BOUNCE_MAX;
-            var bestVol = -1;
+            var bestG = -1;
             var best: Hit;
-            for (var vi = 0; vi < p.counts.x; vi = vi + 1) {
-                let w2v = worldToVoxelOf(vi);
-                let lo = (w2v * vec4<f32>(origin, 1.0)).xyz;
-                let ld = (w2v * vec4<f32>(dw, 0.0)).xyz;
-                let vd = dimsOf(vi);
-                let clip = slabClip(lo, ld, vd, 0.0, bestT);
+            for (var gi = 0; gi < p.counts.x; gi = gi + 1) {
+                let gd = grids[gi];
+                if (gd.table.y <= 0) { continue; }
+                let lo = (gd.w2v * vec4<f32>(origin, 1.0)).xyz;
+                let ld = (gd.w2v * vec4<f32>(dw, 0.0)).xyz;
+                let clip = slabClip(lo, ld, vec3<f32>(gd.bmin.xyz), vec3<f32>(gd.bmax.xyz), 0.0, bestT);
                 if (!clip.hit) { continue; }
-                let h = ddaNearest(vi, lo, ld, clip.t0, clip.t1, vd);
-                if (h.hit && h.t < bestT) { bestT = h.t; bestVol = vi; best = h; }
+                let h = ddaNearest(gi, lo, ld, clip.t0, clip.t1, gd.bmin.xyz, gd.bmax.xyz);
+                if (h.hit && h.t < bestT) { bestT = h.t; bestG = gi; best = h; }
             }
-            if (bestVol >= 0) { sumL = sumL + radianceAt(bestVol, best.cell, best.n); }
+            if (bestG >= 0) { sumL = sumL + radianceAt(bestG, best); }
             else { escaped = escaped + 1.0; }
         }
         let estimate = clamp(p.bounce.x * sumL / f32(rays), 0.0, 1.0);
@@ -650,7 +546,7 @@ fn bounceVoxel(x: i32, y: i32, z: i32, alpha: f32, slice: i32) {
         bounce8 = blend8(f32(word >> 24u), estimate * 255.0, alpha);
         occ8 = blend8(f32((word >> 16u) & 0xFFu), occEstimate * 255.0, alpha);
     }
-    lightvWrite(ti, i, (word & 0x0000FFFFu) | (u32(occ8) << 16u) | (u32(bounce8) << 24u));
+    lightPool[li] = (word & 0x0000FFFFu) | (u32(occ8) << 16u) | (u32(bounce8) << 24u);
 }
 
 // One blend step of an 8-bit stored value toward target (both 0-255). With 8-bit storage a small alpha can
@@ -665,255 +561,143 @@ fn blend8(s8: f32, goal: f32, alpha: f32) -> f32 {
 @compute @workgroup_size(8, 8, 4)
 fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
                @builtin(local_invocation_id) lid: vec3<u32>) {
-    // The bounce work list is pairs: (packed brick, evaluations since the brick changed).
-    let bi = wid.x + wid.y * nwg.x;
-    if (bi >= u32(p.bricks.x)) { return; }
-    let e = brickList[bi * 2u];
-    let nu = brickList[bi * 2u + 1u];
+    // The bounce work list is pairs: (light slot, evaluations since the brick changed).
+    let wi = wid.x + wid.y * nwg.x;
+    if (wi >= u32(p.counts.z)) { return; }
+    let br = brickOf(work[wi * 2u]);
+    let nu = work[wi * 2u + 1u];
     // A running average over the first full cycle (exactly the complete ray set's mean), then a weight of one
     // cycle, so each further cycle weighs the whole set about equally.
     let cycle = max(u32(p.bounce2.y), 1u);
     let alpha = max(1.0 / f32(cycle), 1.0 / (f32(nu) + 1.0));
     let slice = i32(nu % cycle);
-    let x = i32(e & 1023u) * 8 + i32(lid.x);
-    let y = i32((e >> 10u) & 1023u) * 8 + i32(lid.y);
-    let z = i32((e >> 20u) & 1023u) * 8 + i32(lid.z);
-    bounceVoxel(x, y, z, alpha, slice);
-    bounceVoxel(x, y, z + 4, alpha, slice);
+    let l = vec3<i32>(lid);
+    let li = br.base + l.x + 8 * (l.y + 8 * l.z);
+    bounceVoxel(br.g, br.origin + l, li, alpha, slice);
+    bounceVoxel(br.g, br.origin + l + vec3<i32>(0, 0, 4), li + 256, alpha, slice);
 }";
 
     private readonly GpuContext _ctx;
     private readonly ComputePipeline _sunPipeline;
     private readonly ComputePipeline _lampPipeline;
-    private readonly ComputePipeline? _bouncePipeline;   // null when the adapter allows too few storage buffers
+    private readonly ComputePipeline _bouncePipeline;
     private readonly GpuBuffer _param;
-
-    /// <summary>Storage buffers bounce_main binds: opacity, light and sun visibility per volume slot, plus the
-    /// brick list. Above WebGPU's default of 8, so it needs the adapter's real limit (GpuContext requests it).</summary>
-    private const int BounceStorageBuffers = MaxRayVolumes * 3 + 1;
-
-    public bool BounceSupported => _bouncePipeline != null;
-    private readonly GpuBuffer _dummyOpacity; // padding for unused volume slots (never solid)
-    private readonly GpuBuffer[] _dummyLight = new GpuBuffer[MaxRayVolumes]; // writable padding, one per slot
-    private readonly GpuBuffer _lampList;     // scratch: this dispatch's filtered lamp list (xyz, w=level)
+    private readonly GpuBuffer _lampList;     // this frame's lamps (xyz world, w level)
     private bool _loggedTooManyLamps;
+
+    // Bindings each entry point uses (auto layouts only contain what the entry point references).
+    private static readonly uint[] SunBindings    = { 0, 1, 3, 4, 5, 6, 8 };
+    private static readonly uint[] LampBindings   = { 0, 1, 3, 4, 5, 6, 7, 8 };
+    private static readonly uint[] BounceBindings = { 0, 1, 2, 3, 4, 5, 6, 8 };
 
     public GpuRayLightPass(GpuContext ctx)
     {
         _ctx = ctx;
-        _sunPipeline  = new ComputePipeline(ctx, Wgsl, "sun_main");
-        _lampPipeline = new ComputePipeline(ctx, Wgsl, "lamp_main");
-        uint storageLimit = ctx.AdapterLimits.MaxStorageBuffersPerShaderStage;
-        if (storageLimit >= BounceStorageBuffers)
-            _bouncePipeline = new ComputePipeline(ctx, Wgsl, "bounce_main");
-        else
-            Console.WriteLine($"[ray-lighting] bounce disabled: adapter allows {storageLimit} storage buffers per stage, bounce needs {BounceStorageBuffers}.");
-        _param = GpuBuffer.CreateUniform(ctx, (ulong)Marshal.SizeOf<RayParams>());
-        _dummyOpacity = GpuBuffer.CreateStorage(ctx, sizeof(uint));
-        _dummyOpacity.Write<uint>(0, new uint[1]);
-        for (int i = 0; i < MaxRayVolumes; i++) _dummyLight[i] = GpuBuffer.CreateStorage(ctx, sizeof(uint));
-        _lampList = GpuBuffer.CreateStorage(ctx, (ulong)MaxLampsPerDispatch * 16); // vec4<f32> per lamp
+        _sunPipeline    = new ComputePipeline(ctx, Wgsl, "sun_main");
+        _lampPipeline   = new ComputePipeline(ctx, Wgsl, "lamp_main");
+        _bouncePipeline = new ComputePipeline(ctx, Wgsl, "bounce_main");
+        _param    = GpuBuffer.CreateUniform(ctx, (ulong)Marshal.SizeOf<RayParams>());
+        _lampList = GpuBuffer.CreateStorage(ctx, (ulong)MaxLamps * 16);
     }
 
-    /// <summary>
-    /// Ray-traced sun visibility for <paramref name="targetIdx"/> among <paramref name="slots"/>[0..
-    /// <paramref name="volumeCount"/>-1] (the rest of the fixed <see cref="MaxRayVolumes"/>-length span is
-    /// padded with the dummy opacity buffer). Any-hit DDA against every real volume's occupancy in turn,
-    /// replacing <c>GpuSunVisPass</c>'s shadow-map sample. Writes <paramref name="targetSunVis"/> with the
-    /// existing 0/254/255 convention the fragment shader already consumes (255 = non-surface sentinel,
-    /// 0/254 = hard shadowed/lit).
-    /// </summary>
-    public void DispatchSun(ReadOnlySpan<RayVolumeSlot> slots, int volumeCount, int targetIdx,
-                            GpuBuffer targetSunVis, Vector3D<float> sunDir, GpuBuffer brickList, int brickCount)
+    /// <summary>Sun visibility for the <paramref name="count"/> light slots listed in <paramref name="work"/>.</summary>
+    public void DispatchSun(GridStore store, int gridCount, Vector3D<float> sunDir, GpuBuffer work, int count)
     {
-        if (volumeCount <= 0 || targetIdx < 0 || targetIdx >= volumeCount) return;
-        var target = slots[targetIdx];
-        if (target.VW <= 0 || target.VH <= 0 || target.VD <= 0 || brickCount <= 0) return;
-
-        WriteParams(slots, volumeCount, targetIdx, sunDir, lampCount: 0, ambientLevel: 0, brickCount);
-
-        var entries = new (uint, GpuBuffer)[8];
-        for (int i = 0; i < MaxRayVolumes; i++)
-            entries[i] = ((uint)i, i < volumeCount ? slots[i].Opacity : _dummyOpacity);
-        entries[5] = (5u, targetSunVis);
-        entries[6] = (8u, _param);
-        entries[7] = (9u, brickList);
-
-        nint bg = _sunPipeline.CreateBindGroupHandle(entries);
-        DispatchBricks(_sunPipeline, bg, brickCount);
-        _ctx.Api.BindGroupRelease((BindGroup*)bg);
+        if (count <= 0) return;
+        WriteParams(sunDir, gridCount, 0, count, default, default);
+        Dispatch(_sunPipeline, SunBindings, store, work, count);
     }
 
-    // One workgroup per brick, as a 2D grid since a big volume's list can exceed the 65535-per-dimension limit.
-    private static void DispatchBricks(ComputePipeline pipeline, nint bindGroup, int brickCount)
+    /// <summary>Lamp light for the listed slots. Every lamp is tested by every voxel (nearest-first is not
+    /// needed: distance rejects most of them before any ray).</summary>
+    public void DispatchLamps(GridStore store, int gridCount, ReadOnlySpan<Vector4D<float>> lamps, GpuBuffer work, int count)
     {
-        const int MaxPerDim = 65535;
-        uint gx = (uint)System.Math.Min(brickCount, MaxPerDim);
-        uint gy = CeilDiv((uint)brickCount, gx);
-        pipeline.Dispatch(bindGroup, gx, gy, 1u);
-    }
-
-    /// <summary>
-    /// Ray-traced point-lamp lighting for <paramref name="targetIdx"/>: every entry of
-    /// <paramref name="lamps"/> (xyz world position, w level/reach radius — caller should already have
-    /// prefiltered to lamps that can plausibly reach this volume, e.g. via <c>GpuLightSystem.LampAabb</c>)
-    /// is shadow-tested with the same any-hit multi-volume DDA the sun pass uses, no same-volume special
-    /// case. Writes <paramref name="targetLight"/> in full each call (flat <paramref name="ambientLevel"/>
-    /// (0-15) in the sky byte, max-combined lamp contribution in the block byte) — fully self-contained,
-    /// no dependency on the flood having run.
-    /// </summary>
-    public void DispatchLamps(ReadOnlySpan<RayVolumeSlot> slots, int volumeCount, int targetIdx,
-                              GpuBuffer targetLight, ReadOnlySpan<Vector4D<float>> lamps, int ambientLevel,
-                              GpuBuffer brickList, int brickCount)
-    {
-        if (volumeCount <= 0 || targetIdx < 0 || targetIdx >= volumeCount) return;
-        var target = slots[targetIdx];
-        if (target.VW <= 0 || target.VH <= 0 || target.VD <= 0 || brickCount <= 0) return;
-
+        if (count <= 0) return;
         int lampCount = lamps.Length;
-        if (lampCount > MaxLampsPerDispatch)
+        if (lampCount > MaxLamps)
         {
             if (!_loggedTooManyLamps)
             {
                 _loggedTooManyLamps = true;
-                Console.WriteLine($"[ray-lighting] {lampCount} lamps reach a volume this frame; truncating to {MaxLampsPerDispatch}.");
+                Console.WriteLine($"[ray-lighting] {lampCount} lamps loaded; only the first {MaxLamps} light anything.");
             }
-            lampCount = MaxLampsPerDispatch;
+            lampCount = MaxLamps;
         }
-        if (lampCount > 0)
-            _lampList.Write<Vector4D<float>>(0, lamps.Slice(0, lampCount));
-
-        WriteParams(slots, volumeCount, targetIdx, Vector3D<float>.Zero, lampCount, ambientLevel, brickCount);
-
-        var entries = new (uint, GpuBuffer)[9];
-        for (int i = 0; i < MaxRayVolumes; i++)
-            entries[i] = ((uint)i, i < volumeCount ? slots[i].Opacity : _dummyOpacity);
-        entries[5] = (6u, targetLight);
-        entries[6] = (7u, _lampList);
-        entries[7] = (8u, _param);
-        entries[8] = (9u, brickList);
-
-        nint bg = _lampPipeline.CreateBindGroupHandle(entries);
-        DispatchBricks(_lampPipeline, bg, brickCount);
-        _ctx.Api.BindGroupRelease((BindGroup*)bg);
+        if (lampCount > 0) _lampList.Write<Vector4D<float>>(0, lamps.Slice(0, lampCount));
+        WriteParams(Vector3D<float>.Zero, gridCount, lampCount, count, default, default);
+        Dispatch(_lampPipeline, LampBindings, store, work, count);
     }
 
     /// <summary>
-    /// One EMA step of bounce light for the listed bricks of <paramref name="targetIdx"/> (see bounce_main).
-    /// Reads every volume's light and sun visibility, so run it after the direct passes of all volumes.
-    /// <paramref name="brickList"/> holds <paramref name="brickCount"/> pairs of (packed brick, evaluations since
-    /// that brick changed). Each voxel's fixed direction set is <paramref name="rays"/> x <paramref name="cycle"/>
-    /// directions, one slice of <paramref name="rays"/> per evaluation.
+    /// One EMA step of bounce light for the listed bricks (see bounce_main). Reads direct light of every grid, so
+    /// run it after the direct passes. <paramref name="work"/> holds <paramref name="count"/> pairs of (light slot,
+    /// evaluations since that brick changed). Each voxel's fixed direction set is <paramref name="rays"/> x
+    /// <paramref name="cycle"/> directions, one slice of <paramref name="rays"/> per evaluation.
     /// </summary>
-    public void DispatchBounce(ReadOnlySpan<RayVolumeSlot> slots, ReadOnlySpan<GpuBuffer> lights, ReadOnlySpan<GpuBuffer> sunVis,
-                               int volumeCount, int targetIdx, Vector3D<float> sunDir, float sunStrength,
-                               float albedo, int rays, int cycle, GpuBuffer brickList, int brickCount)
+    public void DispatchBounce(GridStore store, int gridCount, Vector3D<float> sunDir, float sunStrength,
+                               float albedo, int rays, int cycle, GpuBuffer work, int count)
     {
-        if (_bouncePipeline == null) return;
-        if (volumeCount <= 0 || targetIdx < 0 || targetIdx >= volumeCount) return;
-        var target = slots[targetIdx];
-        if (target.VW <= 0 || target.VH <= 0 || target.VD <= 0 || brickCount <= 0) return;
+        if (count <= 0) return;
+        WriteParams(sunDir, gridCount, 0, count,
+                    new Vector4D<float>(albedo, sunStrength, 0f, 0f), new Vector4D<float>(rays, cycle, 0f, 0f));
+        Dispatch(_bouncePipeline, BounceBindings, store, work, count);
+    }
 
-        WriteParams(slots, volumeCount, targetIdx, sunDir, lampCount: 0, ambientLevel: 0, brickCount,
-                    new Vector4D<float>(albedo, sunStrength, 0f, 0f),
-                    new Vector4D<float>(rays, cycle, 0f, 0f));
+    private void Dispatch(ComputePipeline pipeline, uint[] bindings, GridStore store, GpuBuffer work, int count)
+    {
+        var entries = new (uint, GpuBuffer)[bindings.Length];
+        for (int i = 0; i < bindings.Length; i++)
+            entries[i] = (bindings[i], bindings[i] switch
+            {
+                0 => store.OccPool,
+                1 => store.ChunkTable,
+                2 => store.BrickTable,
+                3 => store.LightPool,
+                4 => store.SlotInfo,
+                5 => store.Grids,
+                6 => work,
+                7 => _lampList,
+                _ => _param,
+            });
+        nint bg = pipeline.CreateBindGroupHandle(entries);
 
-        // Unused slots get distinct dummies: a writable buffer can't be bound twice in one bind group.
-        var entries = new (uint, GpuBuffer)[BounceStorageBuffers + 1];
-        int k = 0;
-        for (int i = 0; i < MaxRayVolumes; i++)
-        {
-            bool real = i < volumeCount;
-            entries[k++] = ((uint)i, real ? slots[i].Opacity : _dummyOpacity);
-            entries[k++] = ((uint)(10 + i), real ? lights[i] : _dummyLight[i]);
-            entries[k++] = ((uint)(15 + i), real ? sunVis[i] : _dummyOpacity);
-        }
-        entries[k++] = (8u, _param);
-        entries[k++] = (9u, brickList);
-
-        nint bg = _bouncePipeline.CreateBindGroupHandle(entries);
-        DispatchBricks(_bouncePipeline, bg, brickCount);
+        // One workgroup per brick, as a 2D grid since a big list can exceed the 65535-per-dimension limit.
+        const int MaxPerDim = 65535;
+        uint gx = (uint)System.Math.Min(count, MaxPerDim);
+        uint gy = ((uint)count + gx - 1u) / gx;
+        pipeline.Dispatch(bg, gx, gy, 1u);
         _ctx.Api.BindGroupRelease((BindGroup*)bg);
     }
 
-    private void WriteParams(ReadOnlySpan<RayVolumeSlot> slots, int volumeCount, int targetIdx, Vector3D<float> sunDir,
-                             int lampCount, int ambientLevel, int brickCount, Vector4D<float> bounce = default,
-                             Vector4D<float> bounce2 = default)
+    private void WriteParams(Vector3D<float> sunDir, int gridCount, int lampCount, int workCount,
+                             Vector4D<float> bounce, Vector4D<float> bounce2)
     {
-        var pr = new RayParams();
-        SetSlot(ref pr, 0, volumeCount > 0 ? slots[0] : default);
-        SetSlot(ref pr, 1, volumeCount > 1 ? slots[1] : default);
-        SetSlot(ref pr, 2, volumeCount > 2 ? slots[2] : default);
-        SetSlot(ref pr, 3, volumeCount > 3 ? slots[3] : default);
-        SetSlot(ref pr, 4, volumeCount > 4 ? slots[4] : default);
-        pr.SunX = sunDir.X; pr.SunY = sunDir.Y; pr.SunZ = sunDir.Z; pr.SunPad = 0f;
-        pr.VolumeCount = volumeCount; pr.TargetIdx = targetIdx; pr.LampCount = lampCount; pr.AmbientLevel = ambientLevel;
-        pr.BrickCount = brickCount;
-        pr.Bounce = bounce;
-        pr.Bounce2 = bounce2;
-
-        Span<RayParams> sp = stackalloc RayParams[1] { pr };
+        Span<RayParams> sp = stackalloc RayParams[1];
+        sp[0] = new RayParams
+        {
+            Sun = new Vector4D<float>(sunDir.X, sunDir.Y, sunDir.Z, 0f),
+            GridCount = gridCount, LampCount = lampCount, WorkCount = workCount,
+            Bounce = bounce, Bounce2 = bounce2,
+        };
         _param.Write<RayParams>(0, sp);
     }
-
-    private static void SetSlot(ref RayParams pr, int idx, RayVolumeSlot slot)
-    {
-        switch (idx)
-        {
-            case 0:
-                pr.VoxelToWorld0 = slot.VoxelToWorld; pr.WorldToVoxel0 = slot.WorldToVoxel;
-                pr.VW0 = slot.VW; pr.VH0 = slot.VH; pr.VD0 = slot.VD;
-                break;
-            case 1:
-                pr.VoxelToWorld1 = slot.VoxelToWorld; pr.WorldToVoxel1 = slot.WorldToVoxel;
-                pr.VW1 = slot.VW; pr.VH1 = slot.VH; pr.VD1 = slot.VD;
-                break;
-            case 2:
-                pr.VoxelToWorld2 = slot.VoxelToWorld; pr.WorldToVoxel2 = slot.WorldToVoxel;
-                pr.VW2 = slot.VW; pr.VH2 = slot.VH; pr.VD2 = slot.VD;
-                break;
-            case 3:
-                pr.VoxelToWorld3 = slot.VoxelToWorld; pr.WorldToVoxel3 = slot.WorldToVoxel;
-                pr.VW3 = slot.VW; pr.VH3 = slot.VH; pr.VD3 = slot.VD;
-                break;
-            case 4:
-                pr.VoxelToWorld4 = slot.VoxelToWorld; pr.WorldToVoxel4 = slot.WorldToVoxel;
-                pr.VW4 = slot.VW; pr.VH4 = slot.VH; pr.VD4 = slot.VD;
-                break;
-        }
-    }
-
-    private static uint CeilDiv(uint a, uint b) => (a + b - 1u) / b;
 
     public void Dispose()
     {
         _sunPipeline.Dispose();
         _lampPipeline.Dispose();
-        _bouncePipeline?.Dispose();
-        foreach (var b in _dummyLight) b.Dispose();
+        _bouncePipeline.Dispose();
         _param.Dispose();
-        _dummyOpacity.Dispose();
         _lampList.Dispose();
     }
 
-    /// <summary>Uniform block for the ray-traced pass (752 bytes): 5 volume-to-world mat4s, 5
-    /// world-to-volume mat4s, 5 (dims+pad) vec4&lt;i32&gt;s, sun direction, then counts. Field order/padding
-    /// match the WGSL <c>Params</c> std140 layout, flattening the per-slot array into named fields the same
-    /// way <c>GpuLightFlood.InjectParams</c> flattens its 6 face matrices (F0..F5).</summary>
+    /// <summary>Uniform block (64 bytes); matches WGSL <c>Params</c>.</summary>
     [StructLayout(LayoutKind.Sequential)]
     private struct RayParams
     {
-        public Mat4 VoxelToWorld0, VoxelToWorld1, VoxelToWorld2, VoxelToWorld3, VoxelToWorld4;
-        public Mat4 WorldToVoxel0, WorldToVoxel1, WorldToVoxel2, WorldToVoxel3, WorldToVoxel4;
-        public int VW0, VH0, VD0, Pad0;
-        public int VW1, VH1, VD1, Pad1;
-        public int VW2, VH2, VD2, Pad2;
-        public int VW3, VH3, VD3, Pad3;
-        public int VW4, VH4, VD4, Pad4;
-        public float SunX, SunY, SunZ, SunPad;
-        public int VolumeCount, TargetIdx, LampCount, AmbientLevel;
-        public int BrickCount, BrickPad0, BrickPad1, BrickPad2;   // vec4<i32> bricks
-        public Vector4D<float> Bounce;                            // albedo, sun strength, unused, unused
-        public Vector4D<float> Bounce2;                           // rays per evaluation, cycle
+        public Vector4D<float> Sun;
+        public int GridCount, LampCount, WorkCount, Pad;
+        public Vector4D<float> Bounce;    // albedo, sun strength, unused, unused
+        public Vector4D<float> Bounce2;   // rays per evaluation, cycle
     }
 }

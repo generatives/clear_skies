@@ -44,6 +44,7 @@ public static class DynamicGridFactory
     /// </summary>
     public static void Despawn(PhysicsWorld physics, ChunkMeshSystem meshSystem, DynamicGrid grid)
     {
+        // Its GPU voxel storage is released by GpuResidencySystem once the root entity is gone.
         meshSystem.UnregisterVolume(grid);
 
         if (grid.BodyCreated)
@@ -52,8 +53,6 @@ public static class DynamicGridFactory
             physics.RemoveBody(grid.Body);
             physics.RemoveCompound(shape);
         }
-
-        grid.VolumeGpu?.Dispose();
 
         foreach (var (_, entry) in grid.All)
         {

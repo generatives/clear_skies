@@ -59,6 +59,7 @@ public sealed class StaticWorld : ChunkVolume
             entry.Entity.Dispose();
 
         _chunks.Remove(pos);
+        RemovedChunks.Add(pos);
         MarkNeighboursDirty(pos);
     }
 

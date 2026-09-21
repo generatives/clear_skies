@@ -1,4 +1,5 @@
 using ClearSkies.Engine.Math;
+using ClearSkies.Engine.Voxels;
 using Silk.NET.Core.Native;
 using Silk.NET.Maths;
 using Silk.NET.WebGPU;
@@ -14,52 +15,44 @@ public sealed unsafe class Renderer : IDisposable
 {
     private const int MaxObjects = 4096;
     private const ulong ModelStride = 256;   // >= minUniformBufferOffsetAlignment
-    private const ulong CameraSize  = 224;   // three mat4x4<f32> (view, proj, lightViewProj) + vec4<f32> sun direction + vec4<f32> light params
-    private const ulong ModelSize   = 96;    // mat4x4<f32> + vec3<i32> chunkBase + vec3<i32> volSize (each padded to 16B)
+    private const ulong CameraSize  = 160;   // two mat4x4<f32> (view, proj) + vec4<f32> sun direction + vec4<f32> light params
+    private const ulong ModelSize   = 96;    // mat4x4<f32> + vec3<i32> chunk + i32 grid + vec4<i32> padding
 
-    // Ambient fallback (sky=6/15) for fragments whose air-side voxel is outside the volume buffer
-    // (e.g. non-chunk draws, or volume not yet initialised).
-    private const string Wgsl = @"
-const AMBIENT_SKY: f32 = 3.0 / 15.0;  // matches VolumeGpuResources.BaseSkyLevel (out-of-volume fallback)
-// Direct-sun brightness now comes from camera.sunDir.w (SunLight.Strength, debug-panel adjustable) instead
-// of a fixed const — originally unused vec4 padding, repurposed so the GPU Lighting debug panel can dial it.
+    private static readonly string Wgsl = @"
 const MIN_AMBIENT: f32 = 0.00;        // floor so no geometry is ever fully black
 const AO_MIN: f32 = 0.15;             // darkest ambient-occluded corner (1 = no AO). 0.15 provides exaggeration for evaluation;
                                       // 0.45 is the subtler default.
-const WPC: i32 = 1024;                // u32 opacity words per 32³ chunk (VolumeGpuResources.WordsPerChunk)
+const WPC: i32 = " + GridStore.WordsPerChunk + @";
+const OCC_UNLOADED: i32 = " + GridStore.OccUnloaded + @";
+const OCC_ALL_SOLID: i32 = " + GridStore.OccAllSolid + @";
+const NO_SURFACE: u32 = " + GridStore.NoSurface + @"u;
+const EMPTY_LIGHT: u32 = " + GridStore.EmptyLightWord + @"u;
 
-// lightParams.x: ray AO strength, .y: bounce scale (both 0 = off; the old lighting path never writes those bits).
-struct Camera { view: mat4x4<f32>, proj: mat4x4<f32>, sunDir: vec4<f32>, lightViewProj: mat4x4<f32>, lightParams: vec4<f32> };
+// sunDir.w: sun strength (SunLight.Strength). lightParams.x: ray AO strength, .y: bounce scale, .z: ambient (0-1).
+struct Camera { view: mat4x4<f32>, proj: mat4x4<f32>, sunDir: vec4<f32>, lightParams: vec4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
-// model: world transform. chunkBase: this chunk's voxel origin in the volume. volSize: volume dims in voxels.
-// vec3<i32> in a WGSL uniform struct is padded to 16 bytes (same as vec4).
-struct Model { model: mat4x4<f32>, chunkBase: vec3<i32>, _p0: i32, volSize: vec3<i32>, _p1: i32 };
+// model: world transform. chunk: this chunk's coordinate in its grid. grid: the grid's index in the GridStore, or
+// -1 for a non-chunk draw (drawn full-bright).
+struct Model { model: mat4x4<f32>, chunk: vec3<i32>, grid: i32, _pad: vec4<i32> };
 @group(1) @binding(0) var<uniform> model: Model;
 
-// Per-volume light field (entire ChunkVolume in one buffer).
-// 1 u32 per voxel: bits 0-7 = sky (0-15), bits 8-15 = block (0-15).
-// Index: vx + volSize.x * (vy + volSize.y * vz) where (vx,vy,vz) = chunkBase + localAir.
-@group(2) @binding(0) var<storage, read> light: array<u32>;
-
-// Per-volume opacity bitset (chunk-major, 1 bit/voxel), same buffer the flood reads. Sampled for in-shader
-// ambient occlusion of the air-side cell's neighbourhood.
-@group(2) @binding(1) var<storage, read> opacity: array<u32>;
-
-// Per-voxel directional-sun visibility (0-255, 255 = fully lit), precomputed each frame by GpuSunVisPass from
-// the world-space sun shadow map. Volume-linear like `light`. Sampling this replaces the old per-fragment PCF.
-@group(2) @binding(2) var<storage, read> sunvis: array<u32>;
-
-// Directional-sun shadow map, rendered depth-only from the sun's POV (see SunShadowPass). Still bound for the
-// depth pass; the main fragment now reads precomputed `sunvis` instead of sampling this directly.
-@group(3) @binding(0) var shadowMap: texture_depth_2d;
+// The shared voxel storage (see GridStore): occupancy pool, chunk table ((occupancy slot or code, chunk tag)),
+// brick table (light slot per 8³ brick), light pool (one word per voxel of each surface brick: bits 0-7 sun
+// visibility 0-254 / 255 no sample, 8-15 lamp level, 16-23 ray AO, 24-31 bounce) and grid descriptors.
+struct GridDesc { v2w: mat4x4<f32>, w2v: mat4x4<f32>, table: vec4<i32>, bmin: vec4<i32>, bmax: vec4<i32> };
+@group(2) @binding(0) var<storage, read> occPool: array<u32>;
+@group(2) @binding(1) var<storage, read> chunkTable: array<vec4<i32>>;
+@group(2) @binding(2) var<storage, read> brickTable: array<u32>;
+@group(2) @binding(3) var<storage, read> lightPool: array<u32>;
+@group(2) @binding(4) var<storage, read> grids: array<GridDesc>;
 
 // Block texture array: each layer is one named sprite from the spritesheet (TextureAtlas), sized
 // TileSize² and nearest-filtered. Vertex UV is (u, v, layer): u/v are tile-space (not normalized),
 // wrapped per-fragment with fract() so a texture repeats once per block regardless of how large a
 // greedy-merged quad is; layer < 0 means untextured — use the vertex color instead (see fs_main).
-@group(4) @binding(0) var atlasTex:  texture_2d_array<f32>;
-@group(4) @binding(1) var atlasSamp: sampler;
+@group(3) @binding(0) var atlasTex:  texture_2d_array<f32>;
+@group(3) @binding(1) var atlasSamp: sampler;
 
 struct VSOut {
     @builtin(position) pos:         vec4<f32>,
@@ -87,49 +80,60 @@ fn vs_main(
     return o;
 }
 
-// Chunk-major opacity test (matches the flood shader): slot = cx + DX*(cy + DY*cz); word = ly + 32*lz; bit = lx.
+// a mod n in [0, n), unsigned arithmetic only (signed % is wrong for negatives on at least one backend).
+fn wrapi(a: i32, n: i32) -> i32 {
+    let un = u32(n);
+    if (a >= 0) { return i32(u32(a) % un); }
+    return n - 1 - i32(u32(-(a + 1)) % un);
+}
+
+// Chunk-table entry index of chunk c in this draw's grid, or -1 when that chunk isn't stored (the tag differs).
+fn entryOf(c: vec3<i32>) -> i32 {
+    let t = grids[model.grid].table;
+    if (t.y <= 0) { return -1; }
+    let idx = t.x + wrapi(c.x, t.y) + t.y * (wrapi(c.y, t.z) + t.z * wrapi(c.z, t.w));
+    let e = chunkTable[idx];
+    if (e.y != c.x || e.z != c.y || e.w != c.z) { return -1; }
+    return idx;
+}
+
+// Voxel v in this draw's grid (grid voxel space). Unloaded → open.
 fn isSolid(v: vec3<i32>) -> bool {
-    if (v.x < 0 || v.x >= model.volSize.x ||
-        v.y < 0 || v.y >= model.volSize.y ||
-        v.z < 0 || v.z >= model.volSize.z) { return false; } // out of volume → treat as open (no AO at borders)
-    let dx   = model.volSize.x >> 5;
-    let dy   = model.volSize.y >> 5;
-    let slot = (v.x >> 5) + dx * ((v.y >> 5) + dy * (v.z >> 5));
-    let word = slot * WPC + ((v.y & 31) + 32 * (v.z & 31));
-    let bit  = u32(v.x & 31);
-    return ((opacity[u32(word)] >> bit) & 1u) == 1u;
+    let i = entryOf(v >> vec3<u32>(5u));
+    if (i < 0) { return false; }
+    let code = chunkTable[i].x;
+    if (code >= 0) {
+        let l = v & vec3<i32>(31);
+        return ((occPool[u32(code * WPC + l.y + 32 * l.z)] >> u32(l.x)) & 1u) == 1u;
+    }
+    return code == OCC_ALL_SOLID;
 }
 
 fn occ(v: vec3<i32>) -> f32 { return select(0.0, 1.0, isSolid(v)); }
 
-// Light (sky, block) in 0..1 at a single volume voxel. Out-of-volume → ambient fallback. Sky is scaled by the
-// ray AO occlusion in bits 16-23 (0 = open), weighted by camera.lightParams.x. Bounce light (bits 24-31,
-// 0-255 = 0-1) is indirect light with no direction, so it joins the block channel by max, like a lamp's.
-fn lightAt(vol: vec3<i32>) -> vec2<f32> {
-    if (vol.x < 0 || vol.x >= model.volSize.x ||
-        vol.y < 0 || vol.y >= model.volSize.y ||
-        vol.z < 0 || vol.z >= model.volSize.z) {
-        return vec2<f32>(AMBIENT_SKY, 0.0);
-    }
-    let idx    = u32(vol.x + model.volSize.x * (vol.y + model.volSize.y * vol.z));
-    let packed = light[idx];
-    let rayOcc = f32((packed >> 16u) & 0xFFu) / 255.0;
-    let sky    = f32(packed & 0xFFu) / 15.0 * (1.0 - camera.lightParams.x * rayOcc);
-    let bounce = f32(packed >> 24u) / 255.0 * camera.lightParams.y;
-    return vec2<f32>(sky, max(f32((packed >> 8u) & 0xFFu) / 15.0, bounce));
+// Light word of voxel v; a voxel with no light storage reads as ambient only.
+fn lightWord(v: vec3<i32>) -> u32 {
+    let i = entryOf(v >> vec3<u32>(5u));
+    if (i < 0) { return EMPTY_LIGHT; }
+    let l = v & vec3<i32>(31);
+    let b = (l.x >> 3u) + 4 * ((l.y >> 3u) + 4 * (l.z >> 3u));
+    let s = brickTable[u32(i * 64 + b)];
+    if (s == NO_SURFACE) { return EMPTY_LIGHT; }
+    let lb = l & vec3<i32>(7);
+    return lightPool[s * 512u + u32(lb.x + 8 * (lb.y + 8 * lb.z))];
 }
 
-// Raw per-voxel directional-sun visibility from the `sunvis` buffer that GpuSunVisPass precomputed this frame.
-// 0-254 = shadowed…lit; 255 = SKIP SENTINEL ('no surface shadow sample here' — open air / out of volume). The
-// sun blend in sampleLit skips 255 so open-air cells past a convex edge don't wash the shadow out before the
-// edge. Out-of-volume also returns 255 (skip). The PCF happens once per surface voxel in the compute pass.
-fn sunRaw(vol: vec3<i32>) -> u32 {
-    if (vol.x < 0 || vol.x >= model.volSize.x ||
-        vol.y < 0 || vol.y >= model.volSize.y ||
-        vol.z < 0 || vol.z >= model.volSize.z) {
-        return 255u;
-    }
-    return sunvis[u32(vol.x + model.volSize.x * (vol.y + model.volSize.y * vol.z))];
+// (sky, block, sun visibility 0-1, has-sun-sample) at one voxel. Sky is the flat ambient scaled by the ray AO
+// occlusion, weighted by camera.lightParams.x. Bounce light is indirect light with no direction, so it joins the
+// block channel by max, like a lamp's. Sun 255 = no sample (not a surface voxel), which the blend skips.
+fn litAt(v: vec3<i32>) -> vec4<f32> {
+    let w = lightWord(v);
+    let rayOcc = f32((w >> 16u) & 0xFFu) / 255.0;
+    let sky    = camera.lightParams.z * (1.0 - camera.lightParams.x * rayOcc);
+    let bounce = f32(w >> 24u) / 255.0 * camera.lightParams.y;
+    let blk    = max(f32((w >> 8u) & 0xFFu) / 15.0, bounce);
+    let sv     = w & 0xFFu;
+    return vec4<f32>(sky, blk, f32(sv) / 254.0, select(0.0, 1.0, sv < 255u));
 }
 
 // Minecraft-style smooth lighting at the air side of this fragment: sky + block light (each 0..1) and sun
@@ -146,8 +150,8 @@ struct Lit { sky: f32, blk: f32, sun: f32 };
 
 fn onSurface(c: vec3<i32>, N: vec3<i32>) -> bool { return !isSolid(c) && isSolid(c - N); }
 
-// (sky, block, sun) averaged over the usable cells at one corner. Sun skips 255 (no-sample) cells.
-fn cornerLit(air: vec3<i32>, s1: vec3<i32>, s2: vec3<i32>, dg: vec3<i32>, N: vec3<i32>, wantSun: bool) -> vec3<f32> {
+// (sky, block, sun) averaged over the usable cells at one corner. Sun skips cells with no sample.
+fn cornerLit(air: vec3<i32>, s1: vec3<i32>, s2: vec3<i32>, dg: vec3<i32>, N: vec3<i32>) -> vec3<f32> {
     let inc1 = onSurface(s1, N);
     let inc2 = onSurface(s2, N);
     let incD = (inc1 || inc2) && onSurface(dg, N);
@@ -157,27 +161,25 @@ fn cornerLit(air: vec3<i32>, s1: vec3<i32>, s2: vec3<i32>, dg: vec3<i32>, N: vec
     var accS = 0.0; var nS = 0.0;
     for (var k = 0; k < 4; k = k + 1) {
         if (!inc[k]) { continue; }
-        accL += lightAt(cells[k]);
+        let la = litAt(cells[k]);
+        accL += la.xy;
         nL += 1.0;
-        if (wantSun) {
-            let sv = sunRaw(cells[k]);
-            if (sv < 255u) { accS += f32(sv) / 254.0; nS += 1.0; }
-        }
+        accS += la.z * la.w;
+        nS += la.w;
     }
     let l = accL / nL;
     return vec3<f32>(l.x, l.y, select(1.0, accS / max(nS, 1.0), nS > 0.0));
 }
 
-fn sampleLit(localPos: vec3<f32>, localNormal: vec3<f32>, wantSun: bool) -> Lit {
-    let air = model.chunkBase + vec3<i32>(floor(localPos + 0.5 * localNormal));
+fn sampleLit(localPos: vec3<f32>, localNormal: vec3<f32>) -> Lit {
+    let air = model.chunk * 32 + vec3<i32>(floor(localPos + 0.5 * localNormal));
     var o: Lit;
 
     if (!SMOOTH_LIGHT) {
-        let la = lightAt(air);
+        let la = litAt(air);
         o.sky = la.x;
         o.blk = la.y;
-        let sv = sunRaw(air);
-        o.sun = select(1.0, f32(sv) / 254.0, wantSun && sv < 255u);
+        o.sun = select(1.0, la.z, la.w > 0.5);
         return o;
     }
 
@@ -188,10 +190,10 @@ fn sampleLit(localPos: vec3<f32>, localNormal: vec3<f32>, wantSun: bool) -> Lit 
     else if (n.y > 0.5) { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 0, 1); }
     else                { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 1, 0); }
 
-    let c00 = cornerLit(air, air - T, air - B, air - T - B, N, wantSun);
-    let c10 = cornerLit(air, air + T, air - B, air + T - B, N, wantSun);
-    let c01 = cornerLit(air, air - T, air + B, air - T + B, N, wantSun);
-    let c11 = cornerLit(air, air + T, air + B, air + T + B, N, wantSun);
+    let c00 = cornerLit(air, air - T, air - B, air - T - B, N);
+    let c10 = cornerLit(air, air + T, air - B, air + T - B, N);
+    let c01 = cornerLit(air, air - T, air + B, air - T + B, N);
+    let c11 = cornerLit(air, air + T, air + B, air + T + B, N);
 
     // Plain bilinear across the cell face, like Minecraft's per-vertex interpolation.
     let s = fract(dot(localPos, vec3<f32>(T)));
@@ -199,7 +201,7 @@ fn sampleLit(localPos: vec3<f32>, localNormal: vec3<f32>, wantSun: bool) -> Lit 
     let v = mix(mix(c00, c10, s), mix(c01, c11, s), t);
     o.sky = v.x;
     o.blk = v.y;
-    o.sun = select(1.0, v.z, wantSun);
+    o.sun = v.z;
     return o;
 }
 
@@ -214,7 +216,7 @@ fn vAO(s1: f32, s2: f32, c: f32) -> f32 {
 // axes give four corner AO values (from the side + diagonal neighbours); the fragment's fractional position
 // within the cell bilerps between them, so AO stays smooth across a greedy-merged quad and is light-independent.
 fn computeAO(localPos: vec3<f32>, localNormal: vec3<f32>) -> f32 {
-    let air = model.chunkBase + vec3<i32>(floor(localPos + 0.5 * localNormal));
+    let air = model.chunk * 32 + vec3<i32>(floor(localPos + 0.5 * localNormal));
     let n   = abs(localNormal);
     var T: vec3<i32>; var B: vec3<i32>;
     if (n.x > 0.5)      { T = vec3<i32>(0, 1, 0); B = vec3<i32>(0, 0, 1); }
@@ -239,31 +241,31 @@ fn computeAO(localPos: vec3<f32>, localNormal: vec3<f32>) -> f32 {
 
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
-    let worldN = normalize(in.worldNormal);
-    let ndotl  = max(dot(worldN, -(camera.sunDir.xyz)), 0.0);
-    let s      = sampleLit(in.localPos, in.localNormal, ndotl > 0.0);
-
-    // Soft ambient fill (sky flood from all six faces, max BASE_SKY/15).
-    let ambient = s.sky;
-
-    // Direct sun capped at camera.sunDir.w (SunLight.Strength): Lambertian on the surface normal, gated by
-    // the smoothed voxel sun visibility.
-    let directSun = ndotl * s.sun * camera.sunDir.w;
-
-    // Sky contribution = the brighter of soft ambient and direct sun.
-    let skyTerm = max(ambient, directSun);
-
-    // Final = brightest of sky, block light, and the minimum ambient floor (geometry never fully dark).
-    let lit = max(max(skyTerm, s.blk), MIN_AMBIENT);
-
-    // Ambient occlusion darkens inner corners / block junctions; lerp from AO_MIN so corners aren't pure black.
-    let aoFactor = mix(AO_MIN, 1.0, computeAO(in.localPos, in.localNormal));
-
     // Sample unconditionally (avoids implicit-derivative issues from branching on a per-fragment value) and
     // select against the vertex color for untextured blocks (uv.z < 0, the no-texture sentinel).
     let layer     = max(i32(round(in.uv.z)), 0);
     let texColor  = textureSample(atlasTex, atlasSamp, fract(in.uv.xy), layer).rgb;
     let baseColor = select(in.color, texColor, in.uv.z >= 0.0);
+
+    // Non-chunk draws (selection highlight, HUD, debug meshes) have no light data: full-bright.
+    if (model.grid < 0) { return vec4<f32>(baseColor, 1.0); }
+
+    let worldN = normalize(in.worldNormal);
+    let ndotl  = max(dot(worldN, -(camera.sunDir.xyz)), 0.0);
+    let s      = sampleLit(in.localPos, in.localNormal);
+
+    // Direct sun capped at camera.sunDir.w (SunLight.Strength): Lambertian on the surface normal, gated by
+    // the smoothed voxel sun visibility.
+    let directSun = ndotl * s.sun * camera.sunDir.w;
+
+    // Sky contribution = the brighter of ambient and direct sun.
+    let skyTerm = max(s.sky, directSun);
+
+    // Final = brightest of sky, block light, and the minimum ambient floor.
+    let lit = max(max(skyTerm, s.blk), MIN_AMBIENT);
+
+    // Ambient occlusion darkens inner corners / block junctions; lerp from AO_MIN so corners aren't pure black.
+    let aoFactor = mix(AO_MIN, 1.0, computeAO(in.localPos, in.localNormal));
 
     return vec4<f32>(baseColor * lit * aoFactor, 1.0);
 }
@@ -275,19 +277,15 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     private ShaderModule* _shader;
     private BindGroupLayout* _cameraLayout;
     private BindGroupLayout* _modelLayout;
-    private BindGroupLayout* _lightLayout;
-    private BindGroupLayout* _shadowLayout;
+    private BindGroupLayout* _voxelLayout;
     private BindGroupLayout* _atlasLayout;
     private PipelineLayout* _pipelineLayout;
     private RenderPipeline* _pipeline;
     private RenderPipeline* _wireframePipeline;
     private RenderPipeline* _hudPipeline;
 
-    private SunShadowPass _shadow = null!;
-    private BindGroup* _shadowBindGroup;
-
     // Block texture array (TextureAtlas → GPU). Constructed with a 1x1 white fallback so BeginFrame
-    // always has a valid group-4 bind group; LoadTextureAtlas replaces it with the real spritesheet.
+    // always has a valid group-3 bind group; LoadTextureAtlas replaces it with the real spritesheet.
     private Texture*     _atlasTexture;
     private TextureView* _atlasTextureView;
     private Sampler*     _atlasSampler;
@@ -300,13 +298,14 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     private readonly GpuBuffer _cameraBuffer;
     private readonly GpuBuffer _hudCameraBuffer; // permanently holds identity view+proj
     private readonly GpuBuffer _modelBuffer;
-    private GpuBuffer _fullBrightLight = null!;  // Phase 4.1: shared sky=15 buffer for all draws
-    private GpuBuffer _fullAirOpacity = null!;   // all-air opacity for the fallback (non-chunk) light bind group
-    private GpuBuffer _fullLitSunVis = null!;    // all-lit (255) sun visibility for the fallback light bind group
     private BindGroup* _cameraBindGroup;
     private BindGroup* _hudCameraBindGroup;
     private BindGroup* _modelBindGroup;
-    private BindGroup* _lightBindGroup;
+
+    // Group 2: the shared voxel storage. Rebuilt when the store's buffers are replaced (pool growth).
+    private GridStore? _gridStore;
+    private BindGroup* _voxelBindGroup;
+    private int _voxelBindingVersion = -1;
 
     private CommandEncoder* _encoder;
     private RenderPassEncoder* _pass;
@@ -334,9 +333,6 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         _wireframePipeline = CreatePipeline(PrimitiveTopology.LineList,     CullMode.None);
         _hudPipeline       = CreatePipeline(PrimitiveTopology.TriangleList, CullMode.None, depthTest: false);
 
-        // Sun shadow pass shares the camera + model bind-group layouts (its depth shader reads both).
-        _shadow = new SunShadowPass(ctx, _cameraLayout, _modelLayout);
-
         _cameraBuffer    = GpuBuffer.CreateUniform(ctx, CameraSize);
         _hudCameraBuffer = GpuBuffer.CreateUniform(ctx, CameraSize);
         _modelBuffer     = GpuBuffer.CreateUniform(ctx, ModelStride * MaxObjects);
@@ -348,6 +344,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         id[0] = new CameraUniform { View = Mat4.Identity, Projection = Mat4.Identity };
         _hudCameraBuffer.Write<CameraUniform>(0, id);
     }
+
+    /// <summary>Sets the voxel storage chunk draws read their light from. Must be called before the first frame.</summary>
+    public void AttachGridStore(GridStore store) => _gridStore = store;
 
     private ShaderModule* CreateShader(string wgsl)
     {
@@ -377,47 +376,26 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         var modelEntry = new BindGroupLayoutEntry
         {
             Binding = 0,
-            Visibility = ShaderStage.Vertex | ShaderStage.Fragment, // fragment reads chunkBase/volSize
+            Visibility = ShaderStage.Vertex | ShaderStage.Fragment, // fragment reads chunk/grid
             Buffer = new BufferBindingLayout { Type = BufferBindingType.Uniform, HasDynamicOffset = true, MinBindingSize = ModelSize },
         };
         var modelDesc = new BindGroupLayoutDescriptor { EntryCount = 1, Entries = &modelEntry };
         _modelLayout = _api.DeviceCreateBindGroupLayout(_ctx.Device, &modelDesc);
 
-        // Group 2: per-volume light (binding 0) + opacity (binding 1) + sun visibility (binding 2), all
-        // read-only storage in the fragment.
-        BindGroupLayoutEntry* lightEntries = stackalloc BindGroupLayoutEntry[3];
-        lightEntries[0] = new BindGroupLayoutEntry
-        {
-            Binding = 0,
-            Visibility = ShaderStage.Fragment,
-            Buffer = new BufferBindingLayout { Type = BufferBindingType.ReadOnlyStorage, HasDynamicOffset = false, MinBindingSize = 0 },
-        };
-        lightEntries[1] = new BindGroupLayoutEntry
-        {
-            Binding = 1,
-            Visibility = ShaderStage.Fragment,
-            Buffer = new BufferBindingLayout { Type = BufferBindingType.ReadOnlyStorage, HasDynamicOffset = false, MinBindingSize = 0 },
-        };
-        lightEntries[2] = new BindGroupLayoutEntry
-        {
-            Binding = 2,
-            Visibility = ShaderStage.Fragment,
-            Buffer = new BufferBindingLayout { Type = BufferBindingType.ReadOnlyStorage, HasDynamicOffset = false, MinBindingSize = 0 },
-        };
-        var lightDesc = new BindGroupLayoutDescriptor { EntryCount = 3, Entries = lightEntries };
-        _lightLayout = _api.DeviceCreateBindGroupLayout(_ctx.Device, &lightDesc);
+        // Group 2: the shared voxel storage, all read-only storage in the fragment.
+        const int VoxelBindings = 5;
+        BindGroupLayoutEntry* voxelEntries = stackalloc BindGroupLayoutEntry[VoxelBindings];
+        for (int i = 0; i < VoxelBindings; i++)
+            voxelEntries[i] = new BindGroupLayoutEntry
+            {
+                Binding = (uint)i,
+                Visibility = ShaderStage.Fragment,
+                Buffer = new BufferBindingLayout { Type = BufferBindingType.ReadOnlyStorage, HasDynamicOffset = false, MinBindingSize = 0 },
+            };
+        var voxelDesc = new BindGroupLayoutDescriptor { EntryCount = VoxelBindings, Entries = voxelEntries };
+        _voxelLayout = _api.DeviceCreateBindGroupLayout(_ctx.Device, &voxelDesc);
 
-        // Group 3: the sun shadow map, sampled via textureLoad (no sampler needed → hard, voxel-res shadows).
-        var shadowEntry = new BindGroupLayoutEntry
-        {
-            Binding    = 0,
-            Visibility = ShaderStage.Fragment,
-            Texture    = new TextureBindingLayout { SampleType = TextureSampleType.Depth, ViewDimension = TextureViewDimension.Dimension2D, Multisampled = false },
-        };
-        var shadowDesc = new BindGroupLayoutDescriptor { EntryCount = 1, Entries = &shadowEntry };
-        _shadowLayout = _api.DeviceCreateBindGroupLayout(_ctx.Device, &shadowDesc);
-
-        // Group 4: block texture array (binding 0) + a filtering sampler (binding 1).
+        // Group 3: block texture array (binding 0) + a filtering sampler (binding 1).
         BindGroupLayoutEntry* atlasEntries = stackalloc BindGroupLayoutEntry[2];
         atlasEntries[0] = new BindGroupLayoutEntry
         {
@@ -434,13 +412,12 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         var atlasDesc = new BindGroupLayoutDescriptor { EntryCount = 2, Entries = atlasEntries };
         _atlasLayout = _api.DeviceCreateBindGroupLayout(_ctx.Device, &atlasDesc);
 
-        BindGroupLayout** layouts = stackalloc BindGroupLayout*[5];
+        BindGroupLayout** layouts = stackalloc BindGroupLayout*[4];
         layouts[0] = _cameraLayout;
         layouts[1] = _modelLayout;
-        layouts[2] = _lightLayout;
-        layouts[3] = _shadowLayout;
-        layouts[4] = _atlasLayout;
-        var plDesc = new PipelineLayoutDescriptor { BindGroupLayoutCount = 5, BindGroupLayouts = layouts };
+        layouts[2] = _voxelLayout;
+        layouts[3] = _atlasLayout;
+        var plDesc = new PipelineLayoutDescriptor { BindGroupLayoutCount = 4, BindGroupLayouts = layouts };
         _pipelineLayout = _api.DeviceCreatePipelineLayout(_ctx.Device, &plDesc);
     }
 
@@ -505,40 +482,27 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         var modelEntry = new BindGroupEntry { Binding = 0, Buffer = _modelBuffer.Handle, Offset = 0, Size = ModelSize };
         var modelDesc = new BindGroupDescriptor { Layout = _modelLayout, EntryCount = 1, Entries = &modelEntry };
         _modelBindGroup = _api.DeviceCreateBindGroup(_ctx.Device, &modelDesc);
-
-        // Phase 4.1: one shared full-bright (sky=15) light buffer bound for every draw, proving the
-        // fragment-sampling path. Phase 4.2 replaces this with per-chunk flooded buffers.
-        const int voxels = 32 * 32 * 32;
-        _fullBrightLight = GpuBuffer.CreateStorage(_ctx, (ulong)(voxels * sizeof(uint)));
-        var full = new uint[voxels];
-        Array.Fill(full, 15u); // sky=15, block=0
-        _fullBrightLight.Write<uint>(0, full);
-
-        // All-air opacity (one 32³ chunk's worth of words) so the fallback's AO sampling sees no occluders.
-        const int opWords = voxels / 32;
-        _fullAirOpacity = GpuBuffer.CreateStorage(_ctx, (ulong)(opWords * sizeof(uint)));
-        _fullAirOpacity.Write<uint>(0, new uint[opWords]);
-
-        // All-lit sun visibility (255) for the fallback (non-chunk) draws — no sun shadowing.
-        _fullLitSunVis = GpuBuffer.CreateStorage(_ctx, (ulong)(voxels * sizeof(uint)));
-        var litVis = new uint[voxels];
-        Array.Fill(litVis, 255u);
-        _fullLitSunVis.Write<uint>(0, litVis);
-
-        BindGroupEntry* lightEntries = stackalloc BindGroupEntry[3];
-        lightEntries[0] = new BindGroupEntry { Binding = 0, Buffer = _fullBrightLight.Handle, Offset = 0, Size = _fullBrightLight.SizeBytes };
-        lightEntries[1] = new BindGroupEntry { Binding = 1, Buffer = _fullAirOpacity.Handle, Offset = 0, Size = _fullAirOpacity.SizeBytes };
-        lightEntries[2] = new BindGroupEntry { Binding = 2, Buffer = _fullLitSunVis.Handle, Offset = 0, Size = _fullLitSunVis.SizeBytes };
-        var lightDesc  = new BindGroupDescriptor { Layout = _lightLayout, EntryCount = 3, Entries = lightEntries };
-        _lightBindGroup = _api.DeviceCreateBindGroup(_ctx.Device, &lightDesc);
-
-        // Group 3: the shadow map depth view (same texture the shadow pass renders into).
-        var shadowEntry = new BindGroupEntry { Binding = 0, TextureView = _shadow.DepthView };
-        var shadowDesc  = new BindGroupDescriptor { Layout = _shadowLayout, EntryCount = 1, Entries = &shadowEntry };
-        _shadowBindGroup = _api.DeviceCreateBindGroup(_ctx.Device, &shadowDesc);
     }
 
-    /// <summary>1x1 white single-layer array texture, bound as group 4 until <see cref="LoadTextureAtlas"/>
+    /// <summary>(Re)creates the group-2 bind group over the store's buffers when they were replaced.</summary>
+    private void EnsureVoxelBindGroup()
+    {
+        var s = _gridStore ?? throw new InvalidOperationException("Renderer.AttachGridStore was not called.");
+        if (_voxelBindGroup != null && _voxelBindingVersion == s.BindingVersion) return;
+        if (_voxelBindGroup != null) _api.BindGroupRelease(_voxelBindGroup);
+
+        BindGroupEntry* entries = stackalloc BindGroupEntry[5];
+        entries[0] = new BindGroupEntry { Binding = 0, Buffer = s.OccPool.Handle,    Offset = 0, Size = s.OccPool.SizeBytes };
+        entries[1] = new BindGroupEntry { Binding = 1, Buffer = s.ChunkTable.Handle, Offset = 0, Size = s.ChunkTable.SizeBytes };
+        entries[2] = new BindGroupEntry { Binding = 2, Buffer = s.BrickTable.Handle, Offset = 0, Size = s.BrickTable.SizeBytes };
+        entries[3] = new BindGroupEntry { Binding = 3, Buffer = s.LightPool.Handle,  Offset = 0, Size = s.LightPool.SizeBytes };
+        entries[4] = new BindGroupEntry { Binding = 4, Buffer = s.Grids.Handle,      Offset = 0, Size = s.Grids.SizeBytes };
+        var desc = new BindGroupDescriptor { Layout = _voxelLayout, EntryCount = 5, Entries = entries };
+        _voxelBindGroup = _api.DeviceCreateBindGroup(_ctx.Device, &desc);
+        _voxelBindingVersion = s.BindingVersion;
+    }
+
+    /// <summary>1x1 white single-layer array texture, bound as group 3 until <see cref="LoadTextureAtlas"/>
     /// replaces it — keeps every draw's texture sample well-defined (white, so untextured blocks are
     /// unaffected since they select the vertex color anyway) before the real spritesheet is loaded.</summary>
     private void CreateFallbackAtlas()
@@ -643,10 +607,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     /// <summary>
     /// Draws <paramref name="mesh"/> using the wireframe pipeline and wireframe index buffer, regardless
     /// of the current <see cref="WireframeMode"/>, then restores the previous pipeline.
-    /// Intended for overlay elements (selection highlight, debug gizmos). Rebinds the full-bright fallback
-    /// light group (group 2) first so the highlight always reads as bright/legible instead of picking up
-    /// the real (possibly shadowed) lighting of the block it outlines; a following <see cref="DrawMesh"/>
-    /// call rebinds its own chunk's light buffer, so this doesn't leak into subsequent world draws.
+    /// Intended for overlay elements (selection highlight, debug gizmos). Drawn full-bright (no grid), so the
+    /// highlight always reads as legible instead of picking up the lighting of the block it outlines.
     /// </summary>
     public void DrawMeshWireframe(GpuMesh mesh, in Mat4 model)
     {
@@ -659,7 +621,6 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 
         uint dynOffset = (uint)offset;
         _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset);
-        _api.RenderPassEncoderSetBindGroup(_pass, 2, _lightBindGroup, 0, null);
         _api.RenderPassEncoderSetVertexBuffer(_pass, 0, mesh.VertexBuffer.Handle, 0, mesh.VertexBuffer.SizeBytes);
         _api.RenderPassEncoderSetPipeline(_pass, _wireframePipeline);
         _api.RenderPassEncoderSetIndexBuffer(_pass, mesh.WireframeBuffer.Handle, IndexFormat.Uint32, 0, mesh.WireframeBuffer.SizeBytes);
@@ -670,17 +631,14 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 
     /// <summary>
     /// Switches to the HUD pipeline (depth always passes, no depth writes) and binds the identity camera.
-    /// Uses a dedicated buffer that never changes, so the world camera uniform is not touched. Also rebinds
-    /// the full-bright fallback light group (group 2), which world draws may have swapped for a per-chunk
-    /// buffer — otherwise the shared fs_main shader would tint HUD geometry with whatever chunk lighting was
-    /// last bound instead of drawing it at full brightness.
+    /// Uses a dedicated buffer that never changes, so the world camera uniform is not touched. HUD draws have no
+    /// grid, so they render full-bright.
     /// Call this after all world-space draws; follow with <see cref="DrawHudMesh"/> calls.
     /// </summary>
     public void BeginHudPass()
     {
         _api.RenderPassEncoderSetPipeline(_pass, _hudPipeline);
         _api.RenderPassEncoderSetBindGroup(_pass, 0, _hudCameraBindGroup, 0, null);
-        _api.RenderPassEncoderSetBindGroup(_pass, 2, _lightBindGroup, 0, null);
     }
 
     /// <summary>
@@ -720,40 +678,6 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         return lines;
     }
 
-    /// <summary>
-    /// Opens the sun shadow depth pass. Call after <see cref="SetCameraUniform"/> (the shadow shader reads
-    /// <c>lightViewProj</c> from the camera uniform) and before <see cref="BeginFrame"/>. Follow with
-    /// <see cref="DrawShadowMesh"/> for every opaque caster, then <see cref="EndShadowPass"/>.
-    /// </summary>
-    public void BeginShadowPass()
-    {
-        _shadow.Begin();
-        _api.RenderPassEncoderSetBindGroup(_shadow.Pass, 0, _cameraBindGroup, 0, null);
-        _drawIndex = 0;
-    }
-
-    /// <summary>Renders one caster into the shadow map. Reuses the dynamic-offset model buffer (the same
-    /// slot is overwritten with full data for the main pass, which is submitted later).</summary>
-    public void DrawShadowMesh(GpuMesh mesh, in Mat4 model)
-    {
-        if (_drawIndex >= MaxObjects) return;
-
-        ulong offset = (ulong)_drawIndex * ModelStride;
-        Span<ModelUniform> s = stackalloc ModelUniform[1];
-        s[0] = ModelUniform.Default(model);
-        _modelBuffer.Write<ModelUniform>(offset, s);
-
-        uint dynOffset = (uint)offset;
-        _api.RenderPassEncoderSetBindGroup(_shadow.Pass, 1, _modelBindGroup, 1, &dynOffset);
-        _api.RenderPassEncoderSetVertexBuffer(_shadow.Pass, 0, mesh.VertexBuffer.Handle, 0, mesh.VertexBuffer.SizeBytes);
-        _api.RenderPassEncoderSetIndexBuffer(_shadow.Pass, mesh.IndexBuffer.Handle, IndexFormat.Uint32, 0, mesh.IndexBuffer.SizeBytes);
-        _api.RenderPassEncoderDrawIndexed(_shadow.Pass, mesh.IndexCount, 1, 0, 0, 0);
-        _drawIndex++;
-    }
-
-    /// <summary>Ends and submits the shadow pass so the map is ready for the main pass to sample.</summary>
-    public void EndShadowPass() => _shadow.End();
-
     public bool BeginFrame()
     {
         if (!_ctx.AcquireCurrentView())
@@ -762,6 +686,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             return false;
         }
         _drawIndex = 0;
+        EnsureVoxelBindGroup();
 
         var encDesc = new CommandEncoderDescriptor();
         _encoder = _api.DeviceCreateCommandEncoder(_ctx.Device, &encDesc);
@@ -791,13 +716,10 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         _pass = _api.CommandEncoderBeginRenderPass(_encoder, &passDesc);
         _api.RenderPassEncoderSetPipeline(_pass, WireframeMode ? _wireframePipeline : _pipeline);
         _api.RenderPassEncoderSetBindGroup(_pass, 0, _cameraBindGroup, 0, null);
-        // Group 2 (light) is the same for every draw in Phase 4.1 and persists across pipeline
-        // switches (all pipelines share the layout), so bind it once here.
-        _api.RenderPassEncoderSetBindGroup(_pass, 2, _lightBindGroup, 0, null);
-        // Group 3 (sun shadow map) is constant for the frame; bind once.
-        _api.RenderPassEncoderSetBindGroup(_pass, 3, _shadowBindGroup, 0, null);
-        // Group 4 (block texture array) is constant for the frame; bind once.
-        _api.RenderPassEncoderSetBindGroup(_pass, 4, _atlasBindGroup, 0, null);
+        // Groups 2 (voxel storage) and 3 (block texture array) are the same for every draw and persist across
+        // pipeline switches (all pipelines share the layout), so bind them once here.
+        _api.RenderPassEncoderSetBindGroup(_pass, 2, _voxelBindGroup, 0, null);
+        _api.RenderPassEncoderSetBindGroup(_pass, 3, _atlasBindGroup, 0, null);
         return true;
     }
 
@@ -806,57 +728,23 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         Span<CameraUniform> s = stackalloc CameraUniform[1];
         s[0] = camera;
         _cameraBuffer.Write<CameraUniform>(0, s);
-        LastLightViewProj = camera.LightViewProj;
-    }
-
-    /// <summary>The sun light-space view-projection from the most recent <see cref="SetCameraUniform"/> — the
-    /// matrix the current shadow map was rendered with. The sun-vis compute pass projects voxels through this.</summary>
-    public Mat4 LastLightViewProj { get; private set; }
-
-    /// <summary>Opaque handle to the sun shadow-map depth view (a <c>texture_depth_2d</c>), bound by the
-    /// sun-vis compute pass. Constant for the renderer's lifetime.</summary>
-    internal nint ShadowDepthView => (nint)_shadow.DepthView;
-
-    /// <summary>Creates a group-2 bind group over a volume's <paramref name="lightBuffer"/> (binding 0),
-    /// <paramref name="opacityBuffer"/> (binding 1, for in-shader AO) and <paramref name="sunVisBuffer"/>
-    /// (binding 2, per-voxel sun visibility); returns an opaque handle. The caller owns its lifetime
-    /// (release via the buffer's owner).</summary>
-    public nint CreateLightBindGroup(GpuBuffer lightBuffer, GpuBuffer opacityBuffer, GpuBuffer sunVisBuffer)
-    {
-        BindGroupEntry* entries = stackalloc BindGroupEntry[3];
-        entries[0] = new BindGroupEntry { Binding = 0, Buffer = lightBuffer.Handle,   Offset = 0, Size = lightBuffer.SizeBytes };
-        entries[1] = new BindGroupEntry { Binding = 1, Buffer = opacityBuffer.Handle, Offset = 0, Size = opacityBuffer.SizeBytes };
-        entries[2] = new BindGroupEntry { Binding = 2, Buffer = sunVisBuffer.Handle,  Offset = 0, Size = sunVisBuffer.SizeBytes };
-        var desc = new BindGroupDescriptor { Layout = _lightLayout, EntryCount = 3, Entries = entries };
-        return (nint)_api.DeviceCreateBindGroup(_ctx.Device, &desc);
     }
 
     /// <summary>
-    /// Draws a mesh with per-volume lighting. <paramref name="lightBindGroup"/> (group 2) should be the
-    /// volume's LightA bind group; 0 falls back to the shared full-bright buffer.
-    /// <paramref name="chunkBase"/> is the chunk's voxel origin within the volume;
-    /// <paramref name="volSize"/> is the volume dimensions in voxels.
+    /// Draws a chunk mesh lit from grid <paramref name="grid"/> (its <see cref="GridHandle.Index"/>; -1 draws it
+    /// full-bright). <paramref name="chunk"/> is the chunk's coordinate in that grid.
     /// </summary>
-    public void DrawMesh(GpuMesh mesh, in Mat4 model, nint lightBindGroup,
-                         int cbx, int cby, int cbz,
-                         int vsx, int vsy, int vsz)
+    public void DrawMesh(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk)
     {
         if (_drawIndex >= MaxObjects) return;
 
         ulong offset = (ulong)_drawIndex * ModelStride;
         Span<ModelUniform> s = stackalloc ModelUniform[1];
-        s[0] = new ModelUniform
-        {
-            Model      = model,
-            ChunkBaseX = cbx, ChunkBaseY = cby, ChunkBaseZ = cbz, _Pad0 = 0,
-            VolSizeX   = vsx, VolSizeY   = vsy, VolSizeZ   = vsz, _Pad1 = 0,
-        };
+        s[0] = new ModelUniform { Model = model, ChunkX = chunk.X, ChunkY = chunk.Y, ChunkZ = chunk.Z, Grid = grid };
         _modelBuffer.Write<ModelUniform>(offset, s);
 
         uint dynOffset = (uint)offset;
         _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset);
-        var lbg = lightBindGroup != 0 ? (BindGroup*)lightBindGroup : _lightBindGroup;
-        _api.RenderPassEncoderSetBindGroup(_pass, 2, lbg, 0, null);
         _api.RenderPassEncoderSetVertexBuffer(_pass, 0, mesh.VertexBuffer.Handle, 0, mesh.VertexBuffer.SizeBytes);
 
         var idxBuf   = WireframeMode ? mesh.WireframeBuffer : mesh.IndexBuffer;
@@ -886,19 +774,12 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     private struct ModelUniform
     {
         public Mat4 Model;
-        // WGSL pads vec3<i32> to 16 bytes, so each vec3 needs an explicit int pad.
-        public int ChunkBaseX, ChunkBaseY, ChunkBaseZ, _Pad0;
-        public int VolSizeX,   VolSizeY,   VolSizeZ,   _Pad1;
+        public int ChunkX, ChunkY, ChunkZ, Grid;
+        public int _Pad0, _Pad1, _Pad2, _Pad3;
         // sizeof = 64 + 16 + 16 = 96 == ModelSize
 
-        /// <summary>Safe default for non-chunk draws: chunkBase=(0,0,0), volSize=(32,32,32).
-        /// Keeps the fragment shader from sampling out-of-bounds on the full-bright buffer.</summary>
-        public static ModelUniform Default(in Mat4 m) => new()
-        {
-            Model      = m,
-            ChunkBaseX = 0, ChunkBaseY = 0, ChunkBaseZ = 0, _Pad0 = 0,
-            VolSizeX   = 32, VolSizeY  = 32, VolSizeZ  = 32, _Pad1 = 0,
-        };
+        /// <summary>Non-chunk draws: no grid, drawn full-bright.</summary>
+        public static ModelUniform Default(in Mat4 m) => new() { Model = m, Grid = -1 };
     }
 
     public void OnResize(Vector2D<int> size) => _ctx.Configure(size);
@@ -908,10 +789,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         _cameraBuffer.Dispose();
         _hudCameraBuffer.Dispose();
         _modelBuffer.Dispose();
-        _fullBrightLight.Dispose();
-        _fullAirOpacity.Dispose();
-        _fullLitSunVis.Dispose();
-        _shadow.Dispose();
+        if (_voxelBindGroup   != null) _api.BindGroupRelease(_voxelBindGroup);
         if (_atlasBindGroup   != null) _api.BindGroupRelease(_atlasBindGroup);
         if (_atlasSampler     != null) _api.SamplerRelease(_atlasSampler);
         if (_atlasTextureView != null) _api.TextureViewRelease(_atlasTextureView);

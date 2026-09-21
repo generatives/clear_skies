@@ -6,20 +6,17 @@ namespace ClearSkies.Engine.ECS;
 
 /// <summary>
 /// Marks an entity as drawable with a given GPU mesh and per-volume lighting info.
-/// <see cref="VolumeGpu"/> null → renderer falls back to the shared full-bright buffer.
+/// <see cref="Grid"/> null → drawn full-bright.
 /// </summary>
 public struct MeshRenderer
 {
     public GpuMesh Mesh;
 
-    /// <summary>Owning volume's GPU resources. The renderer reads <c>VolumeGpu.RenderBindGroup</c> for the
-    /// light buffer, and derives this chunk's voxel base + the volume dims from it live each draw. Null for
-    /// non-chunk meshes (debug cubes, etc.) — uses the shared full-bright fallback.</summary>
-    internal VolumeGpuResources? VolumeGpu;
+    /// <summary>Owning volume's registration in the shared voxel storage; the fragment shader looks light up
+    /// through it. Null for non-chunk meshes (debug cubes, etc.), which draw full-bright.</summary>
+    public GridHandle? Grid;
 
-    /// <summary>This chunk's position in the volume. The fragment-shader chunkBase and volSize are computed
-    /// from this against <see cref="VolumeGpu"/> at draw time, so a volume reallocation (which moves every
-    /// chunk's base and changes the dims) needs no remesh — the geometry is unchanged.</summary>
+    /// <summary>This chunk's position in its volume (grid-local chunk coordinates).</summary>
     public ChunkPosition ChunkPos;
 }
 

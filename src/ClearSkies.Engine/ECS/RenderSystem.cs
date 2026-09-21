@@ -51,43 +51,16 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
             return;
         }
 
-        var sunDir = SunLight.Direction;
-
         var uniform = new CameraUniform
         {
-            View          = camera.GetView(camTransform),
-            Projection    = camera.GetProjection(_renderer.AspectRatio),
-            SunDirection  = sunDir,
-            SunStrength   = SunLight.Strength,
-            LightViewProj = BuildLightViewProj(sunDir, camTransform.Position),
+            View           = camera.GetView(camTransform),
+            Projection     = camera.GetProjection(_renderer.AspectRatio),
+            SunDirection   = SunLight.Direction,
+            SunStrength    = SunLight.Strength,
             RayAoStrength  = RayLightingSettings.AoStrength,
             RayBounceScale = RayLightingSettings.BounceScale,
+            Ambient        = RayLightingSettings.Ambient,
         };
-
-        // Camera uniform carries lightViewProj, which the shadow pass's depth shader reads — write it
-        // before the shadow pass, then render all casters from the sun's POV into the shadow map.
-        //
-        // Every loaded chunk mesh gets a MeshRenderer (see ChunkVolume.SetMesh) — with no culling, at a
-        // large view distance that meant drawing every loaded chunk twice a frame (shadow + main pass)
-        // regardless of whether it was anywhere near visible, the dominant per-frame cost once generation/
-        // meshing/lighting throughput stopped being the bottleneck. Frustum-cull both passes: the shadow
-        // pass against the sun's own (much smaller, fixed-radius — see BuildLightViewProj) orthographic
-        // volume, the main pass against the camera's. Every chunk mesh is exactly ChunkData.Size local
-        // units on a side (GreedyMesher's local space), so the world AABB is just that box transformed by
-        // the entity's own model matrix (handles rotation for a dynamic grid's chunks too, not just the
-        // static world's axis-aligned ones).
-        var lightFrustum = Frustum.FromViewProjection(uniform.LightViewProj);
-
-        _renderer.SetCameraUniform(uniform);
-        _renderer.BeginShadowPass();
-        foreach (ref readonly Entity e in _meshes.GetEntities())
-        {
-            ref readonly var t = ref e.Get<Transform>();
-            var model = t.ToMatrix();
-            if (!ChunkBoundsIntersect(model, lightFrustum)) continue;
-            _renderer.DrawShadowMesh(e.Get<MeshRenderer>().Mesh, model);
-        }
-        _renderer.EndShadowPass();
 
         if (!_renderer.BeginFrame())
         {
@@ -97,6 +70,9 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
 
         _renderer.SetCameraUniform(uniform);
 
+        // Every loaded chunk mesh gets a MeshRenderer (see ChunkVolume.SetMesh); frustum-cull them. Every chunk
+        // mesh is exactly ChunkData.Size local units on a side (GreedyMesher's local space), so the world AABB is
+        // just that box transformed by the entity's own model matrix (handles a dynamic grid's rotation too).
         var camFrustum = Frustum.FromViewProjection(Mat4.Multiply(uniform.Projection, uniform.View));
 
         foreach (ref readonly Entity e in _meshes.GetEntities())
@@ -107,21 +83,7 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
             var model = t.ToMatrix();
             if (!ChunkBoundsIntersect(model, camFrustum)) continue;
 
-            // Derive chunkBase + volume dims live from the current volume state. This stays correct
-            // across volume reallocations (which move every chunk's base and resize the volume)
-            // without needing to remesh. Fallback for non-chunk meshes: base 0, size 32 (full-bright).
-            nint lbg = 0;
-            int cbx = 0, cby = 0, cbz = 0;
-            int vsx = ChunkData.Size, vsy = ChunkData.Size, vsz = ChunkData.Size;
-            if (mr.VolumeGpu is { } gpu)
-            {
-                lbg = gpu.RenderBindGroup;
-                var (bx, by, bz) = gpu.ChunkVoxelBase(mr.ChunkPos);
-                cbx = bx; cby = by; cbz = bz;
-                vsx = gpu.VW; vsy = gpu.VH; vsz = gpu.VD;
-            }
-
-            _renderer.DrawMesh(mr.Mesh, model, lbg, cbx, cby, cbz, vsx, vsy, vsz);
+            _renderer.DrawMesh(mr.Mesh, model, mr.Grid?.Index ?? -1, mr.ChunkPos);
         }
 
         // Wireframe overlays drawn on top (pipeline switches mid-pass then restores).
@@ -162,32 +124,6 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
             max = Vector3D.Max(max, world);
         }
         return frustum.Intersects(min, max);
-    }
-
-    // Orthographic light-space matrix for the directional sun, framing a box around the camera so the
-    // shadow map covers the loaded region at high texel density. ~160-unit radius ≈ the load region plus
-    // margin; 2048² map → ~6 texels/voxel.
-    private static Mat4 BuildLightViewProj(Vector3D<float> sunDir, Vector3D<float> cameraPos)
-    {
-        const float radius = 160f;
-        var eye = cameraPos - sunDir * radius;
-        var up  = MathF.Abs(sunDir.Y) > 0.99f ? new Vector3D<float>(0, 0, 1) : new Vector3D<float>(0, 1, 0);
-        var view = Mat4.LookAtRh(eye, cameraPos, up);
-        var proj = Mat4.OrthoRhZo(-radius, radius, -radius, radius, 0.1f, 2f * radius);
-        var lvp  = Mat4.Multiply(proj, view);
-
-        // Texel-snap the light frustum: the eye tracks the camera, so without snapping the projected world
-        // slides sub-texel every frame and shadow edges shimmer/crawl even on a static scene. Project the world
-        // origin into light clip space, quantise its XY to whole shadow-map texels, and fold the correction back
-        // into the clip-space translation so the world→texel mapping only ever moves in whole-texel steps.
-        const float mapSize = SunShadowPass.MapSize;
-        float ox = lvp.M12, oy = lvp.M13;            // origin (0,0,0) → clip-space xy (ortho, w = 1)
-        float halfTexels = mapSize * 0.5f;           // clip [-1,1] spans mapSize texels
-        float dx = (MathF.Round(ox * halfTexels) - ox * halfTexels) / halfTexels;
-        float dy = (MathF.Round(oy * halfTexels) - oy * halfTexels) / halfTexels;
-        lvp.M12 += dx;
-        lvp.M13 += dy;
-        return lvp;
     }
 
     private bool TryGetActiveCamera(out Transform transform, out Camera camera)

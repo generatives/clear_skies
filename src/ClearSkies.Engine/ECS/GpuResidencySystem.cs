@@ -1,120 +1,73 @@
 using ClearSkies.Engine.Core;
-using ClearSkies.Engine.Rendering.WebGpu;
 using ClearSkies.Engine.Voxels;
 using DefaultEcs;
 
 namespace ClearSkies.Engine.ECS;
 
 /// <summary>
-/// Keeps <see cref="VolumeGpuResources"/> in sync with loaded chunks each PreRender tick.
-///
-/// Responsibilities:
-/// 1. Create the per-volume GPU buffer on first load, sized to a window around the loaded chunks.
-/// 2. Re-window the buffer (reallocate) when the loaded set no longer fits the window or the window has
-///    grown wastefully large — so the volume tracks the camera instead of growing without bound (the
-///    cause of the far-travel buffer-limit crash).
-/// 3. Upload each dirty chunk's opacity slice on block edits, up to <see cref="UploadsPerFrame"/> per frame.
-/// 4. Ensure the volume's render bind group (LightA → group 2) is created.
+/// Keeps the shared <see cref="GridStore"/> in sync with loaded chunks each PreRender tick:
+/// <list type="number">
+/// <item>releases the storage of chunks that unloaded and of ships that were despawned;</item>
+/// <item>uploads new and edited chunks' occupancy (and with it, which bricks get light storage), up to
+/// <see cref="UploadsPerFrame"/> per frame.</item>
+/// </list>
+/// Nothing is ever reallocated as the camera moves: the world's chunk table is toroidal, and every chunk takes and
+/// returns fixed-size slots.
 /// </summary>
 public sealed class GpuResidencySystem : ISystem
 {
-    private const int UploadsPerFrame = 8;
+    private const int UploadsPerFrame = 16;
 
-    /// <summary>Chunks of padding around the loaded set when (re)windowing. Larger = less frequent reallocs
-    /// (each crossing of the margin re-windows) at the cost of more VRAM and a bigger re-flood per crossing.</summary>
-    private const int WindowMargin = 2;
-
-    /// <summary>Re-window to shrink when the current allocation exceeds this multiple of the needed size.</summary>
-    private const int ShrinkFactor = 3;
-
-    private readonly GpuContext  _ctx;
-    private readonly Renderer    _renderer;
+    private readonly GridStore   _store;
     private readonly ChunkVolume _staticWorld;
     private readonly EntitySet   _grids;
+    private readonly HashSet<DynamicGrid> _known = new();
+    private readonly List<DynamicGrid> _gone = new();
 
-    public GpuResidencySystem(World ecsWorld, StaticWorld staticWorld, GpuContext ctx, Renderer renderer)
+    public GpuResidencySystem(World ecsWorld, StaticWorld staticWorld, GridStore store)
     {
-        _ctx         = ctx;
-        _renderer    = renderer;
+        _store       = store;
         _staticWorld = staticWorld;
         _grids       = ecsWorld.GetEntities().With<DynamicGridComponent>().AsSet();
+        _store.Register(staticWorld.Gpu, isWorld: true);
     }
 
     public void Update(float dt)
     {
+        // Despawned ships: their root entity is gone from the set.
+        _gone.Clear();
+        foreach (var g in _known)
+        {
+            bool alive = false;
+            foreach (ref readonly Entity e in _grids.GetEntities())
+                if (ReferenceEquals(e.Get<DynamicGridComponent>().Grid, g)) { alive = true; break; }
+            if (!alive) _gone.Add(g);
+        }
+        foreach (var g in _gone) { _store.Unregister(g.Gpu); _known.Remove(g); }
+
         int budget = UploadsPerFrame;
         ProcessVolume(_staticWorld, ref budget);
         foreach (ref readonly Entity e in _grids.GetEntities())
         {
-            if (budget <= 0) break;
-            ProcessVolume(e.Get<DynamicGridComponent>().Grid, ref budget);
+            var grid = e.Get<DynamicGridComponent>().Grid;
+            _known.Add(grid);
+            ProcessVolume(grid, ref budget);
         }
     }
 
     private void ProcessVolume(ChunkVolume vol, ref int budget)
     {
-        if (vol.LoadedCount == 0) return;
-        if (!vol.TryGetLoadedBounds(out var lmin, out var lmax)) return;
+        // Removals first, so a chunk that loads onto the same wrapped table entry this frame finds it free.
+        foreach (var pos in vol.RemovedChunks) _store.RemoveChunk(vol.Gpu, pos);
+        vol.RemovedChunks.Clear();
 
-        // Target window = loaded AABB padded by WindowMargin chunks. The margin absorbs camera travel so the
-        // volume doesn't re-window every chunk boundary.
-        var tmin = new ChunkPosition(lmin.X - WindowMargin, lmin.Y - WindowMargin, lmin.Z - WindowMargin);
-        var tmax = new ChunkPosition(lmax.X + WindowMargin, lmax.Y + WindowMargin, lmax.Z + WindowMargin);
-
-        if (vol.VolumeGpu == null)
-        {
-            vol.VolumeGpu = VolumeGpuResources.Create(_ctx, tmin, tmax);
-        }
-        else
-        {
-            var g = vol.VolumeGpu;
-            long cur = (long)g.DX * g.DY * g.DZ;
-            long tgt = (long)(tmax.X - tmin.X + 1) * (tmax.Y - tmin.Y + 1) * (tmax.Z - tmin.Z + 1);
-
-            // Re-window if the loaded set has moved outside the current allocation, or the allocation is now
-            // wastefully large (e.g. after teleporting away from a previously explored region).
-            if (!g.Covers(lmin, lmax) || cur > tgt * ShrinkFactor)
-            {
-                var sw = System.Diagnostics.Stopwatch.StartNew();
-                g.Reallocate(tmin, tmax);
-                long reallocMs = sw.ElapsedMilliseconds;
-
-                // Fresh, empty buffers. Re-upload every loaded chunk's opacity NOW rather than draining it at
-                // UploadsPerFrame: the Opacity buffer is sampled directly every frame for ambient occlusion
-                // (independent of the light flood), so any loaded chunk left un-uploaded reads as all-air —
-                // no occlusion — until its turn comes up, which at a few thousand loaded chunks would show as
-                // the whole reallocated area flashing to full brightness for the better part of a second.
-                // Affordable to do synchronously because UpdateChunkOpacity skips recomputing the packed words
-                // for any chunk whose block data hasn't actually changed since its last upload (see
-                // ChunkEntry.PackedOpacityWords) — the common case here, since a reallocation is triggered by
-                // the loaded window moving, not by edits.
-                foreach (var (pos, e) in vol.All)
-                {
-                    g.UpdateChunkOpacity(pos, e);
-                    e.NeedsGpuUpload = false;
-                    e.NeedsFlood     = true;
-                }
-                long totalMs = sw.ElapsedMilliseconds;
-                Console.WriteLine($"[gpu-realloc] {(vol == _staticWorld ? "static" : "grid")} cur={g.DX}x{g.DY}x{g.DZ} -> new={tmax.X-tmin.X+1}x{tmax.Y-tmin.Y+1}x{tmax.Z-tmin.Z+1} loaded={vol.LoadedCount} allocMs={reallocMs} totalMs={totalMs}");
-            }
-        }
-
-        var gpu = vol.VolumeGpu!;
-
-        // Upload each dirty chunk's opacity slice (chunk-major, one contiguous write) and rebuild its
-        // emitter list. Budgeted per frame (block edits / newly streamed chunks).
+        if (budget <= 0) return;
         foreach (var (pos, entry) in vol.All)
         {
             if (!entry.NeedsGpuUpload) continue;
-            if (budget <= 0) break;
-
-            gpu.UpdateChunkOpacity(pos, entry);
+            _store.UploadChunk(vol.Gpu, pos, entry);
             entry.NeedsGpuUpload = false;
-            budget--;
+            if (--budget <= 0) break;
         }
-
-        // Create / recreate the fragment-shader render bind group for LightA + Opacity (AO) + SunVis.
-        if (gpu.RenderBindGroup == 0)
-            gpu.RenderBindGroup = _renderer.CreateLightBindGroup(gpu.LightA, gpu.Opacity, gpu.SunVis);
     }
 }

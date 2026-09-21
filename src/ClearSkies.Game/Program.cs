@@ -40,7 +40,13 @@ var physicsBody = new PhysicsBodySystem(host.World, staticWorld, host.Physics);
 // recomputing a much larger dirty region during the load-in burst plus the per-frame full-chunk scans in
 // ChunkMeshSystem/GpuResidencySystem/GpuLightSystem/PhysicsBodySystem (see the deferred dirty-queue task).
 // Pushing further needs that follow-up work, not just a bigger radius.
-host.AddSystem(new ChunkLoadSystem(host.World, staticWorld, worldGen, xzRadius: 8, yRadius: 3), SystemStage.Logic);
+const int ViewXz = 8, ViewY = 3;
+host.AddSystem(new ChunkLoadSystem(host.World, staticWorld, worldGen, xzRadius: ViewXz, yRadius: ViewY), SystemStage.Logic);
+
+// Shared GPU voxel storage for lighting (world + ships). ChunkLoadSystem unloads past radius + 1, so the loaded
+// span never exceeds 2 * (radius + 1) + 1 chunks per axis — the world's toroidal table size.
+var gridStore = new GridStore(host.Context, new Vector3D<int>(2 * ViewXz + 3, 2 * ViewY + 3, 2 * ViewXz + 3));
+host.Renderer.AttachGridStore(gridStore);
 host.AddSystem(physicsBody, SystemStage.Logic);
 host.AddSystem(new PlayerGridControlSystem(host.World, host.Physics, host.Input), SystemStage.Logic);
 
@@ -74,8 +80,8 @@ host.AddSystem(new LambdaSystem(() =>
         Console.WriteLine($"[debug] wireframe: {host.Renderer.WireframeMode}");
     }
 }), SystemStage.Logic);
-host.AddSystem(new GpuResidencySystem(host.World, staticWorld, host.Context, host.Renderer), SystemStage.PreRender);
-host.AddSystem(new GpuLightSystem(host.World, staticWorld, host.Context, host.Physics, host.Renderer), SystemStage.PreRender);
+host.AddSystem(new GpuResidencySystem(host.World, staticWorld, gridStore), SystemStage.PreRender);
+host.AddSystem(new GpuLightSystem(host.World, staticWorld, host.Context, host.Physics, gridStore), SystemStage.PreRender);
 host.AddSystem(meshSystem, SystemStage.PreRender);
 host.AddSystem(new RenderSystem(host.World, host.Renderer, host.Gui, host.Time), SystemStage.Render);
 
@@ -101,3 +107,4 @@ var camSpawn = TestScene.Build(host, worldGen.Seed);
 host.Run();
 
 staticWorld.SaveAllDirty(); // graceful-exit flush; unload/autosave already cover the running game
+gridStore.Dispose();
