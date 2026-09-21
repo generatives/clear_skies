@@ -35,6 +35,23 @@ public sealed partial class GpuLightSystem
         public void Dispose() => Work?.Dispose();
     }
 
+    /// <summary>
+    /// Bounce scheduling. Bounce is an EMA that climbs over repeated evaluations (and gains a hop per
+    /// evaluation), so a brick keeps being evaluated for <see cref="BounceHoldFrames"/> frames after its direct
+    /// light changed, and so do the bricks within bounce range of it. Hold is a per-brick countdown (static world
+    /// only); AllFrames holds the whole volume.
+    /// </summary>
+    private sealed class BounceWork : IDisposable
+    {
+        public int AllFrames = BounceHoldFrames;
+        public byte[] Hold = Array.Empty<byte>();
+        public int AnyFrames;
+        public GpuBuffer? Work;
+        public int WorkCapacity;
+
+        public void Dispose() => Work?.Dispose();
+    }
+
     private sealed class RayVolumeState : IDisposable
     {
         // Surface-brick list (CPU), packed x | y<<10 | z<<20 in this volume's brick coordinates.
@@ -49,6 +66,7 @@ public sealed partial class GpuLightSystem
         // Dirty state for the sun + lamp passes and for the AO pass: whole volume, or per brick over a
         // BW x BH x BD brick grid (static world only).
         public readonly BrickWork Light = new(), Ao = new();
+        public readonly BounceWork Bounce = new();
         public int BW, BH, BD;
 
         // Ships: last frame's pose / opacity version, and this frame's world-space bounds of their solid bricks.
@@ -61,14 +79,22 @@ public sealed partial class GpuLightSystem
         // Scratch for building a work list (the dirty subset of Surface) before upload.
         public uint[] WorkScratch = new uint[4096];
 
-        public void Dispose() { Light.Dispose(); Ao.Dispose(); }
+        public void Dispose() { Light.Dispose(); Ao.Dispose(); Bounce.Dispose(); }
     }
 
     private readonly Dictionary<ChunkVolume, RayVolumeState> _rayStates = new();
     private readonly RayVolumeState?[] _slotState = new RayVolumeState?[GpuRayLightPass.MaxRayVolumes];
-    private int _lastBrickTotal, _lastDirtyTotal, _lastAoDirtyTotal;
+    private int _lastBrickTotal, _lastDirtyTotal, _lastAoDirtyTotal, _lastBounceTotal;
 
     private const float AoReach = 17f;    // voxels: GpuRayLightPass AO_MAX (16) plus a voxel of slack
+    private const int BounceHoldFrames = 32;   // evaluations after a change; at alpha 0.15 that is ~99% converged
+    private const int BounceMarginBricks = 2;  // bounce rays reach 16 voxels = 2 bricks
+
+    private readonly GpuBuffer[] _slotLight = new GpuBuffer[GpuRayLightPass.MaxRayVolumes];
+    private readonly GpuBuffer[] _slotSunVis = new GpuBuffer[GpuRayLightPass.MaxRayVolumes];
+    private float _prevBounceAlbedo = -1f, _prevSunLevel = -1f;
+    private bool _prevBounceEnabled;
+    private int _bounceFrame;
 
     private bool _rayWasActive;
     private Vector3D<float> _prevSunDir;
@@ -126,17 +152,28 @@ public sealed partial class GpuLightSystem
             foreach (var (mn, mx) in _directChanges) MarkRegion(volumeCount, mn, mx);
         }
 
+        // Bounce inputs that change what every surface receives: re-evaluate everything.
+        bool bounceOn = _bounceEnabled && _rayLight.BounceSupported;
+        if (bounceOn && (!_prevBounceEnabled || _bounceAlbedo != _prevBounceAlbedo || SunLight.Level != _prevSunLevel))
+            for (int i = 0; i < volumeCount; i++) _slotState[i]!.Bounce.AllFrames = BounceHoldFrames;
+        _prevBounceEnabled = bounceOn;
+        _prevBounceAlbedo = _bounceAlbedo;
+        _prevSunLevel = SunLight.Level;
+
         _sunTimer.Reset();
         _lampTimer.Reset();
         _aoTimer.Reset();
+        _bounceTimer.Reset();
         _lastBrickTotal = 0;
         _lastDirtyTotal = 0;
         _lastAoDirtyTotal = 0;
+        _lastBounceTotal = 0;
         for (int i = 0; i < volumeCount; i++)
         {
             var gpu = _slotGpu[i]!;
             var st  = _slotState[i]!;
             _lastBrickTotal += st.SurfaceCount;
+            HoldBounce(st);
 
             int nAo = BuildWorkList(st, st.Ao);
             _lastAoDirtyTotal += nAo;
@@ -172,9 +209,102 @@ public sealed partial class GpuLightSystem
                                     ambient, st.Light.Work!, n);
             _lampTimer.Stop();
         }
-        _rtSunMsEma  = Ema(_rtSunMsEma, _sunTimer.Elapsed.TotalMilliseconds);
-        _rtLampMsEma = Ema(_rtLampMsEma, _lampTimer.Elapsed.TotalMilliseconds);
-        _rtAoMsEma   = Ema(_rtAoMsEma, _aoTimer.Elapsed.TotalMilliseconds);
+
+        // Bounce reads every volume's direct light, so it runs after all of them are written.
+        if (bounceOn)
+        {
+            _bounceFrame++;
+            for (int i = 0; i < volumeCount; i++)
+            {
+                _slotLight[i]  = _slotGpu[i]!.LightA;
+                _slotSunVis[i] = _slotGpu[i]!.SunVis;
+            }
+            for (int i = 0; i < volumeCount; i++)
+            {
+                var st = _slotState[i]!;
+                int nb = BuildBounceList(st);
+                _lastBounceTotal += nb;
+                if (nb == 0) continue;
+                _bounceTimer.Start();
+                _rayLight.DispatchBounce(_slots, _slotLight, _slotSunVis, volumeCount, i, sunDir, SunLight.Strength,
+                                         _bounceAlbedo, _bounceAlpha, _bounceFrame, st.Bounce.Work!, nb);
+                _bounceTimer.Stop();
+            }
+        }
+
+        _rtSunMsEma    = Ema(_rtSunMsEma, _sunTimer.Elapsed.TotalMilliseconds);
+        _rtLampMsEma   = Ema(_rtLampMsEma, _lampTimer.Elapsed.TotalMilliseconds);
+        _rtAoMsEma     = Ema(_rtAoMsEma, _aoTimer.Elapsed.TotalMilliseconds);
+        _rtBounceMsEma = Ema(_rtBounceMsEma, _bounceTimer.Elapsed.TotalMilliseconds);
+    }
+
+    /// <summary>Before the light work list consumes this frame's dirty marks: hold the whole volume for bounce if
+    /// it is fully dirty, otherwise every dirty brick and the bricks within bounce range of it.</summary>
+    private static void HoldBounce(RayVolumeState st)
+    {
+        var b = st.Bounce;
+        if (st.Light.All) { b.AllFrames = BounceHoldFrames; return; }
+        if (!st.Light.AnyMarked || b.Hold.Length == 0) return;
+
+        var dirty = st.Light.Dirty;
+        const int m = BounceMarginBricks;
+        for (int z = 0; z < st.BD; z++)
+        for (int y = 0; y < st.BH; y++)
+        {
+            int row = st.BW * (y + st.BH * z);
+            for (int x = 0; x < st.BW; x++)
+            {
+                if (!dirty[row + x]) continue;
+                int x0 = System.Math.Max(0, x - m), x1 = System.Math.Min(st.BW - 1, x + m);
+                int y0 = System.Math.Max(0, y - m), y1 = System.Math.Min(st.BH - 1, y + m);
+                int z0 = System.Math.Max(0, z - m), z1 = System.Math.Min(st.BD - 1, z + m);
+                for (int zz = z0; zz <= z1; zz++)
+                for (int yy = y0; yy <= y1; yy++)
+                {
+                    int r = st.BW * (yy + st.BH * zz);
+                    for (int xx = x0; xx <= x1; xx++) b.Hold[r + xx] = BounceHoldFrames;
+                }
+            }
+        }
+        b.AnyFrames = BounceHoldFrames;
+    }
+
+    /// <summary>This frame's bounce bricks (whole volume while AllFrames lasts, otherwise the held bricks),
+    /// counting their holds down, uploaded to the bounce work buffer.</summary>
+    private int BuildBounceList(RayVolumeState st)
+    {
+        var b = st.Bounce;
+        int n = 0;
+        if (b.AllFrames > 0)
+        {
+            b.AllFrames--;
+            EnsureWorkScratch(st, st.SurfaceCount);
+            Array.Copy(st.Surface, st.WorkScratch, st.SurfaceCount);
+            n = st.SurfaceCount;
+        }
+        else if (b.AnyFrames > 0)
+        {
+            for (int k = 0; k < st.SurfaceCount; k++)
+            {
+                uint e = st.Surface[k];
+                int idx = (int)(e & 1023u) + st.BW * ((int)((e >> 10) & 1023u) + st.BH * (int)(e >> 20));
+                if (b.Hold[idx] == 0) continue;
+                b.Hold[idx]--;
+                EnsureWorkScratch(st, n + 1);
+                st.WorkScratch[n++] = e;
+            }
+        }
+        if (b.AnyFrames > 0 && --b.AnyFrames == 0) Array.Clear(b.Hold);
+        if (n == 0) return 0;
+
+        if (n > b.WorkCapacity)
+        {
+            b.Work?.Dispose();
+            b.WorkCapacity = System.Math.Max(n, System.Math.Max(1024, b.WorkCapacity * 2));
+            b.Work = GpuBuffer.CreateStorage(_ctx, (ulong)b.WorkCapacity * sizeof(uint));
+        }
+        b.Work!.Write<uint>(0, st.WorkScratch.AsSpan(0, n));
+        return n;
     }
 
     /// <summary>Called every frame the ray-traced path is off: forget change history so turning it back on
@@ -426,7 +556,9 @@ public sealed partial class GpuLightSystem
                 st.BW = gpu.VW / 8; st.BH = gpu.VH / 8; st.BD = gpu.VD / 8;
                 st.Light.Dirty = new bool[st.BW * st.BH * st.BD];
                 st.Ao.Dirty    = new bool[st.BW * st.BH * st.BD];
+                st.Bounce.Hold = new byte[st.BW * st.BH * st.BD];
                 st.Light.AnyMarked = st.Ao.AnyMarked = false;
+                st.Bounce.AnyFrames = 0;
             }
         }
 
@@ -437,7 +569,6 @@ public sealed partial class GpuLightSystem
         {
             if (e.PackedOpacityWords == null || !gpu.Contains(pos)) continue;
             var (vx, vy, vz) = gpu.ChunkVoxelBase(pos);
-            uint bx0 = (uint)vx >> 3, by0 = (uint)vy >> 3, bz0 = (uint)vz >> 3;
 
             ulong solid = e.BrickSolidMask;
             while (solid != 0)
@@ -449,15 +580,26 @@ public sealed partial class GpuLightSystem
                 sMax = Vector3D.Max(sMax, lo + new Vector3D<float>(8f));
             }
 
-            ulong active = ActiveBricks(vol, pos, e);
-            while (active != 0)
-            {
-                int b = System.Numerics.BitOperations.TrailingZeroCount(active);
-                active &= active - 1;
-                if (n == st.Surface.Length) Array.Resize(ref st.Surface, n * 2);
-                st.Surface[n++] = (bx0 + (uint)(b & 3)) | ((by0 + (uint)((b >> 2) & 3)) << 10) | ((bz0 + (uint)(b >> 4)) << 20);
-            }
+            AppendBricks(st, ref n, vx, vy, vz, ActiveBricks(vol, pos, e));
+
+            // Air next to this chunk's solid bricks in a chunk that doesn't exist (a ship only has chunks with
+            // blocks in them, so the air under a hull sitting at the bottom of its chunk is in no chunk at all).
+            // It is still inside the volume's margin and gets rendered, so it has to be lit.
+            ulong s = e.BrickSolidMask;
+            if (s == 0) continue;
+            AddMissingNeighbour(vol, gpu, pos,  1, 0, 0, (s & BxHi) >> 3);
+            AddMissingNeighbour(vol, gpu, pos, -1, 0, 0, (s & BxLo) << 3);
+            AddMissingNeighbour(vol, gpu, pos, 0,  1, 0, (s & ByHi) >> 12);
+            AddMissingNeighbour(vol, gpu, pos, 0, -1, 0, (s & ByLo) << 12);
+            AddMissingNeighbour(vol, gpu, pos, 0, 0,  1, (s & BzHi) >> 48);
+            AddMissingNeighbour(vol, gpu, pos, 0, 0, -1, (s & BzLo) << 48);
         }
+        foreach (var (mpos, mask) in _missingNeighbours)
+        {
+            var (mx, my, mz) = gpu.ChunkVoxelBase(mpos);
+            AppendBricks(st, ref n, mx, my, mz, mask);
+        }
+        _missingNeighbours.Clear();
 
         st.SurfaceCount = n;
         st.HasSolid = sMin.X <= sMax.X;
@@ -467,6 +609,30 @@ public sealed partial class GpuLightSystem
         st.BuiltVersion    = gpu.OpacityVersion;
         st.BuiltLoaded     = vol.LoadedCount;
         return st;
+    }
+
+    // Missing chunks bordering solid bricks, with the bricks in them that border solid (merged, so a missing
+    // chunk touched from two sides lists each brick once).
+    private readonly Dictionary<ChunkPosition, ulong> _missingNeighbours = new();
+
+    private void AddMissingNeighbour(ChunkVolume vol, VolumeGpuResources gpu, ChunkPosition pos, int dx, int dy, int dz, ulong mask)
+    {
+        if (mask == 0) return;
+        var npos = new ChunkPosition(pos.X + dx, pos.Y + dy, pos.Z + dz);
+        if (vol.GetEntry(npos) != null || !gpu.Contains(npos)) return;
+        _missingNeighbours[npos] = _missingNeighbours.GetValueOrDefault(npos) | mask;
+    }
+
+    private static void AppendBricks(RayVolumeState st, ref int n, int vx, int vy, int vz, ulong mask)
+    {
+        uint bx0 = (uint)vx >> 3, by0 = (uint)vy >> 3, bz0 = (uint)vz >> 3;
+        while (mask != 0)
+        {
+            int b = System.Numerics.BitOperations.TrailingZeroCount(mask);
+            mask &= mask - 1;
+            if (n == st.Surface.Length) Array.Resize(ref st.Surface, n * 2);
+            st.Surface[n++] = (bx0 + (uint)(b & 3)) | ((by0 + (uint)((b >> 2) & 3)) << 10) | ((bz0 + (uint)(b >> 4)) << 20);
+        }
     }
 
     private static ulong ActiveBricks(ChunkVolume vol, ChunkPosition pos, ChunkEntry e)

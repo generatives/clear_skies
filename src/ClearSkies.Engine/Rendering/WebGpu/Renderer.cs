@@ -28,7 +28,7 @@ const AO_MIN: f32 = 0.15;             // darkest ambient-occluded corner (1 = no
                                       // 0.45 is the subtler default.
 const WPC: i32 = 1024;                // u32 opacity words per 32³ chunk (VolumeGpuResources.WordsPerChunk)
 
-// lightParams.x: ray AO strength (0 = off; the old lighting path never writes the AO bits).
+// lightParams.x: ray AO strength, .y: bounce scale (both 0 = off; the old lighting path never writes those bits).
 struct Camera { view: mat4x4<f32>, proj: mat4x4<f32>, sunDir: vec4<f32>, lightViewProj: mat4x4<f32>, lightParams: vec4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
@@ -103,7 +103,8 @@ fn isSolid(v: vec3<i32>) -> bool {
 fn occ(v: vec3<i32>) -> f32 { return select(0.0, 1.0, isSolid(v)); }
 
 // Light (sky, block) in 0..1 at a single volume voxel. Out-of-volume → ambient fallback. Sky is scaled by the
-// ray AO occlusion in bits 16-23 (0 = open), weighted by camera.lightParams.x.
+// ray AO occlusion in bits 16-23 (0 = open), weighted by camera.lightParams.x. Bounce light (bits 24-31,
+// 0-255 = 0-1) is indirect light with no direction, so it joins the block channel by max, like a lamp's.
 fn lightAt(vol: vec3<i32>) -> vec2<f32> {
     if (vol.x < 0 || vol.x >= model.volSize.x ||
         vol.y < 0 || vol.y >= model.volSize.y ||
@@ -114,7 +115,8 @@ fn lightAt(vol: vec3<i32>) -> vec2<f32> {
     let packed = light[idx];
     let rayOcc = f32((packed >> 16u) & 0xFFu) / 255.0;
     let sky    = f32(packed & 0xFFu) / 15.0 * (1.0 - camera.lightParams.x * rayOcc);
-    return vec2<f32>(sky, f32((packed >> 8u) & 0xFFu) / 15.0);
+    let bounce = f32(packed >> 24u) / 255.0 * camera.lightParams.y;
+    return vec2<f32>(sky, max(f32((packed >> 8u) & 0xFFu) / 15.0, bounce));
 }
 
 // Raw per-voxel directional-sun visibility from the `sunvis` buffer that GpuSunVisPass precomputed this frame.

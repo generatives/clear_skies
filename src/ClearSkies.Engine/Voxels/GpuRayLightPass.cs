@@ -62,6 +62,8 @@ struct Params {
     sunDir: vec4<f32>,
     counts: vec4<i32>, // volumeCount, targetVolIdx, lampCount (unused by sun_main), ambientLevel (0-15, lamp_main only)
     bricks: vec4<i32>, // x: number of entries in brickList for this dispatch
+    bounce: vec4<f32>, // x: albedo (fraction of incoming light a surface re-emits), y: sun strength (0-1),
+                       // z: EMA alpha, w: frame counter (random seed)
 };
 
 @group(0) @binding(0) var<storage, read> opacity0: array<u32>;
@@ -74,6 +76,19 @@ struct Params {
 @group(0) @binding(7) var<storage, read> lamps: array<vec4<f32>>; // xyz world pos, w level (also doubles as radius)
 @group(0) @binding(8) var<uniform> p: Params;
 @group(0) @binding(9) var<storage, read> brickList: array<u32>;   // target volume's surface bricks
+// bounce_main only: every volume's light and sun visibility, so a ray can read the light where it hits any
+// grid. Light is read_write because the target volume's own buffer is one of them (a buffer can't be bound
+// twice when one binding is writable); only the target's is written.
+@group(0) @binding(10) var<storage, read_write> lightv0: array<u32>;
+@group(0) @binding(11) var<storage, read_write> lightv1: array<u32>;
+@group(0) @binding(12) var<storage, read_write> lightv2: array<u32>;
+@group(0) @binding(13) var<storage, read_write> lightv3: array<u32>;
+@group(0) @binding(14) var<storage, read_write> lightv4: array<u32>;
+@group(0) @binding(15) var<storage, read> sunv0: array<u32>;
+@group(0) @binding(16) var<storage, read> sunv1: array<u32>;
+@group(0) @binding(17) var<storage, read> sunv2: array<u32>;
+@group(0) @binding(18) var<storage, read> sunv3: array<u32>;
+@group(0) @binding(19) var<storage, read> sunv4: array<u32>;
 
 const WPC: i32 = " + VolumeGpuResources.WordsPerChunk + @";
 const SUN_MAX_DISTANCE: f32 = 2000.0;
@@ -492,6 +507,214 @@ fn lamp_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg
     lampVoxel(x, y, z + 4);
 }
 
+// ── Bounce (one-hop indirect light, multi-hop through re-evaluation) ─────────────────────────────────────
+// Each evaluation, a surface air voxel fires BOUNCE_RAYS short random rays (up to BOUNCE_MAX), cosine-
+// distributed around its surface normal, through every grid. At each ray's nearest hit it reads the light
+// arriving at the hit face from the air cell in front of it: the brighter of that cell's direct sun
+// (visibility x strength x the face's N.L), its lamp light and its own stored bounce; a miss reads 0. The
+// mean of those times the albedo is this evaluation's estimate, blended into the stored bounce (0-255, bits
+// 24-31 of the light word) as an exponential moving average with weight alpha. Reading the stored bounce at
+// the hit is what makes it multi-hop: each evaluation adds a hop, and the CPU keeps a changed area evaluating
+// for a number of frames. Keep albedo well below 1 or the feedback lingers (a removed light ghosts longer).
+// Ambient is not bounced; it is already uniform.
+const BOUNCE_RAYS: i32 = 4;
+const BOUNCE_MAX: f32 = 16.0;
+
+fn lightvRead(vi: i32, idx: u32) -> u32 {
+    switch (vi) {
+        case 0: { return lightv0[idx]; }
+        case 1: { return lightv1[idx]; }
+        case 2: { return lightv2[idx]; }
+        case 3: { return lightv3[idx]; }
+        case 4: { return lightv4[idx]; }
+        default: { return 0u; }
+    }
+}
+
+fn lightvWrite(vi: i32, idx: u32, v: u32) {
+    switch (vi) {
+        case 0: { lightv0[idx] = v; }
+        case 1: { lightv1[idx] = v; }
+        case 2: { lightv2[idx] = v; }
+        case 3: { lightv3[idx] = v; }
+        case 4: { lightv4[idx] = v; }
+        default: { }
+    }
+}
+
+fn sunvRead(vi: i32, idx: u32) -> u32 {
+    switch (vi) {
+        case 0: { return sunv0[idx]; }
+        case 1: { return sunv1[idx]; }
+        case 2: { return sunv2[idx]; }
+        case 3: { return sunv3[idx]; }
+        case 4: { return sunv4[idx]; }
+        default: { return 255u; }
+    }
+}
+
+struct Hit { hit: bool, t: f32, cell: vec3<i32>, n: vec3<f32> }; // cell: air cell in front of the hit face; n: face normal (local)
+
+// Nearest-hit DDA over [t0,t1] in one volume. Single-axis steps, no tie handling (a ray slipping through a
+// diagonal gap only nudges an averaged value). A ray that enters this volume straight into a solid cell hits
+// with its front cell outside the volume, which reads as unlit.
+fn ddaNearest(vi: i32, o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, dims: vec3<i32>) -> Hit {
+    var h: Hit;
+    h.hit = false;
+    if (t0 >= t1) { return h; }
+    let dimsF = vec3<f32>(dims);
+    let p0 = clamp(o + d * t0, vec3<f32>(0.0), dimsF - vec3<f32>(0.0001));
+    var voxel = clamp(vec3<i32>(floor(p0)), vec3<i32>(0), dims - vec3<i32>(1));
+    let stepX: i32 = select(-1, 1, d.x > 0.0);
+    let stepY: i32 = select(-1, 1, d.y > 0.0);
+    let stepZ: i32 = select(-1, 1, d.z > 0.0);
+    if (isOpaqueInVolume(vi, voxel.x, voxel.y, voxel.z)) {
+        h.hit = true; h.t = t0; h.cell = vec3<i32>(-1, -1, -1); h.n = -d;
+        return h;
+    }
+    var tMaxX: f32 = select(1e30, ((f32(voxel.x) + select(0.0, 1.0, d.x > 0.0)) - o.x) / d.x, abs(d.x) > 1e-8);
+    var tMaxY: f32 = select(1e30, ((f32(voxel.y) + select(0.0, 1.0, d.y > 0.0)) - o.y) / d.y, abs(d.y) > 1e-8);
+    var tMaxZ: f32 = select(1e30, ((f32(voxel.z) + select(0.0, 1.0, d.z > 0.0)) - o.z) / d.z, abs(d.z) > 1e-8);
+    for (var iter = 0; iter < 64; iter = iter + 1) {
+        let prev = voxel;
+        var n = vec3<f32>(0.0);
+        var t = 0.0;
+        if (tMaxX <= tMaxY && tMaxX <= tMaxZ) {
+            t = tMaxX;
+            voxel.x = voxel.x + stepX; n = vec3<f32>(f32(-stepX), 0.0, 0.0);
+            tMaxX = ((f32(voxel.x) + select(0.0, 1.0, d.x > 0.0)) - o.x) / d.x;
+        } else if (tMaxY <= tMaxZ) {
+            t = tMaxY;
+            voxel.y = voxel.y + stepY; n = vec3<f32>(0.0, f32(-stepY), 0.0);
+            tMaxY = ((f32(voxel.y) + select(0.0, 1.0, d.y > 0.0)) - o.y) / d.y;
+        } else {
+            t = tMaxZ;
+            voxel.z = voxel.z + stepZ; n = vec3<f32>(0.0, 0.0, f32(-stepZ));
+            tMaxZ = ((f32(voxel.z) + select(0.0, 1.0, d.z > 0.0)) - o.z) / d.z;
+        }
+        if (t >= t1) { return h; }
+        if (voxel.x < 0 || voxel.x >= dims.x || voxel.y < 0 || voxel.y >= dims.y || voxel.z < 0 || voxel.z >= dims.z) { return h; }
+        if (isOpaqueInVolume(vi, voxel.x, voxel.y, voxel.z)) {
+            h.hit = true; h.t = t; h.cell = prev; h.n = n;
+            return h;
+        }
+    }
+    return h;
+}
+
+// Light (0-1) arriving at the hit face from the air cell in front of it, in volume vi.
+fn radianceAt(vi: i32, cell: vec3<i32>, nLocal: vec3<f32>) -> f32 {
+    let dims = dimsOf(vi);
+    if (cell.x < 0 || cell.x >= dims.x || cell.y < 0 || cell.y >= dims.y || cell.z < 0 || cell.z >= dims.z) { return 0.0; }
+    let idx = u32(cell.x + dims.x * (cell.y + dims.y * cell.z));
+    let word = lightvRead(vi, idx);
+    let blk = f32((word >> 8u) & 0xFFu) / 15.0;
+    let bnc = f32(word >> 24u) / 255.0;
+    var sun = 0.0;
+    let sv = sunvRead(vi, idx);
+    if (sv < 255u) {
+        let nW = normalize((voxelToWorldOf(vi) * vec4<f32>(nLocal, 0.0)).xyz);
+        sun = f32(sv) / 254.0 * p.bounce.y * max(dot(nW, -p.sunDir.xyz), 0.0);
+    }
+    return max(sun, max(blk, bnc));
+}
+
+fn pcg(v: u32) -> u32 {
+    let s = v * 747796405u + 2891336453u;
+    let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
+    return (w >> 22u) ^ w;
+}
+
+fn rand01(h: u32) -> f32 { return f32(pcg(h) & 0xFFFFFFu) / 16777216.0; }
+
+fn bounceVoxel(x: i32, y: i32, z: i32) {
+    let ti = p.counts.y;
+    let dims = dimsOf(ti);
+    if (x >= dims.x || y >= dims.y || z >= dims.z) { return; }
+    let i = u32(x + dims.x * (y + dims.y * z));
+    if (isOpaqueInVolume(ti, x, y, z)) { return; }
+
+    let sxn = isOpaqueInVolume(ti, x - 1, y, z); let sxp = isOpaqueInVolume(ti, x + 1, y, z);
+    let syn = isOpaqueInVolume(ti, x, y - 1, z); let syp = isOpaqueInVolume(ti, x, y + 1, z);
+    let szn = isOpaqueInVolume(ti, x, y, z - 1); let szp = isOpaqueInVolume(ti, x, y, z + 1);
+    let word = lightvRead(ti, i);
+    var stored = f32(word >> 24u) / 255.0;
+    if (sxn || sxp || syn || syp || szn || szp) {
+        // The voxel's surfaces face away from its solid neighbours; rays are cosine-distributed around that
+        // combined normal, so a floor does not light itself with its own downward rays. Opposite solids (a
+        // floor and a ceiling) cancel out, and then rays go in every direction.
+        var nrm = vec3<f32>(0.0);
+        if (sxn) { nrm.x = nrm.x + 1.0; } if (sxp) { nrm.x = nrm.x - 1.0; }
+        if (syn) { nrm.y = nrm.y + 1.0; } if (syp) { nrm.y = nrm.y - 1.0; }
+        if (szn) { nrm.z = nrm.z + 1.0; } if (szp) { nrm.z = nrm.z - 1.0; }
+        let hasN = dot(nrm, nrm) > 0.0;
+        let nLoc = select(vec3<f32>(0.0, 1.0, 0.0), normalize(nrm), hasN);
+        // Tangent frame around nLoc.
+        let up = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(nLoc.y) > 0.9);
+        let tx = normalize(cross(up, nLoc));
+        let ty = cross(nLoc, tx);
+
+        let v2w = voxelToWorldOf(ti);
+        let origin = (v2w * vec4<f32>(f32(x) + 0.5, f32(y) + 0.5, f32(z) + 0.5, 1.0)).xyz;
+        let seed = pcg(u32(x) ^ pcg(u32(y) ^ pcg(u32(z) ^ pcg(u32(p.bounce.w)))));
+        var sumL = 0.0;
+        for (var k = 0; k < BOUNCE_RAYS; k = k + 1) {
+            let u1 = rand01(seed + u32(k) * 2u);
+            let u2 = rand01(seed + u32(k) * 2u + 1u);
+            let phi = u2 * 6.2831853;
+            var dl: vec3<f32>;
+            if (hasN) {
+                let r = sqrt(u1);                                   // cosine-weighted hemisphere
+                let h = sqrt(max(0.0, 1.0 - u1));
+                dl = tx * (r * cos(phi)) + ty * (r * sin(phi)) + nLoc * h;
+            } else {
+                let cz = 1.0 - 2.0 * u1;                            // uniform sphere
+                let r = sqrt(max(0.0, 1.0 - cz * cz));
+                dl = vec3<f32>(r * cos(phi), cz, r * sin(phi));
+            }
+
+            let dw = (v2w * vec4<f32>(dl, 0.0)).xyz;
+            var bestT = BOUNCE_MAX;
+            var bestVol = -1;
+            var best: Hit;
+            for (var vi = 0; vi < p.counts.x; vi = vi + 1) {
+                let w2v = worldToVoxelOf(vi);
+                let lo = (w2v * vec4<f32>(origin, 1.0)).xyz;
+                let ld = (w2v * vec4<f32>(dw, 0.0)).xyz;
+                let vd = dimsOf(vi);
+                let clip = slabClip(lo, ld, vd, 0.0, bestT);
+                if (!clip.hit) { continue; }
+                let h = ddaNearest(vi, lo, ld, clip.t0, clip.t1, vd);
+                if (h.hit && h.t < bestT) { bestT = h.t; bestVol = vi; best = h; }
+            }
+            if (bestVol >= 0) { sumL = sumL + radianceAt(bestVol, best.cell, best.n); }
+        }
+        let estimate = clamp(p.bounce.x * sumL / f32(BOUNCE_RAYS), 0.0, 1.0);
+        // EMA. With 8-bit storage a small alpha can stall a step short of the target (a change under half a
+        // step rounds away), so the blend always moves at least one step toward the estimate.
+        let next = stored + p.bounce.z * (estimate - stored);
+        var q = round(next * 255.0);
+        let s8 = f32(word >> 24u);
+        if (q == s8 && abs(estimate * 255.0 - s8) >= 1.0) { q = s8 + sign(estimate * 255.0 - s8); }
+        stored = clamp(q, 0.0, 255.0) / 255.0;
+    } else {
+        stored = 0.0;
+    }
+    lightvWrite(ti, i, (word & 0x00FFFFFFu) | (u32(round(stored * 255.0)) << 24u));
+}
+
+@compute @workgroup_size(8, 8, 4)
+fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
+               @builtin(local_invocation_id) lid: vec3<u32>) {
+    let b = brickBase(wid, nwg);
+    if (b.w == 0) { return; }
+    let x = b.x + i32(lid.x);
+    let y = b.y + i32(lid.y);
+    let z = b.z + i32(lid.z);
+    bounceVoxel(x, y, z);
+    bounceVoxel(x, y, z + 4);
+}
+
 @compute @workgroup_size(8, 8, 4)
 fn ao_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
            @builtin(local_invocation_id) lid: vec3<u32>) {
@@ -508,8 +731,16 @@ fn ao_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: 
     private readonly ComputePipeline _sunPipeline;
     private readonly ComputePipeline _lampPipeline;
     private readonly ComputePipeline _aoPipeline;
+    private readonly ComputePipeline? _bouncePipeline;   // null when the adapter allows too few storage buffers
     private readonly GpuBuffer _param;
+
+    /// <summary>Storage buffers bounce_main binds: opacity, light and sun visibility per volume slot, plus the
+    /// brick list. Above WebGPU's default of 8, so it needs the adapter's real limit (GpuContext requests it).</summary>
+    private const int BounceStorageBuffers = MaxRayVolumes * 3 + 1;
+
+    public bool BounceSupported => _bouncePipeline != null;
     private readonly GpuBuffer _dummyOpacity; // padding for unused volume slots (never solid)
+    private readonly GpuBuffer[] _dummyLight = new GpuBuffer[MaxRayVolumes]; // writable padding, one per slot
     private readonly GpuBuffer _lampList;     // scratch: this dispatch's filtered lamp list (xyz, w=level)
     private bool _loggedTooManyLamps;
 
@@ -519,9 +750,15 @@ fn ao_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: 
         _sunPipeline  = new ComputePipeline(ctx, Wgsl, "sun_main");
         _lampPipeline = new ComputePipeline(ctx, Wgsl, "lamp_main");
         _aoPipeline   = new ComputePipeline(ctx, Wgsl, "ao_main");
+        uint storageLimit = ctx.AdapterLimits.MaxStorageBuffersPerShaderStage;
+        if (storageLimit >= BounceStorageBuffers)
+            _bouncePipeline = new ComputePipeline(ctx, Wgsl, "bounce_main");
+        else
+            Console.WriteLine($"[ray-lighting] bounce disabled: adapter allows {storageLimit} storage buffers per stage, bounce needs {BounceStorageBuffers}.");
         _param = GpuBuffer.CreateUniform(ctx, (ulong)Marshal.SizeOf<RayParams>());
         _dummyOpacity = GpuBuffer.CreateStorage(ctx, sizeof(uint));
         _dummyOpacity.Write<uint>(0, new uint[1]);
+        for (int i = 0; i < MaxRayVolumes; i++) _dummyLight[i] = GpuBuffer.CreateStorage(ctx, sizeof(uint));
         _lampList = GpuBuffer.CreateStorage(ctx, (ulong)MaxLampsPerDispatch * 16); // vec4<f32> per lamp
     }
 
@@ -633,8 +870,42 @@ fn ao_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: 
         _ctx.Api.BindGroupRelease((BindGroup*)bg);
     }
 
+    /// <summary>
+    /// One EMA step of bounce light for the listed bricks of <paramref name="targetIdx"/> (see bounce_main).
+    /// Reads every volume's light and sun visibility, so run it after the direct passes of all volumes.
+    /// </summary>
+    public void DispatchBounce(ReadOnlySpan<RayVolumeSlot> slots, ReadOnlySpan<GpuBuffer> lights, ReadOnlySpan<GpuBuffer> sunVis,
+                               int volumeCount, int targetIdx, Vector3D<float> sunDir, float sunStrength,
+                               float albedo, float alpha, int frame, GpuBuffer brickList, int brickCount)
+    {
+        if (_bouncePipeline == null) return;
+        if (volumeCount <= 0 || targetIdx < 0 || targetIdx >= volumeCount) return;
+        var target = slots[targetIdx];
+        if (target.VW <= 0 || target.VH <= 0 || target.VD <= 0 || brickCount <= 0) return;
+
+        WriteParams(slots, volumeCount, targetIdx, sunDir, lampCount: 0, ambientLevel: 0, brickCount,
+                    new Vector4D<float>(albedo, sunStrength, alpha, frame & 0xFFFFF));
+
+        // Unused slots get distinct dummies: a writable buffer can't be bound twice in one bind group.
+        var entries = new (uint, GpuBuffer)[BounceStorageBuffers + 1];
+        int k = 0;
+        for (int i = 0; i < MaxRayVolumes; i++)
+        {
+            bool real = i < volumeCount;
+            entries[k++] = ((uint)i, real ? slots[i].Opacity : _dummyOpacity);
+            entries[k++] = ((uint)(10 + i), real ? lights[i] : _dummyLight[i]);
+            entries[k++] = ((uint)(15 + i), real ? sunVis[i] : _dummyOpacity);
+        }
+        entries[k++] = (8u, _param);
+        entries[k++] = (9u, brickList);
+
+        nint bg = _bouncePipeline.CreateBindGroupHandle(entries);
+        DispatchBricks(_bouncePipeline, bg, brickCount);
+        _ctx.Api.BindGroupRelease((BindGroup*)bg);
+    }
+
     private void WriteParams(ReadOnlySpan<RayVolumeSlot> slots, int volumeCount, int targetIdx, Vector3D<float> sunDir,
-                             int lampCount, int ambientLevel, int brickCount)
+                             int lampCount, int ambientLevel, int brickCount, Vector4D<float> bounce = default)
     {
         var pr = new RayParams();
         SetSlot(ref pr, 0, volumeCount > 0 ? slots[0] : default);
@@ -645,6 +916,7 @@ fn ao_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: 
         pr.SunX = sunDir.X; pr.SunY = sunDir.Y; pr.SunZ = sunDir.Z; pr.SunPad = 0f;
         pr.VolumeCount = volumeCount; pr.TargetIdx = targetIdx; pr.LampCount = lampCount; pr.AmbientLevel = ambientLevel;
         pr.BrickCount = brickCount;
+        pr.Bounce = bounce;
 
         Span<RayParams> sp = stackalloc RayParams[1] { pr };
         _param.Write<RayParams>(0, sp);
@@ -684,6 +956,8 @@ fn ao_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: 
         _sunPipeline.Dispose();
         _lampPipeline.Dispose();
         _aoPipeline.Dispose();
+        _bouncePipeline?.Dispose();
+        foreach (var b in _dummyLight) b.Dispose();
         _param.Dispose();
         _dummyOpacity.Dispose();
         _lampList.Dispose();
@@ -706,5 +980,6 @@ fn ao_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: 
         public float SunX, SunY, SunZ, SunPad;
         public int VolumeCount, TargetIdx, LampCount, AmbientLevel;
         public int BrickCount, BrickPad0, BrickPad1, BrickPad2;   // vec4<i32> bricks
+        public Vector4D<float> Bounce;                            // albedo, sun strength, alpha, frame
     }
 }

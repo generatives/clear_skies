@@ -76,8 +76,15 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     private float _ambientLevel = 2f;
 
     // How strongly ray AO (GpuRayLightPass ao_main) darkens the ambient term, 0-1. Passed to the fragment
-    // shader through RayAmbientOcclusion.Strength; forced to 0 while the old path is active.
+    // shader through RayLightingSettings.AoStrength; forced to 0 while the old path is active.
     private float _aoStrength = 1f;
+
+    // Bounce (GpuRayLightPass bounce_main): albedo feeds the pass (changing it re-evaluates everything), EMA
+    // alpha is the blend weight per evaluation, and scale only multiplies the stored value in the fragment shader.
+    private bool _bounceEnabled = true;
+    private float _bounceAlbedo = 0.5f;
+    private float _bounceAlpha = 0.15f;
+    private float _bounceScale = 1f;
 
     // Reused scratch for the ray-traced path (avoid per-frame allocation). _slotGpu[i] is the
     // VolumeGpuResources backing _slots[i] (0..volumeCount-1), so the per-volume dispatch knows which
@@ -103,8 +110,9 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     private readonly Stopwatch _sunTimer = new();
     private readonly Stopwatch _lampTimer = new();
     private readonly Stopwatch _aoTimer = new();
+    private readonly Stopwatch _bounceTimer = new();
     private readonly Stopwatch _oldPathTimer = new();
-    private double _rtSunMsEma, _rtLampMsEma, _rtAoMsEma, _oldPathMsEma;
+    private double _rtSunMsEma, _rtLampMsEma, _rtAoMsEma, _rtBounceMsEma, _oldPathMsEma;
 
     private static double Ema(double prev, double sample) => prev <= 0.0 ? sample : prev + EmaAlpha * (sample - prev);
 
@@ -149,16 +157,25 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         ImGui.Text($"Ray-traced sun dispatch:                   {_rtSunMsEma:F2} ms/frame");
         ImGui.Text($"Ray-traced lamp dispatch:                  {_rtLampMsEma:F2} ms/frame");
         ImGui.Text($"Ray-traced AO dispatch:                    {_rtAoMsEma:F2} ms/frame");
+        ImGui.Text($"Ray-traced bounce dispatch:                {_rtBounceMsEma:F2} ms/frame");
         ImGui.TextDisabled("CPU submission time only (queue is async) — compare FPS for total GPU+CPU cost.");
 
         ImGui.Separator();
         ImGui.Text("Lighting settings");
         ImGui.SliderFloat("Ambient level (ray-traced only)", ref _ambientLevel, 0f, 15f, "%.0f");
         ImGui.SliderFloat("Ray AO strength (ray-traced only)", ref _aoStrength, 0f, 1f, "%.2f");
+        if (_rayLight.BounceSupported)
+        {
+            ImGui.Checkbox("Bounce light (ray-traced only)", ref _bounceEnabled);
+            ImGui.SliderFloat("Bounce albedo", ref _bounceAlbedo, 0f, 0.9f, "%.2f");
+            ImGui.SliderFloat("Bounce EMA alpha", ref _bounceAlpha, 0.02f, 1f, "%.2f");
+            ImGui.SliderFloat("Bounce display scale", ref _bounceScale, 0f, 4f, "%.2f");
+        }
+        else ImGui.TextDisabled("Bounce light unavailable: too few storage buffers per shader stage (see console).");
         if (_rayTracedLighting)
         {
             ImGui.TextDisabled($"Bricks relit this frame: {_lastDirtyTotal:N0} of {_lastBrickTotal:N0} surface bricks");
-            ImGui.TextDisabled($"Bricks AO-traced this frame: {_lastAoDirtyTotal:N0}");
+            ImGui.TextDisabled($"Bricks AO-traced this frame: {_lastAoDirtyTotal:N0}, bounced: {_lastBounceTotal:N0}");
             ImGui.TextDisabled($"  full relight: {(_dbgFullReason == "" ? "no" : _dbgFullReason)}, volumes reallocated: {_dbgReallocs}");
             ImGui.TextDisabled($"  world chunks uploaded: {_dbgChangedChunks}, ships moved: {_dbgShipsMoved}, lamp changes: {_dbgLampChanges}");
         }
@@ -177,7 +194,8 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
 
     public void Update(float dt)
     {
-        RayAmbientOcclusion.Strength = _rayTracedLighting ? _aoStrength : 0f;
+        RayLightingSettings.AoStrength  = _rayTracedLighting ? _aoStrength : 0f;
+        RayLightingSettings.BounceScale = _rayTracedLighting && _bounceEnabled && _rayLight.BounceSupported ? _bounceScale : 0f;
         if (_rayTracedLighting) { UpdateRayTracedLighting(); return; } // old path fully bypassed — see plan doc
         ResetRayTracedTracking();
 

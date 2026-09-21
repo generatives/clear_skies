@@ -60,7 +60,8 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
             SunDirection  = sunDir,
             SunStrength   = SunLight.Strength,
             LightViewProj = BuildLightViewProj(sunDir, camTransform.Position),
-            RayAoStrength = RayAmbientOcclusion.Strength,
+            RayAoStrength  = RayLightingSettings.AoStrength,
+            RayBounceScale = RayLightingSettings.BounceScale,
         };
 
         // Camera uniform carries lightViewProj, which the shadow pass's depth shader reads — write it
