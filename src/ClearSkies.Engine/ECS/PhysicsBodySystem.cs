@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Numerics;
 using BepuPhysics;
@@ -23,14 +24,17 @@ namespace ClearSkies.Engine.ECS;
 /// </summary>
 public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
 {
-    // Box decomposition averages ~120us per non-empty chunk (see GenerationBenchmark) — much cheaper
-    // than meshing, so this can run well ahead of MeshesPerFrame without becoming the new bottleneck.
-    private const int CollidersPerFrame = 8;
+    /// <summary>Static-collider jobs in flight at once (see UpdateStaticColliders).</summary>
+    private static readonly int MaxInFlight = System.Math.Max(2, Environment.ProcessorCount / 2);
 
     private readonly EntitySet         _grids;
     private readonly StaticWorld       _world;
     private readonly PhysicsWorld      _physics;
-    private readonly VoxelBoxDecomposer _decomposer = new();
+    private readonly VoxelBoxDecomposer _decomposer = new(); // dynamic grids, main thread
+    private readonly ThreadLocal<VoxelBoxDecomposer> _decomposers = new(() => new VoxelBoxDecomposer()); // terrain workers
+    private readonly HashSet<ChunkEntry> _inFlight = new();
+    private readonly ConcurrentQueue<(ChunkPosition Pos, ChunkEntry Entry, PhysicsWorld.StaticCompoundBuild? Build, Exception? Error)> _colliderResults = new();
+    private double _applyMs;
     private readonly List<(Vector3 center, Vector3 size, float mass)> _dynamicBoxes = new();
 
     // One BigCompound static per non-empty chunk; box count kept only for the debug panel.
@@ -54,37 +58,42 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
     }
 
     // ── static terrain colliders (moved from StaticColliderSystem) ─────────────
+    // Box decomposition and the BigCompound tree build (~0.2-0.35ms per non-empty chunk, spiking past 2ms on
+    // dense ones — see StreamingBenchmark) run on thread-pool workers; only the cheap Shapes/Statics adds happen
+    // here. One job in flight per chunk, same pattern as ChunkMeshSystem: a chunk re-dirtied mid-job is
+    // re-dispatched once that job lands, and a result for a chunk unloaded meanwhile is dropped. A chunk's old
+    // collider stays in place until its replacement arrives, so an edit never opens a hole for a frame.
     private void UpdateStaticColliders()
     {
-        int built = 0;
+        ApplyColliderResults();
 
         foreach (var (pos, entry) in _world.All)
         {
-            if (!entry.NeedsRecollide) continue;
+            if (_inFlight.Count >= MaxInFlight) break;
+            if (!entry.NeedsRecollide || _inFlight.Contains(entry)) continue;
+            entry.NeedsRecollide = false;
 
-            // Drop any existing collider for this chunk before rebuilding.
-            if (_colliders.Remove(pos, out var old)) _physics.RemoveStaticCompound(old.handle);
-
-            if (entry.Data.HasAnySolid())
+            if (!entry.Data.HasAnySolid())
             {
-                _sw.Restart();
-                var boxes = _decomposer.Decompose(entry.Data);
-                if (boxes.Count > 0)
-                {
-                    var o = pos.WorldOrigin;
-                    _colliders[pos] = (_physics.AddStaticCompound(boxes, new PhysVec(o.X, o.Y, o.Z)), boxes.Count);
-                }
-                long ms = _sw.ElapsedMilliseconds;
-
-                _totalBuilt++;
-                built++;
-
-                if (ms > 2)
-                    Console.WriteLine($"[collide] chunk {pos} | {boxes.Count} boxes | {ms}ms | total={_totalBuilt}");
+                if (_colliders.Remove(pos, out var old)) _physics.RemoveStaticCompound(old.handle);
+                continue;
             }
 
-            entry.NeedsRecollide = false;
-            if (built >= CollidersPerFrame) break;
+            _inFlight.Add(entry);
+            var data = entry.Data;
+            ThreadPool.UnsafeQueueUserWorkItem(_ =>
+            {
+                try
+                {
+                    // Terrain needs no per-box mass, so boxes may span block types — roughly halves the box count.
+                    var boxes = _decomposers.Value!.Decompose(data, mergeBlockTypes: true);
+                    _colliderResults.Enqueue((pos, entry, boxes.Count > 0 ? PhysicsWorld.PrepareStaticCompound(boxes) : null, null));
+                }
+                catch (Exception e)
+                {
+                    _colliderResults.Enqueue((pos, entry, null, e));
+                }
+            }, null);
         }
 
         // Reconcile: release colliders for chunks that have been unloaded.
@@ -97,6 +106,30 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
                 _physics.RemoveStaticCompound(c.handle);
         }
         _stale.Clear();
+    }
+
+    private void ApplyColliderResults()
+    {
+        while (_colliderResults.TryDequeue(out var r))
+        {
+            _inFlight.Remove(r.Entry);
+            if (r.Error is not null)
+            {
+                Console.WriteLine($"[collide] chunk {r.Pos} failed: {r.Error}");
+                continue;
+            }
+            if (_world.GetEntry(r.Pos) != r.Entry) continue; // unloaded (or unloaded and reloaded) meanwhile
+
+            _sw.Restart();
+            if (_colliders.Remove(r.Pos, out var old)) _physics.RemoveStaticCompound(old.handle);
+            if (r.Build is not null)
+            {
+                var o = r.Pos.WorldOrigin;
+                _colliders[r.Pos] = (_physics.AddStaticCompound(r.Build, new PhysVec(o.X, o.Y, o.Z)), r.Build.BoxCount);
+            }
+            _applyMs += 0.05 * (_sw.Elapsed.TotalMilliseconds - _applyMs);
+            _totalBuilt++;
+        }
     }
 
     /// <summary>True if <paramref name="pos"/> currently has a static collider registered. Used by
@@ -181,5 +214,7 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
         ImGui.Text($"Chunks with colliders (one BigCompound static each): {_colliders.Count}");
         ImGui.Text($"Total compound child boxes: {totalBoxes}");
         ImGui.Text($"Chunks built (lifetime): {_totalBuilt}");
+        ImGui.Text($"Jobs in flight: {_inFlight.Count} / {MaxInFlight}");
+        ImGui.Text($"Main-thread add (smoothed): {_applyMs:F3} ms per chunk");
     }
 }

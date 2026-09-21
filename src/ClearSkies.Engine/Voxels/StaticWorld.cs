@@ -60,7 +60,7 @@ public sealed class StaticWorld : ChunkVolume
 
         _chunks.Remove(pos);
         RemovedChunks.Add(pos);
-        MarkNeighboursDirty(pos);
+        MarkNeighboursDirty(pos, entry.Data);
     }
 
     /// <summary>Writes every currently loaded chunk with unsaved edits to disk, clearing its dirty flag.

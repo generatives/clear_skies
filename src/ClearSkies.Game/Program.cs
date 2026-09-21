@@ -10,6 +10,11 @@ using Silk.NET.Maths;
 using System.Numerics;
 
 // Headless perf harness (see GenerationBenchmark) — no GPU/window needed, so this runs before EngineHost.
+if (args.Contains("--benchmark-stream"))
+{
+    StreamingBenchmark.Run();
+    return;
+}
 if (args.Contains("--benchmark"))
 {
     GenerationBenchmark.Run();

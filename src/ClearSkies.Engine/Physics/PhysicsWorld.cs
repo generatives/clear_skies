@@ -4,6 +4,7 @@ using BepuPhysics;
 using BepuPhysics.Collidables;
 using BepuPhysics.CollisionDetection;
 using BepuPhysics.Constraints;
+using BepuPhysics.Trees;
 using BepuUtilities;
 using BepuUtilities.Memory;
 using ClearSkies.Engine.Core;
@@ -253,23 +254,78 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
 
     // ── Static terrain colliders (one BigCompound static per chunk) ───────────────
 
-    /// <summary>Adds a single static whose shape is a <see cref="BigCompound"/> of one box child per
-    /// entry of <paramref name="boxes"/> (centre + size, local to <paramref name="origin"/>). One static
-    /// per chunk keeps the broad phase small — the compound's own internal tree handles the per-box
-    /// culling — instead of inserting every merged box as its own static.</summary>
-    public StaticHandle AddStaticCompound(IReadOnlyList<(Vector3 center, Vector3 size, BlockId id)> boxes, Vector3 origin)
+    /// <summary>A static terrain compound's boxes plus its prebuilt acceleration tree, serialized so it can be
+    /// built off the main thread (see <see cref="PrepareStaticCompound"/>) and copied into the simulation's pool
+    /// cheaply by <see cref="AddStaticCompound"/>.</summary>
+    public sealed class StaticCompoundBuild
     {
-        _pool.Take<CompoundChild>(boxes.Count, out var children);
+        internal readonly (Vector3 center, Vector3 size)[] Boxes;
+        internal readonly byte[]? Tree; // null: single box, tree built on add
+        internal StaticCompoundBuild((Vector3, Vector3)[] boxes, byte[]? tree) { Boxes = boxes; Tree = tree; }
+        public int BoxCount => Boxes.Length;
+    }
+
+    /// <summary>The serialized tree inside a <see cref="StaticCompoundBuild"/>, for StreamingBenchmark's check that
+    /// it matches what BigCompound's own constructor builds.</summary>
+    public static ReadOnlySpan<byte> DebugTreeBytes(StaticCompoundBuild build) => build.Tree ?? default(ReadOnlySpan<byte>);
+
+    // Per-worker pool for PrepareStaticCompound's temporary tree: BufferPool isn't thread-safe, so workers
+    // can't touch _pool (which the simulation uses on the main thread).
+    [ThreadStatic] private static BufferPool? t_buildPool;
+
+    /// <summary>Thread-safe first half of adding a static compound: builds the <see cref="BigCompound"/>
+    /// acceleration tree over <paramref name="boxes"/> (centre + size, compound-local) the same way
+    /// BigCompound's own constructor does (a sweep build, one leaf per box in order) — then serializes it. Touches no
+    /// simulation state, so it can run on a worker thread.</summary>
+    public static StaticCompoundBuild PrepareStaticCompound(IReadOnlyList<(Vector3 center, Vector3 size, BlockId id)> boxes)
+    {
+        var pool = t_buildPool ??= new BufferPool();
+        var copy = new (Vector3, Vector3)[boxes.Count];
+        pool.Take<BoundingBox>(boxes.Count, out var leafBounds);
         for (int i = 0; i < boxes.Count; i++)
         {
             var (center, size, _) = boxes[i];
+            copy[i] = (center, size);
+            var half = size * 0.5f; // an unrotated box's bounds, as BigCompound computes them at identity
+            leafBounds[i] = new BoundingBox(center - half, center + half);
+        }
+        // A one-leaf tree doesn't survive this route (SweepBuild and the Span deserializer both leave it with no
+        // root node, unlike BigCompound's constructor), so AddStaticCompound builds that trivial case itself.
+        if (boxes.Count == 1)
+        {
+            pool.Return(ref leafBounds);
+            return new StaticCompoundBuild(copy, null);
+        }
+        var tree = new Tree(pool, boxes.Count);
+        tree.SweepBuild(pool, leafBounds);
+        pool.Return(ref leafBounds);
+        var bytes = new byte[tree.GetSerializedByteCount()];
+        tree.Serialize(bytes);
+        tree.Dispose(pool);
+        return new StaticCompoundBuild(copy, bytes);
+    }
+
+    /// <summary>Adds a single static whose shape is a <see cref="BigCompound"/> of one box child per box in
+    /// <paramref name="build"/> (local to <paramref name="origin"/>). One static per chunk keeps the broad phase
+    /// small — the compound's own internal tree handles the per-box culling — instead of inserting every merged
+    /// box as its own static. Main thread only; the tree itself was built by <see cref="PrepareStaticCompound"/>.</summary>
+    public StaticHandle AddStaticCompound(StaticCompoundBuild build, Vector3 origin)
+    {
+        var boxes = build.Boxes;
+        _pool.Take<CompoundChild>(boxes.Length, out var children);
+        for (int i = 0; i < boxes.Length; i++)
+        {
+            var (center, size) = boxes[i];
             children[i] = new CompoundChild
             {
                 LocalPose  = new RigidPose(center),
                 ShapeIndex = Simulation.Shapes.Add(new Box(size.X, size.Y, size.Z)),
             };
         }
-        var shape = Simulation.Shapes.Add(new BigCompound(children, Simulation.Shapes, _pool));
+        var compound = build.Tree is null
+            ? new BigCompound(children, Simulation.Shapes, _pool)
+            : new BigCompound { Children = children, Tree = new Tree(build.Tree, _pool) };
+        var shape = Simulation.Shapes.Add(compound);
         return Simulation.Statics.Add(new StaticDescription(origin, shape));
     }
 

@@ -143,7 +143,7 @@ public static class GenerationBenchmark
     /// <summary>Spirals outward over region cells from the origin looking for the first cell that holds an
     /// island cluster, returning the chunk position of that island's centre. Mirrors TestScene's spawn-finding
     /// search but only needs "an island exists nearby", not "the closest one".</summary>
-    private static ChunkPosition FindFocusChunk(ulong seed)
+    internal static ChunkPosition FindFocusChunk(ulong seed)
     {
         Span<IslandDef> islands = stackalloc IslandDef[4];
         for (int ring = 0; ring <= 32; ring++)

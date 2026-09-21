@@ -118,7 +118,7 @@ public class ChunkVolume
         var entry = new ChunkEntry(data, entity);
         _chunks[pos] = entry;
         UpdateBounds(pos);
-        MarkNeighboursDirty(pos);
+        MarkNeighboursDirty(pos, data);
         return entry;
     }
 
@@ -163,11 +163,38 @@ public class ChunkVolume
         }
     }
 
-    protected void MarkNeighboursDirty(ChunkPosition pos)
+    /// <summary>Remesh the neighbours whose face culling changes because <paramref name="data"/> (at
+    /// <paramref name="pos"/>) was just loaded or unloaded. The mesher treats a missing neighbour as open air, so a
+    /// neighbour's mesh only changes where this chunk's touching face holds a solid block — most streamed chunks in
+    /// a sky world are air (or air at that face), and marking all six unconditionally remeshed each chunk several
+    /// times over during load-in.</summary>
+    protected void MarkNeighboursDirty(ChunkPosition pos, ChunkData data)
     {
-        TryMark(pos.Offset( 1,  0,  0)); TryMark(pos.Offset(-1,  0,  0));
-        TryMark(pos.Offset( 0,  1,  0)); TryMark(pos.Offset( 0, -1,  0));
-        TryMark(pos.Offset( 0,  0,  1)); TryMark(pos.Offset( 0,  0, -1));
+        if (FaceHasSolid(data, 0)) TryMark(pos.Offset(-1,  0,  0));
+        if (FaceHasSolid(data, 1)) TryMark(pos.Offset( 1,  0,  0));
+        if (FaceHasSolid(data, 2)) TryMark(pos.Offset( 0, -1,  0));
+        if (FaceHasSolid(data, 3)) TryMark(pos.Offset( 0,  1,  0));
+        if (FaceHasSolid(data, 4)) TryMark(pos.Offset( 0,  0, -1));
+        if (FaceHasSolid(data, 5)) TryMark(pos.Offset( 0,  0,  1));
+    }
+
+    /// <summary>True if the chunk's boundary layer on side <paramref name="face"/> (0=-X, 1=+X, 2=-Y, 3=+Y, 4=-Z,
+    /// 5=+Z) contains any solid block, in the mesher's sense (<see cref="BlockDef.IsSolid"/>).</summary>
+    public static bool FaceHasSolid(ChunkData data, int face)
+    {
+        int s = ChunkData.Size, layer = (face & 1) == 0 ? 0 : s - 1;
+        for (int a = 0; a < s; a++)
+        for (int b = 0; b < s; b++)
+        {
+            var id = (face >> 1) switch
+            {
+                0 => data.Get(layer, a, b),
+                1 => data.Get(a, layer, b),
+                _ => data.Get(a, b, layer),
+            };
+            if (BlockRegistry.Get(id).IsSolid) return true;
+        }
+        return false;
     }
 
     protected void TryMark(ChunkPosition pos)

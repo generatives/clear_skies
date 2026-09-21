@@ -12,14 +12,19 @@ namespace ClearSkies.Engine.Voxels;
 public sealed class VoxelBoxDecomposer
 {
     private readonly bool[] _consumed = new bool[ChunkData.Size * ChunkData.Size * ChunkData.Size];
+    private bool _mergeBlockTypes;
 
     /// <summary>Returns boxes as (centre, size, block id) in chunk-local block units (centre relative
-    /// to the chunk origin). Each box contains only one <see cref="BlockId"/>.</summary>
-    public List<(Vector3 center, Vector3 size, BlockId Id)> Decompose(ChunkData data)
+    /// to the chunk origin). Each box contains only one <see cref="BlockId"/> — unless
+    /// <paramref name="mergeBlockTypes"/> is set, in which case boxes span any solid blocks and the id is just the
+    /// first voxel's. Static terrain colliders use that: they don't need per-box mass, and merging across
+    /// grass/dirt/stone layers cuts the box count (and so the BigCompound tree build) substantially.</summary>
+    public List<(Vector3 center, Vector3 size, BlockId Id)> Decompose(ChunkData data, bool mergeBlockTypes = false)
     {
         int sz = ChunkData.Size;
         Array.Clear(_consumed, 0, _consumed.Length);
         var boxes = new List<(Vector3, Vector3, BlockId)>();
+        _mergeBlockTypes = mergeBlockTypes;
 
         for (int z = 0; z < sz; z++)
         for (int y = 0; y < sz; y++)
@@ -65,7 +70,8 @@ public sealed class VoxelBoxDecomposer
         return true;
     }
 
-    private static bool Matches(ChunkData data, int x, int y, int z, BlockId id) => data.Get(x, y, z) == id;
+    private bool Matches(ChunkData data, int x, int y, int z, BlockId id) =>
+        _mergeBlockTypes ? IsSolid(data, x, y, z) : data.Get(x, y, z) == id;
     private static bool IsSolid(ChunkData data, int x, int y, int z) => BlockRegistry.Get(data.Get(x, y, z)).IsSolid;
     private static int  Idx(int x, int y, int z) => ChunkData.Index(x, y, z);
 }
