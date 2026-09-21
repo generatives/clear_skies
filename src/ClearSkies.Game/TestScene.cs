@@ -67,7 +67,7 @@ public static class TestScene
         cam.Set(new CharacterControllerComponent { Character = character, EyeHeight = 0.7f });
         cam.Set(new CharacterModeComponent { FreeFly = true }); // start in FreeFly — zero regression risk vs. today
 
-        host.Input.CursorCaptured = true;
+        host.Input.CursorCaptured = false; // the F1 debug menu starts open, and F1 frees the cursor with it
         return camTransform.Position;
     }
 

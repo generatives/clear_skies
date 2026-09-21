@@ -63,7 +63,8 @@ struct Params {
     counts: vec4<i32>, // volumeCount, targetVolIdx, lampCount (unused by sun_main), ambientLevel (0-15, lamp_main only)
     bricks: vec4<i32>, // x: number of entries in brickList for this dispatch
     bounce: vec4<f32>, // x: albedo (fraction of incoming light a surface re-emits), y: sun strength (0-1),
-                       // z: EMA alpha, w: frame counter (random seed)
+                       // z, w: unused
+    bounce2: vec4<f32>, // x: rays per evaluation, y: evaluations per full ray set (cycle)
 };
 
 @group(0) @binding(0) var<storage, read> opacity0: array<u32>;
@@ -406,71 +407,6 @@ fn lampVoxel(x: i32, y: i32, z: i32) {
     light[i] = keep | ambient | (min(best, 15u) << 8u);
 }
 
-// Ray ambient occlusion: how much of the sphere around a surface air voxel is enclosed by its own grid's
-// blocks within AO_MAX voxels. Flat open ground sees about half the sphere (the other half is the ground), so
-// the open fraction is measured against AO_OPEN_REF: that much open or more reads as unoccluded, a cave or a
-// sealed room reads as fully occluded. Rays stay in the voxel's own grid (a ship does not darken the ground),
-// so the result only changes when that grid's blocks change, never when anything moves. Stored as occlusion
-// (0 = open) in bits 16-23 of the light word; the fragment shader scales the ambient (sky) term by it.
-const AO_RAYS: i32 = 64;
-const AO_MAX: f32 = 16.0;
-const AO_OPEN_REF: f32 = 0.5;
-
-// Nearest-hit is not needed, only whether any block lies within AO_MAX. Single-axis steps (no tie
-// handling): a ray slipping through a diagonal gap is harmless for an averaged occlusion value.
-fn aoOccluded(ti: i32, o: vec3<f32>, d: vec3<f32>, dims: vec3<i32>) -> bool {
-    var voxel = vec3<i32>(floor(o));
-    let stepX: i32 = select(-1, 1, d.x > 0.0);
-    let stepY: i32 = select(-1, 1, d.y > 0.0);
-    let stepZ: i32 = select(-1, 1, d.z > 0.0);
-    var tMaxX: f32 = select(1e30, ((f32(voxel.x) + select(0.0, 1.0, d.x > 0.0)) - o.x) / d.x, abs(d.x) > 1e-8);
-    var tMaxY: f32 = select(1e30, ((f32(voxel.y) + select(0.0, 1.0, d.y > 0.0)) - o.y) / d.y, abs(d.y) > 1e-8);
-    var tMaxZ: f32 = select(1e30, ((f32(voxel.z) + select(0.0, 1.0, d.z > 0.0)) - o.z) / d.z, abs(d.z) > 1e-8);
-    for (var iter = 0; iter < 64; iter = iter + 1) {
-        if (min(tMaxX, min(tMaxY, tMaxZ)) > AO_MAX) { return false; }
-        if (tMaxX <= tMaxY && tMaxX <= tMaxZ) {
-            voxel.x = voxel.x + stepX;
-            tMaxX = ((f32(voxel.x) + select(0.0, 1.0, d.x > 0.0)) - o.x) / d.x;
-        } else if (tMaxY <= tMaxZ) {
-            voxel.y = voxel.y + stepY;
-            tMaxY = ((f32(voxel.y) + select(0.0, 1.0, d.y > 0.0)) - o.y) / d.y;
-        } else {
-            voxel.z = voxel.z + stepZ;
-            tMaxZ = ((f32(voxel.z) + select(0.0, 1.0, d.z > 0.0)) - o.z) / d.z;
-        }
-        if (voxel.x < 0 || voxel.x >= dims.x || voxel.y < 0 || voxel.y >= dims.y || voxel.z < 0 || voxel.z >= dims.z) { return false; }
-        if (isOpaqueInVolume(ti, voxel.x, voxel.y, voxel.z)) { return true; }
-    }
-    return false;
-}
-
-fn aoVoxel(x: i32, y: i32, z: i32) {
-    let ti = p.counts.y;
-    let dims = dimsOf(ti);
-    if (x >= dims.x || y >= dims.y || z >= dims.z) { return; }
-    let i = u32(x + dims.x * (y + dims.y * z));
-    if (isOpaqueInVolume(ti, x, y, z)) { return; } // the lamp pass zeroes solid cells
-
-    let surface = isOpaqueInVolume(ti, x - 1, y, z) || isOpaqueInVolume(ti, x + 1, y, z) ||
-                  isOpaqueInVolume(ti, x, y - 1, z) || isOpaqueInVolume(ti, x, y + 1, z) ||
-                  isOpaqueInVolume(ti, x, y, z - 1) || isOpaqueInVolume(ti, x, y, z + 1);
-    var occ = 0.0;
-    if (surface) {
-        let o = vec3<f32>(f32(x) + 0.5, f32(y) + 0.5, f32(z) + 0.5);
-        var open = 0;
-        for (var k = 0; k < AO_RAYS; k = k + 1) {
-            // Fibonacci sphere: evenly spread, fixed directions.
-            let cy = 1.0 - 2.0 * (f32(k) + 0.5) / f32(AO_RAYS);
-            let r = sqrt(max(0.0, 1.0 - cy * cy));
-            let phi = f32(k) * 2.39996323;
-            let d = vec3<f32>(r * cos(phi), cy, r * sin(phi));
-            if (!aoOccluded(ti, o, d, dims)) { open = open + 1; }
-        }
-        occ = 1.0 - clamp(f32(open) / f32(AO_RAYS) / AO_OPEN_REF, 0.0, 1.0);
-    }
-    light[i] = (light[i] & 0xFF00FFFFu) | (u32(round(occ * 255.0)) << 16u);
-}
-
 // Work is driven by the target volume's surface-brick list (built on the CPU, see GpuLightSystem): one
 // workgroup per 8x8x8 brick that can contain a surface air voxel, instead of one thread per voxel of the
 // whole volume. 256 threads per workgroup, each covering two voxels (z and z+4). Brick entries pack the
@@ -508,17 +444,25 @@ fn lamp_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg
 }
 
 // ── Bounce (one-hop indirect light, multi-hop through re-evaluation) ─────────────────────────────────────
-// Each evaluation, a surface air voxel fires BOUNCE_RAYS short random rays (up to BOUNCE_MAX), cosine-
-// distributed around its surface normal, through every grid. At each ray's nearest hit it reads the light
+// Each evaluation, a surface air voxel fires p.bounce2.x short rays (up to BOUNCE_MAX), cosine-distributed
+// around its surface normal, through every grid: one slice of a fixed per-voxel direction set that a full
+// cycle of p.bounce2.y evaluations covers (see bounceVoxel). At each ray's nearest hit it reads the light
 // arriving at the hit face from the air cell in front of it: the brighter of that cell's direct sun
 // (visibility x strength x the face's N.L), its lamp light and its own stored bounce; a miss reads 0. The
 // mean of those times the albedo is this evaluation's estimate, blended into the stored bounce (0-255, bits
-// 24-31 of the light word) as an exponential moving average with weight alpha. Reading the stored bounce at
-// the hit is what makes it multi-hop: each evaluation adds a hop, and the CPU keeps a changed area evaluating
-// for a number of frames. Keep albedo well below 1 or the feedback lingers (a removed light ghosts longer).
-// Ambient is not bounced; it is already uniform.
-const BOUNCE_RAYS: i32 = 4;
+// 24-31 of the light word) with weight alpha = max(1/cycle, 1/(n+1)), n being how many times the brick has
+// been evaluated since it changed: a running average over the first cycle (after which the value is exactly
+// the complete set's mean), then an EMA weighing one cycle.
+// The same rays measure ambient occlusion: the fraction that hit nothing within BOUNCE_MAX is the voxel's sky
+// visibility (cosine-weighted, since the rays are), and one minus it is blended into bits 16-23 the same way.
+// The fragment shader scales the flat ambient by it, so caves and sealed rooms go dark while open ground,
+// whose rays all go up, stays fully lit. Rays cross grids, so a ship darkens the ground under it.
+// Reading the stored bounce at the hit is what makes it multi-hop:
+// each evaluation adds a hop, and the CPU keeps a changed area evaluating for a number of frames. Keep albedo
+// well below 1 or the feedback lingers (a removed light ghosts longer). Ambient is not bounced; it is
+// already uniform.
 const BOUNCE_MAX: f32 = 16.0;
+const BOUNCE_MAX_RAYS: i32 = 32;
 
 fn lightvRead(vi: i32, idx: u32) -> u32 {
     switch (vi) {
@@ -627,7 +571,7 @@ fn pcg(v: u32) -> u32 {
 
 fn rand01(h: u32) -> f32 { return f32(pcg(h) & 0xFFFFFFu) / 16777216.0; }
 
-fn bounceVoxel(x: i32, y: i32, z: i32) {
+fn bounceVoxel(x: i32, y: i32, z: i32, alpha: f32, slice: i32) {
     let ti = p.counts.y;
     let dims = dimsOf(ti);
     if (x >= dims.x || y >= dims.y || z >= dims.z) { return; }
@@ -638,7 +582,8 @@ fn bounceVoxel(x: i32, y: i32, z: i32) {
     let syn = isOpaqueInVolume(ti, x, y - 1, z); let syp = isOpaqueInVolume(ti, x, y + 1, z);
     let szn = isOpaqueInVolume(ti, x, y, z - 1); let szp = isOpaqueInVolume(ti, x, y, z + 1);
     let word = lightvRead(ti, i);
-    var stored = f32(word >> 24u) / 255.0;
+    var bounce8 = 0.0;   // non-surface air: no bounce, no occlusion
+    var occ8 = 0.0;
     if (sxn || sxp || syn || syp || szn || szp) {
         // The voxel's surfaces face away from its solid neighbours; rays are cosine-distributed around that
         // combined normal, so a floor does not light itself with its own downward rays. Opposite solids (a
@@ -656,12 +601,22 @@ fn bounceVoxel(x: i32, y: i32, z: i32) {
 
         let v2w = voxelToWorldOf(ti);
         let origin = (v2w * vec4<f32>(f32(x) + 0.5, f32(y) + 0.5, f32(z) + 0.5, 1.0)).xyz;
-        let seed = pcg(u32(x) ^ pcg(u32(y) ^ pcg(u32(z) ^ pcg(u32(p.bounce.w)))));
+        // Each voxel has one fixed set of rays * cycle directions, set by its position alone: a cosine-weighted
+        // Fibonacci spiral (evenly spread, far less noisy than random directions), twisted and shifted per voxel
+        // so neighbours differ. Evaluation n fires slice n mod cycle; slices interleave (direction j = k*cycle +
+        // slice), so each one spans the whole hemisphere coarsely and a full cycle covers the complete set.
+        let seed = pcg(u32(x) ^ pcg(u32(y) ^ pcg(u32(z))));
+        let twist = rand01(seed) * 6.2831853;
+        let shift = rand01(seed + 1u);
         var sumL = 0.0;
-        for (var k = 0; k < BOUNCE_RAYS; k = k + 1) {
-            let u1 = rand01(seed + u32(k) * 2u);
-            let u2 = rand01(seed + u32(k) * 2u + 1u);
-            let phi = u2 * 6.2831853;
+        var escaped = 0.0;
+        let rays = clamp(i32(p.bounce2.x), 1, BOUNCE_MAX_RAYS);
+        let cycle = max(i32(p.bounce2.y), 1);
+        let total = f32(rays * cycle);
+        for (var k = 0; k < rays; k = k + 1) {
+            let j = f32(k * cycle + slice);
+            let u1 = fract((j + shift) / total);
+            let phi = j * 2.39996323 + twist;
             var dl: vec3<f32>;
             if (hasN) {
                 let r = sqrt(u1);                                   // cosine-weighted hemisphere
@@ -688,49 +643,48 @@ fn bounceVoxel(x: i32, y: i32, z: i32) {
                 if (h.hit && h.t < bestT) { bestT = h.t; bestVol = vi; best = h; }
             }
             if (bestVol >= 0) { sumL = sumL + radianceAt(bestVol, best.cell, best.n); }
+            else { escaped = escaped + 1.0; }
         }
-        let estimate = clamp(p.bounce.x * sumL / f32(BOUNCE_RAYS), 0.0, 1.0);
-        // EMA. With 8-bit storage a small alpha can stall a step short of the target (a change under half a
-        // step rounds away), so the blend always moves at least one step toward the estimate.
-        let next = stored + p.bounce.z * (estimate - stored);
-        var q = round(next * 255.0);
-        let s8 = f32(word >> 24u);
-        if (q == s8 && abs(estimate * 255.0 - s8) >= 1.0) { q = s8 + sign(estimate * 255.0 - s8); }
-        stored = clamp(q, 0.0, 255.0) / 255.0;
-    } else {
-        stored = 0.0;
+        let estimate = clamp(p.bounce.x * sumL / f32(rays), 0.0, 1.0);
+        let occEstimate = 1.0 - escaped / f32(rays);
+        bounce8 = blend8(f32(word >> 24u), estimate * 255.0, alpha);
+        occ8 = blend8(f32((word >> 16u) & 0xFFu), occEstimate * 255.0, alpha);
     }
-    lightvWrite(ti, i, (word & 0x00FFFFFFu) | (u32(round(stored * 255.0)) << 24u));
+    lightvWrite(ti, i, (word & 0x0000FFFFu) | (u32(occ8) << 16u) | (u32(bounce8) << 24u));
+}
+
+// One blend step of an 8-bit stored value toward target (both 0-255). With 8-bit storage a small alpha can
+// stall a step short of the target (a change under half a step rounds away), so it always moves at least one
+// step toward it.
+fn blend8(s8: f32, goal: f32, alpha: f32) -> f32 {
+    var q = round(s8 + alpha * (goal - s8));
+    if (q == s8 && abs(goal - s8) >= 1.0) { q = s8 + sign(goal - s8); }
+    return clamp(q, 0.0, 255.0);
 }
 
 @compute @workgroup_size(8, 8, 4)
 fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
                @builtin(local_invocation_id) lid: vec3<u32>) {
-    let b = brickBase(wid, nwg);
-    if (b.w == 0) { return; }
-    let x = b.x + i32(lid.x);
-    let y = b.y + i32(lid.y);
-    let z = b.z + i32(lid.z);
-    bounceVoxel(x, y, z);
-    bounceVoxel(x, y, z + 4);
-}
-
-@compute @workgroup_size(8, 8, 4)
-fn ao_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
-           @builtin(local_invocation_id) lid: vec3<u32>) {
-    let b = brickBase(wid, nwg);
-    if (b.w == 0) { return; }
-    let x = b.x + i32(lid.x);
-    let y = b.y + i32(lid.y);
-    let z = b.z + i32(lid.z);
-    aoVoxel(x, y, z);
-    aoVoxel(x, y, z + 4);
+    // The bounce work list is pairs: (packed brick, evaluations since the brick changed).
+    let bi = wid.x + wid.y * nwg.x;
+    if (bi >= u32(p.bricks.x)) { return; }
+    let e = brickList[bi * 2u];
+    let nu = brickList[bi * 2u + 1u];
+    // A running average over the first full cycle (exactly the complete ray set's mean), then a weight of one
+    // cycle, so each further cycle weighs the whole set about equally.
+    let cycle = max(u32(p.bounce2.y), 1u);
+    let alpha = max(1.0 / f32(cycle), 1.0 / (f32(nu) + 1.0));
+    let slice = i32(nu % cycle);
+    let x = i32(e & 1023u) * 8 + i32(lid.x);
+    let y = i32((e >> 10u) & 1023u) * 8 + i32(lid.y);
+    let z = i32((e >> 20u) & 1023u) * 8 + i32(lid.z);
+    bounceVoxel(x, y, z, alpha, slice);
+    bounceVoxel(x, y, z + 4, alpha, slice);
 }";
 
     private readonly GpuContext _ctx;
     private readonly ComputePipeline _sunPipeline;
     private readonly ComputePipeline _lampPipeline;
-    private readonly ComputePipeline _aoPipeline;
     private readonly ComputePipeline? _bouncePipeline;   // null when the adapter allows too few storage buffers
     private readonly GpuBuffer _param;
 
@@ -749,7 +703,6 @@ fn ao_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: 
         _ctx = ctx;
         _sunPipeline  = new ComputePipeline(ctx, Wgsl, "sun_main");
         _lampPipeline = new ComputePipeline(ctx, Wgsl, "lamp_main");
-        _aoPipeline   = new ComputePipeline(ctx, Wgsl, "ao_main");
         uint storageLimit = ctx.AdapterLimits.MaxStorageBuffersPerShaderStage;
         if (storageLimit >= BounceStorageBuffers)
             _bouncePipeline = new ComputePipeline(ctx, Wgsl, "bounce_main");
@@ -846,37 +799,15 @@ fn ao_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: 
     }
 
     /// <summary>
-    /// Ray ambient occlusion for the listed bricks of <paramref name="targetIdx"/>: short rays in the target's
-    /// own grid only, written to bits 16-23 of <paramref name="targetLight"/> (the other bits are kept).
-    /// </summary>
-    public void DispatchAo(ReadOnlySpan<RayVolumeSlot> slots, int volumeCount, int targetIdx,
-                           GpuBuffer targetLight, GpuBuffer brickList, int brickCount)
-    {
-        if (volumeCount <= 0 || targetIdx < 0 || targetIdx >= volumeCount) return;
-        var target = slots[targetIdx];
-        if (target.VW <= 0 || target.VH <= 0 || target.VD <= 0 || brickCount <= 0) return;
-
-        WriteParams(slots, volumeCount, targetIdx, Vector3D<float>.Zero, lampCount: 0, ambientLevel: 0, brickCount);
-
-        var entries = new (uint, GpuBuffer)[8];
-        for (int i = 0; i < MaxRayVolumes; i++)
-            entries[i] = ((uint)i, i < volumeCount ? slots[i].Opacity : _dummyOpacity);
-        entries[5] = (6u, targetLight);
-        entries[6] = (8u, _param);
-        entries[7] = (9u, brickList);
-
-        nint bg = _aoPipeline.CreateBindGroupHandle(entries);
-        DispatchBricks(_aoPipeline, bg, brickCount);
-        _ctx.Api.BindGroupRelease((BindGroup*)bg);
-    }
-
-    /// <summary>
     /// One EMA step of bounce light for the listed bricks of <paramref name="targetIdx"/> (see bounce_main).
     /// Reads every volume's light and sun visibility, so run it after the direct passes of all volumes.
+    /// <paramref name="brickList"/> holds <paramref name="brickCount"/> pairs of (packed brick, evaluations since
+    /// that brick changed). Each voxel's fixed direction set is <paramref name="rays"/> x <paramref name="cycle"/>
+    /// directions, one slice of <paramref name="rays"/> per evaluation.
     /// </summary>
     public void DispatchBounce(ReadOnlySpan<RayVolumeSlot> slots, ReadOnlySpan<GpuBuffer> lights, ReadOnlySpan<GpuBuffer> sunVis,
                                int volumeCount, int targetIdx, Vector3D<float> sunDir, float sunStrength,
-                               float albedo, float alpha, int frame, GpuBuffer brickList, int brickCount)
+                               float albedo, int rays, int cycle, GpuBuffer brickList, int brickCount)
     {
         if (_bouncePipeline == null) return;
         if (volumeCount <= 0 || targetIdx < 0 || targetIdx >= volumeCount) return;
@@ -884,7 +815,8 @@ fn ao_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: 
         if (target.VW <= 0 || target.VH <= 0 || target.VD <= 0 || brickCount <= 0) return;
 
         WriteParams(slots, volumeCount, targetIdx, sunDir, lampCount: 0, ambientLevel: 0, brickCount,
-                    new Vector4D<float>(albedo, sunStrength, alpha, frame & 0xFFFFF));
+                    new Vector4D<float>(albedo, sunStrength, 0f, 0f),
+                    new Vector4D<float>(rays, cycle, 0f, 0f));
 
         // Unused slots get distinct dummies: a writable buffer can't be bound twice in one bind group.
         var entries = new (uint, GpuBuffer)[BounceStorageBuffers + 1];
@@ -905,7 +837,8 @@ fn ao_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: 
     }
 
     private void WriteParams(ReadOnlySpan<RayVolumeSlot> slots, int volumeCount, int targetIdx, Vector3D<float> sunDir,
-                             int lampCount, int ambientLevel, int brickCount, Vector4D<float> bounce = default)
+                             int lampCount, int ambientLevel, int brickCount, Vector4D<float> bounce = default,
+                             Vector4D<float> bounce2 = default)
     {
         var pr = new RayParams();
         SetSlot(ref pr, 0, volumeCount > 0 ? slots[0] : default);
@@ -917,6 +850,7 @@ fn ao_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: 
         pr.VolumeCount = volumeCount; pr.TargetIdx = targetIdx; pr.LampCount = lampCount; pr.AmbientLevel = ambientLevel;
         pr.BrickCount = brickCount;
         pr.Bounce = bounce;
+        pr.Bounce2 = bounce2;
 
         Span<RayParams> sp = stackalloc RayParams[1] { pr };
         _param.Write<RayParams>(0, sp);
@@ -955,7 +889,6 @@ fn ao_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: 
     {
         _sunPipeline.Dispose();
         _lampPipeline.Dispose();
-        _aoPipeline.Dispose();
         _bouncePipeline?.Dispose();
         foreach (var b in _dummyLight) b.Dispose();
         _param.Dispose();
@@ -980,6 +913,7 @@ fn ao_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: 
         public float SunX, SunY, SunZ, SunPad;
         public int VolumeCount, TargetIdx, LampCount, AmbientLevel;
         public int BrickCount, BrickPad0, BrickPad1, BrickPad2;   // vec4<i32> bricks
-        public Vector4D<float> Bounce;                            // albedo, sun strength, alpha, frame
+        public Vector4D<float> Bounce;                            // albedo, sun strength, unused, unused
+        public Vector4D<float> Bounce2;                           // rays per evaluation, cycle
     }
 }

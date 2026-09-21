@@ -54,6 +54,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     private readonly ChunkVolume    _staticWorld;
     private readonly EntitySet      _grids;
     private readonly EntitySet      _meshes;
+    private readonly EntitySet      _cameras;
     private readonly PhysicsWorld   _physics;
     private readonly Renderer       _renderer;
     private readonly GpuLightFlood  _flood;
@@ -68,23 +69,36 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     // A/B switch: when true, bypasses the flood/cube-map/shadow-map path entirely and dispatches
     // GpuRayLightPass for every loaded volume instead. When false, behaves exactly as before —
     // zero regression risk.
-    private bool _rayTracedLighting;
+    private bool _rayTracedLighting = true;
 
     // Ray-traced lamp pass's flat ambient (0-15, Minecraft-style level — see GpuRayLightPass.DispatchLamps),
     // debug-panel adjustable. Deliberately its own setting, decoupled from VolumeGpuResources.BaseSkyLevel
     // (the old flood's ambient, unaffected by this).
     private float _ambientLevel = 2f;
 
-    // How strongly ray AO (GpuRayLightPass ao_main) darkens the ambient term, 0-1. Passed to the fragment
-    // shader through RayLightingSettings.AoStrength; forced to 0 while the old path is active.
+    // How strongly ray AO (measured by the bounce rays, GpuRayLightPass bounce_main) darkens the ambient term,
+    // 0-1. Passed to the fragment shader through RayLightingSettings.AoStrength; forced to 0 while the old path
+    // is active or bounce is off.
     private float _aoStrength = 1f;
 
-    // Bounce (GpuRayLightPass bounce_main): albedo feeds the pass (changing it re-evaluates everything), EMA
-    // alpha is the blend weight per evaluation, and scale only multiplies the stored value in the fragment shader.
+    // Bounce (GpuRayLightPass bounce_main): albedo feeds the pass (changing it re-evaluates everything); each voxel
+    // has a fixed set of rays x cycle directions, one slice of rays per evaluation, blended as a running average
+    // over the first cycle and then with a weight of one cycle; hold frames is how many evaluations a changed
+    // area gets (rounded up to whole cycles); scale only multiplies the stored value in the fragment shader.
     private bool _bounceEnabled = true;
     private float _bounceAlbedo = 0.5f;
-    private float _bounceAlpha = 0.15f;
+    private int _bounceRays = 8;
+    private int _bounceCycle = 4;   // evaluations per full ray set: each voxel's fixed set is rays x cycle directions
+    private int _bounceHoldFrames = 4;
     private float _bounceScale = 1f;
+
+    // A brick that changes again while still being evaluated has its evaluation count capped at this (blend
+    // weight 1/(n+1)) instead of restarting at 0, so continuously changing areas stay a little smoothed.
+    private int _bounceRechangeN = 2;
+
+    // Held bricks within this many voxels of the camera are evaluated this many times per frame.
+    private int _bounceNearRepeats = 4;
+    private float _bounceNearRadius = 64f;
 
     // Reused scratch for the ray-traced path (avoid per-frame allocation). _slotGpu[i] is the
     // VolumeGpuResources backing _slots[i] (0..volumeCount-1), so the per-volume dispatch knows which
@@ -109,10 +123,9 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     private const double EmaAlpha = 0.1;
     private readonly Stopwatch _sunTimer = new();
     private readonly Stopwatch _lampTimer = new();
-    private readonly Stopwatch _aoTimer = new();
     private readonly Stopwatch _bounceTimer = new();
     private readonly Stopwatch _oldPathTimer = new();
-    private double _rtSunMsEma, _rtLampMsEma, _rtAoMsEma, _rtBounceMsEma, _oldPathMsEma;
+    private double _rtSunMsEma, _rtLampMsEma, _rtBounceMsEma, _oldPathMsEma;
 
     private static double Ema(double prev, double sample) => prev <= 0.0 ? sample : prev + EmaAlpha * (sample - prev);
 
@@ -138,6 +151,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         _physics     = physics;
         _renderer    = renderer;
         _grids       = world.GetEntities().With<DynamicGridComponent>().AsSet();
+        _cameras     = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
         _meshes      = world.GetEntities().With<Transform>().With<MeshRenderer>().AsSet();
         _flood       = new GpuLightFlood(ctx);
         _lightShadow = new LightShadowPass(ctx);
@@ -156,8 +170,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         ImGui.Text($"Old path (sun-vis + cross-volume + flood): {_oldPathMsEma:F2} ms/frame");
         ImGui.Text($"Ray-traced sun dispatch:                   {_rtSunMsEma:F2} ms/frame");
         ImGui.Text($"Ray-traced lamp dispatch:                  {_rtLampMsEma:F2} ms/frame");
-        ImGui.Text($"Ray-traced AO dispatch:                    {_rtAoMsEma:F2} ms/frame");
-        ImGui.Text($"Ray-traced bounce dispatch:                {_rtBounceMsEma:F2} ms/frame");
+        ImGui.Text($"Ray-traced bounce + AO dispatch:           {_rtBounceMsEma:F2} ms/frame");
         ImGui.TextDisabled("CPU submission time only (queue is async) — compare FPS for total GPU+CPU cost.");
 
         ImGui.Separator();
@@ -166,16 +179,22 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         ImGui.SliderFloat("Ray AO strength (ray-traced only)", ref _aoStrength, 0f, 1f, "%.2f");
         if (_rayLight.BounceSupported)
         {
-            ImGui.Checkbox("Bounce light (ray-traced only)", ref _bounceEnabled);
+            ImGui.Checkbox("Bounce light + AO rays (ray-traced only)", ref _bounceEnabled);
             ImGui.SliderFloat("Bounce albedo", ref _bounceAlbedo, 0f, 0.9f, "%.2f");
-            ImGui.SliderFloat("Bounce EMA alpha", ref _bounceAlpha, 0.02f, 1f, "%.2f");
+            ImGui.SliderInt("Bounce rays per evaluation", ref _bounceRays, 1, 32);
+            ImGui.SliderInt("Evaluations per full ray set", ref _bounceCycle, 1, 16);
+            ImGui.TextDisabled($"  = {_bounceRays * _bounceCycle} fixed directions per voxel");
+            ImGui.SliderInt("Bounce hold frames", ref _bounceHoldFrames, 1, 64);
+            ImGui.SliderInt("Bounce re-change restart count", ref _bounceRechangeN, 0, 16);
+            ImGui.SliderInt("Near-camera evaluations per frame", ref _bounceNearRepeats, 1, 4);
+            ImGui.SliderFloat("Near-camera radius", ref _bounceNearRadius, 8f, 256f, "%.0f");
             ImGui.SliderFloat("Bounce display scale", ref _bounceScale, 0f, 4f, "%.2f");
         }
         else ImGui.TextDisabled("Bounce light unavailable: too few storage buffers per shader stage (see console).");
         if (_rayTracedLighting)
         {
             ImGui.TextDisabled($"Bricks relit this frame: {_lastDirtyTotal:N0} of {_lastBrickTotal:N0} surface bricks");
-            ImGui.TextDisabled($"Bricks AO-traced this frame: {_lastAoDirtyTotal:N0}, bounced: {_lastBounceTotal:N0}");
+            ImGui.TextDisabled($"Bricks bounced this frame: {_lastBounceTotal:N0}, plus near-camera repeats: {_lastNearTotal:N0}");
             ImGui.TextDisabled($"  full relight: {(_dbgFullReason == "" ? "no" : _dbgFullReason)}, volumes reallocated: {_dbgReallocs}");
             ImGui.TextDisabled($"  world chunks uploaded: {_dbgChangedChunks}, ships moved: {_dbgShipsMoved}, lamp changes: {_dbgLampChanges}");
         }
@@ -194,8 +213,10 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
 
     public void Update(float dt)
     {
-        RayLightingSettings.AoStrength  = _rayTracedLighting ? _aoStrength : 0f;
-        RayLightingSettings.BounceScale = _rayTracedLighting && _bounceEnabled && _rayLight.BounceSupported ? _bounceScale : 0f;
+        // AO is measured by the bounce rays, so it goes with them.
+        bool bounceRays = _rayTracedLighting && _bounceEnabled && _rayLight.BounceSupported;
+        RayLightingSettings.AoStrength  = bounceRays ? _aoStrength : 0f;
+        RayLightingSettings.BounceScale = bounceRays ? _bounceScale : 0f;
         if (_rayTracedLighting) { UpdateRayTracedLighting(); return; } // old path fully bypassed — see plan doc
         ResetRayTracedTracking();
 
@@ -262,6 +283,9 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
 
         // Every frame now (not the old 2 Hz cadence) — cheap at prototype lamp counts, and the lamp pass
         // needs a fresh world-space list every dispatch since nothing here is cached across frames.
+        // GatherLamps walks _volumes, which only the old path otherwise refreshes: without this, starting with
+        // the ray-traced path on found no lamps at all, and a ship spawned while it was on had its lamps missed.
+        BuildVolumes();
         GatherLamps();
 
         RayTracedDispatch(volumeCount); // change tracking + dispatch: see GpuLightSystem.RayDirty.cs

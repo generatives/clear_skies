@@ -107,7 +107,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // ── "Systems" menu bar (see IDebugUiSystem) ─────────────────────────────────
     private readonly List<IDebugUiSystem> _debugUiSystems = new();
     private readonly Dictionary<string, bool> _debugUiVisible = new();
-    private bool _menuVisible;
+    private bool _menuVisible = true;   // shown at startup; F1 toggles
 
     /// <summary>True when ImGui wants to consume mouse input this frame (hovering/dragging/clicking a
     /// widget) — reflects the previous frame's layout, since it's set inside <see cref="Update"/> before
