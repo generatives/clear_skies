@@ -16,7 +16,7 @@ public sealed unsafe class Renderer : IDisposable
 {
     private const int MaxObjects = 4096;
     private const ulong ModelStride = 256;   // >= minUniformBufferOffsetAlignment
-    private const ulong CameraSize  = 224;   // two mat4x4<f32> (view, proj) + six vec4<f32> (sun, light params, camera position, fog, zenith, horizon)
+    private const ulong CameraSize  = 240;   // two mat4x4<f32> (view, proj) + seven vec4<f32> (sun, light params, camera position, fog, zenith, horizon, clouds)
     private const ulong ModelSize   = 96;    // mat4x4<f32> + vec3<i32> chunk + i32 grid + vec4<i32> padding
 
     private static readonly string Wgsl = @"
@@ -32,10 +32,11 @@ const EMPTY_DISPLAY: u32 = 0x3000u;   // no light storage: full sun, no light, n
 
 // sunDir.w: sun strength (SunLight.Strength). lightParams.x: ray AO strength, .y: 1 = reference light path (see
 // shadeFast), .z: ambient (0-1), .w unused. camPos.xyz: camera world position. fog: horizontal start/end, vertical
-// start/end (blocks from the camera). zenith/horizon.rgb: the sky gradient (see SkySettings).
+// start/end (blocks from the camera). zenith/horizon.rgb: the sky gradient (see SkySettings). clouds.xy: the cloud
+// layer's fog start/end (see CloudLayer).
 struct Camera {
     view: mat4x4<f32>, proj: mat4x4<f32>, sunDir: vec4<f32>, lightParams: vec4<f32>,
-    camPos: vec4<f32>, fog: vec4<f32>, zenith: vec4<f32>, horizon: vec4<f32>,
+    camPos: vec4<f32>, fog: vec4<f32>, zenith: vec4<f32>, horizon: vec4<f32>, clouds: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
@@ -471,6 +472,22 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 
     return vec4<f32>(applyFog(baseColor * lit * aoFactor, in.worldPos), 1.0);
 }
+
+// Cloud-layer boxes (CloudLayer): flat per-face shading like Minecraft's clouds (bright tops, darker sides and
+// undersides), a little extra on the faces the sun hits, then faded into the sky by the cloud layer's own fog
+// distances — clouds aren't limited by the loaded world, so they use neither of the terrain fog ranges.
+@fragment
+fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
+    let n = in.worldNormal;
+    var shade = 0.8;
+    if (n.y > 0.5)             { shade = 1.0; }
+    else if (n.y < -0.5)       { shade = 0.7; }
+    else if (abs(n.x) > 0.5)   { shade = 0.88; }
+    shade *= 0.9 + 0.1 * max(dot(n, -camera.sunDir.xyz), 0.0) * camera.sunDir.w;
+    let d = in.worldPos - camera.camPos.xyz;
+    let f = smoothstep(camera.clouds.x, camera.clouds.y, length(d));
+    return vec4<f32>(mix(in.color * shade, skyColor(normalize(d)), f), 1.0);
+}
 ";
 
     private readonly GpuContext _ctx;
@@ -486,6 +503,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     private RenderPipeline* _wireframePipeline;
     private RenderPipeline* _hudPipeline;
     private RenderPipeline* _skyPipeline;
+    private RenderPipeline* _cloudPipeline;
 
     // Block texture array (TextureAtlas → GPU). Constructed with a 1x1 white fallback so BeginFrame
     // always has a valid group-3 bind group; LoadTextureAtlas replaces it with the real spritesheet.
@@ -545,6 +563,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         _wireframePipeline = CreatePipeline(PrimitiveTopology.LineList,     CullMode.None);
         _hudPipeline       = CreatePipeline(PrimitiveTopology.TriangleList, CullMode.None, depthTest: false);
         _skyPipeline       = CreateSkyPipeline();
+        _cloudPipeline     = CreatePipeline(PrimitiveTopology.TriangleList, CullMode.Back, fragmentEntry: "fs_cloud");
 
         _cameraBuffer    = GpuBuffer.CreateUniform(ctx, CameraSize);
         _hudCameraBuffer = GpuBuffer.CreateUniform(ctx, CameraSize);
@@ -634,7 +653,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         _pipelineLayout = _api.DeviceCreatePipelineLayout(_ctx.Device, &plDesc);
     }
 
-    private RenderPipeline* CreatePipeline(PrimitiveTopology topology, CullMode cullMode, bool depthTest = true)
+    private RenderPipeline* CreatePipeline(PrimitiveTopology topology, CullMode cullMode, bool depthTest = true,
+                                           string fragmentEntry = "fs_main")
     {
         VertexAttribute* attrs = stackalloc VertexAttribute[4];
         attrs[0] = new VertexAttribute { Format = VertexFormat.Float32x3, Offset = 0,  ShaderLocation = 0 };
@@ -644,7 +664,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         var vbLayout = new VertexBufferLayout { ArrayStride = Vertex.SizeBytes, StepMode = VertexStepMode.Vertex, AttributeCount = 4, Attributes = attrs };
 
         var vsEntry = (byte*)SilkMarshal.StringToPtr("vs_main", NativeStringEncoding.UTF8);
-        var fsEntry = (byte*)SilkMarshal.StringToPtr("fs_main", NativeStringEncoding.UTF8);
+        var fsEntry = (byte*)SilkMarshal.StringToPtr(fragmentEntry, NativeStringEncoding.UTF8);
 
         var vertexState   = new VertexState   { Module = _shader, EntryPoint = vsEntry, BufferCount = 1, Buffers = &vbLayout };
         var colorTarget   = new ColorTargetState { Format = _ctx.SurfaceFormat, Blend = null, WriteMask = ColorWriteMask.All };
@@ -881,6 +901,26 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     }
 
     /// <summary>
+    /// Draws <paramref name="mesh"/> (the <see cref="CloudLayer"/> tile) once per model in <paramref name="tiles"/>
+    /// with the cloud shader. Depth-tested and depth-writing like the world, so call it before <see cref="DrawSky"/>.
+    /// </summary>
+    public void DrawClouds(GpuMesh mesh, ReadOnlySpan<Mat4> tiles)
+    {
+        _api.RenderPassEncoderSetPipeline(_pass, _cloudPipeline);
+        _api.RenderPassEncoderSetVertexBuffer(_pass, 0, mesh.VertexBuffer.Handle, 0, mesh.VertexBuffer.SizeBytes);
+        _api.RenderPassEncoderSetIndexBuffer(_pass, mesh.IndexBuffer.Handle, IndexFormat.Uint32, 0, mesh.IndexBuffer.SizeBytes);
+        foreach (var tile in tiles)
+        {
+            if (_drawIndex >= MaxObjects) break;
+            uint dynOffset = StageModel(ModelUniform.Default(tile));
+            _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset);
+            _api.RenderPassEncoderDrawIndexed(_pass, mesh.IndexCount, 1, 0, 0, 0);
+            _drawIndex++;
+        }
+        _api.RenderPassEncoderSetPipeline(_pass, WireframeMode ? _wireframePipeline : _pipeline);
+    }
+
+    /// <summary>
     /// Fills every pixel the world didn't cover with the sky gradient and sun (see the shader's fs_sky). Call after
     /// the world draws, so the depth test skips covered pixels, and before overlays and the HUD.
     /// </summary>
@@ -1073,6 +1113,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         if (_atlasSampler     != null) _api.SamplerRelease(_atlasSampler);
         if (_atlasTextureView != null) _api.TextureViewRelease(_atlasTextureView);
         if (_atlasTexture     != null) _api.TextureRelease(_atlasTexture);
+        if (_cloudPipeline      != null) _api.RenderPipelineRelease(_cloudPipeline);
         if (_skyPipeline        != null) _api.RenderPipelineRelease(_skyPipeline);
         if (_hudPipeline        != null) _api.RenderPipelineRelease(_hudPipeline);
         if (_wireframePipeline  != null) _api.RenderPipelineRelease(_wireframePipeline);

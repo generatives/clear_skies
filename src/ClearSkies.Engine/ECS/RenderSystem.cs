@@ -20,12 +20,14 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
     private readonly Renderer _renderer;
     private readonly ImGuiController _gui;
     private readonly Time _time;
+    private readonly CloudLayer _clouds;
 
     public RenderSystem(World world, Renderer renderer, ImGuiController gui, Time time)
     {
         _renderer   = renderer;
         _gui        = gui;
         _time       = time;
+        _clouds     = new CloudLayer(renderer);
         _cameras    = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
         _meshes     = world.GetEntities().With<Transform>().With<MeshRenderer>().AsSet();
         _wireframes = world.GetEntities().With<Transform>().With<WireframeRenderer>().AsSet();
@@ -64,6 +66,10 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
                            $"{SkySettings.LoadedVertical:F0} up/down); fog is total at the edge.");
         ImGui.ColorEdit3("Zenith", ref SkySettings.ZenithColor);
         ImGui.ColorEdit3("Horizon / fog", ref SkySettings.HorizonColor);
+        ImGui.Checkbox("Clouds", ref SkySettings.CloudsEnabled);
+        ImGui.SliderFloat("Cloud coverage", ref SkySettings.CloudCoverage, 0f, 1f);
+        ImGui.SliderFloat("Cloud altitude", ref SkySettings.CloudAltitude, 0f, 600f);
+        ImGui.SliderFloat("Wind speed (blocks/s)", ref SkySettings.WindSpeed, 0f, 30f);
     }
 
     private static Vector3D<float> ToVector3D(System.Numerics.Vector3 v) => new(v.X, v.Y, v.Z);
@@ -88,6 +94,8 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
             CameraPosition = camTransform.Position,
             ZenithColor    = ToVector3D(SkySettings.ZenithColor),
             HorizonColor   = ToVector3D(SkySettings.HorizonColor),
+            CloudFogStart  = CloudLayer.FogStart,
+            CloudFogEnd    = CloudLayer.FogEnd,
         };
         if (SkySettings.FogEnabled)
         {
@@ -135,7 +143,9 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
         foreach (var d in _draws)
             _renderer.DrawMesh(d.Mesh, d.Model, d.Grid, d.Chunk);
 
-        // Sky after the world, so it only shades the pixels the world left uncovered.
+        if (SkySettings.CloudsEnabled) _clouds.Draw(camTransform.Position, _time.TotalSeconds);
+
+        // Sky after the world and clouds, so it only shades the pixels they left uncovered.
         _renderer.DrawSky();
 
         // Wireframe overlays drawn on top (pipeline switches mid-pass then restores).
