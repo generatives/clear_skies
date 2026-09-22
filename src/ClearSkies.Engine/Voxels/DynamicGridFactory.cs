@@ -1,6 +1,4 @@
-using System.Collections.Generic;
 using ClearSkies.Engine.ECS;
-using ClearSkies.Engine.Physics;
 using DefaultEcs;
 using PhysVec = System.Numerics.Vector3;
 
@@ -15,7 +13,7 @@ public static class DynamicGridFactory
     /// automatically next frame via GpuLightSystem/PhysicsBodySystem) and marks it the Selected Grid.
     /// </summary>
     public static DynamicGrid SpawnFromVoxels(
-        World world, ChunkMeshSystem meshSystem, GridSelection selection,
+        World world, GridSelection selection,
         PhysVec spawnWorld, IEnumerable<(int X, int Y, int Z, BlockId Id, Facing Facing)> voxels)
     {
         var grid = new DynamicGrid(world, spawnWorld);
@@ -24,7 +22,6 @@ public static class DynamicGridFactory
             if (id == BlockId.Air) continue; // defensive; saved files shouldn't contain air entries
             grid.SetBlock(x, y, z, id, facing);
         }
-        meshSystem.RegisterVolume(grid);
         selection.Select(grid.Root);
         return grid;
     }
@@ -32,34 +29,7 @@ public static class DynamicGridFactory
     /// <summary>Spawns a grid containing a single block at local (0,0,0) whose centre is placed at
     /// <paramref name="spawnWorld"/>.</summary>
     public static DynamicGrid SpawnSingleBlock(
-        World world, ChunkMeshSystem meshSystem, GridSelection selection,
+        World world, GridSelection selection,
         PhysVec spawnWorld, BlockId block, Facing facing = Facing.Up)
-        => SpawnFromVoxels(world, meshSystem, selection, spawnWorld, new[] { (0, 0, 0, block, facing) });
-
-    /// <summary>
-    /// Tears a grid down: unregisters it from meshing, removes its physics body and shape (if a body
-    /// was created), releases its GPU lighting resources, disposes every chunk mesh/entity, and finally
-    /// disposes the root entity (which also drops any <see cref="SelectedGridComponent"/> it carried).
-    /// After this call <paramref name="grid"/> must not be used again.
-    /// </summary>
-    public static void Despawn(PhysicsWorld physics, ChunkMeshSystem meshSystem, DynamicGrid grid)
-    {
-        // Its GPU voxel storage is released by GpuResidencySystem once the root entity is gone.
-        meshSystem.UnregisterVolume(grid);
-
-        if (grid.BodyCreated)
-        {
-            var shape = physics.GetBodyShape(grid.Body);
-            physics.RemoveBody(grid.Body);
-            physics.RemoveCompound(shape);
-        }
-
-        foreach (var (_, entry) in grid.All)
-        {
-            entry.Mesh?.Dispose();
-            if (entry.Entity.IsAlive) entry.Entity.Dispose();
-        }
-
-        if (grid.Root.IsAlive) grid.Root.Dispose();
-    }
+        => SpawnFromVoxels(world, selection, spawnWorld, new[] { (0, 0, 0, block, facing) });
 }

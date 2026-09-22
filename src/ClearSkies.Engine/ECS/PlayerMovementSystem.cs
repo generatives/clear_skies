@@ -101,9 +101,11 @@ public sealed class PlayerMovementSystem : ISystem
         if (_input.IsKeyDown(Key.A)) move -= right;
         if (_input.IsKeyDown(Key.Space)) move += up;
         if (_input.IsKeyDown(Key.ShiftLeft) || _input.IsKeyDown(Key.ShiftRight)) move -= up;
-        if (_input.IsKeyDown(Key.E)) c.MoveSpeed += 2;
-        if (_input.IsKeyDown(Key.Q)) c.MoveSpeed -= 2;
         if (_input.IsKeyDown(Key.ControlLeft) || _input.IsKeyDown(Key.ControlRight)) speedUp = true;
+        
+        c.MoveSpeed += _input.ScrollDelta.Y * 0.5f; // scroll wheel adjusts speed up/down
+
+        Console.WriteLine($"[debug] free-fly speed: {c.MoveSpeed:F2} (scroll wheel to adjust)");
 
         c.MoveSpeed = MathF.Max(2f, c.MoveSpeed);
 

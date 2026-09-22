@@ -30,6 +30,7 @@ public sealed class InputManager : IDisposable
     private readonly HashSet<MouseButton> _justMousePressed = new();
     private System.Numerics.Vector2 _accumDelta;
     private System.Numerics.Vector2 _lastPos;
+    private System.Numerics.Vector2 _scrollDelta = System.Numerics.Vector2.Zero;
     private bool _firstMove = true;
     private bool _cursorCaptured;
 
@@ -51,6 +52,7 @@ public sealed class InputManager : IDisposable
                 _lastPos = pos;
             };
             _mouse.MouseDown += (_, btn) => _justMousePressed.Add(btn);
+            _mouse.Scroll += (_, scroll) => _scrollDelta = new(scroll.X, scroll.Y);
         }
     }
 
@@ -60,11 +62,13 @@ public sealed class InputManager : IDisposable
         _justPressed.Clear();
         _justMousePressed.Clear();
         _accumDelta = System.Numerics.Vector2.Zero;
+        _scrollDelta = System.Numerics.Vector2.Zero;
     }
 
     public bool IsKeyDown(Key key) => !UiWantsKeyboard && (_keyboard?.IsKeyPressed(key) ?? false);
 
     public bool WasKeyPressed(Key key) => !UiWantsKeyboard && _justPressed.Contains(key);
+    public System.Numerics.Vector2 ScrollDelta => _scrollDelta;
     public bool WasMouseButtonPressed(MouseButton button) => !UiWantsMouse && _justMousePressed.Contains(button);
 
     /// <summary>Discards this frame's "just pressed" edge for a button, so later queries this same

@@ -5,6 +5,7 @@ using ClearSkies.Engine.Gui;
 using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Rendering.WebGpu;
 using ClearSkies.Engine.Voxels;
+using DefaultEcs;
 using ImGuiNET;
 
 namespace ClearSkies.Engine.ECS;
@@ -25,48 +26,56 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     /// <summary>Jobs in flight at once — bounds both worker load and the number of uploads landing per frame.</summary>
     private static readonly int MaxInFlight = System.Math.Max(2, Environment.ProcessorCount / 2);
 
-    private readonly List<ChunkVolume> _volumes = new();
+    private readonly World _ecsWorld;
+    private EntitySet _dirtyChunks;
     private readonly Renderer _renderer;
     private readonly ThreadLocal<GreedyMesher> _meshers;
 
-    private readonly HashSet<ChunkEntry> _inFlight = new();
+    private readonly int _inFlight = 0;
     private readonly ConcurrentQueue<Result> _results = new();
+    private readonly List<Entity> _removed = new();
 
     private int _totalMeshed;
     private double _uploadMs;
 
-    private sealed record Result(ChunkVolume Volume, ChunkPosition Pos, ChunkEntry Entry,
-                                 Vertex[] Verts, int VertCount, uint[] Idxs, int IdxCount, Exception? Error);
+    private sealed record Result(Entity Entity, Vertex[] Verts, int VertCount, uint[] Idxs, int IdxCount, Exception? Error);
 
-    public ChunkMeshSystem(ChunkVolume initial, Renderer renderer)
+    public ChunkMeshSystem(World ecsWorld, Renderer renderer)
     {
-        _volumes.Add(initial);
+        _ecsWorld = ecsWorld;
+        _dirtyChunks = ecsWorld.GetEntities().With<Chunk>().With<Transform>().With<NeedsRemeshFlag>().AsSet();
         _renderer = renderer;
         var atlas = renderer.Atlas;
         _meshers  = new ThreadLocal<GreedyMesher>(() => new GreedyMesher(atlas));
+
+        _ecsWorld.SubscribeEntityDisposed(EntityDisposed);
     }
 
-    public void RegisterVolume(ChunkVolume volume)
+    private void EntityDisposed(in Entity e)
     {
-        if (!_volumes.Contains(volume)) _volumes.Add(volume);
+        if (e.Has<ChunkMesh>())
+        {
+            _removed.Add(e);
+        }
     }
-
-    public void UnregisterVolume(ChunkVolume volume) => _volumes.Remove(volume);
 
     public void Update(float dt)
     {
         ApplyResults();
         Dispatch();
+        Cleanup();
     }
 
     private void Dispatch()
     {
-        if (_inFlight.Count >= MaxInFlight) return;
+        if (_inFlight >= MaxInFlight) return;
 
-        foreach (var volume in _volumes)
-        foreach (var (pos, entry) in volume.All)
+        foreach (ref readonly Entity e in _dirtyChunks.GetEntities())
         {
-            if (!entry.NeedsRemesh || _inFlight.Contains(entry)) continue;
+            var chunk = e.Get<Chunk>();
+            var entry = chunk.Entry;
+            var pos = entry.Position;
+            var volume = entry.Volume;
 
             // Fast path: pure air chunk.
             if (!entry.Data.HasAnySolid())
@@ -75,8 +84,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                 continue;
             }
 
-            entry.NeedsRemesh = false;
-            _inFlight.Add(entry);
+            entry.Entity.Remove<NeedsRemeshFlag>();
 
             var data = entry.Data;
             var nX = volume.GetData(pos.Offset(-1, 0, 0)); var pX = volume.GetData(pos.Offset(1, 0, 0));
@@ -93,15 +101,15 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                     var i = ArrayPool<uint>.Shared.Rent(System.Math.Max(1, idxs.Count));
                     verts.CopyTo(v);
                     idxs.CopyTo(i);
-                    _results.Enqueue(new Result(vol, pos, entry, v, verts.Count, i, idxs.Count, null));
+                    _results.Enqueue(new Result(entry.Entity, v, verts.Count, i, idxs.Count, null));
                 }
                 catch (Exception e)
                 {
-                    _results.Enqueue(new Result(vol, pos, entry, Array.Empty<Vertex>(), 0, Array.Empty<uint>(), 0, e));
+                    _results.Enqueue(new Result(entry.Entity, Array.Empty<Vertex>(), 0, Array.Empty<uint>(), 0, e));
                 }
             }, null);
 
-            if (_inFlight.Count >= MaxInFlight) return;
+            if (_inFlight >= MaxInFlight) return;
         }
     }
 
@@ -109,22 +117,27 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     {
         while (_results.TryDequeue(out var r))
         {
-            _inFlight.Remove(r.Entry);
+            var entity = r.Entity;
             try
             {
                 if (r.Error is not null)
                 {
-                    Console.WriteLine($"[mesh] chunk {r.Pos} failed: {r.Error}");
+                    Console.WriteLine($"[mesh] chunk failed: {r.Error}");
                     continue;
                 }
-                // Unloaded (or its grid destroyed) while meshing — nothing to hand the mesh to.
-                if (!_volumes.Contains(r.Volume) || r.Volume.GetEntry(r.Pos) != r.Entry) continue;
+
+                if (!entity.IsAlive) continue; // unloaded while meshing
+                if (!entity.Has<ChunkEntry>()) continue; // unloaded while meshing
+
+                var chunk = entity.Get<Chunk>();
+                var entry = chunk.Entry;
+                var volume = entry.Volume;
 
                 if (r.VertCount == 0)
                 {
-                    bool redirtiedEmpty = r.Entry.NeedsRemesh;
-                    ClearMesh(r.Entry);
-                    r.Entry.NeedsRemesh = redirtiedEmpty;
+                    bool redirtied = entity.Has<NeedsRemeshFlag>();
+                    ClearMesh(entry);
+                    if (redirtied) entity.Set<NeedsRemeshFlag>();
                     continue;
                 }
 
@@ -135,10 +148,12 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                 // The chunk's voxel base and the volume dims are derived live at draw time from the volume's
                 // GPU resources (see RenderSystem), so a volume reallocation needs no remesh here. SetMesh clears
                 // NeedsRemesh, so preserve a re-dirty that arrived while this job was in flight.
-                bool redirtied = r.Entry.NeedsRemesh;
-                r.Volume.SetMesh(r.Pos, mesh);
-                r.Entry.NeedsRemesh = redirtied;
-                _totalMeshed++;
+                {
+                    bool redirtied = entity.Has<NeedsRemeshFlag>();
+                    volume.SetMesh(entry.Position, mesh);
+                    if (redirtied) entity.Set<NeedsRemeshFlag>();
+                    _totalMeshed++;
+                }
             }
             finally
             {
@@ -148,13 +163,23 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
         }
     }
 
-    private static void ClearMesh(ChunkEntry entry)
+    private void Cleanup()
     {
-        entry.Mesh?.Dispose();
-        entry.Mesh        = null;
-        entry.NeedsRemesh = false;
-        if (entry.Entity.Has<MeshRenderer>())
-            entry.Entity.Remove<MeshRenderer>();
+        foreach (var e in _removed)
+        {
+            var mesh = e.Get<ChunkMesh>();
+            mesh.Mesh.Dispose();
+        }
+
+        _removed.Clear();
+    }
+
+    private static void ClearMesh(ChunkEntry entry)
+    {   
+        entry.Entity.Remove<NeedsRemeshFlag>();
+        if (entry.Entity.Has<ChunkMesh>())
+            entry.Entity.Get<ChunkMesh>().Mesh.Dispose();
+        entry.Entity.Remove<ChunkMesh>();
     }
 
     // ── debug UI ─────────────────────────────────────────────────────────────
@@ -162,7 +187,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
 
     public void DrawDebugUi()
     {
-        ImGui.Text($"Jobs in flight: {_inFlight.Count} / {MaxInFlight}");
+        ImGui.Text($"Jobs in flight: {_inFlight} / {MaxInFlight}");
         ImGui.Text($"Upload (main thread, smoothed): {_uploadMs:F2} ms per chunk");
         ImGui.Text($"Chunks meshed (lifetime): {_totalMeshed}");
     }

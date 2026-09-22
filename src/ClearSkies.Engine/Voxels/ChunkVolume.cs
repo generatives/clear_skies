@@ -20,9 +20,6 @@ public class ChunkVolume
     /// sync by GpuResidencySystem.</summary>
     public GridHandle Gpu { get; } = new();
 
-    /// <summary>Chunks removed since GpuResidencySystem last drained this, so their GPU storage is released.</summary>
-    internal List<ChunkPosition> RemovedChunks { get; } = new();
-
     /// <summary>Current axis-aligned bounding box of loaded chunks (inclusive).</summary>
     internal ChunkPosition BoundsMin { get; private set; }
     internal ChunkPosition BoundsMax { get; private set; }
@@ -80,9 +77,10 @@ public class ChunkVolume
         if (!_chunks.TryGetValue(cp, out var entry)) return;
 
         entry.Data.Set(lx, ly, lz, id, facing);
-        entry.NeedsRemesh         = true;
-        entry.NeedsRecollide      = true;
+        entry.Entity.Set(new NeedsRemeshFlag());
+        entry.Entity.Set(new NeedsRecollideFlag());
         entry.NeedsGpuUpload      = true;
+        entry.Entity.Set(new NeedsGpuUploadFlag());
         entry.PackedOpacityWords  = null; // block data actually changed -- cached opacity is stale
         entry.AddEdit(lx, ly, lz, placedSolid: BlockRegistry.Get(id).Opacity >= 15);
 
@@ -98,10 +96,13 @@ public class ChunkVolume
     public void SetMesh(ChunkPosition pos, GpuMesh mesh)
     {
         if (!_chunks.TryGetValue(pos, out var entry)) return;
-        entry.Mesh?.Dispose();
-        entry.Mesh        = mesh;
-        entry.NeedsRemesh = false;
-        entry.Entity.Set(new MeshRenderer
+        var entity = entry.Entity;
+        if (entity.Has<ChunkMesh>())
+        {
+            entry.Entity.Get<ChunkMesh>().Mesh.Dispose();
+        }
+        entry.Entity.Remove<NeedsRemeshFlag>();
+        entry.Entity.Set(new ChunkMesh
         {
             Mesh     = mesh,
             Grid     = Gpu,
@@ -114,8 +115,12 @@ public class ChunkVolume
     private protected ChunkEntry AddChunk(ChunkPosition pos, ChunkData data)
     {
         var entity = _world.CreateEntity();
-        PlaceChunkEntity(entity, pos);
-        var entry = new ChunkEntry(data, entity);
+        var entry = new ChunkEntry(data, entity, this, pos);
+        var t = Transform.Identity;
+        t.Position = entry.Position.WorldOrigin;
+        entity.Set(t);
+        entity.Set(new Chunk() { Entry = entry });
+        
         _chunks[pos] = entry;
         UpdateBounds(pos);
         MarkNeighboursDirty(pos, data);
@@ -124,13 +129,6 @@ public class ChunkVolume
 
     private protected ChunkEntry EnsureChunk(ChunkPosition pos) =>
         _chunks.TryGetValue(pos, out var e) ? e : AddChunk(pos, new ChunkData());
-
-    protected virtual void PlaceChunkEntity(Entity entity, ChunkPosition pos)
-    {
-        var t = Transform.Identity;
-        t.Position = pos.WorldOrigin;
-        entity.Set(t);
-    }
 
     // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -199,6 +197,8 @@ public class ChunkVolume
 
     protected void TryMark(ChunkPosition pos)
     {
-        if (_chunks.TryGetValue(pos, out var e)) e.NeedsRemesh = true;
+        if (_chunks.TryGetValue(pos, out var e)) {
+            e.Entity.Set(new NeedsRemeshFlag());
+        }
     }
 }

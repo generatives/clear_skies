@@ -32,7 +32,7 @@ GpuComputeSelfTest.Run(host.Context);
 
 var staticWorld   = new StaticWorld(host.World);
 var worldGen      = new SkyWorldGenerator();
-var meshSystem    = new ChunkMeshSystem(staticWorld, host.Renderer);
+var meshSystem    = new ChunkMeshSystem(host.World, host.Renderer);
 var gridSelection = new GridSelection(host.World);
 
 host.AddSystem(host.Gui, SystemStage.Input); // opens ImGui's frame before Logic/PreRender systems run
@@ -85,6 +85,8 @@ host.AddSystem(new LambdaSystem(() =>
         Console.WriteLine($"[debug] wireframe: {host.Renderer.WireframeMode}");
     }
 }), SystemStage.Logic);
+host.AddSystem(new ChunkCleanupSystem(host.World), SystemStage.Logic);
+
 host.AddSystem(new GpuResidencySystem(host.World, staticWorld, gridStore), SystemStage.PreRender);
 host.AddSystem(new GpuLightSystem(host.World, staticWorld, host.Context, host.Physics, gridStore), SystemStage.PreRender);
 host.AddSystem(meshSystem, SystemStage.PreRender);
@@ -105,7 +107,7 @@ var camSpawn = TestScene.Build(host, worldGen.Seed);
     shipVoxels.Add((2, 2, 2, BlockId.Lamp, Facing.Up)); // exposed on the hull's roof, open air on 5 sides
 
     var shipSpawn = new Vector3(camSpawn.X + 10f, camSpawn.Y - 5f, camSpawn.Z + 45f);
-    DynamicGridFactory.SpawnFromVoxels(host.World, meshSystem, gridSelection, shipSpawn, shipVoxels);
+    DynamicGridFactory.SpawnFromVoxels(host.World, gridSelection, shipSpawn, shipVoxels);
     Console.WriteLine($"[test-ship] spawned 5x2x5 hull + lamp at {shipSpawn}");
 }
 

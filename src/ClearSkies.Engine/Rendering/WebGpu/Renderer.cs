@@ -1041,7 +1041,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     /// Draws a chunk mesh lit from grid <paramref name="grid"/> (its <see cref="GridHandle.Index"/>; -1 draws it
     /// full-bright). <paramref name="chunk"/> is the chunk's coordinate in that grid.
     /// </summary>
-    public void DrawMesh(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk)
+    public void DrawChunkMesh(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk)
     {
         if (_drawIndex >= MaxObjects) return;
 

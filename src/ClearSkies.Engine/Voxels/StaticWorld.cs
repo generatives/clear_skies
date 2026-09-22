@@ -49,17 +49,10 @@ public sealed class StaticWorld : ChunkVolume
 
         SaveIfDirty(pos, entry);
 
-        if (entry.Mesh is not null)
-        {
-            if (entry.Entity.Has<MeshRenderer>())
-                entry.Entity.Remove<MeshRenderer>();
-            entry.Mesh.Dispose();
-        }
         if (entry.Entity.IsAlive)
             entry.Entity.Dispose();
 
         _chunks.Remove(pos);
-        RemovedChunks.Add(pos);
         MarkNeighboursDirty(pos, entry.Data);
     }
 

@@ -106,7 +106,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
             return;
 
         var spawn = CameraUtil.SpawnPointInFrontOf(t);
-        DynamicGridFactory.SpawnSingleBlock(_world, _meshSystem, _selection, new PhysVec(spawn.X, spawn.Y, spawn.Z), BlockId.Stone);
+        DynamicGridFactory.SpawnSingleBlock(_world, _selection, new PhysVec(spawn.X, spawn.Y, spawn.Z), BlockId.Stone);
         Console.WriteLine($"[spawn] grid at ({spawn.X:0.0},{spawn.Y:0.0},{spawn.Z:0.0})");
     }
 
@@ -201,7 +201,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
                 var grid = (DynamicGrid)bestVolume;
                 if (grid.IsEmpty())
                 {
-                    DynamicGridFactory.Despawn(_physics, _meshSystem, grid);
+                    grid.Root.Dispose();
                     HideFace(); // the outlined face no longer has a volume behind it
                 }
                 else

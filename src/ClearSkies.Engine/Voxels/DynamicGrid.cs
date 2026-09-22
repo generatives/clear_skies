@@ -26,9 +26,6 @@ public sealed class DynamicGrid : ChunkVolume
     /// <summary>Centre of mass in grid-local space, updated on every shape rebuild. Render offsets subtract this.</summary>
     public PhysVec CenterOfMass { get; internal set; }
 
-    /// <summary>Set when block occupancy changes; consumed by PhysicsBodySystem to rebuild the body shape + inertia.</summary>
-    public bool ShapeDirty { get; internal set; } = true;
-
     /// <summary>True while the grid is frozen in place (Phase 5.1 "lock"): its body is kinematic (zero
     /// inverse mass/inertia via <see cref="Physics.PhysicsWorld.SetBodyKinematic"/>), so Bepu's own
     /// integrator skips it entirely (no gravity added, ever). The dynamic/kinematic transition goes
@@ -60,14 +57,5 @@ public sealed class DynamicGrid : ChunkVolume
         var (cp, _, _, _) = Decompose(x, y, z);
         EnsureChunk(cp);          // grow on demand so edits outside existing chunks create new ones
         base.SetBlock(x, y, z, id, facing);
-        ShapeDirty = true;
-    }
-
-    protected override void PlaceChunkEntity(Entity entity, ChunkPosition pos)
-    {
-        // Initial local placement; GridTransformSystem overwrites the world pose each frame.
-        var t = Transform.Identity;
-        t.Position = pos.WorldOrigin;
-        entity.Set(t);
     }
 }

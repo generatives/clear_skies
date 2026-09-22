@@ -123,7 +123,7 @@ public sealed class GridPersistenceSystem : ISystem
     private void DeleteSelected()
     {
         if (!TryGetSelectedGrid(out var grid)) { _status = "No grid selected."; return; }
-        DynamicGridFactory.Despawn(_physics, _meshSystem, grid);
+        grid.Root.Dispose();
         _status = "Deleted selected grid.";
     }
 
@@ -145,7 +145,7 @@ public sealed class GridPersistenceSystem : ISystem
 
             var spawn = CameraUtil.SpawnPointInFrontOf(camTransform);
             DynamicGridFactory.SpawnFromVoxels(
-                _world, _meshSystem, _selection,
+                _world, _selection,
                 new PhysVec(spawn.X, spawn.Y, spawn.Z), voxels);
 
             _status = $"Loaded '{_chosenFile}' ({voxels.Count} blocks).";

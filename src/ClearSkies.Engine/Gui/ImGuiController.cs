@@ -28,7 +28,7 @@ namespace ClearSkies.Engine.Gui;
 ///
 /// <see cref="EndFrame"/> is a separate, non-<see cref="ISystem"/> call: it must run after all
 /// world/HUD geometry for the frame has been drawn (i.e. after <see cref="Renderer.BeginFrame"/> and
-/// any <see cref="Renderer.DrawMesh"/>/<see cref="Renderer.DrawHudMesh"/> calls) and before
+/// any <see cref="Renderer.DrawChunkMesh"/>/<see cref="Renderer.DrawHudMesh"/> calls) and before
 /// <see cref="Renderer.EndFrame"/> closes the pass — a point mid-way through <c>RenderSystem</c>'s own
 /// update, not something a stage boundary can express, so <c>RenderSystem</c> calls it directly.
 /// </summary>

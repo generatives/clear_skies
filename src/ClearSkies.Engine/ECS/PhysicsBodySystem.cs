@@ -13,9 +13,7 @@ using PhysVec = System.Numerics.Vector3;
 namespace ClearSkies.Engine.ECS;
 
 /// <summary>
-/// Owns every BepuPhysics body/collider create-or-rebuild call in the game: static terrain colliders
-/// (reacting to <see cref="ChunkEntry.NeedsRecollide"/>) and dynamic grid bodies (reacting to
-/// <see cref="DynamicGrid.ShapeDirty"/>). Both halves decompose their own voxel occupancy into boxes
+/// Owns every BepuPhysics body/collider create-or-rebuild call in the game (reacting to <see cref="NeedsRecollideFlag"/>). Both halves decompose their own voxel occupancy into boxes
 /// internally — merged from two previously separate systems (GridShapeSystem, StaticColliderSystem)
 /// because nothing outside each pipeline ever read the intermediate box list, so splitting "decompose"
 /// and "call physics" across two systems communicating via a component would only have added
@@ -28,18 +26,20 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
     private static readonly int MaxInFlight = System.Math.Max(2, Environment.ProcessorCount / 2);
 
     private readonly EntitySet         _grids;
+    private readonly EntitySet         _dirtyChunks;
     private readonly StaticWorld       _world;
     private readonly PhysicsWorld      _physics;
     private readonly VoxelBoxDecomposer _decomposer = new(); // dynamic grids, main thread
     private readonly ThreadLocal<VoxelBoxDecomposer> _decomposers = new(() => new VoxelBoxDecomposer()); // terrain workers
-    private readonly HashSet<ChunkEntry> _inFlight = new();
+    private int _inFlight = 0;
     private readonly ConcurrentQueue<(ChunkPosition Pos, ChunkEntry Entry, PhysicsWorld.StaticCompoundBuild? Build, Exception? Error)> _colliderResults = new();
     private double _applyMs;
     private readonly List<(Vector3 center, Vector3 size, float mass)> _dynamicBoxes = new();
 
     // One BigCompound static per non-empty chunk; box count kept only for the debug panel.
     private readonly Dictionary<ChunkPosition, (StaticHandle handle, int boxes)> _colliders = new();
-    private readonly List<ChunkPosition> _stale = new();
+    private readonly List<Entity> _removedDynamicGrids = new();
+    private readonly List<Entity> _removedStaticChunks = new();
 
     private readonly Stopwatch _sw = new();
     private int _totalBuilt;
@@ -49,12 +49,55 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
         _world   = staticWorld;
         _physics = physics;
         _grids   = world.GetEntities().With<DynamicGridComponent>().AsSet();
+        _dirtyChunks = world.GetEntities().With<Chunk>().With<NeedsRecollideFlag>().AsSet();
+    }
+
+    private void OnEntityDisposed(in Entity entity)
+    {
+        if (entity.Has<DynamicGridComponent>())
+        {
+            _removedDynamicGrids.Add(entity);
+        }
+
+        if (!entity.Has<DynamicGridComponent>() && entity.Has<Chunk>())
+        {
+            _removedStaticChunks.Add(entity);
+        }
     }
 
     public void Update(float dt)
     {
-        UpdateStaticColliders();
-        UpdateDynamicGrids();
+        ApplyColliderResults();
+        UpdateColliders();
+        Cleanup();
+    }
+
+    public void UpdateColliders()
+    {
+        HashSet<DynamicGrid> grids = new HashSet<DynamicGrid>(1);
+
+        foreach (var entity in _dirtyChunks.GetEntities())
+        {
+            var chunk = entity.Get<Chunk>();
+            var entry = chunk.Entry;
+            var volume = entry.Volume;
+
+            if (volume is DynamicGrid grid)
+            {
+                grids.Add(grid);
+            }
+            else
+            {
+                UpdateStaticCollider(entry);
+            }
+
+            entity.Remove<NeedsRecollideFlag>();
+        }
+
+        foreach (var grid in grids)
+        {
+            UpdateDynamicGrid(grid);
+        }
     }
 
     // ── static terrain colliders (moved from StaticColliderSystem) ─────────────
@@ -63,56 +106,40 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
     // here. One job in flight per chunk, same pattern as ChunkMeshSystem: a chunk re-dirtied mid-job is
     // re-dispatched once that job lands, and a result for a chunk unloaded meanwhile is dropped. A chunk's old
     // collider stays in place until its replacement arrives, so an edit never opens a hole for a frame.
-    private void UpdateStaticColliders()
+    private void UpdateStaticCollider(ChunkEntry entry)
     {
-        ApplyColliderResults();
+        if (_inFlight >= MaxInFlight) return;
 
-        foreach (var (pos, entry) in _world.All)
+        var pos = entry.Position;
+
+        if (!entry.Data.HasAnySolid())
         {
-            if (_inFlight.Count >= MaxInFlight) break;
-            if (!entry.NeedsRecollide || _inFlight.Contains(entry)) continue;
-            entry.NeedsRecollide = false;
+            if (_colliders.Remove(pos, out var old)) _physics.RemoveStaticCompound(old.handle);
+            return;
+        }
 
-            if (!entry.Data.HasAnySolid())
+        _inFlight += 1;
+        var data = entry.Data;
+        ThreadPool.UnsafeQueueUserWorkItem(_ =>
+        {
+            try
             {
-                if (_colliders.Remove(pos, out var old)) _physics.RemoveStaticCompound(old.handle);
-                continue;
+                // Terrain needs no per-box mass, so boxes may span block types — roughly halves the box count.
+                var boxes = _decomposers.Value!.Decompose(data, mergeBlockTypes: true);
+                _colliderResults.Enqueue((pos, entry, boxes.Count > 0 ? PhysicsWorld.PrepareStaticCompound(boxes) : null, null));
             }
-
-            _inFlight.Add(entry);
-            var data = entry.Data;
-            ThreadPool.UnsafeQueueUserWorkItem(_ =>
+            catch (Exception e)
             {
-                try
-                {
-                    // Terrain needs no per-box mass, so boxes may span block types — roughly halves the box count.
-                    var boxes = _decomposers.Value!.Decompose(data, mergeBlockTypes: true);
-                    _colliderResults.Enqueue((pos, entry, boxes.Count > 0 ? PhysicsWorld.PrepareStaticCompound(boxes) : null, null));
-                }
-                catch (Exception e)
-                {
-                    _colliderResults.Enqueue((pos, entry, null, e));
-                }
-            }, null);
-        }
-
-        // Reconcile: release colliders for chunks that have been unloaded.
-        foreach (var pos in _colliders.Keys)
-            if (!_world.IsLoaded(pos)) _stale.Add(pos);
-
-        foreach (var pos in _stale)
-        {
-            if (_colliders.Remove(pos, out var c))
-                _physics.RemoveStaticCompound(c.handle);
-        }
-        _stale.Clear();
+                _colliderResults.Enqueue((pos, entry, null, e));
+            }
+        }, null);
     }
 
     private void ApplyColliderResults()
     {
         while (_colliderResults.TryDequeue(out var r))
         {
-            _inFlight.Remove(r.Entry);
+            _inFlight -= 1;
             if (r.Error is not null)
             {
                 Console.WriteLine($"[collide] chunk {r.Pos} failed: {r.Error}");
@@ -138,69 +165,87 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
     public bool HasCollider(ChunkPosition pos) => _colliders.ContainsKey(pos);
 
     // ── dynamic grid bodies (moved from GridShapeSystem) ────────────────────────
-    private void UpdateDynamicGrids()
+    private void UpdateDynamicGrid(DynamicGrid grid)
     {
-        foreach (ref readonly Entity e in _grids.GetEntities())
+        // Gather merged boxes across all chunks, expressed in grid-local space. Each box is
+        // homogeneous in BlockId (see VoxelBoxDecomposer), so its mass is volume * that block's
+        // Weight — real per-block-type density instead of uniform volume. Also tally Buoyant voxel
+        // count here (AirshipFlightSystem's feedforward) since we're already walking every box.
+        _dynamicBoxes.Clear();
+        int buoyantCount = 0;
+        foreach (var (pos, entry) in grid.All)
         {
-            var grid = e.Get<DynamicGridComponent>().Grid;
-            if (!grid.ShapeDirty) continue;
-
-            // Gather merged boxes across all chunks, expressed in grid-local space. Each box is
-            // homogeneous in BlockId (see VoxelBoxDecomposer), so its mass is volume * that block's
-            // Weight — real per-block-type density instead of uniform volume. Also tally Buoyant voxel
-            // count here (AirshipFlightSystem's feedforward) since we're already walking every box.
-            _dynamicBoxes.Clear();
-            int buoyantCount = 0;
-            foreach (var (pos, entry) in grid.All)
+            if (!entry.Data.HasAnySolid()) continue;
+            var o = pos.WorldOrigin;
+            foreach (var (c, s, id) in _decomposer.Decompose(entry.Data))
             {
-                if (!entry.Data.HasAnySolid()) continue;
-                var o = pos.WorldOrigin;
-                foreach (var (c, s, id) in _decomposer.Decompose(entry.Data))
-                {
-                    float volume = s.X * s.Y * s.Z;
-                    if (id == BlockId.Buoyant) buoyantCount += (int)volume;
-                    _dynamicBoxes.Add((new Vector3(o.X + c.X, o.Y + c.Y, o.Z + c.Z), s, volume * BlockRegistry.Get(id).Weight));
-                }
+                float volume = s.X * s.Y * s.Z;
+                if (id == BlockId.Buoyant) buoyantCount += (int)volume;
+                _dynamicBoxes.Add((new Vector3(o.X + c.X, o.Y + c.Y, o.Z + c.Z), s, volume * BlockRegistry.Get(id).Weight));
             }
-            grid.BuoyantBlockCount = buoyantCount;
-
-            if (_dynamicBoxes.Count == 0)
-            {
-                grid.ShapeDirty = false; // nothing solid yet; leave any existing body untouched
-                continue;
-            }
-
-            var (shape, inertia, com) = _physics.BuildDynamicCompound(_dynamicBoxes);
-            grid.Inertia = inertia;
-
-            if (!grid.BodyCreated)
-            {
-                // Grids default to Locked (see DynamicGrid.Locked) so they don't immediately fall under
-                // gravity when spawned; the body is created kinematic (zero inertia) in that case, same
-                // as the rebuild branch below.
-                grid.Body        = _physics.AddDynamicBody(shape, grid.Locked ? default : inertia, grid.SpawnPosition);
-                grid.CenterOfMass = com;
-                grid.BodyCreated  = true;
-            }
-            else
-            {
-                // Preserve world geometry as the local CoM moves: shift the body origin by the rotated delta.
-                var (pos, orient) = _physics.GetBodyPose(grid.Body);
-                var worldShift = Vector3.Transform(com - grid.CenterOfMass, orient);
-                var oldShape = _physics.GetBodyShape(grid.Body);
-
-                // While locked, keep the body's actual physics inertia zeroed (kinematic) even though
-                // the shape/geometry updates — grid.Inertia (above) still tracks the real value for
-                // GridPilotSystem to restore on unlock.
-                _physics.SetBodyShape(grid.Body, shape, grid.Locked ? default : inertia);
-                _physics.SetBodyPose(grid.Body, pos + worldShift, orient);
-                _physics.RemoveCompound(oldShape);
-
-                grid.CenterOfMass = com;
-            }
-
-            grid.ShapeDirty = false;
         }
+        grid.BuoyantBlockCount = buoyantCount;
+
+        if (_dynamicBoxes.Count == 0)
+        {
+            return;
+        }
+
+        var (shape, inertia, com) = _physics.BuildDynamicCompound(_dynamicBoxes);
+        grid.Inertia = inertia;
+
+        if (!grid.BodyCreated)
+        {
+            // Grids default to Locked (see DynamicGrid.Locked) so they don't immediately fall under
+            // gravity when spawned; the body is created kinematic (zero inertia) in that case, same
+            // as the rebuild branch below.
+            grid.Body        = _physics.AddDynamicBody(shape, grid.Locked ? default : inertia, grid.SpawnPosition);
+            grid.CenterOfMass = com;
+            grid.BodyCreated  = true;
+        }
+        else
+        {
+            // Preserve world geometry as the local CoM moves: shift the body origin by the rotated delta.
+            var (pos, orient) = _physics.GetBodyPose(grid.Body);
+            var worldShift = Vector3.Transform(com - grid.CenterOfMass, orient);
+            var oldShape = _physics.GetBodyShape(grid.Body);
+
+            // While locked, keep the body's actual physics inertia zeroed (kinematic) even though
+            // the shape/geometry updates — grid.Inertia (above) still tracks the real value for
+            // GridPilotSystem to restore on unlock.
+            _physics.SetBodyShape(grid.Body, shape, grid.Locked ? default : inertia);
+            _physics.SetBodyPose(grid.Body, pos + worldShift, orient);
+            _physics.RemoveCompound(oldShape);
+
+            grid.CenterOfMass = com;
+        }
+    }
+
+    private void Cleanup()
+    {
+        foreach (var entity in _removedDynamicGrids)
+        {
+            var gridComp = entity.Get<DynamicGridComponent>();
+            var grid = gridComp.Grid;
+            
+            if (grid.BodyCreated)
+            {
+                var shape = _physics.GetBodyShape(grid.Body);
+                _physics.RemoveBody(grid.Body);
+                _physics.RemoveCompound(shape);
+            }
+        }
+        _removedDynamicGrids.Clear();
+
+        foreach (var entity in _removedDynamicGrids)
+        {
+            var chunk = entity.Get<Chunk>();
+            var entry = chunk.Entry;
+            
+            if (_colliders.Remove(entry.Position, out var c))
+                _physics.RemoveStaticCompound(c.handle);
+        }
+        _removedDynamicGrids.Clear();
     }
 
     // ── debug UI ─────────────────────────────────────────────────────────────
@@ -214,7 +259,7 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
         ImGui.Text($"Chunks with colliders (one BigCompound static each): {_colliders.Count}");
         ImGui.Text($"Total compound child boxes: {totalBoxes}");
         ImGui.Text($"Chunks built (lifetime): {_totalBuilt}");
-        ImGui.Text($"Jobs in flight: {_inFlight.Count} / {MaxInFlight}");
+        ImGui.Text($"Jobs in flight: {_inFlight} / {MaxInFlight}");
         ImGui.Text($"Main-thread add (smoothed): {_applyMs:F3} ms per chunk");
     }
 }

@@ -8,7 +8,7 @@ namespace ClearSkies.Engine.ECS;
 /// Marks an entity as drawable with a given GPU mesh and per-volume lighting info.
 /// <see cref="Grid"/> null → drawn full-bright.
 /// </summary>
-public struct MeshRenderer
+public struct ChunkMesh
 {
     public GpuMesh Mesh;
 

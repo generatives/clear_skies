@@ -10,16 +10,13 @@ internal readonly record struct EmitterVoxel(byte Lx, byte Ly, byte Lz, byte Lev
 internal sealed class ChunkEntry
 {
     public ChunkData  Data        { get; }
+    public ChunkVolume Volume { get; }
+    public ChunkPosition Position { get; }
     public Entity     Entity      { get; }
-    public GpuMesh?   Mesh        { get; set; }
-    public bool       NeedsRemesh { get; set; } = true;
 
     /// <summary>Light-emitting voxels in this chunk, rebuilt from <see cref="Data"/> whenever its opacity is
     /// repacked (see <c>GridStore.UploadChunk</c>). Gathered into the lamp list each frame.</summary>
     public List<EmitterVoxel> Emitters { get; } = new();
-
-    /// <summary>Set when block occupancy changes and the physics collider must be rebuilt.</summary>
-    public bool NeedsRecollide { get; set; } = true;
 
     /// <summary>Set on creation and every block edit; cleared after the volume opacity is re-uploaded to GPU.</summary>
     public bool NeedsGpuUpload { get; set; } = true;
@@ -55,9 +52,11 @@ internal sealed class ChunkEntry
 
     public void ClearEdits() { HasEdits = false; EditsAddedSolid = false; }
 
-    public ChunkEntry(ChunkData data, Entity entity)
+    public ChunkEntry(ChunkData data, Entity entity, ChunkVolume volume, ChunkPosition position)
     {
         Data   = data;
         Entity = entity;
+        Volume = volume;
+        Position = position;
     }
 }

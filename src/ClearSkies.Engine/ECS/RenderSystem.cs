@@ -10,7 +10,7 @@ using Silk.NET.Maths;
 
 namespace ClearSkies.Engine.ECS;
 
-/// <summary>Builds the camera uniform and issues a draw call per <see cref="MeshRenderer"/> entity.</summary>
+/// <summary>Builds the camera uniform and issues a draw call per <see cref="ChunkMesh"/> entity.</summary>
 public sealed class RenderSystem : ISystem, IDebugUiSystem
 {
     private readonly EntitySet _cameras;
@@ -29,16 +29,13 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
         _time       = time;
         _clouds     = new CloudLayer(renderer);
         _cameras    = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
-        _meshes     = world.GetEntities().With<Transform>().With<MeshRenderer>().AsSet();
+        _meshes     = world.GetEntities().With<Transform>().With<ChunkMesh>().AsSet();
         _wireframes = world.GetEntities().With<Transform>().With<WireframeRenderer>().AsSet();
         _huds       = world.GetEntities().With<HudRenderer>().AsSet();
     }
 
     // ── debug UI ─────────────────────────────────────────────────────────────
     public string DebugName => "Renderer";
-
-    // A/B switches for the chunk pass's performance work (see Update and the shader's shadeFast).
-    private bool _sortFrontToBack = true;
     private bool _referenceLighting;
 
     // One visible chunk draw, collected so they can be issued nearest first.
@@ -55,7 +52,6 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
         bool wireframe = _renderer.WireframeMode;
         if (ImGui.Checkbox("Wireframe", ref wireframe))
             _renderer.WireframeMode = wireframe;
-        ImGui.Checkbox("Draw chunks front to back", ref _sortFrontToBack);
         ImGui.Checkbox("Reference (slow) light + AO shader path", ref _referenceLighting);
 
         ImGui.SeparatorText("Sky & fog");
@@ -119,7 +115,7 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
 
         _renderer.SetCameraUniform(uniform);
 
-        // Every loaded chunk mesh gets a MeshRenderer (see ChunkVolume.SetMesh); frustum-cull them. Every chunk
+        // Every loaded chunk mesh gets a ChunkMesh (see ChunkVolume.SetMesh); frustum-cull them. Every chunk
         // mesh is exactly ChunkData.Size local units on a side (GreedyMesher's local space), so the world AABB is
         // just that box transformed by the entity's own model matrix (handles a dynamic grid's rotation too).
         var camFrustum = Frustum.FromViewProjection(Mat4.Multiply(uniform.Projection, uniform.View));
@@ -131,7 +127,7 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
         foreach (ref readonly Entity e in _meshes.GetEntities())
         {
             ref readonly var t   = ref e.Get<Transform>();
-            ref readonly var mr  = ref e.Get<MeshRenderer>();
+            ref readonly var mr  = ref e.Get<ChunkMesh>();
 
             var model = t.ToMatrix();
             if (!ChunkBoundsIntersect(model, camFrustum)) continue;
@@ -139,9 +135,10 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
             float distSq = Vector3D.DistanceSquared(model.TransformPoint(half), camTransform.Position);
             _draws.Add(new ChunkDraw(distSq, mr.Mesh, model, mr.Grid?.Index ?? -1, mr.ChunkPos));
         }
-        if (_sortFrontToBack) _draws.Sort(NearestFirst);
+        _draws.Sort(NearestFirst);
+
         foreach (var d in _draws)
-            _renderer.DrawMesh(d.Mesh, d.Model, d.Grid, d.Chunk);
+            _renderer.DrawChunkMesh(d.Mesh, d.Model, d.Grid, d.Chunk);
 
         if (SkySettings.CloudsEnabled) _clouds.Draw(camTransform.Position, _time.TotalSeconds);
 
