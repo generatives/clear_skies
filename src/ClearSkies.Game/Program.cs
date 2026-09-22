@@ -85,7 +85,7 @@ host.AddSystem(new LambdaSystem(() =>
         Console.WriteLine($"[debug] wireframe: {host.Renderer.WireframeMode}");
     }
 }), SystemStage.Logic);
-host.AddSystem(new ChunkCleanupSystem(host.World), SystemStage.Logic);
+host.AddSystem(new DynamicGridCleanupSystem(host.World), SystemStage.Logic);
 
 host.AddSystem(new GpuResidencySystem(host.World, staticWorld, gridStore), SystemStage.PreRender);
 host.AddSystem(new GpuLightSystem(host.World, staticWorld, host.Context, host.Physics, gridStore), SystemStage.PreRender);

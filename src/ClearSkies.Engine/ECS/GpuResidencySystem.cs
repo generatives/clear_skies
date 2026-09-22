@@ -22,7 +22,7 @@ public sealed class GpuResidencySystem : ISystem
     private readonly ChunkVolume _staticWorld;
     private readonly EntitySet   _needsGpuUpload;
     private readonly List<DynamicGrid> _removedDynamicGrids = new();
-    private readonly List<Entity> _removedChunks = new();
+    private readonly List<(ChunkVolume, ChunkPosition)> _removedChunks = new();
 
     public GpuResidencySystem(World ecsWorld, StaticWorld staticWorld, GridStore store)
     {
@@ -44,7 +44,11 @@ public sealed class GpuResidencySystem : ISystem
         
         if (e.Has<Chunk>())
         {
-            _removedChunks.Add(e);
+            var chunk = e.Get<Chunk>();
+            var entry = chunk.Entry;
+            var volume = entry.Volume;
+            var pos = entry.Position;
+            _removedChunks.Add((volume, pos));
         }
     }
 
@@ -54,15 +58,11 @@ public sealed class GpuResidencySystem : ISystem
         foreach (var g in _removedDynamicGrids) { _store.Unregister(g.Gpu); }
         _removedDynamicGrids.Clear();
 
-        foreach (var e in _removedChunks)
+        foreach (var (volume, pos) in _removedChunks)
         {
-            var chunk = e.Get<Chunk>();
-            var entry = chunk.Entry;
-            var volume = entry.Volume;
-            var pos = entry.Position;
             _store.RemoveChunk(volume.Gpu, pos);
         }
-        _removedDynamicGrids.Clear();
+        _removedChunks.Clear();
 
         int budget = UploadsPerFrame;
         foreach (var entity in _needsGpuUpload.GetEntities())

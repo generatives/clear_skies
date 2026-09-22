@@ -14,7 +14,7 @@ namespace ClearSkies.Engine.ECS;
 public sealed class RenderSystem : ISystem, IDebugUiSystem
 {
     private readonly EntitySet _cameras;
-    private readonly EntitySet _meshes;
+    private readonly EntitySet _chunkMeshes;
     private readonly EntitySet _wireframes;
     private readonly EntitySet _huds;
     private readonly Renderer _renderer;
@@ -29,7 +29,7 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
         _time       = time;
         _clouds     = new CloudLayer(renderer);
         _cameras    = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
-        _meshes     = world.GetEntities().With<Transform>().With<ChunkMesh>().AsSet();
+        _chunkMeshes     = world.GetEntities().With<Transform>().With<ChunkMesh>().AsSet();
         _wireframes = world.GetEntities().With<Transform>().With<WireframeRenderer>().AsSet();
         _huds       = world.GetEntities().With<HudRenderer>().AsSet();
     }
@@ -46,7 +46,7 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
     public void DrawDebugUi()
     {
         ImGui.Text($"{_time.FramesPerSecond} fps");
-        ImGui.Text($"Draw calls: {_renderer.DrawCount:N0} ({_draws.Count:N0} chunks visible of {_meshes.Count:N0})");
+        ImGui.Text($"Draw calls: {_renderer.DrawCount:N0} ({_draws.Count:N0} chunks visible of {_chunkMeshes.Count:N0})");
         ImGui.Text($"Swapchain acquire wait: {_renderer.AcquireMs:F2} ms, present: {_renderer.PresentMs:F2} ms");
         ImGui.TextDisabled("A large acquire/present wait means the frame is waiting on the GPU (vsync is on).");
         bool wireframe = _renderer.WireframeMode;
@@ -124,7 +124,7 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
         // runs on them instead of shading them and overwriting them later.
         _draws.Clear();
         var half = new Vector3D<float>(ChunkData.Size * 0.5f);
-        foreach (ref readonly Entity e in _meshes.GetEntities())
+        foreach (ref readonly Entity e in _chunkMeshes.GetEntities())
         {
             ref readonly var t   = ref e.Get<Transform>();
             ref readonly var mr  = ref e.Get<ChunkMesh>();

@@ -38,8 +38,8 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
 
     // One BigCompound static per non-empty chunk; box count kept only for the debug panel.
     private readonly Dictionary<ChunkPosition, (StaticHandle handle, int boxes)> _colliders = new();
-    private readonly List<Entity> _removedDynamicGrids = new();
-    private readonly List<Entity> _removedStaticChunks = new();
+    private readonly List<DynamicGrid> _removedDynamicGrids = new();
+    private readonly List<ChunkEntry> _removedStaticChunks = new();
 
     private readonly Stopwatch _sw = new();
     private int _totalBuilt;
@@ -50,18 +50,22 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
         _physics = physics;
         _grids   = world.GetEntities().With<DynamicGridComponent>().AsSet();
         _dirtyChunks = world.GetEntities().With<Chunk>().With<NeedsRecollideFlag>().AsSet();
+        world.SubscribeEntityDisposed(OnEntityDisposed);
     }
 
     private void OnEntityDisposed(in Entity entity)
     {
         if (entity.Has<DynamicGridComponent>())
         {
-            _removedDynamicGrids.Add(entity);
+            var gridComp = entity.Get<DynamicGridComponent>();
+            var grid = gridComp.Grid;
+            _removedDynamicGrids.Add(grid);
         }
 
-        if (!entity.Has<DynamicGridComponent>() && entity.Has<Chunk>())
+        if (entity.Has<Chunk>())
         {
-            _removedStaticChunks.Add(entity);
+            var chunk = entity.Get<Chunk>();
+            _removedStaticChunks.Add(chunk.Entry);
         }
     }
 
@@ -223,11 +227,8 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
 
     private void Cleanup()
     {
-        foreach (var entity in _removedDynamicGrids)
-        {
-            var gridComp = entity.Get<DynamicGridComponent>();
-            var grid = gridComp.Grid;
-            
+        foreach (var grid in _removedDynamicGrids)
+        {   
             if (grid.BodyCreated)
             {
                 var shape = _physics.GetBodyShape(grid.Body);
@@ -237,15 +238,12 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
         }
         _removedDynamicGrids.Clear();
 
-        foreach (var entity in _removedDynamicGrids)
+        foreach (var entry in _removedStaticChunks)
         {
-            var chunk = entity.Get<Chunk>();
-            var entry = chunk.Entry;
-            
             if (_colliders.Remove(entry.Position, out var c))
                 _physics.RemoveStaticCompound(c.handle);
         }
-        _removedDynamicGrids.Clear();
+        _removedStaticChunks.Clear();
     }
 
     // ── debug UI ─────────────────────────────────────────────────────────────

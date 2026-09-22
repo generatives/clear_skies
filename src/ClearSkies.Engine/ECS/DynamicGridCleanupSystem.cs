@@ -3,12 +3,12 @@ using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Voxels;
 using DefaultEcs;
 
-public class ChunkCleanupSystem : ISystem
+public class DynamicGridCleanupSystem : ISystem
 {
-    private readonly List<Entity> _removed = new();
+    private readonly List<DynamicGrid> _removed = new();
     private readonly IDisposable _subscription;
 
-    public ChunkCleanupSystem(World ecsWorld)
+    public DynamicGridCleanupSystem(World ecsWorld)
     {
         _subscription = ecsWorld.SubscribeEntityDisposed(OnEntityDisposed);
     }
@@ -17,16 +17,16 @@ public class ChunkCleanupSystem : ISystem
     {
         if (entity.Has<DynamicGridComponent>())
         {
-            _removed.Add(entity);
+            var gridComp = entity.Get<DynamicGridComponent>();
+            _removed.Add(gridComp.Grid);
         }
     }
 
     public void Update(float dt)
     {
-        foreach (var entity in _removed)
+        foreach (var grid in _removed)
         {
-            var gridComp = entity.Get<DynamicGridComponent>();
-            foreach (var (_, entry) in gridComp.Grid.All)
+            foreach (var (_, entry) in grid.All)
             {  
                 if (entry.Entity.IsAlive) entry.Entity.Dispose();
             }

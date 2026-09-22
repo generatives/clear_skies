@@ -31,9 +31,9 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     private readonly Renderer _renderer;
     private readonly ThreadLocal<GreedyMesher> _meshers;
 
-    private readonly int _inFlight = 0;
+    private int _inFlight = 0;
     private readonly ConcurrentQueue<Result> _results = new();
-    private readonly List<Entity> _removed = new();
+    private readonly List<GpuMesh> _removed = new();
 
     private int _totalMeshed;
     private double _uploadMs;
@@ -55,7 +55,8 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     {
         if (e.Has<ChunkMesh>())
         {
-            _removed.Add(e);
+            var mesh = e.Get<ChunkMesh>();
+            _removed.Add(mesh.Mesh);
         }
     }
 
@@ -85,6 +86,8 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
             }
 
             entry.Entity.Remove<NeedsRemeshFlag>();
+
+            _inFlight += 1;
 
             var data = entry.Data;
             var nX = volume.GetData(pos.Offset(-1, 0, 0)); var pX = volume.GetData(pos.Offset(1, 0, 0));
@@ -117,6 +120,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     {
         while (_results.TryDequeue(out var r))
         {
+            _inFlight -= 1;
             var entity = r.Entity;
             try
             {
@@ -127,7 +131,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                 }
 
                 if (!entity.IsAlive) continue; // unloaded while meshing
-                if (!entity.Has<ChunkEntry>()) continue; // unloaded while meshing
+                if (!entity.Has<Chunk>()) continue; // unloaded while meshing
 
                 var chunk = entity.Get<Chunk>();
                 var entry = chunk.Entry;
@@ -165,10 +169,9 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
 
     private void Cleanup()
     {
-        foreach (var e in _removed)
+        foreach (var gpuMesh in _removed)
         {
-            var mesh = e.Get<ChunkMesh>();
-            mesh.Mesh.Dispose();
+            gpuMesh.Dispose();
         }
 
         _removed.Clear();
