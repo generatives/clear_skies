@@ -31,7 +31,7 @@ host.Renderer.LoadTextureAtlas(
 GpuComputeSelfTest.Run(host.Context);
 
 var staticVolume   = new ChunkVolume(host.World);
-var worldGen      = new SkyWorldGenerator();
+ulong seed = 1337;
 var meshSystem    = new ChunkMeshSystem(host.World, host.Renderer);
 var gridSelection = new GridSelection(host.World);
 
@@ -46,7 +46,7 @@ var physicsBody = new PhysicsBodySystem(host.World, host.Physics);
 // ChunkMeshSystem/GpuResidencySystem/GpuLightSystem/PhysicsBodySystem (see the deferred dirty-queue task).
 // Pushing further needs that follow-up work, not just a bigger radius.
 const int ViewXz = 16, ViewY = 5;
-var chunkLoadSystem = new ChunkLoadSystem(host.World, staticVolume, worldGen, xzRadius: ViewXz, yRadius: ViewY);
+var chunkLoadSystem = new ChunkLoadSystem(host.World, staticVolume, () => new SkyWorldGenerator(seed), xzRadius: ViewXz, yRadius: ViewY);
 host.AddSystem(chunkLoadSystem, SystemStage.Logic);
 
 // Shared GPU voxel storage for lighting (world + ships). ChunkLoadSystem unloads past radius + 1, so the loaded
@@ -93,7 +93,7 @@ host.AddSystem(new GpuLightSystem(host.World, staticVolume, host.Context, host.P
 host.AddSystem(meshSystem, SystemStage.PreRender);
 host.AddSystem(new RenderSystem(host.World, host.Renderer, host.Gui, host.Time), SystemStage.Render);
 
-var camSpawn = TestScene.Build(host, worldGen.Seed);
+var camSpawn = TestScene.Build(host, seed);
 
 // Ray-traced lighting prototype test ship (plan doc, task 4): a small solid hull with a Lamp exposed on
 // top, placed near the camera's spawn so its shadow should visibly fall on the terrain below once the

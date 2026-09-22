@@ -7,6 +7,7 @@ using ClearSkies.Engine.Generation;
 using DefaultEcs;
 using ImGuiNET;
 using Silk.NET.Maths;
+using System.Collections.Concurrent;
 
 namespace ClearSkies.Engine.ECS;
 
@@ -16,6 +17,8 @@ namespace ClearSkies.Engine.ECS;
 /// </summary>
 public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 {
+    private static readonly int MaxInFlight = System.Math.Max(2, Environment.ProcessorCount / 2);
+
     // Generate() now averages ~100us (p99 ~1.1ms) per chunk after the meshing/generation perf pass —
     // see GenerationBenchmark. 16/frame budgets ~1.6ms typical, leaving headroom for meshing/physics/GPU
     // work in the same frame; was 4 when the pipeline was slower.
@@ -29,7 +32,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 
     private readonly EntitySet      _cameras;
     private readonly ChunkVolume    _staticVolume;
-    private readonly IWorldGenerator _generator;
+    private readonly ThreadLocal<IWorldGenerator> _generator;
     private readonly int            _xzRadius;
     private readonly int            _yRadius;
 
@@ -41,10 +44,12 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     private readonly (int dx, int dy, int dz)[] _offsetsByDistance;
 
     private readonly Queue<ChunkPosition> _loadQueue = new();
+    private int _inFlight = 0;
+    private readonly ConcurrentQueue<(ChunkData, ChunkPosition)> _results = new();
     private ChunkPosition _lastCamChunk = new(int.MinValue, int.MinValue, int.MinValue);
     private float _autosaveTimer;
 
-    public ChunkLoadSystem(World world, ChunkVolume staticVolume, IWorldGenerator generator,
+    public ChunkLoadSystem(World world, ChunkVolume staticVolume, Func<IWorldGenerator> generatorFactory,
                            int xzRadius = 5, int yRadius = 2)
     {
         _savesDir = Path.Combine(AppContext.BaseDirectory, "Saves", "World");
@@ -52,7 +57,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 
         _cameras   = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
         _staticVolume   = staticVolume;
-        _generator = generator;
+        _generator = new ThreadLocal<IWorldGenerator>(generatorFactory);
         _xzRadius  = xzRadius;
         _yRadius   = yRadius;
         _offsetsByDistance = BuildOffsetsByDistance(xzRadius, yRadius);
@@ -95,6 +100,13 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
             SaveAllDirty();
         }
 
+        while (_results.TryDequeue(out var t))
+        {
+            _inFlight -= 1;
+            var (data, pos) = t;
+            _staticVolume.AddChunk(pos, data);
+        }
+
         if (!TryGetCameraPos(out var camPos)) return;
 
         var camChunk = WorldToChunk(camPos);
@@ -107,20 +119,27 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
             UnloadDistant(camChunk);
         }
 
-        // Process a small batch of the load queue each frame.
-        int processed = 0;
-        while (processed < LoadsPerFrame && _loadQueue.Count > 0)
+        // Keep the max number in flight as long as there are chunks to load
+        while (_inFlight < MaxInFlight && _loadQueue.Count > 0)
         {
             var pos = _loadQueue.Dequeue();
             if (!_staticVolume.IsLoaded(pos))
             {
-                Load(pos, _generator);
-                processed++;
+                _inFlight += 1;
+                ThreadPool.UnsafeQueueUserWorkItem(_ =>
+                {
+                    var data = new ChunkData();
+                    if (!StaticWorldSerializer.TryLoad(SavePath(pos), data))
+                        _generator.Value!.Generate(data, pos);
+                    data.IsDirty = false;
+
+                    _results.Enqueue((data, pos));
+                }, null);
             }
         }
 
-        if (processed > 0)
-            Console.WriteLine($"[load] queued={_loadQueue.Count} loaded={_staticVolume.LoadedCount} loaded_this_frame={processed}");
+        if (_inFlight > 0)
+            Console.WriteLine($"[load] queued={_loadQueue.Count} loaded={_staticVolume.LoadedCount} in flight={_inFlight}");
     }
 
     private void RebuildLoadQueue(ChunkPosition center)
@@ -169,18 +188,6 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         }
         pos = default;
         return false;
-    }
-
-    public void Load(ChunkPosition pos, IWorldGenerator generator)
-    {
-        if (_staticVolume.IsLoaded(pos)) return;
-
-        var data = new ChunkData();
-        if (!StaticWorldSerializer.TryLoad(SavePath(pos), data))
-            generator.Generate(data, pos);
-        data.IsDirty = false;
-
-        _staticVolume.AddChunk(pos, data);
     }
 
     public void Unload(ChunkPosition pos)
