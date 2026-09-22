@@ -24,7 +24,7 @@ namespace ClearSkies.Engine.ECS;
 /// </summary>
 public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSystem
 {
-    private readonly ChunkVolume     _staticWorld;
+    private readonly ChunkVolume     _staticVolume;
     private readonly EntitySet       _grids;
     private readonly EntitySet       _cameras;
     private readonly PhysicsWorld    _physics;
@@ -89,9 +89,9 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     private readonly record struct WorldLamp(Vector3D<float> World, int Level, Vector3D<float> Color,
                                              int Grid, Vector3D<int> Local);
 
-    public GpuLightSystem(World world, ChunkVolume staticWorld, GpuContext ctx, PhysicsWorld physics, GridStore store)
+    public GpuLightSystem(World world, ChunkVolume staticVolume, GpuContext ctx, PhysicsWorld physics, GridStore store)
     {
-        _staticWorld = staticWorld;
+        _staticVolume = staticVolume;
         _physics     = physics;
         _store       = store;
         _grids       = world.GetEntities().With<DynamicGridComponent>().AsSet();
@@ -160,7 +160,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         RayLightingSettings.AoStrength  = _bounceEnabled ? _aoStrength : 0f;
 
         _lit.Clear();
-        AddLit(_staticWorld);
+        AddLit(_staticVolume);
         foreach (ref readonly Entity e in _grids.GetEntities())
             AddLit(e.Get<DynamicGridComponent>().Grid);
         _store.UploadGrids();
@@ -175,7 +175,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     /// light bricks, and prints them next to the CPU mirror.</summary>
     private void Probe()
     {
-        var world = _staticWorld.Gpu;
+        var world = _staticVolume.Gpu;
         if (!CameraUtil.TryGetActive(_cameras, out var cam) || world.Index < 0) return;
         var cp = new ChunkPosition((int)MathF.Floor(cam.Position.X / 32f), (int)MathF.Floor(cam.Position.Y / 32f), (int)MathF.Floor(cam.Position.Z / 32f));
         ChunkRecord? rec = null;

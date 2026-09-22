@@ -27,7 +27,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
     private readonly World        _world;
     private readonly EntitySet    _cameras;
     private readonly EntitySet    _grids;
-    private readonly StaticWorld  _staticWorld;
+    private readonly ChunkVolume  _staticVolume;
     private readonly PhysicsWorld _physics;
     private readonly InputManager _input;
     private readonly ChunkMeshSystem _meshSystem;
@@ -58,13 +58,13 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
     private int _placeIndex = 0; // index into PlaceableBlocks
     private BlockId _placeBlock = PlaceableBlocks[0];
 
-    public PlayerInputSystem(World world, StaticWorld staticWorld, PhysicsWorld physics, InputManager input,
+    public PlayerInputSystem(World world, ChunkVolume staticVolume, PhysicsWorld physics, InputManager input,
                               ChunkMeshSystem meshSystem, Renderer renderer, GridSelection selection)
     {
         _world       = world;
         _cameras     = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
         _grids       = world.GetEntities().With<DynamicGridComponent>().AsSet();
-        _staticWorld = staticWorld;
+        _staticVolume = staticVolume;
         _physics     = physics;
         _input       = input;
         _meshSystem  = meshSystem;
@@ -132,9 +132,9 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
         Vector3D<float>    gridPos = default, gridCom = default;
         Quaternion<float>  gridRot = Quaternion<float>.Identity;
 
-        if (VoxelRaycaster.Cast(_staticWorld, origin, dir, ReachBlocks, out var sb, out var sn, out var sd) && sd < bestDist)
+        if (VoxelRaycaster.Cast(_staticVolume, origin, dir, ReachBlocks, out var sb, out var sn, out var sd) && sd < bestDist)
         {
-            bestDist = sd; bestVolume = _staticWorld; bestBlock = sb; bestNormal = sn; bestIsGrid = false;
+            bestDist = sd; bestVolume = _staticVolume; bestBlock = sb; bestNormal = sn; bestIsGrid = false;
         }
 
         foreach (ref readonly Entity e in _grids.GetEntities())

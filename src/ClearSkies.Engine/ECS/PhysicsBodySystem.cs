@@ -25,9 +25,7 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
     /// <summary>Static-collider jobs in flight at once (see UpdateStaticColliders).</summary>
     private static readonly int MaxInFlight = System.Math.Max(2, Environment.ProcessorCount / 2);
 
-    private readonly EntitySet         _grids;
     private readonly EntitySet         _dirtyChunks;
-    private readonly StaticWorld       _world;
     private readonly PhysicsWorld      _physics;
     private readonly VoxelBoxDecomposer _decomposer = new(); // dynamic grids, main thread
     private readonly ThreadLocal<VoxelBoxDecomposer> _decomposers = new(() => new VoxelBoxDecomposer()); // terrain workers
@@ -44,11 +42,9 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
     private readonly Stopwatch _sw = new();
     private int _totalBuilt;
 
-    public PhysicsBodySystem(World world, StaticWorld staticWorld, PhysicsWorld physics)
+    public PhysicsBodySystem(World world, PhysicsWorld physics)
     {
-        _world   = staticWorld;
         _physics = physics;
-        _grids   = world.GetEntities().With<DynamicGridComponent>().AsSet();
         _dirtyChunks = world.GetEntities().With<Chunk>().With<NeedsRecollideFlag>().AsSet();
         world.SubscribeEntityDisposed(OnEntityDisposed);
     }
@@ -149,7 +145,8 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
                 Console.WriteLine($"[collide] chunk {r.Pos} failed: {r.Error}");
                 continue;
             }
-            if (_world.GetEntry(r.Pos) != r.Entry) continue; // unloaded (or unloaded and reloaded) meanwhile
+
+            if (!r.Entry.Entity.IsAlive) continue; // unloaded (or unloaded and reloaded) meanwhile
 
             _sw.Restart();
             if (_colliders.Remove(r.Pos, out var old)) _physics.RemoveStaticCompound(old.handle);

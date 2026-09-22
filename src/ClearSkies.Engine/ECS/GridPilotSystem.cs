@@ -34,7 +34,7 @@ public sealed class GridPilotSystem : ISystem
     private readonly EntitySet    _selectedGrid;
     private readonly InputManager _input;
     private readonly PhysicsWorld _physics;
-    private readonly StaticWorld  _staticWorld;
+    private readonly ChunkVolume _staticVolume;
     private readonly PhysicsBodySystem _physicsBody;
 
     private Entity _followedCamera;
@@ -49,11 +49,11 @@ public sealed class GridPilotSystem : ISystem
     private float _localPitch;
 
     public GridPilotSystem(World world, InputManager input, PhysicsWorld physics,
-                            StaticWorld staticWorld, PhysicsBodySystem physicsBody)
+                            ChunkVolume staticVolume, PhysicsBodySystem physicsBody)
     {
         _input           = input;
         _physics         = physics;
-        _staticWorld     = staticWorld;
+        _staticVolume     = staticVolume;
         _physicsBody     = physicsBody;
         _freeFlyCameras  = world.GetEntities().With<Transform>().With<CameraComponent>().With<FreeFlyController>().AsSet();
         _selectedGrid    = world.GetEntities().With<DynamicGridComponent>().With<SelectedGridComponent>().AsSet();
@@ -227,7 +227,7 @@ public sealed class GridPilotSystem : ISystem
                     (int)MathF.Floor(pos.X / ChunkData.Size),
                     (int)MathF.Floor(pos.Y / ChunkData.Size),
                     (int)MathF.Floor(pos.Z / ChunkData.Size));
-                bool chunkLoaded = _staticWorld.IsLoaded(chunkPos);
+                bool chunkLoaded = _staticVolume.IsLoaded(chunkPos);
                 bool hasCollider = _physicsBody.HasCollider(chunkPos);
                 ImGui.Text($"Grid's chunk {chunkPos}: loaded={chunkLoaded}  hasCollider={hasCollider}");
             }

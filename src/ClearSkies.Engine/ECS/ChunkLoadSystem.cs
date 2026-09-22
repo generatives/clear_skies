@@ -28,7 +28,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     private readonly string _savesDir;
 
     private readonly EntitySet      _cameras;
-    private readonly StaticWorld    _manager;
+    private readonly ChunkVolume    _staticVolume;
     private readonly IWorldGenerator _generator;
     private readonly int            _xzRadius;
     private readonly int            _yRadius;
@@ -44,14 +44,14 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     private ChunkPosition _lastCamChunk = new(int.MinValue, int.MinValue, int.MinValue);
     private float _autosaveTimer;
 
-    public ChunkLoadSystem(World world, StaticWorld manager, IWorldGenerator generator,
+    public ChunkLoadSystem(World world, ChunkVolume staticVolume, IWorldGenerator generator,
                            int xzRadius = 5, int yRadius = 2)
     {
         _savesDir = Path.Combine(AppContext.BaseDirectory, "Saves", "World");
         Directory.CreateDirectory(_savesDir);
 
         _cameras   = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
-        _manager   = manager;
+        _staticVolume   = staticVolume;
         _generator = generator;
         _xzRadius  = xzRadius;
         _yRadius   = yRadius;
@@ -80,7 +80,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     public void DrawDebugUi()
     {
         ImGui.Text($"Queued: {_loadQueue.Count}");
-        ImGui.Text($"Loaded: {_manager.LoadedCount}");
+        ImGui.Text($"Loaded: {_staticVolume.LoadedCount}");
         ImGui.Text($"Autosave in: {System.Math.Max(0f, AutosaveInterval - _autosaveTimer):F0}s");
     }
 
@@ -112,7 +112,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         while (processed < LoadsPerFrame && _loadQueue.Count > 0)
         {
             var pos = _loadQueue.Dequeue();
-            if (!_manager.IsLoaded(pos))
+            if (!_staticVolume.IsLoaded(pos))
             {
                 Load(pos, _generator);
                 processed++;
@@ -120,7 +120,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         }
 
         if (processed > 0)
-            Console.WriteLine($"[load] queued={_loadQueue.Count} loaded={_manager.LoadedCount} loaded_this_frame={processed}");
+            Console.WriteLine($"[load] queued={_loadQueue.Count} loaded={_staticVolume.LoadedCount} loaded_this_frame={processed}");
     }
 
     private void RebuildLoadQueue(ChunkPosition center)
@@ -132,7 +132,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         foreach (var (dx, dy, dz) in _offsetsByDistance)
         {
             var p = center.Offset(dx, dy, dz);
-            if (!_manager.IsLoaded(p))
+            if (!_staticVolume.IsLoaded(p))
                 _loadQueue.Enqueue(p);
         }
     }
@@ -142,7 +142,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         // Collect positions outside the view volume.
         var toUnload = new List<ChunkPosition>();
 
-        foreach (var (pos, _) in _manager.All)
+        foreach (var (pos, _) in _staticVolume.All)
         {
             int dx = System.Math.Abs(pos.X - center.X);
             int dy = System.Math.Abs(pos.Y - center.Y);
@@ -173,31 +173,31 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 
     public void Load(ChunkPosition pos, IWorldGenerator generator)
     {
-        if (_manager.IsLoaded(pos)) return;
+        if (_staticVolume.IsLoaded(pos)) return;
 
         var data = new ChunkData();
         if (!StaticWorldSerializer.TryLoad(SavePath(pos), data))
             generator.Generate(data, pos);
         data.IsDirty = false;
 
-        _manager.AddChunk(pos, data);
+        _staticVolume.AddChunk(pos, data);
     }
 
     public void Unload(ChunkPosition pos)
     {
-        var entry = _manager.GetEntry(pos);
+        var entry = _staticVolume.GetEntry(pos);
         if (entry is not null)
         {
             SaveIfDirty(pos, entry);
         }
-        _manager.RemoveChunk(pos);
+        _staticVolume.RemoveChunk(pos);
     }
 
     /// <summary>Writes every currently loaded chunk with unsaved edits to disk, clearing its dirty flag.
     /// Called by the periodic autosave (see ChunkLoadSystem) and once on graceful shutdown.</summary>
     public void SaveAllDirty()
     {
-        foreach (var (pos, entry) in _manager.All)
+        foreach (var (pos, entry) in _staticVolume.All)
             SaveIfDirty(pos, entry);
     }
 

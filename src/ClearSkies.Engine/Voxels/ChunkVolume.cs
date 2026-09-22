@@ -8,7 +8,7 @@ namespace ClearSkies.Engine.Voxels;
 /// <summary>
 /// A set of 32³ chunks with their block data, GPU meshes, and ECS entities, plus the shared
 /// bookkeeping for dirty-marking and mesh handoff. Coordinates passed to <see cref="GetBlock"/> and
-/// <see cref="SetBlock"/> are in this volume's own space: world space for <see cref="StaticWorld"/>,
+/// <see cref="SetBlock"/> are in this volume's own space: world space for the static volume,
 /// grid-local space for a dynamic grid.
 /// </summary>
 public class ChunkVolume

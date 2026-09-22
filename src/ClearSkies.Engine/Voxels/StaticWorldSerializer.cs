@@ -5,7 +5,7 @@ namespace ClearSkies.Engine.Voxels;
 /// <summary>
 /// Reads/writes a single static-world chunk's raw 32x32x32 block (+ facing, since v2) array to/from a
 /// small binary format. One file per chunk; the chunk position is implied entirely by the filename (see
-/// <see cref="StaticWorld"/>), so no position is stored in the payload itself.
+/// <see cref="ChunkLoadSystem"/>), so no position is stored in the payload itself.
 /// </summary>
 internal static class StaticWorldSerializer
 {

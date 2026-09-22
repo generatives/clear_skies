@@ -30,14 +30,14 @@ host.Renderer.LoadTextureAtlas(
 // Phase 4.0: prove the GPU compute path (upload → dispatch → readback) before building lighting on it.
 GpuComputeSelfTest.Run(host.Context);
 
-var staticWorld   = new StaticWorld(host.World);
+var staticVolume   = new ChunkVolume(host.World);
 var worldGen      = new SkyWorldGenerator();
 var meshSystem    = new ChunkMeshSystem(host.World, host.Renderer);
 var gridSelection = new GridSelection(host.World);
 
 host.AddSystem(host.Gui, SystemStage.Input); // opens ImGui's frame before Logic/PreRender systems run
 
-var physicsBody = new PhysicsBodySystem(host.World, staticWorld, host.Physics);
+var physicsBody = new PhysicsBodySystem(host.World, host.Physics);
 
 // View distance: xzRadius=16/yRadius=3 (was 8/3). Verified crash-free and smooth at this setting; a bigger
 // jump (tried 16/3) hit two real problems: the GPU device was silently capped at a 256 MiB max buffer size
@@ -46,7 +46,7 @@ var physicsBody = new PhysicsBodySystem(host.World, staticWorld, host.Physics);
 // ChunkMeshSystem/GpuResidencySystem/GpuLightSystem/PhysicsBodySystem (see the deferred dirty-queue task).
 // Pushing further needs that follow-up work, not just a bigger radius.
 const int ViewXz = 16, ViewY = 5;
-var chunkLoadSystem = new ChunkLoadSystem(host.World, staticWorld, worldGen, xzRadius: ViewXz, yRadius: ViewY);
+var chunkLoadSystem = new ChunkLoadSystem(host.World, staticVolume, worldGen, xzRadius: ViewXz, yRadius: ViewY);
 host.AddSystem(chunkLoadSystem, SystemStage.Logic);
 
 // Shared GPU voxel storage for lighting (world + ships). ChunkLoadSystem unloads past radius + 1, so the loaded
@@ -63,7 +63,7 @@ host.AddSystem(new PlayerMovementSystem(host.World, host.Input), SystemStage.Log
 
 // Milestone 5: airship flight (velocity control law + Fan/Buoyant propulsion, merged into one system —
 // see AirshipFlightSystem), before the physics step so its impulses are integrated this same tick.
-var gridPilot = new GridPilotSystem(host.World, host.Input, host.Physics, staticWorld, physicsBody);
+var gridPilot = new GridPilotSystem(host.World, host.Input, host.Physics, staticVolume, physicsBody);
 var airshipFlight = new AirshipFlightSystem(host.World, host.Physics, host.Input);
 host.AddSystem(airshipFlight, SystemStage.Logic);
 
@@ -72,7 +72,7 @@ host.AddSystem(new GridTransformSystem(host.World, host.Physics), SystemStage.Lo
 host.AddSystem(new HierarchyTransformSystem(host.World), SystemStage.Logic);
 host.AddSystem(new CharacterCameraSyncSystem(host.World), SystemStage.Logic); // reads the capsule's post-physics pose into Transform
 host.AddSystem(gridPilot, SystemStage.Logic);
-host.AddSystem(new PlayerInputSystem(host.World, staticWorld, host.Physics, host.Input, meshSystem, host.Renderer, gridSelection), SystemStage.Logic);
+host.AddSystem(new PlayerInputSystem(host.World, staticVolume, host.Physics, host.Input, meshSystem, host.Renderer, gridSelection), SystemStage.Logic);
 var gridPersistence = new GridPersistenceSystem(host.World, meshSystem, host.Physics, gridSelection);
 host.AddSystem(gridPersistence, SystemStage.Logic);
 // The airship-related debug panels above (Pilot/Flight/Save-Load) drew into their own separate "Systems"
@@ -88,8 +88,8 @@ host.AddSystem(new LambdaSystem(() =>
 }), SystemStage.Logic);
 host.AddSystem(new DynamicGridCleanupSystem(host.World), SystemStage.Logic);
 
-host.AddSystem(new GpuResidencySystem(host.World, staticWorld, gridStore), SystemStage.PreRender);
-host.AddSystem(new GpuLightSystem(host.World, staticWorld, host.Context, host.Physics, gridStore), SystemStage.PreRender);
+host.AddSystem(new GpuResidencySystem(host.World, staticVolume, gridStore), SystemStage.PreRender);
+host.AddSystem(new GpuLightSystem(host.World, staticVolume, host.Context, host.Physics, gridStore), SystemStage.PreRender);
 host.AddSystem(meshSystem, SystemStage.PreRender);
 host.AddSystem(new RenderSystem(host.World, host.Renderer, host.Gui, host.Time), SystemStage.Render);
 

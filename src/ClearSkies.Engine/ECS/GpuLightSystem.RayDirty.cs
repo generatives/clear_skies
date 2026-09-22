@@ -483,7 +483,7 @@ public sealed partial class GpuLightSystem
             if (!st.LightAll && RayHitsBox(centre, sunDir, st.CurWorldMin - half, st.CurWorldMax + half)) st.LightAll = true;
         }
 
-        var world = _staticWorld.Gpu;
+        var world = _staticVolume.Gpu;
         if (!world.HasBox || !_gridStates.TryGetValue(world, out var worldState)) return;
         var wMin = world.BoxMin.WorldOrigin;
         var wMax = world.BoxMax.WorldOrigin + new Vector3D<float>(S);
