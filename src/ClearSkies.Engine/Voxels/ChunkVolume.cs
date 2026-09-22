@@ -79,7 +79,6 @@ public class ChunkVolume
         entry.Data.Set(lx, ly, lz, id, facing);
         entry.Entity.Set(new NeedsRemeshFlag());
         entry.Entity.Set(new NeedsRecollideFlag());
-        entry.NeedsGpuUpload      = true;
         entry.Entity.Set(new NeedsGpuUploadFlag());
         entry.PackedOpacityWords  = null; // block data actually changed -- cached opacity is stale
         entry.AddEdit(lx, ly, lz, placedSolid: BlockRegistry.Get(id).Opacity >= 15);
@@ -93,23 +92,6 @@ public class ChunkVolume
         if (lz == ChunkData.Size - 1) TryMark(cp.Offset( 0,  0,  1));
     }
 
-    public void SetMesh(ChunkPosition pos, GpuMesh mesh)
-    {
-        if (!_chunks.TryGetValue(pos, out var entry)) return;
-        var entity = entry.Entity;
-        if (entity.Has<ChunkMesh>())
-        {
-            entry.Entity.Get<ChunkMesh>().Mesh.Dispose();
-        }
-        entry.Entity.Remove<NeedsRemeshFlag>();
-        entry.Entity.Set(new ChunkMesh
-        {
-            Mesh     = mesh,
-            Grid     = Gpu,
-            ChunkPos = pos,
-        });
-    }
-
     // ── Chunk lifecycle ────────────────────────────────────────────────────
 
     private protected ChunkEntry AddChunk(ChunkPosition pos, ChunkData data)
@@ -120,6 +102,9 @@ public class ChunkVolume
         t.Position = entry.Position.WorldOrigin;
         entity.Set(t);
         entity.Set(new Chunk() { Entry = entry });
+        entry.Entity.Set(new NeedsRemeshFlag());
+        entry.Entity.Set(new NeedsRecollideFlag());
+        entry.Entity.Set(new NeedsGpuUploadFlag());
         
         _chunks[pos] = entry;
         UpdateBounds(pos);

@@ -72,7 +72,7 @@ public sealed class GpuResidencySystem : ISystem
             var volume = entry.Volume;
             var pos = entry.Position;
             _store.UploadChunk(volume.Gpu, pos, entry);
-            entry.NeedsGpuUpload = false;
+            entity.Remove<NeedsGpuUploadFlag>();
             if (--budget <= 0) break;
         }
     }

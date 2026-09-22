@@ -154,7 +154,19 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                 // NeedsRemesh, so preserve a re-dirty that arrived while this job was in flight.
                 {
                     bool redirtied = entity.Has<NeedsRemeshFlag>();
-                    volume.SetMesh(entry.Position, mesh);
+
+                    if (entity.Has<ChunkMesh>())
+                    {
+                        entry.Entity.Get<ChunkMesh>().Mesh.Dispose();
+                    }
+                    entry.Entity.Remove<NeedsRemeshFlag>();
+                    entry.Entity.Set(new ChunkMesh
+                    {
+                        Mesh     = mesh,
+                        Grid     = volume.Gpu,
+                        ChunkPos = entry.Position,
+                    });
+
                     if (redirtied) entity.Set<NeedsRemeshFlag>();
                     _totalMeshed++;
                 }

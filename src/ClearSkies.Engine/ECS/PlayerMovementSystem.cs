@@ -104,9 +104,6 @@ public sealed class PlayerMovementSystem : ISystem
         if (_input.IsKeyDown(Key.ControlLeft) || _input.IsKeyDown(Key.ControlRight)) speedUp = true;
         
         c.MoveSpeed += _input.ScrollDelta.Y * 0.5f; // scroll wheel adjusts speed up/down
-
-        Console.WriteLine($"[debug] free-fly speed: {c.MoveSpeed:F2} (scroll wheel to adjust)");
-
         c.MoveSpeed = MathF.Max(2f, c.MoveSpeed);
 
         float speed = speedUp ? c.MoveSpeed * 3f : c.MoveSpeed;

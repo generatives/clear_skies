@@ -18,9 +18,6 @@ internal sealed class ChunkEntry
     /// repacked (see <c>GridStore.UploadChunk</c>). Gathered into the lamp list each frame.</summary>
     public List<EmitterVoxel> Emitters { get; } = new();
 
-    /// <summary>Set on creation and every block edit; cleared after the volume opacity is re-uploaded to GPU.</summary>
-    public bool NeedsGpuUpload { get; set; } = true;
-
     /// <summary>Packed opacity words (see <c>GridStore.WordsPerChunk</c>). Null means "recompute from
     /// <see cref="Data"/>" — set on creation and invalidated on every block edit (see
     /// <c>ChunkVolume.SetBlock</c>).</summary>
