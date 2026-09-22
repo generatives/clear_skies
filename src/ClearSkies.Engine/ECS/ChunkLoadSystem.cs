@@ -25,6 +25,8 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     /// safety for edits to chunks that stay loaded (never unload) for a long time.</summary>
     private const float AutosaveInterval = 30f;
 
+    private readonly string _savesDir;
+
     private readonly EntitySet      _cameras;
     private readonly StaticWorld    _manager;
     private readonly IWorldGenerator _generator;
@@ -45,6 +47,9 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     public ChunkLoadSystem(World world, StaticWorld manager, IWorldGenerator generator,
                            int xzRadius = 5, int yRadius = 2)
     {
+        _savesDir = Path.Combine(AppContext.BaseDirectory, "Saves", "World");
+        Directory.CreateDirectory(_savesDir);
+
         _cameras   = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
         _manager   = manager;
         _generator = generator;
@@ -87,7 +92,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         if (_autosaveTimer >= AutosaveInterval)
         {
             _autosaveTimer = 0f;
-            _manager.SaveAllDirty();
+            SaveAllDirty();
         }
 
         if (!TryGetCameraPos(out var camPos)) return;
@@ -109,7 +114,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
             var pos = _loadQueue.Dequeue();
             if (!_manager.IsLoaded(pos))
             {
-                _manager.Load(pos, _generator);
+                Load(pos, _generator);
                 processed++;
             }
         }
@@ -148,7 +153,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         }
 
         foreach (var pos in toUnload)
-            _manager.Unload(pos);
+            Unload(pos);
     }
 
     private bool TryGetCameraPos(out Vector3D<float> pos)
@@ -165,6 +170,45 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         pos = default;
         return false;
     }
+
+    public void Load(ChunkPosition pos, IWorldGenerator generator)
+    {
+        if (_manager.IsLoaded(pos)) return;
+
+        var data = new ChunkData();
+        if (!StaticWorldSerializer.TryLoad(SavePath(pos), data))
+            generator.Generate(data, pos);
+        data.IsDirty = false;
+
+        _manager.AddChunk(pos, data);
+    }
+
+    public void Unload(ChunkPosition pos)
+    {
+        var entry = _manager.GetEntry(pos);
+        if (entry is not null)
+        {
+            SaveIfDirty(pos, entry);
+        }
+        _manager.RemoveChunk(pos);
+    }
+
+    /// <summary>Writes every currently loaded chunk with unsaved edits to disk, clearing its dirty flag.
+    /// Called by the periodic autosave (see ChunkLoadSystem) and once on graceful shutdown.</summary>
+    public void SaveAllDirty()
+    {
+        foreach (var (pos, entry) in _manager.All)
+            SaveIfDirty(pos, entry);
+    }
+
+    private void SaveIfDirty(ChunkPosition pos, ChunkEntry entry)
+    {
+        if (!entry.Data.IsDirty) return;
+        StaticWorldSerializer.Save(entry.Data, SavePath(pos));
+        entry.Data.IsDirty = false;
+    }
+
+    private string SavePath(ChunkPosition pos) => Path.Combine(_savesDir, $"{pos.X}_{pos.Y}_{pos.Z}.chunk");
 
     private static ChunkPosition WorldToChunk(Vector3D<float> world) =>
         new((int)System.Math.Floor(world.X / ChunkData.Size),

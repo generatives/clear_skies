@@ -94,7 +94,7 @@ public class ChunkVolume
 
     // ── Chunk lifecycle ────────────────────────────────────────────────────
 
-    private protected ChunkEntry AddChunk(ChunkPosition pos, ChunkData data)
+    internal ChunkEntry AddChunk(ChunkPosition pos, ChunkData data)
     {
         var entity = _world.CreateEntity();
         var entry = new ChunkEntry(data, entity, this, pos);
@@ -110,6 +110,18 @@ public class ChunkVolume
         UpdateBounds(pos);
         MarkNeighboursDirty(pos, data);
         return entry;
+    }
+
+    public void RemoveChunk(ChunkPosition pos)
+    {
+        var entry = GetEntry(pos);
+        if (entry is null) return;
+
+        if (entry.Entity.IsAlive)
+            entry.Entity.Dispose();
+
+        _chunks.Remove(pos);
+        MarkNeighboursDirty(pos, entry.Data);
     }
 
     private protected ChunkEntry EnsureChunk(ChunkPosition pos) =>

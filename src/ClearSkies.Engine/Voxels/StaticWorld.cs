@@ -19,57 +19,11 @@ namespace ClearSkies.Engine.Voxels;
 /// </summary>
 public sealed class StaticWorld : ChunkVolume
 {
-    private readonly string _savesDir;
 
     public StaticWorld(World world) : base(world)
     {
-        _savesDir = Path.Combine(AppContext.BaseDirectory, "Saves", "World");
-        Directory.CreateDirectory(_savesDir);
     }
 
     public BlockId GetBlockWorld(int wx, int wy, int wz) => GetBlock(wx, wy, wz);
     public void    SetBlockWorld(int wx, int wy, int wz, BlockId id) => SetBlock(wx, wy, wz, id);
-
-    public void Load(ChunkPosition pos, IWorldGenerator generator)
-    {
-        if (IsLoaded(pos)) return;
-
-        var data = new ChunkData();
-        if (!StaticWorldSerializer.TryLoad(SavePath(pos), data))
-            generator.Generate(data, pos);
-        data.IsDirty = false;
-
-        AddChunk(pos, data);
-    }
-
-    public void Unload(ChunkPosition pos)
-    {
-        var entry = GetEntry(pos);
-        if (entry is null) return;
-
-        SaveIfDirty(pos, entry);
-
-        if (entry.Entity.IsAlive)
-            entry.Entity.Dispose();
-
-        _chunks.Remove(pos);
-        MarkNeighboursDirty(pos, entry.Data);
-    }
-
-    /// <summary>Writes every currently loaded chunk with unsaved edits to disk, clearing its dirty flag.
-    /// Called by the periodic autosave (see ChunkLoadSystem) and once on graceful shutdown.</summary>
-    public void SaveAllDirty()
-    {
-        foreach (var (pos, entry) in All)
-            SaveIfDirty(pos, entry);
-    }
-
-    private void SaveIfDirty(ChunkPosition pos, ChunkEntry entry)
-    {
-        if (!entry.Data.IsDirty) return;
-        StaticWorldSerializer.Save(entry.Data, SavePath(pos));
-        entry.Data.IsDirty = false;
-    }
-
-    private string SavePath(ChunkPosition pos) => Path.Combine(_savesDir, $"{pos.X}_{pos.Y}_{pos.Z}.chunk");
 }

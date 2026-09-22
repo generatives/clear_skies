@@ -46,7 +46,8 @@ var physicsBody = new PhysicsBodySystem(host.World, staticWorld, host.Physics);
 // ChunkMeshSystem/GpuResidencySystem/GpuLightSystem/PhysicsBodySystem (see the deferred dirty-queue task).
 // Pushing further needs that follow-up work, not just a bigger radius.
 const int ViewXz = 16, ViewY = 5;
-host.AddSystem(new ChunkLoadSystem(host.World, staticWorld, worldGen, xzRadius: ViewXz, yRadius: ViewY), SystemStage.Logic);
+var chunkLoadSystem = new ChunkLoadSystem(host.World, staticWorld, worldGen, xzRadius: ViewXz, yRadius: ViewY);
+host.AddSystem(chunkLoadSystem, SystemStage.Logic);
 
 // Shared GPU voxel storage for lighting (world + ships). ChunkLoadSystem unloads past radius + 1, so the loaded
 // span never exceeds 2 * (radius + 1) + 1 chunks per axis — the world's toroidal table size.
@@ -113,5 +114,5 @@ var camSpawn = TestScene.Build(host, worldGen.Seed);
 
 host.Run();
 
-staticWorld.SaveAllDirty(); // graceful-exit flush; unload/autosave already cover the running game
+chunkLoadSystem.SaveAllDirty(); // graceful-exit flush; unload/autosave already cover the running game
 gridStore.Dispose();
