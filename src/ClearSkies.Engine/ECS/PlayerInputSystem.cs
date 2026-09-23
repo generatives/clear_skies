@@ -22,7 +22,7 @@ namespace ClearSkies.Engine.ECS;
 /// </summary>
 public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
 {
-    private const float ReachBlocks = 32f;
+    private const float ReachBlocks = 128f;
 
     private readonly World        _world;
     private readonly EntitySet    _cameras;
@@ -57,6 +57,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
 
     private int _placeIndex = 0; // index into PlaceableBlocks
     private BlockId _placeBlock = PlaceableBlocks[0];
+    private int _blockBrushRadius = 0;
 
     public PlayerInputSystem(World world, ChunkVolume staticVolume, PhysicsWorld physics, InputManager input,
                               ChunkMeshSystem meshSystem, Renderer renderer, GridSelection selection)
@@ -95,6 +96,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
         ImGui.Text(TargetBlock is { } b ? $"Target: ({b.X}, {b.Y}, {b.Z})" : "Target: none");
         if (ImGui.Combo("Place block", ref _placeIndex, PlaceableNames, PlaceableNames.Length))
             _placeBlock = PlaceableBlocks[_placeIndex];
+        ImGui.SliderInt("Brush Size", ref _blockBrushRadius, 0, 32);
         ImGui.TextDisabled("(or press L to cycle)");
     }
 
@@ -187,14 +189,32 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
                 // the 6 axis directions), so e.g. a Fan placed against a ship's east wall faces east —
                 // away from the ship, not wherever the camera happened to be pointed.
                 var facing = FacingExtensions.FromNormal(bestNormal);
-                bestVolume.SetBlock(t.X, t.Y, t.Z, _placeBlock, facing);
+                for (int x = t.X - _blockBrushRadius; x <= t.X + _blockBrushRadius; x++)
+                {
+                    for (int y = t.Y - _blockBrushRadius; y <= t.Y + _blockBrushRadius; y++)
+                    {
+                        for (int z = t.Z - _blockBrushRadius; z <= t.Z + _blockBrushRadius; z++)
+                        {
+                            bestVolume.SetBlock(x, y, z, _placeBlock, facing);
+                        }
+                    }
+                }
                 if (bestIsDynamicGrid) _selection.Select(bestGridEntity);
                 Console.WriteLine($"[place] {_placeBlock} in {(bestIsDynamicGrid ? "grid" : "world")} ({t.X},{t.Y},{t.Z})");
             }
         }
         else if (_input.WasMouseButtonPressed(MouseButton.Right))
         {
-            bestVolume.SetBlock(bestBlock.X, bestBlock.Y, bestBlock.Z, BlockId.Air);
+            for (int x = bestBlock.X - _blockBrushRadius; x <= bestBlock.X + _blockBrushRadius; x++)
+            {
+                for (int y = bestBlock.Y - _blockBrushRadius; y <= bestBlock.Y + _blockBrushRadius; y++)
+                {
+                    for (int z = bestBlock.Z - _blockBrushRadius; z <= bestBlock.Z + _blockBrushRadius; z++)
+                    {
+                        bestVolume.SetBlock(x, y, z, BlockId.Air);
+                    }
+                }
+            }
             Console.WriteLine($"[break] {(bestIsDynamicGrid ? "grid" : "world")} ({bestBlock.X},{bestBlock.Y},{bestBlock.Z})");
 
             if (bestIsDynamicGrid)
