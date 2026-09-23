@@ -247,8 +247,9 @@ public sealed class AirshipFlightSystem : ISystem
                     float forceShare  = totalForceAlign  > 1e-3f ? MathF.Max(0f, forceAlign)  / totalForceAlign  : 0f;
                     float torqueShare = totalTorqueAlign > 1e-3f ? MathF.Max(0f, torqueAlign) / totalTorqueAlign : 0f;
 
-                    float thrust = System.Math.Clamp(
-                        forceShare * desiredForceMag + torqueShare * desiredTorqueMag, -_fanMaxForce, _fanMaxForce);
+                    float desiredThrust = forceShare * desiredForceMag + torqueShare * desiredTorqueMag;
+                    float thrust = System.Math.Clamp(desiredThrust, -_fanMaxForce, _fanMaxForce);
+
                     if (MathF.Abs(thrust) < 1e-3f) continue;
 
                     var thrustDir = ThrustDirection(entry, lx, ly, lz, rot);

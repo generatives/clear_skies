@@ -26,7 +26,6 @@ public enum GridCameraMode { ThirdPerson, Locked }
 /// </summary>
 public sealed class GridPilotSystem : ISystem
 {
-    private const float ThirdPersonBack = 16f;
     private const float ThirdPersonUp   = 4f;
     private const float LockedUp        = 1f;
 
@@ -47,6 +46,7 @@ public sealed class GridPilotSystem : ISystem
     // relative bearing as the ship turns, instead of snapping back to dead-behind every frame.
     private float _localYaw;
     private float _localPitch;
+    private float _cameraDistance = 16f;
 
     public GridPilotSystem(World world, InputManager input, PhysicsWorld physics,
                             ChunkVolume staticVolume, PhysicsBodySystem physicsBody)
@@ -116,6 +116,8 @@ public sealed class GridPilotSystem : ISystem
 
         float limit = MathF.PI / 2f - 0.01f;
         _localPitch = System.Math.Clamp(_localPitch, -limit, limit);
+
+        _cameraDistance += -_input.ScrollDelta.Y;
     }
 
     private void StopPiloting()
@@ -188,7 +190,7 @@ public sealed class GridPilotSystem : ISystem
         var cameraRot = gridRot * lookRot;
 
         var localOffset = _cameraMode == GridCameraMode.ThirdPerson
-            ? new Vector3D<float>(0, ThirdPersonUp, ThirdPersonBack)
+            ? new Vector3D<float>(0, ThirdPersonUp, _cameraDistance)
             : new Vector3D<float>(0, LockedUp, 0);
 
         ref var t = ref _followedCamera.Get<Transform>();
