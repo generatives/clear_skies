@@ -15,9 +15,8 @@ namespace ClearSkies.Engine.ECS;
 /// cubes nearest first, then each visible chunk's model blocks — placed at their cell, turned to their stored
 /// <see cref="Facing"/> and lit from that cell's voxel light. Runs in <see cref="SystemStage.RenderWorld"/>.
 /// </summary>
-public sealed class ChunkRenderSystem : ISystem, IDebugUiSystem
+public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
 {
-    private readonly RenderFrame _frame;
     private readonly EntitySet _chunks;
     private readonly Renderer _renderer;
 
@@ -33,16 +32,14 @@ public sealed class ChunkRenderSystem : ISystem, IDebugUiSystem
     /// point its +Y along the facing, standing on the cell face opposite it.</summary>
     private static readonly Mat4[] FacingPlacement = BuildFacingPlacements();
 
-    public ChunkRenderSystem(RenderFrame frame, World world, Renderer renderer)
+    public ChunkRenderSystem(World world, Renderer renderer)
     {
-        _frame    = frame;
         _renderer = renderer;
         _chunks   = world.GetEntities().With<Transform>().With<ChunkRenderData>().AsSet();
     }
 
-    public void Update(float dt)
+    public void Render(in RenderContext frame)
     {
-        var frame = _frame.Context;
         // Every chunk's box is exactly ChunkData.Size local units on a side (GreedyMesher's local space); its model
         // blocks sit in its cells, so the same box culls them too.
         _draws.Clear();

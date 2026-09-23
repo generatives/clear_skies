@@ -1,5 +1,6 @@
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Math;
+using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Rendering.WebGpu;
 using DefaultEcs;
 
@@ -7,7 +8,7 @@ namespace ClearSkies.Engine.ECS;
 
 /// <summary>Draws every <see cref="HudRenderer"/> entity's NDC-space mesh. Runs in <see cref="SystemStage.RenderHud"/>,
 /// after binding the HUD pipeline and identity camera.</summary>
-public sealed class HudRenderSystem : ISystem
+public sealed class HudRenderSystem : IRenderSystem
 {
     private readonly EntitySet _huds;
     private readonly Renderer _renderer;
@@ -18,7 +19,7 @@ public sealed class HudRenderSystem : ISystem
         _huds     = world.GetEntities().With<HudRenderer>().AsSet();
     }
 
-    public void Update(float dt)
+    public void Render(in RenderContext frame)
     {
         _renderer.BeginHudPass();
         foreach (ref readonly Entity e in _huds.GetEntities())

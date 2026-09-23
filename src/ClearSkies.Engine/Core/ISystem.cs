@@ -2,8 +2,9 @@ namespace ClearSkies.Engine.Core;
 
 /// <summary>Ordered stages systems run in each frame. Input through PreRender run on the update tick. The render
 /// stages (<see cref="RenderWorld"/> onwards) run on the render tick, and only when <see cref="EngineHost"/> managed
-/// to open the frame (<c>RenderFrame</c>): all of them draw into its single GPU render pass, with this frame's
-/// camera in <c>RenderFrame.Context</c>. A skipped frame (no active camera, no swapchain image) runs none of them.
+/// to open the frame (<c>RenderFrame</c>): they hold <see cref="IRenderSystem"/>s, which all draw into its single GPU
+/// render pass and are handed this frame's camera and time. A skipped frame (no active camera, no swapchain image)
+/// runs none of them.
 /// </summary>
 public enum SystemStage
 {
@@ -26,8 +27,17 @@ public enum SystemStage
     RenderHud,
 }
 
-/// <summary>Minimal scheduling contract so engine and game systems share one update order.</summary>
+/// <summary>Minimal scheduling contract so engine and game systems share one update order. Runs in the update stages
+/// (Input, Logic, PreRender).</summary>
 public interface ISystem
 {
     void Update(float dt);
+}
+
+/// <summary>A system that draws: runs in a render stage (<see cref="SystemStage.RenderWorld"/> onwards), inside the
+/// open frame, and is handed that frame's camera and time. Registered with the same
+/// <see cref="EngineHost.AddSystem(IRenderSystem, SystemStage)"/> as any other system.</summary>
+public interface IRenderSystem
+{
+    void Render(in Rendering.RenderContext frame);
 }

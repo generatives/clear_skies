@@ -1,4 +1,5 @@
 using ClearSkies.Engine.Core;
+using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Rendering.WebGpu;
 using DefaultEcs;
 
@@ -6,7 +7,7 @@ namespace ClearSkies.Engine.ECS;
 
 /// <summary>Draws every <see cref="WireframeRenderer"/> entity as a full-bright wireframe at its
 /// <see cref="Transform"/>. Runs in <see cref="SystemStage.RenderOverlay"/>.</summary>
-public sealed class WireframeRenderSystem : ISystem
+public sealed class WireframeRenderSystem : IRenderSystem
 {
     private readonly EntitySet _wireframes;
     private readonly Renderer _renderer;
@@ -17,7 +18,7 @@ public sealed class WireframeRenderSystem : ISystem
         _wireframes = world.GetEntities().With<Transform>().With<WireframeRenderer>().AsSet();
     }
 
-    public void Update(float dt)
+    public void Render(in RenderContext frame)
     {
         foreach (ref readonly Entity e in _wireframes.GetEntities())
         {

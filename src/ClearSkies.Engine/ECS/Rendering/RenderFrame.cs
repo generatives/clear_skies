@@ -9,15 +9,11 @@ using Silk.NET.Maths;
 
 namespace ClearSkies.Engine.ECS;
 
-/// <summary>Per-frame view state for render-stage systems.</summary>
-public readonly record struct RenderContext(
-    Vector3D<float> CameraPosition, Mat4 View, Mat4 Projection, Frustum Frustum, double TimeSeconds);
-
 /// <summary>
 /// The frame the render stages draw into, owned by <see cref="EngineHost"/> (<see cref="EngineHost.Frame"/>). Each
 /// render tick the host calls <see cref="TryBegin"/> — which builds the camera uniform from the active camera and
-/// opens the render pass — runs the render stages only if that succeeded, then calls <see cref="End"/>. So a
-/// render-stage system only ever runs inside an open frame and can read <see cref="Context"/> unconditionally.
+/// opens the render pass — runs the render stages only if that succeeded, passing each <see cref="IRenderSystem"/>
+/// the frame's <see cref="Context"/>, then calls <see cref="End"/>.
 /// </summary>
 public sealed class RenderFrame : IDebugUiSystem
 {
@@ -27,8 +23,9 @@ public sealed class RenderFrame : IDebugUiSystem
     private readonly Time _time;
     private bool _open;
 
-    /// <summary>This frame's camera and time. Valid during the render stages.</summary>
-    public RenderContext Context { get; private set; }
+    /// <summary>This frame's camera and time, handed to every render system. Valid after a successful
+    /// <see cref="TryBegin"/>.</summary>
+    internal RenderContext Context { get; private set; }
 
     internal RenderFrame(World world, Renderer renderer, ImGuiController gui, Time time)
     {

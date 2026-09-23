@@ -96,10 +96,10 @@ host.AddSystem(new GpuResidencySystem(host.World, staticVolume, gridStore), Syst
 host.AddSystem(new GpuLightSystem(host.World, staticVolume, host.Context, host.Physics, gridStore), SystemStage.PreRender);
 host.AddSystem(meshSystem, SystemStage.PreRender);
 // Rendering: the host opens the frame, runs the render stages (systems in the order added within a stage), then
-// closes it with ImGui and presents. Systems read this frame's camera from host.Frame.Context.
-using var clouds = new CloudRenderSystem(host.Frame, host.Renderer);
-host.AddSystem(new ChunkRenderSystem(host.Frame, host.World, host.Renderer), SystemStage.RenderWorld);
-host.AddSystem(new ModelRenderSystem(host.Frame, host.World, host.Renderer), SystemStage.RenderWorld);
+// closes it with ImGui and presents. Each render system is handed this frame's camera and time.
+using var clouds = new CloudRenderSystem(host.Renderer);
+host.AddSystem(new ChunkRenderSystem(host.World, host.Renderer), SystemStage.RenderWorld);
+host.AddSystem(new ModelRenderSystem(host.World, host.Renderer), SystemStage.RenderWorld);
 host.AddSystem(clouds, SystemStage.RenderWorld);
 host.AddSystem(new SkyRenderSystem(host.Renderer), SystemStage.RenderSky);
 host.AddSystem(new WireframeRenderSystem(host.World, host.Renderer), SystemStage.RenderOverlay);

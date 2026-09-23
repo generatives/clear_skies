@@ -15,7 +15,8 @@ namespace ClearSkies.Engine.Core;
 /// </summary>
 public sealed class EngineHost : IDisposable
 {
-    private readonly List<(ISystem system, SystemStage stage)> _systems = new();
+    // Update stages hold ISystems, render stages IRenderSystems (enforced by AddSystem).
+    private readonly List<(object system, SystemStage stage)> _systems = new();
 
     public EngineOptions Options { get; }
     public World World { get; }
@@ -27,9 +28,9 @@ public sealed class EngineHost : IDisposable
     public Time Time { get; }
     public ImGuiController Gui { get; }
 
-    /// <summary>The frame the render stages draw into; its <see cref="RenderFrame.Context"/> holds this frame's
-    /// camera. Opened and closed by the host around the render stages.</summary>
-    public RenderFrame Frame { get; }
+    /// <summary>The frame the render stages draw into, opened and closed by the host around them; its context is
+    /// what every <see cref="IRenderSystem"/> is handed.</summary>
+    internal RenderFrame Frame { get; }
 
     public EngineHost(EngineOptions options)
     {
@@ -57,7 +58,27 @@ public sealed class EngineHost : IDisposable
         Gui.RegisterDebugUi(new FrameTimingsPanel(this));
     }
 
+    /// <summary>Schedules <paramref name="system"/> in an update stage (Input, Logic or PreRender), after the systems
+    /// already in it.</summary>
     public void AddSystem(ISystem system, SystemStage stage)
+    {
+        if (IsRenderStage(stage))
+            throw new ArgumentException($"{stage} is a render stage; it takes an {nameof(IRenderSystem)}.", nameof(stage));
+        Schedule(system, stage);
+    }
+
+    /// <summary>Schedules <paramref name="system"/> in a render stage (RenderWorld onwards), after the systems already
+    /// in it.</summary>
+    public void AddSystem(IRenderSystem system, SystemStage stage)
+    {
+        if (!IsRenderStage(stage))
+            throw new ArgumentException($"{stage} is an update stage; it takes an {nameof(ISystem)}.", nameof(stage));
+        Schedule(system, stage);
+    }
+
+    private static bool IsRenderStage(SystemStage stage) => stage >= SystemStage.RenderWorld;
+
+    private void Schedule(object system, SystemStage stage)
     {
         _systems.Add((system, stage));
         _systemMs.Add(0.0);
@@ -95,7 +116,7 @@ public sealed class EngineHost : IDisposable
         _frameBeginMs += TimingSmoothing * (_systemTimer.Elapsed.TotalMilliseconds - _frameBeginMs);
         if (open)
             for (var stage = SystemStage.RenderWorld; stage <= SystemStage.RenderHud; stage++)
-                RunStage(stage, (float)dt);
+                RunRenderStage(stage, Frame.Context);
 
         _systemTimer.Restart();
         Frame.End();
@@ -112,11 +133,25 @@ public sealed class EngineHost : IDisposable
             var (system, s) = _systems[i];
             if (s != stage) continue;
             _systemTimer.Restart();
-            system.Update(dt);
-            double ms = _systemTimer.Elapsed.TotalMilliseconds;
-            _systemMs[i] += TimingSmoothing * (ms - _systemMs[i]);
+            ((ISystem)system).Update(dt);
+            RecordTime(i);
         }
     }
+
+    private void RunRenderStage(SystemStage stage, in Rendering.RenderContext frame)
+    {
+        for (int i = 0; i < _systems.Count; i++)
+        {
+            var (system, s) = _systems[i];
+            if (s != stage) continue;
+            _systemTimer.Restart();
+            ((IRenderSystem)system).Render(frame);
+            RecordTime(i);
+        }
+    }
+
+    private void RecordTime(int i) =>
+        _systemMs[i] += TimingSmoothing * (_systemTimer.Elapsed.TotalMilliseconds - _systemMs[i]);
 
     /// <summary>Debug panel listing each system's CPU time per frame, slowest first. GPU work isn't timed
     /// directly: if the frame takes much longer than the CPU total, the difference is GPU time (or vsync),

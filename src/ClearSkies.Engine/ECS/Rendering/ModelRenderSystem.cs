@@ -7,22 +7,19 @@ namespace ClearSkies.Engine.ECS;
 
 /// <summary>Draws every frustum-visible standalone <see cref="ModelRenderer"/> entity at its <see cref="Transform"/>
 /// (model blocks are drawn by <see cref="ChunkRenderSystem"/> instead). Runs in <see cref="SystemStage.RenderWorld"/>.</summary>
-public sealed class ModelRenderSystem : ISystem
+public sealed class ModelRenderSystem : IRenderSystem
 {
-    private readonly RenderFrame _frame;
     private readonly EntitySet _models;
     private readonly Renderer _renderer;
 
-    public ModelRenderSystem(RenderFrame frame, World world, Renderer renderer)
+    public ModelRenderSystem(World world, Renderer renderer)
     {
-        _frame    = frame;
         _renderer = renderer;
         _models   = world.GetEntities().With<Transform>().With<ModelRenderer>().AsSet();
     }
 
-    public void Update(float dt)
+    public void Render(in RenderContext frame)
     {
-        var frame = _frame.Context;
         foreach (ref readonly Entity e in _models.GetEntities())
         {
             ref readonly var mr = ref e.Get<ModelRenderer>();
