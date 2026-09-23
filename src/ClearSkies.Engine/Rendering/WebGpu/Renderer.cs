@@ -17,7 +17,7 @@ public sealed unsafe class Renderer : IDisposable
     private const int MaxObjects = 4096;
     private const ulong ModelStride = 256;   // >= minUniformBufferOffsetAlignment
     private const ulong CameraSize  = 240;   // two mat4x4<f32> (view, proj) + seven vec4<f32> (sun, light params, camera position, fog, zenith, horizon, clouds)
-    private const ulong ModelSize   = 96;    // mat4x4<f32> + vec3<i32> chunk + i32 grid + vec4<i32> padding
+    private const ulong ModelSize   = 96;    // mat4x4<f32> + vec3<i32> chunk + i32 grid + vec4<f32> params
 
     private static readonly string Wgsl = @"
 const MIN_AMBIENT: f32 = 0.00;        // floor so no geometry is ever fully black
@@ -89,8 +89,8 @@ fn fs_sky(in: SkyOut) -> @location(0) vec4<f32> {
 }
 
 // model: world transform. chunk: this chunk's coordinate in its grid. grid: the grid's index in the GridStore, or
-// -1 for a non-chunk draw (drawn full-bright).
-struct Model { model: mat4x4<f32>, chunk: vec3<i32>, grid: i32, _pad: vec4<i32> };
+// -1 for a non-chunk draw (drawn full-bright). params.x: alpha-test cutoff for fs_model (0 = opaque); yzw unused.
+struct Model { model: mat4x4<f32>, chunk: vec3<i32>, grid: i32, params: vec4<f32> };
 @group(1) @binding(0) var<uniform> model: Model;
 
 // The shared voxel storage (see GridStore): occupancy pool, chunk table ((occupancy slot or code, chunk tag), then
@@ -473,6 +473,21 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     return vec4<f32>(applyFog(baseColor * lit * aoFactor, in.worldPos), 1.0);
 }
 
+// 3D models (GpuModel, e.g. glTF props): group 3 holds the model's own single-layer texture instead of the block
+// array, sampled at the normalized uv.xy. No voxel light data, so lit like an open-air surface: the brighter of the
+// flat ambient and Lambertian sun, then fogged like the terrain. Drawn with culling off (glTF doubleSided is common
+// and cheap here), so back faces flip their normal. Texels under the material's alpha cutoff are cut out.
+@fragment
+fn fs_model(in: VSOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    let tex = textureSample(atlasTex, atlasSamp, in.uv.xy, 0);
+    if (tex.a < model.params.x) { discard; }
+    var n = normalize(in.worldNormal);
+    if (!front) { n = -n; }
+    let ndotl = max(dot(n, -camera.sunDir.xyz), 0.0);
+    let lit   = max(max(camera.lightParams.z, ndotl * camera.sunDir.w), MIN_AMBIENT);
+    return vec4<f32>(applyFog(tex.rgb * in.color * lit, in.worldPos), 1.0);
+}
+
 // Cloud-layer boxes (CloudLayer): flat per-face shading like Minecraft's clouds (bright tops, darker sides and
 // undersides), a little extra on the faces the sun hits, then faded into the sky by the cloud layer's own fog
 // distances — clouds aren't limited by the loaded world, so they use neither of the terrain fog ranges.
@@ -504,6 +519,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     private RenderPipeline* _hudPipeline;
     private RenderPipeline* _skyPipeline;
     private RenderPipeline* _cloudPipeline;
+    private RenderPipeline* _modelPipeline;
 
     // Block texture array (TextureAtlas → GPU). Constructed with a 1x1 white fallback so BeginFrame
     // always has a valid group-3 bind group; LoadTextureAtlas replaces it with the real spritesheet.
@@ -564,6 +580,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         _hudPipeline       = CreatePipeline(PrimitiveTopology.TriangleList, CullMode.None, depthTest: false);
         _skyPipeline       = CreateSkyPipeline();
         _cloudPipeline     = CreatePipeline(PrimitiveTopology.TriangleList, CullMode.None, fragmentEntry: "fs_cloud");
+        _modelPipeline     = CreatePipeline(PrimitiveTopology.TriangleList, CullMode.None, fragmentEntry: "fs_model");
 
         _cameraBuffer    = GpuBuffer.CreateUniform(ctx, CameraSize);
         _hudCameraBuffer = GpuBuffer.CreateUniform(ctx, CameraSize);
@@ -806,24 +823,46 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         if (_atlasTextureView != null) _api.TextureViewRelease(_atlasTextureView);
         if (_atlasTexture     != null) _api.TextureRelease(_atlasTexture);
 
+        var samplerDesc = new SamplerDescriptor
+        {
+            AddressModeU  = AddressMode.Repeat,
+            AddressModeV  = AddressMode.Repeat,
+            AddressModeW  = AddressMode.Repeat,
+            MagFilter     = FilterMode.Nearest,
+            MinFilter     = FilterMode.Nearest,
+            MipmapFilter  = MipmapFilterMode.Nearest,
+            LodMinClamp   = 0,
+            LodMaxClamp   = 1,
+            Compare       = CompareFunction.Undefined,
+            MaxAnisotropy = 1,
+        };
+        CreateTextureArray(tileWidth, tileHeight, layers, samplerDesc,
+                           out _atlasTexture, out _atlasTextureView, out _atlasSampler, out _atlasBindGroup);
+    }
+
+    /// <summary>Uploads <paramref name="layers"/> (RGBA8, <paramref name="width"/>×<paramref name="height"/> each) as a
+    /// <c>texture_2d_array</c> and wraps it with a sampler in a bind group on the group-3 layout.</summary>
+    private void CreateTextureArray(int width, int height, byte[][] layers, in SamplerDescriptor samplerDesc,
+                                    out Texture* texture, out TextureView* view, out Sampler* sampler, out BindGroup* bindGroup)
+    {
         var texDesc = new TextureDescriptor
         {
             Usage         = TextureUsage.TextureBinding | TextureUsage.CopyDst,
             Dimension     = TextureDimension.Dimension2D,
-            Size          = new Extent3D((uint)tileWidth, (uint)tileHeight, (uint)layers.Length),
+            Size          = new Extent3D((uint)width, (uint)height, (uint)layers.Length),
             Format        = TextureFormat.Rgba8Unorm,
             MipLevelCount = 1,
             SampleCount   = 1,
         };
-        _atlasTexture = _api.DeviceCreateTexture(_ctx.Device, &texDesc);
+        texture = _api.DeviceCreateTexture(_ctx.Device, &texDesc);
 
         for (uint layer = 0; layer < layers.Length; layer++)
         {
             fixed (byte* data = layers[layer])
             {
-                var dest = new ImageCopyTexture { Texture = _atlasTexture, MipLevel = 0, Origin = new Origin3D(0, 0, layer), Aspect = TextureAspect.All };
-                var dataLayout = new TextureDataLayout { Offset = 0, BytesPerRow = (uint)(tileWidth * 4), RowsPerImage = (uint)tileHeight };
-                var writeSize = new Extent3D((uint)tileWidth, (uint)tileHeight, 1);
+                var dest = new ImageCopyTexture { Texture = texture, MipLevel = 0, Origin = new Origin3D(0, 0, layer), Aspect = TextureAspect.All };
+                var dataLayout = new TextureDataLayout { Offset = 0, BytesPerRow = (uint)(width * 4), RowsPerImage = (uint)height };
+                var writeSize = new Extent3D((uint)width, (uint)height, 1);
                 _api.QueueWriteTexture(_ctx.Queue, &dest, data, (nuint)layers[layer].Length, &dataLayout, &writeSize);
             }
         }
@@ -838,28 +877,48 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
             ArrayLayerCount = (uint)layers.Length,
             Aspect          = TextureAspect.All,
         };
-        _atlasTextureView = _api.TextureCreateView(_atlasTexture, &viewDesc);
+        view = _api.TextureCreateView(texture, &viewDesc);
 
-        var samplerDesc = new SamplerDescriptor
-        {
-            AddressModeU  = AddressMode.Repeat,
-            AddressModeV  = AddressMode.Repeat,
-            AddressModeW  = AddressMode.Repeat,
-            MagFilter     = FilterMode.Nearest,
-            MinFilter     = FilterMode.Nearest,
-            MipmapFilter  = MipmapFilterMode.Nearest,
-            LodMinClamp   = 0,
-            LodMaxClamp   = 1,
-            Compare       = CompareFunction.Undefined,
-            MaxAnisotropy = 1,
-        };
-        _atlasSampler = _api.DeviceCreateSampler(_ctx.Device, &samplerDesc);
+        fixed (SamplerDescriptor* sd = &samplerDesc)
+            sampler = _api.DeviceCreateSampler(_ctx.Device, sd);
 
         BindGroupEntry* entries = stackalloc BindGroupEntry[2];
-        entries[0] = new BindGroupEntry { Binding = 0, TextureView = _atlasTextureView };
-        entries[1] = new BindGroupEntry { Binding = 1, Sampler = _atlasSampler };
+        entries[0] = new BindGroupEntry { Binding = 0, TextureView = view };
+        entries[1] = new BindGroupEntry { Binding = 1, Sampler = sampler };
         var desc = new BindGroupDescriptor { Layout = _atlasLayout, EntryCount = 2, Entries = entries };
-        _atlasBindGroup = _api.DeviceCreateBindGroup(_ctx.Device, &desc);
+        bindGroup = _api.DeviceCreateBindGroup(_ctx.Device, &desc);
+    }
+
+    /// <summary>Uploads a loaded model (see <see cref="Gltf.GltfLoader"/>): one mesh and texture per material part.
+    /// Untextured materials get a 1×1 white texture, so their base colour (carried in the vertex colour) shows as is.</summary>
+    public GpuModel UploadModel(Gltf.ModelData data)
+    {
+        var parts = new List<GpuModelPart>(data.Parts.Count);
+        foreach (var part in data.Parts)
+        {
+            var tex = part.Material.Texture;
+            var samplerDesc = new SamplerDescriptor
+            {
+                AddressModeU  = tex is { ClampU: true } ? AddressMode.ClampToEdge : AddressMode.Repeat,
+                AddressModeV  = tex is { ClampV: true } ? AddressMode.ClampToEdge : AddressMode.Repeat,
+                AddressModeW  = AddressMode.ClampToEdge,
+                MagFilter     = tex is null or { Nearest: true } ? FilterMode.Nearest : FilterMode.Linear,
+                MinFilter     = tex is null or { Nearest: true } ? FilterMode.Nearest : FilterMode.Linear,
+                MipmapFilter  = MipmapFilterMode.Nearest,
+                LodMinClamp   = 0,
+                LodMaxClamp   = 1,
+                Compare       = CompareFunction.Undefined,
+                MaxAnisotropy = 1,
+            };
+            int w = tex?.Width ?? 1, h = tex?.Height ?? 1;
+            var pixels = tex?.Rgba ?? new byte[] { 255, 255, 255, 255 };
+            CreateTextureArray(w, h, new[] { pixels }, samplerDesc,
+                               out var texture, out var view, out var sampler, out var bindGroup);
+
+            var mesh = UploadMesh(part.Vertices, part.Indices);
+            parts.Add(new GpuModelPart(mesh, new ModelTexture(_api, texture, view, sampler, bindGroup), part.Material.AlphaCutoff));
+        }
+        return new GpuModel(parts, data.BoundsMin, data.BoundsMax);
     }
 
     public GpuMesh UploadMesh(ReadOnlySpan<Vertex> vertices, ReadOnlySpan<uint> indices)
@@ -898,6 +957,34 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         _api.RenderPassEncoderDrawIndexed(_pass, mesh.WireframeIndexCount, 1, 0, 0, 0);
         _api.RenderPassEncoderSetPipeline(_pass, WireframeMode ? _wireframePipeline : _pipeline);
         _drawIndex++;
+    }
+
+    /// <summary>
+    /// Draws every part of <paramref name="gpuModel"/> placed by <paramref name="model"/> with the model shader
+    /// (fs_model: its own texture, sun + ambient, fog), or as a full-bright wireframe while
+    /// <see cref="WireframeMode"/> is on. Depth-tested like the world, so call it before <see cref="DrawSky"/>.
+    /// </summary>
+    public void DrawModel(GpuModel gpuModel, in Mat4 model)
+    {
+        _api.RenderPassEncoderSetPipeline(_pass, WireframeMode ? _wireframePipeline : _modelPipeline);
+        foreach (var part in gpuModel.Parts)
+        {
+            if (_drawIndex >= MaxObjects) break;
+            var u = ModelUniform.Default(model);
+            u.AlphaCutoff = part.AlphaCutoff;
+            uint dynOffset = StageModel(u);
+            _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset);
+            _api.RenderPassEncoderSetBindGroup(_pass, 3, part.Texture.BindGroup, 0, null);
+            _api.RenderPassEncoderSetVertexBuffer(_pass, 0, part.Mesh.VertexBuffer.Handle, 0, part.Mesh.VertexBuffer.SizeBytes);
+
+            var idxBuf   = WireframeMode ? part.Mesh.WireframeBuffer : part.Mesh.IndexBuffer;
+            var idxCount = WireframeMode ? part.Mesh.WireframeIndexCount : part.Mesh.IndexCount;
+            _api.RenderPassEncoderSetIndexBuffer(_pass, idxBuf.Handle, IndexFormat.Uint32, 0, idxBuf.SizeBytes);
+            _api.RenderPassEncoderDrawIndexed(_pass, idxCount, 1, 0, 0, 0);
+            _drawIndex++;
+        }
+        _api.RenderPassEncoderSetBindGroup(_pass, 3, _atlasBindGroup, 0, null);
+        _api.RenderPassEncoderSetPipeline(_pass, WireframeMode ? _wireframePipeline : _pipeline);
     }
 
     /// <summary>
@@ -1094,7 +1181,8 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     {
         public Mat4 Model;
         public int ChunkX, ChunkY, ChunkZ, Grid;
-        public int _Pad0, _Pad1, _Pad2, _Pad3;
+        public float AlphaCutoff;      // params.x (fs_model)
+        public float _Pad1, _Pad2, _Pad3;
         // 64 + 16 + 16 = 96 == ModelSize bytes the shader reads, padded to ModelStride
 
         /// <summary>Non-chunk draws: no grid, drawn full-bright.</summary>
@@ -1113,6 +1201,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         if (_atlasSampler     != null) _api.SamplerRelease(_atlasSampler);
         if (_atlasTextureView != null) _api.TextureViewRelease(_atlasTextureView);
         if (_atlasTexture     != null) _api.TextureRelease(_atlasTexture);
+        if (_modelPipeline      != null) _api.RenderPipelineRelease(_modelPipeline);
         if (_cloudPipeline      != null) _api.RenderPipelineRelease(_cloudPipeline);
         if (_skyPipeline        != null) _api.RenderPipelineRelease(_skyPipeline);
         if (_hudPipeline        != null) _api.RenderPipelineRelease(_hudPipeline);

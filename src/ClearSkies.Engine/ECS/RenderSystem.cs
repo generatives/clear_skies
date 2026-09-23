@@ -16,6 +16,7 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
     private readonly EntitySet _cameras;
     private readonly EntitySet _chunkMeshes;
     private readonly EntitySet _wireframes;
+    private readonly EntitySet _models;
     private readonly EntitySet _huds;
     private readonly Renderer _renderer;
     private readonly ImGuiController _gui;
@@ -31,6 +32,7 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
         _cameras    = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
         _chunkMeshes     = world.GetEntities().With<Transform>().With<ChunkMesh>().AsSet();
         _wireframes = world.GetEntities().With<Transform>().With<WireframeRenderer>().AsSet();
+        _models     = world.GetEntities().With<Transform>().With<ModelRenderer>().AsSet();
         _huds       = world.GetEntities().With<HudRenderer>().AsSet();
     }
 
@@ -140,6 +142,14 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
         foreach (var d in _draws)
             _renderer.DrawChunkMesh(d.Mesh, d.Model, d.Grid, d.Chunk);
 
+        foreach (ref readonly Entity e in _models.GetEntities())
+        {
+            ref readonly var mr = ref e.Get<ModelRenderer>();
+            var model = e.Get<Transform>().ToMatrix();
+            if (!BoundsIntersect(model, mr.Model.BoundsMin, mr.Model.BoundsMax, camFrustum)) continue;
+            _renderer.DrawModel(mr.Model, model);
+        }
+
         if (SkySettings.CloudsEnabled) _clouds.Draw(camTransform.Position, _time.TotalSeconds);
 
         // Sky after the world and clouds, so it only shades the pixels they left uncovered.
@@ -171,13 +181,17 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
     /// than assuming axis-alignment, since a dynamic grid's chunks are rotated (the static world's aren't,
     /// but there's no cheap way to tell which case this is from the matrix alone, and 8 corner transforms
     /// per chunk per frame is negligible next to the draw call it decides whether to skip).</summary>
-    private static bool ChunkBoundsIntersect(in Mat4 model, in Frustum frustum)
+    private static bool ChunkBoundsIntersect(in Mat4 model, in Frustum frustum) =>
+        BoundsIntersect(model, Vector3D<float>.Zero, new Vector3D<float>(ChunkData.Size), frustum);
+
+    /// <summary>True if the local box [<paramref name="lo"/>, <paramref name="hi"/>] placed by <paramref name="model"/>
+    /// intersects <paramref name="frustum"/> (its 8 corners transformed, so rotation is handled).</summary>
+    private static bool BoundsIntersect(in Mat4 model, Vector3D<float> lo, Vector3D<float> hi, in Frustum frustum)
     {
-        const float S = ChunkData.Size;
         Vector3D<float> min = new(float.MaxValue), max = new(float.MinValue);
         for (int i = 0; i < 8; i++)
         {
-            var local = new Vector3D<float>((i & 1) != 0 ? S : 0f, (i & 2) != 0 ? S : 0f, (i & 4) != 0 ? S : 0f);
+            var local = new Vector3D<float>((i & 1) != 0 ? hi.X : lo.X, (i & 2) != 0 ? hi.Y : lo.Y, (i & 4) != 0 ? hi.Z : lo.Z);
             var world = model.TransformPoint(local);
             min = Vector3D.Min(min, world);
             max = Vector3D.Max(max, world);

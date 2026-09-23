@@ -1,5 +1,6 @@
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.ECS;
+using ClearSkies.Engine.Rendering.Gltf;
 using ClearSkies.Engine.Rendering.WebGpu;
 using ClearSkies.Engine.Voxels;
 using ClearSkies.Game;
@@ -112,6 +113,22 @@ var camSpawn = TestScene.Build(host, seed);
     Console.WriteLine($"[test-ship] spawned 5x2x5 hull + lamp at {shipSpawn}");
 }
 
+// glTF model rendering test: the Blockbench lever, floating a couple of blocks in front of the spawn camera (which
+// starts facing -Z, away from the test ship above), just below eye level. No scaling needed: Blockbench's glTF exporter already divides
+// its 16-pixels-per-block grid by 16, so 1 exported unit = 1 block.
+{
+    var lever = host.Renderer.UploadModel(GltfLoader.Load(
+        Path.Combine(AppContext.BaseDirectory, "Resources", "Models", "lever", "lever.gltf")));
+    var leverEntity = host.World.CreateEntity();
+    var leverTransform = Transform.Identity;
+    leverTransform.Position = camSpawn + new Vector3D<float>(0f, -0.75f, -2.5f);
+    leverEntity.Set(leverTransform);
+    leverEntity.Set(new ModelRenderer { Model = lever });
+    Console.WriteLine($"[model] lever ({lever.Parts.Count} part(s)) at {leverTransform.Position}");
+}
+
+{ int f=0; var camSet = host.World.GetEntities().With<CameraComponent>().AsSet();
+host.AddSystem(new LambdaSystem(() => { if (++f % 20 != 0) return; foreach (var e in camSet.GetEntities()) { var t=e.Get<Transform>(); Console.WriteLine($"[cam] {t.Position} {t.Rotation} {e.Get<MouseLookComponent>().Pitch}"); } }), SystemStage.Logic); }
 host.Run();
 
 chunkLoadSystem.SaveAllDirty(); // graceful-exit flush; unload/autosave already cover the running game

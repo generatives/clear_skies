@@ -28,3 +28,10 @@ public struct HudRenderer
 {
     public GpuMesh Mesh;
 }
+/// <summary>Draws a 3D model (e.g. a glTF prop loaded via <see cref="ClearSkies.Engine.Rendering.Gltf.GltfLoader"/>
+/// and uploaded with <c>Renderer.UploadModel</c>) at the entity's <c>Transform</c>. The model can be shared by
+/// many entities.</summary>
+public struct ModelRenderer
+{
+    public GpuModel Model;
+}
