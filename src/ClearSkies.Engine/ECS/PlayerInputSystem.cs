@@ -63,7 +63,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
     {
         _world       = world;
         _cameras     = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
-        _grids       = world.GetEntities().With<ChunkVolume>().With<DynamicGrid>().AsSet();
+        _grids       = world.GetEntities().With<ChunkGrid>().With<DynamicGrid>().AsSet();
         _staticVolume = staticVolume;
         _physics     = physics;
         _input       = input;
@@ -139,7 +139,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
 
         foreach (ref readonly Entity e in _grids.GetEntities())
         {
-            var volume = e.Get<ChunkVolume>();
+            var volume = e.Get<ChunkGrid>().Volume;
             var grid = e.Get<DynamicGrid>();
             if (!grid.BodyCreated) continue;
 

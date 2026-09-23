@@ -37,7 +37,7 @@ public sealed class GridPersistenceSystem : ISystem
         _physics    = physics;
         _selection  = selection;
         _cameras      = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
-        _selectedGrid = world.GetEntities().With<ChunkVolume>().With<SelectedGridComponent>().AsSet();
+        _selectedGrid = world.GetEntities().With<ChunkGrid>().With<SelectedGridComponent>().AsSet();
 
         _savesDir = Path.Combine(AppContext.BaseDirectory, "Saves", "Grids");
         Directory.CreateDirectory(_savesDir);

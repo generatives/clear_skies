@@ -153,7 +153,7 @@ public sealed class GridPilotSystem : ISystem
 
         foreach (ref readonly Entity e in _selectedGrid.GetEntities())
         {
-            var grid = e.Get<DynamicGrid>();
+            ref var grid = ref e.Get<DynamicGrid>();
             if (!grid.BodyCreated) return;
 
             if (lockPressed)

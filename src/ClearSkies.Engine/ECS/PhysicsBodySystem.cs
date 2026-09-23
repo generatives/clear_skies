@@ -74,7 +74,7 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
 
     public void UpdateColliders()
     {
-        HashSet<(ChunkVolume, DynamicGrid)> grids = new HashSet<(ChunkVolume, DynamicGrid)>(1);
+        HashSet<Entity> grids = new HashSet<Entity>(1);
 
         foreach (var entity in _dirtyChunks.GetEntities())
         {
@@ -85,7 +85,7 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
 
             if (volumeEntity.Has<DynamicGrid>())
             {
-                grids.Add((volume, volumeEntity.Get<DynamicGrid>()));
+                grids.Add(volumeEntity);
             }
             else
             {
@@ -95,9 +95,9 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
             entity.Remove<NeedsRecollideFlag>();
         }
 
-        foreach (var (volume, dg) in grids)
+        foreach (var entity in grids)
         {
-            UpdateDynamicGrid(volume, dg);
+            UpdateDynamicGrid(entity);
         }
     }
 
@@ -167,7 +167,7 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
     public bool HasCollider(ChunkPosition pos) => _colliders.ContainsKey(pos);
 
     // ── dynamic grid bodies (moved from GridShapeSystem) ────────────────────────
-    private void UpdateDynamicGrid(ChunkVolume chunkVolume, DynamicGrid grid)
+    private void UpdateDynamicGrid(Entity entity)
     {
         // Gather merged boxes across all chunks, expressed in grid-local space. Each box is
         // homogeneous in BlockId (see VoxelBoxDecomposer), so its mass is volume * that block's
@@ -175,6 +175,10 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
         // count here (AirshipFlightSystem's feedforward) since we're already walking every box.
         _dynamicBoxes.Clear();
         int buoyantCount = 0;
+
+        var chunkVolume = entity.Get<ChunkGrid>().Volume;
+        ref var grid = ref entity.Get<DynamicGrid>();
+
         foreach (var (pos, entry) in chunkVolume.All)
         {
             if (!entry.Data.HasAnySolid()) continue;
