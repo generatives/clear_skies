@@ -22,7 +22,6 @@ public sealed class ModelRenderSystem : ISystem
 
     public void Update(float dt)
     {
-        if (!_frame.IsOpen) return;
         var frame = _frame.Context;
         foreach (ref readonly Entity e in _models.GetEntities())
         {

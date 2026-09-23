@@ -8,20 +8,17 @@ namespace ClearSkies.Engine.ECS;
 /// <see cref="Transform"/>. Runs in <see cref="SystemStage.RenderOverlay"/>.</summary>
 public sealed class WireframeRenderSystem : ISystem
 {
-    private readonly RenderFrame _frame;
     private readonly EntitySet _wireframes;
     private readonly Renderer _renderer;
 
-    public WireframeRenderSystem(RenderFrame frame, World world, Renderer renderer)
+    public WireframeRenderSystem(World world, Renderer renderer)
     {
-        _frame      = frame;
         _renderer   = renderer;
         _wireframes = world.GetEntities().With<Transform>().With<WireframeRenderer>().AsSet();
     }
 
     public void Update(float dt)
     {
-        if (!_frame.IsOpen) return;
         foreach (ref readonly Entity e in _wireframes.GetEntities())
         {
             ref readonly var t  = ref e.Get<Transform>();

@@ -28,7 +28,7 @@ namespace ClearSkies.Engine.Gui;
 ///
 /// <see cref="EndFrame"/> is a separate, non-<see cref="ISystem"/> call: it must run after all
 /// world/HUD geometry for the frame has been drawn and right before <see cref="Renderer.EndFrame"/>
-/// closes the pass, so <c>FrameEndSystem</c> (the EndRender stage) calls it directly.
+/// closes the pass, so <c>RenderFrame.End</c> (called by the host after the render stages) calls it directly.
 /// </summary>
 public sealed unsafe class ImGuiController : ISystem, IDisposable
 {

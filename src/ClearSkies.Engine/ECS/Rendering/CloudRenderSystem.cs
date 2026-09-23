@@ -20,7 +20,6 @@ public sealed class CloudRenderSystem : ISystem, IDisposable
 
     public void Update(float dt)
     {
-        if (!_frame.IsOpen) return;
         var frame = _frame.Context;
         if (SkySettings.CloudsEnabled) _clouds.Draw(frame.CameraPosition, frame.TimeSeconds);
     }

@@ -1,3 +1,4 @@
+using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Gui;
 using ClearSkies.Engine.Input;
 using ClearSkies.Engine.Physics;
@@ -26,6 +27,10 @@ public sealed class EngineHost : IDisposable
     public Time Time { get; }
     public ImGuiController Gui { get; }
 
+    /// <summary>The frame the render stages draw into; its <see cref="RenderFrame.Context"/> holds this frame's
+    /// camera. Opened and closed by the host around the render stages.</summary>
+    public RenderFrame Frame { get; }
+
     public EngineHost(EngineOptions options)
     {
         Options = options;
@@ -47,6 +52,8 @@ public sealed class EngineHost : IDisposable
         Window.Render += OnRender;
         Window.Resize += Renderer.OnResize;
 
+        Frame = new RenderFrame(World, Renderer, Gui, Time);
+        Gui.RegisterDebugUi(Frame);
         Gui.RegisterDebugUi(new FrameTimingsPanel(this));
     }
 
@@ -80,9 +87,23 @@ public sealed class EngineHost : IDisposable
     {
         Time.Advance(dt);
         Window.Native.Title = $"{Options.Title} — {Time.FramesPerSecond} fps";
-        for (var stage = SystemStage.BeginRender; stage <= SystemStage.EndRender; stage++)
-            RunStage(stage, (float)dt);
+
+        // The render stages only make sense inside an open frame; when it can't be opened (no active camera, no
+        // swapchain image) they're skipped entirely, and End still closes ImGui's frame.
+        _systemTimer.Restart();
+        bool open = Frame.TryBegin();
+        _frameBeginMs += TimingSmoothing * (_systemTimer.Elapsed.TotalMilliseconds - _frameBeginMs);
+        if (open)
+            for (var stage = SystemStage.RenderWorld; stage <= SystemStage.RenderHud; stage++)
+                RunStage(stage, (float)dt);
+
+        _systemTimer.Restart();
+        Frame.End();
+        _frameEndMs += TimingSmoothing * (_systemTimer.Elapsed.TotalMilliseconds - _frameEndMs);
     }
+
+    // Smoothed CPU time of opening (camera uniform, swapchain acquire) and closing (ImGui, submit, present) the frame.
+    private double _frameBeginMs, _frameEndMs;
 
     private void RunStage(SystemStage stage, float dt)
     {
@@ -99,7 +120,7 @@ public sealed class EngineHost : IDisposable
 
     /// <summary>Debug panel listing each system's CPU time per frame, slowest first. GPU work isn't timed
     /// directly: if the frame takes much longer than the CPU total, the difference is GPU time (or vsync),
-    /// and it usually shows up inside FrameEndSystem, where the frame waits to present.</summary>
+    /// and it usually shows up in "Frame begin" / "Frame end", where the frame waits to acquire / present.</summary>
     private sealed class FrameTimingsPanel : IDebugUiSystem
     {
         private readonly EngineHost _host;
@@ -117,6 +138,9 @@ public sealed class EngineHost : IDisposable
                 rows.Add(($"{system.GetType().Name} ({stage})", h._systemMs[i]));
                 total += h._systemMs[i];
             }
+            rows.Add(("Frame begin (camera, acquire)", h._frameBeginMs));
+            rows.Add(("Frame end (ImGui, submit, present)", h._frameEndMs));
+            total += h._frameBeginMs + h._frameEndMs;
             rows.Sort((a, b) => b.ms.CompareTo(a.ms));
 
             double frameMs = h.Time.FramesPerSecond > 0 ? 1000.0 / h.Time.FramesPerSecond : 0;

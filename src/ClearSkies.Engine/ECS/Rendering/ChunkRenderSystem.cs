@@ -42,7 +42,6 @@ public sealed class ChunkRenderSystem : ISystem, IDebugUiSystem
 
     public void Update(float dt)
     {
-        if (!_frame.IsOpen) return;
         var frame = _frame.Context;
         // Every chunk's box is exactly ChunkData.Size local units on a side (GreedyMesher's local space); its model
         // blocks sit in its cells, so the same box culls them too.

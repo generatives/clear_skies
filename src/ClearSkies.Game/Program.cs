@@ -95,18 +95,15 @@ host.AddSystem(new DynamicGridCleanupSystem(host.World), SystemStage.Logic);
 host.AddSystem(new GpuResidencySystem(host.World, staticVolume, gridStore), SystemStage.PreRender);
 host.AddSystem(new GpuLightSystem(host.World, staticVolume, host.Context, host.Physics, gridStore), SystemStage.PreRender);
 host.AddSystem(meshSystem, SystemStage.PreRender);
-// Rendering: FrameBeginSystem opens the frame in BeginRender, the draw systems fill it stage by stage (in the order
-// added within a stage), and FrameEndSystem draws ImGui and presents in EndRender. They share the frame via RenderFrame.
-var renderFrame = new RenderFrame();
-using var clouds = new CloudRenderSystem(renderFrame, host.Renderer);
-host.AddSystem(new FrameBeginSystem(renderFrame, host.World, host.Renderer, host.Time), SystemStage.BeginRender);
-host.AddSystem(new ChunkRenderSystem(renderFrame, host.World, host.Renderer), SystemStage.RenderWorld);
-host.AddSystem(new ModelRenderSystem(renderFrame, host.World, host.Renderer), SystemStage.RenderWorld);
+// Rendering: the host opens the frame, runs the render stages (systems in the order added within a stage), then
+// closes it with ImGui and presents. Systems read this frame's camera from host.Frame.Context.
+using var clouds = new CloudRenderSystem(host.Frame, host.Renderer);
+host.AddSystem(new ChunkRenderSystem(host.Frame, host.World, host.Renderer), SystemStage.RenderWorld);
+host.AddSystem(new ModelRenderSystem(host.Frame, host.World, host.Renderer), SystemStage.RenderWorld);
 host.AddSystem(clouds, SystemStage.RenderWorld);
-host.AddSystem(new SkyRenderSystem(renderFrame, host.Renderer), SystemStage.RenderSky);
-host.AddSystem(new WireframeRenderSystem(renderFrame, host.World, host.Renderer), SystemStage.RenderOverlay);
-host.AddSystem(new HudRenderSystem(renderFrame, host.World, host.Renderer), SystemStage.RenderHud);
-host.AddSystem(new FrameEndSystem(renderFrame, host.Renderer, host.Gui), SystemStage.EndRender);
+host.AddSystem(new SkyRenderSystem(host.Renderer), SystemStage.RenderSky);
+host.AddSystem(new WireframeRenderSystem(host.World, host.Renderer), SystemStage.RenderOverlay);
+host.AddSystem(new HudRenderSystem(host.World, host.Renderer), SystemStage.RenderHud);
 
 var camSpawn = TestScene.Build(host, seed);
 
