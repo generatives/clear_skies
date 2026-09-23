@@ -10,11 +10,14 @@ using Silk.NET.Maths;
 
 namespace ClearSkies.Engine.ECS;
 
-/// <summary>Builds the camera uniform and issues a draw call per <see cref="ChunkMesh"/> entity.</summary>
+/// <summary>
+/// Owns the frame: builds the camera uniform, opens the render pass, runs every registered
+/// <see cref="IWorldRenderPass"/> (e.g. <see cref="ChunkRenderSystem"/>) and draws the standalone
+/// <see cref="ModelRenderer"/> entities, then clouds, sky, wireframe overlays, HUD and ImGui.
+/// </summary>
 public sealed class RenderSystem : ISystem, IDebugUiSystem
 {
     private readonly EntitySet _cameras;
-    private readonly EntitySet _chunkMeshes;
     private readonly EntitySet _wireframes;
     private readonly EntitySet _models;
     private readonly EntitySet _huds;
@@ -30,7 +33,6 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
         _time       = time;
         _clouds     = new CloudLayer(renderer);
         _cameras    = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
-        _chunkMeshes     = world.GetEntities().With<Transform>().With<ChunkMesh>().AsSet();
         _wireframes = world.GetEntities().With<Transform>().With<WireframeRenderer>().AsSet();
         _models     = world.GetEntities().With<Transform>().With<ModelRenderer>().AsSet();
         _huds       = world.GetEntities().With<HudRenderer>().AsSet();
@@ -40,15 +42,16 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
     public string DebugName => "Renderer";
     private bool _referenceLighting;
 
-    // One visible chunk draw, collected so they can be issued nearest first.
-    private readonly record struct ChunkDraw(float DistSq, GpuMesh Mesh, Mat4 Model, int Grid, ChunkPosition Chunk);
-    private readonly List<ChunkDraw> _draws = new();
-    private static readonly Comparison<ChunkDraw> NearestFirst = (a, b) => a.DistSq.CompareTo(b.DistSq);
+    private readonly List<IWorldRenderPass> _worldPasses = new();
+
+    /// <summary>Adds a pass drawn each frame after the camera is set up and before clouds and sky, in the order
+    /// added.</summary>
+    public void AddWorldPass(IWorldRenderPass pass) => _worldPasses.Add(pass);
 
     public void DrawDebugUi()
     {
         ImGui.Text($"{_time.FramesPerSecond} fps");
-        ImGui.Text($"Draw calls: {_renderer.DrawCount:N0} ({_draws.Count:N0} chunks visible of {_chunkMeshes.Count:N0})");
+        ImGui.Text($"Draw calls: {_renderer.DrawCount:N0}");
         ImGui.Text($"Swapchain acquire wait: {_renderer.AcquireMs:F2} ms, present: {_renderer.PresentMs:F2} ms");
         ImGui.TextDisabled("A large acquire/present wait means the frame is waiting on the GPU (vsync is on).");
         bool wireframe = _renderer.WireframeMode;
@@ -117,36 +120,16 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
 
         _renderer.SetCameraUniform(uniform);
 
-        // Every loaded chunk mesh gets a ChunkMesh (see ChunkVolume.SetMesh); frustum-cull them. Every chunk
-        // mesh is exactly ChunkData.Size local units on a side (GreedyMesher's local space), so the world AABB is
-        // just that box transformed by the entity's own model matrix (handles a dynamic grid's rotation too).
-        var camFrustum = Frustum.FromViewProjection(Mat4.Multiply(uniform.Projection, uniform.View));
-
-        // Drawn nearest first, so the depth test rejects hidden fragments before the (expensive) lighting shader
-        // runs on them instead of shading them and overwriting them later.
-        _draws.Clear();
-        var half = new Vector3D<float>(ChunkData.Size * 0.5f);
-        foreach (ref readonly Entity e in _chunkMeshes.GetEntities())
-        {
-            ref readonly var t   = ref e.Get<Transform>();
-            ref readonly var mr  = ref e.Get<ChunkMesh>();
-
-            var model = t.ToMatrix();
-            if (!ChunkBoundsIntersect(model, camFrustum)) continue;
-
-            float distSq = Vector3D.DistanceSquared(model.TransformPoint(half), camTransform.Position);
-            _draws.Add(new ChunkDraw(distSq, mr.Mesh, model, mr.Grid?.Index ?? -1, mr.ChunkPos));
-        }
-        _draws.Sort(NearestFirst);
-
-        foreach (var d in _draws)
-            _renderer.DrawChunkMesh(d.Mesh, d.Model, d.Grid, d.Chunk);
+        var frame = new WorldRenderContext(camTransform.Position,
+                                           Frustum.FromViewProjection(Mat4.Multiply(uniform.Projection, uniform.View)));
+        foreach (var pass in _worldPasses)
+            pass.Draw(frame);
 
         foreach (ref readonly Entity e in _models.GetEntities())
         {
             ref readonly var mr = ref e.Get<ModelRenderer>();
             var model = e.Get<Transform>().ToMatrix();
-            if (!BoundsIntersect(model, mr.Model.BoundsMin, mr.Model.BoundsMax, camFrustum)) continue;
+            if (!frame.Frustum.Intersects(model, mr.Model.BoundsMin, mr.Model.BoundsMax)) continue;
             _renderer.DrawModel(mr.Model, model);
         }
 
@@ -174,29 +157,6 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
         // ImGui draws last, on top of everything, in the same pass.
         _gui.EndFrame();
         _renderer.EndFrame();
-    }
-
-    /// <summary>True if the chunk-sized ([0,ChunkData.Size] local space, per GreedyMesher) box placed by
-    /// <paramref name="model"/> intersects <paramref name="frustum"/>. Transforms all 8 local corners rather
-    /// than assuming axis-alignment, since a dynamic grid's chunks are rotated (the static world's aren't,
-    /// but there's no cheap way to tell which case this is from the matrix alone, and 8 corner transforms
-    /// per chunk per frame is negligible next to the draw call it decides whether to skip).</summary>
-    private static bool ChunkBoundsIntersect(in Mat4 model, in Frustum frustum) =>
-        BoundsIntersect(model, Vector3D<float>.Zero, new Vector3D<float>(ChunkData.Size), frustum);
-
-    /// <summary>True if the local box [<paramref name="lo"/>, <paramref name="hi"/>] placed by <paramref name="model"/>
-    /// intersects <paramref name="frustum"/> (its 8 corners transformed, so rotation is handled).</summary>
-    private static bool BoundsIntersect(in Mat4 model, Vector3D<float> lo, Vector3D<float> hi, in Frustum frustum)
-    {
-        Vector3D<float> min = new(float.MaxValue), max = new(float.MinValue);
-        for (int i = 0; i < 8; i++)
-        {
-            var local = new Vector3D<float>((i & 1) != 0 ? hi.X : lo.X, (i & 2) != 0 ? hi.Y : lo.Y, (i & 4) != 0 ? hi.Z : lo.Z);
-            var world = model.TransformPoint(local);
-            min = Vector3D.Min(min, world);
-            max = Vector3D.Max(max, world);
-        }
-        return frustum.Intersects(min, max);
     }
 
     private bool TryGetActiveCamera(out Transform transform, out Camera camera)

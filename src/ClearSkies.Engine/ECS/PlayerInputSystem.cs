@@ -51,7 +51,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
     // dropdown in DrawDebugUi — both keep _placeIndex/_placeBlock in sync.
     private static readonly BlockId[] PlaceableBlocks =
         { BlockId.Stone, BlockId.Wood, BlockId.Grass, BlockId.Dirt, BlockId.Lamp, BlockId.RedLamp, BlockId.GreenLamp,
-          BlockId.BlueLamp, BlockId.Fan, BlockId.Buoyant };
+          BlockId.BlueLamp, BlockId.Fan, BlockId.Buoyant, BlockId.Lever };
     private static readonly string[] PlaceableNames =
         Array.ConvertAll(PlaceableBlocks, id => BlockRegistry.Get(id).Name);
 

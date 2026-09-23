@@ -1,6 +1,6 @@
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.ECS;
-using ClearSkies.Engine.Rendering.Gltf;
+using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Rendering.WebGpu;
 using ClearSkies.Engine.Voxels;
 using ClearSkies.Game;
@@ -33,7 +33,10 @@ var staticVolume = new ChunkVolume(staticVolumeEntity, host.World);
 staticVolumeEntity.Set(new ChunkGrid() { Volume = staticVolume });
 
 ulong seed = 1337;
-var meshSystem    = new ChunkMeshSystem(host.World, host.Renderer);
+// Model blocks' glTF models (BlockDef.Model paths are relative to Resources/Models — see the csproj's link of
+// the blockbench folder), loaded on first use.
+using var blockModels = new BlockModelLibrary(host.Renderer, Path.Combine(AppContext.BaseDirectory, "Resources", "Models"));
+var meshSystem    = new ChunkMeshSystem(host.World, host.Renderer, blockModels);
 var gridSelection = new GridSelection(host.World);
 
 host.AddSystem(host.Gui, SystemStage.Input); // opens ImGui's frame before Logic/PreRender systems run
@@ -92,7 +95,11 @@ host.AddSystem(new DynamicGridCleanupSystem(host.World), SystemStage.Logic);
 host.AddSystem(new GpuResidencySystem(host.World, staticVolume, gridStore), SystemStage.PreRender);
 host.AddSystem(new GpuLightSystem(host.World, staticVolume, host.Context, host.Physics, gridStore), SystemStage.PreRender);
 host.AddSystem(meshSystem, SystemStage.PreRender);
-host.AddSystem(new RenderSystem(host.World, host.Renderer, host.Gui, host.Time), SystemStage.Render);
+var renderSystem = new RenderSystem(host.World, host.Renderer, host.Gui, host.Time);
+var chunkRender  = new ChunkRenderSystem(host.World, host.Renderer);
+renderSystem.AddWorldPass(chunkRender);
+host.Gui.RegisterDebugUi(chunkRender);
+host.AddSystem(renderSystem, SystemStage.Render);
 
 var camSpawn = TestScene.Build(host, seed);
 
@@ -107,6 +114,9 @@ var camSpawn = TestScene.Build(host, seed);
     for (int y = 0; y < 2; y++)
         shipVoxels.Add((x, y, z, BlockId.Wood, Facing.Up));
     shipVoxels.Add((2, 2, 2, BlockId.Lamp, Facing.Up)); // exposed on the hull's roof, open air on 5 sides
+    // Model blocks: a lever standing on the roof and one sticking out of the east wall.
+    shipVoxels.Add((0, 2, 0, BlockId.Lever, Facing.Up));
+    shipVoxels.Add((5, 1, 2, BlockId.Lever, Facing.East));
 
     var shipSpawn = new Vector3(camSpawn.X + 10f, camSpawn.Y - 5f, camSpawn.Z + 45f);
     DynamicGridFactory.SpawnFromVoxels(host.World, gridSelection, shipSpawn, shipVoxels);
@@ -117,8 +127,7 @@ var camSpawn = TestScene.Build(host, seed);
 // starts facing -Z, away from the test ship above), just below eye level. No scaling needed: Blockbench's glTF exporter already divides
 // its 16-pixels-per-block grid by 16, so 1 exported unit = 1 block.
 {
-    var lever = host.Renderer.UploadModel(GltfLoader.Load(
-        Path.Combine(AppContext.BaseDirectory, "Resources", "Models", "lever", "lever.gltf")));
+    var lever = blockModels.Get(BlockId.Lever)!;
     var leverEntity = host.World.CreateEntity();
     var leverTransform = Transform.Identity;
     leverTransform.Position = camSpawn + new Vector3D<float>(0f, -0.75f, -2.5f);
@@ -127,8 +136,6 @@ var camSpawn = TestScene.Build(host, seed);
     Console.WriteLine($"[model] lever ({lever.Parts.Count} part(s)) at {leverTransform.Position}");
 }
 
-{ int f=0; var camSet = host.World.GetEntities().With<CameraComponent>().AsSet();
-host.AddSystem(new LambdaSystem(() => { if (++f % 20 != 0) return; foreach (var e in camSet.GetEntities()) { var t=e.Get<Transform>(); Console.WriteLine($"[cam] {t.Position} {t.Rotation} {e.Get<MouseLookComponent>().Pitch}"); } }), SystemStage.Logic); }
 host.Run();
 
 chunkLoadSystem.SaveAllDirty(); // graceful-exit flush; unload/autosave already cover the running game

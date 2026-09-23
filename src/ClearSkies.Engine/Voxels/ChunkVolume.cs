@@ -180,7 +180,7 @@ public class ChunkVolume
     }
 
     /// <summary>True if the chunk's boundary layer on side <paramref name="face"/> (0=-X, 1=+X, 2=-Y, 3=+Y, 4=-Z,
-    /// 5=+Z) contains any solid block, in the mesher's sense (<see cref="BlockDef.IsSolid"/>).</summary>
+    /// 5=+Z) contains any solid block, in the mesher's sense (<see cref="BlockDef.IsFullCube"/>).</summary>
     public static bool FaceHasSolid(ChunkData data, int face)
     {
         int s = ChunkData.Size, layer = (face & 1) == 0 ? 0 : s - 1;
@@ -193,7 +193,7 @@ public class ChunkVolume
                 1 => data.Get(a, layer, b),
                 _ => data.Get(a, b, layer),
             };
-            if (BlockRegistry.Get(id).IsSolid) return true;
+            if (BlockRegistry.Get(id).IsFullCube) return true;
         }
         return false;
     }

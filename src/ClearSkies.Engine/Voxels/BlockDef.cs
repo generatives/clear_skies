@@ -37,6 +37,18 @@ public readonly struct BlockDef
     /// Facing lookup entirely for blocks that look the same on every face regardless of orientation.
     public bool HasOrientedTexture => TextureTop != null || TextureBottom != null;
 
+    /// Model-block path (a glTF file relative to the game's Resources/Models folder, see
+    /// <c>BlockModelLibrary</c>). Non-null makes this a model block: drawn as that model, placed at its cell
+    /// and turned so the model's +Y points along the voxel's stored Facing, instead of as a textured cube.
+    /// It stays <see cref="IsSolid"/> (raycasts hit it, so it can be targeted, placed against and broken, and it
+    /// still collides as a full cell), but it isn't a <see cref="IsFullCube"/>: it emits no cube faces and never
+    /// hides a neighbour's.
+    public string?         Model          { get; init; }
+
+    /// True for blocks drawn as a full cube by <c>GreedyMesher</c>: solid and not a model block. The mesher's
+    /// face culling (and the neighbour remeshing that depends on it) keys off this rather than IsSolid.
+    public bool IsFullCube => IsSolid && Model == null;
+
     /// Classifies which texture role <paramref name="faceNormal"/> plays for a voxel whose stored
     /// orientation is <paramref name="facing"/>: Top if the face points the way the voxel faces,
     /// Bottom if it points the opposite way, Side otherwise.

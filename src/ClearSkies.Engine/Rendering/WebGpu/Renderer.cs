@@ -89,7 +89,8 @@ fn fs_sky(in: SkyOut) -> @location(0) vec4<f32> {
 }
 
 // model: world transform. chunk: this chunk's coordinate in its grid. grid: the grid's index in the GridStore, or
-// -1 for a non-chunk draw (drawn full-bright). params.x: alpha-test cutoff for fs_model (0 = opaque); yzw unused.
+// -1 for a non-chunk draw (drawn full-bright). params.x: alpha-test cutoff for fs_model (0 = opaque); params.yzw: for a
+// model block (fs_model with grid >= 0), its cell's voxel coordinates within the chunk.
 struct Model { model: mat4x4<f32>, chunk: vec3<i32>, grid: i32, params: vec4<f32> };
 @group(1) @binding(0) var<uniform> model: Model;
 
@@ -473,10 +474,12 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     return vec4<f32>(applyFog(baseColor * lit * aoFactor, in.worldPos), 1.0);
 }
 
-// 3D models (GpuModel, e.g. glTF props): group 3 holds the model's own single-layer texture instead of the block
-// array, sampled at the normalized uv.xy. No voxel light data, so lit like an open-air surface: the brighter of the
-// flat ambient and Lambertian sun, then fogged like the terrain. Drawn with culling off (glTF doubleSided is common
-// and cheap here), so back faces flip their normal. Texels under the material's alpha cutoff are cut out.
+// 3D models (GpuModel, e.g. glTF props and model blocks): group 3 holds the model's own single-layer texture instead
+// of the block array, sampled at the normalized uv.xy. A model block (grid >= 0) is lit from its own cell's voxel
+// light — sky/AO, lamp light and sun visibility, one flat value for the whole model — combined like fs_main does.
+// Any other model has no light data and is lit like an open-air surface: the brighter of the flat ambient and
+// Lambertian sun. Both are fogged like the terrain. Drawn with culling off (glTF doubleSided is common and cheap
+// here), so back faces flip their normal. Texels under the material's alpha cutoff are cut out.
 @fragment
 fn fs_model(in: VSOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let tex = textureSample(atlasTex, atlasSamp, in.uv.xy, 0);
@@ -484,7 +487,12 @@ fn fs_model(in: VSOut, @builtin(front_facing) front: bool) -> @location(0) vec4<
     var n = normalize(in.worldNormal);
     if (!front) { n = -n; }
     let ndotl = max(dot(n, -camera.sunDir.xyz), 0.0);
-    let lit   = max(max(camera.lightParams.z, ndotl * camera.sunDir.w), MIN_AMBIENT);
+    var lit = vec3<f32>(max(camera.lightParams.z, ndotl * camera.sunDir.w));
+    if (model.grid >= 0) {
+        let c = cellAt(model.chunk * 32 + vec3<i32>(model.params.yzw));
+        lit = max(vec3<f32>(max(c.sky, ndotl * c.sun * camera.sunDir.w)), c.rgb);
+    }
+    lit = max(lit, vec3<f32>(MIN_AMBIENT));
     return vec4<f32>(applyFog(tex.rgb * in.color * lit, in.worldPos), 1.0);
 }
 
@@ -961,17 +969,23 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
 
     /// <summary>
     /// Draws every part of <paramref name="gpuModel"/> placed by <paramref name="model"/> with the model shader
-    /// (fs_model: its own texture, sun + ambient, fog), or as a full-bright wireframe while
-    /// <see cref="WireframeMode"/> is on. Depth-tested like the world, so call it before <see cref="DrawSky"/>.
+    /// (fs_model: its own texture, lighting, fog), or as a full-bright wireframe while <see cref="WireframeMode"/>
+    /// is on. Depth-tested like the world, so call it before <see cref="DrawSky"/>. A model block passes its grid
+    /// (<see cref="GridHandle.Index"/>), chunk and chunk-local cell to be lit from that cell's voxel light; the
+    /// default grid -1 lights it with just sun and ambient.
     /// </summary>
-    public void DrawModel(GpuModel gpuModel, in Mat4 model)
+    public void DrawModel(GpuModel gpuModel, in Mat4 model, int grid = -1, ChunkPosition chunk = default,
+                          Vector3D<int> voxel = default)
     {
         _api.RenderPassEncoderSetPipeline(_pass, WireframeMode ? _wireframePipeline : _modelPipeline);
         foreach (var part in gpuModel.Parts)
         {
             if (_drawIndex >= MaxObjects) break;
-            var u = ModelUniform.Default(model);
-            u.AlphaCutoff = part.AlphaCutoff;
+            var u = new ModelUniform
+            {
+                Model = model, Grid = grid, ChunkX = chunk.X, ChunkY = chunk.Y, ChunkZ = chunk.Z,
+                AlphaCutoff = part.AlphaCutoff, VoxelX = voxel.X, VoxelY = voxel.Y, VoxelZ = voxel.Z,
+            };
             uint dynOffset = StageModel(u);
             _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset);
             _api.RenderPassEncoderSetBindGroup(_pass, 3, part.Texture.BindGroup, 0, null);
@@ -1181,8 +1195,8 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     {
         public Mat4 Model;
         public int ChunkX, ChunkY, ChunkZ, Grid;
-        public float AlphaCutoff;      // params.x (fs_model)
-        public float _Pad1, _Pad2, _Pad3;
+        public float AlphaCutoff;             // params.x (fs_model)
+        public float VoxelX, VoxelY, VoxelZ;  // params.yzw (fs_model, model blocks)
         // 64 + 16 + 16 = 96 == ModelSize bytes the shader reads, padded to ModelStride
 
         /// <summary>Non-chunk draws: no grid, drawn full-bright.</summary>
