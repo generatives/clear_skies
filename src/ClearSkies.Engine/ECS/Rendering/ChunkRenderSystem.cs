@@ -12,10 +12,9 @@ namespace ClearSkies.Engine.ECS;
 /// <summary>
 /// Draws every loaded chunk's <see cref="ChunkRenderData"/>: frustum-culls the chunks, draws their greedy-meshed
 /// cubes nearest first, then each visible chunk's model blocks — placed at their cell, turned to their stored
-/// <see cref="Facing"/> and lit from that cell's voxel light. Runs inside <see cref="RenderSystem"/>'s render pass
-/// as an <see cref="IWorldRenderPass"/>.
+/// <see cref="Facing"/> and lit from that cell's voxel light. Belongs in <see cref="RenderPass.World"/>.
 /// </summary>
-public sealed class ChunkRenderSystem : IWorldRenderPass, IDebugUiSystem
+public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
 {
     private readonly EntitySet _chunks;
     private readonly Renderer _renderer;
@@ -38,7 +37,7 @@ public sealed class ChunkRenderSystem : IWorldRenderPass, IDebugUiSystem
         _chunks   = world.GetEntities().With<Transform>().With<ChunkRenderData>().AsSet();
     }
 
-    public void Draw(in WorldRenderContext frame)
+    public void Render(in RenderContext frame)
     {
         // Every chunk's box is exactly ChunkData.Size local units on a side (GreedyMesher's local space); its model
         // blocks sit in its cells, so the same box culls them too.

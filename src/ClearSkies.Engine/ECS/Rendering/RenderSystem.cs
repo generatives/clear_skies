@@ -3,7 +3,6 @@ using ClearSkies.Engine.Gui;
 using ClearSkies.Engine.Math;
 using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Rendering.WebGpu;
-using ClearSkies.Engine.Voxels;
 using DefaultEcs;
 using ImGuiNET;
 using Silk.NET.Maths;
@@ -11,42 +10,42 @@ using Silk.NET.Maths;
 namespace ClearSkies.Engine.ECS;
 
 /// <summary>
-/// Owns the frame: builds the camera uniform, opens the render pass, runs every registered
-/// <see cref="IWorldRenderPass"/> (e.g. <see cref="ChunkRenderSystem"/>) and draws the standalone
-/// <see cref="ModelRenderer"/> entities, then clouds, sky, wireframe overlays, HUD and ImGui.
+/// Owns the frame: builds the camera uniform, opens the render pass, then runs each <see cref="RenderPass"/> in order
+/// — its setup, then every <see cref="IRenderSystem"/> added to it, in the order added — and closes with ImGui.
+/// Holds no drawing of its own: chunks, models, clouds, sky, overlays and HUD are all render systems (see
+/// <see cref="Add"/>).
 /// </summary>
-public sealed class RenderSystem : ISystem, IDebugUiSystem
+public sealed class RenderSystem : ISystem, IDebugUiSystem, IDisposable
 {
+    private static readonly RenderPass[] PassOrder = Enum.GetValues<RenderPass>();
+
     private readonly EntitySet _cameras;
-    private readonly EntitySet _wireframes;
-    private readonly EntitySet _models;
-    private readonly EntitySet _huds;
     private readonly Renderer _renderer;
     private readonly ImGuiController _gui;
     private readonly Time _time;
-    private readonly CloudLayer _clouds;
+    private readonly List<IRenderSystem>[] _passes = new List<IRenderSystem>[PassOrder.Length];
 
     public RenderSystem(World world, Renderer renderer, ImGuiController gui, Time time)
     {
-        _renderer   = renderer;
-        _gui        = gui;
-        _time       = time;
-        _clouds     = new CloudLayer(renderer);
-        _cameras    = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
-        _wireframes = world.GetEntities().With<Transform>().With<WireframeRenderer>().AsSet();
-        _models     = world.GetEntities().With<Transform>().With<ModelRenderer>().AsSet();
-        _huds       = world.GetEntities().With<HudRenderer>().AsSet();
+        _renderer = renderer;
+        _gui      = gui;
+        _time     = time;
+        _cameras  = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
+        for (int i = 0; i < _passes.Length; i++) _passes[i] = new List<IRenderSystem>();
+    }
+
+    /// <summary>Adds <paramref name="system"/> to <paramref name="pass"/>, drawn after the systems already in it.
+    /// A system that implements <see cref="IDebugUiSystem"/> gets its panel registered too.</summary>
+    public RenderSystem Add(RenderPass pass, IRenderSystem system)
+    {
+        _passes[(int)pass].Add(system);
+        if (system is IDebugUiSystem debugUi) _gui.RegisterDebugUi(debugUi);
+        return this;
     }
 
     // ── debug UI ─────────────────────────────────────────────────────────────
     public string DebugName => "Renderer";
     private bool _referenceLighting;
-
-    private readonly List<IWorldRenderPass> _worldPasses = new();
-
-    /// <summary>Adds a pass drawn each frame after the camera is set up and before clouds and sky, in the order
-    /// added.</summary>
-    public void AddWorldPass(IWorldRenderPass pass) => _worldPasses.Add(pass);
 
     public void DrawDebugUi()
     {
@@ -120,43 +119,34 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem
 
         _renderer.SetCameraUniform(uniform);
 
-        var frame = new WorldRenderContext(camTransform.Position,
-                                           Frustum.FromViewProjection(Mat4.Multiply(uniform.Projection, uniform.View)));
-        foreach (var pass in _worldPasses)
-            pass.Draw(frame);
-
-        foreach (ref readonly Entity e in _models.GetEntities())
+        var frame = new RenderContext(camTransform.Position, uniform.View, uniform.Projection,
+                                      Frustum.FromViewProjection(Mat4.Multiply(uniform.Projection, uniform.View)),
+                                      _time.TotalSeconds);
+        foreach (var pass in PassOrder)
         {
-            ref readonly var mr = ref e.Get<ModelRenderer>();
-            var model = e.Get<Transform>().ToMatrix();
-            if (!frame.Frustum.Intersects(model, mr.Model.BoundsMin, mr.Model.BoundsMax)) continue;
-            _renderer.DrawModel(mr.Model, model);
-        }
-
-        if (SkySettings.CloudsEnabled) _clouds.Draw(camTransform.Position, _time.TotalSeconds);
-
-        // Sky after the world and clouds, so it only shades the pixels they left uncovered.
-        _renderer.DrawSky();
-
-        // Wireframe overlays drawn on top (pipeline switches mid-pass then restores).
-        foreach (ref readonly Entity e in _wireframes.GetEntities())
-        {
-            ref readonly var t  = ref e.Get<Transform>();
-            ref readonly var wr = ref e.Get<WireframeRenderer>();
-            _renderer.DrawMeshWireframe(wr.Mesh, t.ToMatrix());
-        }
-
-        // HUD elements: screen-space NDC vertices, depth always passes.
-        _renderer.BeginHudPass();
-        foreach (ref readonly Entity e in _huds.GetEntities())
-        {
-            ref readonly var hr = ref e.Get<HudRenderer>();
-            _renderer.DrawHudMesh(hr.Mesh, Mat4.Identity);
+            BeginPass(pass);
+            foreach (var system in _passes[(int)pass])
+                system.Render(frame);
         }
 
         // ImGui draws last, on top of everything, in the same pass.
         _gui.EndFrame();
         _renderer.EndFrame();
+    }
+
+    /// <summary>Per-pass state its systems start from. World, Sky and Overlay share the world camera and pipeline
+    /// BeginFrame bound (each Renderer draw restores it after switching); Hud switches to the HUD pipeline and
+    /// identity camera for the rest of the frame.</summary>
+    private void BeginPass(RenderPass pass)
+    {
+        if (pass == RenderPass.Hud) _renderer.BeginHudPass();
+    }
+
+    public void Dispose()
+    {
+        foreach (var list in _passes)
+            foreach (var system in list)
+                (system as IDisposable)?.Dispose();
     }
 
     private bool TryGetActiveCamera(out Transform transform, out Camera camera)

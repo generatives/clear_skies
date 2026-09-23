@@ -95,10 +95,14 @@ host.AddSystem(new DynamicGridCleanupSystem(host.World), SystemStage.Logic);
 host.AddSystem(new GpuResidencySystem(host.World, staticVolume, gridStore), SystemStage.PreRender);
 host.AddSystem(new GpuLightSystem(host.World, staticVolume, host.Context, host.Physics, gridStore), SystemStage.PreRender);
 host.AddSystem(meshSystem, SystemStage.PreRender);
-var renderSystem = new RenderSystem(host.World, host.Renderer, host.Gui, host.Time);
-var chunkRender  = new ChunkRenderSystem(host.World, host.Renderer);
-renderSystem.AddWorldPass(chunkRender);
-host.Gui.RegisterDebugUi(chunkRender);
+// Each frame draws its render passes in order, and each pass its systems in the order added here.
+using var renderSystem = new RenderSystem(host.World, host.Renderer, host.Gui, host.Time)
+    .Add(RenderPass.World,   new ChunkRenderSystem(host.World, host.Renderer))
+    .Add(RenderPass.World,   new ModelRenderSystem(host.World, host.Renderer))
+    .Add(RenderPass.World,   new CloudRenderSystem(host.Renderer))
+    .Add(RenderPass.Sky,     new SkyRenderSystem(host.Renderer))
+    .Add(RenderPass.Overlay, new WireframeRenderSystem(host.World, host.Renderer))
+    .Add(RenderPass.Hud,     new HudRenderSystem(host.World, host.Renderer));
 host.AddSystem(renderSystem, SystemStage.Render);
 
 var camSpawn = TestScene.Build(host, seed);
