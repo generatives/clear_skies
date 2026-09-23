@@ -19,7 +19,6 @@ public sealed class GpuResidencySystem : ISystem
     private const int UploadsPerFrame = 16;
 
     private readonly GridStore   _store;
-    private readonly ChunkVolume _staticVolume;
     private readonly EntitySet   _needsGpuUpload;
     private readonly List<DynamicGrid> _removedDynamicGrids = new();
     private readonly List<(ChunkVolume, ChunkPosition)> _removedChunks = new();
@@ -27,7 +26,6 @@ public sealed class GpuResidencySystem : ISystem
     public GpuResidencySystem(World ecsWorld, ChunkVolume staticVolume, GridStore store)
     {
         _store       = store;
-        _staticVolume = staticVolume;
         _needsGpuUpload       = ecsWorld.GetEntities().With<Chunk>().With<NeedsGpuUploadFlag>().AsSet();
         _store.Register(staticVolume.Gpu, isWorld: true);
 
