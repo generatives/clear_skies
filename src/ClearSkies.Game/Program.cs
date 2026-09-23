@@ -27,10 +27,10 @@ host.Renderer.LoadTextureAtlas(
     Path.Combine(AppContext.BaseDirectory, "Resources", "spritesheet_tiles.png"),
     Path.Combine(AppContext.BaseDirectory, "Resources", "spritesheet_tiles.xml"));
 
-// Phase 4.0: prove the GPU compute path (upload → dispatch → readback) before building lighting on it.
-GpuComputeSelfTest.Run(host.Context);
+var staticVolumeEntity = host.World.CreateEntity();
+var staticVolume = new ChunkVolume(staticVolumeEntity, host.World);
+staticVolumeEntity.Set(new ChunkGrid() { Volume = staticVolume });
 
-var staticVolume   = new ChunkVolume(host.World);
 ulong seed = 1337;
 var meshSystem    = new ChunkMeshSystem(host.World, host.Renderer);
 var gridSelection = new GridSelection(host.World);

@@ -20,7 +20,7 @@ public sealed class GpuResidencySystem : ISystem
 
     private readonly GridStore   _store;
     private readonly EntitySet   _needsGpuUpload;
-    private readonly List<DynamicGrid> _removedDynamicGrids = new();
+    private readonly List<ChunkVolume> _removedGrids = new();
     private readonly List<(ChunkVolume, ChunkPosition)> _removedChunks = new();
 
     public GpuResidencySystem(World ecsWorld, ChunkVolume staticVolume, GridStore store)
@@ -34,10 +34,10 @@ public sealed class GpuResidencySystem : ISystem
 
     private void OnEntityDisposed(in Entity e)
     {
-        if (e.Has<DynamicGridComponent>())
+        if (e.Has<ChunkGrid>())
         {
-            var grid = e.Get<DynamicGridComponent>().Grid;
-            _removedDynamicGrids.Add(grid);
+            var grid = e.Get<ChunkGrid>().Volume;
+            _removedGrids.Add(grid);
         }
         
         if (e.Has<Chunk>())
@@ -53,8 +53,8 @@ public sealed class GpuResidencySystem : ISystem
     public void Update(float dt)
     {
         // Despawned ships: their root entity is gone from the set.
-        foreach (var g in _removedDynamicGrids) { _store.Unregister(g.Gpu); }
-        _removedDynamicGrids.Clear();
+        foreach (var g in _removedGrids) { _store.Unregister(g.Gpu); }
+        _removedGrids.Clear();
 
         foreach (var (volume, pos) in _removedChunks)
         {

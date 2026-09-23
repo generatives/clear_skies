@@ -2,6 +2,7 @@ using System.Numerics;
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Input;
 using ClearSkies.Engine.Physics;
+using ClearSkies.Engine.Voxels;
 using DefaultEcs;
 using Silk.NET.Input;
 
@@ -26,7 +27,7 @@ public sealed class PlayerGridControlSystem : ISystem
     {
         _physics      = physics;
         _input        = input;
-        _selectedGrid = world.GetEntities().With<DynamicGridComponent>().With<SelectedGridComponent>().AsSet();
+        _selectedGrid = world.GetEntities().With<DynamicGrid>().With<SelectedGridComponent>().AsSet();
     }
 
     public void Update(float dt)
@@ -46,7 +47,7 @@ public sealed class PlayerGridControlSystem : ISystem
 
         foreach (ref readonly Entity e in _selectedGrid.GetEntities())
         {
-            var grid = e.Get<DynamicGridComponent>().Grid;
+            var grid = e.Get<DynamicGrid>();
             if (!grid.BodyCreated) continue;
 
             if (stop)

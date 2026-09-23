@@ -16,7 +16,6 @@ public sealed class GridSelection
     public GridSelection(World world)
     {
         _selected = world.GetEntities()
-            .With<DynamicGridComponent>()
             .With<SelectedGridComponent>()
             .AsSet();
     }

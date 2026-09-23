@@ -99,7 +99,7 @@ public sealed class AirshipFlightSystem : ISystem
 
     public AirshipFlightSystem(World world, PhysicsWorld physics, InputManager input)
     {
-        _grids   = world.GetEntities().With<DynamicGridComponent>().AsSet();
+        _grids   = world.GetEntities().With<DynamicGrid>().With<ChunkGrid>().AsSet();
         _physics = physics;
         _input   = input;
     }
@@ -110,12 +110,13 @@ public sealed class AirshipFlightSystem : ISystem
 
         foreach (ref readonly Entity e in _grids.GetEntities())
         {
-            var grid = e.Get<DynamicGridComponent>().Grid;
+            var volume = e.Get<ChunkGrid>().Volume;
+            var dynamicGrid = e.Get<DynamicGrid>();
             // Kinematic (Locked) grids skip gravity/impulses entirely via Bepu's own integrator, and an
             // empty grid has no body to steer — nothing to fly in either case.
-            if (!grid.BodyCreated || grid.Locked) continue;
+            if (!dynamicGrid.BodyCreated || dynamicGrid.Locked) continue;
 
-            float mass = _physics.GetBodyMass(grid.Body);
+            float mass = _physics.GetBodyMass(dynamicGrid.Body);
             if (mass <= 0f) continue; // shouldn't happen for an unlocked body, but guard the degenerate case
 
             gridsProcessed++;
@@ -123,9 +124,9 @@ public sealed class AirshipFlightSystem : ISystem
             // ── control law: this tick's desired force/torque ──────────────────
             bool piloted = e.Has<PilotedComponent>();
 
-            var (pos, rot) = _physics.GetBodyPose(grid.Body);
-            var linVel = _physics.GetBodyLinearVelocity(grid.Body);
-            var angVel = _physics.GetBodyAngularVelocity(grid.Body);
+            var (pos, rot) = _physics.GetBodyPose(dynamicGrid.Body);
+            var linVel = _physics.GetBodyLinearVelocity(dynamicGrid.Body);
+            var angVel = _physics.GetBodyAngularVelocity(dynamicGrid.Body);
 
             var worldUp = Vector3.UnitY;
             var forward = Vector3.Transform(new Vector3(0, 0, -1), rot);
@@ -160,7 +161,7 @@ public sealed class AirshipFlightSystem : ISystem
             // grid's own Buoyant lift (BuoyantBlockCount × per-block force ÷ mass = its acceleration
             // contribution) — leaving out Buoyant was why the ship started drifting *up* once gravity
             // alone got cancelled. So the P-term only has to correct whatever's left over.
-            float buoyantAccel = grid.BuoyantBlockCount * _buoyantForce / mass;
+            float buoyantAccel = dynamicGrid.BuoyantBlockCount * _buoyantForce / mass;
             var verticalForce = _verticalGain * (desiredVerticalSpeed - currentVerticalSpeed) * worldUp
                                - _physics.Gravity - buoyantAccel * worldUp;
 
@@ -174,8 +175,8 @@ public sealed class AirshipFlightSystem : ISystem
             // ── propulsion: realize desiredForce/Torque via Fan/Buoyant blocks ──
             if (_freePropulsion)
             {
-                _physics.ApplyLinearImpulse(grid.Body, desiredForce * dt);
-                _physics.ApplyAngularImpulse(grid.Body, desiredTorque * dt);
+                _physics.ApplyLinearImpulse(dynamicGrid.Body, desiredForce * dt);
+                _physics.ApplyAngularImpulse(dynamicGrid.Body, desiredTorque * dt);
                 freePropelled++;
                 // Falls through to the block scan below, which — while free propulsion is on — only
                 // still applies real Buoyant lift; Fan blocks are skipped there since desiredForce/
@@ -183,7 +184,7 @@ public sealed class AirshipFlightSystem : ISystem
                 // double it up.
             }
 
-            var com = grid.CenterOfMass;
+            var com = dynamicGrid.CenterOfMass;
             float desiredForceMag  = desiredForce.Length();
             float desiredTorqueMag = desiredTorque.Length();
 
@@ -192,7 +193,7 @@ public sealed class AirshipFlightSystem : ISystem
             float totalForceAlign = 0f, totalTorqueAlign = 0f;
             if (!_freePropulsion)
             {
-                foreach (var (chunkPos, entry) in grid.All)
+                foreach (var (chunkPos, entry) in volume.All)
                 {
                     if (!entry.Data.HasAnySolid()) continue;
                     var silkOrigin = chunkPos.WorldOrigin;
@@ -215,7 +216,7 @@ public sealed class AirshipFlightSystem : ISystem
             // Pass 2: apply Buoyant lift (always) and each Fan's proportional share (skipped in
             // free-propulsion mode — desiredForce/Torque was already applied directly above).
             float deliveredForceY = 0f;
-            foreach (var (chunkPos, entry) in grid.All)
+            foreach (var (chunkPos, entry) in volume.All)
             {
                 if (!entry.Data.HasAnySolid()) continue;
                 var silkOrigin = chunkPos.WorldOrigin;
@@ -232,7 +233,7 @@ public sealed class AirshipFlightSystem : ISystem
                     {
                         buoyantCount++;
                         var worldOffset = LocalOffset(lx, ly, lz, chunkOrigin, com, rot);
-                        _physics.ApplyLinearImpulse(grid.Body, Vector3.UnitY * (_buoyantForce * dt), worldOffset);
+                        _physics.ApplyLinearImpulse(dynamicGrid.Body, Vector3.UnitY * (_buoyantForce * dt), worldOffset);
                         deliveredForceY += _buoyantForce;
                         continue;
                     }
@@ -252,7 +253,7 @@ public sealed class AirshipFlightSystem : ISystem
 
                     var thrustDir = ThrustDirection(entry, lx, ly, lz, rot);
                     var fanOffset = LocalOffset(lx, ly, lz, chunkOrigin, com, rot);
-                    _physics.ApplyLinearImpulse(grid.Body, thrustDir * (thrust * dt), fanOffset);
+                    _physics.ApplyLinearImpulse(dynamicGrid.Body, thrustDir * (thrust * dt), fanOffset);
                     deliveredForceY += thrustDir.Y * thrust;
                 }
             }

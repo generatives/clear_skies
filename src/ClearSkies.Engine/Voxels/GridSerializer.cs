@@ -1,21 +1,18 @@
-using System.Collections.Generic;
-using System.IO;
-
 namespace ClearSkies.Engine.Voxels;
 
 /// <summary>
-/// Reads/writes a DynamicGrid's raw non-air voxel contents to/from a small binary format. No ECS data,
+/// Reads/writes a ChunkVolume's raw non-air voxel contents to/from a small binary format. No ECS data,
 /// spawn position, or physics state is persisted — only grid-local (possibly negative) block coordinates,
 /// block ids, and (since v2) each voxel's facing. Loaded voxel lists are handed to
 /// <see cref="DynamicGridFactory.SpawnFromVoxels"/> to reconstruct a grid.
 /// </summary>
-public static class DynamicGridSerializer
+public static class GridSerializer
 {
     // "CSGD" ClearSkies Grid Data — 4 literal ASCII bytes so the format is identifiable in a hex viewer.
     private static readonly byte[] Magic = { (byte)'C', (byte)'S', (byte)'G', (byte)'D' };
     private const ushort Version = 2; // v1: (x,y,z,id). v2: + a facing byte per voxel.
 
-    public static void Save(DynamicGrid grid, string filePath)
+    public static void Save(ChunkVolume grid, string filePath)
     {
         var voxels = new List<(int X, int Y, int Z, byte Id, byte Facing)>();
         foreach (var (pos, entry) in grid.All)

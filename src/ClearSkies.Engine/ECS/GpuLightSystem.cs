@@ -94,7 +94,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         _staticVolume = staticVolume;
         _physics     = physics;
         _store       = store;
-        _grids       = world.GetEntities().With<DynamicGridComponent>().AsSet();
+        _grids       = world.GetEntities().With<ChunkGrid>().AsSet();
         _cameras     = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
         _rayLight    = new GpuRayLightPass(ctx);
         _ctx         = ctx;
@@ -160,9 +160,11 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         RayLightingSettings.AoStrength  = _bounceEnabled ? _aoStrength : 0f;
 
         _lit.Clear();
-        AddLit(_staticVolume);
         foreach (ref readonly Entity e in _grids.GetEntities())
-            AddLit(e.Get<DynamicGridComponent>().Grid);
+        {
+            DynamicGrid? dynamicGrid = e.Has<DynamicGrid>() ? e.Get<DynamicGrid>() : null;
+            AddLit(e.Get<ChunkGrid>().Volume, dynamicGrid);
+        }
         _store.UploadGrids();
 
         GatherLamps();
@@ -236,11 +238,11 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     }
 
     /// <summary>Poses a registered grid for this frame (a ship whose body doesn't exist yet stays hidden).</summary>
-    private void AddLit(ChunkVolume vol)
+    private void AddLit(ChunkVolume vol, DynamicGrid? dynamicGrid)
     {
         var h = vol.Gpu;
         if (h.Index < 0) return;
-        if (!TryPose(vol, out var pos, out var rot, out var com)) return;
+        if (!TryPose(vol, dynamicGrid, out var pos, out var rot, out var com)) return;
         var v2w = VoxelToWorld(pos, rot, com);
         _store.SetPose(h, v2w, WorldToVoxel(pos, rot, com));
         _lit.Add(new LitGrid(vol, h, v2w, pos, rot));
@@ -269,10 +271,11 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
 
     /// <summary>Pose of a volume: a dynamic grid's body pose + centre-of-mass, or identity for the static world.
     /// Returns false for a grid whose body isn't created yet.</summary>
-    private bool TryPose(ChunkVolume vol, out Vector3D<float> pos, out Quaternion<float> rot, out Vector3D<float> com)
+    private bool TryPose(ChunkVolume vol, DynamicGrid? dynamicGrid, out Vector3D<float> pos, out Quaternion<float> rot, out Vector3D<float> com)
     {
-        if (vol is DynamicGrid g)
+        if (dynamicGrid.HasValue)
         {
+            var g = dynamicGrid.Value;
             if (!g.BodyCreated) { pos = default; rot = Quaternion<float>.Identity; com = default; return false; }
             var (p, q) = _physics.GetBodyPose(g.Body);
             pos = PhysicsConv.ToSilk(p);

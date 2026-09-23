@@ -56,7 +56,7 @@ public sealed class GridPilotSystem : ISystem
         _staticVolume     = staticVolume;
         _physicsBody     = physicsBody;
         _freeFlyCameras  = world.GetEntities().With<Transform>().With<CameraComponent>().With<FreeFlyController>().AsSet();
-        _selectedGrid    = world.GetEntities().With<DynamicGridComponent>().With<SelectedGridComponent>().AsSet();
+        _selectedGrid    = world.GetEntities().With<DynamicGrid>().With<SelectedGridComponent>().AsSet();
     }
 
     public void Update(float dt)
@@ -86,7 +86,7 @@ public sealed class GridPilotSystem : ISystem
     {
         foreach (ref readonly Entity e in _selectedGrid.GetEntities())
         {
-            var grid = e.Get<DynamicGridComponent>().Grid;
+            var grid = e.Get<DynamicGrid>();
             if (!grid.BodyCreated) return; // nothing solid yet; can't pilot an empty grid
 
             _pilotedGridRoot = e;
@@ -153,7 +153,7 @@ public sealed class GridPilotSystem : ISystem
 
         foreach (ref readonly Entity e in _selectedGrid.GetEntities())
         {
-            var grid = e.Get<DynamicGridComponent>().Grid;
+            var grid = e.Get<DynamicGrid>();
             if (!grid.BodyCreated) return;
 
             if (lockPressed)
@@ -175,7 +175,7 @@ public sealed class GridPilotSystem : ISystem
     private void UpdateCameraFollow()
     {
         if (!_pilotedGridRoot.IsAlive || !_followedCamera.IsAlive) return;
-        var grid = _pilotedGridRoot.Get<DynamicGridComponent>().Grid;
+        var grid = _pilotedGridRoot.Get<DynamicGrid>();
         if (!grid.BodyCreated) return;
 
         var (pos, rot) = _physics.GetBodyPose(grid.Body);
@@ -211,7 +211,7 @@ public sealed class GridPilotSystem : ISystem
 
         foreach (ref readonly Entity e in _selectedGrid.GetEntities())
         {
-            var grid = e.Get<DynamicGridComponent>().Grid;
+            var grid = e.Get<DynamicGrid>();
             ImGui.Text(grid.Locked ? "Selected grid: LOCKED" : "Selected grid: unlocked");
             if (grid.BodyCreated)
             {

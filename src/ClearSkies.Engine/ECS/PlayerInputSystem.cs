@@ -63,7 +63,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
     {
         _world       = world;
         _cameras     = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
-        _grids       = world.GetEntities().With<DynamicGridComponent>().AsSet();
+        _grids       = world.GetEntities().With<ChunkVolume>().With<DynamicGrid>().AsSet();
         _staticVolume = staticVolume;
         _physics     = physics;
         _input       = input;
@@ -128,18 +128,19 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
         ChunkVolume? bestVolume = null;
         Entity       bestGridEntity = default;
         Vector3D<int> bestBlock  = default, bestNormal = default;
-        bool          bestIsGrid = false;
+        bool          bestIsDynamicGrid = false;
         Vector3D<float>    gridPos = default, gridCom = default;
         Quaternion<float>  gridRot = Quaternion<float>.Identity;
 
         if (VoxelRaycaster.Cast(_staticVolume, origin, dir, ReachBlocks, out var sb, out var sn, out var sd) && sd < bestDist)
         {
-            bestDist = sd; bestVolume = _staticVolume; bestBlock = sb; bestNormal = sn; bestIsGrid = false;
+            bestDist = sd; bestVolume = _staticVolume; bestBlock = sb; bestNormal = sn; bestIsDynamicGrid = false;
         }
 
         foreach (ref readonly Entity e in _grids.GetEntities())
         {
-            var grid = e.Get<DynamicGridComponent>().Grid;
+            var volume = e.Get<ChunkVolume>();
+            var grid = e.Get<DynamicGrid>();
             if (!grid.BodyCreated) continue;
 
             var (p, q) = _physics.GetBodyPose(grid.Body);
@@ -152,9 +153,9 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
             var lo = com + Vec.Rotate(inv, origin - gp);
             var ld = Vec.Rotate(inv, dir);
 
-            if (VoxelRaycaster.Cast(grid, lo, ld, ReachBlocks, out var gb, out var gn, out var gd) && gd < bestDist)
+            if (VoxelRaycaster.Cast(volume, lo, ld, ReachBlocks, out var gb, out var gn, out var gd) && gd < bestDist)
             {
-                bestDist = gd; bestVolume = grid; bestBlock = gb; bestNormal = gn; bestIsGrid = true;
+                bestDist = gd; bestVolume = volume; bestBlock = gb; bestNormal = gn; bestIsDynamicGrid = true;
                 bestGridEntity = e;
                 gridPos = gp; gridRot = gr; gridCom = com;
             }
@@ -168,7 +169,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
 
         TargetBlock  = bestBlock;
         TargetNormal = bestNormal;
-        ShowFace(bestVolume, bestBlock, bestNormal, bestIsGrid, gridPos, gridRot, gridCom);
+        ShowFace(bestVolume, bestBlock, bestNormal, bestIsDynamicGrid, gridPos, gridRot, gridCom);
 
         if (_input.WasKeyPressed(Key.L))
         {
@@ -187,21 +188,20 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
                 // away from the ship, not wherever the camera happened to be pointed.
                 var facing = FacingExtensions.FromNormal(bestNormal);
                 bestVolume.SetBlock(t.X, t.Y, t.Z, _placeBlock, facing);
-                if (bestIsGrid) _selection.Select(bestGridEntity);
-                Console.WriteLine($"[place] {_placeBlock} in {(bestIsGrid ? "grid" : "world")} ({t.X},{t.Y},{t.Z})");
+                if (bestIsDynamicGrid) _selection.Select(bestGridEntity);
+                Console.WriteLine($"[place] {_placeBlock} in {(bestIsDynamicGrid ? "grid" : "world")} ({t.X},{t.Y},{t.Z})");
             }
         }
         else if (_input.WasMouseButtonPressed(MouseButton.Right))
         {
             bestVolume.SetBlock(bestBlock.X, bestBlock.Y, bestBlock.Z, BlockId.Air);
-            Console.WriteLine($"[break] {(bestIsGrid ? "grid" : "world")} ({bestBlock.X},{bestBlock.Y},{bestBlock.Z})");
+            Console.WriteLine($"[break] {(bestIsDynamicGrid ? "grid" : "world")} ({bestBlock.X},{bestBlock.Y},{bestBlock.Z})");
 
-            if (bestIsGrid)
+            if (bestIsDynamicGrid)
             {
-                var grid = (DynamicGrid)bestVolume;
-                if (grid.IsEmpty())
+                if (bestVolume.IsEmpty())
                 {
-                    grid.Root.Dispose();
+                    bestVolume.Root.Dispose();
                     HideFace(); // the outlined face no longer has a volume behind it
                 }
                 else

@@ -16,13 +16,16 @@ public static class DynamicGridFactory
         World world, GridSelection selection,
         PhysVec spawnWorld, IEnumerable<(int X, int Y, int Z, BlockId Id, Facing Facing)> voxels)
     {
-        var grid = new DynamicGrid(world, spawnWorld);
+        var entity = world.CreateEntity();
+        var grid = new DynamicGrid(spawnWorld);
+        var volume = new ChunkVolume(entity, world);
+        entity.Set(new ChunkGrid() { Volume = volume });
         foreach (var (x, y, z, id, facing) in voxels)
         {
             if (id == BlockId.Air) continue; // defensive; saved files shouldn't contain air entries
-            grid.SetBlock(x, y, z, id, facing);
+            volume.SetBlock(x, y, z, id, facing);
         }
-        selection.Select(grid.Root);
+        selection.Select(entity);
         return grid;
     }
 

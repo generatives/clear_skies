@@ -37,7 +37,7 @@ public sealed class GridPersistenceSystem : ISystem
         _physics    = physics;
         _selection  = selection;
         _cameras      = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
-        _selectedGrid = world.GetEntities().With<DynamicGridComponent>().With<SelectedGridComponent>().AsSet();
+        _selectedGrid = world.GetEntities().With<ChunkVolume>().With<SelectedGridComponent>().AsSet();
 
         _savesDir = Path.Combine(AppContext.BaseDirectory, "Saves", "Grids");
         Directory.CreateDirectory(_savesDir);
@@ -84,11 +84,11 @@ public sealed class GridPersistenceSystem : ISystem
 
     // ── actions ──────────────────────────────────────────────────────────────
 
-    private bool TryGetSelectedGrid(out DynamicGrid grid)
+    private bool TryGetSelectedGrid(out ChunkVolume grid)
     {
         foreach (ref readonly Entity e in _selectedGrid.GetEntities())
         {
-            grid = e.Get<DynamicGridComponent>().Grid;
+            grid = e.Get<ChunkGrid>().Volume;
             return true;
         }
         grid = null!;
@@ -113,7 +113,7 @@ public sealed class GridPersistenceSystem : ISystem
         string path = Path.Combine(_savesDir, safeName + ".grid");
         try
         {
-            DynamicGridSerializer.Save(grid, path);
+            GridSerializer.Save(grid, path);
             _status = $"Saved '{safeName}'.";
             RefreshSaveList();
         }
@@ -134,7 +134,7 @@ public sealed class GridPersistenceSystem : ISystem
 
         try
         {
-            var voxels = DynamicGridSerializer.Load(path);
+            var voxels = GridSerializer.Load(path);
             if (voxels.Count == 0) { _status = $"'{_chosenFile}' has no blocks; not spawned."; return; }
 
             if (!CameraUtil.TryGetActive(_cameras, out var camTransform))

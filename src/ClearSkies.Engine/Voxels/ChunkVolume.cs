@@ -16,6 +16,8 @@ public class ChunkVolume
     private protected readonly Dictionary<ChunkPosition, ChunkEntry> _chunks = new();
     protected readonly World _world;
 
+    public Entity Root { get; }
+
     /// <summary>This volume's registration in the shared GPU voxel storage (see <see cref="GridStore"/>), kept in
     /// sync by GpuResidencySystem.</summary>
     public GridHandle Gpu { get; } = new();
@@ -25,7 +27,11 @@ public class ChunkVolume
     internal ChunkPosition BoundsMax { get; private set; }
     private bool _boundsInitialised;
 
-    public ChunkVolume(World world) => _world = world;
+    public ChunkVolume(Entity entity, World world)
+    {
+        Root = entity;
+        _world = world;
+    }
 
     public int  LoadedCount                => _chunks.Count;
     public bool IsLoaded(ChunkPosition pos) => _chunks.ContainsKey(pos);

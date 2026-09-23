@@ -1,30 +1,7 @@
 using ClearSkies.Engine.Physics.Characters;
 using ClearSkies.Engine.Rendering;
-using ClearSkies.Engine.Voxels;
 
 namespace ClearSkies.Engine.ECS;
-
-/// <summary>
-/// Marks an entity as drawable with a given GPU mesh and per-volume lighting info.
-/// <see cref="Grid"/> null → drawn full-bright.
-/// </summary>
-public struct ChunkMesh
-{
-    public GpuMesh Mesh;
-
-    /// <summary>Owning volume's registration in the shared voxel storage; the fragment shader looks light up
-    /// through it. Null for non-chunk meshes (debug cubes, etc.), which draw full-bright.</summary>
-    public GridHandle? Grid;
-
-    /// <summary>This chunk's position in its volume (grid-local chunk coordinates).</summary>
-    public ChunkPosition ChunkPos;
-}
-
-/// <summary>Tags the root entity of a dynamic voxel grid, carrying a reference to its data/body.</summary>
-public struct DynamicGridComponent
-{
-    public DynamicGrid Grid;
-}
 
 /// <summary>Marker flag: set on exactly one DynamicGrid's root entity at a time — the grid whose
 /// blocks a UI action (e.g. Save) currently operates on. See <see cref="GridSelection"/> for the
@@ -38,18 +15,6 @@ public struct CameraComponent
 {
     public Camera Camera;
     public bool Active;
-}
-
-/// <summary>Always renders the mesh as a wireframe overlay regardless of the global WireframeMode.</summary>
-public struct WireframeRenderer
-{
-    public GpuMesh Mesh;
-}
-
-/// <summary>Renders the mesh in screen space (HUD pipeline: depth always passes, no depth write). Vertices are in NDC.</summary>
-public struct HudRenderer
-{
-    public GpuMesh Mesh;
 }
 
 /// <summary>Free-fly (noclip) camera movement speed. See <see cref="MouseLookComponent"/> for the

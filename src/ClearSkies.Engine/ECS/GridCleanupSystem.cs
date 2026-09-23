@@ -5,7 +5,7 @@ using DefaultEcs;
 
 public class DynamicGridCleanupSystem : ISystem
 {
-    private readonly List<DynamicGrid> _removed = new();
+    private readonly List<ChunkVolume> _removed = new();
     private readonly IDisposable _subscription;
 
     public DynamicGridCleanupSystem(World ecsWorld)
@@ -15,10 +15,10 @@ public class DynamicGridCleanupSystem : ISystem
 
     private void OnEntityDisposed(in Entity entity)
     {
-        if (entity.Has<DynamicGridComponent>())
+        if (entity.Has<ChunkGrid>())
         {
-            var gridComp = entity.Get<DynamicGridComponent>();
-            _removed.Add(gridComp.Grid);
+            var gridComp = entity.Get<ChunkGrid>();
+            _removed.Add(gridComp.Volume);
         }
     }
 

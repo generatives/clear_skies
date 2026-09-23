@@ -12,11 +12,8 @@ namespace ClearSkies.Engine.Voxels;
 /// Tier-2 lighting relies on). Editing a block grows chunks on demand and flags the collision shape
 /// for rebuild.
 /// </summary>
-public sealed class DynamicGrid : ChunkVolume
+public struct DynamicGrid
 {
-    /// <summary>Root entity tagged with <see cref="DynamicGridComponent"/>; distinct from the per-chunk entities.</summary>
-    public Entity Root { get; }
-
     /// <summary>World position at which the grid's centre of mass is placed when its body is first created.</summary>
     public PhysVec SpawnPosition { get; }
 
@@ -45,17 +42,8 @@ public sealed class DynamicGrid : ChunkVolume
     /// vertical hold converges to true zero instead of drifting against whichever one it didn't cancel.</summary>
     public int BuoyantBlockCount { get; internal set; }
 
-    public DynamicGrid(World world, PhysVec spawnPosition) : base(world)
+    public DynamicGrid(PhysVec spawnPosition)
     {
         SpawnPosition = spawnPosition;
-        Root = world.CreateEntity();
-        Root.Set(new DynamicGridComponent { Grid = this });
-    }
-
-    public override void SetBlock(int x, int y, int z, BlockId id, Facing facing = Facing.Up)
-    {
-        var (cp, _, _, _) = Decompose(x, y, z);
-        EnsureChunk(cp);          // grow on demand so edits outside existing chunks create new ones
-        base.SetBlock(x, y, z, id, facing);
     }
 }

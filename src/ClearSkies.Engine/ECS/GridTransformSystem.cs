@@ -1,8 +1,8 @@
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Math;
 using ClearSkies.Engine.Physics;
+using ClearSkies.Engine.Voxels;
 using DefaultEcs;
-using Silk.NET.Maths;
 
 namespace ClearSkies.Engine.ECS;
 
@@ -24,14 +24,15 @@ public sealed class GridTransformSystem : ISystem
     public GridTransformSystem(World world, PhysicsWorld physics)
     {
         _physics = physics;
-        _grids   = world.GetEntities().With<DynamicGridComponent>().AsSet();
+        _grids   = world.GetEntities().With<DynamicGrid>().With<ChunkGrid>().AsSet();
     }
 
     public void Update(float dt)
     {
         foreach (ref readonly Entity e in _grids.GetEntities())
         {
-            var grid = e.Get<DynamicGridComponent>().Grid;
+            var volume = e.Get<ChunkGrid>().Volume;
+            var grid = e.Get<DynamicGrid>();
             if (!grid.BodyCreated) continue;
 
             var (p, q) = _physics.GetBodyPose(grid.Body);
@@ -39,7 +40,7 @@ public sealed class GridTransformSystem : ISystem
             var gridRot = PhysicsConv.ToSilk(q);
             var com     = PhysicsConv.ToSilk(grid.CenterOfMass);
 
-            foreach (var (pos, entry) in grid.All)
+            foreach (var (pos, entry) in volume.All)
             {
                 if (!entry.Entity.IsAlive) continue;
                 ref var t = ref entry.Entity.Get<Transform>();

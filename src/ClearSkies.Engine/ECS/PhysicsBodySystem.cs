@@ -37,7 +37,7 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
     // One BigCompound static per non-empty chunk; box count kept only for the debug panel.
     private readonly Dictionary<ChunkPosition, (StaticHandle handle, int boxes)> _colliders = new();
     private readonly List<DynamicGrid> _removedDynamicGrids = new();
-    private readonly List<ChunkEntry> _removedStaticChunks = new();
+    private readonly List<ChunkEntry> _removedChunks = new();
 
     private readonly Stopwatch _sw = new();
     private int _totalBuilt;
@@ -51,17 +51,17 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
 
     private void OnEntityDisposed(in Entity entity)
     {
-        if (entity.Has<DynamicGridComponent>())
+        if (entity.Has<DynamicGrid>())
         {
-            var gridComp = entity.Get<DynamicGridComponent>();
-            var grid = gridComp.Grid;
+            var gridComp = entity.Get<DynamicGrid>();
+            var grid = gridComp;
             _removedDynamicGrids.Add(grid);
         }
 
         if (entity.Has<Chunk>())
         {
             var chunk = entity.Get<Chunk>();
-            _removedStaticChunks.Add(chunk.Entry);
+            _removedChunks.Add(chunk.Entry);
         }
     }
 
@@ -74,17 +74,18 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
 
     public void UpdateColliders()
     {
-        HashSet<DynamicGrid> grids = new HashSet<DynamicGrid>(1);
+        HashSet<(ChunkVolume, DynamicGrid)> grids = new HashSet<(ChunkVolume, DynamicGrid)>(1);
 
         foreach (var entity in _dirtyChunks.GetEntities())
         {
             var chunk = entity.Get<Chunk>();
             var entry = chunk.Entry;
             var volume = entry.Volume;
+            var volumeEntity = volume.Root;
 
-            if (volume is DynamicGrid grid)
+            if (volumeEntity.Has<DynamicGrid>())
             {
-                grids.Add(grid);
+                grids.Add((volume, volumeEntity.Get<DynamicGrid>()));
             }
             else
             {
@@ -94,9 +95,9 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
             entity.Remove<NeedsRecollideFlag>();
         }
 
-        foreach (var grid in grids)
+        foreach (var (volume, dg) in grids)
         {
-            UpdateDynamicGrid(grid);
+            UpdateDynamicGrid(volume, dg);
         }
     }
 
@@ -166,7 +167,7 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
     public bool HasCollider(ChunkPosition pos) => _colliders.ContainsKey(pos);
 
     // ── dynamic grid bodies (moved from GridShapeSystem) ────────────────────────
-    private void UpdateDynamicGrid(DynamicGrid grid)
+    private void UpdateDynamicGrid(ChunkVolume chunkVolume, DynamicGrid grid)
     {
         // Gather merged boxes across all chunks, expressed in grid-local space. Each box is
         // homogeneous in BlockId (see VoxelBoxDecomposer), so its mass is volume * that block's
@@ -174,7 +175,7 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
         // count here (AirshipFlightSystem's feedforward) since we're already walking every box.
         _dynamicBoxes.Clear();
         int buoyantCount = 0;
-        foreach (var (pos, entry) in grid.All)
+        foreach (var (pos, entry) in chunkVolume.All)
         {
             if (!entry.Data.HasAnySolid()) continue;
             var o = pos.WorldOrigin;
@@ -235,12 +236,12 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
         }
         _removedDynamicGrids.Clear();
 
-        foreach (var entry in _removedStaticChunks)
+        foreach (var entry in _removedChunks)
         {
             if (_colliders.Remove(entry.Position, out var c))
                 _physics.RemoveStaticCompound(c.handle);
         }
-        _removedStaticChunks.Clear();
+        _removedChunks.Clear();
     }
 
     // ── debug UI ─────────────────────────────────────────────────────────────
