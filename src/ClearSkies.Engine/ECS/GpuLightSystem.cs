@@ -20,7 +20,7 @@ namespace ClearSkies.Engine.ECS;
 /// any grid light any other. Change tracking and dispatch: GpuLightSystem.RayDirty.cs; per-chunk grid and lamp
 /// lists: GpuLightSystem.Lists.cs.
 ///
-/// Runs after <c>GpuResidencySystem</c> (occupancy and light storage up to date) and before RenderSystem.
+/// Runs after <c>GpuResidencySystem</c> (occupancy and light storage up to date) and before the render stages.
 /// </summary>
 public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSystem
 {

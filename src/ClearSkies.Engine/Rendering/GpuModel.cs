@@ -5,7 +5,7 @@ namespace ClearSkies.Engine.Rendering;
 
 /// <summary>
 /// A 3D model uploaded to the GPU by <see cref="Renderer.UploadModel"/>: one mesh + texture per material,
-/// in model space, plus the model-space bounds <c>RenderSystem</c> frustum-culls with. Shareable between any
+/// in model space, plus the model-space bounds <c>ModelRenderSystem</c> frustum-culls with. Shareable between any
 /// number of <see cref="ModelRenderer"/> entities.
 /// </summary>
 public sealed class GpuModel : IDisposable

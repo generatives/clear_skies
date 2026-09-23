@@ -10,37 +10,23 @@ using Silk.NET.Maths;
 namespace ClearSkies.Engine.ECS;
 
 /// <summary>
-/// Owns the frame: builds the camera uniform, opens the render pass, then runs each <see cref="RenderPass"/> in order
-/// — its setup, then every <see cref="IRenderSystem"/> added to it, in the order added — and closes with ImGui.
-/// Holds no drawing of its own: chunks, models, clouds, sky, overlays and HUD are all render systems (see
-/// <see cref="Add"/>).
+/// Opens the frame (<see cref="SystemStage.BeginRender"/>): builds the camera uniform from the active camera, opens
+/// the render pass and fills in the shared <see cref="RenderFrame"/> the later render stages draw with. Leaves the
+/// frame closed when there's no active camera or no swapchain image, and every render-stage system then skips it.
 /// </summary>
-public sealed class RenderSystem : ISystem, IDebugUiSystem, IDisposable
+public sealed class FrameBeginSystem : ISystem, IDebugUiSystem
 {
-    private static readonly RenderPass[] PassOrder = Enum.GetValues<RenderPass>();
-
+    private readonly RenderFrame _frame;
     private readonly EntitySet _cameras;
     private readonly Renderer _renderer;
-    private readonly ImGuiController _gui;
     private readonly Time _time;
-    private readonly List<IRenderSystem>[] _passes = new List<IRenderSystem>[PassOrder.Length];
 
-    public RenderSystem(World world, Renderer renderer, ImGuiController gui, Time time)
+    public FrameBeginSystem(RenderFrame frame, World world, Renderer renderer, Time time)
     {
+        _frame    = frame;
         _renderer = renderer;
-        _gui      = gui;
         _time     = time;
         _cameras  = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
-        for (int i = 0; i < _passes.Length; i++) _passes[i] = new List<IRenderSystem>();
-    }
-
-    /// <summary>Adds <paramref name="system"/> to <paramref name="pass"/>, drawn after the systems already in it.
-    /// A system that implements <see cref="IDebugUiSystem"/> gets its panel registered too.</summary>
-    public RenderSystem Add(RenderPass pass, IRenderSystem system)
-    {
-        _passes[(int)pass].Add(system);
-        if (system is IDebugUiSystem debugUi) _gui.RegisterDebugUi(debugUi);
-        return this;
     }
 
     // ── debug UI ─────────────────────────────────────────────────────────────
@@ -76,11 +62,9 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem, IDisposable
 
     public void Update(float dt)
     {
+        _frame.IsOpen = false;
         if (!TryGetActiveCamera(out var camTransform, out var camera))
-        {
-            _gui.EndFrame(); // close the ImGui frame EngineHost opened even when nothing else renders
             return;
-        }
 
         var uniform = new CameraUniform
         {
@@ -112,41 +96,14 @@ public sealed class RenderSystem : ISystem, IDebugUiSystem, IDisposable
         }
 
         if (!_renderer.BeginFrame())
-        {
-            _gui.EndFrame();
             return;
-        }
 
         _renderer.SetCameraUniform(uniform);
 
-        var frame = new RenderContext(camTransform.Position, uniform.View, uniform.Projection,
-                                      Frustum.FromViewProjection(Mat4.Multiply(uniform.Projection, uniform.View)),
-                                      _time.TotalSeconds);
-        foreach (var pass in PassOrder)
-        {
-            BeginPass(pass);
-            foreach (var system in _passes[(int)pass])
-                system.Render(frame);
-        }
-
-        // ImGui draws last, on top of everything, in the same pass.
-        _gui.EndFrame();
-        _renderer.EndFrame();
-    }
-
-    /// <summary>Per-pass state its systems start from. World, Sky and Overlay share the world camera and pipeline
-    /// BeginFrame bound (each Renderer draw restores it after switching); Hud switches to the HUD pipeline and
-    /// identity camera for the rest of the frame.</summary>
-    private void BeginPass(RenderPass pass)
-    {
-        if (pass == RenderPass.Hud) _renderer.BeginHudPass();
-    }
-
-    public void Dispose()
-    {
-        foreach (var list in _passes)
-            foreach (var system in list)
-                (system as IDisposable)?.Dispose();
+        _frame.Context = new RenderContext(camTransform.Position, uniform.View, uniform.Projection,
+                                           Frustum.FromViewProjection(Mat4.Multiply(uniform.Projection, uniform.View)),
+                                           _time.TotalSeconds);
+        _frame.IsOpen = true;
     }
 
     private bool TryGetActiveCamera(out Transform transform, out Camera camera)

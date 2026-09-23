@@ -95,15 +95,18 @@ host.AddSystem(new DynamicGridCleanupSystem(host.World), SystemStage.Logic);
 host.AddSystem(new GpuResidencySystem(host.World, staticVolume, gridStore), SystemStage.PreRender);
 host.AddSystem(new GpuLightSystem(host.World, staticVolume, host.Context, host.Physics, gridStore), SystemStage.PreRender);
 host.AddSystem(meshSystem, SystemStage.PreRender);
-// Each frame draws its render passes in order, and each pass its systems in the order added here.
-using var renderSystem = new RenderSystem(host.World, host.Renderer, host.Gui, host.Time)
-    .Add(RenderPass.World,   new ChunkRenderSystem(host.World, host.Renderer))
-    .Add(RenderPass.World,   new ModelRenderSystem(host.World, host.Renderer))
-    .Add(RenderPass.World,   new CloudRenderSystem(host.Renderer))
-    .Add(RenderPass.Sky,     new SkyRenderSystem(host.Renderer))
-    .Add(RenderPass.Overlay, new WireframeRenderSystem(host.World, host.Renderer))
-    .Add(RenderPass.Hud,     new HudRenderSystem(host.World, host.Renderer));
-host.AddSystem(renderSystem, SystemStage.Render);
+// Rendering: FrameBeginSystem opens the frame in BeginRender, the draw systems fill it stage by stage (in the order
+// added within a stage), and FrameEndSystem draws ImGui and presents in EndRender. They share the frame via RenderFrame.
+var renderFrame = new RenderFrame();
+using var clouds = new CloudRenderSystem(renderFrame, host.Renderer);
+host.AddSystem(new FrameBeginSystem(renderFrame, host.World, host.Renderer, host.Time), SystemStage.BeginRender);
+host.AddSystem(new ChunkRenderSystem(renderFrame, host.World, host.Renderer), SystemStage.RenderWorld);
+host.AddSystem(new ModelRenderSystem(renderFrame, host.World, host.Renderer), SystemStage.RenderWorld);
+host.AddSystem(clouds, SystemStage.RenderWorld);
+host.AddSystem(new SkyRenderSystem(renderFrame, host.Renderer), SystemStage.RenderSky);
+host.AddSystem(new WireframeRenderSystem(renderFrame, host.World, host.Renderer), SystemStage.RenderOverlay);
+host.AddSystem(new HudRenderSystem(renderFrame, host.World, host.Renderer), SystemStage.RenderHud);
+host.AddSystem(new FrameEndSystem(renderFrame, host.Renderer, host.Gui), SystemStage.EndRender);
 
 var camSpawn = TestScene.Build(host, seed);
 

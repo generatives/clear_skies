@@ -80,7 +80,8 @@ public sealed class EngineHost : IDisposable
     {
         Time.Advance(dt);
         Window.Native.Title = $"{Options.Title} — {Time.FramesPerSecond} fps";
-        RunStage(SystemStage.Render, (float)dt);
+        for (var stage = SystemStage.BeginRender; stage <= SystemStage.EndRender; stage++)
+            RunStage(stage, (float)dt);
     }
 
     private void RunStage(SystemStage stage, float dt)
@@ -98,7 +99,7 @@ public sealed class EngineHost : IDisposable
 
     /// <summary>Debug panel listing each system's CPU time per frame, slowest first. GPU work isn't timed
     /// directly: if the frame takes much longer than the CPU total, the difference is GPU time (or vsync),
-    /// and it usually shows up inside RenderSystem, where the frame waits to present.</summary>
+    /// and it usually shows up inside FrameEndSystem, where the frame waits to present.</summary>
     private sealed class FrameTimingsPanel : IDebugUiSystem
     {
         private readonly EngineHost _host;

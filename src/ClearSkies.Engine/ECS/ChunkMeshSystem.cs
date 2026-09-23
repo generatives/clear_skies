@@ -162,7 +162,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                 }
 
                 // The chunk's voxel base and the volume dims are derived live at draw time from the volume's
-                // GPU resources (see RenderSystem), so a volume reallocation needs no remesh here. SetMesh clears
+                // GPU resources (see ChunkRenderSystem), so a volume reallocation needs no remesh here. SetMesh clears
                 // NeedsRemesh, so preserve a re-dirty that arrived while this job was in flight.
                 {
                     bool redirtied = entity.Has<NeedsRemeshFlag>();

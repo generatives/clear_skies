@@ -4,7 +4,7 @@ namespace ClearSkies.Engine.Rendering;
 
 /// <summary>
 /// Sky gradient and distance fog, shared by <c>ChunkLoadSystem</c> (which publishes how far the world is loaded)
-/// and <c>RenderSystem</c> (the <c>CameraUniform</c> sky/fog fields and the debug sliders).
+/// and <c>FrameBeginSystem</c> (the <c>CameraUniform</c> sky/fog fields and the debug sliders).
 /// The fog exists to hide the edge of the loaded world, so its distances are fractions of the loaded extent rather
 /// than absolute: changing the view distance moves the fog with it. Fogged geometry fades to the sky colour in its
 /// own view direction, so it blends into exactly what is drawn behind it.
