@@ -55,18 +55,16 @@ public struct CharacterModeComponent
     public bool FreeFly;
 }
 
-/// <summary>On a DynamicGrid's root entity: the heading the ship holds when not piloted, in radians about world up
-/// (0 with its bow towards -Z, increasing anticlockwise seen from above). Set by <see cref="AirshipFlightSystem"/>
-/// to the ship's heading when it first flies, and follows the ship while it's piloted; turning a
-/// <see cref="SteeringWheel"/> on the ship turns it.</summary>
-public struct Helm
-{
-    public float TargetHeading;
-}
-
 /// <summary>Tag: set on exactly one DynamicGrid's root entity while GridPilotSystem is piloting it.
 /// Read by AirshipFlightSystem to decide whether to take velocity targets from player input.</summary>
 public struct PilotedComponent
+{
+}
+
+/// <summary>Tag: set on the camera entity while the player is using an Interactive block (see
+/// <see cref="BlockInteraction"/>): the mouse moves the control instead of turning the view, which
+/// <see cref="PlayerInputSystem"/> keeps on the part being moved. PlayerMovementSystem skips mouse-look meanwhile.</summary>
+public struct LookLockedComponent
 {
 }
 

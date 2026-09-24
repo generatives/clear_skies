@@ -40,9 +40,9 @@ public struct Interactive
 {
 }
 
-/// <summary>A lever: an arm the player drags across its range (see <see cref="LeverControlSystem"/>). On a ship it asks
-/// for acceleration along the axis it levers on (see <see cref="AirshipFlightSystem"/>): at 1, the full lever
-/// acceleration towards the lever's north face; at -1, towards its south face. A ship's levers on the same axis move together.</summary>
+/// <summary>A lever: an arm the player drags across its range (see <see cref="LeverControlSystem"/>). On a ship it sets
+/// the speed along the axis it levers on (see <see cref="AirshipFlightSystem"/>): at 1, top speed towards the lever's
+/// north face; at -1, towards its south face; upright, still. A ship's levers on the same axis move together.</summary>
 public struct Lever
 {
     /// <summary>Where the arm is set, from -1 (fully to one side) through 0 (upright) to 1 (fully to the other).
@@ -52,11 +52,15 @@ public struct Lever
 }
 
 /// <summary>A ship's wheel: the player grabs its rim and turns it (see <see cref="SteeringWheelControlSystem"/>), and
-/// the ship's <see cref="Helm"/> heading turns with it, one for one: clockwise (as seen from its north face, where the
-/// player who placed it stands) to starboard.</summary>
+/// the ship turns at a rate set by how far it's turned (see <see cref="AirshipFlightSystem"/>): clockwise (as seen
+/// from its north face, where the player who placed it stands) to starboard, faster the further it's turned. A
+/// ship's wheels turn together.</summary>
 public struct SteeringWheel
 {
-    /// <summary>How far the wheel has been turned from where it was modelled, clockwise, in radians. Unbounded: it
-    /// keeps counting past a full turn.</summary>
+    /// <summary>How far the wheel turns either way from centred (radians): half a turn.</summary>
+    public const float MaxAngle = MathF.PI;
+
+    /// <summary>How far the wheel is turned from centred (where it was modelled), clockwise, in radians, within
+    /// ±<see cref="MaxAngle"/>.</summary>
     public float Angle;
 }

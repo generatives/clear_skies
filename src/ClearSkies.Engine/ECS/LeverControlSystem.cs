@@ -10,19 +10,15 @@ using Silk.NET.Maths;
 namespace ClearSkies.Engine.ECS;
 
 /// <summary>
-/// Lets the player drag a lever's arm across its range. On each <see cref="BlockInteraction"/> for a lever (the click
-/// and every frame the button is held), sets <see cref="Lever.Value"/> to the setting that brings the arm's tip closest
-/// to the camera ray, so the tip follows the crosshair as nearly as the arm's range allows. The arm moves continuously
-/// from where it is (the nearest such setting downhill from it, not the best over the whole range): seen head-on, a
-/// tip leaning towards the player and one leaning away can look equally near the crosshair, and following the arm
-/// keeps it from jumping between them, and lets a drag carry it over the top to the far side. (Unlike aiming at where
-/// the ray crosses the arm's swing plane, this still works head-on, with the player standing in that plane, as they
-/// do in front of a lever they placed.) Every frame it poses each lever's
-/// arm from its <see cref="Lever.Value"/>, so anything else that sets the value moves the arm too.
+/// Lets the player drag a lever's arm across its range. Clicking a lever takes hold of the arm's tip: while the button
+/// is held the view stays on the tip (see <see cref="InteractionFocus"/>) and the mouse, instead of turning the view,
+/// drags the tip along its arc: its movement along the way the tip moves on screen turns the arm, slowly, for fine
+/// control, and movement across that is ignored. Every frame it poses each lever's arm from its
+/// <see cref="Lever.Value"/>, so anything else that sets the value moves the arm too.
 ///
 /// A volume's levers on the same axis move together: dragging one sets every other lever in its volume that levers
 /// along the same line (north face the same way or the opposite way; the opposite way gets the negated value, so all
-/// of them ask for the same force), and a lever placed on an axis that already has levers picks up their setting.
+/// of them ask for the same thing), and a lever placed on an axis that already has levers picks up their setting.
 ///
 /// The swing comes from the model: the arm node pivots about its own X axis at its rest position, so it levers north
 /// and south: upright along its own +Y at 0, leaning <see cref="MaxAngle"/> towards its own -Z (the block's north
@@ -38,6 +34,11 @@ public sealed class LeverControlSystem : ISystem, IDisposable, IDebugUiSystem
     /// <summary>How far the arm swings from upright at <see cref="Lever.Value"/> ±1.</summary>
     public const float MaxAngle = MathF.PI / 4f;
 
+    // How far the arm turns per pixel the mouse moves along the tip's path on screen (radians): about 200 pixels from
+    // upright to either end, much slower than the view turns, for fine control.
+    private const float Sensitivity = 0.004f;
+
+    private readonly World       _world;
     private readonly EntitySet   _levers;
     private readonly IDisposable _subscription;
     private Entity _lastUsed;
@@ -47,6 +48,7 @@ public sealed class LeverControlSystem : ISystem, IDisposable, IDebugUiSystem
 
     public LeverControlSystem(World world)
     {
+        _world        = world;
         _levers       = world.GetEntities().With<Lever>().With<RenderedModel>().AsSet();
         _subscription = world.Subscribe<BlockInteraction>(OnInteraction);
     }
@@ -71,15 +73,48 @@ public sealed class LeverControlSystem : ISystem, IDisposable, IDebugUiSystem
         var e = interaction.Block;
         if (!e.IsAlive || !e.Has<Lever>() || !e.Has<RenderedModel>() || !e.Has<Transform>()) return;
 
+        var model = e.Get<RenderedModel>().Model;
+        ref readonly var transform = ref e.Get<Transform>();
         ref var lever = ref e.Get<Lever>();
-        float current = System.Math.Clamp(lever.Value, -1f, 1f) * MaxAngle;
-        if (ArmAngleTowards(e.Get<RenderedModel>().Model, e.Get<Transform>(),
-                            interaction.RayOrigin, interaction.RayDirection, current) is not { } angle)
-            return;
+        float angle = System.Math.Clamp(lever.Value, -1f, 1f) * MaxAngle;
+        if (ArmTip(model, transform, angle) is not { } arm) return;
 
-        lever.Value = angle / MaxAngle;
+        // Drag the tip along its arc: the mouse's movement along the way the tip moves on screen turns the arm.
+        float pixels = InteractionDrag.AlongScreen(arm.Tangent, interaction.RayDirection, interaction.MouseDelta);
+        if (pixels != 0f)
+        {
+            angle = System.Math.Clamp(angle + pixels * Sensitivity, -MaxAngle, MaxAngle);
+            lever.Value = angle / MaxAngle;
+            SyncAxis(e);
+            arm = ArmTip(model, transform, angle)!.Value;
+        }
+
         _lastUsed = e;
-        SyncAxis(e);
+        _world.Publish(new InteractionFocus(arm.Tip)); // keep the crosshair on the tip
+    }
+
+    /// <summary>Where the arm's tip is in world space with the arm at <paramref name="angle"/> (about its pivot axis,
+    /// from upright), and which way it moves as the angle grows; null when the model has no arm.</summary>
+    private static (Vector3D<float> Tip, Vector3D<float> Tangent)? ArmTip(GpuModel model, in Transform transform, float angle)
+    {
+        int arm = model.FindNode(ArmNode);
+        if (arm < 0) return null;
+
+        // The arm's pivot and axes at rest, in model space (= the block entity's own space): its columns are the
+        // arm node's local Y (upright) and Z (south; the arm leans the other way, north, at positive angles).
+        ref readonly var rest = ref model.RestPose[arm];
+        var pivot = new Vector3D<float>(rest.M12, rest.M13, rest.M14);
+        var up    = Vector3D.Normalize(new Vector3D<float>(rest.M4, rest.M5, rest.M6));
+        var north = -Vector3D.Normalize(new Vector3D<float>(rest.M8, rest.M9, rest.M10));
+
+        // The arm's length: at rest it stands upright to the top of the model.
+        float length = model.BoundsMax.Y - pivot.Y;
+        if (length <= 0f) return null;
+
+        // Turning the arm by +angle about PivotAxis takes its tip to pivot + length·(cos·up + sin·north).
+        var tip     = pivot + length * (MathF.Cos(angle) * up + MathF.Sin(angle) * north);
+        var tangent = length * (-MathF.Sin(angle) * up + MathF.Cos(angle) * north);
+        return (InteractionDrag.ToWorld(transform, tip), InteractionDrag.DirectionToWorld(transform, tangent));
     }
 
     /// <summary>The line a lever levers along in its volume (0-2: the north/south, east/west or up/down axis), and
@@ -125,63 +160,6 @@ public sealed class LeverControlSystem : ISystem, IDisposable, IDebugUiSystem
             lever.Get<Lever>().Value = other.Get<Lever>().Value * otherSign * sign;
             return;
         }
-    }
-
-    /// <summary>The arm angle (about the arm's pivot axis, from upright, within ±<see cref="MaxAngle"/>) nearest
-    /// <paramref name="current"/> at which the arm's tip is locally closest to the world-space ray, or null when the
-    /// model has no arm.</summary>
-    private static float? ArmAngleTowards(GpuModel model, in Transform transform,
-                                          Vector3D<float> rayOrigin, Vector3D<float> rayDirection, float current)
-    {
-        int arm = model.FindNode(ArmNode);
-        if (arm < 0) return null;
-
-        // The arm's pivot and axes at rest, in model space (= the block entity's own space): its columns are the
-        // arm node's local Y (upright) and Z (south; the arm leans the other way, north, at positive angles).
-        ref readonly var rest = ref model.RestPose[arm];
-        var pivot = new Vector3D<float>(rest.M12, rest.M13, rest.M14);
-        var up    = Vector3D.Normalize(new Vector3D<float>(rest.M4, rest.M5, rest.M6));
-        var north = -Vector3D.Normalize(new Vector3D<float>(rest.M8, rest.M9, rest.M10));
-
-        // The arm's length: at rest it stands upright to the top of the model.
-        float length = model.BoundsMax.Y - pivot.Y;
-        if (length <= 0f) return null;
-
-        // The ray in the block entity's own space.
-        var inverse = Vec.Conjugate(transform.Rotation);
-        var origin  = Vec.Rotate(inverse, rayOrigin - transform.Position) / transform.Scale;
-        var dir     = Vector3D.Normalize(Vec.Rotate(inverse, rayDirection) / transform.Scale);
-
-        // Turning the arm by +angle about PivotAxis takes its tip to pivot + length·(cos·up + sin·north). Find the angle
-        // whose tip is nearest the ray, walking downhill from the current angle in small steps, then narrowing in.
-        // "Nearest" as the player sees it: the angle between the ray and the tip from the camera, i.e. how far the tip is
-        // from the crosshair on screen. (Plain distance to the ray would favour tips nearer the camera.)
-        float TipDistance(float angle)
-        {
-            var tip = pivot + length * (MathF.Cos(angle) * up + MathF.Sin(angle) * north);
-            return 1f - Vector3D.Dot(Vector3D.Normalize(tip - origin), dir);
-        }
-
-        const float step = MaxAngle / 16f;
-        float best = System.Math.Clamp(current, -MaxAngle, MaxAngle), bestDistance = TipDistance(best);
-        float up1 = System.Math.Min(best + step, MaxAngle), down1 = System.Math.Max(best - step, -MaxAngle);
-        float direction = TipDistance(up1) <= TipDistance(down1) ? 1f : -1f; // the steeper way downhill
-        while (true)
-        {
-            float next = System.Math.Clamp(best + direction * step, -MaxAngle, MaxAngle), distance = TipDistance(next);
-            if (next == best || distance >= bestDistance) break;
-            best = next; bestDistance = distance;
-        }
-
-        // Golden-section search between the neighbouring steps.
-        float lo = MathF.Max(best - step, -MaxAngle), hi = MathF.Min(best + step, MaxAngle);
-        const float InvPhi = 0.618034f;
-        for (int i = 0; i < 16; i++)
-        {
-            float a = hi - InvPhi * (hi - lo), b = lo + InvPhi * (hi - lo);
-            if (TipDistance(a) < TipDistance(b)) hi = b; else lo = a;
-        }
-        return (lo + hi) * 0.5f;
     }
 
     public void Dispose() => _subscription.Dispose();

@@ -55,7 +55,8 @@ public sealed class PlayerMovementSystem : ISystem
             ref var t    = ref e.Get<Transform>();
             ref var look = ref e.Get<MouseLookComponent>();
 
-            if (_input.CursorCaptured)
+            // While using an Interactive block the mouse moves the control, not the view (see BlockInteraction).
+            if (_input.CursorCaptured && !e.Has<LookLockedComponent>())
             {
                 var delta = _input.MouseDelta;
                 look.Yaw -= delta.X * look.LookSensitivity;

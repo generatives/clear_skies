@@ -9,12 +9,14 @@ using Silk.NET.Maths;
 namespace ClearSkies.Engine.ECS;
 
 /// <summary>
-/// Lets the player turn a ship's wheel by grabbing its rim. On the click (<see cref="InteractionPhase.Began"/>) it
-/// notes where on the wheel's face the camera ray points, as an angle about the wheel's hub; each frame the button is
-/// held it turns the wheel by however far that angle has moved since, so the part of the wheel the player grabbed
-/// follows the crosshair round (rather than, say, the wheel's top snapping to it). Every turn also turns the ship's
-/// <see cref="Helm"/> heading by the same amount, clockwise to starboard, which <see cref="AirshipFlightSystem"/>
-/// then steers the ship to. Every frame it poses each wheel from its <see cref="SteeringWheel.Angle"/>.
+/// Lets the player turn a ship's wheel by grabbing its rim. Clicking takes hold of the wheel where the crosshair is on
+/// its face (at the rim, when the click is on the hub); while the button is held the view stays on that spot as the
+/// wheel turns (see <see cref="InteractionFocus"/>), and the mouse, instead of turning the view, drags the spot round:
+/// its movement along the way the spot moves on screen turns the wheel, slowly, for fine control. So the part of the
+/// wheel the player grabbed goes round with the mouse, rather than the wheel's top snapping to it. The wheel turns up
+/// to <see cref="SteeringWheel.MaxAngle"/> either way, and a ship's wheels turn together. What the wheel asks of the
+/// ship is <see cref="AirshipFlightSystem"/>'s business. Every frame it poses each wheel from its
+/// <see cref="SteeringWheel.Angle"/>.
 ///
 /// The spin comes from the model: the wheel node turns about its own Z axis at its rest position, its face towards
 /// the block's north face (where the player who placed it stands).
@@ -23,19 +25,27 @@ public sealed class SteeringWheelControlSystem : ISystem, IDisposable, IDebugUiS
 {
     private const string WheelNode = "wheel";
 
-    // Pointing closer to the hub than this, the angle the ray points at swings wildly with tiny moves: ignore it.
-    private const float MinGrabRadius = 0.05f;
+    // How far the wheel turns per pixel the mouse moves along the held spot's path on screen (radians): about 400
+    // pixels from centred to either end.
+    private const float Sensitivity = 0.008f;
 
+    // The hold's distance from the hub: at least MinGrabRadius (nearer, its path is too small to drag along) and at most
+    // RimRadius, the rim (a click beside the wheel, still in its block, holds the rim), which is also where a click
+    // on the hub itself holds.
+    private const float RimRadius = 0.44f, MinGrabRadius = 0.2f;
+
+    private readonly World       _world;
     private readonly EntitySet   _wheels;
     private readonly IDisposable _subscription;
 
-    // The wheel being turned and the angle about its hub the ray last pointed at, while one is.
-    private Entity _turning;
-    private float? _grabAngle;
+    // The spot held on the wheel being turned: its angle about the hub from the wheel's own +X (turning with the
+    // wheel) and its distance from the hub.
+    private float  _grabAngle, _grabRadius;
     private Entity _lastUsed;
 
     public SteeringWheelControlSystem(World world)
     {
+        _world        = world;
         _wheels       = world.GetEntities().With<SteeringWheel>().With<RenderedModel>().AsSet();
         _subscription = world.Subscribe<BlockInteraction>(OnInteraction);
     }
@@ -50,73 +60,91 @@ public sealed class SteeringWheelControlSystem : ISystem, IDisposable, IDebugUiS
     private void OnInteraction(in BlockInteraction interaction)
     {
         var e = interaction.Block;
+        if (interaction.Phase == InteractionPhase.Ended) return;
         if (!e.IsAlive || !e.Has<SteeringWheel>() || !e.Has<RenderedModel>() || !e.Has<Transform>()) return;
+        if (WheelFrame(e.Get<RenderedModel>().Model) is not { } frame) return;
+        ref readonly var transform = ref e.Get<Transform>();
+        ref var wheel = ref e.Get<SteeringWheel>();
 
-        if (interaction.Phase == InteractionPhase.Ended)
+        if (interaction.Phase == InteractionPhase.Began)
         {
-            _turning = default;
-            _grabAngle = null;
-            return;
+            // Hold the spot clicked, as it sits on the wheel at its current angle.
+            var (angle, radius) = PointedAt(frame, transform, interaction.RayOrigin, interaction.RayDirection)
+                                  ?? (MathF.PI / 2f, RimRadius);
+            _grabAngle  = angle - wheel.Angle;
+            _grabRadius = System.Math.Clamp(radius, MinGrabRadius, RimRadius);
+            _lastUsed   = e;
+        }
+        else
+        {
+            var (_, tangent) = Spot(frame, transform, wheel.Angle);
+            float pixels = InteractionDrag.AlongScreen(tangent, interaction.RayDirection, interaction.MouseDelta);
+            if (pixels != 0f)
+            {
+                wheel.Angle = System.Math.Clamp(wheel.Angle + pixels * Sensitivity,
+                                                -SteeringWheel.MaxAngle, SteeringWheel.MaxAngle);
+                SyncShip(e);
+            }
         }
 
-        var pointed = PointedAngle(e.Get<RenderedModel>().Model, e.Get<Transform>(),
-                                   interaction.RayOrigin, interaction.RayDirection);
-        if (interaction.Phase == InteractionPhase.Began || _turning != e)
-        {
-            _turning   = e;
-            _grabAngle = pointed;
-            _lastUsed  = e;
-            return;
-        }
-        if (pointed is not { } angle) return; // off the wheel's face for now: keep the grab where it was
-        if (_grabAngle is not { } grab) { _grabAngle = angle; return; }
-
-        // The shorter way round from the grab to where the ray points now.
-        float delta = MathF.IEEERemainder(angle - grab, 2f * MathF.PI);
-        _grabAngle = angle;
-        Turn(e, delta);
+        _world.Publish(new InteractionFocus(Spot(frame, transform, wheel.Angle).Point)); // keep the crosshair on it
     }
 
-    /// <summary>Turns <paramref name="wheel"/> by <paramref name="delta"/> radians clockwise, and its ship's heading
-    /// with it: to starboard, which is clockwise from above, so its heading (anticlockwise) goes down.</summary>
-    private static void Turn(Entity wheel, float delta)
-    {
-        wheel.Get<SteeringWheel>().Angle += delta;
-        if (!wheel.Has<BlockRef>()) return;
-        var ship = wheel.Get<BlockRef>().Volume.Root;
-        if (ship.IsAlive && ship.Has<Helm>()) ship.Get<Helm>().TargetHeading -= delta;
-    }
+    /// <summary>The wheel's hub and axes at rest, in model space (= the block entity's own space).</summary>
+    private readonly record struct Frame(Vector3D<float> Hub, Vector3D<float> X, Vector3D<float> Y, Vector3D<float> Normal);
 
-    /// <summary>The angle about the wheel's hub, in the wheel's own frame (from its +X towards its +Y: clockwise, seen
-    /// from its north face), at which the world-space ray crosses the wheel's face; null when it doesn't, or crosses
-    /// too near the hub to tell, or the model has no wheel.</summary>
-    private static float? PointedAngle(GpuModel model, in Transform transform,
-                                       Vector3D<float> rayOrigin, Vector3D<float> rayDirection)
+    private static Frame? WheelFrame(GpuModel model)
     {
         int wheel = model.FindNode(WheelNode);
         if (wheel < 0) return null;
-
-        // The wheel's hub and axes at rest, in model space (= the block entity's own space).
         ref readonly var rest = ref model.RestPose[wheel];
-        var hub    = new Vector3D<float>(rest.M12, rest.M13, rest.M14);
-        var x      = Vector3D.Normalize(new Vector3D<float>(rest.M0, rest.M1, rest.M2));
-        var y      = Vector3D.Normalize(new Vector3D<float>(rest.M4, rest.M5, rest.M6));
-        var normal = Vector3D.Normalize(new Vector3D<float>(rest.M8, rest.M9, rest.M10));
+        return new Frame(
+            new Vector3D<float>(rest.M12, rest.M13, rest.M14),
+            Vector3D.Normalize(new Vector3D<float>(rest.M0, rest.M1, rest.M2)),
+            Vector3D.Normalize(new Vector3D<float>(rest.M4, rest.M5, rest.M6)),
+            Vector3D.Normalize(new Vector3D<float>(rest.M8, rest.M9, rest.M10)));
+    }
 
-        // The ray in the block entity's own space.
+    /// <summary>The held spot in world space with the wheel at <paramref name="wheelAngle"/>, and which way it moves
+    /// as the wheel turns clockwise.</summary>
+    private (Vector3D<float> Point, Vector3D<float> Tangent) Spot(in Frame f, in Transform transform, float wheelAngle)
+    {
+        float a = _grabAngle + wheelAngle;
+        var point   = f.Hub + _grabRadius * (MathF.Cos(a) * f.X + MathF.Sin(a) * f.Y);
+        var tangent = _grabRadius * (-MathF.Sin(a) * f.X + MathF.Cos(a) * f.Y);
+        return (InteractionDrag.ToWorld(transform, point), InteractionDrag.DirectionToWorld(transform, tangent));
+    }
+
+    /// <summary>Where the world-space ray crosses the wheel's face: the angle about the hub, in the wheel's own frame
+    /// (from its +X towards its +Y: clockwise, seen from its north face), and the distance from the hub; null when it
+    /// doesn't cross it.</summary>
+    private static (float Angle, float Radius)? PointedAt(in Frame f, in Transform transform,
+                                                         Vector3D<float> rayOrigin, Vector3D<float> rayDirection)
+    {
         var inverse = Vec.Conjugate(transform.Rotation);
         var origin  = Vec.Rotate(inverse, rayOrigin - transform.Position) / transform.Scale;
         var dir     = Vec.Rotate(inverse, rayDirection) / transform.Scale;
 
-        float facing = Vector3D.Dot(dir, normal);
+        float facing = Vector3D.Dot(dir, f.Normal);
         if (MathF.Abs(facing) < 1e-5f) return null; // looking along the face
-        float t = Vector3D.Dot(hub - origin, normal) / facing;
+        float t = Vector3D.Dot(f.Hub - origin, f.Normal) / facing;
         if (t < 0f) return null; // the face is behind the camera
 
-        var offset = origin + t * dir - hub;
-        float ox = Vector3D.Dot(offset, x), oy = Vector3D.Dot(offset, y);
-        if (ox * ox + oy * oy < MinGrabRadius * MinGrabRadius) return null;
-        return MathF.Atan2(oy, ox);
+        var offset = origin + t * dir - f.Hub;
+        float ox = Vector3D.Dot(offset, f.X), oy = Vector3D.Dot(offset, f.Y);
+        float radius = MathF.Sqrt(ox * ox + oy * oy);
+        return radius < 1e-4f ? null : (MathF.Atan2(oy, ox), radius);
+    }
+
+    /// <summary>Turns every other wheel on <paramref name="source"/>'s ship to match it.</summary>
+    private void SyncShip(Entity source)
+    {
+        if (!source.Has<BlockRef>()) return;
+        var volume = source.Get<BlockRef>().Volume;
+        float angle = source.Get<SteeringWheel>().Angle;
+        foreach (ref readonly Entity other in _wheels.GetEntities())
+            if (other != source && other.Has<BlockRef>() && other.Get<BlockRef>().Volume == volume)
+                other.Get<SteeringWheel>().Angle = angle;
     }
 
     public void Dispose() => _subscription.Dispose();
@@ -131,9 +159,6 @@ public sealed class SteeringWheelControlSystem : ISystem, IDisposable, IDebugUiS
         {
             float degrees = _lastUsed.Get<SteeringWheel>().Angle * 180f / MathF.PI;
             ImGui.Text($"Last used: turned {degrees:0}° clockwise");
-            var ship = _lastUsed.Has<BlockRef>() ? _lastUsed.Get<BlockRef>().Volume.Root : default;
-            if (ship.IsAlive && ship.Has<Helm>())
-                ImGui.Text($"Its ship's heading: {ship.Get<Helm>().TargetHeading * 180f / MathF.PI:0}°");
         }
         else
         {
