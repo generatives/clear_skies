@@ -37,7 +37,8 @@ namespace ClearSkies.Engine.ECS;
 /// between 0 and the Fan's max (Fans only push), so that together they produce the desired force and torque as
 /// closely as possible (a box-constrained least-squares problem; see <see cref="AllocateThrust"/>). When the Fans
 /// can meet the demand they meet it exactly, whatever mix of directions it has and however many Fans point each
-/// way. An earlier proportional scheme gave each Fan <c>(its alignment / total alignment) × |demand|</c>, which is
+/// way. When they can't, torque comes first (see <see cref="AllocateKeepingTorque"/>): the ship gets less force rather
+/// than tipping over. An earlier proportional scheme gave each Fan <c>(its alignment / total alignment) × |demand|</c>, which is
 /// only exact when a single group of Fans is working: thrusting forward on a ship with more lift Fans than forward
 /// Fans handed the lift group too much of the bigger total, so ships climbed whenever they accelerated. When the
 /// demand is out of reach (Fans at max, or none pointing the needed way) the solve gives the closest achievable
@@ -272,7 +273,7 @@ public sealed class AirshipFlightSystem : ISystem
             fanCount += blocks.Fans.Count;
             if (!_freePropulsion && blocks.Fans.Count > 0)
             {
-                (_lastUnmetForce, _lastUnmetTorque) = AllocateThrust(blocks.Fans, com, rot, desiredForce, desiredTorque);
+                (_lastUnmetForce, _lastUnmetTorque) = AllocateKeepingTorque(blocks.Fans, com, rot, desiredForce, desiredTorque);
                 for (int i = 0; i < blocks.Fans.Count; i++)
                 {
                     float thrust = _fanThrusts[i];
@@ -414,6 +415,41 @@ public sealed class AirshipFlightSystem : ISystem
         var exhaustDir = Vector3.Transform(new Vector3(up.X, up.Y, up.Z), rot);
         return -exhaustDir;
     }
+
+    /// <summary>
+    /// <see cref="AllocateThrust"/>, but putting torque first: when the Fans can't deliver the whole force and torque
+    /// (typically at their limits), it asks for as large a fraction of <paramref name="force"/> as still leaves the
+    /// torque met as well as it can be with no force asked for at all. Plain least squares would trade some torque for
+    /// more force, and the lost torque is the self-levelling and heading hold: asking an off-balance set of Fans for
+    /// more lift than they have tips the ship over (nose up and over backwards) instead of just lifting less. The
+    /// fraction is found by bisection, re-solving each time; the last solve is the one left in the scratch arrays.
+    /// </summary>
+    private (Vector3 UnmetForce, Vector3 UnmetTorque) AllocateKeepingTorque(
+        List<BlockRef> fans, Vector3 com, Quaternion rot, Vector3 force, Vector3 torque)
+    {
+        var full = AllocateThrust(fans, com, rot, force, torque);
+        float torqueTolerance = TorqueTolerance + 0.01f * torque.Length();
+        if (full.UnmetTorque.Length() <= torqueTolerance) return full;
+
+        // The torque that can't be met whatever force is asked for; allow that much, plus the tolerance.
+        float floor = AllocateThrust(fans, com, rot, Vector3.Zero, torque).UnmetTorque.Length() + torqueTolerance;
+        if (full.UnmetTorque.Length() <= floor) return AllocateThrust(fans, com, rot, force, torque);
+
+        float lo = 0f, hi = 1f; // lo: a fraction known to keep the torque; hi: one known not to
+        for (int i = 0; i < TorqueBisections; i++)
+        {
+            float mid = 0.5f * (lo + hi);
+            if (AllocateThrust(fans, com, rot, force * mid, torque).UnmetTorque.Length() <= floor) lo = mid;
+            else hi = mid;
+        }
+        var kept = AllocateThrust(fans, com, rot, force * lo, torque);
+        return (kept.UnmetForce + force * (1f - lo), kept.UnmetTorque);
+    }
+
+    // AllocateKeepingTorque: torque misses below this (plus 1% of the asked-for torque) count as met; and how many times
+    // it halves the range of force fractions it searches.
+    private const float TorqueTolerance  = 0.05f;
+    private const int   TorqueBisections = 8;
 
     /// <summary>
     /// Solves for each of <paramref name="fans"/>' thrusts, into <see cref="_fanThrusts"/> (with each Fan's world
