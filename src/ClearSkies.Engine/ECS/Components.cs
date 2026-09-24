@@ -40,6 +40,11 @@ public struct CharacterControllerComponent
 {
     public PlayerCharacter Character;
     public float EyeHeight;
+
+    /// <summary>The ship the character stood on last tick, and its orientation then, so the view can turn with it
+    /// (see <see cref="CharacterCameraSyncSystem"/>). Null when it wasn't standing on one.</summary>
+    public BepuPhysics.BodyHandle? RideBody;
+    public System.Numerics.Quaternion RideOrientation;
 }
 
 /// <summary>Movement-mode toggle on the camera entity: true = free-fly noclip (today's default

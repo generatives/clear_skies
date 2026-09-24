@@ -58,6 +58,22 @@ public struct PlayerCharacter
     public readonly bool Supported => characters.GetCharacterByBodyHandle(bodyHandle).Supported;
     public readonly Vector3 LinearVelocity => new BodyReference(bodyHandle, characters.Simulation.Bodies).Velocity.Linear;
 
+    /// <summary>The body the character is standing on, when it's one that can move (a ship, not the static world), and
+    /// that body's current orientation. Standing means supported: on a surface no steeper than the maximum slope.</summary>
+    public readonly bool TryGetSupportBody(out BodyHandle body, out Quaternion orientation)
+    {
+        ref readonly var character = ref characters.GetCharacterByBodyHandle(bodyHandle);
+        if (!character.Supported || character.Support.Mobility == CollidableMobility.Static)
+        {
+            body = default;
+            orientation = Quaternion.Identity;
+            return false;
+        }
+        body = character.Support.BodyHandle;
+        orientation = new BodyReference(body, characters.Simulation.Bodies).Pose.Orientation;
+        return true;
+    }
+
     /// <summary>Reads WASD + Shift(sprint) + Space(jump) and updates the character's motion goals
     /// for this tick. <paramref name="viewDirectionWorld"/> is the camera's world-space forward
     /// vector (unflattened — the surface-relative projection happens inside CharacterControllers).</summary>
