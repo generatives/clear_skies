@@ -23,22 +23,19 @@ namespace ClearSkies.Engine.ECS;
 /// per-tick computation. Runs before <see cref="PhysicsWorld"/> steps, so impulses are integrated the
 /// same tick they're computed.
 ///
-/// Propulsion allocation is a two-pass proportional scheme, not an exact solver: Pass 1 sums each Fan's
-/// *positive* alignment with the desired force and with the desired torque separately (a Fan facing the
-/// wrong way contributes 0, not a negative share). Pass 2 gives each Fan exactly its proportional share
-/// of that total — <c>(this fan's alignment / total positive alignment) × desired magnitude</c> — so the
-/// fleet's total output reconstructs the desired force/torque once, not once per fan. This fixes two
-/// failure modes a naive per-fan dot product had: (1) N similarly-facing Fans each independently claiming
-/// their full raw share delivered N× the request — fine for error-driven terms (the error just shrinks
-/// faster) but a permanent bias for a *constant* feedforward term (gravity/Buoyant cancellation) that
-/// never shrinks to correct for it; (2) dividing by *total* Fan count regardless of orientation starved a
-/// ship with Fans in several different directions (e.g. some for lift, some for forward thrust) — a
-/// handful of correctly-aligned lift Fans got diluted by every unrelated forward-facing Fan on the same
-/// ship, so a 12-Fan ship with only 4 Fans actually oriented for lift only ever got ~1/12th of what those
-/// 4 could truly deliver. Scores against the *unnormalized* force/torque vectors, not a single blended
-/// direction — collapsing e.g. "forward + hold-altitude" into one normalized direction let a large
-/// forward demand drown out a much smaller vertical one. Buoyant blocks apply constant passive lift,
-/// unaffected by any of this.
+/// Propulsion allocation solves for Fan thrusts rather than sharing the demand out: it finds each Fan's thrust,
+/// between 0 and the Fan's max (Fans only push), so that together they produce the desired force and torque as
+/// closely as possible (a box-constrained least-squares problem; see <see cref="AllocateThrust"/>). When the Fans
+/// can meet the demand they meet it exactly, whatever mix of directions it has and however many Fans point each
+/// way. An earlier proportional scheme gave each Fan <c>(its alignment / total alignment) × |demand|</c>, which is
+/// only exact when a single group of Fans is working: thrusting forward on a ship with more lift Fans than forward
+/// Fans handed the lift group too much of the bigger total, so ships climbed whenever they accelerated. When the
+/// demand is out of reach (Fans at max, or none pointing the needed way) the solve gives the closest achievable
+/// force and torque.
+///
+/// Buoyant blocks apply constant passive lift at their own cells. The control law cancels both what that lift
+/// adds (feedforward): its force alongside gravity, and its torque about the centre of mass, which otherwise
+/// leaves a ship with off-centre Buoyant blocks settled at a tilt.
 ///
 /// Fan and Buoyant blocks are entity blocks (see <see cref="Fan"/>, <see cref="Buoyant"/>): each tick starts by
 /// grouping their entities by the volume they belong to (<see cref="BlockRef.Volume"/>), so a ship's blocks are
@@ -65,6 +62,17 @@ public sealed class AirshipFlightSystem : ISystem
     }
     private readonly Dictionary<ChunkVolume, ShipBlocks> _blocksByVolume = new();
     private static readonly ShipBlocks NoBlocks = new();
+
+    // AllocateThrust scratch, one entry per Fan of the grid being allocated; grown as needed.
+    private Vector3[] _fanDirs    = new Vector3[16];
+    private Vector3[] _fanOffsets = new Vector3[16];
+    private Vector3[] _fanTorques = new Vector3[16];
+    private float[]   _fanThrusts = new float[16];
+
+    // Allocation solve: at most this many passes over the Fans, stopping early once a whole pass changes no Fan's
+    // thrust by more than the tolerance (force units).
+    private const int   AllocationMaxPasses = 50;
+    private const float AllocationTolerance = 0.01f;
     private readonly PhysicsWorld    _physics;
     private readonly InputManager    _input;
 
@@ -108,6 +116,10 @@ public sealed class AirshipFlightSystem : ISystem
     // ship's Fans should easily reach) from "this ship's Fans just aren't oriented/powerful enough"
     // (delivered ≈ everything available, still short of desired).
     private float _lastDesiredForceY, _lastDeliveredForceY;
+
+    // What the last allocated grid's Fans couldn't deliver (desired minus delivered): zero while its Fans can meet
+    // the demand, so anything else here means Fans at max or none pointing the needed way.
+    private Vector3 _lastUnmetForce, _lastUnmetTorque;
 
     public AirshipFlightSystem(World world, PhysicsWorld physics, InputManager input)
     {
@@ -189,6 +201,13 @@ public sealed class AirshipFlightSystem : ISystem
             var desiredForce  = (forwardForce + rightForce + verticalForce) * mass;
             var desiredTorque = (tiltTorque + yawTorque) * mass;
 
+            // Feedforward, like the Buoyant force above: cancel the torque this grid's Buoyant lift adds about its
+            // centre of mass, so the self-level term isn't left fighting it with a steady tilt.
+            var com = PhysicsConv.ToBepu(volume.Pivot); // a grid's pivot is its centre of mass
+            var buoyantLift = Vector3.UnitY * _buoyantForce;
+            foreach (var buoyant in blocks.Buoyants)
+                desiredTorque -= Vector3.Cross(LocalOffset(buoyant, com, rot), buoyantLift);
+
             // ── propulsion: realize desiredForce/Torque via Fan/Buoyant blocks ──
             if (_freePropulsion)
             {
@@ -201,53 +220,27 @@ public sealed class AirshipFlightSystem : ISystem
                 // double it up.
             }
 
-            var com = PhysicsConv.ToBepu(volume.Pivot); // a grid's pivot is its centre of mass
-            float desiredForceMag  = desiredForce.Length();
-            float desiredTorqueMag = desiredTorque.Length();
-
-            // Pass 1: total positive alignment "capacity" across all Fans, force and torque tracked
-            // separately. Skipped in free-propulsion mode — nothing reads it there.
-            float totalForceAlign = 0f, totalTorqueAlign = 0f;
-            if (!_freePropulsion)
-            {
-                foreach (var fan in blocks.Fans)
-                {
-                    var (forceAlign, torqueAlign) = FanAlignment(fan, com, rot, desiredForce, desiredTorque);
-                    totalForceAlign  += MathF.Max(0f, forceAlign);
-                    totalTorqueAlign += MathF.Max(0f, torqueAlign);
-                }
-            }
-
-            // Pass 2: apply Buoyant lift (always) and each Fan's proportional share (skipped in
+            // Buoyant lift (always, free propulsion or not), then the Fans' solved thrusts (skipped in
             // free-propulsion mode — desiredForce/Torque was already applied directly above).
             float deliveredForceY = 0f;
             foreach (var buoyant in blocks.Buoyants)
             {
                 buoyantCount++;
-                var worldOffset = LocalOffset(buoyant, com, rot);
-                _physics.ApplyLinearImpulse(body, Vector3.UnitY * (_buoyantForce * dt), worldOffset);
+                _physics.ApplyLinearImpulse(body, buoyantLift * dt, LocalOffset(buoyant, com, rot));
                 deliveredForceY += _buoyantForce;
             }
 
-            foreach (var fan in blocks.Fans)
+            fanCount += blocks.Fans.Count;
+            if (!_freePropulsion && blocks.Fans.Count > 0)
             {
-                fanCount++;
-                if (_freePropulsion) continue;
-
-                var (forceAlign, torqueAlign) = FanAlignment(fan, com, rot, desiredForce, desiredTorque);
-
-                float forceShare  = totalForceAlign  > 1e-3f ? MathF.Max(0f, forceAlign)  / totalForceAlign  : 0f;
-                float torqueShare = totalTorqueAlign > 1e-3f ? MathF.Max(0f, torqueAlign) / totalTorqueAlign : 0f;
-
-                float desiredThrust = forceShare * desiredForceMag + torqueShare * desiredTorqueMag;
-                float thrust = System.Math.Clamp(desiredThrust, -_fanMaxForce, _fanMaxForce);
-
-                if (MathF.Abs(thrust) < 1e-3f) continue;
-
-                var thrustDir = ThrustDirection(fan, rot);
-                var fanOffset = LocalOffset(fan, com, rot);
-                _physics.ApplyLinearImpulse(body, thrustDir * (thrust * dt), fanOffset);
-                deliveredForceY += thrustDir.Y * thrust;
+                (_lastUnmetForce, _lastUnmetTorque) = AllocateThrust(blocks.Fans, com, rot, desiredForce, desiredTorque);
+                for (int i = 0; i < blocks.Fans.Count; i++)
+                {
+                    float thrust = _fanThrusts[i];
+                    if (thrust < 1e-3f) continue;
+                    _physics.ApplyLinearImpulse(body, _fanDirs[i] * (thrust * dt), _fanOffsets[i]);
+                    deliveredForceY += _fanDirs[i].Y * thrust;
+                }
             }
 
             _lastDesiredForceY   = desiredForce.Y;
@@ -348,18 +341,68 @@ public sealed class AirshipFlightSystem : ISystem
         return -exhaustDir;
     }
 
-    // A Fan's alignment with the desired force (dot of its thrust direction with it) and with the
-    // desired torque (dot of its lever-arm cross product with it, normalized by lever length).
-    private static (float forceAlign, float torqueAlign) FanAlignment(
-        in BlockRef fan, Vector3 com, Quaternion rot, Vector3 desiredForce, Vector3 desiredTorque)
+    /// <summary>
+    /// Solves for each of <paramref name="fans"/>' thrusts, into <see cref="_fanThrusts"/> (with each Fan's world
+    /// thrust direction and offset from the centre of mass in <see cref="_fanDirs"/> / <see cref="_fanOffsets"/>):
+    /// thrusts between 0 and <see cref="_fanMaxForce"/> whose combined force and torque about the centre of mass come
+    /// as close as possible to <paramref name="force"/> and <paramref name="torque"/>. Returns what they fall short by.
+    ///
+    /// Box-constrained least squares, by coordinate descent: each step sets one Fan's thrust to whatever best reduces
+    /// the remaining force/torque error, clamped to its limits, and passes repeat until nothing changes. Converges to
+    /// the exact answer when one exists. Torque is weighted by 1/L, L the Fans' RMS distance from the centre of mass,
+    /// so a unit of thrust counts about the same in the force and torque terms; unweighted, the large lever arms of a
+    /// big ship make torque dominate every step and the force error shrinks so slowly that a pass limit stops it
+    /// short (a steady sink or climb).
+    /// </summary>
+    private (Vector3 UnmetForce, Vector3 UnmetTorque) AllocateThrust(
+        List<BlockRef> fans, Vector3 com, Quaternion rot, Vector3 force, Vector3 torque)
     {
-        var worldOffset = LocalOffset(fan, com, rot);
-        var thrustDir = ThrustDirection(fan, rot);
+        int n = fans.Count;
+        if (_fanThrusts.Length < n)
+        {
+            int size = System.Math.Max(n, _fanThrusts.Length * 2);
+            _fanDirs = new Vector3[size]; _fanOffsets = new Vector3[size]; _fanTorques = new Vector3[size];
+            _fanThrusts = new float[size];
+        }
 
-        float leverLength = MathF.Max(worldOffset.Length(), 0.5f);
-        float forceAlign  = Vector3.Dot(thrustDir, desiredForce);
-        float torqueAlign = Vector3.Dot(Vector3.Cross(worldOffset, thrustDir) / leverLength, desiredTorque);
-        return (forceAlign, torqueAlign);
+        float sumSq = 0f;
+        for (int i = 0; i < n; i++)
+        {
+            _fanDirs[i]    = ThrustDirection(fans[i], rot);
+            _fanOffsets[i] = LocalOffset(fans[i], com, rot);
+            sumSq += _fanOffsets[i].LengthSquared();
+        }
+        float torqueWeight = 1f / MathF.Max(MathF.Sqrt(sumSq / n), 0.5f);
+
+        // Weighted torque per unit thrust, and the remaining (unmet) force and weighted torque.
+        for (int i = 0; i < n; i++)
+        {
+            _fanTorques[i] = Vector3.Cross(_fanOffsets[i], _fanDirs[i]) * torqueWeight;
+            _fanThrusts[i] = 0f;
+        }
+        var unmetForce  = force;
+        var unmetTorque = torque * torqueWeight;
+
+        for (int pass = 0; pass < AllocationMaxPasses; pass++)
+        {
+            float largestChange = 0f;
+            for (int i = 0; i < n; i++)
+            {
+                var d = _fanDirs[i];
+                var t = _fanTorques[i];
+                float step = (Vector3.Dot(d, unmetForce) + Vector3.Dot(t, unmetTorque)) / (d.LengthSquared() + t.LengthSquared());
+                float thrust = System.Math.Clamp(_fanThrusts[i] + step, 0f, _fanMaxForce);
+                float change = thrust - _fanThrusts[i];
+                if (change == 0f) continue;
+
+                _fanThrusts[i] = thrust;
+                unmetForce  -= d * change;
+                unmetTorque -= t * change;
+                largestChange = MathF.Max(largestChange, MathF.Abs(change));
+            }
+            if (largestChange < AllocationTolerance) break;
+        }
+        return (unmetForce, unmetTorque / torqueWeight);
     }
 
     // ── debug UI ─────────────────────────────────────────────────────────────
@@ -392,5 +435,6 @@ public sealed class AirshipFlightSystem : ISystem
         ImGui.Text($"Free-propelled: {_lastFreePropelled}");
         ImGui.Text($"Fan blocks seen: {_lastFanCount}   Buoyant blocks seen: {_lastBuoyantCount}");
         ImGui.Text($"Vertical (last grid): desired={_lastDesiredForceY:0.0}  delivered={_lastDeliveredForceY:0.0}");
+        ImGui.Text($"Unmet by Fans (last grid): force={_lastUnmetForce.Length():0.0}  torque={_lastUnmetTorque.Length():0.0}");
     }
 }
