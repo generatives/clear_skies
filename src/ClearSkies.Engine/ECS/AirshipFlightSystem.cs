@@ -29,8 +29,8 @@ namespace ClearSkies.Engine.ECS;
 /// <item>Otherwise, the ship's own controls. Its <see cref="Lever"/>s set an acceleration, which the Fans are asked for
 /// as a force (acceleration × mass), not a speed: each axis' levers (they move together; see
 /// <see cref="LeverControlSystem"/>) ask for their setting's fraction of a fixed maximum acceleration (±15 m/s² by
-/// default) along that axis. Nothing corrects for anything else acting on the ship, gravity and Buoyant lift
-/// included, so the crew holds it up with a vertical lever, and it coasts when the levers are upright. It holds its <see cref="Helm"/> heading, which its <see cref="SteeringWheel"/>s turn.</item>
+/// default) along that axis, on top of cancelling gravity and the ship's Buoyant lift (the same feedforward as piloting),
+/// so a ship with its levers upright hovers and coasts. Nothing corrects for anything else acting on the ship. It holds its <see cref="Helm"/> heading, which its <see cref="SteeringWheel"/>s turn.</item>
 /// </list>
 ///
 /// Propulsion allocation solves for Fan thrusts rather than sharing the demand out: it finds each Fan's thrust,
@@ -238,10 +238,13 @@ public sealed class AirshipFlightSystem : ISystem
                 float headingError = MathF.IEEERemainder(helm.TargetHeading - heading, 2f * MathF.PI);
                 var yawTorque = (_headingGain * headingError - _yawGain * currentYawRate) * worldUp;
                 desiredTorque = (tiltTorque + yawTorque) * mass;
-                desiredForce  = LeverForce(blocks, rot, mass);
+                // The levers' acceleration on top of cancelling gravity and Buoyant lift, as piloting does, so upright
+                // levers hover. Nothing else acting on the ship is corrected for.
+                float buoyantAccel = blocks.Buoyants.Count * _buoyantForce / mass;
+                desiredForce = LeverForce(blocks, rot, mass) - (_physics.Gravity + buoyantAccel * worldUp) * mass;
             }
 
-            // Feedforward, like the piloted Buoyant force above (in both modes, since self-levelling is): cancel the torque this grid's Buoyant lift adds about its
+            // Feedforward, like the Buoyant force above: cancel the torque this grid's Buoyant lift adds about its
             // centre of mass, so the self-level term isn't left fighting it with a steady tilt.
             var com = PhysicsConv.ToBepu(volume.Pivot); // a grid's pivot is its centre of mass
             var buoyantLift = Vector3.UnitY * _buoyantForce;
