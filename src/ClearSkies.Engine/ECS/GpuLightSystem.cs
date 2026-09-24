@@ -20,7 +20,7 @@ namespace ClearSkies.Engine.ECS;
 /// any grid light any other. Change tracking and dispatch: GpuLightSystem.RayDirty.cs; per-chunk grid and lamp
 /// lists: GpuLightSystem.Lists.cs.
 ///
-/// Runs after <c>GpuResidencySystem</c> (occupancy and light storage up to date) and before RenderSystem.
+/// Runs after <c>GpuResidencySystem</c> (occupancy and light storage up to date) and before the render stages.
 /// </summary>
 public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSystem
 {
@@ -119,12 +119,12 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         ImGui.SliderFloat("Ray AO strength", ref _aoStrength, 0f, 1f, "%.2f");
         ImGui.Checkbox("Bounce light + AO rays", ref _bounceEnabled);
         ImGui.SliderFloat("Bounce albedo", ref _bounceAlbedo, 0f, 0.9f, "%.2f");
-        ImGui.SliderInt("Bounce rays per evaluation", ref _bounceRays, 1, 32);
-        ImGui.SliderInt("Evaluations per full ray set", ref _bounceCycle, 1, 16);
+        ImGui.SliderInt("Bounce rays per evaluation", ref _bounceRays, 1, 64);
+        ImGui.SliderInt("Evaluations per full ray set", ref _bounceCycle, 1, 64);
         ImGui.TextDisabled($"  = {_bounceRays * _bounceCycle} fixed directions per voxel");
         ImGui.SliderInt("Bounce evaluations after a change", ref _bounceHoldFrames, 1, 64);
         ImGui.SliderInt("Bounce re-change restart count", ref _bounceRechangeN, 0, 16);
-        ImGui.SliderInt("Near-camera evaluations per frame", ref _bounceNearRepeats, 1, 4);
+        ImGui.SliderInt("Near-camera evaluations per frame", ref _bounceNearRepeats, 1, 64);
         ImGui.SliderFloat("Near-camera radius", ref _bounceNearRadius, 8f, 256f, "%.0f");
         ImGui.SliderFloat("Bounce display scale", ref _bounceScale, 0f, 4f, "%.2f");
 

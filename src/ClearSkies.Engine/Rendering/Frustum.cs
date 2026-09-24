@@ -58,6 +58,22 @@ public readonly struct Frustum
             && Inside(_top, min, max) && Inside(_near, min, max) && Inside(_far, min, max);
     }
 
+    /// <summary>True if the local box [<paramref name="lo"/>, <paramref name="hi"/>] placed by <paramref name="model"/>
+    /// may be visible. Transforms all 8 corners rather than assuming axis-alignment, so a rotated model (e.g. a
+    /// dynamic grid's chunk) is handled; 8 corner transforms is negligible next to the draw it decides to skip.</summary>
+    public bool Intersects(in Mat4 model, Vector3D<float> lo, Vector3D<float> hi)
+    {
+        Vector3D<float> min = new(float.MaxValue), max = new(float.MinValue);
+        for (int i = 0; i < 8; i++)
+        {
+            var local = new Vector3D<float>((i & 1) != 0 ? hi.X : lo.X, (i & 2) != 0 ? hi.Y : lo.Y, (i & 4) != 0 ? hi.Z : lo.Z);
+            var world = model.TransformPoint(local);
+            min = Vector3D.Min(min, world);
+            max = Vector3D.Max(max, world);
+        }
+        return Intersects(min, max);
+    }
+
     private static bool Inside(Vector4D<float> p, Vector3D<float> min, Vector3D<float> max)
     {
         float px = p.X >= 0f ? max.X : min.X;

@@ -27,10 +27,8 @@ namespace ClearSkies.Engine.Gui;
 /// in the "Systems" dropdown that opens/closes its own panel — see <see cref="RegisterDebugUi"/>.
 ///
 /// <see cref="EndFrame"/> is a separate, non-<see cref="ISystem"/> call: it must run after all
-/// world/HUD geometry for the frame has been drawn (i.e. after <see cref="Renderer.BeginFrame"/> and
-/// any <see cref="Renderer.DrawChunkMesh"/>/<see cref="Renderer.DrawHudMesh"/> calls) and before
-/// <see cref="Renderer.EndFrame"/> closes the pass — a point mid-way through <c>RenderSystem</c>'s own
-/// update, not something a stage boundary can express, so <c>RenderSystem</c> calls it directly.
+/// world/HUD geometry for the frame has been drawn and right before <see cref="Renderer.EndFrame"/>
+/// closes the pass, so <c>RenderFrame.End</c> (called by the host after the render stages) calls it directly.
 /// </summary>
 public sealed unsafe class ImGuiController : ISystem, IDisposable
 {

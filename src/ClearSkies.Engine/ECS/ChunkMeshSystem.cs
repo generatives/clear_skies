@@ -11,7 +11,9 @@ using ImGuiNET;
 namespace ClearSkies.Engine.ECS;
 
 /// <summary>
-/// Remeshes chunks flagged dirty across all registered <see cref="ChunkVolume"/>s. The greedy mesh itself
+/// Remeshes chunks flagged dirty across all registered <see cref="ChunkVolume"/>s into their
+/// <see cref="ChunkRenderData"/>: the greedy-meshed cubes plus the chunk's model blocks (found in the same worker
+/// job, resolved to their shared models through <see cref="BlockModelLibrary"/>). The greedy mesh itself
 /// (~0.65ms per non-empty chunk, see StreamingBenchmark) runs on thread-pool workers, one
 /// <see cref="GreedyMesher"/> per thread; only the GPU upload and the hand-back to the owning volume happen
 /// here on the main thread.
@@ -29,6 +31,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     private readonly World _ecsWorld;
     private EntitySet _dirtyChunks;
     private readonly Renderer _renderer;
+    private readonly BlockModelLibrary _blockModels;
     private readonly ThreadLocal<GreedyMesher> _meshers;
 
     private int _inFlight = 0;
@@ -38,13 +41,19 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     private int _totalMeshed;
     private double _uploadMs;
 
-    private sealed record Result(Entity Entity, Vertex[] Verts, int VertCount, uint[] Idxs, int IdxCount, Exception? Error);
+    /// <summary>A model block's cell and facing as found by the worker; resolved to a <see cref="ModelBlock"/>
+    /// (which needs the GPU model) on the main thread.</summary>
+    private readonly record struct ModelCell(byte X, byte Y, byte Z, BlockId Block, Facing Facing);
 
-    public ChunkMeshSystem(World ecsWorld, Renderer renderer)
+    private sealed record Result(Entity Entity, Vertex[] Verts, int VertCount, uint[] Idxs, int IdxCount,
+                                 ModelCell[] Models, Exception? Error);
+
+    public ChunkMeshSystem(World ecsWorld, Renderer renderer, BlockModelLibrary blockModels)
     {
         _ecsWorld = ecsWorld;
         _dirtyChunks = ecsWorld.GetEntities().With<Chunk>().With<Transform>().With<NeedsRemeshFlag>().AsSet();
         _renderer = renderer;
+        _blockModels = blockModels;
         var atlas = renderer.Atlas;
         _meshers  = new ThreadLocal<GreedyMesher>(() => new GreedyMesher(atlas));
 
@@ -53,11 +62,8 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
 
     private void EntityDisposed(in Entity e)
     {
-        if (e.Has<ChunkMesh>())
-        {
-            var mesh = e.Get<ChunkMesh>();
-            _removed.Add(mesh.Mesh);
-        }
+        if (e.Has<ChunkRenderData>() && e.Get<ChunkRenderData>().Mesh is { } mesh)
+            _removed.Add(mesh);
     }
 
     public void Update(float dt)
@@ -104,11 +110,12 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                     var i = ArrayPool<uint>.Shared.Rent(System.Math.Max(1, idxs.Count));
                     verts.CopyTo(v);
                     idxs.CopyTo(i);
-                    _results.Enqueue(new Result(entry.Entity, v, verts.Count, i, idxs.Count, null));
+                    _results.Enqueue(new Result(entry.Entity, v, verts.Count, i, idxs.Count, FindModelBlocks(data), null));
                 }
                 catch (Exception e)
                 {
-                    _results.Enqueue(new Result(entry.Entity, Array.Empty<Vertex>(), 0, Array.Empty<uint>(), 0, e));
+                    _results.Enqueue(new Result(entry.Entity, Array.Empty<Vertex>(), 0, Array.Empty<uint>(), 0,
+                                                Array.Empty<ModelCell>(), e));
                 }
             }, null);
 
@@ -137,7 +144,8 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                 var entry = chunk.Entry;
                 var volume = entry.Volume;
 
-                if (r.VertCount == 0)
+                var models = ResolveModels(r.Models);
+                if (r.VertCount == 0 && models.Length == 0)
                 {
                     bool redirtied = entity.Has<NeedsRemeshFlag>();
                     ClearMesh(entry);
@@ -145,24 +153,29 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                     continue;
                 }
 
-                long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-                var mesh = _renderer.UploadMesh(r.Verts.AsSpan(0, r.VertCount), r.Idxs.AsSpan(0, r.IdxCount));
-                _uploadMs += 0.05 * (System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds - _uploadMs);
+                GpuMesh? mesh = null;
+                if (r.VertCount > 0)
+                {
+                    long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+                    mesh = _renderer.UploadMesh(r.Verts.AsSpan(0, r.VertCount), r.Idxs.AsSpan(0, r.IdxCount));
+                    _uploadMs += 0.05 * (System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds - _uploadMs);
+                }
 
                 // The chunk's voxel base and the volume dims are derived live at draw time from the volume's
-                // GPU resources (see RenderSystem), so a volume reallocation needs no remesh here. SetMesh clears
+                // GPU resources (see ChunkRenderSystem), so a volume reallocation needs no remesh here. SetMesh clears
                 // NeedsRemesh, so preserve a re-dirty that arrived while this job was in flight.
                 {
                     bool redirtied = entity.Has<NeedsRemeshFlag>();
 
-                    if (entity.Has<ChunkMesh>())
+                    if (entity.Has<ChunkRenderData>())
                     {
-                        entry.Entity.Get<ChunkMesh>().Mesh.Dispose();
+                        entry.Entity.Get<ChunkRenderData>().Mesh?.Dispose();
                     }
                     entry.Entity.Remove<NeedsRemeshFlag>();
-                    entry.Entity.Set(new ChunkMesh
+                    entry.Entity.Set(new ChunkRenderData
                     {
                         Mesh     = mesh,
+                        Models   = models,
                         Grid     = volume.Gpu,
                         ChunkPos = entry.Position,
                     });
@@ -192,9 +205,47 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     private static void ClearMesh(ChunkEntry entry)
     {   
         entry.Entity.Remove<NeedsRemeshFlag>();
-        if (entry.Entity.Has<ChunkMesh>())
-            entry.Entity.Get<ChunkMesh>().Mesh.Dispose();
-        entry.Entity.Remove<ChunkMesh>();
+        if (entry.Entity.Has<ChunkRenderData>())
+            entry.Entity.Get<ChunkRenderData>().Mesh?.Dispose();
+        entry.Entity.Remove<ChunkRenderData>();
+    }
+
+    // Which block ids are model blocks, so the per-voxel scan below is a table lookup.
+    private static readonly bool[] IsModelBlock = BuildModelBlockTable();
+
+    private static bool[] BuildModelBlockTable()
+    {
+        var t = new bool[256];
+        for (int i = 0; i < t.Length; i++) t[i] = BlockRegistry.Get((BlockId)i).Model != null;
+        return t;
+    }
+
+    /// <summary>Every model block in <paramref name="data"/> (worker thread).</summary>
+    private static ModelCell[] FindModelBlocks(ChunkData data)
+    {
+        List<ModelCell>? found = null;
+        int s = ChunkData.Size;
+        for (int z = 0; z < s; z++)
+        for (int y = 0; y < s; y++)
+        for (int x = 0; x < s; x++)
+        {
+            var id = data.Get(x, y, z);
+            if (!IsModelBlock[(byte)id]) continue;
+            (found ??= new()).Add(new ModelCell((byte)x, (byte)y, (byte)z, id, data.GetFacing(x, y, z)));
+        }
+        return found?.ToArray() ?? Array.Empty<ModelCell>();
+    }
+
+    /// <summary>Attaches each found model block's GPU model (main thread: may load it); blocks whose model is
+    /// unavailable are dropped.</summary>
+    private ModelBlock[] ResolveModels(ModelCell[] cells)
+    {
+        if (cells.Length == 0) return Array.Empty<ModelBlock>();
+        var result = new List<ModelBlock>(cells.Length);
+        foreach (var c in cells)
+            if (_blockModels.Get(c.Block) is { } model)
+                result.Add(new ModelBlock(model, c.Block, c.X, c.Y, c.Z, c.Facing));
+        return result.ToArray();
     }
 
     // ── debug UI ─────────────────────────────────────────────────────────────

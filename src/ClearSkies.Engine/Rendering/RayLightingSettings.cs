@@ -2,7 +2,7 @@ namespace ClearSkies.Engine.Rendering;
 
 /// <summary>
 /// Ray-traced lighting settings the main render pass needs, shared by <c>GpuLightSystem</c> (which owns the
-/// debug sliders) and <c>RenderSystem</c> (the <c>CameraUniform</c> light parameters).
+/// debug sliders) and <c>RenderFrame</c> (the <c>CameraUniform</c> light parameters).
 /// </summary>
 public static class RayLightingSettings
 {

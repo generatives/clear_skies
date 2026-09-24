@@ -6,6 +6,8 @@
 
   <ItemGroup>
     <None Include="Resources\**" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Blockbench glTF exports, linked (not copied) so re-exporting over them is picked up on the next build. -->
+    <None Include="..\..\blockbench\**\*.gltf;..\..\blockbench\**\*.bin" Link="Resources\Models\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <PropertyGroup>

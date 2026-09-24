@@ -17,4 +17,5 @@ public enum BlockId : byte
     RedLamp   = 12,
     GreenLamp = 13,
     BlueLamp  = 14,
+    Lever     = 15,
 }

@@ -91,7 +91,7 @@ public sealed class GreedyMesher
                 for (int v = 0; v < sz; v++)
                 {
                     var blockId = GetBlock(chunk, face, slice, u, v);
-                    if (!BlockRegistry.Get(blockId).IsSolid) continue;
+                    if (!BlockRegistry.Get(blockId).IsFullCube) continue; // air, or a model block (drawn separately)
 
                     BlockId adjId;
                     if (adjSlice < 0 || adjSlice >= sz)
@@ -107,7 +107,7 @@ public sealed class GreedyMesher
                         adjId = GetBlock(chunk, face, adjSlice, u, v);
                     }
 
-                    if (!BlockRegistry.Get(adjId).IsSolid)
+                    if (!BlockRegistry.Get(adjId).IsFullCube)
                     {
                         // Only look up this voxel's Facing (and classify this face's role) for block
                         // types whose Top/Bottom textures actually depend on orientation — every other
