@@ -203,70 +203,19 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
     /// Builds a dynamic compound from boxes given in the grid's local space (centre + size + mass —
     /// callers derive mass from per-block-type density; see PhysicsBodySystem). Returns the shape index,
     /// its computed inertia, and the centre of mass in local space. The children are recentered around
-    /// the CoM, so render offsets must subtract the same CoM.
-    ///
-    /// <paramref name="massOnly"/> boxes (passable blocks) add their mass to the body — its mass, centre of mass and
-    /// inertia — without being part of its collision shape.
+    /// the CoM by Bepu, so render offsets must subtract the same CoM.
     /// </summary>
     public (TypedIndex shape, BodyInertia inertia, Vector3 centerOfMass) BuildDynamicCompound(
-        IReadOnlyList<(Vector3 center, Vector3 size, float mass)> boxes,
-        IReadOnlyList<(Vector3 center, Vector3 size, float mass)>? massOnly = null)
+        IReadOnlyList<(Vector3 center, Vector3 size, float mass)> boxes)
     {
         using var builder = new CompoundBuilder(_pool, Simulation.Shapes, boxes.Count);
-        Buffer<CompoundChild> children;
-        BodyInertia inertia;
-        Vector3 centerOfMass;
-        if (massOnly is null || massOnly.Count == 0)
-        {
-            foreach (var (center, size, mass) in boxes)
-                builder.Add(new Box(size.X, size.Y, size.Z), new RigidPose(center), mass);
-            builder.BuildDynamicCompound(out children, out inertia, out centerOfMass);
-        }
-        else
-        {
-            // Bepu's builder only weighs the shapes it builds, so weigh everything here: the collision boxes and the
-            // mass-only ones together give the centre of mass and inertia, and the collision boxes alone, placed
-            // about that centre, give the shape.
-            (inertia, centerOfMass) = BoxesInertia(boxes, massOnly);
-            foreach (var (center, size, _) in boxes)
-                builder.AddForKinematic(new Box(size.X, size.Y, size.Z), new RigidPose(center - centerOfMass), 1f);
-            builder.BuildKinematicCompound(out children);
-        }
+        foreach (var (center, size, mass) in boxes)
+            builder.Add(new Box(size.X, size.Y, size.Z), new RigidPose(center), mass);
+        builder.BuildDynamicCompound(out var children, out var inertia, out var centerOfMass);
 
         var shape = Simulation.Shapes.Add(new Compound(children));
         _compoundChildren[shape.Packed] = children;
         return (shape, inertia, centerOfMass);
-    }
-
-    /// <summary>The inertia and centre of mass of solid boxes (centre + size + mass) together.</summary>
-    private static (BodyInertia Inertia, Vector3 CenterOfMass) BoxesInertia(
-        IReadOnlyList<(Vector3 center, Vector3 size, float mass)> a,
-        IReadOnlyList<(Vector3 center, Vector3 size, float mass)> b)
-    {
-        float total = 0f;
-        var moment = Vector3.Zero;
-        foreach (var list in new[] { a, b })
-            foreach (var (center, _, mass) in list) { total += mass; moment += center * mass; }
-        var com = moment / total;
-
-        // Each box's own inertia about its centre, moved to the centre of mass (parallel axis theorem).
-        var tensor = default(Symmetric3x3);
-        foreach (var list in new[] { a, b })
-            foreach (var (center, size, mass) in list)
-            {
-                var r = center - com;
-                var s2 = size * size;
-                float k = mass / 12f;
-                tensor.XX += k * (s2.Y + s2.Z) + mass * (r.Y * r.Y + r.Z * r.Z);
-                tensor.YY += k * (s2.X + s2.Z) + mass * (r.X * r.X + r.Z * r.Z);
-                tensor.ZZ += k * (s2.X + s2.Y) + mass * (r.X * r.X + r.Y * r.Y);
-                tensor.YX -= mass * r.X * r.Y;
-                tensor.ZX -= mass * r.X * r.Z;
-                tensor.ZY -= mass * r.Y * r.Z;
-            }
-
-        Symmetric3x3.Invert(tensor, out var inverse);
-        return (new BodyInertia { InverseInertiaTensor = inverse, InverseMass = 1f / total }, com);
     }
 
     public BodyHandle AddDynamicBody(TypedIndex shape, BodyInertia inertia, Vector3 position, Quaternion orientation)

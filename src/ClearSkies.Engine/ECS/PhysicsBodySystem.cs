@@ -34,7 +34,6 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
     private readonly ConcurrentQueue<(ChunkPosition Pos, ChunkEntry Entry, PhysicsWorld.StaticCompoundBuild? Build, Exception? Error)> _colliderResults = new();
     private double _applyMs;
     private readonly List<(Vector3 center, Vector3 size, float mass)> _dynamicBoxes = new();
-    private readonly List<(Vector3 center, Vector3 size, float mass)> _passableBoxes = new(); // mass, no collision
 
     // One BigCompound static per non-empty chunk; box count kept only for the debug panel.
     private readonly Dictionary<ChunkPosition, (StaticHandle handle, int boxes)> _colliders = new();
@@ -171,7 +170,6 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
         // homogeneous in BlockId (see VoxelBoxDecomposer), so its mass is volume * that block's
         // Weight — real per-block-type density instead of uniform volume.
         _dynamicBoxes.Clear();
-        _passableBoxes.Clear();
 
         var chunkVolume = entity.Get<ChunkGrid>().Volume;
         ref var grid = ref entity.Get<DynamicGrid>();
@@ -185,12 +183,6 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
                 float volume = s.X * s.Y * s.Z;
                 _dynamicBoxes.Add((new Vector3(o.X + c.X, o.Y + c.Y, o.Z + c.Z), s, volume * BlockRegistry.Get(id).Weight));
             }
-            // Passable blocks (levers and the like) weigh the ship down without colliding.
-            foreach (var (c, s, id) in _decomposer.Decompose(entry.Data, passable: true))
-            {
-                float volume = s.X * s.Y * s.Z;
-                _passableBoxes.Add((new Vector3(o.X + c.X, o.Y + c.Y, o.Z + c.Z), s, volume * BlockRegistry.Get(id).Weight));
-            }
         }
 
         if (_dynamicBoxes.Count == 0)
@@ -198,7 +190,7 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
             return;
         }
 
-        var (shape, inertia, com) = _physics.BuildDynamicCompound(_dynamicBoxes, _passableBoxes);
+        var (shape, inertia, com) = _physics.BuildDynamicCompound(_dynamicBoxes);
         grid.Inertia = inertia;
 
         // Bepu recentres the compound on its centre of mass, so the body origin — and with it the grid's
