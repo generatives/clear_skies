@@ -1,4 +1,5 @@
 using ClearSkies.Engine.ECS;
+using ClearSkies.Engine.Math;
 using ClearSkies.Engine.Rendering;
 using DefaultEcs;
 using Silk.NET.Maths;
@@ -10,6 +11,12 @@ namespace ClearSkies.Engine.Voxels;
 /// bookkeeping for dirty-marking and mesh handoff. Coordinates passed to <see cref="GetBlock"/> and
 /// <see cref="SetBlock"/> are in this volume's own space: world space for the static volume,
 /// grid-local space for a dynamic grid.
+///
+/// Every volume's <see cref="Root"/> entity carries a <see cref="Transform"/> placing it in the world (identity for
+/// the static world, the body pose for a dynamic grid), and <see cref="Pivot"/> says which point of the volume's
+/// own space sits at that Transform: world = root.Position + root.Rotation·(voxel − Pivot). Everything that maps
+/// between volume space and world space (chunk placement, lighting, raycasts) goes through those two, so none of
+/// it needs to know whether the volume is static or has a physics body. Volumes are rigid: root scale is ignored.
 /// </summary>
 public class ChunkVolume
 {
@@ -22,6 +29,15 @@ public class ChunkVolume
     /// sync by GpuResidencySystem.</summary>
     public GridHandle Gpu { get; } = new();
 
+    /// <summary>The point in this volume's own space that sits at <see cref="Root"/>'s <see cref="Transform"/>.
+    /// Zero for the static world; a dynamic grid's centre of mass (kept in step with its body by
+    /// PhysicsBodySystem), because that is where Bepu puts a compound body's origin.</summary>
+    public Vector3D<float> Pivot { get; internal set; }
+
+    /// <summary>Root pose and pivot the chunk entities were last placed for (see ChunkTransformSystem), so a
+    /// volume that hasn't moved — the static world, a parked ship — isn't re-placed every frame.</summary>
+    internal (Vector3D<float> Position, Quaternion<float> Rotation, Vector3D<float> Pivot)? PlacedFor;
+
     /// <summary>Current axis-aligned bounding box of loaded chunks (inclusive).</summary>
     internal ChunkPosition BoundsMin { get; private set; }
     internal ChunkPosition BoundsMax { get; private set; }
@@ -31,6 +47,7 @@ public class ChunkVolume
     {
         Root = entity;
         _world = world;
+        if (!entity.Has<Transform>()) entity.Set(Transform.Identity);
     }
 
     public int  LoadedCount                => _chunks.Count;
@@ -104,9 +121,7 @@ public class ChunkVolume
     {
         var entity = _world.CreateEntity();
         var entry = new ChunkEntry(data, entity, this, pos);
-        var t = Transform.Identity;
-        t.Position = entry.Position.WorldOrigin;
-        entity.Set(t);
+        entity.Set(ChunkTransform(Root.Get<Transform>(), pos));
         entity.Set(new Chunk() { Entry = entry });
         entry.Entity.Set(new NeedsRemeshFlag());
         entry.Entity.Set(new NeedsRecollideFlag());
@@ -132,6 +147,25 @@ public class ChunkVolume
 
     private protected ChunkEntry EnsureChunk(ChunkPosition pos) =>
         _chunks.TryGetValue(pos, out var e) ? e : AddChunk(pos, new ChunkData());
+
+    // ── Placement ──────────────────────────────────────────────────────────
+
+    /// <summary>World <see cref="Transform"/> of chunk <paramref name="pos"/>'s entity (its origin at the chunk's
+    /// minimum corner, where GreedyMesher's local space starts) for a root at <paramref name="root"/>.</summary>
+    internal Transform ChunkTransform(in Transform root, ChunkPosition pos) => new()
+    {
+        Position = VoxelToWorld(root, pos.WorldOrigin),
+        Rotation = root.Rotation,
+        Scale    = Vector3D<float>.One,
+    };
+
+    /// <summary>Maps a point in this volume's space to world space for a root at <paramref name="root"/>.</summary>
+    public Vector3D<float> VoxelToWorld(in Transform root, Vector3D<float> voxel)
+        => root.Position + Vec.Rotate(root.Rotation, voxel - Pivot);
+
+    /// <summary>Inverse of <see cref="VoxelToWorld"/>. Directions map with just the inverse rotation.</summary>
+    public Vector3D<float> WorldToVoxel(in Transform root, Vector3D<float> world)
+        => Pivot + Vec.Rotate(Vec.Conjugate(root.Rotation), world - root.Position);
 
     // ── Helpers ────────────────────────────────────────────────────────────
 

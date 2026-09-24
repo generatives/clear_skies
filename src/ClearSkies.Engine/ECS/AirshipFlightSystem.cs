@@ -99,7 +99,7 @@ public sealed class AirshipFlightSystem : ISystem
 
     public AirshipFlightSystem(World world, PhysicsWorld physics, InputManager input)
     {
-        _grids   = world.GetEntities().With<DynamicGrid>().With<ChunkGrid>().AsSet();
+        _grids   = world.GetEntities().With<DynamicGrid>().With<ChunkGrid>().With<PhysicsBodyComponent>().AsSet();
         _physics = physics;
         _input   = input;
     }
@@ -112,11 +112,12 @@ public sealed class AirshipFlightSystem : ISystem
         {
             var volume = e.Get<ChunkGrid>().Volume;
             var dynamicGrid = e.Get<DynamicGrid>();
-            // Kinematic (Locked) grids skip gravity/impulses entirely via Bepu's own integrator, and an
-            // empty grid has no body to steer — nothing to fly in either case.
-            if (!dynamicGrid.BodyCreated || dynamicGrid.Locked) continue;
+            // Kinematic (Locked) grids skip gravity/impulses entirely via Bepu's own integrator — nothing
+            // to fly. (An empty grid has no body yet, so it isn't in _grids at all.)
+            if (dynamicGrid.Locked) continue;
+            var body = e.Get<PhysicsBodyComponent>().Body;
 
-            float mass = _physics.GetBodyMass(dynamicGrid.Body);
+            float mass = _physics.GetBodyMass(body);
             if (mass <= 0f) continue; // shouldn't happen for an unlocked body, but guard the degenerate case
 
             gridsProcessed++;
@@ -124,9 +125,9 @@ public sealed class AirshipFlightSystem : ISystem
             // ── control law: this tick's desired force/torque ──────────────────
             bool piloted = e.Has<PilotedComponent>();
 
-            var (pos, rot) = _physics.GetBodyPose(dynamicGrid.Body);
-            var linVel = _physics.GetBodyLinearVelocity(dynamicGrid.Body);
-            var angVel = _physics.GetBodyAngularVelocity(dynamicGrid.Body);
+            var (pos, rot) = _physics.GetBodyPose(body);
+            var linVel = _physics.GetBodyLinearVelocity(body);
+            var angVel = _physics.GetBodyAngularVelocity(body);
 
             var worldUp = Vector3.UnitY;
             var forward = Vector3.Transform(new Vector3(0, 0, -1), rot);
@@ -175,8 +176,8 @@ public sealed class AirshipFlightSystem : ISystem
             // ── propulsion: realize desiredForce/Torque via Fan/Buoyant blocks ──
             if (_freePropulsion)
             {
-                _physics.ApplyLinearImpulse(dynamicGrid.Body, desiredForce * dt);
-                _physics.ApplyAngularImpulse(dynamicGrid.Body, desiredTorque * dt);
+                _physics.ApplyLinearImpulse(body, desiredForce * dt);
+                _physics.ApplyAngularImpulse(body, desiredTorque * dt);
                 freePropelled++;
                 // Falls through to the block scan below, which — while free propulsion is on — only
                 // still applies real Buoyant lift; Fan blocks are skipped there since desiredForce/
@@ -184,7 +185,7 @@ public sealed class AirshipFlightSystem : ISystem
                 // double it up.
             }
 
-            var com = dynamicGrid.CenterOfMass;
+            var com = PhysicsConv.ToBepu(volume.Pivot); // a grid's pivot is its centre of mass
             float desiredForceMag  = desiredForce.Length();
             float desiredTorqueMag = desiredTorque.Length();
 
@@ -233,7 +234,7 @@ public sealed class AirshipFlightSystem : ISystem
                     {
                         buoyantCount++;
                         var worldOffset = LocalOffset(lx, ly, lz, chunkOrigin, com, rot);
-                        _physics.ApplyLinearImpulse(dynamicGrid.Body, Vector3.UnitY * (_buoyantForce * dt), worldOffset);
+                        _physics.ApplyLinearImpulse(body, Vector3.UnitY * (_buoyantForce * dt), worldOffset);
                         deliveredForceY += _buoyantForce;
                         continue;
                     }
@@ -254,7 +255,7 @@ public sealed class AirshipFlightSystem : ISystem
 
                     var thrustDir = ThrustDirection(entry, lx, ly, lz, rot);
                     var fanOffset = LocalOffset(lx, ly, lz, chunkOrigin, com, rot);
-                    _physics.ApplyLinearImpulse(dynamicGrid.Body, thrustDir * (thrust * dt), fanOffset);
+                    _physics.ApplyLinearImpulse(body, thrustDir * (thrust * dt), fanOffset);
                     deliveredForceY += thrustDir.Y * thrust;
                 }
             }
@@ -302,7 +303,7 @@ public sealed class AirshipFlightSystem : ISystem
     }
 
     // World-space offset from centre of mass for a chunk-local voxel — the same rigid transform
-    // GridTransformSystem uses for chunk meshes: world = bodyPos + R·(localCentre - centreOfMass).
+    // ChunkVolume.VoxelToWorld places chunks with: world = bodyPos + R·(localCentre - centreOfMass).
     private static Vector3 LocalOffset(int lx, int ly, int lz, Vector3 chunkOrigin, Vector3 com, Quaternion rot)
     {
         var localCentre = new Vector3(chunkOrigin.X + lx + 0.5f, chunkOrigin.Y + ly + 0.5f, chunkOrigin.Z + lz + 0.5f);

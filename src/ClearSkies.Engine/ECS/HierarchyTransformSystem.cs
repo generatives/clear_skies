@@ -7,8 +7,9 @@ namespace ClearSkies.Engine.ECS;
 /// <summary>
 /// Resolves each entity's <see cref="LocalTransform"/> into a world-space <see cref="Transform"/> by
 /// composing it with its <see cref="Parent"/> chain, root down. Runs after every system that writes a
-/// root's world <see cref="Transform"/> directly (physics, <see cref="GridTransformSystem"/>, player
-/// input), so parents are current before their children are resolved this tick.
+/// root's world <see cref="Transform"/> directly (<see cref="PhysicsTransformSyncSystem"/>,
+/// <see cref="ChunkTransformSystem"/>, player input), so parents are current before their children are
+/// resolved this tick.
 ///
 /// Composition assumes uniform parent scale, like most engines' TRS hierarchies — a non-uniform
 /// <see cref="LocalTransform.Scale"/> combined with a rotated parent will shear rather than resolve

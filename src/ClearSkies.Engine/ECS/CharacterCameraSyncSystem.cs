@@ -11,7 +11,7 @@ namespace ClearSkies.Engine.ECS;
 /// character capsule's new pose (after this tick's Simulation.Timestep, including the ported
 /// BepuPhysics2 character-controller constraint — see Physics/Characters/) and writes the
 /// first-person eye position into <see cref="Transform"/>. Mirrors the existing
-/// GridTransformSystem/GridPilotSystem post-physics pose-readback precedent.
+/// PhysicsTransformSyncSystem/GridPilotSystem post-physics pose-readback precedent.
 /// </summary>
 public sealed class CharacterCameraSyncSystem : ISystem, IDebugUiSystem
 {

@@ -1,7 +1,5 @@
 using BepuPhysics;
 using ClearSkies.Engine.ECS;
-using DefaultEcs;
-using PhysVec = System.Numerics.Vector3;
 
 namespace ClearSkies.Engine.Voxels;
 
@@ -11,18 +9,14 @@ namespace ClearSkies.Engine.Voxels;
 /// body pose changes — which keeps the grid's internal representation motion-invariant (the property
 /// Tier-2 lighting relies on). Editing a block grows chunks on demand and flags the collision shape
 /// for rebuild.
+///
+/// The body itself is a <see cref="PhysicsBodyComponent"/> on the same entity, added by PhysicsBodySystem once
+/// the grid has a solid block. Like any body its pose is synced into the entity's <see cref="Transform"/>, which
+/// therefore sits at the grid's centre of mass; the volume's <see cref="ChunkVolume.Pivot"/> records where that is
+/// in grid-local space. Before the body exists the Transform is simply where the grid was spawned.
 /// </summary>
 public struct DynamicGrid
 {
-    /// <summary>World position at which the grid's centre of mass is placed when its body is first created.</summary>
-    public PhysVec SpawnPosition { get; }
-
-    public BodyHandle Body { get; internal set; }
-    public bool       BodyCreated { get; internal set; }
-
-    /// <summary>Centre of mass in grid-local space, updated on every shape rebuild. Render offsets subtract this.</summary>
-    public PhysVec CenterOfMass { get; internal set; }
-
     /// <summary>True while the grid is frozen in place (Phase 5.1 "lock"): its body is kinematic (zero
     /// inverse mass/inertia via <see cref="Physics.PhysicsWorld.SetBodyKinematic"/>), so Bepu's own
     /// integrator skips it entirely (no gravity added, ever). The dynamic/kinematic transition goes
@@ -42,8 +36,5 @@ public struct DynamicGrid
     /// vertical hold converges to true zero instead of drifting against whichever one it didn't cancel.</summary>
     public int BuoyantBlockCount { get; internal set; }
 
-    public DynamicGrid(PhysVec spawnPosition)
-    {
-        SpawnPosition = spawnPosition;
-    }
+    public DynamicGrid() { }
 }
