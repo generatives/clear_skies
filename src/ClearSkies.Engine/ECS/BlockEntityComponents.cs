@@ -21,6 +21,19 @@ public struct BlockRef
     public BlockId Id;
 }
 
+/// <summary>Marks a Fan block entity: a thruster that <see cref="AirshipFlightSystem"/> allocates its ship's
+/// desired force and torque across, pushing against the block's facing. Thrust limits are the flight system's
+/// tuning for now.</summary>
+public struct Fan
+{
+}
+
+/// <summary>Marks a Buoyant block entity: constant passive lift, applied at the block by
+/// <see cref="AirshipFlightSystem"/> (strength is the flight system's tuning for now).</summary>
+public struct Buoyant
+{
+}
+
 /// <summary>A lever's state. Placeholder behaviour for now: the lever is the first entity block, used to exercise
 /// the block entity lifecycle and rendering.</summary>
 public struct Lever

@@ -30,11 +30,5 @@ public struct DynamicGrid
     /// <summary>Inertia last computed by PhysicsBodySystem from block occupancy; restored on unlock.</summary>
     public BodyInertia Inertia { get; internal set; }
 
-    /// <summary>Count of Buoyant voxels, cached by PhysicsBodySystem whenever the shape rebuilds (block
-    /// occupancy is the only thing that changes it, so it doesn't need a per-tick scan). Read by
-    /// AirshipFlightSystem to feedforward-cancel Buoyant's constant lift alongside gravity, so the
-    /// vertical hold converges to true zero instead of drifting against whichever one it didn't cancel.</summary>
-    public int BuoyantBlockCount { get; internal set; }
-
     public DynamicGrid() { }
 }

@@ -168,10 +168,8 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
     {
         // Gather merged boxes across all chunks, expressed in grid-local space. Each box is
         // homogeneous in BlockId (see VoxelBoxDecomposer), so its mass is volume * that block's
-        // Weight — real per-block-type density instead of uniform volume. Also tally Buoyant voxel
-        // count here (AirshipFlightSystem's feedforward) since we're already walking every box.
+        // Weight — real per-block-type density instead of uniform volume.
         _dynamicBoxes.Clear();
-        int buoyantCount = 0;
 
         var chunkVolume = entity.Get<ChunkGrid>().Volume;
         ref var grid = ref entity.Get<DynamicGrid>();
@@ -183,11 +181,9 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
             foreach (var (c, s, id) in _decomposer.Decompose(entry.Data))
             {
                 float volume = s.X * s.Y * s.Z;
-                if (id == BlockId.Buoyant) buoyantCount += (int)volume;
                 _dynamicBoxes.Add((new Vector3(o.X + c.X, o.Y + c.Y, o.Z + c.Z), s, volume * BlockRegistry.Get(id).Weight));
             }
         }
-        grid.BuoyantBlockCount = buoyantCount;
 
         if (_dynamicBoxes.Count == 0)
         {
