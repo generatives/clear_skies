@@ -96,7 +96,7 @@ host.AddSystem(new LambdaSystem(() =>
 host.AddSystem(new GpuResidencySystem(host.World, staticVolume, gridStore), SystemStage.PreRender);
 host.AddSystem(new GpuLightSystem(host.World, staticVolume, host.Context, gridStore), SystemStage.PreRender);
 host.AddSystem(meshSystem, SystemStage.PreRender);
-host.AddSystem(new BlockModelSystem(host.World, blockModels), SystemStage.PreRender); // block entities -> ModelRenderer
+host.AddSystem(new BlockModelSystem(host.World, blockModels), SystemStage.PreRender); // block entities -> RenderedModel
 // Rendering: the host opens the frame, runs the render stages (systems in the order added within a stage), then
 // closes it with ImGui and presents. Each render system is handed this frame's camera and time.
 using var clouds = new CloudRenderSystem(host.Renderer);
@@ -138,7 +138,7 @@ var camSpawn = TestScene.Build(host, seed);
     var leverTransform = Transform.Identity;
     leverTransform.Position = camSpawn + new Vector3D<float>(0f, -0.75f, -2.5f);
     leverEntity.Set(leverTransform);
-    leverEntity.Set(new ModelRenderer { Model = lever });
+    leverEntity.Set(new RenderedModel(lever));
     Console.WriteLine($"[model] lever ({lever.Parts.Count} part(s)) at {leverTransform.Position}");
 }
 

@@ -9,7 +9,7 @@ namespace ClearSkies.Engine.Rendering;
 /// A 3D model uploaded to the GPU by <see cref="Renderer.UploadModel"/>: its node tree, one mesh + texture per node
 /// and material in that node's local space, and the model-space bounds of the rest pose that renderers frustum-cull
 /// with. Shareable between any number of entities: an entity that animates keeps its own node rotations and pose
-/// (see <c>AnimatedModel</c> and <see cref="ComputePose"/>); anything else is drawn at <see cref="RestPose"/>.
+/// (see <c>RenderedModel</c> and <see cref="ComputePose"/>); anything else is drawn at <see cref="RestPose"/>.
 /// </summary>
 public sealed class GpuModel : IDisposable
 {

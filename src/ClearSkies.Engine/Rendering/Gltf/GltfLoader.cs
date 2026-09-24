@@ -7,7 +7,7 @@ namespace ClearSkies.Engine.Rendering.Gltf;
 
 /// <summary>
 /// Loads a glTF 2.0 model (<c>.gltf</c> or <c>.glb</c>, via SharpGLTF) into a <see cref="ModelData"/>, keeping the
-/// default scene's node tree so a node can be posed at draw time (see <c>AnimatedModel</c>): each mesh's triangles
+/// default scene's node tree so a node can be posed at draw time (see <c>RenderedModel</c>): each mesh's triangles
 /// become parts in its node's local space, one per node and material, with shared vertices de-duplicated.
 ///
 /// A skinned mesh is bound rigidly: each vertex is moved into the space of the joint that weighs most on it and

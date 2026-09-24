@@ -9,7 +9,7 @@ namespace ClearSkies.Engine.ECS;
 /// <summary>
 /// Test harness for per-entity model animation: rocks every lever's arm back and forth about its pivot, each lever
 /// on its own phase (from its cell), so levers side by side visibly move independently. Writes only the lever's
-/// own <see cref="AnimatedModel"/>. Stands in until levers get real behaviour (a use key flipping
+/// own <see cref="RenderedModel"/> pose. Stands in until levers get real behaviour (a use key flipping
 /// <see cref="Lever.On"/>); toggle it off in its debug panel to put the arms back at rest.
 /// </summary>
 public sealed class LeverTestAnimationSystem : ISystem, IDebugUiSystem
@@ -24,7 +24,7 @@ public sealed class LeverTestAnimationSystem : ISystem, IDebugUiSystem
 
     public LeverTestAnimationSystem(World world)
     {
-        _levers = world.GetEntities().With<Lever>().With<BlockRef>().With<AnimatedModel>().AsSet();
+        _levers = world.GetEntities().With<Lever>().With<BlockRef>().With<RenderedModel>().AsSet();
     }
 
     public void Update(float dt)
@@ -39,7 +39,7 @@ public sealed class LeverTestAnimationSystem : ISystem, IDebugUiSystem
             float angle = _amplitude * MathF.Sin(_time * _speed + phase);
 
             // The lever's base is wide along X, so the arm swings in the XY plane: about Z.
-            e.Get<AnimatedModel>().SetRotationFromRest(ArmNode,
+            e.Get<RenderedModel>().SetRotationFromRest(ArmNode,
                 Quaternion<float>.CreateFromAxisAngle(Vector3D<float>.UnitZ, angle));
         }
     }
@@ -58,6 +58,6 @@ public sealed class LeverTestAnimationSystem : ISystem, IDebugUiSystem
     private void ResetArms()
     {
         foreach (ref readonly Entity e in _levers.GetEntities())
-            e.Get<AnimatedModel>().ResetRotation(ArmNode);
+            e.Get<RenderedModel>().ResetRotation(ArmNode);
     }
 }
