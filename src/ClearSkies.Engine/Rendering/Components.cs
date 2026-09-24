@@ -25,8 +25,8 @@ public struct ChunkRenderData
 }
 
 /// <summary>One placed model block: its shared model, cell in the chunk (chunk-local voxel coordinates) and the
-/// voxel's stored facing, which the model's +Y is turned to point along.</summary>
-public readonly record struct ModelBlock(GpuModel Model, BlockId Block, byte X, byte Y, byte Z, Facing Facing);
+/// voxel's stored orientation, which the model is turned to.</summary>
+public readonly record struct ModelBlock(GpuModel Model, BlockId Block, byte X, byte Y, byte Z, BlockOrientation Orientation);
 
 /// <summary>Always renders the mesh as a wireframe overlay regardless of the global WireframeMode.</summary>
 public struct WireframeRenderer

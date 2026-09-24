@@ -16,8 +16,10 @@ namespace ClearSkies.Engine.ECS;
 /// <summary>
 /// The single system for all first-person player input: WASD/QE + mouse-look move the camera,
 /// G spawns a single-block dynamic grid in front of it, and left/right click place/break blocks
-/// on whichever volume (static world or dynamic grid) the camera is aimed at. The targeted face is
-/// highlighted and a crosshair is always shown at the screen centre.
+/// on whichever volume (static world or dynamic grid) the camera is aimed at. Left-clicking an
+/// <see cref="Interactive"/> block uses it instead of placing against it: <see cref="BlockInteraction"/>s are
+/// published for it until the button is released. The targeted face is highlighted and a crosshair is always
+/// shown at the screen centre.
 /// </summary>
 public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
 {
@@ -40,6 +42,12 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
     private Vector3D<int> _lastNormal;
     private object?       _lastVolume;
     private bool          _faceVisible;
+
+    // The Interactive block being used, from the click on it until the button is released (see BlockInteraction),
+    // and the last ray sent for it.
+    private bool            _interacting;
+    private Entity          _interactBlock;
+    private Vector3D<float> _interactOrigin, _interactDir;
 
     public Vector3D<int>? TargetBlock  { get; private set; }
     public Vector3D<int>? TargetNormal { get; private set; }
@@ -116,8 +124,22 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
 
         if (!_input.CursorCaptured || !TryGetCameraRay(out var origin, out var dir))
         {
+            EndInteraction();
             HideFace();
             return;
+        }
+
+        // Using an Interactive block: it has the left button until that comes up, following the ray wherever it
+        // points (even off the block, so a drag can overshoot), with no targeting or editing meanwhile.
+        if (_interacting)
+        {
+            if (_interactBlock.IsAlive && _input.IsMouseButtonDown(MouseButton.Left))
+            {
+                PublishInteraction(InteractionPhase.Held, origin, dir);
+                HideFace();
+                return;
+            }
+            EndInteraction();
         }
 
         // Find the nearest hit across every volume (the static world and each dynamic grid), casting the ray in
@@ -126,6 +148,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
         ChunkVolume? bestVolume = null;
         Entity       bestEntity = default;
         Vector3D<int> bestBlock  = default, bestNormal = default;
+        Vector3D<float> bestEye  = default; // the camera in the hit volume's voxel space
 
         foreach (ref readonly Entity e in _volumes.GetEntities())
         {
@@ -136,7 +159,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
 
             if (VoxelRaycaster.Cast(volume, lo, ld, ReachBlocks, out var b, out var n, out var d) && d < bestDist)
             {
-                bestDist = d; bestVolume = volume; bestBlock = b; bestNormal = n; bestEntity = e;
+                bestDist = d; bestVolume = volume; bestBlock = b; bestNormal = n; bestEntity = e; bestEye = lo;
             }
         }
 
@@ -158,22 +181,31 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
             Console.WriteLine($"[place] selected block: {_placeBlock}");
         }
 
-        if (_input.WasMouseButtonPressed(MouseButton.Left))
+        if (_input.WasMouseButtonPressed(MouseButton.Left)
+            && bestVolume.TryGetBlockEntity(bestBlock.X, bestBlock.Y, bestBlock.Z, out var block) && block.Has<Interactive>())
+        {
+            _interacting   = true;
+            _interactBlock = block;
+            PublishInteraction(InteractionPhase.Began, origin, dir);
+        }
+        else if (_input.WasMouseButtonPressed(MouseButton.Left))
         {
             var t = bestBlock + bestNormal;
             if (bestVolume.GetBlock(t.X, t.Y, t.Z) == BlockId.Air)
             {
-                // Facing = away from the face it was placed on (bestNormal already is exactly one of
-                // the 6 axis directions), so e.g. a Fan placed against a ship's east wall faces east —
-                // away from the ship, not wherever the camera happened to be pointed.
-                var facing = FacingExtensions.FromNormal(bestNormal);
+                // Bottom on the face it was placed against: its top points away from that face (bestNormal is
+                // already exactly one of the 6 axis directions), so e.g. a Fan placed against a ship's east wall
+                // faces east, away from the ship. Then its north face turns towards the player as far as it can
+                // while keeping that: onto whichever axis across the face is nearest the direction to the camera.
+                var towards = bestEye - (new Vector3D<float>(t.X, t.Y, t.Z) + new Vector3D<float>(0.5f));
+                var orientation = BlockOrientation.Placed(DirectionExtensions.FromNormal(bestNormal), towards);
                 for (int x = t.X - _blockBrushRadius; x <= t.X + _blockBrushRadius; x++)
                 {
                     for (int y = t.Y - _blockBrushRadius; y <= t.Y + _blockBrushRadius; y++)
                     {
                         for (int z = t.Z - _blockBrushRadius; z <= t.Z + _blockBrushRadius; z++)
                         {
-                            bestVolume.SetBlock(x, y, z, _placeBlock, facing);
+                            bestVolume.SetBlock(x, y, z, _placeBlock, orientation);
                         }
                     }
                 }
@@ -208,6 +240,24 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
                 }
             }
         }
+    }
+
+    // ── Interaction ──────────────────────────────────────────────────────────
+
+    private void PublishInteraction(InteractionPhase phase, Vector3D<float> origin, Vector3D<float> dir)
+    {
+        _interactOrigin = origin;
+        _interactDir    = dir;
+        _world.Publish(new BlockInteraction(_interactBlock, phase, origin, dir));
+    }
+
+    /// <summary>Ends the current interaction, if any, telling its block with the last ray it was sent.</summary>
+    private void EndInteraction()
+    {
+        if (!_interacting) return;
+        _interacting = false;
+        PublishInteraction(InteractionPhase.Ended, _interactOrigin, _interactDir);
+        _interactBlock = default;
     }
 
     public void Dispose()

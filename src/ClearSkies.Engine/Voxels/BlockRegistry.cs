@@ -29,9 +29,9 @@ public static class BlockRegistry
         Register(new BlockDef { Id = BlockId.Wood,  Name = "Wood",  Color = new(0.55f, 0.40f, 0.25f), IsSolid = true,  LightEmission = 0,  Opacity = 15, Weight = 1,
             Texture = "wood" });
 
-        // Milestone 5: minimal airship blocks. Fan applies thrust along its Facing; Buoyant applies
+        // Milestone 5: minimal airship blocks. Fan applies thrust along its top's direction; Buoyant applies
         // constant passive lift. See AirshipFlightSystem. Fan's thrust-exit
-        // face (its Top, which BlockDef orients to wherever the voxel's Facing points) gets a distinct
+        // face (its Top, which BlockDef orients to wherever the voxel's top points) gets a distinct
         // texture so you can see which way it'll push just by looking at it; every other face uses the
         // plain metal housing.
         // Fan and Buoyant are entity blocks (see BlockDef.Components): AirshipFlightSystem finds a ship's Fans and
@@ -41,9 +41,9 @@ public static class BlockRegistry
         //Register(new BlockDef { Id = BlockId.Fan,     Name = "Fan",     Color = new(0.85f, 0.55f, 0.15f), IsSolid = true, LightEmission = 0, Opacity = 15, Weight = 3,
         //    Texture = "metal", TextureTop = "thruster" });
         // Model block (see BlockDef.Model): the Blockbench lever. Transparent to light (Opacity 0) since it only
-        // fills a sliver of its cell. The first entity block (see BlockDef.Components), so its arm can move.
+        // fills a sliver of its cell. An interactive entity block: the player drags its arm (LeverControlSystem).
         Register(new BlockDef { Id = BlockId.Lever, Name = "Lever", Color = new(0.45f, 0.35f, 0.25f), IsSolid = true, LightEmission = 0, Opacity = 0, Weight = 1,
-            Model = "lever/lever.gltf", Components = e => e.Set(new Lever()) });
+            Model = "lever/lever.gltf", Components = e => { e.Set(new Lever()); e.Set(new Interactive()); } });
         Register(new BlockDef { Id = BlockId.Buoyant, Name = "Buoyant", Color = new(0.55f, 0.85f, 1.00f), IsSolid = true, LightEmission = 0, Opacity = 15, Weight = 1,
             Components = e => e.Set(new Buoyant()) });
 

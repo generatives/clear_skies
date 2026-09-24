@@ -41,9 +41,9 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     private int _totalMeshed;
     private double _uploadMs;
 
-    /// <summary>A model block's cell and facing as found by the worker; resolved to a <see cref="ModelBlock"/>
+    /// <summary>A model block's cell and orientation as found by the worker; resolved to a <see cref="ModelBlock"/>
     /// (which needs the GPU model) on the main thread.</summary>
-    private readonly record struct ModelCell(byte X, byte Y, byte Z, BlockId Block, Facing Facing);
+    private readonly record struct ModelCell(byte X, byte Y, byte Z, BlockId Block, BlockOrientation Orientation);
 
     private sealed record Result(Entity Entity, Vertex[] Verts, int VertCount, uint[] Idxs, int IdxCount,
                                  ModelCell[] Models, Exception? Error);
@@ -236,7 +236,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
         {
             var id = data.Get(x, y, z);
             if (!IsModelBlock[(byte)id]) continue;
-            (found ??= new()).Add(new ModelCell((byte)x, (byte)y, (byte)z, id, data.GetFacing(x, y, z)));
+            (found ??= new()).Add(new ModelCell((byte)x, (byte)y, (byte)z, id, data.GetOrientation(x, y, z)));
         }
         return found?.ToArray() ?? Array.Empty<ModelCell>();
     }
@@ -249,7 +249,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
         var result = new List<ModelBlock>(cells.Length);
         foreach (var c in cells)
             if (_blockModels.Get(c.Block) is { } model)
-                result.Add(new ModelBlock(model, c.Block, c.X, c.Y, c.Z, c.Facing));
+                result.Add(new ModelBlock(model, c.Block, c.X, c.Y, c.Z, c.Orientation));
         return result.ToArray();
     }
 

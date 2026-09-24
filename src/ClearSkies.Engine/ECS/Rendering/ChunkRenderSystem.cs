@@ -13,7 +13,7 @@ namespace ClearSkies.Engine.ECS;
 /// <summary>
 /// Draws every loaded chunk's <see cref="ChunkRenderData"/>: frustum-culls the chunks, draws their greedy-meshed
 /// cubes nearest first, then each visible chunk's model blocks — placed at their cell, turned to their stored
-/// <see cref="Facing"/> and lit from that cell's voxel light. Runs in <see cref="SystemStage.RenderWorld"/>.
+/// <see cref="BlockOrientation"/> and lit from that cell's voxel light. Runs in <see cref="SystemStage.RenderWorld"/>.
 /// </summary>
 public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
 {
@@ -27,10 +27,10 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     private static readonly Comparison<ChunkDraw> NearestFirst = (a, b) => a.DistSq.CompareTo(b.DistSq);
     private int _modelBlocksDrawn;
 
-    /// <summary>Cell-local placement per <see cref="Facing"/>: a model block's model is authored Blockbench-style
-    /// (x/z centred on the origin, standing on y = 0, 1 unit = 1 block), so it is rotated about the cell centre to
-    /// point its +Y along the facing, standing on the cell face opposite it.</summary>
-    private static readonly Mat4[] FacingPlacement = BuildFacingPlacements();
+    /// <summary>Cell-local placement per <see cref="BlockOrientation"/> (indexed by its byte): a model block's model is
+    /// authored Blockbench-style (x/z centred on the origin, standing on y = 0, 1 unit = 1 block), so it is rotated
+    /// about the cell centre to the orientation, standing on the cell face opposite its top.</summary>
+    private static readonly Mat4[] OrientationPlacement = BuildOrientationPlacements();
 
     public ChunkRenderSystem(World world, Renderer renderer)
     {
@@ -67,19 +67,24 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
             foreach (var m in d.Models)
             {
                 var cell  = Mat4.Translation(new Vector3D<float>(m.X, m.Y, m.Z));
-                var world = Mat4.Multiply(d.Model, Mat4.Multiply(cell, FacingPlacement[(int)m.Facing]));
+                var world = Mat4.Multiply(d.Model, Mat4.Multiply(cell, OrientationPlacement[m.Orientation.ToByte()]));
                 _renderer.DrawModel(m.Model, world, d.Grid, d.Chunk, new Vector3D<int>(m.X, m.Y, m.Z));
                 _modelBlocksDrawn++;
             }
         }
     }
 
-    private static Mat4[] BuildFacingPlacements()
+    private static Mat4[] BuildOrientationPlacements()
     {
         var toCentre   = Mat4.Translation(new Vector3D<float>(0.5f));
         var fromCentre = Mat4.Translation(new Vector3D<float>(0f, -0.5f, 0f));
-        return Array.ConvertAll(Enum.GetValues<Facing>(), f =>
-            Mat4.Multiply(toCentre, Mat4.Multiply(Mat4.FromQuaternion(f.ToRotation()), fromCentre)));
+        var placements = new Mat4[BlockOrientation.Count];
+        for (int i = 0; i < placements.Length; i++)
+        {
+            var rotation = Mat4.FromQuaternion(BlockOrientation.FromByte((byte)i).Rotation);
+            placements[i] = Mat4.Multiply(toCentre, Mat4.Multiply(rotation, fromCentre));
+        }
+        return placements;
     }
 
     // ── debug UI ─────────────────────────────────────────────────────────────

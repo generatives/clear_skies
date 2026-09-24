@@ -10,7 +10,7 @@ namespace ClearSkies.Engine.Voxels;
 ///
 /// Meshing is light-independent: faces merge on <see cref="BlockId"/> plus, only for block types whose
 /// appearance depends on orientation (<see cref="BlockDef.HasOrientedTexture"/>, e.g. Fan), which
-/// <see cref="FaceRole"/> this face plays for the voxel's stored Facing — so two adjacent oriented
+/// <see cref="FaceRole"/> this face plays for the voxel's stored orientation — so two adjacent oriented
 /// blocks facing different ways still mesh as separate quads where that matters, but every other block
 /// type merges exactly as before. Lighting is applied
 /// in the fragment shader, which samples the chunk light buffer at the air-side voxel using the
@@ -109,20 +109,20 @@ public sealed class GreedyMesher
 
                     if (!BlockRegistry.Get(adjId).IsFullCube)
                     {
-                        // Only look up this voxel's Facing (and classify this face's role) for block
-                        // types whose Top/Bottom textures actually depend on orientation — every other
-                        // block keeps merging purely by BlockId regardless of whatever Facing is stored.
+                        // Only look up this voxel's orientation (and classify this face's role) for block
+                        // types whose Top/Bottom textures actually depend on it — every other block keeps
+                        // merging purely by BlockId regardless of whatever orientation is stored.
                         var role = FaceRole.Side;
                         if (BlockRegistry.Get(blockId).HasOrientedTexture)
                         {
-                            var voxelFacing = GetFacing(chunk, face, slice, u, v);
-                            role = BlockDef.GetFaceRole(face.Normal, voxelFacing);
+                            var voxelUp = GetOrientation(chunk, face, slice, u, v).Up;
+                            role = BlockDef.GetFaceRole(face.Normal, voxelUp);
                         }
                         _mask[u + v * sz] = new MaskCell(blockId, role);
                     }
                 }
 
-                // ── Greedy merge (block id + facing-match) ───────────────────────────
+                // ── Greedy merge (block id + face-role match) ───────────────────────────
                 for (int v = 0; v < sz; v++)
                 for (int u = 0; u < sz; u++)
                 {
@@ -182,13 +182,13 @@ public sealed class GreedyMesher
         return chunk.Get(x, y, z);
     }
 
-    private static Facing GetFacing(ChunkData chunk, in FaceDesc face, int slice, int u, int v)
+    private static BlockOrientation GetOrientation(ChunkData chunk, in FaceDesc face, int slice, int u, int v)
     {
         int x, y, z;
         if (face.D == 0)      { x = slice; y = u; z = v; }
         else if (face.D == 1) { y = slice; x = u; z = v; }
         else                  { z = slice; x = u; y = v; }
-        return chunk.GetFacing(x, y, z);
+        return chunk.GetOrientation(x, y, z);
     }
 
     private static void EmitQuad(
@@ -272,7 +272,7 @@ public sealed class GreedyMesher
 
     /// <summary>Greedy-merge key for one visible face cell: which block, and (only meaningful for
     /// block types with HasOrientedTexture) which texture role this face plays for that voxel's
-    /// Facing. default(MaskCell) == Air/Side, used as the mask's "empty" sentinel.</summary>
+    /// orientation. default(MaskCell) == Air/Side, used as the mask's "empty" sentinel.</summary>
     private readonly struct MaskCell : IEquatable<MaskCell>
     {
         public readonly BlockId Id;
