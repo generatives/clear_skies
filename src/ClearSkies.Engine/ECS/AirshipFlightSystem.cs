@@ -28,7 +28,7 @@ namespace ClearSkies.Engine.ECS;
 /// are ignored, and the ship's <see cref="Helm"/> heading follows it, so letting go holds the heading it was left at.</item>
 /// <item>Otherwise, the ship's own controls. Its <see cref="Lever"/>s set an acceleration, which the Fans are asked for
 /// as a force (acceleration × mass), not a speed: each axis' levers (they move together; see
-/// <see cref="LeverControlSystem"/>) ask for their setting's fraction of a fixed maximum acceleration (±15 m/s² by
+/// <see cref="LeverControlSystem"/>) ask for their setting, squared so it ramps up, as a fraction of a fixed maximum acceleration (±15 m/s² by
 /// default) along that axis, on top of cancelling gravity and the ship's Buoyant lift (the same feedforward as piloting),
 /// so a ship with its levers upright hovers and coasts. Nothing corrects for anything else acting on the ship. It holds its <see cref="Helm"/> heading, which its <see cref="SteeringWheel"/>s turn.</item>
 /// </list>
@@ -301,8 +301,8 @@ public sealed class AirshipFlightSystem : ISystem
     private static float Heading(Vector3 forward) => MathF.Atan2(-forward.X, -forward.Z);
 
     /// <summary>The force a ship's <see cref="Lever"/>s ask for, in world space: along each of its three axes (the
-    /// lines its levers lever along), its levers' setting (their average, though they move together) times the
-    /// maximum lever acceleration, times the ship's mass.</summary>
+    /// lines its levers lever along), its levers' setting (their average, though they move together) squared, keeping
+    /// its sign, times the maximum lever acceleration, times the ship's mass: half-way asks for a quarter.</summary>
     private Vector3 LeverForce(ShipBlocks blocks, Quaternion rot, float mass)
     {
         Span<float> sum   = stackalloc float[3];
@@ -320,7 +320,9 @@ public sealed class AirshipFlightSystem : ISystem
             if (count[axis] == 0) continue;
             // The axis' own direction: its north face, east face or top.
             var local = ((Direction)(axis * 2)).ToVector();
-            accel += sum[axis] / count[axis] * _leverMaxAccel * new Vector3(local.X, local.Y, local.Z);
+            // Squared (keeping its sign), so the acceleration ramps up: fine control near upright, full at the end.
+            float setting = sum[axis] / count[axis];
+            accel += setting * MathF.Abs(setting) * _leverMaxAccel * new Vector3(local.X, local.Y, local.Z);
         }
         return Vector3.Transform(accel, rot) * mass;
     }
