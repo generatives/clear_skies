@@ -100,6 +100,7 @@ host.AddSystem(meshSystem, SystemStage.PreRender);
 using var clouds = new CloudRenderSystem(host.Renderer);
 host.AddSystem(new ChunkRenderSystem(host.World, host.Renderer), SystemStage.RenderWorld);
 host.AddSystem(new ModelRenderSystem(host.World, host.Renderer), SystemStage.RenderWorld);
+host.AddSystem(new BlockEntityRenderSystem(host.World, host.Renderer, blockModels), SystemStage.RenderWorld);
 host.AddSystem(clouds, SystemStage.RenderWorld);
 host.AddSystem(new SkyRenderSystem(host.Renderer), SystemStage.RenderSky);
 host.AddSystem(new WireframeRenderSystem(host.World, host.Renderer), SystemStage.RenderOverlay);

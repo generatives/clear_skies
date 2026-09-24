@@ -10,7 +10,8 @@ public struct ChunkRenderData
     /// <summary>The chunk's cube faces, or null when it holds only model blocks.</summary>
     public GpuMesh? Mesh;
 
-    /// <summary>Every model block (<see cref="BlockDef.Model"/>) in the chunk; empty when there are none.</summary>
+    /// <summary>Every static model block (<see cref="BlockDef.Model"/>, not an entity block) in the chunk; empty
+    /// when there are none.</summary>
     public ModelBlock[] Models;
 
     /// <summary>Owning volume's registration in the shared voxel storage; the fragment shader looks light up

@@ -1,5 +1,6 @@
 using ClearSkies.Engine.Rendering;
 using DefaultEcs;
+using Silk.NET.Maths;
 
 namespace ClearSkies.Engine.Voxels;
 
@@ -17,6 +18,10 @@ internal sealed class ChunkEntry
     /// <summary>Light-emitting voxels in this chunk, rebuilt from <see cref="Data"/> whenever its opacity is
     /// repacked (see <c>GridStore.UploadChunk</c>). Gathered into the lamp list each frame.</summary>
     public List<EmitterVoxel> Emitters { get; } = new();
+
+    /// <summary>This chunk's block entities (see <see cref="BlockDef.Components"/>) by chunk-local cell, owned by
+    /// <see cref="ChunkVolume"/>. Null until the chunk gets its first one; most chunks never do.</summary>
+    public Dictionary<Vector3D<int>, Entity>? BlockEntities { get; set; }
 
     /// <summary>Packed opacity words (see <c>GridStore.WordsPerChunk</c>). Null means "recompute from
     /// <see cref="Data"/>" — set on creation and invalidated on every block edit (see

@@ -1,3 +1,4 @@
+using System.Buffers;
 using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Math;
 using ClearSkies.Engine.Rendering;
@@ -21,6 +22,12 @@ namespace ClearSkies.Engine.Voxels;
 /// Chunk entities are <see cref="Hierarchy"/> children of <see cref="Root"/>, each at a <see cref="LocalTransform"/>
 /// of its chunk origin minus the pivot, so <see cref="HierarchyTransformSystem"/> carries them along with the root
 /// (and destroys them with it).
+///
+/// The volume also owns block entities (<see cref="BlockDef.Components"/>): one per entity block, created when its
+/// chunk is added or <see cref="SetBlock"/> places it, destroyed when <see cref="SetBlock"/> replaces it or its chunk
+/// is removed. Each is a Hierarchy child of its chunk entity, placed on its cell and turned to its facing, so it
+/// rides along with the volume like the chunk does. The voxel always wins: <see cref="SetBlock"/> is the one place
+/// an entity is reconciled with its voxel. Main thread only, like every entity create/destroy.
 /// </summary>
 public class ChunkVolume
 {
@@ -111,6 +118,7 @@ public class ChunkVolume
         var entry = EnsureChunk(cp);
 
         entry.Data.Set(lx, ly, lz, id, facing);
+        SyncBlockEntity(entry, new Vector3D<int>(lx, ly, lz), id, facing);
         entry.Entity.Set(new NeedsRemeshFlag());
         entry.Entity.Set(new NeedsRecollideFlag());
         entry.Entity.Set(new NeedsGpuUploadFlag());
@@ -137,7 +145,8 @@ public class ChunkVolume
         entry.Entity.Set(new NeedsRemeshFlag());
         entry.Entity.Set(new NeedsRecollideFlag());
         entry.Entity.Set(new NeedsGpuUploadFlag());
-        
+        CreateBlockEntities(entry);
+
         _chunks[pos] = entry;
         UpdateBounds(pos);
         MarkNeighboursDirty(pos, data);
@@ -149,8 +158,9 @@ public class ChunkVolume
         var entry = GetEntry(pos);
         if (entry is null) return;
 
-        if (entry.Entity.IsAlive)
-            entry.Entity.Dispose();
+        // Takes the chunk's block entities with it, immediately.
+        Hierarchy.DestroyRecursive(entry.Entity);
+        entry.BlockEntities = null;
 
         _chunks.Remove(pos);
         MarkNeighboursDirty(pos, entry.Data);
@@ -158,6 +168,75 @@ public class ChunkVolume
 
     private protected ChunkEntry EnsureChunk(ChunkPosition pos) =>
         _chunks.TryGetValue(pos, out var e) ? e : AddChunk(pos, new ChunkData());
+
+    // ── Block entities ─────────────────────────────────────────────────────
+
+    // Entity block ids as raw bytes, for a vectorized search of a freshly added chunk's block array.
+    private static readonly SearchValues<byte> EntityBlockBytes = SearchValues.Create(
+        Enumerable.Range(0, 256).Where(i => BlockRegistry.Get((BlockId)i).IsEntityBlock).Select(i => (byte)i).ToArray());
+
+    /// <summary>Creates an entity for every entity block in a chunk that was just added.</summary>
+    private void CreateBlockEntities(ChunkEntry entry)
+    {
+        var blocks = entry.Data.BlocksAsBytes();
+        int i = 0;
+        while (true)
+        {
+            int found = blocks[i..].IndexOfAny(EntityBlockBytes);
+            if (found < 0) return;
+            i += found;
+            int x = i % ChunkData.Size, y = i / ChunkData.Size % ChunkData.Size, z = i / (ChunkData.Size * ChunkData.Size);
+            CreateBlockEntity(entry, new Vector3D<int>(x, y, z), (BlockId)blocks[i], entry.Data.GetFacing(x, y, z));
+            i++;
+        }
+    }
+
+    /// <summary>Makes the block entity at <paramref name="cell"/> agree with the voxel just set there: keeps it if
+    /// the same block type and facing was set again (so its state survives), otherwise destroys it and creates a
+    /// fresh one if the new block is an entity block.</summary>
+    private void SyncBlockEntity(ChunkEntry entry, Vector3D<int> cell, BlockId id, Facing facing)
+    {
+        if (entry.BlockEntities is { } entities && entities.Remove(cell, out var existing))
+        {
+            if (existing.IsAlive)
+            {
+                ref readonly var r = ref existing.Get<BlockRef>();
+                if (r.Id == id && r.Facing == facing) { entities[cell] = existing; return; }
+                Hierarchy.DestroyRecursive(existing);
+            }
+        }
+
+        if (BlockRegistry.Get(id).IsEntityBlock)
+            CreateBlockEntity(entry, cell, id, facing);
+    }
+
+    private void CreateBlockEntity(ChunkEntry entry, Vector3D<int> cell, BlockId id, Facing facing)
+    {
+        var e = _world.CreateEntity();
+        e.Set(new BlockRef
+        {
+            Volume   = this,
+            Position = new Vector3D<int>(entry.Position.X, entry.Position.Y, entry.Position.Z) * ChunkData.Size + cell,
+            Facing   = facing,
+            Id       = id,
+        });
+        Hierarchy.SetParent(e, entry.Entity, CellLocal(cell, facing));
+        BlockRegistry.Get(id).Components!(e);
+        (entry.BlockEntities ??= new())[cell] = e;
+    }
+
+    /// <summary>A block entity relative to its chunk entity: the same placement ChunkRenderSystem gives a static
+    /// model block — the model's +Y turned to the facing about the cell centre, standing on the cell face opposite
+    /// it.</summary>
+    private static LocalTransform CellLocal(Vector3D<int> cell, Facing facing)
+    {
+        var rotation = facing.ToRotation();
+        var local = LocalTransform.Identity;
+        local.Rotation = rotation;
+        local.Position = new Vector3D<float>(cell.X + 0.5f, cell.Y + 0.5f, cell.Z + 0.5f)
+                       + Vec.Rotate(rotation, new Vector3D<float>(0f, -0.5f, 0f));
+        return local;
+    }
 
     // ── Placement ──────────────────────────────────────────────────────────
 
