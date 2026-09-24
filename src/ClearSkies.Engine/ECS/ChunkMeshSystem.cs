@@ -41,7 +41,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     private int _totalMeshed;
     private double _uploadMs;
 
-    /// <summary>A model block's cell and facing as found by the worker; resolved to a <see cref="ModelBlock"/>
+    /// <summary>A model block's cell and orientation as found by the worker; resolved to a <see cref="ModelBlock"/>
     /// (which needs the GPU model) on the main thread.</summary>
     private readonly record struct ModelCell(byte X, byte Y, byte Z, BlockId Block, BlockOrientation Orientation);
 

@@ -23,10 +23,10 @@ public readonly struct BlockOrientation : IEquatable<BlockOrientation>
     private BlockOrientation(byte value) => _value = value;
 
     /// <summary>Standing upright (+Y up) with the north face towards -Z: the identity orientation.</summary>
-    public static readonly BlockOrientation Upright = new((byte)Facing.Up);
+    public static readonly BlockOrientation Upright = new((byte)Direction.Up);
 
-    public Facing Up    => (Facing)(_value % 6);
-    public Facing North => Norths[_value];
+    public Direction Up    => (Direction)(_value % 6);
+    public Direction North => Norths[_value];
 
     /// <summary>The rotation from the block's own space (+Y up, -Z north) to its volume's local space.</summary>
     public Quaternion<float> Rotation => Rotations[_value];
@@ -39,7 +39,7 @@ public readonly struct BlockOrientation : IEquatable<BlockOrientation>
     /// <summary>The orientation with its top along <paramref name="up"/> and its north face along
     /// <paramref name="north"/>. When <paramref name="north"/> isn't perpendicular to <paramref name="up"/>, the north
     /// face is left where spin 0 puts it.</summary>
-    public static BlockOrientation From(Facing up, Facing north)
+    public static BlockOrientation From(Direction up, Direction north)
     {
         for (int spin = 0; spin < 4; spin++)
         {
@@ -54,16 +54,16 @@ public readonly struct BlockOrientation : IEquatable<BlockOrientation>
     /// <paramref name="towards"/> — typically from the block towards the player. Only the part of
     /// <paramref name="towards"/> across the surface counts, since the north face must stay perpendicular to up; when
     /// there is none (looking straight along up), spin 0.</summary>
-    public static BlockOrientation Placed(Facing up, Vector3D<float> towards)
+    public static BlockOrientation Placed(Direction up, Vector3D<float> towards)
     {
         var u = up.ToVector();
         var across = towards - Vector3D.Dot(towards, new Vector3D<float>(u.X, u.Y, u.Z)) * new Vector3D<float>(u.X, u.Y, u.Z);
         if (across.LengthSquared < 1e-8f) return new((byte)up);
-        return From(up, FacingExtensions.FromVector(across));
+        return From(up, DirectionExtensions.FromVector(across));
     }
 
     private static readonly Quaternion<float>[] Rotations = new Quaternion<float>[Count];
-    private static readonly Facing[]            Norths    = new Facing[Count];
+    private static readonly Direction[]            Norths    = new Direction[Count];
 
     static BlockOrientation()
     {
@@ -75,26 +75,26 @@ public readonly struct BlockOrientation : IEquatable<BlockOrientation>
             for (int up = 0; up < 6; up++)
             {
                 int i = up + 6 * spin;
-                Rotations[i] = Multiply(UpRotation((Facing)up), turn);
-                Norths[i]    = FacingExtensions.FromVector(Vec.Rotate(Rotations[i], -Vector3D<float>.UnitZ));
+                Rotations[i] = Multiply(UpRotation((Direction)up), turn);
+                Norths[i]    = DirectionExtensions.FromVector(Vec.Rotate(Rotations[i], -Vector3D<float>.UnitZ));
             }
         }
     }
 
     /// <summary>Turns +Y to point along <paramref name="up"/>: about X, +Y turns towards +Z; about Z, towards -X.
     /// (Spin 0's rotations, which set where each spin-0 north face ends up.)</summary>
-    private static Quaternion<float> UpRotation(Facing up)
+    private static Quaternion<float> UpRotation(Direction up)
     {
         var x = Vector3D<float>.UnitX;
         var z = Vector3D<float>.UnitZ;
         const float Quarter = MathF.PI / 2;
         return up switch
         {
-            Facing.North => Quaternion<float>.CreateFromAxisAngle(x, -Quarter),
-            Facing.South => Quaternion<float>.CreateFromAxisAngle(x,  Quarter),
-            Facing.East  => Quaternion<float>.CreateFromAxisAngle(z, -Quarter),
-            Facing.West  => Quaternion<float>.CreateFromAxisAngle(z,  Quarter),
-            Facing.Down  => Quaternion<float>.CreateFromAxisAngle(x, MathF.PI),
+            Direction.North => Quaternion<float>.CreateFromAxisAngle(x, -Quarter),
+            Direction.South => Quaternion<float>.CreateFromAxisAngle(x,  Quarter),
+            Direction.East  => Quaternion<float>.CreateFromAxisAngle(z, -Quarter),
+            Direction.West  => Quaternion<float>.CreateFromAxisAngle(z,  Quarter),
+            Direction.Down  => Quaternion<float>.CreateFromAxisAngle(x, MathF.PI),
             _            => Quaternion<float>.Identity,
         };
     }

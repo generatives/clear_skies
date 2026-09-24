@@ -169,7 +169,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
                 // faces east, away from the ship. Then its north face turns towards the player as far as it can
                 // while keeping that: onto whichever axis across the face is nearest the direction to the camera.
                 var towards = bestEye - (new Vector3D<float>(t.X, t.Y, t.Z) + new Vector3D<float>(0.5f));
-                var orientation = BlockOrientation.Placed(FacingExtensions.FromNormal(bestNormal), towards);
+                var orientation = BlockOrientation.Placed(DirectionExtensions.FromNormal(bestNormal), towards);
                 for (int x = t.X - _blockBrushRadius; x <= t.X + _blockBrushRadius; x++)
                 {
                     for (int y = t.Y - _blockBrushRadius; y <= t.Y + _blockBrushRadius; y++)

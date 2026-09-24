@@ -54,7 +54,7 @@ public sealed class AirshipFlightSystem : ISystem
     private readonly EntitySet       _fans;
     private readonly EntitySet       _buoyants;
 
-    /// <summary>This tick's Fan and Buoyant blocks of one volume, by cell and facing.</summary>
+    /// <summary>This tick's Fan and Buoyant blocks of one volume, by cell and orientation.</summary>
     private sealed class ShipBlocks
     {
         public readonly List<BlockRef> Fans     = new();
@@ -336,8 +336,8 @@ public sealed class AirshipFlightSystem : ISystem
     // directly), which is why it tested fine while Fan-block-allocated thrust didn't.
     private static Vector3 ThrustDirection(in BlockRef fan, Quaternion rot)
     {
-        var facingVec = fan.Orientation.Up.ToVector();
-        var exhaustDir = Vector3.Transform(new Vector3(facingVec.X, facingVec.Y, facingVec.Z), rot);
+        var up = fan.Orientation.Up.ToVector();
+        var exhaustDir = Vector3.Transform(new Vector3(up.X, up.Y, up.Z), rot);
         return -exhaustDir;
     }
 

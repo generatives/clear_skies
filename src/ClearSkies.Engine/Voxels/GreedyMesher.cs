@@ -122,7 +122,7 @@ public sealed class GreedyMesher
                     }
                 }
 
-                // ── Greedy merge (block id + facing-match) ───────────────────────────
+                // ── Greedy merge (block id + face-role match) ───────────────────────────
                 for (int v = 0; v < sz; v++)
                 for (int u = 0; u < sz; u++)
                 {

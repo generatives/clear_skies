@@ -66,7 +66,7 @@ public readonly struct BlockDef
     /// Classifies which texture role <paramref name="faceNormal"/> plays for a voxel whose
     /// top points <paramref name="up"/>: Top if the face points that way, Bottom if it points the opposite way,
     /// Side otherwise.
-    public static FaceRole GetFaceRole(Vector3D<int> faceNormal, Facing up)
+    public static FaceRole GetFaceRole(Vector3D<int> faceNormal, Direction up)
     {
         var f = up.ToVector();
         if (faceNormal == f) return FaceRole.Top;

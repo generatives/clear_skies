@@ -122,7 +122,7 @@ var camSpawn = TestScene.Build(host, seed);
     shipVoxels.Add((2, 2, 2, BlockId.Lamp, BlockOrientation.Upright)); // exposed on the hull's roof, open air on 5 sides
     // Model blocks: a lever standing on the roof and one sticking out of the east wall.
     shipVoxels.Add((0, 2, 0, BlockId.Lever, BlockOrientation.Upright));
-    shipVoxels.Add((5, 1, 2, BlockId.Lever, BlockOrientation.From(Facing.East, Facing.North)));
+    shipVoxels.Add((5, 1, 2, BlockId.Lever, BlockOrientation.From(Direction.East, Direction.North)));
 
     var shipSpawn = new Vector3(camSpawn.X + 10f, camSpawn.Y - 5f, camSpawn.Z + 45f);
     DynamicGridFactory.SpawnFromVoxels(host.World, gridSelection, shipSpawn, shipVoxels);

@@ -25,7 +25,7 @@ namespace ClearSkies.Engine.Voxels;
 ///
 /// The volume also owns block entities (<see cref="BlockDef.Components"/>): one per entity block, created when its
 /// chunk is added or <see cref="SetBlock"/> places it, destroyed when <see cref="SetBlock"/> replaces it or its chunk
-/// is removed. Each is a Hierarchy child of its chunk entity, placed on its cell and turned to its facing, so it
+/// is removed. Each is a Hierarchy child of its chunk entity, placed on its cell and turned to its orientation, so it
 /// rides along with the volume like the chunk does. The voxel always wins: <see cref="SetBlock"/> is the one place
 /// an entity is reconciled with its voxel. Main thread only, like every entity create/destroy.
 /// </summary>
