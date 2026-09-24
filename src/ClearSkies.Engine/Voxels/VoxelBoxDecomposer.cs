@@ -13,24 +13,30 @@ public sealed class VoxelBoxDecomposer
 {
     private readonly bool[] _consumed = new bool[ChunkData.Size * ChunkData.Size * ChunkData.Size];
     private bool _mergeBlockTypes;
+    private bool _passable;
 
     /// <summary>Returns boxes as (centre, size, block id) in chunk-local block units (centre relative
     /// to the chunk origin). Each box contains only one <see cref="BlockId"/> — unless
     /// <paramref name="mergeBlockTypes"/> is set, in which case boxes span any colliding blocks and the id is just the
     /// first voxel's. Static terrain colliders use that: they don't need per-box mass, and merging across
     /// grass/dirt/stone layers cuts the box count (and so the BigCompound tree build) substantially.</summary>
-    public List<(Vector3 center, Vector3 size, BlockId Id)> Decompose(ChunkData data, bool mergeBlockTypes = false)
+    ///
+    /// With <paramref name="passable"/> set it covers the solid blocks that don't collide
+    /// (<see cref="BlockDef.Passable"/>) instead, for their mass alone.
+    public List<(Vector3 center, Vector3 size, BlockId Id)> Decompose(ChunkData data, bool mergeBlockTypes = false,
+                                                                      bool passable = false)
     {
         int sz = ChunkData.Size;
         Array.Clear(_consumed, 0, _consumed.Length);
         var boxes = new List<(Vector3, Vector3, BlockId)>();
         _mergeBlockTypes = mergeBlockTypes;
+        _passable        = passable;
 
         for (int z = 0; z < sz; z++)
         for (int y = 0; y < sz; y++)
         for (int x = 0; x < sz; x++)
         {
-            if (_consumed[Idx(x, y, z)] || !Collides(data, x, y, z)) continue;
+            if (_consumed[Idx(x, y, z)] || !Covers(data, x, y, z)) continue;
             BlockId id = data.Get(x, y, z);
 
             // Grow along X.
@@ -71,7 +77,13 @@ public sealed class VoxelBoxDecomposer
     }
 
     private bool Matches(ChunkData data, int x, int y, int z, BlockId id) =>
-        _mergeBlockTypes ? Collides(data, x, y, z) : data.Get(x, y, z) == id;
-    private static bool Collides(ChunkData data, int x, int y, int z) => BlockRegistry.Get(data.Get(x, y, z)).Collides;
+        _mergeBlockTypes ? Covers(data, x, y, z) : data.Get(x, y, z) == id;
+
+    // Whether this pass covers the block: colliding blocks normally, passable ones when asked for those.
+    private bool Covers(ChunkData data, int x, int y, int z)
+    {
+        ref readonly var def = ref BlockRegistry.Get(data.Get(x, y, z));
+        return _passable ? def.IsSolid && def.Passable : def.Collides;
+    }
     private static int  Idx(int x, int y, int z) => ChunkData.Index(x, y, z);
 }

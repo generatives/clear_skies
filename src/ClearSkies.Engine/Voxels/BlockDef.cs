@@ -11,8 +11,8 @@ public readonly struct BlockDef
     public bool            IsSolid        { get; init; }
 
     /// True for a solid block that bodies pass through: raycasts still hit it (so it can be targeted, used, placed
-    /// against and broken), but it gets no collision shape, so characters walk through it. Having no shape, it adds
-    /// nothing to a ship's mass either. For small fittings like levers.
+    /// against and broken), but it gets no collision shape, so characters walk through it. It still weighs a ship down
+    /// (its <see cref="Weight"/> counts towards the ship's mass). For small fittings like levers.
     public bool            Passable       { get; init; }
 
     /// True when this block gets a collision shape: solid and not <see cref="Passable"/>.
