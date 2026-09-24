@@ -11,9 +11,7 @@ namespace ClearSkies.Engine.ECS;
 
 /// <summary>
 /// Full airship flight pipeline (Milestone 5 Phases 5.3/5.4), per dynamic grid each tick: first a
-/// desired-velocity control law (self-leveling always; forward/right/vertical/yaw velocity targets from
-/// player input when the grid carries <see cref="PilotedComponent"/> (set by <see cref="GridPilotSystem"/>
-/// while it's piloting that grid), zero otherwise — the grid just holds position/heading), then
+/// control law deciding the force and torque the ship wants, then
 /// immediately realizing that desired force/torque by
 /// distributing it across the grid's Fan/Buoyant blocks (or applying it directly in "free propulsion"
 /// debug mode). Previously two systems (a control system computing desired force/torque into a
@@ -22,6 +20,18 @@ namespace ClearSkies.Engine.ECS;
 /// what the ship should do" vs. "make it happen" was easy to mix up despite being two halves of the same
 /// per-tick computation. Runs before <see cref="PhysicsWorld"/> steps, so impulses are integrated the
 /// same tick they're computed.
+///
+/// The control law always self-levels (pitch/roll). Past that it has two modes:
+/// <list type="bullet">
+/// <item>Piloted (the grid carries <see cref="PilotedComponent"/>, set by <see cref="GridPilotSystem"/>): forward,
+/// right, vertical and yaw velocity targets from the keyboard, with gravity and Buoyant lift cancelled for it. Levers
+/// are ignored, and the ship's <see cref="Helm"/> heading follows it, so letting go holds the heading it was left at.</item>
+/// <item>Otherwise, the ship's own controls. Its <see cref="Lever"/>s ask for force, not a speed or an acceleration:
+/// each axis' levers (they move together; see <see cref="LeverControlSystem"/>) ask for their setting's fraction of
+/// everything the Fans can push that way, and nothing corrects for anything else acting on the ship, gravity and
+/// Buoyant lift included, so the crew holds it up with a vertical lever, and it coasts when the levers are
+/// upright. It holds its <see cref="Helm"/> heading, which its <see cref="SteeringWheel"/>s turn.</item>
+/// </list>
 ///
 /// Propulsion allocation solves for Fan thrusts rather than sharing the demand out: it finds each Fan's thrust,
 /// between 0 and the Fan's max (Fans only push), so that together they produce the desired force and torque as
@@ -53,12 +63,14 @@ public sealed class AirshipFlightSystem : ISystem
     private readonly EntitySet       _grids;
     private readonly EntitySet       _fans;
     private readonly EntitySet       _buoyants;
+    private readonly EntitySet       _levers;
 
     /// <summary>This tick's Fan and Buoyant blocks of one volume, by cell and orientation.</summary>
     private sealed class ShipBlocks
     {
         public readonly List<BlockRef> Fans     = new();
         public readonly List<BlockRef> Buoyants = new();
+        public readonly List<(BlockRef Block, float Value)> Levers = new();
     }
     private readonly Dictionary<ChunkVolume, ShipBlocks> _blocksByVolume = new();
     private static readonly ShipBlocks NoBlocks = new();
@@ -98,6 +110,11 @@ public sealed class AirshipFlightSystem : ISystem
     private float _verticalGain = 3f;
     private float _yawGain      = 2f;
 
+    // Not piloted: heading hold (acceleration-space, like the gains above; the yaw-rate damping is _yawGain), and
+    // what a full lever asks for in free-propulsion mode, where there are no Fans to ask everything of.
+    private float _headingGain      = 1f;
+    private float _freeLeverAccel   = 20f;
+
     // ── propulsion tuning ───────────────────────────────────────────────────
     private float _fanMaxForce  = 100f;
     private float _buoyantForce = 25f;
@@ -126,6 +143,7 @@ public sealed class AirshipFlightSystem : ISystem
         _grids    = world.GetEntities().With<DynamicGrid>().With<ChunkGrid>().With<PhysicsBodyComponent>().AsSet();
         _fans     = world.GetEntities().With<Fan>().With<BlockRef>().AsSet();
         _buoyants = world.GetEntities().With<Buoyant>().With<BlockRef>().AsSet();
+        _levers   = world.GetEntities().With<Lever>().With<BlockRef>().AsSet();
         _physics = physics;
         _input   = input;
     }
@@ -140,10 +158,17 @@ public sealed class AirshipFlightSystem : ISystem
             var volume = e.Get<ChunkGrid>().Volume;
             var dynamicGrid = e.Get<DynamicGrid>();
             var blocks = _blocksByVolume.GetValueOrDefault(volume, NoBlocks);
+            var body = e.Get<PhysicsBodyComponent>().Body;
+            var (pos, rot) = _physics.GetBodyPose(body);
+            var forward = Vector3.Transform(new Vector3(0, 0, -1), rot);
+
+            // Every grid gets a helm, locked or not, so its wheels steer from the moment it exists.
+            float heading = Heading(forward);
+            if (!e.Has<Helm>()) e.Set(new Helm { TargetHeading = heading });
+
             // Kinematic (Locked) grids skip gravity/impulses entirely via Bepu's own integrator — nothing
             // to fly. (An empty grid has no body yet, so it isn't in _grids at all.)
             if (dynamicGrid.Locked) continue;
-            var body = e.Get<PhysicsBodyComponent>().Body;
 
             float mass = _physics.GetBodyMass(body);
             if (mass <= 0f) continue; // shouldn't happen for an unlocked body, but guard the degenerate case
@@ -153,12 +178,10 @@ public sealed class AirshipFlightSystem : ISystem
             // ── control law: this tick's desired force/torque ──────────────────
             bool piloted = e.Has<PilotedComponent>();
 
-            var (pos, rot) = _physics.GetBodyPose(body);
             var linVel = _physics.GetBodyLinearVelocity(body);
             var angVel = _physics.GetBodyAngularVelocity(body);
 
             var worldUp = Vector3.UnitY;
-            var forward = Vector3.Transform(new Vector3(0, 0, -1), rot);
             var right   = Vector3.Transform(new Vector3(1, 0, 0), rot);
             var gridUp  = Vector3.Transform(worldUp, rot);
 
@@ -168,40 +191,56 @@ public sealed class AirshipFlightSystem : ISystem
             var angVelPitchRoll = angVel - Vector3.Dot(angVel, worldUp) * worldUp;
             tiltTorque -= _levelDamp * angVelPitchRoll;
 
-            float desiredYawRate = piloted ? YawInput() * _yawRateTarget : 0f;
+            ref var helm = ref e.Get<Helm>();
             float currentYawRate = Vector3.Dot(angVel, worldUp);
-            var yawTorque = _yawGain * (desiredYawRate - currentYawRate) * worldUp;
 
-            float desiredForwardSpeed = piloted ? ForwardInput() * _forwardSpeedTarget : 0f;
-            float currentForwardSpeed = Vector3.Dot(linVel, forward);
-            var forwardForce = _forwardGain * (desiredForwardSpeed - currentForwardSpeed) * forward;
+            Vector3 desiredForce, desiredTorque;
+            if (piloted)
+            {
+                helm.TargetHeading = heading; // so the ship holds the heading it's left at
 
-            float desiredRightSpeed = piloted ? RightInput() * _rightSpeedTarget : 0f;
-            float currentRightSpeed = Vector3.Dot(linVel, right);
-            var rightForce = _rightGain * (desiredRightSpeed - currentRightSpeed) * right;
+                float desiredYawRate = YawInput() * _yawRateTarget;
+                var yawTorque = _yawGain * (desiredYawRate - currentYawRate) * worldUp;
 
-            float desiredVerticalSpeed = piloted ? VerticalInput() * _verticalSpeedTarget : 0f;
-            float currentVerticalSpeed = Vector3.Dot(linVel, worldUp);
-            // Feedforward: a pure proportional term can never fully cancel a constant disturbance like
-            // gravity — it settles at whatever small velocity error happens to produce enough force to
-            // balance it, and holds that terminal drift forever instead of reaching true zero. Cancel
-            // BOTH known constants directly (acceleration-space, consistent with the P-term above,
-            // before the mass multiply below turns the whole sum into a real force): gravity, and this
-            // grid's own Buoyant lift (its Buoyant block count × per-block force ÷ mass = its acceleration
-            // contribution) — leaving out Buoyant was why the ship started drifting *up* once gravity
-            // alone got cancelled. So the P-term only has to correct whatever's left over.
-            float buoyantAccel = blocks.Buoyants.Count * _buoyantForce / mass;
-            var verticalForce = _verticalGain * (desiredVerticalSpeed - currentVerticalSpeed) * worldUp
-                               - _physics.Gravity - buoyantAccel * worldUp;
+                float desiredForwardSpeed = ForwardInput() * _forwardSpeedTarget;
+                float currentForwardSpeed = Vector3.Dot(linVel, forward);
+                var forwardForce = _forwardGain * (desiredForwardSpeed - currentForwardSpeed) * forward;
 
-            // Mass-scaled so a given gain produces the same ACCELERATION regardless of how heavy the
-            // grid is (F = m·a) — torque uses the same scalar as an approximation (real rotational
-            // inertia is a tensor, not a scalar, but this is close enough for a prototype and keeps
-            // yaw/self-level similarly mass-independent in feel).
-            var desiredForce  = (forwardForce + rightForce + verticalForce) * mass;
-            var desiredTorque = (tiltTorque + yawTorque) * mass;
+                float desiredRightSpeed = RightInput() * _rightSpeedTarget;
+                float currentRightSpeed = Vector3.Dot(linVel, right);
+                var rightForce = _rightGain * (desiredRightSpeed - currentRightSpeed) * right;
 
-            // Feedforward, like the Buoyant force above: cancel the torque this grid's Buoyant lift adds about its
+                float desiredVerticalSpeed = VerticalInput() * _verticalSpeedTarget;
+                float currentVerticalSpeed = Vector3.Dot(linVel, worldUp);
+                // Feedforward: a pure proportional term can never fully cancel a constant disturbance like
+                // gravity — it settles at whatever small velocity error happens to produce enough force to
+                // balance it, and holds that terminal drift forever instead of reaching true zero. Cancel
+                // BOTH known constants directly (acceleration-space, consistent with the P-term above,
+                // before the mass multiply below turns the whole sum into a real force): gravity, and this
+                // grid's own Buoyant lift (its Buoyant block count × per-block force ÷ mass = its acceleration
+                // contribution) — leaving out Buoyant was why the ship started drifting *up* once gravity
+                // alone got cancelled. So the P-term only has to correct whatever's left over.
+                float buoyantAccel = blocks.Buoyants.Count * _buoyantForce / mass;
+                var verticalForce = _verticalGain * (desiredVerticalSpeed - currentVerticalSpeed) * worldUp
+                                   - _physics.Gravity - buoyantAccel * worldUp;
+
+                // Mass-scaled so a given gain produces the same ACCELERATION regardless of how heavy the
+                // grid is (F = m·a) — torque uses the same scalar as an approximation (real rotational
+                // inertia is a tensor, not a scalar, but this is close enough for a prototype and keeps
+                // yaw/self-level similarly mass-independent in feel).
+                desiredForce  = (forwardForce + rightForce + verticalForce) * mass;
+                desiredTorque = (tiltTorque + yawTorque) * mass;
+            }
+            else
+            {
+                // Hold the helm's heading: turn towards it, damped by the yaw rate.
+                float headingError = MathF.IEEERemainder(helm.TargetHeading - heading, 2f * MathF.PI);
+                var yawTorque = (_headingGain * headingError - _yawGain * currentYawRate) * worldUp;
+                desiredTorque = (tiltTorque + yawTorque) * mass;
+                desiredForce  = LeverForce(blocks, rot, mass);
+            }
+
+            // Feedforward, like the piloted Buoyant force above (in both modes, since self-levelling is): cancel the torque this grid's Buoyant lift adds about its
             // centre of mass, so the self-level term isn't left fighting it with a steady tilt.
             var com = PhysicsConv.ToBepu(volume.Pivot); // a grid's pivot is its centre of mass
             var buoyantLift = Vector3.UnitY * _buoyantForce;
@@ -253,6 +292,50 @@ public sealed class AirshipFlightSystem : ISystem
         _lastFreePropelled   = freePropelled;
     }
 
+    /// <summary>A ship's heading from its bow direction: radians about world up, 0 towards -Z, anticlockwise from
+    /// above (as <see cref="Helm.TargetHeading"/>).</summary>
+    private static float Heading(Vector3 forward) => MathF.Atan2(-forward.X, -forward.Z);
+
+    /// <summary>The force a ship's <see cref="Lever"/>s ask for, in world space. Each of its three axes (the lines
+    /// its levers lever along) asks for its levers' setting (their average, though they move together) times
+    /// everything the ship's Fans could push that way (a fixed acceleration of the ship in free-propulsion mode).</summary>
+    private Vector3 LeverForce(ShipBlocks blocks, Quaternion rot, float mass)
+    {
+        Span<float> sum   = stackalloc float[3];
+        Span<int>   count = stackalloc int[3];
+        foreach (var (block, value) in blocks.Levers)
+        {
+            var (axis, sign) = LeverControlSystem.LeverAxis(block);
+            sum[axis] += System.Math.Clamp(value, -1f, 1f) * sign;
+            count[axis]++;
+        }
+
+        var force = Vector3.Zero;
+        for (int axis = 0; axis < 3; axis++)
+        {
+            if (count[axis] == 0) continue;
+            float setting = sum[axis] / count[axis];
+            if (setting == 0f) continue;
+
+            // The axis' own direction (its north face, east face or top), turned the way the setting asks.
+            var local = ((Direction)(axis * 2)).ToVector();
+            var dir = Vector3.Transform(new Vector3(local.X, local.Y, local.Z), rot) * MathF.Sign(setting);
+            float available = _freePropulsion ? _freeLeverAccel * mass : FanCapacity(blocks.Fans, rot, dir);
+            force += MathF.Abs(setting) * available * dir;
+        }
+        return force;
+    }
+
+    /// <summary>The most force <paramref name="fans"/> could push along world direction <paramref name="dir"/>
+    /// (a unit vector): every Fan's full thrust, counting only the part of it along <paramref name="dir"/>.</summary>
+    private float FanCapacity(List<BlockRef> fans, Quaternion rot, Vector3 dir)
+    {
+        float capacity = 0f;
+        foreach (var fan in fans)
+            capacity += MathF.Max(0f, Vector3.Dot(ThrustDirection(fan, rot), dir)) * _fanMaxForce;
+        return capacity;
+    }
+
     private float ForwardInput()
     {
         float v = 0f;
@@ -285,7 +368,7 @@ public sealed class AirshipFlightSystem : ISystem
         return v;
     }
 
-    /// <summary>Rebuilds <see cref="_blocksByVolume"/> from this tick's Fan and Buoyant entities. Lists are reused
+    /// <summary>Rebuilds <see cref="_blocksByVolume"/> from this tick's Fan, Buoyant and Lever entities. Lists are reused
     /// across ticks; a volume left with neither is dropped so a despawned ship's lists don't linger.</summary>
     private void GroupBlocksByVolume()
     {
@@ -293,6 +376,7 @@ public sealed class AirshipFlightSystem : ISystem
         {
             blocks.Fans.Clear();
             blocks.Buoyants.Clear();
+            blocks.Levers.Clear();
         }
 
         foreach (ref readonly Entity e in _fans.GetEntities())
@@ -305,9 +389,14 @@ public sealed class AirshipFlightSystem : ISystem
             ref readonly var block = ref e.Get<BlockRef>();
             BlocksOf(block.Volume).Buoyants.Add(block);
         }
+        foreach (ref readonly Entity e in _levers.GetEntities())
+        {
+            ref readonly var block = ref e.Get<BlockRef>();
+            BlocksOf(block.Volume).Levers.Add((block, e.Get<Lever>().Value));
+        }
 
         foreach (var (volume, blocks) in _blocksByVolume)
-            if (blocks.Fans.Count == 0 && blocks.Buoyants.Count == 0) _blocksByVolume.Remove(volume);
+            if (blocks.Fans.Count == 0 && blocks.Buoyants.Count == 0 && blocks.Levers.Count == 0) _blocksByVolume.Remove(volume);
     }
 
     private ShipBlocks BlocksOf(ChunkVolume volume)
@@ -424,6 +513,10 @@ public sealed class AirshipFlightSystem : ISystem
         ImGui.SliderFloat("Right gain", ref _rightGain, 0f, 20f);
         ImGui.SliderFloat("Vertical gain", ref _verticalGain, 0f, 20f);
         ImGui.SliderFloat("Yaw gain", ref _yawGain, 0f, 20f);
+        ImGui.Separator();
+        ImGui.Text("Ship's controls (not piloted)");
+        ImGui.SliderFloat("Heading gain", ref _headingGain, 0f, 20f);
+        ImGui.SliderFloat("Free-propulsion lever accel", ref _freeLeverAccel, 0f, 50f);
         ImGui.Separator();
         ImGui.Checkbox("Free propulsion (no blocks needed)", ref _freePropulsion);
         ImGui.BeginDisabled(_freePropulsion);

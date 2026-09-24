@@ -2,6 +2,7 @@ using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Gui;
 using ClearSkies.Engine.Math;
 using ClearSkies.Engine.Rendering;
+using ClearSkies.Engine.Voxels;
 using DefaultEcs;
 using ImGuiNET;
 using Silk.NET.Maths;
@@ -18,6 +19,10 @@ namespace ClearSkies.Engine.ECS;
 /// the ray crosses the arm's swing plane, this still works head-on, with the player standing in that plane, as they
 /// do in front of a lever they placed.) Every frame it poses each lever's
 /// arm from its <see cref="Lever.Value"/>, so anything else that sets the value moves the arm too.
+///
+/// A volume's levers on the same axis move together: dragging one sets every other lever in its volume that levers
+/// along the same line (north face the same way or the opposite way; the opposite way gets the negated value, so all
+/// of them ask for the same force), and a lever placed on an axis that already has levers picks up their setting.
 ///
 /// The swing comes from the model: the arm node pivots about its own X axis at its rest position, so it levers north
 /// and south: upright along its own +Y at 0, leaning <see cref="MaxAngle"/> towards its own -Z (the block's north
@@ -37,6 +42,9 @@ public sealed class LeverControlSystem : ISystem, IDisposable, IDebugUiSystem
     private readonly IDisposable _subscription;
     private Entity _lastUsed;
 
+    // Levers already synced with their axis; any other lever is new, and picks up its axis' setting.
+    private readonly HashSet<Entity> _synced = new();
+
     public LeverControlSystem(World world)
     {
         _levers       = world.GetEntities().With<Lever>().With<RenderedModel>().AsSet();
@@ -45,6 +53,10 @@ public sealed class LeverControlSystem : ISystem, IDisposable, IDebugUiSystem
 
     public void Update(float dt)
     {
+        _synced.RemoveWhere(e => !e.IsAlive);
+        foreach (ref readonly Entity e in _levers.GetEntities())
+            if (_synced.Add(e)) AdoptAxisValue(e);
+
         foreach (ref readonly Entity e in _levers.GetEntities())
         {
             float value = System.Math.Clamp(e.Get<Lever>().Value, -1f, 1f);
@@ -67,6 +79,52 @@ public sealed class LeverControlSystem : ISystem, IDisposable, IDebugUiSystem
 
         lever.Value = angle / MaxAngle;
         _lastUsed = e;
+        SyncAxis(e);
+    }
+
+    /// <summary>The line a lever levers along in its volume (0-2: the north/south, east/west or up/down axis), and
+    /// which way along it its north face points (+1 or -1): <see cref="Direction"/>s come in opposite pairs.</summary>
+    public static (int Axis, float Sign) LeverAxis(in BlockRef block)
+    {
+        int north = (int)block.Orientation.North;
+        return (north / 2, north % 2 == 0 ? 1f : -1f);
+    }
+
+    /// <summary>Sets every other lever in <paramref name="source"/>'s volume on its axis to match it.</summary>
+    private void SyncAxis(Entity source)
+    {
+        if (!source.Has<BlockRef>()) return;
+        ref readonly var block = ref source.Get<BlockRef>();
+        var (axis, sign) = LeverAxis(block);
+        float value = source.Get<Lever>().Value * sign; // the setting along the axis' own direction
+
+        foreach (ref readonly Entity other in _levers.GetEntities())
+        {
+            if (other == source || !other.Has<BlockRef>()) continue;
+            ref readonly var otherBlock = ref other.Get<BlockRef>();
+            if (otherBlock.Volume != block.Volume) continue;
+            var (otherAxis, otherSign) = LeverAxis(otherBlock);
+            if (otherAxis == axis) other.Get<Lever>().Value = value * otherSign;
+        }
+    }
+
+    /// <summary>Sets a new lever to the setting of any lever already on its axis in its volume.</summary>
+    private void AdoptAxisValue(Entity lever)
+    {
+        if (!lever.Has<BlockRef>()) return;
+        ref readonly var block = ref lever.Get<BlockRef>();
+        var (axis, sign) = LeverAxis(block);
+
+        foreach (ref readonly Entity other in _levers.GetEntities())
+        {
+            if (other == lever || !_synced.Contains(other) || !other.Has<BlockRef>()) continue;
+            ref readonly var otherBlock = ref other.Get<BlockRef>();
+            if (otherBlock.Volume != block.Volume) continue;
+            var (otherAxis, otherSign) = LeverAxis(otherBlock);
+            if (otherAxis != axis) continue;
+            lever.Get<Lever>().Value = other.Get<Lever>().Value * otherSign * sign;
+            return;
+        }
     }
 
     /// <summary>The arm angle (about the arm's pivot axis, from upright, within ±<see cref="MaxAngle"/>) nearest
@@ -137,7 +195,7 @@ public sealed class LeverControlSystem : ISystem, IDisposable, IDebugUiSystem
         if (_lastUsed.IsAlive && _lastUsed.Has<Lever>())
         {
             ref var lever = ref _lastUsed.Get<Lever>();
-            ImGui.SliderFloat("Last used", ref lever.Value, -1f, 1f, "%.2f");
+            if (ImGui.SliderFloat("Last used", ref lever.Value, -1f, 1f, "%.2f")) SyncAxis(_lastUsed);
         }
         else
         {

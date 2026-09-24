@@ -40,11 +40,23 @@ public struct Interactive
 {
 }
 
-/// <summary>A lever: an arm the player drags across its range (see <see cref="LeverControlSystem"/>).</summary>
+/// <summary>A lever: an arm the player drags across its range (see <see cref="LeverControlSystem"/>). On a ship it asks
+/// for force along the axis it levers on (see <see cref="AirshipFlightSystem"/>): at 1, everything the ship's Fans can
+/// push towards the lever's north face; at -1, towards its south face. A ship's levers on the same axis move together.</summary>
 public struct Lever
 {
     /// <summary>Where the arm is set, from -1 (fully to one side) through 0 (upright) to 1 (fully to the other).
     /// The arm levers north and south: towards 1 it leans to the block's north face (towards the player who placed
     /// it), towards -1 to its south face.</summary>
     public float Value;
+}
+
+/// <summary>A ship's wheel: the player grabs its rim and turns it (see <see cref="SteeringWheelControlSystem"/>), and
+/// the ship's <see cref="Helm"/> heading turns with it, one for one: clockwise (as seen from its north face, where the
+/// player who placed it stands) to starboard.</summary>
+public struct SteeringWheel
+{
+    /// <summary>How far the wheel has been turned from where it was modelled, clockwise, in radians. Unbounded: it
+    /// keeps counting past a full turn.</summary>
+    public float Angle;
 }

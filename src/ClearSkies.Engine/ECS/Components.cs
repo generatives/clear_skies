@@ -50,6 +50,15 @@ public struct CharacterModeComponent
     public bool FreeFly;
 }
 
+/// <summary>On a DynamicGrid's root entity: the heading the ship holds when not piloted, in radians about world up
+/// (0 with its bow towards -Z, increasing anticlockwise seen from above). Set by <see cref="AirshipFlightSystem"/>
+/// to the ship's heading when it first flies, and follows the ship while it's piloted; turning a
+/// <see cref="SteeringWheel"/> on the ship turns it.</summary>
+public struct Helm
+{
+    public float TargetHeading;
+}
+
 /// <summary>Tag: set on exactly one DynamicGrid's root entity while GridPilotSystem is piloting it.
 /// Read by AirshipFlightSystem to decide whether to take velocity targets from player input.</summary>
 public struct PilotedComponent

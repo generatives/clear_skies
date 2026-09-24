@@ -44,6 +44,9 @@ public static class BlockRegistry
         // fills a sliver of its cell. An interactive entity block: the player drags its arm (LeverControlSystem).
         Register(new BlockDef { Id = BlockId.Lever, Name = "Lever", Color = new(0.45f, 0.35f, 0.25f), IsSolid = true, LightEmission = 0, Opacity = 0, Weight = 1,
             Model = "lever/lever.gltf", Components = e => { e.Set(new Lever()); e.Set(new Interactive()); } });
+        // The Blockbench ship's wheel: the player grabs its rim and turns it to steer (SteeringWheelControlSystem).
+        Register(new BlockDef { Id = BlockId.SteeringWheel, Name = "Steering Wheel", Color = new(0.50f, 0.36f, 0.22f), IsSolid = true, LightEmission = 0, Opacity = 0, Weight = 1,
+            Model = "steering_wheel/steering_wheel.gltf", Components = e => { e.Set(new SteeringWheel()); e.Set(new Interactive()); } });
         Register(new BlockDef { Id = BlockId.Buoyant, Name = "Buoyant", Color = new(0.55f, 0.85f, 1.00f), IsSolid = true, LightEmission = 0, Opacity = 15, Weight = 1,
             Components = e => e.Set(new Buoyant()) });
 
