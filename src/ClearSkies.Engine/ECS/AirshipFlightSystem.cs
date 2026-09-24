@@ -40,9 +40,10 @@ namespace ClearSkies.Engine.ECS;
 /// forward demand drown out a much smaller vertical one. Buoyant blocks apply constant passive lift,
 /// unaffected by any of this.
 ///
-/// Scans every voxel of every loaded chunk *twice* each tick (once per allocation pass) to find
-/// Fan/Buoyant blocks — a naive O(voxels) cost accepted for this prototype milestone (small ships),
-/// matching this project's "naive-correct first" pattern elsewhere (e.g. the GPU lighting flood).
+/// Fan and Buoyant blocks are entity blocks (see <see cref="Fan"/>, <see cref="Buoyant"/>): each tick starts by
+/// grouping their entities by the volume they belong to (<see cref="BlockRef.Volume"/>), so a ship's blocks are
+/// found by walking its own lists instead of scanning its voxels. Fans and Buoyant blocks on the static world are
+/// ignored — only grids fly.
 ///
 /// Debug "free propulsion" mode (the "Free propulsion" checkbox in <see cref="DrawDebugUi"/>) applies the
 /// control law's force/torque directly at the grid's centre of mass instead of allocating it across Fan
@@ -53,6 +54,17 @@ namespace ClearSkies.Engine.ECS;
 public sealed class AirshipFlightSystem : ISystem
 {
     private readonly EntitySet       _grids;
+    private readonly EntitySet       _fans;
+    private readonly EntitySet       _buoyants;
+
+    /// <summary>This tick's Fan and Buoyant blocks of one volume, by cell and facing.</summary>
+    private sealed class ShipBlocks
+    {
+        public readonly List<BlockRef> Fans     = new();
+        public readonly List<BlockRef> Buoyants = new();
+    }
+    private readonly Dictionary<ChunkVolume, ShipBlocks> _blocksByVolume = new();
+    private static readonly ShipBlocks NoBlocks = new();
     private readonly PhysicsWorld    _physics;
     private readonly InputManager    _input;
 
@@ -99,7 +111,9 @@ public sealed class AirshipFlightSystem : ISystem
 
     public AirshipFlightSystem(World world, PhysicsWorld physics, InputManager input)
     {
-        _grids   = world.GetEntities().With<DynamicGrid>().With<ChunkGrid>().With<PhysicsBodyComponent>().AsSet();
+        _grids    = world.GetEntities().With<DynamicGrid>().With<ChunkGrid>().With<PhysicsBodyComponent>().AsSet();
+        _fans     = world.GetEntities().With<Fan>().With<BlockRef>().AsSet();
+        _buoyants = world.GetEntities().With<Buoyant>().With<BlockRef>().AsSet();
         _physics = physics;
         _input   = input;
     }
@@ -107,11 +121,13 @@ public sealed class AirshipFlightSystem : ISystem
     public void Update(float dt)
     {
         int fanCount = 0, buoyantCount = 0, gridsProcessed = 0, freePropelled = 0;
+        GroupBlocksByVolume();
 
         foreach (ref readonly Entity e in _grids.GetEntities())
         {
             var volume = e.Get<ChunkGrid>().Volume;
             var dynamicGrid = e.Get<DynamicGrid>();
+            var blocks = _blocksByVolume.GetValueOrDefault(volume, NoBlocks);
             // Kinematic (Locked) grids skip gravity/impulses entirely via Bepu's own integrator — nothing
             // to fly. (An empty grid has no body yet, so it isn't in _grids at all.)
             if (dynamicGrid.Locked) continue;
@@ -159,10 +175,10 @@ public sealed class AirshipFlightSystem : ISystem
             // balance it, and holds that terminal drift forever instead of reaching true zero. Cancel
             // BOTH known constants directly (acceleration-space, consistent with the P-term above,
             // before the mass multiply below turns the whole sum into a real force): gravity, and this
-            // grid's own Buoyant lift (BuoyantBlockCount × per-block force ÷ mass = its acceleration
+            // grid's own Buoyant lift (its Buoyant block count × per-block force ÷ mass = its acceleration
             // contribution) — leaving out Buoyant was why the ship started drifting *up* once gravity
             // alone got cancelled. So the P-term only has to correct whatever's left over.
-            float buoyantAccel = dynamicGrid.BuoyantBlockCount * _buoyantForce / mass;
+            float buoyantAccel = blocks.Buoyants.Count * _buoyantForce / mass;
             var verticalForce = _verticalGain * (desiredVerticalSpeed - currentVerticalSpeed) * worldUp
                                - _physics.Gravity - buoyantAccel * worldUp;
 
@@ -194,70 +210,44 @@ public sealed class AirshipFlightSystem : ISystem
             float totalForceAlign = 0f, totalTorqueAlign = 0f;
             if (!_freePropulsion)
             {
-                foreach (var (chunkPos, entry) in volume.All)
+                foreach (var fan in blocks.Fans)
                 {
-                    if (!entry.Data.HasAnySolid()) continue;
-                    var silkOrigin = chunkPos.WorldOrigin;
-                    var chunkOrigin = new Vector3(silkOrigin.X, silkOrigin.Y, silkOrigin.Z);
-
-                    for (int lz = 0; lz < ChunkData.Size; lz++)
-                    for (int ly = 0; ly < ChunkData.Size; ly++)
-                    for (int lx = 0; lx < ChunkData.Size; lx++)
-                    {
-                        if (entry.Data.Get(lx, ly, lz) != BlockId.Fan) continue;
-
-                        var (forceAlign, torqueAlign) = FanAlignment(
-                            entry, lx, ly, lz, chunkOrigin, com, rot, desiredForce, desiredTorque);
-                        totalForceAlign  += MathF.Max(0f, forceAlign);
-                        totalTorqueAlign += MathF.Max(0f, torqueAlign);
-                    }
+                    var (forceAlign, torqueAlign) = FanAlignment(fan, com, rot, desiredForce, desiredTorque);
+                    totalForceAlign  += MathF.Max(0f, forceAlign);
+                    totalTorqueAlign += MathF.Max(0f, torqueAlign);
                 }
             }
 
             // Pass 2: apply Buoyant lift (always) and each Fan's proportional share (skipped in
             // free-propulsion mode — desiredForce/Torque was already applied directly above).
             float deliveredForceY = 0f;
-            foreach (var (chunkPos, entry) in volume.All)
+            foreach (var buoyant in blocks.Buoyants)
             {
-                if (!entry.Data.HasAnySolid()) continue;
-                var silkOrigin = chunkPos.WorldOrigin;
-                var chunkOrigin = new Vector3(silkOrigin.X, silkOrigin.Y, silkOrigin.Z);
+                buoyantCount++;
+                var worldOffset = LocalOffset(buoyant, com, rot);
+                _physics.ApplyLinearImpulse(body, Vector3.UnitY * (_buoyantForce * dt), worldOffset);
+                deliveredForceY += _buoyantForce;
+            }
 
-                for (int lz = 0; lz < ChunkData.Size; lz++)
-                for (int ly = 0; ly < ChunkData.Size; ly++)
-                for (int lx = 0; lx < ChunkData.Size; lx++)
-                {
-                    var id = entry.Data.Get(lx, ly, lz);
-                    if (id != BlockId.Fan && id != BlockId.Buoyant) continue;
+            foreach (var fan in blocks.Fans)
+            {
+                fanCount++;
+                if (_freePropulsion) continue;
 
-                    if (id == BlockId.Buoyant)
-                    {
-                        buoyantCount++;
-                        var worldOffset = LocalOffset(lx, ly, lz, chunkOrigin, com, rot);
-                        _physics.ApplyLinearImpulse(body, Vector3.UnitY * (_buoyantForce * dt), worldOffset);
-                        deliveredForceY += _buoyantForce;
-                        continue;
-                    }
+                var (forceAlign, torqueAlign) = FanAlignment(fan, com, rot, desiredForce, desiredTorque);
 
-                    fanCount++;
-                    if (_freePropulsion) continue;
+                float forceShare  = totalForceAlign  > 1e-3f ? MathF.Max(0f, forceAlign)  / totalForceAlign  : 0f;
+                float torqueShare = totalTorqueAlign > 1e-3f ? MathF.Max(0f, torqueAlign) / totalTorqueAlign : 0f;
 
-                    var (forceAlign, torqueAlign) = FanAlignment(
-                        entry, lx, ly, lz, chunkOrigin, com, rot, desiredForce, desiredTorque);
+                float desiredThrust = forceShare * desiredForceMag + torqueShare * desiredTorqueMag;
+                float thrust = System.Math.Clamp(desiredThrust, -_fanMaxForce, _fanMaxForce);
 
-                    float forceShare  = totalForceAlign  > 1e-3f ? MathF.Max(0f, forceAlign)  / totalForceAlign  : 0f;
-                    float torqueShare = totalTorqueAlign > 1e-3f ? MathF.Max(0f, torqueAlign) / totalTorqueAlign : 0f;
+                if (MathF.Abs(thrust) < 1e-3f) continue;
 
-                    float desiredThrust = forceShare * desiredForceMag + torqueShare * desiredTorqueMag;
-                    float thrust = System.Math.Clamp(desiredThrust, -_fanMaxForce, _fanMaxForce);
-
-                    if (MathF.Abs(thrust) < 1e-3f) continue;
-
-                    var thrustDir = ThrustDirection(entry, lx, ly, lz, rot);
-                    var fanOffset = LocalOffset(lx, ly, lz, chunkOrigin, com, rot);
-                    _physics.ApplyLinearImpulse(body, thrustDir * (thrust * dt), fanOffset);
-                    deliveredForceY += thrustDir.Y * thrust;
-                }
+                var thrustDir = ThrustDirection(fan, rot);
+                var fanOffset = LocalOffset(fan, com, rot);
+                _physics.ApplyLinearImpulse(body, thrustDir * (thrust * dt), fanOffset);
+                deliveredForceY += thrustDir.Y * thrust;
             }
 
             _lastDesiredForceY   = desiredForce.Y;
@@ -302,11 +292,44 @@ public sealed class AirshipFlightSystem : ISystem
         return v;
     }
 
-    // World-space offset from centre of mass for a chunk-local voxel — the same rigid transform
-    // ChunkVolume.VoxelToWorld maps voxels with: world = bodyPos + R·(localCentre - centreOfMass).
-    private static Vector3 LocalOffset(int lx, int ly, int lz, Vector3 chunkOrigin, Vector3 com, Quaternion rot)
+    /// <summary>Rebuilds <see cref="_blocksByVolume"/> from this tick's Fan and Buoyant entities. Lists are reused
+    /// across ticks; a volume left with neither is dropped so a despawned ship's lists don't linger.</summary>
+    private void GroupBlocksByVolume()
     {
-        var localCentre = new Vector3(chunkOrigin.X + lx + 0.5f, chunkOrigin.Y + ly + 0.5f, chunkOrigin.Z + lz + 0.5f);
+        foreach (var blocks in _blocksByVolume.Values)
+        {
+            blocks.Fans.Clear();
+            blocks.Buoyants.Clear();
+        }
+
+        foreach (ref readonly Entity e in _fans.GetEntities())
+        {
+            ref readonly var block = ref e.Get<BlockRef>();
+            BlocksOf(block.Volume).Fans.Add(block);
+        }
+        foreach (ref readonly Entity e in _buoyants.GetEntities())
+        {
+            ref readonly var block = ref e.Get<BlockRef>();
+            BlocksOf(block.Volume).Buoyants.Add(block);
+        }
+
+        foreach (var (volume, blocks) in _blocksByVolume)
+            if (blocks.Fans.Count == 0 && blocks.Buoyants.Count == 0) _blocksByVolume.Remove(volume);
+    }
+
+    private ShipBlocks BlocksOf(ChunkVolume volume)
+    {
+        if (!_blocksByVolume.TryGetValue(volume, out var blocks))
+            _blocksByVolume[volume] = blocks = new ShipBlocks();
+        return blocks;
+    }
+
+    // World-space offset from centre of mass for a block's cell centre — the same rigid transform
+    // ChunkVolume.VoxelToWorld maps voxels with: world = bodyPos + R·(localCentre - centreOfMass).
+    private static Vector3 LocalOffset(in BlockRef block, Vector3 com, Quaternion rot)
+    {
+        var p = block.Position;
+        var localCentre = new Vector3(p.X + 0.5f, p.Y + 0.5f, p.Z + 0.5f);
         return Vector3.Transform(localCentre - com, rot);
     }
 
@@ -318,21 +341,20 @@ public sealed class AirshipFlightSystem : ISystem
     // downward) was actually pushing the ship further down, fighting the very lift it was built to
     // provide. Free propulsion mode never touches Facing at all (it applies the control law's force
     // directly), which is why it tested fine while Fan-block-allocated thrust didn't.
-    private static Vector3 ThrustDirection(ChunkEntry entry, int lx, int ly, int lz, Quaternion rot)
+    private static Vector3 ThrustDirection(in BlockRef fan, Quaternion rot)
     {
-        var facingVec = entry.Data.GetFacing(lx, ly, lz).ToVector();
+        var facingVec = fan.Facing.ToVector();
         var exhaustDir = Vector3.Transform(new Vector3(facingVec.X, facingVec.Y, facingVec.Z), rot);
         return -exhaustDir;
     }
 
-    // A Fan voxel's alignment with the desired force (dot of its thrust direction with it) and with the
+    // A Fan's alignment with the desired force (dot of its thrust direction with it) and with the
     // desired torque (dot of its lever-arm cross product with it, normalized by lever length).
     private static (float forceAlign, float torqueAlign) FanAlignment(
-        ChunkEntry entry, int lx, int ly, int lz, Vector3 chunkOrigin, Vector3 com, Quaternion rot,
-        Vector3 desiredForce, Vector3 desiredTorque)
+        in BlockRef fan, Vector3 com, Quaternion rot, Vector3 desiredForce, Vector3 desiredTorque)
     {
-        var worldOffset = LocalOffset(lx, ly, lz, chunkOrigin, com, rot);
-        var thrustDir = ThrustDirection(entry, lx, ly, lz, rot);
+        var worldOffset = LocalOffset(fan, com, rot);
+        var thrustDir = ThrustDirection(fan, rot);
 
         float leverLength = MathF.Max(worldOffset.Length(), 0.5f);
         float forceAlign  = Vector3.Dot(thrustDir, desiredForce);

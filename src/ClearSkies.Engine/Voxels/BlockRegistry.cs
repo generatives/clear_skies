@@ -34,15 +34,18 @@ public static class BlockRegistry
         // face (its Top, which BlockDef orients to wherever the voxel's Facing points) gets a distinct
         // texture so you can see which way it'll push just by looking at it; every other face uses the
         // plain metal housing.
+        // Fan and Buoyant are entity blocks (see BlockDef.Components): AirshipFlightSystem finds a ship's Fans and
+        // Buoyant blocks through their entities instead of scanning voxels.
         Register(new BlockDef { Id = BlockId.Fan, Name = "Fan", Color = new(0.85f, 0.55f, 0.15f), IsSolid = true, LightEmission = 0, Opacity = 0, Weight = 3,
-            Model = "thruster/thruster.gltf" });
+            Model = "thruster/thruster.gltf", Components = e => e.Set(new Fan()) });
         //Register(new BlockDef { Id = BlockId.Fan,     Name = "Fan",     Color = new(0.85f, 0.55f, 0.15f), IsSolid = true, LightEmission = 0, Opacity = 15, Weight = 3,
         //    Texture = "metal", TextureTop = "thruster" });
         // Model block (see BlockDef.Model): the Blockbench lever. Transparent to light (Opacity 0) since it only
         // fills a sliver of its cell. The first entity block (see BlockDef.Components), so its arm can move.
         Register(new BlockDef { Id = BlockId.Lever, Name = "Lever", Color = new(0.45f, 0.35f, 0.25f), IsSolid = true, LightEmission = 0, Opacity = 0, Weight = 1,
             Model = "lever/lever.gltf", Components = e => e.Set(new Lever()) });
-        Register(new BlockDef { Id = BlockId.Buoyant, Name = "Buoyant", Color = new(0.55f, 0.85f, 1.00f), IsSolid = true, LightEmission = 0, Opacity = 15, Weight = 1 });
+        Register(new BlockDef { Id = BlockId.Buoyant, Name = "Buoyant", Color = new(0.55f, 0.85f, 1.00f), IsSolid = true, LightEmission = 0, Opacity = 15, Weight = 1,
+            Components = e => e.Set(new Buoyant()) });
 
         // Floating-island world-gen biome blocks. Water is opaque (no alpha-blend render pipeline
         // exists yet) — it renders, collides, and blocks movement like ordinary solid ground.
