@@ -10,8 +10,10 @@ namespace ClearSkies.Engine.ECS;
 
 /// <summary>
 /// Lets the player drag a lever's arm across its range. On each <see cref="BlockInteraction"/> for a lever (the click
-/// and every frame the button is held), finds where the camera ray crosses the plane the arm swings in and sets
-/// <see cref="Lever.Value"/> to put the arm as near that point as its range allows. Every frame it poses each lever's
+/// and every frame the button is held), sets <see cref="Lever.Value"/> to the setting that brings the arm's tip closest
+/// to the camera ray, so the tip follows the crosshair as nearly as the arm's range allows. (Unlike aiming at where
+/// the ray crosses the arm's swing plane, this still works head-on, with the player standing in that plane, as they
+/// do in front of a lever they placed.) Every frame it poses each lever's
 /// arm from its <see cref="Lever.Value"/>, so anything else that sets the value moves the arm too.
 ///
 /// The swing comes from the model: the arm node pivots about its own X axis at its rest position, so it levers north
@@ -58,13 +60,12 @@ public sealed class LeverControlSystem : ISystem, IDisposable, IDebugUiSystem
                             interaction.RayOrigin, interaction.RayDirection) is not { } angle)
             return;
 
-        e.Get<Lever>().Value = System.Math.Clamp(angle / MaxAngle, -1f, 1f);
+        e.Get<Lever>().Value = angle / MaxAngle;
         _lastUsed = e;
     }
 
-    /// <summary>The arm angle (about the arm's pivot axis, from upright) that points the arm at where the world-space
-    /// ray crosses its swing plane, or null when the ray doesn't cross it ahead of the camera. Unclamped: past the arm's
-    /// range, the nearest end of the range is the closest the arm can get.</summary>
+    /// <summary>The arm angle (about the arm's pivot axis, from upright, within ±<see cref="MaxAngle"/>) that brings the
+    /// arm's tip closest to the world-space ray, or null when the model has no arm.</summary>
     private static float? ArmAngleTowards(GpuModel model, in Transform transform,
                                           Vector3D<float> rayOrigin, Vector3D<float> rayDirection)
     {
@@ -72,30 +73,49 @@ public sealed class LeverControlSystem : ISystem, IDisposable, IDebugUiSystem
         if (arm < 0) return null;
 
         // The arm's pivot and axes at rest, in model space (= the block entity's own space): its columns are the
-        // arm node's local X (the pivot axis), Y (upright) and Z (south; the arm leans the other way, north, at
-        // positive angles).
+        // arm node's local Y (upright) and Z (south; the arm leans the other way, north, at positive angles).
         ref readonly var rest = ref model.RestPose[arm];
-        var pivot  = new Vector3D<float>(rest.M12, rest.M13, rest.M14);
-        var normal = Vector3D.Normalize(new Vector3D<float>(rest.M0, rest.M1, rest.M2));
-        var up     = Vector3D.Normalize(new Vector3D<float>(rest.M4, rest.M5, rest.M6));
-        var north  = -Vector3D.Normalize(new Vector3D<float>(rest.M8, rest.M9, rest.M10));
+        var pivot = new Vector3D<float>(rest.M12, rest.M13, rest.M14);
+        var up    = Vector3D.Normalize(new Vector3D<float>(rest.M4, rest.M5, rest.M6));
+        var north = -Vector3D.Normalize(new Vector3D<float>(rest.M8, rest.M9, rest.M10));
+
+        // The arm's length: at rest it stands upright to the top of the model.
+        float length = model.BoundsMax.Y - pivot.Y;
+        if (length <= 0f) return null;
 
         // The ray in the block entity's own space.
         var inverse = Vec.Conjugate(transform.Rotation);
         var origin  = Vec.Rotate(inverse, rayOrigin - transform.Position) / transform.Scale;
-        var dir     = Vec.Rotate(inverse, rayDirection) / transform.Scale;
+        var dir     = Vector3D.Normalize(Vec.Rotate(inverse, rayDirection) / transform.Scale);
 
-        // Where it crosses the swing plane (through the pivot, across the pivot axis).
-        float denom = Vector3D.Dot(dir, normal);
-        if (MathF.Abs(denom) < 1e-6f) return null;            // running along the plane
-        float s = Vector3D.Dot(pivot - origin, normal) / denom;
-        if (s < 0f) return null;                              // behind the camera
-        var towards = origin + s * dir - pivot;
+        // Turning the arm by +angle about PivotAxis takes its tip to pivot + length·(cos·up + sin·north). Find the angle
+        // whose tip is nearest the ray: sample the range, then narrow in around the best sample.
+        float TipDistance(float angle)
+        {
+            var tip = pivot + length * (MathF.Cos(angle) * up + MathF.Sin(angle) * north);
+            var d   = tip - origin;
+            float s = MathF.Max(Vector3D.Dot(d, dir), 0f);  // nearest point on the ray, not behind the camera
+            return (d - s * dir).LengthSquared;
+        }
 
-        // Turning the arm by +angle about PivotAxis takes its +Y to cos·up + sin·north.
-        float n = Vector3D.Dot(towards, north), y = Vector3D.Dot(towards, up);
-        if (n * n + y * y < 1e-10f) return null;              // right on the pivot: no direction
-        return MathF.Atan2(n, y);
+        const int Samples = 32;
+        float step = 2f * MaxAngle / Samples;
+        float best = -MaxAngle, bestDistance = float.MaxValue;
+        for (int i = 0; i <= Samples; i++)
+        {
+            float angle = -MaxAngle + i * step, distance = TipDistance(angle);
+            if (distance < bestDistance) { best = angle; bestDistance = distance; }
+        }
+
+        // Golden-section search between the neighbouring samples.
+        float lo = MathF.Max(best - step, -MaxAngle), hi = MathF.Min(best + step, MaxAngle);
+        const float InvPhi = 0.618034f;
+        for (int i = 0; i < 16; i++)
+        {
+            float a = hi - InvPhi * (hi - lo), b = lo + InvPhi * (hi - lo);
+            if (TipDistance(a) < TipDistance(b)) hi = b; else lo = a;
+        }
+        return (lo + hi) * 0.5f;
     }
 
     public void Dispose() => _subscription.Dispose();
