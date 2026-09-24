@@ -126,6 +126,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
         ChunkVolume? bestVolume = null;
         Entity       bestEntity = default;
         Vector3D<int> bestBlock  = default, bestNormal = default;
+        Vector3D<float> bestEye  = default; // the camera in the hit volume's voxel space
 
         foreach (ref readonly Entity e in _volumes.GetEntities())
         {
@@ -136,7 +137,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
 
             if (VoxelRaycaster.Cast(volume, lo, ld, ReachBlocks, out var b, out var n, out var d) && d < bestDist)
             {
-                bestDist = d; bestVolume = volume; bestBlock = b; bestNormal = n; bestEntity = e;
+                bestDist = d; bestVolume = volume; bestBlock = b; bestNormal = n; bestEntity = e; bestEye = lo;
             }
         }
 
@@ -163,17 +164,19 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
             var t = bestBlock + bestNormal;
             if (bestVolume.GetBlock(t.X, t.Y, t.Z) == BlockId.Air)
             {
-                // Facing = away from the face it was placed on (bestNormal already is exactly one of
-                // the 6 axis directions), so e.g. a Fan placed against a ship's east wall faces east —
-                // away from the ship, not wherever the camera happened to be pointed.
-                var facing = FacingExtensions.FromNormal(bestNormal);
+                // Bottom on the face it was placed against: its top points away from that face (bestNormal is
+                // already exactly one of the 6 axis directions), so e.g. a Fan placed against a ship's east wall
+                // faces east, away from the ship. Then its north face turns towards the player as far as it can
+                // while keeping that: onto whichever axis across the face is nearest the direction to the camera.
+                var towards = bestEye - (new Vector3D<float>(t.X, t.Y, t.Z) + new Vector3D<float>(0.5f));
+                var orientation = BlockOrientation.Placed(FacingExtensions.FromNormal(bestNormal), towards);
                 for (int x = t.X - _blockBrushRadius; x <= t.X + _blockBrushRadius; x++)
                 {
                     for (int y = t.Y - _blockBrushRadius; y <= t.Y + _blockBrushRadius; y++)
                     {
                         for (int z = t.Z - _blockBrushRadius; z <= t.Z + _blockBrushRadius; z++)
                         {
-                            bestVolume.SetBlock(x, y, z, _placeBlock, facing);
+                            bestVolume.SetBlock(x, y, z, _placeBlock, orientation);
                         }
                     }
                 }

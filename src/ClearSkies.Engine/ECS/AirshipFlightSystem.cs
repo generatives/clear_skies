@@ -326,17 +326,17 @@ public sealed class AirshipFlightSystem : ISystem
         return Vector3.Transform(localCentre - com, rot);
     }
 
-    // A Fan's thrust FORCE ON THE SHIP is opposite its stored Facing — Facing is the exhaust/visual
-    // direction (also which face gets the glowing Top texture, since Fan's Top is oriented to Facing),
+    // A Fan's thrust FORCE ON THE SHIP is opposite where its top points — the top is the exhaust/visual
+    // direction (also which face gets the glowing Top texture),
     // and the reaction (Newton's third law) pushes the ship the other way, like a rocket nozzle: exhaust
-    // down, ship goes up. Applying force *along* Facing instead of against it was a sign bug present
+    // down, ship goes up. Applying force *along* the top instead of against it was a sign bug present
     // since Fan thrust was first implemented — a Fan facing down (intended as a lift thruster, exhausting
     // downward) was actually pushing the ship further down, fighting the very lift it was built to
-    // provide. Free propulsion mode never touches Facing at all (it applies the control law's force
+    // provide. Free propulsion mode never touches orientation at all (it applies the control law's force
     // directly), which is why it tested fine while Fan-block-allocated thrust didn't.
     private static Vector3 ThrustDirection(in BlockRef fan, Quaternion rot)
     {
-        var facingVec = fan.Facing.ToVector();
+        var facingVec = fan.Orientation.Up.ToVector();
         var exhaustDir = Vector3.Transform(new Vector3(facingVec.X, facingVec.Y, facingVec.Z), rot);
         return -exhaustDir;
     }

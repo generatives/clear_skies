@@ -114,15 +114,15 @@ var camSpawn = TestScene.Build(host, seed);
 // ray-traced toggle is on and ships are wired into GpuLightSystem's volume slots. Offset from camera
 // spawn rather than re-deriving island geometry (TryFindNearestIsland is private to TestScene).
 {
-    var shipVoxels = new List<(int X, int Y, int Z, BlockId Id, Facing Facing)>();
+    var shipVoxels = new List<(int X, int Y, int Z, BlockId Id, BlockOrientation Orientation)>();
     for (int x = 0; x < 5; x++)
     for (int z = 0; z < 5; z++)
     for (int y = 0; y < 2; y++)
-        shipVoxels.Add((x, y, z, BlockId.Wood, Facing.Up));
-    shipVoxels.Add((2, 2, 2, BlockId.Lamp, Facing.Up)); // exposed on the hull's roof, open air on 5 sides
+        shipVoxels.Add((x, y, z, BlockId.Wood, BlockOrientation.Upright));
+    shipVoxels.Add((2, 2, 2, BlockId.Lamp, BlockOrientation.Upright)); // exposed on the hull's roof, open air on 5 sides
     // Model blocks: a lever standing on the roof and one sticking out of the east wall.
-    shipVoxels.Add((0, 2, 0, BlockId.Lever, Facing.Up));
-    shipVoxels.Add((5, 1, 2, BlockId.Lever, Facing.East));
+    shipVoxels.Add((0, 2, 0, BlockId.Lever, BlockOrientation.Upright));
+    shipVoxels.Add((5, 1, 2, BlockId.Lever, BlockOrientation.From(Facing.East, Facing.North)));
 
     var shipSpawn = new Vector3(camSpawn.X + 10f, camSpawn.Y - 5f, camSpawn.Z + 45f);
     DynamicGridFactory.SpawnFromVoxels(host.World, gridSelection, shipSpawn, shipVoxels);

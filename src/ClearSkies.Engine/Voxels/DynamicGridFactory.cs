@@ -19,7 +19,7 @@ public static class DynamicGridFactory
     /// </summary>
     public static void SpawnFromVoxels(
         World world, GridSelection selection,
-        PhysVec spawnWorld, IEnumerable<(int X, int Y, int Z, BlockId Id, Facing Facing)> voxels)
+        PhysVec spawnWorld, IEnumerable<(int X, int Y, int Z, BlockId Id, BlockOrientation Orientation)> voxels)
     {
         // Defensive; saved files shouldn't contain air entries.
         var solid = voxels.Where(v => v.Id != BlockId.Air).ToList();
@@ -32,8 +32,8 @@ public static class DynamicGridFactory
 
         var volume = new ChunkVolume(entity, world) { Pivot = BoundsCentre(solid) };
         entity.Set(new ChunkGrid() { Volume = volume });
-        foreach (var (x, y, z, id, facing) in solid)
-            volume.SetBlock(x, y, z, id, facing);
+        foreach (var (x, y, z, id, orientation) in solid)
+            volume.SetBlock(x, y, z, id, orientation);
         selection.Select(entity);
     }
 
@@ -41,11 +41,11 @@ public static class DynamicGridFactory
     /// <paramref name="spawnWorld"/>.</summary>
     public static void SpawnSingleBlock(
         World world, GridSelection selection,
-        PhysVec spawnWorld, BlockId block, Facing facing = Facing.Up)
-        => SpawnFromVoxels(world, selection, spawnWorld, new[] { (0, 0, 0, block, facing) });
+        PhysVec spawnWorld, BlockId block)
+        => SpawnFromVoxels(world, selection, spawnWorld, new[] { (0, 0, 0, block, BlockOrientation.Upright) });
 
     /// <summary>Centre of the voxels' bounding box (each voxel spans [v, v+1]), or zero if there are none.</summary>
-    private static Vector3D<float> BoundsCentre(List<(int X, int Y, int Z, BlockId Id, Facing Facing)> voxels)
+    private static Vector3D<float> BoundsCentre(List<(int X, int Y, int Z, BlockId Id, BlockOrientation Orientation)> voxels)
     {
         if (voxels.Count == 0) return Vector3D<float>.Zero;
         int nx = int.MaxValue, ny = int.MaxValue, nz = int.MaxValue;

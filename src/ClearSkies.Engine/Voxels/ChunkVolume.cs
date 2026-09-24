@@ -112,13 +112,15 @@ public class ChunkVolume
         return GetData(cp)?.Get(lx, ly, lz) ?? BlockId.Air;
     }
 
-    public void SetBlock(int x, int y, int z, BlockId id, Facing facing = Facing.Up)
+    public void SetBlock(int x, int y, int z, BlockId id) => SetBlock(x, y, z, id, BlockOrientation.Upright);
+
+    public void SetBlock(int x, int y, int z, BlockId id, BlockOrientation orientation)
     {
         var (cp, lx, ly, lz) = Decompose(x, y, z);
         var entry = EnsureChunk(cp);
 
-        entry.Data.Set(lx, ly, lz, id, facing);
-        SyncBlockEntity(entry, new Vector3D<int>(lx, ly, lz), id, facing);
+        entry.Data.Set(lx, ly, lz, id, orientation);
+        SyncBlockEntity(entry, new Vector3D<int>(lx, ly, lz), id, orientation);
         entry.Entity.Set(new NeedsRemeshFlag());
         entry.Entity.Set(new NeedsRecollideFlag());
         entry.Entity.Set(new NeedsGpuUploadFlag());
@@ -186,51 +188,51 @@ public class ChunkVolume
             if (found < 0) return;
             i += found;
             int x = i % ChunkData.Size, y = i / ChunkData.Size % ChunkData.Size, z = i / (ChunkData.Size * ChunkData.Size);
-            CreateBlockEntity(entry, new Vector3D<int>(x, y, z), (BlockId)blocks[i], entry.Data.GetFacing(x, y, z));
+            CreateBlockEntity(entry, new Vector3D<int>(x, y, z), (BlockId)blocks[i], entry.Data.GetOrientation(x, y, z));
             i++;
         }
     }
 
     /// <summary>Makes the block entity at <paramref name="cell"/> agree with the voxel just set there: keeps it if
-    /// the same block type and facing was set again (so its state survives), otherwise destroys it and creates a
+    /// the same block type and orientation was set again (so its state survives), otherwise destroys it and creates a
     /// fresh one if the new block is an entity block.</summary>
-    private void SyncBlockEntity(ChunkEntry entry, Vector3D<int> cell, BlockId id, Facing facing)
+    private void SyncBlockEntity(ChunkEntry entry, Vector3D<int> cell, BlockId id, BlockOrientation orientation)
     {
         if (entry.BlockEntities is { } entities && entities.Remove(cell, out var existing))
         {
             if (existing.IsAlive)
             {
                 ref readonly var r = ref existing.Get<BlockRef>();
-                if (r.Id == id && r.Facing == facing) { entities[cell] = existing; return; }
+                if (r.Id == id && r.Orientation == orientation) { entities[cell] = existing; return; }
                 Hierarchy.DestroyRecursive(existing);
             }
         }
 
         if (BlockRegistry.Get(id).IsEntityBlock)
-            CreateBlockEntity(entry, cell, id, facing);
+            CreateBlockEntity(entry, cell, id, orientation);
     }
 
-    private void CreateBlockEntity(ChunkEntry entry, Vector3D<int> cell, BlockId id, Facing facing)
+    private void CreateBlockEntity(ChunkEntry entry, Vector3D<int> cell, BlockId id, BlockOrientation orientation)
     {
         var e = _world.CreateEntity();
         e.Set(new BlockRef
         {
-            Volume   = this,
-            Position = new Vector3D<int>(entry.Position.X, entry.Position.Y, entry.Position.Z) * ChunkData.Size + cell,
-            Facing   = facing,
-            Id       = id,
+            Volume      = this,
+            Position    = new Vector3D<int>(entry.Position.X, entry.Position.Y, entry.Position.Z) * ChunkData.Size + cell,
+            Orientation = orientation,
+            Id          = id,
         });
-        Hierarchy.SetParent(e, entry.Entity, CellLocal(cell, facing));
+        Hierarchy.SetParent(e, entry.Entity, CellLocal(cell, orientation));
         BlockRegistry.Get(id).Components!(e);
         (entry.BlockEntities ??= new())[cell] = e;
     }
 
     /// <summary>A block entity relative to its chunk entity: the same placement ChunkRenderSystem gives a static
-    /// model block — the model's +Y turned to the facing about the cell centre, standing on the cell face opposite
-    /// it.</summary>
-    private static LocalTransform CellLocal(Vector3D<int> cell, Facing facing)
+    /// model block — the model turned to the orientation about the cell centre, standing on the cell face opposite
+    /// its top.</summary>
+    private static LocalTransform CellLocal(Vector3D<int> cell, BlockOrientation orientation)
     {
-        var rotation = facing.ToRotation();
+        var rotation = orientation.Rotation;
         var local = LocalTransform.Identity;
         local.Rotation = rotation;
         local.Position = new Vector3D<float>(cell.X + 0.5f, cell.Y + 0.5f, cell.Z + 0.5f)

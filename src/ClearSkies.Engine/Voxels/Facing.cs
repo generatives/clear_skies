@@ -2,9 +2,8 @@ using Silk.NET.Maths;
 
 namespace ClearSkies.Engine.Voxels;
 
-/// <summary>A block's facing direction in its owning volume's local space. Stored densely per voxel in
-/// <see cref="ChunkData"/> alongside its <see cref="BlockId"/> — only a few block types (e.g. Fan)
-/// currently read it, but every voxel carries one.</summary>
+/// <summary>One of the 6 axis directions in a volume's local space. A block's orientation (see
+/// <see cref="BlockOrientation"/>) is a pair of these: where its top and its north face point.</summary>
 public enum Facing : byte
 {
     North = 0, // local -Z
@@ -27,27 +26,6 @@ public static class FacingExtensions
         Facing.Down  => new(0, -1, 0),
         _            => new(0, 0, -1),
     };
-
-    /// <summary>The rotation turning local +Y to point along <paramref name="facing"/> (how a model block's model,
-    /// authored standing up, is turned to its facing). About X, +Y turns towards +Z; about Z, towards -X.</summary>
-    public static Quaternion<float> ToRotation(this Facing facing) => Rotations[(int)facing];
-
-    private static readonly Quaternion<float>[] Rotations = BuildRotations();
-
-    private static Quaternion<float>[] BuildRotations()
-    {
-        var x = Vector3D<float>.UnitX;
-        var z = Vector3D<float>.UnitZ;
-        const float Quarter = MathF.PI / 2;
-        var r = new Quaternion<float>[6];
-        r[(int)Facing.North] = Quaternion<float>.CreateFromAxisAngle(x, -Quarter);
-        r[(int)Facing.South] = Quaternion<float>.CreateFromAxisAngle(x,  Quarter);
-        r[(int)Facing.East]  = Quaternion<float>.CreateFromAxisAngle(z, -Quarter);
-        r[(int)Facing.West]  = Quaternion<float>.CreateFromAxisAngle(z,  Quarter);
-        r[(int)Facing.Up]    = Quaternion<float>.Identity;
-        r[(int)Facing.Down]  = Quaternion<float>.CreateFromAxisAngle(x, MathF.PI);
-        return r;
-    }
 
     /// <summary>Snaps an arbitrary direction to whichever of the 6 axis facings it is most aligned with.</summary>
     public static Facing FromVector(Vector3D<float> dir)

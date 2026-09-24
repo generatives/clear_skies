@@ -3,7 +3,7 @@ using System.IO;
 namespace ClearSkies.Engine.Voxels;
 
 /// <summary>
-/// Reads/writes a single static-world chunk's raw 32x32x32 block (+ facing, since v2) array to/from a
+/// Reads/writes a single static-world chunk's raw 32x32x32 block (+ orientation, since v2) array to/from a
 /// small binary format. One file per chunk; the chunk position is implied entirely by the filename (see
 /// <see cref="ChunkLoadSystem"/>), so no position is stored in the payload itself.
 /// </summary>
@@ -11,7 +11,7 @@ internal static class StaticWorldSerializer
 {
     // "CSCD" ClearSkies Chunk Data — 4 literal ASCII bytes so the format is identifiable in a hex viewer.
     private static readonly byte[] Magic = { (byte)'C', (byte)'S', (byte)'C', (byte)'D' };
-    private const ushort Version = 2; // v1: blocks only. v2: + a facing byte per voxel.
+    private const ushort Version = 2; // v1: blocks only. v2: + an orientation byte per voxel (older v2 files only hold 0-5, spin 0).
     private const int PayloadBytes = ChunkData.Size * ChunkData.Size * ChunkData.Size;
 
     public static void Save(ChunkData data, string filePath)
@@ -21,7 +21,7 @@ internal static class StaticWorldSerializer
         bw.Write(Magic);
         bw.Write(Version);
         bw.Write(data.BlocksAsBytes());
-        bw.Write(data.FacingsAsBytes());
+        bw.Write(data.OrientationsAsBytes());
     }
 
     /// <summary>Loads bytes into <paramref name="data"/> in place. Returns false (leaving
@@ -47,11 +47,11 @@ internal static class StaticWorldSerializer
 
         if (version >= 2)
         {
-            byte[] facingPayload = br.ReadBytes(PayloadBytes);
-            if (facingPayload.Length == PayloadBytes)
-                data.LoadFacingBytes(facingPayload);
+            byte[] orientationPayload = br.ReadBytes(PayloadBytes);
+            if (orientationPayload.Length == PayloadBytes)
+                data.LoadOrientationBytes(orientationPayload);
         }
-        // v1 files have no facing payload — every voxel keeps ChunkData's default facing.
+        // v1 files have no orientation payload — every voxel keeps ChunkData's default orientation.
 
         return true;
     }

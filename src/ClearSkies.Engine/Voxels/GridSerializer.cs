@@ -3,18 +3,18 @@ namespace ClearSkies.Engine.Voxels;
 /// <summary>
 /// Reads/writes a ChunkVolume's raw non-air voxel contents to/from a small binary format. No ECS data,
 /// spawn position, or physics state is persisted — only grid-local (possibly negative) block coordinates,
-/// block ids, and (since v2) each voxel's facing. Loaded voxel lists are handed to
+/// block ids, and (since v2) each voxel's orientation. Loaded voxel lists are handed to
 /// <see cref="DynamicGridFactory.SpawnFromVoxels"/> to reconstruct a grid.
 /// </summary>
 public static class GridSerializer
 {
     // "CSGD" ClearSkies Grid Data — 4 literal ASCII bytes so the format is identifiable in a hex viewer.
     private static readonly byte[] Magic = { (byte)'C', (byte)'S', (byte)'G', (byte)'D' };
-    private const ushort Version = 2; // v1: (x,y,z,id). v2: + a facing byte per voxel.
+    private const ushort Version = 2; // v1: (x,y,z,id). v2: + an orientation byte per voxel (older v2 files only hold 0-5, spin 0).
 
     public static void Save(ChunkVolume grid, string filePath)
     {
-        var voxels = new List<(int X, int Y, int Z, byte Id, byte Facing)>();
+        var voxels = new List<(int X, int Y, int Z, byte Id, byte Orientation)>();
         foreach (var (pos, entry) in grid.All)
         {
             if (!entry.Data.HasAnySolid()) continue;
@@ -27,7 +27,7 @@ public static class GridSerializer
             {
                 var id = entry.Data.Get(lx, ly, lz);
                 if (id == BlockId.Air) continue;
-                voxels.Add((ox + lx, oy + ly, oz + lz, (byte)id, (byte)entry.Data.GetFacing(lx, ly, lz)));
+                voxels.Add((ox + lx, oy + ly, oz + lz, (byte)id, entry.Data.GetOrientation(lx, ly, lz).ToByte()));
             }
         }
 
@@ -36,17 +36,17 @@ public static class GridSerializer
         bw.Write(Magic);
         bw.Write(Version);
         bw.Write(voxels.Count);
-        foreach (var (x, y, z, id, facing) in voxels)
+        foreach (var (x, y, z, id, orientation) in voxels)
         {
             bw.Write(x);
             bw.Write(y);
             bw.Write(z);
             bw.Write(id);
-            bw.Write(facing);
+            bw.Write(orientation);
         }
     }
 
-    public static List<(int X, int Y, int Z, BlockId Id, Facing Facing)> Load(string filePath)
+    public static List<(int X, int Y, int Z, BlockId Id, BlockOrientation Orientation)> Load(string filePath)
     {
         using var fs = File.OpenRead(filePath);
         using var br = new BinaryReader(fs);
@@ -60,13 +60,13 @@ public static class GridSerializer
             throw new InvalidDataException($"Unsupported grid save version {version}: {filePath}");
 
         int count = br.ReadInt32();
-        var voxels = new List<(int, int, int, BlockId, Facing)>(count);
+        var voxels = new List<(int, int, int, BlockId, BlockOrientation)>(count);
         for (int i = 0; i < count; i++)
         {
             int x = br.ReadInt32(), y = br.ReadInt32(), z = br.ReadInt32();
             BlockId id = (BlockId)br.ReadByte();
-            Facing facing = version >= 2 ? (Facing)br.ReadByte() : Facing.Up;
-            voxels.Add((x, y, z, id, facing));
+            var orientation = version >= 2 ? BlockOrientation.FromByte(br.ReadByte()) : BlockOrientation.Upright;
+            voxels.Add((x, y, z, id, orientation));
         }
         return voxels;
     }
