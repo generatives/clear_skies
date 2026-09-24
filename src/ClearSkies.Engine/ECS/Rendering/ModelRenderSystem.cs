@@ -11,8 +11,9 @@ namespace ClearSkies.Engine.ECS;
 /// <summary>
 /// Draws every frustum-visible <see cref="ModelRenderer"/> entity at its <see cref="Transform"/>: standalone props
 /// and block entities alike (static model blocks are drawn by <see cref="ChunkRenderSystem"/> instead). An entity
-/// with an <see cref="AnimatedModel"/> is drawn in its own pose, computed here from its node rotations (so only for
-/// entities that are actually visible); one with <see cref="VoxelLit"/> is lit from that voxel's light. Runs in
+/// with an <see cref="AnimatedModel"/> for the same model is drawn in its own pose, computed here from its node
+/// rotations (so only for entities that are actually visible); one with <see cref="VoxelLit"/> is lit from that
+/// voxel's light. Runs in
 /// <see cref="SystemStage.RenderWorld"/>.
 /// </summary>
 public sealed class ModelRenderSystem : IRenderSystem, IDebugUiSystem
@@ -36,13 +37,10 @@ public sealed class ModelRenderSystem : IRenderSystem, IDebugUiSystem
             var model = e.Get<Transform>().ToMatrix();
             if (!frame.Frustum.Intersects(model, gpuModel.BoundsMin, gpuModel.BoundsMax)) continue;
 
+            // A pose made for a different model would index the wrong nodes: draw that at rest instead.
             ReadOnlySpan<Mat4> pose = default;
-            if (e.Has<AnimatedModel>())
-            {
-                ref readonly var anim = ref e.Get<AnimatedModel>();
-                gpuModel.ComputePose(anim.Pose, anim.NodeRotations);
-                pose = anim.Pose;
-            }
+            if (e.Has<AnimatedModel>() && e.Get<AnimatedModel>().Model == gpuModel)
+                pose = e.Get<AnimatedModel>().ComputePose();
 
             if (e.Has<VoxelLit>())
             {

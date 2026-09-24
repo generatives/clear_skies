@@ -29,17 +29,22 @@ public sealed class GpuModel : IDisposable
         BoundsMin = boundsMin;
         BoundsMax = boundsMax;
 
+        var index = new Dictionary<string, int>();
+        for (int i = 0; i < nodes.Count; i++)
+            if (nodes[i].Name is { } name) index.TryAdd(name, i);
+        _nodeIndex = index;
+
         RestPose = new Mat4[nodes.Count];
         ComputePose(RestPose, default);
     }
 
-    /// <summary>Index of the first node named <paramref name="name"/> in <see cref="Nodes"/> (parents first), or -1.</summary>
-    public int FindNode(string name)
-    {
-        for (int i = 0; i < Nodes.Count; i++)
-            if (Nodes[i].Name == name) return i;
-        return -1;
-    }
+    // Node name -> index of the first node with that name in Nodes (parents first).
+    private readonly Dictionary<string, int> _nodeIndex;
+
+    /// <summary>Index of the first node named <paramref name="name"/> in <see cref="Nodes"/> (parents first), or -1.
+    /// When several nodes share a name (Blockbench exports a skinned group's joint and its parent under the group's
+    /// name), that is the outermost one.</summary>
+    public int FindNode(string name) => _nodeIndex.TryGetValue(name, out int i) ? i : -1;
 
     /// <summary>Fills <paramref name="pose"/> (one entry per node) with each node's model-space matrix, using
     /// <paramref name="rotations"/> (one per node) as the nodes' local rotations in place of their rest rotations;

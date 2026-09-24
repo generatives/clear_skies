@@ -24,7 +24,7 @@ public sealed class LeverTestAnimationSystem : ISystem, IDebugUiSystem
 
     public LeverTestAnimationSystem(World world)
     {
-        _levers = world.GetEntities().With<Lever>().With<BlockRef>().With<ModelRenderer>().With<AnimatedModel>().AsSet();
+        _levers = world.GetEntities().With<Lever>().With<BlockRef>().With<AnimatedModel>().AsSet();
     }
 
     public void Update(float dt)
@@ -34,17 +34,13 @@ public sealed class LeverTestAnimationSystem : ISystem, IDebugUiSystem
 
         foreach (ref readonly Entity e in _levers.GetEntities())
         {
-            var model = e.Get<ModelRenderer>().Model;
-            int arm = model.FindNode(ArmNode);
-            if (arm < 0) continue;
-
             var cell  = e.Get<BlockRef>().Position;
             float phase = cell.X * 0.7f + cell.Y * 1.3f + cell.Z * 0.9f;
             float angle = _amplitude * MathF.Sin(_time * _speed + phase);
 
             // The lever's base is wide along X, so the arm swings in the XY plane: about Z.
-            e.Get<AnimatedModel>().NodeRotations[arm] =
-                model.Nodes[arm].Rotation * Quaternion<float>.CreateFromAxisAngle(Vector3D<float>.UnitZ, angle);
+            e.Get<AnimatedModel>().SetRotationFromRest(ArmNode,
+                Quaternion<float>.CreateFromAxisAngle(Vector3D<float>.UnitZ, angle));
         }
     }
 
@@ -62,10 +58,6 @@ public sealed class LeverTestAnimationSystem : ISystem, IDebugUiSystem
     private void ResetArms()
     {
         foreach (ref readonly Entity e in _levers.GetEntities())
-        {
-            var model = e.Get<ModelRenderer>().Model;
-            int arm = model.FindNode(ArmNode);
-            if (arm >= 0) e.Get<AnimatedModel>().NodeRotations[arm] = model.Nodes[arm].Rotation;
-        }
+            e.Get<AnimatedModel>().ResetRotation(ArmNode);
     }
 }

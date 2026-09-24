@@ -31,22 +31,67 @@ public struct Lever
 }
 
 /// <summary>
-/// One entity's own pose for its <see cref="ModelRenderer"/> model, so entities sharing a model animate
-/// independently. Animation systems write <see cref="NodeRotations"/> (each node's local rotation, indexed like
-/// <see cref="GpuModel.Nodes"/>; find a node with <see cref="GpuModel.FindNode"/>) and
-/// <see cref="ModelRenderSystem"/> turns them into <see cref="Pose"/> when it draws the entity. Create it with
-/// <see cref="For"/>, so both arrays match the model and start at its rest pose.
+/// One entity's own pose for a model, so entities sharing a model animate independently. Animation systems pose
+/// nodes by name — <c>anim.SetRotationFromRest("arm_group", swing)</c> — and <see cref="ModelRenderSystem"/> turns
+/// the node rotations into the pose it draws with. Create it with <see cref="For"/>, for the same model as the
+/// entity's <see cref="ModelRenderer"/>; it starts at the model's rest pose.
+///
+/// A name refers to the first node with that name (see <see cref="GpuModel.FindNode"/>); a name the model doesn't
+/// have is ignored, and the setters return false. The component holds references to its arrays, so the setters
+/// work on the copy <c>Entity.Get</c> hands back and need no <c>Set</c> afterwards.
 /// </summary>
 public struct AnimatedModel
 {
-    public Quaternion<float>[] NodeRotations;
-
-    /// <summary>Each node's model-space matrix, recomputed from <see cref="NodeRotations"/> on every draw.</summary>
-    public Mat4[] Pose;
+    private GpuModel _model;
+    private Quaternion<float>[] _rotations; // each node's local rotation, indexed like _model.Nodes
+    private Mat4[] _pose;                   // each node's model-space matrix, as of the last ComputePose
 
     public static AnimatedModel For(GpuModel model) => new()
     {
-        NodeRotations = model.Nodes.Select(n => n.Rotation).ToArray(),
-        Pose          = (Mat4[])model.RestPose.Clone(),
+        _model     = model,
+        _rotations = model.Nodes.Select(n => n.Rotation).ToArray(),
+        _pose      = (Mat4[])model.RestPose.Clone(),
     };
+
+    /// <summary>The model this pose is for.</summary>
+    public readonly GpuModel Model => _model;
+
+    public readonly bool HasNode(string node) => _model.FindNode(node) >= 0;
+
+    /// <summary>Sets <paramref name="node"/>'s local rotation outright.</summary>
+    public readonly bool SetRotation(string node, Quaternion<float> rotation)
+    {
+        int i = _model.FindNode(node);
+        if (i < 0) return false;
+        _rotations[i] = rotation;
+        return true;
+    }
+
+    /// <summary>Sets <paramref name="node"/>'s local rotation to its rest rotation turned further by
+    /// <paramref name="offset"/> (in the node's own frame) — e.g. an arm swung by an angle from where it was
+    /// modelled.</summary>
+    public readonly bool SetRotationFromRest(string node, Quaternion<float> offset)
+    {
+        int i = _model.FindNode(node);
+        if (i < 0) return false;
+        _rotations[i] = _model.Nodes[i].Rotation * offset;
+        return true;
+    }
+
+    /// <summary>Puts <paramref name="node"/> back at its rest rotation.</summary>
+    public readonly bool ResetRotation(string node) => SetRotationFromRest(node, Quaternion<float>.Identity);
+
+    /// <summary>Puts every node back at its rest rotation.</summary>
+    public readonly void ResetAll()
+    {
+        for (int i = 0; i < _rotations.Length; i++) _rotations[i] = _model.Nodes[i].Rotation;
+    }
+
+    /// <summary>Recomputes the pose from the current node rotations and returns it: one model-space matrix per
+    /// node, for <c>Renderer.DrawModel</c>. Called by the renderer for visible entities only.</summary>
+    public readonly ReadOnlySpan<Mat4> ComputePose()
+    {
+        _model.ComputePose(_pose, _rotations);
+        return _pose;
+    }
 }
