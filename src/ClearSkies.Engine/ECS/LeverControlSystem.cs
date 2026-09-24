@@ -11,7 +11,10 @@ namespace ClearSkies.Engine.ECS;
 /// <summary>
 /// Lets the player drag a lever's arm across its range. On each <see cref="BlockInteraction"/> for a lever (the click
 /// and every frame the button is held), sets <see cref="Lever.Value"/> to the setting that brings the arm's tip closest
-/// to the camera ray, so the tip follows the crosshair as nearly as the arm's range allows. (Unlike aiming at where
+/// to the camera ray, so the tip follows the crosshair as nearly as the arm's range allows. The arm moves continuously
+/// from where it is (the nearest such setting downhill from it, not the best over the whole range): seen head-on, a
+/// tip leaning towards the player and one leaning away can look equally near the crosshair, and following the arm
+/// keeps it from jumping between them, and lets a drag carry it over the top to the far side. (Unlike aiming at where
 /// the ray crosses the arm's swing plane, this still works head-on, with the player standing in that plane, as they
 /// do in front of a lever they placed.) Every frame it poses each lever's
 /// arm from its <see cref="Lever.Value"/>, so anything else that sets the value moves the arm too.
@@ -56,18 +59,21 @@ public sealed class LeverControlSystem : ISystem, IDisposable, IDebugUiSystem
         var e = interaction.Block;
         if (!e.IsAlive || !e.Has<Lever>() || !e.Has<RenderedModel>() || !e.Has<Transform>()) return;
 
+        ref var lever = ref e.Get<Lever>();
+        float current = System.Math.Clamp(lever.Value, -1f, 1f) * MaxAngle;
         if (ArmAngleTowards(e.Get<RenderedModel>().Model, e.Get<Transform>(),
-                            interaction.RayOrigin, interaction.RayDirection) is not { } angle)
+                            interaction.RayOrigin, interaction.RayDirection, current) is not { } angle)
             return;
 
-        e.Get<Lever>().Value = angle / MaxAngle;
+        lever.Value = angle / MaxAngle;
         _lastUsed = e;
     }
 
-    /// <summary>The arm angle (about the arm's pivot axis, from upright, within ±<see cref="MaxAngle"/>) that brings the
-    /// arm's tip closest to the world-space ray, or null when the model has no arm.</summary>
+    /// <summary>The arm angle (about the arm's pivot axis, from upright, within ±<see cref="MaxAngle"/>) nearest
+    /// <paramref name="current"/> at which the arm's tip is locally closest to the world-space ray, or null when the
+    /// model has no arm.</summary>
     private static float? ArmAngleTowards(GpuModel model, in Transform transform,
-                                          Vector3D<float> rayOrigin, Vector3D<float> rayDirection)
+                                          Vector3D<float> rayOrigin, Vector3D<float> rayDirection, float current)
     {
         int arm = model.FindNode(ArmNode);
         if (arm < 0) return null;
@@ -89,25 +95,27 @@ public sealed class LeverControlSystem : ISystem, IDisposable, IDebugUiSystem
         var dir     = Vector3D.Normalize(Vec.Rotate(inverse, rayDirection) / transform.Scale);
 
         // Turning the arm by +angle about PivotAxis takes its tip to pivot + length·(cos·up + sin·north). Find the angle
-        // whose tip is nearest the ray: sample the range, then narrow in around the best sample.
+        // whose tip is nearest the ray, walking downhill from the current angle in small steps, then narrowing in.
+        // "Nearest" as the player sees it: the angle between the ray and the tip from the camera, i.e. how far the tip is
+        // from the crosshair on screen. (Plain distance to the ray would favour tips nearer the camera.)
         float TipDistance(float angle)
         {
             var tip = pivot + length * (MathF.Cos(angle) * up + MathF.Sin(angle) * north);
-            var d   = tip - origin;
-            float s = MathF.Max(Vector3D.Dot(d, dir), 0f);  // nearest point on the ray, not behind the camera
-            return (d - s * dir).LengthSquared;
+            return 1f - Vector3D.Dot(Vector3D.Normalize(tip - origin), dir);
         }
 
-        const int Samples = 32;
-        float step = 2f * MaxAngle / Samples;
-        float best = -MaxAngle, bestDistance = float.MaxValue;
-        for (int i = 0; i <= Samples; i++)
+        const float step = MaxAngle / 16f;
+        float best = System.Math.Clamp(current, -MaxAngle, MaxAngle), bestDistance = TipDistance(best);
+        float up1 = System.Math.Min(best + step, MaxAngle), down1 = System.Math.Max(best - step, -MaxAngle);
+        float direction = TipDistance(up1) <= TipDistance(down1) ? 1f : -1f; // the steeper way downhill
+        while (true)
         {
-            float angle = -MaxAngle + i * step, distance = TipDistance(angle);
-            if (distance < bestDistance) { best = angle; bestDistance = distance; }
+            float next = System.Math.Clamp(best + direction * step, -MaxAngle, MaxAngle), distance = TipDistance(next);
+            if (next == best || distance >= bestDistance) break;
+            best = next; bestDistance = distance;
         }
 
-        // Golden-section search between the neighbouring samples.
+        // Golden-section search between the neighbouring steps.
         float lo = MathF.Max(best - step, -MaxAngle), hi = MathF.Min(best + step, MaxAngle);
         const float InvPhi = 0.618034f;
         for (int i = 0; i < 16; i++)
