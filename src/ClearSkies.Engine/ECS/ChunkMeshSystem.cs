@@ -211,7 +211,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     }
 
     // Which block ids are static model blocks, so the per-voxel scan below is a table lookup. Entity blocks with a
-    // model are left out: BlockEntityRenderSystem draws those at their entity's Transform.
+    // model are left out: ModelRenderSystem draws those at their entity's Transform (see BlockModelSystem).
     private static readonly bool[] IsModelBlock = BuildModelBlockTable();
 
     private static bool[] BuildModelBlockTable()

@@ -8,8 +8,8 @@ namespace ClearSkies.Engine.Rendering;
 /// <summary>
 /// A 3D model uploaded to the GPU by <see cref="Renderer.UploadModel"/>: its node tree, one mesh + texture per node
 /// and material in that node's local space, and the model-space bounds of the rest pose that renderers frustum-cull
-/// with. Shareable between any number of entities; a pose (one model-space matrix per node, see
-/// <see cref="ComputePose"/>) is supplied per draw, defaulting to <see cref="RestPose"/>.
+/// with. Shareable between any number of entities: an entity that animates keeps its own node rotations and pose
+/// (see <c>AnimatedModel</c> and <see cref="ComputePose"/>); anything else is drawn at <see cref="RestPose"/>.
 /// </summary>
 public sealed class GpuModel : IDisposable
 {
@@ -21,9 +21,6 @@ public sealed class GpuModel : IDisposable
     /// <summary>Each node's model-space matrix with every node at its rest transform.</summary>
     public Mat4[] RestPose { get; }
 
-    // For each node, whether it is the first node carrying its name (the one a name-keyed override poses).
-    private readonly bool[] _firstOfName;
-
     internal GpuModel(IReadOnlyList<ModelNode> nodes, IReadOnlyList<GpuModelPart> parts,
                       Vector3D<float> boundsMin, Vector3D<float> boundsMax)
     {
@@ -32,23 +29,27 @@ public sealed class GpuModel : IDisposable
         BoundsMin = boundsMin;
         BoundsMax = boundsMax;
 
-        var seen = new HashSet<string>();
-        _firstOfName = nodes.Select(n => n.Name != null && seen.Add(n.Name)).ToArray();
-
         RestPose = new Mat4[nodes.Count];
-        ComputePose(RestPose, null);
+        ComputePose(RestPose, default);
     }
 
-    /// <summary>Fills <paramref name="pose"/> (one entry per node) with each node's model-space matrix, replacing the
-    /// local rotation of every node named in <paramref name="rotations"/> (the first node of that name in
-    /// <see cref="Nodes"/>, which lists parents first).</summary>
-    public void ComputePose(Span<Mat4> pose, IReadOnlyDictionary<string, Quaternion<float>>? rotations)
+    /// <summary>Index of the first node named <paramref name="name"/> in <see cref="Nodes"/> (parents first), or -1.</summary>
+    public int FindNode(string name)
+    {
+        for (int i = 0; i < Nodes.Count; i++)
+            if (Nodes[i].Name == name) return i;
+        return -1;
+    }
+
+    /// <summary>Fills <paramref name="pose"/> (one entry per node) with each node's model-space matrix, using
+    /// <paramref name="rotations"/> (one per node) as the nodes' local rotations in place of their rest rotations;
+    /// empty uses the rest rotations. Translation and scale always stay at rest.</summary>
+    public void ComputePose(Span<Mat4> pose, ReadOnlySpan<Quaternion<float>> rotations)
     {
         for (int i = 0; i < Nodes.Count; i++)
         {
             var n = Nodes[i];
-            var rotation = n.Rotation;
-            if (rotations != null && _firstOfName[i] && rotations.TryGetValue(n.Name!, out var r)) rotation = r;
+            var rotation = rotations.IsEmpty ? n.Rotation : rotations[i];
 
             var local = Mat4.Multiply(Mat4.Translation(n.Translation),
                         Mat4.Multiply(Mat4.FromQuaternion(rotation), Mat4.Scale(n.Scale)));

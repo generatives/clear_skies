@@ -55,7 +55,7 @@ public readonly struct BlockDef
     public Action<Entity>? Components     { get; init; }
 
     /// True when blocks of this type get an entity (see <see cref="Components"/>). An entity block with a
-    /// <see cref="Model"/> is drawn by <c>BlockEntityRenderSystem</c> at its entity's Transform (so it can be
+    /// <see cref="Model"/> is drawn by <c>ModelRenderSystem</c> at its entity's Transform (so it can be
     /// animated), not with its chunk's static model blocks.
     public bool IsEntityBlock => Components != null;
 

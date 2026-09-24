@@ -1,3 +1,5 @@
+using ClearSkies.Engine.Math;
+using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Voxels;
 using Silk.NET.Maths;
 
@@ -29,14 +31,22 @@ public struct Lever
 }
 
 /// <summary>
-/// Per-node pose overrides for an entity's model (a block entity's, drawn by <see cref="BlockEntityRenderSystem"/>):
-/// each entry replaces the local rotation of the model node with that name, e.g. the lever's <c>arm_group</c>.
-/// When several nodes share a name, the first in the model's node tree (parents first) is the one overridden —
-/// for the lever, the parent of its arm's joint, which pivots the arm at the same point. Set the component again
-/// (<c>Entity.Set</c>) after changing it, or share one dictionary and mutate it in place; the renderer reads it
-/// every frame either way.
+/// One entity's own pose for its <see cref="ModelRenderer"/> model, so entities sharing a model animate
+/// independently. Animation systems write <see cref="NodeRotations"/> (each node's local rotation, indexed like
+/// <see cref="GpuModel.Nodes"/>; find a node with <see cref="GpuModel.FindNode"/>) and
+/// <see cref="ModelRenderSystem"/> turns them into <see cref="Pose"/> when it draws the entity. Create it with
+/// <see cref="For"/>, so both arrays match the model and start at its rest pose.
 /// </summary>
 public struct AnimatedModel
 {
-    public Dictionary<string, Quaternion<float>> NodeRotations;
+    public Quaternion<float>[] NodeRotations;
+
+    /// <summary>Each node's model-space matrix, recomputed from <see cref="NodeRotations"/> on every draw.</summary>
+    public Mat4[] Pose;
+
+    public static AnimatedModel For(GpuModel model) => new()
+    {
+        NodeRotations = model.Nodes.Select(n => n.Rotation).ToArray(),
+        Pose          = (Mat4[])model.RestPose.Clone(),
+    };
 }

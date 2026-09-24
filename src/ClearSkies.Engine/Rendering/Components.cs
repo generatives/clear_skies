@@ -37,9 +37,19 @@ public struct HudRenderer
 {
     public GpuMesh Mesh;
 }
+/// <summary>Lights a <see cref="ModelRenderer"/> entity from one voxel's stored light instead of just sun and
+/// ambient: its volume's registration, and the cell's chunk and chunk-local position. Block entities get it (see
+/// <c>BlockModelSystem</c>), so they are lit like the static model blocks around them.</summary>
+public struct VoxelLit
+{
+    public GridHandle Grid;
+    public ChunkPosition Chunk;
+    public Silk.NET.Maths.Vector3D<int> Cell;
+}
+
 /// <summary>Draws a 3D model (e.g. a glTF prop loaded via <see cref="ClearSkies.Engine.Rendering.Gltf.GltfLoader"/>
-/// and uploaded with <c>Renderer.UploadModel</c>) at the entity's <c>Transform</c>. The model can be shared by
-/// many entities.</summary>
+/// and uploaded with <c>Renderer.UploadModel</c>) at the entity's <c>Transform</c>, by <c>ModelRenderSystem</c>. The
+/// model can be shared by many entities; one that animates also carries its own <c>AnimatedModel</c>.</summary>
 public struct ModelRenderer
 {
     public GpuModel Model;
