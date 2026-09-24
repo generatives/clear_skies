@@ -44,6 +44,7 @@ public struct Interactive
 public struct Lever
 {
     /// <summary>Where the arm is set, from -1 (fully to one side) through 0 (upright) to 1 (fully to the other).
-    /// Towards -1 the arm leans to the block's own +X; towards 1, to its -X.</summary>
+    /// The arm levers north and south: towards 1 it leans to the block's north face (towards the player who placed
+    /// it), towards -1 to its south face.</summary>
     public float Value;
 }

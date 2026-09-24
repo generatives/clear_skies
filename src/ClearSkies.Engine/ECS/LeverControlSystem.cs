@@ -14,12 +14,16 @@ namespace ClearSkies.Engine.ECS;
 /// <see cref="Lever.Value"/> to put the arm as near that point as its range allows. Every frame it poses each lever's
 /// arm from its <see cref="Lever.Value"/>, so anything else that sets the value moves the arm too.
 ///
-/// The swing comes from the model: the arm node pivots about its own Z axis at its rest position, upright along its
-/// own +Y at 0, reaching <see cref="MaxAngle"/> either way at ±1.
+/// The swing comes from the model: the arm node pivots about its own X axis at its rest position, so it levers north
+/// and south: upright along its own +Y at 0, leaning <see cref="MaxAngle"/> towards its own -Z (the block's north
+/// face) at 1 and towards +Z (south) at -1.
 /// </summary>
 public sealed class LeverControlSystem : ISystem, IDisposable, IDebugUiSystem
 {
     private const string ArmNode = "arm_group";
+
+    // The arm node's own axis it pivots about: turning +Y about -X leans it towards -Z (north) for positive angles.
+    private static readonly Vector3D<float> PivotAxis = -Vector3D<float>.UnitX;
 
     /// <summary>How far the arm swings from upright at <see cref="Lever.Value"/> ±1.</summary>
     public const float MaxAngle = MathF.PI / 4f;
@@ -40,7 +44,7 @@ public sealed class LeverControlSystem : ISystem, IDisposable, IDebugUiSystem
         {
             float value = System.Math.Clamp(e.Get<Lever>().Value, -1f, 1f);
             e.Get<RenderedModel>().SetRotationFromRest(ArmNode,
-                Quaternion<float>.CreateFromAxisAngle(Vector3D<float>.UnitZ, value * MaxAngle));
+                Quaternion<float>.CreateFromAxisAngle(PivotAxis, value * MaxAngle));
         }
     }
 
@@ -68,12 +72,13 @@ public sealed class LeverControlSystem : ISystem, IDisposable, IDebugUiSystem
         if (arm < 0) return null;
 
         // The arm's pivot and axes at rest, in model space (= the block entity's own space): its columns are the
-        // arm node's local X (the side it leans to at negative angles), Y (upright) and Z (the pivot axis).
+        // arm node's local X (the pivot axis), Y (upright) and Z (south; the arm leans the other way, north, at
+        // positive angles).
         ref readonly var rest = ref model.RestPose[arm];
         var pivot  = new Vector3D<float>(rest.M12, rest.M13, rest.M14);
-        var side   = Vector3D.Normalize(new Vector3D<float>(rest.M0, rest.M1, rest.M2));
+        var normal = Vector3D.Normalize(new Vector3D<float>(rest.M0, rest.M1, rest.M2));
         var up     = Vector3D.Normalize(new Vector3D<float>(rest.M4, rest.M5, rest.M6));
-        var normal = Vector3D.Normalize(new Vector3D<float>(rest.M8, rest.M9, rest.M10));
+        var north  = -Vector3D.Normalize(new Vector3D<float>(rest.M8, rest.M9, rest.M10));
 
         // The ray in the block entity's own space.
         var inverse = Vec.Conjugate(transform.Rotation);
@@ -87,10 +92,10 @@ public sealed class LeverControlSystem : ISystem, IDisposable, IDebugUiSystem
         if (s < 0f) return null;                              // behind the camera
         var towards = origin + s * dir - pivot;
 
-        // Turning the arm by +angle about its Z takes its +Y to (-sin, cos) in its X/Y.
-        float x = Vector3D.Dot(towards, side), y = Vector3D.Dot(towards, up);
-        if (x * x + y * y < 1e-10f) return null;              // right on the pivot: no direction
-        return MathF.Atan2(-x, y);
+        // Turning the arm by +angle about PivotAxis takes its +Y to cos·up + sin·north.
+        float n = Vector3D.Dot(towards, north), y = Vector3D.Dot(towards, up);
+        if (n * n + y * y < 1e-10f) return null;              // right on the pivot: no direction
+        return MathF.Atan2(n, y);
     }
 
     public void Dispose() => _subscription.Dispose();
