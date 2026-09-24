@@ -2,7 +2,6 @@ using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Gui;
 using ClearSkies.Engine.Input;
 using ClearSkies.Engine.Math;
-using ClearSkies.Engine.Physics;
 using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Rendering.WebGpu;
 using ClearSkies.Engine.Voxels;
@@ -26,9 +25,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
 
     private readonly World        _world;
     private readonly EntitySet    _cameras;
-    private readonly EntitySet    _grids;
-    private readonly ChunkVolume  _staticVolume;
-    private readonly PhysicsWorld _physics;
+    private readonly EntitySet    _volumes;
     private readonly InputManager _input;
     private readonly ChunkMeshSystem _meshSystem;
     private readonly GridSelection   _selection;
@@ -59,14 +56,12 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
     private BlockId _placeBlock = PlaceableBlocks[0];
     private int _blockBrushRadius = 0;
 
-    public PlayerInputSystem(World world, ChunkVolume staticVolume, PhysicsWorld physics, InputManager input,
-                              ChunkMeshSystem meshSystem, Renderer renderer, GridSelection selection)
+    public PlayerInputSystem(World world, InputManager input, ChunkMeshSystem meshSystem, Renderer renderer,
+                              GridSelection selection)
     {
         _world       = world;
         _cameras     = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
-        _grids       = world.GetEntities().With<ChunkGrid>().With<DynamicGrid>().AsSet();
-        _staticVolume = staticVolume;
-        _physics     = physics;
+        _volumes     = world.GetEntities().With<ChunkGrid>().With<Transform>().AsSet();
         _input       = input;
         _meshSystem  = meshSystem;
         _selection   = selection;
@@ -125,41 +120,23 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
             return;
         }
 
-        // Find the nearest hit across the static world and every dynamic grid.
+        // Find the nearest hit across every volume (the static world and each dynamic grid), casting the ray in
+        // each volume's own space. Rotation preserves length, so hit distances compare directly.
         float        bestDist   = float.MaxValue;
         ChunkVolume? bestVolume = null;
-        Entity       bestGridEntity = default;
+        Entity       bestEntity = default;
         Vector3D<int> bestBlock  = default, bestNormal = default;
-        bool          bestIsDynamicGrid = false;
-        Vector3D<float>    gridPos = default, gridCom = default;
-        Quaternion<float>  gridRot = Quaternion<float>.Identity;
 
-        if (VoxelRaycaster.Cast(_staticVolume, origin, dir, ReachBlocks, out var sb, out var sn, out var sd) && sd < bestDist)
-        {
-            bestDist = sd; bestVolume = _staticVolume; bestBlock = sb; bestNormal = sn; bestIsDynamicGrid = false;
-        }
-
-        foreach (ref readonly Entity e in _grids.GetEntities())
+        foreach (ref readonly Entity e in _volumes.GetEntities())
         {
             var volume = e.Get<ChunkGrid>().Volume;
-            var grid = e.Get<DynamicGrid>();
-            if (!grid.BodyCreated) continue;
+            ref readonly var root = ref e.Get<Transform>();
+            var lo = volume.WorldToVoxel(root, origin);
+            var ld = Vec.Rotate(Vec.Conjugate(root.Rotation), dir);
 
-            var (p, q) = _physics.GetBodyPose(grid.Body);
-            var gp  = PhysicsConv.ToSilk(p);
-            var gr  = PhysicsConv.ToSilk(q);
-            var com = PhysicsConv.ToSilk(grid.CenterOfMass);
-            var inv = Conjugate(gr);
-
-            // Transform the ray into grid-local space: localPoint = com + R⁻¹·(world − gridPos).
-            var lo = com + Vec.Rotate(inv, origin - gp);
-            var ld = Vec.Rotate(inv, dir);
-
-            if (VoxelRaycaster.Cast(volume, lo, ld, ReachBlocks, out var gb, out var gn, out var gd) && gd < bestDist)
+            if (VoxelRaycaster.Cast(volume, lo, ld, ReachBlocks, out var b, out var n, out var d) && d < bestDist)
             {
-                bestDist = gd; bestVolume = volume; bestBlock = gb; bestNormal = gn; bestIsDynamicGrid = true;
-                bestGridEntity = e;
-                gridPos = gp; gridRot = gr; gridCom = com;
+                bestDist = d; bestVolume = volume; bestBlock = b; bestNormal = n; bestEntity = e;
             }
         }
 
@@ -169,9 +146,10 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
             return;
         }
 
+        bool bestIsDynamicGrid = bestEntity.Has<DynamicGrid>();
         TargetBlock  = bestBlock;
         TargetNormal = bestNormal;
-        ShowFace(bestVolume, bestBlock, bestNormal, bestIsDynamicGrid, gridPos, gridRot, gridCom);
+        ShowFace(bestVolume, bestEntity.Get<Transform>(), bestBlock, bestNormal);
 
         if (_input.WasKeyPressed(Key.L))
         {
@@ -199,7 +177,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
                         }
                     }
                 }
-                if (bestIsDynamicGrid) _selection.Select(bestGridEntity);
+                if (bestIsDynamicGrid) _selection.Select(bestEntity);
                 Console.WriteLine($"[place] {_placeBlock} in {(bestIsDynamicGrid ? "grid" : "world")} ({t.X},{t.Y},{t.Z})");
             }
         }
@@ -221,12 +199,12 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
             {
                 if (bestVolume.IsEmpty())
                 {
-                    bestVolume.Root.Dispose();
+                    Hierarchy.DestroyRecursive(bestVolume.Root); // its chunks with it
                     HideFace(); // the outlined face no longer has a volume behind it
                 }
                 else
                 {
-                    _selection.Select(bestGridEntity);
+                    _selection.Select(bestEntity);
                 }
             }
         }
@@ -252,8 +230,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
         }
     }
 
-    private void ShowFace(ChunkVolume volume, Vector3D<int> block, Vector3D<int> normal,
-                          bool isGrid, Vector3D<float> gridPos, Quaternion<float> gridRot, Vector3D<float> gridCom)
+    private void ShowFace(ChunkVolume volume, in Transform root, Vector3D<int> block, Vector3D<int> normal)
     {
         // Corners are in the volume's local space; re-upload only when the cell or volume changes.
         if (!_faceVisible || block != _lastBlock || normal != _lastNormal || !ReferenceEquals(volume, _lastVolume))
@@ -264,20 +241,11 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
             _lastVolume = volume;
         }
 
-        // Map the local-space face into the world. For a grid: world = gridPos + R·(local − com),
-        // expressed as a Transform of rotation R and position gridPos − R·com. For the static world the
-        // local space is world space, so the transform is identity.
+        // Map the volume-space face into the world: a Transform with the root's rotation whose origin is
+        // volume-space (0,0,0).
         ref var t = ref _faceEntity.Get<Transform>();
-        if (isGrid)
-        {
-            t.Rotation = gridRot;
-            t.Position = gridPos - Vec.Rotate(gridRot, gridCom);
-        }
-        else
-        {
-            t.Rotation = Quaternion<float>.Identity;
-            t.Position = Vector3D<float>.Zero;
-        }
+        t.Rotation = root.Rotation;
+        t.Position = volume.VoxelToWorld(root, Vector3D<float>.Zero);
 
         if (!_faceVisible)
         {
@@ -386,8 +354,6 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
-
-    private static Quaternion<float> Conjugate(Quaternion<float> q) => new(-q.X, -q.Y, -q.Z, q.W);
 
     private bool TryGetCameraRay(out Vector3D<float> origin, out Vector3D<float> dir)
     {

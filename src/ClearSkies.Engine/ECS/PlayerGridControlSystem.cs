@@ -27,7 +27,7 @@ public sealed class PlayerGridControlSystem : ISystem
     {
         _physics      = physics;
         _input        = input;
-        _selectedGrid = world.GetEntities().With<DynamicGrid>().With<SelectedGridComponent>().AsSet();
+        _selectedGrid = world.GetEntities().With<DynamicGrid>().With<SelectedGridComponent>().With<PhysicsBodyComponent>().AsSet();
     }
 
     public void Update(float dt)
@@ -47,18 +47,17 @@ public sealed class PlayerGridControlSystem : ISystem
 
         foreach (ref readonly Entity e in _selectedGrid.GetEntities())
         {
-            var grid = e.Get<DynamicGrid>();
-            if (!grid.BodyCreated) continue;
+            var body = e.Get<PhysicsBodyComponent>().Body;
 
             if (stop)
             {
-                _physics.StopBody(grid.Body);
+                _physics.StopBody(body);
                 continue;
             }
 
-            float mass = _physics.GetBodyMass(grid.Body);
+            float mass = _physics.GetBodyMass(body);
             if (mass <= 0f) continue;
-            _physics.ApplyLinearImpulse(grid.Body, dir * (Acceleration * mass * dt));
+            _physics.ApplyLinearImpulse(body, dir * (Acceleration * mass * dt));
         }
     }
 }

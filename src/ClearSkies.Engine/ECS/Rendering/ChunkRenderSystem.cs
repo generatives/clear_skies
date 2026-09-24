@@ -76,22 +76,10 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
 
     private static Mat4[] BuildFacingPlacements()
     {
-        // Rotation taking the model's +Y to each facing: about X, +Y turns towards +Z; about Z, towards -X.
-        var x = Vector3D<float>.UnitX;
-        var z = Vector3D<float>.UnitZ;
-        const float Quarter = MathF.PI / 2;
-        var rotations = new Quaternion<float>[6];
-        rotations[(int)Facing.North] = Quaternion<float>.CreateFromAxisAngle(x, -Quarter);
-        rotations[(int)Facing.South] = Quaternion<float>.CreateFromAxisAngle(x,  Quarter);
-        rotations[(int)Facing.East]  = Quaternion<float>.CreateFromAxisAngle(z, -Quarter);
-        rotations[(int)Facing.West]  = Quaternion<float>.CreateFromAxisAngle(z,  Quarter);
-        rotations[(int)Facing.Up]    = Quaternion<float>.Identity;
-        rotations[(int)Facing.Down]  = Quaternion<float>.CreateFromAxisAngle(x, MathF.PI);
-
         var toCentre   = Mat4.Translation(new Vector3D<float>(0.5f));
         var fromCentre = Mat4.Translation(new Vector3D<float>(0f, -0.5f, 0f));
-        return Array.ConvertAll(rotations, r =>
-            Mat4.Multiply(toCentre, Mat4.Multiply(Mat4.FromQuaternion(r), fromCentre)));
+        return Array.ConvertAll(Enum.GetValues<Facing>(), f =>
+            Mat4.Multiply(toCentre, Mat4.Multiply(Mat4.FromQuaternion(f.ToRotation()), fromCentre)));
     }
 
     // ── debug UI ─────────────────────────────────────────────────────────────

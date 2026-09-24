@@ -1,3 +1,4 @@
+using DefaultEcs;
 using Silk.NET.Maths;
 
 namespace ClearSkies.Engine.Voxels;
@@ -44,6 +45,19 @@ public readonly struct BlockDef
     /// still collides as a full cell), but it isn't a <see cref="IsFullCube"/>: it emits no cube faces and never
     /// hides a neighbour's.
     public string?         Model          { get; init; }
+
+    /// Entity-block hook: non-null makes every placed block of this type also get its own ECS entity while its
+    /// chunk is loaded (created and destroyed by <see cref="ChunkVolume"/>, a Hierarchy child of the chunk
+    /// entity, carrying a <see cref="ECS.BlockRef"/> back to its voxel). The hook attaches the block's starting
+    /// components: its state and behaviour. The voxel still decides occupancy (collision, raycasts, light, mass,
+    /// saving the block type); the entity holds everything else. Plain blocks leave this null and stay voxel-only.
+    /// Called on the main thread.
+    public Action<Entity>? Components     { get; init; }
+
+    /// True when blocks of this type get an entity (see <see cref="Components"/>). An entity block with a
+    /// <see cref="Model"/> is drawn by <c>ModelRenderSystem</c> at its entity's Transform (so it can be
+    /// animated), not with its chunk's static model blocks.
+    public bool IsEntityBlock => Components != null;
 
     /// True for blocks drawn as a full cube by <c>GreedyMesher</c>: solid and not a model block. The mesher's
     /// face culling (and the neighbour remeshing that depends on it) keys off this rather than IsSolid.

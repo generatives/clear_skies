@@ -28,6 +28,7 @@ host.Renderer.LoadTextureAtlas(
     Path.Combine(AppContext.BaseDirectory, "Resources", "spritesheet_tiles.png"),
     Path.Combine(AppContext.BaseDirectory, "Resources", "spritesheet_tiles.xml"));
 
+// The static world is a volume like any other, with an identity Transform (set by ChunkVolume) and zero pivot.
 var staticVolumeEntity = host.World.CreateEntity();
 var staticVolume = new ChunkVolume(staticVolumeEntity, host.World);
 staticVolumeEntity.Set(new ChunkGrid() { Volume = staticVolume });
@@ -72,16 +73,17 @@ var airshipFlight = new AirshipFlightSystem(host.World, host.Physics, host.Input
 host.AddSystem(airshipFlight, SystemStage.Logic);
 
 host.AddSystem(host.Physics, SystemStage.Logic); // steps the simulation once bodies/impulses for this frame are in
-host.AddSystem(new GridTransformSystem(host.World, host.Physics), SystemStage.Logic);
-host.AddSystem(new HierarchyTransformSystem(host.World), SystemStage.Logic);
+host.AddSystem(new PhysicsTransformSyncSystem(host.World, host.Physics), SystemStage.Logic); // body poses -> Transform
+host.AddSystem(new HierarchyTransformSystem(host.World), SystemStage.Logic); // e.g. volume Transforms -> chunk Transforms
 host.AddSystem(new CharacterCameraSyncSystem(host.World), SystemStage.Logic); // reads the capsule's post-physics pose into Transform
 host.AddSystem(gridPilot, SystemStage.Logic);
-host.AddSystem(new PlayerInputSystem(host.World, staticVolume, host.Physics, host.Input, meshSystem, host.Renderer, gridSelection), SystemStage.Logic);
+host.AddSystem(new PlayerInputSystem(host.World, host.Input, meshSystem, host.Renderer, gridSelection), SystemStage.Logic);
 var gridPersistence = new GridPersistenceSystem(host.World, meshSystem, host.Physics, gridSelection);
 host.AddSystem(gridPersistence, SystemStage.Logic);
 // The airship-related debug panels above (Pilot/Flight/Save-Load) drew into their own separate "Systems"
 // menu windows; combined here into one "Airship" window so they read as one feature.
 host.AddSystem(new AirshipDebugPanel(gridPilot, airshipFlight, gridPersistence), SystemStage.Logic);
+host.AddSystem(new LeverTestAnimationSystem(host.World), SystemStage.Logic); // test: rocks lever arms
 host.AddSystem(new LambdaSystem(() =>
 {
     if (host.Input.WasKeyPressed(Key.Tab))
@@ -90,11 +92,11 @@ host.AddSystem(new LambdaSystem(() =>
         Console.WriteLine($"[debug] wireframe: {host.Renderer.WireframeMode}");
     }
 }), SystemStage.Logic);
-host.AddSystem(new DynamicGridCleanupSystem(host.World), SystemStage.Logic);
 
 host.AddSystem(new GpuResidencySystem(host.World, staticVolume, gridStore), SystemStage.PreRender);
-host.AddSystem(new GpuLightSystem(host.World, staticVolume, host.Context, host.Physics, gridStore), SystemStage.PreRender);
+host.AddSystem(new GpuLightSystem(host.World, staticVolume, host.Context, gridStore), SystemStage.PreRender);
 host.AddSystem(meshSystem, SystemStage.PreRender);
+host.AddSystem(new BlockModelSystem(host.World, blockModels), SystemStage.PreRender); // block entities -> RenderedModel
 // Rendering: the host opens the frame, runs the render stages (systems in the order added within a stage), then
 // closes it with ImGui and presents. Each render system is handed this frame's camera and time.
 using var clouds = new CloudRenderSystem(host.Renderer);
@@ -136,7 +138,7 @@ var camSpawn = TestScene.Build(host, seed);
     var leverTransform = Transform.Identity;
     leverTransform.Position = camSpawn + new Vector3D<float>(0f, -0.75f, -2.5f);
     leverEntity.Set(leverTransform);
-    leverEntity.Set(new ModelRenderer { Model = lever });
+    leverEntity.Set(new RenderedModel(lever));
     Console.WriteLine($"[model] lever ({lever.Parts.Count} part(s)) at {leverTransform.Position}");
 }
 

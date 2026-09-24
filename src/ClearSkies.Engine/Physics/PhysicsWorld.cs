@@ -218,13 +218,12 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
         return (shape, inertia, centerOfMass);
     }
 
-    public BodyHandle AddDynamicBody(TypedIndex shape, BodyInertia inertia, Vector3 position)
+    public BodyHandle AddDynamicBody(TypedIndex shape, BodyInertia inertia, Vector3 position, Quaternion orientation)
         => Simulation.Bodies.Add(BodyDescription.CreateDynamic(
-            new RigidPose(position), inertia, new CollidableDescription(shape, 0.1f), new BodyActivityDescription(0.01f)));
+            new RigidPose(position, orientation), inertia, new CollidableDescription(shape, 0.1f), new BodyActivityDescription(0.01f)));
 
-    /// <summary>Removes a dynamic body. Callers that created it via <see cref="AddDynamicBody"/> with a
-    /// compound shape should read the shape with <see cref="GetBodyShape"/> first, then pass it to
-    /// <see cref="RemoveCompound"/> after this call to also free the shape.</summary>
+    /// <summary>Removes a dynamic body. To also free its shape, read the shape with <see cref="GetBodyShape"/>
+    /// first, then pass it to <see cref="RemoveCompound"/> after this call.</summary>
     public void RemoveBody(BodyHandle handle) => Simulation.Bodies.Remove(handle);
 
     public TypedIndex GetBodyShape(BodyHandle handle) => Simulation.Bodies[handle].Collidable.Shape;
@@ -240,7 +239,8 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
         body.Awake = true;
     }
 
-    /// <summary>Removes a compound shape: its child convex shapes, its children buffer, then the compound itself.</summary>
+    /// <summary>Removes a compound shape: its child convex shapes, its children buffer, then the compound itself.
+    /// A shape that isn't a compound built by <see cref="BuildDynamicCompound"/> is just removed.</summary>
     public void RemoveCompound(TypedIndex shape)
     {
         if (_compoundChildren.Remove(shape.Packed, out var children))

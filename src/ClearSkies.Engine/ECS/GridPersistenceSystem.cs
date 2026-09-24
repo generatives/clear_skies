@@ -123,7 +123,7 @@ public sealed class GridPersistenceSystem : ISystem
     private void DeleteSelected()
     {
         if (!TryGetSelectedGrid(out var grid)) { _status = "No grid selected."; return; }
-        grid.Root.Dispose();
+        Hierarchy.DestroyRecursive(grid.Root); // its chunks with it
         _status = "Deleted selected grid.";
     }
 

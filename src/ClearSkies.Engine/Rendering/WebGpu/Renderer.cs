@@ -924,9 +924,9 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
                                out var texture, out var view, out var sampler, out var bindGroup);
 
             var mesh = UploadMesh(part.Vertices, part.Indices);
-            parts.Add(new GpuModelPart(mesh, new ModelTexture(_api, texture, view, sampler, bindGroup), part.Material.AlphaCutoff));
+            parts.Add(new GpuModelPart(part.Node, mesh, new ModelTexture(_api, texture, view, sampler, bindGroup), part.Material.AlphaCutoff));
         }
-        return new GpuModel(parts, data.BoundsMin, data.BoundsMax);
+        return new GpuModel(data.Nodes, parts, data.BoundsMin, data.BoundsMax);
     }
 
     public GpuMesh UploadMesh(ReadOnlySpan<Vertex> vertices, ReadOnlySpan<uint> indices)
@@ -972,18 +972,21 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     /// (fs_model: its own texture, lighting, fog), or as a full-bright wireframe while <see cref="WireframeMode"/>
     /// is on. Depth-tested like the world, so call it before <see cref="DrawSky"/>. A model block passes its grid
     /// (<see cref="GridHandle.Index"/>), chunk and chunk-local cell to be lit from that cell's voxel light; the
-    /// default grid -1 lights it with just sun and ambient.
+    /// default grid -1 lights it with just sun and ambient. <paramref name="pose"/> gives each model node's
+    /// model-space matrix (see <see cref="GpuModel.ComputePose"/>); empty draws the rest pose.
     /// </summary>
     public void DrawModel(GpuModel gpuModel, in Mat4 model, int grid = -1, ChunkPosition chunk = default,
-                          Vector3D<int> voxel = default)
+                          Vector3D<int> voxel = default, ReadOnlySpan<Mat4> pose = default)
     {
+        // Each part is drawn at its node's model-space matrix from the pose (the rest pose unless one is given).
+        if (pose.IsEmpty) pose = gpuModel.RestPose;
         _api.RenderPassEncoderSetPipeline(_pass, WireframeMode ? _wireframePipeline : _modelPipeline);
         foreach (var part in gpuModel.Parts)
         {
             if (_drawIndex >= MaxObjects) break;
             var u = new ModelUniform
             {
-                Model = model, Grid = grid, ChunkX = chunk.X, ChunkY = chunk.Y, ChunkZ = chunk.Z,
+                Model = part.Node < 0 ? model : Mat4.Multiply(model, pose[part.Node]), Grid = grid, ChunkX = chunk.X, ChunkY = chunk.Y, ChunkZ = chunk.Z,
                 AlphaCutoff = part.AlphaCutoff, VoxelX = voxel.X, VoxelY = voxel.Y, VoxelZ = voxel.Z,
             };
             uint dynOffset = StageModel(u);

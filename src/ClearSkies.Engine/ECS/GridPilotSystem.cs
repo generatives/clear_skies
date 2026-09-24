@@ -86,8 +86,7 @@ public sealed class GridPilotSystem : ISystem
     {
         foreach (ref readonly Entity e in _selectedGrid.GetEntities())
         {
-            var grid = e.Get<DynamicGrid>();
-            if (!grid.BodyCreated) return; // nothing solid yet; can't pilot an empty grid
+            if (!e.Has<PhysicsBodyComponent>()) return; // nothing solid yet; can't pilot an empty grid
 
             _pilotedGridRoot = e;
             _isPiloting = true;
@@ -156,19 +155,20 @@ public sealed class GridPilotSystem : ISystem
         foreach (ref readonly Entity e in _selectedGrid.GetEntities())
         {
             ref var grid = ref e.Get<DynamicGrid>();
-            if (!grid.BodyCreated) return;
+            if (!e.Has<PhysicsBodyComponent>()) return;
+            var body = e.Get<PhysicsBodyComponent>().Body;
 
             if (lockPressed)
             {
                 grid.Locked = !grid.Locked;
-                _physics.SetBodyKinematic(grid.Body, grid.Locked, grid.Inertia);
+                _physics.SetBodyKinematic(body, grid.Locked, grid.Inertia);
             }
 
             if (rightPressed)
             {
-                var (pos, _) = _physics.GetBodyPose(grid.Body);
-                _physics.SetBodyPose(grid.Body, pos, System.Numerics.Quaternion.Identity);
-                _physics.SetBodyAngularVelocity(grid.Body, PhysVec.Zero);
+                var (pos, _) = _physics.GetBodyPose(body);
+                _physics.SetBodyPose(body, pos, System.Numerics.Quaternion.Identity);
+                _physics.SetBodyAngularVelocity(body, PhysVec.Zero);
             }
             return;
         }
@@ -177,12 +177,11 @@ public sealed class GridPilotSystem : ISystem
     private void UpdateCameraFollow()
     {
         if (!_pilotedGridRoot.IsAlive || !_followedCamera.IsAlive) return;
-        var grid = _pilotedGridRoot.Get<DynamicGrid>();
-        if (!grid.BodyCreated) return;
 
-        var (pos, rot) = _physics.GetBodyPose(grid.Body);
-        var gridPos = PhysicsConv.ToSilk(pos);
-        var gridRot = PhysicsConv.ToSilk(rot);
+        // The grid's Transform is its body pose (centre of mass), synced by PhysicsTransformSyncSystem.
+        var gridTransform = _pilotedGridRoot.Get<Transform>();
+        var gridPos = gridTransform.Position;
+        var gridRot = gridTransform.Rotation;
 
         // lookRot first (relative to the ship's own facing), then gridRot on top — so panning the
         // mouse orbits the camera around the ship, and turning the ship carries that bearing with it.
@@ -215,13 +214,14 @@ public sealed class GridPilotSystem : ISystem
         {
             var grid = e.Get<DynamicGrid>();
             ImGui.Text(grid.Locked ? "Selected grid: LOCKED" : "Selected grid: unlocked");
-            if (grid.BodyCreated)
+            if (e.Has<PhysicsBodyComponent>())
             {
-                var (pos, _) = _physics.GetBodyPose(grid.Body);
-                var vel = _physics.GetBodyLinearVelocity(grid.Body);
+                var body = e.Get<PhysicsBodyComponent>().Body;
+                var pos = e.Get<Transform>().Position;
+                var vel = _physics.GetBodyLinearVelocity(body);
                 ImGui.Text($"Position: ({pos.X:0.00}, {pos.Y:0.00}, {pos.Z:0.00})");
                 ImGui.Text($"Velocity: ({vel.X:0.00}, {vel.Y:0.00}, {vel.Z:0.00})  |{vel.Length():0.00}|");
-                ImGui.Text($"Mass: {_physics.GetBodyMass(grid.Body):0.0} (0 while locked/kinematic)");
+                ImGui.Text($"Mass: {_physics.GetBodyMass(body):0.0} (0 while locked/kinematic)");
 
                 // Directly answers "is there actually a collider where this grid currently is" —
                 // distinguishes a chunk-streaming/collider gap from a genuine collision-resolution bug.

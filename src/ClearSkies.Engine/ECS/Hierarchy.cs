@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Linq;
+using ClearSkies.Engine.Math;
 using DefaultEcs;
 using Silk.NET.Maths;
 
@@ -13,15 +14,18 @@ public struct Parent
 }
 
 /// <summary>The child entities attached to this entity via <see cref="Parent"/>. Maintained by
-/// <see cref="Hierarchy"/> — don't mutate the list directly or it will drift out of sync.</summary>
+/// <see cref="Hierarchy"/> — don't mutate the set directly or it will drift out of sync. A set rather than a
+/// list because a parent can have thousands of children (the static world's chunks) that come and go.</summary>
 public struct Children
 {
-    public List<Entity> Entities;
+    public HashSet<Entity> Entities;
 }
 
 /// <summary>An entity's transform relative to its <see cref="Parent"/>, instead of world space.
 /// <see cref="HierarchyTransformSystem"/> composes this with the parent's world <see cref="Transform"/>
-/// into the entity's own world-space <see cref="Transform"/> each frame.</summary>
+/// into the entity's own world-space <see cref="Transform"/>. Change it with <c>Entity.Set</c>, not a
+/// <c>ref</c> write: the system only re-resolves a child whose parent moved or whose LocalTransform was
+/// Set.</summary>
 public struct LocalTransform
 {
     public Vector3D<float> Position;
@@ -51,9 +55,28 @@ public static class Hierarchy
         child.Set(new Parent { Value = parent });
 
         if (!parent.Has<Children>())
-            parent.Set(new Children { Entities = new List<Entity>() });
+            parent.Set(new Children { Entities = new HashSet<Entity>() });
         parent.Get<Children>().Entities.Add(child);
     }
+
+    /// <summary>Attaches <paramref name="child"/> to <paramref name="parent"/> at <paramref name="local"/>, and
+    /// resolves its world <see cref="Transform"/> straight away so it is placed correctly even before
+    /// <see cref="HierarchyTransformSystem"/> next runs.</summary>
+    public static void SetParent(Entity child, Entity parent, in LocalTransform local)
+    {
+        SetParent(child, parent);
+        child.Set(local);
+        child.Set(Compose(parent.Has<Transform>() ? parent.Get<Transform>() : Transform.Identity, local));
+    }
+
+    /// <summary>World transform of a child at <paramref name="local"/> under a parent at
+    /// <paramref name="parentWorld"/>.</summary>
+    public static Transform Compose(in Transform parentWorld, in LocalTransform local) => new()
+    {
+        Position = parentWorld.Position + Vec.Rotate(parentWorld.Rotation, parentWorld.Scale * local.Position),
+        Rotation = parentWorld.Rotation * local.Rotation,
+        Scale    = parentWorld.Scale * local.Scale,
+    };
 
     /// <summary>Detaches <paramref name="child"/> from its parent, if any. The child keeps whatever
     /// world-space <see cref="Transform"/> it last resolved to.</summary>
@@ -69,7 +92,8 @@ public static class Hierarchy
     }
 
     /// <summary>Disposes <paramref name="entity"/> and every descendant reachable through
-    /// <see cref="Children"/>.</summary>
+    /// <see cref="Children"/>, immediately. (Disposing a parent directly also takes its descendants with it,
+    /// but only when <see cref="HierarchyTransformSystem"/> next runs.)</summary>
     public static void DestroyRecursive(Entity entity)
     {
         if (!entity.IsAlive) return;

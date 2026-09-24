@@ -210,17 +210,22 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
         entry.Entity.Remove<ChunkRenderData>();
     }
 
-    // Which block ids are model blocks, so the per-voxel scan below is a table lookup.
+    // Which block ids are static model blocks, so the per-voxel scan below is a table lookup. Entity blocks with a
+    // model are left out: ModelRenderSystem draws those at their entity's Transform (see BlockModelSystem).
     private static readonly bool[] IsModelBlock = BuildModelBlockTable();
 
     private static bool[] BuildModelBlockTable()
     {
         var t = new bool[256];
-        for (int i = 0; i < t.Length; i++) t[i] = BlockRegistry.Get((BlockId)i).Model != null;
+        for (int i = 0; i < t.Length; i++)
+        {
+            var def = BlockRegistry.Get((BlockId)i);
+            t[i] = def.Model != null && !def.IsEntityBlock;
+        }
         return t;
     }
 
-    /// <summary>Every model block in <paramref name="data"/> (worker thread).</summary>
+    /// <summary>Every static model block in <paramref name="data"/> (worker thread).</summary>
     private static ModelCell[] FindModelBlocks(ChunkData data)
     {
         List<ModelCell>? found = null;

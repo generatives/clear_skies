@@ -11,4 +11,7 @@ public static class Vec
         var t = 2f * Vector3D.Cross(u, v);
         return v + q.W * t + Vector3D.Cross(u, t);
     }
+
+    /// <summary>Conjugate of a quaternion — its inverse, for the unit quaternions used as rotations.</summary>
+    public static Quaternion<float> Conjugate(Quaternion<float> q) => new(-q.X, -q.Y, -q.Z, q.W);
 }

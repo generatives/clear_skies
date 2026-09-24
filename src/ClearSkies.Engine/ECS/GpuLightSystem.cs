@@ -1,7 +1,6 @@
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Gui;
 using ClearSkies.Engine.Math;
-using ClearSkies.Engine.Physics;
 using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Rendering.WebGpu;
 using ClearSkies.Engine.Voxels;
@@ -27,7 +26,6 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     private readonly ChunkVolume     _staticVolume;
     private readonly EntitySet       _grids;
     private readonly EntitySet       _cameras;
-    private readonly PhysicsWorld    _physics;
     private readonly GridStore       _store;
     private readonly GpuRayLightPass _rayLight;
     private readonly GpuContext      _ctx;
@@ -89,12 +87,11 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     private readonly record struct WorldLamp(Vector3D<float> World, int Level, Vector3D<float> Color,
                                              int Grid, Vector3D<int> Local);
 
-    public GpuLightSystem(World world, ChunkVolume staticVolume, GpuContext ctx, PhysicsWorld physics, GridStore store)
+    public GpuLightSystem(World world, ChunkVolume staticVolume, GpuContext ctx, GridStore store)
     {
         _staticVolume = staticVolume;
-        _physics     = physics;
         _store       = store;
-        _grids       = world.GetEntities().With<ChunkGrid>().AsSet();
+        _grids       = world.GetEntities().With<ChunkGrid>().With<Transform>().AsSet();
         _cameras     = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
         _rayLight    = new GpuRayLightPass(ctx);
         _ctx         = ctx;
@@ -161,10 +158,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
 
         _lit.Clear();
         foreach (ref readonly Entity e in _grids.GetEntities())
-        {
-            DynamicGrid? dynamicGrid = e.Has<DynamicGrid>() ? e.Get<DynamicGrid>() : null;
-            AddLit(e.Get<ChunkGrid>().Volume, dynamicGrid);
-        }
+            AddLit(e.Get<ChunkGrid>().Volume, e.Get<Transform>());
         _store.UploadGrids();
 
         GatherLamps();
@@ -237,15 +231,14 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         Console.WriteLine($"[probe] voxels={voxels} sun-shadowed={shadowed} rgb-lit={lit} coloured={coloured} ao={ao} bounce={bounce} held={_heldList.Count}");
     }
 
-    /// <summary>Poses a registered grid for this frame (a ship whose body doesn't exist yet stays hidden).</summary>
-    private void AddLit(ChunkVolume vol, DynamicGrid? dynamicGrid)
+    /// <summary>Poses a registered grid for this frame from its root <see cref="Transform"/> and pivot.</summary>
+    private void AddLit(ChunkVolume vol, in Transform root)
     {
         var h = vol.Gpu;
         if (h.Index < 0) return;
-        if (!TryPose(vol, dynamicGrid, out var pos, out var rot, out var com)) return;
-        var v2w = VoxelToWorld(pos, rot, com);
-        _store.SetPose(h, v2w, WorldToVoxel(pos, rot, com));
-        _lit.Add(new LitGrid(vol, h, v2w, pos, rot));
+        var v2w = VoxelToWorld(root.Position, root.Rotation, vol.Pivot);
+        _store.SetPose(h, v2w, WorldToVoxel(root.Position, root.Rotation, vol.Pivot));
+        _lit.Add(new LitGrid(vol, h, v2w, root.Position, root.Rotation));
     }
 
     private void GatherLamps()
@@ -269,35 +262,15 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
 
     // ── Grid transforms ───────────────────────────────────────────────────────
 
-    /// <summary>Pose of a volume: a dynamic grid's body pose + centre-of-mass, or identity for the static world.
-    /// Returns false for a grid whose body isn't created yet.</summary>
-    private bool TryPose(ChunkVolume vol, DynamicGrid? dynamicGrid, out Vector3D<float> pos, out Quaternion<float> rot, out Vector3D<float> com)
-    {
-        if (dynamicGrid.HasValue)
-        {
-            var g = dynamicGrid.Value;
-            if (!g.BodyCreated) { pos = default; rot = Quaternion<float>.Identity; com = default; return false; }
-            var (p, q) = _physics.GetBodyPose(g.Body);
-            pos = PhysicsConv.ToSilk(p);
-            rot = PhysicsConv.ToSilk(q);
-            com = PhysicsConv.ToSilk(g.CenterOfMass);
-            return true;
-        }
-        pos = Vector3D<float>.Zero; rot = Quaternion<float>.Identity; com = Vector3D<float>.Zero;
-        return true;
-    }
-
-    // A grid's voxel space is its local block space (chunk*32 + local); the pose carries it to world space:
-    // world = T(pos)·R·T(−com)·voxel. The static world's is the identity.
-    private static Mat4 VoxelToWorld(Vector3D<float> pos, Quaternion<float> rot, Vector3D<float> com)
-        => Mat4.Multiply(Mat4.Multiply(Mat4.Translation(pos), Mat4.FromQuaternion(rot)), Mat4.Translation(-com));
+    // A grid's voxel space is its local block space (chunk*32 + local); its root Transform and pivot carry it to
+    // world space: world = T(pos)·R·T(−pivot)·voxel (see ChunkVolume). The static world's is the identity.
+    private static Mat4 VoxelToWorld(Vector3D<float> pos, Quaternion<float> rot, Vector3D<float> pivot)
+        => Mat4.Multiply(Mat4.Multiply(Mat4.Translation(pos), Mat4.FromQuaternion(rot)), Mat4.Translation(-pivot));
 
     /// <summary>Inverse of <see cref="VoxelToWorld"/>, built analytically since the transform is rigid:
-    /// voxel = T(com) · R⁻¹ · T(−pos) · world.</summary>
-    private static Mat4 WorldToVoxel(Vector3D<float> pos, Quaternion<float> rot, Vector3D<float> com)
-        => Mat4.Multiply(Mat4.Multiply(Mat4.Translation(com), Mat4.FromQuaternion(Conjugate(rot))), Mat4.Translation(-pos));
-
-    private static Quaternion<float> Conjugate(Quaternion<float> q) => new(-q.X, -q.Y, -q.Z, q.W);
+    /// voxel = T(pivot) · R⁻¹ · T(−pos) · world.</summary>
+    private static Mat4 WorldToVoxel(Vector3D<float> pos, Quaternion<float> rot, Vector3D<float> pivot)
+        => Mat4.Multiply(Mat4.Multiply(Mat4.Translation(pivot), Mat4.FromQuaternion(Vec.Conjugate(rot))), Mat4.Translation(-pos));
 
     public void Dispose()
     {
