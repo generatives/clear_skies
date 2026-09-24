@@ -74,8 +74,7 @@ host.AddSystem(airshipFlight, SystemStage.Logic);
 
 host.AddSystem(host.Physics, SystemStage.Logic); // steps the simulation once bodies/impulses for this frame are in
 host.AddSystem(new PhysicsTransformSyncSystem(host.World, host.Physics), SystemStage.Logic); // body poses -> Transform
-host.AddSystem(new ChunkTransformSystem(host.World), SystemStage.Logic); // volume Transforms -> chunk Transforms
-host.AddSystem(new HierarchyTransformSystem(host.World), SystemStage.Logic);
+host.AddSystem(new HierarchyTransformSystem(host.World), SystemStage.Logic); // e.g. volume Transforms -> chunk Transforms
 host.AddSystem(new CharacterCameraSyncSystem(host.World), SystemStage.Logic); // reads the capsule's post-physics pose into Transform
 host.AddSystem(gridPilot, SystemStage.Logic);
 host.AddSystem(new PlayerInputSystem(host.World, host.Input, meshSystem, host.Renderer, gridSelection), SystemStage.Logic);
@@ -92,7 +91,6 @@ host.AddSystem(new LambdaSystem(() =>
         Console.WriteLine($"[debug] wireframe: {host.Renderer.WireframeMode}");
     }
 }), SystemStage.Logic);
-host.AddSystem(new DynamicGridCleanupSystem(host.World), SystemStage.Logic);
 
 host.AddSystem(new GpuResidencySystem(host.World, staticVolume, gridStore), SystemStage.PreRender);
 host.AddSystem(new GpuLightSystem(host.World, staticVolume, host.Context, gridStore), SystemStage.PreRender);

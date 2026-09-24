@@ -17,6 +17,10 @@ namespace ClearSkies.Engine.Voxels;
 /// own space sits at that Transform: world = root.Position + root.Rotation·(voxel − Pivot). Everything that maps
 /// between volume space and world space (chunk placement, lighting, raycasts) goes through those two, so none of
 /// it needs to know whether the volume is static or has a physics body. Volumes are rigid: root scale is ignored.
+///
+/// Chunk entities are <see cref="Hierarchy"/> children of <see cref="Root"/>, each at a <see cref="LocalTransform"/>
+/// of its chunk origin minus the pivot, so <see cref="HierarchyTransformSystem"/> carries them along with the root
+/// (and destroys them with it).
 /// </summary>
 public class ChunkVolume
 {
@@ -32,11 +36,18 @@ public class ChunkVolume
     /// <summary>The point in this volume's own space that sits at <see cref="Root"/>'s <see cref="Transform"/>.
     /// Zero for the static world; a dynamic grid's centre of mass (kept in step with its body by
     /// PhysicsBodySystem), because that is where Bepu puts a compound body's origin.</summary>
-    public Vector3D<float> Pivot { get; internal set; }
-
-    /// <summary>Root pose and pivot the chunk entities were last placed for (see ChunkTransformSystem), so a
-    /// volume that hasn't moved — the static world, a parked ship — isn't re-placed every frame.</summary>
-    internal (Vector3D<float> Position, Quaternion<float> Rotation, Vector3D<float> Pivot)? PlacedFor;
+    public Vector3D<float> Pivot
+    {
+        get => _pivot;
+        internal set
+        {
+            if (value == _pivot) return;
+            _pivot = value;
+            foreach (var entry in _chunks.Values)
+                if (entry.Entity.IsAlive) entry.Entity.Set(ChunkLocal(entry.Position));
+        }
+    }
+    private Vector3D<float> _pivot;
 
     /// <summary>Current axis-aligned bounding box of loaded chunks (inclusive).</summary>
     internal ChunkPosition BoundsMin { get; private set; }
@@ -121,7 +132,7 @@ public class ChunkVolume
     {
         var entity = _world.CreateEntity();
         var entry = new ChunkEntry(data, entity, this, pos);
-        entity.Set(ChunkTransform(Root.Get<Transform>(), pos));
+        Hierarchy.SetParent(entity, Root, ChunkLocal(pos));
         entity.Set(new Chunk() { Entry = entry });
         entry.Entity.Set(new NeedsRemeshFlag());
         entry.Entity.Set(new NeedsRecollideFlag());
@@ -150,14 +161,14 @@ public class ChunkVolume
 
     // ── Placement ──────────────────────────────────────────────────────────
 
-    /// <summary>World <see cref="Transform"/> of chunk <paramref name="pos"/>'s entity (its origin at the chunk's
-    /// minimum corner, where GreedyMesher's local space starts) for a root at <paramref name="root"/>.</summary>
-    internal Transform ChunkTransform(in Transform root, ChunkPosition pos) => new()
+    /// <summary>Chunk <paramref name="pos"/>'s entity relative to <see cref="Root"/>: its origin (where
+    /// GreedyMesher's local space starts) at the chunk's minimum corner, relative to the pivot.</summary>
+    private LocalTransform ChunkLocal(ChunkPosition pos)
     {
-        Position = VoxelToWorld(root, pos.WorldOrigin),
-        Rotation = root.Rotation,
-        Scale    = Vector3D<float>.One,
-    };
+        var local = LocalTransform.Identity;
+        local.Position = pos.WorldOrigin - Pivot;
+        return local;
+    }
 
     /// <summary>Maps a point in this volume's space to world space for a root at <paramref name="root"/>.</summary>
     public Vector3D<float> VoxelToWorld(in Transform root, Vector3D<float> voxel)

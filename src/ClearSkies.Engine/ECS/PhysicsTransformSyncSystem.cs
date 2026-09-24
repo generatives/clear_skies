@@ -8,7 +8,8 @@ namespace ClearSkies.Engine.ECS;
 /// Post-physics: copies each <see cref="PhysicsBodyComponent"/> body's pose into its entity's
 /// <see cref="Transform"/> (position and rotation; scale is left alone). Runs right after
 /// <see cref="PhysicsWorld"/> steps and before anything that reads those Transforms this tick
-/// (<see cref="ChunkTransformSystem"/>, <see cref="HierarchyTransformSystem"/>, camera follow, rendering).
+/// (<see cref="HierarchyTransformSystem"/>, which carries children such as a grid's chunks along; camera
+/// follow; rendering).
 /// </summary>
 public sealed class PhysicsTransformSyncSystem : ISystem
 {

@@ -13,7 +13,7 @@ namespace ClearSkies.Engine.Voxels;
 /// The body itself is a <see cref="PhysicsBodyComponent"/> on the same entity, added by PhysicsBodySystem once
 /// the grid has a solid block. Like any body its pose is synced into the entity's <see cref="Transform"/>, which
 /// therefore sits at the grid's centre of mass; the volume's <see cref="ChunkVolume.Pivot"/> records where that is
-/// in grid-local space. Before the body exists the Transform is simply where the grid was spawned.
+/// in grid-local space, and the grid's chunks follow it as its <see cref="Hierarchy"/> children. Before the body exists the Transform is simply where the grid was spawned.
 /// </summary>
 public struct DynamicGrid
 {

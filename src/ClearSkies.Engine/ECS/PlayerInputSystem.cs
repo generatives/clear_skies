@@ -199,7 +199,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
             {
                 if (bestVolume.IsEmpty())
                 {
-                    bestVolume.Root.Dispose();
+                    Hierarchy.DestroyRecursive(bestVolume.Root); // its chunks with it
                     HideFace(); // the outlined face no longer has a volume behind it
                 }
                 else

@@ -303,7 +303,7 @@ public sealed class AirshipFlightSystem : ISystem
     }
 
     // World-space offset from centre of mass for a chunk-local voxel — the same rigid transform
-    // ChunkVolume.VoxelToWorld places chunks with: world = bodyPos + R·(localCentre - centreOfMass).
+    // ChunkVolume.VoxelToWorld maps voxels with: world = bodyPos + R·(localCentre - centreOfMass).
     private static Vector3 LocalOffset(int lx, int ly, int lz, Vector3 chunkOrigin, Vector3 com, Quaternion rot)
     {
         var localCentre = new Vector3(chunkOrigin.X + lx + 0.5f, chunkOrigin.Y + ly + 0.5f, chunkOrigin.Z + lz + 0.5f);
