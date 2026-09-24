@@ -112,6 +112,18 @@ public class ChunkVolume
         return GetData(cp)?.Get(lx, ly, lz) ?? BlockId.Air;
     }
 
+    /// <summary>The entity of the entity block at a cell (see <see cref="BlockDef.Components"/>), if there is one and
+    /// its chunk is loaded.</summary>
+    public bool TryGetBlockEntity(int x, int y, int z, out Entity entity)
+    {
+        var (cp, lx, ly, lz) = Decompose(x, y, z);
+        if (GetEntry(cp)?.BlockEntities is { } entities && entities.TryGetValue(new Vector3D<int>(lx, ly, lz), out entity)
+            && entity.IsAlive)
+            return true;
+        entity = default;
+        return false;
+    }
+
     public void SetBlock(int x, int y, int z, BlockId id) => SetBlock(x, y, z, id, BlockOrientation.Upright);
 
     public void SetBlock(int x, int y, int z, BlockId id, BlockOrientation orientation)

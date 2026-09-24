@@ -78,12 +78,12 @@ host.AddSystem(new HierarchyTransformSystem(host.World), SystemStage.Logic); // 
 host.AddSystem(new CharacterCameraSyncSystem(host.World), SystemStage.Logic); // reads the capsule's post-physics pose into Transform
 host.AddSystem(gridPilot, SystemStage.Logic);
 host.AddSystem(new PlayerInputSystem(host.World, host.Input, meshSystem, host.Renderer, gridSelection), SystemStage.Logic);
+host.AddSystem(new LeverControlSystem(host.World), SystemStage.Logic); // after PlayerInputSystem, whose clicks drag levers
 var gridPersistence = new GridPersistenceSystem(host.World, meshSystem, host.Physics, gridSelection);
 host.AddSystem(gridPersistence, SystemStage.Logic);
 // The airship-related debug panels above (Pilot/Flight/Save-Load) drew into their own separate "Systems"
 // menu windows; combined here into one "Airship" window so they read as one feature.
 host.AddSystem(new AirshipDebugPanel(gridPilot, airshipFlight, gridPersistence), SystemStage.Logic);
-host.AddSystem(new LeverTestAnimationSystem(host.World), SystemStage.Logic); // test: rocks lever arms
 host.AddSystem(new LambdaSystem(() =>
 {
     if (host.Input.WasKeyPressed(Key.Tab))

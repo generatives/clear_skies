@@ -16,8 +16,10 @@ namespace ClearSkies.Engine.ECS;
 /// <summary>
 /// The single system for all first-person player input: WASD/QE + mouse-look move the camera,
 /// G spawns a single-block dynamic grid in front of it, and left/right click place/break blocks
-/// on whichever volume (static world or dynamic grid) the camera is aimed at. The targeted face is
-/// highlighted and a crosshair is always shown at the screen centre.
+/// on whichever volume (static world or dynamic grid) the camera is aimed at. Left-clicking an
+/// <see cref="Interactive"/> block uses it instead of placing against it: <see cref="BlockInteraction"/>s are
+/// published for it until the button is released. The targeted face is highlighted and a crosshair is always
+/// shown at the screen centre.
 /// </summary>
 public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
 {
@@ -40,6 +42,12 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
     private Vector3D<int> _lastNormal;
     private object?       _lastVolume;
     private bool          _faceVisible;
+
+    // The Interactive block being used, from the click on it until the button is released (see BlockInteraction),
+    // and the last ray sent for it.
+    private bool            _interacting;
+    private Entity          _interactBlock;
+    private Vector3D<float> _interactOrigin, _interactDir;
 
     public Vector3D<int>? TargetBlock  { get; private set; }
     public Vector3D<int>? TargetNormal { get; private set; }
@@ -116,8 +124,22 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
 
         if (!_input.CursorCaptured || !TryGetCameraRay(out var origin, out var dir))
         {
+            EndInteraction();
             HideFace();
             return;
+        }
+
+        // Using an Interactive block: it has the left button until that comes up, following the ray wherever it
+        // points (even off the block, so a drag can overshoot), with no targeting or editing meanwhile.
+        if (_interacting)
+        {
+            if (_interactBlock.IsAlive && _input.IsMouseButtonDown(MouseButton.Left))
+            {
+                PublishInteraction(InteractionPhase.Held, origin, dir);
+                HideFace();
+                return;
+            }
+            EndInteraction();
         }
 
         // Find the nearest hit across every volume (the static world and each dynamic grid), casting the ray in
@@ -159,7 +181,14 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
             Console.WriteLine($"[place] selected block: {_placeBlock}");
         }
 
-        if (_input.WasMouseButtonPressed(MouseButton.Left))
+        if (_input.WasMouseButtonPressed(MouseButton.Left)
+            && bestVolume.TryGetBlockEntity(bestBlock.X, bestBlock.Y, bestBlock.Z, out var block) && block.Has<Interactive>())
+        {
+            _interacting   = true;
+            _interactBlock = block;
+            PublishInteraction(InteractionPhase.Began, origin, dir);
+        }
+        else if (_input.WasMouseButtonPressed(MouseButton.Left))
         {
             var t = bestBlock + bestNormal;
             if (bestVolume.GetBlock(t.X, t.Y, t.Z) == BlockId.Air)
@@ -211,6 +240,24 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
                 }
             }
         }
+    }
+
+    // ── Interaction ──────────────────────────────────────────────────────────
+
+    private void PublishInteraction(InteractionPhase phase, Vector3D<float> origin, Vector3D<float> dir)
+    {
+        _interactOrigin = origin;
+        _interactDir    = dir;
+        _world.Publish(new BlockInteraction(_interactBlock, phase, origin, dir));
+    }
+
+    /// <summary>Ends the current interaction, if any, telling its block with the last ray it was sent.</summary>
+    private void EndInteraction()
+    {
+        if (!_interacting) return;
+        _interacting = false;
+        PublishInteraction(InteractionPhase.Ended, _interactOrigin, _interactDir);
+        _interactBlock = default;
     }
 
     public void Dispose()

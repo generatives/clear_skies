@@ -70,6 +70,7 @@ public sealed class InputManager : IDisposable
     public bool WasKeyPressed(Key key) => !UiWantsKeyboard && _justPressed.Contains(key);
     public System.Numerics.Vector2 ScrollDelta => _scrollDelta;
     public bool WasMouseButtonPressed(MouseButton button) => !UiWantsMouse && _justMousePressed.Contains(button);
+    public bool IsMouseButtonDown(MouseButton button) => !UiWantsMouse && (_mouse?.IsButtonPressed(button) ?? false);
 
     /// <summary>Discards this frame's "just pressed" edge for a button, so later queries this same
     /// frame (e.g. block-editing) don't also react to a click already consumed for something else
