@@ -117,7 +117,7 @@ public sealed class AirshipFlightSystem : ISystem
     private float _leverMaxAccel  = 15f;
 
     // ── propulsion tuning ───────────────────────────────────────────────────
-    private float _fanMaxForce  = 100f;
+    private float _fanMaxForce  = 1000f;
     private float _buoyantForce = 25f;
 
     // When true, every grid gets its control-law force/torque applied directly (no Fan/Buoyant blocks
