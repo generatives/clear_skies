@@ -26,11 +26,11 @@ namespace ClearSkies.Engine.ECS;
 /// <item>Piloted (the grid carries <see cref="PilotedComponent"/>, set by <see cref="GridPilotSystem"/>): forward,
 /// right, vertical and yaw velocity targets from the keyboard, with gravity and Buoyant lift cancelled for it. Levers
 /// are ignored, and the ship's <see cref="Helm"/> heading follows it, so letting go holds the heading it was left at.</item>
-/// <item>Otherwise, the ship's own controls. Its <see cref="Lever"/>s ask for force, not a speed or an acceleration:
-/// each axis' levers (they move together; see <see cref="LeverControlSystem"/>) ask for their setting's fraction of
-/// everything the Fans can push that way, and nothing corrects for anything else acting on the ship, gravity and
-/// Buoyant lift included, so the crew holds it up with a vertical lever, and it coasts when the levers are
-/// upright. It holds its <see cref="Helm"/> heading, which its <see cref="SteeringWheel"/>s turn.</item>
+/// <item>Otherwise, the ship's own controls. Its <see cref="Lever"/>s set an acceleration, which the Fans are asked for
+/// as a force (acceleration × mass), not a speed: each axis' levers (they move together; see
+/// <see cref="LeverControlSystem"/>) ask for their setting's fraction of a fixed maximum acceleration (±15 m/s² by
+/// default) along that axis. Nothing corrects for anything else acting on the ship, gravity and Buoyant lift
+/// included, so the crew holds it up with a vertical lever, and it coasts when the levers are upright. It holds its <see cref="Helm"/> heading, which its <see cref="SteeringWheel"/>s turn.</item>
 /// </list>
 ///
 /// Propulsion allocation solves for Fan thrusts rather than sharing the demand out: it finds each Fan's thrust,
@@ -111,9 +111,9 @@ public sealed class AirshipFlightSystem : ISystem
     private float _yawGain      = 2f;
 
     // Not piloted: heading hold (acceleration-space, like the gains above; the yaw-rate damping is _yawGain), and
-    // what a full lever asks for in free-propulsion mode, where there are no Fans to ask everything of.
-    private float _headingGain      = 1f;
-    private float _freeLeverAccel   = 20f;
+    // the acceleration a lever asks for at full (m/s²).
+    private float _headingGain    = 1f;
+    private float _leverMaxAccel  = 15f;
 
     // ── propulsion tuning ───────────────────────────────────────────────────
     private float _fanMaxForce  = 100f;
@@ -296,9 +296,9 @@ public sealed class AirshipFlightSystem : ISystem
     /// above (as <see cref="Helm.TargetHeading"/>).</summary>
     private static float Heading(Vector3 forward) => MathF.Atan2(-forward.X, -forward.Z);
 
-    /// <summary>The force a ship's <see cref="Lever"/>s ask for, in world space. Each of its three axes (the lines
-    /// its levers lever along) asks for its levers' setting (their average, though they move together) times
-    /// everything the ship's Fans could push that way (a fixed acceleration of the ship in free-propulsion mode).</summary>
+    /// <summary>The force a ship's <see cref="Lever"/>s ask for, in world space: along each of its three axes (the
+    /// lines its levers lever along), its levers' setting (their average, though they move together) times the
+    /// maximum lever acceleration, times the ship's mass.</summary>
     private Vector3 LeverForce(ShipBlocks blocks, Quaternion rot, float mass)
     {
         Span<float> sum   = stackalloc float[3];
@@ -310,30 +310,15 @@ public sealed class AirshipFlightSystem : ISystem
             count[axis]++;
         }
 
-        var force = Vector3.Zero;
+        var accel = Vector3.Zero; // in the ship's own space
         for (int axis = 0; axis < 3; axis++)
         {
             if (count[axis] == 0) continue;
-            float setting = sum[axis] / count[axis];
-            if (setting == 0f) continue;
-
-            // The axis' own direction (its north face, east face or top), turned the way the setting asks.
+            // The axis' own direction: its north face, east face or top.
             var local = ((Direction)(axis * 2)).ToVector();
-            var dir = Vector3.Transform(new Vector3(local.X, local.Y, local.Z), rot) * MathF.Sign(setting);
-            float available = _freePropulsion ? _freeLeverAccel * mass : FanCapacity(blocks.Fans, rot, dir);
-            force += MathF.Abs(setting) * available * dir;
+            accel += sum[axis] / count[axis] * _leverMaxAccel * new Vector3(local.X, local.Y, local.Z);
         }
-        return force;
-    }
-
-    /// <summary>The most force <paramref name="fans"/> could push along world direction <paramref name="dir"/>
-    /// (a unit vector): every Fan's full thrust, counting only the part of it along <paramref name="dir"/>.</summary>
-    private float FanCapacity(List<BlockRef> fans, Quaternion rot, Vector3 dir)
-    {
-        float capacity = 0f;
-        foreach (var fan in fans)
-            capacity += MathF.Max(0f, Vector3.Dot(ThrustDirection(fan, rot), dir)) * _fanMaxForce;
-        return capacity;
+        return Vector3.Transform(accel, rot) * mass;
     }
 
     private float ForwardInput()
@@ -516,7 +501,7 @@ public sealed class AirshipFlightSystem : ISystem
         ImGui.Separator();
         ImGui.Text("Ship's controls (not piloted)");
         ImGui.SliderFloat("Heading gain", ref _headingGain, 0f, 20f);
-        ImGui.SliderFloat("Free-propulsion lever accel", ref _freeLeverAccel, 0f, 50f);
+        ImGui.SliderFloat("Full lever accel (m/s²)", ref _leverMaxAccel, 0f, 50f);
         ImGui.Separator();
         ImGui.Checkbox("Free propulsion (no blocks needed)", ref _freePropulsion);
         ImGui.BeginDisabled(_freePropulsion);
