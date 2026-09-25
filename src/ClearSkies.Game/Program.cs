@@ -70,6 +70,10 @@ var gridStore = new GridStore(host.Context, (int)((long)LightBudgetMb * 1024 * 1
 var chunkLoadSystem = new ChunkLoadSystem(host.World, staticVolume, gridStore, generatorFactory,
                                           ViewDistance, MinChunkY, "Hearts15");
 host.AddSystem(chunkLoadSystem, SystemStage.Logic);
+// Streamed chunks are meshed once their neighbouring columns are in, not again as each arrives.
+meshSystem.StreamedVolume = staticVolume;
+meshSystem.ColumnSettled = chunkLoadSystem.IsColumnSettled;
+chunkLoadSystem.ColumnLoaded += meshSystem.OnColumnLoaded;
 host.Renderer.AttachGridStore(gridStore);
 host.AddSystem(physicsBody, SystemStage.Logic);
 

@@ -173,7 +173,10 @@ public class ChunkVolume
         return entry;
     }
 
-    public void RemoveChunk(ChunkPosition pos)
+    /// <param name="remeshNeighbours">Whether the neighbours are remeshed to close the faces this chunk covered.
+    /// Streaming passes false: what unloads is farther from the camera than what stays, so those faces point away
+    /// from it, and remeshing for them was wasted work.</param>
+    public void RemoveChunk(ChunkPosition pos, bool remeshNeighbours = true)
     {
         var entry = GetEntry(pos);
         if (entry is null) return;
@@ -183,7 +186,7 @@ public class ChunkVolume
         entry.BlockEntities = null;
 
         _chunks.Remove(pos);
-        MarkNeighboursDirty(pos, entry.Data);
+        if (remeshNeighbours) MarkNeighboursDirty(pos, entry.Data);
     }
 
     private protected ChunkEntry EnsureChunk(ChunkPosition pos) =>

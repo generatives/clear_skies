@@ -76,6 +76,75 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     {
         if (e.Has<ChunkRenderData>() && e.Get<ChunkRenderData>().Mesh is { } mesh)
             _removed.Add(mesh);
+        _waited.Remove(e);
+        if (e.Has<Chunk>() && _parked.Count > 0)
+        {
+            var pos = e.Get<Chunk>().Entry.Position;
+            if (_parked.TryGetValue((pos.X, pos.Z), out var list) && list.Remove(e))
+            {
+                _parkedCount--;
+                if (list.Count == 0) _parked.Remove((pos.X, pos.Z));
+            }
+        }
+    }
+
+    // ── Waiting for neighbours ─────────────────────────────────────────────
+    //
+    // A streamed chunk's mesh depends on its neighbours (a face against a missing one is drawn, as if open to the
+    // air), and its horizontal neighbours arrive in other columns, later. Meshed as soon as it loaded, a chunk at the
+    // edge of the loaded world was meshed again as each neighbouring column came in, and again when one was evicted.
+    // So a streamed chunk waits (parked, without its remesh flag) until the four columns beside it have finished
+    // loading, or MaxParkSeconds at most: where loading has stopped (the light budget is full) the columns beyond
+    // never come, and the edge of the loaded world must still show through the fog.
+
+    /// <summary>The streamed volume (the static world), whose chunks wait for their neighbouring columns; and whether
+    /// a column has finished loading (see ChunkLoadSystem.IsColumnSettled). Unset: nothing waits.</summary>
+    public ChunkVolume? StreamedVolume { get; set; }
+    public Func<int, int, bool>? ColumnSettled { get; set; }
+
+    private const double MaxParkSeconds = 1.5;
+    private readonly Dictionary<(int x, int z), List<Entity>> _parked = new();
+    private readonly Queue<(Entity E, int X, int Z, long Until)> _parkOrder = new(); // oldest first, for the time limit
+    private readonly HashSet<Entity> _waited = new(); // woken by the time limit: meshed next without waiting again
+    private int _parkedCount, _remeshes, _meshes;
+
+    private bool NeighboursSettled(ChunkPosition p)
+        => ColumnSettled!(p.X - 1, p.Z) && ColumnSettled(p.X + 1, p.Z) && ColumnSettled(p.X, p.Z - 1) && ColumnSettled(p.X, p.Z + 1);
+
+    /// <summary>Column (x, z) finished loading: the parked chunks beside it whose neighbours are now all in are
+    /// queued for meshing.</summary>
+    public void OnColumnLoaded(int x, int z)
+    {
+        if (_parkedCount == 0) return;
+        Wake(x - 1, z); Wake(x + 1, z); Wake(x, z - 1); Wake(x, z + 1);
+    }
+
+    /// <summary>Meshes the chunks that have waited <see cref="MaxParkSeconds"/>.</summary>
+    private void WakeExpired()
+    {
+        long now = System.Diagnostics.Stopwatch.GetTimestamp();
+        while (_parkOrder.TryPeek(out var p) && p.Until <= now)
+        {
+            _parkOrder.Dequeue();
+            if (!_parked.TryGetValue((p.X, p.Z), out var list) || !list.Remove(p.E)) continue; // woken already
+            _parkedCount--;
+            if (list.Count == 0) _parked.Remove((p.X, p.Z));
+            if (p.E.IsAlive) { p.E.Set<NeedsRemeshFlag>(); _waited.Add(p.E); }
+        }
+    }
+
+    private void Wake(int x, int z)
+    {
+        if (!_parked.TryGetValue((x, z), out var list)) return;
+        for (int i = list.Count - 1; i >= 0; i--)
+        {
+            var e = list[i];
+            if (e.IsAlive && e.Has<Chunk>() && !NeighboursSettled(e.Get<Chunk>().Entry.Position)) continue;
+            if (e.IsAlive) e.Set<NeedsRemeshFlag>();
+            list.RemoveAt(i);
+            _parkedCount--;
+        }
+        if (list.Count == 0) _parked.Remove((x, z));
     }
 
     public void Update(float dt)
@@ -87,6 +156,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
             foreach (var e in _meshedChunks.GetEntities().ToArray()) e.Set<NeedsRemeshFlag>();
         _wireframe = wireframe;
 
+        WakeExpired();
         long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
         ApplyResults();
         long t1 = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -178,6 +248,21 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
             }
 
             entry.Entity.Remove<NeedsRemeshFlag>();
+
+            if (volume == StreamedVolume && ColumnSettled != null && !_waited.Remove(e) && !NeighboursSettled(pos))
+            {
+                if (!_parked.TryGetValue((pos.X, pos.Z), out var list)) _parked[(pos.X, pos.Z)] = list = new List<Entity>();
+                if (!list.Contains(e))
+                {
+                    list.Add(e);
+                    _parkedCount++;
+                    _parkOrder.Enqueue((e, pos.X, pos.Z, System.Diagnostics.Stopwatch.GetTimestamp()
+                                                         + (long)(MaxParkSeconds * System.Diagnostics.Stopwatch.Frequency)));
+                }
+                continue;
+            }
+            _meshes++;
+            if (e.Has<ChunkRenderData>()) _remeshes++;
 
             _inFlight += 1;
 
@@ -352,6 +437,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                    $"freeing meshes {_cleanupMs:F2} ms");
         ImGui.Text($"Upload (main thread, smoothed): {_uploadMs:F2} ms per chunk " +
                    $"(creating the buffer {_createMs:F2} ms, writing it {_writeMs:F2} ms, {_uploadKb:F0} KB)");
-        ImGui.Text($"Chunks meshed (lifetime): {_totalMeshed}");
+        ImGui.Text($"Chunks meshed (lifetime): {_totalMeshed}; of the jobs, {_remeshes:N0} of {_meshes:N0} were remeshes");
+        ImGui.Text($"Waiting for neighbouring columns to load: {_parkedCount:N0} chunks");
     }
 }

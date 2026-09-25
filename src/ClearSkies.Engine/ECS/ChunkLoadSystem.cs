@@ -125,6 +125,18 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     /// queued or loading, or else the view distance, eased over time. Fog should be total by here.</summary>
     public float FogDistance => _fogDistance;
 
+    /// <summary>Raised when a column's chunks have all been loaded (or found to be air).</summary>
+    public event Action<int, int>? ColumnLoaded;
+
+    /// <summary>Whether column (x, z) has nothing left to load: none of its chunks missing or being loaded. A column
+    /// beyond the view distance never loads, so it counts as settled.</summary>
+    public bool IsColumnSettled(int x, int z)
+    {
+        if (!InView(x, z)) return true;
+        if (_inFlight.ContainsKey((x, z))) return false;
+        return !Missing(x, z).Any();
+    }
+
     /// <param name="store">The GPU store the world's chunks go to: its light budget limits what's loaded.</param>
     /// <param name="viewDistance">How far out chunks are streamed, in blocks (horizontally), as far as the budget
     /// reaches. The GridStore's world index must fit it: see <see cref="WorldIndexDim"/>.</param>
@@ -216,6 +228,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
                 // Dropped if the camera moved on while it generated, or an edit created the chunk meanwhile.
                 if (InView(pos.X, pos.Z) && !_staticVolume.IsLoaded(pos)) _staticVolume.AddChunk(pos, data);
             }
+            ColumnLoaded?.Invoke(job.Column.x, job.Column.z);
         }
 
         if (!CameraUtil.TryGetActive(_cameras, out var cam)) return;
@@ -460,7 +473,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         {
             SaveIfDirty(pos, entry);
         }
-        _staticVolume.RemoveChunk(pos);
+        _staticVolume.RemoveChunk(pos, remeshNeighbours: false);
     }
 
     /// <summary>Writes every currently loaded chunk with unsaved edits to disk. Called by the periodic autosave and
