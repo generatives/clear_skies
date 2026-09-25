@@ -56,6 +56,11 @@ public class ChunkVolume
     }
     private Vector3D<float> _pivot;
 
+    /// <summary>The chunk layers <see cref="SetBlock(int, int, int, BlockId, BlockOrientation)"/> may change
+    /// (inclusive); an edit outside them does nothing. Unlimited by default. ChunkLoadSystem limits the static world to
+    /// the layers it streams, since a chunk built outside them would be unloaded and never come back.</summary>
+    public (int Min, int Max) EditableLayers { get; set; } = (int.MinValue, int.MaxValue);
+
     /// <summary>Current axis-aligned bounding box of loaded chunks (inclusive).</summary>
     internal ChunkPosition BoundsMin { get; private set; }
     internal ChunkPosition BoundsMax { get; private set; }
@@ -129,6 +134,7 @@ public class ChunkVolume
     public void SetBlock(int x, int y, int z, BlockId id, BlockOrientation orientation)
     {
         var (cp, lx, ly, lz) = Decompose(x, y, z);
+        if (cp.Y < EditableLayers.Min || cp.Y > EditableLayers.Max) return;
         var entry = EnsureChunk(cp);
 
         entry.Data.Set(lx, ly, lz, id, orientation);

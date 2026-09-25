@@ -107,7 +107,8 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     /// <param name="minChunkY">Lowest chunk layer the generator fills.</param>
     /// <param name="maxChunkY">Highest chunk layer the generator fills. Streaming reaches <see cref="LayersBelow"/>
     /// layers under <paramref name="minChunkY"/> and the rest of 64 above; outside the generated layers it loads only
-    /// chunks that something was built in.</param>
+    /// chunks that something was built in. Edits to the static world outside those 64 layers are refused (see
+    /// <see cref="ChunkVolume.EditableLayers"/>).</param>
     public ChunkLoadSystem(World world, ChunkVolume staticVolume, Func<IWorldGenerator> generatorFactory, string surveyKey,
                            int regionChunkShift, int chunkBudget, int minChunkY, int maxChunkY)
     {
@@ -128,6 +129,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         _budget       = chunkBudget;
         _minY         = minChunkY - LayersBelow;
         _generated    = ((1UL << generatedLayers) - 1) << LayersBelow;
+        _staticVolume.EditableLayers = (_minY, _minY + 63); // only what streaming can load back
         _offsetsByDistance = BuildOffsetsByDistance((3 << regionChunkShift) / 2);
     }
 
