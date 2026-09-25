@@ -40,9 +40,9 @@ public struct Interactive
 {
 }
 
-/// <summary>A lever: an arm the player drags across its range (see <see cref="LeverControlSystem"/>). On a ship it sets
-/// the speed along the axis it levers on (see <see cref="AirshipFlightSystem"/>): at 1, top speed towards the lever's
-/// north face; at -1, towards its south face; upright, still. A ship's levers on the same axis move together.</summary>
+/// <summary>A lever: an arm the player drags across its range (see <see cref="LeverControlSystem"/>). On a ship it asks
+/// for force along the axis it levers on (see <see cref="AirshipFlightSystem"/>): at 1, the full lever force towards
+/// the lever's north face; at -1, towards its south face; upright, none. A ship's levers on the same axis move together.</summary>
 public struct Lever
 {
     /// <summary>Where the arm is set, from -1 (fully to one side) through 0 (upright) to 1 (fully to the other).

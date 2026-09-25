@@ -21,17 +21,21 @@ namespace ClearSkies.Engine.ECS;
 /// per-tick computation. Runs before <see cref="PhysicsWorld"/> steps, so impulses are integrated the
 /// same tick they're computed.
 ///
-/// The control law always self-levels (pitch/roll), cancels gravity and the ship's Buoyant lift (feedforward), and
-/// tracks forward, right, vertical and yaw velocity targets, so anything else pushing the ship is corrected for. The
-/// targets come from:
+/// The control law always self-levels (pitch/roll) and cancels gravity and the ship's Buoyant lift (feedforward). Past
+/// that it has two modes:
 /// <list type="bullet">
-/// <item>the keyboard while piloted (the grid carries <see cref="PilotedComponent"/>, set by
-/// <see cref="GridPilotSystem"/>), when the ship's own controls are ignored;</item>
-/// <item>otherwise the ship's own controls. Its <see cref="Lever"/>s set the forward, right and vertical targets:
-/// each axis' levers (they move together; see <see cref="LeverControlSystem"/>) ask for their setting, squared so it
-/// ramps up (fine near upright), as a fraction of that axis' top speed. Its <see cref="SteeringWheel"/>s set the yaw
-/// rate the same way, clockwise to starboard. With every lever upright and the wheel centred, the ship holds still.</item>
+/// <item>Piloted (the grid carries <see cref="PilotedComponent"/>, set by <see cref="GridPilotSystem"/>): forward,
+/// right, vertical and yaw velocity targets from the keyboard. The ship's own controls are ignored.</item>
+/// <item>Otherwise, the ship's own controls. Its <see cref="Lever"/>s ask for force: each axis' levers (they move
+/// together; see <see cref="LeverControlSystem"/>) ask for their setting, squared so it ramps up (fine near upright),
+/// as a fraction of a tunable maximum force along that axis. Nothing tracks a speed: the ship speeds up until air
+/// resistance (below) matches the levers' force. Its <see cref="SteeringWheel"/>s set a yaw rate target the same
+/// way, clockwise to starboard.</item>
 /// </list>
+///
+/// Every unlocked grid also feels air resistance, a drag force against its velocity growing with the square of its
+/// speed, so a steady force gives a top speed (where the drag matches it) and a ship left alone slows to a stop. It's
+/// part of the world, not the controls: applied directly, not through the Fans.
 ///
 /// Propulsion allocation solves for Fan thrusts rather than sharing the demand out: it finds each Fan's thrust,
 /// between 0 and the Fan's max (Fans only push), so that together they produce the desired force and torque as
@@ -107,6 +111,13 @@ public sealed class AirshipFlightSystem : ISystem
     private float _rightSpeedTarget    = 8f;
     private float _verticalSpeedTarget = 5f;
     private float _yawRateTarget       = 1.2f; // rad/s
+
+    // Not piloted: the force (N) a lever asks for at full, along its axis.
+    private float _leverMaxForce = 500f;
+
+    // Air resistance: drag force = this × speed², against the velocity. With a lever's full force F, top speed is
+    // √(F / this): 10 m/s at the defaults.
+    private float _dragCoefficient = 5f;
 
     private float _forwardGain  = 3f;
     private float _rightGain    = 3f;
@@ -220,8 +231,24 @@ public sealed class AirshipFlightSystem : ISystem
             // grid is (F = m·a) — torque uses the same scalar as an approximation (real rotational
             // inertia is a tensor, not a scalar, but this is close enough for a prototype and keeps
             // yaw/self-level similarly mass-independent in feel).
-            var desiredForce  = (forwardForce + rightForce + verticalForce) * mass;
             var desiredTorque = (tiltTorque + yawTorque) * mass;
+            Vector3 desiredForce;
+            if (piloted)
+            {
+                desiredForce = (forwardForce + rightForce + verticalForce) * mass;
+            }
+            else
+            {
+                // The levers' force along the ship's own axes, on top of cancelling gravity and Buoyant lift; no
+                // speed tracking (air resistance sets the top speed).
+                var leverForce = (controls.X * forward + controls.Y * right + controls.Z * gridUp) * _leverMaxForce;
+                desiredForce = leverForce - (_physics.Gravity + buoyantAccel * worldUp) * mass;
+            }
+
+            // Air resistance, straight onto the body: part of the world, not something the Fans deliver.
+            float speed = linVel.Length();
+            if (speed > 1e-4f)
+                _physics.ApplyLinearImpulse(body, -_dragCoefficient * speed * linVel * dt);
 
             // Feedforward, like the Buoyant force above: cancel the torque this grid's Buoyant lift adds about its
             // centre of mass, so the self-level term isn't left fighting it with a steady tilt.
@@ -275,8 +302,8 @@ public sealed class AirshipFlightSystem : ISystem
         _lastFreePropelled   = freePropelled;
     }
 
-    /// <summary>A ship's own controls, as fractions (-1 to 1) of its top speeds: forward, right and vertical from its
-    /// <see cref="Lever"/>s (each axis' levers' setting, their average though they move together), and yaw
+    /// <summary>A ship's own controls, as fractions (-1 to 1): forward, right and vertical (of the full lever force) from
+    /// its <see cref="Lever"/>s (each axis' levers' setting, their average though they move together), and yaw
     /// (anticlockwise from above, like <see cref="YawInput"/>) from its <see cref="SteeringWheel"/>s, clockwise to
     /// starboard. Each is squared, keeping its sign, so it ramps up: half-way asks for a quarter.</summary>
     private static Vector4 ShipControls(ShipBlocks blocks)
@@ -512,7 +539,12 @@ public sealed class AirshipFlightSystem : ISystem
         ImGui.SliderFloat("Level gain", ref _levelGain, 0f, 20f);
         ImGui.SliderFloat("Level damping", ref _levelDamp, 0f, 10f);
         ImGui.Separator();
-        ImGui.Text("Top speeds (keyboard while piloted, levers and wheel otherwise)");
+        ImGui.Text("Ship's controls (not piloted)");
+        ImGui.SliderFloat("Full lever force (N)", ref _leverMaxForce, 0f, 20000f);
+        ImGui.SliderFloat("Air resistance", ref _dragCoefficient, 0f, 100f);
+        ImGui.Text($"Top speed at full lever: {MathF.Sqrt(_leverMaxForce / MathF.Max(_dragCoefficient, 1e-4f)):0.0} m/s");
+        ImGui.Separator();
+        ImGui.Text("Top speeds (keyboard while piloted; yaw rate also the wheel's)");
         ImGui.SliderFloat("Forward speed", ref _forwardSpeedTarget, 0f, 30f);
         ImGui.SliderFloat("Right speed", ref _rightSpeedTarget, 0f, 30f);
         ImGui.SliderFloat("Vertical speed", ref _verticalSpeedTarget, 0f, 30f);
