@@ -29,12 +29,14 @@ namespace ClearSkies.Engine.ECS;
 /// <item>Otherwise, the ship's own controls. Its <see cref="Lever"/>s ask for force: each axis' levers (they move
 /// together; see <see cref="LeverControlSystem"/>) ask for their setting, squared so it ramps up (fine near upright),
 /// as a fraction of a tunable maximum force along that axis. Nothing tracks a speed: the ship speeds up until air
-/// resistance (below) matches the levers' force. Its <see cref="SteeringWheel"/>s set a yaw rate target the same
-/// way, clockwise to starboard.</item>
+/// resistance (below) matches the levers' force. Its <see cref="SteeringWheel"/>s ask for turning force (torque about
+/// world up) the same way, clockwise to starboard: the ship's turn speeds up until air resistance on its rotation
+/// matches, and coasts to a stop when the wheel is centred.</item>
 /// </list>
 ///
 /// Every unlocked grid also feels air resistance, a drag force against its velocity growing with the square of its
-/// speed, so a steady force gives a top speed (where the drag matches it) and a ship left alone slows to a stop. It's
+/// speed, and a drag torque against its spin growing with the square of its turn rate, so a steady force or torque
+/// gives a top speed or turn rate (where the drag matches it) and a ship left alone slows to a stop. It's
 /// part of the world, not the controls: applied directly, not through the Fans.
 ///
 /// Propulsion allocation solves for Fan thrusts rather than sharing the demand out: it finds each Fan's thrust,
@@ -115,9 +117,16 @@ public sealed class AirshipFlightSystem : ISystem
     // Not piloted: the force (N) a lever asks for at full, along its axis.
     private float _leverMaxForce = 500f;
 
+    // Not piloted: the torque (N·m) the wheel asks for at full, about world up.
+    private float _wheelMaxTorque = 500f;
+
     // Air resistance: drag force = this × speed², against the velocity. With a lever's full force F, top speed is
     // √(F / this): 10 m/s at the defaults.
     private float _dragCoefficient = 5f;
+
+    // Air resistance on rotation: drag torque = this × turn rate², against the spin. With the wheel's full torque T,
+    // top turn rate is √(T / this): 1 rad/s at the defaults.
+    private float _angularDragCoefficient = 500f;
 
     private float _forwardGain  = 3f;
     private float _rightGain    = 3f;
@@ -231,7 +240,11 @@ public sealed class AirshipFlightSystem : ISystem
             // grid is (F = m·a) — torque uses the same scalar as an approximation (real rotational
             // inertia is a tensor, not a scalar, but this is close enough for a prototype and keeps
             // yaw/self-level similarly mass-independent in feel).
-            var desiredTorque = (tiltTorque + yawTorque) * mass;
+            // Piloted, yaw tracks a rate target; otherwise the wheel's torque, with no rate tracking (air resistance on
+            // rotation sets the top turn rate).
+            var desiredTorque = piloted
+                ? (tiltTorque + yawTorque) * mass
+                : tiltTorque * mass + controls.W * _wheelMaxTorque * worldUp;
             Vector3 desiredForce;
             if (piloted)
             {
@@ -249,6 +262,9 @@ public sealed class AirshipFlightSystem : ISystem
             float speed = linVel.Length();
             if (speed > 1e-4f)
                 _physics.ApplyLinearImpulse(body, -_dragCoefficient * speed * linVel * dt);
+            float spin = angVel.Length();
+            if (spin > 1e-4f)
+                _physics.ApplyAngularImpulse(body, -_angularDragCoefficient * spin * angVel * dt);
 
             // Feedforward, like the Buoyant force above: cancel the torque this grid's Buoyant lift adds about its
             // centre of mass, so the self-level term isn't left fighting it with a steady tilt.
@@ -304,7 +320,8 @@ public sealed class AirshipFlightSystem : ISystem
 
     /// <summary>A ship's own controls, as fractions (-1 to 1): forward, right and vertical (of the full lever force) from
     /// its <see cref="Lever"/>s (each axis' levers' setting, their average though they move together), and yaw
-    /// (anticlockwise from above, like <see cref="YawInput"/>) from its <see cref="SteeringWheel"/>s, clockwise to
+    /// (of the full wheel torque, anticlockwise from above, like <see cref="YawInput"/>) from its
+    /// <see cref="SteeringWheel"/>s, clockwise to
     /// starboard. Each is squared, keeping its sign, so it ramps up: half-way asks for a quarter.</summary>
     private static Vector4 ShipControls(ShipBlocks blocks)
     {
@@ -543,8 +560,11 @@ public sealed class AirshipFlightSystem : ISystem
         ImGui.SliderFloat("Full lever force (N)", ref _leverMaxForce, 0f, 20000f);
         ImGui.SliderFloat("Air resistance", ref _dragCoefficient, 0f, 100f);
         ImGui.Text($"Top speed at full lever: {MathF.Sqrt(_leverMaxForce / MathF.Max(_dragCoefficient, 1e-4f)):0.0} m/s");
+        ImGui.SliderFloat("Full wheel torque (N·m)", ref _wheelMaxTorque, 0f, 20000f);
+        ImGui.SliderFloat("Rotation air resistance", ref _angularDragCoefficient, 0f, 5000f);
+        ImGui.Text($"Top turn rate at full wheel: {MathF.Sqrt(_wheelMaxTorque / MathF.Max(_angularDragCoefficient, 1e-4f)):0.00} rad/s");
         ImGui.Separator();
-        ImGui.Text("Top speeds (keyboard while piloted; yaw rate also the wheel's)");
+        ImGui.Text("Top speeds (keyboard while piloted)");
         ImGui.SliderFloat("Forward speed", ref _forwardSpeedTarget, 0f, 30f);
         ImGui.SliderFloat("Right speed", ref _rightSpeedTarget, 0f, 30f);
         ImGui.SliderFloat("Vertical speed", ref _verticalSpeedTarget, 0f, 30f);

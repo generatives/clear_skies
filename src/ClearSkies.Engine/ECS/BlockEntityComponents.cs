@@ -52,8 +52,9 @@ public struct Lever
 }
 
 /// <summary>A ship's wheel: the player grabs its rim and turns it (see <see cref="SteeringWheelControlSystem"/>), and
-/// the ship turns at a rate set by how far it's turned (see <see cref="AirshipFlightSystem"/>): clockwise (as seen
-/// from its north face, where the player who placed it stands) to starboard, faster the further it's turned. A
+/// the ship is pushed round by a turning force set by how far it's turned (see <see cref="AirshipFlightSystem"/>):
+/// clockwise (as seen from its north face, where the player who placed it stands) to starboard, harder the further
+/// it's turned. A
 /// ship's wheels turn together.</summary>
 public struct SteeringWheel
 {
