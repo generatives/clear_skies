@@ -26,15 +26,22 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     // Wobble of a block's position before finding its nearest heart, in blocks: across, and up and down.
     private const float WarpAcross = 18f, WarpUp = 6f, WarpFrequency = 0.012f;
 
-    // Crack half-widths, in the scaled space nearest hearts are found in (a horizontal crack is VerticalScale times
-    // thinner): narrow in the floor, wider higher up, varied by noise.
-    private const float FloorCrack = 10f, UpperCrack = 14f;
+    // How far each piece is worn back from its faces, in blocks, so there are cracks twice that wide between
+    // neighbouring pieces and small or thin pieces wear away altogether: across (from side faces) and up and down (from
+    // top and bottom faces), in the floor and higher up, varied by noise.
+    private const float FloorWear = 12f, UpperWear = 16f, FloorWearUp = 9f, UpperWearUp = 12f;
 
-    // Cracks widen from FloorCrack to UpperCrack over CrackOver blocks from CrackFrom above the floor's top: at most
-    // (UpperCrack - FloorCrack) * 1.5 / CrackOver per block (a smoothstep's steepest), times 1.4 for crack noise, so
-    // by under CrackSlack over CrackStepMax blocks.
+    /// <summary>How far round a piece's edges and corners are worn, in scaled space (see Solid).</summary>
+    private const float Rounding = 6f;
+
+    // Wear grows from the floor's to the upper over CrackOver blocks from CrackFrom above the floor's top: at most
+    // (UpperWearUp - FloorWearUp) * VerticalScale * 1.5 / CrackOver per block (a smoothstep's steepest), times 1.4
+    // for noise, so by under CrackSlack over CrackStepMax blocks.
     private const float CrackFrom = -20f, CrackOver = 220f;
     private const int CrackStepMax = 18;
+
+    /// <summary>Solid runs thinner than this are worn away: slivers where the terrain surface just grazes a piece.</summary>
+    private const int MinThickness = 6;
 
     /// <summary>How far above <see cref="HeartGrid.LowestBottom"/> the world's rough bottom reaches.</summary>
     private const float BottomRoughness = 30f;
@@ -158,7 +165,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             float px = wx + WarpAcross * _warpX.GetNoise(wx, wz);
             float pz = wz + WarpAcross * _warpZ.GetNoise(wx, wz);
             float lift = WarpUp * _warpY.GetNoise(wx, wz);
-            float crackNoise = 0.6f + 0.4f * (_crack.GetNoise(wx, wz) + 1f);
+            float wearNoise = 0.6f + 0.4f * (_crack.GetNoise(wx, wz) + 1f);
 
             // Up the column, skipping as far as nothing can change: each test also says how many blocks further up it
             // could, at the nearest piece face or crack above.
@@ -170,16 +177,19 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 int step = 1;
                 if (y <= yTop)
                 {
-                    solid = Solid(px, (y + lift) * HeartGrid.VerticalScale, pz, Crack(y) * crackNoise + CrackSlack, out float clear);
+                    float t = WearBlend(y);
+                    float across = (FloorWear + (UpperWear - FloorWear) * t) * wearNoise + CrackSlack;
+                    float up = (FloorWearUp + (UpperWearUp - FloorWearUp) * t) * wearNoise * HeartGrid.VerticalScale + CrackSlack;
+                    solid = Solid(px, (y + lift) * HeartGrid.VerticalScale, pz, across, up, out float clear);
                     step = System.Math.Max(1, (int)clear);
-                    // Where cracks widen with height, not so far that they widen by more than CrackSlack.
+                    // Where wear grows with height, not so far that it grows by more than CrackSlack.
                     if (y > HeartGrid.FloorTop + CrackFrom && y < HeartGrid.FloorTop + CrackFrom + CrackOver)
                         step = System.Math.Min(step, CrackStepMax);
                 }
                 if (solid && runLo == int.MinValue) runLo = y;
                 else if (!solid && runLo != int.MinValue)
                 {
-                    if (spans < MaxSpans) _spans[col * MaxSpans + spans++] = ((short)runLo, (short)(y - 1));
+                    if (spans < MaxSpans && y - runLo >= MinThickness) _spans[col * MaxSpans + spans++] = ((short)runLo, (short)(y - 1));
                     runLo = int.MinValue;
                 }
                 y = System.Math.Min(y + step, System.Math.Max(y + 1, yTop + 1));
@@ -191,20 +201,21 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         }
     }
 
-    /// <summary>A crack's half-width at height y: narrow in the floor, wider in the broken ground above.</summary>
-    private static float Crack(float y)
+    /// <summary>0 in the floor to 1 in the broken ground above: how far wear goes from the floor's to the upper.</summary>
+    private static float WearBlend(float y)
     {
         float t = Math.Clamp((y - HeartGrid.FloorTop - CrackFrom) / CrackOver, 0f, 1f);
-        return FloorCrack + (UpperCrack - FloorCrack) * t * t * (3f - 2f * t);
+        return t * t * (3f - 2f * t);
     }
 
-    /// <summary>How much a crack can widen between a test and the blocks it skips (see Crack), in scaled space: tests
-    /// are made with cracks this much wider.</summary>
+    /// <summary>How much wear can grow between a test and the blocks it skips (see WearBlend), in scaled space: tests
+    /// are made with this much more.</summary>
     private const float CrackSlack = 1f;
 
-    /// <summary>Whether the point at scaled position (sx, sy, sz) is in a live piece, clear of the cracks around it, and
-    /// how many blocks straight up it stays so (<paramref name="clear"/>).</summary>
-    private bool Solid(float sx, float sy, float sz, float halfCrack, out float clear)
+    /// <summary>Whether the point at scaled position (sx, sy, sz) is in a live piece, worn back from its faces by
+    /// <paramref name="wearAcross"/> and <paramref name="wearUp"/> (scaled space), and how many blocks straight up it
+    /// stays so (<paramref name="clear"/>).</summary>
+    private bool Solid(float sx, float sy, float sz, float wearAcross, float wearUp, out float clear)
     {
         // The hearts to search: those in the cells around the point in each layer whose band is within a cell of it.
         // Going up, that set changes at the next cell boundary of a searched layer, or where another layer comes
@@ -244,14 +255,20 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         clear = 0f;
         if (bi < 0) return false;
 
-        // Distances to the planes halfway between the nearest heart and each other: its piece's faces. In a live piece
-        // the point is solid if it is at least halfCrack from every face shared with another live piece; it stays so
-        // until it nears one of those, or crosses a face into a dead piece. In a dead piece it stays empty until it
-        // crosses a face into a live one.
-        // A face's distance changes linearly going up: it shrinks only for a face above, at a rate of its normal's
-        // upward part (times VerticalScale per block).
+        // Distances to the planes halfway between the nearest heart and each other: its piece's faces, each less the
+        // wear there (across for a side face, up and down for a top or bottom one, blended between for a slanted
+        // one). In a live piece the point is solid if a smooth minimum of those is positive: worn back from every
+        // face, and further at edges and corners, where faces meet, so they're rounded. In a dead piece it is empty.
+        //
+        // Going up, a face's distance changes linearly, at a rate of its normal's upward part (times VerticalScale per
+        // block): it shrinks for a face above and grows for one below. The smooth minimum changes no faster than its
+        // fastest face, so a solid point stays solid for at least its value over the fastest shrinking rate, and an
+        // empty one in a live piece stays empty for at least minus its value over the fastest growing rate. Either
+        // stays in the same piece until it reaches a face above.
         bool alive = _alive[bi];
-        float nearestLive = float.MaxValue, change = float.MaxValue;
+        float least = float.MaxValue, shrink = 0f, grow = 0f, toFace = float.MaxValue;
+        Span<float> worn = stackalloc float[27 * 3];
+        int faces = 0;
         foreach (int h in near[..count])
         {
             if (h == bi) continue;
@@ -259,15 +276,32 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             float ex = _hx[h] - _hx[bi], ey = _hy[h] - _hy[bi], ez = _hz[h] - _hz[bi];
             float len = MathF.Sqrt(ex * ex + ey * ey + ez * ez);
             float plane = (dx * dx + dy * dy + dz * dz - best) / (2f * len);
-            float until; // how far the face can come before this changes, in scaled space
-            if (alive) until = _alive[h] ? plane - halfCrack : plane;
-            else if (_alive[h]) until = plane; // (no crack between a live piece and a hole)
-            else continue;
-            if (alive && _alive[h]) nearestLive = MathF.Min(nearestLive, plane);
-            if (ey > 0f) change = MathF.Min(change, until * len / (ey * HeartGrid.VerticalScale));
+            float rate = ey / len * HeartGrid.VerticalScale; // how fast the face nears, per block up
+            if (rate > 0f) toFace = MathF.Min(toFace, plane / rate);
+            if (!alive) continue;
+            float upness = ey * ey / (len * len);
+            float f = plane - (wearAcross + (wearUp - wearAcross) * upness);
+            worn[faces++] = f;
+            least = MathF.Min(least, f);
+            if (rate > 0f) shrink = MathF.Max(shrink, rate); else grow = MathF.Max(grow, -rate);
         }
-        bool solid = alive && nearestLive > halfCrack;
-        if (solid || !alive) clear = MathF.Max(MathF.Min(change, setChange), 0f);
+        if (!alive)
+        {
+            clear = MathF.Max(MathF.Min(toFace, setChange), 0f);
+            return false;
+        }
+
+        // Smooth minimum: least - Rounding * ln(sum of e^-(f - least) / Rounding).
+        float sum = 0f;
+        for (int i = 0; i < faces; i++)
+        {
+            float e = (worn[i] - least) / Rounding;
+            if (e < 12f) sum += MathF.Exp(-e);
+        }
+        float soft = faces == 0 ? float.MaxValue : least - Rounding * MathF.Log(sum);
+        bool solid = soft > 0f;
+        float until = solid ? (shrink > 0f ? soft / shrink : float.MaxValue) : (grow > 0f ? -soft / grow : float.MaxValue);
+        clear = MathF.Max(MathF.Min(MathF.Min(until, toFace), setChange), 0f);
         return solid;
     }
 

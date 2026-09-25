@@ -33,12 +33,12 @@ public static class HeartGrid
     public static readonly Layer[] Layers =
     {
         new(150f, float.MinValue, 0f),
-        new(100f, 0f, 400f),
-        new(70f, 400f, float.MaxValue),
+        new(110f, 0f, 400f),
+        new(85f, 400f, float.MaxValue),
     };
 
     /// <summary>How much more a vertical offset counts than a horizontal one when finding a block's nearest heart.</summary>
-    public const float VerticalScale = 2.2f;
+    public const float VerticalScale = 1.6f;
 
     /// <summary>How far a heart may sit from its cell's middle, as a share of the cell: under 1, so no two are
     /// too close together.</summary>
