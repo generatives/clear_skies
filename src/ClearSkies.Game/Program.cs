@@ -104,7 +104,7 @@ host.AddSystem(meshSystem, SystemStage.PreRender);
 host.AddSystem(new BlockModelSystem(host.World, blockModels), SystemStage.PreRender); // block entities -> RenderedModel
 // Rendering: the host opens the frame, runs the render stages (systems in the order added within a stage), then
 // closes it with ImGui and presents. Each render system is handed this frame's camera and time.
-using var clouds = new CloudRenderSystem(host.Renderer);
+using var clouds = new CloudRenderSystem(host.Renderer, new IslandCloudDensity(seed));
 host.AddSystem(new ChunkRenderSystem(host.World, host.Renderer), SystemStage.RenderWorld);
 host.AddSystem(new ModelRenderSystem(host.World, host.Renderer), SystemStage.RenderWorld);
 host.AddSystem(clouds, SystemStage.RenderWorld);

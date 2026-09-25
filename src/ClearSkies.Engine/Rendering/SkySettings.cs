@@ -21,13 +21,18 @@ public static class SkySettings
 
     public static bool CloudsEnabled = true;
 
-    /// <summary>0-1: the fraction of cloud-layer cells that are cloud (see <c>CloudLayer</c>).</summary>
-    public static float CloudCoverage = 0.1f;
+    /// <summary>0-1: the fraction of the sky that is cloud over open sky, far from any island (see <c>CloudLayer</c>
+    /// and <c>ICloudDensityMap</c>).</summary>
+    public static float CloudCoverageOpen = 0.03f;
 
-    /// <summary>World Y of the cloud layer's underside; islands top out well below the default.</summary>
-    public static float CloudAltitude = 300f;
+    /// <summary>0-1: the fraction of the sky that is cloud around islands.</summary>
+    public static float CloudCoverageIslands = 0.4f;
 
-    /// <summary>Blocks per second the cloud layer drifts along +X.</summary>
+    /// <summary>World Y of the middle cloud layer, just above the islands' peaks; the low layer sits under the islands
+    /// and the high one above (see <c>CloudLayer</c>).</summary>
+    public static float CloudAltitude = 320f;
+
+    /// <summary>Blocks per second the middle cloud layer drifts along +X (the others a little slower and faster).</summary>
     public static float WindSpeed = 1.5f;
 
     /// <summary>How far before <see cref="FogDistance"/> the fog starts, in blocks: a fixed width, since the fog

@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
 using ClearSkies.Engine.Math;
 using ClearSkies.Engine.Rendering.WebGpu;
 using Silk.NET.Maths;
@@ -5,142 +7,359 @@ using Silk.NET.Maths;
 namespace ClearSkies.Engine.Rendering;
 
 /// <summary>
-/// Minecraft-style blocky clouds: a flat layer of <see cref="CellSize"/>-block square cells, each either a
-/// <see cref="Thickness"/>-block-thick slab of cloud or empty, drawn as real depth-tested geometry so islands and
-/// ships sort against them properly. The cell pattern is one repeating tile (<see cref="Cells"/>² cells, built from
-/// wrapping value noise so it tiles seamlessly); 3×3 copies around the camera always reach past the cloud fog's
-/// end, and the whole layer drifts along +X with <see cref="SkySettings.WindSpeed"/>.
+/// Minecraft-style blocky clouds in three layers (<see cref="Levels"/>: low under the islands, mid above them, high
+/// and sparse), drawn out to <see cref="Distance"/> blocks as real depth-tested boxes so islands and ships sort
+/// against them properly.
+///
+/// Each layer is a grid of square cells; a cell is either empty or one box, whose underside wanders up and down with a
+/// broad noise field (so clouds sit at different heights) and whose thickness grows towards the middle of each cloud.
+/// How much of the sky is cloud blends between <see cref="SkySettings.CloudCoverageOpen"/> and
+/// <see cref="SkySettings.CloudCoverageIslands"/> by an <see cref="ICloudDensityMap"/>, so clouds bank up around
+/// islands and thin out over empty sky.
+///
+/// Every layer drifts along +X with the wind at its own speed. Cells are generated in each layer's drifting frame, in
+/// tiles of <see cref="TileCells"/>² cells built on worker threads and drawn as one instanced draw each (one instance
+/// per cloud cell, see <see cref="CloudCell"/>). The density map is fixed to the world, though, so a tile is rebuilt
+/// once its layer has drifted <see cref="RebuildDrift"/> blocks since it was built: clouds form upwind of an island
+/// and thin out downwind of it a few cells at a time.
 /// </summary>
 public sealed class CloudLayer : IDisposable
 {
-    public const int   Cells     = 64;
-    public const float CellSize  = 12f;
-    public const float Thickness = 4f;
-    public const float TileSize  = Cells * CellSize;
+    /// <summary>How far clouds are drawn, in blocks from the camera. <see cref="Camera.FarPlane"/> reaches past it.</summary>
+    public const float Distance = 12000f;
 
-    /// <summary>Cloud fog, blocks from the camera: fully faded before the edge of the 3×3 tiles (at least one tile
-    /// away in every direction), so the layer never visibly ends.</summary>
-    public const float FogStart = 0.35f * TileSize;
-    public const float FogEnd   = 0.95f * TileSize;
+    /// <summary>Cloud fog, blocks from the camera: faded out entirely by <see cref="Distance"/>, so the edge never shows.</summary>
+    public const float FogStart = 2500f;
+    public const float FogEnd   = Distance;
 
-    private const int Seed = 0x5EED;
+    public const int TileCells = 256; // cell coordinates in a tile fit a byte (see CloudCell)
 
-    private static readonly Vector3D<float> CloudColor = new(0.97f, 0.98f, 1.0f);
+    private const int   DensityStep  = 8;   // cells between density-map samples (bilinear in between)
+    private const float RebuildDrift = 96f; // blocks a layer drifts before its tiles are rebuilt against the density map
+    private const int   MaxBuilding  = 4;   // tile builds in flight at once
+
+    /// <summary>One cloud layer. Heights are blocks relative to <see cref="SkySettings.CloudAltitude"/>
+    /// + <see cref="AltitudeOffset"/>; <see cref="Spacing"/> is the noise's largest lattice spacing in cells (roughly
+    /// the size of one cloud).</summary>
+    private sealed record Level(string Name, float AltitudeOffset, float CellSize, float MinThickness,
+                                float MaxThickness, float BottomVariation, float CoverageScale, float WindScale,
+                                uint Seed, int Spacing)
+    {
+        public float TileSize => TileCells * CellSize;
+    }
+
+    private static readonly Level[] Levels =
+    {
+        new("low",  -250f, 12f, 4f, 14f, 20f, 1.0f, 0.8f, 0x1C10D, 12),
+        new("mid",     0f, 16f, 4f, 36f, 48f, 0.8f, 1.0f, 0x2C10D, 16),
+        new("high",  260f, 32f, 4f, 10f, 60f, 0.5f, 1.5f, 0x3C10D, 12),
+    };
+
+    /// <summary>One cloud cell (a box), as the cloud shader's instance data. <see cref="Packed"/>: bits 0-7 cell x
+    /// and 8-15 cell z within the tile, 16-19 which side faces to draw (+X, -X, +Z, -Z; a side is skipped where the
+    /// neighbouring box covers it). <see cref="Heights"/>: bottom (low 16 bits) and top (high 16 bits) as signed
+    /// blocks above the layer's altitude.</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    public struct CloudCell
+    {
+        public uint Packed;
+        public uint Heights;
+    }
+
+    private sealed class Tile
+    {
+        public GpuBuffer? Buffer;
+        public uint Count;
+        public bool Built, Building;
+        public double BuiltDrift;
+        public int BuiltVersion;
+    }
+
+    private readonly record struct Built((int Level, int X, int Z) Key, CloudCell[] Cells, int Count, double Drift, int Version);
 
     private readonly Renderer _renderer;
-    private GpuMesh? _mesh;
-    private float _builtCoverage = -1f;
-    private readonly Mat4[] _tiles = new Mat4[9];
+    private readonly ICloudDensityMap? _density;
+    private readonly Dictionary<(int Level, int X, int Z), Tile> _tiles = new();
+    private readonly ConcurrentQueue<Built> _built = new();
+    private readonly List<(int Level, int X, int Z)> _stale = new();
+    private readonly HashSet<(int Level, int X, int Z)> _inRange = new();
+    private readonly List<CloudTileDraw> _draws = new();
+    private readonly double[] _drift = new double[Levels.Length];
+    private double _lastTime = double.NaN;
+    private int _building;
+    private int _version;
+    private (float Open, float Islands) _builtCoverage = (-1f, -1f);
 
-    public CloudLayer(Renderer renderer) => _renderer = renderer;
+    public CloudLayer(Renderer renderer, ICloudDensityMap? density = null)
+    {
+        _renderer = renderer;
+        _density = density;
+    }
 
-    /// <summary>Draws the layer around <paramref name="cameraPos"/>; <paramref name="timeSeconds"/> drives the drift.</summary>
+    public int TileCount => _tiles.Count;
+    public long CellCount { get; private set; }
+
+    /// <summary>Draws the layers around <paramref name="cameraPos"/>; <paramref name="timeSeconds"/> drives the drift.</summary>
     public void Draw(Vector3D<float> cameraPos, double timeSeconds)
     {
-        if (_mesh == null || _builtCoverage != SkySettings.CloudCoverage) Rebuild(SkySettings.CloudCoverage);
-        if (_mesh == null) return; // no cloud cells at this coverage
+        // Integrate the drift (rather than time * speed), so changing the wind speed doesn't jump the clouds.
+        double dt = double.IsNaN(_lastTime) ? 0 : System.Math.Clamp(timeSeconds - _lastTime, 0, 1);
+        _lastTime = timeSeconds;
+        for (int l = 0; l < Levels.Length; l++) _drift[l] += dt * SkySettings.WindSpeed * Levels[l].WindScale;
 
-        // Drift wrapped to one tile in double, so the offset stays precise however long the game runs.
-        float drift = (float)((timeSeconds * SkySettings.WindSpeed) % TileSize);
-        int ci = (int)MathF.Floor((cameraPos.X - drift) / TileSize);
-        int cj = (int)MathF.Floor(cameraPos.Z / TileSize);
+        var coverage = (SkySettings.CloudCoverageOpen, SkySettings.CloudCoverageIslands);
+        if (coverage != _builtCoverage) { _builtCoverage = coverage; _version++; }
 
-        int k = 0;
-        for (int i = -1; i <= 1; i++)
-        for (int j = -1; j <= 1; j++)
-            _tiles[k++] = Mat4.Translation(new Vector3D<float>(
-                (ci + i) * TileSize + drift, SkySettings.CloudAltitude, (cj + j) * TileSize));
-        _renderer.DrawClouds(_mesh, _tiles);
-    }
-
-    private void Rebuild(float coverage)
-    {
-        _mesh?.Dispose();
-        _mesh = null;
-        _builtCoverage = coverage;
-
-        var cloud = BuildPattern(coverage);
-        var verts = new List<Vertex>();
-        var idx   = new List<uint>();
-        for (int z = 0; z < Cells; z++)
-        for (int x = 0; x < Cells; x++)
+        while (_built.TryDequeue(out var b))
         {
-            if (!cloud[x, z]) continue;
-            var min = new Vector3D<float>(x * CellSize, 0f, z * CellSize);
-            var max = min + new Vector3D<float>(CellSize, Thickness, CellSize);
-            var ex = new Vector3D<float>(CellSize, 0, 0);
-            var ey = new Vector3D<float>(0, Thickness, 0);
-            var ez = new Vector3D<float>(0, 0, CellSize);
-
-            // Tops and bottoms always; sides only where the (wrapped) neighbour cell is empty, so a cloud of many
-            // cells reads as one solid shape. Each quad's two edges are ordered so edge1 × edge2 is the outward
-            // normal, which is counter-clockwise from outside (the front face).
-            AddQuad(verts, idx, new(min.X, max.Y, min.Z), ez, ex, new(0, 1, 0));
-            AddQuad(verts, idx, min, ex, ez, new(0, -1, 0));
-            if (!cloud[(x + 1) % Cells, z])         AddQuad(verts, idx, new(max.X, min.Y, min.Z), ey, ez, new(1, 0, 0));
-            if (!cloud[(x + Cells - 1) % Cells, z]) AddQuad(verts, idx, min, ez, ey, new(-1, 0, 0));
-            if (!cloud[x, (z + 1) % Cells])         AddQuad(verts, idx, new(min.X, min.Y, max.Z), ex, ey, new(0, 0, 1));
-            if (!cloud[x, (z + Cells - 1) % Cells]) AddQuad(verts, idx, min, ey, ex, new(0, 0, -1));
+            _building--;
+            if (!_tiles.TryGetValue(b.Key, out var tile)) continue; // went out of range while building
+            tile.Buffer?.Dispose();
+            tile.Buffer = b.Count > 0 ? _renderer.UploadInstances<CloudCell>(b.Cells.AsSpan(0, b.Count)) : null;
+            tile.Count = (uint)b.Count;
+            tile.Built = true; tile.Building = false;
+            tile.BuiltDrift = b.Drift; tile.BuiltVersion = b.Version;
         }
-        if (idx.Count > 0) _mesh = _renderer.UploadMesh(verts.ToArray(), idx.ToArray());
-    }
 
-    private static void AddQuad(List<Vertex> verts, List<uint> idx, Vector3D<float> origin,
-                                Vector3D<float> e1, Vector3D<float> e2, Vector3D<float> normal)
-    {
-        uint b = (uint)verts.Count;
-        verts.Add(new Vertex(origin,           normal, CloudColor));
-        verts.Add(new Vertex(origin + e1,      normal, CloudColor));
-        verts.Add(new Vertex(origin + e1 + e2, normal, CloudColor));
-        verts.Add(new Vertex(origin + e2,      normal, CloudColor));
-        idx.Add(b); idx.Add(b + 1); idx.Add(b + 2);
-        idx.Add(b); idx.Add(b + 2); idx.Add(b + 3);
-    }
-
-    /// <summary>Which cells are cloud: three octaves of wrapping value noise (lattice spacings 16, 8 and 4 cells, so
-    /// the tile repeats seamlessly), thresholded at the quantile that makes exactly <paramref name="coverage"/> of the
-    /// cells cloud.</summary>
-    private static bool[,] BuildPattern(float coverage)
-    {
-        var value = new float[Cells, Cells];
-        (int spacing, float weight)[] octaves = { (16, 0.55f), (8, 0.3f), (4, 0.15f) };
-        var rng = new Random(Seed);
-        foreach (var (spacing, weight) in octaves)
+        _draws.Clear();
+        _stale.Clear();
+        long cells = 0;
+        _inRange.Clear();
+        for (int l = 0; l < Levels.Length; l++)
         {
-            int n = Cells / spacing;
-            var lattice = new float[n, n];
-            for (int a = 0; a < n; a++)
-            for (int b = 0; b < n; b++)
-                lattice[a, b] = rng.NextSingle();
-
-            for (int z = 0; z < Cells; z++)
-            for (int x = 0; x < Cells; x++)
+            var lv = Levels[l];
+            float size = lv.TileSize;
+            double camX = cameraPos.X - _drift[l]; // the camera in this layer's drifting frame
+            double camZ = cameraPos.Z;
+            int x0 = (int)System.Math.Floor((camX - Distance) / size), x1 = (int)System.Math.Floor((camX + Distance) / size);
+            int z0 = (int)System.Math.Floor((camZ - Distance) / size), z1 = (int)System.Math.Floor((camZ + Distance) / size);
+            float altitude = SkySettings.CloudAltitude + lv.AltitudeOffset;
+            for (int tz = z0; tz <= z1; tz++)
+            for (int tx = x0; tx <= x1; tx++)
             {
-                float fx = (x + 0.5f) / spacing, fz = (z + 0.5f) / spacing;
-                int x0 = (int)MathF.Floor(fx), z0 = (int)MathF.Floor(fz);
-                float tx = Smooth(fx - x0), tz = Smooth(fz - z0);
-                float v00 = lattice[x0 % n, z0 % n],             v10 = lattice[(x0 + 1) % n, z0 % n];
-                float v01 = lattice[x0 % n, (z0 + 1) % n],       v11 = lattice[(x0 + 1) % n, (z0 + 1) % n];
-                float v = Lerp(Lerp(v00, v10, tx), Lerp(v01, v11, tx), tz);
-                value[x, z] += weight * v;
+                // Nearest point of the tile to the camera, horizontally.
+                double dx = System.Math.Max(0, System.Math.Max(tx * size - camX, camX - (tx + 1) * size));
+                double dz = System.Math.Max(0, System.Math.Max(tz * size - camZ, camZ - (tz + 1) * size));
+                if (dx * dx + dz * dz > (double)Distance * Distance) continue;
+
+                var key = (l, tx, tz);
+                _inRange.Add(key);
+                if (!_tiles.TryGetValue(key, out var tile)) _tiles[key] = tile = new Tile();
+                if (!tile.Building && (!tile.Built || tile.BuiltVersion != _version
+                                       || System.Math.Abs(_drift[l] - tile.BuiltDrift) > RebuildDrift))
+                    _stale.Add(key);
+
+                if (tile.Buffer == null) continue;
+                cells += tile.Count;
+                var model = Mat4.Scale(new Vector3D<float>(lv.CellSize, 1f, lv.CellSize));
+                model.M12 = (float)(tx * (double)size + _drift[l]);
+                model.M13 = altitude;
+                model.M14 = tz * size;
+                _draws.Add(new CloudTileDraw(tile.Buffer, tile.Count, model));
+            }
+        }
+        CellCount = cells;
+
+        foreach (var key in _tiles.Keys.Where(k => !_inRange.Contains(k)).ToList())
+        {
+            _tiles[key].Buffer?.Dispose();
+            _tiles.Remove(key);
+        }
+
+        // Tiles never built first (holes in the sky), then the nearest.
+        if (_stale.Count > 0 && _building < MaxBuilding)
+        {
+            _stale.Sort((a, b) =>
+            {
+                int built = _tiles[a].Built.CompareTo(_tiles[b].Built);
+                return built != 0 ? built : TileDistance(a, cameraPos).CompareTo(TileDistance(b, cameraPos));
+            });
+            foreach (var key in _stale)
+            {
+                if (_building >= MaxBuilding) break;
+                StartBuild(key);
             }
         }
 
-        var sorted = new float[Cells * Cells];
-        Buffer.BlockCopy(value, 0, sorted, 0, sorted.Length * sizeof(float));
-        Array.Sort(sorted);
-        int cloudCells = (int)MathF.Round(System.Math.Clamp(coverage, 0f, 1f) * sorted.Length);
-        float threshold = cloudCells == 0 ? float.MaxValue : sorted[sorted.Length - cloudCells];
+        _renderer.DrawClouds(_draws);
+    }
 
-        var cloud = new bool[Cells, Cells];
-        for (int z = 0; z < Cells; z++)
-        for (int x = 0; x < Cells; x++)
-            cloud[x, z] = value[x, z] >= threshold;
-        return cloud;
+    private double TileDistance((int Level, int X, int Z) key, Vector3D<float> cameraPos)
+    {
+        float size = Levels[key.Level].TileSize;
+        double cx = (key.X + 0.5) * size + _drift[key.Level] - cameraPos.X;
+        double cz = (key.Z + 0.5) * size - cameraPos.Z;
+        return cx * cx + cz * cz;
+    }
+
+    private void StartBuild((int Level, int X, int Z) key)
+    {
+        _tiles[key].Building = true;
+        _building++;
+        var lv = Levels[key.Level];
+        double drift = _drift[key.Level];
+        int version = _version;
+        var (open, islands) = _builtCoverage;
+        var density = _density;
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            CloudCell[] cells;
+            int count;
+            try { cells = BuildTile(lv, key.X, key.Z, drift, open, islands, density, out count); }
+            catch (Exception e)
+            {
+                Console.WriteLine($"[clouds] tile {key} failed: {e}");
+                cells = Array.Empty<CloudCell>(); count = 0;
+            }
+            _built.Enqueue(new Built(key, cells, count, drift, version));
+        });
+    }
+
+    // ── Tile generation (worker threads) ─────────────────────────────────────
+
+    private const int Border = TileCells + 2; // the tile plus a one-cell ring, for neighbour tests
+
+    private static CloudCell[] BuildTile(Level lv, int tx, int tz, double drift, float open, float islands,
+                                         ICloudDensityMap? density, out int count)
+    {
+        int ox = tx * TileCells, oz = tz * TileCells; // the tile's first cell, in the layer's cell coordinates
+
+        // The density map, sampled every DensityStep cells at where those cells are over the world right now.
+        const int n = TileCells / DensityStep + 1;
+        var dens = new float[n * n];
+        if (density != null)
+            for (int j = 0; j < n; j++)
+            for (int i = 0; i < n; i++)
+                dens[i + j * n] = System.Math.Clamp(density.Density(
+                    (float)((ox + i * DensityStep) * (double)lv.CellSize + drift),
+                    (oz + j * DensityStep) * lv.CellSize), 0f, 1f);
+
+        // Each cell's box (bottom, top), or bottom > top for none, over the tile and its border ring.
+        var bottom = new short[Border * Border];
+        var top    = new short[Border * Border];
+        for (int z = -1; z <= TileCells; z++)
+        for (int x = -1; x <= TileCells; x++)
+        {
+            int idx = (x + 1) + (z + 1) * Border;
+            bottom[idx] = 1; top[idx] = 0;
+
+            float d = SampleDensity(dens, n, x, z);
+            float coverage = System.Math.Clamp((open + (islands - open) * d) * lv.CoverageScale, 0f, 1f);
+            if (coverage <= 0f) continue;
+            int gx = ox + x, gz = oz + z;
+            float v = Fbm(gx, gz, lv.Spacing, lv.Seed);
+            float threshold = Threshold(coverage);
+            if (v < threshold) continue;
+
+            // Thicker towards the middle of a cloud (further above the threshold), in 2-block steps; the underside
+            // bulges down a little under the thick middle. The base height wanders with a broad field.
+            float e = System.Math.Clamp((v - threshold) / 0.12f, 0f, 1f);
+            int thickness = 2 * (int)MathF.Round((lv.MinThickness + (lv.MaxThickness - lv.MinThickness) * e) * 0.5f);
+            float wander = (ValueNoise(gx, gz, lv.Spacing * 5, lv.Seed ^ 0xB077u) * 2f - 1f) * lv.BottomVariation;
+            int baseY = 4 * (int)MathF.Round(wander * 0.25f);
+            int sag = 2 * (int)(thickness * 0.15f);
+            bottom[idx] = (short)(baseY - sag);
+            top[idx]    = (short)(baseY + thickness - sag);
+        }
+
+        var cells = new CloudCell[TileCells * TileCells / 4];
+        count = 0;
+        for (int z = 0; z < TileCells; z++)
+        for (int x = 0; x < TileCells; x++)
+        {
+            int idx = (x + 1) + (z + 1) * Border;
+            short b = bottom[idx], t = top[idx];
+            if (b > t) continue;
+            uint mask = 0;
+            if (!Covers(bottom, top, idx + 1, b, t))      mask |= 1; // +X
+            if (!Covers(bottom, top, idx - 1, b, t))      mask |= 2; // -X
+            if (!Covers(bottom, top, idx + Border, b, t)) mask |= 4; // +Z
+            if (!Covers(bottom, top, idx - Border, b, t)) mask |= 8; // -Z
+            if (count == cells.Length) Array.Resize(ref cells, cells.Length * 2);
+            cells[count++] = new CloudCell
+            {
+                Packed  = (uint)x | ((uint)z << 8) | (mask << 16),
+                Heights = (ushort)b | ((uint)(ushort)t << 16),
+            };
+        }
+        return cells;
+    }
+
+    /// <summary>Whether the neighbouring box at <paramref name="i"/> hides the whole side of the box [b, t] facing it.</summary>
+    private static bool Covers(short[] bottom, short[] top, int i, short b, short t)
+        => bottom[i] <= top[i] && bottom[i] <= b && top[i] >= t;
+
+    private static float SampleDensity(float[] dens, int n, int x, int z)
+    {
+        float fx = System.Math.Clamp(x, 0, TileCells) / (float)DensityStep;
+        float fz = System.Math.Clamp(z, 0, TileCells) / (float)DensityStep;
+        int i = System.Math.Min((int)fx, n - 2), j = System.Math.Min((int)fz, n - 2);
+        float u = fx - i, w = fz - j;
+        float a = Lerp(dens[i + j * n], dens[i + 1 + j * n], u);
+        float c = Lerp(dens[i + (j + 1) * n], dens[i + 1 + (j + 1) * n], u);
+        return Lerp(a, c, w);
+    }
+
+    // ── Noise ────────────────────────────────────────────────────────────────
+
+    /// <summary>Three octaves of value noise at lattice spacings of <paramref name="spacing"/>, half and a quarter of
+    /// it (in cells), weighted 0.55 / 0.3 / 0.15 so the result stays in [0, 1].</summary>
+    private static float Fbm(int gx, int gz, int spacing, uint seed)
+        => 0.55f * ValueNoise(gx, gz, spacing, seed)
+         + 0.30f * ValueNoise(gx, gz, System.Math.Max(1, spacing / 2), seed + 1)
+         + 0.15f * ValueNoise(gx, gz, System.Math.Max(1, spacing / 4), seed + 2);
+
+    private static float ValueNoise(int gx, int gz, int spacing, uint seed)
+    {
+        float fx = (gx + 0.5f) / spacing, fz = (gz + 0.5f) / spacing;
+        float flx = MathF.Floor(fx), flz = MathF.Floor(fz);
+        int x0 = (int)flx, z0 = (int)flz;
+        float tx = Smooth(fx - flx), tz = Smooth(fz - flz);
+        float v00 = Hash01(x0, z0, seed),     v10 = Hash01(x0 + 1, z0, seed);
+        float v01 = Hash01(x0, z0 + 1, seed), v11 = Hash01(x0 + 1, z0 + 1, seed);
+        return Lerp(Lerp(v00, v10, tx), Lerp(v01, v11, tx), tz);
+    }
+
+    private static float Hash01(int x, int z, uint seed)
+    {
+        uint h = (uint)x * 0x8DA6B343u ^ (uint)z * 0xD8163841u ^ seed * 0xCB1AB31Fu;
+        h ^= h >> 16; h *= 0x7FEB352Du;
+        h ^= h >> 15; h *= 0x846CA68Bu;
+        h ^= h >> 16;
+        return (h >> 8) * (1f / (1 << 24));
+    }
+
+    /// <summary><see cref="Fbm"/>'s distribution, sampled once: turns a coverage fraction into the noise threshold
+    /// above which that fraction of cells is cloud.</summary>
+    private static readonly float[] FbmQuantiles = BuildQuantiles();
+
+    private static float[] BuildQuantiles()
+    {
+        const int side = 128;
+        var v = new float[side * side];
+        for (int z = 0; z < side; z++)
+        for (int x = 0; x < side; x++)
+            v[x + z * side] = Fbm(x * 7, z * 7, 16, 0x51A7u);
+        Array.Sort(v);
+        return v;
+    }
+
+    private static float Threshold(float coverage)
+    {
+        int i = (int)((1f - coverage) * (FbmQuantiles.Length - 1));
+        return FbmQuantiles[System.Math.Clamp(i, 0, FbmQuantiles.Length - 1)];
     }
 
     private static float Smooth(float t) => t * t * (3f - 2f * t);
     private static float Lerp(float a, float b, float t) => a + (b - a) * t;
 
-    public void Dispose() => _mesh?.Dispose();
+    public void Dispose()
+    {
+        foreach (var t in _tiles.Values) t.Buffer?.Dispose();
+        _tiles.Clear();
+    }
 }
+
+/// <summary>One instanced draw of a <see cref="CloudLayer"/> tile: <paramref name="Count"/> <see cref="CloudLayer.CloudCell"/>s
+/// from <paramref name="Instances"/>, placed by <paramref name="Model"/> (cell units to world).</summary>
+public readonly record struct CloudTileDraw(GpuBuffer Instances, uint Count, Mat4 Model);
