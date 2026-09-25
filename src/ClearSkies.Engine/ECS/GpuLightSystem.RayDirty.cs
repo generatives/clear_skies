@@ -89,6 +89,7 @@ public sealed partial class GpuLightSystem
     private void RayTracedDispatch()
     {
         _frame++;
+        _phaseTimer.Start();
         _dbgChangedChunks = _dbgShipsMoved = 0;
         EnsureSlotArrays(_store.LightSlotCapacity);
         DropGoneGridStates();
@@ -144,7 +145,9 @@ public sealed partial class GpuLightSystem
                 if (darkens) ClearBounceAround(mn - pad, mx + pad);
             }
             foreach (var (mn, mx) in _directChanges) MarkRegion(mn, mx);
+            _marks.Flush(_staticVolume.Gpu, _markSlot);
         }
+        _phaseTimer.Lap(0);
 
         // Evaluations a changed area gets, rounded up to whole cycles so it always stops having covered each voxel's
         // complete ray set equally.
@@ -175,7 +178,9 @@ public sealed partial class GpuLightSystem
         _composeCount = 0;
         int n = BuildLightWork(cam.Position);
         _lastDirtyTotal = n;
+        _phaseTimer.Lap(1);
         HoldBounce(hold, _bounceRechangeN, bounceReset);
+        _phaseTimer.Lap(2);
         if (n > 0) AddCompose(_scratch.AsSpan(0, n), 1);
 
         CollectBounceClears(hold);
@@ -198,7 +203,9 @@ public sealed partial class GpuLightSystem
             if (nb > 0) AddCompose(_scratch.AsSpan(0, 2 * nb), 2);
         }
 
+        _phaseTimer.Lap(3);
         BuildLists(_composeList.AsSpan(0, _composeCount), sunDir);
+        _phaseTimer.Lap(4);
 
         if (n > 0)
         {
@@ -264,6 +271,8 @@ public sealed partial class GpuLightSystem
             _lampTimer.Stop();
         }
 
+        _phaseTimer.Lap(5);
+        _phaseTimer.Stop();
         _rtSunMsEma    = Ema(_rtSunMsEma, _sunTimer.Elapsed.TotalMilliseconds);
         _rtLampMsEma   = Ema(_rtLampMsEma, _lampTimer.Elapsed.TotalMilliseconds);
         _rtBounceMsEma = Ema(_rtBounceMsEma, _bounceTimer.Elapsed.TotalMilliseconds);
@@ -436,7 +445,7 @@ public sealed partial class GpuLightSystem
         int bx0 = (int)MathF.Floor(mn.X / 8f), bx1 = (int)MathF.Floor(mx.X / 8f);
         int by0 = (int)MathF.Floor(mn.Y / 8f), by1 = (int)MathF.Floor(mx.Y / 8f);
         int bz0 = (int)MathF.Floor(mn.Z / 8f), bz1 = (int)MathF.Floor(mx.Z / 8f);
-        ForEachSlotInBrickBox(world, bx0, by0, bz0, bx1, by1, bz1, MarkSlot);
+        _marks.AddBox(world, bx0, by0, bz0, bx1, by1, bz1); // flushed into MarkSlot once marking is done
     }
 
     /// <summary>Calls <paramref name="action"/> for every light slot in the inclusive brick-coordinate box.</summary>
@@ -503,6 +512,12 @@ public sealed partial class GpuLightSystem
         }
     }
 
+    // World bricks marked this frame, per chunk; and the delegates they are flushed into (made once).
+    private readonly BrickMarks _marks = new(), _holdMarks = new();
+    private Action<int>? _markSlotDelegate, _holdSlotDelegate;
+    private Action<int> _markSlot => _markSlotDelegate ??= MarkSlot;
+    private int _holdFramesNow, _rechangeNNow;
+
     private void MarkSlot(int slot)
     {
         if (_dirty[slot]) return;
@@ -554,18 +569,23 @@ public sealed partial class GpuLightSystem
             }
         }
 
+        // The world bricks within bounce reach of every relit one, gathered per chunk so the overlapping reaches of
+        // neighbouring bricks are visited once.
         const int m = BounceMarginBricks;
+        var world = _staticVolume.Gpu;
         foreach (int slot in _relitList)
         {
             int gi = _store.SlotGrid[slot];
-            var g = _store.GridAt(gi);
-            if (g == null || !g.IsWorld) continue;
+            if (_store.GridAt(gi) != world) continue;
             var c = _store.SlotChunk[slot];
             int b = _store.SlotBrick[slot];
             int bx = c.X * 4 + (b & 3), by = c.Y * 4 + ((b >> 2) & 3), bz = c.Z * 4 + (b >> 4);
-            ForEachSlotInBrickBox(g, bx - m, by - m, bz - m, bx + m, by + m, bz + m,
-                                  s => HoldSlot(s, holdFrames, rechangeN));
+            _holdMarks.AddBox(world, bx - m, by - m, bz - m, bx + m, by + m, bz + m);
         }
+        if (_holdMarks.IsEmpty) return;
+        _holdFramesNow = holdFrames;
+        _rechangeNNow = rechangeN;
+        _holdMarks.Flush(world, _holdSlotDelegate ??= s => HoldSlot(s, _holdFramesNow, _rechangeNNow));
     }
 
     private void HoldSlot(int slot, int holdFrames, int rechangeN)
@@ -640,16 +660,47 @@ public sealed partial class GpuLightSystem
             return count;
         }
         if (_sortKeys.Length < count) { _sortKeys = new float[count * 2]; _sortSlots = new int[count * 2]; }
+        var world = _staticVolume.Gpu;
         for (int i = 0; i < count; i++)
         {
             int slot = candidates[i];
             var g = _store.GridAt(_store.SlotGrid[slot])!;
-            _sortKeys[i] = Vector3D.DistanceSquared(BrickCentre(slot, g.VoxelToWorld), camPos);
+            var centre = g == world ? BrickCentre(slot) : BrickCentre(slot, g.VoxelToWorld); // the world's pose is identity
+            _sortKeys[i] = Vector3D.DistanceSquared(centre, camPos);
             _sortSlots[i] = slot;
         }
-        Array.Sort(_sortKeys, _sortSlots, 0, count);
+        // Only which are the nearest matters, not their order: partition around the cap'th instead of sorting all.
+        SelectSmallest(_sortKeys, _sortSlots, count, cap);
         for (int i = 0; i < cap; i++) chosen.Add(_sortSlots[i]);
         return cap;
+    }
+
+    /// <summary>Reorders the first <paramref name="count"/> keys (and their values alongside) so the
+    /// <paramref name="k"/> smallest come first, in no particular order (quickselect, expected linear time).</summary>
+    private static void SelectSmallest(float[] keys, int[] values, int count, int k)
+    {
+        int lo = 0, hi = count - 1;
+        while (lo < hi)
+        {
+            // Median of three as the pivot, so a list already in (or near) order doesn't go quadratic.
+            int mid = lo + (hi - lo) / 2;
+            float a = keys[lo], b = keys[mid], c = keys[hi];
+            float pivot = a < b ? (b < c ? b : a < c ? c : a) : (a < c ? a : b < c ? c : b);
+            int i = lo, j = hi;
+            while (i <= j)
+            {
+                while (keys[i] < pivot) i++;
+                while (keys[j] > pivot) j--;
+                if (i > j) break;
+                (keys[i], keys[j]) = (keys[j], keys[i]);
+                (values[i], values[j]) = (values[j], values[i]);
+                i++; j--;
+            }
+            // Now [lo, j] <= pivot <= [i, hi], with anything between equal to it.
+            if (k - 1 <= j) hi = j;
+            else if (k - 1 >= i) lo = i;
+            else return;
+        }
     }
 
     private float[] _sortKeys = Array.Empty<float>();
@@ -737,6 +788,14 @@ public sealed partial class GpuLightSystem
 
     private bool IsNear(int slot, in Mat4 voxelToWorld, Vector3D<float> camPos, float r2)
         => Vector3D.DistanceSquared(BrickCentre(slot, voxelToWorld), camPos) <= r2;
+
+    /// <summary>Grid-space centre of a light slot's brick (world space for the static world).</summary>
+    private Vector3D<float> BrickCentre(int slot)
+    {
+        var c = _store.SlotChunk[slot];
+        int b = _store.SlotBrick[slot];
+        return new Vector3D<float>(c.X * S + (b & 3) * 8 + 4, c.Y * S + ((b >> 2) & 3) * 8 + 4, c.Z * S + (b >> 4) * 8 + 4);
+    }
 
     /// <summary>World-space centre of a light slot's brick.</summary>
     private Vector3D<float> BrickCentre(int slot, in Mat4 voxelToWorld)

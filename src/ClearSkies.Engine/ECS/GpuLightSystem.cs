@@ -75,6 +75,30 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
 
     private static double Ema(double prev, double sample) => prev <= 0.0 ? sample : prev + EmaAlpha * (sample - prev);
 
+    /// <summary>CPU time of each phase of a frame's lighting (ms, smoothed), for the debug panel.</summary>
+    private sealed class PhaseTimer
+    {
+        public static readonly string[] Names =
+            { "Marking changes", "Choosing relit bricks", "Bounce holds", "Choosing bounce bricks", "Chunk lists", "Dispatch + upload" };
+        public readonly double[] Ms = new double[Names.Length];
+        private readonly Stopwatch _sw = new();
+        private double _last;
+
+        public void Start() { _sw.Restart(); _last = 0; }
+
+        /// <summary>Ends phase <paramref name="i"/> (the time since the previous lap).</summary>
+        public void Lap(int i)
+        {
+            double t = _sw.Elapsed.TotalMilliseconds;
+            Ms[i] = Ema(Ms[i], t - _last);
+            _last = t;
+        }
+
+        public void Stop() => _sw.Stop();
+    }
+
+    private readonly PhaseTimer _phaseTimer = new();
+
     /// <summary>A grid with a pose this frame.</summary>
     private readonly record struct LitGrid(ChunkVolume Vol, GridHandle Handle, Mat4 VoxelToWorld,
                                            Vector3D<float> Pos, Quaternion<float> Rot);
@@ -109,6 +133,10 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         ImGui.Text($"Compose (lamps) dispatch: {_rtLampMsEma:F2} ms/frame");
         ImGui.Text($"Bounce + AO dispatch:    {_rtBounceMsEma:F2} ms/frame");
         ImGui.TextDisabled("CPU submission time only (queue is async) — compare FPS for total GPU+CPU cost.");
+        ImGui.Text("CPU time by phase:");
+        for (int i = 0; i < PhaseTimer.Names.Length; i++)
+            ImGui.Text($"  {_phaseTimer.Ms[i],6:F2} ms  {PhaseTimer.Names[i]}");
+        ImGui.TextDisabled($"  queued: {_lastRelitWaiting:N0} to relight, {_lastBounceWaiting:N0} to bounce");
 
         ImGui.Separator();
         ImGui.Text("Lighting settings");
