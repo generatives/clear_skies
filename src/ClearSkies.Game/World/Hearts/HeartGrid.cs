@@ -44,9 +44,12 @@ public struct Heart
     public uint Id;           // per-heart noise (outline corners, which sides are cliffs, lens edge wobble, the top)
 
     /// <summary>The farthest the support reaches from the heart, horizontally.</summary>
-    public readonly float Reach => Radius * 1.2f;
+    public readonly float Reach => Radius * 1.3f;
 
-    public readonly float YMin => Shape == SupportShape.Lens ? Y - Wall - 2f : Y - MathF.Max(Wall + Spike, Band) - 2f;
+    public readonly float YMin => Y - MaxLump * (Shape == SupportShape.Lens ? Wall : MathF.Max(Wall + Spike, Band)) - 2f;
+
+    /// <summary>The most the underside's lumps deepen it (see <see cref="Span"/>).</summary>
+    private const float MaxLump = 1.3f;
     public readonly float YMax => Y + Up + Roll + 1f;
 
     /// <summary>The support's span at column (x, z), if the column is inside it.</summary>
@@ -64,7 +67,7 @@ public struct Heart
         {
             // Wobbly round outline; underside a bowl, (1 - t²)^0.75, rounded at the rim.
             float wobble = HeartGrid.ValueNoise(Id, x / (Radius * 0.5f), z / (Radius * 0.5f));
-            t = d / (Radius * (0.8f + 0.4f * wobble));
+            t = d / (Radius * (0.8f + 0.4f * wobble) * Ragged(x, z));
             if (t >= 1f) return false;
             cliff = 0f;
             depth = Wall * MathF.Pow(1f - t * t, 0.75f);
@@ -82,17 +85,20 @@ public struct Heart
             float phi = (a - i) * sector;
             float ri = Corner(i % Sides), rj = Corner((i + 1) % Sides);
             float edge = ri * rj * MathF.Sin(sector) / (ri * MathF.Sin(phi) + rj * MathF.Sin(sector - phi));
-            edge *= 0.97f + 0.06f * HeartGrid.ValueNoise(Id ^ 0x5EEDu, x / 10f, z / 10f); // rough, not glassy, faces
-            t = d / edge;
+            t = d / (edge * Ragged(x, z));
             if (t >= 1f) return false;
             float f = phi / sector;
             cliff = IsCliff(i);
             if (f < 0.15f) cliff = Lerp(0.5f * (IsCliff(i - 1) + cliff), cliff, f / 0.15f);
             else if (f > 0.85f) cliff = Lerp(cliff, 0.5f * (cliff + IsCliff(i + 1)), (f - 0.85f) / 0.15f);
             depth = Wall * MathF.Pow(1f - t * t, 0.75f) + Spike * MathF.Pow(1f - t, SpikePower);
-            depth = MathF.Max(depth, cliff * Band);
+            // The band's foot is ragged, not ruled.
+            float band = Band * (0.55f + 0.75f * HeartGrid.ValueNoise(Id ^ 0xBA5Eu, x / 18f, z / 18f));
+            depth = MathF.Max(depth, cliff * band);
         }
 
+        // A lumpy underside: bulges and hollows a dozen blocks or so across.
+        depth *= 0.7f + 0.6f * HeartGrid.ValueNoise(Id ^ 0xB0B0u, x / 14f, z / 14f);
         bottom = Y - depth;
 
         // The top: a broad roll plus finer bumps, dropping off towards a rounded edge (not a cliff one).
@@ -103,7 +109,13 @@ public struct Heart
         return top > bottom + 1f;
     }
 
-    // Corners at 0.7-1.15 of the radius: with the faces' 3% roughness, still inside Reach.
+    /// <summary>0.9-1.08: how far the outline at (x, z) is pushed in or out, so the sides have notches, buttresses and
+    /// spurs rather than smooth faces.</summary>
+    private readonly float Ragged(float x, float z)
+        => 0.9f + 0.1f * HeartGrid.ValueNoise(Id ^ 0x5EEDu, x / 30f, z / 30f)
+                + 0.08f * HeartGrid.ValueNoise(Id ^ 0x5EEEu, x / 9f, z / 9f);
+
+    // Corners at 0.7-1.15 of the radius: with the outline's raggedness, still inside Reach.
     private readonly float Corner(int i) => Radius * (0.7f + 0.45f * HeartGrid.Hash01(Id, i, 0));
 
     /// <summary>1 if side i (from corner i to the next) is a cliff, 0 if it slopes: most of a spire's sides are cliffs,
@@ -140,7 +152,7 @@ public static class HeartGrid
     private static readonly KindDef[] Kinds =
     {
         //   cell height  radius        chance: outside, inside clusters
-        new( 128,  120,   38f,  100f, 0f,     0.60f), // Fragment: clusters only (radius: see FragmentMin)
+        new( 128,  120,   38f,  100f, 0f,     0.50f), // Fragment: clusters only (radius: see FragmentMin)
         new( 600,  300,   80f,  220f, 0.03f,  0.50f), // Medium
         new( 320,  200,   30f,   90f, 0.01f,  0.30f), // Small
     };
@@ -235,7 +247,8 @@ public static class HeartGrid
         float z = (cz + rng.NextRange(margin, 1f - margin)) * def.CellSize;
         // Fragments fill the clusters; the other hearts gather over a wider area around them, and on chains.
         float bias = fragment ? ClusterField(seed, x, z) : MathF.Max(Clumps(seed, x, z, 0.42f, 0.6f), 0.8f * Chains(seed, x, z));
-        if (roll >= Lerp(def.ChanceLow, def.ChanceHigh, bias)) return false;
+        float chance = Lerp(def.ChanceLow, def.ChanceHigh, bias);
+        if (roll >= chance) return false;
 
         float shapeRoll = rng.NextFloat01();
         var shape = fragment ? (shapeRoll < 0.35f ? SupportShape.Lens : shapeRoll < 0.9f ? SupportShape.Cliff : SupportShape.Spire)
@@ -273,6 +286,7 @@ public static class HeartGrid
         // island's top.
         heart.Y = (cy + rng.NextFloat01()) * def.CellHeight;
         if (heart.Y > ContinentTerrain.For(seed).Height(x, z) - HeartCover) return false;
+        if (roll >= chance * HeightDensity(heart.Y)) return false;
         heart.Up = fragment ? rng.NextRange(12f, 30f) + radius * 0.15f : rng.NextRange(20f, 50f) + radius * 0.15f;
         heart.Roll = rng.NextRange(5f, 12f) + radius * 0.06f;
 
@@ -297,14 +311,21 @@ public static class HeartGrid
         return Smoothstep(lo, hi, v);
     }
 
-    /// <summary>0-1: how far inside a cluster of fragments (x, z) is. Clusters are a kilometre or two across, a few
-    /// hundred blocks apart where the big <see cref="Clumps"/> field is, and rare outside it.</summary>
+    /// <summary>0-1: how far inside a cluster of fragments (x, z) is, rising gradually from its fringe (a scattering of
+    /// fragments) to its core (packed). Clusters are a kilometre or two across, a few hundred blocks apart where the big
+    /// <see cref="Clumps"/> field is, and rare outside it.</summary>
     public static float ClusterField(ulong seed, float x, float z)
     {
         float v = 0.75f * ValueNoise((uint)seed ^ 0xC5u, x / ClusterSpacing, z / ClusterSpacing)
                 + 0.25f * ValueNoise((uint)seed ^ 0xC6u, x / ClusterDetail, z / ClusterDetail);
-        return Smoothstep(0.56f, 0.64f, v) * Lerp(0.15f, 1f, Clumps(seed, x, z, 0.4f, 0.6f));
+        return Smoothstep(0.55f, 0.75f, v) * Lerp(0.15f, 1f, Clumps(seed, x, z, 0.4f, 0.6f));
     }
+
+    /// <summary>How likely a heart is at height y, relative to the bottom of the world: on top of there being more
+    /// ground low down, hearts thin out upward, so islands go from dense near the bottom to sparse near the top.</summary>
+    private static float HeightDensity(float y) => Lerp(1f, 0.3f, Math.Clamp(y / HeightDensityTop, 0f, 1f));
+
+    private const float HeightDensityTop = 1000f;
 
     /// <summary>0-1: 1 along narrow winding bands (where a value noise crosses its middle), fading out to either
     /// side: chains of hearts.</summary>
