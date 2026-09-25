@@ -108,7 +108,12 @@ host.AddSystem(new SkyRenderSystem(host.Renderer), SystemStage.RenderSky);
 host.AddSystem(new WireframeRenderSystem(host.World, host.Renderer), SystemStage.RenderOverlay);
 host.AddSystem(new HudRenderSystem(host.World, host.Renderer), SystemStage.RenderHud);
 
-var camSpawn = TestScene.Build(host, seed);
+// --camera x,y,z[,yaw,pitch]: start the camera at a given spot instead of overlooking the nearest island.
+float[]? cameraOverride = null;
+int camArg = Array.IndexOf(args, "--camera");
+if (camArg >= 0 && camArg + 1 < args.Length)
+    cameraOverride = args[camArg + 1].Split(',').Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+var camSpawn = TestScene.Build(host, seed, cameraOverride);
 
 // Ray-traced lighting prototype test ship (plan doc, task 4): a small solid hull with a Lamp exposed on
 // top, placed near the camera's spawn so its shadow should visibly fall on the terrain below once the

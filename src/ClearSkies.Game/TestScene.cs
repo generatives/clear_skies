@@ -20,7 +20,9 @@ public static class TestScene
     /// <summary>Builds the scene and returns the resolved camera spawn position, so callers (e.g. the
     /// ray-traced lighting prototype's test ship — see the plan doc) can place things relative to it
     /// without re-deriving island geometry via <see cref="TryFindNearestIsland"/>.</summary>
-    public static Vector3D<float> Build(EngineHost host, ulong worldSeed)
+    /// <param name="cameraOverride">Launch option (<c>--camera x,y,z[,yaw,pitch]</c>): puts the camera here instead of
+    /// overlooking the nearest island, e.g. to reproduce a view for a screenshot.</param>
+    public static Vector3D<float> Build(EngineHost host, ulong worldSeed, float[]? cameraOverride = null)
     {
         var cam = host.World.CreateEntity();
         var camTransform = Transform.Identity;
@@ -37,13 +39,20 @@ public static class TestScene
         {
             camTransform.Position = FallbackSpawn;
         }
+        float yaw = MathF.PI, pitch = -0.45f;
+        if (cameraOverride is { Length: >= 3 })
+        {
+            camTransform.Position = new Vector3D<float>(cameraOverride[0], cameraOverride[1], cameraOverride[2]);
+            if (cameraOverride.Length >= 5) (yaw, pitch) = (cameraOverride[3], cameraOverride[4]);
+            camTransform.Rotation = Quaternion<float>.CreateFromYawPitchRoll(yaw, pitch, 0f);
+        }
         cam.Set(camTransform);
         cam.Set(new CameraComponent { Camera = new Camera(), Active = true });
         cam.Set(new MouseLookComponent
         {
             LookSensitivity = 0.0025f,
-            Yaw             = MathF.PI,  // face +Z (yaw=π rotates default -Z forward to +Z)
-            Pitch           = -0.45f,    // ~26° downward — sees island surface at ~75 units ahead
+            Yaw             = yaw,    // default π: face +Z (yaw=π rotates default -Z forward to +Z)
+            Pitch           = pitch,  // default ~26° downward — sees island surface at ~75 units ahead
         });
         cam.Set(new FreeFlyController { MoveSpeed = 10f });
 
