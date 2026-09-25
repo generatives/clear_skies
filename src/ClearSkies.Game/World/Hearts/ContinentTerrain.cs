@@ -20,7 +20,7 @@ public sealed class ContinentTerrain
 
     // Surface bands (world Y of a top): hot and sandy low down, sand patches in grass growing sparser up to DryLine,
     // grass up to RockLine, bare rock up to SnowLine, snow above.
-    public const float SandLine = -50f, DryLine = 250f, RockLine = 950f, SnowLine = 1200f;
+    public const float SandLine = -210f, DryLine = -50f, RockLine = 900f, SnowLine = 1150f;
 
     private readonly FastNoiseLite _plains;   // broad, gently rolling lowlands
     private readonly FastNoiseLite _hills;    // hills in the foothills
@@ -56,7 +56,7 @@ public sealed class ContinentTerrain
     /// foothills to wide mountain ranges a few kilometres across and several apart, peaking at about 1,600.</summary>
     public float Height(float x, float z)
     {
-        float plains = 70f + 70f * _plains.GetNoise(x, z);
+        float plains = PlainsLevel + 45f * _plains.GetNoise(x, z);
 
         // Nearness to a range's spine: 0 on it, rising away from it.
         float wx = x + RangeWarp * _warpX.GetNoise(x, z), wz = z + RangeWarp * _warpZ.GetNoise(x, z);
@@ -73,7 +73,11 @@ public sealed class ContinentTerrain
     // Ranges: the spine's noise within RangeEdge of zero is mountains, within FootEdge foothills; bent by up to
     // RangeWarp blocks.
     private const float RangeEdge = 0.35f, FootCore = 0.15f, FootEdge = 0.75f, RangeWarp = 800f;
-    private const float FootRise = 260f, RangeRise = 1150f;
+    private const float FootRise = 280f, RangeRise = 1200f;
+
+    /// <summary>The plains' average height: low, just above the cloud sea, so they are a floor of land under the
+    /// broken-up foothills and ranges.</summary>
+    public const float PlainsLevel = -90f;
 
     /// <summary>How far the rock layers at column (x, z) are shifted up or down, for <see cref="Block"/>.</summary>
     public float Strata(float x, float z) => 5f * _strata.GetNoise(x, z);
