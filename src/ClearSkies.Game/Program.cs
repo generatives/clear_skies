@@ -44,20 +44,17 @@ host.AddSystem(host.Gui, SystemStage.Input); // opens ImGui's frame before Logic
 
 var physicsBody = new PhysicsBodySystem(host.World, host.Physics);
 
-// View distance: xzRadius=16/yRadius=3 (was 8/3). Verified crash-free and smooth at this setting; a bigger
-// jump (tried 16/3) hit two real problems: the GPU device was silently capped at a 256 MiB max buffer size
-// (fixed in GpuContext — see AdapterLimits), and even past that, single-digit FPS from the GPU light flood
-// recomputing a much larger dirty region during the load-in burst plus the per-frame full-chunk scans in
-// ChunkMeshSystem/GpuResidencySystem/GpuLightSystem/PhysicsBodySystem (see the deferred dirty-queue task).
-// Pushing further needs that follow-up work, not just a bigger radius.
-const int ViewXz = 16, ViewY = 5;
-var chunkLoadSystem = new ChunkLoadSystem(host.World, staticVolume, () => new SkyWorldGenerator(seed), xzRadius: ViewXz, yRadius: ViewY);
-host.AddSystem(chunkLoadSystem, SystemStage.Logic);
+// Streaming budget: how many world chunks are loaded at once — as many as the old 12/3 view box held, but spent
+// only on chunks that can hold terrain (see ChunkLoadSystem), so it reaches as far as the islands need.
+const int ChunkBudget = (12 * 2 + 1) * (12 * 2 + 1) * (3 * 2 + 1);
 
 // Shared GPU voxel storage for lighting (world + ships). The world's table is split by island region (RegionGrid
 // cells), each region's section sized to what it holds.
-var gridStore = new GridStore(host.Context, RegionGrid.CellShift - ChunkData.Shift,
-                              (2 * ViewXz + 3) * (2 * ViewY + 3) * (2 * ViewXz + 3));
+var terrainLayout = new SkyTerrainLayout(seed);
+var gridStore = new GridStore(host.Context, terrainLayout.RegionChunkShift, ChunkBudget);
+var chunkLoadSystem = new ChunkLoadSystem(host.World, staticVolume, () => new SkyWorldGenerator(seed), terrainLayout,
+                                          ChunkBudget, gridStore);
+host.AddSystem(chunkLoadSystem, SystemStage.Logic);
 host.Renderer.AttachGridStore(gridStore);
 host.AddSystem(physicsBody, SystemStage.Logic);
 
