@@ -35,11 +35,10 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     /// chunks that stay loaded (never unload) for a long time.</summary>
     private const float AutosaveInterval = 30f;
 
-    /// <summary>The GridStore region directory size that fits the regions a view distance touches: wider than their
-    /// span (with one to spare for the frame between a region leaving range and its chunks being released), so two
-    /// loaded regions never share a directory entry.</summary>
-    public static int RegionDirectoryDim(float viewDistance, int regionChunkShift)
-        => 2 * (int)MathF.Ceiling(viewDistance / (S << regionChunkShift)) + 3;
+    /// <summary>The GridStore world index width that fits a view distance: wider than the span of chunks loaded at
+    /// once (with a column to spare each side for the frame between a chunk leaving range and its storage being
+    /// released), so two loaded chunks never share a cell.</summary>
+    public static int WorldIndexDim(float viewDistance) => 2 * (int)MathF.Ceiling(viewDistance / S) + 3;
 
     /// <summary>Chunks found to be air before the budget is re-picked to spend what they freed.</summary>
     private const int AirRebuildBatch = 256;
@@ -106,7 +105,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     /// different key are ignored, since they'd describe different terrain.</param>
     /// <param name="regionChunkShift">log2 of a region's width in chunks; must match the GridStore's.</param>
     /// <param name="viewDistance">How far out chunks are streamed, in blocks (horizontally), as far as the budget
-    /// reaches. The GridStore's region directory must fit it: see <see cref="RegionDirectoryDim"/>.</param>
+    /// reaches. The GridStore's world index must fit it: see <see cref="WorldIndexDim"/>.</param>
     /// <param name="minChunkY">Lowest chunk layer the generator fills.</param>
     /// <param name="maxChunkY">Highest chunk layer the generator fills. Streaming reaches <see cref="LayersBelow"/>
     /// layers under <paramref name="minChunkY"/> and the rest of 64 above; outside the generated layers it loads only

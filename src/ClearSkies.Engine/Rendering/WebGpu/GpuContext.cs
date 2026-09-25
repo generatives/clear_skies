@@ -216,11 +216,11 @@ public sealed unsafe class GpuContext : IDisposable
     internal void Poll(bool wait = true) => _wgpu.DevicePoll(_device, new Silk.NET.Core.Bool32(wait), null);
 
     /// <summary>Encodes and submits a single GPU→GPU buffer copy.</summary>
-    internal void CopyBufferToBuffer(GpuBuffer src, GpuBuffer dst, ulong size, ulong srcOffset = 0)
+    internal void CopyBufferToBuffer(GpuBuffer src, GpuBuffer dst, ulong size, ulong srcOffset = 0, ulong dstOffset = 0)
     {
         var encDesc = new CommandEncoderDescriptor();
         var enc = _api.DeviceCreateCommandEncoder(_device, &encDesc);
-        _api.CommandEncoderCopyBufferToBuffer(enc, src.Handle, srcOffset, dst.Handle, 0, size);
+        _api.CommandEncoderCopyBufferToBuffer(enc, src.Handle, srcOffset, dst.Handle, dstOffset, size);
         var cmdDesc = new CommandBufferDescriptor();
         var cmd = _api.CommandEncoderFinish(enc, &cmdDesc);
         _api.QueueSubmit(_queue, 1, &cmd);
