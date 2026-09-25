@@ -13,12 +13,11 @@ namespace ClearSkies.Engine.ECS;
 
 /// <summary>
 /// Streams the static world around the active camera: a fixed budget of chunks, chosen closest-first by horizontal
-/// distance out to the view distance, a whole chunk column at a time — but spent only on chunks that hold something.
-/// Every chunk that is generated or loaded is recorded in its region's <see cref="RegionSurvey"/> (saved to disk), and
-/// chunks known to be air are neither loaded nor counted. A chunk not surveyed yet counts as if it held something
-/// until it has been generated, so the first visit to a region fills its survey in closest-first as you travel, and
-/// later visits spend the budget exactly. The budget therefore goes to islands rather than sky, and reaches the
-/// islands out to the view distance.
+/// distance out to the view distance, a whole chunk column at a time — but spent only on chunks that may hold
+/// something: the layers the generator says it may fill (<see cref="IWorldGenerator.ColumnLayers"/>) and chunks with a
+/// save file (builds). Chunks that turn out to be air are remembered while they stay in range, and are neither loaded
+/// nor counted again. The budget therefore goes to islands rather than sky, and reaches the islands out to the view
+/// distance.
 ///
 /// Candidates are the columns within the view distance. Where the budget runs out (or else the view
 /// distance), and the nearest column still being generated or loaded, set the fog distance (see
@@ -31,7 +30,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     /// the excess.</summary>
     private const int MaxInFlight = 64;
 
-    /// <summary>Seconds between periodic flushes of dirty chunks and surveys — crash/power-loss safety for edits to
+    /// <summary>Seconds between periodic flushes of dirty chunks — crash/power-loss safety for edits to
     /// chunks that stay loaded (never unload) for a long time.</summary>
     private const float AutosaveInterval = 30f;
 
@@ -43,24 +42,20 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     /// <summary>Chunks found to be air before the budget is re-picked to spend what they freed.</summary>
     private const int AirRebuildBatch = 256;
 
-    /// <summary>Streamed layers below the generated ones, for building under the islands. Streaming covers 64 layers
-    /// (a survey column); the rest are above.</summary>
+    /// <summary>Streamed layers below the lowest generated one, for building under the islands. Streaming covers 64
+    /// layers (a column's bits); the rest are above.</summary>
     private const int LayersBelow = 8;
 
     private const int S = ChunkData.Size;
 
     private readonly string _savesDir;
-    private readonly string _surveyDir;
-    private readonly string _surveyKey;
 
     private readonly EntitySet      _cameras;
     private readonly ChunkVolume    _staticVolume;
     private readonly ThreadLocal<IWorldGenerator> _generator;
     private readonly ThreadLocal<ChunkData> _scratch = new(() => new ChunkData());
     private readonly int            _budget;
-    private readonly int            _regionShift;
-    private readonly int            _minY;      // the lowest streamed layer: bit 0 of a survey column
-    private readonly ulong          _generated; // the layers the generator fills, as survey bits
+    private readonly int            _minY;      // the lowest streamed layer: bit 0 of a column's bits
 
     /// <summary>Column offsets from the camera's column, closest first, out to the view distance. Computed once; a
     /// rebuild just walks it.</summary>
@@ -68,12 +63,17 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     private readonly int _viewColumns; // the view distance in columns
     private readonly float _viewDistance;
 
-    private readonly Dictionary<(int x, int z), RegionSurvey> _regions = new();
+    /// <summary>Per column in view (layer bits): what the generator may fill, and what turned out to be air. Dropped
+    /// once the column leaves view, so returning re-learns its air.</summary>
+    private readonly Dictionary<(int x, int z), (ulong Generated, ulong Air)> _columns = new();
 
     /// <summary>Every chunk with a save file (scanned once at startup, kept up to date by saves).</summary>
     private readonly HashSet<ChunkPosition> _saved = new();
 
-    /// <summary>The chunks the budget currently covers, loaded or not: survey bits per column.</summary>
+    /// <summary>Per column (layer bits): chunks holding a build — a save with blocks, or an unsaved edit.</summary>
+    private readonly Dictionary<(int x, int z), ulong> _built = new();
+
+    /// <summary>The chunks the budget currently covers, loaded or not: layer bits per column.</summary>
     private readonly Dictionary<(int x, int z), ulong> _wanted = new();
 
     // Columns with wanted chunks still to generate or load, closest first; and the columns workers have now.
@@ -101,40 +101,27 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     /// budget cut off or that is still loading, or else the view distance, eased over time. Fog should be total by here.</summary>
     public float FogDistance => _fogDistance;
 
-    /// <param name="surveyKey">Identifies what the generator produces (seed and version): survey files made under a
-    /// different key are ignored, since they'd describe different terrain.</param>
-    /// <param name="regionChunkShift">log2 of a region's width in chunks; must match the GridStore's.</param>
     /// <param name="viewDistance">How far out chunks are streamed, in blocks (horizontally), as far as the budget
     /// reaches. The GridStore's world index must fit it: see <see cref="WorldIndexDim"/>.</param>
-    /// <param name="minChunkY">Lowest chunk layer the generator fills.</param>
-    /// <param name="maxChunkY">Highest chunk layer the generator fills. Streaming reaches <see cref="LayersBelow"/>
-    /// layers under <paramref name="minChunkY"/> and the rest of 64 above; outside the generated layers it loads only
-    /// chunks that something was built in. Edits to the static world outside those 64 layers are refused (see
-    /// <see cref="ChunkVolume.EditableLayers"/>).</param>
-    public ChunkLoadSystem(World world, ChunkVolume staticVolume, Func<IWorldGenerator> generatorFactory, string surveyKey,
-                           int regionChunkShift, float viewDistance, int chunkBudget, int minChunkY, int maxChunkY)
+    /// <param name="minChunkY">Lowest chunk layer the generator fills. Streaming covers 64 layers from
+    /// <see cref="LayersBelow"/> under it; the generator's layers must fall inside them. Edits to the static world
+    /// outside them are refused (see <see cref="ChunkVolume.EditableLayers"/>).</param>
+    public ChunkLoadSystem(World world, ChunkVolume staticVolume, Func<IWorldGenerator> generatorFactory,
+                           float viewDistance, int chunkBudget, int minChunkY)
     {
-        int generatedLayers = maxChunkY - minChunkY + 1;
-        if (generatedLayers < 1 || generatedLayers > 64 - LayersBelow)
-            throw new ArgumentOutOfRangeException(nameof(maxChunkY), $"1-{64 - LayersBelow} generated layers");
-
         _savesDir  = Path.Combine(AppContext.BaseDirectory, "Saves", "World");
-        _surveyDir = Path.Combine(_savesDir, "Regions");
-        Directory.CreateDirectory(_surveyDir);
-        ScanSaves();
+        Directory.CreateDirectory(_savesDir);
 
         _cameras      = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
         _staticVolume = staticVolume;
         _generator    = new ThreadLocal<IWorldGenerator>(generatorFactory);
-        _surveyKey    = surveyKey;
-        _regionShift  = regionChunkShift;
         _budget       = chunkBudget;
         _minY         = minChunkY - LayersBelow;
-        _generated    = ((1UL << generatedLayers) - 1) << LayersBelow;
         _staticVolume.EditableLayers = (_minY, _minY + 63); // only what streaming can load back
         _viewDistance = viewDistance;
         _viewColumns  = (int)MathF.Ceiling(viewDistance / S);
         _offsetsByDistance = BuildOffsetsByDistance(_viewColumns);
+        ScanSaves();
     }
 
     private static (short dx, short dz)[] BuildOffsetsByDistance(int radius)
@@ -154,7 +141,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
             var parts = Path.GetFileNameWithoutExtension(path).Split('_');
             if (parts.Length == 3 && int.TryParse(parts[0], out int x) && int.TryParse(parts[1], out int y) &&
                 int.TryParse(parts[2], out int z))
-                _saved.Add(new ChunkPosition(x, y, z));
+                RecordSave(new ChunkPosition(x, y, z), hasBlocks: true);
         }
     }
 
@@ -163,16 +150,11 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 
     public void DrawDebugUi()
     {
-        ImGui.Text($"View distance: {_viewDistance:F0} blocks ({_regions.Count} regions)");
+        ImGui.Text($"View distance: {_viewDistance:F0} blocks ({_columns.Count} columns known)");
         ImGui.Text($"Budget: {_budgetUsed} / {_budget} chunks ({_columnsWalked} columns walked)");
         ImGui.Text($"Loaded: {_staticVolume.LoadedCount}   Queued columns: {_loadQueue.Count}   In flight: {_inFlight.Count}");
         ImGui.Text($"Fog distance: {_fogDistance:F0} (target {_fogTarget:F0})   Cut: {(_hasCut ? $"column {_cut.x},{_cut.z}" : "none")}");
         ImGui.Text($"Saved chunks: {_saved.Count}   Layers: {_minY}..{_minY + 63}");
-
-        ImGui.Separator();
-        ImGui.Text("Candidate regions:");
-        foreach (var ((x, z), r) in _regions)
-            ImGui.BulletText($"({x},{z}): {r.KnownAirCount} known air{(r.Dirty ? ", unsaved" : "")}");
 
         ImGui.Separator();
         ImGui.Text($"Autosave in: {System.Math.Max(0f, AutosaveInterval - _autosaveTimer):F0}s");
@@ -194,9 +176,11 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
             _inFlight.Remove(job.Column);
             foreach (var (pos, data) in job.Chunks)
             {
-                if (_regions.TryGetValue(RegionOf(pos), out var survey)) survey.Record(pos, data != null);
                 if (data == null)
                 {
+                    if (_saved.Contains(pos)) RecordBuild(pos, hasBlocks: false); // a build that was emptied out
+                    else if (_columns.TryGetValue((pos.X, pos.Z), out var col))
+                        _columns[(pos.X, pos.Z)] = (col.Generated, col.Air | Bit(pos));
                     _airSinceRebuild++;
                     continue;
                 }
@@ -225,20 +209,13 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     }
 
     /// <summary>Re-picks the budgeted chunks: walks columns outward from the camera, counting every chunk that may
-    /// hold something (see <see cref="RegionSurvey.MaybeContent"/>) until the next column doesn't fit; queues the
-    /// columns with chunks still to fetch, unloads what's no longer covered, and swaps in the surveys of the regions
-    /// now in range.</summary>
+    /// hold something (see <see cref="MaybeContent"/>) until the next column doesn't fit; queues the columns with chunks
+    /// still to fetch, and unloads what's no longer covered.</summary>
     private void Rebuild(Vector3D<float> camPos)
     {
-        var camRegion = RegionOf(_lastCamColumn.x, _lastCamColumn.z);
-        int rings = (_viewColumns >> _regionShift) + 1;
-        for (int rz = camRegion.z - rings; rz <= camRegion.z + rings; rz++)
-        for (int rx = camRegion.x - rings; rx <= camRegion.x + rings; rx++)
-            if (InView((rx, rz)) && !_regions.ContainsKey((rx, rz))) _regions[(rx, rz)] = OpenSurvey(rx, rz);
-
-        // Loaded chunks always count: an edit may have put blocks where the survey found air.
-        foreach (var (p, _) in _staticVolume.All)
-            if (_regions.TryGetValue(RegionOf(p), out var survey)) survey.Record(p, true);
+        // An edit may have put blocks where there were none: it counts as a build from now on.
+        foreach (var (p, entry) in _staticVolume.All)
+            if (entry.Data.IsDirty) RecordBuild(p, hasBlocks: true);
 
         _wanted.Clear();
         _loadQueue.Clear();
@@ -250,7 +227,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
             int x = _lastCamColumn.x + dx, z = _lastCamColumn.z + dz;
             _columnsWalked++;
 
-            ulong bits = _regions[RegionOf(x, z)].MaybeContent(x, z); // every column in view has its region open
+            ulong bits = MaybeContent(x, z);
             int count = BitOperations.PopCount(bits);
             if (count == 0) continue;
             if (_budgetUsed + count > _budget)
@@ -264,32 +241,49 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
             if (Missing(x, z).Any()) _loadQueue.Enqueue((x, z));
         }
 
-        // Unloading saves edits into their surveys, so the surveys of regions that left range are dropped after it.
         _toUnload.Clear();
         foreach (var (p, _) in _staticVolume.All)
             if (!IsWanted(p)) _toUnload.Add(p);
         foreach (var p in _toUnload) Unload(p);
-        foreach (var key in _regions.Keys.Where(k => !InView(k)).ToList())
-        {
-            SaveSurvey(_regions[key]);
-            _regions.Remove(key);
-        }
+
+        // Forget the columns out of view: their air is re-learned on return.
+        long r2 = (long)_viewColumns * _viewColumns;
+        foreach (var key in _columns.Keys.Where(k => Sq(k.x - _lastCamColumn.x) + Sq(k.z - _lastCamColumn.z) > r2).ToList())
+            _columns.Remove(key);
 
         Console.WriteLine($"[load] rebuild: {_columnsWalked} columns walked, budget {_budgetUsed}/{_budget}, " +
                           $"cut {(_hasCut ? $"at {ColumnDistance(camPos, _cut.x, _cut.z):F0} blocks" : "none")}, " +
                           $"queued {_loadQueue.Count} columns, loaded {_staticVolume.LoadedCount}, unloaded {_toUnload.Count}");
     }
 
-    /// <summary>Region (rx, rz)'s survey from disk, or a new one (a first visit, or the terrain changed).</summary>
-    private RegionSurvey OpenSurvey(int rx, int rz)
+    private static long Sq(int v) => (long)v * v;
+
+    /// <summary>Chunks of column (x, z) that may hold something: what the generator may fill, less what turned out to be
+    /// air, plus builds.</summary>
+    private ulong MaybeContent(int x, int z)
     {
-        var survey = RegionSurvey.TryLoad(SurveyPath(rx, rz), _surveyKey, rx, rz, _regionShift, _minY, _generated);
-        if (survey != null) return survey;
-        survey = new RegionSurvey(rx, rz, _regionShift, _minY, _generated);
-        // A new survey takes the layers the generator doesn't fill for air, but saved chunks there hold a build.
-        foreach (var p in _saved)
-            if (RegionOf(p) == (rx, rz)) survey.Record(p, true);
-        return survey;
+        if (!_columns.TryGetValue((x, z), out var col))
+            _columns[(x, z)] = col = (_generator.Value!.ColumnLayers(x, z, _minY), 0UL);
+        return (col.Generated & ~col.Air) | _built.GetValueOrDefault((x, z));
+    }
+
+    private ulong Bit(ChunkPosition p) => 1UL << (p.Y - _minY);
+
+    /// <summary>Records whether chunk <paramref name="p"/> holds a build; a chunk that was emptied out is air again.</summary>
+    private void RecordBuild(ChunkPosition p, bool hasBlocks)
+    {
+        if (p.Y < _minY || p.Y > _minY + 63) return;
+        ulong b = Bit(p);
+        ulong built = _built.GetValueOrDefault((p.X, p.Z));
+        _built[(p.X, p.Z)] = hasBlocks ? built | b : built & ~b;
+        if (_columns.TryGetValue((p.X, p.Z), out var col))
+            _columns[(p.X, p.Z)] = (col.Generated, hasBlocks ? col.Air & ~b : col.Air | b);
+    }
+
+    private void RecordSave(ChunkPosition p, bool hasBlocks)
+    {
+        _saved.Add(p);
+        RecordBuild(p, hasBlocks);
     }
 
     /// <summary>Hands queued columns to workers, one job per column.</summary>
@@ -369,19 +363,6 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         return MathF.Sqrt(dx * dx + dz * dz);
     }
 
-    private (int x, int z) RegionOf(ChunkPosition p) => RegionOf(p.X, p.Z);
-    private (int x, int z) RegionOf(int chunkX, int chunkZ) => (chunkX >> _regionShift, chunkZ >> _regionShift);
-
-    /// <summary>Whether region (x, z) holds any column within the view distance of the camera's column.</summary>
-    private bool InView((int x, int z) region)
-    {
-        int w = 1 << _regionShift;
-        int x0 = region.x * w, z0 = region.z * w;
-        long dx = System.Math.Max(0, System.Math.Max(x0 - _lastCamColumn.x, _lastCamColumn.x - (x0 + w - 1)));
-        long dz = System.Math.Max(0, System.Math.Max(z0 - _lastCamColumn.z, _lastCamColumn.z - (z0 + w - 1)));
-        return dx * dx + dz * dz <= (long)_viewColumns * _viewColumns;
-    }
-
     public void Unload(ChunkPosition pos)
     {
         var entry = _staticVolume.GetEntry(pos);
@@ -392,14 +373,12 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         _staticVolume.RemoveChunk(pos);
     }
 
-    /// <summary>Writes every currently loaded chunk with unsaved edits, and every changed region survey, to disk.
-    /// Called by the periodic autosave and once on graceful shutdown.</summary>
+    /// <summary>Writes every currently loaded chunk with unsaved edits to disk. Called by the periodic autosave and
+    /// once on graceful shutdown.</summary>
     public void SaveAllDirty()
     {
         foreach (var (pos, entry) in _staticVolume.All)
             SaveIfDirty(pos, entry);
-        foreach (var survey in _regions.Values)
-            SaveSurvey(survey);
     }
 
     private void SaveIfDirty(ChunkPosition pos, ChunkEntry entry)
@@ -409,15 +388,8 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         entry.Data.IsDirty = false;
         // What's there now is what a reload finds, so an edit off the island's terrain (a bridge, a tower) comes back,
         // and one that cleared a chunk out stops costing budget.
-        _saved.Add(pos);
-        if (_regions.TryGetValue(RegionOf(pos), out var survey)) survey.Record(pos, entry.Data.HasAnySolid());
-    }
-
-    private void SaveSurvey(RegionSurvey survey)
-    {
-        if (survey.Dirty) survey.Save(SurveyPath(survey.X, survey.Z), _surveyKey);
+        RecordSave(pos, entry.Data.HasAnySolid());
     }
 
     private string SavePath(ChunkPosition pos) => Path.Combine(_savesDir, $"{pos.X}_{pos.Y}_{pos.Z}.chunk");
-    private string SurveyPath(int rx, int rz) => Path.Combine(_surveyDir, $"{rx}_{rz}.survey");
 }
