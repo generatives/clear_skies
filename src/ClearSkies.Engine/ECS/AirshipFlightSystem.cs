@@ -11,9 +11,7 @@ namespace ClearSkies.Engine.ECS;
 
 /// <summary>
 /// Full airship flight pipeline (Milestone 5 Phases 5.3/5.4), per dynamic grid each tick: first a
-/// desired-velocity control law (self-leveling always; forward/right/vertical/yaw velocity targets from
-/// player input when the grid carries <see cref="PilotedComponent"/> (set by <see cref="GridPilotSystem"/>
-/// while it's piloting that grid), zero otherwise — the grid just holds position/heading), then
+/// control law deciding the force and torque the ship wants, then
 /// immediately realizing that desired force/torque by
 /// distributing it across the grid's Fan/Buoyant blocks (or applying it directly in "free propulsion"
 /// debug mode). Previously two systems (a control system computing desired force/torque into a
@@ -23,11 +21,30 @@ namespace ClearSkies.Engine.ECS;
 /// per-tick computation. Runs before <see cref="PhysicsWorld"/> steps, so impulses are integrated the
 /// same tick they're computed.
 ///
+/// The control law always self-levels (pitch/roll) and cancels gravity and the ship's Buoyant lift (feedforward). Past
+/// that it has two modes:
+/// <list type="bullet">
+/// <item>Piloted (the grid carries <see cref="PilotedComponent"/>, set by <see cref="GridPilotSystem"/>): forward,
+/// right, vertical and yaw velocity targets from the keyboard. The ship's own controls are ignored.</item>
+/// <item>Otherwise, the ship's own controls. Its <see cref="Lever"/>s ask for force: each axis' levers (they move
+/// together; see <see cref="LeverControlSystem"/>) ask for their setting, squared so it ramps up (fine near upright),
+/// as a fraction of a tunable maximum force along that axis. Nothing tracks a speed: the ship speeds up until air
+/// resistance (below) matches the levers' force. Its <see cref="SteeringWheel"/>s ask for turning force (torque about
+/// world up) the same way, clockwise to starboard: the ship's turn speeds up until air resistance on its rotation
+/// matches, and coasts to a stop when the wheel is centred.</item>
+/// </list>
+///
+/// Every unlocked grid also feels air resistance, a drag force against its velocity growing with the square of its
+/// speed, and a drag torque against its spin growing with the square of its turn rate, so a steady force or torque
+/// gives a top speed or turn rate (where the drag matches it) and a ship left alone slows to a stop. It's
+/// part of the world, not the controls: applied directly, not through the Fans.
+///
 /// Propulsion allocation solves for Fan thrusts rather than sharing the demand out: it finds each Fan's thrust,
 /// between 0 and the Fan's max (Fans only push), so that together they produce the desired force and torque as
 /// closely as possible (a box-constrained least-squares problem; see <see cref="AllocateThrust"/>). When the Fans
 /// can meet the demand they meet it exactly, whatever mix of directions it has and however many Fans point each
-/// way. An earlier proportional scheme gave each Fan <c>(its alignment / total alignment) × |demand|</c>, which is
+/// way. When they can't, torque comes first (see <see cref="AllocateKeepingTorque"/>): the ship gets less force rather
+/// than tipping over. An earlier proportional scheme gave each Fan <c>(its alignment / total alignment) × |demand|</c>, which is
 /// only exact when a single group of Fans is working: thrusting forward on a ship with more lift Fans than forward
 /// Fans handed the lift group too much of the bigger total, so ships climbed whenever they accelerated. When the
 /// demand is out of reach (Fans at max, or none pointing the needed way) the solve gives the closest achievable
@@ -53,12 +70,16 @@ public sealed class AirshipFlightSystem : ISystem
     private readonly EntitySet       _grids;
     private readonly EntitySet       _fans;
     private readonly EntitySet       _buoyants;
+    private readonly EntitySet       _levers;
+    private readonly EntitySet       _steeringWheels;
 
     /// <summary>This tick's Fan and Buoyant blocks of one volume, by cell and orientation.</summary>
     private sealed class ShipBlocks
     {
         public readonly List<BlockRef> Fans     = new();
         public readonly List<BlockRef> Buoyants = new();
+        public readonly List<(BlockRef Block, float Value)> Levers = new();
+        public readonly List<float> WheelAngles = new();
     }
     private readonly Dictionary<ChunkVolume, ShipBlocks> _blocksByVolume = new();
     private static readonly ShipBlocks NoBlocks = new();
@@ -93,13 +114,27 @@ public sealed class AirshipFlightSystem : ISystem
     private float _verticalSpeedTarget = 5f;
     private float _yawRateTarget       = 1.2f; // rad/s
 
+    // Not piloted: the force (N) a lever asks for at full, along its axis.
+    private float _leverMaxForce = 500f;
+
+    // Not piloted: the torque (N·m) the wheel asks for at full, about world up.
+    private float _wheelMaxTorque = 500f;
+
+    // Air resistance: drag force = this × speed², against the velocity. With a lever's full force F, top speed is
+    // √(F / this): 10 m/s at the defaults.
+    private float _dragCoefficient = 5f;
+
+    // Air resistance on rotation: drag torque = this × turn rate², against the spin. With the wheel's full torque T,
+    // top turn rate is √(T / this): 1 rad/s at the defaults.
+    private float _angularDragCoefficient = 500f;
+
     private float _forwardGain  = 3f;
     private float _rightGain    = 3f;
     private float _verticalGain = 3f;
     private float _yawGain      = 2f;
 
     // ── propulsion tuning ───────────────────────────────────────────────────
-    private float _fanMaxForce  = 100f;
+    private float _fanMaxForce  = 1000f;
     private float _buoyantForce = 25f;
 
     // When true, every grid gets its control-law force/torque applied directly (no Fan/Buoyant blocks
@@ -126,6 +161,8 @@ public sealed class AirshipFlightSystem : ISystem
         _grids    = world.GetEntities().With<DynamicGrid>().With<ChunkGrid>().With<PhysicsBodyComponent>().AsSet();
         _fans     = world.GetEntities().With<Fan>().With<BlockRef>().AsSet();
         _buoyants = world.GetEntities().With<Buoyant>().With<BlockRef>().AsSet();
+        _levers   = world.GetEntities().With<Lever>().With<BlockRef>().AsSet();
+        _steeringWheels = world.GetEntities().With<SteeringWheel>().With<BlockRef>().AsSet();
         _physics = physics;
         _input   = input;
     }
@@ -168,19 +205,24 @@ public sealed class AirshipFlightSystem : ISystem
             var angVelPitchRoll = angVel - Vector3.Dot(angVel, worldUp) * worldUp;
             tiltTorque -= _levelDamp * angVelPitchRoll;
 
-            float desiredYawRate = piloted ? YawInput() * _yawRateTarget : 0f;
+            // Where the velocity targets come from: the keyboard while piloted, the ship's own controls otherwise.
+            var controls = piloted
+                ? new Vector4(ForwardInput(), RightInput(), VerticalInput(), YawInput())
+                : ShipControls(blocks);
+
+            float desiredYawRate = controls.W * _yawRateTarget;
             float currentYawRate = Vector3.Dot(angVel, worldUp);
             var yawTorque = _yawGain * (desiredYawRate - currentYawRate) * worldUp;
 
-            float desiredForwardSpeed = piloted ? ForwardInput() * _forwardSpeedTarget : 0f;
+            float desiredForwardSpeed = controls.X * _forwardSpeedTarget;
             float currentForwardSpeed = Vector3.Dot(linVel, forward);
             var forwardForce = _forwardGain * (desiredForwardSpeed - currentForwardSpeed) * forward;
 
-            float desiredRightSpeed = piloted ? RightInput() * _rightSpeedTarget : 0f;
+            float desiredRightSpeed = controls.Y * _rightSpeedTarget;
             float currentRightSpeed = Vector3.Dot(linVel, right);
             var rightForce = _rightGain * (desiredRightSpeed - currentRightSpeed) * right;
 
-            float desiredVerticalSpeed = piloted ? VerticalInput() * _verticalSpeedTarget : 0f;
+            float desiredVerticalSpeed = controls.Z * _verticalSpeedTarget;
             float currentVerticalSpeed = Vector3.Dot(linVel, worldUp);
             // Feedforward: a pure proportional term can never fully cancel a constant disturbance like
             // gravity — it settles at whatever small velocity error happens to produce enough force to
@@ -198,8 +240,31 @@ public sealed class AirshipFlightSystem : ISystem
             // grid is (F = m·a) — torque uses the same scalar as an approximation (real rotational
             // inertia is a tensor, not a scalar, but this is close enough for a prototype and keeps
             // yaw/self-level similarly mass-independent in feel).
-            var desiredForce  = (forwardForce + rightForce + verticalForce) * mass;
-            var desiredTorque = (tiltTorque + yawTorque) * mass;
+            // Piloted, yaw tracks a rate target; otherwise the wheel's torque, with no rate tracking (air resistance on
+            // rotation sets the top turn rate).
+            var desiredTorque = piloted
+                ? (tiltTorque + yawTorque) * mass
+                : tiltTorque * mass + controls.W * _wheelMaxTorque * worldUp;
+            Vector3 desiredForce;
+            if (piloted)
+            {
+                desiredForce = (forwardForce + rightForce + verticalForce) * mass;
+            }
+            else
+            {
+                // The levers' force along the ship's own axes, on top of cancelling gravity and Buoyant lift; no
+                // speed tracking (air resistance sets the top speed).
+                var leverForce = (controls.X * forward + controls.Y * right + controls.Z * gridUp) * _leverMaxForce;
+                desiredForce = leverForce - (_physics.Gravity + buoyantAccel * worldUp) * mass;
+            }
+
+            // Air resistance, straight onto the body: part of the world, not something the Fans deliver.
+            float speed = linVel.Length();
+            if (speed > 1e-4f)
+                _physics.ApplyLinearImpulse(body, -_dragCoefficient * speed * linVel * dt);
+            float spin = angVel.Length();
+            if (spin > 1e-4f)
+                _physics.ApplyAngularImpulse(body, -_angularDragCoefficient * spin * angVel * dt);
 
             // Feedforward, like the Buoyant force above: cancel the torque this grid's Buoyant lift adds about its
             // centre of mass, so the self-level term isn't left fighting it with a steady tilt.
@@ -233,7 +298,7 @@ public sealed class AirshipFlightSystem : ISystem
             fanCount += blocks.Fans.Count;
             if (!_freePropulsion && blocks.Fans.Count > 0)
             {
-                (_lastUnmetForce, _lastUnmetTorque) = AllocateThrust(blocks.Fans, com, rot, desiredForce, desiredTorque);
+                (_lastUnmetForce, _lastUnmetTorque) = AllocateKeepingTorque(blocks.Fans, com, rot, desiredForce, desiredTorque);
                 for (int i = 0; i < blocks.Fans.Count; i++)
                 {
                     float thrust = _fanThrusts[i];
@@ -251,6 +316,39 @@ public sealed class AirshipFlightSystem : ISystem
         _lastBuoyantCount    = buoyantCount;
         _lastGridsProcessed  = gridsProcessed;
         _lastFreePropelled   = freePropelled;
+    }
+
+    /// <summary>A ship's own controls, as fractions (-1 to 1): forward, right and vertical (of the full lever force) from
+    /// its <see cref="Lever"/>s (each axis' levers' setting, their average though they move together), and yaw
+    /// (of the full wheel torque, anticlockwise from above, like <see cref="YawInput"/>) from its
+    /// <see cref="SteeringWheel"/>s, clockwise to
+    /// starboard. Each is squared, keeping its sign, so it ramps up: half-way asks for a quarter.</summary>
+    private static Vector4 ShipControls(ShipBlocks blocks)
+    {
+        Span<float> sum   = stackalloc float[3];
+        Span<int>   count = stackalloc int[3];
+        foreach (var (block, value) in blocks.Levers)
+        {
+            var (axis, sign) = LeverControlSystem.LeverAxis(block);
+            sum[axis] += System.Math.Clamp(value, -1f, 1f) * sign;
+            count[axis]++;
+        }
+        // Lever axes: 0 levers towards the ship's north (-Z, forward), 1 towards its east (+X, right), 2 its top.
+        Span<float> axes = stackalloc float[3];
+        for (int axis = 0; axis < 3; axis++)
+            axes[axis] = count[axis] == 0 ? 0f : Ramp(sum[axis] / count[axis]);
+
+        float wheel = 0f;
+        foreach (float angle in blocks.WheelAngles) wheel += angle;
+        if (blocks.WheelAngles.Count > 0) wheel /= blocks.WheelAngles.Count * SteeringWheel.MaxAngle;
+
+        return new Vector4(axes[0], axes[1], axes[2], -Ramp(wheel));
+    }
+
+    private static float Ramp(float setting)
+    {
+        setting = System.Math.Clamp(setting, -1f, 1f);
+        return setting * MathF.Abs(setting);
     }
 
     private float ForwardInput()
@@ -285,7 +383,7 @@ public sealed class AirshipFlightSystem : ISystem
         return v;
     }
 
-    /// <summary>Rebuilds <see cref="_blocksByVolume"/> from this tick's Fan and Buoyant entities. Lists are reused
+    /// <summary>Rebuilds <see cref="_blocksByVolume"/> from this tick's Fan, Buoyant, Lever and Steering Wheel entities. Lists are reused
     /// across ticks; a volume left with neither is dropped so a despawned ship's lists don't linger.</summary>
     private void GroupBlocksByVolume()
     {
@@ -293,6 +391,8 @@ public sealed class AirshipFlightSystem : ISystem
         {
             blocks.Fans.Clear();
             blocks.Buoyants.Clear();
+            blocks.Levers.Clear();
+            blocks.WheelAngles.Clear();
         }
 
         foreach (ref readonly Entity e in _fans.GetEntities())
@@ -305,9 +405,17 @@ public sealed class AirshipFlightSystem : ISystem
             ref readonly var block = ref e.Get<BlockRef>();
             BlocksOf(block.Volume).Buoyants.Add(block);
         }
+        foreach (ref readonly Entity e in _levers.GetEntities())
+        {
+            ref readonly var block = ref e.Get<BlockRef>();
+            BlocksOf(block.Volume).Levers.Add((block, e.Get<Lever>().Value));
+        }
+        foreach (ref readonly Entity e in _steeringWheels.GetEntities())
+            BlocksOf(e.Get<BlockRef>().Volume).WheelAngles.Add(e.Get<SteeringWheel>().Angle);
 
         foreach (var (volume, blocks) in _blocksByVolume)
-            if (blocks.Fans.Count == 0 && blocks.Buoyants.Count == 0) _blocksByVolume.Remove(volume);
+            if (blocks.Fans.Count == 0 && blocks.Buoyants.Count == 0 && blocks.Levers.Count == 0
+                && blocks.WheelAngles.Count == 0) _blocksByVolume.Remove(volume);
     }
 
     private ShipBlocks BlocksOf(ChunkVolume volume)
@@ -340,6 +448,41 @@ public sealed class AirshipFlightSystem : ISystem
         var exhaustDir = Vector3.Transform(new Vector3(up.X, up.Y, up.Z), rot);
         return -exhaustDir;
     }
+
+    /// <summary>
+    /// <see cref="AllocateThrust"/>, but putting torque first: when the Fans can't deliver the whole force and torque
+    /// (typically at their limits), it asks for as large a fraction of <paramref name="force"/> as still leaves the
+    /// torque met as well as it can be with no force asked for at all. Plain least squares would trade some torque for
+    /// more force, and the lost torque is the self-levelling and yaw control: asking an off-balance set of Fans for
+    /// more lift than they have tips the ship over (nose up and over backwards) instead of just lifting less. The
+    /// fraction is found by bisection, re-solving each time; the last solve is the one left in the scratch arrays.
+    /// </summary>
+    private (Vector3 UnmetForce, Vector3 UnmetTorque) AllocateKeepingTorque(
+        List<BlockRef> fans, Vector3 com, Quaternion rot, Vector3 force, Vector3 torque)
+    {
+        var full = AllocateThrust(fans, com, rot, force, torque);
+        float torqueTolerance = TorqueTolerance + 0.01f * torque.Length();
+        if (full.UnmetTorque.Length() <= torqueTolerance) return full;
+
+        // The torque that can't be met whatever force is asked for; allow that much, plus the tolerance.
+        float floor = AllocateThrust(fans, com, rot, Vector3.Zero, torque).UnmetTorque.Length() + torqueTolerance;
+        if (full.UnmetTorque.Length() <= floor) return AllocateThrust(fans, com, rot, force, torque);
+
+        float lo = 0f, hi = 1f; // lo: a fraction known to keep the torque; hi: one known not to
+        for (int i = 0; i < TorqueBisections; i++)
+        {
+            float mid = 0.5f * (lo + hi);
+            if (AllocateThrust(fans, com, rot, force * mid, torque).UnmetTorque.Length() <= floor) lo = mid;
+            else hi = mid;
+        }
+        var kept = AllocateThrust(fans, com, rot, force * lo, torque);
+        return (kept.UnmetForce + force * (1f - lo), kept.UnmetTorque);
+    }
+
+    // AllocateKeepingTorque: torque misses below this (plus 1% of the asked-for torque) count as met; and how many times
+    // it halves the range of force fractions it searches.
+    private const float TorqueTolerance  = 0.05f;
+    private const int   TorqueBisections = 8;
 
     /// <summary>
     /// Solves for each of <paramref name="fans"/>' thrusts, into <see cref="_fanThrusts"/> (with each Fan's world
@@ -413,7 +556,15 @@ public sealed class AirshipFlightSystem : ISystem
         ImGui.SliderFloat("Level gain", ref _levelGain, 0f, 20f);
         ImGui.SliderFloat("Level damping", ref _levelDamp, 0f, 10f);
         ImGui.Separator();
-        ImGui.Text("Velocity targets (while piloted)");
+        ImGui.Text("Ship's controls (not piloted)");
+        ImGui.SliderFloat("Full lever force (N)", ref _leverMaxForce, 0f, 20000f);
+        ImGui.SliderFloat("Air resistance", ref _dragCoefficient, 0f, 100f);
+        ImGui.Text($"Top speed at full lever: {MathF.Sqrt(_leverMaxForce / MathF.Max(_dragCoefficient, 1e-4f)):0.0} m/s");
+        ImGui.SliderFloat("Full wheel torque (N·m)", ref _wheelMaxTorque, 0f, 20000f);
+        ImGui.SliderFloat("Rotation air resistance", ref _angularDragCoefficient, 0f, 5000f);
+        ImGui.Text($"Top turn rate at full wheel: {MathF.Sqrt(_wheelMaxTorque / MathF.Max(_angularDragCoefficient, 1e-4f)):0.00} rad/s");
+        ImGui.Separator();
+        ImGui.Text("Top speeds (keyboard while piloted)");
         ImGui.SliderFloat("Forward speed", ref _forwardSpeedTarget, 0f, 30f);
         ImGui.SliderFloat("Right speed", ref _rightSpeedTarget, 0f, 30f);
         ImGui.SliderFloat("Vertical speed", ref _verticalSpeedTarget, 0f, 30f);

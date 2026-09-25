@@ -59,7 +59,6 @@ host.AddSystem(chunkLoadSystem, SystemStage.Logic);
 var gridStore = new GridStore(host.Context, new Vector3D<int>(2 * ViewXz + 3, 2 * ViewY + 3, 2 * ViewXz + 3));
 host.Renderer.AttachGridStore(gridStore);
 host.AddSystem(physicsBody, SystemStage.Logic);
-host.AddSystem(new PlayerGridControlSystem(host.World, host.Physics, host.Input), SystemStage.Logic);
 
 // Character controller (ported from BepuPhysics2's own Demos/Demos/Characters — see
 // Physics/Characters/): motion goals (WASD/jump/mode toggle) must be set before the physics step
@@ -79,6 +78,7 @@ host.AddSystem(new CharacterCameraSyncSystem(host.World), SystemStage.Logic); //
 host.AddSystem(gridPilot, SystemStage.Logic);
 host.AddSystem(new PlayerInputSystem(host.World, host.Input, meshSystem, host.Renderer, gridSelection), SystemStage.Logic);
 host.AddSystem(new LeverControlSystem(host.World), SystemStage.Logic); // after PlayerInputSystem, whose clicks drag levers
+host.AddSystem(new SteeringWheelControlSystem(host.World), SystemStage.Logic); // ...and turn wheels
 var gridPersistence = new GridPersistenceSystem(host.World, meshSystem, host.Physics, gridSelection);
 host.AddSystem(gridPersistence, SystemStage.Logic);
 // The airship-related debug panels above (Pilot/Flight/Save-Load) drew into their own separate "Systems"
@@ -120,26 +120,20 @@ var camSpawn = TestScene.Build(host, seed);
     for (int y = 0; y < 2; y++)
         shipVoxels.Add((x, y, z, BlockId.Wood, BlockOrientation.Upright));
     shipVoxels.Add((2, 2, 2, BlockId.Lamp, BlockOrientation.Upright)); // exposed on the hull's roof, open air on 5 sides
-    // Model blocks: a lever standing on the roof and one sticking out of the east wall.
-    shipVoxels.Add((0, 2, 0, BlockId.Lever, BlockOrientation.Upright));
+    // The helm, on the roof one row from the stern, facing a player standing on the stern row looking at the bow
+    // (-Z): the wheel, and a lever per axis — forward/back, starboard/port, and up/down (standing out of a post
+    // towards the player, so it levers vertically) — plus a second forward/back lever out of the east wall, which
+    // moves with the first.
+    shipVoxels.Add((2, 2, 3, BlockId.SteeringWheel, BlockOrientation.From(Direction.Up, Direction.South)));
+    shipVoxels.Add((1, 2, 3, BlockId.Lever, BlockOrientation.From(Direction.Up, Direction.South)));
+    shipVoxels.Add((3, 2, 3, BlockId.Lever, BlockOrientation.From(Direction.Up, Direction.East)));
+    shipVoxels.Add((4, 2, 2, BlockId.Wood, BlockOrientation.Upright));
+    shipVoxels.Add((4, 2, 3, BlockId.Lever, BlockOrientation.From(Direction.South, Direction.Up)));
     shipVoxels.Add((5, 1, 2, BlockId.Lever, BlockOrientation.From(Direction.East, Direction.North)));
 
     var shipSpawn = new Vector3(camSpawn.X + 10f, camSpawn.Y - 5f, camSpawn.Z + 45f);
     DynamicGridFactory.SpawnFromVoxels(host.World, gridSelection, shipSpawn, shipVoxels);
     Console.WriteLine($"[test-ship] spawned 5x2x5 hull + lamp at {shipSpawn}");
-}
-
-// glTF model rendering test: the Blockbench lever, floating a couple of blocks in front of the spawn camera (which
-// starts facing -Z, away from the test ship above), just below eye level. No scaling needed: Blockbench's glTF exporter already divides
-// its 16-pixels-per-block grid by 16, so 1 exported unit = 1 block.
-{
-    var lever = blockModels.Get(BlockId.Lever)!;
-    var leverEntity = host.World.CreateEntity();
-    var leverTransform = Transform.Identity;
-    leverTransform.Position = camSpawn + new Vector3D<float>(0f, -0.75f, -2.5f);
-    leverEntity.Set(leverTransform);
-    leverEntity.Set(new RenderedModel(lever));
-    Console.WriteLine($"[model] lever ({lever.Parts.Count} part(s)) at {leverTransform.Position}");
 }
 
 host.Run();

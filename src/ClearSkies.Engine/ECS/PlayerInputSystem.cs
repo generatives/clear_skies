@@ -18,7 +18,8 @@ namespace ClearSkies.Engine.ECS;
 /// G spawns a single-block dynamic grid in front of it, and left/right click place/break blocks
 /// on whichever volume (static world or dynamic grid) the camera is aimed at. Left-clicking an
 /// <see cref="Interactive"/> block uses it instead of placing against it: <see cref="BlockInteraction"/>s are
-/// published for it until the button is released. The targeted face is highlighted and a crosshair is always
+/// published for it until the button is released, with the mouse moving the control rather than the view, which
+/// follows whatever point the control reports the player has hold of (<see cref="InteractionFocus"/>). The targeted face is highlighted and a crosshair is always
 /// shown at the screen centre.
 /// </summary>
 public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
@@ -48,6 +49,8 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
     private bool            _interacting;
     private Entity          _interactBlock;
     private Vector3D<float> _interactOrigin, _interactDir;
+    private Vector3D<float>? _focus; // what the block's control last said the player has hold of
+    private readonly IDisposable _focusSubscription;
 
     public Vector3D<int>? TargetBlock  { get; private set; }
     public Vector3D<int>? TargetNormal { get; private set; }
@@ -56,7 +59,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
     // dropdown in DrawDebugUi — both keep _placeIndex/_placeBlock in sync.
     private static readonly BlockId[] PlaceableBlocks =
         { BlockId.Stone, BlockId.Wood, BlockId.Grass, BlockId.Dirt, BlockId.Lamp, BlockId.RedLamp, BlockId.GreenLamp,
-          BlockId.BlueLamp, BlockId.Fan, BlockId.Buoyant, BlockId.Lever };
+          BlockId.BlueLamp, BlockId.Fan, BlockId.Buoyant, BlockId.Lever, BlockId.SteeringWheel };
     private static readonly string[] PlaceableNames =
         Array.ConvertAll(PlaceableBlocks, id => BlockRegistry.Get(id).Name);
 
@@ -68,6 +71,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
                               GridSelection selection)
     {
         _world       = world;
+        _focusSubscription = world.Subscribe<InteractionFocus>((in InteractionFocus f) => _focus = f.Point);
         _cameras     = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
         _volumes     = world.GetEntities().With<ChunkGrid>().With<Transform>().AsSet();
         _input       = input;
@@ -135,7 +139,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
         {
             if (_interactBlock.IsAlive && _input.IsMouseButtonDown(MouseButton.Left))
             {
-                PublishInteraction(InteractionPhase.Held, origin, dir);
+                PublishInteraction(InteractionPhase.Held, origin, dir, _input.MouseDelta);
                 HideFace();
                 return;
             }
@@ -186,7 +190,8 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
         {
             _interacting   = true;
             _interactBlock = block;
-            PublishInteraction(InteractionPhase.Began, origin, dir);
+            SetLookLocked(true);
+            PublishInteraction(InteractionPhase.Began, origin, dir, Vector2D<float>.Zero);
         }
         else if (_input.WasMouseButtonPressed(MouseButton.Left))
         {
@@ -244,11 +249,45 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
 
     // ── Interaction ──────────────────────────────────────────────────────────
 
-    private void PublishInteraction(InteractionPhase phase, Vector3D<float> origin, Vector3D<float> dir)
+    private void PublishInteraction(InteractionPhase phase, Vector3D<float> origin, Vector3D<float> dir,
+                                    Vector2D<float> mouseDelta)
     {
         _interactOrigin = origin;
         _interactDir    = dir;
-        _world.Publish(new BlockInteraction(_interactBlock, phase, origin, dir));
+        _focus          = null;
+        _world.Publish(new BlockInteraction(_interactBlock, phase, origin, dir, mouseDelta));
+        if (phase != InteractionPhase.Ended && _focus is { } focus) LookAt(focus);
+    }
+
+    /// <summary>Locks or unlocks the active camera's mouse-look (see <see cref="LookLockedComponent"/>).</summary>
+    private void SetLookLocked(bool locked)
+    {
+        foreach (ref readonly Entity e in _cameras.GetEntities())
+        {
+            if (locked && e.Get<CameraComponent>().Active) e.Set(new LookLockedComponent());
+            else if (!locked && e.Has<LookLockedComponent>()) e.Remove<LookLockedComponent>();
+        }
+    }
+
+    /// <summary>Turns the active camera to look straight at <paramref name="point"/>, keeping its mouse-look angles
+    /// in step so looking around resumes from there.</summary>
+    private void LookAt(Vector3D<float> point)
+    {
+        foreach (ref readonly Entity e in _cameras.GetEntities())
+        {
+            if (!e.Get<CameraComponent>().Active || !e.Has<MouseLookComponent>()) continue;
+            ref var t    = ref e.Get<Transform>();
+            ref var look = ref e.Get<MouseLookComponent>();
+            var toPoint = point - t.Position;
+            if (toPoint.LengthSquared < 1e-8f) return;
+            toPoint = Vector3D.Normalize(toPoint);
+
+            float limit = MathF.PI / 2f - 0.01f;
+            look.Yaw   = MathF.Atan2(-toPoint.X, -toPoint.Z);
+            look.Pitch = System.Math.Clamp(MathF.Asin(System.Math.Clamp(toPoint.Y, -1f, 1f)), -limit, limit);
+            t.Rotation = Quaternion<float>.CreateFromYawPitchRoll(look.Yaw, look.Pitch, 0f);
+            return;
+        }
     }
 
     /// <summary>Ends the current interaction, if any, telling its block with the last ray it was sent.</summary>
@@ -256,12 +295,14 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
     {
         if (!_interacting) return;
         _interacting = false;
-        PublishInteraction(InteractionPhase.Ended, _interactOrigin, _interactDir);
+        SetLookLocked(false);
+        PublishInteraction(InteractionPhase.Ended, _interactOrigin, _interactDir, Vector2D<float>.Zero);
         _interactBlock = default;
     }
 
     public void Dispose()
     {
+        _focusSubscription.Dispose();
         _faceMesh.Dispose();
         _crosshairMesh.Dispose();
         if (_faceEntity.IsAlive)      _faceEntity.Dispose();

@@ -40,6 +40,11 @@ public struct CharacterControllerComponent
 {
     public PlayerCharacter Character;
     public float EyeHeight;
+
+    /// <summary>The ship the character stood on last tick, and its orientation then, so the view can turn with it
+    /// (see <see cref="CharacterCameraSyncSystem"/>). Null when it wasn't standing on one.</summary>
+    public BepuPhysics.BodyHandle? RideBody;
+    public System.Numerics.Quaternion RideOrientation;
 }
 
 /// <summary>Movement-mode toggle on the camera entity: true = free-fly noclip (today's default
@@ -53,6 +58,13 @@ public struct CharacterModeComponent
 /// <summary>Tag: set on exactly one DynamicGrid's root entity while GridPilotSystem is piloting it.
 /// Read by AirshipFlightSystem to decide whether to take velocity targets from player input.</summary>
 public struct PilotedComponent
+{
+}
+
+/// <summary>Tag: set on the camera entity while the player is using an Interactive block (see
+/// <see cref="BlockInteraction"/>): the mouse moves the control instead of turning the view, which
+/// <see cref="PlayerInputSystem"/> keeps on the part being moved. PlayerMovementSystem skips mouse-look meanwhile.</summary>
+public struct LookLockedComponent
 {
 }
 

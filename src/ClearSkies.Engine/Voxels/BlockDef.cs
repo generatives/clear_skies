@@ -9,6 +9,14 @@ public readonly struct BlockDef
     public string          Name           { get; init; }
     public Vector3D<float> Color          { get; init; }
     public bool            IsSolid        { get; init; }
+
+    /// True for a solid block that bodies pass through: raycasts still hit it (so it can be targeted, used, placed
+    /// against and broken), but it gets no collision shape, so characters walk through it. Having no shape, it adds
+    /// nothing to a ship's mass either. For small fittings like levers.
+    public bool            Passable       { get; init; }
+
+    /// True when this block gets a collision shape: solid and not <see cref="Passable"/>.
+    public bool            Collides       => IsSolid && !Passable;
     public byte            LightEmission  { get; init; } // 0-15: a lamp's brightness at its own block, and its reach
     public Vector3D<float> LightColor     { get; init; } // 0-1 per channel, scales LightEmission; default = white
 
@@ -41,8 +49,8 @@ public readonly struct BlockDef
     /// Model-block path (a glTF file relative to the game's Resources/Models folder, see
     /// <c>BlockModelLibrary</c>). Non-null makes this a model block: drawn as that model, placed at its cell
     /// and turned to the voxel's stored orientation (the model's +Y to its top, -Z to its north face), instead of as a textured cube.
-    /// It stays <see cref="IsSolid"/> (raycasts hit it, so it can be targeted, placed against and broken, and it
-    /// still collides as a full cell), but it isn't a <see cref="IsFullCube"/>: it emits no cube faces and never
+    /// It stays <see cref="IsSolid"/> (raycasts hit it, so it can be targeted, placed against and broken, and unless
+    /// <see cref="Passable"/> it still collides as a full cell), but it isn't a <see cref="IsFullCube"/>: it emits no cube faces and never
     /// hides a neighbour's.
     public string?         Model          { get; init; }
 

@@ -55,7 +55,8 @@ public sealed class PlayerMovementSystem : ISystem
             ref var t    = ref e.Get<Transform>();
             ref var look = ref e.Get<MouseLookComponent>();
 
-            if (_input.CursorCaptured)
+            // While using an Interactive block the mouse moves the control, not the view (see BlockInteraction).
+            if (_input.CursorCaptured && !e.Has<LookLockedComponent>())
             {
                 var delta = _input.MouseDelta;
                 look.Yaw -= delta.X * look.LookSensitivity;
@@ -69,6 +70,9 @@ public sealed class PlayerMovementSystem : ISystem
             if (_input.WasKeyPressed(Key.V))
                 mode.FreeFly = !mode.FreeFly;
 
+            // Using an Interactive block holds the player still: no walking, jumping or flying until they let go.
+            bool frozen = e.Has<LookLockedComponent>();
+
             ref var cc = ref e.Get<CharacterControllerComponent>();
             if (mode.FreeFly)
             {
@@ -76,12 +80,12 @@ public sealed class PlayerMovementSystem : ISystem
                 // switching back to Walking always resumes from the visible position instead of
                 // falling from a stale one.
                 cc.Character.TeleportTo(new PhysVec(t.Position.X, t.Position.Y - cc.EyeHeight, t.Position.Z));
-                UpdateFreeFly(ref t, ref e.Get<FreeFlyController>(), dt);
+                if (!frozen) UpdateFreeFly(ref t, ref e.Get<FreeFlyController>(), dt);
             }
             else
             {
                 var forward = Vec.Rotate(t.Rotation, new Vector3D<float>(0, 0, -1));
-                cc.Character.UpdateCharacterGoals(_input, new PhysVec(forward.X, forward.Y, forward.Z), dt);
+                cc.Character.UpdateCharacterGoals(_input, new PhysVec(forward.X, forward.Y, forward.Z), dt, frozen);
             }
         }
     }

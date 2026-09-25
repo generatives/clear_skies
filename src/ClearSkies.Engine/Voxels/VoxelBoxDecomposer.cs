@@ -3,10 +3,10 @@ using System.Numerics;
 namespace ClearSkies.Engine.Voxels;
 
 /// <summary>
-/// Greedy 3-D box decomposition of a chunk's solid blocks — the volumetric analogue of the 2-D
+/// Greedy 3-D box decomposition of a chunk's colliding blocks (solid, not <see cref="BlockDef.Passable"/>) — the volumetric analogue of the 2-D
 /// <see cref="GreedyMesher"/>. Produces a small set of axis-aligned boxes (local centre + size, in
 /// block units, each homogeneous in <see cref="BlockId"/> so a caller can derive per-box mass from a
-/// single block's <see cref="BlockDef.Weight"/>) that exactly cover the solid voxels, for use as
+/// single block's <see cref="BlockDef.Weight"/>) that exactly cover the colliding voxels, for use as
 /// physics collision shapes. Not a minimal cover, but a large reduction from one box per block.
 /// </summary>
 public sealed class VoxelBoxDecomposer
@@ -16,7 +16,7 @@ public sealed class VoxelBoxDecomposer
 
     /// <summary>Returns boxes as (centre, size, block id) in chunk-local block units (centre relative
     /// to the chunk origin). Each box contains only one <see cref="BlockId"/> — unless
-    /// <paramref name="mergeBlockTypes"/> is set, in which case boxes span any solid blocks and the id is just the
+    /// <paramref name="mergeBlockTypes"/> is set, in which case boxes span any colliding blocks and the id is just the
     /// first voxel's. Static terrain colliders use that: they don't need per-box mass, and merging across
     /// grass/dirt/stone layers cuts the box count (and so the BigCompound tree build) substantially.</summary>
     public List<(Vector3 center, Vector3 size, BlockId Id)> Decompose(ChunkData data, bool mergeBlockTypes = false)
@@ -30,7 +30,7 @@ public sealed class VoxelBoxDecomposer
         for (int y = 0; y < sz; y++)
         for (int x = 0; x < sz; x++)
         {
-            if (_consumed[Idx(x, y, z)] || !IsSolid(data, x, y, z)) continue;
+            if (_consumed[Idx(x, y, z)] || !Collides(data, x, y, z)) continue;
             BlockId id = data.Get(x, y, z);
 
             // Grow along X.
@@ -71,7 +71,7 @@ public sealed class VoxelBoxDecomposer
     }
 
     private bool Matches(ChunkData data, int x, int y, int z, BlockId id) =>
-        _mergeBlockTypes ? IsSolid(data, x, y, z) : data.Get(x, y, z) == id;
-    private static bool IsSolid(ChunkData data, int x, int y, int z) => BlockRegistry.Get(data.Get(x, y, z)).IsSolid;
+        _mergeBlockTypes ? Collides(data, x, y, z) : data.Get(x, y, z) == id;
+    private static bool Collides(ChunkData data, int x, int y, int z) => BlockRegistry.Get(data.Get(x, y, z)).Collides;
     private static int  Idx(int x, int y, int z) => ChunkData.Index(x, y, z);
 }
