@@ -481,9 +481,8 @@ fn fs_model(in: VSOut, @builtin(front_facing) front: bool) -> @location(0) vec4<
 }
 
 // Cloud boxes (CloudLayer): one instance per cloud cell, 36 vertices each (6 faces x 2 triangles, counter-clockwise
-// from outside). cell.x: bits 0-7 x and 8-15 z within the tile, 16-19 which side faces to draw (+X, -X, +Z, -Z; tops
-// and bottoms always are); cell.y: bottom and top (signed 16-bit, blocks). model: cell units to world. A skipped face
-// collapses to a point, so it draws nothing.
+// from outside). cell.x: bits 0-7 x and 8-15 z within the tile; cell.y: bottom and top (signed 16-bit, blocks).
+// model: cell units to world. Sides against a neighbouring box are drawn too; depth hides them.
 @vertex
 fn vs_cloud(@builtin(vertex_index) vi: u32, @location(0) cell: vec2<u32>) -> VSOut {
     var origins = array<vec3<f32>, 6>(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0), vec3<f32>(0.0, 0.0, 1.0),
@@ -498,11 +497,6 @@ fn vs_cloud(@builtin(vertex_index) vi: u32, @location(0) cell: vec2<u32>) -> VSO
 
     var o: VSOut;
     let face = vi / 6u;
-    let faces = ((cell.x >> 16u) & 0xFu) | 0x30u;
-    if ((faces & (1u << face)) == 0u) {
-        o.pos = vec4<f32>(0.0, 0.0, -1.0, 1.0);
-        return o;
-    }
     let k = corners[vi % 6u];
     var p = origins[face];
     if (k == 1u || k == 2u) { p += e1s[face]; }
