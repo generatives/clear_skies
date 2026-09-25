@@ -45,15 +45,22 @@ host.AddSystem(host.Gui, SystemStage.Input); // opens ImGui's frame before Logic
 var physicsBody = new PhysicsBodySystem(host.World, host.Physics);
 
 // Streaming budget: how many world chunks are loaded at once — as many as the old 12/3 view box held, but spent
-// only on chunks that can hold terrain (see ChunkLoadSystem), so it reaches as far as the islands need.
-const int ChunkBudget = (12 * 2 + 1) * (12 * 2 + 1) * (3 * 2 + 1);
+// only on chunks that hold something (see ChunkLoadSystem), so it reaches as far as the islands need. Streamed
+// layers: chunk y 0-11 (blocks 0-384); islands span roughly 60-300.
+// --chunk-budget N overrides it, e.g. for a software renderer whose small max buffer size can't hold the light
+// for a full budget of island chunks.
+int ChunkBudget = (12 * 2 + 1) * (12 * 2 + 1) * (3 * 2 + 1);
+int budgetArg = Array.IndexOf(args, "--chunk-budget");
+if (budgetArg >= 0 && budgetArg + 1 < args.Length) ChunkBudget = int.Parse(args[budgetArg + 1]);
+const int MinChunkY = 0, MaxChunkY = 11;
 
-// Shared GPU voxel storage for lighting (world + ships). The world's table is split by island region (RegionGrid
-// cells), each region's section sized to what it holds.
-var terrainLayout = new SkyTerrainLayout(seed);
-var gridStore = new GridStore(host.Context, terrainLayout.RegionChunkShift, ChunkBudget);
-var chunkLoadSystem = new ChunkLoadSystem(host.World, staticVolume, () => new SkyWorldGenerator(seed), terrainLayout,
-                                          ChunkBudget, gridStore);
+// Shared GPU voxel storage for lighting (world + ships). The world's table is split by region (a RegionGrid cell,
+// 128x128 chunk columns), each region's section sized to what it holds.
+const int RegionChunkShift = RegionGrid.CellShift - ChunkData.Shift;
+var gridStore = new GridStore(host.Context, RegionChunkShift, ChunkBudget);
+var chunkLoadSystem = new ChunkLoadSystem(host.World, staticVolume, () => new SkyWorldGenerator(seed),
+                                          surveyKey: $"sky:{seed}:v{SkyWorldGenerator.Version}", RegionChunkShift,
+                                          ChunkBudget, MinChunkY, MaxChunkY, gridStore);
 host.AddSystem(chunkLoadSystem, SystemStage.Logic);
 host.Renderer.AttachGridStore(gridStore);
 host.AddSystem(physicsBody, SystemStage.Logic);

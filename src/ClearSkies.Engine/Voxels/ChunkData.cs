@@ -28,12 +28,8 @@ public sealed class ChunkData
 
     public static int Index(int x, int y, int z) => x + Size * (y + Size * z);
 
-    public bool HasAnySolid()
-    {
-        for (int i = 0; i < _blocks.Length; i++)
-            if (_blocks[i] != BlockId.Air) return true;
-        return false;
-    }
+    // Vectorized: the streaming survey calls this for every chunk it generates, and nearly all of them are air.
+    public bool HasAnySolid() => BlocksAsBytes().IndexOfAnyExcept((byte)BlockId.Air) >= 0;
 
     /// <summary>Zero-copy raw byte views of the block/orientation arrays, for bulk serialization (an orientation is
     /// its <see cref="BlockOrientation.ToByte"/>).</summary>

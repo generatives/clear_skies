@@ -19,6 +19,11 @@ public sealed class SkyWorldGenerator : IWorldGenerator
 {
     private const int MaxIslandsPerCell = 4;
 
+    /// <summary>Bump whenever a change here alters what any chunk generates: ChunkLoadSystem's per-region survey
+    /// files (which chunks are air) are keyed by the seed and this, so stale ones are discarded instead of hiding
+    /// new terrain.</summary>
+    public const int Version = 1;
+
     public ulong Seed => _seed;
 
     private readonly ulong _seed;
@@ -120,7 +125,9 @@ public sealed class SkyWorldGenerator : IWorldGenerator
         for (int i = 0; i < islandCount; i++)
         {
             ref readonly IslandDef island = ref islandBuf[i];
-            var (maxReach, islandYMin, islandYMax) = IslandBounds(in island);
+            float maxReach = island.Radius * 1.4f * MathF.Max(island.StretchMajor, island.StretchMinor);
+            float islandYMin = island.BaseY - island.DomeDepth - 8f;
+            float islandYMax = island.BaseY + 8f + 100f + 8f;
 
             if (originY + ChunkData.Size < islandYMin || originY > islandYMax) continue;
 
@@ -148,15 +155,6 @@ public sealed class SkyWorldGenerator : IWorldGenerator
             }
         }
     }
-
-    /// <summary>Conservative bounds of everything <paramref name="island"/> can generate: its horizontal reach from
-    /// its centre (radius times the coastline wobble's and warp's worst case, times its larger stretch) and the world
-    /// Y range from the deepest underside to the highest peak. <see cref="SkyTerrainLayout"/> lists chunks from these
-    /// same bounds, so what the loader asks for and what generates here can't disagree.</summary>
-    internal static (float reach, float yMin, float yMax) IslandBounds(in IslandDef island)
-        => (island.Radius * 1.4f * MathF.Max(island.StretchMajor, island.StretchMinor),
-            island.BaseY - island.DomeDepth - 8f,
-            island.BaseY + 8f + 100f + 8f);
 
     /// <summary>Resolves the island cluster for the region cell containing world (wx, wz), reusing the
     /// last result when the query falls in the same cell as last time (see <see cref="_cachedCellX"/>).</summary>

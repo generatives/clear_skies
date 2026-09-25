@@ -147,14 +147,14 @@ public sealed class GridStore : IDisposable
     private GridHandle?[] _grids = new GridHandle?[16];
     private GridDesc[] _descs = new GridDesc[16];
     // World regions: 2^_regionShift chunks across (x and z), found through a _regionDirDim x _regionDirDim directory
-    // wrapped on the region coordinate. Suggested section boxes per region (see SetWorldRegionExtent).
+    // wrapped on the region coordinate. Suggested section sizes per region (see SetWorldRegionSize).
     private readonly int _regionShift;
     private readonly int _regionDirDim;
-    private readonly Dictionary<(int x, int z), (ChunkPosition min, ChunkPosition max)> _regionExtents = new();
+    private readonly Dictionary<(int x, int z), Vector3D<int>> _regionSizes = new();
 
-    /// <summary>Default section box for a region with no suggested extent (built in, with no terrain), in chunks.</summary>
-    private static readonly Vector3D<int> DefaultRegionDims = new(16, 8, 16);
-    private const int RegionSlackXZ = 4, RegionSlackY = 4;
+    /// <summary>Starting section size for a region with no suggested size (not visited before), in chunks. Grows by
+    /// half an axis at a time as its chunks load (see GrowRegion).</summary>
+    private static readonly Vector3D<int> DefaultRegionDims = new(32, 12, 32);
 
     /// <summary>Light slots allocated since the lighting system last drained this. They hold
     /// <see cref="EmptyDisplayPair"/> and zeroed accumulation, and need lighting.</summary>
@@ -221,10 +221,19 @@ public sealed class GridStore : IDisposable
         _tableNext = 0;
     }
 
-    /// <summary>Suggests the chunk box a world region's section should cover when it is first allocated (the box its
-    /// terrain can occupy). Chunks outside it still work: the section grows if one would collide.</summary>
-    public void SetWorldRegionExtent(int regionX, int regionZ, ChunkPosition min, ChunkPosition max)
-        => _regionExtents[(regionX, regionZ)] = (min, max);
+    /// <summary>Suggests the section size (in chunks per axis) a world region gets when it is next allocated, e.g. the
+    /// size it grew to on an earlier visit, so it doesn't regrow its way there again. Chunks that don't fit still
+    /// work: the section grows if one would collide.</summary>
+    public void SetWorldRegionSize(int regionX, int regionZ, Vector3D<int> size)
+        => _regionSizes[(regionX, regionZ)] = size;
+
+    /// <summary>The section size region (<paramref name="regionX"/>, <paramref name="regionZ"/>) has, or had when it was
+    /// last released, or was suggested; false if none of those.</summary>
+    public bool TryGetWorldRegionSize(GridHandle world, int regionX, int regionZ, out Vector3D<int> size)
+    {
+        if (world.Regions.TryGetValue((regionX, regionZ), out var r)) { size = new(r.DX, r.DY, r.DZ); return true; }
+        return _regionSizes.TryGetValue((regionX, regionZ), out size);
+    }
 
     /// <summary>Loaded world regions and their section sizes, for debug display.</summary>
     public IEnumerable<(int x, int z, int dx, int dy, int dz, int chunks)> WorldRegions(GridHandle world)
@@ -473,13 +482,8 @@ public sealed class GridStore : IDisposable
             }
 
         r = new WorldRegion { X = key.x, Z = key.z };
-        if (_regionExtents.TryGetValue(key, out var ext))
-        {
-            r.DX = ext.max.X - ext.min.X + 1 + RegionSlackXZ;
-            r.DY = ext.max.Y - ext.min.Y + 1 + RegionSlackY;
-            r.DZ = ext.max.Z - ext.min.Z + 1 + RegionSlackXZ;
-        }
-        else (r.DX, r.DY, r.DZ) = (DefaultRegionDims.X, DefaultRegionDims.Y, DefaultRegionDims.Z);
+        var size = _regionSizes.TryGetValue(key, out var hint) ? hint : DefaultRegionDims;
+        (r.DX, r.DY, r.DZ) = (System.Math.Max(1, size.X), System.Math.Max(1, size.Y), System.Math.Max(1, size.Z));
         r.Base = AllocRange(r.DX * r.DY * r.DZ);
         g.Regions[key] = r;
         WriteDirectoryEntry(g, r);
@@ -497,6 +501,7 @@ public sealed class GridStore : IDisposable
 
     private void ReleaseRegion(GridHandle g, WorldRegion r)
     {
+        _regionSizes[(r.X, r.Z)] = new Vector3D<int>(r.DX, r.DY, r.DZ); // comes back at the size it grew to
         FreeRange(r.Base, r.DX * r.DY * r.DZ);
         g.Regions.Remove((r.X, r.Z));
         // A dims of 0 reads as "no region" to lookups (see entryOf in the shaders).
