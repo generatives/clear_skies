@@ -19,7 +19,7 @@ public sealed unsafe class Renderer : IDisposable
     // ChunkLoadSystem) plus model blocks, ships and clouds used to cut distant islands off at 4096.
     private const int MaxObjects = 16384;
     private const ulong ModelStride = 256;   // >= minUniformBufferOffsetAlignment
-    private const ulong CameraSize  = 240;   // two mat4x4<f32> (view, proj) + seven vec4<f32> (sun, light params, camera position, fog, zenith, horizon, clouds)
+    private const ulong CameraSize  = 224;   // two mat4x4<f32> (view, proj) + six vec4<f32> (sun, light params, camera position, fog, zenith, horizon)
     private const ulong ModelSize   = 96;    // mat4x4<f32> + vec3<i32> chunk + i32 grid + vec4<f32> params
 
     private static readonly string Wgsl = @"
@@ -34,12 +34,12 @@ const SLOT_WORDS: u32 = " + GridStore.WordsPerSlot + @"u;
 const EMPTY_DISPLAY: u32 = 0x3000u;   // no light storage: full sun, no light, no AO
 
 // sunDir.w: sun strength (SunLight.Strength). lightParams.x: ray AO strength, .y: 1 = reference light path (see
-// shadeFast), .z: ambient (0-1), .w unused. camPos.xyz: camera world position. fog: horizontal start/end, vertical
-// start/end (blocks from the camera). zenith/horizon.rgb: the sky gradient (see SkySettings). clouds.xy: the cloud
-// layer's fog start/end (see CloudLayer).
+// shadeFast), .z: ambient (0-1), .w unused. camPos.xyz: camera world position. fog.xy: the world's fog start/end
+// (horizontal), fog.zw: the cloud layer's (see CloudLayer), in blocks from the camera. zenith/horizon.rgb: the sky
+// gradient (see SkySettings).
 struct Camera {
     view: mat4x4<f32>, proj: mat4x4<f32>, sunDir: vec4<f32>, lightParams: vec4<f32>,
-    camPos: vec4<f32>, fog: vec4<f32>, zenith: vec4<f32>, horizon: vec4<f32>, clouds: vec4<f32>,
+    camPos: vec4<f32>, fog: vec4<f32>, zenith: vec4<f32>, horizon: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
@@ -58,13 +58,11 @@ fn skyColor(dir: vec3<f32>) -> vec3<f32> {
     return c + vec3<f32>(1.0, 0.9, 0.7) * glow * camera.sunDir.w;
 }
 
-// Fades a lit surface colour at worldPos into the sky behind it. Horizontal and vertical distance are faded
-// separately because the loaded world is a box much shorter than it is wide (see SkySettings); either one
-// reaching its end hides the surface completely, which is where the loaded world stops.
+// Fades a lit surface colour at worldPos into the sky behind it, by horizontal distance: streaming loads whole
+// chunk columns, so the loaded world ends only sideways, where the fog is total (see SkySettings.FogDistance).
 fn applyFog(color: vec3<f32>, worldPos: vec3<f32>) -> vec3<f32> {
     let d = worldPos - camera.camPos.xyz;
-    let f = max(smoothstep(camera.fog.x, camera.fog.y, length(d.xz)),
-                smoothstep(camera.fog.z, camera.fog.w, abs(d.y)));
+    let f = smoothstep(camera.fog.x, camera.fog.y, length(d.xz));
     return mix(color, skyColor(normalize(d)), f);
 }
 
@@ -101,7 +99,7 @@ struct Model { model: mat4x4<f32>, chunk: vec3<i32>, grid: i32, params: vec4<f32
 // ray-only data), brick table (light slot per 8³ brick), light pool and grid descriptors. Only a slot's display half
 // is read here: one u16 per voxel, two per word — bits 0-3 R, 4-7 G, 8-11 B (lamp + bounce, square-curve encoded),
 // 12-13 sun visibility (0-3), 14-15 ray AO occlusion (0-3).
-struct GridDesc { v2w: mat4x4<f32>, w2v: mat4x4<f32>, table: vec4<i32>, bmin: vec4<i32>, bmax: vec4<i32> };
+" + GridStore.LookupWgsl + @"
 @group(2) @binding(0) var<storage, read> occPool: array<u32>;
 @group(2) @binding(1) var<storage, read> chunkTable: array<vec4<i32>>;
 @group(2) @binding(2) var<storage, read> brickTable: array<u32>;
@@ -144,37 +142,9 @@ fn vs_main(
     return o;
 }
 
-// a mod n in [0, n), unsigned arithmetic only (signed % is wrong for negatives on at least one backend).
-fn wrapi(a: i32, n: i32) -> i32 {
-    let un = u32(n);
-    if (a >= 0) { return i32(u32(a) % un); }
-    return n - 1 - i32(u32(-(a + 1)) % un);
-}
-
-// Chunk-table entry index of chunk c in this draw's grid, or -1 when that chunk isn't stored (the tag differs). The
-// world's table is a directory of regions first (bmin.w entries per side, regions 2^bmax.w chunks across): see
-// entryOf in GpuRayLightPass.
-fn entryOf(c: vec3<i32>) -> i32 {
-    let g = model.grid;
-    var t = grids[g].table;
-    if (t.y <= 0) { return -1; }
-    let dirDim = grids[g].bmin.w;
-    if (dirDim > 0) {
-        let r = vec2<i32>(c.x, c.z) >> vec2<u32>(u32(grids[g].bmax.w));
-        let di = t.x + wrapi(r.x, dirDim) + dirDim * wrapi(r.y, dirDim);
-        let tag = chunkTable[2 * di + 1];
-        t = chunkTable[2 * di];
-        if (t.y <= 0 || tag.x != r.x || tag.y != r.y) { return -1; }
-    }
-    let idx = t.x + wrapi(c.x, t.y) + t.y * (wrapi(c.y, t.z) + t.z * wrapi(c.z, t.w));
-    let e = chunkTable[2 * idx]; // entries are two vec4s; the second (solid-brick mask) is only for rays
-    if (e.y != c.x || e.z != c.y || e.w != c.z) { return -1; }
-    return idx;
-}
-
 // Voxel v in this draw's grid (grid voxel space). Unloaded → open.
 fn isSolid(v: vec3<i32>) -> bool {
-    let i = entryOf(v >> vec3<u32>(5u));
+    let i = entryOf(model.grid, v >> vec3<u32>(5u));
     if (i < 0) { return false; }
     let code = chunkTable[2 * i].x;
     if (code >= 0) {
@@ -202,7 +172,7 @@ fn slotDisplay(s: u32, v: vec3<i32>) -> u32 {
     return (lightPool[s * SLOT_WORDS + (k >> 1u)] >> ((k & 1u) * 16u)) & 0xFFFFu;
 }
 
-fn displayAt(v: vec3<i32>) -> u32 { return slotDisplay(brickSlot(entryOf(v >> vec3<u32>(5u)), v), v); }
+fn displayAt(v: vec3<i32>) -> u32 { return slotDisplay(brickSlot(entryOf(model.grid, v >> vec3<u32>(5u)), v), v); }
 
 fn decodeLevel(c: u32) -> f32 { let f = f32(c) / 15.0; return f * f; }
 
@@ -400,7 +370,7 @@ fn shadeFast(localPos: vec3<f32>, localNormal: vec3<f32>) -> Shade {
     else if (n.y > 0.5) { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 0, 1); }
     else                { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 1, 0); }
 
-    let ai = entryOf(air >> vec3<u32>(5u));
+    let ai = entryOf(model.grid, air >> vec3<u32>(5u));
     let m = solidMask(air, ai);
     let hb = air >> vec3<u32>(3u);
     let hs = brickSlot(ai, air);
@@ -553,7 +523,7 @@ fn vs_cloud(@builtin(vertex_index) vi: u32, @location(0) cell: vec2<u32>) -> VSO
 
 // Cloud boxes (CloudLayer): flat per-face shading like Minecraft's clouds (bright tops, darker sides and
 // undersides), a little extra on the faces the sun hits, then faded into the sky by the cloud layer's own fog
-// distances — clouds aren't limited by the loaded world, so they use neither of the terrain fog ranges.
+// distances (fog.zw) — clouds aren't limited by the loaded world, so they don't use its fog.
 @fragment
 fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     let n = in.worldNormal;
@@ -563,7 +533,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     else if (abs(n.x) > 0.5)   { shade = 0.88; }
     shade *= 0.9 + 0.1 * max(dot(n, -camera.sunDir.xyz), 0.0) * camera.sunDir.w;
     let d = in.worldPos - camera.camPos.xyz;
-    let f = smoothstep(camera.clouds.x, camera.clouds.y, length(d));
+    let f = smoothstep(camera.fog.z, camera.fog.w, length(d));
     return vec4<f32>(mix(in.color * shade, skyColor(normalize(d)), f), 1.0);
 }
 ";
@@ -638,12 +608,15 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
 
         _shader = CreateShader(Wgsl);
         CreateLayouts();
-        _pipeline          = CreatePipeline(PrimitiveTopology.TriangleList, CullMode.Back);
-        _wireframePipeline = CreatePipeline(PrimitiveTopology.LineList,     CullMode.None);
-        _hudPipeline       = CreatePipeline(PrimitiveTopology.TriangleList, CullMode.None, depthTest: false);
-        _skyPipeline       = CreateSkyPipeline();
+        _pipeline          = CreateMeshPipeline(PrimitiveTopology.TriangleList, CullMode.Back);
+        _wireframePipeline = CreateMeshPipeline(PrimitiveTopology.LineList,     CullMode.None);
+        _hudPipeline       = CreateMeshPipeline(PrimitiveTopology.TriangleList, CullMode.None, depthTest: false);
+        _modelPipeline     = CreateMeshPipeline(PrimitiveTopology.TriangleList, CullMode.None, fragmentEntry: "fs_model");
         _cloudPipeline     = CreateCloudPipeline();
-        _modelPipeline     = CreatePipeline(PrimitiveTopology.TriangleList, CullMode.None, fragmentEntry: "fs_model");
+        // The background pass: a full-screen triangle at the far plane that only fills pixels still at the cleared
+        // depth (reversed: the far plane and the clear value are both 0), without writing depth.
+        _skyPipeline       = CreatePipeline("vs_sky", "fs_sky", null, PrimitiveTopology.TriangleList, CullMode.None,
+                                            depthWrite: false, CompareFunction.GreaterEqual);
 
         _cameraBuffer    = GpuBuffer.CreateUniform(ctx, CameraSize);
         _hudCameraBuffer = GpuBuffer.CreateUniform(ctx, CameraSize);
@@ -733,8 +706,9 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         _pipelineLayout = _api.DeviceCreatePipelineLayout(_ctx.Device, &plDesc);
     }
 
-    private RenderPipeline* CreatePipeline(PrimitiveTopology topology, CullMode cullMode, bool depthTest = true,
-                                           string fragmentEntry = "fs_main")
+    /// <summary>A pipeline for vs_main's vertex layout (<see cref="Vertex"/>): the world, wireframe, HUD and models.</summary>
+    private RenderPipeline* CreateMeshPipeline(PrimitiveTopology topology, CullMode cullMode, bool depthTest = true,
+                                               string fragmentEntry = "fs_main")
     {
         VertexAttribute* attrs = stackalloc VertexAttribute[4];
         attrs[0] = new VertexAttribute { Format = VertexFormat.Float32x3, Offset = 0,  ShaderLocation = 0 };
@@ -742,11 +716,33 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         attrs[2] = new VertexAttribute { Format = VertexFormat.Float32x3, Offset = 24, ShaderLocation = 2 };
         attrs[3] = new VertexAttribute { Format = VertexFormat.Float32x3, Offset = 36, ShaderLocation = 3 };
         var vbLayout = new VertexBufferLayout { ArrayStride = Vertex.SizeBytes, StepMode = VertexStepMode.Vertex, AttributeCount = 4, Attributes = attrs };
+        return CreatePipeline("vs_main", fragmentEntry, &vbLayout, topology, cullMode, depthWrite: depthTest,
+                              depthTest ? CompareFunction.Greater : CompareFunction.Always); // reversed depth: nearer is greater
+    }
 
-        var vsEntry = (byte*)SilkMarshal.StringToPtr("vs_main", NativeStringEncoding.UTF8);
+    /// <summary>The cloud boxes (vs_cloud/fs_cloud): no vertex buffer, one <see cref="CloudLayer.CloudCell"/> instance
+    /// per box, back faces culled, depth-tested and depth-writing like the world.</summary>
+    private RenderPipeline* CreateCloudPipeline()
+    {
+        var attr     = new VertexAttribute { Format = VertexFormat.Uint32x2, Offset = 0, ShaderLocation = 0 };
+        var vbLayout = new VertexBufferLayout
+        {
+            ArrayStride = (ulong)sizeof(CloudLayer.CloudCell), StepMode = VertexStepMode.Instance, AttributeCount = 1, Attributes = &attr,
+        };
+        return CreatePipeline("vs_cloud", "fs_cloud", &vbLayout, PrimitiveTopology.TriangleList, CullMode.Back,
+                              depthWrite: true, CompareFunction.Greater);
+    }
+
+    /// <summary>A pipeline over the shared shader and layouts. <paramref name="vertexBuffer"/> is the layout of its one
+    /// vertex buffer, or null for none (the vertex shader makes its own geometry).</summary>
+    private RenderPipeline* CreatePipeline(string vertexEntry, string fragmentEntry, VertexBufferLayout* vertexBuffer,
+                                           PrimitiveTopology topology, CullMode cullMode, bool depthWrite,
+                                           CompareFunction depthCompare)
+    {
+        var vsEntry = (byte*)SilkMarshal.StringToPtr(vertexEntry, NativeStringEncoding.UTF8);
         var fsEntry = (byte*)SilkMarshal.StringToPtr(fragmentEntry, NativeStringEncoding.UTF8);
 
-        var vertexState   = new VertexState   { Module = _shader, EntryPoint = vsEntry, BufferCount = 1, Buffers = &vbLayout };
+        var vertexState   = new VertexState { Module = _shader, EntryPoint = vsEntry, BufferCount = vertexBuffer == null ? 0u : 1u, Buffers = vertexBuffer };
         var colorTarget   = new ColorTargetState { Format = _ctx.SurfaceFormat, Blend = null, WriteMask = ColorWriteMask.All };
         var fragmentState = new FragmentState { Module = _shader, EntryPoint = fsEntry, TargetCount = 1, Targets = &colorTarget };
 
@@ -754,8 +750,8 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         var depth = new DepthStencilState
         {
             Format            = _ctx.DepthFormat,
-            DepthWriteEnabled = depthTest,
-            DepthCompare      = depthTest ? CompareFunction.Greater : CompareFunction.Always, // reversed depth: nearer is greater
+            DepthWriteEnabled = depthWrite,
+            DepthCompare      = depthCompare,
             StencilFront = new StencilFaceState { Compare = CompareFunction.Always, FailOp = keep, DepthFailOp = keep, PassOp = keep },
             StencilBack  = new StencilFaceState { Compare = CompareFunction.Always, FailOp = keep, DepthFailOp = keep, PassOp = keep },
         };
@@ -770,98 +766,6 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
                 StripIndexFormat = IndexFormat.Undefined,
                 FrontFace        = FrontFace.Ccw,
                 CullMode         = cullMode,
-            },
-            DepthStencil = &depth,
-            Multisample  = new MultisampleState { Count = 1, Mask = ~0u, AlphaToCoverageEnabled = false },
-            Fragment     = &fragmentState,
-        };
-        var pipeline = _api.DeviceCreateRenderPipeline(_ctx.Device, &desc);
-
-        SilkMarshal.Free((nint)vsEntry);
-        SilkMarshal.Free((nint)fsEntry);
-        return pipeline;
-    }
-
-    /// <summary>The cloud boxes (vs_cloud/fs_cloud): no vertex buffer, one <see cref="CloudLayer.CloudCell"/> instance
-    /// per box, back faces culled, depth-tested and depth-writing like the world.</summary>
-    private RenderPipeline* CreateCloudPipeline()
-    {
-        var attr     = new VertexAttribute { Format = VertexFormat.Uint32x2, Offset = 0, ShaderLocation = 0 };
-        var vbLayout = new VertexBufferLayout
-        {
-            ArrayStride = (ulong)sizeof(CloudLayer.CloudCell), StepMode = VertexStepMode.Instance, AttributeCount = 1, Attributes = &attr,
-        };
-
-        var vsEntry = (byte*)SilkMarshal.StringToPtr("vs_cloud", NativeStringEncoding.UTF8);
-        var fsEntry = (byte*)SilkMarshal.StringToPtr("fs_cloud", NativeStringEncoding.UTF8);
-
-        var vertexState   = new VertexState { Module = _shader, EntryPoint = vsEntry, BufferCount = 1, Buffers = &vbLayout };
-        var colorTarget   = new ColorTargetState { Format = _ctx.SurfaceFormat, Blend = null, WriteMask = ColorWriteMask.All };
-        var fragmentState = new FragmentState { Module = _shader, EntryPoint = fsEntry, TargetCount = 1, Targets = &colorTarget };
-
-        var keep  = StencilOperation.Keep;
-        var depth = new DepthStencilState
-        {
-            Format            = _ctx.DepthFormat,
-            DepthWriteEnabled = true,
-            DepthCompare      = CompareFunction.Greater, // reversed depth: nearer is greater
-            StencilFront = new StencilFaceState { Compare = CompareFunction.Always, FailOp = keep, DepthFailOp = keep, PassOp = keep },
-            StencilBack  = new StencilFaceState { Compare = CompareFunction.Always, FailOp = keep, DepthFailOp = keep, PassOp = keep },
-        };
-
-        var desc = new RenderPipelineDescriptor
-        {
-            Layout    = _pipelineLayout,
-            Vertex    = vertexState,
-            Primitive = new PrimitiveState
-            {
-                Topology         = PrimitiveTopology.TriangleList,
-                StripIndexFormat = IndexFormat.Undefined,
-                FrontFace        = FrontFace.Ccw,
-                CullMode         = CullMode.Back,
-            },
-            DepthStencil = &depth,
-            Multisample  = new MultisampleState { Count = 1, Mask = ~0u, AlphaToCoverageEnabled = false },
-            Fragment     = &fragmentState,
-        };
-        var pipeline = _api.DeviceCreateRenderPipeline(_ctx.Device, &desc);
-
-        SilkMarshal.Free((nint)vsEntry);
-        SilkMarshal.Free((nint)fsEntry);
-        return pipeline;
-    }
-
-    /// <summary>The background pass (vs_sky/fs_sky): a vertex-buffer-free full-screen triangle at the far plane that
-    /// only fills pixels still at the cleared depth, without writing depth.</summary>
-    private RenderPipeline* CreateSkyPipeline()
-    {
-        var vsEntry = (byte*)SilkMarshal.StringToPtr("vs_sky", NativeStringEncoding.UTF8);
-        var fsEntry = (byte*)SilkMarshal.StringToPtr("fs_sky", NativeStringEncoding.UTF8);
-
-        var vertexState   = new VertexState { Module = _shader, EntryPoint = vsEntry, BufferCount = 0, Buffers = null };
-        var colorTarget   = new ColorTargetState { Format = _ctx.SurfaceFormat, Blend = null, WriteMask = ColorWriteMask.All };
-        var fragmentState = new FragmentState { Module = _shader, EntryPoint = fsEntry, TargetCount = 1, Targets = &colorTarget };
-
-        var keep  = StencilOperation.Keep;
-        var depth = new DepthStencilState
-        {
-            Format            = _ctx.DepthFormat,
-            DepthWriteEnabled = false,
-            DepthCompare      = CompareFunction.GreaterEqual, // reversed depth: the far plane and the clear value are 0
-            StencilFront = new StencilFaceState { Compare = CompareFunction.Always, FailOp = keep, DepthFailOp = keep, PassOp = keep },
-            StencilBack  = new StencilFaceState { Compare = CompareFunction.Always, FailOp = keep, DepthFailOp = keep, PassOp = keep },
-        };
-
-        var desc = new RenderPipelineDescriptor
-        {
-            Layout    = _pipelineLayout,
-            Vertex    = vertexState,
-            Primitive = new PrimitiveState
-            {
-                Topology         = PrimitiveTopology.TriangleList,
-                StripIndexFormat = IndexFormat.Undefined,
-                FrontFace        = FrontFace.Ccw,
-                CullMode         = CullMode.None,
             },
             DepthStencil = &depth,
             Multisample  = new MultisampleState { Count = 1, Mask = ~0u, AlphaToCoverageEnabled = false },

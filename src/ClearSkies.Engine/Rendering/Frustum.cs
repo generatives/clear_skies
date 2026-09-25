@@ -6,7 +6,7 @@ namespace ClearSkies.Engine.Rendering;
 /// <summary>
 /// Six-plane view frustum (left, right, bottom, top, near, far), extracted from a combined
 /// projection*view matrix (Gribb-Hartmann method, adapted for this engine's [0,1]/"ZO" depth
-/// convention — see <see cref="Math.Mat4.PerspectiveRhZo"/>/<see cref="Math.Mat4.OrthoRhZo"/>).
+/// convention — see <see cref="Math.Mat4.PerspectiveRhZoReversed"/>/<see cref="Math.Mat4.OrthoRhZo"/>).
 /// Each plane is (A,B,C,D) with "inside" meaning A*x+B*y+C*z+D &gt;= 0.
 ///
 /// Used to skip drawing (and shadow-casting) meshes that can't possibly be visible: with no culling,

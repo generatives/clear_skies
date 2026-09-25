@@ -89,17 +89,14 @@ public sealed class RenderFrame : IDebugUiSystem
         };
         if (SkySettings.FogEnabled)
         {
-            uniform.FogHorizontalEnd   = SkySettings.FogDistance;
-            uniform.FogHorizontalStart = System.Math.Max(0f, SkySettings.FogDistance - SkySettings.FogBand);
-            // Streaming loads whole chunk columns, so the loaded world has no top or bottom edge to hide.
-            uniform.FogVerticalStart   = 1e8f;
-            uniform.FogVerticalEnd     = 2e8f;
+            uniform.FogEnd   = SkySettings.FogDistance;
+            uniform.FogStart = System.Math.Max(0f, SkySettings.FogDistance - SkySettings.FogBand);
         }
         else
         {
             // Past the far plane: never reached, so nothing fogs.
-            uniform.FogHorizontalStart = uniform.FogVerticalStart = 1e8f;
-            uniform.FogHorizontalEnd   = uniform.FogVerticalEnd   = 2e8f;
+            uniform.FogStart = 1e8f;
+            uniform.FogEnd   = 2e8f;
         }
 
         if (!_renderer.BeginFrame())
