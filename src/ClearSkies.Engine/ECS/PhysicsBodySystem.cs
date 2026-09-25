@@ -47,11 +47,92 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
     private readonly Stopwatch _sw = new();
     private int _totalBuilt;
 
+    // Terrain colliders only near what can touch the terrain: the camera (the player) and every dynamic grid (ships).
+    // Streaming loads tens of thousands of chunks, each 0.2-2 ms of decomposition on the same workers as generation
+    // and meshing, and nothing far away ever collides with them. A chunk needing a collider out of range waits in
+    // _pendingStatic until something comes near; a collider left out of range (past a margin, so one at the edge
+    // isn't rebuilt back and forth) is dropped and its chunk waits again.
+    private const float ColliderRange = 192f, ColliderDropRange = 256f;
+    private const int S = ChunkData.Size;
+    private readonly EntitySet _dynamicGrids;
+    private readonly HashSet<ChunkPosition> _pendingStatic = new();
+    private readonly List<Vector3> _centres = new();
+    private readonly List<Entity> _near = new(), _far = new();
+    private ChunkVolume? _staticVolume;
+    private int _sweepFrame;
+    private static readonly (int dx, int dy, int dz)[] RangeOffsets = BuildRangeOffsets();
+
+    private static (int, int, int)[] BuildRangeOffsets()
+    {
+        int r = (int)MathF.Ceiling(ColliderRange / S);
+        var list = new List<(int, int, int)>();
+        for (int dz = -r; dz <= r; dz++) for (int dy = -r; dy <= r; dy++) for (int dx = -r; dx <= r; dx++)
+            list.Add((dx, dy, dz));
+        return list.ToArray();
+    }
+
+    /// <summary>Where colliders are wanted this frame: the camera and each dynamic grid.</summary>
+    private void GatherCentres()
+    {
+        _centres.Clear();
+        if (CameraUtil.TryGetActive(_cameras, out var cam)) _centres.Add(new Vector3(cam.Position.X, cam.Position.Y, cam.Position.Z));
+        foreach (ref readonly Entity e in _dynamicGrids.GetEntities())
+        {
+            var p = e.Get<Transform>().Position;
+            _centres.Add(new Vector3(p.X, p.Y, p.Z));
+        }
+    }
+
+    /// <summary>Distance squared from chunk <paramref name="pos"/>'s box to the nearest centre.</summary>
+    private float NearestCentreSq(ChunkPosition pos)
+    {
+        var lo = new Vector3(pos.X * S, pos.Y * S, pos.Z * S);
+        float best = float.MaxValue;
+        foreach (var c in _centres)
+        {
+            var d = Vector3.Max(Vector3.Max(lo - c, c - (lo + new Vector3(S))), Vector3.Zero);
+            best = MathF.Min(best, d.LengthSquared());
+        }
+        return best;
+    }
+
+    /// <summary>Flags the waiting chunks that are now in range of a centre; every 30 frames, drops the colliders that
+    /// are out of range of all of them.</summary>
+    private void UpdateStaticRange()
+    {
+        if (_staticVolume != null && _pendingStatic.Count > 0)
+            foreach (var c in _centres)
+            {
+                int cx = (int)MathF.Floor(c.X / S), cy = (int)MathF.Floor(c.Y / S), cz = (int)MathF.Floor(c.Z / S);
+                foreach (var (dx, dy, dz) in RangeOffsets)
+                {
+                    var pos = new ChunkPosition(cx + dx, cy + dy, cz + dz);
+                    if (!_pendingStatic.Contains(pos) || NearestCentreSq(pos) > ColliderRange * ColliderRange) continue;
+                    _pendingStatic.Remove(pos);
+                    if (_staticVolume.GetEntry(pos) is { } entry) entry.Entity.Set<NeedsRecollideFlag>();
+                }
+            }
+
+        if (++_sweepFrame < 30) return;
+        _sweepFrame = 0;
+        List<ChunkPosition>? drop = null;
+        foreach (var pos in _colliders.Keys)
+            if (NearestCentreSq(pos) > ColliderDropRange * ColliderDropRange) (drop ??= new()).Add(pos);
+        if (drop == null) return;
+        foreach (var pos in drop)
+        {
+            _physics.RemoveStaticCompound(_colliders[pos].handle);
+            _colliders.Remove(pos);
+            _pendingStatic.Add(pos);
+        }
+    }
+
     public PhysicsBodySystem(World world, PhysicsWorld physics)
     {
         _physics = physics;
         _dirtyChunks = world.GetEntities().With<Chunk>().With<NeedsRecollideFlag>().AsSet();
         _cameras = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
+        _dynamicGrids = world.GetEntities().With<DynamicGrid>().With<Transform>().AsSet();
         world.SubscribeEntityDisposed(OnEntityDisposed);
     }
 
@@ -78,22 +159,36 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
     {
         _grids.Clear();
 
-        // Closest to the camera first (ship chunks before any terrain, see NearestChunks), so the ground under the
-        // player gets its collider before the far side of the island does. A terrain chunk keeps its flag until its
-        // job is actually dispatched: streaming adds chunks far faster than MaxInFlight jobs a frame.
-        NearestChunks.Select(_dirtyChunks, _cameras, MaxInFlight - _inFlight + 8, _nearest);
-        foreach (var entity in _nearest)
+        // Ship chunks are rebuilt with their grid. Terrain chunks in range of a centre get a collider, closest first; a
+        // terrain chunk keeps its flag until its job is actually dispatched (streaming adds chunks far faster than
+        // MaxInFlight jobs a frame). One out of range waits in _pendingStatic instead (see UpdateStaticRange).
+        GatherCentres();
+        _near.Clear();
+        _far.Clear();
+        foreach (ref readonly Entity entity in _dirtyChunks.GetEntities())
         {
             var entry = entity.Get<Chunk>().Entry;
-            var volumeEntity = entry.Volume.Root;
+            if (entry.Volume.Root.Has<DynamicGrid>()) { _grids.Add(entry.Volume.Root); _far.Add(entity); continue; }
+            _staticVolume ??= entry.Volume;
+            if (NearestCentreSq(entry.Position) <= ColliderRange * ColliderRange) _near.Add(entity);
+            else
+            {
+                // Out of range: an outdated collider there goes too (it would only be rebuilt once something comes near).
+                if (_colliders.Remove(entry.Position, out var old)) _physics.RemoveStaticCompound(old.handle);
+                _pendingStatic.Add(entry.Position);
+                _far.Add(entity);
+            }
+        }
+        foreach (var entity in _far) entity.Remove<NeedsRecollideFlag>();
 
-            if (volumeEntity.Has<DynamicGrid>())
-                _grids.Add(volumeEntity);
-            else if (!UpdateStaticCollider(entry))
-                continue; // no job slot free; try again next frame
-
+        if (_near.Count > MaxInFlight - _inFlight)
+            _near.Sort((a, b) => NearestCentreSq(a.Get<Chunk>().Entry.Position).CompareTo(NearestCentreSq(b.Get<Chunk>().Entry.Position)));
+        foreach (var entity in _near)
+        {
+            if (!UpdateStaticCollider(entity.Get<Chunk>().Entry)) break; // no job slot free; the rest try next frame
             entity.Remove<NeedsRecollideFlag>();
         }
+        UpdateStaticRange();
 
         foreach (var entity in _grids)
         {
@@ -247,6 +342,7 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
         {
             if (_colliders.Remove(entry.Position, out var c))
                 _physics.RemoveStaticCompound(c.handle);
+            if (entry.Volume == _staticVolume) _pendingStatic.Remove(entry.Position);
         }
         _removedChunks.Clear();
     }
@@ -260,6 +356,7 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
         foreach (var c in _colliders.Values) totalBoxes += c.boxes;
 
         ImGui.Text($"Chunks with colliders (one BigCompound static each): {_colliders.Count}");
+        ImGui.Text($"Terrain chunks waiting until something comes within {ColliderRange:F0} blocks: {_pendingStatic.Count:N0}");
         ImGui.Text($"Total compound child boxes: {totalBoxes}");
         ImGui.Text($"Chunks built (lifetime): {_totalBuilt}");
         ImGui.Text($"Jobs in flight: {_inFlight} / {MaxInFlight}");
