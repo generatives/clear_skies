@@ -50,8 +50,12 @@ public sealed partial class GpuLightSystem
     private byte[] _n = Array.Empty<byte>();
     private bool[] _inHeld = Array.Empty<bool>();
     private int[] _holdStamp = Array.Empty<int>();
-    private readonly List<int> _dirtyList = new();
-    private readonly List<int> _heldList = new();
+    // Marked bricks waiting for direct light, and held bricks waiting for bounce, nearest the camera first. Stale
+    // entries (freed slots, holds run out) are dropped as they come up.
+    private NearestQueue? _dirtyQueueField, _heldQueueField;
+    private NearestQueue _dirtyQueue => _dirtyQueueField ??= new NearestQueue(SlotCentre);
+    private NearestQueue _heldQueue => _heldQueueField ??= new NearestQueue(SlotCentre);
+    private readonly List<int> _putBack = new();
     private int _frame;
 
     private GpuBuffer? _lightWork, _bounceWork, _nearWork;
@@ -367,7 +371,7 @@ public sealed partial class GpuLightSystem
             _holdStamp[slot] = _frame;
             _n[slot] = 0;
             _hold[slot] = (byte)holdEvals;
-            if (!_inHeld[slot]) { _inHeld[slot] = true; _heldList.Add(slot); }
+            if (!_inHeld[slot]) { _inHeld[slot] = true; _heldQueue.Add(slot); }
         }
     }
 
@@ -521,7 +525,7 @@ public sealed partial class GpuLightSystem
     {
         if (_dirty[slot]) return;
         _dirty[slot] = true;
-        _dirtyList.Add(slot);
+        _dirtyQueue.Add(slot);
     }
 
     private static bool Overlaps(Vector3D<float> aMin, Vector3D<float> aMax, Vector3D<float> bMin, Vector3D<float> bMax)
@@ -593,7 +597,7 @@ public sealed partial class GpuLightSystem
         _holdStamp[slot] = _frame;
         _n[slot] = _hold[slot] == 0 ? (byte)0 : (byte)System.Math.Min(_n[slot], rechangeN);
         _hold[slot] = (byte)holdFrames;
-        if (!_inHeld[slot]) { _inHeld[slot] = true; _heldList.Add(slot); }
+        if (!_inHeld[slot]) { _inHeld[slot] = true; _heldQueue.Add(slot); }
     }
 
     // ── Work lists ─────────────────────────────────────────────────────────────
@@ -616,95 +620,26 @@ public sealed partial class GpuLightSystem
             st.LightAll = false;
         }
 
-        // Drop marks that no longer need work: freed slots, and bricks of a ship already listed whole.
-        int keep = 0;
-        for (int k = 0; k < _dirtyList.Count; k++)
+        // Marked bricks, nearest first up to the cap; the rest wait for later frames. Marks that no longer need work
+        // (freed slots, bricks of a ship already listed whole) are dropped as they come up.
+        _relitList.Clear();
+        _dirtyQueue.Recentre(camPos);
+        while (_relitList.Count < _maxRelitPerFrame && _dirtyQueue.TryTake(out int slot))
         {
-            int slot = _dirtyList[k];
+            if (!_dirty[slot]) continue;
+            _dirty[slot] = false;
             var g = _store.SlotGrid[slot] >= 0 ? _store.GridAt(_store.SlotGrid[slot]) : null;
-            if (g == null || (_gridStates.TryGetValue(g, out var st) && st.AllThisFrame) || !_gridStates.ContainsKey(g))
-            {
-                _dirty[slot] = false;
-                continue;
-            }
-            _dirtyList[keep++] = slot;
+            if (g == null || !_gridStates.TryGetValue(g, out var st) || st.AllThisFrame) continue;
+            _relitList.Add(slot);
+            Push(ref n, (uint)slot);
         }
-        _dirtyList.RemoveRange(keep, _dirtyList.Count - keep);
-
-        int take = SelectNearest(_dirtyList, _maxRelitPerFrame, camPos, _relitList);
-        foreach (int slot in _relitList) { _dirty[slot] = false; Push(ref n, (uint)slot); }
-        if (take < _dirtyList.Count)
-        {
-            // Keep the rest queued, in their original order.
-            keep = 0;
-            for (int k = 0; k < _dirtyList.Count; k++) if (_dirty[_dirtyList[k]]) _dirtyList[keep++] = _dirtyList[k];
-            _dirtyList.RemoveRange(keep, _dirtyList.Count - keep);
-        }
-        else _dirtyList.Clear();
-        _lastRelitWaiting = _dirtyList.Count;
+        _lastRelitWaiting = _dirtyQueue.Count;
 
         if (n > 0) Upload(ref _lightWork, n);
         return n;
     }
 
-    /// <summary>Copies into <paramref name="chosen"/> the (at most <paramref name="cap"/>) slots of
-    /// <paramref name="candidates"/> whose brick centres are nearest <paramref name="camPos"/>. Returns the count.</summary>
-    private int SelectNearest(List<int> candidates, int cap, Vector3D<float> camPos, List<int> chosen)
-    {
-        chosen.Clear();
-        int count = candidates.Count;
-        if (count <= cap)
-        {
-            chosen.AddRange(candidates);
-            return count;
-        }
-        if (_sortKeys.Length < count) { _sortKeys = new float[count * 2]; _sortSlots = new int[count * 2]; }
-        var world = _staticVolume.Gpu;
-        for (int i = 0; i < count; i++)
-        {
-            int slot = candidates[i];
-            var g = _store.GridAt(_store.SlotGrid[slot])!;
-            var centre = g == world ? BrickCentre(slot) : BrickCentre(slot, g.VoxelToWorld); // the world's pose is identity
-            _sortKeys[i] = Vector3D.DistanceSquared(centre, camPos);
-            _sortSlots[i] = slot;
-        }
-        // Only which are the nearest matters, not their order: partition around the cap'th instead of sorting all.
-        SelectSmallest(_sortKeys, _sortSlots, count, cap);
-        for (int i = 0; i < cap; i++) chosen.Add(_sortSlots[i]);
-        return cap;
-    }
-
-    /// <summary>Reorders the first <paramref name="count"/> keys (and their values alongside) so the
-    /// <paramref name="k"/> smallest come first, in no particular order (quickselect, expected linear time).</summary>
-    private static void SelectSmallest(float[] keys, int[] values, int count, int k)
-    {
-        int lo = 0, hi = count - 1;
-        while (lo < hi)
-        {
-            // Median of three as the pivot, so a list already in (or near) order doesn't go quadratic.
-            int mid = lo + (hi - lo) / 2;
-            float a = keys[lo], b = keys[mid], c = keys[hi];
-            float pivot = a < b ? (b < c ? b : a < c ? c : a) : (a < c ? a : b < c ? c : b);
-            int i = lo, j = hi;
-            while (i <= j)
-            {
-                while (keys[i] < pivot) i++;
-                while (keys[j] > pivot) j--;
-                if (i > j) break;
-                (keys[i], keys[j]) = (keys[j], keys[i]);
-                (values[i], values[j]) = (values[j], values[i]);
-                i++; j--;
-            }
-            // Now [lo, j] <= pivot <= [i, hi], with anything between equal to it.
-            if (k - 1 <= j) hi = j;
-            else if (k - 1 >= i) lo = i;
-            else return;
-        }
-    }
-
-    private float[] _sortKeys = Array.Empty<float>();
-    private int[] _sortSlots = Array.Empty<int>();
-    private readonly List<int> _relitList = new(), _bounceChosen = new(), _bounceCandidates = new(), _bounceForced = new();
+    private readonly List<int> _relitList = new(), _bounceChosen = new();
     private int _lastRelitWaiting, _lastBounceWaiting;
 
     /// <summary>This frame's bounce bricks as (light slot, evaluations since it changed) pairs: every brick of a grid
@@ -735,33 +670,25 @@ public sealed partial class GpuLightSystem
             }
         }
 
-        // Held bricks of the other grids, nearest first up to the cap. The rest keep their hold for later frames.
-        _bounceCandidates.Clear();
-        int keep = 0;
-        for (int k = 0; k < _heldList.Count; k++)
+        // Held bricks of the other grids, nearest first up to the cap; the rest keep their hold for later frames.
+        // Bounce cleared this frame is re-accumulated in full now, wherever it is: its display already dropped the old
+        // bounce, so waiting would show as a dip.
+        _bounceChosen.Clear();
+        foreach (int slot in _clearSlots)
+            if (IsHeldAlone(slot)) _bounceChosen.Add(slot);
+        int forced = _bounceChosen.Count;
+        _putBack.Clear();
+        _heldQueue.Recentre(camPos);
+        while (_bounceChosen.Count - forced < _maxBouncedPerFrame && _heldQueue.TryTake(out int slot))
         {
-            int slot = _heldList[k];
-            int gi = _store.SlotGrid[slot];
-            var g = gi >= 0 ? _store.GridAt(gi) : null;
-            if (g == null || _hold[slot] == 0 || !_gridStates.TryGetValue(g, out var st))
-            {
-                _inHeld[slot] = false;
-                _hold[slot] = 0;
-                continue;
-            }
-            _heldList[keep++] = slot;
-            if (st.BounceAllThisFrame) continue; // evaluated with its whole grid
-            // Bounce cleared this frame is re-accumulated in full now, wherever it is: its display already dropped the
-            // old bounce, so waiting would show as a dip.
-            if (_clearStamp[slot] == _frame) _bounceForced.Add(slot);
-            else _bounceCandidates.Add(slot);
+            if (!IsHeld(slot)) continue;
+            // Evaluated with its whole grid, or already chosen above: still held, so it goes back in the queue.
+            if (!IsHeldAlone(slot) || _clearStamp[slot] == _frame) { _putBack.Add(slot); continue; }
+            _bounceChosen.Add(slot);
+            _putBack.Add(slot); // dropped when it next comes up if this frame uses up its hold
         }
-        _heldList.RemoveRange(keep, _heldList.Count - keep);
-
-        SelectNearest(_bounceCandidates, _maxBouncedPerFrame, camPos, _bounceChosen);
-        _lastBounceWaiting = _bounceCandidates.Count - _bounceChosen.Count;
-        _bounceChosen.AddRange(_bounceForced);
-        _bounceForced.Clear();
+        foreach (int slot in _putBack) _heldQueue.Add(slot);
+        _lastBounceWaiting = _heldQueue.Count;
         // The hold counts evaluations, not frames: a near-camera brick's extra same-frame evaluations use it up too, so
         // with as many near evaluations per frame as the hold, a change near the camera is finished within its frame.
         foreach (int slot in _bounceChosen)
@@ -783,6 +710,35 @@ public sealed partial class GpuLightSystem
         n /= 2;
         if (n > 0) Upload(ref _bounceWork, 2 * n);
         return n;
+    }
+
+    /// <summary>Whether a held slot still needs bounce (its grid is still there and its hold isn't used up); if not,
+    /// it is released.</summary>
+    private bool IsHeld(int slot)
+    {
+        int gi = _store.SlotGrid[slot];
+        var g = gi >= 0 ? _store.GridAt(gi) : null;
+        if (g != null && _hold[slot] > 0 && _gridStates.ContainsKey(g)) return true;
+        _inHeld[slot] = false;
+        _hold[slot] = 0;
+        return false;
+    }
+
+    /// <summary>Whether a slot is held and not evaluated with its whole grid this frame.</summary>
+    private bool IsHeldAlone(int slot)
+    {
+        if (!_inHeld[slot] || _hold[slot] == 0) return false;
+        int gi = _store.SlotGrid[slot];
+        var g = gi >= 0 ? _store.GridAt(gi) : null;
+        return g != null && _gridStates.TryGetValue(g, out var st) && !st.BounceAllThisFrame;
+    }
+
+    /// <summary>World-space centre of a light slot's brick, for the queues.</summary>
+    private Vector3D<float> SlotCentre(int slot)
+    {
+        int gi = _store.SlotGrid[slot];
+        var g = gi >= 0 ? _store.GridAt(gi) : null;
+        return g == null || g.IsWorld ? BrickCentre(slot) : BrickCentre(slot, g.VoxelToWorld);
     }
 
     private bool IsNear(int slot, in Mat4 voxelToWorld, Vector3D<float> camPos, float r2)

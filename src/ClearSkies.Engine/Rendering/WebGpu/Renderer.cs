@@ -1053,6 +1053,15 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         return new GpuMesh(vb, ib, wb, (uint)indices.Length, (uint)wfi.Length);
     }
 
+    /// <summary>Uploads a mesh packed into one block (see <see cref="GpuMesh(GpuBuffer, ulong, uint, uint)"/>): one
+    /// buffer and one write, where separate buffers cost three of each.</summary>
+    public GpuMesh UploadPackedMesh(ReadOnlySpan<byte> packed, ulong vertexBytes, uint indexCount, uint wireframeIndexCount)
+    {
+        var buf = GpuBuffer.Create(_ctx, (ulong)packed.Length, BufferUsage.Vertex | BufferUsage.Index | BufferUsage.CopyDst);
+        buf.Write(0, packed);
+        return new GpuMesh(buf, vertexBytes, indexCount, wireframeIndexCount);
+    }
+
     /// <summary>Upload with an explicit wireframe index buffer (e.g. 12 cube edges instead of diagonal-filled faces).</summary>
     public GpuMesh UploadMesh(ReadOnlySpan<Vertex> vertices, ReadOnlySpan<uint> indices, ReadOnlySpan<uint> wireframeIndices)
     {
@@ -1074,9 +1083,9 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
 
         uint dynOffset = StageModel(ModelUniform.Default(model));
         _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset);
-        _api.RenderPassEncoderSetVertexBuffer(_pass, 0, mesh.VertexBuffer.Handle, 0, mesh.VertexBuffer.SizeBytes);
+        _api.RenderPassEncoderSetVertexBuffer(_pass, 0, mesh.VertexBuffer.Handle, mesh.VertexOffset, mesh.VertexBytes);
         _api.RenderPassEncoderSetPipeline(_pass, _wireframePipeline);
-        _api.RenderPassEncoderSetIndexBuffer(_pass, mesh.WireframeBuffer.Handle, IndexFormat.Uint32, 0, mesh.WireframeBuffer.SizeBytes);
+        _api.RenderPassEncoderSetIndexBuffer(_pass, mesh.WireframeBuffer.Handle, IndexFormat.Uint32, mesh.WireframeOffset, mesh.WireframeBytes);
         _api.RenderPassEncoderDrawIndexed(_pass, mesh.WireframeIndexCount, 1, 0, 0, 0);
         _api.RenderPassEncoderSetPipeline(_pass, WireframeMode ? _wireframePipeline : _pipeline);
         _drawIndex++;
@@ -1107,11 +1116,13 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
             uint dynOffset = StageModel(u);
             _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset);
             _api.RenderPassEncoderSetBindGroup(_pass, 3, part.Texture.BindGroup, 0, null);
-            _api.RenderPassEncoderSetVertexBuffer(_pass, 0, part.Mesh.VertexBuffer.Handle, 0, part.Mesh.VertexBuffer.SizeBytes);
+            _api.RenderPassEncoderSetVertexBuffer(_pass, 0, part.Mesh.VertexBuffer.Handle, part.Mesh.VertexOffset, part.Mesh.VertexBytes);
 
             var idxBuf   = WireframeMode ? part.Mesh.WireframeBuffer : part.Mesh.IndexBuffer;
             var idxCount = WireframeMode ? part.Mesh.WireframeIndexCount : part.Mesh.IndexCount;
-            _api.RenderPassEncoderSetIndexBuffer(_pass, idxBuf.Handle, IndexFormat.Uint32, 0, idxBuf.SizeBytes);
+            var idxOff   = WireframeMode ? part.Mesh.WireframeOffset : part.Mesh.IndexOffset;
+            var idxBytes = WireframeMode ? part.Mesh.WireframeBytes : part.Mesh.IndexBytes;
+            _api.RenderPassEncoderSetIndexBuffer(_pass, idxBuf.Handle, IndexFormat.Uint32, idxOff, idxBytes);
             _api.RenderPassEncoderDrawIndexed(_pass, idxCount, 1, 0, 0, 0);
             _drawIndex++;
         }
@@ -1183,8 +1194,8 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
 
         uint dynOffset = StageModel(ModelUniform.Default(model));
         _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset);
-        _api.RenderPassEncoderSetVertexBuffer(_pass, 0, mesh.VertexBuffer.Handle, 0, mesh.VertexBuffer.SizeBytes);
-        _api.RenderPassEncoderSetIndexBuffer(_pass, mesh.IndexBuffer.Handle, IndexFormat.Uint32, 0, mesh.IndexBuffer.SizeBytes);
+        _api.RenderPassEncoderSetVertexBuffer(_pass, 0, mesh.VertexBuffer.Handle, mesh.VertexOffset, mesh.VertexBytes);
+        _api.RenderPassEncoderSetIndexBuffer(_pass, mesh.IndexBuffer.Handle, IndexFormat.Uint32, mesh.IndexOffset, mesh.IndexBytes);
         _api.RenderPassEncoderDrawIndexed(_pass, mesh.IndexCount, 1, 0, 0, 0);
         _drawIndex++;
     }
@@ -1269,11 +1280,13 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
 
         uint dynOffset = StageModel(new ModelUniform { Model = model, ChunkX = chunk.X, ChunkY = chunk.Y, ChunkZ = chunk.Z, Grid = grid });
         _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset);
-        _api.RenderPassEncoderSetVertexBuffer(_pass, 0, mesh.VertexBuffer.Handle, 0, mesh.VertexBuffer.SizeBytes);
+        _api.RenderPassEncoderSetVertexBuffer(_pass, 0, mesh.VertexBuffer.Handle, mesh.VertexOffset, mesh.VertexBytes);
 
         var idxBuf   = WireframeMode ? mesh.WireframeBuffer : mesh.IndexBuffer;
         var idxCount = WireframeMode ? mesh.WireframeIndexCount : mesh.IndexCount;
-        _api.RenderPassEncoderSetIndexBuffer(_pass, idxBuf.Handle, IndexFormat.Uint32, 0, idxBuf.SizeBytes);
+        var idxOff   = WireframeMode ? mesh.WireframeOffset : mesh.IndexOffset;
+        var idxBytes = WireframeMode ? mesh.WireframeBytes : mesh.IndexBytes;
+        _api.RenderPassEncoderSetIndexBuffer(_pass, idxBuf.Handle, IndexFormat.Uint32, idxOff, idxBytes);
         _api.RenderPassEncoderDrawIndexed(_pass, idxCount, 1, 0, 0, 0);
         _drawIndex++;
     }
