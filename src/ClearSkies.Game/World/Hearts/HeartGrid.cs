@@ -32,7 +32,7 @@ public static class HeartGrid
     /// <summary>The layers, bottom up: big pieces in the floor, smaller in the foothills, smaller still in the ranges.</summary>
     public static readonly Layer[] Layers =
     {
-        new(150f, float.MinValue, 0f),
+        new(240f, float.MinValue, 0f),
         new(110f, 0f, 400f),
         new(85f, 400f, float.MaxValue),
     };

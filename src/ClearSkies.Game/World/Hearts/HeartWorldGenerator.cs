@@ -261,13 +261,16 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         // face, and further at edges and corners, where faces meet, so they're rounded. In a dead piece it is empty.
         //
         // Going up, a face's distance changes linearly, at a rate of its normal's upward part (times VerticalScale per
-        // block): it shrinks for a face above and grows for one below. The smooth minimum changes no faster than its
-        // fastest face, so a solid point stays solid for at least its value over the fastest shrinking rate, and an
-        // empty one in a live piece stays empty for at least minus its value over the fastest growing rate. Either
-        // stays in the same piece until it reaches a face above.
+        // block): it shrinks for a face above and grows for one below. Two bounds each on how long a point stays as it
+        // is, the better of which counts:
+        // - The smooth minimum changes no faster than its fastest face: a solid point stays solid for at least its
+        //   value over the fastest shrinking rate, an empty one for minus its value over the fastest growing rate.
+        // - The smooth minimum is at most Rounding * ln(faces) under the plain one and never over it: a solid point
+        //   stays solid until some face comes within that of zero, an empty one while any face stays at or under zero.
+        // Either stays in the same piece until it reaches a face above.
         bool alive = _alive[bi];
         float least = float.MaxValue, shrink = 0f, grow = 0f, toFace = float.MaxValue;
-        Span<float> worn = stackalloc float[27 * 3];
+        Span<float> worn = stackalloc float[27 * 3], rates = stackalloc float[27 * 3];
         int faces = 0;
         foreach (int h in near[..count])
         {
@@ -281,6 +284,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             if (!alive) continue;
             float upness = ey * ey / (len * len);
             float f = plane - (wearAcross + (wearUp - wearAcross) * upness);
+            rates[faces] = rate;
             worn[faces++] = f;
             least = MathF.Min(least, f);
             if (rate > 0f) shrink = MathF.Max(shrink, rate); else grow = MathF.Max(grow, -rate);
@@ -291,16 +295,39 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             return false;
         }
 
-        // Smooth minimum: least - Rounding * ln(sum of e^-(f - least) / Rounding).
-        float sum = 0f;
-        for (int i = 0; i < faces; i++)
+        // Smooth minimum: least - Rounding * ln(sum of e^-(f - least) / Rounding). It is between least and gap under
+        // it, so only worked out where that straddles zero, near a piece's surface; elsewhere its lower bound serves.
+        float gap = faces > 1 ? Rounding * MathF.Log(faces) : 0f;
+        float soft;
+        if (faces == 0) soft = float.MaxValue;
+        else if (least <= 0f) soft = least;
+        else if (least > gap) soft = least - gap;
+        else
         {
-            float e = (worn[i] - least) / Rounding;
-            if (e < 12f) sum += MathF.Exp(-e);
+            float sum = 0f;
+            for (int i = 0; i < faces; i++)
+            {
+                float e = (worn[i] - least) / Rounding;
+                if (e < 12f) sum += MathF.Exp(-e);
+            }
+            soft = least - Rounding * MathF.Log(sum);
         }
-        float soft = faces == 0 ? float.MaxValue : least - Rounding * MathF.Log(sum);
-        bool solid = soft > 0f;
-        float until = solid ? (shrink > 0f ? soft / shrink : float.MaxValue) : (grow > 0f ? -soft / grow : float.MaxValue);
+        bool solid = soft > 0f || (faces > 0 && least > gap);
+        float until;
+        if (solid)
+        {
+            float byFace = float.MaxValue;
+            for (int i = 0; i < faces; i++)
+                if (rates[i] > 0f) byFace = MathF.Min(byFace, (worn[i] - gap) / rates[i]);
+            until = MathF.Max(shrink > 0f ? soft / shrink : float.MaxValue, byFace);
+        }
+        else
+        {
+            float byFace = 0f;
+            for (int i = 0; i < faces; i++)
+                if (worn[i] <= 0f) byFace = MathF.Max(byFace, rates[i] >= 0f ? float.MaxValue : worn[i] / rates[i]);
+            until = MathF.Max(grow > 0f ? -soft / grow : float.MaxValue, byFace);
+        }
         clear = MathF.Max(MathF.Min(MathF.Min(until, toFace), setChange), 0f);
         return solid;
     }
