@@ -94,9 +94,9 @@ public static class IslandGrid
     {
         //   cell   height  open     archi.  near    radius        height spread
         new(12288, 2048,   0.55f,   0.95f,  0f,     700f, 1200f,  150f), // Large: 1.5-2.5 km across, a clump each
-        new( 2560, 1024,   0f,      0f,     1.00f,  120f,  450f,  250f), // Medium
-        new(  768,  512,   0f,      0f,     0.80f,   30f,  140f,  200f), // Small
-        new(  192,  128,   0f,      0f,     0.50f,    6f,   35f,  160f), // Tiny
+        new( 1920, 1024,   0f,      0f,     1.00f,  120f,  400f,  700f), // Medium: many, stacked above and below
+        new(  768,  512,   0f,      0f,     0.15f,   30f,  140f,  400f), // Small: a few
+        new(  192,  128,   0f,      0f,     0.02f,    6f,   35f,  300f), // Tiny: rare
     };
 
     // Archipelago field: value noise at these two spacings (blocks), mapped through a smoothstep for contrast.
@@ -106,11 +106,14 @@ public static class IslandGrid
     private const float StratumLow = 550f, StratumHigh = 1250f, StratumSpacing = 16000f, StratumDetail = 5000f;
 
     // A parent's pull: full out to NearRim × its radius past its rim, gone by FarRim × its radius (+ FarRimExtra).
-    private const float NearRim = 0.2f, FarRim = 3.5f, FarRimExtra = 100f;
+    private const float NearRim = 0.2f, FarRim = 4.5f, FarRimExtra = 100f;
 
     /// <summary>Least distance between two large islands' centres, so clumps stay apart (the next one a silhouette in
     /// the haze): each sits at least half this from its cell's edges.</summary>
     private const float MinClumpGap = 6000f;
+
+    /// <summary>Clear air between an island stacked right over or under its parent and the parent, in blocks.</summary>
+    private const float StackGapMin = 60f, StackGapMax = 450f;
 
     /// <summary>Base Y range of large islands (their cell is the whole band, so this keeps them off its ends).</summary>
     private const float LargeMinBaseY = 650f, LargeMaxBaseY = 1150f;
@@ -187,7 +190,7 @@ public static class IslandGrid
 
         float midX = (cx + 0.5f) * def.CellSize, midZ = (cz + 0.5f) * def.CellSize;
         float chance = Lerp(def.ChanceOpen, def.ChanceArchipelago, Archipelago(seed, midX, midZ));
-        var (near, parentY) = c == IslandClass.Large ? (0f, 0f) : Near(seed, c, cx, cz);
+        var (near, parent) = c == IslandClass.Large ? (0f, default) : Near(seed, c, cx, cz);
         chance = MathF.Max(chance, def.ChanceNear * near);
         if (roll >= chance) return false;
 
@@ -214,13 +217,24 @@ public static class IslandGrid
 
         // Within the class's spread of the stratum, or of the parent's height. Every vertical cell of a column rolls its
         // own height and keeps the island only if that falls inside it, so a column's islands spread evenly over the
-        // span and never fill the band.
-        float target = Lerp(Stratum(seed, midX, midZ), parentY, near);
-        float y = target + rng.NextRange(-def.HeightSpread, def.HeightSpread);
-        if (c == IslandClass.Large) y = Math.Clamp(y, LargeMinBaseY, LargeMaxBaseY);
-        float cellBottom = WorldBottom + cy * (float)def.CellHeight;
+        // span and never fill the band. Right over the parent, it sits clear above or below it instead, so it shades
+        // the parent or the parent shades it.
         float below = island.Lip + island.Depth + island.Bump + 1f;
         float above = island.YMax - island.BaseY;
+        float y;
+        float pdx = island.CenterX - parent.CenterX, pdz = island.CenterZ - parent.CenterZ;
+        float parentR = parent.Radius * 0.5f * (parent.StretchMajor + parent.StretchMinor);
+        float gap = rng.NextRange(StackGapMin, StackGapMax);
+        bool stackAbove = rng.NextFloat01() < 0.4f;
+        if (near > 0f && pdx * pdx + pdz * pdz < parentR * parentR)
+            y = stackAbove ? parent.YMax + gap + below : parent.YMin - gap - above;
+        else
+        {
+            float target = Lerp(Stratum(seed, midX, midZ), parent.BaseY, near);
+            y = target + rng.NextRange(-def.HeightSpread, def.HeightSpread);
+        }
+        if (c == IslandClass.Large) y = Math.Clamp(y, LargeMinBaseY, LargeMaxBaseY);
+        float cellBottom = WorldBottom + cy * (float)def.CellHeight;
         if (y < cellBottom + below || y > cellBottom + def.CellHeight - above) return false;
         island.BaseY = y;
         return true;
@@ -243,17 +257,18 @@ public static class IslandGrid
     }
 
     /// <summary>How strongly a bigger island draws class <paramref name="c"/>'s islands into column (cx, cz) of its grid
-    /// (0-1, by the cell centre's distance past the parent's rim, relative to the parent's size), and that parent's
-    /// height. The strongest of every bigger class's islands around; cached per column, since each of its vertical
-    /// cells asks.</summary>
-    private static (float Near, float Y) Near(ulong seed, IslandClass c, int cx, int cz)
+    /// (0-1, by the cell centre's distance past the parent's rim, relative to the parent's size), and that parent. The
+    /// strongest of every bigger class's islands around; cached per column, since each of its vertical cells
+    /// asks.</summary>
+    private static (float Near, IslandDef Parent) Near(ulong seed, IslandClass c, int cx, int cz)
     {
         var key = (seed, (int)c, cx, cz);
         if (NearCache.TryGetValue(key, out var cached)) return cached;
 
         var def = Classes[(int)c];
         float x = (cx + 0.5f) * def.CellSize, z = (cz + 0.5f) * def.CellSize;
-        float best = 0f, bestY = 0f;
+        float best = 0f;
+        IslandDef bestParent = default;
         for (int p = 0; p < (int)c; p++)
         {
             var pd = Classes[p];
@@ -269,19 +284,19 @@ public static class IslandGrid
                 float dx = x - parent.CenterX, dz = z - parent.CenterZ;
                 float past = MathF.Sqrt(dx * dx + dz * dz) - r;
                 float near = 1f - Smoothstep(NearRim * parent.Radius, FarRim * parent.Radius + FarRimExtra, past);
-                if (near > best) { best = near; bestY = parent.BaseY; }
+                if (near > best) { best = near; bestParent = parent; }
             }
         }
         if (NearCache.Count > CacheLimit) NearCache.Clear();
-        NearCache[key] = (best, bestY);
-        return (best, bestY);
+        NearCache[key] = (best, bestParent);
+        return (best, bestParent);
     }
 
     // Placements of the classes that are parents (every class but tiny), and each grid column's pull: every smaller cell
     // that might hold an island asks for the few around it. Cleared when they grow past CacheLimit (a long flight).
     private const int CacheLimit = 1 << 20;
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<(ulong, int, int, int, int), (bool, IslandDef)> PlacedCache = new();
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<(ulong, int, int, int), (float, float)> NearCache = new();
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<(ulong, int, int, int), (float, IslandDef)> NearCache = new();
 
     /// <summary><see cref="TryPlace"/>, cached for the parent classes.</summary>
     private static bool Placed(ulong seed, IslandClass c, int cx, int cy, int cz, out IslandDef island)
