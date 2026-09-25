@@ -1,15 +1,17 @@
 namespace ClearSkies.Game.Generation;
 
 /// <summary>One island heart: it holds up the ground nearer to it than to any other heart (its piece), if it is alive.
-/// Positions are world blocks.</summary>
-public readonly record struct Heart(float X, float Y, float Z, bool Alive);
+/// Positions are world blocks. A heart that doesn't <paramref name="Exists"/> (outside its layer's band) is no heart at
+/// all: it holds nothing and leaves the ground to others.</summary>
+public readonly record struct Heart(float X, float Y, float Z, bool Alive, bool Exists);
 
 /// <summary>
 /// Where island hearts are. The world is a <see cref="ContinentTerrain"/> broken into pieces: hearts sit all through
 /// the ground, one per cell of a 3D grid, and each holds the ground nearest to it, so the pieces fit together like a
 /// jigsaw, with a crack between neighbours (see HeartWorldGenerator). Distances count vertical offsets
 /// <see cref="VerticalScale"/> times over, so pieces are wide and flat rather than cubes, and the ground splits into
-/// layers as well as columns.
+/// layers as well as columns. Each height band (<see cref="Layers"/>) has its own grid, finer higher up, so pieces get
+/// smaller with height.
 ///
 /// A dead heart's piece doesn't exist: a hole. Whether a heart is alive goes by height: nearly all are low down, so the
 /// plains are a floor of land cracked into pieces; above it they die off quickly, so the foothills and ranges are
@@ -18,8 +20,22 @@ public readonly record struct Heart(float X, float Y, float Z, bool Alive);
 /// </summary>
 public static class HeartGrid
 {
-    /// <summary>A cell's size, in blocks across; its height is this over <see cref="VerticalScale"/>.</summary>
-    public const float CellSize = 150f;
+    /// <summary>A layer of hearts: a grid of cells <see cref="CellSize"/> blocks across (and that over
+    /// <see cref="VerticalScale"/> tall), whose hearts exist only from <see cref="YMin"/> up to <see cref="YMax"/>.</summary>
+    public readonly record struct Layer(float CellSize, float YMin, float YMax)
+    {
+        public float CellHeight => CellSize / VerticalScale;
+        public int CellX(float x) => (int)MathF.Floor(x / CellSize);
+        public int CellY(float y) => (int)MathF.Floor(y * VerticalScale / CellSize);
+    }
+
+    /// <summary>The layers, bottom up: big pieces in the floor, smaller in the foothills, smaller still in the ranges.</summary>
+    public static readonly Layer[] Layers =
+    {
+        new(150f, float.MinValue, 0f),
+        new(100f, 0f, 400f),
+        new(70f, 400f, float.MaxValue),
+    };
 
     /// <summary>How much more a vertical offset counts than a horizontal one when finding a block's nearest heart.</summary>
     public const float VerticalScale = 2.2f;
@@ -45,17 +61,16 @@ public static class HeartGrid
     // roughened by a finer one at ClusterDetail, gathered where the clumps are.
     private const float ClumpSpacing = 9000f, ClumpDetail = 3000f, ClusterSpacing = 1400f, ClusterDetail = 450f;
 
-    public static int CellX(float x) => (int)MathF.Floor(x / CellSize);
-    public static int CellY(float y) => (int)MathF.Floor(y * VerticalScale / CellSize);
-
-    /// <summary>The heart of cell (cx, cy, cz).</summary>
-    public static Heart At(ulong seed, int cx, int cy, int cz)
+    /// <summary>The heart of cell (cx, cy, cz) of layer <paramref name="layer"/>.</summary>
+    public static Heart At(ulong seed, int layer, int cx, int cy, int cz)
     {
-        var rng = new SplitMix64Rng(HashCell(seed, 200, cx, cy, cz));
-        float x = (cx + 0.5f + Jitter * (rng.NextFloat01() - 0.5f)) * CellSize;
-        float y = (cy + 0.5f + Jitter * (rng.NextFloat01() - 0.5f)) * CellSize / VerticalScale;
-        float z = (cz + 0.5f + Jitter * (rng.NextFloat01() - 0.5f)) * CellSize;
-        return new Heart(x, y, z, rng.NextFloat01() < AliveChance(seed, x, y, z));
+        var l = Layers[layer];
+        var rng = new SplitMix64Rng(HashCell(seed, 200 + layer, cx, cy, cz));
+        float x = (cx + 0.5f + Jitter * (rng.NextFloat01() - 0.5f)) * l.CellSize;
+        float y = (cy + 0.5f + Jitter * (rng.NextFloat01() - 0.5f)) * l.CellHeight;
+        float z = (cz + 0.5f + Jitter * (rng.NextFloat01() - 0.5f)) * l.CellSize;
+        bool exists = y >= l.YMin && y < l.YMax;
+        return new Heart(x, y, z, exists && rng.NextFloat01() < AliveChance(seed, x, y, z), exists);
     }
 
     /// <summary>How likely a heart at (x, y, z) is to be alive.</summary>
