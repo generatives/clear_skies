@@ -52,8 +52,8 @@ public sealed class RenderFrame : IDebugUiSystem
 
         ImGui.SeparatorText("Sky & fog");
         ImGui.Checkbox("Distance fog", ref SkySettings.FogEnabled);
-        ImGui.SliderFloat("Fog start (horizontal)", ref SkySettings.FogStartFraction, 0f, 0.95f);
-        ImGui.TextDisabled($"Fraction of the loaded distance ({SkySettings.FogDistance:F0} blocks); fog is total at the edge.");
+        ImGui.SliderFloat("Fog band (blocks)", ref SkySettings.FogBand, 0f, 512f);
+        ImGui.TextDisabled($"Fades in over this many blocks before the loaded distance ({SkySettings.FogDistance:F0} blocks).");
         ImGui.ColorEdit3("Zenith", ref SkySettings.ZenithColor);
         ImGui.ColorEdit3("Horizon / fog", ref SkySettings.HorizonColor);
         ImGui.Checkbox("Clouds", ref SkySettings.CloudsEnabled);
@@ -89,7 +89,7 @@ public sealed class RenderFrame : IDebugUiSystem
         if (SkySettings.FogEnabled)
         {
             uniform.FogHorizontalEnd   = SkySettings.FogDistance;
-            uniform.FogHorizontalStart = SkySettings.FogDistance * SkySettings.FogStartFraction;
+            uniform.FogHorizontalStart = System.Math.Max(0f, SkySettings.FogDistance - SkySettings.FogBand);
             // Streaming loads whole chunk columns, so the loaded world has no top or bottom edge to hide.
             uniform.FogVerticalStart   = 1e8f;
             uniform.FogVerticalEnd     = 2e8f;

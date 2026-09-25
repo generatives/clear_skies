@@ -75,7 +75,7 @@ fn vs_sky(@builtin(vertex_index) i: u32) -> SkyOut {
     let viewRay = vec3<f32>(ndc.x / camera.proj[0][0], ndc.y / camera.proj[1][1], -1.0);
     let rot = mat3x3<f32>(camera.view[0].xyz, camera.view[1].xyz, camera.view[2].xyz);
     var o: SkyOut;
-    o.pos = vec4<f32>(ndc, 1.0, 1.0);
+    o.pos = vec4<f32>(ndc, 0.0, 1.0); // the far plane (depth is reversed: far is 0)
     o.dir = transpose(rot) * viewRay;
     return o;
 }
@@ -711,7 +711,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         {
             Format            = _ctx.DepthFormat,
             DepthWriteEnabled = depthTest,
-            DepthCompare      = depthTest ? CompareFunction.Less : CompareFunction.Always,
+            DepthCompare      = depthTest ? CompareFunction.Greater : CompareFunction.Always, // reversed depth: nearer is greater
             StencilFront = new StencilFaceState { Compare = CompareFunction.Always, FailOp = keep, DepthFailOp = keep, PassOp = keep },
             StencilBack  = new StencilFaceState { Compare = CompareFunction.Always, FailOp = keep, DepthFailOp = keep, PassOp = keep },
         };
@@ -754,7 +754,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         {
             Format            = _ctx.DepthFormat,
             DepthWriteEnabled = false,
-            DepthCompare      = CompareFunction.LessEqual,
+            DepthCompare      = CompareFunction.GreaterEqual, // reversed depth: the far plane and the clear value are 0
             StencilFront = new StencilFaceState { Compare = CompareFunction.Always, FailOp = keep, DepthFailOp = keep, PassOp = keep },
             StencilBack  = new StencilFaceState { Compare = CompareFunction.Always, FailOp = keep, DepthFailOp = keep, PassOp = keep },
         };
@@ -1127,7 +1127,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
             View = _ctx.DepthView,
             DepthLoadOp = LoadOp.Clear,
             DepthStoreOp = StoreOp.Store,
-            DepthClearValue = 1.0f,
+            DepthClearValue = 0.0f, // reversed depth: 0 is the far plane
         };
         var passDesc = new RenderPassDescriptor
         {

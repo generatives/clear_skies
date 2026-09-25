@@ -16,6 +16,22 @@ public struct Mat4
     public static Mat4 Identity => new() { M0 = 1, M5 = 1, M10 = 1, M15 = 1 };
 
     /// <summary>Right-handed perspective with a [0,1] depth range (WebGPU/D3D convention).</summary>
+    /// <summary>Right-handed perspective with reversed [0,1] depth: the near plane maps to 1 and the far plane to 0.
+    /// With a float depth buffer this keeps depth precision roughly proportional to distance, where standard depth
+    /// crowds all its precision next to the near plane (at a 0.1 near plane it resolved under a block at 1000 and
+    /// about 10 blocks at 4000). Depth tests use Greater, and the depth buffer clears to 0.</summary>
+    public static Mat4 PerspectiveRhZoReversed(float fovYRadians, float aspect, float near, float far)
+    {
+        float tanHalf = MathF.Tan(fovYRadians * 0.5f);
+        Mat4 m = default;
+        m.M0 = 1f / (aspect * tanHalf);   // col0,row0
+        m.M5 = 1f / tanHalf;              // col1,row1
+        m.M10 = near / (far - near);      // col2,row2
+        m.M11 = -1f;                      // col2,row3
+        m.M14 = far * near / (far - near); // col3,row2
+        return m;
+    }
+
     public static Mat4 PerspectiveRhZo(float fovYRadians, float aspect, float near, float far)
     {
         float tanHalf = MathF.Tan(fovYRadians * 0.5f);

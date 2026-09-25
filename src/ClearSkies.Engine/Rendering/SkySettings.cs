@@ -30,8 +30,9 @@ public static class SkySettings
     /// <summary>Blocks per second the cloud layer drifts along +X.</summary>
     public static float WindSpeed = 1.5f;
 
-    /// <summary>Where horizontal fog begins, as a fraction of <see cref="FogDistance"/>; it is total at 1.</summary>
-    public static float FogStartFraction = 0.85f;
+    /// <summary>How far before <see cref="FogDistance"/> the fog starts, in blocks: a fixed width, since the fog
+    /// distance ranges from a few hundred blocks to thousands.</summary>
+    public static float FogBand = 64f;
 
 
     /// <summary>Horizontal distance from the camera at which the loaded world stops (the nearest chunk column the
