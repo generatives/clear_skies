@@ -118,12 +118,12 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     /// <param name="minChunkY">Lowest chunk layer the generator fills. Streaming covers 64 layers from
     /// <see cref="LayersBelow"/> under it; the generator's layers must fall inside them. Edits to the static world
     /// outside them are refused (see <see cref="ChunkVolume.EditableLayers"/>).</param>
+    /// <param name="worldName">The saves folder: one per generator, since edits to one's terrain don't belong in
+    /// another's.</param>
     public ChunkLoadSystem(World world, ChunkVolume staticVolume, GridStore store, Func<IWorldGenerator> generatorFactory,
-                           float viewDistance, int minChunkY)
+                           float viewDistance, int minChunkY, string worldName)
     {
-        // World2: the island grids generate different terrain, so saves of edits to the old terrain (in World) don't
-        // belong in it.
-        _savesDir  = Path.Combine(AppContext.BaseDirectory, "Saves", "World2");
+        _savesDir  = Path.Combine(AppContext.BaseDirectory, "Saves", worldName);
         Directory.CreateDirectory(_savesDir);
 
         _cameras      = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();

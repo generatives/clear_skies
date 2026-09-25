@@ -22,7 +22,10 @@ public static class TestScene
     /// without re-deriving island geometry via <see cref="TryFindNearestIsland"/>.</summary>
     /// <param name="cameraOverride">Launch option (<c>--camera x,y,z[,yaw,pitch]</c>): puts the camera here instead of
     /// overlooking the nearest island, e.g. to reproduce a view for a screenshot.</param>
-    public static Vector3D<float> Build(EngineHost host, ulong worldSeed, float[]? cameraOverride = null)
+    /// <param name="spawnView">Where the camera starts and how it faces (yaw, pitch), if the world has its own idea of
+    /// that; otherwise it overlooks the nearest large island of <see cref="IslandGrid"/>.</param>
+    public static Vector3D<float> Build(EngineHost host, ulong worldSeed, float[]? cameraOverride = null,
+                                        (Vector3D<float> Position, float Yaw, float Pitch)? spawnView = null)
     {
         var cam = host.World.CreateEntity();
         var camTransform = Transform.Identity;
@@ -30,7 +33,12 @@ public static class TestScene
         // Find the nearest large island to the default spawn area and stand off south of it, a little above its
         // ground, so the player always starts overlooking real terrain instead of empty sky.
         float yaw = MathF.PI, pitch = -0.45f;
-        if (TryFindNearestIsland(worldSeed, FallbackSpawn.X, FallbackSpawn.Z, out var island))
+        if (spawnView is { } view)
+        {
+            camTransform.Position = view.Position;
+            (yaw, pitch) = (view.Yaw, view.Pitch);
+        }
+        else if (TryFindNearestIsland(worldSeed, FallbackSpawn.X, FallbackSpawn.Z, out var island))
         {
             float standoff = island.Reach + 100f;
             camTransform.Position = new Vector3D<float>(island.CenterX, island.BaseY + island.Lip + island.Crown + 80f,

@@ -1,5 +1,6 @@
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.ECS;
+using ClearSkies.Engine.Generation;
 using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Rendering.WebGpu;
 using ClearSkies.Engine.Voxels;
@@ -58,11 +59,18 @@ int viewArg = Array.IndexOf(args, "--view-distance");
 if (viewArg >= 0 && viewArg + 1 < args.Length) ViewDistance = float.Parse(args[viewArg + 1], System.Globalization.CultureInfo.InvariantCulture);
 const int MinChunkY = 0; // streamed layers are -8..55 (blocks -256..1792): IslandGrid's WorldBottom..WorldTop
 
+// World generator: "hearts" (default) cuts islands out of a continental terrain around island hearts (see
+// HeartWorldGenerator); "islands" places lens islands in clumps (see SkyWorldGenerator). --generator NAME picks one.
+int genArg = Array.IndexOf(args, "--generator");
+bool heartsWorld = !(genArg >= 0 && genArg + 1 < args.Length && args[genArg + 1] == "islands");
+Func<IWorldGenerator> generatorFactory = heartsWorld ? () => new HeartWorldGenerator(seed) : () => new SkyWorldGenerator(seed);
+if (heartsWorld) SkySettings.CloudAltitude = 1000f; // the hearts world's islands are mostly low: clouds among the hills
+
 // Shared GPU voxel storage for lighting (world + ships).
 var gridStore = new GridStore(host.Context, (int)((long)LightBudgetMb * 1024 * 1024 / GridStore.SlotBytes),
                               ChunkLoadSystem.WorldIndexDim(ViewDistance));
-var chunkLoadSystem = new ChunkLoadSystem(host.World, staticVolume, gridStore, () => new SkyWorldGenerator(seed),
-                                          ViewDistance, MinChunkY);
+var chunkLoadSystem = new ChunkLoadSystem(host.World, staticVolume, gridStore, generatorFactory,
+                                          ViewDistance, MinChunkY, heartsWorld ? "Hearts" : "World2");
 host.AddSystem(chunkLoadSystem, SystemStage.Logic);
 host.Renderer.AttachGridStore(gridStore);
 host.AddSystem(physicsBody, SystemStage.Logic);
@@ -106,7 +114,7 @@ host.AddSystem(meshSystem, SystemStage.PreRender);
 host.AddSystem(new BlockModelSystem(host.World, blockModels), SystemStage.PreRender); // block entities -> RenderedModel
 // Rendering: the host opens the frame, runs the render stages (systems in the order added within a stage), then
 // closes it with ImGui and presents. Each render system is handed this frame's camera and time.
-using var clouds = new CloudRenderSystem(host.Renderer, new IslandCloudDensity(seed));
+using var clouds = new CloudRenderSystem(host.Renderer, heartsWorld ? new HeartCloudDensity(seed) : new IslandCloudDensity(seed));
 host.AddSystem(new ChunkRenderSystem(host.World, host.Renderer), SystemStage.RenderWorld);
 host.AddSystem(new ModelRenderSystem(host.World, host.Renderer), SystemStage.RenderWorld);
 host.AddSystem(clouds, SystemStage.RenderWorld);
@@ -119,7 +127,17 @@ float[]? cameraOverride = null;
 int camArg = Array.IndexOf(args, "--camera");
 if (camArg >= 0 && camArg + 1 < args.Length)
     cameraOverride = args[camArg + 1].Split(',').Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
-var camSpawn = TestScene.Build(host, seed, cameraOverride);
+var camSpawn = TestScene.Build(host, seed, cameraOverride, heartsWorld ? HeartSpawn(seed) : null);
+
+// The hearts world's spawn: standing off south of the large island nearest the origin, a little above its ground,
+// looking at it.
+static (Vector3D<float> Position, float Yaw, float Pitch)? HeartSpawn(ulong seed)
+{
+    if (!HeartGrid.TryFindLarge(seed, 0f, 0f, out var h)) return null;
+    float z = h.Z - h.Reach - 150f;
+    float y = ContinentTerrain.For(seed).Height(h.X, h.Z) + 100f;
+    return (new Vector3D<float>(h.X, y, z), MathF.PI, -0.2f);
+}
 
 // Ray-traced lighting prototype test ship (plan doc, task 4): a small solid hull with a Lamp exposed on
 // top, placed near the camera's spawn so its shadow should visibly fall on the terrain below once the
