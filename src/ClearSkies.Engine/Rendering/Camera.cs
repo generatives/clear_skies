@@ -4,12 +4,16 @@ using Silk.NET.Maths;
 
 namespace ClearSkies.Engine.Rendering;
 
-/// <summary>Projection parameters plus view/projection matrix builders (WebGPU clip space: Y-up, depth [0,1]).</summary>
+/// <summary>Projection parameters plus view/projection matrix builders (WebGPU clip space: Y-up, depth [0,1],
+/// reversed: near is 1, far is 0 — see <see cref="Mat4.PerspectiveRhZoReversed"/>).</summary>
 public sealed class Camera
 {
     public float FovRadians { get; set; } = MathF.PI / 3f; // 60°
     public float NearPlane { get; set; } = 0.1f;
-    public float FarPlane { get; set; } = 1000f;
+    /// <summary>Past the furthest the clouds (<see cref="CloudLayer.Distance"/>) or the streamed world's fog reach, so
+    /// the fog, not the far plane, is what ends the view. Depth is reversed floats, so a far plane this far
+    /// costs no depth precision up close.</summary>
+    public float FarPlane => MathF.Max(CloudLayer.Distance, SkySettings.FogDistance) + 2000f;
 
     public Mat4 GetView(in Transform t)
     {
@@ -18,5 +22,5 @@ public sealed class Camera
         return Mat4.LookAtRh(t.Position, t.Position + forward, up);
     }
 
-    public Mat4 GetProjection(float aspect) => Mat4.PerspectiveRhZo(FovRadians, aspect, NearPlane, FarPlane);
+    public Mat4 GetProjection(float aspect) => Mat4.PerspectiveRhZoReversed(FovRadians, aspect, NearPlane, FarPlane);
 }

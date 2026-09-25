@@ -23,10 +23,14 @@ namespace ClearSkies.Engine.ECS;
 /// </summary>
 public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
 {
-    /// <summary>Static-collider jobs in flight at once (see UpdateStaticColliders).</summary>
-    private static readonly int MaxInFlight = System.Math.Max(2, Environment.ProcessorCount / 2);
+    /// <summary>Static-collider jobs (one chunk each) in flight at once (see UpdateStaticCollider). Streaming adds chunks
+    /// in bursts of hundreds, so this is well above the core count: the thread pool queues the excess.</summary>
+    private const int MaxInFlight = 64;
 
     private readonly EntitySet         _dirtyChunks;
+    private readonly EntitySet         _cameras;
+    private readonly List<Entity>      _nearest = new();
+    private readonly HashSet<Entity>   _grids = new();
     private readonly PhysicsWorld      _physics;
     private readonly VoxelBoxDecomposer _decomposer = new(); // dynamic grids, main thread
     private readonly ThreadLocal<VoxelBoxDecomposer> _decomposers = new(() => new VoxelBoxDecomposer()); // terrain workers
@@ -47,6 +51,7 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
     {
         _physics = physics;
         _dirtyChunks = world.GetEntities().With<Chunk>().With<NeedsRecollideFlag>().AsSet();
+        _cameras = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
         world.SubscribeEntityDisposed(OnEntityDisposed);
     }
 
@@ -71,28 +76,26 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
 
     public void UpdateColliders()
     {
-        HashSet<Entity> grids = new HashSet<Entity>(1);
+        _grids.Clear();
 
-        foreach (var entity in _dirtyChunks.GetEntities())
+        // Closest to the camera first (ship chunks before any terrain, see NearestChunks), so the ground under the
+        // player gets its collider before the far side of the island does. A terrain chunk keeps its flag until its
+        // job is actually dispatched: streaming adds chunks far faster than MaxInFlight jobs a frame.
+        NearestChunks.Select(_dirtyChunks, _cameras, MaxInFlight - _inFlight + 8, _nearest);
+        foreach (var entity in _nearest)
         {
-            var chunk = entity.Get<Chunk>();
-            var entry = chunk.Entry;
-            var volume = entry.Volume;
-            var volumeEntity = volume.Root;
+            var entry = entity.Get<Chunk>().Entry;
+            var volumeEntity = entry.Volume.Root;
 
             if (volumeEntity.Has<DynamicGrid>())
-            {
-                grids.Add(volumeEntity);
-            }
-            else
-            {
-                UpdateStaticCollider(entry);
-            }
+                _grids.Add(volumeEntity);
+            else if (!UpdateStaticCollider(entry))
+                continue; // no job slot free; try again next frame
 
             entity.Remove<NeedsRecollideFlag>();
         }
 
-        foreach (var entity in grids)
+        foreach (var entity in _grids)
         {
             UpdateDynamicGrid(entity);
         }
@@ -104,17 +107,19 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
     // here. One job in flight per chunk, same pattern as ChunkMeshSystem: a chunk re-dirtied mid-job is
     // re-dispatched once that job lands, and a result for a chunk unloaded meanwhile is dropped. A chunk's old
     // collider stays in place until its replacement arrives, so an edit never opens a hole for a frame.
-    private void UpdateStaticCollider(ChunkEntry entry)
+    /// <summary>Starts (or, for an empty chunk, completes) <paramref name="entry"/>'s collider rebuild; false if every
+    /// job slot is taken.</summary>
+    private bool UpdateStaticCollider(ChunkEntry entry)
     {
-        if (_inFlight >= MaxInFlight) return;
-
         var pos = entry.Position;
 
         if (!entry.Data.HasAnySolid())
         {
             if (_colliders.Remove(pos, out var old)) _physics.RemoveStaticCompound(old.handle);
-            return;
+            return true;
         }
+
+        if (_inFlight >= MaxInFlight) return false;
 
         _inFlight += 1;
         var data = entry.Data;
@@ -131,6 +136,7 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
                 _colliderResults.Enqueue((pos, entry, null, e));
             }
         }, null);
+        return true;
     }
 
     private void ApplyColliderResults()

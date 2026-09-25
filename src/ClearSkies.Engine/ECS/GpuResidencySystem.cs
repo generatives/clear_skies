@@ -20,6 +20,8 @@ public sealed class GpuResidencySystem : ISystem
 
     private readonly GridStore   _store;
     private readonly EntitySet   _needsGpuUpload;
+    private readonly EntitySet   _cameras;
+    private readonly List<Entity> _nearest = new();
     private readonly List<ChunkVolume> _removedGrids = new();
     private readonly List<(ChunkVolume, ChunkPosition)> _removedChunks = new();
 
@@ -27,6 +29,7 @@ public sealed class GpuResidencySystem : ISystem
     {
         _store       = store;
         _needsGpuUpload       = ecsWorld.GetEntities().With<Chunk>().With<NeedsGpuUploadFlag>().AsSet();
+        _cameras              = ecsWorld.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
         _store.Register(staticVolume.Gpu, isWorld: true);
 
         ecsWorld.SubscribeEntityDisposed(OnEntityDisposed);
@@ -62,8 +65,9 @@ public sealed class GpuResidencySystem : ISystem
         }
         _removedChunks.Clear();
 
-        int budget = UploadsPerFrame;
-        foreach (var entity in _needsGpuUpload.GetEntities())
+        // Closest to the camera first (see NearestChunks).
+        NearestChunks.Select(_needsGpuUpload, _cameras, UploadsPerFrame, _nearest);
+        foreach (var entity in _nearest)
         {
             var chunk = entity.Get<Chunk>();
             var entry = chunk.Entry;
@@ -71,7 +75,6 @@ public sealed class GpuResidencySystem : ISystem
             var pos = entry.Position;
             _store.UploadChunk(volume.Gpu, pos, entry);
             entity.Remove<NeedsGpuUploadFlag>();
-            if (--budget <= 0) break;
         }
     }
 }

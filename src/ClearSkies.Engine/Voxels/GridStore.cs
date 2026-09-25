@@ -15,9 +15,10 @@ public sealed class GridHandle
     internal bool IsWorld;
     internal readonly Dictionary<ChunkPosition, ChunkRecord> Chunks = new();
 
-    // Chunk-table section: entry index = TableBase + wrap(c.x, TDX) + TDX*(wrap(c.y, TDY) + TDY*wrap(c.z, TDZ)),
-    // the entry holding the chunk's coordinate as a tag. Toroidal for the world (it follows the camera); a ship's
-    // section just covers its chunk box, with the same arithmetic.
+    // Chunk-table section. A ship's covers its chunk box: entry index = TableBase + cell, where
+    // cell = wrap(c.x, TDX) + TDX*(wrap(c.y, TDY) + TDY*wrap(c.z, TDZ)), the entry holding the chunk's coordinate as a
+    // tag. The world's is instead a block of entries for its loaded chunks only, found through the world index: a
+    // TDX x TDY x TDZ grid of 16-bit offsets into the block, wrapped the same way (see GridStore).
     internal int TableBase = -1, TDX, TDY, TDZ;
 
     // Chunk box of the grid's records (inclusive), and whether it changed since the bounds were last derived.
@@ -51,15 +52,22 @@ internal sealed class ChunkRecord
     public ulong Surface;             // bricks holding (conservatively) a surface air voxel
     public int[]? BrickSlots;         // light slot per brick, -1 = none
     public bool Virtual;              // a ship's air chunk next to its blocks, with no ChunkEntry behind it
+    public int WorldCell = -1;        // world only: its world index cell, and its entry's offset in the world block
+    public int WorldSlot = -1;
 }
 
 /// <summary>
 /// GPU storage shared by the static world and every ship, per the ray-traced lighting design doc:
 /// <list type="bullet">
 /// <item>an occupancy pool of 4 KB chunk slots (1 bit per voxel, word = ly + 32*lz, bit = lx);</item>
-/// <item>a chunk table of <c>(occupancy slot or sentinel, cx, cy, cz)</c> entries, one section per grid, the
-/// world's section toroidal around the camera. The coordinate is a tag, so a wrapped lookup that lands on a
-/// different chunk reads as unloaded instead of aliasing onto it;</item>
+/// <item>a chunk table of <c>(occupancy slot or sentinel, cx, cy, cz)</c> entries: a section per ship, indexed by
+/// wrapping the chunk coordinate to the ship's chunk box, and a block of entries for the world's loaded chunks. The
+/// coordinate is a tag, so a wrapped lookup that lands on a different chunk reads as unloaded instead of aliasing
+/// onto it;</item>
+/// <item>the world index, after the chunk table's entries in the same buffer: a grid of 16-bit offsets into the
+/// world's block (0xFFFF = none), one per chunk position, wrapped on the chunk coordinate. It spans the view distance
+/// both ways and the 64 streamed layers, so the loaded chunks never wrap onto one another, and it costs 2 bytes per
+/// position where a full entry would cost 288;</item>
 /// <item>a brick table (64 entries per chunk entry) giving each 8³ brick's light slot, or <see cref="NoSurface"/>;</item>
 /// <item>a light pool of <see cref="WordsPerSlot"/>-word brick slots, allocated only for bricks that contain a
 /// surface air voxel: per voxel a 16-bit display value (RGB 4 bits each, sun 2 bits, AO 2 bits — the only part the
@@ -92,12 +100,53 @@ public sealed class GridStore : IDisposable
     /// <summary>A fresh display word (two voxels): full sun, no light, no AO — ambient and sun only.</summary>
     public const uint EmptyDisplayPair = 0x30003000u;
 
+    /// <summary>WGSL for every shader that reads the store: the grid descriptor (see <see cref="GridDesc"/>) and the
+    /// chunk-table lookup. The including shader declares the <c>chunkTable</c> and <c>grids</c> bindings.</summary>
+    internal const string LookupWgsl = @"
+struct GridDesc {
+    v2w: mat4x4<f32>,
+    w2v: mat4x4<f32>,
+    table: vec4<i32>,  // x: chunk-table base, yzw: section (or world index) dims in chunks (0 = unused descriptor)
+    bmin: vec4<i32>,   // xyz: voxel bounds [bmin, bmax) of the grid's chunks, grid space; w: the world index's
+    bmax: vec4<i32>,   // position in chunkTable (vec4s), 0 for a ship's plain section
+};
+
+// a mod n in [0, n). Unsigned arithmetic only: signed % returns wrong results for negative operands on at least
+// one backend (measured: -1887 % 19 gave 0), which broke every lookup at negative coordinates.
+fn wrapi(a: i32, n: i32) -> i32 {
+    let un = u32(n);
+    if (a >= 0) { return i32(u32(a) % un); }
+    return n - 1 - i32(u32(-(a + 1)) % un);
+}
+
+// Chunk-table entry index of chunk c in grid g, or -1 when that chunk isn't stored. Tables wrap, so the entry's own
+// coordinate tag decides whether it really is this chunk. Each entry is two vec4s: (occupancy slot or code, cx, cy,
+// cz) and (solid-brick mask low, high, 0, 0).
+// A ship's cell is its entry. The world's cell is instead a 16-bit offset (0xFFFF = none) into its block of entries,
+// packed eight to a vec4 in the world index.
+fn entryOf(g: i32, c: vec3<i32>) -> i32 {
+    let t = grids[g].table;
+    if (t.y <= 0) { return -1; }
+    let cell = wrapi(c.x, t.y) + t.y * (wrapi(c.y, t.z) + t.z * wrapi(c.z, t.w));
+    var idx = t.x + cell;
+    let index = grids[g].bmin.w;
+    if (index > 0) {
+        let word = u32(chunkTable[index + (cell >> 3u)][(cell >> 1u) & 3]);
+        let offset = (word >> (u32(cell & 1) * 16u)) & 0xFFFFu;
+        if (offset == 0xFFFFu) { return -1; }
+        idx = t.x + i32(offset);
+    }
+    let e = chunkTable[2 * idx];
+    if (e.y != c.x || e.z != c.y || e.w != c.z) { return -1; }
+    return idx;
+}
+";
+
     private const int S = ChunkData.Size;
     private const int UnusedTag = int.MinValue;
 
-    // Initial pool sizing per chunk column of the world table (measured peaks x ~1.3-1.5 headroom).
-    private const int OccSlotsPerColumn = 4;
-    private const int LightBricksPerColumn = 96;
+    // Initial light pool sizing per budgeted world chunk (measured ~28 x ~1.3 headroom).
+    public const int LightBricksPerChunk = 36;
 
     private readonly GpuContext _ctx;
 
@@ -131,7 +180,15 @@ public sealed class GridStore : IDisposable
     // Grid registry; grows (with the descriptor buffer) when every index is taken, so there is no ship limit.
     private GridHandle?[] _grids = new GridHandle?[16];
     private GridDesc[] _descs = new GridDesc[16];
-    private readonly Vector3D<int> _worldTableDims;
+    // The world index: _worldDim x WorldLayers x _worldDim cells after the chunk table's entries (see the class
+    // summary), and the world's block of entries it points into, handed out as offsets.
+    public const int WorldLayers = 64;
+    private const int NoWorldSlot = 0xFFFF;
+    private readonly int _worldDim;
+    private readonly ulong _worldIndexBytes;
+    private readonly Dictionary<int, ChunkRecord> _worldCells = new();
+    private int _worldCapacity, _worldNext;
+    private readonly Stack<int> _worldFree = new();
 
     /// <summary>Light slots allocated since the lighting system last drained this. They hold
     /// <see cref="EmptyDisplayPair"/> and zeroed accumulation, and need lighting.</summary>
@@ -148,40 +205,44 @@ public sealed class GridStore : IDisposable
     public int OccSlotsInUse => _occNext - _occFree.Count;
     public int OccSlotCapacity => _occCapacity;
     public int LightSlotHighWater => _lightNext;
+    public int WorldChunkCount => _worldCells.Count;
 
     // Scratch.
     private readonly uint[] _brickRun = new uint[64];
     private readonly uint[] _emptyBrick;
 
-    /// <param name="worldTableChunks">The world's toroidal table size in chunks per axis. Must be at least the
-    /// span of chunks ever loaded at once, so wrapping never maps two loaded chunks to one entry.</param>
-    public GridStore(GpuContext ctx, Vector3D<int> worldTableChunks)
+    /// <param name="worldChunkBudget">How many world chunks are loaded at most (sizes the pools).</param>
+    /// <param name="worldIndexDim">The world index's width in chunks (x and z; it wraps): wider than the span of world
+    /// chunks ever loaded at once, so two loaded chunks never share a cell. In y it covers <see cref="WorldLayers"/>.</param>
+    public GridStore(GpuContext ctx, int worldChunkBudget, int worldIndexDim)
     {
         _ctx = ctx;
-        _worldTableDims = worldTableChunks;
-        int worldEntries = worldTableChunks.X * worldTableChunks.Y * worldTableChunks.Z;
+        _worldDim = worldIndexDim;
+        _worldIndexBytes = ((ulong)worldIndexDim * WorldLayers * (ulong)worldIndexDim * 2 + 15) & ~15UL;
+        _worldCapacity = System.Math.Min(worldChunkBudget + 1024, NoWorldSlot);
 
-        // Pools start sized to the view distance so they don't grow (a copy + rebind hitch) during normal play.
-        // Surfaces are mostly horizontal, so what fills them scales with chunk columns, not the table's height.
-        // Measured at the 8/3 view radius (19x19 columns): peaks of ~2.6 non-uniform chunks and ~72 surface bricks
-        // per column. Ships get a fixed extra allowance on top.
-        int columns = worldTableChunks.X * worldTableChunks.Z;
+        // Pools start sized to the chunk budget so they don't grow (a copy + rebind hitch) during normal play.
+        // Measured at the old 8/3 view radius: peaks of ~2.6 non-uniform chunks and ~72 surface bricks per chunk
+        // column, i.e. ~28 surface bricks per non-uniform chunk; loaded world chunks are almost all non-uniform
+        // now that air is never loaded. Ships get a fixed extra allowance on top.
         ulong maxBytes = System.Math.Min(ctx.AdapterLimits.MaxBufferSize, ctx.AdapterLimits.MaxStorageBufferBindingSize);
-        _occCapacity   = System.Math.Min(worldEntries, columns * OccSlotsPerColumn) + 512;
-        _tableCapacity = worldEntries + 4096;
-        _lightCapacity = columns * LightBricksPerColumn + 2048;
+        _occCapacity   = worldChunkBudget + 512;
+        _tableCapacity = _worldCapacity + 4096;
+        _lightCapacity = worldChunkBudget * LightBricksPerChunk + 2048;
         int maxLight = (int)System.Math.Min(maxBytes / SlotBytes, int.MaxValue);
         if (_lightCapacity > maxLight)
         {
             Console.WriteLine($"[grid-store] light pool estimate of {_lightCapacity} bricks exceeds this device's max buffer size; starting at {maxLight}.");
             _lightCapacity = maxLight;
         }
-        Console.WriteLine($"[grid-store] {columns} chunk columns: light pool {_lightCapacity} bricks " +
+        Console.WriteLine($"[grid-store] {worldChunkBudget} chunk budget: light pool {_lightCapacity} bricks " +
                           $"({(ulong)_lightCapacity * SlotBytes / (1024 * 1024)} MB), occupancy {_occCapacity} chunks " +
-                          $"({(ulong)_occCapacity * WordsPerChunk * 4 / (1024 * 1024)} MB)");
+                          $"({(ulong)_occCapacity * WordsPerChunk * 4 / (1024 * 1024)} MB), table {_tableCapacity} entries " +
+                          $"({(ulong)_tableCapacity * (ChunkEntryBytes + 256) / (1024 * 1024)} MB), world index " +
+                          $"{worldIndexDim}x{WorldLayers}x{worldIndexDim} ({_worldIndexBytes / (1024 * 1024)} MB)");
 
         OccPool    = GpuBuffer.CreateStorage(ctx, (ulong)_occCapacity * WordsPerChunk * 4);
-        ChunkTable = GpuBuffer.CreateStorage(ctx, (ulong)_tableCapacity * ChunkEntryBytes);
+        ChunkTable = GpuBuffer.CreateStorage(ctx, (ulong)_tableCapacity * ChunkEntryBytes + _worldIndexBytes);
         BrickTable = GpuBuffer.CreateStorage(ctx, (ulong)_tableCapacity * 64 * 4);
         LightPool  = GpuBuffer.CreateStorage(ctx, (ulong)_lightCapacity * SlotBytes);
         SlotInfo   = GpuBuffer.CreateStorage(ctx, (ulong)_lightCapacity * 16);
@@ -193,7 +254,14 @@ public sealed class GridStore : IDisposable
 
         ClearTableRange(0, _tableCapacity);
         _tableNext = 0;
+        var none = new uint[System.Math.Min(_worldIndexBytes / 4, 1UL << 20)];
+        Array.Fill(none, uint.MaxValue);
+        for (ulong at = 0; at < _worldIndexBytes; at += (ulong)none.Length * 4)
+            ChunkTable.Write<uint>(WorldIndexOffset + at, none.AsSpan(0, (int)System.Math.Min((ulong)none.Length, (_worldIndexBytes - at) / 4)));
     }
+
+    /// <summary>Byte offset of the world index in <see cref="ChunkTable"/>: right after the entries.</summary>
+    private ulong WorldIndexOffset => (ulong)_tableCapacity * ChunkEntryBytes;
 
     // ── Grid registration ─────────────────────────────────────────────────────
 
@@ -213,7 +281,10 @@ public sealed class GridStore : IDisposable
         g.Index = idx;
         g.IsWorld = isWorld;
         if (isWorld)
-            AllocateSection(g, _worldTableDims.X, _worldTableDims.Y, _worldTableDims.Z);
+        {
+            g.TableBase = AllocRange(_worldCapacity);
+            g.TDX = _worldDim; g.TDY = WorldLayers; g.TDZ = _worldDim;
+        }
     }
 
     /// <summary>Releases everything a grid holds (a despawned ship).</summary>
@@ -254,6 +325,7 @@ public sealed class GridStore : IDisposable
             d.WorldToVoxel = g.WorldToVoxel;
             d.TableBase = g.TableBase; d.TDX = g.TDX; d.TDY = g.TDY; d.TDZ = g.TDZ;
             if (!g.Posed || g.TableBase < 0) d.TDX = d.TDY = d.TDZ = 0;
+            d.WorldIndex = g.IsWorld ? (int)(WorldIndexOffset / 16) : 0;
             g.Posed = false;
             if (g.HasBox)
             {
@@ -395,25 +467,64 @@ public sealed class GridStore : IDisposable
     {
         if (g.Chunks.TryGetValue(pos, out var rec)) return rec;
 
-        if (!g.IsWorld && !SectionCovers(g, pos)) GrowShipSection(g, pos);
+        rec = new ChunkRecord { Pos = pos, Virtual = isVirtual, Air = isVirtual ? ulong.MaxValue : 0UL };
         if (g.IsWorld)
         {
-            // Two loaded chunks wrapping onto one entry would corrupt each other. ChunkLoadSystem's unload radius
-            // keeps the loaded span within the table, so this only fires if that invariant is ever broken.
-            UpdateBounds(g);
-            if (!SectionCovers(g, pos))
+            int cell = WorldCell(pos);
+            if (_worldCells.TryGetValue(cell, out var taken))
             {
-                Console.WriteLine($"[grid-store] world chunk {pos} is outside the toroidal table's span; not stored.");
+                Console.WriteLine($"[grid-store] chunk {pos} wraps onto loaded chunk {taken.Pos} in the world index; not stored.");
                 return null;
             }
+            if (_worldFree.Count == 0 && _worldNext == _worldCapacity) GrowWorldBlock(g);
+            rec.WorldSlot = _worldFree.Count > 0 ? _worldFree.Pop() : _worldNext++;
+            rec.WorldCell = cell;
+            rec.TableIndex = g.TableBase + rec.WorldSlot;
+            _worldCells[cell] = rec;
+            WriteWorldIndex(cell);
         }
-
-        rec = new ChunkRecord { Pos = pos, Virtual = isVirtual, Air = isVirtual ? ulong.MaxValue : 0UL };
-        rec.TableIndex = TableIndex(g, pos);
+        else
+        {
+            if (!SectionCovers(g, pos)) GrowShipSection(g, pos);
+            rec.TableIndex = TableIndex(g, pos);
+        }
         g.Chunks[pos] = rec;
         ExtendBox(g, pos);
         WriteChunkEntry(rec);
         return rec;
+    }
+
+    private int WorldCell(ChunkPosition p)
+        => Wrap(p.X, _worldDim) + _worldDim * (Wrap(p.Y, WorldLayers) + WorldLayers * Wrap(p.Z, _worldDim));
+
+    /// <summary>Writes the world index word holding <paramref name="cell"/> (two cells to a word).</summary>
+    private void WriteWorldIndex(int cell)
+    {
+        int pair = cell & ~1;
+        uint lo = _worldCells.TryGetValue(pair, out var a) ? (uint)a.WorldSlot : NoWorldSlot;
+        uint hi = _worldCells.TryGetValue(pair + 1, out var b) ? (uint)b.WorldSlot : NoWorldSlot;
+        Span<uint> word = stackalloc uint[1] { lo | hi << 16 };
+        ChunkTable.Write<uint>(WorldIndexOffset + (ulong)pair * 2, word);
+    }
+
+    /// <summary>Moves the world's block of entries to one twice the size. Offsets into it stay the same, so the world
+    /// index doesn't change; only the entries move.</summary>
+    private void GrowWorldBlock(GridHandle g)
+    {
+        if (_worldCapacity >= NoWorldSlot)
+            throw new InvalidOperationException($"More than {NoWorldSlot} world chunks loaded: the world index's 16-bit offsets can't address them.");
+        int cap = System.Math.Min(_worldCapacity * 2, NoWorldSlot);
+        Console.WriteLine($"[grid-store] world block grown to {cap} entries");
+        int oldBase = g.TableBase, oldCap = _worldCapacity;
+        g.TableBase = AllocRange(cap);
+        _worldCapacity = cap;
+        foreach (var rec in g.Chunks.Values)
+        {
+            rec.TableIndex = g.TableBase + rec.WorldSlot;
+            WriteChunkEntry(rec);
+            WriteBrickRun(rec);
+        }
+        FreeRange(oldBase, oldCap);
     }
 
     private void FreeRecord(GridHandle g, ChunkRecord rec)
@@ -431,9 +542,17 @@ public sealed class GridStore : IDisposable
         ChunkTable.Write<int>((ulong)rec.TableIndex * ChunkEntryBytes, e);
         Array.Fill(_brickRun, NoSurface);
         BrickTable.Write<uint>((ulong)rec.TableIndex * 64 * 4, _brickRun);
+
+        if (rec.WorldCell >= 0)
+        {
+            _worldCells.Remove(rec.WorldCell);
+            WriteWorldIndex(rec.WorldCell);
+            _worldFree.Push(rec.WorldSlot);
+            rec.WorldCell = rec.WorldSlot = -1;
+        }
     }
 
-    private int TableIndex(GridHandle g, ChunkPosition p)
+    private static int TableIndex(GridHandle g, ChunkPosition p)
         => g.TableBase + Wrap(p.X, g.TDX) + g.TDX * (Wrap(p.Y, g.TDY) + g.TDY * Wrap(p.Z, g.TDZ));
 
     private static int Wrap(int a, int n) { int r = a % n; return r < 0 ? r + n : r; }
@@ -468,7 +587,20 @@ public sealed class GridStore : IDisposable
 
     private void AllocateSection(GridHandle g, int dx, int dy, int dz)
     {
-        int n = dx * dy * dz;
+        g.TableBase = AllocRange(dx * dy * dz);
+        g.TDX = dx; g.TDY = dy; g.TDZ = dz;
+    }
+
+    private void FreeSection(GridHandle g)
+    {
+        FreeRange(g.TableBase, g.TDX * g.TDY * g.TDZ);
+        g.TableBase = -1;
+    }
+
+    /// <summary>Takes <paramref name="n"/> consecutive table entries (first fit, else the end of the table, growing it),
+    /// cleared to unused.</summary>
+    private int AllocRange(int n)
+    {
         int start = -1;
         for (int i = 0; i < _tableFree.Count; i++)
         {
@@ -485,15 +617,22 @@ public sealed class GridStore : IDisposable
             _tableNext += n;
         }
         ClearTableRange(start, n);
-        g.TableBase = start; g.TDX = dx; g.TDY = dy; g.TDZ = dz;
+        return start;
     }
 
-    private void FreeSection(GridHandle g)
+    /// <summary>Returns entries to the free list. They aren't cleared: nothing looks them up once their section is
+    /// gone, and <see cref="AllocRange"/> clears them before they are used again.</summary>
+    private void FreeRange(int start, int n)
     {
-        int n = g.TDX * g.TDY * g.TDZ;
-        ClearTableRange(g.TableBase, n);
-        _tableFree.Add((g.TableBase, n));
-        g.TableBase = -1;
+        // Merge with free neighbours so repeated ship/world block regrowth doesn't fragment the table.
+        for (int i = 0; i < _tableFree.Count; i++)
+        {
+            var (s, c) = _tableFree[i];
+            if (s + c == start) { start = s; n += c; _tableFree.RemoveAt(i--); }
+            else if (start + n == s) { n += c; _tableFree.RemoveAt(i--); }
+        }
+        if (start + n == _tableNext) _tableNext = start;
+        else _tableFree.Add((start, n));
     }
 
     private void ClearTableRange(int start, int count)
@@ -712,7 +851,13 @@ public sealed class GridStore : IDisposable
 
     private void GrowTables(int cap)
     {
-        ChunkTable = Grow(ChunkTable, (ulong)cap * ChunkEntryBytes);
+        // The world index follows the entries, so it moves to after the new ones.
+        var table = GpuBuffer.CreateStorage(_ctx, (ulong)cap * ChunkEntryBytes + _worldIndexBytes);
+        _ctx.CopyBufferToBuffer(ChunkTable, table, WorldIndexOffset);
+        _ctx.CopyBufferToBuffer(ChunkTable, table, _worldIndexBytes, WorldIndexOffset, (ulong)cap * ChunkEntryBytes);
+        ChunkTable.Dispose();
+        ChunkTable = table;
+        BindingVersion++;
         BrickTable = Grow(BrickTable, (ulong)cap * 64 * 4);
         int old = _tableCapacity;
         _tableCapacity = cap;
@@ -750,14 +895,15 @@ public sealed class GridStore : IDisposable
         Grids.Dispose();
     }
 
-    /// <summary>GPU grid descriptor (176 bytes); matches WGSL <c>GridDesc</c>.</summary>
+    /// <summary>GPU grid descriptor (176 bytes); matches WGSL <c>GridDesc</c> (bmin.w: the world index's position in
+    /// the chunk table, in vec4s).</summary>
     [StructLayout(LayoutKind.Sequential)]
     private struct GridDesc
     {
         public Mat4 VoxelToWorld;
         public Mat4 WorldToVoxel;
         public int TableBase, TDX, TDY, TDZ;
-        public int MinX, MinY, MinZ, Pad0;   // voxel bounds [min, max), grid space
-        public int MaxX, MaxY, MaxZ, Pad1;
+        public int MinX, MinY, MinZ, WorldIndex;     // voxel bounds [min, max), grid space; world index (0 for ships)
+        public int MaxX, MaxY, MaxZ, _unused;
     }
 }

@@ -44,19 +44,26 @@ host.AddSystem(host.Gui, SystemStage.Input); // opens ImGui's frame before Logic
 
 var physicsBody = new PhysicsBodySystem(host.World, host.Physics);
 
-// View distance: xzRadius=16/yRadius=3 (was 8/3). Verified crash-free and smooth at this setting; a bigger
-// jump (tried 16/3) hit two real problems: the GPU device was silently capped at a 256 MiB max buffer size
-// (fixed in GpuContext — see AdapterLimits), and even past that, single-digit FPS from the GPU light flood
-// recomputing a much larger dirty region during the load-in burst plus the per-frame full-chunk scans in
-// ChunkMeshSystem/GpuResidencySystem/GpuLightSystem/PhysicsBodySystem (see the deferred dirty-queue task).
-// Pushing further needs that follow-up work, not just a bigger radius.
-const int ViewXz = 16, ViewY = 5;
-var chunkLoadSystem = new ChunkLoadSystem(host.World, staticVolume, () => new SkyWorldGenerator(seed), xzRadius: ViewXz, yRadius: ViewY);
-host.AddSystem(chunkLoadSystem, SystemStage.Logic);
+// Streaming budget: how many world chunks are loaded at once — as many as the old 12/3 view box held, but spent
+// only on chunks that hold something (see ChunkLoadSystem), so it reaches as far as the islands need. Streamed
+// layers start 8 under MinChunkY (for building under the islands); islands span roughly blocks 10-300.
+// --chunk-budget N overrides it, e.g. for a software renderer whose small max buffer size can't hold the light
+// for a full budget of island chunks.
+int ChunkBudget = (12 * 2 + 1) * (12 * 2 + 1) * (3 * 2 + 1);
+int budgetArg = Array.IndexOf(args, "--chunk-budget");
+if (budgetArg >= 0 && budgetArg + 1 < args.Length) ChunkBudget = int.Parse(args[budgetArg + 1]);
+// View distance: how far out (in blocks, horizontally) islands are streamed, if the budget reaches. The GPU's world
+// index covers it both ways at 2 bytes per chunk position (~48 MB at 10000). --view-distance N overrides it.
+float ViewDistance = 10000f;
+int viewArg = Array.IndexOf(args, "--view-distance");
+if (viewArg >= 0 && viewArg + 1 < args.Length) ViewDistance = float.Parse(args[viewArg + 1], System.Globalization.CultureInfo.InvariantCulture);
+const int MinChunkY = 0;
 
-// Shared GPU voxel storage for lighting (world + ships). ChunkLoadSystem unloads past radius + 1, so the loaded
-// span never exceeds 2 * (radius + 1) + 1 chunks per axis — the world's toroidal table size.
-var gridStore = new GridStore(host.Context, new Vector3D<int>(2 * ViewXz + 3, 2 * ViewY + 3, 2 * ViewXz + 3));
+// Shared GPU voxel storage for lighting (world + ships).
+var gridStore = new GridStore(host.Context, ChunkBudget, ChunkLoadSystem.WorldIndexDim(ViewDistance));
+var chunkLoadSystem = new ChunkLoadSystem(host.World, staticVolume, () => new SkyWorldGenerator(seed),
+                                          ViewDistance, ChunkBudget, MinChunkY);
+host.AddSystem(chunkLoadSystem, SystemStage.Logic);
 host.Renderer.AttachGridStore(gridStore);
 host.AddSystem(physicsBody, SystemStage.Logic);
 
@@ -99,7 +106,7 @@ host.AddSystem(meshSystem, SystemStage.PreRender);
 host.AddSystem(new BlockModelSystem(host.World, blockModels), SystemStage.PreRender); // block entities -> RenderedModel
 // Rendering: the host opens the frame, runs the render stages (systems in the order added within a stage), then
 // closes it with ImGui and presents. Each render system is handed this frame's camera and time.
-using var clouds = new CloudRenderSystem(host.Renderer);
+using var clouds = new CloudRenderSystem(host.Renderer, new IslandCloudDensity(seed));
 host.AddSystem(new ChunkRenderSystem(host.World, host.Renderer), SystemStage.RenderWorld);
 host.AddSystem(new ModelRenderSystem(host.World, host.Renderer), SystemStage.RenderWorld);
 host.AddSystem(clouds, SystemStage.RenderWorld);
@@ -107,7 +114,12 @@ host.AddSystem(new SkyRenderSystem(host.Renderer), SystemStage.RenderSky);
 host.AddSystem(new WireframeRenderSystem(host.World, host.Renderer), SystemStage.RenderOverlay);
 host.AddSystem(new HudRenderSystem(host.World, host.Renderer), SystemStage.RenderHud);
 
-var camSpawn = TestScene.Build(host, seed);
+// --camera x,y,z[,yaw,pitch]: start the camera at a given spot instead of overlooking the nearest island.
+float[]? cameraOverride = null;
+int camArg = Array.IndexOf(args, "--camera");
+if (camArg >= 0 && camArg + 1 < args.Length)
+    cameraOverride = args[camArg + 1].Split(',').Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+var camSpawn = TestScene.Build(host, seed, cameraOverride);
 
 // Ray-traced lighting prototype test ship (plan doc, task 4): a small solid hull with a Lamp exposed on
 // top, placed near the camera's spawn so its shadow should visibly fall on the terrain below once the

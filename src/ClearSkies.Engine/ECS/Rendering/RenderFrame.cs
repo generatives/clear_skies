@@ -52,15 +52,14 @@ public sealed class RenderFrame : IDebugUiSystem
 
         ImGui.SeparatorText("Sky & fog");
         ImGui.Checkbox("Distance fog", ref SkySettings.FogEnabled);
-        ImGui.SliderFloat("Fog start (horizontal)", ref SkySettings.FogStartFraction, 0f, 0.95f);
-        ImGui.SliderFloat("Fog start (vertical)", ref SkySettings.VerticalFogStartFraction, 0f, 0.95f);
-        ImGui.TextDisabled($"Fraction of the loaded distance ({SkySettings.LoadedHorizontal:F0} blocks across, " +
-                           $"{SkySettings.LoadedVertical:F0} up/down); fog is total at the edge.");
+        ImGui.SliderFloat("Fog band (blocks)", ref SkySettings.FogBand, 0f, 512f);
+        ImGui.TextDisabled($"Fades in over this many blocks before the loaded distance ({SkySettings.FogDistance:F0} blocks).");
         ImGui.ColorEdit3("Zenith", ref SkySettings.ZenithColor);
         ImGui.ColorEdit3("Horizon / fog", ref SkySettings.HorizonColor);
         ImGui.Checkbox("Clouds", ref SkySettings.CloudsEnabled);
-        ImGui.SliderFloat("Cloud coverage", ref SkySettings.CloudCoverage, 0f, 1f);
-        ImGui.SliderFloat("Cloud altitude", ref SkySettings.CloudAltitude, 0f, 600f);
+        ImGui.SliderFloat("Cloud coverage, open sky", ref SkySettings.CloudCoverageOpen, 0f, 0.1f);
+        ImGui.SliderFloat("Cloud coverage, near islands", ref SkySettings.CloudCoverageIslands, 0f, 0.5f);
+        ImGui.SliderFloat("Cloud altitude (lowest layer)", ref SkySettings.CloudAltitude, 0f, 800f);
         ImGui.SliderFloat("Wind speed (blocks/s)", ref SkySettings.WindSpeed, 0f, 30f);
     }
 
@@ -90,16 +89,14 @@ public sealed class RenderFrame : IDebugUiSystem
         };
         if (SkySettings.FogEnabled)
         {
-            uniform.FogHorizontalEnd   = SkySettings.LoadedHorizontal;
-            uniform.FogHorizontalStart = SkySettings.LoadedHorizontal * SkySettings.FogStartFraction;
-            uniform.FogVerticalEnd     = SkySettings.LoadedVertical;
-            uniform.FogVerticalStart   = SkySettings.LoadedVertical * SkySettings.VerticalFogStartFraction;
+            uniform.FogEnd   = SkySettings.FogDistance;
+            uniform.FogStart = System.Math.Max(0f, SkySettings.FogDistance - SkySettings.FogBand);
         }
         else
         {
             // Past the far plane: never reached, so nothing fogs.
-            uniform.FogHorizontalStart = uniform.FogVerticalStart = 1e8f;
-            uniform.FogHorizontalEnd   = uniform.FogVerticalEnd   = 2e8f;
+            uniform.FogStart = 1e8f;
+            uniform.FogEnd   = 2e8f;
         }
 
         if (!_renderer.BeginFrame())

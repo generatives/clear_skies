@@ -30,6 +30,8 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
 
     private readonly World _ecsWorld;
     private EntitySet _dirtyChunks;
+    private readonly EntitySet _cameras;
+    private readonly List<Entity> _nearest = new();
     private readonly Renderer _renderer;
     private readonly BlockModelLibrary _blockModels;
     private readonly ThreadLocal<GreedyMesher> _meshers;
@@ -52,6 +54,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     {
         _ecsWorld = ecsWorld;
         _dirtyChunks = ecsWorld.GetEntities().With<Chunk>().With<Transform>().With<NeedsRemeshFlag>().AsSet();
+        _cameras = ecsWorld.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
         _renderer = renderer;
         _blockModels = blockModels;
         var atlas = renderer.Atlas;
@@ -77,7 +80,9 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     {
         if (_inFlight >= MaxInFlight) return;
 
-        foreach (ref readonly Entity e in _dirtyChunks.GetEntities())
+        // Closest to the camera first (see NearestChunks); a few spare picks for all-air chunks, which take no job.
+        NearestChunks.Select(_dirtyChunks, _cameras, MaxInFlight - _inFlight + 4, _nearest);
+        foreach (var e in _nearest)
         {
             var chunk = e.Get<Chunk>();
             var entry = chunk.Entry;

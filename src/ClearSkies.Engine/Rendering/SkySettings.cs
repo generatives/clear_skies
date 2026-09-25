@@ -5,8 +5,8 @@ namespace ClearSkies.Engine.Rendering;
 /// <summary>
 /// Sky gradient and distance fog, shared by <c>ChunkLoadSystem</c> (which publishes how far the world is loaded)
 /// and <c>RenderFrame</c> (the <c>CameraUniform</c> sky/fog fields and the debug sliders).
-/// The fog exists to hide the edge of the loaded world, so its distances are fractions of the loaded extent rather
-/// than absolute: changing the view distance moves the fog with it. Fogged geometry fades to the sky colour in its
+/// The fog exists to hide the edge of the loaded world, so it follows <see cref="FogDistance"/>, which moves as
+/// the streaming budget reaches further or less far. Fogged geometry fades to the sky colour in its
 /// own view direction, so it blends into exactly what is drawn behind it.
 /// </summary>
 public static class SkySettings
@@ -21,29 +21,28 @@ public static class SkySettings
 
     public static bool CloudsEnabled = true;
 
-    /// <summary>0-1: the fraction of cloud-layer cells that are cloud (see <c>CloudLayer</c>).</summary>
-    public static float CloudCoverage = 0.1f;
+    /// <summary>0-1: the fraction of the sky that is cloud over open sky, far from any island (see <c>CloudLayer</c>
+    /// and <c>ICloudDensityMap</c>).</summary>
+    public static float CloudCoverageOpen = 0.001f;
 
-    /// <summary>World Y of the cloud layer's underside; islands top out well below the default.</summary>
-    public static float CloudAltitude = 300f;
+    /// <summary>0-1: the fraction of the sky that is cloud around islands.</summary>
+    public static float CloudCoverageIslands = 0.1f;
 
-    /// <summary>Blocks per second the cloud layer drifts along +X.</summary>
+    /// <summary>World Y of the lowest cloud layer, just above the islands' peaks; the other two stack above it (see
+    /// <c>CloudLayer</c>).</summary>
+    public static float CloudAltitude = 320f;
+
+    /// <summary>Blocks per second the lowest cloud layer drifts along +X (the ones above a little faster).</summary>
     public static float WindSpeed = 1.5f;
 
-    /// <summary>Where horizontal fog begins, as a fraction of <see cref="LoadedHorizontal"/>; it is total at 1.</summary>
-    public static float FogStartFraction = 0.85f;
+    /// <summary>How far before <see cref="FogDistance"/> the fog starts, in blocks: a fixed width, since the fog
+    /// distance ranges from a few hundred blocks to thousands.</summary>
+    public static float FogBand = 64f;
 
-    /// <summary>Where vertical fog begins, as a fraction of <see cref="LoadedVertical"/>; it is total at 1.</summary>
-    public static float VerticalFogStartFraction = 0.75f;
 
-    /// <summary>Guaranteed-loaded distance from the camera, in blocks: horizontally and vertically. The load region is
-    /// a box of chunks around the camera's chunk, so its nearest edge is at least radius * chunk size away.</summary>
-    public static float LoadedHorizontal { get; private set; } = 256f;
-    public static float LoadedVertical   { get; private set; } = 96f;
+    /// <summary>Horizontal distance from the camera at which the loaded world stops (the nearest chunk column the
+    /// streaming budget cut off or that is still loading), in blocks; published by <c>ChunkLoadSystem</c>.</summary>
+    public static float FogDistance { get; private set; } = 256f;
 
-    public static void SetLoadedExtent(float horizontal, float vertical)
-    {
-        LoadedHorizontal = horizontal;
-        LoadedVertical   = vertical;
-    }
+    public static void SetFogDistance(float distance) => FogDistance = distance;
 }

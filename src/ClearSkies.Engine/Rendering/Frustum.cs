@@ -6,7 +6,7 @@ namespace ClearSkies.Engine.Rendering;
 /// <summary>
 /// Six-plane view frustum (left, right, bottom, top, near, far), extracted from a combined
 /// projection*view matrix (Gribb-Hartmann method, adapted for this engine's [0,1]/"ZO" depth
-/// convention — see <see cref="Math.Mat4.PerspectiveRhZo"/>/<see cref="Math.Mat4.OrthoRhZo"/>).
+/// convention — see <see cref="Math.Mat4.PerspectiveRhZoReversed"/>/<see cref="Math.Mat4.OrthoRhZo"/>).
 /// Each plane is (A,B,C,D) with "inside" meaning A*x+B*y+C*z+D &gt;= 0.
 ///
 /// Used to skip drawing (and shadow-casting) meshes that can't possibly be visible: with no culling,
@@ -38,8 +38,10 @@ public readonly struct Frustum
             Normalize(r3 - r0), // right
             Normalize(r3 + r1), // bottom
             Normalize(r3 - r1), // top
-            Normalize(r2),      // near (ZO depth: near plane is where clip-space z == 0)
-            Normalize(r3 - r2)  // far  (ZO depth: far plane is where clip-space z == w)
+            // The two depth planes, z == 0 and z == w. Which is near and which is far depends on whether depth is
+            // reversed (the camera's is: z == w is near), but culling only needs both.
+            Normalize(r2),
+            Normalize(r3 - r2)
         );
     }
 

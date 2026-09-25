@@ -119,19 +119,8 @@ public sealed class SkyWorldGenerator : IWorldGenerator
         int candidateCount = 0;
         for (int i = 0; i < islandCount; i++)
         {
-            ref readonly IslandDef island = ref islandBuf[i];
-            float maxReach = island.Radius * 1.4f * MathF.Max(island.StretchMajor, island.StretchMinor);
-            float islandYMin = island.BaseY - island.DomeDepth - 8f;
-            float islandYMax = island.BaseY + 8f + 100f + 8f;
-
-            if (originY + ChunkData.Size < islandYMin || originY > islandYMax) continue;
-
-            float chunkCenterX = originX + ChunkData.Size * 0.5f;
-            float chunkCenterZ = originZ + ChunkData.Size * 0.5f;
-            float dxMin = MathF.Max(0f, MathF.Abs(island.CenterX - chunkCenterX) - ChunkData.Size * 0.5f);
-            float dzMin = MathF.Max(0f, MathF.Abs(island.CenterZ - chunkCenterZ) - ChunkData.Size * 0.5f);
-            if (dxMin * dxMin + dzMin * dzMin > maxReach * maxReach) continue;
-
+            if (!ReachesColumn(islandBuf[i], originX, originZ, out float yMin, out float yMax)) continue;
+            if (originY + ChunkData.Size < yMin || originY > yMax) continue;
             candidates[candidateCount++] = i;
         }
         if (candidateCount == 0) return;
@@ -149,6 +138,36 @@ public sealed class SkyWorldGenerator : IWorldGenerator
                     break; // fixed island priority order — first owner wins
             }
         }
+    }
+
+    public ulong ColumnLayers(int chunkX, int chunkZ, int minChunkY)
+    {
+        int originX = chunkX * ChunkData.Size, originZ = chunkZ * ChunkData.Size;
+        Span<IslandDef> islands = stackalloc IslandDef[MaxIslandsPerCell];
+        int count = ResolveIslandsCached(originX + ChunkData.Size / 2, originZ + ChunkData.Size / 2, islands);
+        ulong bits = 0;
+        for (int i = 0; i < count; i++)
+        {
+            if (!ReachesColumn(islands[i], originX, originZ, out float yMin, out float yMax)) continue;
+            int lo = System.Math.Max((int)MathF.Floor(yMin / ChunkData.Size) - minChunkY, 0);
+            int hi = System.Math.Min((int)MathF.Floor(yMax / ChunkData.Size) - minChunkY, 63);
+            if (lo > hi) continue;
+            bits |= (ulong.MaxValue >> (63 - hi)) & (ulong.MaxValue << lo);
+        }
+        return bits;
+    }
+
+    /// <summary>Whether <paramref name="island"/> can reach the chunk column at (originX, originZ), and if so the height
+    /// range it can fill there. Bounds only — no noise — so it's cheap enough to test every island against every chunk
+    /// before doing per-column work, and for <see cref="ColumnLayers"/>.</summary>
+    private static bool ReachesColumn(in IslandDef island, int originX, int originZ, out float yMin, out float yMax)
+    {
+        yMin = island.BaseY - island.DomeDepth - 8f;
+        yMax = island.BaseY + 8f + 100f + 8f;
+        float maxReach = island.Radius * 1.4f * MathF.Max(island.StretchMajor, island.StretchMinor);
+        float dxMin = MathF.Max(0f, MathF.Abs(island.CenterX - (originX + ChunkData.Size * 0.5f)) - ChunkData.Size * 0.5f);
+        float dzMin = MathF.Max(0f, MathF.Abs(island.CenterZ - (originZ + ChunkData.Size * 0.5f)) - ChunkData.Size * 0.5f);
+        return dxMin * dxMin + dzMin * dzMin <= maxReach * maxReach;
     }
 
     /// <summary>Resolves the island cluster for the region cell containing world (wx, wz), reusing the

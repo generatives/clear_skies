@@ -13,8 +13,8 @@ namespace ClearSkies.Game.Diagnostics;
 /// </summary>
 public static class GenerationBenchmark
 {
-    /// <summary>Defaults match Program.cs's ChunkLoadSystem radii, so this reports real shipped
-    /// fill-time expectations; pass larger radii to stress-test headroom beyond the current default.</summary>
+    /// <summary>Generates a box of chunks around the nearest island (the old fixed view box ChunkLoadSystem used to
+    /// load); pass larger radii to stress-test.</summary>
     public static void Run(ulong seed = 1337, int xzRadius = 8, int yRadius = 3)
     {
         Console.WriteLine($"=== Generation benchmark (seed={seed}, xzRadius={xzRadius}, yRadius={yRadius}) ===");
