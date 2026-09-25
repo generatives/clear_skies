@@ -146,7 +146,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     private const int UnusedTag = int.MinValue;
 
     // Initial light pool sizing per budgeted world chunk (measured ~28 x ~1.3 headroom).
-    private const int LightBricksPerChunk = 36;
+    public const int LightBricksPerChunk = 36;
 
     private readonly GpuContext _ctx;
 
@@ -205,6 +205,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     public int OccSlotsInUse => _occNext - _occFree.Count;
     public int OccSlotCapacity => _occCapacity;
     public int LightSlotHighWater => _lightNext;
+    public int WorldChunkCount => _worldCells.Count;
 
     // Scratch.
     private readonly uint[] _brickRun = new uint[64];
