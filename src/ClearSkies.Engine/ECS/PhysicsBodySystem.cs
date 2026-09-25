@@ -23,10 +23,17 @@ namespace ClearSkies.Engine.ECS;
 /// </summary>
 public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
 {
-    /// <summary>Static-collider jobs in flight at once (see UpdateStaticColliders).</summary>
-    private static readonly int MaxInFlight = System.Math.Max(2, Environment.ProcessorCount / 2);
+    /// <summary>Static-collider jobs in flight at once (see UpdateStaticCollider), and terrain chunks per job: streaming
+    /// adds chunks in bursts, and a job per chunk per frame couldn't keep up.</summary>
+    private static readonly int MaxJobs = System.Math.Max(2, Environment.ProcessorCount / 2);
+    private const int ChunksPerJob = 8;
+    private static readonly int MaxInFlight = MaxJobs * ChunksPerJob; // chunks
 
     private readonly EntitySet         _dirtyChunks;
+    private readonly EntitySet         _cameras;
+    private readonly List<Entity>      _nearest = new();
+    private readonly HashSet<Entity>   _grids = new();
+    private readonly List<ChunkEntry>  _batch = new();
     private readonly PhysicsWorld      _physics;
     private readonly VoxelBoxDecomposer _decomposer = new(); // dynamic grids, main thread
     private readonly ThreadLocal<VoxelBoxDecomposer> _decomposers = new(() => new VoxelBoxDecomposer()); // terrain workers
@@ -47,6 +54,7 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
     {
         _physics = physics;
         _dirtyChunks = world.GetEntities().With<Chunk>().With<NeedsRecollideFlag>().AsSet();
+        _cameras = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
         world.SubscribeEntityDisposed(OnEntityDisposed);
     }
 
@@ -71,28 +79,28 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
 
     public void UpdateColliders()
     {
-        HashSet<Entity> grids = new HashSet<Entity>(1);
+        _grids.Clear();
 
-        foreach (var entity in _dirtyChunks.GetEntities())
+        // Closest to the camera first (ship chunks before any terrain, see NearestChunks), so the ground under the
+        // player gets its collider before the far side of the island does. A terrain chunk keeps its flag until its
+        // job is actually dispatched: streaming adds chunks far faster than MaxInFlight jobs a frame.
+        NearestChunks.Select(_dirtyChunks, _cameras, MaxInFlight - _inFlight + 8, _nearest);
+        foreach (var entity in _nearest)
         {
-            var chunk = entity.Get<Chunk>();
-            var entry = chunk.Entry;
-            var volume = entry.Volume;
-            var volumeEntity = volume.Root;
+            var entry = entity.Get<Chunk>().Entry;
+            var volumeEntity = entry.Volume.Root;
 
             if (volumeEntity.Has<DynamicGrid>())
-            {
-                grids.Add(volumeEntity);
-            }
-            else
-            {
-                UpdateStaticCollider(entry);
-            }
+                _grids.Add(volumeEntity);
+            else if (!UpdateStaticCollider(entry))
+                continue; // no job slot free; try again next frame
 
             entity.Remove<NeedsRecollideFlag>();
         }
 
-        foreach (var entity in grids)
+        DispatchBatch();
+
+        foreach (var entity in _grids)
         {
             UpdateDynamicGrid(entity);
         }
@@ -101,36 +109,54 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
     // ── static terrain colliders (moved from StaticColliderSystem) ─────────────
     // Box decomposition and the BigCompound tree build (~0.2-0.35ms per non-empty chunk, spiking past 2ms on
     // dense ones — see StreamingBenchmark) run on thread-pool workers; only the cheap Shapes/Statics adds happen
-    // here. One job in flight per chunk, same pattern as ChunkMeshSystem: a chunk re-dirtied mid-job is
+    // here. At most one job holds a given chunk, same pattern as ChunkMeshSystem: a chunk re-dirtied mid-job is
     // re-dispatched once that job lands, and a result for a chunk unloaded meanwhile is dropped. A chunk's old
     // collider stays in place until its replacement arrives, so an edit never opens a hole for a frame.
-    private void UpdateStaticCollider(ChunkEntry entry)
+    /// <summary>Queues (or, for an empty chunk, completes) <paramref name="entry"/>'s collider rebuild for
+    /// <see cref="DispatchBatch"/>; false if every job slot is taken.</summary>
+    private bool UpdateStaticCollider(ChunkEntry entry)
     {
-        if (_inFlight >= MaxInFlight) return;
-
         var pos = entry.Position;
 
         if (!entry.Data.HasAnySolid())
         {
             if (_colliders.Remove(pos, out var old)) _physics.RemoveStaticCompound(old.handle);
-            return;
+            return true;
         }
 
+        if (_inFlight >= MaxInFlight) return false;
+
         _inFlight += 1;
-        var data = entry.Data;
-        ThreadPool.UnsafeQueueUserWorkItem(_ =>
+        _batch.Add(entry);
+        return true;
+    }
+
+    /// <summary>Starts jobs for the chunks <see cref="UpdateStaticCollider"/> queued this frame, up to
+    /// <see cref="ChunksPerJob"/> each.</summary>
+    private void DispatchBatch()
+    {
+        for (int start = 0; start < _batch.Count; start += ChunksPerJob)
         {
-            try
+            var job = _batch.GetRange(start, System.Math.Min(ChunksPerJob, _batch.Count - start));
+            ThreadPool.UnsafeQueueUserWorkItem(_ =>
             {
-                // Terrain needs no per-box mass, so boxes may span block types — roughly halves the box count.
-                var boxes = _decomposers.Value!.Decompose(data, mergeBlockTypes: true);
-                _colliderResults.Enqueue((pos, entry, boxes.Count > 0 ? PhysicsWorld.PrepareStaticCompound(boxes) : null, null));
-            }
-            catch (Exception e)
-            {
-                _colliderResults.Enqueue((pos, entry, null, e));
-            }
-        }, null);
+                foreach (var entry in job)
+                {
+                    try
+                    {
+                        // Terrain needs no per-box mass, so boxes may span block types — roughly halves the box count.
+                        var boxes = _decomposers.Value!.Decompose(entry.Data, mergeBlockTypes: true);
+                        _colliderResults.Enqueue((entry.Position, entry,
+                            boxes.Count > 0 ? PhysicsWorld.PrepareStaticCompound(boxes) : null, null));
+                    }
+                    catch (Exception e)
+                    {
+                        _colliderResults.Enqueue((entry.Position, entry, null, e));
+                    }
+                }
+            }, null);
+        }
+        _batch.Clear();
     }
 
     private void ApplyColliderResults()
@@ -256,7 +282,7 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
         ImGui.Text($"Chunks with colliders (one BigCompound static each): {_colliders.Count}");
         ImGui.Text($"Total compound child boxes: {totalBoxes}");
         ImGui.Text($"Chunks built (lifetime): {_totalBuilt}");
-        ImGui.Text($"Jobs in flight: {_inFlight} / {MaxInFlight}");
+        ImGui.Text($"Chunks in flight: {_inFlight} / {MaxInFlight} ({ChunksPerJob} per job, up to {MaxJobs} jobs)");
         ImGui.Text($"Main-thread add (smoothed): {_applyMs:F3} ms per chunk");
     }
 }
