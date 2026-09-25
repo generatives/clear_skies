@@ -1190,7 +1190,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     }
 
     // Each triangle (i0,i1,i2) → three line segments → 6 indices.
-    private static uint[] BuildWireframeIndices(ReadOnlySpan<uint> tris)
+    public static uint[] BuildWireframeIndices(ReadOnlySpan<uint> tris)
     {
         var lines = new uint[tris.Length * 2];
         int li = 0;

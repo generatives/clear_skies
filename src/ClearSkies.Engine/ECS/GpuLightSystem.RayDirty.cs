@@ -89,7 +89,6 @@ public sealed partial class GpuLightSystem
     private void RayTracedDispatch()
     {
         _frame++;
-        _phaseTimer.Start();
         _dbgChangedChunks = _dbgShipsMoved = 0;
         EnsureSlotArrays(_store.LightSlotCapacity);
         DropGoneGridStates();
@@ -147,7 +146,7 @@ public sealed partial class GpuLightSystem
             foreach (var (mn, mx) in _directChanges) MarkRegion(mn, mx);
             _marks.Flush(_staticVolume.Gpu, _markSlot);
         }
-        _phaseTimer.Lap(0);
+        _phaseTimer.Lap(2);
 
         // Evaluations a changed area gets, rounded up to whole cycles so it always stops having covered each voxel's
         // complete ray set equally.
@@ -178,9 +177,9 @@ public sealed partial class GpuLightSystem
         _composeCount = 0;
         int n = BuildLightWork(cam.Position);
         _lastDirtyTotal = n;
-        _phaseTimer.Lap(1);
+        _phaseTimer.Lap(3);
         HoldBounce(hold, _bounceRechangeN, bounceReset);
-        _phaseTimer.Lap(2);
+        _phaseTimer.Lap(4);
         if (n > 0) AddCompose(_scratch.AsSpan(0, n), 1);
 
         CollectBounceClears(hold);
@@ -203,9 +202,9 @@ public sealed partial class GpuLightSystem
             if (nb > 0) AddCompose(_scratch.AsSpan(0, 2 * nb), 2);
         }
 
-        _phaseTimer.Lap(3);
+        _phaseTimer.Lap(5);
         BuildLists(_composeList.AsSpan(0, _composeCount), sunDir);
-        _phaseTimer.Lap(4);
+        _phaseTimer.Lap(6);
 
         if (n > 0)
         {
@@ -271,7 +270,7 @@ public sealed partial class GpuLightSystem
             _lampTimer.Stop();
         }
 
-        _phaseTimer.Lap(5);
+        _phaseTimer.Lap(7);
         _phaseTimer.Stop();
         _rtSunMsEma    = Ema(_rtSunMsEma, _sunTimer.Elapsed.TotalMilliseconds);
         _rtLampMsEma   = Ema(_rtLampMsEma, _lampTimer.Elapsed.TotalMilliseconds);

@@ -79,7 +79,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     private sealed class PhaseTimer
     {
         public static readonly string[] Names =
-            { "Marking changes", "Choosing relit bricks", "Bounce holds", "Choosing bounce bricks", "Chunk lists", "Dispatch + upload" };
+            { "Poses + grid upload", "Gathering lamps", "Marking changes", "Choosing relit bricks", "Bounce holds", "Choosing bounce bricks", "Chunk lists", "Dispatch + upload" };
         public readonly double[] Ms = new double[Names.Length];
         private readonly Stopwatch _sw = new();
         private double _last;
@@ -186,12 +186,15 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         RayLightingSettings.Ambient     = _ambientLevel / 15f;
         RayLightingSettings.AoStrength  = _bounceEnabled ? _aoStrength : 0f;
 
+        _phaseTimer.Start();
         _lit.Clear();
         foreach (ref readonly Entity e in _grids.GetEntities())
             AddLit(e.Get<ChunkGrid>().Volume, e.Get<Transform>());
         _store.UploadGrids();
+        _phaseTimer.Lap(0);
 
         GatherLamps();
+        _phaseTimer.Lap(1);
         RayTracedDispatch(); // change tracking + dispatch: see GpuLightSystem.RayDirty.cs
         if (_probeRequested) { _probeRequested = false; Probe(); }
     }
@@ -275,9 +278,8 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     {
         _lamps.Clear();
         foreach (var lg in _lit)
-            foreach (var (cpos, entry) in lg.Vol.All)
+            foreach (var (cpos, entry) in lg.Handle.EmitterChunks) // only the chunks with lamps, not every loaded one
             {
-                if (entry.Emitters.Count == 0) continue;
                 var origin = cpos.WorldOrigin;
                 foreach (var em in entry.Emitters)
                 {

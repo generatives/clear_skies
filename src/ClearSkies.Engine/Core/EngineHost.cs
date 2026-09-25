@@ -162,6 +162,35 @@ public sealed class EngineHost : IDisposable
         public FrameTimingsPanel(EngineHost host) => _host = host;
         public string DebugName => "Frame timings";
 
+        // Garbage collection: collections and pause time since the last sample, sampled about once a second. A pause
+        // stops every thread, so it shows up as time in whichever system was running.
+        private readonly System.Diagnostics.Stopwatch _gcClock = System.Diagnostics.Stopwatch.StartNew();
+        private readonly int[] _gcCounts = new int[3], _gcRate = new int[3];
+        private TimeSpan _gcPause;
+        private double _gcPausePerSec, _gcSampleSecs;
+        private long _allocBytes;
+        private double _allocMbPerSec;
+
+        private void SampleGc()
+        {
+            double secs = _gcClock.Elapsed.TotalSeconds;
+            if (secs < 1.0) return;
+            _gcClock.Restart();
+            _gcSampleSecs = secs;
+            for (int g = 0; g < 3; g++)
+            {
+                int c = GC.CollectionCount(g);
+                _gcRate[g] = c - _gcCounts[g];
+                _gcCounts[g] = c;
+            }
+            var pause = GC.GetTotalPauseDuration();
+            _gcPausePerSec = (pause - _gcPause).TotalMilliseconds / secs;
+            _gcPause = pause;
+            long alloc = GC.GetTotalAllocatedBytes();
+            _allocMbPerSec = (alloc - _allocBytes) / secs / (1024 * 1024);
+            _allocBytes = alloc;
+        }
+
         public void DrawDebugUi()
         {
             var h = _host;
@@ -180,6 +209,9 @@ public sealed class EngineHost : IDisposable
 
             double frameMs = h.Time.FramesPerSecond > 0 ? 1000.0 / h.Time.FramesPerSecond : 0;
             ImGuiNET.ImGui.Text($"Frame: {frameMs:F1} ms ({h.Time.FramesPerSecond} fps), systems CPU total: {total:F1} ms");
+            SampleGc();
+            ImGuiNET.ImGui.Text($"GC: {_gcPausePerSec:F1} ms paused per second; collections gen0/1/2 {_gcRate[0]}/{_gcRate[1]}/{_gcRate[2]} " +
+                                $"in the last {_gcSampleSecs:F1} s; allocating {_allocMbPerSec:F0} MB/s; heap {GC.GetTotalMemory(false) / (1024 * 1024)} MB");
             ImGuiNET.ImGui.Separator();
             foreach (var (name, ms) in rows)
                 ImGuiNET.ImGui.Text($"{ms,7:F2} ms  {name}");

@@ -47,7 +47,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     /// (which needs the GPU model) on the main thread.</summary>
     private readonly record struct ModelCell(byte X, byte Y, byte Z, BlockId Block, BlockOrientation Orientation);
 
-    private sealed record Result(Entity Entity, Vertex[] Verts, int VertCount, uint[] Idxs, int IdxCount,
+    private sealed record Result(Entity Entity, Vertex[] Verts, int VertCount, uint[] Idxs, int IdxCount, uint[] Wire,
                                  ModelCell[] Models, Exception? Error);
 
     public ChunkMeshSystem(World ecsWorld, Renderer renderer, BlockModelLibrary blockModels)
@@ -71,10 +71,20 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
 
     public void Update(float dt)
     {
+        long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
         ApplyResults();
+        long t1 = System.Diagnostics.Stopwatch.GetTimestamp();
         Dispatch();
+        long t2 = System.Diagnostics.Stopwatch.GetTimestamp();
         Cleanup();
+        long t3 = System.Diagnostics.Stopwatch.GetTimestamp();
+        _applyMs    += 0.05 * (Ms(t0, t1) - _applyMs);
+        _dispatchMs += 0.05 * (Ms(t1, t2) - _dispatchMs);
+        _cleanupMs  += 0.05 * (Ms(t2, t3) - _cleanupMs);
     }
+
+    private static double Ms(long a, long b) => (b - a) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+    private double _applyMs, _dispatchMs, _cleanupMs;
 
     private void Dispatch()
     {
@@ -115,12 +125,14 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                     var i = ArrayPool<uint>.Shared.Rent(System.Math.Max(1, idxs.Count));
                     verts.CopyTo(v);
                     idxs.CopyTo(i);
-                    _results.Enqueue(new Result(entry.Entity, v, verts.Count, i, idxs.Count, FindModelBlocks(data), null));
+                    // The wireframe's line list too, here rather than on the main thread at upload.
+                    var wire = idxs.Count > 0 ? Renderer.BuildWireframeIndices(i.AsSpan(0, idxs.Count)) : Array.Empty<uint>();
+                    _results.Enqueue(new Result(entry.Entity, v, verts.Count, i, idxs.Count, wire, FindModelBlocks(data), null));
                 }
                 catch (Exception e)
                 {
                     _results.Enqueue(new Result(entry.Entity, Array.Empty<Vertex>(), 0, Array.Empty<uint>(), 0,
-                                                Array.Empty<ModelCell>(), e));
+                                                Array.Empty<uint>(), Array.Empty<ModelCell>(), e));
                 }
             }, null);
 
@@ -162,7 +174,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                 if (r.VertCount > 0)
                 {
                     long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-                    mesh = _renderer.UploadMesh(r.Verts.AsSpan(0, r.VertCount), r.Idxs.AsSpan(0, r.IdxCount));
+                    mesh = _renderer.UploadMesh(r.Verts.AsSpan(0, r.VertCount), r.Idxs.AsSpan(0, r.IdxCount), r.Wire);
                     _uploadMs += 0.05 * (System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds - _uploadMs);
                 }
 
@@ -263,7 +275,9 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
 
     public void DrawDebugUi()
     {
-        ImGui.Text($"Jobs in flight: {_inFlight} / {MaxInFlight}");
+        ImGui.Text($"Jobs in flight: {_inFlight} / {MaxInFlight}, chunks waiting to mesh: {_dirtyChunks.Count:N0}");
+        ImGui.Text($"Main thread (smoothed): results {_applyMs:F2} ms, choosing + dispatch {_dispatchMs:F2} ms, " +
+                   $"freeing meshes {_cleanupMs:F2} ms");
         ImGui.Text($"Upload (main thread, smoothed): {_uploadMs:F2} ms per chunk");
         ImGui.Text($"Chunks meshed (lifetime): {_totalMeshed}");
     }
