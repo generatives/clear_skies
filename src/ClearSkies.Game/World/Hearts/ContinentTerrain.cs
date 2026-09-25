@@ -4,10 +4,10 @@ using ClearSkies.Engine.Voxels;
 namespace ClearSkies.Game.Generation;
 
 /// <summary>
-/// The whole-world continental terrain that <see cref="HeartGrid"/>'s hearts cut islands out of: a heightmap of plains
-/// low in the band, hills, and mountain ranges reaching near its top. Only what a heart supports exists; the terrain
-/// itself is never generated whole. Most of it is low, so islands are dense near the bottom of the world and rare near
-/// the top (the peaks). What covers it goes by height, hot to cold: sand low down, grass, bare rock, then snow. Its
+/// The whole-world continental terrain that <see cref="HeartGrid"/>'s hearts cut islands out of: a heightmap of low
+/// plains, rising gradually through foothills to wide mountain ranges several kilometres apart. Only what a heart
+/// supports exists; the terrain itself is never generated whole. Most of it is low plain, so islands are dense near the
+/// bottom of the world and sparse up in the ranges. What covers it goes by height, hot to cold: sand low down, grass, bare rock, then snow. Its
 /// highest peaks stay well under the world's top, so none are cut flat.
 ///
 /// Thread-safe: noise sampling only reads its settings.
@@ -20,23 +20,24 @@ public sealed class ContinentTerrain
 
     // Surface bands (world Y of a top): hot and sandy low down, sand patches in grass growing sparser up to DryLine,
     // grass up to RockLine, bare rock up to SnowLine, snow above.
-    public const float SandLine = 100f, DryLine = 450f, RockLine = 980f, SnowLine = 1150f;
+    public const float SandLine = -50f, DryLine = 250f, RockLine = 950f, SnowLine = 1200f;
 
-    private readonly FastNoiseLite _plains;   // broad rolling lowlands
-    private readonly FastNoiseLite _hills;    // hills, gated by _hillMask
-    private readonly FastNoiseLite _hillMask;
-    private readonly FastNoiseLite _ridges;   // ridged mountain ranges, gated by _rangeMask
-    private readonly FastNoiseLite _rangeMask;
+    private readonly FastNoiseLite _plains;   // broad, gently rolling lowlands
+    private readonly FastNoiseLite _hills;    // hills in the foothills
+    private readonly FastNoiseLite _ranges;   // mountain ranges run along where this crosses zero
+    private readonly FastNoiseLite _warpX, _warpZ; // bend the ranges
+    private readonly FastNoiseLite _peaks;    // ridged detail: peaks and valleys within a range
     private readonly FastNoiseLite _strata;   // wobble of the rock layers that cliffs expose
     private readonly FastNoiseLite _patches;  // sand patches in low grass
 
     private ContinentTerrain(ulong seed)
     {
-        _plains = Noise(seed + 11, FastNoiseLite.FractalType.FBm, 3, 0.00035f);
+        _plains = Noise(seed + 11, FastNoiseLite.FractalType.FBm, 3, 0.0004f);
         _hills = Noise(seed + 12, FastNoiseLite.FractalType.FBm, 3, 0.0012f);
-        _hillMask = Noise(seed + 13, FastNoiseLite.FractalType.FBm, 2, 0.0003f);
-        _ridges = Noise(seed + 14, FastNoiseLite.FractalType.Ridged, 4, 0.0005f);
-        _rangeMask = Noise(seed + 15, FastNoiseLite.FractalType.FBm, 2, 0.00012f);
+        _ranges = Noise(seed + 13, FastNoiseLite.FractalType.FBm, 1, 0.00007f);
+        _warpX = Noise(seed + 14, FastNoiseLite.FractalType.FBm, 2, 0.0002f);
+        _warpZ = Noise(seed + 15, FastNoiseLite.FractalType.FBm, 2, 0.0002f);
+        _peaks = Noise(seed + 18, FastNoiseLite.FractalType.Ridged, 4, 0.0006f);
         _strata = Noise(seed + 16, FastNoiseLite.FractalType.FBm, 2, 0.01f);
         _patches = Noise(seed + 17, FastNoiseLite.FractalType.FBm, 3, 0.012f);
     }
@@ -51,16 +52,28 @@ public sealed class ContinentTerrain
         return n;
     }
 
-    /// <summary>World Y of the terrain surface at (x, z).</summary>
+    /// <summary>World Y of the terrain surface at (x, z): low plains almost everywhere, rising gradually through
+    /// foothills to wide mountain ranges a few kilometres across and several apart, peaking at about 1,600.</summary>
     public float Height(float x, float z)
     {
-        // Mostly plains and hills; mountain ranges only where their mask is high, peaking at about 1,650.
-        float plains = 430f + 170f * _plains.GetNoise(x, z);
-        float hills = 300f * MathF.Max(0f, _hills.GetNoise(x, z)) * Smoothstep(-0.1f, 0.5f, _hillMask.GetNoise(x, z));
-        float r = (_ridges.GetNoise(x, z) + 1f) * 0.5f;
-        float ranges = 1000f * r * r * Smoothstep(0.1f, 0.5f, _rangeMask.GetNoise(x, z));
-        return Math.Clamp(plains + hills + ranges, IslandGrid.WorldBottom + 64f, IslandGrid.WorldTop - 32f);
+        float plains = 70f + 70f * _plains.GetNoise(x, z);
+
+        // Nearness to a range's spine: 0 on it, rising away from it.
+        float wx = x + RangeWarp * _warpX.GetNoise(x, z), wz = z + RangeWarp * _warpZ.GetNoise(x, z);
+        float spine = MathF.Abs(_ranges.GetNoise(wx, wz));
+        float foot = 1f - Smoothstep(FootCore, FootEdge, spine);   // the long rise, with hills
+        float core = 1f - Smoothstep(0f, RangeEdge, spine);        // the range itself
+
+        float hills = foot * (FootRise * foot + 220f * MathF.Max(0f, _hills.GetNoise(x, z)));
+        float p = (_peaks.GetNoise(x, z) + 1f) * 0.5f;
+        float mountains = RangeRise * core * core * (0.6f + 0.4f * p);
+        return Math.Clamp(plains + hills + mountains, IslandGrid.WorldBottom + 64f, IslandGrid.WorldTop - 32f);
     }
+
+    // Ranges: the spine's noise within RangeEdge of zero is mountains, within FootEdge foothills; bent by up to
+    // RangeWarp blocks.
+    private const float RangeEdge = 0.35f, FootCore = 0.15f, FootEdge = 0.75f, RangeWarp = 800f;
+    private const float FootRise = 260f, RangeRise = 1150f;
 
     /// <summary>How far the rock layers at column (x, z) are shifted up or down, for <see cref="Block"/>.</summary>
     public float Strata(float x, float z) => 5f * _strata.GetNoise(x, z);

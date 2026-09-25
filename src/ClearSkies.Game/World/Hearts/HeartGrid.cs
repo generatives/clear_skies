@@ -152,7 +152,7 @@ public static class HeartGrid
     private static readonly KindDef[] Kinds =
     {
         //   cell height  radius        chance: outside, inside clusters
-        new( 128,  120,   38f,  100f, 0f,     0.50f), // Fragment: clusters only (radius: see FragmentMin)
+        new( 128,  120,   38f,  100f, 0f,     0.35f), // Fragment: clusters only (radius: see FragmentMin)
         new( 600,  300,   80f,  220f, 0.03f,  0.50f), // Medium
         new( 320,  200,   30f,   90f, 0.01f,  0.30f), // Small
     };
@@ -323,7 +323,7 @@ public static class HeartGrid
 
     /// <summary>How likely a heart is at height y, relative to the bottom of the world: on top of there being more
     /// ground low down, hearts thin out upward, so islands go from dense near the bottom to sparse near the top.</summary>
-    private static float HeightDensity(float y) => Lerp(1f, 0.3f, Math.Clamp(y / HeightDensityTop, 0f, 1f));
+    private static float HeightDensity(float y) => Lerp(1f, 0.6f, Math.Clamp(y / HeightDensityTop, 0f, 1f));
 
     private const float HeightDensityTop = 1000f;
 

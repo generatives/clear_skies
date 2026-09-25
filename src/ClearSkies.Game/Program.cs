@@ -74,7 +74,7 @@ if (heartsWorld)
 var gridStore = new GridStore(host.Context, (int)((long)LightBudgetMb * 1024 * 1024 / GridStore.SlotBytes),
                               ChunkLoadSystem.WorldIndexDim(ViewDistance));
 var chunkLoadSystem = new ChunkLoadSystem(host.World, staticVolume, gridStore, generatorFactory,
-                                          ViewDistance, MinChunkY, heartsWorld ? "Hearts4" : "World2");
+                                          ViewDistance, MinChunkY, heartsWorld ? "Hearts5" : "World2");
 host.AddSystem(chunkLoadSystem, SystemStage.Logic);
 host.Renderer.AttachGridStore(gridStore);
 host.AddSystem(physicsBody, SystemStage.Logic);
