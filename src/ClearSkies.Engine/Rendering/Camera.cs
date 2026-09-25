@@ -10,10 +10,10 @@ public sealed class Camera
 {
     public float FovRadians { get; set; } = MathF.PI / 3f; // 60°
     public float NearPlane { get; set; } = 0.1f;
-    /// <summary>Past the furthest the clouds reach (<see cref="CloudLayer.Distance"/>, well past the streamed world's
-    /// fog), so the fog, not the far plane, is what ends the view. Depth is reversed floats, so a far plane this far
+    /// <summary>Past the furthest the clouds (<see cref="CloudLayer.Distance"/>) or the streamed world's fog reach, so
+    /// the fog, not the far plane, is what ends the view. Depth is reversed floats, so a far plane this far
     /// costs no depth precision up close.</summary>
-    public float FarPlane { get; set; } = CloudLayer.Distance + 2000f;
+    public float FarPlane => MathF.Max(CloudLayer.Distance, SkySettings.FogDistance) + 2000f;
 
     public Mat4 GetView(in Transform t)
     {

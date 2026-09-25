@@ -13,15 +13,15 @@ namespace ClearSkies.Engine.ECS;
 
 /// <summary>
 /// Streams the static world around the active camera: a fixed budget of chunks, chosen closest-first by horizontal
-/// distance, a whole chunk column at a time, with no distance limit — but spent only on chunks that hold something.
+/// distance out to the view distance, a whole chunk column at a time — but spent only on chunks that hold something.
 /// Every chunk that is generated or loaded is recorded in its region's <see cref="RegionSurvey"/> (saved to disk), and
 /// chunks known to be air are neither loaded nor counted. A chunk not surveyed yet counts as if it held something
 /// until it has been generated, so the first visit to a region fills its survey in closest-first as you travel, and
-/// later visits spend the budget exactly. The budget therefore goes to islands rather than sky, and the island ahead
-/// stays visible however far off it is.
+/// later visits spend the budget exactly. The budget therefore goes to islands rather than sky, and reaches the
+/// islands out to the view distance.
 ///
-/// Candidates come from the camera's region and the ring of regions around it. Where the budget runs out (or else the
-/// ring ends), and the nearest column still being generated or loaded, set the fog distance (see
+/// Candidates are the columns within the view distance. Where the budget runs out (or else the view
+/// distance), and the nearest column still being generated or loaded, set the fog distance (see
 /// <see cref="FogDistance"/>): an island only partly loaded fades out at the cut instead of ending in a hard edge.
 /// </summary>
 public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
@@ -35,9 +35,11 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     /// chunks that stay loaded (never unload) for a long time.</summary>
     private const float AutosaveInterval = 30f;
 
-    /// <summary>Candidate regions: the camera's, and this many rings of regions around it. Must stay below the
-    /// GridStore's region directory size, so two loaded regions never share a directory entry.</summary>
-    private const int RegionRings = 1;
+    /// <summary>The GridStore region directory size that fits the regions a view distance touches: wider than their
+    /// span (with one to spare for the frame between a region leaving range and its chunks being released), so two
+    /// loaded regions never share a directory entry.</summary>
+    public static int RegionDirectoryDim(float viewDistance, int regionChunkShift)
+        => 2 * (int)MathF.Ceiling(viewDistance / (S << regionChunkShift)) + 3;
 
     /// <summary>Chunks found to be air before the budget is re-picked to spend what they freed.</summary>
     private const int AirRebuildBatch = 256;
@@ -61,10 +63,11 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     private readonly int            _minY;      // the lowest streamed layer: bit 0 of a survey column
     private readonly ulong          _generated; // the layers the generator fills, as survey bits
 
-    /// <summary>Column offsets from the camera's column, closest first, out to a region and a half — past which the
-    /// ring of candidate regions can't reach anyway. Computed once; a rebuild just walks it.</summary>
+    /// <summary>Column offsets from the camera's column, closest first, out to the view distance. Computed once; a
+    /// rebuild just walks it.</summary>
     private readonly (short dx, short dz)[] _offsetsByDistance;
-    private readonly int _offsetRadius;
+    private readonly int _viewColumns; // the view distance in columns
+    private readonly float _viewDistance;
 
     private readonly Dictionary<(int x, int z), RegionSurvey> _regions = new();
 
@@ -88,8 +91,6 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     private int _budgetUsed;
     private bool _hasCut;
     private (int x, int z) _cut;
-    private bool _hasEdge;
-    private (int x, int z) _edge; // the nearest column outside the candidate regions: where loading stops without a cut
     private int _columnsWalked;
 
     private float _fogDistance;
@@ -98,19 +99,21 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     private readonly List<ChunkPosition> _toUnload = new();
 
     /// <summary>Horizontal distance from the camera at which the loaded world stops: the nearest chunk column that the
-    /// budget cut off, that is still loading, or past the candidate regions, eased over time. Fog should be total by here.</summary>
+    /// budget cut off or that is still loading, or else the view distance, eased over time. Fog should be total by here.</summary>
     public float FogDistance => _fogDistance;
 
     /// <param name="surveyKey">Identifies what the generator produces (seed and version): survey files made under a
     /// different key are ignored, since they'd describe different terrain.</param>
     /// <param name="regionChunkShift">log2 of a region's width in chunks; must match the GridStore's.</param>
+    /// <param name="viewDistance">How far out chunks are streamed, in blocks (horizontally), as far as the budget
+    /// reaches. The GridStore's region directory must fit it: see <see cref="RegionDirectoryDim"/>.</param>
     /// <param name="minChunkY">Lowest chunk layer the generator fills.</param>
     /// <param name="maxChunkY">Highest chunk layer the generator fills. Streaming reaches <see cref="LayersBelow"/>
     /// layers under <paramref name="minChunkY"/> and the rest of 64 above; outside the generated layers it loads only
     /// chunks that something was built in. Edits to the static world outside those 64 layers are refused (see
     /// <see cref="ChunkVolume.EditableLayers"/>).</param>
     public ChunkLoadSystem(World world, ChunkVolume staticVolume, Func<IWorldGenerator> generatorFactory, string surveyKey,
-                           int regionChunkShift, int chunkBudget, int minChunkY, int maxChunkY)
+                           int regionChunkShift, float viewDistance, int chunkBudget, int minChunkY, int maxChunkY)
     {
         int generatedLayers = maxChunkY - minChunkY + 1;
         if (generatedLayers < 1 || generatedLayers > 64 - LayersBelow)
@@ -130,8 +133,9 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         _minY         = minChunkY - LayersBelow;
         _generated    = ((1UL << generatedLayers) - 1) << LayersBelow;
         _staticVolume.EditableLayers = (_minY, _minY + 63); // only what streaming can load back
-        _offsetRadius = (3 << regionChunkShift) / 2;
-        _offsetsByDistance = BuildOffsetsByDistance(_offsetRadius);
+        _viewDistance = viewDistance;
+        _viewColumns  = (int)MathF.Ceiling(viewDistance / S);
+        _offsetsByDistance = BuildOffsetsByDistance(_viewColumns);
     }
 
     private static (short dx, short dz)[] BuildOffsetsByDistance(int radius)
@@ -160,6 +164,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 
     public void DrawDebugUi()
     {
+        ImGui.Text($"View distance: {_viewDistance:F0} blocks ({_regions.Count} regions)");
         ImGui.Text($"Budget: {_budgetUsed} / {_budget} chunks ({_columnsWalked} columns walked)");
         ImGui.Text($"Loaded: {_staticVolume.LoadedCount}   Queued columns: {_loadQueue.Count}   In flight: {_inFlight.Count}");
         ImGui.Text($"Fog distance: {_fogDistance:F0} (target {_fogTarget:F0})   Cut: {(_hasCut ? $"column {_cut.x},{_cut.z}" : "none")}");
@@ -227,9 +232,10 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     private void Rebuild(Vector3D<float> camPos)
     {
         var camRegion = RegionOf(_lastCamColumn.x, _lastCamColumn.z);
-        for (int rz = camRegion.z - RegionRings; rz <= camRegion.z + RegionRings; rz++)
-        for (int rx = camRegion.x - RegionRings; rx <= camRegion.x + RegionRings; rx++)
-            if (!_regions.ContainsKey((rx, rz))) _regions[(rx, rz)] = OpenSurvey(rx, rz);
+        int rings = (_viewColumns >> _regionShift) + 1;
+        for (int rz = camRegion.z - rings; rz <= camRegion.z + rings; rz++)
+        for (int rx = camRegion.x - rings; rx <= camRegion.x + rings; rx++)
+            if (InView((rx, rz)) && !_regions.ContainsKey((rx, rz))) _regions[(rx, rz)] = OpenSurvey(rx, rz);
 
         // Loaded chunks always count: an edit may have put blocks where the survey found air.
         foreach (var (p, _) in _staticVolume.All)
@@ -239,20 +245,13 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         _loadQueue.Clear();
         _budgetUsed = 0;
         _hasCut = false;
-        _hasEdge = false;
         _columnsWalked = 0;
         foreach (var (dx, dz) in _offsetsByDistance)
         {
             int x = _lastCamColumn.x + dx, z = _lastCamColumn.z + dz;
-            var region = RegionOf(x, z);
-            if (!InRange(region, camRegion))
-            {
-                if (!_hasEdge) { _hasEdge = true; _edge = (x, z); }
-                continue;
-            }
             _columnsWalked++;
 
-            ulong bits = _regions[region].MaybeContent(x, z);
+            ulong bits = _regions[RegionOf(x, z)].MaybeContent(x, z); // every column in view has its region open
             int count = BitOperations.PopCount(bits);
             if (count == 0) continue;
             if (_budgetUsed + count > _budget)
@@ -271,7 +270,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         foreach (var (p, _) in _staticVolume.All)
             if (!IsWanted(p)) _toUnload.Add(p);
         foreach (var p in _toUnload) Unload(p);
-        foreach (var key in _regions.Keys.Where(k => !InRange(k, camRegion)).ToList())
+        foreach (var key in _regions.Keys.Where(k => !InView(k)).ToList())
         {
             SaveSurvey(_regions[key]);
             _regions.Remove(key);
@@ -348,13 +347,12 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     }
 
     /// <summary>Eases <see cref="FogDistance"/> toward the nearest column that is cut off or still missing, or else
-    /// outside the candidate regions (everything nearer is loaded, however far that reaches): in fast,
+    /// the view distance (everything nearer is loaded): in fast,
     /// so a gap is covered before it shows, out slowly, so the view opens up gently as loading catches up.</summary>
     private void UpdateFog(Vector3D<float> camPos, float dt)
     {
         float target = _hasCut  ? ColumnDistance(camPos, _cut.x, _cut.z)
-                     : _hasEdge ? ColumnDistance(camPos, _edge.x, _edge.z)
-                     : _offsetRadius * S;
+                     : _viewDistance;
         if (_loadQueue.TryPeek(out var next)) target = MathF.Min(target, ColumnDistance(camPos, next.x, next.z));
         foreach (var (x, z) in _inFlight) target = MathF.Min(target, ColumnDistance(camPos, x, z));
         _fogTarget = target;
@@ -375,8 +373,15 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     private (int x, int z) RegionOf(ChunkPosition p) => RegionOf(p.X, p.Z);
     private (int x, int z) RegionOf(int chunkX, int chunkZ) => (chunkX >> _regionShift, chunkZ >> _regionShift);
 
-    private static bool InRange((int x, int z) region, (int x, int z) center)
-        => System.Math.Abs(region.x - center.x) <= RegionRings && System.Math.Abs(region.z - center.z) <= RegionRings;
+    /// <summary>Whether region (x, z) holds any column within the view distance of the camera's column.</summary>
+    private bool InView((int x, int z) region)
+    {
+        int w = 1 << _regionShift;
+        int x0 = region.x * w, z0 = region.z * w;
+        long dx = System.Math.Max(0, System.Math.Max(x0 - _lastCamColumn.x, _lastCamColumn.x - (x0 + w - 1)));
+        long dz = System.Math.Max(0, System.Math.Max(z0 - _lastCamColumn.z, _lastCamColumn.z - (z0 + w - 1)));
+        return dx * dx + dz * dz <= (long)_viewColumns * _viewColumns;
+    }
 
     public void Unload(ChunkPosition pos)
     {

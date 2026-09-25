@@ -52,14 +52,21 @@ var physicsBody = new PhysicsBodySystem(host.World, host.Physics);
 int ChunkBudget = (12 * 2 + 1) * (12 * 2 + 1) * (3 * 2 + 1);
 int budgetArg = Array.IndexOf(args, "--chunk-budget");
 if (budgetArg >= 0 && budgetArg + 1 < args.Length) ChunkBudget = int.Parse(args[budgetArg + 1]);
+// View distance: how far out (in blocks, horizontally) islands are streamed, if the budget reaches. Each region
+// (4096 blocks across) it touches takes GPU table space for the islands in it, ~11 MB on average.
+// --view-distance N overrides it.
+float ViewDistance = 8000f;
+int viewArg = Array.IndexOf(args, "--view-distance");
+if (viewArg >= 0 && viewArg + 1 < args.Length) ViewDistance = float.Parse(args[viewArg + 1], System.Globalization.CultureInfo.InvariantCulture);
 const int MinChunkY = 0, MaxChunkY = 11;
 
 // Shared GPU voxel storage for lighting (world + ships). The world's table is split by region (a RegionGrid cell,
 // 128x128 chunk columns), each region's section sized to what it holds.
 const int RegionChunkShift = RegionGrid.CellShift - ChunkData.Shift;
-var gridStore = new GridStore(host.Context, RegionChunkShift, ChunkBudget);
+var gridStore = new GridStore(host.Context, RegionChunkShift, ChunkBudget,
+                              ChunkLoadSystem.RegionDirectoryDim(ViewDistance, RegionChunkShift));
 var chunkLoadSystem = new ChunkLoadSystem(host.World, staticVolume, () => new SkyWorldGenerator(seed),
-                                          surveyKey: $"sky:{seed}:v{SkyWorldGenerator.Version}", RegionChunkShift,
+                                          surveyKey: $"sky:{seed}:v{SkyWorldGenerator.Version}", RegionChunkShift, ViewDistance,
                                           ChunkBudget, MinChunkY, MaxChunkY);
 host.AddSystem(chunkLoadSystem, SystemStage.Logic);
 host.Renderer.AttachGridStore(gridStore);
