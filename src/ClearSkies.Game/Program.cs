@@ -31,7 +31,7 @@ host.Renderer.LoadTextureAtlas(
 
 // The static world is a volume like any other, with an identity Transform (set by ChunkVolume) and zero pivot.
 var staticVolumeEntity = host.World.CreateEntity();
-var staticVolume = new ChunkVolume(staticVolumeEntity, host.World);
+var staticVolume = new ChunkVolume(staticVolumeEntity, host.World) { MeshIgnoresNeighbours = true };
 staticVolumeEntity.Set(new ChunkGrid() { Volume = staticVolume });
 
 ulong seed = 1337;
@@ -70,10 +70,6 @@ var gridStore = new GridStore(host.Context, (int)((long)LightBudgetMb * 1024 * 1
 var chunkLoadSystem = new ChunkLoadSystem(host.World, staticVolume, gridStore, generatorFactory,
                                           ViewDistance, MinChunkY, "Hearts15");
 host.AddSystem(chunkLoadSystem, SystemStage.Logic);
-// Streamed chunks are meshed once their neighbouring columns are in, not again as each arrives.
-meshSystem.StreamedVolume = staticVolume;
-meshSystem.ColumnSettled = chunkLoadSystem.IsColumnSettled;
-chunkLoadSystem.ColumnLoaded += meshSystem.OnColumnLoaded;
 host.Renderer.AttachGridStore(gridStore);
 host.AddSystem(physicsBody, SystemStage.Logic);
 

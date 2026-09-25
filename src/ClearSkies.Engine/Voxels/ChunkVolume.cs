@@ -61,6 +61,13 @@ public class ChunkVolume
     /// the layers it streams, since a chunk built outside them would be unloaded and never come back.</summary>
     public (int Min, int Max) EditableLayers { get; set; } = (int.MinValue, int.MaxValue);
 
+    /// <summary>Whether this volume's chunks are meshed on their own, as if every neighbouring chunk were air: faces at
+    /// chunk borders are always drawn (hidden where the neighbour is solid), so a chunk's mesh never changes when a
+    /// neighbour loads, unloads or is edited. Set for the streamed world, where remeshing each chunk as its
+    /// neighbouring columns arrived cost about as many meshes again as the chunks themselves, for about 13% more
+    /// vertices. Ships keep culling against their neighbours: they're small and never stream.</summary>
+    public bool MeshIgnoresNeighbours { get; set; }
+
     /// <summary>Current axis-aligned bounding box of loaded chunks (inclusive).</summary>
     internal ChunkPosition BoundsMin { get; private set; }
     internal ChunkPosition BoundsMax { get; private set; }
@@ -173,10 +180,7 @@ public class ChunkVolume
         return entry;
     }
 
-    /// <param name="remeshNeighbours">Whether the neighbours are remeshed to close the faces this chunk covered.
-    /// Streaming passes false: what unloads is farther from the camera than what stays, so those faces point away
-    /// from it, and remeshing for them was wasted work.</param>
-    public void RemoveChunk(ChunkPosition pos, bool remeshNeighbours = true)
+    public void RemoveChunk(ChunkPosition pos)
     {
         var entry = GetEntry(pos);
         if (entry is null) return;
@@ -186,7 +190,7 @@ public class ChunkVolume
         entry.BlockEntities = null;
 
         _chunks.Remove(pos);
-        if (remeshNeighbours) MarkNeighboursDirty(pos, entry.Data);
+        MarkNeighboursDirty(pos, entry.Data);
     }
 
     private protected ChunkEntry EnsureChunk(ChunkPosition pos) =>
@@ -318,6 +322,7 @@ public class ChunkVolume
     /// times over during load-in.</summary>
     protected void MarkNeighboursDirty(ChunkPosition pos, ChunkData data)
     {
+        if (MeshIgnoresNeighbours) return; // spare the face scans too
         if (FaceHasSolid(data, 0)) TryMark(pos.Offset(-1,  0,  0));
         if (FaceHasSolid(data, 1)) TryMark(pos.Offset( 1,  0,  0));
         if (FaceHasSolid(data, 2)) TryMark(pos.Offset( 0, -1,  0));
@@ -347,6 +352,7 @@ public class ChunkVolume
 
     protected void TryMark(ChunkPosition pos)
     {
+        if (MeshIgnoresNeighbours) return; // no chunk's mesh depends on its neighbours
         if (_chunks.TryGetValue(pos, out var e)) {
             e.Entity.Set(new NeedsRemeshFlag());
         }
