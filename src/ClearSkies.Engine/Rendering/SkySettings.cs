@@ -23,10 +23,10 @@ public static class SkySettings
 
     /// <summary>0-1: the fraction of the sky that is cloud over open sky, far from any island (see <c>CloudLayer</c>
     /// and <c>ICloudDensityMap</c>).</summary>
-    public static float CloudCoverageOpen = 0.03f;
+    public static float CloudCoverageOpen = 0.001f;
 
     /// <summary>0-1: the fraction of the sky that is cloud around islands.</summary>
-    public static float CloudCoverageIslands = 0.4f;
+    public static float CloudCoverageIslands = 0.1f;
 
     /// <summary>World Y of the lowest cloud layer, just above the islands' peaks; the other two stack above it (see
     /// <c>CloudLayer</c>).</summary>
