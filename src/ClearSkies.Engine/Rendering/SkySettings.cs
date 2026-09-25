@@ -19,6 +19,14 @@ public static class SkySettings
 
     public static bool FogEnabled = true;
 
+    /// <summary>Distance haze (aerial perspective): how strong it gets far away (0-1), how far until it's 63% of
+    /// that, in blocks (3D, so islands far above and below are hazed too), and its colour, which turns towards the
+    /// sky's as it thickens.</summary>
+    public static bool HazeEnabled = true;
+    public static float HazeStrength = 0.85f;
+    public static float HazeDistance = 6000f;
+    public static Vector3 HazeColor = new(0.47f, 0.60f, 0.78f);
+
     public static bool CloudsEnabled = true;
 
     /// <summary>0-1: the fraction of the sky that is cloud over open sky, far from any island (see <c>CloudLayer</c>
@@ -28,9 +36,9 @@ public static class SkySettings
     /// <summary>0-1: the fraction of the sky that is cloud around islands.</summary>
     public static float CloudCoverageIslands = 0.1f;
 
-    /// <summary>World Y of the lowest cloud layer, just above the islands' peaks; the other two stack above it (see
-    /// <c>CloudLayer</c>).</summary>
-    public static float CloudAltitude = 320f;
+    /// <summary>World Y of the lowest cloud layer, just above the large islands' peaks (islands of other sizes are
+    /// above and below it); the other two stack above it (see <c>CloudLayer</c>).</summary>
+    public static float CloudAltitude = 1500f;
 
     /// <summary>Blocks per second the lowest cloud layer drifts along +X (the ones above a little faster).</summary>
     public static float WindSpeed = 1.5f;

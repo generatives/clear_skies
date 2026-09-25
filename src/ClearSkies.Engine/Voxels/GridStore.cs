@@ -145,8 +145,8 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     private const int S = ChunkData.Size;
     private const int UnusedTag = int.MinValue;
 
-    // Initial light pool sizing per budgeted world chunk (measured ~28 x ~1.3 headroom).
-    public const int LightBricksPerChunk = 36;
+    /// <summary>The most world chunks that can be loaded at once: the world index's offsets are 16-bit.</summary>
+    public const int MaxWorldChunks = NoWorldSlot - 1;
 
     private readonly GpuContext _ctx;
 
@@ -211,31 +211,35 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     private readonly uint[] _brickRun = new uint[64];
     private readonly uint[] _emptyBrick;
 
-    /// <param name="worldChunkBudget">How many world chunks are loaded at most (sizes the pools).</param>
+    /// <summary>How many light bricks the static world may use (see ChunkLoadSystem): what was asked for, or less if
+    /// this device's max buffer size can't hold it along with the ships' allowance and headroom.</summary>
+    public int WorldLightBudget { get; }
+
+    /// <param name="worldLightBudget">How many light bricks the static world should use at most: the streaming budget
+    /// (sizes the light pool, with headroom for ships and for streaming's estimates).</param>
     /// <param name="worldIndexDim">The world index's width in chunks (x and z; it wraps): wider than the span of world
     /// chunks ever loaded at once, so two loaded chunks never share a cell. In y it covers <see cref="WorldLayers"/>.</param>
-    public GridStore(GpuContext ctx, int worldChunkBudget, int worldIndexDim)
+    public GridStore(GpuContext ctx, int worldLightBudget, int worldIndexDim)
     {
         _ctx = ctx;
         _worldDim = worldIndexDim;
         _worldIndexBytes = ((ulong)worldIndexDim * WorldLayers * (ulong)worldIndexDim * 2 + 15) & ~15UL;
-        _worldCapacity = System.Math.Min(worldChunkBudget + 1024, NoWorldSlot);
+        _worldCapacity = 16384; // grows (to MaxWorldChunks) with what streaming loads
 
-        // Pools start sized to the chunk budget so they don't grow (a copy + rebind hitch) during normal play.
-        // Measured at the old 8/3 view radius: peaks of ~2.6 non-uniform chunks and ~72 surface bricks per chunk
-        // column, i.e. ~28 surface bricks per non-uniform chunk; loaded world chunks are almost all non-uniform
-        // now that air is never loaded. Ships get a fixed extra allowance on top.
+        // Pools start sized to the budget so they don't grow (a copy + rebind hitch) during normal play: the light
+        // pool holds the world's budget plus a fifth for streaming's estimates running over, plus ships. Occupancy is
+        // only needed by chunks mixing solid and air, measured at ~26 light bricks each.
         ulong maxBytes = System.Math.Min(ctx.AdapterLimits.MaxBufferSize, ctx.AdapterLimits.MaxStorageBufferBindingSize);
-        _occCapacity   = worldChunkBudget + 512;
-        _tableCapacity = _worldCapacity + 4096;
-        _lightCapacity = worldChunkBudget * LightBricksPerChunk + 2048;
         int maxLight = (int)System.Math.Min(maxBytes / SlotBytes, int.MaxValue);
-        if (_lightCapacity > maxLight)
-        {
-            Console.WriteLine($"[grid-store] light pool estimate of {_lightCapacity} bricks exceeds this device's max buffer size; starting at {maxLight}.");
-            _lightCapacity = maxLight;
-        }
-        Console.WriteLine($"[grid-store] {worldChunkBudget} chunk budget: light pool {_lightCapacity} bricks " +
+        const int shipBricks = 2048;
+        _lightCapacity = (int)System.Math.Min((long)worldLightBudget + worldLightBudget / 5 + shipBricks, maxLight);
+        WorldLightBudget = System.Math.Min(worldLightBudget, (int)((_lightCapacity - shipBricks) / 1.2));
+        if (WorldLightBudget < worldLightBudget)
+            Console.WriteLine($"[grid-store] a light budget of {worldLightBudget} bricks doesn't fit this device's max buffer size; " +
+                              $"using {WorldLightBudget}.");
+        _occCapacity   = WorldLightBudget / 26 + 512;
+        _tableCapacity = _worldCapacity + 4096;
+        Console.WriteLine($"[grid-store] light budget {WorldLightBudget} bricks: light pool {_lightCapacity} bricks " +
                           $"({(ulong)_lightCapacity * SlotBytes / (1024 * 1024)} MB), occupancy {_occCapacity} chunks " +
                           $"({(ulong)_occCapacity * WordsPerChunk * 4 / (1024 * 1024)} MB), table {_tableCapacity} entries " +
                           $"({(ulong)_tableCapacity * (ChunkEntryBytes + 256) / (1024 * 1024)} MB), world index " +
@@ -370,6 +374,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         if (rec.Solid == 0 || rec.Air == 0)
         {
             FreeOcc(rec);
+            entry.PackedOpacityWords = null; // all one value: not worth keeping 4 KB of it per buried chunk
         }
         else
         {
@@ -422,8 +427,21 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         if (entry.PackedOpacityWords is { } cached) return cached;
 
         var words = entry.PackedOpacityWords = new uint[WordsPerChunk];
-        var data = entry.Data;
         entry.Emitters.Clear();
+        PackOpacity(entry.Data, words, entry.Emitters);
+        (entry.BrickSolidMask, entry.BrickAirMask) = BrickMasks(words);
+        return words;
+    }
+
+    /// <summary>Packs a chunk's opacity into <paramref name="words"/> (lx is the in-word bit, ly + 32*lz the word),
+    /// listing its light emitters if <paramref name="emitters"/> is given.</summary>
+    private static void PackOpacity(ChunkData data, uint[] words, List<EmitterVoxel>? emitters)
+    {
+        if (data.IsUniform(out var block) && BlockRegistry.Get(block).LightEmission == 0)
+        {
+            Array.Fill(words, BlockRegistry.Get(block).Opacity >= 15 ? uint.MaxValue : 0u);
+            return;
+        }
         for (int lz = 0; lz < S; lz++)
         for (int ly = 0; ly < S; ly++)
         {
@@ -433,12 +451,40 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
                 var def = BlockRegistry.Get(data.Get(lx, ly, lz));
                 if (def.Opacity >= 15) bits |= 1u << lx;
                 if (def.LightEmission > 0)
-                    entry.Emitters.Add(new EmitterVoxel((byte)lx, (byte)ly, (byte)lz, def.LightEmission, def.Id));
+                    emitters?.Add(new EmitterVoxel((byte)lx, (byte)ly, (byte)lz, def.LightEmission, def.Id));
             }
-            words[ly + S * lz] = bits; // lx is the in-word bit, (ly + 32*lz) is the word
+            words[ly + S * lz] = bits;
         }
-        (entry.BrickSolidMask, entry.BrickAirMask) = BrickMasks(words);
-        return words;
+    }
+
+    /// <summary>A chunk's per-brick "any opaque" / "any non-opaque" bits, as <see cref="UploadChunk"/> will compute
+    /// them: which of its bricks can need light storage (see <see cref="RefreshSurface"/>). For streaming to estimate
+    /// a chunk's light cost before it is uploaded.</summary>
+    internal static (ulong Solid, ulong Air) BrickMasksOf(ChunkData data)
+    {
+        if (data.IsUniform(out var block) && BlockRegistry.Get(block).LightEmission == 0)
+            return BlockRegistry.Get(block).Opacity >= 15 ? (ulong.MaxValue, 0UL) : (0UL, ulong.MaxValue);
+        var words = new uint[WordsPerChunk];
+        PackOpacity(data, words, null);
+        return BrickMasks(words);
+    }
+
+    /// <summary>Bricks that need light storage: those holding air next to solid in the same or a face-adjacent brick
+    /// (see <see cref="RefreshSurface"/>), given the chunk's masks and its six neighbours' solid masks (0 where a
+    /// neighbour isn't known), in <see cref="FaceDir"/> order.</summary>
+    internal static ulong SurfaceBricks(ulong solid, ulong air, ReadOnlySpan<ulong> neighbourSolid)
+    {
+        ulong near = solid
+            | ((solid >> 1) & ~BxHi) | ((solid << 1) & ~BxLo)
+            | ((solid >> 4) & ~ByHi) | ((solid << 4) & ~ByLo)
+            | (solid >> 16) | (solid << 16);
+        near |= (neighbourSolid[0] & BxLo) << 3;
+        near |= (neighbourSolid[1] & BxHi) >> 3;
+        near |= (neighbourSolid[2] & ByLo) << 12;
+        near |= (neighbourSolid[3] & ByHi) >> 12;
+        near |= (neighbourSolid[4] & BzLo) << 48;
+        near |= (neighbourSolid[5] & BzHi) >> 48;
+        return air & near;
     }
 
     /// <summary>Per-8³-brick "any opaque" / "any non-opaque" bits from a chunk's packed words. Each word is one
@@ -716,18 +762,13 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     /// fresh light slot; bricks that left give theirs back.</summary>
     private void RefreshSurface(GridHandle g, ChunkRecord rec)
     {
-        ulong s = rec.Solid;
-        ulong near = s
-            | ((s >> 1) & ~BxHi) | ((s << 1) & ~BxLo)   // solid at bx+1 / bx-1 within the chunk
-            | ((s >> 4) & ~ByHi) | ((s << 4) & ~ByLo)   // by±1
-            | (s >> 16) | (s << 16);                    // bz±1 (out-of-chunk bits shift out on their own)
-        near |= (NeighbourSolid(g, rec.Pos,  1, 0, 0) & BxLo) << 3;   // neighbour's bx=0 borders our bx=3
-        near |= (NeighbourSolid(g, rec.Pos, -1, 0, 0) & BxHi) >> 3;
-        near |= (NeighbourSolid(g, rec.Pos, 0,  1, 0) & ByLo) << 12;
-        near |= (NeighbourSolid(g, rec.Pos, 0, -1, 0) & ByHi) >> 12;
-        near |= (NeighbourSolid(g, rec.Pos, 0, 0,  1) & BzLo) << 48;
-        near |= (NeighbourSolid(g, rec.Pos, 0, 0, -1) & BzHi) >> 48;
-        ulong surface = rec.Air & near;
+        Span<ulong> neighbours = stackalloc ulong[6];
+        for (int f = 0; f < 6; f++)
+        {
+            var (dx, dy, dz) = FaceDir(f);
+            neighbours[f] = NeighbourSolid(g, rec.Pos, dx, dy, dz);
+        }
+        ulong surface = SurfaceBricks(rec.Solid, rec.Air, neighbours);
         if (surface == rec.Surface) return;
 
         rec.BrickSlots ??= NewBrickSlots();
@@ -838,10 +879,10 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
 
     private void GrowLight()
     {
-        int cap = _lightCapacity * 2;
         ulong maxBytes = System.Math.Min(_ctx.AdapterLimits.MaxBufferSize, _ctx.AdapterLimits.MaxStorageBufferBindingSize);
-        if ((ulong)cap * SlotBytes > maxBytes)
-            throw new InvalidOperationException($"Light pool would need {cap} brick slots, over this device's max buffer size.");
+        int cap = (int)System.Math.Min((long)_lightCapacity * 2, (long)(maxBytes / SlotBytes));
+        if (cap <= _lightCapacity)
+            throw new InvalidOperationException($"Light pool is full at {_lightCapacity} brick slots, this device's max buffer size.");
         LightPool = Grow(LightPool, (ulong)cap * SlotBytes);
         SlotInfo  = Grow(SlotInfo, (ulong)cap * 16);
         _lightCapacity = cap;

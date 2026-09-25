@@ -140,23 +140,19 @@ public static class GenerationBenchmark
                            $"p95={Percentile(0.95):F2}us  p99={Percentile(0.99):F2}us  max={sorted[^1]:F2}us");
     }
 
-    /// <summary>Spirals outward over region cells from the origin looking for the first cell that holds an
-    /// island cluster, returning the chunk position of that island's centre. Mirrors TestScene's spawn-finding
-    /// search but only needs "an island exists nearby", not "the closest one".</summary>
+    /// <summary>Spirals outward over the large islands' cells from the origin looking for the first one that holds an
+    /// island, returning the chunk position of that island's centre. Mirrors TestScene's spawn-finding search but
+    /// only needs "an island exists nearby", not "the closest one".</summary>
     internal static ChunkPosition FindFocusChunk(ulong seed)
     {
-        Span<IslandDef> islands = stackalloc IslandDef[4];
         for (int ring = 0; ring <= 32; ring++)
         {
             for (int dx = -ring; dx <= ring; dx++)
             for (int dz = -ring; dz <= ring; dz++)
             {
                 if (System.Math.Max(System.Math.Abs(dx), System.Math.Abs(dz)) != ring) continue;
+                if (!IslandGrid.TryResolve(seed, IslandClass.Large, dx, 0, dz, out var island)) continue;
 
-                int n = RegionGrid.ResolveIslandsForCell(seed, dx, dz, islands);
-                if (n == 0) continue;
-
-                ref readonly var island = ref islands[0];
                 int cx = (int)MathF.Floor(island.CenterX / ChunkData.Size);
                 int cy = (int)MathF.Floor(island.BaseY / ChunkData.Size);
                 int cz = (int)MathF.Floor(island.CenterZ / ChunkData.Size);

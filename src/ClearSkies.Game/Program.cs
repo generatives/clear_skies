@@ -44,25 +44,25 @@ host.AddSystem(host.Gui, SystemStage.Input); // opens ImGui's frame before Logic
 
 var physicsBody = new PhysicsBodySystem(host.World, host.Physics);
 
-// Streaming budget: how many world chunks are loaded at once — as many as the old 12/3 view box held, but spent
-// only on chunks that hold something (see ChunkLoadSystem), so it reaches as far as the islands need. Streamed
-// layers start 8 under MinChunkY (for building under the islands); islands span roughly blocks 10-300.
-// --chunk-budget N overrides it, e.g. for a software renderer whose small max buffer size can't hold the light
-// for a full budget of island chunks.
-int ChunkBudget = (12 * 2 + 1) * (12 * 2 + 1) * (3 * 2 + 1);
-int budgetArg = Array.IndexOf(args, "--chunk-budget");
-if (budgetArg >= 0 && budgetArg + 1 < args.Length) ChunkBudget = int.Parse(args[budgetArg + 1]);
+// Streaming budget: how much GPU light storage the loaded world may use, in MB (3 KB per 8³ brick of surface). Chunks
+// are loaded closest-first until it's spent (see ChunkLoadSystem), and cost only their surface, so solid stone inside
+// an island is nearly free; the GPU store adds a fifth on top for headroom and ships. --light-budget-mb N overrides it,
+// e.g. for a software renderer whose small max buffer size can't hold it (the store also shrinks it to fit).
+int LightBudgetMb = 1024;
+int budgetArg = Array.IndexOf(args, "--light-budget-mb");
+if (budgetArg >= 0 && budgetArg + 1 < args.Length) LightBudgetMb = int.Parse(args[budgetArg + 1]);
 // View distance: how far out (in blocks, horizontally) islands are streamed, if the budget reaches. The GPU's world
 // index covers it both ways at 2 bytes per chunk position (~48 MB at 10000). --view-distance N overrides it.
 float ViewDistance = 10000f;
 int viewArg = Array.IndexOf(args, "--view-distance");
 if (viewArg >= 0 && viewArg + 1 < args.Length) ViewDistance = float.Parse(args[viewArg + 1], System.Globalization.CultureInfo.InvariantCulture);
-const int MinChunkY = 0;
+const int MinChunkY = 0; // streamed layers are -8..55 (blocks -256..1792): IslandGrid's WorldBottom..WorldTop
 
 // Shared GPU voxel storage for lighting (world + ships).
-var gridStore = new GridStore(host.Context, ChunkBudget, ChunkLoadSystem.WorldIndexDim(ViewDistance));
+var gridStore = new GridStore(host.Context, (int)((long)LightBudgetMb * 1024 * 1024 / GridStore.SlotBytes),
+                              ChunkLoadSystem.WorldIndexDim(ViewDistance));
 var chunkLoadSystem = new ChunkLoadSystem(host.World, staticVolume, () => new SkyWorldGenerator(seed),
-                                          ViewDistance, ChunkBudget, MinChunkY);
+                                          ViewDistance, gridStore.WorldLightBudget, MinChunkY);
 host.AddSystem(chunkLoadSystem, SystemStage.Logic);
 host.Renderer.AttachGridStore(gridStore);
 host.AddSystem(physicsBody, SystemStage.Logic);

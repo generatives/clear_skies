@@ -4,20 +4,22 @@ using ClearSkies.Engine.Generation;
 namespace ClearSkies.Game.Generation;
 
 /// <summary>
-/// Generates a floating-island sky world: large islands (hundreds of blocks across, ~100 tall)
-/// with irregular, non-circular footprints and cragged, non-hemispherical rounded undersides —
-/// large islands get a flatter plateau in the middle rather than a pointed dome apex — carrying
-/// plains/mountains/beaches/lakes on top. Islands are grouped into regions (see <see cref="RegionGrid"/>)
-/// so clusters end up low-thousands of blocks apart, with genuinely empty sky between them.
+/// Generates a floating-island sky world: islands in four size classes, from rocks tens of blocks across to large
+/// islands about 2 km across with real mountain ranges, placed at many heights by <see cref="IslandGrid"/>. Each is a
+/// rounded lens (see <see cref="IslandDef"/>) with an irregular, non-circular footprint and a cragged underside,
+/// carrying plains/mountains/beaches/lakes on top.
 ///
-/// Generation is per-column (2.5D): for a given (x,z), at most one island "owns" the column (fixed
-/// priority order: main island, then satellites in draw order), and everything below is a pure
-/// function of that island's shape parameters plus a handful of independent noise fields sampled at
-/// world coordinates offset per-island for decorrelation.
+/// Generation is per-column (2.5D per island): for a given (x,z), each island reaching the column fills its own
+/// span, a pure function of that island's shape parameters plus a handful of independent noise fields sampled at
+/// world coordinates offset per-island for decorrelation. Islands never overlap, so the spans never collide.
 /// </summary>
 public sealed class SkyWorldGenerator : IWorldGenerator
 {
-    private const int MaxIslandsPerCell = 4;
+    private const int S = ChunkData.Size;
+
+    /// <summary>Room for every island a column can reach: the cells a column overlaps, at most 2 × 2 per class
+    /// horizontally times each class's layers (1 + 2 + 4 + 16).</summary>
+    private const int MaxIslands = 96;
 
     public ulong Seed => _seed;
 
@@ -30,13 +32,6 @@ public sealed class SkyWorldGenerator : IWorldGenerator
     private readonly FastNoiseLite _edgeNoise;   // coastline radius wobble
     private readonly FastNoiseLite _warpNoise;   // domain warp for non-circular footprints
     private readonly FastNoiseLite _bumpNoise;   // small-scale underside crags
-
-    // Single-slot cache for RegionGrid cell resolution (see ResolveIslandsCached). Only valid because
-    // Generate() is called from a single thread today; parallelizing generation later needs this made
-    // thread-local (or dropped) rather than shared.
-    private int _cachedCellX = int.MinValue, _cachedCellZ = int.MinValue;
-    private int _cachedIslandCount;
-    private readonly IslandDef[] _cachedIslands = new IslandDef[MaxIslandsPerCell];
 
     public SkyWorldGenerator(ulong seed = 1337)
     {
@@ -97,124 +92,146 @@ public sealed class SkyWorldGenerator : IWorldGenerator
     public void Generate(ChunkData data, ChunkPosition pos)
     {
         var origin = pos.WorldOrigin;
-        int originX = (int)origin.X;
         int originY = (int)origin.Y;
-        int originZ = (int)origin.Z;
+        var profile = Profile(pos.X, pos.Z);
 
-        // Cheap reject #1: resolve this chunk's region cell once. Most of the world has no island
-        // cluster in its cell at all — that's the common case, and it costs one hash plus a few PRNG
-        // draws, no noise evaluation. Region cells (4096 blocks) are far larger than a chunk (32 blocks),
-        // so every chunk in a vertical stack (same X/Z, different Y) and most horizontal neighbours
-        // resolve to the same cell — cached below so that repeated work isn't redone per chunk.
-        Span<IslandDef> islandBuf = stackalloc IslandDef[MaxIslandsPerCell];
-        int centerX = originX + ChunkData.Size / 2;
-        int centerZ = originZ + ChunkData.Size / 2;
-        int islandCount = ResolveIslandsCached(centerX, centerZ, islandBuf);
-        if (islandCount == 0) return;
-
-        // Cheap reject #2: bounding-volume check per island against this chunk's AABB before any
-        // per-column work. Rejects chunks in a populated cell that are simply at the wrong altitude
-        // or too far horizontally from every island in it.
-        Span<int> candidates = stackalloc int[MaxIslandsPerCell];
-        int candidateCount = 0;
-        for (int i = 0; i < islandCount; i++)
+        // Islands never overlap (see IslandGrid), so a column can hold several at different heights: fill them all.
+        for (int i = 0; i < profile.Count; i++)
         {
-            if (!ReachesColumn(islandBuf[i], originX, originZ, out float yMin, out float yMax)) continue;
-            if (originY + ChunkData.Size < yMin || originY > yMax) continue;
-            candidates[candidateCount++] = i;
+            ref readonly var island = ref profile.Islands[i];
+            if (originY + S < island.YMin || originY > island.YMax) continue;
+            var spans = profile.Spans(i, this);
+            for (int lz = 0; lz < S; lz++)
+            for (int lx = 0; lx < S; lx++)
+                FillSpan(data, lx, lz, originY, in spans[lx + S * lz]);
         }
-        if (candidateCount == 0) return;
+    }
 
-        for (int lx = 0; lx < ChunkData.Size; lx++)
-        for (int lz = 0; lz < ChunkData.Size; lz++)
+    /// <summary>What one island puts in one block column: nothing, land from Bottom to Top, or a lake (land up to
+    /// Floor, water up to Top).</summary>
+    private struct ColumnSpan
+    {
+        public byte Kind; // 0 none, 1 land, 2 lake
+        public BlockId TopBlock;
+        public float Bottom, Top, Floor;
+    }
+
+    /// <summary>The islands reaching one chunk column and, computed on first use, each one's spans over its 32 × 32 block
+    /// columns. Streaming generates a column's chunks one after another on one thread, so the noise behind an island's
+    /// shape is evaluated once per column rather than once per chunk of it.</summary>
+    private sealed class ColumnProfile
+    {
+        public int X = int.MinValue, Z = int.MinValue;
+        public int Count;
+        public readonly IslandDef[] Islands = new IslandDef[MaxIslands];
+        private readonly ColumnSpan[]?[] _spans = new ColumnSpan[MaxIslands][];
+        private readonly bool[] _computed = new bool[MaxIslands];
+
+        public void Reset(int x, int z, int count)
         {
-            float wx = originX + lx;
-            float wz = originZ + lz;
-
-            for (int ci = 0; ci < candidateCount; ci++)
-            {
-                ref readonly IslandDef island = ref islandBuf[candidates[ci]];
-                if (TryFillColumn(data, lx, lz, originY, in island, wx, wz))
-                    break; // fixed island priority order — first owner wins
-            }
+            X = x; Z = z; Count = count;
+            Array.Clear(_computed);
         }
+
+        public ColumnSpan[] Spans(int i, SkyWorldGenerator gen)
+        {
+            var spans = _spans[i] ??= new ColumnSpan[S * S];
+            if (_computed[i]) return spans;
+            _computed[i] = true;
+            for (int lz = 0; lz < S; lz++)
+            for (int lx = 0; lx < S; lx++)
+                spans[lx + S * lz] = gen.ShapeColumn(in Islands[i], X * S + lx, Z * S + lz);
+            return spans;
+        }
+    }
+
+    private readonly ColumnProfile _profile = new();
+
+    private ColumnProfile Profile(int chunkX, int chunkZ)
+    {
+        if (_profile.X == chunkX && _profile.Z == chunkZ) return _profile;
+        int originX = chunkX * S, originZ = chunkZ * S;
+        int count = CollectIslands(originX, IslandGrid.WorldBottom, originZ, originX + S, IslandGrid.WorldTop - 1, originZ + S,
+                                   _profile.Islands);
+        int kept = 0;
+        for (int i = 0; i < count; i++)
+            if (ReachesColumn(_profile.Islands[i], originX, originZ)) _profile.Islands[kept++] = _profile.Islands[i];
+        _profile.Reset(chunkX, chunkZ, kept);
+        return _profile;
+    }
+
+    private static void FillSpan(ChunkData data, int lx, int lz, int originY, in ColumnSpan span)
+    {
+        if (span.Kind == 1) FillLandColumn(data, lx, lz, originY, span.Bottom, span.Top, span.TopBlock);
+        else if (span.Kind == 2) FillLakeColumn(data, lx, lz, originY, span.Bottom, span.Floor, span.Top);
     }
 
     public ulong ColumnLayers(int chunkX, int chunkZ, int minChunkY)
     {
-        int originX = chunkX * ChunkData.Size, originZ = chunkZ * ChunkData.Size;
-        Span<IslandDef> islands = stackalloc IslandDef[MaxIslandsPerCell];
-        int count = ResolveIslandsCached(originX + ChunkData.Size / 2, originZ + ChunkData.Size / 2, islands);
+        int originX = chunkX * S, originZ = chunkZ * S;
+        Span<IslandDef> islands = stackalloc IslandDef[MaxIslands];
+        int count = CollectIslands(originX, IslandGrid.WorldBottom, originZ, originX + S, IslandGrid.WorldTop - 1, originZ + S, islands);
         ulong bits = 0;
         for (int i = 0; i < count; i++)
         {
-            if (!ReachesColumn(islands[i], originX, originZ, out float yMin, out float yMax)) continue;
-            int lo = System.Math.Max((int)MathF.Floor(yMin / ChunkData.Size) - minChunkY, 0);
-            int hi = System.Math.Min((int)MathF.Floor(yMax / ChunkData.Size) - minChunkY, 63);
+            if (!ReachesColumn(islands[i], originX, originZ)) continue;
+            int lo = System.Math.Max((int)MathF.Floor(islands[i].YMin / S) - minChunkY, 0);
+            int hi = System.Math.Min((int)MathF.Floor(islands[i].YMax / S) - minChunkY, 63);
             if (lo > hi) continue;
             bits |= (ulong.MaxValue >> (63 - hi)) & (ulong.MaxValue << lo);
         }
         return bits;
     }
 
-    /// <summary>Whether <paramref name="island"/> can reach the chunk column at (originX, originZ), and if so the height
-    /// range it can fill there. Bounds only — no noise — so it's cheap enough to test every island against every chunk
-    /// before doing per-column work, and for <see cref="ColumnLayers"/>.</summary>
-    private static bool ReachesColumn(in IslandDef island, int originX, int originZ, out float yMin, out float yMax)
+    /// <summary>Every class's islands in the grid cells overlapping the box.</summary>
+    private int CollectIslands(float minX, float minY, float minZ, float maxX, float maxY, float maxZ, Span<IslandDef> output)
     {
-        yMin = island.BaseY - island.DomeDepth - 8f;
-        yMax = island.BaseY + 8f + 100f + 8f;
-        float maxReach = island.Radius * 1.4f * MathF.Max(island.StretchMajor, island.StretchMinor);
-        float dxMin = MathF.Max(0f, MathF.Abs(island.CenterX - (originX + ChunkData.Size * 0.5f)) - ChunkData.Size * 0.5f);
-        float dzMin = MathF.Max(0f, MathF.Abs(island.CenterZ - (originZ + ChunkData.Size * 0.5f)) - ChunkData.Size * 0.5f);
-        return dxMin * dxMin + dzMin * dzMin <= maxReach * maxReach;
+        int count = 0;
+        for (int c = 0; c < IslandGrid.ClassCount; c++)
+            count = IslandGrid.Collect(_seed, (IslandClass)c, minX, minY, minZ, maxX, maxY, maxZ, output, count);
+        return count;
     }
 
-    /// <summary>Resolves the island cluster for the region cell containing world (wx, wz), reusing the
-    /// last result when the query falls in the same cell as last time (see <see cref="_cachedCellX"/>).</summary>
-    private int ResolveIslandsCached(int wx, int wz, Span<IslandDef> outIslands)
+    /// <summary>Whether <paramref name="island"/> can reach the chunk column at (originX, originZ). Bounds only — no
+    /// noise — so it's cheap enough to test every island against every chunk before doing per-column work.</summary>
+    private static bool ReachesColumn(in IslandDef island, int originX, int originZ)
     {
-        int cellX = wx >> RegionGrid.CellShift;
-        int cellZ = wz >> RegionGrid.CellShift;
-
-        if (cellX != _cachedCellX || cellZ != _cachedCellZ)
-        {
-            _cachedCellX = cellX;
-            _cachedCellZ = cellZ;
-            _cachedIslandCount = RegionGrid.ResolveIslandsForCell(_seed, cellX, cellZ, _cachedIslands);
-        }
-
-        for (int i = 0; i < _cachedIslandCount; i++)
-            outIslands[i] = _cachedIslands[i];
-        return _cachedIslandCount;
+        float reach = island.Reach;
+        float dxMin = MathF.Max(0f, MathF.Abs(island.CenterX - (originX + S * 0.5f)) - S * 0.5f);
+        float dzMin = MathF.Max(0f, MathF.Abs(island.CenterZ - (originZ + S * 0.5f)) - S * 0.5f);
+        return dxMin * dxMin + dzMin * dzMin <= reach * reach;
     }
 
     // ── Per-column shaping ──────────────────────────────────────────────────────
 
-    private bool TryFillColumn(ChunkData data, int lx, int lz, int originY, in IslandDef island, float wx, float wz)
+    private ColumnSpan ShapeColumn(in IslandDef island, float wx, float wz)
     {
         // Cheap raw-distance pre-check before paying for a domain-warp noise sample: even with warp
         // and anisotropic stretch, nothing beyond ~2x the nominal radius can end up inside.
         float rawDx = wx - island.CenterX;
         float rawDz = wz - island.CenterZ;
         float rejectR = island.Radius * 2f;
-        if (rawDx * rawDx + rawDz * rawDz > rejectR * rejectR) return false;
+        if (rawDx * rawDx + rawDz * rawDz > rejectR * rejectR) return default;
 
         float offX = island.NoiseOffsetX;
         float offZ = island.NoiseOffsetZ;
 
+        // The footprint's warp and coastline wobble are sampled at coordinates scaled down on big islands, so their
+        // features grow with the island instead of turning a big coast into fine zig-zags.
+        float fs = MathF.Min(1f, 300f / island.Radius);
+
         // Domain-warp the sampling position (not the geometric one) so the displacement itself is
         // decorrelated per island, then apply that displacement to the true world position — this
         // keeps the warp a pure perturbation of geometry rather than an accidental extra offset.
-        float sampleX = wx + offX;
-        float sampleZ = wz + offZ;
+        float sampleX = (wx + offX) * fs;
+        float sampleZ = (wz + offZ) * fs;
         float warpedX = sampleX;
         float warpedZ = sampleZ;
-        _warpNoise.SetDomainWarpAmp(island.Radius * 0.25f);
+        _warpNoise.SetDomainWarpAmp(island.Radius * 0.25f * fs);
         _warpNoise.DomainWarp(ref warpedX, ref warpedZ);
 
-        float px = wx + (warpedX - sampleX);
-        float pz = wz + (warpedZ - sampleZ);
+        float px = wx + (warpedX - sampleX) / fs;
+        float pz = wz + (warpedZ - sampleZ) / fs;
 
         // Rotate + anisotropically stretch around the island center so footprints read as elongated,
         // rotated blobs rather than circles.
@@ -225,61 +242,51 @@ public sealed class SkyWorldGenerator : IWorldGenerator
         float rx = (dx * cosR - dz * sinR) / island.StretchMajor;
         float rz = (dx * sinR + dz * cosR) / island.StretchMinor;
 
-        float edge = _edgeNoise.GetNoise(wx + offX, wz + offZ); // [-1,1] coastline wobble
+        float edge = _edgeNoise.GetNoise(sampleX, sampleZ); // [-1,1] coastline wobble
         float effectiveR = island.Radius * (0.80f + 0.20f * edge);
-        if (effectiveR <= 1f) return false;
+        if (effectiveR <= 1f) return default;
 
         float dist = MathF.Sqrt(rx * rx + rz * rz);
         float t = dist / effectiveR;
-        if (t >= 1f) return false;
+        if (t >= 1f) return default;
 
-        // ── Bottom: plateau in the middle (flatter for larger islands), rounding to a thin rim,
-        //    with small cragged bumps so it never reads as a smooth mathematical dome. ──
-        float coreFalloff;
-        if (t <= island.PlateauT)
-        {
-            coreFalloff = 1f;
-        }
-        else
-        {
-            float u = (t - island.PlateauT) / (1f - island.PlateauT);
-            coreFalloff = MathF.Sqrt(MathF.Max(0f, 1f - u * u));
-        }
-
+        // ── The lens. e is blocks in from the rim. The top of the rim is a rounded lip (a quarter circle of radius
+        //    Lip rising from BaseY); the underside a bowl Lip + Depth deep, (1 - t²)^0.75: steep enough right at the
+        //    rim to round it off, then tapering in like an inverted hill rather than dropping as a sheer wall. Small
+        //    cragged bumps keep the underside from looking mathematical. ──
+        float e = (1f - t) * effectiveR;
+        float lip = island.Lip;
+        float bowl = MathF.Pow(MathF.Max(0f, 1f - t * t), 0.75f);
         float bump = _bumpNoise.GetNoise(wx + offX, wz + offZ); // [-1,1]
-        float bottomY = island.BaseY - island.DomeDepth * coreFalloff + bump * (6f * coreFalloff);
+        float bottomY = island.BaseY - (lip + island.Depth) * bowl + bump * island.Bump * bowl;
 
-        // ── Top: mountains mostly inside the footprint, gated by a broad patch mask; rim always
-        //    stays low/flat (reads as beach), regardless of the height/ridge fields. ──
+        float lipTop = e < lip ? MathF.Sqrt(MathF.Max(0f, lip * lip - (lip - e) * (lip - e))) : lip;
+        float inland = Saturate((e - lip) / MathF.Max(effectiveR - lip, 1f)); // 0 at the lip, 1 at the centre
+        float crown = island.Crown * MathF.Sin(MathF.Min(inland * 2f, 1f) * MathF.PI * 0.5f);
+        float groundY = island.BaseY + lipTop + crown; // the smooth, noise-free ground
+
+        // ── Top: mountains mostly inside the footprint, gated by a broad patch mask; plains roll gently everywhere
+        //    else, fading in over the first blocks past the lip so the rim stays round. ──
         float mountainReach = MathF.Max(0f, (0.72f - t) / 0.72f);
-        mountainReach = MathF.Pow(mountainReach, 1.0f);
         float maskField = _maskNoise.GetNoise(wx + offX, wz + offZ) * 0.5f + 0.5f;
         float mountainFactor = Smoothstep(0.30f, 0.55f, maskField);
-        float mtn = mountainReach * mountainFactor;
+        float mtn = island.MountainMax > 0f ? mountainReach * mountainFactor : 0f;
 
-        float surfaceBase = 8f * (1f - t);
+        float landFade = Smoothstep(0f, 24f, e - lip);
         float rolling = _heightNoise.GetNoise(wx + offX, wz + offZ);
         float ridged = _ridgeNoise.GetNoise(wx + offX, wz + offZ);
         float terrain = Lerp(rolling, ridged, mtn);
-        float amplitude = Lerp(4f, 100f, mtn);
+        float amplitude = Lerp(IslandDef.PlainsAmplitude, MathF.Max(island.MountainMax, IslandDef.PlainsAmplitude), mtn);
 
-        float topY = island.BaseY + surfaceBase + terrain * amplitude;
-        if (topY <= bottomY) topY = bottomY + 1f; // guard against extreme parameter combinations
-
-        // Right at the rim, both bottomY and topY converge toward baseY (that's the intended taper-to-
-        // nothing edge), but that leaves a band of columns only 1-2 blocks thick — too thin to read as
-        // real ground, and since they fall entirely within the beach depth range they show up as odd
-        // isolated sand nubs. Treat anything under a minimum thickness as not part of the island at all.
-        if (topY - bottomY < 3f) return false;
+        float topY = groundY + terrain * amplitude * landFade;
+        if (topY - bottomY < 2f) return default; // a sliver at the very rim
 
         // ── Lakes: independent low-frequency field, interior only, away from rims and mountains. The
         // water surface is flat (not following the noisy topY — an undulating lake just reads as sloped
-        // ground with a blue tint), but its level tracks the LOCAL smooth terrain baseline (surfaceBase,
-        // the radial-only, noise-free component of topY) minus a fixed margin, rather than one constant
-        // per island — a single global level looked flush with the ground wherever the local plains
-        // happened to already sit near it. The margin (3, was 7 — that read as a deep pit) just needs to
-        // clear the ordinary noise wobble so a lake still reads as recessed at typical low dips, not a
-        // full basin.
+        // ground with a blue tint), but its level tracks the LOCAL smooth ground (groundY) minus a fixed margin,
+        // rather than one constant per island — a single global level looked flush with the ground wherever the
+        // local plains happened to already sit near it. The margin just needs to clear the ordinary noise wobble so
+        // a lake still reads as recessed at typical low dips, not a full basin.
         //
         // lakeBlend is continuous (not a hard in/out boolean): as lakeField rises through the shore
         // band, the land height eases down toward lakeLevel — a gentle bank leading down to the water —
@@ -287,11 +294,11 @@ public sealed class SkyWorldGenerator : IWorldGenerator
         // (which read as a sheer cliff around every lake). Once the blended height actually reaches
         // lakeLevel the column is committed to being water, with a carved floor beneath it.
         float lakeField = _lakeNoise.GetNoise(wx + offX, wz + offZ) * 0.5f + 0.5f;
-        float lakeLevel = island.BaseY + surfaceBase - 3f;
+        float lakeLevel = groundY - 3f;
 
-        float lakeBlend = Smoothstep(0.60f, 0.78f, lakeField); // raised from 0.40/0.60 — fewer, smaller lakes
-        lakeBlend *= 1f - Smoothstep(0.68f, 0.78f, t);   // fade out near the rim
-        lakeBlend *= 1f - Smoothstep(0.25f, 0.35f, mtn); // fade out approaching mountains
+        float lakeBlend = Smoothstep(0.60f, 0.78f, lakeField);
+        lakeBlend *= Smoothstep(lip + 20f, lip + 60f, e);   // fade out near the rim
+        lakeBlend *= 1f - Smoothstep(0.25f, 0.35f, mtn);     // fade out approaching mountains
 
         if (lakeBlend > 0f && topY > lakeLevel)
         {
@@ -300,26 +307,25 @@ public sealed class SkyWorldGenerator : IWorldGenerator
             {
                 float lakeCarve = Lerp(2f, 14f, Saturate((lakeField - 0.78f) / 0.22f));
                 float lakeFloorY = MathF.Max(bottomY + 1f, lakeLevel - lakeCarve);
-                FillLakeColumn(data, lx, lz, originY, bottomY, lakeFloorY, lakeLevel);
-                return true;
+                return new ColumnSpan { Kind = 2, Bottom = bottomY, Floor = lakeFloorY, Top = lakeLevel };
             }
 
-            BlockId bankBlock = PickTopBlock(t, blendedTopY, island, mtn);
-            FillLandColumn(data, lx, lz, originY, bottomY, blendedTopY, bankBlock);
-            return true;
+            return new ColumnSpan { Kind = 1, Bottom = bottomY, Top = blendedTopY,
+                                    TopBlock = PickTopBlock(e, blendedTopY - groundY, island, mtn) };
         }
 
-        BlockId topBlock = PickTopBlock(t, topY, island, mtn);
-        FillLandColumn(data, lx, lz, originY, bottomY, topY, topBlock);
-
-        return true;
+        return new ColumnSpan { Kind = 1, Bottom = bottomY, Top = topY, TopBlock = PickTopBlock(e, topY - groundY, island, mtn) };
     }
 
-    private static BlockId PickTopBlock(float t, float topY, in IslandDef island, float mtn)
+    /// <summary>The top block: a sand beach just in from the rim (not on tiny islands), rock and then snow up the
+    /// mountains, by <paramref name="height"/> above the smooth ground as a fraction of the island's mountains, else
+    /// grass.</summary>
+    private static BlockId PickTopBlock(float e, float height, in IslandDef island, float mtn)
     {
-        float beachMask = Smoothstep(0.80f, 0.92f, t);
-        float snowMask = Smoothstep(island.BaseY + 28f, island.BaseY + 45f, topY) * mtn;
-        float rockMask = Smoothstep(island.BaseY + 12f, island.BaseY + 24f, topY) * mtn;
+        float beachMask = island.Class == IslandClass.Tiny ? 0f : 1f - Smoothstep(island.Lip + 4f, island.Lip + 14f, e);
+        float m = MathF.Max(island.MountainMax, 1f);
+        float snowMask = Smoothstep(0.28f * m, 0.45f * m, height) * mtn;
+        float rockMask = Smoothstep(0.12f * m, 0.24f * m, height) * mtn;
         float grassMask = MathF.Max(0f, 1f - MathF.Max(beachMask, MathF.Max(snowMask, rockMask)));
 
         BlockId top = BlockId.Grass;

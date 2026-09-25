@@ -137,7 +137,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         ImGui.TextDisabled($"Light pool: {_store.LightSlotsInUse:N0} / {_store.LightSlotCapacity:N0} bricks " +
                            $"({(long)_store.LightSlotCapacity * GridStore.SlotBytes / (1024 * 1024)} MB), high water {_store.LightSlotHighWater:N0}");
         ImGui.TextDisabled($"  {(_store.WorldChunkCount > 0 ? (float)_store.LightSlotsInUse / _store.WorldChunkCount : 0f):F1} bricks per " +
-                           $"loaded world chunk ({_store.WorldChunkCount:N0} chunks; the pool is sized for {GridStore.LightBricksPerChunk})");
+                           $"loaded world chunk ({_store.WorldChunkCount:N0} chunks), world budget {_store.WorldLightBudget:N0} bricks");
         ImGui.TextDisabled($"Occupancy pool: {_store.OccSlotsInUse:N0} / {_store.OccSlotCapacity:N0} chunks " +
                            $"({(long)_store.OccSlotCapacity * GridStore.WordsPerChunk * 4 / (1024 * 1024)} MB)");
 

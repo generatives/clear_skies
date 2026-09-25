@@ -19,7 +19,7 @@ public sealed unsafe class Renderer : IDisposable
     // ChunkLoadSystem) plus model blocks, ships and clouds used to cut distant islands off at 4096.
     private const int MaxObjects = 16384;
     private const ulong ModelStride = 256;   // >= minUniformBufferOffsetAlignment
-    private const ulong CameraSize  = 224;   // two mat4x4<f32> (view, proj) + six vec4<f32> (sun, light params, camera position, fog, zenith, horizon)
+    private const ulong CameraSize  = 240;   // two mat4x4<f32> (view, proj) + seven vec4<f32> (sun, light params, camera position, fog, zenith, horizon, haze)
     private const ulong ModelSize   = 96;    // mat4x4<f32> + vec3<i32> chunk + i32 grid + vec4<f32> params
 
     private static readonly string Wgsl = @"
@@ -36,10 +36,10 @@ const EMPTY_DISPLAY: u32 = 0x3000u;   // no light storage: full sun, no light, n
 // sunDir.w: sun strength (SunLight.Strength). lightParams.x: ray AO strength, .y: 1 = reference light path (see
 // shadeFast), .z: ambient (0-1), .w unused. camPos.xyz: camera world position. fog.xy: the world's fog start/end
 // (horizontal), fog.zw: the cloud layer's (see CloudLayer), in blocks from the camera. zenith/horizon.rgb: the sky
-// gradient (see SkySettings).
+// gradient (see SkySettings). horizon.w: the distance haze's strength (0-1), haze.rgb its colour, haze.w its distance.
 struct Camera {
     view: mat4x4<f32>, proj: mat4x4<f32>, sunDir: vec4<f32>, lightParams: vec4<f32>,
-    camPos: vec4<f32>, fog: vec4<f32>, zenith: vec4<f32>, horizon: vec4<f32>,
+    camPos: vec4<f32>, fog: vec4<f32>, zenith: vec4<f32>, horizon: vec4<f32>, haze: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
@@ -58,12 +58,21 @@ fn skyColor(dir: vec3<f32>) -> vec3<f32> {
     return c + vec3<f32>(1.0, 0.9, 0.7) * glow * camera.sunDir.w;
 }
 
-// Fades a lit surface colour at worldPos into the sky behind it, by horizontal distance: streaming loads whole
-// chunk columns, so the loaded world ends only sideways, where the fog is total (see SkySettings.FogDistance).
+// Aerial perspective: a blue-grey tint that builds with (3D) distance, reaching 63% of horizon.w by haze.w blocks,
+// and itself turns towards the sky colour behind as it thickens, so far islands (above and below too) read as far
+// away and melt into the horizon.
+fn applyHaze(color: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
+    let k = camera.horizon.w * (1.0 - exp(-length(d) / camera.haze.w));
+    return mix(color, mix(camera.haze.rgb, skyColor(normalize(d)), k), k);
+}
+
+// Hazes a lit surface colour at worldPos, then fades it into the sky behind it by horizontal distance: streaming
+// loads whole chunk columns, so the loaded world ends only sideways, where the fog is total (see
+// SkySettings.FogDistance).
 fn applyFog(color: vec3<f32>, worldPos: vec3<f32>) -> vec3<f32> {
     let d = worldPos - camera.camPos.xyz;
     let f = smoothstep(camera.fog.x, camera.fog.y, length(d.xz));
-    return mix(color, skyColor(normalize(d)), f);
+    return mix(applyHaze(color, d), skyColor(normalize(d)), f);
 }
 
 // Background: one full-screen triangle at the far plane, drawn after the world with depth test LessEqual so it only
@@ -528,7 +537,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     shade *= 0.9 + 0.1 * max(dot(n, -camera.sunDir.xyz), 0.0) * camera.sunDir.w;
     let d = in.worldPos - camera.camPos.xyz;
     let f = smoothstep(camera.fog.z, camera.fog.w, length(d));
-    return vec4<f32>(mix(in.color * shade, skyColor(normalize(d)), f), 1.0);
+    return vec4<f32>(mix(applyHaze(in.color * shade, d), skyColor(normalize(d)), f), 1.0);
 }
 ";
 

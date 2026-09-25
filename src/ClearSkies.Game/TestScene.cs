@@ -27,19 +27,20 @@ public static class TestScene
         var cam = host.World.CreateEntity();
         var camTransform = Transform.Identity;
 
-        // Find the nearest island to the default spawn area and stand off south of it, so the
-        // player always starts overlooking real terrain instead of empty sky (region cells are
-        // sparsely populated — ~55% chance each — so the origin cell itself often has none).
+        // Find the nearest large island to the default spawn area and stand off south of it, a little above its
+        // ground, so the player always starts overlooking real terrain instead of empty sky.
+        float yaw = MathF.PI, pitch = -0.45f;
         if (TryFindNearestIsland(worldSeed, FallbackSpawn.X, FallbackSpawn.Z, out var island))
         {
-            float standoff = island.Radius * 0.6f + 40f;
-            camTransform.Position = new Vector3D<float>(island.CenterX, island.BaseY + 40f, island.CenterZ - standoff);
+            float standoff = island.Reach + 100f;
+            camTransform.Position = new Vector3D<float>(island.CenterX, island.BaseY + island.Lip + island.Crown + 80f,
+                                                        island.CenterZ - standoff);
+            pitch = -0.15f;
         }
         else
         {
             camTransform.Position = FallbackSpawn;
         }
-        float yaw = MathF.PI, pitch = -0.45f;
         if (cameraOverride is { Length: >= 3 })
         {
             camTransform.Position = new Vector3D<float>(cameraOverride[0], cameraOverride[1], cameraOverride[2]);
@@ -84,21 +85,21 @@ public static class TestScene
     }
 
     /// <summary>
-    /// Spirals outward over region cells (see <see cref="RegionGrid"/>) from the cell containing
+    /// Spirals outward over the large islands' cells (see <see cref="IslandGrid"/>) from the cell containing
     /// (aroundX, aroundZ) looking for the closest island center. Once at least one island is found,
     /// searches one extra ring beyond it — an island can sit near its cell's edge, so a slightly
     /// farther ring can still hold something physically closer.
     /// </summary>
     private static bool TryFindNearestIsland(ulong worldSeed, float aroundX, float aroundZ, out IslandDef nearest)
     {
-        int cellX = (int)MathF.Floor(aroundX) >> RegionGrid.CellShift;
-        int cellZ = (int)MathF.Floor(aroundZ) >> RegionGrid.CellShift;
+        int size = IslandGrid.CellSize(IslandClass.Large);
+        int cellX = (int)MathF.Floor(aroundX / size);
+        int cellZ = (int)MathF.Floor(aroundZ / size);
 
         nearest = default;
         bool found = false;
         float bestDistSq = float.MaxValue;
         int foundAtRing = -1;
-        Span<IslandDef> islands = stackalloc IslandDef[4];
 
         for (int ring = 0; ring <= 32; ring++)
         {
@@ -108,19 +109,16 @@ public static class TestScene
             for (int dz = -ring; dz <= ring; dz++)
             {
                 if (System.Math.Max(System.Math.Abs(dx), System.Math.Abs(dz)) != ring) continue; // ring perimeter only
+                if (!IslandGrid.TryResolve(worldSeed, IslandClass.Large, cellX + dx, 0, cellZ + dz, out var island)) continue;
 
-                int n = RegionGrid.ResolveIslandsForCell(worldSeed, cellX + dx, cellZ + dz, islands);
-                for (int i = 0; i < n; i++)
+                float ddx = island.CenterX - aroundX;
+                float ddz = island.CenterZ - aroundZ;
+                float distSq = ddx * ddx + ddz * ddz;
+                if (distSq < bestDistSq)
                 {
-                    float ddx = islands[i].CenterX - aroundX;
-                    float ddz = islands[i].CenterZ - aroundZ;
-                    float distSq = ddx * ddx + ddz * ddz;
-                    if (distSq < bestDistSq)
-                    {
-                        bestDistSq = distSq;
-                        nearest = islands[i];
-                        found = true;
-                    }
+                    bestDistSq = distSq;
+                    nearest = island;
+                    found = true;
                 }
             }
 
