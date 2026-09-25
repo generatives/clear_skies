@@ -1,4 +1,5 @@
 using ClearSkies.Engine.Rendering.WebGpu;
+using Silk.NET.WebGPU;
 
 namespace ClearSkies.Engine.Rendering;
 
@@ -20,6 +21,9 @@ public sealed class GpuMesh : IDisposable
     public ulong WireframeOffset { get; }
     public ulong WireframeBytes { get; }
 
+    /// <summary>The indices' (and wireframe indices') format: 16-bit for a chunk mesh with few enough vertices.</summary>
+    public IndexFormat IndexFormat { get; } = IndexFormat.Uint32;
+
     public GpuMesh(GpuBuffer vertexBuffer, GpuBuffer indexBuffer, GpuBuffer wireframeBuffer,
                    uint indexCount, uint wireframeIndexCount)
     {
@@ -34,17 +38,19 @@ public sealed class GpuMesh : IDisposable
     }
 
     /// <summary>A mesh packed in one buffer: <paramref name="vertexBytes"/> of vertices, then the indices, then the
-    /// wireframe indices.</summary>
-    public GpuMesh(GpuBuffer packed, ulong vertexBytes, uint indexCount, uint wireframeIndexCount)
+    /// wireframe indices (none if <paramref name="wireframeIndexCount"/> is 0), all in <paramref name="format"/>.</summary>
+    public GpuMesh(GpuBuffer packed, ulong vertexBytes, uint indexCount, uint wireframeIndexCount, IndexFormat format)
     {
         VertexBuffer = IndexBuffer = WireframeBuffer = packed;
+        IndexFormat         = format;
         IndexCount          = indexCount;
         WireframeIndexCount = wireframeIndexCount;
+        ulong size = format == IndexFormat.Uint16 ? 2UL : 4UL;
         VertexBytes     = vertexBytes;
         IndexOffset     = vertexBytes;
-        IndexBytes      = (ulong)indexCount * sizeof(uint);
+        IndexBytes      = indexCount * size;
         WireframeOffset = IndexOffset + IndexBytes;
-        WireframeBytes  = (ulong)wireframeIndexCount * sizeof(uint);
+        WireframeBytes  = wireframeIndexCount * size;
     }
 
     public void Dispose()

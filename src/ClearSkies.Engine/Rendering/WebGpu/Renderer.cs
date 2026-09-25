@@ -1105,7 +1105,8 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
 
     /// <summary>Uploads a mesh packed into one block (see <see cref="GpuMesh(GpuBuffer, ulong, uint, uint)"/>): one
     /// buffer and one write, where separate buffers cost three of each.</summary>
-    public GpuMesh UploadPackedMesh(ReadOnlySpan<byte> packed, ulong vertexBytes, uint indexCount, uint wireframeIndexCount)
+    public GpuMesh UploadPackedMesh(ReadOnlySpan<byte> packed, ulong vertexBytes, uint indexCount, uint wireframeIndexCount,
+                                    IndexFormat indexFormat)
     {
         long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
         var buf = GpuBuffer.Create(_ctx, (ulong)packed.Length, BufferUsage.Vertex | BufferUsage.Index | BufferUsage.CopyDst);
@@ -1114,7 +1115,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         long t2 = System.Diagnostics.Stopwatch.GetTimestamp();
         LastCreateMs = (t1 - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
         LastWriteMs  = (t2 - t1) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
-        return new GpuMesh(buf, vertexBytes, indexCount, wireframeIndexCount);
+        return new GpuMesh(buf, vertexBytes, indexCount, wireframeIndexCount, indexFormat);
     }
 
     /// <summary>How long the last <see cref="UploadPackedMesh"/> spent creating its buffer and writing it (ms), for
@@ -1145,7 +1146,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset);
         _api.RenderPassEncoderSetVertexBuffer(_pass, 0, mesh.VertexBuffer.Handle, mesh.VertexOffset, mesh.VertexBytes);
         SetPipeline(_wireframePipeline);
-        _api.RenderPassEncoderSetIndexBuffer(_pass, mesh.WireframeBuffer.Handle, IndexFormat.Uint32, mesh.WireframeOffset, mesh.WireframeBytes);
+        _api.RenderPassEncoderSetIndexBuffer(_pass, mesh.WireframeBuffer.Handle, mesh.IndexFormat, mesh.WireframeOffset, mesh.WireframeBytes);
         _api.RenderPassEncoderDrawIndexed(_pass, mesh.WireframeIndexCount, 1, 0, 0, 0);
         SetPipeline(WireframeMode ? _wireframePipeline : _pipeline);
         _drawIndex++;
@@ -1182,7 +1183,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
             var idxCount = WireframeMode ? part.Mesh.WireframeIndexCount : part.Mesh.IndexCount;
             var idxOff   = WireframeMode ? part.Mesh.WireframeOffset : part.Mesh.IndexOffset;
             var idxBytes = WireframeMode ? part.Mesh.WireframeBytes : part.Mesh.IndexBytes;
-            _api.RenderPassEncoderSetIndexBuffer(_pass, idxBuf.Handle, IndexFormat.Uint32, idxOff, idxBytes);
+            _api.RenderPassEncoderSetIndexBuffer(_pass, idxBuf.Handle, part.Mesh.IndexFormat, idxOff, idxBytes);
             _api.RenderPassEncoderDrawIndexed(_pass, idxCount, 1, 0, 0, 0);
             _drawIndex++;
         }
@@ -1255,7 +1256,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         uint dynOffset = StageModel(ModelUniform.Default(model));
         _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset);
         _api.RenderPassEncoderSetVertexBuffer(_pass, 0, mesh.VertexBuffer.Handle, mesh.VertexOffset, mesh.VertexBytes);
-        _api.RenderPassEncoderSetIndexBuffer(_pass, mesh.IndexBuffer.Handle, IndexFormat.Uint32, mesh.IndexOffset, mesh.IndexBytes);
+        _api.RenderPassEncoderSetIndexBuffer(_pass, mesh.IndexBuffer.Handle, mesh.IndexFormat, mesh.IndexOffset, mesh.IndexBytes);
         _api.RenderPassEncoderDrawIndexed(_pass, mesh.IndexCount, 1, 0, 0, 0);
         _drawIndex++;
     }
@@ -1340,18 +1341,20 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         if (_drawIndex >= MaxObjects) return;
 
         // Chunk meshes are packed (ChunkVertex): their own pipeline, set once for a run of chunk draws.
-        var pipeline = WireframeMode ? _chunkWireframePipeline : _chunkPipeline;
+        // A mesh built while wireframe mode was off has no wireframe (see ChunkMeshSystem): solid until it's remeshed.
+        bool wire = WireframeMode && mesh.WireframeIndexCount > 0;
+        var pipeline = wire ? _chunkWireframePipeline : _chunkPipeline;
         if (_boundPipeline != pipeline) SetPipeline(pipeline);
 
         uint dynOffset = StageModel(new ModelUniform { Model = model, ChunkX = chunk.X, ChunkY = chunk.Y, ChunkZ = chunk.Z, Grid = grid });
         _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset);
         _api.RenderPassEncoderSetVertexBuffer(_pass, 0, mesh.VertexBuffer.Handle, mesh.VertexOffset, mesh.VertexBytes);
 
-        var idxBuf   = WireframeMode ? mesh.WireframeBuffer : mesh.IndexBuffer;
-        var idxCount = WireframeMode ? mesh.WireframeIndexCount : mesh.IndexCount;
-        var idxOff   = WireframeMode ? mesh.WireframeOffset : mesh.IndexOffset;
-        var idxBytes = WireframeMode ? mesh.WireframeBytes : mesh.IndexBytes;
-        _api.RenderPassEncoderSetIndexBuffer(_pass, idxBuf.Handle, IndexFormat.Uint32, idxOff, idxBytes);
+        var idxBuf   = wire ? mesh.WireframeBuffer : mesh.IndexBuffer;
+        var idxCount = wire ? mesh.WireframeIndexCount : mesh.IndexCount;
+        var idxOff   = wire ? mesh.WireframeOffset : mesh.IndexOffset;
+        var idxBytes = wire ? mesh.WireframeBytes : mesh.IndexBytes;
+        _api.RenderPassEncoderSetIndexBuffer(_pass, idxBuf.Handle, mesh.IndexFormat, idxOff, idxBytes);
         _api.RenderPassEncoderDrawIndexed(_pass, idxCount, 1, 0, 0, 0);
         _drawIndex++;
     }

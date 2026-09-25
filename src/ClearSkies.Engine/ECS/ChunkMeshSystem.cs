@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
+using Silk.NET.WebGPU;
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Gui;
 using ClearSkies.Engine.Rendering;
@@ -51,7 +52,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     /// <summary>A meshed chunk: its vertices, indices and wireframe indices packed into one block (rented; the first
     /// <see cref="Bytes"/> are used), uploaded as one buffer.</summary>
     private sealed record Result(Entity Entity, byte[] Packed, int Bytes, int VertCount, int IdxCount, int WireCount,
-                                 ModelCell[] Models, Exception? Error);
+                                 bool WideIndices, ModelCell[] Models, Exception? Error);
 
     /// <summary>Main-thread time spent uploading meshes per frame, at most (at least one goes each frame): results past
     /// it wait for the next frame, so a burst of finished jobs doesn't stall one.</summary>
@@ -61,6 +62,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     {
         _ecsWorld = ecsWorld;
         _dirtyChunks = ecsWorld.GetEntities().With<Chunk>().With<Transform>().With<NeedsRemeshFlag>().AsSet();
+        _meshedChunks = ecsWorld.GetEntities().With<Chunk>().With<ChunkRenderData>().AsSet();
         _cameras = ecsWorld.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
         _renderer = renderer;
         _blockModels = blockModels;
@@ -78,6 +80,13 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
 
     public void Update(float dt)
     {
+        // Wireframe indices are only built while wireframe mode is on (they'd be a third of every chunk's upload):
+        // turning it on remeshes everything loaded so it gets them.
+        bool wireframe = _renderer.WireframeMode;
+        if (wireframe && !_wireframe)
+            foreach (var e in _meshedChunks.GetEntities().ToArray()) e.Set<NeedsRemeshFlag>();
+        _wireframe = wireframe;
+
         long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
         ApplyResults();
         long t1 = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -92,6 +101,61 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
 
     private static double Ms(long a, long b) => (b - a) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
     private double _applyMs, _dispatchMs, _cleanupMs;
+
+    private bool _wireframe;
+    private readonly EntitySet _meshedChunks;
+
+    /// <summary>Packs a chunk mesh for upload, off the main thread: the vertices as <see cref="ChunkVertex"/> (8 bytes,
+    /// not a 48-byte <see cref="Vertex"/>), the indices, then (if <paramref name="wireframe"/>) the wireframe's line
+    /// list. Indices are 16-bit unless the mesh has more vertices than that reaches. Returns the rented block, its used
+    /// length, the wireframe index count and whether the indices are 32-bit.</summary>
+    private static (byte[] Packed, int Bytes, int WireCount, bool Wide) PackMesh(ReadOnlySpan<Vertex> verts,
+                                                                                ReadOnlySpan<uint> idxs, bool wireframe)
+    {
+        bool wide = verts.Length > ushort.MaxValue + 1;
+        int size = wide ? 4 : 2;
+        int wireCount = wireframe ? idxs.Length * 2 : 0;
+        int vLen = verts.Length * (int)ChunkVertex.SizeBytes;
+        int bytes = vLen + (idxs.Length + wireCount) * size; // a multiple of 4: quads have 6 indices, the wireframe 12
+        var packed = ArrayPool<byte>.Shared.Rent(System.Math.Max(4, bytes));
+
+        var cv = MemoryMarshal.Cast<byte, ChunkVertex>(packed.AsSpan(0, vLen));
+        for (int k = 0; k < verts.Length; k++) cv[k] = ChunkVertex.Pack(verts[k]);
+
+        int at = vLen;
+        if (wide)
+        {
+            var dst = MemoryMarshal.Cast<byte, uint>(packed.AsSpan(at, (idxs.Length + wireCount) * 4));
+            idxs.CopyTo(dst);
+            if (wireframe) WriteWireframe(idxs, dst.Slice(idxs.Length));
+        }
+        else
+        {
+            var dst = MemoryMarshal.Cast<byte, ushort>(packed.AsSpan(at, (idxs.Length + wireCount) * 2));
+            for (int k = 0; k < idxs.Length; k++) dst[k] = (ushort)idxs[k];
+            if (wireframe) WriteWireframe(idxs, dst.Slice(idxs.Length));
+        }
+        return (packed, bytes, wireCount, wide);
+    }
+
+    /// <summary>A triangle list's edges as a line list (each triangle's three edges).</summary>
+    private static void WriteWireframe<T>(ReadOnlySpan<uint> tris, Span<T> lines) where T : unmanaged
+    {
+        int li = 0;
+        for (int i = 0; i < tris.Length; i += 3)
+        {
+            uint a = tris[i], b = tris[i + 1], c = tris[i + 2];
+            lines[li++] = Index<T>(a); lines[li++] = Index<T>(b);
+            lines[li++] = Index<T>(b); lines[li++] = Index<T>(c);
+            lines[li++] = Index<T>(c); lines[li++] = Index<T>(a);
+        }
+    }
+
+    private static T Index<T>(uint i) where T : unmanaged
+    {
+        if (typeof(T) == typeof(ushort)) { ushort u = (ushort)i; return System.Runtime.CompilerServices.Unsafe.As<ushort, T>(ref u); }
+        return System.Runtime.CompilerServices.Unsafe.As<uint, T>(ref i);
+    }
 
     private void Dispatch()
     {
@@ -122,33 +186,20 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
             var nY = volume.GetData(pos.Offset(0, -1, 0)); var pY = volume.GetData(pos.Offset(0, 1, 0));
             var nZ = volume.GetData(pos.Offset(0, 0, -1)); var pZ = volume.GetData(pos.Offset(0, 0, 1));
             var vol = volume;
+            bool wireframe = _renderer.WireframeMode;
             ThreadPool.UnsafeQueueUserWorkItem(_ =>
             {
                 try
                 {
                     // The mesher's lists are per-thread scratch, so copy out before this thread meshes again.
                     var (verts, idxs) = _meshers.Value!.Mesh(data, nX, pX, nY, pY, nZ, pZ);
-                    // Packed here, off the main thread: the vertices (8-byte ChunkVertex, not 48-byte Vertex),
-                    // indices, then the wireframe's line list.
-                    var vSpan = CollectionsMarshal.AsSpan(verts);
-                    var iSpan = CollectionsMarshal.AsSpan(idxs);
-                    var wire = iSpan.Length > 0 ? Renderer.BuildWireframeIndices(iSpan) : Array.Empty<uint>();
-                    int vLen = vSpan.Length * (int)ChunkVertex.SizeBytes;
-                    var iBytes = MemoryMarshal.AsBytes(iSpan);
-                    var wBytes = MemoryMarshal.AsBytes(wire.AsSpan());
-                    int bytes = vLen + iBytes.Length + wBytes.Length;
-                    var packed = ArrayPool<byte>.Shared.Rent(System.Math.Max(4, bytes));
-                    var cv = MemoryMarshal.Cast<byte, ChunkVertex>(packed.AsSpan(0, vLen));
-                    for (int k = 0; k < vSpan.Length; k++) cv[k] = ChunkVertex.Pack(vSpan[k]);
-                    var vBytes = packed.AsSpan(0, vLen);
-                    iBytes.CopyTo(packed.AsSpan(vBytes.Length));
-                    wBytes.CopyTo(packed.AsSpan(vBytes.Length + iBytes.Length));
-                    _results.Enqueue(new Result(entry.Entity, packed, bytes, verts.Count, idxs.Count, wire.Length,
+                    var (packed, bytes, wireCount, wide) = PackMesh(CollectionsMarshal.AsSpan(verts), CollectionsMarshal.AsSpan(idxs), wireframe);
+                    _results.Enqueue(new Result(entry.Entity, packed, bytes, verts.Count, idxs.Count, wireCount, wide,
                                                 FindModelBlocks(data), null));
                 }
                 catch (Exception e)
                 {
-                    _results.Enqueue(new Result(entry.Entity, Array.Empty<byte>(), 0, 0, 0, 0, Array.Empty<ModelCell>(), e));
+                    _results.Enqueue(new Result(entry.Entity, Array.Empty<byte>(), 0, 0, 0, 0, false, Array.Empty<ModelCell>(), e));
                 }
             }, null);
 
@@ -192,7 +243,8 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                 {
                     long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
                     mesh = _renderer.UploadPackedMesh(r.Packed.AsSpan(0, r.Bytes), (ulong)r.VertCount * ChunkVertex.SizeBytes,
-                                                      (uint)r.IdxCount, (uint)r.WireCount);
+                                                      (uint)r.IdxCount, (uint)r.WireCount,
+                                                      r.WideIndices ? IndexFormat.Uint32 : IndexFormat.Uint16);
                     _uploadMs += 0.05 * (System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds - _uploadMs);
                     _createMs += 0.05 * (_renderer.LastCreateMs - _createMs);
                     _writeMs  += 0.05 * (_renderer.LastWriteMs - _writeMs);
