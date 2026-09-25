@@ -12,21 +12,20 @@ using System.Collections.Concurrent;
 namespace ClearSkies.Engine.ECS;
 
 /// <summary>
-/// Streams the static world around the active camera: chunks chosen closest-first by horizontal distance out to the
-/// view distance, a whole chunk column at a time, until a budget of GPU light storage is spent — but only chunks that
-/// may hold something: the layers the generator says it may fill (<see cref="IWorldGenerator.ColumnLayers"/>) and
-/// chunks with a save file (builds). Chunks that turn out to be air are remembered while they stay in range, and are
-/// neither loaded nor counted again.
+/// Streams the static world around the active camera, like a typical block game: a queue of the chunk columns within
+/// the view distance, closest first by horizontal distance, rebuilt whenever the camera crosses into another column,
+/// and loaded a whole column at a time. Only chunks that may hold something are queued: the layers the generator says
+/// it may fill (<see cref="IWorldGenerator.ColumnLayers"/>) and chunks with a save file (builds). The generator's
+/// layers are a loose bound, so chunks that turn out to be air are remembered (a bit per column) until their column
+/// leaves view, and aren't queued again.
 ///
-/// A chunk costs the light bricks it will need: its bricks holding air next to solid (see
-/// <see cref="GridStore.SurfaceBricks"/>). That's known once it has been generated or loaded (and remembered while it
-/// stays in view); until then it is <see cref="EstimatedBricks"/>. So solid stone inside an island costs next to
-/// nothing, and surfaces — island tops, undersides, cave walls — cost what they will really use. The number of chunks
-/// is capped too, at what the GPU's world index can address.
+/// What's loaded is limited by GPU light storage (<see cref="GridStore.WorldLightBudget"/>): the world's surface
+/// bricks, plus a surface chunk's average for each chunk loaded but not uploaded yet or still loading. When the
+/// budget is full, the queue stops; and if the next queued column is nearer than the farthest loaded one (after
+/// the camera moved), the farthest is unloaded to make room. So the loaded world is always the nearest that fits.
 ///
-/// Candidates are the columns within the view distance. Where the budget runs out (or else the view
-/// distance), and the nearest column still being generated or loaded, set the fog distance (see
-/// <see cref="FogDistance"/>): an island only partly loaded fades out at the cut instead of ending in a hard edge.
+/// The fog (see <see cref="FogDistance"/>) sits at the nearest column still queued or loading, or else at the view
+/// distance: an island only partly loaded fades out where loading stopped instead of ending in a hard edge.
 /// </summary>
 public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 {
@@ -44,13 +43,18 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     /// released), so two loaded chunks never share a cell.</summary>
     public static int WorldIndexDim(float viewDistance) => 2 * (int)MathF.Ceiling(viewDistance / S) + 3;
 
-    /// <summary>Light bricks a chunk not yet generated is expected to cost. Most chunks the generator can only rule
-    /// out by generating them are air or solid, so this is well under what a surface chunk costs (about 26).</summary>
-    private const int EstimatedBricks = 8;
+    /// <summary>Light bricks counted for a chunk whose real cost the GPU store doesn't know yet (loaded but not
+    /// uploaded, or loading): a surface chunk's measured average. Buried stone and sky cost less, so this errs
+    /// towards waiting for uploads to catch up rather than overshooting.</summary>
+    private const int PendingBricks = 26;
 
     /// <summary>World chunks loaded at most: the GPU's world index limit, less room for chunks leaving range whose
     /// storage is released a frame later.</summary>
     private const int MaxChunks = GridStore.MaxWorldChunks - 4096;
+
+    /// <summary>Columns queued at once. Far more than load before the camera next moves a column; when the queue runs
+    /// out short of the view distance it is rebuilt from there.</summary>
+    private const int MaxQueued = 4096;
 
     /// <summary>Streamed layers below the lowest generated one, for building under the islands. Streaming covers 64
     /// layers (a column's bits); the rest are above.</summary>
@@ -62,10 +66,9 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 
     private readonly EntitySet      _cameras;
     private readonly ChunkVolume    _staticVolume;
+    private readonly GridStore      _store;
     private readonly ThreadLocal<IWorldGenerator> _generator;
     private readonly ThreadLocal<ChunkData> _scratch = new(() => new ChunkData());
-    private readonly int            _budget;    // light bricks
-    private readonly int            _rebuildDrift;
     private readonly int            _minY;      // the lowest streamed layer: bit 0 of a column's bits
 
     /// <summary>Column offsets from the camera's column, closest first, out to the view distance. Computed once; a
@@ -74,16 +77,9 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     private readonly int _viewColumns; // the view distance in columns
     private readonly float _viewDistance;
 
-    /// <summary>What is known about a column in view. Dropped once the column leaves view, so returning re-learns it.</summary>
-    private sealed class Column
-    {
-        public ulong Generated; // layers the generator may fill
-        public ulong Air;       // layers that turned out to be air
-        public ulong Known;     // layers generated or loaded with blocks: their bricks (below) are known
-        public (ulong Solid, ulong Air, int Cost)[]? Bricks; // per layer: brick masks and light cost
-    }
-
-    private readonly Dictionary<(int x, int z), Column> _columns = new();
+    /// <summary>Per column in view (layer bits): what the generator may fill, and what turned out to be air. Dropped
+    /// once the column leaves view, so returning re-learns its air.</summary>
+    private readonly Dictionary<(int x, int z), (ulong Generated, ulong Air)> _columns = new();
 
     /// <summary>Every chunk with a save file (scanned once at startup, kept up to date by saves).</summary>
     private readonly HashSet<ChunkPosition> _saved = new();
@@ -91,43 +87,39 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     /// <summary>Per column (layer bits): chunks holding a build — a save with blocks, or an unsaved edit.</summary>
     private readonly Dictionary<(int x, int z), ulong> _built = new();
 
-    /// <summary>The chunks the budget currently covers, loaded or not: layer bits per column.</summary>
-    private readonly Dictionary<(int x, int z), ulong> _wanted = new();
-
-    // Columns with wanted chunks still to generate or load, closest first; and the columns workers have now.
-    private readonly Queue<(int x, int z)> _loadQueue = new();
-    private readonly HashSet<(int x, int z)> _inFlight = new();
-    private readonly ConcurrentQueue<((int x, int z) Column, List<(ChunkPosition Pos, ChunkData? Data, ulong Solid, ulong Air)> Chunks)> _results = new();
+    // Columns with chunks still to generate or load, closest first, from _queueHead on; and the columns workers have
+    // now, with how many chunks each.
+    private readonly List<(int x, int z)> _queue = new();
+    private int _queueHead;
+    private bool _queueTruncated;
+    private readonly Dictionary<(int x, int z), int> _inFlight = new();
+    private int _inFlightChunks;
+    private readonly ConcurrentQueue<((int x, int z) Column, List<(ChunkPosition Pos, ChunkData? Data)> Chunks)> _results = new();
 
     private (int x, int z) _lastCamColumn = (int.MinValue, int.MinValue);
-    private int _driftSinceRebuild; // bricks by which newly learned costs differed from their estimates
     private bool _skippedInFlight;
+    private bool _nothingToEvict; // the last search found nothing farther than the queue's head; cleared by a rebuild
+    private bool _full;
+    private int _evictions;
     private float _autosaveTimer;
-
-    // Results of the last rebuild: bricks counted (and how many of them estimated), chunks, and the first column
-    // that didn't fit (the cut).
-    private int _budgetUsed, _budgetEstimated, _chunksWanted;
-    private bool _hasCut;
-    private (int x, int z) _cut;
-    private int _columnsWalked;
 
     private float _fogDistance;
     private float _fogTarget;
 
     private readonly List<ChunkPosition> _toUnload = new();
 
-    /// <summary>Horizontal distance from the camera at which the loaded world stops: the nearest chunk column that the
-    /// budget cut off or that is still loading, or else the view distance, eased over time. Fog should be total by here.</summary>
+    /// <summary>Horizontal distance from the camera at which the loaded world stops: the nearest chunk column still
+    /// queued or loading, or else the view distance, eased over time. Fog should be total by here.</summary>
     public float FogDistance => _fogDistance;
 
+    /// <param name="store">The GPU store the world's chunks go to: its light budget limits what's loaded.</param>
     /// <param name="viewDistance">How far out chunks are streamed, in blocks (horizontally), as far as the budget
     /// reaches. The GridStore's world index must fit it: see <see cref="WorldIndexDim"/>.</param>
     /// <param name="minChunkY">Lowest chunk layer the generator fills. Streaming covers 64 layers from
     /// <see cref="LayersBelow"/> under it; the generator's layers must fall inside them. Edits to the static world
     /// outside them are refused (see <see cref="ChunkVolume.EditableLayers"/>).</param>
-    /// <param name="lightBudget">Light bricks the loaded world may use: see <see cref="GridStore.WorldLightBudget"/>.</param>
-    public ChunkLoadSystem(World world, ChunkVolume staticVolume, Func<IWorldGenerator> generatorFactory,
-                           float viewDistance, int lightBudget, int minChunkY)
+    public ChunkLoadSystem(World world, ChunkVolume staticVolume, GridStore store, Func<IWorldGenerator> generatorFactory,
+                           float viewDistance, int minChunkY)
     {
         // World2: the island grids generate different terrain, so saves of edits to the old terrain (in World) don't
         // belong in it.
@@ -136,9 +128,8 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 
         _cameras      = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
         _staticVolume = staticVolume;
+        _store        = store;
         _generator    = new ThreadLocal<IWorldGenerator>(generatorFactory);
-        _budget       = lightBudget;
-        _rebuildDrift = System.Math.Max(lightBudget / 20, 1024);
         _minY         = minChunkY - LayersBelow;
         _staticVolume.EditableLayers = (_minY, _minY + 63); // only what streaming can load back
         _viewDistance = viewDistance;
@@ -174,10 +165,11 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     public void DrawDebugUi()
     {
         ImGui.Text($"View distance: {_viewDistance:F0} blocks ({_columns.Count} columns known)");
-        ImGui.Text($"Budget: {_budgetUsed:N0} / {_budget:N0} light bricks ({_budgetEstimated:N0} estimated), " +
-                   $"{_chunksWanted:N0} / {MaxChunks:N0} chunks ({_columnsWalked} columns walked)");
-        ImGui.Text($"Loaded: {_staticVolume.LoadedCount}   Queued columns: {_loadQueue.Count}   In flight: {_inFlight.Count}");
-        ImGui.Text($"Fog distance: {_fogDistance:F0} (target {_fogTarget:F0})   Cut: {(_hasCut ? $"column {_cut.x},{_cut.z}" : "none")}");
+        ImGui.Text($"Light: {WorldBricks():N0} / {_store.WorldLightBudget:N0} bricks, {PendingChunks():N0} chunks not uploaded yet" +
+                   (_full ? " (full)" : ""));
+        ImGui.Text($"Loaded: {_staticVolume.LoadedCount:N0} / {MaxChunks:N0} chunks   Queued columns: {_queue.Count - _queueHead}" +
+                   $"{(_queueTruncated ? "+" : "")}   In flight: {_inFlight.Count}");
+        ImGui.Text($"Fog distance: {_fogDistance:F0} (target {_fogTarget:F0})   Columns evicted: {_evictions}");
         ImGui.Text($"Saved chunks: {_saved.Count}   Layers: {_minY}..{_minY + 63}");
 
         ImGui.Separator();
@@ -197,157 +189,86 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 
         while (_results.TryDequeue(out var job))
         {
+            _inFlightChunks -= _inFlight[job.Column];
             _inFlight.Remove(job.Column);
-            foreach (var (pos, data, solid, air) in job.Chunks)
+            foreach (var (pos, data) in job.Chunks)
             {
                 if (data == null)
                 {
                     if (_saved.Contains(pos)) RecordBuild(pos, hasBlocks: false); // a build that was emptied out
-                    else if (_columns.TryGetValue((pos.X, pos.Z), out var col)) col.Air |= Bit(pos);
-                    _driftSinceRebuild += EstimatedBricks;
+                    else if (_columns.TryGetValue((pos.X, pos.Z), out var col))
+                        _columns[(pos.X, pos.Z)] = (col.Generated, col.Air | Bit(pos));
                     continue;
                 }
-                _driftSinceRebuild += System.Math.Abs(SetBricks(pos, solid, air) - EstimatedBricks);
-                // Dropped if the budget moved on while it generated, or an edit created the chunk meanwhile.
-                if (IsWanted(pos) && !_staticVolume.IsLoaded(pos)) _staticVolume.AddChunk(pos, data);
+                // Dropped if the camera moved on while it generated, or an edit created the chunk meanwhile.
+                if (InView(pos.X, pos.Z) && !_staticVolume.IsLoaded(pos)) _staticVolume.AddChunk(pos, data);
             }
         }
 
         if (!CameraUtil.TryGetActive(_cameras, out var cam)) return;
         var camPos = cam.Position;
 
-        // Chunks cost other than estimated (air or buried stone frees budget for columns further out, surfaces take
-        // more), so re-pick once enough has turned up (or loading ran dry).
         var camColumn = ((int)MathF.Floor(camPos.X / S), (int)MathF.Floor(camPos.Z / S));
-        bool idle = _loadQueue.Count == 0 && _inFlight.Count == 0;
-        if (camColumn != _lastCamColumn || _driftSinceRebuild >= _rebuildDrift ||
-            (idle && (_driftSinceRebuild > 0 || _skippedInFlight)))
+        bool idle = _queueHead == _queue.Count && _inFlight.Count == 0;
+        if (camColumn != _lastCamColumn || (idle && (_skippedInFlight || _queueTruncated)))
         {
             _lastCamColumn = camColumn;
-            _driftSinceRebuild = 0;
             _skippedInFlight = false;
-            Rebuild(camPos);
+            Rebuild();
         }
 
         Dispatch();
         UpdateFog(camPos, dt);
     }
 
-    /// <summary>Re-picks the budgeted chunks: walks columns outward from the camera, counting the light cost of every
-    /// chunk that may hold something (see <see cref="MaybeContent"/>) until the next column doesn't fit; queues the
-    /// columns with chunks still to fetch, and unloads what's no longer covered.</summary>
-    private void Rebuild(Vector3D<float> camPos)
+    /// <summary>Unloads what left the view distance, and re-queues the columns in view with chunks still to fetch,
+    /// closest first.</summary>
+    private void Rebuild()
     {
-        // An edit may have put blocks where there were none: it counts as a build from now on, and costs what it
-        // costs now.
+        // An edit may have put blocks where there were none: it counts as a build from now on.
         foreach (var (p, entry) in _staticVolume.All)
-        {
-            if (!entry.Data.IsDirty) continue;
-            RecordBuild(p, hasBlocks: true);
-            var (solid, air) = GridStore.BrickMasksOf(entry.Data);
-            SetBricks(p, solid, air);
-        }
-
-        _wanted.Clear();
-        _loadQueue.Clear();
-        _budgetUsed = _budgetEstimated = _chunksWanted = 0;
-        _hasCut = false;
-        _columnsWalked = 0;
-        foreach (var (dx, dz) in _offsetsByDistance)
-        {
-            int x = _lastCamColumn.x + dx, z = _lastCamColumn.z + dz;
-            _columnsWalked++;
-
-            ulong bits = MaybeContent(x, z);
-            if (bits == 0) continue;
-            var col = _columns[(x, z)];
-            int count = BitOperations.PopCount(bits), cost = 0, estimated = 0;
-            for (ulong b = bits; b != 0; b &= b - 1)
-            {
-                int layer = BitOperations.TrailingZeroCount(b);
-                if ((col.Known >> layer & 1) != 0) cost += col.Bricks![layer].Cost;
-                else estimated += EstimatedBricks;
-            }
-            if (_budgetUsed + cost + estimated > _budget || _chunksWanted + count > MaxChunks)
-            {
-                _hasCut = true;
-                _cut = (x, z);
-                break;
-            }
-            _budgetUsed += cost + estimated;
-            _budgetEstimated += estimated;
-            _chunksWanted += count;
-            _wanted[(x, z)] = bits;
-            if (Missing(x, z).Any()) _loadQueue.Enqueue((x, z));
-        }
+            if (entry.Data.IsDirty) RecordBuild(p, hasBlocks: true);
 
         _toUnload.Clear();
         foreach (var (p, _) in _staticVolume.All)
-            if (!IsWanted(p)) _toUnload.Add(p);
+            if (!InView(p.X, p.Z)) _toUnload.Add(p);
         foreach (var p in _toUnload) Unload(p);
 
         // Forget the columns out of view: their air is re-learned on return.
-        long r2 = (long)_viewColumns * _viewColumns;
-        foreach (var key in _columns.Keys.Where(k => Sq(k.x - _lastCamColumn.x) + Sq(k.z - _lastCamColumn.z) > r2).ToList())
+        foreach (var key in _columns.Keys.Where(k => !InView(k.x, k.z)).ToList())
             _columns.Remove(key);
 
-        Console.WriteLine($"[load] rebuild: {_columnsWalked} columns walked, budget {_budgetUsed}/{_budget} bricks " +
-                          $"({_budgetEstimated} estimated) in {_chunksWanted} chunks, " +
-                          $"cut {(_hasCut ? $"at {ColumnDistance(camPos, _cut.x, _cut.z):F0} blocks" : "none")}, " +
-                          $"queued {_loadQueue.Count} columns, loaded {_staticVolume.LoadedCount}, unloaded {_toUnload.Count}");
+        _queue.Clear();
+        _queueHead = 0;
+        _queueTruncated = false;
+        _nothingToEvict = false;
+        foreach (var (dx, dz) in _offsetsByDistance)
+        {
+            int x = _lastCamColumn.x + dx, z = _lastCamColumn.z + dz;
+            if (!Missing(x, z).Any()) continue;
+            if (_queue.Count == MaxQueued) { _queueTruncated = true; break; }
+            _queue.Add((x, z));
+        }
+
+        Console.WriteLine($"[load] rebuild: queued {_queue.Count}{(_queueTruncated ? "+" : "")} columns, loaded " +
+                          $"{_staticVolume.LoadedCount} chunks ({PendingChunks()} not uploaded), light {WorldBricks()}/" +
+                          $"{_store.WorldLightBudget} bricks, unloaded {_toUnload.Count}, evicted {_evictions} columns so far");
     }
 
+    private bool InView(int x, int z) => Sq(x - _lastCamColumn.x) + Sq(z - _lastCamColumn.z) <= Sq(_viewColumns);
+
     private static long Sq(int v) => (long)v * v;
+
+    private long ColumnDistSq((int x, int z) c) => Sq(c.x - _lastCamColumn.x) + Sq(c.z - _lastCamColumn.z);
 
     /// <summary>Chunks of column (x, z) that may hold something: what the generator may fill, less what turned out to be
     /// air, plus builds.</summary>
     private ulong MaybeContent(int x, int z)
     {
         if (!_columns.TryGetValue((x, z), out var col))
-            _columns[(x, z)] = col = new Column { Generated = _generator.Value!.ColumnLayers(x, z, _minY) };
+            _columns[(x, z)] = col = (_generator.Value!.ColumnLayers(x, z, _minY), 0UL);
         return (col.Generated & ~col.Air) | _built.GetValueOrDefault((x, z));
     }
-
-    /// <summary>Records chunk <paramref name="p"/>'s brick masks, and so its light cost and its neighbours' (whose
-    /// surface depends on its solid); returns its cost.</summary>
-    private int SetBricks(ChunkPosition p, ulong solid, ulong air)
-    {
-        if (p.Y < _minY || p.Y > _minY + 63) return 0;
-        if (!_columns.TryGetValue((p.X, p.Z), out var col))
-            _columns[(p.X, p.Z)] = col = new Column { Generated = _generator.Value!.ColumnLayers(p.X, p.Z, _minY) };
-        int layer = p.Y - _minY;
-        col.Bricks ??= new (ulong, ulong, int)[64];
-        col.Bricks[layer] = (solid, air, 0);
-        col.Known |= 1UL << layer;
-        int cost = UpdateCost(p);
-        for (int f = 0; f < 6; f++) UpdateCost(Neighbour(p, f));
-        return cost;
-    }
-
-    /// <summary>Recomputes a known chunk's light cost from its masks and its known neighbours' solid.</summary>
-    private int UpdateCost(ChunkPosition p)
-    {
-        if (!TryGetBricks(p, out var col, out int layer)) return 0;
-        Span<ulong> neighbours = stackalloc ulong[6];
-        for (int f = 0; f < 6; f++)
-            neighbours[f] = TryGetBricks(Neighbour(p, f), out var n, out int nl) ? n.Bricks![nl].Solid : 0UL;
-        ref var b = ref col.Bricks![layer];
-        b.Cost = BitOperations.PopCount(GridStore.SurfaceBricks(b.Solid, b.Air, neighbours));
-        return b.Cost;
-    }
-
-    private bool TryGetBricks(ChunkPosition p, out Column col, out int layer)
-    {
-        layer = p.Y - _minY;
-        return _columns.TryGetValue((p.X, p.Z), out col!) && layer is >= 0 and < 64 && (col.Known >> layer & 1) != 0;
-    }
-
-    // Face order as GridStore.SurfaceBricks takes the neighbours: +x, -x, +y, -y, +z, -z.
-    private static ChunkPosition Neighbour(ChunkPosition p, int face) => face switch
-    {
-        0 => p.Offset(1, 0, 0), 1 => p.Offset(-1, 0, 0), 2 => p.Offset(0, 1, 0),
-        3 => p.Offset(0, -1, 0), 4 => p.Offset(0, 0, 1), _ => p.Offset(0, 0, -1),
-    };
 
     private ulong Bit(ChunkPosition p) => 1UL << (p.Y - _minY);
 
@@ -359,10 +280,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         ulong built = _built.GetValueOrDefault((p.X, p.Z));
         _built[(p.X, p.Z)] = hasBlocks ? built | b : built & ~b;
         if (_columns.TryGetValue((p.X, p.Z), out var col))
-        {
-            col.Air = hasBlocks ? col.Air & ~b : col.Air | b;
-            if (!hasBlocks) col.Known &= ~b;
-        }
+            _columns[(p.X, p.Z)] = (col.Generated, hasBlocks ? col.Air & ~b : col.Air | b);
     }
 
     private void RecordSave(ChunkPosition p, bool hasBlocks)
@@ -371,19 +289,42 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         RecordBuild(p, hasBlocks);
     }
 
-    /// <summary>Hands queued columns to workers, one job per column.</summary>
+    /// <summary>Light bricks the world's chunks hold in the GPU store.</summary>
+    private int WorldBricks() => _staticVolume.Gpu.Slots.Count;
+
+    /// <summary>Chunks loaded but not uploaded to the GPU store yet.</summary>
+    private int PendingChunks() => System.Math.Max(0, _staticVolume.LoadedCount - _store.WorldChunkCount);
+
+    /// <summary>Hands queued columns to workers, one job per column, while the budget has room. When it doesn't, and
+    /// the next column is nearer than the farthest loaded one, unloads that to make room.</summary>
     private void Dispatch()
     {
-        while (_inFlight.Count < MaxInFlight && _loadQueue.TryDequeue(out var col))
+        _full = false;
+        while (_inFlight.Count < MaxInFlight && _queueHead < _queue.Count)
         {
-            if (_inFlight.Contains(col)) { _skippedInFlight = true; continue; } // re-queued by the next rebuild
+            var col = _queue[_queueHead];
+            if (_inFlight.ContainsKey(col)) { _skippedInFlight = true; _queueHead++; continue; } // re-queued by the next rebuild
             var work = Missing(col.x, col.z).Select(p => (Pos: p, FromSave: _saved.Contains(p))).ToList();
-            if (work.Count == 0) continue;
+            if (work.Count == 0) { _queueHead++; continue; }
 
-            _inFlight.Add(col);
+            int chunks = _staticVolume.LoadedCount + _inFlightChunks + work.Count;
+            int bricks = WorldBricks() + (PendingChunks() + _inFlightChunks + work.Count) * PendingBricks;
+            if (chunks > MaxChunks || bricks > _store.WorldLightBudget)
+            {
+                _full = true;
+                // Only once the store really is full: until uploads catch up, pending chunks are just estimates.
+                if (_staticVolume.LoadedCount + _inFlightChunks + work.Count > MaxChunks ||
+                    WorldBricks() + (_inFlightChunks + work.Count) * PendingBricks >= _store.WorldLightBudget)
+                    EvictFartherThan(ColumnDistSq(col));
+                break;
+            }
+
+            _queueHead++;
+            _inFlight.Add(col, work.Count);
+            _inFlightChunks += work.Count;
             ThreadPool.UnsafeQueueUserWorkItem(_ =>
             {
-                var chunks = new List<(ChunkPosition, ChunkData?, ulong, ulong)>(work.Count);
+                var loaded = new List<(ChunkPosition, ChunkData?)>(work.Count);
                 foreach (var (pos, fromSave) in work)
                 {
                     var data = _scratch.Value!;
@@ -393,48 +334,68 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
                     if (data.HasAnySolid())
                     {
                         data.IsDirty = false;
-                        var (solid, air) = GridStore.BrickMasksOf(data);
-                        chunks.Add((pos, data, solid, air));
+                        loaded.Add((pos, data));
                         _scratch.Value = new ChunkData();
                     }
                     else
                     {
-                        chunks.Add((pos, null, 0UL, 0UL));
+                        loaded.Add((pos, null));
                         // Generation only ever writes blocks, so an empty result leaves the buffer all air and ready to
                         // reuse; a loaded save may have overwritten more than blocks, so start that one afresh.
                         if (fromSave) _scratch.Value = new ChunkData();
                     }
                 }
-                _results.Enqueue((col, chunks));
+                _results.Enqueue((col, loaded));
             }, null);
         }
     }
 
-    /// <summary>Column (x, z)'s budgeted chunks that aren't loaded yet.</summary>
+    /// <summary>Unloads the farthest loaded column (not being loaded), if it is more than a column farther than
+    /// <paramref name="distSq"/> (so two columns at about the same distance don't keep swapping). One per frame: the
+    /// store frees its bricks when it next runs.</summary>
+    private void EvictFartherThan(long distSq)
+    {
+        if (_nothingToEvict) return;
+        (int x, int z) far = default;
+        long farDistSq = -1;
+        foreach (var (p, _) in _staticVolume.All)
+        {
+            var c = (p.X, p.Z);
+            long d = ColumnDistSq(c);
+            if (d > farDistSq && !_inFlight.ContainsKey(c)) { farDistSq = d; far = c; }
+        }
+        float margin = MathF.Sqrt(distSq) + 1f;
+        if (farDistSq < 0 || farDistSq <= margin * margin)
+        {
+            _nothingToEvict = true;
+            return;
+        }
+        for (int layer = 0; layer < 64; layer++)
+        {
+            var p = new ChunkPosition(far.x, _minY + layer, far.z);
+            if (_staticVolume.IsLoaded(p)) Unload(p);
+        }
+        _evictions++;
+    }
+
+    /// <summary>Column (x, z)'s chunks that may hold something and aren't loaded yet.</summary>
     private IEnumerable<ChunkPosition> Missing(int x, int z)
     {
-        for (ulong bits = _wanted.GetValueOrDefault((x, z)); bits != 0; bits &= bits - 1)
+        for (ulong bits = MaybeContent(x, z); bits != 0; bits &= bits - 1)
         {
             var p = new ChunkPosition(x, _minY + BitOperations.TrailingZeroCount(bits), z);
             if (!_staticVolume.IsLoaded(p)) yield return p;
         }
     }
 
-    private bool IsWanted(ChunkPosition p)
-    {
-        int bit = p.Y - _minY;
-        return bit is >= 0 and < 64 && (_wanted.GetValueOrDefault((p.X, p.Z)) >> bit & 1) != 0;
-    }
-
-    /// <summary>Eases <see cref="FogDistance"/> toward the nearest column that is cut off or still missing, or else
-    /// the view distance (everything nearer is loaded): in fast,
-    /// so a gap is covered before it shows, out slowly, so the view opens up gently as loading catches up.</summary>
+    /// <summary>Eases <see cref="FogDistance"/> toward the nearest column still queued or loading, or else the view
+    /// distance (everything nearer is loaded): in fast, so a gap is covered before it shows, out slowly, so the view
+    /// opens up gently as loading catches up.</summary>
     private void UpdateFog(Vector3D<float> camPos, float dt)
     {
-        float target = _hasCut  ? ColumnDistance(camPos, _cut.x, _cut.z)
+        float target = _queueHead < _queue.Count ? ColumnDistance(camPos, _queue[_queueHead].x, _queue[_queueHead].z)
                      : _viewDistance;
-        if (_loadQueue.TryPeek(out var next)) target = MathF.Min(target, ColumnDistance(camPos, next.x, next.z));
-        foreach (var (x, z) in _inFlight) target = MathF.Min(target, ColumnDistance(camPos, x, z));
+        foreach (var (x, z) in _inFlight.Keys) target = MathF.Min(target, ColumnDistance(camPos, x, z));
         _fogTarget = target;
 
         float rate = target < _fogDistance ? 8f : 1f;

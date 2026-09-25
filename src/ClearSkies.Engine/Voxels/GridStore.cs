@@ -216,7 +216,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     public int WorldLightBudget { get; }
 
     /// <param name="worldLightBudget">How many light bricks the static world should use at most: the streaming budget
-    /// (sizes the light pool, with headroom for ships and for streaming's estimates).</param>
+    /// (sizes the light pool, with headroom for ships and for loads streaming couldn't count yet).</param>
     /// <param name="worldIndexDim">The world index's width in chunks (x and z; it wraps): wider than the span of world
     /// chunks ever loaded at once, so two loaded chunks never share a cell. In y it covers <see cref="WorldLayers"/>.</param>
     public GridStore(GpuContext ctx, int worldLightBudget, int worldIndexDim)
@@ -227,7 +227,8 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         _worldCapacity = 16384; // grows (to MaxWorldChunks) with what streaming loads
 
         // Pools start sized to the budget so they don't grow (a copy + rebind hitch) during normal play: the light
-        // pool holds the world's budget plus a fifth for streaming's estimates running over, plus ships. Occupancy is
+        // pool holds the world's budget plus a fifth for streaming running over it (chunks it has in flight land after
+        // it stops), plus ships. Occupancy is
         // only needed by chunks mixing solid and air, measured at ~26 light bricks each.
         ulong maxBytes = System.Math.Min(ctx.AdapterLimits.MaxBufferSize, ctx.AdapterLimits.MaxStorageBufferBindingSize);
         int maxLight = (int)System.Math.Min(maxBytes / SlotBytes, int.MaxValue);
@@ -455,36 +456,6 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
             }
             words[ly + S * lz] = bits;
         }
-    }
-
-    /// <summary>A chunk's per-brick "any opaque" / "any non-opaque" bits, as <see cref="UploadChunk"/> will compute
-    /// them: which of its bricks can need light storage (see <see cref="RefreshSurface"/>). For streaming to estimate
-    /// a chunk's light cost before it is uploaded.</summary>
-    internal static (ulong Solid, ulong Air) BrickMasksOf(ChunkData data)
-    {
-        if (data.IsUniform(out var block) && BlockRegistry.Get(block).LightEmission == 0)
-            return BlockRegistry.Get(block).Opacity >= 15 ? (ulong.MaxValue, 0UL) : (0UL, ulong.MaxValue);
-        var words = new uint[WordsPerChunk];
-        PackOpacity(data, words, null);
-        return BrickMasks(words);
-    }
-
-    /// <summary>Bricks that need light storage: those holding air next to solid in the same or a face-adjacent brick
-    /// (see <see cref="RefreshSurface"/>), given the chunk's masks and its six neighbours' solid masks (0 where a
-    /// neighbour isn't known), in <see cref="FaceDir"/> order.</summary>
-    internal static ulong SurfaceBricks(ulong solid, ulong air, ReadOnlySpan<ulong> neighbourSolid)
-    {
-        ulong near = solid
-            | ((solid >> 1) & ~BxHi) | ((solid << 1) & ~BxLo)
-            | ((solid >> 4) & ~ByHi) | ((solid << 4) & ~ByLo)
-            | (solid >> 16) | (solid << 16);
-        near |= (neighbourSolid[0] & BxLo) << 3;
-        near |= (neighbourSolid[1] & BxHi) >> 3;
-        near |= (neighbourSolid[2] & ByLo) << 12;
-        near |= (neighbourSolid[3] & ByHi) >> 12;
-        near |= (neighbourSolid[4] & BzLo) << 48;
-        near |= (neighbourSolid[5] & BzHi) >> 48;
-        return air & near;
     }
 
     /// <summary>Per-8³-brick "any opaque" / "any non-opaque" bits from a chunk's packed words. Each word is one
@@ -762,13 +733,18 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     /// fresh light slot; bricks that left give theirs back.</summary>
     private void RefreshSurface(GridHandle g, ChunkRecord rec)
     {
-        Span<ulong> neighbours = stackalloc ulong[6];
-        for (int f = 0; f < 6; f++)
-        {
-            var (dx, dy, dz) = FaceDir(f);
-            neighbours[f] = NeighbourSolid(g, rec.Pos, dx, dy, dz);
-        }
-        ulong surface = SurfaceBricks(rec.Solid, rec.Air, neighbours);
+        ulong s = rec.Solid;
+        ulong near = s
+            | ((s >> 1) & ~BxHi) | ((s << 1) & ~BxLo)   // solid at bx+1 / bx-1 within the chunk
+            | ((s >> 4) & ~ByHi) | ((s << 4) & ~ByLo)   // by±1
+            | (s >> 16) | (s << 16);                    // bz±1 (out-of-chunk bits shift out on their own)
+        near |= (NeighbourSolid(g, rec.Pos,  1, 0, 0) & BxLo) << 3;   // neighbour's bx=0 borders our bx=3
+        near |= (NeighbourSolid(g, rec.Pos, -1, 0, 0) & BxHi) >> 3;
+        near |= (NeighbourSolid(g, rec.Pos, 0,  1, 0) & ByLo) << 12;
+        near |= (NeighbourSolid(g, rec.Pos, 0, -1, 0) & ByHi) >> 12;
+        near |= (NeighbourSolid(g, rec.Pos, 0, 0,  1) & BzLo) << 48;
+        near |= (NeighbourSolid(g, rec.Pos, 0, 0, -1) & BzHi) >> 48;
+        ulong surface = rec.Air & near;
         if (surface == rec.Surface) return;
 
         rec.BrickSlots ??= NewBrickSlots();

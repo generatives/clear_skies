@@ -45,8 +45,8 @@ host.AddSystem(host.Gui, SystemStage.Input); // opens ImGui's frame before Logic
 var physicsBody = new PhysicsBodySystem(host.World, host.Physics);
 
 // Streaming budget: how much GPU light storage the loaded world may use, in MB (3 KB per 8³ brick of surface). Chunks
-// are loaded closest-first until it's spent (see ChunkLoadSystem), and cost only their surface, so solid stone inside
-// an island is nearly free; the GPU store adds a fifth on top for headroom and ships. --light-budget-mb N overrides it,
+// are loaded closest-first until it's spent (see ChunkLoadSystem); only surfaces use it, so solid stone inside an
+// island is nearly free. The GPU store adds a fifth on top for headroom and ships. --light-budget-mb N overrides it,
 // e.g. for a software renderer whose small max buffer size can't hold it (the store also shrinks it to fit).
 int LightBudgetMb = 1024;
 int budgetArg = Array.IndexOf(args, "--light-budget-mb");
@@ -61,8 +61,8 @@ const int MinChunkY = 0; // streamed layers are -8..55 (blocks -256..1792): Isla
 // Shared GPU voxel storage for lighting (world + ships).
 var gridStore = new GridStore(host.Context, (int)((long)LightBudgetMb * 1024 * 1024 / GridStore.SlotBytes),
                               ChunkLoadSystem.WorldIndexDim(ViewDistance));
-var chunkLoadSystem = new ChunkLoadSystem(host.World, staticVolume, () => new SkyWorldGenerator(seed),
-                                          ViewDistance, gridStore.WorldLightBudget, MinChunkY);
+var chunkLoadSystem = new ChunkLoadSystem(host.World, staticVolume, gridStore, () => new SkyWorldGenerator(seed),
+                                          ViewDistance, MinChunkY);
 host.AddSystem(chunkLoadSystem, SystemStage.Logic);
 host.Renderer.AttachGridStore(gridStore);
 host.AddSystem(physicsBody, SystemStage.Logic);
