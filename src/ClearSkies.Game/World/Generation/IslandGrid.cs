@@ -57,11 +57,14 @@ public struct IslandDef
 ///
 /// Where islands go isn't uniform, so the world reads as places rather than an even sprinkle:
 /// <list type="bullet">
-/// <item>an <see cref="Archipelago"/> field, varying over tens of km, sets how likely a cell of each class is to hold
-/// an island: dense archipelagos, and wide stretches of open sky with only the odd island;</item>
-/// <item>medium, small and tiny islands gather around the large ones (<see cref="Influence"/>): near one, and near its
-/// height, they are likelier and bigger, and sit around its height — each large island gets a group of its
-/// own.</item>
+/// <item>an <see cref="Archipelago"/> field, varying over tens of km, sets how likely large (and a few stray medium)
+/// islands are: archipelagos, and wide stretches of open sky;</item>
+/// <item>smaller islands gather around bigger ones (<see cref="Near"/>): medium ones around large islands, small ones
+/// around those, and tiny rocks around all three, each close to its parent and around its height. Away from any parent,
+/// a smaller island is rare, so groups read as groups;</item>
+/// <item>heights follow a slowly undulating <see cref="Stratum"/>, so islands form a loose layer you look across rather
+/// than filling the sky above and below: each island sits within its class's <c>HeightSpread</c> of the stratum, or of
+/// its parent.</item>
 /// </list>
 ///
 /// Every island stays inside its own cell (horizontally and vertically), so a chunk's islands are found by looking
@@ -78,27 +81,35 @@ public static class IslandGrid
     /// <summary>Gap kept between islands of different classes, in blocks.</summary>
     private const float Clearance = 16f;
 
-    /// <summary>One class's grid and odds. A cell holds an island with a chance from <see cref="ChanceOpen"/> (open
-    /// sky) to <see cref="ChanceArchipelago"/> by the <see cref="Archipelago"/> field, or up to <see cref="ChanceNear"/>
-    /// close to a large island (<see cref="Influence"/>), whichever is higher.</summary>
+    /// <summary>One class's grid, odds and sizes. A cell holds an island with a chance from <see cref="ChanceOpen"/>
+    /// (open sky) to <see cref="ChanceArchipelago"/> by the <see cref="Archipelago"/> field, or up to
+    /// <see cref="ChanceNear"/> close to a parent (<see cref="Near"/>), whichever is higher. Radii run from
+    /// <see cref="MinRadius"/> to <see cref="MaxRadius"/>, mostly towards the small end (bigger near a parent); the
+    /// class ranges overlap, so sizes run on from one class to the next. An island sits within
+    /// <see cref="HeightSpread"/> of the stratum, or of its parent's height.</summary>
     private readonly record struct ClassDef(int CellSize, int CellHeight, float ChanceOpen, float ChanceArchipelago,
-                                            float ChanceNear, float MinRadius, float MaxRadius, float MinBaseY, float MaxBaseY);
+                                            float ChanceNear, float MinRadius, float MaxRadius, float HeightSpread);
 
     private static readonly ClassDef[] Classes =
     {
-        //   cell   height  open    archi.  near    radius        base Y (clamped to the cell)
-        new(10240, 2048,   0.05f,  0.80f,  0f,     800f, 1100f,   650f, 1150f), // Large: about 2 km across, in a middle band
-        new( 2560, 1024,   0.01f,  0.25f,  0.70f,  150f,  350f,   float.MinValue, float.MaxValue), // Medium
-        new(  768,  512,   0.002f, 0.10f,  0.45f,   40f,  100f,   float.MinValue, float.MaxValue), // Small
-        new(  192,  128,   0.0004f,0.025f, 0.12f,   10f,   25f,   float.MinValue, float.MaxValue), // Tiny
+        //   cell   height  open     archi.  near    radius        height spread
+        new(10240, 2048,   0.05f,   0.80f,  0f,     700f, 1200f,  150f), // Large: 1.5-2.5 km across
+        new( 2560, 1024,   0.004f,  0.12f,  1.00f,  120f,  450f,  250f), // Medium
+        new(  768,  512,   0.0005f, 0.01f,  0.80f,   30f,  140f,  200f), // Small
+        new(  192,  128,   0.0001f, 0.001f, 0.50f,    6f,   35f,  160f), // Tiny
     };
 
     // Archipelago field: value noise at these two spacings (blocks), mapped through a smoothstep for contrast.
     private const float ArchipelagoSpacing = 24000f, ArchipelagoDetail = 9000f;
 
-    // Influence of a large island: full out to NearRim blocks past its rim, gone by FarRim; and vertically, full within
-    // NearHeight of its height, gone by FarHeight. Islands it draws in sit within HeightSpread of its height.
-    private const float NearRim = 600f, FarRim = 5000f, NearHeight = 150f, FarHeight = 800f, HeightSpread = 350f;
+    // The stratum: the height islands gather around, undulating between these over these spacings (blocks).
+    private const float StratumLow = 550f, StratumHigh = 1250f, StratumSpacing = 16000f, StratumDetail = 5000f;
+
+    // A parent's pull: full out to NearRim × its radius past its rim, gone by FarRim × its radius (+ FarRimExtra).
+    private const float NearRim = 0.2f, FarRim = 3.5f, FarRimExtra = 100f;
+
+    /// <summary>Base Y range of large islands (their cell is the whole band, so this keeps them off its ends).</summary>
+    private const float LargeMinBaseY = 650f, LargeMaxBaseY = 1150f;
 
     public const int ClassCount = 4;
 
@@ -147,7 +158,7 @@ public static class IslandGrid
             for (int bz = z0; bz <= z1; bz++)
             for (int by = y0; by <= y1; by++)
             for (int bx = x0; bx <= x1; bx++)
-                if (TryPlace(seed, (IslandClass)b, bx, by, bz, out var big) && Overlaps(island, big))
+                if (Placed(seed, (IslandClass)b, bx, by, bz, out var big) && Overlaps(island, big))
                     return false;
         }
         return true;
@@ -170,19 +181,14 @@ public static class IslandGrid
         float roll = rng.NextFloat01();
         if (roll >= MathF.Max(def.ChanceArchipelago, def.ChanceNear)) return false; // cheap reject: no odds reach it
 
-        float cellBottom = WorldBottom + cy * (float)def.CellHeight;
         float midX = (cx + 0.5f) * def.CellSize, midZ = (cz + 0.5f) * def.CellSize;
         float chance = Lerp(def.ChanceOpen, def.ChanceArchipelago, Archipelago(seed, midX, midZ));
-        float near = 0f, nearY = 0f;
-        if (c != IslandClass.Large)
-        {
-            (near, nearY) = Influence(seed, midX, midZ, cellBottom, cellBottom + def.CellHeight);
-            chance = MathF.Max(chance, def.ChanceNear * near);
-        }
+        var (near, parentY) = c == IslandClass.Large ? (0f, 0f) : Near(seed, c, cx, cz);
+        chance = MathF.Max(chance, def.ChanceNear * near);
         if (roll >= chance) return false;
 
-        // Bigger near a large island.
-        float radius   = Lerp(def.MinRadius, def.MaxRadius, MathF.Pow(rng.NextFloat01(), Lerp(1f, 0.5f, near)));
+        // Mostly small for the class; bigger near a parent.
+        float radius   = Lerp(def.MinRadius, def.MaxRadius, MathF.Pow(rng.NextFloat01(), Lerp(2f, 1f, near)));
         float stretchA = rng.NextRange(0.75f, 1.35f);
         float stretchB = rng.NextRange(0.75f, 1.35f);
         island = new IslandDef
@@ -202,13 +208,17 @@ public static class IslandGrid
         island.CenterX = cx * (float)def.CellSize + rng.NextRange(reach, def.CellSize - reach);
         island.CenterZ = cz * (float)def.CellSize + rng.NextRange(reach, def.CellSize - reach);
 
-        // Anywhere in the cell's height that keeps the island inside it; near a large island, drawn towards its height.
+        // Within the class's spread of the stratum, or of the parent's height. Every vertical cell of a column rolls its
+        // own height and keeps the island only if that falls inside it, so a column's islands spread evenly over the
+        // span and never fill the band.
+        float target = Lerp(Stratum(seed, midX, midZ), parentY, near);
+        float y = target + rng.NextRange(-def.HeightSpread, def.HeightSpread);
+        if (c == IslandClass.Large) y = Math.Clamp(y, LargeMinBaseY, LargeMaxBaseY);
+        float cellBottom = WorldBottom + cy * (float)def.CellHeight;
         float below = island.Lip + island.Depth + island.Bump + 1f;
         float above = island.YMax - island.BaseY;
-        float lo = Math.Max(cellBottom + below, def.MinBaseY), hi = Math.Min(cellBottom + def.CellHeight - above, def.MaxBaseY);
-        float anywhere = rng.NextRange(lo, hi);
-        float aroundNear = Math.Clamp(nearY + rng.NextRange(-HeightSpread, HeightSpread), lo, hi);
-        island.BaseY = lo <= hi ? Lerp(anywhere, aroundNear, near) : cellBottom + below;
+        if (y < cellBottom + below || y > cellBottom + def.CellHeight - above) return false;
+        island.BaseY = y;
         return true;
     }
 
@@ -220,36 +230,68 @@ public static class IslandGrid
         return Smoothstep(0.35f, 0.65f, v);
     }
 
-    /// <summary>How strongly the nearest large island draws islands in at (x, z) for a cell spanning
-    /// <paramref name="bottom"/>..<paramref name="top"/> (0-1: by distance past its rim, and how far its height is
-    /// from the cell's), and that island's height.</summary>
-    private static (float Near, float Y) Influence(ulong seed, float x, float z, float bottom, float top)
+    /// <summary>The height islands gather around at (x, z), away from any parent.</summary>
+    private static float Stratum(ulong seed, float x, float z)
     {
-        var def = Classes[(int)IslandClass.Large];
-        int x0 = FloorDiv(x - FarRim - 2500f, def.CellSize), x1 = FloorDiv(x + FarRim + 2500f, def.CellSize);
-        int z0 = FloorDiv(z - FarRim - 2500f, def.CellSize), z1 = FloorDiv(z + FarRim + 2500f, def.CellSize);
+        float v = 0.75f * ValueNoise(seed ^ 0x57A7u, x / StratumSpacing, z / StratumSpacing)
+                + 0.25f * ValueNoise(seed ^ 0x7A75u, x / StratumDetail, z / StratumDetail);
+        return Lerp(StratumLow, StratumHigh, v);
+    }
+
+    /// <summary>How strongly a bigger island draws class <paramref name="c"/>'s islands into column (cx, cz) of its grid
+    /// (0-1, by the cell centre's distance past the parent's rim, relative to the parent's size), and that parent's
+    /// height. The strongest of every bigger class's islands around; cached per column, since each of its vertical
+    /// cells asks.</summary>
+    private static (float Near, float Y) Near(ulong seed, IslandClass c, int cx, int cz)
+    {
+        var key = (seed, (int)c, cx, cz);
+        if (NearCache.TryGetValue(key, out var cached)) return cached;
+
+        var def = Classes[(int)c];
+        float x = (cx + 0.5f) * def.CellSize, z = (cz + 0.5f) * def.CellSize;
         float best = 0f, bestY = 0f;
-        for (int lz = z0; lz <= z1; lz++)
-        for (int lx = x0; lx <= x1; lx++)
+        for (int p = 0; p < (int)c; p++)
         {
-            if (!LargeIsland(seed, lx, lz, out var big)) continue;
-            float dx = x - big.CenterX, dz = z - big.CenterZ;
-            float past = MathF.Sqrt(dx * dx + dz * dz) - big.Radius * 0.5f * (big.StretchMajor + big.StretchMinor);
-            float dy = MathF.Max(0f, MathF.Max(bottom - big.BaseY, big.BaseY - top));
-            float near = (1f - Smoothstep(NearRim, FarRim, past)) * (1f - Smoothstep(NearHeight, FarHeight, dy));
-            if (near > best) { best = near; bestY = big.BaseY; }
+            var pd = Classes[p];
+            float search = pd.MaxRadius * (1.4f * 1.35f + FarRim) + FarRimExtra; // a parent's reach plus its pull
+            int x0 = FloorDiv(x - search, pd.CellSize), x1 = FloorDiv(x + search, pd.CellSize);
+            int z0 = FloorDiv(z - search, pd.CellSize), z1 = FloorDiv(z + search, pd.CellSize);
+            for (int pz = z0; pz <= z1; pz++)
+            for (int py = 0; py < Layers((IslandClass)p); py++)
+            for (int px = x0; px <= x1; px++)
+            {
+                if (!Placed(seed, (IslandClass)p, px, py, pz, out var parent)) continue;
+                float r = parent.Radius * 0.5f * (parent.StretchMajor + parent.StretchMinor);
+                float dx = x - parent.CenterX, dz = z - parent.CenterZ;
+                float past = MathF.Sqrt(dx * dx + dz * dz) - r;
+                float near = 1f - Smoothstep(NearRim * parent.Radius, FarRim * parent.Radius + FarRimExtra, past);
+                if (near > best) { best = near; bestY = parent.BaseY; }
+            }
         }
+        if (NearCache.Count > CacheLimit) NearCache.Clear();
+        NearCache[key] = (best, bestY);
         return (best, bestY);
     }
 
-    // Large islands by cell, for Influence: every smaller cell that might hold an island asks for the few around it.
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<(ulong, int, int), (bool, IslandDef)> LargeCache = new();
+    // Placements of the classes that are parents (every class but tiny), and each grid column's pull: every smaller cell
+    // that might hold an island asks for the few around it. Cleared when they grow past CacheLimit (a long flight).
+    private const int CacheLimit = 1 << 20;
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<(ulong, int, int, int, int), (bool, IslandDef)> PlacedCache = new();
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<(ulong, int, int, int), (float, float)> NearCache = new();
 
-    private static bool LargeIsland(ulong seed, int cx, int cz, out IslandDef island)
+    /// <summary><see cref="TryPlace"/>, cached for the parent classes.</summary>
+    private static bool Placed(ulong seed, IslandClass c, int cx, int cy, int cz, out IslandDef island)
     {
-        (bool has, island) = LargeCache.GetOrAdd((seed, cx, cz),
-            k => (TryPlace(k.Item1, IslandClass.Large, k.Item2, 0, k.Item3, out var d), d));
-        return has;
+        if (c == IslandClass.Tiny) return TryPlace(seed, c, cx, cy, cz, out island);
+        var key = (seed, (int)c, cx, cy, cz);
+        if (!PlacedCache.TryGetValue(key, out var v))
+        {
+            v = (TryPlace(seed, c, cx, cy, cz, out var d), d);
+            if (PlacedCache.Count > CacheLimit) PlacedCache.Clear();
+            PlacedCache[key] = v;
+        }
+        island = v.Item2;
+        return v.Item1;
     }
 
     private static float ValueNoise(ulong seed, float x, float z)
