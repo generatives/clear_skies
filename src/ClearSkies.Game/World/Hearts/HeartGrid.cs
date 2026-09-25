@@ -15,7 +15,7 @@ public readonly record struct Heart(float X, float Y, float Z, bool Alive, bool 
 /// smaller with height.
 ///
 /// A dead heart's piece doesn't exist: a hole. Whether a heart is alive goes by height: nearly all are low down, so the
-/// plains are a floor of land cracked into pieces; above it they die off gradually, so the highlands break up into
+/// plains are a floor of land cracked into pieces (under it, the underworld is sparser); above it they die off gradually, so the highlands break up into
 /// scattered pieces, gathered by the <see cref="ClusterField"/> into clusters with open sky between. In the mountain
 /// ranges most are alive again, so each range holds together, cracked.
 /// </summary>
@@ -30,14 +30,19 @@ public static class HeartGrid
         public int CellY(float y) => (int)MathF.Floor(y * VerticalScale / CellSize);
     }
 
-    /// <summary>The layers, bottom up: big pieces in the floor, nearly as big in the highlands, smaller in the
-    /// mountains.</summary>
+    /// <summary>The layers, bottom up: small pieces in the underworld, big in the floor, nearly as big in the
+    /// highlands, smaller in the mountains.</summary>
     public static readonly Layer[] Layers =
     {
-        new(240f, float.MinValue, 0f),
-        new(200f, 0f, 600f),
-        new(140f, 600f, float.MaxValue),
+        new(120f, float.MinValue, DeepTop),
+        new(240f, DeepTop, 400f),
+        new(200f, 400f, 850f),
+        new(140f, 850f, float.MaxValue),
     };
+
+    /// <summary>The top of the underworld: below it, under the plains, pieces are smaller and fewer, so there is room
+    /// to fly among them.</summary>
+    public const float DeepTop = 0f;
 
     /// <summary>How much more a vertical offset counts than a horizontal one when finding a block's nearest heart.</summary>
     public const float VerticalScale = 1.6f;
@@ -56,7 +61,7 @@ public static class HeartGrid
     // Alive by height: FloorChance up to FloorTop, easing over FloorFade to UpperChance (in the middle of a cluster),
     // and thinning further to half of that ThinOver blocks higher. Inside a mountain range, MountainChance instead,
     // so a mountain holds together as one cracked whole.
-    private const float FloorChance = 0.96f, FloorFade = 350f;
+    private const float FloorChance = 0.96f, FloorFade = 350f, DeepChance = 0.45f, DeepFade = 80f;
     public const float FloorTop = ContinentTerrain.PlainsLevel - 30f;
     private const float UpperChance = 0.45f, ThinOver = 1200f, MountainChance = 0.85f;
 
@@ -101,6 +106,7 @@ public static class HeartGrid
 
     private static float LandChance(ulong seed, float x, float y, float z)
     {
+        if (y < DeepTop) return Lerp(DeepChance, FloorChance, Smoothstep(DeepTop - DeepFade, DeepTop, y));
         float up = Smoothstep(FloorTop, FloorTop + FloorFade, y);
         if (up <= 0f) return FloorChance;
         float thin = Lerp(1f, 0.5f, Math.Clamp((y - FloorTop - FloorFade) / ThinOver, 0f, 1f));
