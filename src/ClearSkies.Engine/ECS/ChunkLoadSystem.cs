@@ -20,9 +20,9 @@ namespace ClearSkies.Engine.ECS;
 /// later visits spend the budget exactly. The budget therefore goes to islands rather than sky, and the island ahead
 /// stays visible however far off it is.
 ///
-/// Candidates come from the camera's region and the ring of regions around it. Where the budget runs out, and the
-/// nearest column still being generated or loaded, set the fog distance (see <see cref="FogDistance"/>): an island
-/// only partly loaded fades out at the cut instead of ending in a hard edge.
+/// Candidates come from the camera's region and the ring of regions around it. Where the budget runs out (or else the
+/// ring ends), and the nearest column still being generated or loaded, set the fog distance (see
+/// <see cref="FogDistance"/>): an island only partly loaded fades out at the cut instead of ending in a hard edge.
 /// </summary>
 public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 {
@@ -46,9 +46,6 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     /// (a survey column); the rest are above.</summary>
     private const int LayersBelow = 8;
 
-    /// <summary>Fog distance when nothing is cut off or missing: everything the budget reached is loaded.</summary>
-    public const float MaxFogDistance = 3800f;
-
     private const int S = ChunkData.Size;
 
     private readonly string _savesDir;
@@ -67,6 +64,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     /// <summary>Column offsets from the camera's column, closest first, out to a region and a half — past which the
     /// ring of candidate regions can't reach anyway. Computed once; a rebuild just walks it.</summary>
     private readonly (short dx, short dz)[] _offsetsByDistance;
+    private readonly int _offsetRadius;
 
     private readonly Dictionary<(int x, int z), RegionSurvey> _regions = new();
 
@@ -90,6 +88,8 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     private int _budgetUsed;
     private bool _hasCut;
     private (int x, int z) _cut;
+    private bool _hasEdge;
+    private (int x, int z) _edge; // the nearest column outside the candidate regions: where loading stops without a cut
     private int _columnsWalked;
 
     private float _fogDistance;
@@ -98,7 +98,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     private readonly List<ChunkPosition> _toUnload = new();
 
     /// <summary>Horizontal distance from the camera at which the loaded world stops: the nearest chunk column that the
-    /// budget cut off or that is still loading, eased over time. Fog should be total by here.</summary>
+    /// budget cut off, that is still loading, or past the candidate regions, eased over time. Fog should be total by here.</summary>
     public float FogDistance => _fogDistance;
 
     /// <param name="surveyKey">Identifies what the generator produces (seed and version): survey files made under a
@@ -130,7 +130,8 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         _minY         = minChunkY - LayersBelow;
         _generated    = ((1UL << generatedLayers) - 1) << LayersBelow;
         _staticVolume.EditableLayers = (_minY, _minY + 63); // only what streaming can load back
-        _offsetsByDistance = BuildOffsetsByDistance((3 << regionChunkShift) / 2);
+        _offsetRadius = (3 << regionChunkShift) / 2;
+        _offsetsByDistance = BuildOffsetsByDistance(_offsetRadius);
     }
 
     private static (short dx, short dz)[] BuildOffsetsByDistance(int radius)
@@ -238,12 +239,17 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         _loadQueue.Clear();
         _budgetUsed = 0;
         _hasCut = false;
+        _hasEdge = false;
         _columnsWalked = 0;
         foreach (var (dx, dz) in _offsetsByDistance)
         {
             int x = _lastCamColumn.x + dx, z = _lastCamColumn.z + dz;
             var region = RegionOf(x, z);
-            if (!InRange(region, camRegion)) continue;
+            if (!InRange(region, camRegion))
+            {
+                if (!_hasEdge) { _hasEdge = true; _edge = (x, z); }
+                continue;
+            }
             _columnsWalked++;
 
             ulong bits = _regions[region].MaybeContent(x, z);
@@ -341,11 +347,14 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         return bit is >= 0 and < 64 && (_wanted.GetValueOrDefault((p.X, p.Z)) >> bit & 1) != 0;
     }
 
-    /// <summary>Eases <see cref="FogDistance"/> toward the nearest column that is cut off or still missing: in fast,
+    /// <summary>Eases <see cref="FogDistance"/> toward the nearest column that is cut off or still missing, or else
+    /// outside the candidate regions (everything nearer is loaded, however far that reaches): in fast,
     /// so a gap is covered before it shows, out slowly, so the view opens up gently as loading catches up.</summary>
     private void UpdateFog(Vector3D<float> camPos, float dt)
     {
-        float target = _hasCut ? ColumnDistance(camPos, _cut.x, _cut.z) : MaxFogDistance;
+        float target = _hasCut  ? ColumnDistance(camPos, _cut.x, _cut.z)
+                     : _hasEdge ? ColumnDistance(camPos, _edge.x, _edge.z)
+                     : _offsetRadius * S;
         if (_loadQueue.TryPeek(out var next)) target = MathF.Min(target, ColumnDistance(camPos, next.x, next.z));
         foreach (var (x, z) in _inFlight) target = MathF.Min(target, ColumnDistance(camPos, x, z));
         _fogTarget = target;
