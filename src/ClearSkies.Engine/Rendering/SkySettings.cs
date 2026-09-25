@@ -28,11 +28,11 @@ public static class SkySettings
     /// <summary>0-1: the fraction of the sky that is cloud around islands.</summary>
     public static float CloudCoverageIslands = 0.4f;
 
-    /// <summary>World Y of the middle cloud layer, just above the islands' peaks; the low layer sits under the islands
-    /// and the high one above (see <c>CloudLayer</c>).</summary>
+    /// <summary>World Y of the lowest cloud layer, just above the islands' peaks; the other two stack above it (see
+    /// <c>CloudLayer</c>).</summary>
     public static float CloudAltitude = 320f;
 
-    /// <summary>Blocks per second the middle cloud layer drifts along +X (the others a little slower and faster).</summary>
+    /// <summary>Blocks per second the lowest cloud layer drifts along +X (the ones above a little faster).</summary>
     public static float WindSpeed = 1.5f;
 
     /// <summary>How far before <see cref="FogDistance"/> the fog starts, in blocks: a fixed width, since the fog

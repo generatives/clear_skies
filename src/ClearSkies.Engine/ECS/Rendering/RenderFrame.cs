@@ -59,7 +59,7 @@ public sealed class RenderFrame : IDebugUiSystem
         ImGui.Checkbox("Clouds", ref SkySettings.CloudsEnabled);
         ImGui.SliderFloat("Cloud coverage, open sky", ref SkySettings.CloudCoverageOpen, 0f, 1f);
         ImGui.SliderFloat("Cloud coverage, near islands", ref SkySettings.CloudCoverageIslands, 0f, 1f);
-        ImGui.SliderFloat("Cloud altitude (middle layer)", ref SkySettings.CloudAltitude, 0f, 800f);
+        ImGui.SliderFloat("Cloud altitude (lowest layer)", ref SkySettings.CloudAltitude, 0f, 800f);
         ImGui.SliderFloat("Wind speed (blocks/s)", ref SkySettings.WindSpeed, 0f, 30f);
     }
 

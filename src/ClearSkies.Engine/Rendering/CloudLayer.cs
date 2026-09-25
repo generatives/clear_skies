@@ -7,15 +7,15 @@ using Silk.NET.Maths;
 namespace ClearSkies.Engine.Rendering;
 
 /// <summary>
-/// Minecraft-style blocky clouds in three layers (<see cref="Levels"/>: low under the islands, mid above them, high
-/// and sparse), drawn out to <see cref="Distance"/> blocks as real depth-tested boxes so islands and ships sort
+/// Minecraft-style blocky clouds in three stacked layers above the islands (<see cref="Levels"/>), drawn out to <see cref="Distance"/> blocks as real depth-tested boxes so islands and ships sort
 /// against them properly.
 ///
 /// Each layer is a grid of square cells; a cell is either empty or one box, whose underside wanders up and down with a
 /// broad noise field (so clouds sit at different heights) and whose thickness grows towards the middle of each cloud.
 /// How much of the sky is cloud blends between <see cref="SkySettings.CloudCoverageOpen"/> and
 /// <see cref="SkySettings.CloudCoverageIslands"/> by an <see cref="ICloudDensityMap"/>, so clouds bank up around
-/// islands and thin out over empty sky.
+/// islands and thin out over empty sky. Each layer up falls off more steeply away from an island (and is sparser over
+/// open sky), so the layers shrink towards the island as they rise and islands wear a pile of cloud.
 ///
 /// Every layer drifts along +X with the wind at its own speed. Cells are generated in each layer's drifting frame, in
 /// tiles of <see cref="TileCells"/>² cells built on worker threads and drawn as one instanced draw each (one instance
@@ -40,19 +40,22 @@ public sealed class CloudLayer : IDisposable
 
     /// <summary>One cloud layer. Heights are blocks relative to <see cref="SkySettings.CloudAltitude"/>
     /// + <see cref="AltitudeOffset"/>; <see cref="Spacing"/> is the noise's largest lattice spacing in cells (roughly
-    /// the size of one cloud).</summary>
+    /// the size of one cloud). Coverage is <see cref="SkySettings.CloudCoverageOpen"/> × <see cref="OpenScale"/> in
+    /// open sky, rising to <see cref="SkySettings.CloudCoverageIslands"/> × <see cref="IslandScale"/> by the density
+    /// map raised to <see cref="Falloff"/>: the higher it is, the tighter the layer hugs the island.</summary>
     private sealed record Level(string Name, float AltitudeOffset, float CellSize, float MinThickness,
-                                float MaxThickness, float BottomVariation, float CoverageScale, float WindScale,
-                                uint Seed, int Spacing)
+                                float MaxThickness, float BottomVariation, float OpenScale, float IslandScale,
+                                float Falloff, float WindScale, uint Seed, int Spacing)
     {
         public float TileSize => TileCells * CellSize;
     }
 
     private static readonly Level[] Levels =
     {
-        new("low",  -250f, 12f, 4f, 14f, 20f, 1.0f, 0.8f, 0x1C10D, 12),
-        new("mid",     0f, 16f, 4f, 36f, 48f, 0.8f, 1.0f, 0x2C10D, 16),
-        new("high",  260f, 32f, 4f, 10f, 60f, 0.5f, 1.5f, 0x3C10D, 12),
+        //   name   altitude cell thickness  wander open island falloff wind  seed     spacing
+        new("1",       0f, 16f, 4f, 28f,  24f,  1.0f, 1.0f,  1f,    1.0f, 0x1C10D, 16),
+        new("2",      70f, 16f, 4f, 24f,  20f,  0.5f, 0.9f,  2.5f,  1.1f, 0x2C10D, 14),
+        new("3",     140f, 16f, 4f, 20f,  16f,  0.2f, 0.8f,  5f,    1.2f, 0x3C10D, 12),
     };
 
     /// <summary>One cloud cell (a box), as the cloud shader's instance data. <see cref="Packed"/>: bits 0-7 cell x
@@ -243,8 +246,9 @@ public sealed class CloudLayer : IDisposable
             int idx = (x + 1) + (z + 1) * Border;
             bottom[idx] = 1; top[idx] = 0;
 
-            float d = SampleDensity(dens, n, x, z);
-            float coverage = System.Math.Clamp((open + (islands - open) * d) * lv.CoverageScale, 0f, 1f);
+            float d = MathF.Pow(SampleDensity(dens, n, x, z), lv.Falloff);
+            float openCov = open * lv.OpenScale;
+            float coverage = System.Math.Clamp(openCov + (islands * lv.IslandScale - openCov) * d, 0f, 1f);
             if (coverage <= 0f) continue;
             int gx = ox + x, gz = oz + z;
             float v = Fbm(gx, gz, lv.Spacing, lv.Seed);
