@@ -10,8 +10,8 @@ public enum SupportShape
 {
     /// <summary>A rounded lens: soft edges, a bowl underneath.</summary>
     Lens,
-    /// <summary>A faceted outline with vertical walls down from the terrain, then a cone underneath: big cliff faces
-    /// that show the terrain's rock layers.</summary>
+    /// <summary>A faceted outline, some of whose sides are vertical walls down from the terrain (big cliff faces that
+    /// show the terrain's rock layers) and the rest rounded slopes, with a cone underneath.</summary>
     Cliff,
     /// <summary>A narrower cliff shape with a long spike underneath.</summary>
     Spire,
@@ -19,9 +19,9 @@ public enum SupportShape
 
 /// <summary>
 /// One island heart and the support around it: the part of the <see cref="ContinentTerrain"/> inside the support is the
-/// island the heart holds up. Positions are world blocks. For each column the support is one height span
-/// (<see cref="Span"/>), from <see cref="Bottom"/> up to <see cref="Y"/> + <see cref="Up"/>; the island's top is the
-/// terrain surface wherever that is lower.
+/// island the heart holds up. Positions are world blocks. Hearts sit just under the terrain surface. For each column the
+/// support is one height span (<see cref="Span"/>) up to <see cref="Y"/> + <see cref="Up"/>, far enough that the island's
+/// top is the terrain surface but on the tallest mountains, which are cut flat there.
 /// </summary>
 public struct Heart
 {
@@ -30,13 +30,12 @@ public struct Heart
     public float X, Y, Z;
     public float Radius;
     public float Up;          // support height above the heart
-    public float Wall;        // lens: underside depth below the heart; cliff/spire: height of the walls below it
+    public float Wall;        // lens: underside depth below the heart; cliff/spire: depth of the walls below it
     public float Spike;       // cliff/spire: depth of the cone below the walls
     public float SpikePower;  // cliff/spire: the cone's profile ((1 - t)^power: under 1 bulges, over 1 is pointed)
     public float Rotation;    // cliff/spire: the outline's rotation
     public int Sides;         // cliff/spire: the outline's corners
-    public uint Id;           // per-heart noise (outline corners, lens edge wobble)
-    public bool Buried;       // deep under the terrain surface: a bare-rock island with no terrain top
+    public uint Id;           // per-heart noise (outline corners, which sides are cliffs, lens edge wobble)
 
     /// <summary>The farthest the support reaches from the heart, horizontally.</summary>
     public readonly float Reach => Radius * 1.2f;
@@ -44,9 +43,16 @@ public struct Heart
     public readonly float YMin => Shape == SupportShape.Lens ? Y - Wall - 2f : Y - Wall - Spike - 2f;
     public readonly float YMax => Y + Up + 1f;
 
-    /// <summary>The support's span at column (x, z), if the column is inside it.</summary>
-    public readonly bool Span(float x, float z, out float bottom, out float top)
+    /// <summary>How much deeper the underside hangs per block the terrain stands above the heart: high ground has a
+    /// root below it, as mountains do, so an island with a mountain on it isn't a thin slab carrying it.</summary>
+    public const float RootFactor = 0.5f;
+
+    /// <summary>The support's span at column (x, z), if the column is inside it, given the terrain's broad height there
+    /// (<paramref name="groundLevel"/>: averaged over a hundred blocks or so, so a root is a broad bulge under high
+    /// ground rather than every peak mirrored).</summary>
+    public readonly bool Span(float x, float z, float groundLevel, out float bottom, out float top)
     {
+        float root = RootFactor * MathF.Max(0f, groundLevel - Y);
         float dx = x - X, dz = z - Z;
         float d = MathF.Sqrt(dx * dx + dz * dz);
         bottom = top = 0f;
@@ -54,19 +60,19 @@ public struct Heart
 
         if (Shape == SupportShape.Lens)
         {
-            // Wobbly round outline; underside a bowl, (1 - t²)^0.75, rounded at the rim; top a dome.
+            // Wobbly round outline; underside a bowl, (1 - t²)^0.75, rounded at the rim.
             float wobble = HeartGrid.ValueNoise(Id, x / (Radius * 0.5f), z / (Radius * 0.5f));
             float t = d / (Radius * (0.8f + 0.4f * wobble));
             if (t >= 1f) return false;
-            float u = 1f - t * t;
-            bottom = Y - Wall * MathF.Pow(u, 0.75f);
-            top = Y + Up * MathF.Sqrt(u);
+            bottom = Y - (Wall + root) * MathF.Pow(1f - t * t, 0.75f);
+            top = Y + Up;
             return true;
         }
 
-        // A polygon of Sides corners at radii between 0.7 and 1.15 of the radius: straight faces with corners. The walls
-        // go straight down from the terrain (the top is flat, cutting a mesa where the terrain rises past it), then a
-        // cone of Spike below them.
+        // A polygon of Sides corners at radii between 0.7 and 1.15 of the radius: straight faces with corners. Along a
+        // cliff side the support goes straight down from the terrain (Wall below the heart, then a cone of Spike);
+        // along the others its depth rounds off towards the edge like a lens, blending over the last part of a side
+        // into the next.
         float angle = MathF.Atan2(dz, dx) - Rotation;
         float sector = MathF.Tau / Sides;
         float a = (angle % MathF.Tau + MathF.Tau) % MathF.Tau / sector;
@@ -77,21 +83,31 @@ public struct Heart
         edge *= 0.97f + 0.06f * HeartGrid.ValueNoise(Id ^ 0x5EEDu, x / 10f, z / 10f); // rough, not glassy, faces
         float tc = d / edge;
         if (tc >= 1f) return false;
-        bottom = Y - Wall - Spike * MathF.Pow(1f - tc, SpikePower);
+        float f = phi / sector, cliff = IsCliff(i);
+        if (f < 0.15f) cliff = Lerp(0.5f * (IsCliff(i - 1) + cliff), cliff, f / 0.15f);
+        else if (f > 0.85f) cliff = Lerp(cliff, 0.5f * (cliff + IsCliff(i + 1)), (f - 0.85f) / 0.15f);
+        float round = MathF.Pow(1f - tc * tc, 0.75f);
+        bottom = Y - (Wall + root + Spike * MathF.Pow(1f - tc, SpikePower)) * Lerp(round, 1f, cliff);
         top = Y + Up;
         return true;
     }
 
     // Corners at 0.7-1.15 of the radius: with the faces' 3% roughness, still inside Reach.
     private readonly float Corner(int i) => Radius * (0.7f + 0.45f * HeartGrid.Hash01(Id, i, 0));
+
+    /// <summary>1 if side i (from corner i to the next) is a cliff, 0 if it slopes: most spires' sides are cliffs,
+    /// about 60% of a cliff's.</summary>
+    private readonly float IsCliff(int i)
+        => HeartGrid.Hash01(Id, ((i % Sides) + Sides) % Sides, 1) < (Shape == SupportShape.Spire ? 0.85f : 0.6f) ? 1f : 0f;
+
+    private static float Lerp(float a, float b, float t) => a + (b - a) * t;
 }
 
 /// <summary>
 /// Where island hearts are. The world is a <see cref="ContinentTerrain"/> with hearts scattered through it; each heart
 /// holds up the terrain inside its support, and nothing else exists. Hearts sit on one grid of cells per
-/// <see cref="HeartClass"/>. A cell's first slot is a heart just under the terrain surface (so its island has a real top:
-/// grass, sand, snow); its further slots are hearts deeper down, now and then, holding bare-rock islands underneath.
-/// As the terrain is mostly low, islands are dense near the bottom of the world and rare near the top, where only the
+/// <see cref="HeartClass"/>, at most one per cell, just under the terrain surface (so its island has a real top: grass,
+/// sand, snow). As the terrain is mostly low, islands are dense near the bottom of the world and rare near the top, where only the
 /// peaks are.
 ///
 /// Where hearts are is coherent rather than even. Large hearts are plateaus (<see cref="Plateau"/>): 2-4 km across but
@@ -103,39 +119,37 @@ public struct Heart
 /// </summary>
 public static class HeartGrid
 {
-    /// <summary>One class's grid: cells of <see cref="CellSize"/> blocks, each with <see cref="Slots"/> slots (a
-    /// surface heart, then deeper ones), a heart's radius, and the chance of a surface heart outside clusters and inside
-    /// them (and, but for the large class, on chains). A deeper slot holds a heart with <see cref="DeepChance"/> of
-    /// that.</summary>
-    private readonly record struct ClassDef(int CellSize, int Slots, float MinRadius, float MaxRadius,
-                                            float ChanceLow, float ChanceHigh, float DeepChance);
+    /// <summary>One class's grid: cells of <see cref="CellSize"/> blocks, a heart's radius, and the chance of a heart
+    /// outside clusters and inside them (and, but for the large class, on chains).</summary>
+    private readonly record struct ClassDef(int CellSize, float MinRadius, float MaxRadius, float ChanceLow, float ChanceHigh);
 
     private static readonly ClassDef[] Classes =
     {
-        //   cell  slots  radius        chance: outside, inside clusters; deep
-        new(2600, 1,     1100f, 1800f, 0f,    0.90f,  0f),    // Large: plateaus, clusters only
-        new(1100, 3,      180f,  450f, 0.01f, 0.50f,  0.30f), // Medium: around clusters, on chains
-        new( 448, 2,       40f,  110f, 0.003f,0.18f,  0.20f), // Small
+        //   cell  radius        chance: outside, inside clusters
+        new(2600, 1100f, 1800f, 0f,     0.90f), // Large: plateaus, clusters only
+        new(1100,  180f,  450f, 0.01f,  0.50f), // Medium: around clusters, on chains
+        new( 448,   40f,  110f, 0.003f, 0.18f), // Small
     };
 
-    /// <summary>A plateau's support, in blocks rather than by its radius, so a wide one stays flat: height above the
-    /// heart, and below it a lens's depth or a cliff's walls and cone.</summary>
-    private const float PlateauUpMin = 250f, PlateauUpMax = 450f, PlateauLensMin = 250f, PlateauLensMax = 500f,
-                        PlateauWallMin = 120f, PlateauWallMax = 300f, PlateauSpikeMin = 150f, PlateauSpikeMax = 400f;
+    /// <summary>A plateau's support below the heart, in blocks rather than by its radius, so a wide one stays flat: a
+    /// lens's depth, or a cliff's walls and cone.</summary>
+    private const float PlateauLensMin = 200f, PlateauLensMax = 400f, PlateauWallMin = 100f, PlateauWallMax = 250f,
+                        PlateauSpikeMin = 100f, PlateauSpikeMax = 300f;
+
+    /// <summary>How far under the terrain surface a heart sits.</summary>
+    private const float HeartDepthMin = 10f, HeartDepthMax = 60f;
 
     public const int ClassCount = 3;
 
     /// <summary>The lowest an island may reach: above the cloud sea (see SkySettings.CloudSeaAltitude).</summary>
-    private const float LowestBottom = IslandGrid.WorldBottom + 56f;
+    internal const float LowestBottom = IslandGrid.WorldBottom + 56f;
 
     // Clumps: value noise at these spacings (blocks); chains: where another value noise crosses its middle, within
     // ChainWidth of it.
     private const float ClumpSpacing = 9000f, ClumpDetail = 3000f, ChainSpacing = 4000f, ChainWidth = 0.04f;
 
-    public static int Layers(HeartClass c) => Classes[(int)c].Slots;
-
     /// <summary>Writes the hearts of class <paramref name="c"/> whose cells are within the class's greatest reach of
-    /// the box (every slot) into <paramref name="output"/> starting at <paramref name="count"/>, and returns the new
+    /// the box into <paramref name="output"/> starting at <paramref name="count"/>, and returns the new
     /// count: every heart whose support can touch the box, and some that can't.</summary>
     public static int Collect(ulong seed, HeartClass c, float minX, float minZ, float maxX, float maxZ,
                               Span<Heart> output, int count)
@@ -144,13 +158,11 @@ public static class HeartGrid
         float pad = def.MaxRadius * 1.2f;
         int x0 = FloorDiv(minX - pad, def.CellSize), x1 = FloorDiv(maxX + pad, def.CellSize);
         int z0 = FloorDiv(minZ - pad, def.CellSize), z1 = FloorDiv(maxZ + pad, def.CellSize);
-        int layers = Layers(c);
         for (int cz = z0; cz <= z1; cz++)
         for (int cx = x0; cx <= x1; cx++)
-        for (int cy = 0; cy < layers; cy++)
         {
             if (count == output.Length) return count;
-            if (Placed(seed, c, cx, cy, cz, out output[count])) count++;
+            if (Placed(seed, c, cx, cz, out output[count])) count++;
         }
         return count;
     }
@@ -163,12 +175,12 @@ public static class HeartGrid
         return count;
     }
 
-    public static bool Placed(ulong seed, HeartClass c, int cx, int cy, int cz, out Heart heart)
+    public static bool Placed(ulong seed, HeartClass c, int cx, int cz, out Heart heart)
     {
-        var key = (seed, (int)c, cx, cy, cz);
+        var key = (seed, (int)c, cx, cz);
         if (!Cache.TryGetValue(key, out var v))
         {
-            v = (TryPlace(seed, c, cx, cy, cz, out var h), h);
+            v = (TryPlace(seed, c, cx, cz, out var h), h);
             if (Cache.Count > CacheLimit) Cache.Clear();
             Cache[key] = v;
         }
@@ -177,14 +189,14 @@ public static class HeartGrid
     }
 
     private const int CacheLimit = 1 << 21;
-    private static readonly ConcurrentDictionary<(ulong, int, int, int, int), (bool, Heart)> Cache = new();
+    private static readonly ConcurrentDictionary<(ulong, int, int, int), (bool, Heart)> Cache = new();
 
-    private static bool TryPlace(ulong seed, HeartClass c, int cx, int cy, int cz, out Heart heart)
+    private static bool TryPlace(ulong seed, HeartClass c, int cx, int cz, out Heart heart)
     {
         heart = default;
         var def = Classes[(int)c];
-        uint id = (uint)HashCell(seed, 100 + (int)c, cx, cy, cz);
-        var rng = new SplitMix64Rng(HashCell(seed, 100 + (int)c, cx, cy, cz));
+        uint id = (uint)HashCell(seed, 100 + (int)c, cx, 0, cz);
+        var rng = new SplitMix64Rng(HashCell(seed, 100 + (int)c, cx, 0, cz));
         float roll = rng.NextFloat01();
         if (roll >= def.ChanceHigh) return false; // cheap reject
 
@@ -194,12 +206,12 @@ public static class HeartGrid
         bool plateau = c == HeartClass.Large;
         // Plateaus fill the clusters; the smaller hearts gather over a wider area around them, and on chains.
         float bias = plateau ? Clumps(seed, x, z) : MathF.Max(Clumps(seed, x, z, 0.42f, 0.6f), 0.8f * Chains(seed, x, z));
-        float chance = Lerp(def.ChanceLow, def.ChanceHigh, bias) * (cy == 0 ? 1f : def.DeepChance);
+        float chance = Lerp(def.ChanceLow, def.ChanceHigh, bias);
         if (roll >= chance) return false;
 
         float shapeRoll = rng.NextFloat01();
         var shape = plateau ? (shapeRoll < 0.35f ? SupportShape.Lens : SupportShape.Cliff)
-                  : shapeRoll < 0.45f ? SupportShape.Lens : shapeRoll < 0.85f ? SupportShape.Cliff : SupportShape.Spire;
+                  : shapeRoll < 0.55f ? SupportShape.Lens : shapeRoll < 0.9f ? SupportShape.Cliff : SupportShape.Spire;
         heart = new Heart
         {
             Class = c, Shape = shape, X = x, Z = z, Id = id,
@@ -207,37 +219,28 @@ public static class HeartGrid
             Rotation = rng.NextFloat01() * MathF.Tau,
             Sides = 5 + (int)(rng.NextFloat01() * 5f),
         };
+        // The top reaches well above the heart, so the terrain decides it (only the tallest mountains are cut flat).
+        heart.Up = MathF.Max(radius * 0.7f, 120f);
         if (plateau) Plateau(ref heart, ref rng);
         else switch (shape)
         {
             case SupportShape.Lens:
-                heart.Up = radius * rng.NextRange(0.5f, 0.9f);
                 heart.Wall = radius * rng.NextRange(0.35f, 0.6f);
                 break;
             case SupportShape.Cliff:
-                heart.Up = radius * rng.NextRange(0.6f, 1.0f);
-                heart.Wall = radius * rng.NextRange(0.25f, 0.55f);
-                heart.Spike = radius * rng.NextRange(0.3f, 0.8f);
+                heart.Wall = radius * rng.NextRange(0.2f, 0.45f);
+                heart.Spike = radius * rng.NextRange(0.3f, 0.7f);
                 heart.SpikePower = rng.NextRange(0.6f, 1.6f);
                 break;
             default:
-                heart.Up = radius * rng.NextRange(0.5f, 0.8f);
-                heart.Wall = radius * rng.NextRange(0.15f, 0.35f);
-                heart.Spike = radius * rng.NextRange(1.0f, 1.8f);
+                heart.Wall = radius * rng.NextRange(0.15f, 0.3f);
+                heart.Spike = radius * rng.NextRange(0.8f, 1.3f);
                 heart.SpikePower = rng.NextRange(0.7f, 1.2f);
                 break;
         }
 
-        // Slot 0: just under the terrain surface, so the island has its top. Deeper slots: far enough down that the
-        // support stops short of the surface, a bare-rock island under the one above (or merged into it).
-        float surface = ContinentTerrain.For(seed).Height(x, z);
-        if (cy == 0)
-            heart.Y = surface - heart.Up * rng.NextRange(0.15f, 0.8f);
-        else
-        {
-            heart.Y = surface - heart.Up - radius * rng.NextRange(0.4f, 1.2f) * cy;
-            heart.Buried = true;
-        }
+        // Just under the terrain surface, so the island has its top and its walls run down from there.
+        heart.Y = ContinentTerrain.For(seed).Height(x, z) - rng.NextRange(HeartDepthMin, HeartDepthMax);
 
         // Too deep for the world: trim the cone, then the walls, rather than lose the island.
         float over = LowestBottom - heart.YMin;
@@ -253,7 +256,6 @@ public static class HeartGrid
     /// <summary>A plateau's support (the large class): flat for its width, sized in blocks.</summary>
     private static void Plateau(ref Heart heart, ref SplitMix64Rng rng)
     {
-        heart.Up = rng.NextRange(PlateauUpMin, PlateauUpMax);
         if (heart.Shape == SupportShape.Lens)
             heart.Wall = rng.NextRange(PlateauLensMin, PlateauLensMax);
         else
@@ -289,9 +291,8 @@ public static class HeartGrid
         int size = Classes[0].CellSize, cx0 = FloorDiv(x, size), cz0 = FloorDiv(z, size);
         for (int cz = cz0 - 12; cz <= cz0 + 12; cz++)
         for (int cx = cx0 - 12; cx <= cx0 + 12; cx++)
-        for (int cy = 0; cy < Layers(HeartClass.Large); cy++)
         {
-            if (!Placed(seed, HeartClass.Large, cx, cy, cz, out var h) || h.Buried) continue;
+            if (!Placed(seed, HeartClass.Large, cx, cz, out var h)) continue;
             float d = (h.X - x) * (h.X - x) + (h.Z - z) * (h.Z - z);
             if (d < best) { best = d; nearest = h; }
         }

@@ -8,8 +8,8 @@ namespace ClearSkies.Game.Generation;
 /// Generates the "island hearts" world: a <see cref="ContinentTerrain"/> of which only what the hearts of
 /// <see cref="HeartGrid"/> hold up exists. A block is solid where it is under the terrain surface and inside some
 /// heart's support; each island's top is the terrain (grass, sand, snow by height), its sides are where the support
-/// cuts through the terrain (vertical cliffs showing rock layers, for cliff and spire supports), and its underside is
-/// the support's own. Overlapping supports merge into one island.
+/// cuts through the terrain (vertical cliffs showing rock layers along a cliff support's cliff sides), and its underside
+/// is the support's own, hanging deeper under high ground (a root). Overlapping supports merge into one island.
 ///
 /// Per column this is a union of height spans, one per heart whose support covers it, clipped by the terrain surface.
 /// </summary>
@@ -18,6 +18,13 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     private const int S = ChunkData.Size;
     private const int MaxHearts = 256;
     private const int MaxSpans = 8; // per block column, after merging
+
+    /// <summary>More than the terrain can rise from a chunk column's centre to its corners (its steepest ridges climb
+    /// several blocks per block).</summary>
+    private const float TerrainRiseMargin = 256f;
+
+    /// <summary>How far apart the terrain samples averaged for a root are, in blocks (see Heart.Span).</summary>
+    private const float RootBlur = 96f;
 
     private readonly ulong _seed;
     private readonly ContinentTerrain _terrain;
@@ -32,11 +39,19 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     {
         Span<Heart> hearts = stackalloc Heart[MaxHearts];
         int count = ColumnHearts(chunkX, chunkZ, hearts);
+        if (count == 0) return 0;
+
+        // Supports reach far above their hearts so the terrain can decide the tops; bound them by the terrain here
+        // instead (its height at the column's centre, plus more than it can rise across half a column), which also
+        // bounds how deep the root under high ground goes.
+        float terrainTop = _terrain.Height(chunkX * S + S * 0.5f, chunkZ * S + S * 0.5f) + TerrainRiseMargin;
         ulong bits = 0;
         for (int i = 0; i < count; i++)
         {
-            int lo = System.Math.Max((int)MathF.Floor(hearts[i].YMin / S) - minChunkY, 0);
-            int hi = System.Math.Min((int)MathF.Floor(MathF.Min(hearts[i].YMax, IslandGrid.WorldTop - 1) / S) - minChunkY, 63);
+            float root = Heart.RootFactor * MathF.Max(0f, terrainTop - hearts[i].Y);
+            int lo = System.Math.Max((int)MathF.Floor((hearts[i].YMin - root) / S) - minChunkY, 0);
+            float top = MathF.Min(MathF.Min(hearts[i].YMax, terrainTop), IslandGrid.WorldTop - 1);
+            int hi = System.Math.Min((int)MathF.Floor(top / S) - minChunkY, 63);
             if (lo > hi) continue;
             bits |= (ulong.MaxValue >> (63 - hi)) & (ulong.MaxValue << lo);
         }
@@ -100,13 +115,16 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         for (int lx = 0; lx < S; lx++)
         {
             float wx = chunkX * S + lx, wz = chunkZ * S + lz;
+            float surface = _terrain.Height(wx, wz);
+            float groundLevel = (surface + _terrain.Height(wx + RootBlur, wz) + _terrain.Height(wx - RootBlur, wz)
+                               + _terrain.Height(wx, wz + RootBlur) + _terrain.Height(wx, wz - RootBlur)) * 0.2f;
             int n = 0;
             for (int i = 0; i < count; i++)
-                if (_hearts[i].Span(wx, wz, out float bottom, out float top)) raw[n++] = (bottom, top);
+                if (_hearts[i].Span(wx, wz, groundLevel, out float bottom, out float top))
+                    raw[n++] = (MathF.Max(bottom, HeartGrid.LowestBottom), top); // a deep root stops above the cloud sea
             if (n == 0) continue;
 
             int col = lx + S * lz;
-            float surface = _terrain.Height(wx, wz);
             _strata[col] = _terrain.Strata(wx, wz);
 
             // Union of the supports' spans (sorted by bottom), each clipped by the terrain surface.
@@ -149,7 +167,6 @@ public sealed class HeartCloudDensity : ICloudDensityMap
         float best = 0f;
         foreach (var h in hearts[..n])
         {
-            if (h.Buried) continue;
             float ex = x - h.X, ez = z - h.Z;
             float past = MathF.Sqrt(ex * ex + ez * ez) - h.Radius;
             float t = Math.Clamp((past - Near) / (Far - Near), 0f, 1f);
