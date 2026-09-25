@@ -60,6 +60,11 @@ public sealed class RenderFrame : IDebugUiSystem
         ImGui.SliderFloat("Haze strength", ref SkySettings.HazeStrength, 0f, 1f);
         ImGui.SliderFloat("Haze distance (blocks)", ref SkySettings.HazeDistance, 500f, 30000f);
         ImGui.ColorEdit3("Haze", ref SkySettings.HazeColor);
+        ImGui.Checkbox("Cloud sea", ref SkySettings.CloudSeaEnabled);
+        ImGui.SliderFloat("Cloud sea altitude", ref SkySettings.CloudSeaAltitude, -2000f, 1000f);
+        ImGui.SliderFloat("Cloud sea coverage", ref SkySettings.CloudSeaCoverage, 0.05f, 1f);
+        ImGui.SliderFloat("Cloud sea cell (blocks)", ref SkySettings.CloudSeaCell, 8f, 128f);
+        ImGui.SliderFloat("Cloud sea thickness (blocks)", ref SkySettings.CloudSeaThickness, 4f, 200f);
         ImGui.Checkbox("Clouds", ref SkySettings.CloudsEnabled);
         ImGui.SliderFloat("Cloud coverage, open sky", ref SkySettings.CloudCoverageOpen, 0f, 0.1f);
         ImGui.SliderFloat("Cloud coverage, near islands", ref SkySettings.CloudCoverageIslands, 0f, 0.5f);
@@ -91,6 +96,10 @@ public sealed class RenderFrame : IDebugUiSystem
             HazeStrength   = SkySettings.HazeEnabled ? SkySettings.HazeStrength : 0f,
             HazeColor      = ToVector3D(SkySettings.HazeColor),
             HazeDistance   = System.Math.Max(SkySettings.HazeDistance, 1f),
+            SeaAltitude    = SkySettings.CloudSeaAltitude,
+            SeaCoverage    = SkySettings.CloudSeaEnabled ? SkySettings.CloudSeaCoverage : 0f,
+            SeaCell        = System.Math.Max(SkySettings.CloudSeaCell, 1f),
+            SeaThickness   = System.Math.Max(SkySettings.CloudSeaThickness, 1f),
             CloudFogStart  = CloudLayer.FogStart,
             CloudFogEnd    = CloudLayer.FogEnd,
         };

@@ -55,13 +55,13 @@ public struct IslandDef
 /// much wider than they are tall (one cell spans the whole world height), the smaller classes stack several cells up
 /// the <see cref="WorldBottom"/>..<see cref="WorldTop"/> band, so islands sit at many heights.
 ///
-/// Where islands go isn't uniform, so the world reads as places rather than an even sprinkle:
+/// Islands come in clumps, each a destination with open sky between it and the next:
 /// <list type="bullet">
-/// <item>an <see cref="Archipelago"/> field, varying over tens of km, sets how likely large (and a few stray medium)
-/// islands are: archipelagos, and wide stretches of open sky;</item>
-/// <item>smaller islands gather around bigger ones (<see cref="Near"/>): medium ones around large islands, small ones
-/// around those, and tiny rocks around all three, each close to its parent and around its height. Away from any parent,
-/// a smaller island is rare, so groups read as groups;</item>
+/// <item>every clump is anchored by a large island, one per large cell at most, kept at least
+/// <see cref="MinClumpGap"/> from the next (the <see cref="Archipelago"/> field makes some stretches of sky emptier
+/// than others);</item>
+/// <item>smaller islands exist only around bigger ones (<see cref="Near"/>): medium ones around the large island, small
+/// ones around those, and tiny rocks around all three, each close to its parent and around its height;</item>
 /// <item>heights follow a slowly undulating <see cref="Stratum"/>, so islands form a loose layer you look across rather
 /// than filling the sky above and below: each island sits within its class's <c>HeightSpread</c> of the stratum, or of
 /// its parent.</item>
@@ -93,10 +93,10 @@ public static class IslandGrid
     private static readonly ClassDef[] Classes =
     {
         //   cell   height  open     archi.  near    radius        height spread
-        new(10240, 2048,   0.05f,   0.80f,  0f,     700f, 1200f,  150f), // Large: 1.5-2.5 km across
-        new( 2560, 1024,   0.004f,  0.12f,  1.00f,  120f,  450f,  250f), // Medium
-        new(  768,  512,   0.0005f, 0.01f,  0.80f,   30f,  140f,  200f), // Small
-        new(  192,  128,   0.0001f, 0.001f, 0.50f,    6f,   35f,  160f), // Tiny
+        new(12288, 2048,   0.55f,   0.95f,  0f,     700f, 1200f,  150f), // Large: 1.5-2.5 km across, a clump each
+        new( 2560, 1024,   0f,      0f,     1.00f,  120f,  450f,  250f), // Medium
+        new(  768,  512,   0f,      0f,     0.80f,   30f,  140f,  200f), // Small
+        new(  192,  128,   0f,      0f,     0.50f,    6f,   35f,  160f), // Tiny
     };
 
     // Archipelago field: value noise at these two spacings (blocks), mapped through a smoothstep for contrast.
@@ -107,6 +107,10 @@ public static class IslandGrid
 
     // A parent's pull: full out to NearRim × its radius past its rim, gone by FarRim × its radius (+ FarRimExtra).
     private const float NearRim = 0.2f, FarRim = 3.5f, FarRimExtra = 100f;
+
+    /// <summary>Least distance between two large islands' centres, so clumps stay apart (the next one a silhouette in
+    /// the haze): each sits at least half this from its cell's edges.</summary>
+    private const float MinClumpGap = 6000f;
 
     /// <summary>Base Y range of large islands (their cell is the whole band, so this keeps them off its ends).</summary>
     private const float LargeMinBaseY = 650f, LargeMaxBaseY = 1150f;
@@ -203,8 +207,8 @@ public static class IslandGrid
         };
         Shape(ref island, rng.NextFloat01());
 
-        // Anywhere in the cell that keeps the whole island inside it.
-        float reach = island.Reach;
+        // Anywhere in the cell that keeps the whole island inside it (large ones, far enough in to keep clumps apart).
+        float reach = c == IslandClass.Large ? MathF.Max(island.Reach, MinClumpGap * 0.5f) : island.Reach;
         island.CenterX = cx * (float)def.CellSize + rng.NextRange(reach, def.CellSize - reach);
         island.CenterZ = cz * (float)def.CellSize + rng.NextRange(reach, def.CellSize - reach);
 

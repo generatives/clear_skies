@@ -19,7 +19,7 @@ public sealed unsafe class Renderer : IDisposable
     // ChunkLoadSystem) plus model blocks, ships and clouds used to cut distant islands off at 4096.
     private const int MaxObjects = 16384;
     private const ulong ModelStride = 256;   // >= minUniformBufferOffsetAlignment
-    private const ulong CameraSize  = 240;   // two mat4x4<f32> (view, proj) + seven vec4<f32> (sun, light params, camera position, fog, zenith, horizon, haze)
+    private const ulong CameraSize  = 256;   // two mat4x4<f32> (view, proj) + eight vec4<f32> (sun, light params, camera position, fog, zenith, horizon, haze, sea)
     private const ulong ModelSize   = 96;    // mat4x4<f32> + vec3<i32> chunk + i32 grid + vec4<f32> params
 
     private static readonly string Wgsl = @"
@@ -37,9 +37,10 @@ const EMPTY_DISPLAY: u32 = 0x3000u;   // no light storage: full sun, no light, n
 // shadeFast), .z: ambient (0-1), .w unused. camPos.xyz: camera world position. fog.xy: the world's fog start/end
 // (horizontal), fog.zw: the cloud layer's (see CloudLayer), in blocks from the camera. zenith/horizon.rgb: the sky
 // gradient (see SkySettings). horizon.w: the distance haze's strength (0-1), haze.rgb its colour, haze.w its distance.
+// sea: the cloud sea's altitude, coverage (0 = off), cell size and thickness, in blocks (see cloudSea).
 struct Camera {
     view: mat4x4<f32>, proj: mat4x4<f32>, sunDir: vec4<f32>, lightParams: vec4<f32>,
-    camPos: vec4<f32>, fog: vec4<f32>, zenith: vec4<f32>, horizon: vec4<f32>, haze: vec4<f32>,
+    camPos: vec4<f32>, fog: vec4<f32>, zenith: vec4<f32>, horizon: vec4<f32>, haze: vec4<f32>, sea: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
@@ -95,7 +96,110 @@ fn fs_sky(in: SkyOut) -> @location(0) vec4<f32> {
     let dir   = normalize(in.dir);
     let toSun = dot(dir, -camera.sunDir.xyz);
     let disc  = smoothstep(0.9992, 0.9996, toSun) * camera.sunDir.w;
-    return vec4<f32>(skyColor(dir) + vec3<f32>(1.0, 0.95, 0.85) * disc, 1.0);
+    var c = skyColor(dir) + vec3<f32>(1.0, 0.95, 0.85) * disc;
+    if (camera.sea.y > 0.0) {
+        let hit = cloudSea(camera.camPos.xyz, dir);
+        if (hit.w >= 0.0) { c = mix(applyHaze(hit.rgb, dir * hit.w), skyColor(dir), smoothstep(20000.0, 40000.0, hit.w)); }
+    }
+    return vec4<f32>(c, 1.0);
+}
+
+// ── Cloud sea ───────────────────────────────────────────────────────────────────────────────────────────────────
+// A floor of blocky cloud far below the islands, drawn in the background pass (it is behind everything) by stepping
+// the view ray through a grid of sea.z-block cells (a 2D DDA) inside the layer sea.x .. sea.x + sea.w: each cell is
+// empty or one flat-topped block up to sea.w thick, shaded per face like the block clouds (fs_cloud). Past
+// SeaDetail blocks, where cells would shimmer under a pixel, it is drawn as its average instead.
+
+const SeaDetail = 14000.0;
+const SeaSteps  = 96;
+const SeaWhite  = vec3<f32>(0.96, 0.97, 1.0);
+
+fn seaHash(c: vec2<i32>) -> f32 {
+    var h = u32(c.x) * 0x8DA6B343u ^ u32(c.y) * 0xD8163841u;
+    h ^= h >> 16u; h *= 0x7FEB352Du;
+    h ^= h >> 15u; h *= 0x846CA68Bu;
+    h ^= h >> 16u;
+    return f32(h >> 8u) * (1.0 / 16777216.0);
+}
+
+// Smooth value noise over cells at a lattice spacing of s cells.
+fn seaNoise(c: vec2<i32>, s: f32) -> f32 {
+    let f = (vec2<f32>(c) + 0.5) / s;
+    let i = vec2<i32>(floor(f));
+    let t = f - floor(f);
+    let u = t * t * (3.0 - 2.0 * t);
+    let a = mix(seaHash(i), seaHash(i + vec2<i32>(1, 0)), u.x);
+    let b = mix(seaHash(i + vec2<i32>(0, 1)), seaHash(i + vec2<i32>(1, 1)), u.x);
+    return mix(a, b, u.y);
+}
+
+// A cell's block height as a fraction of the layer (in quarter steps), or 0 for an empty cell.
+fn seaCell(c: vec2<i32>) -> f32 {
+    let v = 0.6 * seaNoise(c, 11.0) + 0.3 * seaNoise(c + vec2<i32>(913, 211), 4.0) + 0.1 * seaHash(c);
+    let threshold = mix(0.75, 0.25, camera.sea.y);
+    if (v < threshold) { return 0.0; }
+    return clamp(ceil((v - threshold) / 0.1 * 4.0) * 0.25, 0.25, 1.0);
+}
+
+fn seaShade(n: vec3<f32>) -> vec3<f32> {
+    var shade = 0.8;
+    if (n.y > 0.5)           { shade = 1.0; }
+    else if (n.y < -0.5)     { shade = 0.7; }
+    else if (abs(n.x) > 0.5) { shade = 0.88; }
+    shade *= 0.9 + 0.1 * max(dot(n, -camera.sunDir.xyz), 0.0) * camera.sunDir.w;
+    return SeaWhite * shade;
+}
+
+// The cloud sea along the ray from ro in direction rd: its shaded colour and the distance to it, or w = -1 for none.
+fn cloudSea(ro: vec3<f32>, rd: vec3<f32>) -> vec4<f32> {
+    let y0 = camera.sea.x;
+    let h  = camera.sea.w;
+    let size = camera.sea.z;
+    if (abs(rd.y) < 1e-5) { return vec4<f32>(0.0, 0.0, 0.0, -1.0); }
+    let ta = (y0 - ro.y) / rd.y;
+    let tb = (y0 + h - ro.y) / rd.y;
+    let tEnter = max(min(ta, tb), 0.0);
+    let tExit  = max(ta, tb);
+    if (tExit <= 0.0) { return vec4<f32>(0.0, 0.0, 0.0, -1.0); }
+    if (tEnter > SeaDetail) {
+        // Far: the average of cloud tops and the gaps between them.
+        let avg = mix(skyColor(rd), SeaWhite * 0.95, camera.sea.y);
+        return vec4<f32>(avg, tEnter);
+    }
+
+    let p = ro + rd * tEnter;
+    var cell = vec2<i32>(floor(p.xz / size));
+    let dirXZ = rd.xz;
+    let stepC = vec2<i32>(select(-1, 1, dirXZ.x > 0.0), select(-1, 1, dirXZ.y > 0.0));
+    let inv = 1.0 / max(abs(dirXZ), vec2<f32>(1e-6));
+    let next = (vec2<f32>(cell) + select(vec2<f32>(0.0), vec2<f32>(1.0), dirXZ > vec2<f32>(0.0))) * size;
+    var tMax = select((next - ro.xz) / dirXZ, vec2<f32>(1e30), abs(dirXZ) < vec2<f32>(1e-6));
+    let tDelta = size * inv;
+    var t = tEnter;
+    var axis = -1; // the axis last stepped across (0 x, 1 z), -1 before any
+    for (var i = 0; i < SeaSteps; i++) {
+        let tNext = min(tMax.x, tMax.y);
+        let tOut = min(tNext, tExit);
+        let frac = seaCell(cell);
+        if (frac > 0.0) {
+            let top = y0 + frac * h;
+            let ya = (y0 - ro.y) / rd.y;
+            let yb = (top - ro.y) / rd.y;
+            let lo = max(min(ya, yb), t);
+            let hi = min(max(ya, yb), tOut);
+            if (lo <= hi) {
+                var n = vec3<f32>(0.0, -sign(rd.y), 0.0);
+                if (lo <= t + 1e-3 && axis == 0) { n = vec3<f32>(-f32(stepC.x), 0.0, 0.0); }
+                if (lo <= t + 1e-3 && axis == 1) { n = vec3<f32>(0.0, 0.0, -f32(stepC.y)); }
+                return vec4<f32>(seaShade(n), lo);
+            }
+        }
+        if (tNext >= tExit) { break; }
+        t = tNext;
+        if (tMax.x < tMax.y) { tMax.x += tDelta.x; cell.x += stepC.x; axis = 0; }
+        else                 { tMax.y += tDelta.y; cell.y += stepC.y; axis = 1; }
+    }
+    return vec4<f32>(0.0, 0.0, 0.0, -1.0);
 }
 
 // model: world transform. chunk: this chunk's coordinate in its grid. grid: the grid's index in the GridStore, or
