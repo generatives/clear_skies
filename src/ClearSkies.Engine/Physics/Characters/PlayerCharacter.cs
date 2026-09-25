@@ -76,20 +76,26 @@ public struct PlayerCharacter
 
     /// <summary>Reads WASD + Shift(sprint) + Space(jump) and updates the character's motion goals
     /// for this tick. <paramref name="viewDirectionWorld"/> is the camera's world-space forward
-    /// vector (unflattened — the surface-relative projection happens inside CharacterControllers).</summary>
-    public void UpdateCharacterGoals(InputManager input, Vector3 viewDirectionWorld, float simulationTimestepDuration)
+    /// vector (unflattened — the surface-relative projection happens inside CharacterControllers).
+    /// <paramref name="frozen"/> ignores the keys (no walking or jumping) while still standing, falling and riding
+    /// whatever the character stands on as usual — e.g. while the player is using a lever.</summary>
+    public void UpdateCharacterGoals(InputManager input, Vector3 viewDirectionWorld, float simulationTimestepDuration,
+                                     bool frozen = false)
     {
         Vector2 movementDirection = default;
-        if (input.IsKeyDown(Key.W)) movementDirection += new Vector2(0, 1);
-        if (input.IsKeyDown(Key.S)) movementDirection += new Vector2(0, -1);
-        if (input.IsKeyDown(Key.A)) movementDirection += new Vector2(-1, 0);
-        if (input.IsKeyDown(Key.D)) movementDirection += new Vector2(1, 0);
+        if (!frozen)
+        {
+            if (input.IsKeyDown(Key.W)) movementDirection += new Vector2(0, 1);
+            if (input.IsKeyDown(Key.S)) movementDirection += new Vector2(0, -1);
+            if (input.IsKeyDown(Key.A)) movementDirection += new Vector2(-1, 0);
+            if (input.IsKeyDown(Key.D)) movementDirection += new Vector2(1, 0);
+        }
         var movementDirectionLengthSquared = movementDirection.LengthSquared();
         if (movementDirectionLengthSquared > 0)
             movementDirection /= MathF.Sqrt(movementDirectionLengthSquared);
 
         ref var character = ref characters.GetCharacterByBodyHandle(bodyHandle);
-        character.TryJump = input.WasKeyPressed(Key.Space);
+        character.TryJump = !frozen && input.WasKeyPressed(Key.Space);
         var characterBody = new BodyReference(bodyHandle, characters.Simulation.Bodies);
         var effectiveSpeed = (input.IsKeyDown(Key.ShiftLeft) || input.IsKeyDown(Key.ShiftRight)) ? speed * 1.75f : speed;
         var newTargetVelocity = movementDirection * effectiveSpeed;
