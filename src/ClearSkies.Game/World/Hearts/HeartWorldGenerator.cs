@@ -7,9 +7,8 @@ namespace ClearSkies.Game.Generation;
 /// <summary>
 /// Generates the "island hearts" world: a <see cref="ContinentTerrain"/> of which only what the hearts of
 /// <see cref="HeartGrid"/> hold up exists. A block is solid where it is under the terrain surface and inside some
-/// heart's support. A surface heart's island has the terrain for its top (grass, sand, snow by height) and hangs deeper
-/// under high ground (a root); a buried heart's island is a slab with its own rolling top, unless the terrain is lower
-/// there. Sides are where supports cut through the ground (vertical cliffs showing rock layers along a cliff support's
+/// heart's support. An island's top is the terrain (grass, sand, snow by height) where the terrain is lower than its
+/// support's top, and the support's own rolling top elsewhere. Sides are where supports cut through the ground (vertical cliffs showing rock layers along a cliff support's
 /// cliff sides). Overlapping supports merge into one island.
 ///
 /// Per column this is a union of height spans, one per heart whose support covers it, clipped by the terrain surface.
@@ -22,9 +21,6 @@ public sealed class HeartWorldGenerator : IWorldGenerator
 
     /// <summary>More than the terrain can rise above the highest of a chunk column's corners and centre.</summary>
     private const float TerrainRiseMargin = 96f;
-
-    /// <summary>How far apart the terrain samples averaged for a root are, in blocks (see Heart.Span).</summary>
-    private const float RootBlur = 96f;
 
     private readonly ulong _seed;
     private readonly ContinentTerrain _terrain;
@@ -42,7 +38,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         if (count == 0) return 0;
 
         // Nothing is above the terrain: bound it over the column (its highest sample, plus more than it can rise
-        // between samples), which also bounds how deep a surface heart's root goes.
+        // between samples).
         float terrainTop = float.MinValue;
         for (int j = 0; j <= 2; j++)
         for (int i = 0; i <= 2; i++)
@@ -52,7 +48,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         ulong bits = 0;
         for (int i = 0; i < count; i++)
         {
-            float bottom = MathF.Max(hearts[i].YMin - hearts[i].Root(terrainTop), HeartGrid.LowestBottom);
+            float bottom = MathF.Max(hearts[i].YMin, HeartGrid.LowestBottom);
             int lo = System.Math.Max((int)MathF.Floor(bottom / S) - minChunkY, 0);
             float top = MathF.Min(MathF.Min(hearts[i].YMax, terrainTop), IslandGrid.WorldTop - 1);
             int hi = System.Math.Min((int)MathF.Floor(top / S) - minChunkY, 63);
@@ -85,16 +81,12 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     {
         Span<(float Lo, float Hi)> raw = stackalloc (float, float)[64];
         float surface = terrain.Height(wx, wz);
-        float groundLevel = float.NaN;
         int n = 0;
         foreach (ref readonly var h in hearts)
         {
             if (MathF.Abs(h.X - wx) >= h.Reach || MathF.Abs(h.Z - wz) >= h.Reach) continue;
-            if (h.Surface && float.IsNaN(groundLevel))
-                groundLevel = (surface + terrain.Height(wx + RootBlur, wz) + terrain.Height(wx - RootBlur, wz)
-                               + terrain.Height(wx, wz + RootBlur) + terrain.Height(wx, wz - RootBlur)) * 0.2f;
-            if (!h.Span(wx, wz, groundLevel, out float bottom, out float top)) continue;
-            bottom = MathF.Max(bottom, HeartGrid.LowestBottom); // a deep root stops above the cloud sea
+            if (!h.Span(wx, wz, out float bottom, out float top)) continue;
+            bottom = MathF.Max(bottom, HeartGrid.LowestBottom); // a deep spike stops above the cloud sea
             top = MathF.Min(top, surface);
             if (top > bottom && n < raw.Length) raw[n++] = (bottom, top);
         }
@@ -164,12 +156,10 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     }
 }
 
-/// <summary>Clouds bank up over the hearts world's bigger surface islands (large and medium surface hearts): 1 over one and out
-/// to <see cref="Near"/> blocks past its support, easing to 0 by <see cref="Far"/> blocks past it.</summary>
+/// <summary>Clouds bank up over the hearts world's clusters of fragments: the cluster field, widened.</summary>
 public sealed class HeartCloudDensity : ICloudDensityMap
 {
-    private const float Near = 150f;
-    private const float Far  = 1100f;
+    private const float Reach = 300f;
 
     private readonly ulong _seed;
 
@@ -177,16 +167,11 @@ public sealed class HeartCloudDensity : ICloudDensityMap
 
     public float Density(float x, float z)
     {
-        Span<Heart> hearts = stackalloc Heart[128];
-        int n = HeartGrid.Collect(_seed, HeartKind.SurfaceLarge, x - Far, z - Far, x + Far, z + Far, hearts, 0);
-        n = HeartGrid.Collect(_seed, HeartKind.SurfaceMedium, x - Far, z - Far, x + Far, z + Far, hearts, n);
-        float best = 0f;
-        foreach (var h in hearts[..n])
+        float best = HeartGrid.ClusterField(_seed, x, z);
+        for (int i = 0; i < 8 && best < 1f; i++)
         {
-            float ex = x - h.X, ez = z - h.Z;
-            float past = MathF.Sqrt(ex * ex + ez * ez) - h.Radius;
-            float t = Math.Clamp((past - Near) / (Far - Near), 0f, 1f);
-            best = MathF.Max(best, 1f - t * t * (3f - 2f * t));
+            float a = i * (MathF.Tau / 8f);
+            best = MathF.Max(best, 0.8f * HeartGrid.ClusterField(_seed, x + Reach * MathF.Cos(a), z + Reach * MathF.Sin(a)));
         }
         return best;
     }

@@ -69,7 +69,7 @@ public sealed class ContinentTerrain
     public float Patch(float x, float z) => 0.5f + 0.5f * _patches.GetNoise(x, z);
 
     /// <summary>The block at height y in a column whose solid span ends at <paramref name="top"/>: cover by the top's
-    /// height (whether it is the terrain surface or a buried heart's slab top; those are to be decorated differently
+    /// height (whether it is the terrain surface or a support's own top; those are to be decorated differently
     /// later), then rock layers (<paramref name="strata"/> from <see cref="Strata"/>, <paramref name="patch"/> from
     /// <see cref="Patch"/>).</summary>
     public static BlockId Block(int y, int top, float strata, float patch)

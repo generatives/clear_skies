@@ -2,11 +2,10 @@ using System.Collections.Concurrent;
 
 namespace ClearSkies.Game.Generation;
 
-/// <summary>The kinds of hearts, each with its own grid (see <see cref="HeartGrid"/>). Surface hearts sit just under the
-/// terrain surface and hold up everything above them, so their islands' tops are the terrain (hills, mountains, snow
-/// peaks). Buried hearts are scattered through the ground in 3D and each holds up a slab: a bounded height with its own
-/// noisy, mostly flat top, so a mountain or the deep ground becomes a stack of islands.</summary>
-public enum HeartKind { SurfaceLarge, SurfaceMedium, SurfaceSmall, BuriedLarge, BuriedMedium, BuriedSmall }
+/// <summary>The kinds of hearts, each with its own grid (see <see cref="HeartGrid"/>). Fragments are packed tightly in
+/// clusters (<see cref="HeartGrid.ClusterField"/>), a few dozen blocks apart: the terrain broken into pieces, its shape
+/// still readable across them. Medium and small hearts are outlying islands around the clusters, and on chains.</summary>
+public enum HeartKind { Fragment, Medium, Small }
 
 /// <summary>How a heart's support is shaped, and so the island it holds.</summary>
 public enum SupportShape
@@ -23,9 +22,10 @@ public enum SupportShape
 
 /// <summary>
 /// One island heart and the support around it: the part of the <see cref="ContinentTerrain"/> inside the support is the
-/// island the heart holds up. Positions are world blocks. For each column the support is one height span
-/// (<see cref="Span"/>): a surface heart's goes up to the top of the world (the terrain decides the island's top), a buried
-/// heart's to its own rolling top <see cref="Up"/> above it.
+/// island the heart holds up. Positions are world blocks. Hearts are anywhere in the ground; each holds up a chunk of it,
+/// for each column one height span (<see cref="Span"/>) up to a rolling top about <see cref="Up"/> above the heart. Where
+/// the terrain surface is lower than that, the terrain is the island's top (grass, hills, peaks); elsewhere the top is
+/// the support's own, mostly flat.
 /// </summary>
 public struct Heart
 {
@@ -33,8 +33,8 @@ public struct Heart
     public SupportShape Shape;
     public float X, Y, Z;
     public float Radius;
-    public float Up;          // buried: height of the slab's top above the heart
-    public float Roll;        // buried: how far the top rolls up and down
+    public float Up;          // height of the support's top above the heart
+    public float Roll;        // how far the top rolls up and down
     public float Wall;        // lens: underside depth below the heart; cliff/spire: depth of the walls below it
     public float Spike;       // cliff/spire: depth of the cone below the walls
     public float SpikePower;  // cliff/spire: the cone's profile ((1 - t)^power: under 1 bulges, over 1 is pointed)
@@ -43,32 +43,14 @@ public struct Heart
     public int Sides;         // cliff/spire: the outline's corners
     public uint Id;           // per-heart noise (outline corners, which sides are cliffs, lens edge wobble, the top)
 
-    public readonly bool Surface => Kind <= HeartKind.SurfaceSmall;
-
     /// <summary>The farthest the support reaches from the heart, horizontally.</summary>
     public readonly float Reach => Radius * 1.2f;
 
-    /// <summary>The support's lowest point, but for a surface heart's root (see <see cref="Root"/>).</summary>
     public readonly float YMin => Shape == SupportShape.Lens ? Y - Wall - 2f : Y - MathF.Max(Wall + Spike, Band) - 2f;
-    public readonly float YMax => Surface ? IslandGrid.WorldTop : Y + Up + Roll + 1f;
+    public readonly float YMax => Y + Up + Roll + 1f;
 
-    /// <summary>How much deeper a surface heart's underside hangs per block the ground stands above the heart: high
-    /// ground has a root below it, as mountains do, so an island with a mountain on it isn't a thin slab carrying it.
-    /// At most <see cref="RootMax"/> of the radius.</summary>
-    public const float RootFactor = 0.5f, RootMax = 0.3f;
-
-    /// <summary>The deepest a root takes the support below the heart, as a share of its radius: an island is at most
-    /// about a third as deep as it is wide (a spire's spike aside).</summary>
-    public const float MaxDepth = 0.65f;
-
-    /// <summary>A surface heart's root under ground standing at <paramref name="groundLevel"/>.</summary>
-    public readonly float Root(float groundLevel)
-        => Surface ? MathF.Min(RootFactor * MathF.Max(0f, groundLevel - Y), RootMax * Radius) : 0f;
-
-    /// <summary>The support's span at column (x, z), if the column is inside it, given the terrain's broad height there
-    /// (<paramref name="groundLevel"/>: averaged over a hundred blocks or so, so a root is a broad bulge under high
-    /// ground rather than every peak mirrored).</summary>
-    public readonly bool Span(float x, float z, float groundLevel, out float bottom, out float top)
+    /// <summary>The support's span at column (x, z), if the column is inside it.</summary>
+    public readonly bool Span(float x, float z, out float bottom, out float top)
     {
         float dx = x - X, dz = z - Z;
         float d = MathF.Sqrt(dx * dx + dz * dz);
@@ -111,15 +93,9 @@ public struct Heart
             depth = MathF.Max(depth, cliff * Band);
         }
 
-        // A root barely thins towards the edge (only right at the rim), so high ground near the edge still stands on
-        // a thick base.
-        float root = Root(groundLevel);
-        if (root > 0f) depth += MathF.Min(root * MathF.Pow(1f - t * t, 0.2f), MathF.Max(0f, MaxDepth * Radius - depth));
         bottom = Y - depth;
 
-        if (Surface) { top = IslandGrid.WorldTop; return true; }
-
-        // A buried heart's slab: a broad roll plus finer bumps, dropping off towards a rounded edge (not a cliff one).
+        // The top: a broad roll plus finer bumps, dropping off towards a rounded edge (not a cliff one).
         float broad = HeartGrid.ValueNoise(Id ^ 0x70Fu, x / (Radius * 0.35f), z / (Radius * 0.35f));
         float fine = HeartGrid.ValueNoise(Id ^ 0x70Eu, x / 24f, z / 24f);
         float drop = Up * 0.6f * Smoothstep(0.7f, 1f, t) * (1f - cliff);
@@ -147,10 +123,9 @@ public struct Heart
 /// <summary>
 /// Where island hearts are. The world is a <see cref="ContinentTerrain"/> with hearts scattered through it; each heart
 /// holds up the terrain inside its support, and nothing else exists. Each <see cref="HeartKind"/> has its own grid of
-/// cells, at most one heart per cell: surface kinds on 2D cells, a heart just under the terrain surface; buried kinds on
-/// 3D cells, a heart anywhere in the ground (cells above the terrain have none). Buried hearts are as likely anywhere in
-/// the ground, and there is far more ground low down than up in the peaks, so islands are dense near the bottom of the
-/// world and rare near the top.
+/// 3D cells, at most one heart per cell, anywhere in the ground (cells above the terrain have none). Hearts are as
+/// likely anywhere in the ground, and there is far more ground low down than up in the peaks, so islands are dense near
+/// the bottom of the world and rare near the top.
 ///
 /// Where hearts are is coherent rather than even: they gather in clusters (the <see cref="Clumps"/> field) with open sky
 /// between, and the smaller ones also along narrow winding bands (the <see cref="Chains"/> field). A support may reach
@@ -158,29 +133,31 @@ public struct Heart
 /// </summary>
 public static class HeartGrid
 {
-    /// <summary>One kind's grid: cells of <see cref="CellSize"/> blocks across and (buried kinds)
-    /// <see cref="CellHeight"/> tall, a heart's radius, and the chance of a heart outside clusters and inside them.</summary>
+    /// <summary>One kind's grid: cells of <see cref="CellSize"/> blocks across and <see cref="CellHeight"/> tall, a heart's radius, and the chance of a heart outside clusters and inside them.</summary>
     private readonly record struct KindDef(int CellSize, int CellHeight, float MinRadius, float MaxRadius,
                                            float ChanceLow, float ChanceHigh);
 
     private static readonly KindDef[] Kinds =
     {
         //   cell height  radius        chance: outside, inside clusters
-        new(2600,    0,  700f, 1300f, 0f,     0.45f), // SurfaceLarge: clusters only
-        new(1100,    0,  150f,  420f, 0.02f,  0.40f), // SurfaceMedium
-        new( 448,    0,   40f,  110f, 0.005f, 0.14f), // SurfaceSmall
-        new(1600,  500,  450f,  850f, 0.02f,  0.60f), // BuriedLarge: wide, flat slabs
-        new( 700,  300,  120f,  330f, 0.04f,  0.70f), // BuriedMedium
-        new( 320,  200,   35f,  100f, 0.01f,  0.30f), // BuriedSmall
+        new( 128,  120,   38f,  100f, 0f,     0.60f), // Fragment: clusters only (radius: see FragmentMin)
+        new( 600,  300,   80f,  220f, 0.03f,  0.50f), // Medium
+        new( 320,  200,   30f,   90f, 0.01f,  0.30f), // Small
     };
 
-    public const int KindCount = 6;
+    /// <summary>A fragment's radius as a share of its cell: most leave gaps of a few dozen blocks to their neighbours
+    /// (chasms through the cluster); some are bigger and merge with them into larger pieces.</summary>
+    private const float FragmentMin = 0.3f, FragmentMax = 0.45f, BigFragmentMin = 0.55f, BigFragmentMax = 0.78f,
+                        BigFragmentChance = 0.2f;
 
-    /// <summary>How far under the terrain surface a surface heart sits.</summary>
-    private const float HeartDepthMin = 10f, HeartDepthMax = 60f;
+    /// <summary>Clusters: blobs of value noise at this spacing, their edges roughened by a finer one, gathered where the
+    /// big <see cref="Clumps"/> field is.</summary>
+    private const float ClusterSpacing = 1400f, ClusterDetail = 450f;
 
-    /// <summary>How far under the terrain a buried heart's slab top must stay, at its middle.</summary>
-    private const float BuriedCover = 20f;
+    public const int KindCount = 3;
+
+    /// <summary>How far under the terrain surface (at its middle) a heart must be.</summary>
+    private const float HeartCover = 5f;
 
     /// <summary>The lowest an island may reach: above the hearts world's cloud sea (<see cref="CloudSeaAltitude"/>).</summary>
     internal const float LowestBottom = IslandGrid.WorldBottom + 56f;
@@ -203,12 +180,7 @@ public static class HeartGrid
         float pad = def.MaxRadius * 1.2f;
         int x0 = FloorDiv(minX - pad, def.CellSize), x1 = FloorDiv(maxX + pad, def.CellSize);
         int z0 = FloorDiv(minZ - pad, def.CellSize), z1 = FloorDiv(maxZ + pad, def.CellSize);
-        int y0 = 0, y1 = 0;
-        if (def.CellHeight > 0)
-        {
-            y0 = FloorDiv(LowestBottom, def.CellHeight);
-            y1 = FloorDiv(IslandGrid.WorldTop, def.CellHeight);
-        }
+        int y0 = FloorDiv(LowestBottom, def.CellHeight), y1 = FloorDiv(IslandGrid.WorldTop, def.CellHeight);
         for (int cz = z0; cz <= z1; cz++)
         for (int cx = x0; cx <= x1; cx++)
         for (int cy = y0; cy <= y1; cy++)
@@ -252,16 +224,21 @@ public static class HeartGrid
         float roll = rng.NextFloat01();
         if (roll >= def.ChanceHigh) return false; // cheap reject
 
-        float radius = Lerp(def.MinRadius, def.MaxRadius, MathF.Pow(rng.NextFloat01(), 1.5f));
-        float x = (cx + rng.NextFloat01()) * def.CellSize;
-        float z = (cz + rng.NextFloat01()) * def.CellSize;
-        bool large = k is HeartKind.SurfaceLarge or HeartKind.BuriedLarge;
-        // The large hearts fill the clusters; the smaller ones gather over a wider area around them, and on chains.
-        float bias = large ? Clumps(seed, x, z) : MathF.Max(Clumps(seed, x, z, 0.42f, 0.6f), 0.8f * Chains(seed, x, z));
+        bool fragment = k == HeartKind.Fragment;
+        float radius = fragment
+            ? def.CellSize * (rng.NextFloat01() < BigFragmentChance ? rng.NextRange(BigFragmentMin, BigFragmentMax)
+                                                                    : rng.NextRange(FragmentMin, FragmentMax))
+            : Lerp(def.MinRadius, def.MaxRadius, MathF.Pow(rng.NextFloat01(), 1.5f));
+        // A fragment keeps off its cell's edges, so neighbours don't crowd into one another.
+        float margin = fragment ? 0.2f : 0f;
+        float x = (cx + rng.NextRange(margin, 1f - margin)) * def.CellSize;
+        float z = (cz + rng.NextRange(margin, 1f - margin)) * def.CellSize;
+        // Fragments fill the clusters; the other hearts gather over a wider area around them, and on chains.
+        float bias = fragment ? ClusterField(seed, x, z) : MathF.Max(Clumps(seed, x, z, 0.42f, 0.6f), 0.8f * Chains(seed, x, z));
         if (roll >= Lerp(def.ChanceLow, def.ChanceHigh, bias)) return false;
 
         float shapeRoll = rng.NextFloat01();
-        var shape = large ? (shapeRoll < 0.4f ? SupportShape.Lens : SupportShape.Cliff)
+        var shape = fragment ? (shapeRoll < 0.35f ? SupportShape.Lens : shapeRoll < 0.9f ? SupportShape.Cliff : SupportShape.Spire)
                   : shapeRoll < 0.55f ? SupportShape.Lens : shapeRoll < 0.9f ? SupportShape.Cliff : SupportShape.Spire;
         if (shape == SupportShape.Spire) radius *= 0.6f;
         heart = new Heart
@@ -271,17 +248,16 @@ public static class HeartGrid
             Sides = 5 + (int)(rng.NextFloat01() * 5f),
         };
 
-        // Underside: a lens's depth, or a cliff's walls and cone. Large ones are sized in blocks rather than by their
-        // radius, so a wide one stays flat; buried ones are flatter than surface ones.
-        float flat = def.CellHeight > 0 ? 0.75f : 1f;
+        // Underside: a lens's depth, or a cliff's walls and cone, by the radius.
+        float flat = fragment ? 0.7f : 0.85f;
         switch (shape)
         {
             case SupportShape.Lens:
-                heart.Wall = flat * (large ? rng.NextRange(150f, 320f) : radius * rng.NextRange(0.35f, 0.6f));
+                heart.Wall = flat * radius * rng.NextRange(0.35f, 0.6f);
                 break;
             case SupportShape.Cliff:
-                heart.Wall = flat * (large ? rng.NextRange(80f, 200f) : radius * rng.NextRange(0.2f, 0.4f));
-                heart.Spike = flat * (large ? rng.NextRange(80f, 250f) : radius * rng.NextRange(0.3f, 0.7f));
+                heart.Wall = flat * radius * rng.NextRange(0.2f, 0.4f);
+                heart.Spike = flat * radius * rng.NextRange(0.3f, 0.7f);
                 heart.SpikePower = rng.NextRange(0.6f, 1.6f);
                 heart.Band = MathF.Min(rng.NextRange(40f, 120f), radius * 0.4f);
                 break;
@@ -293,21 +269,12 @@ public static class HeartGrid
                 break;
         }
 
-        var terrain = ContinentTerrain.For(seed);
-        float surface = terrain.Height(x, z);
-        if (def.CellHeight == 0)
-        {
-            // Just under the ground at its middle; high ground elsewhere on the island stands on a root.
-            heart.Y = surface - rng.NextRange(HeartDepthMin, HeartDepthMax);
-        }
-        else
-        {
-            // Anywhere in its cell, as long as its slab is under the ground there.
-            heart.Y = (cy + rng.NextFloat01()) * def.CellHeight;
-            heart.Up = large ? rng.NextRange(30f, 80f) : rng.NextRange(15f, 40f) + radius * 0.1f;
-            heart.Roll = large ? rng.NextRange(15f, 40f) : rng.NextRange(5f, 12f) + radius * 0.06f;
-            if (heart.Y + heart.Up + heart.Roll > surface - BuriedCover) return false;
-        }
+        // Anywhere in its cell, as long as it is in the ground. Its top may reach above the terrain, which is then the
+        // island's top.
+        heart.Y = (cy + rng.NextFloat01()) * def.CellHeight;
+        if (heart.Y > ContinentTerrain.For(seed).Height(x, z) - HeartCover) return false;
+        heart.Up = fragment ? rng.NextRange(12f, 30f) + radius * 0.15f : rng.NextRange(20f, 50f) + radius * 0.15f;
+        heart.Roll = rng.NextRange(5f, 12f) + radius * 0.06f;
 
         // Too deep for the world: trim the cone, then the walls, rather than lose the island.
         float over = LowestBottom - heart.YMin;
@@ -322,12 +289,21 @@ public static class HeartGrid
     }
 
     /// <summary>0-1: how far inside a cluster (x, z) is: 0 below <paramref name="lo"/> of the cluster field, 1 above
-    /// <paramref name="hi"/> (the defaults are the large hearts' clusters; a lower range reaches around them).</summary>
+    /// <paramref name="hi"/> (a lower range reaches wider).</summary>
     public static float Clumps(ulong seed, float x, float z, float lo = 0.52f, float hi = 0.68f)
     {
         float v = 0.7f * ValueNoise((uint)seed ^ 0xC1u, x / ClumpSpacing, z / ClumpSpacing)
                 + 0.3f * ValueNoise((uint)seed ^ 0xC2u, x / ClumpDetail, z / ClumpDetail);
         return Smoothstep(lo, hi, v);
+    }
+
+    /// <summary>0-1: how far inside a cluster of fragments (x, z) is. Clusters are a kilometre or two across, a few
+    /// hundred blocks apart where the big <see cref="Clumps"/> field is, and rare outside it.</summary>
+    public static float ClusterField(ulong seed, float x, float z)
+    {
+        float v = 0.75f * ValueNoise((uint)seed ^ 0xC5u, x / ClusterSpacing, z / ClusterSpacing)
+                + 0.25f * ValueNoise((uint)seed ^ 0xC6u, x / ClusterDetail, z / ClusterDetail);
+        return Smoothstep(0.56f, 0.64f, v) * Lerp(0.15f, 1f, Clumps(seed, x, z, 0.4f, 0.6f));
     }
 
     /// <summary>0-1: 1 along narrow winding bands (where a value noise crosses its middle), fading out to either
@@ -338,20 +314,21 @@ public static class HeartGrid
         return 1f - Smoothstep(0f, ChainWidth, MathF.Abs(v - 0.5f));
     }
 
-    /// <summary>Finds a large surface heart near (x, z): the nearest to it within a few cells.</summary>
-    public static bool TryFindLarge(ulong seed, float x, float z, out Heart nearest)
+    /// <summary>Finds the middle of a cluster near (x, z): the nearest point, on a coarse grid spiralling out, well
+    /// inside one.</summary>
+    public static bool TryFindCluster(ulong seed, float x, float z, out float clusterX, out float clusterZ)
     {
-        nearest = default;
-        float best = float.MaxValue;
-        int size = Kinds[(int)HeartKind.SurfaceLarge].CellSize, cx0 = FloorDiv(x, size), cz0 = FloorDiv(z, size);
-        for (int cz = cz0 - 12; cz <= cz0 + 12; cz++)
-        for (int cx = cx0 - 12; cx <= cx0 + 12; cx++)
+        const float Step = 200f;
+        for (int ring = 0; ring < 100; ring++)
+        for (int j = -ring; j <= ring; j++)
+        for (int i = -ring; i <= ring; i++)
         {
-            if (!Placed(seed, HeartKind.SurfaceLarge, cx, 0, cz, out var h)) continue;
-            float d = (h.X - x) * (h.X - x) + (h.Z - z) * (h.Z - z);
-            if (d < best) { best = d; nearest = h; }
+            if (System.Math.Max(System.Math.Abs(i), System.Math.Abs(j)) != ring) continue;
+            clusterX = x + i * Step; clusterZ = z + j * Step;
+            if (ClusterField(seed, clusterX, clusterZ) > 0.9f) return true;
         }
-        return best < float.MaxValue;
+        clusterX = clusterZ = 0f;
+        return false;
     }
 
     internal static float ValueNoise(uint seed, float x, float z)

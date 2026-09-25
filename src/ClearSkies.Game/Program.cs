@@ -74,7 +74,7 @@ if (heartsWorld)
 var gridStore = new GridStore(host.Context, (int)((long)LightBudgetMb * 1024 * 1024 / GridStore.SlotBytes),
                               ChunkLoadSystem.WorldIndexDim(ViewDistance));
 var chunkLoadSystem = new ChunkLoadSystem(host.World, staticVolume, gridStore, generatorFactory,
-                                          ViewDistance, MinChunkY, heartsWorld ? "Hearts2" : "World2");
+                                          ViewDistance, MinChunkY, heartsWorld ? "Hearts3" : "World2");
 host.AddSystem(chunkLoadSystem, SystemStage.Logic);
 host.Renderer.AttachGridStore(gridStore);
 host.AddSystem(physicsBody, SystemStage.Logic);
@@ -133,14 +133,13 @@ if (camArg >= 0 && camArg + 1 < args.Length)
     cameraOverride = args[camArg + 1].Split(',').Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
 var camSpawn = TestScene.Build(host, seed, cameraOverride, heartsWorld ? HeartSpawn(seed) : null);
 
-// The hearts world's spawn: standing off south of the large island nearest the origin, a little above its ground,
-// looking at it.
+// The hearts world's spawn: standing off south of the cluster nearest the origin, a little above its ground, looking
+// at it.
 static (Vector3D<float> Position, float Yaw, float Pitch)? HeartSpawn(ulong seed)
 {
-    if (!HeartGrid.TryFindLarge(seed, 0f, 0f, out var h)) return null;
-    float z = h.Z - h.Reach - 150f;
-    float y = ContinentTerrain.For(seed).Height(h.X, h.Z) + 100f;
-    return (new Vector3D<float>(h.X, y, z), MathF.PI, -0.2f);
+    if (!HeartGrid.TryFindCluster(seed, 0f, 0f, out float x, out float z)) return null;
+    float y = ContinentTerrain.For(seed).Height(x, z) + 100f;
+    return (new Vector3D<float>(x, y, z - 500f), MathF.PI, -0.2f);
 }
 
 // Ray-traced lighting prototype test ship (plan doc, task 4): a small solid hull with a Lamp exposed on
