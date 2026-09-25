@@ -70,7 +70,7 @@ if (heartsWorld) SkySettings.CloudAltitude = 1250f; // the hearts world's island
 var gridStore = new GridStore(host.Context, (int)((long)LightBudgetMb * 1024 * 1024 / GridStore.SlotBytes),
                               ChunkLoadSystem.WorldIndexDim(ViewDistance));
 var chunkLoadSystem = new ChunkLoadSystem(host.World, staticVolume, gridStore, generatorFactory,
-                                          ViewDistance, MinChunkY, heartsWorld ? "Hearts" : "World2");
+                                          ViewDistance, MinChunkY, heartsWorld ? "Hearts2" : "World2");
 host.AddSystem(chunkLoadSystem, SystemStage.Logic);
 host.Renderer.AttachGridStore(gridStore);
 host.AddSystem(physicsBody, SystemStage.Logic);

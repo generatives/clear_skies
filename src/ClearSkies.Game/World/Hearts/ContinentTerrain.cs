@@ -7,7 +7,8 @@ namespace ClearSkies.Game.Generation;
 /// The whole-world continental terrain that <see cref="HeartGrid"/>'s hearts cut islands out of: a heightmap of plains
 /// low in the band, hills, and mountain ranges reaching near its top. Only what a heart supports exists; the terrain
 /// itself is never generated whole. Most of it is low, so islands are dense near the bottom of the world and rare near
-/// the top (the peaks). What covers it goes by height, hot to cold: sand low down, grass, bare rock, then snow.
+/// the top (the peaks). What covers it goes by height, hot to cold: sand low down, grass, bare rock, then snow. Its
+/// highest peaks stay well under the world's top, so none are cut flat.
 ///
 /// Thread-safe: noise sampling only reads its settings.
 /// </summary>
@@ -19,7 +20,7 @@ public sealed class ContinentTerrain
 
     // Surface bands (world Y of the terrain surface): below SandLine it is hot, sandy ground; grass up to RockLine,
     // bare rock up to SnowLine, snow above.
-    public const float SandLine = 520f, RockLine = 1150f, SnowLine = 1400f;
+    public const float SandLine = 300f, RockLine = 980f, SnowLine = 1150f;
 
     private readonly FastNoiseLite _plains;   // broad rolling lowlands
     private readonly FastNoiseLite _hills;    // hills, gated by _hillMask
@@ -51,32 +52,27 @@ public sealed class ContinentTerrain
     /// <summary>World Y of the terrain surface at (x, z).</summary>
     public float Height(float x, float z)
     {
-        float plains = 620f + 180f * _plains.GetNoise(x, z);
-        float hills = 350f * MathF.Max(0f, _hills.GetNoise(x, z)) * Smoothstep(-0.2f, 0.4f, _hillMask.GetNoise(x, z));
+        // Mostly plains and hills; mountain ranges only where their mask is high, peaking at about 1,650.
+        float plains = 430f + 170f * _plains.GetNoise(x, z);
+        float hills = 300f * MathF.Max(0f, _hills.GetNoise(x, z)) * Smoothstep(-0.1f, 0.5f, _hillMask.GetNoise(x, z));
         float r = (_ridges.GetNoise(x, z) + 1f) * 0.5f;
-        float ranges = 950f * r * r * Smoothstep(0.05f, 0.55f, _rangeMask.GetNoise(x, z));
-        float h = plains + hills + ranges;
-        if (h > 1400f) h = 1400f + (h - 1400f) * 0.5f; // peaks ease off below the world's top rather than flattening
-        return Math.Clamp(h, IslandGrid.WorldBottom + 64f, IslandGrid.WorldTop - 32f);
+        float ranges = 1000f * r * r * Smoothstep(0.1f, 0.5f, _rangeMask.GetNoise(x, z));
+        return Math.Clamp(plains + hills + ranges, IslandGrid.WorldBottom + 64f, IslandGrid.WorldTop - 32f);
     }
 
     /// <summary>How far the rock layers at column (x, z) are shifted up or down, for <see cref="Block"/>.</summary>
     public float Strata(float x, float z) => 5f * _strata.GetNoise(x, z);
 
-    /// <summary>The block at height y in a column whose solid span ends at <paramref name="top"/>: the terrain's own
-    /// cover (by the surface's height) if the span reaches the terrain surface, bare rock if the heart's support cut it
-    /// off lower; below that, rock layers (<paramref name="strata"/> from <see cref="Strata"/>).</summary>
-    public static BlockId Block(int y, int top, bool terrainTop, float strata)
+    /// <summary>The block at height y in a column whose solid span ends at <paramref name="top"/>: cover by the top's
+    /// height (whether it is the terrain surface or a buried heart's slab top; those are to be decorated differently
+    /// later), then rock layers (<paramref name="strata"/> from <see cref="Strata"/>).</summary>
+    public static BlockId Block(int y, int top, float strata)
     {
         int depth = top - y;
-        if (terrainTop)
-        {
-            if (top < SandLine) { if (depth < 4) return BlockId.Sand; }
-            else if (top < RockLine) { if (depth == 0) return BlockId.Grass; if (depth < 4) return BlockId.Dirt; }
-            else if (top < SnowLine) { if (depth < 2) return BlockId.Rock; }
-            else if (depth < 3) return BlockId.Snow;
-        }
-        else if (depth < 2) return BlockId.Rock;
+        if (top < SandLine) { if (depth < 4) return BlockId.Sand; }
+        else if (top < RockLine) { if (depth == 0) return BlockId.Grass; if (depth < 4) return BlockId.Dirt; }
+        else if (top < SnowLine) { if (depth < 2) return BlockId.Rock; }
+        else if (depth < 3) return BlockId.Snow;
 
         // Rock layers: bands a few blocks thick, wobbling a little, alternating stone with darker rock, so cliff faces
         // show strata.
