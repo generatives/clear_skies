@@ -14,7 +14,10 @@ namespace ClearSkies.Engine.Rendering.WebGpu;
 /// </summary>
 public sealed unsafe class Renderer : IDisposable
 {
-    private const int MaxObjects = 4096;
+    // Draws per frame (each takes one ModelStride slot of the model uniform buffer). Chunks draw nearest first, so
+    // hitting this drops the farthest ones — and the sky — which with a streaming budget of ~4400 chunks (see
+    // ChunkLoadSystem) plus model blocks, ships and clouds used to cut distant islands off at 4096.
+    private const int MaxObjects = 16384;
     private const ulong ModelStride = 256;   // >= minUniformBufferOffsetAlignment
     private const ulong CameraSize  = 240;   // two mat4x4<f32> (view, proj) + seven vec4<f32> (sun, light params, camera position, fog, zenith, horizon, clouds)
     private const ulong ModelSize   = 96;    // mat4x4<f32> + vec3<i32> chunk + i32 grid + vec4<f32> params
