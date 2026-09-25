@@ -366,7 +366,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     }
 }
 
-/// <summary>Clouds bank up over the hearts world's clusters: the cluster field, widened.</summary>
+/// <summary>Clouds lie over the hearts world's continents, thicker over its clusters, and clear over the gaps between
+/// continents: other land shows from afar as a bank of cloud.</summary>
 public sealed class HeartCloudDensity : ICloudDensityMap
 {
     private const float Reach = 300f;
@@ -377,12 +378,14 @@ public sealed class HeartCloudDensity : ICloudDensityMap
 
     public float Density(float x, float z)
     {
-        float best = HeartGrid.ClusterField(_seed, x, z);
-        for (int i = 0; i < 8 && best < 1f; i++)
+        float continent = HeartGrid.Continent(_seed, x, z);
+        if (continent <= 0f) return 0f;
+        float cluster = HeartGrid.ClusterField(_seed, x, z);
+        for (int i = 0; i < 8 && cluster < 1f; i++)
         {
             float a = i * (MathF.Tau / 8f);
-            best = MathF.Max(best, 0.8f * HeartGrid.ClusterField(_seed, x + Reach * MathF.Cos(a), z + Reach * MathF.Sin(a)));
+            cluster = MathF.Max(cluster, 0.8f * HeartGrid.ClusterField(_seed, x + Reach * MathF.Cos(a), z + Reach * MathF.Sin(a)));
         }
-        return best;
+        return continent * (0.6f + 0.4f * cluster);
     }
 }

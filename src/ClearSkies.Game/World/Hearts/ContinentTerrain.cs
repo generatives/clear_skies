@@ -37,7 +37,7 @@ public sealed class ContinentTerrain
         _ranges = Noise(seed + 13, FastNoiseLite.FractalType.FBm, 1, 0.00007f);
         _warpX = Noise(seed + 14, FastNoiseLite.FractalType.FBm, 2, 0.0002f);
         _warpZ = Noise(seed + 15, FastNoiseLite.FractalType.FBm, 2, 0.0002f);
-        _peaks = Noise(seed + 18, FastNoiseLite.FractalType.Ridged, 4, 0.0006f);
+        _peaks = Noise(seed + 18, FastNoiseLite.FractalType.Ridged, 4, 0.0009f);
         _strata = Noise(seed + 16, FastNoiseLite.FractalType.FBm, 2, 0.01f);
         _patches = Noise(seed + 17, FastNoiseLite.FractalType.FBm, 3, 0.012f);
     }
@@ -52,28 +52,38 @@ public sealed class ContinentTerrain
         return n;
     }
 
-    /// <summary>World Y of the terrain surface at (x, z): low plains almost everywhere, rising gradually through
-    /// foothills to wide mountain ranges a few kilometres across and several apart, peaking at about 1,600.</summary>
+    /// <summary>World Y of the terrain surface at (x, z): low plains, rising gradually through highlands to sharp
+    /// mountain ranges a few kilometres across and several apart, peaking at about 1,650.</summary>
     public float Height(float x, float z)
     {
         float plains = PlainsLevel + 45f * _plains.GetNoise(x, z);
+        float spine = Spine(x, z);
+        float high = 1f - Smoothstep(HighCore, HighEdge, spine);   // the long, gentle rise, with hills
+        float core = RangeCore(spine);                             // the range itself
 
-        // Nearness to a range's spine: 0 on it, rising away from it.
-        float wx = x + RangeWarp * _warpX.GetNoise(x, z), wz = z + RangeWarp * _warpZ.GetNoise(x, z);
-        float spine = MathF.Abs(_ranges.GetNoise(wx, wz));
-        float foot = 1f - Smoothstep(FootCore, FootEdge, spine);   // the long rise, with hills
-        float core = 1f - Smoothstep(0f, RangeEdge, spine);        // the range itself
-
-        float hills = foot * (FootRise * foot + 220f * MathF.Max(0f, _hills.GetNoise(x, z)));
+        float hills = high * (HighRise * high + 180f * MathF.Max(0f, _hills.GetNoise(x, z)));
+        // Sharp peaks: ridged detail, its ridges sharpened, standing on the range's rise.
         float p = (_peaks.GetNoise(x, z) + 1f) * 0.5f;
-        float mountains = RangeRise * core * core * (0.6f + 0.4f * p);
+        float mountains = RangeRise * MathF.Pow(core, 1.6f) * (0.5f + 0.5f * p * MathF.Sqrt(p));
         return Math.Clamp(plains + hills + mountains, IslandGrid.WorldBottom + 64f, IslandGrid.WorldTop - 32f);
     }
 
-    // Ranges: the spine's noise within RangeEdge of zero is mountains, within FootEdge foothills; bent by up to
-    // RangeWarp blocks.
-    private const float RangeEdge = 0.35f, FootCore = 0.15f, FootEdge = 0.75f, RangeWarp = 800f;
-    private const float FootRise = 280f, RangeRise = 1200f;
+    /// <summary>0-1: how far into a mountain range (x, z) is: 1 on its spine, 0 past its edge.</summary>
+    public float RangeCore(float x, float z) => RangeCore(Spine(x, z));
+
+    private static float RangeCore(float spine) => 1f - Smoothstep(0f, RangeEdge, spine);
+
+    /// <summary>Nearness to a range's spine: 0 on it, rising away from it.</summary>
+    private float Spine(float x, float z)
+    {
+        float wx = x + RangeWarp * _warpX.GetNoise(x, z), wz = z + RangeWarp * _warpZ.GetNoise(x, z);
+        return MathF.Abs(_ranges.GetNoise(wx, wz));
+    }
+
+    // Ranges: the spine's noise within RangeEdge of zero is mountains, within HighEdge highlands (full height inside
+    // HighCore); bent by up to RangeWarp blocks.
+    private const float RangeEdge = 0.3f, HighCore = 0.1f, HighEdge = 0.85f, RangeWarp = 800f;
+    private const float HighRise = 350f, RangeRise = 1250f;
 
     /// <summary>The plains' average height: low, just above the cloud sea, so they are a floor of land under the
     /// broken-up foothills and ranges.</summary>
