@@ -42,7 +42,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     private readonly List<GpuMesh> _removed = new();
 
     private int _totalMeshed;
-    private double _uploadMs;
+    private double _uploadMs, _createMs, _writeMs, _uploadKb;
 
     /// <summary>A model block's cell and orientation as found by the worker; resolved to a <see cref="ModelBlock"/>
     /// (which needs the GPU model) on the main thread.</summary>
@@ -191,6 +191,9 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                     mesh = _renderer.UploadPackedMesh(r.Packed.AsSpan(0, r.Bytes), (ulong)r.VertCount * Vertex.SizeBytes,
                                                       (uint)r.IdxCount, (uint)r.WireCount);
                     _uploadMs += 0.05 * (System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds - _uploadMs);
+                    _createMs += 0.05 * (_renderer.LastCreateMs - _createMs);
+                    _writeMs  += 0.05 * (_renderer.LastWriteMs - _writeMs);
+                    _uploadKb += 0.05 * (r.Bytes / 1024.0 - _uploadKb);
                 }
 
                 // The chunk's voxel base and the volume dims are derived live at draw time from the volume's
@@ -292,7 +295,8 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
         ImGui.Text($"Jobs in flight: {_inFlight} / {MaxInFlight}, chunks waiting to mesh: {_dirtyChunks.Count:N0}");
         ImGui.Text($"Main thread (smoothed): results {_applyMs:F2} ms, choosing + dispatch {_dispatchMs:F2} ms, " +
                    $"freeing meshes {_cleanupMs:F2} ms");
-        ImGui.Text($"Upload (main thread, smoothed): {_uploadMs:F2} ms per chunk");
+        ImGui.Text($"Upload (main thread, smoothed): {_uploadMs:F2} ms per chunk " +
+                   $"(creating the buffer {_createMs:F2} ms, writing it {_writeMs:F2} ms, {_uploadKb:F0} KB)");
         ImGui.Text($"Chunks meshed (lifetime): {_totalMeshed}");
     }
 }

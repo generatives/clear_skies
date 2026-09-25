@@ -1057,10 +1057,20 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     /// buffer and one write, where separate buffers cost three of each.</summary>
     public GpuMesh UploadPackedMesh(ReadOnlySpan<byte> packed, ulong vertexBytes, uint indexCount, uint wireframeIndexCount)
     {
+        long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
         var buf = GpuBuffer.Create(_ctx, (ulong)packed.Length, BufferUsage.Vertex | BufferUsage.Index | BufferUsage.CopyDst);
+        long t1 = System.Diagnostics.Stopwatch.GetTimestamp();
         buf.Write(0, packed);
+        long t2 = System.Diagnostics.Stopwatch.GetTimestamp();
+        LastCreateMs = (t1 - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        LastWriteMs  = (t2 - t1) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
         return new GpuMesh(buf, vertexBytes, indexCount, wireframeIndexCount);
     }
+
+    /// <summary>How long the last <see cref="UploadPackedMesh"/> spent creating its buffer and writing it (ms), for
+    /// the meshing panel.</summary>
+    public double LastCreateMs { get; private set; }
+    public double LastWriteMs { get; private set; }
 
     /// <summary>Upload with an explicit wireframe index buffer (e.g. 12 cube edges instead of diagonal-filled faces).</summary>
     public GpuMesh UploadMesh(ReadOnlySpan<Vertex> vertices, ReadOnlySpan<uint> indices, ReadOnlySpan<uint> wireframeIndices)
