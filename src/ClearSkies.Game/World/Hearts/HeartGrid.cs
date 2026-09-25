@@ -2,8 +2,9 @@ namespace ClearSkies.Game.Generation;
 
 /// <summary>One island heart: it holds up the ground nearer to it than to any other heart (its piece), if it is alive.
 /// Positions are world blocks. A heart that doesn't <paramref name="Exists"/> (outside its layer's band) is no heart at
-/// all: it holds nothing and leaves the ground to others.</summary>
-public readonly record struct Heart(float X, float Y, float Z, bool Alive, bool Exists);
+/// all: it holds nothing and leaves the ground to others. <paramref name="Drop"/> is how far its piece's top is worn
+/// down, 0-1 of the most (see HeartWorldGenerator).</summary>
+public readonly record struct Heart(float X, float Y, float Z, bool Alive, bool Exists, float Drop);
 
 /// <summary>
 /// Where island hearts are. The world is a <see cref="ContinentTerrain"/> broken into pieces: hearts sit all through
@@ -76,7 +77,8 @@ public static class HeartGrid
         float y = (cy + 0.5f + Jitter * (rng.NextFloat01() - 0.5f)) * l.CellHeight;
         float z = (cz + 0.5f + Jitter * (rng.NextFloat01() - 0.5f)) * l.CellSize;
         bool exists = y >= l.YMin && y < l.YMax;
-        return new Heart(x, y, z, exists && rng.NextFloat01() < AliveChance(seed, x, y, z), exists);
+        bool alive = exists && rng.NextFloat01() < AliveChance(seed, x, y, z);
+        return new Heart(x, y, z, alive, exists, rng.NextFloat01());
     }
 
     /// <summary>How likely a heart at (x, y, z) is to be alive: by height and the mountain ranges, within a continent.</summary>

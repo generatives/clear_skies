@@ -43,6 +43,15 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     /// <summary>Solid runs thinner than this are worn away: slivers where the terrain surface just grazes a piece.</summary>
     private const int MinThickness = 6;
 
+    // A piece's top is the terrain worn down: where the terrain there stands above the terrain at its heart, only
+    // Flatten of the difference is left, and the whole top is lowered by up to MaxDrop (each piece its own amount).
+    // So tops are flatter than the land they came from, and neighbours don't line up.
+    private const float Flatten = 0.45f, MaxDrop = 30f;
+
+    // A top is bare (see ContinentTerrain.Block) the further it is below the terrain surface, from BareFrom to
+    // BareFull blocks, and at least Shaded if land lies over it within ShadeReach blocks.
+    private const float BareFrom = 12f, BareFull = 60f, Shaded = 0.75f, ShadeReach = 250f;
+
     /// <summary>How far above <see cref="HeartGrid.LowestBottom"/> the world's rough bottom reaches.</summary>
     private const float BottomRoughness = 30f;
 
@@ -94,6 +103,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     private readonly byte[] _spanCount = new byte[S * S];
     private readonly float[] _strata = new float[S * S];
     private readonly float[] _patch = new float[S * S];
+    private readonly float[] _bare = new float[S * S * MaxSpans];
     private readonly float[] _height = new float[S * S];
     private readonly float[] _bottomAt = new float[S * S];
 
@@ -105,6 +115,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                            _first = new int[HeartGrid.Layers.Length];
     private float[] _hx = Array.Empty<float>(), _hy = Array.Empty<float>(), _hz = Array.Empty<float>();
     private bool[] _alive = Array.Empty<bool>(), _exists = Array.Empty<bool>();
+    private float[] _hs = Array.Empty<float>(), _drop = Array.Empty<float>(); // terrain height at the heart; its Drop
 
     public void Generate(ChunkData data, ChunkPosition pos)
     {
@@ -120,7 +131,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 var (lo, hi) = _spans[col * MaxSpans + s];
                 int y0 = System.Math.Max(lo, originY), y1 = System.Math.Min(hi, originY + S - 1);
                 for (int y = y0; y <= y1; y++)
-                    data.Set(lx, y - originY, lz, ContinentTerrain.Block(y, hi, _strata[col], _patch[col]));
+                    data.Set(lx, y - originY, lz, ContinentTerrain.Block(y, hi, _strata[col], _patch[col], _bare[col * MaxSpans + s]));
             }
         }
     }
@@ -180,7 +191,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                     float t = WearBlend(y);
                     float across = (FloorWear + (UpperWear - FloorWear) * t) * wearNoise + CrackSlack;
                     float up = (FloorWearUp + (UpperWearUp - FloorWearUp) * t) * wearNoise * HeartGrid.VerticalScale + CrackSlack;
-                    solid = Solid(px, (y + lift) * HeartGrid.VerticalScale, pz, across, up, out float clear);
+                    solid = Solid(px, (y + lift) * HeartGrid.VerticalScale, pz, y, _height[col], across, up, out float clear);
                     step = System.Math.Max(1, (int)clear);
                     // Where wear grows with height, not so far that it grows by more than CrackSlack.
                     if (y > HeartGrid.FloorTop + CrackFrom && y < HeartGrid.FloorTop + CrackFrom + CrackOver)
@@ -198,6 +209,13 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             if (spans == 0) continue;
             _strata[col] = _terrain.Strata(wx, wz);
             _patch[col] = _terrain.Patch(wx, wz);
+            for (int sp = 0; sp < spans; sp++)
+            {
+                int hi = _spans[col * MaxSpans + sp].Hi;
+                float bare = Math.Clamp((_height[col] - hi - BareFrom) / (BareFull - BareFrom), 0f, 1f);
+                if (sp + 1 < spans && _spans[col * MaxSpans + sp + 1].Lo - hi < ShadeReach) bare = MathF.Max(bare, Shaded);
+                _bare[col * MaxSpans + sp] = bare;
+            }
         }
     }
 
@@ -215,25 +233,25 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     /// <summary>Whether the point at scaled position (sx, sy, sz) is in a live piece, worn back from its faces by
     /// <paramref name="wearAcross"/> and <paramref name="wearUp"/> (scaled space), and how many blocks straight up it
     /// stays so (<paramref name="clear"/>).</summary>
-    private bool Solid(float sx, float sy, float sz, float wearAcross, float wearUp, out float clear)
+    private bool Solid(float sx, float sy, float sz, float y, float surface, float wearAcross, float wearUp, out float clear)
     {
         // The hearts to search: those in the cells around the point in each layer whose band is within a cell of it.
         // Going up, that set changes at the next cell boundary of a searched layer, or where another layer comes
         // within reach: no skipping past either.
         Span<int> near = stackalloc int[27 * 3];
         int count = 0;
-        float y = sy / HeartGrid.VerticalScale, setChange = float.MaxValue;
+        float ly = sy / HeartGrid.VerticalScale, setChange = float.MaxValue;
         for (int l = 0; l < HeartGrid.Layers.Length; l++)
         {
             var layer = HeartGrid.Layers[l];
-            if (y < layer.YMin - layer.CellHeight) { setChange = MathF.Min(setChange, layer.YMin - layer.CellHeight - y); continue; }
-            if (y > layer.YMax + layer.CellHeight) continue;
+            if (ly < layer.YMin - layer.CellHeight) { setChange = MathF.Min(setChange, layer.YMin - layer.CellHeight - ly); continue; }
+            if (ly > layer.YMax + layer.CellHeight) continue;
             if (_nx[l] == 0) continue;
             int cx = (int)MathF.Floor(sx / layer.CellSize) - _cx0[l];
             int cy = (int)MathF.Floor(sy / layer.CellSize) - _cy0[l];
             int cz = (int)MathF.Floor(sz / layer.CellSize) - _cz0[l];
             setChange = MathF.Min(setChange, ((cy + _cy0[l] + 1) * layer.CellSize - sy) / HeartGrid.VerticalScale);
-            if (y > layer.YMax) setChange = MathF.Min(setChange, layer.YMax + layer.CellHeight - y);
+            if (ly > layer.YMax) setChange = MathF.Min(setChange, layer.YMax + layer.CellHeight - ly);
             for (int k = cz - 1; k <= cz + 1; k++)
             for (int j = cy - 1; j <= cy + 1; j++)
             for (int i = cx - 1; i <= cx + 1; i++)
@@ -295,6 +313,14 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             return false;
         }
 
+        // The piece's top, worn down from the terrain: a face like the others, so the rim where it meets the sides is
+        // rounded too (but not worn back: the top is where it is).
+        float top = surface - MathF.Max(0f, surface - _hs[bi]) * (1f - Flatten) - MaxDrop * _drop[bi];
+        rates[faces] = HeartGrid.VerticalScale;
+        worn[faces] = (top - y) * HeartGrid.VerticalScale;
+        least = MathF.Min(least, worn[faces++]);
+        shrink = MathF.Max(shrink, HeartGrid.VerticalScale);
+
         // Smooth minimum: least - Rounding * ln(sum of e^-(f - least) / Rounding). It is between least and gap under
         // it, so only worked out where that straddles zero, near a piece's surface; elsewhere its lower bound serves.
         float gap = faces > 1 ? Rounding * MathF.Log(faces) : 0f;
@@ -351,7 +377,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         if (_hx.Length < total)
         {
             _hx = new float[total]; _hy = new float[total]; _hz = new float[total];
-            _alive = new bool[total]; _exists = new bool[total];
+            _alive = new bool[total]; _exists = new bool[total]; _hs = new float[total]; _drop = new float[total];
         }
         for (int l = 0; l < HeartGrid.Layers.Length; l++)
         for (int k = 0; k < _nz[l]; k++)
@@ -361,7 +387,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             int h = _first[l] + i + _nx[l] * (j + _ny[l] * k);
             var heart = HeartGrid.At(_seed, l, _cx0[l] + i, _cy0[l] + j, _cz0[l] + k);
             _hx[h] = heart.X; _hy[h] = heart.Y * HeartGrid.VerticalScale; _hz[h] = heart.Z;
-            _alive[h] = heart.Alive; _exists[h] = heart.Exists;
+            _alive[h] = heart.Alive; _exists[h] = heart.Exists; _drop[h] = heart.Drop;
+            _hs[h] = heart.Alive ? _terrain.Height(heart.X, heart.Z) : 0f;
         }
     }
 }

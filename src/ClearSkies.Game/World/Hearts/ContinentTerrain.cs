@@ -98,10 +98,13 @@ public sealed class ContinentTerrain
     /// <summary>The block at height y in a column whose solid span ends at <paramref name="top"/>: cover by the top's
     /// height (whether it is the terrain surface or a support's own top; those are to be decorated differently
     /// later), then rock layers (<paramref name="strata"/> from <see cref="Strata"/>, <paramref name="patch"/> from
-    /// <see cref="Patch"/>).</summary>
-    public static BlockId Block(int y, int top, float strata, float patch)
+    /// <see cref="Patch"/>). <paramref name="bare"/>, 0-1, is how little the top is out in the open.</summary>
+    public static BlockId Block(int y, int top, float strata, float patch, float bare)
     {
         int depth = top - y;
+        // A bare top (shaded by land above it, or well below where the surface was) grows nothing: where it is more
+        // bare than the patch field, dirt, then rock the barer it is (or sand, low down).
+        bool isBare = bare > 0.2f + 0.6f * patch;
         if (top < RockLine)
         {
             // Sand where the patch field is under a threshold that falls from mostly sand at SandLine to none by
@@ -109,10 +112,11 @@ public sealed class ContinentTerrain
             float sandy = Math.Clamp((DryLine - top) / (DryLine - SandLine), 0f, 1f);
             float edge = patch - (0.1f + 0.62f * sandy);
             if (sandy > 0f && edge < 0f) { if (depth < 4) return BlockId.Sand; }
-            else if (depth == 0) return sandy > 0f && edge < 0.03f ? BlockId.Dirt : BlockId.Grass;
+            else if (isBare && bare > 0.7f) { if (depth < 1) return BlockId.Rock; }
+            else if (depth == 0) return isBare || (sandy > 0f && edge < 0.03f) ? BlockId.Dirt : BlockId.Grass;
             else if (depth < 4) return BlockId.Dirt;
         }
-        else if (top < SnowLine) { if (depth < 2) return BlockId.Rock; }
+        else if (top < SnowLine || isBare) { if (depth < 2) return BlockId.Rock; }
         else if (depth < 3) return BlockId.Snow;
 
         // Rock layers: bands a few blocks thick, wobbling a little, alternating stone with darker rock, so cliff faces
