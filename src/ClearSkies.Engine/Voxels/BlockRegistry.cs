@@ -52,7 +52,7 @@ public static class BlockRegistry
 
         // Floating-island world-gen biome blocks. Water is opaque (no alpha-blend render pipeline
         // exists yet) — it renders, collides, and blocks movement like ordinary solid ground.
-        Register(new BlockDef { Id = BlockId.Sand,  Name = "Sand",  Color = new(0.76f, 0.70f, 0.50f), IsSolid = true, LightEmission = 0, Opacity = 15, Weight = 2,
+        Register(new BlockDef { Id = BlockId.Sand,  Name = "Sand",  Color = new(0.72f, 0.58f, 0.38f), IsSolid = true, LightEmission = 0, Opacity = 15, Weight = 2,
             Texture = "dirt_sand", TextureTop = "sand", TextureBottom = "dirt" });
         Register(new BlockDef { Id = BlockId.Water, Name = "Water", Color = new(0.20f, 0.45f, 0.85f), IsSolid = true, LightEmission = 0, Opacity = 15, Weight = 3,
             Texture = "water" });

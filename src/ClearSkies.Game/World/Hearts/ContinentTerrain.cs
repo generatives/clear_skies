@@ -18,9 +18,9 @@ public sealed class ContinentTerrain
 
     public static ContinentTerrain For(ulong seed) => BySeed.GetOrAdd(seed, s => new ContinentTerrain(s));
 
-    // Surface bands (world Y of the terrain surface): below SandLine it is hot, sandy ground; grass up to RockLine,
-    // bare rock up to SnowLine, snow above.
-    public const float SandLine = 300f, RockLine = 980f, SnowLine = 1150f;
+    // Surface bands (world Y of a top): hot and sandy low down, sand patches in grass growing sparser up to DryLine,
+    // grass up to RockLine, bare rock up to SnowLine, snow above.
+    public const float SandLine = 100f, DryLine = 450f, RockLine = 980f, SnowLine = 1150f;
 
     private readonly FastNoiseLite _plains;   // broad rolling lowlands
     private readonly FastNoiseLite _hills;    // hills, gated by _hillMask
@@ -28,6 +28,7 @@ public sealed class ContinentTerrain
     private readonly FastNoiseLite _ridges;   // ridged mountain ranges, gated by _rangeMask
     private readonly FastNoiseLite _rangeMask;
     private readonly FastNoiseLite _strata;   // wobble of the rock layers that cliffs expose
+    private readonly FastNoiseLite _patches;  // sand patches in low grass
 
     private ContinentTerrain(ulong seed)
     {
@@ -37,6 +38,7 @@ public sealed class ContinentTerrain
         _ridges = Noise(seed + 14, FastNoiseLite.FractalType.Ridged, 4, 0.0005f);
         _rangeMask = Noise(seed + 15, FastNoiseLite.FractalType.FBm, 2, 0.00012f);
         _strata = Noise(seed + 16, FastNoiseLite.FractalType.FBm, 2, 0.01f);
+        _patches = Noise(seed + 17, FastNoiseLite.FractalType.FBm, 3, 0.012f);
     }
 
     private static FastNoiseLite Noise(ulong seed, FastNoiseLite.FractalType fractal, int octaves, float frequency)
@@ -63,14 +65,26 @@ public sealed class ContinentTerrain
     /// <summary>How far the rock layers at column (x, z) are shifted up or down, for <see cref="Block"/>.</summary>
     public float Strata(float x, float z) => 5f * _strata.GetNoise(x, z);
 
+    /// <summary>0-1 at column (x, z), for <see cref="Block"/>: where the sand patches in low grass are.</summary>
+    public float Patch(float x, float z) => 0.5f + 0.5f * _patches.GetNoise(x, z);
+
     /// <summary>The block at height y in a column whose solid span ends at <paramref name="top"/>: cover by the top's
     /// height (whether it is the terrain surface or a buried heart's slab top; those are to be decorated differently
-    /// later), then rock layers (<paramref name="strata"/> from <see cref="Strata"/>).</summary>
-    public static BlockId Block(int y, int top, float strata)
+    /// later), then rock layers (<paramref name="strata"/> from <see cref="Strata"/>, <paramref name="patch"/> from
+    /// <see cref="Patch"/>).</summary>
+    public static BlockId Block(int y, int top, float strata, float patch)
     {
         int depth = top - y;
-        if (top < SandLine) { if (depth < 4) return BlockId.Sand; }
-        else if (top < RockLine) { if (depth == 0) return BlockId.Grass; if (depth < 4) return BlockId.Dirt; }
+        if (top < RockLine)
+        {
+            // Sand where the patch field is under a threshold that falls from mostly sand at SandLine to none by
+            // DryLine, bare dirt along the patches' edges, grass elsewhere.
+            float sandy = Math.Clamp((DryLine - top) / (DryLine - SandLine), 0f, 1f);
+            float edge = patch - (0.1f + 0.62f * sandy);
+            if (sandy > 0f && edge < 0f) { if (depth < 4) return BlockId.Sand; }
+            else if (depth == 0) return sandy > 0f && edge < 0.03f ? BlockId.Dirt : BlockId.Grass;
+            else if (depth < 4) return BlockId.Dirt;
+        }
         else if (top < SnowLine) { if (depth < 2) return BlockId.Rock; }
         else if (depth < 3) return BlockId.Snow;
 

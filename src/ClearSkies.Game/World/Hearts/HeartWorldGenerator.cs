@@ -121,6 +121,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     private readonly (short Lo, short Hi)[] _spans = new (short, short)[S * S * MaxSpans];
     private readonly byte[] _spanCount = new byte[S * S];
     private readonly float[] _strata = new float[S * S];
+    private readonly float[] _patch = new float[S * S];
     private readonly Heart[] _hearts = new Heart[MaxHearts];
 
     public void Generate(ChunkData data, ChunkPosition pos)
@@ -137,7 +138,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 var (lo, hi) = _spans[col * MaxSpans + s];
                 int y0 = System.Math.Max(lo, originY), y1 = System.Math.Min(hi, originY + S - 1);
                 for (int y = y0; y <= y1; y++)
-                    data.Set(lx, y - originY, lz, ContinentTerrain.Block(y, hi, _strata[col]));
+                    data.Set(lx, y - originY, lz, ContinentTerrain.Block(y, hi, _strata[col], _patch[col]));
             }
         }
     }
@@ -156,7 +157,9 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             int col = lx + S * lz;
             int n = ColumnSpans(_terrain, _hearts.AsSpan(0, count), wx, wz, _spans.AsSpan(col * MaxSpans, MaxSpans));
             _spanCount[col] = (byte)n;
-            if (n > 0) _strata[col] = _terrain.Strata(wx, wz);
+            if (n == 0) continue;
+            _strata[col] = _terrain.Strata(wx, wz);
+            _patch[col] = _terrain.Patch(wx, wz);
         }
     }
 }

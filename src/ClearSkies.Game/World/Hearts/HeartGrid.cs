@@ -13,10 +13,11 @@ public enum SupportShape
 {
     /// <summary>A rounded lens: soft edges, a bowl underneath.</summary>
     Lens,
-    /// <summary>A faceted outline, some of whose sides are vertical walls (big cliff faces that show the terrain's rock
-    /// layers) and the rest rounded slopes, with a cone underneath.</summary>
+    /// <summary>A faceted outline, some of whose sides are cliffs (a vertical band of <see cref="Heart.Band"/> below the
+    /// heart, then curving under, so the faces show the terrain's rock layers) and the rest rounded slopes, with a cone
+    /// underneath.</summary>
     Cliff,
-    /// <summary>A narrower cliff shape with a long spike underneath.</summary>
+    /// <summary>A narrower cliff shape, more of its sides cliffs, with a long spike underneath.</summary>
     Spire,
 }
 
@@ -37,6 +38,7 @@ public struct Heart
     public float Wall;        // lens: underside depth below the heart; cliff/spire: depth of the walls below it
     public float Spike;       // cliff/spire: depth of the cone below the walls
     public float SpikePower;  // cliff/spire: the cone's profile ((1 - t)^power: under 1 bulges, over 1 is pointed)
+    public float Band;        // cliff/spire: how far a cliff side's vertical face goes below the heart
     public float Rotation;    // cliff/spire: the outline's rotation
     public int Sides;         // cliff/spire: the outline's corners
     public uint Id;           // per-heart noise (outline corners, which sides are cliffs, lens edge wobble, the top)
@@ -47,15 +49,21 @@ public struct Heart
     public readonly float Reach => Radius * 1.2f;
 
     /// <summary>The support's lowest point, but for a surface heart's root (see <see cref="Root"/>).</summary>
-    public readonly float YMin => Shape == SupportShape.Lens ? Y - Wall - 2f : Y - Wall - Spike - 2f;
+    public readonly float YMin => Shape == SupportShape.Lens ? Y - Wall - 2f : Y - MathF.Max(Wall + Spike, Band) - 2f;
     public readonly float YMax => Surface ? IslandGrid.WorldTop : Y + Up + Roll + 1f;
 
     /// <summary>How much deeper a surface heart's underside hangs per block the ground stands above the heart: high
-    /// ground has a root below it, as mountains do, so an island with a mountain on it isn't a thin slab carrying it.</summary>
-    public const float RootFactor = 0.6f;
+    /// ground has a root below it, as mountains do, so an island with a mountain on it isn't a thin slab carrying it.
+    /// At most <see cref="RootMax"/> of the radius.</summary>
+    public const float RootFactor = 0.5f, RootMax = 0.3f;
+
+    /// <summary>The deepest a root takes the support below the heart, as a share of its radius: an island is at most
+    /// about a third as deep as it is wide (a spire's spike aside).</summary>
+    public const float MaxDepth = 0.65f;
 
     /// <summary>A surface heart's root under ground standing at <paramref name="groundLevel"/>.</summary>
-    public readonly float Root(float groundLevel) => Surface ? RootFactor * MathF.Max(0f, groundLevel - Y) : 0f;
+    public readonly float Root(float groundLevel)
+        => Surface ? MathF.Min(RootFactor * MathF.Max(0f, groundLevel - Y), RootMax * Radius) : 0f;
 
     /// <summary>The support's span at column (x, z), if the column is inside it, given the terrain's broad height there
     /// (<paramref name="groundLevel"/>: averaged over a hundred blocks or so, so a root is a broad bulge under high
@@ -82,9 +90,9 @@ public struct Heart
         else
         {
             // A polygon of Sides corners at radii between 0.7 and 1.15 of the radius: straight faces with corners.
-            // Along a cliff side the support goes straight down (Wall below the heart, then a cone of Spike); along the
-            // others its depth rounds off towards the edge like a lens, blending over the last part of a side into the
-            // next.
+            // Underneath, walls rounding off towards the edge like a lens, and a cone of Spike. Along a cliff side the
+            // support goes at least Band straight down at the edge, so the face is a vertical band that then curves
+            // under; cliff-ness blends over the last part of a side into the next.
             float angle = MathF.Atan2(dz, dx) - Rotation;
             float sector = MathF.Tau / Sides;
             float a = (angle % MathF.Tau + MathF.Tau) % MathF.Tau / sector;
@@ -99,14 +107,14 @@ public struct Heart
             cliff = IsCliff(i);
             if (f < 0.15f) cliff = Lerp(0.5f * (IsCliff(i - 1) + cliff), cliff, f / 0.15f);
             else if (f > 0.85f) cliff = Lerp(cliff, 0.5f * (cliff + IsCliff(i + 1)), (f - 0.85f) / 0.15f);
-            float round = MathF.Pow(1f - t * t, 0.75f);
-            depth = (Wall + Spike * MathF.Pow(1f - t, SpikePower)) * Lerp(round, 1f, cliff);
+            depth = Wall * MathF.Pow(1f - t * t, 0.75f) + Spike * MathF.Pow(1f - t, SpikePower);
+            depth = MathF.Max(depth, cliff * Band);
         }
 
         // A root barely thins towards the edge (only right at the rim), so high ground near the edge still stands on
         // a thick base.
         float root = Root(groundLevel);
-        if (root > 0f) depth += root * Lerp(MathF.Pow(1f - t * t, 0.2f), 1f, cliff);
+        if (root > 0f) depth += MathF.Min(root * MathF.Pow(1f - t * t, 0.2f), MathF.Max(0f, MaxDepth * Radius - depth));
         bottom = Y - depth;
 
         if (Surface) { top = IslandGrid.WorldTop; return true; }
@@ -122,10 +130,10 @@ public struct Heart
     // Corners at 0.7-1.15 of the radius: with the faces' 3% roughness, still inside Reach.
     private readonly float Corner(int i) => Radius * (0.7f + 0.45f * HeartGrid.Hash01(Id, i, 0));
 
-    /// <summary>1 if side i (from corner i to the next) is a cliff, 0 if it slopes: most spires' sides are cliffs,
-    /// about 60% of a cliff's.</summary>
+    /// <summary>1 if side i (from corner i to the next) is a cliff, 0 if it slopes: most of a spire's sides are cliffs,
+    /// about 40% of a cliff's.</summary>
     private readonly float IsCliff(int i)
-        => HeartGrid.Hash01(Id, ((i % Sides) + Sides) % Sides, 1) < (Shape == SupportShape.Spire ? 0.85f : 0.6f) ? 1f : 0f;
+        => HeartGrid.Hash01(Id, ((i % Sides) + Sides) % Sides, 1) < (Shape == SupportShape.Spire ? 0.7f : 0.4f) ? 1f : 0f;
 
     private static float Lerp(float a, float b, float t) => a + (b - a) * t;
 
@@ -168,14 +176,18 @@ public static class HeartGrid
 
     public const int KindCount = 6;
 
-    /// <summary>How far under the terrain surface a surface heart sits (below the lowest ground around it).</summary>
+    /// <summary>How far under the terrain surface a surface heart sits.</summary>
     private const float HeartDepthMin = 10f, HeartDepthMax = 60f;
 
     /// <summary>How far under the terrain a buried heart's slab top must stay, at its middle.</summary>
     private const float BuriedCover = 20f;
 
-    /// <summary>The lowest an island may reach: above the cloud sea (see SkySettings.CloudSeaAltitude).</summary>
+    /// <summary>The lowest an island may reach: above the hearts world's cloud sea (<see cref="CloudSeaAltitude"/>).</summary>
     internal const float LowestBottom = IslandGrid.WorldBottom + 56f;
+
+    /// <summary>The hearts world's cloud sea (see SkySettings.CloudSeaAltitude): its layer ends a good way below the
+    /// lowest islands, so none sits in it.</summary>
+    public const float CloudSeaAltitude = -300f;
 
     // Clumps: value noise at these spacings (blocks); chains: where another value noise crosses its middle, within
     // ChainWidth of it.
@@ -261,7 +273,7 @@ public static class HeartGrid
 
         // Underside: a lens's depth, or a cliff's walls and cone. Large ones are sized in blocks rather than by their
         // radius, so a wide one stays flat; buried ones are flatter than surface ones.
-        float flat = def.CellHeight > 0 ? 0.6f : 1f;
+        float flat = def.CellHeight > 0 ? 0.75f : 1f;
         switch (shape)
         {
             case SupportShape.Lens:
@@ -271,11 +283,13 @@ public static class HeartGrid
                 heart.Wall = flat * (large ? rng.NextRange(80f, 200f) : radius * rng.NextRange(0.2f, 0.4f));
                 heart.Spike = flat * (large ? rng.NextRange(80f, 250f) : radius * rng.NextRange(0.3f, 0.7f));
                 heart.SpikePower = rng.NextRange(0.6f, 1.6f);
+                heart.Band = MathF.Min(rng.NextRange(40f, 120f), radius * 0.4f);
                 break;
             default:
                 heart.Wall = radius * rng.NextRange(0.15f, 0.3f);
                 heart.Spike = radius * rng.NextRange(0.8f, 1.3f);
                 heart.SpikePower = rng.NextRange(0.7f, 1.2f);
+                heart.Band = MathF.Min(rng.NextRange(40f, 120f), radius * 0.5f);
                 break;
         }
 
@@ -283,15 +297,8 @@ public static class HeartGrid
         float surface = terrain.Height(x, z);
         if (def.CellHeight == 0)
         {
-            // Just under the lowest ground around it, so its island has the terrain for a top all across and high
-            // ground in it stands on a root.
-            float ground = surface;
-            for (int i = 0; i < 6; i++)
-            {
-                float a = i * (MathF.Tau / 6f);
-                ground = MathF.Min(ground, terrain.Height(x + 0.5f * radius * MathF.Cos(a), z + 0.5f * radius * MathF.Sin(a)));
-            }
-            heart.Y = ground - rng.NextRange(HeartDepthMin, HeartDepthMax);
+            // Just under the ground at its middle; high ground elsewhere on the island stands on a root.
+            heart.Y = surface - rng.NextRange(HeartDepthMin, HeartDepthMax);
         }
         else
         {
@@ -309,6 +316,7 @@ public static class HeartGrid
             float trim = MathF.Min(over, heart.Spike);
             heart.Spike -= trim; over -= trim;
             heart.Wall -= MathF.Min(over, MathF.Max(heart.Wall - 40f, 0f));
+            heart.Band = MathF.Min(heart.Band, heart.Y - LowestBottom - 2f);
         }
         return heart.YMin >= LowestBottom;
     }
