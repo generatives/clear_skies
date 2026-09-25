@@ -54,9 +54,10 @@ const int ViewXz = 16, ViewY = 5;
 var chunkLoadSystem = new ChunkLoadSystem(host.World, staticVolume, () => new SkyWorldGenerator(seed), xzRadius: ViewXz, yRadius: ViewY);
 host.AddSystem(chunkLoadSystem, SystemStage.Logic);
 
-// Shared GPU voxel storage for lighting (world + ships). ChunkLoadSystem unloads past radius + 1, so the loaded
-// span never exceeds 2 * (radius + 1) + 1 chunks per axis — the world's toroidal table size.
-var gridStore = new GridStore(host.Context, new Vector3D<int>(2 * ViewXz + 3, 2 * ViewY + 3, 2 * ViewXz + 3));
+// Shared GPU voxel storage for lighting (world + ships). The world's table is split by island region (RegionGrid
+// cells), each region's section sized to what it holds.
+var gridStore = new GridStore(host.Context, RegionGrid.CellShift - ChunkData.Shift,
+                              (2 * ViewXz + 3) * (2 * ViewY + 3) * (2 * ViewXz + 3));
 host.Renderer.AttachGridStore(gridStore);
 host.AddSystem(physicsBody, SystemStage.Logic);
 

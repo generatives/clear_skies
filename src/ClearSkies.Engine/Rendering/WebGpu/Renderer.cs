@@ -148,10 +148,21 @@ fn wrapi(a: i32, n: i32) -> i32 {
     return n - 1 - i32(u32(-(a + 1)) % un);
 }
 
-// Chunk-table entry index of chunk c in this draw's grid, or -1 when that chunk isn't stored (the tag differs).
+// Chunk-table entry index of chunk c in this draw's grid, or -1 when that chunk isn't stored (the tag differs). The
+// world's table is a directory of regions first (bmin.w entries per side, regions 2^bmax.w chunks across): see
+// entryOf in GpuRayLightPass.
 fn entryOf(c: vec3<i32>) -> i32 {
-    let t = grids[model.grid].table;
+    let g = model.grid;
+    var t = grids[g].table;
     if (t.y <= 0) { return -1; }
+    let dirDim = grids[g].bmin.w;
+    if (dirDim > 0) {
+        let r = vec2<i32>(c.x, c.z) >> vec2<u32>(u32(grids[g].bmax.w));
+        let di = t.x + wrapi(r.x, dirDim) + dirDim * wrapi(r.y, dirDim);
+        let tag = chunkTable[2 * di + 1];
+        t = chunkTable[2 * di];
+        if (t.y <= 0 || tag.x != r.x || tag.y != r.y) { return -1; }
+    }
     let idx = t.x + wrapi(c.x, t.y) + t.y * (wrapi(c.y, t.z) + t.z * wrapi(c.z, t.w));
     let e = chunkTable[2 * idx]; // entries are two vec4s; the second (solid-brick mask) is only for rays
     if (e.y != c.x || e.z != c.y || e.w != c.z) { return -1; }

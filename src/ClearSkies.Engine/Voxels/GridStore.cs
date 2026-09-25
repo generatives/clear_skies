@@ -16,9 +16,13 @@ public sealed class GridHandle
     internal readonly Dictionary<ChunkPosition, ChunkRecord> Chunks = new();
 
     // Chunk-table section: entry index = TableBase + wrap(c.x, TDX) + TDX*(wrap(c.y, TDY) + TDY*wrap(c.z, TDZ)),
-    // the entry holding the chunk's coordinate as a tag. Toroidal for the world (it follows the camera); a ship's
-    // section just covers its chunk box, with the same arithmetic.
+    // the entry holding the chunk's coordinate as a tag. A ship's section covers its chunk box. The world's is instead
+    // a TDX x TDY directory of regions (see WorldRegion), wrapped on the region's (x, z); each region has its own
+    // section, found through its directory entry, indexed with the same arithmetic.
     internal int TableBase = -1, TDX, TDY, TDZ;
+
+    // World only: the regions with any chunk records, by region (x, z).
+    internal readonly Dictionary<(int x, int z), WorldRegion> Regions = new();
 
     // Chunk box of the grid's records (inclusive), and whether it changed since the bounds were last derived.
     internal ChunkPosition BoxMin, BoxMax;
@@ -41,6 +45,17 @@ public sealed class GridHandle
     internal bool Posed;
 }
 
+/// <summary>One region of the static world: a column of 2^RegionShift x 2^RegionShift chunks (unbounded in y) with its
+/// own chunk-table section, so the world's table only holds the regions that have chunks, each sized to what it
+/// holds rather than to a box around the camera.</summary>
+internal sealed class WorldRegion
+{
+    public int X, Z;
+    public int Base = -1, DX, DY, DZ;
+    /// <summary>Records by table index, to tell whether a new chunk would wrap onto an entry that is taken.</summary>
+    public readonly Dictionary<int, ChunkRecord> ByIndex = new();
+}
+
 /// <summary>One chunk position a grid has storage for.</summary>
 internal sealed class ChunkRecord
 {
@@ -57,8 +72,9 @@ internal sealed class ChunkRecord
 /// GPU storage shared by the static world and every ship, per the ray-traced lighting design doc:
 /// <list type="bullet">
 /// <item>an occupancy pool of 4 KB chunk slots (1 bit per voxel, word = ly + 32*lz, bit = lx);</item>
-/// <item>a chunk table of <c>(occupancy slot or sentinel, cx, cy, cz)</c> entries, one section per grid, the
-/// world's section toroidal around the camera. The coordinate is a tag, so a wrapped lookup that lands on a
+/// <item>a chunk table of <c>(occupancy slot or sentinel, cx, cy, cz)</c> entries, one section per ship and one per
+/// world region, found through a small wrapped directory of regions (see <see cref="WorldRegion"/>). Sections are
+/// indexed by wrapping the chunk coordinate, and the coordinate is a tag, so a wrapped lookup that lands on a
 /// different chunk reads as unloaded instead of aliasing onto it;</item>
 /// <item>a brick table (64 entries per chunk entry) giving each 8³ brick's light slot, or <see cref="NoSurface"/>;</item>
 /// <item>a light pool of <see cref="WordsPerSlot"/>-word brick slots, allocated only for bricks that contain a
@@ -95,9 +111,8 @@ public sealed class GridStore : IDisposable
     private const int S = ChunkData.Size;
     private const int UnusedTag = int.MinValue;
 
-    // Initial pool sizing per chunk column of the world table (measured peaks x ~1.3-1.5 headroom).
-    private const int OccSlotsPerColumn = 4;
-    private const int LightBricksPerColumn = 96;
+    // Initial light pool sizing per budgeted world chunk (measured ~28 x ~1.3 headroom).
+    private const int LightBricksPerChunk = 36;
 
     private readonly GpuContext _ctx;
 
@@ -131,7 +146,15 @@ public sealed class GridStore : IDisposable
     // Grid registry; grows (with the descriptor buffer) when every index is taken, so there is no ship limit.
     private GridHandle?[] _grids = new GridHandle?[16];
     private GridDesc[] _descs = new GridDesc[16];
-    private readonly Vector3D<int> _worldTableDims;
+    // World regions: 2^_regionShift chunks across (x and z), found through a _regionDirDim x _regionDirDim directory
+    // wrapped on the region coordinate. Suggested section boxes per region (see SetWorldRegionExtent).
+    private readonly int _regionShift;
+    private readonly int _regionDirDim;
+    private readonly Dictionary<(int x, int z), (ChunkPosition min, ChunkPosition max)> _regionExtents = new();
+
+    /// <summary>Default section box for a region with no suggested extent (built in, with no terrain), in chunks.</summary>
+    private static readonly Vector3D<int> DefaultRegionDims = new(16, 8, 16);
+    private const int RegionSlackXZ = 4, RegionSlackY = 4;
 
     /// <summary>Light slots allocated since the lighting system last drained this. They hold
     /// <see cref="EmptyDisplayPair"/> and zeroed accumulation, and need lighting.</summary>
@@ -153,32 +176,35 @@ public sealed class GridStore : IDisposable
     private readonly uint[] _brickRun = new uint[64];
     private readonly uint[] _emptyBrick;
 
-    /// <param name="worldTableChunks">The world's toroidal table size in chunks per axis. Must be at least the
-    /// span of chunks ever loaded at once, so wrapping never maps two loaded chunks to one entry.</param>
-    public GridStore(GpuContext ctx, Vector3D<int> worldTableChunks)
+    /// <param name="worldRegionShift">log2 of a world region's width in chunks: regions are 2^shift x 2^shift chunk
+    /// columns, each with its own table section.</param>
+    /// <param name="worldChunkBudget">How many world chunks are loaded at most (sizes the pools).</param>
+    /// <param name="regionDirectoryDim">The region directory is this many regions per side, wrapped; it must be larger
+    /// than the span of regions ever loaded at once, so two loaded regions never share an entry.</param>
+    public GridStore(GpuContext ctx, int worldRegionShift, int worldChunkBudget, int regionDirectoryDim = 4)
     {
         _ctx = ctx;
-        _worldTableDims = worldTableChunks;
-        int worldEntries = worldTableChunks.X * worldTableChunks.Y * worldTableChunks.Z;
+        _regionShift = worldRegionShift;
+        _regionDirDim = regionDirectoryDim;
 
-        // Pools start sized to the view distance so they don't grow (a copy + rebind hitch) during normal play.
-        // Surfaces are mostly horizontal, so what fills them scales with chunk columns, not the table's height.
-        // Measured at the 8/3 view radius (19x19 columns): peaks of ~2.6 non-uniform chunks and ~72 surface bricks
-        // per column. Ships get a fixed extra allowance on top.
-        int columns = worldTableChunks.X * worldTableChunks.Z;
+        // Pools start sized to the chunk budget so they don't grow (a copy + rebind hitch) during normal play.
+        // Measured at the old 8/3 view radius: peaks of ~2.6 non-uniform chunks and ~72 surface bricks per chunk
+        // column, i.e. ~28 surface bricks per non-uniform chunk; loaded world chunks are almost all non-uniform
+        // now that air is never loaded. Ships get a fixed extra allowance on top.
         ulong maxBytes = System.Math.Min(ctx.AdapterLimits.MaxBufferSize, ctx.AdapterLimits.MaxStorageBufferBindingSize);
-        _occCapacity   = System.Math.Min(worldEntries, columns * OccSlotsPerColumn) + 512;
-        _tableCapacity = worldEntries + 4096;
-        _lightCapacity = columns * LightBricksPerColumn + 2048;
+        _occCapacity   = worldChunkBudget + 512;
+        _tableCapacity = worldChunkBudget * 4 + 4096;
+        _lightCapacity = worldChunkBudget * LightBricksPerChunk + 2048;
         int maxLight = (int)System.Math.Min(maxBytes / SlotBytes, int.MaxValue);
         if (_lightCapacity > maxLight)
         {
             Console.WriteLine($"[grid-store] light pool estimate of {_lightCapacity} bricks exceeds this device's max buffer size; starting at {maxLight}.");
             _lightCapacity = maxLight;
         }
-        Console.WriteLine($"[grid-store] {columns} chunk columns: light pool {_lightCapacity} bricks " +
+        Console.WriteLine($"[grid-store] {worldChunkBudget} chunk budget: light pool {_lightCapacity} bricks " +
                           $"({(ulong)_lightCapacity * SlotBytes / (1024 * 1024)} MB), occupancy {_occCapacity} chunks " +
-                          $"({(ulong)_occCapacity * WordsPerChunk * 4 / (1024 * 1024)} MB)");
+                          $"({(ulong)_occCapacity * WordsPerChunk * 4 / (1024 * 1024)} MB), table {_tableCapacity} entries " +
+                          $"({(ulong)_tableCapacity * (ChunkEntryBytes + 256) / (1024 * 1024)} MB)");
 
         OccPool    = GpuBuffer.CreateStorage(ctx, (ulong)_occCapacity * WordsPerChunk * 4);
         ChunkTable = GpuBuffer.CreateStorage(ctx, (ulong)_tableCapacity * ChunkEntryBytes);
@@ -193,6 +219,17 @@ public sealed class GridStore : IDisposable
 
         ClearTableRange(0, _tableCapacity);
         _tableNext = 0;
+    }
+
+    /// <summary>Suggests the chunk box a world region's section should cover when it is first allocated (the box its
+    /// terrain can occupy). Chunks outside it still work: the section grows if one would collide.</summary>
+    public void SetWorldRegionExtent(int regionX, int regionZ, ChunkPosition min, ChunkPosition max)
+        => _regionExtents[(regionX, regionZ)] = (min, max);
+
+    /// <summary>Loaded world regions and their section sizes, for debug display.</summary>
+    public IEnumerable<(int x, int z, int dx, int dy, int dz, int chunks)> WorldRegions(GridHandle world)
+    {
+        foreach (var r in world.Regions.Values) yield return (r.X, r.Z, r.DX, r.DY, r.DZ, r.ByIndex.Count);
     }
 
     // ── Grid registration ─────────────────────────────────────────────────────
@@ -213,7 +250,7 @@ public sealed class GridStore : IDisposable
         g.Index = idx;
         g.IsWorld = isWorld;
         if (isWorld)
-            AllocateSection(g, _worldTableDims.X, _worldTableDims.Y, _worldTableDims.Z);
+            AllocateSection(g, _regionDirDim, _regionDirDim, 1); // the region directory
     }
 
     /// <summary>Releases everything a grid holds (a despawned ship).</summary>
@@ -254,6 +291,9 @@ public sealed class GridStore : IDisposable
             d.WorldToVoxel = g.WorldToVoxel;
             d.TableBase = g.TableBase; d.TDX = g.TDX; d.TDY = g.TDY; d.TDZ = g.TDZ;
             if (!g.Posed || g.TableBase < 0) d.TDX = d.TDY = d.TDZ = 0;
+            // The world's table is a region directory: its size and the region shift tell lookups so.
+            d.RegionDirDim = g.IsWorld ? _regionDirDim : 0;
+            d.RegionShift  = g.IsWorld ? _regionShift : 0;
             g.Posed = false;
             if (g.HasBox)
             {
@@ -395,25 +435,102 @@ public sealed class GridStore : IDisposable
     {
         if (g.Chunks.TryGetValue(pos, out var rec)) return rec;
 
-        if (!g.IsWorld && !SectionCovers(g, pos)) GrowShipSection(g, pos);
+        WorldRegion? region = null;
         if (g.IsWorld)
         {
-            // Two loaded chunks wrapping onto one entry would corrupt each other. ChunkLoadSystem's unload radius
-            // keeps the loaded span within the table, so this only fires if that invariant is ever broken.
-            UpdateBounds(g);
-            if (!SectionCovers(g, pos))
-            {
-                Console.WriteLine($"[grid-store] world chunk {pos} is outside the toroidal table's span; not stored.");
-                return null;
-            }
+            region = RegionFor(g, pos);
+            if (region == null) return null;
+            if (region.ByIndex.TryGetValue(RegionIndex(region, pos), out var taken) && taken.Pos != pos)
+                GrowRegion(g, region, pos);
         }
+        else if (!SectionCovers(g, pos)) GrowShipSection(g, pos);
 
         rec = new ChunkRecord { Pos = pos, Virtual = isVirtual, Air = isVirtual ? ulong.MaxValue : 0UL };
         rec.TableIndex = TableIndex(g, pos);
+        if (region != null) region.ByIndex[rec.TableIndex] = rec;
         g.Chunks[pos] = rec;
         ExtendBox(g, pos);
         WriteChunkEntry(rec);
         return rec;
+    }
+
+    private (int x, int z) RegionKey(ChunkPosition p) => (p.X >> _regionShift, p.Z >> _regionShift);
+
+    /// <summary>The region holding world chunk <paramref name="p"/>, creating it (a section plus its directory entry)
+    /// if it has none yet; null if its directory entry is held by another loaded region.</summary>
+    private WorldRegion? RegionFor(GridHandle g, ChunkPosition p)
+    {
+        var key = RegionKey(p);
+        if (g.Regions.TryGetValue(key, out var r)) return r;
+
+        int dir = DirectoryIndex(g, key.x, key.z);
+        foreach (var other in g.Regions.Values)
+            if (DirectoryIndex(g, other.X, other.Z) == dir)
+            {
+                Console.WriteLine($"[grid-store] region ({key.x},{key.z}) shares a directory entry with loaded region " +
+                                  $"({other.X},{other.Z}); chunk {p} not stored.");
+                return null;
+            }
+
+        r = new WorldRegion { X = key.x, Z = key.z };
+        if (_regionExtents.TryGetValue(key, out var ext))
+        {
+            r.DX = ext.max.X - ext.min.X + 1 + RegionSlackXZ;
+            r.DY = ext.max.Y - ext.min.Y + 1 + RegionSlackY;
+            r.DZ = ext.max.Z - ext.min.Z + 1 + RegionSlackXZ;
+        }
+        else (r.DX, r.DY, r.DZ) = (DefaultRegionDims.X, DefaultRegionDims.Y, DefaultRegionDims.Z);
+        r.Base = AllocRange(r.DX * r.DY * r.DZ);
+        g.Regions[key] = r;
+        WriteDirectoryEntry(g, r);
+        return r;
+    }
+
+    private int DirectoryIndex(GridHandle g, int rx, int rz) => g.TableBase + Wrap(rx, g.TDX) + g.TDX * Wrap(rz, g.TDY);
+
+    /// <summary>Directory entry: (section base, dims) then the region's (x, z) as its tag.</summary>
+    private void WriteDirectoryEntry(GridHandle g, WorldRegion r)
+    {
+        Span<int> e = stackalloc int[8] { r.Base, r.DX, r.DY, r.DZ, r.X, r.Z, 0, 0 };
+        ChunkTable.Write<int>((ulong)DirectoryIndex(g, r.X, r.Z) * ChunkEntryBytes, e);
+    }
+
+    private void ReleaseRegion(GridHandle g, WorldRegion r)
+    {
+        FreeRange(r.Base, r.DX * r.DY * r.DZ);
+        g.Regions.Remove((r.X, r.Z));
+        // A dims of 0 reads as "no region" to lookups (see entryOf in the shaders).
+        Span<int> e = stackalloc int[8] { -1, 0, 0, 0, 0, 0, 0, 0 };
+        ChunkTable.Write<int>((ulong)DirectoryIndex(g, r.X, r.Z) * ChunkEntryBytes, e);
+    }
+
+    private static int RegionIndex(WorldRegion r, ChunkPosition p)
+        => r.Base + Wrap(p.X, r.DX) + r.DX * (Wrap(p.Y, r.DY) + r.DY * Wrap(p.Z, r.DZ));
+
+    /// <summary>Gives a region a section big enough that its chunks plus <paramref name="p"/> no longer wrap onto one
+    /// another, growing each axis that needs it by at least half so a long build regrows rarely, and moves its
+    /// entries there. Only table entries move: light slots are addressed by chunk, so nothing needs relighting.</summary>
+    private void GrowRegion(GridHandle g, WorldRegion r, ChunkPosition p)
+    {
+        ChunkPosition mn = p, mx = p;
+        foreach (var rec in r.ByIndex.Values) { mn = Min(mn, rec.Pos); mx = Max(mx, rec.Pos); }
+        static int Grown(int dim, int span) => span <= dim ? dim : System.Math.Max(span + 2, dim + dim / 2);
+        int dx = Grown(r.DX, mx.X - mn.X + 1), dy = Grown(r.DY, mx.Y - mn.Y + 1), dz = Grown(r.DZ, mx.Z - mn.Z + 1);
+        Console.WriteLine($"[grid-store] region ({r.X},{r.Z}) section {r.DX}x{r.DY}x{r.DZ} -> {dx}x{dy}x{dz} for chunk {p}");
+
+        FreeRange(r.Base, r.DX * r.DY * r.DZ);
+        (r.DX, r.DY, r.DZ) = (dx, dy, dz);
+        r.Base = AllocRange(dx * dy * dz);
+        var recs = r.ByIndex.Values.ToList();
+        r.ByIndex.Clear();
+        foreach (var rec in recs)
+        {
+            rec.TableIndex = RegionIndex(r, rec.Pos);
+            r.ByIndex[rec.TableIndex] = rec;
+            WriteChunkEntry(rec);
+            WriteBrickRun(rec);
+        }
+        WriteDirectoryEntry(g, r);
     }
 
     private void FreeRecord(GridHandle g, ChunkRecord rec)
@@ -431,10 +548,17 @@ public sealed class GridStore : IDisposable
         ChunkTable.Write<int>((ulong)rec.TableIndex * ChunkEntryBytes, e);
         Array.Fill(_brickRun, NoSurface);
         BrickTable.Write<uint>((ulong)rec.TableIndex * 64 * 4, _brickRun);
+
+        if (g.IsWorld && g.Regions.TryGetValue(RegionKey(rec.Pos), out var region))
+        {
+            region.ByIndex.Remove(rec.TableIndex);
+            if (region.ByIndex.Count == 0) ReleaseRegion(g, region);
+        }
     }
 
     private int TableIndex(GridHandle g, ChunkPosition p)
-        => g.TableBase + Wrap(p.X, g.TDX) + g.TDX * (Wrap(p.Y, g.TDY) + g.TDY * Wrap(p.Z, g.TDZ));
+        => g.IsWorld ? RegionIndex(g.Regions[RegionKey(p)], p)
+                     : g.TableBase + Wrap(p.X, g.TDX) + g.TDX * (Wrap(p.Y, g.TDY) + g.TDY * Wrap(p.Z, g.TDZ));
 
     private static int Wrap(int a, int n) { int r = a % n; return r < 0 ? r + n : r; }
 
@@ -468,7 +592,20 @@ public sealed class GridStore : IDisposable
 
     private void AllocateSection(GridHandle g, int dx, int dy, int dz)
     {
-        int n = dx * dy * dz;
+        g.TableBase = AllocRange(dx * dy * dz);
+        g.TDX = dx; g.TDY = dy; g.TDZ = dz;
+    }
+
+    private void FreeSection(GridHandle g)
+    {
+        FreeRange(g.TableBase, g.TDX * g.TDY * g.TDZ);
+        g.TableBase = -1;
+    }
+
+    /// <summary>Takes <paramref name="n"/> consecutive table entries (first fit, else the end of the table, growing it),
+    /// cleared to unused.</summary>
+    private int AllocRange(int n)
+    {
         int start = -1;
         for (int i = 0; i < _tableFree.Count; i++)
         {
@@ -485,15 +622,22 @@ public sealed class GridStore : IDisposable
             _tableNext += n;
         }
         ClearTableRange(start, n);
-        g.TableBase = start; g.TDX = dx; g.TDY = dy; g.TDZ = dz;
+        return start;
     }
 
-    private void FreeSection(GridHandle g)
+    /// <summary>Returns entries to the free list. They aren't cleared: nothing looks them up once their section is
+    /// gone, and <see cref="AllocRange"/> clears them before they are used again.</summary>
+    private void FreeRange(int start, int n)
     {
-        int n = g.TDX * g.TDY * g.TDZ;
-        ClearTableRange(g.TableBase, n);
-        _tableFree.Add((g.TableBase, n));
-        g.TableBase = -1;
+        // Merge with free neighbours so repeated region/ship regrowth doesn't fragment the table.
+        for (int i = 0; i < _tableFree.Count; i++)
+        {
+            var (s, c) = _tableFree[i];
+            if (s + c == start) { start = s; n += c; _tableFree.RemoveAt(i--); }
+            else if (start + n == s) { n += c; _tableFree.RemoveAt(i--); }
+        }
+        if (start + n == _tableNext) _tableNext = start;
+        else _tableFree.Add((start, n));
     }
 
     private void ClearTableRange(int start, int count)
@@ -750,14 +894,15 @@ public sealed class GridStore : IDisposable
         Grids.Dispose();
     }
 
-    /// <summary>GPU grid descriptor (176 bytes); matches WGSL <c>GridDesc</c>.</summary>
+    /// <summary>GPU grid descriptor (176 bytes); matches WGSL <c>GridDesc</c> (bmin.w: region directory size, bmax.w:
+    /// region shift).</summary>
     [StructLayout(LayoutKind.Sequential)]
     private struct GridDesc
     {
         public Mat4 VoxelToWorld;
         public Mat4 WorldToVoxel;
         public int TableBase, TDX, TDY, TDZ;
-        public int MinX, MinY, MinZ, Pad0;   // voxel bounds [min, max), grid space
-        public int MaxX, MaxY, MaxZ, Pad1;
+        public int MinX, MinY, MinZ, RegionDirDim;   // voxel bounds [min, max), grid space; region directory
+        public int MaxX, MaxY, MaxZ, RegionShift;    // size (0 = the table is one plain section) and region shift
     }
 }

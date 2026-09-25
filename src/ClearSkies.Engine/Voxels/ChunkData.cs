@@ -6,6 +6,7 @@ namespace ClearSkies.Engine.Voxels;
 public sealed class ChunkData
 {
     public const int Size = 32;
+    public const int Shift = 5; // log2(Size)
 
     private readonly BlockId[] _blocks  = new BlockId[Size * Size * Size];
     private readonly BlockOrientation[] _orientations = new BlockOrientation[Size * Size * Size];

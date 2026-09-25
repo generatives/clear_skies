@@ -25,8 +25,8 @@ struct GridDesc {
     v2w: mat4x4<f32>,
     w2v: mat4x4<f32>,
     table: vec4<i32>,  // x: chunk-table base, yzw: section dims in chunks (0 = unused descriptor)
-    bmin: vec4<i32>,   // voxel bounds [bmin, bmax) of the grid's chunks, grid space
-    bmax: vec4<i32>,
+    bmin: vec4<i32>,   // xyz: voxel bounds [bmin, bmax) of the grid's chunks, grid space; w: region directory size
+    bmax: vec4<i32>,   // (0 = the table is one plain section); w: region shift (log2 of a region's width in chunks)
 };
 
 struct Params {
@@ -77,9 +77,20 @@ fn wrapi(a: i32, n: i32) -> i32 {
 // Chunk-table entry index of chunk c in grid g, or -1 when that chunk isn't stored. The table wraps, so the
 // entry's own coordinate tag decides whether it really is this chunk. Each entry is two vec4s: (occupancy slot or
 // code, cx, cy, cz) and (solid-brick mask low, high, 0, 0).
+// The world's table is instead a directory of regions (2^shift chunks across in x and z), wrapped on the region
+// coordinate, each entry (section base, dims) tagged with its region (x, z); the chunk is then looked up in that
+// region's section as above.
 fn entryOf(g: i32, c: vec3<i32>) -> i32 {
-    let t = grids[g].table;
+    var t = grids[g].table;
     if (t.y <= 0) { return -1; }
+    let dirDim = grids[g].bmin.w;
+    if (dirDim > 0) {
+        let r = vec2<i32>(c.x, c.z) >> vec2<u32>(u32(grids[g].bmax.w));
+        let di = t.x + wrapi(r.x, dirDim) + dirDim * wrapi(r.y, dirDim);
+        let tag = chunkTable[2 * di + 1];
+        t = chunkTable[2 * di];
+        if (t.y <= 0 || tag.x != r.x || tag.y != r.y) { return -1; }
+    }
     let idx = t.x + wrapi(c.x, t.y) + t.y * (wrapi(c.y, t.z) + t.z * wrapi(c.z, t.w));
     let e = chunkTable[2 * idx];
     if (e.y != c.x || e.z != c.y || e.w != c.z) { return -1; }
