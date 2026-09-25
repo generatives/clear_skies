@@ -94,26 +94,34 @@ public struct Heart
 /// As the terrain is mostly low, islands are dense near the bottom of the world and rare near the top, where only the
 /// peaks are.
 ///
-/// Where hearts are is coherent rather than even: a <see cref="Clumps"/> field makes groups of them, and narrow
-/// winding bands of the <see cref="Chains"/> field string them into chains. Supports that overlap merge into one
-/// island. Every heart's support stays inside its own cell horizontally, so a column's hearts are found by looking only
-/// at the cells it overlaps.
+/// Where hearts are is coherent rather than even. Large hearts are plateaus (<see cref="Plateau"/>): 2-4 km across but
+/// only a few hundred blocks deep, mostly cliff-sided, and only inside clusters (the <see cref="Clumps"/> field), packed
+/// so tightly that their supports overlap and merge into big broken landmasses, with chasms where they don't quite
+/// meet, and open sky between clusters. Medium and small hearts are outlying islands around the clusters, and strung
+/// along narrow winding bands of the <see cref="Chains"/> field. A support may reach past its own cell (up to the class's
+/// greatest reach), so a column's hearts are found in the cells within that reach of it.
 /// </summary>
 public static class HeartGrid
 {
     /// <summary>One class's grid: cells of <see cref="CellSize"/> blocks, each with <see cref="Slots"/> slots (a
-    /// surface heart, then deeper ones), a heart's radius, and the chance of a surface heart outside clumps and chains
-    /// and inside them. A deeper slot holds a heart with <see cref="DeepChance"/> of that.</summary>
+    /// surface heart, then deeper ones), a heart's radius, and the chance of a surface heart outside clusters and inside
+    /// them (and, but for the large class, on chains). A deeper slot holds a heart with <see cref="DeepChance"/> of
+    /// that.</summary>
     private readonly record struct ClassDef(int CellSize, int Slots, float MinRadius, float MaxRadius,
                                             float ChanceLow, float ChanceHigh, float DeepChance);
 
     private static readonly ClassDef[] Classes =
     {
-        //   cell  slots  radius       chance: outside, inside clumps/chains; deep
-        new(3072, 3,     450f, 900f,  0.25f, 0.90f,  0.35f), // Large
-        new(1280, 3,     140f, 330f,  0.12f, 0.70f,  0.30f), // Medium
-        new( 448, 2,      40f, 110f,  0.05f, 0.40f,  0.20f), // Small
+        //   cell  slots  radius        chance: outside, inside clusters; deep
+        new(2600, 1,     1100f, 1800f, 0f,    0.90f,  0f),    // Large: plateaus, clusters only
+        new(1100, 3,      180f,  450f, 0.01f, 0.50f,  0.30f), // Medium: around clusters, on chains
+        new( 448, 2,       40f,  110f, 0.003f,0.18f,  0.20f), // Small
     };
+
+    /// <summary>A plateau's support, in blocks rather than by its radius, so a wide one stays flat: height above the
+    /// heart, and below it a lens's depth or a cliff's walls and cone.</summary>
+    private const float PlateauUpMin = 250f, PlateauUpMax = 450f, PlateauLensMin = 250f, PlateauLensMax = 500f,
+                        PlateauWallMin = 120f, PlateauWallMax = 300f, PlateauSpikeMin = 150f, PlateauSpikeMax = 400f;
 
     public const int ClassCount = 3;
 
@@ -122,17 +130,20 @@ public static class HeartGrid
 
     // Clumps: value noise at these spacings (blocks); chains: where another value noise crosses its middle, within
     // ChainWidth of it.
-    private const float ClumpSpacing = 5000f, ClumpDetail = 1800f, ChainSpacing = 3500f, ChainWidth = 0.05f;
+    private const float ClumpSpacing = 9000f, ClumpDetail = 3000f, ChainSpacing = 4000f, ChainWidth = 0.04f;
 
     public static int Layers(HeartClass c) => Classes[(int)c].Slots;
 
-    /// <summary>Writes the hearts of class <paramref name="c"/> in the cells overlapping the box (every slot) into <paramref name="output"/> starting at <paramref name="count"/>, and returns the new count.</summary>
+    /// <summary>Writes the hearts of class <paramref name="c"/> whose cells are within the class's greatest reach of
+    /// the box (every slot) into <paramref name="output"/> starting at <paramref name="count"/>, and returns the new
+    /// count: every heart whose support can touch the box, and some that can't.</summary>
     public static int Collect(ulong seed, HeartClass c, float minX, float minZ, float maxX, float maxZ,
                               Span<Heart> output, int count)
     {
         var def = Classes[(int)c];
-        int x0 = FloorDiv(minX, def.CellSize), x1 = FloorDiv(maxX, def.CellSize);
-        int z0 = FloorDiv(minZ, def.CellSize), z1 = FloorDiv(maxZ, def.CellSize);
+        float pad = def.MaxRadius * 1.2f;
+        int x0 = FloorDiv(minX - pad, def.CellSize), x1 = FloorDiv(maxX + pad, def.CellSize);
+        int z0 = FloorDiv(minZ - pad, def.CellSize), z1 = FloorDiv(maxZ + pad, def.CellSize);
         int layers = Layers(c);
         for (int cz = z0; cz <= z1; cz++)
         for (int cx = x0; cx <= x1; cx++)
@@ -178,15 +189,17 @@ public static class HeartGrid
         if (roll >= def.ChanceHigh) return false; // cheap reject
 
         float radius = Lerp(def.MinRadius, def.MaxRadius, MathF.Pow(rng.NextFloat01(), 1.5f));
-        float reach = radius * 1.2f;
-        float x = cx * (float)def.CellSize + rng.NextRange(reach, def.CellSize - reach);
-        float z = cz * (float)def.CellSize + rng.NextRange(reach, def.CellSize - reach);
-        float bias = MathF.Max(Clumps(seed, x, z), 0.8f * Chains(seed, x, z));
+        float x = (cx + rng.NextFloat01()) * def.CellSize;
+        float z = (cz + rng.NextFloat01()) * def.CellSize;
+        bool plateau = c == HeartClass.Large;
+        // Plateaus fill the clusters; the smaller hearts gather over a wider area around them, and on chains.
+        float bias = plateau ? Clumps(seed, x, z) : MathF.Max(Clumps(seed, x, z, 0.42f, 0.6f), 0.8f * Chains(seed, x, z));
         float chance = Lerp(def.ChanceLow, def.ChanceHigh, bias) * (cy == 0 ? 1f : def.DeepChance);
         if (roll >= chance) return false;
 
         float shapeRoll = rng.NextFloat01();
-        var shape = shapeRoll < 0.45f ? SupportShape.Lens : shapeRoll < 0.85f ? SupportShape.Cliff : SupportShape.Spire;
+        var shape = plateau ? (shapeRoll < 0.35f ? SupportShape.Lens : SupportShape.Cliff)
+                  : shapeRoll < 0.45f ? SupportShape.Lens : shapeRoll < 0.85f ? SupportShape.Cliff : SupportShape.Spire;
         heart = new Heart
         {
             Class = c, Shape = shape, X = x, Z = z, Id = id,
@@ -194,7 +207,8 @@ public static class HeartGrid
             Rotation = rng.NextFloat01() * MathF.Tau,
             Sides = 5 + (int)(rng.NextFloat01() * 5f),
         };
-        switch (shape)
+        if (plateau) Plateau(ref heart, ref rng);
+        else switch (shape)
         {
             case SupportShape.Lens:
                 heart.Up = radius * rng.NextRange(0.5f, 0.9f);
@@ -224,15 +238,39 @@ public static class HeartGrid
             heart.Y = surface - heart.Up - radius * rng.NextRange(0.4f, 1.2f) * cy;
             heart.Buried = true;
         }
+
+        // Too deep for the world: trim the cone, then the walls, rather than lose the island.
+        float over = LowestBottom - heart.YMin;
+        if (over > 0f && shape != SupportShape.Lens)
+        {
+            float trim = MathF.Min(over, heart.Spike);
+            heart.Spike -= trim; over -= trim;
+            heart.Wall -= MathF.Min(over, MathF.Max(heart.Wall - 60f, 0f));
+        }
         return heart.YMin >= LowestBottom; // (the top is clipped to the world's)
     }
 
-    /// <summary>0-1: how clumped hearts are at (x, z).</summary>
-    public static float Clumps(ulong seed, float x, float z)
+    /// <summary>A plateau's support (the large class): flat for its width, sized in blocks.</summary>
+    private static void Plateau(ref Heart heart, ref SplitMix64Rng rng)
+    {
+        heart.Up = rng.NextRange(PlateauUpMin, PlateauUpMax);
+        if (heart.Shape == SupportShape.Lens)
+            heart.Wall = rng.NextRange(PlateauLensMin, PlateauLensMax);
+        else
+        {
+            heart.Wall = rng.NextRange(PlateauWallMin, PlateauWallMax);
+            heart.Spike = rng.NextRange(PlateauSpikeMin, PlateauSpikeMax);
+            heart.SpikePower = rng.NextRange(0.6f, 1.6f);
+        }
+    }
+
+    /// <summary>0-1: how far inside a cluster (x, z) is: 0 below <paramref name="lo"/> of the cluster field, 1 above
+    /// <paramref name="hi"/> (the defaults are the plateaus' clusters; a lower range reaches around them).</summary>
+    public static float Clumps(ulong seed, float x, float z, float lo = 0.52f, float hi = 0.68f)
     {
         float v = 0.7f * ValueNoise((uint)seed ^ 0xC1u, x / ClumpSpacing, z / ClumpSpacing)
                 + 0.3f * ValueNoise((uint)seed ^ 0xC2u, x / ClumpDetail, z / ClumpDetail);
-        return Smoothstep(0.45f, 0.72f, v);
+        return Smoothstep(lo, hi, v);
     }
 
     /// <summary>0-1: 1 along narrow winding bands (where a value noise crosses its middle), fading out to either
@@ -249,8 +287,8 @@ public static class HeartGrid
         nearest = default;
         float best = float.MaxValue;
         int size = Classes[0].CellSize, cx0 = FloorDiv(x, size), cz0 = FloorDiv(z, size);
-        for (int cz = cz0 - 4; cz <= cz0 + 4; cz++)
-        for (int cx = cx0 - 4; cx <= cx0 + 4; cx++)
+        for (int cz = cz0 - 12; cz <= cz0 + 12; cz++)
+        for (int cx = cx0 - 12; cx <= cx0 + 12; cx++)
         for (int cy = 0; cy < Layers(HeartClass.Large); cy++)
         {
             if (!Placed(seed, HeartClass.Large, cx, cy, cz, out var h) || h.Buried) continue;

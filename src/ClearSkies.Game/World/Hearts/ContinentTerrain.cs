@@ -19,7 +19,7 @@ public sealed class ContinentTerrain
 
     // Surface bands (world Y of the terrain surface): below SandLine it is hot, sandy ground; grass up to RockLine,
     // bare rock up to SnowLine, snow above.
-    public const float SandLine = 260f, RockLine = 1000f, SnowLine = 1300f;
+    public const float SandLine = 520f, RockLine = 1150f, SnowLine = 1400f;
 
     private readonly FastNoiseLite _plains;   // broad rolling lowlands
     private readonly FastNoiseLite _hills;    // hills, gated by _hillMask
@@ -51,11 +51,13 @@ public sealed class ContinentTerrain
     /// <summary>World Y of the terrain surface at (x, z).</summary>
     public float Height(float x, float z)
     {
-        float plains = 380f + 200f * _plains.GetNoise(x, z);
+        float plains = 620f + 180f * _plains.GetNoise(x, z);
         float hills = 350f * MathF.Max(0f, _hills.GetNoise(x, z)) * Smoothstep(-0.2f, 0.4f, _hillMask.GetNoise(x, z));
         float r = (_ridges.GetNoise(x, z) + 1f) * 0.5f;
-        float ranges = 1250f * r * r * Smoothstep(0.05f, 0.55f, _rangeMask.GetNoise(x, z));
-        return Math.Clamp(plains + hills + ranges, IslandGrid.WorldBottom + 64f, IslandGrid.WorldTop - 32f);
+        float ranges = 950f * r * r * Smoothstep(0.05f, 0.55f, _rangeMask.GetNoise(x, z));
+        float h = plains + hills + ranges;
+        if (h > 1400f) h = 1400f + (h - 1400f) * 0.5f; // peaks ease off below the world's top rather than flattening
+        return Math.Clamp(h, IslandGrid.WorldBottom + 64f, IslandGrid.WorldTop - 32f);
     }
 
     /// <summary>How far the rock layers at column (x, z) are shifted up or down, for <see cref="Block"/>.</summary>

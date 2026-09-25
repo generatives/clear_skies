@@ -64,7 +64,7 @@ const int MinChunkY = 0; // streamed layers are -8..55 (blocks -256..1792): Isla
 int genArg = Array.IndexOf(args, "--generator");
 bool heartsWorld = !(genArg >= 0 && genArg + 1 < args.Length && args[genArg + 1] == "islands");
 Func<IWorldGenerator> generatorFactory = heartsWorld ? () => new HeartWorldGenerator(seed) : () => new SkyWorldGenerator(seed);
-if (heartsWorld) SkySettings.CloudAltitude = 1000f; // the hearts world's islands are mostly low: clouds among the hills
+if (heartsWorld) SkySettings.CloudAltitude = 1250f; // the hearts world's islands are mostly low: clouds among the hills
 
 // Shared GPU voxel storage for lighting (world + ships).
 var gridStore = new GridStore(host.Context, (int)((long)LightBudgetMb * 1024 * 1024 / GridStore.SlotBytes),
