@@ -46,7 +46,7 @@ public static class RegionGrid
     public const int CellShift = 12;
     public const int CellSize = 1 << CellShift; // 4096 blocks
 
-    private const float IslandChance = 0.55f;
+    private const float IslandChance = 0.35f;
     private const float BaseIslandY = 150f;
 
     // Main island max reach (radius*edge-multiplier) union satellite max reach (dist + radius*edge-multiplier)
@@ -78,8 +78,8 @@ public static class RegionGrid
         float cellOriginZ = cellZ * (float)CellSize;
 
         // 2-6. Main island.
-        float mainRadius  = rng.NextRange(350f, 650f);
-        float mainDepth   = rng.NextRange(28f, 50f); // kept modest so terrain amplitude (mountains) dominates the island's height, not the core
+        float mainRadius  = rng.NextRange(150f, 350f);
+        float mainDepth   = rng.NextRange(50f, 100f); // kept modest so terrain amplitude (mountains) dominates the island's height, not the core
         float mainYJitter = rng.NextRange(-30f, 30f);
         float mainLocalX  = rng.NextRange(PlacementMargin, CellSize - PlacementMargin);
         float mainLocalZ  = rng.NextRange(PlacementMargin, CellSize - PlacementMargin);
