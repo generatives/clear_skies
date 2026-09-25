@@ -255,6 +255,37 @@ fn vs_main(
     return o;
 }
 
+// A chunk mesh vertex, packed (see ChunkVertex): x, y, z in bits 0-17 (6 each), face in 18-20 (+X, -X, +Y, -Y, +Z,
+// -Z), texture layer in 21-28 (255: untextured); colour as RGB8. The texture coordinates follow from position and
+// face, as GreedyMesher.MakeUv makes them: V runs down world Y on the side faces.
+@vertex
+fn vs_chunk(@location(0) packed: vec2<u32>) -> VSOut {
+    let a = packed.x;
+    let position = vec3<f32>(f32(a & 63u), f32((a >> 6u) & 63u), f32((a >> 12u) & 63u));
+    let face = (a >> 18u) & 7u;
+    let s = select(1.0, -1.0, (face & 1u) == 1u);
+    var normal = vec3<f32>(0.0);
+    var uv2: vec2<f32>;
+    if (face < 2u)      { normal.x = s; uv2 = vec2<f32>(position.z, -position.y); }
+    else if (face < 4u) { normal.y = s; uv2 = position.xz; }
+    else                { normal.z = s; uv2 = vec2<f32>(position.x, -position.y); }
+    let layerBits = (a >> 21u) & 255u;
+    let layer = select(f32(layerBits), -1.0, layerBits == 255u);
+    let c = packed.y;
+    let color = vec3<f32>(f32(c & 255u), f32((c >> 8u) & 255u), f32((c >> 16u) & 255u)) / 255.0;
+
+    var o: VSOut;
+    let world     = model.model * vec4<f32>(position, 1.0);
+    o.pos         = camera.proj * camera.view * world;
+    o.worldPos    = world.xyz;
+    o.color       = color;
+    o.worldNormal = (model.model * vec4<f32>(normal, 0.0)).xyz;
+    o.localPos    = position;
+    o.localNormal = normal;
+    o.uv          = vec3<f32>(uv2, layer);
+    return o;
+}
+
 // Voxel v in this draw's grid (grid voxel space). Unloaded → open.
 fn isSolid(v: vec3<i32>) -> bool {
     let i = entryOf(model.grid, v >> vec3<u32>(5u));
@@ -660,6 +691,15 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     private RenderPipeline* _skyPipeline;
     private RenderPipeline* _cloudPipeline;
     private RenderPipeline* _modelPipeline;
+    private RenderPipeline* _chunkPipeline;          // vs_chunk: chunk meshes (ChunkVertex)
+    private RenderPipeline* _chunkWireframePipeline;
+    private RenderPipeline* _boundPipeline;          // the pipeline last set in this pass
+
+    private void SetPipeline(RenderPipeline* pipeline)
+    {
+        _api.RenderPassEncoderSetPipeline(_pass, pipeline);
+        _boundPipeline = pipeline;
+    }
 
     // Block texture array (TextureAtlas → GPU). Constructed with a 1x1 white fallback so BeginFrame
     // always has a valid group-3 bind group; LoadTextureAtlas replaces it with the real spritesheet.
@@ -720,6 +760,8 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         _hudPipeline       = CreateMeshPipeline(PrimitiveTopology.TriangleList, CullMode.None, depthTest: false);
         _modelPipeline     = CreateMeshPipeline(PrimitiveTopology.TriangleList, CullMode.None, fragmentEntry: "fs_model");
         _cloudPipeline     = CreateCloudPipeline();
+        _chunkPipeline          = CreateChunkPipeline(PrimitiveTopology.TriangleList, CullMode.Back);
+        _chunkWireframePipeline = CreateChunkPipeline(PrimitiveTopology.LineList,     CullMode.None);
         // The background pass: a full-screen triangle at the far plane that only fills pixels still at the cleared
         // depth (reversed: the far plane and the clear value are both 0), without writing depth.
         _skyPipeline       = CreatePipeline("vs_sky", "fs_sky", null, PrimitiveTopology.TriangleList, CullMode.None,
@@ -825,6 +867,14 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         var vbLayout = new VertexBufferLayout { ArrayStride = Vertex.SizeBytes, StepMode = VertexStepMode.Vertex, AttributeCount = 4, Attributes = attrs };
         return CreatePipeline("vs_main", fragmentEntry, &vbLayout, topology, cullMode, depthWrite: depthTest,
                               depthTest ? CompareFunction.Greater : CompareFunction.Always); // reversed depth: nearer is greater
+    }
+
+    /// <summary>A pipeline for chunk meshes (vs_chunk, one packed <see cref="ChunkVertex"/> per vertex) and fs_main.</summary>
+    private RenderPipeline* CreateChunkPipeline(PrimitiveTopology topology, CullMode cullMode)
+    {
+        var attr     = new VertexAttribute { Format = VertexFormat.Uint32x2, Offset = 0, ShaderLocation = 0 };
+        var vbLayout = new VertexBufferLayout { ArrayStride = ChunkVertex.SizeBytes, StepMode = VertexStepMode.Vertex, AttributeCount = 1, Attributes = &attr };
+        return CreatePipeline("vs_chunk", "fs_main", &vbLayout, topology, cullMode, depthWrite: true, CompareFunction.Greater);
     }
 
     /// <summary>The cloud boxes (vs_cloud/fs_cloud): no vertex buffer, one <see cref="CloudLayer.CloudCell"/> instance
@@ -1094,10 +1144,10 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         uint dynOffset = StageModel(ModelUniform.Default(model));
         _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset);
         _api.RenderPassEncoderSetVertexBuffer(_pass, 0, mesh.VertexBuffer.Handle, mesh.VertexOffset, mesh.VertexBytes);
-        _api.RenderPassEncoderSetPipeline(_pass, _wireframePipeline);
+        SetPipeline(_wireframePipeline);
         _api.RenderPassEncoderSetIndexBuffer(_pass, mesh.WireframeBuffer.Handle, IndexFormat.Uint32, mesh.WireframeOffset, mesh.WireframeBytes);
         _api.RenderPassEncoderDrawIndexed(_pass, mesh.WireframeIndexCount, 1, 0, 0, 0);
-        _api.RenderPassEncoderSetPipeline(_pass, WireframeMode ? _wireframePipeline : _pipeline);
+        SetPipeline(WireframeMode ? _wireframePipeline : _pipeline);
         _drawIndex++;
     }
 
@@ -1114,7 +1164,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     {
         // Each part is drawn at its node's model-space matrix from the pose (the rest pose unless one is given).
         if (pose.IsEmpty) pose = gpuModel.RestPose;
-        _api.RenderPassEncoderSetPipeline(_pass, WireframeMode ? _wireframePipeline : _modelPipeline);
+        SetPipeline(WireframeMode ? _wireframePipeline : _modelPipeline);
         foreach (var part in gpuModel.Parts)
         {
             if (_drawIndex >= MaxObjects) break;
@@ -1137,7 +1187,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
             _drawIndex++;
         }
         _api.RenderPassEncoderSetBindGroup(_pass, 3, _atlasBindGroup, 0, null);
-        _api.RenderPassEncoderSetPipeline(_pass, WireframeMode ? _wireframePipeline : _pipeline);
+        SetPipeline(WireframeMode ? _wireframePipeline : _pipeline);
     }
 
     /// <summary>Uploads per-instance data (e.g. <see cref="CloudLayer.CloudCell"/>s) to a new vertex buffer.</summary>
@@ -1150,7 +1200,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     public void DrawClouds(IReadOnlyList<CloudTileDraw> tiles)
     {
         if (tiles.Count == 0) return;
-        _api.RenderPassEncoderSetPipeline(_pass, _cloudPipeline);
+        SetPipeline(_cloudPipeline);
         foreach (var tile in tiles)
         {
             if (_drawIndex >= MaxObjects) break;
@@ -1160,7 +1210,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
             _api.RenderPassEncoderDraw(_pass, 36, tile.Count, 0, 0);
             _drawIndex++;
         }
-        _api.RenderPassEncoderSetPipeline(_pass, WireframeMode ? _wireframePipeline : _pipeline);
+        SetPipeline(WireframeMode ? _wireframePipeline : _pipeline);
     }
 
     /// <summary>
@@ -1175,9 +1225,9 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         // (it isn't yet if no chunk was drawn this frame).
         uint dynOffset = StageModel(ModelUniform.Default(Mat4.Identity));
         _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset);
-        _api.RenderPassEncoderSetPipeline(_pass, _skyPipeline);
+        SetPipeline(_skyPipeline);
         _api.RenderPassEncoderDraw(_pass, 3, 1, 0, 0);
-        _api.RenderPassEncoderSetPipeline(_pass, WireframeMode ? _wireframePipeline : _pipeline);
+        SetPipeline(WireframeMode ? _wireframePipeline : _pipeline);
         _drawIndex++;
     }
 
@@ -1189,7 +1239,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     /// </summary>
     public void BeginHudPass()
     {
-        _api.RenderPassEncoderSetPipeline(_pass, _hudPipeline);
+        SetPipeline(_hudPipeline);
         _api.RenderPassEncoderSetBindGroup(_pass, 0, _hudCameraBindGroup, 0, null);
     }
 
@@ -1264,7 +1314,8 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
             DepthStencilAttachment = &depthAtt,
         };
         _pass = _api.CommandEncoderBeginRenderPass(_encoder, &passDesc);
-        _api.RenderPassEncoderSetPipeline(_pass, WireframeMode ? _wireframePipeline : _pipeline);
+        _boundPipeline = null;
+        SetPipeline(WireframeMode ? _wireframePipeline : _pipeline);
         _api.RenderPassEncoderSetBindGroup(_pass, 0, _cameraBindGroup, 0, null);
         // Groups 2 (voxel storage) and 3 (block texture array) are the same for every draw and persist across
         // pipeline switches (all pipelines share the layout), so bind them once here.
@@ -1287,6 +1338,10 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     public void DrawChunkMesh(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk)
     {
         if (_drawIndex >= MaxObjects) return;
+
+        // Chunk meshes are packed (ChunkVertex): their own pipeline, set once for a run of chunk draws.
+        var pipeline = WireframeMode ? _chunkWireframePipeline : _chunkPipeline;
+        if (_boundPipeline != pipeline) SetPipeline(pipeline);
 
         uint dynOffset = StageModel(new ModelUniform { Model = model, ChunkX = chunk.X, ChunkY = chunk.Y, ChunkZ = chunk.Z, Grid = grid });
         _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset);
@@ -1365,5 +1420,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         if (_hudPipeline        != null) _api.RenderPipelineRelease(_hudPipeline);
         if (_wireframePipeline  != null) _api.RenderPipelineRelease(_wireframePipeline);
         if (_pipeline           != null) _api.RenderPipelineRelease(_pipeline);
+        if (_chunkPipeline      != null) _api.RenderPipelineRelease(_chunkPipeline);
+        if (_chunkWireframePipeline != null) _api.RenderPipelineRelease(_chunkWireframePipeline);
     }
 }

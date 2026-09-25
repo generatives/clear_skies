@@ -128,16 +128,19 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                 {
                     // The mesher's lists are per-thread scratch, so copy out before this thread meshes again.
                     var (verts, idxs) = _meshers.Value!.Mesh(data, nX, pX, nY, pY, nZ, pZ);
-                    // Packed here, off the main thread: vertices, indices, then the wireframe's line list.
+                    // Packed here, off the main thread: the vertices (8-byte ChunkVertex, not 48-byte Vertex),
+                    // indices, then the wireframe's line list.
                     var vSpan = CollectionsMarshal.AsSpan(verts);
                     var iSpan = CollectionsMarshal.AsSpan(idxs);
                     var wire = iSpan.Length > 0 ? Renderer.BuildWireframeIndices(iSpan) : Array.Empty<uint>();
-                    var vBytes = MemoryMarshal.AsBytes(vSpan);
+                    int vLen = vSpan.Length * (int)ChunkVertex.SizeBytes;
                     var iBytes = MemoryMarshal.AsBytes(iSpan);
                     var wBytes = MemoryMarshal.AsBytes(wire.AsSpan());
-                    int bytes = vBytes.Length + iBytes.Length + wBytes.Length;
+                    int bytes = vLen + iBytes.Length + wBytes.Length;
                     var packed = ArrayPool<byte>.Shared.Rent(System.Math.Max(4, bytes));
-                    vBytes.CopyTo(packed);
+                    var cv = MemoryMarshal.Cast<byte, ChunkVertex>(packed.AsSpan(0, vLen));
+                    for (int k = 0; k < vSpan.Length; k++) cv[k] = ChunkVertex.Pack(vSpan[k]);
+                    var vBytes = packed.AsSpan(0, vLen);
                     iBytes.CopyTo(packed.AsSpan(vBytes.Length));
                     wBytes.CopyTo(packed.AsSpan(vBytes.Length + iBytes.Length));
                     _results.Enqueue(new Result(entry.Entity, packed, bytes, verts.Count, idxs.Count, wire.Length,
@@ -188,7 +191,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                 if (r.VertCount > 0)
                 {
                     long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-                    mesh = _renderer.UploadPackedMesh(r.Packed.AsSpan(0, r.Bytes), (ulong)r.VertCount * Vertex.SizeBytes,
+                    mesh = _renderer.UploadPackedMesh(r.Packed.AsSpan(0, r.Bytes), (ulong)r.VertCount * ChunkVertex.SizeBytes,
                                                       (uint)r.IdxCount, (uint)r.WireCount);
                     _uploadMs += 0.05 * (System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds - _uploadMs);
                     _createMs += 0.05 * (_renderer.LastCreateMs - _createMs);
