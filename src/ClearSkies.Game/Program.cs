@@ -45,7 +45,7 @@ host.AddSystem(host.Gui, SystemStage.Input); // opens ImGui's frame before Logic
 var physicsBody = new PhysicsBodySystem(host.World, host.Physics);
 
 // Streaming budget: how many world chunks are loaded at once — as many as the old 12/3 view box held, but spent
-// only on chunks that hold something (see ChunkLoadSystem), so it reaches as far as the islands need. Streamed
+// only on chunks that hold something (see ChunkLoadSystem), so it reaches as far as the islands need. Generated
 // layers: chunk y 0-11 (blocks 0-384); islands span roughly 60-300.
 // --chunk-budget N overrides it, e.g. for a software renderer whose small max buffer size can't hold the light
 // for a full budget of island chunks.
@@ -60,7 +60,7 @@ const int RegionChunkShift = RegionGrid.CellShift - ChunkData.Shift;
 var gridStore = new GridStore(host.Context, RegionChunkShift, ChunkBudget);
 var chunkLoadSystem = new ChunkLoadSystem(host.World, staticVolume, () => new SkyWorldGenerator(seed),
                                           surveyKey: $"sky:{seed}:v{SkyWorldGenerator.Version}", RegionChunkShift,
-                                          ChunkBudget, MinChunkY, MaxChunkY, gridStore);
+                                          ChunkBudget, MinChunkY, MaxChunkY);
 host.AddSystem(chunkLoadSystem, SystemStage.Logic);
 host.Renderer.AttachGridStore(gridStore);
 host.AddSystem(physicsBody, SystemStage.Logic);

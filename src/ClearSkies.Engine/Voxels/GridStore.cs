@@ -190,13 +190,12 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     private GridHandle?[] _grids = new GridHandle?[16];
     private GridDesc[] _descs = new GridDesc[16];
     // World regions: 2^_regionShift chunks across (x and z), found through a _regionDirDim x _regionDirDim directory
-    // wrapped on the region coordinate. Suggested section sizes per region (see SetWorldRegionSize).
+    // wrapped on the region coordinate.
     private readonly int _regionShift;
     private readonly int _regionDirDim;
-    private readonly Dictionary<(int x, int z), Vector3D<int>> _regionSizes = new();
 
-    /// <summary>Starting section size for a region with no suggested size (not visited before), in chunks. Grows by
-    /// half an axis at a time as its chunks load (see GrowRegion).</summary>
+    /// <summary>A region's starting section size, in chunks. Grows by half an axis at a time as its chunks load (see
+    /// GrowRegion).</summary>
     private static readonly Vector3D<int> DefaultRegionDims = new(32, 12, 32);
 
     /// <summary>Light slots allocated since the lighting system last drained this. They hold
@@ -262,26 +261,6 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
 
         ClearTableRange(0, _tableCapacity);
         _tableNext = 0;
-    }
-
-    /// <summary>Suggests the section size (in chunks per axis) a world region gets when it is next allocated, e.g. the
-    /// size it grew to on an earlier visit, so it doesn't regrow its way there again. Chunks that don't fit still
-    /// work: the section grows if one would collide.</summary>
-    public void SetWorldRegionSize(int regionX, int regionZ, Vector3D<int> size)
-        => _regionSizes[(regionX, regionZ)] = size;
-
-    /// <summary>The section size region (<paramref name="regionX"/>, <paramref name="regionZ"/>) has, or had when it was
-    /// last released, or was suggested; false if none of those.</summary>
-    public bool TryGetWorldRegionSize(GridHandle world, int regionX, int regionZ, out Vector3D<int> size)
-    {
-        if (world.Regions.TryGetValue((regionX, regionZ), out var r)) { size = new(r.DX, r.DY, r.DZ); return true; }
-        return _regionSizes.TryGetValue((regionX, regionZ), out size);
-    }
-
-    /// <summary>Loaded world regions and their section sizes, for debug display.</summary>
-    public IEnumerable<(int x, int z, int dx, int dy, int dz, int chunks)> WorldRegions(GridHandle world)
-    {
-        foreach (var r in world.Regions.Values) yield return (r.X, r.Z, r.DX, r.DY, r.DZ, r.ByIndex.Count);
     }
 
     // ── Grid registration ─────────────────────────────────────────────────────
@@ -524,9 +503,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
                 return null;
             }
 
-        r = new WorldRegion { X = key.x, Z = key.z };
-        var size = _regionSizes.TryGetValue(key, out var hint) ? hint : DefaultRegionDims;
-        (r.DX, r.DY, r.DZ) = (System.Math.Max(1, size.X), System.Math.Max(1, size.Y), System.Math.Max(1, size.Z));
+        r = new WorldRegion { X = key.x, Z = key.z, DX = DefaultRegionDims.X, DY = DefaultRegionDims.Y, DZ = DefaultRegionDims.Z };
         r.Base = AllocRange(r.DX * r.DY * r.DZ);
         g.Regions[key] = r;
         WriteDirectoryEntry(g, r);
@@ -544,10 +521,9 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
 
     private void ReleaseRegion(GridHandle g, WorldRegion r)
     {
-        _regionSizes[(r.X, r.Z)] = new Vector3D<int>(r.DX, r.DY, r.DZ); // comes back at the size it grew to
         FreeRange(r.Base, r.DX * r.DY * r.DZ);
         g.Regions.Remove((r.X, r.Z));
-        // A dims of 0 reads as "no region" to lookups (see entryOf in the shaders).
+        // A dims of 0 reads as "no region" to lookups (see entryOf in LookupWgsl).
         Span<int> e = stackalloc int[8] { -1, 0, 0, 0, 0, 0, 0, 0 };
         ChunkTable.Write<int>((ulong)DirectoryIndex(g, r.X, r.Z) * ChunkEntryBytes, e);
     }
