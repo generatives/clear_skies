@@ -56,6 +56,7 @@ public sealed class EngineHost : IDisposable
         Frame = new RenderFrame(World, Renderer, Gui, Time);
         Gui.RegisterDebugUi(Frame);
         Gui.RegisterDebugUi(new FrameTimingsPanel(this));
+        Gui.RegisterDebugUi(Context.Timer);
     }
 
     /// <summary>Schedules <paramref name="system"/> in an update stage (Input, Logic or PreRender), after the systems
@@ -209,6 +210,11 @@ public sealed class EngineHost : IDisposable
 
             double frameMs = h.Time.FramesPerSecond > 0 ? 1000.0 / h.Time.FramesPerSecond : 0;
             ImGuiNET.ImGui.Text($"Frame: {frameMs:F1} ms ({h.Time.FramesPerSecond} fps), systems CPU total: {total:F1} ms");
+            bool vsync = h.Context.VSync;
+            if (ImGuiNET.ImGui.Checkbox("VSync", ref vsync)) h.Context.VSync = vsync;
+            ImGuiNET.ImGui.SameLine();
+            ImGuiNET.ImGui.TextDisabled(vsync ? "(frame rate capped at the display's refresh; the wait shows in Frame begin/end)"
+                                              : $"(presenting with {h.Context.PresentModeInUse})");
             SampleGc();
             ImGuiNET.ImGui.Text($"GC: {_gcPausePerSec:F1} ms paused per second; collections gen0/1/2 {_gcRate[0]}/{_gcRate[1]}/{_gcRate[2]} " +
                                 $"in the last {_gcSampleSecs:F1} s; allocating {_allocMbPerSec:F0} MB/s; heap {GC.GetTotalMemory(false) / (1024 * 1024)} MB");

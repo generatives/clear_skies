@@ -1314,6 +1314,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
             ColorAttachments = &colorAtt,
             DepthStencilAttachment = &depthAtt,
         };
+        if (_ctx.Timer.TimeRender("Render pass (world, sky, HUD, ImGui)", out var tsw)) passDesc.TimestampWrites = &tsw;
         _pass = _api.CommandEncoderBeginRenderPass(_encoder, &passDesc);
         _boundPipeline = null;
         SetPipeline(WireframeMode ? _wireframePipeline : _pipeline);
@@ -1376,12 +1377,14 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         // QueueWriteBuffer per draw.
         if (_drawIndex > 0) _modelBuffer.Write<ModelUniform>(0, _modelStaging.AsSpan(0, _drawIndex));
 
+        _ctx.Timer.Resolve(_encoder);
         var cmdDesc = new CommandBufferDescriptor();
         var cmd = _api.CommandEncoderFinish(_encoder, &cmdDesc);
         _api.QueueSubmit(_ctx.Queue, 1, &cmd);
         _api.CommandBufferRelease(cmd);
         _api.CommandEncoderRelease(_encoder);
         _encoder = null;
+        _ctx.Timer.AfterSubmit();
 
         long t0 = Stopwatch.GetTimestamp();
         _ctx.Present();

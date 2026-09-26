@@ -761,7 +761,7 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
     {
         if (count <= 0) return;
         var param = WriteParams(Vector3D<float>.Zero, count, default, default);
-        Dispatch(_clearPipeline, ClearBindings, store, work, count, param);
+        Dispatch(_clearPipeline, ClearBindings, store, work, count, param, "Lighting: clear bounce");
     }
 
     /// <summary>Sun visibility for the <paramref name="count"/> light slots listed in <paramref name="work"/>.</summary>
@@ -769,7 +769,7 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
     {
         if (count <= 0) return;
         var param = WriteParams(sunDir, count, default, default);
-        Dispatch(_sunPipeline, SunBindings, store, work, count, param);
+        Dispatch(_sunPipeline, SunBindings, store, work, count, param, "Lighting: sun");
     }
 
     /// <summary>Composes the displayed light of the listed slots: lamp light (traced now, from the lamps in each
@@ -779,7 +779,7 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
     {
         if (count <= 0) return;
         var param = WriteParams(Vector3D<float>.Zero, count, new Vector4D<float>(0f, 0f, bounceScale, 0f), default);
-        Dispatch(_composePipeline, ComposeBindings, store, work, count, param);
+        Dispatch(_composePipeline, ComposeBindings, store, work, count, param, "Lighting: compose");
     }
 
     /// <summary>
@@ -794,10 +794,11 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
         if (count <= 0) return;
         var param = WriteParams(sunDir, count,
                                 new Vector4D<float>(albedo, sunStrength, 0f, 0f), new Vector4D<float>(rays, cycle, 0f, 0f));
-        Dispatch(_bouncePipeline, BounceBindings, store, work, count, param);
+        Dispatch(_bouncePipeline, BounceBindings, store, work, count, param, "Lighting: bounce");
     }
 
-    private void Dispatch(ComputePipeline pipeline, uint[] bindings, GridStore store, GpuBuffer work, int count, GpuBuffer param)
+    private void Dispatch(ComputePipeline pipeline, uint[] bindings, GridStore store, GpuBuffer work, int count, GpuBuffer param,
+                          string timingName)
     {
         var arr = new (uint, GpuBuffer)[bindings.Length];
         for (int i = 0; i < bindings.Length; i++)
@@ -825,7 +826,7 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
         const int MaxPerDim = 65535;
         uint gx = (uint)System.Math.Min(count, MaxPerDim);
         uint gy = ((uint)count + gx - 1u) / gx;
-        pipeline.Record(_enc, (BindGroup*)bg, gx, gy, 1u);
+        pipeline.Record(_enc, (BindGroup*)bg, gx, gy, 1u, timingName);
     }
 
     /// <summary>Submits every dispatch recorded since the last submit, as one command buffer. Each dispatch is its own
