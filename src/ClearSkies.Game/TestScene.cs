@@ -71,8 +71,9 @@ public static class TestScene
             // world's own gentle -6 gravity -> 18 effective while airborne) for a ~1-block peak jump
             // height: v²/(2·g) = 6²/(2·18) = 1.0. Also makes falls heavier/snappier instead of floaty.
             jumpVelocity: 6f, speed: 5f,
-            // Strong (not full) air control, per request — lets you correct your trajectory mid-air.
-            airControlForceScale: 0.6f, airControlSpeedScale: 0.8f);
+            // Full air control: same acceleration and top speed as on the ground, and a gentle brake with no keys
+            // held, so you can steer mid-air and let go to avoid overshooting a ledge.
+            airControlForceScale: 1f, airControlSpeedScale: 1f, airBrakeScale: 0.5f);
         cam.Set(new CharacterControllerComponent { Character = character, EyeHeight = 0.7f });
         cam.Set(new CharacterModeComponent { FreeFly = true }); // start in FreeFly — zero regression risk vs. today
 

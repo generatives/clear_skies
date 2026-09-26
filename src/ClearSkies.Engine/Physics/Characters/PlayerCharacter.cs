@@ -24,18 +24,40 @@ public struct PlayerCharacter
     private float extraFallGravity;
     private float airControlForceScale;
     private float airControlSpeedScale;
+    private float airBrakeScale;
+
+    // Jump forgiveness. A Space press is remembered for JumpBufferTime so it isn't lost when no physics
+    // step runs this frame (render rate > the 60Hz fixed step) or the character is a hair off the
+    // ground; and a jump still works for CoyoteTime after walking off a ledge.
+    private const float JumpBufferTime = 0.15f;
+    private const float CoyoteTime = 0.12f;
+    private float jumpBufferRemaining;
+    private float timeSinceSupported;
+    private bool jumpedSinceSupported;
+
+    // The moving body (ship) last stood on, if any: air control steers and brakes relative to its velocity
+    // rather than the world's, so jumping on a moving deck doesn't leave the player behind.
+    private BodyHandle lastSupportBody;
+    private bool hasLastSupportBody;
 
     public BodyHandle BodyHandle => bodyHandle;
 
     public PlayerCharacter(CharacterControllers characters, Vector3 initialPosition, Capsule shape,
         float minimumSpeculativeMargin, float mass, float maximumHorizontalForce, float maximumVerticalGlueForce,
         float jumpVelocity, float speed, float maximumSlope = MathF.PI * 0.25f,
-        float extraFallGravity = 12f, float airControlForceScale = 0.6f, float airControlSpeedScale = 0.8f)
+        float extraFallGravity = 12f, float airControlForceScale = 1f, float airControlSpeedScale = 1f,
+        float airBrakeScale = 0.5f)
     {
         this.characters = characters;
         this.extraFallGravity = extraFallGravity;
         this.airControlForceScale = airControlForceScale;
         this.airControlSpeedScale = airControlSpeedScale;
+        this.airBrakeScale = airBrakeScale;
+        jumpBufferRemaining = 0;
+        timeSinceSupported = float.MaxValue;
+        jumpedSinceSupported = false;
+        lastSupportBody = default;
+        hasLastSupportBody = false;
         var shapeIndex = characters.Simulation.Shapes.Add(shape);
 
         // Characters are dynamic but must not rotate or fall over, so the inverse inertia tensor is
@@ -95,8 +117,51 @@ public struct PlayerCharacter
             movementDirection /= MathF.Sqrt(movementDirectionLengthSquared);
 
         ref var character = ref characters.GetCharacterByBodyHandle(bodyHandle);
-        character.TryJump = !frozen && input.WasKeyPressed(Key.Space);
         var characterBody = new BodyReference(bodyHandle, characters.Simulation.Bodies);
+
+        // TryJump is only ever set here, never cleared: CharacterControllers clears it after the next physics
+        // step consumes it. Overwriting it every render frame used to drop presses whenever a frame ran no step.
+        if (frozen)
+        {
+            jumpBufferRemaining = 0;
+            character.TryJump = false;
+        }
+        else if (input.WasKeyPressed(Key.Space))
+            jumpBufferRemaining = JumpBufferTime;
+
+        if (character.Supported)
+        {
+            timeSinceSupported = 0;
+            hasLastSupportBody = character.Support.Mobility != CollidableMobility.Static;
+            if (hasLastSupportBody) lastSupportBody = character.Support.BodyHandle;
+            // A pending TryJump means the jump hasn't happened yet (no step since it was requested).
+            if (!character.TryJump) jumpedSinceSupported = false;
+        }
+        else
+            timeSinceSupported += simulationTimestepDuration;
+
+        if (jumpBufferRemaining > 0)
+        {
+            if (character.Supported)
+            {
+                character.TryJump = true;
+                jumpedSinceSupported = true;
+                jumpBufferRemaining = 0;
+            }
+            else if (!jumpedSinceSupported && timeSinceSupported <= CoyoteTime)
+            {
+                // Just walked off an edge: there's no support left to push off, so set the jump velocity
+                // directly (same rule as a grounded jump — reach JumpVelocity, don't add on top of it).
+                if (!characterBody.Awake) characters.Simulation.Awakener.AwakenBody(character.BodyHandle);
+                ref var velocity = ref characterBody.Velocity.Linear;
+                velocity.Y = MathF.Max(velocity.Y, character.JumpVelocity);
+                jumpedSinceSupported = true;
+                jumpBufferRemaining = 0;
+            }
+            else
+                jumpBufferRemaining -= simulationTimestepDuration;
+        }
+
         var effectiveSpeed = (input.IsKeyDown(Key.ShiftLeft) || input.IsKeyDown(Key.ShiftRight)) ? speed * 1.75f : speed;
         var newTargetVelocity = movementDirection * effectiveSpeed;
         var viewDirection = viewDirectionWorld;
@@ -128,25 +193,44 @@ public struct PlayerCharacter
             // roughly 1-block peak height (see PlayerCharacter's constructor default / TestScene).
             characterBody.Velocity.Linear.Y -= extraFallGravity * simulationTimestepDuration;
 
-            if (movementDirectionLengthSquared > 0)
+            // Air control. Holding a direction accelerates along it up to the (sprint-aware) air speed without
+            // ever cutting existing speed along it, while sideways drift is bled off so you can steer; with
+            // no keys held the character brakes gently, so letting go near a cliff edge stops you short.
+            QuaternionEx.Transform(character.LocalUp, characterBody.Pose.Orientation, out var characterUp);
+            ref var linear = ref characterBody.Velocity.Linear;
+            var referenceVelocity = Vector3.Zero;
+            if (hasLastSupportBody && characters.Simulation.Bodies.BodyExists(lastSupportBody))
+                referenceVelocity = new BodyReference(lastSupportBody, characters.Simulation.Bodies).Velocity.Linear;
+            var relative = linear - referenceVelocity;
+            var horizontal = relative - characterUp * Vector3.Dot(relative, characterUp);
+            var airAcceleration = characterBody.LocalInertia.InverseMass * character.MaximumHorizontalForce * airControlForceScale;
+            Vector3 newHorizontal;
+            var characterRight = Vector3.Cross(character.ViewDirection, characterUp);
+            var rightLengthSquared = characterRight.LengthSquared();
+            if (movementDirectionLengthSquared > 0 && rightLengthSquared > 1e-10f)
             {
-                QuaternionEx.Transform(character.LocalUp, characterBody.Pose.Orientation, out var characterUp);
-                var characterRight = Vector3.Cross(character.ViewDirection, characterUp);
-                var rightLengthSquared = characterRight.LengthSquared();
-                if (rightLengthSquared > 1e-10f)
-                {
-                    characterRight /= MathF.Sqrt(rightLengthSquared);
-                    var characterForward = Vector3.Cross(characterUp, characterRight);
-                    var worldMovementDirection = characterRight * movementDirection.X + characterForward * movementDirection.Y;
-                    var currentVelocity = Vector3.Dot(characterBody.Velocity.Linear, worldMovementDirection);
-                    var airAccelerationDt = characterBody.LocalInertia.InverseMass * character.MaximumHorizontalForce * airControlForceScale * simulationTimestepDuration;
-                    var maximumAirSpeed = effectiveSpeed * airControlSpeedScale;
-                    var targetVelocity = MathF.Min(currentVelocity + airAccelerationDt, maximumAirSpeed);
-                    var velocityChangeAlongMovementDirection = MathF.Max(0, targetVelocity - currentVelocity);
-                    characterBody.Velocity.Linear += worldMovementDirection * velocityChangeAlongMovementDirection;
-                }
+                characterRight /= MathF.Sqrt(rightLengthSquared);
+                var characterForward = Vector3.Cross(characterUp, characterRight);
+                var worldMovementDirection = characterRight * movementDirection.X + characterForward * movementDirection.Y;
+                var velocityChange = airAcceleration * simulationTimestepDuration;
+                var along = Vector3.Dot(horizontal, worldMovementDirection);
+                var maximumAirSpeed = effectiveSpeed * airControlSpeedScale;
+                var newAlong = MathF.Max(along, MathF.Min(along + velocityChange, maximumAirSpeed));
+                var lateral = horizontal - worldMovementDirection * along;
+                newHorizontal = worldMovementDirection * newAlong + MoveTowardsZero(lateral, velocityChange);
             }
+            else
+            {
+                newHorizontal = MoveTowardsZero(horizontal, airAcceleration * airBrakeScale * simulationTimestepDuration);
+            }
+            linear += newHorizontal - horizontal;
         }
+    }
+
+    private static Vector3 MoveTowardsZero(Vector3 v, float amount)
+    {
+        var length = v.Length();
+        return length <= amount ? Vector3.Zero : v * ((length - amount) / length);
     }
 
     /// <summary>First-person eye position: capsule centre + half the capsule's cylindrical length

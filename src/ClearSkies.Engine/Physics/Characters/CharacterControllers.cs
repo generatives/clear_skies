@@ -408,10 +408,19 @@ namespace ClearSkies.Engine.Physics.Characters
                 //Note- you could use the friction coefficient to change the horizontal motion constraint's maximum force to simulate different environments if you want.
                 //That would just require caching a bit more information for the AnalyzeContacts function to use.
                 materialProperties.FrictionCoefficient = 0;
+                //Bepu has no restitution coefficient; the "bounce" off a wall is penetration recovery pushing the
+                //capsule back out at up to MaximumRecoveryVelocity. Keep that slow for characters so contacts feel dead.
+                materialProperties.MaximumRecoveryVelocity = MathF.Min(materialProperties.MaximumRecoveryVelocity, CharacterMaximumRecoveryVelocity);
                 return true;
             }
             return false;
         }
+
+        /// <summary>
+        /// Cap on the speed contacts involving a character push it back out of penetration. Low values keep the character from
+        /// bouncing off walls (the closest Bepu has to zero restitution).
+        /// </summary>
+        public float CharacterMaximumRecoveryVelocity = 0.2f;
 
         Buffer<(int Start, int Count)> boundingBoxExpansionJobs;
         unsafe void ExpandBoundingBoxes(int start, int count)
