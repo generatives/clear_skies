@@ -66,10 +66,13 @@ public static class HeartGrid
     private const float UpperChance = 0.45f, ThinOver = 1200f, MountainChance = 0.85f;
 
     // Islands: the floor, the underworld and the mountains keep their chances only inside the clusters (see
-    // ClusterField), easing from IslandFrom to IslandFull of it; between them the ground thins to OutsideChance of
-    // that (a few lone pieces), the mountains to MountainOutside. So a continent is a scatter of island clusters with
-    // open sky between, each still carrying the continent's surface on top.
-    private const float IslandFrom = 0.1f, IslandFull = 0.6f, OutsideChance = 0.04f, MountainOutside = 0.25f;
+    // ClusterField), easing from IslandFrom to IslandFull of it; the mountains thin to MountainOutside between them
+    // (a ragged broken range). Elsewhere between clusters the ground survives only in islets (see IsletField), up to
+    // IsletChance of it: small groups of pieces, stepping stones across the open sky, never a lone piece on its own.
+    // So a continent is a scatter of island clusters with open sky between, each still carrying the continent's
+    // surface on top.
+    private const float IslandFrom = 0.1f, IslandFull = 0.6f, MountainOutside = 0.25f;
+    private const float IsletChance = 0.6f, IsletSpacing = 520f, IsletDetail = 170f, IsletFrom = 0.74f, IsletFull = 0.84f;
 
     /// <summary>How much of FloorChance the floor keeps even inside a cluster: it breaks into islands with gaps between,
     /// not one cracked landmass.</summary>
@@ -118,7 +121,8 @@ public static class HeartGrid
     {
         float cluster = ClusterField(seed, x, z);
         float inIsland = Smoothstep(IslandFrom, IslandFull, cluster);
-        float island = Lerp(OutsideChance, IslandFloor, inIsland);
+        float islet = inIsland < 1f ? IsletField(seed, x, z) : 0f;
+        float island = Lerp(IsletChance * islet, IslandFloor, inIsland);
         if (y < DeepTop) return island * Lerp(DeepChance, FloorChance, Smoothstep(DeepTop - DeepFade, DeepTop, y));
         float up = Smoothstep(FloorTop, FloorTop + FloorFade, y);
         float floor = island * FloorChance;
@@ -126,7 +130,7 @@ public static class HeartGrid
         float mountainChance = MountainChance * Lerp(MountainOutside, 0.9f, inIsland);
         if (up <= 0f) return Lerp(floor, mountainChance, mountain);
         float thin = Lerp(1f, 0.5f, Math.Clamp((y - FloorTop - FloorFade) / ThinOver, 0f, 1f));
-        float upper = MathF.Min(UpperChance * thin * Lerp(0.1f, 1.8f, cluster), 1f);
+        float upper = MathF.Min(UpperChance * thin * Lerp(0.5f * islet, 1.8f, cluster), 1f);
         return Lerp(Lerp(floor, upper, up), mountainChance, mountain);
     }
 
@@ -139,6 +143,15 @@ public static class HeartGrid
         float clumps = 0.7f * ValueNoise((uint)seed ^ 0xC1u, x / ClumpSpacing, z / ClumpSpacing)
                      + 0.3f * ValueNoise((uint)seed ^ 0xC2u, x / ClumpDetail, z / ClumpDetail);
         return Smoothstep(0.5f, 0.75f, v) * Lerp(0.2f, 1f, Smoothstep(0.4f, 0.6f, clumps));
+    }
+
+    /// <summary>0-1: how far inside an islet (x, z) is. Islets are blobs a couple of hundred blocks across, several
+    /// hundred apart, their edges roughened by a finer noise: where the ground between clusters survives.</summary>
+    public static float IsletField(ulong seed, float x, float z)
+    {
+        float v = 0.8f * ValueNoise((uint)seed ^ 0xC9u, x / IsletSpacing, z / IsletSpacing)
+                + 0.2f * ValueNoise((uint)seed ^ 0xCAu, x / IsletDetail, z / IsletDetail);
+        return Smoothstep(IsletFrom, IsletFull, v);
     }
 
     /// <summary>Finds the middle of a cluster near (x, z), well inside a continent: the nearest point, on a coarse grid
