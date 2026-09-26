@@ -32,6 +32,7 @@ public sealed unsafe class GpuTimer : IDebugUiSystem, IDisposable
         public bool Busy, Mapped;
         public int Count;
         public string[] Names = new string[MaxQueries / 2];
+        public int[] Items = new int[MaxQueries / 2];
         public long CpuTicks;             // Stopwatch time the frame was submitted
     }
 
@@ -40,11 +41,14 @@ public sealed unsafe class GpuTimer : IDebugUiSystem, IDisposable
 
     // This frame's passes (query 2k = begin, 2k + 1 = end of pass k).
     private readonly string[] _names = new string[MaxQueries / 2];
+    private readonly int[] _items = new int[MaxQueries / 2];
     private int _passes;
 
     // Results: per name, smoothed ms and passes per frame; and the frame's span, first begin to last end.
     private readonly Dictionary<string, (double ms, double count)> _stats = new();
-    private readonly Dictionary<string, (double ticks, int count)> _frameSums = new();
+    private readonly Dictionary<string, (double ticks, int count, long items)> _frameSums = new();
+    // Per name, all-time totals of GPU ms and items (bricks) for passes that count them: the cost per item.
+    private readonly Dictionary<string, (double ms, long items)> _perItem = new();
     private readonly List<string> _order = new();
     private double _spanMs, _busyMs;
 
@@ -82,21 +86,22 @@ public sealed unsafe class GpuTimer : IDebugUiSystem, IDisposable
         }
     }
 
-    private bool TryAlloc(string name, out uint begin)
+    private bool TryAlloc(string name, int items, out uint begin)
     {
         begin = 0;
         if (!Supported || !Enabled || _passes * 2 >= MaxQueries) return false;
         _names[_passes] = name;
+        _items[_passes] = items;
         begin = (uint)(_passes * 2);
         _passes++;
         return true;
     }
 
     /// <summary>Timestamp writes timing a compute pass as <paramref name="name"/>; false when not timing (leave the
-    /// descriptor's TimestampWrites null).</summary>
-    internal bool TimeCompute(string name, out ComputePassTimestampWrites writes)
+    /// descriptor's TimestampWrites null). <paramref name="items"/> (bricks, say), when given, adds a cost per item.</summary>
+    internal bool TimeCompute(string name, out ComputePassTimestampWrites writes, int items = 0)
     {
-        bool ok = TryAlloc(name, out uint b);
+        bool ok = TryAlloc(name, items, out uint b);
         writes = new ComputePassTimestampWrites { QuerySet = _set, BeginningOfPassWriteIndex = b, EndOfPassWriteIndex = b + 1 };
         return ok;
     }
@@ -104,7 +109,7 @@ public sealed unsafe class GpuTimer : IDebugUiSystem, IDisposable
     /// <summary>As <see cref="TimeCompute"/>, for a render pass.</summary>
     internal bool TimeRender(string name, out RenderPassTimestampWrites writes)
     {
-        bool ok = TryAlloc(name, out uint b);
+        bool ok = TryAlloc(name, 0, out uint b);
         writes = new RenderPassTimestampWrites { QuerySet = _set, BeginningOfPassWriteIndex = b, EndOfPassWriteIndex = b + 1 };
         return ok;
     }
@@ -124,6 +129,7 @@ public sealed unsafe class GpuTimer : IDebugUiSystem, IDisposable
             _api.CommandEncoderCopyBufferToBuffer(enc, _resolve.Handle, 0, r.Buffer.Handle, 0, n * 8);
             r.Count = _passes;
             Array.Copy(_names, r.Names, _passes);
+            Array.Copy(_items, r.Items, _passes);
             _pending = r;
         }
         // (With every readback still in flight this frame's timings are dropped.)
@@ -164,7 +170,7 @@ public sealed unsafe class GpuTimer : IDebugUiSystem, IDisposable
             first = System.Math.Min(first, b);
             last = System.Math.Max(last, e);
             var s = _frameSums.GetValueOrDefault(r.Names[k]);
-            _frameSums[r.Names[k]] = (s.ticks + (e - b), s.count + 1);
+            _frameSums[r.Names[k]] = (s.ticks + (e - b), s.count + 1, s.items + r.Items[k]);
             busy += e - b;
         }
         _api.BufferUnmap(r.Buffer.Handle);
@@ -173,8 +179,13 @@ public sealed unsafe class GpuTimer : IDebugUiSystem, IDisposable
 
         Calibrate(first, r.CpuTicks);
 
-        foreach (var (name, (ticks, count)) in _frameSums)
+        foreach (var (name, (ticks, count, items)) in _frameSums)
         {
+            if (items > 0)
+            {
+                var pi = _perItem.GetValueOrDefault(name);
+                _perItem[name] = (pi.ms + ticks * _nsPerTick * 1e-6, pi.items + items);
+            }
             if (!_stats.ContainsKey(name)) _order.Add(name);
             var s = _stats.GetValueOrDefault(name);
             _stats[name] = (Ema(s.ms, ticks * _nsPerTick * 1e-6), Ema(s.count, count));
@@ -204,6 +215,10 @@ public sealed unsafe class GpuTimer : IDebugUiSystem, IDisposable
         if (cpuNs > 30e9) { _refTicks = gpuTicks; _refCpu = cpuTicks; } // keep the reference fresh
     }
 
+    /// <summary>Average GPU microseconds per item of the passes named <paramref name="name"/> so far.</summary>
+    public double MicrosPerItem(string name)
+        => _perItem.TryGetValue(name, out var pi) && pi.items > 0 ? pi.ms * 1000.0 / pi.items : 0;
+
     private static double Ema(double prev, double sample) => prev + 0.05 * (sample - prev);
 
     public void DrawDebugUi()
@@ -221,7 +236,9 @@ public sealed unsafe class GpuTimer : IDebugUiSystem, IDisposable
         foreach (var name in _order) { var s = _stats[name]; rows.Add((name, s.ms, s.count)); }
         rows.Sort((a, b) => b.ms.CompareTo(a.ms));
         foreach (var (name, ms, count) in rows)
-            ImGui.Text($"{ms,7:F2} ms  {name}" + (count > 1.05 ? $"  (x{count:F1})" : ""));
+            ImGui.Text($"{ms,7:F2} ms  {name}" + (count > 1.05 ? $"  (x{count:F1})" : "") +
+                       (_perItem.TryGetValue(name, out var pi) && pi.items > 0 ? $"  {pi.ms * 1000.0 / pi.items:F2} us/brick" : ""));
+        if (ImGui.Button("Reset per-brick averages")) _perItem.Clear();
         ImGui.Separator();
         ImGui.TextWrapped("Only work inside timed passes is counted. Buffer uploads (meshes, chunk data, light lists) are " +
                           "copies outside any pass and aren't included.");

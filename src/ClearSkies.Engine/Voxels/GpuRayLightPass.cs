@@ -416,15 +416,41 @@ fn sunLevel(g: i32, v: vec3<i32>, list: u32) -> u32 {
     return u32(round(f32(lit) * 3.0 / f32(SUN_SAMPLES)));
 }
 
+// ── Surface compaction ────────────────────────────────────────────────────────────────────────────────────
+// Only surface air voxels (air with a solid face neighbour) trace rays, usually a small share of a brick, scattered
+// through it. Given one voxel pair per thread, most lanes of every SIMD group would sit idle while a few traced, so
+// the ray passes first gather the brick's surface voxels into a workgroup list and then trace it with consecutive
+// threads: the same work in far fewer (and full) SIMD groups.
+var<workgroup> wList: array<u32, 512>;      // brick voxel indices (x + 8y + 64z) of the surface air voxels
+var<workgroup> wCount: atomic<u32>;
+var<workgroup> wSun: array<u32, 512>;       // sun_main: each voxel's result, for the paired write
+
+fn isSurfaceAir(g: i32, v: vec3<i32>) -> bool { return !isSolid(g, v) && hasSolidNeighbour(g, v); }
+
 @compute @workgroup_size(256)
 fn sun_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
             @builtin(local_invocation_index) t: u32) {
     let wi = wid.x + wid.y * nwg.x;
     if (wi >= u32(p.counts.z)) { return; }
+    if (t == 0u) { atomicStore(&wCount, 0u); }
+    workgroupBarrier();
     let it = itemOf(work[wi], t);
+    let base = it.v0 - vec3<i32>(i32(t * 2u) & 7, (i32(t * 2u) >> 3u) & 7, i32(t * 2u) >> 6u);
+    for (var e = 0u; e < 2u; e = e + 1u) {
+        let k = t * 2u + e;
+        wSun[k] = 3u; // not a surface voxel: reads lit (see sunLevel)
+        if (isSurfaceAir(it.g, it.v0 + vec3<i32>(i32(e), 0, 0))) { wList[atomicAdd(&wCount, 1u)] = k; }
+    }
+    workgroupBarrier();
+    let n = atomicLoad(&wCount);
     let list = listOf(it.g, it.v0);
-    let s0 = sunLevel(it.g, it.v0, list);
-    let s1 = sunLevel(it.g, it.v0 + vec3<i32>(1, 0, 0), list);
+    for (var i = t; i < n; i = i + 256u) {
+        let k = wList[i];
+        wSun[k] = sunLevel(it.g, base + vec3<i32>(i32(k & 7u), i32((k >> 3u) & 7u), i32(k >> 6u)), list);
+    }
+    workgroupBarrier();
+    let s0 = wSun[t * 2u];
+    let s1 = wSun[t * 2u + 1u];
     let old = lightPool[it.disp] & ~((3u << 12u) | (3u << 28u));
     lightPool[it.disp] = old | (s0 << 12u) | (s1 << 28u);
 }
@@ -686,6 +712,8 @@ fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) n
     // The bounce work list is pairs: (light slot, evaluations since the brick changed).
     let wi = wid.x + wid.y * nwg.x;
     if (wi >= u32(p.counts.z)) { return; }
+    if (t == 0u) { atomicStore(&wCount, 0u); }
+    workgroupBarrier();
     let it = itemOf(work[wi * 2u], t);
     let nu = work[wi * 2u + 1u];
     // A running average over the first full cycle (exactly the complete ray set's mean), then a weight of one
@@ -694,8 +722,23 @@ fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) n
     let alpha = max(1.0 / f32(cycle), 1.0 / (f32(nu) + 1.0));
     let slice = i32(nu % cycle);
     let list = listOf(it.g, it.v0);
-    lightPool[it.acc]     = bounceVoxel(it.g, it.v0, lightPool[it.acc], alpha, slice, list);
-    lightPool[it.acc + 1] = bounceVoxel(it.g, it.v0 + vec3<i32>(1, 0, 0), lightPool[it.acc + 1], alpha, slice, list);
+    // Gather the surface voxels (see Surface compaction); other air has no bounce and no occlusion, solid keeps its word.
+    let base = it.v0 - vec3<i32>(i32(t * 2u) & 7, (i32(t * 2u) >> 3u) & 7, i32(t * 2u) >> 6u);
+    for (var e = 0u; e < 2u; e = e + 1u) {
+        let v = it.v0 + vec3<i32>(i32(e), 0, 0);
+        if (isSolid(it.g, v)) { continue; }
+        if (hasSolidNeighbour(it.g, v)) { wList[atomicAdd(&wCount, 1u)] = t * 2u + e; }
+        else { lightPool[it.acc + i32(e)] = 0u; }
+    }
+    workgroupBarrier();
+    let n = atomicLoad(&wCount);
+    let accBase = it.acc - i32(t * 2u);
+    for (var i = t; i < n; i = i + 256u) {
+        let k = wList[i];
+        let v = base + vec3<i32>(i32(k & 7u), i32((k >> 3u) & 7u), i32(k >> 6u));
+        let a = accBase + i32(k);
+        lightPool[a] = bounceVoxel(it.g, v, lightPool[a], alpha, slice, list);
+    }
 }
 
 // Drops the stored bounce of the listed slots (keeping AO), where a light was removed or dimmed. Bounce there feeds
@@ -826,7 +869,7 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
         const int MaxPerDim = 65535;
         uint gx = (uint)System.Math.Min(count, MaxPerDim);
         uint gy = ((uint)count + gx - 1u) / gx;
-        pipeline.Record(_enc, (BindGroup*)bg, gx, gy, 1u, timingName);
+        pipeline.Record(_enc, (BindGroup*)bg, gx, gy, 1u, timingName, count);
     }
 
     /// <summary>Submits every dispatch recorded since the last submit, as one command buffer. Each dispatch is its own
