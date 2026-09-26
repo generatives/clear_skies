@@ -41,8 +41,8 @@ public struct PlayerCharacter
     // while the ship is still underneath (a ray straight down hits it first); after ShipReleaseTime away from
     // it (enough to cross a gap in the deck) the player is released, keeping the ship's velocity at that
     // moment as plain momentum, so falling off the side doesn't get dragged along after the ship.
-    private const float ShipReleaseTime = 0.25f;
-    private const float ShipCheckDistance = 64f;
+    private const float ShipReleaseTime = 0.5f;
+    private const float ShipCheckDistance = 128f; // blocks (1 block = 1 unit)
     private BodyHandle lastSupportBody;
     private bool hasLastSupportBody;
     private float timeNotAboveShip;
