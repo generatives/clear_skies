@@ -19,8 +19,9 @@ namespace ClearSkies.Engine.ECS;
 /// on whichever volume (static world or dynamic grid) the camera is aimed at. Left-clicking an
 /// <see cref="Interactive"/> block uses it instead of placing against it: <see cref="BlockInteraction"/>s are
 /// published for it until the button is released, with the mouse moving the control rather than the view, which
-/// follows whatever point the control reports the player has hold of (<see cref="InteractionFocus"/>). The targeted face is highlighted and a crosshair is always
-/// shown at the screen centre.
+/// follows whatever point the control reports the player has hold of (<see cref="InteractionFocus"/>). The targeted face is highlighted.
+/// The block placed is <see cref="PlaceIndex"/> into <see cref="PlaceableBlocks"/>, which the game's hotbar shows and
+/// sets (L also cycles it).
 /// </summary>
 public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
 {
@@ -35,8 +36,6 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
 
     private readonly GpuMesh _faceMesh;
     private readonly Entity  _faceEntity;
-    private readonly GpuMesh _crosshairMesh;
-    private readonly Entity  _crosshairEntity;
 
     // Cached so face vertices are only re-uploaded when the targeted cell/volume changes.
     private Vector3D<int> _lastBlock;
@@ -55,16 +54,31 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
     public Vector3D<int>? TargetBlock  { get; private set; }
     public Vector3D<int>? TargetNormal { get; private set; }
 
-    // Block placed by left-click on an air cell. Cycle with L, or pick directly from the "Place block"
-    // dropdown in DrawDebugUi — both keep _placeIndex/_placeBlock in sync.
-    private static readonly BlockId[] PlaceableBlocks =
+    // Block placed by left-click on an air cell. Cycle with L, pick from the "Place block" dropdown in DrawDebugUi, or
+    // set PlaceIndex (the hotbar) — all keep _placeIndex/_placeBlock in sync.
+    private static readonly BlockId[] Placeable =
         { BlockId.Stone, BlockId.Wood, BlockId.Grass, BlockId.Dirt, BlockId.Lamp, BlockId.RedLamp, BlockId.GreenLamp,
           BlockId.BlueLamp, BlockId.Fan, BlockId.Buoyant, BlockId.Lever, BlockId.SteeringWheel };
     private static readonly string[] PlaceableNames =
-        Array.ConvertAll(PlaceableBlocks, id => BlockRegistry.Get(id).Name);
+        Array.ConvertAll(Placeable, id => BlockRegistry.Get(id).Name);
 
-    private int _placeIndex = 0; // index into PlaceableBlocks
-    private BlockId _placeBlock = PlaceableBlocks[0];
+    /// <summary>The blocks the player can place, in hotbar order.</summary>
+    public static IReadOnlyList<BlockId> PlaceableBlocks => Placeable;
+
+    private int _placeIndex = 0; // index into Placeable
+    private BlockId _placeBlock = Placeable[0];
+
+    /// <summary>Which of <see cref="PlaceableBlocks"/> left-click places.</summary>
+    public int PlaceIndex
+    {
+        get => _placeIndex;
+        set
+        {
+            _placeIndex = ((value % Placeable.Length) + Placeable.Length) % Placeable.Length;
+            _placeBlock = Placeable[_placeIndex];
+        }
+    }
+
     private int _blockBrushRadius = 0;
 
     public PlayerInputSystem(World world, InputManager input, ChunkMeshSystem meshSystem, Renderer renderer,
@@ -82,11 +96,6 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
         _faceMesh   = BuildFaceMesh(renderer);
         _faceEntity = world.CreateEntity();
         _faceEntity.Set(Transform.Identity);
-
-        // Crosshair: always visible; vertices are in NDC so no Transform needed.
-        _crosshairMesh   = BuildCrosshairMesh(renderer);
-        _crosshairEntity = world.CreateEntity();
-        _crosshairEntity.Set(new HudRenderer { Mesh = _crosshairMesh });
     }
 
     public void Update(float dt)
@@ -102,7 +111,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
     {
         ImGui.Text(TargetBlock is { } b ? $"Target: ({b.X}, {b.Y}, {b.Z})" : "Target: none");
         if (ImGui.Combo("Place block", ref _placeIndex, PlaceableNames, PlaceableNames.Length))
-            _placeBlock = PlaceableBlocks[_placeIndex];
+            _placeBlock = Placeable[_placeIndex];
         ImGui.SliderInt("Brush Size", ref _blockBrushRadius, 0, 32);
         ImGui.TextDisabled("(or press L to cycle)");
     }
@@ -180,8 +189,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
 
         if (_input.WasKeyPressed(Key.L))
         {
-            _placeIndex = (_placeIndex + 1) % PlaceableBlocks.Length;
-            _placeBlock = PlaceableBlocks[_placeIndex];
+            PlaceIndex = _placeIndex + 1;
             Console.WriteLine($"[place] selected block: {_placeBlock}");
         }
 
@@ -304,9 +312,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
     {
         _focusSubscription.Dispose();
         _faceMesh.Dispose();
-        _crosshairMesh.Dispose();
-        if (_faceEntity.IsAlive)      _faceEntity.Dispose();
-        if (_crosshairEntity.IsAlive) _crosshairEntity.Dispose();
+        if (_faceEntity.IsAlive) _faceEntity.Dispose();
     }
 
     // ── Face highlight ────────────────────────────────────────────────────────
@@ -404,44 +410,6 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
         uint[] tris  = { 0, 1, 2, 0, 2, 3 };             // 2 dummy triangles (never drawn solid)
         uint[] edges = { 0, 1,  1, 2,  2, 3,  3, 0 };    // 4 border edges
         return renderer.UploadMesh(verts, tris, edges);
-    }
-
-    // ── Crosshair ─────────────────────────────────────────────────────────────
-
-    private static GpuMesh BuildCrosshairMesh(Renderer renderer)
-    {
-        // NDC coordinates for a classic gap-crosshair on a 1280×720 viewport, built as filled quads
-        // (not a GPU line list, whose width is fixed at 1px) so the arms have real on-screen thickness.
-        const float hw = 15f / 640f;  // arm half-length, horizontal arms (X)
-        const float hh = 15f / 360f;  // arm half-length, vertical arms (Y)
-        const float gw =  4f / 640f;  // gap half-length, X
-        const float gh =  4f / 360f;  // gap half-length, Y
-        const float tw =  1.0f / 640f; // arm half-thickness, X (thickness of the vertical arms)
-        const float th =  1.0f / 360f; // arm half-thickness, Y (thickness of the horizontal arms)
-
-        var white = new Vector3D<float>(1f, 1f, 1f);
-        var n     = Vector3D<float>.Zero;
-
-        Vertex V(float x, float y) => new(new(x, y, 0), n, white);
-
-        // 4 quads (4 verts each): left arm, right arm, bottom arm, top arm.
-        var verts = new[]
-        {
-            V(-hw, -th), V(-gw, -th), V(-gw, th), V(-hw, th),
-            V( gw, -th), V( hw, -th), V( hw, th), V( gw, th),
-            V(-tw, -hh), V( tw, -hh), V( tw, -gh), V(-tw, -gh),
-            V(-tw,  gh), V( tw,  gh), V( tw,  hh), V(-tw,  hh),
-        };
-
-        uint[] tris =
-        {
-            0, 1, 2,  0, 2, 3,
-            4, 5, 6,  4, 6, 7,
-            8, 9, 10, 8, 10, 11,
-            12, 13, 14, 12, 14, 15,
-        };
-
-        return renderer.UploadMesh(verts, tris);
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

@@ -825,6 +825,10 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     /// pass, after the HUD pass and before <see cref="EndFrame"/> closes it.</summary>
     internal RenderPassEncoder* CurrentPass => _pass;
 
+    /// <summary>Call after binding a pipeline of your own on <see cref="CurrentPass"/> (e.g. the game UI's), so this
+    /// renderer's later draws rebind theirs rather than assume it's still bound.</summary>
+    internal void ForgetBoundPipeline() => _boundPipeline = null;
+
     public Renderer(GpuContext ctx)
     {
         _ctx = ctx;

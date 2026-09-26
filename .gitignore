@@ -136,3 +136,7 @@ _NCrunch*
 imgui.ini
 
 .claude/worktrees
+
+# Prebuilt native Clay libraries (see native/clay/build.sh) are committed; its CMake build folder is not.
+!native/clay/bin/
+native/clay/build/

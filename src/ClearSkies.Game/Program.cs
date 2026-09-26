@@ -3,10 +3,12 @@ using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Generation;
 using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Rendering.WebGpu;
+using ClearSkies.Engine.Ui;
 using ClearSkies.Engine.Voxels;
 using ClearSkies.Game;
 using ClearSkies.Game.Diagnostics;
 using ClearSkies.Game.Generation;
+using ClearSkies.Game.Hud;
 using Silk.NET.Input;
 using Silk.NET.Maths;
 using System.Numerics;
@@ -42,6 +44,13 @@ var meshSystem    = new ChunkMeshSystem(host.World, host.Renderer, blockModels);
 var gridSelection = new GridSelection(host.World);
 
 host.AddSystem(host.Gui, SystemStage.Input); // opens ImGui's frame before Logic/PreRender systems run
+
+// Game UI (immediate mode, laid out by Clay): opens its layout after ImGui's frame, since ImGui resets whether the UI
+// has the mouse; Logic/PreRender systems declare elements; UiRenderSystem draws them in the HUD stage.
+using var ui = new UiContext(host.Window, host.Input);
+ui.AddFont(UiFont.Load(Path.Combine(AppContext.BaseDirectory, "Resources", "Fonts", "PixelifySans.ttf")));
+HudUi.LoadSprites(ui, Path.Combine(AppContext.BaseDirectory, "Resources", "Ui"));
+host.AddSystem(ui, SystemStage.Input);
 
 var physicsBody = new PhysicsBodySystem(host.World, host.Physics);
 
@@ -89,7 +98,9 @@ host.AddSystem(new PhysicsTransformSyncSystem(host.World, host.Physics), SystemS
 host.AddSystem(new HierarchyTransformSystem(host.World), SystemStage.Logic); // e.g. volume Transforms -> chunk Transforms
 host.AddSystem(new CharacterCameraSyncSystem(host.World), SystemStage.Logic); // reads the capsule's post-physics pose into Transform
 host.AddSystem(gridPilot, SystemStage.Logic);
-host.AddSystem(new PlayerInputSystem(host.World, host.Input, meshSystem, host.Renderer, gridSelection), SystemStage.Logic);
+var playerInput = new PlayerInputSystem(host.World, host.Input, meshSystem, host.Renderer, gridSelection);
+host.AddSystem(playerInput, SystemStage.Logic);
+host.AddSystem(new HudUi(ui, host.Input, playerInput, host.Renderer.Atlas), SystemStage.Logic); // crosshair, hotbar
 host.AddSystem(new LeverControlSystem(host.World), SystemStage.Logic); // after PlayerInputSystem, whose clicks drag levers
 host.AddSystem(new SteeringWheelControlSystem(host.World), SystemStage.Logic); // ...and turn wheels
 var gridPersistence = new GridPersistenceSystem(host.World, meshSystem, host.Physics, gridSelection);
@@ -119,6 +130,8 @@ host.AddSystem(clouds, SystemStage.RenderWorld);
 host.AddSystem(new SkyRenderSystem(host.Renderer), SystemStage.RenderSky);
 host.AddSystem(new WireframeRenderSystem(host.World, host.Renderer), SystemStage.RenderOverlay);
 host.AddSystem(new HudRenderSystem(host.World, host.Renderer), SystemStage.RenderHud);
+using var uiRenderer = new UiRenderSystem(ui, host.Renderer);
+host.AddSystem(uiRenderer, SystemStage.RenderHud);
 
 // --camera x,y,z[,yaw,pitch]: start the camera at a given spot instead of overlooking the nearest cluster.
 float[]? cameraOverride = null;
