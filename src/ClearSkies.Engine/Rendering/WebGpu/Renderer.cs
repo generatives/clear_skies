@@ -469,11 +469,33 @@ fn solidMask(air: vec3<i32>, i: i32) -> u32 {
         }
         return m;
     }
-    // Chunk border: per voxel.
+    // Chunk border: the neighbourhood spans up to 8 chunks (the air cell's, and one more along each axis it sits at
+    // the edge of). Each is looked up once (a chunk lookup is several reads and integer divides), not once per voxel.
+    let c0 = air >> vec3<u32>(5u);
+    var sx = 0; if (l.x == 0) { sx = -1; } else if (l.x == 31) { sx = 1; }
+    var sy = 0; if (l.y == 0) { sy = -1; } else if (l.y == 31) { sy = 1; }
+    var sz = 0; if (l.z == 0) { sz = -1; } else if (l.z == 31) { sz = 1; }
+    var codes: array<i32, 8>;
+    for (var n = 0; n < 8; n = n + 1) {
+        // Combinations stepping along an axis the cell isn't at the edge of are never used.
+        if (((n & 1) != 0 && sx == 0) || ((n & 2) != 0 && sy == 0) || ((n & 4) != 0 && sz == 0)) { continue; }
+        let o = vec3<i32>(select(0, sx, (n & 1) != 0), select(0, sy, (n & 2) != 0), select(0, sz, (n & 4) != 0));
+        var e = i;
+        if (n != 0) { e = entryOf(model.grid, c0 + o); }
+        codes[n] = select(chunkTable[2 * max(e, 0)].x, OCC_UNLOADED, e < 0);
+    }
     var m = 0u;
     for (var k = 0; k < 27; k = k + 1) {
         let d = vec3<i32>(k % 3, (k / 3) % 3, k / 9) - vec3<i32>(1);
-        if (isSolid(air + d)) { m = m | (1u << u32(k)); }
+        let lv = l + d;
+        let n = select(0, 1, lv.x < 0 || lv.x > 31) | select(0, 2, lv.y < 0 || lv.y > 31) | select(0, 4, lv.z < 0 || lv.z > 31);
+        let code = codes[n];
+        var solid = code == OCC_ALL_SOLID;
+        if (code >= 0) {
+            let w = lv & vec3<i32>(31);
+            solid = ((occPool[u32(code * WPC + w.y + 32 * w.z)] >> u32(w.x)) & 1u) == 1u;
+        }
+        if (solid) { m = m | (1u << u32(k)); }
     }
     return m;
 }
@@ -481,11 +503,14 @@ fn solidMask(air: vec3<i32>, i: i32) -> u32 {
 // One in-plane cell's (sky, r, g, b), sun and weight (0 when not included in the smoothing).
 struct WCell { a: vec4<f32>, sun: f32, w: f32 };
 
-fn weighed(inc: bool, v: vec3<i32>, homeBrick: vec3<i32>, homeSlot: u32) -> WCell {
+fn weighed(inc: bool, v: vec3<i32>, homeBrick: vec3<i32>, homeSlot: u32, homeEntry: i32) -> WCell {
     var r: WCell;
     if (!inc) { r.a = vec4<f32>(0.0); r.sun = 0.0; r.w = 0.0; return r; }
     var d: u32;
-    if (all((v >> vec3<u32>(3u)) == homeBrick)) { d = slotDisplay(homeSlot, v); } else { d = displayAt(v); }
+    // In the air cell's brick: its slot; else in its chunk: that chunk's entry (no chunk lookup); else a full lookup.
+    if (all((v >> vec3<u32>(3u)) == homeBrick)) { d = slotDisplay(homeSlot, v); }
+    else if (all((v >> vec3<u32>(5u)) == (homeBrick >> vec3<u32>(2u)))) { d = slotDisplay(brickSlot(homeEntry, v), v); }
+    else { d = displayAt(v); }
     r.a = vec4<f32>(camera.lightParams.z * (1.0 - camera.lightParams.x * f32(d >> 14u) / 3.0),
                     decodeLevel(d & 15u), decodeLevel((d >> 4u) & 15u), decodeLevel((d >> 8u) & 15u));
     r.sun = f32((d >> 12u) & 3u) / 3.0;
@@ -533,11 +558,11 @@ fn shadeFast(localPos: vec3<f32>, localNormal: vec3<f32>) -> Shade {
     let oMP = (oTm || oBp) && !sMP && maskSolid(m, -T + B - N);
     let oPP = (oTp || oBp) && !sPP && maskSolid(m, T + B - N);
 
-    let cC  = weighed(true, air, hb, hs);
-    let cTm = weighed(oTm, air - T, hb, hs);     let cTp = weighed(oTp, air + T, hb, hs);
-    let cBm = weighed(oBm, air - B, hb, hs);     let cBp = weighed(oBp, air + B, hb, hs);
-    let cMM = weighed(oMM, air - T - B, hb, hs); let cPM = weighed(oPM, air + T - B, hb, hs);
-    let cMP = weighed(oMP, air - T + B, hb, hs); let cPP = weighed(oPP, air + T + B, hb, hs);
+    let cC  = weighed(true, air, hb, hs, ai);
+    let cTm = weighed(oTm, air - T, hb, hs, ai);     let cTp = weighed(oTp, air + T, hb, hs, ai);
+    let cBm = weighed(oBm, air - B, hb, hs, ai);     let cBp = weighed(oBp, air + B, hb, hs, ai);
+    let cMM = weighed(oMM, air - T - B, hb, hs, ai); let cPM = weighed(oPM, air + T - B, hb, hs, ai);
+    let cMP = weighed(oMP, air - T + B, hb, hs, ai); let cPP = weighed(oPP, air + T + B, hb, hs, ai);
 
     let c00 = avg4(cC, cTm, cBm, cMM);
     let c10 = avg4(cC, cTp, cBm, cPM);
