@@ -19,7 +19,7 @@ public sealed unsafe class Renderer : IDisposable
     // ChunkLoadSystem) plus model blocks, ships and clouds used to cut distant islands off at 4096.
     private const int MaxObjects = 16384;
     private const ulong ModelStride = 256;   // >= minUniformBufferOffsetAlignment
-    private const ulong CameraSize  = 256;   // two mat4x4<f32> (view, proj) + eight vec4<f32> (sun, light params, camera position, fog, zenith, horizon, haze, sea)
+    private const ulong CameraSize  = 272;   // two mat4x4<f32> (view, proj) + nine vec4<f32> (sun, light params, camera position, fog, zenith, horizon, haze, sea, light params 2)
     private const ulong ModelSize   = 96;    // mat4x4<f32> + vec3<i32> chunk + i32 grid + vec4<f32> params
 
     private static readonly string Wgsl = @"
@@ -34,13 +34,15 @@ const SLOT_WORDS: u32 = " + GridStore.WordsPerSlot + @"u;
 const EMPTY_DISPLAY: u32 = 0x3000u;   // no light storage: full sun, no light, no AO
 
 // sunDir.w: sun strength (SunLight.Strength). lightParams.x: ray AO strength, .y: 1 = reference light path (see
-// shadeFast), .z: ambient (0-1), .w unused. camPos.xyz: camera world position. fog.xy: the world's fog start/end
+// shadeFast), .z: ambient (0-1), .w: unused. camPos.xyz: camera world position. fog.xy: the world's fog start/end
 // (horizontal), fog.zw: the cloud layer's (see CloudLayer), in blocks from the camera. zenith/horizon.rgb: the sky
 // gradient (see SkySettings). horizon.w: the distance haze's strength (0-1), haze.rgb its colour, haze.w its distance.
 // sea: the cloud sea's altitude, coverage (0 = off), cell size and thickness, in blocks (see cloudSea).
+// lightParams2.y/.z: render pass debug toggles (see fs_main).
 struct Camera {
     view: mat4x4<f32>, proj: mat4x4<f32>, sunDir: vec4<f32>, lightParams: vec4<f32>,
     camPos: vec4<f32>, fog: vec4<f32>, zenith: vec4<f32>, horizon: vec4<f32>, haze: vec4<f32>, sea: vec4<f32>,
+    lightParams2: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
@@ -587,12 +589,36 @@ fn shadeFast(localPos: vec3<f32>, localNormal: vec3<f32>) -> Shade {
     return o;
 }
 
+// shadeFast's corner AO alone (the solid mask, no light lookups), for the flat-light debug mode.
+fn cornerAoFast(localPos: vec3<f32>, localNormal: vec3<f32>) -> f32 {
+    let air = model.chunk * 32 + vec3<i32>(floor(localPos + 0.5 * localNormal));
+    let n = abs(localNormal);
+    var T: vec3<i32>; var B: vec3<i32>;
+    if (n.x > 0.5)      { T = vec3<i32>(0, 1, 0); B = vec3<i32>(0, 0, 1); }
+    else if (n.y > 0.5) { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 0, 1); }
+    else                { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 1, 0); }
+    let m = solidMask(air, entryOf(model.grid, air >> vec3<u32>(5u)));
+    let sTm = select(0.0, 1.0, maskSolid(m, -T));     let sTp = select(0.0, 1.0, maskSolid(m, T));
+    let sBm = select(0.0, 1.0, maskSolid(m, -B));     let sBp = select(0.0, 1.0, maskSolid(m, B));
+    let ao00 = vAO(sTm, sBm, select(0.0, 1.0, maskSolid(m, -T - B)));
+    let ao10 = vAO(sTp, sBm, select(0.0, 1.0, maskSolid(m, T - B)));
+    let ao01 = vAO(sTm, sBp, select(0.0, 1.0, maskSolid(m, -T + B)));
+    let ao11 = vAO(sTp, sBp, select(0.0, 1.0, maskSolid(m, T + B)));
+    let s = smoothstep(0.0, 1.0, fract(dot(localPos, vec3<f32>(T))));
+    let t = smoothstep(0.0, 1.0, fract(dot(localPos, vec3<f32>(B))));
+    return mix(mix(ao00, ao10, s), mix(ao01, ao11, s), t);
+}
+
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // Sample unconditionally (avoids implicit-derivative issues from branching on a per-fragment value) and
     // select against the vertex color for untextured blocks (uv.z < 0, the no-texture sentinel).
+    // Debug (Renderer panel, for measuring what the render pass spends): lightParams2.y bit 1 = no texture sample,
+    // bit 2 = no fog or haze; lightParams2.z = lighting mode (see below).
+    let dbg = u32(camera.lightParams2.y);
     let layer     = max(i32(round(in.uv.z)), 0);
-    let texColor  = textureSample(atlasTex, atlasSamp, fract(in.uv.xy), layer).rgb;
+    var texColor  = vec3<f32>(0.6);
+    if ((dbg & 1u) == 0u) { texColor = textureSample(atlasTex, atlasSamp, fract(in.uv.xy), layer).rgb; }
     let baseColor = select(in.color, texColor, in.uv.z >= 0.0);
 
     // Non-chunk draws (selection highlight, HUD, debug meshes) have no light data: full-bright.
@@ -602,7 +628,19 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let ndotl  = max(dot(worldN, -(camera.sunDir.xyz)), 0.0);
     var s: Lit;
     var ao: f32;
-    if (camera.lightParams.y > 0.5) {
+    let mode = i32(camera.lightParams2.z);
+    let air = model.chunk * 32 + vec3<i32>(floor(in.localPos + 0.5 * in.localNormal));
+    if (mode == 3) {
+        // Debug: no voxel lighting at all (open sky, full sun, no AO).
+        s.sky = camera.lightParams.z; s.rgb = vec3<f32>(0.0); s.sun = 1.0;
+        ao = 1.0;
+    } else if (mode == 1 || mode == 2) {
+        // Debug: flat light everywhere, with (1) or without (2) corner AO.
+        let c = cellAt(air);
+        s.sky = c.sky; s.rgb = c.rgb; s.sun = c.sun;
+        ao = 1.0;
+        if (mode == 1) { ao = cornerAoFast(in.localPos, in.localNormal); }
+    } else if (camera.lightParams.y > 0.5) {
         s  = sampleLit(in.localPos, in.localNormal);
         ao = computeAO(in.localPos, in.localNormal);
     } else {
@@ -624,7 +662,16 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // Ambient occlusion darkens inner corners / block junctions; lerp from AO_MIN so corners aren't pure black.
     let aoFactor = mix(AO_MIN, 1.0, ao);
 
+    if ((dbg & 2u) != 0u) { return vec4<f32>(baseColor * lit * aoFactor, 1.0); }
     return vec4<f32>(applyFog(baseColor * lit * aoFactor, in.worldPos), 1.0);
+}
+
+// Debug overdraw view: every terrain fragment that passes the depth test (in the normal nearest-first draw order)
+// adds a fifth of full brightness (and a little red), so brightness counts how many times each pixel is shaded: dim
+// grey 1 (ideal), brighter each time, white at 5 or more.
+@fragment
+fn fs_overdraw(in: VSOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(0.2, 0.17, 0.17, 1.0);
 }
 
 // 3D models (GpuModel, e.g. glTF props and model blocks): group 3 holds the model's own single-layer texture instead
@@ -718,6 +765,11 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     private RenderPipeline* _modelPipeline;
     private RenderPipeline* _chunkPipeline;          // vs_chunk: chunk meshes (ChunkVertex)
     private RenderPipeline* _chunkWireframePipeline;
+    private RenderPipeline* _chunkOverdrawPipeline;  // debug overdraw view
+
+    /// <summary>Debug: draw terrain additively without depth test, so brightness shows how many surfaces cover each
+    /// pixel (sky and clouds are skipped).</summary>
+    public bool OverdrawMode { get; set; }
     private RenderPipeline* _boundPipeline;          // the pipeline last set in this pass
 
     private void SetPipeline(RenderPipeline* pipeline)
@@ -787,6 +839,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         _cloudPipeline     = CreateCloudPipeline();
         _chunkPipeline          = CreateChunkPipeline(PrimitiveTopology.TriangleList, CullMode.Back);
         _chunkWireframePipeline = CreateChunkPipeline(PrimitiveTopology.LineList,     CullMode.None);
+        _chunkOverdrawPipeline  = CreateOverdrawPipeline();
         // The background pass: a full-screen triangle at the far plane that only fills pixels still at the cleared
         // depth (reversed: the far plane and the clear value are both 0), without writing depth.
         _skyPipeline       = CreatePipeline("vs_sky", "fs_sky", null, PrimitiveTopology.TriangleList, CullMode.None,
@@ -902,6 +955,18 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         return CreatePipeline("vs_chunk", "fs_main", &vbLayout, topology, cullMode, depthWrite: true, CompareFunction.Greater);
     }
 
+    /// <summary>Debug overdraw view (fs_overdraw): terrain drawn additively, depth-tested in the normal draw order, so
+    /// it counts the fragments that really get shaded (one per pixel is ideal).</summary>
+    private RenderPipeline* CreateOverdrawPipeline()
+    {
+        var attr     = new VertexAttribute { Format = VertexFormat.Uint32x2, Offset = 0, ShaderLocation = 0 };
+        var vbLayout = new VertexBufferLayout { ArrayStride = ChunkVertex.SizeBytes, StepMode = VertexStepMode.Vertex, AttributeCount = 1, Attributes = &attr };
+        var add = new BlendComponent { Operation = BlendOperation.Add, SrcFactor = BlendFactor.One, DstFactor = BlendFactor.One };
+        var blend = new BlendState { Color = add, Alpha = add };
+        return CreatePipeline("vs_chunk", "fs_overdraw", &vbLayout, PrimitiveTopology.TriangleList, CullMode.Back,
+                              depthWrite: true, CompareFunction.Greater, &blend);
+    }
+
     /// <summary>The cloud boxes (vs_cloud/fs_cloud): no vertex buffer, one <see cref="CloudLayer.CloudCell"/> instance
     /// per box, back faces culled, depth-tested and depth-writing like the world.</summary>
     private RenderPipeline* CreateCloudPipeline()
@@ -919,13 +984,13 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     /// vertex buffer, or null for none (the vertex shader makes its own geometry).</summary>
     private RenderPipeline* CreatePipeline(string vertexEntry, string fragmentEntry, VertexBufferLayout* vertexBuffer,
                                            PrimitiveTopology topology, CullMode cullMode, bool depthWrite,
-                                           CompareFunction depthCompare)
+                                           CompareFunction depthCompare, BlendState* blend = null)
     {
         var vsEntry = (byte*)SilkMarshal.StringToPtr(vertexEntry, NativeStringEncoding.UTF8);
         var fsEntry = (byte*)SilkMarshal.StringToPtr(fragmentEntry, NativeStringEncoding.UTF8);
 
         var vertexState   = new VertexState { Module = _shader, EntryPoint = vsEntry, BufferCount = vertexBuffer == null ? 0u : 1u, Buffers = vertexBuffer };
-        var colorTarget   = new ColorTargetState { Format = _ctx.SurfaceFormat, Blend = null, WriteMask = ColorWriteMask.All };
+        var colorTarget   = new ColorTargetState { Format = _ctx.SurfaceFormat, Blend = blend, WriteMask = ColorWriteMask.All };
         var fragmentState = new FragmentState { Module = _shader, EntryPoint = fsEntry, TargetCount = 1, Targets = &colorTarget };
 
         var keep  = StencilOperation.Keep;
@@ -1225,6 +1290,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     /// </summary>
     public void DrawClouds(IReadOnlyList<CloudTileDraw> tiles)
     {
+        if (OverdrawMode) return;
         if (tiles.Count == 0) return;
         SetPipeline(_cloudPipeline);
         foreach (var tile in tiles)
@@ -1245,6 +1311,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     /// </summary>
     public void DrawSky()
     {
+        if (OverdrawMode) return;
         if (_drawIndex >= MaxObjects) return;
 
         // The sky shader only reads the camera, but the shared pipeline layout needs group 1 bound for any draw
@@ -1324,7 +1391,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
             LoadOp = LoadOp.Clear,
             StoreOp = StoreOp.Store,
             // Sky blue; DrawSky paints over whatever the world leaves uncovered.
-            ClearValue = new Color { R = 0.10, G = 0.3078, B = 0.4804, A = 1.0 },
+            ClearValue = OverdrawMode ? new Color { R = 0, G = 0, B = 0, A = 1 } : new Color { R = 0.10, G = 0.3078, B = 0.4804, A = 1.0 },
         };
         var depthAtt = new RenderPassDepthStencilAttachment
         {
@@ -1369,7 +1436,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         // Chunk meshes are packed (ChunkVertex): their own pipeline, set once for a run of chunk draws.
         // A mesh built while wireframe mode was off has no wireframe (see ChunkMeshSystem): solid until it's remeshed.
         bool wire = WireframeMode && mesh.WireframeIndexCount > 0;
-        var pipeline = wire ? _chunkWireframePipeline : _chunkPipeline;
+        var pipeline = OverdrawMode ? _chunkOverdrawPipeline : wire ? _chunkWireframePipeline : _chunkPipeline;
         if (_boundPipeline != pipeline) SetPipeline(pipeline);
 
         uint dynOffset = StageModel(new ModelUniform { Model = model, ChunkX = chunk.X, ChunkY = chunk.Y, ChunkZ = chunk.Z, Grid = grid });
@@ -1453,5 +1520,6 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         if (_pipeline           != null) _api.RenderPipelineRelease(_pipeline);
         if (_chunkPipeline      != null) _api.RenderPipelineRelease(_chunkPipeline);
         if (_chunkWireframePipeline != null) _api.RenderPipelineRelease(_chunkWireframePipeline);
+        if (_chunkOverdrawPipeline != null) _api.RenderPipelineRelease(_chunkOverdrawPipeline);
     }
 }
