@@ -1,5 +1,6 @@
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.ECS;
+using ClearSkies.Engine.Generation;
 using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Rendering.WebGpu;
 using ClearSkies.Engine.Voxels;
@@ -44,25 +45,30 @@ host.AddSystem(host.Gui, SystemStage.Input); // opens ImGui's frame before Logic
 
 var physicsBody = new PhysicsBodySystem(host.World, host.Physics);
 
-// Streaming budget: how many world chunks are loaded at once — as many as the old 12/3 view box held, but spent
-// only on chunks that hold something (see ChunkLoadSystem), so it reaches as far as the islands need. Streamed
-// layers start 8 under MinChunkY (for building under the islands); islands span roughly blocks 10-300.
-// --chunk-budget N overrides it, e.g. for a software renderer whose small max buffer size can't hold the light
-// for a full budget of island chunks.
-int ChunkBudget = (12 * 2 + 1) * (12 * 2 + 1) * (3 * 2 + 1);
-int budgetArg = Array.IndexOf(args, "--chunk-budget");
-if (budgetArg >= 0 && budgetArg + 1 < args.Length) ChunkBudget = int.Parse(args[budgetArg + 1]);
+// Streaming budget: how much GPU light storage the loaded world may use, in MB (3 KB per 8³ brick of surface). Chunks
+// are loaded closest-first until it's spent (see ChunkLoadSystem); only surfaces use it, so solid stone inside an
+// island is nearly free. The GPU store adds a fifth on top for headroom and ships. --light-budget-mb N overrides it,
+// e.g. for a software renderer whose small max buffer size can't hold it (the store also shrinks it to fit).
+int LightBudgetMb = 1024;
+int budgetArg = Array.IndexOf(args, "--light-budget-mb");
+if (budgetArg >= 0 && budgetArg + 1 < args.Length) LightBudgetMb = int.Parse(args[budgetArg + 1]);
 // View distance: how far out (in blocks, horizontally) islands are streamed, if the budget reaches. The GPU's world
 // index covers it both ways at 2 bytes per chunk position (~48 MB at 10000). --view-distance N overrides it.
 float ViewDistance = 10000f;
 int viewArg = Array.IndexOf(args, "--view-distance");
 if (viewArg >= 0 && viewArg + 1 < args.Length) ViewDistance = float.Parse(args[viewArg + 1], System.Globalization.CultureInfo.InvariantCulture);
-const int MinChunkY = 0;
+const int MinChunkY = 0; // streamed layers are -8..55 (blocks -256..1792): HeartGrid's WorldBottom..WorldTop
+
+// World generator: islands cut out of a continental terrain around island hearts (see HeartWorldGenerator).
+Func<IWorldGenerator> generatorFactory = () => new HeartWorldGenerator(seed);
+SkySettings.CloudAltitude = 1250f; // the islands are mostly low: clouds among the hills
+SkySettings.CloudSeaAltitude = HeartGrid.CloudSeaAltitude; // below its lowest islands
 
 // Shared GPU voxel storage for lighting (world + ships).
-var gridStore = new GridStore(host.Context, ChunkBudget, ChunkLoadSystem.WorldIndexDim(ViewDistance));
-var chunkLoadSystem = new ChunkLoadSystem(host.World, staticVolume, () => new SkyWorldGenerator(seed),
-                                          ViewDistance, ChunkBudget, MinChunkY);
+var gridStore = new GridStore(host.Context, (int)((long)LightBudgetMb * 1024 * 1024 / GridStore.SlotBytes),
+                              ChunkLoadSystem.WorldIndexDim(ViewDistance));
+var chunkLoadSystem = new ChunkLoadSystem(host.World, staticVolume, gridStore, generatorFactory,
+                                          ViewDistance, MinChunkY, "Hearts15");
 host.AddSystem(chunkLoadSystem, SystemStage.Logic);
 host.Renderer.AttachGridStore(gridStore);
 host.AddSystem(physicsBody, SystemStage.Logic);
@@ -106,7 +112,7 @@ host.AddSystem(meshSystem, SystemStage.PreRender);
 host.AddSystem(new BlockModelSystem(host.World, blockModels), SystemStage.PreRender); // block entities -> RenderedModel
 // Rendering: the host opens the frame, runs the render stages (systems in the order added within a stage), then
 // closes it with ImGui and presents. Each render system is handed this frame's camera and time.
-using var clouds = new CloudRenderSystem(host.Renderer, new IslandCloudDensity(seed));
+using var clouds = new CloudRenderSystem(host.Renderer, new HeartCloudDensity(seed));
 host.AddSystem(new ChunkRenderSystem(host.World, host.Renderer), SystemStage.RenderWorld);
 host.AddSystem(new ModelRenderSystem(host.World, host.Renderer), SystemStage.RenderWorld);
 host.AddSystem(clouds, SystemStage.RenderWorld);
@@ -114,17 +120,26 @@ host.AddSystem(new SkyRenderSystem(host.Renderer), SystemStage.RenderSky);
 host.AddSystem(new WireframeRenderSystem(host.World, host.Renderer), SystemStage.RenderOverlay);
 host.AddSystem(new HudRenderSystem(host.World, host.Renderer), SystemStage.RenderHud);
 
-// --camera x,y,z[,yaw,pitch]: start the camera at a given spot instead of overlooking the nearest island.
+// --camera x,y,z[,yaw,pitch]: start the camera at a given spot instead of overlooking the nearest cluster.
 float[]? cameraOverride = null;
 int camArg = Array.IndexOf(args, "--camera");
 if (camArg >= 0 && camArg + 1 < args.Length)
     cameraOverride = args[camArg + 1].Split(',').Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
-var camSpawn = TestScene.Build(host, seed, cameraOverride);
+var camSpawn = TestScene.Build(host, seed, cameraOverride, HeartSpawn(seed));
+
+// Spawn: standing off south of the cluster nearest the origin, a little above its ground, looking
+// at it.
+static (Vector3D<float> Position, float Yaw, float Pitch)? HeartSpawn(ulong seed)
+{
+    if (!HeartGrid.TryFindCluster(seed, 0f, 0f, out float x, out float z)) return null;
+    float y = ContinentTerrain.For(seed).Height(x, z) + 100f;
+    return (new Vector3D<float>(x, y, z - 500f), MathF.PI, -0.2f);
+}
 
 // Ray-traced lighting prototype test ship (plan doc, task 4): a small solid hull with a Lamp exposed on
 // top, placed near the camera's spawn so its shadow should visibly fall on the terrain below once the
 // ray-traced toggle is on and ships are wired into GpuLightSystem's volume slots. Offset from camera
-// spawn rather than re-deriving island geometry (TryFindNearestIsland is private to TestScene).
+// spawn rather than re-deriving island geometry.
 {
     var shipVoxels = new List<(int X, int Y, int Z, BlockId Id, BlockOrientation Orientation)>();
     for (int x = 0; x < 5; x++)

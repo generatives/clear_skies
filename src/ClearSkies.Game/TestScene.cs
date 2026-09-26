@@ -4,7 +4,6 @@ using ClearSkies.Engine.Core;
 using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Physics.Characters;
 using ClearSkies.Engine.Rendering;
-using ClearSkies.Game.Generation;
 using Silk.NET.Maths;
 
 namespace ClearSkies.Game;
@@ -13,33 +12,31 @@ namespace ClearSkies.Game;
 /// plus its walking character body (toggle with V — see PlayerMovementSystem).</summary>
 public static class TestScene
 {
-    // Fallback spawn if no island is found nearby at all (astronomically unlikely given islands
-    // are seeded across the whole plane, but keeps this well-defined).
+    // Fallback spawn if the world has no spawn of its own (no island cluster found nearby).
     private static readonly Vector3D<float> FallbackSpawn = new(16f, 45f, -30f);
 
     /// <summary>Builds the scene and returns the resolved camera spawn position, so callers (e.g. the
-    /// ray-traced lighting prototype's test ship — see the plan doc) can place things relative to it
-    /// without re-deriving island geometry via <see cref="TryFindNearestIsland"/>.</summary>
+    /// ray-traced lighting prototype's test ship — see the plan doc) can place things relative to it.</summary>
     /// <param name="cameraOverride">Launch option (<c>--camera x,y,z[,yaw,pitch]</c>): puts the camera here instead of
     /// overlooking the nearest island, e.g. to reproduce a view for a screenshot.</param>
-    public static Vector3D<float> Build(EngineHost host, ulong worldSeed, float[]? cameraOverride = null)
+    /// <param name="spawnView">Where the camera starts and how it faces (yaw, pitch); <see cref="FallbackSpawn"/> if
+    /// null.</param>
+    public static Vector3D<float> Build(EngineHost host, ulong worldSeed, float[]? cameraOverride = null,
+                                        (Vector3D<float> Position, float Yaw, float Pitch)? spawnView = null)
     {
         var cam = host.World.CreateEntity();
         var camTransform = Transform.Identity;
 
-        // Find the nearest island to the default spawn area and stand off south of it, so the
-        // player always starts overlooking real terrain instead of empty sky (region cells are
-        // sparsely populated — ~55% chance each — so the origin cell itself often has none).
-        if (TryFindNearestIsland(worldSeed, FallbackSpawn.X, FallbackSpawn.Z, out var island))
+        float yaw = MathF.PI, pitch = -0.45f;
+        if (spawnView is { } view)
         {
-            float standoff = island.Radius * 0.6f + 40f;
-            camTransform.Position = new Vector3D<float>(island.CenterX, island.BaseY + 40f, island.CenterZ - standoff);
+            camTransform.Position = view.Position;
+            (yaw, pitch) = (view.Yaw, view.Pitch);
         }
         else
         {
             camTransform.Position = FallbackSpawn;
         }
-        float yaw = MathF.PI, pitch = -0.45f;
         if (cameraOverride is { Length: >= 3 })
         {
             camTransform.Position = new Vector3D<float>(cameraOverride[0], cameraOverride[1], cameraOverride[2]);
@@ -81,52 +78,5 @@ public static class TestScene
 
         host.Input.CursorCaptured = false; // the F1 debug menu starts open, and F1 frees the cursor with it
         return camTransform.Position;
-    }
-
-    /// <summary>
-    /// Spirals outward over region cells (see <see cref="RegionGrid"/>) from the cell containing
-    /// (aroundX, aroundZ) looking for the closest island center. Once at least one island is found,
-    /// searches one extra ring beyond it — an island can sit near its cell's edge, so a slightly
-    /// farther ring can still hold something physically closer.
-    /// </summary>
-    private static bool TryFindNearestIsland(ulong worldSeed, float aroundX, float aroundZ, out IslandDef nearest)
-    {
-        int cellX = (int)MathF.Floor(aroundX) >> RegionGrid.CellShift;
-        int cellZ = (int)MathF.Floor(aroundZ) >> RegionGrid.CellShift;
-
-        nearest = default;
-        bool found = false;
-        float bestDistSq = float.MaxValue;
-        int foundAtRing = -1;
-        Span<IslandDef> islands = stackalloc IslandDef[4];
-
-        for (int ring = 0; ring <= 32; ring++)
-        {
-            if (foundAtRing >= 0 && ring > foundAtRing + 1) break;
-
-            for (int dx = -ring; dx <= ring; dx++)
-            for (int dz = -ring; dz <= ring; dz++)
-            {
-                if (System.Math.Max(System.Math.Abs(dx), System.Math.Abs(dz)) != ring) continue; // ring perimeter only
-
-                int n = RegionGrid.ResolveIslandsForCell(worldSeed, cellX + dx, cellZ + dz, islands);
-                for (int i = 0; i < n; i++)
-                {
-                    float ddx = islands[i].CenterX - aroundX;
-                    float ddz = islands[i].CenterZ - aroundZ;
-                    float distSq = ddx * ddx + ddz * ddz;
-                    if (distSq < bestDistSq)
-                    {
-                        bestDistSq = distSq;
-                        nearest = islands[i];
-                        found = true;
-                    }
-                }
-            }
-
-            if (found && foundAtRing < 0) foundAtRing = ring;
-        }
-
-        return found;
     }
 }

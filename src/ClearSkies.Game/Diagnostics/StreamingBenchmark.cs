@@ -24,7 +24,7 @@ public static class StreamingBenchmark
     public static void Run(ulong seed = 1337, int xzRadius = 8, int yRadius = 3, int flyChunks = 12, int framesPerChunk = 20)
     {
         Console.WriteLine($"=== Streaming benchmark (seed={seed}, radius={xzRadius}/{yRadius}, fly {flyChunks} chunks @ {framesPerChunk} frames/chunk) ===");
-        var generator = new SkyWorldGenerator(seed);
+        var generator = new HeartWorldGenerator(seed);
         var focus = GenerationBenchmark.FindFocusChunk(seed);
 
         var offsets = new List<(int dx, int dy, int dz, int d)>();

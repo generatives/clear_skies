@@ -48,8 +48,22 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         foreach (ref readonly Entity e in _chunks.GetEntities())
         {
             ref readonly var rd = ref e.Get<ChunkRenderData>();
-            var model = e.Get<Transform>().ToMatrix();
-            if (!frame.Frustum.Intersects(model, Vector3D<float>.Zero, size)) continue;
+            if (rd.Mesh == null && rd.Models.Length == 0) continue; // buried stone: nothing to draw
+
+            // Every static-world chunk is axis-aligned: cull its box directly. Building its matrix and transforming
+            // 8 corners, for every loaded chunk every frame, cost ~9 ms at 14000 chunks.
+            ref readonly var t = ref e.Get<Transform>();
+            Mat4 model;
+            if (t.Rotation == Quaternion<float>.Identity && t.Scale == Vector3D<float>.One)
+            {
+                if (!frame.Frustum.Intersects(t.Position, t.Position + size)) continue;
+                model = Mat4.Translation(t.Position);
+            }
+            else
+            {
+                model = t.ToMatrix();
+                if (!frame.Frustum.Intersects(model, Vector3D<float>.Zero, size)) continue;
+            }
 
             float distSq = Vector3D.DistanceSquared(model.TransformPoint(half), frame.CameraPosition);
             _draws.Add(new ChunkDraw(distSq, rd.Mesh, rd.Models, model, rd.Grid?.Index ?? -1, rd.ChunkPos));
