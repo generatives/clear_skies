@@ -2,6 +2,7 @@ using System;
 using System.Numerics;
 using BepuPhysics;
 using BepuPhysics.Collidables;
+using BepuPhysics.Trees;
 using BepuUtilities;
 using ClearSkies.Engine.Input;
 using Silk.NET.Input;
@@ -36,9 +37,16 @@ public struct PlayerCharacter
     private bool jumpedSinceSupported;
 
     // The moving body (ship) last stood on, if any: air control steers and brakes relative to its velocity
-    // rather than the world's, so jumping on a moving deck doesn't leave the player behind.
+    // rather than the world's, so jumping on a moving deck doesn't leave the player behind. That only holds
+    // while the ship is still underneath (a ray straight down hits it first); after ShipReleaseTime away from
+    // it (enough to cross a gap in the deck) the player is released, keeping the ship's velocity at that
+    // moment as plain momentum, so falling off the side doesn't get dragged along after the ship.
+    private const float ShipReleaseTime = 0.25f;
+    private const float ShipCheckDistance = 64f;
     private BodyHandle lastSupportBody;
     private bool hasLastSupportBody;
+    private float timeNotAboveShip;
+    private Vector3 airReferenceVelocity;
 
     public BodyHandle BodyHandle => bodyHandle;
 
@@ -58,6 +66,8 @@ public struct PlayerCharacter
         jumpedSinceSupported = false;
         lastSupportBody = default;
         hasLastSupportBody = false;
+        timeNotAboveShip = 0;
+        airReferenceVelocity = default;
         var shapeIndex = characters.Simulation.Shapes.Add(shape);
 
         // Characters are dynamic but must not rotate or fall over, so the inverse inertia tensor is
@@ -134,6 +144,8 @@ public struct PlayerCharacter
             timeSinceSupported = 0;
             hasLastSupportBody = character.Support.Mobility != CollidableMobility.Static;
             if (hasLastSupportBody) lastSupportBody = character.Support.BodyHandle;
+            timeNotAboveShip = 0;
+            airReferenceVelocity = default;
             // A pending TryJump means the jump hasn't happened yet (no step since it was requested).
             if (!character.TryJump) jumpedSinceSupported = false;
         }
@@ -198,10 +210,8 @@ public struct PlayerCharacter
             // no keys held the character brakes gently, so letting go near a cliff edge stops you short.
             QuaternionEx.Transform(character.LocalUp, characterBody.Pose.Orientation, out var characterUp);
             ref var linear = ref characterBody.Velocity.Linear;
-            var referenceVelocity = Vector3.Zero;
-            if (hasLastSupportBody && characters.Simulation.Bodies.BodyExists(lastSupportBody))
-                referenceVelocity = new BodyReference(lastSupportBody, characters.Simulation.Bodies).Velocity.Linear;
-            var relative = linear - referenceVelocity;
+            UpdateAirReferenceVelocity(characterBody.Pose.Position, characterUp, simulationTimestepDuration);
+            var relative = linear - airReferenceVelocity;
             var horizontal = relative - characterUp * Vector3.Dot(relative, characterUp);
             var airAcceleration = characterBody.LocalInertia.InverseMass * character.MaximumHorizontalForce * airControlForceScale;
             Vector3 newHorizontal;
@@ -224,6 +234,53 @@ public struct PlayerCharacter
                 newHorizontal = MoveTowardsZero(horizontal, airAcceleration * airBrakeScale * simulationTimestepDuration);
             }
             linear += newHorizontal - horizontal;
+        }
+    }
+
+    /// <summary>Follows the ship last stood on while it's still below the player; releases it (freezing its
+    /// velocity as the reference) once the player has been off to the side for <see cref="ShipReleaseTime"/>.</summary>
+    private void UpdateAirReferenceVelocity(Vector3 position, Vector3 up, float dt)
+    {
+        if (!hasLastSupportBody) return;
+        var bodies = characters.Simulation.Bodies;
+        if (!bodies.BodyExists(lastSupportBody))
+        {
+            hasLastSupportBody = false;
+            return;
+        }
+        var shipVelocity = new BodyReference(lastSupportBody, bodies).Velocity.Linear;
+
+        var hitHandler = new NearestHitHandler { Ignore = bodyHandle, T = float.MaxValue };
+        var down = -up;
+        characters.Simulation.RayCast(position, down, ShipCheckDistance, ref hitHandler);
+        var aboveShip = hitHandler.T < float.MaxValue &&
+                        hitHandler.Hit.Mobility != CollidableMobility.Static && hitHandler.Hit.BodyHandle == lastSupportBody;
+
+        timeNotAboveShip = aboveShip ? 0 : timeNotAboveShip + dt;
+        airReferenceVelocity = shipVelocity;
+        if (timeNotAboveShip > ShipReleaseTime) hasLastSupportBody = false;
+    }
+
+    /// <summary>Records the nearest collidable along a ray, skipping the character's own capsule.</summary>
+    private struct NearestHitHandler : IRayHitHandler
+    {
+        public BodyHandle Ignore;
+        public float T;
+        public CollidableReference Hit;
+
+        public bool AllowTest(CollidableReference collidable) =>
+            collidable.Mobility == CollidableMobility.Static || collidable.BodyHandle != Ignore;
+
+        public bool AllowTest(CollidableReference collidable, int childIndex) => true;
+
+        public void OnRayHit(in RayData ray, ref float maximumT, float t, in Vector3 normal, CollidableReference collidable, int childIndex)
+        {
+            if (t < T)
+            {
+                T = t;
+                Hit = collidable;
+                maximumT = t;
+            }
         }
     }
 
