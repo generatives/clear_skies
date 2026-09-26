@@ -177,6 +177,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             float pz = wz + WarpAcross * _warpZ.GetNoise(wx, wz);
             float lift = WarpUp * _warpY.GetNoise(wx, wz);
             float wearNoise = 0.6f + 0.4f * (_crack.GetNoise(wx, wz) + 1f);
+            _nearValid = false; // a new column: its hearts' horizontal distances differ
 
             // Up the column, skipping as far as nothing can change: each test also says how many blocks further up it
             // could, at the nearest piece face or crack above.
@@ -230,6 +231,62 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     /// are made with this much more.</summary>
     private const float CrackSlack = 1f;
 
+    // The hearts near the current test (indices into the heart arrays) and their horizontal distances squared from the
+    // column; the cells they came from (per layer, int.MinValue for none); this test's distances squared; and the
+    // nearest one's faces (_facesFor: which near heart they are for, -1 for none): per other near heart, 1 over twice
+    // the distance between the two, how fast the face between them nears per block up, and its normal's squared upward part.
+    private int[] _near = new int[27 * 4];
+    private float[] _nearXZ = new float[27 * 4], _nearD = new float[27 * 4];
+    private float[] _faceInv2Len = new float[27 * 4], _faceRate = new float[27 * 4], _faceUpness = new float[27 * 4];
+    private readonly int[] _nearKey = new int[HeartGrid.Layers.Length];
+    private int _nearCount, _facesFor = -1;
+    private bool _nearValid;
+
+    private void NearSet(float sx, float sz, ReadOnlySpan<int> key)
+    {
+        key.CopyTo(_nearKey);
+        _nearValid = true;
+        _facesFor = -1;
+        int count = 0;
+        for (int l = 0; l < HeartGrid.Layers.Length; l++)
+        {
+            if (key[l] == int.MinValue) continue;
+            var layer = HeartGrid.Layers[l];
+            int cx = (int)MathF.Floor(sx / layer.CellSize) - _cx0[l];
+            int cz = (int)MathF.Floor(sz / layer.CellSize) - _cz0[l];
+            int cy = key[l];
+            for (int k = cz - 1; k <= cz + 1; k++)
+            for (int j = cy - 1; j <= cy + 1; j++)
+            for (int i = cx - 1; i <= cx + 1; i++)
+            {
+                if ((uint)i >= (uint)_nx[l] || (uint)j >= (uint)_ny[l] || (uint)k >= (uint)_nz[l]) continue;
+                int h = _first[l] + i + _nx[l] * (j + _ny[l] * k);
+                if (!_exists[h]) continue;
+                float dx = _hx[h] - sx, dz = _hz[h] - sz;
+                _near[count] = h;
+                _nearXZ[count++] = dx * dx + dz * dz;
+            }
+        }
+        _nearCount = count;
+    }
+
+    /// <summary>The faces of near heart <paramref name="bn"/>'s piece, against each other near heart.</summary>
+    private void FaceConstants(int bn)
+    {
+        _facesFor = bn;
+        int bi = _near[bn];
+        for (int n = 0; n < _nearCount; n++)
+        {
+            if (n == bn) continue;
+            int h = _near[n];
+            float ex = _hx[h] - _hx[bi], ey = _hy[h] - _hy[bi], ez = _hz[h] - _hz[bi];
+            float len2 = ex * ex + ey * ey + ez * ez, len = MathF.Sqrt(len2);
+            _faceInv2Len[n] = 1f / (2f * len);
+            _faceRate[n] = ey / len * HeartGrid.VerticalScale;
+            _faceUpness[n] = ey * ey / len2;
+        }
+    }
+
     /// <summary>Whether the point at scaled position (sx, sy, sz) is in a live piece, worn back from its faces by
     /// <paramref name="wearAcross"/> and <paramref name="wearUp"/> (scaled space), and how many blocks straight up it
     /// stays so (<paramref name="clear"/>).</summary>
@@ -237,41 +294,38 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     {
         // The hearts to search: those in the cells around the point in each layer whose band is within a cell of it.
         // Going up, that set changes at the next cell boundary of a searched layer, or where another layer comes
-        // within reach: no skipping past either.
-        Span<int> near = stackalloc int[27 * 3];
-        int count = 0;
+        // within reach: no skipping past either. A walk up a column keeps sx and sz, so the set (with each heart's
+        // horizontal distance) is kept from test to test until one of those cells changes (see NearSet).
         float ly = sy / HeartGrid.VerticalScale, setChange = float.MaxValue;
+        Span<int> key = stackalloc int[HeartGrid.Layers.Length];
         for (int l = 0; l < HeartGrid.Layers.Length; l++)
         {
             var layer = HeartGrid.Layers[l];
+            key[l] = int.MinValue;
             if (ly < layer.YMin - layer.CellHeight) { setChange = MathF.Min(setChange, layer.YMin - layer.CellHeight - ly); continue; }
             if (ly > layer.YMax + layer.CellHeight) continue;
             if (_nx[l] == 0) continue;
-            int cx = (int)MathF.Floor(sx / layer.CellSize) - _cx0[l];
             int cy = (int)MathF.Floor(sy / layer.CellSize) - _cy0[l];
-            int cz = (int)MathF.Floor(sz / layer.CellSize) - _cz0[l];
+            key[l] = cy;
             setChange = MathF.Min(setChange, ((cy + _cy0[l] + 1) * layer.CellSize - sy) / HeartGrid.VerticalScale);
             if (ly > layer.YMax) setChange = MathF.Min(setChange, layer.YMax + layer.CellHeight - ly);
-            for (int k = cz - 1; k <= cz + 1; k++)
-            for (int j = cy - 1; j <= cy + 1; j++)
-            for (int i = cx - 1; i <= cx + 1; i++)
-            {
-                if ((uint)i >= (uint)_nx[l] || (uint)j >= (uint)_ny[l] || (uint)k >= (uint)_nz[l]) continue;
-                int h = _first[l] + i + _nx[l] * (j + _ny[l] * k);
-                if (_exists[h]) near[count++] = h;
-            }
         }
+        if (!_nearValid || !key.SequenceEqual(_nearKey)) NearSet(sx, sz, key);
+        int count = _nearCount;
 
         float best = float.MaxValue;
-        int bi = -1;
-        foreach (int h in near[..count])
+        int bn = -1;
+        for (int n = 0; n < count; n++)
         {
-            float dx = _hx[h] - sx, dy = _hy[h] - sy, dz = _hz[h] - sz;
-            float d = dx * dx + dy * dy + dz * dz;
-            if (d < best) { best = d; bi = h; }
+            float dy = _hy[_near[n]] - sy;
+            float d = _nearXZ[n] + dy * dy;
+            _nearD[n] = d;
+            if (d < best) { best = d; bn = n; }
         }
         clear = 0f;
-        if (bi < 0) return false;
+        if (bn < 0) return false;
+        int bi = _near[bn];
+        if (bn != _facesFor) FaceConstants(bn);
 
         // Distances to the planes halfway between the nearest heart and each other: its piece's faces, each less the
         // wear there (across for a side face, up and down for a top or bottom one, blended between for a slanted
@@ -290,18 +344,14 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         float least = float.MaxValue, shrink = 0f, grow = 0f, toFace = float.MaxValue;
         Span<float> worn = stackalloc float[27 * 3], rates = stackalloc float[27 * 3];
         int faces = 0;
-        foreach (int h in near[..count])
+        for (int n = 0; n < count; n++)
         {
-            if (h == bi) continue;
-            float dx = _hx[h] - sx, dy = _hy[h] - sy, dz = _hz[h] - sz;
-            float ex = _hx[h] - _hx[bi], ey = _hy[h] - _hy[bi], ez = _hz[h] - _hz[bi];
-            float len = MathF.Sqrt(ex * ex + ey * ey + ez * ez);
-            float plane = (dx * dx + dy * dy + dz * dz - best) / (2f * len);
-            float rate = ey / len * HeartGrid.VerticalScale; // how fast the face nears, per block up
+            if (n == bn) continue;
+            float plane = (_nearD[n] - best) * _faceInv2Len[n];
+            float rate = _faceRate[n]; // how fast the face nears, per block up
             if (rate > 0f) toFace = MathF.Min(toFace, plane / rate);
             if (!alive) continue;
-            float upness = ey * ey / (len * len);
-            float f = plane - (wearAcross + (wearUp - wearAcross) * upness);
+            float f = plane - (wearAcross + (wearUp - wearAcross) * _faceUpness[n]);
             rates[faces] = rate;
             worn[faces++] = f;
             least = MathF.Min(least, f);
