@@ -127,13 +127,13 @@ if (camArg >= 0 && camArg + 1 < args.Length)
     cameraOverride = args[camArg + 1].Split(',').Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
 var camSpawn = TestScene.Build(host, seed, cameraOverride, HeartSpawn(seed));
 
-// Spawn: standing off south of the cluster nearest the origin, a little above its ground, looking
-// at it.
+// Spawn: over a wide, flat stretch of plains 18 km east of the origin (found by scanning seed 1337 for flat, well-
+// covered lowland), 60 blocks above the terrain surface there (which no piece's top reaches), looking north across it.
 static (Vector3D<float> Position, float Yaw, float Pitch)? HeartSpawn(ulong seed)
 {
-    if (!HeartGrid.TryFindCluster(seed, 0f, 0f, out float x, out float z)) return null;
-    float y = ContinentTerrain.For(seed).Height(x, z) + 100f;
-    return (new Vector3D<float>(x, y, z - 500f), MathF.PI, -0.2f);
+    const float x = 18240f, z = 1088f;
+    float y = ContinentTerrain.For(seed).Height(x, z) + 60f;
+    return (new Vector3D<float>(x, y, z), MathF.PI, -0.15f);
 }
 
 // Ray-traced lighting prototype test ship (plan doc, task 4): a small solid hull with a Lamp exposed on
