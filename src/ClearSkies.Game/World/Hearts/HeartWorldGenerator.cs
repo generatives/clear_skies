@@ -88,7 +88,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         for (int j = 0; j <= 2; j++)
         for (int i = 0; i <= 2; i++)
             terrainTop = MathF.Max(terrainTop, _terrain.Height(chunkX * S + i * S * 0.5f, chunkZ * S + j * S * 0.5f));
-        terrainTop = MathF.Min(terrainTop + TerrainRiseMargin, IslandGrid.WorldTop - 1);
+        terrainTop = MathF.Min(terrainTop + TerrainRiseMargin, HeartGrid.WorldTop - 1);
         int lo = System.Math.Max((int)MathF.Floor(HeartGrid.LowestBottom / S) - minChunkY, 0);
         int hi = System.Math.Min((int)MathF.Floor(terrainTop / S) - minChunkY, 63);
         return lo > hi ? 0 : (ulong.MaxValue >> (63 - hi)) & (ulong.MaxValue << lo);
@@ -160,7 +160,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         {
             int col = lx + S * lz;
             float wx = x0 + lx, wz = z0 + lz;
-            _height[col] = MathF.Min(_terrain.Height(wx, wz), IslandGrid.WorldTop - 1);
+            _height[col] = MathF.Min(_terrain.Height(wx, wz), HeartGrid.WorldTop - 1);
             _bottomAt[col] = HeartGrid.LowestBottom + BottomRoughness * (0.5f + 0.5f * _bottom.GetNoise(wx, wz));
             top = MathF.Max(top, _height[col]);
         }

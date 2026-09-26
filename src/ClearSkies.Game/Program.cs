@@ -57,24 +57,18 @@ if (budgetArg >= 0 && budgetArg + 1 < args.Length) LightBudgetMb = int.Parse(arg
 float ViewDistance = 10000f;
 int viewArg = Array.IndexOf(args, "--view-distance");
 if (viewArg >= 0 && viewArg + 1 < args.Length) ViewDistance = float.Parse(args[viewArg + 1], System.Globalization.CultureInfo.InvariantCulture);
-const int MinChunkY = 0; // streamed layers are -8..55 (blocks -256..1792): IslandGrid's WorldBottom..WorldTop
+const int MinChunkY = 0; // streamed layers are -8..55 (blocks -256..1792): HeartGrid's WorldBottom..WorldTop
 
-// World generator: "hearts" (default) cuts islands out of a continental terrain around island hearts (see
-// HeartWorldGenerator); "islands" places lens islands in clumps (see SkyWorldGenerator). --generator NAME picks one.
-int genArg = Array.IndexOf(args, "--generator");
-bool heartsWorld = !(genArg >= 0 && genArg + 1 < args.Length && args[genArg + 1] == "islands");
-Func<IWorldGenerator> generatorFactory = heartsWorld ? () => new HeartWorldGenerator(seed) : () => new SkyWorldGenerator(seed);
-if (heartsWorld)
-{
-    SkySettings.CloudAltitude = 1250f; // the hearts world's islands are mostly low: clouds among the hills
-    SkySettings.CloudSeaAltitude = HeartGrid.CloudSeaAltitude; // below its lowest islands
-}
+// World generator: islands cut out of a continental terrain around island hearts (see HeartWorldGenerator).
+Func<IWorldGenerator> generatorFactory = () => new HeartWorldGenerator(seed);
+SkySettings.CloudAltitude = 1250f; // the islands are mostly low: clouds among the hills
+SkySettings.CloudSeaAltitude = HeartGrid.CloudSeaAltitude; // below its lowest islands
 
 // Shared GPU voxel storage for lighting (world + ships).
 var gridStore = new GridStore(host.Context, (int)((long)LightBudgetMb * 1024 * 1024 / GridStore.SlotBytes),
                               ChunkLoadSystem.WorldIndexDim(ViewDistance));
 var chunkLoadSystem = new ChunkLoadSystem(host.World, staticVolume, gridStore, generatorFactory,
-                                          ViewDistance, MinChunkY, heartsWorld ? "Hearts15" : "World2");
+                                          ViewDistance, MinChunkY, "Hearts15");
 host.AddSystem(chunkLoadSystem, SystemStage.Logic);
 host.Renderer.AttachGridStore(gridStore);
 host.AddSystem(physicsBody, SystemStage.Logic);
@@ -118,7 +112,7 @@ host.AddSystem(meshSystem, SystemStage.PreRender);
 host.AddSystem(new BlockModelSystem(host.World, blockModels), SystemStage.PreRender); // block entities -> RenderedModel
 // Rendering: the host opens the frame, runs the render stages (systems in the order added within a stage), then
 // closes it with ImGui and presents. Each render system is handed this frame's camera and time.
-using var clouds = new CloudRenderSystem(host.Renderer, heartsWorld ? new HeartCloudDensity(seed) : new IslandCloudDensity(seed));
+using var clouds = new CloudRenderSystem(host.Renderer, new HeartCloudDensity(seed));
 host.AddSystem(new ChunkRenderSystem(host.World, host.Renderer), SystemStage.RenderWorld);
 host.AddSystem(new ModelRenderSystem(host.World, host.Renderer), SystemStage.RenderWorld);
 host.AddSystem(clouds, SystemStage.RenderWorld);
@@ -126,14 +120,14 @@ host.AddSystem(new SkyRenderSystem(host.Renderer), SystemStage.RenderSky);
 host.AddSystem(new WireframeRenderSystem(host.World, host.Renderer), SystemStage.RenderOverlay);
 host.AddSystem(new HudRenderSystem(host.World, host.Renderer), SystemStage.RenderHud);
 
-// --camera x,y,z[,yaw,pitch]: start the camera at a given spot instead of overlooking the nearest island.
+// --camera x,y,z[,yaw,pitch]: start the camera at a given spot instead of overlooking the nearest cluster.
 float[]? cameraOverride = null;
 int camArg = Array.IndexOf(args, "--camera");
 if (camArg >= 0 && camArg + 1 < args.Length)
     cameraOverride = args[camArg + 1].Split(',').Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
-var camSpawn = TestScene.Build(host, seed, cameraOverride, heartsWorld ? HeartSpawn(seed) : null);
+var camSpawn = TestScene.Build(host, seed, cameraOverride, HeartSpawn(seed));
 
-// The hearts world's spawn: standing off south of the cluster nearest the origin, a little above its ground, looking
+// Spawn: standing off south of the cluster nearest the origin, a little above its ground, looking
 // at it.
 static (Vector3D<float> Position, float Yaw, float Pitch)? HeartSpawn(ulong seed)
 {
@@ -145,7 +139,7 @@ static (Vector3D<float> Position, float Yaw, float Pitch)? HeartSpawn(ulong seed
 // Ray-traced lighting prototype test ship (plan doc, task 4): a small solid hull with a Lamp exposed on
 // top, placed near the camera's spawn so its shadow should visibly fall on the terrain below once the
 // ray-traced toggle is on and ships are wired into GpuLightSystem's volume slots. Offset from camera
-// spawn rather than re-deriving island geometry (TryFindNearestIsland is private to TestScene).
+// spawn rather than re-deriving island geometry.
 {
     var shipVoxels = new List<(int X, int Y, int Z, BlockId Id, BlockOrientation Orientation)>();
     for (int x = 0; x < 5; x++)

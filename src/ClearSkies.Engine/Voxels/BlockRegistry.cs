@@ -58,7 +58,7 @@ public static class BlockRegistry
             Texture = "water" });
         // Plain "snow" on every face: a thick snowpack should read as snow all the way round, not a
         // rock/snow blend on the sides (that blend texture is reserved for a thin single-layer cap —
-        // SkyWorldGenerator now always gives Snow multiple layers of depth, so this is the common case).
+        // the world generator gives Snow multiple layers of depth, so this is the common case).
         Register(new BlockDef { Id = BlockId.Snow,  Name = "Snow",  Color = new(0.95f, 0.97f, 1.00f), IsSolid = true, LightEmission = 0, Opacity = 15, Weight = 6,
             Texture = "snow" });
         // Mountain-surface bare rock, one shade lighter than the Stone foundation beneath it. ("rock" is

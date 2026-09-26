@@ -51,8 +51,12 @@ public static class HeartGrid
     /// too close together.</summary>
     private const float Jitter = 0.8f;
 
+    /// <summary>The streamed world's vertical band, in blocks (chunk layers -8..55): nothing generates outside it.</summary>
+    public const int WorldBottom = -256;
+    public const int WorldTop    = 1792;
+
     /// <summary>The lowest an island may reach: above the hearts world's cloud sea (<see cref="CloudSeaAltitude"/>).</summary>
-    internal const float LowestBottom = IslandGrid.WorldBottom + 56f;
+    internal const float LowestBottom = WorldBottom + 56f;
 
     /// <summary>The hearts world's cloud sea (see SkySettings.CloudSeaAltitude): its layer ends a good way below the
     /// lowest islands, so none sits in it.</summary>

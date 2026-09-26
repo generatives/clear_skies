@@ -75,7 +75,7 @@ public sealed class ContinentTerrain
         // Sharp peaks: ridged detail, its ridges sharpened, standing on the range's rise.
         float p = (_peaks.GetNoise(x, z) + 1f) * 0.5f;
         float mountains = RangeRise * MathF.Pow(core, 1.6f) * (0.5f + 0.5f * p * MathF.Sqrt(p));
-        return Math.Clamp(plains + hills + minor + mountains, IslandGrid.WorldBottom + 64f, IslandGrid.WorldTop - 32f);
+        return Math.Clamp(plains + hills + minor + mountains, HeartGrid.WorldBottom + 64f, HeartGrid.WorldTop - 32f);
     }
 
     /// <summary>0-1: how far into a mountain range (x, z) is: 1 on its spine, 0 past its edge.</summary>
