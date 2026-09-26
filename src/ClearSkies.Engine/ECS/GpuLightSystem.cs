@@ -309,8 +309,9 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         _rayLight.Dispose();
         _lightWork?.Dispose();
         _bounceWork?.Dispose();
-        _nearWork?.Dispose();
+        foreach (var b in _nearWorks) b?.Dispose();
         _composeWork?.Dispose();
+        _finalComposeWork?.Dispose();
         _nearComposeWork?.Dispose();
         _clearWork?.Dispose();
     }

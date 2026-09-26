@@ -124,6 +124,18 @@ public sealed unsafe class ComputePipeline : IDisposable
         _api.CommandEncoderRelease(enc);
     }
 
+    /// <summary>Records a dispatch into <paramref name="enc"/> as its own compute pass (the caller submits).</summary>
+    public void Record(CommandEncoder* enc, BindGroup* bindGroup, uint groupsX, uint groupsY = 1, uint groupsZ = 1)
+    {
+        var passDesc = new ComputePassDescriptor();
+        var pass = _api.CommandEncoderBeginComputePass(enc, &passDesc);
+        _api.ComputePassEncoderSetPipeline(pass, _pipeline);
+        _api.ComputePassEncoderSetBindGroup(pass, 0, bindGroup, 0, null);
+        _api.ComputePassEncoderDispatchWorkgroups(pass, groupsX, groupsY, groupsZ);
+        _api.ComputePassEncoderEnd(pass);
+        _api.ComputePassEncoderRelease(pass);
+    }
+
     /// <summary>As <see cref="Dispatch(BindGroup*,uint,uint,uint)"/> but takes an opaque bind-group handle.</summary>
     public void Dispatch(nint bindGroup, uint groupsX, uint groupsY, uint groupsZ)
         => Dispatch((BindGroup*)bindGroup, groupsX, groupsY, groupsZ);

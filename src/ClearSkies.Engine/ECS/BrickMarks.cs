@@ -3,13 +3,14 @@ using ClearSkies.Engine.Voxels;
 namespace ClearSkies.Engine.ECS;
 
 /// <summary>
-/// Accumulates boxes of bricks (brick coordinates, 4x4x4 bricks per chunk) as one 64-bit mask per chunk, then visits
-/// each marked brick's light slot once. Overlapping boxes (a sun sweep's overlapping copies, the bounce reach around
-/// neighbouring bricks) cost a mask OR each instead of a walk over their bricks.
+/// Accumulates boxes of bricks (brick coordinates, 4x4x4 bricks per chunk) as one 64-bit mask per loaded chunk (kept
+/// on its record), then visits each marked brick's light slot once. Overlapping boxes (neighbouring sun-sweep layers,
+/// the bounce reach around neighbouring bricks) cost a mask OR each instead of a walk over their bricks. Chunks with
+/// no light storage (unloaded, or sky) cost one lookup. Only one BrickMarks may be filling at a time: fill, then flush.
 /// </summary>
 internal sealed class BrickMarks
 {
-    private readonly Dictionary<ChunkPosition, ulong> _masks = new();
+    private readonly List<ChunkRecord> _marked = new();
 
     // Bits of a chunk's bricks with local x (y, z) in [a, b]: brick bit = x + 4 * (y + 4 * z).
     private static readonly ulong[] XRange = Ranges(1), YRange = Ranges(4), ZRange = Ranges(16);
@@ -31,7 +32,7 @@ internal sealed class BrickMarks
         return r;
     }
 
-    public bool IsEmpty => _masks.Count == 0;
+    public bool IsEmpty => _marked.Count == 0;
 
     /// <summary>Marks the inclusive brick box, clipped to <paramref name="g"/>'s chunk box.</summary>
     public void AddBox(GridHandle g, int bx0, int by0, int bz0, int bx1, int by1, int bz1)
@@ -49,26 +50,29 @@ internal sealed class BrickMarks
                 for (int cx = cx0; cx <= cx1; cx++)
                 {
                     ulong m = ym & XRange[System.Math.Max(bx0 - cx * 4, 0) * 4 + System.Math.Min(bx1 - cx * 4, 3)];
-                    var key = new ChunkPosition(cx, cy, cz);
-                    _masks[key] = _masks.GetValueOrDefault(key) | m;
+                    if (!g.Chunks.TryGetValue(new ChunkPosition(cx, cy, cz), out var rec) || rec.BrickSlots == null) continue;
+                    if (rec.Marks == 0) _marked.Add(rec);
+                    rec.Marks |= m;
                 }
             }
         }
     }
 
-    /// <summary>Calls <paramref name="action"/> once for the light slot of every marked brick of <paramref name="g"/>
-    /// that has one, and clears the marks.</summary>
-    public void Flush(GridHandle g, Action<int> action)
+    /// <summary>Calls <paramref name="action"/> once for the light slot of every marked brick that has one, and
+    /// clears the marks.</summary>
+    public void Flush(Action<int> action)
     {
-        foreach (var (pos, mask) in _masks)
+        foreach (var rec in _marked)
         {
-            if (!g.Chunks.TryGetValue(pos, out var rec) || rec.BrickSlots == null) continue;
+            ulong mask = rec.Marks;
+            rec.Marks = 0;
+            if (rec.BrickSlots is not { } slots) continue;
             for (ulong m = mask; m != 0; m &= m - 1)
             {
-                int slot = rec.BrickSlots[System.Numerics.BitOperations.TrailingZeroCount(m)];
+                int slot = slots[System.Numerics.BitOperations.TrailingZeroCount(m)];
                 if (slot >= 0) action(slot);
             }
         }
-        _masks.Clear();
+        _marked.Clear();
     }
 }

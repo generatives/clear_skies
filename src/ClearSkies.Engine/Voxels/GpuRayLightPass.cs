@@ -717,7 +717,12 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
     private readonly ComputePipeline _composePipeline;
     private readonly ComputePipeline _bouncePipeline;
     private readonly ComputePipeline _clearPipeline;
-    private readonly GpuBuffer _param;
+    // One small uniform buffer per dispatch of a frame: the dispatches are recorded into one command buffer, so every
+    // parameter write lands before any of them runs and each needs its own.
+    private readonly List<GpuBuffer> _params = new();
+    private int _paramNext;
+    private CommandEncoder* _enc;
+    private readonly List<nint> _bindGroups = new();
     private GpuBuffer _lists;                 // this frame's per-chunk grid and lamp lists (see the WGSL)
     private int _lampBase;
 
@@ -734,7 +739,6 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
         _composePipeline = new ComputePipeline(ctx, Wgsl, "compose_main");
         _bouncePipeline = new ComputePipeline(ctx, Wgsl, "bounce_main");
         _clearPipeline  = new ComputePipeline(ctx, Wgsl, "clear_main");
-        _param = GpuBuffer.CreateUniform(ctx, (ulong)Marshal.SizeOf<RayParams>());
         _lists = GpuBuffer.CreateStorage(ctx, 65536);
     }
 
@@ -756,16 +760,16 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
     public void DispatchClearBounce(GridStore store, GpuBuffer work, int count)
     {
         if (count <= 0) return;
-        WriteParams(Vector3D<float>.Zero, count, default, default);
-        Dispatch(_clearPipeline, ClearBindings, store, work, count);
+        var param = WriteParams(Vector3D<float>.Zero, count, default, default);
+        Dispatch(_clearPipeline, ClearBindings, store, work, count, param);
     }
 
     /// <summary>Sun visibility for the <paramref name="count"/> light slots listed in <paramref name="work"/>.</summary>
     public void DispatchSun(GridStore store, Vector3D<float> sunDir, GpuBuffer work, int count)
     {
         if (count <= 0) return;
-        WriteParams(sunDir, count, default, default);
-        Dispatch(_sunPipeline, SunBindings, store, work, count);
+        var param = WriteParams(sunDir, count, default, default);
+        Dispatch(_sunPipeline, SunBindings, store, work, count, param);
     }
 
     /// <summary>Composes the displayed light of the listed slots: lamp light (traced now, from the lamps in each
@@ -774,8 +778,8 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
     public void DispatchCompose(GridStore store, float bounceScale, GpuBuffer work, int count)
     {
         if (count <= 0) return;
-        WriteParams(Vector3D<float>.Zero, count, new Vector4D<float>(0f, 0f, bounceScale, 0f), default);
-        Dispatch(_composePipeline, ComposeBindings, store, work, count);
+        var param = WriteParams(Vector3D<float>.Zero, count, new Vector4D<float>(0f, 0f, bounceScale, 0f), default);
+        Dispatch(_composePipeline, ComposeBindings, store, work, count, param);
     }
 
     /// <summary>
@@ -788,16 +792,16 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
                                float albedo, int rays, int cycle, GpuBuffer work, int count)
     {
         if (count <= 0) return;
-        WriteParams(sunDir, count,
-                    new Vector4D<float>(albedo, sunStrength, 0f, 0f), new Vector4D<float>(rays, cycle, 0f, 0f));
-        Dispatch(_bouncePipeline, BounceBindings, store, work, count);
+        var param = WriteParams(sunDir, count,
+                                new Vector4D<float>(albedo, sunStrength, 0f, 0f), new Vector4D<float>(rays, cycle, 0f, 0f));
+        Dispatch(_bouncePipeline, BounceBindings, store, work, count, param);
     }
 
-    private void Dispatch(ComputePipeline pipeline, uint[] bindings, GridStore store, GpuBuffer work, int count)
+    private void Dispatch(ComputePipeline pipeline, uint[] bindings, GridStore store, GpuBuffer work, int count, GpuBuffer param)
     {
-        var entries = new (uint, GpuBuffer)[bindings.Length];
+        var arr = new (uint, GpuBuffer)[bindings.Length];
         for (int i = 0; i < bindings.Length; i++)
-            entries[i] = (bindings[i], bindings[i] switch
+            arr[i] = (bindings[i], bindings[i] switch
             {
                 0 => store.OccPool,
                 1 => store.ChunkTable,
@@ -807,20 +811,45 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
                 5 => store.Grids,
                 6 => work,
                 7 => _lists,
-                _ => _param,
+                _ => param,
             });
-        nint bg = pipeline.CreateBindGroupHandle(entries);
+        nint bg = pipeline.CreateBindGroupHandle(arr);
+        _bindGroups.Add(bg);
 
+        if (_enc == null)
+        {
+            var encDesc = new CommandEncoderDescriptor();
+            _enc = _ctx.Api.DeviceCreateCommandEncoder(_ctx.Device, &encDesc);
+        }
         // One workgroup per brick, as a 2D grid since a big list can exceed the 65535-per-dimension limit.
         const int MaxPerDim = 65535;
         uint gx = (uint)System.Math.Min(count, MaxPerDim);
         uint gy = ((uint)count + gx - 1u) / gx;
-        pipeline.Dispatch(bg, gx, gy, 1u);
-        _ctx.Api.BindGroupRelease((BindGroup*)bg);
+        pipeline.Record(_enc, (BindGroup*)bg, gx, gy, 1u);
     }
 
-    private void WriteParams(Vector3D<float> sunDir, int workCount, Vector4D<float> bounce, Vector4D<float> bounce2)
+    /// <summary>Submits every dispatch recorded since the last submit, as one command buffer. Each dispatch is its own
+    /// compute pass, so they run in order with the storage barriers between them. Buffer writes made before this call
+    /// (work lists, the per-chunk lists) all land before the first dispatch runs, so a buffer must not be rewritten
+    /// between two dispatches of one submit.</summary>
+    public void Submit()
     {
+        _paramNext = 0;
+        if (_enc == null) return;
+        var cmdDesc = new CommandBufferDescriptor();
+        var cmd = _ctx.Api.CommandEncoderFinish(_enc, &cmdDesc);
+        _ctx.Api.QueueSubmit(_ctx.Queue, 1, &cmd);
+        _ctx.Api.CommandBufferRelease(cmd);
+        _ctx.Api.CommandEncoderRelease(_enc);
+        _enc = null;
+        foreach (nint bg in _bindGroups) _ctx.Api.BindGroupRelease((BindGroup*)bg);
+        _bindGroups.Clear();
+    }
+
+    private GpuBuffer WriteParams(Vector3D<float> sunDir, int workCount, Vector4D<float> bounce, Vector4D<float> bounce2)
+    {
+        if (_paramNext == _params.Count) _params.Add(GpuBuffer.CreateUniform(_ctx, (ulong)Marshal.SizeOf<RayParams>()));
+        var param = _params[_paramNext++];
         Span<RayParams> sp = stackalloc RayParams[1];
         sp[0] = new RayParams
         {
@@ -828,7 +857,8 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
             LampBase = _lampBase, WorkCount = workCount,
             Bounce = bounce, Bounce2 = bounce2,
         };
-        _param.Write<RayParams>(0, sp);
+        param.Write<RayParams>(0, sp);
+        return param;
     }
 
     public void Dispose()
@@ -837,7 +867,8 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
         _composePipeline.Dispose();
         _bouncePipeline.Dispose();
         _clearPipeline.Dispose();
-        _param.Dispose();
+        Submit();
+        foreach (var p in _params) p.Dispose();
         _lists.Dispose();
     }
 

@@ -58,6 +58,7 @@ internal sealed class ChunkRecord
     public bool Virtual;              // a ship's air chunk next to its blocks, with no ChunkEntry behind it
     public int WorldCell = -1;        // world only: its world index cell, and its entry's offset in the world block
     public int WorldSlot = -1;
+    public ulong Marks;               // bricks marked by the BrickMarks being filled (GpuLightSystem), 0 between uses
 }
 
 /// <summary>
@@ -422,7 +423,9 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
             if (g.Chunks.TryGetValue(pos.Offset(dx, dy, dz), out var n)) RefreshSurface(g, n);
         }
         g.Version++;
-        ChangedChunks.Add((g, pos.WorldOrigin, pos.WorldOrigin + new Vector3D<float>(S), hadSolid, false));
+        // A world chunk unloading isn't a change to the world: what it shadowed stays shadowed, and relighting the far
+        // edge for it would only undo that. (A ship's chunk going is a real change.)
+        ChangedChunks.Add((g, pos.WorldOrigin, pos.WorldOrigin + new Vector3D<float>(S), hadSolid && !g.IsWorld, false));
     }
 
     /// <summary>The light slot holding brick (bx,by,bz) of chunk <paramref name="pos"/>, or -1.</summary>

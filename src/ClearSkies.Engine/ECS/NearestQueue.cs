@@ -39,9 +39,17 @@ internal sealed class NearestQueue
         _count++;
     }
 
+    /// <summary>Puts back a slot just taken from <paramref name="bucket"/>, without measuring it again.</summary>
+    public void PutBack(int slot, int bucket)
+    {
+        _buckets[bucket].Add(slot);
+        if (bucket < _first) _first = bucket;
+        _count++;
+    }
+
     /// <summary>Re-buckets everything around <paramref name="camPos"/> if it has moved far enough from the last
-    /// reference.</summary>
-    public void Recentre(Vector3D<float> camPos)
+    /// reference, dropping the entries <paramref name="keep"/> rejects.</summary>
+    public void Recentre(Vector3D<float> camPos, Func<int, bool> keep)
     {
         if (Vector3D.DistanceSquared(camPos, _ref) < RecentreDistance * RecentreDistance) return;
         _ref = camPos;
@@ -54,11 +62,14 @@ internal sealed class NearestQueue
         }
         _first = Buckets;
         _count = 0;
-        foreach (int slot in _scratch) Add(slot);
+        foreach (int slot in _scratch) if (keep(slot)) Add(slot);
     }
 
     /// <summary>Takes a slot from the nearest nonempty bucket.</summary>
-    public bool TryTake(out int slot)
+    public bool TryTake(out int slot) => TryTake(out slot, out _);
+
+    /// <summary>Takes a slot from the nearest nonempty bucket, and says which (for <see cref="PutBack"/>).</summary>
+    public bool TryTake(out int slot, out int bucket)
     {
         for (; _first < Buckets; _first++)
         {
@@ -67,9 +78,11 @@ internal sealed class NearestQueue
             slot = b[^1];
             b.RemoveAt(b.Count - 1);
             _count--;
+            bucket = _first;
             return true;
         }
         slot = -1;
+        bucket = -1;
         return false;
     }
 

@@ -55,10 +55,15 @@ public sealed partial class GpuLightSystem
     private NearestQueue? _dirtyQueueField, _heldQueueField;
     private NearestQueue _dirtyQueue => _dirtyQueueField ??= new NearestQueue(SlotCentre);
     private NearestQueue _heldQueue => _heldQueueField ??= new NearestQueue(SlotCentre);
-    private readonly List<int> _putBack = new();
+    private readonly List<(int slot, int bucket)> _putBack = new();
+    private Func<int, bool>? _keepDirty, _keepHeld;
     private int _frame;
+    private int _worldIndex = -1;
+    private GridLightState? _worldState;
 
-    private GpuBuffer? _lightWork, _bounceWork, _nearWork;
+    // Every buffer written once per frame: the frame's dispatches go in one submit, after all the writes.
+    private GpuBuffer? _lightWork, _bounceWork;
+    private GpuBuffer?[] _nearWorks = new GpuBuffer?[4];
     private uint[] _scratch = new uint[4096];
     private uint[] _nearScratch = new uint[1024];
     private int _nearCount;
@@ -86,8 +91,7 @@ public sealed partial class GpuLightSystem
     private string _dbgFullReason = "";
     private int _dbgNewSlots, _dbgChangedChunks, _dbgShipsMoved, _dbgLampChanges;
 
-    private const float SweepStep = 4f;   // voxels between successive sun-shadow sweep copies
-    private const float SweepPad  = 3f;   // pad each copy by > SweepStep/2 plus sample jitter, so copies overlap
+    private const float SweepPad  = 1.5f; // pad on the swept box, for the sun rays' sample jitter
     private const int S = ChunkData.Size;
 
     private void RayTracedDispatch()
@@ -98,6 +102,8 @@ public sealed partial class GpuLightSystem
         DropGoneGridStates();
         foreach (var lg in _lit)
             if (!_gridStates.ContainsKey(lg.Handle)) _gridStates[lg.Handle] = new GridLightState();
+        // The static world, for the per-slot fast paths (-1: not lit this frame).
+        _worldIndex = _gridStates.TryGetValue(_staticVolume.Gpu, out _worldState) ? _staticVolume.Gpu.Index : -1;
 
         var sunDir = SunLight.Direction;
         // The bounce display scale is baked into the composed display, so changing it (or bounce on/off) recomposes.
@@ -148,7 +154,7 @@ public sealed partial class GpuLightSystem
                 if (darkens) ClearBounceAround(mn - pad, mx + pad);
             }
             foreach (var (mn, mx) in _directChanges) MarkRegion(mn, mx);
-            _marks.Flush(_staticVolume.Gpu, _markSlot);
+            _marks.Flush(_markSlot);
         }
         _phaseTimer.Lap(2);
 
@@ -252,7 +258,7 @@ public sealed partial class GpuLightSystem
                         if (nr == 0) break;
                         ComposeNear();
                         _rayLight.DispatchBounce(_store, sunDir, SunLight.Strength, _bounceAlbedo, _bounceRays,
-                                                 _bounceCycle, _nearWork!, nr);
+                                                 _bounceCycle, _nearWorks[r]!, nr);
                         _lastNearTotal += nr;
                     }
                     ComposeNear();
@@ -269,10 +275,11 @@ public sealed partial class GpuLightSystem
         if (_composeCount > 0)
         {
             _lampTimer.Start();
-            _composeWork = UploadWords(_composeWork, _composeList.AsSpan(0, _composeCount));
-            _rayLight.DispatchCompose(_store, _bounceEnabled ? _bounceScale : 0f, _composeWork, _composeCount);
+            _finalComposeWork = UploadWords(_finalComposeWork, _composeList.AsSpan(0, _composeCount));
+            _rayLight.DispatchCompose(_store, _bounceEnabled ? _bounceScale : 0f, _finalComposeWork, _composeCount);
             _lampTimer.Stop();
         }
+        _rayLight.Submit();
 
         _phaseTimer.Lap(7);
         _phaseTimer.Stop();
@@ -479,14 +486,14 @@ public sealed partial class GpuLightSystem
     }
 
     /// <summary>Marks the voxels whose sun ray passes through the box: every point p with p - t*sunDir in the
-    /// box for some t >= 0, i.e. the box swept along the sun's travel direction. Swept in overlapping padded
-    /// copies until it leaves the loaded world. When the change <paramref name="darkens"/> (a placed block may now
-    /// shade something), the bounce along the sweep is cleared too.</summary>
+    /// box for some t >= 0, i.e. the box swept along the sun's travel direction, until it leaves the loaded world.
+    /// When the change <paramref name="darkens"/> (a placed block may now shade something), the bounce along the
+    /// sweep is cleared too.</summary>
     private void MarkSunShadow(Vector3D<float> mn, Vector3D<float> mx, Vector3D<float> sunDir, bool darkens)
     {
-        // Ships: one test each against the whole sweep (the box moved along the sun direction, padded like the world
-        // copies below and like MarkRegion's ship test), so the cost doesn't multiply by the number of sweep steps.
-        var half = (mx - mn) * 0.5f + new Vector3D<float>(SweepPad + 1.5f);
+        // Ships: one test each against the whole sweep (the box moved along the sun direction, padded generously, as
+        // MarkRegion's ship test is).
+        var half = (mx - mn) * 0.5f + new Vector3D<float>(4.5f);
         var centre = (mn + mx) * 0.5f;
         foreach (var lg in _lit)
         {
@@ -497,23 +504,50 @@ public sealed partial class GpuLightSystem
 
         var world = _staticVolume.Gpu;
         if (!world.HasBox || !_gridStates.TryGetValue(world, out var worldState)) return;
+        if (worldState.LightAll && !darkens) return;
         var wMin = world.BoxMin.WorldOrigin;
         var wMax = world.BoxMax.WorldOrigin + new Vector3D<float>(S);
-        var pad  = new Vector3D<float>(SweepPad);
 
-        float maxT = Vector3D.Distance(wMin, wMax) + Vector3D.Distance(mn, mx);
-        for (float t = 0f; t <= maxT; t += SweepStep)
+        // The world, one brick layer at a time along the sun's steepest axis: in each layer, the exact extent of the
+        // (padded) box swept through it, so each layer is one thin box one brick deep instead of a run of
+        // overlapping copies. Stops once the sweep has left the loaded world.
+        var pad = new Vector3D<float>(SweepPad);
+        Span<float> lo = stackalloc float[3], hi = stackalloc float[3], d = stackalloc float[3];
+        Span<float> wLo = stackalloc float[3], wHi = stackalloc float[3];
+        Span<int> b0 = stackalloc int[3], b1 = stackalloc int[3];
+        Put(lo, mn - pad); Put(hi, mx + pad); Put(d, sunDir); Put(wLo, wMin); Put(wHi, wMax);
+        int a = MathF.Abs(d[0]) >= MathF.Abs(d[1]) ? (MathF.Abs(d[0]) >= MathF.Abs(d[2]) ? 0 : 2)
+                                                  : (MathF.Abs(d[1]) >= MathF.Abs(d[2]) ? 1 : 2);
+        float da = d[a];
+        int step = da > 0 ? 1 : -1;
+        int j = (int)MathF.Floor((da > 0 ? lo[a] : hi[a]) / 8f);
+        int jEnd = (int)MathF.Floor((da > 0 ? wHi[a] : wLo[a]) / 8f);
+        for (; (jEnd - j) * step >= 0; j += step)
         {
-            var a = mn + sunDir * t - pad;
-            var b = mx + sunDir * t + pad;
-            if ((sunDir.X > 0 && a.X > wMax.X) || (sunDir.X < 0 && b.X < wMin.X) ||
-                (sunDir.Y > 0 && a.Y > wMax.Y) || (sunDir.Y < 0 && b.Y < wMin.Y) ||
-                (sunDir.Z > 0 && a.Z > wMax.Z) || (sunDir.Z < 0 && b.Z < wMin.Z))
-                break; // moving away from the world and already past it
-            if (!worldState.LightAll) MarkWorldBox(world, a, b);
-            if (darkens) ClearBounceAround(a, b);
+            // Sweep distances at which the box overlaps this layer.
+            float t0 = da > 0 ? (8f * j - hi[a]) / da : (8f * j + 8f - lo[a]) / da;
+            float t1 = da > 0 ? (8f * j + 8f - lo[a]) / da : (8f * j - hi[a]) / da;
+            t0 = MathF.Max(t0, 0f);
+            if (t1 < t0) continue;
+            bool gone = false;
+            for (int i = 0; i < 3; i++)
+            {
+                if (i == a) { b0[i] = b1[i] = j; continue; }
+                float l = lo[i] + MathF.Min(t0 * d[i], t1 * d[i]);
+                float h = hi[i] + MathF.Max(t0 * d[i], t1 * d[i]);
+                if ((d[i] >= 0 && l > wHi[i]) || (d[i] <= 0 && h < wLo[i])) gone = true; // past the world, moving away
+                b0[i] = (int)MathF.Floor(l / 8f);
+                b1[i] = (int)MathF.Floor(h / 8f);
+            }
+            if (gone) break;
+            if (!worldState.LightAll) _marks.AddBox(world, b0[0], b0[1], b0[2], b1[0], b1[1], b1[2]);
+            if (darkens)
+                ClearBounceAround(new Vector3D<float>(b0[0] * 8f, b0[1] * 8f, b0[2] * 8f),
+                                  new Vector3D<float>(b1[0] * 8f + 8f, b1[1] * 8f + 8f, b1[2] * 8f + 8f));
         }
     }
+
+    private static void Put(Span<float> dst, Vector3D<float> v) { dst[0] = v.X; dst[1] = v.Y; dst[2] = v.Z; }
 
     // World bricks marked this frame, per chunk; and the delegates they are flushed into (made once).
     private readonly BrickMarks _marks = new(), _holdMarks = new();
@@ -588,7 +622,7 @@ public sealed partial class GpuLightSystem
         if (_holdMarks.IsEmpty) return;
         _holdFramesNow = holdFrames;
         _rechangeNNow = rechangeN;
-        _holdMarks.Flush(world, _holdSlotDelegate ??= s => HoldSlot(s, _holdFramesNow, _rechangeNNow));
+        _holdMarks.Flush(_holdSlotDelegate ??= s => HoldSlot(s, _holdFramesNow, _rechangeNNow));
     }
 
     private void HoldSlot(int slot, int holdFrames, int rechangeN)
@@ -623,7 +657,7 @@ public sealed partial class GpuLightSystem
         // Marked bricks, nearest first up to the cap; the rest wait for later frames. Marks that no longer need work
         // (freed slots, bricks of a ship already listed whole) are dropped as they come up.
         _relitList.Clear();
-        _dirtyQueue.Recentre(camPos);
+        _dirtyQueue.Recentre(camPos, _keepDirty ??= slot => _dirty[slot]);
         while (_relitList.Count < _maxRelitPerFrame && _dirtyQueue.TryTake(out int slot))
         {
             if (!_dirty[slot]) continue;
@@ -678,16 +712,16 @@ public sealed partial class GpuLightSystem
             if (IsHeldAlone(slot)) _bounceChosen.Add(slot);
         int forced = _bounceChosen.Count;
         _putBack.Clear();
-        _heldQueue.Recentre(camPos);
-        while (_bounceChosen.Count - forced < _maxBouncedPerFrame && _heldQueue.TryTake(out int slot))
+        _heldQueue.Recentre(camPos, _keepHeld ??= IsHeld);
+        while (_bounceChosen.Count - forced < _maxBouncedPerFrame && _heldQueue.TryTake(out int slot, out int bucket))
         {
             if (!IsHeld(slot)) continue;
             // Evaluated with its whole grid, or already chosen above: still held, so it goes back in the queue.
-            if (!IsHeldAlone(slot) || _clearStamp[slot] == _frame) { _putBack.Add(slot); continue; }
-            _bounceChosen.Add(slot);
-            _putBack.Add(slot); // dropped when it next comes up if this frame uses up its hold
+            // Otherwise chosen, and still put back: dropped when it next comes up if this frame uses up its hold.
+            _putBack.Add((slot, bucket));
+            if (IsHeldAlone(slot) && _clearStamp[slot] != _frame) _bounceChosen.Add(slot);
         }
-        foreach (int slot in _putBack) _heldQueue.Add(slot);
+        foreach (var (slot, bucket) in _putBack) _heldQueue.PutBack(slot, bucket);
         _lastBounceWaiting = _heldQueue.Count;
         // The hold counts evaluations, not frames: a near-camera brick's extra same-frame evaluations use it up too, so
         // with as many near evaluations per frame as the hold, a change near the camera is finished within its frame.
@@ -696,9 +730,8 @@ public sealed partial class GpuLightSystem
             _hold[slot]--;
             Push(ref n, (uint)slot);
             Push(ref n, _n[slot]);
-            var g = _store.GridAt(_store.SlotGrid[slot])!;
             int more = 0;
-            if (_clearStamp[slot] == _frame || (nearRadius >= 0f && IsNear(slot, g.VoxelToWorld, camPos, nearR2)))
+            if (_clearStamp[slot] == _frame || (nearRadius >= 0f && Vector3D.DistanceSquared(SlotCentre(slot), camPos) <= nearR2))
             {
                 more = System.Math.Min(extra, (int)_hold[slot]);
                 if (more > 0) AddNear((uint)slot, _n[slot], more);
@@ -717,6 +750,7 @@ public sealed partial class GpuLightSystem
     private bool IsHeld(int slot)
     {
         int gi = _store.SlotGrid[slot];
+        if (gi >= 0 && gi == _worldIndex && _hold[slot] > 0) return true; // the common case, without the lookups
         var g = gi >= 0 ? _store.GridAt(gi) : null;
         if (g != null && _hold[slot] > 0 && _gridStates.ContainsKey(g)) return true;
         _inHeld[slot] = false;
@@ -729,6 +763,7 @@ public sealed partial class GpuLightSystem
     {
         if (!_inHeld[slot] || _hold[slot] == 0) return false;
         int gi = _store.SlotGrid[slot];
+        if (gi >= 0 && gi == _worldIndex) return !_worldState!.BounceAllThisFrame;
         var g = gi >= 0 ? _store.GridAt(gi) : null;
         return g != null && _gridStates.TryGetValue(g, out var st) && !st.BounceAllThisFrame;
     }
@@ -780,8 +815,7 @@ public sealed partial class GpuLightSystem
     private int[] _nearExtra = new int[1024];
 
     /// <summary>Uploads, as (slot, N + repeat) pairs, the near-camera bricks that still have an evaluation left for
-    /// extra evaluation number <paramref name="repeat"/>, and returns how many. The queue orders this write after
-    /// the previous repeat's dispatch.</summary>
+    /// extra evaluation number <paramref name="repeat"/> (a buffer per repeat), and returns how many.</summary>
     private int UploadNearRepeat(int repeat)
     {
         int n = 0;
@@ -791,7 +825,8 @@ public sealed partial class GpuLightSystem
             Push(ref n, _nearScratch[2 * k]);
             Push(ref n, System.Math.Min(_nearScratch[2 * k + 1] + (uint)repeat, 255u));
         }
-        if (n > 0) Upload(ref _nearWork, n);
+        if (repeat >= _nearWorks.Length) Array.Resize(ref _nearWorks, repeat + 1);
+        if (n > 0) Upload(ref _nearWorks[repeat], n);
         return n / 2;
     }
 
@@ -799,7 +834,7 @@ public sealed partial class GpuLightSystem
     private uint[] _composeList = new uint[4096];
     private int _composeCount;
     private int[] _composeStamp = Array.Empty<int>();
-    private GpuBuffer? _composeWork;
+    private GpuBuffer? _composeWork, _finalComposeWork;
 
     // The near-camera bricks, recomposed after every bounce repeat (stamped so the final compose skips them).
     private uint[] _nearSlots = new uint[1024];
