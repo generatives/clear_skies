@@ -66,12 +66,13 @@ public static class HeartGrid
     private const float UpperChance = 0.45f, ThinOver = 1200f, MountainChance = 0.85f;
 
     // Islands: the floor, the underworld and the mountains keep their chances only inside the clusters (see
-    // ClusterField), easing from IslandFrom to IslandFull of it; the mountains thin to MountainOutside between them
-    // (a ragged broken range). Elsewhere between clusters the ground survives only in islets (see IsletField), up to
-    // IsletChance of it: small groups of pieces, stepping stones across the open sky, never a lone piece on its own.
-    // So a continent is a scatter of island clusters with open sky between, each still carrying the continent's
-    // surface on top.
-    private const float IslandFrom = 0.1f, IslandFull = 0.6f, MountainOutside = 0.25f;
+    // ClusterField), easing from IslandFrom to IslandFull of it. A range breaks up like the islands around it: up to
+    // MountainInside of MountainChance inside a cluster, so it reads as a line of snowy pieces with sky through it
+    // rather than one cracked block, and nothing of it between clusters. Elsewhere between clusters the ground
+    // survives only in islets (see IsletField), up to IsletChance of it: small groups of pieces, stepping stones
+    // across the open sky, never a lone piece on its own. So a continent is a scatter of island clusters with open
+    // sky between, each still carrying the continent's surface on top.
+    private const float IslandFrom = 0.1f, IslandFull = 0.6f, MountainInside = 0.55f;
     private const float IsletChance = 0.6f, IsletSpacing = 520f, IsletDetail = 170f, IsletFrom = 0.74f, IsletFull = 0.84f;
 
     /// <summary>How much of FloorChance the floor keeps even inside a cluster: it breaks into islands with gaps between,
@@ -127,7 +128,7 @@ public static class HeartGrid
         float up = Smoothstep(FloorTop, FloorTop + FloorFade, y);
         float floor = island * FloorChance;
         float mountain = Smoothstep(0.1f, 0.6f, ContinentTerrain.For(seed).RangeCore(x, z));
-        float mountainChance = MountainChance * Lerp(MountainOutside, 0.9f, inIsland);
+        float mountainChance = MountainChance * MountainInside * inIsland;
         if (up <= 0f) return Lerp(floor, mountainChance, mountain);
         float thin = Lerp(1f, 0.5f, Math.Clamp((y - FloorTop - FloorFade) / ThinOver, 0f, 1f));
         float upper = MathF.Min(UpperChance * thin * Lerp(0.5f * islet, 1.8f, cluster), 1f);

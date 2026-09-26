@@ -22,7 +22,7 @@ public sealed class ContinentTerrain
     // grass growing sparser up to DryLine; grass giving way to bare rock from RockStart to RockFull, and rock to snow
     // from SnowStart to SnowFull, both in patches.
     public const float SandLine = -60f, DryLine = 120f;
-    public const float RockStart = 800f, RockFull = 1050f, SnowStart = 1050f, SnowFull = 1400f;
+    public const float RockStart = 550f, RockFull = 720f, SnowStart = 720f, SnowFull = 950f;
 
     private readonly FastNoiseLite _plains;   // broad, gently rolling lowlands
     private readonly FastNoiseLite _hills;    // hills in the foothills
@@ -60,7 +60,7 @@ public sealed class ContinentTerrain
     }
 
     /// <summary>World Y of the terrain surface at (x, z): plains, rising very gradually through highlands to sharp
-    /// mountain ranges a few kilometres across and several apart, peaking at about 1,700; smaller, shorter ranges in
+    /// mountain ranges a few kilometres across and several apart, peaking at about 1,100; smaller, shorter ranges in
     /// patches across the plains and highlands; small bumps everywhere.</summary>
     public float Height(float x, float z)
     {
@@ -93,7 +93,7 @@ public sealed class ContinentTerrain
     // Ranges: the spine's noise within RangeEdge of zero is mountains, within HighEdge highlands (full height inside
     // HighCore); bent by up to RangeWarp blocks.
     private const float RangeEdge = 0.3f, HighCore = 0.05f, HighEdge = 1f, RangeWarp = 800f;
-    private const float HighRise = 330f, RangeRise = 1000f, MinorRise = 420f;
+    private const float HighRise = 250f, RangeRise = 500f, MinorRise = 320f;
 
     /// <summary>The plains' average height: a floor of land under the broken-up highlands and ranges, with a sparser
     /// underworld of smaller pieces below it, down to the cloud sea.</summary>
