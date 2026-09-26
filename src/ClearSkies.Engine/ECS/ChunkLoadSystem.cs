@@ -60,6 +60,14 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     /// layers (a column's bits); the rest are above.</summary>
     private const int LayersBelow = 8;
 
+    /// <summary>Chunks unloaded at most per frame to make room: enough to keep up with flying, few enough that
+    /// unloading doesn't stall a frame.</summary>
+    private const int MaxEvictChunksPerFrame = 512;
+
+    /// <summary>Light bricks freed beyond what the next column needs, so the columns after it don't each wait a frame
+    /// for their own eviction.</summary>
+    private const int EvictSlack = 4096;
+
     private const int S = ChunkData.Size;
 
     private readonly string _savesDir;
@@ -99,6 +107,11 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     private (int x, int z) _lastCamColumn = (int.MinValue, int.MinValue);
     private bool _skippedInFlight;
     private bool _nothingToEvict; // the last search found nothing farther than the queue's head; cleared by a rebuild
+
+    /// <summary>Loaded columns, farthest first, as of the first eviction since the last rebuild; <see cref="_evictNext"/>
+    /// is the next to consider. Columns loaded since then are nearer (the queue is closest first), so the order holds.</summary>
+    private readonly List<(int x, int z)> _evictOrder = new();
+    private int _evictNext = -1; // -1: not built since the last rebuild
     private bool _full;
     private int _evictions;
     private float _autosaveTimer;
@@ -242,6 +255,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         _queueHead = 0;
         _queueTruncated = false;
         _nothingToEvict = false;
+        _evictNext = -1;
         foreach (var (dx, dz) in _offsetsByDistance)
         {
             int x = _lastCamColumn.x + dx, z = _lastCamColumn.z + dz;
@@ -313,9 +327,10 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
             {
                 _full = true;
                 // Only once the store really is full: until uploads catch up, pending chunks are just estimates.
-                if (_staticVolume.LoadedCount + _inFlightChunks + work.Count > MaxChunks ||
-                    WorldBricks() + (_inFlightChunks + work.Count) * PendingBricks >= _store.WorldLightBudget)
-                    EvictFartherThan(ColumnDistSq(col));
+                int overChunks = _staticVolume.LoadedCount + _inFlightChunks + work.Count - MaxChunks;
+                int overBricks = WorldBricks() + (_inFlightChunks + work.Count) * PendingBricks - _store.WorldLightBudget;
+                if (overChunks > 0 || overBricks >= 0)
+                    EvictFartherThan(ColumnDistSq(col), overChunks + work.Count, overBricks + EvictSlack);
                 break;
             }
 
@@ -350,32 +365,59 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         }
     }
 
-    /// <summary>Unloads the farthest loaded column (not being loaded), if it is more than a column farther than
-    /// <paramref name="distSq"/> (so two columns at about the same distance don't keep swapping). One per frame: the
-    /// store frees its bricks when it next runs.</summary>
-    private void EvictFartherThan(long distSq)
+    /// <summary>Unloads the farthest loaded columns (not being loaded) that are more than a column farther than
+    /// <paramref name="distSq"/> (so two columns at about the same distance don't keep swapping), until
+    /// <paramref name="chunks"/> chunks and <paramref name="bricks"/> light bricks are freed, or
+    /// <see cref="MaxEvictChunksPerFrame"/> chunks. The store frees the bricks when it next runs, so the next frame
+    /// sees the room.</summary>
+    private void EvictFartherThan(long distSq, int chunks, int bricks)
     {
         if (_nothingToEvict) return;
-        (int x, int z) far = default;
-        long farDistSq = -1;
-        foreach (var (p, _) in _staticVolume.All)
-        {
-            var c = (p.X, p.Z);
-            long d = ColumnDistSq(c);
-            if (d > farDistSq && !_inFlight.ContainsKey(c)) { farDistSq = d; far = c; }
-        }
+        if (_evictNext < 0) BuildEvictOrder();
+
         float margin = MathF.Sqrt(distSq) + 1f;
-        if (farDistSq < 0 || farDistSq <= margin * margin)
+        int freedChunks = 0, freedBricks = 0;
+        while (freedChunks < MaxEvictChunksPerFrame && (freedChunks < chunks || freedBricks < bricks))
         {
-            _nothingToEvict = true;
-            return;
+            if (_evictNext >= _evictOrder.Count || ColumnDistSq(_evictOrder[_evictNext]) <= margin * margin)
+            {
+                _nothingToEvict = true;
+                return;
+            }
+            var far = _evictOrder[_evictNext++];
+            if (_inFlight.ContainsKey(far)) continue;
+            int unloaded = 0;
+            for (int layer = 0; layer < 64; layer++)
+            {
+                var p = new ChunkPosition(far.x, _minY + layer, far.z);
+                if (!_staticVolume.IsLoaded(p)) continue;
+                freedBricks += ChunkBricks(p);
+                Unload(p);
+                unloaded++;
+            }
+            if (unloaded == 0) continue;
+            freedChunks += unloaded;
+            _evictions++;
         }
-        for (int layer = 0; layer < 64; layer++)
-        {
-            var p = new ChunkPosition(far.x, _minY + layer, far.z);
-            if (_staticVolume.IsLoaded(p)) Unload(p);
-        }
-        _evictions++;
+    }
+
+    private void BuildEvictOrder()
+    {
+        var columns = new HashSet<(int x, int z)>();
+        foreach (var (p, _) in _staticVolume.All) columns.Add((p.X, p.Z));
+        _evictOrder.Clear();
+        _evictOrder.AddRange(columns);
+        _evictOrder.Sort((a, b) => ColumnDistSq(b).CompareTo(ColumnDistSq(a)));
+        _evictNext = 0;
+    }
+
+    /// <summary>Light bricks chunk <paramref name="p"/> holds in the GPU store (none until it is uploaded).</summary>
+    private int ChunkBricks(ChunkPosition p)
+    {
+        if (!_staticVolume.Gpu.Chunks.TryGetValue(p, out var rec) || rec.BrickSlots == null) return 0;
+        int n = 0;
+        foreach (int slot in rec.BrickSlots) if (slot >= 0) n++;
+        return n;
     }
 
     /// <summary>Column (x, z)'s chunks that may hold something and aren't loaded yet.</summary>

@@ -38,6 +38,10 @@ public sealed class RenderFrame : IDebugUiSystem
     // ── debug UI ─────────────────────────────────────────────────────────────
     public string DebugName => "Renderer";
     private bool _referenceLighting;
+    private bool _dbgNoTextures, _dbgNoFog, _dbgOverdraw;
+    private int _dbgLighting;
+    private static readonly string[] DbgLightingModes =
+        { "Normal", "Flat light + corner shading", "Flat light only", "No voxel lighting" };
 
     public void DrawDebugUi()
     {
@@ -49,6 +53,16 @@ public sealed class RenderFrame : IDebugUiSystem
         if (ImGui.Checkbox("Wireframe", ref wireframe))
             _renderer.WireframeMode = wireframe;
         ImGui.Checkbox("Reference (slow) light + AO shader path", ref _referenceLighting);
+        if (ImGui.CollapsingHeader("Render pass cost (debug)"))
+        {
+            ImGui.TextDisabled("Flip these and watch the render pass in GPU timings.");
+            ImGui.Combo("Terrain lighting", ref _dbgLighting, DbgLightingModes, DbgLightingModes.Length);
+            ImGui.Checkbox("No textures", ref _dbgNoTextures);
+            ImGui.Checkbox("No fog or haze", ref _dbgNoFog);
+            if (ImGui.Checkbox("Overdraw view", ref _dbgOverdraw)) _renderer.OverdrawMode = _dbgOverdraw;
+            ImGui.TextDisabled("Overdraw: how many times each pixel's terrain is shaded (nearer surfaces hide later ones).");
+            ImGui.TextDisabled("  Dim grey = once (ideal); each extra time is a step brighter; white = 5 or more.");
+        }
 
         ImGui.SeparatorText("Sky & fog");
         ImGui.Checkbox("Distance fog", ref SkySettings.FogEnabled);
@@ -90,6 +104,8 @@ public sealed class RenderFrame : IDebugUiSystem
             RayAoStrength  = RayLightingSettings.AoStrength,
             Ambient        = RayLightingSettings.Ambient,
             ReferenceLighting = _referenceLighting ? 1f : 0f,
+            DebugFlags     = (_dbgNoTextures ? 1 : 0) | (_dbgNoFog ? 2 : 0),
+            DebugLighting  = _dbgLighting,
             CameraPosition = camTransform.Position,
             ZenithColor    = ToVector3D(SkySettings.ZenithColor),
             HorizonColor   = ToVector3D(SkySettings.HorizonColor),

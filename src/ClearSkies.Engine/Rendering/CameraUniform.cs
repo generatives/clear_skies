@@ -5,13 +5,13 @@ using Silk.NET.Maths;
 namespace ClearSkies.Engine.Rendering;
 
 /// <summary>
-/// Per-frame camera uniform block (256 bytes). Must match @group(0) @binding(0) in the WGSL shader.
+/// Per-frame camera uniform block (272 bytes). Must match @group(0) @binding(0) in the WGSL shader.
 /// Layout: view (64 B) + projection (64 B) + sunDir as vec4 (16 B: xyz direction, w strength)
 /// + lightParams vec4 (16 B: x ray AO strength, y reference-lighting flag, z ambient 0-1, w unused)
 /// + camPos vec4 (xyz world position) + fog vec4 (xy: the world's fog start/end, horizontal; zw: the cloud layer's,
 /// see <see cref="CloudLayer"/>; blocks from the camera) + zenith and horizon sky colours as vec4s (horizon.w: the
 /// haze's strength) + haze vec4 (rgb colour, w distance) + sea vec4 (the cloud sea: altitude, coverage (0 = off), cell
-/// size and thickness in blocks; see <see cref="SkySettings"/>).
+/// size and thickness in blocks; see <see cref="SkySettings"/>) + lightParams2 vec4 (y, z: render pass debug toggles).
 /// SunDirection is the unit vector pointing FROM the sun TOWARD the scene (i.e. the light direction).
 /// The shader scales sky light by max(dot(worldNormal, -SunDirection), 0).
 /// SunStrength (the vec4's w component) is a 0-1 multiplier on the direct-sun term, read from
@@ -38,4 +38,8 @@ public struct CameraUniform
     public Vector3D<float> HazeColor;      // haze.rgb
     public float           HazeDistance;   // haze.w
     public float           SeaAltitude, SeaCoverage, SeaCell, SeaThickness; // sea
+    private float          _pad4;          // lightParams2.x
+    public float           DebugFlags;     // lightParams2.y: 1 = no texture sample, 2 = no fog or haze
+    public float           DebugLighting;  // lightParams2.z: 0 normal, 1 flat + corner AO, 2 flat only, 3 no voxel lighting
+    private float          _pad5;
 }

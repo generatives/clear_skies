@@ -416,15 +416,41 @@ fn sunLevel(g: i32, v: vec3<i32>, list: u32) -> u32 {
     return u32(round(f32(lit) * 3.0 / f32(SUN_SAMPLES)));
 }
 
+// ── Surface compaction ────────────────────────────────────────────────────────────────────────────────────
+// Only surface air voxels (air with a solid face neighbour) trace rays, usually a small share of a brick, scattered
+// through it. Given one voxel pair per thread, most lanes of every SIMD group would sit idle while a few traced, so
+// the ray passes first gather the brick's surface voxels into a workgroup list and then trace it with consecutive
+// threads: the same work in far fewer (and full) SIMD groups.
+var<workgroup> wList: array<u32, 512>;      // brick voxel indices (x + 8y + 64z) of the surface air voxels
+var<workgroup> wCount: atomic<u32>;
+var<workgroup> wSun: array<u32, 512>;       // sun_main: each voxel's result, for the paired write
+
+fn isSurfaceAir(g: i32, v: vec3<i32>) -> bool { return !isSolid(g, v) && hasSolidNeighbour(g, v); }
+
 @compute @workgroup_size(256)
 fn sun_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
             @builtin(local_invocation_index) t: u32) {
     let wi = wid.x + wid.y * nwg.x;
     if (wi >= u32(p.counts.z)) { return; }
+    if (t == 0u) { atomicStore(&wCount, 0u); }
+    workgroupBarrier();
     let it = itemOf(work[wi], t);
+    let base = it.v0 - vec3<i32>(i32(t * 2u) & 7, (i32(t * 2u) >> 3u) & 7, i32(t * 2u) >> 6u);
+    for (var e = 0u; e < 2u; e = e + 1u) {
+        let k = t * 2u + e;
+        wSun[k] = 3u; // not a surface voxel: reads lit (see sunLevel)
+        if (isSurfaceAir(it.g, it.v0 + vec3<i32>(i32(e), 0, 0))) { wList[atomicAdd(&wCount, 1u)] = k; }
+    }
+    workgroupBarrier();
+    let n = atomicLoad(&wCount);
     let list = listOf(it.g, it.v0);
-    let s0 = sunLevel(it.g, it.v0, list);
-    let s1 = sunLevel(it.g, it.v0 + vec3<i32>(1, 0, 0), list);
+    for (var i = t; i < n; i = i + 256u) {
+        let k = wList[i];
+        wSun[k] = sunLevel(it.g, base + vec3<i32>(i32(k & 7u), i32((k >> 3u) & 7u), i32(k >> 6u)), list);
+    }
+    workgroupBarrier();
+    let s0 = wSun[t * 2u];
+    let s1 = wSun[t * 2u + 1u];
     let old = lightPool[it.disp] & ~((3u << 12u) | (3u << 28u));
     lightPool[it.disp] = old | (s0 << 12u) | (s1 << 28u);
 }
@@ -686,6 +712,8 @@ fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) n
     // The bounce work list is pairs: (light slot, evaluations since the brick changed).
     let wi = wid.x + wid.y * nwg.x;
     if (wi >= u32(p.counts.z)) { return; }
+    if (t == 0u) { atomicStore(&wCount, 0u); }
+    workgroupBarrier();
     let it = itemOf(work[wi * 2u], t);
     let nu = work[wi * 2u + 1u];
     // A running average over the first full cycle (exactly the complete ray set's mean), then a weight of one
@@ -694,8 +722,23 @@ fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) n
     let alpha = max(1.0 / f32(cycle), 1.0 / (f32(nu) + 1.0));
     let slice = i32(nu % cycle);
     let list = listOf(it.g, it.v0);
-    lightPool[it.acc]     = bounceVoxel(it.g, it.v0, lightPool[it.acc], alpha, slice, list);
-    lightPool[it.acc + 1] = bounceVoxel(it.g, it.v0 + vec3<i32>(1, 0, 0), lightPool[it.acc + 1], alpha, slice, list);
+    // Gather the surface voxels (see Surface compaction); other air has no bounce and no occlusion, solid keeps its word.
+    let base = it.v0 - vec3<i32>(i32(t * 2u) & 7, (i32(t * 2u) >> 3u) & 7, i32(t * 2u) >> 6u);
+    for (var e = 0u; e < 2u; e = e + 1u) {
+        let v = it.v0 + vec3<i32>(i32(e), 0, 0);
+        if (isSolid(it.g, v)) { continue; }
+        if (hasSolidNeighbour(it.g, v)) { wList[atomicAdd(&wCount, 1u)] = t * 2u + e; }
+        else { lightPool[it.acc + i32(e)] = 0u; }
+    }
+    workgroupBarrier();
+    let n = atomicLoad(&wCount);
+    let accBase = it.acc - i32(t * 2u);
+    for (var i = t; i < n; i = i + 256u) {
+        let k = wList[i];
+        let v = base + vec3<i32>(i32(k & 7u), i32((k >> 3u) & 7u), i32(k >> 6u));
+        let a = accBase + i32(k);
+        lightPool[a] = bounceVoxel(it.g, v, lightPool[a], alpha, slice, list);
+    }
 }
 
 // Drops the stored bounce of the listed slots (keeping AO), where a light was removed or dimmed. Bounce there feeds
@@ -717,7 +760,12 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
     private readonly ComputePipeline _composePipeline;
     private readonly ComputePipeline _bouncePipeline;
     private readonly ComputePipeline _clearPipeline;
-    private readonly GpuBuffer _param;
+    // One small uniform buffer per dispatch of a frame: the dispatches are recorded into one command buffer, so every
+    // parameter write lands before any of them runs and each needs its own.
+    private readonly List<GpuBuffer> _params = new();
+    private int _paramNext;
+    private CommandEncoder* _enc;
+    private readonly List<nint> _bindGroups = new();
     private GpuBuffer _lists;                 // this frame's per-chunk grid and lamp lists (see the WGSL)
     private int _lampBase;
 
@@ -734,7 +782,6 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
         _composePipeline = new ComputePipeline(ctx, Wgsl, "compose_main");
         _bouncePipeline = new ComputePipeline(ctx, Wgsl, "bounce_main");
         _clearPipeline  = new ComputePipeline(ctx, Wgsl, "clear_main");
-        _param = GpuBuffer.CreateUniform(ctx, (ulong)Marshal.SizeOf<RayParams>());
         _lists = GpuBuffer.CreateStorage(ctx, 65536);
     }
 
@@ -756,16 +803,16 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
     public void DispatchClearBounce(GridStore store, GpuBuffer work, int count)
     {
         if (count <= 0) return;
-        WriteParams(Vector3D<float>.Zero, count, default, default);
-        Dispatch(_clearPipeline, ClearBindings, store, work, count);
+        var param = WriteParams(Vector3D<float>.Zero, count, default, default);
+        Dispatch(_clearPipeline, ClearBindings, store, work, count, param, "Lighting: clear bounce");
     }
 
     /// <summary>Sun visibility for the <paramref name="count"/> light slots listed in <paramref name="work"/>.</summary>
     public void DispatchSun(GridStore store, Vector3D<float> sunDir, GpuBuffer work, int count)
     {
         if (count <= 0) return;
-        WriteParams(sunDir, count, default, default);
-        Dispatch(_sunPipeline, SunBindings, store, work, count);
+        var param = WriteParams(sunDir, count, default, default);
+        Dispatch(_sunPipeline, SunBindings, store, work, count, param, "Lighting: sun");
     }
 
     /// <summary>Composes the displayed light of the listed slots: lamp light (traced now, from the lamps in each
@@ -774,8 +821,8 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
     public void DispatchCompose(GridStore store, float bounceScale, GpuBuffer work, int count)
     {
         if (count <= 0) return;
-        WriteParams(Vector3D<float>.Zero, count, new Vector4D<float>(0f, 0f, bounceScale, 0f), default);
-        Dispatch(_composePipeline, ComposeBindings, store, work, count);
+        var param = WriteParams(Vector3D<float>.Zero, count, new Vector4D<float>(0f, 0f, bounceScale, 0f), default);
+        Dispatch(_composePipeline, ComposeBindings, store, work, count, param, "Lighting: compose");
     }
 
     /// <summary>
@@ -788,16 +835,17 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
                                float albedo, int rays, int cycle, GpuBuffer work, int count)
     {
         if (count <= 0) return;
-        WriteParams(sunDir, count,
-                    new Vector4D<float>(albedo, sunStrength, 0f, 0f), new Vector4D<float>(rays, cycle, 0f, 0f));
-        Dispatch(_bouncePipeline, BounceBindings, store, work, count);
+        var param = WriteParams(sunDir, count,
+                                new Vector4D<float>(albedo, sunStrength, 0f, 0f), new Vector4D<float>(rays, cycle, 0f, 0f));
+        Dispatch(_bouncePipeline, BounceBindings, store, work, count, param, "Lighting: bounce");
     }
 
-    private void Dispatch(ComputePipeline pipeline, uint[] bindings, GridStore store, GpuBuffer work, int count)
+    private void Dispatch(ComputePipeline pipeline, uint[] bindings, GridStore store, GpuBuffer work, int count, GpuBuffer param,
+                          string timingName)
     {
-        var entries = new (uint, GpuBuffer)[bindings.Length];
+        var arr = new (uint, GpuBuffer)[bindings.Length];
         for (int i = 0; i < bindings.Length; i++)
-            entries[i] = (bindings[i], bindings[i] switch
+            arr[i] = (bindings[i], bindings[i] switch
             {
                 0 => store.OccPool,
                 1 => store.ChunkTable,
@@ -807,20 +855,45 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
                 5 => store.Grids,
                 6 => work,
                 7 => _lists,
-                _ => _param,
+                _ => param,
             });
-        nint bg = pipeline.CreateBindGroupHandle(entries);
+        nint bg = pipeline.CreateBindGroupHandle(arr);
+        _bindGroups.Add(bg);
 
+        if (_enc == null)
+        {
+            var encDesc = new CommandEncoderDescriptor();
+            _enc = _ctx.Api.DeviceCreateCommandEncoder(_ctx.Device, &encDesc);
+        }
         // One workgroup per brick, as a 2D grid since a big list can exceed the 65535-per-dimension limit.
         const int MaxPerDim = 65535;
         uint gx = (uint)System.Math.Min(count, MaxPerDim);
         uint gy = ((uint)count + gx - 1u) / gx;
-        pipeline.Dispatch(bg, gx, gy, 1u);
-        _ctx.Api.BindGroupRelease((BindGroup*)bg);
+        pipeline.Record(_enc, (BindGroup*)bg, gx, gy, 1u, timingName, count);
     }
 
-    private void WriteParams(Vector3D<float> sunDir, int workCount, Vector4D<float> bounce, Vector4D<float> bounce2)
+    /// <summary>Submits every dispatch recorded since the last submit, as one command buffer. Each dispatch is its own
+    /// compute pass, so they run in order with the storage barriers between them. Buffer writes made before this call
+    /// (work lists, the per-chunk lists) all land before the first dispatch runs, so a buffer must not be rewritten
+    /// between two dispatches of one submit.</summary>
+    public void Submit()
     {
+        _paramNext = 0;
+        if (_enc == null) return;
+        var cmdDesc = new CommandBufferDescriptor();
+        var cmd = _ctx.Api.CommandEncoderFinish(_enc, &cmdDesc);
+        _ctx.Api.QueueSubmit(_ctx.Queue, 1, &cmd);
+        _ctx.Api.CommandBufferRelease(cmd);
+        _ctx.Api.CommandEncoderRelease(_enc);
+        _enc = null;
+        foreach (nint bg in _bindGroups) _ctx.Api.BindGroupRelease((BindGroup*)bg);
+        _bindGroups.Clear();
+    }
+
+    private GpuBuffer WriteParams(Vector3D<float> sunDir, int workCount, Vector4D<float> bounce, Vector4D<float> bounce2)
+    {
+        if (_paramNext == _params.Count) _params.Add(GpuBuffer.CreateUniform(_ctx, (ulong)Marshal.SizeOf<RayParams>()));
+        var param = _params[_paramNext++];
         Span<RayParams> sp = stackalloc RayParams[1];
         sp[0] = new RayParams
         {
@@ -828,7 +901,8 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
             LampBase = _lampBase, WorkCount = workCount,
             Bounce = bounce, Bounce2 = bounce2,
         };
-        _param.Write<RayParams>(0, sp);
+        param.Write<RayParams>(0, sp);
+        return param;
     }
 
     public void Dispose()
@@ -837,7 +911,8 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
         _composePipeline.Dispose();
         _bouncePipeline.Dispose();
         _clearPipeline.Dispose();
-        _param.Dispose();
+        Submit();
+        foreach (var p in _params) p.Dispose();
         _lists.Dispose();
     }
 

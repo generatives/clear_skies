@@ -124,6 +124,21 @@ public sealed unsafe class ComputePipeline : IDisposable
         _api.CommandEncoderRelease(enc);
     }
 
+    /// <summary>Records a dispatch into <paramref name="enc"/> as its own compute pass (the caller submits), timed on
+    /// the GPU as <paramref name="timingName"/> when given.</summary>
+    public void Record(CommandEncoder* enc, BindGroup* bindGroup, uint groupsX, uint groupsY = 1, uint groupsZ = 1,
+                       string? timingName = null, int timingItems = 0)
+    {
+        var passDesc = new ComputePassDescriptor();
+        if (timingName != null && _ctx.Timer.TimeCompute(timingName, out var tsw, timingItems)) passDesc.TimestampWrites = &tsw;
+        var pass = _api.CommandEncoderBeginComputePass(enc, &passDesc);
+        _api.ComputePassEncoderSetPipeline(pass, _pipeline);
+        _api.ComputePassEncoderSetBindGroup(pass, 0, bindGroup, 0, null);
+        _api.ComputePassEncoderDispatchWorkgroups(pass, groupsX, groupsY, groupsZ);
+        _api.ComputePassEncoderEnd(pass);
+        _api.ComputePassEncoderRelease(pass);
+    }
+
     /// <summary>As <see cref="Dispatch(BindGroup*,uint,uint,uint)"/> but takes an opaque bind-group handle.</summary>
     public void Dispatch(nint bindGroup, uint groupsX, uint groupsY, uint groupsZ)
         => Dispatch((BindGroup*)bindGroup, groupsX, groupsY, groupsZ);

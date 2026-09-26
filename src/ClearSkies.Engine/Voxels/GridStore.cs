@@ -15,6 +15,9 @@ public sealed class GridHandle
     internal bool IsWorld;
     internal readonly Dictionary<ChunkPosition, ChunkRecord> Chunks = new();
 
+    /// <summary>The uploaded chunks that hold light emitters (lamps), so finding lamps doesn't walk every chunk.</summary>
+    internal readonly Dictionary<ChunkPosition, ChunkEntry> EmitterChunks = new();
+
     // Chunk-table section. A ship's covers its chunk box: entry index = TableBase + cell, where
     // cell = wrap(c.x, TDX) + TDX*(wrap(c.y, TDY) + TDY*wrap(c.z, TDZ)), the entry holding the chunk's coordinate as a
     // tag. The world's is instead a block of entries for its loaded chunks only, found through the world index: a
@@ -24,6 +27,7 @@ public sealed class GridHandle
     // Chunk box of the grid's records (inclusive), and whether it changed since the bounds were last derived.
     internal ChunkPosition BoxMin, BoxMax;
     internal bool HasBox, BoxDirty;
+    internal int BoxAge; // uploads since the box was last recomputed (see GridStore.UpdateBounds)
 
     // Light slots owned by this grid (its surface bricks); SlotListPos in GridStore finds a slot's place here.
     internal readonly List<int> Slots = new();
@@ -54,6 +58,7 @@ internal sealed class ChunkRecord
     public bool Virtual;              // a ship's air chunk next to its blocks, with no ChunkEntry behind it
     public int WorldCell = -1;        // world only: its world index cell, and its entry's offset in the world block
     public int WorldSlot = -1;
+    public ulong Marks;               // bricks marked by the BrickMarks being filled (GpuLightSystem), 0 between uses
 }
 
 /// <summary>
@@ -298,6 +303,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         if (g.Index < 0) return;
         foreach (var rec in g.Chunks.Values.ToList()) FreeRecord(g, rec);
         g.Chunks.Clear();
+        g.EmitterChunks.Clear();
         if (g.TableBase >= 0) FreeSection(g);
         _grids[g.Index] = null;
         _descs[g.Index] = default;
@@ -365,6 +371,9 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         }
         entry.ClearEdits();
 
+        if (entry.Emitters.Count > 0) g.EmitterChunks[pos] = entry;
+        else g.EmitterChunks.Remove(pos);
+
         var rec = EnsureRecord(g, pos);
         if (rec == null) return;
         bool hadSolid = rec.Solid != 0;
@@ -406,6 +415,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         bool hadSolid = rec.Solid != 0;
         FreeRecord(g, rec);
         g.Chunks.Remove(pos);
+        g.EmitterChunks.Remove(pos);
         g.BoxDirty = true;
         for (int f = 0; f < 6; f++)
         {
@@ -413,7 +423,9 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
             if (g.Chunks.TryGetValue(pos.Offset(dx, dy, dz), out var n)) RefreshSurface(g, n);
         }
         g.Version++;
-        ChangedChunks.Add((g, pos.WorldOrigin, pos.WorldOrigin + new Vector3D<float>(S), hadSolid, false));
+        // A world chunk unloading isn't a change to the world: what it shadowed stays shadowed, and relighting the far
+        // edge for it would only undo that. (A ship's chunk going is a real change.)
+        ChangedChunks.Add((g, pos.WorldOrigin, pos.WorldOrigin + new Vector3D<float>(S), hadSolid && !g.IsWorld, false));
     }
 
     /// <summary>The light slot holding brick (bx,by,bz) of chunk <paramref name="pos"/>, or -1.</summary>
@@ -695,7 +707,12 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     /// bounds of its bricks.</summary>
     private static void UpdateBounds(GridHandle g)
     {
+        // The world unloads chunks every frame while streaming, and this walks all of them: shrink its box only now and
+        // then. A box that's too big is only a little slower (rays and marking clip to it), never wrong.
+        const int WorldBoxEvery = 30;
         if (!g.BoxDirty) return;
+        if (g.IsWorld && ++g.BoxAge < WorldBoxEvery) return;
+        g.BoxAge = 0;
         g.BoxDirty = false;
         g.HasBox = false;
         foreach (var p in g.Chunks.Keys) ExtendBox(g, p);

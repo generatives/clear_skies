@@ -42,6 +42,9 @@ public sealed unsafe class GpuContext : IDisposable
     /// as an unrecoverable native validation error rather than a catchable .NET exception.</summary>
     public Limits AdapterLimits { get; private set; }
 
+    /// <summary>GPU time per pass (timestamp queries), when the device supports them.</summary>
+    public GpuTimer Timer { get; private set; } = null!;
+
     private GpuBufferFill? _bufferFill;
 
     /// <summary>Shared GPU-side buffer-fill utility (see <see cref="GpuBufferFill"/>) — one shader/pipeline for
@@ -105,8 +108,15 @@ public sealed unsafe class GpuContext : IDisposable
 
         AdapterLimits = required.Limits;
 
-        // Request device + queue.
-        var deviceDesc = new DeviceDescriptor { RequiredLimits = &required };
+        // Request device + queue, with timestamp queries when the adapter has them (for GpuTimer).
+        bool timestamps = _api.AdapterHasFeature(_adapter, FeatureName.TimestampQuery);
+        var features = stackalloc FeatureName[1] { FeatureName.TimestampQuery };
+        var deviceDesc = new DeviceDescriptor
+        {
+            RequiredLimits = &required,
+            RequiredFeatureCount = timestamps ? 1u : 0u,
+            RequiredFeatures = timestamps ? features : null,
+        };
         _api.AdapterRequestDevice(_adapter, &deviceDesc, PfnRequestDeviceCallback.From(HandleDevice), null);
         if (_device == null)
             throw new InvalidOperationException("Failed to create WebGPU device.");
@@ -119,6 +129,7 @@ public sealed unsafe class GpuContext : IDisposable
             _api.DeviceSetUncapturedErrorCallback(_device, _errorCallback, null);
         }
 
+        Timer = new GpuTimer(this, timestamps);
         SurfaceFormat = PickSurfaceFormat();
         Configure(window.FramebufferSize);
     }
@@ -142,6 +153,7 @@ public sealed unsafe class GpuContext : IDisposable
     {
         var caps = new SurfaceCapabilities();
         _api.SurfaceGetCapabilities(_surface, _adapter, &caps);
+        for (int i = 0; i < (int)caps.PresentModeCount; i++) _presentModes.Add(caps.PresentModes[i]);
         if (caps.FormatCount > 0 && caps.Formats != null)
             return caps.Formats[0];
         return TextureFormat.Bgra8Unorm;
@@ -162,11 +174,33 @@ public sealed unsafe class GpuContext : IDisposable
             AlphaMode = CompositeAlphaMode.Opaque,
             Width = (uint)size.X,
             Height = (uint)size.Y,
-            PresentMode = PresentMode.Fifo,
+            PresentMode = PickPresentMode(),
         };
         _api.SurfaceConfigure(_surface, &config);
 
         RebuildDepth((uint)size.X, (uint)size.Y);
+    }
+
+    /// <summary>Whether presenting waits for the display's refresh (FIFO). Off, frames are presented as soon as they
+    /// are ready (mailbox where supported, else immediate, which can tear), so the frame rate shows what the CPU and
+    /// GPU can do rather than the refresh rate.</summary>
+    public bool VSync
+    {
+        get => _vsync;
+        set { if (_vsync == value) return; _vsync = value; Configure(Size); }
+    }
+    private bool _vsync = true;
+    private readonly List<PresentMode> _presentModes = new();
+
+    /// <summary>What <see cref="VSync"/> off actually gets, for display.</summary>
+    public PresentMode PresentModeInUse { get; private set; } = PresentMode.Fifo;
+
+    private PresentMode PickPresentMode()
+    {
+        PresentModeInUse = !_vsync && _presentModes.Contains(PresentMode.Mailbox) ? PresentMode.Mailbox
+                         : !_vsync && _presentModes.Contains(PresentMode.Immediate) ? PresentMode.Immediate
+                         : PresentMode.Fifo;
+        return PresentModeInUse;
     }
 
     private void RebuildDepth(uint width, uint height)
@@ -247,6 +281,7 @@ public sealed unsafe class GpuContext : IDisposable
     public void Dispose()
     {
         _bufferFill?.Dispose();
+        Timer?.Dispose();
         if (_depthView != null) _api.TextureViewRelease(_depthView);
         if (_depthTexture != null) _api.TextureRelease(_depthTexture);
         if (_instance != null) _api.InstanceRelease(_instance);

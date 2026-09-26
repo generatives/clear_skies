@@ -31,7 +31,7 @@ host.Renderer.LoadTextureAtlas(
 
 // The static world is a volume like any other, with an identity Transform (set by ChunkVolume) and zero pivot.
 var staticVolumeEntity = host.World.CreateEntity();
-var staticVolume = new ChunkVolume(staticVolumeEntity, host.World);
+var staticVolume = new ChunkVolume(staticVolumeEntity, host.World) { MeshIgnoresNeighbours = true };
 staticVolumeEntity.Set(new ChunkGrid() { Volume = staticVolume });
 
 ulong seed = 1337;
