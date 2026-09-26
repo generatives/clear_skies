@@ -56,6 +56,15 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     // weight 1/(n+1)) instead of restarting at 0, so continuously changing areas stay a little smoothed.
     private int _bounceRechangeN = 2;
 
+    // Gradual bounce: a changed world brick gets the full hold only within the first radius of the camera; out to
+    // the second it gets the middle count, and past it the far count. As the camera comes closer, a brick is topped
+    // up to its new distance's count, continuing its running average, so distant terrain costs a fraction of the
+    // bounce work and sharpens as it's approached.
+    private float _bounceFullRadius = 256f;
+    private float _bounceMidRadius = 768f;
+    private int _bounceMidEvals = 2;
+    private int _bounceFarEvals = 1;
+
     // Held bricks within this many voxels of the camera are evaluated this many times per frame.
     private int _bounceNearRepeats = 4;
     private float _bounceNearRadius = 64f;
@@ -152,6 +161,13 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         ImGui.SliderInt("Near-camera evaluations per frame", ref _bounceNearRepeats, 1, 64);
         ImGui.SliderFloat("Near-camera radius", ref _bounceNearRadius, 8f, 256f, "%.0f");
         ImGui.SliderFloat("Bounce display scale", ref _bounceScale, 0f, 4f, "%.2f");
+        ImGui.Text("Gradual bounce (world bricks)");
+        ImGui.SliderFloat("Full evaluations within (blocks)", ref _bounceFullRadius, 16f, 4096f, "%.0f");
+        ImGui.SliderFloat("Middle evaluations within (blocks)", ref _bounceMidRadius, 16f, 8192f, "%.0f");
+        ImGui.SliderInt("Middle evaluations", ref _bounceMidEvals, 1, 64);
+        ImGui.SliderInt("Far evaluations", ref _bounceFarEvals, 1, 64);
+        ImGui.TextDisabled($"  of {System.Math.Min(64, (_bounceHoldFrames + _bounceCycle - 1) / _bounceCycle * _bounceCycle)} after a change; " +
+                           $"topped up as the camera nears. Waiting for more: {_coarse.Count:N0}, topped up this frame: {_dbgTopUps:N0}");
 
         ImGui.Separator();
         ImGui.SliderInt("Max bricks relit per frame", ref _maxRelitPerFrame, 64, 16384);

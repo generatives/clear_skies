@@ -50,6 +50,14 @@ public sealed partial class GpuLightSystem
     private byte[] _n = Array.Empty<byte>();
     private bool[] _inHeld = Array.Empty<bool>();
     private int[] _holdStamp = Array.Empty<int>();
+    // Gradual bounce (see GpuLightSystem's settings): the evaluations a world brick has been granted since it last
+    // changed (255: none yet), and the bricks granted fewer than a full hold, topped up as the camera nears them.
+    private byte[] _given = Array.Empty<byte>();
+    private bool[] _inCoarse = Array.Empty<bool>();
+    private readonly List<int> _coarse = new();
+    private int _coarseAt, _fullHold, _dbgTopUps;
+    private Vector3D<float> _tierCam;
+    private bool _tiersOn;
     // Marked bricks waiting for direct light, and held bricks waiting for bounce, nearest the camera first. Stale
     // entries (freed slots, holds run out) are dropped as they come up.
     private NearestQueue? _dirtyQueueField, _heldQueueField;
@@ -123,6 +131,7 @@ public sealed partial class GpuLightSystem
         {
             _hold[slot] = 0;
             _n[slot] = 0;
+            _given[slot] = byte.MaxValue;
             MarkSlot(slot);
         }
         _store.NewSlots.Clear();
@@ -188,6 +197,9 @@ public sealed partial class GpuLightSystem
         int n = BuildLightWork(cam.Position);
         _lastDirtyTotal = n;
         _phaseTimer.Lap(3);
+        _fullHold = hold;
+        _tiersOn = haveCam;
+        _tierCam = cam.Position;
         HoldBounce(hold, _bounceRechangeN, bounceReset);
         _phaseTimer.Lap(4);
         if (n > 0) AddCompose(_scratch.AsSpan(0, n), 1);
@@ -206,6 +218,7 @@ public sealed partial class GpuLightSystem
         int nb = 0;
         if (bounceOn)
         {
+            if (haveCam) TopUpNearing();
             float nearR = haveCam && _bounceNearRepeats > 1 ? _bounceNearRadius : -1f;
             nb = BuildBounceWork(cam.Position, nearR);
             _lastBounceTotal = nb;
@@ -377,7 +390,7 @@ public sealed partial class GpuLightSystem
             // Restart the running average outright, even if the brick was already held this frame.
             _holdStamp[slot] = _frame;
             _n[slot] = 0;
-            _hold[slot] = (byte)holdEvals;
+            _hold[slot] = (byte)Grant(slot, holdEvals);
             if (!_inHeld[slot]) { _inHeld[slot] = true; _heldQueue.Add(slot); }
         }
     }
@@ -630,8 +643,69 @@ public sealed partial class GpuLightSystem
         if (_holdStamp[slot] == _frame) return;
         _holdStamp[slot] = _frame;
         _n[slot] = _hold[slot] == 0 ? (byte)0 : (byte)System.Math.Min(_n[slot], rechangeN);
-        _hold[slot] = (byte)holdFrames;
+        _hold[slot] = (byte)Grant(slot, holdFrames);
         if (!_inHeld[slot]) { _inHeld[slot] = true; _heldQueue.Add(slot); }
+    }
+
+    // ── Gradual bounce ─────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The evaluations a changed brick gets now: a full hold near the camera, fewer farther out (world bricks only;
+    /// ships always get the full hold). A brick granted less is remembered, and <see cref="TopUpNearing"/> gives it
+    /// the rest as the camera comes closer, continuing its running average (the same ray set, the next slices of it)
+    /// rather than restarting it, so its bounce and AO sharpen in a few small steps instead of being relit.
+    /// </summary>
+    private int Grant(int slot, int full)
+    {
+        if (!_tiersOn || _store.SlotGrid[slot] != _worldIndex) return full;
+        int grant = TierEvals(slot, full);
+        _given[slot] = (byte)grant;
+        if (grant < full && !_inCoarse[slot]) { _inCoarse[slot] = true; _coarse.Add(slot); }
+        return grant;
+    }
+
+    /// <summary>The evaluations a world brick should have had at its distance from the camera, out of
+    /// <paramref name="full"/>.</summary>
+    private int TierEvals(int slot, int full)
+    {
+        float fullR = System.Math.Max(_bounceFullRadius, _bounceNearRadius);
+        float midR = System.Math.Max(_bounceMidRadius, fullR);
+        float d2 = Vector3D.DistanceSquared(BrickCentre(slot), _tierCam);
+        int evals = d2 <= fullR * fullR ? full : d2 <= midR * midR ? _bounceMidEvals : _bounceFarEvals;
+        return System.Math.Clamp(evals, 1, full);
+    }
+
+    /// <summary>
+    /// Walks part of the list of bricks granted fewer than a full hold (all of it every 16 frames or so) and tops up
+    /// those the camera has come closer to: their hold grows by the evaluations they're now owed, and their
+    /// evaluation count carries on. Bricks that have had a full hold, were freed, or went to a ship leave the list.
+    /// </summary>
+    private void TopUpNearing()
+    {
+        _dbgTopUps = 0;
+        if (_worldIndex < 0 || _coarse.Count == 0) return;
+        int full = _fullHold;
+        int budget = System.Math.Min(_coarse.Count, System.Math.Clamp(_coarse.Count / 16, 2048, 32768));
+        for (int k = 0; k < budget && _coarse.Count > 0; k++)
+        {
+            if (_coarseAt >= _coarse.Count) _coarseAt = 0;
+            int slot = _coarse[_coarseAt];
+            if (_store.SlotGrid[slot] == _worldIndex && _given[slot] < full)
+            {
+                int want = TierEvals(slot, full);
+                if (want > _given[slot])
+                {
+                    _hold[slot] = (byte)System.Math.Min(255, _hold[slot] + want - _given[slot]);
+                    _given[slot] = (byte)want;
+                    if (!_inHeld[slot]) { _inHeld[slot] = true; _heldQueue.Add(slot); }
+                    _dbgTopUps++;
+                }
+                if (_given[slot] < full) { _coarseAt++; continue; }
+            }
+            _inCoarse[slot] = false;
+            _coarse[_coarseAt] = _coarse[^1];
+            _coarse.RemoveAt(_coarse.Count - 1);
+        }
     }
 
     // ── Work lists ─────────────────────────────────────────────────────────────
@@ -901,6 +975,8 @@ public sealed partial class GpuLightSystem
         Array.Resize(ref _n, capacity);
         Array.Resize(ref _inHeld, capacity);
         Array.Resize(ref _holdStamp, capacity);
+        Array.Resize(ref _given, capacity);
+        Array.Resize(ref _inCoarse, capacity);
         Array.Resize(ref _composeStamp, capacity);
         Array.Resize(ref _nearStamp, capacity);
         Array.Resize(ref _clearStamp, capacity);
