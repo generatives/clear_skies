@@ -11,8 +11,9 @@ namespace ClearSkies.Game.Hud;
 /// <summary>
 /// The in-game HUD, declared each frame on the engine's immediate-mode <see cref="UiContext"/>: a crosshair, and
 /// a hotbar along the bottom of the screen showing <see cref="PlayerInputSystem.PlaceableBlocks"/> with the one
-/// left-click places highlighted. Number keys 1-9 and 0 pick the first ten slots; with the cursor free (Esc or F1)
-/// slots can be clicked. Picking a block shows its name above the hotbar for a moment.
+/// left-click places highlighted. The scroll wheel steps through the slots (down for the next, wrapping around) except
+/// while piloting a ship, when it zooms the camera; number keys 1-9 and 0 pick the first ten slots; with the cursor
+/// free (Esc or F1) slots can be clicked. Picking a block shows its name above the hotbar for a moment.
 ///
 /// Sprites come from Resources/Ui (crosshair, slot, slot_selected, panel; see <see cref="LoadSprites"/>). Block icons
 /// are each block's baked icon from Resources/Icons, or made at startup from its texture or color (see
@@ -34,6 +35,8 @@ public sealed class HudUi : ISystem
     private readonly UiContext _ui;
     private readonly InputManager _input;
     private readonly PlayerInputSystem _player;
+    private readonly GridPilotSystem _pilot;
+    private float _scroll; // wheel movement not yet turned into whole slot steps (touchpads scroll in fractions)
     private readonly UiSprite _crosshair, _slot, _slotSelected, _panel;
     private readonly UiSprite[] _icons;
     private readonly string[] _slotNumbers;
@@ -41,12 +44,13 @@ public sealed class HudUi : ISystem
     private int _shownIndex = -1;
     private float _nameTimer;
 
-    public HudUi(UiContext ui, InputManager input, PlayerInputSystem player, TextureAtlas? blockTextures,
-                 string iconsDirectory)
+    public HudUi(UiContext ui, InputManager input, PlayerInputSystem player, GridPilotSystem pilot,
+                 TextureAtlas? blockTextures, string iconsDirectory)
     {
         _ui = ui;
         _input = input;
         _player = player;
+        _pilot = pilot;
         _crosshair = ui.Atlas.Sprite("crosshair");
         _slot = ui.Atlas.Sprite("slot");
         _slotSelected = ui.Atlas.Sprite("slot_selected");
@@ -89,6 +93,19 @@ public sealed class HudUi : ISystem
         for (int i = 0; i < _icons.Length; i++)
             if (_ui.Clicked(_ui.Id("hotbar-slot", i)))
                 _player.PlaceIndex = i;
+
+        if (_pilot.IsPiloting)
+        {
+            _scroll = 0;
+            return;
+        }
+        _scroll -= _input.ScrollDelta.Y; // wheel down (negative) moves to the next slot
+        int steps = (int)_scroll;        // whole notches, towards zero
+        if (steps != 0)
+        {
+            _scroll -= steps;
+            _player.PlaceIndex += steps; // PlaceIndex wraps
+        }
     }
 
     private void DeclareCrosshair()

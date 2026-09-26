@@ -48,6 +48,9 @@ public sealed class GridPilotSystem : ISystem
     private float _localPitch;
     private float _cameraDistance = 16f;
 
+    /// <summary>True while the player is flying a grid (the scroll wheel then zooms the camera).</summary>
+    public bool IsPiloting => _isPiloting;
+
     public GridPilotSystem(World world, InputManager input, PhysicsWorld physics,
                             ChunkVolume staticVolume, PhysicsBodySystem physicsBody)
     {
