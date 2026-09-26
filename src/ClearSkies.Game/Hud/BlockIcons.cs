@@ -4,15 +4,25 @@ using ClearSkies.Engine.Voxels;
 
 namespace ClearSkies.Game.Hud;
 
-/// <summary>Makes 16x16 pixel-art hotbar icons for blocks: the block's side texture box-filtered down from the block
-/// atlas, or, for blocks without one (lamps, model blocks), a bevelled swatch of its color, glowing in the middle if it
-/// emits light.</summary>
+/// <summary>Hotbar icons for blocks: the block's <see cref="BlockDef.IconTexture"/> if it has one (model blocks get
+/// theirs baked by tools/ClearSkies.IconBaker), otherwise a 16x16 pixel-art icon made here: its side texture
+/// box-filtered down from the block atlas, or for untextured blocks (lamps) a bevelled swatch of its color, glowing in
+/// the middle if it emits light.</summary>
 internal static class BlockIcons
 {
     public const int Size = 16;
 
-    public static UiSprite Create(UiAtlas atlas, BlockDef block, TextureAtlas? textures)
+    /// <param name="iconsDirectory">Where <see cref="BlockDef.IconTexture"/> paths are relative to (Resources/Icons).</param>
+    public static UiSprite Create(UiAtlas atlas, BlockDef block, TextureAtlas? textures, string iconsDirectory)
     {
+        if (block.IconTexture is { } icon)
+        {
+            string path = Path.Combine(iconsDirectory, icon);
+            if (File.Exists(path))
+                return atlas.LoadSprite($"block-icon:{block.Name}", path);
+            Console.Error.WriteLine($"[hud] {block.Name}: icon '{path}' not found (bake it with tools/ClearSkies.IconBaker); using a generated one.");
+        }
+
         byte[] pixels = textures != null && textures.TryGetLayer(block.Texture, out int layer)
             ? Downsample(textures.GetLayerPixels(layer), textures.TileSize)
             : Swatch(block);

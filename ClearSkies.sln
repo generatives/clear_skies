@@ -9,6 +9,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ClearSkies.Engine", "src\Cl
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ClearSkies.Game", "src\ClearSkies.Game\ClearSkies.Game.csproj", "{C36B44BC-440D-4EEA-9138-EB7E9D2D8B0B}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tools", "tools", "{F91B4CF7-80EC-47EC-97CD-37C6482753CC}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ClearSkies.IconBaker", "tools\ClearSkies.IconBaker\ClearSkies.IconBaker.csproj", "{2F159005-706A-4553-B4F3-8F8ADDA5A814}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -26,9 +30,14 @@ Global
 		{C36B44BC-440D-4EEA-9138-EB7E9D2D8B0B}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{C36B44BC-440D-4EEA-9138-EB7E9D2D8B0B}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{C36B44BC-440D-4EEA-9138-EB7E9D2D8B0B}.Release|Any CPU.Build.0 = Release|Any CPU
+		{2F159005-706A-4553-B4F3-8F8ADDA5A814}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{2F159005-706A-4553-B4F3-8F8ADDA5A814}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{2F159005-706A-4553-B4F3-8F8ADDA5A814}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{2F159005-706A-4553-B4F3-8F8ADDA5A814}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{7149A746-A9C3-455B-B0D9-FCC12D259E61} = {46BA6532-E43D-4D43-BDC8-B7B432D4A25B}
 		{C36B44BC-440D-4EEA-9138-EB7E9D2D8B0B} = {46BA6532-E43D-4D43-BDC8-B7B432D4A25B}
+		{2F159005-706A-4553-B4F3-8F8ADDA5A814} = {F91B4CF7-80EC-47EC-97CD-37C6482753CC}
 	EndGlobalSection
 EndGlobal

@@ -88,6 +88,20 @@ Things to know:
 third of its size; pass explicit `NineSlice` insets to `LoadSprite` for anything else. Sprites can also be made from
 pixels (`AddSprite`), which is how the hotbar builds its block icons.
 
+### Block icons
+
+A block's inventory icon is `BlockDef.IconTexture`, a PNG in `src/ClearSkies.Game/Resources/Icons`. Model blocks get
+theirs baked from their glTF by a tool: a CPU rasterizer at a fixed 3/4 angle and lighting, 32x32 with anti-aliased
+edges and a dark outline. Rerun it after changing a model or adding a model block, and commit the PNGs:
+
+```sh
+dotnet run --project tools/ClearSkies.IconBaker                 # all model blocks
+dotnet run --project tools/ClearSkies.IconBaker -- --block Lever  # just one; see Program.cs for size/angle options
+```
+
+Blocks without an `IconTexture` get one generated at startup: their side texture shrunk to 16x16, or a swatch of their
+color.
+
 Fonts are added with `ui.AddFont(UiFont.Load(path))`, and their index is the `TextConfig.FontId`. Font 0 is also what
 Clay's inspector uses.
 

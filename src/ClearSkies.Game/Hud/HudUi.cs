@@ -15,8 +15,8 @@ namespace ClearSkies.Game.Hud;
 /// slots can be clicked. Picking a block shows its name above the hotbar for a moment.
 ///
 /// Sprites come from Resources/Ui (crosshair, slot, slot_selected, panel; see <see cref="LoadSprites"/>). Block icons
-/// are made at startup from the block texture atlas, box-filtered down to 16x16 pixel art, or for untextured blocks
-/// a bevelled swatch of their color.
+/// are each block's baked icon from Resources/Icons, or made at startup from its texture or color (see
+/// <see cref="BlockIcons"/>).
 /// </summary>
 public sealed class HudUi : ISystem
 {
@@ -41,7 +41,8 @@ public sealed class HudUi : ISystem
     private int _shownIndex = -1;
     private float _nameTimer;
 
-    public HudUi(UiContext ui, InputManager input, PlayerInputSystem player, TextureAtlas? blockTextures)
+    public HudUi(UiContext ui, InputManager input, PlayerInputSystem player, TextureAtlas? blockTextures,
+                 string iconsDirectory)
     {
         _ui = ui;
         _input = input;
@@ -56,7 +57,7 @@ public sealed class HudUi : ISystem
         _slotNumbers = new string[blocks.Count];
         for (int i = 0; i < blocks.Count; i++)
         {
-            _icons[i] = BlockIcons.Create(ui.Atlas, BlockRegistry.Get(blocks[i]), blockTextures);
+            _icons[i] = BlockIcons.Create(ui.Atlas, BlockRegistry.Get(blocks[i]), blockTextures, iconsDirectory);
             _slotNumbers[i] = i < SlotKeys.Length ? ((i + 1) % 10).ToString() : "";
         }
     }

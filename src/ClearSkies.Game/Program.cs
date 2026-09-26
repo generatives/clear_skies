@@ -100,7 +100,8 @@ host.AddSystem(new CharacterCameraSyncSystem(host.World), SystemStage.Logic); //
 host.AddSystem(gridPilot, SystemStage.Logic);
 var playerInput = new PlayerInputSystem(host.World, host.Input, meshSystem, host.Renderer, gridSelection);
 host.AddSystem(playerInput, SystemStage.Logic);
-host.AddSystem(new HudUi(ui, host.Input, playerInput, host.Renderer.Atlas), SystemStage.Logic); // crosshair, hotbar
+host.AddSystem(new HudUi(ui, host.Input, playerInput, host.Renderer.Atlas,
+                         Path.Combine(AppContext.BaseDirectory, "Resources", "Icons")), SystemStage.Logic); // crosshair, hotbar
 host.AddSystem(new LeverControlSystem(host.World), SystemStage.Logic); // after PlayerInputSystem, whose clicks drag levers
 host.AddSystem(new SteeringWheelControlSystem(host.World), SystemStage.Logic); // ...and turn wheels
 var gridPersistence = new GridPersistenceSystem(host.World, meshSystem, host.Physics, gridSelection);
