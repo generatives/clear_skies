@@ -65,6 +65,16 @@ public static class HeartGrid
     public const float FloorTop = ContinentTerrain.PlainsLevel - 30f;
     private const float UpperChance = 0.45f, ThinOver = 1200f, MountainChance = 0.85f;
 
+    // Islands: the floor, the underworld and the mountains keep their chances only inside the clusters (see
+    // ClusterField), easing from IslandFrom to IslandFull of it; between them the ground thins to OutsideChance of
+    // that (a few lone pieces), the mountains to MountainOutside. So a continent is a scatter of island clusters with
+    // open sky between, each still carrying the continent's surface on top.
+    private const float IslandFrom = 0.1f, IslandFull = 0.6f, OutsideChance = 0.04f, MountainOutside = 0.25f;
+
+    /// <summary>How much of FloorChance the floor keeps even inside a cluster: it breaks into islands with gaps between,
+    /// not one cracked landmass.</summary>
+    private const float IslandFloor = 0.55f;
+
     // Continents: value noise at ContinentSpacing, roughened by a finer one at ContinentDetail; land where it is over
     // ContinentEdgeLow, fading in until ContinentEdgeHigh.
     private const float ContinentSpacing = 16000f, ContinentDetail = 5000f, ContinentEdgeLow = 0.46f, ContinentEdgeHigh = 0.56f;
@@ -106,13 +116,18 @@ public static class HeartGrid
 
     private static float LandChance(ulong seed, float x, float y, float z)
     {
-        if (y < DeepTop) return Lerp(DeepChance, FloorChance, Smoothstep(DeepTop - DeepFade, DeepTop, y));
+        float cluster = ClusterField(seed, x, z);
+        float inIsland = Smoothstep(IslandFrom, IslandFull, cluster);
+        float island = Lerp(OutsideChance, IslandFloor, inIsland);
+        if (y < DeepTop) return island * Lerp(DeepChance, FloorChance, Smoothstep(DeepTop - DeepFade, DeepTop, y));
         float up = Smoothstep(FloorTop, FloorTop + FloorFade, y);
-        if (up <= 0f) return FloorChance;
-        float thin = Lerp(1f, 0.5f, Math.Clamp((y - FloorTop - FloorFade) / ThinOver, 0f, 1f));
-        float upper = MathF.Min(UpperChance * thin * Lerp(0.25f, 2f, ClusterField(seed, x, z)), 1f);
+        float floor = island * FloorChance;
         float mountain = Smoothstep(0.1f, 0.6f, ContinentTerrain.For(seed).RangeCore(x, z));
-        return Lerp(Lerp(FloorChance, upper, up), MountainChance, mountain);
+        float mountainChance = MountainChance * Lerp(MountainOutside, 0.9f, inIsland);
+        if (up <= 0f) return Lerp(floor, mountainChance, mountain);
+        float thin = Lerp(1f, 0.5f, Math.Clamp((y - FloorTop - FloorFade) / ThinOver, 0f, 1f));
+        float upper = MathF.Min(UpperChance * thin * Lerp(0.1f, 1.8f, cluster), 1f);
+        return Lerp(Lerp(floor, upper, up), mountainChance, mountain);
     }
 
     /// <summary>0-1: how far inside a cluster (x, z) is, rising gradually from its fringe to its core. Clusters are a

@@ -167,6 +167,15 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         LoadHearts(x0 - WarpAcross, z0 - WarpAcross, x0 + S + WarpAcross, z0 + S + WarpAcross,
                    HeartGrid.LowestBottom - WarpUp, top + WarpUp);
 
+        // Between islands most columns have no live heart near them at all: nothing to walk.
+        bool anyAlive = false;
+        foreach (bool a in _alive.AsSpan(0, _heartCount)) if (a) { anyAlive = true; break; }
+        if (!anyAlive)
+        {
+            Array.Clear(_spanCount);
+            return;
+        }
+
         for (int lz = 0; lz < S; lz++)
         for (int lx = 0; lx < S; lx++)
         {
@@ -409,6 +418,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     }
 
     /// <summary>Loads the hearts of every cell a point in the box (world blocks) can search, in each layer.</summary>
+    private int _heartCount; // hearts loaded by LoadHearts
+
     private void LoadHearts(float minX, float minZ, float maxX, float maxZ, float minY, float maxY)
     {
         int total = 0;
@@ -424,6 +435,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             _ny[l] = layer.CellY(hi) + 2 - _cy0[l];
             total += _nx[l] * _ny[l] * _nz[l];
         }
+        _heartCount = total;
         if (_hx.Length < total)
         {
             _hx = new float[total]; _hy = new float[total]; _hz = new float[total];
