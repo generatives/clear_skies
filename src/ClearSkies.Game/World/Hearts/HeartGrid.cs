@@ -34,10 +34,10 @@ public static class HeartGrid
     /// highlands, smaller in the mountains.</summary>
     public static readonly Layer[] Layers =
     {
-        new(120f, float.MinValue, DeepTop),
-        new(240f, DeepTop, 400f),
-        new(200f, 400f, 850f),
-        new(140f, 850f, float.MaxValue),
+        new(180f, float.MinValue, DeepTop),
+        new(360f, DeepTop, 400f),
+        new(300f, 400f, 850f),
+        new(210f, 850f, float.MaxValue),
     };
 
     /// <summary>The top of the underworld: below it, under the plains, pieces are smaller and fewer, so there is room
@@ -77,7 +77,7 @@ public static class HeartGrid
     // across the open sky, never a lone piece on its own. So a continent is a scatter of island clusters with open
     // sky between, each still carrying the continent's surface on top.
     private const float IslandFrom = 0.1f, IslandFull = 0.6f, MountainInside = 0.55f;
-    private const float IsletChance = 0.6f, IsletSpacing = 520f, IsletDetail = 170f, IsletFrom = 0.74f, IsletFull = 0.84f;
+    private const float IsletChance = 0.6f, IsletSpacing = 780f, IsletDetail = 255f, IsletFrom = 0.74f, IsletFull = 0.84f;
 
     /// <summary>How much of FloorChance the floor keeps even inside a cluster: it breaks into islands with gaps between,
     /// not one cracked landmass.</summary>
@@ -150,8 +150,8 @@ public static class HeartGrid
         return Smoothstep(0.5f, 0.75f, v) * Lerp(0.2f, 1f, Smoothstep(0.4f, 0.6f, clumps));
     }
 
-    /// <summary>0-1: how far inside an islet (x, z) is. Islets are blobs a couple of hundred blocks across, several
-    /// hundred apart, their edges roughened by a finer noise: where the ground between clusters survives.</summary>
+    /// <summary>0-1: how far inside an islet (x, z) is. Islets are blobs a few hundred blocks across, most of a kilometre
+    /// apart, their edges roughened by a finer noise: where the ground between clusters survives.</summary>
     public static float IsletField(ulong seed, float x, float z)
     {
         float v = 0.8f * ValueNoise((uint)seed ^ 0xC9u, x / IsletSpacing, z / IsletSpacing)
