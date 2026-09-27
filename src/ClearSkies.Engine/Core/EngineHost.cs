@@ -122,6 +122,20 @@ public sealed class EngineHost : IDisposable
     /// <summary>The last few hundred frames one by one (see the Frame timings panel).</summary>
     public FrameHistory History { get; } = new();
     private readonly int[] _gcSeen = new int[3];
+
+    /// <summary>Raised at the end of every frame, after it was presented: diagnostics that look at single frames
+    /// (the streaming flight test) read <see cref="LastSystemMs"/> here.</summary>
+    public event Action? FrameEnded;
+
+    public int SystemCount => _systems.Count;
+    public string SystemName(int i) => $"{_systems[i].system.GetType().Name} ({_systems[i].stage})";
+
+    /// <summary>A system's CPU time (ms) in the frame just ended.</summary>
+    public double LastSystemMs(int i) => _rawMs[i];
+
+    /// <summary>CPU time (ms) opening (camera, acquire) and closing (ImGui, submit, present) the frame just ended.</summary>
+    public double LastFrameBeginMs { get; private set; }
+    public double LastFrameEndMs { get; private set; }
     private readonly System.Diagnostics.Stopwatch _systemTimer = new();
     private const double TimingSmoothing = 0.05;
 
@@ -191,7 +205,7 @@ public sealed class EngineHost : IDisposable
         // swapchain image) they're skipped entirely, and End still closes ImGui's frame.
         _systemTimer.Restart();
         bool open = frame.TryBegin();
-        double beginMs = _systemTimer.Elapsed.TotalMilliseconds;
+        double beginMs = LastFrameBeginMs = _systemTimer.Elapsed.TotalMilliseconds;
         _frameBeginMs += TimingSmoothing * (beginMs - _frameBeginMs);
         if (open)
             for (var stage = SystemStage.RenderWorld; stage <= SystemStage.RenderHud; stage++)
@@ -199,10 +213,11 @@ public sealed class EngineHost : IDisposable
 
         _systemTimer.Restart();
         frame.End();
-        double endMs = _systemTimer.Elapsed.TotalMilliseconds;
+        double endMs = LastFrameEndMs = _systemTimer.Elapsed.TotalMilliseconds;
         _frameEndMs += TimingSmoothing * (endMs - _frameEndMs);
         SmoothTimes(render: true);
         History.Record(dt * 1000.0, Time.TicksLastFrame, GcGenerationSinceLastFrame(), _rawMs, beginMs, endMs);
+        FrameEnded?.Invoke();
     }
 
     /// <summary>The highest GC generation collected since the last call, or -1 for none.</summary>
@@ -372,6 +387,7 @@ public sealed class EngineHost : IDisposable
 
     public void Dispose()
     {
+        BackgroundWork.Stop(TimeSpan.FromSeconds(5)); // before freeing what running jobs may be using
         Physics.Dispose();
         Gui?.Dispose();
         Renderer?.Dispose();

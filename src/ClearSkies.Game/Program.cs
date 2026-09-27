@@ -30,6 +30,10 @@ if (args.Contains("--benchmark"))
     return;
 }
 
+// Background (non-blocking) full collections only while the game runs: a blocking one stops every thread for tens of
+// milliseconds, a visible hitch. Needs concurrent GC, which is on by default.
+System.Runtime.GCSettings.LatencyMode = System.Runtime.GCLatencyMode.SustainedLowLatency;
+
 // --headless: no window, GPU, input or UI; just the simulation and the network, on a timer. With --host it's a
 // dedicated server (no player of its own); with --join, a player that stands where it spawns (a bot, for testing).
 bool headless = args.Contains("--headless");
@@ -274,6 +278,14 @@ followers.Inner = new ClearSkies.Net.Sync.FollowerSystem(host.World, host.Physic
 host.RegisterDebugUi(new ClearSkies.Net.Debug.NetDebugPanel(net, remoteBodies, transport));
 if (gridPilot != null) gridPilot.Disabled = () => net.OthersConnected; // pilot mode and flight tuning: single-player only
 
+// Moves the camera once a frame (not per tick) while flying; before the interpolation, which then draws it there.
+// --flight-test flies once the world has loaded, then quits. (With a window only: it measures frames.)
+if (!headless)
+{
+    bool flightTest = args.Contains("--flight-test");
+    host.AddSystem(new StreamingFlightTest(host, flightTest, flightTest ? () => host.Window!.Native.Close() : null),
+                   SystemStage.Frame);
+}
 // Per frame, after the ticks: draw between the last two ticks (children follow), then stream terrain around the view.
 host.AddSystem(interpolation, SystemStage.Frame);
 host.AddSystem(remoteBodies, SystemStage.Frame); // bodies owned elsewhere, about 100 ms behind
@@ -319,7 +331,7 @@ if (!headless)
     // Rendering: the host opens the frame, runs the render stages (systems in the order added within a stage), then
     // closes it with ImGui and presents. Each render system is handed this frame's camera and time.
     clouds = new CloudRenderSystem(renderer, new HeartCloudDensity(seed));
-    host.AddSystem(new ChunkRenderSystem(host.World, renderer), SystemStage.RenderWorld);
+    host.AddSystem(new ChunkRenderSystem(host.World, renderer, staticVolume), SystemStage.RenderWorld);
     host.AddSystem(new ModelRenderSystem(host.World, renderer), SystemStage.RenderWorld);
     host.AddSystem(clouds, SystemStage.RenderWorld);
     host.AddSystem(new SkyRenderSystem(renderer), SystemStage.RenderSky);
@@ -385,6 +397,7 @@ using var sigInt = System.Runtime.InteropServices.PosixSignalRegistration.Create
 using var sigTerm = System.Runtime.InteropServices.PosixSignalRegistration.Create(System.Runtime.InteropServices.PosixSignal.SIGTERM, RequestQuit);
 host.AddSystem(new LambdaSystem(() => { if (Volatile.Read(ref quitRequested)) host.Quit(); }), SystemStage.Input);
 host.Run();
+BackgroundWork.Stop(TimeSpan.FromSeconds(5)); // no chunk still loading or meshing while the store is freed
 
 worldSaver?.SaveNow(); // everything, in one transaction, on exit
 net.Dispose(); // says goodbye to the host, or closes the game to clients
