@@ -25,6 +25,10 @@ if (args.Contains("--benchmark"))
     return;
 }
 
+// Background (non-blocking) full collections only while the game runs: a blocking one stops every thread for tens of
+// milliseconds, a visible hitch. Needs concurrent GC, which is on by default.
+System.Runtime.GCSettings.LatencyMode = System.Runtime.GCLatencyMode.SustainedLowLatency;
+
 using var host = new EngineHost(new EngineOptions("Clear Skies", 1280, 720, LogGpuErrors: true));
 
 host.Renderer.LoadTextureAtlas(
@@ -111,6 +115,11 @@ host.AddSystem(interpolation, SystemStage.Simulation); // records this tick's po
 
 // Per frame, after the ticks: where to draw things between the last two ticks (children follow), then stream terrain
 // around the view.
+// Moves the camera once a frame (not per tick) while flying; before the interpolation, which then draws it there.
+// --flight-test flies once the world has loaded, then quits.
+bool flightTest = args.Contains("--flight-test");
+host.AddSystem(new StreamingFlightTest(host, flightTest, flightTest ? () => host.Window.Native.Close() : null),
+               SystemStage.Frame);
 host.AddSystem(interpolation, SystemStage.Frame);
 host.AddSystem(hierarchy, SystemStage.Frame);
 host.AddSystem(chunkLoadSystem, SystemStage.Frame);
@@ -142,7 +151,7 @@ host.AddSystem(new BlockModelSystem(host.World, blockModels), SystemStage.PreRen
 // Rendering: the host opens the frame, runs the render stages (systems in the order added within a stage), then
 // closes it with ImGui and presents. Each render system is handed this frame's camera and time.
 using var clouds = new CloudRenderSystem(host.Renderer, new HeartCloudDensity(seed));
-host.AddSystem(new ChunkRenderSystem(host.World, host.Renderer), SystemStage.RenderWorld);
+host.AddSystem(new ChunkRenderSystem(host.World, host.Renderer, staticVolume), SystemStage.RenderWorld);
 host.AddSystem(new ModelRenderSystem(host.World, host.Renderer), SystemStage.RenderWorld);
 host.AddSystem(clouds, SystemStage.RenderWorld);
 host.AddSystem(new SkyRenderSystem(host.Renderer), SystemStage.RenderSky);
@@ -195,6 +204,7 @@ static (Vector3D<float> Position, float Yaw, float Pitch)? HeartSpawn(ulong seed
 }
 
 host.Run();
+BackgroundWork.Stop(TimeSpan.FromSeconds(5)); // no chunk still loading or meshing while the store is freed
 
 chunkLoadSystem.SaveAllDirty(); // graceful-exit flush; unload/autosave already cover the running game
 gridStore.Dispose();
