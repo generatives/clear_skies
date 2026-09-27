@@ -22,7 +22,7 @@ public sealed class WireframeRenderSystem : IRenderSystem
     {
         foreach (ref readonly Entity e in _wireframes.GetEntities())
         {
-            ref readonly var t  = ref e.Get<Transform>();
+            var t = e.DrawnPose();
             ref readonly var wr = ref e.Get<WireframeRenderer>();
             _renderer.DrawMeshWireframe(wr.Mesh, t.ToMatrix());
         }
