@@ -22,13 +22,15 @@ public sealed class BlockModelSystem : ISystem
     public BlockModelSystem(World world, BlockModelLibrary models)
     {
         _models    = models;
-        _newBlocks = world.GetEntities().WhenAdded<BlockRef>().AsSet();
+        // Only drawn blocks (see Rendered): new ones, and existing ones that just became drawn.
+        _newBlocks = world.GetEntities().With<BlockRef>().With<Rendered>().WhenAdded<BlockRef>().WhenAdded<Rendered>().AsSet();
     }
 
     public void Update(float dt)
     {
         foreach (ref readonly Entity e in _newBlocks.GetEntities())
         {
+            if (e.Has<RenderedModel>()) continue;
             ref readonly var block = ref e.Get<BlockRef>();
             if (_models.Get(block.Id) is not { } model) continue; // no model, or it failed to load
 

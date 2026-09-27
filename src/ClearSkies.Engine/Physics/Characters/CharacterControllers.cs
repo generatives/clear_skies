@@ -155,7 +155,8 @@ namespace ClearSkies.Engine.Physics.Characters
         public float CharacterMaximumRecoveryVelocity = 0.2f;
 
         /// <summary>Seconds an airborne character can be off to the side of the ship it jumped or fell from before it stops
-        /// steering relative to that ship (long enough to cross a gap in the deck). See <see cref="CharacterController.AirReferenceBody"/>.</summary>
+        /// steering relative to that ship (long enough to cross a gap in the deck). Applied by SupportSystem, which owns the
+        /// release. See <see cref="CharacterController.AirReferenceBody"/>.</summary>
         public float AirReferenceReleaseTime = 0.5f;
 
         /// <summary>How far below an airborne character (1 unit = 1 block) its ship still counts as underneath it.</summary>
@@ -974,8 +975,8 @@ namespace ClearSkies.Engine.Physics.Characters
             return length <= amount ? Vector3.Zero : v * ((length - amount) / length);
         }
 
-        /// <summary>Follows the ship an airborne character left while it's still below it (a ray straight down hits it first),
-        /// releasing it — its velocity then kept as the reference — after <see cref="AirReferenceReleaseTime"/> away from it.</summary>
+        /// <summary>While airborne, keeps the reference velocity at the velocity of the ship the character is supported by
+        /// (see the Support component and SupportSystem, which decides when it's released).</summary>
         void UpdateAirReference(ref CharacterController character, Vector3 position, Vector3 up, float dt)
         {
             if (!character.HasAirReferenceBody)
@@ -985,14 +986,48 @@ namespace ClearSkies.Engine.Physics.Characters
                 character.HasAirReferenceBody = false;
                 return;
             }
-            var hitHandler = new NearestHitHandler { Ignore = character.BodyHandle, T = float.MaxValue };
-            Simulation.RayCast(position, -up, AirReferenceCheckDistance, ref hitHandler);
-            var aboveReference = hitHandler.T < float.MaxValue &&
-                                 hitHandler.Hit.Mobility != CollidableMobility.Static && hitHandler.Hit.BodyHandle == character.AirReferenceBody;
-            character.TimeAwayFromAirReference = aboveReference ? 0 : character.TimeAwayFromAirReference + dt;
             character.AirReferenceVelocity = Simulation.Bodies[character.AirReferenceBody].Velocity.Linear;
-            if (character.TimeAwayFromAirReference > AirReferenceReleaseTime)
-                character.HasAirReferenceBody = false;
+        }
+
+        /// <summary>Sets (or with null, releases) the body an airborne character steers relative to. A released body's
+        /// last velocity stays as the reference, as plain momentum.</summary>
+        public void SetAirReference(BodyHandle characterBody, BodyHandle? reference)
+        {
+            ref var character = ref GetCharacterByBodyHandle(characterBody);
+            if (reference is { } body && Simulation.Bodies.BodyExists(body))
+            {
+                character.HasAirReferenceBody = true;
+                character.AirReferenceBody = body;
+            }
+            else character.HasAirReferenceBody = false;
+        }
+
+        /// <summary>The body the character stands on (supported, on a surface no steeper than its maximum slope), if
+        /// it's one that can move rather than the static world.</summary>
+        public bool TryGetStandingBody(BodyHandle characterBody, out BodyHandle body)
+        {
+            ref readonly var character = ref GetCharacterByBodyHandle(characterBody);
+            body = default;
+            if (!character.Supported) return false;
+            if (character.Support.Mobility == CollidableMobility.Static) return false;
+            body = character.Support.BodyHandle;
+            return true;
+        }
+
+        /// <summary>Whether the character stands on something (a body or the static world).</summary>
+        public bool IsStanding(BodyHandle characterBody) => GetCharacterByBodyHandle(characterBody).Supported;
+
+        /// <summary>Whether a ray straight down from the character hits <paramref name="target"/> first, within
+        /// <see cref="AirReferenceCheckDistance"/>.</summary>
+        public bool IsAbove(BodyHandle characterBody, BodyHandle target)
+        {
+            ref readonly var character = ref GetCharacterByBodyHandle(characterBody);
+            var pose = Simulation.Bodies[characterBody].Pose;
+            QuaternionEx.Transform(character.LocalUp, pose.Orientation, out var up);
+            var hitHandler = new NearestHitHandler { Ignore = characterBody, T = float.MaxValue };
+            Simulation.RayCast(pose.Position, -up, AirReferenceCheckDistance, ref hitHandler);
+            return hitHandler.T < float.MaxValue && hitHandler.Hit.Mobility != CollidableMobility.Static &&
+                   hitHandler.Hit.BodyHandle == target;
         }
 
         /// <summary>Records the nearest collidable along a ray, skipping one body (the character's own capsule).</summary>

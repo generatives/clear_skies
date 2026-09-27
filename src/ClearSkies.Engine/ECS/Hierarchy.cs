@@ -57,6 +57,28 @@ public static class Hierarchy
         if (!parent.Has<Children>())
             parent.Set(new Children { Entities = new HashSet<Entity>() });
         parent.Get<Children>().Entities.Add(child);
+
+        if (!child.Has<OwnPresence>()) InheritPresence(child, parent);
+    }
+
+    /// <summary>Gives <paramref name="child"/>, which has no <see cref="OwnPresence"/>, the inherited presence layers of
+    /// <paramref name="parent"/> (only <see cref="Rendered"/> is inherited: physics stays on the grid itself), and
+    /// carries them on down its own children.</summary>
+    private static void InheritPresence(Entity child, Entity parent)
+    {
+        bool rendered = parent.Has<Rendered>();
+        if (rendered == child.Has<Rendered>()) return;
+        if (rendered) child.Set<Rendered>(); else child.Remove<Rendered>();
+        PropagatePresence(child);
+    }
+
+    /// <summary>Carries <paramref name="entity"/>'s presence layers down to every descendant that inherits them (stopping
+    /// at descendants with their own <see cref="OwnPresence"/>). Called when a layer changes on it.</summary>
+    public static void PropagatePresence(Entity entity)
+    {
+        if (!entity.Has<Children>()) return;
+        foreach (var child in entity.Get<Children>().Entities)
+            if (child.IsAlive && !child.Has<OwnPresence>()) InheritPresence(child, entity);
     }
 
     /// <summary>Attaches <paramref name="child"/> to <paramref name="parent"/> at <paramref name="local"/>, and

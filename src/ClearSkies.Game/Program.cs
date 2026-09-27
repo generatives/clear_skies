@@ -1,5 +1,7 @@
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.ECS;
+using ClearSkies.Engine.Entities;
+using ClearSkies.Engine.Physics.Support;
 using ClearSkies.Engine.Generation;
 using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Rendering.WebGpu;
@@ -31,10 +33,21 @@ host.Renderer.LoadTextureAtlas(
     Path.Combine(AppContext.BaseDirectory, "Resources", "spritesheet_tiles.png"),
     Path.Combine(AppContext.BaseDirectory, "Resources", "spritesheet_tiles.xml"));
 
-// The static world is a volume like any other, with an identity Transform (set by ChunkVolume) and zero pivot.
+// Session: single-player is a host session with nobody connected. Network IDs and owners exist, all local.
+var session = Session.SinglePlayer();
+var registry = new NetRegistry(host.World);
+var idAllocator = new NetIdAllocator();
+registry.RequestBlock = idAllocator.NextBlock;
+using var gridNetworking = new GridNetworking(host.World, registry, session);
+
+// The static world is a volume like any other, with an identity Transform (set by ChunkVolume) and zero pivot, and a
+// reserved network ID. Its chunks each decide their own presence layers (see EntityPresenceSystem).
 var staticVolumeEntity = host.World.CreateEntity();
-var staticVolume = new ChunkVolume(staticVolumeEntity, host.World) { MeshIgnoresNeighbours = true };
+var staticVolume = new ChunkVolume(staticVolumeEntity, host.World) { MeshIgnoresNeighbours = true, ChunksOwnPresence = true };
 staticVolumeEntity.Set(new ChunkGrid() { Volume = staticVolume });
+staticVolumeEntity.Set(new NetId { Value = NetRegistry.WorldVolume });
+staticVolumeEntity.Set(session.LocalOwner());
+staticVolumeEntity.Set<Rendered>();
 
 ulong seed = 1337;
 // Model blocks' glTF models (BlockDef.Model paths are relative to Resources/Models — see the csproj's link of
@@ -103,16 +116,19 @@ host.AddSystem(new PlayerMovementSystem(host.World), SystemStage.Tick);
 var gridPilot = new GridPilotSystem(host.World, host.Input, host.Physics, staticVolume, physicsBody);
 var airshipFlight = new AirshipFlightSystem(host.World, host.Physics);
 host.AddSystem(airshipFlight, SystemStage.Tick);
+var presence = new EntityPresenceSystem(host.World, session, staticVolume, ViewDistance);
+host.AddSystem(presence, SystemStage.Tick); // presence layers: bodies, drawing, terrain interest and colliders
 
 host.AddSystem(host.Physics, SystemStage.Tick); // one step, once bodies/impulses for this tick are in
 host.AddSystem(new PhysicsTransformSyncSystem(host.World, host.Physics), SystemStage.Tick); // body poses -> Transform
 host.AddSystem(hierarchy, SystemStage.Tick); // e.g. volume Transforms -> chunk Transforms
-host.AddSystem(new CharacterCameraSyncSystem(host.World), SystemStage.Tick); // reads the capsule's post-physics pose into Transform
+host.AddSystem(new SupportSystem(host.World, host.Physics), SystemStage.Tick); // what each character stands on or rides with
 host.AddSystem(interpolation.EndTick, SystemStage.Tick); // records this tick's poses
 
 // Per frame, after the ticks: draw between the last two ticks (children follow), then stream terrain around the view.
 host.AddSystem(interpolation, SystemStage.Logic);
 host.AddSystem(hierarchy, SystemStage.Logic);
+host.AddSystem(new CameraFollowSystem(host.World), SystemStage.Logic); // the camera at the local player's eye
 host.AddSystem(chunkLoadSystem, SystemStage.Logic);
 host.AddSystem(gridPilot, SystemStage.Logic);
 var playerInput = new PlayerInputSystem(host.World, host.Input, meshSystem, host.Renderer, gridSelection);
@@ -156,7 +172,7 @@ float[]? cameraOverride = null;
 int camArg = Array.IndexOf(args, "--camera");
 if (camArg >= 0 && camArg + 1 < args.Length)
     cameraOverride = args[camArg + 1].Split(',').Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
-var camSpawn = TestScene.Build(host, seed, cameraOverride, HeartSpawn(seed));
+var camSpawn = TestScene.Build(host, registry, session, seed, cameraOverride, HeartSpawn(seed));
 
 // Spawn: over a wide, flat stretch of plains 18 km east of the origin (found by scanning seed 1337 for flat, well-
 // covered lowland), 60 blocks above the terrain surface there (which no piece's top reaches), looking north across it.

@@ -35,7 +35,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     public ChunkRenderSystem(World world, Renderer renderer)
     {
         _renderer = renderer;
-        _chunks   = world.GetEntities().With<Transform>().With<ChunkRenderData>().AsSet();
+        _chunks   = world.GetEntities().With<Transform>().With<ChunkRenderData>().With<Rendered>().AsSet();
     }
 
     public void Render(in RenderContext frame)

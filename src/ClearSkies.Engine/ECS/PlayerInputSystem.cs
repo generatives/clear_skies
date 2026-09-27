@@ -5,6 +5,7 @@ using ClearSkies.Engine.Math;
 using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Rendering.WebGpu;
 using ClearSkies.Engine.Voxels;
+using ClearSkies.Engine.Entities;
 using DefaultEcs;
 using ImGuiNET;
 using Silk.NET.Input;
@@ -29,6 +30,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
 
     private readonly World        _world;
     private readonly EntitySet    _cameras;
+    private readonly EntitySet    _players;
     private readonly EntitySet    _volumes;
     private readonly InputManager _input;
     private readonly ChunkMeshSystem _meshSystem;
@@ -83,6 +85,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
         _world       = world;
         _focusSubscription = world.Subscribe<InteractionFocus>((in InteractionFocus f) => _focus = f.Point);
         _cameras     = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
+        _players     = world.GetEntities().With<LocalPlayer>().With<Transform>().With<MouseLookComponent>().AsSet();
         _volumes     = world.GetEntities().With<ChunkGrid>().With<Transform>().AsSet();
         _input       = input;
         _meshSystem  = meshSystem;
@@ -264,26 +267,26 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
         if (phase != InteractionPhase.Ended && _focus is { } focus) LookAt(focus);
     }
 
-    /// <summary>Locks or unlocks the active camera's mouse-look (see <see cref="LookLockedComponent"/>).</summary>
+    /// <summary>Locks or unlocks the local player's mouse-look (see <see cref="LookLockedComponent"/>).</summary>
     private void SetLookLocked(bool locked)
     {
-        foreach (ref readonly Entity e in _cameras.GetEntities())
+        foreach (ref readonly Entity e in _players.GetEntities())
         {
-            if (locked && e.Get<CameraComponent>().Active) e.Set(new LookLockedComponent());
-            else if (!locked && e.Has<LookLockedComponent>()) e.Remove<LookLockedComponent>();
+            if (locked) e.Set(new LookLockedComponent());
+            else if (e.Has<LookLockedComponent>()) e.Remove<LookLockedComponent>();
         }
     }
 
-    /// <summary>Turns the active camera to look straight at <paramref name="point"/>, keeping its mouse-look angles
-    /// in step so looking around resumes from there.</summary>
+    /// <summary>Turns the local player (and the active camera with them) to look straight at <paramref name="point"/>,
+    /// keeping the mouse-look angles in step so looking around resumes from there.</summary>
     private void LookAt(Vector3D<float> point)
     {
-        foreach (ref readonly Entity e in _cameras.GetEntities())
+        if (!CameraUtil.TryGetActive(_cameras, out var camera)) return;
+        foreach (ref readonly Entity e in _players.GetEntities())
         {
-            if (!e.Get<CameraComponent>().Active || !e.Has<MouseLookComponent>()) continue;
             ref var t    = ref e.Get<Transform>();
             ref var look = ref e.Get<MouseLookComponent>();
-            var toPoint = point - t.Position;
+            var toPoint = point - camera.Position;
             if (toPoint.LengthSquared < 1e-8f) return;
             toPoint = Vector3D.Normalize(toPoint);
 
@@ -291,6 +294,8 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
             look.Yaw   = MathF.Atan2(-toPoint.X, -toPoint.Z);
             look.Pitch = System.Math.Clamp(MathF.Asin(System.Math.Clamp(toPoint.Y, -1f, 1f)), -limit, limit);
             t.Rotation = Quaternion<float>.CreateFromYawPitchRoll(look.Yaw, look.Pitch, 0f);
+            foreach (ref readonly Entity c in _cameras.GetEntities())
+                if (c.Get<CameraComponent>().Active) c.Get<Transform>().Rotation = t.Rotation;
             return;
         }
     }

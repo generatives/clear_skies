@@ -24,8 +24,8 @@ public struct FreeFlyController
     public float MoveSpeed;
 }
 
-/// <summary>Accumulated mouse-look angles, shared by every camera movement mode (free-fly,
-/// walking, grid-piloting) since they all just rotate the same camera Transform.</summary>
+/// <summary>The player's look angles, turned per frame by <see cref="LookInputSystem"/>. The player's Transform rotation
+/// follows them, and the camera takes it from there (see <see cref="CameraFollowSystem"/>).</summary>
 public struct MouseLookComponent
 {
     public float Yaw;
@@ -33,21 +33,16 @@ public struct MouseLookComponent
     public float LookSensitivity;
 }
 
-/// <summary>Tags the camera entity with its walking character body. See
-/// <see cref="CharacterCameraSyncSystem"/> (pose readback) and
-/// <see cref="PlayerMovementSystem"/> (input → motion goals).</summary>
+/// <summary>A player's walking character body. Its Transform is the capsule's centre; the eye is
+/// <see cref="EyeHeight"/> above it (less while crouching). See <see cref="PhysicsTransformSyncSystem"/> (pose readback),
+/// <see cref="PlayerMovementSystem"/> (input → motion goals) and <see cref="CameraFollowSystem"/>.</summary>
 public struct CharacterControllerComponent
 {
     public PlayerCharacter Character;
     public float EyeHeight;
-
-    /// <summary>The ship the character stood on last tick, and its orientation then, so the view can turn with it
-    /// (see <see cref="CharacterCameraSyncSystem"/>). Null when it wasn't standing on one.</summary>
-    public BepuPhysics.BodyHandle? RideBody;
-    public System.Numerics.Quaternion RideOrientation;
 }
 
-/// <summary>Movement-mode toggle on the camera entity: true = free-fly noclip (today's default
+/// <summary>Movement-mode toggle on the player entity: true = free-fly noclip (today's default
 /// behaviour, no collision/gravity), false = physics-driven walking via
 /// <see cref="CharacterControllerComponent"/>. Toggled with V (see PlayerMovementSystem).</summary>
 public struct CharacterModeComponent
@@ -61,16 +56,15 @@ public struct PilotedComponent
 {
 }
 
-/// <summary>Tag: set on the camera entity while the player is using an Interactive block (see
+/// <summary>Tag: set on the local player entity while the player is using an Interactive block (see
 /// <see cref="BlockInteraction"/>): the mouse moves the control instead of turning the view, which
 /// <see cref="PlayerInputSystem"/> keeps on the part being moved. PlayerMovementSystem skips mouse-look meanwhile.</summary>
 public struct LookLockedComponent
 {
 }
 
-/// <summary>Tag: set on the free-fly camera entity while GridPilotSystem is flying it along a
-/// piloted DynamicGrid. PlayerInputSystem skips WASD/mouse-look for a camera carrying this
-/// component.</summary>
+/// <summary>Tag: set on the local player entity while GridPilotSystem flies the camera along a piloted DynamicGrid.
+/// Movement, mouse-look and the camera follow skip a player carrying it.</summary>
 public struct CameraGridFollowComponent
 {
 }

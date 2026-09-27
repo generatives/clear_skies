@@ -12,7 +12,7 @@ using System.Collections.Concurrent;
 namespace ClearSkies.Engine.ECS;
 
 /// <summary>
-/// Streams the static world around the active camera, like a typical block game: a queue of the chunk columns within
+/// Streams the static world around the local player's terrain interest (see <see cref="TerrainInterest"/>), like a typical block game: a queue of the chunk columns within
 /// the view distance, closest first by horizontal distance, rebuilt whenever the camera crosses into another column,
 /// and loaded a whole column at a time. Only chunks that may hold something are queued: the layers the generator says
 /// it may fill (<see cref="IWorldGenerator.ColumnLayers"/>) and chunks with a save file (builds). The generator's
@@ -72,7 +72,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 
     private readonly string _savesDir;
 
-    private readonly EntitySet      _cameras;
+    private readonly EntitySet      _interests;
     private readonly ChunkVolume    _staticVolume;
     private readonly GridStore      _store;
     private readonly ThreadLocal<IWorldGenerator> _generator;
@@ -139,7 +139,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         _savesDir  = Path.Combine(AppContext.BaseDirectory, "Saves", worldName);
         Directory.CreateDirectory(_savesDir);
 
-        _cameras      = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
+        _interests    = world.GetEntities().With<Transform>().With<TerrainInterest>().AsSet();
         _staticVolume = staticVolume;
         _store        = store;
         _generator    = new ThreadLocal<IWorldGenerator>(generatorFactory);
@@ -149,6 +149,21 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         _viewColumns  = (int)MathF.Ceiling(viewDistance / S);
         _offsetsByDistance = BuildOffsetsByDistance(_viewColumns);
         ScanSaves();
+    }
+
+    /// <summary>Where the drawn world is streamed around: the <see cref="TerrainInterestKind.Full"/> terrain interest
+    /// (the local player's, see EntityPresenceSystem). Colliders-only interests get their colliders from what's loaded
+    /// here; streaming data around them too comes with multiplayer.</summary>
+    private bool TryGetViewCentre(out Vector3D<float> centre)
+    {
+        foreach (ref readonly Entity e in _interests.GetEntities())
+        {
+            if (e.Get<TerrainInterest>().Kind != TerrainInterestKind.Full) continue;
+            centre = e.Get<Transform>().Position;
+            return true;
+        }
+        centre = default;
+        return false;
     }
 
     private static (short dx, short dz)[] BuildOffsetsByDistance(int radius)
@@ -218,8 +233,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
             }
         }
 
-        if (!CameraUtil.TryGetActive(_cameras, out var cam)) return;
-        var camPos = cam.Position;
+        if (!TryGetViewCentre(out var camPos)) return;
 
         var camColumn = ((int)MathF.Floor(camPos.X / S), (int)MathF.Floor(camPos.Z / S));
         bool idle = _queueHead == _queue.Count && _inFlight.Count == 0;

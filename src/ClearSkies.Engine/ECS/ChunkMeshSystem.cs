@@ -62,7 +62,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     public ChunkMeshSystem(World ecsWorld, Renderer renderer, BlockModelLibrary blockModels)
     {
         _ecsWorld = ecsWorld;
-        _dirtyChunks = ecsWorld.GetEntities().With<Chunk>().With<Transform>().With<NeedsRemeshFlag>().AsSet();
+        _dirtyChunks = ecsWorld.GetEntities().With<Chunk>().With<Transform>().With<NeedsRemeshFlag>().With<Rendered>().AsSet();
         _meshedChunks = ecsWorld.GetEntities().With<Chunk>().With<ChunkRenderData>().AsSet();
         _cameras = ecsWorld.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
         _renderer = renderer;

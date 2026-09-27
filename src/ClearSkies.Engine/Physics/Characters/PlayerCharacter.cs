@@ -266,6 +266,12 @@ public struct PlayerCharacter
         public void OnHitAtZeroT(ref float maximumT, CollidableReference collidable) { }
     }
 
+    /// <summary>How far above the capsule's centre the eye is: <paramref name="eyeHeight"/>, less while crouching.</summary>
+    public readonly float EyeOffset(float eyeHeight) => eyeHeight - eyeDrop;
+
+    /// <summary>The capsule's centre.</summary>
+    public readonly Vector3 Position => new BodyReference(bodyHandle, characters.Simulation.Bodies).Pose.Position;
+
     /// <summary>First-person eye position: capsule centre + <paramref name="eyeHeight"/>, lowered while crouching
     /// — no third-person backward offset (unlike the original demo's debug camera).</summary>
     public readonly Vector3 GetEyePosition(float eyeHeight)

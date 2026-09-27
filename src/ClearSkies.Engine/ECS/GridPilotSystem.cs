@@ -4,6 +4,7 @@ using ClearSkies.Engine.Math;
 using ClearSkies.Engine.Physics;
 using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Voxels;
+using ClearSkies.Engine.Entities;
 using DefaultEcs;
 using ImGuiNET;
 using Silk.NET.Input;
@@ -29,14 +30,16 @@ public sealed class GridPilotSystem : ISystem
     private const float ThirdPersonUp   = 4f;
     private const float LockedUp        = 1f;
 
-    private readonly EntitySet    _freeFlyCameras;
+    private readonly EntitySet    _players;
+    private readonly EntitySet    _cameras;
     private readonly EntitySet    _selectedGrid;
     private readonly InputManager _input;
     private readonly PhysicsWorld _physics;
     private readonly ChunkVolume _staticVolume;
     private readonly PhysicsBodySystem _physicsBody;
 
-    private Entity _followedCamera;
+    private Entity _followedPlayer; // look angles and the follow tag
+    private Entity _followedCamera; // placed by UpdateCameraFollow
     private Entity _pilotedGridRoot;
     private bool   _isPiloting;
     private GridCameraMode _cameraMode = GridCameraMode.ThirdPerson;
@@ -58,7 +61,8 @@ public sealed class GridPilotSystem : ISystem
         _physics         = physics;
         _staticVolume     = staticVolume;
         _physicsBody     = physicsBody;
-        _freeFlyCameras  = world.GetEntities().With<Transform>().With<CameraComponent>().With<FreeFlyController>().AsSet();
+        _players         = world.GetEntities().With<LocalPlayer>().With<MouseLookComponent>().AsSet();
+        _cameras         = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
         _selectedGrid    = world.GetEntities().With<DynamicGrid>().With<SelectedGridComponent>().AsSet();
     }
 
@@ -97,11 +101,17 @@ public sealed class GridPilotSystem : ISystem
             _localYaw = 0f;
             _localPitch = 0f;
 
-            foreach (ref readonly Entity cam in _freeFlyCameras.GetEntities())
+            foreach (ref readonly Entity player in _players.GetEntities())
             {
+                _followedPlayer = player;
+                player.Set(new CameraGridFollowComponent());
+                break;
+            }
+            foreach (ref readonly Entity cam in _cameras.GetEntities())
+            {
+                if (!cam.Get<CameraComponent>().Active) continue;
                 _followedCamera = cam;
-                cam.Set(new CameraGridFollowComponent());
-                break; // only one free-fly camera exists today
+                break;
             }
             return;
         }
@@ -109,9 +119,9 @@ public sealed class GridPilotSystem : ISystem
 
     private void UpdateLookInput()
     {
-        if (!_input.CursorCaptured || !_followedCamera.IsAlive) return;
+        if (!_input.CursorCaptured || !_followedPlayer.IsAlive) return;
 
-        float sensitivity = _followedCamera.Get<MouseLookComponent>().LookSensitivity;
+        float sensitivity = _followedPlayer.Get<MouseLookComponent>().LookSensitivity;
         var delta = _input.MouseDelta;
         _localYaw -= delta.X * sensitivity;
         _localPitch -= delta.Y * sensitivity;
@@ -129,9 +139,9 @@ public sealed class GridPilotSystem : ISystem
         _isPiloting = false;
         _pilotedGridRoot = default;
 
-        if (_followedCamera.IsAlive)
+        if (_followedPlayer.IsAlive && _followedCamera.IsAlive)
         {
-            _followedCamera.Remove<CameraGridFollowComponent>();
+            _followedPlayer.Remove<CameraGridFollowComponent>();
 
             // MouseLookComponent reconstructs Rotation from Yaw/Pitch on the next mouse-look update, so
             // both must be re-derived here from the camera's current facing — otherwise the very first
@@ -141,11 +151,17 @@ public sealed class GridPilotSystem : ISystem
             var rotation = _followedCamera.Get<Transform>().Rotation;
             var forward = Vec.Rotate(rotation, new Vector3D<float>(0, 0, -1));
 
-            ref var look = ref _followedCamera.Get<MouseLookComponent>();
+            ref var look = ref _followedPlayer.Get<MouseLookComponent>();
             look.Pitch = MathF.Asin(System.Math.Clamp(forward.Y, -1f, 1f));
             look.Yaw   = MathF.Atan2(-forward.X, -forward.Z);
+            _followedPlayer.Get<Transform>().Rotation = Quaternion<float>.CreateFromYawPitchRoll(look.Yaw, look.Pitch, 0f);
+
+            // The player carries on from where the camera was, as when the camera itself was the player.
+            float eye = _followedPlayer.Has<CharacterControllerComponent>() ? _followedPlayer.Get<CharacterControllerComponent>().EyeHeight : 0f;
+            _followedPlayer.Get<Transform>().Position = _followedCamera.Get<Transform>().Position - new Vector3D<float>(0, eye, 0);
         }
 
+        _followedPlayer = default;
         _followedCamera = default;
     }
 

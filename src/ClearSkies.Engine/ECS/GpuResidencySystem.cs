@@ -28,7 +28,7 @@ public sealed class GpuResidencySystem : ISystem
     public GpuResidencySystem(World ecsWorld, ChunkVolume staticVolume, GridStore store)
     {
         _store       = store;
-        _needsGpuUpload       = ecsWorld.GetEntities().With<Chunk>().With<NeedsGpuUploadFlag>().AsSet();
+        _needsGpuUpload       = ecsWorld.GetEntities().With<Chunk>().With<NeedsGpuUploadFlag>().With<Rendered>().AsSet();
         _cameras              = ecsWorld.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
         _store.Register(staticVolume.Gpu, isWorld: true);
 

@@ -24,7 +24,7 @@ public sealed class ModelRenderSystem : IRenderSystem, IDebugUiSystem
     public ModelRenderSystem(World world, Renderer renderer)
     {
         _renderer = renderer;
-        _models   = world.GetEntities().With<Transform>().With<RenderedModel>().AsSet();
+        _models   = world.GetEntities().With<Transform>().With<RenderedModel>().With<Rendered>().AsSet();
     }
 
     public void Render(in RenderContext frame)

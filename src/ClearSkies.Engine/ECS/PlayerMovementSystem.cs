@@ -14,7 +14,7 @@ namespace ClearSkies.Engine.ECS;
 /// by <see cref="FlySpeedStep"/> (Ctrl triples it while held). Walking instead feeds WASD/Shift/Space into the
 /// character's motion goals (<see cref="PlayerCharacter.UpdateCharacterGoals"/>) — actual movement happens inside the
 /// physics step via the ported BepuPhysics2 character-controller constraint (see Physics/Characters/);
-/// <see cref="CharacterCameraSyncSystem"/> reads the resulting body pose back into <see cref="Transform"/> after it.
+/// <see cref="PhysicsTransformSyncSystem"/> reads the resulting body pose back into <see cref="Transform"/> after it.
 /// Mouse-look is per frame, in <see cref="LookInputSystem"/>.
 ///
 /// Must run before <c>host.Physics</c> in the tick so this tick's motion goals are set before Simulation.Timestep's
@@ -36,8 +36,7 @@ public sealed class PlayerMovementSystem : ISystem
     {
         foreach (ref readonly Entity e in _players.GetEntities())
         {
-            // Skip entirely while GridPilotSystem is flying the camera along a piloted grid — it
-            // handles its own look input and overwrites Transform each frame.
+            // Skip entirely while GridPilotSystem is flying the camera along a piloted grid.
             if (e.Has<CameraGridFollowComponent>()) continue;
 
             ref var t = ref e.Get<Transform>();
@@ -53,11 +52,11 @@ public sealed class PlayerMovementSystem : ISystem
             ref var cc = ref e.Get<CharacterControllerComponent>();
             if (mode.FreeFly)
             {
-                // Not actively walking — keep the capsule glued to wherever the camera is, so
+                // Not actively walking — keep the capsule glued to wherever the player flies, so
                 // switching back to Walking always resumes from the visible position instead of
                 // falling from a stale one.
-                cc.Character.TeleportTo(new PhysVec(t.Position.X, t.Position.Y - cc.EyeHeight, t.Position.Z));
                 if (!frozen) UpdateFreeFly(ref t, ref e.Get<FreeFlyController>(), input, dt);
+                cc.Character.TeleportTo(new PhysVec(t.Position.X, t.Position.Y, t.Position.Z));
             }
             else
             {

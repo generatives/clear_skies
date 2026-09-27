@@ -163,10 +163,16 @@ public class ChunkVolume
 
     // ── Chunk lifecycle ────────────────────────────────────────────────────
 
+    /// <summary>True for the static world: each of its chunks gets <see cref="OwnPresence"/>.</summary>
+    public bool ChunksOwnPresence { get; init; }
+
     internal ChunkEntry AddChunk(ChunkPosition pos, ChunkData data)
     {
         var entity = _world.CreateEntity();
         var entry = new ChunkEntry(data, entity, this, pos);
+        // The world's chunks spread across the whole world, so each decides its own presence layers (see
+        // EntityPresenceSystem); a grid's chunks inherit the grid's.
+        if (ChunksOwnPresence) entity.Set<OwnPresence>();
         Hierarchy.SetParent(entity, Root, ChunkLocal(pos));
         entity.Set(new Chunk() { Entry = entry });
         entry.Entity.Set(new NeedsRemeshFlag());
