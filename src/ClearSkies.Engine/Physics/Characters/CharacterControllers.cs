@@ -88,6 +88,20 @@ namespace ClearSkies.Engine.Physics.Characters
         /// Gets the simulation to which this set of chracters belongs.
         /// </summary>
         public Simulation Simulation { get; private set; }
+
+        /// <summary>
+        /// Cap on the speed contacts involving a character push it back out of penetration. Low values keep the character from
+        /// bouncing off walls (the closest Bepu has to zero restitution).
+        /// </summary>
+        public float CharacterMaximumRecoveryVelocity = 0.2f;
+
+        /// <summary>Whether <see cref="SnapBoxEdgeNormals"/> smooths the seams between box colliders (on by default).</summary>
+        public bool SmoothBoxEdges = true;
+
+        /// <summary>Tells voxel colliders (whose seams get smoothed) from everything else, and tags character bodies as they're
+        /// allocated. Set by PhysicsWorld.</summary>
+        public CollidableProperty<ColliderInfo>? Colliders;
+
         BufferPool pool;
 
         Buffer<int> bodyHandleToCharacterIndex;
@@ -188,7 +202,7 @@ namespace ClearSkies.Engine.Physics.Characters
             character.BodyHandle = bodyHandle;
             bodyHandleToCharacterIndex[bodyHandle.Value] = characterIndex;
             if (Colliders is not null)
-                Colliders.Allocate(bodyHandle) = new ClearSkies.Engine.Physics.ColliderInfo(ClearSkies.Engine.Physics.ColliderKind.Character, entity);
+                Colliders.Allocate(bodyHandle) = new ColliderInfo(ColliderKind.Character, entity);
             return ref character;
         }
 
@@ -418,18 +432,6 @@ namespace ClearSkies.Engine.Physics.Characters
             }
             return false;
         }
-
-        /// <summary>
-        /// Cap on the speed contacts involving a character push it back out of penetration. Low values keep the character from
-        /// bouncing off walls (the closest Bepu has to zero restitution).
-        /// </summary>
-        public float CharacterMaximumRecoveryVelocity = 0.2f;
-
-        /// <summary>Whether <see cref="SnapBoxEdgeNormals"/> smooths the seams between box colliders (on by default).</summary>
-        public bool SmoothBoxEdges = true;
-
-        /// <summary>Tells voxel colliders (whose seams get smoothed) from everything else. Set by PhysicsWorld.</summary>
-        public CollidableProperty<ClearSkies.Engine.Physics.ColliderInfo>? Colliders;
 
         /// <summary>
         /// Voxel terrain and ships are compounds of boxes, and Bepu doesn't smooth the internal edges between them: a capsule

@@ -47,9 +47,9 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
 
     /// <summary>What each body/static is (a <see cref="ColliderInfo"/>) — Bepu's per-handle side table, standing in for
     /// user data on a collider. Bepu doesn't bounds-check or clear it, so every collider must be tagged where it's created
-    /// (an untagged handle reads leftover data, e.g. a previous owner's tag). Terrain
-    /// chunks are tagged by <see cref="AddStaticCompound"/>, other bodies by the tag their Add* method requires, and
-    /// character bodies by <see cref="CharacterControllers.AllocateCharacter"/>.</summary>
+    /// (an untagged handle reads leftover data, e.g. a previous owner's tag): terrain chunks by
+    /// <see cref="AddStaticCompound"/>, other bodies by the tag their Add* method requires, and character bodies by
+    /// <see cref="CharacterControllers.AllocateCharacter"/>.</summary>
     public CollidableProperty<ColliderInfo> Colliders { get; }
 
     private readonly BufferPool _pool = new();

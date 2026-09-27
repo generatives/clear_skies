@@ -10,11 +10,11 @@ using Silk.NET.Input;
 namespace ClearSkies.Engine.Physics.Characters;
 
 /// <summary>
-/// Game-side adaptation of BepuPhysics2's own Demos/Demos/Characters/CharacterInput.cs (v2.4.0):
-/// wraps a <see cref="BodyHandle"/> + <see cref="CharacterControllers"/> registration and reads
-/// this project's <see cref="InputManager"/> instead of the Demos framework's Input/Camera types.
-/// The physics-side behaviour (support detection, the motion constraint, air control) is
-/// untouched — this is purely the input/camera seam.
+/// The player's character: a capsule body registered with <see cref="CharacterControllers"/> (which handles support
+/// detection and the grounded motion constraint), driven by this project's <see cref="InputManager"/>. Started as an
+/// adaptation of BepuPhysics2's Demos/Demos/Characters/CharacterInput.cs (v2.4.0); on top of that it owns the
+/// game-feel rules: jump buffering and coyote time, extra fall gravity and air control (relative to the ship last
+/// stood on), and Minecraft-style crouching that won't walk off edges.
 /// </summary>
 public struct PlayerCharacter
 {
@@ -119,11 +119,12 @@ public struct PlayerCharacter
     }
 
     /// <summary>Reads WASD + Shift(sprint) + Ctrl(crouch) + Space(jump) and updates the character's motion goals
-    /// for this tick. <paramref name="viewDirectionWorld"/> is the camera's world-space forward
+    /// for this frame. <paramref name="viewDirectionWorld"/> is the camera's world-space forward
     /// vector (unflattened — the surface-relative projection happens inside CharacterControllers).
-    /// <paramref name="frozen"/> ignores the keys (no walking or jumping) while still standing, falling and riding
-    /// whatever the character stands on as usual — e.g. while the player is using a lever.</summary>
-    public void UpdateCharacterGoals(InputManager input, Vector3 viewDirectionWorld, float simulationTimestepDuration,
+    /// <paramref name="dt"/> is the render frame's duration, not the physics step's: this runs once per frame, and its
+    /// timers and air forces advance by it. <paramref name="frozen"/> ignores the keys (no walking or jumping) while still
+    /// standing, falling and riding whatever the character stands on as usual — e.g. while the player is using a lever.</summary>
+    public void UpdateCharacterGoals(InputManager input, Vector3 viewDirectionWorld, float dt,
                                      bool frozen = false)
     {
         var keys = new CharacterInput();
@@ -137,7 +138,7 @@ public struct PlayerCharacter
             keys.Crouch = input.IsKeyDown(Key.ControlLeft) || input.IsKeyDown(Key.ControlRight);
             keys.JumpPressed = input.WasKeyPressed(Key.Space);
         }
-        UpdateCharacterGoals(keys, viewDirectionWorld, simulationTimestepDuration, frozen);
+        UpdateCharacterGoals(keys, viewDirectionWorld, dt, frozen);
     }
 
     /// <summary>The keys <see cref="UpdateCharacterGoals(InputManager, Vector3, float, bool)"/> reads, for driving the
@@ -150,7 +151,7 @@ public struct PlayerCharacter
         public bool JumpPressed;
     }
 
-    public void UpdateCharacterGoals(CharacterInput keys, Vector3 viewDirectionWorld, float simulationTimestepDuration,
+    public void UpdateCharacterGoals(CharacterInput keys, Vector3 viewDirectionWorld, float dt,
                                      bool frozen = false)
     {
         var movementDirection = keys.Move;
@@ -182,7 +183,7 @@ public struct PlayerCharacter
             if (!character.TryJump) jumpedSinceSupported = false;
         }
         else
-            timeSinceSupported += simulationTimestepDuration;
+            timeSinceSupported += dt;
 
         if (jumpBufferRemaining > 0)
         {
@@ -203,12 +204,12 @@ public struct PlayerCharacter
                 jumpBufferRemaining = 0;
             }
             else
-                jumpBufferRemaining -= simulationTimestepDuration;
+                jumpBufferRemaining -= dt;
         }
 
         var crouching = !frozen && keys.Crouch;
         var eyeDropTarget = crouching ? CrouchEyeDrop : 0f;
-        var eyeDropStep = CrouchEyeDropSpeed * simulationTimestepDuration;
+        var eyeDropStep = CrouchEyeDropSpeed * dt;
         eyeDrop = eyeDrop < eyeDropTarget ? MathF.Min(eyeDrop + eyeDropStep, eyeDropTarget) : MathF.Max(eyeDrop - eyeDropStep, eyeDropTarget);
 
         var effectiveSpeed = crouching ? speed * CrouchSpeedScale
@@ -216,7 +217,7 @@ public struct PlayerCharacter
         var newTargetVelocity = movementDirection * effectiveSpeed;
         var viewDirection = viewDirectionWorld;
         if (crouching && character.Supported && !character.TryJump && newTargetVelocity != Vector2.Zero)
-            newTargetVelocity = KeepAwayFromEdges(ref character, characterBody, newTargetVelocity, viewDirection, simulationTimestepDuration);
+            newTargetVelocity = KeepAwayFromEdges(character, characterBody, newTargetVelocity, viewDirection, dt);
 
         // Modifying the character's raw data doesn't automatically wake it up — do so explicitly
         // if the goals actually changed, otherwise it won't respond (see BodyActivityDescription).
@@ -243,14 +244,14 @@ public struct PlayerCharacter
             // Extra downward acceleration on top of the world's own (deliberately gentle, -6) gravity,
             // so jumps feel heavy/short rather than floaty. Tuned together with JumpVelocity for a
             // roughly 1-block peak height (see PlayerCharacter's constructor default / TestScene).
-            characterBody.Velocity.Linear.Y -= extraFallGravity * simulationTimestepDuration;
+            characterBody.Velocity.Linear.Y -= extraFallGravity * dt;
 
             // Air control. Holding a direction accelerates along it up to the (sprint-aware) air speed without
             // ever cutting existing speed along it, while sideways drift is bled off so you can steer; with
             // no keys held the character brakes gently, so letting go near a cliff edge stops you short.
             QuaternionEx.Transform(character.LocalUp, characterBody.Pose.Orientation, out var characterUp);
             ref var linear = ref characterBody.Velocity.Linear;
-            UpdateAirReferenceVelocity(characterBody.Pose.Position, characterUp, simulationTimestepDuration);
+            UpdateAirReferenceVelocity(characterBody.Pose.Position, characterUp, dt);
             var relative = linear - airReferenceVelocity;
             var horizontal = relative - characterUp * Vector3.Dot(relative, characterUp);
             var airAcceleration = characterBody.LocalInertia.InverseMass * character.MaximumHorizontalForce * airControlForceScale;
@@ -262,7 +263,7 @@ public struct PlayerCharacter
                 characterRight /= MathF.Sqrt(rightLengthSquared);
                 var characterForward = Vector3.Cross(characterUp, characterRight);
                 var worldMovementDirection = characterRight * movementDirection.X + characterForward * movementDirection.Y;
-                var velocityChange = airAcceleration * simulationTimestepDuration;
+                var velocityChange = airAcceleration * dt;
                 var along = Vector3.Dot(horizontal, worldMovementDirection);
                 var maximumAirSpeed = effectiveSpeed * airControlSpeedScale;
                 var newAlong = MathF.Max(along, MathF.Min(along + velocityChange, maximumAirSpeed));
@@ -271,7 +272,7 @@ public struct PlayerCharacter
             }
             else
             {
-                newHorizontal = MoveTowardsZero(horizontal, airAcceleration * airBrakeScale * simulationTimestepDuration);
+                newHorizontal = MoveTowardsZero(horizontal, airAcceleration * airBrakeScale * dt);
             }
             linear += newHorizontal - horizontal;
         }
@@ -280,7 +281,7 @@ public struct PlayerCharacter
     /// <summary>Crouch edge guard: clips the target velocity, one axis at a time (so the character still slides along an
     /// edge), wherever it would carry the character past an edge. Axes are the support's: world X/Z on terrain, the
     /// ship's own axes on a ship. Velocities are relative to the support, as the motion constraint's target is.</summary>
-    private readonly Vector2 KeepAwayFromEdges(ref CharacterController character, BodyReference characterBody, Vector2 targetVelocity,
+    private readonly Vector2 KeepAwayFromEdges(in CharacterController character, BodyReference characterBody, Vector2 targetVelocity,
                                                Vector3 viewDirection, float dt)
     {
         QuaternionEx.Transform(character.LocalUp, characterBody.Pose.Orientation, out var up);
@@ -301,10 +302,6 @@ public struct PlayerCharacter
             velocity -= new BodyReference(supportBody, characters.Simulation.Bodies).Velocity.Linear;
         }
 
-        // Look ahead by the distance the character needs to stop — this frame's travel plus braking at the motion
-        // constraint's maximum deceleration, from whichever is faster of the target and its actual speed (e.g. still
-        // sprinting when Ctrl goes down) — so it halts at the overhang limit rather than after it.
-        var deceleration = characterBody.LocalInertia.InverseMass * character.MaximumHorizontalForce;
         var position = characterBody.Pose.Position;
 
         // Already hanging further out than the limit allows (Ctrl pressed after walking out, an overshoot, a ship
@@ -324,6 +321,10 @@ public struct PlayerCharacter
             overhang = high;
         }
 
+        // Look ahead by the distance the character needs to stop — this frame's travel plus braking at the motion
+        // constraint's maximum deceleration, from whichever is faster of the target and its actual speed (e.g. still
+        // sprinting when Ctrl goes down) — so it halts at the overhang limit rather than after it.
+        var deceleration = characterBody.LocalInertia.InverseMass * character.MaximumHorizontalForce;
         var targetA = Vector3.Dot(desired, axisA);
         var stopA = StoppingDistance(targetA, Vector3.Dot(velocity, axisA), dt, deceleration);
         if (targetA != 0 && !HasGroundNear(position + axisA * stopA, axisA, axisB, up, overhang))
@@ -459,9 +460,19 @@ public struct PlayerCharacter
 
     /// <summary>Snaps the capsule to a given world position and zeroes its velocity — used when the
     /// character isn't actively being simulated as "walking" this frame (free-fly or grid-follow
-    /// modes), so switching back to Walking always resumes from wherever the camera visually is.</summary>
-    public readonly void TeleportTo(Vector3 position)
+    /// modes), so switching back to Walking always resumes from wherever the camera visually is.
+    /// Also forgets the jump, air and crouch state, so walking resumes fresh: e.g. the air reference
+    /// velocity of a ship left long ago doesn't drag the character after switching back mid-air.</summary>
+    public void TeleportTo(Vector3 position)
     {
+        jumpBufferRemaining = 0;
+        timeSinceSupported = float.MaxValue;
+        jumpedSinceSupported = false;
+        hasLastSupportBody = false;
+        timeNotAboveShip = 0;
+        airReferenceVelocity = default;
+        eyeDrop = 0;
+
         var characterBody = new BodyReference(bodyHandle, characters.Simulation.Bodies);
         characterBody.Pose.Position = position;
         characterBody.Velocity.Linear = default;
