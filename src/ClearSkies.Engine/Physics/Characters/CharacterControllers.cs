@@ -281,6 +281,7 @@ namespace ClearSkies.Engine.Physics.Characters
                     ref var set = ref Simulation.Bodies.Sets[bodyLocation.SetIndex];
                     ref var pose = ref set.SolverStates[bodyLocation.Index].Motion.Pose;
                     QuaternionEx.Transform(character.LocalUp, pose.Orientation, out var up);
+                    SnapBoxEdgeNormals(ref manifold, supportCollidable, pair.B.Packed == characterCollidable.Packed, up, character.CosMaximumSlope);
                     //Note that this branch is compiled out- the generic constraints force type specialization.
                     if (manifold.Convex)
                     {
@@ -421,6 +422,80 @@ namespace ClearSkies.Engine.Physics.Characters
         /// bouncing off walls (the closest Bepu has to zero restitution).
         /// </summary>
         public float CharacterMaximumRecoveryVelocity = 0.2f;
+
+        /// <summary>Whether <see cref="SnapBoxEdgeNormals"/> smooths the seams between box colliders (on by default).</summary>
+        public bool SmoothBoxEdges = true;
+
+        /// <summary>
+        /// Voxel terrain and ships are compounds of boxes, and Bepu doesn't smooth the internal edges between them: a capsule
+        /// sliding across the seam between two flush boxes touches the next box's top edge with a tilted normal, which the
+        /// solver treats as a little ramp and pops the character upward (worse the faster it runs). Every walkable surface of
+        /// a box collider is really a face with an axis-aligned normal, so snap any contact normal that's walkable ground to
+        /// the box face axis nearest it. Depths are left alone: the edge distance they hold is never more than the true gap.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        void SnapBoxEdgeNormals<TManifold>(ref TManifold manifold, CollidableReference other, bool characterIsB, Vector3 up, float cosMaximumSlope)
+            where TManifold : struct, IContactManifold<TManifold>
+        {
+            if (!SmoothBoxEdges || !TryGetBoxColliderOrientation(other, out var orientation))
+                return;
+            var sign = characterIsB ? -1f : 1f;
+            if (manifold.Convex)
+            {
+                ref var convexManifold = ref Unsafe.As<TManifold, ConvexContactManifold>(ref manifold);
+                SnapNormal(ref convexManifold.Normal, orientation, sign, up, cosMaximumSlope);
+            }
+            else
+            {
+                ref var nonconvexManifold = ref Unsafe.As<TManifold, NonconvexContactManifold>(ref manifold);
+                for (int i = 0; i < nonconvexManifold.Count; ++i)
+                    SnapNormal(ref Unsafe.Add(ref nonconvexManifold.Contact0, i).Normal, orientation, sign, up, cosMaximumSlope);
+            }
+        }
+
+        /// <param name="sign">1 if the manifold normal points at the character (it points from B to A), -1 otherwise.</param>
+        static void SnapNormal(ref Vector3 normal, Quaternion orientation, float sign, Vector3 up, float cosMaximumSlope)
+        {
+            var towardsCharacter = normal * sign;
+            if (Vector3.Dot(towardsCharacter, up) <= cosMaximumSlope)
+                return; // a wall or ceiling contact; leave it be
+            QuaternionEx.Transform(towardsCharacter, Quaternion.Conjugate(orientation), out var local);
+            var abs = Vector3.Abs(local);
+            Vector3 localAxis;
+            if (abs.X >= abs.Y && abs.X >= abs.Z) localAxis = new Vector3(MathF.Sign(local.X), 0, 0);
+            else if (abs.Y >= abs.Z) localAxis = new Vector3(0, MathF.Sign(local.Y), 0);
+            else localAxis = new Vector3(0, 0, MathF.Sign(local.Z));
+            QuaternionEx.Transform(localAxis, orientation, out var axis);
+            if (Vector3.Dot(axis, up) > cosMaximumSlope)
+                normal = axis * sign;
+        }
+
+        /// <summary>True (with its orientation) if the collidable is built from unrotated boxes: a lone box, or a compound of
+        /// them (chunk terrain, ship grids). Other characters and any other shape are left alone.</summary>
+        bool TryGetBoxColliderOrientation(CollidableReference collidable, out Quaternion orientation)
+        {
+            TypedIndex shape;
+            if (collidable.Mobility == CollidableMobility.Static)
+            {
+                var staticReference = Simulation.Statics[collidable.StaticHandle];
+                shape = staticReference.Shape;
+                orientation = staticReference.Pose.Orientation;
+            }
+            else
+            {
+                var handle = collidable.BodyHandle;
+                if (handle.Value < bodyHandleToCharacterIndex.Length && bodyHandleToCharacterIndex[handle.Value] >= 0)
+                {
+                    orientation = Quaternion.Identity;
+                    return false;
+                }
+                var bodyReference = Simulation.Bodies[handle];
+                shape = bodyReference.Collidable.Shape;
+                orientation = bodyReference.Pose.Orientation;
+            }
+            var type = shape.Type;
+            return type == Box.Id || type == Compound.Id || type == BigCompound.Id;
+        }
 
         Buffer<(int Start, int Count)> boundingBoxExpansionJobs;
         unsafe void ExpandBoundingBoxes(int start, int count)
