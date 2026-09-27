@@ -246,14 +246,14 @@ public sealed class CommandSystem : ISystem, IDebugUiSystem
     {
         ImGui.Text($"Handlers: {_byId.Count}   Pending predictions: {_pending.Count}");
         ImGui.Text($"Applied: {Stats.Applied}   Sent: {Stats.Sent}   Received: {Stats.Received}");
-        ImGui.Text($"Rejected here: {Stats.Rejected}   Ours rejected: {Stats.RejectedHere}");
+        ImGui.Text($"Rejected here: {Stats.Rejected}   Ours rejected: {Stats.RejectedHere}   Forwarded: {Stats.Forwarded}");
         if (LastRejection is { } r) ImGui.TextDisabled($"Last rejected: {r}");
     }
 }
 
 public sealed class CommandStats
 {
-    public long Applied, Sent, Received, Rejected, RejectedHere;
+    public long Applied, Sent, Received, Rejected, RejectedHere, Forwarded;
 }
 
 /// <summary>Command IDs on the wire.</summary>

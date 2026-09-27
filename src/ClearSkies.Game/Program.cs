@@ -273,6 +273,11 @@ var bodySync = new ClearSkies.Net.Sync.BodySync(net, host.World, host.Physics);
 host.AddSystem(bodySync, SystemStage.Tick); // snapshots of owned bodies, every second tick
 var divergence = new ClearSkies.Net.Sync.DivergenceCheck(net, host.World); // hashes compared every 5 s
 host.AddSystem(divergence, SystemStage.Tick);
+// Who simulates what: every machine applies ownership changes and hands entities over; the host decides by bubbles.
+var ownership = new ClearSkies.Net.Ownership.OwnershipSystem(net, host.World);
+host.AddSystem(ownership, SystemStage.Tick);
+if (net is ClearSkies.Net.Session.HostSession bubbleHost)
+    host.AddSystem(new ClearSkies.Net.Ownership.BubbleManager(bubbleHost, ownership, host.World), SystemStage.Tick);
 host.AddSystem(new ClearSkies.Net.Session.NetSendSystem(net), SystemStage.Tick);
 var remoteBodies = new ClearSkies.Net.Sync.RemoteBodySystem(host.World, registry, hostClock);
 // Physics copies of bodies owned elsewhere (kinematic ships near the local player, servo copies of other players),

@@ -20,6 +20,29 @@ public struct SmoothedTransform
 }
 
 /// <summary>
+/// Eases the drawn pose of something that just changed hands (network ownership) from where it was drawn to where its
+/// new source puts it, over <see cref="Seconds"/>, rather than snapping: the offset from the new pose to the old one,
+/// shrinking to nothing.
+/// </summary>
+public struct HandoverBlend
+{
+    public const float Duration = 0.25f;
+    public Vector3D<float> Offset;
+    public Quaternion<float> Rotation; // old drawn rotation relative to the new one
+    public float Seconds;              // left
+
+    /// <summary>The part of the offset still applied (1 at the start, eased out to 0).</summary>
+    public readonly float Weight
+    {
+        get
+        {
+            float f = System.Math.Clamp(Seconds / Duration, 0f, 1f);
+            return f * f * (3 - 2 * f);
+        }
+    }
+}
+
+/// <summary>
 /// Smooths drawing between fixed ticks. Ticks run at 60 Hz and frames at any rate, so a frame usually falls between
 /// two ticks; this draws each <see cref="SmoothedTransform"/> entity <see cref="Time.Alpha"/> of the way from its
 /// previous tick's pose to its latest (one tick behind, which is what makes it smooth).
@@ -111,8 +134,19 @@ public sealed class RenderInterpolationSystem : ISystem
             }
             t.Position = Vector3D.Lerp(s.Previous.Position, s.Current.Position, alpha);
             if (!s.PositionOnly) t.Rotation = Quaternion<float>.Slerp(s.Previous.Rotation, s.Current.Rotation, alpha);
+            if (e.Has<HandoverBlend>()) Blend(e, ref t, dt, !s.PositionOnly);
             s.Drawn = t;
         }
+    }
+
+    private static void Blend(Entity e, ref Transform t, float dt, bool rotation)
+    {
+        ref var blend = ref e.Get<HandoverBlend>();
+        float w = blend.Weight;
+        t.Position += blend.Offset * w;
+        if (rotation) t.Rotation = Quaternion<float>.Slerp(Quaternion<float>.Identity, blend.Rotation, w) * t.Rotation;
+        blend.Seconds -= dt;
+        if (blend.Seconds <= 0) e.Remove<HandoverBlend>();
     }
 
     /// <summary>GridPilotSystem places the camera itself while it follows a grid; bodies owned elsewhere are drawn from

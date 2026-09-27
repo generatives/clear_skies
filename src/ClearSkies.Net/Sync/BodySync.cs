@@ -47,12 +47,19 @@ public sealed class BodySync : ISystem, IDebugUiSystem
         // it has applied that one too.
         net.Commands.Applied += (handler, meta, _) =>
         {
+            // Numbers are per authority, so only the ones we decide count: a grid just handed to us has none yet, and
+            // its snapshots go straight in.
             if (handler.Id is Engine.Commands.CommandIds.EditVoxels or Engine.Commands.CommandIds.SpawnGrid)
-                _shapeVersions[meta.Target] = meta.EventNumber;
+            {
+                if (meta.Authority == net.Session.LocalPeer) _shapeVersions[meta.Target] = meta.EventNumber;
+                else _shapeVersions.Remove(meta.Target);
+            }
         };
         _players = world.GetEntities().With<NetId>().With<NetOwner>().With<Player>().With<Transform>().AsSet();
         _grids = world.GetEntities().With<NetId>().With<NetOwner>().With<PhysicsBodyComponent>().With<Transform>().AsSet();
     }
+
+    public PhysicsWorld Physics => _physics;
 
     /// <summary>Whether grids are synced too (on by default; players always are).</summary>
     public bool SyncGrids { get; set; } = true;
@@ -155,6 +162,7 @@ public sealed class BodySync : ISystem, IDebugUiSystem
             _snapshotsReceived++;
             if (!_net.Registry.TryGet(s.Entity, out var e)) continue; // not spawned here (yet)
             if (e.Has<NetOwner>() && e.Get<NetOwner>().IsLocal) continue; // ours: we're the truth
+            if (e.Has<NetOwner>() && Older(s.Epoch, e.Get<NetOwner>().Epoch)) continue; // from before it changed hands
             if (_net is HostSession && from != PeerId.Host) _relay[s.Entity] = (from, tick, s);
             if (!ShapeApplied(e, s)) { _parked.Add((from, tick, s)); continue; } // its edit hasn't arrived yet
             Buffer(e, tick, s);
@@ -167,9 +175,40 @@ public sealed class BodySync : ISystem, IDebugUiSystem
         e.Get<RemoteBody>().Buffer.Add(tick, s);
     }
 
-    /// <summary>Whether this machine has applied the shape change a grid snapshot follows.</summary>
-    private bool ShapeApplied(Entity e, in BodySnapshot s) =>
-        s.ShapeVersion == 0 || !e.Has<NetOwner>() || _net.Commands.LastEventNumber(e.Get<NetOwner>().Owner, s.Entity) >= s.ShapeVersion;
+    /// <summary>Whether this machine has applied the shape change a grid snapshot follows. With no event from its owner
+    /// applied here at all (it arrived as a description, or has just changed hands) there's nothing to wait for.</summary>
+    private bool ShapeApplied(Entity e, in BodySnapshot s)
+    {
+        if (s.ShapeVersion == 0 || !e.Has<NetOwner>()) return true;
+        uint applied = _net.Commands.LastEventNumber(e.Get<NetOwner>().Owner, s.Entity);
+        return applied == 0 || applied >= s.ShapeVersion;
+    }
+
+    /// <summary>Epochs wrap: <paramref name="a"/> is older than <paramref name="b"/> if it's behind by less than half the range.</summary>
+    public static bool Older(ushort a, ushort b) => a != b && (ushort)(b - a) < 0x8000;
+
+    /// <summary>An entity's body as this machine has it now (for handing it over): its physics body if it has one,
+    /// else its Transform with the velocity of its last snapshot.</summary>
+    public BodySnapshot SnapshotOf(Entity e)
+    {
+        if (e.Has<PhysicsBodyComponent>()) return GridSnapshot(e);
+        ref readonly var t = ref e.Get<Transform>();
+        var s = new BodySnapshot
+        {
+            Entity = e.Get<NetId>().Value,
+            Epoch = e.Has<NetOwner>() ? e.Get<NetOwner>().Epoch : (ushort)0,
+            Position = new Vector3(t.Position.X, t.Position.Y, t.Position.Z),
+            Rotation = new Quaternion(t.Rotation.X, t.Rotation.Y, t.Rotation.Z, t.Rotation.W),
+        };
+        if (e.Has<RemoteBody>() && e.Get<RemoteBody>().Buffer is { Latest: { } latest } buffer && latest.Support == 0)
+        {
+            // Where its owner has it now (as best we know), not where it's drawn, 100 ms behind.
+            if (buffer.At(_net.Clock.Tick) is { } now) (s.Position, s.Rotation) = (now.Position, now.Rotation);
+            s.LinearVelocity = latest.LinearVelocity;
+            s.AngularVelocity = latest.AngularVelocity;
+        }
+        return s;
+    }
 
     /// <summary>Snapshots held back for a shape change that has now been applied go into their buffers.</summary>
     private void FlushParked()

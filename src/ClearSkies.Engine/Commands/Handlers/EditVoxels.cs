@@ -115,6 +115,11 @@ public sealed class EditVoxelsHandler : PredictedCommandHandler<EditVoxels, Edit
         return c;
     }
 
+    /// <summary>A grid's owner decides edits to it; the editing player's bubble owner decides edits to the terrain
+    /// (players closer than the merge distance share a bubble, so two bubbles never edit the same blocks).</summary>
+    public override PeerId Authority(in EditVoxels c, in AuthorityContext ctx) =>
+        c.Volume == NetRegistry.WorldVolume ? ctx.BubbleOwnerOf(c.Editor) : ctx.OwnerOf(c.Target);
+
     public override Verdict Validate(ref EditVoxels c, in CommandContext ctx)
     {
         if (c.Ops is null || c.Ops.Length == 0 || c.Ops.Length > EditLimits.MaxOpsPerCommand) return Verdict.Reject;

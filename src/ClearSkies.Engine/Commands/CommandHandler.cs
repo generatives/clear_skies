@@ -108,7 +108,19 @@ public abstract class CommandHandler<T> : CommandHandlerBase where T : struct, I
     internal sealed override void RunRemoteCommand(PeerId from, uint seq, ReadOnlySpan<byte> payload)
     {
         var reader = new NetReader(payload);
-        RunAsAuthority(Read(ref reader), from, seq);
+        var command = Read(ref reader);
+        var sys = Owner;
+        var authority = Authority(command, new AuthorityContext(sys, from));
+        if (authority != sys.Session.LocalPeer)
+        {
+            // Sent here before its target changed hands: the new authority decides it.
+            sys.Router.ForwardCommand(authority, from, Id, seq, payload);
+            sys.Stats.Forwarded++;
+            return;
+        }
+        // One of ours, forwarded back here because its target became ours meanwhile: undo the prediction and decide it.
+        if (from == sys.Session.LocalPeer) sys.Reconcile(seq, apply: null);
+        RunAsAuthority(command, from, seq);
     }
 
     private void RunAsAuthority(T command, PeerId sender, uint seq)

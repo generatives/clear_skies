@@ -53,6 +53,9 @@ public abstract class NetSession : ICommandRouter, IDisposable
     /// <summary>Compares state hashes (set by the divergence check).</summary>
     public DivergenceCheck? Divergence { get; set; }
 
+    /// <summary>Ownership changes and handovers (set by <see cref="Ownership.OwnershipSystem"/>).</summary>
+    public Ownership.OwnershipSystem? Ownership { get; set; }
+
     /// <summary>Real time in milliseconds, for clock sync. Settable so tests can run on simulated time.</summary>
     public Func<double> TimeSource { get; set; }
 
@@ -101,6 +104,7 @@ public abstract class NetSession : ICommandRouter, IDisposable
     public abstract void SendCommand(PeerId authority, ushort handlerId, uint seq, ReadOnlySpan<byte> payload);
     public abstract void BroadcastEvent(ushort handlerId, in EventMeta meta, ReadOnlySpan<byte> payload);
     public abstract void SendRejection(PeerId to, uint seq);
+    public abstract void ForwardCommand(PeerId authority, PeerId origin, ushort handlerId, uint seq, ReadOnlySpan<byte> payload);
 
     public virtual void Dispose() => Transport?.Dispose();
 }
