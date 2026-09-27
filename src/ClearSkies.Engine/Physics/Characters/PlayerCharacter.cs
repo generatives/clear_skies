@@ -49,12 +49,13 @@ public struct PlayerCharacter
     private Vector3 airReferenceVelocity;
 
     // Crouch (Ctrl), Minecraft-style sneak: slower, a lower eye, and while standing on something the character won't
-    // walk off its edge. The centre may hang up to CrouchEdgeOverhang past an edge or corner (less than the ~0.2 at
-    // which the capsule starts rolling off), and a drop of more than CrouchMaximumDrop counts as an edge.
+    // walk off its edge. The centre may hang up to CrouchEdgeOverhang past an edge, on both axes at once at a corner,
+    // which puts it CrouchEdgeOverhang·√2 ≈ 0.12 from the corner point (short of the ~0.14 at which the capsule rolls
+    // off it). A drop of more than CrouchMaximumDrop counts as an edge.
     private const float CrouchSpeedScale = 0.3f;
     private const float CrouchEyeDrop = 0.3f;
     private const float CrouchEyeDropSpeed = 3f; // blocks per second
-    private const float CrouchEdgeOverhang = 0.12f;
+    private const float CrouchEdgeOverhang = 0.085f;
     private const float CrouchMaximumDrop = 0.6f;
     private float eyeDrop;
 
@@ -307,14 +308,14 @@ public struct PlayerCharacter
         var position = characterBody.Pose.Position;
         var targetA = Vector3.Dot(desired, axisA);
         var stopA = StoppingDistance(targetA, Vector3.Dot(velocity, axisA), dt, deceleration);
-        if (targetA != 0 && !HasGroundNear(position + axisA * stopA, up))
+        if (targetA != 0 && !HasGroundNear(position + axisA * stopA, axisA, axisB, up))
         {
             targetA = 0;
             stopA = 0;
         }
         var targetB = Vector3.Dot(desired, axisB);
         var stopB = StoppingDistance(targetB, Vector3.Dot(velocity, axisB), dt, deceleration);
-        if (targetB != 0 && !HasGroundNear(position + axisA * stopA + axisB * stopB, up))
+        if (targetB != 0 && !HasGroundNear(position + axisA * stopA + axisB * stopB, axisA, axisB, up))
             targetB = 0;
         var allowed = axisA * targetA + axisB * targetB;
         return new Vector2(Vector3.Dot(allowed, right), Vector3.Dot(allowed, forward));
@@ -337,20 +338,22 @@ public struct PlayerCharacter
     }
 
     /// <summary>True if there's something to stand on within <see cref="CrouchMaximumDrop"/> below the feet, anywhere
-    /// within <see cref="CrouchEdgeOverhang"/> (horizontally) of <paramref name="centre"/>: a thin disc of that radius is
-    /// swept straight down from just above the feet. A round footprint makes the allowed area around a corner a smooth
-    /// quarter circle, the same overhang as along an edge, so the character glides round corners rather than stepping.
+    /// under a square footprint <see cref="CrouchEdgeOverhang"/> each way from <paramref name="centre"/>, lined up with
+    /// the support's axes: a thin plate of that size is swept straight down from just above the feet. Being square and
+    /// aligned with the blocks (as Minecraft's is), the overhang allowed at a corner is the same on both axes whichever
+    /// way the character arrives or leaves, so it never shifts outward along one edge as it moves away from the other.
     /// The sweep starts clear of the floor; anything it overlaps at the start is a wall the capsule (far wider than the
-    /// disc) couldn't be pressed into, so zero-distance hits are ignored.</summary>
-    private readonly bool HasGroundNear(Vector3 centre, Vector3 up)
+    /// plate) couldn't be pressed into, so zero-distance hits are ignored.</summary>
+    private readonly bool HasGroundNear(Vector3 centre, Vector3 axisA, Vector3 axisB, Vector3 up)
     {
         const float startAboveFeet = 0.1f;
-        const float discThickness = 0.02f;
+        const float plateThickness = 0.02f;
         var feet = centre - up * (shape.HalfLength + shape.Radius);
-        var start = feet + up * (startAboveFeet + discThickness / 2);
-        QuaternionEx.GetQuaternionBetweenNormalizedVectors(Vector3.UnitY, up, out var orientation);
+        var start = feet + up * (startAboveFeet + plateThickness / 2);
+        var basis = new Matrix3x3 { X = axisA, Y = up, Z = axisB };
+        QuaternionEx.CreateFromRotationMatrix(basis, out var orientation);
         var hitHandler = new AnyHitHandler { Ignore = bodyHandle };
-        characters.Simulation.Sweep(new Cylinder(CrouchEdgeOverhang, discThickness), new RigidPose(start, orientation),
+        characters.Simulation.Sweep(new Box(2 * CrouchEdgeOverhang, plateThickness, 2 * CrouchEdgeOverhang), new RigidPose(start, orientation),
             new BodyVelocity(-up), startAboveFeet + CrouchMaximumDrop, characters.Simulation.BufferPool, ref hitHandler);
         return hitHandler.Hit;
     }
