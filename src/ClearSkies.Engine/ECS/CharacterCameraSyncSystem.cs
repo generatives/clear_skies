@@ -63,6 +63,7 @@ public sealed class CharacterCameraSyncSystem : ISystem, IDebugUiSystem
             var previous = cc.RideOrientation;
 
             // Yaw: the ship's change in heading (the way its bow points, seen from above), in full.
+            float yaw = look.Yaw, pitch = look.Pitch;
             look.Yaw += WrapAngle(Heading(orientation) - Heading(previous));
 
             // Pitch: the ship's change in slope along the way the player now faces.
@@ -70,6 +71,8 @@ public sealed class CharacterCameraSyncSystem : ISystem, IDebugUiSystem
             look.Pitch += SlopeAlong(orientation, facing) - SlopeAlong(previous, facing);
             float limit = MathF.PI / 2f - 0.01f;
             look.Pitch = System.Math.Clamp(look.Pitch, -limit, limit);
+            look.TurnYaw = look.Yaw - yaw;
+            look.TurnPitch = look.Pitch - pitch;
 
             t.Rotation = Quaternion<float>.CreateFromYawPitchRoll(look.Yaw, look.Pitch, 0f);
         }

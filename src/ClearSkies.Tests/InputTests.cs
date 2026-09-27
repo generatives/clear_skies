@@ -3,6 +3,7 @@ using BepuPhysics.Collidables;
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Input;
+using ClearSkies.Engine.Math;
 using ClearSkies.Engine.Physics;
 using ClearSkies.Engine.Physics.Characters;
 using DefaultEcs;
@@ -234,4 +235,77 @@ public class RenderInterpolationTests
         Assert.Equal(turned, rig.Entity.Get<Transform>().Rotation);
         Assert.Equal(0.5f, rig.Entity.Get<Transform>().Position.X, 4);
     }
+
+    private static float Heading(Quaternion<float> q)
+    {
+        var forward = Vec.Rotate(q, new Vector3D<float>(0, 0, -1));
+        return MathF.Atan2(-forward.X, -forward.Z);
+    }
+
+    [Fact]
+    public void AViewTurningWithAShipIsDrawnTurningWithTheDrawnShip()
+    {
+        // A ship turning steadily and a player standing on it whose view turns with it each tick (as
+        // CharacterCameraSyncSystem does), at uneven frame times around 58 fps: some frames run no tick, some two.
+        var world = new World();
+        var time = new Time();
+        var clock = new TickClock();
+        var system = new RenderInterpolationSystem(world, time);
+        var ship = world.CreateEntity();
+        ship.Set(At(0));
+        ship.Set(new SmoothedTransform());
+        var player = world.CreateEntity();
+        player.Set(At(0));
+        player.Set(new SmoothedTransform { PositionOnly = true });
+        player.Set(new MouseLookComponent());
+
+        const float turnPerTick = 0.05f;
+        float shipYaw = 0f;
+        var rng = new Random(7);
+        int zeroTickFrames = 0, twoTickFrames = 0;
+        for (int frame = 0; frame < 600; frame++)
+        {
+            int ticks = clock.Advance(1.0 / 58.0 + (rng.NextDouble() - 0.5) * 0.004);
+            if (ticks == 0) zeroTickFrames++;
+            if (ticks == 2) twoTickFrames++;
+            for (int i = 0; i < ticks; i++)
+            {
+                system.BeginTick.Update(0);
+                ref var look = ref player.Get<MouseLookComponent>();
+                // The tick sees the true view: facing the way the ship faces.
+                Assert.Equal(WrapAngle(shipYaw), WrapAngle(Heading(player.Get<Transform>().Rotation)), 3);
+                shipYaw += turnPerTick;
+                ship.Get<Transform>().Rotation = Quaternion<float>.CreateFromYawPitchRoll(shipYaw, 0, 0);
+                look.Yaw += turnPerTick;
+                look.TurnYaw = turnPerTick;
+                player.Get<Transform>().Rotation = Quaternion<float>.CreateFromYawPitchRoll(look.Yaw, look.Pitch, 0);
+                system.EndTick.Update(0);
+            }
+            time.Alpha = clock.Alpha;
+            system.Update(0);
+            if (frame < 2) continue;
+            float drawnShip = Heading(ship.Get<Transform>().Rotation);
+            float drawnView = Heading(player.Get<Transform>().Rotation);
+            Assert.Equal(0f, WrapAngle(drawnView - drawnShip), 3);
+        }
+        Assert.True(zeroTickFrames > 0 && twoTickFrames > 0, $"{zeroTickFrames} frames with no tick, {twoTickFrames} with two");
+    }
+
+    [Fact]
+    public void AViewNoLongerTurningIsDrawnAsItIs()
+    {
+        var rig = new Rig();
+        rig.Entity.Get<SmoothedTransform>().PositionOnly = true;
+        rig.Entity.Set(new MouseLookComponent());
+        rig.Tick(0);
+        rig.Entity.Get<MouseLookComponent>().TurnYaw = 0.5f; // turned with a ship last tick...
+        rig.Entity.Get<MouseLookComponent>().Yaw = 0.5f;
+        rig.Tick(1); // ...and not this one (stepped off)
+        var mouseLooked = Quaternion<float>.CreateFromYawPitchRoll(0.7f, 0, 0);
+        rig.Entity.Get<Transform>().Rotation = mouseLooked;
+        rig.Frame(0.5f);
+        Assert.Equal(mouseLooked, rig.Entity.Get<Transform>().Rotation);
+    }
+
+    private static float WrapAngle(float a) => MathF.IEEERemainder(a, 2f * MathF.PI);
 }
