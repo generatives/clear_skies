@@ -29,16 +29,16 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     // How far each piece is worn back from its faces, in blocks, so there are cracks twice that wide between
     // neighbouring pieces and small or thin pieces wear away altogether: across (from side faces) and up and down (from
     // top and bottom faces), in the floor and higher up, varied by noise.
-    private const float FloorWear = 12f, UpperWear = 16f, FloorWearUp = 9f, UpperWearUp = 12f;
+    private const float FloorWear = 18f, UpperWear = 24f, FloorWearUp = 13f, UpperWearUp = 18f;
 
     /// <summary>How far round a piece's edges and corners are worn, in scaled space (see Solid).</summary>
-    private const float Rounding = 6f;
+    private const float Rounding = 8f;
 
     // Wear grows from the floor's to the upper over CrackOver blocks from CrackFrom above the floor's top: at most
     // (UpperWearUp - FloorWearUp) * VerticalScale * 1.5 / CrackOver per block (a smoothstep's steepest), times 1.4
     // for noise, so by under CrackSlack over CrackStepMax blocks.
     private const float CrackFrom = -20f, CrackOver = 220f;
-    private const int CrackStepMax = 18;
+    private const int CrackStepMax = 12;
 
     /// <summary>Solid runs thinner than this are worn away: slivers where the terrain surface just grazes a piece.</summary>
     private const int MinThickness = 6;
