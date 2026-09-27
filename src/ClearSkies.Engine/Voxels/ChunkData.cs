@@ -61,9 +61,12 @@ public sealed class ChunkData
         }
     }
 
-    private static T[] Filled<T>(T value)
+    // On the pinned object heap: a loaded chunk's arrays live for as long as it stays loaded, and there they're never
+    // copied from generation to generation (on the ordinary heap, every collection while streaming copied the new
+    // chunks' 64 KB arrays along, one of the causes of hitches).
+    private static T[] Filled<T>(T value) where T : unmanaged
     {
-        var a = new T[Volume];
+        var a = GC.AllocateUninitializedArray<T>(Volume, pinned: true);
         Array.Fill(a, value);
         return a;
     }
