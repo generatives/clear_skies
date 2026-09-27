@@ -45,6 +45,13 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
     /// changes to drive it.</summary>
     public CharacterControllers Characters { get; }
 
+    /// <summary>What each body/static is (a <see cref="ColliderInfo"/>) — Bepu's per-handle side table, standing in for
+    /// user data on a collider. Bepu doesn't bounds-check or clear it, so every collider must be tagged where it's created
+    /// (an untagged handle reads leftover data, e.g. a previous owner's tag): terrain chunks by
+    /// <see cref="AddStaticCompound"/>, other bodies by the tag their Add* method requires, and character bodies by
+    /// <see cref="CharacterControllers.AllocateCharacter"/>.</summary>
+    public CollidableProperty<ColliderInfo> Colliders { get; }
+
     private readonly BufferPool _pool = new();
     private readonly float _fixedStep;
     private float _accumulator;
@@ -59,6 +66,8 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
             new VoxelNarrowPhaseCallbacks(new SpringSettings(30, 1)) { Characters = Characters },
             new VoxelPoseCallbacks(gravity, linearDamping: 0.03f, angularDamping: 0.03f),
             new SolveDescription(velocityIterationCount: 8, substepCount: 1));
+        Colliders = new CollidableProperty<ColliderInfo>(Simulation, _pool);
+        Characters.Colliders = Colliders;
     }
 
     public void Update(float dt)
@@ -101,16 +110,18 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
     // ── Dynamic bodies ──────────────────────────────────────────────────────────
 
     /// <summary>Creates a dynamic box body of the given world-space size and mass at a position.</summary>
-    public BodyHandle AddDynamicBox(Vector3 position, Vector3 size, float mass)
+    public BodyHandle AddDynamicBox(Vector3 position, Vector3 size, float mass, ColliderInfo tag)
     {
         var box = new Box(size.X, size.Y, size.Z);
         var shapeIndex = Simulation.Shapes.Add(box);
         var inertia = box.ComputeInertia(mass);
-        return Simulation.Bodies.Add(BodyDescription.CreateDynamic(
+        var handle = Simulation.Bodies.Add(BodyDescription.CreateDynamic(
             new RigidPose(position),
             inertia,
             new CollidableDescription(shapeIndex, 0.1f),
             new BodyActivityDescription(0.01f)));
+        Colliders.Allocate(handle) = tag;
+        return handle;
     }
 
     public (Vector3 position, Quaternion orientation) GetBodyPose(BodyHandle handle)
@@ -218,9 +229,13 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
         return (shape, inertia, centerOfMass);
     }
 
-    public BodyHandle AddDynamicBody(TypedIndex shape, BodyInertia inertia, Vector3 position, Quaternion orientation)
-        => Simulation.Bodies.Add(BodyDescription.CreateDynamic(
+    public BodyHandle AddDynamicBody(TypedIndex shape, BodyInertia inertia, Vector3 position, Quaternion orientation, ColliderInfo tag)
+    {
+        var handle = Simulation.Bodies.Add(BodyDescription.CreateDynamic(
             new RigidPose(position, orientation), inertia, new CollidableDescription(shape, 0.1f), new BodyActivityDescription(0.01f)));
+        Colliders.Allocate(handle) = tag;
+        return handle;
+    }
 
     /// <summary>Removes a dynamic body. To also free its shape, read the shape with <see cref="GetBodyShape"/>
     /// first, then pass it to <see cref="RemoveCompound"/> after this call.</summary>
@@ -326,7 +341,9 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
             ? new BigCompound(children, Simulation.Shapes, _pool)
             : new BigCompound { Children = children, Tree = new Tree(build.Tree, _pool) };
         var shape = Simulation.Shapes.Add(compound);
-        return Simulation.Statics.Add(new StaticDescription(origin, shape));
+        var handle = Simulation.Statics.Add(new StaticDescription(origin, shape));
+        Colliders.Allocate(handle) = new ColliderInfo(ColliderKind.VoxelTerrain);
+        return handle;
     }
 
     /// <summary>Removes a static created by <see cref="AddStaticCompound"/>, along with its compound
@@ -340,6 +357,7 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
 
     public void Dispose()
     {
+        Colliders.Dispose();
         Simulation.Dispose();
         _pool.Clear();
     }

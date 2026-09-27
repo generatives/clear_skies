@@ -307,7 +307,8 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
             ref readonly var t = ref entity.Get<Transform>();
             var orient = PhysicsConv.ToBepu(t.Rotation);
             var pos    = PhysicsConv.ToBepu(t.Position) + Vector3.Transform(com - oldPivot, orient);
-            var body   = _physics.AddDynamicBody(shape, grid.Locked ? default : inertia, pos, orient);
+            var body   = _physics.AddDynamicBody(shape, grid.Locked ? default : inertia, pos, orient,
+                                                 new ColliderInfo(ColliderKind.VoxelGrid, entity));
             entity.Set(new PhysicsBodyComponent { Body = body });
         }
         else

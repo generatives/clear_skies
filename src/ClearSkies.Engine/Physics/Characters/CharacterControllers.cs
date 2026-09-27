@@ -1,6 +1,7 @@
 ﻿using BepuPhysics;
 using BepuPhysics.Collidables;
 using BepuPhysics.CollisionDetection;
+using BepuPhysics.Trees;
 using BepuUtilities;
 using BepuUtilities.Collections;
 using BepuUtilities.Memory;
@@ -28,9 +29,11 @@ namespace ClearSkies.Engine.Physics.Characters
         /// </summary>
         public Vector2 TargetVelocity;
         /// <summary>
-        /// If true, the character will try to jump on the next time step. Will be reset to false after being processed.
+        /// Seconds a jump request stays pending: while above zero, the character jumps at the first time step it can
+        /// (standing on something, or within <see cref="CoyoteTime"/> of leaving it), which clears it. Counts down by the
+        /// step duration otherwise, so a press slightly before landing still jumps. Set it to the buffer time when jump is pressed.
         /// </summary>
-        public bool TryJump;
+        public float JumpRequestRemaining;
 
         /// <summary>
         /// Handle of the body associated with the character.
@@ -44,6 +47,26 @@ namespace ClearSkies.Engine.Physics.Characters
         /// Velocity at which the character pushes off the support during a jump.
         /// </summary>
         public float JumpVelocity;
+        /// <summary>
+        /// Seconds after leaving a support during which a jump still pushes off it ("coyote time"), once per time in the air.
+        /// </summary>
+        public float CoyoteTime;
+        /// <summary>
+        /// Downward acceleration added to the simulation's gravity while unsupported, so jumps and falls feel heavy rather than floaty.
+        /// </summary>
+        public float ExtraFallGravity;
+        /// <summary>
+        /// Fraction of <see cref="MaximumHorizontalForce"/> the character can apply while unsupported to steer (air control).
+        /// </summary>
+        public float AirControlForceScale;
+        /// <summary>
+        /// Fraction of the target speed (the length of <see cref="TargetVelocity"/>) air control accelerates the character up to.
+        /// </summary>
+        public float AirControlSpeedScale;
+        /// <summary>
+        /// Fraction of the air control force used to brake while unsupported with no target velocity.
+        /// </summary>
+        public float AirBrakeScale;
         /// <summary>
         /// Maximum force the character can apply tangent to the supporting surface to move.
         /// </summary>
@@ -77,6 +100,42 @@ namespace ClearSkies.Engine.Physics.Characters
         /// Handle of the character's motion constraint, if any. Only valid if Supported is true.
         /// </summary>
         public ConstraintHandle MotionConstraintHandle;
+
+        /// <summary>Seconds since the character was last supported.</summary>
+        public float TimeSinceSupported;
+        /// <summary>Whether the character has jumped since it was last supported (so coyote time can't give it a second jump).</summary>
+        public bool JumpedSinceSupported;
+        /// <summary>Whether the character jumped in the current time step. Its extra fall gravity starts from the next step,
+        /// so the jump reaches <see cref="JumpVelocity"/> in full.</summary>
+        public bool JumpedThisStep;
+        /// <summary>
+        /// The moving body (ship) the character last stood on, if <see cref="HasAirReferenceBody"/>. While unsupported, air
+        /// control steers and brakes relative to its velocity, so jumping on a moving deck doesn't leave the character behind;
+        /// once the character has been off to the side of it for <see cref="CharacterControllers.AirReferenceReleaseTime"/>,
+        /// it's released and its velocity then is kept in <see cref="AirReferenceVelocity"/> as plain momentum.
+        /// </summary>
+        public BodyHandle AirReferenceBody;
+        /// <summary>Whether <see cref="AirReferenceBody"/> is still being followed.</summary>
+        public bool HasAirReferenceBody;
+        /// <summary>Seconds the character has been airborne without <see cref="AirReferenceBody"/> below it.</summary>
+        public float TimeAwayFromAirReference;
+        /// <summary>Velocity air control steers and brakes relative to while unsupported.</summary>
+        public Vector3 AirReferenceVelocity;
+
+        /// <summary>Whether a jump request is pending (see <see cref="JumpRequestRemaining"/>).</summary>
+        public readonly bool JumpPending => JumpRequestRemaining > 0;
+
+        /// <summary>Forgets the jump and air state: no pending jump, no coyote time, no air reference. For when the character
+        /// is moved by hand (teleported) rather than by the simulation.</summary>
+        public void ResetJumpAndAirState()
+        {
+            JumpRequestRemaining = 0;
+            TimeSinceSupported = float.MaxValue;
+            JumpedSinceSupported = false;
+            HasAirReferenceBody = false;
+            TimeAwayFromAirReference = 0;
+            AirReferenceVelocity = default;
+        }
     }
 
     /// <summary>
@@ -88,6 +147,27 @@ namespace ClearSkies.Engine.Physics.Characters
         /// Gets the simulation to which this set of chracters belongs.
         /// </summary>
         public Simulation Simulation { get; private set; }
+
+        /// <summary>
+        /// Cap on the speed contacts involving a character push it back out of penetration. Low values keep the character from
+        /// bouncing off walls (the closest Bepu has to zero restitution).
+        /// </summary>
+        public float CharacterMaximumRecoveryVelocity = 0.2f;
+
+        /// <summary>Seconds an airborne character can be off to the side of the ship it jumped or fell from before it stops
+        /// steering relative to that ship (long enough to cross a gap in the deck). See <see cref="CharacterController.AirReferenceBody"/>.</summary>
+        public float AirReferenceReleaseTime = 0.5f;
+
+        /// <summary>How far below an airborne character (1 unit = 1 block) its ship still counts as underneath it.</summary>
+        public float AirReferenceCheckDistance = 128f;
+
+        /// <summary>Whether <see cref="SnapBoxEdgeNormals"/> smooths the seams between box colliders (on by default).</summary>
+        public bool SmoothBoxEdges = true;
+
+        /// <summary>Tells voxel colliders (whose seams get smoothed) from everything else, and tags character bodies as they're
+        /// allocated. Set by PhysicsWorld.</summary>
+        public CollidableProperty<ColliderInfo>? Colliders;
+
         BufferPool pool;
 
         Buffer<int> bodyHandleToCharacterIndex;
@@ -176,7 +256,7 @@ namespace ClearSkies.Engine.Physics.Characters
         /// </summary>
         /// <param name="bodyHandle">Body handle associated with the character.</param>
         /// <returns>Reference to the allocated character.</returns>
-        public ref CharacterController AllocateCharacter(BodyHandle bodyHandle)
+        public ref CharacterController AllocateCharacter(BodyHandle bodyHandle, DefaultEcs.Entity entity = default)
         {
             Debug.Assert(bodyHandle.Value >= 0 && (bodyHandle.Value >= bodyHandleToCharacterIndex.Length || bodyHandleToCharacterIndex[bodyHandle.Value] == -1),
                 "Cannot allocate more than one character for the same body handle.");
@@ -186,7 +266,10 @@ namespace ClearSkies.Engine.Physics.Characters
             ref var character = ref characters.Allocate(pool);
             character = default;
             character.BodyHandle = bodyHandle;
+            character.ResetJumpAndAirState();
             bodyHandleToCharacterIndex[bodyHandle.Value] = characterIndex;
+            if (Colliders is not null)
+                Colliders.Allocate(bodyHandle) = new ColliderInfo(ColliderKind.Character, entity);
             return ref character;
         }
 
@@ -281,6 +364,7 @@ namespace ClearSkies.Engine.Physics.Characters
                     ref var set = ref Simulation.Bodies.Sets[bodyLocation.SetIndex];
                     ref var pose = ref set.SolverStates[bodyLocation.Index].Motion.Pose;
                     QuaternionEx.Transform(character.LocalUp, pose.Orientation, out var up);
+                    SnapBoxEdgeNormals(ref manifold, supportCollidable, pair.B.Packed == characterCollidable.Packed, up, character.CosMaximumSlope);
                     //Note that this branch is compiled out- the generic constraints force type specialization.
                     if (manifold.Convex)
                     {
@@ -408,9 +492,71 @@ namespace ClearSkies.Engine.Physics.Characters
                 //Note- you could use the friction coefficient to change the horizontal motion constraint's maximum force to simulate different environments if you want.
                 //That would just require caching a bit more information for the AnalyzeContacts function to use.
                 materialProperties.FrictionCoefficient = 0;
+                //Bepu has no restitution coefficient; the "bounce" off a wall is penetration recovery pushing the
+                //capsule back out at up to MaximumRecoveryVelocity. Keep that slow for characters so contacts feel dead.
+                materialProperties.MaximumRecoveryVelocity = MathF.Min(materialProperties.MaximumRecoveryVelocity, CharacterMaximumRecoveryVelocity);
                 return true;
             }
             return false;
+        }
+
+        /// <summary>
+        /// Voxel terrain and ships are compounds of boxes, and Bepu doesn't smooth the internal edges between them: a capsule
+        /// sliding across the seam between two flush boxes touches the next box's top edge with a tilted normal, which the
+        /// solver treats as a little ramp and pops the character upward (worse the faster it runs). Every walkable surface of
+        /// a box collider is really a face with an axis-aligned normal, so snap any contact normal that's walkable ground to
+        /// the box face axis nearest it. Depths are left alone: the edge distance they hold is never more than the true gap.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        void SnapBoxEdgeNormals<TManifold>(ref TManifold manifold, CollidableReference other, bool characterIsB, Vector3 up, float cosMaximumSlope)
+            where TManifold : struct, IContactManifold<TManifold>
+        {
+            if (!SmoothBoxEdges || !TryGetBoxColliderOrientation(other, out var orientation))
+                return;
+            var sign = characterIsB ? -1f : 1f;
+            if (manifold.Convex)
+            {
+                ref var convexManifold = ref Unsafe.As<TManifold, ConvexContactManifold>(ref manifold);
+                SnapNormal(ref convexManifold.Normal, orientation, sign, up, cosMaximumSlope);
+            }
+            else
+            {
+                ref var nonconvexManifold = ref Unsafe.As<TManifold, NonconvexContactManifold>(ref manifold);
+                for (int i = 0; i < nonconvexManifold.Count; ++i)
+                    SnapNormal(ref Unsafe.Add(ref nonconvexManifold.Contact0, i).Normal, orientation, sign, up, cosMaximumSlope);
+            }
+        }
+
+        /// <param name="sign">1 if the manifold normal points at the character (it points from B to A), -1 otherwise.</param>
+        static void SnapNormal(ref Vector3 normal, Quaternion orientation, float sign, Vector3 up, float cosMaximumSlope)
+        {
+            //Pick the face from the normal alone: on a steep but walkable deck, a seam's edge normal can lean further from up
+            //than the maximum slope even though the face it belongs to is walkable. Walls and ceilings fail the test below.
+            var towardsCharacter = normal * sign;
+            QuaternionEx.Transform(towardsCharacter, Quaternion.Conjugate(orientation), out var local);
+            var abs = Vector3.Abs(local);
+            Vector3 localAxis;
+            if (abs.X >= abs.Y && abs.X >= abs.Z) localAxis = new Vector3(MathF.Sign(local.X), 0, 0);
+            else if (abs.Y >= abs.Z) localAxis = new Vector3(0, MathF.Sign(local.Y), 0);
+            else localAxis = new Vector3(0, 0, MathF.Sign(local.Z));
+            QuaternionEx.Transform(localAxis, orientation, out var axis);
+            if (Vector3.Dot(axis, up) > cosMaximumSlope)
+                normal = axis * sign;
+        }
+
+        /// <summary>True (with its orientation) if the collidable is tagged as voxel terrain or a grid in <see cref="Colliders"/>:
+        /// built from unrotated boxes in its local space. Everything else (other characters, untagged shapes) is left alone.</summary>
+        bool TryGetBoxColliderOrientation(CollidableReference collidable, out Quaternion orientation)
+        {
+            orientation = Quaternion.Identity;
+            if (Colliders is null)
+                return false;
+            if (!Colliders[collidable].IsVoxel)
+                return false;
+            orientation = collidable.Mobility == CollidableMobility.Static
+                ? Simulation.Statics[collidable.StaticHandle].Pose.Orientation
+                : Simulation.Bodies[collidable.BodyHandle].Pose.Orientation;
+            return true;
         }
 
         Buffer<(int Start, int Count)> boundingBoxExpansionJobs;
@@ -584,7 +730,9 @@ namespace ClearSkies.Engine.Physics.Characters
                     //2) The character was previously supported by a body, and is now supported by a different body.
                     //3) The character was previously supported by a static, and is now supported by a body.
                     //4) The character was previously supported by a body, and is now supported by a static.
-                    var shouldRemove = character.Supported && (character.TryJump || supportCandidate.Depth == float.MinValue || character.Support.Packed != supportCandidate.Support.Packed);
+                    var wantsJump = character.JumpPending;
+                    character.JumpedThisStep = false;
+                    var shouldRemove = character.Supported && (wantsJump || supportCandidate.Depth == float.MinValue || character.Support.Packed != supportCandidate.Support.Packed);
                     if (shouldRemove)
                     {
                         //Mark the constraint for removal.
@@ -592,7 +740,7 @@ namespace ClearSkies.Engine.Physics.Characters
                     }
 
                     //If the character is jumping, don't create a constraint.
-                    if (supportCandidate.Depth > float.MinValue && character.TryJump)
+                    if (supportCandidate.Depth > float.MinValue && wantsJump)
                     {
                         QuaternionEx.Transform(character.LocalUp, Simulation.Bodies.ActiveSet.SolverStates[bodyLocation.Index].Motion.Pose.Orientation, out var characterUp);
                         //Note that we assume that character orientations are constant. This isn't necessarily the case in all uses, but it's a decent approximation.
@@ -634,6 +782,9 @@ namespace ClearSkies.Engine.Physics.Characters
                             jump.SupportBodyIndex = -1;
                         }
                         character.Supported = false;
+                        character.JumpRequestRemaining = 0;
+                        character.JumpedSinceSupported = true;
+                        character.JumpedThisStep = true;
                     }
                     else if (supportCandidate.Depth > float.MinValue)
                     {
@@ -719,10 +870,151 @@ namespace ClearSkies.Engine.Physics.Characters
                     else
                     {
                         character.Supported = false;
+                        if (wantsJump && !character.JumpedSinceSupported && character.TimeSinceSupported <= character.CoyoteTime)
+                            QueueCoyoteJump(ref character, ref bodyLocation, ref analyzeContactsWorkerCache);
+                    }
+
+                    if (character.Supported)
+                    {
+                        character.TimeSinceSupported = 0;
+                        character.JumpedSinceSupported = false;
+                        character.HasAirReferenceBody = character.Support.Mobility != CollidableMobility.Static;
+                        if (character.HasAirReferenceBody)
+                            character.AirReferenceBody = character.Support.BodyHandle;
+                        character.TimeAwayFromAirReference = 0;
+                        character.AirReferenceVelocity = default;
+                    }
+                    else
+                    {
+                        character.TimeSinceSupported += analysisDt;
                     }
                 }
-                //The TryJump flag is always reset even if the attempt failed.
-                character.TryJump = false;
+                //An unfulfilled jump request stays pending for a while (see JumpRequestRemaining).
+                if (character.JumpRequestRemaining > 0)
+                    character.JumpRequestRemaining -= analysisDt;
+            }
+        }
+
+        /// <summary>
+        /// A jump within coyote time of walking off a support. There's no contact left to push off, so it follows the same
+        /// rule as a grounded jump against the body the character last stood on (<see cref="CharacterController.AirReferenceBody"/>,
+        /// if it was a body): reach <see cref="CharacterController.JumpVelocity"/> relative to that body's velocity where the
+        /// character is, and push a dynamic body back. Runs during the multithreaded analysis, so it only queues the jump.
+        /// </summary>
+        void QueueCoyoteJump(ref CharacterController character, ref BodyMemoryLocation bodyLocation, ref AnalyzeContactsWorkerCache analyzeContactsWorkerCache)
+        {
+            ref var state = ref Simulation.Bodies.ActiveSet.SolverStates[bodyLocation.Index];
+            QuaternionEx.Transform(character.LocalUp, state.Motion.Pose.Orientation, out var characterUp);
+            var characterUpVelocity = Vector3.Dot(state.Motion.Velocity.Linear, characterUp);
+            var supportUpVelocity = 0f;
+            ref var jump = ref analyzeContactsWorkerCache.Jumps.AllocateUnsafely();
+            jump.CharacterBodyIndex = bodyLocation.Index;
+            jump.SupportBodyIndex = -1;
+            if (character.HasAirReferenceBody && Simulation.Bodies.BodyExists(character.AirReferenceBody))
+            {
+                ref var supportLocation = ref Simulation.Bodies.HandleToLocation[character.AirReferenceBody.Value];
+                ref var supportState = ref Simulation.Bodies.Sets[supportLocation.SetIndex].SolverStates[supportLocation.Index];
+                var offsetFromSupport = state.Motion.Pose.Position - supportState.Motion.Pose.Position;
+                supportUpVelocity = Vector3.Dot(supportState.Motion.Velocity.Linear + Vector3.Cross(supportState.Motion.Velocity.Angular, offsetFromSupport), characterUp);
+                //Only an awake dynamic body can be pushed back; kinematics ignore impulses anyway.
+                if (supportLocation.SetIndex == 0 && supportState.Inertia.Local.InverseMass > 0)
+                {
+                    jump.SupportBodyIndex = supportLocation.Index;
+                    jump.SupportImpulseOffset = offsetFromSupport;
+                }
+            }
+            jump.CharacterVelocityChange = characterUp * MathF.Max(0, character.JumpVelocity - (characterUpVelocity - supportUpVelocity));
+            character.JumpRequestRemaining = 0;
+            character.JumpedSinceSupported = true;
+            character.JumpedThisStep = true;
+        }
+
+        /// <summary>
+        /// Moves an unsupported character for one time step: <see cref="CharacterController.ExtraFallGravity"/> on top of the
+        /// simulation's gravity (from the step after a jump), and air control. Holding a direction (a nonzero <see cref="CharacterController.TargetVelocity"/>)
+        /// accelerates along it up to the target speed times <see cref="CharacterController.AirControlSpeedScale"/>, never cutting
+        /// speed already along it, while bleeding off sideways drift so the character can steer; with no target it brakes gently.
+        /// Both are relative to <see cref="CharacterController.AirReferenceVelocity"/> (the ship left behind, if any).
+        /// </summary>
+        void UpdateAirborneCharacter(ref CharacterController character, ref SolverState state, float dt)
+        {
+            ref var motion = ref state.Motion;
+            QuaternionEx.Transform(character.LocalUp, motion.Pose.Orientation, out var up);
+            UpdateAirReference(ref character, motion.Pose.Position, up, dt);
+            if (!character.JumpedThisStep)
+                motion.Velocity.Linear -= up * (character.ExtraFallGravity * dt);
+
+            var relative = motion.Velocity.Linear - character.AirReferenceVelocity;
+            var horizontal = relative - up * Vector3.Dot(relative, up);
+            var velocityChange = state.Inertia.Local.InverseMass * character.MaximumHorizontalForce * character.AirControlForceScale * dt;
+            var targetSpeed = character.TargetVelocity.Length();
+            var right = Vector3.Cross(character.ViewDirection, up);
+            var rightLengthSquared = right.LengthSquared();
+            Vector3 newHorizontal;
+            if (targetSpeed > 0 && rightLengthSquared > 1e-10f)
+            {
+                right /= MathF.Sqrt(rightLengthSquared);
+                var forward = Vector3.Cross(up, right);
+                var direction = (right * character.TargetVelocity.X + forward * character.TargetVelocity.Y) / targetSpeed;
+                var along = Vector3.Dot(horizontal, direction);
+                var newAlong = MathF.Max(along, MathF.Min(along + velocityChange, targetSpeed * character.AirControlSpeedScale));
+                var lateral = horizontal - direction * along;
+                newHorizontal = direction * newAlong + MoveTowardsZero(lateral, velocityChange);
+            }
+            else
+            {
+                newHorizontal = MoveTowardsZero(horizontal, velocityChange * character.AirBrakeScale);
+            }
+            motion.Velocity.Linear += newHorizontal - horizontal;
+        }
+
+        static Vector3 MoveTowardsZero(Vector3 v, float amount)
+        {
+            var length = v.Length();
+            return length <= amount ? Vector3.Zero : v * ((length - amount) / length);
+        }
+
+        /// <summary>Follows the ship an airborne character left while it's still below it (a ray straight down hits it first),
+        /// releasing it — its velocity then kept as the reference — after <see cref="AirReferenceReleaseTime"/> away from it.</summary>
+        void UpdateAirReference(ref CharacterController character, Vector3 position, Vector3 up, float dt)
+        {
+            if (!character.HasAirReferenceBody)
+                return;
+            if (!Simulation.Bodies.BodyExists(character.AirReferenceBody))
+            {
+                character.HasAirReferenceBody = false;
+                return;
+            }
+            var hitHandler = new NearestHitHandler { Ignore = character.BodyHandle, T = float.MaxValue };
+            Simulation.RayCast(position, -up, AirReferenceCheckDistance, ref hitHandler);
+            var aboveReference = hitHandler.T < float.MaxValue &&
+                                 hitHandler.Hit.Mobility != CollidableMobility.Static && hitHandler.Hit.BodyHandle == character.AirReferenceBody;
+            character.TimeAwayFromAirReference = aboveReference ? 0 : character.TimeAwayFromAirReference + dt;
+            character.AirReferenceVelocity = Simulation.Bodies[character.AirReferenceBody].Velocity.Linear;
+            if (character.TimeAwayFromAirReference > AirReferenceReleaseTime)
+                character.HasAirReferenceBody = false;
+        }
+
+        /// <summary>Records the nearest collidable along a ray, skipping one body (the character's own capsule).</summary>
+        struct NearestHitHandler : IRayHitHandler
+        {
+            public BodyHandle Ignore;
+            public float T;
+            public CollidableReference Hit;
+
+            public bool AllowTest(CollidableReference collidable) =>
+                collidable.Mobility == CollidableMobility.Static || collidable.BodyHandle != Ignore;
+
+            public bool AllowTest(CollidableReference collidable, int childIndex) => true;
+
+            public void OnRayHit(in RayData ray, ref float maximumT, float t, in Vector3 normal, CollidableReference collidable, int childIndex)
+            {
+                if (t < T)
+                {
+                    T = t;
+                    Hit = collidable;
+                    maximumT = t;
+                }
             }
         }
 
@@ -734,6 +1026,7 @@ namespace ClearSkies.Engine.Physics.Characters
 
         int analysisJobIndex;
         int analysisJobCount;
+        float analysisDt;
         Buffer<AnalyzeContactsJob> jobs;
         Action<int> analyzeContactsWorker;
         void AnalyzeContactsWorker(int workerIndex)
@@ -755,6 +1048,7 @@ namespace ClearSkies.Engine.Physics.Characters
         {
             //var start = Stopwatch.GetTimestamp();
             Debug.Assert(contactCollectionWorkerCaches.Allocated, "Worker caches weren't properly allocated; did you forget to call PrepareForContacts before collision detection?");
+            analysisDt = dt;
 
             if (threadDispatcher == null)
             {
@@ -837,6 +1131,18 @@ namespace ClearSkies.Engine.Physics.Characters
                     workerCache.Dispose(pool);
                 }
                 pool.Return(ref analyzeContactsWorkerCaches);
+            }
+
+            //Airborne movement, after the jumps above so a character that just jumped gets this step's share too. Sequential:
+            //it casts rays, and there are few characters.
+            for (int i = 0; i < characters.Count; ++i)
+            {
+                ref var character = ref characters[i];
+                if (character.Supported)
+                    continue;
+                ref var location = ref Simulation.Bodies.HandleToLocation[character.BodyHandle.Value];
+                if (location.SetIndex == 0)
+                    UpdateAirborneCharacter(ref character, ref Simulation.Bodies.ActiveSet.SolverStates[location.Index], dt);
             }
 
             //var end = Stopwatch.GetTimestamp();
