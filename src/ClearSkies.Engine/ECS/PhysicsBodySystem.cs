@@ -25,7 +25,7 @@ namespace ClearSkies.Engine.ECS;
 public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
 {
     /// <summary>Static-collider jobs (one chunk each) in flight at once (see UpdateStaticCollider). Streaming adds chunks
-    /// in bursts of hundreds, so this is well above the core count: the thread pool queues the excess.</summary>
+    /// in bursts of hundreds, so this is well above the core count: the background workers (see BackgroundWork) queue the excess.</summary>
     private const int MaxInFlight = 64;
 
     private readonly EntitySet         _dirtyChunks;
@@ -186,7 +186,7 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
 
         _inFlight += 1;
         var data = entry.Data;
-        ThreadPool.UnsafeQueueUserWorkItem(_ =>
+        BackgroundWork.Soon(() =>
         {
             try
             {
@@ -198,7 +198,7 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
             {
                 _colliderResults.Enqueue((pos, entry, null, e));
             }
-        }, null);
+        });
         return true;
     }
 

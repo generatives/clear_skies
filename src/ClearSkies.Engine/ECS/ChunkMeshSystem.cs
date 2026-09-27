@@ -213,7 +213,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
             var nZ = alone ? null : volume.GetData(pos.Offset(0, 0, -1)); var pZ = alone ? null : volume.GetData(pos.Offset(0, 0, 1));
             var vol = volume;
             bool wireframe = _renderer.WireframeMode;
-            ThreadPool.UnsafeQueueUserWorkItem(_ =>
+            BackgroundWork.Soon(() =>
             {
                 try
                 {
@@ -227,7 +227,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                 {
                     _results.Enqueue(new Result(entry.Entity, Array.Empty<byte>(), 0, 0, 0, 0, false, Array.Empty<ModelCell>(), e));
                 }
-            }, null);
+            });
 
             if (_inFlight >= MaxInFlight) return;
         }
