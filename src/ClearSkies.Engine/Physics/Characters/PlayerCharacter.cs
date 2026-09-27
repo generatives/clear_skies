@@ -306,16 +306,34 @@ public struct PlayerCharacter
         // sprinting when Ctrl goes down) — so it halts at the overhang limit rather than after it.
         var deceleration = characterBody.LocalInertia.InverseMass * character.MaximumHorizontalForce;
         var position = characterBody.Pose.Position;
+
+        // Already hanging further out than the limit allows (Ctrl pressed after walking out, an overshoot, a ship
+        // moving underneath): judge moves against how far out the character already is instead, so it can still
+        // slide along the edge or step back, just not go further out. Found to within ~1cm by bisection.
+        var overhang = CrouchEdgeOverhang;
+        if (!HasGroundNear(position, axisA, axisB, up, overhang))
+        {
+            float low = overhang, high = shape.Radius;
+            if (!HasGroundNear(position, axisA, axisB, up, high))
+                return targetVelocity; // nothing within reach underneath: not standing on an edge this guard understands
+            while (high - low > 0.01f)
+            {
+                var middle = (low + high) / 2;
+                if (HasGroundNear(position, axisA, axisB, up, middle)) high = middle; else low = middle;
+            }
+            overhang = high;
+        }
+
         var targetA = Vector3.Dot(desired, axisA);
         var stopA = StoppingDistance(targetA, Vector3.Dot(velocity, axisA), dt, deceleration);
-        if (targetA != 0 && !HasGroundNear(position + axisA * stopA, axisA, axisB, up))
+        if (targetA != 0 && !HasGroundNear(position + axisA * stopA, axisA, axisB, up, overhang))
         {
             targetA = 0;
             stopA = 0;
         }
         var targetB = Vector3.Dot(desired, axisB);
         var stopB = StoppingDistance(targetB, Vector3.Dot(velocity, axisB), dt, deceleration);
-        if (targetB != 0 && !HasGroundNear(position + axisA * stopA + axisB * stopB, axisA, axisB, up))
+        if (targetB != 0 && !HasGroundNear(position + axisA * stopA + axisB * stopB, axisA, axisB, up, overhang))
             targetB = 0;
         var allowed = axisA * targetA + axisB * targetB;
         return new Vector2(Vector3.Dot(allowed, right), Vector3.Dot(allowed, forward));
@@ -338,13 +356,13 @@ public struct PlayerCharacter
     }
 
     /// <summary>True if there's something to stand on within <see cref="CrouchMaximumDrop"/> below the feet, anywhere
-    /// under a square footprint <see cref="CrouchEdgeOverhang"/> each way from <paramref name="centre"/>, lined up with
+    /// under a square footprint <paramref name="overhang"/> each way from <paramref name="centre"/>, lined up with
     /// the support's axes: a thin plate of that size is swept straight down from just above the feet. Being square and
     /// aligned with the blocks (as Minecraft's is), the overhang allowed at a corner is the same on both axes whichever
     /// way the character arrives or leaves, so it never shifts outward along one edge as it moves away from the other.
     /// The sweep starts clear of the floor; anything it overlaps at the start is a wall the capsule (far wider than the
     /// plate) couldn't be pressed into, so zero-distance hits are ignored.</summary>
-    private readonly bool HasGroundNear(Vector3 centre, Vector3 axisA, Vector3 axisB, Vector3 up)
+    private readonly bool HasGroundNear(Vector3 centre, Vector3 axisA, Vector3 axisB, Vector3 up, float overhang)
     {
         const float startAboveFeet = 0.1f;
         const float plateThickness = 0.02f;
@@ -353,7 +371,7 @@ public struct PlayerCharacter
         var basis = new Matrix3x3 { X = axisA, Y = up, Z = axisB };
         QuaternionEx.CreateFromRotationMatrix(basis, out var orientation);
         var hitHandler = new AnyHitHandler { Ignore = bodyHandle };
-        characters.Simulation.Sweep(new Box(2 * CrouchEdgeOverhang, plateThickness, 2 * CrouchEdgeOverhang), new RigidPose(start, orientation),
+        characters.Simulation.Sweep(new Box(2 * overhang, plateThickness, 2 * overhang), new RigidPose(start, orientation),
             new BodyVelocity(-up), startAboveFeet + CrouchMaximumDrop, characters.Simulation.BufferPool, ref hitHandler);
         return hitHandler.Hit;
     }
