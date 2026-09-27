@@ -92,7 +92,7 @@ host.AddSystem(physicsBody, SystemStage.Logic);
 host.AddSystem(new PlayerMovementSystem(host.World, host.Input), SystemStage.Logic);
 // After the player's own movement, which it overrides while flying. --flight-test flies once the world has loaded, then quits.
 bool flightTest = args.Contains("--flight-test");
-host.AddSystem(new StreamingFlightTest(host.World, flightTest, flightTest ? () => host.Window.Native.Close() : null),
+host.AddSystem(new StreamingFlightTest(host, flightTest, flightTest ? () => host.Window.Native.Close() : null),
                SystemStage.Logic);
 
 // Milestone 5: airship flight (velocity control law + Fan/Buoyant propulsion, merged into one system —
@@ -186,6 +186,7 @@ static (Vector3D<float> Position, float Yaw, float Pitch)? HeartSpawn(ulong seed
 }
 
 host.Run();
+BackgroundWork.Stop(TimeSpan.FromSeconds(5)); // no chunk still loading or meshing while the store is freed
 
 chunkLoadSystem.SaveAllDirty(); // graceful-exit flush; unload/autosave already cover the running game
 gridStore.Dispose();

@@ -17,6 +17,8 @@ public static class BackgroundWork
 
     private static readonly System.Collections.Concurrent.ConcurrentQueue<Action> _soon = new(), _bulk = new();
     private static readonly SemaphoreSlim _ready = new(0);
+    private static volatile bool _stopping;
+    private static int _running;
 
     static BackgroundWork()
     {
@@ -41,14 +43,29 @@ public static class BackgroundWork
     /// <summary>Work queued and not started yet, for the debug panels.</summary>
     public static int Waiting => _soon.Count + _bulk.Count;
 
+    /// <summary>Drops the work still waiting and waits (up to <paramref name="timeout"/>) for what is running to
+    /// finish, so shutting down doesn't free what a job is still using (physics buffers, GPU objects).</summary>
+    public static void Stop(TimeSpan timeout)
+    {
+        _stopping = true;
+        while (_soon.TryDequeue(out _) || _bulk.TryDequeue(out _)) { }
+        var until = DateTime.UtcNow + timeout;
+        while (Volatile.Read(ref _running) > 0 && DateTime.UtcNow < until) Thread.Sleep(1);
+    }
+
     private static void Run()
     {
         while (true)
         {
             _ready.Wait();
-            if (!_soon.TryDequeue(out var work) && !_bulk.TryDequeue(out work)) continue;
-            try { work(); }
+            Interlocked.Increment(ref _running);
+            try
+            {
+                if (_stopping || (!_soon.TryDequeue(out var work) && !_bulk.TryDequeue(out work))) continue;
+                work();
+            }
             catch (Exception ex) { Console.WriteLine($"[background] unhandled: {ex}"); }
+            finally { Interlocked.Decrement(ref _running); }
         }
     }
 }
