@@ -51,8 +51,14 @@ public sealed unsafe class GpuBuffer : IDisposable
     public static GpuBuffer CreateReadback(GpuContext ctx, ulong size)
         => Create(ctx, Align4(size), BufferUsage.MapRead | BufferUsage.CopyDst);
 
+    /// <summary>Writes queued so far, and their bytes, across every buffer: for diagnostics (a frame that writes
+    /// many small pieces pays per write).</summary>
+    public static long WriteCount, WriteBytes;
+
     public void Write<T>(ulong offset, ReadOnlySpan<T> data) where T : unmanaged
     {
+        WriteCount++;
+        WriteBytes += data.Length * sizeof(T);
         fixed (T* p = data)
             _ctx.Api.QueueWriteBuffer(_ctx.Queue, Handle, offset, p, (nuint)(data.Length * sizeof(T)));
     }
