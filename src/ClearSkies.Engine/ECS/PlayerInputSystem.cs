@@ -154,7 +154,9 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
         }
 
         // Find the nearest hit across every volume (the static world and each dynamic grid), casting the ray in
-        // each volume's own space. Rotation preserves length, so hit distances compare directly.
+        // each volume's own space. Rotation preserves length, so hit distances compare directly. Volumes are placed
+        // where they're drawn, like the camera the ray comes from, so the target is the block the player sees
+        // (a moving ship's true pose is up to a tick ahead of its drawing).
         float        bestDist   = float.MaxValue;
         ChunkVolume? bestVolume = null;
         Entity       bestEntity = default;
@@ -164,7 +166,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
         foreach (ref readonly Entity e in _volumes.GetEntities())
         {
             var volume = e.Get<ChunkGrid>().Volume;
-            ref readonly var root = ref e.Get<Transform>();
+            var root = e.DrawnPose();
             var lo = volume.WorldToVoxel(root, origin);
             var ld = Vec.Rotate(Vec.Conjugate(root.Rotation), dir);
 
@@ -183,7 +185,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
         bool bestIsDynamicGrid = bestEntity.Has<DynamicGrid>();
         TargetBlock  = bestBlock;
         TargetNormal = bestNormal;
-        ShowFace(bestVolume, bestEntity.Get<Transform>(), bestBlock, bestNormal);
+        ShowFace(bestVolume, bestEntity.DrawnPose(), bestBlock, bestNormal);
 
         if (_input.WasKeyPressed(Key.L))
         {
