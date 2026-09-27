@@ -456,9 +456,9 @@ namespace ClearSkies.Engine.Physics.Characters
         /// <param name="sign">1 if the manifold normal points at the character (it points from B to A), -1 otherwise.</param>
         static void SnapNormal(ref Vector3 normal, Quaternion orientation, float sign, Vector3 up, float cosMaximumSlope)
         {
+            //Pick the face from the normal alone: on a steep but walkable deck, a seam's edge normal can lean further from up
+            //than the maximum slope even though the face it belongs to is walkable. Walls and ceilings fail the test below.
             var towardsCharacter = normal * sign;
-            if (Vector3.Dot(towardsCharacter, up) <= cosMaximumSlope)
-                return; // a wall or ceiling contact; leave it be
             QuaternionEx.Transform(towardsCharacter, Quaternion.Conjugate(orientation), out var local);
             var abs = Vector3.Abs(local);
             Vector3 localAxis;
