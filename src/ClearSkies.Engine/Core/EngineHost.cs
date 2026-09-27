@@ -32,7 +32,7 @@ public sealed class EngineHost : IDisposable
     public PhysicsWorld Physics { get; }
     public Time Time { get; }
 
-    /// <summary>Decides how many fixed ticks each frame runs (see <see cref="SystemStage.Tick"/>).</summary>
+    /// <summary>Decides how many fixed ticks each frame runs (see <see cref="SystemStage.Simulation"/>).</summary>
     public TickClock Clock { get; } = new();
     public ImGuiController? Gui { get; }
 
@@ -69,12 +69,23 @@ public sealed class EngineHost : IDisposable
         Gui.RegisterDebugUi(Context.Timer);
     }
 
-    /// <summary>Schedules <paramref name="system"/> in an update stage (Input, Tick, Logic or PreRender), after the systems
-    /// already in it.</summary>
+    /// <summary>Schedules <paramref name="system"/> in an update stage (Input, Simulation, Frame or PreRender), after the
+    /// systems already in it.</summary>
     public void AddSystem(ISystem system, SystemStage stage)
     {
         if (IsRenderStage(stage))
             throw new ArgumentException($"{stage} is a render stage; it takes an {nameof(IRenderSystem)}.", nameof(stage));
+        Schedule(system, stage);
+    }
+
+    /// <summary>Schedules one stage of a system with work in several: call once per stage it runs in, each at the point
+    /// in that stage where it should run.</summary>
+    public void AddSystem(IStagedSystem system, SystemStage stage)
+    {
+        if (IsRenderStage(stage))
+            throw new ArgumentException($"{stage} is a render stage; it takes an {nameof(IRenderSystem)}.", nameof(stage));
+        if (_systems.Exists(s => s.system == system && s.stage == stage))
+            throw new ArgumentException($"{system.GetType().Name} is already scheduled in {stage}.", nameof(stage));
         Schedule(system, stage);
     }
 
@@ -91,17 +102,18 @@ public sealed class EngineHost : IDisposable
 
     private void Schedule(object system, SystemStage stage)
     {
+        bool registered = _systems.Exists(s => s.system == system);
         _systems.Add((system, stage));
         _systemMs.Add(0.0);
         _frameMs.Add(0.0);
         _rawMs.Add(0.0);
-        if (system is IDebugUiSystem debugUi) RegisterDebugUi(debugUi);
+        if (system is IDebugUiSystem debugUi && !registered) RegisterDebugUi(debugUi);
     }
 
     /// <summary>Adds a debug panel to the debug UI (nothing, headless).</summary>
     public void RegisterDebugUi(IDebugUiSystem panel) => Gui?.RegisterDebugUi(panel);
 
-    // Per-system CPU time per frame (ms, smoothed), parallel to _systems; _frameMs sums this frame's runs (a Tick
+    // Per-system CPU time per frame (ms, smoothed), parallel to _systems; _frameMs sums this frame's runs (a Simulation
     // system runs several times in some frames and not at all in others).
     private readonly List<double> _systemMs = new();
     private readonly List<double> _frameMs = new();
@@ -158,12 +170,12 @@ public sealed class EngineHost : IDisposable
         for (int i = 0; i < ticks; i++)
         {
             Time.Tick++;
-            RunStage(SystemStage.Tick, Time.TickSeconds);
+            RunStage(SystemStage.Simulation, Time.TickSeconds);
         }
         Time.TicksLastFrame = ticks;
         Time.Alpha = Clock.Alpha;
 
-        RunStage(SystemStage.Logic, (float)dt);
+        RunStage(SystemStage.Frame, (float)dt);
         RunStage(SystemStage.PreRender, (float)dt);
         Input?.NewFrame();  // clear after all stages read, before next frame's events fire
         SmoothTimes(render: false);
@@ -216,7 +228,8 @@ public sealed class EngineHost : IDisposable
             var (system, s) = _systems[i];
             if (s != stage) continue;
             _systemTimer.Restart();
-            ((ISystem)system).Update(dt);
+            if (system is IStagedSystem staged) staged.Update(stage, dt);
+            else ((ISystem)system).Update(dt);
             RecordTime(i);
         }
     }
