@@ -1,3 +1,5 @@
+using ClearSkies.Engine.Commands;
+using ClearSkies.Engine.Commands.Handlers;
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Entities;
@@ -77,6 +79,18 @@ host.AddSystem(interpolation.BeginTick, SystemStage.Tick); // the true poses bac
 host.AddSystem(hierarchy, SystemStage.Tick);
 host.AddSystem(inputSample, SystemStage.Tick);
 
+// Commands: every discrete change goes through a registered handler, applied at one point in the tick. Single-player
+// is a host with nobody connected, so every command's authority is here and it applies in the tick it was sent.
+var commands = new CommandSystem(session, registry, () => host.Time.Tick);
+var blockEntities = new BlockEntities(host.World, registry);
+var editLimits = new EditLimits();
+commands.Register(new EditVoxelsHandler(blockEntities, editLimits));
+commands.Register(new SetLeverHandler(blockEntities));
+commands.Register(new SetWheelHandler(blockEntities));
+commands.Register(new SetGridLockedHandler(registry, host.Physics));
+commands.Register(new RightGridHandler(registry, host.Physics));
+commands.Register(new SetMoveModeHandler(registry));
+
 var physicsBody = new PhysicsBodySystem(host.World, host.Physics);
 
 // Streaming budget: how much GPU light storage the loaded world may use, in MB (3 KB per 8³ brick of surface). Chunks
@@ -109,11 +123,18 @@ host.AddSystem(physicsBody, SystemStage.Tick);
 // Character controller (ported from BepuPhysics2's own Demos/Demos/Characters — see
 // Physics/Characters/): motion goals (WASD/jump/mode toggle) must be set before the physics step
 // so Simulation.Timestep's CollisionsDetected analysis sees them this same tick.
-host.AddSystem(new PlayerMovementSystem(host.World), SystemStage.Tick);
+host.AddSystem(new PlayerMovementSystem(host.World, commands), SystemStage.Tick);
 
 // Milestone 5: airship flight (velocity control law + Fan/Buoyant propulsion, merged into one system —
 // see AirshipFlightSystem), before the physics step so its impulses are integrated this same tick.
-var gridPilot = new GridPilotSystem(host.World, host.Input, host.Physics, staticVolume, physicsBody);
+var gridPilot = new GridPilotSystem(host.World, host.Input, host.Physics, staticVolume, physicsBody, commands);
+// Place, break, spawn and use controls (levers and wheels, whose control systems turn drags into commands), then apply
+// every command sent this tick.
+var blockActions = new BlockActionSystem(host.World, commands, editLimits, gridSelection);
+host.AddSystem(blockActions, SystemStage.Tick);
+host.AddSystem(new LeverControlSystem(host.World, commands), SystemStage.Tick);
+host.AddSystem(new SteeringWheelControlSystem(host.World, commands), SystemStage.Tick);
+host.AddSystem(commands, SystemStage.Tick);
 var airshipFlight = new AirshipFlightSystem(host.World, host.Physics);
 host.AddSystem(airshipFlight, SystemStage.Tick);
 var presence = new EntityPresenceSystem(host.World, session, staticVolume, ViewDistance);
@@ -131,12 +152,9 @@ host.AddSystem(hierarchy, SystemStage.Logic);
 host.AddSystem(new CameraFollowSystem(host.World), SystemStage.Logic); // the camera at the local player's eye
 host.AddSystem(chunkLoadSystem, SystemStage.Logic);
 host.AddSystem(gridPilot, SystemStage.Logic);
-var playerInput = new PlayerInputSystem(host.World, host.Input, meshSystem, host.Renderer, gridSelection);
-host.AddSystem(playerInput, SystemStage.Logic);
-host.AddSystem(new HudUi(ui, host.Input, playerInput, gridPilot, host.Renderer.Atlas,
+host.AddSystem(new BlockTargetSystem(host.World, host.Input, host.Renderer, blockActions, editLimits), SystemStage.Logic);
+host.AddSystem(new HudUi(ui, host.Input, blockActions, gridPilot, host.Renderer.Atlas,
                          Path.Combine(AppContext.BaseDirectory, "Resources", "Icons")), SystemStage.Logic); // crosshair, hotbar
-host.AddSystem(new LeverControlSystem(host.World), SystemStage.Logic); // after PlayerInputSystem, whose clicks drag levers
-host.AddSystem(new SteeringWheelControlSystem(host.World), SystemStage.Logic); // ...and turn wheels
 var gridPersistence = new GridPersistenceSystem(host.World, meshSystem, host.Physics, gridSelection);
 host.AddSystem(gridPersistence, SystemStage.Logic);
 // The airship-related debug panels above (Pilot/Flight/Save-Load) drew into their own separate "Systems"

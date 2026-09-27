@@ -35,7 +35,7 @@ public sealed class InputSampleSystem : ISystem
         {
             float yaw = 0f, pitch = 0f;
             if (e.Has<MouseLookComponent>()) (yaw, pitch) = (e.Get<MouseLookComponent>().Yaw, e.Get<MouseLookComponent>().Pitch);
-            e.Get<PlayerInput>() = _latch.Take(held, yaw, pitch);
+            e.Get<PlayerInput>() = _latch.Take(held, yaw, pitch, _input.CursorCaptured);
         }
     }
 }

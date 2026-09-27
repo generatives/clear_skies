@@ -6,7 +6,7 @@ namespace ClearSkies.Engine.ECS;
 
 /// <summary>
 /// Shared "find the active camera" + "compute a spawn point in front of it" helpers, factored out of
-/// PlayerInputSystem so both the G-key single-block spawn and Load-from-file use identical placement.
+/// the player input code so both the G-key single-block spawn and Load-from-file use identical placement.
 /// </summary>
 public static class CameraUtil
 {

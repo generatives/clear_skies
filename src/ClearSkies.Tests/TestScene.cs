@@ -1,5 +1,7 @@
 using System.Numerics;
 using BepuPhysics.Collidables;
+using ClearSkies.Engine.Commands;
+using ClearSkies.Engine.Commands.Handlers;
 using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Input;
@@ -24,6 +26,10 @@ public sealed class HeadlessScene : IDisposable
     public readonly GridSelection Selection;
     public readonly ChunkVolume WorldVolume;
     public readonly EntityPresenceSystem Presence;
+    public readonly CommandSystem Commands;
+    public readonly BlockEntities Blocks;
+    public readonly EditLimits Limits = new();
+    public uint TickNumber;
     private readonly GridNetworking _gridNetworking;
     private readonly List<Engine.Core.ISystem> _tick = new();
 
@@ -43,10 +49,19 @@ public sealed class HeadlessScene : IDisposable
         root.Set<Rendered>();
 
         Presence = new EntityPresenceSystem(World, Session, WorldVolume, viewDistance: 500f);
+        Commands = new CommandSystem(Session, Registry, () => TickNumber);
+        Blocks = new BlockEntities(World, Registry);
+        Commands.Register(new EditVoxelsHandler(Blocks, Limits));
+        Commands.Register(new SetLeverHandler(Blocks));
+        Commands.Register(new SetWheelHandler(Blocks));
+        Commands.Register(new SetGridLockedHandler(Registry, Physics));
+        Commands.Register(new RightGridHandler(Registry, Physics));
+        Commands.Register(new SetMoveModeHandler(Registry));
         var hierarchy = new HierarchyTransformSystem(World);
         _tick.Add(hierarchy);
         _tick.Add(new PhysicsBodySystem(World, Physics));
-        _tick.Add(new PlayerMovementSystem(World));
+        _tick.Add(new PlayerMovementSystem(World, Commands));
+        _tick.Add(Commands);
         _tick.Add(Presence);
         _tick.Add(Physics);
         _tick.Add(new PhysicsTransformSyncSystem(World, Physics));
@@ -57,7 +72,10 @@ public sealed class HeadlessScene : IDisposable
     public void Tick(int count = 1)
     {
         for (int i = 0; i < count; i++)
+        {
+            TickNumber++;
             foreach (var s in _tick) s.Update(Dt);
+        }
     }
 
     /// <summary>Runs ticks until <paramref name="done"/> or <paramref name="max"/> ticks.</summary>

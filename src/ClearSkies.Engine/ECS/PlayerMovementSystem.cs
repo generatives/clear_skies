@@ -2,6 +2,9 @@ using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Input;
 using ClearSkies.Engine.Math;
 using ClearSkies.Engine.Physics.Characters;
+using ClearSkies.Engine.Commands;
+using ClearSkies.Engine.Commands.Handlers;
+using ClearSkies.Engine.Entities;
 using DefaultEcs;
 using Silk.NET.Maths;
 using PhysVec = System.Numerics.Vector3;
@@ -9,7 +12,8 @@ using PhysVec = System.Numerics.Vector3;
 namespace ClearSkies.Engine.ECS;
 
 /// <summary>
-/// Each tick, before physics: the FreeFly/Walking mode toggle (V) and per-mode movement, all from the tick's
+/// Each tick, before physics: the FreeFly/Walking mode toggle (V, sent as a SetMoveMode command, which applies later
+/// this same tick) and per-mode movement, all from the tick's
 /// <see cref="PlayerInput"/>. FreeFly moves <see cref="Transform.Position"/> directly; E and Q raise and lower its speed
 /// by <see cref="FlySpeedStep"/> (Ctrl triples it while held). Walking instead feeds WASD/Shift/Space into the
 /// character's motion goals (<see cref="PlayerCharacter.UpdateCharacterGoals"/>) — actual movement happens inside the
@@ -23,9 +27,12 @@ namespace ClearSkies.Engine.ECS;
 public sealed class PlayerMovementSystem : ISystem
 {
     private readonly EntitySet _players;
+    private readonly CommandSystem? _commands;
 
-    public PlayerMovementSystem(World world)
+    /// <param name="commands">Where the walk/fly toggle is sent as SetMoveMode; without one it's set directly.</param>
+    public PlayerMovementSystem(World world, CommandSystem? commands = null)
     {
+        _commands = commands;
         _players = world.GetEntities()
             .With<Transform>().With<PlayerInput>()
             .With<FreeFlyController>().With<CharacterControllerComponent>().With<CharacterModeComponent>()
@@ -44,7 +51,12 @@ public sealed class PlayerMovementSystem : ISystem
 
             ref var mode = ref e.Get<CharacterModeComponent>();
             if (input.WasPressed(PlayerButtons.ToggleFly))
-                mode.FreeFly = !mode.FreeFly;
+            {
+                if (_commands != null && e.Has<NetId>())
+                    _commands.Send(new SetMoveMode { Player = e.Get<NetId>().Value, FreeFly = !mode.FreeFly });
+                else
+                    mode.FreeFly = !mode.FreeFly;
+            }
 
             // Using an Interactive block holds the player still: no walking, jumping or flying until they let go.
             bool frozen = e.Has<LookLockedComponent>();

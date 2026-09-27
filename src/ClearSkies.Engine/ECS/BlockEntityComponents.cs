@@ -35,7 +35,7 @@ public struct Buoyant
 }
 
 /// <summary>Marks a block entity the player can use: clicking it publishes <see cref="BlockInteraction"/>s for it
-/// (see <see cref="PlayerInputSystem"/>) instead of placing a block against it.</summary>
+/// (see <see cref="BlockActionSystem"/>) instead of placing a block against it.</summary>
 public struct Interactive
 {
 }

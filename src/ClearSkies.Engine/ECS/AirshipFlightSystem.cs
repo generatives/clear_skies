@@ -328,7 +328,7 @@ public sealed class AirshipFlightSystem : ISystem
         Span<int>   count = stackalloc int[3];
         foreach (var (block, value) in blocks.Levers)
         {
-            var (axis, sign) = LeverControlSystem.LeverAxis(block);
+            var (axis, sign) = Commands.BlockEntities.LeverAxis(block);
             sum[axis] += System.Math.Clamp(value, -1f, 1f) * sign;
             count[axis]++;
         }

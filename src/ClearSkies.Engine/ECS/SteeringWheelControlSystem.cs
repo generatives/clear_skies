@@ -2,6 +2,8 @@ using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Gui;
 using ClearSkies.Engine.Math;
 using ClearSkies.Engine.Rendering;
+using ClearSkies.Engine.Commands;
+using ClearSkies.Engine.Commands.Handlers;
 using DefaultEcs;
 using ImGuiNET;
 using Silk.NET.Maths;
@@ -34,18 +36,20 @@ public sealed class SteeringWheelControlSystem : ISystem, IDisposable, IDebugUiS
     // on the hub itself holds.
     private const float RimRadius = 0.44f, MinGrabRadius = 0.2f;
 
-    private readonly World       _world;
-    private readonly EntitySet   _wheels;
-    private readonly IDisposable _subscription;
+    private readonly World         _world;
+    private readonly CommandSystem _commands;
+    private readonly EntitySet     _wheels;
+    private readonly IDisposable   _subscription;
 
     // The spot held on the wheel being turned: its angle about the hub from the wheel's own +X (turning with the
     // wheel) and its distance from the hub.
     private float  _grabAngle, _grabRadius;
     private Entity _lastUsed;
 
-    public SteeringWheelControlSystem(World world)
+    public SteeringWheelControlSystem(World world, CommandSystem commands)
     {
         _world        = world;
+        _commands     = commands;
         _wheels       = world.GetEntities().With<SteeringWheel>().With<RenderedModel>().AsSet();
         _subscription = world.Subscribe<BlockInteraction>(OnInteraction);
     }
@@ -81,9 +85,11 @@ public sealed class SteeringWheelControlSystem : ISystem, IDisposable, IDebugUiS
             float pixels = InteractionDrag.AlongScreen(tangent, interaction.RayDirection, interaction.MouseDelta);
             if (pixels != 0f)
             {
-                wheel.Angle = System.Math.Clamp(wheel.Angle + pixels * Sensitivity,
-                                                -SteeringWheel.MaxAngle, SteeringWheel.MaxAngle);
-                SyncShip(e);
+                float angle = System.Math.Clamp(wheel.Angle + pixels * Sensitivity, -SteeringWheel.MaxAngle, SteeringWheel.MaxAngle);
+                // The SetWheel handler turns every wheel on the ship with it.
+                if (BlockEntities.AddressOf(e) is { } address) _commands.Send(new SetWheel { Wheel = address, Angle = angle });
+                _world.Publish(new InteractionFocus(Spot(frame, transform, angle).Point)); // keep the crosshair on it
+                return;
             }
         }
 
@@ -134,17 +140,6 @@ public sealed class SteeringWheelControlSystem : ISystem, IDisposable, IDebugUiS
         float ox = Vector3D.Dot(offset, f.X), oy = Vector3D.Dot(offset, f.Y);
         float radius = MathF.Sqrt(ox * ox + oy * oy);
         return radius < 1e-4f ? null : (MathF.Atan2(oy, ox), radius);
-    }
-
-    /// <summary>Turns every other wheel on <paramref name="source"/>'s ship to match it.</summary>
-    private void SyncShip(Entity source)
-    {
-        if (!source.Has<BlockRef>()) return;
-        var volume = source.Get<BlockRef>().Volume;
-        float angle = source.Get<SteeringWheel>().Angle;
-        foreach (ref readonly Entity other in _wheels.GetEntities())
-            if (other != source && other.Has<BlockRef>() && other.Get<BlockRef>().Volume == volume)
-                other.Get<SteeringWheel>().Angle = angle;
     }
 
     public void Dispose() => _subscription.Dispose();

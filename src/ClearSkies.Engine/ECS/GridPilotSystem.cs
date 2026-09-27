@@ -5,6 +5,8 @@ using ClearSkies.Engine.Physics;
 using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Voxels;
 using ClearSkies.Engine.Entities;
+using ClearSkies.Engine.Commands;
+using ClearSkies.Engine.Commands.Handlers;
 using DefaultEcs;
 using ImGuiNET;
 using Silk.NET.Input;
@@ -23,7 +25,7 @@ public enum GridCameraMode { ThirdPerson, Locked }
 /// the same free-fly camera entity the player always uses — no separate camera entity is created
 /// or swapped in — so chunk streaming, raycasting, etc. keep tracking one stable Entity the whole
 /// time. <see cref="CameraGridFollowComponent"/> is set on that entity while piloting so
-/// <see cref="PlayerInputSystem"/> stops reading WASD/mouse-look into it.
+/// <see cref="BlockActionSystem"/> stops reading WASD/mouse-look into it.
 /// </summary>
 public sealed class GridPilotSystem : ISystem
 {
@@ -34,6 +36,7 @@ public sealed class GridPilotSystem : ISystem
     private readonly EntitySet    _cameras;
     private readonly EntitySet    _selectedGrid;
     private readonly InputManager _input;
+    private readonly CommandSystem _commands;
     private readonly PhysicsWorld _physics;
     private readonly ChunkVolume _staticVolume;
     private readonly PhysicsBodySystem _physicsBody;
@@ -55,8 +58,9 @@ public sealed class GridPilotSystem : ISystem
     public bool IsPiloting => _isPiloting;
 
     public GridPilotSystem(World world, InputManager input, PhysicsWorld physics,
-                            ChunkVolume staticVolume, PhysicsBodySystem physicsBody)
+                            ChunkVolume staticVolume, PhysicsBodySystem physicsBody, CommandSystem commands)
     {
+        _commands        = commands;
         _input           = input;
         _physics         = physics;
         _staticVolume     = staticVolume;
@@ -173,22 +177,10 @@ public sealed class GridPilotSystem : ISystem
 
         foreach (ref readonly Entity e in _selectedGrid.GetEntities())
         {
-            ref var grid = ref e.Get<DynamicGrid>();
-            if (!e.Has<PhysicsBodyComponent>()) return;
-            var body = e.Get<PhysicsBodyComponent>().Body;
-
-            if (lockPressed)
-            {
-                grid.Locked = !grid.Locked;
-                _physics.SetBodyKinematic(body, grid.Locked, grid.Inertia);
-            }
-
-            if (rightPressed)
-            {
-                var (pos, _) = _physics.GetBodyPose(body);
-                _physics.SetBodyPose(body, pos, System.Numerics.Quaternion.Identity);
-                _physics.SetBodyAngularVelocity(body, PhysVec.Zero);
-            }
+            if (!e.Has<NetId>()) return;
+            uint id = e.Get<NetId>().Value;
+            if (lockPressed) _commands.Send(new SetGridLocked { Grid = id, Locked = !e.Get<DynamicGrid>().Locked });
+            if (rightPressed) _commands.Send(new RightGrid { Grid = id });
             return;
         }
     }

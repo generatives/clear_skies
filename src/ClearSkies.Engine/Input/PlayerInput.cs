@@ -26,6 +26,14 @@ public enum PlayerButtons : uint
     Next = 1 << 8,
     /// <summary>Q: lower the fly speed, or turn left while piloting.</summary>
     Previous = 1 << 9,
+    /// <summary>Left mouse button: place a block, or use a control.</summary>
+    Primary = 1 << 10,
+    /// <summary>Right mouse button: break a block.</summary>
+    Secondary = 1 << 11,
+    /// <summary>G: spawn a one-block grid in front of the player.</summary>
+    SpawnGrid = 1 << 12,
+    /// <summary>L: cycle the block to place.</summary>
+    CycleBlock = 1 << 13,
 }
 
 /// <summary>
@@ -46,6 +54,9 @@ public struct PlayerInput
 
     /// <summary>Mouse movement in pixels since the previous tick, for dragging controls.</summary>
     public Vector2 MouseDelta;
+
+    /// <summary>Whether the cursor is captured for playing (not freed for the UI): the mouse aims and clicks act.</summary>
+    public bool Aiming;
 
     public readonly bool IsHeld(PlayerButtons button) => (Held & button) != 0;
     public readonly bool WasPressed(PlayerButtons button) => (Pressed & button) != 0;
@@ -74,9 +85,9 @@ public sealed class InputLatch
     }
 
     /// <summary>Builds a tick's input from what's been collected since the last call, and starts collecting afresh.</summary>
-    public PlayerInput Take(PlayerButtons held, float yaw, float pitch)
+    public PlayerInput Take(PlayerButtons held, float yaw, float pitch, bool aiming = true)
     {
-        var input = new PlayerInput { Held = held, Pressed = _pressed, Yaw = yaw, Pitch = pitch, MouseDelta = _mouseDelta };
+        var input = new PlayerInput { Held = held, Pressed = _pressed, Yaw = yaw, Pitch = pitch, MouseDelta = _mouseDelta, Aiming = aiming };
         _pressed = PlayerButtons.None;
         _mouseDelta = Vector2.Zero;
         return input;
@@ -100,6 +111,14 @@ public static class PlayerInputBindings
         (Key.V, PlayerButtons.ToggleFly),
         (Key.E, PlayerButtons.Next),
         (Key.Q, PlayerButtons.Previous),
+        (Key.G, PlayerButtons.SpawnGrid),
+        (Key.L, PlayerButtons.CycleBlock),
+    };
+
+    public static readonly (MouseButton Button, PlayerButtons Buttons)[] MouseButtons =
+    {
+        (MouseButton.Left, PlayerButtons.Primary),
+        (MouseButton.Right, PlayerButtons.Secondary),
     };
 
     /// <summary>Buttons whose keys are down now.</summary>
@@ -108,6 +127,8 @@ public static class PlayerInputBindings
         var buttons = PlayerButtons.None;
         foreach (var (key, button) in Keys)
             if (input.IsKeyDown(key)) buttons |= button;
+        foreach (var (mouse, button) in MouseButtons)
+            if (input.IsMouseButtonDown(mouse)) buttons |= button;
         return buttons;
     }
 
@@ -117,6 +138,8 @@ public static class PlayerInputBindings
         var buttons = PlayerButtons.None;
         foreach (var (key, button) in Keys)
             if (input.WasKeyPressed(key)) buttons |= button;
+        foreach (var (mouse, button) in MouseButtons)
+            if (input.WasMouseButtonPressed(mouse)) buttons |= button;
         return buttons;
     }
 }

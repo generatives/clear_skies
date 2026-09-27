@@ -58,7 +58,7 @@ public struct PilotedComponent
 
 /// <summary>Tag: set on the local player entity while the player is using an Interactive block (see
 /// <see cref="BlockInteraction"/>): the mouse moves the control instead of turning the view, which
-/// <see cref="PlayerInputSystem"/> keeps on the part being moved. PlayerMovementSystem skips mouse-look meanwhile.</summary>
+/// <see cref="BlockActionSystem"/> keeps on the part being moved. PlayerMovementSystem skips mouse-look meanwhile.</summary>
 public struct LookLockedComponent
 {
 }

@@ -19,7 +19,7 @@ public enum InteractionPhase : byte
 
 /// <summary>
 /// Published on the <see cref="World"/> (<c>world.Subscribe&lt;BlockInteraction&gt;</c>) by
-/// <see cref="PlayerInputSystem"/> while the player uses an <see cref="Interactive"/> block: once when they click it,
+/// <see cref="BlockActionSystem"/> while the player uses an <see cref="Interactive"/> block: once when they click it,
 /// every frame while they hold the button, and once when they let go. Carries the camera ray in world space (where
 /// the player clicked, on <see cref="InteractionPhase.Began"/>) and the mouse's movement this frame, in pixels (x
 /// right, y down). While the button is held the mouse doesn't turn the view: each block's control system moves its
@@ -35,7 +35,7 @@ public readonly record struct BlockInteraction(
 
 /// <summary>
 /// Published by a block's control system while handling a <see cref="BlockInteraction"/>: the world-space point the
-/// player has hold of (a lever's tip, a spot on a wheel's rim). <see cref="PlayerInputSystem"/> turns the view to keep
+/// player has hold of (a lever's tip, a spot on a wheel's rim). <see cref="BlockActionSystem"/> turns the view to keep
 /// the crosshair on it, so the player's hold follows the control as it moves.
 /// </summary>
 public readonly record struct InteractionFocus(Vector3D<float> Point);

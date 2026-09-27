@@ -138,6 +138,8 @@ public class ChunkVolume
 
     public void SetBlock(int x, int y, int z, BlockId id) => SetBlock(x, y, z, id, BlockOrientation.Upright);
 
+    /// <summary>Sets one block. For generation and loading only: during gameplay, blocks change through the EditVoxels
+    /// command (see EditVoxelsHandler), which calls this and <see cref="FillBox"/>.</summary>
     public void SetBlock(int x, int y, int z, BlockId id, BlockOrientation orientation)
     {
         var (cp, lx, ly, lz) = Decompose(x, y, z);
@@ -159,6 +161,61 @@ public class ChunkVolume
         if (ly == ChunkData.Size - 1) TryMark(cp.Offset( 0,  1,  0));
         if (lz == 0)                  TryMark(cp.Offset( 0,  0, -1));
         if (lz == ChunkData.Size - 1) TryMark(cp.Offset( 0,  0,  1));
+    }
+
+    /// <summary>The orientation of the block at a cell (<see cref="BlockOrientation.Upright"/> where nothing is loaded).</summary>
+    public BlockOrientation GetOrientation(int x, int y, int z)
+    {
+        var (cp, lx, ly, lz) = Decompose(x, y, z);
+        return GetData(cp)?.GetOrientation(lx, ly, lz) ?? BlockOrientation.Upright;
+    }
+
+    /// <summary>Sets every cell in the box from <paramref name="min"/> to <paramref name="max"/> (inclusive) to one
+    /// block: the fast path for a box edit, touching each chunk's flags once instead of once per block. Cells that
+    /// already hold that block (and orientation) are left alone, so their block entities keep their state. Clearing
+    /// to air doesn't create chunks that aren't there.</summary>
+    public void FillBox(Vector3D<int> min, Vector3D<int> max, BlockId id, BlockOrientation orientation)
+    {
+        const int S = ChunkData.Size;
+        var (lo, _, _, _) = Decompose(min.X, min.Y, min.Z);
+        var (hi, _, _, _) = Decompose(max.X, max.Y, max.Z);
+        bool placedSolid = BlockRegistry.Get(id).Opacity >= 15;
+        for (int cz = lo.Z; cz <= hi.Z; cz++)
+        for (int cy = lo.Y; cy <= hi.Y; cy++)
+        for (int cx = lo.X; cx <= hi.X; cx++)
+        {
+            var cp = new ChunkPosition(cx, cy, cz);
+            if (cp.Y < EditableLayers.Min || cp.Y > EditableLayers.Max) continue;
+            var entry = id == BlockId.Air ? GetEntry(cp) : EnsureChunk(cp);
+            if (entry is null) continue;
+
+            int x0 = System.Math.Max(min.X - cx * S, 0), x1 = System.Math.Min(max.X - cx * S, S - 1);
+            int y0 = System.Math.Max(min.Y - cy * S, 0), y1 = System.Math.Min(max.Y - cy * S, S - 1);
+            int z0 = System.Math.Max(min.Z - cz * S, 0), z1 = System.Math.Min(max.Z - cz * S, S - 1);
+            bool changed = false;
+            for (int lz = z0; lz <= z1; lz++)
+            for (int ly = y0; ly <= y1; ly++)
+            for (int lx = x0; lx <= x1; lx++)
+            {
+                if (entry.Data.Get(lx, ly, lz) == id && entry.Data.GetOrientation(lx, ly, lz) == orientation) continue;
+                entry.Data.Set(lx, ly, lz, id, orientation);
+                SyncBlockEntity(entry, new Vector3D<int>(lx, ly, lz), id, orientation);
+                entry.AddEdit(lx, ly, lz, placedSolid);
+                changed = true;
+            }
+            if (!changed) continue;
+
+            entry.Entity.Set(new NeedsRemeshFlag());
+            entry.Entity.Set(new NeedsRecollideFlag());
+            entry.Entity.Set(new NeedsGpuUploadFlag());
+            entry.PackedOpacityWords = null;
+            if (x0 == 0)     TryMark(cp.Offset(-1,  0,  0));
+            if (x1 == S - 1) TryMark(cp.Offset( 1,  0,  0));
+            if (y0 == 0)     TryMark(cp.Offset( 0, -1,  0));
+            if (y1 == S - 1) TryMark(cp.Offset( 0,  1,  0));
+            if (z0 == 0)     TryMark(cp.Offset( 0,  0, -1));
+            if (z1 == S - 1) TryMark(cp.Offset( 0,  0,  1));
+        }
     }
 
     // ── Chunk lifecycle ────────────────────────────────────────────────────
