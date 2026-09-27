@@ -55,7 +55,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
     public Vector3D<int>? TargetNormal { get; private set; }
 
     // Block placed by left-click on an air cell. Cycle with L, pick from the "Place block" dropdown in DrawDebugUi, or
-    // set PlaceIndex (the hotbar) — all keep _placeIndex/_placeBlock in sync.
+    // set PlaceIndex (the hotbar).
     private static readonly BlockId[] Placeable =
         { BlockId.Stone, BlockId.Wood, BlockId.Grass, BlockId.Dirt, BlockId.Lamp, BlockId.RedLamp, BlockId.GreenLamp,
           BlockId.BlueLamp, BlockId.Fan, BlockId.Buoyant, BlockId.Lever, BlockId.SteeringWheel };
@@ -66,17 +66,13 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
     public static IReadOnlyList<BlockId> PlaceableBlocks => Placeable;
 
     private int _placeIndex = 0; // index into Placeable
-    private BlockId _placeBlock = Placeable[0];
+    private BlockId PlaceBlock => Placeable[_placeIndex];
 
     /// <summary>Which of <see cref="PlaceableBlocks"/> left-click places.</summary>
     public int PlaceIndex
     {
         get => _placeIndex;
-        set
-        {
-            _placeIndex = ((value % Placeable.Length) + Placeable.Length) % Placeable.Length;
-            _placeBlock = Placeable[_placeIndex];
-        }
+        set => _placeIndex = ((value % Placeable.Length) + Placeable.Length) % Placeable.Length;
     }
 
     private int _blockBrushRadius = 0;
@@ -110,8 +106,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
     public void DrawDebugUi()
     {
         ImGui.Text(TargetBlock is { } b ? $"Target: ({b.X}, {b.Y}, {b.Z})" : "Target: none");
-        if (ImGui.Combo("Place block", ref _placeIndex, PlaceableNames, PlaceableNames.Length))
-            _placeBlock = Placeable[_placeIndex];
+        ImGui.Combo("Place block", ref _placeIndex, PlaceableNames, PlaceableNames.Length);
         ImGui.SliderInt("Brush Size", ref _blockBrushRadius, 0, 32);
         ImGui.TextDisabled("(or press L to cycle)");
     }
@@ -190,7 +185,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
         if (_input.WasKeyPressed(Key.L))
         {
             PlaceIndex = _placeIndex + 1;
-            Console.WriteLine($"[place] selected block: {_placeBlock}");
+            Console.WriteLine($"[place] selected block: {PlaceBlock}");
         }
 
         if (_input.WasMouseButtonPressed(MouseButton.Left)
@@ -218,12 +213,12 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
                     {
                         for (int z = t.Z - _blockBrushRadius; z <= t.Z + _blockBrushRadius; z++)
                         {
-                            bestVolume.SetBlock(x, y, z, _placeBlock, orientation);
+                            bestVolume.SetBlock(x, y, z, PlaceBlock, orientation);
                         }
                     }
                 }
                 if (bestIsDynamicGrid) _selection.Select(bestEntity);
-                Console.WriteLine($"[place] {_placeBlock} in {(bestIsDynamicGrid ? "grid" : "world")} ({t.X},{t.Y},{t.Z})");
+                Console.WriteLine($"[place] {PlaceBlock} in {(bestIsDynamicGrid ? "grid" : "world")} ({t.X},{t.Y},{t.Z})");
             }
         }
         else if (_input.WasMouseButtonPressed(MouseButton.Right))
