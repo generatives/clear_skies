@@ -116,7 +116,8 @@ The "Game UI" debug panel shows:
 
 Its "Clay inspector" checkbox turns on Clay's built-in element inspector, which the game UI draws on the right of the
 screen. It shows the element tree, and hovering or clicking a row highlights that element and shows its layout and
-config. Clay sizes the inspector in pixels, so the UI drops to scale 1 while it's open (the HUD looks small then), and
-the pointer over it is kept from gameplay. It needs the cursor free: with F1, close it with the checkbox (the ImGui menu
+config. The inspector is a fixed 400 units wide and takes that width off the layout, so while it's open the scale
+drops to the largest that still leaves 640 units beside it (1 at 1080p, 2 at 1440p, 3 at 4K; the HUD looks smaller
+then). The pointer over it is kept from gameplay. It needs the cursor free: with F1, close it with the checkbox (the ImGui menu
 bar covers its own close button); with Esc, its × button works. Clay's errors (duplicate
 ids, unbalanced elements, capacity) are logged to the console once each, prefixed `[ui]`.

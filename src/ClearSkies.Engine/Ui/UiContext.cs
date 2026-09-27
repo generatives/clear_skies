@@ -67,7 +67,7 @@ public sealed unsafe class UiContext : ISystem, IDebugUiSystem, IDisposable
     public int ScaleOverride { get; set; }
 
     /// <summary>Whether Clay's element inspector is showing. It draws on the right of the screen, takes the mouse
-    /// like <see cref="BlockPointer"/>ed UI, and switches the layout to scale 1 while open.</summary>
+    /// like <see cref="BlockPointer"/>ed UI, and lowers the scale while open to make room for it.</summary>
     public bool InspectorOpen
     {
         get => _initialized && ClayNative.ClayShim_IsDebugModeEnabled() != 0; // no Clay context before Initialize
@@ -76,6 +76,7 @@ public sealed unsafe class UiContext : ISystem, IDebugUiSystem, IDisposable
 
     private readonly bool _initialized;
     private const string InspectorElement = "Clay__DebugView"; // the inspector's outer element in clay.h
+    private const float InspectorWidth = 400f;                  // its width, Clay__debugViewWidth in clay.h
 
     /// <summary>The screen's size in layout units this frame.</summary>
     public UiDimensions LayoutSize { get; private set; }
@@ -170,9 +171,10 @@ public sealed unsafe class UiContext : ISystem, IDebugUiSystem, IDisposable
         var fb = _window.FramebufferSize;
         int w = System.Math.Max(1, fb.X), h = System.Math.Max(1, fb.Y);
         int auto = System.Math.Max(1, (int)System.Math.Min(w / MinLayoutWidth, h / MinLayoutHeight));
-        // Clay's inspector is sized in pixels (400 wide, 16 px text) and takes its width off the layout, so it gets
-        // scale 1 while open.
-        Scale = InspectorOpen ? 1 : ScaleOverride > 0 ? ScaleOverride : auto;
+        // Clay's inspector is a fixed 400 units wide (with 16-unit text) and takes its width off the layout, so while
+        // it's open the scale is the largest that leaves the usual 640 units beside it.
+        int inspector = System.Math.Max(1, System.Math.Min(auto, (int)(w / (MinLayoutWidth + InspectorWidth))));
+        Scale = InspectorOpen ? inspector : ScaleOverride > 0 ? ScaleOverride : auto;
         LayoutSize = new UiDimensions((float)w / Scale, (float)h / Scale);
     }
 
@@ -412,7 +414,7 @@ public sealed unsafe class UiContext : ISystem, IDebugUiSystem, IDisposable
         ImGui.Text($"Pointer over blocking UI: {WantsMouse}");
         bool inspector = InspectorOpen;
         if (ImGui.Checkbox("Clay inspector", ref inspector)) InspectorOpen = inspector;
-        ImGui.TextDisabled("Clay's element inspector, drawn by the game UI on the right; needs the cursor free (F1). The UI runs at scale 1 while it's open.");
+        ImGui.TextDisabled("Clay's element inspector, drawn by the game UI on the right; needs the cursor free (F1). The UI scale drops while it's open, to make room.");
     }
 
     public void Dispose()
