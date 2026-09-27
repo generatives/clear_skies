@@ -5,6 +5,7 @@ using ClearSkies.Engine.Core;
 using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Input;
+using ClearSkies.Engine.Persistence;
 using ClearSkies.Engine.Rendering;
 using Silk.NET.Maths;
 
@@ -23,7 +24,9 @@ public static class TestScene
     /// overlooking the nearest island, e.g. to reproduce a view for a screenshot.</param>
     /// <param name="spawnView">Where the camera starts and how it faces (yaw, pitch); <see cref="FallbackSpawn"/> if
     /// null.</param>
-    public static Vector3D<float> Build(EngineHost host, CommandSystem commands, float[]? cameraOverride = null,
+    /// <param name="savedPlayer">The local player's saved SpawnPlayer command, if they've played this world before.</param>
+    public static Vector3D<float> Build(EngineHost host, CommandSystem commands, LocalSettings settings, byte[]? savedPlayer,
+                                        float[]? cameraOverride = null,
                                         (Vector3D<float> Position, float Yaw, float Pitch)? spawnView = null)
     {
         var eyeTransform = Transform.Identity;
@@ -50,21 +53,27 @@ public static class TestScene
         cam.Set(eyeTransform);
         cam.Set(new CameraComponent { Camera = new Camera(), Active = true });
 
-        // The player: spawned through the command system (applied in the first tick), at the eye position less the
-        // eye height (its Transform is the character capsule's centre).
-        var p = eyeTransform.Position;
-        commands.Send(new SpawnPlayer
+        // The player: spawned through the command system (applied in the first tick). From the save if they've played
+        // this world before (where they left off); otherwise at the eye position less the eye height (its Transform is
+        // the character capsule's centre).
+        if (savedPlayer is not null)
+            commands.SendSerialized(CommandIds.SpawnPlayer, savedPlayer);
+        else
         {
-            Player = new PlayerDescription
+            var p = eyeTransform.Position;
+            commands.Send(new SpawnPlayer
             {
-                Id = PlayerId.New(),
-                Name = Environment.UserName,
-                FreeFly = true, // start in FreeFly — zero regression risk vs. today
-                Position = new Vector3(p.X, p.Y - PlayerFactory.EyeHeight, p.Z),
-                Yaw = yaw,
-                Pitch = pitch,
-            },
-        });
+                Player = new PlayerDescription
+                {
+                    Id = settings.PlayerId,
+                    Name = settings.Name,
+                    FreeFly = true, // start in FreeFly — zero regression risk vs. today
+                    Position = new Vector3(p.X, p.Y - PlayerFactory.EyeHeight, p.Z),
+                    Yaw = yaw,
+                    Pitch = pitch,
+                },
+            });
+        }
 
         host.Input.CursorCaptured = false; // the F1 debug menu starts open, and F1 frees the cursor with it
         return eyeTransform.Position;

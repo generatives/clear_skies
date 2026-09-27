@@ -16,6 +16,7 @@ public abstract class CommandHandlerBase
     internal abstract Type CommandType { get; }
     internal abstract void RunQueued(int slot);
     internal abstract void ClearQueue();
+    internal abstract bool EnqueueSerialized(ReadOnlySpan<byte> payload, out int slot);
     internal abstract void RunRemoteCommand(PeerId from, uint seq, ReadOnlySpan<byte> payload);
     internal abstract void RunEvent(in EventMeta meta, ReadOnlySpan<byte> payload);
 
@@ -77,6 +78,12 @@ public abstract class CommandHandler<T> : CommandHandlerBase where T : struct, I
     }
 
     internal sealed override void ClearQueue() => _queued.Clear();
+
+    internal sealed override bool EnqueueSerialized(ReadOnlySpan<byte> payload, out int slot)
+    {
+        var reader = new NetReader(payload);
+        return Enqueue(Read(ref reader), out slot);
+    }
 
     internal sealed override void RunQueued(int slot) => RunLocal(_queued[slot]);
 

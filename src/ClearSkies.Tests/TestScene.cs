@@ -3,6 +3,7 @@ using BepuPhysics.Collidables;
 using ClearSkies.Engine.Commands;
 using ClearSkies.Engine.Commands.Handlers;
 using ClearSkies.Engine.ECS;
+using ClearSkies.Engine.Persistence;
 using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Input;
 using ClearSkies.Engine.Physics;
@@ -32,12 +33,17 @@ public sealed class HeadlessScene : IDisposable
     public uint TickNumber;
     private readonly List<Engine.Core.ISystem> _tick = new();
 
-    public HeadlessScene(Session? session = null)
+    public readonly NetIdAllocator Ids;
+    public WorldSaver? Saver;
+    public EntityStreamingSystem? Streaming;
+    public StoredEntityIndex? Index;
+
+    public HeadlessScene(Session? session = null, uint firstFreeId = NetRegistry.FirstFreeId)
     {
         Session = session ?? Session.SinglePlayer();
         Registry = new NetRegistry(World);
-        var allocator = new NetIdAllocator();
-        Registry.RequestBlock = allocator.NextBlock;
+        Ids = new NetIdAllocator(firstFreeId);
+        Registry.RequestBlock = Ids.NextBlock;
         Selection = new GridSelection(World);
 
         var root = World.CreateEntity();
@@ -68,6 +74,16 @@ public sealed class HeadlessScene : IDisposable
         _tick.Add(new PhysicsTransformSyncSystem(World, Physics));
         _tick.Add(hierarchy);
         _tick.Add(new SupportSystem(World, Physics));
+    }
+
+    /// <summary>Saves to <paramref name="db"/> and streams entities from it, as the host does.</summary>
+    public void EnablePersistence(SaveDatabase db)
+    {
+        Index = new StoredEntityIndex(db.ReadEntityIndex());
+        Saver = new WorldSaver(World, db, Index, Commands, Ids);
+        Streaming = new EntityStreamingSystem(World, db, Index, Registry, Commands, Saver);
+        _tick.Insert(1, Streaming);
+        _tick.Insert(2, Saver);
     }
 
     public void Tick(int count = 1)

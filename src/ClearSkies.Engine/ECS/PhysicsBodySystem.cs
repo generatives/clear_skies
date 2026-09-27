@@ -229,6 +229,20 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
     /// collidable, as opposed to just loaded/rendered.</summary>
     public bool HasCollider(ChunkPosition pos) => _colliders.ContainsKey(pos);
 
+    /// <summary>Whether every loaded terrain chunk with blocks within <paramref name="radius"/> of
+    /// <paramref name="centre"/> has its collider, so a body placed there won't fall through.</summary>
+    public bool CollidersReady(ChunkVolume world, PhysVec centre, float radius)
+    {
+        int r = (int)MathF.Ceiling(radius / S);
+        int cx = (int)MathF.Floor(centre.X / S), cy = (int)MathF.Floor(centre.Y / S), cz = (int)MathF.Floor(centre.Z / S);
+        for (int dz = -r; dz <= r; dz++) for (int dy = -r; dy <= r; dy++) for (int dx = -r; dx <= r; dx++)
+        {
+            var pos = new ChunkPosition(cx + dx, cy + dy, cz + dz);
+            if (world.GetEntry(pos) is { } entry && entry.Data.HasAnySolid() && !_colliders.ContainsKey(pos)) return false;
+        }
+        return true;
+    }
+
     // ── dynamic grid bodies (moved from GridShapeSystem) ────────────────────────
     private void UpdateDynamicGrid(Entity entity)
     {
