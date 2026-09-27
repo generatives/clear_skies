@@ -9,6 +9,7 @@ public readonly struct BlockDef
     public string          Name           { get; init; }
     public Vector3D<float> Color          { get; init; }
     public bool            IsSolid        { get; init; }
+    public bool            PlaceOriented  { get; init ;}
 
     /// True for a solid block that bodies pass through: raycasts still hit it (so it can be targeted, used, placed
     /// against and broken), but it gets no collision shape, so characters walk through it. Having no shape, it adds
