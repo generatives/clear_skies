@@ -14,7 +14,9 @@ namespace ClearSkies.Engine.ECS;
 /// <summary>
 /// Streams the static world around the local player's terrain interest (see <see cref="TerrainInterest"/>), like a typical block game: a queue of the chunk columns within
 /// the view distance, closest first by horizontal distance, rebuilt whenever the camera crosses into another column,
-/// and loaded a whole column at a time. Only chunks that may hold something are queued: the layers the generator says
+/// and loaded a whole column at a time. A rebuild is spread over frames (within <see cref="StreamBudgetMs"/>, for
+/// unloading what left view and for scanning the columns in view), so crossing a column doesn't cost one long frame.
+/// Only chunks that may hold something are queued: the layers the generator says
 /// it may fill (<see cref="IWorldGenerator.ColumnLayers"/>) and chunks with a save file (builds). The generator's
 /// layers are a loose bound, so chunks that turn out to be air are remembered (a bit per column) until their column
 /// leaves view, and aren't queued again.
@@ -30,7 +32,7 @@ namespace ClearSkies.Engine.ECS;
 public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 {
     /// <summary>Column jobs (loading or generating a column's missing chunks) in flight at once. Most of a first visit is
-    /// sky that generation rules out in microseconds, so this is well above the core count: the thread pool queues
+    /// sky that generation rules out in microseconds, so this is well above the core count: the background workers queue
     /// the excess.</summary>
     private const int MaxInFlight = 64;
 
@@ -100,9 +102,26 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     private readonly List<(int x, int z)> _queue = new();
     private int _queueHead;
     private bool _queueTruncated;
+
+    /// <summary>Main-thread time per frame for the work that comes in bursts, shared: unloading what left view,
+    /// adding finished columns, and scanning for columns to queue, in that order. What doesn't fit waits for the next
+    /// frame. Each still gets a minimum (<see cref="MinStepMs"/>) so none is starved for long.</summary>
+    private const double StreamBudgetMs = 2.5, MinStepMs = 0.3;
+    private readonly System.Diagnostics.Stopwatch _budget = new();
+
+    private double BudgetLeft => System.Math.Max(MinStepMs, StreamBudgetMs - _budget.Elapsed.TotalMilliseconds);
+
+    // The rebuild's scan of the columns in view: the next offset to look at, and whether it has looked at them all
+    // (or filled the queue). Columns nearer than the scan's position are all queued, loading or loaded.
+    private int _scanAt;
+    private bool _scanDone = true;
+
+    // Chunks that left view at the last rebuild, unloaded from _unloadAt on a few per frame.
+    private int _unloadAt;
+    private readonly List<(int x, int z)> _columnsOutOfView = new();
     private readonly Dictionary<(int x, int z), int> _inFlight = new();
     private int _inFlightChunks;
-    private readonly ConcurrentQueue<((int x, int z) Column, List<(ChunkPosition Pos, ChunkData? Data)> Chunks)> _results = new();
+    private readonly ConcurrentQueue<((int x, int z) Column, List<(ChunkPosition Pos, ChunkData? Data, PackedOpacity? Packed)> Chunks)> _results = new();
 
     private (int x, int z) _lastCamColumn = (int.MinValue, int.MinValue);
     private bool _skippedInFlight;
@@ -202,10 +221,18 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 
         ImGui.Separator();
         ImGui.Text($"Autosave in: {System.Math.Max(0f, AutosaveInterval - _autosaveTimer):F0}s");
+        ImGui.Separator();
+        _steps.Draw();
     }
+
+    // CPU time of each step, for the debug panel: which one a hitch while streaming came from.
+    private const int AutosaveStep = 0, ApplyStep = 1, UnloadStep = 2, QueueStep = 3, DispatchStep = 4, EvictStep = 5, FogStep = 6;
+    private readonly StepTimer _steps = new("Autosave", "Adding finished columns", "Rebuild: unloading out of view",
+                                            "Rebuild: queueing columns", "Dispatching jobs", "Evicting far columns", "Fog") { Owner = "Chunk Loading" };
 
     public void Update(float dt)
     {
+        _steps.Start();
         // Crash/power-loss safety: flush dirty chunks on a fixed cadence regardless of camera/streaming
         // state, so edits to a chunk that never unloads aren't only ever saved on graceful exit.
         _autosaveTimer += dt;
@@ -214,12 +241,30 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
             _autosaveTimer = 0f;
             SaveAllDirty();
         }
+        _steps.Lap(AutosaveStep);
 
-        while (_results.TryDequeue(out var job))
+        _budget.Restart();
+        bool haveCam = TryGetViewCentre(out var camPos);
+        if (haveCam)
+        {
+            var camColumn = ((int)MathF.Floor(camPos.X / S), (int)MathF.Floor(camPos.Z / S));
+            bool idle = _scanDone && _queueHead == _queue.Count && _inFlight.Count == 0;
+            if (camColumn != _lastCamColumn || (idle && (_skippedInFlight || _queueTruncated)))
+            {
+                _lastCamColumn = camColumn;
+                _skippedInFlight = false;
+                Rebuild();
+            }
+            UnloadSome(BudgetLeft);
+            _steps.Lap(UnloadStep);
+        }
+
+        double applyUntil = _steps.SinceLap() + BudgetLeft;
+        while (_steps.SinceLap() < applyUntil && _results.TryDequeue(out var job))
         {
             _inFlightChunks -= _inFlight[job.Column];
             _inFlight.Remove(job.Column);
-            foreach (var (pos, data) in job.Chunks)
+            foreach (var (pos, data, packed) in job.Chunks)
             {
                 if (data == null)
                 {
@@ -229,55 +274,82 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
                     continue;
                 }
                 // Dropped if the camera moved on while it generated, or an edit created the chunk meanwhile.
-                if (InView(pos.X, pos.Z) && !_staticVolume.IsLoaded(pos)) _staticVolume.AddChunk(pos, data);
+                if (InView(pos.X, pos.Z) && !_staticVolume.IsLoaded(pos)) _staticVolume.AddChunk(pos, data, packed);
             }
         }
+        _steps.Lap(ApplyStep);
+        if (!haveCam) return;
 
-        if (!TryGetViewCentre(out var camPos)) return;
-
-        var camColumn = ((int)MathF.Floor(camPos.X / S), (int)MathF.Floor(camPos.Z / S));
-        bool idle = _queueHead == _queue.Count && _inFlight.Count == 0;
-        if (camColumn != _lastCamColumn || (idle && (_skippedInFlight || _queueTruncated)))
-        {
-            _lastCamColumn = camColumn;
-            _skippedInFlight = false;
-            Rebuild();
-        }
+        ScanSome(BudgetLeft);
+        _steps.Lap(QueueStep);
 
         Dispatch();
+        _steps.Lap(DispatchStep);
         UpdateFog(camPos, dt);
+        _steps.Lap(FogStep);
     }
 
-    /// <summary>Unloads what left the view distance, and re-queues the columns in view with chunks still to fetch,
-    /// closest first.</summary>
+    /// <summary>Starts over from the camera's new column: lists what left the view distance to unload, and restarts
+    /// the scan for columns in view with chunks still to fetch, closest first. Both then go on a little each frame
+    /// (<see cref="UnloadSome"/>, <see cref="ScanSome"/>).</summary>
     private void Rebuild()
     {
-        // An edit may have put blocks where there were none: it counts as a build from now on.
-        foreach (var (p, entry) in _staticVolume.All)
-            if (entry.Data.IsDirty) RecordBuild(p, hasBlocks: true);
+        // Whatever the last rebuild didn't get to unload goes now: a chunk that stays loaded out of view could share a
+        // cell of the GPU store's world index with one coming into view on the other side (see WorldIndexDim).
+        UnloadSome(double.PositiveInfinity);
 
         _toUnload.Clear();
+        _unloadAt = 0;
+        // (An edit that put blocks where there were none counts as a build once its chunk is saved: by the autosave,
+        // or as it unloads. Until then the chunk is loaded, so the queue doesn't need to know.)
         foreach (var (p, _) in _staticVolume.All)
             if (!InView(p.X, p.Z)) _toUnload.Add(p);
-        foreach (var p in _toUnload) Unload(p);
 
         // Forget the columns out of view: their air is re-learned on return.
-        foreach (var key in _columns.Keys.Where(k => !InView(k.x, k.z)).ToList())
-            _columns.Remove(key);
+        _columnsOutOfView.Clear();
+        foreach (var key in _columns.Keys)
+            if (!InView(key.x, key.z)) _columnsOutOfView.Add(key);
+        foreach (var key in _columnsOutOfView) _columns.Remove(key);
+        _steps.Lap(UnloadStep);
 
         _queue.Clear();
         _queueHead = 0;
         _queueTruncated = false;
         _nothingToEvict = false;
         _evictNext = -1;
-        foreach (var (dx, dz) in _offsetsByDistance)
-        {
-            int x = _lastCamColumn.x + dx, z = _lastCamColumn.z + dz;
-            if (!Missing(x, z).Any()) continue;
-            if (_queue.Count == MaxQueued) { _queueTruncated = true; break; }
-            _queue.Add((x, z));
-        }
+        _scanAt = 0;
+        _scanDone = false;
+        _steps.Lap(QueueStep);
+    }
 
+    /// <summary>Unloads chunks that left view at the last rebuild, for up to <paramref name="budgetMs"/>.</summary>
+    private void UnloadSome(double budgetMs)
+    {
+        double start = _steps.SinceLap();
+        while (_unloadAt < _toUnload.Count && _steps.SinceLap() - start < budgetMs)
+            Unload(_toUnload[_unloadAt++]); // a no-op if eviction already unloaded it
+    }
+
+    /// <summary>Carries on the rebuild's scan of the columns in view, closest first, for up to
+    /// <paramref name="budgetMs"/>, queueing each with chunks still to fetch.</summary>
+    private void ScanSome(double budgetMs)
+    {
+        if (_scanDone) return;
+        double start = _steps.SinceLap();
+        while (_scanAt < _offsetsByDistance.Length)
+        {
+            // Checked every column: one seen for the first time asks the generator for its layers, which isn't cheap.
+            if (_steps.SinceLap() - start >= budgetMs) return;
+            var (dx, dz) = _offsetsByDistance[_scanAt];
+            int x = _lastCamColumn.x + dx, z = _lastCamColumn.z + dz;
+            if (HasMissing(x, z))
+            {
+                if (_queue.Count == MaxQueued) { _queueTruncated = true; break; }
+                _queue.Add((x, z));
+            }
+            _scanAt++;
+        }
+        _scanDone = true;
         Console.WriteLine($"[load] rebuild: queued {_queue.Count}{(_queueTruncated ? "+" : "")} columns, loaded " +
                           $"{_staticVolume.LoadedCount} chunks ({PendingChunks()} not uploaded), light {WorldBricks()}/" +
                           $"{_store.WorldLightBudget} bricks, unloaded {_toUnload.Count}, evicted {_evictions} columns so far");
@@ -317,11 +389,13 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         RecordBuild(p, hasBlocks);
     }
 
-    /// <summary>Light bricks the world's chunks hold in the GPU store.</summary>
-    private int WorldBricks() => _staticVolume.Gpu.Slots.Count;
+    /// <summary>Light bricks the world's loaded chunks hold in the GPU store (not counting unloaded ones still
+    /// waiting to be released).</summary>
+    private int WorldBricks() => _staticVolume.Gpu.Slots.Count - _store.WorldBricksReleasing;
 
     /// <summary>Chunks loaded but not uploaded to the GPU store yet.</summary>
-    private int PendingChunks() => System.Math.Max(0, _staticVolume.LoadedCount - _store.WorldChunkCount);
+    private int PendingChunks() =>
+        System.Math.Max(0, _staticVolume.LoadedCount - (_store.WorldChunkCount - _store.WorldChunksReleasing));
 
     /// <summary>Hands queued columns to workers, one job per column, while the budget has room. When it doesn't, and
     /// the next column is nearer than the farthest loaded one, unloads that to make room.</summary>
@@ -332,7 +406,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         {
             var col = _queue[_queueHead];
             if (_inFlight.ContainsKey(col)) { _skippedInFlight = true; _queueHead++; continue; } // re-queued by the next rebuild
-            var work = Missing(col.x, col.z).Select(p => (Pos: p, FromSave: _saved.Contains(p))).ToList();
+            var work = Missing(col.x, col.z);
             if (work.Count == 0) { _queueHead++; continue; }
 
             int chunks = _staticVolume.LoadedCount + _inFlightChunks + work.Count;
@@ -344,16 +418,20 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
                 int overChunks = _staticVolume.LoadedCount + _inFlightChunks + work.Count - MaxChunks;
                 int overBricks = WorldBricks() + (_inFlightChunks + work.Count) * PendingBricks - _store.WorldLightBudget;
                 if (overChunks > 0 || overBricks >= 0)
+                {
+                    _steps.Lap(DispatchStep);
                     EvictFartherThan(ColumnDistSq(col), overChunks + work.Count, overBricks + EvictSlack);
+                    _steps.Lap(EvictStep);
+                }
                 break;
             }
 
             _queueHead++;
             _inFlight.Add(col, work.Count);
             _inFlightChunks += work.Count;
-            ThreadPool.UnsafeQueueUserWorkItem(_ =>
+            BackgroundWork.Queue(() =>
             {
-                var loaded = new List<(ChunkPosition, ChunkData?)>(work.Count);
+                var loaded = new List<(ChunkPosition, ChunkData?, PackedOpacity?)>(work.Count);
                 foreach (var (pos, fromSave) in work)
                 {
                     var data = _scratch.Value!;
@@ -363,27 +441,27 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
                     if (data.HasAnySolid())
                     {
                         data.IsDirty = false;
-                        loaded.Add((pos, data));
+                        loaded.Add((pos, data, GridStore.Pack(data))); // the GPU store's packing, off the main thread
                         _scratch.Value = new ChunkData();
                     }
                     else
                     {
-                        loaded.Add((pos, null));
+                        loaded.Add((pos, null, null));
                         // Generation only ever writes blocks, so an empty result leaves the buffer all air and ready to
                         // reuse; a loaded save may have overwritten more than blocks, so start that one afresh.
                         if (fromSave) _scratch.Value = new ChunkData();
                     }
                 }
                 _results.Enqueue((col, loaded));
-            }, null);
+            });
         }
     }
 
     /// <summary>Unloads the farthest loaded columns (not being loaded) that are more than a column farther than
     /// <paramref name="distSq"/> (so two columns at about the same distance don't keep swapping), until
     /// <paramref name="chunks"/> chunks and <paramref name="bricks"/> light bricks are freed, or
-    /// <see cref="MaxEvictChunksPerFrame"/> chunks. The store frees the bricks when it next runs, so the next frame
-    /// sees the room.</summary>
+    /// <see cref="MaxEvictChunksPerFrame"/> chunks. Their bricks count as free at once (GridStore.WorldBricksReleasing),
+    /// though the store releases them over the next frames.</summary>
     private void EvictFartherThan(long distSq, int chunks, int bricks)
     {
         if (_nothingToEvict) return;
@@ -426,22 +504,26 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     }
 
     /// <summary>Light bricks chunk <paramref name="p"/> holds in the GPU store (none until it is uploaded).</summary>
-    private int ChunkBricks(ChunkPosition p)
+    private int ChunkBricks(ChunkPosition p) => _store.BricksOf(_staticVolume.Gpu, p);
+
+    /// <summary>Whether column (x, z) has chunks that may hold something and aren't loaded yet.</summary>
+    private bool HasMissing(int x, int z)
     {
-        if (!_staticVolume.Gpu.Chunks.TryGetValue(p, out var rec) || rec.BrickSlots == null) return 0;
-        int n = 0;
-        foreach (int slot in rec.BrickSlots) if (slot >= 0) n++;
-        return n;
+        for (ulong bits = MaybeContent(x, z); bits != 0; bits &= bits - 1)
+            if (!_staticVolume.IsLoaded(new ChunkPosition(x, _minY + BitOperations.TrailingZeroCount(bits), z))) return true;
+        return false;
     }
 
-    /// <summary>Column (x, z)'s chunks that may hold something and aren't loaded yet.</summary>
-    private IEnumerable<ChunkPosition> Missing(int x, int z)
+    /// <summary>Column (x, z)'s chunks that may hold something and aren't loaded yet, with whether each has a save.</summary>
+    private List<(ChunkPosition Pos, bool FromSave)> Missing(int x, int z)
     {
+        var missing = new List<(ChunkPosition, bool)>();
         for (ulong bits = MaybeContent(x, z); bits != 0; bits &= bits - 1)
         {
             var p = new ChunkPosition(x, _minY + BitOperations.TrailingZeroCount(bits), z);
-            if (!_staticVolume.IsLoaded(p)) yield return p;
+            if (!_staticVolume.IsLoaded(p)) missing.Add((p, _saved.Contains(p)));
         }
+        return missing;
     }
 
     /// <summary>Eases <see cref="FogDistance"/> toward the nearest column still queued or loading, or else the view
@@ -449,7 +531,10 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     /// opens up gently as loading catches up.</summary>
     private void UpdateFog(Vector3D<float> camPos, float dt)
     {
+        // While a rebuild's scan is still going, the nearest column it found missing is known only up to where it has
+        // looked: until it finds one, or finishes, the target stays where it was (it only moved by a column).
         float target = _queueHead < _queue.Count ? ColumnDistance(camPos, _queue[_queueHead].x, _queue[_queueHead].z)
+                     : !_scanDone ? _fogTarget
                      : _viewDistance;
         foreach (var (x, z) in _inFlight.Keys) target = MathF.Min(target, ColumnDistance(camPos, x, z));
         _fogTarget = target;
