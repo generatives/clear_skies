@@ -73,7 +73,7 @@ public static class TestScene
             jumpVelocity: 6f, speed: 5f,
             // Full air control: same acceleration and top speed as on the ground, and a gentle brake with no keys
             // held, so you can steer mid-air and let go to avoid overshooting a ledge.
-            airControlForceScale: 1f, airControlSpeedScale: 1f, airBrakeScale: 0.5f);
+            airControlForceScale: 1f, airControlSpeedScale: 1f, airBrakeScale: 0.5f, entity: cam);
         cam.Set(new CharacterControllerComponent { Character = character, EyeHeight = 0.7f });
         cam.Set(new CharacterModeComponent { FreeFly = true }); // start in FreeFly — zero regression risk vs. today
 

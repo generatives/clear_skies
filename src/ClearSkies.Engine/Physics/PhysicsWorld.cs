@@ -46,7 +46,8 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
     public CharacterControllers Characters { get; }
 
     /// <summary>What each body/static is (voxel terrain, a grid, other) — see <see cref="ColliderTags"/>. Terrain
-    /// chunks are tagged by <see cref="AddStaticCompound"/>; grid bodies by whoever creates them.</summary>
+    /// chunks are tagged by <see cref="AddStaticCompound"/>, other bodies by the tag their Add* method requires, and
+    /// character bodies by <see cref="CharacterControllers.AllocateCharacter"/>.</summary>
     public ColliderTags Colliders { get; } = new();
 
     private readonly BufferPool _pool = new();
@@ -105,16 +106,18 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
     // ── Dynamic bodies ──────────────────────────────────────────────────────────
 
     /// <summary>Creates a dynamic box body of the given world-space size and mass at a position.</summary>
-    public BodyHandle AddDynamicBox(Vector3 position, Vector3 size, float mass)
+    public BodyHandle AddDynamicBox(Vector3 position, Vector3 size, float mass, ColliderInfo tag)
     {
         var box = new Box(size.X, size.Y, size.Z);
         var shapeIndex = Simulation.Shapes.Add(box);
         var inertia = box.ComputeInertia(mass);
-        return Simulation.Bodies.Add(BodyDescription.CreateDynamic(
+        var handle = Simulation.Bodies.Add(BodyDescription.CreateDynamic(
             new RigidPose(position),
             inertia,
             new CollidableDescription(shapeIndex, 0.1f),
             new BodyActivityDescription(0.01f)));
+        Colliders.Set(handle, tag);
+        return handle;
     }
 
     public (Vector3 position, Quaternion orientation) GetBodyPose(BodyHandle handle)
@@ -222,9 +225,13 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
         return (shape, inertia, centerOfMass);
     }
 
-    public BodyHandle AddDynamicBody(TypedIndex shape, BodyInertia inertia, Vector3 position, Quaternion orientation)
-        => Simulation.Bodies.Add(BodyDescription.CreateDynamic(
+    public BodyHandle AddDynamicBody(TypedIndex shape, BodyInertia inertia, Vector3 position, Quaternion orientation, ColliderInfo tag)
+    {
+        var handle = Simulation.Bodies.Add(BodyDescription.CreateDynamic(
             new RigidPose(position, orientation), inertia, new CollidableDescription(shape, 0.1f), new BodyActivityDescription(0.01f)));
+        Colliders.Set(handle, tag);
+        return handle;
+    }
 
     /// <summary>Removes a dynamic body. To also free its shape, read the shape with <see cref="GetBodyShape"/>
     /// first, then pass it to <see cref="RemoveCompound"/> after this call.</summary>

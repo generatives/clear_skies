@@ -54,7 +54,7 @@ public struct PlayerCharacter
         float minimumSpeculativeMargin, float mass, float maximumHorizontalForce, float maximumVerticalGlueForce,
         float jumpVelocity, float speed, float maximumSlope = MathF.PI * 0.25f,
         float extraFallGravity = 12f, float airControlForceScale = 1f, float airControlSpeedScale = 1f,
-        float airBrakeScale = 0.5f)
+        float airBrakeScale = 0.5f, DefaultEcs.Entity entity = default)
     {
         this.characters = characters;
         this.extraFallGravity = extraFallGravity;
@@ -75,7 +75,7 @@ public struct PlayerCharacter
         bodyHandle = characters.Simulation.Bodies.Add(
             BodyDescription.CreateDynamic(initialPosition, new BodyInertia { InverseMass = 1f / mass },
             new(shapeIndex, minimumSpeculativeMargin, float.MaxValue, ContinuousDetection.Passive), shape.Radius * 0.02f));
-        ref var character = ref characters.AllocateCharacter(bodyHandle);
+        ref var character = ref characters.AllocateCharacter(bodyHandle, entity);
         character.LocalUp = new Vector3(0, 1, 0);
         character.CosMaximumSlope = MathF.Cos(maximumSlope);
         character.JumpVelocity = jumpVelocity;

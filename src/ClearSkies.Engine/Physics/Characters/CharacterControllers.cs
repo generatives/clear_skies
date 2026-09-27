@@ -176,7 +176,7 @@ namespace ClearSkies.Engine.Physics.Characters
         /// </summary>
         /// <param name="bodyHandle">Body handle associated with the character.</param>
         /// <returns>Reference to the allocated character.</returns>
-        public ref CharacterController AllocateCharacter(BodyHandle bodyHandle)
+        public ref CharacterController AllocateCharacter(BodyHandle bodyHandle, DefaultEcs.Entity entity = default)
         {
             Debug.Assert(bodyHandle.Value >= 0 && (bodyHandle.Value >= bodyHandleToCharacterIndex.Length || bodyHandleToCharacterIndex[bodyHandle.Value] == -1),
                 "Cannot allocate more than one character for the same body handle.");
@@ -187,6 +187,7 @@ namespace ClearSkies.Engine.Physics.Characters
             character = default;
             character.BodyHandle = bodyHandle;
             bodyHandleToCharacterIndex[bodyHandle.Value] = characterIndex;
+            Colliders?.Set(bodyHandle, new ClearSkies.Engine.Physics.ColliderInfo(ClearSkies.Engine.Physics.ColliderKind.Character, entity));
             return ref character;
         }
 
@@ -217,6 +218,7 @@ namespace ClearSkies.Engine.Physics.Characters
         {
             Debug.Assert(bodyHandle.Value >= 0 && bodyHandle.Value < bodyHandleToCharacterIndex.Length && bodyHandleToCharacterIndex[bodyHandle.Value] >= 0,
                 "Removing a character by body handle requires that a character associated with the given body handle actually exists.");
+            Colliders?.Clear(bodyHandle);
             RemoveCharacterByIndex(bodyHandleToCharacterIndex[bodyHandle.Value]);
         }
 
