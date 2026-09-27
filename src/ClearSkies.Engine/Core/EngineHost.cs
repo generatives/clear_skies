@@ -94,6 +94,7 @@ public sealed class EngineHost : IDisposable
         _systems.Add((system, stage));
         _systemMs.Add(0.0);
         _frameMs.Add(0.0);
+        _rawMs.Add(0.0);
         if (system is IDebugUiSystem debugUi) RegisterDebugUi(debugUi);
     }
 
@@ -104,6 +105,11 @@ public sealed class EngineHost : IDisposable
     // system runs several times in some frames and not at all in others).
     private readonly List<double> _systemMs = new();
     private readonly List<double> _frameMs = new();
+    private readonly List<double> _rawMs = new(); // this frame's time per system, unsmoothed, for History
+
+    /// <summary>The last few hundred frames one by one (see the Frame timings panel).</summary>
+    public FrameHistory History { get; } = new();
+    private readonly int[] _gcSeen = new int[3];
     private readonly System.Diagnostics.Stopwatch _systemTimer = new();
     private const double TimingSmoothing = 0.05;
 
@@ -173,15 +179,31 @@ public sealed class EngineHost : IDisposable
         // swapchain image) they're skipped entirely, and End still closes ImGui's frame.
         _systemTimer.Restart();
         bool open = frame.TryBegin();
-        _frameBeginMs += TimingSmoothing * (_systemTimer.Elapsed.TotalMilliseconds - _frameBeginMs);
+        double beginMs = _systemTimer.Elapsed.TotalMilliseconds;
+        _frameBeginMs += TimingSmoothing * (beginMs - _frameBeginMs);
         if (open)
             for (var stage = SystemStage.RenderWorld; stage <= SystemStage.RenderHud; stage++)
                 RunRenderStage(stage, frame.Context);
 
         _systemTimer.Restart();
         frame.End();
-        _frameEndMs += TimingSmoothing * (_systemTimer.Elapsed.TotalMilliseconds - _frameEndMs);
+        double endMs = _systemTimer.Elapsed.TotalMilliseconds;
+        _frameEndMs += TimingSmoothing * (endMs - _frameEndMs);
         SmoothTimes(render: true);
+        History.Record(dt * 1000.0, Time.TicksLastFrame, GcGenerationSinceLastFrame(), _rawMs, beginMs, endMs);
+    }
+
+    /// <summary>The highest GC generation collected since the last call, or -1 for none.</summary>
+    private int GcGenerationSinceLastFrame()
+    {
+        int highest = -1;
+        for (int g = 0; g < 3; g++)
+        {
+            int count = GC.CollectionCount(g);
+            if (count != _gcSeen[g]) highest = g;
+            _gcSeen[g] = count;
+        }
+        return highest;
     }
 
     // Smoothed CPU time of opening (camera uniform, swapchain acquire) and closing (ImGui, submit, present) the frame.
@@ -220,6 +242,7 @@ public sealed class EngineHost : IDisposable
         {
             if (IsRenderStage(_systems[i].stage) != render) continue;
             _systemMs[i] += TimingSmoothing * (_frameMs[i] - _systemMs[i]);
+            _rawMs[i] = _frameMs[i];
             _frameMs[i] = 0;
         }
     }
@@ -290,9 +313,47 @@ public sealed class EngineHost : IDisposable
             SampleGc();
             ImGuiNET.ImGui.Text($"GC: {_gcPausePerSec:F1} ms paused per second; collections gen0/1/2 {_gcRate[0]}/{_gcRate[1]}/{_gcRate[2]} " +
                                 $"in the last {_gcSampleSecs:F1} s; allocating {_allocMbPerSec:F0} MB/s; heap {GC.GetTotalMemory(false) / (1024 * 1024)} MB");
+            DrawHistory();
             ImGuiNET.ImGui.Separator();
+            ImGuiNET.ImGui.TextDisabled("Smoothed CPU time per frame:");
             foreach (var (name, ms) in rows)
                 ImGuiNET.ImGui.Text($"{ms,7:F2} ms  {name}");
+        }
+
+        /// <summary>The last few hundred frames one by one, and where the slowest of them spent its time.</summary>
+        private void DrawHistory()
+        {
+            var history = _host.History;
+            if (history.Count == 0) return;
+            ImGuiNET.ImGui.Separator();
+            var (average, worst, spikes, slowestAgo) = history.Summarize();
+            ImGuiNET.ImGui.Text($"Last {history.Count} frames: average {average:F1} ms, longest {worst:F1} ms, " +
+                                $"{spikes} over 1.5x the average");
+            bool paused = history.Paused;
+            if (ImGuiNET.ImGui.Checkbox("Hold graph", ref paused)) history.Paused = paused;
+
+            float width = ImGuiNET.ImGui.GetContentRegionAvail().X;
+            float top = System.Math.Max(40f, worst * 1.1f);
+            ImGuiNET.ImGui.PlotLines("##frames", ref history.Milliseconds[0], history.Count, history.Offset,
+                                     $"frame ms (0 to {top:F0})", 0f, top, new System.Numerics.Vector2(width, 70));
+            ImGuiNET.ImGui.PlotHistogram("##ticks", ref history.TicksPerFrame[0], history.Count, history.Offset,
+                                         "ticks per frame (0 to 3)", 0f, 3f, new System.Numerics.Vector2(width, 30));
+
+            ref readonly var slowest = ref history.Get(slowestAgo);
+            string gc = slowest.GcGeneration < 0 ? "no GC" : $"GC gen {slowest.GcGeneration}";
+            ImGuiNET.ImGui.Text($"Longest: {slowest.Ms:F1} ms, {slowestAgo} frames ago; {slowest.Ticks} tick(s), {gc}, " +
+                                $"{slowest.CpuMs:F1} ms CPU in systems");
+            foreach (var (system, ms) in slowest.Slowest)
+            {
+                if (system == -1) break;
+                string name = system switch
+                {
+                    FrameHistory.FrameBegin => "Frame begin (camera, acquire)",
+                    FrameHistory.FrameEnd => "Frame end (ImGui, submit, present)",
+                    _ => $"{_host._systems[system].system.GetType().Name} ({_host._systems[system].stage})",
+                };
+                ImGuiNET.ImGui.Text($"  {ms,7:F2} ms  {name}");
+            }
         }
     }
 
