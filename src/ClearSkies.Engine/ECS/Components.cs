@@ -31,6 +31,11 @@ public struct MouseLookComponent
     public float Yaw;
     public float Pitch;
     public float LookSensitivity;
+
+    /// <summary>How far the ship the player stands on turned the view (yaw, pitch) in the latest tick. The ship is
+    /// drawn between its last two ticks, so the view is drawn that much behind too (see
+    /// <see cref="RenderInterpolationSystem"/>); cleared at the start of each tick.</summary>
+    public float TurnYaw, TurnPitch;
 }
 
 /// <summary>A player's walking character body. Its Transform is the capsule's centre; the eye is
