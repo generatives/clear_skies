@@ -197,8 +197,9 @@ public sealed class GridPilotSystem : ISystem
     {
         if (!_pilotedGridRoot.IsAlive || !_followedCamera.IsAlive) return;
 
-        // The grid's Transform is its body pose (centre of mass), synced by PhysicsTransformSyncSystem.
-        var gridTransform = _pilotedGridRoot.Get<Transform>();
+        // Where the grid is drawn (its body pose, the centre of mass, between its last two ticks): the camera follows
+        // what's on screen.
+        var gridTransform = _pilotedGridRoot.DrawnPose();
         var gridPos = gridTransform.Position;
         var gridRot = gridTransform.Rotation;
 

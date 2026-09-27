@@ -20,7 +20,7 @@ public sealed class Time
     public uint Tick { get; internal set; }
 
     /// <summary>How far the frame being drawn is between the last two ticks (0 = the previous tick, 1 = the latest):
-    /// smoothed drawing places things this far along.</summary>
+    /// interpolated drawing (see <see cref="ECS.TickInterpolationSystem"/>) places things this far along.</summary>
     public float Alpha { get; internal set; }
 
     /// <summary>Ticks run during the last frame (0 to <see cref="TickClock.MaxTicksPerFrame"/>).</summary>
