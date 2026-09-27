@@ -30,7 +30,7 @@ namespace ClearSkies.Engine.ECS;
 public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 {
     /// <summary>Column jobs (loading or generating a column's missing chunks) in flight at once. Most of a first visit is
-    /// sky that generation rules out in microseconds, so this is well above the core count: the thread pool queues
+    /// sky that generation rules out in microseconds, so this is well above the core count: the background workers queue
     /// the excess.</summary>
     private const int MaxInFlight = 64;
 
@@ -361,7 +361,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
             _queueHead++;
             _inFlight.Add(col, work.Count);
             _inFlightChunks += work.Count;
-            ThreadPool.UnsafeQueueUserWorkItem(_ =>
+            BackgroundWork.Queue(() =>
             {
                 var loaded = new List<(ChunkPosition, ChunkData?, PackedOpacity?)>(work.Count);
                 foreach (var (pos, fromSave) in work)
@@ -385,7 +385,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
                     }
                 }
                 _results.Enqueue((col, loaded));
-            }, null);
+            });
         }
     }
 

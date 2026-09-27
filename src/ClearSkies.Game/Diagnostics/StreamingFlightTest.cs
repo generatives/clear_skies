@@ -137,7 +137,8 @@ public sealed class StreamingFlightTest : ISystem, IDebugUiSystem
         // A hitch: a frame over twice the median. Its excess over the median is the time the motion visibly stalls.
         var hitches = frames.Where(f => f.Ms > 2 * median).ToArray();
         sb.AppendLine($"Flight test: {_distance:F0} blocks out and back at {_speed:F0} blocks/s, {ms.Length} frames " +
-                      $"in {_clock.Elapsed.TotalSeconds:F1} s");
+                      $"in {_clock.Elapsed.TotalSeconds:F1} s, {BackgroundWork.Workers} background workers of " +
+                      $"{Environment.ProcessorCount} cores");
         sb.AppendLine($"  frame ms: average {ms.Average():F1}, median {median:F1}, 95% {P(0.95):F1}, 99% {P(0.99):F1}, " +
                       $"longest {sorted[^1]:F1}");
         sb.AppendLine($"  hitches (over 2x median): {hitches.Length}, stalled {hitches.Sum(f => f.Ms - median):F0} ms in all; " +
