@@ -15,9 +15,9 @@ namespace ClearSkies.Game.Hud;
 /// while piloting a ship, when it zooms the camera; number keys 1-9 and 0 pick the first ten slots; with the cursor
 /// free (Esc or F1) slots can be clicked. Picking a block shows its name above the hotbar for a moment.
 ///
-/// Sprites come from Resources/Ui (crosshair, slot, slot_selected, panel; see <see cref="LoadSprites"/>). Block icons
-/// are each block's baked icon from Resources/Icons, or made at startup from its texture or color (see
-/// <see cref="BlockIcons"/>).
+/// Sprites come from Resources/Ui (crosshair, slot, slot_selected, panel), loaded into <see cref="UiContext.Atlas"/>
+/// before this is created. Block icons are each block's baked icon from Resources/Icons, or made at startup from its
+/// texture or color (see <see cref="BlockIcons"/>).
 /// </summary>
 public sealed class HudUi : ISystem
 {
@@ -66,10 +66,6 @@ public sealed class HudUi : ISystem
         }
     }
 
-    /// <summary>Loads the HUD's sprites (every PNG in <paramref name="directory"/>; <c>name.9.png</c> files are
-    /// nine-sliced at a third of their size).</summary>
-    public static void LoadSprites(UiContext ui, string directory) => ui.Atlas.LoadSprites(directory);
-
     public void Update(float dt)
     {
         HandleSelection();
@@ -99,7 +95,9 @@ public sealed class HudUi : ISystem
             _scroll = 0;
             return;
         }
-        _scroll -= _input.ScrollDelta.Y; // wheel down (negative) moves to the next slot
+        // Over the hotbar the pointer is the UI's, so gameplay's scroll is zero there; read the UI's instead.
+        float wheel = _ui.IsHovered("hotbar-bar") ? _ui.ScrollDelta.Y : _input.ScrollDelta.Y;
+        _scroll -= wheel;                // wheel down (negative) moves to the next slot
         int steps = (int)_scroll;        // whole notches, towards zero
         if (steps != 0)
         {

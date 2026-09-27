@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Rebuilds the prebuilt Clay libraries in bin/: linux-x64 with gcc and win-x64 with the MinGW cross compiler
 # (Ubuntu: apt install gcc-mingw-w64-x86-64). macOS isn't cross-compiled here; build it there with CMake (see
-# CMakeLists.txt) and copy libclay.dylib into bin/osx-x64 or bin/osx-arm64.
+# README.md) as one universal libclay.dylib in bin/osx.
 set -euo pipefail
 cd "$(dirname "$0")"
 

@@ -42,8 +42,9 @@ public sealed class UiAtlas
     private int _shelfX, _shelfY, _shelfHeight;
     private const int Padding = 1;
 
-    // Region changed since the renderer last uploaded (exclusive max); empty when _dirtyMaxX <= _dirtyMinX.
-    private int _dirtyMinX, _dirtyMinY, _dirtyMaxX, _dirtyMaxY;
+    // Rows changed since the renderer last uploaded (exclusive max); none when _dirtyMaxY <= _dirtyMinY. Whole rows
+    // are uploaded, so columns aren't tracked.
+    private int _dirtyMinY = int.MaxValue, _dirtyMaxY;
     private bool _warnedFull;
 
     /// <summary>Centre of the white block, for untextured quads (solid rectangles and borders).</summary>
@@ -55,7 +56,6 @@ public sealed class UiAtlas
     {
         Size = size;
         Pixels = new byte[size * size * 4];
-        _dirtyMinX = _dirtyMinY = int.MaxValue;
 
         // A 4x4 white block; sampling its centre is white whatever the filtering.
         var white = new byte[4 * 4 * 4];
@@ -147,7 +147,7 @@ public sealed class UiAtlas
             return false;
         for (int row = 0; row < height; row++)
             rgba.Slice(row * width * 4, width * 4).CopyTo(Pixels.AsSpan(((y + row) * Size + x) * 4, width * 4));
-        MarkDirty(x, y, width, height);
+        MarkDirty(y, height);
         return true;
     }
 
@@ -165,7 +165,7 @@ public sealed class UiAtlas
                 Pixels[dst + 3] = alpha[row * stride + col];
             }
         }
-        MarkDirty(x, y, width, height);
+        MarkDirty(y, height);
         return true;
     }
 
@@ -193,22 +193,20 @@ public sealed class UiAtlas
         return true;
     }
 
-    private void MarkDirty(int x, int y, int w, int h)
+    private void MarkDirty(int y, int height)
     {
-        _dirtyMinX = System.Math.Min(_dirtyMinX, x);
         _dirtyMinY = System.Math.Min(_dirtyMinY, y);
-        _dirtyMaxX = System.Math.Max(_dirtyMaxX, x + w);
-        _dirtyMaxY = System.Math.Max(_dirtyMaxY, y + h);
+        _dirtyMaxY = System.Math.Max(_dirtyMaxY, y + height);
     }
 
-    /// <summary>The region changed since the last call (whole rows, to upload in one copy), and clears it.</summary>
+    /// <summary>The rows changed since the last call (uploaded whole, in one copy), and clears them.</summary>
     internal bool TakeDirtyRect(out int y, out int height)
     {
-        if (_dirtyMaxX <= _dirtyMinX) { y = height = 0; return false; }
+        if (_dirtyMaxY <= _dirtyMinY) { y = height = 0; return false; }
         y = _dirtyMinY;
         height = _dirtyMaxY - _dirtyMinY;
-        _dirtyMinX = _dirtyMinY = int.MaxValue;
-        _dirtyMaxX = _dirtyMaxY = 0;
+        _dirtyMinY = int.MaxValue;
+        _dirtyMaxY = 0;
         return true;
     }
 }

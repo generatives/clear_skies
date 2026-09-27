@@ -49,7 +49,7 @@ host.AddSystem(host.Gui, SystemStage.Input); // opens ImGui's frame before Logic
 // has the mouse; Logic/PreRender systems declare elements; UiRenderSystem draws them in the HUD stage.
 using var ui = new UiContext(host.Window, host.Input);
 ui.AddFont(UiFont.Load(Path.Combine(AppContext.BaseDirectory, "Resources", "Fonts", "PixelifySans.ttf")));
-HudUi.LoadSprites(ui, Path.Combine(AppContext.BaseDirectory, "Resources", "Ui"));
+ui.Atlas.LoadSprites(Path.Combine(AppContext.BaseDirectory, "Resources", "Ui")); // the HUD's; name.9.png is nine-sliced
 host.AddSystem(ui, SystemStage.Input);
 
 var physicsBody = new PhysicsBodySystem(host.World, host.Physics);

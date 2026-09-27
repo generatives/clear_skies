@@ -30,7 +30,9 @@ cmake -S native/clay -B native/clay/build -DCMAKE_BUILD_TYPE=Release
 cmake --build native/clay/build --config Release
 ```
 
-and copy the library into `bin/<rid>/` (`win-x64`, `linux-x64`, `osx-arm64`, ...).
+and copy the library into `bin/<rid>/` (`win-x64`, `linux-x64`, ...). Every library in `bin` is copied to the same
+output folder, so there can be only one per file name: on macOS, build one universal `libclay.dylib`
+(`-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"`) into `bin/osx`.
 
 ## Updating Clay
 

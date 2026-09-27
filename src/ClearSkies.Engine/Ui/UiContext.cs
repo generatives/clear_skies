@@ -30,9 +30,9 @@ namespace ClearSkies.Engine.Ui;
 /// sprites stay crisp. By default it's the largest that keeps the layout at least
 /// <see cref="MinLayoutWidth"/> x <see cref="MinLayoutHeight"/>, so a UI designed for 640x360 fits any window.
 ///
-/// Input: while the cursor is captured for mouse-look the UI sees no pointer. When it's free, elements under it are
-/// hovered, <see cref="Clicked"/> reports clicks, and elements marked with <see cref="BlockPointer"/> take the mouse
-/// from gameplay (via <see cref="InputManager.UiWantsMouse"/>).
+/// Input: while the cursor is captured for mouse-look, or over an ImGui window, the UI sees no pointer. Otherwise
+/// elements under it are hovered, <see cref="Clicked"/> reports clicks, and elements marked with
+/// <see cref="BlockPointer"/> take the mouse from gameplay (via <see cref="InputManager.UiWantsMouse"/>).
 /// </summary>
 public sealed unsafe class UiContext : ISystem, IDebugUiSystem, IDisposable
 {
@@ -50,7 +50,8 @@ public sealed unsafe class UiContext : ISystem, IDebugUiSystem, IDisposable
     private bool _layoutOpen;
     private bool _pointerDown, _pointerPressed;
     private bool _pressLatched; // a left press seen by event since the last frame, in case it was also released
-    private float _scrollX, _scrollY;
+    private float _scrollX, _scrollY; // wheel movement since the last Update, from events
+    private float _dt;
     // Elements that take the mouse from gameplay: marked while declaring this frame, tested against the pointer
     // next frame (when this frame's layout is the one the pointer is over).
     private HashSet<uint> _blocking = new(), _blockingNext = new();
@@ -83,6 +84,11 @@ public sealed unsafe class UiContext : ISystem, IDebugUiSystem, IDisposable
 
     /// <summary>True while the pointer is over an element marked with <see cref="BlockPointer"/>.</summary>
     public bool WantsMouse { get; private set; }
+
+    /// <summary>Wheel movement this frame while the UI has the pointer (zero while the cursor is captured or over
+    /// ImGui), in notches. <see cref="InputManager.ScrollDelta"/> is zero while the pointer is over
+    /// <see cref="BlockPointer"/>ed UI, so UI that reacts to the wheel itself reads this instead.</summary>
+    public UiVector2 ScrollDelta { get; private set; }
 
     /// <summary>Clay's built-in ease-out curve, for <see cref="TransitionConfig.Handler"/>.</summary>
     public static void* EaseOut => ClayNative.ClayShim_EaseOutHandler();
@@ -133,7 +139,8 @@ public sealed unsafe class UiContext : ISystem, IDebugUiSystem, IDisposable
     /// update resets <see cref="InputManager.UiWantsMouse"/>.</summary>
     public void Update(float dt)
     {
-        if (_layoutOpen) EndLayout(dt, out _); // the last frame wasn't drawn (e.g. minimized): discard its layout
+        if (_layoutOpen) EndLayout(out _); // the last frame wasn't drawn (e.g. minimized): discard its layout
+        _dt = dt;
 
         int oldScale = Scale;
         UpdateLayoutSize();
@@ -181,7 +188,8 @@ public sealed unsafe class UiContext : ISystem, IDebugUiSystem, IDisposable
     private void UpdatePointer(float dt)
     {
         IMouse? mouse = _input.Native.Mice.Count > 0 ? _input.Native.Mice[0] : null;
-        bool free = mouse != null && !_input.CursorCaptured;
+        // UiWantsMouse is still only ImGui's here (its controller updates first): ImGui draws on top, so it wins.
+        bool free = mouse != null && !_input.CursorCaptured && !_input.UiWantsMouse;
         // A click shorter than a frame is released again before it can be polled, so presses are also latched from
         // the button event.
         bool held = free && mouse!.IsButtonPressed(MouseButton.Left);
@@ -203,9 +211,10 @@ public sealed unsafe class UiContext : ISystem, IDebugUiSystem, IDisposable
         }
         ClayNative.ClayShim_SetPointerState(x, y, down ? 1 : 0);
 
-        const float ScrollSpeed = 24f; // layout units per wheel notch
-        ClayNative.ClayShim_UpdateScrollContainers(0, free ? _scrollX * ScrollSpeed : 0, free ? _scrollY * ScrollSpeed : 0, dt);
+        ScrollDelta = free ? new UiVector2(_scrollX, _scrollY) : default;
         _scrollX = _scrollY = 0;
+        const float ScrollSpeed = 24f; // layout units per wheel notch
+        ClayNative.ClayShim_UpdateScrollContainers(0, ScrollDelta.X * ScrollSpeed, ScrollDelta.Y * ScrollSpeed, dt);
     }
 
     private void OnMouseDown(IMouse _, MouseButton button)
@@ -221,13 +230,13 @@ public sealed unsafe class UiContext : ISystem, IDebugUiSystem, IDisposable
 
     /// <summary>Closes the layout and returns its render commands, valid until the next <see cref="Update"/>.
     /// Called by UiRenderSystem; false if no layout was open.</summary>
-    internal bool EndLayout(float dt, out ClayRenderCommandArray commands)
+    internal bool EndLayout(out ClayRenderCommandArray commands)
     {
         commands = default;
         if (!_layoutOpen) return false;
         _layoutOpen = false;
         ClayRenderCommandArray result;
-        ClayNative.ClayShim_EndLayout(dt, &result);
+        ClayNative.ClayShim_EndLayout(_dt, &result); // the frame's time step, for transitions
         commands = result;
         return true;
     }

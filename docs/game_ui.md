@@ -79,8 +79,10 @@ Things to know:
   - `BackgroundColor` draws a rectangle, or tints the element's image if it has one.
   - `OverlayColor` blends an element and its children towards a color. It works for highlights and fades.
 - **Transitions.** `TransitionConfig` with `Handler = UiContext.EaseOut` animates changes to position, size and colors.
-- **Pointer.** The UI only sees the pointer while the cursor is free (Esc or F1). While it's captured for mouse-look,
-  nothing is hovered or clicked.
+- **Pointer.** The UI only sees the pointer while the cursor is free (Esc or F1) and not over an ImGui window, which
+  draws on top. While it's captured for mouse-look, nothing is hovered or clicked.
+- **Scroll.** Over `BlockPointer`ed UI, gameplay's `InputManager.ScrollDelta` is zero; UI that reacts to the wheel
+  itself reads `ui.ScrollDelta`. Clip containers scroll by themselves.
 
 ## Sprites and fonts
 

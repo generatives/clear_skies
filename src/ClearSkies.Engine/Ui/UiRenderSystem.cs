@@ -158,7 +158,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     private (int X, int Y, int W, int H) _scissor;
     private uint _overlay;
     private int _fbWidth, _fbHeight, _scale;
-    private double _lastTime = -1;
+    private readonly bool _srgbTarget;
 
     public UiRenderSystem(UiContext ui, Renderer renderer)
     {
@@ -166,15 +166,14 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         _renderer = renderer;
         _ctx = renderer.Context;
         _api = _ctx.Api;
+        _srgbTarget = _ctx.SurfaceFormat.ToString().Contains("Srgb", StringComparison.OrdinalIgnoreCase);
         CreatePipeline();
         CreateAtlasTexture();
     }
 
     public void Render(in RenderContext frame)
     {
-        float dt = _lastTime < 0 ? 0f : (float)(frame.TimeSeconds - _lastTime);
-        _lastTime = frame.TimeSeconds;
-        if (!_ui.EndLayout(dt, out var commands)) return;
+        if (!_ui.EndLayout(out var commands)) return;
 
         _fbWidth = System.Math.Max(0, _ctx.Size.X);
         _fbHeight = System.Math.Max(0, _ctx.Size.Y);
@@ -448,14 +447,13 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     {
         // Pixels (top-left origin, y down) to clip space.
         float sx = 2f / _fbWidth, sy = -2f / _fbHeight;
-        bool srgb = _ctx.SurfaceFormat.ToString().Contains("Srgb", StringComparison.OrdinalIgnoreCase);
         Span<float> data = stackalloc float[]
         {
             sx, 0, 0, 0,
             0, sy, 0, 0,
             0, 0, 1, 0,
             -1, 1, 0, 1,
-            srgb ? 1 : 0, 0, 0, 0,
+            _srgbTarget ? 1 : 0, 0, 0, 0,
         };
         fixed (float* p = data) _api.QueueWriteBuffer(_ctx.Queue, _uniformBuffer, 0, p, 80);
     }
