@@ -160,7 +160,7 @@ public sealed class RenderFrame : IDebugUiSystem
             ref readonly var cc = ref e.Get<CameraComponent>();
             if (cc.Active)
             {
-                transform = e.Get<Transform>();
+                transform = e.DrawnPose();
                 camera = cc.Camera;
                 return true;
             }
