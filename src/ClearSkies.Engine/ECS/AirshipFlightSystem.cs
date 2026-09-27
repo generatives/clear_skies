@@ -5,7 +5,6 @@ using ClearSkies.Engine.Physics;
 using ClearSkies.Engine.Voxels;
 using DefaultEcs;
 using ImGuiNET;
-using Silk.NET.Input;
 
 namespace ClearSkies.Engine.ECS;
 
@@ -95,7 +94,7 @@ public sealed class AirshipFlightSystem : ISystem
     private const int   AllocationMaxPasses = 50;
     private const float AllocationTolerance = 0.01f;
     private readonly PhysicsWorld    _physics;
-    private readonly InputManager    _input;
+    private readonly EntitySet       _players;
 
     // ── control law tuning ──────────────────────────────────────────────────
     // Self-level (pitch/roll) — always on.
@@ -156,7 +155,7 @@ public sealed class AirshipFlightSystem : ISystem
     // the demand, so anything else here means Fans at max or none pointing the needed way.
     private Vector3 _lastUnmetForce, _lastUnmetTorque;
 
-    public AirshipFlightSystem(World world, PhysicsWorld physics, InputManager input)
+    public AirshipFlightSystem(World world, PhysicsWorld physics)
     {
         _grids    = world.GetEntities().With<DynamicGrid>().With<ChunkGrid>().With<PhysicsBodyComponent>().AsSet();
         _fans     = world.GetEntities().With<Fan>().With<BlockRef>().AsSet();
@@ -164,7 +163,7 @@ public sealed class AirshipFlightSystem : ISystem
         _levers   = world.GetEntities().With<Lever>().With<BlockRef>().AsSet();
         _steeringWheels = world.GetEntities().With<SteeringWheel>().With<BlockRef>().AsSet();
         _physics = physics;
-        _input   = input;
+        _players = world.GetEntities().With<PlayerInput>().AsSet();
     }
 
     public void Update(float dt)
@@ -207,7 +206,7 @@ public sealed class AirshipFlightSystem : ISystem
 
             // Where the velocity targets come from: the keyboard while piloted, the ship's own controls otherwise.
             var controls = piloted
-                ? new Vector4(ForwardInput(), RightInput(), VerticalInput(), YawInput())
+                ? PilotInput()
                 : ShipControls(blocks);
 
             float desiredYawRate = controls.W * _yawRateTarget;
@@ -351,36 +350,18 @@ public sealed class AirshipFlightSystem : ISystem
         return setting * MathF.Abs(setting);
     }
 
-    private float ForwardInput()
+    /// <summary>The pilot's keys, as (forward, right, up, yaw left): from the local player's input this tick.</summary>
+    private Vector4 PilotInput()
     {
-        float v = 0f;
-        if (_input.IsKeyDown(Key.W)) v += 1f;
-        if (_input.IsKeyDown(Key.S)) v -= 1f;
-        return v;
-    }
-
-    private float RightInput()
-    {
-        float v = 0f;
-        if (_input.IsKeyDown(Key.D)) v += 1f;
-        if (_input.IsKeyDown(Key.A)) v -= 1f;
-        return v;
-    }
-
-    private float VerticalInput()
-    {
-        float v = 0f;
-        if (_input.IsKeyDown(Key.Space)) v += 1f;
-        if (_input.IsKeyDown(Key.ShiftLeft) || _input.IsKeyDown(Key.ShiftRight)) v -= 1f;
-        return v;
-    }
-
-    private float YawInput()
-    {
-        float v = 0f;
-        if (_input.IsKeyDown(Key.Q)) v += 1f;
-        if (_input.IsKeyDown(Key.E)) v -= 1f;
-        return v;
+        foreach (ref readonly Entity p in _players.GetEntities())
+        {
+            ref readonly var input = ref p.Get<PlayerInput>();
+            return new Vector4(input.Axis(PlayerButtons.Forward, PlayerButtons.Back),
+                               input.Axis(PlayerButtons.Right, PlayerButtons.Left),
+                               input.Axis(PlayerButtons.Up, PlayerButtons.Down),
+                               input.Axis(PlayerButtons.Previous, PlayerButtons.Next));
+        }
+        return Vector4.Zero;
     }
 
     /// <summary>Rebuilds <see cref="_blocksByVolume"/> from this tick's Fan, Buoyant, Lever and Steering Wheel entities. Lists are reused

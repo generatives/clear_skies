@@ -52,6 +52,18 @@ ui.AddFont(UiFont.Load(Path.Combine(AppContext.BaseDirectory, "Resources", "Font
 ui.Atlas.LoadSprites(Path.Combine(AppContext.BaseDirectory, "Resources", "Ui")); // the HUD's; name.9.png is nine-sliced
 host.AddSystem(ui, SystemStage.Input);
 
+// Fixed ticks: gameplay and physics run in the Tick stage, once per 1/60 s tick (0 or more times a frame, see
+// TickClock). Mouse-look runs per frame before them; presses are collected per frame and handed to the next tick as
+// the player's PlayerInput, which is all tick systems read. Drawing is smoothed between the last two ticks.
+host.AddSystem(new LookInputSystem(host.World, host.Input), SystemStage.Input);
+var inputSample = new InputSampleSystem(host.World, host.Input);
+host.AddSystem(inputSample.Collect, SystemStage.Input);
+var interpolation = new RenderInterpolationSystem(host.World, host.Time);
+var hierarchy = new HierarchyTransformSystem(host.World);
+host.AddSystem(interpolation.BeginTick, SystemStage.Tick); // the true poses back from the drawn ones
+host.AddSystem(hierarchy, SystemStage.Tick);
+host.AddSystem(inputSample, SystemStage.Tick);
+
 var physicsBody = new PhysicsBodySystem(host.World, host.Physics);
 
 // Streaming budget: how much GPU light storage the loaded world may use, in MB (3 KB per 8³ brick of surface). Chunks
@@ -78,25 +90,30 @@ var gridStore = new GridStore(host.Context, (int)((long)LightBudgetMb * 1024 * 1
                               ChunkLoadSystem.WorldIndexDim(ViewDistance));
 var chunkLoadSystem = new ChunkLoadSystem(host.World, staticVolume, gridStore, generatorFactory,
                                           ViewDistance, MinChunkY, "Hearts16");
-host.AddSystem(chunkLoadSystem, SystemStage.Logic);
 host.Renderer.AttachGridStore(gridStore);
-host.AddSystem(physicsBody, SystemStage.Logic);
+host.AddSystem(physicsBody, SystemStage.Tick);
 
 // Character controller (ported from BepuPhysics2's own Demos/Demos/Characters — see
 // Physics/Characters/): motion goals (WASD/jump/mode toggle) must be set before the physics step
 // so Simulation.Timestep's CollisionsDetected analysis sees them this same tick.
-host.AddSystem(new PlayerMovementSystem(host.World, host.Input), SystemStage.Logic);
+host.AddSystem(new PlayerMovementSystem(host.World), SystemStage.Tick);
 
 // Milestone 5: airship flight (velocity control law + Fan/Buoyant propulsion, merged into one system —
 // see AirshipFlightSystem), before the physics step so its impulses are integrated this same tick.
 var gridPilot = new GridPilotSystem(host.World, host.Input, host.Physics, staticVolume, physicsBody);
-var airshipFlight = new AirshipFlightSystem(host.World, host.Physics, host.Input);
-host.AddSystem(airshipFlight, SystemStage.Logic);
+var airshipFlight = new AirshipFlightSystem(host.World, host.Physics);
+host.AddSystem(airshipFlight, SystemStage.Tick);
 
-host.AddSystem(host.Physics, SystemStage.Logic); // steps the simulation once bodies/impulses for this frame are in
-host.AddSystem(new PhysicsTransformSyncSystem(host.World, host.Physics), SystemStage.Logic); // body poses -> Transform
-host.AddSystem(new HierarchyTransformSystem(host.World), SystemStage.Logic); // e.g. volume Transforms -> chunk Transforms
-host.AddSystem(new CharacterCameraSyncSystem(host.World), SystemStage.Logic); // reads the capsule's post-physics pose into Transform
+host.AddSystem(host.Physics, SystemStage.Tick); // one step, once bodies/impulses for this tick are in
+host.AddSystem(new PhysicsTransformSyncSystem(host.World, host.Physics), SystemStage.Tick); // body poses -> Transform
+host.AddSystem(hierarchy, SystemStage.Tick); // e.g. volume Transforms -> chunk Transforms
+host.AddSystem(new CharacterCameraSyncSystem(host.World), SystemStage.Tick); // reads the capsule's post-physics pose into Transform
+host.AddSystem(interpolation.EndTick, SystemStage.Tick); // records this tick's poses
+
+// Per frame, after the ticks: draw between the last two ticks (children follow), then stream terrain around the view.
+host.AddSystem(interpolation, SystemStage.Logic);
+host.AddSystem(hierarchy, SystemStage.Logic);
+host.AddSystem(chunkLoadSystem, SystemStage.Logic);
 host.AddSystem(gridPilot, SystemStage.Logic);
 var playerInput = new PlayerInputSystem(host.World, host.Input, meshSystem, host.Renderer, gridSelection);
 host.AddSystem(playerInput, SystemStage.Logic);

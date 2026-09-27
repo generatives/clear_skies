@@ -1,6 +1,7 @@
 namespace ClearSkies.Engine.Core;
 
-/// <summary>Frame timing. Variable delta for logic/render plus a fixed step reserved for physics.</summary>
+/// <summary>Frame and tick timing. Frames have a variable duration (<see cref="DeltaSeconds"/>); gameplay and physics
+/// run in fixed ticks of <see cref="TickSeconds"/> (see <see cref="TickClock"/>), numbered by <see cref="Tick"/>.</summary>
 public sealed class Time
 {
     private double _fpsAccum;
@@ -8,7 +9,23 @@ public sealed class Time
 
     public float DeltaSeconds { get; private set; }
     public double TotalSeconds { get; private set; }
-    public float FixedStep { get; } = 1f / 60f;
+
+    /// <summary>Simulated time per tick: 1/60 s.</summary>
+    public float TickSeconds { get; } = 1f / 60f;
+
+    /// <summary>The same as <see cref="TickSeconds"/>; the physics step is one tick.</summary>
+    public float FixedStep => TickSeconds;
+
+    /// <summary>The number of the tick running now, or of the last one run. Ticks count up from 1.</summary>
+    public uint Tick { get; internal set; }
+
+    /// <summary>How far the frame being drawn is between the last two ticks (0 = the previous tick, 1 = the latest):
+    /// smoothed drawing places things this far along.</summary>
+    public float Alpha { get; internal set; }
+
+    /// <summary>Ticks run during the last frame (0 to <see cref="TickClock.MaxTicksPerFrame"/>).</summary>
+    public int TicksLastFrame { get; internal set; }
+
     public int FramesPerSecond { get; private set; }
 
     internal void Advance(double dt)

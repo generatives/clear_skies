@@ -26,6 +26,9 @@ public sealed class EngineHost : IDisposable
     public InputManager Input { get; }
     public PhysicsWorld Physics { get; }
     public Time Time { get; }
+
+    /// <summary>Decides how many fixed ticks each frame runs (see <see cref="SystemStage.Tick"/>).</summary>
+    public TickClock Clock { get; } = new();
     public ImGuiController Gui { get; }
 
     /// <summary>The frame the render stages draw into, opened and closed by the host around them; its context is
@@ -59,7 +62,7 @@ public sealed class EngineHost : IDisposable
         Gui.RegisterDebugUi(Context.Timer);
     }
 
-    /// <summary>Schedules <paramref name="system"/> in an update stage (Input, Logic or PreRender), after the systems
+    /// <summary>Schedules <paramref name="system"/> in an update stage (Input, Tick, Logic or PreRender), after the systems
     /// already in it.</summary>
     public void AddSystem(ISystem system, SystemStage stage)
     {
@@ -83,11 +86,14 @@ public sealed class EngineHost : IDisposable
     {
         _systems.Add((system, stage));
         _systemMs.Add(0.0);
+        _frameMs.Add(0.0);
         if (system is IDebugUiSystem debugUi) Gui.RegisterDebugUi(debugUi);
     }
 
-    // Per-system CPU time (ms, smoothed), parallel to _systems.
+    // Per-system CPU time per frame (ms, smoothed), parallel to _systems; _frameMs sums this frame's runs (a Tick
+    // system runs several times in some frames and not at all in others).
     private readonly List<double> _systemMs = new();
+    private readonly List<double> _frameMs = new();
     private readonly System.Diagnostics.Stopwatch _systemTimer = new();
     private const double TimingSmoothing = 0.05;
 
@@ -100,9 +106,20 @@ public sealed class EngineHost : IDisposable
     private void OnUpdate(double dt)
     {
         RunStage(SystemStage.Input, (float)dt);
+
+        int ticks = Clock.Advance(dt);
+        for (int i = 0; i < ticks; i++)
+        {
+            Time.Tick++;
+            RunStage(SystemStage.Tick, Time.TickSeconds);
+        }
+        Time.TicksLastFrame = ticks;
+        Time.Alpha = Clock.Alpha;
+
         RunStage(SystemStage.Logic, (float)dt);
         RunStage(SystemStage.PreRender, (float)dt);
         Input.NewFrame();   // clear after all stages read, before next frame's events fire
+        SmoothTimes(render: false);
     }
 
     private void OnRender(double dt)
@@ -122,6 +139,7 @@ public sealed class EngineHost : IDisposable
         _systemTimer.Restart();
         Frame.End();
         _frameEndMs += TimingSmoothing * (_systemTimer.Elapsed.TotalMilliseconds - _frameEndMs);
+        SmoothTimes(render: true);
     }
 
     // Smoothed CPU time of opening (camera uniform, swapchain acquire) and closing (ImGui, submit, present) the frame.
@@ -151,8 +169,18 @@ public sealed class EngineHost : IDisposable
         }
     }
 
-    private void RecordTime(int i) =>
-        _systemMs[i] += TimingSmoothing * (_systemTimer.Elapsed.TotalMilliseconds - _systemMs[i]);
+    private void RecordTime(int i) => _frameMs[i] += _systemTimer.Elapsed.TotalMilliseconds;
+
+    /// <summary>Folds this frame's time for the update (or render) systems into their smoothed times.</summary>
+    private void SmoothTimes(bool render)
+    {
+        for (int i = 0; i < _systems.Count; i++)
+        {
+            if (IsRenderStage(_systems[i].stage) != render) continue;
+            _systemMs[i] += TimingSmoothing * (_frameMs[i] - _systemMs[i]);
+            _frameMs[i] = 0;
+        }
+    }
 
     /// <summary>Debug panel listing each system's CPU time per frame, slowest first. GPU work isn't timed
     /// directly: if the frame takes much longer than the CPU total, the difference is GPU time (or vsync),
@@ -210,6 +238,7 @@ public sealed class EngineHost : IDisposable
 
             double frameMs = h.Time.FramesPerSecond > 0 ? 1000.0 / h.Time.FramesPerSecond : 0;
             ImGuiNET.ImGui.Text($"Frame: {frameMs:F1} ms ({h.Time.FramesPerSecond} fps), systems CPU total: {total:F1} ms");
+            ImGuiNET.ImGui.Text($"Tick {h.Time.Tick}: {h.Time.TicksLastFrame} tick(s) last frame, {h.Clock.DroppedTicks} dropped in all");
             bool vsync = h.Context.VSync;
             if (ImGuiNET.ImGui.Checkbox("VSync", ref vsync)) h.Context.VSync = vsync;
             ImGuiNET.ImGui.SameLine();

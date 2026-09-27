@@ -1,6 +1,8 @@
 namespace ClearSkies.Engine.Core;
 
-/// <summary>Ordered stages systems run in each frame. Input through PreRender run on the update tick. The render
+/// <summary>Ordered stages systems run in each frame. Input through PreRender run on the window's update callback:
+/// <see cref="Input"/> once per frame, then <see cref="Tick"/> zero or more times (once per fixed 60 Hz tick, see
+/// <see cref="TickClock"/>), then <see cref="Logic"/> and <see cref="PreRender"/> once per frame. The render
 /// stages (<see cref="RenderWorld"/> onwards) run on the render tick, and only when <see cref="EngineHost"/> managed
 /// to open the frame (<c>RenderFrame</c>): they hold <see cref="IRenderSystem"/>s, which all draw into its single GPU
 /// render pass and are handed this frame's camera and time. A skipped frame (no active camera, no swapchain image)
@@ -8,7 +10,14 @@ namespace ClearSkies.Engine.Core;
 /// </summary>
 public enum SystemStage
 {
+    /// <summary>Once per frame, before any ticks: UI frames, mouse-look, and collecting input for the ticks.</summary>
     Input,
+
+    /// <summary>Once per fixed tick, 0 or more times a frame, handed <see cref="Time.TickSeconds"/>: gameplay
+    /// simulation and exactly one physics step. Systems here read input only through <c>PlayerInput</c>.</summary>
+    Tick,
+
+    /// <summary>Once per frame, after the ticks: presentation and per-frame interaction.</summary>
     Logic,
     PreRender,
 
@@ -28,7 +37,7 @@ public enum SystemStage
 }
 
 /// <summary>Minimal scheduling contract so engine and game systems share one update order. Runs in the update stages
-/// (Input, Logic, PreRender).</summary>
+/// (Input, Tick, Logic, PreRender).</summary>
 public interface ISystem
 {
     void Update(float dt);
