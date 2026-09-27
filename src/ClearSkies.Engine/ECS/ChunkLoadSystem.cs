@@ -14,8 +14,9 @@ namespace ClearSkies.Engine.ECS;
 /// <summary>
 /// Streams the static world around the active camera, like a typical block game: a queue of the chunk columns within
 /// the view distance, closest first by horizontal distance, rebuilt whenever the camera crosses into another column,
-/// and loaded a whole column at a time. A rebuild is spread over frames (<see cref="StepBudgetMs"/> each for
-/// unloading what left view and for scanning the columns in view), so crossing a column doesn't cost one long frame. Only chunks that may hold something are queued: the layers the generator says
+/// and loaded a whole column at a time. A rebuild is spread over frames (within <see cref="StreamBudgetMs"/>, for
+/// unloading what left view and for scanning the columns in view), so crossing a column doesn't cost one long frame.
+/// Only chunks that may hold something are queued: the layers the generator says
 /// it may fill (<see cref="IWorldGenerator.ColumnLayers"/>) and chunks with a save file (builds). The generator's
 /// layers are a loose bound, so chunks that turn out to be air are remembered (a bit per column) until their column
 /// leaves view, and aren't queued again.
@@ -102,9 +103,13 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     private int _queueHead;
     private bool _queueTruncated;
 
-    /// <summary>Main-thread time per frame for each spread-out part of a rebuild: unloading, and scanning for columns
-    /// to queue.</summary>
-    private const double StepBudgetMs = 1.5;
+    /// <summary>Main-thread time per frame for the work that comes in bursts, shared: unloading what left view,
+    /// adding finished columns, and scanning for columns to queue, in that order. What doesn't fit waits for the next
+    /// frame. Each still gets a minimum (<see cref="MinStepMs"/>) so none is starved for long.</summary>
+    private const double StreamBudgetMs = 2.5, MinStepMs = 0.3;
+    private readonly System.Diagnostics.Stopwatch _budget = new();
+
+    private double BudgetLeft => System.Math.Max(MinStepMs, StreamBudgetMs - _budget.Elapsed.TotalMilliseconds);
 
     // The rebuild's scan of the columns in view: the next offset to look at, and whether it has looked at them all
     // (or filled the queue). Columns nearer than the scan's position are all queued, loading or loaded.
@@ -117,11 +122,6 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     private readonly Dictionary<(int x, int z), int> _inFlight = new();
     private int _inFlightChunks;
     private readonly ConcurrentQueue<((int x, int z) Column, List<(ChunkPosition Pos, ChunkData? Data, PackedOpacity? Packed)> Chunks)> _results = new();
-
-    /// <summary>Main-thread time spent adding finished columns per frame; the rest wait for the next frame, so a burst
-    /// of columns finishing together doesn't land on one frame.</summary>
-    private const double ApplyBudgetMs = 2.0;
-    private readonly System.Diagnostics.Stopwatch _applyClock = new();
 
     private (int x, int z) _lastCamColumn = (int.MinValue, int.MinValue);
     private bool _skippedInFlight;
@@ -228,8 +228,24 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         }
         _steps.Lap(AutosaveStep);
 
-        _applyClock.Restart();
-        while (_applyClock.Elapsed.TotalMilliseconds < ApplyBudgetMs && _results.TryDequeue(out var job))
+        _budget.Restart();
+        bool haveCam = CameraUtil.TryGetActive(_cameras, out var cam);
+        if (haveCam)
+        {
+            var camColumn = ((int)MathF.Floor(cam.Position.X / S), (int)MathF.Floor(cam.Position.Z / S));
+            bool idle = _scanDone && _queueHead == _queue.Count && _inFlight.Count == 0;
+            if (camColumn != _lastCamColumn || (idle && (_skippedInFlight || _queueTruncated)))
+            {
+                _lastCamColumn = camColumn;
+                _skippedInFlight = false;
+                Rebuild();
+            }
+            UnloadSome(BudgetLeft);
+            _steps.Lap(UnloadStep);
+        }
+
+        double applyUntil = _steps.SinceLap() + BudgetLeft;
+        while (_steps.SinceLap() < applyUntil && _results.TryDequeue(out var job))
         {
             _inFlightChunks -= _inFlight[job.Column];
             _inFlight.Remove(job.Column);
@@ -247,21 +263,10 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
             }
         }
         _steps.Lap(ApplyStep);
-
-        if (!CameraUtil.TryGetActive(_cameras, out var cam)) return;
+        if (!haveCam) return;
         var camPos = cam.Position;
 
-        var camColumn = ((int)MathF.Floor(camPos.X / S), (int)MathF.Floor(camPos.Z / S));
-        bool idle = _scanDone && _queueHead == _queue.Count && _inFlight.Count == 0;
-        if (camColumn != _lastCamColumn || (idle && (_skippedInFlight || _queueTruncated)))
-        {
-            _lastCamColumn = camColumn;
-            _skippedInFlight = false;
-            Rebuild();
-        }
-        UnloadSome(StepBudgetMs);
-        _steps.Lap(UnloadStep);
-        ScanSome(StepBudgetMs);
+        ScanSome(BudgetLeft);
         _steps.Lap(QueueStep);
 
         Dispatch();
