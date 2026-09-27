@@ -426,6 +426,9 @@ namespace ClearSkies.Engine.Physics.Characters
         /// <summary>Whether <see cref="SnapBoxEdgeNormals"/> smooths the seams between box colliders (on by default).</summary>
         public bool SmoothBoxEdges = true;
 
+        /// <summary>Tells voxel colliders (whose seams get smoothed) from everything else. Set by PhysicsWorld.</summary>
+        public ClearSkies.Engine.Physics.ColliderTags? Colliders;
+
         /// <summary>
         /// Voxel terrain and ships are compounds of boxes, and Bepu doesn't smooth the internal edges between them: a capsule
         /// sliding across the seam between two flush boxes touches the next box's top edge with a tilted normal, which the
@@ -470,31 +473,17 @@ namespace ClearSkies.Engine.Physics.Characters
                 normal = axis * sign;
         }
 
-        /// <summary>True (with its orientation) if the collidable is built from unrotated boxes: a lone box, or a compound of
-        /// them (chunk terrain, ship grids). Other characters and any other shape are left alone.</summary>
+        /// <summary>True (with its orientation) if the collidable is tagged as voxel terrain or a grid in <see cref="Colliders"/>:
+        /// built from unrotated boxes in its local space. Everything else (other characters, untagged shapes) is left alone.</summary>
         bool TryGetBoxColliderOrientation(CollidableReference collidable, out Quaternion orientation)
         {
-            TypedIndex shape;
-            if (collidable.Mobility == CollidableMobility.Static)
-            {
-                var staticReference = Simulation.Statics[collidable.StaticHandle];
-                shape = staticReference.Shape;
-                orientation = staticReference.Pose.Orientation;
-            }
-            else
-            {
-                var handle = collidable.BodyHandle;
-                if (handle.Value < bodyHandleToCharacterIndex.Length && bodyHandleToCharacterIndex[handle.Value] >= 0)
-                {
-                    orientation = Quaternion.Identity;
-                    return false;
-                }
-                var bodyReference = Simulation.Bodies[handle];
-                shape = bodyReference.Collidable.Shape;
-                orientation = bodyReference.Pose.Orientation;
-            }
-            var type = shape.Type;
-            return type == Box.Id || type == Compound.Id || type == BigCompound.Id;
+            orientation = Quaternion.Identity;
+            if (Colliders is null || !Colliders.Get(collidable).IsVoxel)
+                return false;
+            orientation = collidable.Mobility == CollidableMobility.Static
+                ? Simulation.Statics[collidable.StaticHandle].Pose.Orientation
+                : Simulation.Bodies[collidable.BodyHandle].Pose.Orientation;
+            return true;
         }
 
         Buffer<(int Start, int Count)> boundingBoxExpansionJobs;

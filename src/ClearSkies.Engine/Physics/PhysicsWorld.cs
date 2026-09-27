@@ -45,6 +45,10 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
     /// changes to drive it.</summary>
     public CharacterControllers Characters { get; }
 
+    /// <summary>What each body/static is (voxel terrain, a grid, other) — see <see cref="ColliderTags"/>. Terrain
+    /// chunks are tagged by <see cref="AddStaticCompound"/>; grid bodies by whoever creates them.</summary>
+    public ColliderTags Colliders { get; } = new();
+
     private readonly BufferPool _pool = new();
     private readonly float _fixedStep;
     private float _accumulator;
@@ -53,7 +57,7 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
     {
         Gravity = gravity;
         _fixedStep = fixedStep;
-        Characters = new CharacterControllers(_pool);
+        Characters = new CharacterControllers(_pool) { Colliders = Colliders };
         Simulation = Simulation.Create(
             _pool,
             new VoxelNarrowPhaseCallbacks(new SpringSettings(30, 1)) { Characters = Characters },
@@ -224,7 +228,11 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
 
     /// <summary>Removes a dynamic body. To also free its shape, read the shape with <see cref="GetBodyShape"/>
     /// first, then pass it to <see cref="RemoveCompound"/> after this call.</summary>
-    public void RemoveBody(BodyHandle handle) => Simulation.Bodies.Remove(handle);
+    public void RemoveBody(BodyHandle handle)
+    {
+        Colliders.Clear(handle);
+        Simulation.Bodies.Remove(handle);
+    }
 
     public TypedIndex GetBodyShape(BodyHandle handle) => Simulation.Bodies[handle].Collidable.Shape;
 
@@ -326,7 +334,9 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
             ? new BigCompound(children, Simulation.Shapes, _pool)
             : new BigCompound { Children = children, Tree = new Tree(build.Tree, _pool) };
         var shape = Simulation.Shapes.Add(compound);
-        return Simulation.Statics.Add(new StaticDescription(origin, shape));
+        var handle = Simulation.Statics.Add(new StaticDescription(origin, shape));
+        Colliders.Set(handle, new ColliderInfo(ColliderKind.VoxelTerrain));
+        return handle;
     }
 
     /// <summary>Removes a static created by <see cref="AddStaticCompound"/>, along with its compound
@@ -334,6 +344,7 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
     public void RemoveStaticCompound(StaticHandle handle)
     {
         var shape = Simulation.Statics[handle].Shape;
+        Colliders.Clear(handle);
         Simulation.Statics.Remove(handle);
         Simulation.Shapes.RecursivelyRemoveAndDispose(shape, _pool);
     }
