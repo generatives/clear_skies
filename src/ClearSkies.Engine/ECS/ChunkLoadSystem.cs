@@ -375,11 +375,13 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         RecordBuild(p, hasBlocks);
     }
 
-    /// <summary>Light bricks the world's chunks hold in the GPU store.</summary>
-    private int WorldBricks() => _staticVolume.Gpu.Slots.Count;
+    /// <summary>Light bricks the world's loaded chunks hold in the GPU store (not counting unloaded ones still
+    /// waiting to be released).</summary>
+    private int WorldBricks() => _staticVolume.Gpu.Slots.Count - _store.WorldBricksReleasing;
 
     /// <summary>Chunks loaded but not uploaded to the GPU store yet.</summary>
-    private int PendingChunks() => System.Math.Max(0, _staticVolume.LoadedCount - _store.WorldChunkCount);
+    private int PendingChunks() =>
+        System.Math.Max(0, _staticVolume.LoadedCount - (_store.WorldChunkCount - _store.WorldChunksReleasing));
 
     /// <summary>Hands queued columns to workers, one job per column, while the budget has room. When it doesn't, and
     /// the next column is nearer than the farthest loaded one, unloads that to make room.</summary>
@@ -444,8 +446,8 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     /// <summary>Unloads the farthest loaded columns (not being loaded) that are more than a column farther than
     /// <paramref name="distSq"/> (so two columns at about the same distance don't keep swapping), until
     /// <paramref name="chunks"/> chunks and <paramref name="bricks"/> light bricks are freed, or
-    /// <see cref="MaxEvictChunksPerFrame"/> chunks. The store frees the bricks when it next runs, so the next frame
-    /// sees the room.</summary>
+    /// <see cref="MaxEvictChunksPerFrame"/> chunks. Their bricks count as free at once (GridStore.WorldBricksReleasing),
+    /// though the store releases them over the next frames.</summary>
     private void EvictFartherThan(long distSq, int chunks, int bricks)
     {
         if (_nothingToEvict) return;
@@ -488,13 +490,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     }
 
     /// <summary>Light bricks chunk <paramref name="p"/> holds in the GPU store (none until it is uploaded).</summary>
-    private int ChunkBricks(ChunkPosition p)
-    {
-        if (!_staticVolume.Gpu.Chunks.TryGetValue(p, out var rec) || rec.BrickSlots == null) return 0;
-        int n = 0;
-        foreach (int slot in rec.BrickSlots) if (slot >= 0) n++;
-        return n;
-    }
+    private int ChunkBricks(ChunkPosition p) => _store.BricksOf(_staticVolume.Gpu, p);
 
     /// <summary>Whether column (x, z) has chunks that may hold something and aren't loaded yet.</summary>
     private bool HasMissing(int x, int z)

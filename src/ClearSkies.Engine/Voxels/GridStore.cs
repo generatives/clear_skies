@@ -212,6 +212,20 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     public int LightSlotHighWater => _lightNext;
     public int WorldChunkCount => _worldCells.Count;
 
+    /// <summary>World chunks that unloaded and wait to be released (see GpuResidencySystem), and the light bricks they
+    /// hold as of when they unloaded: as good as free already, for whoever budgets what's loaded.</summary>
+    public int WorldChunksReleasing { get; internal set; }
+    public int WorldBricksReleasing { get; internal set; }
+
+    /// <summary>Light bricks chunk <paramref name="pos"/> of grid <paramref name="g"/> holds.</summary>
+    internal int BricksOf(GridHandle g, ChunkPosition pos)
+    {
+        if (!g.Chunks.TryGetValue(pos, out var rec) || rec.BrickSlots == null) return 0;
+        int n = 0;
+        foreach (int slot in rec.BrickSlots) if (slot >= 0) n++;
+        return n;
+    }
+
     // Scratch.
     private readonly uint[] _brickRun = new uint[64];
     private readonly uint[] _emptyBrick;
@@ -529,6 +543,16 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         ExtendBox(g, pos);
         WriteChunkEntry(rec);
         return rec;
+    }
+
+    /// <summary>The other chunk of the world holding the world index cell that <paramref name="pos"/> wraps to, if
+    /// any: one that has left view but not been removed yet (see GpuResidencySystem), which must go first.</summary>
+    internal bool WorldCellHolder(GridHandle g, ChunkPosition pos, out ChunkPosition holder)
+    {
+        holder = default;
+        if (!g.IsWorld || !_worldCells.TryGetValue(WorldCell(pos), out var rec) || rec.Pos == pos) return false;
+        holder = rec.Pos;
+        return true;
     }
 
     private int WorldCell(ChunkPosition p)
