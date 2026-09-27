@@ -77,7 +77,7 @@ public static class TestScene
             });
         }
 
-        host.Input.CursorCaptured = false; // the F1 debug menu starts open, and F1 frees the cursor with it
+        if (host.Input is { } input) input.CursorCaptured = false; // the F1 debug menu starts open, and F1 frees the cursor with it
         return eyeTransform.Position;
     }
 }
