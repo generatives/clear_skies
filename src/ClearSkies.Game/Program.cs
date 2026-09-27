@@ -49,12 +49,12 @@ var physicsBody = new PhysicsBodySystem(host.World, host.Physics);
 // are loaded closest-first until it's spent (see ChunkLoadSystem); only surfaces use it, so solid stone inside an
 // island is nearly free. The GPU store adds a fifth on top for headroom and ships. --light-budget-mb N overrides it,
 // e.g. for a software renderer whose small max buffer size can't hold it (the store also shrinks it to fit).
-int LightBudgetMb = 1024;
+int LightBudgetMb = 2048;
 int budgetArg = Array.IndexOf(args, "--light-budget-mb");
 if (budgetArg >= 0 && budgetArg + 1 < args.Length) LightBudgetMb = int.Parse(args[budgetArg + 1]);
 // View distance: how far out (in blocks, horizontally) islands are streamed, if the budget reaches. The GPU's world
 // index covers it both ways at 2 bytes per chunk position (~48 MB at 10000). --view-distance N overrides it.
-float ViewDistance = 10000f;
+float ViewDistance = 2000f;
 int viewArg = Array.IndexOf(args, "--view-distance");
 if (viewArg >= 0 && viewArg + 1 < args.Length) ViewDistance = float.Parse(args[viewArg + 1], System.Globalization.CultureInfo.InvariantCulture);
 const int MinChunkY = 0; // streamed layers are -8..55 (blocks -256..1792): HeartGrid's WorldBottom..WorldTop
