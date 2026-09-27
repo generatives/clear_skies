@@ -16,9 +16,10 @@ public sealed class InputManager : IDisposable
     /// independent context via <c>window.CreateInput()</c>.</summary>
     internal IInputContext Native => _input;
 
-    /// <summary>Set each frame from <c>ImGuiController.WantCaptureMouse</c>. While true, mouse-button
-    /// queries report nothing pressed, so a click on an ImGui panel isn't also read by game systems as
-    /// (for example) "recapture the cursor for camera look".</summary>
+    /// <summary>Set each frame from <c>ImGuiController.WantCaptureMouse</c> (and by the game UI while the pointer is
+    /// over one of its panels). While true, mouse-button queries report nothing pressed and the mouse and scroll deltas
+    /// are zero, so a click or scroll on an ImGui panel isn't also read by game systems as (for example) "recapture the
+    /// cursor for camera look" or "pick the next hotbar slot".</summary>
     public bool UiWantsMouse { get; set; }
 
     /// <summary>Set each frame from <c>ImGuiController.WantCaptureKeyboard</c> (true while an ImGui
@@ -68,7 +69,7 @@ public sealed class InputManager : IDisposable
     public bool IsKeyDown(Key key) => !UiWantsKeyboard && (_keyboard?.IsKeyPressed(key) ?? false);
 
     public bool WasKeyPressed(Key key) => !UiWantsKeyboard && _justPressed.Contains(key);
-    public System.Numerics.Vector2 ScrollDelta => _scrollDelta;
+    public System.Numerics.Vector2 ScrollDelta => UiWantsMouse ? System.Numerics.Vector2.Zero : _scrollDelta;
     public bool WasMouseButtonPressed(MouseButton button) => !UiWantsMouse && _justMousePressed.Contains(button);
     public bool IsMouseButtonDown(MouseButton button) => !UiWantsMouse && (_mouse?.IsButtonPressed(button) ?? false);
 
