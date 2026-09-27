@@ -70,10 +70,18 @@ public sealed class GridPilotSystem : ISystem
         _selectedGrid    = world.GetEntities().With<DynamicGrid>().With<SelectedGridComponent>().AsSet();
     }
 
+    /// <summary>Pilot mode is a single-player debug tool: while this says so (other players are connected), it's off.</summary>
+    public Func<bool>? Disabled { get; set; }
+
     public void Update(float dt)
     {
         if (_isPiloting && !_pilotedGridRoot.IsAlive)
             StopPiloting(); // the piloted grid was despawned out from under us
+        if (Disabled?.Invoke() == true)
+        {
+            if (_isPiloting) StopPiloting();
+            return;
+        }
 
         if (_input.WasKeyPressed(Key.F))
         {

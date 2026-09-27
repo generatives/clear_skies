@@ -1,6 +1,7 @@
 using System.Numerics;
 using BepuPhysics.Collidables;
 using ClearSkies.Engine.Commands;
+using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Commands.Handlers;
 using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Persistence;
@@ -30,7 +31,11 @@ public sealed class HeadlessScene : IDisposable
     public readonly CommandSystem Commands;
     public readonly BlockEntities Blocks;
     public readonly EditLimits Limits = new();
-    public uint TickNumber;
+    public readonly ManualTickClock Clock = new();
+    private double _rateCredit;
+    public uint TickNumber => Clock.Tick;
+    public ClearSkies.Net.Session.NetSession? Net;
+    public ClearSkies.Net.Sync.RemoteBodySystem? RemoteBodies;
     private readonly List<Engine.Core.ISystem> _tick = new();
 
     public readonly NetIdAllocator Ids;
@@ -53,7 +58,7 @@ public sealed class HeadlessScene : IDisposable
         root.Set<Rendered>();
 
         Presence = new EntityPresenceSystem(World, Session, WorldVolume, viewDistance: 500f);
-        Commands = new CommandSystem(Session, Registry, () => TickNumber);
+        Commands = new CommandSystem(Session, Registry, () => Clock.Tick);
         Blocks = new BlockEntities(World, Registry);
         Commands.Register(new EditVoxelsHandler(Blocks, Limits));
         Commands.Register(new SetLeverHandler(Blocks));
@@ -76,6 +81,16 @@ public sealed class HeadlessScene : IDisposable
         _tick.Add(new SupportSystem(World, Physics));
     }
 
+    /// <summary>Puts a network session's systems in the tick: receive first, body sync and send last.</summary>
+    public void AttachNet(ClearSkies.Net.Session.NetSession net)
+    {
+        Net = net;
+        _tick.Insert(0, new ClearSkies.Net.Session.NetReceiveSystem(net));
+        _tick.Add(new ClearSkies.Net.Sync.BodySync(net, World, Physics));
+        _tick.Add(new ClearSkies.Net.Session.NetSendSystem(net));
+        RemoteBodies = new ClearSkies.Net.Sync.RemoteBodySystem(World, Registry, Clock);
+    }
+
     /// <summary>Saves to <paramref name="db"/> and streams entities from it, as the host does.</summary>
     public void EnablePersistence(SaveDatabase db)
     {
@@ -90,8 +105,15 @@ public sealed class HeadlessScene : IDisposable
     {
         for (int i = 0; i < count; i++)
         {
-            TickNumber++;
-            foreach (var s in _tick) s.Update(Dt);
+            // One frame of real time: usually one tick, but clock sync's slew (Rate) sometimes makes it none or two.
+            _rateCredit += Clock.Rate;
+            while (_rateCredit >= 1)
+            {
+                _rateCredit -= 1;
+                Clock.Tick++;
+                foreach (var s in _tick) s.Update(Dt);
+            }
+            RemoteBodies?.Update(Dt); // per frame in the game
         }
     }
 
@@ -139,6 +161,7 @@ public sealed class HeadlessScene : IDisposable
 
     public void Dispose()
     {
+        Net?.Dispose();
         Registry.Dispose();
         Physics.Dispose();
         World.Dispose();

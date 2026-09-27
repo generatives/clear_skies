@@ -76,9 +76,9 @@ public sealed class ChunkData
 
     /// <summary>Zero-copy raw byte views of the block/orientation arrays, for bulk serialization (an orientation is
     /// its <see cref="BlockOrientation.ToByte"/>). A uniform chunk's view is a shared read-only array of its value.</summary>
-    internal ReadOnlySpan<byte> BlocksAsBytes()
+    public ReadOnlySpan<byte> BlocksAsBytes()
         => _blocks != null ? MemoryMarshal.Cast<BlockId, byte>(_blocks) : UniformBytes((byte)_uniformBlock);
-    internal ReadOnlySpan<byte> OrientationsAsBytes()
+    public ReadOnlySpan<byte> OrientationsAsBytes()
         => _orientations != null ? MemoryMarshal.Cast<BlockOrientation, byte>(_orientations) : UniformBytes(_uniformOrientation.ToByte());
 
     private static readonly byte[]?[] Uniform = new byte[]?[256];

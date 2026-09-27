@@ -27,7 +27,8 @@ public static class TestScene
     /// <param name="savedPlayer">The local player's saved SpawnPlayer command, if they've played this world before.</param>
     public static Vector3D<float> Build(EngineHost host, CommandSystem commands, LocalSettings settings, byte[]? savedPlayer,
                                         float[]? cameraOverride = null,
-                                        (Vector3D<float> Position, float Yaw, float Pitch)? spawnView = null)
+                                        (Vector3D<float> Position, float Yaw, float Pitch)? spawnView = null,
+                                        bool spawnPlayer = true)
     {
         var eyeTransform = Transform.Identity;
 
@@ -56,7 +57,8 @@ public static class TestScene
         // The player: spawned through the command system (applied in the first tick). From the save if they've played
         // this world before (where they left off); otherwise at the eye position less the eye height (its Transform is
         // the character capsule's centre).
-        if (savedPlayer is not null)
+        if (!spawnPlayer) { } // a client: the host spawns its player once it has joined
+        else if (savedPlayer is not null)
             commands.SendSerialized(CommandIds.SpawnPlayer, savedPlayer);
         else
         {

@@ -36,22 +36,59 @@ host.Renderer.LoadTextureAtlas(
     Path.Combine(AppContext.BaseDirectory, "Resources", "spritesheet_tiles.png"),
     Path.Combine(AppContext.BaseDirectory, "Resources", "spritesheet_tiles.xml"));
 
-// The world's save: Saves/Worlds/<name>.db (--world <name>, default "Default"). A new world's seed is 1337 unless
-// --seed <n> says otherwise; after that it's whatever the save says.
 string ArgValue(string name) { int i = Array.IndexOf(args, name); return i >= 0 && i + 1 < args.Length ? args[i + 1] : ""; }
-string worldName = ArgValue("--world") is { Length: > 0 } w ? w : "Default";
-var saveDb = SaveDatabase.Open(SaveDatabase.PathFor(worldName));
-bool newWorld = saveDb.Seed is null;
-ulong seed = saveDb.Seed ?? (ulong.TryParse(ArgValue("--seed"), out var seedArg) ? seedArg : 1337UL);
-if (newWorld) saveDb.Seed = seed;
-Console.WriteLine($"[save] world '{worldName}' ({(newWorld ? "new" : "loaded")}), seed {seed}");
-var localSettings = LocalSettings.LoadOrCreate(Path.Combine(AppContext.BaseDirectory, "Saves", "settings.txt"), Environment.UserName);
+// This machine's player: an ID kept in Saves/settings.txt, and a name. --name <player> plays as someone else, with
+// their own settings file (Saves/settings-<player>.txt), so two instances on one machine are two players.
+string nameArg = ArgValue("--name");
+var localSettings = LocalSettings.LoadOrCreate(Path.Combine(AppContext.BaseDirectory, "Saves",
+    nameArg.Length > 0 ? $"settings-{string.Concat(nameArg.Where(char.IsLetterOrDigit))}.txt" : "settings.txt"),
+    nameArg.Length > 0 ? nameArg : Environment.UserName);
+string playerName = localSettings.Name;
 
-// Session: single-player is a host session with nobody connected. Network IDs and owners exist, all local.
+// Session: single-player is a host session with nobody connected (--host <port> lets others join); --join
+// <address:port> joins someone else's instead. Joining happens now, before the world is built, because the host
+// decides the seed.
 var session = Session.SinglePlayer();
 var registry = new NetRegistry(host.World);
-var idAllocator = new NetIdAllocator(saveDb.NextFreeId); // IDs never repeat across sessions
-registry.RequestBlock = idAllocator.NextBlock;
+ulong generationChecksum = GenerationChecksum.Compute();
+string joinAddress = ArgValue("--join");
+bool joining = joinAddress.Length > 0;
+ClearSkies.Net.Transport.LaggedTransport? transport = null;
+ClearSkies.Net.Protocol.Welcome welcome = default;
+if (joining)
+{
+    int colon = joinAddress.LastIndexOf(':');
+    string address = colon > 0 ? joinAddress[..colon] : joinAddress;
+    int port = colon > 0 ? int.Parse(joinAddress[(colon + 1)..]) : 7777;
+    Console.WriteLine($"[net] joining {address}:{port} as {playerName}");
+    transport = new ClearSkies.Net.Transport.LaggedTransport(ClearSkies.Net.Transport.LiteNetTransport.Join(address, port));
+    welcome = ClearSkies.Net.Session.ClientSession.Connect(transport,
+        new ClearSkies.Net.Protocol.Hello(ClearSkies.Net.Protocol.ProtocolVersion.Current, localSettings.PlayerId, playerName, generationChecksum),
+        TimeSpan.FromSeconds(15));
+    session.BecomeClient(welcome.Peer);
+}
+else if (ArgValue("--host") is { Length: > 0 } hostPort)
+{
+    transport = new ClearSkies.Net.Transport.LaggedTransport(ClearSkies.Net.Transport.LiteNetTransport.Host(int.Parse(hostPort)));
+    Console.WriteLine($"[net] hosting on port {hostPort}");
+}
+
+// The world's save (the host's only): Saves/Worlds/<name>.db (--world <name>, default "Default"). A new world's seed
+// is 1337 unless --seed <n> says otherwise; after that it's whatever the save says. A client takes the host's seed.
+string worldName = ArgValue("--world") is { Length: > 0 } w ? w : "Default";
+SaveDatabase? saveDb = joining ? null : SaveDatabase.Open(SaveDatabase.PathFor(worldName));
+bool newWorld = saveDb is { Seed: null };
+ulong seed = joining ? welcome.Seed : saveDb!.Seed ?? (ulong.TryParse(ArgValue("--seed"), out var seedArg) ? seedArg : 1337UL);
+if (newWorld) saveDb!.Seed = seed;
+if (saveDb != null) Console.WriteLine($"[save] world '{worldName}' ({(newWorld ? "new" : "loaded")}), seed {seed}");
+
+// Network IDs: the host hands out blocks from the save's next free ID, so they never repeat across sessions; a
+// client gets blocks from the host.
+var idAllocator = new NetIdAllocator(saveDb?.NextFreeId ?? NetRegistry.FirstFreeId);
+if (!joining) registry.RequestBlock = idAllocator.NextBlock;
+
+// The network session: first in every tick it receives, last it sends (set once the command system exists).
+ClearSkies.Net.Session.NetSession? net = null;
 
 // The static world is a volume like any other, with an identity Transform (set by ChunkVolume) and zero pivot, and a
 // reserved network ID. Its chunks each decide their own presence layers (see EntityPresenceSystem).
@@ -59,7 +96,7 @@ var staticVolumeEntity = host.World.CreateEntity();
 var staticVolume = new ChunkVolume(staticVolumeEntity, host.World) { MeshIgnoresNeighbours = true, ChunksOwnPresence = true };
 staticVolumeEntity.Set(new ChunkGrid() { Volume = staticVolume });
 staticVolumeEntity.Set(new NetId { Value = NetRegistry.WorldVolume });
-staticVolumeEntity.Set(session.LocalOwner());
+staticVolumeEntity.Set(session.OwnerFor(PeerId.Host));
 staticVolumeEntity.Set<Rendered>();
 
 // Model blocks' glTF models (BlockDef.Model paths are relative to Resources/Models — see the csproj's link of
@@ -84,6 +121,7 @@ host.AddSystem(new LookInputSystem(host.World, host.Input), SystemStage.Input);
 var inputSample = new InputSampleSystem(host.World, host.Input);
 host.AddSystem(inputSample.Collect, SystemStage.Input);
 var interpolation = new RenderInterpolationSystem(host.World, host.Time);
+host.AddSystem(new LambdaSystem(() => net?.Receive()), SystemStage.Tick); // commands, events, snapshots, session messages
 var hierarchy = new HierarchyTransformSystem(host.World);
 host.AddSystem(interpolation.BeginTick, SystemStage.Tick); // the true poses back from the drawn ones
 host.AddSystem(hierarchy, SystemStage.Tick);
@@ -107,10 +145,14 @@ commands.Register(new DespawnEntityHandler(registry));
 
 // Persistence (the host's): entities load within 1,000 blocks of a player and unload past 1,100, written to the save
 // as they go; everything is autosaved every 5 minutes and on exit, in one transaction.
-var storedIndex = new StoredEntityIndex(saveDb.ReadEntityIndex());
-var worldSaver = new WorldSaver(host.World, saveDb, storedIndex, commands, idAllocator);
-host.AddSystem(new EntityStreamingSystem(host.World, saveDb, storedIndex, registry, commands, worldSaver), SystemStage.Tick);
-host.AddSystem(worldSaver, SystemStage.Tick);
+WorldSaver? worldSaver = null;
+if (saveDb != null)
+{
+    var storedIndex = new StoredEntityIndex(saveDb.ReadEntityIndex());
+    worldSaver = new WorldSaver(host.World, saveDb, storedIndex, commands, idAllocator);
+    host.AddSystem(new EntityStreamingSystem(host.World, saveDb, storedIndex, registry, commands, worldSaver), SystemStage.Tick);
+    host.AddSystem(worldSaver, SystemStage.Tick);
+}
 
 var physicsBody = new PhysicsBodySystem(host.World, host.Physics);
 
@@ -137,7 +179,7 @@ SkySettings.CloudSeaAltitude = HeartGrid.CloudSeaAltitude; // below its lowest i
 var gridStore = new GridStore(host.Context, (int)((long)LightBudgetMb * 1024 * 1024 / GridStore.SlotBytes),
                               ChunkLoadSystem.WorldIndexDim(ViewDistance));
 var chunkLoadSystem = new ChunkLoadSystem(host.World, staticVolume, gridStore, generatorFactory,
-                                          ViewDistance, MinChunkY, new DatabaseChunkStore(saveDb));
+                                          ViewDistance, MinChunkY, saveDb != null ? new DatabaseChunkStore(saveDb) : new NoChunkStore());
 host.Renderer.AttachGridStore(gridStore);
 host.AddSystem(physicsBody, SystemStage.Tick);
 
@@ -174,8 +216,52 @@ host.AddSystem(hierarchy, SystemStage.Tick); // e.g. volume Transforms -> chunk 
 host.AddSystem(new SupportSystem(host.World, host.Physics), SystemStage.Tick); // what each character stands on or rides with
 host.AddSystem(interpolation.EndTick, SystemStage.Tick); // records this tick's poses
 
+// The network session, now the command system exists: a host (single-player: with the transport off) or a client.
+var hostClock = new HostTickClock(host.Time, host.Clock);
+if (joining)
+{
+    var client = new ClearSkies.Net.Session.ClientSession(transport!, welcome, session, commands, registry, host.World, hostClock,
+        p => chunkLoadSystem.IsTerrainLoaded(new Vector3D<float>(p.X, p.Y, p.Z), 64f));
+    client.Ended += reason => { Console.WriteLine($"[net] session ended: {reason}"); host.Window.Native.Close(); };
+    net = client;
+}
+else
+{
+    var hostNet = new ClearSkies.Net.Session.HostSession(transport, session, commands, registry, host.World, hostClock, idAllocator, seed,
+        generationChecksum, playerId =>
+        {
+            // A returning player spawns where they left off; a new one at the spawn point.
+            var saved = saveDb!.ReadPlayer(playerId);
+            if (saved != null)
+            {
+                var reader = new ClearSkies.Engine.Serialization.NetReader(saved);
+                var spawn = ((SpawnPlayerHandler)commands.HandlerFor(CommandIds.SpawnPlayer)!).Read(ref reader);
+                return (saved, spawn.Player.Position);
+            }
+            var p = HeartSpawn(seed)!.Value.Position;
+            return (null, new Vector3(p.X, p.Y - PlayerFactory.EyeHeight, p.Z));
+        });
+    hostNet.NewPlayerLook = (HeartSpawn(seed)!.Value.Yaw, HeartSpawn(seed)!.Value.Pitch);
+    // A leaving player is saved (the players table), then despawned.
+    var leaving = new HashSet<uint>();
+    hostNet.PlayerLeaving = player =>
+    {
+        leaving.Add(player.Get<NetId>().Value);
+        DescribeRequest.Request(player, DescribePurpose.Store);
+    };
+    worldSaver!.Stored += id => { if (leaving.Remove(id)) commands.Send(new DespawnEntity { Entity = id, KeepStored = true }); };
+    net = hostNet;
+}
+var bodySync = new ClearSkies.Net.Sync.BodySync(net, host.World, host.Physics);
+host.AddSystem(bodySync, SystemStage.Tick); // snapshots of owned bodies, every second tick
+host.AddSystem(new ClearSkies.Net.Session.NetSendSystem(net), SystemStage.Tick);
+var remoteBodies = new ClearSkies.Net.Sync.RemoteBodySystem(host.World, registry, hostClock);
+host.Gui.RegisterDebugUi(new ClearSkies.Net.Debug.NetDebugPanel(net, remoteBodies, transport));
+gridPilot.Disabled = () => net.OthersConnected; // pilot mode and flight tuning: single-player only
+
 // Per frame, after the ticks: draw between the last two ticks (children follow), then stream terrain around the view.
 host.AddSystem(interpolation, SystemStage.Logic);
+host.AddSystem(remoteBodies, SystemStage.Logic); // bodies owned elsewhere, about 100 ms behind
 host.AddSystem(hierarchy, SystemStage.Logic);
 host.AddSystem(new CameraFollowSystem(host.World), SystemStage.Logic); // the camera at the local player's eye
 host.AddSystem(chunkLoadSystem, SystemStage.Logic);
@@ -201,6 +287,8 @@ host.AddSystem(new GpuResidencySystem(host.World, staticVolume, gridStore), Syst
 host.AddSystem(new GpuLightSystem(host.World, staticVolume, host.Context, gridStore), SystemStage.PreRender);
 host.AddSystem(meshSystem, SystemStage.PreRender);
 host.AddSystem(new BlockModelSystem(host.World, blockModels), SystemStage.PreRender); // block entities -> RenderedModel
+using var playerModels = new PlayerModelSystem(host.World, host.Renderer);
+host.AddSystem(playerModels, SystemStage.PreRender); // other players, as boxes
 // Rendering: the host opens the frame, runs the render stages (systems in the order added within a stage), then
 // closes it with ImGui and presents. Each render system is handed this frame's camera and time.
 using var clouds = new CloudRenderSystem(host.Renderer, new HeartCloudDensity(seed));
@@ -218,7 +306,10 @@ float[]? cameraOverride = null;
 int camArg = Array.IndexOf(args, "--camera");
 if (camArg >= 0 && camArg + 1 < args.Length)
     cameraOverride = args[camArg + 1].Split(',').Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
-var camSpawn = TestScene.Build(host, commands, localSettings, saveDb.ReadPlayer(localSettings.PlayerId), cameraOverride, HeartSpawn(seed));
+// A client's player is spawned by the host once it has joined; everyone else spawns their own here.
+var camSpawn = TestScene.Build(host, commands, localSettings, saveDb?.ReadPlayer(localSettings.PlayerId), cameraOverride,
+                               joining ? (new Vector3D<float>(welcome.Spawn.X, welcome.Spawn.Y + PlayerFactory.EyeHeight, welcome.Spawn.Z), MathF.PI, -0.15f) : HeartSpawn(seed),
+                               spawnPlayer: !joining);
 
 // Spawn: over a wide, flat stretch of plains 18 km east of the origin (found by scanning seed 1337 for flat, well-
 // covered lowland), 60 blocks above the terrain surface there (which no piece's top reaches), looking north across it.
@@ -257,7 +348,7 @@ if (newWorld)
     Console.WriteLine($"[test-ship] spawned 5x2x5 hull + lamp at {shipSpawn}");
 }
 
-worldSaver.SaveChunks = chunkLoadSystem.SaveAllDirty;
+if (worldSaver != null) worldSaver.SaveChunks = chunkLoadSystem.SaveAllDirty;
 // Ctrl+C or a kill closes the window (on the main thread, next frame) as if it were closed by hand, so the world is
 // saved on the way out.
 bool quitRequested = false;
@@ -267,6 +358,7 @@ using var sigTerm = System.Runtime.InteropServices.PosixSignalRegistration.Creat
 host.AddSystem(new LambdaSystem(() => { if (Volatile.Read(ref quitRequested)) host.Window.Native.Close(); }), SystemStage.Input);
 host.Run();
 
-worldSaver.SaveNow(); // everything, in one transaction, on exit
-saveDb.Dispose();
+worldSaver?.SaveNow(); // everything, in one transaction, on exit
+net.Dispose(); // says goodbye to the host, or closes the game to clients
+saveDb?.Dispose();
 gridStore.Dispose();

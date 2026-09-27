@@ -166,6 +166,11 @@ public sealed class CommandSystem : ISystem, IDebugUiSystem
 
     internal uint NextSeq() => _nextSeq++;
 
+    /// <summary>Metadata for an event this machine sends as its own authority without a command (a description sent
+    /// to a joining player), numbered after every event already sent for <paramref name="target"/>.</summary>
+    public EventMeta StampEvent(uint target) =>
+        new(Session.LocalPeer, 0, Session.LocalPeer, target, NextEventNumber(target), Tick);
+
     internal uint NextEventNumber(uint target)
     {
         uint n = _eventNumbers.GetValueOrDefault(target) + 1;

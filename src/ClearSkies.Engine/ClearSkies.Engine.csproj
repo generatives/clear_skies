@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="ClearSkies.Tests" />
+    <InternalsVisibleTo Include="ClearSkies.Net" />
   </ItemGroup>
 
   <ItemGroup>
