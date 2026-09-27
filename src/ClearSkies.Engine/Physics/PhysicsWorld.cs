@@ -20,8 +20,8 @@ namespace ClearSkies.Engine.Physics;
 /// via <see cref="PhysicsConv"/>.
 ///
 /// Doubles as the <see cref="ISystem"/> that steps the simulation: <see cref="Step"/> advances it by exactly one fixed
-/// step, and it's scheduled in the Tick stage, which runs once per fixed tick (see <see cref="TickClock"/>, which also
-/// caps the ticks a frame runs). Register it with <c>AddSystem(host.Physics, SystemStage.Tick)</c> at the point in the
+/// step, and it's scheduled in the Simulation stage, which runs once per fixed tick (see <see cref="TickClock"/>, which also
+/// caps the ticks a frame runs). Register it with <c>AddSystem(host.Physics, SystemStage.Simulation)</c> at the point in the
 /// tick where physics should step — after systems that create bodies or apply impulses, before systems that read poses.
 /// </summary>
 public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
@@ -66,7 +66,7 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
         Characters.Colliders = Colliders;
     }
 
-    /// <summary>The Tick stage's call: one step (the tick's duration is always the fixed step).</summary>
+    /// <summary>The Simulation stage's call: one step (the tick's duration is always the fixed step).</summary>
     public void Update(float dt) => Step();
 
     /// <summary>Advances the simulation by exactly one fixed step.</summary>
