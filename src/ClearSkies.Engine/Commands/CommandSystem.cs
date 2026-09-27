@@ -2,6 +2,7 @@ using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Gui;
 using ClearSkies.Engine.Serialization;
+using DefaultEcs;
 using ImGuiNET;
 
 namespace ClearSkies.Engine.Commands;
@@ -27,9 +28,15 @@ public sealed class CommandSystem : ISystem, IDebugUiSystem
     private readonly Func<uint> _tick;
     private uint _nextSeq = 1;
 
-    public CommandSystem(Session session, NetRegistry registry, Func<uint> tick, ICommandRouter? router = null)
+    private readonly List<IDescriber> _describers = new();
+    private readonly EntitySet _describeRequests;
+    private readonly List<Entity> _unclaimed = new();
+
+    public CommandSystem(Session session, NetRegistry registry, Func<uint> tick, ICommandRouter? router = null, World? world = null)
     {
         Session = session;
+        Descriptions = new DescriptionSink(this);
+        _describeRequests = (world ?? registry.World).GetEntities().With<DescribeRequest>().AsSet();
         _registry = registry;
         _tick = tick;
         Router = router ?? new LocalCommandRouter();
@@ -53,8 +60,23 @@ public sealed class CommandSystem : ISystem, IDebugUiSystem
         _byId[handler.Id] = handler;
         _byType[handler.CommandType] = handler;
         handler.Owner = this;
+        if (handler is IDescriber describer)
+        {
+            _describers.Add(describer);
+            _describers.Sort((a, b) => a.Order.CompareTo(b.Order));
+        }
         return handler;
     }
+
+    /// <summary>Descriptions of entities with a <see cref="DescribeRequest"/>, made at the end of each tick.</summary>
+    public DescriptionSink Descriptions { get; }
+
+    internal CommandHandler<T> HandlerOf<T>() where T : struct, ICommand =>
+        _byType.TryGetValue(typeof(T), out var h) ? (CommandHandler<T>)h
+            : throw new InvalidOperationException($"No handler is registered for {typeof(T).Name}.");
+
+    /// <summary>Whether a handler for <typeparamref name="T"/> is registered.</summary>
+    public bool Handles<T>() where T : struct, ICommand => _byType.ContainsKey(typeof(T));
 
     public CommandHandlerBase? HandlerFor(ushort id) => _byId.GetValueOrDefault(id);
 
@@ -110,6 +132,23 @@ public sealed class CommandSystem : ISystem, IDebugUiSystem
         }
         _queue.Clear();
         foreach (var h in _byId.Values) h.ClearQueue();
+
+        DescribeRequested();
+    }
+
+    /// <summary>Calls every describer in order, then removes every <see cref="DescribeRequest"/>.</summary>
+    public void DescribeRequested()
+    {
+        if (_describeRequests.Count == 0) return;
+        Descriptions.Reset();
+        foreach (var d in _describers) d.Describe(Descriptions);
+        _unclaimed.Clear();
+        foreach (ref readonly var e in _describeRequests.GetEntities()) _unclaimed.Add(e);
+        foreach (var e in _unclaimed)
+        {
+            if (!Descriptions.Claimed(e)) Console.WriteLine($"[describe] nothing describes entity {e} (net ID {(e.Has<NetId>() ? e.Get<NetId>().Value : 0)})");
+            e.Remove<DescribeRequest>();
+        }
     }
 
     // ── bookkeeping used by the handlers ────────────────────────────────────

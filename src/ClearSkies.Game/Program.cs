@@ -40,7 +40,6 @@ var session = Session.SinglePlayer();
 var registry = new NetRegistry(host.World);
 var idAllocator = new NetIdAllocator();
 registry.RequestBlock = idAllocator.NextBlock;
-using var gridNetworking = new GridNetworking(host.World, registry, session);
 
 // The static world is a volume like any other, with an identity Transform (set by ChunkVolume) and zero pivot, and a
 // reserved network ID. Its chunks each decide their own presence layers (see EntityPresenceSystem).
@@ -90,6 +89,9 @@ commands.Register(new SetWheelHandler(blockEntities));
 commands.Register(new SetGridLockedHandler(registry, host.Physics));
 commands.Register(new RightGridHandler(registry, host.Physics));
 commands.Register(new SetMoveModeHandler(registry));
+commands.Register(new SpawnGridHandler(host.World, registry, session, host.Physics, gridSelection));
+commands.Register(new SpawnPlayerHandler(host.World, registry, session, host.Physics));
+commands.Register(new DespawnEntityHandler(registry));
 
 var physicsBody = new PhysicsBodySystem(host.World, host.Physics);
 
@@ -155,7 +157,7 @@ host.AddSystem(gridPilot, SystemStage.Logic);
 host.AddSystem(new BlockTargetSystem(host.World, host.Input, host.Renderer, blockActions, editLimits), SystemStage.Logic);
 host.AddSystem(new HudUi(ui, host.Input, blockActions, gridPilot, host.Renderer.Atlas,
                          Path.Combine(AppContext.BaseDirectory, "Resources", "Icons")), SystemStage.Logic); // crosshair, hotbar
-var gridPersistence = new GridPersistenceSystem(host.World, meshSystem, host.Physics, gridSelection);
+var gridPersistence = new GridPersistenceSystem(host.World, meshSystem, host.Physics, gridSelection, commands);
 host.AddSystem(gridPersistence, SystemStage.Logic);
 // The airship-related debug panels above (Pilot/Flight/Save-Load) drew into their own separate "Systems"
 // menu windows; combined here into one "Airship" window so they read as one feature.
@@ -190,7 +192,7 @@ float[]? cameraOverride = null;
 int camArg = Array.IndexOf(args, "--camera");
 if (camArg >= 0 && camArg + 1 < args.Length)
     cameraOverride = args[camArg + 1].Split(',').Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
-var camSpawn = TestScene.Build(host, registry, session, seed, cameraOverride, HeartSpawn(seed));
+var camSpawn = TestScene.Build(host, commands, cameraOverride, HeartSpawn(seed));
 
 // Spawn: over a wide, flat stretch of plains 18 km east of the origin (found by scanning seed 1337 for flat, well-
 // covered lowland), 60 blocks above the terrain surface there (which no piece's top reaches), looking north across it.
@@ -206,25 +208,25 @@ static (Vector3D<float> Position, float Yaw, float Pitch)? HeartSpawn(ulong seed
 // ray-traced toggle is on and ships are wired into GpuLightSystem's volume slots. Offset from camera
 // spawn rather than re-deriving island geometry.
 {
-    var shipVoxels = new List<(int X, int Y, int Z, BlockId Id, BlockOrientation Orientation)>();
+    var shipVoxels = new List<GridVoxel>();
     for (int x = 0; x < 5; x++)
     for (int z = 0; z < 5; z++)
     for (int y = 0; y < 2; y++)
-        shipVoxels.Add((x, y, z, BlockId.Wood, BlockOrientation.Upright));
-    shipVoxels.Add((2, 2, 2, BlockId.Lamp, BlockOrientation.Upright)); // exposed on the hull's roof, open air on 5 sides
+        shipVoxels.Add(new(x, y, z, BlockId.Wood, BlockOrientation.Upright));
+    shipVoxels.Add(new(2, 2, 2, BlockId.Lamp, BlockOrientation.Upright)); // exposed on the hull's roof, open air on 5 sides
     // The helm, on the roof one row from the stern, facing a player standing on the stern row looking at the bow
     // (-Z): the wheel, and a lever per axis — forward/back, starboard/port, and up/down (standing out of a post
     // towards the player, so it levers vertically) — plus a second forward/back lever out of the east wall, which
     // moves with the first.
-    shipVoxels.Add((2, 2, 3, BlockId.SteeringWheel, BlockOrientation.From(Direction.Up, Direction.South)));
-    shipVoxels.Add((1, 2, 3, BlockId.Lever, BlockOrientation.From(Direction.Up, Direction.South)));
-    shipVoxels.Add((3, 2, 3, BlockId.Lever, BlockOrientation.From(Direction.Up, Direction.East)));
-    shipVoxels.Add((4, 2, 2, BlockId.Wood, BlockOrientation.Upright));
-    shipVoxels.Add((4, 2, 3, BlockId.Lever, BlockOrientation.From(Direction.South, Direction.Up)));
-    shipVoxels.Add((5, 1, 2, BlockId.Lever, BlockOrientation.From(Direction.East, Direction.North)));
+    shipVoxels.Add(new(2, 2, 3, BlockId.SteeringWheel, BlockOrientation.From(Direction.Up, Direction.South)));
+    shipVoxels.Add(new(1, 2, 3, BlockId.Lever, BlockOrientation.From(Direction.Up, Direction.South)));
+    shipVoxels.Add(new(3, 2, 3, BlockId.Lever, BlockOrientation.From(Direction.Up, Direction.East)));
+    shipVoxels.Add(new(4, 2, 2, BlockId.Wood, BlockOrientation.Upright));
+    shipVoxels.Add(new(4, 2, 3, BlockId.Lever, BlockOrientation.From(Direction.South, Direction.Up)));
+    shipVoxels.Add(new(5, 1, 2, BlockId.Lever, BlockOrientation.From(Direction.East, Direction.North)));
 
     var shipSpawn = new Vector3(camSpawn.X + 10f, camSpawn.Y - 5f, camSpawn.Z + 45f);
-    DynamicGridFactory.SpawnFromVoxels(host.World, gridSelection, shipSpawn, shipVoxels);
+    commands.Send(new SpawnGrid { Grid = GridDescription.FromVoxels(shipSpawn, shipVoxels), Select = true });
     Console.WriteLine($"[test-ship] spawned 5x2x5 hull + lamp at {shipSpawn}");
 }
 

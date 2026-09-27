@@ -16,7 +16,8 @@ namespace ClearSkies.Engine.ECS;
 /// <summary>
 /// Each tick, from the local player's <see cref="PlayerInput"/>: what the player does to blocks, as commands. Left
 /// click places <see cref="PlaceIndex"/> of <see cref="PlaceableBlocks"/> against the targeted face and right click
-/// breaks the targeted block (both <see cref="EditVoxels"/>), with a brush in creative mode; G spawns a one-block grid.
+/// breaks the targeted block (both <see cref="EditVoxels"/>), with a brush in creative mode; G spawns a one-block grid
+/// (<see cref="SpawnGrid"/>).
 /// Left-clicking an <see cref="Interactive"/> block uses it instead: <see cref="BlockInteraction"/>s are published for
 /// it until the button is released, with the mouse moving the control (whose system sends SetLever or SetWheel) rather
 /// than the view, which follows whatever point the control reports the player has hold of
@@ -166,7 +167,9 @@ public sealed class BlockActionSystem : ISystem, IDisposable, IDebugUiSystem
     private void SpawnGrid(Vector3D<float> eye, Vector3D<float> dir)
     {
         var spawn = eye + dir * 3f;
-        DynamicGridFactory.SpawnSingleBlock(_world, _selection, new PhysVec(spawn.X, spawn.Y, spawn.Z), BlockId.Stone);
+        var grid = GridDescription.FromVoxels(new PhysVec(spawn.X, spawn.Y, spawn.Z),
+            new[] { new GridVoxel(0, 0, 0, BlockId.Stone, BlockOrientation.Upright) });
+        _commands.Send(new SpawnGrid { Grid = grid, Select = true });
         Console.WriteLine($"[spawn] grid at ({spawn.X:0.0},{spawn.Y:0.0},{spawn.Z:0.0})");
     }
 

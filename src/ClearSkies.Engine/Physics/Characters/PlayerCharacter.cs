@@ -296,6 +296,14 @@ public struct PlayerCharacter
         characterBody.Awake = true;
     }
 
+    /// <summary>Sets the character's velocity, waking it.</summary>
+    public readonly void SetVelocity(Vector3 velocity)
+    {
+        var characterBody = new BodyReference(bodyHandle, characters.Simulation.Bodies);
+        characterBody.Velocity.Linear = velocity;
+        characterBody.Awake = true;
+    }
+
     /// <summary>Removes the character's body from the simulation and the character registration.</summary>
     public readonly void Dispose()
     {

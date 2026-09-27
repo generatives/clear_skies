@@ -165,6 +165,13 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
         body.ApplyAngularImpulse(angularImpulse);
     }
 
+    public void SetBodyLinearVelocity(BodyHandle handle, Vector3 linearVelocity)
+    {
+        var body = Simulation.Bodies[handle];
+        body.Velocity.Linear = linearVelocity;
+        body.Awake = true;
+    }
+
     public void SetBodyAngularVelocity(BodyHandle handle, Vector3 angularVelocity)
     {
         var body = Simulation.Bodies[handle];

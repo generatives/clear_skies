@@ -25,6 +25,7 @@ public sealed class NetRegistry : IDisposable
 
     public NetRegistry(World world)
     {
+        World = world;
         _subscriptions.Add(world.SubscribeComponentAdded<NetId>((in Entity e, in NetId id) => Register(e, id.Value)));
         _subscriptions.Add(world.SubscribeComponentChanged<NetId>((in Entity e, in NetId old, in NetId id) =>
         {
@@ -43,6 +44,8 @@ public sealed class NetRegistry : IDisposable
     public Func<(uint First, uint Count)>? RequestBlock { get; set; }
 
     public int Count => _byId.Count;
+
+    public World World { get; }
 
     public bool TryGet(uint id, out Entity entity) => _byId.TryGetValue(id, out entity) && entity.IsAlive;
 

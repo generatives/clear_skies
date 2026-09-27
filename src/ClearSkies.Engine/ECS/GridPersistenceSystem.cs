@@ -4,6 +4,9 @@ using System.IO;
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Physics;
 using ClearSkies.Engine.Voxels;
+using ClearSkies.Engine.Commands;
+using ClearSkies.Engine.Commands.Handlers;
+using ClearSkies.Engine.Entities;
 using DefaultEcs;
 using ImGuiNET;
 using PhysVec = System.Numerics.Vector3;
@@ -23,6 +26,7 @@ public sealed class GridPersistenceSystem : ISystem
     private readonly GridSelection _selection;
     private readonly EntitySet _cameras;
     private readonly EntitySet _selectedGrid;
+    private readonly CommandSystem _commands;
     private readonly string _savesDir;
 
     private string _saveName = "";
@@ -30,8 +34,10 @@ public sealed class GridPersistenceSystem : ISystem
     private string? _chosenFile;
     private string _status = "";
 
-    public GridPersistenceSystem(World world, ChunkMeshSystem meshSystem, PhysicsWorld physics, GridSelection selection)
+    public GridPersistenceSystem(World world, ChunkMeshSystem meshSystem, PhysicsWorld physics, GridSelection selection,
+                                 CommandSystem commands)
     {
+        _commands   = commands;
         _world      = world;
         _meshSystem = meshSystem;
         _physics    = physics;
@@ -123,7 +129,7 @@ public sealed class GridPersistenceSystem : ISystem
     private void DeleteSelected()
     {
         if (!TryGetSelectedGrid(out var grid)) { _status = "No grid selected."; return; }
-        Hierarchy.DestroyRecursive(grid.Root); // its chunks with it
+        if (grid.Root.Has<NetId>()) _commands.Send(new DespawnEntity { Entity = grid.Root.Get<NetId>().Value });
         _status = "Deleted selected grid.";
     }
 
@@ -144,9 +150,7 @@ public sealed class GridPersistenceSystem : ISystem
             }
 
             var spawn = CameraUtil.SpawnPointInFrontOf(camTransform);
-            DynamicGridFactory.SpawnFromVoxels(
-                _world, _selection,
-                new PhysVec(spawn.X, spawn.Y, spawn.Z), voxels);
+            _commands.Send(new SpawnGrid { Grid = GridDescription.FromVoxels(new PhysVec(spawn.X, spawn.Y, spawn.Z), voxels), Select = true });
 
             _status = $"Loaded '{_chosenFile}' ({voxels.Count} blocks).";
         }

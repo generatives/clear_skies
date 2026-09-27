@@ -1,61 +1,105 @@
 using ClearSkies.Engine.ECS;
+using ClearSkies.Engine.Entities;
+using ClearSkies.Engine.Physics;
+using ClearSkies.Engine.Physics.Support;
 using DefaultEcs;
 using Silk.NET.Maths;
-using PhysVec = System.Numerics.Vector3;
 
 namespace ClearSkies.Engine.Voxels;
 
-/// <summary>Helpers for spawning dynamic voxel grids.</summary>
+/// <summary>Builds grid entities from descriptions. A construction helper for SpawnGridHandler, the only caller: to
+/// create a grid, send a SpawnGrid command.</summary>
 public static class DynamicGridFactory
 {
     /// <summary>
-    /// Spawns a grid from an arbitrary set of grid-local voxels, centred at <paramref name="spawnWorld"/>.
-    /// Its chunks mesh, light and get a body automatically (ChunkMeshSystem/GpuLightSystem/PhysicsBodySystem),
-    /// and it becomes the Selected Grid.
-    ///
-    /// The grid's Transform starts at <paramref name="spawnWorld"/> with the centre of the voxels' bounding box as
-    /// its pivot. PhysicsBodySystem then moves the pivot to the true centre of mass without moving the grid, so
-    /// the grid stays exactly where it spawned (for a single block the two centres coincide).
+    /// Creates a grid with network ID <paramref name="netId"/> from <paramref name="description"/>. Its chunks mesh,
+    /// light and get a body once its presence layers are decided (ChunkMeshSystem, GpuLightSystem, PhysicsBodySystem).
+    /// The grid's Transform is the description's body pose, with the description's pivot, so the grid stands exactly
+    /// where it was described; PhysicsBodySystem then keeps the pivot at the true centre of mass without moving it.
     /// </summary>
-    public static void SpawnFromVoxels(
-        World world, GridSelection selection,
-        PhysVec spawnWorld, IEnumerable<(int X, int Y, int Z, BlockId Id, BlockOrientation Orientation)> voxels)
+    public static Entity Create(World world, uint netId, GridDescription description)
     {
-        // Defensive; saved files shouldn't contain air entries.
-        var solid = voxels.Where(v => v.Id != BlockId.Air).ToList();
-
         var entity = world.CreateEntity();
-        entity.Set(new DynamicGrid());
-        var t = Transform.Identity;
-        t.Position = new Vector3D<float>(spawnWorld.X, spawnWorld.Y, spawnWorld.Z);
-        entity.Set(t);
-
-        var volume = new ChunkVolume(entity, world) { Pivot = BoundsCentre(solid) };
+        entity.Set(new DynamicGrid { Locked = description.Locked });
+        entity.Set(Transform.Identity);
+        entity.Set(new NetId { Value = netId });
+        var volume = new ChunkVolume(entity, world);
         entity.Set(new ChunkGrid() { Volume = volume });
-        foreach (var (x, y, z, id, orientation) in solid)
-            volume.SetBlock(x, y, z, id, orientation);
-        selection.Select(entity);
+        entity.Set<OwnPresence>();
+        entity.Set<Supportable>();
+        Fill(entity, description);
+        return entity;
     }
 
-    /// <summary>Spawns a grid containing a single block at local (0,0,0) whose centre is placed at
-    /// <paramref name="spawnWorld"/>.</summary>
-    public static void SpawnSingleBlock(
-        World world, GridSelection selection,
-        PhysVec spawnWorld, BlockId block)
-        => SpawnFromVoxels(world, selection, spawnWorld, new[] { (0, 0, 0, block, BlockOrientation.Upright) });
-
-    /// <summary>Centre of the voxels' bounding box (each voxel spans [v, v+1]), or zero if there are none.</summary>
-    private static Vector3D<float> BoundsCentre(List<(int X, int Y, int Z, BlockId Id, BlockOrientation Orientation)> voxels)
+    /// <summary>Makes an existing grid match <paramref name="description"/>: its blocks, block entity state, lock and
+    /// body state. Used to create a grid and to overwrite one in place (a spawn received twice, a resync).</summary>
+    public static void Fill(Entity entity, GridDescription description)
     {
-        if (voxels.Count == 0) return Vector3D<float>.Zero;
-        int nx = int.MaxValue, ny = int.MaxValue, nz = int.MaxValue;
-        int xx = int.MinValue, xy = int.MinValue, xz = int.MinValue;
-        foreach (var (x, y, z, _, _) in voxels)
-        {
-            nx = System.Math.Min(nx, x); xx = System.Math.Max(xx, x);
-            ny = System.Math.Min(ny, y); xy = System.Math.Max(xy, y);
-            nz = System.Math.Min(nz, z); xz = System.Math.Max(xz, z);
-        }
-        return new Vector3D<float>(nx + xx + 1, ny + xy + 1, nz + xz + 1) * 0.5f;
+        var volume = entity.Get<ChunkGrid>().Volume;
+        foreach (var pos in volume.All.Select(c => c.Key).ToList()) volume.RemoveChunk(pos);
+
+        volume.Pivot = new Vector3D<float>(description.Pivot.X, description.Pivot.Y, description.Pivot.Z);
+        foreach (var v in description.Voxels) volume.SetBlock(v.X, v.Y, v.Z, v.Id, v.Orientation);
+        foreach (var (cell, value) in description.Levers)
+            if (volume.TryGetBlockEntity(cell.X, cell.Y, cell.Z, out var lever) && lever.Has<Lever>()) lever.Get<Lever>().Value = value;
+        foreach (var (cell, angle) in description.Wheels)
+            if (volume.TryGetBlockEntity(cell.X, cell.Y, cell.Z, out var wheel) && wheel.Has<SteeringWheel>()) wheel.Get<SteeringWheel>().Angle = angle;
+
+        entity.Get<DynamicGrid>().Locked = description.Locked;
+        var b = description.Body;
+        ref var t = ref entity.Get<Transform>();
+        t.Position = PhysicsConv.ToSilk(b.Position);
+        t.Rotation = PhysicsConv.ToSilk(b.Rotation);
+        entity.Set(new BodyStateOverride { LinearVelocity = b.LinearVelocity, AngularVelocity = b.AngularVelocity });
     }
+
+    /// <summary>A live grid's description: its blocks, block entity state, lock and body state (from its body if it has
+    /// one, else its Transform).</summary>
+    public static GridDescription Describe(Entity entity, PhysicsWorld physics)
+    {
+        var volume = entity.Get<ChunkGrid>().Volume;
+        var d = new GridDescription
+        {
+            Voxels = GridSerializer.Voxels(volume),
+            Pivot = new System.Numerics.Vector3(volume.Pivot.X, volume.Pivot.Y, volume.Pivot.Z),
+            Locked = entity.Get<DynamicGrid>().Locked,
+        };
+        if (entity.Has<PhysicsBodyComponent>())
+        {
+            var body = entity.Get<PhysicsBodyComponent>().Body;
+            var (p, q) = physics.GetBodyPose(body);
+            d.Body = new BodyState { Position = p, Rotation = q,
+                LinearVelocity = physics.GetBodyLinearVelocity(body), AngularVelocity = physics.GetBodyAngularVelocity(body) };
+        }
+        else
+        {
+            ref readonly var t = ref entity.Get<Transform>();
+            d.Body = new BodyState { Position = PhysicsConv.ToBepu(t.Position), Rotation = PhysicsConv.ToBepu(t.Rotation) };
+            if (entity.Has<BodyStateOverride>())
+                (d.Body.LinearVelocity, d.Body.AngularVelocity) = (entity.Get<BodyStateOverride>().LinearVelocity, entity.Get<BodyStateOverride>().AngularVelocity);
+        }
+
+        // Block entity state, in a fixed order.
+        foreach (var (pos, entry) in volume.All.OrderBy(c => (c.Key.X, c.Key.Y, c.Key.Z)))
+        {
+            if (entry.BlockEntities is not { } entities) continue;
+            foreach (var (cell, e) in entities.OrderBy(c => (c.Key.X, c.Key.Y, c.Key.Z)))
+            {
+                if (!e.IsAlive) continue;
+                var p = new Vector3D<int>(pos.X, pos.Y, pos.Z) * ChunkData.Size + cell;
+                if (e.Has<Lever>()) d.Levers.Add((p, e.Get<Lever>().Value));
+                if (e.Has<SteeringWheel>()) d.Wheels.Add((p, e.Get<SteeringWheel>().Angle));
+            }
+        }
+        return d;
+    }
+}
+
+/// <summary>A body state to give a grid's body once it has one (or straight away if it does): the pose from its
+/// Transform, and these velocities. Set when a grid is spawned or overwritten from a description; PhysicsBodySystem
+/// applies and removes it.</summary>
+public struct BodyStateOverride
+{
+    public System.Numerics.Vector3 LinearVelocity;
+    public System.Numerics.Vector3 AngularVelocity;
 }
