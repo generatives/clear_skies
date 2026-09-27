@@ -141,7 +141,7 @@ public class PlayerMovementTests
     }
 }
 
-public class RenderInterpolationTests
+public class TickInterpolationTests
 {
     private static Transform At(float x) => new()
         { Position = new Vector3D<float>(x, 0, 0), Rotation = Quaternion<float>.Identity, Scale = Vector3D<float>.One };
@@ -150,30 +150,30 @@ public class RenderInterpolationTests
     {
         public readonly World World = new();
         public readonly Time Time = new();
-        public readonly RenderInterpolationSystem System;
+        public readonly TickInterpolationSystem System;
         public readonly Entity Entity;
         public Rig()
         {
-            System = new RenderInterpolationSystem(World, Time);
+            System = new TickInterpolationSystem(World, Time);
             Entity = World.CreateEntity();
             Entity.Set(At(0));
-            Entity.Set(new SmoothedTransform());
+            Entity.Set(new InterpolatedTransform());
         }
 
         /// <summary>One tick in which the simulation moves the entity to <paramref name="x"/>.</summary>
         public void Tick(float x, Action<float>? check = null)
         {
-            System.BeginTick.Update(0);
             check?.Invoke(Entity.Get<Transform>().Position.X);
             Entity.Get<Transform>() = At(x);
-            System.EndTick.Update(0);
+            System.Update(SystemStage.Simulation, 0);
         }
 
+        /// <summary>Draws a frame; returns where the entity is drawn.</summary>
         public float Frame(float alpha)
         {
             Time.Alpha = alpha;
-            System.Update(0);
-            return Entity.Get<Transform>().Position.X;
+            System.Update(SystemStage.Frame, 0);
+            return Entity.DrawnPose().Position.X;
         }
     }
 
@@ -188,12 +188,13 @@ public class RenderInterpolationTests
     }
 
     [Fact]
-    public void TicksSeeTheTruePoseNotTheDrawnOne()
+    public void DrawingNeverTouchesTheTransform()
     {
         var rig = new Rig();
         rig.Tick(0);
         rig.Tick(1);
-        rig.Frame(0.5f);
+        Assert.Equal(0.5f, rig.Frame(0.5f), 4);
+        Assert.Equal(1f, rig.Entity.Get<Transform>().Position.X);
         rig.Tick(2, check: x => Assert.Equal(1f, x));
         Assert.Equal(1.5f, rig.Frame(0.5f), 4);
     }
@@ -205,12 +206,12 @@ public class RenderInterpolationTests
         rig.Tick(0);
         rig.Frame(0);
         rig.Tick(1);
-        rig.Tick(2, check: x => Assert.Equal(1f, x));
+        rig.Tick(2);
         Assert.Equal(1.5f, rig.Frame(0.5f), 4);
     }
 
     [Fact]
-    public void MovingOutsideTheTicksIsNotSmoothed()
+    public void MovingOutsideTheTicksIsNotInterpolated()
     {
         var rig = new Rig();
         rig.Tick(0);
@@ -223,17 +224,35 @@ public class RenderInterpolationTests
     }
 
     [Fact]
-    public void PositionOnlyLeavesRotationToOthers()
+    public void PositionOnlyDrawsTheTransformsRotation()
     {
         var rig = new Rig();
-        rig.Entity.Get<SmoothedTransform>().PositionOnly = true;
+        rig.Entity.Get<InterpolatedTransform>().PositionOnly = true;
         rig.Tick(0);
         rig.Tick(1);
         var turned = Quaternion<float>.CreateFromYawPitchRoll(1f, 0, 0);
         rig.Entity.Get<Transform>().Rotation = turned; // mouse-look, per frame
         rig.Frame(0.5f);
-        Assert.Equal(turned, rig.Entity.Get<Transform>().Rotation);
-        Assert.Equal(0.5f, rig.Entity.Get<Transform>().Position.X, 4);
+        Assert.Equal(turned, rig.Entity.DrawnPose().Rotation);
+        Assert.Equal(0.5f, rig.Entity.DrawnPose().Position.X, 4);
+    }
+
+    [Fact]
+    public void ChildrenAreDrawnWithTheirParent()
+    {
+        var rig = new Rig();
+        var child = rig.World.CreateEntity();
+        Hierarchy.SetParent(child, rig.Entity, new LocalTransform
+            { Position = new Vector3D<float>(0, 2, 0), Rotation = Quaternion<float>.Identity, Scale = Vector3D<float>.One });
+        rig.Tick(0);
+        rig.Tick(1);
+        rig.Frame(0.5f);
+        Assert.Equal(new Vector3D<float>(0.5f, 2, 0), child.DrawnPose().Position);
+
+        // Taken off the parent: drawn where it is again.
+        Hierarchy.RemoveParent(child);
+        rig.Frame(0.5f);
+        Assert.False(child.Has<DrawnTransform>());
     }
 
     private static float Heading(Quaternion<float> q)
@@ -250,13 +269,13 @@ public class RenderInterpolationTests
         var world = new World();
         var time = new Time();
         var clock = new TickClock();
-        var system = new RenderInterpolationSystem(world, time);
+        var system = new TickInterpolationSystem(world, time);
         var ship = world.CreateEntity();
         ship.Set(At(0));
-        ship.Set(new SmoothedTransform());
+        ship.Set(new InterpolatedTransform());
         var player = world.CreateEntity();
         player.Set(At(0));
-        player.Set(new SmoothedTransform { PositionOnly = true });
+        player.Set(new InterpolatedTransform { PositionOnly = true });
         player.Set(new MouseLookComponent());
 
         const float turnPerTick = 0.05f;
@@ -270,22 +289,20 @@ public class RenderInterpolationTests
             if (ticks == 2) twoTickFrames++;
             for (int i = 0; i < ticks; i++)
             {
-                system.BeginTick.Update(0);
-                ref var look = ref player.Get<MouseLookComponent>();
                 // The tick sees the true view: facing the way the ship faces.
                 Assert.Equal(WrapAngle(shipYaw), WrapAngle(Heading(player.Get<Transform>().Rotation)), 3);
                 shipYaw += turnPerTick;
                 ship.Get<Transform>().Rotation = Quaternion<float>.CreateFromYawPitchRoll(shipYaw, 0, 0);
-                look.Yaw += turnPerTick;
-                look.TurnYaw = turnPerTick;
+                ref var look = ref player.Get<MouseLookComponent>();
+                look.TurnWith(turnPerTick, 0);
                 player.Get<Transform>().Rotation = Quaternion<float>.CreateFromYawPitchRoll(look.Yaw, look.Pitch, 0);
-                system.EndTick.Update(0);
+                system.Update(SystemStage.Simulation, 0);
             }
             time.Alpha = clock.Alpha;
-            system.Update(0);
+            system.Update(SystemStage.Frame, 0);
             if (frame < 2) continue;
-            float drawnShip = Heading(ship.Get<Transform>().Rotation);
-            float drawnView = Heading(player.Get<Transform>().Rotation);
+            float drawnShip = Heading(ship.DrawnPose().Rotation);
+            float drawnView = Heading(player.DrawnPose().Rotation);
             Assert.Equal(0f, WrapAngle(drawnView - drawnShip), 3);
         }
         Assert.True(zeroTickFrames > 0 && twoTickFrames > 0, $"{zeroTickFrames} frames with no tick, {twoTickFrames} with two");
@@ -295,16 +312,16 @@ public class RenderInterpolationTests
     public void AViewNoLongerTurningIsDrawnAsItIs()
     {
         var rig = new Rig();
-        rig.Entity.Get<SmoothedTransform>().PositionOnly = true;
+        rig.Entity.Get<InterpolatedTransform>().PositionOnly = true;
         rig.Entity.Set(new MouseLookComponent());
         rig.Tick(0);
-        rig.Entity.Get<MouseLookComponent>().TurnYaw = 0.5f; // turned with a ship last tick...
-        rig.Entity.Get<MouseLookComponent>().Yaw = 0.5f;
-        rig.Tick(1); // ...and not this one (stepped off)
+        rig.Entity.Get<MouseLookComponent>().TurnWith(0.5f, 0); // turned with a ship last tick...
+        rig.Tick(1);
+        rig.Tick(2); // ...and not this one (stepped off)
         var mouseLooked = Quaternion<float>.CreateFromYawPitchRoll(0.7f, 0, 0);
         rig.Entity.Get<Transform>().Rotation = mouseLooked;
         rig.Frame(0.5f);
-        Assert.Equal(mouseLooked, rig.Entity.Get<Transform>().Rotation);
+        Assert.Equal(mouseLooked, rig.Entity.DrawnPose().Rotation);
     }
 
     private static float WrapAngle(float a) => MathF.IEEERemainder(a, 2f * MathF.PI);

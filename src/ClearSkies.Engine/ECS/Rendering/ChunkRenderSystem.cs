@@ -52,7 +52,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
 
             // Every static-world chunk is axis-aligned: cull its box directly. Building its matrix and transforming
             // 8 corners, for every loaded chunk every frame, cost ~9 ms at 14000 chunks.
-            ref readonly var t = ref e.Get<Transform>();
+            var t = e.DrawnPose();
             Mat4 model;
             if (t.Rotation == Quaternion<float>.Identity && t.Scale == Vector3D<float>.One)
             {
