@@ -209,6 +209,8 @@ var presence = new EntityPresenceSystem(host.World, session, staticVolume, ViewD
                         physicsBody.CollidersReady(staticVolume, p, 64f),
 };
 host.AddSystem(presence, SystemStage.Tick); // presence layers: bodies, drawing, terrain interest and colliders
+var followers = new DeferredSystem();
+host.AddSystem(followers, SystemStage.Tick);
 
 host.AddSystem(host.Physics, SystemStage.Tick); // one step, once bodies/impulses for this tick are in
 host.AddSystem(new PhysicsTransformSyncSystem(host.World, host.Physics), SystemStage.Tick); // body poses -> Transform
@@ -256,6 +258,9 @@ var bodySync = new ClearSkies.Net.Sync.BodySync(net, host.World, host.Physics);
 host.AddSystem(bodySync, SystemStage.Tick); // snapshots of owned bodies, every second tick
 host.AddSystem(new ClearSkies.Net.Session.NetSendSystem(net), SystemStage.Tick);
 var remoteBodies = new ClearSkies.Net.Sync.RemoteBodySystem(host.World, registry, hostClock);
+// Physics copies of bodies owned elsewhere (kinematic ships near the local player, servo copies of other players),
+// placed before the step: scheduled right after the presence system, which decides which copies exist.
+followers.Inner = new ClearSkies.Net.Sync.FollowerSystem(host.World, host.Physics, remoteBodies);
 host.Gui.RegisterDebugUi(new ClearSkies.Net.Debug.NetDebugPanel(net, remoteBodies, transport));
 gridPilot.Disabled = () => net.OthersConnected; // pilot mode and flight tuning: single-player only
 
@@ -362,3 +367,10 @@ worldSaver?.SaveNow(); // everything, in one transaction, on exit
 net.Dispose(); // says goodbye to the host, or closes the game to clients
 saveDb?.Dispose();
 gridStore.Dispose();
+
+/// <summary>A place in the schedule for a system created later (once what it needs exists).</summary>
+sealed class DeferredSystem : ISystem
+{
+    public ISystem? Inner;
+    public void Update(float dt) => Inner?.Update(dt);
+}

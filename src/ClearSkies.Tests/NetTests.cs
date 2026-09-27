@@ -195,7 +195,8 @@ public class JoinTests
         uint gridId = grid.Get<NetId>().Value;
         var copy = client.Registry.Find(gridId);
         Assert.NotNull(copy);
-        Assert.Equal(DescriptionTests.DescribeNow(game.Host, grid).Hash, DescriptionTests.DescribeNow(client, copy!.Value).Hash);
+        Assert.Equal(GridSerializer.Voxels(grid.Get<ChunkGrid>().Volume), GridSerializer.Voxels(copy!.Value.Get<ChunkGrid>().Volume));
+        Assert.Equal(grid.Get<ChunkGrid>().Volume.Pivot, copy.Value.Get<ChunkGrid>().Volume.Pivot);
         Assert.False(copy.Value.Get<NetOwner>().IsLocal); // the host's
 
         // Its own player, owned by it; the host's player, owned by the host.

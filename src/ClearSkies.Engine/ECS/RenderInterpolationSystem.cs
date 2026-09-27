@@ -115,8 +115,10 @@ public sealed class RenderInterpolationSystem : ISystem
         }
     }
 
-    /// <summary>GridPilotSystem places the camera itself while it follows a grid.</summary>
-    private static bool Paused(Entity e) => e.Has<CameraGridFollowComponent>();
+    /// <summary>GridPilotSystem places the camera itself while it follows a grid; bodies owned elsewhere are drawn from
+    /// their snapshots instead (RemoteBodySystem).</summary>
+    private static bool Paused(Entity e) =>
+        e.Has<CameraGridFollowComponent>() || (e.Has<Entities.NetOwner>() && !e.Get<Entities.NetOwner>().IsLocal);
 
     private static void Restart(ref SmoothedTransform s, in Transform t, Entity e)
     {

@@ -50,6 +50,7 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
     public CollidableProperty<ColliderInfo> Colliders { get; }
 
     private readonly BufferPool _pool = new();
+    private readonly ContactFilter _filter = new();
     private readonly float _fixedStep;
 
     public PhysicsWorld(Vector3 gravity, float fixedStep)
@@ -59,11 +60,12 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
         Characters = new CharacterControllers(_pool);
         Simulation = Simulation.Create(
             _pool,
-            new VoxelNarrowPhaseCallbacks(new SpringSettings(30, 1)) { Characters = Characters },
+            new VoxelNarrowPhaseCallbacks(new SpringSettings(30, 1)) { Characters = Characters, Filter = _filter },
             new VoxelPoseCallbacks(gravity, linearDamping: 0.03f, angularDamping: 0.03f),
             new SolveDescription(velocityIterationCount: 8, substepCount: 1));
         Colliders = new CollidableProperty<ColliderInfo>(Simulation, _pool);
         Characters.Colliders = Colliders;
+        _filter.Colliders = Colliders;
     }
 
     /// <summary>The Tick stage's call: one step (the tick's duration is always the fixed step).</summary>
@@ -163,6 +165,26 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
         var body = Simulation.Bodies[handle];
         body.Awake = true;
         body.ApplyAngularImpulse(angularImpulse);
+    }
+
+    /// <summary>A capsule body for another player's servo copy (see <see cref="ColliderKind.Follower"/>): dynamic, never
+    /// rotating, colliding with grids only.</summary>
+    public BodyHandle AddFollowerCapsule(Vector3 position, float radius, float length, float mass, ColliderInfo tag)
+    {
+        var shape = new Capsule(radius, length);
+        var shapeIndex = Simulation.Shapes.Add(shape);
+        var handle = Simulation.Bodies.Add(BodyDescription.CreateDynamic(new RigidPose(position),
+            new BodyInertia { InverseMass = 1f / mass }, new CollidableDescription(shapeIndex, 0.1f), new BodyActivityDescription(-1f)));
+        Colliders.Allocate(handle) = tag;
+        return handle;
+    }
+
+    /// <summary>Removes a body and its shape.</summary>
+    public void RemoveBodyAndShape(BodyHandle handle)
+    {
+        var shape = Simulation.Bodies[handle].Collidable.Shape;
+        Simulation.Bodies.Remove(handle);
+        Simulation.Shapes.RecursivelyRemoveAndDispose(shape, _pool);
     }
 
     public void SetBodyLinearVelocity(BodyHandle handle, Vector3 linearVelocity)
@@ -392,9 +414,12 @@ internal struct VoxelNarrowPhaseCallbacks : INarrowPhaseCallbacks
         Characters?.Initialize(simulation);
     }
 
+    /// <summary>Which pairs may touch (set by <see cref="PhysicsWorld"/>'s constructor).</summary>
+    public ContactFilter? Filter;
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public readonly bool AllowContactGeneration(int workerIndex, CollidableReference a, CollidableReference b, ref float speculativeMargin)
-        => true;
+        => Filter is null || Filter.Allow(a, b);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public readonly bool AllowContactGeneration(int workerIndex, CollidablePair pair, int childIndexA, int childIndexB)
@@ -460,5 +485,22 @@ internal struct VoxelPoseCallbacks : IPoseIntegratorCallbacks
     {
         velocity.Linear  = (velocity.Linear + _gravityDt) * _linearDampingDt;
         velocity.Angular = velocity.Angular * _angularDampingDt;
+    }
+}
+
+/// <summary>Decides which colliders may touch: another player's servo copy (<see cref="ColliderKind.Follower"/>)
+/// touches grids only.</summary>
+public sealed class ContactFilter
+{
+    public CollidableProperty<ColliderInfo>? Colliders;
+
+    public bool Allow(CollidableReference a, CollidableReference b)
+    {
+        if (Colliders is not { } colliders) return true;
+        var ka = colliders[a].Kind;
+        var kb = colliders[b].Kind;
+        if (ka == ColliderKind.Follower) return kb == ColliderKind.VoxelGrid;
+        if (kb == ColliderKind.Follower) return ka == ColliderKind.VoxelGrid;
+        return true;
     }
 }

@@ -33,6 +33,8 @@ public sealed class BodySync : ISystem, IDebugUiSystem
     private readonly List<BodySnapshot> _own = new();
     private readonly Dictionary<uint, (PeerId Owner, uint Tick, BodySnapshot Snapshot)> _relay = new();
     private readonly NetWriter _writer = new(2048);
+    private readonly Dictionary<uint, uint> _shapeVersions = new(); // grid → event number of its last shape change
+    private readonly List<(PeerId From, uint Tick, BodySnapshot Snapshot)> _parked = new();
     private long _snapshotsSent, _snapshotsReceived;
 
     public BodySync(NetSession net, World world, PhysicsWorld physics)
@@ -40,15 +42,24 @@ public sealed class BodySync : ISystem, IDebugUiSystem
         _net = net;
         _physics = physics;
         net.Bodies = this;
+        // A grid's shape changes (its blocks, and with them its centre of mass, which is the body's origin) with its
+        // EditVoxels and SpawnGrid events: its snapshots say which one they follow, so a receiver uses them only once
+        // it has applied that one too.
+        net.Commands.Applied += (handler, meta, _) =>
+        {
+            if (handler.Id is Engine.Commands.CommandIds.EditVoxels or Engine.Commands.CommandIds.SpawnGrid)
+                _shapeVersions[meta.Target] = meta.EventNumber;
+        };
         _players = world.GetEntities().With<NetId>().With<NetOwner>().With<Player>().With<Transform>().AsSet();
         _grids = world.GetEntities().With<NetId>().With<NetOwner>().With<PhysicsBodyComponent>().With<Transform>().AsSet();
     }
 
-    /// <summary>Snapshots of grids too (from N2; players only until then).</summary>
-    public bool SyncGrids { get; set; }
+    /// <summary>Whether grids are synced too (on by default; players always are).</summary>
+    public bool SyncGrids { get; set; } = true;
 
     public void Update(float dt)
     {
+        FlushParked();
         if (_net.Clock.Tick % 2 != 0) return;
         _own.Clear();
         foreach (ref readonly var e in _players.GetEntities())
@@ -118,10 +129,12 @@ public sealed class BodySync : ISystem, IDebugUiSystem
     {
         var body = e.Get<PhysicsBodyComponent>().Body;
         var (p, q) = _physics.GetBodyPose(body);
+        uint id = e.Get<NetId>().Value;
         return new BodySnapshot
         {
-            Entity = e.Get<NetId>().Value,
+            Entity = id,
             Epoch = e.Get<NetOwner>().Epoch,
+            ShapeVersion = _shapeVersions.GetValueOrDefault(id),
             Position = p,
             Rotation = q,
             LinearVelocity = _physics.GetBodyLinearVelocity(body),
@@ -140,11 +153,37 @@ public sealed class BodySync : ISystem, IDebugUiSystem
             _snapshotsReceived++;
             if (!_net.Registry.TryGet(s.Entity, out var e)) continue; // not spawned here (yet)
             if (e.Has<NetOwner>() && e.Get<NetOwner>().IsLocal) continue; // ours: we're the truth
-            if (!e.Has<RemoteBody>()) e.Set(new RemoteBody { Buffer = new SnapshotBuffer() });
-            e.Get<RemoteBody>().Buffer.Add(tick, s);
             if (_net is HostSession && from != PeerId.Host) _relay[s.Entity] = (from, tick, s);
+            if (!ShapeApplied(e, s)) { _parked.Add((from, tick, s)); continue; } // its edit hasn't arrived yet
+            Buffer(e, tick, s);
         }
     }
+
+    private static void Buffer(Entity e, uint tick, in BodySnapshot s)
+    {
+        if (!e.Has<RemoteBody>()) e.Set(new RemoteBody { Buffer = new SnapshotBuffer() });
+        e.Get<RemoteBody>().Buffer.Add(tick, s);
+    }
+
+    /// <summary>Whether this machine has applied the shape change a grid snapshot follows.</summary>
+    private bool ShapeApplied(Entity e, in BodySnapshot s) =>
+        s.ShapeVersion == 0 || !e.Has<NetOwner>() || _net.Commands.LastEventNumber(e.Get<NetOwner>().Owner, s.Entity) >= s.ShapeVersion;
+
+    /// <summary>Snapshots held back for a shape change that has now been applied go into their buffers.</summary>
+    private void FlushParked()
+    {
+        for (int i = _parked.Count - 1; i >= 0; i--)
+        {
+            var (_, tick, s) = _parked[i];
+            if (!_net.Registry.TryGet(s.Entity, out var e)) { _parked.RemoveAt(i); continue; }
+            if (!ShapeApplied(e, s)) continue;
+            Buffer(e, tick, s);
+            _parked.RemoveAt(i);
+        }
+        if (_parked.Count > 256) _parked.RemoveRange(0, _parked.Count - 256);
+    }
+
+    public int Parked => _parked.Count;
 
     public string DebugName => "Body sync";
 
@@ -172,7 +211,12 @@ public sealed class RemoteBodySystem : ISystem
     /// <summary>How far behind the host's tick remote bodies are drawn, in ticks: 6 (100 ms) by default.</summary>
     public double InterpolationDelay { get; set; } = 6;
 
-    public double RenderTick => _clock.Tick + (double)_clock.Alpha - InterpolationDelay;
+    /// <summary>The tick remote bodies are drawn at this frame. Things simulated here are drawn between the last two
+    /// ticks (a tick behind, see RenderInterpolationSystem), so remote bodies are too, to line up with them.</summary>
+    public double RenderTick => _clock.Tick + (double)_clock.Alpha - 1 - InterpolationDelay;
+
+    /// <summary>The tick followers' bodies are placed at in tick <see cref="ITickClock.Tick"/>.</summary>
+    public double PhysicsTick => _clock.Tick - InterpolationDelay;
 
     public void Update(float dt)
     {

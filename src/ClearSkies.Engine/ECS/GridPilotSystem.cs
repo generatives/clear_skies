@@ -70,7 +70,8 @@ public sealed class GridPilotSystem : ISystem
         _selectedGrid    = world.GetEntities().With<DynamicGrid>().With<SelectedGridComponent>().AsSet();
     }
 
-    /// <summary>Pilot mode is a single-player debug tool: while this says so (other players are connected), it's off.</summary>
+    /// <summary>Pilot mode is a single-player debug tool: while this says so (other players are connected), it's off.
+    /// Locking and righting the selected grid (End, Home) are commands and still work.</summary>
     public Func<bool>? Disabled { get; set; }
 
     public void Update(float dt)
@@ -80,6 +81,7 @@ public sealed class GridPilotSystem : ISystem
         if (Disabled?.Invoke() == true)
         {
             if (_isPiloting) StopPiloting();
+            HandleLockAndRight(); // commands, not pilot mode: still work
             return;
         }
 

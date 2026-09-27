@@ -178,6 +178,11 @@ public sealed class CommandSystem : ISystem, IDebugUiSystem
         return n;
     }
 
+    /// <summary>The number of the last event applied here from <paramref name="authority"/> for
+    /// <paramref name="target"/> (or, on that authority itself, the last it sent).</summary>
+    public uint LastEventNumber(PeerId authority, uint target) =>
+        authority == Session.LocalPeer ? _eventNumbers.GetValueOrDefault(target) : _lastApplied.GetValueOrDefault((authority.Value, target));
+
     /// <summary>False for an event already applied (numbers only go up per authority and target).</summary>
     internal bool AcceptEventNumber(in EventMeta meta)
     {
