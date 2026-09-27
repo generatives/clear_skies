@@ -196,10 +196,20 @@ public struct PlayerCharacter
             else if (!jumpedSinceSupported && timeSinceSupported <= CoyoteTime)
             {
                 // Just walked off an edge: there's no support left to push off, so set the jump velocity
-                // directly (same rule as a grounded jump — reach JumpVelocity, don't add on top of it).
+                // directly, by the same rule as a grounded jump: reach JumpVelocity relative to what the character
+                // was standing on (don't add on top of it), so a ship rising or sinking doesn't weaken or boost it.
                 if (!characterBody.Awake) characters.Simulation.Awakener.AwakenBody(character.BodyHandle);
+                QuaternionEx.Transform(character.LocalUp, characterBody.Pose.Orientation, out var up);
+                var supportUpVelocity = 0f;
+                if (hasLastSupportBody && characters.Simulation.Bodies.BodyExists(lastSupportBody))
+                {
+                    var support = new BodyReference(lastSupportBody, characters.Simulation.Bodies);
+                    var offset = characterBody.Pose.Position - support.Pose.Position;
+                    supportUpVelocity = Vector3.Dot(support.Velocity.Linear + Vector3.Cross(support.Velocity.Angular, offset), up);
+                }
                 ref var velocity = ref characterBody.Velocity.Linear;
-                velocity.Y = MathF.Max(velocity.Y, character.JumpVelocity);
+                var upVelocity = Vector3.Dot(velocity, up);
+                velocity += up * MathF.Max(0, supportUpVelocity + character.JumpVelocity - upVelocity);
                 jumpedSinceSupported = true;
                 jumpBufferRemaining = 0;
             }
