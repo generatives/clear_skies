@@ -30,6 +30,10 @@ public struct SmoothedTransform
 /// something outside the ticks moved the entity between them (a spawn, a teleport), its Transform no longer matches
 /// what was drawn: that position is taken as-is, with no smoothing across the jump.
 ///
+/// A player's view turns with the ship they stand on once per tick (see <see cref="MouseLookComponent.TurnYaw"/>);
+/// with <see cref="SmoothedTransform.PositionOnly"/> the view is drawn behind by the same fraction of that turn as the
+/// ship, so the two stay together between ticks.
+///
 /// Dynamic grids get a <see cref="SmoothedTransform"/> automatically. When a grid's blocks change, its pivot (the
 /// centre of mass) moves and its Transform with it while the blocks stay put; the previous pose is moved the same
 /// way so the edit doesn't make the grid twitch.
@@ -63,6 +67,7 @@ public sealed class RenderInterpolationSystem : ISystem
         {
             ref var s = ref e.Get<SmoothedTransform>();
             ref var t = ref e.Get<Transform>();
+            if (s.PositionOnly && e.Has<MouseLookComponent>()) BeginLook(e, ref t);
             if (Paused(e) || !s.Started) continue;
             if (Matches(t, s.Current, s.PositionOnly)) continue; // a second tick in one frame: nothing was drawn between
             if (Matches(t, s.Drawn, s.PositionOnly))
@@ -111,8 +116,28 @@ public sealed class RenderInterpolationSystem : ISystem
             }
             t.Position = Vector3D.Lerp(s.Previous.Position, s.Current.Position, alpha);
             if (!s.PositionOnly) t.Rotation = Quaternion<float>.Slerp(s.Previous.Rotation, s.Current.Rotation, alpha);
+            else if (e.Has<MouseLookComponent>()) DrawLook(e.Get<MouseLookComponent>(), ref t, alpha);
             s.Drawn = t;
         }
+    }
+
+    /// <summary>At the start of a tick: the true view back (the look angles), if it was drawn behind a ship's turn.</summary>
+    private static void BeginLook(Entity e, ref Transform t)
+    {
+        ref var look = ref e.Get<MouseLookComponent>();
+        if ((look.TurnYaw != 0f || look.TurnPitch != 0f) && !Paused(e))
+            t.Rotation = Quaternion<float>.CreateFromYawPitchRoll(look.Yaw, look.Pitch, 0f);
+        look.TurnYaw = look.TurnPitch = 0f;
+    }
+
+    /// <summary>A view turned by the ship it stands on is drawn behind by the part of the latest tick's turn the ship's
+    /// drawing hasn't reached yet, so the two turn together; mouse-look on top is still per frame.</summary>
+    private static void DrawLook(in MouseLookComponent look, ref Transform t, float alpha)
+    {
+        if (look.TurnYaw == 0f && look.TurnPitch == 0f) return;
+        float behind = 1f - alpha;
+        t.Rotation = Quaternion<float>.CreateFromYawPitchRoll(look.Yaw - behind * look.TurnYaw,
+                                                             look.Pitch - behind * look.TurnPitch, 0f);
     }
 
     /// <summary>GridPilotSystem places the camera itself while it follows a grid; bodies owned elsewhere are drawn from
