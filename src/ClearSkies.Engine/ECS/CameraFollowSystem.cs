@@ -6,8 +6,9 @@ using Silk.NET.Maths;
 namespace ClearSkies.Engine.ECS;
 
 /// <summary>
-/// Every frame, after drawing positions are smoothed: puts the active camera at the local player's eye, looking the
-/// way the player looks (which already turns with their support, see SupportSystem). Skipped while GridPilotSystem
+/// Every frame, after the drawn poses are written (TickInterpolationSystem): puts the active camera at the local
+/// player's eye where they're drawn, looking the way the player looks (which already turns with their support, see
+/// SupportSystem). The camera is only a viewpoint, so its Transform is simply that drawn pose. Skipped while GridPilotSystem
 /// flies the camera along a grid.
 /// </summary>
 public sealed class CameraFollowSystem : ISystem
@@ -26,7 +27,7 @@ public sealed class CameraFollowSystem : ISystem
         foreach (ref readonly Entity player in _players.GetEntities())
         {
             if (player.Has<CameraGridFollowComponent>()) return;
-            ref readonly var pt = ref player.Get<Transform>();
+            var pt = player.DrawnPose(); // the camera shows the player where they're drawn
             float eye = player.Has<CharacterControllerComponent>()
                 ? player.Get<CharacterControllerComponent>().Character.EyeOffset(player.Get<CharacterControllerComponent>().EyeHeight)
                 : 0f;
