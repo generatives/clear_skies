@@ -30,9 +30,12 @@ if (args.Contains("--benchmark"))
     return;
 }
 
-using var host = new EngineHost(new EngineOptions("Clear Skies", 1280, 720, LogGpuErrors: true));
+// --headless: no window, GPU, input or UI; just the simulation and the network, on a timer. With --host it's a
+// dedicated server (no player of its own); with --join, a player that stands where it spawns (a bot, for testing).
+bool headless = args.Contains("--headless");
+using var host = new EngineHost(new EngineOptions("Clear Skies", 1280, 720, LogGpuErrors: true, Headless: headless));
 
-host.Renderer.LoadTextureAtlas(
+host.Renderer?.LoadTextureAtlas(
     Path.Combine(AppContext.BaseDirectory, "Resources", "spritesheet_tiles.png"),
     Path.Combine(AppContext.BaseDirectory, "Resources", "spritesheet_tiles.xml"));
 
@@ -101,32 +104,40 @@ staticVolumeEntity.Set<Rendered>();
 
 // Model blocks' glTF models (BlockDef.Model paths are relative to Resources/Models — see the csproj's link of
 // the blockbench folder), loaded on first use.
-using var blockModels = new BlockModelLibrary(host.Renderer, Path.Combine(AppContext.BaseDirectory, "Resources", "Models"));
-var meshSystem    = new ChunkMeshSystem(host.World, host.Renderer, blockModels);
+using var blockModels = headless ? null : new BlockModelLibrary(host.Renderer!, Path.Combine(AppContext.BaseDirectory, "Resources", "Models"));
+var meshSystem    = headless ? null : new ChunkMeshSystem(host.World, host.Renderer!, blockModels!);
 var gridSelection = new GridSelection(host.World);
 
-host.AddSystem(host.Gui, SystemStage.Input); // opens ImGui's frame before Logic/PreRender systems run
+if (host.Gui is { } gui) host.AddSystem(gui, SystemStage.Input); // opens ImGui's frame before Logic/PreRender systems run
 
 // Game UI (immediate mode, laid out by Clay): opens its layout after ImGui's frame, since ImGui resets whether the UI
 // has the mouse; Logic/PreRender systems declare elements; UiRenderSystem draws them in the HUD stage.
-using var ui = new UiContext(host.Window, host.Input);
-ui.AddFont(UiFont.Load(Path.Combine(AppContext.BaseDirectory, "Resources", "Fonts", "PixelifySans.ttf")));
-ui.Atlas.LoadSprites(Path.Combine(AppContext.BaseDirectory, "Resources", "Ui")); // the HUD's; name.9.png is nine-sliced
-host.AddSystem(ui, SystemStage.Input);
+using var ui = headless ? null : new UiContext(host.Window!, host.Input!);
+if (ui != null)
+{
+    ui.AddFont(UiFont.Load(Path.Combine(AppContext.BaseDirectory, "Resources", "Fonts", "PixelifySans.ttf")));
+    ui.Atlas.LoadSprites(Path.Combine(AppContext.BaseDirectory, "Resources", "Ui")); // the HUD's; name.9.png is nine-sliced
+    host.AddSystem(ui, SystemStage.Input);
+}
 
 // Fixed ticks: gameplay and physics run in the Tick stage, once per 1/60 s tick (0 or more times a frame, see
 // TickClock). Mouse-look runs per frame before them; presses are collected per frame and handed to the next tick as
 // the player's PlayerInput, which is all tick systems read. Drawing is smoothed between the last two ticks.
-host.AddSystem(new LookInputSystem(host.World, host.Input), SystemStage.Input);
-var inputSample = new InputSampleSystem(host.World, host.Input);
-host.AddSystem(inputSample.Collect, SystemStage.Input);
+// Headless there's no input: players stand still.
+InputSampleSystem? inputSample = null;
+if (host.Input is { } frameInput)
+{
+    host.AddSystem(new LookInputSystem(host.World, frameInput), SystemStage.Input);
+    inputSample = new InputSampleSystem(host.World, frameInput);
+    host.AddSystem(inputSample.Collect, SystemStage.Input);
+}
 var interpolation = new RenderInterpolationSystem(host.World, host.Time);
 host.AddSystem(new LambdaSystem(() => net?.Receive()), SystemStage.Tick); // commands, events, snapshots, session messages
 var hierarchy = new HierarchyTransformSystem(host.World);
 host.AddSystem(interpolation.BeginTick, SystemStage.Tick); // the true poses back from the drawn ones
 host.AddSystem(hierarchy, SystemStage.Tick);
 
-host.AddSystem(inputSample, SystemStage.Tick);
+if (inputSample != null) host.AddSystem(inputSample, SystemStage.Tick);
 
 // Commands: every discrete change goes through a registered handler, applied at one point in the tick. Single-player
 // is a host with nobody connected, so every command's authority is here and it applies in the tick it was sent.
@@ -165,7 +176,7 @@ int budgetArg = Array.IndexOf(args, "--light-budget-mb");
 if (budgetArg >= 0 && budgetArg + 1 < args.Length) LightBudgetMb = int.Parse(args[budgetArg + 1]);
 // View distance: how far out (in blocks, horizontally) islands are streamed, if the budget reaches. The GPU's world
 // index covers it both ways at 2 bytes per chunk position (~48 MB at 10000). --view-distance N overrides it.
-float ViewDistance = 2000f;
+float ViewDistance = headless ? 256f : 2000f; // headless: only what colliders need
 int viewArg = Array.IndexOf(args, "--view-distance");
 if (viewArg >= 0 && viewArg + 1 < args.Length) ViewDistance = float.Parse(args[viewArg + 1], System.Globalization.CultureInfo.InvariantCulture);
 const int MinChunkY = 0; // streamed layers are -8..55 (blocks -256..1792): HeartGrid's WorldBottom..WorldTop
@@ -176,11 +187,11 @@ SkySettings.CloudAltitude = 1250f; // the islands are mostly low: clouds among t
 SkySettings.CloudSeaAltitude = HeartGrid.CloudSeaAltitude; // below its lowest islands
 
 // Shared GPU voxel storage for lighting (world + ships).
-var gridStore = new GridStore(host.Context, (int)((long)LightBudgetMb * 1024 * 1024 / GridStore.SlotBytes),
-                              ChunkLoadSystem.WorldIndexDim(ViewDistance));
+var gridStore = headless ? null : new GridStore(host.Context!, (int)((long)LightBudgetMb * 1024 * 1024 / GridStore.SlotBytes),
+                                                ChunkLoadSystem.WorldIndexDim(ViewDistance));
 var chunkLoadSystem = new ChunkLoadSystem(host.World, staticVolume, gridStore, generatorFactory,
                                           ViewDistance, MinChunkY, saveDb != null ? new DatabaseChunkStore(saveDb) : new NoChunkStore());
-host.Renderer.AttachGridStore(gridStore);
+if (gridStore != null) host.Renderer!.AttachGridStore(gridStore);
 host.AddSystem(physicsBody, SystemStage.Tick);
 
 // Character controller (ported from BepuPhysics2's own Demos/Demos/Characters — see
@@ -190,7 +201,7 @@ host.AddSystem(new PlayerMovementSystem(host.World, commands), SystemStage.Tick)
 
 // Milestone 5: airship flight (velocity control law + Fan/Buoyant propulsion, merged into one system —
 // see AirshipFlightSystem), before the physics step so its impulses are integrated this same tick.
-var gridPilot = new GridPilotSystem(host.World, host.Input, host.Physics, staticVolume, physicsBody, commands);
+var gridPilot = headless ? null : new GridPilotSystem(host.World, host.Input!, host.Physics, staticVolume, physicsBody, commands);
 // Place, break, spawn and use controls (levers and wheels, whose control systems turn drags into commands), then apply
 // every command sent this tick.
 var blockActions = new BlockActionSystem(host.World, commands, editLimits, gridSelection);
@@ -224,7 +235,7 @@ if (joining)
 {
     var client = new ClearSkies.Net.Session.ClientSession(transport!, welcome, session, commands, registry, host.World, hostClock,
         p => chunkLoadSystem.IsTerrainLoaded(new Vector3D<float>(p.X, p.Y, p.Z), 64f));
-    client.Ended += reason => { Console.WriteLine($"[net] session ended: {reason}"); host.Window.Native.Close(); };
+    client.Ended += reason => { Console.WriteLine($"[net] session ended: {reason}"); host.Quit(); };
     net = client;
 }
 else
@@ -261,8 +272,8 @@ var remoteBodies = new ClearSkies.Net.Sync.RemoteBodySystem(host.World, registry
 // Physics copies of bodies owned elsewhere (kinematic ships near the local player, servo copies of other players),
 // placed before the step: scheduled right after the presence system, which decides which copies exist.
 followers.Inner = new ClearSkies.Net.Sync.FollowerSystem(host.World, host.Physics, remoteBodies);
-host.Gui.RegisterDebugUi(new ClearSkies.Net.Debug.NetDebugPanel(net, remoteBodies, transport));
-gridPilot.Disabled = () => net.OthersConnected; // pilot mode and flight tuning: single-player only
+host.RegisterDebugUi(new ClearSkies.Net.Debug.NetDebugPanel(net, remoteBodies, transport));
+if (gridPilot != null) gridPilot.Disabled = () => net.OthersConnected; // pilot mode and flight tuning: single-player only
 
 // Per frame, after the ticks: draw between the last two ticks (children follow), then stream terrain around the view.
 host.AddSystem(interpolation, SystemStage.Logic);
@@ -270,41 +281,54 @@ host.AddSystem(remoteBodies, SystemStage.Logic); // bodies owned elsewhere, abou
 host.AddSystem(hierarchy, SystemStage.Logic);
 host.AddSystem(new CameraFollowSystem(host.World), SystemStage.Logic); // the camera at the local player's eye
 host.AddSystem(chunkLoadSystem, SystemStage.Logic);
-host.AddSystem(gridPilot, SystemStage.Logic);
-host.AddSystem(new BlockTargetSystem(host.World, host.Input, host.Renderer, blockActions, editLimits), SystemStage.Logic);
-host.AddSystem(new HudUi(ui, host.Input, blockActions, gridPilot, host.Renderer.Atlas,
-                         Path.Combine(AppContext.BaseDirectory, "Resources", "Icons")), SystemStage.Logic); // crosshair, hotbar
-var gridPersistence = new GridPersistenceSystem(host.World, meshSystem, host.Physics, gridSelection, commands);
-host.AddSystem(gridPersistence, SystemStage.Logic);
-// The airship-related debug panels above (Pilot/Flight/Save-Load) drew into their own separate "Systems"
-// menu windows; combined here into one "Airship" window so they read as one feature.
-host.AddSystem(new AirshipDebugPanel(gridPilot, airshipFlight, gridPersistence), SystemStage.Logic);
-host.AddSystem(new LambdaSystem(() =>
+// Everything that draws or reads input: not headless.
+PlayerModelSystem? playerModels = null;
+CloudRenderSystem? clouds = null;
+UiRenderSystem? uiRenderer = null;
+if (!headless)
 {
-    if (host.Input.WasKeyPressed(Key.Tab))
+    var renderer = host.Renderer!;
+    var input = host.Input!;
+    var pilot = gridPilot!;
+    var meshes = meshSystem!;
+    var models = blockModels!;
+    var store = gridStore!;
+    host.AddSystem(pilot, SystemStage.Logic);
+    host.AddSystem(new BlockTargetSystem(host.World, input, renderer, blockActions, editLimits), SystemStage.Logic);
+    host.AddSystem(new HudUi(ui!, input, blockActions, pilot, renderer.Atlas,
+                             Path.Combine(AppContext.BaseDirectory, "Resources", "Icons")), SystemStage.Logic); // crosshair, hotbar
+    var gridPersistence = new GridPersistenceSystem(host.World, meshes, host.Physics, gridSelection, commands);
+    host.AddSystem(gridPersistence, SystemStage.Logic);
+    // The airship-related debug panels above (Pilot/Flight/Save-Load) drew into their own separate "Systems"
+    // menu windows; combined here into one "Airship" window so they read as one feature.
+    host.AddSystem(new AirshipDebugPanel(pilot, airshipFlight, gridPersistence), SystemStage.Logic);
+    host.AddSystem(new LambdaSystem(() =>
     {
-        host.Renderer.WireframeMode = !host.Renderer.WireframeMode;
-        Console.WriteLine($"[debug] wireframe: {host.Renderer.WireframeMode}");
-    }
-}), SystemStage.Logic);
+        if (input.WasKeyPressed(Key.Tab))
+        {
+            renderer.WireframeMode = !renderer.WireframeMode;
+            Console.WriteLine($"[debug] wireframe: {renderer.WireframeMode}");
+        }
+    }), SystemStage.Logic);
 
-host.AddSystem(new GpuResidencySystem(host.World, staticVolume, gridStore), SystemStage.PreRender);
-host.AddSystem(new GpuLightSystem(host.World, staticVolume, host.Context, gridStore), SystemStage.PreRender);
-host.AddSystem(meshSystem, SystemStage.PreRender);
-host.AddSystem(new BlockModelSystem(host.World, blockModels), SystemStage.PreRender); // block entities -> RenderedModel
-using var playerModels = new PlayerModelSystem(host.World, host.Renderer);
-host.AddSystem(playerModels, SystemStage.PreRender); // other players, as boxes
-// Rendering: the host opens the frame, runs the render stages (systems in the order added within a stage), then
-// closes it with ImGui and presents. Each render system is handed this frame's camera and time.
-using var clouds = new CloudRenderSystem(host.Renderer, new HeartCloudDensity(seed));
-host.AddSystem(new ChunkRenderSystem(host.World, host.Renderer), SystemStage.RenderWorld);
-host.AddSystem(new ModelRenderSystem(host.World, host.Renderer), SystemStage.RenderWorld);
-host.AddSystem(clouds, SystemStage.RenderWorld);
-host.AddSystem(new SkyRenderSystem(host.Renderer), SystemStage.RenderSky);
-host.AddSystem(new WireframeRenderSystem(host.World, host.Renderer), SystemStage.RenderOverlay);
-host.AddSystem(new HudRenderSystem(host.World, host.Renderer), SystemStage.RenderHud);
-using var uiRenderer = new UiRenderSystem(ui, host.Renderer);
-host.AddSystem(uiRenderer, SystemStage.RenderHud);
+    host.AddSystem(new GpuResidencySystem(host.World, staticVolume, store), SystemStage.PreRender);
+    host.AddSystem(new GpuLightSystem(host.World, staticVolume, host.Context!, store), SystemStage.PreRender);
+    host.AddSystem(meshes, SystemStage.PreRender);
+    host.AddSystem(new BlockModelSystem(host.World, models), SystemStage.PreRender); // block entities -> RenderedModel
+    playerModels = new PlayerModelSystem(host.World, renderer);
+    host.AddSystem(playerModels, SystemStage.PreRender); // other players, as boxes
+    // Rendering: the host opens the frame, runs the render stages (systems in the order added within a stage), then
+    // closes it with ImGui and presents. Each render system is handed this frame's camera and time.
+    clouds = new CloudRenderSystem(renderer, new HeartCloudDensity(seed));
+    host.AddSystem(new ChunkRenderSystem(host.World, renderer), SystemStage.RenderWorld);
+    host.AddSystem(new ModelRenderSystem(host.World, renderer), SystemStage.RenderWorld);
+    host.AddSystem(clouds, SystemStage.RenderWorld);
+    host.AddSystem(new SkyRenderSystem(renderer), SystemStage.RenderSky);
+    host.AddSystem(new WireframeRenderSystem(host.World, renderer), SystemStage.RenderOverlay);
+    host.AddSystem(new HudRenderSystem(host.World, renderer), SystemStage.RenderHud);
+    uiRenderer = new UiRenderSystem(ui!, renderer);
+    host.AddSystem(uiRenderer, SystemStage.RenderHud);
+}
 
 // --camera x,y,z[,yaw,pitch]: start the camera at a given spot instead of overlooking the nearest cluster.
 float[]? cameraOverride = null;
@@ -314,7 +338,7 @@ if (camArg >= 0 && camArg + 1 < args.Length)
 // A client's player is spawned by the host once it has joined; everyone else spawns their own here.
 var camSpawn = TestScene.Build(host, commands, localSettings, saveDb?.ReadPlayer(localSettings.PlayerId), cameraOverride,
                                joining ? (new Vector3D<float>(welcome.Spawn.X, welcome.Spawn.Y + PlayerFactory.EyeHeight, welcome.Spawn.Z), MathF.PI, -0.15f) : HeartSpawn(seed),
-                               spawnPlayer: !joining);
+                               spawnPlayer: !joining && !headless);
 
 // Spawn: over a wide, flat stretch of plains 18 km east of the origin (found by scanning seed 1337 for flat, well-
 // covered lowland), 60 blocks above the terrain surface there (which no piece's top reaches), looking north across it.
@@ -360,13 +384,16 @@ bool quitRequested = false;
 void RequestQuit(System.Runtime.InteropServices.PosixSignalContext c) { c.Cancel = true; Volatile.Write(ref quitRequested, true); }
 using var sigInt = System.Runtime.InteropServices.PosixSignalRegistration.Create(System.Runtime.InteropServices.PosixSignal.SIGINT, RequestQuit);
 using var sigTerm = System.Runtime.InteropServices.PosixSignalRegistration.Create(System.Runtime.InteropServices.PosixSignal.SIGTERM, RequestQuit);
-host.AddSystem(new LambdaSystem(() => { if (Volatile.Read(ref quitRequested)) host.Window.Native.Close(); }), SystemStage.Input);
+host.AddSystem(new LambdaSystem(() => { if (Volatile.Read(ref quitRequested)) host.Quit(); }), SystemStage.Input);
 host.Run();
 
 worldSaver?.SaveNow(); // everything, in one transaction, on exit
 net.Dispose(); // says goodbye to the host, or closes the game to clients
 saveDb?.Dispose();
-gridStore.Dispose();
+uiRenderer?.Dispose();
+clouds?.Dispose();
+playerModels?.Dispose();
+gridStore?.Dispose();
 
 /// <summary>A place in the schedule for a system created later (once what it needs exists).</summary>
 sealed class DeferredSystem : ISystem

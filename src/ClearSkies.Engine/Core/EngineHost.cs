@@ -12,6 +12,10 @@ namespace ClearSkies.Engine.Core;
 /// Owns the window, ECS world, renderer, input, and the system schedule, and drives the main loop.
 /// The window is initialized eagerly in the constructor so game content (which uploads meshes via
 /// <see cref="Renderer"/>) can be built before <see cref="Run"/> starts the loop.
+///
+/// <see cref="EngineOptions.Headless"/> leaves out everything that needs a display: there's no window, GPU context,
+/// renderer, input or ImGui (those properties are null), render stages never run, and <see cref="Run"/> drives the
+/// update stages from a timer at the tick rate until <see cref="Quit"/>.
 /// </summary>
 public sealed class EngineHost : IDisposable
 {
@@ -20,36 +24,39 @@ public sealed class EngineHost : IDisposable
 
     public EngineOptions Options { get; }
     public World World { get; }
-    public GameWindow Window { get; }
-    public GpuContext Context { get; }
-    public Renderer Renderer { get; }
-    public InputManager Input { get; }
+    public bool Headless => Options.Headless;
+    public GameWindow? Window { get; }
+    public GpuContext? Context { get; }
+    public Renderer? Renderer { get; }
+    public InputManager? Input { get; }
     public PhysicsWorld Physics { get; }
     public Time Time { get; }
 
     /// <summary>Decides how many fixed ticks each frame runs (see <see cref="SystemStage.Tick"/>).</summary>
     public TickClock Clock { get; } = new();
-    public ImGuiController Gui { get; }
+    public ImGuiController? Gui { get; }
 
     /// <summary>The frame the render stages draw into, opened and closed by the host around them; its context is
     /// what every <see cref="IRenderSystem"/> is handed.</summary>
-    internal RenderFrame Frame { get; }
+    internal RenderFrame? Frame { get; }
 
     public EngineHost(EngineOptions options)
     {
         Options = options;
         World = new World();
+        Time = new Time();
+        // Milestone 5 airships need real gravity for weight/lift to mean anything (a Buoyant block
+        // counteracting nothing is meaningless). Gentler than Earth to fit the "magical steampunk sky
+        // world" and give Fan/Buoyant tuning room (see AirshipFlightSystem's debug sliders).
+        Physics = new PhysicsWorld(new System.Numerics.Vector3(0f, -6f, 0f), Time.FixedStep);
+        if (options.Headless) return;
+
         Window = new GameWindow(options);
         Window.Native.Initialize();   // create the native window now (needed for the WebGPU surface)
 
         Context = GpuContext.Create(Window, options);
         Renderer = new Renderer(Context);
         Input = new InputManager(Window);
-        Time = new Time();
-        // Milestone 5 airships need real gravity for weight/lift to mean anything (a Buoyant block
-        // counteracting nothing is meaningless). Gentler than Earth to fit the "magical steampunk sky
-        // world" and give Fan/Buoyant tuning room (see AirshipFlightSystem's debug sliders).
-        Physics = new PhysicsWorld(new System.Numerics.Vector3(0f, -6f, 0f), Time.FixedStep);
         Gui = new ImGuiController(Renderer, Input);
 
         Window.Update += OnUpdate;
@@ -87,8 +94,11 @@ public sealed class EngineHost : IDisposable
         _systems.Add((system, stage));
         _systemMs.Add(0.0);
         _frameMs.Add(0.0);
-        if (system is IDebugUiSystem debugUi) Gui.RegisterDebugUi(debugUi);
+        if (system is IDebugUiSystem debugUi) RegisterDebugUi(debugUi);
     }
+
+    /// <summary>Adds a debug panel to the debug UI (nothing, headless).</summary>
+    public void RegisterDebugUi(IDebugUiSystem panel) => Gui?.RegisterDebugUi(panel);
 
     // Per-system CPU time per frame (ms, smoothed), parallel to _systems; _frameMs sums this frame's runs (a Tick
     // system runs several times in some frames and not at all in others).
@@ -97,10 +107,41 @@ public sealed class EngineHost : IDisposable
     private readonly System.Diagnostics.Stopwatch _systemTimer = new();
     private const double TimingSmoothing = 0.05;
 
+    private volatile bool _quit;
+
     public void Run()
     {
+        if (Window is null)
+        {
+            RunHeadless();
+            return;
+        }
         Window.Native.Title = Options.Title;
         Window.Run();
+    }
+
+    /// <summary>Ends <see cref="Run"/> at the end of this frame (closes the window, if there is one).</summary>
+    public void Quit()
+    {
+        _quit = true;
+        Window?.Native.Close();
+    }
+
+    /// <summary>The update stages, one frame per tick's worth of time, sleeping in between.</summary>
+    private void RunHeadless()
+    {
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        double last = 0;
+        while (!_quit)
+        {
+            double now = clock.Elapsed.TotalSeconds;
+            double dt = now - last;
+            last = now;
+            Time.Advance(dt);
+            OnUpdate(dt);
+            double spare = Time.FixedStep - (clock.Elapsed.TotalSeconds - now);
+            if (spare > 0) Thread.Sleep(TimeSpan.FromSeconds(spare));
+        }
     }
 
     private void OnUpdate(double dt)
@@ -118,26 +159,27 @@ public sealed class EngineHost : IDisposable
 
         RunStage(SystemStage.Logic, (float)dt);
         RunStage(SystemStage.PreRender, (float)dt);
-        Input.NewFrame();   // clear after all stages read, before next frame's events fire
+        Input?.NewFrame();  // clear after all stages read, before next frame's events fire
         SmoothTimes(render: false);
     }
 
     private void OnRender(double dt)
     {
         Time.Advance(dt);
-        Window.Native.Title = $"{Options.Title} — {Time.FramesPerSecond} fps";
+        Window!.Native.Title = $"{Options.Title} — {Time.FramesPerSecond} fps";
+        var frame = Frame!;
 
         // The render stages only make sense inside an open frame; when it can't be opened (no active camera, no
         // swapchain image) they're skipped entirely, and End still closes ImGui's frame.
         _systemTimer.Restart();
-        bool open = Frame.TryBegin();
+        bool open = frame.TryBegin();
         _frameBeginMs += TimingSmoothing * (_systemTimer.Elapsed.TotalMilliseconds - _frameBeginMs);
         if (open)
             for (var stage = SystemStage.RenderWorld; stage <= SystemStage.RenderHud; stage++)
-                RunRenderStage(stage, Frame.Context);
+                RunRenderStage(stage, frame.Context);
 
         _systemTimer.Restart();
-        Frame.End();
+        frame.End();
         _frameEndMs += TimingSmoothing * (_systemTimer.Elapsed.TotalMilliseconds - _frameEndMs);
         SmoothTimes(render: true);
     }
@@ -239,11 +281,12 @@ public sealed class EngineHost : IDisposable
             double frameMs = h.Time.FramesPerSecond > 0 ? 1000.0 / h.Time.FramesPerSecond : 0;
             ImGuiNET.ImGui.Text($"Frame: {frameMs:F1} ms ({h.Time.FramesPerSecond} fps), systems CPU total: {total:F1} ms");
             ImGuiNET.ImGui.Text($"Tick {h.Time.Tick}: {h.Time.TicksLastFrame} tick(s) last frame, {h.Clock.DroppedTicks} dropped in all");
-            bool vsync = h.Context.VSync;
-            if (ImGuiNET.ImGui.Checkbox("VSync", ref vsync)) h.Context.VSync = vsync;
+            var context = h.Context!;
+            bool vsync = context.VSync;
+            if (ImGuiNET.ImGui.Checkbox("VSync", ref vsync)) context.VSync = vsync;
             ImGuiNET.ImGui.SameLine();
             ImGuiNET.ImGui.TextDisabled(vsync ? "(frame rate capped at the display's refresh; the wait shows in Frame begin/end)"
-                                              : $"(presenting with {h.Context.PresentModeInUse})");
+                                              : $"(presenting with {context.PresentModeInUse})");
             SampleGc();
             ImGuiNET.ImGui.Text($"GC: {_gcPausePerSec:F1} ms paused per second; collections gen0/1/2 {_gcRate[0]}/{_gcRate[1]}/{_gcRate[2]} " +
                                 $"in the last {_gcSampleSecs:F1} s; allocating {_allocMbPerSec:F0} MB/s; heap {GC.GetTotalMemory(false) / (1024 * 1024)} MB");
@@ -256,11 +299,11 @@ public sealed class EngineHost : IDisposable
     public void Dispose()
     {
         Physics.Dispose();
-        Gui.Dispose();
-        Renderer.Dispose();
-        Context.Dispose();
-        Input.Dispose();
+        Gui?.Dispose();
+        Renderer?.Dispose();
+        Context?.Dispose();
+        Input?.Dispose();
         World.Dispose();
-        Window.Dispose();
+        Window?.Dispose();
     }
 }
