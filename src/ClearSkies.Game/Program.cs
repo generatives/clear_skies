@@ -120,7 +120,7 @@ if (ui != null)
     host.AddSystem(ui, SystemStage.Input);
 }
 
-// Fixed ticks: gameplay and physics run in the Tick stage, once per 1/60 s tick (0 or more times a frame, see
+// Fixed ticks: gameplay and physics run in the Simulation stage, once per 1/60 s tick (0 or more times a frame, see
 // TickClock). Mouse-look runs per frame before them; presses are collected per frame and handed to the next tick as
 // the player's PlayerInput, which is all tick systems read. Drawing is smoothed between the last two ticks.
 // Headless there's no input: players stand still.
@@ -129,15 +129,14 @@ if (host.Input is { } frameInput)
 {
     host.AddSystem(new LookInputSystem(host.World, frameInput), SystemStage.Input);
     inputSample = new InputSampleSystem(host.World, frameInput);
-    host.AddSystem(inputSample.Collect, SystemStage.Input);
+    host.AddSystem(inputSample, SystemStage.Input);
 }
-var interpolation = new RenderInterpolationSystem(host.World, host.Time);
-host.AddSystem(new LambdaSystem(() => net?.Receive()), SystemStage.Tick); // commands, events, snapshots, session messages
+var interpolation = new TickInterpolationSystem(host.World, host.Time);
+host.AddSystem(new LambdaSystem(() => net?.Receive()), SystemStage.Simulation); // commands, events, snapshots, session messages
 var hierarchy = new HierarchyTransformSystem(host.World);
-host.AddSystem(interpolation.BeginTick, SystemStage.Tick); // the true poses back from the drawn ones
-host.AddSystem(hierarchy, SystemStage.Tick);
+host.AddSystem(hierarchy, SystemStage.Simulation);
 
-if (inputSample != null) host.AddSystem(inputSample, SystemStage.Tick);
+if (inputSample != null) host.AddSystem(inputSample, SystemStage.Simulation);
 
 // Commands: every discrete change goes through a registered handler, applied at one point in the tick. Single-player
 // is a host with nobody connected, so every command's authority is here and it applies in the tick it was sent.
@@ -161,8 +160,8 @@ if (saveDb != null)
 {
     var storedIndex = new StoredEntityIndex(saveDb.ReadEntityIndex());
     worldSaver = new WorldSaver(host.World, saveDb, storedIndex, commands, idAllocator);
-    host.AddSystem(new EntityStreamingSystem(host.World, saveDb, storedIndex, registry, commands, worldSaver), SystemStage.Tick);
-    host.AddSystem(worldSaver, SystemStage.Tick);
+    host.AddSystem(new EntityStreamingSystem(host.World, saveDb, storedIndex, registry, commands, worldSaver), SystemStage.Simulation);
+    host.AddSystem(worldSaver, SystemStage.Simulation);
 }
 
 var physicsBody = new PhysicsBodySystem(host.World, host.Physics);
@@ -198,12 +197,12 @@ IWorldChunkEditor worldEditor = chunkStore as IWorldChunkEditor ?? new HostChunk
 worldEditor.EditedUnloaded += chunkLoadSystem.MarkEdited;
 editVoxels.WorldEditor = worldEditor;
 if (gridStore != null) host.Renderer!.AttachGridStore(gridStore);
-host.AddSystem(physicsBody, SystemStage.Tick);
+host.AddSystem(physicsBody, SystemStage.Simulation);
 
 // Character controller (ported from BepuPhysics2's own Demos/Demos/Characters — see
 // Physics/Characters/): motion goals (WASD/jump/mode toggle) must be set before the physics step
 // so Simulation.Timestep's CollisionsDetected analysis sees them this same tick.
-host.AddSystem(new PlayerMovementSystem(host.World, commands), SystemStage.Tick);
+host.AddSystem(new PlayerMovementSystem(host.World, commands), SystemStage.Simulation);
 
 // Milestone 5: airship flight (velocity control law + Fan/Buoyant propulsion, merged into one system —
 // see AirshipFlightSystem), before the physics step so its impulses are integrated this same tick.
@@ -211,12 +210,12 @@ var gridPilot = headless ? null : new GridPilotSystem(host.World, host.Input!, h
 // Place, break, spawn and use controls (levers and wheels, whose control systems turn drags into commands), then apply
 // every command sent this tick.
 var blockActions = new BlockActionSystem(host.World, commands, editLimits, gridSelection);
-host.AddSystem(blockActions, SystemStage.Tick);
-host.AddSystem(new LeverControlSystem(host.World, commands), SystemStage.Tick);
-host.AddSystem(new SteeringWheelControlSystem(host.World, commands), SystemStage.Tick);
-host.AddSystem(commands, SystemStage.Tick);
+host.AddSystem(blockActions, SystemStage.Simulation);
+host.AddSystem(new LeverControlSystem(host.World, commands), SystemStage.Simulation);
+host.AddSystem(new SteeringWheelControlSystem(host.World, commands), SystemStage.Simulation);
+host.AddSystem(commands, SystemStage.Simulation);
 var airshipFlight = new AirshipFlightSystem(host.World, host.Physics);
-host.AddSystem(airshipFlight, SystemStage.Tick);
+host.AddSystem(airshipFlight, SystemStage.Simulation);
 var presence = new EntityPresenceSystem(host.World, session, staticVolume, ViewDistance)
 {
     // Entities are drawn out to the load window; a grid owned here gets a body once the terrain around it has loaded
@@ -225,15 +224,15 @@ var presence = new EntityPresenceSystem(host.World, session, staticVolume, ViewD
     TerrainReady = p => chunkLoadSystem.IsTerrainLoaded(new Vector3D<float>(p.X, p.Y, p.Z), 64f) &&
                         physicsBody.CollidersReady(staticVolume, p, 64f),
 };
-host.AddSystem(presence, SystemStage.Tick); // presence layers: bodies, drawing, terrain interest and colliders
+host.AddSystem(presence, SystemStage.Simulation); // presence layers: bodies, drawing, terrain interest and colliders
 var followers = new DeferredSystem();
-host.AddSystem(followers, SystemStage.Tick);
+host.AddSystem(followers, SystemStage.Simulation);
 
-host.AddSystem(host.Physics, SystemStage.Tick); // one step, once bodies/impulses for this tick are in
-host.AddSystem(new PhysicsTransformSyncSystem(host.World, host.Physics), SystemStage.Tick); // body poses -> Transform
-host.AddSystem(hierarchy, SystemStage.Tick); // e.g. volume Transforms -> chunk Transforms
-host.AddSystem(new SupportSystem(host.World, host.Physics), SystemStage.Tick); // what each character stands on or rides with
-host.AddSystem(interpolation.EndTick, SystemStage.Tick); // records this tick's poses
+host.AddSystem(host.Physics, SystemStage.Simulation); // one step, once bodies/impulses for this tick are in
+host.AddSystem(new PhysicsTransformSyncSystem(host.World, host.Physics), SystemStage.Simulation); // body poses -> Transform
+host.AddSystem(hierarchy, SystemStage.Simulation); // e.g. volume Transforms -> chunk Transforms
+host.AddSystem(new SupportSystem(host.World, host.Physics), SystemStage.Simulation); // what each character stands on or rides with
+host.AddSystem(interpolation, SystemStage.Simulation); // records this tick's poses
 
 // The network session, now the command system exists: a host (single-player: with the transport off) or a client.
 var hostClock = new HostTickClock(host.Time, host.Clock);
@@ -281,8 +280,8 @@ else
     net = hostNet;
 }
 var bodySync = new ClearSkies.Net.Sync.BodySync(net, host.World, host.Physics);
-host.AddSystem(bodySync, SystemStage.Tick); // snapshots of owned bodies, every second tick
-host.AddSystem(new ClearSkies.Net.Session.NetSendSystem(net), SystemStage.Tick);
+host.AddSystem(bodySync, SystemStage.Simulation); // snapshots of owned bodies, every second tick
+host.AddSystem(new ClearSkies.Net.Session.NetSendSystem(net), SystemStage.Simulation);
 var remoteBodies = new ClearSkies.Net.Sync.RemoteBodySystem(host.World, registry, hostClock);
 // Physics copies of bodies owned elsewhere (kinematic ships near the local player, servo copies of other players),
 // placed before the step: scheduled right after the presence system, which decides which copies exist.
@@ -291,11 +290,11 @@ host.RegisterDebugUi(new ClearSkies.Net.Debug.NetDebugPanel(net, remoteBodies, t
 if (gridPilot != null) gridPilot.Disabled = () => net.OthersConnected; // pilot mode and flight tuning: single-player only
 
 // Per frame, after the ticks: draw between the last two ticks (children follow), then stream terrain around the view.
-host.AddSystem(interpolation, SystemStage.Logic);
-host.AddSystem(remoteBodies, SystemStage.Logic); // bodies owned elsewhere, about 100 ms behind
-host.AddSystem(hierarchy, SystemStage.Logic);
-host.AddSystem(new CameraFollowSystem(host.World), SystemStage.Logic); // the camera at the local player's eye
-host.AddSystem(chunkLoadSystem, SystemStage.Logic);
+host.AddSystem(interpolation, SystemStage.Frame);
+host.AddSystem(remoteBodies, SystemStage.Frame); // bodies owned elsewhere, about 100 ms behind
+host.AddSystem(hierarchy, SystemStage.Frame);
+host.AddSystem(new CameraFollowSystem(host.World), SystemStage.Frame); // the camera at the local player's eye
+host.AddSystem(chunkLoadSystem, SystemStage.Frame);
 // Everything that draws or reads input: not headless.
 PlayerModelSystem? playerModels = null;
 CloudRenderSystem? clouds = null;
@@ -308,15 +307,15 @@ if (!headless)
     var meshes = meshSystem!;
     var models = blockModels!;
     var store = gridStore!;
-    host.AddSystem(pilot, SystemStage.Logic);
-    host.AddSystem(new BlockTargetSystem(host.World, input, renderer, blockActions, editLimits), SystemStage.Logic);
+    host.AddSystem(pilot, SystemStage.Frame);
+    host.AddSystem(new BlockTargetSystem(host.World, input, renderer, blockActions, editLimits), SystemStage.Frame);
     host.AddSystem(new HudUi(ui!, input, blockActions, pilot, renderer.Atlas,
-                             Path.Combine(AppContext.BaseDirectory, "Resources", "Icons")), SystemStage.Logic); // crosshair, hotbar
+                             Path.Combine(AppContext.BaseDirectory, "Resources", "Icons")), SystemStage.Frame); // crosshair, hotbar
     var gridPersistence = new GridPersistenceSystem(host.World, meshes, host.Physics, gridSelection, commands);
-    host.AddSystem(gridPersistence, SystemStage.Logic);
+    host.AddSystem(gridPersistence, SystemStage.Frame);
     // The airship-related debug panels above (Pilot/Flight/Save-Load) drew into their own separate "Systems"
     // menu windows; combined here into one "Airship" window so they read as one feature.
-    host.AddSystem(new AirshipDebugPanel(pilot, airshipFlight, gridPersistence), SystemStage.Logic);
+    host.AddSystem(new AirshipDebugPanel(pilot, airshipFlight, gridPersistence), SystemStage.Frame);
     host.AddSystem(new LambdaSystem(() =>
     {
         if (input.WasKeyPressed(Key.Tab))
@@ -324,7 +323,7 @@ if (!headless)
             renderer.WireframeMode = !renderer.WireframeMode;
             Console.WriteLine($"[debug] wireframe: {renderer.WireframeMode}");
         }
-    }), SystemStage.Logic);
+    }), SystemStage.Frame);
 
     host.AddSystem(new GpuResidencySystem(host.World, staticVolume, store), SystemStage.PreRender);
     host.AddSystem(new GpuLightSystem(host.World, staticVolume, host.Context!, store), SystemStage.PreRender);

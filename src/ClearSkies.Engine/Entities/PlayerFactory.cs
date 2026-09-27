@@ -55,7 +55,7 @@ public static class PlayerFactory
         player.Set<OwnPresence>();
         if (owner.IsLocal)
         {
-            player.Set(new SmoothedTransform { PositionOnly = true }); // moved by ticks, turned per frame by mouse-look
+            player.Set(new InterpolatedTransform { PositionOnly = true }); // moved by ticks, turned per frame by mouse-look
             player.Set<LocalPlayer>();
             player.Set(new PlayerInput()); // filled each tick by InputSampleSystem
         }
