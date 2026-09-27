@@ -115,3 +115,54 @@ public class FixedStepPhysicsTests
         return (physics.GetBodyLinearVelocity(body), ticks);
     }
 }
+
+public class FrameHistoryTests
+{
+    private static readonly double[] NoSystems = Array.Empty<double>();
+
+    [Fact]
+    public void FindsTheSpikeAndWhereItsTimeWent()
+    {
+        var history = new FrameHistory();
+        for (int i = 0; i < 100; i++) history.Record(16.7, 1, -1, new[] { 2.0, 1.0, 0.5 }, 0.2, 0.3);
+        history.Record(48, 3, 2, new[] { 1.0, 30.0, 0.5 }, 0.2, 9.0);
+        for (int i = 0; i < 10; i++) history.Record(16.7, 1, -1, new[] { 2.0, 1.0, 0.5 }, 0.2, 0.3);
+
+        var (average, worst, spikes, ago) = history.Summarize();
+        Assert.Equal(48f, worst);
+        Assert.Equal(10, ago);
+        Assert.Equal(1, spikes);
+        Assert.InRange(average, 16.9f, 17.1f);
+
+        ref readonly var slowest = ref history.Get(ago);
+        Assert.Equal(3, slowest.Ticks);
+        Assert.Equal(2, slowest.GcGeneration);
+        Assert.Equal(40.7f, slowest.CpuMs, 3);
+        Assert.Equal((1, 30f), slowest.Slowest[0]);
+        Assert.Equal((FrameHistory.FrameEnd, 9f), slowest.Slowest[1]);
+        Assert.Equal((0, 1f), slowest.Slowest[2]);
+    }
+
+    [Fact]
+    public void KeepsOnlyTheLatestFramesAsARing()
+    {
+        var history = new FrameHistory();
+        for (int i = 0; i < FrameHistory.Capacity + 7; i++) history.Record(i, 1, -1, NoSystems, 0, 0);
+        Assert.Equal(FrameHistory.Capacity, history.Count);
+        Assert.Equal(FrameHistory.Capacity + 6, history.Get(0).Ms);
+        Assert.Equal(7, history.Get(FrameHistory.Capacity - 1).Ms);
+        // Plotting from Offset goes oldest to newest.
+        Assert.Equal(7f, history.Milliseconds[history.Offset]);
+    }
+
+    [Fact]
+    public void HeldHistoryRecordsNothing()
+    {
+        var history = new FrameHistory();
+        history.Record(16, 1, -1, NoSystems, 0, 0);
+        history.Paused = true;
+        history.Record(99, 1, -1, NoSystems, 0, 0);
+        Assert.Equal(1, history.Count);
+        Assert.Equal(16f, history.Get(0).Ms);
+    }
+}
