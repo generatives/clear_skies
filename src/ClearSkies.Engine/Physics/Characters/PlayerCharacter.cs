@@ -2,7 +2,6 @@ using System;
 using System.Numerics;
 using BepuPhysics;
 using BepuPhysics.Collidables;
-using BepuPhysics.Trees;
 using BepuUtilities;
 using ClearSkies.Engine.Input;
 using Silk.NET.Input;
@@ -10,11 +9,12 @@ using Silk.NET.Input;
 namespace ClearSkies.Engine.Physics.Characters;
 
 /// <summary>
-/// The player's character: a capsule body registered with <see cref="CharacterControllers"/> (which handles support
-/// detection and the grounded motion constraint), driven by this project's <see cref="InputManager"/>. Started as an
-/// adaptation of BepuPhysics2's Demos/Demos/Characters/CharacterInput.cs (v2.4.0); on top of that it owns the
-/// game-feel rules: jump buffering and coyote time, extra fall gravity and air control (relative to the ship last
-/// stood on), and Minecraft-style crouching that won't walk off edges.
+/// The player's character: a capsule body registered with <see cref="CharacterControllers"/>, which owns its physics —
+/// support detection, the grounded motion constraint, jumping (buffered, with coyote time), extra fall gravity and air
+/// control relative to the ship last stood on. This side turns this project's <see cref="InputManager"/> keys into the
+/// character's goals each frame (target velocity, view direction, jump requests), and adds Minecraft-style crouching:
+/// slower, a lower eye, and a guard that won't walk off edges. Started as an adaptation of BepuPhysics2's
+/// Demos/Demos/Characters/CharacterInput.cs (v2.4.0).
 /// </summary>
 public struct PlayerCharacter
 {
@@ -22,31 +22,11 @@ public struct PlayerCharacter
     private CharacterControllers characters;
     private float speed;
     private Capsule shape;
-    private float extraFallGravity;
-    private float airControlForceScale;
-    private float airControlSpeedScale;
-    private float airBrakeScale;
 
-    // Jump forgiveness. A Space press is remembered for JumpBufferTime so it isn't lost when no physics
-    // step runs this frame (render rate > the 60Hz fixed step) or the character is a hair off the
-    // ground; and a jump still works for CoyoteTime after walking off a ledge.
+    // A Space press stays pending for JumpBufferTime (see CharacterController.JumpRequestRemaining), so a press slightly
+    // before landing still jumps; CoyoteTime lets a jump still push off for a moment after walking off a ledge.
     private const float JumpBufferTime = 0.15f;
     private const float CoyoteTime = 0.12f;
-    private float jumpBufferRemaining;
-    private float timeSinceSupported;
-    private bool jumpedSinceSupported;
-
-    // The moving body (ship) last stood on, if any: air control steers and brakes relative to its velocity
-    // rather than the world's, so jumping on a moving deck doesn't leave the player behind. That only holds
-    // while the ship is still underneath (a ray straight down hits it first); after ShipReleaseTime away from
-    // it (enough to cross a gap in the deck) the player is released, keeping the ship's velocity at that
-    // moment as plain momentum, so falling off the side doesn't get dragged along after the ship.
-    private const float ShipReleaseTime = 0.5f;
-    private const float ShipCheckDistance = 128f; // blocks (1 block = 1 unit)
-    private BodyHandle lastSupportBody;
-    private bool hasLastSupportBody;
-    private float timeNotAboveShip;
-    private Vector3 airReferenceVelocity;
 
     // Crouch (Ctrl), Minecraft-style sneak: slower, a lower eye, and while standing on something the character won't
     // walk off its edge. The centre may hang up to CrouchEdgeOverhang past an edge, on both axes at once at a corner,
@@ -68,17 +48,6 @@ public struct PlayerCharacter
         float airBrakeScale = 0.5f, DefaultEcs.Entity entity = default)
     {
         this.characters = characters;
-        this.extraFallGravity = extraFallGravity;
-        this.airControlForceScale = airControlForceScale;
-        this.airControlSpeedScale = airControlSpeedScale;
-        this.airBrakeScale = airBrakeScale;
-        jumpBufferRemaining = 0;
-        timeSinceSupported = float.MaxValue;
-        jumpedSinceSupported = false;
-        lastSupportBody = default;
-        hasLastSupportBody = false;
-        timeNotAboveShip = 0;
-        airReferenceVelocity = default;
         eyeDrop = 0;
         var shapeIndex = characters.Simulation.Shapes.Add(shape);
 
@@ -91,6 +60,11 @@ public struct PlayerCharacter
         character.LocalUp = new Vector3(0, 1, 0);
         character.CosMaximumSlope = MathF.Cos(maximumSlope);
         character.JumpVelocity = jumpVelocity;
+        character.CoyoteTime = CoyoteTime;
+        character.ExtraFallGravity = extraFallGravity;
+        character.AirControlForceScale = airControlForceScale;
+        character.AirControlSpeedScale = airControlSpeedScale;
+        character.AirBrakeScale = airBrakeScale;
         character.MaximumVerticalForce = maximumVerticalGlueForce;
         character.MaximumHorizontalForce = maximumHorizontalForce;
         character.MinimumSupportDepth = shape.Radius * -0.01f;
@@ -118,14 +92,13 @@ public struct PlayerCharacter
         return true;
     }
 
-    /// <summary>Reads WASD + Shift(sprint) + Ctrl(crouch) + Space(jump) and updates the character's motion goals
-    /// for this frame. <paramref name="viewDirectionWorld"/> is the camera's world-space forward
-    /// vector (unflattened — the surface-relative projection happens inside CharacterControllers).
-    /// <paramref name="dt"/> is the render frame's duration, not the physics step's: this runs once per frame, and its
-    /// timers and air forces advance by it. <paramref name="frozen"/> ignores the keys (no walking or jumping) while still
-    /// standing, falling and riding whatever the character stands on as usual — e.g. while the player is using a lever.</summary>
-    public void UpdateCharacterGoals(InputManager input, Vector3 viewDirectionWorld, float dt,
-                                     bool frozen = false)
+    /// <summary>Reads WASD + Shift(sprint) + Ctrl(crouch) + Space(jump) and updates the character's goals for this
+    /// frame. <paramref name="viewDirectionWorld"/> is the camera's world-space forward vector (unflattened — the
+    /// surface-relative projection happens inside CharacterControllers). <paramref name="dt"/> is the render frame's
+    /// duration (it only eases the crouch eye; the physics runs on the simulation's own steps). <paramref name="frozen"/>
+    /// ignores the keys (no walking or jumping) while still standing, falling and riding whatever the character stands
+    /// on as usual — e.g. while the player is using a lever.</summary>
+    public void UpdateCharacterGoals(InputManager input, Vector3 viewDirectionWorld, float dt, bool frozen = false)
     {
         var keys = new CharacterInput();
         if (!frozen)
@@ -151,8 +124,7 @@ public struct PlayerCharacter
         public bool JumpPressed;
     }
 
-    public void UpdateCharacterGoals(CharacterInput keys, Vector3 viewDirectionWorld, float dt,
-                                     bool frozen = false)
+    public void UpdateCharacterGoals(CharacterInput keys, Vector3 viewDirectionWorld, float dt, bool frozen = false)
     {
         var movementDirection = keys.Move;
         var movementDirectionLengthSquared = movementDirection.LengthSquared();
@@ -162,60 +134,10 @@ public struct PlayerCharacter
         ref var character = ref characters.GetCharacterByBodyHandle(bodyHandle);
         var characterBody = new BodyReference(bodyHandle, characters.Simulation.Bodies);
 
-        // TryJump is only ever set here, never cleared: CharacterControllers clears it after the next physics
-        // step consumes it. Overwriting it every render frame used to drop presses whenever a frame ran no step.
         if (frozen)
-        {
-            jumpBufferRemaining = 0;
-            character.TryJump = false;
-        }
+            character.JumpRequestRemaining = 0;
         else if (keys.JumpPressed)
-            jumpBufferRemaining = JumpBufferTime;
-
-        if (character.Supported)
-        {
-            timeSinceSupported = 0;
-            hasLastSupportBody = character.Support.Mobility != CollidableMobility.Static;
-            if (hasLastSupportBody) lastSupportBody = character.Support.BodyHandle;
-            timeNotAboveShip = 0;
-            airReferenceVelocity = default;
-            // A pending TryJump means the jump hasn't happened yet (no step since it was requested).
-            if (!character.TryJump) jumpedSinceSupported = false;
-        }
-        else
-            timeSinceSupported += dt;
-
-        if (jumpBufferRemaining > 0)
-        {
-            if (character.Supported)
-            {
-                character.TryJump = true;
-                jumpedSinceSupported = true;
-                jumpBufferRemaining = 0;
-            }
-            else if (!jumpedSinceSupported && timeSinceSupported <= CoyoteTime)
-            {
-                // Just walked off an edge: there's no support left to push off, so set the jump velocity
-                // directly, by the same rule as a grounded jump: reach JumpVelocity relative to what the character
-                // was standing on (don't add on top of it), so a ship rising or sinking doesn't weaken or boost it.
-                if (!characterBody.Awake) characters.Simulation.Awakener.AwakenBody(character.BodyHandle);
-                QuaternionEx.Transform(character.LocalUp, characterBody.Pose.Orientation, out var up);
-                var supportUpVelocity = 0f;
-                if (hasLastSupportBody && characters.Simulation.Bodies.BodyExists(lastSupportBody))
-                {
-                    var support = new BodyReference(lastSupportBody, characters.Simulation.Bodies);
-                    var offset = characterBody.Pose.Position - support.Pose.Position;
-                    supportUpVelocity = Vector3.Dot(support.Velocity.Linear + Vector3.Cross(support.Velocity.Angular, offset), up);
-                }
-                ref var velocity = ref characterBody.Velocity.Linear;
-                var upVelocity = Vector3.Dot(velocity, up);
-                velocity += up * MathF.Max(0, supportUpVelocity + character.JumpVelocity - upVelocity);
-                jumpedSinceSupported = true;
-                jumpBufferRemaining = 0;
-            }
-            else
-                jumpBufferRemaining -= dt;
-        }
+            character.JumpRequestRemaining = JumpBufferTime;
 
         var crouching = !frozen && keys.Crouch;
         var eyeDropTarget = crouching ? CrouchEyeDrop : 0f;
@@ -226,13 +148,15 @@ public struct PlayerCharacter
             : keys.Sprint ? speed * 1.75f : speed;
         var newTargetVelocity = movementDirection * effectiveSpeed;
         var viewDirection = viewDirectionWorld;
-        if (crouching && character.Supported && !character.TryJump && newTargetVelocity != Vector2.Zero)
+        if (crouching && character.Supported && !character.JumpPending && newTargetVelocity != Vector2.Zero)
             newTargetVelocity = KeepAwayFromEdges(character, characterBody, newTargetVelocity, viewDirection, dt);
 
-        // Modifying the character's raw data doesn't automatically wake it up — do so explicitly
-        // if the goals actually changed, otherwise it won't respond (see BodyActivityDescription).
+        // Modifying the character's raw data doesn't automatically wake it up — do so explicitly if the goals changed,
+        // otherwise it won't respond (see BodyActivityDescription). Airborne, CharacterControllers moves it every step
+        // (extra gravity, air control), which only happens to awake bodies, and nothing else guarantees it's awake (e.g.
+        // resting motionless against a wall: not "Supported", since the wall fails the slope test), so wake it then too.
         if (!characterBody.Awake &&
-            ((character.TryJump && character.Supported) ||
+            (character.JumpPending || !character.Supported ||
              newTargetVelocity != character.TargetVelocity ||
              (newTargetVelocity != Vector2.Zero && character.ViewDirection != viewDirection)))
         {
@@ -240,52 +164,6 @@ public struct PlayerCharacter
         }
         character.TargetVelocity = newTargetVelocity;
         character.ViewDirection = viewDirection;
-
-        // The motion constraint only exists while supported; while airborne we apply gravity/control
-        // ourselves. Both run every frame regardless of input, so a falling character with no keys
-        // held still gets the extra weight — unlike TargetVelocity/TryJump above, nothing else
-        // guarantees the body is awake for this path (e.g. resting motionless against a wall, not
-        // "Supported" since the wall fails the slope test, with no jump/target-velocity change to
-        // trigger the wake check above), so wake it explicitly before touching its velocity.
-        if (!character.Supported)
-        {
-            if (!characterBody.Awake) characters.Simulation.Awakener.AwakenBody(character.BodyHandle);
-
-            // Extra downward acceleration on top of the world's own (deliberately gentle, -6) gravity,
-            // so jumps feel heavy/short rather than floaty. Tuned together with JumpVelocity for a
-            // roughly 1-block peak height (see PlayerCharacter's constructor default / TestScene).
-            characterBody.Velocity.Linear.Y -= extraFallGravity * dt;
-
-            // Air control. Holding a direction accelerates along it up to the (sprint-aware) air speed without
-            // ever cutting existing speed along it, while sideways drift is bled off so you can steer; with
-            // no keys held the character brakes gently, so letting go near a cliff edge stops you short.
-            QuaternionEx.Transform(character.LocalUp, characterBody.Pose.Orientation, out var characterUp);
-            ref var linear = ref characterBody.Velocity.Linear;
-            UpdateAirReferenceVelocity(characterBody.Pose.Position, characterUp, dt);
-            var relative = linear - airReferenceVelocity;
-            var horizontal = relative - characterUp * Vector3.Dot(relative, characterUp);
-            var airAcceleration = characterBody.LocalInertia.InverseMass * character.MaximumHorizontalForce * airControlForceScale;
-            Vector3 newHorizontal;
-            var characterRight = Vector3.Cross(character.ViewDirection, characterUp);
-            var rightLengthSquared = characterRight.LengthSquared();
-            if (movementDirectionLengthSquared > 0 && rightLengthSquared > 1e-10f)
-            {
-                characterRight /= MathF.Sqrt(rightLengthSquared);
-                var characterForward = Vector3.Cross(characterUp, characterRight);
-                var worldMovementDirection = characterRight * movementDirection.X + characterForward * movementDirection.Y;
-                var velocityChange = airAcceleration * dt;
-                var along = Vector3.Dot(horizontal, worldMovementDirection);
-                var maximumAirSpeed = effectiveSpeed * airControlSpeedScale;
-                var newAlong = MathF.Max(along, MathF.Min(along + velocityChange, maximumAirSpeed));
-                var lateral = horizontal - worldMovementDirection * along;
-                newHorizontal = worldMovementDirection * newAlong + MoveTowardsZero(lateral, velocityChange);
-            }
-            else
-            {
-                newHorizontal = MoveTowardsZero(horizontal, airAcceleration * airBrakeScale * dt);
-            }
-            linear += newHorizontal - horizontal;
-        }
     }
 
     /// <summary>Crouch edge guard: clips the target velocity, one axis at a time (so the character still slides along an
@@ -407,59 +285,6 @@ public struct PlayerCharacter
         public void OnHitAtZeroT(ref float maximumT, CollidableReference collidable) { }
     }
 
-    /// <summary>Follows the ship last stood on while it's still below the player; releases it (freezing its
-    /// velocity as the reference) once the player has been off to the side for <see cref="ShipReleaseTime"/>.</summary>
-    private void UpdateAirReferenceVelocity(Vector3 position, Vector3 up, float dt)
-    {
-        if (!hasLastSupportBody) return;
-        var bodies = characters.Simulation.Bodies;
-        if (!bodies.BodyExists(lastSupportBody))
-        {
-            hasLastSupportBody = false;
-            return;
-        }
-        var shipVelocity = new BodyReference(lastSupportBody, bodies).Velocity.Linear;
-
-        var hitHandler = new NearestHitHandler { Ignore = bodyHandle, T = float.MaxValue };
-        var down = -up;
-        characters.Simulation.RayCast(position, down, ShipCheckDistance, ref hitHandler);
-        var aboveShip = hitHandler.T < float.MaxValue &&
-                        hitHandler.Hit.Mobility != CollidableMobility.Static && hitHandler.Hit.BodyHandle == lastSupportBody;
-
-        timeNotAboveShip = aboveShip ? 0 : timeNotAboveShip + dt;
-        airReferenceVelocity = shipVelocity;
-        if (timeNotAboveShip > ShipReleaseTime) hasLastSupportBody = false;
-    }
-
-    /// <summary>Records the nearest collidable along a ray, skipping the character's own capsule.</summary>
-    private struct NearestHitHandler : IRayHitHandler
-    {
-        public BodyHandle Ignore;
-        public float T;
-        public CollidableReference Hit;
-
-        public bool AllowTest(CollidableReference collidable) =>
-            collidable.Mobility == CollidableMobility.Static || collidable.BodyHandle != Ignore;
-
-        public bool AllowTest(CollidableReference collidable, int childIndex) => true;
-
-        public void OnRayHit(in RayData ray, ref float maximumT, float t, in Vector3 normal, CollidableReference collidable, int childIndex)
-        {
-            if (t < T)
-            {
-                T = t;
-                Hit = collidable;
-                maximumT = t;
-            }
-        }
-    }
-
-    private static Vector3 MoveTowardsZero(Vector3 v, float amount)
-    {
-        var length = v.Length();
-        return length <= amount ? Vector3.Zero : v * ((length - amount) / length);
-    }
-
     /// <summary>First-person eye position: capsule centre + <paramref name="eyeHeight"/>, lowered while crouching
     /// — no third-person backward offset (unlike the original demo's debug camera).</summary>
     public readonly Vector3 GetEyePosition(float eyeHeight)
@@ -475,14 +300,8 @@ public struct PlayerCharacter
     /// velocity of a ship left long ago doesn't drag the character after switching back mid-air.</summary>
     public void TeleportTo(Vector3 position)
     {
-        jumpBufferRemaining = 0;
-        timeSinceSupported = float.MaxValue;
-        jumpedSinceSupported = false;
-        hasLastSupportBody = false;
-        timeNotAboveShip = 0;
-        airReferenceVelocity = default;
+        characters.GetCharacterByBodyHandle(bodyHandle).ResetJumpAndAirState();
         eyeDrop = 0;
-
         var characterBody = new BodyReference(bodyHandle, characters.Simulation.Bodies);
         characterBody.Pose.Position = position;
         characterBody.Velocity.Linear = default;
