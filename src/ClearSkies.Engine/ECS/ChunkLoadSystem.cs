@@ -187,10 +187,18 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 
         ImGui.Separator();
         ImGui.Text($"Autosave in: {System.Math.Max(0f, AutosaveInterval - _autosaveTimer):F0}s");
+        ImGui.Separator();
+        _steps.Draw();
     }
+
+    // CPU time of each step, for the debug panel: which one a hitch while streaming came from.
+    private const int AutosaveStep = 0, ApplyStep = 1, UnloadStep = 2, QueueStep = 3, DispatchStep = 4, EvictStep = 5, FogStep = 6;
+    private readonly StepTimer _steps = new("Autosave", "Adding finished columns", "Rebuild: unloading out of view",
+                                            "Rebuild: queueing columns", "Dispatching jobs", "Evicting far columns", "Fog");
 
     public void Update(float dt)
     {
+        _steps.Start();
         // Crash/power-loss safety: flush dirty chunks on a fixed cadence regardless of camera/streaming
         // state, so edits to a chunk that never unloads aren't only ever saved on graceful exit.
         _autosaveTimer += dt;
@@ -199,6 +207,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
             _autosaveTimer = 0f;
             SaveAllDirty();
         }
+        _steps.Lap(AutosaveStep);
 
         while (_results.TryDequeue(out var job))
         {
@@ -217,6 +226,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
                 if (InView(pos.X, pos.Z) && !_staticVolume.IsLoaded(pos)) _staticVolume.AddChunk(pos, data);
             }
         }
+        _steps.Lap(ApplyStep);
 
         if (!CameraUtil.TryGetActive(_cameras, out var cam)) return;
         var camPos = cam.Position;
@@ -231,7 +241,9 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         }
 
         Dispatch();
+        _steps.Lap(DispatchStep);
         UpdateFog(camPos, dt);
+        _steps.Lap(FogStep);
     }
 
     /// <summary>Unloads what left the view distance, and re-queues the columns in view with chunks still to fetch,
@@ -250,6 +262,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         // Forget the columns out of view: their air is re-learned on return.
         foreach (var key in _columns.Keys.Where(k => !InView(k.x, k.z)).ToList())
             _columns.Remove(key);
+        _steps.Lap(UnloadStep);
 
         _queue.Clear();
         _queueHead = 0;
@@ -267,6 +280,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         Console.WriteLine($"[load] rebuild: queued {_queue.Count}{(_queueTruncated ? "+" : "")} columns, loaded " +
                           $"{_staticVolume.LoadedCount} chunks ({PendingChunks()} not uploaded), light {WorldBricks()}/" +
                           $"{_store.WorldLightBudget} bricks, unloaded {_toUnload.Count}, evicted {_evictions} columns so far");
+        _steps.Lap(QueueStep); // with the log line: the console can be slow
     }
 
     private bool InView(int x, int z) => Sq(x - _lastCamColumn.x) + Sq(z - _lastCamColumn.z) <= Sq(_viewColumns);
@@ -330,7 +344,11 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
                 int overChunks = _staticVolume.LoadedCount + _inFlightChunks + work.Count - MaxChunks;
                 int overBricks = WorldBricks() + (_inFlightChunks + work.Count) * PendingBricks - _store.WorldLightBudget;
                 if (overChunks > 0 || overBricks >= 0)
+                {
+                    _steps.Lap(DispatchStep);
                     EvictFartherThan(ColumnDistSq(col), overChunks + work.Count, overBricks + EvictSlack);
+                    _steps.Lap(EvictStep);
+                }
                 break;
             }
 

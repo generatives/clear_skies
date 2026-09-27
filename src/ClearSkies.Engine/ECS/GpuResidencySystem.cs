@@ -1,6 +1,8 @@
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Voxels;
+using ClearSkies.Engine.Gui;
 using DefaultEcs;
+using ImGuiNET;
 
 namespace ClearSkies.Engine.ECS;
 
@@ -14,8 +16,22 @@ namespace ClearSkies.Engine.ECS;
 /// Nothing is ever reallocated as the camera moves: the world's chunk table is toroidal, and every chunk takes and
 /// returns fixed-size slots.
 /// </summary>
-public sealed class GpuResidencySystem : ISystem
+public sealed class GpuResidencySystem : ISystem, IDebugUiSystem
 {
+    // CPU time of each step, and how many chunks went each way, for the debug panel.
+    private const int RemovedStep = 0, ChooseStep = 1, UploadStep = 2;
+    private readonly StepTimer _steps = new("Releasing removed chunks and grids", "Choosing chunks to upload", "Uploading");
+    private int _released, _uploaded, _mostReleased;
+
+    public string DebugName => "GPU residency";
+
+    public void DrawDebugUi()
+    {
+        ImGui.Text($"Last frame: released {_released} chunks, uploaded {_uploaded} (at most {UploadsPerFrame}); " +
+                   $"most released in a frame: {_mostReleased}");
+        _steps.Draw();
+    }
+
     private const int UploadsPerFrame = 16;
 
     private readonly GridStore   _store;
@@ -55,6 +71,8 @@ public sealed class GpuResidencySystem : ISystem
 
     public void Update(float dt)
     {
+        _steps.Start();
+        _uploaded = 0;
         // Despawned ships: their root entity is gone from the set.
         foreach (var g in _removedGrids) { _store.Unregister(g.Gpu); }
         _removedGrids.Clear();
@@ -63,10 +81,14 @@ public sealed class GpuResidencySystem : ISystem
         {
             _store.RemoveChunk(volume.Gpu, pos);
         }
+        _released = _removedChunks.Count;
+        _mostReleased = System.Math.Max(_mostReleased, _released);
         _removedChunks.Clear();
+        _steps.Lap(RemovedStep);
 
         // Closest to the camera first (see NearestChunks).
         NearestChunks.Select(_needsGpuUpload, _cameras, UploadsPerFrame, _nearest);
+        _steps.Lap(ChooseStep);
         foreach (var entity in _nearest)
         {
             var chunk = entity.Get<Chunk>();
@@ -75,6 +97,8 @@ public sealed class GpuResidencySystem : ISystem
             var pos = entry.Position;
             _store.UploadChunk(volume.Gpu, pos, entry);
             entity.Remove<NeedsGpuUploadFlag>();
+            _uploaded++;
         }
+        _steps.Lap(UploadStep);
     }
 }
