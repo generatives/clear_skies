@@ -253,7 +253,7 @@ public sealed class RemoteBodySystem : ISystem
     public double InterpolationDelay { get; set; } = 6;
 
     /// <summary>The tick remote bodies are drawn at this frame. Things simulated here are drawn between the last two
-    /// ticks (a tick behind, see RenderInterpolationSystem), so remote bodies are too, to line up with them.</summary>
+    /// ticks (a tick behind, see TickInterpolationSystem), so remote bodies are too, to line up with them.</summary>
     public double RenderTick => _clock.Tick + (double)_clock.Alpha - 1 - InterpolationDelay;
 
     /// <summary>The tick followers' bodies are placed at in tick <see cref="ITickClock.Tick"/>.</summary>

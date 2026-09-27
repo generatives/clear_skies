@@ -259,8 +259,9 @@ public sealed class OwnershipSystem : ISystem, IDebugUiSystem
     {
         if (!e.Has<Transform>()) return;
         ref var t = ref e.Get<Transform>();
-        var drawnPosition = t.Position;
-        var drawnRotation = t.Rotation;
+        var drawn = e.DrawnPose(); // where it's on screen now
+        var drawnPosition = drawn.Position;
+        var drawnRotation = drawn.Rotation;
         var s = snapshot ?? _net.Bodies?.SnapshotOf(e) ?? default;
         if (snapshot is null) tick = _net.Clock.Tick;
 
