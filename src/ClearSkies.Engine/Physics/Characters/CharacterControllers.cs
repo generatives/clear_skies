@@ -187,7 +187,8 @@ namespace ClearSkies.Engine.Physics.Characters
             character = default;
             character.BodyHandle = bodyHandle;
             bodyHandleToCharacterIndex[bodyHandle.Value] = characterIndex;
-            Colliders?.Set(bodyHandle, new ClearSkies.Engine.Physics.ColliderInfo(ClearSkies.Engine.Physics.ColliderKind.Character, entity));
+            if (Colliders is not null)
+                Colliders.Allocate(bodyHandle) = new ClearSkies.Engine.Physics.ColliderInfo(ClearSkies.Engine.Physics.ColliderKind.Character, entity);
             return ref character;
         }
 
@@ -218,7 +219,6 @@ namespace ClearSkies.Engine.Physics.Characters
         {
             Debug.Assert(bodyHandle.Value >= 0 && bodyHandle.Value < bodyHandleToCharacterIndex.Length && bodyHandleToCharacterIndex[bodyHandle.Value] >= 0,
                 "Removing a character by body handle requires that a character associated with the given body handle actually exists.");
-            Colliders?.Clear(bodyHandle);
             RemoveCharacterByIndex(bodyHandleToCharacterIndex[bodyHandle.Value]);
         }
 
@@ -429,7 +429,7 @@ namespace ClearSkies.Engine.Physics.Characters
         public bool SmoothBoxEdges = true;
 
         /// <summary>Tells voxel colliders (whose seams get smoothed) from everything else. Set by PhysicsWorld.</summary>
-        public ClearSkies.Engine.Physics.ColliderTags? Colliders;
+        public CollidableProperty<ClearSkies.Engine.Physics.ColliderInfo>? Colliders;
 
         /// <summary>
         /// Voxel terrain and ships are compounds of boxes, and Bepu doesn't smooth the internal edges between them: a capsule
@@ -480,7 +480,11 @@ namespace ClearSkies.Engine.Physics.Characters
         bool TryGetBoxColliderOrientation(CollidableReference collidable, out Quaternion orientation)
         {
             orientation = Quaternion.Identity;
-            if (Colliders is null || !Colliders.Get(collidable).IsVoxel)
+            if (Colliders is null)
+                return false;
+            var info = Colliders[collidable];
+            Debug.Assert(info.Kind != ClearSkies.Engine.Physics.ColliderKind.Untagged, "Collider was never tagged: create it through PhysicsWorld/CharacterControllers.");
+            if (!info.IsVoxel)
                 return false;
             orientation = collidable.Mobility == CollidableMobility.Static
                 ? Simulation.Statics[collidable.StaticHandle].Pose.Orientation

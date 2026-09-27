@@ -45,10 +45,11 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
     /// changes to drive it.</summary>
     public CharacterControllers Characters { get; }
 
-    /// <summary>What each body/static is (voxel terrain, a grid, other) — see <see cref="ColliderTags"/>. Terrain
+    /// <summary>What each body/static is (a <see cref="ColliderInfo"/>) — Bepu's per-handle side table, standing in for
+    /// user data on a collider. Every collider is tagged where it's created, so every read is in range. Terrain
     /// chunks are tagged by <see cref="AddStaticCompound"/>, other bodies by the tag their Add* method requires, and
     /// character bodies by <see cref="CharacterControllers.AllocateCharacter"/>.</summary>
-    public ColliderTags Colliders { get; } = new();
+    public CollidableProperty<ColliderInfo> Colliders { get; }
 
     private readonly BufferPool _pool = new();
     private readonly float _fixedStep;
@@ -58,12 +59,14 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
     {
         Gravity = gravity;
         _fixedStep = fixedStep;
-        Characters = new CharacterControllers(_pool) { Colliders = Colliders };
+        Characters = new CharacterControllers(_pool);
         Simulation = Simulation.Create(
             _pool,
             new VoxelNarrowPhaseCallbacks(new SpringSettings(30, 1)) { Characters = Characters },
             new VoxelPoseCallbacks(gravity, linearDamping: 0.03f, angularDamping: 0.03f),
             new SolveDescription(velocityIterationCount: 8, substepCount: 1));
+        Colliders = new CollidableProperty<ColliderInfo>(Simulation, _pool);
+        Characters.Colliders = Colliders;
     }
 
     public void Update(float dt)
@@ -116,7 +119,7 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
             inertia,
             new CollidableDescription(shapeIndex, 0.1f),
             new BodyActivityDescription(0.01f)));
-        Colliders.Set(handle, tag);
+        Colliders.Allocate(handle) = tag;
         return handle;
     }
 
@@ -229,17 +232,13 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
     {
         var handle = Simulation.Bodies.Add(BodyDescription.CreateDynamic(
             new RigidPose(position, orientation), inertia, new CollidableDescription(shape, 0.1f), new BodyActivityDescription(0.01f)));
-        Colliders.Set(handle, tag);
+        Colliders.Allocate(handle) = tag;
         return handle;
     }
 
     /// <summary>Removes a dynamic body. To also free its shape, read the shape with <see cref="GetBodyShape"/>
     /// first, then pass it to <see cref="RemoveCompound"/> after this call.</summary>
-    public void RemoveBody(BodyHandle handle)
-    {
-        Colliders.Clear(handle);
-        Simulation.Bodies.Remove(handle);
-    }
+    public void RemoveBody(BodyHandle handle) => Simulation.Bodies.Remove(handle);
 
     public TypedIndex GetBodyShape(BodyHandle handle) => Simulation.Bodies[handle].Collidable.Shape;
 
@@ -342,7 +341,7 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
             : new BigCompound { Children = children, Tree = new Tree(build.Tree, _pool) };
         var shape = Simulation.Shapes.Add(compound);
         var handle = Simulation.Statics.Add(new StaticDescription(origin, shape));
-        Colliders.Set(handle, new ColliderInfo(ColliderKind.VoxelTerrain));
+        Colliders.Allocate(handle) = new ColliderInfo(ColliderKind.VoxelTerrain);
         return handle;
     }
 
@@ -351,13 +350,13 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
     public void RemoveStaticCompound(StaticHandle handle)
     {
         var shape = Simulation.Statics[handle].Shape;
-        Colliders.Clear(handle);
         Simulation.Statics.Remove(handle);
         Simulation.Shapes.RecursivelyRemoveAndDispose(shape, _pool);
     }
 
     public void Dispose()
     {
+        Colliders.Dispose();
         Simulation.Dispose();
         _pool.Clear();
     }
