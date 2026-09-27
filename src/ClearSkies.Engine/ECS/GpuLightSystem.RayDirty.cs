@@ -295,7 +295,6 @@ public sealed partial class GpuLightSystem
         _rayLight.Submit();
 
         _phaseTimer.Lap(7);
-        _phaseTimer.Stop();
         _rtSunMsEma    = Ema(_rtSunMsEma, _sunTimer.Elapsed.TotalMilliseconds);
         _rtLampMsEma   = Ema(_rtLampMsEma, _lampTimer.Elapsed.TotalMilliseconds);
         _rtBounceMsEma = Ema(_rtBounceMsEma, _bounceTimer.Elapsed.TotalMilliseconds);
