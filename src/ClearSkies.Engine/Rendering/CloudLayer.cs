@@ -1,3 +1,4 @@
+using ClearSkies.Engine.Core;
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using ClearSkies.Engine.Math;
@@ -199,7 +200,7 @@ public sealed class CloudLayer : IDisposable
         int version = _version;
         var (open, islands) = _builtCoverage;
         var density = _density;
-        ThreadPool.QueueUserWorkItem(_ =>
+        BackgroundWork.Queue(() =>
         {
             List<CloudCell> cells;
             try { cells = BuildTile(lv, key.X, key.Z, drift, open, islands, density); }
