@@ -31,10 +31,12 @@ namespace ClearSkies.Net.Ownership;
 /// </summary>
 public sealed class BubbleManager : ISystem, IDebugUiSystem
 {
-    public float PlayerMergeDistance { get; set; } = 64f;
+    public const float DefaultPlayerMergeDistance = 64f, DefaultSplitMargin = 16f;
+
+    public float PlayerMergeDistance { get; set; } = DefaultPlayerMergeDistance;
     public float ObjectMergeDistance { get; set; } = 24f;
     public float ReachMergeDistance { get; set; } = 16f;
-    public float SplitMargin { get; set; } = 16f;
+    public float SplitMargin { get; set; } = DefaultSplitMargin;
     public float MinMergedSeconds { get; set; } = 5f;
     public int IntervalTicks { get; set; } = 10;
 

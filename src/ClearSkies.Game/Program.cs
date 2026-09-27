@@ -324,6 +324,12 @@ host.AddSystem(new ModelRenderSystem(host.World, host.Renderer), SystemStage.Ren
 host.AddSystem(clouds, SystemStage.RenderWorld);
 host.AddSystem(new SkyRenderSystem(host.Renderer), SystemStage.RenderSky);
 host.AddSystem(new WireframeRenderSystem(host.World, host.Renderer), SystemStage.RenderOverlay);
+var ownershipOverlay = new OwnershipOverlaySystem(host.World, host.Renderer, session,
+    ClearSkies.Net.Ownership.BubbleManager.DefaultPlayerMergeDistance,
+    ClearSkies.Net.Ownership.BubbleManager.DefaultPlayerMergeDistance + ClearSkies.Net.Ownership.BubbleManager.DefaultSplitMargin);
+ownershipOverlay.Enabled = args.Contains("--show-ownership");
+host.AddSystem(ownershipOverlay, SystemStage.RenderOverlay);
+host.Gui.RegisterDebugUi(ownershipOverlay);
 host.AddSystem(new HudRenderSystem(host.World, host.Renderer), SystemStage.RenderHud);
 using var uiRenderer = new UiRenderSystem(ui, host.Renderer);
 host.AddSystem(uiRenderer, SystemStage.RenderHud);
