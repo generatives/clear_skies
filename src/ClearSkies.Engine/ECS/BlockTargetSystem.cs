@@ -54,14 +54,14 @@ public sealed class BlockTargetSystem : ISystem, IDisposable, Gui.IDebugUiSystem
         TargetBlock  = null;
         TargetNormal = null;
         if (!_input.CursorCaptured || _actions.Interacting || !TryGetCameraRay(out var origin, out var dir)
-            || BlockRaycast.Nearest(_volumes, origin, dir, _limits.Reach) is not { } hit)
+            || BlockRaycast.Nearest(_volumes, origin, dir, _limits.Reach, drawn: true) is not { } hit)
         {
             HideFace();
             return;
         }
         TargetBlock = hit.Block;
         TargetNormal = hit.Normal;
-        ShowFace(hit.Volume, hit.Root.Get<Transform>(), hit.Block, hit.Normal);
+        ShowFace(hit.Volume, hit.Root.DrawnPose(), hit.Block, hit.Normal); // on the ship as it's drawn
     }
 
     public string DebugName => "Block target";
