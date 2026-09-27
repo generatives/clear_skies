@@ -45,7 +45,7 @@ public static class PlayerFactory
         player.Set(new CharacterControllerComponent { Character = character, EyeHeight = EyeHeight });
         player.Set(new CharacterModeComponent { FreeFly = d.FreeFly });
         player.Set(new Support());
-        player.Set(new SmoothedTransform { PositionOnly = true }); // moved by ticks, turned per frame by mouse-look
+        player.Set(new InterpolatedTransform { PositionOnly = true }); // moved by ticks, turned per frame by mouse-look
         player.Set(new Player { Id = d.Id, Name = d.Name, IsLocal = owner.IsLocal });
         player.Set(new NetId { Value = netId });
         player.Set(owner);
