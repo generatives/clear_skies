@@ -48,6 +48,9 @@ public sealed class ClientSession : NetSession
     }
 
     public Welcome Welcome { get; }
+
+    /// <summary>The built-on terrain chunks, fetched from the host as streaming needs them.</summary>
+    public Sync.RemoteChunkStore? Chunks { get; set; }
     public ClockSync ClockSync { get; }
     public bool Joined { get; private set; }
     public override bool OthersConnected => true;
@@ -83,6 +86,12 @@ public sealed class ClientSession : NetSession
             Writer.WriteByte((byte)MessageKind.TerrainReady);
             Send(Host);
             _terrainReadySent = true;
+        }
+        if (Chunks?.TakeRequests() is { Count: > 0 } wanted)
+        {
+            Writer.Clear();
+            ChunkMessages.WriteRequest(Writer, wanted);
+            Send(Host);
         }
         if (_anchor.IsAlive && _localPlayers.Count > 0)
         {
@@ -133,6 +142,12 @@ public sealed class ClientSession : NetSession
             case MessageKind.StateFrame:
                 Bodies?.ReceiveFrame(PeerId.Host, ref r);
                 break;
+            case MessageKind.ChunkData:
+            {
+                var (pos, blob) = ChunkMessages.ReadData(ref r);
+                Chunks?.Receive(pos, blob);
+                break;
+            }
             case MessageKind.TimePong:
                 ClockSync.OnPong(TimePong.Read(ref r), NowMs);
                 break;

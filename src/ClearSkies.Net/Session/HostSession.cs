@@ -5,6 +5,7 @@ using ClearSkies.Engine.Core;
 using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Serialization;
+using ClearSkies.Engine.Voxels;
 using ClearSkies.Net.Protocol;
 using ClearSkies.Net.Transport;
 using DefaultEcs;
@@ -69,10 +70,17 @@ public sealed class HostSession : NetSession
     }
 
     public IReadOnlyCollection<RemotePeer> Peers => _peers.Values;
+    public long ChunksSent { get; private set; }
     public override bool OthersConnected => _peers.Values.Any(p => p.State != PeerState.Connected);
 
     /// <summary>Called when a leaving player's entity should go: describe for storage first if there's a save.</summary>
     public Action<Entity>? PlayerLeaving { get; set; }
+
+    /// <summary>Every built-on terrain chunk, sent to a joining client so it fetches them rather than generate them.</summary>
+    public Func<IEnumerable<ChunkPosition>>? EditedChunks { get; set; }
+
+    /// <summary>A terrain chunk's current data (as loaded here, or from the save), for a client fetching it.</summary>
+    public Func<ChunkPosition, byte[]?>? ChunkSource { get; set; }
 
     /// <summary>Which way a new player faces when they first spawn (yaw, pitch).</summary>
     public (float Yaw, float Pitch) NewPlayerLook { get; set; }
@@ -172,6 +180,19 @@ public sealed class HostSession : NetSession
                 Send(from);
                 break;
             }
+            case MessageKind.ChunkRequest:
+                // Answered at once, on the reliable channel: the data reflects every edit already relayed to them, and
+                // every later edit arrives after it.
+                var wanted = ChunkMessages.ReadRequest(ref r);
+                Console.WriteLine($"[net] sending {wanted.Count} built-on chunk(s) to {peer.Name}");
+                foreach (var pos in wanted)
+                {
+                    Writer.Clear();
+                    ChunkMessages.WriteData(Writer, pos, ChunkSource?.Invoke(pos));
+                    Send(from);
+                    ChunksSent++;
+                }
+                break;
             case MessageKind.Disconnect:
                 Transport?.Disconnect(from, DisconnectMessage.Read(ref r).Reason);
                 break;
@@ -204,7 +225,7 @@ public sealed class HostSession : NetSession
         peer.Spawn = _spawnFor(hello.Player).Position;
         var (first, count) = _ids.NextBlock();
         Writer.Clear();
-        new Welcome(id, first, count, _seed, Clock.Tick, peer.Spawn).Write(Writer);
+        new Welcome(id, first, count, _seed, Clock.Tick, peer.Spawn, EditedChunks?.Invoke().ToArray() ?? Array.Empty<ChunkPosition>()).Write(Writer);
         Send(peer.Connection);
         Console.WriteLine($"[net] {hello.Name} joining as {id}");
     }

@@ -133,7 +133,7 @@ host.AddSystem(inputSample, SystemStage.Tick);
 var commands = new CommandSystem(session, registry, () => host.Time.Tick);
 var blockEntities = new BlockEntities(host.World, registry);
 var editLimits = new EditLimits();
-commands.Register(new EditVoxelsHandler(blockEntities, editLimits));
+var editVoxels = commands.Register(new EditVoxelsHandler(blockEntities, editLimits));
 commands.Register(new SetLeverHandler(blockEntities));
 commands.Register(new SetWheelHandler(blockEntities));
 commands.Register(new SetGridLockedHandler(registry, host.Physics));
@@ -178,8 +178,14 @@ SkySettings.CloudSeaAltitude = HeartGrid.CloudSeaAltitude; // below its lowest i
 // Shared GPU voxel storage for lighting (world + ships).
 var gridStore = new GridStore(host.Context, (int)((long)LightBudgetMb * 1024 * 1024 / GridStore.SlotBytes),
                               ChunkLoadSystem.WorldIndexDim(ViewDistance));
+// Built-on terrain: the host keeps it in its save (and edits it there even where it isn't loaded); a client fetches it
+// from the host as it streams in, and keeps it in memory only.
+IChunkStore chunkStore = joining ? new ClearSkies.Net.Sync.RemoteChunkStore(welcome.EditedChunks) : new DatabaseChunkStore(saveDb!);
 var chunkLoadSystem = new ChunkLoadSystem(host.World, staticVolume, gridStore, generatorFactory,
-                                          ViewDistance, MinChunkY, saveDb != null ? new DatabaseChunkStore(saveDb) : new NoChunkStore());
+                                          ViewDistance, MinChunkY, chunkStore);
+IWorldChunkEditor worldEditor = chunkStore as IWorldChunkEditor ?? new HostChunkEditor(chunkStore, generatorFactory);
+worldEditor.EditedUnloaded += chunkLoadSystem.MarkEdited;
+editVoxels.WorldEditor = worldEditor;
 host.Renderer.AttachGridStore(gridStore);
 host.AddSystem(physicsBody, SystemStage.Tick);
 
@@ -225,6 +231,7 @@ if (joining)
     var client = new ClearSkies.Net.Session.ClientSession(transport!, welcome, session, commands, registry, host.World, hostClock,
         p => chunkLoadSystem.IsTerrainLoaded(new Vector3D<float>(p.X, p.Y, p.Z), 64f));
     client.Ended += reason => { Console.WriteLine($"[net] session ended: {reason}"); host.Window.Native.Close(); };
+    client.Chunks = (ClearSkies.Net.Sync.RemoteChunkStore)chunkStore;
     net = client;
 }
 else
@@ -244,6 +251,14 @@ else
             return (null, new Vector3(p.X, p.Y - PlayerFactory.EyeHeight, p.Z));
         });
     hostNet.NewPlayerLook = (HeartSpawn(seed)!.Value.Yaw, HeartSpawn(seed)!.Value.Pitch);
+    // Chunk transfer: joining clients get the list of built-on chunks, and fetch each as they load it.
+    hostNet.EditedChunks = () => chunkLoadSystem.EditedChunks;
+    hostNet.ChunkSource = pos =>
+    {
+        if (staticVolume.GetData(pos) is { } loaded) return StaticWorldSerializer.ToBytes(loaded);
+        var data = new ChunkData();
+        return chunkStore.TryLoad(pos, data) ? StaticWorldSerializer.ToBytes(data) : null;
+    };
     // A leaving player is saved (the players table), then despawned.
     var leaving = new HashSet<uint>();
     hostNet.PlayerLeaving = player =>

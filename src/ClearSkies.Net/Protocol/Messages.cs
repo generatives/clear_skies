@@ -2,6 +2,7 @@ using System.Numerics;
 using ClearSkies.Engine.Commands;
 using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Serialization;
+using ClearSkies.Engine.Voxels;
 
 namespace ClearSkies.Net.Protocol;
 
@@ -42,16 +43,66 @@ public readonly record struct Hello(ushort Version, PlayerId Player, string Name
     public static Hello Read(ref NetReader r) => new(r.ReadUInt16(), new PlayerId(r.ReadGuid()), r.ReadString(), r.ReadUInt64());
 }
 
-/// <summary>Host → client: the client's peer ID and first block of network IDs, the world seed, the host's tick, and
-/// where the player will spawn (their saved position, or the spawn point), so terrain can load there first.</summary>
-public readonly record struct Welcome(PeerId Peer, uint IdFirst, uint IdCount, ulong Seed, uint HostTick, Vector3 Spawn)
+/// <summary>Host → client: the client's peer ID and first block of network IDs, the world seed, the host's tick,
+/// where the player will spawn (their saved position, or the spawn point) so terrain can load there first, and every
+/// terrain chunk that has been built on (12 bytes each), which the client fetches from the host instead of
+/// generating.</summary>
+public readonly record struct Welcome(PeerId Peer, uint IdFirst, uint IdCount, ulong Seed, uint HostTick, Vector3 Spawn,
+                                      ChunkPosition[] EditedChunks)
 {
     public void Write(NetWriter w)
     {
         w.WriteByte((byte)MessageKind.Welcome); w.WriteUInt32(Peer.Value); w.WriteUInt32(IdFirst); w.WriteUInt32(IdCount);
         w.WriteUInt64(Seed); w.WriteUInt32(HostTick); w.WriteVector3(Spawn);
+        w.WriteVarUInt((uint)EditedChunks.Length);
+        foreach (var p in EditedChunks) ChunkMessages.WritePosition(w, p);
     }
-    public static Welcome Read(ref NetReader r) => new(new PeerId(r.ReadUInt32()), r.ReadUInt32(), r.ReadUInt32(), r.ReadUInt64(), r.ReadUInt32(), r.ReadVector3());
+    public static Welcome Read(ref NetReader r)
+    {
+        var (peer, first, count, seed, tick, spawn) = (new PeerId(r.ReadUInt32()), r.ReadUInt32(), r.ReadUInt32(), r.ReadUInt64(), r.ReadUInt32(), r.ReadVector3());
+        var edited = new ChunkPosition[r.ReadVarUInt()];
+        for (int i = 0; i < edited.Length; i++) edited[i] = ChunkMessages.ReadPosition(ref r);
+        return new Welcome(peer, first, count, seed, tick, spawn, edited);
+    }
+}
+
+/// <summary>Chunk transfer: a client asks for built-on chunks it's about to load, and the host sends each one's
+/// current data (every edit it has already relayed included; later ones arrive after it, on the same channel).</summary>
+public static class ChunkMessages
+{
+    public static void WritePosition(NetWriter w, ChunkPosition p) { w.WriteInt32(p.X); w.WriteInt32(p.Y); w.WriteInt32(p.Z); }
+    public static ChunkPosition ReadPosition(ref NetReader r) => new(r.ReadInt32(), r.ReadInt32(), r.ReadInt32());
+
+    public static void WriteRequest(NetWriter w, IReadOnlyCollection<ChunkPosition> chunks)
+    {
+        w.WriteByte((byte)MessageKind.ChunkRequest);
+        w.WriteVarUInt((uint)chunks.Count);
+        foreach (var p in chunks) WritePosition(w, p);
+    }
+
+    public static List<ChunkPosition> ReadRequest(ref NetReader r)
+    {
+        uint n = r.ReadVarUInt();
+        if (n > 4096) throw new InvalidDataException($"A request for {n} chunks.");
+        var list = new List<ChunkPosition>((int)n);
+        for (int i = 0; i < n; i++) list.Add(ReadPosition(ref r));
+        return list;
+    }
+
+    public static void WriteData(NetWriter w, ChunkPosition p, byte[]? blob)
+    {
+        w.WriteByte((byte)MessageKind.ChunkData);
+        WritePosition(w, p);
+        w.WriteBool(blob != null);
+        if (blob != null) w.WriteBytes(blob);
+    }
+
+    /// <summary>A chunk's position and data (null: nothing there after all, so generate it).</summary>
+    public static (ChunkPosition Pos, byte[]? Blob) ReadData(ref NetReader r)
+    {
+        var p = ReadPosition(ref r);
+        return (p, r.ReadBool() ? r.ReadBytes().ToArray() : null);
+    }
 }
 
 /// <summary>Either way: the connection is ending, and why.</summary>

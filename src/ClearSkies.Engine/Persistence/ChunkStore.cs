@@ -13,6 +13,53 @@ public interface IChunkStore
     bool TryLoad(ChunkPosition pos, ChunkData data);
 
     void Save(ChunkPosition pos, ChunkData data);
+
+    /// <summary>Whether a saved chunk can be loaded right now. A client's chunks come from the host, so one it hasn't
+    /// received yet isn't ready: <see cref="Request"/> it and try again once it is.</summary>
+    bool IsReady(ChunkPosition pos) => true;
+
+    /// <summary>Asks for a chunk that isn't <see cref="IsReady"/> yet.</summary>
+    void Request(ChunkPosition pos) { }
+}
+
+/// <summary>Edits terrain chunks that aren't loaded here (EditVoxels on the static world, far from this machine's
+/// player).</summary>
+public interface IWorldChunkEditor
+{
+    /// <summary>Applies <paramref name="edit"/> to the chunk at <paramref name="pos"/>, which isn't loaded.</summary>
+    void EditUnloaded(ChunkPosition pos, Action<ChunkData> edit);
+
+    /// <summary>Raised for each chunk edited while unloaded, so streaming knows it's been built on.</summary>
+    event Action<ChunkPosition>? EditedUnloaded;
+}
+
+/// <summary>
+/// The host's editor for unloaded terrain: the chunk comes from the save if it has been edited before, or else is
+/// generated; the edit is applied and the chunk saved. Data only: no meshing, lighting or colliders. So an edit far
+/// from the host is recorded, and whoever loads that chunk later (the host, or a client fetching it) sees it.
+/// </summary>
+public sealed class HostChunkEditor : IWorldChunkEditor
+{
+    private readonly IChunkStore _store;
+    private readonly Func<Generation.IWorldGenerator> _generator;
+    private Generation.IWorldGenerator? _cached;
+
+    public HostChunkEditor(IChunkStore store, Func<Generation.IWorldGenerator> generator)
+    {
+        _store = store;
+        _generator = generator;
+    }
+
+    public event Action<ChunkPosition>? EditedUnloaded;
+
+    public void EditUnloaded(ChunkPosition pos, Action<ChunkData> edit)
+    {
+        var data = new ChunkData();
+        if (!_store.TryLoad(pos, data)) (_cached ??= _generator()).Generate(data, pos);
+        edit(data);
+        _store.Save(pos, data);
+        EditedUnloaded?.Invoke(pos);
+    }
 }
 
 /// <summary>The host's chunk store: the save database's chunks table.</summary>
