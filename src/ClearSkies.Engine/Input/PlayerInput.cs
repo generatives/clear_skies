@@ -29,7 +29,7 @@ public enum PlayerButtons : uint
 }
 
 /// <summary>
-/// One tick's input for the local player: raw input, not gameplay commands. Simulation systems in the Tick stage read
+/// One tick's input for the local player: raw input, not gameplay commands. Simulation systems in the Simulation stage read
 /// only this, never <see cref="InputManager"/>, so what they see doesn't depend on how many frames or ticks there were:
 /// <see cref="Pressed"/> holds every press since the previous tick, even from frames that ran no tick.
 /// </summary>

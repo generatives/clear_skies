@@ -89,7 +89,7 @@ public static class TestScene
         player.Set(new CharacterControllerComponent { Character = character, EyeHeight = eyeHeight });
         player.Set(new CharacterModeComponent { FreeFly = true }); // start in FreeFly — zero regression risk vs. today
         player.Set(new PlayerInput()); // filled each tick by InputSampleSystem
-        player.Set(new SmoothedTransform { PositionOnly = true }); // moved by ticks, turned per frame by mouse-look
+        player.Set(new InterpolatedTransform { PositionOnly = true }); // moved by ticks, turned per frame by mouse-look
         player.Set(new Support());
         player.Set(new Player { Id = PlayerId.New(), Name = Environment.UserName, IsLocal = true });
         player.Set<LocalPlayer>();
