@@ -34,6 +34,10 @@ public sealed class GpuResidencySystem : ISystem, IDebugUiSystem
 
     private const int UploadsPerFrame = 16;
 
+    /// <summary>Main-thread time uploading per frame: past it, the rest of the frame's chunks wait for the next (the
+    /// nearest still go first).</summary>
+    private const double UploadBudgetMs = 2.0;
+
     private readonly GridStore   _store;
     private readonly EntitySet   _needsGpuUpload;
     private readonly EntitySet   _cameras;
@@ -91,6 +95,7 @@ public sealed class GpuResidencySystem : ISystem, IDebugUiSystem
         _steps.Lap(ChooseStep);
         foreach (var entity in _nearest)
         {
+            if (_uploaded > 0 && _steps.SinceLap() > UploadBudgetMs) break;
             var chunk = entity.Get<Chunk>();
             var entry = chunk.Entry;
             var volume = entry.Volume;

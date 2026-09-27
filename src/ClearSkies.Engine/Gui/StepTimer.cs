@@ -77,6 +77,10 @@ public sealed class StepTimer
         _last = t;
     }
 
+    /// <summary>Time (ms) since the last <see cref="Lap"/> (or <see cref="Start"/>): how long the current step has
+    /// taken so far, for work that stops at a time budget.</summary>
+    public double SinceLap() => _sw.Elapsed.TotalMilliseconds - _last;
+
     public void Reset() => Array.Clear(_worstEver);
 
     private void Commit()

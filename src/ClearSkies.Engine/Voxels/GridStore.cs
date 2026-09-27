@@ -438,12 +438,20 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     private static uint[] PackChunk(ChunkEntry entry)
     {
         if (entry.PackedOpacityWords is { } cached) return cached;
+        entry.SetPacked(Pack(entry.Data));
+        return entry.PackedOpacityWords!;
+    }
 
-        var words = entry.PackedOpacityWords = new uint[WordsPerChunk];
-        entry.Emitters.Clear();
-        PackOpacity(entry.Data, words, entry.Emitters);
-        (entry.BrickSolidMask, entry.BrickAirMask) = BrickMasks(words);
-        return words;
+    /// <summary>A chunk's packed opacity, brick masks and light emitters, as <see cref="UploadChunk"/> needs them.
+    /// Touches nothing shared, so chunk loading does it on its worker threads (see <see cref="ChunkEntry.SetPacked"/>)
+    /// rather than leaving it to the frame that uploads the chunk.</summary>
+    internal static PackedOpacity Pack(ChunkData data)
+    {
+        var words = new uint[WordsPerChunk];
+        var emitters = new List<EmitterVoxel>();
+        PackOpacity(data, words, emitters);
+        var (solid, air) = BrickMasks(words);
+        return new PackedOpacity(words, solid, air, emitters);
     }
 
     /// <summary>Packs a chunk's opacity into <paramref name="words"/> (lx is the in-word bit, ly + 32*lz the word),

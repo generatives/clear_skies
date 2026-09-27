@@ -102,7 +102,12 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     private bool _queueTruncated;
     private readonly Dictionary<(int x, int z), int> _inFlight = new();
     private int _inFlightChunks;
-    private readonly ConcurrentQueue<((int x, int z) Column, List<(ChunkPosition Pos, ChunkData? Data)> Chunks)> _results = new();
+    private readonly ConcurrentQueue<((int x, int z) Column, List<(ChunkPosition Pos, ChunkData? Data, PackedOpacity? Packed)> Chunks)> _results = new();
+
+    /// <summary>Main-thread time spent adding finished columns per frame; the rest wait for the next frame, so a burst
+    /// of columns finishing together doesn't land on one frame.</summary>
+    private const double ApplyBudgetMs = 2.0;
+    private readonly System.Diagnostics.Stopwatch _applyClock = new();
 
     private (int x, int z) _lastCamColumn = (int.MinValue, int.MinValue);
     private bool _skippedInFlight;
@@ -209,11 +214,12 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         }
         _steps.Lap(AutosaveStep);
 
-        while (_results.TryDequeue(out var job))
+        _applyClock.Restart();
+        while (_applyClock.Elapsed.TotalMilliseconds < ApplyBudgetMs && _results.TryDequeue(out var job))
         {
             _inFlightChunks -= _inFlight[job.Column];
             _inFlight.Remove(job.Column);
-            foreach (var (pos, data) in job.Chunks)
+            foreach (var (pos, data, packed) in job.Chunks)
             {
                 if (data == null)
                 {
@@ -223,7 +229,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
                     continue;
                 }
                 // Dropped if the camera moved on while it generated, or an edit created the chunk meanwhile.
-                if (InView(pos.X, pos.Z) && !_staticVolume.IsLoaded(pos)) _staticVolume.AddChunk(pos, data);
+                if (InView(pos.X, pos.Z) && !_staticVolume.IsLoaded(pos)) _staticVolume.AddChunk(pos, data, packed);
             }
         }
         _steps.Lap(ApplyStep);
@@ -357,7 +363,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
             _inFlightChunks += work.Count;
             ThreadPool.UnsafeQueueUserWorkItem(_ =>
             {
-                var loaded = new List<(ChunkPosition, ChunkData?)>(work.Count);
+                var loaded = new List<(ChunkPosition, ChunkData?, PackedOpacity?)>(work.Count);
                 foreach (var (pos, fromSave) in work)
                 {
                     var data = _scratch.Value!;
@@ -367,12 +373,12 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
                     if (data.HasAnySolid())
                     {
                         data.IsDirty = false;
-                        loaded.Add((pos, data));
+                        loaded.Add((pos, data, GridStore.Pack(data))); // the GPU store's packing, off the main thread
                         _scratch.Value = new ChunkData();
                     }
                     else
                     {
-                        loaded.Add((pos, null));
+                        loaded.Add((pos, null, null));
                         // Generation only ever writes blocks, so an empty result leaves the buffer all air and ready to
                         // reuse; a loaded save may have overwritten more than blocks, so start that one afresh.
                         if (fromSave) _scratch.Value = new ChunkData();

@@ -8,6 +8,9 @@ namespace ClearSkies.Engine.Voxels;
 /// light colour).</summary>
 internal readonly record struct EmitterVoxel(byte Lx, byte Ly, byte Lz, byte Level, BlockId Block);
 
+/// <summary>A chunk's opacity packed for the GPU store (see <c>GridStore.Pack</c>).</summary>
+internal sealed record PackedOpacity(uint[] Words, ulong Solid, ulong Air, List<EmitterVoxel> Emitters);
+
 internal sealed class ChunkEntry
 {
     public ChunkData  Data        { get; }
@@ -50,6 +53,15 @@ internal sealed class ChunkEntry
         if (!HasEdits) { EditMin = EditMax = (lx, ly, lz); HasEdits = true; return; }
         EditMin = (System.Math.Min(EditMin.X, lx), System.Math.Min(EditMin.Y, ly), System.Math.Min(EditMin.Z, lz));
         EditMax = (System.Math.Max(EditMax.X, lx), System.Math.Max(EditMax.Y, ly), System.Math.Max(EditMax.Z, lz));
+    }
+
+    /// <summary>Takes a packing of <see cref="Data"/> as it is now.</summary>
+    public void SetPacked(PackedOpacity packed)
+    {
+        PackedOpacityWords = packed.Words;
+        (BrickSolidMask, BrickAirMask) = (packed.Solid, packed.Air);
+        Emitters.Clear();
+        Emitters.AddRange(packed.Emitters);
     }
 
     public void ClearEdits() { HasEdits = false; EditsAddedSolid = false; }

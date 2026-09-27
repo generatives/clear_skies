@@ -25,6 +25,10 @@ if (args.Contains("--benchmark"))
     return;
 }
 
+// Background (non-blocking) full collections only while the game runs: a blocking one stops every thread for tens of
+// milliseconds, a visible hitch. Needs concurrent GC, which is on by default.
+System.Runtime.GCSettings.LatencyMode = System.Runtime.GCLatencyMode.SustainedLowLatency;
+
 using var host = new EngineHost(new EngineOptions("Clear Skies", 1280, 720, LogGpuErrors: true));
 
 host.Renderer.LoadTextureAtlas(

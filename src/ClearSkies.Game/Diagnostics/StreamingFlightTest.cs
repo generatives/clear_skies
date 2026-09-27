@@ -3,6 +3,7 @@ using System.Text;
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Gui;
+using ClearSkies.Engine.Rendering.WebGpu;
 using DefaultEcs;
 using ImGuiNET;
 using Silk.NET.Maths;
@@ -22,7 +23,12 @@ public sealed class StreamingFlightTest : ISystem, IDebugUiSystem
     private readonly EntitySet _cameras;
     private readonly Action? _whenDone;
     private readonly Stopwatch _clock = new();
-    private readonly List<float> _frameMs = new();
+    // Per frame: its length, garbage-collection pause and collections in it, and GPU buffer writes queued in it.
+    private readonly List<Frame> _frames = new();
+    private readonly record struct Frame(float Ms, float GcPauseMs, int Collections, long Writes, long WriteBytes);
+    private TimeSpan _lastPause;
+    private int _lastCollections;
+    private long _lastWrites, _lastWriteBytes;
 
     private float _distance = 1500f, _speed = 60f;
     private bool _running;
@@ -53,7 +59,7 @@ public sealed class StreamingFlightTest : ISystem, IDebugUiSystem
         ImGui.SliderFloat("Speed (blocks/s)", ref _speed, 10f, 300f, "%.0f");
         if (_running)
         {
-            ImGui.Text($"Flying: {_travelled:F0} / {2 * _distance:F0} blocks, {_frameMs.Count} frames");
+            ImGui.Text($"Flying: {_travelled:F0} / {2 * _distance:F0} blocks, {_frames.Count} frames");
             if (ImGui.Button("Stop")) Finish();
         }
         else if (ImGui.Button("Start flight")) Begin();
@@ -70,8 +76,14 @@ public sealed class StreamingFlightTest : ISystem, IDebugUiSystem
         if (!_running) return;
 
         double now = _clock.Elapsed.TotalMilliseconds;
-        _frameMs.Add((float)(now - _lastFrame));
+        var pause = GC.GetTotalPauseDuration();
+        int collections = GC.CollectionCount(0); // every collection includes gen0
+        _frames.Add(new Frame((float)(now - _lastFrame), (float)(pause - _lastPause).TotalMilliseconds,
+                              collections - _lastCollections, GpuBuffer.WriteCount - _lastWrites,
+                              GpuBuffer.WriteBytes - _lastWriteBytes));
         _lastFrame = now;
+        (_lastPause, _lastCollections) = (pause, collections);
+        (_lastWrites, _lastWriteBytes) = (GpuBuffer.WriteCount, GpuBuffer.WriteBytes);
 
         var e = _cameras.GetEntities()[0];
         ref var t = ref e.Get<Transform>();
@@ -92,7 +104,9 @@ public sealed class StreamingFlightTest : ISystem, IDebugUiSystem
         _direction = Vector3D.Normalize(forward);
         _start = t.Position;
         _travelled = 0;
-        _frameMs.Clear();
+        _frames.Clear();
+        (_lastPause, _lastCollections) = (GC.GetTotalPauseDuration(), GC.CollectionCount(0));
+        (_lastWrites, _lastWriteBytes) = (GpuBuffer.WriteCount, GpuBuffer.WriteBytes);
         foreach (var timer in StepTimer.All) timer.Reset();
         for (int g = 0; g < 3; g++) _gcAtStart[g] = GC.CollectionCount(g);
         _clock.Restart();
@@ -114,21 +128,31 @@ public sealed class StreamingFlightTest : ISystem, IDebugUiSystem
     private string Report()
     {
         var sb = new StringBuilder();
-        var ms = _frameMs.Skip(1).ToArray(); // the first frame's length includes whatever ran before the start
+        var frames = _frames.Skip(1).ToArray(); // the first frame's length includes whatever ran before the start
+        var ms = frames.Select(f => f.Ms).ToArray();
         if (ms.Length == 0) return "No frames recorded.";
         var sorted = ms.OrderBy(v => v).ToArray();
         float P(double q) => sorted[(int)System.Math.Min(sorted.Length - 1, q * sorted.Length)];
         float median = P(0.5);
         // A hitch: a frame over twice the median. Its excess over the median is the time the motion visibly stalls.
-        var hitches = ms.Where(v => v > 2 * median).ToArray();
+        var hitches = frames.Where(f => f.Ms > 2 * median).ToArray();
         sb.AppendLine($"Flight test: {_distance:F0} blocks out and back at {_speed:F0} blocks/s, {ms.Length} frames " +
                       $"in {_clock.Elapsed.TotalSeconds:F1} s");
         sb.AppendLine($"  frame ms: average {ms.Average():F1}, median {median:F1}, 95% {P(0.95):F1}, 99% {P(0.99):F1}, " +
                       $"longest {sorted[^1]:F1}");
-        sb.AppendLine($"  hitches (over 2x median): {hitches.Length}, stalled {hitches.Sum(v => v - median):F0} ms in all; " +
+        sb.AppendLine($"  hitches (over 2x median): {hitches.Length}, stalled {hitches.Sum(f => f.Ms - median):F0} ms in all; " +
                       $"over 33 ms: {ms.Count(v => v > 33.3f)}, over 50 ms: {ms.Count(v => v > 50f)}");
         sb.AppendLine($"  garbage collections: gen0 {GC.CollectionCount(0) - _gcAtStart[0]}, " +
-                      $"gen1 {GC.CollectionCount(1) - _gcAtStart[1]}, gen2 {GC.CollectionCount(2) - _gcAtStart[2]}");
+                      $"gen1 {GC.CollectionCount(1) - _gcAtStart[1]}, gen2 {GC.CollectionCount(2) - _gcAtStart[2]}; " +
+                      $"paused {frames.Sum(f => f.GcPauseMs):F0} ms in all, longest in one frame {frames.Max(f => f.GcPauseMs):F1} ms");
+        var gcHitches = hitches.Where(f => f.Collections > 0).ToArray();
+        sb.AppendLine($"  hitches with a collection in them: {gcHitches.Length} of {hitches.Length}, " +
+                      $"their pauses {gcHitches.Sum(f => f.GcPauseMs):F0} ms of their {gcHitches.Sum(f => f.Ms - median):F0} ms stall");
+        sb.AppendLine($"  GPU buffer writes per frame: average {frames.Average(f => f.Writes):F0}, most {frames.Max(f => f.Writes)}; " +
+                      $"KB per frame: average {frames.Average(f => f.WriteBytes) / 1024:F0}, most {frames.Max(f => f.WriteBytes) / 1024}");
+        sb.AppendLine("  longest frames (ms, GC pause ms, GPU writes, KB written):");
+        foreach (var f in frames.OrderByDescending(f => f.Ms).Take(8))
+            sb.AppendLine($"    {f.Ms,6:F1}  {f.GcPauseMs,5:F1}  {f.Writes,6}  {f.WriteBytes / 1024,6}");
         sb.AppendLine("  longest step in one frame (ms), over 1 ms:");
         var steps = new List<(double Worst, double Average, string Name)>();
         foreach (var timer in StepTimer.All)
