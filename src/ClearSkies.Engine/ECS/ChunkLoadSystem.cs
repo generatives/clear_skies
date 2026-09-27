@@ -286,12 +286,10 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 
         _toUnload.Clear();
         _unloadAt = 0;
-        foreach (var (p, entry) in _staticVolume.All)
-        {
-            // An edit may have put blocks where there were none: it counts as a build from now on.
-            if (entry.Data.IsDirty) RecordBuild(p, hasBlocks: true);
+        // (An edit that put blocks where there were none counts as a build once its chunk is saved: by the autosave,
+        // or as it unloads. Until then the chunk is loaded, so the queue doesn't need to know.)
+        foreach (var (p, _) in _staticVolume.All)
             if (!InView(p.X, p.Z)) _toUnload.Add(p);
-        }
 
         // Forget the columns out of view: their air is re-learned on return.
         _columnsOutOfView.Clear();
@@ -326,8 +324,8 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         double start = _steps.SinceLap();
         while (_scanAt < _offsetsByDistance.Length)
         {
-            // The clock is only read every so often: most columns are ruled out in a few lookups.
-            if ((_scanAt & 63) == 0 && _steps.SinceLap() - start >= budgetMs) return;
+            // Checked every column: one seen for the first time asks the generator for its layers, which isn't cheap.
+            if (_steps.SinceLap() - start >= budgetMs) return;
             var (dx, dz) = _offsetsByDistance[_scanAt];
             int x = _lastCamColumn.x + dx, z = _lastCamColumn.z + dz;
             if (HasMissing(x, z))
@@ -523,10 +521,10 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     /// opens up gently as loading catches up.</summary>
     private void UpdateFog(Vector3D<float> camPos, float dt)
     {
-        // Nearer than the scan's position, every column is queued, loading or loaded.
+        // While a rebuild's scan is still going, the nearest column it found missing is known only up to where it has
+        // looked: until it finds one, or finishes, the target stays where it was (it only moved by a column).
         float target = _queueHead < _queue.Count ? ColumnDistance(camPos, _queue[_queueHead].x, _queue[_queueHead].z)
-                     : !_scanDone ? ColumnDistance(camPos, _lastCamColumn.x + _offsetsByDistance[_scanAt].dx,
-                                                   _lastCamColumn.z + _offsetsByDistance[_scanAt].dz)
+                     : !_scanDone ? _fogTarget
                      : _viewDistance;
         foreach (var (x, z) in _inFlight.Keys) target = MathF.Min(target, ColumnDistance(camPos, x, z));
         _fogTarget = target;
