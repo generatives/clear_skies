@@ -49,8 +49,8 @@ public struct PlayerCharacter
     private Vector3 airReferenceVelocity;
 
     // Crouch (Ctrl), Minecraft-style sneak: slower, a lower eye, and while standing on something the character won't
-    // walk off its edge. The centre may hang up to CrouchEdgeOverhang past an edge (less than the ~0.2 at which the
-    // capsule starts rolling off), and a drop of more than CrouchMaximumDrop counts as an edge.
+    // walk off its edge. The centre may hang up to CrouchEdgeOverhang past an edge or corner (less than the ~0.2 at
+    // which the capsule starts rolling off), and a drop of more than CrouchMaximumDrop counts as an edge.
     private const float CrouchSpeedScale = 0.3f;
     private const float CrouchEyeDrop = 0.3f;
     private const float CrouchEyeDropSpeed = 3f; // blocks per second
@@ -307,14 +307,14 @@ public struct PlayerCharacter
         var position = characterBody.Pose.Position;
         var targetA = Vector3.Dot(desired, axisA);
         var stopA = StoppingDistance(targetA, Vector3.Dot(velocity, axisA), dt, deceleration);
-        if (targetA != 0 && !HasGroundNear(position + axisA * stopA, axisA, axisB, up))
+        if (targetA != 0 && !HasGroundNear(position + axisA * stopA, up))
         {
             targetA = 0;
             stopA = 0;
         }
         var targetB = Vector3.Dot(desired, axisB);
         var stopB = StoppingDistance(targetB, Vector3.Dot(velocity, axisB), dt, deceleration);
-        if (targetB != 0 && !HasGroundNear(position + axisA * stopA + axisB * stopB, axisA, axisB, up))
+        if (targetB != 0 && !HasGroundNear(position + axisA * stopA + axisB * stopB, up))
             targetB = 0;
         var allowed = axisA * targetA + axisB * targetB;
         return new Vector2(Vector3.Dot(allowed, right), Vector3.Dot(allowed, forward));
@@ -336,23 +336,43 @@ public struct PlayerCharacter
         return lengthSquared > 1e-6f ? axis / MathF.Sqrt(lengthSquared) : fallback;
     }
 
-    /// <summary>True if there's something to stand on under the character centred at <paramref name="centre"/>: within
-    /// <see cref="CrouchMaximumDrop"/> below its feet, under the centre or anywhere it may overhang (a square footprint
-    /// <see cref="CrouchEdgeOverhang"/> each way along the support's axes).</summary>
-    private readonly bool HasGroundNear(Vector3 centre, Vector3 axisA, Vector3 axisB, Vector3 up)
+    /// <summary>True if there's something to stand on within <see cref="CrouchMaximumDrop"/> below the feet, anywhere
+    /// within <see cref="CrouchEdgeOverhang"/> (horizontally) of <paramref name="centre"/>: a thin disc of that radius is
+    /// swept straight down from just above the feet. A round footprint makes the allowed area around a corner a smooth
+    /// quarter circle, the same overhang as along an edge, so the character glides round corners rather than stepping.
+    /// The sweep starts clear of the floor; anything it overlaps at the start is a wall the capsule (far wider than the
+    /// disc) couldn't be pressed into, so zero-distance hits are ignored.</summary>
+    private readonly bool HasGroundNear(Vector3 centre, Vector3 up)
     {
-        var rayLength = shape.HalfLength + shape.Radius + CrouchMaximumDrop;
-        var o = CrouchEdgeOverhang;
-        return HasGroundBelow(centre, up, rayLength)
-            || HasGroundBelow(centre - axisA * o, up, rayLength) || HasGroundBelow(centre + axisA * o, up, rayLength)
-            || HasGroundBelow(centre - axisB * o, up, rayLength) || HasGroundBelow(centre + axisB * o, up, rayLength);
+        const float startAboveFeet = 0.1f;
+        const float discThickness = 0.02f;
+        var feet = centre - up * (shape.HalfLength + shape.Radius);
+        var start = feet + up * (startAboveFeet + discThickness / 2);
+        QuaternionEx.GetQuaternionBetweenNormalizedVectors(Vector3.UnitY, up, out var orientation);
+        var hitHandler = new AnyHitHandler { Ignore = bodyHandle };
+        characters.Simulation.Sweep(new Cylinder(CrouchEdgeOverhang, discThickness), new RigidPose(start, orientation),
+            new BodyVelocity(-up), startAboveFeet + CrouchMaximumDrop, characters.Simulation.BufferPool, ref hitHandler);
+        return hitHandler.Hit;
     }
 
-    private readonly bool HasGroundBelow(Vector3 origin, Vector3 up, float rayLength)
+    /// <summary>Records whether a sweep hit anything other than the character itself, ignoring overlaps at its start.</summary>
+    private struct AnyHitHandler : ISweepHitHandler
     {
-        var hitHandler = new NearestHitHandler { Ignore = bodyHandle, T = float.MaxValue };
-        characters.Simulation.RayCast(origin, -up, rayLength, ref hitHandler);
-        return hitHandler.T < float.MaxValue;
+        public BodyHandle Ignore;
+        public bool Hit;
+
+        public bool AllowTest(CollidableReference collidable) =>
+            collidable.Mobility == CollidableMobility.Static || collidable.BodyHandle != Ignore;
+
+        public bool AllowTest(CollidableReference collidable, int child) => true;
+
+        public void OnHit(ref float maximumT, float t, in Vector3 hitLocation, in Vector3 hitNormal, CollidableReference collidable)
+        {
+            Hit = true;
+            maximumT = t;
+        }
+
+        public void OnHitAtZeroT(ref float maximumT, CollidableReference collidable) { }
     }
 
     /// <summary>Follows the ship last stood on while it's still below the player; releases it (freezing its
