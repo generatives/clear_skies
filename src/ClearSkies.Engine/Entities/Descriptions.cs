@@ -110,6 +110,8 @@ public sealed class GridDescription
 /// <summary>A player's full state, carried by SpawnPlayer, produced by describing a live player, and kept in storage.</summary>
 public sealed class PlayerDescription
 {
+    internal object MemberwiseCopy() => MemberwiseClone();
+
     public PlayerId Id;
     public string Name = "";
     public bool FreeFly = true;
@@ -121,6 +123,11 @@ public sealed class PlayerDescription
     public Vector3 Velocity;
     public float Yaw, Pitch;
 
+    /// <summary>What they were standing on or riding with (a network ID; 0 for none), and where on it. A returning
+    /// player is put back there, wherever the ship has gone since.</summary>
+    public uint Support;
+    public Vector3 SupportPosition;
+
     public void Write(NetWriter w)
     {
         w.WriteGuid(Id.Value);
@@ -131,17 +138,34 @@ public sealed class PlayerDescription
         w.WriteVector3(Velocity);
         w.WriteSingle(Yaw);
         w.WriteSingle(Pitch);
+        w.WriteUInt32(Support);
+        if (Support != 0) w.WriteVector3(SupportPosition);
     }
 
-    public static PlayerDescription Read(ref NetReader r) => new()
+    public static PlayerDescription Read(ref NetReader r)
     {
-        Id = new PlayerId(r.ReadGuid()),
-        Name = r.ReadString(),
-        FreeFly = r.ReadBool(),
-        FlySpeed = r.ReadSingle(),
-        Position = r.ReadVector3(),
-        Velocity = r.ReadVector3(),
-        Yaw = r.ReadSingle(),
-        Pitch = r.ReadSingle(),
-    };
+        var d = new PlayerDescription
+        {
+            Id = new PlayerId(r.ReadGuid()),
+            Name = r.ReadString(),
+            FreeFly = r.ReadBool(),
+            FlySpeed = r.ReadSingle(),
+            Position = r.ReadVector3(),
+            Velocity = r.ReadVector3(),
+            Yaw = r.ReadSingle(),
+            Pitch = r.ReadSingle(),
+            Support = r.ReadUInt32(),
+        };
+        if (d.Support != 0) d.SupportPosition = r.ReadVector3();
+        return d;
+    }
+
+    /// <summary>Where to put the player: on their support if it's here, else their saved world position.</summary>
+    public Vector3 ResolvePosition(NetRegistry registry)
+    {
+        if (Support == 0 || !registry.TryGet(Support, out var s) || !s.Has<ECS.Transform>()) return Position;
+        ref readonly var t = ref s.Get<ECS.Transform>();
+        var rotation = new Quaternion(t.Rotation.X, t.Rotation.Y, t.Rotation.Z, t.Rotation.W);
+        return new Vector3(t.Position.X, t.Position.Y, t.Position.Z) + Vector3.Transform(SupportPosition, rotation);
+    }
 }

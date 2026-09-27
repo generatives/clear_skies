@@ -122,6 +122,13 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     private readonly List<(int x, int z)> _waiting = new();
     private readonly HashSet<ChunkPosition> _stale = new();
 
+    // Colliders-only streaming: columns wanted by colliders-only terrain interests (ships this machine simulates, away
+    // from its own view) that aren't in view. Their chunks are loaded as data for colliders, never drawn or uploaded,
+    // and don't count against the light budget.
+    private readonly HashSet<(int x, int z)> _colliderColumns = new();
+    private int _colliderRefresh;
+    private const int MaxColliderColumnJobs = 8;
+
     /// <summary>Horizontal distance from the camera at which the loaded world stops: the nearest chunk column still
     /// queued or loading, or else the view distance, eased over time. Fog should be total by here.</summary>
     public float FogDistance => _fogDistance;
@@ -215,7 +222,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
                 // Dropped if the camera moved on while it generated, or an edit created the chunk meanwhile, or it was
                 // edited while loading (it's loaded again, edit and all).
                 if (_stale.Remove(pos)) { if (!_waiting.Contains(job.Column)) _waiting.Add(job.Column); continue; }
-                if (InView(pos.X, pos.Z) && !_staticVolume.IsLoaded(pos)) _staticVolume.AddChunk(pos, data);
+                if (Wanted(pos.X, pos.Z) && !_staticVolume.IsLoaded(pos)) _staticVolume.AddChunk(pos, data);
             }
         }
 
@@ -231,6 +238,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         }
 
         Dispatch();
+        StreamColliderColumns();
         UpdateFog(camPos, dt);
     }
 
@@ -244,11 +252,11 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 
         _toUnload.Clear();
         foreach (var (p, _) in _staticVolume.All)
-            if (!InView(p.X, p.Z)) _toUnload.Add(p);
+            if (!Wanted(p.X, p.Z)) _toUnload.Add(p);
         foreach (var p in _toUnload) Unload(p);
 
         // Forget the columns out of view: their air is re-learned on return.
-        foreach (var key in _columns.Keys.Where(k => !InView(k.x, k.z)).ToList())
+        foreach (var key in _columns.Keys.Where(k => !Wanted(k.x, k.z)).ToList())
             _columns.Remove(key);
 
         _queue.Clear();
@@ -270,6 +278,69 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     }
 
     private bool InView(int x, int z) => Sq(x - _lastCamColumn.x) + Sq(z - _lastCamColumn.z) <= Sq(_viewColumns);
+
+    /// <summary>In view, or wanted for colliders.</summary>
+    private bool Wanted(int x, int z) => InView(x, z) || _colliderColumns.Contains((x, z));
+
+    /// <summary>Loads (as data only) the columns colliders-only interests want that aren't in view, and unloads the ones
+    /// no longer wanted. The wanted set is refreshed every 30 frames.</summary>
+    private void StreamColliderColumns()
+    {
+        if (++_colliderRefresh >= 30)
+        {
+            _colliderRefresh = 0;
+            var wanted = new HashSet<(int x, int z)>();
+            foreach (ref readonly Entity e in _interests.GetEntities())
+            {
+                ref readonly var interest = ref e.Get<TerrainInterest>();
+                if (interest.Kind != TerrainInterestKind.CollidersOnly) continue;
+                var p = e.Get<Transform>().Position;
+                int cx = (int)MathF.Floor(p.X / S), cz = (int)MathF.Floor(p.Z / S), r = (int)MathF.Ceiling(interest.Radius / S);
+                for (int dz = -r; dz <= r; dz++)
+                for (int dx = -r; dx <= r; dx++)
+                    if (dx * dx + dz * dz <= r * r && !InView(cx + dx, cz + dz)) wanted.Add((cx + dx, cz + dz));
+            }
+            var dropped = _colliderColumns.Where(c => !wanted.Contains(c)).ToList();
+            _colliderColumns.Clear();
+            _colliderColumns.UnionWith(wanted);
+            foreach (var (x, z) in dropped)
+            {
+                if (InView(x, z)) continue;
+                for (int layer = 0; layer < 64; layer++)
+                {
+                    var p = new ChunkPosition(x, _minY + layer, z);
+                    if (_staticVolume.IsLoaded(p)) Unload(p);
+                }
+                _columns.Remove((x, z));
+            }
+        }
+
+        int jobs = 0;
+        foreach (var col in _colliderColumns)
+        {
+            if (jobs >= MaxColliderColumnJobs || _inFlight.Count >= MaxInFlight) break;
+            if (_inFlight.ContainsKey(col)) continue;
+            var work = Missing(col.x, col.z).Select(p => (Pos: p, FromSave: _saved.Contains(p))).ToList();
+            if (work.Count == 0) continue;
+            if (work.Any(w => w.FromSave && !_chunkStore.IsReady(w.Pos)))
+            {
+                foreach (var w in work) if (w.FromSave && !_chunkStore.IsReady(w.Pos)) _chunkStore.Request(w.Pos);
+                continue;
+            }
+            DispatchColumn(col, work);
+            jobs++;
+        }
+    }
+
+    /// <summary>Chunks loaded for colliders only: out of view, never uploaded.</summary>
+    private int ColliderOnlyChunks()
+    {
+        int n = 0;
+        foreach (var (x, z) in _colliderColumns)
+            for (int layer = 0; layer < 64; layer++)
+                if (_staticVolume.IsLoaded(new ChunkPosition(x, _minY + layer, z))) n++;
+        return n;
+    }
 
     private static long Sq(int v) => (long)v * v;
 
@@ -307,7 +378,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     private int WorldBricks() => _staticVolume.Gpu.Slots.Count;
 
     /// <summary>Chunks loaded but not uploaded to the GPU store yet.</summary>
-    private int PendingChunks() => System.Math.Max(0, _staticVolume.LoadedCount - _store.WorldChunkCount);
+    private int PendingChunks() => System.Math.Max(0, _staticVolume.LoadedCount - ColliderOnlyChunks() - _store.WorldChunkCount);
 
     /// <summary>Hands queued columns to workers, one job per column, while the budget has room. When it doesn't, and
     /// the next column is nearer than the farthest loaded one, unloads that to make room.</summary>
@@ -354,34 +425,40 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
             }
 
             _queueHead++;
-            _inFlight.Add(col, work.Count);
-            _inFlightChunks += work.Count;
-            ThreadPool.UnsafeQueueUserWorkItem(_ =>
-            {
-                var loaded = new List<(ChunkPosition, ChunkData?)>(work.Count);
-                foreach (var (pos, fromSave) in work)
-                {
-                    var data = _scratch.Value!;
-                    if (!(fromSave && _chunkStore.TryLoad(pos, data)))
-                        _generator.Value!.Generate(data, pos);
-                    data.Compact(); // stone inside an island, or sky, keeps one block instead of 64 KB
-                    if (data.HasAnySolid())
-                    {
-                        data.IsDirty = false;
-                        loaded.Add((pos, data));
-                        _scratch.Value = new ChunkData();
-                    }
-                    else
-                    {
-                        loaded.Add((pos, null));
-                        // Generation only ever writes blocks, so an empty result leaves the buffer all air and ready to
-                        // reuse; a loaded save may have overwritten more than blocks, so start that one afresh.
-                        if (fromSave) _scratch.Value = new ChunkData();
-                    }
-                }
-                _results.Enqueue((col, loaded));
-            }, null);
+            DispatchColumn(col, work);
         }
+    }
+
+    /// <summary>Hands a column's missing chunks to a worker: each loaded from the store if saved, else generated.</summary>
+    private void DispatchColumn((int x, int z) col, List<(ChunkPosition Pos, bool FromSave)> work)
+    {
+        _inFlight.Add(col, work.Count);
+        _inFlightChunks += work.Count;
+        ThreadPool.UnsafeQueueUserWorkItem(_ =>
+        {
+            var loaded = new List<(ChunkPosition, ChunkData?)>(work.Count);
+            foreach (var (pos, fromSave) in work)
+            {
+                var data = _scratch.Value!;
+                if (!(fromSave && _chunkStore.TryLoad(pos, data)))
+                    _generator.Value!.Generate(data, pos);
+                data.Compact(); // stone inside an island, or sky, keeps one block instead of 64 KB
+                if (data.HasAnySolid())
+                {
+                    data.IsDirty = false;
+                    loaded.Add((pos, data));
+                    _scratch.Value = new ChunkData();
+                }
+                else
+                {
+                    loaded.Add((pos, null));
+                    // Generation only ever writes blocks, so an empty result leaves the buffer all air and ready to
+                    // reuse; a loaded save may have overwritten more than blocks, so start that one afresh.
+                    if (fromSave) _scratch.Value = new ChunkData();
+                }
+            }
+            _results.Enqueue((col, loaded));
+        }, null);
     }
 
     /// <summary>Unloads the farthest loaded columns (not being loaded) that are more than a column farther than
@@ -423,7 +500,8 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     private void BuildEvictOrder()
     {
         var columns = new HashSet<(int x, int z)>();
-        foreach (var (p, _) in _staticVolume.All) columns.Add((p.X, p.Z));
+        foreach (var (p, _) in _staticVolume.All)
+            if (!_colliderColumns.Contains((p.X, p.Z))) columns.Add((p.X, p.Z)); // colliders-only columns use no budget
         _evictOrder.Clear();
         _evictOrder.AddRange(columns);
         _evictOrder.Sort((a, b) => ColumnDistSq(b).CompareTo(ColumnDistSq(a)));
@@ -470,7 +548,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         for (int dx = -r; dx <= r; dx++)
         {
             int x = cx + dx, z = cz + dz;
-            if (!InView(x, z) || _inFlight.ContainsKey((x, z)) || Missing(x, z).Any()) return false;
+            if (!Wanted(x, z) || _inFlight.ContainsKey((x, z)) || Missing(x, z).Any()) return false;
         }
         return true;
     }

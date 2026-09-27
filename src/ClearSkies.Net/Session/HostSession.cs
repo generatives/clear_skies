@@ -36,6 +36,12 @@ public sealed class RemotePeer
     public uint PlayerEntity;
     public Vector3 Spawn;
     public readonly List<(ushort Handler, byte[] Payload, uint Target)> PendingSnapshot = new();
+
+    /// <summary>The entities this client has: those in its load window. It's sent events and snapshots for these only.</summary>
+    public readonly HashSet<uint> Known = new();
+
+    /// <summary>Entities being described for this client (they've just come into its window).</summary>
+    public readonly HashSet<uint> Requested = new();
 }
 
 /// <summary>
@@ -70,6 +76,11 @@ public sealed class HostSession : NetSession
     }
 
     public IReadOnlyCollection<RemotePeer> Peers => _peers.Values;
+
+    /// <summary>A client has the entities within this distance of its player, and forgets them past
+    /// <see cref="ForgetWindow"/>: the same load window entities stream by.</summary>
+    public float LoadWindow { get; set; } = 1000f;
+    public float ForgetWindow { get; set; } = 1100f;
     public long ChunksSent { get; private set; }
     public override bool OthersConnected => _peers.Values.Any(p => p.State != PeerState.Connected);
 
@@ -159,7 +170,7 @@ public sealed class HostSession : NetSession
                 var payload = r.ReadRaw(r.Remaining).ToArray();
                 Commands.ReceiveEvent(h.Meta, h.Handler, payload);
                 foreach (var other in Joined)
-                    if (other != peer) Send(other.Connection, packet);
+                    if (other != peer && Wants(other, h.Meta)) Send(other.Connection, packet);
                 break;
             }
             case MessageKind.Rejection:
@@ -180,6 +191,9 @@ public sealed class HostSession : NetSession
                 Send(from);
                 break;
             }
+            case MessageKind.SnapshotRequest:
+                Divergence?.ReceiveSnapshotRequest(peer.Peer, ref r);
+                break;
             case MessageKind.ChunkRequest:
                 // Answered at once, on the reliable channel: the data reflects every edit already relayed to them, and
                 // every later edit arrives after it.
@@ -235,14 +249,97 @@ public sealed class HostSession : NetSession
     {
         peer.State = PeerState.Snapshot;
         foreach (var e in _describable.GetEntities().ToArray())
-            DescribeRequest.Request(e, DescribePurpose.Send, PeerSet.Of(peer.Peer));
+            if (InWindow(peer, e, LoadWindow)) DescribeRequest.Request(e, DescribePurpose.Send, PeerSet.Of(peer.Peer));
     }
 
     private void OnDescribed(Description d)
     {
         if ((d.Request.Purpose & DescribePurpose.Send) == 0) return;
         foreach (var peerId in d.Request.SendTo.Peers)
-            if (PeerById(peerId) is { } peer) peer.PendingSnapshot.Add((d.HandlerId, d.Payload, d.NetId));
+        {
+            if (PeerById(peerId) is not { } peer) continue;
+            if (peer.State == PeerState.Snapshot) peer.PendingSnapshot.Add((d.HandlerId, d.Payload, d.NetId));
+            else if (peer.State == PeerState.Joined)
+            {
+                // Came into their window, or they asked for a resync: it goes to them as a spawn event.
+                Writer.Clear();
+                new EventHeader(d.HandlerId, Commands.StampEvent(d.NetId)).Write(Writer);
+                Writer.WriteRaw(d.Payload);
+                Send(peer.Connection);
+                peer.Known.Add(d.NetId);
+            }
+            peer.Requested.Remove(d.NetId);
+        }
+    }
+
+    // ── load windows ────────────────────────────────────────────────────────
+
+    /// <summary>Where a client's load window is centred: its player (as this machine has it), or its spawn until then.</summary>
+    private Vector3 WindowCentre(RemotePeer peer)
+    {
+        if (peer.PlayerEntity != 0 && Registry.TryGet(peer.PlayerEntity, out var p) && p.Has<Transform>())
+        {
+            var t = p.Get<Transform>().Position;
+            return new Vector3(t.X, t.Y, t.Z);
+        }
+        return peer.Spawn;
+    }
+
+    /// <summary>Whether an entity is within <paramref name="range"/> of a client's window centre. One with no position (a
+    /// global entity) is in every window.</summary>
+    private bool InWindow(RemotePeer peer, Entity e, float range)
+    {
+        if (!e.Has<Transform>()) return true;
+        var t = e.Get<Transform>().Position;
+        return Vector3.Distance(new Vector3(t.X, t.Y, t.Z), WindowCentre(peer)) <= range;
+    }
+
+    /// <summary>Whether a client has an entity (and so gets its events and snapshots).</summary>
+    public bool Knows(PeerId peer, uint entity) => PeerById(peer) is { } p && p.Known.Contains(entity);
+
+    /// <summary>Last in each tick: entities coming into a client's window are described for it; ones leaving it are
+    /// forgotten there.</summary>
+    public override void Flush()
+    {
+        foreach (var peer in Joined)
+        {
+            foreach (ref readonly var e in _describable.GetEntities())
+            {
+                uint id = e.Get<NetId>().Value;
+                if (id == peer.PlayerEntity) { peer.Known.Add(id); continue; }
+                bool known = peer.Known.Contains(id);
+                if (!known && !peer.Requested.Contains(id) && InWindow(peer, e, LoadWindow))
+                {
+                    peer.Requested.Add(id);
+                    DescribeRequest.Request(e, DescribePurpose.Send, PeerSet.Of(peer.Peer));
+                }
+                else if (known && !InWindow(peer, e, ForgetWindow))
+                {
+                    peer.Known.Remove(id);
+                    Writer.Clear();
+                    Writer.WriteByte((byte)MessageKind.Forget);
+                    Writer.WriteUInt32(id);
+                    Send(peer.Connection);
+                }
+            }
+            peer.Known.RemoveWhere(id => !Registry.IsLive(id));
+        }
+    }
+
+    /// <summary>Whether an event for <paramref name="target"/> goes to <paramref name="peer"/>: everything about the
+    /// terrain goes to everyone; anything else to clients that have it, including one it's just come into view of (a
+    /// new spawn) and the client that sent the command.</summary>
+    private bool Wants(RemotePeer peer, in EventMeta meta)
+    {
+        uint target = meta.Target;
+        if (target == NetRegistry.WorldVolume) return true;
+        if (peer.Known.Contains(target) || meta.Origin == peer.Peer) { peer.Known.Add(target); return true; }
+        if (Registry.TryGet(target, out var e) && e.Has<OwnPresence>() && InWindow(peer, e, LoadWindow))
+        {
+            peer.Known.Add(target);
+            return true;
+        }
+        return false;
     }
 
     /// <summary>Descriptions are out: send each snapshotting client theirs, then spawn their player for everyone.</summary>
@@ -257,6 +354,7 @@ public sealed class HostSession : NetSession
                 Writer.WriteRaw(payload);
                 Send(peer.Connection);
             }
+            foreach (var (_, _, target) in peer.PendingSnapshot) peer.Known.Add(target);
             peer.PendingSnapshot.Clear();
             peer.State = PeerState.Joined;
 
@@ -301,7 +399,10 @@ public sealed class HostSession : NetSession
         Writer.Clear();
         new EventHeader(handlerId, meta).Write(Writer);
         Writer.WriteRaw(payload);
-        foreach (var peer in Joined) Send(peer.Connection);
+        foreach (var peer in Joined)
+            if (Wants(peer, meta)) Send(peer.Connection);
+        if (handlerId == CommandIds.DespawnEntity)
+            foreach (var peer in _peers.Values) peer.Known.Remove(meta.Target);
     }
 
     public override void SendRejection(PeerId to, uint seq)

@@ -271,6 +271,8 @@ else
 }
 var bodySync = new ClearSkies.Net.Sync.BodySync(net, host.World, host.Physics);
 host.AddSystem(bodySync, SystemStage.Tick); // snapshots of owned bodies, every second tick
+var divergence = new ClearSkies.Net.Sync.DivergenceCheck(net, host.World); // hashes compared every 5 s
+host.AddSystem(divergence, SystemStage.Tick);
 host.AddSystem(new ClearSkies.Net.Session.NetSendSystem(net), SystemStage.Tick);
 var remoteBodies = new ClearSkies.Net.Sync.RemoteBodySystem(host.World, registry, hostClock);
 // Physics copies of bodies owned elsewhere (kinematic ships near the local player, servo copies of other players),

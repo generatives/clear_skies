@@ -25,12 +25,15 @@ public sealed class LoopbackGame : IDisposable
     public readonly HostSession HostNet;
     public readonly List<(HeadlessScene Scene, ClientSession Net)> Clients = new();
 
+    /// <summary>Where a joining player spawns: their saved SpawnPlayer command, if any, and a position.</summary>
+    public Func<PlayerId, (byte[]? Saved, Vector3 Position)> SpawnFor = _ => (null, new Vector3(0, 60, 0));
+
     public LoopbackGame(double latencyMs = 0, double lossChance = 0)
     {
         Network.LatencyMs = latencyMs;
         Network.LossChance = lossChance;
         HostNet = new HostSession(Network.Listen(), Host.Session, Host.Commands, Host.Registry, Host.World, Host.Clock, Host.Ids,
-            seed: 1337, generationChecksum: Checksum, spawnFor: _ => (null, new Vector3(0, 60, 0)));
+            seed: 1337, generationChecksum: Checksum, spawnFor: id => SpawnFor(id));
         HostNet.TimeSource = () => Network.Now;
         Host.AttachNet(HostNet);
     }
@@ -46,12 +49,20 @@ public sealed class LoopbackGame : IDisposable
         }
     }
 
+    /// <summary>Ticks every machine until <paramref name="done"/>, for at most <paramref name="max"/> ticks.</summary>
+    public bool TickUntil(Func<bool> done, int max = 600)
+    {
+        for (int i = 0; i < max && !done(); i++) Tick();
+        return done();
+    }
+
     /// <summary>A client joining: hello, welcome, then ticking until its player has arrived.</summary>
-    public (HeadlessScene Scene, ClientSession Net) Join(string name = "client", ulong checksum = Checksum, int maxTicks = 600)
+    public (HeadlessScene Scene, ClientSession Net) Join(string name = "client", ulong checksum = Checksum, int maxTicks = 600,
+                                                         PlayerId? player = null)
     {
         var transport = Network.Connect();
         var scene = new HeadlessScene(new Engine.Entities.Session(SessionRole.Host, PeerId.Host));
-        using (var join = new JoinRequest(transport, new Hello(ProtocolVersion.Current, PlayerId.New(), name, checksum)))
+        using (var join = new JoinRequest(transport, new Hello(ProtocolVersion.Current, player ?? PlayerId.New(), name, checksum)))
         {
             Welcome welcome;
             int guard = 0;

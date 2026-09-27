@@ -95,7 +95,16 @@ public sealed class SpawnGridHandler : CommandHandler<SpawnGrid>, IDescriber
         foreach (var grid in _requested.GetEntities().ToArray())
         {
             var owner = grid.Has<NetOwner>() ? grid.Get<NetOwner>().Owner : _session.LocalPeer;
-            sink.Add(grid, new SpawnGrid { Id = grid.Get<NetId>().Value, Owner = owner, Grid = DynamicGridFactory.Describe(grid, _physics) });
+            var description = DynamicGridFactory.Describe(grid, _physics);
+            var command = new SpawnGrid { Id = grid.Get<NetId>().Value, Owner = owner, Grid = description };
+            SpawnGrid? forHash = null;
+            if ((grid.Get<DescribeRequest>().Purpose & DescribePurpose.Hash) != 0)
+            {
+                // The blocks, block entity state and lock; not the body, nor the pivot derived from the blocks.
+                var bare = new GridDescription { Locked = description.Locked, Voxels = description.Voxels, Levers = description.Levers, Wheels = description.Wheels };
+                forHash = command with { Grid = bare, Owner = PeerId.None };
+            }
+            sink.Add(grid, command, forHash);
         }
     }
 }
@@ -160,11 +169,11 @@ public sealed class SpawnPlayerHandler : CommandHandler<SpawnPlayer>, IDescriber
     {
         if (_registry.TryGet(e.Id, out var existing) && existing.Has<Player>())
         {
-            PlayerFactory.Fill(existing, e.Player);
+            PlayerFactory.Fill(existing, e.Player, _registry);
             existing.Set(_session.OwnerFor(e.Owner));
             return;
         }
-        PlayerFactory.Create(_world, _physics, e.Id, _session.OwnerFor(e.Owner), e.Player);
+        PlayerFactory.Create(_world, _physics, e.Id, _session.OwnerFor(e.Owner), e.Player, _registry);
     }
 
     /// <summary>After grids, which players may stand on.</summary>
@@ -175,7 +184,12 @@ public sealed class SpawnPlayerHandler : CommandHandler<SpawnPlayer>, IDescriber
         foreach (var player in _requested.GetEntities().ToArray())
         {
             var owner = player.Has<NetOwner>() ? player.Get<NetOwner>().Owner : _session.LocalPeer;
-            sink.Add(player, new SpawnPlayer { Id = player.Get<NetId>().Value, Owner = owner, Player = PlayerFactory.Describe(player) });
+            var description = PlayerFactory.Describe(player);
+            var command = new SpawnPlayer { Id = player.Get<NetId>().Value, Owner = owner, Player = description };
+            SpawnPlayer? forHash = null;
+            if ((player.Get<DescribeRequest>().Purpose & DescribePurpose.Hash) != 0)
+                forHash = command with { Player = new PlayerDescription { Id = description.Id, Name = description.Name, FreeFly = description.FreeFly } };
+            sink.Add(player, command, forHash);
         }
     }
 }

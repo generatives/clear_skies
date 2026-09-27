@@ -73,10 +73,12 @@ public interface IDescriber
 }
 
 /// <summary>One entity's description: its spawn command, written out.</summary>
-public readonly record struct Description(Entity Entity, uint NetId, DescribeRequest Request, ushort HandlerId, byte[] Payload)
+public readonly record struct Description(Entity Entity, uint NetId, DescribeRequest Request, ushort HandlerId, byte[] Payload,
+                                          byte[]? HashPayload = null)
 {
-    /// <summary>A hash of the description, the same on every machine for the same state.</summary>
-    public ulong Hash => DescriptionHash.Of(Payload);
+    /// <summary>A hash of the description's replicated state, the same on every machine for the same state: what the
+    /// divergence check compares. It leaves out body state, which body sync only carries approximately.</summary>
+    public ulong Hash => DescriptionHash.Of(HashPayload ?? Payload);
 }
 
 /// <summary>Where describers put their descriptions; hands each to whoever wants that purpose (the network for Send,
@@ -91,13 +93,15 @@ public sealed class DescriptionSink
     /// <summary>Everything described this tick, in order.</summary>
     public event Action<Description>? Described;
 
-    public void Add<T>(Entity entity, in T spawnCommand) where T : struct, ICommand
+    /// <param name="forHash">The same, less anything that isn't exactly replicated (body state), for the hash.</param>
+    public void Add<T>(Entity entity, in T spawnCommand, T? forHash = null) where T : struct, ICommand
     {
         var handler = _commands.HandlerOf<T>();
         var request = entity.Has<DescribeRequest>() ? entity.Get<DescribeRequest>() : default;
         uint id = entity.Has<NetId>() ? entity.Get<NetId>().Value : 0;
         _claimed.Add(entity);
-        Described?.Invoke(new Description(entity, id, request, handler.Id, handler.Serialize(spawnCommand)));
+        byte[]? hashPayload = forHash is { } h ? handler.Serialize(h) : null;
+        Described?.Invoke(new Description(entity, id, request, handler.Id, handler.Serialize(spawnCommand), hashPayload));
     }
 
     internal bool Claimed(Entity entity) => _claimed.Contains(entity);

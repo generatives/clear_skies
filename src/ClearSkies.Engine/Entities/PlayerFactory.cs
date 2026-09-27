@@ -17,8 +17,9 @@ public static class PlayerFactory
     public const float EyeHeight = 0.7f;
     public const float LookSensitivity = 0.0025f;
 
-    public static Entity Create(World world, PhysicsWorld physics, uint netId, NetOwner owner, PlayerDescription d)
+    public static Entity Create(World world, PhysicsWorld physics, uint netId, NetOwner owner, PlayerDescription d, NetRegistry? registry = null)
     {
+        if (registry != null) d = WithResolvedPosition(d, registry);
         var player = world.CreateEntity();
         player.Set(new Transform { Position = PhysicsConv.ToSilk(d.Position), Rotation = Quaternion<float>.Identity, Scale = Vector3D<float>.One });
         player.Set(new MouseLookComponent { LookSensitivity = LookSensitivity });
@@ -63,9 +64,19 @@ public static class PlayerFactory
         return player;
     }
 
-    /// <summary>Puts an existing player where <paramref name="d"/> says, facing that way, in that mode.</summary>
-    public static void Fill(Entity player, PlayerDescription d)
+    private static PlayerDescription WithResolvedPosition(PlayerDescription d, NetRegistry registry)
     {
+        var position = d.ResolvePosition(registry);
+        if (position == d.Position) return d;
+        var copy = (PlayerDescription)d.MemberwiseCopy();
+        copy.Position = position;
+        return copy;
+    }
+
+    /// <summary>Puts an existing player where <paramref name="d"/> says, facing that way, in that mode.</summary>
+    public static void Fill(Entity player, PlayerDescription d, NetRegistry? registry = null)
+    {
+        if (registry != null) d = WithResolvedPosition(d, registry);
         ref var look = ref player.Get<MouseLookComponent>();
         (look.Yaw, look.Pitch) = (d.Yaw, d.Pitch);
         ref var t = ref player.Get<Transform>();
@@ -96,6 +107,9 @@ public static class PlayerFactory
             Velocity = velocity,
             Yaw = look.Yaw,
             Pitch = look.Pitch,
+            Support = player.Has<Physics.Support.Support>() && player.Get<Physics.Support.Support>() is { HasSupporter: true } s && s.Supporter.Has<NetId>()
+                ? s.Supporter.Get<NetId>().Value : 0,
+            SupportPosition = player.Has<Physics.Support.Support>() ? player.Get<Physics.Support.Support>().LocalPosition : default,
         };
     }
 }
