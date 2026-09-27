@@ -482,9 +482,7 @@ namespace ClearSkies.Engine.Physics.Characters
             orientation = Quaternion.Identity;
             if (Colliders is null)
                 return false;
-            var info = Colliders[collidable];
-            Debug.Assert(info.Kind != ClearSkies.Engine.Physics.ColliderKind.Untagged, "Collider was never tagged: create it through PhysicsWorld/CharacterControllers.");
-            if (!info.IsVoxel)
+            if (!Colliders[collidable].IsVoxel)
                 return false;
             orientation = collidable.Mobility == CollidableMobility.Static
                 ? Simulation.Statics[collidable.StaticHandle].Pose.Orientation

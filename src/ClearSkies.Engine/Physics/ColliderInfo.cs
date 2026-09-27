@@ -6,9 +6,8 @@ namespace ClearSkies.Engine.Physics;
 /// body/static in <see cref="PhysicsWorld.Colliders"/>; every collider is tagged where it's created.</summary>
 public enum ColliderKind : byte
 {
-    /// <summary>Never tagged: a collider created without going through PhysicsWorld/CharacterControllers. Readers assert on it.</summary>
-    Untagged,
-    /// <summary>Anything without a more specific kind (loose boxes, future non-voxel colliders).</summary>
+    /// <summary>Anything without a more specific kind (loose boxes, future non-voxel colliders). The zero value, so
+    /// zeroed memory reads as "not voxel".</summary>
     Other,
     /// <summary>A character capsule (see CharacterControllers); <see cref="ColliderInfo.Entity"/> is its entity, if any.</summary>
     Character,
