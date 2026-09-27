@@ -114,5 +114,9 @@ The "Game UI" debug panel shows:
 - atlas usage
 - whether the pointer is over UI
 
-Its "Clay inspector" checkbox turns on Clay's built-in element inspector, which the game UI draws. Clay's errors (duplicate
+Its "Clay inspector" checkbox turns on Clay's built-in element inspector, which the game UI draws on the right of the
+screen. It shows the element tree, and hovering or clicking a row highlights that element and shows its layout and
+config. Clay sizes the inspector in pixels, so the UI drops to scale 1 while it's open (the HUD looks small then), and
+the pointer over it is kept from gameplay. It needs the cursor free: with F1, close it with the checkbox (the ImGui menu
+bar covers its own close button); with Esc, its × button works. Clay's errors (duplicate
 ids, unbalanced elements, capacity) are logged to the console once each, prefixed `[ui]`.

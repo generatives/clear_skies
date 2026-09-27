@@ -66,6 +66,17 @@ public sealed unsafe class UiContext : ISystem, IDebugUiSystem, IDisposable
     /// <summary>Forces <see cref="Scale"/> (0 = automatic).</summary>
     public int ScaleOverride { get; set; }
 
+    /// <summary>Whether Clay's element inspector is showing. It draws on the right of the screen, takes the mouse
+    /// like <see cref="BlockPointer"/>ed UI, and switches the layout to scale 1 while open.</summary>
+    public bool InspectorOpen
+    {
+        get => _initialized && ClayNative.ClayShim_IsDebugModeEnabled() != 0; // no Clay context before Initialize
+        set => ClayNative.ClayShim_SetDebugModeEnabled(value ? 1 : 0);
+    }
+
+    private readonly bool _initialized;
+    private const string InspectorElement = "Clay__DebugView"; // the inspector's outer element in clay.h
+
     /// <summary>The screen's size in layout units this frame.</summary>
     public UiDimensions LayoutSize { get; private set; }
 
@@ -93,6 +104,7 @@ public sealed unsafe class UiContext : ISystem, IDebugUiSystem, IDisposable
 
         UpdateLayoutSize();
         ClayNative.ClayShim_Initialize(_memory, size, LayoutSize.Width, LayoutSize.Height, &OnClayError, self);
+        _initialized = true;
         ClayNative.ClayShim_SetMeasureTextFunction(&MeasureText, self);
 
         foreach (IMouse mouse in _input.Native.Mice)
@@ -127,17 +139,24 @@ public sealed unsafe class UiContext : ISystem, IDebugUiSystem, IDisposable
         if (Scale != oldScale) ClayNative.ClayShim_ResetMeasureTextCache(); // measurements depend on pixel size
         ClayNative.ClayShim_SetLayoutDimensions(LayoutSize.Width, LayoutSize.Height);
 
+        // Before the pointer update: a click on the inspector's close button closes it there, and should still be
+        // kept from gameplay.
+        bool inspector = InspectorOpen;
         UpdatePointer(dt);
 
         (_blocking, _blockingNext) = (_blockingNext, _blocking);
         _blockingNext.Clear();
         WantsMouse = false;
-        if (_blocking.Count > 0)
+        if (_blocking.Count > 0 || inspector)
         {
             ClayElementIdArray over;
             ClayNative.ClayShim_GetPointerOverIds(&over);
+            uint inspectorId = inspector ? Id(InspectorElement).Id : 0;
             for (int i = 0; i < over.Length && !WantsMouse; i++)
-                WantsMouse = _blocking.Contains(over.InternalArray[i].Id);
+            {
+                uint id = over.InternalArray[i].Id;
+                WantsMouse = _blocking.Contains(id) || (inspector && id == inspectorId);
+            }
         }
         if (WantsMouse) _input.UiWantsMouse = true;
 
@@ -151,7 +170,9 @@ public sealed unsafe class UiContext : ISystem, IDebugUiSystem, IDisposable
         var fb = _window.FramebufferSize;
         int w = System.Math.Max(1, fb.X), h = System.Math.Max(1, fb.Y);
         int auto = System.Math.Max(1, (int)System.Math.Min(w / MinLayoutWidth, h / MinLayoutHeight));
-        Scale = ScaleOverride > 0 ? ScaleOverride : auto;
+        // Clay's inspector is sized in pixels (400 wide, 16 px text) and takes its width off the layout, so it gets
+        // scale 1 while open.
+        Scale = InspectorOpen ? 1 : ScaleOverride > 0 ? ScaleOverride : auto;
         LayoutSize = new UiDimensions((float)w / Scale, (float)h / Scale);
     }
 
@@ -389,9 +410,9 @@ public sealed unsafe class UiContext : ISystem, IDebugUiSystem, IDisposable
         ImGui.Text($"Render commands: {LastRenderCommands}, quads: {LastQuads}, draw calls: {LastDrawCalls}");
         ImGui.Text($"Atlas: {Atlas.SpriteCount} sprites, {Atlas.UsedHeight * 100 / Atlas.Size}% of {Atlas.Size}x{Atlas.Size} used");
         ImGui.Text($"Pointer over blocking UI: {WantsMouse}");
-        bool debugView = ClayNative.ClayShim_IsDebugModeEnabled() != 0;
-        if (ImGui.Checkbox("Clay inspector", ref debugView)) ClayNative.ClayShim_SetDebugModeEnabled(debugView ? 1 : 0);
-        ImGui.TextDisabled("Clay's element inspector, drawn by the game UI on the right; needs the cursor free (F1). It is 400 units wide, so a scale override of 1 leaves more room.");
+        bool inspector = InspectorOpen;
+        if (ImGui.Checkbox("Clay inspector", ref inspector)) InspectorOpen = inspector;
+        ImGui.TextDisabled("Clay's element inspector, drawn by the game UI on the right; needs the cursor free (F1). The UI runs at scale 1 while it's open.");
     }
 
     public void Dispose()
