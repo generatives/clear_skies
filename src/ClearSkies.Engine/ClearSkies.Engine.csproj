@@ -19,6 +19,15 @@
     <PackageReference Include="Silk.NET.WebGPU.Native.WGPU" Version="2.23.0" />
     <PackageReference Include="Silk.NET.Windowing" Version="2.23.0" />
     <PackageReference Include="StbImageSharp" Version="2.30.16" />
+    <PackageReference Include="StbTrueTypeSharp" Version="1.26.13" />
+  </ItemGroup>
+
+  <!-- The native Clay library (UI layout, see native/clay/README.md), prebuilt per platform. Each platform's file has
+       its own name (clay.dll, libclay.so, libclay.dylib), so all of them go straight into the output folder, where
+       [DllImport("clay")] finds the right one; this also flows on to the game project's output. -->
+  <ItemGroup>
+    <None Include="..\..\native\clay\bin\*\*.dll;..\..\native\clay\bin\*\*.so;..\..\native\clay\bin\*\*.dylib"
+          Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" Visible="false" />
   </ItemGroup>
 
 </Project>

@@ -54,6 +54,12 @@ public readonly struct BlockDef
     /// hides a neighbour's.
     public string?         Model          { get; init; }
 
+    /// Inventory icon: a PNG relative to the game's Resources/Icons folder, shown for this block in the UI (e.g. the
+    /// hotbar). Model blocks get theirs baked from <see cref="Model"/> by tools/ClearSkies.IconBaker; rerun it after
+    /// changing a model. Null lets the UI make one: the block's <see cref="Texture"/>, or a swatch of its
+    /// <see cref="Color"/>.
+    public string?         IconTexture    { get; init; }
+
     /// Entity-block hook: non-null makes every placed block of this type also get its own ECS entity while its
     /// chunk is loaded (created and destroyed by <see cref="ChunkVolume"/>, a Hierarchy child of the chunk
     /// entity, carrying a <see cref="ECS.BlockRef"/> back to its voxel). The hook attaches the block's starting

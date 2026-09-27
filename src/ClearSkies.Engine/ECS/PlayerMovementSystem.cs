@@ -11,7 +11,8 @@ namespace ClearSkies.Engine.ECS;
 /// <summary>
 /// Pre-physics: cursor capture, mouse-look, the FreeFly/Walking mode toggle (V), and per-mode
 /// movement input. FreeFly teleports <see cref="Transform.Position"/> directly, unchanged from
-/// the old free-fly-only camera. Walking instead feeds WASD/Shift/Space into the character's
+/// the old free-fly-only camera; E and Q raise and lower its speed by <see cref="FlySpeedStep"/> (Ctrl triples it
+/// while held). Walking instead feeds WASD/Shift/Space into the character's
 /// motion goals (<see cref="Physics.Characters.PlayerCharacter.UpdateCharacterGoals"/>) — actual
 /// movement happens inside the physics step via the ported BepuPhysics2 character-controller
 /// constraint (see Physics/Characters/); <see cref="CharacterCameraSyncSystem"/> reads the
@@ -90,6 +91,9 @@ public sealed class PlayerMovementSystem : ISystem
         }
     }
 
+    /// <summary>Blocks per second each E/Q press adds or removes from the free-fly speed; also its minimum.</summary>
+    public const float FlySpeedStep = 5f;
+
     private void UpdateFreeFly(ref Transform t, ref FreeFlyController c, float dt)
     {
         var forward = Vec.Rotate(t.Rotation, new Vector3D<float>(0, 0, -1));
@@ -107,8 +111,12 @@ public sealed class PlayerMovementSystem : ISystem
         if (_input.IsKeyDown(Key.ShiftLeft) || _input.IsKeyDown(Key.ShiftRight)) move -= up;
         if (_input.IsKeyDown(Key.ControlLeft) || _input.IsKeyDown(Key.ControlRight)) speedUp = true;
         
-        c.MoveSpeed += _input.ScrollDelta.Y * 0.5f; // scroll wheel adjusts speed up/down
-        c.MoveSpeed = MathF.Max(2f, c.MoveSpeed);
+        if (_input.WasKeyPressed(Key.E) || _input.WasKeyPressed(Key.Q))
+        {
+            float step = _input.WasKeyPressed(Key.E) ? FlySpeedStep : -FlySpeedStep;
+            c.MoveSpeed = MathF.Max(FlySpeedStep, c.MoveSpeed + step);
+            Console.WriteLine($"[fly] speed: {c.MoveSpeed:0} blocks/s");
+        }
 
         float speed = speedUp ? c.MoveSpeed * 3f : c.MoveSpeed;
 
