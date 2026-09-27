@@ -56,6 +56,17 @@ ui.AddFont(UiFont.Load(Path.Combine(AppContext.BaseDirectory, "Resources", "Font
 ui.Atlas.LoadSprites(Path.Combine(AppContext.BaseDirectory, "Resources", "Ui")); // the HUD's; name.9.png is nine-sliced
 host.AddSystem(ui, SystemStage.Input);
 
+// Fixed ticks: gameplay and physics run in the Simulation stage, once per 1/60 s tick (0 or more times a frame, see
+// TickClock). Mouse-look runs per frame before them; presses are collected per frame and handed to the next tick as
+// the player's PlayerInput, which is all tick systems read. Moving things are drawn between their last two ticks.
+host.AddSystem(new LookInputSystem(host.World, host.Input), SystemStage.Input);
+var inputSample = new InputSampleSystem(host.World, host.Input);
+host.AddSystem(inputSample, SystemStage.Input); // latches the frame's input
+var interpolation = new TickInterpolationSystem(host.World, host.Time);
+var hierarchy = new HierarchyTransformSystem(host.World);
+host.AddSystem(hierarchy, SystemStage.Simulation);
+host.AddSystem(inputSample, SystemStage.Simulation); // ...and hands it to the tick
+
 var physicsBody = new PhysicsBodySystem(host.World, host.Physics);
 
 // Streaming budget: how much GPU light storage the loaded world may use, in MB (3 KB per 8³ brick of surface). Chunks
@@ -82,41 +93,48 @@ var gridStore = new GridStore(host.Context, (int)((long)LightBudgetMb * 1024 * 1
                               ChunkLoadSystem.WorldIndexDim(ViewDistance));
 var chunkLoadSystem = new ChunkLoadSystem(host.World, staticVolume, gridStore, generatorFactory,
                                           ViewDistance, MinChunkY, "Hearts16");
-host.AddSystem(chunkLoadSystem, SystemStage.Logic);
 host.Renderer.AttachGridStore(gridStore);
-host.AddSystem(physicsBody, SystemStage.Logic);
+host.AddSystem(physicsBody, SystemStage.Simulation);
 
 // Character controller (ported from BepuPhysics2's own Demos/Demos/Characters — see
 // Physics/Characters/): motion goals (WASD/jump/mode toggle) must be set before the physics step
 // so Simulation.Timestep's CollisionsDetected analysis sees them this same tick.
-host.AddSystem(new PlayerMovementSystem(host.World, host.Input), SystemStage.Logic);
-// After the player's own movement, which it overrides while flying. --flight-test flies once the world has loaded, then quits.
-bool flightTest = args.Contains("--flight-test");
-host.AddSystem(new StreamingFlightTest(host, flightTest, flightTest ? () => host.Window.Native.Close() : null),
-               SystemStage.Logic);
+host.AddSystem(new PlayerMovementSystem(host.World), SystemStage.Simulation);
 
 // Milestone 5: airship flight (velocity control law + Fan/Buoyant propulsion, merged into one system —
 // see AirshipFlightSystem), before the physics step so its impulses are integrated this same tick.
 var gridPilot = new GridPilotSystem(host.World, host.Input, host.Physics, staticVolume, physicsBody);
-var airshipFlight = new AirshipFlightSystem(host.World, host.Physics, host.Input);
-host.AddSystem(airshipFlight, SystemStage.Logic);
+var airshipFlight = new AirshipFlightSystem(host.World, host.Physics);
+host.AddSystem(airshipFlight, SystemStage.Simulation);
 
-host.AddSystem(host.Physics, SystemStage.Logic); // steps the simulation once bodies/impulses for this frame are in
-host.AddSystem(new PhysicsTransformSyncSystem(host.World, host.Physics), SystemStage.Logic); // body poses -> Transform
-host.AddSystem(new HierarchyTransformSystem(host.World), SystemStage.Logic); // e.g. volume Transforms -> chunk Transforms
-host.AddSystem(new CharacterCameraSyncSystem(host.World), SystemStage.Logic); // reads the capsule's post-physics pose into Transform
-host.AddSystem(gridPilot, SystemStage.Logic);
+host.AddSystem(host.Physics, SystemStage.Simulation); // one step, once bodies/impulses for this tick are in
+host.AddSystem(new PhysicsTransformSyncSystem(host.World, host.Physics), SystemStage.Simulation); // body poses -> Transform
+host.AddSystem(hierarchy, SystemStage.Simulation); // e.g. volume Transforms -> chunk Transforms
+host.AddSystem(new CharacterCameraSyncSystem(host.World), SystemStage.Simulation); // reads the capsule's post-physics pose into Transform
+host.AddSystem(interpolation, SystemStage.Simulation); // records this tick's poses
+
+// Per frame, after the ticks: where to draw things between the last two ticks (children follow), then stream terrain
+// around the view.
+// Moves the camera once a frame (not per tick) while flying; before the interpolation, which then draws it there.
+// --flight-test flies once the world has loaded, then quits.
+bool flightTest = args.Contains("--flight-test");
+host.AddSystem(new StreamingFlightTest(host, flightTest, flightTest ? () => host.Window.Native.Close() : null),
+               SystemStage.Frame);
+host.AddSystem(interpolation, SystemStage.Frame);
+host.AddSystem(hierarchy, SystemStage.Frame);
+host.AddSystem(chunkLoadSystem, SystemStage.Frame);
+host.AddSystem(gridPilot, SystemStage.Frame);
 var playerInput = new PlayerInputSystem(host.World, host.Input, meshSystem, host.Renderer, gridSelection);
-host.AddSystem(playerInput, SystemStage.Logic);
+host.AddSystem(playerInput, SystemStage.Frame);
 host.AddSystem(new HudUi(ui, host.Input, playerInput, gridPilot, host.Renderer.Atlas,
-                         Path.Combine(AppContext.BaseDirectory, "Resources", "Icons")), SystemStage.Logic); // crosshair, hotbar
-host.AddSystem(new LeverControlSystem(host.World), SystemStage.Logic); // after PlayerInputSystem, whose clicks drag levers
-host.AddSystem(new SteeringWheelControlSystem(host.World), SystemStage.Logic); // ...and turn wheels
+                         Path.Combine(AppContext.BaseDirectory, "Resources", "Icons")), SystemStage.Frame); // crosshair, hotbar
+host.AddSystem(new LeverControlSystem(host.World), SystemStage.Frame); // after PlayerInputSystem, whose clicks drag levers
+host.AddSystem(new SteeringWheelControlSystem(host.World), SystemStage.Frame); // ...and turn wheels
 var gridPersistence = new GridPersistenceSystem(host.World, meshSystem, host.Physics, gridSelection);
-host.AddSystem(gridPersistence, SystemStage.Logic);
+host.AddSystem(gridPersistence, SystemStage.Frame);
 // The airship-related debug panels above (Pilot/Flight/Save-Load) drew into their own separate "Systems"
 // menu windows; combined here into one "Airship" window so they read as one feature.
-host.AddSystem(new AirshipDebugPanel(gridPilot, airshipFlight, gridPersistence), SystemStage.Logic);
+host.AddSystem(new AirshipDebugPanel(gridPilot, airshipFlight, gridPersistence), SystemStage.Frame);
 host.AddSystem(new LambdaSystem(() =>
 {
     if (host.Input.WasKeyPressed(Key.Tab))
@@ -124,7 +142,7 @@ host.AddSystem(new LambdaSystem(() =>
         host.Renderer.WireframeMode = !host.Renderer.WireframeMode;
         Console.WriteLine($"[debug] wireframe: {host.Renderer.WireframeMode}");
     }
-}), SystemStage.Logic);
+}), SystemStage.Frame);
 
 host.AddSystem(new GpuResidencySystem(host.World, staticVolume, gridStore), SystemStage.PreRender);
 host.AddSystem(new GpuLightSystem(host.World, staticVolume, host.Context, gridStore), SystemStage.PreRender);

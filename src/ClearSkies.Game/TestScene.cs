@@ -2,6 +2,7 @@ using System.Numerics;
 using BepuPhysics.Collidables;
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.ECS;
+using ClearSkies.Engine.Input;
 using ClearSkies.Engine.Physics.Characters;
 using ClearSkies.Engine.Rendering;
 using Silk.NET.Maths;
@@ -76,6 +77,8 @@ public static class TestScene
             airControlForceScale: 1f, airControlSpeedScale: 1f, airBrakeScale: 0.5f, entity: cam);
         cam.Set(new CharacterControllerComponent { Character = character, EyeHeight = 0.7f });
         cam.Set(new CharacterModeComponent { FreeFly = true }); // start in FreeFly — zero regression risk vs. today
+        cam.Set(new PlayerInput()); // filled each tick by InputSampleSystem
+        cam.Set(new InterpolatedTransform { PositionOnly = true }); // moved by ticks, turned per frame by mouse-look
 
         host.Input.CursorCaptured = false; // the F1 debug menu starts open, and F1 frees the cursor with it
         return camTransform.Position;

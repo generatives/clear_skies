@@ -1,74 +1,50 @@
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Input;
 using ClearSkies.Engine.Math;
+using ClearSkies.Engine.Physics.Characters;
 using DefaultEcs;
-using Silk.NET.Input;
 using Silk.NET.Maths;
 using PhysVec = System.Numerics.Vector3;
 
 namespace ClearSkies.Engine.ECS;
 
 /// <summary>
-/// Pre-physics: cursor capture, mouse-look, the FreeFly/Walking mode toggle (V), and per-mode
-/// movement input. FreeFly teleports <see cref="Transform.Position"/> directly, unchanged from
-/// the old free-fly-only camera; E and Q raise and lower its speed by <see cref="FlySpeedStep"/> (Ctrl triples it
-/// while held). Walking instead feeds WASD/Shift/Space into the character's
-/// motion goals (<see cref="Physics.Characters.PlayerCharacter.UpdateCharacterGoals"/>) — actual
-/// movement happens inside the physics step via the ported BepuPhysics2 character-controller
-/// constraint (see Physics/Characters/); <see cref="CharacterCameraSyncSystem"/> reads the
-/// resulting body pose back into <see cref="Transform"/> after the physics step.
+/// Each tick, before physics: the FreeFly/Walking mode toggle (V) and per-mode movement, all from the tick's
+/// <see cref="PlayerInput"/>. FreeFly moves <see cref="Transform.Position"/> directly; E and Q raise and lower its speed
+/// by <see cref="FlySpeedStep"/> (Ctrl triples it while held). Walking instead feeds WASD/Shift/Space into the
+/// character's motion goals (<see cref="PlayerCharacter.UpdateCharacterGoals"/>) — actual movement happens inside the
+/// physics step via the ported BepuPhysics2 character-controller constraint (see Physics/Characters/);
+/// <see cref="CharacterCameraSyncSystem"/> reads the resulting body pose back into <see cref="Transform"/> after it.
+/// Mouse-look is per frame, in <see cref="LookInputSystem"/>.
 ///
-/// Must run before <c>host.Physics</c> in Program.cs so this frame's motion goals are set before
-/// Simulation.Timestep's CollisionsDetected analysis runs (same precedent as AirshipFlightSystem).
+/// Must run before <c>host.Physics</c> in the tick so this tick's motion goals are set before Simulation.Timestep's
+/// CollisionsDetected analysis runs (same precedent as AirshipFlightSystem).
 /// </summary>
 public sealed class PlayerMovementSystem : ISystem
 {
-    private readonly EntitySet    _cameras;
-    private readonly InputManager _input;
+    private readonly EntitySet _players;
 
-    public PlayerMovementSystem(World world, InputManager input)
+    public PlayerMovementSystem(World world)
     {
-        _cameras = world.GetEntities()
-            .With<Transform>().With<CameraComponent>().With<MouseLookComponent>()
+        _players = world.GetEntities()
+            .With<Transform>().With<PlayerInput>()
             .With<FreeFlyController>().With<CharacterControllerComponent>().With<CharacterModeComponent>()
             .AsSet();
-        _input = input;
     }
 
     public void Update(float dt)
     {
-        // Esc unlocks the cursor; clicking the window re-locks it.
-        if (_input.WasKeyPressed(Key.Escape) && _input.CursorCaptured)
-            _input.CursorCaptured = false;
-        else if (_input.WasMouseButtonPressed(MouseButton.Left) && !_input.CursorCaptured)
-        {
-            _input.CursorCaptured = true;
-            // Swallow this click so the same press that recaptures the cursor doesn't also place a block.
-            _input.ConsumeMouseButtonPress(MouseButton.Left);
-        }
-
-        foreach (ref readonly Entity e in _cameras.GetEntities())
+        foreach (ref readonly Entity e in _players.GetEntities())
         {
             // Skip entirely while GridPilotSystem is flying the camera along a piloted grid — it
-            // handles its own look input and overwrites Transform each frame post-physics.
+            // handles its own look input and overwrites Transform each frame.
             if (e.Has<CameraGridFollowComponent>()) continue;
 
-            ref var t    = ref e.Get<Transform>();
-            ref var look = ref e.Get<MouseLookComponent>();
-
-            // While using an Interactive block the mouse moves the control, not the view (see BlockInteraction).
-            if (_input.CursorCaptured && !e.Has<LookLockedComponent>())
-            {
-                var delta = _input.MouseDelta;
-                look.Yaw -= delta.X * look.LookSensitivity;
-                look.Pitch -= delta.Y * look.LookSensitivity;
-                float limit = MathF.PI / 2f - 0.01f;
-                look.Pitch = System.Math.Clamp(look.Pitch, -limit, limit);
-                t.Rotation = Quaternion<float>.CreateFromYawPitchRoll(look.Yaw, look.Pitch, 0f);
-            }
+            ref var t = ref e.Get<Transform>();
+            ref readonly var input = ref e.Get<PlayerInput>();
 
             ref var mode = ref e.Get<CharacterModeComponent>();
-            if (_input.WasKeyPressed(Key.V))
+            if (input.WasPressed(PlayerButtons.ToggleFly))
                 mode.FreeFly = !mode.FreeFly;
 
             // Using an Interactive block holds the player still: no walking, jumping or flying until they let go.
@@ -81,44 +57,46 @@ public sealed class PlayerMovementSystem : ISystem
                 // switching back to Walking always resumes from the visible position instead of
                 // falling from a stale one.
                 cc.Character.TeleportTo(new PhysVec(t.Position.X, t.Position.Y - cc.EyeHeight, t.Position.Z));
-                if (!frozen) UpdateFreeFly(ref t, ref e.Get<FreeFlyController>(), dt);
+                if (!frozen) UpdateFreeFly(ref t, ref e.Get<FreeFlyController>(), input, dt);
             }
             else
             {
                 var forward = Vec.Rotate(t.Rotation, new Vector3D<float>(0, 0, -1));
-                cc.Character.UpdateCharacterGoals(_input, new PhysVec(forward.X, forward.Y, forward.Z), dt, frozen);
+                cc.Character.UpdateCharacterGoals(CharacterKeys(input), new PhysVec(forward.X, forward.Y, forward.Z), dt, frozen);
             }
         }
     }
 
+    /// <summary>The walking character's keys from a tick's input.</summary>
+    public static PlayerCharacter.CharacterInput CharacterKeys(in PlayerInput input) => new()
+    {
+        Move = input.Move,
+        Sprint = input.IsHeld(PlayerButtons.Down),
+        Crouch = input.IsHeld(PlayerButtons.Crouch),
+        JumpPressed = input.WasPressed(PlayerButtons.Up),
+    };
+
     /// <summary>Blocks per second each E/Q press adds or removes from the free-fly speed; also its minimum.</summary>
     public const float FlySpeedStep = 5f;
 
-    private void UpdateFreeFly(ref Transform t, ref FreeFlyController c, float dt)
+    private static void UpdateFreeFly(ref Transform t, ref FreeFlyController c, in PlayerInput input, float dt)
     {
         var forward = Vec.Rotate(t.Rotation, new Vector3D<float>(0, 0, -1));
         var right   = Vec.Rotate(t.Rotation, new Vector3D<float>(1, 0, 0));
         var up      = new Vector3D<float>(0, 1, 0);
 
-        bool speedUp = false;
+        var move = forward * input.Axis(PlayerButtons.Forward, PlayerButtons.Back)
+                 + right * input.Axis(PlayerButtons.Right, PlayerButtons.Left)
+                 + up * input.Axis(PlayerButtons.Up, PlayerButtons.Down);
 
-        var move = Vector3D<float>.Zero;
-        if (_input.IsKeyDown(Key.W)) move += forward;
-        if (_input.IsKeyDown(Key.S)) move -= forward;
-        if (_input.IsKeyDown(Key.D)) move += right;
-        if (_input.IsKeyDown(Key.A)) move -= right;
-        if (_input.IsKeyDown(Key.Space)) move += up;
-        if (_input.IsKeyDown(Key.ShiftLeft) || _input.IsKeyDown(Key.ShiftRight)) move -= up;
-        if (_input.IsKeyDown(Key.ControlLeft) || _input.IsKeyDown(Key.ControlRight)) speedUp = true;
-        
-        if (_input.WasKeyPressed(Key.E) || _input.WasKeyPressed(Key.Q))
+        if (input.WasPressed(PlayerButtons.Next) || input.WasPressed(PlayerButtons.Previous))
         {
-            float step = _input.WasKeyPressed(Key.E) ? FlySpeedStep : -FlySpeedStep;
+            float step = input.WasPressed(PlayerButtons.Next) ? FlySpeedStep : -FlySpeedStep;
             c.MoveSpeed = MathF.Max(FlySpeedStep, c.MoveSpeed + step);
             Console.WriteLine($"[fly] speed: {c.MoveSpeed:0} blocks/s");
         }
 
-        float speed = speedUp ? c.MoveSpeed * 3f : c.MoveSpeed;
+        float speed = input.IsHeld(PlayerButtons.Crouch) ? c.MoveSpeed * 3f : c.MoveSpeed;
 
         if (move.LengthSquared > 1e-6f)
             t.Position += Vector3D.Normalize(move) * speed * dt;

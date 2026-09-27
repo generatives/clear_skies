@@ -31,6 +31,30 @@ public struct MouseLookComponent
     public float Yaw;
     public float Pitch;
     public float LookSensitivity;
+
+    /// <summary>How far the ship the player stands on turned the view (yaw, pitch) in the latest tick. The ship is
+    /// drawn between its last two ticks, so the view is drawn that much behind too (see
+    /// <see cref="TickInterpolationSystem"/>). Set with <see cref="TurnWith"/>.</summary>
+    public float TurnYaw { readonly get; private set; }
+    public float TurnPitch { readonly get; private set; }
+    private bool _turned;
+
+    /// <summary>Turns the view with its support this tick.</summary>
+    public void TurnWith(float yaw, float pitch)
+    {
+        Yaw += yaw;
+        Pitch += pitch;
+        TurnYaw = yaw;
+        TurnPitch = pitch;
+        _turned = true;
+    }
+
+    /// <summary>End of a tick: a tick that didn't turn the view leaves no turn to draw.</summary>
+    internal void EndTick()
+    {
+        if (!_turned) TurnYaw = TurnPitch = 0f;
+        _turned = false;
+    }
 }
 
 /// <summary>Tags the camera entity with its walking character body. See

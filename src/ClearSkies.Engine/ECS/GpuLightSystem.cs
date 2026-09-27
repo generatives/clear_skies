@@ -184,7 +184,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         _phaseTimer.Start();
         _lit.Clear();
         foreach (ref readonly Entity e in _grids.GetEntities())
-            AddLit(e.Get<ChunkGrid>().Volume, e.Get<Transform>());
+            AddLit(e.Get<ChunkGrid>().Volume, e.DrawnPose()); // lit where it's drawn
         _store.UploadGrids();
         _phaseTimer.Lap(0);
 

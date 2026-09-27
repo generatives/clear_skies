@@ -3,16 +3,14 @@ using System.Numerics;
 using BepuPhysics;
 using BepuPhysics.Collidables;
 using BepuUtilities;
-using ClearSkies.Engine.Input;
-using Silk.NET.Input;
 
 namespace ClearSkies.Engine.Physics.Characters;
 
 /// <summary>
 /// The player's character: a capsule body registered with <see cref="CharacterControllers"/>, which owns its physics —
 /// support detection, the grounded motion constraint, jumping (buffered, with coyote time), extra fall gravity and air
-/// control relative to the ship last stood on. This side turns this project's <see cref="InputManager"/> keys into the
-/// character's goals each frame (target velocity, view direction, jump requests), and adds Minecraft-style crouching:
+/// control relative to the ship last stood on. This side turns the tick's keys into the
+/// character's goals each tick (target velocity, view direction, jump requests), and adds Minecraft-style crouching:
 /// slower, a lower eye, and a guard that won't walk off edges. Started as an adaptation of BepuPhysics2's
 /// Demos/Demos/Characters/CharacterInput.cs (v2.4.0).
 /// </summary>
@@ -92,30 +90,8 @@ public struct PlayerCharacter
         return true;
     }
 
-    /// <summary>Reads WASD + Shift(sprint) + Ctrl(crouch) + Space(jump) and updates the character's goals for this
-    /// frame. <paramref name="viewDirectionWorld"/> is the camera's world-space forward vector (unflattened — the
-    /// surface-relative projection happens inside CharacterControllers). <paramref name="dt"/> is the render frame's
-    /// duration (it only eases the crouch eye; the physics runs on the simulation's own steps). <paramref name="frozen"/>
-    /// ignores the keys (no walking or jumping) while still standing, falling and riding whatever the character stands
-    /// on as usual — e.g. while the player is using a lever.</summary>
-    public void UpdateCharacterGoals(InputManager input, Vector3 viewDirectionWorld, float dt, bool frozen = false)
-    {
-        var keys = new CharacterInput();
-        if (!frozen)
-        {
-            if (input.IsKeyDown(Key.W)) keys.Move += new Vector2(0, 1);
-            if (input.IsKeyDown(Key.S)) keys.Move += new Vector2(0, -1);
-            if (input.IsKeyDown(Key.A)) keys.Move += new Vector2(-1, 0);
-            if (input.IsKeyDown(Key.D)) keys.Move += new Vector2(1, 0);
-            keys.Sprint = input.IsKeyDown(Key.ShiftLeft) || input.IsKeyDown(Key.ShiftRight);
-            keys.Crouch = input.IsKeyDown(Key.ControlLeft) || input.IsKeyDown(Key.ControlRight);
-            keys.JumpPressed = input.WasKeyPressed(Key.Space);
-        }
-        UpdateCharacterGoals(keys, viewDirectionWorld, dt, frozen);
-    }
-
-    /// <summary>The keys <see cref="UpdateCharacterGoals(InputManager, Vector3, float, bool)"/> reads, for driving the
-    /// character without an <see cref="InputManager"/>. <see cref="Move"/> is (strafe right, forward), any length.</summary>
+    /// <summary>The keys that drive the character this tick (see <c>PlayerMovementSystem.CharacterKeys</c>).
+    /// <see cref="Move"/> is (strafe right, forward), any length.</summary>
     public struct CharacterInput
     {
         public Vector2 Move;
@@ -124,6 +100,11 @@ public struct PlayerCharacter
         public bool JumpPressed;
     }
 
+    /// <summary>Updates the character's goals for this tick from its keys. <paramref name="viewDirectionWorld"/> is the
+    /// camera's world-space forward vector (unflattened — the surface-relative projection happens inside
+    /// CharacterControllers). <paramref name="dt"/> is the tick's duration (it only eases the crouch eye).
+    /// <paramref name="frozen"/> ignores the keys (no walking or jumping) while still standing, falling and riding
+    /// whatever the character stands on as usual — e.g. while the player is using a lever.</summary>
     public void UpdateCharacterGoals(CharacterInput keys, Vector3 viewDirectionWorld, float dt, bool frozen = false)
     {
         var movementDirection = keys.Move;

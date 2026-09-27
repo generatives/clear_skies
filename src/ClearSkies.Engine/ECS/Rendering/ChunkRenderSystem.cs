@@ -123,7 +123,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
             ref readonly var rd = ref e.Get<ChunkRenderData>();
             if (rd.Mesh == null && rd.Models.Length == 0) continue;
 
-            ref readonly var t = ref e.Get<Transform>();
+            var t = e.DrawnPose(); // ships are drawn where they're drawn, between ticks
             Mat4 model;
             if (t.Rotation == Quaternion<float>.Identity && t.Scale == Vector3D<float>.One)
             {

@@ -35,7 +35,7 @@ public sealed class ModelRenderSystem : IRenderSystem, IDebugUiSystem
             ref readonly var rm = ref e.Get<RenderedModel>();
             var gpuModel = rm.Model;
             if (gpuModel is null) continue; // default-constructed: nothing to draw
-            var model = e.Get<Transform>().ToMatrix();
+            var model = e.DrawnPose().ToMatrix();
             if (!frame.Frustum.Intersects(model, gpuModel.BoundsMin, gpuModel.BoundsMax)) continue;
 
             var pose = rm.ComputePose();

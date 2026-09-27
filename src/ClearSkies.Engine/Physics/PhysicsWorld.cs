@@ -19,19 +19,16 @@ namespace ClearSkies.Engine.Physics;
 /// terrain colliders. All public coordinates use System.Numerics (the Bepu domain); callers convert
 /// via <see cref="PhysicsConv"/>.
 ///
-/// Doubles as the <see cref="ISystem"/> that steps the simulation: <see cref="Update"/> advances it
-/// on a fixed timestep decoupled from the variable frame rate, accumulating frame delta and stepping
-/// in fixed increments (capped per frame to avoid a "spiral of death" after a long stall). Register it
-/// with <c>AddSystem(host.Physics, SystemStage.Logic)</c> at the point in the Logic stage where physics
-/// should step — after systems that create bodies or apply impulses, before systems that read poses.
+/// Doubles as the <see cref="ISystem"/> that steps the simulation: <see cref="Step"/> advances it by exactly one fixed
+/// step, and it's scheduled in the Simulation stage, which runs once per fixed tick (see <see cref="TickClock"/>, which also
+/// caps the ticks a frame runs). Register it with <c>AddSystem(host.Physics, SystemStage.Simulation)</c> at the point in the
+/// tick where physics should step — after systems that create bodies or apply impulses, before systems that read poses.
 /// </summary>
 public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
 {
-    private const int MaxStepsPerFrame = 5;
-
-    // Debug-panel stats: fixed steps run last frame and smoothed cost of one step.
+    // Debug-panel stats: steps run so far and smoothed cost of one step.
     private readonly System.Diagnostics.Stopwatch _stepTimer = new();
-    private int _stepsLastFrame;
+    private long _steps;
     private double _stepMs;
 
     public Simulation Simulation { get; }
@@ -54,7 +51,6 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
 
     private readonly BufferPool _pool = new();
     private readonly float _fixedStep;
-    private float _accumulator;
 
     public PhysicsWorld(Vector3 gravity, float fixedStep)
     {
@@ -70,23 +66,16 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
         Characters.Colliders = Colliders;
     }
 
-    public void Update(float dt)
+    /// <summary>The Simulation stage's call: one step (the tick's duration is always the fixed step).</summary>
+    public void Update(float dt) => Step();
+
+    /// <summary>Advances the simulation by exactly one fixed step.</summary>
+    public void Step()
     {
-        _accumulator += dt;
-
-        int steps = 0;
-        while (_accumulator >= _fixedStep && steps < MaxStepsPerFrame)
-        {
-            _stepTimer.Restart();
-            Simulation.Timestep(_fixedStep);
-            _stepMs += 0.1 * (_stepTimer.Elapsed.TotalMilliseconds - _stepMs);
-            _accumulator -= _fixedStep;
-            steps++;
-        }
-        _stepsLastFrame = steps;
-
-        // If we hit the cap and still have a large backlog, drop it rather than chase forever.
-        if (_accumulator > _fixedStep) _accumulator = 0f;
+        _stepTimer.Restart();
+        Simulation.Timestep(_fixedStep);
+        _stepMs += 0.1 * (_stepTimer.Elapsed.TotalMilliseconds - _stepMs);
+        _steps++;
     }
 
     // ── Debug UI ────────────────────────────────────────────────────────────────
@@ -94,7 +83,7 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
 
     public void DrawDebugUi()
     {
-        ImGuiNET.ImGui.Text($"Steps last frame: {_stepsLastFrame} (max {MaxStepsPerFrame}), one step: {_stepMs:F2} ms");
+        ImGuiNET.ImGui.Text($"Steps: {_steps} (one per tick), one step: {_stepMs:F2} ms");
         ImGuiNET.ImGui.Text($"Awake bodies: {Simulation.Bodies.ActiveSet.Count}, statics: {Simulation.Statics.Count}, " +
                             $"constraints: {Simulation.Solver.CountConstraints()}");
         ref var set = ref Simulation.Bodies.ActiveSet;
