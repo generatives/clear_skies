@@ -25,8 +25,16 @@ public sealed class StepTimer
     private int _next;
     private bool _open;
 
+    /// <summary>Every step timer made, so a report (the streaming flight test) can list the worst steps of all.</summary>
+    public static IReadOnlyList<StepTimer> All => _all;
+    private static readonly List<StepTimer> _all = new();
+
+    /// <summary>Whose steps these are (the system's debug name), for reports that list several timers.</summary>
+    public string Owner { get; init; } = "";
+
     public StepTimer(params string[] names)
     {
+        lock (_all) _all.Add(this);
         _names = names;
         _frame = new double[names.Length];
         _average = new double[names.Length];

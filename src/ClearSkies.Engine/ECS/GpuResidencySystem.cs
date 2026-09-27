@@ -20,7 +20,7 @@ public sealed class GpuResidencySystem : ISystem, IDebugUiSystem
 {
     // CPU time of each step, and how many chunks went each way, for the debug panel.
     private const int RemovedStep = 0, ChooseStep = 1, UploadStep = 2;
-    private readonly StepTimer _steps = new("Releasing removed chunks and grids", "Choosing chunks to upload", "Uploading");
+    private readonly StepTimer _steps = new("Releasing removed chunks and grids", "Choosing chunks to upload", "Uploading") { Owner = "GPU residency" };
     private int _released, _uploaded, _mostReleased;
 
     public string DebugName => "GPU residency";

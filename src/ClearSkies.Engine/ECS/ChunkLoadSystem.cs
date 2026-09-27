@@ -194,7 +194,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     // CPU time of each step, for the debug panel: which one a hitch while streaming came from.
     private const int AutosaveStep = 0, ApplyStep = 1, UnloadStep = 2, QueueStep = 3, DispatchStep = 4, EvictStep = 5, FogStep = 6;
     private readonly StepTimer _steps = new("Autosave", "Adding finished columns", "Rebuild: unloading out of view",
-                                            "Rebuild: queueing columns", "Dispatching jobs", "Evicting far columns", "Fog");
+                                            "Rebuild: queueing columns", "Dispatching jobs", "Evicting far columns", "Fog") { Owner = "Chunk Loading" };
 
     public void Update(float dt)
     {

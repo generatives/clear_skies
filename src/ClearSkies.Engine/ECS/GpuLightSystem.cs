@@ -87,7 +87,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     /// <summary>CPU time of each phase of a frame's lighting, for the debug panel.</summary>
     private readonly StepTimer _phaseTimer = new(
         "Poses + grid upload", "Gathering lamps", "Marking changes", "Choosing relit bricks", "Bounce holds",
-        "Choosing bounce bricks", "Chunk lists", "Dispatch + upload");
+        "Choosing bounce bricks", "Chunk lists", "Dispatch + upload") { Owner = "GPU lighting" };
 
     /// <summary>A grid with a pose this frame.</summary>
     private readonly record struct LitGrid(ChunkVolume Vol, GridHandle Handle, Mat4 VoxelToWorld,

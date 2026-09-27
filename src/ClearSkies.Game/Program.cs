@@ -86,6 +86,10 @@ host.AddSystem(physicsBody, SystemStage.Logic);
 // Physics/Characters/): motion goals (WASD/jump/mode toggle) must be set before the physics step
 // so Simulation.Timestep's CollisionsDetected analysis sees them this same tick.
 host.AddSystem(new PlayerMovementSystem(host.World, host.Input), SystemStage.Logic);
+// After the player's own movement, which it overrides while flying. --flight-test flies once the world has loaded, then quits.
+bool flightTest = args.Contains("--flight-test");
+host.AddSystem(new StreamingFlightTest(host.World, flightTest, flightTest ? () => host.Window.Native.Close() : null),
+               SystemStage.Logic);
 
 // Milestone 5: airship flight (velocity control law + Fan/Buoyant propulsion, merged into one system —
 // see AirshipFlightSystem), before the physics step so its impulses are integrated this same tick.
