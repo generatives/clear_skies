@@ -309,6 +309,8 @@ public class SupportTests
         }
         float turned = player.Get<MouseLookComponent>().Yaw - yawBefore;
         Assert.InRange(turned, 0.25f, 0.31f);
+        // The last tick's turn is kept, for drawing the view turning with the drawn ship.
+        Assert.Equal(0.01f, player.Get<MouseLookComponent>().TurnYaw, 3);
     }
 
     [Fact]
