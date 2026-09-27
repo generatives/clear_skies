@@ -83,11 +83,27 @@ public sealed class EngineHost : IDisposable
     {
         _systems.Add((system, stage));
         _systemMs.Add(0.0);
+        _lastSystemMs.Add(0.0);
         if (system is IDebugUiSystem debugUi) Gui.RegisterDebugUi(debugUi);
     }
 
     // Per-system CPU time (ms, smoothed), parallel to _systems.
     private readonly List<double> _systemMs = new();
+    private readonly List<double> _lastSystemMs = new(); // ...and in the last frame alone
+
+    /// <summary>Raised at the end of every frame, after it was presented: diagnostics that look at single frames
+    /// (the streaming flight test) read <see cref="LastSystemMs"/> here.</summary>
+    public event Action? FrameEnded;
+
+    public int SystemCount => _systems.Count;
+    public string SystemName(int i) => $"{_systems[i].system.GetType().Name} ({_systems[i].stage})";
+
+    /// <summary>A system's CPU time (ms) in the frame just ended.</summary>
+    public double LastSystemMs(int i) => _lastSystemMs[i];
+
+    /// <summary>CPU time (ms) opening (camera, acquire) and closing (ImGui, submit, present) the frame just ended.</summary>
+    public double LastFrameBeginMs { get; private set; }
+    public double LastFrameEndMs { get; private set; }
     private readonly System.Diagnostics.Stopwatch _systemTimer = new();
     private const double TimingSmoothing = 0.05;
 
@@ -114,14 +130,17 @@ public sealed class EngineHost : IDisposable
         // swapchain image) they're skipped entirely, and End still closes ImGui's frame.
         _systemTimer.Restart();
         bool open = Frame.TryBegin();
-        _frameBeginMs += TimingSmoothing * (_systemTimer.Elapsed.TotalMilliseconds - _frameBeginMs);
+        LastFrameBeginMs = _systemTimer.Elapsed.TotalMilliseconds;
+        _frameBeginMs += TimingSmoothing * (LastFrameBeginMs - _frameBeginMs);
         if (open)
             for (var stage = SystemStage.RenderWorld; stage <= SystemStage.RenderHud; stage++)
                 RunRenderStage(stage, Frame.Context);
 
         _systemTimer.Restart();
         Frame.End();
-        _frameEndMs += TimingSmoothing * (_systemTimer.Elapsed.TotalMilliseconds - _frameEndMs);
+        LastFrameEndMs = _systemTimer.Elapsed.TotalMilliseconds;
+        _frameEndMs += TimingSmoothing * (LastFrameEndMs - _frameEndMs);
+        FrameEnded?.Invoke();
     }
 
     // Smoothed CPU time of opening (camera uniform, swapchain acquire) and closing (ImGui, submit, present) the frame.
@@ -151,8 +170,11 @@ public sealed class EngineHost : IDisposable
         }
     }
 
-    private void RecordTime(int i) =>
-        _systemMs[i] += TimingSmoothing * (_systemTimer.Elapsed.TotalMilliseconds - _systemMs[i]);
+    private void RecordTime(int i)
+    {
+        _lastSystemMs[i] = _systemTimer.Elapsed.TotalMilliseconds;
+        _systemMs[i] += TimingSmoothing * (_lastSystemMs[i] - _systemMs[i]);
+    }
 
     /// <summary>Debug panel listing each system's CPU time per frame, slowest first. GPU work isn't timed
     /// directly: if the frame takes much longer than the CPU total, the difference is GPU time (or vsync),
@@ -226,6 +248,7 @@ public sealed class EngineHost : IDisposable
 
     public void Dispose()
     {
+        BackgroundWork.Stop(TimeSpan.FromSeconds(5)); // before freeing what running jobs may be using
         Physics.Dispose();
         Gui.Dispose();
         Renderer.Dispose();

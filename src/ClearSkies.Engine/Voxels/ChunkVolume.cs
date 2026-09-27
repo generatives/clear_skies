@@ -163,10 +163,13 @@ public class ChunkVolume
 
     // ── Chunk lifecycle ────────────────────────────────────────────────────
 
-    internal ChunkEntry AddChunk(ChunkPosition pos, ChunkData data)
+    /// <param name="packed">The chunk's opacity packed for the GPU store already (off the main thread), if it
+    /// has been; otherwise its upload packs it.</param>
+    internal ChunkEntry AddChunk(ChunkPosition pos, ChunkData data, PackedOpacity? packed = null)
     {
         var entity = _world.CreateEntity();
         var entry = new ChunkEntry(data, entity, this, pos);
+        if (packed != null) entry.SetPacked(packed);
         Hierarchy.SetParent(entity, Root, ChunkLocal(pos));
         entity.Set(new Chunk() { Entry = entry });
         entry.Entity.Set(new NeedsRemeshFlag());
