@@ -12,14 +12,16 @@ public readonly record struct BlockHit(Entity Root, ChunkVolume Volume, Vector3D
 public static class BlockRaycast
 {
     /// <summary>Casts in each volume's own space; rotation preserves length, so hit distances compare directly.
-    /// <paramref name="volumes"/> must be queried with at least <c>With&lt;ChunkGrid&gt;().With&lt;Transform&gt;()</c>.</summary>
-    public static BlockHit? Nearest(EntitySet volumes, Vector3D<float> origin, Vector3D<float> dir, float reach)
+    /// <paramref name="volumes"/> must be queried with at least <c>With&lt;ChunkGrid&gt;().With&lt;Transform&gt;()</c>.
+    /// With <paramref name="drawn"/>, volumes are where they're drawn (for a ray from the drawn camera: a moving ship's
+    /// true pose is up to a tick ahead of its drawing); otherwise at their true poses, for a ray from a tick.</summary>
+    public static BlockHit? Nearest(EntitySet volumes, Vector3D<float> origin, Vector3D<float> dir, float reach, bool drawn = false)
     {
         BlockHit? best = null;
         foreach (ref readonly Entity e in volumes.GetEntities())
         {
             var volume = e.Get<ChunkGrid>().Volume;
-            ref readonly var root = ref e.Get<Transform>();
+            var root = drawn ? e.DrawnPose() : e.Get<Transform>();
             var lo = volume.WorldToVoxel(root, origin);
             var ld = Vec.Rotate(Vec.Conjugate(root.Rotation), dir);
             if (VoxelRaycaster.Cast(volume, lo, ld, reach, out var b, out var n, out var d) && (best is null || d < best.Value.Distance))
