@@ -69,13 +69,27 @@ fn applyHaze(color: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
     return mix(color, mix(camera.haze.rgb, skyColor(normalize(d)), k), k);
 }
 
-// Hazes a lit surface colour at worldPos, then fades it into the sky behind it by horizontal distance: streaming
-// loads whole chunk columns, so the loaded world ends only sideways, where the fog is total (see
-// SkySettings.FogDistance).
+// Hazes a lit surface colour at worldPos, then fades it into what fs_sky draws behind it (the sky, or the cloud sea
+// below) by horizontal distance: streaming loads whole chunk columns, so the loaded world ends only sideways, where
+// the fog is total (see SkySettings.FogDistance). Fading into the sky colour alone would leave islands showing as
+// blue shapes over the white sea as they load in.
 fn applyFog(color: vec3<f32>, worldPos: vec3<f32>) -> vec3<f32> {
     let d = worldPos - camera.camPos.xyz;
     let f = smoothstep(camera.fog.x, camera.fog.y, length(d.xz));
-    return mix(applyHaze(color, d), skyColor(normalize(d)), f);
+    let hazed = applyHaze(color, d);
+    if (f <= 0.0) { return hazed; } // only the fog band pays for tracing the sea
+    return mix(hazed, background(normalize(d)).rgb, f);
+}
+
+// What fs_sky draws along world direction dir (unit), without the sun disc: the sky (w = 0), or the cloud sea if the
+// view ray meets it (w = 1).
+fn background(dir: vec3<f32>) -> vec4<f32> {
+    let sky = skyColor(dir);
+    if (camera.sea.y > 0.0) {
+        let hit = cloudSea(camera.camPos.xyz, dir);
+        if (hit.w >= 0.0) { return vec4<f32>(mix(applyHaze(hit.rgb, dir * hit.w), sky, smoothstep(20000.0, 40000.0, hit.w)), 1.0); }
+    }
+    return vec4<f32>(sky, 0.0);
 }
 
 // Background: one full-screen triangle at the far plane, drawn after the world with depth test LessEqual so it only
@@ -98,12 +112,8 @@ fn fs_sky(in: SkyOut) -> @location(0) vec4<f32> {
     let dir   = normalize(in.dir);
     let toSun = dot(dir, -camera.sunDir.xyz);
     let disc  = smoothstep(0.9992, 0.9996, toSun) * camera.sunDir.w;
-    var c = skyColor(dir) + vec3<f32>(1.0, 0.95, 0.85) * disc;
-    if (camera.sea.y > 0.0) {
-        let hit = cloudSea(camera.camPos.xyz, dir);
-        if (hit.w >= 0.0) { c = mix(applyHaze(hit.rgb, dir * hit.w), skyColor(dir), smoothstep(20000.0, 40000.0, hit.w)); }
-    }
-    return vec4<f32>(c, 1.0);
+    let b = background(dir);
+    return vec4<f32>(b.rgb + vec3<f32>(1.0, 0.95, 0.85) * disc * (1.0 - b.w), 1.0);
 }
 
 // ── Cloud sea ───────────────────────────────────────────────────────────────────────────────────────────────────

@@ -58,12 +58,12 @@ var physicsBody = new PhysicsBodySystem(host.World, host.Physics);
 // are loaded closest-first until it's spent (see ChunkLoadSystem); only surfaces use it, so solid stone inside an
 // island is nearly free. The GPU store adds a fifth on top for headroom and ships. --light-budget-mb N overrides it,
 // e.g. for a software renderer whose small max buffer size can't hold it (the store also shrinks it to fit).
-int LightBudgetMb = 1024;
+int LightBudgetMb = 2048;
 int budgetArg = Array.IndexOf(args, "--light-budget-mb");
 if (budgetArg >= 0 && budgetArg + 1 < args.Length) LightBudgetMb = int.Parse(args[budgetArg + 1]);
 // View distance: how far out (in blocks, horizontally) islands are streamed, if the budget reaches. The GPU's world
 // index covers it both ways at 2 bytes per chunk position (~48 MB at 10000). --view-distance N overrides it.
-float ViewDistance = 10000f;
+float ViewDistance = 2000f;
 int viewArg = Array.IndexOf(args, "--view-distance");
 if (viewArg >= 0 && viewArg + 1 < args.Length) ViewDistance = float.Parse(args[viewArg + 1], System.Globalization.CultureInfo.InvariantCulture);
 const int MinChunkY = 0; // streamed layers are -8..55 (blocks -256..1792): HeartGrid's WorldBottom..WorldTop
@@ -77,7 +77,7 @@ SkySettings.CloudSeaAltitude = HeartGrid.CloudSeaAltitude; // below its lowest i
 var gridStore = new GridStore(host.Context, (int)((long)LightBudgetMb * 1024 * 1024 / GridStore.SlotBytes),
                               ChunkLoadSystem.WorldIndexDim(ViewDistance));
 var chunkLoadSystem = new ChunkLoadSystem(host.World, staticVolume, gridStore, generatorFactory,
-                                          ViewDistance, MinChunkY, "Hearts15");
+                                          ViewDistance, MinChunkY, "Hearts16");
 host.AddSystem(chunkLoadSystem, SystemStage.Logic);
 host.Renderer.AttachGridStore(gridStore);
 host.AddSystem(physicsBody, SystemStage.Logic);
@@ -141,13 +141,13 @@ if (camArg >= 0 && camArg + 1 < args.Length)
     cameraOverride = args[camArg + 1].Split(',').Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
 var camSpawn = TestScene.Build(host, seed, cameraOverride, HeartSpawn(seed));
 
-// Spawn: standing off south of the cluster nearest the origin, a little above its ground, looking
-// at it.
+// Spawn: over a wide, flat stretch of plains 18 km east of the origin (found by scanning seed 1337 for flat, well-
+// covered lowland), 60 blocks above the terrain surface there (which no piece's top reaches), looking north across it.
 static (Vector3D<float> Position, float Yaw, float Pitch)? HeartSpawn(ulong seed)
 {
-    if (!HeartGrid.TryFindCluster(seed, 0f, 0f, out float x, out float z)) return null;
-    float y = ContinentTerrain.For(seed).Height(x, z) + 100f;
-    return (new Vector3D<float>(x, y, z - 500f), MathF.PI, -0.2f);
+    const float x = 18240f, z = 1088f;
+    float y = ContinentTerrain.For(seed).Height(x, z) + 60f;
+    return (new Vector3D<float>(x, y, z), MathF.PI, -0.15f);
 }
 
 // Ray-traced lighting prototype test ship (plan doc, task 4): a small solid hull with a Lamp exposed on
