@@ -16,7 +16,6 @@ public struct InterpolatedTransform
     public bool PositionOnly;
 
     internal Transform Previous, Current;
-    internal Vector3D<float> Pivot;
     internal bool Started;
 }
 
@@ -56,9 +55,8 @@ public static class Drawing
 /// are drawn behind by the same fraction of that turn as the ship, so the two stay together between ticks. A tick that
 /// didn't turn the view clears the last one's turn.
 ///
-/// Dynamic grids get an <see cref="InterpolatedTransform"/> automatically. When a grid's blocks change, its pivot (the
-/// centre of mass) moves and its Transform with it while the blocks stay put; the previous pose is moved the same way
-/// so the edit doesn't make the grid twitch.
+/// Dynamic grids get an <see cref="InterpolatedTransform"/> automatically. A grid's Transform is its block space, which
+/// edits don't move (only its body moves, to the new centre of mass), so an edit doesn't make the grid twitch.
 /// </summary>
 public sealed class TickInterpolationSystem : IStagedSystem
 {
@@ -104,13 +102,6 @@ public sealed class TickInterpolationSystem : IStagedSystem
 
             s.Previous = s.Current;
             s.Current = t;
-            if (e.Has<ChunkGrid>())
-            {
-                var pivot = e.Get<ChunkGrid>().Volume.Pivot;
-                if (pivot != s.Pivot)
-                    s.Previous.Position += Vec.Rotate(s.Previous.Rotation, pivot - s.Pivot);
-                s.Pivot = pivot;
-            }
         }
     }
 
@@ -192,7 +183,6 @@ public sealed class TickInterpolationSystem : IStagedSystem
     private static void Restart(ref InterpolatedTransform s, in Transform t, Entity e)
     {
         s.Previous = s.Current = t;
-        s.Pivot = e.Has<ChunkGrid>() ? e.Get<ChunkGrid>().Volume.Pivot : default;
         s.Started = true;
     }
 

@@ -25,8 +25,8 @@ public class ShipDrawingTests
     /// <summary>What was drawn over five seconds of flight (flying east and turning), once things have settled.</summary>
     private sealed class Flight
     {
-        /// <summary>The ship as the client draws it, less where steady motion puts it by then: a frame that took
-        /// longer should move it further, so only changes in this are jitter.</summary>
+        /// <summary>The ship's centre of mass as the client draws it, less where steady motion puts it by then: a frame
+        /// that took longer should move it further, so only changes in this are jitter.</summary>
         public readonly List<float> ClientShipError = new();
         /// <summary>The client's player (their camera), in the ship's space as the client draws it.</summary>
         public readonly List<Vector3> CameraOnDeck = new();
@@ -71,7 +71,8 @@ public class ShipDrawingTests
             if (frame < 300) continue;
 
             ref readonly var drawnCopy = ref copy.Get<Transform>(); // a copy is drawn where its Transform is
-            flight.ClientShipError.Add(drawnCopy.Position.X - Speed * (float)(now + clientNoise));
+            var drawnCentre = copy.Get<PhysicsBodyComponent>().BodyPosition(drawnCopy); // the turn carries its block origin round
+            flight.ClientShipError.Add(drawnCentre.X - Speed * (float)(now + clientNoise));
             var toCopy = Quaternion.Conjugate(Q(drawnCopy.Rotation));
             flight.CameraOnDeck.Add(Vector3.Transform(V(crew.DrawnPose().Position) - V(drawnCopy.Position), toCopy));
             var hostShip = ship.DrawnPose();

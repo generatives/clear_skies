@@ -195,15 +195,17 @@ public sealed class GridPilotSystem : ISystem
         if (_pilotedGridRoot.IsAlive && _camera.IsAlive) _camera.Set(CameraLocal());
     }
 
-    /// <summary>The camera in the grid's own space (about its centre of mass): the look turns it relative to the grid,
-    /// and in third person it sits behind and above along that look, orbiting the grid as the mouse moves.</summary>
+    /// <summary>The camera in the grid's block space, about its centre of mass (its body's offset, which edits move):
+    /// the look turns it relative to the grid, and in third person it sits behind and above along that look, orbiting
+    /// the grid as the mouse moves.</summary>
     private LocalTransform CameraLocal()
     {
         var look = Quaternion<float>.CreateFromYawPitchRoll(_localYaw, _localPitch, 0f);
         var offset = _cameraMode == GridCameraMode.ThirdPerson
             ? new Vector3D<float>(0, ThirdPersonUp, _cameraDistance)
             : new Vector3D<float>(0, LockedUp, 0);
-        return new LocalTransform { Position = Vec.Rotate(look, offset), Rotation = look, Scale = Vector3D<float>.One };
+        var centre = _pilotedGridRoot.Has<PhysicsBodyComponent>() ? _pilotedGridRoot.Get<PhysicsBodyComponent>().Offset : default;
+        return new LocalTransform { Position = centre + Vec.Rotate(look, offset), Rotation = look, Scale = Vector3D<float>.One };
     }
 
     // ── debug UI ─────────────────────────────────────────────────────────────
@@ -226,7 +228,8 @@ public sealed class GridPilotSystem : ISystem
             if (e.Has<PhysicsBodyComponent>())
             {
                 var body = e.Get<PhysicsBodyComponent>().Body;
-                var pos = e.Get<Transform>().Position;
+                var (bodyPos, _) = _physics.GetBodyPose(body); // the centre of mass
+                var pos = PhysicsConv.ToSilk(bodyPos);
                 var vel = _physics.GetBodyLinearVelocity(body);
                 ImGui.Text($"Position: ({pos.X:0.00}, {pos.Y:0.00}, {pos.Z:0.00})");
                 ImGui.Text($"Velocity: ({vel.X:0.00}, {vel.Y:0.00}, {vel.Z:0.00})  |{vel.Length():0.00}|");

@@ -20,7 +20,7 @@ public class CrewTests
 
     /// <summary>A host with a ship (an 8×8 deck with a lever, a second lever on its axis and a wheel) and a player on it,
     /// and a client whose player walks on the same deck.</summary>
-    private static (LoopbackGame game, Entity ship, HeadlessScene client, Entity crew) ShipWithCrew(double latencyMs = 50)
+    internal static (LoopbackGame game, Entity ship, HeadlessScene client, Entity crew) ShipWithCrew(double latencyMs = 50)
     {
         var game = new LoopbackGame(latencyMs);
         var voxels = new List<GridVoxel>();
@@ -51,7 +51,7 @@ public class CrewTests
         game.Tick(120);
         game.Host.Physics.SetBodyLinearVelocity(ship.Get<PhysicsBodyComponent>().Body, Vector3.Zero);
         game.Tick(30);
-        var truth = ship.Get<Transform>().Position;
+        var (truth, _) = game.Host.Physics.GetBodyPose(ship.Get<PhysicsBodyComponent>().Body);
         var (followed, _) = client.Physics.GetBodyPose(copy.Get<PhysicsBodyComponent>().Body);
         Assert.True(truth.X > 11);
         Assert.True(MathF.Abs(followed.X - truth.X) < 0.05f, $"copy at {followed.X}, ship at {truth.X}");
@@ -135,7 +135,7 @@ public class CrewTests
         Assert.Equal(PhysicsMode.ServoFollower, copy.Get<PhysicsPresence>().Mode);
         Assert.True(copy.Has<ServoBody>());
         var (onDeck, _) = game.Host.Physics.GetBodyPose(copy.Get<ServoBody>().Body);
-        Assert.InRange(onDeck.Y, 50.8f, 52.5f); // resting on the deck (its top is at 50.5)
+        Assert.InRange(onDeck.Y, 50.7f, 51f); // resting on the deck: its top is at 50 (the levers and wheel make the blocks two high, centred at 50)
 
         // Terrain right where the crew member walks: their copy goes into it (their own machine keeps them out of it).
         for (int x = 10; x < 14; x++) for (int z = 10; z < 14; z++) game.Host.WorldVolume.SetBlock(x, 40, z, BlockId.Stone);
@@ -149,10 +149,12 @@ public class CrewTests
     /// <summary>Where a grid's voxel (0,0,0) is drawn.</summary>
     private static Vector3 DrawnOrigin(Entity grid)
     {
-        ref readonly var t = ref grid.Get<Transform>();
-        return GridFrame.Origin(grid, new Vector3(t.Position.X, t.Position.Y, t.Position.Z),
-                                new Quaternion(t.Rotation.X, t.Rotation.Y, t.Rotation.Z, t.Rotation.W));
+        var p = grid.Get<Transform>().Position;
+        return new Vector3(p.X, p.Y, p.Z);
     }
+
+    /// <summary>Where a grid's centre of mass is in its block space.</summary>
+    private static Vector3D<float> Com(Entity grid) => grid.Get<PhysicsBodyComponent>().Offset;
 
     [Theory]
     [InlineData(true)]
@@ -164,7 +166,7 @@ public class CrewTests
         uint id = ship.Get<NetId>().Value;
         var copy = client.Registry.Find(id)!.Value;
         var before = DrawnOrigin(copy);
-        var pivot = GridFrame.Pivot(copy);
+        var com = Com(copy);
         var editor = byTheCrew ? crew : game.Host.World.GetEntities().With<LocalPlayer>().AsEnumerable().Single();
         (byTheCrew ? client : game.Host).Commands.Send(new EditVoxels { Volume = id, Editor = editor.Get<NetId>().Value,
             Ops = new[] { VoxelOp.FillBox(new(1, 2, 1), 1, BlockId.Stone, BlockOrientation.Upright) } });
@@ -174,7 +176,7 @@ public class CrewTests
             float off = Vector3.Distance(DrawnOrigin(copy), before);
             Assert.True(off < 0.01f, $"{i} ticks after the edit the copy is drawn {off} blocks off");
         }
-        Assert.True(Vector3.Distance(GridFrame.Pivot(copy), pivot) > 0.5f); // the edit did move its centre of mass
+        Assert.True(Vector3D.Distance(Com(copy), com) > 0.5f); // the edit did move its centre of mass
     }
 
     [Fact]
@@ -187,9 +189,9 @@ public class CrewTests
             Ops = new[] { VoxelOp.FillBox(new(1, 2, 1), 1, BlockId.Stone, BlockOrientation.Upright) } });
         game.Tick(60);
         var copy = client.Registry.Find(id)!.Value;
-        var a = ship.Get<ChunkGrid>().Volume.Pivot;
-        var b = copy.Get<ChunkGrid>().Volume.Pivot;
-        Assert.True(Vector3D.Distance(a, b) < 1e-3f, $"host pivot {a}, client pivot {b}");
+        var a = Com(ship);
+        var b = Com(copy);
+        Assert.True(Vector3D.Distance(a, b) < 1e-3f, $"host centre of mass {a}, client centre of mass {b}");
         // And the copy sits where the ship is.
         var (followed, _) = client.Physics.GetBodyPose(copy.Get<PhysicsBodyComponent>().Body);
         var (truth, _) = game.Host.Physics.GetBodyPose(ship.Get<PhysicsBodyComponent>().Body);

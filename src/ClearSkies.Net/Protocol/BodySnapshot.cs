@@ -72,8 +72,8 @@ public struct BodySnapshot
 
 /// <summary>Smallest-three quaternion encoding: the index of the largest component in 2 bits, and the other three,
 /// each within ±1/√2, in 20 bits each (64 bits in all). Good to about a millionth of a radian: coarser (10 bits, 0.1°)
-/// made a ship wobble visibly, turning everything seen from its deck with it, and moving its centre of mass, which is
-/// placed through the rotation.</summary>
+/// made a ship wobble visibly, turning everything seen from its deck with it, and moving its blocks and body, which
+/// are placed through the rotation from its block origin.</summary>
 public static class QuaternionCodec
 {
     private const float Range = 0.70710678f;

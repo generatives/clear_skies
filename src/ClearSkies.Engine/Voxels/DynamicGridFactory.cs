@@ -14,8 +14,8 @@ public static class DynamicGridFactory
     /// <summary>
     /// Creates a grid with network ID <paramref name="netId"/> from <paramref name="description"/>. Its chunks mesh,
     /// light and get a body once its presence layers are decided (ChunkMeshSystem, GpuLightSystem, PhysicsBodySystem).
-    /// The grid's Transform is the description's body pose, with the description's pivot, so the grid stands exactly
-    /// where it was described; PhysicsBodySystem then keeps the pivot at the true centre of mass without moving it.
+    /// The grid's Transform (its block space) is the description's pose, so the grid stands exactly where it was
+    /// described; PhysicsBodySystem then puts its body at the centre of mass within it.
     /// </summary>
     public static Entity Create(World world, uint netId, GridDescription description)
     {
@@ -38,7 +38,6 @@ public static class DynamicGridFactory
         var volume = entity.Get<ChunkGrid>().Volume;
         foreach (var pos in volume.All.Select(c => c.Key).ToList()) volume.RemoveChunk(pos);
 
-        volume.Pivot = new Vector3D<float>(description.Pivot.X, description.Pivot.Y, description.Pivot.Z);
         foreach (var v in description.Voxels) volume.SetBlock(v.X, v.Y, v.Z, v.Id, v.Orientation);
         foreach (var (cell, value) in description.Levers)
             if (volume.TryGetBlockEntity(cell.X, cell.Y, cell.Z, out var lever) && lever.Has<Lever>()) lever.Get<Lever>().Value = value;
@@ -53,22 +52,22 @@ public static class DynamicGridFactory
         entity.Set(new BodyStateOverride { LinearVelocity = b.LinearVelocity, AngularVelocity = b.AngularVelocity });
     }
 
-    /// <summary>A live grid's description: its blocks, block entity state, lock and body state (from its body if it has
-    /// one, else its Transform).</summary>
+    /// <summary>A live grid's description: its blocks, block entity state, lock, pose and velocities (from its body if it
+    /// has one, else its Transform).</summary>
     public static GridDescription Describe(Entity entity, PhysicsWorld physics)
     {
         var volume = entity.Get<ChunkGrid>().Volume;
         var d = new GridDescription
         {
             Voxels = GridSerializer.Voxels(volume),
-            Pivot = new System.Numerics.Vector3(volume.Pivot.X, volume.Pivot.Y, volume.Pivot.Z),
             Locked = entity.Get<DynamicGrid>().Locked,
         };
         if (entity.Has<PhysicsBodyComponent>())
         {
-            var body = entity.Get<PhysicsBodyComponent>().Body;
+            ref readonly var pb = ref entity.Get<PhysicsBodyComponent>();
+            var body = pb.Body;
             var (p, q) = physics.GetBodyPose(body);
-            d.Body = new BodyState { Position = p, Rotation = q,
+            d.Body = new BodyState { Position = PhysicsConv.ToBepu(pb.EntityPosition(p, q)), Rotation = q,
                 LinearVelocity = physics.GetBodyLinearVelocity(body), AngularVelocity = physics.GetBodyAngularVelocity(body) };
         }
         else

@@ -6,7 +6,8 @@ namespace ClearSkies.Engine.ECS;
 
 /// <summary>
 /// Post-physics: copies each <see cref="PhysicsBodyComponent"/> body's pose into its entity's
-/// <see cref="Transform"/> (position and rotation; scale is left alone), and each walking character's capsule centre
+/// <see cref="Transform"/> (position and rotation, less the body's <see cref="PhysicsBodyComponent.Offset"/> into the entity;
+/// scale is left alone), and each walking character's capsule centre
 /// into its position (the rotation is the player's look, set by mouse-look). Runs right after
 /// <see cref="PhysicsWorld"/> steps and before anything that reads those Transforms this tick
 /// (<see cref="HierarchyTransformSystem"/>, which carries children such as a grid's chunks along; support; rendering).
@@ -28,9 +29,10 @@ public sealed class PhysicsTransformSyncSystem : ISystem
     {
         foreach (ref readonly Entity e in _bodies.GetEntities())
         {
-            var (p, q) = _physics.GetBodyPose(e.Get<PhysicsBodyComponent>().Body);
+            ref readonly var pb = ref e.Get<PhysicsBodyComponent>();
+            var (p, q) = _physics.GetBodyPose(pb.Body);
             ref var t = ref e.Get<Transform>();
-            t.Position = PhysicsConv.ToSilk(p);
+            t.Position = pb.EntityPosition(p, q);
             t.Rotation = PhysicsConv.ToSilk(q);
         }
 

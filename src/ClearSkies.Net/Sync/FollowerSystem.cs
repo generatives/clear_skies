@@ -69,8 +69,9 @@ public sealed class FollowerSystem : ISystem, IDebugUiSystem
             if (e.Get<PhysicsPresence>().Mode != PhysicsMode.KinematicFollower) { _placed.Remove(e); continue; }
             var buffer = e.Get<RemoteBody>().Buffer;
             if (buffer.At(_remote.PhysicsTick(buffer)) is not { } s) continue;
-            var (target, rotation) = _remote.Pose(e, s);
-            FollowKinematic(e, e.Get<PhysicsBodyComponent>().Body, target, rotation, dt);
+            var (origin, rotation) = _remote.ToWorld(s.Support, s.Position, s.Rotation);
+            ref readonly var pb = ref e.Get<PhysicsBodyComponent>();
+            FollowKinematic(e, pb.Body, pb.BodyPosition(origin, rotation), rotation, dt);
         }
 
         // Servo copies come and go with the presence layer.

@@ -107,8 +107,7 @@ public sealed class EntityStreamingSystem : ISystem, IDebugUiSystem
         {
             uint id = e.Get<NetId>().Value;
             if (_unloading.Contains(id) || _despawning.Contains(id)) continue;
-            var t = e.Get<Transform>().Position;
-            if (NearestPlayer(new Vector3(t.X, t.Y, t.Z)) > UnloadWindow) _toUnload.Add(e);
+            if (NearestPlayer(Where(e)) > UnloadWindow) _toUnload.Add(e);
         }
         foreach (var e in _toUnload)
         {
@@ -116,6 +115,14 @@ public sealed class EntityStreamingSystem : ISystem, IDebugUiSystem
             _unloading.Add(e.Get<NetId>().Value);
             DescribeRequest.Request(e, DescribePurpose.Store);
         }
+    }
+
+    /// <summary>Where an entity is, for the windows: its body if it has one (a grid's centre of mass, which may be well
+    /// away from its block origin), else its Transform.</summary>
+    internal static Vector3 Where(Entity e)
+    {
+        ref readonly var t = ref e.Get<Transform>();
+        return e.Has<PhysicsBodyComponent>() ? e.Get<PhysicsBodyComponent>().BodyPosition(t) : new Vector3(t.Position.X, t.Position.Y, t.Position.Z);
     }
 
     private float NearestPlayer(Vector3 pos)
@@ -227,9 +234,7 @@ public sealed class WorldSaver : ISystem, IDebugUiSystem
                 }
                 else
                 {
-                    Vector3? pos = d.Entity.IsAlive && d.Entity.Has<Transform>()
-                        ? new Vector3(d.Entity.Get<Transform>().Position.X, d.Entity.Get<Transform>().Position.Y, d.Entity.Get<Transform>().Position.Z)
-                        : null;
+                    Vector3? pos = d.Entity.IsAlive && d.Entity.Has<Transform>() ? EntityStreamingSystem.Where(d.Entity) : null;
                     _db.WriteEntity(d.NetId, d.HandlerId, pos, d.Payload);
                     _index.Set(new StoredEntity(d.NetId, d.HandlerId, pos));
                 }

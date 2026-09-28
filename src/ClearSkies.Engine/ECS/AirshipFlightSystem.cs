@@ -269,7 +269,7 @@ public sealed class AirshipFlightSystem : ISystem
 
             // Feedforward, like the Buoyant force above: cancel the torque this grid's Buoyant lift adds about its
             // centre of mass, so the self-level term isn't left fighting it with a steady tilt.
-            var com = PhysicsConv.ToBepu(volume.Pivot); // a grid's pivot is its centre of mass
+            var com = PhysicsConv.ToBepu(e.Get<PhysicsBodyComponent>().Offset); // the body sits at the centre of mass
             var buoyantLift = Vector3.UnitY * _buoyantForce;
             foreach (var buoyant in blocks.Buoyants)
                 desiredTorque -= Vector3.Cross(LocalOffset(buoyant, com, rot), buoyantLift);
