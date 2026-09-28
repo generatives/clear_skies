@@ -5,9 +5,9 @@ public readonly record struct GridVoxel(int X, int Y, int Z, BlockId Id, BlockOr
 
 /// <summary>
 /// Reads/writes a grid's raw non-air voxel contents in a small binary format: grid-local (possibly negative) block
-/// coordinates, block ids, and (since v2) each voxel's orientation. No ECS data, position or physics state. The same
-/// stream format is used by .grid files and by grid descriptions (see GridDescription), so a saved ship and a ship
-/// sent to another player are the same bytes.
+/// coordinates, block ids, and (since v2) each voxel's orientation. No ECS data, position or physics state. It's how a
+/// <see cref="Entities.GridDescription"/> holds its voxels (and so how .grid files, stored grids and spawns sent to
+/// other players do).
 /// </summary>
 public static class GridSerializer
 {
@@ -78,18 +78,5 @@ public static class GridSerializer
             if (id != BlockId.Air) voxels.Add(new GridVoxel(x, y, z, id, orientation));
         }
         return voxels;
-    }
-
-    public static void Save(ChunkVolume grid, string filePath)
-    {
-        using var fs = File.Create(filePath);
-        Write(fs, Voxels(grid));
-    }
-
-    public static List<GridVoxel> Load(string filePath)
-    {
-        using var fs = File.OpenRead(filePath);
-        try { return Read(fs); }
-        catch (InvalidDataException e) { throw new InvalidDataException($"{e.Message} ({filePath})", e); }
     }
 }
