@@ -237,26 +237,27 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
         var (shape, inertia, com) = _physics.BuildDynamicCompound(_dynamicBoxes);
         grid.Inertia = inertia;
 
-        // Bepu recentres the compound on its centre of mass, so the body origin — and with it the grid's
-        // Transform — is the CoM, and the volume's pivot follows it. Either way the grid must not move in the
-        // world as the pivot moves: the body origin goes wherever the new pivot currently is.
+        // Bepu recentres the compound on its centre of mass, so the body origin is the CoM, which sits at the
+        // volume's pivot inside the grid's block space (see BodyFrame). The grid's Transform is that block space and
+        // must not move as blocks change: only the body moves, to wherever the new CoM is.
         var oldPivot = PhysicsConv.ToBepu(chunkVolume.Pivot);
         if (!entity.Has<PhysicsBodyComponent>())
         {
-            // First solid block: place the body under the grid's current Transform (where it was spawned).
+            // First solid block: place the body at the CoM within the grid's current Transform (where it was spawned).
             // Grids default to Locked (see DynamicGrid.Locked) so they don't immediately fall under
             // gravity when spawned; the body is created kinematic (zero inertia) in that case, same
             // as the rebuild branch below.
             ref readonly var t = ref entity.Get<Transform>();
             var orient = PhysicsConv.ToBepu(t.Rotation);
-            var pos    = PhysicsConv.ToBepu(t.Position) + Vector3.Transform(com - oldPivot, orient);
+            var pos    = PhysicsConv.ToBepu(t.Position) + Vector3.Transform(com, orient);
             var body   = _physics.AddDynamicBody(shape, grid.Locked ? default : inertia, pos, orient,
                                                  new ColliderInfo(ColliderKind.VoxelGrid, entity));
             entity.Set(new PhysicsBodyComponent { Body = body });
         }
         else
         {
-            // The body pose, not the Transform: something may have set it since the last sync.
+            // The body pose, not the Transform: something may have set it since the last sync. The block space stays
+            // put, so the body moves by however far the CoM moved within it.
             var body = entity.Get<PhysicsBodyComponent>().Body;
             var (pos, orient) = _physics.GetBodyPose(body);
             var worldShift = Vector3.Transform(com - oldPivot, orient);
