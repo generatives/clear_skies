@@ -1,10 +1,22 @@
+using ClearSkies.Engine.Serialization;
+
 namespace ClearSkies.Engine.Entities;
 
-/// <summary>An entity's network ID: the same on every machine and across sessions. Looked up through
-/// <see cref="NetRegistry"/>. Players, grids and the world volume have one.</summary>
-public struct NetId
+/// <summary>
+/// Which entity this is, the same on every machine and across sessions: commands and events name entities by it, and
+/// saves store them by it. Also the component that gives an entity its ID (players, grids and the world volume have
+/// one); <see cref="EntityRegistry"/> looks entities up by it. <see cref="None"/> (0) is no entity.
+/// </summary>
+public readonly record struct EntityId(uint Value)
 {
-    public uint Value;
+    public static readonly EntityId None = new(0);
+
+    public bool IsNone => Value == 0;
+
+    public void Write(NetWriter w) => w.WriteUInt32(Value);
+    public static EntityId Read(ref NetReader r) => new(r.ReadUInt32());
+
+    public override string ToString() => $"#{Value}";
 }
 
 /// <summary>Which peer owns (simulates, and decides commands for) an entity. <see cref="IsLocal"/> is whether that's

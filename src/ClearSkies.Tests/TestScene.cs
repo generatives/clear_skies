@@ -22,7 +22,7 @@ public sealed class HeadlessScene : IDisposable
     public readonly World World = new();
     public readonly PhysicsWorld Physics = new(new Vector3(0, -6, 0), Dt);
     public readonly Session Session;
-    public readonly NetRegistry Registry;
+    public readonly EntityRegistry Registry;
     public readonly GridSelection Selection;
     public readonly ChunkVolume WorldVolume;
     public readonly EntityPresenceSystem Presence;
@@ -37,8 +37,8 @@ public sealed class HeadlessScene : IDisposable
     public HeadlessScene(Session? session = null)
     {
         Session = session ?? Session.SinglePlayer();
-        Registry = new NetRegistry(World);
-        var allocator = new NetIdAllocator();
+        Registry = new EntityRegistry(World);
+        var allocator = new EntityIdAllocator();
         Registry.RequestBlock = allocator.NextBlock;
         _gridNetworking = new GridNetworking(World, Registry, Session);
         Selection = new GridSelection(World);
@@ -46,7 +46,7 @@ public sealed class HeadlessScene : IDisposable
         var root = World.CreateEntity();
         WorldVolume = new ChunkVolume(root, World) { ChunksOwnPresence = true };
         root.Set(new ChunkGrid { Volume = WorldVolume });
-        root.Set(new NetId { Value = NetRegistry.WorldVolume });
+        root.Set(EntityRegistry.WorldVolume);
         root.Set<Rendered>();
 
         Presence = new EntityPresenceSystem(World, Session, WorldVolume, viewDistance: 500f);
@@ -111,7 +111,7 @@ public sealed class HeadlessScene : IDisposable
         player.Set(new Support());
         player.Set(new Player { Id = PlayerId.New(), Name = "test", IsLocal = true });
         player.Set<LocalPlayer>();
-        player.Set(new NetId { Value = Registry.Allocate() });
+        player.Set(Registry.Allocate());
         player.Set(Session.LocalOwner());
         player.Set<OwnPresence>();
         Players.SetFreeFlying(player, freeFly);

@@ -19,7 +19,7 @@ namespace ClearSkies.Engine.Commands;
 public static class GameCommands
 {
     /// <summary>Registers every gameplay command's handler.</summary>
-    public static void RegisterAll(CommandSystem commands, BlockEntities blocks, EditLimits limits, NetRegistry registry,
+    public static void RegisterAll(CommandSystem commands, BlockEntities blocks, EditLimits limits, EntityRegistry registry,
                                    PhysicsWorld physics)
     {
         commands.Register(new EditVoxelsHandler(blocks, limits));

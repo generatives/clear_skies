@@ -37,13 +37,13 @@ public sealed class CommandSystem : ISystem, IDebugUiSystem
     private readonly List<OutgoingCommand> _outgoingCommands = new();
     private int _outgoingSent; // how many of the outgoing commands have been sent this tick (only coalesce into later ones)
     private readonly List<Prediction> _unconfirmedPredictions = new();
-    private readonly Dictionary<uint, uint> _lastEventNumberSent = new();                           // as the authority, per target
-    private readonly Dictionary<(uint Authority, uint Target), uint> _lastEventNumberApplied = new(); // as a receiver
-    private readonly NetRegistry _registry;
+    private readonly Dictionary<EntityId, uint> _lastEventNumberSent = new();                           // as the authority, per target
+    private readonly Dictionary<(PeerId Authority, EntityId Target), uint> _lastEventNumberApplied = new(); // as a receiver
+    private readonly EntityRegistry _registry;
     private readonly Func<uint> _tick;
     private uint _nextSeq = 1;
 
-    public CommandSystem(Session session, NetRegistry registry, Func<uint> tick, ICommandRouter? router = null)
+    public CommandSystem(Session session, EntityRegistry registry, Func<uint> tick, ICommandRouter? router = null)
     {
         Session = session;
         _registry = registry;
@@ -145,7 +145,7 @@ public sealed class CommandSystem : ISystem, IDebugUiSystem
 
     internal uint NextSeq() => _nextSeq++;
 
-    internal uint NextEventNumber(uint target)
+    internal uint NextEventNumber(EntityId target)
     {
         uint n = _lastEventNumberSent.GetValueOrDefault(target) + 1;
         _lastEventNumberSent[target] = n;
@@ -155,13 +155,13 @@ public sealed class CommandSystem : ISystem, IDebugUiSystem
     /// <summary>False for an event already applied (numbers only go up per authority and target).</summary>
     internal bool AcceptEventNumber(in EventMeta meta)
     {
-        var key = (meta.Authority.Value, meta.Target);
+        var key = (meta.Authority, meta.Target);
         if (_lastEventNumberApplied.TryGetValue(key, out var last) && meta.EventNumber <= last) return false;
         _lastEventNumberApplied[key] = meta.EventNumber;
         return true;
     }
 
-    internal PeerId OwnerOf(uint entity)
+    internal PeerId OwnerOf(EntityId entity)
     {
         if (_registry.TryGet(entity, out var e) && e.Has<NetOwner>()) return e.Get<NetOwner>().Owner;
         return PeerId.Host;

@@ -9,21 +9,21 @@ namespace ClearSkies.Engine.Commands;
 /// move together (a volume's levers on one axis, a ship's wheels).</summary>
 public sealed class BlockEntities
 {
-    private readonly NetRegistry _registry;
+    private readonly EntityRegistry _registry;
     private readonly EntitySet _levers;
     private readonly EntitySet _wheels;
 
-    public BlockEntities(World world, NetRegistry registry)
+    public BlockEntities(World world, EntityRegistry registry)
     {
         _registry = registry;
         _levers = world.GetEntities().With<Lever>().With<BlockRef>().AsSet();
         _wheels = world.GetEntities().With<SteeringWheel>().With<BlockRef>().AsSet();
     }
 
-    public NetRegistry Registry => _registry;
+    public EntityRegistry Registry => _registry;
 
-    /// <summary>The volume with network ID <paramref name="id"/>, if it's live here.</summary>
-    public ChunkVolume? Volume(uint id) =>
+    /// <summary>The volume with entity ID <paramref name="id"/>, if it's live here.</summary>
+    public ChunkVolume? Volume(EntityId id) =>
         _registry.TryGet(id, out var e) && e.Has<ChunkGrid>() ? e.Get<ChunkGrid>().Volume : null;
 
     /// <summary>The block entity at a block address, if its volume and chunk are loaded here.</summary>
@@ -33,13 +33,13 @@ public sealed class BlockEntities
         return volume.TryGetBlockEntity(address.Block.X, address.Block.Y, address.Block.Z, out var e) ? e : null;
     }
 
-    /// <summary>The address of a block entity, if its volume has a network ID.</summary>
+    /// <summary>The address of a block entity, if its volume has a entity ID.</summary>
     public static EntityAddress? AddressOf(Entity block)
     {
         if (!block.Has<BlockRef>()) return null;
         ref readonly var r = ref block.Get<BlockRef>();
-        if (!r.Volume.Root.IsAlive || !r.Volume.Root.Has<NetId>()) return null;
-        return EntityAddress.OfBlock(r.Volume.Root.Get<NetId>().Value, r.Position);
+        if (!r.Volume.Root.IsAlive || !r.Volume.Root.Has<EntityId>()) return null;
+        return EntityAddress.OfBlock(r.Volume.Root.Get<EntityId>(), r.Position);
     }
 
     /// <summary>The line a lever levers along in its volume (0-2: the north/south, east/west or up/down axis), and

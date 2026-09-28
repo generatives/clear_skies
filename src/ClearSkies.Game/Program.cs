@@ -39,19 +39,19 @@ host.Renderer.LoadTextureAtlas(
     Path.Combine(AppContext.BaseDirectory, "Resources", "spritesheet_tiles.png"),
     Path.Combine(AppContext.BaseDirectory, "Resources", "spritesheet_tiles.xml"));
 
-// Session: single-player is a host session with nobody connected. Network IDs and owners exist, all local.
+// Session: single-player is a host session with nobody connected. Entity IDs and owners exist, all local.
 var session = Session.SinglePlayer();
-var registry = new NetRegistry(host.World);
-var idAllocator = new NetIdAllocator();
+var registry = new EntityRegistry(host.World);
+var idAllocator = new EntityIdAllocator();
 registry.RequestBlock = idAllocator.NextBlock;
 using var gridNetworking = new GridNetworking(host.World, registry, session);
 
 // The static world is a volume like any other, with an identity Transform (set by ChunkVolume), and a
-// reserved network ID. Its chunks each decide their own presence layers (see EntityPresenceSystem).
+// reserved entity ID. Its chunks each decide their own presence layers (see EntityPresenceSystem).
 var staticVolumeEntity = host.World.CreateEntity();
 var staticVolume = new ChunkVolume(staticVolumeEntity, host.World) { MeshIgnoresNeighbours = true, ChunksOwnPresence = true };
 staticVolumeEntity.Set(new ChunkGrid() { Volume = staticVolume });
-staticVolumeEntity.Set(new NetId { Value = NetRegistry.WorldVolume });
+staticVolumeEntity.Set(EntityRegistry.WorldVolume);
 staticVolumeEntity.Set(session.LocalOwner());
 staticVolumeEntity.Set<Rendered>();
 

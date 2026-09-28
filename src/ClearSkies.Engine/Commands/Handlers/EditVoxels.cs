@@ -25,11 +25,11 @@ public readonly record struct VoxelOp(Vector3D<int> Min, Vector3D<int> Max, Bloc
 /// <summary>Changes blocks in a volume (a grid, or the static world): the only way blocks change during gameplay.</summary>
 public struct EditVoxels : ICommand
 {
-    /// <summary>The volume's network ID.</summary>
-    public uint Volume;
+    /// <summary>The volume: a grid, or the static world.</summary>
+    public EntityId Volume;
 
-    /// <summary>The editing player's network ID (for the reach check).</summary>
-    public uint Editor;
+    /// <summary>The editing player (for the reach check).</summary>
+    public EntityId Editor;
 
     public VoxelOp[] Ops;
 
@@ -84,8 +84,8 @@ public sealed class EditVoxelsHandler : PredictedCommandHandler<EditVoxels, Edit
 
     public override void Write(NetWriter w, in EditVoxels c)
     {
-        w.WriteUInt32(c.Volume);
-        w.WriteUInt32(c.Editor);
+        c.Volume.Write(w);
+        c.Editor.Write(w);
         w.WriteVarUInt((uint)c.Ops.Length);
         foreach (var op in c.Ops)
         {
@@ -100,7 +100,7 @@ public sealed class EditVoxelsHandler : PredictedCommandHandler<EditVoxels, Edit
 
     public override EditVoxels Read(ref NetReader r)
     {
-        var c = new EditVoxels { Volume = r.ReadUInt32(), Editor = r.ReadUInt32() };
+        var c = new EditVoxels { Volume = EntityId.Read(ref r), Editor = EntityId.Read(ref r) };
         uint count = r.ReadVarUInt();
         if (count > EditLimits.MaxOpsPerCommand) throw new InvalidDataException($"EditVoxels with {count} ops.");
         c.Ops = new VoxelOp[count];
@@ -152,11 +152,11 @@ public sealed class EditVoxelsHandler : PredictedCommandHandler<EditVoxels, Edit
             if (op.IsSingle) volume.SetBlock(op.Min.X, op.Min.Y, op.Min.Z, op.Block, op.Orientation);
             else volume.FillBox(op.Min, op.Max, op.Block, op.Orientation);
         }
-        if (_blocks.Registry.Find(e.Volume) is { } root) AdoptLeverSettings(volume, root.Get<NetId>().Value, e.Ops);
+        if (_blocks.Registry.Find(e.Volume) is { } root) AdoptLeverSettings(volume, root.Get<EntityId>(), e.Ops);
     }
 
     /// <summary>New levers take the setting of the levers already on their axis in the volume.</summary>
-    private void AdoptLeverSettings(ChunkVolume volume, uint volumeId, VoxelOp[] ops)
+    private void AdoptLeverSettings(ChunkVolume volume, EntityId volumeId, VoxelOp[] ops)
     {
         foreach (var op in ops)
         {
@@ -199,7 +199,7 @@ public sealed class EditVoxelsHandler : PredictedCommandHandler<EditVoxels, Edit
     /// <summary>What an edit changed: every cell in its ops' boxes as it was, and the block entity state there.</summary>
     public sealed class Undo
     {
-        public uint Volume;
+        public EntityId Volume;
         public readonly List<(VoxelOp Box, BlockId[] Blocks, byte[] Orientations)> Boxes = new();
         public readonly List<(Vector3D<int> Cell, float? Lever, float? Wheel)> States = new();
     }
