@@ -48,7 +48,6 @@ public static class PlayerFactory
                 airControlForceScale: 1f, airControlSpeedScale: 1f, airBrakeScale: 0.5f, entity: player);
             player.Set(new CharacterControllerComponent { Character = character, EyeHeight = EyeHeight });
         }
-        player.Set(new CharacterModeComponent { FreeFly = d.FreeFly });
         player.Set(new Support());
         player.Set(new Player { Id = d.Id, Name = d.Name, IsLocal = owner.IsLocal });
         player.Set(new NetId { Value = netId });
@@ -81,12 +80,12 @@ public static class PlayerFactory
         (look.Yaw, look.Pitch) = (d.Yaw, d.Pitch);
         ref var t = ref player.Get<Transform>();
         t.Position = PhysicsConv.ToSilk(d.Position);
-        t.Rotation = Quaternion<float>.CreateFromYawPitchRoll(d.Yaw, d.Pitch, 0f);
-        player.Get<CharacterModeComponent>().FreeFly = d.FreeFly;
+        t.Rotation = look.BodyRotation;
         player.Get<FreeFlyController>().MoveSpeed = d.FlySpeed;
+        Players.SetFreeFlying(player, d.FreeFly); // landing puts the capsule where the Transform now is
         if (!player.Has<CharacterControllerComponent>()) return;
         ref var cc = ref player.Get<CharacterControllerComponent>();
-        cc.Character.TeleportTo(d.Position);
+        cc.Character.TeleportTo(d.Position); // (both no-ops while flying: there's no capsule)
         cc.Character.SetVelocity(d.Velocity);
     }
 
@@ -94,7 +93,7 @@ public static class PlayerFactory
     {
         ref readonly var p = ref player.Get<Player>();
         ref readonly var look = ref player.Get<MouseLookComponent>();
-        bool freeFly = player.Get<CharacterModeComponent>().FreeFly;
+        bool freeFly = player.Has<FreeFlying>();
         var velocity = !freeFly && player.Has<CharacterControllerComponent>()
             ? player.Get<CharacterControllerComponent>().Character.LinearVelocity : Vector3.Zero;
         return new PlayerDescription

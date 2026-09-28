@@ -21,7 +21,7 @@ public sealed class PhysicsTransformSyncSystem : ISystem
     {
         _physics = physics;
         _bodies  = world.GetEntities().With<PhysicsBodyComponent>().With<Transform>().AsSet();
-        _characters = world.GetEntities().With<CharacterControllerComponent>().With<CharacterModeComponent>().With<Transform>().AsSet();
+        _characters = world.GetEntities().With<CharacterControllerComponent>().With<Transform>().Without<FreeFlying>().AsSet();
     }
 
     public void Update(float dt)
@@ -34,10 +34,7 @@ public sealed class PhysicsTransformSyncSystem : ISystem
             t.Rotation = PhysicsConv.ToSilk(q);
         }
 
-        foreach (ref readonly Entity e in _characters.GetEntities())
-        {
-            if (e.Get<CharacterModeComponent>().FreeFly || e.Has<CameraGridFollowComponent>()) continue; // moved directly
+        foreach (ref readonly Entity e in _characters.GetEntities()) // a free-flying player has no capsule in the simulation
             e.Get<Transform>().Position = PhysicsConv.ToSilk(e.Get<CharacterControllerComponent>().Character.Position);
-        }
     }
 }

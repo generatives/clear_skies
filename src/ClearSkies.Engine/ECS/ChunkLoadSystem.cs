@@ -14,7 +14,7 @@ namespace ClearSkies.Engine.ECS;
 
 /// <summary>
 /// Streams the static world around the local player's terrain interest (see <see cref="TerrainInterest"/>), like a typical block game: a queue of the chunk columns within
-/// the view distance, closest first by horizontal distance, rebuilt whenever the camera crosses into another column,
+/// the view distance, closest first by horizontal distance, rebuilt whenever that crosses into another column,
 /// and loaded a whole column at a time. A rebuild is spread over frames (within <see cref="StreamBudgetMs"/>, for
 /// unloading what left view and for scanning the columns in view), so crossing a column doesn't cost one long frame.
 /// Only chunks that may hold something are queued: the layers the generator says
@@ -25,7 +25,7 @@ namespace ClearSkies.Engine.ECS;
 /// What's loaded is limited by GPU light storage (<see cref="GridStore.WorldLightBudget"/>): the world's surface
 /// bricks, plus a surface chunk's average for each chunk loaded but not uploaded yet or still loading. When the
 /// budget is full, the queue stops; and if the next queued column is nearer than the farthest loaded one (after
-/// the camera moved), the farthest is unloaded to make room. So the loaded world is always the nearest that fits.
+/// the centre moved), the farthest is unloaded to make room. So the loaded world is always the nearest that fits.
 ///
 /// The fog (see <see cref="FogDistance"/>) sits at the nearest column still queued or loading, or else at the view
 /// distance: an island only partly loaded fades out where loading stopped instead of ending in a hard edge.
@@ -51,7 +51,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     /// storage is released a frame later.</summary>
     private const int MaxChunks = GridStore.MaxWorldChunks - 4096;
 
-    /// <summary>Columns queued at once. Far more than load before the camera next moves a column; when the queue runs
+    /// <summary>Columns queued at once. Far more than load before the centre next moves a column; when the queue runs
     /// out short of the view distance it is rebuilt from there.</summary>
     private const int MaxQueued = 4096;
 
@@ -79,7 +79,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     private readonly ThreadLocal<ChunkData> _scratch = new(() => new ChunkData());
     private readonly int            _minY;      // the lowest streamed layer: bit 0 of a column's bits
 
-    /// <summary>Column offsets from the camera's column, closest first, out to the view distance. Computed once; a
+    /// <summary>Column offsets from the centre's column, closest first, out to the view distance. Computed once; a
     /// rebuild just walks it.</summary>
     private readonly (short dx, short dz)[] _offsetsByDistance;
     private readonly int _viewColumns; // the view distance in columns
@@ -121,7 +121,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     private int _inFlightChunks;
     private readonly ConcurrentQueue<((int x, int z) Column, List<(ChunkPosition Pos, ChunkData? Data, PackedOpacity? Packed)> Chunks)> _results = new();
 
-    private (int x, int z) _lastCamColumn = (int.MinValue, int.MinValue);
+    private (int x, int z) _lastCentreColumn = (int.MinValue, int.MinValue);
     private bool _skippedInFlight;
     private bool _nothingToEvict; // the last search found nothing farther than the queue's head; cleared by a rebuild
 
@@ -149,7 +149,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     private int _colliderRefresh;
     private const int MaxColliderColumnJobs = 8;
 
-    /// <summary>Horizontal distance from the camera at which the loaded world stops: the nearest chunk column still
+    /// <summary>Horizontal distance from the centre at which the loaded world stops: the nearest chunk column still
     /// queued or loading, or else the view distance, eased over time. Fog should be total by here.</summary>
     public float FogDistance => _fogDistance;
 
@@ -181,7 +181,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     /// <summary>Where the drawn world is streamed around: the <see cref="TerrainInterestKind.Full"/> terrain interest
     /// (the local player's, see EntityPresenceSystem). Colliders-only interests get their colliders from what's loaded
     /// here; streaming data around them too comes with multiplayer.</summary>
-    private bool TryGetViewCentre(out Vector3D<float> centre)
+    private bool TryGetInterestCentre(out Vector3D<float> centre)
     {
         foreach (ref readonly Entity e in _interests.GetEntities())
         {
@@ -236,25 +236,25 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         _steps.Start();
 
         _budget.Restart();
-        bool hasView = TryGetViewCentre(out var camPos);
+        bool hasView = TryGetInterestCentre(out var centre);
         if (!hasView)
         {
             // Nobody to draw for (a dedicated server, or before the player arrives): only what colliders want.
             if (_hasView)
             {
                 _hasView = false;
-                _lastCamColumn = (int.MinValue, int.MinValue);
+                _lastCentreColumn = (int.MinValue, int.MinValue);
                 Rebuild();
             }
         }
         else
         {
             _hasView = true;
-            var camColumn = ViewColumn(camPos);
+            var centreColumn = ViewColumn(centre);
             bool idle = _scanDone && _queueHead == _queue.Count && _inFlight.Count == 0;
-            if (camColumn != _lastCamColumn || (idle && (_skippedInFlight || _queueTruncated)))
+            if (centreColumn != _lastCentreColumn || (idle && (_skippedInFlight || _queueTruncated)))
             {
-                _lastCamColumn = camColumn;
+                _lastCentreColumn = centreColumn;
                 _skippedInFlight = false;
                 Rebuild();
             }
@@ -276,7 +276,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
                         _columns[(pos.X, pos.Z)] = (col.Generated, col.Air | Bit(pos));
                     continue;
                 }
-                // Dropped if the camera moved on while it generated, or an edit created the chunk meanwhile, or it was
+                // Dropped if the centre moved on while it generated, or an edit created the chunk meanwhile, or it was
                 // edited while loading (it's loaded again, edit and all).
                 if (_stale.Remove(pos)) { if (!_waiting.Contains(job.Column)) _waiting.Add(job.Column); continue; }
                 if (Wanted(pos.X, pos.Z) && !_staticVolume.IsLoaded(pos)) _staticVolume.AddChunk(pos, data, packed);
@@ -295,7 +295,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         Dispatch();
         StreamColliderColumns();
         _steps.Lap(DispatchStep);
-        UpdateFog(camPos, dt);
+        UpdateFog(centre, dt);
         _steps.Lap(FogStep);
     }
 
@@ -306,7 +306,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     public int LoadedChunks => _staticVolume.LoadedCount;
     public int ColumnsInFlight => _inFlight.Count;
 
-    /// <summary>Starts over from the camera's new column: lists what left the view distance to unload, and restarts
+    /// <summary>Starts over from the centre's new column: lists what left the view distance to unload, and restarts
     /// the scan for columns in view with chunks still to fetch, closest first. Both then go on a little each frame
     /// (<see cref="UnloadSome"/>, <see cref="ScanSome"/>).</summary>
     private void Rebuild()
@@ -359,7 +359,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
             // Checked every column: one seen for the first time asks the generator for its layers, which isn't cheap.
             if (_steps.SinceLap() - start >= budgetMs) return;
             var (dx, dz) = _offsetsByDistance[_scanAt];
-            int x = _lastCamColumn.x + dx, z = _lastCamColumn.z + dz;
+            int x = _lastCentreColumn.x + dx, z = _lastCentreColumn.z + dz;
             if (HasMissing(x, z))
             {
                 if (_queue.Count == MaxQueued) { _queueTruncated = true; break; }
@@ -373,22 +373,22 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
                           $"{LightBudget} bricks, unloaded {_toUnload.Count}, evicted {_evictions} columns so far");
     }
 
-    /// <summary>Blocks the camera must be past its column's edge before the view moves on, so standing on a column
+    /// <summary>Blocks the centre must be past its column's edge before the view moves on, so standing on a column
     /// boundary doesn't unload and reload the edge of the view every wobble.</summary>
     private const float ViewHysteresis = 2f;
 
-    /// <summary>The column the view is streamed around: the camera's, once it's clearly left the last one.</summary>
-    private (int x, int z) ViewColumn(Vector3D<float> camPos)
+    /// <summary>The column the view is streamed around: the interest centre's, once it's clearly left the last one.</summary>
+    private (int x, int z) ViewColumn(Vector3D<float> centre)
     {
-        var column = ((int)MathF.Floor(camPos.X / S), (int)MathF.Floor(camPos.Z / S));
-        if (_lastCamColumn.x == int.MinValue || column == _lastCamColumn) return column;
-        float x0 = _lastCamColumn.x * S, z0 = _lastCamColumn.z * S;
-        bool near = camPos.X >= x0 - ViewHysteresis && camPos.X < x0 + S + ViewHysteresis &&
-                    camPos.Z >= z0 - ViewHysteresis && camPos.Z < z0 + S + ViewHysteresis;
-        return near ? _lastCamColumn : column;
+        var column = ((int)MathF.Floor(centre.X / S), (int)MathF.Floor(centre.Z / S));
+        if (_lastCentreColumn.x == int.MinValue || column == _lastCentreColumn) return column;
+        float x0 = _lastCentreColumn.x * S, z0 = _lastCentreColumn.z * S;
+        bool near = centre.X >= x0 - ViewHysteresis && centre.X < x0 + S + ViewHysteresis &&
+                    centre.Z >= z0 - ViewHysteresis && centre.Z < z0 + S + ViewHysteresis;
+        return near ? _lastCentreColumn : column;
     }
 
-    private bool InView(int x, int z) => _hasView && Sq(x - _lastCamColumn.x) + Sq(z - _lastCamColumn.z) <= Sq(_viewColumns);
+    private bool InView(int x, int z) => _hasView && Sq(x - _lastCentreColumn.x) + Sq(z - _lastCentreColumn.z) <= Sq(_viewColumns);
 
     /// <summary>In view, or wanted for colliders.</summary>
     private bool Wanted(int x, int z) => InView(x, z) || _colliderColumns.Contains((x, z));
@@ -455,7 +455,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 
     private static long Sq(int v) => (long)v * v;
 
-    private long ColumnDistSq((int x, int z) c) => Sq(c.x - _lastCamColumn.x) + Sq(c.z - _lastCamColumn.z);
+    private long ColumnDistSq((int x, int z) c) => Sq(c.x - _lastCentreColumn.x) + Sq(c.z - _lastCentreColumn.z);
 
     /// <summary>Chunks of column (x, z) that may hold something: what the generator may fill, less what turned out to be
     /// air, plus builds.</summary>
@@ -687,14 +687,14 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     /// <summary>Eases <see cref="FogDistance"/> toward the nearest column still queued or loading, or else the view
     /// distance (everything nearer is loaded): in fast, so a gap is covered before it shows, out slowly, so the view
     /// opens up gently as loading catches up.</summary>
-    private void UpdateFog(Vector3D<float> camPos, float dt)
+    private void UpdateFog(Vector3D<float> centre, float dt)
     {
         // While a rebuild's scan is still going, the nearest column it found missing is known only up to where it has
         // looked: until it finds one, or finishes, the target stays where it was (it only moved by a column).
-        float target = _queueHead < _queue.Count ? ColumnDistance(camPos, _queue[_queueHead].x, _queue[_queueHead].z)
+        float target = _queueHead < _queue.Count ? ColumnDistance(centre, _queue[_queueHead].x, _queue[_queueHead].z)
                      : !_scanDone ? _fogTarget
                      : _viewDistance;
-        foreach (var (x, z) in _inFlight.Keys) target = MathF.Min(target, ColumnDistance(camPos, x, z));
+        foreach (var (x, z) in _inFlight.Keys) target = MathF.Min(target, ColumnDistance(centre, x, z));
         _fogTarget = target;
 
         float rate = target < _fogDistance ? 8f : 1f;
@@ -702,7 +702,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         SkySettings.SetFogDistance(_fogDistance);
     }
 
-    /// <summary>Horizontal distance from the camera to the nearest point of chunk column (x, z).</summary>
+    /// <summary>Horizontal distance from the centre to the nearest point of chunk column (x, z).</summary>
     private static float ColumnDistance(Vector3D<float> cam, int x, int z)
     {
         float dx = MathF.Max(0f, MathF.Abs(cam.X - (x * S + S * 0.5f)) - S * 0.5f);

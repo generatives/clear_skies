@@ -338,9 +338,9 @@ public class JoinTests
         aPlayer.Get<Engine.Input.PlayerInput>() = new Engine.Input.PlayerInput { Pressed = Engine.Input.PlayerButtons.ToggleFly };
         a.Tick();
         aPlayer.Get<Engine.Input.PlayerInput>() = default;
-        Assert.False(aPlayer.Get<CharacterModeComponent>().FreeFly); // its own authority: at once
+        Assert.False(aPlayer.Has<FreeFlying>()); // its own authority: at once
         game.Tick(10);
-        Assert.False(game.Host.Registry.Find(aPlayer.Get<NetId>().Value)!.Value.Get<CharacterModeComponent>().FreeFly);
+        Assert.False(game.Host.Registry.Find(aPlayer.Get<NetId>().Value)!.Value.Has<FreeFlying>());
     }
 
     [Fact]

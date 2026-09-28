@@ -52,8 +52,9 @@ public static class Drawing
 /// longer matches the last tick's: that position is taken as-is, with no interpolation across the jump.
 ///
 /// A player's view turns with the ship they stand on once per tick (see <see cref="MouseLookComponent.TurnYaw"/>);
-/// with <see cref="InterpolatedTransform.PositionOnly"/> the view is drawn behind by the same fraction of that turn as
-/// the ship, so the two stay together between ticks. A tick that didn't turn the view clears the last one's turn.
+/// with <see cref="InterpolatedTransform.PositionOnly"/> the player's yaw, and their <see cref="Eye"/> camera's pitch,
+/// are drawn behind by the same fraction of that turn as the ship, so the two stay together between ticks. A tick that
+/// didn't turn the view clears the last one's turn.
 ///
 /// Dynamic grids get an <see cref="InterpolatedTransform"/> automatically. When a grid's blocks change, its pivot (the
 /// centre of mass) moves and its Transform with it while the blocks stay put; the previous pose is moved the same way
@@ -68,6 +69,7 @@ public sealed class TickInterpolationSystem : IStagedSystem
     private readonly List<Entity> _stale = new();
     private readonly Time _time;
     private long _frame;
+    private float _alpha;
 
     public TickInterpolationSystem(World world, Time time)
     {
@@ -115,7 +117,7 @@ public sealed class TickInterpolationSystem : IStagedSystem
     private void Draw()
     {
         _frame++;
-        float alpha = _time.Alpha;
+        float alpha = _alpha = _time.Alpha;
         foreach (ref readonly Entity e in _interpolated.GetEntities())
         {
             ref var s = ref e.Get<InterpolatedTransform>();
@@ -162,26 +164,30 @@ public sealed class TickInterpolationSystem : IStagedSystem
         foreach (var child in parent.Get<Children>().Entities)
         {
             if (!child.IsAlive || !child.Has<LocalTransform>() || child.Has<InterpolatedTransform>()) continue;
-            var drawn = Hierarchy.Compose(parentDrawn, child.Get<LocalTransform>());
+            var local = child.Get<LocalTransform>();
+            if (child.Has<Eye>() && parent.Has<MouseLookComponent>())
+                local.Rotation = DrawnHead(parent.Get<MouseLookComponent>(), _alpha);
+            var drawn = Hierarchy.Compose(parentDrawn, local);
             SetDrawn(child, drawn, fromParent: true);
             DrawChildren(child, drawn);
         }
     }
 
     /// <summary>A view turned by the ship it stands on is drawn behind by the part of the latest tick's turn the ship's
-    /// drawing hasn't reached yet, so the two turn together; mouse-look on top is still per frame.</summary>
+    /// drawing hasn't reached yet, so the two turn together; mouse-look on top is still per frame. This is the yaw, on
+    /// the player; the pitch is the eye's (<see cref="DrawnHead"/>).</summary>
     private static void DrawLook(in MouseLookComponent look, ref Transform drawn, float alpha)
     {
-        if (look.TurnYaw == 0f && look.TurnPitch == 0f) return;
-        float behind = 1f - alpha;
-        drawn.Rotation = Quaternion<float>.CreateFromYawPitchRoll(look.Yaw - behind * look.TurnYaw,
-                                                                 look.Pitch - behind * look.TurnPitch, 0f);
+        if (look.TurnYaw == 0f) return;
+        drawn.Rotation = Quaternion<float>.CreateFromYawPitchRoll(look.Yaw - (1f - alpha) * look.TurnYaw, 0f, 0f);
     }
 
-    /// <summary>GridPilotSystem places the camera itself while it follows a grid; bodies owned elsewhere are drawn from
-    /// their snapshots instead (RemoteBodySystem).</summary>
-    private static bool Paused(Entity e) =>
-        e.Has<CameraGridFollowComponent>() || (e.Has<Entities.NetOwner>() && !e.Get<Entities.NetOwner>().IsLocal);
+    /// <summary>The eye's pitch as drawn: behind like the yaw (see <see cref="DrawLook"/>).</summary>
+    private static Quaternion<float> DrawnHead(in MouseLookComponent look, float alpha) =>
+        Quaternion<float>.CreateFromYawPitchRoll(0f, look.Pitch - (1f - alpha) * look.TurnPitch, 0f);
+
+    /// <summary>Bodies owned elsewhere are drawn from their snapshots instead (RemoteBodySystem).</summary>
+    private static bool Paused(Entity e) => e.Has<Entities.NetOwner>() && !e.Get<Entities.NetOwner>().IsLocal;
 
     private static void Restart(ref InterpolatedTransform s, in Transform t, Entity e)
     {
