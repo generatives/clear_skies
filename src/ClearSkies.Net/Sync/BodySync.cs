@@ -30,6 +30,7 @@ public sealed class BodySync : ISystem, IDebugUiSystem
     private readonly PhysicsWorld _physics;
     private readonly EntitySet _players;
     private readonly EntitySet _grids;
+    private readonly EntitySet _remote;
     private readonly List<BodySnapshot> _own = new();
     private readonly Dictionary<uint, (PeerId Owner, uint Tick, BodySnapshot Snapshot)> _relay = new();
     private readonly NetWriter _writer = new(2048);
@@ -40,6 +41,13 @@ public sealed class BodySync : ISystem, IDebugUiSystem
         _net = net;
         _physics = physics;
         net.Bodies = this;
+        _remote = world.GetEntities().With<RemoteBody>().AsSet();
+        // Snapshots' lateness is measured against our clock: when clock sync snaps it, they move with it.
+        if (net is ClientSession client)
+            client.ClockSync.Snapped += ticks =>
+            {
+                foreach (ref readonly var e in _remote.GetEntities()) e.Get<RemoteBody>().Buffer.ShiftClock(ticks);
+            };
         _players = world.GetEntities().With<NetId>().With<NetOwner>().With<Player>().With<Transform>().AsSet();
         _grids = world.GetEntities().With<NetId>().With<NetOwner>().With<PhysicsBodyComponent>().With<Transform>().AsSet();
     }
@@ -141,7 +149,7 @@ public sealed class BodySync : ISystem, IDebugUiSystem
             if (!_net.Registry.TryGet(s.Entity, out var e)) continue; // not spawned here (yet)
             if (e.Has<NetOwner>() && e.Get<NetOwner>().IsLocal) continue; // ours: we're the truth
             if (!e.Has<RemoteBody>()) e.Set(new RemoteBody { Buffer = new SnapshotBuffer() });
-            e.Get<RemoteBody>().Buffer.Add(tick, s);
+            e.Get<RemoteBody>().Buffer.Add(tick, s, _net.Clock.Tick);
             if (_net is HostSession && from != PeerId.Host) _relay[s.Entity] = (from, tick, s);
         }
     }
@@ -152,8 +160,8 @@ public sealed class BodySync : ISystem, IDebugUiSystem
 }
 
 /// <summary>
-/// Every frame: draws bodies owned elsewhere from their snapshots, <see cref="InterpolationDelay"/> ticks behind the
-/// host's current tick, interpolated in their support's space (so a player standing on a moving ship stays on its
+/// Every frame: draws bodies owned elsewhere from their snapshots, each as little behind our tick as keeps a newer
+/// snapshot in hand (<see cref="SnapshotBuffer.Delay"/>), interpolated in their support's space (so a player standing on a moving ship stays on its
 /// deck). Players face the way they look.
 /// </summary>
 public sealed class RemoteBodySystem : ISystem
@@ -169,18 +177,26 @@ public sealed class RemoteBodySystem : ISystem
         _clock = clock;
     }
 
-    /// <summary>How far behind the host's tick remote bodies are drawn, in ticks: 6 (100 ms) by default.</summary>
-    public double InterpolationDelay { get; set; } = 6;
+    /// <summary>Extra delay, in ticks, on top of what each body needs (a debug setting).</summary>
+    public double Margin { get; set; }
 
-    public double RenderTick => _clock.Tick + (double)_clock.Alpha - InterpolationDelay;
+    /// <summary>The tick <paramref name="buffer"/>'s body is drawn at this frame.</summary>
+    public double RenderTick(SnapshotBuffer buffer) => _clock.Tick + (double)_clock.Alpha - buffer.Delay;
+
+    /// <summary>The longest and shortest delay remote bodies are drawn with, in ticks (for the network panel).</summary>
+    public (double Least, double Most) Delays { get; private set; }
 
     public void Update(float dt)
     {
-        double renderTick = RenderTick;
+        double least = double.MaxValue, most = 0;
         foreach (ref readonly var e in _remote.GetEntities())
         {
             if (e.Has<NetOwner>() && e.Get<NetOwner>().IsLocal) continue;
-            if (e.Get<RemoteBody>().Buffer.At(renderTick) is not { } s) continue;
+            var buffer = e.Get<RemoteBody>().Buffer;
+            buffer.Margin = Margin;
+            buffer.UpdateDelay(dt * 60 * _clock.Rate);
+            (least, most) = (System.Math.Min(least, buffer.Delay), System.Math.Max(most, buffer.Delay));
+            if (buffer.At(RenderTick(buffer)) is not { } s) continue;
             var (position, rotation) = ToWorld(s.Support, s.Position, s.Rotation);
             ref var t = ref e.Get<Transform>();
             t.Position = new Vector3D<float>(position.X, position.Y, position.Z);
@@ -195,6 +211,7 @@ public sealed class RemoteBodySystem : ISystem
             }
             else t.Rotation = new Quaternion<float>(rotation.X, rotation.Y, rotation.Z, rotation.W);
         }
+        Delays = most > 0 ? (least, most) : (0, 0);
     }
 
     /// <summary>A pose in a support's space, in world space (as the support is drawn now).</summary>

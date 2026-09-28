@@ -41,8 +41,10 @@ public sealed class NetDebugPanel : IDebugUiSystem
                            $"rate {_net.Clock.Rate:0.000}, snaps {client.ClockSync.SnapsPerMinute}/min");
                 break;
         }
-        float delay = (float)_remote.InterpolationDelay;
-        if (ImGui.SliderFloat("Interpolation delay (ticks)", ref delay, 4, 12, "%.1f")) _remote.InterpolationDelay = delay;
+        var (least, most) = _remote.Delays;
+        ImGui.Text($"Others drawn {least:0.0}-{most:0.0} ticks behind");
+        float margin = (float)_remote.Margin;
+        if (ImGui.SliderFloat("Extra delay (ticks)", ref margin, 0, 10, "%.1f")) _remote.Margin = margin;
 
         if (_net.Transport is { } t)
         {
