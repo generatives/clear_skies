@@ -40,21 +40,17 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     // Bounce (GpuRayLightPass bounce_main): albedo feeds the pass (changing it re-evaluates everything); each voxel
     // has a fixed set of rays x cycle directions, one slice of rays per evaluation, blended as a running average
     // over the first cycle and then with a weight of one cycle; the hold is how many evaluations a changed area gets
-    // (rounded up to whole cycles), counting near-camera repeats, so one near the camera can finish in one frame;
-    // scale multiplies the stored bounce when the display is composed.
+    // (rounded up to whole cycles); scale multiplies the stored bounce when the display is composed.
     private bool _bounceEnabled = true;
     private float _bounceAlbedo = 0.5f;
-    // With the hold at one full cycle and as many near-camera evaluations as the cycle, a change near the camera runs
-    // exactly its full ray set in one frame and stops. Farther away, one evaluation per frame averages the set in over
-    // cycle frames; cycle 1 (all rays each evaluation) would make those exact every frame too, at cycle x the rays.
+    // Within the near radius of the camera, a change runs its whole hold in the frame it happens (each evaluation reads
+    // the one before, adding a hop), so it is settled that frame; with the hold at one full cycle that is exactly its
+    // full ray set. Farther away, one evaluation per frame averages the set in over the hold's frames.
     private int _bounceRays = 8;
     private int _bounceCycle = 4;   // evaluations per full ray set: each voxel's fixed set is rays x cycle directions
-    private int _bounceHoldFrames = 4;
+    private int _bounceHoldFrames = 4;   // evaluations after a change
+    private float _bounceNearRadius = 64f;
     private float _bounceScale = 1f;
-
-    // A brick that changes again while still being evaluated has its evaluation count capped at this (blend
-    // weight 1/(n+1)) instead of restarting at 0, so continuously changing areas stay a little smoothed.
-    private int _bounceRechangeN = 2;
 
     // Gradual bounce: a changed world brick gets the full hold only within the first radius of the camera; out to
     // the second it gets the middle count, and past it the far count. As the camera comes closer, a brick is topped
@@ -64,10 +60,6 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     private float _bounceMidRadius = 768f;
     private int _bounceMidEvals = 2;
     private int _bounceFarEvals = 1;
-
-    // Held bricks within this many voxels of the camera are evaluated this many times per frame.
-    private int _bounceNearRepeats = 4;
-    private float _bounceNearRadius = 64f;
 
     // Per-frame work caps (world bricks, nearest the camera first; the rest wait for later frames). Ships are always
     // relit and bounced whole, on top of these.
@@ -136,9 +128,8 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         ImGui.SliderInt("Evaluations per full ray set", ref _bounceCycle, 1, 64);
         ImGui.TextDisabled($"  = {_bounceRays * _bounceCycle} fixed directions per voxel");
         ImGui.SliderInt("Bounce evaluations after a change", ref _bounceHoldFrames, 1, 64);
-        ImGui.SliderInt("Bounce re-change restart count", ref _bounceRechangeN, 0, 16);
-        ImGui.SliderInt("Near-camera evaluations per frame", ref _bounceNearRepeats, 1, 64);
-        ImGui.SliderFloat("Near-camera radius", ref _bounceNearRadius, 8f, 256f, "%.0f");
+        ImGui.SliderFloat("Settled-in-one-frame radius", ref _bounceNearRadius, 0f, 256f, "%.0f");
+        ImGui.TextDisabled("  changes within it run all their evaluations the frame they happen");
         ImGui.SliderFloat("Bounce display scale", ref _bounceScale, 0f, 4f, "%.2f");
         ImGui.Text("Gradual bounce (world bricks)");
         ImGui.SliderFloat("Full evaluations within (blocks)", ref _bounceFullRadius, 16f, 4096f, "%.0f");
