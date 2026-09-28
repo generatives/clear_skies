@@ -10,7 +10,7 @@ namespace ClearSkies.Engine.Voxels;
 /// Ray-traced voxel lighting over the shared <see cref="GridStore"/>: sun visibility and point-lamp shadows (any-hit
 /// DDA), and bounce light + ray AO (nearest-hit DDA), for every grid at once. A ray is carried into each grid's own
 /// voxel space and walked there, so ships shadow terrain, terrain shadows ships, and lamps on any grid light any
-/// other (bounce and AO rays stay in the voxel's own grid). Which grids and lamps a voxel tests comes from its chunk's list (<see cref="UploadLists"/>), so the cost
+/// other. Which grids and lamps a voxel tests comes from its chunk's list (<see cref="UploadLists"/>), so the cost
 /// per voxel doesn't grow with the number of ships or lamps elsewhere.
 ///
 /// <para>Work is a list of light slots (surface bricks) from any grid: one workgroup per brick, 256 threads each
@@ -513,7 +513,7 @@ fn compose_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) 
 
 // ── Bounce (one-hop indirect light, multi-hop through re-evaluation) ─────────────────────────────────────
 // Each evaluation, a surface air voxel fires p.bounce2.x short rays (up to BOUNCE_MAX), cosine-distributed
-// around its surface normal, within its own grid only: one slice of a fixed per-voxel direction set that a full
+// around its surface normal, through its chunk's grids: one slice of a fixed per-voxel direction set that a full
 // cycle of p.bounce2.y evaluations covers (see bounceVoxel). At each ray's nearest hit it reads the light
 // arriving at the hit face from the air cell in front of it: the brighter of that cell's direct sun
 // (visibility x strength x the face's N.L), its lamp light and its own stored bounce; a miss reads 0. The
@@ -524,9 +524,7 @@ fn compose_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) 
 // The same rays measure ambient occlusion: the fraction that hit nothing within BOUNCE_MAX is the voxel's sky
 // visibility (cosine-weighted, since the rays are), and one minus it is blended into bits 16-23 the same way.
 // The fragment shader scales the flat ambient by it, so caves and sealed rooms go dark while open ground,
-// whose rays all go up, stays fully lit. Unlike sun and lamp rays, bounce rays stay in their own grid: a ship
-// doesn't touch the ground's bounce and AO, nor the ground the ship's, so neither jumps about as ships move (with
-// 32 rays a voxel, each ray the ship crosses is a visible step) and a moving ship needs no bounce work around it.
+// whose rays all go up, stays fully lit. Rays cross grids, so a ship darkens the ground under it.
 // Reading the stored bounce at the hit is what makes it multi-hop:
 // each evaluation adds a hop, and the CPU keeps a changed area evaluating for a number of frames. Keep albedo
 // well below 1 or the feedback lingers (a removed light ghosts longer). Ambient is not bounced; it is
@@ -642,8 +640,8 @@ fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, slice: i32, list: u3
     let tx = normalize(cross(up, nLoc));
     let ty = cross(nLoc, tx);
 
-    let gd = grids[g];
-    let origin = vec3<f32>(v) + vec3<f32>(0.5);
+    let v2w = grids[g].v2w;
+    let origin = (v2w * vec4<f32>(vec3<f32>(v) + vec3<f32>(0.5), 1.0)).xyz;
     // Each voxel has one fixed set of rays * cycle directions, set by its position alone: a cosine-weighted
     // Fibonacci spiral (evenly spread, far less noisy than random directions), twisted and shifted per voxel so
     // neighbours differ. Evaluation n fires slice n mod cycle; slices interleave (direction j = k*cycle + slice), so
@@ -671,12 +669,23 @@ fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, slice: i32, list: u3
             dl = vec3<f32>(r * cos(phi), cz, r * sin(phi));
         }
 
-        // Walked in the voxel's own grid, in its voxel space (where dl already is).
-        var h: Hit;
-        h.hit = false;
-        let clip = slabClip(origin, dl, vec3<f32>(gd.bmin.xyz), vec3<f32>(gd.bmax.xyz), 0.0, BOUNCE_MAX);
-        if (clip.hit) { h = ddaNearest(g, origin, dl, clip.t0, clip.t1, gd.bmin.xyz, gd.bmax.xyz); }
-        if (h.hit) { sumL = sumL + radianceAt(g, h); }
+        let dw = (v2w * vec4<f32>(dl, 0.0)).xyz;
+        var bestT = BOUNCE_MAX;
+        var bestG = -1;
+        var best: Hit;
+        let gridCount = lists[list];
+        for (var gk = 0u; gk < gridCount; gk = gk + 1u) {
+            let gi = i32(lists[list + 1u + gk]);
+            let gd = grids[gi];
+            if (gd.table.y <= 0) { continue; }
+            let lo = (gd.w2v * vec4<f32>(origin, 1.0)).xyz;
+            let ld = (gd.w2v * vec4<f32>(dw, 0.0)).xyz;
+            let clip = slabClip(lo, ld, vec3<f32>(gd.bmin.xyz), vec3<f32>(gd.bmax.xyz), 0.0, bestT);
+            if (!clip.hit) { continue; }
+            let h = ddaNearest(gi, lo, ld, clip.t0, clip.t1, gd.bmin.xyz, gd.bmax.xyz);
+            if (h.hit && h.t < bestT) { bestT = h.t; bestG = gi; best = h; }
+        }
+        if (bestG >= 0) { sumL = sumL + radianceAt(bestG, best); }
         else { escaped = escaped + 1.0; }
     }
     let estimate = clamp(p.bounce.x * sumL / f32(rays), vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0;

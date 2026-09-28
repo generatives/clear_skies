@@ -13,12 +13,11 @@ namespace ClearSkies.Engine.ECS;
 // What makes a brick dirty:
 //  - everything, on the first frame, when the sun direction changes, or on the debug panel's relight button;
 //  - being newly given light storage (a chunk loaded or edited next to it);
-//  - a changed world occluder (a world chunk with solid in it that was loaded, edited or unloaded): the bricks right
-//    next to it, every brick whose sun ray passes through it (its bounds swept along the sun direction), and the full
-//    radius of every lamp whose reach overlaps it; for a placed block the bounce there is also cleared, and those
-//    bricks are relit and bounced the same frame, past the caps;
-//  - a ship that moved or was edited, at its old and new pose: the whole ship, and in other grids only the bricks
-//    whose sun ray passes through it and the lamps whose reach overlaps it (bounce rays stay in their own grid);
+//  - a changed occluder (a world chunk with solid in it that was loaded, edited or unloaded; a ship that moved or
+//    was edited, at its old and new pose): the bricks right next to it, every brick whose sun ray passes through it
+//    (its bounds swept along the sun direction), and the full radius of every lamp whose reach overlaps it;
+//    for a placed block or a moved ship the bounce there is also cleared, and those bricks are relit and bounced
+//    the same frame, past the caps;
 //  - a lamp that appeared, disappeared or moved: its full radius, at old and new positions.
 // A ship is all-or-nothing (it is small) and always processed; the static world is tracked per brick, and its marked
 // bricks wait in a queue that is worked through nearest the camera first, up to a per-frame cap, so a burst of chunk
@@ -96,8 +95,6 @@ public sealed partial class GpuLightSystem
     // darkens: a placed block, which can take light away (bounce there is then cleared rather than left to decay).
     private readonly List<(Vector3D<float> min, Vector3D<float> max, bool darkens)> _occluderChanges = new();
     private readonly List<(Vector3D<float> min, Vector3D<float> max)> _directChanges = new();
-    // A moved or edited ship's world bounds, at its old and new pose.
-    private readonly List<(Vector3D<float> min, Vector3D<float> max)> _shipMoves = new();
 
     // Debug-panel breakdown of why bricks were relit this frame.
     private string _dbgFullReason = "";
@@ -141,7 +138,6 @@ public sealed partial class GpuLightSystem
         _store.NewSlots.Clear();
 
         _occluderChanges.Clear();
-        _shipMoves.Clear();
         _directChanges.Clear();
         _bounceClears.Clear();
         CollectOccluderChanges(relightAll);
@@ -166,11 +162,6 @@ public sealed partial class GpuLightSystem
                 MarkSunShadow(mn, mx, sunDir, darkens);     // voxels whose sun ray passes through it
                 MarkLampsTouching(mn, mx, darkens);         // lamps whose rays may pass through it
                 if (darkens) ClearBounceAround(mn - pad, mx + pad);
-            }
-            foreach (var (mn, mx) in _shipMoves)
-            {
-                MarkSunShadow(mn, mx, sunDir, false);
-                MarkLampsTouching(mn, mx, false);
             }
             foreach (var (mn, mx) in _directChanges) MarkRegion(mn, mx);
             _marks.Flush(_markSlot);
@@ -337,9 +328,11 @@ public sealed partial class GpuLightSystem
             {
                 _dbgShipsMoved++;
                 st.LightAll = true;
-                // Other grids' bounce rays don't see the ship, so only what its sun and lamp rays reach changes.
-                if (st.HavePrev) _shipMoves.Add((st.PrevWorldMin, st.PrevWorldMax));
-                if (h.HasSolid) _shipMoves.Add((st.CurWorldMin, st.CurWorldMax));
+                // Like a placed block: the ship may now shade what it didn't, so the bounce around both poses and
+                // along both sun shadows restarts and is recomputed in full this frame, instead of blending with
+                // last frame's (which lags behind the ship and flickers as it moves).
+                if (st.HavePrev) _occluderChanges.Add((st.PrevWorldMin, st.PrevWorldMax, true));
+                if (h.HasSolid) _occluderChanges.Add((st.CurWorldMin, st.CurWorldMax, true));
             }
             st.HavePrev     = h.HasSolid;
             st.PrevPos      = lg.Pos;
