@@ -174,7 +174,7 @@ public sealed class CommandSystem : ISystem, IDebugUiSystem
         foreach (ref readonly var e in _describeRequests.GetEntities()) _unclaimed.Add(e);
         foreach (var e in _unclaimed)
         {
-            if (!Descriptions.Claimed(e)) Console.WriteLine($"[describe] nothing describes entity {e} (net ID {(e.Has<EntityId>() ? e.Get<EntityId>() : 0)})");
+            if (!Descriptions.Claimed(e)) Console.WriteLine($"[describe] nothing describes entity {e} ({(e.Has<EntityId>() ? e.Get<EntityId>() : EntityId.None)})");
             e.Remove<DescribeRequest>();
         }
     }
