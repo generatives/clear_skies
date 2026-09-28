@@ -124,13 +124,14 @@ public sealed class BodySync : ISystem, IDebugUiSystem
 
     private BodySnapshot GridSnapshot(Entity e)
     {
-        var body = e.Get<PhysicsBodyComponent>().Body;
+        ref readonly var pb = ref e.Get<PhysicsBodyComponent>();
+        var body = pb.Body;
         var (p, q) = _physics.GetBodyPose(body);
         return new BodySnapshot
         {
             Entity = e.Get<NetId>().Value,
             Epoch = e.Get<NetOwner>().Epoch,
-            Position = p,
+            Position = PhysicsConv.ToBepu(pb.EntityPosition(p, q)), // its block space, which edits don't move
             Rotation = q,
             LinearVelocity = _physics.GetBodyLinearVelocity(body),
             AngularVelocity = _physics.GetBodyAngularVelocity(body),
