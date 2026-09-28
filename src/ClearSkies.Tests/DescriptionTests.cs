@@ -54,14 +54,13 @@ public class DescriptionTests
         using var a = new HeadlessScene();
         var grid = Ship(a);
         a.Commands.Send(new SetGridLocked { Grid = grid.Get<NetId>().Value, Locked = false });
-        a.Tick(20); // it falls and gets a body, pivot and velocity
+        a.Tick(20); // it falls and gets a body and velocity
         var d = DescribeNow(a, grid);
 
         using var b = new HeadlessScene();
         Spawn(b, d);
         var copy = b.Registry.Find(d.NetId)!.Value;
         Assert.Equal(d.Hash, DescribeNow(b, copy).Hash);
-        Assert.Equal(grid.Get<ChunkGrid>().Volume.Pivot, copy.Get<ChunkGrid>().Volume.Pivot);
         copy.Get<ChunkGrid>().Volume.TryGetBlockEntity(1, 1, 1, out var lever);
         Assert.Equal(0.35f, lever.Get<Lever>().Value);
         Assert.False(copy.Get<DynamicGrid>().Locked);
@@ -73,6 +72,9 @@ public class DescriptionTests
         using var a = new HeadlessScene();
         var grid = Ship(a);
         a.Tick(3);
+        var body = grid.Get<PhysicsBodyComponent>().Body; // turned, so its centre of mass is off its block origin
+        a.Physics.SetBodyPose(body, a.Physics.GetBodyPose(body).position, Quaternion.CreateFromAxisAngle(Vector3.Normalize(new Vector3(1, 2, 3)), 0.7f));
+        a.Tick();
         var d = DescribeNow(a, grid);
         using var b = new HeadlessScene();
         Spawn(b, d);

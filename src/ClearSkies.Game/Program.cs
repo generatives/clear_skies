@@ -57,7 +57,7 @@ var registry = new NetRegistry(host.World);
 var idAllocator = new NetIdAllocator(saveDb.NextFreeId); // IDs never repeat across sessions
 registry.RequestBlock = idAllocator.NextBlock;
 
-// The static world is a volume like any other, with an identity Transform (set by ChunkVolume) and zero pivot, and a
+// The static world is a volume like any other, with an identity Transform (set by ChunkVolume), and a
 // reserved network ID. Its chunks each decide their own presence layers (see EntityPresenceSystem).
 var staticVolumeEntity = host.World.CreateEntity();
 var staticVolume = new ChunkVolume(staticVolumeEntity, host.World) { MeshIgnoresNeighbours = true, ChunksOwnPresence = true };
