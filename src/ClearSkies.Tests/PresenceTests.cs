@@ -318,7 +318,7 @@ public class SupportTests
     {
         var (scene, grid, player) = StandingOnPlatform();
         using var _ = scene;
-        player.Get<CharacterModeComponent>().FreeFly = true;
+        Players.SetFreeFlying(player, true);
         scene.Tick();
         Assert.False(player.Get<Support>().HasSupporter);
     }

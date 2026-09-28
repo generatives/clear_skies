@@ -43,7 +43,6 @@ public static class PlayerFactory
             // held, so you can steer mid-air and let go to avoid overshooting a ledge.
             airControlForceScale: 1f, airControlSpeedScale: 1f, airBrakeScale: 0.5f, entity: player);
         player.Set(new CharacterControllerComponent { Character = character, EyeHeight = EyeHeight });
-        player.Set(new CharacterModeComponent { FreeFly = d.FreeFly });
         player.Set(new Support());
         player.Set(new InterpolatedTransform { PositionOnly = true }); // moved by ticks, turned per frame by mouse-look
         player.Set(new Player { Id = d.Id, Name = d.Name, IsLocal = owner.IsLocal });
@@ -66,11 +65,11 @@ public static class PlayerFactory
         (look.Yaw, look.Pitch) = (d.Yaw, d.Pitch);
         ref var t = ref player.Get<Transform>();
         t.Position = PhysicsConv.ToSilk(d.Position);
-        t.Rotation = Quaternion<float>.CreateFromYawPitchRoll(d.Yaw, d.Pitch, 0f);
-        player.Get<CharacterModeComponent>().FreeFly = d.FreeFly;
+        t.Rotation = look.BodyRotation;
         player.Get<FreeFlyController>().MoveSpeed = d.FlySpeed;
+        Players.SetFreeFlying(player, d.FreeFly); // landing puts the capsule where the Transform now is
         ref var cc = ref player.Get<CharacterControllerComponent>();
-        cc.Character.TeleportTo(d.Position);
+        cc.Character.TeleportTo(d.Position); // (both no-ops while flying: there's no capsule)
         cc.Character.SetVelocity(d.Velocity);
     }
 
@@ -79,7 +78,7 @@ public static class PlayerFactory
         ref readonly var p = ref player.Get<Player>();
         ref readonly var look = ref player.Get<MouseLookComponent>();
         ref readonly var cc = ref player.Get<CharacterControllerComponent>();
-        bool freeFly = player.Get<CharacterModeComponent>().FreeFly;
+        bool freeFly = player.Has<FreeFlying>();
         return new PlayerDescription
         {
             Id = p.Id,

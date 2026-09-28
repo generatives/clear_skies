@@ -11,7 +11,7 @@ using Silk.NET.Maths;
 namespace ClearSkies.Game;
 
 /// <summary>Spawns the local player (free-fly by default, with a walking character body: toggle with V — see
-/// PlayerMovementSystem) overlooking the procedural sky world, and the camera that follows their eye.</summary>
+/// PlayerMovementSystem) overlooking the procedural sky world, and the camera at their eye.</summary>
 public static class TestScene
 {
     // Fallback spawn if the world has no spawn of its own (no island cluster found nearby).
@@ -43,12 +43,6 @@ public static class TestScene
             eyeTransform.Position = new Vector3D<float>(cameraOverride[0], cameraOverride[1], cameraOverride[2]);
             if (cameraOverride.Length >= 5) (yaw, pitch) = (cameraOverride[3], cameraOverride[4]);
         }
-        eyeTransform.Rotation = Quaternion<float>.CreateFromYawPitchRoll(yaw, pitch, 0f);
-
-        // The camera: placed at the local player's eye every frame by CameraFollowSystem.
-        var cam = host.World.CreateEntity();
-        cam.Set(eyeTransform);
-        cam.Set(new CameraComponent { Camera = new Camera(), Active = true });
 
         // The player: spawned through the command system (applied in the first tick), at the eye position less the
         // eye height (its Transform is the character capsule's centre).
@@ -65,6 +59,12 @@ public static class TestScene
                 Pitch = pitch,
             },
         });
+
+        // The camera: at the spawn until the player exists, then a child of the player at their eye (see EyeSystem).
+        var cam = host.World.CreateEntity();
+        eyeTransform.Rotation = Quaternion<float>.CreateFromYawPitchRoll(yaw, pitch, 0f);
+        cam.Set(eyeTransform);
+        cam.Set(new CameraComponent { Camera = new Camera(), Active = true });
 
         host.Input.CursorCaptured = false; // the F1 debug menu starts open, and F1 frees the cursor with it
         return eyeTransform.Position;

@@ -157,11 +157,11 @@ bool flightTest = args.Contains("--flight-test");
 host.AddSystem(new StreamingFlightTest(host, flightTest, flightTest ? () => host.Window.Native.Close() : null),
                SystemStage.Frame);
 // Per frame, after the ticks: draw between the last two ticks (children follow), then stream terrain around the view.
+host.AddSystem(gridPilot, SystemStage.Frame); // puts the camera under a piloted grid...
+host.AddSystem(new EyeSystem(host.World), SystemStage.Frame); // ...or at the local player's eye
 host.AddSystem(interpolation, SystemStage.Frame);
 host.AddSystem(hierarchy, SystemStage.Frame);
-host.AddSystem(new CameraFollowSystem(host.World), SystemStage.Frame); // the camera at the local player's eye
 host.AddSystem(chunkLoadSystem, SystemStage.Frame);
-host.AddSystem(gridPilot, SystemStage.Frame);
 host.AddSystem(new BlockTargetSystem(host.World, host.Input, host.Renderer, blockActions, editLimits), SystemStage.Frame);
 host.AddSystem(new HudUi(ui, host.Input, blockActions, gridPilot, host.Renderer.Atlas,
                          Path.Combine(AppContext.BaseDirectory, "Resources", "Icons")), SystemStage.Frame); // crosshair, hotbar
