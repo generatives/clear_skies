@@ -123,6 +123,7 @@ public class PresenceTests
     public void AGridOwnedElsewhereNearTheLocalPlayerIsAKinematicFollower()
     {
         using var scene = new HeadlessScene();
+        scene.Presence.ViewDistance = 1000f; // entities are drawn as far as the terrain
         scene.SpawnLocalPlayer(new Vector3(0, 60, 0), freeFly: true);
         var near = RemoteEntity(scene, new Vector3(50, 60, 0), player: false);
         var far = RemoteEntity(scene, new Vector3(900, 60, 0), player: false);
@@ -152,10 +153,21 @@ public class PresenceTests
     }
 
     [Fact]
+    public void RenderDistanceFollowsTheViewDistanceUpToItsLimit()
+    {
+        using var scene = new HeadlessScene(); // view distance 500
+        Assert.Equal(500f, scene.Presence.RenderDistance);
+        scene.Presence.RenderDistanceLimit = 200f;
+        Assert.Equal(200f, scene.Presence.RenderDistance);
+        scene.Presence.ViewDistance = 150f;
+        Assert.Equal(150f, scene.Presence.RenderDistance);
+    }
+
+    [Fact]
     public void RenderDistanceRemovesRenderedFromTheGridAndItsChildren()
     {
         using var scene = new HeadlessScene();
-        scene.Presence.RenderDistance = 100f;
+        scene.Presence.RenderDistanceLimit = 100f;
         scene.SpawnLocalPlayer(new Vector3(0, 60, 0), freeFly: true);
         var grid = scene.SpawnPlatform(new Vector3(0, 50, 0));
         scene.Tick(2);
@@ -318,7 +330,7 @@ public class SupportTests
     {
         var (scene, grid, player) = StandingOnPlatform();
         using var _ = scene;
-        player.Get<CharacterModeComponent>().FreeFly = true;
+        Players.SetFreeFlying(player, true);
         scene.Tick();
         Assert.False(player.Get<Support>().HasSupporter);
     }

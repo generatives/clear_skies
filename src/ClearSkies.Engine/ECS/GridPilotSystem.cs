@@ -22,10 +22,10 @@ public enum GridCameraMode { ThirdPerson, Locked }
 /// currently Selected Grid; <c>C</c> swaps between third-person and locked camera modes while
 /// piloting; <c>End</c> toggles Lock on the Selected Grid (freezes it in place — kinematic, ignores
 /// gravity/impulses); <c>Home</c> resets the Selected Grid's rotation to upright. Piloting drives
-/// the same free-fly camera entity the player always uses — no separate camera entity is created
-/// or swapped in — so chunk streaming, raycasting, etc. keep tracking one stable Entity the whole
-/// time. <see cref="CameraGridFollowComponent"/> is set on that entity while piloting so
-/// <see cref="BlockActionSystem"/> stops reading WASD/mouse-look into it.
+/// the player's own camera: while piloting it's a hierarchy child of the grid, orbiting it (third person) or sitting in
+/// it (locked), so it moves, and is drawn, with the grid; when piloting stops it goes back to the player's eye. The
+/// player stays where they are meanwhile (<see cref="Piloting"/>: standing still, riding along if they're aboard), so
+/// they carry on from there.
 /// </summary>
 public sealed class GridPilotSystem : ISystem
 {
@@ -41,15 +41,14 @@ public sealed class GridPilotSystem : ISystem
     private readonly ChunkVolume _staticVolume;
     private readonly PhysicsBodySystem _physicsBody;
 
-    private Entity _followedPlayer; // look angles and the follow tag
-    private Entity _followedCamera; // placed by UpdateCameraFollow
+    private Entity _pilot;  // the player piloting, tagged Piloting
+    private Entity _camera; // their camera, under the grid meanwhile
     private Entity _pilotedGridRoot;
     private bool   _isPiloting;
     private GridCameraMode _cameraMode = GridCameraMode.ThirdPerson;
 
-    // Mouse-look offset applied on top of the grid's own rotation (see UpdateCameraFollow), so
-    // looking around while piloting orbits the camera around the ship and keeps that same
-    // relative bearing as the ship turns, instead of snapping back to dead-behind every frame.
+    // Mouse-look relative to the grid's own rotation (see PlaceCamera), so looking around while piloting orbits the
+    // camera around the ship and keeps that same relative bearing as the ship turns.
     private float _localYaw;
     private float _localPitch;
     private float _cameraDistance = 16f;
@@ -66,6 +65,7 @@ public sealed class GridPilotSystem : ISystem
         _staticVolume     = staticVolume;
         _physicsBody     = physicsBody;
         _players         = world.GetEntities().With<LocalPlayer>().With<MouseLookComponent>().AsSet();
+        // Runs before the drawn poses are written, so the camera is drawn where the grid is this frame.
         _cameras         = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
         _selectedGrid    = world.GetEntities().With<DynamicGrid>().With<SelectedGridComponent>().AsSet();
     }
@@ -97,7 +97,7 @@ public sealed class GridPilotSystem : ISystem
         if (_isPiloting)
         {
             UpdateLookInput();
-            UpdateCameraFollow();
+            PlaceCamera();
         }
     }
 
@@ -115,14 +115,16 @@ public sealed class GridPilotSystem : ISystem
 
             foreach (ref readonly Entity player in _players.GetEntities())
             {
-                _followedPlayer = player;
-                player.Set(new CameraGridFollowComponent());
+                _pilot = player;
+                player.Set<Piloting>();
                 break;
             }
             foreach (ref readonly Entity cam in _cameras.GetEntities())
             {
                 if (!cam.Get<CameraComponent>().Active) continue;
-                _followedCamera = cam;
+                _camera = cam;
+                if (cam.Has<Eye>()) cam.Remove<Eye>();
+                Hierarchy.SetParent(cam, e, CameraLocal());
                 break;
             }
             return;
@@ -131,9 +133,9 @@ public sealed class GridPilotSystem : ISystem
 
     private void UpdateLookInput()
     {
-        if (!_input.CursorCaptured || !_followedPlayer.IsAlive) return;
+        if (!_input.CursorCaptured || !_pilot.IsAlive) return;
 
-        float sensitivity = _followedPlayer.Get<MouseLookComponent>().LookSensitivity;
+        float sensitivity = _pilot.Get<MouseLookComponent>().LookSensitivity;
         var delta = _input.MouseDelta;
         _localYaw -= delta.X * sensitivity;
         _localPitch -= delta.Y * sensitivity;
@@ -151,30 +153,15 @@ public sealed class GridPilotSystem : ISystem
         _isPiloting = false;
         _pilotedGridRoot = default;
 
-        if (_followedPlayer.IsAlive && _followedCamera.IsAlive)
+        // Back to the player's eye; they're where they were (Hierarchy detached the camera if the grid was destroyed).
+        if (_pilot.IsAlive)
         {
-            _followedPlayer.Remove<CameraGridFollowComponent>();
-
-            // MouseLookComponent reconstructs Rotation from Yaw/Pitch on the next mouse-look update, so
-            // both must be re-derived here from the camera's current facing — otherwise the very first
-            // mouse move snaps the view back to whatever stale Yaw/Pitch it had before piloting. Matches
-            // the exact convention PlayerMovementSystem builds Rotation with:
-            // forward = (-sin(yaw)cos(pitch), sin(pitch), -cos(yaw)cos(pitch)).
-            var rotation = _followedCamera.Get<Transform>().Rotation;
-            var forward = Vec.Rotate(rotation, new Vector3D<float>(0, 0, -1));
-
-            ref var look = ref _followedPlayer.Get<MouseLookComponent>();
-            look.Pitch = MathF.Asin(System.Math.Clamp(forward.Y, -1f, 1f));
-            look.Yaw   = MathF.Atan2(-forward.X, -forward.Z);
-            _followedPlayer.Get<Transform>().Rotation = Quaternion<float>.CreateFromYawPitchRoll(look.Yaw, look.Pitch, 0f);
-
-            // The player carries on from where the camera was, as when the camera itself was the player.
-            float eye = _followedPlayer.Has<CharacterControllerComponent>() ? _followedPlayer.Get<CharacterControllerComponent>().EyeHeight : 0f;
-            _followedPlayer.Get<Transform>().Position = _followedCamera.Get<Transform>().Position - new Vector3D<float>(0, eye, 0);
+            _pilot.Remove<Piloting>();
+            if (_camera.IsAlive) EyeSystem.Attach(_camera, _pilot);
         }
 
-        _followedPlayer = default;
-        _followedCamera = default;
+        _pilot = default;
+        _camera = default;
     }
 
     private void HandleLockAndRight()
@@ -193,28 +180,20 @@ public sealed class GridPilotSystem : ISystem
         }
     }
 
-    private void UpdateCameraFollow()
+    private void PlaceCamera()
     {
-        if (!_pilotedGridRoot.IsAlive || !_followedCamera.IsAlive) return;
+        if (_pilotedGridRoot.IsAlive && _camera.IsAlive) _camera.Set(CameraLocal());
+    }
 
-        // Where the grid is drawn (its body pose, the centre of mass, between its last two ticks): the camera follows
-        // what's on screen.
-        var gridTransform = _pilotedGridRoot.DrawnPose();
-        var gridPos = gridTransform.Position;
-        var gridRot = gridTransform.Rotation;
-
-        // lookRot first (relative to the ship's own facing), then gridRot on top — so panning the
-        // mouse orbits the camera around the ship, and turning the ship carries that bearing with it.
-        var lookRot = Quaternion<float>.CreateFromYawPitchRoll(_localYaw, _localPitch, 0f);
-        var cameraRot = gridRot * lookRot;
-
-        var localOffset = _cameraMode == GridCameraMode.ThirdPerson
+    /// <summary>The camera in the grid's own space (about its centre of mass): the look turns it relative to the grid,
+    /// and in third person it sits behind and above along that look, orbiting the grid as the mouse moves.</summary>
+    private LocalTransform CameraLocal()
+    {
+        var look = Quaternion<float>.CreateFromYawPitchRoll(_localYaw, _localPitch, 0f);
+        var offset = _cameraMode == GridCameraMode.ThirdPerson
             ? new Vector3D<float>(0, ThirdPersonUp, _cameraDistance)
             : new Vector3D<float>(0, LockedUp, 0);
-
-        ref var t = ref _followedCamera.Get<Transform>();
-        t.Position = gridPos + Vec.Rotate(cameraRot, localOffset);
-        t.Rotation = cameraRot;
+        return new LocalTransform { Position = Vec.Rotate(look, offset), Rotation = look, Scale = Vector3D<float>.One };
     }
 
     // ── debug UI ─────────────────────────────────────────────────────────────

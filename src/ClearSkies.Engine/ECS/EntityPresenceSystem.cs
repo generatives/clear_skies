@@ -73,9 +73,13 @@ public sealed class EntityPresenceSystem : ISystem, IDebugUiSystem
         _rangeOffsets = offsets.ToArray();
     }
 
-    /// <summary>How far away grids and players are drawn. Until rendering systems can release a grid's GPU resources
-    /// (S5) this is unlimited, so nothing ever loses <see cref="Rendered"/>.</summary>
-    public float RenderDistance { get; set; } = float.PositiveInfinity;
+    /// <summary>How far away grids and players are drawn: as far as the terrain (<see cref="ViewDistance"/>), up to
+    /// <see cref="RenderDistanceLimit"/>.</summary>
+    public float RenderDistance => MathF.Min(ViewDistance, RenderDistanceLimit);
+
+    /// <summary>The furthest grids and players are drawn at any view distance (e.g. the entity load window, past which
+    /// there's nothing to draw). Unlimited unless set.</summary>
+    public float RenderDistanceLimit { get; set; } = float.PositiveInfinity;
 
     /// <summary>Other players are servo followers within this distance of the local player: the load window.</summary>
     public float LoadRange { get; set; } = 1000f;
@@ -165,7 +169,7 @@ public sealed class EntityPresenceSystem : ISystem, IDebugUiSystem
     {
         if (rendered == e.Has<Rendered>()) return;
         if (rendered) e.Set<Rendered>(); else e.Remove<Rendered>();
-        Hierarchy.PropagatePresence(e);
+        Hierarchy.PropagateRendered(e);
     }
 
     // ── terrain ──────────────────────────────────────────────────────────────
@@ -238,8 +242,7 @@ public sealed class EntityPresenceSystem : ISystem, IDebugUiSystem
     public void DrawDebugUi()
     {
         ImGui.Text($"Session: {_session.Role}, {_session.LocalPeer}");
-        float render = float.IsPositiveInfinity(RenderDistance) ? 5000f : RenderDistance;
-        if (ImGui.SliderFloat("Entity render distance", ref render, 16f, 5000f, "%.0f")) RenderDistance = render;
+        ImGui.Text($"Entity render distance: {RenderDistance:0} (view distance {ViewDistance:0}, limit {RenderDistanceLimit:0})");
         ImGui.Text($"Terrain chunks with colliders: {_terrainColliders.Count}   Interests: {_interests.Count}");
         foreach (ref readonly Entity e in _roots.GetEntities())
         {
