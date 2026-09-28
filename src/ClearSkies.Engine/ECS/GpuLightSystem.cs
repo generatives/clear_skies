@@ -15,8 +15,8 @@ namespace ClearSkies.Engine.ECS;
 /// Ray-traced voxel lighting (see the "Ray-Traced Voxel Lighting" design doc). Every frame: pose each grid (the
 /// static world and every ship) in the shared <see cref="GridStore"/>, work out which surface bricks' lighting
 /// can have changed, and dispatch <see cref="GpuRayLightPass"/>'s sun, lamp and bounce passes over just those.
-/// Rays test occlusion against every grid that can reach them, so ships shadow terrain and each other, and lamps on
-/// any grid light any other. Change tracking and dispatch: GpuLightSystem.RayDirty.cs; per-chunk grid and lamp
+/// Sun and lamp rays test occlusion against every grid that can reach them, so ships shadow terrain and each other,
+/// and lamps on any grid light any other; bounce and AO rays stay in their own grid. Change tracking and dispatch: GpuLightSystem.RayDirty.cs; per-chunk grid and lamp
 /// lists: GpuLightSystem.Lists.cs.
 ///
 /// Runs after <c>GpuResidencySystem</c> (occupancy and light storage up to date) and before the render stages.
