@@ -14,15 +14,8 @@ public abstract class CommandHandlerBase
     internal CommandSystem Owner { get; set; } = null!;
 
     internal abstract Type CommandType { get; }
-    internal abstract void RunQueued(int slot);
-    internal abstract void ClearQueue();
     internal abstract void RunRemoteCommand(PeerId from, uint seq, ReadOnlySpan<byte> payload);
     internal abstract void RunEvent(in EventMeta meta, ReadOnlySpan<byte> payload);
-
-    // Prediction (only PredictedCommandHandler does anything).
-    internal virtual void RestorePrediction(uint seq) { }
-    internal virtual void ReapplyPrediction(uint seq) { }
-    internal virtual void ForgetPrediction(uint seq) { }
 }
 
 /// <summary>
@@ -38,8 +31,6 @@ public abstract class CommandHandlerBase
 /// </summary>
 public abstract class CommandHandler<T> : CommandHandlerBase where T : struct, ICommand
 {
-    private readonly List<T> _queued = new();
-
     /// <summary>Several per tick for one target: only the latest is sent (lever and wheel drags).</summary>
     public virtual bool Coalesce => false;
 
@@ -60,28 +51,9 @@ public abstract class CommandHandler<T> : CommandHandlerBase where T : struct, I
 
     internal sealed override Type CommandType => typeof(T);
 
-    /// <summary>Queues a command sent this tick; coalescing replaces an earlier one for the same target.</summary>
-    internal bool Enqueue(in T command, out int slot)
-    {
-        if (Coalesce)
-            for (int i = 0; i < _queued.Count; i++)
-                if (_queued[i].Target == command.Target)
-                {
-                    _queued[i] = command;
-                    slot = i;
-                    return false;
-                }
-        _queued.Add(command);
-        slot = _queued.Count - 1;
-        return true;
-    }
-
-    internal sealed override void ClearQueue() => _queued.Clear();
-
-    internal sealed override void RunQueued(int slot) => RunLocal(_queued[slot]);
-
-    /// <summary>A command from this machine: decided here, or predicted (if it can be) and sent to its authority.</summary>
-    private void RunLocal(T command)
+    /// <summary>A command from this machine, taken from <see cref="CommandSystem"/>'s outgoing commands: decided here,
+    /// or predicted (if it can be) and sent to its authority.</summary>
+    internal void RunLocal(T command)
     {
         var sys = Owner;
         var local = sys.Session.LocalPeer;
@@ -129,7 +101,10 @@ public abstract class CommandHandler<T> : CommandHandlerBase where T : struct, I
         var evt = Read(ref reader);
         if (meta.Origin == sys.Session.LocalPeer && TryConfirm(meta, payload, evt))
             return; // our own prediction coming back
-        ApplyEvent(evt, new ApplyContext(meta.Origin, IsAuthority: false, IsPrediction: false, meta.Tick), meta);
+        // The authority decided this before any of our predictions it hasn't answered yet, so it goes beneath them.
+        var m = meta;
+        sys.ApplyBeneathPredictions(meta.Authority,
+            () => ApplyEvent(evt, new ApplyContext(m.Origin, IsAuthority: false, IsPrediction: false, m.Tick), m));
     }
 
     /// <summary>Applies an event (not a prediction) and tells anyone listening.</summary>
@@ -157,14 +132,13 @@ public abstract class CommandHandler<T> : CommandHandlerBase where T : struct, I
 
 /// <summary>
 /// A command the sender applies straight away, before its authority confirms it. <see cref="Capture"/> records what
-/// <see cref="CommandHandler{T}.Apply"/> is about to change so a rejection can put it back with <see cref="Restore"/>.
-/// When the command's own event comes back as predicted nothing changes; if the authority adjusted it, the prediction
-/// is undone and the event applied instead.
+/// <see cref="CommandHandler{T}.Apply"/> is about to change so it can be put back with <see cref="Restore"/>. Each
+/// prediction waits in <see cref="CommandSystem"/>'s unconfirmed predictions until its authority answers: when the
+/// command's own event comes back as predicted nothing changes; if the authority adjusted it, the prediction is undone
+/// and the event applied instead; if it rejected it, the prediction is undone.
 /// </summary>
 public abstract class PredictedCommandHandler<T, TUndo> : CommandHandler<T> where T : struct, ICommand
 {
-    private readonly Dictionary<uint, (T Command, TUndo Undo, byte[] Payload)> _predictions = new();
-
     /// <summary>Captures what Apply is about to change, so a rejection can put it back.</summary>
     public abstract TUndo Capture(in T command);
 
@@ -172,42 +146,50 @@ public abstract class PredictedCommandHandler<T, TUndo> : CommandHandler<T> wher
 
     internal sealed override void TryPredict(in T command, uint seq, PeerId authority, byte[] payload)
     {
-        _predictions[seq] = (command, Capture(command), payload);
-        Apply(command, new ApplyContext(Owner.Session.LocalPeer, IsAuthority: false, IsPrediction: true, Owner.Tick));
-        Owner.AddPending(this, seq, authority);
+        var prediction = new Predicted(this, seq, authority, command, payload);
+        prediction.Redo();
+        Owner.AddPrediction(prediction);
     }
 
     internal sealed override bool TryConfirm(in EventMeta meta, ReadOnlySpan<byte> payload, in T evt)
     {
-        if (!_predictions.TryGetValue(meta.OriginSeq, out var p)) return false; // not ours any more: apply it
+        if (Owner.FindPrediction(meta.OriginSeq) is not Predicted p) return false; // not a prediction (any more): apply it
         if (payload.SequenceEqual(p.Payload))
         {
-            Owner.RemovePending(meta.OriginSeq);
-            _predictions.Remove(meta.OriginSeq);
+            Owner.ConfirmPrediction(p);
             return true;
         }
-        // Adjusted by the authority: undo the prediction (and any later ones to the same authority), apply the event
-        // as decided, then redo the later ones on top.
+        // Adjusted by the authority: the event as decided replaces the prediction.
         var e = evt;
         var m = meta;
-        Owner.Reconcile(meta.OriginSeq, () => ApplyEvent(e, new ApplyContext(m.Origin, false, false, m.Tick), m));
+        Owner.ReplacePrediction(p, () => ApplyEvent(e, new ApplyContext(m.Origin, false, false, m.Tick), m));
         return true;
     }
 
-    internal sealed override void RestorePrediction(uint seq)
+    /// <summary>One of this handler's predictions: the command, what applying it changed, and the bytes sent, to
+    /// compare with the event that comes back.</summary>
+    private sealed class Predicted : Prediction
     {
-        if (_predictions.TryGetValue(seq, out var p)) Restore(p.Undo);
+        private readonly PredictedCommandHandler<T, TUndo> _handler;
+        private readonly T _command;
+        private TUndo _undo = default!;
+        public readonly byte[] Payload;
+
+        public Predicted(PredictedCommandHandler<T, TUndo> handler, uint seq, PeerId authority, T command, byte[] payload)
+            : base(seq, authority)
+        {
+            _handler = handler;
+            _command = command;
+            Payload = payload;
+        }
+
+        public override void Undo() => _handler.Restore(_undo);
+
+        public override void Redo()
+        {
+            var sys = _handler.Owner;
+            _undo = _handler.Capture(_command);
+            _handler.Apply(_command, new ApplyContext(sys.Session.LocalPeer, IsAuthority: false, IsPrediction: true, sys.Tick));
+        }
     }
-
-    internal sealed override void ReapplyPrediction(uint seq)
-    {
-        if (!_predictions.TryGetValue(seq, out var p)) return;
-        _predictions[seq] = (p.Command, Capture(p.Command), p.Payload);
-        Apply(p.Command, new ApplyContext(Owner.Session.LocalPeer, IsAuthority: false, IsPrediction: true, Owner.Tick));
-    }
-
-    internal sealed override void ForgetPrediction(uint seq) => _predictions.Remove(seq);
-
-    /// <summary>Predictions waiting for their event (for tests and the debug panel).</summary>
-    public int PendingCount => _predictions.Count;
 }

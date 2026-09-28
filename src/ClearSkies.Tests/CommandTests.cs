@@ -320,7 +320,7 @@ public class PredictionTests
         Assert.Equal(0.3f, lever());
         Assert.Single(router.Commands);
         Assert.Equal(PeerId.Host, router.Commands[0].To);
-        Assert.Equal(1, scene.Commands.PendingCount);
+        Assert.Equal(1, scene.Commands.UnconfirmedPredictionCount);
     }
 
     [Fact]
@@ -331,7 +331,7 @@ public class PredictionTests
         scene.Commands.Send(new SetGridLocked { Grid = grid.Get<NetId>().Value, Locked = false });
         scene.Commands.Update(0);
         Assert.True(grid.Get<DynamicGrid>().Locked);
-        Assert.Equal(0, scene.Commands.PendingCount);
+        Assert.Equal(0, scene.Commands.UnconfirmedPredictionCount);
         var (to, id, seq, payload) = router.Commands[0];
         scene.Commands.ReceiveEvent(new EventMeta(Client, seq, PeerId.Host, grid.Get<NetId>().Value, 1, 0), id, payload);
         scene.Commands.Update(0);
@@ -349,7 +349,7 @@ public class PredictionTests
         scene.Commands.ReceiveEvent(new EventMeta(Client, seq, PeerId.Host, grid.Get<NetId>().Value, 1, 0), id, payload);
         scene.Commands.Update(0);
         Assert.Equal(0.3f, lever());
-        Assert.Equal(0, scene.Commands.PendingCount);
+        Assert.Equal(0, scene.Commands.UnconfirmedPredictionCount);
     }
 
     [Fact]
@@ -367,13 +367,13 @@ public class PredictionTests
             Ops = new[] { VoxelOp.SetBlock(new(2, 1, 2), BlockId.Wood, BlockOrientation.Upright) } });
         scene.Commands.Update(0);
         Assert.Equal(BlockId.Wood, v.GetBlock(2, 1, 2));
-        Assert.Equal(2, scene.Commands.PendingCount);
+        Assert.Equal(2, scene.Commands.UnconfirmedPredictionCount);
 
         scene.Commands.ReceiveRejection(PeerId.Host, router.Commands[0].Seq);
         scene.Commands.Update(0);
         Assert.Equal(0f, lever());                         // the rejected lever is back
         Assert.Equal(BlockId.Wood, v.GetBlock(2, 1, 2));    // the later edit is still predicted
-        Assert.Equal(1, scene.Commands.PendingCount);
+        Assert.Equal(1, scene.Commands.UnconfirmedPredictionCount);
     }
 
     [Fact]
@@ -405,7 +405,51 @@ public class PredictionTests
         scene.Commands.ReceiveEvent(new EventMeta(Client, seq, PeerId.Host, grid.Get<NetId>().Value, 1, 0), id, w.ToArray());
         scene.Commands.Update(0);
         Assert.Equal(0.25f, lever());
-        Assert.Equal(0, scene.Commands.PendingCount);
+        Assert.Equal(0, scene.Commands.UnconfirmedPredictionCount);
+    }
+
+    private static readonly PeerId OtherClient = new(3);
+
+    /// <summary>The host's event for another player's lever setting.</summary>
+    private static void ReceiveOthers(HeadlessScene scene, Entity grid, float value, uint eventNumber)
+    {
+        var handler = (SetLeverHandler)scene.Commands.HandlerFor(CommandIds.SetLever)!;
+        var w = new NetWriter();
+        handler.Write(w, Set(grid, value));
+        scene.Commands.ReceiveEvent(new EventMeta(OtherClient, 9, PeerId.Host, grid.Get<NetId>().Value, eventNumber, 0),
+                                    CommandIds.SetLever, w.ToArray());
+        scene.Commands.Update(0);
+    }
+
+    [Fact]
+    public void AnotherPlayersEventGoesBeneathOurWaitingPrediction()
+    {
+        var (scene, router, grid, lever) = ClientScene();
+        using var _ = scene;
+        scene.Commands.Send(Set(grid, 0.3f));
+        scene.Commands.Update(0);
+
+        // The host decided another player's setting first, then ours.
+        ReceiveOthers(scene, grid, 0.8f, eventNumber: 1);
+        Assert.Equal(0.3f, lever()); // ours still on top
+        var (_, id, seq, payload) = router.Commands[0];
+        scene.Commands.ReceiveEvent(new EventMeta(Client, seq, PeerId.Host, grid.Get<NetId>().Value, 2, 0), id, payload);
+        scene.Commands.Update(0);
+        Assert.Equal(0.3f, lever()); // as on the host
+        Assert.Equal(0, scene.Commands.UnconfirmedPredictionCount);
+    }
+
+    [Fact]
+    public void RejectingAPredictionLeavesWhatWasDecidedBeneathIt()
+    {
+        var (scene, router, grid, lever) = ClientScene();
+        using var _ = scene;
+        scene.Commands.Send(Set(grid, 0.3f));
+        scene.Commands.Update(0);
+        ReceiveOthers(scene, grid, 0.8f, eventNumber: 1);
+        scene.Commands.ReceiveRejection(PeerId.Host, router.Commands[0].Seq);
+        scene.Commands.Update(0);
+        Assert.Equal(0.8f, lever()); // the other player's setting, not the one from before either
     }
 
     [Fact]
