@@ -16,6 +16,8 @@ namespace ClearSkies.Engine.ECS;
 //  - a changed occluder (a world chunk with solid in it that was loaded, edited or unloaded; a ship that moved or
 //    was edited, at its old and new pose): the bricks right next to it, every brick whose sun ray passes through it
 //    (its bounds swept along the sun direction), and the full radius of every lamp whose reach overlaps it;
+//    for a placed block or a moved ship the bounce there is also cleared, and those bricks are relit and bounced in
+//    full the same frame, past the caps, so they are settled the frame they change;
 //  - a lamp that appeared, disappeared or moved: its full radius, at old and new positions.
 // A ship is all-or-nothing (it is small) and always processed; the static world is tracked per brick, and its marked
 // bricks wait in a queue that is worked through nearest the camera first, up to a per-frame cap, so a burst of chunk
@@ -43,8 +45,9 @@ public sealed partial class GpuLightSystem
 
     // Per light slot. Hold is how many more bounce evaluations the brick gets; N how many it has had since it went
     // from idle to changed (it picks the ray slice, N mod cycle, and the shader's blend weight, max(1/cycle,
-    // 1/(N+1))). A brick changed again while still held has N capped at the re-change setting rather than reset,
-    // so an area that changes every frame (a moving ship's shadow) keeps some smoothing instead of flickering.
+    // 1/(N+1))). A brick changed again while still held has N capped at the re-change setting rather than reset.
+    // (Not where bounce is cleared, as around a placed block or a moving ship: there it restarts and is recomputed
+    // in full that frame, so it is settled the frame it changes.)
     private bool[] _dirty = Array.Empty<bool>();
     private byte[] _hold = Array.Empty<byte>();
     private byte[] _n = Array.Empty<byte>();
@@ -194,17 +197,18 @@ public sealed partial class GpuLightSystem
         // -> bounce (accumulation; reads the display at its hits) -> compose again (display colour and AO, from lamp
         // rays plus the new bounce). Every brick whose sun or bounce changed is recomposed.
         _composeCount = 0;
-        int n = BuildLightWork(cam.Position);
-        _lastDirtyTotal = n;
-        _phaseTimer.Lap(3);
         _fullHold = hold;
         _tiersOn = haveCam;
         _tierCam = cam.Position;
+        CollectBounceClears(); // first, so the cleared bricks' direct light is redone this frame too
+        int n = BuildLightWork(cam.Position);
+        _lastDirtyTotal = n;
+        _phaseTimer.Lap(3);
         HoldBounce(hold, _bounceRechangeN, bounceReset);
+        HoldBounceClears(hold);
         _phaseTimer.Lap(4);
         if (n > 0) AddCompose(_scratch.AsSpan(0, n), 1);
 
-        CollectBounceClears(hold);
         int nClear = _clearSlots.Count;
         if (nClear > 0)
         {
@@ -326,8 +330,11 @@ public sealed partial class GpuLightSystem
             {
                 _dbgShipsMoved++;
                 st.LightAll = true;
-                if (st.HavePrev) _occluderChanges.Add((st.PrevWorldMin, st.PrevWorldMax, false));
-                if (h.HasSolid) _occluderChanges.Add((st.CurWorldMin, st.CurWorldMax, false));
+                // Like a placed block: the ship may now shade what it didn't, so the bounce around both poses and
+                // along both sun shadows restarts and is recomputed in full this frame, instead of blending with
+                // last frame's (which lags behind the ship and flickers as it moves).
+                if (st.HavePrev) _occluderChanges.Add((st.PrevWorldMin, st.PrevWorldMax, true));
+                if (h.HasSolid) _occluderChanges.Add((st.CurWorldMin, st.CurWorldMax, true));
             }
             st.HavePrev     = h.HasSolid;
             st.PrevPos      = lg.Pos;
@@ -365,9 +372,9 @@ public sealed partial class GpuLightSystem
         _prevLamps.AddRange(_lamps);
     }
 
-    /// <summary>The slots inside this frame's bounce-clear boxes (per brick in the world, a whole ship it touches):
-    /// their bounce restarts from zero, held for a full set of evaluations.</summary>
-    private void CollectBounceClears(int holdEvals)
+    /// <summary>The slots inside this frame's bounce-clear boxes (per brick in the world, a whole ship it touches);
+    /// see <see cref="HoldBounceClears"/>.</summary>
+    private void CollectBounceClears()
     {
         _clearSlots.Clear();
         if (_bounceClears.Count == 0) return;
@@ -384,8 +391,19 @@ public sealed partial class GpuLightSystem
                         foreach (int slot in lg.Handle.Slots) AddClear(slot);
                 }
             }
+    }
+
+    /// <summary>The cleared slots' bounce restarts from zero, held for a full set of evaluations (all of them this
+    /// frame, see <see cref="BuildBounceWork"/>).</summary>
+    private void HoldBounceClears(int holdEvals)
+    {
         foreach (int slot in _clearSlots)
         {
+            // A ship relit whole restarts and finishes its bounce whole (HoldBounce); held per brick as well, it would
+            // be evaluated again next frame.
+            int gi = _store.SlotGrid[slot];
+            if (gi != _worldIndex && gi >= 0 && _store.GridAt(gi) is { } g && _gridStates.TryGetValue(g, out var gs) && gs.AllThisFrame)
+                continue;
             // Restart the running average outright, even if the brick was already held this frame.
             _holdStamp[slot] = _frame;
             _n[slot] = 0;
@@ -612,8 +630,9 @@ public sealed partial class GpuLightSystem
             else if (resetAll) { st.BounceAllFrames = holdFrames; st.BounceAllN = 0; }
             else if (st.AllThisFrame)
             {
-                // Idle -> changed restarts the running average; changed again while held only caps it.
-                st.BounceAllN = st.BounceAllFrames == 0 ? 0 : System.Math.Min(st.BounceAllN, rechangeN);
+                // A relit ship restarts its running average and gets its whole hold this frame (BuildBounceWork), so
+                // it is exact and settled the frame it changes, however often it changes.
+                st.BounceAllN = 0;
                 st.BounceAllFrames = holdFrames;
             }
         }
@@ -729,21 +748,28 @@ public sealed partial class GpuLightSystem
 
         // Marked bricks, nearest first up to the cap; the rest wait for later frames. Marks that no longer need work
         // (freed slots, bricks of a ship already listed whole) are dropped as they come up.
+        // Bricks whose bounce is cleared this frame (a placed block or moved ship darkening them) are relit now, past
+        // the cap: their bounce is recomputed in full this frame and should see the new direct light.
         _relitList.Clear();
+        foreach (int slot in _clearSlots)
+            if (_dirty[slot]) TakeDirty(slot, ref n);
+        int urgent = _relitList.Count;
         _dirtyQueue.Recentre(camPos, _keepDirty ??= slot => _dirty[slot]);
-        while (_relitList.Count < _maxRelitPerFrame && _dirtyQueue.TryTake(out int slot))
-        {
-            if (!_dirty[slot]) continue;
-            _dirty[slot] = false;
-            var g = _store.SlotGrid[slot] >= 0 ? _store.GridAt(_store.SlotGrid[slot]) : null;
-            if (g == null || !_gridStates.TryGetValue(g, out var st) || st.AllThisFrame) continue;
-            _relitList.Add(slot);
-            Push(ref n, (uint)slot);
-        }
+        while (_relitList.Count - urgent < _maxRelitPerFrame && _dirtyQueue.TryTake(out int slot))
+            if (_dirty[slot]) TakeDirty(slot, ref n);
         _lastRelitWaiting = _dirtyQueue.Count;
 
         if (n > 0) Upload(ref _lightWork, n);
         return n;
+    }
+
+    private void TakeDirty(int slot, ref int n)
+    {
+        _dirty[slot] = false;
+        var g = _store.SlotGrid[slot] >= 0 ? _store.GridAt(_store.SlotGrid[slot]) : null;
+        if (g == null || !_gridStates.TryGetValue(g, out var st) || st.AllThisFrame) return;
+        _relitList.Add(slot);
+        Push(ref n, (uint)slot);
     }
 
     private readonly List<int> _relitList = new(), _bounceChosen = new();
@@ -766,14 +792,18 @@ public sealed partial class GpuLightSystem
             var st = _gridStates[lg.Handle];
             st.BounceAllThisFrame = st.BounceAllFrames > 0;
             if (!st.BounceAllThisFrame) continue;
-            st.BounceAllFrames--;
+            // Ships are small: wherever they are, they take the same-frame repeats (up to what's left of the hold), so
+            // a change is finished within its frame and the next frame doesn't blend in a different slice of rays.
             uint evals = (uint)System.Math.Min(st.BounceAllN, 255);
-            st.BounceAllN++;
+            int more = lg.Handle.IsWorld ? 0 : System.Math.Min(extra, st.BounceAllFrames - 1);
+            st.BounceAllFrames -= 1 + more;
+            st.BounceAllN += 1 + more;
             foreach (int slot in lg.Handle.Slots)
             {
                 Push(ref n, (uint)slot);
                 Push(ref n, evals);
-                if (nearRadius >= 0f && IsNear(slot, lg.VoxelToWorld, camPos, nearR2)) AddNear((uint)slot, evals, extra);
+                if (more > 0) AddNear((uint)slot, evals, more);
+                else if (nearRadius >= 0f && IsNear(slot, lg.VoxelToWorld, camPos, nearR2)) AddNear((uint)slot, evals, extra);
             }
         }
 
