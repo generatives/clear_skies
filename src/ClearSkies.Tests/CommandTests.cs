@@ -272,7 +272,7 @@ public class ControlCommandTests
         using var __ = scene;
         player.Get<Engine.Input.PlayerInput>() = new Engine.Input.PlayerInput { Pressed = Engine.Input.PlayerButtons.ToggleFly };
         scene.Tick();
-        Assert.False(player.Get<CharacterModeComponent>().FreeFly);
+        Assert.False(player.Has<FreeFlying>());
         Assert.True(scene.Commands.Stats.Applied > 0);
     }
 }

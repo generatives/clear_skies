@@ -33,7 +33,7 @@ public class CrewTests
         game.Tick(2);
         var (client, _) = game.Join("crew");
         var crew = LocalPlayerOf(client);
-        crew.Get<CharacterModeComponent>().FreeFly = false;
+        Players.SetFreeFlying(crew, false);
         crew.Get<CharacterControllerComponent>().Character.TeleportTo(new Vector3(-1, 51.4f, -1));
         game.Tick(60);
         return (game, ship, client, crew);
@@ -116,7 +116,7 @@ public class CrewTests
 
         // Terrain right where the crew member walks: their copy goes into it (their own machine keeps them out of it).
         for (int x = 10; x < 14; x++) for (int z = 10; z < 14; z++) game.Host.WorldVolume.SetBlock(x, 40, z, BlockId.Stone);
-        crew.Get<CharacterModeComponent>().FreeFly = true;
+        Players.SetFreeFlying(crew, true);
         crew.Get<Transform>().Position = new Vector3D<float>(11.5f, 40.5f, 11.5f);
         game.Tick(60);
         var (inTerrain, _) = game.Host.Physics.GetBodyPose(copy.Get<ServoBody>().Body);

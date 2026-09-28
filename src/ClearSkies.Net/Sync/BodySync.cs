@@ -123,7 +123,7 @@ public sealed class BodySync : ISystem, IDebugUiSystem
             s.Support = support.Supporter.Get<NetId>().Value;
             s.Position = support.LocalPosition;
         }
-        if (e.Has<CharacterControllerComponent>() && !(e.Has<CharacterModeComponent>() && e.Get<CharacterModeComponent>().FreeFly))
+        if (e.Has<CharacterControllerComponent>() && !e.Has<FreeFlying>())
             s.LinearVelocity = e.Get<CharacterControllerComponent>().Character.LinearVelocity;
         if (e.Has<MouseLookComponent>())
         {

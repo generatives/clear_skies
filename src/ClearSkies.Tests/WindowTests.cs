@@ -155,7 +155,7 @@ public class WindowTests
         crew.Get<Engine.Input.PlayerInput>() = new Engine.Input.PlayerInput { Pressed = Engine.Input.PlayerButtons.ToggleFly };
         client.Tick();
         crew.Get<Engine.Input.PlayerInput>() = default;
-        Assert.False(crew.Get<CharacterModeComponent>().FreeFly);
+        Assert.False(crew.Has<FreeFlying>());
         crew.Get<CharacterControllerComponent>().Character.TeleportTo(new Vector3(-1, 51.4f, -1));
         game.Tick(60);
         var seen = game.Host.Registry.Find(crew.Get<NetId>().Value)!.Value;
