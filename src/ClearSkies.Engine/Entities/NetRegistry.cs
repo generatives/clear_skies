@@ -63,6 +63,9 @@ public sealed class NetRegistry : IDisposable
     {
         if (_current.Next >= _current.End)
         {
+            // Normally the next block is already waiting: a client asks the host for one while it still has a quarter
+            // of its current block left, so spawning never waits on a round trip. Only if none came in time (or on the
+            // host, which hands them out itself) is one requested here.
             if (_blocks.Count == 0)
             {
                 var request = RequestBlock ?? throw new InvalidOperationException("No network IDs left and nowhere to get more.");

@@ -77,8 +77,8 @@ public class PlayerMovementTests
         var character = new PlayerCharacter(physics.Characters, new Vector3(0, 49.2f, 0), new Capsule(0.3f, 1f),
             0.01f, 2f, 100f, 70f, 6f, 5f, entity: player);
         player.Set(new CharacterControllerComponent { Character = character, EyeHeight = 0.7f });
-        player.Set(new CharacterModeComponent { FreeFly = freeFly });
         player.Set(new PlayerInput());
+        Players.SetFreeFlying(player, freeFly);
         return (world, physics, player);
     }
 
@@ -105,10 +105,10 @@ public class PlayerMovementTests
         var movement = new PlayerMovementSystem(world);
         player.Get<PlayerInput>() = new PlayerInput { Pressed = PlayerButtons.ToggleFly, Held = PlayerButtons.ToggleFly };
         movement.Update(1f / 60f);
-        Assert.False(player.Get<CharacterModeComponent>().FreeFly);
+        Assert.False(player.Has<FreeFlying>());
         player.Get<PlayerInput>() = new PlayerInput { Held = PlayerButtons.ToggleFly }; // still held, no new press
         movement.Update(1f / 60f);
-        Assert.False(player.Get<CharacterModeComponent>().FreeFly);
+        Assert.False(player.Has<FreeFlying>());
         physics.Dispose();
         world.Dispose();
     }
