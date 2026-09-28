@@ -135,11 +135,11 @@ host.AddSystem(interpolation, SystemStage.Simulation); // records this tick's po
 bool flightTest = args.Contains("--flight-test");
 host.AddSystem(new StreamingFlightTest(host, flightTest, flightTest ? () => host.Window.Native.Close() : null),
                SystemStage.Frame);
+host.AddSystem(gridPilot, SystemStage.Frame); // puts the camera under a piloted grid...
+host.AddSystem(new EyeSystem(host.World), SystemStage.Frame); // ...or at the local player's eye
 host.AddSystem(interpolation, SystemStage.Frame);
 host.AddSystem(hierarchy, SystemStage.Frame);
-host.AddSystem(new CameraFollowSystem(host.World), SystemStage.Frame); // the camera at the local player's eye
 host.AddSystem(chunkLoadSystem, SystemStage.Frame);
-host.AddSystem(gridPilot, SystemStage.Frame);
 var playerInput = new PlayerInputSystem(host.World, host.Input, meshSystem, host.Renderer, gridSelection);
 host.AddSystem(playerInput, SystemStage.Frame);
 host.AddSystem(new HudUi(ui, host.Input, playerInput, gridPilot, host.Renderer.Atlas,

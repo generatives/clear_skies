@@ -91,7 +91,6 @@ public sealed class HeadlessScene : IDisposable
         player.Set(new FreeFlyController { MoveSpeed = 10f });
         var character = new PlayerCharacter(Physics.Characters, position, new Capsule(0.3f, 1f), 0.01f, 2f, 100f, 70f, 6f, 5f, entity: player);
         player.Set(new CharacterControllerComponent { Character = character, EyeHeight = 0.7f });
-        player.Set(new CharacterModeComponent { FreeFly = freeFly });
         player.Set(new PlayerInput());
         player.Set(new Support());
         player.Set(new Player { Id = PlayerId.New(), Name = "test", IsLocal = true });
@@ -99,6 +98,7 @@ public sealed class HeadlessScene : IDisposable
         player.Set(new NetId { Value = Registry.Allocate() });
         player.Set(Session.LocalOwner());
         player.Set<OwnPresence>();
+        Players.SetFreeFlying(player, freeFly);
         return player;
     }
 

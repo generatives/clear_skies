@@ -12,7 +12,7 @@ using Silk.NET.Maths;
 namespace ClearSkies.Game;
 
 /// <summary>Spawns the local player (free-fly by default, with a walking character body: toggle with V — see
-/// PlayerMovementSystem) overlooking the procedural sky world, and the camera that follows their eye.</summary>
+/// PlayerMovementSystem) overlooking the procedural sky world, and the camera at their eye.</summary>
 public static class TestScene
 {
     // Fallback spawn if the world has no spawn of its own (no island cluster found nearby).
@@ -45,25 +45,21 @@ public static class TestScene
             eyeTransform.Position = new Vector3D<float>(cameraOverride[0], cameraOverride[1], cameraOverride[2]);
             if (cameraOverride.Length >= 5) (yaw, pitch) = (cameraOverride[3], cameraOverride[4]);
         }
-        eyeTransform.Rotation = Quaternion<float>.CreateFromYawPitchRoll(yaw, pitch, 0f);
-
-        // The camera: placed at the local player's eye every frame by CameraFollowSystem.
-        var cam = host.World.CreateEntity();
-        cam.Set(eyeTransform);
-        cam.Set(new CameraComponent { Camera = new Camera(), Active = true });
 
         // The player: its Transform is the character capsule's centre, EyeHeight below the eye.
         const float eyeHeight = 0.7f;
         var player = host.World.CreateEntity();
-        var playerTransform = eyeTransform;
-        playerTransform.Position -= new Vector3D<float>(0, eyeHeight, 0);
-        player.Set(playerTransform);
-        player.Set(new MouseLookComponent
+        var look = new MouseLookComponent
         {
             LookSensitivity = 0.0025f,
             Yaw             = yaw,    // default π: face +Z (yaw=π rotates default -Z forward to +Z)
             Pitch           = pitch,  // default ~26° downward — sees island surface at ~75 units ahead
-        });
+        };
+        var playerTransform = eyeTransform;
+        playerTransform.Position -= new Vector3D<float>(0, eyeHeight, 0);
+        playerTransform.Rotation = look.BodyRotation;
+        player.Set(playerTransform);
+        player.Set(look);
         player.Set(new FreeFlyController { MoveSpeed = 10f });
 
         // Capsule spawns under the eye position (PhysicsConv is internal to ClearSkies.Engine, so convert by hand).
@@ -87,7 +83,6 @@ public static class TestScene
             // held, so you can steer mid-air and let go to avoid overshooting a ledge.
             airControlForceScale: 1f, airControlSpeedScale: 1f, airBrakeScale: 0.5f, entity: player);
         player.Set(new CharacterControllerComponent { Character = character, EyeHeight = eyeHeight });
-        player.Set(new CharacterModeComponent { FreeFly = true }); // start in FreeFly — zero regression risk vs. today
         player.Set(new PlayerInput()); // filled each tick by InputSampleSystem
         player.Set(new InterpolatedTransform { PositionOnly = true }); // moved by ticks, turned per frame by mouse-look
         player.Set(new Support());
@@ -96,6 +91,12 @@ public static class TestScene
         player.Set(new NetId { Value = registry.Allocate() });
         player.Set(session.LocalOwner());
         player.Set<OwnPresence>();
+        Players.SetFreeFlying(player, true); // start free-flying — zero regression risk vs. today
+
+        // The camera: a child of the player at their eye (see EyeSystem).
+        var cam = host.World.CreateEntity();
+        cam.Set(new CameraComponent { Camera = new Camera(), Active = true });
+        EyeSystem.Attach(cam, player);
 
         host.Input.CursorCaptured = false; // the F1 debug menu starts open, and F1 frees the cursor with it
         return eyeTransform.Position;

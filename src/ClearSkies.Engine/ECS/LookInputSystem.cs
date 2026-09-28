@@ -2,7 +2,6 @@ using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Input;
 using DefaultEcs;
 using Silk.NET.Input;
-using Silk.NET.Maths;
 
 namespace ClearSkies.Engine.ECS;
 
@@ -38,16 +37,16 @@ public sealed class LookInputSystem : ISystem
         var delta = _input.MouseDelta;
         foreach (ref readonly Entity e in _lookers.GetEntities())
         {
-            // GridPilotSystem does its own looking while it flies the camera along a grid; while using an Interactive
-            // block the mouse moves the control, not the view (see BlockInteraction).
-            if (e.Has<CameraGridFollowComponent>() || e.Has<LookLockedComponent>()) continue;
+            // GridPilotSystem turns its own camera while the player pilots a grid; while using an Interactive block the
+            // mouse moves the control, not the view (see BlockInteraction).
+            if (e.Has<Piloting>() || e.Has<LookLockedComponent>()) continue;
 
             ref var look = ref e.Get<MouseLookComponent>();
             look.Yaw -= delta.X * look.LookSensitivity;
             look.Pitch -= delta.Y * look.LookSensitivity;
             float limit = MathF.PI / 2f - 0.01f;
             look.Pitch = System.Math.Clamp(look.Pitch, -limit, limit);
-            e.Get<Transform>().Rotation = Quaternion<float>.CreateFromYawPitchRoll(look.Yaw, look.Pitch, 0f);
+            e.Get<Transform>().Rotation = look.BodyRotation; // the head's pitch is the eye's (EyeSystem)
         }
     }
 }

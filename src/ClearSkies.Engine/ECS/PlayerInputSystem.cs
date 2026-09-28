@@ -280,13 +280,13 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
     }
 
     /// <summary>Turns the local player (and the active camera with them) to look straight at <paramref name="point"/>,
-    /// keeping the mouse-look angles in step so looking around resumes from there.</summary>
+    /// keeping the mouse-look angles in step so looking around resumes from there. The camera is also turned where it's
+    /// drawn this frame, which was placed before this ran.</summary>
     private void LookAt(Vector3D<float> point)
     {
         if (!CameraUtil.TryGetActive(_cameras, out var camera)) return;
         foreach (ref readonly Entity e in _players.GetEntities())
         {
-            ref var t    = ref e.Get<Transform>();
             ref var look = ref e.Get<MouseLookComponent>();
             var toPoint = point - camera.Position;
             if (toPoint.LengthSquared < 1e-8f) return;
@@ -295,9 +295,10 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
             float limit = MathF.PI / 2f - 0.01f;
             look.Yaw   = MathF.Atan2(-toPoint.X, -toPoint.Z);
             look.Pitch = System.Math.Clamp(MathF.Asin(System.Math.Clamp(toPoint.Y, -1f, 1f)), -limit, limit);
-            t.Rotation = Quaternion<float>.CreateFromYawPitchRoll(look.Yaw, look.Pitch, 0f);
+            e.Get<Transform>().Rotation = look.BodyRotation;
             foreach (ref readonly Entity c in _cameras.GetEntities())
-                if (c.Get<CameraComponent>().Active) c.Get<Transform>().Rotation = t.Rotation;
+                if (c.Get<CameraComponent>().Active && c.Has<DrawnTransform>())
+                    c.Get<DrawnTransform>().Value.Rotation = Quaternion<float>.CreateFromYawPitchRoll(look.Yaw, look.Pitch, 0f);
             return;
         }
     }
@@ -424,7 +425,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
         {
             ref readonly var cc = ref e.Get<CameraComponent>();
             if (!cc.Active) continue;
-            ref readonly var t = ref e.Get<Transform>();
+            var t = e.DrawnPose(); // the view on screen
             origin = t.Position;
             dir    = Vector3D.Normalize(Vec.Rotate(t.Rotation, new Vector3D<float>(0, 0, -1)));
             return true;
