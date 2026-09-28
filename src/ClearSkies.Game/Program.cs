@@ -44,7 +44,7 @@ var idAllocator = new NetIdAllocator();
 registry.RequestBlock = idAllocator.NextBlock;
 using var gridNetworking = new GridNetworking(host.World, registry, session);
 
-// The static world is a volume like any other, with an identity Transform (set by ChunkVolume) and zero pivot, and a
+// The static world is a volume like any other, with an identity Transform (set by ChunkVolume), and a
 // reserved network ID. Its chunks each decide their own presence layers (see EntityPresenceSystem).
 var staticVolumeEntity = host.World.CreateEntity();
 var staticVolume = new ChunkVolume(staticVolumeEntity, host.World) { MeshIgnoresNeighbours = true, ChunksOwnPresence = true };

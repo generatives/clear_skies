@@ -13,9 +13,9 @@ public static class DynamicGridFactory
     /// Its chunks mesh, light and get a body automatically (ChunkMeshSystem/GpuLightSystem/PhysicsBodySystem),
     /// and it becomes the Selected Grid.
     ///
-    /// The grid's Transform starts at <paramref name="spawnWorld"/> with the centre of the voxels' bounding box as
-    /// its pivot. PhysicsBodySystem then moves the pivot to the true centre of mass without moving the grid, so
-    /// the grid stays exactly where it spawned (for a single block the two centres coincide).
+    /// The grid's Transform is its block space, placed so the centre of the voxels' bounding box lands on
+    /// <paramref name="spawnWorld"/>. PhysicsBodySystem then puts the body at the centre of mass within that space,
+    /// which moves neither the Transform nor the blocks.
     /// </summary>
     public static void SpawnFromVoxels(
         World world, GridSelection selection,
@@ -24,13 +24,14 @@ public static class DynamicGridFactory
         // Defensive; saved files shouldn't contain air entries.
         var solid = voxels.Where(v => v.Id != BlockId.Air).ToList();
 
+        var centre = BoundsCentre(solid);
         var entity = world.CreateEntity();
         entity.Set(new DynamicGrid());
         var t = Transform.Identity;
-        t.Position = new Vector3D<float>(spawnWorld.X, spawnWorld.Y, spawnWorld.Z);
+        t.Position = new Vector3D<float>(spawnWorld.X, spawnWorld.Y, spawnWorld.Z) - centre;
         entity.Set(t);
 
-        var volume = new ChunkVolume(entity, world) { Pivot = BoundsCentre(solid) };
+        var volume = new ChunkVolume(entity, world);
         entity.Set(new ChunkGrid() { Volume = volume });
         foreach (var (x, y, z, id, orientation) in solid)
             volume.SetBlock(x, y, z, id, orientation);
