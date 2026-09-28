@@ -121,7 +121,9 @@ public class TransportTests
         {
             var q = Quaternion.Normalize(new Quaternion((float)rng.NextDouble() - .5f, (float)rng.NextDouble() - .5f, (float)rng.NextDouble() - .5f, (float)rng.NextDouble() - .5f));
             var back = QuaternionCodec.Unpack(QuaternionCodec.Pack(q));
-            Assert.True(MathF.Abs(Quaternion.Dot(q, back)) > 0.99999f);
+            if (Quaternion.Dot(q, back) < 0) back = -back; // the same rotation
+            float error = MathF.Max(MathF.Max(MathF.Abs(q.X - back.X), MathF.Abs(q.Y - back.Y)), MathF.Max(MathF.Abs(q.Z - back.Z), MathF.Abs(q.W - back.W)));
+            Assert.True(error < 1e-5f, $"off by {error}");
         }
     }
 

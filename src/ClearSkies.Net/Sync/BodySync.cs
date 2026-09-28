@@ -204,15 +204,18 @@ public sealed class RemoteBodySystem : ISystem
     public void Update(float dt)
     {
         double least = double.MaxValue, most = 0;
+        // Grids before players: a player standing on a ship is drawn on the ship as it's drawn this frame.
+        for (int pass = 0; pass < 2; pass++)
         foreach (ref readonly var e in _remote.GetEntities())
         {
             if (e.Has<NetOwner>() && e.Get<NetOwner>().IsLocal) continue;
+            if (e.Has<Player>() != (pass == 1)) continue;
             var buffer = e.Get<RemoteBody>().Buffer;
             buffer.Margin = Margin;
             buffer.UpdateDelay(dt * 60 * _clock.Rate);
             (least, most) = (System.Math.Min(least, buffer.Delay), System.Math.Max(most, buffer.Delay));
             if (buffer.At(RenderTick(buffer)) is not { } s) continue;
-            var (position, rotation) = Pose(e, s);
+            var (position, rotation) = Pose(e, s, drawn: true);
             ref var t = ref e.Get<Transform>();
             t.Position = new Vector3D<float>(position.X, position.Y, position.Z);
             if (e.Has<Player>())
@@ -229,19 +232,21 @@ public sealed class RemoteBodySystem : ISystem
         Delays = most > 0 ? (least, most) : (0, 0);
     }
 
-    /// <summary>Where a sample puts <paramref name="e"/>, in world space, about its own centre of mass if it's a grid.</summary>
-    public (Vector3 Position, Quaternion Rotation) Pose(Entity e, in SnapshotBuffer.Sample s)
+    /// <summary>Where a sample puts <paramref name="e"/>, in world space, about its own centre of mass if it's a grid:
+    /// relative to its support as it's <paramref name="drawn"/> this frame, or else as it is.</summary>
+    public (Vector3 Position, Quaternion Rotation) Pose(Entity e, in SnapshotBuffer.Sample s, bool drawn = false)
     {
-        var (position, rotation) = ToWorld(s.Support, s.Position, s.Rotation);
+        var (position, rotation) = ToWorld(s.Support, s.Position, s.Rotation, drawn);
         return (GridFrame.Centre(e, position, rotation), rotation);
     }
 
-    /// <summary>A pose in a support's space (its block space if it's a grid), in world space (as the support is drawn
-    /// now).</summary>
-    public (Vector3 Position, Quaternion Rotation) ToWorld(uint support, Vector3 position, Quaternion rotation)
+    /// <summary>A pose in a support's space (its block space if it's a grid), in world space: as the support is
+    /// <paramref name="drawn"/> this frame (a ship this machine simulates is drawn up to a tick behind its Transform,
+    /// see TickInterpolationSystem), or else as it is.</summary>
+    public (Vector3 Position, Quaternion Rotation) ToWorld(uint support, Vector3 position, Quaternion rotation, bool drawn = false)
     {
         if (support == 0 || !_registry.TryGet(support, out var s) || !s.Has<Transform>()) return (position, rotation);
-        ref readonly var st = ref s.Get<Transform>();
+        var st = drawn ? s.DrawnPose() : s.Get<Transform>();
         var sr = new Quaternion(st.Rotation.X, st.Rotation.Y, st.Rotation.Z, st.Rotation.W);
         return (new Vector3(st.Position.X, st.Position.Y, st.Position.Z) + Vector3.Transform(position - GridFrame.Pivot(s), sr), sr * rotation);
     }

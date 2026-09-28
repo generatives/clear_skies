@@ -79,7 +79,14 @@ public sealed class HeadlessScene : IDisposable
         _tick.Add(new PhysicsTransformSyncSystem(World, Physics));
         _tick.Add(hierarchy);
         _tick.Add(new SupportSystem(World, Physics));
+        Interpolation = new TickInterpolationSystem(World, Time);
+        _tick.Add(new LambdaSystem(() => Interpolation.Update(SystemStage.Simulation, Dt))); // records this tick's poses
     }
+
+    /// <summary>Frame timing, as the game's: <see cref="Frame"/> sets its Alpha, which drawing interpolates by.</summary>
+    public readonly Time Time = new();
+    public readonly TickInterpolationSystem Interpolation;
+    private readonly TickClock _frameClock = new();
 
     /// <summary>Puts a network session's systems in the tick: receive first, body sync and send last.</summary>
     public void AttachNet(ClearSkies.Net.Session.NetSession net)
@@ -114,8 +121,32 @@ public sealed class HeadlessScene : IDisposable
                 Clock.Tick++;
                 foreach (var s in _tick) s.Update(Dt);
             }
-            RemoteBodies?.Update(Dt); // per frame in the game
+            Draw(Dt);
         }
+    }
+
+    /// <summary>One frame of <paramref name="seconds"/> as the game runs it: the ticks it's due (clock sync's Rate
+    /// included), then drawing <see cref="ManualTickClock.Alpha"/> of the way between the last two ticks.</summary>
+    public void Frame(double seconds)
+    {
+        _frameClock.Rate = Clock.Rate;
+        uint before = Clock.Tick;
+        int ticks = _frameClock.Advance(seconds);
+        for (int i = 0; i < ticks; i++)
+        {
+            Clock.Tick++;
+            foreach (var s in _tick) s.Update(Dt);
+        }
+        if (Clock.Tick != before + (uint)ticks) _frameClock.Reset(); // clock sync snapped it, as HostTickClock does
+        Clock.Alpha = _frameClock.Alpha;
+        Draw((float)seconds);
+    }
+
+    private void Draw(float dt)
+    {
+        Time.Alpha = Clock.Alpha;
+        Interpolation.Update(SystemStage.Frame, dt);
+        RemoteBodies?.Update(dt); // after the interpolation, as in the game
     }
 
     /// <summary>Runs ticks until <paramref name="done"/> or <paramref name="max"/> ticks.</summary>
