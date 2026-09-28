@@ -39,6 +39,7 @@ public sealed class EngineHost : IDisposable
     {
         Options = options;
         World = new World();
+        PowerThrottling.OptOut(); // keep full speed when another window is in front
         Window = new GameWindow(options);
         Window.Native.Initialize();   // create the native window now (needed for the WebGPU surface)
 
@@ -60,6 +61,35 @@ public sealed class EngineHost : IDisposable
         Gui.RegisterDebugUi(Frame);
         Gui.RegisterDebugUi(new FrameTimingsPanel(this));
         Gui.RegisterDebugUi(Context.Timer);
+    }
+
+    /// <summary>Runs at most <paramref name="fps"/> frames a second, with vsync off. With vsync on, a window in the
+    /// background can be held to far fewer by the compositor; this keeps two instances side by side (a host and a
+    /// client) both at a steady rate.</summary>
+    public void CapFrameRate(int fps)
+    {
+        Context.VSync = false;
+        _framePeriod = 1.0 / fps;
+        PowerThrottling.FineTimer();
+    }
+
+    private double _framePeriod;  // 0: uncapped
+    private double _nextFrame;
+    private readonly System.Diagnostics.Stopwatch _paceClock = System.Diagnostics.Stopwatch.StartNew();
+
+    /// <summary>Waits until the next frame is due under <see cref="CapFrameRate"/>: sleeps most of the way, then spins
+    /// the last couple of milliseconds, as sleeps overshoot.</summary>
+    private void Pace()
+    {
+        if (_framePeriod <= 0) return;
+        double now;
+        while ((now = _paceClock.Elapsed.TotalSeconds) < _nextFrame)
+        {
+            if (_nextFrame - now > 0.002) Thread.Sleep(1);
+            else Thread.SpinWait(50);
+        }
+        // Due a period after the last one; after a slow frame, a period from now (no burst to catch up).
+        _nextFrame = System.Math.Max(_nextFrame + _framePeriod, now);
     }
 
     /// <summary>Schedules <paramref name="system"/> in an update stage (Input, Simulation, Frame or PreRender), after the
@@ -137,6 +167,7 @@ public sealed class EngineHost : IDisposable
 
     private void OnUpdate(double dt)
     {
+        Pace();
         RunStage(SystemStage.Input, (float)dt);
 
         int ticks = Clock.Advance(dt);

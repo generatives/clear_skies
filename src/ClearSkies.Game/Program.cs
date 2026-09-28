@@ -34,6 +34,20 @@ if (args.Contains("--benchmark"))
 // milliseconds, a visible hitch. Needs concurrent GC, which is on by default.
 System.Runtime.GCSettings.LatencyMode = System.Runtime.GCLatencyMode.SustainedLowLatency;
 
+// --backend vulkan|dx12|metal|gl: the graphics API, instead of wgpu's choice (a window in the background can fare
+// differently under each).
+{
+    int b = Array.IndexOf(args, "--backend");
+    if (b >= 0 && b + 1 < args.Length)
+        ClearSkies.Engine.Rendering.WebGpu.GpuContext.Backend = args[b + 1].ToLowerInvariant() switch
+        {
+            "vulkan" => Silk.NET.WebGPU.Extensions.WGPU.InstanceBackend.Vulkan,
+            "dx12" => Silk.NET.WebGPU.Extensions.WGPU.InstanceBackend.DX12,
+            "metal" => Silk.NET.WebGPU.Extensions.WGPU.InstanceBackend.Metal,
+            "gl" => Silk.NET.WebGPU.Extensions.WGPU.InstanceBackend.GL,
+            var other => throw new ArgumentException($"Unknown --backend {other}: vulkan, dx12, metal or gl."),
+        };
+}
 using var host = new EngineHost(new EngineOptions("Clear Skies", 1280, 720, LogGpuErrors: true));
 
 host.Renderer.LoadTextureAtlas(
@@ -41,6 +55,9 @@ host.Renderer.LoadTextureAtlas(
     Path.Combine(AppContext.BaseDirectory, "Resources", "spritesheet_tiles.xml"));
 
 string ArgValue(string name) { int i = Array.IndexOf(args, name); return i >= 0 && i + 1 < args.Length ? args[i + 1] : ""; }
+// --fps N: vsync off, at most N frames a second, so a window in the background doesn't slow down (for playing a host
+// and a client side by side, e.g. --fps 60 on both).
+if (int.TryParse(ArgValue("--fps"), out int fpsCap) && fpsCap > 0) host.CapFrameRate(fpsCap);
 // This machine's player: an ID kept in Saves/settings.txt, and a name. --name <player> plays as someone else, with
 // their own settings file (Saves/settings-<player>.txt), so two instances on one machine are two players.
 string nameArg = ArgValue("--name");
