@@ -94,7 +94,7 @@ public sealed class BlockActionSystem : ISystem, IDisposable, IDebugUiSystem
     private void Act(Entity player)
     {
         ref readonly var input = ref player.Get<PlayerInput>();
-        if (!input.Aiming || player.Has<CameraGridFollowComponent>())
+        if (!input.Aiming || player.Has<Piloting>())
         {
             EndInteraction(player);
             return;
@@ -222,7 +222,7 @@ public sealed class BlockActionSystem : ISystem, IDisposable, IDebugUiSystem
         float limit = MathF.PI / 2f - 0.01f;
         look.Yaw = MathF.Atan2(-toPoint.X, -toPoint.Z);
         look.Pitch = System.Math.Clamp(MathF.Asin(System.Math.Clamp(toPoint.Y, -1f, 1f)), -limit, limit);
-        player.Get<Transform>().Rotation = Quaternion<float>.CreateFromYawPitchRoll(look.Yaw, look.Pitch, 0f);
+        player.Get<Transform>().Rotation = look.BodyRotation;
     }
 
     public void Dispose() => _focusSubscription.Dispose();
