@@ -46,9 +46,10 @@ public struct MouseLookComponent
     public readonly Vector3D<float> Forward =>
         Vec.Rotate(Quaternion<float>.CreateFromYawPitchRoll(Yaw, Pitch, 0f), new Vector3D<float>(0, 0, -1));
 
-    /// <summary>How far the ship the player stands on turned the view (yaw, pitch) in the latest tick. The ship is
-    /// drawn between its last two ticks, so the view is drawn that much behind too (see
-    /// <see cref="TickInterpolationSystem"/>). Set with <see cref="TurnWith"/>.</summary>
+    /// <summary>How far the view was turned (yaw, pitch) by the latest tick: by the ship the player stands on
+    /// (<see cref="TurnWith"/>), or to keep it on a control they hold (<see cref="TurnTo"/>). Ticks happen less often
+    /// than frames, so the view is drawn that much behind, catching up by the next tick like the ship does (see
+    /// <see cref="TickInterpolationSystem"/>).</summary>
     public float TurnYaw { readonly get; private set; }
     public float TurnPitch { readonly get; private set; }
     private bool _turned;
@@ -56,11 +57,19 @@ public struct MouseLookComponent
     /// <summary>Turns the view with its support this tick.</summary>
     public void TurnWith(float yaw, float pitch)
     {
+        if (!_turned) TurnYaw = TurnPitch = 0f;
         Yaw += yaw;
         Pitch += pitch;
-        TurnYaw = yaw;
-        TurnPitch = pitch;
+        TurnYaw += yaw;
+        TurnPitch += pitch;
         _turned = true;
+    }
+
+    /// <summary>Turns the view to <paramref name="yaw"/> and <paramref name="pitch"/> this tick, the short way round.</summary>
+    public void TurnTo(float yaw, float pitch)
+    {
+        float turn = MathF.IEEERemainder(yaw - Yaw, 2f * MathF.PI);
+        TurnWith(turn, pitch - Pitch);
     }
 
     /// <summary>End of a tick: a tick that didn't turn the view leaves no turn to draw.</summary>
