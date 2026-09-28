@@ -5,7 +5,7 @@ using Silk.NET.Maths;
 
 namespace ClearSkies.Engine.Entities;
 
-/// <summary>A body's pose and velocity in world space.</summary>
+/// <summary>A pose and velocity in world space.</summary>
 public struct BodyState
 {
     public Vector3 Position;
@@ -39,11 +39,9 @@ public struct BodyState
 /// </summary>
 public sealed class GridDescription
 {
-    /// <summary>Its body (the centre of mass) in the world.</summary>
+    /// <summary>Where its block space (voxel (0,0,0)) is in the world, and its body's velocities (the linear one at its
+    /// centre of mass, which the blocks determine).</summary>
     public BodyState Body;
-
-    /// <summary>Where the body sits in the grid's own voxel space (see ChunkVolume.Pivot).</summary>
-    public Vector3 Pivot;
 
     public bool Locked = true;
 
@@ -56,9 +54,8 @@ public sealed class GridDescription
     /// <summary>A new grid of <paramref name="voxels"/> whose bounding box centre is at <paramref name="position"/>.</summary>
     public static GridDescription FromVoxels(Vector3 position, IEnumerable<GridVoxel> voxels)
     {
-        var d = new GridDescription { Body = BodyState.At(position), Voxels = voxels.Where(v => v.Id != BlockId.Air).ToList() };
-        d.Pivot = BoundsCentre(d.Voxels);
-        return d;
+        var solid = voxels.Where(v => v.Id != BlockId.Air).ToList();
+        return new GridDescription { Body = BodyState.At(position - BoundsCentre(solid)), Voxels = solid };
     }
 
     /// <summary>Centre of the voxels' bounding box (each voxel spans [v, v+1]), or zero if there are none.</summary>
@@ -79,7 +76,6 @@ public sealed class GridDescription
     public void Write(NetWriter w)
     {
         Body.Write(w);
-        w.WriteVector3(Pivot);
         w.WriteBool(Locked);
         using (var ms = new MemoryStream())
         {
@@ -94,7 +90,7 @@ public sealed class GridDescription
 
     public static GridDescription Read(ref NetReader r)
     {
-        var d = new GridDescription { Body = BodyState.Read(ref r), Pivot = r.ReadVector3(), Locked = r.ReadBool() };
+        var d = new GridDescription { Body = BodyState.Read(ref r), Locked = r.ReadBool() };
         using (var ms = new MemoryStream(r.ReadBytes().ToArray())) d.Voxels = GridSerializer.Read(ms);
         uint levers = r.ReadVarUInt();
         for (int i = 0; i < levers; i++) d.Levers.Add((ReadCell(ref r), r.ReadSingle()));
