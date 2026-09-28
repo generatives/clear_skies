@@ -31,6 +31,7 @@ public sealed class HeadlessScene : IDisposable
     public readonly EditLimits Limits = new();
     public uint TickNumber;
     private readonly List<Engine.Core.ISystem> _tick = new();
+    private readonly TickInterpolationSystem _interpolation;
 
     public HeadlessScene(Session? session = null)
     {
@@ -68,6 +69,7 @@ public sealed class HeadlessScene : IDisposable
         _tick.Add(new PhysicsTransformSyncSystem(World, Physics));
         _tick.Add(hierarchy);
         _tick.Add(new SupportSystem(World, Physics));
+        _interpolation = new TickInterpolationSystem(World, new Engine.Core.Time()); // last, as in the game
     }
 
     public void Tick(int count = 1)
@@ -76,6 +78,7 @@ public sealed class HeadlessScene : IDisposable
         {
             TickNumber++;
             foreach (var s in _tick) s.Update(Dt);
+            _interpolation.Update(Engine.Core.SystemStage.Simulation, Dt);
         }
     }
 

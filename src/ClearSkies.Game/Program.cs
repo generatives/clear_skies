@@ -74,7 +74,7 @@ host.AddSystem(ui, SystemStage.Input);
 // TickClock). Mouse-look runs per frame before them; presses are collected per frame and handed to the next tick as
 // the player's PlayerInput, which is all tick systems read. Moving things are drawn between their last two ticks.
 host.AddSystem(new LookInputSystem(host.World, host.Input), SystemStage.Input);
-var inputSample = new InputSampleSystem(host.World, host.Input);
+var inputSample = new InputSampleSystem(host.World, host.Input, host.Time);
 host.AddSystem(inputSample, SystemStage.Input); // latches the frame's input
 var interpolation = new TickInterpolationSystem(host.World, host.Time);
 var hierarchy = new HierarchyTransformSystem(host.World);
@@ -102,7 +102,7 @@ var physicsBody = new PhysicsBodySystem(host.World, host.Physics);
 // are loaded closest-first until it's spent (see ChunkLoadSystem); only surfaces use it, so solid stone inside an
 // island is nearly free. The GPU store adds a fifth on top for headroom and ships. --light-budget-mb N overrides it,
 // e.g. for a software renderer whose small max buffer size can't hold it (the store also shrinks it to fit).
-int LightBudgetMb = 2048;
+int LightBudgetMb = 512;
 int budgetArg = Array.IndexOf(args, "--light-budget-mb");
 if (budgetArg >= 0 && budgetArg + 1 < args.Length) LightBudgetMb = int.Parse(args[budgetArg + 1]);
 // View distance: how far out (in blocks, horizontally) islands are streamed, if the budget reaches. The GPU's world
@@ -133,13 +133,16 @@ host.AddSystem(new PlayerMovementSystem(host.World, commands), SystemStage.Simul
 // Milestone 5: airship flight (velocity control law + Fan/Buoyant propulsion, merged into one system —
 // see AirshipFlightSystem), before the physics step so its impulses are integrated this same tick.
 var gridPilot = new GridPilotSystem(host.World, host.Input, host.Physics, staticVolume, physicsBody, commands);
-// Place, break, spawn and use controls (levers and wheels, whose control systems turn drags into commands), then apply
-// every command sent this tick.
+// Place, break, spawn and use controls (levers and wheels, whose control systems turn drags into commands as the
+// interactions are published), then apply every command sent this tick, then pose the controls from what the commands
+// set, so an arm is posed this tick where the view was turned to keep on it.
 var blockActions = new BlockActionSystem(host.World, commands, editLimits, gridSelection);
 host.AddSystem(blockActions, SystemStage.Simulation);
-host.AddSystem(new LeverControlSystem(host.World, commands), SystemStage.Simulation);
-host.AddSystem(new SteeringWheelControlSystem(host.World, commands), SystemStage.Simulation);
+var levers = new LeverControlSystem(host.World, commands);
+var wheels = new SteeringWheelControlSystem(host.World, commands);
 host.AddSystem(commands, SystemStage.Simulation);
+host.AddSystem(levers, SystemStage.Simulation);
+host.AddSystem(wheels, SystemStage.Simulation);
 var airshipFlight = new AirshipFlightSystem(host.World, host.Physics);
 host.AddSystem(airshipFlight, SystemStage.Simulation);
 var presence = new EntityPresenceSystem(host.World, session, staticVolume, ViewDistance);
@@ -187,7 +190,7 @@ host.AddSystem(new BlockModelSystem(host.World, blockModels), SystemStage.PreRen
 // closes it with ImGui and presents. Each render system is handed this frame's camera and time.
 using var clouds = new CloudRenderSystem(host.Renderer, new HeartCloudDensity(seed));
 host.AddSystem(new ChunkRenderSystem(host.World, host.Renderer, staticVolume), SystemStage.RenderWorld);
-host.AddSystem(new ModelRenderSystem(host.World, host.Renderer), SystemStage.RenderWorld);
+host.AddSystem(new ModelRenderSystem(host.World, host.Renderer, host.Time), SystemStage.RenderWorld);
 host.AddSystem(clouds, SystemStage.RenderWorld);
 host.AddSystem(new SkyRenderSystem(host.Renderer), SystemStage.RenderSky);
 host.AddSystem(new WireframeRenderSystem(host.World, host.Renderer), SystemStage.RenderOverlay);
