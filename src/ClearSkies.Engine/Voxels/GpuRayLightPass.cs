@@ -233,7 +233,8 @@ fn slabClip(o: vec3<f32>, d: vec3<f32>, lo: vec3<f32>, hi: vec3<f32>, tLo: f32, 
 // grid and lamp there is. Layout of lists:
 //   [0, 2)                 the empty list (no grids, no lamps), for chunks with no list this frame;
 //   [2, 2 + table size)    per chunk-table entry, the offset of that chunk's list;
-//   [p.counts.y, ...)      lamp records, 8 words each: world position xyz, level (= reach), colour rgb, 0 (f32 bits);
+//   [p.counts.y, ...)      lamp records, 8 words each: world position xyz, level (= reach), colour rgb (f32 bits), and
+//                          open faces (bits 0-5: +x, -x, +y, -y, +z, -z in its grid) | its grid index << 6;
 //   then the lists: grid count, grid indices, lamp count, lamp indices.
 // A chunk's grids are every grid whose solid can block a ray from it: the world, its own grid, and any ship near
 // it or between it and the sun.
@@ -460,13 +461,33 @@ fn sun_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg:
 
 // ── Lamps and composition ─────────────────────────────────────────────────────────────────────────────────
 
+// Whether light from a lamp (centre c, open faces `open` of grid g) reaches world point dest: from each open face
+// dest is in front of, a segment from just past the face (inside the open cell) to it, lit if any is
+// clear. Faces the point is behind don't count, so a lamp with its top and bottom open lights what is below it
+// exactly as one open only at the bottom. Starting at the face rather than the lamp's centre keeps a lamp set in a
+// ceiling or wall from being blocked by the blocks beside it, so it lights along a tunnel; starting in the open cell
+// (not stopping short of the lamp) still tests every block the light passes, so it can't leak through diagonals.
+fn lampReaches(list: u32, c: vec3<f32>, open: u32, g: i32, dest: vec3<f32>) -> bool {
+    let m = grids[g].v2w;
+    for (var f = 0u; f < 6u; f = f + 1u) {
+        if ((open & (1u << f)) == 0u) { continue; }
+        let s = select(-1.0, 1.0, (f & 1u) == 0u);
+        var nl = vec3<f32>(0.0, 0.0, s);
+        if (f < 2u) { nl = vec3<f32>(s, 0.0, 0.0); } else if (f < 4u) { nl = vec3<f32>(0.0, s, 0.0); }
+        let n = (m * vec4<f32>(nl, 0.0)).xyz;
+        let o = c + n * 0.501;
+        let d = dest - o;
+        if (dot(d, n) <= 0.0) { continue; } // behind this face
+        let len = length(d);
+        if (len < 1e-4 || !anyOccluderAlongSegment(list, o, d / len, len, false)) { return true; }
+    }
+    return false;
+}
+
 // Point-lamp light (linear 0-1 per channel) at air voxel v, from the lamps in its chunk's list. No same-grid special
 // case: a lamp on this very grid goes through the identical world-space any-hit test as a lamp on another grid
-// entirely. Rays are traced FROM the lamp TO the voxel over the full distance, skipping only the lamp's own
-// starting cell. (Shortening the ray by a fixed radius instead let exact 45-degree rays stop inside an open
-// diagonal cell before reaching the lamp cell's edge/corner, so the face blocks covering the lamp were never on
-// the tested segment and light leaked through the diagonals.) Each lamp falls off one level per block from its
-// level, times its colour; per channel the brightest lamp wins.
+// entirely (see lampReaches). Each lamp falls off one level per block from its centre, from its level, times its
+// colour; per channel the brightest lamp wins.
 fn lampLight(g: i32, v: vec3<i32>, list: u32) -> vec3<f32> {
     let world = (grids[g].v2w * vec4<f32>(vec3<f32>(v) + vec3<f32>(0.5), 1.0)).xyz;
     var best = vec3<f32>(0.0);
@@ -484,7 +505,8 @@ fn lampLight(g: i32, v: vec3<i32>, list: u32) -> vec3<f32> {
         let c = vec3<f32>(contribF) * col;
         if (contribF <= 0.0 || all(c <= best)) { continue; }
 
-        if (!anyOccluderAlongSegment(list, lamp.xyz, -toLamp / dist, dist, true)) {
+        let faces = lists[r + 7u];
+        if (lampReaches(list, lamp.xyz, faces & 63u, i32(faces >> 6u), world)) {
             best = max(best, c);
         }
     }

@@ -90,9 +90,10 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     private readonly List<WorldLamp>           _lamps = new();
 
     // Grid/Local identify the lamp block (grid index, grid-space voxel), so a lamp riding a moving ship stays the
-    // same lamp; World is where it is this frame.
+    // same lamp; World is where it is this frame. Open: which of its faces (bit f: +x, -x, +y, -y, +z, -z in grid
+    // space) border a cell light passes through; its light leaves from those.
     private readonly record struct WorldLamp(Vector3D<float> World, int Level, Vector3D<float> Color,
-                                             int Grid, Vector3D<int> Local);
+                                             int Grid, Vector3D<int> Local, int Open);
 
     public GpuLightSystem(World world, ChunkVolume staticVolume, GpuContext ctx, GridStore store)
     {
@@ -275,9 +276,23 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
                     var world = lg.VoxelToWorld.TransformPoint(local);
                     var col = BlockRegistry.Get(em.Block).EffectiveLightColor;
                     var voxel = new Vector3D<int>(cpos.X * ChunkData.Size + em.Lx, cpos.Y * ChunkData.Size + em.Ly, cpos.Z * ChunkData.Size + em.Lz);
-                    _lamps.Add(new WorldLamp(world, em.Level, col, lg.Handle.Index, voxel));
+                    _lamps.Add(new WorldLamp(world, em.Level, col, lg.Handle.Index, voxel, OpenFaces(lg.Vol, voxel)));
                 }
             }
+    }
+
+    /// <summary>Which faces of the block at <paramref name="v"/> border a cell light passes through (bit f: +x, -x,
+    /// +y, -y, +z, -z). Unloaded neighbours count as open.</summary>
+    private static int OpenFaces(ChunkVolume vol, Vector3D<int> v)
+    {
+        int open = 0;
+        for (int f = 0; f < 6; f++)
+        {
+            int s = (f & 1) == 0 ? 1 : -1;
+            var n = f < 2 ? new Vector3D<int>(s, 0, 0) : f < 4 ? new Vector3D<int>(0, s, 0) : new Vector3D<int>(0, 0, s);
+            if (BlockRegistry.Get(vol.GetBlock(v.X + n.X, v.Y + n.Y, v.Z + n.Z)).Opacity < 15) open |= 1 << f;
+        }
+        return open;
     }
 
     // ── Grid transforms ───────────────────────────────────────────────────────
