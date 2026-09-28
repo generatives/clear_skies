@@ -13,7 +13,11 @@ public sealed record ModelData(IReadOnlyList<ModelNode> Nodes, IReadOnlyList<Mod
 /// <summary>One node of a model's tree: its name (null if unnamed), parent index (-1 for a root, always lower than
 /// this node's own index) and rest-pose local transform.</summary>
 public sealed record ModelNode(string? Name, int Parent, Vector3D<float> Translation, Quaternion<float> Rotation,
-                               Vector3D<float> Scale);
+                               Vector3D<float> Scale)
+{
+    /// <summary>Its rest-pose local transform as a <see cref="NodePose"/>.</summary>
+    public NodePose Rest => new(Translation, Rotation, Scale);
+}
 
 /// <summary>
 /// One draw's worth of a model: triangles sharing a node and a material, in that node's local space (<see cref="Node"/>

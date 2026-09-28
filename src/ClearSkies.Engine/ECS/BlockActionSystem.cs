@@ -19,7 +19,7 @@ namespace ClearSkies.Engine.ECS;
 /// breaks the targeted block (both <see cref="EditVoxels"/>), with a brush in creative mode; G spawns a one-block grid
 /// (<see cref="SpawnGrid"/>).
 /// Left-clicking an <see cref="Interactive"/> block uses it instead: <see cref="BlockInteraction"/>s are published for
-/// it until the button is released, with the mouse moving the control (whose system sends SetLever or SetWheel) rather
+/// it until the button is released, with the mouse moving the control (whose system sends SetShipThrust or SetShipTurn) rather
 /// than the view, which follows whatever point the control reports the player has hold of
 /// (<see cref="InteractionFocus"/>). Aims from the player's true eye and look, not the drawn camera. Split from the
 /// old PlayerInputSystem; the targeted-face highlight is <see cref="BlockTargetSystem"/>.
@@ -78,7 +78,7 @@ public sealed class BlockActionSystem : ISystem, IDisposable, IDebugUiSystem
         _limits = limits;
         _selection = selection;
         _players = world.GetEntities().With<LocalPlayer>().With<PlayerInput>().With<Transform>().With<MouseLookComponent>().AsSet();
-        _volumes = world.GetEntities().With<ChunkGrid>().With<Transform>().With<NetId>().AsSet();
+        _volumes = world.GetEntities().With<ChunkGrid>().With<Transform>().With<EntityId>().AsSet();
         _focusSubscription = world.Subscribe<InteractionFocus>((in InteractionFocus f) => _focus = f.Point);
     }
 
@@ -126,8 +126,8 @@ public sealed class BlockActionSystem : ISystem, IDisposable, IDebugUiSystem
         bool place = input.WasPressed(PlayerButtons.Primary), dig = input.WasPressed(PlayerButtons.Secondary);
         if (!place && !dig) return;
         if (BlockRaycast.Nearest(_volumes, origin, dir, _limits.Reach) is not { } hit) return;
-        uint volumeId = hit.Root.Get<NetId>().Value;
-        uint editor = player.Has<NetId>() ? player.Get<NetId>().Value : 0;
+        var volumeId = hit.Root.Get<EntityId>();
+        var editor = player.Has<EntityId>() ? player.Get<EntityId>() : EntityId.None;
         bool isGrid = hit.Root.Has<DynamicGrid>();
 
         if (place && hit.Volume.TryGetBlockEntity(hit.Block.X, hit.Block.Y, hit.Block.Z, out var block) && block.Has<Interactive>())

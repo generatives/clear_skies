@@ -25,12 +25,11 @@ namespace ClearSkies.Engine.ECS;
 /// <list type="bullet">
 /// <item>Piloted (the grid carries <see cref="PilotedComponent"/>, set by <see cref="GridPilotSystem"/>): forward,
 /// right, vertical and yaw velocity targets from the keyboard. The ship's own controls are ignored.</item>
-/// <item>Otherwise, the ship's own controls. Its <see cref="Lever"/>s ask for force: each axis' levers (they move
-/// together; see <see cref="LeverControlSystem"/>) ask for their setting, squared so it ramps up (fine near upright),
-/// as a fraction of a tunable maximum force along that axis. Nothing tracks a speed: the ship speeds up until air
-/// resistance (below) matches the levers' force. Its <see cref="SteeringWheel"/>s ask for turning force (torque about
-/// world up) the same way, clockwise to starboard: the ship's turn speeds up until air resistance on its rotation
-/// matches, and coasts to a stop when the wheel is centred.</item>
+/// <item>Otherwise, the ship's own controls (<see cref="ShipControls"/>, which its levers and wheels show and set).
+/// Each thrust axis' setting, squared so it ramps up (fine near upright), asks for that fraction of a tunable maximum
+/// force along the axis. Nothing tracks a speed: the ship speeds up until air resistance (below) matches the force.
+/// The turn setting asks for turning force (torque about world up) the same way, clockwise to starboard: the ship's
+/// turn speeds up until air resistance on its rotation matches, and coasts to a stop when the turn is centred.</item>
 /// </list>
 ///
 /// Every unlocked grid also feels air resistance, a drag force against its velocity growing with the square of its
@@ -69,16 +68,12 @@ public sealed class AirshipFlightSystem : ISystem
     private readonly EntitySet       _grids;
     private readonly EntitySet       _fans;
     private readonly EntitySet       _buoyants;
-    private readonly EntitySet       _levers;
-    private readonly EntitySet       _steeringWheels;
 
     /// <summary>This tick's Fan and Buoyant blocks of one volume, by cell and orientation.</summary>
     private sealed class ShipBlocks
     {
         public readonly List<BlockRef> Fans     = new();
         public readonly List<BlockRef> Buoyants = new();
-        public readonly List<(BlockRef Block, float Value)> Levers = new();
-        public readonly List<float> WheelAngles = new();
     }
     private readonly Dictionary<ChunkVolume, ShipBlocks> _blocksByVolume = new();
     private static readonly ShipBlocks NoBlocks = new();
@@ -113,10 +108,10 @@ public sealed class AirshipFlightSystem : ISystem
     private float _verticalSpeedTarget = 5f;
     private float _yawRateTarget       = 1.2f; // rad/s
 
-    // Not piloted: the force (N) a lever asks for at full, along its axis.
+    // Not piloted: the force (N) full thrust asks for, along its axis.
     private float _leverMaxForce = 500f;
 
-    // Not piloted: the torque (N·m) the wheel asks for at full, about world up.
+    // Not piloted: the torque (N·m) full turn asks for, about world up.
     private float _wheelMaxTorque = 500f;
 
     // Air resistance: drag force = this × speed², against the velocity. With a lever's full force F, top speed is
@@ -160,8 +155,6 @@ public sealed class AirshipFlightSystem : ISystem
         _grids    = world.GetEntities().With<DynamicGrid>().With<ChunkGrid>().With<PhysicsBodyComponent>().AsSet();
         _fans     = world.GetEntities().With<Fan>().With<BlockRef>().AsSet();
         _buoyants = world.GetEntities().With<Buoyant>().With<BlockRef>().AsSet();
-        _levers   = world.GetEntities().With<Lever>().With<BlockRef>().AsSet();
-        _steeringWheels = world.GetEntities().With<SteeringWheel>().With<BlockRef>().AsSet();
         _physics = physics;
         _players = world.GetEntities().With<PlayerInput>().AsSet();
     }
@@ -207,7 +200,7 @@ public sealed class AirshipFlightSystem : ISystem
             // Where the velocity targets come from: the keyboard while piloted, the ship's own controls otherwise.
             var controls = piloted
                 ? PilotInput()
-                : ShipControls(blocks);
+                : OwnControls(e.Has<ShipControls>() ? e.Get<ShipControls>() : default);
 
             float desiredYawRate = controls.W * _yawRateTarget;
             float currentYawRate = Vector3.Dot(angVel, worldUp);
@@ -317,32 +310,11 @@ public sealed class AirshipFlightSystem : ISystem
         _lastFreePropelled   = freePropelled;
     }
 
-    /// <summary>A ship's own controls, as fractions (-1 to 1): forward, right and vertical (of the full lever force) from
-    /// its <see cref="Lever"/>s (each axis' levers' setting, their average though they move together), and yaw
-    /// (of the full wheel torque, anticlockwise from above, like <see cref="YawInput"/>) from its
-    /// <see cref="SteeringWheel"/>s, clockwise to
+    /// <summary>A ship's own controls, as fractions (-1 to 1) of the full force and torque: forward, right and vertical
+    /// from its thrust settings, and yaw (anticlockwise from above, like the pilot's keys) from its turn, clockwise to
     /// starboard. Each is squared, keeping its sign, so it ramps up: half-way asks for a quarter.</summary>
-    private static Vector4 ShipControls(ShipBlocks blocks)
-    {
-        Span<float> sum   = stackalloc float[3];
-        Span<int>   count = stackalloc int[3];
-        foreach (var (block, value) in blocks.Levers)
-        {
-            var (axis, sign) = Commands.BlockEntities.LeverAxis(block);
-            sum[axis] += System.Math.Clamp(value, -1f, 1f) * sign;
-            count[axis]++;
-        }
-        // Lever axes: 0 levers towards the ship's north (-Z, forward), 1 towards its east (+X, right), 2 its top.
-        Span<float> axes = stackalloc float[3];
-        for (int axis = 0; axis < 3; axis++)
-            axes[axis] = count[axis] == 0 ? 0f : Ramp(sum[axis] / count[axis]);
-
-        float wheel = 0f;
-        foreach (float angle in blocks.WheelAngles) wheel += angle;
-        if (blocks.WheelAngles.Count > 0) wheel /= blocks.WheelAngles.Count * SteeringWheel.MaxAngle;
-
-        return new Vector4(axes[0], axes[1], axes[2], -Ramp(wheel));
-    }
+    private static Vector4 OwnControls(in ShipControls c) =>
+        new(Ramp(c.Forward), Ramp(c.Right), Ramp(c.Up), -Ramp(c.Turn));
 
     private static float Ramp(float setting)
     {
@@ -364,7 +336,7 @@ public sealed class AirshipFlightSystem : ISystem
         return Vector4.Zero;
     }
 
-    /// <summary>Rebuilds <see cref="_blocksByVolume"/> from this tick's Fan, Buoyant, Lever and Steering Wheel entities. Lists are reused
+    /// <summary>Rebuilds <see cref="_blocksByVolume"/> from this tick's Fan and Buoyant entities. Lists are reused
     /// across ticks; a volume left with neither is dropped so a despawned ship's lists don't linger.</summary>
     private void GroupBlocksByVolume()
     {
@@ -372,8 +344,6 @@ public sealed class AirshipFlightSystem : ISystem
         {
             blocks.Fans.Clear();
             blocks.Buoyants.Clear();
-            blocks.Levers.Clear();
-            blocks.WheelAngles.Clear();
         }
 
         foreach (ref readonly Entity e in _fans.GetEntities())
@@ -386,17 +356,9 @@ public sealed class AirshipFlightSystem : ISystem
             ref readonly var block = ref e.Get<BlockRef>();
             BlocksOf(block.Volume).Buoyants.Add(block);
         }
-        foreach (ref readonly Entity e in _levers.GetEntities())
-        {
-            ref readonly var block = ref e.Get<BlockRef>();
-            BlocksOf(block.Volume).Levers.Add((block, e.Get<Lever>().Value));
-        }
-        foreach (ref readonly Entity e in _steeringWheels.GetEntities())
-            BlocksOf(e.Get<BlockRef>().Volume).WheelAngles.Add(e.Get<SteeringWheel>().Angle);
 
         foreach (var (volume, blocks) in _blocksByVolume)
-            if (blocks.Fans.Count == 0 && blocks.Buoyants.Count == 0 && blocks.Levers.Count == 0
-                && blocks.WheelAngles.Count == 0) _blocksByVolume.Remove(volume);
+            if (blocks.Fans.Count == 0 && blocks.Buoyants.Count == 0) _blocksByVolume.Remove(volume);
     }
 
     private ShipBlocks BlocksOf(ChunkVolume volume)

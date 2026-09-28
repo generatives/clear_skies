@@ -1,7 +1,7 @@
 using System.Numerics;
+using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Serialization;
 using ClearSkies.Engine.Voxels;
-using Silk.NET.Maths;
 
 namespace ClearSkies.Engine.Entities;
 
@@ -47,9 +47,8 @@ public sealed class GridDescription
 
     public List<GridVoxel> Voxels = new();
 
-    /// <summary>Lever settings and wheel angles, by cell.</summary>
-    public List<(Vector3D<int> Cell, float Value)> Levers = new();
-    public List<(Vector3D<int> Cell, float Angle)> Wheels = new();
+    /// <summary>What its levers and wheels ask of it.</summary>
+    public ShipControls Controls;
 
     /// <summary>A new grid of <paramref name="voxels"/> whose bounding box centre is at <paramref name="position"/>.</summary>
     public static GridDescription FromVoxels(Vector3 position, IEnumerable<GridVoxel> voxels)
@@ -82,25 +81,19 @@ public sealed class GridDescription
             GridSerializer.Write(ms, Voxels);
             w.WriteBytes(ms.GetBuffer().AsSpan(0, (int)ms.Length));
         }
-        w.WriteVarUInt((uint)Levers.Count);
-        foreach (var (cell, value) in Levers) { WriteCell(w, cell); w.WriteSingle(value); }
-        w.WriteVarUInt((uint)Wheels.Count);
-        foreach (var (cell, angle) in Wheels) { WriteCell(w, cell); w.WriteSingle(angle); }
+        w.WriteSingle(Controls.Forward);
+        w.WriteSingle(Controls.Right);
+        w.WriteSingle(Controls.Up);
+        w.WriteSingle(Controls.Turn);
     }
 
     public static GridDescription Read(ref NetReader r)
     {
         var d = new GridDescription { Body = BodyState.Read(ref r), Locked = r.ReadBool() };
         using (var ms = new MemoryStream(r.ReadBytes().ToArray())) d.Voxels = GridSerializer.Read(ms);
-        uint levers = r.ReadVarUInt();
-        for (int i = 0; i < levers; i++) d.Levers.Add((ReadCell(ref r), r.ReadSingle()));
-        uint wheels = r.ReadVarUInt();
-        for (int i = 0; i < wheels; i++) d.Wheels.Add((ReadCell(ref r), r.ReadSingle()));
+        d.Controls = new ShipControls { Forward = r.ReadSingle(), Right = r.ReadSingle(), Up = r.ReadSingle(), Turn = r.ReadSingle() };
         return d;
     }
-
-    private static void WriteCell(NetWriter w, Vector3D<int> c) { w.WriteInt32(c.X); w.WriteInt32(c.Y); w.WriteInt32(c.Z); }
-    private static Vector3D<int> ReadCell(ref NetReader r) => new(r.ReadInt32(), r.ReadInt32(), r.ReadInt32());
 }
 
 /// <summary>A player's full state, carried by SpawnPlayer, produced by describing a live player, and kept in storage.</summary>

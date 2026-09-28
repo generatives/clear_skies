@@ -396,6 +396,22 @@ public class TickInterpolationTests
     }
 
     [Fact]
+    public void ANodeMovedByTicksIsDrawnBetweenThem()
+    {
+        var (_, system, _, arm) = ArmRig();
+        void Tick(float x)
+        {
+            arm.Get<RenderedModel>().SetTranslationFromRest("arm", new Vector3D<float>(x, 0, 0));
+            system.Update(SystemStage.Simulation, 0);
+        }
+        Tick(0f);
+        Tick(2f);
+        var tip = arm.Get<RenderedModel>().ComputeDrawnPose(0.25f)[0].TransformPoint(Vector3D<float>.UnitY);
+        Assert.Equal(0.5f, tip.X, 4);
+        Assert.Equal(1f, tip.Y, 4);
+    }
+
+    [Fact]
     public void ANodeTurnedOutsideTheTicksIsDrawnAsItIs()
     {
         var (_, system, _, arm) = ArmRig();

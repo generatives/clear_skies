@@ -129,7 +129,7 @@ public sealed class GridPersistenceSystem : ISystem
     private void DeleteSelected()
     {
         if (!TryGetSelectedGrid(out var grid)) { _status = "No grid selected."; return; }
-        if (grid.Root.Has<NetId>()) _commands.Send(new DespawnEntity { Entity = grid.Root.Get<NetId>().Value });
+        if (grid.Root.Has<EntityId>()) _commands.Send(new DespawnEntity { Entity = grid.Root.Get<EntityId>() });
         _status = "Deleted selected grid.";
     }
 
