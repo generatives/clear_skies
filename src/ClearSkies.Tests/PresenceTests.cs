@@ -15,44 +15,44 @@ public class NetRegistryTests
     public void LooksEntitiesUpByIdAndForgetsDisposedOnes()
     {
         using var world = new World();
-        using var registry = new NetRegistry(world);
+        using var registry = new EntityRegistry(world);
         var e = world.CreateEntity();
-        e.Set(new NetId { Value = 5000 });
-        Assert.True(registry.TryGet(5000, out var found));
+        e.Set(new EntityId(5000));
+        Assert.True(registry.TryGet(new EntityId(5000), out var found));
         Assert.Equal(e, found);
         e.Dispose();
-        Assert.False(registry.IsLive(5000));
+        Assert.False(registry.IsLive(new EntityId(5000)));
     }
 
     [Fact]
     public void ChangingAnIdMovesTheEntry()
     {
         using var world = new World();
-        using var registry = new NetRegistry(world);
+        using var registry = new EntityRegistry(world);
         var e = world.CreateEntity();
-        e.Set(new NetId { Value = 10 });
-        e.Set(new NetId { Value = 11 });
-        Assert.False(registry.IsLive(10));
-        Assert.True(registry.IsLive(11));
+        e.Set(new EntityId(10));
+        e.Set(new EntityId(11));
+        Assert.False(registry.IsLive(new EntityId(10)));
+        Assert.True(registry.IsLive(new EntityId(11)));
     }
 
     [Fact]
     public void AllocatedIdsNeverRepeatAcrossBlocks()
     {
         using var world = new World();
-        using var registry = new NetRegistry(world);
-        var allocator = new NetIdAllocator();
+        using var registry = new EntityRegistry(world);
+        var allocator = new EntityIdAllocator();
         registry.RequestBlock = allocator.NextBlock;
-        var seen = new HashSet<uint>();
+        var seen = new HashSet<EntityId>();
         for (int i = 0; i < 5000; i++) Assert.True(seen.Add(registry.Allocate()));
-        Assert.All(seen, id => Assert.True(id >= NetRegistry.FirstFreeId));
+        Assert.All(seen, id => Assert.True(id.Value >= EntityRegistry.FirstFreeId));
     }
 
     [Fact]
     public void AllocatingWithNoBlocksAndNoSourceFails()
     {
         using var world = new World();
-        using var registry = new NetRegistry(world);
+        using var registry = new EntityRegistry(world);
         Assert.Throws<InvalidOperationException>(() => registry.Allocate());
     }
 
@@ -61,8 +61,8 @@ public class NetRegistryTests
     {
         using var scene = new HeadlessScene();
         var grid = scene.SpawnPlatform(new Vector3(0, 50, 0));
-        Assert.True(grid.Has<NetId>());
-        Assert.True(scene.Registry.IsLive(grid.Get<NetId>().Value));
+        Assert.True(grid.Has<EntityId>());
+        Assert.True(scene.Registry.IsLive(grid.Get<EntityId>()));
         Assert.True(grid.Get<NetOwner>().IsLocal);
         Assert.True(grid.Has<OwnPresence>());
         Assert.True(grid.Has<Supportable>());

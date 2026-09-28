@@ -1,5 +1,7 @@
 using System.Numerics;
 using BepuPhysics.Collidables;
+using ClearSkies.Engine.Commands;
+using ClearSkies.Engine.Commands.Handlers;
 using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Input;
@@ -20,18 +22,23 @@ public sealed class HeadlessScene : IDisposable
     public readonly World World = new();
     public readonly PhysicsWorld Physics = new(new Vector3(0, -6, 0), Dt);
     public readonly Session Session;
-    public readonly NetRegistry Registry;
+    public readonly EntityRegistry Registry;
     public readonly GridSelection Selection;
     public readonly ChunkVolume WorldVolume;
     public readonly EntityPresenceSystem Presence;
+    public readonly CommandSystem Commands;
+    public readonly BlockEntities Blocks;
+    public readonly EditLimits Limits = new();
+    public uint TickNumber;
     private readonly GridNetworking _gridNetworking;
     private readonly List<Engine.Core.ISystem> _tick = new();
+    private readonly TickInterpolationSystem _interpolation;
 
     public HeadlessScene(Session? session = null)
     {
         Session = session ?? Session.SinglePlayer();
-        Registry = new NetRegistry(World);
-        var allocator = new NetIdAllocator();
+        Registry = new EntityRegistry(World);
+        var allocator = new EntityIdAllocator();
         Registry.RequestBlock = allocator.NextBlock;
         _gridNetworking = new GridNetworking(World, Registry, Session);
         Selection = new GridSelection(World);
@@ -39,25 +46,34 @@ public sealed class HeadlessScene : IDisposable
         var root = World.CreateEntity();
         WorldVolume = new ChunkVolume(root, World) { ChunksOwnPresence = true };
         root.Set(new ChunkGrid { Volume = WorldVolume });
-        root.Set(new NetId { Value = NetRegistry.WorldVolume });
+        root.Set(EntityRegistry.WorldVolume);
         root.Set<Rendered>();
 
         Presence = new EntityPresenceSystem(World, Session, WorldVolume, viewDistance: 500f);
+        Commands = new CommandSystem(Session, Registry, () => TickNumber);
+        Blocks = new BlockEntities(World, Registry);
+        GameCommands.RegisterAll(Commands, Blocks, Limits, Registry, Physics);
         var hierarchy = new HierarchyTransformSystem(World);
         _tick.Add(hierarchy);
         _tick.Add(new PhysicsBodySystem(World, Physics));
-        _tick.Add(new PlayerMovementSystem(World));
+        _tick.Add(new PlayerMovementSystem(World, Commands));
+        _tick.Add(Commands);
         _tick.Add(Presence);
         _tick.Add(Physics);
         _tick.Add(new PhysicsTransformSyncSystem(World, Physics));
         _tick.Add(hierarchy);
         _tick.Add(new SupportSystem(World, Physics));
+        _interpolation = new TickInterpolationSystem(World, new Engine.Core.Time()); // last, as in the game
     }
 
     public void Tick(int count = 1)
     {
         for (int i = 0; i < count; i++)
+        {
+            TickNumber++;
             foreach (var s in _tick) s.Update(Dt);
+            _interpolation.Update(Engine.Core.SystemStage.Simulation, Dt);
+        }
     }
 
     /// <summary>Runs ticks until <paramref name="done"/> or <paramref name="max"/> ticks.</summary>
@@ -95,7 +111,7 @@ public sealed class HeadlessScene : IDisposable
         player.Set(new Support());
         player.Set(new Player { Id = PlayerId.New(), Name = "test", IsLocal = true });
         player.Set<LocalPlayer>();
-        player.Set(new NetId { Value = Registry.Allocate() });
+        player.Set(Registry.Allocate());
         player.Set(Session.LocalOwner());
         player.Set<OwnPresence>();
         Players.SetFreeFlying(player, freeFly);

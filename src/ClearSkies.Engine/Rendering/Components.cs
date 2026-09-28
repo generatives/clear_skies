@@ -53,65 +53,144 @@ public struct VoxelLit
 /// Draws a 3D model (e.g. a glTF prop loaded via <see cref="ClearSkies.Engine.Rendering.Gltf.GltfLoader"/> and
 /// uploaded with <c>Renderer.UploadModel</c>, or a block entity's model) at the entity's <c>Transform</c>, by
 /// <c>ModelRenderSystem</c>, in this entity's own pose. The <see cref="GpuModel"/> is shared by every entity using it;
-/// the node rotations are this entity's alone, so entities sharing a model animate independently.
+/// the node poses are this entity's alone, so entities sharing a model animate independently.
 ///
-/// Animation systems pose nodes by name — <c>rm.SetRotationFromRest("arm_group", swing)</c> — and the renderer turns
-/// the rotations into the pose it draws with. A name refers to the first node with that name (see
-/// <see cref="GpuModel.FindNode"/>); a name the model doesn't have is ignored and the setter returns false. The
-/// component holds references to its arrays, so the setters work on the copy <c>Entity.Get</c> hands back and need no
-/// <c>Set</c> afterwards. Create it with the constructor; it starts at the model's rest pose.
+/// Animation systems pose nodes by name — <c>rm.SetRotationFromRest("arm_group", swing)</c>, or
+/// <c>SetTranslationFromRest</c> to slide one — and the renderer turns the poses into the matrices it draws with. A name
+/// refers to the first node with that name (see <see cref="GpuModel.FindNode"/>); a name the model doesn't have is
+/// ignored and the setter returns false. The component holds references to its arrays, so the setters work on the copy
+/// <c>Entity.Get</c> hands back and need no <c>Set</c> afterwards. Create it with the constructor; it starts at the
+/// model's rest pose.
+///
+/// Nodes posed by ticks are drawn between their last two ticked poses, like Transforms (see
+/// <see cref="ClearSkies.Engine.ECS.TickInterpolationSystem"/>, which records each tick's poses with
+/// <see cref="EndTick"/>): the poses set here stay the true pose, and <see cref="ComputeDrawnPose"/> blends. A node set
+/// outside the ticks, so that it no longer matches the last tick's pose, is drawn as set.
 /// </summary>
 public struct RenderedModel
 {
     private readonly GpuModel _model;
-    private readonly Quaternion<float>[] _rotations; // each node's local rotation, indexed like _model.Nodes
-    private readonly Mat4[] _pose;                   // each node's model-space matrix, as of the last ComputePose
+    private readonly NodePose[] _nodes;   // each node's local pose, indexed like _model.Nodes
+    private readonly Mat4[] _matrices;    // each node's model-space matrix, as of the last ComputeDrawnPose
+    private readonly Ticked _ticked;
+
+    // Each node's pose as of the last two ticks, and the poses last drawn with.
+    private sealed class Ticked
+    {
+        public NodePose[] Previous, Current;
+        public readonly NodePose[] Drawn;
+        public bool Started;
+
+        public Ticked(int nodes) { Previous = new NodePose[nodes]; Current = new NodePose[nodes]; Drawn = new NodePose[nodes]; }
+    }
 
     public RenderedModel(GpuModel model)
     {
-        _model     = model;
-        _rotations = model.Nodes.Select(n => n.Rotation).ToArray();
-        _pose      = (Mat4[])model.RestPose.Clone();
+        _model    = model;
+        _nodes    = model.Nodes.Select(n => n.Rest).ToArray();
+        _matrices = (Mat4[])model.RestPose.Clone();
+        _ticked   = new Ticked(_nodes.Length);
     }
 
     public readonly GpuModel Model => _model;
 
     public readonly bool HasNode(string node) => _model.FindNode(node) >= 0;
 
-    /// <summary>Sets <paramref name="node"/>'s local rotation outright.</summary>
+    /// <summary>Sets <paramref name="node"/>'s local pose outright.</summary>
+    public readonly bool SetPose(string node, NodePose pose)
+    {
+        int i = _model.FindNode(node);
+        if (i < 0) return false;
+        _nodes[i] = pose;
+        return true;
+    }
+
+    /// <summary>Sets <paramref name="node"/>'s local rotation outright, keeping its translation and scale.</summary>
     public readonly bool SetRotation(string node, Quaternion<float> rotation)
     {
         int i = _model.FindNode(node);
         if (i < 0) return false;
-        _rotations[i] = rotation;
+        _nodes[i] = _nodes[i] with { Rotation = rotation };
         return true;
     }
 
     /// <summary>Sets <paramref name="node"/>'s local rotation to its rest rotation turned further by
-    /// <paramref name="offset"/> (in the node's own frame) — e.g. an arm swung by an angle from where it was
-    /// modelled.</summary>
+    /// <paramref name="offset"/> (in the node's own frame), keeping its translation and scale — e.g. an arm swung by an
+    /// angle from where it was modelled.</summary>
     public readonly bool SetRotationFromRest(string node, Quaternion<float> offset)
     {
         int i = _model.FindNode(node);
         if (i < 0) return false;
-        _rotations[i] = _model.Nodes[i].Rotation * offset;
+        _nodes[i] = _nodes[i] with { Rotation = _model.Nodes[i].Rotation * offset };
         return true;
     }
 
-    /// <summary>Puts <paramref name="node"/> back at its rest rotation.</summary>
-    public readonly bool ResetRotation(string node) => SetRotationFromRest(node, Quaternion<float>.Identity);
-
-    /// <summary>Puts every node back at its rest rotation.</summary>
-    public readonly void ResetAll()
+    /// <summary>Sets <paramref name="node"/>'s local translation outright, keeping its rotation and scale.</summary>
+    public readonly bool SetTranslation(string node, Vector3D<float> translation)
     {
-        for (int i = 0; i < _rotations.Length; i++) _rotations[i] = _model.Nodes[i].Rotation;
+        int i = _model.FindNode(node);
+        if (i < 0) return false;
+        _nodes[i] = _nodes[i] with { Translation = translation };
+        return true;
     }
 
-    /// <summary>Recomputes the pose from the current node rotations and returns it: one model-space matrix per
-    /// node, for <c>Renderer.DrawModel</c>. Called by the renderer for visible entities only.</summary>
-    public readonly ReadOnlySpan<Mat4> ComputePose()
+    /// <summary>Sets <paramref name="node"/>'s local translation to its rest translation moved by
+    /// <paramref name="offset"/> (in its parent's frame), keeping its rotation and scale — e.g. a slider pushed along
+    /// its track.</summary>
+    public readonly bool SetTranslationFromRest(string node, Vector3D<float> offset)
     {
-        _model.ComputePose(_pose, _rotations);
-        return _pose;
+        int i = _model.FindNode(node);
+        if (i < 0) return false;
+        _nodes[i] = _nodes[i] with { Translation = _model.Nodes[i].Translation + offset };
+        return true;
+    }
+
+    /// <summary>Puts <paramref name="node"/> back at its rest pose.</summary>
+    public readonly bool ResetPose(string node)
+    {
+        int i = _model.FindNode(node);
+        if (i < 0) return false;
+        _nodes[i] = _model.Nodes[i].Rest;
+        return true;
+    }
+
+    /// <summary>Puts every node back at its rest pose.</summary>
+    public readonly void ResetAll()
+    {
+        for (int i = 0; i < _nodes.Length; i++) _nodes[i] = _model.Nodes[i].Rest;
+    }
+
+    /// <summary>End of a tick: records the tick's poses. The first tick recorded starts there, with nothing to blend
+    /// from.</summary>
+    public readonly void EndTick()
+    {
+        var t = _ticked;
+        if (t is null) return; // default-constructed: nothing to record
+        if (!t.Started)
+        {
+            _nodes.CopyTo(t.Previous, 0);
+            _nodes.CopyTo(t.Current, 0);
+            t.Started = true;
+            return;
+        }
+        (t.Previous, t.Current) = (t.Current, t.Previous);
+        _nodes.CopyTo(t.Current, 0);
+    }
+
+    /// <summary>Computes the pose to draw and returns it: one model-space matrix per node, for
+    /// <c>Renderer.DrawModel</c>, with each node <paramref name="alpha"/> of the way from its previous tick's pose to its
+    /// latest (see <see cref="EndTick"/>). Called by the renderer for visible entities only.</summary>
+    public readonly ReadOnlySpan<Mat4> ComputeDrawnPose(float alpha)
+    {
+        var t = _ticked;
+        for (int i = 0; i < _nodes.Length; i++)
+        {
+            var pose = _nodes[i];
+            t.Drawn[i] = t.Started && pose == t.Current[i] && t.Previous[i] != pose
+                ? NodePose.Lerp(t.Previous[i], pose, alpha)
+                : pose;
+        }
+        _model.ComputePose(_matrices, t.Drawn);
+        return _matrices;
     }
 }

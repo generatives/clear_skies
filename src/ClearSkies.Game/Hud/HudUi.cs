@@ -10,7 +10,7 @@ namespace ClearSkies.Game.Hud;
 
 /// <summary>
 /// The in-game HUD, declared each frame on the engine's immediate-mode <see cref="UiContext"/>: a crosshair, and
-/// a hotbar along the bottom of the screen showing <see cref="PlayerInputSystem.PlaceableBlocks"/> with the one
+/// a hotbar along the bottom of the screen showing <see cref="BlockActionSystem.PlaceableBlocks"/> with the one
 /// left-click places highlighted. The scroll wheel steps through the slots (down for the next, wrapping around) except
 /// while piloting a ship, when it zooms the camera; number keys 1-9 and 0 pick the first ten slots; with the cursor
 /// free (Esc or F1) slots can be clicked. Picking a block shows its name above the hotbar for a moment.
@@ -34,7 +34,7 @@ public sealed class HudUi : ISystem
 
     private readonly UiContext _ui;
     private readonly InputManager _input;
-    private readonly PlayerInputSystem _player;
+    private readonly BlockActionSystem _player;
     private readonly GridPilotSystem _pilot;
     private float _scroll; // wheel movement not yet turned into whole slot steps (touchpads scroll in fractions)
     private readonly UiSprite _crosshair, _slot, _slotSelected, _panel;
@@ -44,7 +44,7 @@ public sealed class HudUi : ISystem
     private int _shownIndex = -1;
     private float _nameTimer;
 
-    public HudUi(UiContext ui, InputManager input, PlayerInputSystem player, GridPilotSystem pilot,
+    public HudUi(UiContext ui, InputManager input, BlockActionSystem player, GridPilotSystem pilot,
                  TextureAtlas? blockTextures, string iconsDirectory)
     {
         _ui = ui;
@@ -56,7 +56,7 @@ public sealed class HudUi : ISystem
         _slotSelected = ui.Atlas.Sprite("slot_selected");
         _panel = ui.Atlas.Sprite("panel");
 
-        var blocks = PlayerInputSystem.PlaceableBlocks;
+        var blocks = BlockActionSystem.PlaceableBlocks;
         _icons = new UiSprite[blocks.Count];
         _slotNumbers = new string[blocks.Count];
         for (int i = 0; i < blocks.Count; i++)
@@ -198,7 +198,7 @@ public sealed class HudUi : ISystem
     {
         // Holds its height even when hidden, so the bar doesn't jump when the name appears.
         float alpha = System.Math.Clamp(_nameTimer / NameFadeSeconds, 0f, 1f);
-        string name = BlockRegistry.Get(PlayerInputSystem.PlaceableBlocks[_player.PlaceIndex]).Name;
+        string name = BlockRegistry.Get(BlockActionSystem.PlaceableBlocks[_player.PlaceIndex]).Name;
         using (_ui.Element("hotbar-name", new ElementDeclaration
         {
             Layout = new LayoutConfig { Padding = Padding.Axes(5, 1) },

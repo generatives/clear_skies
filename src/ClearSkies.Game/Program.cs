@@ -1,3 +1,5 @@
+using ClearSkies.Engine.Commands;
+using ClearSkies.Engine.Commands.Handlers;
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Entities;
@@ -37,19 +39,19 @@ host.Renderer.LoadTextureAtlas(
     Path.Combine(AppContext.BaseDirectory, "Resources", "spritesheet_tiles.png"),
     Path.Combine(AppContext.BaseDirectory, "Resources", "spritesheet_tiles.xml"));
 
-// Session: single-player is a host session with nobody connected. Network IDs and owners exist, all local.
+// Session: single-player is a host session with nobody connected. Entity IDs and owners exist, all local.
 var session = Session.SinglePlayer();
-var registry = new NetRegistry(host.World);
-var idAllocator = new NetIdAllocator();
+var registry = new EntityRegistry(host.World);
+var idAllocator = new EntityIdAllocator();
 registry.RequestBlock = idAllocator.NextBlock;
 using var gridNetworking = new GridNetworking(host.World, registry, session);
 
 // The static world is a volume like any other, with an identity Transform (set by ChunkVolume), and a
-// reserved network ID. Its chunks each decide their own presence layers (see EntityPresenceSystem).
+// reserved entity ID. Its chunks each decide their own presence layers (see EntityPresenceSystem).
 var staticVolumeEntity = host.World.CreateEntity();
 var staticVolume = new ChunkVolume(staticVolumeEntity, host.World) { MeshIgnoresNeighbours = true, ChunksOwnPresence = true };
 staticVolumeEntity.Set(new ChunkGrid() { Volume = staticVolume });
-staticVolumeEntity.Set(new NetId { Value = NetRegistry.WorldVolume });
+staticVolumeEntity.Set(EntityRegistry.WorldVolume);
 staticVolumeEntity.Set(session.LocalOwner());
 staticVolumeEntity.Set<Rendered>();
 
@@ -73,12 +75,19 @@ host.AddSystem(ui, SystemStage.Input);
 // TickClock). Mouse-look runs per frame before them; presses are collected per frame and handed to the next tick as
 // the player's PlayerInput, which is all tick systems read. Moving things are drawn between their last two ticks.
 host.AddSystem(new LookInputSystem(host.World, host.Input), SystemStage.Input);
-var inputSample = new InputSampleSystem(host.World, host.Input);
+var inputSample = new InputSampleSystem(host.World, host.Input, host.Time);
 host.AddSystem(inputSample, SystemStage.Input); // latches the frame's input
 var interpolation = new TickInterpolationSystem(host.World, host.Time);
 var hierarchy = new HierarchyTransformSystem(host.World);
 host.AddSystem(hierarchy, SystemStage.Simulation);
 host.AddSystem(inputSample, SystemStage.Simulation); // ...and hands it to the tick
+
+// Commands: every discrete change goes through a registered handler, applied at one point in the tick. Single-player
+// is a host with nobody connected, so every command's authority is here and it applies in the tick it was sent.
+var commands = new CommandSystem(session, registry, () => host.Time.Tick);
+var blockEntities = new BlockEntities(host.World, registry);
+var editLimits = new EditLimits();
+GameCommands.RegisterAll(commands, blockEntities, editLimits, registry, host.Physics);
 
 var physicsBody = new PhysicsBodySystem(host.World, host.Physics);
 
@@ -86,7 +95,7 @@ var physicsBody = new PhysicsBodySystem(host.World, host.Physics);
 // are loaded closest-first until it's spent (see ChunkLoadSystem); only surfaces use it, so solid stone inside an
 // island is nearly free. The GPU store adds a fifth on top for headroom and ships. --light-budget-mb N overrides it,
 // e.g. for a software renderer whose small max buffer size can't hold it (the store also shrinks it to fit).
-int LightBudgetMb = 2048;
+int LightBudgetMb = 512;
 int budgetArg = Array.IndexOf(args, "--light-budget-mb");
 if (budgetArg >= 0 && budgetArg + 1 < args.Length) LightBudgetMb = int.Parse(args[budgetArg + 1]);
 // View distance: how far out (in blocks, horizontally) islands are streamed, if the budget reaches. The GPU's world
@@ -112,11 +121,21 @@ host.AddSystem(physicsBody, SystemStage.Simulation);
 // Character controller (ported from BepuPhysics2's own Demos/Demos/Characters — see
 // Physics/Characters/): motion goals (WASD/jump/mode toggle) must be set before the physics step
 // so Simulation.Timestep's CollisionsDetected analysis sees them this same tick.
-host.AddSystem(new PlayerMovementSystem(host.World), SystemStage.Simulation);
+host.AddSystem(new PlayerMovementSystem(host.World, commands), SystemStage.Simulation);
 
 // Milestone 5: airship flight (velocity control law + Fan/Buoyant propulsion, merged into one system —
 // see AirshipFlightSystem), before the physics step so its impulses are integrated this same tick.
-var gridPilot = new GridPilotSystem(host.World, host.Input, host.Physics, staticVolume, physicsBody);
+var gridPilot = new GridPilotSystem(host.World, host.Input, host.Physics, staticVolume, physicsBody, commands);
+// Place, break, spawn and use controls (levers and wheels, whose control systems turn drags into commands as the
+// interactions are published), then apply every command sent this tick, then pose the controls from what the commands
+// set, so an arm is posed this tick where the view was turned to keep on it.
+var blockActions = new BlockActionSystem(host.World, commands, editLimits, gridSelection);
+host.AddSystem(blockActions, SystemStage.Simulation);
+var levers = new LeverControlSystem(host.World, commands);
+var wheels = new SteeringWheelControlSystem(host.World, commands);
+host.AddSystem(commands, SystemStage.Simulation);
+host.AddSystem(levers, SystemStage.Simulation);
+host.AddSystem(wheels, SystemStage.Simulation);
 var airshipFlight = new AirshipFlightSystem(host.World, host.Physics);
 host.AddSystem(airshipFlight, SystemStage.Simulation);
 var presence = new EntityPresenceSystem(host.World, session, staticVolume, ViewDistance);
@@ -128,24 +147,20 @@ host.AddSystem(hierarchy, SystemStage.Simulation); // e.g. volume Transforms -> 
 host.AddSystem(new SupportSystem(host.World, host.Physics), SystemStage.Simulation); // what each character stands on or rides with
 host.AddSystem(interpolation, SystemStage.Simulation); // records this tick's poses
 
-// Per frame, after the ticks: where to draw things between the last two ticks (children follow), then stream terrain
-// around the view.
 // Moves the camera once a frame (not per tick) while flying; before the interpolation, which then draws it there.
 // --flight-test flies once the world has loaded, then quits.
 bool flightTest = args.Contains("--flight-test");
 host.AddSystem(new StreamingFlightTest(host, flightTest, flightTest ? () => host.Window.Native.Close() : null),
                SystemStage.Frame);
+// Per frame, after the ticks: draw between the last two ticks (children follow), then stream terrain around the view.
 host.AddSystem(gridPilot, SystemStage.Frame); // puts the camera under a piloted grid...
 host.AddSystem(new EyeSystem(host.World), SystemStage.Frame); // ...or at the local player's eye
 host.AddSystem(interpolation, SystemStage.Frame);
 host.AddSystem(hierarchy, SystemStage.Frame);
 host.AddSystem(chunkLoadSystem, SystemStage.Frame);
-var playerInput = new PlayerInputSystem(host.World, host.Input, meshSystem, host.Renderer, gridSelection);
-host.AddSystem(playerInput, SystemStage.Frame);
-host.AddSystem(new HudUi(ui, host.Input, playerInput, gridPilot, host.Renderer.Atlas,
+host.AddSystem(new BlockTargetSystem(host.World, host.Input, host.Renderer, blockActions, editLimits), SystemStage.Frame);
+host.AddSystem(new HudUi(ui, host.Input, blockActions, gridPilot, host.Renderer.Atlas,
                          Path.Combine(AppContext.BaseDirectory, "Resources", "Icons")), SystemStage.Frame); // crosshair, hotbar
-host.AddSystem(new LeverControlSystem(host.World), SystemStage.Frame); // after PlayerInputSystem, whose clicks drag levers
-host.AddSystem(new SteeringWheelControlSystem(host.World), SystemStage.Frame); // ...and turn wheels
 var gridPersistence = new GridPersistenceSystem(host.World, meshSystem, host.Physics, gridSelection);
 host.AddSystem(gridPersistence, SystemStage.Frame);
 // The airship-related debug panels above (Pilot/Flight/Save-Load) drew into their own separate "Systems"
@@ -168,7 +183,7 @@ host.AddSystem(new BlockModelSystem(host.World, blockModels), SystemStage.PreRen
 // closes it with ImGui and presents. Each render system is handed this frame's camera and time.
 using var clouds = new CloudRenderSystem(host.Renderer, new HeartCloudDensity(seed));
 host.AddSystem(new ChunkRenderSystem(host.World, host.Renderer, staticVolume), SystemStage.RenderWorld);
-host.AddSystem(new ModelRenderSystem(host.World, host.Renderer), SystemStage.RenderWorld);
+host.AddSystem(new ModelRenderSystem(host.World, host.Renderer, host.Time), SystemStage.RenderWorld);
 host.AddSystem(clouds, SystemStage.RenderWorld);
 host.AddSystem(new SkyRenderSystem(host.Renderer), SystemStage.RenderSky);
 host.AddSystem(new WireframeRenderSystem(host.World, host.Renderer), SystemStage.RenderOverlay);

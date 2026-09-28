@@ -5,7 +5,7 @@ namespace ClearSkies.Engine.ECS;
 /// <summary>
 /// Tracks which single DynamicGrid root entity currently carries <see cref="SelectedGridComponent"/>,
 /// enforcing the "only one at a time" invariant. Constructed once (see Program.cs) and shared by every
-/// call site that can change grid selection: DynamicGridFactory (on spawn) and PlayerInputSystem (on a
+/// call site that can change grid selection: DynamicGridFactory (on spawn) and BlockActionSystem (on a
 /// successful block break/place against a grid).
 /// </summary>
 public sealed class GridSelection

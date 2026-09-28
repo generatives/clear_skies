@@ -3,6 +3,9 @@ using ClearSkies.Engine.Gui;
 using ClearSkies.Engine.Math;
 using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Voxels;
+using ClearSkies.Engine.Commands;
+using ClearSkies.Engine.Commands.Handlers;
+using ClearSkies.Engine.Entities;
 using DefaultEcs;
 using ImGuiNET;
 using Silk.NET.Maths;
@@ -13,12 +16,11 @@ namespace ClearSkies.Engine.ECS;
 /// Lets the player drag a lever's arm across its range. Clicking a lever takes hold of the arm's tip: while the button
 /// is held the view stays on the tip (see <see cref="InteractionFocus"/>) and the mouse, instead of turning the view,
 /// drags the tip along its arc: its movement along the way the tip moves on screen turns the arm, slowly, for fine
-/// control, and movement across that is ignored. Every frame it poses each lever's arm from its
-/// <see cref="Lever.Value"/>, so anything else that sets the value moves the arm too.
+/// control, and movement across that is ignored.
 ///
-/// A volume's levers on the same axis move together: dragging one sets every other lever in its volume that levers
-/// along the same line (north face the same way or the opposite way; the opposite way gets the negated value, so all
-/// of them ask for the same thing), and a lever placed on an axis that already has levers picks up their setting.
+/// A lever is a view of its ship's thrust along the axis it levers on (see <see cref="ShipControls"/>): dragging sends
+/// SetShipThrust commands, and every tick, after the commands, this poses each lever's arm from its ship's setting. So
+/// every lever on an axis moves together, and a new one stands where the others do.
 ///
 /// The swing comes from the model: the arm node pivots about its own X axis at its rest position, so it levers north
 /// and south: upright along its own +Y at 0, leaning <see cref="MaxAngle"/> towards its own -Z (the block's north
@@ -38,30 +40,25 @@ public sealed class LeverControlSystem : ISystem, IDisposable, IDebugUiSystem
     // upright to either end, much slower than the view turns, for fine control.
     private const float Sensitivity = 0.004f;
 
-    private readonly World       _world;
-    private readonly EntitySet   _levers;
-    private readonly IDisposable _subscription;
+    private readonly World         _world;
+    private readonly CommandSystem _commands;
+    private readonly EntitySet     _levers;
+    private readonly IDisposable   _subscription;
     private Entity _lastUsed;
 
-    // Levers already synced with their axis; any other lever is new, and picks up its axis' setting.
-    private readonly HashSet<Entity> _synced = new();
-
-    public LeverControlSystem(World world)
+    public LeverControlSystem(World world, CommandSystem commands)
     {
         _world        = world;
-        _levers       = world.GetEntities().With<Lever>().With<RenderedModel>().AsSet();
+        _commands     = commands;
+        _levers       = world.GetEntities().With<Lever>().With<BlockRef>().With<RenderedModel>().AsSet();
         _subscription = world.Subscribe<BlockInteraction>(OnInteraction);
     }
 
     public void Update(float dt)
     {
-        _synced.RemoveWhere(e => !e.IsAlive);
-        foreach (ref readonly Entity e in _levers.GetEntities())
-            if (_synced.Add(e)) AdoptAxisValue(e);
-
         foreach (ref readonly Entity e in _levers.GetEntities())
         {
-            float value = System.Math.Clamp(e.Get<Lever>().Value, -1f, 1f);
+            float value = System.Math.Clamp(ShipControls.LeverValue(e.Get<BlockRef>()), -1f, 1f);
             e.Get<RenderedModel>().SetRotationFromRest(ArmNode,
                 Quaternion<float>.CreateFromAxisAngle(PivotAxis, value * MaxAngle));
         }
@@ -71,13 +68,11 @@ public sealed class LeverControlSystem : ISystem, IDisposable, IDebugUiSystem
     {
         if (interaction.Phase == InteractionPhase.Ended) return;
         var e = interaction.Block;
-        if (!e.IsAlive || !e.Has<Lever>() || !e.Has<RenderedModel>() || !e.Has<Transform>()) return;
+        if (!e.IsAlive || !e.Has<Lever>() || !e.Has<BlockRef>() || !e.Has<RenderedModel>() || !e.Has<Transform>()) return;
 
         var model = e.Get<RenderedModel>().Model;
-        // Where it's drawn, like the camera the ray comes from: the view stays on the tip the player sees.
-        var transform = e.DrawnPose();
-        ref var lever = ref e.Get<Lever>();
-        float angle = System.Math.Clamp(lever.Value, -1f, 1f) * MaxAngle;
+        ref readonly var transform = ref e.Get<Transform>();
+        float angle = System.Math.Clamp(ShipControls.LeverValue(e.Get<BlockRef>()), -1f, 1f) * MaxAngle;
         if (ArmTip(model, transform, angle) is not { } arm) return;
 
         // Drag the tip along its arc: the mouse's movement along the way the tip moves on screen turns the arm.
@@ -85,8 +80,7 @@ public sealed class LeverControlSystem : ISystem, IDisposable, IDebugUiSystem
         if (pixels != 0f)
         {
             angle = System.Math.Clamp(angle + pixels * Sensitivity, -MaxAngle, MaxAngle);
-            lever.Value = angle / MaxAngle;
-            SyncAxis(e);
+            Send(e, angle / MaxAngle);
             arm = ArmTip(model, transform, angle)!.Value;
         }
 
@@ -118,49 +112,13 @@ public sealed class LeverControlSystem : ISystem, IDisposable, IDebugUiSystem
         return (InteractionDrag.ToWorld(transform, tip), InteractionDrag.DirectionToWorld(transform, tangent));
     }
 
-    /// <summary>The line a lever levers along in its volume (0-2: the north/south, east/west or up/down axis), and
-    /// which way along it its north face points (+1 or -1): <see cref="Direction"/>s come in opposite pairs.</summary>
-    public static (int Axis, float Sign) LeverAxis(in BlockRef block)
+    /// <summary>Asks for the thrust a lever set to <paramref name="value"/> shows, on its ship's axis.</summary>
+    private void Send(Entity lever, float value)
     {
-        int north = (int)block.Orientation.North;
-        return (north / 2, north % 2 == 0 ? 1f : -1f);
-    }
-
-    /// <summary>Sets every other lever in <paramref name="source"/>'s volume on its axis to match it.</summary>
-    private void SyncAxis(Entity source)
-    {
-        if (!source.Has<BlockRef>()) return;
-        ref readonly var block = ref source.Get<BlockRef>();
-        var (axis, sign) = LeverAxis(block);
-        float value = source.Get<Lever>().Value * sign; // the setting along the axis' own direction
-
-        foreach (ref readonly Entity other in _levers.GetEntities())
-        {
-            if (other == source || !other.Has<BlockRef>()) continue;
-            ref readonly var otherBlock = ref other.Get<BlockRef>();
-            if (otherBlock.Volume != block.Volume) continue;
-            var (otherAxis, otherSign) = LeverAxis(otherBlock);
-            if (otherAxis == axis) other.Get<Lever>().Value = value * otherSign;
-        }
-    }
-
-    /// <summary>Sets a new lever to the setting of any lever already on its axis in its volume.</summary>
-    private void AdoptAxisValue(Entity lever)
-    {
-        if (!lever.Has<BlockRef>()) return;
         ref readonly var block = ref lever.Get<BlockRef>();
-        var (axis, sign) = LeverAxis(block);
-
-        foreach (ref readonly Entity other in _levers.GetEntities())
-        {
-            if (other == lever || !_synced.Contains(other) || !other.Has<BlockRef>()) continue;
-            ref readonly var otherBlock = ref other.Get<BlockRef>();
-            if (otherBlock.Volume != block.Volume) continue;
-            var (otherAxis, otherSign) = LeverAxis(otherBlock);
-            if (otherAxis != axis) continue;
-            lever.Get<Lever>().Value = other.Get<Lever>().Value * otherSign * sign;
-            return;
-        }
+        if (!block.Volume.Root.IsAlive || !block.Volume.Root.Has<EntityId>()) return;
+        var (axis, sign) = ShipControls.LeverAxis(block);
+        _commands.Send(new SetShipThrust { Ship = block.Volume.Root.Get<EntityId>(), Axis = axis, Value = value * sign });
     }
 
     public void Dispose() => _subscription.Dispose();
@@ -171,10 +129,10 @@ public sealed class LeverControlSystem : ISystem, IDisposable, IDebugUiSystem
     public void DrawDebugUi()
     {
         ImGui.Text($"Levers: {_levers.Count:N0}");
-        if (_lastUsed.IsAlive && _lastUsed.Has<Lever>())
+        if (_lastUsed.IsAlive && _lastUsed.Has<Lever>() && _lastUsed.Has<BlockRef>())
         {
-            ref var lever = ref _lastUsed.Get<Lever>();
-            if (ImGui.SliderFloat("Last used", ref lever.Value, -1f, 1f, "%.2f")) SyncAxis(_lastUsed);
+            float value = ShipControls.LeverValue(_lastUsed.Get<BlockRef>());
+            if (ImGui.SliderFloat("Last used", ref value, -1f, 1f, "%.2f")) Send(_lastUsed, value);
         }
         else
         {

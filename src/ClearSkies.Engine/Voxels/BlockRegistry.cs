@@ -72,4 +72,8 @@ public static class BlockRegistry
     private static void Register(BlockDef def) => Defs[(byte)def.Id] = def;
 
     public static ref readonly BlockDef Get(BlockId id) => ref Defs[(byte)id];
+
+    /// <summary>Whether <paramref name="id"/> is a registered block (air included), e.g. to check one read from the
+    /// network or a save.</summary>
+    public static bool IsDefined(BlockId id) => id == BlockId.Air || Defs[(byte)id].Id == id && Defs[(byte)id].Name is not null;
 }

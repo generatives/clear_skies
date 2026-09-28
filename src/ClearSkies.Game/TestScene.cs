@@ -24,7 +24,7 @@ public static class TestScene
     /// overlooking the nearest island, e.g. to reproduce a view for a screenshot.</param>
     /// <param name="spawnView">Where the camera starts and how it faces (yaw, pitch); <see cref="FallbackSpawn"/> if
     /// null.</param>
-    public static Vector3D<float> Build(EngineHost host, NetRegistry registry, Session session, ulong worldSeed,
+    public static Vector3D<float> Build(EngineHost host, EntityRegistry registry, Session session, ulong worldSeed,
                                         float[]? cameraOverride = null,
                                         (Vector3D<float> Position, float Yaw, float Pitch)? spawnView = null)
     {
@@ -88,7 +88,7 @@ public static class TestScene
         player.Set(new Support());
         player.Set(new Player { Id = PlayerId.New(), Name = Environment.UserName, IsLocal = true });
         player.Set<LocalPlayer>();
-        player.Set(new NetId { Value = registry.Allocate() });
+        player.Set(registry.Allocate());
         player.Set(session.LocalOwner());
         player.Set<OwnPresence>();
         Players.SetFreeFlying(player, true); // start free-flying — zero regression risk vs. today

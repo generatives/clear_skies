@@ -2,6 +2,9 @@ using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Input;
 using ClearSkies.Engine.Math;
 using ClearSkies.Engine.Physics.Characters;
+using ClearSkies.Engine.Commands;
+using ClearSkies.Engine.Commands.Handlers;
+using ClearSkies.Engine.Entities;
 using DefaultEcs;
 using Silk.NET.Maths;
 using PhysVec = System.Numerics.Vector3;
@@ -9,8 +12,8 @@ using PhysVec = System.Numerics.Vector3;
 namespace ClearSkies.Engine.ECS;
 
 /// <summary>
-/// Each tick, before physics: the free-fly/walking toggle (V, see <see cref="Players.SetFreeFlying"/>) and per-mode
-/// movement, all from the tick's <see cref="PlayerInput"/>. Free-flying moves <see cref="Transform.Position"/> directly
+/// Each tick, before physics: the free-fly/walking toggle (V, sent as a SetMoveMode command, which applies later this
+/// same tick; see <see cref="Players.SetFreeFlying"/>) and per-mode movement, all from the tick's <see cref="PlayerInput"/>. Free-flying moves <see cref="Transform.Position"/> directly
 /// the way the player looks; E and Q raise and lower its speed by <see cref="FlySpeedStep"/> (Ctrl triples it while
 /// held). Walking instead feeds WASD/Shift/Space into the character's motion goals
 /// (<see cref="PlayerCharacter.UpdateCharacterGoals"/>) — actual movement happens inside the physics step via the
@@ -25,12 +28,15 @@ namespace ClearSkies.Engine.ECS;
 public sealed class PlayerMovementSystem : ISystem
 {
     private readonly EntitySet _players;
+    private readonly CommandSystem? _commands;
     private readonly EntitySet _walkers;
     private readonly EntitySet _flyers;
     private readonly List<Entity> _toggled = new();
 
-    public PlayerMovementSystem(World world)
+    /// <param name="commands">Where the walk/fly toggle is sent as SetMoveMode; without one it's set directly.</param>
+    public PlayerMovementSystem(World world, CommandSystem? commands = null)
     {
+        _commands = commands;
         _players = world.GetEntities().With<PlayerInput>().With<CharacterControllerComponent>().AsSet();
         _walkers = world.GetEntities()
             .With<Transform>().With<PlayerInput>().With<CharacterControllerComponent>()
@@ -43,7 +49,13 @@ public sealed class PlayerMovementSystem : ISystem
     {
         foreach (ref readonly Entity e in _players.GetEntities())
             if (e.Get<PlayerInput>().WasPressed(PlayerButtons.ToggleFly) && !e.Has<Piloting>()) _toggled.Add(e);
-        foreach (var e in _toggled) Players.SetFreeFlying(e, !e.Has<FreeFlying>()); // changes which set it's in
+        foreach (var e in _toggled)
+        {
+            if (_commands != null && e.Has<EntityId>())
+                _commands.Send(new SetMoveMode { Player = e.Get<EntityId>(), FreeFly = !e.Has<FreeFlying>() });
+            else
+                Players.SetFreeFlying(e, !e.Has<FreeFlying>()); // changes which set it's in
+        }
         _toggled.Clear();
 
         foreach (ref readonly Entity e in _walkers.GetEntities())

@@ -26,6 +26,14 @@ public enum PlayerButtons : uint
     Next = 1 << 8,
     /// <summary>Q: lower the fly speed, or turn left while piloting.</summary>
     Previous = 1 << 9,
+    /// <summary>Left mouse button: place a block, or use a control.</summary>
+    Primary = 1 << 10,
+    /// <summary>Right mouse button: break a block.</summary>
+    Secondary = 1 << 11,
+    /// <summary>G: spawn a one-block grid in front of the player.</summary>
+    SpawnGrid = 1 << 12,
+    /// <summary>L: cycle the block to place.</summary>
+    CycleBlock = 1 << 13,
 }
 
 /// <summary>
@@ -47,6 +55,9 @@ public struct PlayerInput
     /// <summary>Mouse movement in pixels since the previous tick, for dragging controls.</summary>
     public Vector2 MouseDelta;
 
+    /// <summary>Whether the cursor is captured for playing (not freed for the UI): the mouse aims and clicks act.</summary>
+    public bool Aiming;
+
     public readonly bool IsHeld(PlayerButtons button) => (Held & button) != 0;
     public readonly bool WasPressed(PlayerButtons button) => (Pressed & button) != 0;
 
@@ -60,25 +71,61 @@ public struct PlayerInput
 
 /// <summary>Collects presses and mouse movement over frames and hands them to the next tick. A frame can run no tick
 /// (at high frame rates most don't), while <see cref="InputManager"/> forgets a press after its frame, so without this a
-/// click or jump in such a frame would be lost.</summary>
+/// click or jump in such a frame would be lost.
+///
+/// Presses all go to the next tick. Mouse movement is shared out by time when frames give their length: a tick takes
+/// the movement from its own <see cref="TickSeconds"/> of frames, splitting a frame that straddles two ticks, so a drag
+/// moves as much each tick however frames and ticks line up (handing a tick whole frames would give it one, two or
+/// three frames' movement in turn, and a steady drag would move in uneven steps).</summary>
 public sealed class InputLatch
 {
     private PlayerButtons _pressed;
-    private Vector2 _mouseDelta;
+    private readonly List<(Vector2 Delta, double Seconds)> _moves = new(); // oldest first; not yet taken
 
-    /// <summary>Adds one frame's presses and mouse movement.</summary>
-    public void AddFrame(PlayerButtons pressed, Vector2 mouseDelta)
+    /// <summary>Adds one frame's presses and mouse movement, made over <paramref name="seconds"/> (0: all of it goes to
+    /// the next tick).</summary>
+    public void AddFrame(PlayerButtons pressed, Vector2 mouseDelta, double seconds = 0)
     {
         _pressed |= pressed;
-        _mouseDelta += mouseDelta;
+        if (mouseDelta != Vector2.Zero || seconds > 0) _moves.Add((mouseDelta, System.Math.Max(0, seconds)));
     }
 
-    /// <summary>Builds a tick's input from what's been collected since the last call, and starts collecting afresh.</summary>
-    public PlayerInput Take(PlayerButtons held, float yaw, float pitch)
+    /// <summary>Tells the latch how much time the tick clock carries past its last tick: movement waiting longer than
+    /// that (ticks the clock dropped, or ran faster than frames) is squeezed into it, so none is lost and none lags.</summary>
+    public void Carry(double seconds)
     {
-        var input = new PlayerInput { Held = held, Pressed = _pressed, Yaw = yaw, Pitch = pitch, MouseDelta = _mouseDelta };
+        double waiting = 0;
+        var moved = Vector2.Zero;
+        foreach (var (d, s) in _moves) { waiting += s; moved += d; }
+        if (waiting <= seconds) return;
+        _moves.Clear();
+        _moves.Add((moved, System.Math.Max(0, seconds)));
+    }
+
+    /// <summary>Builds a tick's input from what's been collected since the last call, and starts collecting afresh:
+    /// every press, and the mouse movement made over the next <paramref name="seconds"/> of frames (by default all
+    /// of it).</summary>
+    public PlayerInput Take(PlayerButtons held, float yaw, float pitch, bool aiming = true, double seconds = double.PositiveInfinity)
+    {
+        var moved = Vector2.Zero;
+        double left = seconds;
+        int taken = 0;
+        for (; taken < _moves.Count; taken++)
+        {
+            var (d, s) = _moves[taken];
+            if (s <= left) { moved += d; left -= s; continue; }
+            if (left > 0)
+            {
+                float part = (float)(left / s);
+                moved += d * part;
+                _moves[taken] = (d * (1f - part), s - left);
+            }
+            break;
+        }
+        _moves.RemoveRange(0, taken);
+
+        var input = new PlayerInput { Held = held, Pressed = _pressed, Yaw = yaw, Pitch = pitch, MouseDelta = moved, Aiming = aiming };
         _pressed = PlayerButtons.None;
-        _mouseDelta = Vector2.Zero;
         return input;
     }
 }
@@ -100,6 +147,14 @@ public static class PlayerInputBindings
         (Key.V, PlayerButtons.ToggleFly),
         (Key.E, PlayerButtons.Next),
         (Key.Q, PlayerButtons.Previous),
+        (Key.G, PlayerButtons.SpawnGrid),
+        (Key.L, PlayerButtons.CycleBlock),
+    };
+
+    public static readonly (MouseButton Button, PlayerButtons Buttons)[] MouseButtons =
+    {
+        (MouseButton.Left, PlayerButtons.Primary),
+        (MouseButton.Right, PlayerButtons.Secondary),
     };
 
     /// <summary>Buttons whose keys are down now.</summary>
@@ -108,6 +163,8 @@ public static class PlayerInputBindings
         var buttons = PlayerButtons.None;
         foreach (var (key, button) in Keys)
             if (input.IsKeyDown(key)) buttons |= button;
+        foreach (var (mouse, button) in MouseButtons)
+            if (input.IsMouseButtonDown(mouse)) buttons |= button;
         return buttons;
     }
 
@@ -117,6 +174,8 @@ public static class PlayerInputBindings
         var buttons = PlayerButtons.None;
         foreach (var (key, button) in Keys)
             if (input.WasKeyPressed(key)) buttons |= button;
+        foreach (var (mouse, button) in MouseButtons)
+            if (input.WasMouseButtonPressed(mouse)) buttons |= button;
         return buttons;
     }
 }

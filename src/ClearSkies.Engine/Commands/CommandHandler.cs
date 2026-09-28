@@ -1,0 +1,196 @@
+using ClearSkies.Engine.Entities;
+using ClearSkies.Engine.Serialization;
+
+namespace ClearSkies.Engine.Commands;
+
+/// <summary>The part of every handler the <see cref="CommandSystem"/> drives without knowing its command type.</summary>
+public abstract class CommandHandlerBase
+{
+    /// <summary>Unique across handlers; identifies the command on the wire (see <see cref="CommandIds"/>).</summary>
+    public abstract ushort Id { get; }
+
+    public virtual string Name => GetType().Name.Replace("Handler", "");
+
+    internal CommandSystem Owner { get; set; } = null!;
+
+    internal abstract Type CommandType { get; }
+    internal abstract void RunRemoteCommand(PeerId from, uint seq, ReadOnlySpan<byte> payload);
+    internal abstract void RunEvent(in EventMeta meta, ReadOnlySpan<byte> payload);
+}
+
+/// <summary>
+/// Handles one kind of command: where the gameplay rules for it live. The authority (by default the owner of the
+/// command's target) runs <see cref="Validate"/> to accept, adjust or reject it, then <see cref="Apply"/> and
+/// <see cref="AfterApply"/>, and the accepted command goes to every other machine as an event, which they apply with
+/// the same <see cref="Apply"/>. Handlers are registered once at startup, get their dependencies through their
+/// constructors, and work the same with nobody connected.
+///
+/// Two rules keep every machine in step: set values, don't add to them (a duplicated or reordered event still gives
+/// the right result), and <see cref="Apply"/> reads only the event and replicated gameplay state, never physics poses
+/// or anything local. Physics effects that only matter on the owner go in <see cref="AfterApply"/>.
+/// </summary>
+public abstract class CommandHandler<T> : CommandHandlerBase where T : struct, ICommand
+{
+    /// <summary>Whether <paramref name="later"/>, sent in the same tick as <paramref name="earlier"/> and before it has
+    /// run, replaces it: a drag's settings, where only the latest per thing set is worth sending. Never, by default.</summary>
+    public virtual bool Coalesces(in T earlier, in T later) => false;
+
+    public abstract void Write(NetWriter writer, in T command);
+    public abstract T Read(ref NetReader reader);
+
+    /// <summary>Which peer decides this command. Default: the owner of its target.</summary>
+    public virtual PeerId Authority(in T command, in AuthorityContext ctx) => ctx.OwnerOf(command.Target);
+
+    /// <summary>Authority only. Accept, adjust the command in place, or reject it.</summary>
+    public virtual Verdict Validate(ref T command, in CommandContext ctx) => Verdict.Accept;
+
+    /// <summary>Every machine, identically: the event's effect on gameplay state.</summary>
+    public abstract void Apply(in T evt, in ApplyContext ctx);
+
+    /// <summary>Authority only, after <see cref="Apply"/>: owner-side effects and follow-on commands.</summary>
+    public virtual void AfterApply(in T evt, in CommandContext ctx) { }
+
+    internal sealed override Type CommandType => typeof(T);
+
+    /// <summary>A command from this machine, taken from <see cref="CommandSystem"/>'s outgoing commands: decided here,
+    /// or predicted (if it can be) and sent to its authority.</summary>
+    internal void RunLocal(T command)
+    {
+        var sys = Owner;
+        var local = sys.Session.LocalPeer;
+        uint seq = sys.NextSeq();
+        var authority = Authority(command, new AuthorityContext(sys, local));
+        if (authority == local)
+        {
+            RunAsAuthority(command, local, seq);
+            return;
+        }
+        var payload = Serialize(command);
+        TryPredict(command, seq, authority, payload);
+        sys.Router.SendCommand(authority, Id, seq, payload);
+        sys.Stats.Sent++;
+    }
+
+    internal sealed override void RunRemoteCommand(PeerId from, uint seq, ReadOnlySpan<byte> payload)
+    {
+        var reader = new NetReader(payload);
+        RunAsAuthority(Read(ref reader), from, seq);
+    }
+
+    private void RunAsAuthority(T command, PeerId sender, uint seq)
+    {
+        var sys = Owner;
+        var ctx = new CommandContext(sender, sys.Tick);
+        if (Validate(ref command, ctx) == Verdict.Reject)
+        {
+            sys.Stats.Rejected++;
+            sys.LastRejection = $"{Name} on {command.Target} from {sender}";
+            if (sender != sys.Session.LocalPeer) sys.Router.SendRejection(sender, seq);
+            return;
+        }
+        var meta = new EventMeta(sender, seq, sys.Session.LocalPeer, command.Target.Entity, sys.NextEventNumber(command.Target.Entity), sys.Tick);
+        ApplyEvent(command, new ApplyContext(sender, IsAuthority: true, IsPrediction: false, sys.Tick), meta);
+        AfterApply(command, ctx);
+        sys.Router.BroadcastEvent(Id, meta, Serialize(command));
+    }
+
+    internal sealed override void RunEvent(in EventMeta meta, ReadOnlySpan<byte> payload)
+    {
+        var sys = Owner;
+        if (!sys.AcceptEventNumber(meta)) return; // a duplicate
+        var reader = new NetReader(payload);
+        var evt = Read(ref reader);
+        if (meta.Origin == sys.Session.LocalPeer && TryConfirm(meta, payload, evt))
+            return; // our own prediction coming back
+        // The authority decided this before any of our predictions it hasn't answered yet, so it goes beneath them.
+        var m = meta;
+        sys.ApplyBeneathPredictions(meta.Authority,
+            () => ApplyEvent(evt, new ApplyContext(m.Origin, IsAuthority: false, IsPrediction: false, m.Tick), m));
+    }
+
+    /// <summary>Applies an event (not a prediction) and tells anyone listening.</summary>
+    internal void ApplyEvent(in T evt, in ApplyContext ctx, in EventMeta meta)
+    {
+        Apply(evt, ctx);
+        Owner.Stats.Applied++;
+        if (Owner.HasAppliedListeners) Owner.RaiseApplied(this, meta, evt);
+    }
+
+    /// <summary>Predicted handlers apply a command sent to a remote authority straight away.</summary>
+    internal virtual void TryPredict(in T command, uint seq, PeerId authority, byte[] payload) { }
+
+    /// <summary>Predicted handlers settle a prediction when its event comes back; true if it was one.</summary>
+    internal virtual bool TryConfirm(in EventMeta meta, ReadOnlySpan<byte> payload, in T evt) => false;
+
+    internal byte[] Serialize(in T command)
+    {
+        var w = Owner.Scratch;
+        w.Clear();
+        Write(w, command);
+        return w.ToArray();
+    }
+}
+
+/// <summary>
+/// A command the sender applies straight away, before its authority confirms it. <see cref="Capture"/> records what
+/// <see cref="CommandHandler{T}.Apply"/> is about to change so it can be put back with <see cref="Restore"/>. Each
+/// prediction waits in <see cref="CommandSystem"/>'s unconfirmed predictions until its authority answers: when the
+/// command's own event comes back as predicted nothing changes; if the authority adjusted it, the prediction is undone
+/// and the event applied instead; if it rejected it, the prediction is undone.
+/// </summary>
+public abstract class PredictedCommandHandler<T, TUndo> : CommandHandler<T> where T : struct, ICommand
+{
+    /// <summary>Captures what Apply is about to change, so a rejection can put it back.</summary>
+    public abstract TUndo Capture(in T command);
+
+    public abstract void Restore(in TUndo undo);
+
+    internal sealed override void TryPredict(in T command, uint seq, PeerId authority, byte[] payload)
+    {
+        var prediction = new Predicted(this, seq, authority, command, payload);
+        prediction.Redo();
+        Owner.AddPrediction(prediction);
+    }
+
+    internal sealed override bool TryConfirm(in EventMeta meta, ReadOnlySpan<byte> payload, in T evt)
+    {
+        if (Owner.FindPrediction(meta.OriginSeq) is not Predicted p) return false; // not a prediction (any more): apply it
+        if (payload.SequenceEqual(p.Payload))
+        {
+            Owner.ConfirmPrediction(p);
+            return true;
+        }
+        // Adjusted by the authority: the event as decided replaces the prediction.
+        var e = evt;
+        var m = meta;
+        Owner.ReplacePrediction(p, () => ApplyEvent(e, new ApplyContext(m.Origin, false, false, m.Tick), m));
+        return true;
+    }
+
+    /// <summary>One of this handler's predictions: the command, what applying it changed, and the bytes sent, to
+    /// compare with the event that comes back.</summary>
+    private sealed class Predicted : Prediction
+    {
+        private readonly PredictedCommandHandler<T, TUndo> _handler;
+        private readonly T _command;
+        private TUndo _undo = default!;
+        public readonly byte[] Payload;
+
+        public Predicted(PredictedCommandHandler<T, TUndo> handler, uint seq, PeerId authority, T command, byte[] payload)
+            : base(seq, authority)
+        {
+            _handler = handler;
+            _command = command;
+            Payload = payload;
+        }
+
+        public override void Undo() => _handler.Restore(_undo);
+
+        public override void Redo()
+        {
+            var sys = _handler.Owner;
+            _undo = _handler.Capture(_command);
+            _handler.Apply(_command, new ApplyContext(sys.Session.LocalPeer, IsAuthority: false, IsPrediction: true, sys.Tick));
+        }
+    }
+}

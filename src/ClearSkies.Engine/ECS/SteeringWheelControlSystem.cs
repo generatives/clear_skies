@@ -2,6 +2,9 @@ using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Gui;
 using ClearSkies.Engine.Math;
 using ClearSkies.Engine.Rendering;
+using ClearSkies.Engine.Commands;
+using ClearSkies.Engine.Commands.Handlers;
+using ClearSkies.Engine.Entities;
 using DefaultEcs;
 using ImGuiNET;
 using Silk.NET.Maths;
@@ -14,9 +17,11 @@ namespace ClearSkies.Engine.ECS;
 /// wheel turns (see <see cref="InteractionFocus"/>), and the mouse, instead of turning the view, drags the spot round:
 /// its movement along the way the spot moves on screen turns the wheel, slowly, for fine control. So the part of the
 /// wheel the player grabbed goes round with the mouse, rather than the wheel's top snapping to it. The wheel turns up
-/// to <see cref="SteeringWheel.MaxAngle"/> either way, and a ship's wheels turn together. What the wheel asks of the
-/// ship is <see cref="AirshipFlightSystem"/>'s business. Every frame it poses each wheel from its
-/// <see cref="SteeringWheel.Angle"/>.
+/// to <see cref="SteeringWheel.MaxAngle"/> either way.
+///
+/// A wheel is a view of its ship's turn (see <see cref="ShipControls.Turn"/>): turning it sends SetShipTurn commands,
+/// and every tick, after the commands, this poses each wheel from its ship's setting, so a ship's wheels turn together.
+/// What the turn asks of the ship is <see cref="AirshipFlightSystem"/>'s business.
 ///
 /// The spin comes from the model: the wheel node turns about its own Z axis at its rest position, its face towards
 /// the block's north face (where the player who placed it stands).
@@ -34,19 +39,21 @@ public sealed class SteeringWheelControlSystem : ISystem, IDisposable, IDebugUiS
     // on the hub itself holds.
     private const float RimRadius = 0.44f, MinGrabRadius = 0.2f;
 
-    private readonly World       _world;
-    private readonly EntitySet   _wheels;
-    private readonly IDisposable _subscription;
+    private readonly World         _world;
+    private readonly CommandSystem _commands;
+    private readonly EntitySet     _wheels;
+    private readonly IDisposable   _subscription;
 
     // The spot held on the wheel being turned: its angle about the hub from the wheel's own +X (turning with the
     // wheel) and its distance from the hub.
     private float  _grabAngle, _grabRadius;
     private Entity _lastUsed;
 
-    public SteeringWheelControlSystem(World world)
+    public SteeringWheelControlSystem(World world, CommandSystem commands)
     {
         _world        = world;
-        _wheels       = world.GetEntities().With<SteeringWheel>().With<RenderedModel>().AsSet();
+        _commands     = commands;
+        _wheels       = world.GetEntities().With<SteeringWheel>().With<BlockRef>().With<RenderedModel>().AsSet();
         _subscription = world.Subscribe<BlockInteraction>(OnInteraction);
     }
 
@@ -54,41 +61,49 @@ public sealed class SteeringWheelControlSystem : ISystem, IDisposable, IDebugUiS
     {
         foreach (ref readonly Entity e in _wheels.GetEntities())
             e.Get<RenderedModel>().SetRotationFromRest(WheelNode,
-                Quaternion<float>.CreateFromAxisAngle(Vector3D<float>.UnitZ, e.Get<SteeringWheel>().Angle));
+                Quaternion<float>.CreateFromAxisAngle(Vector3D<float>.UnitZ, SteeringWheel.Angle(e.Get<BlockRef>())));
     }
 
     private void OnInteraction(in BlockInteraction interaction)
     {
         var e = interaction.Block;
         if (interaction.Phase == InteractionPhase.Ended) return;
-        if (!e.IsAlive || !e.Has<SteeringWheel>() || !e.Has<RenderedModel>() || !e.Has<Transform>()) return;
+        if (!e.IsAlive || !e.Has<SteeringWheel>() || !e.Has<BlockRef>() || !e.Has<RenderedModel>() || !e.Has<Transform>()) return;
         if (WheelFrame(e.Get<RenderedModel>().Model) is not { } frame) return;
-        // Where it's drawn, like the camera the ray comes from: the view stays on the spot the player sees.
-        var transform = e.DrawnPose();
-        ref var wheel = ref e.Get<SteeringWheel>();
+        ref readonly var transform = ref e.Get<Transform>();
+        float wheelAngle = SteeringWheel.Angle(e.Get<BlockRef>());
 
         if (interaction.Phase == InteractionPhase.Began)
         {
             // Hold the spot clicked, as it sits on the wheel at its current angle.
             var (angle, radius) = PointedAt(frame, transform, interaction.RayOrigin, interaction.RayDirection)
                                   ?? (MathF.PI / 2f, RimRadius);
-            _grabAngle  = angle - wheel.Angle;
+            _grabAngle  = angle - wheelAngle;
             _grabRadius = System.Math.Clamp(radius, MinGrabRadius, RimRadius);
             _lastUsed   = e;
         }
         else
         {
-            var (_, tangent) = Spot(frame, transform, wheel.Angle);
+            var (_, tangent) = Spot(frame, transform, wheelAngle);
             float pixels = InteractionDrag.AlongScreen(tangent, interaction.RayDirection, interaction.MouseDelta);
             if (pixels != 0f)
             {
-                wheel.Angle = System.Math.Clamp(wheel.Angle + pixels * Sensitivity,
-                                                -SteeringWheel.MaxAngle, SteeringWheel.MaxAngle);
-                SyncShip(e);
+                float angle = System.Math.Clamp(wheelAngle + pixels * Sensitivity, -SteeringWheel.MaxAngle, SteeringWheel.MaxAngle);
+                Send(e, angle);
+                _world.Publish(new InteractionFocus(Spot(frame, transform, angle).Point)); // keep the crosshair on it
+                return;
             }
         }
 
-        _world.Publish(new InteractionFocus(Spot(frame, transform, wheel.Angle).Point)); // keep the crosshair on it
+        _world.Publish(new InteractionFocus(Spot(frame, transform, wheelAngle).Point)); // keep the crosshair on it
+    }
+
+    /// <summary>Asks for the turn a wheel turned to <paramref name="angle"/> shows.</summary>
+    private void Send(Entity wheel, float angle)
+    {
+        var root = wheel.Get<BlockRef>().Volume.Root;
+        if (root.IsAlive && root.Has<EntityId>())
+            _commands.Send(new SetShipTurn { Ship = root.Get<EntityId>(), Value = angle / SteeringWheel.MaxAngle });
     }
 
     /// <summary>The wheel's hub and axes at rest, in model space (= the block entity's own space).</summary>
@@ -137,17 +152,6 @@ public sealed class SteeringWheelControlSystem : ISystem, IDisposable, IDebugUiS
         return radius < 1e-4f ? null : (MathF.Atan2(oy, ox), radius);
     }
 
-    /// <summary>Turns every other wheel on <paramref name="source"/>'s ship to match it.</summary>
-    private void SyncShip(Entity source)
-    {
-        if (!source.Has<BlockRef>()) return;
-        var volume = source.Get<BlockRef>().Volume;
-        float angle = source.Get<SteeringWheel>().Angle;
-        foreach (ref readonly Entity other in _wheels.GetEntities())
-            if (other != source && other.Has<BlockRef>() && other.Get<BlockRef>().Volume == volume)
-                other.Get<SteeringWheel>().Angle = angle;
-    }
-
     public void Dispose() => _subscription.Dispose();
 
     // ── debug UI ─────────────────────────────────────────────────────────────
@@ -156,9 +160,9 @@ public sealed class SteeringWheelControlSystem : ISystem, IDisposable, IDebugUiS
     public void DrawDebugUi()
     {
         ImGui.Text($"Steering wheels: {_wheels.Count:N0}");
-        if (_lastUsed.IsAlive && _lastUsed.Has<SteeringWheel>())
+        if (_lastUsed.IsAlive && _lastUsed.Has<SteeringWheel>() && _lastUsed.Has<BlockRef>())
         {
-            float degrees = _lastUsed.Get<SteeringWheel>().Angle * 180f / MathF.PI;
+            float degrees = SteeringWheel.Angle(_lastUsed.Get<BlockRef>()) * 180f / MathF.PI;
             ImGui.Text($"Last used: turned {degrees:0}° clockwise");
         }
         else
