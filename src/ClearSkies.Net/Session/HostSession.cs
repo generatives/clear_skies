@@ -32,9 +32,9 @@ public sealed class RemotePeer
     public PeerState State;
     public string Name = "";
     public PlayerId Player;
-    public uint PlayerEntity;
+    public EntityId PlayerEntity;
     public Vector3 Spawn;
-    public readonly List<(ushort Handler, byte[] Payload, uint Target)> PendingSnapshot = new();
+    public readonly List<(ushort Handler, byte[] Payload, EntityId Target)> PendingSnapshot = new();
 }
 
 /// <summary>
@@ -47,15 +47,15 @@ public sealed class HostSession : NetSession
 {
     private readonly Dictionary<ConnectionId, RemotePeer> _peers = new();
     private readonly EntitySet _describable;
-    private readonly NetIdAllocator _ids;
+    private readonly EntityIdAllocator _ids;
     private readonly ulong _seed;
     private readonly ulong _checksum;
     private readonly Func<PlayerId, (byte[]? SavedSpawn, Vector3 Position)> _spawnFor;
 
     /// <param name="spawnFor">A joining player's saved SpawnPlayer command (if they've played this world before) and
     /// where they'll spawn.</param>
-    public HostSession(ITransport? transport, EngineSession session, CommandSystem commands, NetRegistry registry, World world,
-                       ITickClock clock, NetIdAllocator ids, ulong seed, ulong generationChecksum,
+    public HostSession(ITransport? transport, EngineSession session, CommandSystem commands, EntityRegistry registry, World world,
+                       ITickClock clock, EntityIdAllocator ids, ulong seed, ulong generationChecksum,
                        Func<PlayerId, (byte[]? SavedSpawn, Vector3 Position)> spawnFor)
         : base(transport, session, commands, registry, world, clock)
     {
@@ -63,7 +63,7 @@ public sealed class HostSession : NetSession
         _seed = seed;
         _checksum = generationChecksum;
         _spawnFor = spawnFor;
-        _describable = world.GetEntities().With<NetId>().With<OwnPresence>().Without<Chunk>().AsSet();
+        _describable = world.GetEntities().With<EntityId>().With<OwnPresence>().Without<Chunk>().AsSet();
         commands.Descriptions.Described += OnDescribed;
         commands.DescribedAll += OnDescribedAll;
     }
@@ -93,7 +93,7 @@ public sealed class HostSession : NetSession
         // Everything they owned is the host's now (their player, until it's despawned).
         foreach (var e in World.GetEntities().With<NetOwner>().AsEnumerable().ToList())
             if (e.Get<NetOwner>().Owner == peer.Peer) e.Set(Session.LocalOwner((ushort)(e.Get<NetOwner>().Epoch + 1)));
-        if (peer.PlayerEntity != 0 && Registry.TryGet(peer.PlayerEntity, out var player))
+        if (!peer.PlayerEntity.IsNone && Registry.TryGet(peer.PlayerEntity, out var player))
         {
             if (PlayerLeaving is { } leaving) leaving(player);
             else Commands.Send(new DespawnEntity { Entity = peer.PlayerEntity, KeepStored = true });
@@ -221,7 +221,7 @@ public sealed class HostSession : NetSession
     {
         if ((d.Request.Purpose & DescribePurpose.Send) == 0) return;
         foreach (var peerId in d.Request.SendTo.Peers)
-            if (PeerById(peerId) is { } peer) peer.PendingSnapshot.Add((d.HandlerId, d.Payload, d.NetId));
+            if (PeerById(peerId) is { } peer) peer.PendingSnapshot.Add((d.HandlerId, d.Payload, d.Id));
     }
 
     /// <summary>Descriptions are out: send each snapshotting client theirs, then spawn their player for everyone.</summary>
@@ -248,12 +248,12 @@ public sealed class HostSession : NetSession
                 spawn = handler.Read(ref reader);
                 spawn.Owner = peer.Peer;
                 spawn.Player.Name = peer.Name;
-                if (Registry.IsLive(spawn.Id)) spawn.Id = 0; // somehow still here: give them a fresh entity
+                if (Registry.IsLive(spawn.Id)) spawn.Id = EntityId.None; // somehow still here: give them a fresh entity
             }
             else
                 spawn = new SpawnPlayer { Owner = peer.Peer, Player = new PlayerDescription
                     { Id = peer.Player, Name = peer.Name, FreeFly = true, Position = position, Yaw = NewPlayerLook.Yaw, Pitch = NewPlayerLook.Pitch } };
-            if (spawn.Id == 0) spawn.Id = Registry.Allocate();
+            if (spawn.Id.IsNone) spawn.Id = Registry.Allocate();
             peer.PlayerEntity = spawn.Id;
             Commands.Send(spawn);
 

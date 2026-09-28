@@ -32,7 +32,7 @@ public sealed class BodySync : ISystem, IDebugUiSystem
     private readonly EntitySet _grids;
     private readonly EntitySet _remote;
     private readonly List<BodySnapshot> _own = new();
-    private readonly Dictionary<uint, (PeerId Owner, uint Tick, BodySnapshot Snapshot)> _relay = new();
+    private readonly Dictionary<EntityId, (PeerId Owner, uint Tick, BodySnapshot Snapshot)> _relay = new();
     private readonly NetWriter _writer = new(2048);
     private long _snapshotsSent, _snapshotsReceived;
 
@@ -48,8 +48,8 @@ public sealed class BodySync : ISystem, IDebugUiSystem
             {
                 foreach (ref readonly var e in _remote.GetEntities()) e.Get<RemoteBody>().Buffer.ShiftClock(ticks);
             };
-        _players = world.GetEntities().With<NetId>().With<NetOwner>().With<Player>().With<Transform>().AsSet();
-        _grids = world.GetEntities().With<NetId>().With<NetOwner>().With<PhysicsBodyComponent>().With<Transform>().AsSet();
+        _players = world.GetEntities().With<EntityId>().With<NetOwner>().With<Player>().With<Transform>().AsSet();
+        _grids = world.GetEntities().With<EntityId>().With<NetOwner>().With<PhysicsBodyComponent>().With<Transform>().AsSet();
     }
 
     /// <summary>Snapshots of grids too (from N2; players only until then).</summary>
@@ -103,12 +103,12 @@ public sealed class BodySync : ISystem, IDebugUiSystem
 
     private BodySnapshot PlayerSnapshot(Entity e)
     {
-        var s = new BodySnapshot { Entity = e.Get<NetId>().Value, Epoch = e.Get<NetOwner>().Epoch, Rotation = Quaternion.Identity };
+        var s = new BodySnapshot { Entity = e.Get<EntityId>(), Epoch = e.Get<NetOwner>().Epoch, Rotation = Quaternion.Identity };
         ref readonly var t = ref e.Get<Transform>();
         s.Position = new Vector3(t.Position.X, t.Position.Y, t.Position.Z);
-        if (e.Has<Support>() && e.Get<Support>() is { HasSupporter: true } support && support.Supporter.Has<NetId>())
+        if (e.Has<Support>() && e.Get<Support>() is { HasSupporter: true } support && support.Supporter.Has<EntityId>())
         {
-            s.Support = support.Supporter.Get<NetId>().Value;
+            s.Support = support.Supporter.Get<EntityId>();
             s.Position = support.LocalPosition;
         }
         if (e.Has<CharacterControllerComponent>() && !e.Has<FreeFlying>())
@@ -129,7 +129,7 @@ public sealed class BodySync : ISystem, IDebugUiSystem
         var (p, q) = _physics.GetBodyPose(body);
         return new BodySnapshot
         {
-            Entity = e.Get<NetId>().Value,
+            Entity = e.Get<EntityId>(),
             Epoch = e.Get<NetOwner>().Epoch,
             Position = PhysicsConv.ToBepu(pb.EntityPosition(p, q)), // its block space, which edits don't move
             Rotation = q,
@@ -168,10 +168,10 @@ public sealed class BodySync : ISystem, IDebugUiSystem
 public sealed class RemoteBodySystem : ISystem
 {
     private readonly EntitySet _remote;
-    private readonly NetRegistry _registry;
+    private readonly EntityRegistry _registry;
     private readonly ITickClock _clock;
 
-    public RemoteBodySystem(World world, NetRegistry registry, ITickClock clock)
+    public RemoteBodySystem(World world, EntityRegistry registry, ITickClock clock)
     {
         _remote = world.GetEntities().With<RemoteBody>().With<Transform>().AsSet();
         _registry = registry;
@@ -216,9 +216,9 @@ public sealed class RemoteBodySystem : ISystem
     }
 
     /// <summary>A pose in a support's space, in world space (as the support is drawn now).</summary>
-    public (Vector3 Position, Quaternion Rotation) ToWorld(uint support, Vector3 position, Quaternion rotation)
+    public (Vector3 Position, Quaternion Rotation) ToWorld(EntityId support, Vector3 position, Quaternion rotation)
     {
-        if (support == 0 || !_registry.TryGet(support, out var s) || !s.Has<Transform>()) return (position, rotation);
+        if (support.IsNone || !_registry.TryGet(support, out var s) || !s.Has<Transform>()) return (position, rotation);
         ref readonly var st = ref s.Get<Transform>();
         var sr = new Quaternion(st.Rotation.X, st.Rotation.Y, st.Rotation.Z, st.Rotation.W);
         return (new Vector3(st.Position.X, st.Position.Y, st.Position.Z) + Vector3.Transform(position, sr), sr * rotation);

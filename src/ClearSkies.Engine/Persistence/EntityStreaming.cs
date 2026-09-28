@@ -18,7 +18,7 @@ namespace ClearSkies.Engine.Persistence;
 /// </summary>
 public sealed class StoredEntityIndex
 {
-    private readonly Dictionary<uint, StoredEntity> _entries = new();
+    private readonly Dictionary<EntityId, StoredEntity> _entries = new();
 
     public StoredEntityIndex(IEnumerable<StoredEntity> entries)
     {
@@ -28,8 +28,8 @@ public sealed class StoredEntityIndex
     public int Count => _entries.Count;
     public IEnumerable<StoredEntity> Entries => _entries.Values;
     public void Set(StoredEntity entry) => _entries[entry.Id] = entry;
-    public void Remove(uint id) => _entries.Remove(id);
-    public bool TryGet(uint id, out StoredEntity entry) => _entries.TryGetValue(id, out entry);
+    public void Remove(EntityId id) => _entries.Remove(id);
+    public bool TryGet(EntityId id, out StoredEntity entry) => _entries.TryGetValue(id, out entry);
 }
 
 /// <summary>
@@ -49,17 +49,17 @@ public sealed class EntityStreamingSystem : ISystem, IDebugUiSystem
 
     private readonly SaveDatabase _db;
     private readonly StoredEntityIndex _index;
-    private readonly NetRegistry _registry;
+    private readonly EntityRegistry _registry;
     private readonly CommandSystem _commands;
     private readonly EntitySet _players;
     private readonly EntitySet _streamed;
     private readonly List<Vector3> _playerPositions = new();
-    private readonly HashSet<uint> _unloading = new();   // described for storage, not written yet
-    private readonly HashSet<uint> _despawning = new();  // written, despawn sent
+    private readonly HashSet<EntityId> _unloading = new();   // described for storage, not written yet
+    private readonly HashSet<EntityId> _despawning = new();  // written, despawn sent
     private readonly List<Entity> _toUnload = new();
     private int _loads, _unloads;
 
-    public EntityStreamingSystem(World world, SaveDatabase db, StoredEntityIndex index, NetRegistry registry,
+    public EntityStreamingSystem(World world, SaveDatabase db, StoredEntityIndex index, EntityRegistry registry,
                                  CommandSystem commands, WorldSaver saver)
     {
         _db = db;
@@ -68,7 +68,7 @@ public sealed class EntityStreamingSystem : ISystem, IDebugUiSystem
         _commands = commands;
         _players = world.GetEntities().With<Player>().With<Transform>().AsSet();
         // What streams: networked entities that position themselves and aren't players (grids today).
-        _streamed = world.GetEntities().With<NetId>().With<OwnPresence>().With<Transform>().Without<Player>().Without<Chunk>().AsSet();
+        _streamed = world.GetEntities().With<EntityId>().With<OwnPresence>().With<Transform>().Without<Player>().Without<Chunk>().AsSet();
         saver.Stored += OnStored;
     }
 
@@ -105,14 +105,14 @@ public sealed class EntityStreamingSystem : ISystem, IDebugUiSystem
         _toUnload.Clear();
         foreach (ref readonly var e in _streamed.GetEntities())
         {
-            uint id = e.Get<NetId>().Value;
+            var id = e.Get<EntityId>();
             if (_unloading.Contains(id) || _despawning.Contains(id)) continue;
             if (NearestPlayer(Where(e)) > UnloadWindow) _toUnload.Add(e);
         }
         foreach (var e in _toUnload)
         {
             // Until dynamic ownership every loaded entity is the host's already; with it, the host takes ownership here.
-            _unloading.Add(e.Get<NetId>().Value);
+            _unloading.Add(e.Get<EntityId>());
             DescribeRequest.Request(e, DescribePurpose.Store);
         }
     }
@@ -133,7 +133,7 @@ public sealed class EntityStreamingSystem : ISystem, IDebugUiSystem
     }
 
     /// <summary>An entity being unloaded has been written: now it goes.</summary>
-    private void OnStored(uint id)
+    private void OnStored(EntityId id)
     {
         if (!_unloading.Remove(id)) return;
         if (!_registry.IsLive(id)) return;
@@ -163,20 +163,20 @@ public sealed class WorldSaver : ISystem, IDebugUiSystem
     private readonly SaveDatabase _db;
     private readonly StoredEntityIndex _index;
     private readonly CommandSystem _commands;
-    private readonly NetIdAllocator _ids;
+    private readonly EntityIdAllocator _ids;
     private readonly EntitySet _saveable;
     private readonly List<Description> _pending = new();
     private bool _autosaving;
     private float _sinceSave;
     private DateTime _lastSave;
 
-    public WorldSaver(World world, SaveDatabase db, StoredEntityIndex index, CommandSystem commands, NetIdAllocator ids)
+    public WorldSaver(World world, SaveDatabase db, StoredEntityIndex index, CommandSystem commands, EntityIdAllocator ids)
     {
         _db = db;
         _index = index;
         _commands = commands;
         _ids = ids;
-        _saveable = world.GetEntities().With<NetId>().With<OwnPresence>().Without<Chunk>().AsSet();
+        _saveable = world.GetEntities().With<EntityId>().With<OwnPresence>().Without<Chunk>().AsSet();
         commands.Descriptions.Described += OnDescribed;
         commands.DescribedAll += Commit;
         commands.Applied += (handler, _, evt) =>
@@ -189,8 +189,8 @@ public sealed class WorldSaver : ISystem, IDebugUiSystem
     /// <summary>Called during an autosave's transaction, to write edited terrain chunks.</summary>
     public Action? SaveChunks { get; set; }
 
-    /// <summary>An entity's description was written to the save (its network ID).</summary>
-    public event Action<uint>? Stored;
+    /// <summary>An entity's description was written to the save (its entity ID).</summary>
+    public event Action<EntityId>? Stored;
 
     public void Update(float dt)
     {
@@ -222,7 +222,7 @@ public sealed class WorldSaver : ISystem, IDebugUiSystem
     private void Commit()
     {
         if (_pending.Count == 0 && !_autosaving) return;
-        var written = new List<uint>();
+        var written = new List<EntityId>();
         _db.InTransaction(() =>
         {
             foreach (var d in _pending)
@@ -235,10 +235,10 @@ public sealed class WorldSaver : ISystem, IDebugUiSystem
                 else
                 {
                     Vector3? pos = d.Entity.IsAlive && d.Entity.Has<Transform>() ? EntityStreamingSystem.Where(d.Entity) : null;
-                    _db.WriteEntity(d.NetId, d.HandlerId, pos, d.Payload);
-                    _index.Set(new StoredEntity(d.NetId, d.HandlerId, pos));
+                    _db.WriteEntity(d.Id, d.HandlerId, pos, d.Payload);
+                    _index.Set(new StoredEntity(d.Id, d.HandlerId, pos));
                 }
-                written.Add(d.NetId);
+                written.Add(d.Id);
             }
             if (_autosaving) SaveChunks?.Invoke();
             _db.NextFreeId = _ids.NextFree;
@@ -254,7 +254,7 @@ public sealed class WorldSaver : ISystem, IDebugUiSystem
     }
 
     /// <summary>A despawned entity that was never meant to come back (deleted, or its grid broken up) leaves the save.</summary>
-    public void Forget(uint id)
+    public void Forget(EntityId id)
     {
         _db.DeleteEntity(id);
         _index.Remove(id);

@@ -1,3 +1,4 @@
+using ClearSkies.Engine.Entities;
 using System.Numerics;
 using ClearSkies.Net.Protocol;
 
@@ -120,7 +121,7 @@ public sealed class SnapshotBuffer
         return a + d * f;
     }
 
-    public readonly record struct Sample(uint Support, Vector3 Position, Quaternion Rotation, LookAngles Look, Vector3 Velocity, bool HasLook);
+    public readonly record struct Sample(EntityId Support, Vector3 Position, Quaternion Rotation, LookAngles Look, Vector3 Velocity, bool HasLook);
 }
 
 /// <summary>ECS component holding a remote body's <see cref="SnapshotBuffer"/>.</summary>

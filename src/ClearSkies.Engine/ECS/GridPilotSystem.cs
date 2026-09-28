@@ -172,8 +172,8 @@ public sealed class GridPilotSystem : ISystem
 
         foreach (ref readonly Entity e in _selectedGrid.GetEntities())
         {
-            if (!e.Has<NetId>()) return;
-            uint id = e.Get<NetId>().Value;
+            if (!e.Has<EntityId>()) return;
+            var id = e.Get<EntityId>();
             if (lockPressed) _commands.Send(new SetGridLocked { Grid = id, Locked = !e.Get<DynamicGrid>().Locked });
             if (rightPressed) _commands.Send(new RightGrid { Grid = id });
             return;

@@ -12,23 +12,23 @@ public interface ICommand
     EntityAddress Target { get; }
 }
 
-/// <summary>Where a command points: an entity by network ID (grids, players, the world volume), or a block in a volume
+/// <summary>Where a command points: an entity by entity ID (grids, players, the world volume), or a block in a volume
 /// (levers, wheels and other block entities, which are rebuilt from voxels and have no ID of their own).</summary>
-public readonly record struct EntityAddress(uint Entity, bool IsBlock, Vector3D<int> Block)
+public readonly record struct EntityAddress(EntityId Entity, bool IsBlock, Vector3D<int> Block)
 {
-    public static EntityAddress Of(uint entity) => new(entity, false, default);
-    public static EntityAddress OfBlock(uint volume, Vector3D<int> block) => new(volume, true, block);
+    public static EntityAddress Of(EntityId entity) => new(entity, false, default);
+    public static EntityAddress OfBlock(EntityId volume, Vector3D<int> block) => new(volume, true, block);
 
     public void Write(NetWriter w)
     {
-        w.WriteUInt32(Entity);
+        Entity.Write(w);
         w.WriteBool(IsBlock);
         if (IsBlock) { w.WriteInt32(Block.X); w.WriteInt32(Block.Y); w.WriteInt32(Block.Z); }
     }
 
     public static EntityAddress Read(ref NetReader r)
     {
-        uint entity = r.ReadUInt32();
+        var entity = EntityId.Read(ref r);
         return r.ReadBool() ? OfBlock(entity, new Vector3D<int>(r.ReadInt32(), r.ReadInt32(), r.ReadInt32())) : Of(entity);
     }
 
@@ -72,16 +72,16 @@ public readonly record struct ApplyContext(PeerId Origin, bool IsAuthority, bool
 
 /// <summary>What travels with an event: who sent the command (and their number for it), who decided it, and the
 /// authority's number for this event on its target, so receivers apply events in order and drop duplicates.</summary>
-public readonly record struct EventMeta(PeerId Origin, uint OriginSeq, PeerId Authority, uint Target, uint EventNumber, uint Tick)
+public readonly record struct EventMeta(PeerId Origin, uint OriginSeq, PeerId Authority, EntityId Target, uint EventNumber, uint Tick)
 {
     public void Write(NetWriter w)
     {
         w.WriteUInt32(Origin.Value); w.WriteUInt32(OriginSeq); w.WriteUInt32(Authority.Value);
-        w.WriteUInt32(Target); w.WriteUInt32(EventNumber); w.WriteUInt32(Tick);
+        Target.Write(w); w.WriteUInt32(EventNumber); w.WriteUInt32(Tick);
     }
 
     public static EventMeta Read(ref NetReader r) =>
-        new(new PeerId(r.ReadUInt32()), r.ReadUInt32(), new PeerId(r.ReadUInt32()), r.ReadUInt32(), r.ReadUInt32(), r.ReadUInt32());
+        new(new PeerId(r.ReadUInt32()), r.ReadUInt32(), new PeerId(r.ReadUInt32()), EntityId.Read(ref r), r.ReadUInt32(), r.ReadUInt32());
 }
 
 /// <summary>Carries commands and events between machines; implemented by the network layer. With nobody connected

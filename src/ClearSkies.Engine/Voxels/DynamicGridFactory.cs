@@ -12,17 +12,17 @@ namespace ClearSkies.Engine.Voxels;
 public static class DynamicGridFactory
 {
     /// <summary>
-    /// Creates a grid with network ID <paramref name="netId"/> from <paramref name="description"/>. Its chunks mesh,
+    /// Creates a grid with entity ID <paramref name="id"/> from <paramref name="description"/>. Its chunks mesh,
     /// light and get a body once its presence layers are decided (ChunkMeshSystem, GpuLightSystem, PhysicsBodySystem).
     /// The grid's Transform (its block space) is the description's pose, so the grid stands exactly where it was
     /// described; PhysicsBodySystem then puts its body at the centre of mass within it.
     /// </summary>
-    public static Entity Create(World world, uint netId, GridDescription description)
+    public static Entity Create(World world, EntityId id, GridDescription description)
     {
         var entity = world.CreateEntity();
         entity.Set(new DynamicGrid { Locked = description.Locked });
         entity.Set(Transform.Identity);
-        entity.Set(new NetId { Value = netId });
+        entity.Set(id);
         var volume = new ChunkVolume(entity, world);
         entity.Set(new ChunkGrid() { Volume = volume });
         entity.Set<OwnPresence>();
@@ -31,19 +31,15 @@ public static class DynamicGridFactory
         return entity;
     }
 
-    /// <summary>Makes an existing grid match <paramref name="description"/>: its blocks, block entity state, lock and
-    /// body state. Used to create a grid and to overwrite one in place (a spawn received twice, a resync).</summary>
+    /// <summary>Makes an existing grid match <paramref name="description"/>: its blocks, controls, lock and body
+    /// state. Used to create a grid and to overwrite one in place (a spawn received twice, a resync).</summary>
     public static void Fill(Entity entity, GridDescription description)
     {
         var volume = entity.Get<ChunkGrid>().Volume;
         foreach (var pos in volume.All.Select(c => c.Key).ToList()) volume.RemoveChunk(pos);
 
         foreach (var v in description.Voxels) volume.SetBlock(v.X, v.Y, v.Z, v.Id, v.Orientation);
-        foreach (var (cell, value) in description.Levers)
-            if (volume.TryGetBlockEntity(cell.X, cell.Y, cell.Z, out var lever) && lever.Has<Lever>()) lever.Get<Lever>().Value = value;
-        foreach (var (cell, angle) in description.Wheels)
-            if (volume.TryGetBlockEntity(cell.X, cell.Y, cell.Z, out var wheel) && wheel.Has<SteeringWheel>()) wheel.Get<SteeringWheel>().Angle = angle;
-
+        entity.Set(description.Controls);
         entity.Get<DynamicGrid>().Locked = description.Locked;
         var b = description.Body;
         ref var t = ref entity.Get<Transform>();
@@ -52,7 +48,7 @@ public static class DynamicGridFactory
         entity.Set(new BodyStateOverride { LinearVelocity = b.LinearVelocity, AngularVelocity = b.AngularVelocity });
     }
 
-    /// <summary>A live grid's description: its blocks, block entity state, lock, pose and velocities (from its body if it
+    /// <summary>A live grid's description: its blocks, controls, lock, pose and velocities (from its body if it
     /// has one, else its Transform).</summary>
     public static GridDescription Describe(Entity entity, PhysicsWorld physics)
     {
@@ -61,6 +57,7 @@ public static class DynamicGridFactory
         {
             Voxels = GridSerializer.Voxels(volume),
             Locked = entity.Get<DynamicGrid>().Locked,
+            Controls = entity.Has<ShipControls>() ? entity.Get<ShipControls>() : default,
         };
         if (entity.Has<PhysicsBodyComponent>())
         {
@@ -78,18 +75,6 @@ public static class DynamicGridFactory
                 (d.Body.LinearVelocity, d.Body.AngularVelocity) = (entity.Get<BodyStateOverride>().LinearVelocity, entity.Get<BodyStateOverride>().AngularVelocity);
         }
 
-        // Block entity state, in a fixed order.
-        foreach (var (pos, entry) in volume.All.OrderBy(c => (c.Key.X, c.Key.Y, c.Key.Z)))
-        {
-            if (entry.BlockEntities is not { } entities) continue;
-            foreach (var (cell, e) in entities.OrderBy(c => (c.Key.X, c.Key.Y, c.Key.Z)))
-            {
-                if (!e.IsAlive) continue;
-                var p = new Vector3D<int>(pos.X, pos.Y, pos.Z) * ChunkData.Size + cell;
-                if (e.Has<Lever>()) d.Levers.Add((p, e.Get<Lever>().Value));
-                if (e.Has<SteeringWheel>()) d.Wheels.Add((p, e.Get<SteeringWheel>().Angle));
-            }
-        }
         return d;
     }
 }
