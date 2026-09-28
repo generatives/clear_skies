@@ -50,6 +50,9 @@ public abstract class NetSession : ICommandRouter, IDisposable
     /// <summary>Receives and relays body snapshots (set by the body sync system).</summary>
     public BodySync? Bodies { get; set; }
 
+    /// <summary>Compares state hashes (set by the divergence check).</summary>
+    public DivergenceCheck? Divergence { get; set; }
+
     /// <summary>Real time in milliseconds, for clock sync. Settable so tests can run on simulated time.</summary>
     public Func<double> TimeSource { get; set; }
 

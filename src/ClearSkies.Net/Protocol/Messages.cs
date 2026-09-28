@@ -34,6 +34,8 @@ public enum MessageKind : byte
     SnapshotRequest = 17,
     IdBlockRequest = 18,
     IdBlock = 19,
+    /// <summary>Host → client: an entity left the client's load window; drop it (it's still in the game).</summary>
+    Forget = 20,
 }
 
 /// <summary>Client → host, first thing: who's joining and whether their game matches.</summary>

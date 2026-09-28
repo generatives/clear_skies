@@ -1,4 +1,7 @@
 using ClearSkies.Engine.Core;
+using ClearSkies.Engine.ECS;
+using ClearSkies.Engine.Entities;
+using ClearSkies.Engine.Voxels;
 using ClearSkies.Engine.Gui;
 using ClearSkies.Net.Session;
 using ClearSkies.Net.Sync;
@@ -34,7 +37,7 @@ public sealed class NetDebugPanel : IDebugUiSystem
             case HostSession host:
                 ImGui.Text(_net.Transport is null ? "Transport off (single-player): start with --host <port> to let others join"
                                                   : $"Players connected: {host.Peers.Count}");
-                foreach (var p in host.Peers) ImGui.Text($"  {p.Name} ({p.Peer}): {p.State}");
+                foreach (var p in host.Peers) ImGui.Text($"  {p.Name} ({p.Peer}): {p.State}, knows {p.Known.Count} entities");
                 break;
             case ClientSession client:
                 ImGui.Text($"Round trip {client.ClockSync.RoundTripMs:0} ms, clock offset {client.ClockSync.Offset:+0.00;-0.00} ticks, " +
@@ -57,6 +60,20 @@ public sealed class NetDebugPanel : IDebugUiSystem
                 (_lastBytesOut, _lastBytesIn, _lastSample) = (t.Stats.BytesSent, t.Stats.BytesReceived, now);
             }
             ImGui.Text($"Out {_kbOut:0.0} KB/s, in {_kbIn:0.0} KB/s   (reliable out {t.Stats.BytesSentByChannel[0] / 1024:N0} KB, unreliable {t.Stats.BytesSentByChannel[1] / 1024:N0} KB total)");
+        }
+        if (ImGui.CollapsingHeader("Ownership"))
+        {
+            // Who simulates what: each networked entity other than terrain, its owner and whether this machine has it
+            // as a simulated body, a follower copy, or not in physics at all.
+            foreach (var (id, e) in _net.Registry.All.OrderBy(p => p.Id))
+            {
+                if (!e.Has<NetOwner>() || e.Has<Chunk>()) continue;
+                var owner = e.Get<NetOwner>();
+                string what = e.Has<Player>() ? $"player {e.Get<Player>().Name}" : "grid";
+                string physics = e.Has<PhysicsPresence>() ? e.Get<PhysicsPresence>().Mode.ToString() : "none";
+                var colour = owner.IsLocal ? new System.Numerics.Vector4(0.5f, 1f, 0.5f, 1) : new System.Numerics.Vector4(0.6f, 0.8f, 1f, 1);
+                ImGui.TextColored(colour, $"  {id,6} {what,-20} {(owner.IsLocal ? "ours" : owner.Owner.ToString()),-8} physics {physics}");
+            }
         }
         if (_lag != null)
         {

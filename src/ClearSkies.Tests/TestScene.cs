@@ -87,6 +87,7 @@ public sealed class HeadlessScene : IDisposable
         Net = net;
         _tick.Insert(0, new ClearSkies.Net.Session.NetReceiveSystem(net));
         _tick.Add(new ClearSkies.Net.Sync.BodySync(net, World, Physics));
+        _tick.Add(new ClearSkies.Net.Sync.DivergenceCheck(net, World));
         _tick.Add(new ClearSkies.Net.Session.NetSendSystem(net));
         RemoteBodies = new ClearSkies.Net.Sync.RemoteBodySystem(World, Registry, Clock);
         _tick.Insert(_tick.IndexOf(Physics), new ClearSkies.Net.Sync.FollowerSystem(World, Physics, RemoteBodies));

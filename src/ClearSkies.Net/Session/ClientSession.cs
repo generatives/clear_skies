@@ -148,6 +148,17 @@ public sealed class ClientSession : NetSession
                 Chunks?.Receive(pos, blob);
                 break;
             }
+            case MessageKind.StateHash:
+                Divergence?.ReceiveHash(PeerId.Host, ref r);
+                break;
+            case MessageKind.Forget:
+            {
+                // Out of our window: drop our copy (it's still in the game; it comes back as a spawn if we return).
+                uint id = r.ReadUInt32();
+                if (Registry.TryGet(id, out var e) && !(e.Has<NetOwner>() && e.Get<NetOwner>().IsLocal))
+                    Engine.ECS.Hierarchy.DestroyRecursive(e);
+                break;
+            }
             case MessageKind.TimePong:
                 ClockSync.OnPong(TimePong.Read(ref r), NowMs);
                 break;

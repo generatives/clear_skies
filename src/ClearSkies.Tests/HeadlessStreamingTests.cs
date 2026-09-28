@@ -51,14 +51,42 @@ public class HeadlessStreamingTests
         new(scene.World, scene.WorldVolume, store: null, () => new Flat(), viewDistance: 64, minChunkY: 0, new DatabaseChunkStore(db));
 
     [Fact]
-    public void WithNoViewNothingIsStreamed()
+    public void ColliderOnlyColumnsLoadAroundAShipAwayFromTheViewAndSettle()
     {
         using var scene = new HeadlessScene();
         using var db = SaveDatabase.InMemory();
         var load = Streaming(scene, db);
-        Settle(load); // a dedicated server with nobody on it
-        Assert.Equal(0, load.LoadedChunks);
+        Interest(scene, 0, 0, 64, TerrainInterestKind.Full);
+        var ship = Interest(scene, 100, 0, 48, TerrainInterestKind.CollidersOnly);
+        Settle(load);
+        Assert.True(load.IsTerrainLoaded(new Vector3D<float>(0, 0, 0), 32));
+        Assert.True(load.IsTerrainLoaded(new Vector3D<float>(100, 0, 0), 32)); // around the ship, out of view
+        int rebuilds = load.Rebuilds, loaded = load.LoadedChunks;
+        Settle(load);
+        Assert.Equal(rebuilds, load.Rebuilds); // nothing moved: no reloading
+        Assert.Equal(loaded, load.LoadedChunks);
+
+        // The ship flies off: its old columns go, new ones come.
+        ship.Get<Transform>().Position = new Vector3D<float>(300, 10, 0);
+        Settle(load);
+        Assert.True(load.IsTerrainLoaded(new Vector3D<float>(300, 0, 0), 32));
+        Assert.False(scene.WorldVolume.IsLoaded(new ChunkPosition(6, -1, 0)));
+    }
+
+    [Fact]
+    public void WithNoViewOnlyCollidersAreStreamed()
+    {
+        using var scene = new HeadlessScene();
+        using var db = SaveDatabase.InMemory();
+        var load = Streaming(scene, db);
+        Interest(scene, 500, 500, 48, TerrainInterestKind.CollidersOnly); // a dedicated server's ship
+        Settle(load);
+        Assert.True(load.IsTerrainLoaded(new Vector3D<float>(500, 0, 500), 32));
         Assert.False(load.IsTerrainLoaded(new Vector3D<float>(0, 0, 0), 16));
+        int rebuilds = load.Rebuilds, loaded = load.LoadedChunks;
+        Settle(load);
+        Assert.Equal(rebuilds, load.Rebuilds);
+        Assert.Equal(loaded, load.LoadedChunks);
     }
 
     [Fact]

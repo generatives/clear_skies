@@ -78,9 +78,11 @@ public sealed class BodySync : ISystem, IDebugUiSystem
             case HostSession host:
                 foreach (var peer in host.Joined)
                 {
-                    var frame = new List<BodySnapshot>(_own);
+                    // Only what's in their window.
+                    var frame = new List<BodySnapshot>(_own.Count);
+                    foreach (var s in _own) if (peer.Known.Contains(s.Entity)) frame.Add(s);
                     foreach (var (id, relayed) in _relay)
-                        if (relayed.Owner != peer.Peer) frame.Add(relayed.Snapshot);
+                        if (relayed.Owner != peer.Peer && peer.Known.Contains(id)) frame.Add(relayed.Snapshot);
                     SendFrames(tick, frame, packet => host.SendUnreliable(peer.Peer, packet));
                 }
                 _relay.Clear();
@@ -213,6 +215,15 @@ public sealed class RemoteBodySystem : ISystem
             (least, most) = (System.Math.Min(least, buffer.Delay), System.Math.Max(most, buffer.Delay));
             if (buffer.At(RenderTick(buffer)) is not { } s) continue;
             var (position, rotation) = Pose(e, s);
+            if (e.Has<Support>())
+            {
+                // What it stands on, as its owner has it: kept so a description of it (a leaving player's save) is
+                // relative to the ship it's on (about its centre of mass, as Support has it).
+                ref var support = ref e.Get<Support>();
+                support.Supporter = s.Support != 0 && _registry.TryGet(s.Support, out var supporter) ? supporter : default;
+                support.LocalPosition = support.HasSupporter ? s.Position - GridFrame.Pivot(support.Supporter) : position;
+                support.LocalRotation = support.HasSupporter ? s.Rotation : rotation;
+            }
             ref var t = ref e.Get<Transform>();
             t.Position = new Vector3D<float>(position.X, position.Y, position.Z);
             if (e.Has<Player>())
