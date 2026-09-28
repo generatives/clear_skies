@@ -1,5 +1,7 @@
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.ECS;
+using ClearSkies.Engine.Entities;
+using ClearSkies.Engine.Physics.Support;
 using ClearSkies.Engine.Generation;
 using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Rendering.WebGpu;
@@ -35,10 +37,21 @@ host.Renderer.LoadTextureAtlas(
     Path.Combine(AppContext.BaseDirectory, "Resources", "spritesheet_tiles.png"),
     Path.Combine(AppContext.BaseDirectory, "Resources", "spritesheet_tiles.xml"));
 
-// The static world is a volume like any other, with an identity Transform (set by ChunkVolume) and zero pivot.
+// Session: single-player is a host session with nobody connected. Network IDs and owners exist, all local.
+var session = Session.SinglePlayer();
+var registry = new NetRegistry(host.World);
+var idAllocator = new NetIdAllocator();
+registry.RequestBlock = idAllocator.NextBlock;
+using var gridNetworking = new GridNetworking(host.World, registry, session);
+
+// The static world is a volume like any other, with an identity Transform (set by ChunkVolume) and zero pivot, and a
+// reserved network ID. Its chunks each decide their own presence layers (see EntityPresenceSystem).
 var staticVolumeEntity = host.World.CreateEntity();
-var staticVolume = new ChunkVolume(staticVolumeEntity, host.World) { MeshIgnoresNeighbours = true };
+var staticVolume = new ChunkVolume(staticVolumeEntity, host.World) { MeshIgnoresNeighbours = true, ChunksOwnPresence = true };
 staticVolumeEntity.Set(new ChunkGrid() { Volume = staticVolume });
+staticVolumeEntity.Set(new NetId { Value = NetRegistry.WorldVolume });
+staticVolumeEntity.Set(session.LocalOwner());
+staticVolumeEntity.Set<Rendered>();
 
 ulong seed = 1337;
 // Model blocks' glTF models (BlockDef.Model paths are relative to Resources/Models — see the csproj's link of
@@ -106,11 +119,13 @@ host.AddSystem(new PlayerMovementSystem(host.World), SystemStage.Simulation);
 var gridPilot = new GridPilotSystem(host.World, host.Input, host.Physics, staticVolume, physicsBody);
 var airshipFlight = new AirshipFlightSystem(host.World, host.Physics);
 host.AddSystem(airshipFlight, SystemStage.Simulation);
+var presence = new EntityPresenceSystem(host.World, session, staticVolume, ViewDistance);
+host.AddSystem(presence, SystemStage.Simulation); // presence layers: bodies, drawing, terrain interest and colliders
 
 host.AddSystem(host.Physics, SystemStage.Simulation); // one step, once bodies/impulses for this tick are in
 host.AddSystem(new PhysicsTransformSyncSystem(host.World, host.Physics), SystemStage.Simulation); // body poses -> Transform
 host.AddSystem(hierarchy, SystemStage.Simulation); // e.g. volume Transforms -> chunk Transforms
-host.AddSystem(new CharacterCameraSyncSystem(host.World), SystemStage.Simulation); // reads the capsule's post-physics pose into Transform
+host.AddSystem(new SupportSystem(host.World, host.Physics), SystemStage.Simulation); // what each character stands on or rides with
 host.AddSystem(interpolation, SystemStage.Simulation); // records this tick's poses
 
 // Per frame, after the ticks: where to draw things between the last two ticks (children follow), then stream terrain
@@ -120,10 +135,11 @@ host.AddSystem(interpolation, SystemStage.Simulation); // records this tick's po
 bool flightTest = args.Contains("--flight-test");
 host.AddSystem(new StreamingFlightTest(host, flightTest, flightTest ? () => host.Window.Native.Close() : null),
                SystemStage.Frame);
+host.AddSystem(gridPilot, SystemStage.Frame); // puts the camera under a piloted grid...
+host.AddSystem(new EyeSystem(host.World), SystemStage.Frame); // ...or at the local player's eye
 host.AddSystem(interpolation, SystemStage.Frame);
 host.AddSystem(hierarchy, SystemStage.Frame);
 host.AddSystem(chunkLoadSystem, SystemStage.Frame);
-host.AddSystem(gridPilot, SystemStage.Frame);
 var playerInput = new PlayerInputSystem(host.World, host.Input, meshSystem, host.Renderer, gridSelection);
 host.AddSystem(playerInput, SystemStage.Frame);
 host.AddSystem(new HudUi(ui, host.Input, playerInput, gridPilot, host.Renderer.Atlas,
@@ -165,7 +181,7 @@ float[]? cameraOverride = null;
 int camArg = Array.IndexOf(args, "--camera");
 if (camArg >= 0 && camArg + 1 < args.Length)
     cameraOverride = args[camArg + 1].Split(',').Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
-var camSpawn = TestScene.Build(host, seed, cameraOverride, HeartSpawn(seed));
+var camSpawn = TestScene.Build(host, registry, session, seed, cameraOverride, HeartSpawn(seed));
 
 // Spawn: over a wide, flat stretch of plains 18 km east of the origin (found by scanning seed 1337 for flat, well-
 // covered lowland), 60 blocks above the terrain surface there (which no piece's top reaches), looking north across it.

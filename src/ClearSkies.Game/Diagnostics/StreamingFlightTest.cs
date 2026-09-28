@@ -49,7 +49,8 @@ public sealed class StreamingFlightTest : ISystem, IDebugUiSystem
     {
         _host = host;
         host.FrameEnded += RecordFrame;
-        _cameras = host.World.GetEntities().With<Transform>().With<CameraComponent>().With<FreeFlyController>().AsSet();
+        // Whatever free-flies: the camera itself, or the player the camera follows.
+        _cameras = host.World.GetEntities().With<Transform>().With<FreeFlyController>().AsSet();
         _whenDone = whenDone;
         if (autoStart) _autoStartIn = 20f;
     }
@@ -127,7 +128,9 @@ public sealed class StreamingFlightTest : ISystem, IDebugUiSystem
     private void Begin()
     {
         if (_cameras.Count == 0) return;
-        var t = _cameras.GetEntities()[0].Get<Transform>();
+        var flyer = _cameras.GetEntities()[0];
+        if (flyer.Has<CharacterControllerComponent>()) Players.SetFreeFlying(flyer, true); // straight through anything
+        var t = flyer.Get<Transform>();
         var forward = Engine.Math.Vec.Rotate(t.Rotation, new Vector3D<float>(0, 0, -1));
         forward.Y = 0;
         if (forward.LengthSquared < 1e-6f) forward = new Vector3D<float>(1, 0, 0);

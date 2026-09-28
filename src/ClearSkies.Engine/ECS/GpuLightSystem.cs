@@ -105,7 +105,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     {
         _staticVolume = staticVolume;
         _store       = store;
-        _grids       = world.GetEntities().With<ChunkGrid>().With<Transform>().AsSet();
+        _grids       = world.GetEntities().With<ChunkGrid>().With<Transform>().With<Rendered>().AsSet();
         _cameras     = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
         _rayLight    = new GpuRayLightPass(ctx);
         _ctx         = ctx;

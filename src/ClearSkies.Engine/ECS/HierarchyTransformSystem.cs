@@ -62,7 +62,7 @@ public sealed class HierarchyTransformSystem : ISystem
         {
             if (!orphan.IsAlive) continue;
             orphan.Remove<Parent>(); // its parent is gone; don't let DestroyRecursive look for it
-            Hierarchy.DestroyRecursive(orphan);
+            if (!Hierarchy.OutlivesParent(orphan)) Hierarchy.DestroyRecursive(orphan);
         }
         _orphans.Clear();
 

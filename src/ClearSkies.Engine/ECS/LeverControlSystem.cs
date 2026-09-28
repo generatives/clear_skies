@@ -74,7 +74,8 @@ public sealed class LeverControlSystem : ISystem, IDisposable, IDebugUiSystem
         if (!e.IsAlive || !e.Has<Lever>() || !e.Has<RenderedModel>() || !e.Has<Transform>()) return;
 
         var model = e.Get<RenderedModel>().Model;
-        ref readonly var transform = ref e.Get<Transform>();
+        // Where it's drawn, like the camera the ray comes from: the view stays on the tip the player sees.
+        var transform = e.DrawnPose();
         ref var lever = ref e.Get<Lever>();
         float angle = System.Math.Clamp(lever.Value, -1f, 1f) * MaxAngle;
         if (ArmTip(model, transform, angle) is not { } arm) return;

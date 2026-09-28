@@ -63,7 +63,8 @@ public sealed class SteeringWheelControlSystem : ISystem, IDisposable, IDebugUiS
         if (interaction.Phase == InteractionPhase.Ended) return;
         if (!e.IsAlive || !e.Has<SteeringWheel>() || !e.Has<RenderedModel>() || !e.Has<Transform>()) return;
         if (WheelFrame(e.Get<RenderedModel>().Model) is not { } frame) return;
-        ref readonly var transform = ref e.Get<Transform>();
+        // Where it's drawn, like the camera the ray comes from: the view stays on the spot the player sees.
+        var transform = e.DrawnPose();
         ref var wheel = ref e.Get<SteeringWheel>();
 
         if (interaction.Phase == InteractionPhase.Began)

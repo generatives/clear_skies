@@ -11,14 +11,14 @@ namespace ClearSkies.Engine.ECS;
 public static class CameraUtil
 {
     /// <summary>Finds the entity in <paramref name="cameras"/> with <c>CameraComponent.Active == true</c>
-    /// and returns its Transform. <paramref name="cameras"/> must be queried with at least
+    /// and returns where it's drawn (the view on screen: see <see cref="Drawing.DrawnPose"/>). <paramref name="cameras"/> must be queried with at least
     /// <c>With&lt;Transform&gt;().With&lt;CameraComponent&gt;()</c>.</summary>
     public static bool TryGetActive(EntitySet cameras, out Transform transform)
     {
         foreach (ref readonly Entity e in cameras.GetEntities())
         {
             ref readonly var cc = ref e.Get<CameraComponent>();
-            if (cc.Active) { transform = e.Get<Transform>(); return true; }
+            if (cc.Active) { transform = e.DrawnPose(); return true; }
         }
         transform = default;
         return false;

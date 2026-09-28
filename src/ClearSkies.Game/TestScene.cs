@@ -2,15 +2,17 @@ using System.Numerics;
 using BepuPhysics.Collidables;
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.ECS;
+using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Input;
+using ClearSkies.Engine.Physics.Support;
 using ClearSkies.Engine.Physics.Characters;
 using ClearSkies.Engine.Rendering;
 using Silk.NET.Maths;
 
 namespace ClearSkies.Game;
 
-/// <summary>Spawns the player camera (free-fly by default) overlooking the procedural sky world,
-/// plus its walking character body (toggle with V — see PlayerMovementSystem).</summary>
+/// <summary>Spawns the local player (free-fly by default, with a walking character body: toggle with V — see
+/// PlayerMovementSystem) overlooking the procedural sky world, and the camera at their eye.</summary>
 public static class TestScene
 {
     // Fallback spawn if the world has no spawn of its own (no island cluster found nearby).
@@ -22,41 +24,46 @@ public static class TestScene
     /// overlooking the nearest island, e.g. to reproduce a view for a screenshot.</param>
     /// <param name="spawnView">Where the camera starts and how it faces (yaw, pitch); <see cref="FallbackSpawn"/> if
     /// null.</param>
-    public static Vector3D<float> Build(EngineHost host, ulong worldSeed, float[]? cameraOverride = null,
+    public static Vector3D<float> Build(EngineHost host, NetRegistry registry, Session session, ulong worldSeed,
+                                        float[]? cameraOverride = null,
                                         (Vector3D<float> Position, float Yaw, float Pitch)? spawnView = null)
     {
-        var cam = host.World.CreateEntity();
-        var camTransform = Transform.Identity;
+        var eyeTransform = Transform.Identity;
 
         float yaw = MathF.PI, pitch = -0.45f;
         if (spawnView is { } view)
         {
-            camTransform.Position = view.Position;
+            eyeTransform.Position = view.Position;
             (yaw, pitch) = (view.Yaw, view.Pitch);
         }
         else
         {
-            camTransform.Position = FallbackSpawn;
+            eyeTransform.Position = FallbackSpawn;
         }
         if (cameraOverride is { Length: >= 3 })
         {
-            camTransform.Position = new Vector3D<float>(cameraOverride[0], cameraOverride[1], cameraOverride[2]);
+            eyeTransform.Position = new Vector3D<float>(cameraOverride[0], cameraOverride[1], cameraOverride[2]);
             if (cameraOverride.Length >= 5) (yaw, pitch) = (cameraOverride[3], cameraOverride[4]);
-            camTransform.Rotation = Quaternion<float>.CreateFromYawPitchRoll(yaw, pitch, 0f);
         }
-        cam.Set(camTransform);
-        cam.Set(new CameraComponent { Camera = new Camera(), Active = true });
-        cam.Set(new MouseLookComponent
+
+        // The player: its Transform is the character capsule's centre, EyeHeight below the eye.
+        const float eyeHeight = 0.7f;
+        var player = host.World.CreateEntity();
+        var look = new MouseLookComponent
         {
             LookSensitivity = 0.0025f,
             Yaw             = yaw,    // default π: face +Z (yaw=π rotates default -Z forward to +Z)
             Pitch           = pitch,  // default ~26° downward — sees island surface at ~75 units ahead
-        });
-        cam.Set(new FreeFlyController { MoveSpeed = 10f });
+        };
+        var playerTransform = eyeTransform;
+        playerTransform.Position -= new Vector3D<float>(0, eyeHeight, 0);
+        playerTransform.Rotation = look.BodyRotation;
+        player.Set(playerTransform);
+        player.Set(look);
+        player.Set(new FreeFlyController { MoveSpeed = 10f });
 
-        // Capsule spawns under the camera's eye position (PhysicsConv is internal to
-        // ClearSkies.Engine, so convert by hand here — it's just field access).
-        var spawnPosition = new Vector3(camTransform.Position.X, camTransform.Position.Y - 0.8f, camTransform.Position.Z);
+        // Capsule spawns under the eye position (PhysicsConv is internal to ClearSkies.Engine, so convert by hand).
+        var spawnPosition = new Vector3(playerTransform.Position.X, playerTransform.Position.Y, playerTransform.Position.Z);
         var shape = new Capsule(radius: 0.3f, length: 1.0f);
         var character = new PlayerCharacter(host.Physics.Characters, spawnPosition, shape,
             // Light (two Wood blocks' worth): the character pushes off the deck it walks on as hard as it pushes
@@ -74,13 +81,24 @@ public static class TestScene
             jumpVelocity: 6f, speed: 5f,
             // Full air control: same acceleration and top speed as on the ground, and a gentle brake with no keys
             // held, so you can steer mid-air and let go to avoid overshooting a ledge.
-            airControlForceScale: 1f, airControlSpeedScale: 1f, airBrakeScale: 0.5f, entity: cam);
-        cam.Set(new CharacterControllerComponent { Character = character, EyeHeight = 0.7f });
-        cam.Set(new CharacterModeComponent { FreeFly = true }); // start in FreeFly — zero regression risk vs. today
-        cam.Set(new PlayerInput()); // filled each tick by InputSampleSystem
-        cam.Set(new InterpolatedTransform { PositionOnly = true }); // moved by ticks, turned per frame by mouse-look
+            airControlForceScale: 1f, airControlSpeedScale: 1f, airBrakeScale: 0.5f, entity: player);
+        player.Set(new CharacterControllerComponent { Character = character, EyeHeight = eyeHeight });
+        player.Set(new PlayerInput()); // filled each tick by InputSampleSystem
+        player.Set(new InterpolatedTransform { PositionOnly = true }); // moved by ticks, turned per frame by mouse-look
+        player.Set(new Support());
+        player.Set(new Player { Id = PlayerId.New(), Name = Environment.UserName, IsLocal = true });
+        player.Set<LocalPlayer>();
+        player.Set(new NetId { Value = registry.Allocate() });
+        player.Set(session.LocalOwner());
+        player.Set<OwnPresence>();
+        Players.SetFreeFlying(player, true); // start free-flying — zero regression risk vs. today
+
+        // The camera: a child of the player at their eye (see EyeSystem).
+        var cam = host.World.CreateEntity();
+        cam.Set(new CameraComponent { Camera = new Camera(), Active = true });
+        EyeSystem.Attach(cam, player);
 
         host.Input.CursorCaptured = false; // the F1 debug menu starts open, and F1 frees the cursor with it
-        return camTransform.Position;
+        return eyeTransform.Position;
     }
 }

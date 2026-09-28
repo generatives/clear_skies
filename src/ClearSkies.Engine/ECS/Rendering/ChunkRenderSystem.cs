@@ -107,6 +107,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
             _columnsVisible++;
             foreach (var e in column.Chunks)
             {
+                if (!e.Has<Rendered>()) continue; // not in the rendering layer (see EntityPresenceSystem)
                 ref readonly var rd = ref e.Get<ChunkRenderData>();
                 if (rd.Mesh == null && rd.Models.Length == 0) continue; // buried stone: nothing to draw
                 var origin = e.Get<Transform>().Position;
@@ -119,7 +120,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
 
         foreach (var e in _others)
         {
-            if (!e.Has<Transform>()) continue;
+            if (!e.Has<Transform>() || !e.Has<Rendered>()) continue;
             ref readonly var rd = ref e.Get<ChunkRenderData>();
             if (rd.Mesh == null && rd.Models.Length == 0) continue;
 

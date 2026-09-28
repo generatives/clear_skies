@@ -37,7 +37,17 @@ public struct PlayerCharacter
     private const float CrouchMaximumDrop = 0.6f;
     private float eyeDrop;
 
+    // To take the capsule out of the simulation and put it back (see Suspend): what its body and character were made from.
+    private TypedIndex shapeIndex;
+    private float minimumSpeculativeMargin, mass;
+    private DefaultEcs.Entity entity;
+    private CharacterController settings;
+    private bool suspended;
+
     public BodyHandle BodyHandle => bodyHandle;
+
+    /// <summary>Whether the capsule is out of the simulation (see <see cref="Suspend"/>).</summary>
+    public readonly bool Suspended => suspended;
 
     public PlayerCharacter(CharacterControllers characters, Vector3 initialPosition, Capsule shape,
         float minimumSpeculativeMargin, float mass, float maximumHorizontalForce, float maximumVerticalGlueForce,
@@ -47,13 +57,14 @@ public struct PlayerCharacter
     {
         this.characters = characters;
         eyeDrop = 0;
-        var shapeIndex = characters.Simulation.Shapes.Add(shape);
-
-        // Characters are dynamic but must not rotate or fall over, so the inverse inertia tensor is
-        // left at all zeroes (equivalent to infinite inertia — no torque will ever rotate the capsule).
-        bodyHandle = characters.Simulation.Bodies.Add(
-            BodyDescription.CreateDynamic(initialPosition, new BodyInertia { InverseMass = 1f / mass },
-            new(shapeIndex, minimumSpeculativeMargin, float.MaxValue, ContinuousDetection.Passive), shape.Radius * 0.02f));
+        shapeIndex = characters.Simulation.Shapes.Add(shape);
+        this.minimumSpeculativeMargin = minimumSpeculativeMargin;
+        this.mass = mass;
+        this.entity = entity;
+        this.shape = shape;
+        settings = default;
+        suspended = false;
+        bodyHandle = AddBody(initialPosition);
         ref var character = ref characters.AllocateCharacter(bodyHandle, entity);
         character.LocalUp = new Vector3(0, 1, 0);
         character.CosMaximumSlope = MathF.Cos(maximumSlope);
@@ -68,16 +79,52 @@ public struct PlayerCharacter
         character.MinimumSupportDepth = shape.Radius * -0.01f;
         character.MinimumSupportContinuationDepth = -minimumSpeculativeMargin;
         this.speed = speed;
-        this.shape = shape;
     }
 
-    public readonly bool Supported => characters.GetCharacterByBodyHandle(bodyHandle).Supported;
-    public readonly Vector3 LinearVelocity => new BodyReference(bodyHandle, characters.Simulation.Bodies).Velocity.Linear;
+    private readonly BodyHandle AddBody(Vector3 position) =>
+        // Characters are dynamic but must not rotate or fall over, so the inverse inertia tensor is
+        // left at all zeroes (equivalent to infinite inertia — no torque will ever rotate the capsule).
+        characters.Simulation.Bodies.Add(
+            BodyDescription.CreateDynamic(position, new BodyInertia { InverseMass = 1f / mass },
+            new(shapeIndex, minimumSpeculativeMargin, float.MaxValue, ContinuousDetection.Passive), shape.Radius * 0.02f));
+
+    /// <summary>Takes the capsule out of the simulation (for free-flying): nothing touches it, supports it or is pushed
+    /// by it until <see cref="Resume"/>. Its body handle is meaningless meanwhile.</summary>
+    public void Suspend()
+    {
+        if (suspended) return;
+        settings = characters.GetCharacterByBodyHandle(bodyHandle);
+        characters.RemoveCharacterByBodyHandle(bodyHandle);
+        characters.Simulation.Bodies.Remove(bodyHandle); // with the motion constraint, if it had one
+        suspended = true;
+    }
+
+    /// <summary>Puts the capsule back into the simulation at <paramref name="position"/>, at rest, with the same settings
+    /// and no jump, air or crouch state (see <see cref="TeleportTo"/>). Its body handle may change.</summary>
+    public void Resume(Vector3 position)
+    {
+        if (!suspended) return;
+        bodyHandle = AddBody(position);
+        ref var character = ref characters.AllocateCharacter(bodyHandle, entity);
+        var s = settings;
+        s.BodyHandle = bodyHandle;
+        s.Supported = false; // no motion constraint to remove
+        s.Support = default;
+        s.TargetVelocity = default;
+        character = s;
+        character.ResetJumpAndAirState();
+        eyeDrop = 0;
+        suspended = false;
+    }
+
+    public readonly bool Supported => !suspended && characters.GetCharacterByBodyHandle(bodyHandle).Supported;
+    public readonly Vector3 LinearVelocity => suspended ? default : new BodyReference(bodyHandle, characters.Simulation.Bodies).Velocity.Linear;
 
     /// <summary>The body the character is standing on, when it's one that can move (a ship, not the static world), and
     /// that body's current orientation. Standing means supported: on a surface no steeper than the maximum slope.</summary>
     public readonly bool TryGetSupportBody(out BodyHandle body, out Quaternion orientation)
     {
+        if (suspended) { body = default; orientation = Quaternion.Identity; return false; }
         ref readonly var character = ref characters.GetCharacterByBodyHandle(bodyHandle);
         if (!character.Supported || character.Support.Mobility == CollidableMobility.Static)
         {
@@ -107,7 +154,7 @@ public struct PlayerCharacter
     /// whatever the character stands on as usual — e.g. while the player is using a lever.</summary>
     public void UpdateCharacterGoals(CharacterInput keys, Vector3 viewDirectionWorld, float dt, bool frozen = false)
     {
-        var movementDirection = keys.Move;
+        var movementDirection = frozen ? Vector2.Zero : keys.Move;
         var movementDirectionLengthSquared = movementDirection.LengthSquared();
         if (movementDirectionLengthSquared > 0)
             movementDirection /= MathF.Sqrt(movementDirectionLengthSquared);
@@ -266,6 +313,12 @@ public struct PlayerCharacter
         public void OnHitAtZeroT(ref float maximumT, CollidableReference collidable) { }
     }
 
+    /// <summary>How far above the capsule's centre the eye is: <paramref name="eyeHeight"/>, less while crouching.</summary>
+    public readonly float EyeOffset(float eyeHeight) => eyeHeight - eyeDrop;
+
+    /// <summary>The capsule's centre.</summary>
+    public readonly Vector3 Position => new BodyReference(bodyHandle, characters.Simulation.Bodies).Pose.Position;
+
     /// <summary>First-person eye position: capsule centre + <paramref name="eyeHeight"/>, lowered while crouching
     /// — no third-person backward offset (unlike the original demo's debug camera).</summary>
     public readonly Vector3 GetEyePosition(float eyeHeight)
@@ -274,13 +327,12 @@ public struct PlayerCharacter
         return characterBody.Pose.Position + new Vector3(0, eyeHeight - eyeDrop, 0);
     }
 
-    /// <summary>Snaps the capsule to a given world position and zeroes its velocity — used when the
-    /// character isn't actively being simulated as "walking" this frame (free-fly or grid-follow
-    /// modes), so switching back to Walking always resumes from wherever the camera visually is.
-    /// Also forgets the jump, air and crouch state, so walking resumes fresh: e.g. the air reference
-    /// velocity of a ship left long ago doesn't drag the character after switching back mid-air.</summary>
+    /// <summary>Snaps the capsule to a given world position and zeroes its velocity. Also forgets the jump, air and
+    /// crouch state, so walking resumes fresh: e.g. the air reference velocity of a ship left long ago doesn't drag the
+    /// character. See <see cref="ClearSkies.Engine.ECS.Players.Teleport"/>, which moves the player's Transform with it.</summary>
     public void TeleportTo(Vector3 position)
     {
+        if (suspended) return; // put back where the player is when it resumes
         characters.GetCharacterByBodyHandle(bodyHandle).ResetJumpAndAirState();
         eyeDrop = 0;
         var characterBody = new BodyReference(bodyHandle, characters.Simulation.Bodies);
@@ -293,7 +345,8 @@ public struct PlayerCharacter
     /// <summary>Removes the character's body from the simulation and the character registration.</summary>
     public readonly void Dispose()
     {
-        characters.Simulation.Shapes.Remove(new BodyReference(bodyHandle, characters.Simulation.Bodies).Collidable.Shape);
+        characters.Simulation.Shapes.Remove(shapeIndex);
+        if (suspended) return;
         characters.Simulation.Bodies.Remove(bodyHandle);
         characters.RemoveCharacterByBodyHandle(bodyHandle);
     }

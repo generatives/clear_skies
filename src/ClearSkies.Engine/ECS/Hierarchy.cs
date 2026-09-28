@@ -57,6 +57,29 @@ public static class Hierarchy
         if (!parent.Has<Children>())
             parent.Set(new Children { Entities = new HashSet<Entity>() });
         parent.Get<Children>().Entities.Add(child);
+
+        if (!child.Has<OwnPresence>()) InheritRendered(child, parent);
+    }
+
+    /// <summary>Gives <paramref name="child"/>, which has no <see cref="OwnPresence"/>, <paramref name="parent"/>'s
+    /// <see cref="Rendered"/>, and carries it on down its own children. <see cref="Rendered"/> is the only presence
+    /// layer that's inherited: nothing below a grid has a body of its own (its chunks and blocks are shapes in the grid's
+    /// one compound body), so <see cref="PhysicsPresence"/> stays on the grid, and terrain chunks decide their own.</summary>
+    private static void InheritRendered(Entity child, Entity parent)
+    {
+        bool rendered = parent.Has<Rendered>();
+        if (rendered == child.Has<Rendered>()) return;
+        if (rendered) child.Set<Rendered>(); else child.Remove<Rendered>();
+        PropagateRendered(child);
+    }
+
+    /// <summary>Carries <paramref name="entity"/>'s <see cref="Rendered"/> down to every descendant that inherits it
+    /// (stopping at descendants with their own <see cref="OwnPresence"/>). Called when it changes on it.</summary>
+    public static void PropagateRendered(Entity entity)
+    {
+        if (!entity.Has<Children>()) return;
+        foreach (var child in entity.Get<Children>().Entities)
+            if (child.IsAlive && !child.Has<OwnPresence>()) InheritRendered(child, entity);
     }
 
     /// <summary>Attaches <paramref name="child"/> to <paramref name="parent"/> at <paramref name="local"/>, and
@@ -93,16 +116,24 @@ public static class Hierarchy
 
     /// <summary>Disposes <paramref name="entity"/> and every descendant reachable through
     /// <see cref="Children"/>, immediately. (Disposing a parent directly also takes its descendants with it,
-    /// but only when <see cref="HierarchyTransformSystem"/> next runs.)</summary>
+    /// but only when <see cref="HierarchyTransformSystem"/> next runs.) A camera is only detached (see
+    /// <see cref="OutlivesParent"/>).</summary>
     public static void DestroyRecursive(Entity entity)
     {
         if (!entity.IsAlive) return;
 
         if (entity.Has<Children>())
             foreach (var child in entity.Get<Children>().Entities.ToArray())
-                DestroyRecursive(child);
+            {
+                if (OutlivesParent(child)) RemoveParent(child);
+                else DestroyRecursive(child);
+            }
 
         RemoveParent(entity);
         entity.Dispose();
     }
+
+    /// <summary>Whether <paramref name="child"/> is detached, not destroyed, with its parent: a camera only views from
+    /// whatever it's attached to (a player's eye, a piloted ship), and whoever attached it puts it back.</summary>
+    public static bool OutlivesParent(Entity child) => child.Has<CameraComponent>();
 }

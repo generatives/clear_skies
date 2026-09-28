@@ -5,6 +5,7 @@ using ClearSkies.Engine.Math;
 using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Rendering.WebGpu;
 using ClearSkies.Engine.Voxels;
+using ClearSkies.Engine.Entities;
 using DefaultEcs;
 using ImGuiNET;
 using Silk.NET.Input;
@@ -29,6 +30,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
 
     private readonly World        _world;
     private readonly EntitySet    _cameras;
+    private readonly EntitySet    _players;
     private readonly EntitySet    _volumes;
     private readonly InputManager _input;
     private readonly ChunkMeshSystem _meshSystem;
@@ -83,6 +85,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
         _world       = world;
         _focusSubscription = world.Subscribe<InteractionFocus>((in InteractionFocus f) => _focus = f.Point);
         _cameras     = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
+        _players     = world.GetEntities().With<LocalPlayer>().With<Transform>().With<MouseLookComponent>().AsSet();
         _volumes     = world.GetEntities().With<ChunkGrid>().With<Transform>().AsSet();
         _input       = input;
         _meshSystem  = meshSystem;
@@ -151,7 +154,9 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
         }
 
         // Find the nearest hit across every volume (the static world and each dynamic grid), casting the ray in
-        // each volume's own space. Rotation preserves length, so hit distances compare directly.
+        // each volume's own space. Rotation preserves length, so hit distances compare directly. Volumes are placed
+        // where they're drawn, like the camera the ray comes from, so the target is the block the player sees
+        // (a moving ship's true pose is up to a tick ahead of its drawing).
         float        bestDist   = float.MaxValue;
         ChunkVolume? bestVolume = null;
         Entity       bestEntity = default;
@@ -161,7 +166,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
         foreach (ref readonly Entity e in _volumes.GetEntities())
         {
             var volume = e.Get<ChunkGrid>().Volume;
-            ref readonly var root = ref e.Get<Transform>();
+            var root = e.DrawnPose();
             var lo = volume.WorldToVoxel(root, origin);
             var ld = Vec.Rotate(Vec.Conjugate(root.Rotation), dir);
 
@@ -180,7 +185,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
         bool bestIsDynamicGrid = bestEntity.Has<DynamicGrid>();
         TargetBlock  = bestBlock;
         TargetNormal = bestNormal;
-        ShowFace(bestVolume, bestEntity.Get<Transform>(), bestBlock, bestNormal);
+        ShowFace(bestVolume, bestEntity.DrawnPose(), bestBlock, bestNormal);
 
         if (_input.WasKeyPressed(Key.L))
         {
@@ -264,33 +269,36 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
         if (phase != InteractionPhase.Ended && _focus is { } focus) LookAt(focus);
     }
 
-    /// <summary>Locks or unlocks the active camera's mouse-look (see <see cref="LookLockedComponent"/>).</summary>
+    /// <summary>Locks or unlocks the local player's mouse-look (see <see cref="LookLockedComponent"/>).</summary>
     private void SetLookLocked(bool locked)
     {
-        foreach (ref readonly Entity e in _cameras.GetEntities())
+        foreach (ref readonly Entity e in _players.GetEntities())
         {
-            if (locked && e.Get<CameraComponent>().Active) e.Set(new LookLockedComponent());
-            else if (!locked && e.Has<LookLockedComponent>()) e.Remove<LookLockedComponent>();
+            if (locked) e.Set(new LookLockedComponent());
+            else if (e.Has<LookLockedComponent>()) e.Remove<LookLockedComponent>();
         }
     }
 
-    /// <summary>Turns the active camera to look straight at <paramref name="point"/>, keeping its mouse-look angles
-    /// in step so looking around resumes from there.</summary>
+    /// <summary>Turns the local player (and the active camera with them) to look straight at <paramref name="point"/>,
+    /// keeping the mouse-look angles in step so looking around resumes from there. The camera is also turned where it's
+    /// drawn this frame, which was placed before this ran.</summary>
     private void LookAt(Vector3D<float> point)
     {
-        foreach (ref readonly Entity e in _cameras.GetEntities())
+        if (!CameraUtil.TryGetActive(_cameras, out var camera)) return;
+        foreach (ref readonly Entity e in _players.GetEntities())
         {
-            if (!e.Get<CameraComponent>().Active || !e.Has<MouseLookComponent>()) continue;
-            ref var t    = ref e.Get<Transform>();
             ref var look = ref e.Get<MouseLookComponent>();
-            var toPoint = point - t.Position;
+            var toPoint = point - camera.Position;
             if (toPoint.LengthSquared < 1e-8f) return;
             toPoint = Vector3D.Normalize(toPoint);
 
             float limit = MathF.PI / 2f - 0.01f;
             look.Yaw   = MathF.Atan2(-toPoint.X, -toPoint.Z);
             look.Pitch = System.Math.Clamp(MathF.Asin(System.Math.Clamp(toPoint.Y, -1f, 1f)), -limit, limit);
-            t.Rotation = Quaternion<float>.CreateFromYawPitchRoll(look.Yaw, look.Pitch, 0f);
+            e.Get<Transform>().Rotation = look.BodyRotation;
+            foreach (ref readonly Entity c in _cameras.GetEntities())
+                if (c.Get<CameraComponent>().Active && c.Has<DrawnTransform>())
+                    c.Get<DrawnTransform>().Value.Rotation = Quaternion<float>.CreateFromYawPitchRoll(look.Yaw, look.Pitch, 0f);
             return;
         }
     }
@@ -417,7 +425,7 @@ public sealed class PlayerInputSystem : ISystem, IDisposable, IDebugUiSystem
         {
             ref readonly var cc = ref e.Get<CameraComponent>();
             if (!cc.Active) continue;
-            ref readonly var t = ref e.Get<Transform>();
+            var t = e.DrawnPose(); // the view on screen
             origin = t.Position;
             dir    = Vector3D.Normalize(Vec.Rotate(t.Rotation, new Vector3D<float>(0, 0, -1)));
             return true;

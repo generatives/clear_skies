@@ -163,6 +163,9 @@ public class ChunkVolume
 
     // ── Chunk lifecycle ────────────────────────────────────────────────────
 
+    /// <summary>True for the static world: each of its chunks gets <see cref="OwnPresence"/>.</summary>
+    public bool ChunksOwnPresence { get; init; }
+
     /// <param name="packed">The chunk's opacity packed for the GPU store already (off the main thread), if it
     /// has been; otherwise its upload packs it.</param>
     internal ChunkEntry AddChunk(ChunkPosition pos, ChunkData data, PackedOpacity? packed = null)
@@ -170,6 +173,9 @@ public class ChunkVolume
         var entity = _world.CreateEntity();
         var entry = new ChunkEntry(data, entity, this, pos);
         if (packed != null) entry.SetPacked(packed);
+        // The world's chunks spread across the whole world, so each decides its own presence layers (see
+        // EntityPresenceSystem); a grid's chunks inherit the grid's.
+        if (ChunksOwnPresence) entity.Set<OwnPresence>();
         Hierarchy.SetParent(entity, Root, ChunkLocal(pos));
         entity.Set(new Chunk() { Entry = entry });
         entry.Entity.Set(new NeedsRemeshFlag());
