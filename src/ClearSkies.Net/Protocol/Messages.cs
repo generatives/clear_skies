@@ -9,7 +9,7 @@ namespace ClearSkies.Net.Protocol;
 /// <summary>Bumped whenever any message or description format changes; a mismatch refuses the join.</summary>
 public static class ProtocolVersion
 {
-    public const ushort Current = 1;
+    public const ushort Current = 2;
 }
 
 /// <summary>The first byte of every packet.</summary>
@@ -36,6 +36,17 @@ public enum MessageKind : byte
     IdBlock = 19,
     /// <summary>Host → client: an entity left the client's load window; drop it (it's still in the game).</summary>
     Forget = 20,
+    /// <summary>Client → host: a command that reached this client after its target changed hands, for its authority now
+    /// (a <see cref="CommandHeader"/> whose From is the command's origin).</summary>
+    ForwardedCommand = 21,
+    /// <summary>Host → an entity's owner: hand it over (see <see cref="OwnershipMessages"/>).</summary>
+    OwnershipRelease = 22,
+    /// <summary>Old owner → host: the entity's body as it let go.</summary>
+    HandoverSnapshot = 23,
+    /// <summary>Host → everyone who has the entity: its new owner and epoch, with the handover snapshot.</summary>
+    OwnershipChanged = 24,
+    /// <summary>Host → everyone: each player's bubble owner.</summary>
+    BubbleOwners = 25,
 }
 
 /// <summary>Client → host, first thing: who's joining and whether their game matches.</summary>

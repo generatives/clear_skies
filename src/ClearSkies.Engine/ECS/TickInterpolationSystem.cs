@@ -21,6 +21,29 @@ public struct InterpolatedTransform
 }
 
 /// <summary>
+/// Eases the drawn pose of something that just changed hands (network ownership) from where it was drawn to where its
+/// new source puts it, over <see cref="Seconds"/>, rather than snapping: the offset from the new pose to the old one,
+/// shrinking to nothing.
+/// </summary>
+public struct HandoverBlend
+{
+    public const float Duration = 0.25f;
+    public Vector3D<float> Offset;
+    public Quaternion<float> Rotation; // old drawn rotation relative to the new one
+    public float Seconds;              // left
+
+    /// <summary>The part of the offset still applied (1 at the start, eased out to 0).</summary>
+    public readonly float Weight
+    {
+        get
+        {
+            float f = System.Math.Clamp(Seconds / Duration, 0f, 1f);
+            return f * f * (3 - 2 * f);
+        }
+    }
+}
+
+/// <summary>
 /// Where to draw an entity this frame, when that isn't its <see cref="Transform"/>: set each frame for entities with an
 /// <see cref="InterpolatedTransform"/> and everything under them in the hierarchy. Read it with
 /// <see cref="Drawing.DrawnPose"/>, which falls back to the Transform.
@@ -86,7 +109,7 @@ public sealed class TickInterpolationSystem : IStagedSystem
     public void Update(SystemStage stage, float dt)
     {
         if (stage == SystemStage.Simulation) EndTick();
-        else Draw();
+        else Draw(dt);
     }
 
     private void EndTick()
@@ -114,7 +137,7 @@ public sealed class TickInterpolationSystem : IStagedSystem
         }
     }
 
-    private void Draw()
+    private void Draw(float dt)
     {
         _frame++;
         float alpha = _alpha = _time.Alpha;
@@ -133,6 +156,7 @@ public sealed class TickInterpolationSystem : IStagedSystem
             drawn.Position = Vector3D.Lerp(s.Previous.Position, s.Current.Position, alpha);
             if (!s.PositionOnly) drawn.Rotation = Quaternion<float>.Slerp(s.Previous.Rotation, s.Current.Rotation, alpha);
             else if (e.Has<MouseLookComponent>()) DrawLook(e.Get<MouseLookComponent>(), ref drawn, alpha);
+            if (e.Has<HandoverBlend>()) Blend(e, ref drawn, dt, !s.PositionOnly);
             SetDrawn(e, drawn, fromParent: false);
             DrawChildren(e, drawn);
         }
@@ -155,6 +179,16 @@ public sealed class TickInterpolationSystem : IStagedSystem
         }
         else
             e.Set(new DrawnTransform { Value = drawn, Frame = _frame, FromParent = fromParent });
+    }
+
+    private static void Blend(Entity e, ref Transform drawn, float dt, bool rotation)
+    {
+        ref var blend = ref e.Get<HandoverBlend>();
+        float w = blend.Weight;
+        drawn.Position += blend.Offset * w;
+        if (rotation) drawn.Rotation = Quaternion<float>.Slerp(Quaternion<float>.Identity, blend.Rotation, w) * drawn.Rotation;
+        blend.Seconds -= dt;
+        if (blend.Seconds <= 0) e.Remove<HandoverBlend>();
     }
 
     /// <summary>Everything under <paramref name="parent"/> in the hierarchy is drawn relative to its drawn pose.</summary>

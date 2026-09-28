@@ -88,9 +88,22 @@ public sealed class HeadlessScene : IDisposable
         _tick.Insert(0, new ClearSkies.Net.Session.NetReceiveSystem(net));
         _tick.Add(new ClearSkies.Net.Sync.BodySync(net, World, Physics));
         _tick.Add(new ClearSkies.Net.Sync.DivergenceCheck(net, World));
+        Ownership = new ClearSkies.Net.Ownership.OwnershipSystem(net, World);
+        _tick.Insert(_tick.IndexOf(Presence), Ownership);
         _tick.Add(new ClearSkies.Net.Session.NetSendSystem(net));
         RemoteBodies = new ClearSkies.Net.Sync.RemoteBodySystem(World, Registry, Clock);
         _tick.Insert(_tick.IndexOf(Physics), new ClearSkies.Net.Sync.FollowerSystem(World, Physics, RemoteBodies));
+    }
+
+    public ClearSkies.Net.Ownership.OwnershipSystem? Ownership { get; private set; }
+    public ClearSkies.Net.Ownership.BubbleManager? Bubbles { get; private set; }
+
+    /// <summary>The host decides who simulates what by bubbles (off by default in tests: the host owns everything).</summary>
+    public ClearSkies.Net.Ownership.BubbleManager EnableBubbles()
+    {
+        Bubbles = new ClearSkies.Net.Ownership.BubbleManager((ClearSkies.Net.Session.HostSession)Net!, Ownership!, World);
+        _tick.Insert(_tick.IndexOf(Presence), Bubbles);
+        return Bubbles;
     }
 
     /// <summary>Saves to <paramref name="db"/> and streams entities from it, as the host does.</summary>

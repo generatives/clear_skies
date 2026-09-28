@@ -149,7 +149,10 @@ public sealed class ClientSession : NetSession
                 break;
             }
             case MessageKind.StateHash:
-                Divergence?.ReceiveHash(PeerId.Host, ref r);
+                Divergence?.ReceiveHash(ref r);
+                break;
+            case MessageKind.SnapshotRequest:
+                Divergence?.ReceiveSnapshotRequest(PeerId.Host, ref r);
                 break;
             case MessageKind.Forget:
             {
@@ -159,6 +162,15 @@ public sealed class ClientSession : NetSession
                     Engine.ECS.Hierarchy.DestroyRecursive(e);
                 break;
             }
+            case MessageKind.OwnershipRelease:
+                Ownership?.ReceiveRelease(ref r);
+                break;
+            case MessageKind.OwnershipChanged:
+                Ownership?.ReceiveChanged(ref r);
+                break;
+            case MessageKind.BubbleOwners:
+                Ownership?.ReceiveBubbleOwners(ref r);
+                break;
             case MessageKind.TimePong:
                 ClockSync.OnPong(TimePong.Read(ref r), NowMs);
                 break;
@@ -204,6 +216,18 @@ public sealed class ClientSession : NetSession
     {
         Writer.Clear();
         new Rejection(to, Session.LocalPeer, seq).Write(Writer);
+        Send(Host);
+    }
+
+    public override void ForwardCommand(PeerId authority, PeerId origin, ushort handlerId, uint seq, ReadOnlySpan<byte> payload)
+    {
+        Writer.Clear();
+        Writer.WriteByte((byte)MessageKind.ForwardedCommand); // a command header, marked as passed on
+        Writer.WriteUInt32(authority.Value);
+        Writer.WriteUInt32(origin.Value);
+        Writer.WriteUInt16(handlerId);
+        Writer.WriteUInt32(seq);
+        Writer.WriteRaw(payload);
         Send(Host);
     }
 

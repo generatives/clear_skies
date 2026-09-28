@@ -57,6 +57,10 @@ public readonly struct AuthorityContext
     /// <summary>The owner of an entity; the host for anything unknown (not spawned yet, or already gone).</summary>
     public PeerId OwnerOf(EntityAddress address) => _system.OwnerOf(address.Entity);
 
+    /// <summary>Who decides for the bubble <paramref name="entity"/>'s owner is in (terrain edits by that player): the
+    /// host until the bubble manager says otherwise.</summary>
+    public PeerId BubbleOwnerOf(uint entity) => _system.Session.BubbleOwnerOf(_system.OwnerOf(entity));
+
     public PeerId Host => PeerId.Host;
 }
 
@@ -96,6 +100,10 @@ public interface ICommandRouter
 
     /// <summary>Tells a sender its command <paramref name="seq"/> was rejected.</summary>
     void SendRejection(PeerId to, uint seq);
+
+    /// <summary>Passes on a command that reached this machine after its target changed hands: to the authority now,
+    /// still from <paramref name="origin"/>, so its event and any rejection go back to them.</summary>
+    void ForwardCommand(PeerId authority, PeerId origin, ushort handlerId, uint seq, ReadOnlySpan<byte> payload);
 }
 
 /// <summary>The router for a session with nobody connected: there's never anyone to send to.</summary>
@@ -107,4 +115,7 @@ public sealed class LocalCommandRouter : ICommandRouter
     public void BroadcastEvent(ushort handlerId, in EventMeta meta, ReadOnlySpan<byte> payload) { }
 
     public void SendRejection(PeerId to, uint seq) { }
+
+    public void ForwardCommand(PeerId authority, PeerId origin, ushort handlerId, uint seq, ReadOnlySpan<byte> payload)
+        => throw new InvalidOperationException($"No route to {authority}: nobody is connected.");
 }

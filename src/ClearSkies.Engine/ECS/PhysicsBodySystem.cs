@@ -155,11 +155,9 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
             ref readonly var t = ref entity.Get<Transform>();
             var o = entity.Get<BodyStateOverride>();
             _physics.SetBodyPose(body, PhysicsConv.ToBepu(t.Position), PhysicsConv.ToBepu(t.Rotation));
-            if (_physics.GetBodyMass(body) > 0)
-            {
-                _physics.SetBodyLinearVelocity(body, o.LinearVelocity);
-                _physics.SetBodyAngularVelocity(body, o.AngularVelocity);
-            }
+            // Kinematic (locked) bodies too: one handed over mid-flight keeps moving.
+            _physics.SetBodyLinearVelocity(body, o.LinearVelocity);
+            _physics.SetBodyAngularVelocity(body, o.AngularVelocity);
             entity.Remove<BodyStateOverride>();
         }
     }

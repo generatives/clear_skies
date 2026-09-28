@@ -287,6 +287,11 @@ var bodySync = new ClearSkies.Net.Sync.BodySync(net, host.World, host.Physics);
 host.AddSystem(bodySync, SystemStage.Simulation); // snapshots of owned bodies, every second tick
 var divergence = new ClearSkies.Net.Sync.DivergenceCheck(net, host.World); // hashes compared every 5 s
 host.AddSystem(divergence, SystemStage.Simulation);
+// Who simulates what: every machine applies ownership changes and hands entities over; the host decides by bubbles.
+var ownership = new ClearSkies.Net.Ownership.OwnershipSystem(net, host.World);
+host.AddSystem(ownership, SystemStage.Simulation);
+if (net is ClearSkies.Net.Session.HostSession bubbleHost)
+    host.AddSystem(new ClearSkies.Net.Ownership.BubbleManager(bubbleHost, ownership, host.World), SystemStage.Simulation);
 host.AddSystem(new ClearSkies.Net.Session.NetSendSystem(net), SystemStage.Simulation);
 var remoteBodies = new ClearSkies.Net.Sync.RemoteBodySystem(host.World, registry, hostClock);
 // Physics copies of bodies owned elsewhere (kinematic ships near the local player, servo copies of other players),
@@ -353,6 +358,12 @@ if (!headless)
     host.AddSystem(clouds, SystemStage.RenderWorld);
     host.AddSystem(new SkyRenderSystem(renderer), SystemStage.RenderSky);
     host.AddSystem(new WireframeRenderSystem(host.World, renderer), SystemStage.RenderOverlay);
+    var ownershipOverlay = new OwnershipOverlaySystem(host.World, renderer, session,
+        ClearSkies.Net.Ownership.BubbleManager.DefaultPlayerMergeDistance,
+        ClearSkies.Net.Ownership.BubbleManager.DefaultPlayerMergeDistance + ClearSkies.Net.Ownership.BubbleManager.DefaultSplitMargin);
+    ownershipOverlay.Enabled = args.Contains("--show-ownership");
+    host.AddSystem(ownershipOverlay, SystemStage.RenderOverlay);
+    host.RegisterDebugUi(ownershipOverlay);
     host.AddSystem(new HudRenderSystem(host.World, renderer), SystemStage.RenderHud);
     uiRenderer = new UiRenderSystem(ui!, renderer);
     host.AddSystem(uiRenderer, SystemStage.RenderHud);

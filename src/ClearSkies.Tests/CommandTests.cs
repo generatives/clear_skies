@@ -286,6 +286,8 @@ public sealed class RecordingRouter : ICommandRouter
     public void SendCommand(PeerId authority, ushort handlerId, uint seq, ReadOnlySpan<byte> payload) => Commands.Add((authority, handlerId, seq, payload.ToArray()));
     public void BroadcastEvent(ushort handlerId, in EventMeta meta, ReadOnlySpan<byte> payload) => Events.Add((handlerId, meta, payload.ToArray()));
     public void SendRejection(PeerId to, uint seq) => Rejections.Add((to, seq));
+    public readonly List<(PeerId To, PeerId Origin, ushort Id, uint Seq)> Forwarded = new();
+    public void ForwardCommand(PeerId authority, PeerId origin, ushort handlerId, uint seq, ReadOnlySpan<byte> payload) => Forwarded.Add((authority, origin, handlerId, seq));
 }
 
 public class PredictionTests

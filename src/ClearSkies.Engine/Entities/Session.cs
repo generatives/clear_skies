@@ -31,6 +31,12 @@ public sealed class Session
     /// <summary>An owner record for <paramref name="owner"/>, local or not.</summary>
     public NetOwner OwnerFor(PeerId owner, ushort epoch = 0) => new() { Owner = owner, Epoch = epoch, IsLocal = owner == LocalPeer };
 
+    /// <summary>Each player's bubble owner (the peer that simulates their surroundings and decides their terrain
+    /// edits), as the host's bubble manager last announced it. Anyone missing is in the host's.</summary>
+    public Dictionary<PeerId, PeerId> BubbleOwners { get; } = new();
+
+    public PeerId BubbleOwnerOf(PeerId player) => BubbleOwners.TryGetValue(player, out var owner) ? owner : PeerId.Host;
+
     /// <summary>Becomes a client once the host has welcomed this machine and given it a peer ID.</summary>
     public void BecomeClient(PeerId localPeer)
     {

@@ -98,7 +98,7 @@ public sealed class HostSession : NetSession
 
     public IEnumerable<RemotePeer> Joined => _peers.Values.Where(p => p.State == PeerState.Joined);
 
-    private RemotePeer? PeerById(PeerId id) => _peers.Values.FirstOrDefault(p => p.Peer == id);
+    internal RemotePeer? PeerById(PeerId id) => _peers.Values.FirstOrDefault(p => p.Peer == id);
 
     // ── connections ─────────────────────────────────────────────────────────
 
@@ -110,8 +110,10 @@ public sealed class HostSession : NetSession
         if (!_peers.Remove(connection, out var peer) || peer.Peer == PeerId.None) return;
         Console.WriteLine($"[net] {peer.Name} ({peer.Peer}) left: {reason}");
         // Everything they owned is the host's now (their player, until it's despawned).
-        foreach (var e in World.GetEntities().With<NetOwner>().AsEnumerable().ToList())
-            if (e.Get<NetOwner>().Owner == peer.Peer) e.Set(Session.LocalOwner((ushort)(e.Get<NetOwner>().Epoch + 1)));
+        if (Ownership is { } ownership) ownership.PeerLeft(peer.Peer);
+        else
+            foreach (var e in World.GetEntities().With<NetOwner>().AsEnumerable().ToList())
+                if (e.Get<NetOwner>().Owner == peer.Peer) e.Set(Session.LocalOwner((ushort)(e.Get<NetOwner>().Epoch + 1)));
         if (peer.PlayerEntity != 0 && Registry.TryGet(peer.PlayerEntity, out var player))
         {
             if (PlayerLeaving is { } leaving) leaving(player);
@@ -163,6 +165,17 @@ public sealed class HostSession : NetSession
                 else if (PeerById(h.To) is { } target) Relay(target, h with { From = peer.Peer }, ref r);
                 break;
             }
+            case MessageKind.ForwardedCommand:
+            {
+                // A command that reached a client after its target left them: on to its authority now, from its origin.
+                var h = CommandHeader.Read(ref r);
+                if (h.To == Session.LocalPeer) Commands.ReceiveCommand(h.From, h.Handler, h.Seq, r.ReadRaw(r.Remaining).ToArray());
+                else if (PeerById(h.To) is { } target) Relay(target, h, ref r);
+                break;
+            }
+            case MessageKind.HandoverSnapshot:
+                Ownership?.ReceiveHandover(peer.Peer, ref r);
+                break;
             case MessageKind.Event:
             {
                 // A client deciding something it owns (its own player): apply it here, and pass it on.
@@ -191,6 +204,9 @@ public sealed class HostSession : NetSession
                 Send(from);
                 break;
             }
+            case MessageKind.StateHash:
+                Divergence?.ReceiveHash(ref r);
+                break;
             case MessageKind.SnapshotRequest:
                 Divergence?.ReceiveSnapshotRequest(peer.Peer, ref r);
                 break;
@@ -214,6 +230,12 @@ public sealed class HostSession : NetSession
     }
 
     private void Send(ConnectionId to, ReadOnlySpan<byte> packet, Channel channel = Channel.Reliable) => Transport?.Send(to, packet, channel);
+
+    /// <summary>Sends a reliable packet to one client (joined or joining).</summary>
+    internal void SendReliable(PeerId to, ReadOnlySpan<byte> packet)
+    {
+        if (PeerById(to) is { } peer) Send(peer.Connection, packet);
+    }
 
     private void Relay(RemotePeer target, CommandHeader header, ref NetReader rest)
     {
@@ -267,6 +289,7 @@ public sealed class HostSession : NetSession
                 Writer.WriteRaw(d.Payload);
                 Send(peer.Connection);
                 peer.Known.Add(d.NetId);
+                Ownership?.SendEpoch(peer, d.Entity);
             }
             peer.Requested.Remove(d.NetId);
         }
@@ -354,7 +377,11 @@ public sealed class HostSession : NetSession
                 Writer.WriteRaw(payload);
                 Send(peer.Connection);
             }
-            foreach (var (_, _, target) in peer.PendingSnapshot) peer.Known.Add(target);
+            foreach (var (_, _, target) in peer.PendingSnapshot)
+            {
+                peer.Known.Add(target);
+                if (Ownership is { } ownership && Registry.TryGet(target, out var e) && e.Has<NetOwner>()) ownership.SendEpoch(peer, e);
+            }
             peer.PendingSnapshot.Clear();
             peer.State = PeerState.Joined;
 
@@ -403,6 +430,19 @@ public sealed class HostSession : NetSession
             if (Wants(peer, meta)) Send(peer.Connection);
         if (handlerId == CommandIds.DespawnEntity)
             foreach (var peer in _peers.Values) peer.Known.Remove(meta.Target);
+    }
+
+    public override void ForwardCommand(PeerId authority, PeerId origin, ushort handlerId, uint seq, ReadOnlySpan<byte> payload)
+    {
+        if (PeerById(authority) is not { } peer)
+        {
+            SendRejection(origin, seq); // nobody to decide it: the sender undoes its prediction
+            return;
+        }
+        Writer.Clear();
+        new CommandHeader(authority, origin, handlerId, seq).Write(Writer);
+        Writer.WriteRaw(payload);
+        Send(peer.Connection);
     }
 
     public override void SendRejection(PeerId to, uint seq)

@@ -56,6 +56,8 @@ public sealed class BodySync : ISystem, IDebugUiSystem
         _grids = world.GetEntities().With<NetId>().With<NetOwner>().With<PhysicsBodyComponent>().With<Transform>().AsSet();
     }
 
+    public PhysicsWorld Physics => _physics;
+
     /// <summary>Whether grids are synced too (on by default; players always are).</summary>
     public bool SyncGrids { get; set; } = true;
 
@@ -155,6 +157,7 @@ public sealed class BodySync : ISystem, IDebugUiSystem
             _snapshotsReceived++;
             if (!_net.Registry.TryGet(s.Entity, out var e)) continue; // not spawned here (yet)
             if (e.Has<NetOwner>() && e.Get<NetOwner>().IsLocal) continue; // ours: we're the truth
+            if (e.Has<NetOwner>() && Older(s.Epoch, e.Get<NetOwner>().Epoch)) continue; // from before it changed hands
             if (_net is HostSession && from != PeerId.Host) _relay[s.Entity] = (from, tick, s);
             Buffer(e, tick, s);
         }
@@ -164,6 +167,32 @@ public sealed class BodySync : ISystem, IDebugUiSystem
     {
         if (!e.Has<RemoteBody>()) e.Set(new RemoteBody { Buffer = new SnapshotBuffer() });
         e.Get<RemoteBody>().Buffer.Add(tick, s, _net.Clock.Tick);
+    }
+
+    /// <summary>Epochs wrap: <paramref name="a"/> is older than <paramref name="b"/> if it's behind by less than half the range.</summary>
+    public static bool Older(ushort a, ushort b) => a != b && (ushort)(b - a) < 0x8000;
+
+    /// <summary>An entity's body as this machine has it now (for handing it over): its physics body if it has one,
+    /// else its Transform with the velocity of its last snapshot. A grid's is in its block space, like its snapshots.</summary>
+    public BodySnapshot SnapshotOf(Entity e)
+    {
+        if (e.Has<PhysicsBodyComponent>()) return GridSnapshot(e);
+        ref readonly var t = ref e.Get<Transform>();
+        var s = new BodySnapshot
+        {
+            Entity = e.Get<NetId>().Value,
+            Epoch = e.Has<NetOwner>() ? e.Get<NetOwner>().Epoch : (ushort)0,
+            Rotation = new Quaternion(t.Rotation.X, t.Rotation.Y, t.Rotation.Z, t.Rotation.W),
+        };
+        s.Position = GridFrame.Origin(e, new Vector3(t.Position.X, t.Position.Y, t.Position.Z), s.Rotation);
+        if (e.Has<RemoteBody>() && e.Get<RemoteBody>().Buffer is { Latest: { } latest } buffer && latest.Support == 0)
+        {
+            // Where its owner has it now (as best we know), not where it's drawn, 100 ms behind.
+            if (buffer.At(_net.Clock.Tick) is { } now) (s.Position, s.Rotation) = (now.Position, now.Rotation);
+            s.LinearVelocity = latest.LinearVelocity;
+            s.AngularVelocity = latest.AngularVelocity;
+        }
+        return s;
     }
 
     public string DebugName => "Body sync";
