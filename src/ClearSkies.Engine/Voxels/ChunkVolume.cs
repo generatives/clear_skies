@@ -13,15 +13,16 @@ namespace ClearSkies.Engine.Voxels;
 /// <see cref="SetBlock"/> are in this volume's own space: world space for the static volume,
 /// grid-local space for a dynamic grid.
 ///
-/// Every volume's <see cref="Root"/> entity carries a <see cref="Transform"/> placing it in the world (identity for
-/// the static world, the body pose for a dynamic grid), and <see cref="Pivot"/> says which point of the volume's
-/// own space sits at that Transform: world = root.Position + root.Rotation·(voxel − Pivot). Everything that maps
-/// between volume space and world space (chunk placement, lighting, raycasts) goes through those two, so none of
-/// it needs to know whether the volume is static or has a physics body. Volumes are rigid: root scale is ignored.
+/// Every volume's <see cref="Root"/> entity carries a <see cref="Transform"/> placing the volume's own space in the
+/// world (identity for the static world): world = root.Position + root.Rotation·voxel. Everything that maps between
+/// volume space and world space (chunk placement, lighting, raycasts) goes through that, so none of it needs to know
+/// whether the volume is static or has a physics body. Volumes are rigid: root scale is ignored. A dynamic grid's
+/// body sits at its centre of mass inside that space (<see cref="PhysicsBodyComponent.Offset"/>); edits move the
+/// centre of mass, never the volume's space.
 ///
 /// Chunk entities are <see cref="Hierarchy"/> children of <see cref="Root"/>, each at a <see cref="LocalTransform"/>
-/// of its chunk origin minus the pivot, so <see cref="HierarchyTransformSystem"/> carries them along with the root
-/// (and destroys them with it).
+/// of its chunk origin, so <see cref="HierarchyTransformSystem"/> carries them along with the root (and destroys them
+/// with it).
 ///
 /// The volume also owns block entities (<see cref="BlockDef.Components"/>): one per entity block, created when its
 /// chunk is added or <see cref="SetBlock"/> places it, destroyed when <see cref="SetBlock"/> replaces it or its chunk
@@ -39,22 +40,6 @@ public class ChunkVolume
     /// <summary>This volume's registration in the shared GPU voxel storage (see <see cref="GridStore"/>), kept in
     /// sync by GpuResidencySystem.</summary>
     public GridHandle Gpu { get; } = new();
-
-    /// <summary>The point in this volume's own space that sits at <see cref="Root"/>'s <see cref="Transform"/>.
-    /// Zero for the static world; a dynamic grid's centre of mass (kept in step with its body by
-    /// PhysicsBodySystem), because that is where Bepu puts a compound body's origin.</summary>
-    public Vector3D<float> Pivot
-    {
-        get => _pivot;
-        internal set
-        {
-            if (value == _pivot) return;
-            _pivot = value;
-            foreach (var entry in _chunks.Values)
-                if (entry.Entity.IsAlive) entry.Entity.Set(ChunkLocal(entry.Position));
-        }
-    }
-    private Vector3D<float> _pivot;
 
     /// <summary>The chunk layers <see cref="SetBlock(int, int, int, BlockId, BlockOrientation)"/> may change
     /// (inclusive); an edit outside them does nothing. Unlimited by default. ChunkLoadSystem limits the static world to
@@ -334,21 +319,21 @@ public class ChunkVolume
     // ── Placement ──────────────────────────────────────────────────────────
 
     /// <summary>Chunk <paramref name="pos"/>'s entity relative to <see cref="Root"/>: its origin (where
-    /// GreedyMesher's local space starts) at the chunk's minimum corner, relative to the pivot.</summary>
-    private LocalTransform ChunkLocal(ChunkPosition pos)
+    /// GreedyMesher's local space starts) at the chunk's minimum corner.</summary>
+    private static LocalTransform ChunkLocal(ChunkPosition pos)
     {
         var local = LocalTransform.Identity;
-        local.Position = pos.WorldOrigin - Pivot;
+        local.Position = pos.WorldOrigin;
         return local;
     }
 
     /// <summary>Maps a point in this volume's space to world space for a root at <paramref name="root"/>.</summary>
     public Vector3D<float> VoxelToWorld(in Transform root, Vector3D<float> voxel)
-        => root.Position + Vec.Rotate(root.Rotation, voxel - Pivot);
+        => root.Position + Vec.Rotate(root.Rotation, voxel);
 
     /// <summary>Inverse of <see cref="VoxelToWorld"/>. Directions map with just the inverse rotation.</summary>
     public Vector3D<float> WorldToVoxel(in Transform root, Vector3D<float> world)
-        => Pivot + Vec.Rotate(Vec.Conjugate(root.Rotation), world - root.Position);
+        => Vec.Rotate(Vec.Conjugate(root.Rotation), world - root.Position);
 
     // ── Helpers ────────────────────────────────────────────────────────────
 
