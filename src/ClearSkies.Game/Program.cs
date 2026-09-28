@@ -185,7 +185,7 @@ host.AddSystem(new BlockModelSystem(host.World, blockModels), SystemStage.PreRen
 // closes it with ImGui and presents. Each render system is handed this frame's camera and time.
 using var clouds = new CloudRenderSystem(host.Renderer, new HeartCloudDensity(seed));
 host.AddSystem(new ChunkRenderSystem(host.World, host.Renderer, staticVolume), SystemStage.RenderWorld);
-host.AddSystem(new ModelRenderSystem(host.World, host.Renderer), SystemStage.RenderWorld);
+host.AddSystem(new ModelRenderSystem(host.World, host.Renderer, host.Time), SystemStage.RenderWorld);
 host.AddSystem(clouds, SystemStage.RenderWorld);
 host.AddSystem(new SkyRenderSystem(host.Renderer), SystemStage.RenderSky);
 host.AddSystem(new WireframeRenderSystem(host.World, host.Renderer), SystemStage.RenderOverlay);

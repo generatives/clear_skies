@@ -217,8 +217,8 @@ public sealed class BlockActionSystem : ISystem, IDisposable, IDebugUiSystem
         toPoint = Vector3D.Normalize(toPoint);
         ref var look = ref player.Get<MouseLookComponent>();
         float limit = MathF.PI / 2f - 0.01f;
-        look.Yaw = MathF.Atan2(-toPoint.X, -toPoint.Z);
-        look.Pitch = System.Math.Clamp(MathF.Asin(System.Math.Clamp(toPoint.Y, -1f, 1f)), -limit, limit);
+        look.TurnTo(MathF.Atan2(-toPoint.X, -toPoint.Z),
+                    System.Math.Clamp(MathF.Asin(System.Math.Clamp(toPoint.Y, -1f, 1f)), -limit, limit));
         player.Get<Transform>().Rotation = look.BodyRotation;
     }
 
