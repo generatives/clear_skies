@@ -21,6 +21,10 @@ namespace ClearSkies.Net.Sync;
 /// the others along with its own. Receivers buffer them per entity (<see cref="RemoteBody"/>) and draw them about
 /// 100 ms behind (<see cref="RemoteBodySystem"/>). A lost packet is simply replaced by the next one. Runs last in the
 /// tick, after support.
+/// <para>A grid's body is centred on its centre of mass, which moves whenever its blocks change, and a machine changes
+/// them when an edit reaches it, which isn't when any snapshot does. So a grid's pose, and a pose on a grid, is sent in
+/// the grid's block space (<see cref="GridFrame"/>), which no edit moves, and each machine puts it back about its own
+/// centre of mass.</para>
 /// </summary>
 public sealed class BodySync : ISystem, IDebugUiSystem
 {
@@ -34,8 +38,6 @@ public sealed class BodySync : ISystem, IDebugUiSystem
     private readonly List<BodySnapshot> _own = new();
     private readonly Dictionary<uint, (PeerId Owner, uint Tick, BodySnapshot Snapshot)> _relay = new();
     private readonly NetWriter _writer = new(2048);
-    private readonly Dictionary<uint, uint> _shapeVersions = new(); // grid → event number of its last shape change
-    private readonly List<(PeerId From, uint Tick, BodySnapshot Snapshot)> _parked = new();
     private long _snapshotsSent, _snapshotsReceived;
 
     public BodySync(NetSession net, World world, PhysicsWorld physics)
@@ -50,14 +52,6 @@ public sealed class BodySync : ISystem, IDebugUiSystem
             {
                 foreach (ref readonly var e in _remote.GetEntities()) e.Get<RemoteBody>().Buffer.ShiftClock(ticks);
             };
-        // A grid's shape changes (its blocks, and with them its centre of mass, which is the body's origin) with its
-        // EditVoxels and SpawnGrid events: its snapshots say which one they follow, so a receiver uses them only once
-        // it has applied that one too.
-        net.Commands.Applied += (handler, meta, _) =>
-        {
-            if (handler.Id is Engine.Commands.CommandIds.EditVoxels or Engine.Commands.CommandIds.SpawnGrid)
-                _shapeVersions[meta.Target] = meta.EventNumber;
-        };
         _players = world.GetEntities().With<NetId>().With<NetOwner>().With<Player>().With<Transform>().AsSet();
         _grids = world.GetEntities().With<NetId>().With<NetOwner>().With<PhysicsBodyComponent>().With<Transform>().AsSet();
     }
@@ -67,7 +61,6 @@ public sealed class BodySync : ISystem, IDebugUiSystem
 
     public void Update(float dt)
     {
-        FlushParked();
         if (_net.Clock.Tick % 2 != 0) return;
         _own.Clear();
         foreach (ref readonly var e in _players.GetEntities())
@@ -120,7 +113,7 @@ public sealed class BodySync : ISystem, IDebugUiSystem
         if (e.Has<Support>() && e.Get<Support>() is { HasSupporter: true } support && support.Supporter.Has<NetId>())
         {
             s.Support = support.Supporter.Get<NetId>().Value;
-            s.Position = support.LocalPosition;
+            s.Position = support.LocalPosition + GridFrame.Pivot(support.Supporter);
         }
         if (e.Has<CharacterControllerComponent>() && !e.Has<FreeFlying>())
             s.LinearVelocity = e.Get<CharacterControllerComponent>().Character.LinearVelocity;
@@ -142,8 +135,7 @@ public sealed class BodySync : ISystem, IDebugUiSystem
         {
             Entity = id,
             Epoch = e.Get<NetOwner>().Epoch,
-            ShapeVersion = _shapeVersions.GetValueOrDefault(id),
-            Position = p,
+            Position = GridFrame.Origin(e, p, q),
             Rotation = q,
             LinearVelocity = _physics.GetBodyLinearVelocity(body),
             AngularVelocity = _physics.GetBodyAngularVelocity(body),
@@ -162,7 +154,6 @@ public sealed class BodySync : ISystem, IDebugUiSystem
             if (!_net.Registry.TryGet(s.Entity, out var e)) continue; // not spawned here (yet)
             if (e.Has<NetOwner>() && e.Get<NetOwner>().IsLocal) continue; // ours: we're the truth
             if (_net is HostSession && from != PeerId.Host) _relay[s.Entity] = (from, tick, s);
-            if (!ShapeApplied(e, s)) { _parked.Add((from, tick, s)); continue; } // its edit hasn't arrived yet
             Buffer(e, tick, s);
         }
     }
@@ -172,26 +163,6 @@ public sealed class BodySync : ISystem, IDebugUiSystem
         if (!e.Has<RemoteBody>()) e.Set(new RemoteBody { Buffer = new SnapshotBuffer() });
         e.Get<RemoteBody>().Buffer.Add(tick, s, _net.Clock.Tick);
     }
-
-    /// <summary>Whether this machine has applied the shape change a grid snapshot follows.</summary>
-    private bool ShapeApplied(Entity e, in BodySnapshot s) =>
-        s.ShapeVersion == 0 || !e.Has<NetOwner>() || _net.Commands.LastEventNumber(e.Get<NetOwner>().Owner, s.Entity) >= s.ShapeVersion;
-
-    /// <summary>Snapshots held back for a shape change that has now been applied go into their buffers.</summary>
-    private void FlushParked()
-    {
-        for (int i = _parked.Count - 1; i >= 0; i--)
-        {
-            var (_, tick, s) = _parked[i];
-            if (!_net.Registry.TryGet(s.Entity, out var e)) { _parked.RemoveAt(i); continue; }
-            if (!ShapeApplied(e, s)) continue;
-            Buffer(e, tick, s);
-            _parked.RemoveAt(i);
-        }
-        if (_parked.Count > 256) _parked.RemoveRange(0, _parked.Count - 256);
-    }
-
-    public int Parked => _parked.Count;
 
     public string DebugName => "Body sync";
 
@@ -241,7 +212,7 @@ public sealed class RemoteBodySystem : ISystem
             buffer.UpdateDelay(dt * 60 * _clock.Rate);
             (least, most) = (System.Math.Min(least, buffer.Delay), System.Math.Max(most, buffer.Delay));
             if (buffer.At(RenderTick(buffer)) is not { } s) continue;
-            var (position, rotation) = ToWorld(s.Support, s.Position, s.Rotation);
+            var (position, rotation) = Pose(e, s);
             ref var t = ref e.Get<Transform>();
             t.Position = new Vector3D<float>(position.X, position.Y, position.Z);
             if (e.Has<Player>())
@@ -258,12 +229,39 @@ public sealed class RemoteBodySystem : ISystem
         Delays = most > 0 ? (least, most) : (0, 0);
     }
 
-    /// <summary>A pose in a support's space, in world space (as the support is drawn now).</summary>
+    /// <summary>Where a sample puts <paramref name="e"/>, in world space, about its own centre of mass if it's a grid.</summary>
+    public (Vector3 Position, Quaternion Rotation) Pose(Entity e, in SnapshotBuffer.Sample s)
+    {
+        var (position, rotation) = ToWorld(s.Support, s.Position, s.Rotation);
+        return (GridFrame.Centre(e, position, rotation), rotation);
+    }
+
+    /// <summary>A pose in a support's space (its block space if it's a grid), in world space (as the support is drawn
+    /// now).</summary>
     public (Vector3 Position, Quaternion Rotation) ToWorld(uint support, Vector3 position, Quaternion rotation)
     {
         if (support == 0 || !_registry.TryGet(support, out var s) || !s.Has<Transform>()) return (position, rotation);
         ref readonly var st = ref s.Get<Transform>();
         var sr = new Quaternion(st.Rotation.X, st.Rotation.Y, st.Rotation.Z, st.Rotation.W);
-        return (new Vector3(st.Position.X, st.Position.Y, st.Position.Z) + Vector3.Transform(position, sr), sr * rotation);
+        return (new Vector3(st.Position.X, st.Position.Y, st.Position.Z) + Vector3.Transform(position - GridFrame.Pivot(s), sr), sr * rotation);
     }
+}
+
+/// <summary>A grid's block space (where its voxel (0,0,0) is), which edits don't move, and its centre of mass, which
+/// they do: world = centre + rotation·(voxel − <see cref="Pivot"/>).</summary>
+public static class GridFrame
+{
+    /// <summary>Where a grid's centre of mass is in its block space (zero for anything else).</summary>
+    public static Vector3 Pivot(Entity e)
+    {
+        if (!e.Has<global::ChunkGrid>()) return Vector3.Zero;
+        var p = e.Get<global::ChunkGrid>().Volume.Pivot;
+        return new Vector3(p.X, p.Y, p.Z);
+    }
+
+    /// <summary>A grid's block origin from its centre of mass.</summary>
+    public static Vector3 Origin(Entity e, Vector3 centre, Quaternion rotation) => centre - Vector3.Transform(Pivot(e), rotation);
+
+    /// <summary>A grid's centre of mass from its block origin.</summary>
+    public static Vector3 Centre(Entity e, Vector3 origin, Quaternion rotation) => origin + Vector3.Transform(Pivot(e), rotation);
 }

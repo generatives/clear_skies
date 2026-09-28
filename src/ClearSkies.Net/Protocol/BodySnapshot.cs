@@ -24,9 +24,6 @@ public struct BodySnapshot
 {
     public uint Entity;
     public ushort Epoch;
-    /// <summary>For grids, the event number of the last shape change: receivers hold the snapshot until they've
-    /// applied that event, because the body's origin (centre of mass) moves when blocks change.</summary>
-    public uint ShapeVersion;
     public uint Support;
     public Vector3 Position;
     public Quaternion Rotation;
@@ -38,7 +35,6 @@ public struct BodySnapshot
     {
         w.WriteUInt32(Entity);
         w.WriteUInt16(Epoch);
-        w.WriteUInt32(ShapeVersion);
         w.WriteUInt32(Support);
         w.WriteVector3(Position);
         w.WriteUInt32(QuaternionCodec.Pack(Rotation));
@@ -58,7 +54,6 @@ public struct BodySnapshot
         {
             Entity = r.ReadUInt32(),
             Epoch = r.ReadUInt16(),
-            ShapeVersion = r.ReadUInt32(),
             Support = r.ReadUInt32(),
             Position = r.ReadVector3(),
             Rotation = QuaternionCodec.Unpack(r.ReadUInt32()),
