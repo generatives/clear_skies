@@ -32,6 +32,9 @@ public sealed class ClockSync
     public double Offset { get; private set; }
 
     public bool HasEstimate => _samples.Count > 0;
+
+    /// <summary>Raised when the clock is snapped, with how many ticks it moved.</summary>
+    public event Action<double>? Snapped;
     public long Snaps { get; private set; }
 
     /// <summary>Snaps in the last minute.</summary>
@@ -76,6 +79,7 @@ public sealed class ClockSync
             _clock.Rate = 1;
             Snaps++;
             _snapTimes.Enqueue(nowMs);
+            Snapped?.Invoke(applied);
             return;
         }
         // Slew: faster when behind, slower when ahead, proportionally, until within half a tick.
@@ -85,7 +89,9 @@ public sealed class ClockSync
     /// <summary>Snaps straight to a known host tick (on Welcome, before any pings).</summary>
     public void SnapTo(uint hostTick)
     {
+        double before = LocalTick;
         _clock.Snap(hostTick);
+        Snapped?.Invoke(LocalTick - before);
         _samples.Clear();
         Offset = 0;
     }
