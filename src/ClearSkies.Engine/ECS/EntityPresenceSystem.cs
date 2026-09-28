@@ -165,7 +165,7 @@ public sealed class EntityPresenceSystem : ISystem, IDebugUiSystem
     {
         if (rendered == e.Has<Rendered>()) return;
         if (rendered) e.Set<Rendered>(); else e.Remove<Rendered>();
-        Hierarchy.PropagatePresence(e);
+        Hierarchy.PropagateRendered(e);
     }
 
     // ── terrain ──────────────────────────────────────────────────────────────

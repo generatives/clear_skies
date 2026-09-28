@@ -19,7 +19,7 @@ namespace ClearSkies.Engine.Physics.Support;
 /// The support becomes the character's air-control reference, so jumping on a moving deck doesn't leave the player
 /// behind. While standing on a support, the view turns with it: its change in heading turns the view's yaw, and its
 /// change in slope along the way the player faces tilts the pitch, so a player at the helm keeps facing the same way
-/// relative to the ship. Roll isn't followed.
+/// relative to the ship. Roll isn't followed. Free-flying players (<see cref="FreeFlying"/>) have no support.
 /// </summary>
 public sealed class SupportSystem : ISystem, IDebugUiSystem
 {
@@ -27,11 +27,13 @@ public sealed class SupportSystem : ISystem, IDebugUiSystem
     public const float ReleaseSeconds = 0.5f;
 
     private readonly EntitySet _bodies;
+    private readonly EntitySet _characters; // flying or not, for the debug panel
     private readonly PhysicsWorld _physics;
 
     public SupportSystem(World world, PhysicsWorld physics)
     {
-        _bodies = world.GetEntities().With<Support>().With<CharacterControllerComponent>().With<Transform>().AsSet();
+        _bodies = world.GetEntities().With<Support>().With<CharacterControllerComponent>().With<Transform>().Without<FreeFlying>().AsSet();
+        _characters = world.GetEntities().With<Support>().With<CharacterControllerComponent>().AsSet();
         _physics = physics;
     }
 
@@ -42,14 +44,6 @@ public sealed class SupportSystem : ISystem, IDebugUiSystem
             ref var support = ref e.Get<Support>();
             ref var cc = ref e.Get<CharacterControllerComponent>();
             var characterBody = cc.Character.BodyHandle;
-
-            bool freeFly = e.Has<CharacterModeComponent>() && e.Get<CharacterModeComponent>().FreeFly;
-            if (freeFly)
-            {
-                Release(ref support);
-                _physics.Characters.SetAirReference(characterBody, null);
-                continue;
-            }
 
             bool standing = false;
             if (_physics.Characters.TryGetStandingBody(characterBody, out var standingBody))
@@ -131,7 +125,7 @@ public sealed class SupportSystem : ISystem, IDebugUiSystem
                                         -limit, limit) - look.Pitch;
         look.TurnWith(yaw, pitch);
 
-        t.Rotation = Quaternion<float>.CreateFromYawPitchRoll(look.Yaw, look.Pitch, 0f);
+        t.Rotation = look.BodyRotation;
     }
 
     /// <summary>Which way a body's own -Z points seen from above: radians about world up, 0 towards -Z, anticlockwise
@@ -160,10 +154,10 @@ public sealed class SupportSystem : ISystem, IDebugUiSystem
 
     public void DrawDebugUi()
     {
-        foreach (ref readonly Entity e in _bodies.GetEntities())
+        foreach (ref readonly Entity e in _characters.GetEntities())
         {
             ref readonly var cc = ref e.Get<CharacterControllerComponent>();
-            bool freeFly = e.Has<CharacterModeComponent>() && e.Get<CharacterModeComponent>().FreeFly;
+            bool freeFly = e.Has<FreeFlying>();
             ImGui.Text($"Mode: {(freeFly ? "FreeFly" : "Walking")} (V to toggle)");
             if (freeFly) continue;
             ImGui.Text($"Supported: {cc.Character.Supported}");
