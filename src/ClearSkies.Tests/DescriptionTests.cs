@@ -221,4 +221,37 @@ public class DescriptionTests
         ms.Position = 0;
         Assert.Equal(voxels, GridSerializer.Read(ms));
     }
+
+    [Fact]
+    public void AGridFileHoldsTheWholeDescription()
+    {
+        using var scene = new HeadlessScene();
+        var grid = Ship(scene); // with ship-control settings
+        var d = DynamicGridFactory.Describe(grid, scene.Physics);
+        string path = Path.Combine(Path.GetTempPath(), $"ship-{Guid.NewGuid():N}.grid");
+        try
+        {
+            d.SaveFile(path);
+            var loaded = GridDescription.LoadFile(path);
+            Assert.Equal(d.Voxels, loaded.Voxels);
+            Assert.Equal(d.Controls, loaded.Controls);
+            Assert.Equal(d.Locked, loaded.Locked);
+            Assert.Equal(d.Body, loaded.Body);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void AnOldGridFileIsRefusedWithAReason()
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"old-{Guid.NewGuid():N}.grid");
+        try
+        {
+            using (var fs = File.Create(path)) // voxels alone, as .grid files were
+                GridSerializer.Write(fs, new[] { new GridVoxel(0, 0, 0, BlockId.Stone, BlockOrientation.Upright) });
+            var e = Assert.Throws<InvalidDataException>(() => GridDescription.LoadFile(path));
+            Assert.Contains("older build", e.Message);
+        }
+        finally { File.Delete(path); }
+    }
 }
