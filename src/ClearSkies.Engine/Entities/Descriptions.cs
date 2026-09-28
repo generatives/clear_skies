@@ -94,6 +94,35 @@ public sealed class GridDescription
         d.Controls = new ShipControls { Forward = r.ReadSingle(), Right = r.ReadSingle(), Up = r.ReadSingle(), Turn = r.ReadSingle() };
         return d;
     }
+
+    // ── .grid files ─────────────────────────────────────────────────────────
+    // A .grid file is "CSGF", a format version, then the description exactly as SpawnGrid carries it: a saved ship
+    // is the same thing as a ship spawned, sent or stored, and gains whatever descriptions gain.
+
+    private static readonly byte[] FileMagic = { (byte)'C', (byte)'S', (byte)'G', (byte)'F' };
+    private const ushort FileVersion = 1;
+
+    public void SaveFile(string path)
+    {
+        var w = new NetWriter();
+        w.WriteRaw(FileMagic);
+        w.WriteUInt16(FileVersion);
+        Write(w);
+        File.WriteAllBytes(path, w.ToArray());
+    }
+
+    public static GridDescription LoadFile(string path)
+    {
+        byte[] bytes = File.ReadAllBytes(path);
+        if (bytes.Length < FileMagic.Length + 2 || !bytes.AsSpan(0, FileMagic.Length).SequenceEqual(FileMagic))
+            throw new InvalidDataException($"Not a ClearSkies grid file (saved by an older build?): {path}");
+        var r = new NetReader(bytes);
+        r.ReadRaw(FileMagic.Length);
+        ushort version = r.ReadUInt16();
+        if (version != FileVersion) throw new InvalidDataException($"Unsupported grid file version {version}: {path}");
+        try { return Read(ref r); }
+        catch (Exception e) when (e is not InvalidDataException) { throw new InvalidDataException($"Corrupt grid file: {path}", e); }
+    }
 }
 
 /// <summary>A player's full state, carried by SpawnPlayer, produced by describing a live player, and kept in storage.</summary>

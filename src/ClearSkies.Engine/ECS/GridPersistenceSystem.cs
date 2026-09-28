@@ -14,8 +14,9 @@ using PhysVec = System.Numerics.Vector3;
 namespace ClearSkies.Engine.ECS;
 
 /// <summary>
-/// Debug panel for saving the currently Selected Grid's blocks to disk and loading a previously saved
-/// grid back in, spawned in front of the player (same placement as the G-key spawn). All work happens
+/// Debug panel for saving the currently Selected Grid to disk (its description: blocks, ship controls and all; see
+/// <see cref="GridDescription.SaveFile"/>) and loading a previously saved grid back in, spawned in front of the player
+/// (same placement as the G-key spawn), at rest and locked. All work happens
 /// inside DrawDebugUi in response to button clicks — there is no continuous per-frame Update logic.
 /// </summary>
 public sealed class GridPersistenceSystem : ISystem
@@ -112,6 +113,7 @@ public sealed class GridPersistenceSystem : ISystem
     private void SaveSelected()
     {
         if (!TryGetSelectedGrid(out var grid)) { _status = "No grid selected."; return; }
+        if (!grid.Root.IsAlive || !grid.Root.Has<DynamicGrid>()) { _status = "Only ships can be saved."; return; }
 
         string safeName = Path.GetFileName(_saveName.Trim()); // defensive: strip any path separators
         if (safeName.Length == 0) { _status = "Enter a name first."; return; }
@@ -119,7 +121,7 @@ public sealed class GridPersistenceSystem : ISystem
         string path = Path.Combine(_savesDir, safeName + ".grid");
         try
         {
-            GridSerializer.Save(grid, path);
+            DynamicGridFactory.Describe(grid.Root, _physics).SaveFile(path);
             _status = $"Saved '{safeName}'.";
             RefreshSaveList();
         }
@@ -140,8 +142,8 @@ public sealed class GridPersistenceSystem : ISystem
 
         try
         {
-            var voxels = GridSerializer.Load(path);
-            if (voxels.Count == 0) { _status = $"'{_chosenFile}' has no blocks; not spawned."; return; }
+            var description = GridDescription.LoadFile(path);
+            if (description.Voxels.Count == 0) { _status = $"'{_chosenFile}' has no blocks; not spawned."; return; }
 
             if (!CameraUtil.TryGetActive(_cameras, out var camTransform))
             {
@@ -150,9 +152,12 @@ public sealed class GridPersistenceSystem : ISystem
             }
 
             var spawn = CameraUtil.SpawnPointInFrontOf(camTransform);
-            _commands.Send(new SpawnGrid { Grid = GridDescription.FromVoxels(new PhysVec(spawn.X, spawn.Y, spawn.Z), voxels), Select = true });
+            // Where it was saved doesn't matter: it comes in front of the player, upright, still and locked.
+            description.Body = BodyState.At(new PhysVec(spawn.X, spawn.Y, spawn.Z) - GridDescription.BoundsCentre(description.Voxels));
+            description.Locked = true;
+            _commands.Send(new SpawnGrid { Grid = description, Select = true });
 
-            _status = $"Loaded '{_chosenFile}' ({voxels.Count} blocks).";
+            _status = $"Loaded '{_chosenFile}' ({description.Voxels.Count} blocks).";
         }
         catch (Exception ex) when (ex is IOException or InvalidDataException)
         {
