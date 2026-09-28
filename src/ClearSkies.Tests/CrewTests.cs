@@ -82,6 +82,29 @@ public class CrewTests
     }
 
     [Fact]
+    public void CrewStayAboardWhileTheHostDrawsSlowly()
+    {
+        // The host at 8 fps (its window in the background, say), running its ticks as the game would; the client at 60.
+        var (game, ship, client, crew) = ShipWithCrew(20);
+        using var _ = game;
+        var copy = client.Registry.Find(ship.Get<NetId>().Value)!.Value;
+        game.Host.Physics.SetBodyLinearVelocity(ship.Get<PhysicsBodyComponent>().Body, new Vector3(6, 0, 0));
+        var hostClock = new ClearSkies.Engine.Core.TickClock();
+        int jumps = 0;
+        for (int frame = 1; frame <= 600; frame++)
+        {
+            game.Network.ManualTime += 1000.0 / 60.0;
+            if (frame % 8 == 0) game.Host.Tick(hostClock.Advance(8 / 60.0));
+            uint before = client.Clock.Tick;
+            client.Tick();
+            if (client.Clock.Tick < before || client.Clock.Tick > before + 2) jumps++; // clock sync snapped
+        }
+        Assert.Equal(0, jumps);
+        Assert.Equal(copy, crew.Get<Support>().Supporter); // still on deck
+        Assert.InRange(client.RemoteBodies!.Delays.Most, 0, 12); // drawn a little behind, not seconds
+    }
+
+    [Fact]
     public void BothPlayersWorkTheShipsControls()
     {
         var (game, ship, client, _) = ShipWithCrew();
