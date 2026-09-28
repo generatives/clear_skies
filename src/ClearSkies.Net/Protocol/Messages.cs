@@ -42,7 +42,7 @@ public readonly record struct Hello(ushort Version, PlayerId Player, string Name
     public static Hello Read(ref NetReader r) => new(r.ReadUInt16(), new PlayerId(r.ReadGuid()), r.ReadString(), r.ReadUInt64());
 }
 
-/// <summary>Host → client: the client's peer ID and first block of network IDs, the world seed, the host's tick, and
+/// <summary>Host → client: the client's peer ID and first block of entity IDs, the world seed, the host's tick, and
 /// where the player will spawn (their saved position, or the spawn point), so terrain can load there first.</summary>
 public readonly record struct Welcome(PeerId Peer, uint IdFirst, uint IdCount, ulong Seed, uint HostTick, Vector3 Spawn)
 {
@@ -102,7 +102,7 @@ public readonly record struct TimePong(double ClientTimeMs, uint HostTick, float
     public static TimePong Read(ref NetReader r) => new(r.ReadDouble(), r.ReadUInt32(), r.ReadSingle());
 }
 
-/// <summary>A block of network IDs for a client to hand out (it asks for another when it runs low).</summary>
+/// <summary>A block of entity IDs for a client to hand out (it asks for another when it runs low).</summary>
 public readonly record struct IdBlockMessage(uint First, uint Count)
 {
     public void Write(NetWriter w) { w.WriteByte((byte)MessageKind.IdBlock); w.WriteUInt32(First); w.WriteUInt32(Count); }

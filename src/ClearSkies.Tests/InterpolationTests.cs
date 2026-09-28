@@ -24,7 +24,7 @@ public class InterpolationTests
         var mover = game.Host.SpawnLocalPlayer(new Vector3(0, 60, 0), freeFly: true);
         game.Tick();
         var (client, _) = game.Join();
-        var seen = client.Registry.Find(mover.Get<NetId>().Value)!.Value;
+        var seen = client.Registry.Find(mover.Get<EntityId>())!.Value;
         return (game, mover, seen);
     }
 
@@ -96,8 +96,8 @@ public class InterpolationTests
         Players.SetFreeFlying(clientPlayer, false);
         clientPlayer.Get<CharacterControllerComponent>().Character.TeleportTo(new Vector3(3, 51.4f, 25));
         game.Tick(60);
-        var hostSeen = client.Registry.Find(hostPlayer.Get<NetId>().Value)!.Value;
-        var clientSeen = game.Host.Registry.Find(clientPlayer.Get<NetId>().Value)!.Value;
+        var hostSeen = client.Registry.Find(hostPlayer.Get<EntityId>())!.Value;
+        var clientSeen = game.Host.Registry.Find(clientPlayer.Get<EntityId>())!.Value;
 
         var rng = new Random(2);
         double now = 0, hostNoise = 0, clientNoise = 0;

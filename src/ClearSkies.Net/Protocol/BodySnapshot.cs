@@ -1,4 +1,5 @@
 using System.Numerics;
+using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Serialization;
 
 namespace ClearSkies.Net.Protocol;
@@ -22,9 +23,9 @@ public readonly record struct LookAngles(float Yaw, float Pitch);
 /// </summary>
 public struct BodySnapshot
 {
-    public uint Entity;
+    public EntityId Entity;
     public ushort Epoch;
-    public uint Support;
+    public EntityId Support;
     public Vector3 Position;
     public Quaternion Rotation;
     public Vector3 LinearVelocity, AngularVelocity;
@@ -33,9 +34,9 @@ public struct BodySnapshot
 
     public readonly void Write(NetWriter w)
     {
-        w.WriteUInt32(Entity);
+        Entity.Write(w);
         w.WriteUInt16(Epoch);
-        w.WriteUInt32(Support);
+        Support.Write(w);
         w.WriteVector3(Position);
         w.WriteUInt64(QuaternionCodec.Pack(Rotation));
         w.WriteHalf(LinearVelocity.X); w.WriteHalf(LinearVelocity.Y); w.WriteHalf(LinearVelocity.Z);
@@ -52,9 +53,9 @@ public struct BodySnapshot
     {
         var s = new BodySnapshot
         {
-            Entity = r.ReadUInt32(),
+            Entity = EntityId.Read(ref r),
             Epoch = r.ReadUInt16(),
-            Support = r.ReadUInt32(),
+            Support = EntityId.Read(ref r),
             Position = r.ReadVector3(),
             Rotation = QuaternionCodec.Unpack(r.ReadUInt64()),
             LinearVelocity = new Vector3(r.ReadHalf(), r.ReadHalf(), r.ReadHalf()),

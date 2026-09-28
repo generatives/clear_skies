@@ -246,7 +246,7 @@ public sealed class EntityPresenceSystem : ISystem, IDebugUiSystem
         ImGui.Text($"Terrain chunks with colliders: {_terrainColliders.Count}   Interests: {_interests.Count}");
         foreach (ref readonly Entity e in _roots.GetEntities())
         {
-            string id = e.Has<NetId>() ? e.Get<NetId>().Value.ToString() : "-";
+            string id = e.Has<EntityId>() ? e.Get<EntityId>().ToString() : "-";
             string kind = e.Has<Player>() ? "player" : "grid";
             string physics = e.Has<PhysicsPresence>() ? e.Get<PhysicsPresence>().Mode.ToString() : "none";
             string owner = e.Has<NetOwner>() ? (e.Get<NetOwner>().IsLocal ? "here" : e.Get<NetOwner>().Owner.ToString()) : "here";

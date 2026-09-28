@@ -73,7 +73,7 @@ public interface IDescriber
 }
 
 /// <summary>One entity's description: its spawn command, written out.</summary>
-public readonly record struct Description(Entity Entity, uint NetId, DescribeRequest Request, ushort HandlerId, byte[] Payload)
+public readonly record struct Description(Entity Entity, EntityId Id, DescribeRequest Request, ushort HandlerId, byte[] Payload)
 {
     /// <summary>A hash of the description, the same on every machine for the same state.</summary>
     public ulong Hash => DescriptionHash.Of(Payload);
@@ -95,7 +95,7 @@ public sealed class DescriptionSink
     {
         var handler = _commands.HandlerOf<T>();
         var request = entity.Has<DescribeRequest>() ? entity.Get<DescribeRequest>() : default;
-        uint id = entity.Has<NetId>() ? entity.Get<NetId>().Value : 0;
+        var id = entity.Has<EntityId>() ? entity.Get<EntityId>() : EntityId.None;
         _claimed.Add(entity);
         Described?.Invoke(new Description(entity, id, request, handler.Id, handler.Serialize(spawnCommand)));
     }

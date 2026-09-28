@@ -132,7 +132,7 @@ public class TransportTests
     {
         var s = new BodySnapshot
         {
-            Entity = 1234, Epoch = 3, Support = 1100, Position = new Vector3(1.5f, -2, 300),
+            Entity = new EntityId(1234), Epoch = 3, Support = new EntityId(1100), Position = new Vector3(1.5f, -2, 300),
             Rotation = Quaternion.CreateFromYawPitchRoll(0.3f, 0.2f, 0.1f), LinearVelocity = new Vector3(1, 2, 3),
             AngularVelocity = new Vector3(0.5f, 0, -0.25f), Flags = SnapshotFlags.HasLook, Look = new LookAngles(-2.5f, 0.4f),
         };
@@ -194,7 +194,7 @@ public class JoinTests
         var (client, net) = game.Join();
 
         // The grid, exactly as the host has it.
-        uint gridId = grid.Get<NetId>().Value;
+        var gridId = grid.Get<EntityId>();
         var copy = client.Registry.Find(gridId);
         Assert.NotNull(copy);
         Assert.Equal(GridSerializer.Voxels(grid.Get<ChunkGrid>().Volume), GridSerializer.Voxels(copy!.Value.Get<ChunkGrid>().Volume));
@@ -203,9 +203,9 @@ public class JoinTests
         // Its own player, owned by it; the host's player, owned by the host.
         var mine = client.World.GetEntities().With<LocalPlayer>().AsEnumerable().Single();
         Assert.Equal(net.Session.LocalPeer, mine.Get<NetOwner>().Owner);
-        Assert.True(client.Registry.IsLive(hostPlayer.Get<NetId>().Value));
+        Assert.True(client.Registry.IsLive(hostPlayer.Get<EntityId>()));
         // The host has the client's player too, owned by the client.
-        var remote = game.Host.Registry.Find(mine.Get<NetId>().Value)!.Value;
+        var remote = game.Host.Registry.Find(mine.Get<EntityId>())!.Value;
         Assert.False(remote.Get<NetOwner>().IsLocal);
         Assert.False(remote.Has<CharacterControllerComponent>()); // simulated by its owner only
     }
@@ -248,8 +248,8 @@ public class JoinTests
         hostPlayer.Get<Engine.Input.PlayerInput>() = default;
         clientPlayer.Get<Engine.Input.PlayerInput>() = default;
         game.Tick(30);
-        var hostSeenByClient = client.Registry.Find(hostPlayer.Get<NetId>().Value)!.Value;
-        var clientSeenByHost = game.Host.Registry.Find(clientPlayer.Get<NetId>().Value)!.Value;
+        var hostSeenByClient = client.Registry.Find(hostPlayer.Get<EntityId>())!.Value;
+        var clientSeenByHost = game.Host.Registry.Find(clientPlayer.Get<EntityId>())!.Value;
         Assert.True(Vector3D.Distance(hostSeenByClient.Get<Transform>().Position, hostPlayer.Get<Transform>().Position) < 0.5f);
         Assert.True(Vector3D.Distance(clientSeenByHost.Get<Transform>().Position, clientPlayer.Get<Transform>().Position) < 0.5f);
         Assert.True(hostPlayer.Get<Transform>().Position.Z < -15);   // flew forward (-Z)
@@ -267,7 +267,7 @@ public class JoinTests
         var aPlayer = a.World.GetEntities().With<LocalPlayer>().AsEnumerable().Single();
         aPlayer.Get<Transform>().Position = new Vector3D<float>(12, 70, 3);
         game.Tick(30);
-        var aSeenByB = b.Registry.Find(aPlayer.Get<NetId>().Value);
+        var aSeenByB = b.Registry.Find(aPlayer.Get<EntityId>());
         Assert.NotNull(aSeenByB);
         Assert.True(Vector3D.Distance(aSeenByB!.Value.Get<Transform>().Position, new Vector3D<float>(12, 70, 3)) < 0.1f);
     }
@@ -284,16 +284,16 @@ public class JoinTests
         var aPlayer = a.World.GetEntities().With<LocalPlayer>().AsEnumerable().Single();
         aPlayer.Get<Transform>().Position = new Vector3D<float>(0, 57, 0);
         game.Tick(10);
-        uint gridId = grid.Get<NetId>().Value;
-        a.Commands.Send(new EditVoxels { Volume = gridId, Editor = aPlayer.Get<NetId>().Value,
+        var gridId = grid.Get<EntityId>();
+        a.Commands.Send(new EditVoxels { Volume = gridId, Editor = aPlayer.Get<EntityId>(),
             Ops = new[] { VoxelOp.SetBlock(new(1, 1, 1), BlockId.Wood, BlockOrientation.Upright) } });
         a.Tick(); // predicted at once on a...
         Assert.Equal(BlockId.Wood, a.Registry.Find(gridId)!.Value.Get<ChunkGrid>().Volume.GetBlock(1, 1, 1));
-        Assert.Equal(1, a.Commands.PendingCount);
+        Assert.Equal(1, a.Commands.UnconfirmedPredictionCount);
         game.Tick(30); // ...then decided by the host and sent to everyone
         Assert.Equal(BlockId.Wood, grid.Get<ChunkGrid>().Volume.GetBlock(1, 1, 1));
         Assert.Equal(BlockId.Wood, b.Registry.Find(gridId)!.Value.Get<ChunkGrid>().Volume.GetBlock(1, 1, 1));
-        Assert.Equal(0, a.Commands.PendingCount);
+        Assert.Equal(0, a.Commands.UnconfirmedPredictionCount);
     }
 
     [Fact]
@@ -307,8 +307,8 @@ public class JoinTests
         var aPlayer = a.World.GetEntities().With<LocalPlayer>().AsEnumerable().Single();
         aPlayer.Get<Transform>().Position = new Vector3D<float>(0, 300, 0); // far out of reach, as the host will see
         game.Tick(10);
-        uint gridId = grid.Get<NetId>().Value;
-        a.Commands.Send(new EditVoxels { Volume = gridId, Editor = aPlayer.Get<NetId>().Value,
+        var gridId = grid.Get<EntityId>();
+        a.Commands.Send(new EditVoxels { Volume = gridId, Editor = aPlayer.Get<EntityId>(),
             Ops = new[] { VoxelOp.SetBlock(new(1, 1, 1), BlockId.Wood, BlockOrientation.Upright) } });
         a.Tick();
         Assert.Equal(BlockId.Wood, a.Registry.Find(gridId)!.Value.Get<ChunkGrid>().Volume.GetBlock(1, 1, 1));
@@ -330,7 +330,7 @@ public class JoinTests
         aPlayer.Get<Engine.Input.PlayerInput>() = default;
         Assert.False(aPlayer.Has<FreeFlying>()); // its own authority: at once
         game.Tick(10);
-        Assert.False(game.Host.Registry.Find(aPlayer.Get<NetId>().Value)!.Value.Has<FreeFlying>());
+        Assert.False(game.Host.Registry.Find(aPlayer.Get<EntityId>())!.Value.Has<FreeFlying>());
     }
 
     [Fact]
@@ -353,7 +353,7 @@ public class JoinTests
         game.Tick();
         var (a, aNet) = game.Join("a");
         var (b, _) = game.Join("b");
-        uint aId = a.World.GetEntities().With<LocalPlayer>().AsEnumerable().Single().Get<NetId>().Value;
+        var aId = a.World.GetEntities().With<LocalPlayer>().AsEnumerable().Single().Get<EntityId>();
         Assert.True(b.Registry.IsLive(aId));
         aNet.Dispose();
         game.Clients.RemoveAll(c => c.Net == aNet);

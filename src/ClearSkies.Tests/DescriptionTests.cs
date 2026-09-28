@@ -28,7 +28,7 @@ public class DescriptionTests
     /// <summary>Applies a description in <paramref name="scene"/>, as a spawn event from the host.</summary>
     internal static void Spawn(HeadlessScene scene, Description d, uint eventNumber = 1)
     {
-        scene.Commands.ReceiveEvent(new EventMeta(PeerId.Host, 1, PeerId.Host, d.NetId, eventNumber, 0), d.HandlerId, d.Payload);
+        scene.Commands.ReceiveEvent(new EventMeta(PeerId.Host, 1, PeerId.Host, d.Id, eventNumber, 0), d.HandlerId, d.Payload);
         scene.Commands.Update(0);
     }
 
@@ -41,10 +41,7 @@ public class DescriptionTests
         voxels.Add(new(40, 0, 0, BlockId.Fan, BlockOrientation.From(Direction.East, Direction.Up))); // a second chunk
         var grid = scene.SpawnGrid(GridDescription.FromVoxels(new Vector3(10, 80, -20), voxels));
         var v = grid.Get<ChunkGrid>().Volume;
-        v.TryGetBlockEntity(1, 1, 1, out var lever);
-        lever.Get<Lever>().Value = 0.35f;
-        v.TryGetBlockEntity(3, 1, 1, out var wheel);
-        wheel.Get<SteeringWheel>().Angle = -1.1f;
+        grid.Set(new ShipControls { Forward = 0.35f, Turn = -0.4f });
         return grid;
     }
 
@@ -53,16 +50,15 @@ public class DescriptionTests
     {
         using var a = new HeadlessScene();
         var grid = Ship(a);
-        a.Commands.Send(new SetGridLocked { Grid = grid.Get<NetId>().Value, Locked = false });
+        a.Commands.Send(new SetGridLocked { Grid = grid.Get<EntityId>(), Locked = false });
         a.Tick(20); // it falls and gets a body and velocity
         var d = DescribeNow(a, grid);
 
         using var b = new HeadlessScene();
         Spawn(b, d);
-        var copy = b.Registry.Find(d.NetId)!.Value;
+        var copy = b.Registry.Find(d.Id)!.Value;
         Assert.Equal(d.Hash, DescribeNow(b, copy).Hash);
-        copy.Get<ChunkGrid>().Volume.TryGetBlockEntity(1, 1, 1, out var lever);
-        Assert.Equal(0.35f, lever.Get<Lever>().Value);
+        Assert.Equal(new ShipControls { Forward = 0.35f, Turn = -0.4f }, copy.Get<ShipControls>());
         Assert.False(copy.Get<DynamicGrid>().Locked);
     }
 
@@ -79,7 +75,7 @@ public class DescriptionTests
         using var b = new HeadlessScene();
         Spawn(b, d);
         b.Tick(3);
-        var copy = b.Registry.Find(d.NetId)!.Value;
+        var copy = b.Registry.Find(d.Id)!.Value;
         Assert.True(copy.Has<PhysicsBodyComponent>());
         var (p, _) = b.Physics.GetBodyPose(copy.Get<PhysicsBodyComponent>().Body);
         var (original, _) = a.Physics.GetBodyPose(grid.Get<PhysicsBodyComponent>().Body);
@@ -95,7 +91,7 @@ public class DescriptionTests
         var d = DescribeNow(a, player);
         using var b = new HeadlessScene();
         Spawn(b, d);
-        var copy = b.Registry.Find(d.NetId)!.Value;
+        var copy = b.Registry.Find(d.Id)!.Value;
         Assert.Equal(d.Hash, DescribeNow(b, copy).Hash);
         Assert.Equal("test", copy.Get<Player>().Name);
     }
@@ -139,7 +135,7 @@ public class DescriptionTests
         });
         scene.Tick();
         var grid = scene.World.GetEntities().With<DynamicGrid>().AsEnumerable().Single();
-        Assert.True(grid.Get<NetId>().Value >= NetRegistry.FirstFreeId);
+        Assert.True(grid.Get<EntityId>() is { Value: >= EntityRegistry.FirstFreeId });
         Assert.True(grid.Get<NetOwner>().IsLocal);
         Assert.True(grid.Has<SelectedGridComponent>());
         Assert.True(grid.Has<OwnPresence>() && grid.Has<Engine.Physics.Support.Supportable>());
@@ -151,7 +147,7 @@ public class DescriptionTests
         using var scene = new HeadlessScene();
         var grid = Ship(scene);
         var chunks = grid.Get<ChunkGrid>().Volume.All.Select(c => c.Value.Entity).ToList();
-        scene.Commands.Send(new DespawnEntity { Entity = grid.Get<NetId>().Value });
+        scene.Commands.Send(new DespawnEntity { Entity = grid.Get<EntityId>() });
         scene.Tick();
         Assert.False(grid.IsAlive);
         Assert.All(chunks, c => Assert.False(c.IsAlive));
@@ -164,7 +160,7 @@ public class DescriptionTests
         var player = scene.SpawnLocalPlayer(new Vector3(0, 70, 0));
         scene.Tick();
         int bodies = scene.Physics.Simulation.Bodies.ActiveSet.Count;
-        scene.Commands.Send(new DespawnEntity { Entity = player.Get<NetId>().Value });
+        scene.Commands.Send(new DespawnEntity { Entity = player.Get<EntityId>() });
         scene.Tick(2);
         Assert.False(player.IsAlive);
         Assert.Equal(bodies - 1, scene.Physics.Simulation.Bodies.ActiveSet.Count);
@@ -178,7 +174,7 @@ public class DescriptionTests
         var player = scene.SpawnLocalPlayer(new Vector3(0, 52, 0), freeFly: true);
         var despawns = 0;
         scene.Commands.Applied += (h, _, _) => { if (h.Id == CommandIds.DespawnEntity) despawns++; };
-        scene.Commands.Send(new EditVoxels { Volume = grid.Get<NetId>().Value, Editor = player.Get<NetId>().Value,
+        scene.Commands.Send(new EditVoxels { Volume = grid.Get<EntityId>(), Editor = player.Get<EntityId>(),
             Ops = new[] { VoxelOp.SetBlock(new(0, 0, 0), BlockId.Air, BlockOrientation.Upright) } });
         scene.Tick();
         Assert.False(grid.IsAlive);

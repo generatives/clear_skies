@@ -24,7 +24,7 @@ public sealed class HeadlessScene : IDisposable
     public readonly World World = new();
     public readonly PhysicsWorld Physics = new(new Vector3(0, -6, 0), Dt);
     public readonly Session Session;
-    public readonly NetRegistry Registry;
+    public readonly EntityRegistry Registry;
     public readonly GridSelection Selection;
     public readonly ChunkVolume WorldVolume;
     public readonly EntityPresenceSystem Presence;
@@ -38,37 +38,29 @@ public sealed class HeadlessScene : IDisposable
     public ClearSkies.Net.Sync.RemoteBodySystem? RemoteBodies;
     private readonly List<Engine.Core.ISystem> _tick = new();
 
-    public readonly NetIdAllocator Ids;
+    public readonly EntityIdAllocator Ids;
     public WorldSaver? Saver;
     public EntityStreamingSystem? Streaming;
     public StoredEntityIndex? Index;
 
-    public HeadlessScene(Session? session = null, uint firstFreeId = NetRegistry.FirstFreeId)
+    public HeadlessScene(Session? session = null, uint firstFreeId = EntityRegistry.FirstFreeId)
     {
         Session = session ?? Session.SinglePlayer();
-        Registry = new NetRegistry(World);
-        Ids = new NetIdAllocator(firstFreeId);
+        Registry = new EntityRegistry(World);
+        Ids = new EntityIdAllocator(firstFreeId);
         Registry.RequestBlock = Ids.NextBlock;
         Selection = new GridSelection(World);
 
         var root = World.CreateEntity();
         WorldVolume = new ChunkVolume(root, World) { ChunksOwnPresence = true };
         root.Set(new ChunkGrid { Volume = WorldVolume });
-        root.Set(new NetId { Value = NetRegistry.WorldVolume });
+        root.Set(EntityRegistry.WorldVolume);
         root.Set<Rendered>();
 
         Presence = new EntityPresenceSystem(World, Session, WorldVolume, viewDistance: 500f);
         Commands = new CommandSystem(Session, Registry, () => Clock.Tick);
         Blocks = new BlockEntities(World, Registry);
-        Commands.Register(new EditVoxelsHandler(Blocks, Limits));
-        Commands.Register(new SetLeverHandler(Blocks));
-        Commands.Register(new SetWheelHandler(Blocks));
-        Commands.Register(new SetGridLockedHandler(Registry, Physics));
-        Commands.Register(new RightGridHandler(Registry, Physics));
-        Commands.Register(new SetMoveModeHandler(Registry));
-        Commands.Register(new SpawnGridHandler(World, Registry, Session, Physics, Selection));
-        Commands.Register(new SpawnPlayerHandler(World, Registry, Session, Physics));
-        Commands.Register(new DespawnEntityHandler(Registry));
+        GameCommands.RegisterAll(Commands, World, Session, Blocks, Limits, Registry, Physics, Selection);
         var hierarchy = new HierarchyTransformSystem(World);
         _tick.Add(hierarchy);
         _tick.Add(new PhysicsBodySystem(World, Physics));
@@ -174,7 +166,7 @@ public sealed class HeadlessScene : IDisposable
     public Entity SpawnGrid(GridDescription description)
     {
         // Applied directly (as its event would be), so it works on a client scene too.
-        uint id = Registry.Allocate();
+        var id = Registry.Allocate();
         var handler = (SpawnGridHandler)Commands.HandlerFor(CommandIds.SpawnGrid)!;
         handler.Apply(new SpawnGrid { Id = id, Owner = Session.LocalPeer, Grid = description }, default);
         return Registry.Find(id) ?? throw new InvalidOperationException("The grid didn't spawn.");
@@ -184,7 +176,7 @@ public sealed class HeadlessScene : IDisposable
     /// <paramref name="position"/>.</summary>
     public Entity SpawnLocalPlayer(Vector3 position, bool freeFly = false)
     {
-        uint id = Registry.Allocate();
+        var id = Registry.Allocate();
         var handler = (SpawnPlayerHandler)Commands.HandlerFor(CommandIds.SpawnPlayer)!;
         handler.Apply(new SpawnPlayer { Id = id, Owner = Session.LocalPeer,
             Player = new PlayerDescription { Id = PlayerId.New(), Name = "test", FreeFly = freeFly, Position = position } }, default);

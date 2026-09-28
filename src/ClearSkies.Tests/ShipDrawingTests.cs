@@ -50,8 +50,8 @@ public class ShipDrawingTests
         crew.Get<CharacterControllerComponent>().Character.TeleportTo(new Vector3(1, 51.4f, 1));
         game.Tick(60);
         if (holdingControls) crew.Set(new LookLockedComponent());
-        var copy = client.Registry.Find(ship.Get<NetId>().Value)!.Value;
-        var crewOnHost = game.Host.Registry.Find(crew.Get<NetId>().Value)!.Value;
+        var copy = client.Registry.Find(ship.Get<EntityId>())!.Value;
+        var crewOnHost = game.Host.Registry.Find(crew.Get<EntityId>())!.Value;
         var body = ship.Get<PhysicsBodyComponent>().Body;
         game.Host.Physics.SetBodyLinearVelocity(body, new Vector3(Speed, 0, 0));
         game.Host.Physics.SetBodyAngularVelocity(body, new Vector3(0, 0.3f, 0));

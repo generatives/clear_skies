@@ -173,8 +173,8 @@ public sealed class GridPilotSystem : ISystem
         bool rightPressed = _input.WasKeyPressed(Key.Home);
         if (!lockPressed && !rightPressed) return;
 
-        if (LockTarget() is not { } e || !e.Has<NetId>()) return;
-        uint id = e.Get<NetId>().Value;
+        if (LockTarget() is not { } e || !e.Has<EntityId>()) return;
+        var id = e.Get<EntityId>();
         if (lockPressed) _commands.Send(new SetGridLocked { Grid = id, Locked = !e.Get<DynamicGrid>().Locked });
         if (rightPressed) _commands.Send(new RightGrid { Grid = id });
     }

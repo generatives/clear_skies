@@ -73,7 +73,7 @@ string playerName = localSettings.Name;
 // <address:port> joins someone else's instead. Joining happens now, before the world is built, because the host
 // decides the seed.
 var session = Session.SinglePlayer();
-var registry = new NetRegistry(host.World);
+var registry = new EntityRegistry(host.World);
 ulong generationChecksum = GenerationChecksum.Compute();
 string joinAddress = ArgValue("--join");
 bool joining = joinAddress.Length > 0;
@@ -106,20 +106,20 @@ ulong seed = joining ? welcome.Seed : saveDb!.Seed ?? (ulong.TryParse(ArgValue("
 if (newWorld) saveDb!.Seed = seed;
 if (saveDb != null) Console.WriteLine($"[save] world '{worldName}' ({(newWorld ? "new" : "loaded")}), seed {seed}");
 
-// Network IDs: the host hands out blocks from the save's next free ID, so they never repeat across sessions; a
+// Entity IDs: the host hands out blocks from the save's next free ID, so they never repeat across sessions; a
 // client gets blocks from the host.
-var idAllocator = new NetIdAllocator(saveDb?.NextFreeId ?? NetRegistry.FirstFreeId);
+var idAllocator = new EntityIdAllocator(saveDb?.NextFreeId ?? EntityRegistry.FirstFreeId);
 if (!joining) registry.RequestBlock = idAllocator.NextBlock;
 
 // The network session: first in every tick it receives, last it sends (set once the command system exists).
 ClearSkies.Net.Session.NetSession? net = null;
 
 // The static world is a volume like any other, with an identity Transform (set by ChunkVolume), and a
-// reserved network ID. Its chunks each decide their own presence layers (see EntityPresenceSystem).
+// reserved entity ID. Its chunks each decide their own presence layers (see EntityPresenceSystem).
 var staticVolumeEntity = host.World.CreateEntity();
 var staticVolume = new ChunkVolume(staticVolumeEntity, host.World) { MeshIgnoresNeighbours = true, ChunksOwnPresence = true };
 staticVolumeEntity.Set(new ChunkGrid() { Volume = staticVolume });
-staticVolumeEntity.Set(new NetId { Value = NetRegistry.WorldVolume });
+staticVolumeEntity.Set(EntityRegistry.WorldVolume);
 staticVolumeEntity.Set(session.OwnerFor(PeerId.Host));
 staticVolumeEntity.Set<Rendered>();
 
@@ -164,15 +164,7 @@ if (inputSample != null) host.AddSystem(inputSample, SystemStage.Simulation);
 var commands = new CommandSystem(session, registry, () => host.Time.Tick);
 var blockEntities = new BlockEntities(host.World, registry);
 var editLimits = new EditLimits();
-commands.Register(new EditVoxelsHandler(blockEntities, editLimits));
-commands.Register(new SetLeverHandler(blockEntities));
-commands.Register(new SetWheelHandler(blockEntities));
-commands.Register(new SetGridLockedHandler(registry, host.Physics));
-commands.Register(new RightGridHandler(registry, host.Physics));
-commands.Register(new SetMoveModeHandler(registry));
-commands.Register(new SpawnGridHandler(host.World, registry, session, host.Physics, gridSelection));
-commands.Register(new SpawnPlayerHandler(host.World, registry, session, host.Physics));
-commands.Register(new DespawnEntityHandler(registry));
+GameCommands.RegisterAll(commands, host.World, session, blockEntities, editLimits, registry, host.Physics, gridSelection);
 
 // Persistence (the host's): entities load within 1,000 blocks of a player and unload past 1,100, written to the save
 // as they go; everything is autosaved every 5 minutes and on exit, in one transaction.
@@ -279,10 +271,10 @@ else
         });
     hostNet.NewPlayerLook = (HeartSpawn(seed)!.Value.Yaw, HeartSpawn(seed)!.Value.Pitch);
     // A leaving player is saved (the players table), then despawned.
-    var leaving = new HashSet<uint>();
+    var leaving = new HashSet<EntityId>();
     hostNet.PlayerLeaving = player =>
     {
-        leaving.Add(player.Get<NetId>().Value);
+        leaving.Add(player.Get<EntityId>());
         DescribeRequest.Request(player, DescribePurpose.Store);
     };
     worldSaver!.Stored += id => { if (leaving.Remove(id)) commands.Send(new DespawnEntity { Entity = id, KeepStored = true }); };

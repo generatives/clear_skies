@@ -44,7 +44,7 @@ public class CrewTests
     {
         var (game, ship, client, _) = ShipWithCrew();
         using var _ = game;
-        var copy = client.Registry.Find(ship.Get<NetId>().Value)!.Value;
+        var copy = client.Registry.Find(ship.Get<EntityId>())!.Value;
         Assert.Equal(PhysicsMode.KinematicFollower, copy.Get<PhysicsPresence>().Mode);
         // Fly the (locked, kinematic) ship east at 6 blocks a second for 2 s.
         game.Host.Physics.SetBodyLinearVelocity(ship.Get<PhysicsBodyComponent>().Body, new Vector3(6, 0, 0));
@@ -62,7 +62,7 @@ public class CrewTests
     {
         var (game, ship, client, crew) = ShipWithCrew();
         using var _ = game;
-        var copy = client.Registry.Find(ship.Get<NetId>().Value)!.Value;
+        var copy = client.Registry.Find(ship.Get<EntityId>())!.Value;
         Assert.Equal(copy, crew.Get<Support>().Supporter); // standing on the host's ship, as the client has it
 
         var body = ship.Get<PhysicsBodyComponent>().Body;
@@ -76,7 +76,7 @@ public class CrewTests
         Assert.InRange(MathF.Abs(local.Z), 0f, 4f);
 
         // The host sees the crew member on its deck too.
-        var seen = game.Host.Registry.Find(crew.Get<NetId>().Value)!.Value;
+        var seen = game.Host.Registry.Find(crew.Get<EntityId>())!.Value;
         var shipPos = ship.Get<Transform>().Position;
         Assert.True(Vector3D.Distance(seen.Get<Transform>().Position, shipPos) < 6f);
     }
@@ -87,7 +87,7 @@ public class CrewTests
         // The host at 8 fps (its window in the background, say), running its ticks as the game would; the client at 60.
         var (game, ship, client, crew) = ShipWithCrew(20);
         using var _ = game;
-        var copy = client.Registry.Find(ship.Get<NetId>().Value)!.Value;
+        var copy = client.Registry.Find(ship.Get<EntityId>())!.Value;
         game.Host.Physics.SetBodyLinearVelocity(ship.Get<PhysicsBodyComponent>().Body, new Vector3(6, 0, 0));
         var hostClock = new ClearSkies.Engine.Core.TickClock();
         int jumps = 0;
@@ -109,10 +109,12 @@ public class CrewTests
     {
         var (game, ship, client, _) = ShipWithCrew();
         using var _ = game;
-        uint id = ship.Get<NetId>().Value;
+        var id = ship.Get<EntityId>();
         // The crew member pulls one lever; the host turns the wheel.
-        client.Commands.Send(new SetLever { Lever = EntityAddress.OfBlock(id, new(0, 1, 7)), Value = 0.8f });
-        game.Host.Commands.Send(new SetWheel { Wheel = EntityAddress.OfBlock(id, new(3, 1, 7)), Angle = -1.5f });
+        client.Registry.Find(id)!.Value.Get<ChunkGrid>().Volume.TryGetBlockEntity(0, 1, 7, out var pulled);
+        var (axis, sign) = ShipControls.LeverAxis(pulled.Get<BlockRef>());
+        client.Commands.Send(new SetShipThrust { Ship = id, Axis = axis, Value = 0.8f * sign });
+        game.Host.Commands.Send(new SetShipTurn { Ship = id, Value = -1.5f / SteeringWheel.MaxAngle });
         game.Tick(30);
         foreach (var scene in new[] { game.Host, client })
         {
@@ -120,9 +122,9 @@ public class CrewTests
             v.TryGetBlockEntity(0, 1, 7, out var lever);
             v.TryGetBlockEntity(7, 1, 7, out var other);
             v.TryGetBlockEntity(3, 1, 7, out var wheel);
-            Assert.Equal(0.8f, lever.Get<Lever>().Value);
-            Assert.Equal(-0.8f, other.Get<Lever>().Value); // the same axis, facing the other way
-            Assert.Equal(-1.5f, wheel.Get<SteeringWheel>().Angle);
+            Assert.Equal(0.8f, ShipControls.LeverValue(lever.Get<BlockRef>()), 5);
+            Assert.Equal(-0.8f, ShipControls.LeverValue(other.Get<BlockRef>()), 5); // the same axis, facing the other way
+            Assert.Equal(-1.5f, SteeringWheel.Angle(wheel.Get<BlockRef>()), 5);
         }
     }
 
@@ -131,7 +133,7 @@ public class CrewTests
     {
         var (game, ship, client, crew) = ShipWithCrew();
         using var _ = game;
-        var copy = game.Host.Registry.Find(crew.Get<NetId>().Value)!.Value;
+        var copy = game.Host.Registry.Find(crew.Get<EntityId>())!.Value;
         Assert.Equal(PhysicsMode.ServoFollower, copy.Get<PhysicsPresence>().Mode);
         Assert.True(copy.Has<ServoBody>());
         var (onDeck, _) = game.Host.Physics.GetBodyPose(copy.Get<ServoBody>().Body);
@@ -163,12 +165,12 @@ public class CrewTests
     {
         var (game, ship, client, crew) = ShipWithCrew();
         using var _ = game;
-        uint id = ship.Get<NetId>().Value;
+        var id = ship.Get<EntityId>();
         var copy = client.Registry.Find(id)!.Value;
         var before = DrawnOrigin(copy);
         var com = Com(copy);
         var editor = byTheCrew ? crew : game.Host.World.GetEntities().With<LocalPlayer>().AsEnumerable().Single();
-        (byTheCrew ? client : game.Host).Commands.Send(new EditVoxels { Volume = id, Editor = editor.Get<NetId>().Value,
+        (byTheCrew ? client : game.Host).Commands.Send(new EditVoxels { Volume = id, Editor = editor.Get<EntityId>(),
             Ops = new[] { VoxelOp.FillBox(new(1, 2, 1), 1, BlockId.Stone, BlockOrientation.Upright) } });
         for (int i = 0; i < 40; i++)
         {
@@ -184,8 +186,8 @@ public class CrewTests
     {
         var (game, ship, client, crew) = ShipWithCrew();
         using var _ = game;
-        uint id = ship.Get<NetId>().Value;
-        client.Commands.Send(new EditVoxels { Volume = id, Editor = crew.Get<NetId>().Value,
+        var id = ship.Get<EntityId>();
+        client.Commands.Send(new EditVoxels { Volume = id, Editor = crew.Get<EntityId>(),
             Ops = new[] { VoxelOp.FillBox(new(1, 2, 1), 1, BlockId.Stone, BlockOrientation.Upright) } });
         game.Tick(60);
         var copy = client.Registry.Find(id)!.Value;

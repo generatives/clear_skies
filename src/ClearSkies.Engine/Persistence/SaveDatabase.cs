@@ -8,7 +8,7 @@ namespace ClearSkies.Engine.Persistence;
 
 /// <summary>An entity's row in the index: which spawn command recreates it, and where it is (none for a global
 /// entity, which is always loaded).</summary>
-public readonly record struct StoredEntity(uint Id, ushort Kind, Vector3? Position);
+public readonly record struct StoredEntity(EntityId Id, ushort Kind, Vector3? Position);
 
 /// <summary>
 /// One world's save: a SQLite database (Saves/Worlds/&lt;name&gt;.db) holding the world's settings, every stored
@@ -78,10 +78,10 @@ public sealed class SaveDatabase : IDisposable
         set => SetWorld("seed", value!.Value.ToString(CultureInfo.InvariantCulture));
     }
 
-    /// <summary>The first network ID not handed out yet (see <see cref="NetIdAllocator"/>).</summary>
+    /// <summary>The first entity ID not handed out yet (see <see cref="EntityIdAllocator"/>).</summary>
     public uint NextFreeId
     {
-        get => GetWorld("next_free_id") is { } s ? uint.Parse(s, CultureInfo.InvariantCulture) : NetRegistry.FirstFreeId;
+        get => GetWorld("next_free_id") is { } s ? uint.Parse(s, CultureInfo.InvariantCulture) : EntityRegistry.FirstFreeId;
         set => SetWorld("next_free_id", value.ToString(CultureInfo.InvariantCulture));
     }
 
@@ -98,31 +98,31 @@ public sealed class SaveDatabase : IDisposable
             while (r.Read())
             {
                 Vector3? pos = r.IsDBNull(2) ? null : new Vector3(r.GetFloat(2), r.GetFloat(3), r.GetFloat(4));
-                list.Add(new StoredEntity((uint)r.GetInt64(0), (ushort)r.GetInt32(1), pos));
+                list.Add(new StoredEntity(new EntityId((uint)r.GetInt64(0)), (ushort)r.GetInt32(1), pos));
             }
             return list;
         }
     }
 
-    public (ushort Kind, byte[] Data)? ReadEntity(uint id)
+    public (ushort Kind, byte[] Data)? ReadEntity(EntityId id)
     {
         lock (_lock)
         {
             using var cmd = Command("SELECT kind, data FROM entities WHERE id = $id");
-            cmd.Parameters.AddWithValue("$id", (long)id);
+            cmd.Parameters.AddWithValue("$id", (long)id.Value);
             using var r = cmd.ExecuteReader();
             return r.Read() ? ((ushort)r.GetInt32(0), (byte[])r["data"]) : null;
         }
     }
 
     /// <summary>Writes an entity's description; <paramref name="position"/> null for a global entity.</summary>
-    public void WriteEntity(uint id, ushort kind, Vector3? position, byte[] data)
+    public void WriteEntity(EntityId id, ushort kind, Vector3? position, byte[] data)
     {
         lock (_lock)
         {
             using var cmd = Command(@"INSERT INTO entities (id, kind, x, y, z, data) VALUES ($id, $kind, $x, $y, $z, $data)
                                       ON CONFLICT(id) DO UPDATE SET kind = $kind, x = $x, y = $y, z = $z, data = $data");
-            cmd.Parameters.AddWithValue("$id", (long)id);
+            cmd.Parameters.AddWithValue("$id", (long)id.Value);
             cmd.Parameters.AddWithValue("$kind", (int)kind);
             cmd.Parameters.AddWithValue("$x", position is { } p ? p.X : DBNull.Value);
             cmd.Parameters.AddWithValue("$y", position is { } q ? q.Y : DBNull.Value);
@@ -132,12 +132,12 @@ public sealed class SaveDatabase : IDisposable
         }
     }
 
-    public void DeleteEntity(uint id)
+    public void DeleteEntity(EntityId id)
     {
         lock (_lock)
         {
             using var cmd = Command("DELETE FROM entities WHERE id = $id");
-            cmd.Parameters.AddWithValue("$id", (long)id);
+            cmd.Parameters.AddWithValue("$id", (long)id.Value);
             cmd.ExecuteNonQuery();
         }
     }

@@ -28,16 +28,16 @@ public class SaveDatabaseTests
     public void EntitiesRoundTripWithNullablePositions()
     {
         using var db = SaveDatabase.InMemory();
-        db.WriteEntity(2000, CommandIds.SpawnGrid, new Vector3(1, 2, 3), new byte[] { 9, 8, 7 });
-        db.WriteEntity(2001, CommandIds.SpawnGrid, null, new byte[] { 1 }); // a global entity
-        db.WriteEntity(2000, CommandIds.SpawnGrid, new Vector3(4, 5, 6), new byte[] { 6 }); // overwritten
-        var index = db.ReadEntityIndex().OrderBy(e => e.Id).ToList();
+        db.WriteEntity(new EntityId(2000), CommandIds.SpawnGrid, new Vector3(1, 2, 3), new byte[] { 9, 8, 7 });
+        db.WriteEntity(new EntityId(2001), CommandIds.SpawnGrid, null, new byte[] { 1 }); // a global entity
+        db.WriteEntity(new EntityId(2000), CommandIds.SpawnGrid, new Vector3(4, 5, 6), new byte[] { 6 }); // overwritten
+        var index = db.ReadEntityIndex().OrderBy(e => e.Id.Value).ToList();
         Assert.Equal(2, index.Count);
         Assert.Equal(new Vector3(4, 5, 6), index[0].Position);
         Assert.Null(index[1].Position);
-        Assert.Equal(new byte[] { 6 }, db.ReadEntity(2000)!.Value.Data);
-        db.DeleteEntity(2000);
-        Assert.Null(db.ReadEntity(2000));
+        Assert.Equal(new byte[] { 6 }, db.ReadEntity(new EntityId(2000))!.Value.Data);
+        db.DeleteEntity(new EntityId(2000));
+        Assert.Null(db.ReadEntity(new EntityId(2000)));
     }
 
     [Fact]
@@ -65,15 +65,15 @@ public class SaveDatabaseTests
     public void AFailedTransactionLeavesThePreviousSaveIntact()
     {
         using var db = SaveDatabase.InMemory();
-        db.WriteEntity(2000, 7, Vector3.Zero, new byte[] { 1 });
+        db.WriteEntity(new EntityId(2000), 7, Vector3.Zero, new byte[] { 1 });
         Assert.Throws<InvalidOperationException>(() => db.InTransaction(() =>
         {
-            db.WriteEntity(2000, 7, Vector3.Zero, new byte[] { 2 });
-            db.WriteEntity(2001, 7, Vector3.Zero, new byte[] { 3 });
+            db.WriteEntity(new EntityId(2000), 7, Vector3.Zero, new byte[] { 2 });
+            db.WriteEntity(new EntityId(2001), 7, Vector3.Zero, new byte[] { 3 });
             throw new InvalidOperationException("crash mid-save");
         }));
-        Assert.Equal(new byte[] { 1 }, db.ReadEntity(2000)!.Value.Data);
-        Assert.Null(db.ReadEntity(2001));
+        Assert.Equal(new byte[] { 1 }, db.ReadEntity(new EntityId(2000))!.Value.Data);
+        Assert.Null(db.ReadEntity(new EntityId(2001)));
     }
 
     [Fact]
@@ -82,7 +82,7 @@ public class SaveDatabaseTests
         string path = Path.Combine(Path.GetTempPath(), $"cs-test-{Guid.NewGuid():N}.db");
         try
         {
-            var seen = new HashSet<uint>();
+            var seen = new HashSet<EntityId>();
             for (int session = 0; session < 3; session++)
             {
                 using var db = SaveDatabase.Open(path);
@@ -118,7 +118,7 @@ public class StreamingTests
     {
         var (scene, db, player, grid) = Scene();
         using var _ = scene; using var __ = db;
-        uint id = grid.Get<NetId>().Value;
+        var id = grid.Get<EntityId>();
         MovePlayer(player, 1200); // 1,180 from the grid: past the unload window
         scene.Tick(3);
         Assert.False(grid.IsAlive);
@@ -132,7 +132,7 @@ public class StreamingTests
     {
         var (scene, db, player, grid) = Scene();
         using var _ = scene; using var __ = db;
-        uint id = grid.Get<NetId>().Value;
+        var id = grid.Get<EntityId>();
         var before = DescriptionTests.DescribeNow(scene, grid).Hash;
         MovePlayer(player, 1200);
         scene.Tick(3);
@@ -149,7 +149,7 @@ public class StreamingTests
     {
         var (scene, db, player, grid) = Scene();
         using var _ = scene; using var __ = db;
-        uint id = grid.Get<NetId>().Value;
+        var id = grid.Get<EntityId>();
         MovePlayer(player, 1100); // 1,080 away: inside the unload window, outside the load window
         scene.Tick(3);
         Assert.True(grid.IsAlive);
@@ -182,11 +182,11 @@ public class StreamingTests
         // A stored row with no position, far from everyone as far as position goes.
         var d = DescriptionTests.DescribeNow(scene, grid);
         Hierarchy.DestroyRecursive(grid);
-        db.WriteEntity(d.NetId, d.HandlerId, null, d.Payload);
-        scene.Index!.Set(new StoredEntity(d.NetId, d.HandlerId, null));
+        db.WriteEntity(d.Id, d.HandlerId, null, d.Payload);
+        scene.Index!.Set(new StoredEntity(d.Id, d.HandlerId, null));
         MovePlayer(player, 50_000);
         scene.Tick(2);
-        Assert.True(scene.Registry.IsLive(d.NetId));
+        Assert.True(scene.Registry.IsLive(d.Id));
     }
 
     [Fact]
@@ -195,7 +195,7 @@ public class StreamingTests
         string path = Path.Combine(Path.GetTempPath(), $"cs-test-{Guid.NewGuid():N}.db");
         try
         {
-            uint gridId, playerId;
+            EntityId gridId, playerId;
             PlayerId who;
             using (var db = SaveDatabase.Open(path))
             using (var scene = new HeadlessScene(firstFreeId: db.NextFreeId))
@@ -204,7 +204,7 @@ public class StreamingTests
                 var player = scene.SpawnLocalPlayer(new Vector3(5, 60, 5), freeFly: true);
                 var grid = scene.SpawnPlatform(new Vector3(20, 50, 0), size: 3);
                 scene.Tick(2);
-                (gridId, playerId, who) = (grid.Get<NetId>().Value, player.Get<NetId>().Value, player.Get<Player>().Id);
+                (gridId, playerId, who) = (grid.Get<EntityId>(), player.Get<EntityId>(), player.Get<Player>().Id);
                 MovePlayer(player, 7);
                 scene.Saver!.SaveNow();
             }
@@ -220,7 +220,7 @@ public class StreamingTests
                 Assert.NotNull(player);
                 Assert.Equal(7f, player!.Value.Get<Transform>().Position.X);
                 Assert.True(scene.Registry.IsLive(gridId)); // loaded around the restored player
-                Assert.True(scene.Registry.Allocate() > gridId);
+                Assert.True(scene.Registry.Allocate().Value > gridId.Value);
             }
         }
         finally { File.Delete(path); }
@@ -231,7 +231,7 @@ public class StreamingTests
     {
         var (scene, db, player, grid) = Scene();
         using var _ = scene; using var __ = db;
-        uint id = grid.Get<NetId>().Value;
+        var id = grid.Get<EntityId>();
         scene.Saver!.SaveNow();
         Assert.NotNull(db.ReadEntity(id));
         scene.Commands.Send(new DespawnEntity { Entity = id });
