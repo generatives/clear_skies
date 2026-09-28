@@ -18,7 +18,7 @@ public struct ServoBody
 
 /// <summary>
 /// Each tick before the physics step: moves this machine's physics copies of bodies owned elsewhere to where their
-/// snapshots put them, <see cref="RemoteBodySystem.InterpolationDelay"/> ticks behind.
+/// snapshots put them, as far behind as each is drawn (<see cref="SnapshotBuffer.Delay"/>).
 /// <list type="bullet">
 /// <item>A grid near the local player (<see cref="PhysicsMode.KinematicFollower"/>) has a kinematic body. It's given
 /// the velocity that carries it to its snapshot pose over the step, so a player standing on it rides it, and its
@@ -64,11 +64,11 @@ public sealed class FollowerSystem : ISystem, IDebugUiSystem
         foreach (var body in _orphaned) _physics.RemoveBodyAndShape(body);
         _orphaned.Clear();
 
-        double tick = _remote.PhysicsTick;
         foreach (ref readonly var e in _grids.GetEntities())
         {
             if (e.Get<PhysicsPresence>().Mode != PhysicsMode.KinematicFollower) { _placed.Remove(e); continue; }
-            if (e.Get<RemoteBody>().Buffer.At(tick) is not { } s) continue;
+            var buffer = e.Get<RemoteBody>().Buffer;
+            if (buffer.At(_remote.PhysicsTick(buffer)) is not { } s) continue;
             var (target, rotation) = _remote.ToWorld(s.Support, s.Position, s.Rotation);
             FollowKinematic(e, e.Get<PhysicsBodyComponent>().Body, target, rotation, dt);
         }
@@ -83,7 +83,8 @@ public sealed class FollowerSystem : ISystem, IDebugUiSystem
         foreach (ref readonly var e in _players.GetEntities())
         {
             if (!e.Has<PhysicsPresence>() || e.Get<PhysicsPresence>().Mode != PhysicsMode.ServoFollower || e.Has<CharacterControllerComponent>()) continue;
-            if (e.Get<RemoteBody>().Buffer.At(tick) is not { } s) continue;
+            var buffer = e.Get<RemoteBody>().Buffer;
+            if (buffer.At(_remote.PhysicsTick(buffer)) is not { } s) continue;
             var (target, _) = _remote.ToWorld(s.Support, s.Position, s.Rotation);
             if (!e.Has<ServoBody>())
             {
