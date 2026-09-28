@@ -284,17 +284,3 @@ public sealed class CommandStats
 {
     public long Applied, Sent, Received, Rejected, RejectedHere;
 }
-
-/// <summary>Command IDs on the wire.</summary>
-public static class CommandIds
-{
-    public const ushort EditVoxels = 1;
-    public const ushort SetLever = 2;
-    public const ushort SetWheel = 3;
-    public const ushort SetGridLocked = 4;
-    public const ushort RightGrid = 5;
-    public const ushort SetMoveMode = 6;
-    public const ushort SpawnGrid = 7;
-    public const ushort SpawnPlayer = 8;
-    public const ushort DespawnEntity = 9;
-}

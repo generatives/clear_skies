@@ -87,12 +87,7 @@ host.AddSystem(inputSample, SystemStage.Simulation); // ...and hands it to the t
 var commands = new CommandSystem(session, registry, () => host.Time.Tick);
 var blockEntities = new BlockEntities(host.World, registry);
 var editLimits = new EditLimits();
-commands.Register(new EditVoxelsHandler(blockEntities, editLimits));
-commands.Register(new SetLeverHandler(blockEntities));
-commands.Register(new SetWheelHandler(blockEntities));
-commands.Register(new SetGridLockedHandler(registry, host.Physics));
-commands.Register(new RightGridHandler(registry, host.Physics));
-commands.Register(new SetMoveModeHandler(registry));
+GameCommands.RegisterAll(commands, blockEntities, editLimits, registry, host.Physics);
 
 var physicsBody = new PhysicsBodySystem(host.World, host.Physics);
 

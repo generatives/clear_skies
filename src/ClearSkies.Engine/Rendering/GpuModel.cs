@@ -47,17 +47,14 @@ public sealed class GpuModel : IDisposable
     public int FindNode(string name) => _nodeIndex.TryGetValue(name, out int i) ? i : -1;
 
     /// <summary>Fills <paramref name="pose"/> (one entry per node) with each node's model-space matrix, using
-    /// <paramref name="rotations"/> (one per node) as the nodes' local rotations in place of their rest rotations;
-    /// empty uses the rest rotations. Translation and scale always stay at rest.</summary>
-    public void ComputePose(Span<Mat4> pose, ReadOnlySpan<Quaternion<float>> rotations)
+    /// <paramref name="nodes"/> (one per node) as the nodes' local transforms in place of their rest transforms; empty
+    /// uses the rest transforms.</summary>
+    public void ComputePose(Span<Mat4> pose, ReadOnlySpan<NodePose> nodes)
     {
         for (int i = 0; i < Nodes.Count; i++)
         {
             var n = Nodes[i];
-            var rotation = rotations.IsEmpty ? n.Rotation : rotations[i];
-
-            var local = Mat4.Multiply(Mat4.Translation(n.Translation),
-                        Mat4.Multiply(Mat4.FromQuaternion(rotation), Mat4.Scale(n.Scale)));
+            var local = (nodes.IsEmpty ? n.Rest : nodes[i]).ToMatrix();
             pose[i] = n.Parent < 0 ? local : Mat4.Multiply(pose[n.Parent], local);
         }
     }
@@ -75,3 +72,17 @@ public sealed class GpuModel : IDisposable
 /// <summary>One node's triangles in one material: the node it hangs off (index into <see cref="GpuModel.Nodes"/>,
 /// -1 for model space), the mesh, its base-colour texture and the alpha-test cutoff (0 = opaque).</summary>
 public sealed record GpuModelPart(int Node, GpuMesh Mesh, ModelTexture Texture, float AlphaCutoff);
+
+/// <summary>A node's local transform, relative to its parent: translation, rotation and scale, applied scale first.</summary>
+public readonly record struct NodePose(Vector3D<float> Translation, Quaternion<float> Rotation, Vector3D<float> Scale)
+{
+    public Mat4 ToMatrix() =>
+        Mat4.Multiply(Mat4.Translation(Translation), Mat4.Multiply(Mat4.FromQuaternion(Rotation), Mat4.Scale(Scale)));
+
+    /// <summary><paramref name="t"/> of the way from <paramref name="a"/> to <paramref name="b"/>: translation and
+    /// scale in a straight line, rotation the short way round.</summary>
+    public static NodePose Lerp(in NodePose a, in NodePose b, float t) => new(
+        Vector3D.Lerp(a.Translation, b.Translation, t),
+        Quaternion<float>.Slerp(a.Rotation, b.Rotation, t),
+        Vector3D.Lerp(a.Scale, b.Scale, t));
+}

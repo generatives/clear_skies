@@ -52,12 +52,7 @@ public sealed class HeadlessScene : IDisposable
         Presence = new EntityPresenceSystem(World, Session, WorldVolume, viewDistance: 500f);
         Commands = new CommandSystem(Session, Registry, () => TickNumber);
         Blocks = new BlockEntities(World, Registry);
-        Commands.Register(new EditVoxelsHandler(Blocks, Limits));
-        Commands.Register(new SetLeverHandler(Blocks));
-        Commands.Register(new SetWheelHandler(Blocks));
-        Commands.Register(new SetGridLockedHandler(Registry, Physics));
-        Commands.Register(new RightGridHandler(Registry, Physics));
-        Commands.Register(new SetMoveModeHandler(Registry));
+        GameCommands.RegisterAll(Commands, Blocks, Limits, Registry, Physics);
         var hierarchy = new HierarchyTransformSystem(World);
         _tick.Add(hierarchy);
         _tick.Add(new PhysicsBodySystem(World, Physics));
