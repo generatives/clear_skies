@@ -205,9 +205,9 @@ var airshipFlight = new AirshipFlightSystem(host.World, host.Physics);
 host.AddSystem(airshipFlight, SystemStage.Simulation);
 var presence = new EntityPresenceSystem(host.World, session, staticVolume, ViewDistance)
 {
-    // Entities are drawn out to the load window; a grid owned here gets a body once the terrain around it has loaded
-    // with colliders, so nothing loaded from the save falls through the world.
-    RenderDistance = EntityStreamingSystem.LoadWindow,
+    // Entities are drawn as far as the terrain, but no further than the load window; a grid owned here gets a body
+    // once the terrain around it has loaded with colliders, so nothing loaded from the save falls through the world.
+    RenderDistanceLimit = EntityStreamingSystem.LoadWindow,
     TerrainReady = p => chunkLoadSystem.IsTerrainLoaded(new Vector3D<float>(p.X, p.Y, p.Z), 64f) &&
                         physicsBody.CollidersReady(staticVolume, p, 64f),
 };
@@ -268,12 +268,12 @@ bool flightTest = args.Contains("--flight-test");
 host.AddSystem(new StreamingFlightTest(host, flightTest, flightTest ? () => host.Window.Native.Close() : null),
                SystemStage.Frame);
 // Per frame, after the ticks: draw between the last two ticks (children follow), then stream terrain around the view.
+host.AddSystem(gridPilot, SystemStage.Frame); // puts the camera under a piloted grid...
+host.AddSystem(new EyeSystem(host.World), SystemStage.Frame); // ...or at the local player's eye
 host.AddSystem(interpolation, SystemStage.Frame);
 host.AddSystem(remoteBodies, SystemStage.Frame); // bodies owned elsewhere, about 100 ms behind
 host.AddSystem(hierarchy, SystemStage.Frame);
-host.AddSystem(new CameraFollowSystem(host.World), SystemStage.Frame); // the camera at the local player's eye
 host.AddSystem(chunkLoadSystem, SystemStage.Frame);
-host.AddSystem(gridPilot, SystemStage.Frame);
 host.AddSystem(new BlockTargetSystem(host.World, host.Input, host.Renderer, blockActions, editLimits), SystemStage.Frame);
 host.AddSystem(new HudUi(ui, host.Input, blockActions, gridPilot, host.Renderer.Atlas,
                          Path.Combine(AppContext.BaseDirectory, "Resources", "Icons")), SystemStage.Frame); // crosshair, hotbar

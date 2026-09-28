@@ -180,7 +180,7 @@ public sealed class BlockTargetSystem : ISystem, IDisposable, Gui.IDebugUiSystem
         {
             ref readonly var cc = ref e.Get<CameraComponent>();
             if (!cc.Active) continue;
-            ref readonly var t = ref e.Get<Transform>();
+            var t = e.DrawnPose(); // the view on screen
             origin = t.Position;
             dir    = Vector3D.Normalize(Vec.Rotate(t.Rotation, new Vector3D<float>(0, 0, -1)));
             return true;
