@@ -11,7 +11,8 @@ namespace ClearSkies.Engine.ECS;
 /// <summary>
 /// Draws every frustum-visible <see cref="RenderedModel"/> entity at its <see cref="Transform"/>: standalone props
 /// and block entities alike (static model blocks are drawn by <see cref="ChunkRenderSystem"/> instead). Each is drawn
-/// in its own pose, computed here from its node rotations (so only for entities that are actually visible); one
+/// in its own pose, computed here from its node rotations between the last two ticks (so only for entities that are
+/// actually visible; see <see cref="RenderedModel.ComputeDrawnPose"/>); one
 /// with <see cref="VoxelLit"/> is lit from that voxel's light. Runs in
 /// <see cref="SystemStage.RenderWorld"/>.
 /// </summary>
@@ -19,11 +20,13 @@ public sealed class ModelRenderSystem : IRenderSystem, IDebugUiSystem
 {
     private readonly EntitySet _models;
     private readonly Renderer _renderer;
+    private readonly Time _time;
     private int _drawn;
 
-    public ModelRenderSystem(World world, Renderer renderer)
+    public ModelRenderSystem(World world, Renderer renderer, Time time)
     {
         _renderer = renderer;
+        _time     = time;
         _models   = world.GetEntities().With<Transform>().With<RenderedModel>().With<Rendered>().AsSet();
     }
 
@@ -38,7 +41,7 @@ public sealed class ModelRenderSystem : IRenderSystem, IDebugUiSystem
             var model = e.DrawnPose().ToMatrix();
             if (!frame.Frustum.Intersects(model, gpuModel.BoundsMin, gpuModel.BoundsMax)) continue;
 
-            var pose = rm.ComputePose();
+            var pose = rm.ComputeDrawnPose(_time.Alpha);
 
             if (e.Has<VoxelLit>())
             {

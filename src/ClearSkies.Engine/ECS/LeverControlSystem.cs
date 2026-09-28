@@ -15,7 +15,7 @@ namespace ClearSkies.Engine.ECS;
 /// Lets the player drag a lever's arm across its range. Clicking a lever takes hold of the arm's tip: while the button
 /// is held the view stays on the tip (see <see cref="InteractionFocus"/>) and the mouse, instead of turning the view,
 /// drags the tip along its arc: its movement along the way the tip moves on screen turns the arm, slowly, for fine
-/// control, and movement across that is ignored. Every frame it poses each lever's arm from its
+/// control, and movement across that is ignored. Every tick, after the commands, it poses each lever's arm from its
 /// <see cref="Lever.Value"/>, so anything else that sets the value moves the arm too.
 ///
 /// Dragging sends SetLever commands; the handler moves every lever on the same axis together, and a lever placed on
