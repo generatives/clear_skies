@@ -259,13 +259,13 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         Console.WriteLine($"[probe] voxels={voxels} sun-shadowed={shadowed} rgb-lit={lit} coloured={coloured} ao={ao} bounce={bounce} held={_heldQueue.Count}");
     }
 
-    /// <summary>Poses a registered grid for this frame from its root <see cref="Transform"/> and pivot.</summary>
+    /// <summary>Poses a registered grid for this frame from its root <see cref="Transform"/>.</summary>
     private void AddLit(ChunkVolume vol, in Transform root)
     {
         var h = vol.Gpu;
         if (h.Index < 0) return;
-        var v2w = VoxelToWorld(root.Position, root.Rotation, vol.Pivot);
-        _store.SetPose(h, v2w, WorldToVoxel(root.Position, root.Rotation, vol.Pivot));
+        var v2w = VoxelToWorld(root.Position, root.Rotation);
+        _store.SetPose(h, v2w, WorldToVoxel(root.Position, root.Rotation));
         _lit.Add(new LitGrid(vol, h, v2w, root.Position, root.Rotation));
     }
 
@@ -289,15 +289,15 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
 
     // ── Grid transforms ───────────────────────────────────────────────────────
 
-    // A grid's voxel space is its local block space (chunk*32 + local); its root Transform and pivot carry it to
-    // world space: world = T(pos)·R·T(−pivot)·voxel (see ChunkVolume). The static world's is the identity.
-    private static Mat4 VoxelToWorld(Vector3D<float> pos, Quaternion<float> rot, Vector3D<float> pivot)
-        => Mat4.Multiply(Mat4.Multiply(Mat4.Translation(pos), Mat4.FromQuaternion(rot)), Mat4.Translation(-pivot));
+    // A grid's voxel space is its local block space (chunk*32 + local); its root Transform carries it to world
+    // space: world = T(pos)·R·voxel (see ChunkVolume). The static world's is the identity.
+    private static Mat4 VoxelToWorld(Vector3D<float> pos, Quaternion<float> rot)
+        => Mat4.Multiply(Mat4.Translation(pos), Mat4.FromQuaternion(rot));
 
     /// <summary>Inverse of <see cref="VoxelToWorld"/>, built analytically since the transform is rigid:
-    /// voxel = T(pivot) · R⁻¹ · T(−pos) · world.</summary>
-    private static Mat4 WorldToVoxel(Vector3D<float> pos, Quaternion<float> rot, Vector3D<float> pivot)
-        => Mat4.Multiply(Mat4.Multiply(Mat4.Translation(pivot), Mat4.FromQuaternion(Vec.Conjugate(rot))), Mat4.Translation(-pos));
+    /// voxel = R⁻¹ · T(−pos) · world.</summary>
+    private static Mat4 WorldToVoxel(Vector3D<float> pos, Quaternion<float> rot)
+        => Mat4.Multiply(Mat4.FromQuaternion(Vec.Conjugate(rot)), Mat4.Translation(-pos));
 
     public void Dispose()
     {
