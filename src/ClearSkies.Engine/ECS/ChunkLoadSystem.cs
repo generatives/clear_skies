@@ -136,6 +136,11 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 
     private readonly List<ChunkPosition> _toUnload = new();
 
+    // Columns waiting for saved chunks the store doesn't have yet (a client's, fetched from the host), and chunks
+    // edited while their column was loading, whose loaded data is stale.
+    private readonly List<(int x, int z)> _waiting = new();
+    private readonly HashSet<ChunkPosition> _stale = new();
+
     /// <summary>Horizontal distance from the centre at which the loaded world stops: the nearest chunk column still
     /// queued or loading, or else the view distance, eased over time. Fog should be total by here.</summary>
     public float FogDistance => _fogDistance;
@@ -258,7 +263,9 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
                         _columns[(pos.X, pos.Z)] = (col.Generated, col.Air | Bit(pos));
                     continue;
                 }
-                // Dropped if the centre moved on while it generated, or an edit created the chunk meanwhile.
+                // Dropped if the centre moved on while it generated, or an edit created the chunk meanwhile, or it was
+                // edited while loading (it's loaded again, edit and all).
+                if (_stale.Remove(pos)) { if (!_waiting.Contains(job.Column)) _waiting.Add(job.Column); continue; }
                 if (InView(pos.X, pos.Z) && !_staticVolume.IsLoaded(pos)) _staticVolume.AddChunk(pos, data, packed);
             }
         }
@@ -412,12 +419,31 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     private void Dispatch()
     {
         _full = false;
+
+        // Columns whose saved chunks have arrived go next.
+        for (int i = _waiting.Count - 1; i >= 0; i--)
+        {
+            var col = _waiting[i];
+            if (!InView(col.x, col.z)) { _waiting.RemoveAt(i); continue; }
+            if (Missing(col.x, col.z).Any(w => w.FromSave && !_chunkStore.IsReady(w.Pos))) continue;
+            _waiting.RemoveAt(i);
+            _queue.Insert(_queueHead, col);
+        }
+
         while (_inFlight.Count < MaxInFlight && _queueHead < _queue.Count)
         {
             var col = _queue[_queueHead];
             if (_inFlight.ContainsKey(col)) { _skippedInFlight = true; _queueHead++; continue; } // re-queued by the next rebuild
             var work = Missing(col.x, col.z);
             if (work.Count == 0) { _queueHead++; continue; }
+            if (work.Any(w => w.FromSave && !_chunkStore.IsReady(w.Pos)))
+            {
+                // Saved chunks not here yet: ask, and come back to the column once they are.
+                foreach (var w in work) if (w.FromSave && !_chunkStore.IsReady(w.Pos)) _chunkStore.Request(w.Pos);
+                if (!_waiting.Contains(col)) _waiting.Add(col);
+                _queueHead++;
+                continue;
+            }
 
             int chunks = _staticVolume.LoadedCount + _inFlightChunks + work.Count;
             int bricks = WorldBricks() + (PendingChunks() + _inFlightChunks + work.Count) * PendingBricks;
@@ -522,6 +548,26 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         for (ulong bits = MaybeContent(x, z); bits != 0; bits &= bits - 1)
             if (!_staticVolume.IsLoaded(new ChunkPosition(x, _minY + BitOperations.TrailingZeroCount(bits), z))) return true;
         return false;
+    }
+
+    /// <summary>Every chunk that has been built on (edited since generation): what a joining client must fetch from the
+    /// host rather than generate.</summary>
+    public IEnumerable<ChunkPosition> EditedChunks
+    {
+        get
+        {
+            var set = new HashSet<ChunkPosition>(_saved);
+            foreach (var (p, entry) in _staticVolume.All) if (entry.Data.IsDirty) set.Add(p);
+            return set;
+        }
+    }
+
+    /// <summary>A chunk was edited while not loaded here: it's a build from now on, and if its column is loading, what
+    /// loads is stale and is loaded again.</summary>
+    public void MarkEdited(ChunkPosition pos)
+    {
+        RecordSave(pos, hasBlocks: true);
+        if (_inFlight.ContainsKey((pos.X, pos.Z))) _stale.Add(pos);
     }
 
     /// <summary>Whether the terrain within <paramref name="radius"/> (horizontally) of <paramref name="centre"/> has

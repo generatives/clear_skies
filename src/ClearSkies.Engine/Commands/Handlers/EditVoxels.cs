@@ -1,6 +1,7 @@
 using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Math;
+using ClearSkies.Engine.Persistence;
 using ClearSkies.Engine.Serialization;
 using ClearSkies.Engine.Voxels;
 using DefaultEcs;
@@ -79,6 +80,10 @@ public sealed class EditVoxelsHandler : PredictedCommandHandler<EditVoxels, Edit
 
     public override ushort Id => CommandIds.EditVoxels;
 
+    /// <summary>Edits parts of the static world that aren't loaded here (the host saves them; a client marks them to be
+    /// fetched fresh). Without one, an edit to an unloaded world chunk creates it empty, as a grid's would.</summary>
+    public IWorldChunkEditor? WorldEditor { get; set; }
+
     public override void Write(NetWriter w, in EditVoxels c)
     {
         w.WriteUInt32(c.Volume);
@@ -144,12 +149,41 @@ public sealed class EditVoxelsHandler : PredictedCommandHandler<EditVoxels, Edit
     public override void Apply(in EditVoxels e, in ApplyContext ctx)
     {
         if (_blocks.Volume(e.Volume) is not { } volume) return;
+        bool world = e.Volume == NetRegistry.WorldVolume && WorldEditor != null;
         foreach (var op in e.Ops)
         {
-            if (op.IsSingle) volume.SetBlock(op.Min.X, op.Min.Y, op.Min.Z, op.Block, op.Orientation);
+            if (world) ApplyToWorld(volume, op);
+            else if (op.IsSingle) volume.SetBlock(op.Min.X, op.Min.Y, op.Min.Z, op.Block, op.Orientation);
             else volume.FillBox(op.Min, op.Max, op.Block, op.Orientation);
         }
         if (_blocks.Registry.Find(e.Volume) is { } root) AdoptLeverSettings(volume, root.Get<NetId>().Value, e.Ops);
+    }
+
+    /// <summary>A world edit, chunk by chunk: loaded chunks change in place, the rest through <see cref="WorldEditor"/>.</summary>
+    private void ApplyToWorld(ChunkVolume world, VoxelOp op)
+    {
+        const int S = ChunkData.Size;
+        int Floor(int v) => (int)MathF.Floor(v / (float)S);
+        for (int cz = Floor(op.Min.Z); cz <= Floor(op.Max.Z); cz++)
+        for (int cy = Floor(op.Min.Y); cy <= Floor(op.Max.Y); cy++)
+        for (int cx = Floor(op.Min.X); cx <= Floor(op.Max.X); cx++)
+        {
+            var pos = new ChunkPosition(cx, cy, cz);
+            if (cy < world.EditableLayers.Min || cy > world.EditableLayers.Max) continue;
+            var min = Vector3D.Max(op.Min, new Vector3D<int>(cx * S, cy * S, cz * S));
+            var max = Vector3D.Min(op.Max, new Vector3D<int>(cx * S + S - 1, cy * S + S - 1, cz * S + S - 1));
+            if (world.IsLoaded(pos))
+            {
+                world.FillBox(min, max, op.Block, op.Orientation);
+                continue;
+            }
+            var (block, orientation) = (op.Block, op.Orientation);
+            WorldEditor!.EditUnloaded(pos, data =>
+            {
+                for (int z = min.Z; z <= max.Z; z++) for (int y = min.Y; y <= max.Y; y++) for (int x = min.X; x <= max.X; x++)
+                    data.Set(x - cx * S, y - cy * S, z - cz * S, block, orientation);
+            });
+        }
     }
 
     /// <summary>New levers take the setting of the levers already on their axis in the volume.</summary>
