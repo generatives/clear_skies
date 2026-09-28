@@ -60,6 +60,37 @@ public class InputLatchTests
     }
 
     [Fact]
+    public void ASteadyDragMovesAsMuchEveryTickHoweverFramesFall()
+    {
+        const double tick = 1.0 / 60.0;
+        const float speed = 600f; // pixels per second: 10 a tick
+        var latch = new InputLatch();
+        var clock = new TickClock(tick);
+        var rng = new Random(1337);
+        var perTick = new List<float>();
+        for (int frame = 0; frame < 500; frame++)
+        {
+            double dt = 1.0 / 144.0 + (rng.NextDouble() - 0.5) * 0.003;
+            latch.Carry(clock.Alpha * tick);
+            latch.AddFrame(PlayerButtons.None, new Vector2(speed * (float)dt, 0), dt);
+            int ticks = clock.Advance(dt);
+            for (int i = 0; i < ticks; i++)
+                perTick.Add(latch.Take(PlayerButtons.None, 0, 0, seconds: tick).MouseDelta.X);
+        }
+        Assert.True(perTick.Count > 150);
+        foreach (float moved in perTick.Skip(1)) Assert.Equal(10f, moved, 2);
+    }
+
+    [Fact]
+    public void MovementFromDroppedTicksIsntLost()
+    {
+        var latch = new InputLatch();
+        latch.AddFrame(PlayerButtons.None, new Vector2(30, 0), 0.5); // a long frame, most of whose ticks were dropped
+        latch.Carry(0.01);
+        Assert.Equal(30f, latch.Take(PlayerButtons.None, 0, 0, seconds: 1.0 / 60.0).MouseDelta.X, 3);
+    }
+
+    [Fact]
     public void MoveAxesCancelOut()
     {
         var input = new PlayerInput { Held = PlayerButtons.Forward | PlayerButtons.Left | PlayerButtons.Right };

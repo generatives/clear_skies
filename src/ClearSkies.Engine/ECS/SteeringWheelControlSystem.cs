@@ -17,7 +17,7 @@ namespace ClearSkies.Engine.ECS;
 /// its movement along the way the spot moves on screen turns the wheel, slowly, for fine control. So the part of the
 /// wheel the player grabbed goes round with the mouse, rather than the wheel's top snapping to it. The wheel turns up
 /// to <see cref="SteeringWheel.MaxAngle"/> either way, and a ship's wheels turn together. What the wheel asks of the
-/// ship is <see cref="AirshipFlightSystem"/>'s business. Every frame it poses each wheel from its
+/// ship is <see cref="AirshipFlightSystem"/>'s business. Every tick, after the commands, it poses each wheel from its
 /// <see cref="SteeringWheel.Angle"/>.
 ///
 /// The spin comes from the model: the wheel node turns about its own Z axis at its rest position, its face towards
