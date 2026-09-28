@@ -51,8 +51,8 @@ public sealed class PlayerMovementSystem : ISystem
             if (e.Get<PlayerInput>().WasPressed(PlayerButtons.ToggleFly) && !e.Has<Piloting>()) _toggled.Add(e);
         foreach (var e in _toggled)
         {
-            if (_commands != null && e.Has<NetId>())
-                _commands.Send(new SetMoveMode { Player = e.Get<NetId>().Value, FreeFly = !e.Has<FreeFlying>() });
+            if (_commands != null && e.Has<EntityId>())
+                _commands.Send(new SetMoveMode { Player = e.Get<EntityId>(), FreeFly = !e.Has<FreeFlying>() });
             else
                 Players.SetFreeFlying(e, !e.Has<FreeFlying>()); // changes which set it's in
         }

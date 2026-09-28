@@ -22,7 +22,7 @@ public abstract class NetSession : ICommandRouter, IDisposable
     protected readonly NetWriter Writer = new(1024);
     protected readonly Stopwatch RealTime = Stopwatch.StartNew();
 
-    protected NetSession(ITransport? transport, EngineSession session, CommandSystem commands, NetRegistry registry, World world, ITickClock clock)
+    protected NetSession(ITransport? transport, EngineSession session, CommandSystem commands, EntityRegistry registry, World world, ITickClock clock)
     {
         Transport = transport;
         Session = session;
@@ -43,7 +43,7 @@ public abstract class NetSession : ICommandRouter, IDisposable
     public ITransport? Transport { get; }
     public EngineSession Session { get; }
     public CommandSystem Commands { get; }
-    public NetRegistry Registry { get; }
+    public EntityRegistry Registry { get; }
     public World World { get; }
     public ITickClock Clock { get; }
 

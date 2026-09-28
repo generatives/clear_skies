@@ -23,7 +23,7 @@ public class InterpolationTests
         var mover = game.Host.SpawnLocalPlayer(new Vector3(0, 60, 0), freeFly: true);
         game.Tick();
         var (client, _) = game.Join();
-        var seen = client.Registry.Find(mover.Get<NetId>().Value)!.Value;
+        var seen = client.Registry.Find(mover.Get<EntityId>())!.Value;
         return (game, mover, seen);
     }
 

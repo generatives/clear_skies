@@ -40,28 +40,22 @@ public struct Interactive
 {
 }
 
-/// <summary>A lever: an arm the player drags across its range (see <see cref="LeverControlSystem"/>). On a ship it asks
-/// for force along the axis it levers on (see <see cref="AirshipFlightSystem"/>): at 1, the full lever force towards
-/// the lever's north face; at -1, towards its south face; upright, none. A ship's levers on the same axis move together.</summary>
+/// <summary>A lever: an arm the player drags across its range (see <see cref="LeverControlSystem"/>), showing and setting
+/// its ship's thrust along the axis it levers on (see <see cref="ShipControls"/>): leaning fully to its north face asks
+/// for full thrust towards that face, fully to its south face full thrust the other way, upright none. It holds no
+/// setting of its own.</summary>
 public struct Lever
 {
-    /// <summary>Where the arm is set, from -1 (fully to one side) through 0 (upright) to 1 (fully to the other).
-    /// The arm levers north and south: towards 1 it leans to the block's north face (towards the player who placed
-    /// it), towards -1 to its south face.</summary>
-    public float Value;
 }
 
-/// <summary>A ship's wheel: the player grabs its rim and turns it (see <see cref="SteeringWheelControlSystem"/>), and
-/// the ship is pushed round by a turning force set by how far it's turned (see <see cref="AirshipFlightSystem"/>):
-/// clockwise (as seen from its north face, where the player who placed it stands) to starboard, harder the further
-/// it's turned. A
-/// ship's wheels turn together.</summary>
+/// <summary>A ship's wheel: the player grabs its rim and turns it (see <see cref="SteeringWheelControlSystem"/>),
+/// showing and setting its ship's turn (see <see cref="ShipControls.Turn"/>): turned fully clockwise (as seen from its
+/// north face, where the player who placed it stands), full turn to starboard. It holds no setting of its own.</summary>
 public struct SteeringWheel
 {
-    /// <summary>How far the wheel turns either way from centred (radians): half a turn.</summary>
+    /// <summary>How far the wheel turns either way from centred (radians), at full turn: half a turn.</summary>
     public const float MaxAngle = MathF.PI;
 
-    /// <summary>How far the wheel is turned from centred (where it was modelled), clockwise, in radians, within
-    /// ±<see cref="MaxAngle"/>.</summary>
-    public float Angle;
+    /// <summary>How far a wheel is turned (clockwise, radians) for its ship's current turn setting.</summary>
+    public static float Angle(in BlockRef wheel) => ShipControls.Of(wheel.Volume).Turn * MaxAngle;
 }

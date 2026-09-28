@@ -29,7 +29,7 @@ public sealed class ClientSession : NetSession
 
     /// <param name="welcome">The host's welcome (see <see cref="Connect"/>).</param>
     /// <param name="terrainLoaded">Whether the terrain around a point has loaded (ChunkLoadSystem).</param>
-    public ClientSession(ITransport transport, Welcome welcome, EngineSession session, CommandSystem commands, NetRegistry registry,
+    public ClientSession(ITransport transport, Welcome welcome, EngineSession session, CommandSystem commands, EntityRegistry registry,
                          World world, ITickClock clock, Func<Vector3, bool> terrainLoaded)
         : base(transport, session, commands, registry, world, clock)
     {
@@ -89,7 +89,7 @@ public sealed class ClientSession : NetSession
             _anchor.Dispose(); // the player streams its own terrain now
             Joined = true;
         }
-        if (Registry.IdsLeft < NetRegistry.BlockSize / 4 && !_idRequested)
+        if (Registry.IdsLeft < EntityRegistry.BlockSize / 4 && !_idRequested)
         {
             Writer.Clear();
             Writer.WriteByte((byte)MessageKind.IdBlockRequest);
