@@ -6,6 +6,8 @@ using ClearSkies.Engine.Input;
 using ClearSkies.Engine.Math;
 using ClearSkies.Engine.Physics;
 using ClearSkies.Engine.Physics.Characters;
+using ClearSkies.Engine.Rendering;
+using ClearSkies.Engine.Rendering.Gltf;
 using DefaultEcs;
 using Silk.NET.Maths;
 using Xunit;
@@ -55,6 +57,37 @@ public class InputLatchTests
         Assert.True(input.WasPressed(PlayerButtons.Left));
         Assert.Equal((1f, 2f), (input.Yaw, input.Pitch));
         Assert.Equal(Vector2.Zero, latch.Take(PlayerButtons.None, 0, 0).MouseDelta);
+    }
+
+    [Fact]
+    public void ASteadyDragMovesAsMuchEveryTickHoweverFramesFall()
+    {
+        const double tick = 1.0 / 60.0;
+        const float speed = 600f; // pixels per second: 10 a tick
+        var latch = new InputLatch();
+        var clock = new TickClock(tick);
+        var rng = new Random(1337);
+        var perTick = new List<float>();
+        for (int frame = 0; frame < 500; frame++)
+        {
+            double dt = 1.0 / 144.0 + (rng.NextDouble() - 0.5) * 0.003;
+            latch.Carry(clock.Alpha * tick);
+            latch.AddFrame(PlayerButtons.None, new Vector2(speed * (float)dt, 0), dt);
+            int ticks = clock.Advance(dt);
+            for (int i = 0; i < ticks; i++)
+                perTick.Add(latch.Take(PlayerButtons.None, 0, 0, seconds: tick).MouseDelta.X);
+        }
+        Assert.True(perTick.Count > 150);
+        foreach (float moved in perTick.Skip(1)) Assert.Equal(10f, moved, 2);
+    }
+
+    [Fact]
+    public void MovementFromDroppedTicksIsntLost()
+    {
+        var latch = new InputLatch();
+        latch.AddFrame(PlayerButtons.None, new Vector2(30, 0), 0.5); // a long frame, most of whose ticks were dropped
+        latch.Carry(0.01);
+        Assert.Equal(30f, latch.Take(PlayerButtons.None, 0, 0, seconds: 1.0 / 60.0).MouseDelta.X, 3);
     }
 
     [Fact]
@@ -322,6 +355,74 @@ public class TickInterpolationTests
         rig.Entity.Get<Transform>().Rotation = mouseLooked;
         rig.Frame(0.5f);
         Assert.Equal(mouseLooked, rig.Entity.DrawnPose().Rotation);
+    }
+
+    // A one-node model: an arm reaching up along +Y from the origin, turned about Z.
+    private static (World World, TickInterpolationSystem System, Time Time, Entity Model) ArmRig()
+    {
+        var world = new World();
+        var time = new Time();
+        var system = new TickInterpolationSystem(world, time);
+        var model = new GpuModel(new[] { new ModelNode("arm", -1, Vector3D<float>.Zero, Quaternion<float>.Identity, Vector3D<float>.One) },
+                                 Array.Empty<GpuModelPart>(), Vector3D<float>.Zero, Vector3D<float>.One);
+        var e = world.CreateEntity();
+        e.Set(new RenderedModel(model));
+        return (world, system, time, e);
+    }
+
+    private static float DrawnArmAngle(Entity e, float alpha)
+    {
+        var tip = e.Get<RenderedModel>().ComputeDrawnPose(alpha)[0].TransformPoint(Vector3D<float>.UnitY);
+        return MathF.Atan2(-tip.X, tip.Y);
+    }
+
+    [Fact]
+    public void ANodeTurnedByTicksIsDrawnBetweenThem()
+    {
+        var (_, system, _, arm) = ArmRig();
+        void Tick(float angle)
+        {
+            arm.Get<RenderedModel>().SetRotationFromRest("arm", Quaternion<float>.CreateFromAxisAngle(Vector3D<float>.UnitZ, angle));
+            system.Update(SystemStage.Simulation, 0);
+        }
+        Tick(0.2f); // the first tick starts there
+        Assert.Equal(0.2f, DrawnArmAngle(arm, 0.5f), 4);
+        Tick(0.6f);
+        Assert.Equal(0.2f, DrawnArmAngle(arm, 0f), 4);
+        Assert.Equal(0.4f, DrawnArmAngle(arm, 0.5f), 4);
+        Assert.Equal(0.6f, DrawnArmAngle(arm, 1f), 4);
+        Tick(0.6f); // held still: drawn still
+        Assert.Equal(0.6f, DrawnArmAngle(arm, 0.3f), 4);
+    }
+
+    [Fact]
+    public void ANodeTurnedOutsideTheTicksIsDrawnAsItIs()
+    {
+        var (_, system, _, arm) = ArmRig();
+        system.Update(SystemStage.Simulation, 0);
+        arm.Get<RenderedModel>().SetRotationFromRest("arm", Quaternion<float>.CreateFromAxisAngle(Vector3D<float>.UnitZ, 1f));
+        system.Update(SystemStage.Simulation, 0);
+        arm.Get<RenderedModel>().SetRotationFromRest("arm", Quaternion<float>.CreateFromAxisAngle(Vector3D<float>.UnitZ, -0.5f));
+        Assert.Equal(-0.5f, DrawnArmAngle(arm, 0.5f), 4);
+    }
+
+    [Fact]
+    public void AViewTurnedToAControlIsDrawnBetweenTicks()
+    {
+        var rig = new Rig();
+        rig.Entity.Get<InterpolatedTransform>().PositionOnly = true;
+        rig.Entity.Set(new MouseLookComponent { Yaw = 2.9f });
+        rig.Tick(0);
+        ref var look = ref rig.Entity.Get<MouseLookComponent>();
+        look.TurnTo(-3f, 0.4f); // across ±π: the short way round is about +0.38
+        rig.Entity.Get<Transform>().Rotation = look.BodyRotation;
+        rig.Tick(0);
+        Assert.Equal(-3f, WrapAngle(look.Yaw), 4);
+        Assert.Equal(0.4f, look.Pitch, 4);
+
+        rig.Frame(0.5f);
+        float halfway = 2.9f + 0.5f * (2f * MathF.PI - 5.9f);
+        Assert.Equal(0f, WrapAngle(Heading(rig.Entity.DrawnPose().Rotation) - halfway), 3);
     }
 
     private static float WrapAngle(float a) => MathF.IEEERemainder(a, 2f * MathF.PI);

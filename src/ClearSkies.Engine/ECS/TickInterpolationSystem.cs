@@ -1,5 +1,6 @@
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Math;
+using ClearSkies.Engine.Rendering;
 using DefaultEcs;
 using Silk.NET.Maths;
 
@@ -50,7 +51,12 @@ public static class Drawing
 /// <see cref="SystemStage.Frame"/> it writes the drawn poses. If something outside the ticks moved the entity (a spawn, a teleport), its Transform no
 /// longer matches the last tick's: that position is taken as-is, with no interpolation across the jump.
 ///
-/// A player's view turns with the ship they stand on once per tick (see <see cref="MouseLookComponent.TurnYaw"/>);
+/// Models' nodes are drawn between ticks too: at the end of each tick this records every <see cref="RenderedModel"/>'s
+/// node rotations, which the renderer blends by the same fraction (see <see cref="RenderedModel.ComputeDrawnPose"/>),
+/// so a lever's arm or a wheel set by the ticks moves smoothly.
+///
+/// A player's view turns once per tick with the ship they stand on, or to keep on a control they hold (see
+/// <see cref="MouseLookComponent.TurnYaw"/>);
 /// with <see cref="InterpolatedTransform.PositionOnly"/> the player's yaw, and their <see cref="Eye"/> camera's pitch,
 /// are drawn behind by the same fraction of that turn as the ship, so the two stay together between ticks. A tick that
 /// didn't turn the view clears the last one's turn.
@@ -64,6 +70,7 @@ public sealed class TickInterpolationSystem : IStagedSystem
     private readonly EntitySet _uninterpolatedGrids;
     private readonly EntitySet _drawn;
     private readonly EntitySet _lookers;
+    private readonly EntitySet _models;
     private readonly List<Entity> _stale = new();
     private readonly Time _time;
     private long _frame;
@@ -75,6 +82,7 @@ public sealed class TickInterpolationSystem : IStagedSystem
         _uninterpolatedGrids = world.GetEntities().With<PhysicsBodyComponent>().With<Transform>().Without<InterpolatedTransform>().AsSet();
         _drawn = world.GetEntities().With<DrawnTransform>().AsSet();
         _lookers = world.GetEntities().With<MouseLookComponent>().AsSet();
+        _models = world.GetEntities().With<RenderedModel>().AsSet();
         _time = time;
         world.SubscribeComponentRemoved((in Entity e, in InterpolatedTransform _) => { if (e.Has<DrawnTransform>()) e.Remove<DrawnTransform>(); });
     }
@@ -92,6 +100,8 @@ public sealed class TickInterpolationSystem : IStagedSystem
         foreach (var e in _uninterpolatedGrids.GetEntities().ToArray()) e.Set(new InterpolatedTransform());
         foreach (ref readonly Entity e in _lookers.GetEntities())
             e.Get<MouseLookComponent>().EndTick();
+        foreach (ref readonly Entity e in _models.GetEntities())
+            e.Get<RenderedModel>().EndTick();
 
         foreach (ref readonly Entity e in _interpolated.GetEntities())
         {

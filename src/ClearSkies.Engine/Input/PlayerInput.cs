@@ -71,25 +71,61 @@ public struct PlayerInput
 
 /// <summary>Collects presses and mouse movement over frames and hands them to the next tick. A frame can run no tick
 /// (at high frame rates most don't), while <see cref="InputManager"/> forgets a press after its frame, so without this a
-/// click or jump in such a frame would be lost.</summary>
+/// click or jump in such a frame would be lost.
+///
+/// Presses all go to the next tick. Mouse movement is shared out by time when frames give their length: a tick takes
+/// the movement from its own <see cref="TickSeconds"/> of frames, splitting a frame that straddles two ticks, so a drag
+/// moves as much each tick however frames and ticks line up (handing a tick whole frames would give it one, two or
+/// three frames' movement in turn, and a steady drag would move in uneven steps).</summary>
 public sealed class InputLatch
 {
     private PlayerButtons _pressed;
-    private Vector2 _mouseDelta;
+    private readonly List<(Vector2 Delta, double Seconds)> _moves = new(); // oldest first; not yet taken
 
-    /// <summary>Adds one frame's presses and mouse movement.</summary>
-    public void AddFrame(PlayerButtons pressed, Vector2 mouseDelta)
+    /// <summary>Adds one frame's presses and mouse movement, made over <paramref name="seconds"/> (0: all of it goes to
+    /// the next tick).</summary>
+    public void AddFrame(PlayerButtons pressed, Vector2 mouseDelta, double seconds = 0)
     {
         _pressed |= pressed;
-        _mouseDelta += mouseDelta;
+        if (mouseDelta != Vector2.Zero || seconds > 0) _moves.Add((mouseDelta, System.Math.Max(0, seconds)));
     }
 
-    /// <summary>Builds a tick's input from what's been collected since the last call, and starts collecting afresh.</summary>
-    public PlayerInput Take(PlayerButtons held, float yaw, float pitch, bool aiming = true)
+    /// <summary>Tells the latch how much time the tick clock carries past its last tick: movement waiting longer than
+    /// that (ticks the clock dropped, or ran faster than frames) is squeezed into it, so none is lost and none lags.</summary>
+    public void Carry(double seconds)
     {
-        var input = new PlayerInput { Held = held, Pressed = _pressed, Yaw = yaw, Pitch = pitch, MouseDelta = _mouseDelta, Aiming = aiming };
+        double waiting = 0;
+        var moved = Vector2.Zero;
+        foreach (var (d, s) in _moves) { waiting += s; moved += d; }
+        if (waiting <= seconds) return;
+        _moves.Clear();
+        _moves.Add((moved, System.Math.Max(0, seconds)));
+    }
+
+    /// <summary>Builds a tick's input from what's been collected since the last call, and starts collecting afresh:
+    /// every press, and the mouse movement made over the next <paramref name="seconds"/> of frames (by default all
+    /// of it).</summary>
+    public PlayerInput Take(PlayerButtons held, float yaw, float pitch, bool aiming = true, double seconds = double.PositiveInfinity)
+    {
+        var moved = Vector2.Zero;
+        double left = seconds;
+        int taken = 0;
+        for (; taken < _moves.Count; taken++)
+        {
+            var (d, s) = _moves[taken];
+            if (s <= left) { moved += d; left -= s; continue; }
+            if (left > 0)
+            {
+                float part = (float)(left / s);
+                moved += d * part;
+                _moves[taken] = (d * (1f - part), s - left);
+            }
+            break;
+        }
+        _moves.RemoveRange(0, taken);
+
+        var input = new PlayerInput { Held = held, Pressed = _pressed, Yaw = yaw, Pitch = pitch, MouseDelta = moved, Aiming = aiming };
         _pressed = PlayerButtons.None;
-        _mouseDelta = Vector2.Zero;
         return input;
     }
 }
