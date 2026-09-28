@@ -30,11 +30,12 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     private readonly GpuRayLightPass _rayLight;
     private readonly GpuContext      _ctx;
 
-    // Flat ambient (0-15, Minecraft-style level), passed to the fragment shader; changing it relights nothing.
+    // Flat ambient (0-15, Minecraft-style level), baked into each voxel's displayed light (darkened by its ray AO) by
+    // the compose pass; changing it relights everything.
     private float _ambientLevel = 2f;
 
     // How strongly ray AO (measured by the bounce rays, GpuRayLightPass bounce_main) darkens the ambient term,
-    // 0-1. Passed to the fragment shader through RayLightingSettings.AoStrength; forced to 0 while bounce is off.
+    // 0-1. Applied by the compose pass (changing it relights everything); forced to 0 while bounce is off.
     private float _aoStrength = 1f;
 
     // Bounce (GpuRayLightPass bounce_main): albedo feeds the pass (changing it re-evaluates everything); each voxel
@@ -229,8 +230,8 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         }
         Console.WriteLine($"[probe] slotInfo mismatches: {badInfo} of {hw}; last frame relit={_lastDirtyTotal} bounced={_lastBounceTotal}");
 
-        // Per voxel of every live slot: display sun/RGB/AO and accumulated bounce.
-        long voxels = 0, shadowed = 0, lit = 0, ao = 0, bounce = 0, coloured = 0;
+        // Per voxel of every live slot: display sun/brightness/warmth, accumulated AO and bounce.
+        long voxels = 0, shadowed = 0, lit = 0, ao = 0, bounce = 0, coloured = 0, unlit = 0;
         for (int s = 0; s < hw; s++)
         {
             if (_store.SlotGrid[s] < 0) continue;
@@ -240,14 +241,15 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
                 uint d = (pool[b0 + (k >> 1)] >> (16 * (k & 1))) & 0xFFFF;
                 uint acc = pool[b0 + 256 + k];
                 voxels++;
-                if (((d >> 12) & 3) < 3) shadowed++;
-                if ((d & 0xFFF) != 0) lit++;
-                if ((d & 15) != ((d >> 4) & 15) || (d & 15) != ((d >> 8) & 15)) coloured++;
-                if ((d >> 14) != 0) ao++;
+                if ((d & 511) == 511) { unlit++; continue; } // not composed yet
+                if (((d >> 14) & 3) < 3) shadowed++;
+                if ((d & 511) != 0) lit++;
+                if (((d >> 9) & 31) != 15) coloured++;
+                if ((acc >> 24) != 0) ao++;
                 if ((acc & 0xFFFFFF) != 0) bounce++;
             }
         }
-        Console.WriteLine($"[probe] voxels={voxels} sun-shadowed={shadowed} rgb-lit={lit} coloured={coloured} ao={ao} bounce={bounce} held={_heldQueue.Count}");
+        Console.WriteLine($"[probe] voxels={voxels} not-composed={unlit} sun-shadowed={shadowed} lit={lit} tinted={coloured} ao={ao} bounce={bounce} held={_heldQueue.Count}");
     }
 
     /// <summary>Poses a registered grid for this frame from its root <see cref="Transform"/>.</summary>

@@ -28,7 +28,8 @@ struct Params {
     counts: vec4<i32>,  // y: word offset of the lamp records in lists, z: work entries this dispatch
     bounce: vec4<f32>,  // x: albedo (fraction of incoming light a surface re-emits), y: sun strength (0-1),
                         // z: bounce display scale (0 = bounce off)
-    bounce2: vec4<f32>, // x: rays per evaluation, y: evaluations per full ray set (cycle)
+    bounce2: vec4<f32>, // x: rays per evaluation, y: evaluations per full ray set (cycle); compose: z: ambient
+                        // (0-1), w: ray AO strength (0-1)
 };
 
 @group(0) @binding(0) var<storage, read> occPool: array<u32>;
@@ -153,17 +154,19 @@ fn jumpCell(v: vec3<i32>, size: i32, o: vec3<f32>, d: vec3<f32>, t1: f32) -> Jum
 
 // ── Light layout ──────────────────────────────────────────────────────────────────────────────────────────
 // A light slot (one 8³ brick, voxel k = x + 8*(y + 8*z)) is SLOT_WORDS u32s:
-//   [0, 256)    display: one u16 per voxel, two per word (k even = low half): bits 0-3 R, 4-7 G, 8-11 B (direct and
-//               bounce combined, on the DECODE curve), 12-13 sun visibility (0-3), 14-15 AO occlusion (0-3). The
-//               fragment shader reads only this.
+//   [0, 256)    display: one u16 per voxel, two per word (k even = low half): bits 0-8 brightness, 9-13 warmth,
+//               14-15 sun visibility (0-3). Brightness and warmth hold all the non-sun light (ambient times the ray
+//               AO, lamps and bounce, combined per channel by max; see encodeLight). The fragment shader reads only
+//               this.
 //   [256, 768)  accumulation: one u32 per voxel: bits 0-7 bounce R, 8-15 G, 16-23 B (linear 0-1), 24-31 AO
 //               occlusion (0-255). Persistent between frames, blended by the bounce pass.
 const SLOT_WORDS: i32 = " + GridStore.WordsPerSlot + @";
 const ACC_BASE: i32 = 256;
 
-// Display RGB is 4 bits per channel on a square curve, so the dark end (where bounce lives) gets finer steps.
-fn decodeLevel(c: u32) -> f32 { let f = f32(c) / 15.0; return f * f; }
-fn encodeLevel(b: f32) -> u32 { return u32(round(15.0 * sqrt(clamp(b, 0.0, 1.0)))); }
+// Display light is a brightness (the brightest channel, 0-510 on a square curve, so ambient and bounce at the dark
+// end get fine steps; 511 is kept for no light storage) and a warmth (0-30) along one line of tints: 0 cool
+// blue-white, 15 white, 30 deep red. Other colours are carried to the nearest tint on that line.
+" + GridStore.LightCodecWgsl + @"
 
 struct VoxelRef { ok: bool, disp: i32, shift: u32, acc: i32 }; // disp: display word, shift: 0 or 16 into it
 
@@ -451,8 +454,8 @@ fn sun_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg:
     workgroupBarrier();
     let s0 = wSun[t * 2u];
     let s1 = wSun[t * 2u + 1u];
-    let old = lightPool[it.disp] & ~((3u << 12u) | (3u << 28u));
-    lightPool[it.disp] = old | (s0 << 12u) | (s1 << 28u);
+    let old = lightPool[it.disp] & ~((3u << 14u) | (3u << 30u));
+    lightPool[it.disp] = old | (s0 << 14u) | (s1 << 30u);
 }
 
 // ── Lamps and composition ─────────────────────────────────────────────────────────────────────────────────
@@ -488,14 +491,16 @@ fn lampLight(g: i32, v: vec3<i32>, list: u32) -> vec3<f32> {
     return min(best, vec3<f32>(15.0)) / 15.0;
 }
 
-// The voxel's display half: its lamp light (traced now) and stored bounce (times the display scale, p.bounce.z)
-// combined per channel by max, the stored AO quantised to 2 bits, and the given sun level.
+// The voxel's display half: the flat ambient (p.bounce2.z) darkened by the stored ray AO (times its strength,
+// p.bounce2.w), its lamp light (traced now) and stored bounce (times the display scale, p.bounce.z), combined per
+// channel by max, and the given sun level. Air away from any surface gets the plain ambient.
 fn composeVoxel(g: i32, v: vec3<i32>, acc: u32, sun: u32, list: u32) -> u32 {
-    if (isSolid(g, v) || !hasSolidNeighbour(g, v)) { return sun << 12u; }
+    let ambient = p.bounce2.z;
+    if (isSolid(g, v) || !hasSolidNeighbour(g, v)) { return encodeLight(vec3<f32>(ambient)) | (sun << 14u); }
     let bounce = vec3<f32>(f32(acc & 0xFFu), f32((acc >> 8u) & 0xFFu), f32((acc >> 16u) & 0xFFu)) / 255.0 * p.bounce.z;
-    let rgb = max(lampLight(g, v, list), bounce);
-    let ao = u32(round(f32(acc >> 24u) / 255.0 * 3.0));
-    return encodeLevel(rgb.r) | (encodeLevel(rgb.g) << 4u) | (encodeLevel(rgb.b) << 8u) | (sun << 12u) | (ao << 14u);
+    let sky = ambient * (1.0 - p.bounce2.w * f32(acc >> 24u) / 255.0);
+    let light = max(max(lampLight(g, v, list), bounce), vec3<f32>(sky));
+    return encodeLight(light) | (sun << 14u);
 }
 
 @compute @workgroup_size(256)
@@ -506,8 +511,8 @@ fn compose_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) 
     let it = itemOf(work[wi], t);
     let old = lightPool[it.disp];
     let list = listOf(it.g, it.v0);
-    let d0 = composeVoxel(it.g, it.v0, lightPool[it.acc], (old >> 12u) & 3u, list);
-    let d1 = composeVoxel(it.g, it.v0 + vec3<i32>(1, 0, 0), lightPool[it.acc + 1], (old >> 28u) & 3u, list);
+    let d0 = composeVoxel(it.g, it.v0, lightPool[it.acc], (old >> 14u) & 3u, list);
+    let d1 = composeVoxel(it.g, it.v0 + vec3<i32>(1, 0, 0), lightPool[it.acc + 1], (old >> 30u) & 3u, list);
     lightPool[it.disp] = d0 | (d1 << 16u);
 }
 
@@ -593,7 +598,8 @@ fn ddaNearest(g: i32, o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, lo: vec3<i32
 }
 
 // Light (linear 0-1 per channel) arriving at the hit face from the air cell in front of it, in grid g: the brighter
-// of the cell's direct sun (visibility x strength x the face's N.L, white) and its displayed light, per channel.
+// of the cell's direct sun (visibility x strength x the face's N.L, white) and its displayed light (which includes
+// its AO-darkened ambient, so ambient bounces too: it lifts deep corners a little), per channel.
 // Its accumulated bounce is read too: the display is recomposed once a frame, but near-camera repeats within the
 // frame need each other's fresh bounce to add their hops.
 fn radianceAt(g: i32, h: Hit) -> vec3<f32> {
@@ -602,10 +608,10 @@ fn radianceAt(g: i32, h: Hit) -> vec3<f32> {
     if (!r.ok) { return vec3<f32>(0.0); }
     let d = (lightPool[r.disp] >> r.shift) & 0xFFFFu;
     let acc = lightPool[r.acc];
-    let shown = vec3<f32>(decodeLevel(d & 15u), decodeLevel((d >> 4u) & 15u), decodeLevel((d >> 8u) & 15u));
+    let shown = select(decodeLight(d), vec3<f32>(0.0), isEmptyLight(d)); // not composed yet: nothing to reflect
     let bnc = vec3<f32>(f32(acc & 0xFFu), f32((acc >> 8u) & 0xFFu), f32((acc >> 16u) & 0xFFu)) / 255.0;
     let nW = normalize((grids[g].v2w * vec4<f32>(h.n, 0.0)).xyz);
-    let sun = f32((d >> 12u) & 3u) / 3.0 * p.bounce.y * max(dot(nW, -p.sunDir.xyz), 0.0);
+    let sun = f32((d >> 14u) & 3u) / 3.0 * p.bounce.y * max(dot(nW, -p.sunDir.xyz), 0.0);
     return max(vec3<f32>(sun), max(shown, bnc));
 }
 
@@ -816,12 +822,14 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
     }
 
     /// <summary>Composes the displayed light of the listed slots: lamp light (traced now, from the lamps in each
-    /// chunk's list) combined with the stored bounce times <paramref name="bounceScale"/>, plus the stored AO and the
-    /// sun level already in place. Run it after the sun and bounce passes.</summary>
-    public void DispatchCompose(GridStore store, float bounceScale, GpuBuffer work, int count)
+    /// chunk's list) combined with the stored bounce times <paramref name="bounceScale"/> and the flat
+    /// <paramref name="ambient"/> darkened by the stored AO times <paramref name="aoStrength"/>, keeping the sun level
+    /// already in place. Run it after the sun and bounce passes.</summary>
+    public void DispatchCompose(GridStore store, float bounceScale, float ambient, float aoStrength, GpuBuffer work, int count)
     {
         if (count <= 0) return;
-        var param = WriteParams(Vector3D<float>.Zero, count, new Vector4D<float>(0f, 0f, bounceScale, 0f), default);
+        var param = WriteParams(Vector3D<float>.Zero, count, new Vector4D<float>(0f, 0f, bounceScale, 0f),
+                                new Vector4D<float>(0f, 0f, ambient, aoStrength));
         Dispatch(_composePipeline, ComposeBindings, store, work, count, param, "Lighting: compose");
     }
 

@@ -31,9 +31,9 @@ const OCC_UNLOADED: i32 = " + GridStore.OccUnloaded + @";
 const OCC_ALL_SOLID: i32 = " + GridStore.OccAllSolid + @";
 const NO_SURFACE: u32 = " + GridStore.NoSurface + @"u;
 const SLOT_WORDS: u32 = " + GridStore.WordsPerSlot + @"u;
-const EMPTY_DISPLAY: u32 = 0x3000u;   // no light storage: full sun, no light, no AO
+const EMPTY_DISPLAY: u32 = 0xFFFFu;   // no light storage (or not lit yet): ambient and full sun
 
-// sunDir.w: sun strength (SunLight.Strength). lightParams.x: ray AO strength, .y: 1 = reference light path (see
+// sunDir.w: sun strength (SunLight.Strength). lightParams.x: unused (ray AO is in the voxel light), .y: 1 = reference light path (see
 // shadeFast), .z: ambient (0-1), .w: unused. camPos.xyz: camera world position. fog.xy: the world's fog start/end
 // (horizontal), fog.zw: the cloud layer's (see CloudLayer), in blocks from the camera. zenith/horizon.rgb: the sky
 // gradient (see SkySettings). horizon.w: the distance haze's strength (0-1), haze.rgb its colour, haze.w its distance.
@@ -330,18 +330,19 @@ fn slotDisplay(s: u32, v: vec3<i32>) -> u32 {
 
 fn displayAt(v: vec3<i32>) -> u32 { return slotDisplay(brickSlot(entryOf(model.grid, v >> vec3<u32>(5u)), v), v); }
 
-fn decodeLevel(c: u32) -> f32 { let f = f32(c) / 15.0; return f * f; }
+" + GridStore.LightCodecWgsl + @"
 
-// One cell's light: sky (the flat ambient scaled by the ray AO occlusion, weighted by camera.lightParams.x), RGB
-// (lamp and bounce light) and sun visibility 0-1.
+// One cell's light: sky (the flat ambient, only where there is no stored light), RGB (everything else: ambient
+// darkened by the ray AO, lamps and bounce, see LightCodecWgsl) and sun visibility 0-1.
 struct Cell { sky: f32, rgb: vec3<f32>, sun: f32 };
 
 fn cellAt(v: vec3<i32>) -> Cell {
     let d = displayAt(v);
     var c: Cell;
-    c.sky = camera.lightParams.z * (1.0 - camera.lightParams.x * f32(d >> 14u) / 3.0);
-    c.rgb = vec3<f32>(decodeLevel(d & 15u), decodeLevel((d >> 4u) & 15u), decodeLevel((d >> 8u) & 15u));
-    c.sun = f32((d >> 12u) & 3u) / 3.0;
+    if (isEmptyLight(d)) { c.sky = camera.lightParams.z; c.rgb = vec3<f32>(0.0); c.sun = 1.0; return c; }
+    c.sky = 0.0;
+    c.rgb = decodeLight(d);
+    c.sun = f32((d >> 14u) & 3u) / 3.0;
     return c;
 }
 
@@ -523,9 +524,8 @@ fn weighed(inc: bool, v: vec3<i32>, homeBrick: vec3<i32>, homeSlot: u32, homeEnt
     if (all((v >> vec3<u32>(3u)) == homeBrick)) { d = slotDisplay(homeSlot, v); }
     else if (all((v >> vec3<u32>(5u)) == (homeBrick >> vec3<u32>(2u)))) { d = slotDisplay(brickSlot(homeEntry, v), v); }
     else { d = displayAt(v); }
-    r.a = vec4<f32>(camera.lightParams.z * (1.0 - camera.lightParams.x * f32(d >> 14u) / 3.0),
-                    decodeLevel(d & 15u), decodeLevel((d >> 4u) & 15u), decodeLevel((d >> 8u) & 15u));
-    r.sun = f32((d >> 12u) & 3u) / 3.0;
+    if (isEmptyLight(d)) { r.a = vec4<f32>(camera.lightParams.z, 0.0, 0.0, 0.0); r.sun = 1.0; }
+    else { r.a = vec4<f32>(0.0, decodeLight(d)); r.sun = f32((d >> 14u) & 3u) / 3.0; }
     r.w = 1.0;
     return r;
 }

@@ -102,8 +102,40 @@ public sealed class GridStore : IDisposable
     /// mask low, high, 0, 0).</summary>
     public const int ChunkEntryBytes = 32;
 
-    /// <summary>A fresh display word (two voxels): full sun, no light, no AO — ambient and sun only.</summary>
-    public const uint EmptyDisplayPair = 0x30003000u;
+    /// <summary>A fresh display word (two voxels): not composed yet (brightness 511, see <see cref="LightCodecWgsl"/>),
+    /// which renders like no light storage — ambient and full sun — until the brick is lit.</summary>
+    public const uint EmptyDisplayPair = 0xFFFFFFFFu;
+
+    /// <summary>
+    /// WGSL for the display light of a voxel (the low 14 bits of its display u16): brightness, the brightest channel
+    /// on a square curve (bits 0-8, 0-510; 511 = not composed / no light storage), and warmth (bits 9-13, 0-30), a
+    /// tint along one line from cool blue-white (0) through white (15) to deep red (30). Colours off that line are
+    /// carried to its nearest tint (green and blue lamps read as cool white). 9 bits keep ambient darkened by ray AO
+    /// smooth: near full ambient a step is about 1% of it, finer than one bounce ray.
+    /// </summary>
+    public const string LightCodecWgsl = @"
+fn warmTint(w: f32) -> vec3<f32> {
+    if (w >= 0.5) { let s = 2.0 * w - 1.0; return vec3<f32>(1.0, 1.0 - 0.75 * s, 1.0 - 0.9 * s); }
+    let s = 1.0 - 2.0 * w;
+    return vec3<f32>(1.0 - 0.4 * s, 1.0 - 0.25 * s, 1.0);
+}
+fn isEmptyLight(d: u32) -> bool { return (d & 511u) == 511u; }
+fn decodeLight(d: u32) -> vec3<f32> {
+    let f = f32(d & 511u) / 510.0;
+    return f * f * warmTint(f32((d >> 9u) & 31u) / 30.0);
+}
+fn encodeLight(c: vec3<f32>) -> u32 {
+    let m = max(c.r, max(c.g, c.b));
+    var w = 0.5;
+    if (m > 0.0) {
+        // Least-squares nearest point on the tint line, on whichever side of white the colour leans.
+        let t = c / m;
+        if (t.r >= t.b) { w = 0.5 + 0.5 * clamp((0.75 * (1.0 - t.g) + 0.9 * (1.0 - t.b)) / 1.3725, 0.0, 1.0); }
+        else { w = 0.5 - 0.5 * clamp((0.4 * (1.0 - t.r) + 0.25 * (1.0 - t.g)) / 0.2225, 0.0, 1.0); }
+    }
+    return u32(round(510.0 * sqrt(clamp(m, 0.0, 1.0)))) | (u32(round(w * 30.0)) << 9u);
+}
+";
 
     /// <summary>WGSL for every shader that reads the store: the grid descriptor (see <see cref="GridDesc"/>) and the
     /// chunk-table lookup. The including shader declares the <c>chunkTable</c> and <c>grids</c> bindings.</summary>

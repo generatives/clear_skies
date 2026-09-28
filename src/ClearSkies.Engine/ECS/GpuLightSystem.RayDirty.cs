@@ -85,7 +85,7 @@ public sealed partial class GpuLightSystem
     private int _prevBounceRays = -1, _prevBounceCycle = -1;
 
     private bool _rayWasActive, _relightRequested;
-    private float _prevShownScale = -1f;
+    private (float scale, float ambient, float ao) _prevShown = (-1f, -1f, -1f);
     private Vector3D<float> _prevSunDir;
     private readonly List<WorldLamp> _prevLamps = new();
     private HashSet<(int, int, int, int, int)> _prevLampKeys = new(), _curLampKeys = new();
@@ -115,13 +115,14 @@ public sealed partial class GpuLightSystem
         _worldIndex = _gridStates.TryGetValue(_staticVolume.Gpu, out _worldState) ? _staticVolume.Gpu.Index : -1;
 
         var sunDir = SunLight.Direction;
-        // The bounce display scale is baked into the composed display, so changing it (or bounce on/off) recomposes.
-        float shownScale = _bounceEnabled ? _bounceScale : 0f;
-        bool scaleChanged = shownScale != _prevShownScale;
-        _prevShownScale = shownScale;
+        // The bounce display scale, ambient and AO strength are baked into the composed display, so changing any of them
+        // (or bounce on/off) recomposes.
+        var shown = (_bounceEnabled ? _bounceScale : 0f, RayLightingSettings.Ambient, RayLightingSettings.AoStrength);
+        bool scaleChanged = shown != _prevShown;
+        _prevShown = shown;
         bool relightAll = !_rayWasActive || sunDir != _prevSunDir || _relightRequested || scaleChanged;
         _dbgFullReason = !_rayWasActive ? "first frame" : sunDir != _prevSunDir ? "sun moved" : _relightRequested ? "requested"
-                       : scaleChanged ? "bounce display changed" : "";
+                       : scaleChanged ? "display settings changed" : "";
         _rayWasActive = true;
         _relightRequested = false;
         _prevSunDir = sunDir;
@@ -172,10 +173,11 @@ public sealed partial class GpuLightSystem
         // complete ray set equally.
         int hold = System.Math.Min(64, (_bounceHoldFrames + _bounceCycle - 1) / _bounceCycle * _bounceCycle);
 
-        // Bounce inputs that change what every surface receives (or which rays it fires): re-evaluate everything.
+        // Bounce inputs that change what every surface receives (or which rays it fires): re-evaluate everything. The
+        // displayed light bounce rays read includes the AO-darkened ambient, so that counts too.
         bool bounceOn = _bounceEnabled;
         bool bounceReset = bounceOn && (!_prevBounceEnabled || _bounceAlbedo != _prevBounceAlbedo || SunLight.Level != _prevSunLevel
-                                        || _bounceRays != _prevBounceRays || _bounceCycle != _prevBounceCycle);
+                                        || _bounceRays != _prevBounceRays || _bounceCycle != _prevBounceCycle || scaleChanged);
         _prevBounceEnabled = bounceOn;
         _prevBounceAlbedo = _bounceAlbedo;
         _prevSunLevel = SunLight.Level;
@@ -242,7 +244,8 @@ public sealed partial class GpuLightSystem
         {
             _lampTimer.Start();
             _composeWork = UploadWords(_composeWork, _composeList.AsSpan(0, preCompose));
-            _rayLight.DispatchCompose(_store, _bounceEnabled ? _bounceScale : 0f, _composeWork, preCompose);
+            _rayLight.DispatchCompose(_store, _bounceEnabled ? _bounceScale : 0f, RayLightingSettings.Ambient,
+                                     RayLightingSettings.AoStrength, _composeWork, preCompose);
             _lampTimer.Stop();
         }
 
@@ -291,7 +294,8 @@ public sealed partial class GpuLightSystem
         {
             _lampTimer.Start();
             _finalComposeWork = UploadWords(_finalComposeWork, _composeList.AsSpan(0, _composeCount));
-            _rayLight.DispatchCompose(_store, _bounceEnabled ? _bounceScale : 0f, _finalComposeWork, _composeCount);
+            _rayLight.DispatchCompose(_store, _bounceEnabled ? _bounceScale : 0f, RayLightingSettings.Ambient,
+                                     RayLightingSettings.AoStrength, _finalComposeWork, _composeCount);
             _lampTimer.Stop();
         }
         _rayLight.Submit();
@@ -949,7 +953,8 @@ public sealed partial class GpuLightSystem
     private void ComposeNear()
     {
         _lampTimer.Start();
-        _rayLight.DispatchCompose(_store, _bounceEnabled ? _bounceScale : 0f, _nearComposeWork!, _nearCount);
+        _rayLight.DispatchCompose(_store, _bounceEnabled ? _bounceScale : 0f, RayLightingSettings.Ambient,
+                                     RayLightingSettings.AoStrength, _nearComposeWork!, _nearCount);
         _lampTimer.Stop();
     }
 
