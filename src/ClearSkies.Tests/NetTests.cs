@@ -141,7 +141,7 @@ public class TransportTests
     {
         var s = new BodySnapshot
         {
-            Entity = 1234, Epoch = 3, ShapeVersion = 9, Support = 1100, Position = new Vector3(1.5f, -2, 300),
+            Entity = 1234, Epoch = 3, Support = 1100, Position = new Vector3(1.5f, -2, 300),
             Rotation = Quaternion.CreateFromYawPitchRoll(0.3f, 0.2f, 0.1f), LinearVelocity = new Vector3(1, 2, 3),
             AngularVelocity = new Vector3(0.5f, 0, -0.25f), Flags = SnapshotFlags.HasLook, Look = new LookAngles(-2.5f, 0.4f),
         };

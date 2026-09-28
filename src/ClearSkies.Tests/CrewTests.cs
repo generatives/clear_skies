@@ -123,31 +123,35 @@ public class CrewTests
         Assert.True(Vector3.Distance(inTerrain, new Vector3(11.5f, 40.5f, 11.5f)) < 0.5f);
     }
 
-    [Fact]
-    public void AGridSnapshotWaitsForTheEditItFollows()
+    /// <summary>Where a grid's voxel (0,0,0) is drawn.</summary>
+    private static Vector3 DrawnOrigin(Entity grid)
     {
-        var (game, ship, client, crew) = ShipWithCrew(latencyMs: 0);
+        ref readonly var t = ref grid.Get<Transform>();
+        return GridFrame.Origin(grid, new Vector3(t.Position.X, t.Position.Y, t.Position.Z),
+                                new Quaternion(t.Rotation.X, t.Rotation.Y, t.Rotation.Z, t.Rotation.W));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void AnEditDoesNotShakeTheShipsCopy(bool byTheCrew)
+    {
+        var (game, ship, client, crew) = ShipWithCrew();
         using var _ = game;
         uint id = ship.Get<NetId>().Value;
         var copy = client.Registry.Find(id)!.Value;
-        var bodies = (BodySync)client.Net!.Bodies!;
-        uint applied = client.Commands.LastEventNumber(PeerId.Host, id);
-
-        // A snapshot claiming a shape change the client hasn't seen yet.
-        var w = new NetWriter();
-        w.WriteUInt32(client.Clock.Tick + 50);
-        w.WriteUInt16(1);
-        new BodySnapshot { Entity = id, ShapeVersion = applied + 1, Position = new Vector3(100, 50, 0), Rotation = Quaternion.Identity }.Write(w);
-        var r = new NetReader(w.Written);
-        bodies.ReceiveFrame(PeerId.Host, ref r);
-        Assert.Equal(1, bodies.Parked);
-        Assert.NotEqual(client.Clock.Tick + 50, copy.Get<RemoteBody>().Buffer.LatestTick);
-
-        // The edit arrives: the snapshot goes in.
-        game.Host.Commands.Send(new EditVoxels { Volume = id, Editor = game.Host.World.GetEntities().With<LocalPlayer>().AsEnumerable().Single().Get<NetId>().Value,
-            Ops = new[] { VoxelOp.SetBlock(new(4, 1, 4), BlockId.Stone, BlockOrientation.Upright) } });
-        game.Tick(3);
-        Assert.Equal(0, bodies.Parked);
+        var before = DrawnOrigin(copy);
+        var pivot = GridFrame.Pivot(copy);
+        var editor = byTheCrew ? crew : game.Host.World.GetEntities().With<LocalPlayer>().AsEnumerable().Single();
+        (byTheCrew ? client : game.Host).Commands.Send(new EditVoxels { Volume = id, Editor = editor.Get<NetId>().Value,
+            Ops = new[] { VoxelOp.FillBox(new(1, 2, 1), 1, BlockId.Stone, BlockOrientation.Upright) } });
+        for (int i = 0; i < 40; i++)
+        {
+            game.Tick();
+            float off = Vector3.Distance(DrawnOrigin(copy), before);
+            Assert.True(off < 0.01f, $"{i} ticks after the edit the copy is drawn {off} blocks off");
+        }
+        Assert.True(Vector3.Distance(GridFrame.Pivot(copy), pivot) > 0.5f); // the edit did move its centre of mass
     }
 
     [Fact]

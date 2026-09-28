@@ -248,10 +248,10 @@ public sealed class OwnershipSystem : ISystem, IDebugUiSystem
         {
             // Followed from snapshots again, starting with ours: drawn from there until the new owner's arrive.
             var buffer = new SnapshotBuffer();
-            if (snapshot is { } s) buffer.Add(tick, s);
+            if (snapshot is { } s) buffer.Add(tick, s, _net.Clock.Tick);
             e.Set(new RemoteBody { Buffer = buffer });
         }
-        else if (snapshot is { } s && e.Has<RemoteBody>()) e.Get<RemoteBody>().Buffer.Add(tick, s);
+        else if (snapshot is { } s && e.Has<RemoteBody>()) e.Get<RemoteBody>().Buffer.Add(tick, s, _net.Clock.Tick);
     }
 
     /// <summary>Starts simulating an entity handed to this machine, from its handover snapshot carried forward to now.</summary>
@@ -266,7 +266,7 @@ public sealed class OwnershipSystem : ISystem, IDebugUiSystem
         if (snapshot is null) tick = _net.Clock.Tick;
 
         float ahead = System.Math.Clamp((int)(_net.Clock.Tick - tick), 0, 30) / 60f;
-        var position = s.Position + s.LinearVelocity * ahead;
+        var position = GridFrame.Centre(e, s.Position, s.Rotation) + s.LinearVelocity * ahead; // (a grid's is in block space)
         var rotation = Integrate(s.Rotation, s.AngularVelocity, ahead);
 
         // Where the body is here now (a kinematic copy, or just drawn): anyone of ours standing on it moves with it.
