@@ -167,17 +167,23 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 
     /// <summary>Where the drawn world is streamed around: the <see cref="TerrainInterestKind.Full"/> terrain interest
     /// (the local player's, see EntityPresenceSystem). Colliders-only interests get their colliders from what's loaded
-    /// here; streaming data around them too comes with multiplayer.</summary>
+    /// here. A dedicated server has no player of its own, so it streams around one of the ships it simulates instead:
+    /// without terrain under it, a ship never gets a body (and can't be unlocked or flown).</summary>
     private bool TryGetInterestCentre(out Vector3D<float> centre)
     {
+        bool any = false;
+        centre = default;
         foreach (ref readonly Entity e in _interests.GetEntities())
         {
-            if (e.Get<TerrainInterest>().Kind != TerrainInterestKind.Full) continue;
-            centre = e.Get<Transform>().Position;
-            return true;
+            if (e.Get<TerrainInterest>().Kind == TerrainInterestKind.Full)
+            {
+                centre = e.Get<Transform>().Position;
+                return true;
+            }
+            if (!any) centre = e.Get<Transform>().Position;
+            any = true;
         }
-        centre = default;
-        return false;
+        return any;
     }
 
     private static (short dx, short dz)[] BuildOffsetsByDistance(int radius)
