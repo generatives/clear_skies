@@ -105,17 +105,17 @@ public sealed class SetMoveModeHandler : PredictedCommandHandler<SetMoveMode, (u
     public override SetMoveMode Read(ref NetReader r) => new() { Player = r.ReadUInt32(), FreeFly = r.ReadBool() };
 
     public override Verdict Validate(ref SetMoveMode c, in CommandContext ctx)
-        => _registry.Find(c.Player) is { } e && e.Has<CharacterModeComponent>() ? Verdict.Accept : Verdict.Reject;
+        => _registry.Find(c.Player) is { } e && e.Has<Player>() ? Verdict.Accept : Verdict.Reject;
 
     public override void Apply(in SetMoveMode e, in ApplyContext ctx) => Set(e.Player, e.FreeFly);
 
     public override (uint Player, bool FreeFly) Capture(in SetMoveMode c)
-        => (c.Player, _registry.Find(c.Player) is { } p && p.Has<CharacterModeComponent>() && p.Get<CharacterModeComponent>().FreeFly);
+        => (c.Player, _registry.Find(c.Player) is { } p && p.Has<FreeFlying>());
 
     public override void Restore(in (uint Player, bool FreeFly) undo) => Set(undo.Player, undo.FreeFly);
 
     private void Set(uint player, bool freeFly)
     {
-        if (_registry.Find(player) is { } p && p.Has<CharacterModeComponent>()) p.Get<CharacterModeComponent>().FreeFly = freeFly;
+        if (_registry.Find(player) is { } p && p.Has<Player>()) Players.SetFreeFlying(p, freeFly);
     }
 }
