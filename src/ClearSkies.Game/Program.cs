@@ -163,9 +163,9 @@ var airshipFlight = new AirshipFlightSystem(host.World, host.Physics);
 host.AddSystem(airshipFlight, SystemStage.Simulation);
 var presence = new EntityPresenceSystem(host.World, session, staticVolume, ViewDistance)
 {
-    // Entities are drawn out to the load window; a grid owned here gets a body once the terrain around it has loaded
-    // with colliders, so nothing loaded from the save falls through the world.
-    RenderDistance = EntityStreamingSystem.LoadWindow,
+    // Entities are drawn as far as the terrain, but no further than the load window; a grid owned here gets a body
+    // once the terrain around it has loaded with colliders, so nothing loaded from the save falls through the world.
+    RenderDistanceLimit = EntityStreamingSystem.LoadWindow,
     TerrainReady = p => chunkLoadSystem.IsTerrainLoaded(new Vector3D<float>(p.X, p.Y, p.Z), 64f) &&
                         physicsBody.CollidersReady(staticVolume, p, 64f),
 };
