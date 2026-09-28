@@ -17,7 +17,7 @@ public static class PlayerFactory
     public const float EyeHeight = 0.7f;
     public const float LookSensitivity = 0.0025f;
 
-    public static Entity Create(World world, PhysicsWorld physics, uint netId, NetOwner owner, PlayerDescription d)
+    public static Entity Create(World world, PhysicsWorld physics, EntityId id, NetOwner owner, PlayerDescription d)
     {
         var player = world.CreateEntity();
         player.Set(new Transform { Position = PhysicsConv.ToSilk(d.Position), Rotation = Quaternion<float>.Identity, Scale = Vector3D<float>.One });
@@ -46,7 +46,7 @@ public static class PlayerFactory
         player.Set(new Support());
         player.Set(new InterpolatedTransform { PositionOnly = true }); // moved by ticks, turned per frame by mouse-look
         player.Set(new Player { Id = d.Id, Name = d.Name, IsLocal = owner.IsLocal });
-        player.Set(new NetId { Value = netId });
+        player.Set(id);
         player.Set(owner);
         player.Set<OwnPresence>();
         if (owner.IsLocal)

@@ -39,18 +39,18 @@ host.Renderer.LoadTextureAtlas(
     Path.Combine(AppContext.BaseDirectory, "Resources", "spritesheet_tiles.png"),
     Path.Combine(AppContext.BaseDirectory, "Resources", "spritesheet_tiles.xml"));
 
-// Session: single-player is a host session with nobody connected. Network IDs and owners exist, all local.
+// Session: single-player is a host session with nobody connected. Entity IDs and owners exist, all local.
 var session = Session.SinglePlayer();
-var registry = new NetRegistry(host.World);
-var idAllocator = new NetIdAllocator();
+var registry = new EntityRegistry(host.World);
+var idAllocator = new EntityIdAllocator();
 registry.RequestBlock = idAllocator.NextBlock;
 
 // The static world is a volume like any other, with an identity Transform (set by ChunkVolume), and a
-// reserved network ID. Its chunks each decide their own presence layers (see EntityPresenceSystem).
+// reserved entity ID. Its chunks each decide their own presence layers (see EntityPresenceSystem).
 var staticVolumeEntity = host.World.CreateEntity();
 var staticVolume = new ChunkVolume(staticVolumeEntity, host.World) { MeshIgnoresNeighbours = true, ChunksOwnPresence = true };
 staticVolumeEntity.Set(new ChunkGrid() { Volume = staticVolume });
-staticVolumeEntity.Set(new NetId { Value = NetRegistry.WorldVolume });
+staticVolumeEntity.Set(EntityRegistry.WorldVolume);
 staticVolumeEntity.Set(session.LocalOwner());
 staticVolumeEntity.Set<Rendered>();
 
@@ -86,15 +86,7 @@ host.AddSystem(inputSample, SystemStage.Simulation); // ...and hands it to the t
 var commands = new CommandSystem(session, registry, () => host.Time.Tick);
 var blockEntities = new BlockEntities(host.World, registry);
 var editLimits = new EditLimits();
-commands.Register(new EditVoxelsHandler(blockEntities, editLimits));
-commands.Register(new SetLeverHandler(blockEntities));
-commands.Register(new SetWheelHandler(blockEntities));
-commands.Register(new SetGridLockedHandler(registry, host.Physics));
-commands.Register(new RightGridHandler(registry, host.Physics));
-commands.Register(new SetMoveModeHandler(registry));
-commands.Register(new SpawnGridHandler(host.World, registry, session, host.Physics, gridSelection));
-commands.Register(new SpawnPlayerHandler(host.World, registry, session, host.Physics));
-commands.Register(new DespawnEntityHandler(registry));
+GameCommands.RegisterAll(commands, host.World, session, blockEntities, editLimits, registry, host.Physics, gridSelection);
 
 var physicsBody = new PhysicsBodySystem(host.World, host.Physics);
 

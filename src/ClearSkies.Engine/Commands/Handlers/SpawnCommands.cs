@@ -10,8 +10,8 @@ namespace ClearSkies.Engine.Commands.Handlers;
 /// <summary>Creates a grid from its description, or overwrites the grid with that ID in place.</summary>
 public struct SpawnGrid : ICommand
 {
-    /// <summary>0 in a new spawn: the authority assigns one.</summary>
-    public uint Id;
+    /// <summary>None in a new spawn: the authority assigns one.</summary>
+    public EntityId Id;
 
     /// <summary>Who will own it; set by the authority.</summary>
     public PeerId Owner;
@@ -26,33 +26,33 @@ public struct SpawnGrid : ICommand
 
 /// <summary>
 /// Spawns grids (G, loading a .grid file, loading from storage, joining, resyncing), and describes live ones. The
-/// authority assigns the network ID and owns the new grid. Apply creates it, or overwrites it in place if that ID
+/// authority assigns the entity ID and owns the new grid. Apply creates it, or overwrites it in place if that ID
 /// already exists, so a spawn received twice is harmless.
 /// </summary>
 public sealed class SpawnGridHandler : CommandHandler<SpawnGrid>, IDescriber
 {
     private readonly World _world;
-    private readonly NetRegistry _registry;
+    private readonly EntityRegistry _registry;
     private readonly Session _session;
     private readonly PhysicsWorld _physics;
     private readonly GridSelection? _selection;
     private readonly EntitySet _requested;
 
-    public SpawnGridHandler(World world, NetRegistry registry, Session session, PhysicsWorld physics, GridSelection? selection = null)
+    public SpawnGridHandler(World world, EntityRegistry registry, Session session, PhysicsWorld physics, GridSelection? selection = null)
     {
         _world = world;
         _registry = registry;
         _session = session;
         _physics = physics;
         _selection = selection;
-        _requested = world.GetEntities().With<DescribeRequest>().With<DynamicGrid>().With<ChunkGrid>().With<NetId>().AsSet();
+        _requested = world.GetEntities().With<DescribeRequest>().With<DynamicGrid>().With<ChunkGrid>().With<EntityId>().AsSet();
     }
 
     public override ushort Id => CommandIds.SpawnGrid;
 
     public override void Write(NetWriter w, in SpawnGrid c)
     {
-        w.WriteUInt32(c.Id);
+        c.Id.Write(w);
         w.WriteUInt32(c.Owner.Value);
         w.WriteBool(c.Select);
         c.Grid.Write(w);
@@ -60,17 +60,17 @@ public sealed class SpawnGridHandler : CommandHandler<SpawnGrid>, IDescriber
 
     public override SpawnGrid Read(ref NetReader r) => new()
     {
-        Id = r.ReadUInt32(), Owner = new PeerId(r.ReadUInt32()), Select = r.ReadBool(), Grid = GridDescription.Read(ref r),
+        Id = EntityId.Read(ref r), Owner = new PeerId(r.ReadUInt32()), Select = r.ReadBool(), Grid = GridDescription.Read(ref r),
     };
 
     /// <summary>A new grid is decided by the host (the spawning player's bubble owner, from N5); an existing one by its owner.</summary>
-    public override PeerId Authority(in SpawnGrid c, in AuthorityContext ctx) => c.Id == 0 ? ctx.Host : ctx.OwnerOf(c.Target);
+    public override PeerId Authority(in SpawnGrid c, in AuthorityContext ctx) => c.Id.IsNone ? ctx.Host : ctx.OwnerOf(c.Target);
 
     public override Verdict Validate(ref SpawnGrid c, in CommandContext ctx)
     {
         if (c.Grid is null || c.Grid.Voxels.Count == 0) return Verdict.Reject;
         foreach (var v in c.Grid.Voxels) if (!BlockRegistry.IsDefined(v.Id)) return Verdict.Reject;
-        if (c.Id == 0) c.Id = _registry.Allocate();
+        if (c.Id.IsNone) c.Id = _registry.Allocate();
         if (c.Owner == PeerId.None) c.Owner = _session.LocalPeer;
         return Verdict.Accept;
     }
@@ -95,7 +95,7 @@ public sealed class SpawnGridHandler : CommandHandler<SpawnGrid>, IDescriber
         foreach (var grid in _requested.GetEntities().ToArray())
         {
             var owner = grid.Has<NetOwner>() ? grid.Get<NetOwner>().Owner : _session.LocalPeer;
-            sink.Add(grid, new SpawnGrid { Id = grid.Get<NetId>().Value, Owner = owner, Grid = DynamicGridFactory.Describe(grid, _physics) });
+            sink.Add(grid, new SpawnGrid { Id = grid.Get<EntityId>(), Owner = owner, Grid = DynamicGridFactory.Describe(grid, _physics) });
         }
     }
 }
@@ -103,8 +103,8 @@ public sealed class SpawnGridHandler : CommandHandler<SpawnGrid>, IDescriber
 /// <summary>Creates a player from their description, or moves the player with that ID to it.</summary>
 public struct SpawnPlayer : ICommand
 {
-    /// <summary>0 in a new spawn: the host assigns one.</summary>
-    public uint Id;
+    /// <summary>None in a new spawn: the host assigns one.</summary>
+    public EntityId Id;
 
     /// <summary>The peer the player plays on: they own their own character.</summary>
     public PeerId Owner;
@@ -118,32 +118,32 @@ public struct SpawnPlayer : ICommand
 public sealed class SpawnPlayerHandler : CommandHandler<SpawnPlayer>, IDescriber
 {
     private readonly World _world;
-    private readonly NetRegistry _registry;
+    private readonly EntityRegistry _registry;
     private readonly Session _session;
     private readonly PhysicsWorld _physics;
     private readonly EntitySet _requested;
 
-    public SpawnPlayerHandler(World world, NetRegistry registry, Session session, PhysicsWorld physics)
+    public SpawnPlayerHandler(World world, EntityRegistry registry, Session session, PhysicsWorld physics)
     {
         _world = world;
         _registry = registry;
         _session = session;
         _physics = physics;
-        _requested = world.GetEntities().With<DescribeRequest>().With<Player>().With<NetId>().AsSet();
+        _requested = world.GetEntities().With<DescribeRequest>().With<Player>().With<EntityId>().AsSet();
     }
 
     public override ushort Id => CommandIds.SpawnPlayer;
 
     public override void Write(NetWriter w, in SpawnPlayer c)
     {
-        w.WriteUInt32(c.Id);
+        c.Id.Write(w);
         w.WriteUInt32(c.Owner.Value);
         c.Player.Write(w);
     }
 
     public override SpawnPlayer Read(ref NetReader r) => new()
     {
-        Id = r.ReadUInt32(), Owner = new PeerId(r.ReadUInt32()), Player = PlayerDescription.Read(ref r),
+        Id = EntityId.Read(ref r), Owner = new PeerId(r.ReadUInt32()), Player = PlayerDescription.Read(ref r),
     };
 
     public override PeerId Authority(in SpawnPlayer c, in AuthorityContext ctx) => ctx.Host;
@@ -151,7 +151,7 @@ public sealed class SpawnPlayerHandler : CommandHandler<SpawnPlayer>, IDescriber
     public override Verdict Validate(ref SpawnPlayer c, in CommandContext ctx)
     {
         if (c.Player is null) return Verdict.Reject;
-        if (c.Id == 0) c.Id = _registry.Allocate();
+        if (c.Id.IsNone) c.Id = _registry.Allocate();
         if (c.Owner == PeerId.None) c.Owner = ctx.Sender;
         return Verdict.Accept;
     }
@@ -175,7 +175,7 @@ public sealed class SpawnPlayerHandler : CommandHandler<SpawnPlayer>, IDescriber
         foreach (var player in _requested.GetEntities().ToArray())
         {
             var owner = player.Has<NetOwner>() ? player.Get<NetOwner>().Owner : _session.LocalPeer;
-            sink.Add(player, new SpawnPlayer { Id = player.Get<NetId>().Value, Owner = owner, Player = PlayerFactory.Describe(player) });
+            sink.Add(player, new SpawnPlayer { Id = player.Get<EntityId>(), Owner = owner, Player = PlayerFactory.Describe(player) });
         }
     }
 }
@@ -183,22 +183,22 @@ public sealed class SpawnPlayerHandler : CommandHandler<SpawnPlayer>, IDescriber
 /// <summary>Removes an entity (a grid, a player) and everything attached to it.</summary>
 public struct DespawnEntity : ICommand
 {
-    public uint Entity;
+    public EntityId Entity;
     public readonly EntityAddress Target => EntityAddress.Of(Entity);
 }
 
 public sealed class DespawnEntityHandler : CommandHandler<DespawnEntity>
 {
-    private readonly NetRegistry _registry;
-    public DespawnEntityHandler(NetRegistry registry) => _registry = registry;
+    private readonly EntityRegistry _registry;
+    public DespawnEntityHandler(EntityRegistry registry) => _registry = registry;
 
     public override ushort Id => CommandIds.DespawnEntity;
 
-    public override void Write(NetWriter w, in DespawnEntity c) => w.WriteUInt32(c.Entity);
-    public override DespawnEntity Read(ref NetReader r) => new() { Entity = r.ReadUInt32() };
+    public override void Write(NetWriter w, in DespawnEntity c) => c.Entity.Write(w);
+    public override DespawnEntity Read(ref NetReader r) => new() { Entity = EntityId.Read(ref r) };
 
     public override Verdict Validate(ref DespawnEntity c, in CommandContext ctx)
-        => c.Entity != NetRegistry.WorldVolume && _registry.IsLive(c.Entity) ? Verdict.Accept : Verdict.Reject;
+        => c.Entity != EntityRegistry.WorldVolume && _registry.IsLive(c.Entity) ? Verdict.Accept : Verdict.Reject;
 
     public override void Apply(in DespawnEntity e, in ApplyContext ctx)
     {
