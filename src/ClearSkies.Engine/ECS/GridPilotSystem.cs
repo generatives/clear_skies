@@ -185,7 +185,7 @@ public sealed class GridPilotSystem : ISystem
         if (_pilotedGridRoot.IsAlive && _camera.IsAlive) _camera.Set(CameraLocal());
     }
 
-    /// <summary>The camera in the grid's block space, about its centre of mass (the volume's pivot, which edits move):
+    /// <summary>The camera in the grid's block space, about its centre of mass (its body's offset, which edits move):
     /// the look turns it relative to the grid, and in third person it sits behind and above along that look, orbiting
     /// the grid as the mouse moves.</summary>
     private LocalTransform CameraLocal()
@@ -194,7 +194,7 @@ public sealed class GridPilotSystem : ISystem
         var offset = _cameraMode == GridCameraMode.ThirdPerson
             ? new Vector3D<float>(0, ThirdPersonUp, _cameraDistance)
             : new Vector3D<float>(0, LockedUp, 0);
-        var centre = _pilotedGridRoot.Get<ChunkGrid>().Volume.Pivot;
+        var centre = _pilotedGridRoot.Has<PhysicsBodyComponent>() ? _pilotedGridRoot.Get<PhysicsBodyComponent>().Offset : default;
         return new LocalTransform { Position = centre + Vec.Rotate(look, offset), Rotation = look, Scale = Vector3D<float>.One };
     }
 

@@ -17,8 +17,8 @@ namespace ClearSkies.Engine.Voxels;
 /// world (identity for the static world): world = root.Position + root.Rotation·voxel. Everything that maps between
 /// volume space and world space (chunk placement, lighting, raycasts) goes through that, so none of it needs to know
 /// whether the volume is static or has a physics body. Volumes are rigid: root scale is ignored. A dynamic grid's
-/// body sits at its centre of mass, <see cref="Pivot"/>, inside that space (see <see cref="BodyFrame"/>); edits move
-/// the centre of mass, never the volume's space.
+/// body sits at its centre of mass inside that space (<see cref="PhysicsBodyComponent.Offset"/>); edits move the
+/// centre of mass, never the volume's space.
 ///
 /// Chunk entities are <see cref="Hierarchy"/> children of <see cref="Root"/>, each at a <see cref="LocalTransform"/>
 /// of its chunk origin, so <see cref="HierarchyTransformSystem"/> carries them along with the root (and destroys them
@@ -40,12 +40,6 @@ public class ChunkVolume
     /// <summary>This volume's registration in the shared GPU voxel storage (see <see cref="GridStore"/>), kept in
     /// sync by GpuResidencySystem.</summary>
     public GridHandle Gpu { get; } = new();
-
-    /// <summary>A dynamic grid's centre of mass in this volume's own space, where its body's origin sits (Bepu puts a
-    /// compound body's origin there): kept in step with the body by PhysicsBodySystem, and an estimate (the middle
-    /// of its blocks) before it has one. Zero for the static world. It places nothing: the volume's space is its
-    /// <see cref="Root"/>'s Transform.</summary>
-    public Vector3D<float> Pivot { get; internal set; }
 
     /// <summary>The chunk layers <see cref="SetBlock(int, int, int, BlockId, BlockOrientation)"/> may change
     /// (inclusive); an edit outside them does nothing. Unlimited by default. ChunkLoadSystem limits the static world to

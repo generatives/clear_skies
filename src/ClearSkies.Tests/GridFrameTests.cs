@@ -14,6 +14,8 @@ public class GridFrameTests
     private static void Near(Vector3 expected, Vector3 actual, float tolerance = 1e-4f)
         => Assert.True(Vector3.Distance(expected, actual) < tolerance, $"expected {expected}, got {actual}");
 
+    private static Vector3D<float> Com(DefaultEcs.Entity grid) => grid.Get<PhysicsBodyComponent>().Offset;
+
     private static Vector3 BodyPosition(HeadlessScene scene, DefaultEcs.Entity grid)
         => scene.Physics.GetBodyPose(grid.Get<PhysicsBodyComponent>().Body).position;
 
@@ -28,7 +30,7 @@ public class GridFrameTests
         ref readonly var t = ref grid.Get<Transform>();
         Near(new Vector3(-4, 49.5f, -4), V(t.Position)); // voxel (0,0,0)'s corner
         Near(new Vector3(0, 50, 0), V(volume.VoxelToWorld(t, new Vector3D<float>(4, 0.5f, 4))));
-        Near(new Vector3(4, 0.5f, 4), V(volume.Pivot));
+        Near(new Vector3(4, 0.5f, 4), V(Com(grid)));
         Near(new Vector3(0, 50, 0), BodyPosition(scene, grid));
     }
 
@@ -42,7 +44,7 @@ public class GridFrameTests
         var before = grid.Get<Transform>();
         var chunk = volume.All.First().Value.Entity;
         var chunkBefore = chunk.Get<Transform>().Position;
-        var pivotBefore = volume.Pivot;
+        var comBefore = Com(grid);
 
         for (int y = 1; y <= 4; y++) volume.SetBlock(7, y, 7, BlockId.Stone);
         scene.Tick(2);
@@ -50,9 +52,9 @@ public class GridFrameTests
         ref readonly var after = ref grid.Get<Transform>();
         Near(V(before.Position), V(after.Position));
         Near(V(chunkBefore), V(chunk.Get<Transform>().Position));
-        Assert.True(volume.Pivot.X > pivotBefore.X && volume.Pivot.Y > pivotBefore.Y && volume.Pivot.Z > pivotBefore.Z,
-                    $"the centre of mass should move towards the new column: {pivotBefore} → {volume.Pivot}");
-        Near(V(after.Position) + V(volume.Pivot), BodyPosition(scene, grid));
+        Assert.True(Com(grid).X > comBefore.X && Com(grid).Y > comBefore.Y && Com(grid).Z > comBefore.Z,
+                    $"the centre of mass should move towards the new column: {comBefore} → {Com(grid)}");
+        Near(V(after.Position) + V(Com(grid)), BodyPosition(scene, grid));
     }
 
     [Fact]
@@ -68,8 +70,8 @@ public class GridFrameTests
         scene.Tick();
 
         ref readonly var t = ref grid.Get<Transform>();
-        // The body (the centre of mass) is where the pivot lands.
-        Near(new Vector3(10, 60, -5), V(volume.VoxelToWorld(t, volume.Pivot)));
+        // The body (the centre of mass) is where its offset lands.
+        Near(new Vector3(10, 60, -5), V(volume.VoxelToWorld(t, Com(grid))));
         Near(V(t.Position), V(volume.VoxelToWorld(t, Vector3D<float>.Zero)));
         var voxel = new Vector3D<float>(3.25f, 0.5f, 6.75f);
         Near(V(voxel), V(volume.WorldToVoxel(t, volume.VoxelToWorld(t, voxel))));
@@ -79,6 +81,6 @@ public class GridFrameTests
         volume.SetBlock(0, 1, 0, BlockId.Stone);
         scene.Tick(2);
         Near(corner, V(volume.VoxelToWorld(grid.Get<Transform>(), Vector3D<float>.Zero)));
-        Near(V(volume.VoxelToWorld(grid.Get<Transform>(), volume.Pivot)), BodyPosition(scene, grid));
+        Near(V(volume.VoxelToWorld(grid.Get<Transform>(), Com(grid))), BodyPosition(scene, grid));
     }
 }
