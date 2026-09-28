@@ -37,6 +37,7 @@ public sealed class HeadlessScene : IDisposable
     public ClearSkies.Net.Session.NetSession? Net;
     public ClearSkies.Net.Sync.RemoteBodySystem? RemoteBodies;
     private readonly List<Engine.Core.ISystem> _tick = new();
+    private readonly TickInterpolationSystem _interpolation;
 
     public readonly NetIdAllocator Ids;
     public WorldSaver? Saver;
@@ -79,6 +80,7 @@ public sealed class HeadlessScene : IDisposable
         _tick.Add(new PhysicsTransformSyncSystem(World, Physics));
         _tick.Add(hierarchy);
         _tick.Add(new SupportSystem(World, Physics));
+        _interpolation = new TickInterpolationSystem(World, new Engine.Core.Time()); // last, as in the game
     }
 
     /// <summary>Puts a network session's systems in the tick: receive first, body sync and send last.</summary>
@@ -112,6 +114,7 @@ public sealed class HeadlessScene : IDisposable
                 _rateCredit -= 1;
                 Clock.Tick++;
                 foreach (var s in _tick) s.Update(Dt);
+                _interpolation.Update(Engine.Core.SystemStage.Simulation, Dt);
             }
             RemoteBodies?.Update(Dt); // per frame in the game
         }

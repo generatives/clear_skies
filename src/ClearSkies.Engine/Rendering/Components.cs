@@ -60,18 +60,35 @@ public struct VoxelLit
 /// <see cref="GpuModel.FindNode"/>); a name the model doesn't have is ignored and the setter returns false. The
 /// component holds references to its arrays, so the setters work on the copy <c>Entity.Get</c> hands back and need no
 /// <c>Set</c> afterwards. Create it with the constructor; it starts at the model's rest pose.
+///
+/// Nodes posed by ticks are drawn between their last two ticked rotations, like Transforms (see
+/// <see cref="ClearSkies.Engine.ECS.TickInterpolationSystem"/>, which records each tick's rotations with
+/// <see cref="EndTick"/>): the rotations set here stay the true pose, and <see cref="ComputeDrawnPose"/> blends. A node
+/// set outside the ticks, so that it no longer matches the last tick's rotation, is drawn as set.
 /// </summary>
 public struct RenderedModel
 {
     private readonly GpuModel _model;
     private readonly Quaternion<float>[] _rotations; // each node's local rotation, indexed like _model.Nodes
-    private readonly Mat4[] _pose;                   // each node's model-space matrix, as of the last ComputePose
+    private readonly Mat4[] _pose;                   // each node's model-space matrix, as of the last ComputeDrawnPose
+    private readonly Ticked _ticked;
+
+    // Each node's rotation as of the last two ticks, and the rotations last drawn with.
+    private sealed class Ticked
+    {
+        public Quaternion<float>[] Previous, Current;
+        public readonly Quaternion<float>[] Drawn;
+        public bool Started;
+
+        public Ticked(int nodes) { Previous = new Quaternion<float>[nodes]; Current = new Quaternion<float>[nodes]; Drawn = new Quaternion<float>[nodes]; }
+    }
 
     public RenderedModel(GpuModel model)
     {
         _model     = model;
         _rotations = model.Nodes.Select(n => n.Rotation).ToArray();
         _pose      = (Mat4[])model.RestPose.Clone();
+        _ticked    = new Ticked(_rotations.Length);
     }
 
     public readonly GpuModel Model => _model;
@@ -107,11 +124,37 @@ public struct RenderedModel
         for (int i = 0; i < _rotations.Length; i++) _rotations[i] = _model.Nodes[i].Rotation;
     }
 
-    /// <summary>Recomputes the pose from the current node rotations and returns it: one model-space matrix per
-    /// node, for <c>Renderer.DrawModel</c>. Called by the renderer for visible entities only.</summary>
-    public readonly ReadOnlySpan<Mat4> ComputePose()
+    /// <summary>End of a tick: records the tick's rotations. The first tick recorded starts there, with nothing to
+    /// blend from.</summary>
+    public readonly void EndTick()
     {
-        _model.ComputePose(_pose, _rotations);
+        var t = _ticked;
+        if (t is null) return; // default-constructed: nothing to record
+        if (!t.Started)
+        {
+            _rotations.CopyTo(t.Previous, 0);
+            _rotations.CopyTo(t.Current, 0);
+            t.Started = true;
+            return;
+        }
+        (t.Previous, t.Current) = (t.Current, t.Previous);
+        _rotations.CopyTo(t.Current, 0);
+    }
+
+    /// <summary>Computes the pose to draw and returns it: one model-space matrix per node, for
+    /// <c>Renderer.DrawModel</c>, with each node <paramref name="alpha"/> of the way from its previous tick's rotation
+    /// to its latest (see <see cref="EndTick"/>). Called by the renderer for visible entities only.</summary>
+    public readonly ReadOnlySpan<Mat4> ComputeDrawnPose(float alpha)
+    {
+        var t = _ticked;
+        for (int i = 0; i < _rotations.Length; i++)
+        {
+            var r = _rotations[i];
+            t.Drawn[i] = t.Started && r == t.Current[i] && t.Previous[i] != r
+                ? Quaternion<float>.Slerp(t.Previous[i], r, alpha)
+                : r;
+        }
+        _model.ComputePose(_pose, t.Drawn);
         return _pose;
     }
 }
