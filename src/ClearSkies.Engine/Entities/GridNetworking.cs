@@ -6,7 +6,7 @@ using DefaultEcs;
 namespace ClearSkies.Engine.Entities;
 
 /// <summary>
-/// Makes every new dynamic grid a networked, supportable entity that decides its own presence: a entity ID, an owner
+/// Makes every new dynamic grid a networked, supportable entity that decides its own presence: an entity ID, an owner
 /// (this machine), <see cref="OwnPresence"/> and <see cref="Supportable"/>. Until spawning goes through spawn commands
 /// (which assign these themselves), this covers every way a grid is created: G-spawn, loading a .grid file and the test
 /// ship.

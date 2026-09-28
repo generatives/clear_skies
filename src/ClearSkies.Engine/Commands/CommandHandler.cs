@@ -31,8 +31,9 @@ public abstract class CommandHandlerBase
 /// </summary>
 public abstract class CommandHandler<T> : CommandHandlerBase where T : struct, ICommand
 {
-    /// <summary>Several per tick for one target: only the latest is sent (lever and wheel drags).</summary>
-    public virtual bool Coalesce => false;
+    /// <summary>Whether <paramref name="later"/>, sent in the same tick as <paramref name="earlier"/> and before it has
+    /// run, replaces it: a drag's settings, where only the latest per thing set is worth sending. Never, by default.</summary>
+    public virtual bool Coalesces(in T earlier, in T later) => false;
 
     public abstract void Write(NetWriter writer, in T command);
     public abstract T Read(ref NetReader reader);

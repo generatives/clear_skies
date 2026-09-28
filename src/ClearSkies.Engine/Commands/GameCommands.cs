@@ -23,8 +23,8 @@ public static class GameCommands
                                    PhysicsWorld physics)
     {
         commands.Register(new EditVoxelsHandler(blocks, limits));
-        commands.Register(new SetLeverHandler(blocks));
-        commands.Register(new SetWheelHandler(blocks));
+        commands.Register(new SetShipThrustHandler(registry));
+        commands.Register(new SetShipTurnHandler(registry));
         commands.Register(new SetGridLockedHandler(registry, physics));
         commands.Register(new RightGridHandler(registry, physics));
         commands.Register(new SetMoveModeHandler(registry));
@@ -35,8 +35,8 @@ public static class GameCommands
 public static class CommandIds
 {
     public const ushort EditVoxels = 1;
-    public const ushort SetLever = 2;
-    public const ushort SetWheel = 3;
+    public const ushort SetShipThrust = 2; // 2 and 3 were SetLever and SetWheel before any release
+    public const ushort SetShipTurn = 3;
     public const ushort SetGridLocked = 4;
     public const ushort RightGrid = 5;
     public const ushort SetMoveMode = 6;

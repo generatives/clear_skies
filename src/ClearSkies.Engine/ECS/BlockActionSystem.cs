@@ -18,7 +18,7 @@ namespace ClearSkies.Engine.ECS;
 /// click places <see cref="PlaceIndex"/> of <see cref="PlaceableBlocks"/> against the targeted face and right click
 /// breaks the targeted block (both <see cref="EditVoxels"/>), with a brush in creative mode; G spawns a one-block grid.
 /// Left-clicking an <see cref="Interactive"/> block uses it instead: <see cref="BlockInteraction"/>s are published for
-/// it until the button is released, with the mouse moving the control (whose system sends SetLever or SetWheel) rather
+/// it until the button is released, with the mouse moving the control (whose system sends SetShipThrust or SetShipTurn) rather
 /// than the view, which follows whatever point the control reports the player has hold of
 /// (<see cref="InteractionFocus"/>). Aims from the player's true eye and look, not the drawn camera. Split from the
 /// old PlayerInputSystem; the targeted-face highlight is <see cref="BlockTargetSystem"/>.

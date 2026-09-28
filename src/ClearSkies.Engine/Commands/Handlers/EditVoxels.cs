@@ -62,9 +62,8 @@ public sealed class EditLimits
 
 /// <summary>
 /// Applies <see cref="VoxelOp"/>s in voxel space. Validate enforces the <see cref="EditLimits"/>: box size by game mode,
-/// and reach from the editor's eye to every op, plus a margin. A new lever takes the setting of the levers already on
-/// its axis. AfterApply despawns a grid left empty. The undo holds the old blocks in the ops' area, and the state of
-/// the block entities there (lever values, wheel angles).
+/// and reach from the editor's eye to every op, plus a margin. AfterApply despawns a grid left empty. The undo holds the
+/// old blocks in the ops' area.
 /// </summary>
 public sealed class EditVoxelsHandler : PredictedCommandHandler<EditVoxels, EditVoxelsHandler.Undo>
 {
@@ -152,37 +151,6 @@ public sealed class EditVoxelsHandler : PredictedCommandHandler<EditVoxels, Edit
             if (op.IsSingle) volume.SetBlock(op.Min.X, op.Min.Y, op.Min.Z, op.Block, op.Orientation);
             else volume.FillBox(op.Min, op.Max, op.Block, op.Orientation);
         }
-        if (_blocks.Registry.Find(e.Volume) is { } root) AdoptLeverSettings(volume, root.Get<EntityId>(), e.Ops);
-    }
-
-    /// <summary>New levers take the setting of the levers already on their axis in the volume.</summary>
-    private void AdoptLeverSettings(ChunkVolume volume, EntityId volumeId, VoxelOp[] ops)
-    {
-        foreach (var op in ops)
-        {
-            if (op.Block != BlockId.Lever) continue;
-            for (int z = op.Min.Z; z <= op.Max.Z; z++)
-            for (int y = op.Min.Y; y <= op.Max.Y; y++)
-            for (int x = op.Min.X; x <= op.Max.X; x++)
-            {
-                if (!volume.TryGetBlockEntity(x, y, z, out var lever) || !lever.Has<Lever>()) continue;
-                foreach (var (other, sign) in _blocks.LeversOnSameAxis(lever))
-                {
-                    var p = other.Get<BlockRef>().Position;
-                    if (InAnyOp(ops, p)) continue; // placed by this same edit
-                    lever.Get<Lever>().Value = other.Get<Lever>().Value * sign;
-                    break;
-                }
-            }
-        }
-    }
-
-    private static bool InAnyOp(VoxelOp[] ops, Vector3D<int> p)
-    {
-        foreach (var op in ops)
-            if (p.X >= op.Min.X && p.X <= op.Max.X && p.Y >= op.Min.Y && p.Y <= op.Max.Y && p.Z >= op.Min.Z && p.Z <= op.Max.Z)
-                return true;
-        return false;
     }
 
     public override void AfterApply(in EditVoxels e, in CommandContext ctx)
@@ -196,12 +164,11 @@ public sealed class EditVoxelsHandler : PredictedCommandHandler<EditVoxels, Edit
 
     // ── undo ────────────────────────────────────────────────────────────────
 
-    /// <summary>What an edit changed: every cell in its ops' boxes as it was, and the block entity state there.</summary>
+    /// <summary>What an edit changed: every cell in its ops' boxes as it was.</summary>
     public sealed class Undo
     {
         public EntityId Volume;
         public readonly List<(VoxelOp Box, BlockId[] Blocks, byte[] Orientations)> Boxes = new();
-        public readonly List<(Vector3D<int> Cell, float? Lever, float? Wheel)> States = new();
     }
 
     public override Undo Capture(in EditVoxels c)
@@ -219,10 +186,6 @@ public sealed class EditVoxelsHandler : PredictedCommandHandler<EditVoxels, Edit
             {
                 blocks[i] = volume.GetBlock(x, y, z);
                 orientations[i] = volume.GetOrientation(x, y, z).ToByte();
-                if (volume.TryGetBlockEntity(x, y, z, out var be))
-                    undo.States.Add((new Vector3D<int>(x, y, z),
-                        be.Has<Lever>() ? be.Get<Lever>().Value : null,
-                        be.Has<SteeringWheel>() ? be.Get<SteeringWheel>().Angle : null));
             }
             undo.Boxes.Add((op, blocks, orientations));
         }
@@ -244,12 +207,6 @@ public sealed class EditVoxelsHandler : PredictedCommandHandler<EditVoxels, Edit
                 if (volume.GetBlock(x, y, z) != blocks[i] || volume.GetOrientation(x, y, z) != orientation)
                     volume.SetBlock(x, y, z, blocks[i], orientation);
             }
-        }
-        foreach (var (cell, lever, wheel) in undo.States)
-        {
-            if (!volume.TryGetBlockEntity(cell.X, cell.Y, cell.Z, out var be)) continue;
-            if (lever is { } l && be.Has<Lever>()) be.Get<Lever>().Value = l;
-            if (wheel is { } w && be.Has<SteeringWheel>()) be.Get<SteeringWheel>().Angle = w;
         }
     }
 }

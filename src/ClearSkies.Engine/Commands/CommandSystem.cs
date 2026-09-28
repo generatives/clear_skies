@@ -82,13 +82,12 @@ public sealed class CommandSystem : ISystem, IDebugUiSystem
         if (!_byType.TryGetValue(typeof(T), out var handler))
             throw new InvalidOperationException($"No handler is registered for {typeof(T).Name}.");
         var typed = (CommandHandler<T>)handler;
-        if (typed.Coalesce)
-            for (int i = _outgoingSent; i < _outgoingCommands.Count; i++)
-                if (_outgoingCommands[i] is OutgoingCommand<T> earlier && earlier.Command.Target == command.Target)
-                {
-                    earlier.Command = command;
-                    return;
-                }
+        for (int i = _outgoingSent; i < _outgoingCommands.Count; i++)
+            if (_outgoingCommands[i] is OutgoingCommand<T> earlier && typed.Coalesces(earlier.Command, command))
+            {
+                earlier.Command = command;
+                return;
+            }
         _outgoingCommands.Add(new OutgoingCommand<T>(typed, command));
     }
 
