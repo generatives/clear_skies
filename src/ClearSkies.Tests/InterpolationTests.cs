@@ -1,6 +1,7 @@
 using System.Numerics;
 using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Entities;
+using ClearSkies.Engine.Input;
 using DefaultEcs;
 using Silk.NET.Maths;
 using Xunit;
@@ -76,5 +77,58 @@ public class InterpolationTests
         _out.WriteLine($"{rough} rough frames of 180; {behind:0.00} ticks behind");
         Assert.True(rough <= 10, $"{rough} rough frames");
         Assert.InRange(behind, 0, 6);
+    }
+
+    /// <summary>Both players walk steadily across a platform, host and client each at 60 fps with a couple of
+    /// milliseconds of noise in their frame times: each draws the other moving as steadily as they draw themselves.
+    /// Arrivals wobble by a tick with frame timing; if the delay followed them it would keep speeding the body up and
+    /// slowing it down.</summary>
+    [Fact]
+    public void WalkingPlayersAreDrawnMovingSteadily()
+    {
+        var game = new LoopbackGame(30);
+        using var _ = game;
+        game.Host.SpawnPlatform(new Vector3(0, 50, 0), 64);
+        var hostPlayer = game.Host.SpawnLocalPlayer(new Vector3(-3, 52, 25));
+        game.Tick(2);
+        var (client, _) = game.Join("walker");
+        var clientPlayer = client.World.GetEntities().With<LocalPlayer>().AsEnumerable().Single();
+        Players.SetFreeFlying(clientPlayer, false);
+        clientPlayer.Get<CharacterControllerComponent>().Character.TeleportTo(new Vector3(3, 51.4f, 25));
+        game.Tick(60);
+        var hostSeen = client.Registry.Find(hostPlayer.Get<NetId>().Value)!.Value;
+        var clientSeen = game.Host.Registry.Find(clientPlayer.Get<NetId>().Value)!.Value;
+
+        var rng = new Random(2);
+        double now = 0, hostNoise = 0, clientNoise = 0;
+        var onClient = new List<(double T, float Z)>();
+        var onHost = new List<(double T, float Z)>();
+        for (int frame = 0; frame < 240; frame++)
+        {
+            hostPlayer.Get<PlayerInput>() = new PlayerInput { Held = PlayerButtons.Forward };
+            clientPlayer.Get<PlayerInput>() = new PlayerInput { Held = PlayerButtons.Forward };
+            double h = (rng.NextDouble() * 2 - 1) * 0.002, c = (rng.NextDouble() * 2 - 1) * 0.002;
+            game.Network.ManualTime += 1000.0 / 60.0;
+            now += 1 / 60.0;
+            game.Host.Frame(1 / 60.0 + h - hostNoise);
+            client.Frame(1 / 60.0 + c - clientNoise);
+            (hostNoise, clientNoise) = (h, c);
+            if (frame < 90) continue; // up to speed
+            onClient.Add((now + c, hostSeen.Get<Transform>().Position.Z));
+            onHost.Add((now + h, clientSeen.Get<Transform>().Position.Z));
+        }
+        float seenByClient = Jitter(onClient), seenByHost = Jitter(onHost);
+        _out.WriteLine($"off steady motion, frame to frame: host as the client sees them {seenByClient:0.0000}, client as the host sees them {seenByHost:0.0000} (a frame's step is about 0.08)");
+        Assert.True(seenByClient < 0.002f, $"the host's player jitters by up to {seenByClient} blocks a frame");
+        Assert.True(seenByHost < 0.002f, $"the client's player jitters by up to {seenByHost} blocks a frame");
+    }
+
+    /// <summary>The largest frame-to-frame change in how far a path is off a straight line in real time.</summary>
+    private static float Jitter(List<(double T, float Z)> path)
+    {
+        double mt = path.Average(p => p.T), mz = path.Average(p => p.Z);
+        double slope = path.Sum(p => (p.T - mt) * (p.Z - mz)) / path.Sum(p => (p.T - mt) * (p.T - mt));
+        var off = path.Select(p => p.Z - mz - slope * (p.T - mt)).ToList();
+        return (float)off.Zip(off.Skip(1), (a, b) => System.Math.Abs(b - a)).Max();
     }
 }

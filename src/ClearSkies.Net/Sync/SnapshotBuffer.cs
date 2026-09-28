@@ -8,10 +8,12 @@ namespace ClearSkies.Net.Sync;
 /// pair around the render tick is interpolated in the support's space, and with no newer snapshot the body is
 /// extrapolated from its last velocity for up to <see cref="MaxExtrapolationTicks"/>, then held.
 /// <para>The delay is as short as keeps a newer snapshot in hand: each arrival's lateness (our tick when it arrived,
-/// less the tick it was taken on) is kept for a couple of seconds, and the delay aims for the latest of them plus the
-/// gap between snapshots. It moves there by drawing up to <see cref="MaxSlew"/> faster or slower, or jumps when far
-/// off (a hitch on either machine). Lateness includes any error in the clocks, so it copes with the sender's ticks
-/// running behind or ahead of ours as well as with the network.</para>
+/// less the tick it was taken on) is kept for a couple of seconds, and what's <see cref="Needed"/> is the latest of
+/// them plus the gap between snapshots. Arrivals wobble by a tick with frame timing, so the delay holds steady while
+/// it's within <see cref="Slack"/> above that: it only goes up when snapshots come later than it allows, and down when
+/// it's well over. Changing it plays the body faster or slower, up to <see cref="MaxSlew"/>, which shows as a stutter
+/// in how it moves; far off (a hitch on either machine) it jumps. Lateness includes any error in the clocks, so it
+/// copes with the sender's ticks running behind or ahead of ours as well as with the network.</para>
 /// </summary>
 public sealed class SnapshotBuffer
 {
@@ -21,8 +23,11 @@ public sealed class SnapshotBuffer
     public const double SendInterval = 2;
     /// <summary>Arrivals the lateness is judged over: about two seconds' worth.</summary>
     public const int LatenessWindow = 60;
-    /// <summary>The most faster or slower than real time the delay is caught up by (5%).</summary>
-    public const double MaxSlew = 0.05;
+    /// <summary>The most faster or slower than real time the delay is caught up by (2%).</summary>
+    public const double MaxSlew = 0.02;
+    /// <summary>How far over <see cref="Needed"/> the delay may be before it comes down, in ticks; it's set half a tick
+    /// over, so a tick's wobble either way in arrivals leaves it be.</summary>
+    public const double Slack = 1.5, Headroom = 0.5;
     /// <summary>Further off than this, in ticks, the delay jumps instead.</summary>
     public const double JumpTicks = 6;
     public const double MinDelay = 2;
@@ -34,7 +39,12 @@ public sealed class SnapshotBuffer
     /// <summary>How far behind our tick the body is drawn, in ticks.</summary>
     public double Delay { get; private set; }
 
-    /// <summary>What <see cref="Delay"/> is heading for: the latest recent arrival plus the gap between snapshots.</summary>
+    /// <summary>The least delay that keeps a newer snapshot in hand: the latest recent arrival plus the gap between
+    /// snapshots (and <see cref="Margin"/>).</summary>
+    public double Needed { get; private set; }
+
+    /// <summary>What <see cref="Delay"/> is heading for: where it is while it's enough and not far over
+    /// <see cref="Needed"/>, else half a tick over that.</summary>
     public double TargetDelay { get; private set; }
 
     /// <summary>Extra ticks of delay on top of what's needed (a debug setting).</summary>
@@ -50,8 +60,8 @@ public sealed class SnapshotBuffer
     {
         if (_lateness.Count == LatenessWindow) _lateness.Dequeue();
         _lateness.Enqueue(arrived - tick);
-        TargetDelay = System.Math.Max(MinDelay, _lateness.Max() + SendInterval) + Margin;
-        if (!_hasDelay) (Delay, _hasDelay) = (TargetDelay, true);
+        Needed = System.Math.Max(MinDelay, _lateness.Max() + SendInterval) + Margin;
+        if (!_hasDelay) (Delay, TargetDelay, _hasDelay) = (Needed + Headroom, Needed + Headroom, true);
 
         if (_samples.Count > 0 && tick <= _samples[^1].Tick)
         {
@@ -68,6 +78,7 @@ public sealed class SnapshotBuffer
     /// <summary>Moves <see cref="Delay"/> towards <see cref="TargetDelay"/> for a frame of <paramref name="ticks"/>.</summary>
     public void UpdateDelay(double ticks)
     {
+        if (Delay < Needed || Delay > Needed + Slack) TargetDelay = Needed + Headroom;
         double off = TargetDelay - Delay;
         if (System.Math.Abs(off) > JumpTicks) Delay = TargetDelay;
         else Delay += System.Math.Clamp(off, -MaxSlew * ticks, MaxSlew * ticks);
@@ -79,6 +90,7 @@ public sealed class SnapshotBuffer
     {
         int n = _lateness.Count;
         for (int i = 0; i < n; i++) _lateness.Enqueue(_lateness.Dequeue() + ticks);
+        Needed += ticks;
         TargetDelay += ticks;
         Delay += ticks;
     }
