@@ -34,6 +34,7 @@ public sealed unsafe class GpuTimer : IDebugUiSystem, IDisposable
         public string[] Names = new string[MaxQueries / 2];
         public int[] Items = new int[MaxQueries / 2];
         public long CpuTicks;             // Stopwatch time the frame was submitted
+        public long Frame;                // SubmittedFrames when it was submitted
     }
 
     private readonly Readback[] _ring = new Readback[Ring];
@@ -64,8 +65,25 @@ public sealed unsafe class GpuTimer : IDebugUiSystem, IDisposable
     private int _totalFrames;
     private double _totalBusyMs;
 
-    /// <summary>Starts summing GPU time per pass from the next frame read back (see <see cref="Totals"/>).</summary>
-    public void BeginTotals() { _totals.Clear(); _totalFrames = 0; _totalBusyMs = 0; }
+    /// <summary>Starts summing GPU time per pass from the next frame read back (see <see cref="Totals"/>), and keeping
+    /// each frame's own (see <see cref="FrameTimes"/>).</summary>
+    public void BeginTotals() { _totals.Clear(); _totalFrames = 0; _totalBusyMs = 0; _perFrame.Clear(); }
+
+    /// <summary>Frames submitted so far (each renderer frame resolves once, timed passes or not): the number of the
+    /// frame just submitted is this minus one.</summary>
+    public long SubmittedFrames { get; private set; }
+
+    // Since BeginTotals: each frame read back, by its number: busy ms and its passes' ms, heaviest first.
+    private readonly Dictionary<long, (double BusyMs, (string Name, double Ms)[] Passes)> _perFrame = new();
+
+    /// <summary>Frame <paramref name="frame"/>'s GPU time (since <see cref="BeginTotals"/>, once read back): busy ms and
+    /// each pass's ms, heaviest first. False if it wasn't timed (its readback was dropped, or it hasn't arrived).</summary>
+    public bool FrameTimes(long frame, out double busyMs, out (string Name, double Ms)[] passes)
+    {
+        bool ok = _perFrame.TryGetValue(frame, out var f);
+        (busyMs, passes) = ok ? f : (0, Array.Empty<(string, double)>());
+        return ok;
+    }
 
     /// <summary>Since <see cref="BeginTotals"/>: frames read back, their busy GPU ms in all, and per pass its ms in all
     /// and the frames it ran in. Only meaningful once the tick length is measured (<see cref="Calibrated"/>).</summary>
@@ -135,6 +153,7 @@ public sealed unsafe class GpuTimer : IDebugUiSystem, IDisposable
     internal void Resolve(CommandEncoder* enc)
     {
         _pending = null;
+        long frame = SubmittedFrames++;
         if (_passes == 0) return;
         var r = _ring[_nextRing];
         if (!r.Busy)
@@ -143,6 +162,7 @@ public sealed unsafe class GpuTimer : IDebugUiSystem, IDisposable
             _api.CommandEncoderResolveQuerySet(enc, _set, 0, n, _resolve!.Handle, 0);
             _api.CommandEncoderCopyBufferToBuffer(enc, _resolve.Handle, 0, r.Buffer.Handle, 0, n * 8);
             r.Count = _passes;
+            r.Frame = frame;
             Array.Copy(_names, r.Names, _passes);
             Array.Copy(_items, r.Items, _passes);
             _pending = r;
@@ -217,6 +237,9 @@ public sealed unsafe class GpuTimer : IDebugUiSystem, IDisposable
             var sum = _totals.GetValueOrDefault(name);
             _totals[name] = (sum.ms + ticks * _nsPerTick * 1e-6, sum.frames + 1);
         }
+        _perFrame[r.Frame] = (busy * _nsPerTick * 1e-6,
+                              _frameSums.Select(kv => (kv.Key, kv.Value.ticks * _nsPerTick * 1e-6))
+                                        .OrderByDescending(p => p.Item2).ToArray());
     }
 
     private void Calibrate(ulong gpuTicks, long cpuTicks)

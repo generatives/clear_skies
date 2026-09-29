@@ -23,7 +23,7 @@ public sealed unsafe class WorldMeshPool : IDisposable
     public const int PageQuads = 64;
     public const int PageBytes = PageQuads * (int)ChunkQuad.SizeBytes;
     private const int Bands = 1024; // at 4000 blocks' range, about a block apart nearby and 8 at the far end
-    private const int SlotInts = 8; // chunk table entry: x, y, z, grid, first page, pages, quads, flags
+    private const int SlotInts = 16; // chunk table entry: x, y, z, grid; first page, pages, quads, flags; where each face's quads end (6)
     private const int Group = 64;   // compute workgroup size
 
     private readonly GpuContext _ctx;
@@ -84,9 +84,10 @@ public sealed unsafe class WorldMeshPool : IDisposable
         => GpuBuffer.Create(_ctx, System.Math.Max(16UL, size), BufferUsage.Storage | BufferUsage.CopyDst | extra);
 
     /// <summary>Pools a chunk mesh: <paramref name="quadCount"/> packed quads of the chunk at <paramref name="pos"/> in
-    /// grid <paramref name="grid"/> (the static world, at the origin unrotated). Returns its slot, hidden until
-    /// <see cref="SetShown"/>, or -1 if the pool is full.</summary>
-    public int Add(ReadOnlySpan<byte> quads, uint quadCount, int grid, ChunkPosition pos)
+    /// grid <paramref name="grid"/> (the static world, at the origin unrotated), grouped by face (+X, -X, +Y, -Y, +Z,
+    /// -Z), each group ending at <paramref name="faceEnds"/>. Returns its slot, hidden until <see cref="SetShown"/>, or
+    /// -1 if the pool is full.</summary>
+    public int Add(ReadOnlySpan<byte> quads, uint quadCount, ReadOnlySpan<int> faceEnds, int grid, ChunkPosition pos)
     {
         int pages = (int)((quadCount + PageQuads - 1) / PageQuads);
         if (pages == 0) return -1;
@@ -99,6 +100,7 @@ public sealed unsafe class WorldMeshPool : IDisposable
         var e = _table.AsSpan(slot * SlotInts, SlotInts);
         e[0] = pos.X; e[1] = pos.Y; e[2] = pos.Z; e[3] = grid;
         e[4] = first; e[5] = pages; e[6] = (int)quadCount; e[7] = 0;
+        faceEnds.CopyTo(e.Slice(8, 6));
         MarkDirty(slot);
         Chunks++;
         return slot;
@@ -225,7 +227,7 @@ public sealed unsafe class WorldMeshPool : IDisposable
         if (!_groupsStale) return;
         _groupsStale = false;
         Release(ref _cullGroup); Release(ref _bandGroup); Release(ref _listGroup); Release(ref _drawGroup);
-        _cullGroup = _cullPass.CreateBindGroup(new[] { (0u, _cull), (1u, _chunks), (2u, _counters), (3u, _visChunks) });
+        _cullGroup = _cullPass.CreateBindGroup(new[] { (0u, _cull), (1u, _chunks), (2u, _counters), (3u, _visChunks), (4u, _visible) });
         _bandGroup = _bandPass.CreateBindGroup(new[] { (2u, _counters), (5u, _args) });
         _listGroup = _listPass.CreateBindGroup(new[] { (1u, _chunks), (2u, _counters), (3u, _visChunks), (4u, _visible) });
         if (_drawLayout == null) return;
@@ -260,10 +262,12 @@ public sealed unsafe class WorldMeshPool : IDisposable
         public uint Slots, Pad0, Pad1, Pad2;
     }
 
-    // Three passes: cull_main tests each chunk against the view and claims room in its distance band; band_main (one
-    // thread) turns the bands' page counts into start offsets and writes the draw arguments; list_main writes each
-    // visible chunk's pages at its place. Bands are spaced by the square root of the distance, so the near ones, where
-    // the order matters most, are narrow.
+    // Three passes: cull_main tests each chunk against the view, works out which faces may face the camera (a chunk's
+    // +X faces can't unless the camera is past the chunk's low X side, and so on: about half of all quads are skipped)
+    // and claims room in its distance band for the pages holding them; band_main (one thread) turns the bands' page
+    // counts into start offsets and writes the draw arguments; list_main writes each visible chunk's pages at its
+    // place. A page shared by two listed faces is listed once; the vertex shader drops the quads of faces not listed.
+    // Bands are spaced by the square root of the distance, so the near ones, where the order matters most, are narrow.
     private const string CullWgsl = @"
 struct Cull { planes: array<vec4<f32>, 6>, camera: vec4<f32>, slots: vec4<u32> };
 @group(0) @binding(0) var<uniform> cull: Cull;
@@ -277,12 +281,37 @@ const BANDS: u32 = 1024u;
 const PAGE_QUADS: u32 = 64u;
 const VISIBLE_COUNT: u32 = 2048u; // counters[2 * BANDS]
 
+// The pages of chunk slot holding the faces in mask (bit f: face f), in order, each once: counted, and when write is
+// set, listed from visible[start] as (page, slot | mask << 26).
+fn pagesOf(slot: u32, mask: u32, start: u32, write: bool) -> u32 {
+    let span = chunks[4u * slot + 1u];
+    let e0 = chunks[4u * slot + 2u];
+    let e1 = chunks[4u * slot + 3u];
+    var ends = array<u32, 6>(u32(e0.x), u32(e0.y), u32(e0.z), u32(e0.w), u32(e1.x), u32(e1.y));
+    var begin = 0u;
+    var unlisted = 0u; // the first page not listed yet
+    var n = 0u;
+    for (var f = 0u; f < 6u; f++) {
+        let stop = ends[f];
+        if (((mask >> f) & 1u) == 1u && stop > begin) {
+            let endPage = (stop - 1u) / PAGE_QUADS + 1u;
+            for (var p = max(begin / PAGE_QUADS, unlisted); p < endPage; p++) {
+                if (write) { visible[start + n] = vec2<u32>(u32(span.x) + p, slot | (mask << 26u)); }
+                n++;
+            }
+            unlisted = max(unlisted, endPage);
+        }
+        begin = stop;
+    }
+    return n;
+}
+
 @compute @workgroup_size(64)
 fn cull_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let slot = id.x;
     if (slot >= cull.slots.x) { return; }
-    let at = chunks[2u * slot];
-    let span = chunks[2u * slot + 1u];
+    let at = chunks[4u * slot];
+    let span = chunks[4u * slot + 1u];
     if (span.w == 0 || span.y == 0) { return; }
     let lo = vec3<f32>(at.xyz * 32);
     let hi = lo + vec3<f32>(32.0);
@@ -291,11 +320,16 @@ fn cull_main(@builtin(global_invocation_id) id: vec3<u32>) {
         let v = select(lo, hi, p.xyz >= vec3<f32>(0.0));
         if (dot(p.xyz, v) + p.w < 0.0) { return; }
     }
-    let d = length(lo + vec3<f32>(16.0) - cull.camera.xyz);
+    let c = cull.camera.xyz;
+    let mask = select(0u, 1u, c.x > lo.x) | select(0u, 2u, c.x < hi.x) | select(0u, 4u, c.y > lo.y)
+             | select(0u, 8u, c.y < hi.y) | select(0u, 16u, c.z > lo.z) | select(0u, 32u, c.z < hi.z);
+    let pages = pagesOf(slot, mask, 0u, false);
+    if (pages == 0u) { return; }
+    let d = length(lo + vec3<f32>(16.0) - c);
     let band = min(BANDS - 1u, u32(sqrt(d * cull.camera.w) * f32(BANDS)));
-    let offset = atomicAdd(&counters[band], u32(span.y));
+    let offset = atomicAdd(&counters[band], pages);
     let n = atomicAdd(&counters[VISIBLE_COUNT], 1u);
-    visChunks[n] = vec4<u32>(slot, band, offset, 0u);
+    visChunks[n] = vec4<u32>(slot, band, offset, mask);
 }
 
 @compute @workgroup_size(1)
@@ -313,11 +347,7 @@ fn band_main() {
 fn list_main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (id.x >= atomicLoad(&counters[VISIBLE_COUNT])) { return; }
     let v = visChunks[id.x];
-    let span = chunks[2u * v.x + 1u];
-    let start = atomicLoad(&counters[BANDS + v.y]) + v.z;
-    for (var p = 0u; p < u32(span.y); p++) {
-        visible[start + p] = vec2<u32>(u32(span.x) + p, v.x);
-    }
+    pagesOf(v.x, v.w, atomicLoad(&counters[BANDS + v.y]) + v.z, true);
 }
 ";
 }

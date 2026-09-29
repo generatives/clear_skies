@@ -310,9 +310,9 @@ fn vs_chunk_lines(@builtin(vertex_index) vi: u32) -> VSOut {
 
 // The world's chunks, all in one draw (see WorldMeshPool): their quads sit in one buffer in pages of 64, and each
 // instance draws one visible page, which the culling pass listed nearest first (roughly), with its chunk's slot in the
-// chunk table: xyz, grid, then first page, page count and quad count. Slots past the chunk's last
+// chunk table (xyz, grid, then first page, page count and quad count) and, in bits 26-31, which faces to draw. Slots past the chunk's last
 // quad collapse to a point, which draws nothing.
-@group(1) @binding(2) var<storage, read> visiblePages: array<vec2<u32>>; // (page, chunk slot)
+@group(1) @binding(2) var<storage, read> visiblePages: array<vec2<u32>>; // (page, chunk slot | faces << 26)
 @group(1) @binding(3) var<storage, read> worldChunks: array<vec4<i32>>;
 
 @vertex
@@ -327,16 +327,18 @@ fn vs_world_lines(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u
 }
 
 fn worldVertex(ii: u32, q: u32, corner: u32) -> VSOut {
-    let page = visiblePages[ii].x;
-    let slot = visiblePages[ii].y;
-    let at = worldChunks[2u * slot];
-    let span = worldChunks[2u * slot + 1u];
+    let v = visiblePages[ii];
+    let slot = v.y & 0x3FFFFFFu;
+    let at = worldChunks[4u * slot];
+    let span = worldChunks[4u * slot + 1u];
+    let quad = quads[v.x * PAGE_QUADS + q];
     var o: VSOut;
-    if ((page - u32(span.x)) * PAGE_QUADS + q >= u32(span.z)) {
+    // Past the chunk's last quad, or a face turned away (see the culling pass's mask): nothing.
+    if ((v.x - u32(span.x)) * PAGE_QUADS + q >= u32(span.z) || ((v.y >> (26u + ((quad.x >> 18u) & 7u))) & 1u) == 0u) {
         o.pos = vec4<f32>(0.0, 0.0, 0.0, 1.0);
         return o;
     }
-    let c = quadCorner(quads[page * PAGE_QUADS + q], corner);
+    let c = quadCorner(quad, corner);
     let world     = vec3<f32>(at.xyz * 32) + c.position;
     o.pos         = camera.proj * camera.view * vec4<f32>(world, 1.0);
     o.worldPos    = world;
@@ -1402,10 +1404,11 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     /// <summary>Uploads a static-world chunk mesh into the <see cref="WorldPool"/>, drawn with the rest of the world by
     /// <see cref="DrawWorldChunks"/> and hidden until <see cref="WorldMeshPool.SetShown"/>; a chunk that doesn't fit
     /// gets a mesh of its own (<see cref="UploadChunkQuads(ReadOnlySpan{byte}, uint)"/>).</summary>
-    public GpuMesh UploadWorldChunkQuads(ReadOnlySpan<byte> quads, uint quadCount, int grid, ChunkPosition chunk)
+    public GpuMesh UploadWorldChunkQuads(ReadOnlySpan<byte> quads, uint quadCount, ReadOnlySpan<int> faceEnds, int grid,
+                                         ChunkPosition chunk)
     {
         long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-        int slot = _worldPool.Add(quads, quadCount, grid, chunk);
+        int slot = _worldPool.Add(quads, quadCount, faceEnds, grid, chunk);
         if (slot < 0) return UploadChunkQuads(quads, quadCount);
         LastCreateMs = 0;
         LastWriteMs  = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;

@@ -28,6 +28,9 @@ public readonly struct ChunkQuad
 
     private ChunkQuad(uint a, uint b) { A = a; B = b; }
 
+    /// <summary>The way it faces: 0 +X, 1 -X, 2 +Y, 3 -Y, 4 +Z, 5 -Z.</summary>
+    public int Face => (int)((A >> 18) & 7);
+
     /// <summary>Packs the quad the mesher emitted as <paramref name="v"/> (its four corners, in its order).</summary>
     public static ChunkQuad Pack(ReadOnlySpan<Vertex> v)
     {

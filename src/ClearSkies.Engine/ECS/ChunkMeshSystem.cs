@@ -7,6 +7,7 @@ using ClearSkies.Engine.Gui;
 using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Rendering.WebGpu;
 using ClearSkies.Engine.Voxels;
+using Silk.NET.Maths;
 using DefaultEcs;
 using ImGuiNET;
 
@@ -52,7 +53,8 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
 
     /// <summary>A meshed chunk: its quads packed as <see cref="ChunkQuad"/>s (rented; the first <see cref="Bytes"/> are
     /// used), uploaded as one buffer.</summary>
-    private sealed record Result(Entity Entity, byte[] Packed, int Bytes, int QuadCount, ModelCell[] Models, Exception? Error);
+    private sealed record Result(Entity Entity, byte[] Packed, int Bytes, int QuadCount, int[] FaceEnds, ModelCell[] Models,
+                                 Exception? Error);
 
     /// <summary>Main-thread time spent uploading meshes per frame, at most (at least one goes each frame): results past
     /// it wait for the next frame, so a burst of finished jobs doesn't stall one.</summary>
@@ -98,17 +100,29 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     private readonly EntitySet _meshedChunks;
 
     /// <summary>Packs a chunk mesh for upload, off the main thread: each of the mesher's quads (four vertices; the
-    /// indices only ever join them as two triangles) as one 8-byte <see cref="ChunkQuad"/>. Returns the rented block,
-    /// its used length and the quad count.</summary>
-    private static (byte[] Packed, int Bytes, int Quads) PackQuads(ReadOnlySpan<Vertex> verts)
+    /// indices only ever join them as two triangles) as one 8-byte <see cref="ChunkQuad"/>, grouped by the way they
+    /// face (+X, -X, +Y, -Y, +Z, -Z), so the world's culling pass can skip the groups facing away from the camera.
+    /// Returns the rented block, its used length, the quad count and where each face's group ends.</summary>
+    private static (byte[] Packed, int Bytes, int Quads, int[] FaceEnds) PackQuads(ReadOnlySpan<Vertex> verts)
     {
         int quads = verts.Length / 4;
         int bytes = quads * (int)ChunkQuad.SizeBytes;
         var packed = ArrayPool<byte>.Shared.Rent(System.Math.Max(8, bytes));
         var dst = MemoryMarshal.Cast<byte, ChunkQuad>(packed.AsSpan(0, bytes));
-        for (int q = 0; q < quads; q++) dst[q] = ChunkQuad.Pack(verts.Slice(4 * q, 4));
-        return (packed, bytes, quads);
+        var ends = new int[6];
+        Span<int> at = stackalloc int[6];
+        for (int q = 0; q < quads; q++) ends[FaceOf(verts[4 * q].Normal)]++;
+        for (int f = 0, sum = 0; f < 6; f++) { at[f] = sum; sum += ends[f]; ends[f] = sum; }
+        for (int q = 0; q < quads; q++)
+        {
+            var quad = ChunkQuad.Pack(verts.Slice(4 * q, 4));
+            dst[at[quad.Face]++] = quad;
+        }
+        return (packed, bytes, quads, ends);
     }
+
+    private static int FaceOf(Vector3D<float> n)
+        => n.X > 0.5f ? 0 : n.X < -0.5f ? 1 : n.Y > 0.5f ? 2 : n.Y < -0.5f ? 3 : n.Z > 0.5f ? 4 : 5;
 
     private void Dispatch()
     {
@@ -151,12 +165,12 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                 {
                     // The mesher's lists are per-thread scratch, so copy out before this thread meshes again.
                     var (verts, _) = _meshers.Value!.Mesh(data, nX, pX, nY, pY, nZ, pZ);
-                    var (packed, bytes, quads) = PackQuads(CollectionsMarshal.AsSpan(verts));
-                    _results.Enqueue(new Result(entry.Entity, packed, bytes, quads, FindModelBlocks(data), null));
+                    var (packed, bytes, quads, faceEnds) = PackQuads(CollectionsMarshal.AsSpan(verts));
+                    _results.Enqueue(new Result(entry.Entity, packed, bytes, quads, faceEnds, FindModelBlocks(data), null));
                 }
                 catch (Exception e)
                 {
-                    _results.Enqueue(new Result(entry.Entity, Array.Empty<byte>(), 0, 0, Array.Empty<ModelCell>(), e));
+                    _results.Enqueue(new Result(entry.Entity, Array.Empty<byte>(), 0, 0, Array.Empty<int>(), Array.Empty<ModelCell>(), e));
                 }
                 finally
                 {
@@ -205,7 +219,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                     long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
                     var quads = r.Packed.AsSpan(0, r.Bytes);
                     mesh = volume.PoolMeshes && volume.Gpu.Index >= 0
-                        ? _renderer.UploadWorldChunkQuads(quads, (uint)r.QuadCount, volume.Gpu.Index, entry.Position)
+                        ? _renderer.UploadWorldChunkQuads(quads, (uint)r.QuadCount, r.FaceEnds, volume.Gpu.Index, entry.Position)
                         : _renderer.UploadChunkQuads(quads, (uint)r.QuadCount);
                     _uploadMs += 0.05 * (System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds - _uploadMs);
                     _createMs += 0.05 * (_renderer.LastCreateMs - _createMs);

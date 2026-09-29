@@ -34,7 +34,8 @@ public sealed class StreamingFlightTest : ISystem, IDebugUiSystem
     private readonly GridStore _store;
     private readonly List<Frame> _frames = new();
     private readonly record struct Frame(float Ms, float GcPauseMs, int Collections, long Writes, long WriteBytes, int Draws,
-                                         (int System, float Ms) Top1, (int System, float Ms) Top2, (int System, float Ms) Top3);
+                                         (int System, float Ms) Top1, (int System, float Ms) Top2, (int System, float Ms) Top3,
+                                         long GpuFrame);
     private const int FrameBegin = -2, FrameEnd = -3;
     private TimeSpan _lastPause;
     private int _lastCollections;
@@ -131,7 +132,8 @@ public sealed class StreamingFlightTest : ISystem, IDebugUiSystem
         Consider(FrameEnd, _host.LastFrameEndMs);
         _frames.Add(new Frame((float)(now - _lastFrame), (float)(pause - _lastPause).TotalMilliseconds,
                               collections - _lastCollections, GpuBuffer.WriteCount - _lastWrites,
-                              GpuBuffer.WriteBytes - _lastWriteBytes, _host.Renderer.DrawCount, a, b, c));
+                              GpuBuffer.WriteBytes - _lastWriteBytes, _host.Renderer.DrawCount, a, b, c,
+                              _host.Context.Timer.SubmittedFrames - 1));
         _peakLightSlots = System.Math.Max(_peakLightSlots, _store.LightSlotsInUse);
         _peakOccSlots = System.Math.Max(_peakOccSlots, _store.OccSlotsInUse);
         _peakMeshBytes = System.Math.Max(_peakMeshBytes, GpuMesh.LiveBytes);
@@ -230,6 +232,7 @@ public sealed class StreamingFlightTest : ISystem, IDebugUiSystem
             sb.AppendLine($"    {f.Ms,6:F1}  {f.GcPauseMs,5:F1}  {f.Writes,6}  {f.WriteBytes / 1024,6}");
             foreach (var (system, systemMs) in new[] { f.Top1, f.Top2, f.Top3 })
                 if (system != -1) sb.AppendLine($"        {systemMs,6:F1}  {Name(system)}");
+            GpuFrames(sb, f.GpuFrame);
         }
         sb.AppendLine("  longest step in one frame (ms), over 1 ms:");
         var steps = new List<(double Worst, double Average, string Name)>();
@@ -240,6 +243,27 @@ public sealed class StreamingFlightTest : ISystem, IDebugUiSystem
         foreach (var (worst, average, name) in steps.OrderByDescending(s => s.Worst))
             sb.AppendLine($"    {worst,7:F1}  (average {average,5:F2})  {name}");
         return sb.ToString();
+    }
+
+    /// <summary>For one of the longest frames: the GPU time of the frame it submitted and the two before, since a frame
+    /// that waits to begin (for a swapchain image) is waiting on the GPU's earlier frames; and the heaviest of those
+    /// frames' passes.</summary>
+    private void GpuFrames(StringBuilder sb, long frame)
+    {
+        var timer = _host.Context.Timer;
+        if (!timer.Supported) return;
+        var parts = new List<string>();
+        (double Busy, (string Name, double Ms)[] Passes) heaviest = (-1, Array.Empty<(string, double)>());
+        for (long f = frame - 2; f <= frame; f++)
+        {
+            if (!timer.FrameTimes(f, out double busy, out var passes)) { parts.Add("?"); continue; }
+            parts.Add($"{busy:F1}");
+            if (busy > heaviest.Busy) heaviest = (busy, passes);
+        }
+        sb.Append($"        GPU ms, 2 frames before to this one: {string.Join(" / ", parts)}");
+        if (heaviest.Busy >= 0)
+            sb.Append("; heaviest: " + string.Join(", ", heaviest.Passes.Take(3).Select(p => $"{p.Name} {p.Ms:F1}")));
+        sb.AppendLine();
     }
 
     /// <summary>GPU time per timed pass over the flight (average per frame, and in the frames it ran).</summary>
