@@ -24,13 +24,17 @@ public sealed class LoopbackGame : IDisposable
     public readonly HeadlessScene Host = new();
     public readonly HostSession HostNet;
     public readonly List<(HeadlessScene Scene, ClientSession Net)> Clients = new();
+    private readonly Dictionary<string, PlayerId> _players = new();
+
+    /// <summary>Like a save: each name gets a player ID the first time it's seen.</summary>
+    private PlayerId PlayerFor(string name) => _players.TryGetValue(name, out var id) ? id : _players[name] = PlayerId.New();
 
     public LoopbackGame(double latencyMs = 0, double lossChance = 0)
     {
         Network.LatencyMs = latencyMs;
         Network.LossChance = lossChance;
         HostNet = new HostSession(Network.Listen(), Host.Session, Host.Commands, Host.Registry, Host.World, Host.Clock, Host.Ids,
-            seed: 1337, generationChecksum: Checksum, spawnFor: _ => (null, new Vector3(0, 60, 0)));
+            seed: 1337, generationChecksum: Checksum, playerFor: PlayerFor, spawnFor: _ => (null, new Vector3(0, 60, 0)));
         HostNet.TimeSource = () => Network.Now;
         Host.AttachNet(HostNet);
     }
@@ -51,7 +55,7 @@ public sealed class LoopbackGame : IDisposable
     {
         var transport = Network.Connect();
         var scene = new HeadlessScene(new Engine.Entities.Session(SessionRole.Host, PeerId.Host));
-        using (var join = new JoinRequest(transport, new Hello(ProtocolVersion.Current, PlayerId.New(), name, checksum)))
+        using (var join = new JoinRequest(transport, new Hello(ProtocolVersion.Current, name, checksum)))
         {
             Welcome welcome;
             int guard = 0;
@@ -214,6 +218,16 @@ public class JoinTests
         using var game = new LoopbackGame();
         var e = Assert.Throws<InvalidOperationException>(() => game.Join(checksum: 7));
         Assert.Contains("generation", e.Message);
+    }
+
+    [Fact]
+    public void ANameAlreadyInTheGameIsRefused()
+    {
+        using var game = new LoopbackGame();
+        game.Join("a");
+        var e = Assert.Throws<InvalidOperationException>(() => game.Join("a"));
+        Assert.Contains("already in the game", e.Message);
+        game.Join("b");
     }
 
     [Fact]

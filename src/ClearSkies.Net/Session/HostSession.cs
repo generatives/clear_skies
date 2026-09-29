@@ -50,19 +50,24 @@ public sealed class HostSession : NetSession
     private readonly EntityIdAllocator _ids;
     private readonly ulong _seed;
     private readonly ulong _checksum;
+    private readonly Func<string, PlayerId> _playerFor;
     private readonly Func<PlayerId, (byte[]? SavedSpawn, Vector3 Position)> _spawnFor;
+    private readonly EntitySet _players;
 
+    /// <param name="playerFor">The player a joining name is (the save gives each name a player ID).</param>
     /// <param name="spawnFor">A joining player's saved player spawn (if they've played this world before) and
     /// where they'll spawn.</param>
     public HostSession(ITransport? transport, EngineSession session, CommandSystem commands, EntityRegistry registry, World world,
                        ITickClock clock, EntityIdAllocator ids, ulong seed, ulong generationChecksum,
-                       Func<PlayerId, (byte[]? SavedSpawn, Vector3 Position)> spawnFor)
+                       Func<string, PlayerId> playerFor, Func<PlayerId, (byte[]? SavedSpawn, Vector3 Position)> spawnFor)
         : base(transport, session, commands, registry, world, clock)
     {
         _ids = ids;
         _seed = seed;
         _checksum = generationChecksum;
+        _playerFor = playerFor;
         _spawnFor = spawnFor;
+        _players = world.GetEntities().With<Player>().AsSet();
         _describable = world.GetEntities().With<EntityId>().With<OwnPresence>().Without<Chunk>().AsSet();
         commands.Descriptions.Described += OnDescribed;
         commands.DescribedAll += OnDescribedAll;
@@ -188,6 +193,14 @@ public sealed class HostSession : NetSession
         Send(target.Connection);
     }
 
+    /// <summary>A player already here: the host's own, or a joined client's.</summary>
+    private bool InGame(PlayerId player)
+    {
+        foreach (ref readonly var e in _players.GetEntities())
+            if (e.Get<Player>().Id == player) return true;
+        return false;
+    }
+
     private void OnHello(RemotePeer peer, Hello hello)
     {
         if (peer.State != PeerState.Connected) return;
@@ -195,18 +208,25 @@ public sealed class HostSession : NetSession
         if (hello.GenerationChecksum != _checksum) { Refuse(peer.Connection, "World generation differs from the host's (different game build?)"); return; }
         var id = FreePeerId();
         if (id == PeerId.None) { Refuse(peer.Connection, "The game is full"); return; }
-        if (_peers.Values.Any(p => p.Player == hello.Player && p != peer)) { Refuse(peer.Connection, "That player is already in the game"); return; }
+        string name = hello.Name.Trim();
+        if (name.Length == 0) { Refuse(peer.Connection, "A player name is needed"); return; }
+        var player = _playerFor(name);
+        if (_peers.Values.Any(p => p.Player == player && p != peer) || InGame(player))
+        {
+            Refuse(peer.Connection, $"{name} is already in the game");
+            return;
+        }
 
         peer.Peer = id;
-        peer.Name = hello.Name;
-        peer.Player = hello.Player;
+        peer.Name = name;
+        peer.Player = player;
         peer.State = PeerState.LoadingTerrain;
-        peer.Spawn = _spawnFor(hello.Player).Position;
+        peer.Spawn = _spawnFor(player).Position;
         var (first, count) = _ids.NextBlock();
         Writer.Clear();
         new Welcome(id, first, count, _seed, Clock.Tick, peer.Spawn).Write(Writer);
         Send(peer.Connection);
-        Console.WriteLine($"[net] {hello.Name} joining as {id}");
+        Console.WriteLine($"[net] {name} joining as {id}");
     }
 
     /// <summary>The client has terrain: describe every live entity for them (sent when describing ends this tick).</summary>

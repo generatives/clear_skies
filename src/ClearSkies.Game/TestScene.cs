@@ -25,7 +25,7 @@ public static class TestScene
     /// <param name="spawnView">Where the camera starts and how it faces (yaw, pitch); <see cref="FallbackSpawn"/> if
     /// null.</param>
     /// <param name="savedPlayer">The local player's saved player spawn, if they've played this world before.</param>
-    public static Vector3D<float> Build(EngineHost host, CommandSystem commands, LocalSettings settings, byte[]? savedPlayer,
+    public static Vector3D<float> Build(EngineHost host, CommandSystem commands, PlayerId playerId, string playerName, byte[]? savedPlayer,
                                         float[]? cameraOverride = null,
                                         (Vector3D<float> Position, float Yaw, float Pitch)? spawnView = null,
                                         bool spawnPlayer = true)
@@ -61,8 +61,8 @@ public static class TestScene
             {
                 Description = new PlayerDescription
                 {
-                    Id = settings.PlayerId,
-                    Name = settings.Name,
+                    Id = playerId,
+                    Name = playerName,
                     FreeFly = true, // start in FreeFly — zero regression risk vs. today
                     Position = new Vector3(p.X, p.Y - PlayerFactory.EyeHeight, p.Z),
                     Yaw = yaw,
