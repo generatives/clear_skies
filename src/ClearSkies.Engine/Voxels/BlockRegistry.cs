@@ -11,7 +11,7 @@ public static class BlockRegistry
     {
         Register(new BlockDef { Id = BlockId.Air,   Name = "Air",   Color = default,                   IsSolid = false, PlaceOriented = false, LightEmission = 0,  Opacity = 0,  Weight = 0 });
         Register(new BlockDef { Id = BlockId.Grass, Name = "Grass", Color = new(0.35f, 0.75f, 0.25f), IsSolid = true, PlaceOriented = false,  LightEmission = 0,  Opacity = 15, Weight = 2,
-            Texture = "dirt_grass", TextureTop = "grass_top", TextureBottom = "dirt" });
+            Texture = "dirt_grass", TextureTop = "leaves", TextureBottom = "dirt" });
         Register(new BlockDef { Id = BlockId.Dirt,  Name = "Dirt",  Color = new(0.55f, 0.38f, 0.22f), IsSolid = true, PlaceOriented = false,  LightEmission = 0,  Opacity = 15, Weight = 2,
             Texture = "dirt" });
         // Deep/foundation fill (island core, dome underside, subsurface everywhere) — "greystone" is a
