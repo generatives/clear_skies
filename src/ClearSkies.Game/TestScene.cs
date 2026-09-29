@@ -47,9 +47,9 @@ public static class TestScene
         // The player: spawned through the command system (applied in the first tick), at the eye position less the
         // eye height (its Transform is the character capsule's centre).
         var p = eyeTransform.Position;
-        commands.Send(new SpawnPlayer
+        commands.Send(new Spawn<PlayerDescription>
         {
-            Player = new PlayerDescription
+            Description = new PlayerDescription
             {
                 Id = PlayerId.New(),
                 Name = Environment.UserName,
