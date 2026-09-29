@@ -66,6 +66,11 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     /// unloading doesn't stall a frame.</summary>
     private const int MaxEvictChunksPerFrame = 512;
 
+    /// <summary>Main-thread time eviction may take per frame (ms): unloading a chunk (saving it, disposing its entity,
+    /// releasing its storage) isn't free, and a full batch of chunks in one frame took ~14 ms. It stops after the column
+    /// that runs over, and carries on next frame; loading waits for the room meanwhile, which the fog covers.</summary>
+    private const double MaxEvictMsPerFrame = 2.0;
+
     /// <summary>Light bricks freed beyond what the next column needs, so the columns after it don't each wait a frame
     /// for their own eviction.</summary>
     private const int EvictSlack = 4096;
@@ -460,16 +465,18 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     /// <summary>Unloads the farthest loaded columns (not being loaded) that are more than a column farther than
     /// <paramref name="distSq"/> (so two columns at about the same distance don't keep swapping), until
     /// <paramref name="chunks"/> chunks and <paramref name="bricks"/> light bricks are freed, or
-    /// <see cref="MaxEvictChunksPerFrame"/> chunks. Their bricks count as free at once (GridStore.WorldBricksReleasing),
-    /// though the store releases them over the next frames.</summary>
+    /// <see cref="MaxEvictChunksPerFrame"/> chunks, or <see cref="MaxEvictMsPerFrame"/> of time. Their bricks count as
+    /// free at once (GridStore.WorldBricksReleasing), though the store releases them over the next frames.</summary>
     private void EvictFartherThan(long distSq, int chunks, int bricks)
     {
         if (_nothingToEvict) return;
+        long start = System.Diagnostics.Stopwatch.GetTimestamp();
         if (_evictNext < 0) BuildEvictOrder();
 
         float margin = MathF.Sqrt(distSq) + 1f;
         int freedChunks = 0, freedBricks = 0;
-        while (freedChunks < MaxEvictChunksPerFrame && (freedChunks < chunks || freedBricks < bricks))
+        while (freedChunks < MaxEvictChunksPerFrame && (freedChunks < chunks || freedBricks < bricks)
+               && System.Diagnostics.Stopwatch.GetElapsedTime(start).TotalMilliseconds < MaxEvictMsPerFrame)
         {
             if (_evictNext >= _evictOrder.Count || ColumnDistSq(_evictOrder[_evictNext]) <= margin * margin)
             {
