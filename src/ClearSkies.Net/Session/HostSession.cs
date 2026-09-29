@@ -52,7 +52,7 @@ public sealed class HostSession : NetSession
     private readonly ulong _checksum;
     private readonly Func<PlayerId, (byte[]? SavedSpawn, Vector3 Position)> _spawnFor;
 
-    /// <param name="spawnFor">A joining player's saved SpawnPlayer command (if they've played this world before) and
+    /// <param name="spawnFor">A joining player's saved player spawn (if they've played this world before) and
     /// where they'll spawn.</param>
     public HostSession(ITransport? transport, EngineSession session, CommandSystem commands, EntityRegistry registry, World world,
                        ITickClock clock, EntityIdAllocator ids, ulong seed, ulong generationChecksum,
@@ -240,18 +240,18 @@ public sealed class HostSession : NetSession
             peer.State = PeerState.Joined;
 
             var (saved, position) = _spawnFor(peer.Player);
-            SpawnPlayer spawn;
+            Spawn<PlayerDescription> spawn;
             if (saved is not null)
             {
                 var handler = (SpawnPlayerHandler)Commands.HandlerFor(CommandIds.SpawnPlayer)!;
                 var reader = new NetReader(saved);
                 spawn = handler.Read(ref reader);
                 spawn.Owner = peer.Peer;
-                spawn.Player.Name = peer.Name;
+                spawn.Description.Name = peer.Name;
                 if (Registry.IsLive(spawn.Id)) spawn.Id = EntityId.None; // somehow still here: give them a fresh entity
             }
             else
-                spawn = new SpawnPlayer { Owner = peer.Peer, Player = new PlayerDescription
+                spawn = new Spawn<PlayerDescription> { Owner = peer.Peer, Description = new PlayerDescription
                     { Id = peer.Player, Name = peer.Name, FreeFly = true, Position = position, Yaw = NewPlayerLook.Yaw, Pitch = NewPlayerLook.Pitch } };
             if (spawn.Id.IsNone) spawn.Id = Registry.Allocate();
             peer.PlayerEntity = spawn.Id;

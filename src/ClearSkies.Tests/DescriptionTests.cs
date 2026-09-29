@@ -103,34 +103,42 @@ public class DescriptionTests
         var d = DescribeNow(a, Ship(a));
         using var b = new HeadlessScene();
         Spawn(b, d, eventNumber: 1);
-        Spawn(b, d, eventNumber: 2); // a resync or repeated join: a new event with the same contents
+        Spawn(b, d, eventNumber: 2); // the same spawn again, as a new event: ignored
         var grids = b.World.GetEntities().With<DynamicGrid>().AsEnumerable().ToList();
         Assert.Single(grids);
         Assert.Equal(d.Hash, DescribeNow(b, grids[0]).Hash);
         Assert.Equal(1, grids[0].Get<ChunkGrid>().Volume.All.Count(c => c.Key == new ChunkPosition(1, 0, 0)));
     }
 
+    /// <summary>A spawn is only for an ID that isn't live: asked for, it's rejected; arriving as an event, the entity
+    /// that's here is left as it is.</summary>
     [Fact]
-    public void OverwritingInPlaceReplacesBlocksAndKeepsTheEntity()
+    public void ASpawnForALiveIdChangesNothing()
     {
         using var scene = new HeadlessScene();
         var grid = Ship(scene);
         var before = DescribeNow(scene, grid);
         var v = grid.Get<ChunkGrid>().Volume;
-        v.SetBlock(2, 5, 2, BlockId.Stone); // diverge
+        v.SetBlock(2, 5, 2, BlockId.Stone);
+
+        scene.Commands.Send(new Spawn<GridDescription> { Id = grid.Get<EntityId>(), Description = GridDescription.FromVoxels(
+            Vector3.Zero, new[] { new GridVoxel(0, 0, 0, BlockId.Stone, BlockOrientation.Upright) }) });
+        scene.Tick();
+        Assert.Equal(1, scene.Commands.Stats.Rejected);
+
         Spawn(scene, before, eventNumber: 5);
         Assert.True(grid.IsAlive);
-        Assert.Equal(BlockId.Air, v.GetBlock(2, 5, 2));
-        Assert.Equal(before.Hash, DescribeNow(scene, grid).Hash);
+        Assert.Single(scene.World.GetEntities().With<DynamicGrid>().AsEnumerable());
+        Assert.Equal(BlockId.Stone, v.GetBlock(2, 5, 2)); // not put back as described
     }
 
     [Fact]
     public void ANewSpawnGetsAnIdFromTheAuthorityAndIsSelected()
     {
         using var scene = new HeadlessScene();
-        scene.Commands.Send(new SpawnGrid
+        scene.Commands.Send(new Spawn<GridDescription>
         {
-            Grid = GridDescription.FromVoxels(new Vector3(0, 50, 0), new[] { new GridVoxel(0, 0, 0, BlockId.Stone, BlockOrientation.Upright) }),
+            Description = GridDescription.FromVoxels(new Vector3(0, 50, 0), new[] { new GridVoxel(0, 0, 0, BlockId.Stone, BlockOrientation.Upright) }),
             Select = true,
         });
         scene.Tick();

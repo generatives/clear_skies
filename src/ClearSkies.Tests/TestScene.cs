@@ -139,7 +139,7 @@ public sealed class HeadlessScene : IDisposable
         // Applied directly (as its event would be), so it works on a client scene too.
         var id = Registry.Allocate();
         var handler = (SpawnGridHandler)Commands.HandlerFor(CommandIds.SpawnGrid)!;
-        handler.Apply(new SpawnGrid { Id = id, Owner = Session.LocalPeer, Grid = description }, default);
+        handler.Apply(new Spawn<GridDescription> { Id = id, Owner = Session.LocalPeer, Description = description }, default);
         return Registry.Find(id) ?? throw new InvalidOperationException("The grid didn't spawn.");
     }
 
@@ -149,8 +149,8 @@ public sealed class HeadlessScene : IDisposable
     {
         var id = Registry.Allocate();
         var handler = (SpawnPlayerHandler)Commands.HandlerFor(CommandIds.SpawnPlayer)!;
-        handler.Apply(new SpawnPlayer { Id = id, Owner = Session.LocalPeer,
-            Player = new PlayerDescription { Id = PlayerId.New(), Name = "test", FreeFly = freeFly, Position = position } }, default);
+        handler.Apply(new Spawn<PlayerDescription> { Id = id, Owner = Session.LocalPeer,
+            Description = new PlayerDescription { Id = PlayerId.New(), Name = "test", FreeFly = freeFly, Position = position } }, default);
         return Registry.Find(id) ?? throw new InvalidOperationException("The player didn't spawn.");
     }
 
