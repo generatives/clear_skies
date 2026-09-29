@@ -130,7 +130,10 @@ public sealed class TickInterpolationSystem : IStagedSystem
             if (!Matches(t, s.Current, s.PositionOnly)) Restart(ref s, t, e); // moved by something outside the ticks
 
             var drawn = t;
-            drawn.Position = Vector3D.Lerp(s.Previous.Position, s.Current.Position, alpha);
+            // From the previous pose by the step, not Vector3D.Lerp's a·(1−t) + b·t: that rounds both terms at the
+            // pose's magnitude, so far from the origin (the spawn is 18 km out) something standing still is drawn up to
+            // a float's step off, differently every frame: it vibrates.
+            drawn.Position = s.Previous.Position + (s.Current.Position - s.Previous.Position) * alpha;
             if (!s.PositionOnly) drawn.Rotation = Quaternion<float>.Slerp(s.Previous.Rotation, s.Current.Rotation, alpha);
             else if (e.Has<MouseLookComponent>()) DrawLook(e.Get<MouseLookComponent>(), ref drawn, alpha);
             SetDrawn(e, drawn, fromParent: false);
