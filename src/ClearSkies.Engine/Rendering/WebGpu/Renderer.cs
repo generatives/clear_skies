@@ -282,14 +282,15 @@ fn vs_main(
 // bits 24-25, height - 1 in b bits 26-30; colour as RGB8 in b. Corners follow the mesher's order (GreedyMesher.EmitQuad)
 // and the texture coordinates follow from position and face, as GreedyMesher.MakeUv makes them: V runs down world Y on
 // the side faces.
-// The mesh's quads, read by vertex index (6 vertices per quad; 8 for the wireframe) rather than drawn as instances:
-// GPUs pack many tiny instances into their vertex batches poorly, which cost about 1 ms a frame on a laptop GPU.
+// The mesh's quads, read by vertex index. Drawn indexed through one shared index buffer (quad q's triangles are
+// 4q + 0, 1, 2 and 0, 2, 3), so vertex_index is 4q + corner and the GPU reuses the corners the two triangles share:
+// four shader runs per quad, as with the old four-vertex meshes, where six separate vertices (instanced or not) cost
+// about 1 ms a frame more on a laptop GPU.
 @group(1) @binding(1) var<storage, read> quads: array<vec2<u32>>;
 
 @vertex
 fn vs_chunk(@builtin(vertex_index) vi: u32) -> VSOut {
-    var corners = array<u32, 6>(0u, 1u, 2u, 0u, 2u, 3u); // two triangles
-    return chunkVertex(quads[vi / 6u], corners[vi % 6u]);
+    return chunkVertex(quads[vi / 4u], vi % 4u);
 }
 
 // The wireframe: each quad's outline as four lines.
@@ -840,6 +841,13 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     private readonly GpuBuffer _cameraBuffer;
     private readonly GpuBuffer _hudCameraBuffer; // permanently holds identity view+proj
     private readonly GpuBuffer _modelBuffer;
+
+    // One index buffer for every chunk mesh: quad q's two triangles as 4q + (0, 1, 2, 0, 2, 3), for as many quads as a
+    // chunk can have (every block of a checkerboard showing all six faces). vs_chunk takes quad = index / 4 and
+    // corner = index % 4, so the GPU reuses the two corners the triangles share: four vertex shader runs per quad
+    // instead of six.
+    private const int MaxChunkQuads = ChunkData.Size * ChunkData.Size * ChunkData.Size / 2 * 6;
+    private readonly GpuBuffer _quadIndices;
     private BindGroup* _cameraBindGroup;
     private BindGroup* _hudCameraBindGroup;
     private BindGroup* _modelBindGroup;
@@ -900,6 +908,15 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         _cameraBuffer    = GpuBuffer.CreateUniform(ctx, CameraSize);
         _hudCameraBuffer = GpuBuffer.CreateUniform(ctx, CameraSize);
         _modelBuffer     = GpuBuffer.CreateUniform(ctx, ModelStride * MaxObjects);
+        var quadIdx = new uint[MaxChunkQuads * 6];
+        for (uint q = 0, k = 0; q < MaxChunkQuads; q++)
+        {
+            uint b = 4 * q;
+            quadIdx[k++] = b; quadIdx[k++] = b + 1; quadIdx[k++] = b + 2;
+            quadIdx[k++] = b; quadIdx[k++] = b + 2; quadIdx[k++] = b + 3;
+        }
+        _quadIndices = GpuBuffer.Create(ctx, (ulong)quadIdx.Length * 4, BufferUsage.Index | BufferUsage.CopyDst);
+        _quadIndices.Write<uint>(0, quadIdx);
         CreateBindGroups();
         CreateFallbackAtlas();
 
@@ -1516,7 +1533,12 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
 
         uint dynOffset = StageModel(new ModelUniform { Model = model, ChunkX = chunk.X, ChunkY = chunk.Y, ChunkZ = chunk.Z, Grid = grid });
         _api.RenderPassEncoderSetBindGroup(_pass, 1, (BindGroup*)mesh.DrawBindGroup, 1, &dynOffset);
-        _api.RenderPassEncoderDraw(_pass, (wire && !OverdrawMode ? 8u : 6u) * mesh.QuadCount, 1, 0, 0);
+        if (wire && !OverdrawMode) _api.RenderPassEncoderDraw(_pass, 8u * mesh.QuadCount, 1, 0, 0);
+        else
+        {
+            _api.RenderPassEncoderSetIndexBuffer(_pass, _quadIndices.Handle, IndexFormat.Uint32, 0, _quadIndices.SizeBytes);
+            _api.RenderPassEncoderDrawIndexed(_pass, 6u * System.Math.Min(mesh.QuadCount, (uint)MaxChunkQuads), 1, 0, 0, 0);
+        }
         _drawIndex++;
     }
 
@@ -1575,6 +1597,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         _cameraBuffer.Dispose();
         _hudCameraBuffer.Dispose();
         _modelBuffer.Dispose();
+        _quadIndices.Dispose();
         if (_voxelBindGroup   != null) _api.BindGroupRelease(_voxelBindGroup);
         if (_atlasBindGroup   != null) _api.BindGroupRelease(_atlasBindGroup);
         if (_atlasSampler     != null) _api.SamplerRelease(_atlasSampler);
