@@ -205,7 +205,7 @@ var camSpawn = TestScene.Build(host, registry, session, seed, cameraOverride, He
 // land fills the view out to 450 blocks (toward +Z it covers about half). --flight-test flies this way from here.
 static (Vector3D<float> Position, float Yaw, float Pitch)? HeartSpawn(ulong seed)
 {
-    const float x = 18240f, z = 1088f;
+    const float x = -825f, z = -1000f;
     float y = ContinentTerrain.For(seed).Height(x, z) + 60f;
     return (new Vector3D<float>(x, y, z), 0f, -0.15f);
 }
