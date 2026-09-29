@@ -4,6 +4,7 @@ using ClearSkies.Engine.Gui;
 using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Voxels;
 using ClearSkies.Engine.Generation;
+using ClearSkies.Engine.Persistence;
 using DefaultEcs;
 using ImGuiNET;
 using Silk.NET.Maths;
@@ -35,10 +36,6 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     /// sky that generation rules out in microseconds, so this is well above the core count: the background workers queue
     /// the excess.</summary>
     private const int MaxInFlight = 64;
-
-    /// <summary>Seconds between periodic flushes of dirty chunks — crash/power-loss safety for edits to
-    /// chunks that stay loaded (never unload) for a long time.</summary>
-    private const float AutosaveInterval = 30f;
 
     /// <summary>The GridStore world index width that fits a view distance: wider than the span of chunks loaded at
     /// once (with a column to spare each side for the frame between a chunk leaving range and its storage being
@@ -72,7 +69,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 
     private const int S = ChunkData.Size;
 
-    private readonly string _savesDir;
+    private readonly IChunkStore _chunkStore;
 
     private readonly EntitySet      _interests;
     private readonly ChunkVolume    _staticVolume;
@@ -133,7 +130,6 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     private int _evictNext = -1; // -1: not built since the last rebuild
     private bool _full;
     private int _evictions;
-    private float _autosaveTimer;
 
     private float _fogDistance;
     private float _fogTarget;
@@ -150,13 +146,11 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     /// <param name="minChunkY">Lowest chunk layer the generator fills. Streaming covers 64 layers from
     /// <see cref="LayersBelow"/> under it; the generator's layers must fall inside them. Edits to the static world
     /// outside them are refused (see <see cref="ChunkVolume.EditableLayers"/>).</param>
-    /// <param name="worldName">The saves folder: one per generator, since edits to one's terrain don't belong in
-    /// another's.</param>
+    /// <param name="chunkStore">Where edited chunks are kept (the world's save database on the host).</param>
     public ChunkLoadSystem(World world, ChunkVolume staticVolume, GridStore store, Func<IWorldGenerator> generatorFactory,
-                           float viewDistance, int minChunkY, string worldName)
+                           float viewDistance, int minChunkY, IChunkStore chunkStore)
     {
-        _savesDir  = Path.Combine(AppContext.BaseDirectory, "Saves", worldName);
-        Directory.CreateDirectory(_savesDir);
+        _chunkStore = chunkStore;
 
         _interests    = world.GetEntities().With<Transform>().With<TerrainInterest>().AsSet();
         _staticVolume = staticVolume;
@@ -197,13 +191,8 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 
     private void ScanSaves()
     {
-        foreach (var path in Directory.EnumerateFiles(_savesDir, "*.chunk"))
-        {
-            var parts = Path.GetFileNameWithoutExtension(path).Split('_');
-            if (parts.Length == 3 && int.TryParse(parts[0], out int x) && int.TryParse(parts[1], out int y) &&
-                int.TryParse(parts[2], out int z))
-                RecordSave(new ChunkPosition(x, y, z), hasBlocks: true);
-        }
+        foreach (var pos in _chunkStore.SavedChunks())
+            RecordSave(pos, hasBlocks: true);
     }
 
     // ── debug UI ─────────────────────────────────────────────────────────────
@@ -220,28 +209,17 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         ImGui.Text($"Saved chunks: {_saved.Count}   Layers: {_minY}..{_minY + 63}");
 
         ImGui.Separator();
-        ImGui.Text($"Autosave in: {System.Math.Max(0f, AutosaveInterval - _autosaveTimer):F0}s");
-        ImGui.Separator();
         _steps.Draw();
     }
 
     // CPU time of each step, for the debug panel: which one a hitch while streaming came from.
-    private const int AutosaveStep = 0, ApplyStep = 1, UnloadStep = 2, QueueStep = 3, DispatchStep = 4, EvictStep = 5, FogStep = 6;
-    private readonly StepTimer _steps = new("Autosave", "Adding finished columns", "Rebuild: unloading out of view",
+    private const int ApplyStep = 0, UnloadStep = 1, QueueStep = 2, DispatchStep = 3, EvictStep = 4, FogStep = 5;
+    private readonly StepTimer _steps = new("Adding finished columns", "Rebuild: unloading out of view",
                                             "Rebuild: queueing columns", "Dispatching jobs", "Evicting far columns", "Fog") { Owner = "Chunk Loading" };
 
     public void Update(float dt)
     {
         _steps.Start();
-        // Crash/power-loss safety: flush dirty chunks on a fixed cadence regardless of streaming
-        // state, so edits to a chunk that never unloads aren't only ever saved on graceful exit.
-        _autosaveTimer += dt;
-        if (_autosaveTimer >= AutosaveInterval)
-        {
-            _autosaveTimer = 0f;
-            SaveAllDirty();
-        }
-        _steps.Lap(AutosaveStep);
 
         _budget.Restart();
         bool hasCentre = TryGetInterestCentre(out var centre);
@@ -435,7 +413,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
                 foreach (var (pos, fromSave) in work)
                 {
                     var data = _scratch.Value!;
-                    if (!(fromSave && StaticWorldSerializer.TryLoad(SavePath(pos), data)))
+                    if (!(fromSave && _chunkStore.TryLoad(pos, data)))
                         _generator.Value!.Generate(data, pos);
                     data.Compact(); // stone inside an island, or sky, keeps one block instead of 64 KB
                     if (data.HasAnySolid())
@@ -514,6 +492,21 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         return false;
     }
 
+    /// <summary>Whether the terrain within <paramref name="radius"/> (horizontally) of <paramref name="centre"/> has
+    /// loaded: every column there is in view, with nothing still to load or loading.</summary>
+    public bool IsTerrainLoaded(Vector3D<float> centre, float radius)
+    {
+        if (_lastCentreColumn.x == int.MinValue) return false;
+        int cx = (int)MathF.Floor(centre.X / S), cz = (int)MathF.Floor(centre.Z / S), r = (int)MathF.Ceiling(radius / S);
+        for (int dz = -r; dz <= r; dz++)
+        for (int dx = -r; dx <= r; dx++)
+        {
+            int x = cx + dx, z = cz + dz;
+            if (!InView(x, z) || _inFlight.ContainsKey((x, z)) || HasMissing(x, z)) return false;
+        }
+        return true;
+    }
+
     /// <summary>Column (x, z)'s chunks that may hold something and aren't loaded yet, with whether each has a save.</summary>
     private List<(ChunkPosition Pos, bool FromSave)> Missing(int x, int z)
     {
@@ -562,8 +555,8 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         _staticVolume.RemoveChunk(pos);
     }
 
-    /// <summary>Writes every currently loaded chunk with unsaved edits to disk. Called by the periodic autosave and
-    /// once on graceful shutdown.</summary>
+    /// <summary>Writes every currently loaded chunk with unsaved edits to the chunk store. Called by autosave (inside its
+    /// transaction) and on exit.</summary>
     public void SaveAllDirty()
     {
         foreach (var (pos, entry) in _staticVolume.All)
@@ -573,12 +566,11 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     private void SaveIfDirty(ChunkPosition pos, ChunkEntry entry)
     {
         if (!entry.Data.IsDirty) return;
-        StaticWorldSerializer.Save(entry.Data, SavePath(pos));
+        _chunkStore.Save(pos, entry.Data);
         entry.Data.IsDirty = false;
         // What's there now is what a reload finds, so an edit off the island's terrain (a bridge, a tower) comes back,
         // and one that cleared a chunk out stops costing budget.
         RecordSave(pos, entry.Data.HasAnySolid());
     }
 
-    private string SavePath(ChunkPosition pos) => Path.Combine(_savesDir, $"{pos.X}_{pos.Y}_{pos.Z}.chunk");
 }

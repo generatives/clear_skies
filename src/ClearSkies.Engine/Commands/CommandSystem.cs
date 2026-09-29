@@ -88,6 +88,15 @@ public sealed class CommandSystem : ISystem, IDebugUiSystem
     /// <summary>Descriptions of entities with a <see cref="DescribeRequest"/>, made at the end of each tick.</summary>
     public DescriptionSink Descriptions { get; }
 
+    /// <summary>Raised after each round of describing, once every description is out.</summary>
+    public event Action? DescribedAll;
+
+    /// <summary>Sends a command given in its wire form (a stored spawn command, for example), as if sent here.</summary>
+    public void SendSerialized(ushort handlerId, ReadOnlySpan<byte> payload)
+    {
+        Require(handlerId).SendSerialized(payload);
+    }
+
     internal CommandHandler<T> HandlerOf<T>() where T : struct, ICommand =>
         _byType.TryGetValue(typeof(T), out var h) ? (CommandHandler<T>)h
             : throw new InvalidOperationException($"No handler is registered for {typeof(T).Name}.");
@@ -165,7 +174,7 @@ public sealed class CommandSystem : ISystem, IDebugUiSystem
     /// <summary>Calls every describer in order, then removes every <see cref="DescribeRequest"/>.</summary>
     public void DescribeRequested()
     {
-        if (_describeRequests.Count == 0) return;
+        if (_describeRequests.Count == 0) { DescribedAll?.Invoke(); return; }
         Descriptions.Reset();
         foreach (var d in _describers) d.Describe(Descriptions);
         _unclaimed.Clear();
@@ -175,6 +184,7 @@ public sealed class CommandSystem : ISystem, IDebugUiSystem
             if (!Descriptions.Claimed(e)) Console.WriteLine($"[describe] nothing describes entity {e} ({(e.Has<EntityId>() ? e.Get<EntityId>() : EntityId.None)})");
             e.Remove<DescribeRequest>();
         }
+        DescribedAll?.Invoke();
     }
 
     // ── bookkeeping used by the handlers ────────────────────────────────────

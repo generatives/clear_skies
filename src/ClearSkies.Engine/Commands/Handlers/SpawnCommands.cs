@@ -162,6 +162,9 @@ public sealed class SpawnPlayerHandler : SpawnHandler<PlayerDescription, Player>
 public struct DespawnEntity : ICommand
 {
     public EntityId Entity;
+
+    /// <summary>Unloading: the entity stays in storage. Otherwise it's gone for good and leaves the save too.</summary>
+    public bool KeepStored;
     public readonly EntityAddress Target => EntityAddress.Of(Entity);
 }
 
@@ -172,8 +175,8 @@ public sealed class DespawnEntityHandler : CommandHandler<DespawnEntity>
 
     public override ushort Id => CommandIds.DespawnEntity;
 
-    public override void Write(NetWriter w, in DespawnEntity c) => c.Entity.Write(w);
-    public override DespawnEntity Read(ref NetReader r) => new() { Entity = EntityId.Read(ref r) };
+    public override void Write(NetWriter w, in DespawnEntity c) { c.Entity.Write(w); w.WriteBool(c.KeepStored); }
+    public override DespawnEntity Read(ref NetReader r) => new() { Entity = EntityId.Read(ref r), KeepStored = r.ReadBool() };
 
     public override Verdict Validate(ref DespawnEntity c, in CommandContext ctx)
         => c.Entity != EntityRegistry.WorldVolume && _registry.IsLive(c.Entity) ? Verdict.Accept : Verdict.Reject;

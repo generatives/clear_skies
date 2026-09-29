@@ -14,6 +14,7 @@ public abstract class CommandHandlerBase
     internal CommandSystem Owner { get; set; } = null!;
 
     internal abstract Type CommandType { get; }
+    internal abstract void SendSerialized(ReadOnlySpan<byte> payload);
     internal abstract void RunRemoteCommand(PeerId from, uint seq, ReadOnlySpan<byte> payload);
     internal abstract void RunEvent(in EventMeta meta, ReadOnlySpan<byte> payload);
 }
@@ -51,6 +52,12 @@ public abstract class CommandHandler<T> : CommandHandlerBase where T : struct, I
     public virtual void AfterApply(in T evt, in CommandContext ctx) { }
 
     internal sealed override Type CommandType => typeof(T);
+
+    internal sealed override void SendSerialized(ReadOnlySpan<byte> payload)
+    {
+        var reader = new NetReader(payload);
+        Owner.Send(Read(ref reader));
+    }
 
     /// <summary>A command from this machine, taken from <see cref="CommandSystem"/>'s outgoing commands: decided here,
     /// or predicted (if it can be) and sent to its authority.</summary>
