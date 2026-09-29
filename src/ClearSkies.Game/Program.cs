@@ -256,7 +256,7 @@ if (newWorld)
     shipVoxels.Add(new(5, 1, 2, BlockId.Lever, BlockOrientation.From(Direction.East, Direction.North)));
 
     var shipSpawn = new Vector3(camSpawn.X + 10f, camSpawn.Y - 5f, camSpawn.Z + 45f);
-    commands.Send(new SpawnGrid { Grid = GridDescription.FromVoxels(shipSpawn, shipVoxels), Select = true });
+    commands.Send(new Spawn<GridDescription> { Description = GridDescription.FromVoxels(shipSpawn, shipVoxels), Select = true });
     Console.WriteLine($"[test-ship] spawned 5x2x5 hull + lamp at {shipSpawn}");
 }
 

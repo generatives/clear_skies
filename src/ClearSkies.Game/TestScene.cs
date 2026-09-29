@@ -55,9 +55,9 @@ public static class TestScene
         else
         {
             var p = eyeTransform.Position;
-            commands.Send(new SpawnPlayer
+            commands.Send(new Spawn<PlayerDescription>
             {
-                Player = new PlayerDescription
+                Description = new PlayerDescription
                 {
                     Id = settings.PlayerId,
                     Name = settings.Name,

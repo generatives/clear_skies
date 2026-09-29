@@ -32,12 +32,20 @@ public struct BodyState
     };
 }
 
+/// <summary>An entity's full state, as a <see cref="Commands.Handlers.Spawn{TDescription}"/> carries it: written and
+/// read the same way whether it's sent, stored or saved.</summary>
+public interface IEntityDescription<TSelf> where TSelf : class, IEntityDescription<TSelf>
+{
+    void Write(NetWriter w);
+    static abstract TSelf Read(ref NetReader r);
+}
+
 /// <summary>
-/// A grid's full state: everything needed to create it on any machine. Carried by SpawnGrid, produced by describing a
+/// A grid's full state: everything needed to create it on any machine. Carried by a spawn, produced by describing a
 /// live grid, and kept in storage. Presence layers (drawn, simulated) are never part of it: each machine works those
 /// out for itself.
 /// </summary>
-public sealed class GridDescription
+public sealed class GridDescription : IEntityDescription<GridDescription>
 {
     /// <summary>Where its block space (voxel (0,0,0)) is in the world, and its body's velocities (the linear one at its
     /// centre of mass, which the blocks determine).</summary>
@@ -96,7 +104,7 @@ public sealed class GridDescription
     }
 
     // ── .grid files ─────────────────────────────────────────────────────────
-    // A .grid file is "CSGF", a format version, then the description exactly as SpawnGrid carries it: a saved ship
+    // A .grid file is "CSGF", a format version, then the description exactly as a spawn carries it: a saved ship
     // is the same thing as a ship spawned, sent or stored, and gains whatever descriptions gain.
 
     private static readonly byte[] FileMagic = { (byte)'C', (byte)'S', (byte)'G', (byte)'F' };
@@ -125,8 +133,8 @@ public sealed class GridDescription
     }
 }
 
-/// <summary>A player's full state, carried by SpawnPlayer, produced by describing a live player, and kept in storage.</summary>
-public sealed class PlayerDescription
+/// <summary>A player's full state, carried by a spawn, produced by describing a live player, and kept in storage.</summary>
+public sealed class PlayerDescription : IEntityDescription<PlayerDescription>
 {
     public PlayerId Id;
     public string Name = "";
