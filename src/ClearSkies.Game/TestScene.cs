@@ -24,7 +24,7 @@ public static class TestScene
     /// overlooking the nearest island, e.g. to reproduce a view for a screenshot.</param>
     /// <param name="spawnView">Where the camera starts and how it faces (yaw, pitch); <see cref="FallbackSpawn"/> if
     /// null.</param>
-    /// <param name="savedPlayer">The local player's saved SpawnPlayer command, if they've played this world before.</param>
+    /// <param name="savedPlayer">The local player's saved player spawn, if they've played this world before.</param>
     public static Vector3D<float> Build(EngineHost host, CommandSystem commands, LocalSettings settings, byte[]? savedPlayer,
                                         float[]? cameraOverride = null,
                                         (Vector3D<float> Position, float Yaw, float Pitch)? spawnView = null,

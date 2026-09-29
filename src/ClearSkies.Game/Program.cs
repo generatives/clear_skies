@@ -251,7 +251,7 @@ else
             {
                 var reader = new ClearSkies.Engine.Serialization.NetReader(saved);
                 var spawn = ((SpawnPlayerHandler)commands.HandlerFor(CommandIds.SpawnPlayer)!).Read(ref reader);
-                return (saved, spawn.Player.Position);
+                return (saved, spawn.Description.Position);
             }
             var p = HeartSpawn(seed)!.Value.Position;
             return (null, new Vector3(p.X, p.Y - PlayerFactory.EyeHeight, p.Z));
