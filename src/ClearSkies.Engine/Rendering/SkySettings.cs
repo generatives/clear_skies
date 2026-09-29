@@ -24,7 +24,7 @@ public static class SkySettings
     /// sky's as it thickens.</summary>
     public static bool HazeEnabled = true;
     public static float HazeStrength = 0.95f;
-    public static float HazeDistance = 2500f;
+    public static float HazeDistance = 4000f;
 
     /// <summary>The cloud sea: a floor of blocky cloud far below the islands, drawn with the sky. Its lowest block
     /// face's altitude, how much of it is cloud (0-1), its cells' size and its blocks' greatest thickness, in
