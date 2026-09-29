@@ -122,7 +122,8 @@ public abstract class CommandHandler<T> : CommandHandlerBase where T : struct, I
     /// <summary>Predicted handlers settle a prediction when its event comes back; true if it was one.</summary>
     internal virtual bool TryConfirm(in EventMeta meta, ReadOnlySpan<byte> payload, in T evt) => false;
 
-    internal byte[] Serialize(in T command)
+    /// <summary>The command written out, as it goes on the wire.</summary>
+    public byte[] Serialize(in T command)
     {
         var w = Owner.Scratch;
         w.Clear();

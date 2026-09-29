@@ -5,6 +5,7 @@ using BepuPhysics;
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Gui;
 using ClearSkies.Engine.Physics;
+using ClearSkies.Engine.Physics.Characters;
 using ClearSkies.Engine.Voxels;
 using DefaultEcs;
 using ImGuiNET;
@@ -54,6 +55,8 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
     private readonly EntitySet _terrainLostPresence;
     private readonly EntitySet _gridsGainedPresence;
     private readonly EntitySet _gridsLostPresence;
+    private readonly EntitySet _bodyOverrides;
+    private readonly List<PlayerCharacter> _removedCharacters = new();
 
     public PhysicsBodySystem(World world, PhysicsWorld physics)
     {
@@ -63,6 +66,7 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
         _terrainLostPresence = world.GetEntities().With<Chunk>().With<OwnPresence>().WhenRemoved<PhysicsPresence>().AsSet();
         _gridsGainedPresence = world.GetEntities().With<DynamicGrid>().With<ChunkGrid>().WhenAdded<PhysicsPresence>().AsSet();
         _gridsLostPresence = world.GetEntities().With<DynamicGrid>().With<PhysicsBodyComponent>().WhenRemoved<PhysicsPresence>().AsSet();
+        _bodyOverrides = world.GetEntities().With<BodyStateOverride>().With<PhysicsBodyComponent>().With<Transform>().AsSet();
         world.SubscribeEntityDisposed(OnEntityDisposed);
     }
 
@@ -76,6 +80,9 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
             var chunk = entity.Get<Chunk>();
             _removedChunks.Add(chunk.Entry);
         }
+
+        if (entity.Has<CharacterControllerComponent>())
+            _removedCharacters.Add(entity.Get<CharacterControllerComponent>().Character);
     }
 
     public void Update(float dt)
@@ -135,6 +142,22 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
         {
             if (entity.IsAlive && entity.Has<PhysicsPresence>() && entity.Get<PhysicsPresence>().Mode == PhysicsMode.Simulated)
                 UpdateDynamicGrid(entity);
+        }
+
+        // Spawned or overwritten from a description: the body takes the described pose and velocities.
+        foreach (var entity in _bodyOverrides.GetEntities().ToArray())
+        {
+            ref readonly var pb = ref entity.Get<PhysicsBodyComponent>();
+            var body = pb.Body;
+            ref readonly var t = ref entity.Get<Transform>();
+            var o = entity.Get<BodyStateOverride>();
+            _physics.SetBodyPose(body, pb.BodyPosition(t), PhysicsConv.ToBepu(t.Rotation));
+            if (_physics.GetBodyMass(body) > 0)
+            {
+                _physics.SetBodyLinearVelocity(body, o.LinearVelocity);
+                _physics.SetBodyAngularVelocity(body, o.AngularVelocity);
+            }
+            entity.Remove<BodyStateOverride>();
         }
     }
 
@@ -282,6 +305,9 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
             _physics.RemoveCompound(shape);
         }
         _removedBodies.Clear();
+
+        foreach (var character in _removedCharacters) character.Dispose();
+        _removedCharacters.Clear();
 
         foreach (var entry in _removedChunks)
         {
