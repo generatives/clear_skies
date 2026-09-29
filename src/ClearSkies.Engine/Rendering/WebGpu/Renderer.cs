@@ -277,23 +277,43 @@ fn vs_main(
     return o;
 }
 
-// A chunk mesh vertex, packed (see ChunkVertex): x, y, z in bits 0-17 (6 each), face in 18-20 (+X, -X, +Y, -Y, +Z,
-// -Z), texture layer in 21-28 (255: untextured); colour as RGB8. The texture coordinates follow from position and
-// face, as GreedyMesher.MakeUv makes them: V runs down world Y on the side faces.
+// A chunk mesh quad, packed (see ChunkQuad), drawn as one instance: its first corner x, y, z in a bits 0-17 (6 each),
+// face in 18-20 (+X, -X, +Y, -Y, +Z, -Z), texture layer in 21-28 (255: untextured), width - 1 in a bits 29-31 and b
+// bits 24-25, height - 1 in b bits 26-30; colour as RGB8 in b. Corners follow the mesher's order (GreedyMesher.EmitQuad)
+// and the texture coordinates follow from position and face, as GreedyMesher.MakeUv makes them: V runs down world Y on
+// the side faces.
 @vertex
-fn vs_chunk(@location(0) packed: vec2<u32>) -> VSOut {
-    let a = packed.x;
-    let position = vec3<f32>(f32(a & 63u), f32((a >> 6u) & 63u), f32((a >> 12u) & 63u));
+fn vs_chunk(@builtin(vertex_index) vi: u32, @location(0) quad: vec2<u32>) -> VSOut {
+    var corners = array<u32, 6>(0u, 1u, 2u, 0u, 2u, 3u); // two triangles
+    return chunkVertex(quad, corners[vi]);
+}
+
+// The wireframe: each quad's outline as four lines.
+@vertex
+fn vs_chunk_lines(@builtin(vertex_index) vi: u32, @location(0) quad: vec2<u32>) -> VSOut {
+    var corners = array<u32, 8>(0u, 1u, 1u, 2u, 2u, 3u, 3u, 0u);
+    return chunkVertex(quad, corners[vi]);
+}
+
+fn chunkVertex(quad: vec2<u32>, corner: u32) -> VSOut {
+    let a = quad.x;
+    let c = quad.y;
     let face = (a >> 18u) & 7u;
+    let du = f32(((a >> 29u) | (((c >> 24u) & 3u) << 3u)) + 1u);
+    let dv = f32(((c >> 26u) & 31u) + 1u);
+    // The mesher winds +X, -Y and +Z the other way round (FaceDesc.Flip).
+    let flip = face == 0u || face == 3u || face == 4u;
+    let cu = select(select(0.0, du, corner >= 2u), select(0.0, du, corner == 1u || corner == 2u), flip);
+    let cv = select(select(0.0, dv, corner == 1u || corner == 2u), select(0.0, dv, corner >= 2u), flip);
+    var position = vec3<f32>(f32(a & 63u), f32((a >> 6u) & 63u), f32((a >> 12u) & 63u));
     let s = select(1.0, -1.0, (face & 1u) == 1u);
     var normal = vec3<f32>(0.0);
     var uv2: vec2<f32>;
-    if (face < 2u)      { normal.x = s; uv2 = vec2<f32>(position.z, -position.y); }
-    else if (face < 4u) { normal.y = s; uv2 = position.xz; }
-    else                { normal.z = s; uv2 = vec2<f32>(position.x, -position.y); }
+    if (face < 2u)      { position.y += cu; position.z += cv; normal.x = s; uv2 = vec2<f32>(position.z, -position.y); }
+    else if (face < 4u) { position.x += cu; position.z += cv; normal.y = s; uv2 = position.xz; }
+    else                { position.x += cu; position.y += cv; normal.z = s; uv2 = vec2<f32>(position.x, -position.y); }
     let layerBits = (a >> 21u) & 255u;
     let layer = select(f32(layerBits), -1.0, layerBits == 255u);
-    let c = packed.y;
     let color = vec3<f32>(f32(c & 255u), f32((c >> 8u) & 255u), f32((c >> 16u) & 255u)) / 255.0;
 
     var o: VSOut;
@@ -784,7 +804,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     private RenderPipeline* _skyPipeline;
     private RenderPipeline* _cloudPipeline;
     private RenderPipeline* _modelPipeline;
-    private RenderPipeline* _chunkPipeline;          // vs_chunk: chunk meshes (ChunkVertex)
+    private RenderPipeline* _chunkPipeline;          // vs_chunk: chunk meshes (ChunkQuad instances)
     private RenderPipeline* _chunkWireframePipeline;
     private RenderPipeline* _chunkOverdrawPipeline;  // debug overdraw view
 
@@ -862,8 +882,8 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         _hudPipeline       = CreateMeshPipeline(PrimitiveTopology.TriangleList, CullMode.None, depthTest: false);
         _modelPipeline     = CreateMeshPipeline(PrimitiveTopology.TriangleList, CullMode.None, fragmentEntry: "fs_model");
         _cloudPipeline     = CreateCloudPipeline();
-        _chunkPipeline          = CreateChunkPipeline(PrimitiveTopology.TriangleList, CullMode.Back);
-        _chunkWireframePipeline = CreateChunkPipeline(PrimitiveTopology.LineList,     CullMode.None);
+        _chunkPipeline          = CreateChunkPipeline("vs_chunk", PrimitiveTopology.TriangleList, CullMode.Back);
+        _chunkWireframePipeline = CreateChunkPipeline("vs_chunk_lines", PrimitiveTopology.LineList, CullMode.None);
         _chunkOverdrawPipeline  = CreateOverdrawPipeline();
         // The background pass: a full-screen triangle at the far plane that only fills pixels still at the cleared
         // depth (reversed: the far plane and the clear value are both 0), without writing depth.
@@ -973,12 +993,13 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
                               depthTest ? CompareFunction.Greater : CompareFunction.Always); // reversed depth: nearer is greater
     }
 
-    /// <summary>A pipeline for chunk meshes (vs_chunk, one packed <see cref="ChunkVertex"/> per vertex) and fs_main.</summary>
-    private RenderPipeline* CreateChunkPipeline(PrimitiveTopology topology, CullMode cullMode)
+    /// <summary>A pipeline for chunk meshes (<paramref name="vertexEntry"/>: one packed <see cref="ChunkQuad"/> per
+    /// instance) and fs_main.</summary>
+    private RenderPipeline* CreateChunkPipeline(string vertexEntry, PrimitiveTopology topology, CullMode cullMode)
     {
         var attr     = new VertexAttribute { Format = VertexFormat.Uint32x2, Offset = 0, ShaderLocation = 0 };
-        var vbLayout = new VertexBufferLayout { ArrayStride = ChunkVertex.SizeBytes, StepMode = VertexStepMode.Vertex, AttributeCount = 1, Attributes = &attr };
-        return CreatePipeline("vs_chunk", "fs_main", &vbLayout, topology, cullMode, depthWrite: true, CompareFunction.Greater);
+        var vbLayout = new VertexBufferLayout { ArrayStride = ChunkQuad.SizeBytes, StepMode = VertexStepMode.Instance, AttributeCount = 1, Attributes = &attr };
+        return CreatePipeline(vertexEntry, "fs_main", &vbLayout, topology, cullMode, depthWrite: true, CompareFunction.Greater);
     }
 
     /// <summary>Debug overdraw view (fs_overdraw): terrain drawn additively, depth-tested in the normal draw order, so
@@ -986,7 +1007,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     private RenderPipeline* CreateOverdrawPipeline()
     {
         var attr     = new VertexAttribute { Format = VertexFormat.Uint32x2, Offset = 0, ShaderLocation = 0 };
-        var vbLayout = new VertexBufferLayout { ArrayStride = ChunkVertex.SizeBytes, StepMode = VertexStepMode.Vertex, AttributeCount = 1, Attributes = &attr };
+        var vbLayout = new VertexBufferLayout { ArrayStride = ChunkQuad.SizeBytes, StepMode = VertexStepMode.Instance, AttributeCount = 1, Attributes = &attr };
         var add = new BlendComponent { Operation = BlendOperation.Add, SrcFactor = BlendFactor.One, DstFactor = BlendFactor.One };
         var blend = new BlendState { Color = add, Alpha = add };
         return CreatePipeline("vs_chunk", "fs_overdraw", &vbLayout, PrimitiveTopology.TriangleList, CullMode.Back,
@@ -1223,22 +1244,21 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         return new GpuMesh(vb, ib, wb, (uint)indices.Length, (uint)wfi.Length);
     }
 
-    /// <summary>Uploads a mesh packed into one block (see <see cref="GpuMesh(GpuBuffer, ulong, uint, uint)"/>): one
-    /// buffer and one write, where separate buffers cost three of each.</summary>
-    public GpuMesh UploadPackedMesh(ReadOnlySpan<byte> packed, ulong vertexBytes, uint indexCount, uint wireframeIndexCount,
-                                    IndexFormat indexFormat)
+    /// <summary>Uploads a chunk mesh: <paramref name="quads"/> holds <paramref name="quadCount"/> packed
+    /// <see cref="ChunkQuad"/>s, one buffer and one write.</summary>
+    public GpuMesh UploadChunkQuads(ReadOnlySpan<byte> quads, uint quadCount)
     {
         long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-        var buf = GpuBuffer.Create(_ctx, (ulong)packed.Length, BufferUsage.Vertex | BufferUsage.Index | BufferUsage.CopyDst);
+        var buf = GpuBuffer.Create(_ctx, (ulong)quads.Length, BufferUsage.Vertex | BufferUsage.CopyDst);
         long t1 = System.Diagnostics.Stopwatch.GetTimestamp();
-        buf.Write(0, packed);
+        buf.Write(0, quads);
         long t2 = System.Diagnostics.Stopwatch.GetTimestamp();
         LastCreateMs = (t1 - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
         LastWriteMs  = (t2 - t1) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
-        return new GpuMesh(buf, vertexBytes, indexCount, wireframeIndexCount, indexFormat);
+        return new GpuMesh(buf, quadCount);
     }
 
-    /// <summary>How long the last <see cref="UploadPackedMesh"/> spent creating its buffer and writing it (ms), for
+    /// <summary>How long the last <see cref="UploadChunkQuads"/> spent creating its buffer and writing it (ms), for
     /// the meshing panel.</summary>
     public double LastCreateMs { get; private set; }
     public double LastWriteMs { get; private set; }
@@ -1463,22 +1483,16 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     {
         if (_drawIndex >= MaxObjects) return;
 
-        // Chunk meshes are packed (ChunkVertex): their own pipeline, set once for a run of chunk draws.
-        // A mesh built while wireframe mode was off has no wireframe (see ChunkMeshSystem): solid until it's remeshed.
-        bool wire = WireframeMode && mesh.WireframeIndexCount > 0;
+        // Chunk meshes are packed quads (ChunkQuad), one instance each: their own pipeline, set once for a run of
+        // chunk draws. The wireframe draws the same quads as line loops.
+        bool wire = WireframeMode;
         var pipeline = OverdrawMode ? _chunkOverdrawPipeline : wire ? _chunkWireframePipeline : _chunkPipeline;
         if (_boundPipeline != pipeline) SetPipeline(pipeline);
 
         uint dynOffset = StageModel(new ModelUniform { Model = model, ChunkX = chunk.X, ChunkY = chunk.Y, ChunkZ = chunk.Z, Grid = grid });
         _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset);
-        _api.RenderPassEncoderSetVertexBuffer(_pass, 0, mesh.VertexBuffer.Handle, mesh.VertexOffset, mesh.VertexBytes);
-
-        var idxBuf   = wire ? mesh.WireframeBuffer : mesh.IndexBuffer;
-        var idxCount = wire ? mesh.WireframeIndexCount : mesh.IndexCount;
-        var idxOff   = wire ? mesh.WireframeOffset : mesh.IndexOffset;
-        var idxBytes = wire ? mesh.WireframeBytes : mesh.IndexBytes;
-        _api.RenderPassEncoderSetIndexBuffer(_pass, idxBuf.Handle, mesh.IndexFormat, idxOff, idxBytes);
-        _api.RenderPassEncoderDrawIndexed(_pass, idxCount, 1, 0, 0, 0);
+        _api.RenderPassEncoderSetVertexBuffer(_pass, 0, mesh.VertexBuffer.Handle, 0, mesh.VertexBytes);
+        _api.RenderPassEncoderDraw(_pass, wire && !OverdrawMode ? 8u : 6u, mesh.QuadCount, 0, 0);
         _drawIndex++;
     }
 

@@ -33,8 +33,20 @@ public sealed class GpuMesh : IDisposable
     public ulong WireframeOffset { get; }
     public ulong WireframeBytes { get; }
 
-    /// <summary>The indices' (and wireframe indices') format: 16-bit for a chunk mesh with few enough vertices.</summary>
+    /// <summary>The indices' (and wireframe indices') format.</summary>
     public IndexFormat IndexFormat { get; } = IndexFormat.Uint32;
+
+    /// <summary>For a chunk mesh: how many <see cref="ChunkQuad"/>s its vertex buffer holds (it has no indices).</summary>
+    public uint QuadCount { get; }
+
+    /// <summary>A chunk mesh: <paramref name="quadCount"/> packed <see cref="ChunkQuad"/>s, drawn as instances.</summary>
+    public GpuMesh(GpuBuffer quads, uint quadCount)
+    {
+        VertexBuffer = IndexBuffer = WireframeBuffer = quads;
+        QuadCount   = quadCount;
+        VertexBytes = quadCount * ChunkQuad.SizeBytes;
+        Count(1);
+    }
 
     public GpuMesh(GpuBuffer vertexBuffer, GpuBuffer indexBuffer, GpuBuffer wireframeBuffer,
                    uint indexCount, uint wireframeIndexCount)
