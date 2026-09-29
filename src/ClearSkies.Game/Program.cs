@@ -49,7 +49,9 @@ bool newWorld = saveDb.Seed is null;
 ulong seed = saveDb.Seed ?? (ulong.TryParse(ArgValue("--seed"), out var seedArg) ? seedArg : 1337UL);
 if (newWorld) saveDb.Seed = seed;
 Console.WriteLine($"[save] world '{worldName}' ({(newWorld ? "new" : "loaded")}), seed {seed}");
-var localSettings = LocalSettings.LoadOrCreate(Path.Combine(AppContext.BaseDirectory, "Saves", "settings.txt"), Environment.UserName);
+// The local player: known by name (this machine's user name), which the save turns into a player ID.
+string playerName = Environment.UserName;
+var playerId = saveDb.PlayerFor(playerName);
 
 // Session: single-player is a host session with nobody connected. Entity IDs and owners exist, all local.
 var session = Session.SinglePlayer();
@@ -221,7 +223,7 @@ float[]? cameraOverride = null;
 int camArg = Array.IndexOf(args, "--camera");
 if (camArg >= 0 && camArg + 1 < args.Length)
     cameraOverride = args[camArg + 1].Split(',').Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
-var camSpawn = TestScene.Build(host, commands, localSettings, saveDb.ReadPlayer(localSettings.PlayerId), cameraOverride, HeartSpawn(seed));
+var camSpawn = TestScene.Build(host, commands, playerId, playerName, saveDb.ReadPlayer(playerId), cameraOverride, HeartSpawn(seed));
 
 // Spawn: over a wide, flat stretch of plains 18 km east of the origin (found by scanning seed 1337 for flat, well-
 // covered lowland), 60 blocks above the terrain surface there (which no piece's top reaches), looking north across it.
