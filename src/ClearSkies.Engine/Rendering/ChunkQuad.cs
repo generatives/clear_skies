@@ -5,7 +5,8 @@ namespace ClearSkies.Engine.Rendering;
 
 /// <summary>
 /// One greedy-meshed chunk quad packed into 8 bytes (four 48-byte <see cref="Vertex"/>es and six indices before),
-/// drawn by the shader's vs_chunk as one 6-vertex instance (vs_chunk_lines: 8 for the wireframe). A chunk's quads sit
+/// read from a storage buffer by the shader's vs_chunk, six vertices per quad (vs_chunk_lines: 8 for the wireframe),
+/// found by vertex index. A chunk's quads sit
 /// on whole block corners, face one of six ways and take one colour and texture per block type, so:
 /// <list type="bullet">
 /// <item><see cref="A"/>: the quad's first corner (chunk-local, 0-32) in bits 0-5, 6-11, 12-17; the face (0 +X, 1 -X,
