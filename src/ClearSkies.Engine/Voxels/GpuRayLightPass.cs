@@ -517,24 +517,52 @@ fn unpackAcc(a: u32) -> vec4<f32> {
     return vec4<f32>(f32(a & 0xFFu), f32((a >> 8u) & 0xFFu), f32((a >> 16u) & 0xFFu), f32(a >> 24u)) / 255.0;
 }
 
-// A surface voxel's stored bounce (rgb) and AO (a), averaged with those of its face neighbours that are surface air
-// too (the voxel itself counting double). Each voxel fires its own fixed ray directions, so this pools several
-// voxels' ray sets: one ray starting or stopping to hit something moves the result a few times less, which keeps
-// moving ships from making nearby light crawl. Neighbours are directly connected air, so it can't reach through a
-// wall; it softens bounce and AO by about a block.
+// Face direction f (0-5: +x, -x, +y, -y, +z, -z).
+fn faceDir(f: i32) -> vec3<i32> {
+    let s = select(-1, 1, (f & 1) == 0);
+    if (f < 2) { return vec3<i32>(s, 0, 0); }
+    if (f < 4) { return vec3<i32>(0, s, 0); }
+    return vec3<i32>(0, 0, s);
+}
+
+// Whether n is surface air (air with a solid face neighbour), testing through the cached chunk.
+fn surfaceAirCached(g: i32, n: vec3<i32>, cc: ptr<function, vec3<i32>>, info: ptr<function, vec4<i32>>) -> bool {
+    if (solidCached(g, n, cc, info)) { return false; }
+    for (var f = 0; f < 6; f = f + 1) {
+        if (solidCached(g, n + faceDir(f), cc, info)) { return true; }
+    }
+    return false;
+}
+
+// A surface voxel's stored bounce (rgb) and AO (a), averaged with those of the surface air around it: its face
+// neighbours (weight 1) and its edge diagonals (weight 1/2, only through an air face cell, so never across a wall's
+// edge), the voxel itself counting 2. Each voxel fires its own fixed ray directions, so this pools several voxels'
+// ray sets: one ray starting or stopping to hit a moving ship moves the result a few times less. The diagonals matter
+// on stepped surfaces such as rounded island undersides, where the surface air cells touch only diagonally. Other air
+// is skipped (it fires no rays, so it has no bounce or AO). Solidity is read through one cached chunk, since nearly
+// all of these cells share the voxel's.
 fn smoothedAcc(g: i32, v: vec3<i32>, own: u32) -> vec4<f32> {
+    var cc = vec3<i32>(v >> vec3<u32>(5u));
+    var info = chunkInfo(g, cc);
     var sum = unpackAcc(own) * 2.0;
     var w = 2.0;
+    var faceSolid: array<bool, 6>;
     for (var f = 0; f < 6; f = f + 1) {
-        let s = select(-1, 1, (f & 1) == 0);
-        var d = vec3<i32>(0, 0, s);
-        if (f < 2) { d = vec3<i32>(s, 0, 0); } else if (f < 4) { d = vec3<i32>(0, s, 0); }
-        let n = v + d;
-        if (isSolid(g, n) || !hasSolidNeighbour(g, n)) { continue; }
+        let n = v + faceDir(f);
+        faceSolid[f] = solidCached(g, n, &cc, &info);
+        if (faceSolid[f] || !surfaceAirCached(g, n, &cc, &info)) { continue; }
         let r = voxelRef(g, n);
-        if (!r.ok) { continue; }
-        sum = sum + unpackAcc(lightPool[r.acc]);
-        w = w + 1.0;
+        if (r.ok) { sum = sum + unpackAcc(lightPool[r.acc]); w = w + 1.0; }
+    }
+    // Edge diagonals: faces fa < fb on different axes.
+    for (var fa = 0; fa < 4; fa = fa + 1) {
+        for (var fb = (fa & ~1) + 2; fb < 6; fb = fb + 1) {
+            if (faceSolid[fa] && faceSolid[fb]) { continue; } // no air path around the edge
+            let n = v + faceDir(fa) + faceDir(fb);
+            if (!surfaceAirCached(g, n, &cc, &info)) { continue; }
+            let r = voxelRef(g, n);
+            if (r.ok) { sum = sum + 0.5 * unpackAcc(lightPool[r.acc]); w = w + 0.5; }
+        }
     }
     return sum / w;
 }
