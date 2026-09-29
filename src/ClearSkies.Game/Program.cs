@@ -199,12 +199,13 @@ if (camArg >= 0 && camArg + 1 < args.Length)
 var camSpawn = TestScene.Build(host, registry, session, seed, cameraOverride, HeartSpawn(seed));
 
 // Spawn: over a wide, flat stretch of plains 18 km east of the origin (found by scanning seed 1337 for flat, well-
-// covered lowland), 60 blocks above the terrain surface there (which no piece's top reaches), looking north across it.
+// covered lowland), 60 blocks above the terrain surface there (which no piece's top reaches), looking along -Z, where
+// land fills the view out to 450 blocks (toward +Z it covers about half). --flight-test flies this way from here.
 static (Vector3D<float> Position, float Yaw, float Pitch)? HeartSpawn(ulong seed)
 {
     const float x = 18240f, z = 1088f;
     float y = ContinentTerrain.For(seed).Height(x, z) + 60f;
-    return (new Vector3D<float>(x, y, z), MathF.PI, -0.15f);
+    return (new Vector3D<float>(x, y, z), 0f, -0.15f);
 }
 
 // Ray-traced lighting prototype test ship (plan doc, task 4): a small solid hull with a Lamp exposed on
