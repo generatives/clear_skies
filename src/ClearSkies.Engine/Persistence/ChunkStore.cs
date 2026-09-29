@@ -33,7 +33,8 @@ public sealed class DatabaseChunkStore : IChunkStore
     public void Save(ChunkPosition pos, ChunkData data) => _db.WriteChunk(pos, StaticWorldSerializer.ToBytes(data));
 }
 
-/// <summary>A store that keeps nothing: nothing was ever saved, and saves are dropped.</summary>
+/// <summary>A client's store until N3 fetches chunks from the host: it has no save, so nothing was ever saved, and saves
+/// are dropped.</summary>
 public sealed class NoChunkStore : IChunkStore
 {
     public IEnumerable<ChunkPosition> SavedChunks() => Array.Empty<ChunkPosition>();
