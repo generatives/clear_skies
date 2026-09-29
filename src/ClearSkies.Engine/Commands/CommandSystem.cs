@@ -48,18 +48,19 @@ public sealed class CommandSystem : ISystem, IDebugUiSystem
     private readonly EntitySet _describeRequests;
     private readonly List<Entity> _unclaimed = new();
 
-    public CommandSystem(Session session, EntityRegistry registry, Func<uint> tick, ICommandRouter? router = null, World? world = null)
+    public CommandSystem(Session session, EntityRegistry registry, Func<uint> tick)
     {
         Session = session;
         Descriptions = new DescriptionSink(this);
-        _describeRequests = (world ?? registry.World).GetEntities().With<DescribeRequest>().AsSet();
+        _describeRequests = registry.World.GetEntities().With<DescribeRequest>().AsSet();
         _registry = registry;
         _tick = tick;
-        Router = router ?? new LocalCommandRouter();
     }
 
     public Session Session { get; }
-    public ICommandRouter Router { get; set; }
+
+    /// <summary>Where commands, events and rejections go: this machine alone until a network session takes over.</summary>
+    public ICommandRouter Router { get; set; } = new LocalCommandRouter();
     public uint Tick => _tick();
     internal NetWriter Scratch { get; } = new();
     public CommandStats Stats { get; } = new();
@@ -90,9 +91,6 @@ public sealed class CommandSystem : ISystem, IDebugUiSystem
     internal CommandHandler<T> HandlerOf<T>() where T : struct, ICommand =>
         _byType.TryGetValue(typeof(T), out var h) ? (CommandHandler<T>)h
             : throw new InvalidOperationException($"No handler is registered for {typeof(T).Name}.");
-
-    /// <summary>Whether a handler for <typeparamref name="T"/> is registered.</summary>
-    public bool Handles<T>() where T : struct, ICommand => _byType.ContainsKey(typeof(T));
 
     public CommandHandlerBase? HandlerFor(ushort id) => _byId.GetValueOrDefault(id);
 
