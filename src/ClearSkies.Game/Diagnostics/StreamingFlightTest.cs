@@ -247,7 +247,9 @@ public sealed class StreamingFlightTest : ISystem, IDebugUiSystem
         double occ = (double)_store.OccSlotsInUse * GridStore.WordsPerChunk * 4 / Mb;
         double mesh = GpuMesh.LiveBytes / Mb, wire = GpuMesh.LiveWireframeBytes / Mb;
         double cpu = (double)dense * ChunkData.Size * ChunkData.Size * ChunkData.Size / Mb;
-        sb.AppendLine($"  memory at the end (MB; peak in brackets): light {light:F0} ({(double)_peakLightSlots * GridStore.SlotBytes / Mb:F0}), " +
+        double acc = (double)_store.AccSlotCapacity * GridStore.AccSlotBytes / Mb;
+        sb.AppendLine($"  memory at the end (MB; peak in brackets): light {light:F0} ({(double)_peakLightSlots * GridStore.SlotBytes / Mb:F0}) " +
+                      $"+ accumulation pool {acc:F0} ({_store.AccSlotsInUse:N0} bricks being evaluated), " +
                       $"mesh {mesh:F0} ({_peakMeshBytes / Mb:F0}; wireframe indices {wire:F0} of it), " +
                       $"occupancy {occ:F0} ({(double)_peakOccSlots * GridStore.WordsPerChunk * 4 / Mb:F0}), CPU chunk data {cpu:F0}");
         sb.AppendLine($"    {_store.LightSlotsInUse:N0} light bricks, {_store.WorldChunkCount:N0} world chunks on the GPU, " +

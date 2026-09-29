@@ -41,6 +41,8 @@ struct Params {
 @group(0) @binding(6) var<storage, read> work: array<u32>;
 @group(0) @binding(7) var<storage, read> lists: array<u32>;
 @group(0) @binding(8) var<uniform> p: Params;
+@group(0) @binding(9) var<storage, read_write> accPool: array<u32>;
+@group(0) @binding(10) var<storage, read> accMap: array<u32>;
 
 const WPC: i32 = " + GridStore.WordsPerChunk + @";
 const OCC_UNLOADED: i32 = " + GridStore.OccUnloaded + @";
@@ -154,21 +156,30 @@ fn jumpCell(v: vec3<i32>, size: i32, o: vec3<f32>, d: vec3<f32>, t1: f32) -> Jum
 
 // ── Light layout ──────────────────────────────────────────────────────────────────────────────────────────
 // A light slot (one 8³ brick, voxel k = x + 8*(y + 8*z)) is SLOT_WORDS u32s:
-//   [0, 256)    display: one u16 per voxel, two per word (k even = low half): bits 0-8 brightness, 9-13 warmth,
-//               14-15 sun visibility (0-3). Brightness and warmth hold all the non-sun light (ambient times the ray
-//               AO, lamps and bounce, combined per channel by max; see encodeLight). The fragment shader reads only
-//               this.
-//   [256, 768)  accumulation: one u32 per voxel: bits 0-7 bounce R, 8-15 G, 16-23 B (linear 0-1), 24-31 AO
-//               occlusion (0-255). Persistent between frames, blended by the bounce pass.
+//   display: one u16 per voxel, two per word (k even = low half): bits 0-8 brightness, 9-13 warmth, 14-15 sun
+//   visibility (0-3). Brightness and warmth hold all the non-sun light (ambient times the ray AO, lamps and bounce,
+//   combined per channel by max; see encodeLight). The fragment shader reads only this.
+// A brick whose bounce is being evaluated also has an accumulation slot in accPool (accMap[slot] = its index + 1, 0
+// for none), ACC_WORDS u32s, one per voxel: bits 0-7 bounce R, 8-15 G, 16-23 B (linear 0-1), 24-31 AO occlusion
+// (0-255), blended by the bounce pass. The CPU hands one out when the brick's evaluation starts and takes it back when
+// its evaluations are done, so a settled brick keeps only its display.
 const SLOT_WORDS: i32 = " + GridStore.WordsPerSlot + @";
-const ACC_BASE: i32 = 256;
+const ACC_WORDS: i32 = " + GridStore.AccWordsPerSlot + @";
+
+// First accPool word of light slot s's accumulation, or -1 if it has none.
+fn accOf(s: u32) -> i32 {
+    let a = accMap[s];
+    if (a == 0u) { return -1; }
+    return i32(a - 1u) * ACC_WORDS;
+}
 
 // Display light is a brightness (the brightest channel, 0-510 on a square curve, so ambient and bounce at the dark
 // end get fine steps; 511 is kept for no light storage) and a warmth (0-30) along one line of tints: 0 cool
 // blue-white, 15 white, 30 deep red. Other colours are carried to the nearest tint on that line.
 " + GridStore.LightCodecWgsl + @"
 
-struct VoxelRef { ok: bool, disp: i32, shift: u32, acc: i32 }; // disp: display word, shift: 0 or 16 into it
+// disp: display word, shift: 0 or 16 into it; acc: accPool word, or -1 if the brick has no accumulation.
+struct VoxelRef { ok: bool, disp: i32, shift: u32, acc: i32 };
 
 // Where voxel v of grid g lives in lightPool (ok = false: it has no light storage).
 fn voxelRef(g: i32, v: vec3<i32>) -> VoxelRef {
@@ -185,7 +196,8 @@ fn voxelRef(g: i32, v: vec3<i32>) -> VoxelRef {
     r.ok = true;
     r.disp = i32(s) * SLOT_WORDS + (k >> 1u);
     r.shift = u32(k & 1) * 16u;
-    r.acc = i32(s) * SLOT_WORDS + ACC_BASE + k;
+    let a = accOf(s);
+    r.acc = select(-1, a + k, a >= 0);
     return r;
 }
 
@@ -361,7 +373,7 @@ fn anyOccluderAlongSegment(list: u32, worldOrigin: vec3<f32>, worldDir: vec3<f32
 // display word and two accumulation words, so every pass writes whole words no other thread touches. The work list
 // can exceed the 65535 per-dimension dispatch limit, so it is dispatched as a 2D grid and flattened here.
 
-struct Item { g: i32, v0: vec3<i32>, disp: i32, acc: i32 }; // v0: the thread's first voxel (the second is +x)
+struct Item { g: i32, v0: vec3<i32>, disp: i32, slot: u32 }; // v0: the thread's first voxel (the second is +x)
 
 fn itemOf(slot: u32, t: u32) -> Item {
     let info = slotInfo[slot];
@@ -371,7 +383,7 @@ fn itemOf(slot: u32, t: u32) -> Item {
     it.g = info.x >> 6u;
     it.v0 = info.yzw * 32 + vec3<i32>(b & 3, (b >> 2u) & 3, b >> 4u) * 8 + vec3<i32>(k & 7, (k >> 3u) & 7, k >> 6u);
     it.disp = i32(slot) * SLOT_WORDS + i32(t);
-    it.acc = i32(slot) * SLOT_WORDS + ACC_BASE + k;
+    it.slot = slot;
     return it;
 }
 
@@ -552,7 +564,7 @@ fn smoothedAcc(g: i32, v: vec3<i32>, own: u32) -> vec4<f32> {
         faceSolid[f] = solidCached(g, n, &cc, &info);
         if (faceSolid[f] || !surfaceAirCached(g, n, &cc, &info)) { continue; }
         let r = voxelRef(g, n);
-        if (r.ok) { sum = sum + unpackAcc(lightPool[r.acc]); w = w + 1.0; }
+        if (r.ok && r.acc >= 0) { sum = sum + unpackAcc(accPool[r.acc]); w = w + 1.0; }
     }
     // Edge diagonals: faces fa < fb on different axes.
     for (var fa = 0; fa < 4; fa = fa + 1) {
@@ -561,7 +573,7 @@ fn smoothedAcc(g: i32, v: vec3<i32>, own: u32) -> vec4<f32> {
             let n = v + faceDir(fa) + faceDir(fb);
             if (!surfaceAirCached(g, n, &cc, &info)) { continue; }
             let r = voxelRef(g, n);
-            if (r.ok) { sum = sum + 0.5 * unpackAcc(lightPool[r.acc]); w = w + 0.5; }
+            if (r.ok && r.acc >= 0) { sum = sum + 0.5 * unpackAcc(accPool[r.acc]); w = w + 0.5; }
         }
     }
     return sum / w;
@@ -589,8 +601,13 @@ fn compose_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) 
     let it = itemOf(work[wi], t);
     let old = lightPool[it.disp];
     let list = listOf(it.g, it.v0);
-    let d0 = composeVoxel(it.g, it.v0, lightPool[it.acc], (old >> 14u) & 3u, list);
-    let d1 = composeVoxel(it.g, it.v0 + vec3<i32>(1, 0, 0), lightPool[it.acc + 1], (old >> 30u) & 3u, list);
+    // No accumulation (bounce off, or not evaluated yet): no bounce and no AO.
+    let a = accOf(it.slot);
+    let k = i32(t) * 2;
+    let acc0 = select(0u, accPool[a + k], a >= 0);
+    let acc1 = select(0u, accPool[a + k + 1], a >= 0);
+    let d0 = composeVoxel(it.g, it.v0, acc0, (old >> 14u) & 3u, list);
+    let d1 = composeVoxel(it.g, it.v0 + vec3<i32>(1, 0, 0), acc1, (old >> 30u) & 3u, list);
     lightPool[it.disp] = d0 | (d1 << 16u);
 }
 
@@ -685,7 +702,7 @@ fn radianceAt(g: i32, h: Hit) -> vec3<f32> {
     let r = voxelRef(g, h.cell);
     if (!r.ok) { return vec3<f32>(0.0); }
     let d = (lightPool[r.disp] >> r.shift) & 0xFFFFu;
-    let acc = lightPool[r.acc];
+    let acc = select(0u, accPool[max(r.acc, 0)], r.acc >= 0); // a settled brick: its bounce is in its display
     let shown = select(decodeLight(d), vec3<f32>(0.0), isEmptyLight(d)); // not composed yet: nothing to reflect
     let bnc = vec3<f32>(f32(acc & 0xFFu), f32((acc >> 8u) & 0xFFu), f32((acc >> 16u) & 0xFFu)) / 255.0;
     let nW = normalize((grids[g].v2w * vec4<f32>(h.n, 0.0)).xyz);
@@ -806,22 +823,24 @@ fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) n
     let alpha = max(1.0 / f32(cycle), 1.0 / (f32(nu) + 1.0));
     let slice = i32(nu % cycle);
     let list = listOf(it.g, it.v0);
+    // The CPU gives every brick it lists an accumulation slot; without one there is nothing to write.
+    let accBase = accOf(it.slot);
+    let has = accBase >= 0;
     // Gather the surface voxels (see Surface compaction); other air has no bounce and no occlusion, solid keeps its word.
     let base = it.v0 - vec3<i32>(i32(t * 2u) & 7, (i32(t * 2u) >> 3u) & 7, i32(t * 2u) >> 6u);
     for (var e = 0u; e < 2u; e = e + 1u) {
         let v = it.v0 + vec3<i32>(i32(e), 0, 0);
-        if (isSolid(it.g, v)) { continue; }
+        if (!has || isSolid(it.g, v)) { continue; }
         if (hasSolidNeighbour(it.g, v)) { wList[atomicAdd(&wCount, 1u)] = t * 2u + e; }
-        else { lightPool[it.acc + i32(e)] = 0u; }
+        else { accPool[accBase + i32(t * 2u + e)] = 0u; }
     }
     workgroupBarrier();
     let n = atomicLoad(&wCount);
-    let accBase = it.acc - i32(t * 2u);
     for (var i = t; i < n; i = i + 256u) {
         let k = wList[i];
         let v = base + vec3<i32>(i32(k & 7u), i32((k >> 3u) & 7u), i32(k >> 6u));
         let a = accBase + i32(k);
-        lightPool[a] = bounceVoxel(it.g, v, lightPool[a], alpha, slice, list);
+        accPool[a] = bounceVoxel(it.g, v, accPool[a], alpha, slice, list);
     }
 }
 
@@ -833,9 +852,23 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
               @builtin(local_invocation_index) t: u32) {
     let wi = wid.x + wid.y * nwg.x;
     if (wi >= u32(p.counts.z)) { return; }
-    let base = i32(work[wi]) * SLOT_WORDS + ACC_BASE + i32(t) * 2;
-    lightPool[base]     = lightPool[base] & 0xFF000000u;
-    lightPool[base + 1] = lightPool[base + 1] & 0xFF000000u;
+    let a = accOf(work[wi]);
+    if (a < 0) { return; }
+    let base = a + i32(t) * 2;
+    accPool[base]     = accPool[base] & 0xFF000000u;
+    accPool[base + 1] = accPool[base + 1] & 0xFF000000u;
+}
+
+// Zeroes the listed accumulation slots (accPool slot numbers, not light slots): ones just handed out, which still
+// hold whatever their last brick left, before anything reads them.
+@compute @workgroup_size(256)
+fn zero_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
+             @builtin(local_invocation_index) t: u32) {
+    let wi = wid.x + wid.y * nwg.x;
+    if (wi >= u32(p.counts.z)) { return; }
+    let base = i32(work[wi]) * ACC_WORDS + i32(t) * 2;
+    accPool[base] = 0u;
+    accPool[base + 1] = 0u;
 }";
 
 
@@ -844,6 +877,7 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
     private readonly ComputePipeline _composePipeline;
     private readonly ComputePipeline _bouncePipeline;
     private readonly ComputePipeline _clearPipeline;
+    private readonly ComputePipeline _zeroPipeline;
     // One small uniform buffer per dispatch of a frame: the dispatches are recorded into one command buffer, so every
     // parameter write lands before any of them runs and each needs its own.
     private readonly List<GpuBuffer> _params = new();
@@ -855,9 +889,10 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
 
     // Bindings each entry point uses (auto layouts only contain what the entry point references).
     private static readonly uint[] SunBindings    = { 0, 1, 3, 4, 5, 6, 7, 8 };
-    private static readonly uint[] ComposeBindings = { 0, 1, 2, 3, 4, 5, 6, 7, 8 }; // 2: neighbour smoothing (voxelRef)
-    private static readonly uint[] BounceBindings = { 0, 1, 2, 3, 4, 5, 6, 7, 8 };
-    private static readonly uint[] ClearBindings  = { 3, 6, 8 };
+    private static readonly uint[] ComposeBindings = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 }; // 2: neighbour smoothing (voxelRef)
+    private static readonly uint[] BounceBindings = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
+    private static readonly uint[] ClearBindings  = { 6, 8, 9, 10 };
+    private static readonly uint[] ZeroBindings   = { 6, 8, 9 };
 
     public GpuRayLightPass(GpuContext ctx)
     {
@@ -866,6 +901,7 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
         _composePipeline = new ComputePipeline(ctx, Wgsl, "compose_main");
         _bouncePipeline = new ComputePipeline(ctx, Wgsl, "bounce_main");
         _clearPipeline  = new ComputePipeline(ctx, Wgsl, "clear_main");
+        _zeroPipeline   = new ComputePipeline(ctx, Wgsl, "zero_main");
         _lists = GpuBuffer.CreateStorage(ctx, 65536);
     }
 
@@ -889,6 +925,15 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
         if (count <= 0) return;
         var param = WriteParams(Vector3D<float>.Zero, count, default, default);
         Dispatch(_clearPipeline, ClearBindings, store, work, count, param, "Lighting: clear bounce");
+    }
+
+    /// <summary>Zeroes the <paramref name="count"/> accumulation slots (accumulation-pool numbers) listed in
+    /// <paramref name="work"/>; see zero_main.</summary>
+    public void DispatchZeroAcc(GridStore store, GpuBuffer work, int count)
+    {
+        if (count <= 0) return;
+        var param = WriteParams(Vector3D<float>.Zero, count, default, default);
+        Dispatch(_zeroPipeline, ZeroBindings, store, work, count, param, "Lighting: zero accumulation");
     }
 
     /// <summary>Sun visibility for the <paramref name="count"/> light slots listed in <paramref name="work"/>.</summary>
@@ -941,7 +986,9 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
                 5 => store.Grids,
                 6 => work,
                 7 => _lists,
-                _ => param,
+                8 => param,
+                9 => store.AccPool,
+                _ => store.AccMap,
             });
         nint bg = pipeline.CreateBindGroupHandle(arr);
         _bindGroups.Add(bg);
@@ -997,6 +1044,7 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
         _composePipeline.Dispose();
         _bouncePipeline.Dispose();
         _clearPipeline.Dispose();
+        _zeroPipeline.Dispose();
         Submit();
         foreach (var p in _params) p.Dispose();
         _lists.Dispose();
