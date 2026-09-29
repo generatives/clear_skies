@@ -266,7 +266,7 @@ else
             {
                 var reader = new ClearSkies.Engine.Serialization.NetReader(saved);
                 var spawn = ((SpawnPlayerHandler)commands.HandlerFor(CommandIds.SpawnPlayer)!).Read(ref reader);
-                return (saved, spawn.Player.Position);
+                return (saved, spawn.Description.Position);
             }
             var p = HeartSpawn(seed)!.Value.Position;
             return (null, new Vector3(p.X, p.Y - PlayerFactory.EyeHeight, p.Z));
@@ -398,7 +398,7 @@ if (newWorld)
     shipVoxels.Add(new(5, 1, 2, BlockId.Lever, BlockOrientation.From(Direction.East, Direction.North)));
 
     var shipSpawn = new Vector3(camSpawn.X + 10f, camSpawn.Y - 5f, camSpawn.Z + 45f);
-    commands.Send(new SpawnGrid { Grid = GridDescription.FromVoxels(shipSpawn, shipVoxels), Select = true });
+    commands.Send(new Spawn<GridDescription> { Description = GridDescription.FromVoxels(shipSpawn, shipVoxels), Select = true });
     Console.WriteLine($"[test-ship] spawned 5x2x5 hull + lamp at {shipSpawn}");
 }
 

@@ -8,7 +8,7 @@ using Silk.NET.Maths;
 namespace ClearSkies.Engine.Voxels;
 
 /// <summary>Builds grid entities from descriptions. A construction helper for SpawnGridHandler, the only caller: to
-/// create a grid, send a SpawnGrid command.</summary>
+/// create a grid, send a <c>Spawn&lt;GridDescription&gt;</c> command.</summary>
 public static class DynamicGridFactory
 {
     /// <summary>
@@ -21,31 +21,17 @@ public static class DynamicGridFactory
     {
         var entity = world.CreateEntity();
         entity.Set(new DynamicGrid { Locked = description.Locked });
-        entity.Set(Transform.Identity);
+        var b = description.Body;
+        entity.Set(new Transform { Position = PhysicsConv.ToSilk(b.Position), Rotation = PhysicsConv.ToSilk(b.Rotation), Scale = Vector3D<float>.One });
         entity.Set(id);
         var volume = new ChunkVolume(entity, world);
         entity.Set(new ChunkGrid() { Volume = volume });
         entity.Set<OwnPresence>();
         entity.Set<Supportable>();
-        Fill(entity, description);
-        return entity;
-    }
-
-    /// <summary>Makes an existing grid match <paramref name="description"/>: its blocks, controls, lock and body
-    /// state. Used to create a grid and to overwrite one in place (a spawn received twice, a resync).</summary>
-    public static void Fill(Entity entity, GridDescription description)
-    {
-        var volume = entity.Get<ChunkGrid>().Volume;
-        foreach (var pos in volume.All.Select(c => c.Key).ToList()) volume.RemoveChunk(pos);
-
         foreach (var v in description.Voxels) volume.SetBlock(v.X, v.Y, v.Z, v.Id, v.Orientation);
         entity.Set(description.Controls);
-        entity.Get<DynamicGrid>().Locked = description.Locked;
-        var b = description.Body;
-        ref var t = ref entity.Get<Transform>();
-        t.Position = PhysicsConv.ToSilk(b.Position);
-        t.Rotation = PhysicsConv.ToSilk(b.Rotation);
         entity.Set(new BodyStateOverride { LinearVelocity = b.LinearVelocity, AngularVelocity = b.AngularVelocity });
+        return entity;
     }
 
     /// <summary>A live grid's description: its blocks, controls, lock, pose and velocities (from its body if it
@@ -80,7 +66,7 @@ public static class DynamicGridFactory
 }
 
 /// <summary>A body state to give a grid's body once it has one (or straight away if it does): the pose from its
-/// Transform, and these velocities. Set when a grid is spawned or overwritten from a description; PhysicsBodySystem
+/// Transform, and these velocities. Set when a grid is spawned from a description; PhysicsBodySystem
 /// applies and removes it.</summary>
 public struct BodyStateOverride
 {

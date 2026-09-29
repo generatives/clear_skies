@@ -152,11 +152,9 @@ public sealed class EditVoxelsHandler : PredictedCommandHandler<EditVoxels, Edit
 
     public override void AfterApply(in EditVoxels e, in CommandContext ctx)
     {
+        // Only the authority (the grid's owner) runs AfterApply, so the owner despawns it, for everyone.
         if (_blocks.Registry.Find(e.Volume) is { } root && root.Has<DynamicGrid>() && root.Get<ChunkGrid>().Volume.IsEmpty())
-        {
-            if (Owner.Handles<DespawnEntity>()) Owner.Send(new DespawnEntity { Entity = e.Volume });
-            else Hierarchy.DestroyRecursive(root); // its chunks with it
-        }
+            Owner.Send(new DespawnEntity { Entity = e.Volume });
     }
 
     // ── undo ────────────────────────────────────────────────────────────────
