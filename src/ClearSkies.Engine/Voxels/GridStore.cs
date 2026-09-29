@@ -110,8 +110,8 @@ public sealed class GridStore : IDisposable
     /// WGSL for the display light of a voxel (the low 14 bits of its display u16): brightness, the brightest channel
     /// on a square curve (bits 0-8, 0-510; 511 = not composed / no light storage), and warmth (bits 9-13, 0-30), a
     /// tint along one line from cool blue-white (0) through white (15) to deep red (30). Colours off that line are
-    /// carried to its nearest tint (green and blue lamps read as cool white). 9 bits keep ambient darkened by ray AO
-    /// smooth: near full ambient a step is about 1% of it, finer than one bounce ray.
+    /// carried to the tint with the same red minus blue (a green lamp reads as white, a blue one as cool white).
+    /// 9 bits keep ambient darkened by ray AO smooth: near full ambient a step is about 1% of it.
     /// </summary>
     public const string LightCodecWgsl = @"
 fn warmTint(w: f32) -> vec3<f32> {
@@ -128,10 +128,11 @@ fn encodeLight(c: vec3<f32>) -> u32 {
     let m = max(c.r, max(c.g, c.b));
     var w = 0.5;
     if (m > 0.0) {
-        // Least-squares nearest point on the tint line, on whichever side of white the colour leans.
+        // Along the tint line red minus blue runs from -0.4 (cool end) through 0 (white) to 0.9 (red end), so warmth
+        // follows it alone: continuous, and green (which the line can't show) doesn't push a colour either way.
         let t = c / m;
-        if (t.r >= t.b) { w = 0.5 + 0.5 * clamp((0.75 * (1.0 - t.g) + 0.9 * (1.0 - t.b)) / 1.3725, 0.0, 1.0); }
-        else { w = 0.5 - 0.5 * clamp((0.4 * (1.0 - t.r) + 0.25 * (1.0 - t.g)) / 0.2225, 0.0, 1.0); }
+        let d = t.r - t.b;
+        w = select(0.5 - 0.5 * clamp(-d / 0.4, 0.0, 1.0), 0.5 + 0.5 * clamp(d / 0.9, 0.0, 1.0), d >= 0.0);
     }
     return u32(round(510.0 * sqrt(clamp(m, 0.0, 1.0)))) | (u32(round(w * 30.0)) << 9u);
 }
