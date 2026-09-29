@@ -31,7 +31,7 @@ public sealed class SaveDatabase : IDisposable
         Execute("PRAGMA synchronous = NORMAL;");
         Execute(@"CREATE TABLE IF NOT EXISTS world (key TEXT PRIMARY KEY, value TEXT NOT NULL);
                   CREATE TABLE IF NOT EXISTS entities (id INTEGER PRIMARY KEY, kind INTEGER NOT NULL, x REAL, y REAL, z REAL, data BLOB NOT NULL);
-                  CREATE TABLE IF NOT EXISTS players (player_id TEXT PRIMARY KEY, name TEXT NOT NULL, data BLOB NOT NULL);
+                  CREATE TABLE IF NOT EXISTS players (player_id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, data BLOB);
                   CREATE TABLE IF NOT EXISTS chunks (x INTEGER NOT NULL, y INTEGER NOT NULL, z INTEGER NOT NULL, data BLOB NOT NULL, PRIMARY KEY (x, y, z));");
     }
 
@@ -144,6 +144,29 @@ public sealed class SaveDatabase : IDisposable
 
     // ── players ──────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// The player called <paramref name="name"/> in this world: players are known by name, and the host gives each name
+    /// a player ID the first time it sees it. The ID then keys the player's saved state.
+    /// </summary>
+    public PlayerId PlayerFor(string name)
+    {
+        lock (_lock)
+        {
+            using (var find = Command("SELECT player_id FROM players WHERE name = $n"))
+            {
+                find.Parameters.AddWithValue("$n", name);
+                if (find.ExecuteScalar() is string id) return new PlayerId(Guid.Parse(id));
+            }
+            var player = PlayerId.New();
+            using var add = Command("INSERT INTO players (player_id, name) VALUES ($p, $n)");
+            add.Parameters.AddWithValue("$p", player.Value.ToString("N"));
+            add.Parameters.AddWithValue("$n", name);
+            add.ExecuteNonQuery();
+            return player;
+        }
+    }
+
+    /// <summary>The player's saved spawn; null if they haven't been saved in this world yet.</summary>
     public byte[]? ReadPlayer(PlayerId player)
     {
         lock (_lock)
@@ -159,7 +182,7 @@ public sealed class SaveDatabase : IDisposable
         lock (_lock)
         {
             using var cmd = Command(@"INSERT INTO players (player_id, name, data) VALUES ($p, $n, $d)
-                                      ON CONFLICT(player_id) DO UPDATE SET name = $n, data = $d");
+                                      ON CONFLICT(player_id) DO UPDATE SET data = $d");
             cmd.Parameters.AddWithValue("$p", player.Value.ToString("N"));
             cmd.Parameters.AddWithValue("$n", name);
             cmd.Parameters.AddWithValue("$d", data);

@@ -266,32 +266,3 @@ public sealed class WorldSaver : ISystem, IDebugUiSystem
         if (ImGui.Button("Save now")) RequestAutosave();
     }
 }
-
-/// <summary>This machine's settings: who the player is, across sessions and worlds.</summary>
-public sealed class LocalSettings
-{
-    public PlayerId PlayerId { get; private set; }
-    public string Name { get; private set; } = "";
-
-    /// <summary>Reads Saves/settings.txt, creating it with a new player ID the first time.</summary>
-    public static LocalSettings LoadOrCreate(string path, string defaultName)
-    {
-        var settings = new LocalSettings { Name = defaultName };
-        if (File.Exists(path))
-            foreach (var line in File.ReadAllLines(path))
-            {
-                int eq = line.IndexOf('=');
-                if (eq < 0) continue;
-                var (key, value) = (line[..eq].Trim(), line[(eq + 1)..].Trim());
-                if (key == "player_id" && Guid.TryParse(value, out var g)) settings.PlayerId = new PlayerId(g);
-                if (key == "name" && value.Length > 0) settings.Name = value;
-            }
-        if (settings.PlayerId.Value == Guid.Empty)
-        {
-            settings.PlayerId = PlayerId.New();
-            Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
-            File.WriteAllLines(path, new[] { $"player_id = {settings.PlayerId.Value:D}", $"name = {settings.Name}" });
-        }
-        return settings;
-    }
-}
