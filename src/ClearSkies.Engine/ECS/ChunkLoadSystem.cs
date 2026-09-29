@@ -26,8 +26,10 @@ namespace ClearSkies.Engine.ECS;
 /// budget is full, the queue stops; and if the next queued column is nearer than the farthest loaded one (after
 /// the centre moved), the farthest is unloaded to make room. So the loaded world is always the nearest that fits.
 ///
-/// The fog (see <see cref="FogDistance"/>) sits at the nearest column still queued or loading, or else at the view
-/// distance: an island only partly loaded fades out where loading stopped instead of ending in a hard edge.
+/// The fog (see <see cref="FogDistance"/>) sits at the nearest column still queued or loading, or holding a chunk that
+/// is loaded but not drawn yet (not in the GPU store or not meshed), or else at the view distance: an island only
+/// partly loaded fades out where loading stopped instead of ending in a hard edge, and chunks appear behind the fog
+/// rather than popping in in front of it.
 /// </summary>
 public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 {
@@ -144,6 +146,8 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 
     private float _fogDistance;
     private float _fogTarget;
+    // Chunks loaded but perhaps not drawn yet: until each is uploaded to the GPU store and meshed, the fog stays short of it.
+    private readonly List<ChunkPosition> _undrawn = new();
 
     private readonly List<ChunkPosition> _toUnload = new();
 
@@ -282,7 +286,11 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
                     continue;
                 }
                 // Dropped if the centre moved on while it generated, or an edit created the chunk meanwhile.
-                if (InView(pos.X, pos.Z) && !_staticVolume.IsLoaded(pos)) _staticVolume.AddChunk(pos, data, packed);
+                if (InView(pos.X, pos.Z) && !_staticVolume.IsLoaded(pos))
+                {
+                    _staticVolume.AddChunk(pos, data, packed);
+                    _undrawn.Add(pos);
+                }
             }
         }
         _steps.Lap(ApplyStep);
@@ -557,11 +565,33 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
                      : !_scanDone ? _fogTarget
                      : _viewDistance;
         foreach (var (x, z) in _inFlight.Keys) target = MathF.Min(target, ColumnDistance(centre, x, z));
+        target = MathF.Min(target, NearestUndrawn(centre));
         _fogTarget = target;
 
         float rate = target < _fogDistance ? 8f : 1f;
         _fogDistance += (target - _fogDistance) * (1f - MathF.Exp(-rate * dt));
         SkySettings.SetFogDistance(_fogDistance);
+    }
+
+    /// <summary>The distance to the nearest loaded chunk still waiting for its GPU upload or its first mesh (infinity if
+    /// none), forgetting those now drawn, unloaded, or outside the rendering layer (which never draw).</summary>
+    private float NearestUndrawn(Vector3D<float> centre)
+    {
+        float nearest = float.PositiveInfinity;
+        for (int i = _undrawn.Count - 1; i >= 0; i--)
+        {
+            var pos = _undrawn[i];
+            var e = _staticVolume.GetEntry(pos)?.Entity;
+            if (e is { IsAlive: true } entity && entity.Has<Rendered>()
+                && (entity.Has<NeedsGpuUploadFlag>() || entity.Has<NeedsRemeshFlag>()))
+            {
+                nearest = MathF.Min(nearest, ColumnDistance(centre, pos.X, pos.Z));
+                continue;
+            }
+            _undrawn[i] = _undrawn[^1];
+            _undrawn.RemoveAt(_undrawn.Count - 1);
+        }
+        return nearest;
     }
 
     /// <summary>Horizontal distance from the centre to the nearest point of chunk column (x, z).</summary>
