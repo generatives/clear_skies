@@ -227,7 +227,7 @@ var camSpawn = TestScene.Build(host, commands, localSettings, saveDb.ReadPlayer(
 // covered lowland), 60 blocks above the terrain surface there (which no piece's top reaches), looking north across it.
 static (Vector3D<float> Position, float Yaw, float Pitch)? HeartSpawn(ulong seed)
 {
-    const float x = 18240f, z = 1088f;
+    const float x = -825f, z = -1000f;
     float y = ContinentTerrain.For(seed).Height(x, z) + 60f;
     return (new Vector3D<float>(x, y, z), MathF.PI, -0.15f);
 }
