@@ -232,6 +232,18 @@ public class TickInterpolationTests
         Assert.Equal(1.5f, rig.Frame(0.5f), 4);
     }
 
+    /// <summary>Far from the origin (the spawn is 18 km out) something standing still is drawn exactly where it is,
+    /// every frame, not a float's rounding off it (which showed as a ship vibrating).</summary>
+    [Fact]
+    public void FarFromTheOriginSomethingStillIsDrawnWhereItIs()
+    {
+        var rig = new Rig();
+        const float x = 18240.37f;
+        rig.Tick(x);
+        rig.Tick(x);
+        for (int i = 1; i < 100; i++) Assert.Equal(x, rig.Frame(i / 100f));
+    }
+
     [Fact]
     public void SeveralTicksInOneFrameKeepTheirHistory()
     {
