@@ -123,6 +123,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         ImGui.Separator();
         ImGui.Text("Lighting settings");
         ImGui.SliderFloat("Ambient level", ref _ambientLevel, 0f, 15f, "%.0f");
+        ImGui.SliderFloat("Exposure (lit surfaces)", ref RayLightingSettings.Exposure, 0.5f, 3f, "%.2f");
         ImGui.SliderFloat("Ray AO strength", ref _aoStrength, 0f, 1f, "%.2f");
         ImGui.Checkbox("Bounce light + AO rays", ref _bounceEnabled);
         ImGui.SliderFloat("Bounce albedo", ref _bounceAlbedo, 0f, 0.9f, "%.2f");

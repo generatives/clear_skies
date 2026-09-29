@@ -38,7 +38,8 @@ const EMPTY_DISPLAY: u32 = 0xFFFFu;   // no light storage (or not lit yet): ambi
 // (horizontal), fog.zw: the cloud layer's (see CloudLayer), in blocks from the camera. zenith/horizon.rgb: the sky
 // gradient (see SkySettings). horizon.w: the distance haze's strength (0-1), haze.rgb its colour, haze.w its distance.
 // sea: the cloud sea's altitude, coverage (0 = off), cell size and thickness, in blocks (see cloudSea).
-// lightParams2.y/.z: render pass debug toggles (see fs_main).
+// lightParams2.x: exposure, a multiplier on lit surfaces before fog. lightParams2.y/.z: render pass debug toggles
+// (see fs_main).
 struct Camera {
     view: mat4x4<f32>, proj: mat4x4<f32>, sunDir: vec4<f32>, lightParams: vec4<f32>,
     camPos: vec4<f32>, fog: vec4<f32>, zenith: vec4<f32>, horizon: vec4<f32>, haze: vec4<f32>, sea: vec4<f32>,
@@ -681,8 +682,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // Ambient occlusion darkens inner corners / block junctions; lerp from AO_MIN so corners aren't pure black.
     let aoFactor = mix(AO_MIN, 1.0, ao);
 
-    if ((dbg & 2u) != 0u) { return vec4<f32>(baseColor * lit * aoFactor, 1.0); }
-    return vec4<f32>(applyFog(baseColor * lit * aoFactor, in.worldPos), 1.0);
+    let shaded = baseColor * lit * aoFactor * camera.lightParams2.x;
+    if ((dbg & 2u) != 0u) { return vec4<f32>(shaded, 1.0); }
+    return vec4<f32>(applyFog(shaded, in.worldPos), 1.0);
 }
 
 // Debug overdraw view: every terrain fragment that passes the depth test (in the normal nearest-first draw order)
@@ -712,7 +714,7 @@ fn fs_model(in: VSOut, @builtin(front_facing) front: bool) -> @location(0) vec4<
         lit = max(vec3<f32>(max(c.sky, ndotl * c.sun * camera.sunDir.w)), c.rgb);
     }
     lit = max(lit, vec3<f32>(MIN_AMBIENT));
-    return vec4<f32>(applyFog(tex.rgb * lin(in.color) * lit, in.worldPos), 1.0);
+    return vec4<f32>(applyFog(tex.rgb * lin(in.color) * lit * camera.lightParams2.x, in.worldPos), 1.0);
 }
 
 // Cloud boxes (CloudLayer): one instance per cloud cell, 36 vertices each (6 faces x 2 triangles, counter-clockwise
