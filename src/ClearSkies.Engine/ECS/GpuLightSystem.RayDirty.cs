@@ -49,6 +49,9 @@ public sealed partial class GpuLightSystem
     private bool[] _dirty = Array.Empty<bool>();
     private byte[] _hold = Array.Empty<byte>();
     private byte[] _n = Array.Empty<byte>();
+    // Whether a brick has had its priming evaluation since its average last restarted (see GpuRayLightPass PRIME).
+    private bool[] _primed = Array.Empty<bool>();
+    private const uint PrimeEval = uint.MaxValue;
     private bool[] _inHeld = Array.Empty<bool>();
     private int[] _holdStamp = Array.Empty<int>();
     // Gradual bounce (see GpuLightSystem's settings): the evaluations a world brick has been granted since it last
@@ -134,6 +137,7 @@ public sealed partial class GpuLightSystem
         {
             _hold[slot] = 0;
             _n[slot] = 0;
+            _primed[slot] = false;
             _given[slot] = byte.MaxValue;
             MarkSlot(slot);
         }
@@ -291,7 +295,7 @@ public sealed partial class GpuLightSystem
                         _nearStamp[(int)_nearSlots[k]] = _frame;
                     }
                     _nearComposeWork = UploadWords(_nearComposeWork, _nearSlots.AsSpan(0, _nearCount));
-                    for (int r = 1; r < hold; r++)
+                    for (int r = 1; r <= hold; r++) // up to a whole hold after a priming evaluation
                     {
                         int nr = UploadNearRepeat(r);
                         if (nr == 0) break;
@@ -433,6 +437,7 @@ public sealed partial class GpuLightSystem
             // Restart the running average outright, even if the brick was already held this frame.
             _holdStamp[slot] = _frame;
             _n[slot] = 0;
+            _primed[slot] = false;
             _hold[slot] = (byte)Grant(slot, holdEvals);
             if (!_inHeld[slot]) { _inHeld[slot] = true; _heldQueue.Add(slot); }
         }
@@ -686,6 +691,7 @@ public sealed partial class GpuLightSystem
         if (_holdStamp[slot] == _frame) return;
         _holdStamp[slot] = _frame;
         _n[slot] = 0;
+        _primed[slot] = false;
         _hold[slot] = (byte)Grant(slot, holdFrames);
         if (!_inHeld[slot]) { _inHeld[slot] = true; _heldQueue.Add(slot); }
     }
@@ -861,19 +867,23 @@ public sealed partial class GpuLightSystem
         // camera is finished within its frame; farther away it takes one per frame.
         foreach (int slot in _bounceChosen)
         {
-            // A brick starting its evaluations gets its accumulation now; one without any restarts its average.
-            if (GiveAcc(slot)) _n[slot] = 0;
-            _hold[slot]--;
+            // A brick starting its evaluations gets its accumulation now; one without any restarts its average, and
+            // is primed first (AO only), an evaluation on top of its hold; near the camera its whole hold still runs
+            // this frame, after it.
+            if (GiveAcc(slot)) { _n[slot] = 0; _primed[slot] = false; }
+            bool prime = !_primed[slot];
+            _primed[slot] = true;
+            if (!prime) _hold[slot]--;
             Push(ref n, (uint)slot);
-            Push(ref n, _n[slot]);
+            Push(ref n, prime ? PrimeEval : _n[slot]);
             int more = 0;
             if (nearRadius >= 0f && Vector3D.DistanceSquared(SlotCentre(slot), camPos) <= nearR2)
             {
-                more = System.Math.Min(extra, (int)_hold[slot]);
-                if (more > 0) AddNear((uint)slot, _n[slot], more);
+                more = System.Math.Min(extra + (prime ? 1 : 0), (int)_hold[slot]);
+                if (more > 0) AddNear((uint)slot, prime ? PrimeEval : _n[slot], more);
                 _hold[slot] -= (byte)more;
             }
-            _n[slot] = (byte)System.Math.Min(_n[slot] + 1 + more, 255);
+            _n[slot] = (byte)System.Math.Min(_n[slot] + (prime ? 0 : 1) + more, 255);
         }
 
         n /= 2;
@@ -962,7 +972,8 @@ public sealed partial class GpuLightSystem
         {
             if (_nearExtra[k] < repeat) continue;
             Push(ref n, _nearScratch[2 * k]);
-            Push(ref n, System.Math.Min(_nearScratch[2 * k + 1] + (uint)repeat, 255u));
+            // After a priming evaluation (PrimeEval, which wraps round) the repeats count from 0.
+            Push(ref n, System.Math.Min(unchecked(_nearScratch[2 * k + 1] + (uint)repeat), 255u));
         }
         if (repeat >= _nearWorks.Length) Array.Resize(ref _nearWorks, repeat + 1);
         if (n > 0) Upload(ref _nearWorks[repeat], n);
@@ -1041,6 +1052,7 @@ public sealed partial class GpuLightSystem
         Array.Resize(ref _dirty, capacity);
         Array.Resize(ref _hold, capacity);
         Array.Resize(ref _n, capacity);
+        Array.Resize(ref _primed, capacity);
         Array.Resize(ref _inHeld, capacity);
         Array.Resize(ref _holdStamp, capacity);
         Array.Resize(ref _given, capacity);
