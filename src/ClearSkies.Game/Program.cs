@@ -61,13 +61,9 @@ string ArgValue(string name) { int i = Array.IndexOf(args, name); return i >= 0 
 // --fps N: vsync off, at most N frames a second, so a window in the background doesn't slow down (for playing a host
 // and a client side by side, e.g. --fps 60 on both).
 if (int.TryParse(ArgValue("--fps"), out int fpsCap) && fpsCap > 0) host.CapFrameRate(fpsCap);
-// This machine's player: an ID kept in Saves/settings.txt, and a name. --name <player> plays as someone else, with
-// their own settings file (Saves/settings-<player>.txt), so two instances on one machine are two players.
-string nameArg = ArgValue("--name");
-var localSettings = LocalSettings.LoadOrCreate(Path.Combine(AppContext.BaseDirectory, "Saves",
-    nameArg.Length > 0 ? $"settings-{string.Concat(nameArg.Where(char.IsLetterOrDigit))}.txt" : "settings.txt"),
-    nameArg.Length > 0 ? nameArg : Environment.UserName);
-string playerName = localSettings.Name;
+// The local player is known by name: this machine's user name, or --name <player> to play as someone else (two
+// instances on one machine are then two players). Whoever hosts the world gives each name its player ID.
+string playerName = ArgValue("--name") is { Length: > 0 } n ? n : Environment.UserName;
 
 // Session: single-player is a host session with nobody connected (--host <port> lets others join); --join
 // <address:port> joins someone else's instead. Joining happens now, before the world is built, because the host
@@ -87,7 +83,7 @@ if (joining)
     Console.WriteLine($"[net] joining {address}:{port} as {playerName}");
     transport = new ClearSkies.Net.Transport.LaggedTransport(ClearSkies.Net.Transport.LiteNetTransport.Join(address, port));
     welcome = ClearSkies.Net.Session.ClientSession.Connect(transport,
-        new ClearSkies.Net.Protocol.Hello(ClearSkies.Net.Protocol.ProtocolVersion.Current, localSettings.PlayerId, playerName, generationChecksum),
+        new ClearSkies.Net.Protocol.Hello(ClearSkies.Net.Protocol.ProtocolVersion.Current, playerName, generationChecksum),
         TimeSpan.FromSeconds(15));
     session.BecomeClient(welcome.Peer);
 }
@@ -254,7 +250,7 @@ if (joining)
 else
 {
     var hostNet = new ClearSkies.Net.Session.HostSession(transport, session, commands, registry, host.World, hostClock, idAllocator, seed,
-        generationChecksum, playerId =>
+        generationChecksum, saveDb!.PlayerFor, playerId =>
         {
             // A returning player spawns where they left off; a new one at the spawn point.
             var saved = saveDb!.ReadPlayer(playerId);
@@ -354,7 +350,8 @@ int camArg = Array.IndexOf(args, "--camera");
 if (camArg >= 0 && camArg + 1 < args.Length)
     cameraOverride = args[camArg + 1].Split(',').Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
 // A client's player is spawned by the host once it has joined; everyone else spawns their own here.
-var camSpawn = TestScene.Build(host, commands, localSettings, saveDb?.ReadPlayer(localSettings.PlayerId), cameraOverride,
+var localPlayer = saveDb?.PlayerFor(playerName) ?? default;
+var camSpawn = TestScene.Build(host, commands, localPlayer, playerName, saveDb?.ReadPlayer(localPlayer), cameraOverride,
                                joining ? (new Vector3D<float>(welcome.Spawn.X, welcome.Spawn.Y + PlayerFactory.EyeHeight, welcome.Spawn.Z), MathF.PI, -0.15f) : HeartSpawn(seed),
                                spawnPlayer: !joining && !headless);
 

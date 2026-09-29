@@ -35,11 +35,12 @@ public enum MessageKind : byte
     IdBlock = 19,
 }
 
-/// <summary>Client → host, first thing: who's joining and whether their game matches.</summary>
-public readonly record struct Hello(ushort Version, PlayerId Player, string Name, ulong GenerationChecksum)
+/// <summary>Client → host, first thing: who's joining (by name: the host gives each name its player ID) and whether
+/// their game matches.</summary>
+public readonly record struct Hello(ushort Version, string Name, ulong GenerationChecksum)
 {
-    public void Write(NetWriter w) { w.WriteByte((byte)MessageKind.Hello); w.WriteUInt16(Version); w.WriteGuid(Player.Value); w.WriteString(Name); w.WriteUInt64(GenerationChecksum); }
-    public static Hello Read(ref NetReader r) => new(r.ReadUInt16(), new PlayerId(r.ReadGuid()), r.ReadString(), r.ReadUInt64());
+    public void Write(NetWriter w) { w.WriteByte((byte)MessageKind.Hello); w.WriteUInt16(Version); w.WriteString(Name); w.WriteUInt64(GenerationChecksum); }
+    public static Hello Read(ref NetReader r) => new(r.ReadUInt16(), r.ReadString(), r.ReadUInt64());
 }
 
 /// <summary>Host → client: the client's peer ID and first block of entity IDs, the world seed, the host's tick, and

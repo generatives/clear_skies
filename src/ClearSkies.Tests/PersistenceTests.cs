@@ -41,10 +41,32 @@ public class SaveDatabaseTests
     }
 
     [Fact]
+    public void APlayerIsKnownByNameAcrossSessions()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"cs-players-{Guid.NewGuid():N}.db");
+        try
+        {
+            PlayerId declan;
+            using (var db = SaveDatabase.Open(path))
+            {
+                declan = db.PlayerFor("Declan");
+                Assert.Equal(declan, db.PlayerFor("Declan"));
+                Assert.NotEqual(declan, db.PlayerFor("Guest"));
+            }
+            using (var db = SaveDatabase.Open(path)) Assert.Equal(declan, db.PlayerFor("Declan"));
+        }
+        finally
+        {
+            foreach (var f in new[] { path, path + "-wal", path + "-shm" }) File.Delete(f);
+        }
+    }
+
+    [Fact]
     public void PlayersAndChunksRoundTrip()
     {
         using var db = SaveDatabase.InMemory();
-        var id = PlayerId.New();
+        var id = db.PlayerFor("Declan");
+        Assert.Null(db.ReadPlayer(id)); // known, but never saved
         db.WritePlayer(id, "Declan", new byte[] { 1, 2 });
         Assert.Equal(new byte[] { 1, 2 }, db.ReadPlayer(id));
         Assert.Null(db.ReadPlayer(PlayerId.New()));
