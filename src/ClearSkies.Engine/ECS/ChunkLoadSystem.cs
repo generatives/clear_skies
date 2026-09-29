@@ -580,6 +580,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
             SaveIfDirty(pos, entry);
         }
         _staticVolume.RemoveChunk(pos);
+        entry?.Data.Release(); // its arrays go to the next chunk to load
     }
 
     /// <summary>Writes every currently loaded chunk with unsaved edits to disk. Called by the periodic autosave and
