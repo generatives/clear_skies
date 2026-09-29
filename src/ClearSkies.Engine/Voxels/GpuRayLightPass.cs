@@ -513,14 +513,42 @@ fn lampLight(g: i32, v: vec3<i32>, list: u32) -> vec3<f32> {
     return min(best, vec3<f32>(15.0)) / 15.0;
 }
 
-// The voxel's display half: the flat ambient (p.bounce2.z) darkened by the stored ray AO (times its strength,
-// p.bounce2.w), its lamp light (traced now) and stored bounce (times the display scale, p.bounce.z), combined per
-// channel by max, and the given sun level. Air away from any surface gets the plain ambient.
+fn unpackAcc(a: u32) -> vec4<f32> {
+    return vec4<f32>(f32(a & 0xFFu), f32((a >> 8u) & 0xFFu), f32((a >> 16u) & 0xFFu), f32(a >> 24u)) / 255.0;
+}
+
+// A surface voxel's stored bounce (rgb) and AO (a), averaged with those of its face neighbours that are surface air
+// too (the voxel itself counting double). Each voxel fires its own fixed ray directions, so this pools several
+// voxels' ray sets: one ray starting or stopping to hit something moves the result a few times less, which keeps
+// moving ships from making nearby light crawl. Neighbours are directly connected air, so it can't reach through a
+// wall; it softens bounce and AO by about a block.
+fn smoothedAcc(g: i32, v: vec3<i32>, own: u32) -> vec4<f32> {
+    var sum = unpackAcc(own) * 2.0;
+    var w = 2.0;
+    for (var f = 0; f < 6; f = f + 1) {
+        let s = select(-1, 1, (f & 1) == 0);
+        var d = vec3<i32>(0, 0, s);
+        if (f < 2) { d = vec3<i32>(s, 0, 0); } else if (f < 4) { d = vec3<i32>(0, s, 0); }
+        let n = v + d;
+        if (isSolid(g, n) || !hasSolidNeighbour(g, n)) { continue; }
+        let r = voxelRef(g, n);
+        if (!r.ok) { continue; }
+        sum = sum + unpackAcc(lightPool[r.acc]);
+        w = w + 1.0;
+    }
+    return sum / w;
+}
+
+// The voxel's display half: the flat ambient (p.bounce2.z) darkened by the ray AO (times its strength, p.bounce2.w),
+// its lamp light (traced now) and bounce (times the display scale, p.bounce.z), combined per channel by max, and the
+// given sun level; bounce and AO are the stored ones smoothed over neighbours (smoothedAcc). Air away from any
+// surface gets the plain ambient.
 fn composeVoxel(g: i32, v: vec3<i32>, acc: u32, sun: u32, list: u32) -> u32 {
     let ambient = p.bounce2.z;
     if (isSolid(g, v) || !hasSolidNeighbour(g, v)) { return encodeLight(vec3<f32>(ambient)) | (sun << 14u); }
-    let bounce = vec3<f32>(f32(acc & 0xFFu), f32((acc >> 8u) & 0xFFu), f32((acc >> 16u) & 0xFFu)) / 255.0 * p.bounce.z;
-    let sky = ambient * (1.0 - p.bounce2.w * f32(acc >> 24u) / 255.0);
+    let sm = smoothedAcc(g, v, acc);
+    let bounce = sm.rgb * p.bounce.z;
+    let sky = ambient * (1.0 - p.bounce2.w * sm.a);
     let light = max(max(lampLight(g, v, list), bounce), vec3<f32>(sky));
     return encodeLight(light) | (sun << 14u);
 }
@@ -799,7 +827,7 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
 
     // Bindings each entry point uses (auto layouts only contain what the entry point references).
     private static readonly uint[] SunBindings    = { 0, 1, 3, 4, 5, 6, 7, 8 };
-    private static readonly uint[] ComposeBindings = { 0, 1, 3, 4, 5, 6, 7, 8 };
+    private static readonly uint[] ComposeBindings = { 0, 1, 2, 3, 4, 5, 6, 7, 8 }; // 2: neighbour smoothing (voxelRef)
     private static readonly uint[] BounceBindings = { 0, 1, 2, 3, 4, 5, 6, 7, 8 };
     private static readonly uint[] ClearBindings  = { 3, 6, 8 };
 

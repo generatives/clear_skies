@@ -7,7 +7,7 @@ namespace ClearSkies.Engine.Rendering;
 /// <summary>
 /// Per-frame camera uniform block (272 bytes). Must match @group(0) @binding(0) in the WGSL shader.
 /// Layout: view (64 B) + projection (64 B) + sunDir as vec4 (16 B: xyz direction, w strength)
-/// + lightParams vec4 (16 B: x ray AO strength, y reference-lighting flag, z ambient 0-1, w unused)
+/// + lightParams vec4 (16 B: x ray AO strength, y reference-lighting flag, z ambient 0-1, w 1 on an sRGB surface)
 /// + camPos vec4 (xyz world position) + fog vec4 (xy: the world's fog start/end, horizontal; zw: the cloud layer's,
 /// see <see cref="CloudLayer"/>; blocks from the camera) + zenith and horizon sky colours as vec4s (horizon.w: the
 /// haze's strength) + haze vec4 (rgb colour, w distance) + sea vec4 (the cloud sea: altitude, coverage (0 = off), cell
@@ -27,7 +27,7 @@ public struct CameraUniform
     public float           RayAoStrength;  // lightParams.x: RayLightingSettings.AoStrength
     public float           ReferenceLighting; // lightParams.y: 1 = the shader's slow reference light/AO path (A/B)
     public float           Ambient;        // lightParams.z: RayLightingSettings.Ambient
-    private float          _pad0;
+    public float           LinearizeColors; // lightParams.w: 1 = sRGB surface, authored colours are converted to linear
     public Vector3D<float> CameraPosition; // camPos.xyz: fog distances and view directions are measured from here
     private float          _pad1;
     public float           FogStart, FogEnd, CloudFogStart, CloudFogEnd; // fog, blocks
