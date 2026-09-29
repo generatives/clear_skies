@@ -18,7 +18,7 @@ namespace ClearSkies.Game.Diagnostics;
 /// and out behind, then back again. Meanwhile it records every frame's length, and at the end reports them (average,
 /// percentiles, how many were long) with the longest time each timed step (<see cref="StepTimer"/>) took in one
 /// frame, so a change can be compared on the same route. It also reports GPU time per timed pass, draw calls, and
-/// memory (light, mesh, occupancy, CPU chunk data) at the end and at its peak, per km² of loaded land. Start it from
+/// memory (light, mesh, occupancy, CPU chunk data) at the end and at its peak. Start it from
 /// its debug panel, or with <c>--flight-test</c>, which starts it once the world around the spawn has loaded (the same
 /// route every run) and closes the game when it's done.
 /// </summary>
@@ -238,12 +238,11 @@ public sealed class StreamingFlightTest : ISystem, IDebugUiSystem
             sb.AppendLine($"    {ms / count,7:F2}  (in the {n} frames it ran: {ms / n:F2})  {name}");
     }
 
-    /// <summary>Memory at the end of the flight and at its peak, and per km² of the land loaded at the end.</summary>
+    /// <summary>Memory at the end of the flight and at its peak.</summary>
     private void MemoryReport(StringBuilder sb)
     {
         const double Mb = 1024.0 * 1024.0;
         int dense = _world.DenseCount();
-        double km2 = _store.WorldChunkCount * ChunkData.Size * ChunkData.Size / 1e6; // chunk columns' footprint, roughly
         double light = (double)_store.LightSlotsInUse * GridStore.SlotBytes / Mb;
         double occ = (double)_store.OccSlotsInUse * GridStore.WordsPerChunk * 4 / Mb;
         double mesh = GpuMesh.LiveBytes / Mb, wire = GpuMesh.LiveWireframeBytes / Mb;
