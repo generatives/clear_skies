@@ -5,8 +5,8 @@ using ClearSkies.Net.Protocol;
 namespace ClearSkies.Net.Sync;
 
 /// <summary>
-/// Snapshots of a body owned by another machine, newest last, for drawing it <see cref="Delay"/> ticks behind: the
-/// pair around the render tick is interpolated in the support's space, and with no newer snapshot the body is
+/// Snapshots of a body owned by another machine, newest last, for playing it back <see cref="Delay"/> ticks behind:
+/// the pair around the sampled tick is interpolated in the support's space, and with no newer snapshot the body is
 /// extrapolated from its last velocity for up to <see cref="MaxExtrapolationTicks"/>, then held.
 /// <para>The delay is as short as keeps a newer snapshot in hand: each arrival's lateness (our tick when it arrived,
 /// less the tick it was taken on) is kept for a couple of seconds, and what's <see cref="Needed"/> is the latest of
@@ -76,13 +76,19 @@ public sealed class SnapshotBuffer
         return true;
     }
 
-    /// <summary>Moves <see cref="Delay"/> towards <see cref="TargetDelay"/> for a frame of <paramref name="ticks"/>.</summary>
-    public void UpdateDelay(double ticks)
+    /// <summary>Moves <see cref="Delay"/> towards <see cref="TargetDelay"/> over <paramref name="ticks"/>; true if it
+    /// jumped there instead.</summary>
+    public bool UpdateDelay(double ticks)
     {
         if (Delay < Needed || Delay > Needed + Slack) TargetDelay = Needed + Headroom;
         double off = TargetDelay - Delay;
-        if (System.Math.Abs(off) > JumpTicks) Delay = TargetDelay;
-        else Delay += System.Math.Clamp(off, -MaxSlew * ticks, MaxSlew * ticks);
+        if (System.Math.Abs(off) > JumpTicks)
+        {
+            Delay = TargetDelay;
+            return true;
+        }
+        Delay += System.Math.Clamp(off, -MaxSlew * ticks, MaxSlew * ticks);
+        return false;
     }
 
     /// <summary>Our clock jumped by <paramref name="ticks"/> (clock sync snapped it): what's been measured against it
@@ -140,4 +146,6 @@ public sealed class SnapshotBuffer
 public struct RemoteBody
 {
     public SnapshotBuffer Buffer;
+    /// <summary>Its next pose is a jump (its first, or the delay jumped), to be drawn there straight away.</summary>
+    public bool Jumped;
 }

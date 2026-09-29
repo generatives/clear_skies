@@ -18,8 +18,8 @@ namespace ClearSkies.Net.Sync;
 /// <summary>
 /// Body sync: every second tick (30 Hz), each machine snapshots the bodies it owns, relative to their support, with
 /// streamed values (a player's look), and sends them unreliably: clients to the host, which forwards each client's to
-/// the others along with its own. Receivers buffer them per entity (<see cref="RemoteBody"/>) and draw them about
-/// 100 ms behind (<see cref="RemoteBodySystem"/>). A lost packet is simply replaced by the next one. Runs last in the
+/// the others along with its own. Receivers buffer them per entity (<see cref="RemoteBody"/>) and play them back
+/// about 100 ms behind (<see cref="RemoteBodySystem"/>). A lost packet is simply replaced by the next one. Runs last in the
 /// tick, after support.
 /// <para>A grid's pose, and a pose on a grid, is its block space's (its Transform's), which no edit moves; its body
 /// sits at its centre of mass inside that, which edits do move, and when an edit reaches each machine isn't when any
@@ -159,7 +159,7 @@ public sealed class BodySync : ISystem, IDebugUiSystem
 
     private void Buffer(Entity e, uint tick, in BodySnapshot s)
     {
-        if (!e.Has<RemoteBody>()) e.Set(new RemoteBody { Buffer = new SnapshotBuffer() });
+        if (!e.Has<RemoteBody>()) e.Set(new RemoteBody { Buffer = new SnapshotBuffer(), Jumped = true });
         e.Get<RemoteBody>().Buffer.Add(tick, s, _net.Clock.Tick);
     }
 
@@ -169,9 +169,12 @@ public sealed class BodySync : ISystem, IDebugUiSystem
 }
 
 /// <summary>
-/// Every frame: draws bodies owned elsewhere from their snapshots, each as little behind our tick as keeps a newer
-/// snapshot in hand (<see cref="SnapshotBuffer.Delay"/>), interpolated in their support's space (so a player standing on a moving ship stays on its
-/// deck). Players face the way they look.
+/// Each tick, after physics: puts bodies owned elsewhere where their snapshots say they were
+/// <see cref="SnapshotBuffer.Delay"/> ticks ago, each as little behind as keeps a newer snapshot in hand, in their
+/// support's space (so a player standing on a moving ship stays on its deck). Players face the way they look. That's
+/// their Transform on this machine, the pose their physics copies are moved to (<see cref="FollowerSystem"/>); they're
+/// drawn between ticks like anything simulated here (TickInterpolationSystem), which comes to the same thing as
+/// sampling the snapshots every frame, <see cref="ITickClock.Alpha"/> of a tick later.
 /// </summary>
 public sealed class RemoteBodySystem : ISystem
 {
@@ -189,13 +192,8 @@ public sealed class RemoteBodySystem : ISystem
     /// <summary>Extra delay, in ticks, on top of what each body needs (a debug setting).</summary>
     public double Margin { get; set; }
 
-    /// <summary>The tick <paramref name="buffer"/>'s body is drawn at this frame. Things simulated here are drawn
-    /// between the last two ticks (a tick behind, see TickInterpolationSystem), so remote bodies are too, to line up
-    /// with them.</summary>
-    public double RenderTick(SnapshotBuffer buffer) => _clock.Tick + (double)_clock.Alpha - 1 - buffer.Delay;
-
-    /// <summary>The tick <paramref name="buffer"/>'s follower body is placed at in tick <see cref="ITickClock.Tick"/>.</summary>
-    public double PhysicsTick(SnapshotBuffer buffer) => _clock.Tick - buffer.Delay;
+    /// <summary>The tick <paramref name="buffer"/>'s body is at in tick <see cref="ITickClock.Tick"/>.</summary>
+    public double SampleTick(SnapshotBuffer buffer) => _clock.Tick - buffer.Delay;
 
     /// <summary>The longest and shortest delay remote bodies are drawn with, in ticks (for the network panel).</summary>
     public (double Least, double Most) Delays { get; private set; }
@@ -203,41 +201,48 @@ public sealed class RemoteBodySystem : ISystem
     public void Update(float dt)
     {
         double least = double.MaxValue, most = 0;
-        // Grids before players: a player standing on a ship is drawn on the ship as it's drawn this frame.
+        // Grids before players: a player standing on a ship is placed on the ship as it is this tick.
         for (int pass = 0; pass < 2; pass++)
         foreach (ref readonly var e in _remote.GetEntities())
         {
             if (e.Has<NetOwner>() && e.Get<NetOwner>().IsLocal) continue;
             if (e.Has<Player>() != (pass == 1)) continue;
-            var buffer = e.Get<RemoteBody>().Buffer;
-            buffer.Margin = Margin;
-            buffer.UpdateDelay(dt * 60 * _clock.Rate);
-            (least, most) = (System.Math.Min(least, buffer.Delay), System.Math.Max(most, buffer.Delay));
-            if (buffer.At(RenderTick(buffer)) is not { } s) continue;
-            var (position, rotation) = ToWorld(s.Support, s.Position, s.Rotation, drawn: true);
-            ref var t = ref e.Get<Transform>();
-            t.Position = new Vector3D<float>(position.X, position.Y, position.Z);
-            if (e.Has<Player>())
+            ref var remote = ref e.Get<RemoteBody>();
+            var buffer = remote.Buffer;
+            if (buffer.At(SampleTick(buffer)) is { } s)
             {
-                if (s.HasLook && e.Has<MouseLookComponent>())
+                var (position, rotation) = ToWorld(s.Support, s.Position, s.Rotation);
+                ref var t = ref e.Get<Transform>();
+                t.Position = new Vector3D<float>(position.X, position.Y, position.Z);
+                if (e.Has<Player>())
                 {
-                    ref var look = ref e.Get<MouseLookComponent>();
-                    (look.Yaw, look.Pitch) = (s.Look.Yaw, s.Look.Pitch);
-                    t.Rotation = Quaternion<float>.CreateFromYawPitchRoll(s.Look.Yaw, 0, 0); // the body turns, the head nods
+                    if (s.HasLook && e.Has<MouseLookComponent>())
+                    {
+                        ref var look = ref e.Get<MouseLookComponent>();
+                        (look.Yaw, look.Pitch) = (s.Look.Yaw, s.Look.Pitch);
+                        t.Rotation = look.BodyRotation; // the body turns, the head nods
+                    }
                 }
+                else t.Rotation = new Quaternion<float>(rotation.X, rotation.Y, rotation.Z, rotation.W);
+                // Its first pose, or one after the delay jumped: appear there, don't slide there over the tick.
+                if (remote.Jumped && e.Has<InterpolatedTransform>()) e.Get<InterpolatedTransform>().Teleport();
+                remote.Jumped = false;
             }
-            else t.Rotation = new Quaternion<float>(rotation.X, rotation.Y, rotation.Z, rotation.W);
+
+            // For the next tick, which the physics copies are moved to before this runs again.
+            buffer.Margin = Margin;
+            if (buffer.UpdateDelay(1)) remote.Jumped = true;
+            (least, most) = (System.Math.Min(least, buffer.Delay), System.Math.Max(most, buffer.Delay));
         }
         Delays = most > 0 ? (least, most) : (0, 0);
     }
 
-    /// <summary>A pose in a support's space (its block space if it's a grid), in world space: as the support is
-    /// <paramref name="drawn"/> this frame (a ship this machine simulates is drawn up to a tick behind its Transform,
-    /// see TickInterpolationSystem), or else as it is.</summary>
-    public (Vector3 Position, Quaternion Rotation) ToWorld(EntityId support, Vector3 position, Quaternion rotation, bool drawn = false)
+    /// <summary>A pose in a support's space (its block space if it's a grid), in world space, with the support as it
+    /// is now.</summary>
+    public (Vector3 Position, Quaternion Rotation) ToWorld(EntityId support, Vector3 position, Quaternion rotation)
     {
         if (support.IsNone || !_registry.TryGet(support, out var s) || !s.Has<Transform>()) return (position, rotation);
-        var st = drawn ? s.DrawnPose() : s.Get<Transform>();
+        ref readonly var st = ref s.Get<Transform>();
         var sr = new Quaternion(st.Rotation.X, st.Rotation.Y, st.Rotation.Z, st.Rotation.W);
         return (new Vector3(st.Position.X, st.Position.Y, st.Position.Z) + Vector3.Transform(position, sr), sr * rotation);
     }

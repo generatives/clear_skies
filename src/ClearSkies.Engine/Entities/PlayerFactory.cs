@@ -58,6 +58,7 @@ public static class PlayerFactory
             player.Set<LocalPlayer>();
             player.Set(new PlayerInput()); // filled each tick by InputSampleSystem
         }
+        else player.Set(new InterpolatedTransform()); // moved and turned each tick by their snapshots
         Fill(player, d);
         return player;
     }

@@ -40,7 +40,7 @@ public class InterpolationTests
     }
 
     /// <summary>How many of the host's ticks behind the client draws the mover.</summary>
-    private static double Behind(LoopbackGame game, Entity seen) => game.Host.Clock.Tick - 1 - seen.Get<Transform>().Position.X / Speed;
+    private static double Behind(LoopbackGame game, Entity seen) => game.Host.Clock.Tick - 1 - seen.DrawnPose().Position.X / Speed;
 
     [Theory]
     [InlineData(0, 4.5)]
@@ -55,6 +55,50 @@ public class InterpolationTests
         Assert.InRange(behind - latencyMs / (1000.0 / 60.0), 0, most);
     }
 
+    /// <summary>A remote body's Transform is where its snapshots put it this tick, a tick's motion on from the last;
+    /// it's drawn between the two, like anything simulated here.</summary>
+    [Fact]
+    public void ARemoteBodysTransformIsItsTickPoseAndItsDrawnBetweenTicks()
+    {
+        var (game, mover, seen) = Watch(0);
+        using var _ = game;
+        for (int i = 0; i < 120; i++) Step(game, mover);
+        float before = seen.Get<Transform>().Position.X;
+        Step(game, mover);
+        float after = seen.Get<Transform>().Position.X, drawn = seen.DrawnPose().Position.X;
+        Assert.Equal(Speed, after - before, 3);
+        Assert.InRange(drawn, before, after);
+        Assert.True(seen.Has<InterpolatedTransform>());
+    }
+
+    /// <summary>A player too far off for this machine to give them a physics copy is still placed and drawn from their
+    /// snapshots, as smoothly as one nearby.</summary>
+    [Fact]
+    public void AFarOffRemoteBodyWithNoPhysicsCopyIsDrawnSteadily()
+    {
+        var (game, mover, seen) = Watch(0);
+        using var _ = game;
+        const float far = 2000f; // beyond the load window, where other players get physics copies
+        void StepFar()
+        {
+            game.Network.ManualTime += 1000.0 / 60.0;
+            mover.Get<Transform>().Position = new Vector3D<float>(far + game.Host.Clock.Tick * Speed, 60, 0);
+            game.Host.Tick();
+            foreach (var (scene, _) in game.Clients) scene.Tick();
+        }
+        for (int i = 0; i < 120; i++) StepFar();
+        Assert.False(seen.Has<ClearSkies.Net.Sync.ServoBody>());
+        float last = seen.DrawnPose().Position.X;
+        for (int i = 0; i < 60; i++)
+        {
+            StepFar();
+            float x = seen.DrawnPose().Position.X;
+            Assert.Equal(Speed, x - last, 3);
+            last = x;
+        }
+        Assert.InRange(last, far, far + game.Host.Clock.Tick * Speed);
+    }
+
     [Fact]
     public void AfterTheHostHitchesTheMoverIsSmoothAgainQuickly()
     {
@@ -65,11 +109,11 @@ public class InterpolationTests
         // After half a second, the client draws it moving steadily, and not far behind.
         for (int i = 0; i < 30; i++) Step(game, mover);
         int rough = 0;
-        float last = seen.Get<Transform>().Position.X;
+        float last = seen.DrawnPose().Position.X;
         for (int i = 0; i < 180; i++)
         {
             Step(game, mover);
-            float x = seen.Get<Transform>().Position.X;
+            float x = seen.DrawnPose().Position.X;
             if (MathF.Abs(x - last - Speed) > Speed * 0.1f) rough++;
             last = x;
         }
@@ -114,8 +158,8 @@ public class InterpolationTests
             client.Frame(1 / 60.0 + c - clientNoise);
             (hostNoise, clientNoise) = (h, c);
             if (frame < 90) continue; // up to speed
-            onClient.Add((now + c, hostSeen.Get<Transform>().Position.Z));
-            onHost.Add((now + h, clientSeen.Get<Transform>().Position.Z));
+            onClient.Add((now + c, hostSeen.DrawnPose().Position.Z));
+            onHost.Add((now + h, clientSeen.DrawnPose().Position.Z));
         }
         float seenByClient = Jitter(onClient), seenByHost = Jitter(onHost);
         _out.WriteLine($"off steady motion, frame to frame: host as the client sees them {seenByClient:0.0000}, client as the host sees them {seenByHost:0.0000} (a frame's step is about 0.08)");

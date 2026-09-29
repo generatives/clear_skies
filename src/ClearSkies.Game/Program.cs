@@ -240,6 +240,8 @@ host.AddSystem(followers, SystemStage.Simulation);
 
 host.AddSystem(host.Physics, SystemStage.Simulation); // one step, once bodies/impulses for this tick are in
 host.AddSystem(new PhysicsTransformSyncSystem(host.World, host.Physics), SystemStage.Simulation); // body poses -> Transform
+var remoteBodyPoses = new DeferredSystem();
+host.AddSystem(remoteBodyPoses, SystemStage.Simulation); // bodies owned elsewhere -> Transform, about 100 ms behind
 host.AddSystem(hierarchy, SystemStage.Simulation); // e.g. volume Transforms -> chunk Transforms
 host.AddSystem(new SupportSystem(host.World, host.Physics), SystemStage.Simulation); // what each character stands on or rides with
 host.AddSystem(interpolation, SystemStage.Simulation); // records this tick's poses
@@ -284,6 +286,7 @@ var bodySync = new ClearSkies.Net.Sync.BodySync(net, host.World, host.Physics);
 host.AddSystem(bodySync, SystemStage.Simulation); // snapshots of owned bodies, every second tick
 host.AddSystem(new ClearSkies.Net.Session.NetSendSystem(net), SystemStage.Simulation);
 var remoteBodies = new ClearSkies.Net.Sync.RemoteBodySystem(host.World, registry, hostClock);
+remoteBodyPoses.Inner = remoteBodies;
 // Physics copies of bodies owned elsewhere (kinematic ships near the local player, servo copies of other players),
 // placed before the step: scheduled right after the presence system, which decides which copies exist.
 followers.Inner = new ClearSkies.Net.Sync.FollowerSystem(host.World, host.Physics, remoteBodies);
@@ -302,7 +305,6 @@ if (!headless)
 if (gridPilot != null) host.AddSystem(gridPilot, SystemStage.Frame); // puts the camera under a piloted grid...
 host.AddSystem(new EyeSystem(host.World), SystemStage.Frame); // ...or at the local player's eye
 host.AddSystem(interpolation, SystemStage.Frame);
-host.AddSystem(remoteBodies, SystemStage.Frame); // bodies owned elsewhere, about 100 ms behind
 host.AddSystem(hierarchy, SystemStage.Frame);
 host.AddSystem(chunkLoadSystem, SystemStage.Frame);
 // Everything that draws or reads input: not headless.

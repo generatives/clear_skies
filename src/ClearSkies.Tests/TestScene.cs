@@ -88,6 +88,7 @@ public sealed class HeadlessScene : IDisposable
         _tick.Add(new ClearSkies.Net.Sync.BodySync(net, World, Physics));
         _tick.Add(new ClearSkies.Net.Session.NetSendSystem(net));
         RemoteBodies = new ClearSkies.Net.Sync.RemoteBodySystem(World, Registry, Clock);
+        _tick.Insert(_tick.FindIndex(s => s is PhysicsTransformSyncSystem) + 1, RemoteBodies);
         _tick.Insert(_tick.IndexOf(Physics), new ClearSkies.Net.Sync.FollowerSystem(World, Physics, RemoteBodies));
     }
 
@@ -138,7 +139,6 @@ public sealed class HeadlessScene : IDisposable
     {
         Time.Alpha = Clock.Alpha;
         Interpolation.Update(SystemStage.Frame, dt);
-        RemoteBodies?.Update(dt); // after the interpolation, as in the game
     }
 
     /// <summary>Runs ticks until <paramref name="done"/> or <paramref name="max"/> ticks.</summary>

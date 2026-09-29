@@ -18,7 +18,7 @@ public struct ServoBody
 
 /// <summary>
 /// Each tick before the physics step: moves this machine's physics copies of bodies owned elsewhere to where their
-/// snapshots put them, as far behind as each is drawn (<see cref="SnapshotBuffer.Delay"/>).
+/// snapshots put them this tick (<see cref="RemoteBodySystem"/> sets their Transforms there after the step).
 /// <list type="bullet">
 /// <item>A grid near the local player (<see cref="PhysicsMode.KinematicFollower"/>) has a kinematic body. It's given
 /// the velocity that carries it to its snapshot pose over the step, so a player standing on it rides it, and its
@@ -68,7 +68,7 @@ public sealed class FollowerSystem : ISystem, IDebugUiSystem
         {
             if (e.Get<PhysicsPresence>().Mode != PhysicsMode.KinematicFollower) { _placed.Remove(e); continue; }
             var buffer = e.Get<RemoteBody>().Buffer;
-            if (buffer.At(_remote.PhysicsTick(buffer)) is not { } s) continue;
+            if (buffer.At(_remote.SampleTick(buffer)) is not { } s) continue;
             var (origin, rotation) = _remote.ToWorld(s.Support, s.Position, s.Rotation);
             ref readonly var pb = ref e.Get<PhysicsBodyComponent>();
             FollowKinematic(e, pb.Body, pb.BodyPosition(origin, rotation), rotation, dt);
@@ -85,7 +85,7 @@ public sealed class FollowerSystem : ISystem, IDebugUiSystem
         {
             if (!e.Has<PhysicsPresence>() || e.Get<PhysicsPresence>().Mode != PhysicsMode.ServoFollower || e.Has<CharacterControllerComponent>()) continue;
             var buffer = e.Get<RemoteBody>().Buffer;
-            if (buffer.At(_remote.PhysicsTick(buffer)) is not { } s) continue;
+            if (buffer.At(_remote.SampleTick(buffer)) is not { } s) continue;
             var (target, _) = _remote.ToWorld(s.Support, s.Position, s.Rotation);
             if (!e.Has<ServoBody>())
             {

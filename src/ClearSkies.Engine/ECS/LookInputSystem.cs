@@ -1,4 +1,5 @@
 using ClearSkies.Engine.Core;
+using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Input;
 using DefaultEcs;
 using Silk.NET.Input;
@@ -17,7 +18,7 @@ public sealed class LookInputSystem : ISystem
 
     public LookInputSystem(World world, InputManager input)
     {
-        _lookers = world.GetEntities().With<Transform>().With<MouseLookComponent>().AsSet();
+        _lookers = world.GetEntities().With<LocalPlayer>().With<Transform>().With<MouseLookComponent>().AsSet(); // others look the way their snapshots say
         _input = input;
     }
 

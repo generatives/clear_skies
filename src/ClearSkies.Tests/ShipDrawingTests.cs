@@ -70,13 +70,13 @@ public class ShipDrawingTests
             (hostNoise, clientNoise) = (h, c);
             if (frame < 300) continue;
 
-            ref readonly var drawnCopy = ref copy.Get<Transform>(); // a copy is drawn where its Transform is
+            var drawnCopy = copy.DrawnPose();
             var drawnCentre = copy.Get<PhysicsBodyComponent>().BodyPosition(drawnCopy); // the turn carries its block origin round
             flight.ClientShipError.Add(drawnCentre.X - Speed * (float)(now + clientNoise));
             var toCopy = Quaternion.Conjugate(Q(drawnCopy.Rotation));
             flight.CameraOnDeck.Add(Vector3.Transform(V(crew.DrawnPose().Position) - V(drawnCopy.Position), toCopy));
             var hostShip = ship.DrawnPose();
-            flight.CrewOnHostDeck.Add(Vector3.Transform(V(crewOnHost.Get<Transform>().Position) - V(hostShip.Position),
+            flight.CrewOnHostDeck.Add(Vector3.Transform(V(crewOnHost.DrawnPose().Position) - V(hostShip.Position),
                                                         Quaternion.Conjugate(Q(hostShip.Rotation))));
         }
         flight.StillAboard = crew.Get<Support>().Supporter == copy;
