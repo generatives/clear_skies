@@ -574,7 +574,9 @@ fn smoothedAcc(g: i32, v: vec3<i32>, own: u32) -> vec4<f32> {
 fn composeVoxel(g: i32, v: vec3<i32>, acc: u32, sun: u32, list: u32) -> u32 {
     let ambient = p.bounce2.z;
     if (isSolid(g, v) || !hasSolidNeighbour(g, v)) { return encodeLight(vec3<f32>(ambient)) | (sun << 14u); }
-    let sm = smoothedAcc(g, v, acc);
+    // Only the frame's last compose of a brick smooths (p.bounce.x): the ones before it are there for the bounce passes
+    // to read current light, and each voxel's own value does for that at a fraction of the cost.
+    let sm = select(unpackAcc(acc), smoothedAcc(g, v, acc), p.bounce.x > 0.5);
     let bounce = sm.rgb * p.bounce.z;
     let sky = ambient * (1.0 - p.bounce2.w * sm.a);
     let light = max(max(lampLight(g, v, list), bounce), vec3<f32>(sky));
@@ -902,11 +904,13 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
     /// <summary>Composes the displayed light of the listed slots: lamp light (traced now, from the lamps in each
     /// chunk's list) combined with the stored bounce times <paramref name="bounceScale"/> and the flat
     /// <paramref name="ambient"/> darkened by the stored AO times <paramref name="aoStrength"/>, keeping the sun level
-    /// already in place. Run it after the sun and bounce passes.</summary>
-    public void DispatchCompose(GridStore store, float bounceScale, float ambient, float aoStrength, GpuBuffer work, int count)
+    /// already in place. Run it after the sun and bounce passes. <paramref name="smooth"/>: average bounce and AO over
+    /// neighbours (the frame's last compose of these bricks); otherwise each voxel's own.</summary>
+    public void DispatchCompose(GridStore store, float bounceScale, float ambient, float aoStrength, GpuBuffer work, int count,
+                                bool smooth)
     {
         if (count <= 0) return;
-        var param = WriteParams(Vector3D<float>.Zero, count, new Vector4D<float>(0f, 0f, bounceScale, 0f),
+        var param = WriteParams(Vector3D<float>.Zero, count, new Vector4D<float>(smooth ? 1f : 0f, 0f, bounceScale, 0f),
                                 new Vector4D<float>(0f, 0f, ambient, aoStrength));
         Dispatch(_composePipeline, ComposeBindings, store, work, count, param, "Lighting: compose");
     }
