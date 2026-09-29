@@ -45,6 +45,13 @@ public readonly struct Frustum
         );
     }
 
+    /// <summary>The six planes (left, right, bottom, top and the two depth planes), for a culling shader.</summary>
+    public void CopyPlanes(Span<Vector4D<float>> planes)
+    {
+        planes[0] = _left; planes[1] = _right; planes[2] = _bottom;
+        planes[3] = _top;  planes[4] = _near;  planes[5] = _far;
+    }
+
     private static Vector4D<float> Normalize(Vector4D<float> p)
     {
         float len = MathF.Sqrt(p.X * p.X + p.Y * p.Y + p.Z * p.Z);

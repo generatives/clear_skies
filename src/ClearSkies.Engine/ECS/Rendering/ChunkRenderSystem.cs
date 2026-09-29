@@ -15,16 +15,18 @@ namespace ClearSkies.Engine.ECS;
 /// cubes nearest first, then each visible chunk's model blocks — placed at their cell, turned to their stored
 /// <see cref="BlockOrientation"/> and lit from that cell's voxel light. Runs in <see cref="SystemStage.RenderWorld"/>.
 ///
-/// The static world's chunks (tens of thousands) are kept by column, with each column's height range, so a column
-/// outside the view is skipped in one test instead of one per chunk: looking at every chunk each frame cost ~6 ms.
-/// Ships' chunks, which move, are tested one by one.
+/// The static world's cubes are pooled (<see cref="WorldMeshPool"/>): culled on the GPU and drawn in one draw, so
+/// here they only need showing and hiding as chunks enter and leave the rendering layer. What's left for the CPU, the
+/// world's model blocks and any chunk the pool had no room for, is kept by column, with each column's height range,
+/// so a column outside the view is skipped in one test instead of one per chunk. Ships' chunks, which move, are
+/// tested one by one.
 /// </summary>
 public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
 {
     private readonly Renderer _renderer;
     private readonly GridHandle _world;
 
-    // The static world's chunks with render data, by column; every other chunk (ships') on its own.
+    // The static world's chunks with something drawn from the CPU, by column; every other chunk (ships') on its own.
     private sealed class WorldColumn
     {
         public readonly List<Entity> Chunks = new();
@@ -52,19 +54,35 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     {
         _renderer = renderer;
         _world    = staticVolume.Gpu;
-        world.SubscribeComponentAdded<ChunkRenderData>(OnAdded);
+        world.SubscribeComponentAdded((in Entity e, in ChunkRenderData _) => Refresh(e));
+        world.SubscribeComponentChanged((in Entity e, in ChunkRenderData _, in ChunkRenderData _) => Refresh(e));
         world.SubscribeComponentRemoved<ChunkRenderData>((in Entity e, in ChunkRenderData _) => Forget(e));
-        world.SubscribeEntityDisposed((in Entity e) => Forget(e));
+        world.SubscribeComponentAdded((in Entity e, in Rendered _) => ShowPooled(e, true));
+        world.SubscribeComponentRemoved((in Entity e, in Rendered _) => ShowPooled(e, false));
+        world.SubscribeEntityDisposed((in Entity e) => { ShowPooled(e, false); Forget(e); });
     }
 
-    private void OnAdded(in Entity e, in ChunkRenderData rd)
+    // A pooled mesh is drawn while its chunk is in the rendering layer; the chunk itself is only kept here (below) if
+    // something of it is drawn from the CPU: model blocks, or a mesh the pool had no room for.
+    private void Refresh(in Entity e)
     {
+        ref readonly var rd = ref e.Get<ChunkRenderData>();
+        ShowPooled(e, e.Has<Rendered>());
         if (rd.Grid != _world) { _others.Add(e); return; }
+        bool cpu = rd.Models.Length > 0 || rd.Mesh is { IsPooled: false };
+        if (!cpu) { Forget(e); return; }
+        if (_columnOf.ContainsKey(e)) { UpdateRange(_columns[_columnOf[e]]); return; }
         var key = (rd.ChunkPos.X, rd.ChunkPos.Z);
         if (!_columns.TryGetValue(key, out var column)) _columns[key] = column = new WorldColumn();
         column.Chunks.Add(e);
         _columnOf[e] = key;
         UpdateRange(column);
+    }
+
+    private void ShowPooled(in Entity e, bool shown)
+    {
+        if (e.Has<ChunkRenderData>() && e.Get<ChunkRenderData>().Mesh is { IsPooled: true } mesh)
+            _renderer.WorldPool.SetShown(mesh.PoolSlot, shown);
     }
 
     private void Forget(Entity e)
@@ -109,7 +127,6 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
             {
                 if (!e.Has<Rendered>()) continue; // not in the rendering layer (see EntityPresenceSystem)
                 ref readonly var rd = ref e.Get<ChunkRenderData>();
-                if (rd.Mesh == null && rd.Models.Length == 0) continue; // buried stone: nothing to draw
                 var origin = e.Get<Transform>().Position;
                 if (!frame.Frustum.Intersects(origin, origin + size)) continue;
                 var centre = origin + half;
@@ -143,9 +160,10 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
 
         // Nearest first, so the depth test rejects hidden fragments before the (expensive) lighting shader runs on
         // them instead of shading them and overwriting them later.
+        _renderer.DrawWorldChunks();
         _draws.Sort(NearestFirst);
         foreach (var d in _draws)
-            if (d.Mesh != null) _renderer.DrawChunkMesh(d.Mesh, d.Model, d.Grid, d.Chunk);
+            if (d.Mesh is { IsPooled: false }) _renderer.DrawChunkMesh(d.Mesh, d.Model, d.Grid, d.Chunk);
 
         _modelBlocksDrawn = 0;
         foreach (var d in _draws)
@@ -178,8 +196,11 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
 
     public void DrawDebugUi()
     {
-        ImGui.Text($"Chunks visible: {_draws.Count:N0} of {_columnOf.Count + _others.Count:N0}; world columns visible: " +
-                   $"{_columnsVisible:N0} of {_columns.Count:N0}; ship chunks: {_others.Count:N0}");
+        var pool = _renderer.WorldPool;
+        ImGui.Text($"World chunks in one draw: {pool.Chunks:N0}, {pool.PagesUsed * (long)WorldMeshPool.PageBytes / (1 << 20):N0} MB " +
+                   $"of {pool.CapacityBytes / (1 << 20):N0} MB (culled on the GPU)");
+        ImGui.Text($"Drawn from the CPU: {_draws.Count:N0} of {_columnOf.Count + _others.Count:N0} chunks; world columns " +
+                   $"visible: {_columnsVisible:N0} of {_columns.Count:N0}; ship chunks: {_others.Count:N0}");
         ImGui.Text($"Model blocks drawn: {_modelBlocksDrawn:N0}");
     }
 }

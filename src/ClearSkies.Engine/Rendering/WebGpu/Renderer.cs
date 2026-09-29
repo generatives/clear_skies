@@ -256,7 +256,14 @@ struct VSOut {
     @location(3)       localNormal: vec3<f32>,
     @location(4)       uv:          vec3<f32>,
     @location(5)       worldPos:    vec3<f32>,
+    // The chunk (xyz, in its grid) and grid (w; -1 for none) this surface is lit from: from the model uniform, or for
+    // the world's pooled chunks from the chunk table (vs_world).
+    @location(6) @interpolate(flat) cg: vec4<i32>,
 };
+
+// The fragment's chunk and grid (from VSOut.cg, or the model uniform for fs_model), for the lighting lookups below.
+var<private> drawChunk: vec3<i32>;
+var<private> drawGrid: i32;
 
 @vertex
 fn vs_main(
@@ -274,6 +281,7 @@ fn vs_main(
     o.localPos    = position;
     o.localNormal = normal;
     o.uv          = uv;
+    o.cg          = vec4<i32>(model.chunk, model.grid);
     return o;
 }
 
@@ -300,7 +308,52 @@ fn vs_chunk_lines(@builtin(vertex_index) vi: u32) -> VSOut {
     return chunkVertex(quads[vi / 8u], corners[vi % 8u]);
 }
 
-fn chunkVertex(quad: vec2<u32>, corner: u32) -> VSOut {
+// The world's chunks, all in one draw (see WorldMeshPool): their quads sit in one buffer in pages of 64, and each
+// instance draws one visible page, which the culling pass listed nearest first (roughly), with its chunk's slot in the
+// chunk table: xyz, grid, then first page, page count and quad count. Slots past the chunk's last
+// quad collapse to a point, which draws nothing.
+@group(1) @binding(2) var<storage, read> visiblePages: array<vec2<u32>>; // (page, chunk slot)
+@group(1) @binding(3) var<storage, read> worldChunks: array<vec4<i32>>;
+
+@vertex
+fn vs_world(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut {
+    return worldVertex(ii, vi / 4u, vi % 4u);
+}
+
+@vertex
+fn vs_world_lines(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut {
+    var corners = array<u32, 8>(0u, 1u, 1u, 2u, 2u, 3u, 3u, 0u);
+    return worldVertex(ii, vi / 8u, corners[vi % 8u]);
+}
+
+fn worldVertex(ii: u32, q: u32, corner: u32) -> VSOut {
+    let page = visiblePages[ii].x;
+    let slot = visiblePages[ii].y;
+    let at = worldChunks[2u * slot];
+    let span = worldChunks[2u * slot + 1u];
+    var o: VSOut;
+    if ((page - u32(span.x)) * PAGE_QUADS + q >= u32(span.z)) {
+        o.pos = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        return o;
+    }
+    let c = quadCorner(quads[page * PAGE_QUADS + q], corner);
+    let world     = vec3<f32>(at.xyz * 32) + c.position;
+    o.pos         = camera.proj * camera.view * vec4<f32>(world, 1.0);
+    o.worldPos    = world;
+    o.color       = c.color;
+    o.worldNormal = c.normal;
+    o.localPos    = c.position;
+    o.localNormal = c.normal;
+    o.uv          = c.uv;
+    o.cg          = at;
+    return o;
+}
+
+const PAGE_QUADS: u32 = 64u;
+
+struct QuadCorner { position: vec3<f32>, normal: vec3<f32>, uv: vec3<f32>, color: vec3<f32> };
+
+fn quadCorner(quad: vec2<u32>, corner: u32) -> QuadCorner {
     let a = quad.x;
     let c = quad.y;
     let face = (a >> 18u) & 7u;
@@ -318,24 +371,32 @@ fn chunkVertex(quad: vec2<u32>, corner: u32) -> VSOut {
     else if (face < 4u) { position.x += cu; position.z += cv; normal.y = s; uv2 = position.xz; }
     else                { position.x += cu; position.y += cv; normal.z = s; uv2 = vec2<f32>(position.x, -position.y); }
     let layerBits = (a >> 21u) & 255u;
-    let layer = select(f32(layerBits), -1.0, layerBits == 255u);
-    let color = vec3<f32>(f32(c & 255u), f32((c >> 8u) & 255u), f32((c >> 16u) & 255u)) / 255.0;
+    var r: QuadCorner;
+    r.position = position;
+    r.normal   = normal;
+    r.uv       = vec3<f32>(uv2, select(f32(layerBits), -1.0, layerBits == 255u));
+    r.color    = vec3<f32>(f32(c & 255u), f32((c >> 8u) & 255u), f32((c >> 16u) & 255u)) / 255.0;
+    return r;
+}
 
+fn chunkVertex(quad: vec2<u32>, corner: u32) -> VSOut {
+    let c = quadCorner(quad, corner);
     var o: VSOut;
-    let world     = model.model * vec4<f32>(position, 1.0);
+    let world     = model.model * vec4<f32>(c.position, 1.0);
     o.pos         = camera.proj * camera.view * world;
     o.worldPos    = world.xyz;
-    o.color       = color;
-    o.worldNormal = (model.model * vec4<f32>(normal, 0.0)).xyz;
-    o.localPos    = position;
-    o.localNormal = normal;
-    o.uv          = vec3<f32>(uv2, layer);
+    o.color       = c.color;
+    o.worldNormal = (model.model * vec4<f32>(c.normal, 0.0)).xyz;
+    o.localPos    = c.position;
+    o.localNormal = c.normal;
+    o.uv          = c.uv;
+    o.cg          = vec4<i32>(model.chunk, model.grid);
     return o;
 }
 
 // Voxel v in this draw's grid (grid voxel space). Unloaded → open.
 fn isSolid(v: vec3<i32>) -> bool {
-    let i = entryOf(model.grid, v >> vec3<u32>(5u));
+    let i = entryOf(drawGrid, v >> vec3<u32>(5u));
     if (i < 0) { return false; }
     let code = chunkTable[2 * i].x;
     if (code >= 0) {
@@ -363,7 +424,7 @@ fn slotDisplay(s: u32, v: vec3<i32>) -> u32 {
     return (lightPool[s * SLOT_WORDS + (k >> 1u)] >> ((k & 1u) * 16u)) & 0xFFFFu;
 }
 
-fn displayAt(v: vec3<i32>) -> u32 { return slotDisplay(brickSlot(entryOf(model.grid, v >> vec3<u32>(5u)), v), v); }
+fn displayAt(v: vec3<i32>) -> u32 { return slotDisplay(brickSlot(entryOf(drawGrid, v >> vec3<u32>(5u)), v), v); }
 
 " + GridStore.LightCodecWgsl + @"
 
@@ -421,7 +482,7 @@ fn cornerLit(air: vec3<i32>, s1: vec3<i32>, s2: vec3<i32>, dg: vec3<i32>, N: vec
 }
 
 fn sampleLit(localPos: vec3<f32>, localNormal: vec3<f32>) -> Lit {
-    let air = model.chunk * 32 + vec3<i32>(floor(localPos + 0.5 * localNormal));
+    let air = drawChunk * 32 + vec3<i32>(floor(localPos + 0.5 * localNormal));
     var o: Lit;
 
     if (!SMOOTH_LIGHT) {
@@ -465,7 +526,7 @@ fn vAO(s1: f32, s2: f32, c: f32) -> f32 {
 // axes give four corner AO values (from the side + diagonal neighbours); the fragment's fractional position
 // within the cell bilerps between them, so AO stays smooth across a greedy-merged quad and is light-independent.
 fn computeAO(localPos: vec3<f32>, localNormal: vec3<f32>) -> f32 {
-    let air = model.chunk * 32 + vec3<i32>(floor(localPos + 0.5 * localNormal));
+    let air = drawChunk * 32 + vec3<i32>(floor(localPos + 0.5 * localNormal));
     let n   = abs(localNormal);
     var T: vec3<i32>; var B: vec3<i32>;
     if (n.x > 0.5)      { T = vec3<i32>(0, 1, 0); B = vec3<i32>(0, 0, 1); }
@@ -529,7 +590,7 @@ fn solidMask(air: vec3<i32>, i: i32) -> u32 {
         if (((n & 1) != 0 && sx == 0) || ((n & 2) != 0 && sy == 0) || ((n & 4) != 0 && sz == 0)) { continue; }
         let o = vec3<i32>(select(0, sx, (n & 1) != 0), select(0, sy, (n & 2) != 0), select(0, sz, (n & 4) != 0));
         var e = i;
-        if (n != 0) { e = entryOf(model.grid, c0 + o); }
+        if (n != 0) { e = entryOf(drawGrid, c0 + o); }
         codes[n] = select(chunkTable[2 * max(e, 0)].x, OCC_UNLOADED, e < 0);
     }
     var m = 0u;
@@ -578,7 +639,7 @@ fn avg4(p: WCell, q: WCell, r: WCell, s: WCell) -> Corner4 {
 struct Shade { sky: f32, rgb: vec3<f32>, sun: f32, ao: f32 };
 
 fn shadeFast(localPos: vec3<f32>, localNormal: vec3<f32>) -> Shade {
-    let air = model.chunk * 32 + vec3<i32>(floor(localPos + 0.5 * localNormal));
+    let air = drawChunk * 32 + vec3<i32>(floor(localPos + 0.5 * localNormal));
     let N = vec3<i32>(round(localNormal));
     let n = abs(localNormal);
     var T: vec3<i32>; var B: vec3<i32>;
@@ -586,7 +647,7 @@ fn shadeFast(localPos: vec3<f32>, localNormal: vec3<f32>) -> Shade {
     else if (n.y > 0.5) { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 0, 1); }
     else                { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 1, 0); }
 
-    let ai = entryOf(model.grid, air >> vec3<u32>(5u));
+    let ai = entryOf(drawGrid, air >> vec3<u32>(5u));
     let m = solidMask(air, ai);
     let hb = air >> vec3<u32>(3u);
     let hs = brickSlot(ai, air);
@@ -636,13 +697,13 @@ fn shadeFast(localPos: vec3<f32>, localNormal: vec3<f32>) -> Shade {
 
 // shadeFast's corner AO alone (the solid mask, no light lookups), for the flat-light debug mode.
 fn cornerAoFast(localPos: vec3<f32>, localNormal: vec3<f32>) -> f32 {
-    let air = model.chunk * 32 + vec3<i32>(floor(localPos + 0.5 * localNormal));
+    let air = drawChunk * 32 + vec3<i32>(floor(localPos + 0.5 * localNormal));
     let n = abs(localNormal);
     var T: vec3<i32>; var B: vec3<i32>;
     if (n.x > 0.5)      { T = vec3<i32>(0, 1, 0); B = vec3<i32>(0, 0, 1); }
     else if (n.y > 0.5) { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 0, 1); }
     else                { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 1, 0); }
-    let m = solidMask(air, entryOf(model.grid, air >> vec3<u32>(5u)));
+    let m = solidMask(air, entryOf(drawGrid, air >> vec3<u32>(5u)));
     let sTm = select(0.0, 1.0, maskSolid(m, -T));     let sTp = select(0.0, 1.0, maskSolid(m, T));
     let sBm = select(0.0, 1.0, maskSolid(m, -B));     let sBp = select(0.0, 1.0, maskSolid(m, B));
     let ao00 = vAO(sTm, sBm, select(0.0, 1.0, maskSolid(m, -T - B)));
@@ -656,6 +717,8 @@ fn cornerAoFast(localPos: vec3<f32>, localNormal: vec3<f32>) -> f32 {
 
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
+    drawChunk = in.cg.xyz;
+    drawGrid  = in.cg.w;
     // Sample unconditionally (avoids implicit-derivative issues from branching on a per-fragment value) and
     // select against the vertex color for untextured blocks (uv.z < 0, the no-texture sentinel).
     // Debug (Renderer panel, for measuring what the render pass spends): lightParams2.y bit 1 = no texture sample,
@@ -667,14 +730,14 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let baseColor = select(lin(in.color), texColor, in.uv.z >= 0.0);
 
     // Non-chunk draws (selection highlight, HUD, debug meshes) have no light data: full-bright.
-    if (model.grid < 0) { return vec4<f32>(baseColor, 1.0); }
+    if (drawGrid < 0) { return vec4<f32>(baseColor, 1.0); }
 
     let worldN = normalize(in.worldNormal);
     let ndotl  = max(dot(worldN, -(camera.sunDir.xyz)), 0.0);
     var s: Lit;
     var ao: f32;
     let mode = i32(camera.lightParams2.z);
-    let air = model.chunk * 32 + vec3<i32>(floor(in.localPos + 0.5 * in.localNormal));
+    let air = drawChunk * 32 + vec3<i32>(floor(in.localPos + 0.5 * in.localNormal));
     if (mode == 3) {
         // Debug: no voxel lighting at all (open sky, full sun, no AO).
         s.sky = camera.lightParams.z; s.rgb = vec3<f32>(0.0); s.sun = 1.0;
@@ -728,14 +791,16 @@ fn fs_overdraw(in: VSOut) -> @location(0) vec4<f32> {
 // here), so back faces flip their normal. Texels under the material's alpha cutoff are cut out.
 @fragment
 fn fs_model(in: VSOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    drawChunk = model.chunk;
+    drawGrid  = model.grid;
     let tex = textureSample(atlasTex, atlasSamp, in.uv.xy, 0);
     if (tex.a < model.params.x) { discard; }
     var n = normalize(in.worldNormal);
     if (!front) { n = -n; }
     let ndotl = max(dot(n, -camera.sunDir.xyz), 0.0);
     var lit = vec3<f32>(max(camera.lightParams.z, ndotl * camera.sunDir.w));
-    if (model.grid >= 0) {
-        let c = cellAt(model.chunk * 32 + vec3<i32>(model.params.yzw));
+    if (drawGrid >= 0) {
+        let c = cellAt(drawChunk * 32 + vec3<i32>(model.params.yzw));
         lit = max(vec3<f32>(max(c.sky, ndotl * c.sun * camera.sunDir.w)), c.rgb);
     }
     lit = max(lit, vec3<f32>(MIN_AMBIENT));
@@ -815,6 +880,20 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     private RenderPipeline* _chunkPipeline;          // vs_chunk: chunk meshes (ChunkQuad instances)
     private RenderPipeline* _chunkWireframePipeline;
     private RenderPipeline* _chunkOverdrawPipeline;  // debug overdraw view
+    // The static world's chunks, drawn together from the WorldMeshPool: group 1 holds its quads, the culling pass's
+    // page list and the chunk table.
+    private BindGroupLayout* _worldLayout;
+    private PipelineLayout* _worldPipelineLayout;
+    private RenderPipeline* _worldPipeline;
+    private RenderPipeline* _worldWireframePipeline;
+    private RenderPipeline* _worldOverdrawPipeline;
+    private readonly WorldMeshPool _worldPool;
+    private Frustum _cullFrustum;
+    private Vector3D<float> _cullCamera;
+    private float _cullRange = 1f;
+
+    /// <summary>The pooled static-world chunk meshes (for reports).</summary>
+    public WorldMeshPool WorldPool => _worldPool;
 
     /// <summary>Debug: draw terrain additively without depth test, so brightness shows how many surfaces cover each
     /// pixel (sky and clouds are skipped).</summary>
@@ -899,7 +978,13 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         _cloudPipeline     = CreateCloudPipeline();
         _chunkPipeline          = CreateChunkPipeline("vs_chunk", PrimitiveTopology.TriangleList, CullMode.Back);
         _chunkWireframePipeline = CreateChunkPipeline("vs_chunk_lines", PrimitiveTopology.LineList, CullMode.None);
-        _chunkOverdrawPipeline  = CreateOverdrawPipeline();
+        _chunkOverdrawPipeline  = CreateOverdrawPipeline("vs_chunk", _chunkPipelineLayout);
+        _worldPipeline          = CreatePipeline("vs_world", "fs_main", null, PrimitiveTopology.TriangleList, CullMode.Back,
+                                                 depthWrite: true, CompareFunction.Greater, layout: _worldPipelineLayout);
+        _worldWireframePipeline = CreatePipeline("vs_world_lines", "fs_main", null, PrimitiveTopology.LineList, CullMode.None,
+                                                 depthWrite: true, CompareFunction.Greater, layout: _worldPipelineLayout);
+        _worldOverdrawPipeline  = CreateOverdrawPipeline("vs_world", _worldPipelineLayout);
+        _worldPool = new WorldMeshPool(ctx);
         // The background pass: a full-screen triangle at the far plane that only fills pixels still at the cleared
         // depth (reversed: the far plane and the clear value are both 0), without writing depth.
         _skyPipeline       = CreatePipeline("vs_sky", "fs_sky", null, PrimitiveTopology.TriangleList, CullMode.None,
@@ -1015,6 +1100,20 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         layouts[1] = _chunkModelLayout;
         var chunkPlDesc = new PipelineLayoutDescriptor { BindGroupLayoutCount = 4, BindGroupLayouts = layouts };
         _chunkPipelineLayout = _api.DeviceCreatePipelineLayout(_ctx.Device, &chunkPlDesc);
+
+        BindGroupLayoutEntry* worldEntries = stackalloc BindGroupLayoutEntry[3];
+        for (int i = 0; i < 3; i++)
+            worldEntries[i] = new BindGroupLayoutEntry
+            {
+                Binding = (uint)(i + 1),
+                Visibility = ShaderStage.Vertex,
+                Buffer = new BufferBindingLayout { Type = BufferBindingType.ReadOnlyStorage, HasDynamicOffset = false, MinBindingSize = 0 },
+            };
+        var worldDesc = new BindGroupLayoutDescriptor { EntryCount = 3, Entries = worldEntries };
+        _worldLayout = _api.DeviceCreateBindGroupLayout(_ctx.Device, &worldDesc);
+        layouts[1] = _worldLayout;
+        var worldPlDesc = new PipelineLayoutDescriptor { BindGroupLayoutCount = 4, BindGroupLayouts = layouts };
+        _worldPipelineLayout = _api.DeviceCreatePipelineLayout(_ctx.Device, &worldPlDesc);
     }
 
     /// <summary>A pipeline for vs_main's vertex layout (<see cref="Vertex"/>): the world, wireframe, HUD and models.</summary>
@@ -1039,12 +1138,12 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
 
     /// <summary>Debug overdraw view (fs_overdraw): terrain drawn additively, depth-tested in the normal draw order, so
     /// it counts the fragments that really get shaded (one per pixel is ideal).</summary>
-    private RenderPipeline* CreateOverdrawPipeline()
+    private RenderPipeline* CreateOverdrawPipeline(string vertexEntry, PipelineLayout* layout)
     {
         var add = new BlendComponent { Operation = BlendOperation.Add, SrcFactor = BlendFactor.One, DstFactor = BlendFactor.One };
         var blend = new BlendState { Color = add, Alpha = add };
-        return CreatePipeline("vs_chunk", "fs_overdraw", null, PrimitiveTopology.TriangleList, CullMode.Back,
-                              depthWrite: true, CompareFunction.Greater, &blend, _chunkPipelineLayout);
+        return CreatePipeline(vertexEntry, "fs_overdraw", null, PrimitiveTopology.TriangleList, CullMode.Back,
+                              depthWrite: true, CompareFunction.Greater, &blend, layout);
     }
 
     /// <summary>The cloud boxes (vs_cloud/fs_cloud): no vertex buffer, one <see cref="CloudLayer.CloudCell"/> instance
@@ -1300,6 +1399,19 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         return new GpuMesh(buf, quadCount, (nint)group, g => api.BindGroupRelease((BindGroup*)g));
     }
 
+    /// <summary>Uploads a static-world chunk mesh into the <see cref="WorldPool"/>, drawn with the rest of the world by
+    /// <see cref="DrawWorldChunks"/> and hidden until <see cref="WorldMeshPool.SetShown"/>; a chunk that doesn't fit
+    /// gets a mesh of its own (<see cref="UploadChunkQuads(ReadOnlySpan{byte}, uint)"/>).</summary>
+    public GpuMesh UploadWorldChunkQuads(ReadOnlySpan<byte> quads, uint quadCount, int grid, ChunkPosition chunk)
+    {
+        long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        int slot = _worldPool.Add(quads, quadCount, grid, chunk);
+        if (slot < 0) return UploadChunkQuads(quads, quadCount);
+        LastCreateMs = 0;
+        LastWriteMs  = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        return new GpuMesh(_worldPool, slot, quadCount);
+    }
+
     /// <summary>How long the last <see cref="UploadChunkQuads"/> spent creating its buffer and writing it (ms), for
     /// the meshing panel.</summary>
     public double LastCreateMs { get; private set; }
@@ -1475,6 +1587,8 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
 
         var encDesc = new CommandEncoderDescriptor();
         _encoder = _api.DeviceCreateCommandEncoder(_ctx.Device, &encDesc);
+        // The world's chunks are culled on the GPU, ahead of the render pass that draws them.
+        _worldPool.Cull(_encoder, _cullFrustum, _cullCamera, _cullRange);
 
         var colorAtt = new RenderPassColorAttachment
         {
@@ -1508,6 +1622,26 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         _api.RenderPassEncoderSetBindGroup(_pass, 2, _voxelBindGroup, 0, null);
         _api.RenderPassEncoderSetBindGroup(_pass, 3, _atlasBindGroup, 0, null);
         return true;
+    }
+
+    /// <summary>The view the world's chunks are culled against this frame (see <see cref="WorldMeshPool"/>), and the
+    /// distance they are sorted over: call before <see cref="BeginFrame"/>.</summary>
+    public void SetCullView(in Frustum frustum, Vector3D<float> camera, float range)
+    {
+        _cullFrustum = frustum;
+        _cullCamera  = camera;
+        _cullRange   = range;
+    }
+
+    /// <summary>Draws every shown static-world chunk in the <see cref="WorldPool"/> that the culling pass found in
+    /// view, in one draw, roughly nearest first.</summary>
+    public void DrawWorldChunks()
+    {
+        if (_worldPool.Chunks == 0 || _drawIndex >= MaxObjects) return;
+        bool wire = WireframeMode && !OverdrawMode;
+        SetPipeline(OverdrawMode ? _worldOverdrawPipeline : wire ? _worldWireframePipeline : _worldPipeline);
+        _worldPool.Draw(_pass, _worldLayout, _quadIndices, wire);
+        _drawIndex++;
     }
 
     public void SetCameraUniform(in CameraUniform camera)
@@ -1612,5 +1746,9 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         if (_chunkPipeline      != null) _api.RenderPipelineRelease(_chunkPipeline);
         if (_chunkWireframePipeline != null) _api.RenderPipelineRelease(_chunkWireframePipeline);
         if (_chunkOverdrawPipeline != null) _api.RenderPipelineRelease(_chunkOverdrawPipeline);
+        if (_worldPipeline != null) _api.RenderPipelineRelease(_worldPipeline);
+        if (_worldWireframePipeline != null) _api.RenderPipelineRelease(_worldWireframePipeline);
+        if (_worldOverdrawPipeline != null) _api.RenderPipelineRelease(_worldOverdrawPipeline);
+        _worldPool.Dispose();
     }
 }

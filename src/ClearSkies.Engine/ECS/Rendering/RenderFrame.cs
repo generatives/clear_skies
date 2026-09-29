@@ -133,14 +133,14 @@ public sealed class RenderFrame : IDebugUiSystem
             uniform.FogEnd   = 2e8f;
         }
 
+        var frustum = Frustum.FromViewProjection(Mat4.Multiply(uniform.Projection, uniform.View));
+        _renderer.SetCullView(frustum, camTransform.Position, SkySettings.FogEnabled ? SkySettings.FogDistance : 8192f);
         if (!_renderer.BeginFrame())
             return false;
 
         _renderer.SetCameraUniform(uniform);
 
-        Context = new RenderContext(camTransform.Position, uniform.View, uniform.Projection,
-                                    Frustum.FromViewProjection(Mat4.Multiply(uniform.Projection, uniform.View)),
-                                    _time.TotalSeconds);
+        Context = new RenderContext(camTransform.Position, uniform.View, uniform.Projection, frustum, _time.TotalSeconds);
         _open = true;
         return true;
     }

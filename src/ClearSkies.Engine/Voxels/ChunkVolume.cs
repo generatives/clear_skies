@@ -53,6 +53,10 @@ public class ChunkVolume
     /// vertices. Ships keep culling against their neighbours: they're small and never stream.</summary>
     public bool MeshIgnoresNeighbours { get; set; }
 
+    /// <summary>Whether this volume's chunk meshes go in the renderer's WorldMeshPool, all drawn in one GPU-culled draw.
+    /// Only for a volume that sits at the origin unrotated and never moves: the static world.</summary>
+    public bool PoolMeshes { get; set; }
+
     /// <summary>Current axis-aligned bounding box of loaded chunks (inclusive).</summary>
     internal ChunkPosition BoundsMin { get; private set; }
     internal ChunkPosition BoundsMax { get; private set; }

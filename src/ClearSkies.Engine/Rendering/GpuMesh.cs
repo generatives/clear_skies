@@ -55,6 +55,23 @@ public sealed class GpuMesh : IDisposable
         Count(1);
     }
 
+    /// <summary>For a static-world chunk mesh in the <see cref="WorldMeshPool"/>: its slot there (it has no buffers of its
+    /// own, and is drawn with the rest of the pool), else -1.</summary>
+    public int PoolSlot { get; } = -1;
+    private readonly WorldMeshPool? _pool;
+    public bool IsPooled => _pool != null;
+
+    /// <summary>A chunk mesh in <paramref name="pool"/>'s slot <paramref name="slot"/>, which it frees when disposed.</summary>
+    public GpuMesh(WorldMeshPool pool, int slot, uint quadCount)
+    {
+        _pool = pool;
+        PoolSlot = slot;
+        QuadCount = quadCount;
+        VertexBuffer = IndexBuffer = WireframeBuffer = null!;
+        VertexBytes = (ulong)((quadCount + WorldMeshPool.PageQuads - 1) / WorldMeshPool.PageQuads) * WorldMeshPool.PageBytes;
+        Count(1);
+    }
+
     public GpuMesh(GpuBuffer vertexBuffer, GpuBuffer indexBuffer, GpuBuffer wireframeBuffer,
                    uint indexCount, uint wireframeIndexCount)
     {
@@ -91,6 +108,7 @@ public sealed class GpuMesh : IDisposable
         if (_disposed) return;
         _disposed = true;
         Count(-1);
+        if (_pool != null) { _pool.Remove(PoolSlot); return; }
         if (DrawBindGroup != 0) _releaseBindGroup?.Invoke(DrawBindGroup);
         VertexBuffer.Dispose();
         if (IndexBuffer != VertexBuffer) IndexBuffer.Dispose();

@@ -203,7 +203,10 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                 if (r.QuadCount > 0)
                 {
                     long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-                    mesh = _renderer.UploadChunkQuads(r.Packed.AsSpan(0, r.Bytes), (uint)r.QuadCount);
+                    var quads = r.Packed.AsSpan(0, r.Bytes);
+                    mesh = volume.PoolMeshes && volume.Gpu.Index >= 0
+                        ? _renderer.UploadWorldChunkQuads(quads, (uint)r.QuadCount, volume.Gpu.Index, entry.Position)
+                        : _renderer.UploadChunkQuads(quads, (uint)r.QuadCount);
                     _uploadMs += 0.05 * (System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds - _uploadMs);
                     _createMs += 0.05 * (_renderer.LastCreateMs - _createMs);
                     _writeMs  += 0.05 * (_renderer.LastWriteMs - _writeMs);

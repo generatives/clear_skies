@@ -269,6 +269,9 @@ public sealed class StreamingFlightTest : ISystem, IDebugUiSystem
                       $"+ accumulation pool {acc:F0} ({_store.AccSlotsInUse:N0} bricks being evaluated), " +
                       $"mesh {mesh:F0} ({_peakMeshBytes / Mb:F0}; wireframe indices {wire:F0} of it), " +
                       $"occupancy {occ:F0} ({(double)_peakOccSlots * GridStore.WordsPerChunk * 4 / Mb:F0}), CPU chunk data {cpu:F0}");
+        var pool = _host.Renderer.WorldPool;
+        sb.AppendLine($"    world meshes in one draw: {pool.Chunks:N0} chunks in {pool.PagesUsed * (double)WorldMeshPool.PageBytes / Mb:F0} MB " +
+                      $"of pages (buffer {pool.CapacityBytes / Mb:F0} MB)");
         sb.AppendLine($"    {_store.LightSlotsInUse:N0} light bricks, {_store.WorldChunkCount:N0} world chunks on the GPU, " +
                       $"{_world.LoadedCount:N0} loaded ({dense:N0} dense)");
     }
