@@ -17,7 +17,7 @@ namespace ClearSkies.Engine.ECS;
 /// Each tick, from the local player's <see cref="PlayerInput"/>: what the player does to blocks, as commands. Left
 /// click places <see cref="PlaceIndex"/> of <see cref="PlaceableBlocks"/> against the targeted face and right click
 /// breaks the targeted block (both <see cref="EditVoxels"/>), with a brush in creative mode; G spawns a one-block grid
-/// (<see cref="SpawnGrid"/>).
+/// (<see cref="Spawn{TDescription}"/>).
 /// Left-clicking an <see cref="Interactive"/> block uses it instead: <see cref="BlockInteraction"/>s are published for
 /// it until the button is released, with the mouse moving the control (whose system sends SetShipThrust or SetShipTurn) rather
 /// than the view, which follows whatever point the control reports the player has hold of
@@ -169,7 +169,7 @@ public sealed class BlockActionSystem : ISystem, IDisposable, IDebugUiSystem
         var spawn = eye + dir * 3f;
         var grid = GridDescription.FromVoxels(new PhysVec(spawn.X, spawn.Y, spawn.Z),
             new[] { new GridVoxel(0, 0, 0, BlockId.Stone, BlockOrientation.Upright) });
-        _commands.Send(new SpawnGrid { Grid = grid, Select = true });
+        _commands.Send(new Spawn<GridDescription> { Description = grid, Select = true });
         Console.WriteLine($"[spawn] grid at ({spawn.X:0.0},{spawn.Y:0.0},{spawn.Z:0.0})");
     }
 

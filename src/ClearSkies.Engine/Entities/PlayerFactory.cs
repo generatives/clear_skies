@@ -63,7 +63,7 @@ public static class PlayerFactory
     }
 
     /// <summary>Puts an existing player where <paramref name="d"/> says, facing that way, in that mode.</summary>
-    public static void Fill(Entity player, PlayerDescription d)
+    private static void Fill(Entity player, PlayerDescription d)
     {
         ref var look = ref player.Get<MouseLookComponent>();
         (look.Yaw, look.Pitch) = (d.Yaw, d.Pitch);

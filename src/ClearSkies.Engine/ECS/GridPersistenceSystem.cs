@@ -155,7 +155,7 @@ public sealed class GridPersistenceSystem : ISystem
             // Where it was saved doesn't matter: it comes in front of the player, upright, still and locked.
             description.Body = BodyState.At(new PhysVec(spawn.X, spawn.Y, spawn.Z) - GridDescription.BoundsCentre(description.Voxels));
             description.Locked = true;
-            _commands.Send(new SpawnGrid { Grid = description, Select = true });
+            _commands.Send(new Spawn<GridDescription> { Description = description, Select = true });
 
             _status = $"Loaded '{_chosenFile}' ({description.Voxels.Count} blocks).";
         }

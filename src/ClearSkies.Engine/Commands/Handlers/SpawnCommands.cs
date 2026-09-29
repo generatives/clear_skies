@@ -7,177 +7,155 @@ using DefaultEcs;
 
 namespace ClearSkies.Engine.Commands.Handlers;
 
-/// <summary>Creates a grid from its description, or overwrites the grid with that ID in place.</summary>
-public struct SpawnGrid : ICommand
+/// <summary>
+/// Creates an entity (a grid, a player) from its description. Sent to spawn something new (with no ID: the host
+/// assigns one), and also how a live entity's description reaches a joining client or comes back out of storage.
+/// </summary>
+public struct Spawn<TDescription> : ICommand where TDescription : class, IEntityDescription<TDescription>
 {
-    /// <summary>None in a new spawn: the authority assigns one.</summary>
+    /// <summary>None in a new spawn: the host assigns one.</summary>
     public EntityId Id;
 
-    /// <summary>Who will own it; set by the authority.</summary>
+    /// <summary>Who will own it; None for the handler's default (see <see cref="SpawnHandler{TDescription, TKind}.DefaultOwner"/>).</summary>
     public PeerId Owner;
 
-    public GridDescription Grid;
+    public TDescription Description;
 
-    /// <summary>Select it on the machine that asked for it (the G key, loading a .grid file).</summary>
+    /// <summary>Select it on the machine that asked for it, where the kind can be selected (a grid: the G key, loading a
+    /// .grid file).</summary>
     public bool Select;
 
     public readonly EntityAddress Target => EntityAddress.Of(Id);
 }
 
 /// <summary>
-/// Spawns grids (G, loading a .grid file, loading from storage, joining, resyncing), and describes live ones. The
-/// authority assigns the entity ID and owns the new grid. Apply creates it, or overwrites it in place if that ID
-/// already exists, so a spawn received twice is harmless.
+/// Spawns one kind of entity from its description, and describes live ones of that kind (<typeparamref name="TKind"/>
+/// marks them) for sending and storing. Decided by the host, which assigns the ID. A spawn is only ever for an ID that
+/// isn't live: one that is is rejected, or, arriving as an event, left alone. A subclass says how to create its kind
+/// and describe it, and what makes a description valid.
 /// </summary>
-public sealed class SpawnGridHandler : CommandHandler<SpawnGrid>, IDescriber
+public abstract class SpawnHandler<TDescription, TKind> : CommandHandler<Spawn<TDescription>>, IDescriber
+    where TDescription : class, IEntityDescription<TDescription>
 {
-    private readonly World _world;
-    private readonly EntityRegistry _registry;
-    private readonly Session _session;
-    private readonly PhysicsWorld _physics;
-    private readonly GridSelection? _selection;
+    protected readonly World World;
+    protected readonly EntityRegistry Registry;
+    protected readonly Session Session;
     private readonly EntitySet _requested;
 
-    public SpawnGridHandler(World world, EntityRegistry registry, Session session, PhysicsWorld physics, GridSelection? selection = null)
+    protected SpawnHandler(World world, EntityRegistry registry, Session session)
     {
-        _world = world;
-        _registry = registry;
-        _session = session;
-        _physics = physics;
-        _selection = selection;
-        _requested = world.GetEntities().With<DescribeRequest>().With<DynamicGrid>().With<ChunkGrid>().With<EntityId>().AsSet();
+        World = world;
+        Registry = registry;
+        Session = session;
+        _requested = world.GetEntities().With<DescribeRequest>().With<TKind>().With<EntityId>().AsSet();
     }
 
-    public override ushort Id => CommandIds.SpawnGrid;
+    /// <summary>Order among describers each tick: supports (grids) before what they support (players).</summary>
+    public abstract int Order { get; }
 
-    public override void Write(NetWriter w, in SpawnGrid c)
+    /// <summary>Creates the entity, owned by <paramref name="owner"/>.</summary>
+    protected abstract Entity Create(EntityId id, NetOwner owner, TDescription description);
+
+    /// <summary>A live entity's description.</summary>
+    protected abstract TDescription DescriptionOf(Entity entity);
+
+    protected virtual bool IsValid(TDescription description) => true;
+
+    /// <summary>Who owns a new one when the spawn doesn't say: whoever asked for it.</summary>
+    protected virtual PeerId DefaultOwner(in CommandContext ctx) => ctx.Sender;
+
+    /// <summary>Selects a new one on the machine that asked for it, if the spawn says to and the kind can be.</summary>
+    protected virtual void Select(Entity entity) { }
+
+    public override void Write(NetWriter w, in Spawn<TDescription> c)
     {
         c.Id.Write(w);
         w.WriteUInt32(c.Owner.Value);
         w.WriteBool(c.Select);
-        c.Grid.Write(w);
+        c.Description.Write(w);
     }
 
-    public override SpawnGrid Read(ref NetReader r) => new()
+    public override Spawn<TDescription> Read(ref NetReader r) => new()
     {
-        Id = EntityId.Read(ref r), Owner = new PeerId(r.ReadUInt32()), Select = r.ReadBool(), Grid = GridDescription.Read(ref r),
+        Id = EntityId.Read(ref r), Owner = new PeerId(r.ReadUInt32()), Select = r.ReadBool(), Description = TDescription.Read(ref r),
     };
 
-    /// <summary>A new grid is decided by the host (the spawning player's bubble owner, from N5); an existing one by its owner.</summary>
-    public override PeerId Authority(in SpawnGrid c, in AuthorityContext ctx) => c.Id.IsNone ? ctx.Host : ctx.OwnerOf(c.Target);
+    public override PeerId Authority(in Spawn<TDescription> c, in AuthorityContext ctx) => ctx.Host;
 
-    public override Verdict Validate(ref SpawnGrid c, in CommandContext ctx)
+    public override Verdict Validate(ref Spawn<TDescription> c, in CommandContext ctx)
     {
-        if (c.Grid is null || c.Grid.Voxels.Count == 0) return Verdict.Reject;
-        foreach (var v in c.Grid.Voxels) if (!BlockRegistry.IsDefined(v.Id)) return Verdict.Reject;
-        if (c.Id.IsNone) c.Id = _registry.Allocate();
-        if (c.Owner == PeerId.None) c.Owner = _session.LocalPeer;
+        if (c.Description is null || !IsValid(c.Description)) return Verdict.Reject;
+        if (c.Id.IsNone) c.Id = Registry.Allocate();
+        else if (Registry.IsLive(c.Id)) return Verdict.Reject; // already here
+        if (c.Owner == PeerId.None) c.Owner = DefaultOwner(ctx);
         return Verdict.Accept;
     }
 
-    public override void Apply(in SpawnGrid e, in ApplyContext ctx)
+    public override void Apply(in Spawn<TDescription> e, in ApplyContext ctx)
     {
-        Entity grid;
-        if (_registry.TryGet(e.Id, out var existing) && existing.Has<DynamicGrid>())
-        {
-            DynamicGridFactory.Fill(existing, e.Grid);
-            grid = existing;
-        }
-        else grid = DynamicGridFactory.Create(_world, e.Id, e.Grid);
-        grid.Set(_session.OwnerFor(e.Owner));
-        if (e.Select && ctx.Origin == _session.LocalPeer) _selection?.Select(grid);
+        if (Registry.IsLive(e.Id)) return; // already here (sent twice): keep what's here
+        var entity = Create(e.Id, Session.OwnerFor(e.Owner), e.Description);
+        if (e.Select && ctx.Origin == Session.LocalPeer) Select(entity);
     }
-
-    public int Order => 0;
 
     public void Describe(DescriptionSink sink)
     {
-        foreach (var grid in _requested.GetEntities().ToArray())
+        foreach (var entity in _requested.GetEntities().ToArray())
         {
-            var owner = grid.Has<NetOwner>() ? grid.Get<NetOwner>().Owner : _session.LocalPeer;
-            sink.Add(grid, new SpawnGrid { Id = grid.Get<EntityId>(), Owner = owner, Grid = DynamicGridFactory.Describe(grid, _physics) });
+            var owner = entity.Has<NetOwner>() ? entity.Get<NetOwner>().Owner : Session.LocalPeer;
+            sink.Add(entity, new Spawn<TDescription> { Id = entity.Get<EntityId>(), Owner = owner, Description = DescriptionOf(entity) });
         }
     }
 }
 
-/// <summary>Creates a player from their description, or moves the player with that ID to it.</summary>
-public struct SpawnPlayer : ICommand
+/// <summary>Spawns grids (G, loading a .grid file, loading from storage, joining). The host owns a new grid.</summary>
+public sealed class SpawnGridHandler : SpawnHandler<GridDescription, DynamicGrid>
 {
-    /// <summary>None in a new spawn: the host assigns one.</summary>
-    public EntityId Id;
+    private readonly PhysicsWorld _physics;
+    private readonly GridSelection? _selection;
 
-    /// <summary>The peer the player plays on: they own their own character.</summary>
-    public PeerId Owner;
+    public SpawnGridHandler(World world, EntityRegistry registry, Session session, PhysicsWorld physics, GridSelection? selection = null)
+        : base(world, registry, session)
+    {
+        _physics = physics;
+        _selection = selection;
+    }
 
-    public PlayerDescription Player;
+    public override ushort Id => CommandIds.SpawnGrid;
+    public override int Order => 0;
 
-    public readonly EntityAddress Target => EntityAddress.Of(Id);
+    protected override bool IsValid(GridDescription d) => d.Voxels.Count > 0 && d.Voxels.All(v => BlockRegistry.IsDefined(v.Id));
+
+    protected override PeerId DefaultOwner(in CommandContext ctx) => Session.LocalPeer;
+
+    protected override Entity Create(EntityId id, NetOwner owner, GridDescription d)
+    {
+        var grid = DynamicGridFactory.Create(World, id, d);
+        grid.Set(owner);
+        return grid;
+    }
+
+    protected override GridDescription DescriptionOf(Entity grid) => DynamicGridFactory.Describe(grid, _physics);
+
+    protected override void Select(Entity grid) => _selection?.Select(grid);
 }
 
-/// <summary>Spawns players (at startup, and for each player joining), and describes live ones. Decided by the host.</summary>
-public sealed class SpawnPlayerHandler : CommandHandler<SpawnPlayer>, IDescriber
+/// <summary>Spawns players (at startup, and for each player joining). A player owns their own character.</summary>
+public sealed class SpawnPlayerHandler : SpawnHandler<PlayerDescription, Player>
 {
-    private readonly World _world;
-    private readonly EntityRegistry _registry;
-    private readonly Session _session;
     private readonly PhysicsWorld _physics;
-    private readonly EntitySet _requested;
 
     public SpawnPlayerHandler(World world, EntityRegistry registry, Session session, PhysicsWorld physics)
-    {
-        _world = world;
-        _registry = registry;
-        _session = session;
-        _physics = physics;
-        _requested = world.GetEntities().With<DescribeRequest>().With<Player>().With<EntityId>().AsSet();
-    }
+        : base(world, registry, session) => _physics = physics;
 
     public override ushort Id => CommandIds.SpawnPlayer;
 
-    public override void Write(NetWriter w, in SpawnPlayer c)
-    {
-        c.Id.Write(w);
-        w.WriteUInt32(c.Owner.Value);
-        c.Player.Write(w);
-    }
-
-    public override SpawnPlayer Read(ref NetReader r) => new()
-    {
-        Id = EntityId.Read(ref r), Owner = new PeerId(r.ReadUInt32()), Player = PlayerDescription.Read(ref r),
-    };
-
-    public override PeerId Authority(in SpawnPlayer c, in AuthorityContext ctx) => ctx.Host;
-
-    public override Verdict Validate(ref SpawnPlayer c, in CommandContext ctx)
-    {
-        if (c.Player is null) return Verdict.Reject;
-        if (c.Id.IsNone) c.Id = _registry.Allocate();
-        if (c.Owner == PeerId.None) c.Owner = ctx.Sender;
-        return Verdict.Accept;
-    }
-
-    public override void Apply(in SpawnPlayer e, in ApplyContext ctx)
-    {
-        if (_registry.TryGet(e.Id, out var existing) && existing.Has<Player>())
-        {
-            PlayerFactory.Fill(existing, e.Player);
-            existing.Set(_session.OwnerFor(e.Owner));
-            return;
-        }
-        PlayerFactory.Create(_world, _physics, e.Id, _session.OwnerFor(e.Owner), e.Player);
-    }
-
     /// <summary>After grids, which players may stand on.</summary>
-    public int Order => 10;
+    public override int Order => 10;
 
-    public void Describe(DescriptionSink sink)
-    {
-        foreach (var player in _requested.GetEntities().ToArray())
-        {
-            var owner = player.Has<NetOwner>() ? player.Get<NetOwner>().Owner : _session.LocalPeer;
-            sink.Add(player, new SpawnPlayer { Id = player.Get<EntityId>(), Owner = owner, Player = PlayerFactory.Describe(player) });
-        }
-    }
+    protected override Entity Create(EntityId id, NetOwner owner, PlayerDescription d) => PlayerFactory.Create(World, _physics, id, owner, d);
+
+    protected override PlayerDescription DescriptionOf(Entity player) => PlayerFactory.Describe(player);
 }
 
 /// <summary>Removes an entity (a grid, a player) and everything attached to it.</summary>
