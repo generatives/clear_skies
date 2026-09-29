@@ -76,8 +76,9 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
 
     private readonly EntitySet _unrendered;
 
-    /// <summary>Chunks no longer drawn (their grid or chunk lost <see cref="Rendered"/>) give up their meshes, and are
-    /// marked to be meshed afresh if they're drawn again.</summary>
+    /// <summary>Chunks no longer drawn (their grid or chunk lost <see cref="Rendered"/>) give up their meshes. Without a
+    /// mesh they're out of date, so they're flagged: that's what gets them meshed again if they're drawn again. Nothing
+    /// is meshed meanwhile, because only drawn chunks are (<c>_dirtyChunks</c> requires Rendered).</summary>
     private void ReleaseUnrendered()
     {
         foreach (var e in _unrendered.GetEntities().ToArray())

@@ -39,7 +39,8 @@ public sealed class StoredEntityIndex
 /// entity) is always loaded.
 ///
 /// Loading sends the entity's stored spawn command (its owner is the host). Unloading has it described for storage;
-/// once <see cref="WorldSaver"/> has written it, it's despawned.
+/// <see cref="WorldSaver"/> writes it at the end of that same tick (it doesn't wait for an autosave), and then it's
+/// despawned.
 /// </summary>
 public sealed class EntityStreamingSystem : ISystem, IDebugUiSystem
 {
@@ -56,7 +57,6 @@ public sealed class EntityStreamingSystem : ISystem, IDebugUiSystem
     private readonly List<Vector3> _playerPositions = new();
     private readonly HashSet<EntityId> _unloading = new();   // described for storage, not written yet
     private readonly HashSet<EntityId> _despawning = new();  // written, despawn sent
-    private readonly List<Entity> _toUnload = new();
     private int _loads, _unloads;
 
     public EntityStreamingSystem(World world, SaveDatabase db, StoredEntityIndex index, EntityRegistry registry,
@@ -95,24 +95,21 @@ public sealed class EntityStreamingSystem : ISystem, IDebugUiSystem
             if (loads >= MaxLoadsPerTick) break;
             if (_registry.IsLive(entry.Id)) continue;
             if (entry.Position is { } pos && NearestPlayer(pos) > LoadWindow) continue;
-            if (_db.ReadEntity(entry.Id) is not { } row) { _index.Remove(entry.Id); break; }
+            // The index and the entities table change together (WorldSaver writes and forgets both), so the row is there.
+            var row = _db.ReadEntity(entry.Id) ?? throw new InvalidOperationException($"Stored entity {entry.Id} has no row in the save.");
             _commands.SendSerialized(row.Kind, row.Data);
             loads++;
             _loads++;
         }
 
-        // Unload what left every window.
-        _toUnload.Clear();
+        // Unload what left every window: until dynamic ownership every loaded entity is the host's already; with it, the
+        // host takes ownership here.
         foreach (ref readonly var e in _streamed.GetEntities())
         {
             var id = e.Get<EntityId>();
             if (_unloading.Contains(id) || _despawning.Contains(id)) continue;
-            if (NearestPlayer(Where(e)) > UnloadWindow) _toUnload.Add(e);
-        }
-        foreach (var e in _toUnload)
-        {
-            // Until dynamic ownership every loaded entity is the host's already; with it, the host takes ownership here.
-            _unloading.Add(e.Get<EntityId>());
+            if (NearestPlayer(Where(e)) <= UnloadWindow) continue;
+            _unloading.Add(id);
             DescribeRequest.Request(e, DescribePurpose.Store);
         }
     }
