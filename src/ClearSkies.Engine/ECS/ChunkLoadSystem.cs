@@ -135,6 +135,8 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     /// <summary>Loaded columns, farthest first, as of the first eviction since the last rebuild; <see cref="_evictNext"/>
     /// is the next to consider. Columns loaded since then are nearer (the queue is closest first), so the order holds.</summary>
     private readonly List<(int x, int z)> _evictOrder = new();
+    private readonly HashSet<(int x, int z)> _evictColumns = new();
+    private long[] _evictKeys = Array.Empty<long>();
     private int _evictNext = -1; // -1: not built since the last rebuild
     private bool _full;
     private int _evictions;
@@ -231,9 +233,10 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     }
 
     // CPU time of each step, for the debug panel: which one a hitch while streaming came from.
-    private const int AutosaveStep = 0, ApplyStep = 1, UnloadStep = 2, QueueStep = 3, DispatchStep = 4, EvictStep = 5, FogStep = 6;
+    private const int AutosaveStep = 0, ApplyStep = 1, UnloadStep = 2, QueueStep = 3, DispatchStep = 4, EvictStep = 5, FogStep = 6,
+                      EvictOrderStep = 7;
     private readonly StepTimer _steps = new("Autosave", "Adding finished columns", "Rebuild: unloading out of view",
-                                            "Rebuild: queueing columns", "Dispatching jobs", "Evicting far columns", "Fog") { Owner = "Chunk Loading" };
+                                            "Rebuild: queueing columns", "Dispatching jobs", "Evicting far columns", "Fog", "Evicting: ordering columns") { Owner = "Chunk Loading" };
 
     public void Update(float dt)
     {
@@ -472,41 +475,51 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         if (_nothingToEvict) return;
         long start = System.Diagnostics.Stopwatch.GetTimestamp();
         if (_evictNext < 0) BuildEvictOrder();
+        _steps.Lap(EvictOrderStep);
 
         float margin = MathF.Sqrt(distSq) + 1f;
         int freedChunks = 0, freedBricks = 0;
-        while (freedChunks < MaxEvictChunksPerFrame && (freedChunks < chunks || freedBricks < bricks)
-               && System.Diagnostics.Stopwatch.GetElapsedTime(start).TotalMilliseconds < MaxEvictMsPerFrame)
+        while (freedChunks < MaxEvictChunksPerFrame && (freedChunks < chunks || freedBricks < bricks))
         {
             if (_evictNext >= _evictOrder.Count || ColumnDistSq(_evictOrder[_evictNext]) <= margin * margin)
             {
                 _nothingToEvict = true;
                 return;
             }
-            var far = _evictOrder[_evictNext++];
-            if (_inFlight.ContainsKey(far)) continue;
+            var far = _evictOrder[_evictNext];
+            if (_inFlight.ContainsKey(far)) { _evictNext++; continue; }
+            // The time budget is checked per chunk: a column cut short stays next, and its unloaded chunks are
+            // skipped when it comes up again.
             int unloaded = 0;
             for (int layer = 0; layer < 64; layer++)
             {
                 var p = new ChunkPosition(far.x, _minY + layer, far.z);
                 if (!_staticVolume.IsLoaded(p)) continue;
+                if (System.Diagnostics.Stopwatch.GetElapsedTime(start).TotalMilliseconds >= MaxEvictMsPerFrame)
+                {
+                    if (unloaded > 0) _evictions++;
+                    return;
+                }
                 freedBricks += ChunkBricks(p);
                 Unload(p);
                 unloaded++;
+                freedChunks++;
             }
-            if (unloaded == 0) continue;
-            freedChunks += unloaded;
-            _evictions++;
+            _evictNext++;
+            if (unloaded > 0) _evictions++;
         }
     }
 
     private void BuildEvictOrder()
     {
-        var columns = new HashSet<(int x, int z)>();
-        foreach (var (p, _) in _staticVolume.All) columns.Add((p.X, p.Z));
+        _evictColumns.Clear();
+        foreach (var (p, _) in _staticVolume.All) _evictColumns.Add((p.X, p.Z));
         _evictOrder.Clear();
-        _evictOrder.AddRange(columns);
-        _evictOrder.Sort((a, b) => ColumnDistSq(b).CompareTo(ColumnDistSq(a)));
+        _evictOrder.AddRange(_evictColumns);
+        // Each column's distance once, farthest first (the comparison sort would compute it twice per comparison).
+        if (_evictKeys.Length < _evictOrder.Count) _evictKeys = new long[_evictOrder.Count * 2];
+        for (int i = 0; i < _evictOrder.Count; i++) _evictKeys[i] = -ColumnDistSq(_evictOrder[i]);
+        _evictKeys.AsSpan(0, _evictOrder.Count).Sort(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_evictOrder));
         _evictNext = 0;
     }
 
