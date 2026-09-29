@@ -266,7 +266,7 @@ public sealed partial class GpuLightSystem
             _lampTimer.Start();
             _composeWork = UploadWords(_composeWork, _preCompose.AsSpan(0, preCompose));
             _rayLight.DispatchCompose(_store, _bounceEnabled ? _bounceScale : 0f, RayLightingSettings.Ambient,
-                                     RayLightingSettings.AoStrength, _composeWork, preCompose);
+                                     RayLightingSettings.AoStrength, _composeWork, preCompose, smooth: false);
             _lampTimer.Stop();
         }
 
@@ -295,12 +295,12 @@ public sealed partial class GpuLightSystem
                     {
                         int nr = UploadNearRepeat(r);
                         if (nr == 0) break;
-                        ComposeNear();
+                        ComposeNear(final: false);
                         _rayLight.DispatchBounce(_store, sunDir, SunLight.Strength, _bounceAlbedo, _bounceRays,
                                                  _bounceCycle, _nearWorks[r]!, nr);
                         _lastNearTotal += nr;
                     }
-                    ComposeNear();
+                    ComposeNear(final: true);
                 }
                 _bounceTimer.Stop();
             }
@@ -319,7 +319,7 @@ public sealed partial class GpuLightSystem
             _lampTimer.Start();
             _finalComposeWork = UploadWords(_finalComposeWork, _composeList.AsSpan(0, _composeCount));
             _rayLight.DispatchCompose(_store, _bounceEnabled ? _bounceScale : 0f, RayLightingSettings.Ambient,
-                                     RayLightingSettings.AoStrength, _finalComposeWork, _composeCount);
+                                     RayLightingSettings.AoStrength, _finalComposeWork, _composeCount, smooth: true);
             _lampTimer.Stop();
         }
         _rayLight.Submit();
@@ -980,11 +980,13 @@ public sealed partial class GpuLightSystem
     private int[] _nearStamp = Array.Empty<int>();
     private GpuBuffer? _nearComposeWork;
 
-    private void ComposeNear()
+    /// <summary>Recomposes the near-camera bricks; <paramref name="final"/> for their last compose this frame, the one
+    /// that's shown (smoothed over neighbours).</summary>
+    private void ComposeNear(bool final)
     {
         _lampTimer.Start();
         _rayLight.DispatchCompose(_store, _bounceEnabled ? _bounceScale : 0f, RayLightingSettings.Ambient,
-                                     RayLightingSettings.AoStrength, _nearComposeWork!, _nearCount);
+                                     RayLightingSettings.AoStrength, _nearComposeWork!, _nearCount, smooth: final);
         _lampTimer.Stop();
     }
 
