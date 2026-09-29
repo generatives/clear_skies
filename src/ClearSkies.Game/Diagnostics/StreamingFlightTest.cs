@@ -3,7 +3,9 @@ using System.Text;
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Gui;
+using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Rendering.WebGpu;
+using ClearSkies.Engine.Voxels;
 using DefaultEcs;
 using ImGuiNET;
 using Silk.NET.Maths;
@@ -15,8 +17,10 @@ namespace ClearSkies.Game.Diagnostics;
 /// <see cref="_distance"/> blocks at <see cref="_speed"/> blocks/s, and straight back, so the world streams in ahead
 /// and out behind, then back again. Meanwhile it records every frame's length, and at the end reports them (average,
 /// percentiles, how many were long) with the longest time each timed step (<see cref="StepTimer"/>) took in one
-/// frame, so a change can be compared on the same route. Start it from its debug panel, or with <c>--flight-test</c>,
-/// which starts it once the world around the camera has loaded and closes the game when it's done.
+/// frame, so a change can be compared on the same route. It also reports GPU time per timed pass, draw calls, and
+/// memory (light, mesh, occupancy, CPU chunk data) at the end and at its peak, per km² of loaded land. Start it from
+/// its debug panel, or with <c>--flight-test</c>, which starts it once the world around the spawn has loaded (the same
+/// route every run) and closes the game when it's done.
 /// </summary>
 public sealed class StreamingFlightTest : ISystem, IDebugUiSystem
 {
@@ -26,8 +30,10 @@ public sealed class StreamingFlightTest : ISystem, IDebugUiSystem
     private readonly Stopwatch _clock = new();
     // Per frame: its length, garbage-collection pause and collections in it, GPU buffer writes queued in it, and its
     // three slowest systems (index into the host's systems, or FrameBegin / FrameEnd; -1 for none).
+    private readonly ChunkVolume _world;
+    private readonly GridStore _store;
     private readonly List<Frame> _frames = new();
-    private readonly record struct Frame(float Ms, float GcPauseMs, int Collections, long Writes, long WriteBytes,
+    private readonly record struct Frame(float Ms, float GcPauseMs, int Collections, long Writes, long WriteBytes, int Draws,
                                          (int System, float Ms) Top1, (int System, float Ms) Top2, (int System, float Ms) Top3);
     private const int FrameBegin = -2, FrameEnd = -3;
     private TimeSpan _lastPause;
@@ -45,9 +51,15 @@ public sealed class StreamingFlightTest : ISystem, IDebugUiSystem
     // With --flight-test: wait this long for the world around the camera to load before flying.
     private float _autoStartIn = -1f;
 
-    public StreamingFlightTest(EngineHost host, bool autoStart, Action? whenDone = null)
+    // Peaks over the flight.
+    private int _peakLightSlots, _peakOccSlots;
+    private long _peakMeshBytes;
+
+    public StreamingFlightTest(EngineHost host, ChunkVolume world, GridStore store, bool autoStart, Action? whenDone = null)
     {
         _host = host;
+        _world = world;
+        _store = store;
         host.FrameEnded += RecordFrame;
         // Whatever free-flies: the camera itself, or the player the camera follows.
         _cameras = host.World.GetEntities().With<Transform>().With<FreeFlyController>().AsSet();
@@ -112,7 +124,10 @@ public sealed class StreamingFlightTest : ISystem, IDebugUiSystem
         Consider(FrameEnd, _host.LastFrameEndMs);
         _frames.Add(new Frame((float)(now - _lastFrame), (float)(pause - _lastPause).TotalMilliseconds,
                               collections - _lastCollections, GpuBuffer.WriteCount - _lastWrites,
-                              GpuBuffer.WriteBytes - _lastWriteBytes, a, b, c));
+                              GpuBuffer.WriteBytes - _lastWriteBytes, _host.Renderer.DrawCount, a, b, c));
+        _peakLightSlots = System.Math.Max(_peakLightSlots, _store.LightSlotsInUse);
+        _peakOccSlots = System.Math.Max(_peakOccSlots, _store.OccSlotsInUse);
+        _peakMeshBytes = System.Math.Max(_peakMeshBytes, GpuMesh.LiveBytes);
         _lastFrame = now;
         (_lastPause, _lastCollections) = (pause, collections);
         (_lastWrites, _lastWriteBytes) = (GpuBuffer.WriteCount, GpuBuffer.WriteBytes);
@@ -142,10 +157,13 @@ public sealed class StreamingFlightTest : ISystem, IDebugUiSystem
         (_lastWrites, _lastWriteBytes) = (GpuBuffer.WriteCount, GpuBuffer.WriteBytes);
         foreach (var timer in StepTimer.All) timer.Reset();
         for (int g = 0; g < 3; g++) _gcAtStart[g] = GC.CollectionCount(g);
+        _host.Context.Timer.BeginTotals();
+        _peakLightSlots = _peakOccSlots = 0;
+        _peakMeshBytes = 0;
         _clock.Restart();
         _lastFrame = 0;
         _running = true;
-        Console.WriteLine($"[flight] {_distance:F0} blocks out and back at {_speed:F0} blocks/s from {_start}");
+        Console.WriteLine($"[flight] {_distance:F0} blocks out and back at {_speed:F0} blocks/s from {_start}, heading {_direction}");
     }
 
     private void Finish()
@@ -172,6 +190,7 @@ public sealed class StreamingFlightTest : ISystem, IDebugUiSystem
         sb.AppendLine($"Flight test: {_distance:F0} blocks out and back at {_speed:F0} blocks/s, {ms.Length} frames " +
                       $"in {_clock.Elapsed.TotalSeconds:F1} s, {BackgroundWork.Workers} background workers of " +
                       $"{Environment.ProcessorCount} cores");
+        sb.AppendLine($"  from ({_start.X:F0}, {_start.Y:F0}, {_start.Z:F0}) heading ({_direction.X:F2}, {_direction.Z:F2})");
         sb.AppendLine($"  frame ms: average {ms.Average():F1}, median {median:F1}, 95% {P(0.95):F1}, 99% {P(0.99):F1}, " +
                       $"longest {sorted[^1]:F1}");
         sb.AppendLine($"  hitches (over 2x median): {hitches.Length}, stalled {hitches.Sum(f => f.Ms - median):F0} ms in all; " +
@@ -184,6 +203,10 @@ public sealed class StreamingFlightTest : ISystem, IDebugUiSystem
                       $"their pauses {gcHitches.Sum(f => f.GcPauseMs):F0} ms of their {gcHitches.Sum(f => f.Ms - median):F0} ms stall");
         sb.AppendLine($"  GPU buffer writes per frame: average {frames.Average(f => f.Writes):F0}, most {frames.Max(f => f.Writes)}; " +
                       $"KB per frame: average {frames.Average(f => f.WriteBytes) / 1024:F0}, most {frames.Max(f => f.WriteBytes) / 1024}");
+        var draws = frames.Select(f => f.Draws).OrderBy(v => v).ToArray();
+        sb.AppendLine($"  draw calls per frame: average {draws.Average():F0}, median {draws[draws.Length / 2]}, most {draws[^1]}");
+        GpuReport(sb);
+        MemoryReport(sb);
         sb.AppendLine("  longest frames (ms, GC pause ms, GPU writes, KB written; slowest systems):");
         foreach (var f in frames.OrderByDescending(f => f.Ms).Take(8))
         {
@@ -200,5 +223,35 @@ public sealed class StreamingFlightTest : ISystem, IDebugUiSystem
         foreach (var (worst, average, name) in steps.OrderByDescending(s => s.Worst))
             sb.AppendLine($"    {worst,7:F1}  (average {average,5:F2})  {name}");
         return sb.ToString();
+    }
+
+    /// <summary>GPU time per timed pass over the flight (average per frame, and in the frames it ran).</summary>
+    private void GpuReport(StringBuilder sb)
+    {
+        var timer = _host.Context.Timer;
+        if (!timer.Supported) { sb.AppendLine("  GPU time: not measurable here (no timestamp queries)"); return; }
+        var (count, busy, passes) = timer.Totals();
+        if (count == 0) { sb.AppendLine("  GPU time: no frames read back"); return; }
+        sb.AppendLine($"  GPU ms per frame (timed passes, {count} frames{(timer.Calibrated ? "" : ", tick length not measured yet: may be off")}): " +
+                      $"busy {busy / count:F2}");
+        foreach (var (name, (ms, n)) in passes.OrderByDescending(p => p.Value.Ms))
+            sb.AppendLine($"    {ms / count,7:F2}  (in the {n} frames it ran: {ms / n:F2})  {name}");
+    }
+
+    /// <summary>Memory at the end of the flight and at its peak, and per km² of the land loaded at the end.</summary>
+    private void MemoryReport(StringBuilder sb)
+    {
+        const double Mb = 1024.0 * 1024.0;
+        int dense = _world.DenseCount();
+        double km2 = _store.WorldChunkCount * ChunkData.Size * ChunkData.Size / 1e6; // chunk columns' footprint, roughly
+        double light = (double)_store.LightSlotsInUse * GridStore.SlotBytes / Mb;
+        double occ = (double)_store.OccSlotsInUse * GridStore.WordsPerChunk * 4 / Mb;
+        double mesh = GpuMesh.LiveBytes / Mb, wire = GpuMesh.LiveWireframeBytes / Mb;
+        double cpu = (double)dense * ChunkData.Size * ChunkData.Size * ChunkData.Size / Mb;
+        sb.AppendLine($"  memory at the end (MB; peak in brackets): light {light:F0} ({(double)_peakLightSlots * GridStore.SlotBytes / Mb:F0}), " +
+                      $"mesh {mesh:F0} ({_peakMeshBytes / Mb:F0}; wireframe indices {wire:F0} of it), " +
+                      $"occupancy {occ:F0} ({(double)_peakOccSlots * GridStore.WordsPerChunk * 4 / Mb:F0}), CPU chunk data {cpu:F0}");
+        sb.AppendLine($"    {_store.LightSlotsInUse:N0} light bricks, {_store.WorldChunkCount:N0} world chunks on the GPU, " +
+                      $"{_world.LoadedCount:N0} loaded ({dense:N0} dense)");
     }
 }

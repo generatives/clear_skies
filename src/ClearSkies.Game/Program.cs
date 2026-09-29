@@ -150,7 +150,7 @@ host.AddSystem(interpolation, SystemStage.Simulation); // records this tick's po
 // Moves the camera once a frame (not per tick) while flying; before the interpolation, which then draws it there.
 // --flight-test flies once the world has loaded, then quits.
 bool flightTest = args.Contains("--flight-test");
-host.AddSystem(new StreamingFlightTest(host, flightTest, flightTest ? () => host.Window.Native.Close() : null),
+host.AddSystem(new StreamingFlightTest(host, staticVolume, gridStore, flightTest, flightTest ? () => host.Window.Native.Close() : null),
                SystemStage.Frame);
 // Per frame, after the ticks: draw between the last two ticks (children follow), then stream terrain around the view.
 host.AddSystem(gridPilot, SystemStage.Frame); // puts the camera under a piloted grid...

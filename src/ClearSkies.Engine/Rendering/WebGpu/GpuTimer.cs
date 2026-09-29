@@ -59,6 +59,21 @@ public sealed unsafe class GpuTimer : IDebugUiSystem, IDisposable
     private double _nsPerTick = 1.0;
     private bool _calibrated;
 
+    // Totals since BeginTotals (for the flight test): per pass name, GPU ms and frames it ran in; frames read back.
+    private readonly Dictionary<string, (double ms, int frames)> _totals = new();
+    private int _totalFrames;
+    private double _totalBusyMs;
+
+    /// <summary>Starts summing GPU time per pass from the next frame read back (see <see cref="Totals"/>).</summary>
+    public void BeginTotals() { _totals.Clear(); _totalFrames = 0; _totalBusyMs = 0; }
+
+    /// <summary>Since <see cref="BeginTotals"/>: frames read back, their busy GPU ms in all, and per pass its ms in all
+    /// and the frames it ran in. Only meaningful once the tick length is measured (<see cref="Calibrated"/>).</summary>
+    public (int Frames, double BusyMs, IReadOnlyDictionary<string, (double Ms, int Frames)> Passes) Totals()
+        => (_totalFrames, _totalBusyMs, _totals.ToDictionary(kv => kv.Key, kv => (kv.Value.ms, kv.Value.frames)));
+
+    public bool Calibrated => _calibrated;
+
     public bool Supported { get; }
     public bool Enabled = true;
 
@@ -195,6 +210,13 @@ public sealed unsafe class GpuTimer : IDebugUiSystem, IDisposable
             if (!_frameSums.ContainsKey(name)) { var s = _stats[name]; _stats[name] = (Ema(s.ms, 0), Ema(s.count, 0)); }
         _spanMs = Ema(_spanMs, (last - first) * _nsPerTick * 1e-6);
         _busyMs = Ema(_busyMs, busy * _nsPerTick * 1e-6);
+        _totalFrames++;
+        _totalBusyMs += busy * _nsPerTick * 1e-6;
+        foreach (var (name, (ticks, _, _)) in _frameSums)
+        {
+            var sum = _totals.GetValueOrDefault(name);
+            _totals[name] = (sum.ms + ticks * _nsPerTick * 1e-6, sum.frames + 1);
+        }
     }
 
     private void Calibrate(ulong gpuTicks, long cpuTicks)
