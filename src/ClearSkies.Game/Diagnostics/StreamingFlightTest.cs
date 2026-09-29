@@ -55,9 +55,15 @@ public sealed class StreamingFlightTest : ISystem, IDebugUiSystem
     private int _peakLightSlots, _peakOccSlots;
     private long _peakMeshBytes;
 
-    public StreamingFlightTest(EngineHost host, ChunkVolume world, GridStore store, bool autoStart, Action? whenDone = null)
+    // With --flight-test: the look (yaw, pitch) held for the whole flight, which also sets the heading, so every run
+    // flies the same line and sees the same view however the mouse moved while the world loaded.
+    private readonly (float Yaw, float Pitch)? _fixedLook;
+
+    public StreamingFlightTest(EngineHost host, ChunkVolume world, GridStore store, bool autoStart, Action? whenDone = null,
+                               (float Yaw, float Pitch)? fixedLook = null)
     {
         _host = host;
+        _fixedLook = autoStart ? fixedLook : null;
         _world = world;
         _store = store;
         host.FrameEnded += RecordFrame;
@@ -97,6 +103,7 @@ public sealed class StreamingFlightTest : ISystem, IDebugUiSystem
         double now = _clock.Elapsed.TotalMilliseconds;
         var e = _cameras.GetEntities()[0];
         ref var t = ref e.Get<Transform>();
+        HoldLook(e);
         // Distance by the clock rather than dt, so a long frame moves the camera as far as it would have in real time.
         _travelled = MathF.Min(2 * _distance, (float)(now / 1000.0) * _speed);
         float along = _travelled <= _distance ? _travelled : 2 * _distance - _travelled;
@@ -145,6 +152,7 @@ public sealed class StreamingFlightTest : ISystem, IDebugUiSystem
         if (_cameras.Count == 0) return;
         var flyer = _cameras.GetEntities()[0];
         if (flyer.Has<CharacterControllerComponent>()) Players.SetFreeFlying(flyer, true); // straight through anything
+        HoldLook(flyer);
         var t = flyer.Get<Transform>();
         var forward = Engine.Math.Vec.Rotate(t.Rotation, new Vector3D<float>(0, 0, -1));
         forward.Y = 0;
@@ -164,6 +172,15 @@ public sealed class StreamingFlightTest : ISystem, IDebugUiSystem
         _lastFrame = 0;
         _running = true;
         Console.WriteLine($"[flight] {_distance:F0} blocks out and back at {_speed:F0} blocks/s from {_start}, heading {_direction}");
+    }
+
+    /// <summary>With a fixed look, puts the flyer's look and body turn back to it (after the mouse moved them).</summary>
+    private void HoldLook(Entity flyer)
+    {
+        if (_fixedLook is not { } look || !flyer.Has<MouseLookComponent>()) return;
+        ref var m = ref flyer.Get<MouseLookComponent>();
+        (m.Yaw, m.Pitch) = look;
+        flyer.Get<Transform>().Rotation = m.BodyRotation;
     }
 
     private void Finish()
