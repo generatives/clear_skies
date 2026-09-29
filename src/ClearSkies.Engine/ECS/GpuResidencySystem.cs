@@ -111,8 +111,9 @@ public sealed class GpuResidencySystem : ISystem, IDebugUiSystem
     {
         _steps.Start();
         _uploaded = 0;
-        // No longer drawn: a chunk's storage and light bricks go, and it's uploaded afresh if drawn again; a grid's whole
-        // GPU registration goes (re-registered on its first upload).
+        // No longer drawn: a chunk's storage and light bricks go, and a grid's whole GPU registration (re-registered on
+        // its first upload). The flag is what uploads a chunk again if it's drawn again; nothing is uploaded meanwhile,
+        // since only drawn chunks are (_needsGpuUpload requires Rendered).
         foreach (var e in _unrenderedChunks.GetEntities().ToArray())
         {
             if (e.Has<Rendered>()) continue;
