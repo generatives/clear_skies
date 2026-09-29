@@ -704,7 +704,13 @@ fn pcg(v: u32) -> u32 {
 fn rand01(h: u32) -> f32 { return f32(pcg(h) & 0xFFFFFFu) / 16777216.0; }
 
 // Blends one evaluation into the voxel's accumulation word (bounce RGB and AO) and returns the new word.
-fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, slice: i32, list: u32) -> u32 {
+// A priming evaluation (the first after a brick's average restarts) measures only AO and stores no bounce: until then
+// the brick's voxels were shown with no AO at all (nothing measured yet, or solid a moment ago), as bright as open
+// air, and bounce rays reading those walls would start the average far too high, which then feeds on itself. After
+// it the brick is recomposed with its AO and the average starts over, reading walls lit as they really are.
+const PRIME: u32 = 0xFFFFFFFFu;
+
+fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, slice: i32, list: u32, prime: bool) -> u32 {
     if (isSolid(g, v)) { return word; }
 
     let sxn = isSolid(g, v - vec3<i32>(1, 0, 0)); let sxp = isSolid(g, v + vec3<i32>(1, 0, 0));
@@ -771,7 +777,7 @@ fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, slice: i32, list: u3
             let h = ddaNearest(gi, lo, ld, clip.t0, clip.t1, gd.bmin.xyz, gd.bmax.xyz);
             if (h.hit && h.t < bestT) { bestT = h.t; bestG = gi; best = h; }
         }
-        if (bestG >= 0) { sumL = sumL + radianceAt(bestG, best); }
+        if (bestG >= 0) { if (!prime) { sumL = sumL + radianceAt(bestG, best); } }
         else { escaped = escaped + 1.0; }
     }
     let estimate = clamp(p.bounce.x * sumL / f32(rays), vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0;
@@ -803,10 +809,12 @@ fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) n
     let it = itemOf(work[wi * 2u], t);
     let nu = work[wi * 2u + 1u];
     // A running average over the first full cycle (exactly the complete ray set's mean), then a weight of one
-    // cycle, so each further cycle weighs the whole set about equally.
+    // cycle, so each further cycle weighs the whole set about equally. N = PRIME: the priming evaluation (see
+    // bounceVoxel), which overwrites.
     let cycle = max(u32(p.bounce2.y), 1u);
-    let alpha = max(1.0 / f32(cycle), 1.0 / (f32(nu) + 1.0));
-    let slice = i32(nu % cycle);
+    let prime = nu == PRIME;
+    let alpha = select(max(1.0 / f32(cycle), 1.0 / (f32(nu) + 1.0)), 1.0, prime);
+    let slice = select(i32(nu % cycle), i32(cycle) - 1, prime);
     let list = listOf(it.g, it.v0);
     // Gather the surface voxels (see Surface compaction); other air has no bounce and no occlusion, solid keeps its word.
     let base = it.v0 - vec3<i32>(i32(t * 2u) & 7, (i32(t * 2u) >> 3u) & 7, i32(t * 2u) >> 6u);
@@ -823,7 +831,7 @@ fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) n
         let k = wList[i];
         let v = base + vec3<i32>(i32(k & 7u), i32((k >> 3u) & 7u), i32(k >> 6u));
         let a = accBase + i32(k);
-        lightPool[a] = bounceVoxel(it.g, v, lightPool[a], alpha, slice, list);
+        lightPool[a] = bounceVoxel(it.g, v, lightPool[a], alpha, slice, list, prime);
     }
 }
 
