@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 namespace ClearSkies.Engine.Voxels;
 
@@ -20,6 +22,28 @@ public sealed class ChunkData
     private BlockOrientation _uniformOrientation = BlockOrientation.Upright;
 
     public bool IsDirty { get; set; }
+
+    // The owner's reference plus one per background job reading this chunk (see Retain); the arrays go back to the
+    // pool once the owner has released the chunk and the last job is done with it.
+    private int _refs = 1;
+
+    /// <summary>Keeps the arrays from being recycled while a background job reads them; pair with
+    /// <see cref="Unretain"/> when the job is done.</summary>
+    public void Retain() => Interlocked.Increment(ref _refs);
+    public void Unretain() { if (Interlocked.Decrement(ref _refs) == 0) Recycle(); }
+
+    /// <summary>The owner is done with this chunk (it was unloaded): its arrays return to the pool for the next chunk
+    /// once no background job is reading them. Only for a chunk nothing else will keep using; anyone still holding it
+    /// afterwards sees all air.</summary>
+    public void Release() => Unretain();
+
+    private void Recycle()
+    {
+        BlockPool.Return(Interlocked.Exchange(ref _blocks, null));
+        OrientationPool.Return(Interlocked.Exchange(ref _orientations, null));
+        _uniformBlock = BlockId.Air;
+        _uniformOrientation = BlockOrientation.Upright;
+    }
 
     public BlockId Get(int x, int y, int z) => _blocks is { } b ? b[Index(x, y, z)] : _uniformBlock;
     public BlockOrientation GetOrientation(int x, int y, int z)
@@ -45,30 +69,57 @@ public sealed class ChunkData
         IsDirty = true;
     }
 
-    /// <summary>Drops the arrays if every block (or every orientation) is the same, e.g. after generating a chunk of
-    /// solid stone.</summary>
+    /// <summary>Drops the arrays (back to the pool) if every block (or every orientation) is the same, e.g. after
+    /// generating a chunk of solid stone. Only before the chunk is shared with other threads.</summary>
     public void Compact()
     {
         if (_blocks != null && BlocksAsBytes().IndexOfAnyExcept((byte)_blocks[0]) < 0)
         {
             _uniformBlock = _blocks[0];
+            BlockPool.Return(_blocks);
             _blocks = null;
         }
         if (_orientations != null && OrientationsAsBytes().IndexOfAnyExcept(_orientations[0].ToByte()) < 0)
         {
             _uniformOrientation = _orientations[0];
+            OrientationPool.Return(_orientations);
             _orientations = null;
         }
     }
 
-    // On the pinned object heap: a loaded chunk's arrays live for as long as it stays loaded, and there they're never
-    // copied from generation to generation (on the ordinary heap, every collection while streaming copied the new
-    // chunks' 64 KB arrays along, one of the causes of hitches).
     private static T[] Filled<T>(T value) where T : unmanaged
     {
-        var a = GC.AllocateUninitializedArray<T>(Volume, pinned: true);
+        var a = ChunkArrayPool<T>.Rent();
         Array.Fill(a, value);
         return a;
+    }
+
+    private static readonly ChunkArrayPool<BlockId> BlockPool = ChunkArrayPool<BlockId>.Shared;
+    private static readonly ChunkArrayPool<BlockOrientation> OrientationPool = ChunkArrayPool<BlockOrientation>.Shared;
+
+    /// <summary>Chunk-sized arrays from unloaded (or compacted) chunks, for the next chunks to load. While streaming,
+    /// as many chunks unload as load, so after a while nearly every chunk reuses an array instead of allocating one:
+    /// fewer allocations means fewer full collections, and those were the long pauses. New arrays go on the pinned
+    /// object heap, where a collection never copies them.</summary>
+    private sealed class ChunkArrayPool<T> where T : unmanaged
+    {
+        public static readonly ChunkArrayPool<T> Shared = new();
+        private const int MaxKept = 1024; // 32 MB of blocks; streaming needs far fewer spare at once
+        private readonly Stack<T[]> _free = new();
+
+        public static T[] Rent()
+        {
+            lock (Shared._free)
+                if (Shared._free.TryPop(out var a)) return a;
+            return GC.AllocateUninitializedArray<T>(Volume, pinned: true);
+        }
+
+        public void Return(T[]? a)
+        {
+            if (a == null) return;
+            lock (_free)
+                if (_free.Count < MaxKept) _free.Push(a);
+        }
     }
 
     public static int Index(int x, int y, int z) => x + Size * (y + Size * z);
@@ -101,7 +152,7 @@ public sealed class ChunkData
     {
         if (bytes.Length != Volume)
             throw new ArgumentException($"Expected {Volume} bytes, got {bytes.Length}.", nameof(bytes));
-        _blocks ??= new BlockId[Volume];
+        _blocks ??= ChunkArrayPool<BlockId>.Rent();
         bytes.CopyTo(MemoryMarshal.Cast<BlockId, byte>(_blocks));
     }
 
@@ -109,7 +160,7 @@ public sealed class ChunkData
     {
         if (bytes.Length != Volume)
             throw new ArgumentException($"Expected {Volume} bytes, got {bytes.Length}.", nameof(bytes));
-        _orientations ??= new BlockOrientation[Volume];
+        _orientations ??= ChunkArrayPool<BlockOrientation>.Rent();
         for (int i = 0; i < bytes.Length; i++)
             _orientations[i] = BlockOrientation.FromByte(bytes[i]); // validated: a bad byte would index out of range
     }
