@@ -22,7 +22,7 @@ public sealed unsafe class WorldMeshPool : IDisposable
 {
     public const int PageQuads = 64;
     public const int PageBytes = PageQuads * (int)ChunkQuad.SizeBytes;
-    private const int Bands = 32;
+    private const int Bands = 1024; // at 4000 blocks' range, about a block apart nearby and 8 at the far end
     private const int SlotInts = 8; // chunk table entry: x, y, z, grid, first page, pages, quads, flags
     private const int Group = 64;   // compute workgroup size
 
@@ -273,9 +273,9 @@ struct Cull { planes: array<vec4<f32>, 6>, camera: vec4<f32>, slots: vec4<u32> }
 @group(0) @binding(4) var<storage, read_write> visible: array<vec2<u32>>;
 @group(0) @binding(5) var<storage, read_write> args: array<u32>;
 
-const BANDS: u32 = 32u;
+const BANDS: u32 = 1024u;
 const PAGE_QUADS: u32 = 64u;
-const VISIBLE_COUNT: u32 = 64u; // counters[2 * BANDS]
+const VISIBLE_COUNT: u32 = 2048u; // counters[2 * BANDS]
 
 @compute @workgroup_size(64)
 fn cull_main(@builtin(global_invocation_id) id: vec3<u32>) {
