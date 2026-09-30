@@ -27,8 +27,10 @@ namespace ClearSkies.Engine.ECS;
 /// budget is full, the queue stops; and if the next queued column is nearer than the farthest loaded one (after
 /// the centre moved), the farthest is unloaded to make room. So the loaded world is always the nearest that fits.
 ///
-/// The fog (see <see cref="FogDistance"/>) sits at the nearest column still queued or loading, or else at the view
-/// distance: an island only partly loaded fades out where loading stopped instead of ending in a hard edge.
+/// The fog (see <see cref="FogDistance"/>) sits at the nearest column still queued or loading, or holding a chunk that
+/// is loaded but not drawn yet (not in the GPU store or not meshed), or else at the view distance: an island only
+/// partly loaded fades out where loading stopped instead of ending in a hard edge, and chunks appear behind the fog
+/// rather than popping in in front of it.
 /// </summary>
 public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 {
@@ -62,6 +64,11 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     /// <summary>Chunks unloaded at most per frame to make room: enough to keep up with flying, few enough that
     /// unloading doesn't stall a frame.</summary>
     private const int MaxEvictChunksPerFrame = 512;
+
+    /// <summary>Main-thread time eviction may take per frame (ms): unloading a chunk (saving it, disposing its entity,
+    /// releasing its storage) isn't free, and a full batch of chunks in one frame took ~14 ms. It stops after the column
+    /// that runs over, and carries on next frame; loading waits for the room meanwhile, which the fog covers.</summary>
+    private const double MaxEvictMsPerFrame = 2.0;
 
     /// <summary>Light bricks freed beyond what the next column needs, so the columns after it don't each wait a frame
     /// for their own eviction.</summary>
@@ -127,12 +134,16 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     /// <summary>Loaded columns, farthest first, as of the first eviction since the last rebuild; <see cref="_evictNext"/>
     /// is the next to consider. Columns loaded since then are nearer (the queue is closest first), so the order holds.</summary>
     private readonly List<(int x, int z)> _evictOrder = new();
+    private readonly HashSet<(int x, int z)> _evictColumns = new();
+    private long[] _evictKeys = Array.Empty<long>();
     private int _evictNext = -1; // -1: not built since the last rebuild
     private bool _full;
     private int _evictions;
 
     private float _fogDistance;
     private float _fogTarget;
+    // Chunks loaded but perhaps not drawn yet: until each is uploaded to the GPU store and meshed, the fog stays short of it.
+    private readonly List<ChunkPosition> _undrawn = new();
 
     private readonly List<ChunkPosition> _toUnload = new();
 
@@ -213,9 +224,11 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     }
 
     // CPU time of each step, for the debug panel: which one a hitch while streaming came from.
-    private const int ApplyStep = 0, UnloadStep = 1, QueueStep = 2, DispatchStep = 3, EvictStep = 4, FogStep = 5;
+    private const int ApplyStep = 0, UnloadStep = 1, QueueStep = 2, DispatchStep = 3, EvictStep = 4, FogStep = 5,
+                      EvictOrderStep = 6;
     private readonly StepTimer _steps = new("Adding finished columns", "Rebuild: unloading out of view",
-                                            "Rebuild: queueing columns", "Dispatching jobs", "Evicting far columns", "Fog") { Owner = "Chunk Loading" };
+                                            "Rebuild: queueing columns", "Dispatching jobs", "Evicting far columns", "Fog",
+                                            "Evicting: ordering columns") { Owner = "Chunk Loading" };
 
     public void Update(float dt)
     {
@@ -252,7 +265,11 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
                     continue;
                 }
                 // Dropped if the centre moved on while it generated, or an edit created the chunk meanwhile.
-                if (InView(pos.X, pos.Z) && !_staticVolume.IsLoaded(pos)) _staticVolume.AddChunk(pos, data, packed);
+                if (InView(pos.X, pos.Z) && !_staticVolume.IsLoaded(pos))
+                {
+                    _staticVolume.AddChunk(pos, data, packed);
+                    _undrawn.Add(pos);
+                }
             }
         }
         _steps.Lap(ApplyStep);
@@ -438,12 +455,14 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     /// <summary>Unloads the farthest loaded columns (not being loaded) that are more than a column farther than
     /// <paramref name="distSq"/> (so two columns at about the same distance don't keep swapping), until
     /// <paramref name="chunks"/> chunks and <paramref name="bricks"/> light bricks are freed, or
-    /// <see cref="MaxEvictChunksPerFrame"/> chunks. Their bricks count as free at once (GridStore.WorldBricksReleasing),
-    /// though the store releases them over the next frames.</summary>
+    /// <see cref="MaxEvictChunksPerFrame"/> chunks, or <see cref="MaxEvictMsPerFrame"/> of time. Their bricks count as
+    /// free at once (GridStore.WorldBricksReleasing), though the store releases them over the next frames.</summary>
     private void EvictFartherThan(long distSq, int chunks, int bricks)
     {
         if (_nothingToEvict) return;
+        long start = System.Diagnostics.Stopwatch.GetTimestamp();
         if (_evictNext < 0) BuildEvictOrder();
+        _steps.Lap(EvictOrderStep);
 
         float margin = MathF.Sqrt(distSq) + 1f;
         int freedChunks = 0, freedBricks = 0;
@@ -454,30 +473,40 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
                 _nothingToEvict = true;
                 return;
             }
-            var far = _evictOrder[_evictNext++];
-            if (_inFlight.ContainsKey(far)) continue;
+            var far = _evictOrder[_evictNext];
+            if (_inFlight.ContainsKey(far)) { _evictNext++; continue; }
+            // The time budget is checked per chunk: a column cut short stays next, and its unloaded chunks are
+            // skipped when it comes up again.
             int unloaded = 0;
             for (int layer = 0; layer < 64; layer++)
             {
                 var p = new ChunkPosition(far.x, _minY + layer, far.z);
                 if (!_staticVolume.IsLoaded(p)) continue;
+                if (System.Diagnostics.Stopwatch.GetElapsedTime(start).TotalMilliseconds >= MaxEvictMsPerFrame)
+                {
+                    if (unloaded > 0) _evictions++;
+                    return;
+                }
                 freedBricks += ChunkBricks(p);
                 Unload(p);
                 unloaded++;
+                freedChunks++;
             }
-            if (unloaded == 0) continue;
-            freedChunks += unloaded;
-            _evictions++;
+            _evictNext++;
+            if (unloaded > 0) _evictions++;
         }
     }
 
     private void BuildEvictOrder()
     {
-        var columns = new HashSet<(int x, int z)>();
-        foreach (var (p, _) in _staticVolume.All) columns.Add((p.X, p.Z));
+        _evictColumns.Clear();
+        foreach (var (p, _) in _staticVolume.All) _evictColumns.Add((p.X, p.Z));
         _evictOrder.Clear();
-        _evictOrder.AddRange(columns);
-        _evictOrder.Sort((a, b) => ColumnDistSq(b).CompareTo(ColumnDistSq(a)));
+        _evictOrder.AddRange(_evictColumns);
+        // Each column's distance once, farthest first (the comparison sort would compute it twice per comparison).
+        if (_evictKeys.Length < _evictOrder.Count) _evictKeys = new long[_evictOrder.Count * 2];
+        for (int i = 0; i < _evictOrder.Count; i++) _evictKeys[i] = -ColumnDistSq(_evictOrder[i]);
+        _evictKeys.AsSpan(0, _evictOrder.Count).Sort(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_evictOrder));
         _evictNext = 0;
     }
 
@@ -530,11 +559,41 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
                      : !_scanDone ? _fogTarget
                      : _viewDistance;
         foreach (var (x, z) in _inFlight.Keys) target = MathF.Min(target, ColumnDistance(centre, x, z));
+        PruneUndrawn();
+        target = MathF.Min(target, NearestUndrawn(centre));
         _fogTarget = target;
 
         float rate = target < _fogDistance ? 8f : 1f;
         _fogDistance += (target - _fogDistance) * (1f - MathF.Exp(-rate * dt));
         SkySettings.SetFogDistance(_fogDistance);
+    }
+
+    /// <summary>Forgets the chunks in <see cref="_undrawn"/> that no longer hold the fog back: drawn now (uploaded to
+    /// the GPU store and meshed) or unloaded. Whether a chunk is in the rendering layer isn't asked: a new chunk only
+    /// gets <see cref="Rendered"/> later in the frame (EntityPresenceSystem), and every chunk in view gets it.</summary>
+    private void PruneUndrawn()
+    {
+        for (int i = _undrawn.Count - 1; i >= 0; i--)
+        {
+            if (!IsUndrawn(_undrawn[i]))
+            {
+                _undrawn[i] = _undrawn[^1];
+                _undrawn.RemoveAt(_undrawn.Count - 1);
+            }
+        }
+    }
+
+    private bool IsUndrawn(ChunkPosition pos)
+        => _staticVolume.GetEntry(pos)?.Entity is { IsAlive: true } e
+           && (e.Has<NeedsGpuUploadFlag>() || e.Has<NeedsRemeshFlag>());
+
+    /// <summary>The distance to the nearest chunk in <see cref="_undrawn"/> (infinity if none): call
+    /// <see cref="PruneUndrawn"/> first.</summary>
+    private float NearestUndrawn(Vector3D<float> centre)
+    {
+        float nearest = float.PositiveInfinity;
+        foreach (var pos in _undrawn) nearest = MathF.Min(nearest, ColumnDistance(centre, pos.X, pos.Z));
+        return nearest;
     }
 
     /// <summary>Horizontal distance from the centre to the nearest point of chunk column (x, z).</summary>
@@ -553,6 +612,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
             SaveIfDirty(pos, entry);
         }
         _staticVolume.RemoveChunk(pos);
+        entry?.Data.Release(); // its arrays go to the next chunk to load
     }
 
     /// <summary>Writes every currently loaded chunk with unsaved edits to the chunk store. Called by autosave (inside its

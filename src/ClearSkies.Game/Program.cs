@@ -177,7 +177,9 @@ host.AddSystem(interpolation, SystemStage.Simulation); // records this tick's po
 // Moves the camera once a frame (not per tick) while flying; before the interpolation, which then draws it there.
 // --flight-test flies once the world has loaded, then quits.
 bool flightTest = args.Contains("--flight-test");
-host.AddSystem(new StreamingFlightTest(host, flightTest, flightTest ? () => host.Window.Native.Close() : null),
+var spawnView = HeartSpawn(seed);
+host.AddSystem(new StreamingFlightTest(host, staticVolume, gridStore, flightTest, flightTest ? () => host.Window.Native.Close() : null,
+                                       spawnView is { } sv ? (sv.Yaw, sv.Pitch) : null),
                SystemStage.Frame);
 // Per frame, after the ticks: draw between the last two ticks (children follow), then stream terrain around the view.
 host.AddSystem(gridPilot, SystemStage.Frame); // puts the camera under a piloted grid...
@@ -226,12 +228,13 @@ if (camArg >= 0 && camArg + 1 < args.Length)
 var camSpawn = TestScene.Build(host, commands, playerId, playerName, saveDb.ReadPlayer(playerId), cameraOverride, HeartSpawn(seed));
 
 // Spawn: over a wide, flat stretch of plains 18 km east of the origin (found by scanning seed 1337 for flat, well-
-// covered lowland), 60 blocks above the terrain surface there (which no piece's top reaches), looking north across it.
+// covered lowland), 60 blocks above the terrain surface there (which no piece's top reaches), looking along -Z, where
+// land fills the view out to 450 blocks (toward +Z it covers about half). --flight-test flies this way from here.
 static (Vector3D<float> Position, float Yaw, float Pitch)? HeartSpawn(ulong seed)
 {
     const float x = -825f, z = -1000f;
     float y = ContinentTerrain.For(seed).Height(x, z) + 60f;
-    return (new Vector3D<float>(x, y, z), MathF.PI, -0.15f);
+    return (new Vector3D<float>(x, y, z), 0f, -0.15f);
 }
 
 // Ray-traced lighting prototype test ship (plan doc, task 4): a small solid hull with a Lamp exposed on
