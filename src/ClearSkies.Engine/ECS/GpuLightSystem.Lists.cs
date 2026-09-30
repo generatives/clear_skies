@@ -56,7 +56,7 @@ public sealed partial class GpuLightSystem
             _listWords[_listCount++] = BitConverter.SingleToUInt32Bits(l.Color.X);
             _listWords[_listCount++] = BitConverter.SingleToUInt32Bits(l.Color.Y);
             _listWords[_listCount++] = BitConverter.SingleToUInt32Bits(l.Color.Z);
-            _listWords[_listCount++] = 0u;
+            _listWords[_listCount++] = (uint)(l.Open | (l.Grid << 6));
 
             var (a, b) = LampReach(l);
             int x0 = FloorDiv(a.X), y0 = FloorDiv(a.Y), z0 = FloorDiv(a.Z);

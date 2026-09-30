@@ -8,6 +8,18 @@ namespace ClearSkies.Engine.Rendering;
 /// from their offsets and sizes.</summary>
 public sealed class GpuMesh : IDisposable
 {
+    /// <summary>Bytes held by every mesh not yet disposed, and the wireframe indices' share of them (for reports).</summary>
+    public static long LiveBytes => Interlocked.Read(ref _liveBytes);
+    public static long LiveWireframeBytes => Interlocked.Read(ref _liveWireBytes);
+    private static long _liveBytes, _liveWireBytes;
+    private bool _disposed;
+
+    private void Count(int sign)
+    {
+        Interlocked.Add(ref _liveBytes, sign * (long)(VertexBytes + IndexBytes + WireframeBytes));
+        Interlocked.Add(ref _liveWireBytes, sign * (long)WireframeBytes);
+    }
+
     public GpuBuffer VertexBuffer        { get; }
     public GpuBuffer IndexBuffer         { get; }
     public GpuBuffer WireframeBuffer     { get; }
@@ -35,6 +47,7 @@ public sealed class GpuMesh : IDisposable
         VertexBytes    = vertexBuffer.SizeBytes;
         IndexBytes     = indexBuffer.SizeBytes;
         WireframeBytes = wireframeBuffer.SizeBytes;
+        Count(1);
     }
 
     /// <summary>A mesh packed in one buffer: <paramref name="vertexBytes"/> of vertices, then the indices, then the
@@ -51,10 +64,14 @@ public sealed class GpuMesh : IDisposable
         IndexBytes      = indexCount * size;
         WireframeOffset = IndexOffset + IndexBytes;
         WireframeBytes  = wireframeIndexCount * size;
+        Count(1);
     }
 
     public void Dispose()
     {
+        if (_disposed) return;
+        _disposed = true;
+        Count(-1);
         VertexBuffer.Dispose();
         if (IndexBuffer != VertexBuffer) IndexBuffer.Dispose();
         if (WireframeBuffer != VertexBuffer && WireframeBuffer != IndexBuffer) WireframeBuffer.Dispose();

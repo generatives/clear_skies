@@ -58,7 +58,9 @@ public sealed class ViewSystems : IDisposable
     public void AddFlying(NetSession net)
     {
         bool flightTest = _world.Options.FlightTest;
-        _host.AddSystem(new StreamingFlightTest(_host, flightTest, flightTest ? () => _host.Quit() : null),
+        var spawn = WorldSpawn.For(_world.Seed);
+        _host.AddSystem(new StreamingFlightTest(_host, _world.StaticVolume, _view.GridStore, flightTest,
+                                                flightTest ? () => _host.Quit() : null, (spawn.Yaw, spawn.Pitch)),
                         SystemStage.Frame);
         _host.AddSystem(Pilot, SystemStage.Frame);
         Pilot.Disabled = () => net.OthersConnected;
