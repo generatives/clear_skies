@@ -1,6 +1,5 @@
 using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Persistence;
-using ClearSkies.Game.Startup.Systems;
 using ClearSkies.Net.Session;
 using ClearSkies.Net.Transport;
 
@@ -42,7 +41,8 @@ public sealed class WorldSave : IDisposable
 /// <summary>
 /// Hosting a world from its save: the host session deciding everything (with <paramref name="transport"/> off,
 /// nobody can join), entity IDs from the save, players known by the save, and the save's streaming and autosave
-/// (<see cref="Persistence"/>, which the game puts in the tick after the local player's input, if any).
+/// (<see cref="Streaming"/> and <see cref="Saver"/>, which the game puts early in the tick, after the local player's
+/// input if any).
 /// </summary>
 public sealed class Hosting : IDisposable
 {
@@ -51,18 +51,23 @@ public sealed class Hosting : IDisposable
         // Entity IDs come in blocks from the save's next free ID, so they never repeat across sessions.
         var ids = new EntityIdAllocator(save.Database.NextFreeId);
         world.Registry.RequestBlock = ids.NextBlock;
-        Persistence = new PersistenceSystems(world, save.Database, ids);
-        Players = new SavedPlayers(save.Database, Persistence.Saver, save.Seed);
+        // Entities load within 1,000 blocks of a player and unload past 1,100, written to the save as they go; everything
+        // is autosaved every 5 minutes and on exit, in one transaction.
+        var index = new StoredEntityIndex(save.Database.ReadEntityIndex());
+        Saver = new WorldSaver(world.Host.World, save.Database, index, world.Commands, ids) { SaveChunks = world.ChunkLoad.SaveAllDirty };
+        Streaming = new EntityStreamingSystem(world.Host.World, save.Database, index, world.Registry, world.Commands, Saver);
+        Players = new SavedPlayers(save.Database, Saver, save.Seed);
         Net = new HostSession(transport, world.Session, world.Commands, world.Registry, world.Host.World, world.Host.Clock, ids,
                               save.Seed, GenerationChecksum.Compute(), Players);
     }
 
     public HostSession Net { get; }
-    public PersistenceSystems Persistence { get; }
+    public EntityStreamingSystem Streaming { get; }
+    public WorldSaver Saver { get; }
     public SavedPlayers Players { get; }
 
     /// <summary>Saves everything, in one transaction (on exit).</summary>
-    public void SaveAll() => Persistence.Saver.SaveAll();
+    public void SaveAll() => Saver.SaveAll();
 
     public void Dispose() => Net.Dispose();
 }
