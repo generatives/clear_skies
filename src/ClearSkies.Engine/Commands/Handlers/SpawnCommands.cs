@@ -141,17 +141,20 @@ public sealed class SpawnGridHandler : SpawnHandler<GridDescription, DynamicGrid
 
 /// <summary>Spawns players (at startup, and for each player joining). The host owns and simulates every player; the
 /// spawn's owner is who plays them (<see cref="Player.ControllingPeer"/>), whose machine predicts them. Players played
-/// elsewhere are drawn with <see cref="PlayerModel"/>, where there's one (not headless).</summary>
+/// elsewhere are drawn with <see cref="PlayerModel"/>, where there's one (not headless). The local player gets the active
+/// camera at their eye, if it's attached to nothing (see <see cref="EyeSystem"/>).</summary>
 public sealed class SpawnPlayerHandler : SpawnHandler<PlayerDescription, Player>
 {
     private readonly PhysicsWorld _physics;
     private readonly PlayerModel? _model;
+    private readonly EntitySet _looseCameras;
 
     public SpawnPlayerHandler(World world, EntityRegistry registry, Session session, PhysicsWorld physics, PlayerModel? model = null)
         : base(world, registry, session)
     {
         _physics = physics;
         _model = model;
+        _looseCameras = world.GetEntities().With<CameraComponent>().Without<Parent>().AsSet();
     }
 
     public override ushort Id => CommandIds.SpawnPlayer;
@@ -188,6 +191,9 @@ public sealed class SpawnPlayerHandler : SpawnHandler<PlayerDescription, Player>
         if (ship.IsAlive && player.Has<Support>())
             (player.Get<Support>().Supporter, player.Get<Support>().LocalPosition) = (ship, d.LocalPosition);
         if (!controlledHere && _model is not null) player.Set(_model.Create());
+        if (controlledHere)
+            foreach (var camera in _looseCameras.GetEntities().ToArray())
+                if (camera.Get<CameraComponent>().Active) { EyeSystem.Attach(camera, player); break; }
         return player;
     }
 
