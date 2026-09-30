@@ -65,6 +65,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
         _ecsWorld = ecsWorld;
         _dirtyChunks = ecsWorld.GetEntities().With<Chunk>().With<Transform>().With<NeedsRemeshFlag>().With<Rendered>().AsSet();
         _meshedChunks = ecsWorld.GetEntities().With<Chunk>().With<ChunkRenderData>().AsSet();
+        _unrendered = ecsWorld.GetEntities().With<Chunk>().WhenRemoved<Rendered>().AsSet();
         _cameras = ecsWorld.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
         _renderer = renderer;
         _blockModels = blockModels;
@@ -72,6 +73,26 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
         _meshers  = new ThreadLocal<GreedyMesher>(() => new GreedyMesher(atlas));
 
         _ecsWorld.SubscribeEntityDisposed(EntityDisposed);
+    }
+
+    private readonly EntitySet _unrendered;
+
+    /// <summary>Chunks no longer drawn (their grid or chunk lost <see cref="Rendered"/>) give up their meshes. Without a
+    /// mesh they're out of date, so they're flagged: that's what gets them meshed again if they're drawn again. Nothing
+    /// is meshed meanwhile, because only drawn chunks are (<c>_dirtyChunks</c> requires Rendered).</summary>
+    private void ReleaseUnrendered()
+    {
+        foreach (var e in _unrendered.GetEntities().ToArray())
+        {
+            if (e.Has<Rendered>()) continue; // back again already
+            if (e.Has<ChunkRenderData>())
+            {
+                if (e.Get<ChunkRenderData>().Mesh is { } mesh) _removed.Add(mesh);
+                e.Remove<ChunkRenderData>();
+            }
+            e.Set<NeedsRemeshFlag>();
+        }
+        _unrendered.Complete();
     }
 
     private void EntityDisposed(in Entity e)
@@ -82,6 +103,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
 
     public void Update(float dt)
     {
+        ReleaseUnrendered();
         long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
         ApplyResults();
         long t1 = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -199,6 +221,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
 
                 if (!entity.IsAlive) continue; // unloaded while meshing
                 if (!entity.Has<Chunk>()) continue; // unloaded while meshing
+                if (!entity.Has<Rendered>()) { entity.Set<NeedsRemeshFlag>(); continue; } // no longer drawn
 
                 var chunk = entity.Get<Chunk>();
                 var entry = chunk.Entry;

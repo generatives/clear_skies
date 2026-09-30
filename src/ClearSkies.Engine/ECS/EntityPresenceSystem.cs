@@ -73,9 +73,13 @@ public sealed class EntityPresenceSystem : ISystem, IDebugUiSystem
         _rangeOffsets = offsets.ToArray();
     }
 
-    /// <summary>How far away grids and players are drawn. Until rendering systems can release a grid's GPU resources
-    /// (S5) this is unlimited, so nothing ever loses <see cref="Rendered"/>.</summary>
-    public float RenderDistance { get; set; } = float.PositiveInfinity;
+    /// <summary>How far away grids and players are drawn: as far as the terrain (<see cref="ViewDistance"/>), up to
+    /// <see cref="RenderDistanceLimit"/>.</summary>
+    public float RenderDistance => MathF.Min(ViewDistance, RenderDistanceLimit);
+
+    /// <summary>The furthest grids and players are drawn at any view distance (e.g. the entity load window, past which
+    /// there's nothing to draw). Unlimited unless set.</summary>
+    public float RenderDistanceLimit { get; set; } = float.PositiveInfinity;
 
     /// <summary>Other players are servo followers within this distance of the local player: the load window.</summary>
     public float LoadRange { get; set; } = 1000f;
@@ -85,6 +89,10 @@ public sealed class EntityPresenceSystem : ISystem, IDebugUiSystem
 
     /// <summary>How far the local player's terrain is drawn (horizontal).</summary>
     public float ViewDistance { get; set; }
+
+    /// <summary>Whether the terrain around a point has loaded with colliders. A grid owned here only gets a body once
+    /// it has, so nothing loaded from storage falls through the world. Null: always ready.</summary>
+    public Func<Vector3, bool>? TerrainReady { get; set; }
 
     public void Update(float dt)
     {
@@ -125,7 +133,12 @@ public sealed class EntityPresenceSystem : ISystem, IDebugUiSystem
 
         // Physics.
         PhysicsMode? mode = null;
-        if (owned) mode = PhysicsMode.Simulated;
+        if (owned)
+        {
+            bool ready = isPlayer || e.Has<PhysicsPresence>() || TerrainReady is null ||
+                         TerrainReady(ToNumerics(e.Get<Transform>().Position));
+            if (ready) mode = PhysicsMode.Simulated;
+        }
         else if (isPlayer && Within(distance, LoadRange, e.Has<PhysicsPresence>())) mode = PhysicsMode.ServoFollower;
         else if (!isPlayer && Within(distance, FollowerGridRange, e.Has<PhysicsPresence>())) mode = PhysicsMode.KinematicFollower;
         if (mode is { } m)
@@ -229,6 +242,7 @@ public sealed class EntityPresenceSystem : ISystem, IDebugUiSystem
     public void DrawDebugUi()
     {
         ImGui.Text($"Session: {_session.Role}, {_session.LocalPeer}");
+        ImGui.Text($"Entity render distance: {RenderDistance:0} (view distance {ViewDistance:0}, limit {RenderDistanceLimit:0})");
         ImGui.Text($"Terrain chunks with colliders: {_terrainColliders.Count}   Interests: {_interests.Count}");
         foreach (ref readonly Entity e in _roots.GetEntities())
         {

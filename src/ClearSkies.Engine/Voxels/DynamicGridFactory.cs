@@ -1,62 +1,75 @@
 using ClearSkies.Engine.ECS;
+using ClearSkies.Engine.Entities;
+using ClearSkies.Engine.Physics;
+using ClearSkies.Engine.Physics.Support;
 using DefaultEcs;
 using Silk.NET.Maths;
-using PhysVec = System.Numerics.Vector3;
 
 namespace ClearSkies.Engine.Voxels;
 
-/// <summary>Helpers for spawning dynamic voxel grids.</summary>
+/// <summary>Builds grid entities from descriptions. A construction helper for SpawnGridHandler, the only caller: to
+/// create a grid, send a <c>Spawn&lt;GridDescription&gt;</c> command.</summary>
 public static class DynamicGridFactory
 {
     /// <summary>
-    /// Spawns a grid from an arbitrary set of grid-local voxels, centred at <paramref name="spawnWorld"/>.
-    /// Its chunks mesh, light and get a body automatically (ChunkMeshSystem/GpuLightSystem/PhysicsBodySystem),
-    /// and it becomes the Selected Grid.
-    ///
-    /// The grid's Transform is its block space, placed so the centre of the voxels' bounding box lands on
-    /// <paramref name="spawnWorld"/>. PhysicsBodySystem then puts the body at the centre of mass within that space,
-    /// which moves neither the Transform nor the blocks.
+    /// Creates a grid with entity ID <paramref name="id"/> from <paramref name="description"/>. Its chunks mesh,
+    /// light and get a body once its presence layers are decided (ChunkMeshSystem, GpuLightSystem, PhysicsBodySystem).
+    /// The grid's Transform (its block space) is the description's pose, so the grid stands exactly where it was
+    /// described; PhysicsBodySystem then puts its body at the centre of mass within it.
     /// </summary>
-    public static void SpawnFromVoxels(
-        World world, GridSelection selection,
-        PhysVec spawnWorld, IEnumerable<(int X, int Y, int Z, BlockId Id, BlockOrientation Orientation)> voxels)
+    public static Entity Create(World world, EntityId id, GridDescription description)
     {
-        // Defensive; saved files shouldn't contain air entries.
-        var solid = voxels.Where(v => v.Id != BlockId.Air).ToList();
-
-        var centre = BoundsCentre(solid);
         var entity = world.CreateEntity();
-        entity.Set(new DynamicGrid());
-        var t = Transform.Identity;
-        t.Position = new Vector3D<float>(spawnWorld.X, spawnWorld.Y, spawnWorld.Z) - centre;
-        entity.Set(t);
-
+        entity.Set(new DynamicGrid { Locked = description.Locked });
+        var b = description.Body;
+        entity.Set(new Transform { Position = PhysicsConv.ToSilk(b.Position), Rotation = PhysicsConv.ToSilk(b.Rotation), Scale = Vector3D<float>.One });
+        entity.Set(id);
         var volume = new ChunkVolume(entity, world);
         entity.Set(new ChunkGrid() { Volume = volume });
-        foreach (var (x, y, z, id, orientation) in solid)
-            volume.SetBlock(x, y, z, id, orientation);
-        selection.Select(entity);
+        entity.Set<OwnPresence>();
+        entity.Set<Supportable>();
+        foreach (var v in description.Voxels) volume.SetBlock(v.X, v.Y, v.Z, v.Id, v.Orientation);
+        entity.Set(description.Controls);
+        entity.Set(new BodyStateOverride { LinearVelocity = b.LinearVelocity, AngularVelocity = b.AngularVelocity });
+        return entity;
     }
 
-    /// <summary>Spawns a grid containing a single block at local (0,0,0) whose centre is placed at
-    /// <paramref name="spawnWorld"/>.</summary>
-    public static void SpawnSingleBlock(
-        World world, GridSelection selection,
-        PhysVec spawnWorld, BlockId block)
-        => SpawnFromVoxels(world, selection, spawnWorld, new[] { (0, 0, 0, block, BlockOrientation.Upright) });
-
-    /// <summary>Centre of the voxels' bounding box (each voxel spans [v, v+1]), or zero if there are none.</summary>
-    private static Vector3D<float> BoundsCentre(List<(int X, int Y, int Z, BlockId Id, BlockOrientation Orientation)> voxels)
+    /// <summary>A live grid's description: its blocks, controls, lock, pose and velocities (from its body if it
+    /// has one, else its Transform).</summary>
+    public static GridDescription Describe(Entity entity, PhysicsWorld physics)
     {
-        if (voxels.Count == 0) return Vector3D<float>.Zero;
-        int nx = int.MaxValue, ny = int.MaxValue, nz = int.MaxValue;
-        int xx = int.MinValue, xy = int.MinValue, xz = int.MinValue;
-        foreach (var (x, y, z, _, _) in voxels)
+        var volume = entity.Get<ChunkGrid>().Volume;
+        var d = new GridDescription
         {
-            nx = System.Math.Min(nx, x); xx = System.Math.Max(xx, x);
-            ny = System.Math.Min(ny, y); xy = System.Math.Max(xy, y);
-            nz = System.Math.Min(nz, z); xz = System.Math.Max(xz, z);
+            Voxels = GridSerializer.Voxels(volume),
+            Locked = entity.Get<DynamicGrid>().Locked,
+            Controls = entity.Has<ShipControls>() ? entity.Get<ShipControls>() : default,
+        };
+        if (entity.Has<PhysicsBodyComponent>())
+        {
+            ref readonly var pb = ref entity.Get<PhysicsBodyComponent>();
+            var body = pb.Body;
+            var (p, q) = physics.GetBodyPose(body);
+            d.Body = new BodyState { Position = PhysicsConv.ToBepu(pb.EntityPosition(p, q)), Rotation = q,
+                LinearVelocity = physics.GetBodyLinearVelocity(body), AngularVelocity = physics.GetBodyAngularVelocity(body) };
         }
-        return new Vector3D<float>(nx + xx + 1, ny + xy + 1, nz + xz + 1) * 0.5f;
+        else
+        {
+            ref readonly var t = ref entity.Get<Transform>();
+            d.Body = new BodyState { Position = PhysicsConv.ToBepu(t.Position), Rotation = PhysicsConv.ToBepu(t.Rotation) };
+            if (entity.Has<BodyStateOverride>())
+                (d.Body.LinearVelocity, d.Body.AngularVelocity) = (entity.Get<BodyStateOverride>().LinearVelocity, entity.Get<BodyStateOverride>().AngularVelocity);
+        }
+
+        return d;
     }
+}
+
+/// <summary>A body state to give a grid's body once it has one (or straight away if it does): the pose from its
+/// Transform, and these velocities. Set when a grid is spawned from a description; PhysicsBodySystem
+/// applies and removes it.</summary>
+public struct BodyStateOverride
+{
+    public System.Numerics.Vector3 LinearVelocity;
+    public System.Numerics.Vector3 AngularVelocity;
 }
