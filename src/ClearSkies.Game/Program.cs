@@ -5,6 +5,7 @@ using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Physics.Support;
 using ClearSkies.Engine.Generation;
+using ClearSkies.Engine.Persistence;
 using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Rendering.WebGpu;
 using ClearSkies.Engine.Ui;
@@ -39,12 +40,24 @@ host.Renderer.LoadTextureAtlas(
     Path.Combine(AppContext.BaseDirectory, "Resources", "spritesheet_tiles.png"),
     Path.Combine(AppContext.BaseDirectory, "Resources", "spritesheet_tiles.xml"));
 
+// The world's save: Saves/Worlds/<name>.db (--world <name>, default "Default"). A new world's seed is 1337 unless
+// --seed <n> says otherwise; after that it's whatever the save says.
+string ArgValue(string name) { int i = Array.IndexOf(args, name); return i >= 0 && i + 1 < args.Length ? args[i + 1] : ""; }
+string worldName = ArgValue("--world") is { Length: > 0 } w ? w : "Default";
+var saveDb = SaveDatabase.Open(SaveDatabase.PathFor(worldName));
+bool newWorld = saveDb.Seed is null;
+ulong seed = saveDb.Seed ?? (ulong.TryParse(ArgValue("--seed"), out var seedArg) ? seedArg : 1337UL);
+if (newWorld) saveDb.Seed = seed;
+Console.WriteLine($"[save] world '{worldName}' ({(newWorld ? "new" : "loaded")}), seed {seed}");
+// The local player: known by name (this machine's user name), which the save turns into a player ID.
+string playerName = Environment.UserName;
+var playerId = saveDb.PlayerFor(playerName);
+
 // Session: single-player is a host session with nobody connected. Entity IDs and owners exist, all local.
 var session = Session.SinglePlayer();
 var registry = new EntityRegistry(host.World);
-var idAllocator = new EntityIdAllocator();
+var idAllocator = new EntityIdAllocator(saveDb.NextFreeId); // IDs never repeat across sessions
 registry.RequestBlock = idAllocator.NextBlock;
-using var gridNetworking = new GridNetworking(host.World, registry, session);
 
 // The static world is a volume like any other, with an identity Transform (set by ChunkVolume), and a
 // reserved entity ID. Its chunks each decide their own presence layers (see EntityPresenceSystem).
@@ -55,7 +68,6 @@ staticVolumeEntity.Set(EntityRegistry.WorldVolume);
 staticVolumeEntity.Set(session.LocalOwner());
 staticVolumeEntity.Set<Rendered>();
 
-ulong seed = 1337;
 // Model blocks' glTF models (BlockDef.Model paths are relative to Resources/Models — see the csproj's link of
 // the blockbench folder), loaded on first use.
 using var blockModels = new BlockModelLibrary(host.Renderer, Path.Combine(AppContext.BaseDirectory, "Resources", "Models"));
@@ -80,14 +92,22 @@ host.AddSystem(inputSample, SystemStage.Input); // latches the frame's input
 var interpolation = new TickInterpolationSystem(host.World, host.Time);
 var hierarchy = new HierarchyTransformSystem(host.World);
 host.AddSystem(hierarchy, SystemStage.Simulation);
-host.AddSystem(inputSample, SystemStage.Simulation); // ...and hands it to the tick
+
+host.AddSystem(inputSample, SystemStage.Simulation);
 
 // Commands: every discrete change goes through a registered handler, applied at one point in the tick. Single-player
 // is a host with nobody connected, so every command's authority is here and it applies in the tick it was sent.
 var commands = new CommandSystem(session, registry, () => host.Time.Tick);
 var blockEntities = new BlockEntities(host.World, registry);
 var editLimits = new EditLimits();
-GameCommands.RegisterAll(commands, blockEntities, editLimits, registry, host.Physics);
+GameCommands.RegisterAll(commands, host.World, session, blockEntities, editLimits, registry, host.Physics, gridSelection);
+
+// Persistence (the host's): entities load within 1,000 blocks of a player and unload past 1,100, written to the save
+// as they go; everything is autosaved every 5 minutes and on exit, in one transaction.
+var storedIndex = new StoredEntityIndex(saveDb.ReadEntityIndex());
+var worldSaver = new WorldSaver(host.World, saveDb, storedIndex, commands, idAllocator);
+host.AddSystem(new EntityStreamingSystem(host.World, saveDb, storedIndex, registry, commands, worldSaver), SystemStage.Simulation);
+host.AddSystem(worldSaver, SystemStage.Simulation);
 
 var physicsBody = new PhysicsBodySystem(host.World, host.Physics);
 
@@ -114,7 +134,7 @@ SkySettings.CloudSeaAltitude = HeartGrid.CloudSeaAltitude; // below its lowest i
 var gridStore = new GridStore(host.Context, (int)((long)LightBudgetMb * 1024 * 1024 / GridStore.SlotBytes),
                               ChunkLoadSystem.WorldIndexDim(ViewDistance));
 var chunkLoadSystem = new ChunkLoadSystem(host.World, staticVolume, gridStore, generatorFactory,
-                                          ViewDistance, MinChunkY, "Hearts16");
+                                          ViewDistance, MinChunkY, new DatabaseChunkStore(saveDb));
 host.Renderer.AttachGridStore(gridStore);
 host.AddSystem(physicsBody, SystemStage.Simulation);
 
@@ -138,7 +158,14 @@ host.AddSystem(levers, SystemStage.Simulation);
 host.AddSystem(wheels, SystemStage.Simulation);
 var airshipFlight = new AirshipFlightSystem(host.World, host.Physics);
 host.AddSystem(airshipFlight, SystemStage.Simulation);
-var presence = new EntityPresenceSystem(host.World, session, staticVolume, ViewDistance);
+var presence = new EntityPresenceSystem(host.World, session, staticVolume, ViewDistance)
+{
+    // Entities are drawn as far as the terrain, but no further than the load window; a grid owned here gets a body
+    // once the terrain around it has loaded with colliders, so nothing loaded from the save falls through the world.
+    RenderDistanceLimit = EntityStreamingSystem.LoadWindow,
+    TerrainReady = p => chunkLoadSystem.IsTerrainLoaded(new Vector3D<float>(p.X, p.Y, p.Z), 64f) &&
+                        physicsBody.CollidersReady(staticVolume, p, 64f),
+};
 host.AddSystem(presence, SystemStage.Simulation); // presence layers: bodies, drawing, terrain interest and colliders
 
 host.AddSystem(host.Physics, SystemStage.Simulation); // one step, once bodies/impulses for this tick are in
@@ -163,7 +190,7 @@ host.AddSystem(chunkLoadSystem, SystemStage.Frame);
 host.AddSystem(new BlockTargetSystem(host.World, host.Input, host.Renderer, blockActions, editLimits), SystemStage.Frame);
 host.AddSystem(new HudUi(ui, host.Input, blockActions, gridPilot, host.Renderer.Atlas,
                          Path.Combine(AppContext.BaseDirectory, "Resources", "Icons")), SystemStage.Frame); // crosshair, hotbar
-var gridPersistence = new GridPersistenceSystem(host.World, meshSystem, host.Physics, gridSelection);
+var gridPersistence = new GridPersistenceSystem(host.World, meshSystem, host.Physics, gridSelection, commands);
 host.AddSystem(gridPersistence, SystemStage.Frame);
 // The airship-related debug panels above (Pilot/Flight/Save-Load) drew into their own separate "Systems"
 // menu windows; combined here into one "Airship" window so they read as one feature.
@@ -198,7 +225,7 @@ float[]? cameraOverride = null;
 int camArg = Array.IndexOf(args, "--camera");
 if (camArg >= 0 && camArg + 1 < args.Length)
     cameraOverride = args[camArg + 1].Split(',').Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
-var camSpawn = TestScene.Build(host, registry, session, seed, cameraOverride, HeartSpawn(seed));
+var camSpawn = TestScene.Build(host, commands, playerId, playerName, saveDb.ReadPlayer(playerId), cameraOverride, HeartSpawn(seed));
 
 // Spawn: over a wide, flat stretch of plains 18 km east of the origin (found by scanning seed 1337 for flat, well-
 // covered lowland), 60 blocks above the terrain surface there (which no piece's top reaches), looking along -Z, where
@@ -213,32 +240,42 @@ static (Vector3D<float> Position, float Yaw, float Pitch)? HeartSpawn(ulong seed
 // Ray-traced lighting prototype test ship (plan doc, task 4): a small solid hull with a Lamp exposed on
 // top, placed near the camera's spawn so its shadow should visibly fall on the terrain below once the
 // ray-traced toggle is on and ships are wired into GpuLightSystem's volume slots. Offset from camera
-// spawn rather than re-deriving island geometry.
+// spawn rather than re-deriving island geometry. Only in a new world: after that it's in the save.
+if (newWorld)
 {
-    var shipVoxels = new List<(int X, int Y, int Z, BlockId Id, BlockOrientation Orientation)>();
+    var shipVoxels = new List<GridVoxel>();
     for (int x = 0; x < 5; x++)
     for (int z = 0; z < 5; z++)
     for (int y = 0; y < 2; y++)
-        shipVoxels.Add((x, y, z, BlockId.Wood, BlockOrientation.Upright));
-    shipVoxels.Add((2, 2, 2, BlockId.Lamp, BlockOrientation.Upright)); // exposed on the hull's roof, open air on 5 sides
+        shipVoxels.Add(new(x, y, z, BlockId.Wood, BlockOrientation.Upright));
+    shipVoxels.Add(new(2, 2, 2, BlockId.Lamp, BlockOrientation.Upright)); // exposed on the hull's roof, open air on 5 sides
     // The helm, on the roof one row from the stern, facing a player standing on the stern row looking at the bow
     // (-Z): the wheel, and a lever per axis — forward/back, starboard/port, and up/down (standing out of a post
     // towards the player, so it levers vertically) — plus a second forward/back lever out of the east wall, which
     // moves with the first.
-    shipVoxels.Add((2, 2, 3, BlockId.SteeringWheel, BlockOrientation.From(Direction.Up, Direction.South)));
-    shipVoxels.Add((1, 2, 3, BlockId.Lever, BlockOrientation.From(Direction.Up, Direction.South)));
-    shipVoxels.Add((3, 2, 3, BlockId.Lever, BlockOrientation.From(Direction.Up, Direction.East)));
-    shipVoxels.Add((4, 2, 2, BlockId.Wood, BlockOrientation.Upright));
-    shipVoxels.Add((4, 2, 3, BlockId.Lever, BlockOrientation.From(Direction.South, Direction.Up)));
-    shipVoxels.Add((5, 1, 2, BlockId.Lever, BlockOrientation.From(Direction.East, Direction.North)));
+    shipVoxels.Add(new(2, 2, 3, BlockId.SteeringWheel, BlockOrientation.From(Direction.Up, Direction.South)));
+    shipVoxels.Add(new(1, 2, 3, BlockId.Lever, BlockOrientation.From(Direction.Up, Direction.South)));
+    shipVoxels.Add(new(3, 2, 3, BlockId.Lever, BlockOrientation.From(Direction.Up, Direction.East)));
+    shipVoxels.Add(new(4, 2, 2, BlockId.Wood, BlockOrientation.Upright));
+    shipVoxels.Add(new(4, 2, 3, BlockId.Lever, BlockOrientation.From(Direction.South, Direction.Up)));
+    shipVoxels.Add(new(5, 1, 2, BlockId.Lever, BlockOrientation.From(Direction.East, Direction.North)));
 
     var shipSpawn = new Vector3(camSpawn.X + 10f, camSpawn.Y - 5f, camSpawn.Z + 45f);
-    DynamicGridFactory.SpawnFromVoxels(host.World, gridSelection, shipSpawn, shipVoxels);
+    commands.Send(new Spawn<GridDescription> { Description = GridDescription.FromVoxels(shipSpawn, shipVoxels), Select = true });
     Console.WriteLine($"[test-ship] spawned 5x2x5 hull + lamp at {shipSpawn}");
 }
 
+worldSaver.SaveChunks = chunkLoadSystem.SaveAllDirty;
+// Ctrl+C or a kill closes the window (on the main thread, next frame) as if it were closed by hand, so the world is
+// saved on the way out.
+bool quitRequested = false;
+void RequestQuit(System.Runtime.InteropServices.PosixSignalContext c) { c.Cancel = true; Volatile.Write(ref quitRequested, true); }
+using var sigInt = System.Runtime.InteropServices.PosixSignalRegistration.Create(System.Runtime.InteropServices.PosixSignal.SIGINT, RequestQuit);
+using var sigTerm = System.Runtime.InteropServices.PosixSignalRegistration.Create(System.Runtime.InteropServices.PosixSignal.SIGTERM, RequestQuit);
+host.AddSystem(new LambdaSystem(() => { if (Volatile.Read(ref quitRequested)) host.Window.Native.Close(); }), SystemStage.Input);
 host.Run();
 BackgroundWork.Stop(TimeSpan.FromSeconds(5)); // no chunk still loading or meshing while the store is freed
 
-chunkLoadSystem.SaveAllDirty(); // graceful-exit flush; unload/autosave already cover the running game
+worldSaver.SaveNow(); // everything, in one transaction, on exit
+saveDb.Dispose();
 gridStore.Dispose();

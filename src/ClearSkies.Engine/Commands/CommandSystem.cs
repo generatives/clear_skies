@@ -2,6 +2,7 @@ using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Gui;
 using ClearSkies.Engine.Serialization;
+using DefaultEcs;
 using ImGuiNET;
 
 namespace ClearSkies.Engine.Commands;
@@ -43,16 +44,23 @@ public sealed class CommandSystem : ISystem, IDebugUiSystem
     private readonly Func<uint> _tick;
     private uint _nextSeq = 1;
 
-    public CommandSystem(Session session, EntityRegistry registry, Func<uint> tick, ICommandRouter? router = null)
+    private readonly List<IDescriber> _describers = new();
+    private readonly EntitySet _describeRequests;
+    private readonly List<Entity> _unclaimed = new();
+
+    public CommandSystem(Session session, EntityRegistry registry, Func<uint> tick)
     {
         Session = session;
+        Descriptions = new DescriptionSink(this);
+        _describeRequests = registry.World.GetEntities().With<DescribeRequest>().AsSet();
         _registry = registry;
         _tick = tick;
-        Router = router ?? new LocalCommandRouter();
     }
 
     public Session Session { get; }
-    public ICommandRouter Router { get; set; }
+
+    /// <summary>Where commands, events and rejections go: this machine alone until a network session takes over.</summary>
+    public ICommandRouter Router { get; set; } = new LocalCommandRouter();
     public uint Tick => _tick();
     internal NetWriter Scratch { get; } = new();
     public CommandStats Stats { get; } = new();
@@ -69,8 +77,29 @@ public sealed class CommandSystem : ISystem, IDebugUiSystem
         _byId[handler.Id] = handler;
         _byType[handler.CommandType] = handler;
         handler.Owner = this;
+        if (handler is IDescriber describer)
+        {
+            _describers.Add(describer);
+            _describers.Sort((a, b) => a.Order.CompareTo(b.Order));
+        }
         return handler;
     }
+
+    /// <summary>Descriptions of entities with a <see cref="DescribeRequest"/>, made at the end of each tick.</summary>
+    public DescriptionSink Descriptions { get; }
+
+    /// <summary>Raised after each round of describing, once every description is out.</summary>
+    public event Action? DescribedAll;
+
+    /// <summary>Sends a command given in its wire form (a stored spawn command, for example), as if sent here.</summary>
+    public void SendSerialized(ushort handlerId, ReadOnlySpan<byte> payload)
+    {
+        Require(handlerId).SendSerialized(payload);
+    }
+
+    internal CommandHandler<T> HandlerOf<T>() where T : struct, ICommand =>
+        _byType.TryGetValue(typeof(T), out var h) ? (CommandHandler<T>)h
+            : throw new InvalidOperationException($"No handler is registered for {typeof(T).Name}.");
 
     public CommandHandlerBase? HandlerFor(ushort id) => _byId.GetValueOrDefault(id);
 
@@ -138,6 +167,24 @@ public sealed class CommandSystem : ISystem, IDebugUiSystem
         }
         _outgoingCommands.Clear();
         _outgoingSent = 0;
+
+        DescribeRequested();
+    }
+
+    /// <summary>Calls every describer in order, then removes every <see cref="DescribeRequest"/>.</summary>
+    public void DescribeRequested()
+    {
+        if (_describeRequests.Count == 0) { DescribedAll?.Invoke(); return; }
+        Descriptions.Reset();
+        foreach (var d in _describers) d.Describe(Descriptions);
+        _unclaimed.Clear();
+        foreach (ref readonly var e in _describeRequests.GetEntities()) _unclaimed.Add(e);
+        foreach (var e in _unclaimed)
+        {
+            if (!Descriptions.Claimed(e)) Console.WriteLine($"[describe] nothing describes entity {e} ({(e.Has<EntityId>() ? e.Get<EntityId>() : EntityId.None)})");
+            e.Remove<DescribeRequest>();
+        }
+        DescribedAll?.Invoke();
     }
 
     // ── bookkeeping used by the handlers ────────────────────────────────────
