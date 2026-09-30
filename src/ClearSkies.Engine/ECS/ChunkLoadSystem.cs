@@ -569,7 +569,8 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     }
 
     /// <summary>Forgets the chunks in <see cref="_undrawn"/> that no longer hold the fog back: drawn now (uploaded to
-    /// the GPU store and meshed), unloaded, or outside the rendering layer (which never draw).</summary>
+    /// the GPU store and meshed) or unloaded. Whether a chunk is in the rendering layer isn't asked: a new chunk only
+    /// gets <see cref="Rendered"/> later in the frame (EntityPresenceSystem), and every chunk in view gets it.</summary>
     private void PruneUndrawn()
     {
         for (int i = _undrawn.Count - 1; i >= 0; i--)
@@ -583,7 +584,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     }
 
     private bool IsUndrawn(ChunkPosition pos)
-        => _staticVolume.GetEntry(pos)?.Entity is { IsAlive: true } e && e.Has<Rendered>()
+        => _staticVolume.GetEntry(pos)?.Entity is { IsAlive: true } e
            && (e.Has<NeedsGpuUploadFlag>() || e.Has<NeedsRemeshFlag>());
 
     /// <summary>The distance to the nearest chunk in <see cref="_undrawn"/> (infinity if none): call
