@@ -14,55 +14,54 @@ namespace ClearSkies.Game.Startup;
 /// </summary>
 internal static class HostedGame
 {
-    public static void Run(EngineHost host, LaunchOptions options, LaggedTransport? transport)
+    public static void Run(WindowedEngineHost host, LaunchOptions options, LaggedTransport? transport)
     {
-        // The world's save: Saves/Worlds/<name>.db. A new world's seed is --seed's (1337 by default); after that it's the
-        // save's.
-        using var save = SaveDatabase.Open(SaveDatabase.PathFor(options.WorldName));
-        bool newWorld = save.Seed is null;
-        ulong seed = save.Seed ?? options.NewWorldSeed;
-        if (newWorld) save.Seed = seed;
-        Console.WriteLine($"[save] world '{options.WorldName}' ({(newWorld ? "new" : "loaded")}), seed {seed}");
+        using var save = WorldSave.Open(options);
+        using var view = new GameView(host, options);
+        var world = new GameWorld(host, options, Session.SinglePlayer(), save.Seed, save.Chunks, view.Budget, view.ChunkPreparer,
+                                  view.PlayerModel);
+        using var hosting = new Hosting(world, save, transport);
+        using var viewSystems = new ViewSystems(world, view);
+        var net = hosting.Net;
 
-        var session = Session.SinglePlayer();
-        using var world = new GameWorld(host, options, session, seed, new DatabaseChunkStore(save));
-        // Entity IDs come in blocks from the save's next free ID, so they never repeat across sessions.
-        var ids = new EntityIdAllocator(save.NextFreeId);
-        world.Registry.RequestBlock = ids.NextBlock;
-        var persistence = new PersistenceSystems(world, save, ids);
-        var players = new SavedPlayers(save, persistence.Saver, seed);
-        using var net = new HostSession(transport, session, world.Commands, world.Registry, host.World, host.Clock, ids, seed,
-                                        GenerationChecksum.Compute(), players);
-        world.AddSystems(net, persistence, transport);
+        viewSystems.AddInput();
+        world.AddTickStart(net);
+        viewSystems.AddTickInput();
+        hosting.Persistence.Add(host); // the save's streaming and autosave
+        world.AddTick(net);
+        viewSystems.AddFlying(net);
+        world.AddFrame();
+        viewSystems.AddInteraction(net, transport);
+        viewSystems.AddRender();
 
-        var spawn = WorldSpawn.For(seed);
+        var spawn = WorldSpawn.For(save.Seed);
         var camera = TestScene.AddCamera(host, spawn.Eye, spawn.Yaw, spawn.Pitch, options.Camera);
-        if (!options.Headless) // a dedicated server has no player of its own
-        {
-            var localPlayer = players.PlayerFor(options.PlayerName);
-            TestScene.SpawnLocalPlayer(world.Commands, localPlayer, options.PlayerName, players.Saved(localPlayer), camera);
-        }
-        if (newWorld) TestScene.SpawnTestShip(world.Commands, camera.Eye);
+        var players = hosting.Players;
+        var localPlayer = players.PlayerFor(options.PlayerName);
+        TestScene.SpawnLocalPlayer(world.Commands, localPlayer, options.PlayerName, players.Saved(localPlayer), camera);
+        if (save.IsNew) TestScene.SpawnTestShip(world.Commands, camera.Eye);
 
         using (new QuitOnSignal(host)) world.Run();
-        persistence.Saver.SaveAll(); // everything, in one transaction, on exit
+        hosting.SaveAll();
     }
 }
 
 /// <summary>Playing alone: a hosted game nobody can join.</summary>
 public static class SinglePlayerGame
 {
-    public static void Run(EngineHost host, LaunchOptions options) => HostedGame.Run(host, options, transport: null);
+    public static void Run(WindowedEngineHost host, LaunchOptions options) => HostedGame.Run(host, options, transport: null);
 }
 
 /// <summary>Hosting a game others can join, on <see cref="LaunchOptions.HostPort"/>.</summary>
 public static class HostGame
 {
-    public static void Run(EngineHost host, LaunchOptions options)
+    public static void Run(WindowedEngineHost host, LaunchOptions options) => HostedGame.Run(host, options, Listen(options));
+
+    /// <summary>Listens for players joining on <see cref="LaunchOptions.HostPort"/>.</summary>
+    public static LaggedTransport Listen(LaunchOptions options)
     {
         int port = options.HostPort!.Value;
-        var transport = new LaggedTransport(LiteNetTransport.Host(port));
         Console.WriteLine($"[net] hosting on port {port}");
-        HostedGame.Run(host, options, transport);
+        return new LaggedTransport(LiteNetTransport.Host(port));
     }
 }

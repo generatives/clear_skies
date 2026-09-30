@@ -34,7 +34,17 @@ System.Runtime.GCSettings.LatencyMode = System.Runtime.GCLatencyMode.SustainedLo
 }
 
 var options = LaunchOptions.Parse(args);
-using var host = new EngineHost(new EngineOptions("Clear Skies", 1280, 720, LogGpuErrors: true, Headless: options.Headless));
+if (options.Headless)
+{
+    // No window, GPU, input or UI: just the simulation and the network, on a timer.
+    using var headless = new EngineHost();
+    if (options.JoinAddress is not null) BotClientGame.Run(headless, options);
+    else if (options.HostPort is not null) DedicatedServerGame.Run(headless, options);
+    else Console.Error.WriteLine("--headless needs --host <port> (a dedicated server) or --join <address> (a bot).");
+    return;
+}
+
+using var host = new WindowedEngineHost(new EngineOptions("Clear Skies", 1280, 720, LogGpuErrors: true));
 if (options.JoinAddress is not null) ClientGame.Run(host, options);
 else if (options.HostPort is not null) HostGame.Run(host, options);
 else SinglePlayerGame.Run(host, options);

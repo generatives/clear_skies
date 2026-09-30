@@ -31,7 +31,6 @@ public static class TestScene
         var cam = host.World.CreateEntity();
         cam.Set(new Transform { Position = eye, Rotation = Quaternion<float>.CreateFromYawPitchRoll(yaw, pitch, 0f), Scale = Vector3D<float>.One });
         cam.Set(new CameraComponent { Camera = new Camera(), Active = true });
-        if (host.Input is { } input) input.CursorCaptured = false; // the F1 debug menu starts open, and F1 frees the cursor with it
         return (eye, yaw, pitch);
     }
 

@@ -7,7 +7,7 @@ using Xunit;
 
 namespace ClearSkies.Tests;
 
-/// <summary>Terrain streaming with no GPU store (headless).</summary>
+/// <summary>Terrain streaming with nothing drawn (headless): limited by a count of chunks.</summary>
 public class HeadlessStreamingTests
 {
     /// <summary>Stone below y = 0, air above.</summary>
@@ -20,7 +20,8 @@ public class HeadlessStreamingTests
                 data.Set(x, y, z, BlockId.Stone);
         }
 
-        public ulong ColumnLayers(int chunkX, int chunkZ, int minChunkY) => ulong.MaxValue;
+        /// <summary>The stone: the 8 layers streamed below y = 0 (bit 0 is layer minChunkY - 8).</summary>
+        public ulong ColumnLayers(int chunkX, int chunkZ, int minChunkY) => 0xFF;
     }
 
     private static DefaultEcs.Entity Interest(HeadlessScene scene, float x, float z, float radius, TerrainInterestKind kind)
@@ -47,8 +48,9 @@ public class HeadlessStreamingTests
         }
     }
 
-    private static ChunkLoadSystem Streaming(HeadlessScene scene, SaveDatabase db) =>
-        new(scene.World, scene.WorldVolume, store: null, () => new Flat(), viewDistance: 64, minChunkY: 0, new DatabaseChunkStore(db));
+    private static ChunkLoadSystem Streaming(HeadlessScene scene, SaveDatabase db, int maxChunks = 100_000) =>
+        new(scene.World, scene.WorldVolume, new ChunkCountBudget(maxChunks), () => new Flat(), viewDistance: 64, minChunkY: 0,
+            new DatabaseChunkStore(db));
 
     [Fact]
     public void WithNoViewNothingIsStreamed()
@@ -81,5 +83,25 @@ public class HeadlessStreamingTests
         player.Get<Transform>().Position = new Vector3D<float>(-5, 10, 5);
         Settle(load, 5);
         Assert.Equal(rebuilds + 1, load.Rebuilds);
+    }
+
+    [Fact]
+    public void TheBudgetLimitsWhatLoadsAndTheNearestIsKept()
+    {
+        using var scene = new HeadlessScene();
+        using var db = SaveDatabase.InMemory();
+        var unlimited = Streaming(scene, db);
+        var player = Interest(scene, 16, 16, 64, TerrainInterestKind.Full);
+        Settle(unlimited);
+        int all = unlimited.LoadedChunks;
+
+        using var scene2 = new HeadlessScene();
+        int max = all - 2 * 8; // two columns short of everything in view (a column is 8 chunks of stone)
+        var limited = Streaming(scene2, db, maxChunks: max);
+        Interest(scene2, 16, 16, 64, TerrainInterestKind.Full);
+        Settle(limited);
+        Assert.InRange(limited.LoadedChunks, max - 8, max);
+        Assert.True(limited.IsTerrainLoaded(new Vector3D<float>(16, 0, 16), 16)); // the nearest loaded first
+        Assert.False(limited.IsTerrainLoaded(new Vector3D<float>(16, 0, 16), 64));
     }
 }

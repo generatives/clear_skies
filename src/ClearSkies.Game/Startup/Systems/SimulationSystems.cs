@@ -2,15 +2,16 @@ using ClearSkies.Engine.Core;
 using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Persistence;
 using ClearSkies.Engine.Physics.Support;
+using ClearSkies.Net.Sync;
 using Silk.NET.Maths;
 
 namespace ClearSkies.Game.Startup.Systems;
 
 /// <summary>
-/// Gameplay and physics, once per 1/60 s tick (0 or more times a frame, see TickClock): input handed to the tick,
-/// movement, block actions, every command sent this tick, flight, presence layers, one physics step, and what came of
-/// it. Mouse-look runs per frame before the ticks; presses are collected per frame and handed to the next tick as the
-/// player's PlayerInput, which is all tick systems read. Creates the systems the other groups share too.
+/// Gameplay and physics, once per 1/60 s tick (0 or more times a frame, see TickClock): movement, block actions, every
+/// command sent this tick, flight, presence layers, one physics step, and what came of it. Tick systems read only the
+/// players' PlayerInput, which the view hands the tick (a local player's), or stays as it is. Creates the systems
+/// other groups share too.
 /// </summary>
 public sealed class SimulationSystems
 {
@@ -23,32 +24,24 @@ public sealed class SimulationSystems
         Interpolation = new TickInterpolationSystem(host.World, host.Time);
         Hierarchy = new HierarchyTransformSystem(host.World);
         PhysicsBody = new PhysicsBodySystem(host.World, host.Physics);
-        // Headless there's no input: players stand still, and nobody pilots.
-        if (host.Input is { } input)
-        {
-            InputSample = new InputSampleSystem(host.World, input, host.Time);
-            Pilot = new GridPilotSystem(host.World, input, host.Physics, w.StaticVolume, PhysicsBody, w.Commands);
-        }
         BlockActions = new BlockActionSystem(host.World, w.Commands, w.EditLimits, w.Selection);
         Flight = new AirshipFlightSystem(host.World, host.Physics);
+        RemoteBodies = new RemoteBodySystem(host.World, w.Registry, host.Clock);
     }
 
-    public InputSampleSystem? InputSample { get; }
     public TickInterpolationSystem Interpolation { get; }
     public HierarchyTransformSystem Hierarchy { get; }
     public PhysicsBodySystem PhysicsBody { get; }
-    public GridPilotSystem? Pilot { get; }
     public BlockActionSystem BlockActions { get; }
     public AirshipFlightSystem Flight { get; }
 
-    /// <summary>Early in the tick, after the network: hierarchy, and the frame's input handed to the tick.</summary>
-    public void AddInput()
-    {
-        _w.Host.AddSystem(Hierarchy, SystemStage.Simulation);
-        if (InputSample != null) _w.Host.AddSystem(InputSample, SystemStage.Simulation);
-    }
+    /// <summary>Bodies owned elsewhere, drawn from their snapshots about 100 ms behind.</summary>
+    public RemoteBodySystem RemoteBodies { get; }
 
-    /// <summary>The rest of the tick, after the save's streaming.</summary>
+    /// <summary>Early in the tick, after the network: the hierarchy.</summary>
+    public void AddStart() => _w.Host.AddSystem(Hierarchy, SystemStage.Simulation);
+
+    /// <summary>The rest of the tick, after the local player's input and the save's streaming.</summary>
     public void Add()
     {
         var host = _w.Host;
