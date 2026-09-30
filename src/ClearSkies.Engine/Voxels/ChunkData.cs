@@ -1,4 +1,5 @@
 using System;
+using ClearSkies.Engine.Core;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -62,8 +63,8 @@ public sealed class ChunkData
     public void Set(int x, int y, int z, BlockId id, BlockOrientation orientation)
     {
         int i = Index(x, y, z);
-        if (_blocks == null && id != _uniformBlock) _blocks = Filled(_uniformBlock);
-        if (_orientations == null && orientation != _uniformOrientation) _orientations = Filled(_uniformOrientation);
+        if (_blocks == null && id != _uniformBlock) _blocks = Filled(BlockPool, _uniformBlock);
+        if (_orientations == null && orientation != _uniformOrientation) _orientations = Filled(OrientationPool, _uniformOrientation);
         if (_blocks != null) _blocks[i] = id;
         if (_orientations != null) _orientations[i] = orientation;
         IsDirty = true;
@@ -87,40 +88,19 @@ public sealed class ChunkData
         }
     }
 
-    private static T[] Filled<T>(T value) where T : unmanaged
+    private static T[] Filled<T>(FixedArrayPool<T> pool, T value)
     {
-        var a = ChunkArrayPool<T>.Rent();
+        var a = pool.Rent();
         Array.Fill(a, value);
         return a;
     }
 
-    private static readonly ChunkArrayPool<BlockId> BlockPool = ChunkArrayPool<BlockId>.Shared;
-    private static readonly ChunkArrayPool<BlockOrientation> OrientationPool = ChunkArrayPool<BlockOrientation>.Shared;
-
-    /// <summary>Chunk-sized arrays from unloaded (or compacted) chunks, for the next chunks to load. While streaming,
-    /// as many chunks unload as load, so after a while nearly every chunk reuses an array instead of allocating one:
-    /// fewer allocations means fewer full collections, and those were the long pauses. New arrays go on the pinned
-    /// object heap, where a collection never copies them.</summary>
-    private sealed class ChunkArrayPool<T> where T : unmanaged
-    {
-        public static readonly ChunkArrayPool<T> Shared = new();
-        private const int MaxKept = 1024; // 32 MB of blocks; streaming needs far fewer spare at once
-        private readonly Stack<T[]> _free = new();
-
-        public static T[] Rent()
-        {
-            lock (Shared._free)
-                if (Shared._free.TryPop(out var a)) return a;
-            return GC.AllocateUninitializedArray<T>(Volume, pinned: true);
-        }
-
-        public void Return(T[]? a)
-        {
-            if (a == null) return;
-            lock (_free)
-                if (_free.Count < MaxKept) _free.Push(a);
-        }
-    }
+    // Chunk-sized arrays from unloaded (or compacted) chunks, for the next chunks to load. While streaming, as many
+    // chunks unload as load, so after a while nearly every chunk reuses an array instead of allocating one: fewer
+    // allocations means fewer full collections, and those were the long pauses. New arrays go on the pinned object
+    // heap, where a collection never copies them. 1024 kept is 32 MB of each; streaming needs far fewer spare at once.
+    private static readonly FixedArrayPool<BlockId> BlockPool = new(Volume, maxKept: 1024, pinned: true);
+    private static readonly FixedArrayPool<BlockOrientation> OrientationPool = new(Volume, maxKept: 1024, pinned: true);
 
     public static int Index(int x, int y, int z) => x + Size * (y + Size * z);
 
@@ -152,7 +132,7 @@ public sealed class ChunkData
     {
         if (bytes.Length != Volume)
             throw new ArgumentException($"Expected {Volume} bytes, got {bytes.Length}.", nameof(bytes));
-        _blocks ??= ChunkArrayPool<BlockId>.Rent();
+        _blocks ??= BlockPool.Rent();
         bytes.CopyTo(MemoryMarshal.Cast<BlockId, byte>(_blocks));
     }
 
@@ -160,7 +140,7 @@ public sealed class ChunkData
     {
         if (bytes.Length != Volume)
             throw new ArgumentException($"Expected {Volume} bytes, got {bytes.Length}.", nameof(bytes));
-        _orientations ??= ChunkArrayPool<BlockOrientation>.Rent();
+        _orientations ??= OrientationPool.Rent();
         for (int i = 0; i < bytes.Length; i++)
             _orientations[i] = BlockOrientation.FromByte(bytes[i]); // validated: a bad byte would index out of range
     }

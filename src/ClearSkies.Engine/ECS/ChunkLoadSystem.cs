@@ -565,6 +565,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
                      : !_scanDone ? _fogTarget
                      : _viewDistance;
         foreach (var (x, z) in _inFlight.Keys) target = MathF.Min(target, ColumnDistance(centre, x, z));
+        PruneUndrawn();
         target = MathF.Min(target, NearestUndrawn(centre));
         _fogTarget = target;
 
@@ -573,24 +574,30 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         SkySettings.SetFogDistance(_fogDistance);
     }
 
-    /// <summary>The distance to the nearest loaded chunk still waiting for its GPU upload or its first mesh (infinity if
-    /// none), forgetting those now drawn, unloaded, or outside the rendering layer (which never draw).</summary>
+    /// <summary>Forgets the chunks in <see cref="_undrawn"/> that no longer hold the fog back: drawn now (uploaded to
+    /// the GPU store and meshed), unloaded, or outside the rendering layer (which never draw).</summary>
+    private void PruneUndrawn()
+    {
+        for (int i = _undrawn.Count - 1; i >= 0; i--)
+        {
+            if (!IsUndrawn(_undrawn[i]))
+            {
+                _undrawn[i] = _undrawn[^1];
+                _undrawn.RemoveAt(_undrawn.Count - 1);
+            }
+        }
+    }
+
+    private bool IsUndrawn(ChunkPosition pos)
+        => _staticVolume.GetEntry(pos)?.Entity is { IsAlive: true } e && e.Has<Rendered>()
+           && (e.Has<NeedsGpuUploadFlag>() || e.Has<NeedsRemeshFlag>());
+
+    /// <summary>The distance to the nearest chunk in <see cref="_undrawn"/> (infinity if none): call
+    /// <see cref="PruneUndrawn"/> first.</summary>
     private float NearestUndrawn(Vector3D<float> centre)
     {
         float nearest = float.PositiveInfinity;
-        for (int i = _undrawn.Count - 1; i >= 0; i--)
-        {
-            var pos = _undrawn[i];
-            var e = _staticVolume.GetEntry(pos)?.Entity;
-            if (e is { IsAlive: true } entity && entity.Has<Rendered>()
-                && (entity.Has<NeedsGpuUploadFlag>() || entity.Has<NeedsRemeshFlag>()))
-            {
-                nearest = MathF.Min(nearest, ColumnDistance(centre, pos.X, pos.Z));
-                continue;
-            }
-            _undrawn[i] = _undrawn[^1];
-            _undrawn.RemoveAt(_undrawn.Count - 1);
-        }
+        foreach (var pos in _undrawn) nearest = MathF.Min(nearest, ColumnDistance(centre, pos.X, pos.Z));
         return nearest;
     }
 
