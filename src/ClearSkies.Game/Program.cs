@@ -146,7 +146,7 @@ host.AddSystem(inputSample, SystemStage.Simulation);
 
 // Commands: every discrete change goes through a registered handler, applied at one point in the tick. Single-player
 // is a host with nobody connected, so every command's authority is here and it applies in the tick it was sent.
-var commands = new CommandSystem(session, registry, () => host.Time.Tick);
+var commands = new CommandSystem(session, registry, () => host.Clock.Tick);
 var blockEntities = new BlockEntities(host.World, registry);
 var editLimits = new EditLimits();
 using var playerModel = new PlayerModel(host.Renderer); // other players, as boxes
@@ -229,17 +229,16 @@ host.AddSystem(new SupportSystem(host.World, host.Physics), SystemStage.Simulati
 host.AddSystem(interpolation, SystemStage.Simulation); // records this tick's poses
 
 // The network session, now the command system exists: a host (single-player: with the transport off) or a client.
-var hostClock = new HostTickClock(host.Time, host.Clock);
 if (joining)
 {
-    var client = new ClearSkies.Net.Session.ClientSession(transport!, welcome, session, commands, registry, host.World, hostClock,
+    var client = new ClearSkies.Net.Session.ClientSession(transport!, welcome, session, commands, registry, host.World, host.Clock,
         p => chunkLoadSystem.IsTerrainLoaded(new Vector3D<float>(p.X, p.Y, p.Z), 64f));
     client.Ended += reason => { Console.WriteLine($"[net] session ended: {reason}"); host.Window.Native.Close(); };
     net = client;
 }
 else
 {
-    var hostNet = new ClearSkies.Net.Session.HostSession(transport, session, commands, registry, host.World, hostClock, idAllocator, seed,
+    var hostNet = new ClearSkies.Net.Session.HostSession(transport, session, commands, registry, host.World, host.Clock, idAllocator, seed,
         generationChecksum, saveDb!.PlayerFor, playerId =>
         {
             // A returning player spawns where they left off; a new one at the spawn point.
@@ -267,7 +266,7 @@ else
 var bodySync = new ClearSkies.Net.Sync.BodySync(net, host.World, host.Physics);
 host.AddSystem(bodySync, SystemStage.Simulation); // snapshots of owned bodies, every second tick
 host.AddSystem(new ClearSkies.Net.Session.NetSendSystem(net), SystemStage.Simulation);
-var remoteBodies = new ClearSkies.Net.Sync.RemoteBodySystem(host.World, registry, hostClock);
+var remoteBodies = new ClearSkies.Net.Sync.RemoteBodySystem(host.World, registry, host.Clock);
 host.Gui.RegisterDebugUi(new ClearSkies.Net.Debug.NetDebugPanel(net, remoteBodies, transport));
 gridPilot.Disabled = () => net.OthersConnected; // pilot mode and flight tuning: single-player only
 

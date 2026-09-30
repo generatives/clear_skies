@@ -131,7 +131,7 @@ public sealed class ClientSession : NetSession
                 break;
             }
             case MessageKind.StateFrame:
-                Bodies?.ReceiveFrame(PeerId.Host, ref r);
+                Bodies?.ReceiveFrame(ref r);
                 break;
             case MessageKind.TimePong:
                 ClockSync.OnPong(TimePong.Read(ref r), NowMs);

@@ -167,7 +167,12 @@ public sealed class HostSession : NetSession
                 break;
             }
             case MessageKind.StateFrame:
-                Bodies?.ReceiveFrame(peer.Peer, ref r);
+                if (peer.State != PeerState.Joined) break;
+                Bodies?.ReceiveFrame(ref r);
+                // Clients only hear each other through the host: passed on straight away, as it came (with the tick
+                // it was taken on).
+                foreach (var other in Joined)
+                    if (other != peer) Transport?.Send(other.Connection, packet, Channel.Unreliable);
                 break;
             case MessageKind.IdBlockRequest:
             {
@@ -203,7 +208,11 @@ public sealed class HostSession : NetSession
 
     private void OnHello(RemotePeer peer, Hello hello)
     {
-        if (peer.State != PeerState.Connected) return;
+        if (peer.State != PeerState.Connected)
+        {
+            Console.WriteLine($"[net] ignoring a second hello from {peer.Name} ({peer.Peer}), already {peer.State}");
+            return;
+        }
         if (hello.Version != ProtocolVersion.Current) { Refuse(peer.Connection, $"Version mismatch: host {ProtocolVersion.Current}, you {hello.Version}"); return; }
         if (hello.GenerationChecksum != _checksum) { Refuse(peer.Connection, "World generation differs from the host's (different game build?)"); return; }
         var id = FreePeerId();

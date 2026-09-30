@@ -104,11 +104,10 @@ public sealed class SnapshotBuffer
                               b.LinearVelocity, (b.Flags & SnapshotFlags.HasLook) != 0);
         }
 
-        // After the last: extrapolate from its velocity, for a while.
+        // After the last: extrapolate from its velocity, for a while (a body at rest sends none, so stays put).
         var (tl, last) = _samples[^1];
         double ahead = System.Math.Min(renderTick - tl, MaxExtrapolationTicks);
         var s = From(last);
-        if ((last.Flags & SnapshotFlags.Sleeping) != 0) return s;
         return s with { Position = last.Position + last.LinearVelocity * (float)(ahead / 60.0) };
     }
 

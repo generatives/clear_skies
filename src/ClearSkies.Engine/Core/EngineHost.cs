@@ -173,7 +173,7 @@ public sealed class EngineHost : IDisposable
         int ticks = Clock.Advance(dt);
         for (int i = 0; i < ticks; i++)
         {
-            Time.Tick++;
+            Clock.Tick++;
             RunStage(SystemStage.Simulation, Time.TickSeconds);
         }
         Time.TicksLastFrame = ticks;
@@ -320,7 +320,7 @@ public sealed class EngineHost : IDisposable
 
             double frameMs = h.Time.FramesPerSecond > 0 ? 1000.0 / h.Time.FramesPerSecond : 0;
             ImGuiNET.ImGui.Text($"Frame: {frameMs:F1} ms ({h.Time.FramesPerSecond} fps), systems CPU total: {total:F1} ms");
-            ImGuiNET.ImGui.Text($"Tick {h.Time.Tick}: {h.Time.TicksLastFrame} tick(s) last frame, {h.Clock.DroppedTicks} dropped in all");
+            ImGuiNET.ImGui.Text($"Tick {h.Clock.Tick}: {h.Time.TicksLastFrame} tick(s) last frame, {h.Clock.DroppedTicks} dropped in all");
             bool vsync = h.Context.VSync;
             if (ImGuiNET.ImGui.Checkbox("VSync", ref vsync)) h.Context.VSync = vsync;
             ImGuiNET.ImGui.SameLine();
