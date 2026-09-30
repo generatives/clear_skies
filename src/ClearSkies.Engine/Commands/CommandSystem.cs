@@ -44,15 +44,11 @@ public sealed class CommandSystem : ISystem, IDebugUiSystem
     private readonly Func<uint> _tick;
     private uint _nextSeq = 1;
 
-    private readonly List<IDescriber> _describers = new();
-    private readonly EntitySet _describeRequests;
-    private readonly List<Entity> _unclaimed = new();
+    private readonly List<ISpawnHandler> _spawners = new();
 
     public CommandSystem(Session session, EntityRegistry registry, Func<uint> tick)
     {
         Session = session;
-        Descriptions = new DescriptionSink(this);
-        _describeRequests = registry.World.GetEntities().With<DescribeRequest>().AsSet();
         _registry = registry;
         _tick = tick;
     }
@@ -77,21 +73,55 @@ public sealed class CommandSystem : ISystem, IDebugUiSystem
         _byId[handler.Id] = handler;
         _byType[handler.CommandType] = handler;
         handler.Owner = this;
-        if (handler is IDescriber describer)
+        if (handler is ISpawnHandler spawner)
         {
-            _describers.Add(describer);
-            _describers.Sort((a, b) => a.Order.CompareTo(b.Order));
+            _spawners.Add(spawner);
+            _spawners.Sort((a, b) => a.Order.CompareTo(b.Order));
         }
         return handler;
     }
 
-    /// <summary>Descriptions of entities with a <see cref="DescribeRequest"/>, made at the end of each tick.</summary>
-    public DescriptionSink Descriptions { get; }
+    // ── describing ──────────────────────────────────────────────────────────
 
-    /// <summary>Raised after each round of describing, once every description is out.</summary>
-    public event Action? DescribedAll;
+    /// <summary>
+    /// Describes <paramref name="entities"/> as they are now: each one's description, written out, with its kind (the
+    /// spawn handler that recreates it). Supports come before what they support (grids before players), so spawning
+    /// them in this order recreates each on what it stood on. An entity no spawn handler describes is left out (and
+    /// logged). Call it between ticks or from a system, never from inside a command's apply.
+    /// </summary>
+    public List<EntityDescription> Describe(IEnumerable<Entity> entities)
+    {
+        var described = new List<(int Order, EntityDescription Description)>();
+        foreach (var e in entities)
+        {
+            if (_spawners.Find(s => s.Describes(e)) is not { } spawner)
+            {
+                Console.WriteLine($"[describe] nothing describes entity {e} ({(e.Has<EntityId>() ? e.Get<EntityId>() : EntityId.None)})");
+                continue;
+            }
+            described.Add((spawner.Order, new EntityDescription(e, e.Get<EntityId>(), spawner.Id, spawner.Describe(e))));
+        }
+        return described.OrderBy(d => d.Order).Select(d => d.Description).ToList(); // stable: otherwise as given
+    }
 
-    /// <summary>Sends a command given in its wire form (a stored spawn command, for example), as if sent here.</summary>
+    /// <summary>Describes one entity (see <see cref="Describe(IEnumerable{Entity})"/>); throws if nothing describes it.</summary>
+    public EntityDescription Describe(Entity entity) =>
+        Describe([entity]) is [var d] ? d : throw new InvalidOperationException($"Nothing describes entity {entity}.");
+
+    /// <summary>The spawn command that recreates an entity of kind <paramref name="kind"/> from its description, owned
+    /// by <paramref name="owner"/> (None: its kind's default), written out: to send as a spawn event.</summary>
+    public byte[] SpawnCommand(ushort kind, EntityId id, PeerId owner, ReadOnlySpan<byte> description) =>
+        Spawner(kind).SpawnCommand(id, owner, description);
+
+    /// <summary>Spawns an entity from its description, as a command sent here, owned by <paramref name="owner"/>
+    /// (None: its kind's default).</summary>
+    public void Spawn(ushort kind, EntityId id, ReadOnlySpan<byte> description, PeerId owner = default) =>
+        SendSerialized(kind, SpawnCommand(kind, id, owner, description));
+
+    private ISpawnHandler Spawner(ushort kind) =>
+        _spawners.Find(s => s.Id == kind) ?? throw new InvalidDataException($"No spawn handler has ID {kind}.");
+
+    /// <summary>Sends a command given in its wire form, as if sent here.</summary>
     public void SendSerialized(ushort handlerId, ReadOnlySpan<byte> payload)
     {
         Require(handlerId).SendSerialized(payload);
@@ -167,29 +197,16 @@ public sealed class CommandSystem : ISystem, IDebugUiSystem
         }
         _outgoingCommands.Clear();
         _outgoingSent = 0;
-
-        DescribeRequested();
-    }
-
-    /// <summary>Calls every describer in order, then removes every <see cref="DescribeRequest"/>.</summary>
-    public void DescribeRequested()
-    {
-        if (_describeRequests.Count == 0) { DescribedAll?.Invoke(); return; }
-        Descriptions.Reset();
-        foreach (var d in _describers) d.Describe(Descriptions);
-        _unclaimed.Clear();
-        foreach (ref readonly var e in _describeRequests.GetEntities()) _unclaimed.Add(e);
-        foreach (var e in _unclaimed)
-        {
-            if (!Descriptions.Claimed(e)) Console.WriteLine($"[describe] nothing describes entity {e} ({(e.Has<EntityId>() ? e.Get<EntityId>() : EntityId.None)})");
-            e.Remove<DescribeRequest>();
-        }
-        DescribedAll?.Invoke();
     }
 
     // ── bookkeeping used by the handlers ────────────────────────────────────
 
     internal uint NextSeq() => _nextSeq++;
+
+    /// <summary>Metadata for an event this machine sends as its own authority without a command (a description sent
+    /// to a joining player), numbered after every event already sent for <paramref name="target"/>.</summary>
+    public EventMeta StampEvent(EntityId target) =>
+        new(Session.LocalPeer, 0, Session.LocalPeer, target, NextEventNumber(target), Tick);
 
     internal uint NextEventNumber(EntityId target)
     {

@@ -9,7 +9,15 @@ namespace ClearSkies.Engine.Voxels;
 internal readonly record struct EmitterVoxel(byte Lx, byte Ly, byte Lz, byte Level, BlockId Block);
 
 /// <summary>A chunk's opacity packed for the GPU store (see <c>GridStore.Pack</c>).</summary>
-internal sealed record PackedOpacity(uint[] Words, ulong Solid, ulong Air, List<EmitterVoxel> Emitters);
+internal sealed class PackedOpacity(uint[] words, ulong solid, ulong air, List<EmitterVoxel> emitters) : ChunkPreparation
+{
+    public uint[] Words { get; } = words;
+    public ulong Solid { get; } = solid;
+    public ulong Air { get; } = air;
+    public List<EmitterVoxel> Emitters { get; } = emitters;
+
+    internal override void ApplyTo(ChunkEntry entry) => entry.SetPacked(this);
+}
 
 internal sealed class ChunkEntry
 {

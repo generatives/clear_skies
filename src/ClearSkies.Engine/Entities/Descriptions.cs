@@ -40,6 +40,23 @@ public interface IEntityDescription<TSelf> where TSelf : class, IEntityDescripti
     static abstract TSelf Read(ref NetReader r);
 }
 
+/// <summary>Descriptions to and from bytes, as they're stored and carried.</summary>
+public static class DescriptionBytes
+{
+    public static byte[] Of<T>(T description) where T : class, IEntityDescription<T>
+    {
+        var w = new NetWriter();
+        description.Write(w);
+        return w.ToArray();
+    }
+
+    public static T Read<T>(ReadOnlySpan<byte> bytes) where T : class, IEntityDescription<T>
+    {
+        var r = new NetReader(bytes);
+        return T.Read(ref r);
+    }
+}
+
 /// <summary>
 /// A grid's full state: everything needed to create it on any machine. Carried by a spawn, produced by describing a
 /// live grid, and kept in storage. Presence layers (drawn, simulated) are never part of it: each machine works those

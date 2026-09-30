@@ -34,6 +34,12 @@ public sealed class AirshipDebugPanel : ISystem, IDebugUiSystem
     {
         if (ImGui.CollapsingHeader("Save / Load"))
             _persistence.DrawDebugUi();
+        // Pilot mode and the flight tuning sliders are single-player debug tools.
+        if (_pilot.Disabled?.Invoke() == true)
+        {
+            ImGui.TextDisabled("Pilot mode and flight tuning are off while other players are connected.");
+            return;
+        }
         if (ImGui.CollapsingHeader("Pilot", ImGuiTreeNodeFlags.DefaultOpen))
             _pilot.DrawDebugUi();
         if (ImGui.CollapsingHeader("Flight", ImGuiTreeNodeFlags.DefaultOpen))

@@ -72,9 +72,19 @@ public sealed unsafe class GpuContext : IDisposable
         return ctx;
     }
 
+    /// <summary>The graphics API to use (e.g. Vulkan or DX12), or null for wgpu's choice. Set before the host is made
+    /// (the game's --backend).</summary>
+    public static InstanceBackend? Backend { get; set; }
+
     private void Init(GameWindow window)
     {
         var instanceDesc = new InstanceDescriptor();
+        var extras = new InstanceExtras { Chain = new ChainedStruct { SType = (SType)NativeSType.STypeInstanceExtras } };
+        if (Backend is { } backend)
+        {
+            extras.Backends = backend;
+            instanceDesc.NextInChain = (ChainedStruct*)&extras;
+        }
         _instance = _api.CreateInstance(&instanceDesc);
         if (_instance == null)
             throw new InvalidOperationException("Failed to create WebGPU instance.");
@@ -90,6 +100,9 @@ public sealed unsafe class GpuContext : IDisposable
         _api.InstanceRequestAdapter(_instance, &adapterOpts, PfnRequestAdapterCallback.From(HandleAdapter), null);
         if (_adapter == null)
             throw new InvalidOperationException("No suitable WebGPU adapter found.");
+        var properties = new AdapterProperties();
+        _api.AdapterGetProperties(_adapter, &properties);
+        Console.WriteLine($"[wgpu] {SilkMarshal.PtrToString((nint)properties.Name)} ({properties.BackendType})");
 
         // Request the adapter's full supported limits so large per-volume light/opacity storage buffers are
         // allowed (the default maxStorageBufferBindingSize of 128 MiB is exceeded by a modest voxel volume).
