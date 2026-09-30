@@ -1,8 +1,11 @@
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Persistence;
+using ClearSkies.Engine.ECS;
+using ClearSkies.Engine.Physics.Support;
 using ClearSkies.Engine.Voxels;
 using ClearSkies.Net.Session;
+using ClearSkies.Net.Sync;
 
 namespace ClearSkies.Game.Startup;
 
@@ -21,10 +24,37 @@ public static class DedicatedServerGame
         using var hosting = new Hosting(world, save, transport);
         var net = hosting.Net;
 
-        world.AddTickStart(net);
-        hosting.Persistence.Add(host); // the save's streaming and autosave
-        world.AddTick(net);
-        world.AddFrame();
+        var commands = world.Commands;
+
+        // Each 1/60 s tick: everything that arrived (commands, events, snapshots, session messages), the hierarchy, and the
+        // save's streaming and autosave; then gameplay and physics as in a game with a window (see HostedGame).
+
+        host.AddSystem(net, SystemStage.Simulation);
+        host.AddSystem(world.Hierarchy, SystemStage.Simulation);
+        host.AddSystem(hosting.Streaming, SystemStage.Simulation);
+        host.AddSystem(hosting.Saver, SystemStage.Simulation);
+        host.AddSystem(world.PhysicsBody, SystemStage.Simulation);
+        host.AddSystem(new PlayerMovementSystem(host.World, commands), SystemStage.Simulation);
+        host.AddSystem(world.BlockActions, SystemStage.Simulation);
+        var levers = new LeverControlSystem(host.World, commands);
+        var wheels = new SteeringWheelControlSystem(host.World, commands);
+        host.AddSystem(commands, SystemStage.Simulation);
+        host.AddSystem(levers, SystemStage.Simulation);
+        host.AddSystem(wheels, SystemStage.Simulation);
+        host.AddSystem(world.Flight, SystemStage.Simulation);
+        host.AddSystem(world.CreatePresence(), SystemStage.Simulation);
+        host.AddSystem(host.Physics, SystemStage.Simulation);
+        host.AddSystem(new PhysicsTransformSyncSystem(host.World, host.Physics), SystemStage.Simulation);
+        host.AddSystem(world.Hierarchy, SystemStage.Simulation);
+        host.AddSystem(new SupportSystem(host.World, host.Physics), SystemStage.Simulation);
+        host.AddSystem(world.Interpolation, SystemStage.Simulation);
+        host.AddSystem(new BodySync(net, host.World, host.Physics), SystemStage.Simulation);
+
+        // Each frame: bodies owned elsewhere (about 100 ms behind), and terrain streamed around the interest.
+        host.AddSystem(world.Interpolation, SystemStage.Frame);
+        host.AddSystem(world.RemoteBodies, SystemStage.Frame);
+        host.AddSystem(world.Hierarchy, SystemStage.Frame);
+        host.AddSystem(world.ChunkLoad, SystemStage.Frame);
 
         if (save.IsNew) TestScene.SpawnTestShip(world.Commands, WorldSpawn.For(save.Seed).Eye);
 
@@ -47,9 +77,35 @@ public static class BotClientGame
                                           world.TerrainLoaded);
         net.Ended += reason => { Console.WriteLine($"[net] session ended: {reason}"); host.Quit(); };
 
-        world.AddTickStart(net);
-        world.AddTick(net);
-        world.AddFrame();
+        var commands = world.Commands;
+
+        // Each 1/60 s tick: everything that arrived (commands, events, snapshots, session messages), the hierarchy; then
+        // gameplay and physics as in a game with a window (see ClientGame).
+
+        host.AddSystem(net, SystemStage.Simulation);
+        host.AddSystem(world.Hierarchy, SystemStage.Simulation);
+        host.AddSystem(world.PhysicsBody, SystemStage.Simulation);
+        host.AddSystem(new PlayerMovementSystem(host.World, commands), SystemStage.Simulation);
+        host.AddSystem(world.BlockActions, SystemStage.Simulation);
+        var levers = new LeverControlSystem(host.World, commands);
+        var wheels = new SteeringWheelControlSystem(host.World, commands);
+        host.AddSystem(commands, SystemStage.Simulation);
+        host.AddSystem(levers, SystemStage.Simulation);
+        host.AddSystem(wheels, SystemStage.Simulation);
+        host.AddSystem(world.Flight, SystemStage.Simulation);
+        host.AddSystem(world.CreatePresence(), SystemStage.Simulation);
+        host.AddSystem(host.Physics, SystemStage.Simulation);
+        host.AddSystem(new PhysicsTransformSyncSystem(host.World, host.Physics), SystemStage.Simulation);
+        host.AddSystem(world.Hierarchy, SystemStage.Simulation);
+        host.AddSystem(new SupportSystem(host.World, host.Physics), SystemStage.Simulation);
+        host.AddSystem(world.Interpolation, SystemStage.Simulation);
+        host.AddSystem(new BodySync(net, host.World, host.Physics), SystemStage.Simulation);
+
+        // Each frame: bodies owned elsewhere (about 100 ms behind), and terrain streamed around the interest.
+        host.AddSystem(world.Interpolation, SystemStage.Frame);
+        host.AddSystem(world.RemoteBodies, SystemStage.Frame);
+        host.AddSystem(world.Hierarchy, SystemStage.Frame);
+        host.AddSystem(world.ChunkLoad, SystemStage.Frame);
 
         using (new QuitOnSignal(host)) world.Run();
     }
