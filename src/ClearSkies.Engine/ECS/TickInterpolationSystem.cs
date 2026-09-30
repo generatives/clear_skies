@@ -61,13 +61,12 @@ public static class Drawing
 /// are drawn behind by the same fraction of that turn as the ship, so the two stay together between ticks. A tick that
 /// didn't turn the view clears the last one's turn.
 ///
-/// Dynamic grids get an <see cref="InterpolatedTransform"/> automatically. A grid's Transform is its block space, which
-/// edits don't move (only its body moves, to the new centre of mass), so an edit doesn't make the grid twitch.
+/// Dynamic grids get an <see cref="InterpolatedTransform"/> when they're created (DynamicGridFactory). A grid's
+/// Transform is its block space, which edits don't move (only its body moves, to the new centre of mass), so an edit doesn't make the grid twitch.
 /// </summary>
 public sealed class TickInterpolationSystem : IStagedSystem
 {
     private readonly EntitySet _interpolated;
-    private readonly EntitySet _uninterpolatedGrids;
     private readonly EntitySet _drawn;
     private readonly EntitySet _lookers;
     private readonly EntitySet _models;
@@ -79,7 +78,6 @@ public sealed class TickInterpolationSystem : IStagedSystem
     public TickInterpolationSystem(World world, Time time)
     {
         _interpolated = world.GetEntities().With<Transform>().With<InterpolatedTransform>().AsSet();
-        _uninterpolatedGrids = world.GetEntities().With<PhysicsBodyComponent>().With<Transform>().Without<InterpolatedTransform>().AsSet();
         _drawn = world.GetEntities().With<DrawnTransform>().AsSet();
         _lookers = world.GetEntities().With<MouseLookComponent>().AsSet();
         _models = world.GetEntities().With<RenderedModel>().AsSet();
@@ -97,7 +95,6 @@ public sealed class TickInterpolationSystem : IStagedSystem
 
     private void EndTick()
     {
-        foreach (var e in _uninterpolatedGrids.GetEntities().ToArray()) e.Set(new InterpolatedTransform());
         foreach (ref readonly Entity e in _lookers.GetEntities())
             e.Get<MouseLookComponent>().EndTick();
         foreach (ref readonly Entity e in _models.GetEntities())

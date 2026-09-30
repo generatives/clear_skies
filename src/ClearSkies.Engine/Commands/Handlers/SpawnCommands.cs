@@ -140,20 +140,33 @@ public sealed class SpawnGridHandler : SpawnHandler<GridDescription, DynamicGrid
     protected override void Select(Entity grid) => _selection?.Select(grid);
 }
 
-/// <summary>Spawns players (at startup, and for each player joining). A player owns their own character.</summary>
+/// <summary>Spawns players (at startup, and for each player joining). A player owns their own character. The local
+/// player gets the active camera at their eye, if it's attached to nothing (see <see cref="EyeSystem"/>).</summary>
 public sealed class SpawnPlayerHandler : SpawnHandler<PlayerDescription, Player>
 {
     private readonly PhysicsWorld _physics;
+    private readonly EntitySet _looseCameras;
 
     public SpawnPlayerHandler(World world, EntityRegistry registry, Session session, PhysicsWorld physics)
-        : base(world, registry, session) => _physics = physics;
+        : base(world, registry, session)
+    {
+        _physics = physics;
+        _looseCameras = world.GetEntities().With<CameraComponent>().Without<Parent>().AsSet();
+    }
 
     public override ushort Id => CommandIds.SpawnPlayer;
 
     /// <summary>After grids, which players may stand on.</summary>
     public override int Order => 10;
 
-    protected override Entity Create(EntityId id, NetOwner owner, PlayerDescription d) => PlayerFactory.Create(World, _physics, id, owner, d);
+    protected override Entity Create(EntityId id, NetOwner owner, PlayerDescription d)
+    {
+        var player = PlayerFactory.Create(World, _physics, id, owner, d);
+        if (owner.IsLocal)
+            foreach (var camera in _looseCameras.GetEntities().ToArray())
+                if (camera.Get<CameraComponent>().Active) { EyeSystem.Attach(camera, player); break; }
+        return player;
+    }
 
     protected override PlayerDescription DescriptionOf(Entity player) => PlayerFactory.Describe(player);
 }

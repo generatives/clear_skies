@@ -69,7 +69,8 @@ public static class TestScene
             });
         }
 
-        // The camera: at the spawn until the player exists, then a child of the player at their eye (see EyeSystem).
+        // The camera: at the spawn until the player exists, then a child of the player at their eye (SpawnPlayerHandler
+        // puts it there when the spawn is applied, in the first tick).
         var cam = host.World.CreateEntity();
         eyeTransform.Rotation = Quaternion<float>.CreateFromYawPitchRoll(yaw, pitch, 0f);
         cam.Set(eyeTransform);
