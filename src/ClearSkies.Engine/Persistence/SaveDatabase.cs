@@ -6,8 +6,8 @@ using Microsoft.Data.Sqlite;
 
 namespace ClearSkies.Engine.Persistence;
 
-/// <summary>An entity's row in the index: which spawn command recreates it, and where it is (none for a global
-/// entity, which is always loaded).</summary>
+/// <summary>An entity's row in the index: its kind (the spawn handler that recreates it from its description), and
+/// where it is (none for a global entity, which is always loaded).</summary>
 public readonly record struct StoredEntity(EntityId Id, ushort Kind, Vector3? Position);
 
 /// <summary>
@@ -166,7 +166,8 @@ public sealed class SaveDatabase : IDisposable
         }
     }
 
-    /// <summary>The player's saved spawn; null if they haven't been saved in this world yet.</summary>
+    /// <summary>The player's saved description (a <see cref="PlayerDescription"/>); null if they haven't been saved in
+    /// this world yet.</summary>
     public byte[]? ReadPlayer(PlayerId player)
     {
         lock (_lock)

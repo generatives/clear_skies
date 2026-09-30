@@ -18,8 +18,6 @@ public enum PeerState
     Connected,
     /// <summary>Welcomed; loading terrain around their spawn.</summary>
     LoadingTerrain,
-    /// <summary>Terrain loaded; the host is describing every entity for them this tick.</summary>
-    Snapshot,
     /// <summary>In the game: receives every event and snapshot.</summary>
     Joined,
 }
@@ -34,7 +32,6 @@ public sealed class RemotePeer
     public PlayerId Player;
     public EntityId PlayerEntity;
     public Vector3 Spawn;
-    public readonly List<(ushort Handler, byte[] Payload, EntityId Target)> PendingSnapshot = new();
 }
 
 /// <summary>
@@ -51,15 +48,15 @@ public sealed class HostSession : NetSession
     private readonly ulong _seed;
     private readonly ulong _checksum;
     private readonly Func<string, PlayerId> _playerFor;
-    private readonly Func<PlayerId, (byte[]? SavedSpawn, Vector3 Position)> _spawnFor;
+    private readonly Func<PlayerId, (PlayerDescription? Saved, Vector3 Position)> _spawnFor;
     private readonly EntitySet _players;
 
     /// <param name="playerFor">The player a joining name is (the save gives each name a player ID).</param>
-    /// <param name="spawnFor">A joining player's saved player spawn (if they've played this world before) and
-    /// where they'll spawn.</param>
+    /// <param name="spawnFor">A joining player's saved description (if they've played this world before) and where
+    /// they'll spawn.</param>
     public HostSession(ITransport? transport, EngineSession session, CommandSystem commands, EntityRegistry registry, World world,
                        ITickClock clock, EntityIdAllocator ids, ulong seed, ulong generationChecksum,
-                       Func<string, PlayerId> playerFor, Func<PlayerId, (byte[]? SavedSpawn, Vector3 Position)> spawnFor)
+                       Func<string, PlayerId> playerFor, Func<PlayerId, (PlayerDescription? Saved, Vector3 Position)> spawnFor)
         : base(transport, session, commands, registry, world, clock)
     {
         _ids = ids;
@@ -69,14 +66,12 @@ public sealed class HostSession : NetSession
         _spawnFor = spawnFor;
         _players = world.GetEntities().With<Player>().AsSet();
         _describable = world.GetEntities().With<EntityId>().With<OwnPresence>().Without<Chunk>().AsSet();
-        commands.Descriptions.Described += OnDescribed;
-        commands.DescribedAll += OnDescribedAll;
     }
 
     public IReadOnlyCollection<RemotePeer> Peers => _peers.Values;
     public override bool OthersConnected => _peers.Values.Any(p => p.State != PeerState.Connected);
 
-    /// <summary>Called when a leaving player's entity should go: describe for storage first if there's a save.</summary>
+    /// <summary>Called with a leaving player's entity just before it's despawned (to save it, if there's a save).</summary>
     public Action<Entity>? PlayerLeaving { get; set; }
 
     /// <summary>Which way a new player faces when they first spawn (yaw, pitch).</summary>
@@ -101,8 +96,8 @@ public sealed class HostSession : NetSession
             if (e.Get<NetOwner>().Owner == peer.Peer) e.Set(Session.LocalOwner((ushort)(e.Get<NetOwner>().Epoch + 1)));
         if (!peer.PlayerEntity.IsNone && Registry.TryGet(peer.PlayerEntity, out var player))
         {
-            if (PlayerLeaving is { } leaving) leaving(player);
-            else Commands.Send(new DespawnEntity { Entity = peer.PlayerEntity, KeepStored = true });
+            PlayerLeaving?.Invoke(player);
+            Commands.Send(new DespawnEntity { Entity = peer.PlayerEntity, KeepStored = true });
         }
         Send(JoinedConnections, new PlayerNotice(false, peer.Peer, peer.Name));
     }
@@ -129,7 +124,7 @@ public sealed class HostSession : NetSession
         {
             case MessageKind.Hello: OnHello(peer, Hello.Read(ref r)); break;
             case MessageKind.TerrainReady:
-                if (peer.State == PeerState.LoadingTerrain) BeginSnapshot(peer);
+                if (peer.State == PeerState.LoadingTerrain) SendWorld(peer);
                 break;
             case MessageKind.TimePing:
             {
@@ -219,54 +214,31 @@ public sealed class HostSession : NetSession
         Console.WriteLine($"[net] {name} joining as {id}");
     }
 
-    /// <summary>The client has terrain: describe every live entity for them (sent when describing ends this tick).</summary>
-    private void BeginSnapshot(RemotePeer peer)
+    /// <summary>
+    /// The client has terrain: send them the world as it is now, then spawn their player for everyone. Runs first in the
+    /// tick (in the session's update), so every change of the last tick is in the descriptions, and every later event
+    /// goes out after them on the same ordered channel: nothing is missed or applied twice. Each is numbered after
+    /// every event already sent for its entity (<see cref="CommandSystem.StampEvent"/>).
+    /// </summary>
+    private void SendWorld(RemotePeer peer)
     {
-        peer.State = PeerState.Snapshot;
-        foreach (var e in _describable.GetEntities().ToArray())
-            DescribeRequest.Request(e, DescribePurpose.Send, PeerSet.Of(peer.Peer));
-    }
-
-    private void OnDescribed(Description d)
-    {
-        if ((d.Request.Purpose & DescribePurpose.Send) == 0) return;
-        foreach (var peerId in d.Request.SendTo.Peers)
-            if (PeerById(peerId) is { } peer) peer.PendingSnapshot.Add((d.HandlerId, d.Payload, d.Id));
-    }
-
-    /// <summary>Descriptions are out: send each snapshotting client theirs, then spawn their player for everyone.</summary>
-    private void OnDescribedAll()
-    {
-        foreach (var peer in _peers.Values.Where(p => p.State == PeerState.Snapshot).ToList())
+        foreach (var d in Commands.Describe(_describable.GetEntities().ToArray()))
         {
-            foreach (var (handler, payload, target) in peer.PendingSnapshot)
-            {
-                Send([peer.Connection], new EventMessage(handler, Commands.StampEvent(target), payload));
-            }
-            peer.PendingSnapshot.Clear();
-            peer.State = PeerState.Joined;
-
-            var (saved, position) = _spawnFor(peer.Player);
-            Spawn<PlayerDescription> spawn;
-            if (saved is not null)
-            {
-                var handler = (SpawnPlayerHandler)Commands.HandlerFor(CommandIds.SpawnPlayer)!;
-                var reader = new NetReader(saved);
-                spawn = handler.Read(ref reader);
-                spawn.Owner = peer.Peer;
-                spawn.Description.Name = peer.Name;
-                if (Registry.IsLive(spawn.Id)) spawn.Id = EntityId.None; // somehow still here: give them a fresh entity
-            }
-            else
-                spawn = new Spawn<PlayerDescription> { Owner = peer.Peer, Description = new PlayerDescription
-                    { Id = peer.Player, Name = peer.Name, FreeFly = true, Position = position, Yaw = NewPlayerLook.Yaw, Pitch = NewPlayerLook.Pitch } };
-            if (spawn.Id.IsNone) spawn.Id = Registry.Allocate();
-            peer.PlayerEntity = spawn.Id;
-            Commands.Send(spawn);
-
-            Send(JoinedConnections, new PlayerNotice(true, peer.Peer, peer.Name));
-            Console.WriteLine($"[net] {peer.Name} ({peer.Peer}) joined");
+            var owner = d.Entity.Has<NetOwner>() ? d.Entity.Get<NetOwner>().Owner : Session.LocalPeer;
+            Send([peer.Connection], new EventMessage(d.Kind, Commands.StampEvent(d.Id), Commands.SpawnCommand(d.Kind, d.Id, owner, d.Data)));
         }
+        peer.State = PeerState.Joined;
+
+        // Where they left off if they've played this world before, else new at the spawn point.
+        var (saved, position) = _spawnFor(peer.Player);
+        var description = saved ?? new PlayerDescription
+            { Id = peer.Player, FreeFly = true, Position = position, Yaw = NewPlayerLook.Yaw, Pitch = NewPlayerLook.Pitch };
+        description.Name = peer.Name;
+        peer.PlayerEntity = Registry.Allocate();
+        Commands.Send(new Spawn<PlayerDescription> { Id = peer.PlayerEntity, Owner = peer.Peer, Description = description });
+
+        Send(JoinedConnections, new PlayerNotice(true, peer.Peer, peer.Name));
+        Console.WriteLine($"[net] {peer.Name} ({peer.Peer}) joined");
     }
 
     // ── routing ─────────────────────────────────────────────────────────────

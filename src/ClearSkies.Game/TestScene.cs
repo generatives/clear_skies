@@ -24,8 +24,8 @@ public static class TestScene
     /// overlooking the nearest island, e.g. to reproduce a view for a screenshot.</param>
     /// <param name="spawnView">Where the camera starts and how it faces (yaw, pitch); <see cref="FallbackSpawn"/> if
     /// null.</param>
-    /// <param name="savedPlayer">The local player's saved player spawn, if they've played this world before.</param>
-    public static Vector3D<float> Build(EngineHost host, CommandSystem commands, PlayerId playerId, string playerName, byte[]? savedPlayer,
+    /// <param name="savedPlayer">The local player's saved description, if they've played this world before.</param>
+    public static Vector3D<float> Build(EngineHost host, CommandSystem commands, PlayerId playerId, string playerName, PlayerDescription? savedPlayer,
                                         float[]? cameraOverride = null,
                                         (Vector3D<float> Position, float Yaw, float Pitch)? spawnView = null,
                                         bool spawnPlayer = true)
@@ -51,24 +51,19 @@ public static class TestScene
         // The player: spawned through the command system (applied in the first tick). From the save if they've played
         // this world before (where they left off); otherwise at the eye position less the eye height (its Transform is
         // the character capsule's centre).
-        if (!spawnPlayer) { } // a client: the host spawns its player once it has joined
-        else if (savedPlayer is not null)
-            commands.SendSerialized(CommandIds.SpawnPlayer, savedPlayer);
-        else
+        if (spawnPlayer) // a client's player is spawned by the host once it has joined
         {
             var p = eyeTransform.Position;
-            commands.Send(new Spawn<PlayerDescription>
+            var description = savedPlayer ?? new PlayerDescription
             {
-                Description = new PlayerDescription
-                {
-                    Id = playerId,
-                    Name = playerName,
-                    FreeFly = true, // start in FreeFly — zero regression risk vs. today
-                    Position = new Vector3(p.X, p.Y - PlayerFactory.EyeHeight, p.Z),
-                    Yaw = yaw,
-                    Pitch = pitch,
-                },
-            });
+                Id = playerId,
+                FreeFly = true, // start in FreeFly — zero regression risk vs. today
+                Position = new Vector3(p.X, p.Y - PlayerFactory.EyeHeight, p.Z),
+                Yaw = yaw,
+                Pitch = pitch,
+            };
+            description.Name = playerName;
+            commands.Send(new Spawn<PlayerDescription> { Description = description });
         }
 
         // The camera: at the spawn until the player exists, then a child of the player at their eye (see EyeSystem).

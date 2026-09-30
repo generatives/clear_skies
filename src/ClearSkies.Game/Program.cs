@@ -242,25 +242,12 @@ else
         generationChecksum, saveDb!.PlayerFor, playerId =>
         {
             // A returning player spawns where they left off; a new one at the spawn point.
-            var saved = saveDb!.ReadPlayer(playerId);
-            if (saved != null)
-            {
-                var reader = new ClearSkies.Engine.Serialization.NetReader(saved);
-                var spawn = ((SpawnPlayerHandler)commands.HandlerFor(CommandIds.SpawnPlayer)!).Read(ref reader);
-                return (saved, spawn.Description.Position);
-            }
+            if (SavedPlayer(playerId) is { } saved) return (saved, saved.Position);
             var p = HeartSpawn(seed)!.Value.Position;
             return (null, new Vector3(p.X, p.Y - PlayerFactory.EyeHeight, p.Z));
         });
     hostNet.NewPlayerLook = (HeartSpawn(seed)!.Value.Yaw, HeartSpawn(seed)!.Value.Pitch);
-    // A leaving player is saved (the players table), then despawned.
-    var leaving = new HashSet<EntityId>();
-    hostNet.PlayerLeaving = player =>
-    {
-        leaving.Add(player.Get<EntityId>());
-        DescribeRequest.Request(player, DescribePurpose.Store);
-    };
-    worldSaver!.Stored += id => { if (leaving.Remove(id)) commands.Send(new DespawnEntity { Entity = id, KeepStored = true }); };
+    hostNet.PlayerLeaving = player => worldSaver!.Save([player]); // to the players table
     net = hostNet;
 }
 var bodySync = new ClearSkies.Net.Sync.BodySync(net, host.World, host.Physics);
@@ -321,12 +308,16 @@ if (camArg >= 0 && camArg + 1 < args.Length)
     cameraOverride = args[camArg + 1].Split(',').Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
 // A client's player is spawned by the host once it has joined; everyone else spawns their own here.
 var localPlayer = saveDb?.PlayerFor(playerName) ?? default;
-var camSpawn = TestScene.Build(host, commands, localPlayer, playerName, saveDb?.ReadPlayer(localPlayer), cameraOverride,
+var camSpawn = TestScene.Build(host, commands, localPlayer, playerName, SavedPlayer(localPlayer), cameraOverride,
                                joining ? (new Vector3D<float>(welcome.Spawn.X, welcome.Spawn.Y + PlayerFactory.EyeHeight, welcome.Spawn.Z), MathF.PI, -0.15f) : HeartSpawn(seed),
                                spawnPlayer: !joining);
 
 // Spawn: over a wide, flat stretch of plains 18 km east of the origin (found by scanning seed 1337 for flat, well-
 // covered lowland), 60 blocks above the terrain surface there (which no piece's top reaches), looking north across it.
+// A player's saved description, if they've played this world before.
+PlayerDescription? SavedPlayer(PlayerId player) =>
+    saveDb?.ReadPlayer(player) is { } saved ? DescriptionBytes.Read<PlayerDescription>(saved) : null;
+
 static (Vector3D<float> Position, float Yaw, float Pitch)? HeartSpawn(ulong seed)
 {
     const float x = -825f, z = -1000f;
@@ -373,7 +364,7 @@ host.AddSystem(new LambdaSystem(() => { if (Volatile.Read(ref quitRequested)) ho
 host.Run();
 BackgroundWork.Stop(TimeSpan.FromSeconds(5)); // no chunk still loading or meshing while the store is freed
 
-worldSaver?.SaveNow(); // everything, in one transaction, on exit
+worldSaver?.SaveAll(); // everything, in one transaction, on exit
 net.Dispose(); // says goodbye to the host, or closes the game to clients
 saveDb?.Dispose();
 gridStore.Dispose();
