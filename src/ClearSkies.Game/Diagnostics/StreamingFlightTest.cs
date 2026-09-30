@@ -20,7 +20,7 @@ namespace ClearSkies.Game.Diagnostics;
 /// </summary>
 public sealed class StreamingFlightTest : ISystem, IDebugUiSystem
 {
-    private readonly EngineHost _host;
+    private readonly WindowedEngineHost _host;
     private readonly EntitySet _cameras;
     private readonly Action? _whenDone;
     private readonly Stopwatch _clock = new();
@@ -45,7 +45,7 @@ public sealed class StreamingFlightTest : ISystem, IDebugUiSystem
     // With --flight-test: wait this long for the world around the camera to load before flying.
     private float _autoStartIn = -1f;
 
-    public StreamingFlightTest(EngineHost host, bool autoStart, Action? whenDone = null)
+    public StreamingFlightTest(WindowedEngineHost host, bool autoStart, Action? whenDone = null)
     {
         _host = host;
         host.FrameEnded += RecordFrame;

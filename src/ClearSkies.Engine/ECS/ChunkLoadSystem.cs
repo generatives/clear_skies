@@ -22,8 +22,7 @@ namespace ClearSkies.Engine.ECS;
 /// layers are a loose bound, so chunks that turn out to be air are remembered (a bit per column) until their column
 /// leaves view, and aren't queued again.
 ///
-/// What's loaded is limited by GPU light storage (<see cref="GridStore.WorldLightBudget"/>): the world's surface
-/// bricks, plus a surface chunk's average for each chunk loaded but not uploaded yet or still loading. When the
+/// What's loaded is limited by a budget (<see cref="IChunkBudget"/>: GPU light storage for a drawn world). When the
 /// budget is full, the queue stops; and if the next queued column is nearer than the farthest loaded one (after
 /// the centre moved), the farthest is unloaded to make room. So the loaded world is always the nearest that fits.
 ///
@@ -37,20 +36,6 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     /// the excess.</summary>
     private const int MaxInFlight = 64;
 
-    /// <summary>The GridStore world index width that fits a view distance: wider than the span of chunks loaded at
-    /// once (with a column to spare each side for the frame between a chunk leaving range and its storage being
-    /// released), so two loaded chunks never share a cell.</summary>
-    public static int WorldIndexDim(float viewDistance) => 2 * (int)MathF.Ceiling(viewDistance / S) + 3;
-
-    /// <summary>Light bricks counted for a chunk whose real cost the GPU store doesn't know yet (loaded but not
-    /// uploaded, or loading): a surface chunk's measured average. Buried stone and sky cost less, so this errs
-    /// towards waiting for uploads to catch up rather than overshooting.</summary>
-    private const int PendingBricks = 26;
-
-    /// <summary>World chunks loaded at most: the GPU's world index limit, less room for chunks leaving range whose
-    /// storage is released a frame later.</summary>
-    private const int MaxChunks = GridStore.MaxWorldChunks - 4096;
-
     /// <summary>Columns queued at once. Far more than load before the centre next moves a column; when the queue runs
     /// out short of the view distance it is rebuilt from there.</summary>
     private const int MaxQueued = 4096;
@@ -63,17 +48,14 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     /// unloading doesn't stall a frame.</summary>
     private const int MaxEvictChunksPerFrame = 512;
 
-    /// <summary>Light bricks freed beyond what the next column needs, so the columns after it don't each wait a frame
-    /// for their own eviction.</summary>
-    private const int EvictSlack = 4096;
-
     private const int S = ChunkData.Size;
 
     private readonly IChunkStore _chunkStore;
 
     private readonly EntitySet      _interests;
     private readonly ChunkVolume    _staticVolume;
-    private readonly GridStore?     _store;   // null headless: no light budget, nothing to upload
+    private readonly IChunkBudget   _loadBudget;
+    private readonly IChunkPreparer? _preparer;
     private readonly ThreadLocal<IWorldGenerator> _generator;
     private readonly ThreadLocal<ChunkData> _scratch = new(() => new ChunkData());
     private readonly int            _minY;      // the lowest streamed layer: bit 0 of a column's bits
@@ -118,7 +100,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     private readonly List<(int x, int z)> _columnsOutOfView = new();
     private readonly Dictionary<(int x, int z), int> _inFlight = new();
     private int _inFlightChunks;
-    private readonly ConcurrentQueue<((int x, int z) Column, List<(ChunkPosition Pos, ChunkData? Data, PackedOpacity? Packed)> Chunks)> _results = new();
+    private readonly ConcurrentQueue<((int x, int z) Column, List<(ChunkPosition Pos, ChunkData? Data, ChunkPreparation? Prepared)> Chunks)> _results = new();
 
     private (int x, int z) _lastCentreColumn = (int.MinValue, int.MinValue);
     private bool _skippedInFlight;
@@ -140,22 +122,24 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     /// queued or loading, or else the view distance, eased over time. Fog should be total by here.</summary>
     public float FogDistance => _fogDistance;
 
-    /// <param name="store">The GPU store the world's chunks go to: its light budget limits what's loaded. Null when
-    /// nothing is drawn (headless): only <see cref="MaxChunks"/> limits it.</param>
+    /// <param name="budget">What limits what's loaded.</param>
     /// <param name="viewDistance">How far out chunks are streamed, in blocks (horizontally), as far as the budget
-    /// reaches. The GridStore's world index must fit it: see <see cref="WorldIndexDim"/>.</param>
+    /// reaches.</param>
     /// <param name="minChunkY">Lowest chunk layer the generator fills. Streaming covers 64 layers from
     /// <see cref="LayersBelow"/> under it; the generator's layers must fall inside them. Edits to the static world
     /// outside them are refused (see <see cref="ChunkVolume.EditableLayers"/>).</param>
     /// <param name="chunkStore">Where edited chunks are kept (the world's save database on the host).</param>
-    public ChunkLoadSystem(World world, ChunkVolume staticVolume, GridStore? store, Func<IWorldGenerator> generatorFactory,
-                           float viewDistance, int minChunkY, IChunkStore chunkStore)
+    /// <param name="preparer">Work on each loaded chunk's data on the worker that loaded it (packing it for the GPU, for
+    /// a drawn world).</param>
+    public ChunkLoadSystem(World world, ChunkVolume staticVolume, IChunkBudget budget, Func<IWorldGenerator> generatorFactory,
+                           float viewDistance, int minChunkY, IChunkStore chunkStore, IChunkPreparer? preparer = null)
     {
         _chunkStore = chunkStore;
 
         _interests    = world.GetEntities().With<Transform>().With<TerrainInterest>().AsSet();
         _staticVolume = staticVolume;
-        _store        = store;
+        _loadBudget   = budget;
+        _preparer     = preparer;
         _generator    = new ThreadLocal<IWorldGenerator>(generatorFactory);
         _minY         = minChunkY - LayersBelow;
         _staticVolume.EditableLayers = (_minY, _minY + 63); // only what streaming can load back
@@ -208,9 +192,8 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     public void DrawDebugUi()
     {
         ImGui.Text($"View distance: {_viewDistance:F0} blocks ({_columns.Count} columns known)");
-        ImGui.Text($"Light: {WorldBricks():N0} / {LightBudget:N0} bricks, {PendingChunks():N0} chunks not uploaded yet" +
-                   (_full ? " (full)" : ""));
-        ImGui.Text($"Loaded: {_staticVolume.LoadedCount:N0} / {MaxChunks:N0} chunks   Queued columns: {_queue.Count - _queueHead}" +
+        ImGui.Text($"Budget: {_loadBudget.Describe(_staticVolume)}" + (_full ? " (full)" : ""));
+        ImGui.Text($"Loaded: {_staticVolume.LoadedCount:N0} chunks   Queued columns: {_queue.Count - _queueHead}" +
                    $"{(_queueTruncated ? "+" : "")}   In flight: {_inFlight.Count}");
         ImGui.Text($"Fog distance: {_fogDistance:F0} (target {_fogTarget:F0})   Columns evicted: {_evictions}");
         ImGui.Text($"Saved chunks: {_saved.Count}   Layers: {_minY}..{_minY + 63}");
@@ -249,7 +232,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         {
             _inFlightChunks -= _inFlight[job.Column];
             _inFlight.Remove(job.Column);
-            foreach (var (pos, data, packed) in job.Chunks)
+            foreach (var (pos, data, prepared) in job.Chunks)
             {
                 if (data == null)
                 {
@@ -259,7 +242,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
                     continue;
                 }
                 // Dropped if the centre moved on while it generated, or an edit created the chunk meanwhile.
-                if (InView(pos.X, pos.Z) && !_staticVolume.IsLoaded(pos)) _staticVolume.AddChunk(pos, data, packed);
+                if (InView(pos.X, pos.Z) && !_staticVolume.IsLoaded(pos)) _staticVolume.AddChunk(pos, data, prepared);
             }
         }
         _steps.Lap(ApplyStep);
@@ -288,7 +271,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     {
         Rebuilds++;
         // Whatever the last rebuild didn't get to unload goes now: a chunk that stays loaded out of view could share a
-        // cell of the GPU store's world index with one coming into view on the other side (see WorldIndexDim).
+        // cell of the GPU store's world index with one coming into view on the other side (see LightBudget.WorldIndexDim).
         UnloadSome(double.PositiveInfinity);
 
         _toUnload.Clear();
@@ -344,8 +327,8 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         }
         _scanDone = true;
         Console.WriteLine($"[load] rebuild: queued {_queue.Count}{(_queueTruncated ? "+" : "")} columns, loaded " +
-                          $"{_staticVolume.LoadedCount} chunks ({PendingChunks()} not uploaded), light {WorldBricks()}/" +
-                          $"{LightBudget} bricks, unloaded {_toUnload.Count}, evicted {_evictions} columns so far");
+                          $"{_staticVolume.LoadedCount} chunks ({_loadBudget.Describe(_staticVolume)}), unloaded {_toUnload.Count}, " +
+                          $"evicted {_evictions} columns so far");
     }
 
     /// <summary>Blocks the centre must be past its column's edge before the view moves on, so standing on a column
@@ -397,16 +380,6 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         RecordBuild(p, hasBlocks);
     }
 
-    /// <summary>Light bricks the world's loaded chunks hold in the GPU store (not counting unloaded ones still
-    /// waiting to be released).</summary>
-    private int WorldBricks() => _staticVolume.Gpu.Slots.Count - (_store?.WorldBricksReleasing ?? 0);
-
-    /// <summary>Chunks loaded but not uploaded to the GPU store yet.</summary>
-    private int PendingChunks() => _store is null ? 0
-        : System.Math.Max(0, _staticVolume.LoadedCount - (_store.WorldChunkCount - _store.WorldChunksReleasing));
-
-    private int LightBudget => _store?.WorldLightBudget ?? int.MaxValue;
-
     /// <summary>Hands queued columns to workers, one job per column, while the budget has room. When it doesn't, and
     /// the next column is nearer than the farthest loaded one, unloads that to make room.</summary>
     private void Dispatch()
@@ -419,18 +392,15 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
             var work = Missing(col.x, col.z);
             if (work.Count == 0) { _queueHead++; continue; }
 
-            int chunks = _staticVolume.LoadedCount + _inFlightChunks + work.Count;
-            int bricks = WorldBricks() + (PendingChunks() + _inFlightChunks + work.Count) * PendingBricks;
-            if (chunks > MaxChunks || bricks > LightBudget)
+            int adding = _inFlightChunks + work.Count;
+            if (!_loadBudget.HasRoomFor(_staticVolume, adding))
             {
                 _full = true;
-                // Only once the store really is full: until uploads catch up, pending chunks are just estimates.
-                int overChunks = _staticVolume.LoadedCount + _inFlightChunks + work.Count - MaxChunks;
-                int overBricks = _store is null ? -1 : WorldBricks() + (_inFlightChunks + work.Count) * PendingBricks - LightBudget;
-                if (overChunks > 0 || overBricks >= 0)
+                var shortfall = _loadBudget.ShortfallFor(_staticVolume, adding);
+                if (!shortfall.IsNone)
                 {
                     _steps.Lap(DispatchStep);
-                    EvictFartherThan(ColumnDistSq(col), overChunks + work.Count, overBricks + EvictSlack);
+                    EvictFartherThan(ColumnDistSq(col), shortfall.Chunks + work.Count, shortfall.Units);
                     _steps.Lap(EvictStep);
                 }
                 break;
@@ -441,7 +411,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
             _inFlightChunks += work.Count;
             BackgroundWork.Queue(() =>
             {
-                var loaded = new List<(ChunkPosition, ChunkData?, PackedOpacity?)>(work.Count);
+                var loaded = new List<(ChunkPosition, ChunkData?, ChunkPreparation?)>(work.Count);
                 foreach (var (pos, fromSave) in work)
                 {
                     var data = _scratch.Value!;
@@ -451,7 +421,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
                     if (data.HasAnySolid())
                     {
                         data.IsDirty = false;
-                        loaded.Add((pos, data, GridStore.Pack(data))); // the GPU store's packing, off the main thread
+                        loaded.Add((pos, data, _preparer?.Prepare(data))); // off the main thread
                         _scratch.Value = new ChunkData();
                     }
                     else
@@ -469,17 +439,16 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 
     /// <summary>Unloads the farthest loaded columns (not being loaded) that are more than a column farther than
     /// <paramref name="distSq"/> (so two columns at about the same distance don't keep swapping), until
-    /// <paramref name="chunks"/> chunks and <paramref name="bricks"/> light bricks are freed, or
-    /// <see cref="MaxEvictChunksPerFrame"/> chunks. Their bricks count as free at once (GridStore.WorldBricksReleasing),
-    /// though the store releases them over the next frames.</summary>
-    private void EvictFartherThan(long distSq, int chunks, int bricks)
+    /// <paramref name="chunks"/> chunks and <paramref name="units"/> of the budget are freed, or
+    /// <see cref="MaxEvictChunksPerFrame"/> chunks.</summary>
+    private void EvictFartherThan(long distSq, int chunks, int units)
     {
         if (_nothingToEvict) return;
         if (_evictNext < 0) BuildEvictOrder();
 
         float margin = MathF.Sqrt(distSq) + 1f;
-        int freedChunks = 0, freedBricks = 0;
-        while (freedChunks < MaxEvictChunksPerFrame && (freedChunks < chunks || freedBricks < bricks))
+        int freedChunks = 0, freedUnits = 0;
+        while (freedChunks < MaxEvictChunksPerFrame && (freedChunks < chunks || freedUnits < units))
         {
             if (_evictNext >= _evictOrder.Count || ColumnDistSq(_evictOrder[_evictNext]) <= margin * margin)
             {
@@ -493,7 +462,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
             {
                 var p = new ChunkPosition(far.x, _minY + layer, far.z);
                 if (!_staticVolume.IsLoaded(p)) continue;
-                freedBricks += ChunkBricks(p);
+                freedUnits += _loadBudget.CostOf(_staticVolume, p);
                 Unload(p);
                 unloaded++;
             }
@@ -512,9 +481,6 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         _evictOrder.Sort((a, b) => ColumnDistSq(b).CompareTo(ColumnDistSq(a)));
         _evictNext = 0;
     }
-
-    /// <summary>Light bricks chunk <paramref name="p"/> holds in the GPU store (none until it is uploaded).</summary>
-    private int ChunkBricks(ChunkPosition p) => _store?.BricksOf(_staticVolume.Gpu, p) ?? 0;
 
     /// <summary>Whether column (x, z) has chunks that may hold something and aren't loaded yet.</summary>
     private bool HasMissing(int x, int z)
