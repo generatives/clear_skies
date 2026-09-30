@@ -102,8 +102,41 @@ public sealed class GridStore : IDisposable
     /// mask low, high, 0, 0).</summary>
     public const int ChunkEntryBytes = 32;
 
-    /// <summary>A fresh display word (two voxels): full sun, no light, no AO — ambient and sun only.</summary>
-    public const uint EmptyDisplayPair = 0x30003000u;
+    /// <summary>A fresh display word (two voxels): not composed yet (brightness 511, see <see cref="LightCodecWgsl"/>),
+    /// which renders like no light storage — ambient and full sun — until the brick is lit.</summary>
+    public const uint EmptyDisplayPair = 0xFFFFFFFFu;
+
+    /// <summary>
+    /// WGSL for the display light of a voxel (the low 14 bits of its display u16): brightness, the brightest channel
+    /// on a square curve (bits 0-8, 0-510; 511 = not composed / no light storage), and warmth (bits 9-13, 0-30), a
+    /// tint along one line from cool blue-white (0) through white (15) to deep red (30). Colours off that line are
+    /// carried to the tint with the same red minus blue (a green lamp reads as white, a blue one as cool white).
+    /// 9 bits keep ambient darkened by ray AO smooth: near full ambient a step is about 1% of it.
+    /// </summary>
+    public const string LightCodecWgsl = @"
+fn warmTint(w: f32) -> vec3<f32> {
+    if (w >= 0.5) { let s = 2.0 * w - 1.0; return vec3<f32>(1.0, 1.0 - 0.75 * s, 1.0 - 0.9 * s); }
+    let s = 1.0 - 2.0 * w;
+    return vec3<f32>(1.0 - 0.4 * s, 1.0 - 0.25 * s, 1.0);
+}
+fn isEmptyLight(d: u32) -> bool { return (d & 511u) == 511u; }
+fn decodeLight(d: u32) -> vec3<f32> {
+    let f = f32(d & 511u) / 510.0;
+    return f * f * warmTint(f32((d >> 9u) & 31u) / 30.0);
+}
+fn encodeLight(c: vec3<f32>) -> u32 {
+    let m = max(c.r, max(c.g, c.b));
+    var w = 0.5;
+    if (m > 0.0) {
+        // Along the tint line red minus blue runs from -0.4 (cool end) through 0 (white) to 0.9 (red end), so warmth
+        // follows it alone: continuous, and green (which the line can't show) doesn't push a colour either way.
+        let t = c / m;
+        let d = t.r - t.b;
+        w = select(0.5 - 0.5 * clamp(-d / 0.4, 0.0, 1.0), 0.5 + 0.5 * clamp(d / 0.9, 0.0, 1.0), d >= 0.0);
+    }
+    return u32(round(510.0 * sqrt(clamp(m, 0.0, 1.0)))) | (u32(round(w * 30.0)) << 9u);
+}
+";
 
     /// <summary>WGSL for every shader that reads the store: the grid descriptor (see <see cref="GridDesc"/>) and the
     /// chunk-table lookup. The including shader declares the <c>chunkTable</c> and <c>grids</c> bindings.</summary>
@@ -258,6 +291,11 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
             Console.WriteLine($"[grid-store] a light budget of {worldLightBudget} bricks doesn't fit this device's max buffer size; " +
                               $"using {WorldLightBudget}.");
         _occCapacity   = WorldLightBudget / 26 + 512;
+        // World chunks average about 25 light bricks each (measured over several flights), so the budget says how many
+        // can load: start the world's block of table entries big enough for them, since growing it mid-flight
+        // rewrites every entry (and grows the tables, and makes the lighting rebuild its lists).
+        _worldCapacity = (int)System.Math.Min(System.Numerics.BitOperations.RoundUpToPowerOf2((uint)System.Math.Max(16384, WorldLightBudget / 20)),
+                                              NoWorldSlot);
         _tableCapacity = _worldCapacity + 4096;
         Console.WriteLine($"[grid-store] light budget {WorldLightBudget} bricks: light pool {_lightCapacity} bricks " +
                           $"({(ulong)_lightCapacity * SlotBytes / (1024 * 1024)} MB), occupancy {_occCapacity} chunks " +
@@ -579,12 +617,19 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         int oldBase = g.TableBase, oldCap = _worldCapacity;
         g.TableBase = AllocRange(cap);
         _worldCapacity = cap;
+        // The moved entries in two writes (AllocRange cleared the new block to unloaded), not two per chunk.
+        var entries = new int[oldCap * 8];
+        var bricks = new uint[oldCap * 64];
+        for (int i = 0; i < oldCap; i++) { entries[8 * i] = OccUnloaded; entries[8 * i + 1] = entries[8 * i + 2] = entries[8 * i + 3] = UnusedTag; }
+        Array.Fill(bricks, NoSurface);
         foreach (var rec in g.Chunks.Values)
         {
             rec.TableIndex = g.TableBase + rec.WorldSlot;
-            WriteChunkEntry(rec);
-            WriteBrickRun(rec);
+            EntryWords(rec, entries.AsSpan(8 * rec.WorldSlot, 8));
+            BrickRun(rec, bricks.AsSpan(64 * rec.WorldSlot, 64));
         }
+        ChunkTable.Write<int>((ulong)g.TableBase * ChunkEntryBytes, entries);
+        BrickTable.Write<uint>((ulong)g.TableBase * 64 * 4, bricks);
         FreeRange(oldBase, oldCap);
     }
 
@@ -712,21 +757,33 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
 
     private void WriteChunkEntry(ChunkRecord rec)
     {
+        Span<int> e = stackalloc int[8];
+        EntryWords(rec, e);
+        ChunkTable.Write<int>((ulong)rec.TableIndex * ChunkEntryBytes, e);
+    }
+
+    /// <summary>A chunk's table entry: (occupancy slot or code, cx, cy, cz), then which 8³ bricks hold any solid, so
+    /// rays can step over empty bricks whole.</summary>
+    private static void EntryWords(ChunkRecord rec, Span<int> e)
+    {
         int code = rec.OccSlot >= 0 ? rec.OccSlot
                  : rec.Solid == 0 ? OccAllAir
                  : rec.Air == 0 ? OccAllSolid
                  : OccUnloaded;
-        // Second half: which 8³ bricks hold any solid, so rays can step over empty bricks whole.
-        Span<int> e = stackalloc int[8] { code, rec.Pos.X, rec.Pos.Y, rec.Pos.Z,
-                                          (int)(uint)rec.Solid, (int)(uint)(rec.Solid >> 32), 0, 0 };
-        ChunkTable.Write<int>((ulong)rec.TableIndex * ChunkEntryBytes, e);
+        e[0] = code; e[1] = rec.Pos.X; e[2] = rec.Pos.Y; e[3] = rec.Pos.Z;
+        e[4] = (int)(uint)rec.Solid; e[5] = (int)(uint)(rec.Solid >> 32); e[6] = 0; e[7] = 0;
     }
 
     private void WriteBrickRun(ChunkRecord rec)
     {
-        for (int b = 0; b < 64; b++)
-            _brickRun[b] = rec.BrickSlots != null && rec.BrickSlots[b] >= 0 ? (uint)rec.BrickSlots[b] : NoSurface;
+        BrickRun(rec, _brickRun);
         BrickTable.Write<uint>((ulong)rec.TableIndex * 64 * 4, _brickRun);
+    }
+
+    private static void BrickRun(ChunkRecord rec, Span<uint> run)
+    {
+        for (int b = 0; b < 64; b++)
+            run[b] = rec.BrickSlots != null && rec.BrickSlots[b] >= 0 ? (uint)rec.BrickSlots[b] : NoSurface;
     }
 
     private static void ExtendBox(GridHandle g, ChunkPosition p)

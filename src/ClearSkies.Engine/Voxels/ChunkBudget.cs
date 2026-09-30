@@ -3,7 +3,7 @@ namespace ClearSkies.Engine.Voxels;
 /// <summary>
 /// What limits how much of a volume is loaded at once (see ChunkLoadSystem): the loader asks whether chunks it's about
 /// to load fit, and when they don't, how much to free by unloading the farthest. What a chunk costs is the budget's
-/// own business: GPU light storage for a drawn world, for one (<see cref="LightBudget"/>).
+/// own business: GPU light storage for a drawn world (<see cref="LightBudget"/>).
 /// </summary>
 public interface IChunkBudget
 {

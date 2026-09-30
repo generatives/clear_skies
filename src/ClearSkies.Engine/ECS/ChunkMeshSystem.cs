@@ -214,6 +214,8 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
             var nZ = alone ? null : volume.GetData(pos.Offset(0, 0, -1)); var pZ = alone ? null : volume.GetData(pos.Offset(0, 0, 1));
             var vol = volume;
             bool wireframe = _renderer.WireframeMode;
+            // Held until the job is done, so a chunk unloaded meanwhile doesn't hand its arrays to another chunk.
+            data.Retain(); nX?.Retain(); pX?.Retain(); nY?.Retain(); pY?.Retain(); nZ?.Retain(); pZ?.Retain();
             BackgroundWork.Soon(() =>
             {
                 try
@@ -227,6 +229,10 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                 catch (Exception e)
                 {
                     _results.Enqueue(new Result(entry.Entity, Array.Empty<byte>(), 0, 0, 0, 0, false, Array.Empty<ModelCell>(), e));
+                }
+                finally
+                {
+                    data.Unretain(); nX?.Unretain(); pX?.Unretain(); nY?.Unretain(); pY?.Unretain(); nZ?.Unretain(); pZ?.Unretain();
                 }
             });
 

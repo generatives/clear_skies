@@ -167,10 +167,19 @@ public sealed unsafe class GpuContext : IDisposable
         var caps = new SurfaceCapabilities();
         _api.SurfaceGetCapabilities(_surface, _adapter, &caps);
         for (int i = 0; i < (int)caps.PresentModeCount; i++) _presentModes.Add(caps.PresentModes[i]);
+        // Prefer an sRGB format: shaders then work in linear light and the output is gamma-encoded on write, which
+        // gives dark values far more of the 8-bit steps (a linear 8-bit target bands visibly in dim tunnels).
+        for (int i = 0; i < (int)caps.FormatCount; i++)
+            if (caps.Formats[i] is TextureFormat.Bgra8UnormSrgb or TextureFormat.Rgba8UnormSrgb)
+                return caps.Formats[i];
         if (caps.FormatCount > 0 && caps.Formats != null)
             return caps.Formats[0];
         return TextureFormat.Bgra8Unorm;
     }
+
+    /// <summary>Whether the surface gamma-encodes on write: shaders must then output linear colour, so authored
+    /// (display-space) colours and textures are converted to linear first.</summary>
+    public bool SurfaceIsSrgb => SurfaceFormat.ToString().Contains("Srgb", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>(Re)configure the surface for a new size and rebuild the depth texture.</summary>
     public void Configure(Vector2D<int> size)

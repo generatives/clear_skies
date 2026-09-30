@@ -23,8 +23,8 @@ public static class SkySettings
     /// that, in blocks (3D, so islands far above and below are hazed too), and its colour, which turns towards the
     /// sky's as it thickens.</summary>
     public static bool HazeEnabled = true;
-    public static float HazeStrength = 0.95f;
-    public static float HazeDistance = 2500f;
+    public static float HazeStrength = 0.7f;
+    public static float HazeDistance = 4000f;
 
     /// <summary>The cloud sea: a floor of blocky cloud far below the islands, drawn with the sky. Its lowest block
     /// face's altitude, how much of it is cloud (0-1), its cells' size and its blocks' greatest thickness, in
@@ -34,7 +34,7 @@ public static class SkySettings
     public static float CloudSeaCoverage = 0.6f;
     public static float CloudSeaCell = 32f;
     public static float CloudSeaThickness = 48f;
-    public static Vector3 HazeColor = new(0.47f, 0.60f, 0.78f);
+    public static Vector3 HazeColor = new(0.24f, 0.30f, 0.4f);
 
     public static bool CloudsEnabled = true;
 

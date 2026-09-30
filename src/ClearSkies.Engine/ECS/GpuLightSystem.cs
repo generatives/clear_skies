@@ -30,31 +30,28 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     private readonly GpuRayLightPass _rayLight;
     private readonly GpuContext      _ctx;
 
-    // Flat ambient (0-15, Minecraft-style level), passed to the fragment shader; changing it relights nothing.
+    // Flat ambient (0-15, Minecraft-style level), baked into each voxel's displayed light (darkened by its ray AO) by
+    // the compose pass; changing it relights everything.
     private float _ambientLevel = 2f;
 
     // How strongly ray AO (measured by the bounce rays, GpuRayLightPass bounce_main) darkens the ambient term,
-    // 0-1. Passed to the fragment shader through RayLightingSettings.AoStrength; forced to 0 while bounce is off.
+    // 0-1. Applied by the compose pass (changing it relights everything); forced to 0 while bounce is off.
     private float _aoStrength = 1f;
 
     // Bounce (GpuRayLightPass bounce_main): albedo feeds the pass (changing it re-evaluates everything); each voxel
     // has a fixed set of rays x cycle directions, one slice of rays per evaluation, blended as a running average
     // over the first cycle and then with a weight of one cycle; the hold is how many evaluations a changed area gets
-    // (rounded up to whole cycles), counting near-camera repeats, so one near the camera can finish in one frame;
-    // scale multiplies the stored bounce when the display is composed.
+    // (rounded up to whole cycles); scale multiplies the stored bounce when the display is composed.
     private bool _bounceEnabled = true;
     private float _bounceAlbedo = 0.5f;
-    // With the hold at one full cycle and as many near-camera evaluations as the cycle, a change near the camera runs
-    // exactly its full ray set in one frame and stops. Farther away, one evaluation per frame averages the set in over
-    // cycle frames; cycle 1 (all rays each evaluation) would make those exact every frame too, at cycle x the rays.
+    // Within the near radius of the camera, a change runs its whole hold in the frame it happens (each evaluation reads
+    // the one before, adding a hop), so it is settled that frame; with the hold at one full cycle that is exactly its
+    // full ray set. Farther away, one evaluation per frame averages the set in over the hold's frames.
     private int _bounceRays = 8;
     private int _bounceCycle = 4;   // evaluations per full ray set: each voxel's fixed set is rays x cycle directions
-    private int _bounceHoldFrames = 4;
+    private int _bounceHoldFrames = 4;   // evaluations after a change
+    private float _bounceNearRadius = 64f;
     private float _bounceScale = 1f;
-
-    // A brick that changes again while still being evaluated has its evaluation count capped at this (blend
-    // weight 1/(n+1)) instead of restarting at 0, so continuously changing areas stay a little smoothed.
-    private int _bounceRechangeN = 2;
 
     // Gradual bounce: a changed world brick gets the full hold only within the first radius of the camera; out to
     // the second it gets the middle count, and past it the far count. As the camera comes closer, a brick is topped
@@ -64,10 +61,6 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     private float _bounceMidRadius = 768f;
     private int _bounceMidEvals = 2;
     private int _bounceFarEvals = 1;
-
-    // Held bricks within this many voxels of the camera are evaluated this many times per frame.
-    private int _bounceNearRepeats = 4;
-    private float _bounceNearRadius = 64f;
 
     // Per-frame work caps (world bricks, nearest the camera first; the rest wait for later frames). Ships are always
     // relit and bounced whole, on top of these.
@@ -97,9 +90,10 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     private readonly List<WorldLamp>           _lamps = new();
 
     // Grid/Local identify the lamp block (grid index, grid-space voxel), so a lamp riding a moving ship stays the
-    // same lamp; World is where it is this frame.
+    // same lamp; World is where it is this frame. Open: which of its faces (bit f: +x, -x, +y, -y, +z, -z in grid
+    // space) border a cell light passes through; its light leaves from those.
     private readonly record struct WorldLamp(Vector3D<float> World, int Level, Vector3D<float> Color,
-                                             int Grid, Vector3D<int> Local);
+                                             int Grid, Vector3D<int> Local, int Open);
 
     public GpuLightSystem(World world, ChunkVolume staticVolume, GpuContext ctx, GridStore store)
     {
@@ -129,6 +123,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         ImGui.Separator();
         ImGui.Text("Lighting settings");
         ImGui.SliderFloat("Ambient level", ref _ambientLevel, 0f, 15f, "%.0f");
+        ImGui.SliderFloat("Exposure (lit surfaces)", ref RayLightingSettings.Exposure, 0.5f, 3f, "%.2f");
         ImGui.SliderFloat("Ray AO strength", ref _aoStrength, 0f, 1f, "%.2f");
         ImGui.Checkbox("Bounce light + AO rays", ref _bounceEnabled);
         ImGui.SliderFloat("Bounce albedo", ref _bounceAlbedo, 0f, 0.9f, "%.2f");
@@ -136,9 +131,8 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         ImGui.SliderInt("Evaluations per full ray set", ref _bounceCycle, 1, 64);
         ImGui.TextDisabled($"  = {_bounceRays * _bounceCycle} fixed directions per voxel");
         ImGui.SliderInt("Bounce evaluations after a change", ref _bounceHoldFrames, 1, 64);
-        ImGui.SliderInt("Bounce re-change restart count", ref _bounceRechangeN, 0, 16);
-        ImGui.SliderInt("Near-camera evaluations per frame", ref _bounceNearRepeats, 1, 64);
-        ImGui.SliderFloat("Near-camera radius", ref _bounceNearRadius, 8f, 256f, "%.0f");
+        ImGui.SliderFloat("Settled-in-one-frame radius", ref _bounceNearRadius, 0f, 256f, "%.0f");
+        ImGui.TextDisabled("  changes within it run all their evaluations the frame they happen");
         ImGui.SliderFloat("Bounce display scale", ref _bounceScale, 0f, 4f, "%.2f");
         ImGui.Text("Gradual bounce (world bricks)");
         ImGui.SliderFloat("Full evaluations within (blocks)", ref _bounceFullRadius, 16f, 4096f, "%.0f");
@@ -238,8 +232,8 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         }
         Console.WriteLine($"[probe] slotInfo mismatches: {badInfo} of {hw}; last frame relit={_lastDirtyTotal} bounced={_lastBounceTotal}");
 
-        // Per voxel of every live slot: display sun/RGB/AO and accumulated bounce.
-        long voxels = 0, shadowed = 0, lit = 0, ao = 0, bounce = 0, coloured = 0;
+        // Per voxel of every live slot: display sun/brightness/warmth, accumulated AO and bounce.
+        long voxels = 0, shadowed = 0, lit = 0, ao = 0, bounce = 0, coloured = 0, unlit = 0;
         for (int s = 0; s < hw; s++)
         {
             if (_store.SlotGrid[s] < 0) continue;
@@ -249,14 +243,15 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
                 uint d = (pool[b0 + (k >> 1)] >> (16 * (k & 1))) & 0xFFFF;
                 uint acc = pool[b0 + 256 + k];
                 voxels++;
-                if (((d >> 12) & 3) < 3) shadowed++;
-                if ((d & 0xFFF) != 0) lit++;
-                if ((d & 15) != ((d >> 4) & 15) || (d & 15) != ((d >> 8) & 15)) coloured++;
-                if ((d >> 14) != 0) ao++;
+                if ((d & 511) == 511) { unlit++; continue; } // not composed yet
+                if (((d >> 14) & 3) < 3) shadowed++;
+                if ((d & 511) != 0) lit++;
+                if (((d >> 9) & 31) != 15) coloured++;
+                if ((acc >> 24) != 0) ao++;
                 if ((acc & 0xFFFFFF) != 0) bounce++;
             }
         }
-        Console.WriteLine($"[probe] voxels={voxels} sun-shadowed={shadowed} rgb-lit={lit} coloured={coloured} ao={ao} bounce={bounce} held={_heldQueue.Count}");
+        Console.WriteLine($"[probe] voxels={voxels} not-composed={unlit} sun-shadowed={shadowed} lit={lit} tinted={coloured} ao={ao} bounce={bounce} held={_heldQueue.Count}");
     }
 
     /// <summary>Poses a registered grid for this frame from its root <see cref="Transform"/>.</summary>
@@ -282,9 +277,23 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
                     var world = lg.VoxelToWorld.TransformPoint(local);
                     var col = BlockRegistry.Get(em.Block).EffectiveLightColor;
                     var voxel = new Vector3D<int>(cpos.X * ChunkData.Size + em.Lx, cpos.Y * ChunkData.Size + em.Ly, cpos.Z * ChunkData.Size + em.Lz);
-                    _lamps.Add(new WorldLamp(world, em.Level, col, lg.Handle.Index, voxel));
+                    _lamps.Add(new WorldLamp(world, em.Level, col, lg.Handle.Index, voxel, OpenFaces(lg.Vol, voxel)));
                 }
             }
+    }
+
+    /// <summary>Which faces of the block at <paramref name="v"/> border a cell light passes through (bit f: +x, -x,
+    /// +y, -y, +z, -z). Unloaded neighbours count as open.</summary>
+    private static int OpenFaces(ChunkVolume vol, Vector3D<int> v)
+    {
+        int open = 0;
+        for (int f = 0; f < 6; f++)
+        {
+            int s = (f & 1) == 0 ? 1 : -1;
+            var n = f < 2 ? new Vector3D<int>(s, 0, 0) : f < 4 ? new Vector3D<int>(0, s, 0) : new Vector3D<int>(0, 0, s);
+            if (BlockRegistry.Get(vol.GetBlock(v.X + n.X, v.Y + n.Y, v.Z + n.Z)).Opacity < 15) open |= 1 << f;
+        }
+        return open;
     }
 
     // ── Grid transforms ───────────────────────────────────────────────────────
