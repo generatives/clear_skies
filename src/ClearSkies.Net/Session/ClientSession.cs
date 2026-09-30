@@ -68,20 +68,13 @@ public sealed class ClientSession : NetSession
         }
     }
 
-    public override void Receive()
+    public override void Update(float dt)
     {
-        base.Receive();
-        if (ClockSync.ShouldPing(NowMs))
-        {
-            Writer.Clear();
-            new TimePing(NowMs).Write(Writer);
-            Send(Host, Channel.Unreliable);
-        }
+        base.Update(dt);
+        if (ClockSync.ShouldPing(NowMs)) Send(Host, new TimePing(NowMs), Channel.Unreliable);
         if (!_terrainReadySent && _terrainLoaded(Welcome.Spawn))
         {
-            Writer.Clear();
-            Writer.WriteByte((byte)MessageKind.TerrainReady);
-            Send(Host);
+            Send(Host, new TerrainReady());
             _terrainReadySent = true;
         }
         if (_anchor.IsAlive && _localPlayers.Count > 0)
@@ -91,9 +84,7 @@ public sealed class ClientSession : NetSession
         }
         if (Registry.IdsLeft < EntityRegistry.BlockSize / 4 && !_idRequested)
         {
-            Writer.Clear();
-            Writer.WriteByte((byte)MessageKind.IdBlockRequest);
-            Send(Host);
+            Send(Host, new IdBlockRequest());
             _idRequested = true;
         }
     }
@@ -114,14 +105,14 @@ public sealed class ClientSession : NetSession
         {
             case MessageKind.Event:
             {
-                var h = EventHeader.Read(ref r);
-                Commands.ReceiveEvent(h.Meta, h.Handler, r.ReadRaw(r.Remaining).ToArray());
+                var m = EventMessage.Read(ref r);
+                Commands.ReceiveEvent(m.Meta, m.Handler, m.Payload.ToArray());
                 break;
             }
             case MessageKind.Command:
             {
-                var h = CommandHeader.Read(ref r);
-                if (h.To == Session.LocalPeer) Commands.ReceiveCommand(h.From, h.Handler, h.Seq, r.ReadRaw(r.Remaining).ToArray());
+                var m = CommandMessage.Read(ref r);
+                if (m.To == Session.LocalPeer) Commands.ReceiveCommand(m.From, m.Handler, m.Seq, m.Payload.ToArray());
                 break;
             }
             case MessageKind.Rejection:
@@ -131,7 +122,7 @@ public sealed class ClientSession : NetSession
                 break;
             }
             case MessageKind.StateFrame:
-                Bodies?.ReceiveFrame(PeerId.Host, ref r);
+                Bodies?.ReceiveFrame(ref r);
                 break;
             case MessageKind.TimePong:
                 ClockSync.OnPong(TimePong.Read(ref r), NowMs);
@@ -158,40 +149,20 @@ public sealed class ClientSession : NetSession
 
     // ── routing: everything goes through the host ───────────────────────────
 
-    public override void SendCommand(PeerId authority, ushort handlerId, uint seq, ReadOnlySpan<byte> payload)
-    {
-        Writer.Clear();
-        new CommandHeader(authority, Session.LocalPeer, handlerId, seq).Write(Writer);
-        Writer.WriteRaw(payload);
-        Send(Host);
-    }
+    public override void SendCommand(PeerId authority, ushort handlerId, uint seq, ReadOnlySpan<byte> payload) =>
+        Send(Host, new CommandMessage(authority, Session.LocalPeer, handlerId, seq, payload));
 
-    public override void BroadcastEvent(ushort handlerId, in EventMeta meta, ReadOnlySpan<byte> payload)
-    {
-        Writer.Clear();
-        new EventHeader(handlerId, meta).Write(Writer);
-        Writer.WriteRaw(payload);
-        Send(Host);
-    }
+    public override void BroadcastEvent(ushort handlerId, in EventMeta meta, ReadOnlySpan<byte> payload) =>
+        Send([Host], new EventMessage(handlerId, meta, payload));
 
-    public override void SendRejection(PeerId to, uint seq)
-    {
-        Writer.Clear();
-        new Rejection(to, Session.LocalPeer, seq).Write(Writer);
-        Send(Host);
-    }
+    public override void SendRejection(PeerId to, uint seq) => Send(Host, new Rejection(to, Session.LocalPeer, seq));
 
-    internal void SendToHost(ReadOnlySpan<byte> packet, Channel channel) => Transport?.Send(Host, packet, channel);
+    internal void SendToHost(ReadOnlySpan<byte> packet, Channel channel) => Forward(Host, packet, channel);
 
     public override void Dispose()
     {
-        if (Transport is { } t)
-        {
-            Writer.Clear();
-            new DisconnectMessage("left").Write(Writer);
-            t.Send(Host, Writer.Written, Channel.Reliable);
-            t.Poll();
-        }
+        Send(Host, new DisconnectMessage("left"));
+        Transport?.Poll();
         base.Dispose();
     }
 }
@@ -233,7 +204,7 @@ public sealed class JoinRequest : IDisposable
         if (_connected && !_helloSent)
         {
             var w = new NetWriter();
-            _hello.Write(w);
+            _hello.Write(w); // before the session exists
             _transport.Send(new ConnectionId(0), w.Written, Channel.Reliable);
             _helloSent = true;
         }

@@ -75,13 +75,12 @@ public sealed class HeadlessScene : IDisposable
         _interpolation = new TickInterpolationSystem(World, new Engine.Core.Time()); // last, as in the game
     }
 
-    /// <summary>Puts a network session's systems in the tick: receive first, body sync and send last.</summary>
+    /// <summary>Puts a network session in the tick: the session first, body sync last.</summary>
     public void AttachNet(ClearSkies.Net.Session.NetSession net)
     {
         Net = net;
-        _tick.Insert(0, new ClearSkies.Net.Session.NetReceiveSystem(net));
+        _tick.Insert(0, net);
         _tick.Add(new ClearSkies.Net.Sync.BodySync(net, World, Physics));
-        _tick.Add(new ClearSkies.Net.Session.NetSendSystem(net));
         RemoteBodies = new ClearSkies.Net.Sync.RemoteBodySystem(World, Registry, Clock);
     }
 

@@ -14,21 +14,13 @@ namespace ClearSkies.Tests;
 public class DescriptionTests
 {
     /// <summary>Describes <paramref name="entity"/> now and returns its description.</summary>
-    internal static Description DescribeNow(HeadlessScene scene, Entity entity)
-    {
-        Description? got = null;
-        void OnDescribed(Description d) { if (d.Entity == entity) got = d; }
-        scene.Commands.Descriptions.Described += OnDescribed;
-        DescribeRequest.Request(entity, DescribePurpose.Hash);
-        scene.Commands.DescribeRequested();
-        scene.Commands.Descriptions.Described -= OnDescribed;
-        return got ?? throw new InvalidOperationException("Nothing described it.");
-    }
+    internal static EntityDescription DescribeNow(HeadlessScene scene, Entity entity) => scene.Commands.Describe(entity);
 
-    /// <summary>Applies a description in <paramref name="scene"/>, as a spawn event from the host.</summary>
-    internal static void Spawn(HeadlessScene scene, Description d, uint eventNumber = 1)
+    /// <summary>Applies a description in <paramref name="scene"/>, as a spawn event from the host (owned by the host).</summary>
+    internal static void Spawn(HeadlessScene scene, EntityDescription d, uint eventNumber = 1)
     {
-        scene.Commands.ReceiveEvent(new EventMeta(PeerId.Host, 1, PeerId.Host, d.Id, eventNumber, 0), d.HandlerId, d.Payload);
+        var spawn = scene.Commands.SpawnCommand(d.Kind, d.Id, PeerId.Host, d.Data);
+        scene.Commands.ReceiveEvent(new EventMeta(PeerId.Host, 1, PeerId.Host, d.Id, eventNumber, 0), d.Kind, spawn);
         scene.Commands.Update(0);
     }
 
@@ -190,33 +182,12 @@ public class DescriptionTests
     }
 
     [Fact]
-    public void RequestsMergeAndAreRemovedAfterDescribing()
-    {
-        using var scene = new HeadlessScene();
-        var grid = Ship(scene);
-        DescribeRequest.Request(grid, DescribePurpose.Send, PeerSet.Of(new PeerId(2)));
-        DescribeRequest.Request(grid, DescribePurpose.Store, PeerSet.Of(new PeerId(3)));
-        var req = grid.Get<DescribeRequest>();
-        Assert.Equal(DescribePurpose.Send | DescribePurpose.Store, req.Purpose);
-        Assert.True(req.SendTo.Contains(new PeerId(2)) && req.SendTo.Contains(new PeerId(3)));
-        var seen = new List<Description>();
-        scene.Commands.Descriptions.Described += seen.Add;
-        scene.Tick();
-        Assert.False(grid.Has<DescribeRequest>());
-        Assert.Equal(req, Assert.Single(seen).Request);
-    }
-
-    [Fact]
     public void GridsAreDescribedBeforePlayers()
     {
         using var scene = new HeadlessScene();
         var player = scene.SpawnLocalPlayer(new Vector3(0, 70, 0));
         var grid = Ship(scene);
-        DescribeRequest.Request(player, DescribePurpose.Send);
-        DescribeRequest.Request(grid, DescribePurpose.Send);
-        var order = new List<Entity>();
-        scene.Commands.Descriptions.Described += d => order.Add(d.Entity);
-        scene.Commands.DescribeRequested();
+        var order = scene.Commands.Describe([player, grid]).Select(d => d.Entity);
         Assert.Equal(new[] { grid, player }, order);
     }
 

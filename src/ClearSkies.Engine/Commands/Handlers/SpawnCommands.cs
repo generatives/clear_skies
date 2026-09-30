@@ -34,20 +34,18 @@ public struct Spawn<TDescription> : ICommand where TDescription : class, IEntity
 /// isn't live: one that is is rejected, or, arriving as an event, left alone. A subclass says how to create its kind
 /// and describe it, and what makes a description valid.
 /// </summary>
-public abstract class SpawnHandler<TDescription, TKind> : CommandHandler<Spawn<TDescription>>, IDescriber
+public abstract class SpawnHandler<TDescription, TKind> : CommandHandler<Spawn<TDescription>>, ISpawnHandler
     where TDescription : class, IEntityDescription<TDescription>
 {
     protected readonly World World;
     protected readonly EntityRegistry Registry;
     protected readonly Session Session;
-    private readonly EntitySet _requested;
 
     protected SpawnHandler(World world, EntityRegistry registry, Session session)
     {
         World = world;
         Registry = registry;
         Session = session;
-        _requested = world.GetEntities().With<DescribeRequest>().With<TKind>().With<EntityId>().AsSet();
     }
 
     /// <summary>Order among describers each tick: supports (grids) before what they support (players).</summary>
@@ -98,14 +96,12 @@ public abstract class SpawnHandler<TDescription, TKind> : CommandHandler<Spawn<T
         if (e.Select && ctx.Origin == Session.LocalPeer) Select(entity);
     }
 
-    public void Describe(DescriptionSink sink)
-    {
-        foreach (var entity in _requested.GetEntities().ToArray())
-        {
-            var owner = entity.Has<NetOwner>() ? entity.Get<NetOwner>().Owner : Session.LocalPeer;
-            sink.Add(entity, new Spawn<TDescription> { Id = entity.Get<EntityId>(), Owner = owner, Description = DescriptionOf(entity) });
-        }
-    }
+    public bool Describes(Entity entity) => entity.Has<TKind>() && entity.Has<EntityId>();
+
+    public byte[] Describe(Entity entity) => DescriptionBytes.Of(DescriptionOf(entity));
+
+    public byte[] SpawnCommand(EntityId id, PeerId owner, ReadOnlySpan<byte> description) =>
+        Serialize(new Spawn<TDescription> { Id = id, Owner = owner, Description = DescriptionBytes.Read<TDescription>(description) });
 }
 
 /// <summary>Spawns grids (G, loading a .grid file, loading from storage, joining). The host owns a new grid.</summary>

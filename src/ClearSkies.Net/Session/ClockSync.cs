@@ -57,15 +57,17 @@ public sealed class ClockSync
         double hostNow = pong.HostTick + pong.HostFraction + rtt / 2 / TickMs;
         _samples.Add((rtt, hostNow - LocalTick));
         if (_samples.Count > SampleCount) _samples.RemoveAt(0);
-
-        var best = _samples.OrderBy(s => s.RttMs).Take(System.Math.Max(1, _samples.Count / 2)).ToList();
-        RoundTripMs = best.Average(s => s.RttMs);
-        Offset = best.Average(s => s.Offset);
         Correct(nowMs);
     }
 
+    /// <summary>Estimates the offset from the samples with the lowest round trips (the least delayed), then snaps the
+    /// clock if it's far out, or slews it.</summary>
     private void Correct(double nowMs)
     {
+        var best = _samples.OrderBy(s => s.RttMs).Take(System.Math.Max(1, _samples.Count / 2)).ToList();
+        RoundTripMs = best.Average(s => s.RttMs);
+        Offset = best.Average(s => s.Offset);
+
         while (_snapTimes.Count > 0 && nowMs - _snapTimes.Peek() > 60_000) _snapTimes.Dequeue();
         if (System.Math.Abs(Offset) > SnapTicks)
         {
@@ -80,10 +82,12 @@ public sealed class ClockSync
             Snaps++;
             _snapTimes.Enqueue(nowMs);
             Snapped?.Invoke(applied);
-            return;
         }
-        // Slew: faster when behind, slower when ahead, proportionally, until within half a tick.
-        _clock.Rate = System.Math.Abs(Offset) < 0.5 ? 1 : 1 + System.Math.Clamp(Offset * 0.01, -MaxSlew, MaxSlew);
+        else
+        {
+            // Slew: faster when behind, slower when ahead, proportionally, until within half a tick.
+            _clock.Rate = System.Math.Abs(Offset) < 0.5 ? 1 : 1 + System.Math.Clamp(Offset * 0.01, -MaxSlew, MaxSlew);
+        }
     }
 
     /// <summary>Snaps straight to a known host tick (on Welcome, before any pings).</summary>
