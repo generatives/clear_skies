@@ -36,8 +36,14 @@ public sealed record LaunchOptions
     public int LightBudgetMb { get; init; } = 512;
 
     /// <summary>--view-distance N: how far out (in blocks, horizontally) islands stream, if the budget reaches. The GPU's
-    /// world index covers it both ways at 2 bytes per chunk position (~48 MB at 10000).</summary>
+    /// world index covers it both ways at 2 bytes per chunk position (~48 MB at 10000).
+    /// 2000 by default; headless, 256 (only what colliders need).</summary>
     public float ViewDistance { get; init; } = 2000f;
+
+    /// <summary>--headless: no window, GPU, input or UI; just the simulation and the network, on a timer. Hosting, it's a
+    /// dedicated server (no player of its own); joining, a player that stands where it spawns (a bot, for testing).
+    /// </summary>
+    public bool Headless { get; init; }
 
     /// <summary>--flight-test: fly once the world has loaded, then quit.</summary>
     public bool FlightTest { get; init; }
@@ -45,7 +51,8 @@ public sealed record LaunchOptions
     public static LaunchOptions Parse(string[] args)
     {
         string? Value(string name) { int i = Array.IndexOf(args, name); return i >= 0 && i + 1 < args.Length ? args[i + 1] : null; }
-        var o = new LaunchOptions();
+        bool headless = args.Contains("--headless");
+        var o = new LaunchOptions { Headless = headless, ViewDistance = headless ? 256f : 2000f };
         if (Value("--name") is { Length: > 0 } name) o = o with { PlayerName = name };
         if (Value("--join") is { Length: > 0 } join) o = o with { JoinAddress = join };
         if (Value("--host") is { } port) o = o with { HostPort = int.Parse(port, CultureInfo.InvariantCulture) };

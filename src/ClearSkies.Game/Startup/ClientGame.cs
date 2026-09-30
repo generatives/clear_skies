@@ -26,7 +26,7 @@ namespace ClearSkies.Game.Startup;
 /// </summary>
 public static class ClientGame
 {
-    public static void Run(EngineHost host, LaunchOptions options)
+    public static void Run(WindowedEngineHost host, LaunchOptions options)
     {
         var (transport, welcome) = Connect(options);
         var session = new Session(SessionRole.Client, welcome.Peer);
@@ -35,7 +35,7 @@ public static class ClientGame
                                   view.PlayerModel);
         using var net = new ClientSession(transport, welcome, session, world.Commands, world.Registry, host.World, host.Clock,
                                           world.TerrainLoaded);
-        net.Ended += reason => { Console.WriteLine($"[net] session ended: {reason}"); host.Window.Native.Close(); };
+        net.Ended += reason => { Console.WriteLine($"[net] session ended: {reason}"); host.Quit(); };
         var input = host.Input;
         var renderer = host.Renderer;
         var commands = world.Commands;
@@ -84,7 +84,7 @@ public static class ClientGame
         var spawn = WorldSpawn.For(welcome.Seed);
         bool flightTest = options.FlightTest;
         host.AddSystem(new StreamingFlightTest(host, world.StaticVolume, view.GridStore, flightTest,
-                                               flightTest ? () => host.Window.Native.Close() : null, (spawn.Yaw, spawn.Pitch)),
+                                               flightTest ? () => host.Quit() : null, (spawn.Yaw, spawn.Pitch)),
                        SystemStage.Frame);
         var pilot = new GridPilotSystem(host.World, input, host.Physics, world.StaticVolume, world.PhysicsBody, commands)
         {

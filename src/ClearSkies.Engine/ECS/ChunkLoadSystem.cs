@@ -222,7 +222,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         bool hasCentre = TryGetInterestCentre(out var centre);
         if (hasCentre)
         {
-            var centreColumn = ((int)MathF.Floor(centre.X / S), (int)MathF.Floor(centre.Z / S));
+            var centreColumn = ViewColumn(centre);
             bool idle = _scanDone && _queueHead == _queue.Count && _inFlight.Count == 0;
             if (centreColumn != _lastCentreColumn || (idle && (_skippedInFlight || _queueTruncated)))
             {
@@ -268,11 +268,19 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         _steps.Lap(FogStep);
     }
 
+    /// <summary>How many times the queue has been rebuilt (the view moved, or loading caught up).</summary>
+    public int Rebuilds { get; private set; }
+
+    /// <summary>Chunks loaded, and column jobs still loading.</summary>
+    public int LoadedChunks => _staticVolume.LoadedCount;
+    public int ColumnsInFlight => _inFlight.Count;
+
     /// <summary>Starts over from the centre's new column: lists what left the view distance to unload, and restarts
     /// the scan for columns in view with chunks still to fetch, closest first. Both then go on a little each frame
     /// (<see cref="UnloadSome"/>, <see cref="ScanSome"/>).</summary>
     private void Rebuild()
     {
+        Rebuilds++;
         // Whatever the last rebuild didn't get to unload goes now: a chunk that stays loaded out of view could share a
         // cell of the GPU store's world index with one coming into view on the other side (see LightBudget.WorldIndexDim).
         UnloadSome(double.PositiveInfinity);
@@ -332,6 +340,21 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         Console.WriteLine($"[load] rebuild: queued {_queue.Count}{(_queueTruncated ? "+" : "")} columns, loaded " +
                           $"{_staticVolume.LoadedCount} chunks ({_loadBudget.Describe(_staticVolume)}), unloaded {_toUnload.Count}, " +
                           $"evicted {_evictions} columns so far");
+    }
+
+    /// <summary>Blocks the centre must be past its column's edge before the view moves on, so standing on a column
+    /// boundary doesn't unload and reload the edge of the view every wobble.</summary>
+    private const float ViewHysteresis = 2f;
+
+    /// <summary>The column the view is streamed around: the interest centre's, once it's clearly left the last one.</summary>
+    private (int x, int z) ViewColumn(Vector3D<float> centre)
+    {
+        var column = ((int)MathF.Floor(centre.X / S), (int)MathF.Floor(centre.Z / S));
+        if (_lastCentreColumn.x == int.MinValue || column == _lastCentreColumn) return column;
+        float x0 = _lastCentreColumn.x * S, z0 = _lastCentreColumn.z * S;
+        bool near = centre.X >= x0 - ViewHysteresis && centre.X < x0 + S + ViewHysteresis &&
+                    centre.Z >= z0 - ViewHysteresis && centre.Z < z0 + S + ViewHysteresis;
+        return near ? _lastCentreColumn : column;
     }
 
     private bool InView(int x, int z) => Sq(x - _lastCentreColumn.x) + Sq(z - _lastCentreColumn.z) <= Sq(_viewColumns);
