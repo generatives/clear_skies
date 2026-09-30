@@ -78,9 +78,6 @@ public sealed class EditVoxelsHandler : PredictedCommandHandler<EditVoxels, Edit
 
     public override ushort Id => CommandIds.EditVoxels;
 
-    /// <summary>Called for a grid left empty by an edit, on its authority (the despawn).</summary>
-    public Action<Entity>? DespawnEmptyGrid { get; set; }
-
     public override void Write(NetWriter w, in EditVoxels c)
     {
         c.Volume.Write(w);
@@ -155,11 +152,9 @@ public sealed class EditVoxelsHandler : PredictedCommandHandler<EditVoxels, Edit
 
     public override void AfterApply(in EditVoxels e, in CommandContext ctx)
     {
+        // Only the authority (the grid's owner) runs AfterApply, so the owner despawns it, for everyone.
         if (_blocks.Registry.Find(e.Volume) is { } root && root.Has<DynamicGrid>() && root.Get<ChunkGrid>().Volume.IsEmpty())
-        {
-            if (DespawnEmptyGrid is { } despawn) despawn(root);
-            else Hierarchy.DestroyRecursive(root); // its chunks with it
-        }
+            Owner.Send(new DespawnEntity { Entity = e.Volume });
     }
 
     // ── undo ────────────────────────────────────────────────────────────────

@@ -26,6 +26,10 @@ public struct PhysicsBodyComponent
     /// <summary>Where the body's origin is in the entity's own space: a grid's centre of mass; zero otherwise.</summary>
     public Vector3D<float> Offset;
 
+    /// <summary>Where the body is with the entity at <paramref name="t"/>.</summary>
+    public readonly Vector3 BodyPosition(in Transform t)
+        => PhysicsConv.ToBepu(t.Position) + Vector3.Transform(PhysicsConv.ToBepu(Offset), PhysicsConv.ToBepu(t.Rotation));
+
     /// <summary>Where the entity is (its Transform's position) with its body at <paramref name="position"/>,
     /// <paramref name="rotation"/>.</summary>
     public readonly Vector3D<float> EntityPosition(Vector3 position, Quaternion rotation)
