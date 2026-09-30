@@ -1,0 +1,78 @@
+# Builds self-contained, single-file game executables (the .NET runtime included) for each platform and publishes
+# them as a GitHub Release every time main changes. Each release is tagged build-<run number>.
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Releases are created in push order; a newer push waits for the one before it instead of cancelling it.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - run: dotnet test src/ClearSkies.Tests -c Release
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rid: [win-x64, win-arm64, linux-x64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      # IncludeAllContentForSelfExtract bundles Resources/ and the native libraries into the one file; it unpacks
+      # them to a temp folder on first run.
+      - name: Publish
+        run: >
+          dotnet publish src/ClearSkies.Game -c Release -r ${{ matrix.rid }} --self-contained
+          -p:PublishSingleFile=true -p:IncludeAllContentForSelfExtract=true
+          -p:EnableCompressionInSingleFile=true -p:DebugType=none -o publish
+
+      - name: Package
+        run: |
+          mkdir dist
+          cd publish
+          if [[ "${{ matrix.rid }}" == win-* ]]; then
+            mv ClearSkies.Game.exe ClearSkies.exe
+            zip -9 ../dist/ClearSkies-${{ matrix.rid }}.zip ClearSkies.exe
+          else
+            mv ClearSkies.Game ClearSkies
+            tar -czf ../dist/ClearSkies-${{ matrix.rid }}.tar.gz ClearSkies
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClearSkies-${{ matrix.rid }}
+          path: dist/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "build-${{ github.run_number }}" dist/*
+          --repo "${{ github.repository }}" --target "${{ github.sha }}"
+          --title "Build ${{ github.run_number }}" --generate-notes --latest
