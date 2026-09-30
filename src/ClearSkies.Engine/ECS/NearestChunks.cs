@@ -10,10 +10,16 @@ namespace ClearSkies.Engine.ECS;
 /// flag a few chunks per frame (meshing, GPU upload). Taking them in the set's own order does the newest — i.e. the
 /// furthest, since streaming loads closest first — first: removing an entity from a DefaultEcs set moves the set's
 /// last entity into its slot, so each frame's batch starts with the most recently flagged chunks.
+///
+/// World chunks go by horizontal distance, height only breaking ties: the fog that hides the edge of what's drawn is
+/// horizontal (see ChunkLoadSystem), so this way whole columns come in nearest first, the order the fog clears in. By
+/// 3D distance, a chunk far below the camera's own column would wait behind everything nearer in 3D and hold the fog
+/// at the camera meanwhile, though no fog can hide it.
 /// </summary>
 internal static class NearestChunks
 {
     private const int S = ChunkData.Size;
+    private const float HeightWeight = 1e-3f; // a tie-break: a column's chunks nearest the camera's height first
 
     /// <summary>Fills <paramref name="into"/> with up to <paramref name="count"/> entities of <paramref name="set"/>
     /// (which must have <see cref="Chunk"/>), closest first. Ship chunks come before any world chunk: ships are few
@@ -32,7 +38,7 @@ internal static class NearestChunks
             if (haveCam && entry.Volume.Gpu.IsWorld)
             {
                 var c = entry.Position.WorldOrigin + new Vector3D<float>(S * 0.5f) - cam.Position;
-                d = c.X * c.X + c.Y * c.Y + c.Z * c.Z;
+                d = c.X * c.X + c.Z * c.Z + HeightWeight * c.Y * c.Y;
             }
             if (into.Count == count && d >= best[count - 1]) continue;
 
