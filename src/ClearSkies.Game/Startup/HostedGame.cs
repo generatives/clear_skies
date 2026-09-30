@@ -19,7 +19,7 @@ namespace ClearSkies.Game.Startup;
 /// </summary>
 internal static class HostedGame
 {
-    public static void Run(EngineHost host, LaunchOptions options, LaggedTransport? transport)
+    public static void Run(WindowedEngineHost host, LaunchOptions options, LaggedTransport? transport)
     {
         using var save = WorldSave.Open(options);
         using var view = new GameView(host, options);
@@ -77,7 +77,7 @@ internal static class HostedGame
         var spawn = WorldSpawn.For(save.Seed);
         bool flightTest = options.FlightTest;
         host.AddSystem(new StreamingFlightTest(host, world.StaticVolume, view.GridStore, flightTest,
-                                               flightTest ? () => host.Window.Native.Close() : null, (spawn.Yaw, spawn.Pitch)),
+                                               flightTest ? () => host.Quit() : null, (spawn.Yaw, spawn.Pitch)),
                        SystemStage.Frame);
         var pilot = new GridPilotSystem(host.World, input, host.Physics, world.StaticVolume, world.PhysicsBody, commands)
         {
@@ -115,17 +115,19 @@ internal static class HostedGame
 /// <summary>Playing alone: a hosted game nobody can join.</summary>
 public static class SinglePlayerGame
 {
-    public static void Run(EngineHost host, LaunchOptions options) => HostedGame.Run(host, options, transport: null);
+    public static void Run(WindowedEngineHost host, LaunchOptions options) => HostedGame.Run(host, options, transport: null);
 }
 
 /// <summary>Hosting a game others can join, on <see cref="LaunchOptions.HostPort"/>.</summary>
 public static class HostGame
 {
-    public static void Run(EngineHost host, LaunchOptions options)
+    public static void Run(WindowedEngineHost host, LaunchOptions options) => HostedGame.Run(host, options, Listen(options));
+
+    /// <summary>Listens for players joining on <see cref="LaunchOptions.HostPort"/>.</summary>
+    public static LaggedTransport Listen(LaunchOptions options)
     {
         int port = options.HostPort!.Value;
-        var transport = new LaggedTransport(LiteNetTransport.Host(port));
         Console.WriteLine($"[net] hosting on port {port}");
-        HostedGame.Run(host, options, transport);
+        return new LaggedTransport(LiteNetTransport.Host(port));
     }
 }

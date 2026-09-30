@@ -135,7 +135,7 @@ public class DescriptionTests
         });
         scene.Tick();
         var grid = scene.World.GetEntities().With<DynamicGrid>().AsEnumerable().Single();
-        Assert.True(grid.Get<EntityId>().Value >= EntityRegistry.FirstFreeId);
+        Assert.True(grid.Get<EntityId>() is { Value: >= EntityRegistry.FirstFreeId });
         Assert.True(grid.Get<NetOwner>().IsLocal);
         Assert.True(grid.Has<SelectedGridComponent>());
         Assert.True(grid.Has<OwnPresence>() && grid.Has<Engine.Physics.Support.Supportable>());

@@ -3,7 +3,8 @@ namespace ClearSkies.Engine.Voxels;
 /// <summary>
 /// What limits how much of a volume is loaded at once (see ChunkLoadSystem): the loader asks whether chunks it's about
 /// to load fit, and when they don't, how much to free by unloading the farthest. What a chunk costs is the budget's
-/// own business: GPU light storage for a drawn world (<see cref="LightBudget"/>).
+/// own business: GPU light storage for a drawn world (<see cref="LightBudget"/>), just a count of chunks for one
+/// that isn't (<see cref="ChunkCountBudget"/>).
 /// </summary>
 public interface IChunkBudget
 {
@@ -42,4 +43,21 @@ public interface IChunkPreparer
 public abstract class ChunkPreparation
 {
     internal abstract void ApplyTo(ChunkEntry entry);
+}
+
+/// <summary>A budget for a world nothing draws (a dedicated server's, or a bot's): at most <paramref name="maxChunks"/>
+/// chunks, whatever they hold.</summary>
+public sealed class ChunkCountBudget(int maxChunks) : IChunkBudget
+{
+    public bool HasRoomFor(ChunkVolume volume, int adding) => volume.LoadedCount + adding <= maxChunks;
+
+    public ChunkCost ShortfallFor(ChunkVolume volume, int adding)
+    {
+        int over = volume.LoadedCount + adding - maxChunks;
+        return over > 0 ? new ChunkCost(over, 0) : ChunkCost.None;
+    }
+
+    public int CostOf(ChunkVolume volume, ChunkPosition p) => 0;
+
+    public string Describe(ChunkVolume volume) => $"{volume.LoadedCount:N0} / {maxChunks:N0} chunks";
 }

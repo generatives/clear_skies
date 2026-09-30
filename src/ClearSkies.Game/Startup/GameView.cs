@@ -16,7 +16,7 @@ namespace ClearSkies.Game.Startup;
 /// </summary>
 public sealed class GameView : IDisposable
 {
-    public GameView(EngineHost host, LaunchOptions options)
+    public GameView(WindowedEngineHost host, LaunchOptions options)
     {
         Host = host;
         host.Renderer.LoadTextureAtlas(
@@ -45,7 +45,7 @@ public sealed class GameView : IDisposable
         InputSample = new InputSampleSystem(host.World, host.Input, host.Time);
     }
 
-    public EngineHost Host { get; }
+    public WindowedEngineHost Host { get; }
     public BlockModelLibrary BlockModels { get; }
     public ChunkMeshSystem Meshes { get; }
     public PlayerModel PlayerModel { get; }
