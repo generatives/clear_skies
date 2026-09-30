@@ -1,36 +1,25 @@
-using ClearSkies.Engine.Core;
-using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Rendering.Gltf;
 using ClearSkies.Engine.Rendering.WebGpu;
-using DefaultEcs;
 using Silk.NET.Maths;
 
 namespace ClearSkies.Engine.ECS;
 
 /// <summary>
-/// Gives every other player something to draw: there's no player model yet, so a body-sized box the size of the
-/// character capsule, with a visor on the side they face (their Transform turns with their look's yaw). Drawn by
-/// <see cref="ModelRenderSystem"/> like any model. The local player isn't drawn (the camera is in their head).
+/// What other players are drawn as: there's no player model yet, so a body-sized box the size of the character capsule,
+/// with a visor on the side they face (their Transform turns with their look's yaw). SpawnPlayerHandler gives each
+/// player spawned here but owned elsewhere one; <see cref="ModelRenderSystem"/> draws it like any model. The local
+/// player isn't drawn (the camera is in their head).
 /// </summary>
-public sealed class PlayerModelSystem : ISystem, IDisposable
+public sealed class PlayerModel : IDisposable
 {
-    private readonly EntitySet _unmodelled;
     private readonly Renderer _renderer;
     private GpuModel? _model;
 
-    public PlayerModelSystem(World world, Renderer renderer)
-    {
-        _renderer = renderer;
-        _unmodelled = world.GetEntities().With<Player>().With<Transform>().Without<LocalPlayer>().Without<RenderedModel>().AsSet();
-    }
+    public PlayerModel(Renderer renderer) => _renderer = renderer;
 
-    public void Update(float dt)
-    {
-        if (_unmodelled.Count == 0) return;
-        _model ??= _renderer.UploadModel(BuildModel());
-        foreach (var e in _unmodelled.GetEntities().ToArray()) e.Set(new RenderedModel(_model));
-    }
+    /// <summary>A model for one player, with its own pose; the mesh is uploaded with the first.</summary>
+    public RenderedModel Create() => new(_model ??= _renderer.UploadModel(BuildModel()));
 
     /// <summary>A 0.6 × 1.6 × 0.6 body centred on the capsule's centre, and a visor at eye height towards -Z.</summary>
     private static ModelData BuildModel()

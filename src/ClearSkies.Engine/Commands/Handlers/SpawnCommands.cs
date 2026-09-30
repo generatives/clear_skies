@@ -140,20 +140,31 @@ public sealed class SpawnGridHandler : SpawnHandler<GridDescription, DynamicGrid
     protected override void Select(Entity grid) => _selection?.Select(grid);
 }
 
-/// <summary>Spawns players (at startup, and for each player joining). A player owns their own character.</summary>
+/// <summary>Spawns players (at startup, and for each player joining). A player owns their own character. Players owned
+/// elsewhere are drawn with <see cref="PlayerModel"/>, where there's one (not headless).</summary>
 public sealed class SpawnPlayerHandler : SpawnHandler<PlayerDescription, Player>
 {
     private readonly PhysicsWorld _physics;
+    private readonly PlayerModel? _model;
 
-    public SpawnPlayerHandler(World world, EntityRegistry registry, Session session, PhysicsWorld physics)
-        : base(world, registry, session) => _physics = physics;
+    public SpawnPlayerHandler(World world, EntityRegistry registry, Session session, PhysicsWorld physics, PlayerModel? model = null)
+        : base(world, registry, session)
+    {
+        _physics = physics;
+        _model = model;
+    }
 
     public override ushort Id => CommandIds.SpawnPlayer;
 
     /// <summary>After grids, which players may stand on.</summary>
     public override int Order => 10;
 
-    protected override Entity Create(EntityId id, NetOwner owner, PlayerDescription d) => PlayerFactory.Create(World, _physics, id, owner, d);
+    protected override Entity Create(EntityId id, NetOwner owner, PlayerDescription d)
+    {
+        var player = PlayerFactory.Create(World, _physics, id, owner, d);
+        if (!owner.IsLocal && _model is not null) player.Set(_model.Create());
+        return player;
+    }
 
     protected override PlayerDescription DescriptionOf(Entity player) => PlayerFactory.Describe(player);
 }

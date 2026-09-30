@@ -160,7 +160,8 @@ if (inputSample != null) host.AddSystem(inputSample, SystemStage.Simulation);
 var commands = new CommandSystem(session, registry, () => host.Time.Tick);
 var blockEntities = new BlockEntities(host.World, registry);
 var editLimits = new EditLimits();
-GameCommands.RegisterAll(commands, host.World, session, blockEntities, editLimits, registry, host.Physics, gridSelection);
+using var playerModel = headless ? null : new PlayerModel(host.Renderer!); // other players, as boxes
+GameCommands.RegisterAll(commands, host.World, session, blockEntities, editLimits, registry, host.Physics, gridSelection, playerModel);
 
 // Persistence (the host's): entities load within 1,000 blocks of a player and unload past 1,100, written to the save
 // as they go; everything is autosaved every 5 minutes and on exit, in one transaction.
@@ -297,7 +298,6 @@ host.AddSystem(remoteBodies, SystemStage.Frame); // bodies owned elsewhere, abou
 host.AddSystem(hierarchy, SystemStage.Frame);
 host.AddSystem(chunkLoadSystem, SystemStage.Frame);
 // Everything that draws or reads input: not headless.
-PlayerModelSystem? playerModels = null;
 CloudRenderSystem? clouds = null;
 UiRenderSystem? uiRenderer = null;
 if (!headless)
@@ -329,8 +329,6 @@ if (!headless)
     host.AddSystem(new GpuLightSystem(host.World, staticVolume, host.Context!, store), SystemStage.PreRender);
     host.AddSystem(meshes, SystemStage.PreRender);
     host.AddSystem(new BlockModelSystem(host.World, models), SystemStage.PreRender); // block entities -> RenderedModel
-    playerModels = new PlayerModelSystem(host.World, renderer);
-    host.AddSystem(playerModels, SystemStage.PreRender); // other players, as boxes
     // Rendering: the host opens the frame, runs the render stages (systems in the order added within a stage), then
     // closes it with ImGui and presents. Each render system is handed this frame's camera and time.
     clouds = new CloudRenderSystem(renderer, new HeartCloudDensity(seed));
@@ -408,6 +406,5 @@ net.Dispose(); // says goodbye to the host, or closes the game to clients
 saveDb?.Dispose();
 uiRenderer?.Dispose();
 clouds?.Dispose();
-playerModels?.Dispose();
 gridStore?.Dispose();
 
