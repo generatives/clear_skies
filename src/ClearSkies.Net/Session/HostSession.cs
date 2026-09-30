@@ -47,35 +47,23 @@ public sealed class HostSession : NetSession
     private readonly EntityIdAllocator _ids;
     private readonly ulong _seed;
     private readonly ulong _checksum;
-    private readonly Func<string, PlayerId> _playerFor;
-    private readonly Func<PlayerId, (PlayerDescription? Saved, Vector3 Position)> _spawnFor;
+    private readonly IPlayerDirectory _directory;
     private readonly EntitySet _players;
 
-    /// <param name="playerFor">The player a joining name is (the save gives each name a player ID).</param>
-    /// <param name="spawnFor">A joining player's saved description (if they've played this world before) and where
-    /// they'll spawn.</param>
     public HostSession(ITransport? transport, EngineSession session, CommandSystem commands, EntityRegistry registry, World world,
-                       ITickClock clock, EntityIdAllocator ids, ulong seed, ulong generationChecksum,
-                       Func<string, PlayerId> playerFor, Func<PlayerId, (PlayerDescription? Saved, Vector3 Position)> spawnFor)
+                       ITickClock clock, EntityIdAllocator ids, ulong seed, ulong generationChecksum, IPlayerDirectory directory)
         : base(transport, session, commands, registry, world, clock)
     {
         _ids = ids;
         _seed = seed;
         _checksum = generationChecksum;
-        _playerFor = playerFor;
-        _spawnFor = spawnFor;
+        _directory = directory;
         _players = world.GetEntities().With<Player>().AsSet();
         _describable = world.GetEntities().With<EntityId>().With<OwnPresence>().Without<Chunk>().AsSet();
     }
 
     public IReadOnlyCollection<RemotePeer> Peers => _peers.Values;
     public override bool OthersConnected => _peers.Values.Any(p => p.State != PeerState.Connected);
-
-    /// <summary>Called with a leaving player's entity just before it's despawned (to save it, if there's a save).</summary>
-    public Action<Entity>? PlayerLeaving { get; set; }
-
-    /// <summary>Which way a new player faces when they first spawn (yaw, pitch).</summary>
-    public (float Yaw, float Pitch) NewPlayerLook { get; set; }
 
     public IEnumerable<RemotePeer> Joined => _peers.Values.Where(p => p.State == PeerState.Joined);
     private IEnumerable<ConnectionId> JoinedConnections => Joined.Select(p => p.Connection);
@@ -96,7 +84,7 @@ public sealed class HostSession : NetSession
             if (e.Get<NetOwner>().Owner == peer.Peer) e.Set(Session.LocalOwner((ushort)(e.Get<NetOwner>().Epoch + 1)));
         if (!peer.PlayerEntity.IsNone && Registry.TryGet(peer.PlayerEntity, out var player))
         {
-            PlayerLeaving?.Invoke(player);
+            _directory.Leaving(player);
             Commands.Send(new DespawnEntity { Entity = peer.PlayerEntity, KeepStored = true });
         }
         Send(JoinedConnections, new PlayerNotice(false, peer.Peer, peer.Name));
@@ -197,7 +185,7 @@ public sealed class HostSession : NetSession
         if (id == PeerId.None) { Refuse(peer.Connection, "The game is full"); return; }
         string name = hello.Name.Trim();
         if (name.Length == 0) { Refuse(peer.Connection, "A player name is needed"); return; }
-        var player = _playerFor(name);
+        var player = _directory.PlayerFor(name);
         if (_peers.Values.Any(p => p.Player == player && p != peer) || InGame(player))
         {
             Refuse(peer.Connection, $"{name} is already in the game");
@@ -208,7 +196,7 @@ public sealed class HostSession : NetSession
         peer.Name = name;
         peer.Player = player;
         peer.State = PeerState.LoadingTerrain;
-        peer.Spawn = _spawnFor(player).Position;
+        peer.Spawn = _directory.Saved(player)?.Position ?? _directory.NewPlayerSpawn.Position;
         var (first, count) = _ids.NextBlock();
         Send(peer.Connection, new Welcome(id, first, count, _seed, Clock.Tick, peer.Spawn));
         Console.WriteLine($"[net] {name} joining as {id}");
@@ -230,9 +218,9 @@ public sealed class HostSession : NetSession
         peer.State = PeerState.Joined;
 
         // Where they left off if they've played this world before, else new at the spawn point.
-        var (saved, position) = _spawnFor(peer.Player);
-        var description = saved ?? new PlayerDescription
-            { Id = peer.Player, FreeFly = true, Position = position, Yaw = NewPlayerLook.Yaw, Pitch = NewPlayerLook.Pitch };
+        var spawn = _directory.NewPlayerSpawn;
+        var description = _directory.Saved(peer.Player) ?? new PlayerDescription
+            { Id = peer.Player, FreeFly = true, Position = spawn.Position, Yaw = spawn.Yaw, Pitch = spawn.Pitch };
         description.Name = peer.Name;
         peer.PlayerEntity = Registry.Allocate();
         Commands.Send(new Spawn<PlayerDescription> { Id = peer.PlayerEntity, Owner = peer.Peer, Description = description });
