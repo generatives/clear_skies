@@ -31,20 +31,30 @@ const OCC_UNLOADED: i32 = " + GridStore.OccUnloaded + @";
 const OCC_ALL_SOLID: i32 = " + GridStore.OccAllSolid + @";
 const NO_SURFACE: u32 = " + GridStore.NoSurface + @"u;
 const SLOT_WORDS: u32 = " + GridStore.WordsPerSlot + @"u;
-const EMPTY_DISPLAY: u32 = 0x3000u;   // no light storage: full sun, no light, no AO
+const EMPTY_DISPLAY: u32 = 0xFFFFu;   // no light storage (or not lit yet): ambient and full sun
 
-// sunDir.w: sun strength (SunLight.Strength). lightParams.x: ray AO strength, .y: 1 = reference light path (see
-// shadeFast), .z: ambient (0-1), .w: unused. camPos.xyz: camera world position. fog.xy: the world's fog start/end
+// sunDir.w: sun strength (SunLight.Strength). lightParams.x: unused (ray AO is in the voxel light), .y: 1 = reference light path (see
+// shadeFast), .z: ambient (0-1), .w: 1 on an sRGB surface (see lin). camPos.xyz: camera world position. fog.xy: the world's fog start/end
 // (horizontal), fog.zw: the cloud layer's (see CloudLayer), in blocks from the camera. zenith/horizon.rgb: the sky
 // gradient (see SkySettings). horizon.w: the distance haze's strength (0-1), haze.rgb its colour, haze.w its distance.
 // sea: the cloud sea's altitude, coverage (0 = off), cell size and thickness, in blocks (see cloudSea).
-// lightParams2.y/.z: render pass debug toggles (see fs_main).
+// lightParams2.x: exposure, a multiplier on lit surfaces before fog. lightParams2.y/.z: render pass debug toggles
+// (see fs_main).
 struct Camera {
     view: mat4x4<f32>, proj: mat4x4<f32>, sunDir: vec4<f32>, lightParams: vec4<f32>,
     camPos: vec4<f32>, fog: vec4<f32>, zenith: vec4<f32>, horizon: vec4<f32>, haze: vec4<f32>, sea: vec4<f32>,
     lightParams2: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
+
+// Authored colours (vertex colours, sky, haze, clouds, the cloud sea) are display (sRGB) values. On an sRGB surface
+// the shaders work in linear light and the output is encoded on write, so they're converted to linear first; textures
+// are decoded by their sRGB format instead. Unlit colours (sky, clouds) come out as authored; lit surfaces get the
+// light applied in linear, which lifts shadows and dim light and gives dark values many more 8-bit steps.
+fn lin(c: vec3<f32>) -> vec3<f32> {
+    if (camera.lightParams.w < 0.5) { return c; }
+    return select(pow((c + 0.055) / 1.055, vec3<f32>(2.4)), c / 12.92, c <= vec3<f32>(0.04045));
+}
 
 // Sky colour seen along world direction dir (unit): horizon haze blending up to the zenith colour, deepening a
 // little below the horizon (the open void under the islands) so looking down doesn't read as flat grey, plus a
@@ -58,7 +68,7 @@ fn skyColor(dir: vec3<f32>) -> vec3<f32> {
     c        = mix(c, mix(hz, zn, 0.35), pow(max(-up, 0.0), 0.6));
     let toSun = max(dot(dir, -camera.sunDir.xyz), 0.0);
     let glow  = 0.35 * pow(toSun, 8.0) + 0.25 * pow(toSun, 64.0);
-    return c + vec3<f32>(1.0, 0.9, 0.7) * glow * camera.sunDir.w;
+    return lin(c + vec3<f32>(1.0, 0.9, 0.7) * glow * camera.sunDir.w);
 }
 
 // Aerial perspective: a blue-grey tint that builds with (3D) distance, reaching 63% of horizon.w by haze.w blocks,
@@ -66,7 +76,7 @@ fn skyColor(dir: vec3<f32>) -> vec3<f32> {
 // away and melt into the horizon.
 fn applyHaze(color: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
     let k = camera.horizon.w * (1.0 - exp(-length(d) / camera.haze.w));
-    return mix(color, mix(camera.haze.rgb, skyColor(normalize(d)), k), k);
+    return mix(color, mix(lin(camera.haze.rgb), skyColor(normalize(d)), k), k);
 }
 
 // Hazes a lit surface colour at worldPos, then fades it into what fs_sky draws behind it (the sky, or the cloud sea
@@ -203,7 +213,7 @@ fn cloudSea(ro: vec3<f32>, rd: vec3<f32>) -> vec4<f32> {
                 var n = vec3<f32>(0.0, -sign(rd.y), 0.0);
                 if (lo <= t + 1e-3 && axis == 0) { n = vec3<f32>(-f32(stepC.x), 0.0, 0.0); }
                 if (lo <= t + 1e-3 && axis == 1) { n = vec3<f32>(0.0, 0.0, -f32(stepC.y)); }
-                return vec4<f32>(seaShade(n), lo);
+                return vec4<f32>(lin(seaShade(n)), lo);
             }
         }
         if (tNext >= tExit) { break; }
@@ -330,18 +340,19 @@ fn slotDisplay(s: u32, v: vec3<i32>) -> u32 {
 
 fn displayAt(v: vec3<i32>) -> u32 { return slotDisplay(brickSlot(entryOf(model.grid, v >> vec3<u32>(5u)), v), v); }
 
-fn decodeLevel(c: u32) -> f32 { let f = f32(c) / 15.0; return f * f; }
+" + GridStore.LightCodecWgsl + @"
 
-// One cell's light: sky (the flat ambient scaled by the ray AO occlusion, weighted by camera.lightParams.x), RGB
-// (lamp and bounce light) and sun visibility 0-1.
+// One cell's light: sky (the flat ambient, only where there is no stored light), RGB (everything else: ambient
+// darkened by the ray AO, lamps and bounce, see LightCodecWgsl) and sun visibility 0-1.
 struct Cell { sky: f32, rgb: vec3<f32>, sun: f32 };
 
 fn cellAt(v: vec3<i32>) -> Cell {
     let d = displayAt(v);
     var c: Cell;
-    c.sky = camera.lightParams.z * (1.0 - camera.lightParams.x * f32(d >> 14u) / 3.0);
-    c.rgb = vec3<f32>(decodeLevel(d & 15u), decodeLevel((d >> 4u) & 15u), decodeLevel((d >> 8u) & 15u));
-    c.sun = f32((d >> 12u) & 3u) / 3.0;
+    if (isEmptyLight(d)) { c.sky = camera.lightParams.z; c.rgb = vec3<f32>(0.0); c.sun = 1.0; return c; }
+    c.sky = 0.0;
+    c.rgb = decodeLight(d);
+    c.sun = f32((d >> 14u) & 3u) / 3.0;
     return c;
 }
 
@@ -523,9 +534,8 @@ fn weighed(inc: bool, v: vec3<i32>, homeBrick: vec3<i32>, homeSlot: u32, homeEnt
     if (all((v >> vec3<u32>(3u)) == homeBrick)) { d = slotDisplay(homeSlot, v); }
     else if (all((v >> vec3<u32>(5u)) == (homeBrick >> vec3<u32>(2u)))) { d = slotDisplay(brickSlot(homeEntry, v), v); }
     else { d = displayAt(v); }
-    r.a = vec4<f32>(camera.lightParams.z * (1.0 - camera.lightParams.x * f32(d >> 14u) / 3.0),
-                    decodeLevel(d & 15u), decodeLevel((d >> 4u) & 15u), decodeLevel((d >> 8u) & 15u));
-    r.sun = f32((d >> 12u) & 3u) / 3.0;
+    if (isEmptyLight(d)) { r.a = vec4<f32>(camera.lightParams.z, 0.0, 0.0, 0.0); r.sun = 1.0; }
+    else { r.a = vec4<f32>(0.0, decodeLight(d)); r.sun = f32((d >> 14u) & 3u) / 3.0; }
     r.w = 1.0;
     return r;
 }
@@ -629,7 +639,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let layer     = max(i32(round(in.uv.z)), 0);
     var texColor  = vec3<f32>(0.6);
     if ((dbg & 1u) == 0u) { texColor = textureSample(atlasTex, atlasSamp, fract(in.uv.xy), layer).rgb; }
-    let baseColor = select(in.color, texColor, in.uv.z >= 0.0);
+    let baseColor = select(lin(in.color), texColor, in.uv.z >= 0.0);
 
     // Non-chunk draws (selection highlight, HUD, debug meshes) have no light data: full-bright.
     if (model.grid < 0) { return vec4<f32>(baseColor, 1.0); }
@@ -672,8 +682,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // Ambient occlusion darkens inner corners / block junctions; lerp from AO_MIN so corners aren't pure black.
     let aoFactor = mix(AO_MIN, 1.0, ao);
 
-    if ((dbg & 2u) != 0u) { return vec4<f32>(baseColor * lit * aoFactor, 1.0); }
-    return vec4<f32>(applyFog(baseColor * lit * aoFactor, in.worldPos), 1.0);
+    let shaded = baseColor * lit * aoFactor * camera.lightParams2.x;
+    if ((dbg & 2u) != 0u) { return vec4<f32>(shaded, 1.0); }
+    return vec4<f32>(applyFog(shaded, in.worldPos), 1.0);
 }
 
 // Debug overdraw view: every terrain fragment that passes the depth test (in the normal nearest-first draw order)
@@ -703,7 +714,7 @@ fn fs_model(in: VSOut, @builtin(front_facing) front: bool) -> @location(0) vec4<
         lit = max(vec3<f32>(max(c.sky, ndotl * c.sun * camera.sunDir.w)), c.rgb);
     }
     lit = max(lit, vec3<f32>(MIN_AMBIENT));
-    return vec4<f32>(applyFog(tex.rgb * in.color * lit, in.worldPos), 1.0);
+    return vec4<f32>(applyFog(tex.rgb * lin(in.color) * lit * camera.lightParams2.x, in.worldPos), 1.0);
 }
 
 // Cloud boxes (CloudLayer): one instance per cloud cell, 36 vertices each (6 faces x 2 triangles, counter-clockwise
@@ -754,7 +765,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     shade *= 0.9 + 0.1 * max(dot(n, -camera.sunDir.xyz), 0.0) * camera.sunDir.w;
     let d = in.worldPos - camera.camPos.xyz;
     let f = smoothstep(camera.fog.z, camera.fog.w, length(d));
-    return vec4<f32>(mix(applyHaze(in.color * shade, d), skyColor(normalize(d)), f), 1.0);
+    return vec4<f32>(mix(applyHaze(lin(in.color * shade), d), skyColor(normalize(d)), f), 1.0);
 }
 ";
 
@@ -867,7 +878,8 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
 
         // Pre-load identity matrices; never overwritten after this.
         Span<CameraUniform> id = stackalloc CameraUniform[1];
-        id[0] = new CameraUniform { View = Mat4.Identity, Projection = Mat4.Identity };
+        id[0] = new CameraUniform { View = Mat4.Identity, Projection = Mat4.Identity,
+                                    LinearizeColors = _ctx.SurfaceIsSrgb ? 1f : 0f };
         _hudCameraBuffer.Write<CameraUniform>(0, id);
     }
 
@@ -1117,6 +1129,10 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
                            out _atlasTexture, out _atlasTextureView, out _atlasSampler, out _atlasBindGroup);
     }
 
+    /// <summary>Block and model textures are authored in sRGB: on an sRGB surface they're stored as such, so sampling
+    /// decodes them to the linear colour the shaders light.</summary>
+    private TextureFormat TexelFormat => _ctx.SurfaceIsSrgb ? TextureFormat.Rgba8UnormSrgb : TextureFormat.Rgba8Unorm;
+
     /// <summary>Uploads <paramref name="layers"/> (RGBA8, <paramref name="width"/>×<paramref name="height"/> each) as a
     /// <c>texture_2d_array</c> and wraps it with a sampler in a bind group on the group-3 layout.</summary>
     private void CreateTextureArray(int width, int height, byte[][] layers, in SamplerDescriptor samplerDesc,
@@ -1127,7 +1143,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
             Usage         = TextureUsage.TextureBinding | TextureUsage.CopyDst,
             Dimension     = TextureDimension.Dimension2D,
             Size          = new Extent3D((uint)width, (uint)height, (uint)layers.Length),
-            Format        = TextureFormat.Rgba8Unorm,
+            Format        = TexelFormat, // sampled as linear colour when the surface is sRGB
             MipLevelCount = 1,
             SampleCount   = 1,
         };
@@ -1146,7 +1162,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
 
         var viewDesc = new TextureViewDescriptor
         {
-            Format          = TextureFormat.Rgba8Unorm,
+            Format          = TexelFormat,
             Dimension       = TextureViewDimension.Dimension2DArray,
             BaseMipLevel    = 0,
             MipLevelCount   = 1,

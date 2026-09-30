@@ -123,10 +123,20 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // so the two stay proportional.
     private const float UiScale = 2f;
 
+    // ImGui's colours are display (sRGB) values; an sRGB surface encodes what the shader writes, so they go in linear.
+    private readonly float[] _channel = new float[256];
+    private float Channel(uint c) => _channel[c];
+
     public ImGuiController(Renderer renderer, InputManager input)
     {
         _renderer = renderer;
         _ctx = renderer.Context;
+        bool srgb = _ctx.SurfaceIsSrgb;
+        for (int i = 0; i < 256; i++)
+        {
+            float c = i / 255f;
+            _channel[i] = !srgb ? c : c <= 0.04045f ? c / 12.92f : MathF.Pow((c + 0.055f) / 1.055f, 2.4f);
+        }
         _api = _ctx.Api;
         _input = input;
 
@@ -310,9 +320,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
                     Position = src.pos,
                     Uv = src.uv,
                     Color = new Vector4(
-                        (col & 0xFF) / 255f,
-                        ((col >> 8) & 0xFF) / 255f,
-                        ((col >> 16) & 0xFF) / 255f,
+                        Channel(col & 0xFF),
+                        Channel((col >> 8) & 0xFF),
+                        Channel((col >> 16) & 0xFF),
                         ((col >> 24) & 0xFF) / 255f),
                 };
             }

@@ -66,6 +66,15 @@ public class ChunkVolume
     }
 
     public int  LoadedCount                => _chunks.Count;
+
+    /// <summary>How many loaded chunks hold a full block array (32 KB) rather than one uniform block.</summary>
+    public int DenseCount()
+    {
+        int n = 0;
+        foreach (var entry in _chunks.Values)
+            if (!entry.Data.IsUniform(out _)) n++;
+        return n;
+    }
     public bool IsLoaded(ChunkPosition pos) => _chunks.ContainsKey(pos);
 
     /// <summary>True if every loaded chunk is entirely air (no solid blocks anywhere in the volume).</summary>

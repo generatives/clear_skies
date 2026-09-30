@@ -183,6 +183,7 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
 
         _inFlight += 1;
         var data = entry.Data;
+        data.Retain(); // see ChunkData.Release: an unloaded chunk's arrays wait for this job
         BackgroundWork.Soon(() =>
         {
             try
@@ -194,6 +195,10 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
             catch (Exception e)
             {
                 _colliderResults.Enqueue((pos, entry, null, e));
+            }
+            finally
+            {
+                data.Unretain();
             }
         });
         return true;

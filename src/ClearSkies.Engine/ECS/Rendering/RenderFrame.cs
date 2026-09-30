@@ -103,6 +103,8 @@ public sealed class RenderFrame : IDebugUiSystem
             SunStrength    = SunLight.Strength,
             RayAoStrength  = RayLightingSettings.AoStrength,
             Ambient        = RayLightingSettings.Ambient,
+            LinearizeColors = _renderer.Context.SurfaceIsSrgb ? 1f : 0f,
+            Exposure       = RayLightingSettings.Exposure,
             ReferenceLighting = _referenceLighting ? 1f : 0f,
             DebugFlags     = (_dbgNoTextures ? 1 : 0) | (_dbgNoFog ? 2 : 0),
             DebugLighting  = _dbgLighting,

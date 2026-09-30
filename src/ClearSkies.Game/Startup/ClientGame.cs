@@ -43,7 +43,8 @@ public static class ClientGame
         viewSystems.AddRender();
 
         var s = welcome.Spawn;
-        TestScene.AddCamera(host, new Vector3D<float>(s.X, s.Y + PlayerFactory.EyeHeight, s.Z), MathF.PI, -0.15f, options.Camera);
+        var look = WorldSpawn.For(welcome.Seed);
+        TestScene.AddCamera(host, new Vector3D<float>(s.X, s.Y + PlayerFactory.EyeHeight, s.Z), look.Yaw, look.Pitch, options.Camera);
 
         using (new QuitOnSignal(host)) world.Run();
     }
