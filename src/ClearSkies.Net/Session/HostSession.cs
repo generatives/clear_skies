@@ -83,6 +83,7 @@ public sealed class HostSession : NetSession
     public (float Yaw, float Pitch) NewPlayerLook { get; set; }
 
     public IEnumerable<RemotePeer> Joined => _peers.Values.Where(p => p.State == PeerState.Joined);
+    private IEnumerable<ConnectionId> JoinedConnections => Joined.Select(p => p.Connection);
 
     private RemotePeer? PeerById(PeerId id) => _peers.Values.FirstOrDefault(p => p.Peer == id);
 
@@ -103,9 +104,7 @@ public sealed class HostSession : NetSession
             if (PlayerLeaving is { } leaving) leaving(player);
             else Commands.Send(new DespawnEntity { Entity = peer.PlayerEntity, KeepStored = true });
         }
-        Writer.Clear();
-        new PlayerNotice(false, peer.Peer, peer.Name).Write(Writer);
-        foreach (var other in Joined) Send(other.Connection);
+        Send(JoinedConnections, new PlayerNotice(false, peer.Peer, peer.Name));
     }
 
     private PeerId FreePeerId()
@@ -117,9 +116,7 @@ public sealed class HostSession : NetSession
 
     private void Refuse(ConnectionId connection, string reason)
     {
-        Writer.Clear();
-        new DisconnectMessage(reason).Write(Writer);
-        Send(connection);
+        Send(connection, new DisconnectMessage(reason));
         Transport?.Disconnect(connection, reason);
     }
 
@@ -137,33 +134,30 @@ public sealed class HostSession : NetSession
             case MessageKind.TimePing:
             {
                 var ping = TimePing.Read(ref r);
-                Writer.Clear();
-                new TimePong(ping.ClientTimeMs, Clock.Tick, Clock.Alpha).Write(Writer);
-                Send(from, Channel.Unreliable);
+                Send(from, new TimePong(ping.ClientTimeMs, Clock.Tick, Clock.Alpha), Channel.Unreliable);
                 break;
             }
             case MessageKind.Command:
             {
-                var h = CommandHeader.Read(ref r);
-                if (h.To == Session.LocalPeer) Commands.ReceiveCommand(peer.Peer, h.Handler, h.Seq, r.ReadRaw(r.Remaining).ToArray());
-                else if (PeerById(h.To) is { } target) Relay(target, h with { From = peer.Peer }, ref r);
+                var m = CommandMessage.Read(ref r);
+                if (m.To == Session.LocalPeer) Commands.ReceiveCommand(peer.Peer, m.Handler, m.Seq, m.Payload.ToArray());
+                else if (PeerById(m.To) is { } target) Send(target.Connection, m.WithFrom(peer.Peer)); // from whoever sent it, whatever it says
                 break;
             }
             case MessageKind.Event:
             {
                 // A client deciding something it owns (its own player): apply it here, and pass it on.
-                var h = EventHeader.Read(ref r);
-                var payload = r.ReadRaw(r.Remaining).ToArray();
-                Commands.ReceiveEvent(h.Meta, h.Handler, payload);
+                var m = EventMessage.Read(ref r);
+                Commands.ReceiveEvent(m.Meta, m.Handler, m.Payload.ToArray());
                 foreach (var other in Joined)
-                    if (other != peer) Send(other.Connection, packet);
+                    if (other != peer) Forward(other.Connection, packet);
                 break;
             }
             case MessageKind.Rejection:
             {
                 var rej = Rejection.Read(ref r);
                 if (rej.To == Session.LocalPeer) Commands.ReceiveRejection(peer.Peer, rej.Seq);
-                else if (PeerById(rej.To) is { } target) Send(target.Connection, packet);
+                else if (PeerById(rej.To) is { } target) Forward(target.Connection, packet);
                 break;
             }
             case MessageKind.StateFrame:
@@ -172,14 +166,12 @@ public sealed class HostSession : NetSession
                 // Clients only hear each other through the host: passed on straight away, as it came (with the tick
                 // it was taken on).
                 foreach (var other in Joined)
-                    if (other != peer) Transport?.Send(other.Connection, packet, Channel.Unreliable);
+                    if (other != peer) Forward(other.Connection, packet, Channel.Unreliable);
                 break;
             case MessageKind.IdBlockRequest:
             {
                 var (first, count) = _ids.NextBlock();
-                Writer.Clear();
-                new IdBlockMessage(first, count).Write(Writer);
-                Send(from);
+                Send(from, new IdBlockMessage(first, count));
                 break;
             }
             case MessageKind.Disconnect:
@@ -188,15 +180,6 @@ public sealed class HostSession : NetSession
         }
     }
 
-    private void Send(ConnectionId to, ReadOnlySpan<byte> packet, Channel channel = Channel.Reliable) => Transport?.Send(to, packet, channel);
-
-    private void Relay(RemotePeer target, CommandHeader header, ref NetReader rest)
-    {
-        Writer.Clear();
-        header.Write(Writer);
-        Writer.WriteRaw(rest.ReadRaw(rest.Remaining));
-        Send(target.Connection);
-    }
 
     /// <summary>A player already here: the host's own, or a joined client's.</summary>
     private bool InGame(PlayerId player)
@@ -232,9 +215,7 @@ public sealed class HostSession : NetSession
         peer.State = PeerState.LoadingTerrain;
         peer.Spawn = _spawnFor(player).Position;
         var (first, count) = _ids.NextBlock();
-        Writer.Clear();
-        new Welcome(id, first, count, _seed, Clock.Tick, peer.Spawn).Write(Writer);
-        Send(peer.Connection);
+        Send(peer.Connection, new Welcome(id, first, count, _seed, Clock.Tick, peer.Spawn));
         Console.WriteLine($"[net] {name} joining as {id}");
     }
 
@@ -260,10 +241,7 @@ public sealed class HostSession : NetSession
         {
             foreach (var (handler, payload, target) in peer.PendingSnapshot)
             {
-                Writer.Clear();
-                new EventHeader(handler, Commands.StampEvent(target)).Write(Writer);
-                Writer.WriteRaw(payload);
-                Send(peer.Connection);
+                Send([peer.Connection], new EventMessage(handler, Commands.StampEvent(target), payload));
             }
             peer.PendingSnapshot.Clear();
             peer.State = PeerState.Joined;
@@ -286,9 +264,7 @@ public sealed class HostSession : NetSession
             peer.PlayerEntity = spawn.Id;
             Commands.Send(spawn);
 
-            Writer.Clear();
-            new PlayerNotice(true, peer.Peer, peer.Name).Write(Writer);
-            foreach (var other in Joined) Send(other.Connection);
+            Send(JoinedConnections, new PlayerNotice(true, peer.Peer, peer.Name));
             Console.WriteLine($"[net] {peer.Name} ({peer.Peer}) joined");
         }
     }
@@ -298,31 +274,23 @@ public sealed class HostSession : NetSession
     public override void SendCommand(PeerId authority, ushort handlerId, uint seq, ReadOnlySpan<byte> payload)
     {
         if (PeerById(authority) is not { } peer) return; // gone: the command lapses
-        Writer.Clear();
-        new CommandHeader(authority, Session.LocalPeer, handlerId, seq).Write(Writer);
-        Writer.WriteRaw(payload);
-        Send(peer.Connection);
+        Send(peer.Connection, new CommandMessage(authority, Session.LocalPeer, handlerId, seq, payload));
     }
 
     public override void BroadcastEvent(ushort handlerId, in EventMeta meta, ReadOnlySpan<byte> payload)
     {
-        Writer.Clear();
-        new EventHeader(handlerId, meta).Write(Writer);
-        Writer.WriteRaw(payload);
-        foreach (var peer in Joined) Send(peer.Connection);
+        Send(JoinedConnections, new EventMessage(handlerId, meta, payload));
     }
 
     public override void SendRejection(PeerId to, uint seq)
     {
         if (PeerById(to) is not { } peer) return;
-        Writer.Clear();
-        new Rejection(to, Session.LocalPeer, seq).Write(Writer);
-        Send(peer.Connection);
+        Send(peer.Connection, new Rejection(to, Session.LocalPeer, seq));
     }
 
     /// <summary>Sends an unreliable packet to one joined client (body snapshots).</summary>
     internal void SendUnreliable(PeerId to, ReadOnlySpan<byte> packet)
     {
-        if (PeerById(to) is { State: PeerState.Joined } peer) Transport?.Send(peer.Connection, packet, Channel.Unreliable);
+        if (PeerById(to) is { State: PeerState.Joined } peer) Forward(peer.Connection, packet, Channel.Unreliable);
     }
 }

@@ -13,13 +13,15 @@ namespace ClearSkies.Net.Session;
 
 /// <summary>
 /// What host and client sessions share: the transport, packet dispatch, and the engine-side pieces the network feeds
-/// (the command system, the registry, the world, the clock). <see cref="Receive"/> runs first in each tick and
-/// <see cref="Flush"/> last. It's also the command router: commands go to their authority, events to everyone who
-/// applies them, always through the host.
+/// (the command system, the registry, the world, the clock). A system, first in each tick: its update handles
+/// everything that arrived since the last, and whatever the session does each tick. It's also the command router:
+/// commands go to their authority, events to everyone who applies them, always through the host.
+/// <para>Messages go out through <see cref="Send{T}"/>, which writes each into one reused buffer and sends it before
+/// returning, so nothing else ever sees the buffer half-written.</para>
 /// </summary>
-public abstract class NetSession : ICommandRouter, IDisposable
+public abstract class NetSession : ISystem, ICommandRouter, IDisposable
 {
-    protected readonly NetWriter Writer = new(1024);
+    private readonly NetWriter _writer = new(1024);
     protected readonly Stopwatch RealTime = Stopwatch.StartNew();
 
     protected NetSession(ITransport? transport, EngineSession session, CommandSystem commands, EntityRegistry registry, World world, ITickClock clock)
@@ -65,11 +67,9 @@ public abstract class NetSession : ICommandRouter, IDisposable
     /// <summary>Messages received and handed on (for the network panel).</summary>
     public long MessagesIn { get; private set; }
 
-    /// <summary>First in each tick: everything that arrived since the last.</summary>
-    public virtual void Receive() => Transport?.Poll();
-
-    /// <summary>Last in each tick. Transports send as they go; this is for per-tick housekeeping.</summary>
-    public virtual void Flush() { }
+    /// <summary>First in each tick: everything that arrived since the last (handed to <see cref="OnMessage"/>), then
+    /// this tick's own work.</summary>
+    public virtual void Update(float dt) => Transport?.Poll();
 
     protected abstract void OnConnected(ConnectionId connection);
     protected abstract void OnDisconnected(ConnectionId connection, string reason);
@@ -91,7 +91,42 @@ public abstract class NetSession : ICommandRouter, IDisposable
         }
     }
 
-    protected void Send(ConnectionId to, Channel channel = Channel.Reliable) => Transport?.Send(to, Writer.Written, channel);
+    /// <summary>Sends <paramref name="message"/> to <paramref name="to"/>.</summary>
+    protected void Send<T>(ConnectionId to, in T message, Channel channel = Channel.Reliable) where T : struct, IMessage
+    {
+        if (Transport is null) return;
+        _writer.Clear();
+        message.Write(_writer);
+        Transport.Send(to, _writer.Written, channel);
+    }
+
+    /// <summary>Sends <paramref name="message"/> to each of <paramref name="to"/>, written once.</summary>
+    protected void Send<T>(IEnumerable<ConnectionId> to, in T message, Channel channel = Channel.Reliable) where T : struct, IMessage
+    {
+        if (Transport is null) return;
+        _writer.Clear();
+        message.Write(_writer);
+        foreach (var c in to) Transport.Send(c, _writer.Written, channel);
+    }
+
+    protected void Send(ConnectionId to, in CommandMessage message)
+    {
+        if (Transport is null) return;
+        _writer.Clear();
+        message.Write(_writer);
+        Transport.Send(to, _writer.Written, Channel.Reliable);
+    }
+
+    protected void Send(IEnumerable<ConnectionId> to, in EventMessage message)
+    {
+        if (Transport is null) return;
+        _writer.Clear();
+        message.Write(_writer);
+        foreach (var c in to) Transport.Send(c, _writer.Written, Channel.Reliable);
+    }
+
+    /// <summary>Passes on a packet as it came.</summary>
+    protected void Forward(ConnectionId to, ReadOnlySpan<byte> packet, Channel channel = Channel.Reliable) => Transport?.Send(to, packet, channel);
 
     // ── ICommandRouter ──────────────────────────────────────────────────────
 

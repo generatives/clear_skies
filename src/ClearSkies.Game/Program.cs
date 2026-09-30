@@ -138,7 +138,7 @@ host.AddSystem(new LookInputSystem(host.World, host.Input), SystemStage.Input);
 var inputSample = new InputSampleSystem(host.World, host.Input, host.Time);
 host.AddSystem(inputSample, SystemStage.Input); // latches the frame's input
 var interpolation = new TickInterpolationSystem(host.World, host.Time);
-host.AddSystem(new LambdaSystem(() => net?.Receive()), SystemStage.Simulation); // commands, events, snapshots, session messages
+host.AddSystem(new LambdaSystem(() => net?.Update(host.Time.TickSeconds)), SystemStage.Simulation); // commands, events, snapshots, session messages
 var hierarchy = new HierarchyTransformSystem(host.World);
 host.AddSystem(hierarchy, SystemStage.Simulation);
 
@@ -265,7 +265,6 @@ else
 }
 var bodySync = new ClearSkies.Net.Sync.BodySync(net, host.World, host.Physics);
 host.AddSystem(bodySync, SystemStage.Simulation); // snapshots of owned bodies, every second tick
-host.AddSystem(new ClearSkies.Net.Session.NetSendSystem(net), SystemStage.Simulation);
 var remoteBodies = new ClearSkies.Net.Sync.RemoteBodySystem(host.World, registry, host.Clock);
 host.Gui.RegisterDebugUi(new ClearSkies.Net.Debug.NetDebugPanel(net, remoteBodies, transport));
 gridPilot.Disabled = () => net.OthersConnected; // pilot mode and flight tuning: single-player only
