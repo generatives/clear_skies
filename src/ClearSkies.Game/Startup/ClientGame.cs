@@ -23,15 +23,7 @@ public static class ClientGame
 {
     public static void Run(EngineHost host, LaunchOptions options)
     {
-        string joinAddress = options.JoinAddress!;
-        int colon = joinAddress.LastIndexOf(':');
-        string address = colon > 0 ? joinAddress[..colon] : joinAddress;
-        int port = colon > 0 ? int.Parse(joinAddress[(colon + 1)..]) : 7777;
-        Console.WriteLine($"[net] joining {address}:{port} as {options.PlayerName}");
-        var transport = new LaggedTransport(LiteNetTransport.Join(address, port));
-        var welcome = ClientSession.Connect(transport, new Hello(ProtocolVersion.Current, options.PlayerName, GenerationChecksum.Compute()),
-                                            TimeSpan.FromSeconds(15));
-
+        var (transport, welcome) = Connect(options);
         var session = new Session(SessionRole.Client, welcome.Peer);
         using var view = new GameView(host, options);
         var world = new GameWorld(host, options, session, welcome.Seed, new NoChunkStore(), view.Budget, view.ChunkPreparer,
@@ -54,5 +46,20 @@ public static class ClientGame
         TestScene.AddCamera(host, new Vector3D<float>(s.X, s.Y + PlayerFactory.EyeHeight, s.Z), MathF.PI, -0.15f, options.Camera);
 
         using (new QuitOnSignal(host)) world.Run();
+    }
+
+    /// <summary>Connects to <see cref="LaunchOptions.JoinAddress"/> (port 7777 by default) and says hello: returns once
+    /// the host has welcomed us (or throws with its reason for refusing).</summary>
+    public static (LaggedTransport Transport, Welcome Welcome) Connect(LaunchOptions options)
+    {
+        string joinAddress = options.JoinAddress!;
+        int colon = joinAddress.LastIndexOf(':');
+        string address = colon > 0 ? joinAddress[..colon] : joinAddress;
+        int port = colon > 0 ? int.Parse(joinAddress[(colon + 1)..]) : 7777;
+        Console.WriteLine($"[net] joining {address}:{port} as {options.PlayerName}");
+        var transport = new LaggedTransport(LiteNetTransport.Join(address, port));
+        var welcome = ClientSession.Connect(transport, new Hello(ProtocolVersion.Current, options.PlayerName, GenerationChecksum.Compute()),
+                                            TimeSpan.FromSeconds(15));
+        return (transport, welcome);
     }
 }

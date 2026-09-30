@@ -27,7 +27,7 @@ public sealed class ViewSystems : IDisposable
     {
         _world = world;
         _view = view;
-        _host = world.Host;
+        _host = view.Host;
         _inputSample = new InputSampleSystem(_host.World, _host.Input, _host.Time);
         Pilot = new GridPilotSystem(_host.World, _host.Input, _host.Physics, world.StaticVolume, world.Simulation.PhysicsBody,
                                     world.Commands);
