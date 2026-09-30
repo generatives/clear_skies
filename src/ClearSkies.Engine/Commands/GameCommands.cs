@@ -21,8 +21,10 @@ namespace ClearSkies.Engine.Commands;
 public static class GameCommands
 {
     /// <summary>Registers every gameplay command's handler.</summary>
+    /// <param name="playerModel">What other players are drawn as; none headless.</param>
     public static void RegisterAll(CommandSystem commands, World world, Session session, BlockEntities blocks,
-                                   EditLimits limits, EntityRegistry registry, PhysicsWorld physics, GridSelection selection)
+                                   EditLimits limits, EntityRegistry registry, PhysicsWorld physics, GridSelection selection,
+                                   PlayerModel? playerModel = null)
     {
         commands.Register(new EditVoxelsHandler(blocks, limits));
         commands.Register(new SetShipThrustHandler(registry));
@@ -31,7 +33,7 @@ public static class GameCommands
         commands.Register(new RightGridHandler(registry, physics));
         commands.Register(new SetMoveModeHandler(registry));
         commands.Register(new SpawnGridHandler(world, registry, session, physics, selection));
-        commands.Register(new SpawnPlayerHandler(world, registry, session, physics));
+        commands.Register(new SpawnPlayerHandler(world, registry, session, physics, playerModel));
         commands.Register(new DespawnEntityHandler(registry));
     }
 }
