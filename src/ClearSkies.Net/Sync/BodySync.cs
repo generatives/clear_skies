@@ -6,6 +6,7 @@ using ClearSkies.Engine.Gui;
 using ClearSkies.Engine.Physics;
 using ClearSkies.Engine.Physics.Support;
 using ClearSkies.Engine.Serialization;
+using ClearSkies.Engine.Voxels;
 using ClearSkies.Net.Protocol;
 using ClearSkies.Net.Session;
 using ClearSkies.Net.Transport;
@@ -18,8 +19,9 @@ namespace ClearSkies.Net.Sync;
 /// <summary>
 /// Body sync: every second tick (30 Hz), each machine snapshots the bodies it owns, relative to their support, with
 /// streamed values (a player's look), and sends them unreliably: clients to the host, which forwards each client's to
-/// the others along with its own. Receivers buffer them per entity (<see cref="RemoteBody"/>) and play them back
-/// about 100 ms behind (<see cref="RemoteBodySystem"/>). A lost packet is simply replaced by the next one. Runs last in the
+/// the others along with its own. Receivers buffer them per entity (<see cref="RemoteBody"/>, which every synced body
+/// owned elsewhere has from when its owner is set) and play them back about 100 ms behind (<see cref="RemoteBodySystem"/>).
+/// A lost packet is simply replaced by the next one. Runs last in the
 /// tick, after support.
 /// <para>A grid's pose, and a pose on a grid, is its block space's (its Transform's), which no edit moves; its body
 /// sits at its centre of mass inside that, which edits do move, and when an edit reaches each machine isn't when any
@@ -53,10 +55,22 @@ public sealed class BodySync : ISystem, IDebugUiSystem
             };
         _players = world.GetEntities().With<EntityId>().With<NetOwner>().With<Player>().With<Transform>().AsSet();
         _grids = world.GetEntities().With<EntityId>().With<NetOwner>().With<PhysicsBodyComponent>().With<Transform>().AsSet();
+        // Spawned owned elsewhere, or taken over by the host when its owner leaves.
+        world.SubscribeComponentAdded((in Entity e, in NetOwner owner) => SetRemote(e, owner));
+        world.SubscribeComponentChanged((in Entity e, in NetOwner _, in NetOwner owner) => SetRemote(e, owner));
     }
 
     /// <summary>Whether grids are synced too (on by default; players always are).</summary>
-    public bool SyncGrids { get; set; } = true;
+    public bool SyncGrids { get; init; } = true;
+
+    /// <summary>A synced body owned elsewhere is drawn from its snapshots; one owned here is the truth.</summary>
+    private void SetRemote(Entity e, in NetOwner owner)
+    {
+        bool synced = e.Has<Player>() || (SyncGrids && e.Has<DynamicGrid>());
+        bool remote = synced && !owner.IsLocal;
+        if (remote && !e.Has<RemoteBody>()) e.Set(new RemoteBody { Buffer = new SnapshotBuffer(), Jumped = true });
+        else if (!remote && e.Has<RemoteBody>()) e.Remove<RemoteBody>();
+    }
 
     public void Update(float dt)
     {
@@ -151,16 +165,10 @@ public sealed class BodySync : ISystem, IDebugUiSystem
             var s = BodySnapshot.Read(ref r);
             _snapshotsReceived++;
             if (!_net.Registry.TryGet(s.Entity, out var e)) continue; // not spawned here (yet)
-            if (e.Has<NetOwner>() && e.Get<NetOwner>().IsLocal) continue; // ours: we're the truth
+            if (!e.Has<RemoteBody>()) continue; // ours: we're the truth
             if (_net is HostSession && from != PeerId.Host) _relay[s.Entity] = (from, tick, s);
-            Buffer(e, tick, s);
+            e.Get<RemoteBody>().Buffer.Add(tick, s, _net.Clock.Tick);
         }
-    }
-
-    private void Buffer(Entity e, uint tick, in BodySnapshot s)
-    {
-        if (!e.Has<RemoteBody>()) e.Set(new RemoteBody { Buffer = new SnapshotBuffer(), Jumped = true });
-        e.Get<RemoteBody>().Buffer.Add(tick, s, _net.Clock.Tick);
     }
 
     public string DebugName => "Body sync";
@@ -205,10 +213,10 @@ public sealed class RemoteBodySystem : ISystem
         for (int pass = 0; pass < 2; pass++)
         foreach (ref readonly var e in _remote.GetEntities())
         {
-            if (e.Has<NetOwner>() && e.Get<NetOwner>().IsLocal) continue;
             if (e.Has<Player>() != (pass == 1)) continue;
             ref var remote = ref e.Get<RemoteBody>();
             var buffer = remote.Buffer;
+            if (buffer.Count == 0) continue; // nothing heard yet
             if (buffer.At(SampleTick(buffer)) is { } s)
             {
                 var (position, rotation) = ToWorld(s.Support, s.Position, s.Rotation);
