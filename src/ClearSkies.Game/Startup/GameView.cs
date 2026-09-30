@@ -3,14 +3,16 @@ using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Ui;
 using ClearSkies.Engine.Voxels;
+using ClearSkies.Game.Generation;
 
 namespace ClearSkies.Game.Startup;
 
 /// <summary>
 /// What a game shown in a window draws with: the texture atlas, block models and chunk meshes, other players' model,
 /// the game UI, and the GPU light storage the world streams into, which is what limits how much of it loads
-/// (<see cref="Budget"/>). Made before the <see cref="GameWorld"/>, which is given the parts it needs; the view's
-/// systems come with <see cref="Systems.ViewSystems"/>.
+/// (<see cref="Budget"/>). Made before the <see cref="GameWorld"/>, which is given the parts it needs. Each game
+/// schedules the view's input and gameplay systems itself, among the world's; what's on the GPU and drawing come last,
+/// with <see cref="AddRender"/>.
 /// </summary>
 public sealed class GameView : IDisposable
 {
@@ -39,6 +41,8 @@ public sealed class GameView : IDisposable
                                   LightBudget.WorldIndexDim(options.ViewDistance));
         host.Renderer.AttachGridStore(GridStore);
         Budget = new LightBudget(GridStore);
+
+        InputSample = new InputSampleSystem(host.World, host.Input, host.Time);
     }
 
     public WindowedEngineHost Host { get; }
@@ -54,8 +58,45 @@ public sealed class GameView : IDisposable
     /// <summary>Packs each loaded chunk for the light storage as it loads.</summary>
     public IChunkPreparer ChunkPreparer { get; } = new LightPacking();
 
+    /// <summary>Latches each frame's input (in the Input stage), and hands it to the tick as the local player's
+    /// PlayerInput (early in the tick).</summary>
+    public InputSampleSystem InputSample { get; }
+
+    private CloudRenderSystem? _clouds;
+    private UiRenderSystem? _uiRenderer;
+
+    /// <summary>
+    /// Last: what's on the GPU (lighting storage, light, chunk meshes, block models), then drawing. The host opens the
+    /// frame, runs the render stages (systems in the order added within a stage), then closes it with ImGui and presents.
+    /// Each render system is handed this frame's camera and time.
+    /// </summary>
+    public void AddRender(GameWorld world)
+    {
+        var host = Host;
+        var renderer = host.Renderer;
+        var volume = world.StaticVolume;
+        host.AddSystem(new GpuResidencySystem(host.World, volume, GridStore), SystemStage.PreRender);
+        host.AddSystem(new GpuLightSystem(host.World, volume, host.Context, GridStore), SystemStage.PreRender);
+        host.AddSystem(Meshes, SystemStage.PreRender);
+        host.AddSystem(new BlockModelSystem(host.World, BlockModels), SystemStage.PreRender); // block entities -> RenderedModel
+
+        SkySettings.CloudAltitude = 1250f; // the islands are mostly low: clouds among the hills
+        SkySettings.CloudSeaAltitude = HeartGrid.CloudSeaAltitude; // below its lowest islands
+        _clouds = new CloudRenderSystem(renderer, new HeartCloudDensity(world.Seed));
+        _uiRenderer = new UiRenderSystem(Ui, renderer);
+        host.AddSystem(new ChunkRenderSystem(host.World, renderer, volume), SystemStage.RenderWorld);
+        host.AddSystem(new ModelRenderSystem(host.World, renderer, host.Time), SystemStage.RenderWorld);
+        host.AddSystem(_clouds, SystemStage.RenderWorld);
+        host.AddSystem(new SkyRenderSystem(renderer), SystemStage.RenderSky);
+        host.AddSystem(new WireframeRenderSystem(host.World, renderer), SystemStage.RenderOverlay);
+        host.AddSystem(new HudRenderSystem(host.World, renderer), SystemStage.RenderHud);
+        host.AddSystem(_uiRenderer, SystemStage.RenderHud);
+    }
+
     public void Dispose()
     {
+        _uiRenderer?.Dispose();
+        _clouds?.Dispose();
         PlayerModel.Dispose();
         BlockModels.Dispose();
         Ui.Dispose();

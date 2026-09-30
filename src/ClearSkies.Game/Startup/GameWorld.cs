@@ -6,19 +6,19 @@ using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Persistence;
 using ClearSkies.Engine.Voxels;
 using ClearSkies.Game.Generation;
-using ClearSkies.Game.Startup.Systems;
 using ClearSkies.Net.Session;
+using ClearSkies.Net.Sync;
 using Silk.NET.Maths;
 
 namespace ClearSkies.Game.Startup;
 
 /// <summary>
 /// What every game runs, whichever way it started: this machine's session, the entity registry and command system,
-/// the static world streamed around the view, and the systems that play it. Built from a seed (the save's, or the
-/// host's), where edited terrain chunks come from, and what limits how much of the world loads. Nothing here draws or
-/// reads input: that's the <see cref="GameView"/>'s, in a game that has one.
-/// <para>Its systems go in three places, which the game that built it puts in order around its others (the view's, the
-/// save's): <see cref="AddTickStart"/>, <see cref="AddTick"/> and <see cref="AddFrame"/>.</para>
+/// the static world streamed around the view, and the systems several places in a game's schedule share (the
+/// hierarchy and interpolation run in the tick and the frame; block actions, flight and remote bodies have debug panels
+/// and UI reading them). Built from a seed (the save's, or the host's), where edited terrain chunks come from, and
+/// what limits how much of the world loads. Nothing here draws or reads input: that's the <see cref="GameView"/>'s, in
+/// a game that has one. Each game schedules the systems itself, in order.
 /// </summary>
 public sealed class GameWorld
 {
@@ -56,7 +56,12 @@ public sealed class GameWorld
         ChunkLoad = new ChunkLoadSystem(host.World, StaticVolume, budget, () => new HeartWorldGenerator(seed),
                                         options.ViewDistance, MinChunkY, chunkStore, chunkPreparer);
 
-        Simulation = new SimulationSystems(this);
+        Interpolation = new TickInterpolationSystem(host.World, host.Time);
+        Hierarchy = new HierarchyTransformSystem(host.World);
+        PhysicsBody = new PhysicsBodySystem(host.World, host.Physics);
+        BlockActions = new BlockActionSystem(host.World, Commands, EditLimits, Selection);
+        Flight = new AirshipFlightSystem(host.World, host.Physics);
+        RemoteBodies = new RemoteBodySystem(host.World, Registry, host.Clock);
     }
 
     public EngineHost Host { get; }
@@ -71,31 +76,31 @@ public sealed class GameWorld
     public EditLimits EditLimits { get; } = new();
     public ChunkLoadSystem ChunkLoad { get; }
 
-    /// <summary>The gameplay systems others share (block actions, interpolation, remote bodies...).</summary>
-    public SimulationSystems Simulation { get; }
+    /// <summary>Records each tick's poses (in the tick), and draws between the last two (in the frame).</summary>
+    public TickInterpolationSystem Interpolation { get; }
+
+    /// <summary>Parents' Transforms to their children's: after the network, after the physics step, and in the frame.</summary>
+    public HierarchyTransformSystem Hierarchy { get; }
+
+    public PhysicsBodySystem PhysicsBody { get; }
+    public BlockActionSystem BlockActions { get; }
+    public AirshipFlightSystem Flight { get; }
+
+    /// <summary>Bodies owned elsewhere, placed from their snapshots about 100 ms behind.</summary>
+    public RemoteBodySystem RemoteBodies { get; }
 
     /// <summary>Whether the terrain around a point has loaded (joining waits on it, and so do grids' bodies).</summary>
     public bool TerrainLoaded(System.Numerics.Vector3 p) => ChunkLoad.IsTerrainLoaded(new Vector3D<float>(p.X, p.Y, p.Z), 64f);
 
-    /// <summary>First in each tick: the network session (everything that arrived: commands, events, snapshots,
-    /// session messages), then the hierarchy. Next come what hands the tick the local player's input (the view's) and
-    /// the save's streaming (a host's).</summary>
-    public void AddTickStart(NetSession net)
-    {
-        Host.AddSystem(net, SystemStage.Simulation);
-        Simulation.AddStart();
-    }
-
-    /// <summary>The rest of the tick: gameplay and physics, then body sync, last.</summary>
-    public void AddTick(NetSession net)
-    {
-        Simulation.Add();
-        Host.AddSystem(new Net.Sync.BodySync(net, Host.World, Host.Physics), SystemStage.Simulation); // owned bodies, every second tick
-    }
-
-    /// <summary>Once each frame, after the ticks: see <see cref="FrameSystems"/>. Before it go what moves the camera
-    /// itself (the view's flying); after it, what the player points at and uses.</summary>
-    public void AddFrame() => FrameSystems.Add(this);
+    /// <summary>Presence layers (bodies, drawing, terrain interest and colliders). Entities are drawn as far as the
+    /// terrain, but no further than the load window; a grid owned here gets a body once the terrain around it has loaded
+    /// with colliders, so nothing loaded from the save falls through the world.</summary>
+    public EntityPresenceSystem CreatePresence() =>
+        new(Host.World, Session, StaticVolume, Options.ViewDistance)
+        {
+            RenderDistanceLimit = EntityStreamingSystem.LoadWindow,
+            TerrainReady = p => TerrainLoaded(p) && PhysicsBody.CollidersReady(StaticVolume, p, 64f),
+        };
 
     /// <summary>Runs the game until it quits, then stops background work (no chunk still loading while what it loads
     /// into is freed).</summary>
