@@ -1,6 +1,8 @@
 using ClearSkies.Engine.Commands.Handlers;
+using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Physics;
+using DefaultEcs;
 
 namespace ClearSkies.Engine.Commands;
 
@@ -19,8 +21,8 @@ namespace ClearSkies.Engine.Commands;
 public static class GameCommands
 {
     /// <summary>Registers every gameplay command's handler.</summary>
-    public static void RegisterAll(CommandSystem commands, BlockEntities blocks, EditLimits limits, EntityRegistry registry,
-                                   PhysicsWorld physics)
+    public static void RegisterAll(CommandSystem commands, World world, Session session, BlockEntities blocks,
+                                   EditLimits limits, EntityRegistry registry, PhysicsWorld physics, GridSelection selection)
     {
         commands.Register(new EditVoxelsHandler(blocks, limits));
         commands.Register(new SetShipThrustHandler(registry));
@@ -28,6 +30,9 @@ public static class GameCommands
         commands.Register(new SetGridLockedHandler(registry, physics));
         commands.Register(new RightGridHandler(registry, physics));
         commands.Register(new SetMoveModeHandler(registry));
+        commands.Register(new SpawnGridHandler(world, registry, session, physics, selection));
+        commands.Register(new SpawnPlayerHandler(world, registry, session, physics));
+        commands.Register(new DespawnEntityHandler(registry));
     }
 }
 
@@ -40,4 +45,7 @@ public static class CommandIds
     public const ushort SetGridLocked = 4;
     public const ushort RightGrid = 5;
     public const ushort SetMoveMode = 6;
+    public const ushort SpawnGrid = 7;
+    public const ushort SpawnPlayer = 8;
+    public const ushort DespawnEntity = 9;
 }

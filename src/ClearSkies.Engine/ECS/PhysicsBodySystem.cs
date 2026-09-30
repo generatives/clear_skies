@@ -5,6 +5,7 @@ using BepuPhysics;
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Gui;
 using ClearSkies.Engine.Physics;
+using ClearSkies.Engine.Physics.Characters;
 using ClearSkies.Engine.Voxels;
 using DefaultEcs;
 using ImGuiNET;
@@ -54,6 +55,8 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
     private readonly EntitySet _terrainLostPresence;
     private readonly EntitySet _gridsGainedPresence;
     private readonly EntitySet _gridsLostPresence;
+    private readonly EntitySet _bodyOverrides;
+    private readonly List<PlayerCharacter> _removedCharacters = new();
 
     public PhysicsBodySystem(World world, PhysicsWorld physics)
     {
@@ -63,6 +66,7 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
         _terrainLostPresence = world.GetEntities().With<Chunk>().With<OwnPresence>().WhenRemoved<PhysicsPresence>().AsSet();
         _gridsGainedPresence = world.GetEntities().With<DynamicGrid>().With<ChunkGrid>().WhenAdded<PhysicsPresence>().AsSet();
         _gridsLostPresence = world.GetEntities().With<DynamicGrid>().With<PhysicsBodyComponent>().WhenRemoved<PhysicsPresence>().AsSet();
+        _bodyOverrides = world.GetEntities().With<BodyStateOverride>().With<PhysicsBodyComponent>().With<Transform>().AsSet();
         world.SubscribeEntityDisposed(OnEntityDisposed);
     }
 
@@ -76,6 +80,9 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
             var chunk = entity.Get<Chunk>();
             _removedChunks.Add(chunk.Entry);
         }
+
+        if (entity.Has<CharacterControllerComponent>())
+            _removedCharacters.Add(entity.Get<CharacterControllerComponent>().Character);
     }
 
     public void Update(float dt)
@@ -135,6 +142,22 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
         {
             if (entity.IsAlive && entity.Has<PhysicsPresence>() && entity.Get<PhysicsPresence>().Mode == PhysicsMode.Simulated)
                 UpdateDynamicGrid(entity);
+        }
+
+        // Spawned or overwritten from a description: the body takes the described pose and velocities.
+        foreach (var entity in _bodyOverrides.GetEntities().ToArray())
+        {
+            ref readonly var pb = ref entity.Get<PhysicsBodyComponent>();
+            var body = pb.Body;
+            ref readonly var t = ref entity.Get<Transform>();
+            var o = entity.Get<BodyStateOverride>();
+            _physics.SetBodyPose(body, pb.BodyPosition(t), PhysicsConv.ToBepu(t.Rotation));
+            if (_physics.GetBodyMass(body) > 0)
+            {
+                _physics.SetBodyLinearVelocity(body, o.LinearVelocity);
+                _physics.SetBodyAngularVelocity(body, o.AngularVelocity);
+            }
+            entity.Remove<BodyStateOverride>();
         }
     }
 
@@ -212,6 +235,20 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
     /// collidable, as opposed to just loaded/rendered.</summary>
     public bool HasCollider(ChunkPosition pos) => _colliders.ContainsKey(pos);
 
+    /// <summary>Whether every loaded terrain chunk with blocks within <paramref name="radius"/> of
+    /// <paramref name="centre"/> has its collider, so a body placed there won't fall through.</summary>
+    public bool CollidersReady(ChunkVolume world, PhysVec centre, float radius)
+    {
+        int r = (int)MathF.Ceiling(radius / S);
+        int cx = (int)MathF.Floor(centre.X / S), cy = (int)MathF.Floor(centre.Y / S), cz = (int)MathF.Floor(centre.Z / S);
+        for (int dz = -r; dz <= r; dz++) for (int dy = -r; dy <= r; dy++) for (int dx = -r; dx <= r; dx++)
+        {
+            var pos = new ChunkPosition(cx + dx, cy + dy, cz + dz);
+            if (world.GetEntry(pos) is { } entry && entry.Data.HasAnySolid() && !_colliders.ContainsKey(pos)) return false;
+        }
+        return true;
+    }
+
     // ── dynamic grid bodies (moved from GridShapeSystem) ────────────────────────
     private void UpdateDynamicGrid(Entity entity)
     {
@@ -287,6 +324,9 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
             _physics.RemoveCompound(shape);
         }
         _removedBodies.Clear();
+
+        foreach (var character in _removedCharacters) character.Dispose();
+        _removedCharacters.Clear();
 
         foreach (var entry in _removedChunks)
         {
