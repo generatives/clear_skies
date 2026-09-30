@@ -1,6 +1,7 @@
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Persistence;
+using ClearSkies.Game.Startup.Systems;
 using ClearSkies.Net.Protocol;
 using ClearSkies.Net.Session;
 using ClearSkies.Net.Transport;
@@ -32,11 +33,22 @@ public static class ClientGame
                                             TimeSpan.FromSeconds(15));
 
         var session = new Session(SessionRole.Client, welcome.Peer);
-        using var world = new GameWorld(host, options, session, welcome.Seed, new NoChunkStore());
+        using var view = new GameView(host, options);
+        var world = new GameWorld(host, options, session, welcome.Seed, new NoChunkStore(), view.Budget, view.ChunkPreparer,
+                                  view.PlayerModel);
         using var net = new ClientSession(transport, welcome, session, world.Commands, world.Registry, host.World, host.Clock,
                                           world.TerrainLoaded);
         net.Ended += reason => { Console.WriteLine($"[net] session ended: {reason}"); host.Window.Native.Close(); };
-        world.AddSystems(net, persistence: null, transport);
+        using var viewSystems = new ViewSystems(world, view);
+
+        viewSystems.AddInput();
+        world.AddTickStart(net);
+        viewSystems.AddTickInput();
+        world.AddTick(net);
+        viewSystems.AddFlying(net);
+        world.AddFrame();
+        viewSystems.AddInteraction(net, transport);
+        viewSystems.AddRender();
 
         var s = welcome.Spawn;
         TestScene.AddCamera(host, new Vector3D<float>(s.X, s.Y + PlayerFactory.EyeHeight, s.Z), MathF.PI, -0.15f, options.Camera);

@@ -25,7 +25,9 @@ internal static class HostedGame
         Console.WriteLine($"[save] world '{options.WorldName}' ({(newWorld ? "new" : "loaded")}), seed {seed}");
 
         var session = Session.SinglePlayer();
-        using var world = new GameWorld(host, options, session, seed, new DatabaseChunkStore(save));
+        using var view = new GameView(host, options);
+        var world = new GameWorld(host, options, session, seed, new DatabaseChunkStore(save), view.Budget, view.ChunkPreparer,
+                                  view.PlayerModel);
         // Entity IDs come in blocks from the save's next free ID, so they never repeat across sessions.
         var ids = new EntityIdAllocator(save.NextFreeId);
         world.Registry.RequestBlock = ids.NextBlock;
@@ -33,7 +35,17 @@ internal static class HostedGame
         var players = new SavedPlayers(save, persistence.Saver, seed);
         using var net = new HostSession(transport, session, world.Commands, world.Registry, host.World, host.Clock, ids, seed,
                                         GenerationChecksum.Compute(), players);
-        world.AddSystems(net, persistence, transport);
+        using var viewSystems = new ViewSystems(world, view);
+
+        viewSystems.AddInput();
+        world.AddTickStart(net);
+        viewSystems.AddTickInput();
+        persistence.Add(host); // the save's streaming and autosave
+        world.AddTick(net);
+        viewSystems.AddFlying(net);
+        world.AddFrame();
+        viewSystems.AddInteraction(net, transport);
+        viewSystems.AddRender();
 
         var spawn = WorldSpawn.For(seed);
         var camera = TestScene.AddCamera(host, spawn.Eye, spawn.Yaw, spawn.Pitch, options.Camera);
