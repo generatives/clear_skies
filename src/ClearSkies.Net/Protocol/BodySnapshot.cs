@@ -8,10 +8,8 @@ namespace ClearSkies.Net.Protocol;
 public enum SnapshotFlags : byte
 {
     None = 0,
-    /// <summary>At rest: receivers stop extrapolating.</summary>
-    Sleeping = 1,
     /// <summary>A <see cref="LookAngles"/> streamed value follows.</summary>
-    HasLook = 2,
+    HasLook = 1,
 }
 
 /// <summary>A player's look direction, streamed with their body.</summary>

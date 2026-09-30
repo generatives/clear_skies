@@ -24,17 +24,23 @@ public sealed class LoopbackGame : IDisposable
     public readonly HeadlessScene Host = new();
     public readonly HostSession HostNet;
     public readonly List<(HeadlessScene Scene, ClientSession Net)> Clients = new();
-    private readonly Dictionary<string, PlayerId> _players = new();
 
-    /// <summary>Like a save: each name gets a player ID the first time it's seen.</summary>
-    private PlayerId PlayerFor(string name) => _players.TryGetValue(name, out var id) ? id : _players[name] = PlayerId.New();
+    /// <summary>Like a save: each name gets a player ID the first time it's seen; nothing is kept.</summary>
+    private sealed class Players : IPlayerDirectory
+    {
+        private readonly Dictionary<string, PlayerId> _ids = new();
+        public PlayerId PlayerFor(string name) => _ids.TryGetValue(name, out var id) ? id : _ids[name] = PlayerId.New();
+        public PlayerDescription? Saved(PlayerId player) => null;
+        public (Vector3 Position, float Yaw, float Pitch) NewPlayerSpawn => (new Vector3(0, 60, 0), 0, 0);
+        public void Leaving(DefaultEcs.Entity player) { }
+    }
 
     public LoopbackGame(double latencyMs = 0, double lossChance = 0)
     {
         Network.LatencyMs = latencyMs;
         Network.LossChance = lossChance;
         HostNet = new HostSession(Network.Listen(), Host.Session, Host.Commands, Host.Registry, Host.World, Host.Clock, Host.Ids,
-            seed: 1337, generationChecksum: Checksum, playerFor: PlayerFor, spawnFor: _ => (null, new Vector3(0, 60, 0)));
+            seed: 1337, generationChecksum: Checksum, directory: new Players());
         HostNet.TimeSource = () => Network.Now;
         Host.AttachNet(HostNet);
     }

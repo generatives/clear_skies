@@ -80,13 +80,12 @@ public sealed class HeadlessScene : IDisposable
     public readonly TickInterpolationSystem Interpolation;
     private readonly TickClock _frameClock = new();
 
-    /// <summary>Puts a network session's systems in the tick: receive first, body sync and send last.</summary>
+    /// <summary>Puts a network session in the tick: the session first, body sync last.</summary>
     public void AttachNet(ClearSkies.Net.Session.NetSession net)
     {
         Net = net;
-        _tick.Insert(0, new ClearSkies.Net.Session.NetReceiveSystem(net));
+        _tick.Insert(0, net);
         _tick.Add(new ClearSkies.Net.Sync.BodySync(net, World, Physics));
-        _tick.Add(new ClearSkies.Net.Session.NetSendSystem(net));
         RemoteBodies = new ClearSkies.Net.Sync.RemoteBodySystem(World, Registry, Clock);
         _tick.Insert(_tick.FindIndex(s => s is PhysicsTransformSyncSystem) + 1, RemoteBodies);
         _tick.Insert(_tick.IndexOf(Physics), new ClearSkies.Net.Sync.FollowerSystem(World, Physics, RemoteBodies));
@@ -130,7 +129,7 @@ public sealed class HeadlessScene : IDisposable
             Clock.Tick++;
             foreach (var s in _tick) s.Update(Dt);
         }
-        if (Clock.Tick != before + (uint)ticks) _frameClock.Reset(); // clock sync snapped it, as HostTickClock does
+        if (Clock.Tick != before + (uint)ticks) _frameClock.Snap(Clock.Tick); // clock sync snapped it, as the game's clock does
         Clock.Alpha = _frameClock.Alpha;
         Draw((float)seconds);
     }

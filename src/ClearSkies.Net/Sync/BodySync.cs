@@ -18,10 +18,10 @@ namespace ClearSkies.Net.Sync;
 
 /// <summary>
 /// Body sync: every second tick (30 Hz), each machine snapshots the bodies it owns, relative to their support, with
-/// streamed values (a player's look), and sends them unreliably: clients to the host, which forwards each client's to
-/// the others along with its own. Receivers buffer them per entity (<see cref="RemoteBody"/>, which every synced body
-/// owned elsewhere has from when its owner is set) and play them back about 100 ms behind (<see cref="RemoteBodySystem"/>).
-/// A lost packet is simply replaced by the next one. Runs last in the
+/// streamed values (a player's look), and sends them unreliably: clients to the host, which passes each client's on to
+/// the others as they arrive (HostSession), and sends its own to everyone. Receivers buffer them per entity
+/// (<see cref="RemoteBody"/>, which every synced body owned elsewhere has from when its owner is set) and draw them about
+/// 100 ms behind (<see cref="RemoteBodySystem"/>). A lost packet is simply replaced by the next one. Runs last in the
 /// tick, after support.
 /// <para>A grid's pose, and a pose on a grid, is its block space's (its Transform's), which no edit moves; its body
 /// sits at its centre of mass inside that, which edits do move, and when an edit reaches each machine isn't when any
@@ -37,7 +37,6 @@ public sealed class BodySync : ISystem, IDebugUiSystem
     private readonly EntitySet _grids;
     private readonly EntitySet _remote;
     private readonly List<BodySnapshot> _own = new();
-    private readonly Dictionary<EntityId, (PeerId Owner, uint Tick, BodySnapshot Snapshot)> _relay = new();
     private readonly NetWriter _writer = new(2048);
     private long _snapshotsSent, _snapshotsReceived;
 
@@ -89,14 +88,10 @@ public sealed class BodySync : ISystem, IDebugUiSystem
                 SendFrames(tick, _own, packet => client.SendToHost(packet, Channel.Unreliable));
                 break;
             case HostSession host:
-                foreach (var peer in host.Joined)
+                SendFrames(tick, _own, packet =>
                 {
-                    var frame = new List<BodySnapshot>(_own);
-                    foreach (var (id, relayed) in _relay)
-                        if (relayed.Owner != peer.Peer) frame.Add(relayed.Snapshot);
-                    SendFrames(tick, frame, packet => host.SendUnreliable(peer.Peer, packet));
-                }
-                _relay.Clear();
+                    foreach (var peer in host.Joined) host.SendUnreliable(peer.Peer, packet);
+                });
                 break;
         }
     }
@@ -155,8 +150,8 @@ public sealed class BodySync : ISystem, IDebugUiSystem
         };
     }
 
-    /// <summary>A frame from <paramref name="from"/>: buffer each snapshot on its entity, and (on the host) keep it to pass on.</summary>
-    public void ReceiveFrame(PeerId from, ref NetReader r)
+    /// <summary>A frame of snapshots: buffer each on its entity.</summary>
+    public void ReceiveFrame(ref NetReader r)
     {
         uint tick = r.ReadUInt32();
         int count = r.ReadUInt16();
@@ -166,7 +161,6 @@ public sealed class BodySync : ISystem, IDebugUiSystem
             _snapshotsReceived++;
             if (!_net.Registry.TryGet(s.Entity, out var e)) continue; // not spawned here (yet)
             if (!e.Has<RemoteBody>()) continue; // ours: we're the truth
-            if (_net is HostSession && from != PeerId.Host) _relay[s.Entity] = (from, tick, s);
             e.Get<RemoteBody>().Buffer.Add(tick, s, _net.Clock.Tick);
         }
     }
