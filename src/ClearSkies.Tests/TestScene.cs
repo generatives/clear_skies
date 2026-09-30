@@ -3,6 +3,7 @@ using BepuPhysics.Collidables;
 using ClearSkies.Engine.Commands;
 using ClearSkies.Engine.Commands.Handlers;
 using ClearSkies.Engine.ECS;
+using ClearSkies.Engine.Persistence;
 using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Input;
 using ClearSkies.Engine.Physics;
@@ -30,17 +31,20 @@ public sealed class HeadlessScene : IDisposable
     public readonly BlockEntities Blocks;
     public readonly EditLimits Limits = new();
     public uint TickNumber;
-    private readonly GridNetworking _gridNetworking;
     private readonly List<Engine.Core.ISystem> _tick = new();
     private readonly TickInterpolationSystem _interpolation;
 
-    public HeadlessScene(Session? session = null)
+    public readonly EntityIdAllocator Ids;
+    public WorldSaver? Saver;
+    public EntityStreamingSystem? Streaming;
+    public StoredEntityIndex? Index;
+
+    public HeadlessScene(Session? session = null, uint firstFreeId = EntityRegistry.FirstFreeId)
     {
         Session = session ?? Session.SinglePlayer();
         Registry = new EntityRegistry(World);
-        var allocator = new EntityIdAllocator();
-        Registry.RequestBlock = allocator.NextBlock;
-        _gridNetworking = new GridNetworking(World, Registry, Session);
+        Ids = new EntityIdAllocator(firstFreeId);
+        Registry.RequestBlock = Ids.NextBlock;
         Selection = new GridSelection(World);
 
         var root = World.CreateEntity();
@@ -52,7 +56,7 @@ public sealed class HeadlessScene : IDisposable
         Presence = new EntityPresenceSystem(World, Session, WorldVolume, viewDistance: 500f);
         Commands = new CommandSystem(Session, Registry, () => TickNumber);
         Blocks = new BlockEntities(World, Registry);
-        GameCommands.RegisterAll(Commands, Blocks, Limits, Registry, Physics);
+        GameCommands.RegisterAll(Commands, World, Session, Blocks, Limits, Registry, Physics, Selection);
         var hierarchy = new HierarchyTransformSystem(World);
         _tick.Add(hierarchy);
         _tick.Add(new PhysicsBodySystem(World, Physics));
@@ -64,6 +68,16 @@ public sealed class HeadlessScene : IDisposable
         _tick.Add(hierarchy);
         _tick.Add(new SupportSystem(World, Physics));
         _interpolation = new TickInterpolationSystem(World, new Engine.Core.Time()); // last, as in the game
+    }
+
+    /// <summary>Saves to <paramref name="db"/> and streams entities from it, as the host does.</summary>
+    public void EnablePersistence(SaveDatabase db)
+    {
+        Index = new StoredEntityIndex(db.ReadEntityIndex());
+        Saver = new WorldSaver(World, db, Index, Commands, Ids);
+        Streaming = new EntityStreamingSystem(World, db, Index, Registry, Commands, Saver);
+        _tick.Insert(1, Streaming);
+        _tick.Insert(2, Saver);
     }
 
     public void Tick(int count = 1)
@@ -89,38 +103,37 @@ public sealed class HeadlessScene : IDisposable
     }
 
     /// <summary>A locked (kinematic) flat grid of stone, <paramref name="size"/> blocks square, centred at
-    /// <paramref name="centre"/>.</summary>
+    /// <paramref name="centre"/>, spawned through the command system.</summary>
     public Entity SpawnPlatform(Vector3 centre, int size = 8)
     {
-        var voxels = new List<(int, int, int, BlockId, BlockOrientation)>();
-        for (int x = 0; x < size; x++) for (int z = 0; z < size; z++) voxels.Add((x, 0, z, BlockId.Stone, BlockOrientation.Upright));
-        DynamicGridFactory.SpawnFromVoxels(World, Selection, centre, voxels);
-        return World.GetEntities().With<SelectedGridComponent>().AsEnumerable().First();
+        var voxels = new List<GridVoxel>();
+        for (int x = 0; x < size; x++) for (int z = 0; z < size; z++) voxels.Add(new(x, 0, z, BlockId.Stone, BlockOrientation.Upright));
+        return SpawnGrid(GridDescription.FromVoxels(centre, voxels));
     }
 
-    /// <summary>The local player, walking, with its capsule centre at <paramref name="position"/>.</summary>
+    /// <summary>Spawns a grid from a description now (outside a tick) and returns it.</summary>
+    public Entity SpawnGrid(GridDescription description)
+    {
+        // Applied directly (as its event would be), so it works on a client scene too.
+        var id = Registry.Allocate();
+        var handler = (SpawnGridHandler)Commands.HandlerFor(CommandIds.SpawnGrid)!;
+        handler.Apply(new Spawn<GridDescription> { Id = id, Owner = Session.LocalPeer, Description = description }, default);
+        return Registry.Find(id) ?? throw new InvalidOperationException("The grid didn't spawn.");
+    }
+
+    /// <summary>The local player, walking unless <paramref name="freeFly"/>, with its capsule centre at
+    /// <paramref name="position"/>.</summary>
     public Entity SpawnLocalPlayer(Vector3 position, bool freeFly = false)
     {
-        var player = World.CreateEntity();
-        player.Set(new Transform { Position = new Vector3D<float>(position.X, position.Y, position.Z), Rotation = Quaternion<float>.Identity, Scale = Vector3D<float>.One });
-        player.Set(new MouseLookComponent { LookSensitivity = 0.0025f });
-        player.Set(new FreeFlyController { MoveSpeed = 10f });
-        var character = new PlayerCharacter(Physics.Characters, position, new Capsule(0.3f, 1f), 0.01f, 2f, 100f, 70f, 6f, 5f, entity: player);
-        player.Set(new CharacterControllerComponent { Character = character, EyeHeight = 0.7f });
-        player.Set(new PlayerInput());
-        player.Set(new Support());
-        player.Set(new Player { Id = PlayerId.New(), Name = "test", IsLocal = true });
-        player.Set<LocalPlayer>();
-        player.Set(Registry.Allocate());
-        player.Set(Session.LocalOwner());
-        player.Set<OwnPresence>();
-        Players.SetFreeFlying(player, freeFly);
-        return player;
+        var id = Registry.Allocate();
+        var handler = (SpawnPlayerHandler)Commands.HandlerFor(CommandIds.SpawnPlayer)!;
+        handler.Apply(new Spawn<PlayerDescription> { Id = id, Owner = Session.LocalPeer,
+            Description = new PlayerDescription { Id = PlayerId.New(), Name = "test", FreeFly = freeFly, Position = position } }, default);
+        return Registry.Find(id) ?? throw new InvalidOperationException("The player didn't spawn.");
     }
 
     public void Dispose()
     {
-        _gridNetworking.Dispose();
         Registry.Dispose();
         Physics.Dispose();
         World.Dispose();

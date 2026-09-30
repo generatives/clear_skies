@@ -59,6 +59,8 @@ public sealed class GpuResidencySystem : ISystem, IDebugUiSystem
     {
         _store       = store;
         _needsGpuUpload       = ecsWorld.GetEntities().With<Chunk>().With<NeedsGpuUploadFlag>().With<Rendered>().AsSet();
+        _unrenderedChunks     = ecsWorld.GetEntities().With<Chunk>().WhenRemoved<Rendered>().AsSet();
+        _unrenderedGrids      = ecsWorld.GetEntities().With<ChunkGrid>().With<DynamicGrid>().WhenRemoved<Rendered>().AsSet();
         _cameras              = ecsWorld.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
         _store.Register(staticVolume.Gpu, isWorld: true);
 
@@ -90,6 +92,8 @@ public sealed class GpuResidencySystem : ISystem, IDebugUiSystem
         }
     }
 
+    private readonly EntitySet _unrenderedChunks, _unrenderedGrids;
+
     /// <summary>Releases a chunk if it is waiting to be.</summary>
     private bool Release((GridHandle Grid, ChunkPosition Pos) key)
     {
@@ -107,6 +111,21 @@ public sealed class GpuResidencySystem : ISystem, IDebugUiSystem
     {
         _steps.Start();
         _uploaded = 0;
+        // No longer drawn: a chunk's storage and light bricks go, and a grid's whole GPU registration (re-registered on
+        // its first upload). The flag is what uploads a chunk again if it's drawn again; nothing is uploaded meanwhile,
+        // since only drawn chunks are (_needsGpuUpload requires Rendered).
+        foreach (var e in _unrenderedChunks.GetEntities().ToArray())
+        {
+            if (e.Has<Rendered>()) continue;
+            var entry = e.Get<Chunk>().Entry;
+            _store.RemoveChunk(entry.Volume.Gpu, entry.Position);
+            e.Set<NeedsGpuUploadFlag>();
+        }
+        _unrenderedChunks.Complete();
+        foreach (var e in _unrenderedGrids.GetEntities().ToArray())
+            if (!e.Has<Rendered>()) _store.Unregister(e.Get<ChunkGrid>().Volume.Gpu);
+        _unrenderedGrids.Complete();
+
         // Despawned ships: their root entity is gone from the set.
         foreach (var g in _removedGrids) { _store.Unregister(g.Gpu); }
         _removedGrids.Clear();
