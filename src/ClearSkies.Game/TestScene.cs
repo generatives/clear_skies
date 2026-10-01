@@ -34,11 +34,11 @@ public static class TestScene
         return (eye, yaw, pitch);
     }
 
-    /// <summary>The local player on a host (a client's is spawned by the host once it has joined), through the command
-    /// system (applied in the first tick): where they left off if they've played this world before, otherwise with
-    /// their eye at the camera.</summary>
-    public static void SpawnLocalPlayer(CommandSystem commands, PlayerId id, string name, PlayerDescription? saved,
-                                        (Vector3D<float> Eye, float Yaw, float Pitch) camera)
+    /// <summary>The local player on a host (a client's is spawned by the host once it has joined), to spawn once the
+    /// world around them has loaded: where they left off if they've played this world before, otherwise with their eye
+    /// at the camera.</summary>
+    public static PlayerDescription LocalPlayer(PlayerId id, string name, PlayerDescription? saved,
+                                                (Vector3D<float> Eye, float Yaw, float Pitch) camera)
     {
         var description = saved ?? new PlayerDescription
         {
@@ -49,7 +49,7 @@ public static class TestScene
             Pitch = camera.Pitch,
         };
         description.Name = name;
-        commands.Send(new Spawn<PlayerDescription> { Description = description });
+        return description;
     }
 
     /// <summary>

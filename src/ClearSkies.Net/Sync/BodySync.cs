@@ -218,6 +218,9 @@ public sealed class RemoteBodySystem : ISystem
                 t.Position = new Vector3D<float>(position.X, position.Y, position.Z);
                 if (e.Has<Player>())
                 {
+                    // What they stand on, as their machine has it (their own SupportSystem keeps it), so that describing
+                    // them here (saving them as they leave, say) keeps it too.
+                    if (e.Has<Support>()) e.Get<Support>().Supporter = TryGetSupport(s.Support, out var on) ? on : default;
                     if (s.HasLook && e.Has<MouseLookComponent>())
                     {
                         ref var look = ref e.Get<MouseLookComponent>();

@@ -96,6 +96,27 @@ public static class PlayerFactory
             Velocity = velocity,
             Yaw = look.Yaw,
             Pitch = look.Pitch,
-        };
+        }.StandingOn(freeFly || !player.Has<Support>() ? default : player.Get<Support>().Supporter, PhysicsConv.ToBepu(player.Get<Transform>().Position));
+    }
+
+    /// <summary>Where a player on <paramref name="support"/> (if it's a networked entity) is on it: their world
+    /// <paramref name="position"/> in its Transform's space.</summary>
+    private static PlayerDescription StandingOn(this PlayerDescription d, Entity support, Vector3 position)
+    {
+        if (!support.IsAlive || !support.Has<EntityId>() || !support.Has<Transform>()) return d;
+        ref readonly var st = ref support.Get<Transform>();
+        var rotation = PhysicsConv.ToBepu(st.Rotation);
+        d.Support = support.Get<EntityId>();
+        d.LocalPosition = Vector3.Transform(position - PhysicsConv.ToBepu(st.Position), Quaternion.Conjugate(rotation));
+        return d;
+    }
+
+    /// <summary>Where a described player is now: on their support as it is here, if it's here, else where they were
+    /// saved or sent.</summary>
+    public static Vector3 WorldPosition(PlayerDescription d, EntityRegistry registry)
+    {
+        if (d.Support.IsNone || !registry.TryGet(d.Support, out var support) || !support.Has<Transform>()) return d.Position;
+        ref readonly var st = ref support.Get<Transform>();
+        return PhysicsConv.ToBepu(st.Position) + Vector3.Transform(d.LocalPosition, PhysicsConv.ToBepu(st.Rotation));
     }
 }

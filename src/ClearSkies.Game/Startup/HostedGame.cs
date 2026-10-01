@@ -104,10 +104,15 @@ internal static class HostedGame
 
         view.AddRender(world);
 
-        var camera = TestScene.AddCamera(host, spawn.Eye, spawn.Yaw, spawn.Pitch, options.Camera);
+        // The camera waits where the local player left off (or at the world's spawn point) until they spawn there,
+        // once the world around them has loaded.
         var players = hosting.Players;
         var localPlayer = players.PlayerFor(options.PlayerName);
-        TestScene.SpawnLocalPlayer(commands, localPlayer, options.PlayerName, players.Saved(localPlayer), camera);
+        var saved = players.Saved(localPlayer);
+        var camera = saved is null
+            ? TestScene.AddCamera(host, spawn.Eye, spawn.Yaw, spawn.Pitch, options.Camera)
+            : TestScene.AddCamera(host, WorldSpawn.EyeAt(saved.Position), saved.Yaw, saved.Pitch, options.Camera);
+        net.SpawnWhenReady(TestScene.LocalPlayer(localPlayer, options.PlayerName, saved, camera));
         if (save.IsNew) TestScene.SpawnTestShip(commands, camera.Eye);
 
         using (new QuitOnSignal(host)) world.Run();

@@ -24,13 +24,24 @@ public sealed class LoopbackGame : IDisposable
     public readonly HeadlessScene Host = new();
     public readonly HostSession HostNet;
     public readonly List<(HeadlessScene Scene, ClientSession Net)> Clients = new();
+    public readonly Players Directory = new();
 
-    /// <summary>Like a save: each name gets a player ID the first time it's seen; nothing is kept.</summary>
-    private sealed class Players : IPlayerDirectory
+    /// <summary>Like a save: each name gets a player ID the first time it's seen; nothing is kept but what a test
+    /// <see cref="Save"/>s.</summary>
+    public sealed class Players : IPlayerDirectory
     {
         private readonly Dictionary<string, PlayerId> _ids = new();
+        private readonly Dictionary<PlayerId, PlayerDescription> _saved = new();
         public PlayerId PlayerFor(string name) => _ids.TryGetValue(name, out var id) ? id : _ids[name] = PlayerId.New();
-        public PlayerDescription? Saved(PlayerId player) => null;
+        public PlayerDescription? Saved(PlayerId player) => _saved.TryGetValue(player, out var d) ? d : null;
+
+        /// <summary>As if <paramref name="name"/> had played before and left as <paramref name="d"/>.</summary>
+        public void Save(string name, PlayerDescription d)
+        {
+            d.Id = PlayerFor(name);
+            _saved[d.Id] = d;
+        }
+
         public (Vector3 Position, float Yaw, float Pitch) NewPlayerSpawn => (new Vector3(0, 60, 0), 0, 0);
         public void Leaving(DefaultEcs.Entity player) { }
     }
@@ -40,7 +51,7 @@ public sealed class LoopbackGame : IDisposable
         Network.LatencyMs = latencyMs;
         Network.LossChance = lossChance;
         HostNet = new HostSession(Network.Listen(), Host.Session, Host.Commands, Host.Registry, Host.World, Host.Clock, Host.Ids,
-            seed: 1337, generationChecksum: Checksum, directory: new Players());
+            seed: 1337, generationChecksum: Checksum, directory: Directory);
         HostNet.TimeSource = () => Network.Now;
         Host.AttachNet(HostNet);
     }

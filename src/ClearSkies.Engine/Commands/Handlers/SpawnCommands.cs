@@ -157,6 +157,7 @@ public sealed class SpawnPlayerHandler : SpawnHandler<PlayerDescription, Player>
 
     protected override Entity Create(EntityId id, NetOwner owner, PlayerDescription d)
     {
+        d.Position = PlayerFactory.WorldPosition(d, Registry); // on their ship as it is here, if they stand on one
         var player = PlayerFactory.Create(World, _physics, id, owner, d);
         if (!owner.IsLocal && _model is not null) player.Set(_model.Create());
         return player;
