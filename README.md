@@ -19,7 +19,9 @@ Some major gameplay themes:
 I do not have all the details worked out but this is my general goal for the game.
 
 ## Downloads
-There are builds available under "Releases" here on GitHub, I automatically build for Windows x64, Windows ARM, and Linux x64. I really only play regularly on Windows x64 so those builds will be the most reliable. The builds are all self contained so you don't need .NET installed to run them. There are "folder" builds and non-folder builds. The "folder" builds are an archive containing all the files required, including the executable. The non-folder builds are just a single executable which unpacks itself. I include the folder builds because unpacking executables are often blocked as viruses.
+There are builds available under "Releases" here on GitHub, I automatically build for Windows x64, Windows ARM, and Linux x64. I really only play regularly on Windows x64 so those builds will be the most reliable.
+
+The builds are all self contained so you don't need .NET installed to run them. There are "folder" builds and non-folder builds. The "folder" builds are an archive containing all the files required, including the executable. The non-folder builds are just a single executable which unpacks itself. I include the folder builds because unpacking executables are often blocked as viruses.
 
 ## Instructions
 ### Controls
