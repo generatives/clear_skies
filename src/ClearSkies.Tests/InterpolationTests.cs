@@ -87,7 +87,7 @@ public class InterpolationTests
             foreach (var (scene, _) in game.Clients) scene.Tick();
         }
         for (int i = 0; i < 120; i++) StepFar();
-        Assert.False(seen.Has<ClearSkies.Net.Sync.ServoBody>());
+        Assert.False(seen.Has<ClearSkies.Net.Sync.FollowerCharacter>());
         float last = seen.DrawnPose().Position.X;
         for (int i = 0; i < 60; i++)
         {

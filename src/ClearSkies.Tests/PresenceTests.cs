@@ -107,14 +107,14 @@ public class PresenceTests
     }
 
     [Fact]
-    public void AnotherPlayerWithinLoadRangeIsAServoFollowerWithNoTerrainInterest()
+    public void AnotherPlayerWithinLoadRangeIsACharacterFollowerWithNoTerrainInterest()
     {
         using var scene = new HeadlessScene();
         scene.SpawnLocalPlayer(new Vector3(0, 60, 0), freeFly: true);
         var near = RemoteEntity(scene, new Vector3(100, 60, 0), player: true);
         var far = RemoteEntity(scene, new Vector3(5000, 60, 0), player: true);
         scene.Tick();
-        Assert.Equal(PhysicsMode.ServoFollower, near.Get<PhysicsPresence>().Mode);
+        Assert.Equal(PhysicsMode.CharacterFollower, near.Get<PhysicsPresence>().Mode);
         Assert.False(near.Has<TerrainInterest>());
         Assert.False(far.Has<PhysicsPresence>());
     }

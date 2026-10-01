@@ -2,6 +2,7 @@ using System.Numerics;
 using ClearSkies.Engine.Commands;
 using ClearSkies.Engine.Commands.Handlers;
 using ClearSkies.Engine.ECS;
+using ClearSkies.Engine.Input;
 using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Physics.Support;
 using ClearSkies.Engine.Serialization;
@@ -81,39 +82,87 @@ public class CrewTests
         Assert.True(Vector3D.Distance(seen.Get<Transform>().Position, shipPos) < 6f);
     }
 
-    [Fact]
-    public void ClimbingDoesNotTipTheCornerACrewMemberStandsOn()
+    /// <summary>A small unlocked ship (5×5 Wood), flown up hard on its levers with someone on a corner: the host's own
+    /// player, or a client's (a copy on the host, which flies the ship). Returns how far it tipped at most while
+    /// standing (the first second) and while climbing (four seconds), in degrees, and how far it climbed.</summary>
+    private static (float Standing, float Climbing, float Climbed) CornerTilt(bool remote)
     {
-        // A small unlocked ship, flown up hard on its levers with a client's crew member on a corner. On the host the crew
-        // member is a servo copy, which used to hold its place in the world rather than on the deck: it pressed that
-        // corner against the climb as hard as the servo could, and tipped the ship over.
         using var game = new LoopbackGame(50);
         var voxels = new List<GridVoxel>();
         for (int x = 0; x < 5; x++) for (int z = 0; z < 5; z++) voxels.Add(new(x, 0, z, BlockId.Wood, BlockOrientation.Upright));
         var ship = game.Host.SpawnGrid(GridDescription.FromVoxels(new Vector3(0, 50, 0), voxels));
-        game.Host.SpawnLocalPlayer(new Vector3(30, 80, 30));
+        var corner = new Vector3(2f, 51.4f, 2f);
+        game.Host.SpawnLocalPlayer(remote ? new Vector3(30, 80, 30) : corner, freeFly: remote);
         game.Host.AddBeforePhysics(new AirshipFlightSystem(game.Host.World, game.Host.Physics) { FreePropulsion = true });
         game.Tick(2);
-        var (client, _) = game.Join("crew");
-        var crew = LocalPlayerOf(client);
-        Players.SetFreeFlying(crew, false);
-        crew.Get<CharacterControllerComponent>().Character.TeleportTo(new Vector3(2f, 51.4f, 2f));
+        Entity? crew = null;
+        if (remote)
+        {
+            var (client, _) = game.Join("crew");
+            crew = LocalPlayerOf(client);
+            Players.SetFreeFlying(crew.Value, false);
+            crew.Value.Get<CharacterControllerComponent>().Character.TeleportTo(corner);
+        }
         var id = ship.Get<EntityId>();
         game.Host.Commands.Send(new SetGridLocked { Grid = id, Locked = false });
-        game.Tick(60);
+        var body = ship.Get<PhysicsBodyComponent>().Body;
+        float Tilt()
+        {
+            var (_, q) = game.Host.Physics.GetBodyPose(body);
+            return MathF.Acos(Math.Clamp(Vector3.Transform(Vector3.UnitY, q).Y, -1f, 1f)) * 180f / MathF.PI;
+        }
+        float standing = 0f, climbing = 0f;
+        for (int t = 0; t < 60; t++) { game.Tick(); standing = MathF.Max(standing, Tilt()); }
 
         game.Host.Commands.Send(new SetShipThrust { Ship = id, Axis = ThrustAxis.Up, Value = 1f });
-        var body = ship.Get<PhysicsBodyComponent>().Body;
-        float startY = game.Host.Physics.GetBodyPose(body).position.Y, maxTilt = 0f;
-        for (int t = 0; t < 240; t++)
+        float startY = game.Host.Physics.GetBodyPose(body).position.Y;
+        for (int t = 0; t < 240; t++) { game.Tick(); climbing = MathF.Max(climbing, Tilt()); }
+        if (crew is { } c) Assert.Equal(game.Clients[0].Scene.Registry.Find(id), c.Get<Support>().Supporter); // still aboard
+        return (standing, climbing, game.Host.Physics.GetBodyPose(body).position.Y - startY);
+    }
+
+    [Fact]
+    public void ACrewMemberOnACornerTipsTheShipAsMuchAsTheHostsOwnPlayer()
+    {
+        // On the host a client's crew member is a copy, walked to where they are. It used to be a servo copy, which held
+        // its place in the world rather than on the deck (pressing that corner against the climb as hard as it could),
+        // and then weighed almost nothing. Now it presses on the deck as a player does.
+        var local = CornerTilt(remote: false);
+        var crew = CornerTilt(remote: true);
+        Assert.True(local.Climbed > 20f && crew.Climbed > 20f, $"climbed {local.Climbed:F1} / {crew.Climbed:F1}");
+        Assert.True(MathF.Abs(crew.Standing - local.Standing) < 1.5f, $"standing: host's {local.Standing:F1}°, crew's {crew.Standing:F1}°");
+        Assert.True(MathF.Abs(crew.Climbing - local.Climbing) < 3f, $"climbing: host's {local.Climbing:F1}°, crew's {crew.Climbing:F1}°");
+    }
+
+    [Fact]
+    public void ACrewMembersCopyWalksAndJumpsWithThemOnAMovingDeck()
+    {
+        var (game, ship, client, crew) = ShipWithCrew();
+        using var _ = game;
+        var copy = game.Host.Registry.Find(crew.Get<EntityId>())!.Value;
+        game.Host.Physics.SetBodyLinearVelocity(ship.Get<PhysicsBodyComponent>().Body, new Vector3(4, 0, 3));
+        game.Tick(30);
+        float deck = copy.Get<FollowerCharacter>().Character.Position.Y;
+        float gap = 0f, highest = 0f;
+        for (int t = 0; t < 150; t++)
         {
+            // Walk half a second (2.5 blocks, staying aboard), jump, then stand.
+            crew.Get<PlayerInput>() = new PlayerInput
+            {
+                Held = t < 30 ? PlayerButtons.Back : PlayerButtons.None,
+                Pressed = t == 30 ? PlayerButtons.Up : PlayerButtons.None,
+            };
             game.Tick();
-            var (_, q) = game.Host.Physics.GetBodyPose(body);
-            maxTilt = MathF.Max(maxTilt, MathF.Acos(Math.Clamp(Vector3.Transform(Vector3.UnitY, q).Y, -1f, 1f)) * 180f / MathF.PI);
+            var at = copy.Get<FollowerCharacter>().Character.Position;
+            var seen = copy.Get<Transform>().Position; // where their snapshots put them
+            gap = MathF.Max(gap, Vector2.Distance(new Vector2(at.X, at.Z), new Vector2(seen.X, seen.Z)));
+            highest = MathF.Max(highest, at.Y - deck);
         }
-        Assert.True(game.Host.Physics.GetBodyPose(body).position.Y > startY + 20f); // it climbed
-        Assert.True(maxTilt < 20f, $"tipped {maxTilt:F1}°");
-        Assert.Equal(client.Registry.Find(id), crew.Get<Support>().Supporter); // still aboard
+        Assert.True(gap < 0.5f, $"copy up to {gap:F2} from them"); // under 0.1 walking; most of it is mid-jump, where it keeps its momentum
+        Assert.True(highest > 0.6f, $"copy rose {highest:F2}"); // it jumped
+        Assert.Equal(ship, game.Host.Registry.Find(copy.Get<EntityId>()) is { } e && e.Has<FollowerCharacter>()
+            && game.Host.Physics.Characters.TryGetStandingBody(e.Get<FollowerCharacter>().Character.BodyHandle, out var on)
+            ? game.Host.Physics.Colliders[on].Entity : default); // landed back on the deck
     }
 
     [Fact]
@@ -164,23 +213,28 @@ public class CrewTests
     }
 
     [Fact]
-    public void ServoCopiesStandOnShipsButPassThroughTerrain()
+    public void PlayerCopiesStandOnShipsAndTerrainButNotWhileFlying()
     {
         var (game, ship, client, crew) = ShipWithCrew();
         using var _ = game;
         var copy = game.Host.Registry.Find(crew.Get<EntityId>())!.Value;
-        Assert.Equal(PhysicsMode.ServoFollower, copy.Get<PhysicsPresence>().Mode);
-        Assert.True(copy.Has<ServoBody>());
-        var (onDeck, _) = game.Host.Physics.GetBodyPose(copy.Get<ServoBody>().Body);
+        Assert.Equal(PhysicsMode.CharacterFollower, copy.Get<PhysicsPresence>().Mode);
+        Assert.True(copy.Has<FollowerCharacter>());
+        var onDeck = copy.Get<FollowerCharacter>().Character.Position;
         Assert.InRange(onDeck.Y, 50.7f, 51f); // resting on the deck: its top is at 50 (the levers and wheel make the blocks two high, centred at 50)
 
-        // Terrain right where the crew member walks: their copy goes into it (their own machine keeps them out of it).
+        // Walked off onto terrain: the copy stands on it too.
         for (int x = 10; x < 14; x++) for (int z = 10; z < 14; z++) game.Host.WorldVolume.SetBlock(x, 40, z, BlockId.Stone);
+        for (int x = 10; x < 14; x++) for (int z = 10; z < 14; z++) client.WorldVolume.SetBlock(x, 40, z, BlockId.Stone);
+        crew.Get<CharacterControllerComponent>().Character.TeleportTo(new Vector3(11.5f, 41.4f, 11.5f));
+        game.Tick(90);
+        var onGround = copy.Get<FollowerCharacter>().Character.Position;
+        Assert.True(Vector3.Distance(onGround, crew.Get<CharacterControllerComponent>().Character.Position) < 0.2f, $"copy at {onGround}");
+
+        // Flying, they have no body, so no copy.
         Players.SetFreeFlying(crew, true);
-        crew.Get<Transform>().Position = new Vector3D<float>(11.5f, 40.5f, 11.5f);
-        game.Tick(60);
-        var (inTerrain, _) = game.Host.Physics.GetBodyPose(copy.Get<ServoBody>().Body);
-        Assert.True(Vector3.Distance(inTerrain, new Vector3(11.5f, 40.5f, 11.5f)) < 0.5f);
+        game.Tick(30);
+        Assert.False(copy.Has<FollowerCharacter>());
     }
 
     /// <summary>Where a grid's voxel (0,0,0) is drawn.</summary>

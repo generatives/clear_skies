@@ -17,7 +17,7 @@ namespace ClearSkies.Engine.ECS;
 /// <list type="bullet">
 /// <item>Owned here: simulated, drawn within render distance, terrain interest around it (the local player's is
 /// <see cref="TerrainInterestKind.Full"/>, anything else's colliders only).</item>
-/// <item>Another player within load range: a servo follower, drawn within render distance.</item>
+/// <item>Another player within load range: a character follower, drawn within render distance.</item>
 /// <item>A grid owned elsewhere near the local player: a kinematic follower, drawn.</item>
 /// <item>Anything else: drawn within render distance, nothing more.</item>
 /// </list>
@@ -81,7 +81,7 @@ public sealed class EntityPresenceSystem : ISystem, IDebugUiSystem
     /// there's nothing to draw). Unlimited unless set.</summary>
     public float RenderDistanceLimit { get; set; } = float.PositiveInfinity;
 
-    /// <summary>Other players are servo followers within this distance of the local player: the load window.</summary>
+    /// <summary>Other players are character followers within this distance of the local player: the load window.</summary>
     public float LoadRange { get; set; } = 1000f;
 
     /// <summary>A grid owned elsewhere is a kinematic follower within this distance of the local player.</summary>
@@ -139,7 +139,7 @@ public sealed class EntityPresenceSystem : ISystem, IDebugUiSystem
                          TerrainReady(ToNumerics(e.Get<Transform>().Position));
             if (ready) mode = PhysicsMode.Simulated;
         }
-        else if (isPlayer && Within(distance, LoadRange, e.Has<PhysicsPresence>())) mode = PhysicsMode.ServoFollower;
+        else if (isPlayer && Within(distance, LoadRange, e.Has<PhysicsPresence>())) mode = PhysicsMode.CharacterFollower;
         else if (!isPlayer && Within(distance, FollowerGridRange, e.Has<PhysicsPresence>())) mode = PhysicsMode.KinematicFollower;
         if (mode is { } m)
         {

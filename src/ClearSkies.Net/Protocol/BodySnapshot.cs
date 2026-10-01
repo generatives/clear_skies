@@ -10,6 +10,8 @@ public enum SnapshotFlags : byte
     None = 0,
     /// <summary>A <see cref="LookAngles"/> streamed value follows.</summary>
     HasLook = 1,
+    /// <summary>A player free-flying: no character body, so nothing to stand on or push.</summary>
+    FreeFlying = 2,
 }
 
 /// <summary>A player's look direction, streamed with their body.</summary>

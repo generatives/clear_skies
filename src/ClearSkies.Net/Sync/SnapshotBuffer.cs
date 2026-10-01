@@ -119,7 +119,7 @@ public sealed class SnapshotBuffer
             float f = (float)((renderTick - t0) / System.Math.Max(1, t1 - t0));
             return new Sample(b.Support, Vector3.Lerp(a.Position, b.Position, f), Quaternion.Slerp(a.Rotation, b.Rotation, f),
                               new LookAngles(LerpAngle(a.Look.Yaw, b.Look.Yaw, f), a.Look.Pitch + (b.Look.Pitch - a.Look.Pitch) * f),
-                              b.LinearVelocity, (b.Flags & SnapshotFlags.HasLook) != 0);
+                              b.LinearVelocity, (b.Flags & SnapshotFlags.HasLook) != 0, (b.Flags & SnapshotFlags.FreeFlying) != 0);
         }
 
         // After the last: extrapolate from its velocity, for a while (a body at rest sends none, so stays put).
@@ -130,7 +130,8 @@ public sealed class SnapshotBuffer
     }
 
     private static Sample From(in BodySnapshot s) =>
-        new(s.Support, s.Position, s.Rotation, s.Look, s.LinearVelocity, (s.Flags & SnapshotFlags.HasLook) != 0);
+        new(s.Support, s.Position, s.Rotation, s.Look, s.LinearVelocity, (s.Flags & SnapshotFlags.HasLook) != 0,
+            (s.Flags & SnapshotFlags.FreeFlying) != 0);
 
     private static float LerpAngle(float a, float b, float f)
     {
@@ -138,7 +139,8 @@ public sealed class SnapshotBuffer
         return a + d * f;
     }
 
-    public readonly record struct Sample(EntityId Support, Vector3 Position, Quaternion Rotation, LookAngles Look, Vector3 Velocity, bool HasLook);
+    public readonly record struct Sample(EntityId Support, Vector3 Position, Quaternion Rotation, LookAngles Look, Vector3 Velocity,
+                                         bool HasLook, bool FreeFlying);
 }
 
 /// <summary>ECS component holding a remote body's <see cref="SnapshotBuffer"/>.</summary>

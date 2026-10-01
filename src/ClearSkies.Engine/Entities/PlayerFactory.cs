@@ -26,27 +26,7 @@ public static class PlayerFactory
 
         // Only the player's own machine simulates their character; everyone else draws them from body sync.
         if (owner.IsLocal)
-        {
-            var shape = new Capsule(radius: 0.3f, length: 1.0f);
-            var character = new PlayerCharacter(physics.Characters, d.Position, shape,
-                // Light (two Wood blocks' worth): the character pushes off the deck it walks on as hard as it pushes
-                // itself, so a heavy character with strong forces shoved and twisted ships as hard as their Fans.
-                minimumSpeculativeMargin: 0.01f, mass: 2f,
-                // Sharp start/stop: accel = force/mass = 50 m/s², reaches the 5 m/s target in ~0.1s (same
-                // cap governs stopping) and gives the motion constraint plenty of headroom to hold the
-                // character's velocity to an accelerating support (e.g. a thrusting airship deck) without
-                // lagging behind. MaximumVerticalGlueForce raised to match for the vertical half of that grip.
-                // Both scale with the mass, so the feel stays the same at any mass.
-                maximumHorizontalForce: 100f, maximumVerticalGlueForce: 70f,
-                // JumpVelocity paired with PlayerCharacter's default ExtraFallGravity (12, on top of the
-                // world's own gentle -6 gravity -> 18 effective while airborne) for a ~1-block peak jump
-                // height: v²/(2·g) = 6²/(2·18) = 1.0. Also makes falls heavier/snappier instead of floaty.
-                jumpVelocity: 6f, speed: 5f,
-                // Full air control: same acceleration and top speed as on the ground, and a gentle brake with no keys
-                // held, so you can steer mid-air and let go to avoid overshooting a ledge.
-                airControlForceScale: 1f, airControlSpeedScale: 1f, airBrakeScale: 0.5f, entity: player);
-            player.Set(new CharacterControllerComponent { Character = character, EyeHeight = EyeHeight });
-        }
+            player.Set(new CharacterControllerComponent { Character = CreateCharacter(physics, d.Position, player), EyeHeight = EyeHeight });
         player.Set(new Support());
         player.Set(new Player { Id = d.Id, Name = d.Name, IsLocal = owner.IsLocal });
         player.Set(id);
@@ -62,6 +42,27 @@ public static class PlayerFactory
         Fill(player, d);
         return player;
     }
+
+    /// <summary>A player's character body at <paramref name="position"/>: the local player's, and the copies of other
+    /// players that stand on ships here (see FollowerSystem), so both press on a deck alike.</summary>
+    public static PlayerCharacter CreateCharacter(PhysicsWorld physics, Vector3 position, Entity entity) =>
+        new(physics.Characters, position, new Capsule(radius: 0.3f, length: 1.0f),
+            // Light (two Wood blocks' worth): the character pushes off the deck it walks on as hard as it pushes
+            // itself, so a heavy character with strong forces shoved and twisted ships as hard as their Fans.
+            minimumSpeculativeMargin: 0.01f, mass: 2f,
+            // Sharp start/stop: accel = force/mass = 50 m/s², reaches the 5 m/s target in ~0.1s (same
+            // cap governs stopping) and gives the motion constraint plenty of headroom to hold the
+            // character's velocity to an accelerating support (e.g. a thrusting airship deck) without
+            // lagging behind. MaximumVerticalGlueForce raised to match for the vertical half of that grip.
+            // Both scale with the mass, so the feel stays the same at any mass.
+            maximumHorizontalForce: 100f, maximumVerticalGlueForce: 70f,
+            // JumpVelocity paired with PlayerCharacter's default ExtraFallGravity (12, on top of the
+            // world's own gentle -6 gravity -> 18 effective while airborne) for a ~1-block peak jump
+            // height: v²/(2·g) = 6²/(2·18) = 1.0. Also makes falls heavier/snappier instead of floaty.
+            jumpVelocity: 6f, speed: 5f,
+            // Full air control: same acceleration and top speed as on the ground, and a gentle brake with no keys
+            // held, so you can steer mid-air and let go to avoid overshooting a ledge.
+            airControlForceScale: 1f, airControlSpeedScale: 1f, airBrakeScale: 0.5f, entity: entity);
 
     /// <summary>Puts an existing player where <paramref name="d"/> says, facing that way, in that mode.</summary>
     private static void Fill(Entity player, PlayerDescription d)

@@ -167,18 +167,6 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
         body.ApplyAngularImpulse(angularImpulse);
     }
 
-    /// <summary>A capsule body for another player's servo copy (see <see cref="ColliderKind.Follower"/>): dynamic, never
-    /// rotating, colliding with grids only.</summary>
-    public BodyHandle AddFollowerCapsule(Vector3 position, float radius, float length, float mass, ColliderInfo tag)
-    {
-        var shape = new Capsule(radius, length);
-        var shapeIndex = Simulation.Shapes.Add(shape);
-        var handle = Simulation.Bodies.Add(BodyDescription.CreateDynamic(new RigidPose(position),
-            new BodyInertia { InverseMass = 1f / mass }, new CollidableDescription(shapeIndex, 0.1f), new BodyActivityDescription(-1f)));
-        Colliders.Allocate(handle) = tag;
-        return handle;
-    }
-
     /// <summary>Removes a body and its shape.</summary>
     public void RemoveBodyAndShape(BodyHandle handle)
     {
@@ -488,8 +476,8 @@ internal struct VoxelPoseCallbacks : IPoseIntegratorCallbacks
     }
 }
 
-/// <summary>Decides which colliders may touch: another player's servo copy (<see cref="ColliderKind.Follower"/>)
-/// touches grids only.</summary>
+/// <summary>Decides which colliders may touch: another player's copy (<see cref="ColliderKind.Follower"/>) touches
+/// grids and terrain only.</summary>
 public sealed class ContactFilter
 {
     public CollidableProperty<ColliderInfo>? Colliders;
@@ -499,8 +487,8 @@ public sealed class ContactFilter
         if (Colliders is not { } colliders) return true;
         var ka = colliders[a].Kind;
         var kb = colliders[b].Kind;
-        if (ka == ColliderKind.Follower) return kb == ColliderKind.VoxelGrid;
-        if (kb == ColliderKind.Follower) return ka == ColliderKind.VoxelGrid;
+        if (ka == ColliderKind.Follower) return kb is ColliderKind.VoxelGrid or ColliderKind.VoxelTerrain;
+        if (kb == ColliderKind.Follower) return ka is ColliderKind.VoxelGrid or ColliderKind.VoxelTerrain;
         return true;
     }
 }
