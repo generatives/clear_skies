@@ -91,18 +91,21 @@ public readonly struct BlockDef
     /// face culling (and the neighbour remeshing that depends on it) keys off this rather than IsSolid.
     public bool IsFullCube => IsSolid && Model == null;
 
-    /// True for a model block that stops light like a full cube would (e.g. Fan, which nearly fills its cell). Model
-    /// blocks otherwise let light through (see <see cref="BlocksLight"/>).
-    public bool            ModelBlocksLight { get; init; }
+    /// True for a model block whose model fills its whole cell (e.g. Fan): it's treated like an opaque cube, so it
+    /// stops light and hides the faces of blocks against it (which would otherwise be drawn on top of the model's
+    /// sides and flicker). Other model blocks only fill part of their cell, so they do neither.
+    public bool            OpaqueModel    { get; init; }
 
     /// True when this block stops light (sun, lamps, bounce) and darkens its neighbours' corners: a full cube unless
-    /// it's <see cref="Transparent"/>, and a model block only if it sets <see cref="ModelBlocksLight"/> (most only fill
-    /// part of their cell). The lighting system's occupancy is exactly this.
-    public bool BlocksLight => IsSolid && (Model == null ? !Transparent : ModelBlocksLight);
+    /// it's <see cref="Transparent"/>, or an <see cref="OpaqueModel"/>. The lighting system's occupancy is exactly this.
+    public bool BlocksLight => IsSolid && (Model == null ? !Transparent : OpaqueModel);
 
-    /// True when this block hides the face of a <paramref name="neighbour"/> block that touches it: an opaque full cube
-    /// hides every face against it, a <see cref="Transparent"/> one only those of its own type.
-    public bool HidesFaceOf(BlockId neighbour) => IsFullCube && (!Transparent || Id == neighbour);
+    /// True when this block hides the face of a <paramref name="neighbour"/> block that touches it: an opaque cube or
+    /// <see cref="OpaqueModel"/> hides every face against it, a <see cref="Transparent"/> cube only those of its own type.
+    public bool HidesFaceOf(BlockId neighbour) => BlocksLight || (IsFullCube && Transparent && Id == neighbour);
+
+    /// True when this block can hide a neighbour's face (see <see cref="HidesFaceOf"/>).
+    public bool HidesFaces => BlocksLight || IsFullCube;
 
     /// Classifies which texture role <paramref name="faceNormal"/> plays for a voxel whose
     /// top points <paramref name="up"/>: Top if the face points that way, Bottom if it points the opposite way,

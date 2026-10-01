@@ -217,8 +217,8 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
             var data = entry.Data;
             _meshes++;
             if (e.Has<ChunkRenderData>()) _remeshes++;
-            // A volume meshed without its neighbours (the streamed world) uses them only to hide transparent faces
-            // against more of the same block (water across a chunk border): its other border faces are all drawn.
+            // A volume meshed without its neighbours (the streamed world) uses them only to cull transparent faces
+            // (see ChunkVolume.MeshIgnoresNeighbours): its other border faces are all drawn.
             bool alone = volume.MeshIgnoresNeighbours;
             var nX = volume.GetData(pos.Offset(-1, 0, 0)); var pX = volume.GetData(pos.Offset(1, 0, 0));
             var nY = volume.GetData(pos.Offset(0, -1, 0)); var pY = volume.GetData(pos.Offset(0, 1, 0));

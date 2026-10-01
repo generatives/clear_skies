@@ -37,7 +37,7 @@ public static class BlockRegistry
         // Fan and Buoyant are entity blocks (see BlockDef.Components): AirshipFlightSystem finds a ship's Fans and
         // Buoyant blocks through their entities instead of scanning voxels.
         Register(new BlockDef { Id = BlockId.Fan, Name = "Fan", Color = new(0.85f, 0.55f, 0.15f), IsSolid = true, PlaceOriented = true, LightEmission = 0, Weight = 3,
-            ModelBlocksLight = true, // nearly fills its cell, so it shades what's behind it like a cube
+            OpaqueModel = true, // its housing fills the cell: it shades what's behind it and hides faces against it like a cube
             Model = "thruster/thruster.gltf", IconTexture = "thruster.png", Components = e => e.Set(new Fan()) });
         //Register(new BlockDef { Id = BlockId.Fan,     Name = "Fan",     Color = new(0.85f, 0.55f, 0.15f), IsSolid = true, LightEmission = 0, Weight = 3,
         //    Texture = "metal", TextureTop = "thruster" });

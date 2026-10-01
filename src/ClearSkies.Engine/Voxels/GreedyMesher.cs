@@ -20,7 +20,8 @@ namespace ClearSkies.Engine.Voxels;
 /// <see cref="BlockDef.Transparent"/> blocks (glass, water) are meshed alongside but into a separate mesh
 /// (<see cref="TransparentVertices"/>, <see cref="TransparentIndices"/>), drawn alpha-blended after the opaque
 /// world. They don't hide their neighbours' faces, so an opaque block behind glass still has its face; and a
-/// transparent face is hidden only by an opaque block or another of its own type.
+/// transparent face is hidden only by an opaque block (or <see cref="BlockDef.OpaqueModel"/>) or another of its own
+/// type. An opaque model block hides faces against it like an opaque cube, since its model covers them.
 /// </summary>
 public sealed class GreedyMesher
 {
@@ -73,8 +74,8 @@ public sealed class GreedyMesher
     /// Mesh <paramref name="chunk"/>, returning its opaque faces; its transparent ones are left in
     /// <see cref="TransparentVertices"/> and <see cref="TransparentIndices"/>. Neighbour ChunkData parameters are
     /// for face-culling only; pass <c>null</c> for any unloaded neighbour (its side is treated as open air). With
-    /// <paramref name="neighboursForTransparentOnly"/>, the neighbours only cull transparent faces against blocks of
-    /// their own type, and every other border face is drawn as if the neighbour were air (see
+    /// <paramref name="neighboursForTransparentOnly"/>, the neighbours only cull transparent faces, and every other
+    /// border face is drawn as if the neighbour were air (see
     /// <see cref="ChunkVolume.MeshIgnoresNeighbours"/>). The returned lists are reused scratch buffers (see field
     /// docs) — consume them before calling Mesh() again.
     /// </summary>
@@ -125,8 +126,8 @@ public sealed class GreedyMesher
                         else {
                             int nbSlice = face.FaceOffset == 1 ? 0 : sz - 1;
                             adjId = GetBlock(nb, face, nbSlice, u, v);
-                            // Only a block of a transparent face's own type hides it across the border.
-                            if (neighboursForTransparentOnly && (!blockDef.Transparent || adjId != blockId)) adjId = BlockId.Air;
+                            // Only transparent faces are culled across the border.
+                            if (neighboursForTransparentOnly && !blockDef.Transparent) adjId = BlockId.Air;
                         }
                     }
                     else

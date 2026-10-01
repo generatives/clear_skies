@@ -719,7 +719,7 @@ fn fs_overdraw(in: VSOut) -> @location(0) vec4<f32> {
 // 3D models (GpuModel, e.g. glTF props and model blocks): group 3 holds the model's own single-layer texture instead
 // of the block array, sampled at the normalized uv.xy. A model block (grid >= 0) is lit from its own cell's voxel
 // light — sky/AO, lamp light and sun visibility, one flat value for the whole model — combined like fs_main does. A
-// model block that blocks light (BlockDef.ModelBlocksLight) has no light of its own (the light pass gives such cells
+// model block that blocks light (BlockDef.OpaqueModel) has no light of its own (the light pass gives such cells
 // only flat ambient and full sun), so it takes the brightest of its open neighbours' (see modelCell).
 // Any other model has no light data and is lit like an open-air surface: the brighter of the flat ambient and
 // Lambertian sun. Both are fogged like the terrain. Drawn with culling off (glTF doubleSided is common and cheap
