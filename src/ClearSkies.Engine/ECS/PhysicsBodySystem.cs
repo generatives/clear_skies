@@ -156,7 +156,11 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
             ref readonly var t = ref entity.Get<Transform>();
             var o = entity.Get<BodyStateOverride>();
             _physics.SetBodyPose(body, pb.BodyPosition(t), PhysicsConv.ToBepu(t.Rotation));
-            if (_physics.GetBodyMass(body) > 0)
+            // A copy following its owner's snapshots moves too (kinematically) until the follower takes over from its first
+            // snapshot, so whoever spawns aboard doesn't ride a ship that stands still and then lurches off. A locked grid
+            // simulated here stays put.
+            bool following = entity.Has<PhysicsPresence>() && entity.Get<PhysicsPresence>().Mode == PhysicsMode.KinematicFollower;
+            if (_physics.GetBodyMass(body) > 0 || following)
             {
                 _physics.SetBodyLinearVelocity(body, o.LinearVelocity);
                 _physics.SetBodyAngularVelocity(body, o.AngularVelocity);

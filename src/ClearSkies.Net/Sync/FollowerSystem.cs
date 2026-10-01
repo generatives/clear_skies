@@ -5,6 +5,7 @@ using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Gui;
 using ClearSkies.Engine.Physics;
 using ClearSkies.Engine.Physics.Characters;
+using ClearSkies.Engine.Physics.Support;
 using ClearSkies.Engine.Voxels;
 using DefaultEcs;
 using ImGuiNET;
@@ -48,6 +49,7 @@ public sealed class FollowerSystem : ISystem, IDebugUiSystem
     private readonly EntitySet _grids;
     private readonly EntitySet _players;
     private readonly EntitySet _copies;
+    private readonly EntitySet _riders;
     private readonly HashSet<Entity> _placed = new();
     private readonly List<PlayerCharacter> _orphaned = new();
     private int _teleports;
@@ -59,6 +61,7 @@ public sealed class FollowerSystem : ISystem, IDebugUiSystem
         _grids = world.GetEntities().With<DynamicGrid>().With<PhysicsBodyComponent>().With<RemoteBody>().With<PhysicsPresence>().AsSet();
         _players = world.GetEntities().With<Player>().With<RemoteBody>().With<Transform>().AsSet();
         _copies = world.GetEntities().With<FollowerCharacter>().AsSet();
+        _riders = world.GetEntities().With<CharacterControllerComponent>().With<Support>().With<Transform>().Without<FreeFlying>().AsSet();
         world.SubscribeEntityDisposed((in Entity e) =>
         {
             if (e.Has<FollowerCharacter>()) _orphaned.Add(e.Get<FollowerCharacter>().Character);
@@ -78,7 +81,7 @@ public sealed class FollowerSystem : ISystem, IDebugUiSystem
             if (buffer.At(_remote.SampleTick(buffer)) is not { } s) continue;
             var (origin, rotation) = _remote.ToWorld(s.Support, s.Position, s.Rotation);
             ref readonly var pb = ref e.Get<PhysicsBodyComponent>();
-            FollowKinematic(e, pb.Body, pb.BodyPosition(origin, rotation), rotation, dt);
+            FollowKinematic(e, pb.Body, pb.BodyPosition(origin, rotation), rotation, s.Velocity, dt);
         }
 
         // Players' copies come and go with the presence layer, and their flying.
@@ -153,14 +156,18 @@ public sealed class FollowerSystem : ISystem, IDebugUiSystem
     private BepuPhysics.BodyHandle? SupportBody(EntityId support) =>
         _remote.TryGetSupport(support, out var s) && s.Has<PhysicsBodyComponent>() ? s.Get<PhysicsBodyComponent>().Body : null;
 
-    private void FollowKinematic(Entity e, BepuPhysics.BodyHandle body, Vector3 target, Quaternion rotation, float dt)
+    private void FollowKinematic(Entity e, BepuPhysics.BodyHandle body, Vector3 target, Quaternion rotation, Vector3 velocity, float dt)
     {
         var (position, orientation) = _physics.GetBodyPose(body);
         if (!_placed.Contains(e) || Vector3.Distance(position, target) > GridSnapDistance)
         {
-            _physics.SetBodyPose(body, target, rotation);
-            _physics.SetBodyLinearVelocity(body, Vector3.Zero);
+            // Placed straight there (just arrived, or a hitch), moving as it was then, with whoever is aboard: a step
+            // short, as following leaves it, so the step brings it to the target rather than past it.
+            var placed = target - velocity * dt;
+            _physics.SetBodyPose(body, placed, rotation);
+            _physics.SetBodyLinearVelocity(body, velocity);
             _physics.SetBodyAngularVelocity(body, Vector3.Zero);
+            CarryRiders(e, position, orientation, placed, rotation, velocity);
             _placed.Add(e);
             _teleports++;
             return;
@@ -173,6 +180,25 @@ public sealed class FollowerSystem : ISystem, IDebugUiSystem
         float sin = MathF.Sqrt(MathF.Max(0f, 1f - delta.W * delta.W));
         var axis = sin > 1e-5f ? new Vector3(delta.X, delta.Y, delta.Z) / sin : Vector3.Zero;
         _physics.SetBodyAngularVelocity(body, axis * (angle / dt));
+    }
+
+    /// <summary>Moves the local players on <paramref name="ship"/> with it, where it's just been placed: to the same
+    /// spot on its deck, moving with it. (Not as they were moving on it: what it was doing before it was placed may be
+    /// nothing like what it's doing now, e.g. a copy just made, at rest.)</summary>
+    private void CarryRiders(Entity ship, Vector3 fromPosition, Quaternion fromRotation,
+                             Vector3 toPosition, Quaternion toRotation, Vector3 toVelocity)
+    {
+        var inverse = Quaternion.Inverse(fromRotation);
+        foreach (ref readonly var rider in _riders.GetEntities())
+        {
+            if (rider.Get<Support>().Supporter != ship) continue;
+            ref var character = ref rider.Get<CharacterControllerComponent>().Character;
+            var onDeck = Vector3.Transform(character.Position - fromPosition, inverse);
+            var at = toPosition + Vector3.Transform(onDeck, toRotation);
+            Players.Teleport(rider, new Silk.NET.Maths.Vector3D<float>(at.X, at.Y, at.Z));
+            character.SetVelocity(toVelocity);
+            if (rider.Has<InterpolatedTransform>()) rider.Get<InterpolatedTransform>().Teleport();
+        }
     }
 
     /// <summary>How fast the point <paramref name="at"/> of what a player stands on is moving here (zero if they stand on

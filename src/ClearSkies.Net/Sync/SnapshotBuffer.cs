@@ -107,8 +107,9 @@ public sealed class SnapshotBuffer
     public Sample? At(double renderTick)
     {
         if (_samples.Count == 0) return null;
-        // Before the first: hold the first.
-        if (renderTick <= _samples[0].Tick) return From(_samples[0].Snapshot);
+        // Before the first: where it was then, back along its velocity (a ship just sent, moving, doesn't stand still
+        // until the delay catches up with its first snapshot, then lurch off at full speed under whoever's aboard).
+        if (renderTick <= _samples[0].Tick) return Extrapolated(_samples[0].Snapshot, renderTick - _samples[0].Tick);
 
         for (int i = _samples.Count - 1; i > 0; i--)
         {
@@ -124,9 +125,18 @@ public sealed class SnapshotBuffer
 
         // After the last: extrapolate from its velocity, for a while (a body at rest sends none, so stays put).
         var (tl, last) = _samples[^1];
-        double ahead = System.Math.Min(renderTick - tl, MaxExtrapolationTicks);
-        var s = From(last);
-        return s with { Position = last.Position + last.LinearVelocity * (float)(ahead / 60.0) };
+        return Extrapolated(last, renderTick - tl);
+    }
+
+    /// <summary>A snapshot moved along its velocity by <paramref name="ticks"/> (back if negative), up to
+    /// <see cref="MaxExtrapolationTicks"/>. Only in world space: on a support, the velocity (a world one) isn't motion
+    /// on it, so it stays where it was there.</summary>
+    private static Sample Extrapolated(in BodySnapshot snapshot, double ticks)
+    {
+        var s = From(snapshot);
+        if (!snapshot.Support.IsNone) return s;
+        ticks = System.Math.Clamp(ticks, -MaxExtrapolationTicks, MaxExtrapolationTicks);
+        return s with { Position = snapshot.Position + snapshot.LinearVelocity * (float)(ticks / 60.0) };
     }
 
     private static Sample From(in BodySnapshot s) =>
