@@ -14,7 +14,7 @@ Some major gameplay themes:
 - Building and extending the ship. Thinking about buoyancy and thrust, making sure things are well balanced.
 - Operating the ship. The player will need to be involved in keeping the ship in the air an on course. This will be a "tactile", active process.
 - Navigating the world. The player will be incentivized to both explore new areas and return to existing ones regularly. They will need to learn routes and find ways to keep track of your location.
-- Surviving the environment. The player will need to deal with extreme temperatures and pressures as the explore the world. They will need to prepare for long voyages under difficult conditions.
+- Surviving the environment. The player will need to deal with extreme temperatures, pressures, and weather as they explore the world. They will need to prepare for long voyages under difficult conditions.
 
 I do not have all the details worked out but this is my general goal for the game.
 
