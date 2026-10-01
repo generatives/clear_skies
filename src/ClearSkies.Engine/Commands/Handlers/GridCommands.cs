@@ -105,7 +105,7 @@ public sealed class SetMoveModeHandler : PredictedCommandHandler<SetMoveMode, (E
     public override SetMoveMode Read(ref NetReader r) => new() { Player = EntityId.Read(ref r), FreeFly = r.ReadBool() };
 
     public override Verdict Validate(ref SetMoveMode c, in CommandContext ctx)
-        => _registry.Find(c.Player) is { } e && e.Has<CharacterControllerComponent>() ? Verdict.Accept : Verdict.Reject;
+        => _registry.Find(c.Player) is { } e && e.Has<Player>() ? Verdict.Accept : Verdict.Reject;
 
     public override void Apply(in SetMoveMode e, in ApplyContext ctx) => Set(e.Player, e.FreeFly);
 
@@ -116,6 +116,6 @@ public sealed class SetMoveModeHandler : PredictedCommandHandler<SetMoveMode, (E
 
     private void Set(EntityId player, bool freeFly)
     {
-        if (_registry.Find(player) is { } p && p.Has<CharacterControllerComponent>()) Players.SetFreeFlying(p, freeFly);
+        if (_registry.Find(player) is { } p && p.Has<Player>()) Players.SetFreeFlying(p, freeFly);
     }
 }

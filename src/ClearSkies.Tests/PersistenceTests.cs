@@ -111,7 +111,7 @@ public class SaveDatabaseTests
                 using var scene = new HeadlessScene(firstFreeId: db.NextFreeId);
                 scene.EnablePersistence(db);
                 for (int i = 0; i < 1500; i++) Assert.True(seen.Add(scene.Registry.Allocate()));
-                scene.Saver!.SaveNow();
+                scene.Saver!.SaveAll();
             }
         }
         finally { File.Delete(path); }
@@ -191,7 +191,7 @@ public class StreamingTests
     {
         var (scene, db, player, grid) = Scene();
         using var _ = scene; using var __ = db;
-        scene.Saver!.SaveNow(); // now in the index and live
+        scene.Saver!.SaveAll(); // now in the index and live
         scene.Tick(5);
         Assert.Single(scene.World.GetEntities().With<DynamicGrid>().AsEnumerable());
     }
@@ -204,11 +204,13 @@ public class StreamingTests
         // A stored row with no position, far from everyone as far as position goes.
         var d = DescriptionTests.DescribeNow(scene, grid);
         Hierarchy.DestroyRecursive(grid);
-        db.WriteEntity(d.Id, d.HandlerId, null, d.Payload);
-        scene.Index!.Set(new StoredEntity(d.Id, d.HandlerId, null));
+        db.WriteEntity(d.Id, d.Kind, null, d.Data);
+        scene.Index!.Set(new StoredEntity(d.Id, d.Kind, null));
         MovePlayer(player, 50_000);
-        scene.Tick(2);
+        scene.Tick(5); // loaded, and not unloaded again for being far away
         Assert.True(scene.Registry.IsLive(d.Id));
+        scene.Saver!.SaveAll();
+        Assert.True(scene.Index.TryGet(d.Id, out var entry) && entry.Position is null); // still global
     }
 
     [Fact]
@@ -217,7 +219,7 @@ public class StreamingTests
         string path = Path.Combine(Path.GetTempPath(), $"cs-test-{Guid.NewGuid():N}.db");
         try
         {
-            EntityId gridId, playerId;
+            EntityId gridId;
             PlayerId who;
             using (var db = SaveDatabase.Open(path))
             using (var scene = new HeadlessScene(firstFreeId: db.NextFreeId))
@@ -226,9 +228,9 @@ public class StreamingTests
                 var player = scene.SpawnLocalPlayer(new Vector3(5, 60, 5), freeFly: true);
                 var grid = scene.SpawnPlatform(new Vector3(20, 50, 0), size: 3);
                 scene.Tick(2);
-                (gridId, playerId, who) = (grid.Get<EntityId>(), player.Get<EntityId>(), player.Get<Player>().Id);
+                (gridId, who) = (grid.Get<EntityId>(), player.Get<Player>().Id);
                 MovePlayer(player, 7);
-                scene.Saver!.SaveNow();
+                scene.Saver!.SaveAll();
             }
             using (var db = SaveDatabase.Open(path))
             using (var scene = new HeadlessScene(firstFreeId: db.NextFreeId))
@@ -236,11 +238,11 @@ public class StreamingTests
                 scene.EnablePersistence(db);
                 var saved = db.ReadPlayer(who);
                 Assert.NotNull(saved);
-                scene.Commands.SendSerialized(CommandIds.SpawnPlayer, saved);
+                scene.Commands.Send(new Spawn<PlayerDescription> { Description = DescriptionBytes.Read<PlayerDescription>(saved) });
                 scene.Tick(3);
-                var player = scene.Registry.Find(playerId);
-                Assert.NotNull(player);
-                Assert.Equal(7f, player!.Value.Get<Transform>().Position.X);
+                var player = scene.World.GetEntities().With<Player>().AsEnumerable().Single();
+                Assert.Equal(who, player.Get<Player>().Id);
+                Assert.Equal(7f, player.Get<Transform>().Position.X);
                 Assert.True(scene.Registry.IsLive(gridId)); // loaded around the restored player
                 Assert.True(scene.Registry.Allocate().Value > gridId.Value);
             }
@@ -254,7 +256,7 @@ public class StreamingTests
         var (scene, db, player, grid) = Scene();
         using var _ = scene; using var __ = db;
         var id = grid.Get<EntityId>();
-        scene.Saver!.SaveNow();
+        scene.Saver!.SaveAll();
         Assert.NotNull(db.ReadEntity(id));
         scene.Commands.Send(new DespawnEntity { Entity = id });
         scene.Tick(3);

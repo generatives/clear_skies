@@ -24,7 +24,7 @@ namespace ClearSkies.Game.Diagnostics;
 /// </summary>
 public sealed class StreamingFlightTest : ISystem, IDebugUiSystem
 {
-    private readonly EngineHost _host;
+    private readonly WindowedEngineHost _host;
     private readonly EntitySet _cameras;
     private readonly Action? _whenDone;
     private readonly Stopwatch _clock = new();
@@ -60,7 +60,7 @@ public sealed class StreamingFlightTest : ISystem, IDebugUiSystem
     // flies the same line and sees the same view however the mouse moved while the world loaded.
     private readonly (float Yaw, float Pitch)? _fixedLook;
 
-    public StreamingFlightTest(EngineHost host, ChunkVolume world, GridStore store, bool autoStart, Action? whenDone = null,
+    public StreamingFlightTest(WindowedEngineHost host, ChunkVolume world, GridStore store, bool autoStart, Action? whenDone = null,
                                (float Yaw, float Pitch)? fixedLook = null)
     {
         _host = host;
