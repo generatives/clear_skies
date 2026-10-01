@@ -18,6 +18,44 @@ Some major gameplay themes:
 
 I do not have all the details worked out but this is my general goal for the game.
 
+## Downloads
+There are builds available under "Releases" here on GitHub, I automatically build for Windows x64, Windows ARM, and Linux x64. I really only play regularly on Windows x64 so those builds will be the most reliable. The builds are all self contained so you don't need .NET installed to run them. There are "folder" builds and non-folder builds. The "folder" builds are an archive containing all the files required, including the executable. The non-folder builds are just a single executable which unpacks itself. I include the folder builds because unpacking executables are often blocked as viruses.
+
+## Instructions
+### Controls
+The control scheme is pretty scattered right now since I am mostly just building baseline features.
+
+There are 3 general control modes:
+#### Free Fly Camera
+Press "V" to toggle between a physical character and flying camera.
+WASD to move and Mouse to look around
+Space and Shift to move up and down
+Q/E to change movement speed
+Hold Ctrl to triple movement speed
+
+#### Physical Character
+Press "V" to toggle between a physical character and flying camera.
+WASD to move and Mouse to look around
+Space to jump
+Ctrl to crouch, slows movement and prevents walking off edges
+Shift to sprint
+
+#### Pilot Mode
+If you have selected an airship (recently spawned, walked on, or edited) you can press "F" to enter pilot mode. Doesn't work in multiplayer. You will be locked into an orbiting camera angle and can control the ship.
+
+WASD to move laterally
+Q/E to rotate
+Shift/Space to move up and down
+Mouse to orbit camera
+
+### Building Ships
+Press "G" to spawn a ship in front of you
+You can build out a ship using blocks. You will need Fans/Thrusters for it to keep itself stable and move around. There is a simple physics simulation so they need to be places in the right directions and evenly throughout the ship for stability. You can place levers to control thrust, levers control thrust along the axis the lever moves. Steering wheels control Yaw.
+
+Press "End" to lock and unlock a ship. Locked ships will not move, Unlocked ones are dynamic physics bodies. Press "Home" to reset the rotation on a ship, helpful if it looses stability.
+
+If you don't want to place thrusters you can enable Free Propulsion in the Airship menu. You can also Save and Load Airships from there.
+
 ## Technology
 - C#
 - Silk.NET
