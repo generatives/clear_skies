@@ -1,9 +1,9 @@
 # Clear Skies
 
 ## Repo
-This repository contains a Voxel Game and Engine built for that game. This is a "minecraft clone" or "block game", with big textured blocks and simple, low poly graphics.
+This repository contains a Voxel Game and an Engine built for that game. This is a "minecraft clone" or "block game", with big textured blocks and simple, low poly graphics.
 
-A relatively unique feature I am building into the game are "dynamic grids", grids of voxels which have physics bodies attached. There is also a ray traced lighting system which works well with those large, moving bodies.
+A relatively unique feature I am building into the game are "dynamic grids", grids of voxels which have physics bodies attached. There is also a ray traced lighting system which works well with those large, moving bodies. There is a WIP multiplayer system, targeting small groups of players (1-8, I haven't stress tested yet).
 
 This repo is almost entirely written by Claude Code. I do some tinkering and am closely involved in the development process, but I am not really writing code.
 
