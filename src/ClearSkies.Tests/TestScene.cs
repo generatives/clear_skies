@@ -1,6 +1,7 @@
 using System.Numerics;
 using BepuPhysics.Collidables;
 using ClearSkies.Engine.Commands;
+using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Commands.Handlers;
 using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Persistence;
@@ -30,7 +31,11 @@ public sealed class HeadlessScene : IDisposable
     public readonly CommandSystem Commands;
     public readonly BlockEntities Blocks;
     public readonly EditLimits Limits = new();
-    public uint TickNumber;
+    public readonly ManualTickClock Clock = new();
+    private double _rateCredit;
+    public uint TickNumber => Clock.Tick;
+    public ClearSkies.Net.Session.NetSession? Net;
+    public ClearSkies.Net.Sync.RemoteBodySystem? RemoteBodies;
     private readonly List<Engine.Core.ISystem> _tick = new();
     private readonly TickInterpolationSystem _interpolation;
 
@@ -54,7 +59,7 @@ public sealed class HeadlessScene : IDisposable
         root.Set<Rendered>();
 
         Presence = new EntityPresenceSystem(World, Session, WorldVolume, viewDistance: 500f);
-        Commands = new CommandSystem(Session, Registry, () => TickNumber);
+        Commands = new CommandSystem(Session, Registry, () => Clock.Tick);
         Blocks = new BlockEntities(World, Registry);
         GameCommands.RegisterAll(Commands, World, Session, Blocks, Limits, Registry, Physics, Selection);
         var hierarchy = new HierarchyTransformSystem(World);
@@ -68,6 +73,15 @@ public sealed class HeadlessScene : IDisposable
         _tick.Add(hierarchy);
         _tick.Add(new SupportSystem(World, Physics));
         _interpolation = new TickInterpolationSystem(World, new Engine.Core.Time()); // last, as in the game
+    }
+
+    /// <summary>Puts a network session in the tick: the session first, body sync last.</summary>
+    public void AttachNet(ClearSkies.Net.Session.NetSession net)
+    {
+        Net = net;
+        _tick.Insert(0, net);
+        _tick.Add(new ClearSkies.Net.Sync.BodySync(net, World, Physics));
+        RemoteBodies = new ClearSkies.Net.Sync.RemoteBodySystem(World, Registry, Clock);
     }
 
     /// <summary>Saves to <paramref name="db"/> and streams entities from it, as the host does.</summary>
@@ -84,9 +98,16 @@ public sealed class HeadlessScene : IDisposable
     {
         for (int i = 0; i < count; i++)
         {
-            TickNumber++;
-            foreach (var s in _tick) s.Update(Dt);
-            _interpolation.Update(Engine.Core.SystemStage.Simulation, Dt);
+            // One frame of real time: usually one tick, but clock sync's slew (Rate) sometimes makes it none or two.
+            _rateCredit += Clock.Rate;
+            while (_rateCredit >= 1)
+            {
+                _rateCredit -= 1;
+                Clock.Tick++;
+                foreach (var s in _tick) s.Update(Dt);
+                _interpolation.Update(Engine.Core.SystemStage.Simulation, Dt);
+            }
+            RemoteBodies?.Update(Dt); // per frame in the game
         }
     }
 
@@ -134,6 +155,7 @@ public sealed class HeadlessScene : IDisposable
 
     public void Dispose()
     {
+        Net?.Dispose();
         Registry.Dispose();
         Physics.Dispose();
         World.Dispose();

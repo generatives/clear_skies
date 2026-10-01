@@ -14,6 +14,8 @@ public class TickClockTests
     [InlineData(1.0 / 30.0)]
     [InlineData(1.0 / 45.0)]
     [InlineData(1.0 / 240.0)]
+    [InlineData(1.0 / 10.0)] // e.g. a window in the background
+    [InlineData(1.0 / 5.0)]
     public void OneSecondOfFramesRunsSixtyTicks(double frameSeconds)
     {
         var clock = new TickClock();
@@ -43,7 +45,7 @@ public class TickClockTests
     {
         var clock = new TickClock();
         Assert.Equal(TickClock.MaxTicksPerFrame, clock.Advance(1.0));
-        Assert.True(clock.DroppedTicks >= 50);
+        Assert.Equal(60 - TickClock.MaxTicksPerFrame, clock.DroppedTicks);
         // Nothing left over to chase next frame.
         Assert.Equal(1, clock.Advance(1.0 / 60.0));
     }

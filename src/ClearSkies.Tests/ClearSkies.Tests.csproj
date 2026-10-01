@@ -17,6 +17,7 @@
   <ItemGroup>
     <ProjectReference Include="..\ClearSkies.Engine\ClearSkies.Engine.csproj" />
     <ProjectReference Include="..\ClearSkies.Game\ClearSkies.Game.csproj" />
+    <ProjectReference Include="..\ClearSkies.Net\ClearSkies.Net.csproj" />
   </ItemGroup>
 
 </Project>

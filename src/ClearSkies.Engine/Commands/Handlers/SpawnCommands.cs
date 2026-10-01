@@ -34,20 +34,18 @@ public struct Spawn<TDescription> : ICommand where TDescription : class, IEntity
 /// isn't live: one that is is rejected, or, arriving as an event, left alone. A subclass says how to create its kind
 /// and describe it, and what makes a description valid.
 /// </summary>
-public abstract class SpawnHandler<TDescription, TKind> : CommandHandler<Spawn<TDescription>>, IDescriber
+public abstract class SpawnHandler<TDescription, TKind> : CommandHandler<Spawn<TDescription>>, ISpawnHandler
     where TDescription : class, IEntityDescription<TDescription>
 {
     protected readonly World World;
     protected readonly EntityRegistry Registry;
     protected readonly Session Session;
-    private readonly EntitySet _requested;
 
     protected SpawnHandler(World world, EntityRegistry registry, Session session)
     {
         World = world;
         Registry = registry;
         Session = session;
-        _requested = world.GetEntities().With<DescribeRequest>().With<TKind>().With<EntityId>().AsSet();
     }
 
     /// <summary>Order among describers each tick: supports (grids) before what they support (players).</summary>
@@ -98,14 +96,12 @@ public abstract class SpawnHandler<TDescription, TKind> : CommandHandler<Spawn<T
         if (e.Select && ctx.Origin == Session.LocalPeer) Select(entity);
     }
 
-    public void Describe(DescriptionSink sink)
-    {
-        foreach (var entity in _requested.GetEntities().ToArray())
-        {
-            var owner = entity.Has<NetOwner>() ? entity.Get<NetOwner>().Owner : Session.LocalPeer;
-            sink.Add(entity, new Spawn<TDescription> { Id = entity.Get<EntityId>(), Owner = owner, Description = DescriptionOf(entity) });
-        }
-    }
+    public bool Describes(Entity entity) => entity.Has<TKind>() && entity.Has<EntityId>();
+
+    public byte[] Describe(Entity entity) => DescriptionBytes.Of(DescriptionOf(entity));
+
+    public byte[] SpawnCommand(EntityId id, PeerId owner, ReadOnlySpan<byte> description) =>
+        Serialize(new Spawn<TDescription> { Id = id, Owner = owner, Description = DescriptionBytes.Read<TDescription>(description) });
 }
 
 /// <summary>Spawns grids (G, loading a .grid file, loading from storage, joining). The host owns a new grid.</summary>
@@ -140,20 +136,31 @@ public sealed class SpawnGridHandler : SpawnHandler<GridDescription, DynamicGrid
     protected override void Select(Entity grid) => _selection?.Select(grid);
 }
 
-/// <summary>Spawns players (at startup, and for each player joining). A player owns their own character.</summary>
+/// <summary>Spawns players (at startup, and for each player joining). A player owns their own character. Players owned
+/// elsewhere are drawn with <see cref="PlayerModel"/>, where there's one (not headless).</summary>
 public sealed class SpawnPlayerHandler : SpawnHandler<PlayerDescription, Player>
 {
     private readonly PhysicsWorld _physics;
+    private readonly PlayerModel? _model;
 
-    public SpawnPlayerHandler(World world, EntityRegistry registry, Session session, PhysicsWorld physics)
-        : base(world, registry, session) => _physics = physics;
+    public SpawnPlayerHandler(World world, EntityRegistry registry, Session session, PhysicsWorld physics, PlayerModel? model = null)
+        : base(world, registry, session)
+    {
+        _physics = physics;
+        _model = model;
+    }
 
     public override ushort Id => CommandIds.SpawnPlayer;
 
     /// <summary>After grids, which players may stand on.</summary>
     public override int Order => 10;
 
-    protected override Entity Create(EntityId id, NetOwner owner, PlayerDescription d) => PlayerFactory.Create(World, _physics, id, owner, d);
+    protected override Entity Create(EntityId id, NetOwner owner, PlayerDescription d)
+    {
+        var player = PlayerFactory.Create(World, _physics, id, owner, d);
+        if (!owner.IsLocal && _model is not null) player.Set(_model.Create());
+        return player;
+    }
 
     protected override PlayerDescription DescriptionOf(Entity player) => PlayerFactory.Describe(player);
 }

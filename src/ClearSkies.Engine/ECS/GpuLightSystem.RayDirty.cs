@@ -39,6 +39,10 @@ public sealed partial class GpuLightSystem
         public Vector3D<float> PrevPos, PrevWorldMin, PrevWorldMax, CurWorldMin, CurWorldMax;
         public Quaternion<float> PrevRot;
         public int PrevVersion = -1;
+
+        // This frame: moved, and whether its blocks changed (or it appeared); for AO only, whether its rays can reach
+        // another grid now or could last frame (only then does its AO change with its pose).
+        public bool Moved, Edited, NearOther, WasNearOther;
     }
 
     private readonly Dictionary<GridHandle, GridLightState> _gridStates = new();
@@ -81,10 +85,14 @@ public sealed partial class GpuLightSystem
     private int _nearCount;
 
     private int _lastDirtyTotal, _lastBounceTotal, _lastNearTotal;
-    private const int BounceMarginBricks = 2;  // bounce rays reach 16 voxels = 2 bricks
+    // The bricks within bounce ray reach of a brick, each way.
+    private int BounceMarginBricks => (int)MathF.Ceiling(_bounceReach / 8f);
+    // The stored bounce shown: none with AO only (the rays store none).
+    private float ShownBounceScale => _bounceMode == BounceMode.Full ? _bounceScale : 0f;
 
     private float _prevBounceAlbedo = -1f, _prevSunLevel = -1f;
-    private bool _prevBounceEnabled;
+    private BounceMode _prevBounceMode = BounceMode.Off;
+    private float _prevBounceReach = -1f;
     private int _prevBounceRays = -1, _prevBounceCycle = -1;
 
     private bool _rayWasActive, _relightRequested;
@@ -121,7 +129,7 @@ public sealed partial class GpuLightSystem
         var sunDir = SunLight.Direction;
         // The bounce display scale, ambient and AO strength are baked into the composed display, so changing any of them
         // (or bounce on/off) recomposes.
-        var shown = (_bounceEnabled ? _bounceScale : 0f, RayLightingSettings.Ambient, RayLightingSettings.AoStrength);
+        var shown = (ShownBounceScale, RayLightingSettings.Ambient, RayLightingSettings.AoStrength);
         bool scaleChanged = shown != _prevShown;
         _prevShown = shown;
         bool relightAll = !_rayWasActive || sunDir != _prevSunDir || _relightRequested || scaleChanged;
@@ -133,6 +141,8 @@ public sealed partial class GpuLightSystem
 
         // Freshly allocated light storage holds nothing yet: clear any state left by the slot's previous owner.
         _dbgNewSlots = _store.NewSlots.Count;
+        _newSlots.Clear();
+        _newSlots.AddRange(_store.NewSlots);
         foreach (int slot in _store.NewSlots)
         {
             _hold[slot] = 0;
@@ -146,6 +156,7 @@ public sealed partial class GpuLightSystem
         _occluderChanges.Clear();
         _directChanges.Clear();
         _bounceClears.Clear();
+        _shapeChanges.Clear();
         CollectOccluderChanges(relightAll);
         CollectLampChanges();
         _dbgLampChanges = _directChanges.Count;
@@ -180,10 +191,13 @@ public sealed partial class GpuLightSystem
 
         // Bounce inputs that change what every surface receives (or which rays it fires): re-evaluate everything. The
         // displayed light bounce rays read includes the AO-darkened ambient, so that counts too.
+        // With AO only, nothing about direct light feeds the rays: only a change of what they measure counts.
         bool bounceOn = _bounceEnabled;
-        bool bounceReset = bounceOn && (!_prevBounceEnabled || _bounceAlbedo != _prevBounceAlbedo || SunLight.Level != _prevSunLevel
-                                        || _bounceRays != _prevBounceRays || _bounceCycle != _prevBounceCycle || scaleChanged);
-        _prevBounceEnabled = bounceOn;
+        bool bounceReset = bounceOn && (_bounceMode != _prevBounceMode || _bounceReach != _prevBounceReach
+                                        || _bounceRays != _prevBounceRays || _bounceCycle != _prevBounceCycle
+                                        || !_aoOnly && (_bounceAlbedo != _prevBounceAlbedo || SunLight.Level != _prevSunLevel || scaleChanged));
+        _prevBounceMode = _bounceMode;
+        _prevBounceReach = _bounceReach;
         _prevBounceAlbedo = _bounceAlbedo;
         _prevSunLevel = SunLight.Level;
         _prevBounceRays = _bounceRays;
@@ -228,7 +242,7 @@ public sealed partial class GpuLightSystem
         if (bounceOn)
         {
             if (haveCam) TopUpNearing();
-            float nearR = haveCam && hold > 1 ? _bounceNearRadius : -1f;
+            float nearR = haveCam && hold > 1 && _bounceNearRadius > 0f ? _bounceNearRadius : -1f;
             nb = BuildBounceWork(cam.Position, nearR);
             _lastBounceTotal = nb;
             if (nb > 0) AddCompose(_scratch.AsSpan(0, 2 * nb), 2);
@@ -269,7 +283,7 @@ public sealed partial class GpuLightSystem
         {
             _lampTimer.Start();
             _composeWork = UploadWords(_composeWork, _preCompose.AsSpan(0, preCompose));
-            _rayLight.DispatchCompose(_store, _bounceEnabled ? _bounceScale : 0f, RayLightingSettings.Ambient,
+            _rayLight.DispatchCompose(_store, ShownBounceScale, RayLightingSettings.Ambient,
                                      RayLightingSettings.AoStrength, _composeWork, preCompose, smooth: false);
             _lampTimer.Stop();
         }
@@ -280,7 +294,7 @@ public sealed partial class GpuLightSystem
             {
                 _bounceTimer.Start();
                 _rayLight.DispatchBounce(_store, sunDir, SunLight.Strength, _bounceAlbedo, _bounceRays,
-                                         _bounceCycle, _bounceWork!, nb);
+                                         _bounceCycle, _bounceReach, _aoOnly, _bounceWork!, nb);
 
                 // Extra evaluations of the held bricks near the camera, in the same frame. Each reads the previous
                 // one's result, so each adds a hop and more samples to the running average. Bounce rays read the
@@ -301,7 +315,7 @@ public sealed partial class GpuLightSystem
                         if (nr == 0) break;
                         ComposeNear(final: false);
                         _rayLight.DispatchBounce(_store, sunDir, SunLight.Strength, _bounceAlbedo, _bounceRays,
-                                                 _bounceCycle, _nearWorks[r]!, nr);
+                                                 _bounceCycle, _bounceReach, _aoOnly, _nearWorks[r]!, nr);
                         _lastNearTotal += nr;
                     }
                     ComposeNear(final: true);
@@ -322,7 +336,7 @@ public sealed partial class GpuLightSystem
         {
             _lampTimer.Start();
             _finalComposeWork = UploadWords(_finalComposeWork, _composeList.AsSpan(0, _composeCount));
-            _rayLight.DispatchCompose(_store, _bounceEnabled ? _bounceScale : 0f, RayLightingSettings.Ambient,
+            _rayLight.DispatchCompose(_store, ShownBounceScale, RayLightingSettings.Ambient,
                                      RayLightingSettings.AoStrength, _finalComposeWork, _composeCount, smooth: true);
             _lampTimer.Stop();
         }
@@ -346,6 +360,7 @@ public sealed partial class GpuLightSystem
             if (!grid.IsWorld) continue;
             _dbgChangedChunks++;
             if (solid && !relightAll) _occluderChanges.Add((mn, mx, darkens));
+            if (solid) _shapeChanges.Add((mn, mx, true));
         }
         _store.ChangedChunks.Clear();
 
@@ -356,8 +371,13 @@ public sealed partial class GpuLightSystem
             var h = lg.Handle;
             WorldBounds(h, lg.VoxelToWorld, out st.CurWorldMin, out st.CurWorldMax);
             bool moved = !st.HavePrev || lg.Pos != st.PrevPos || lg.Rot != st.PrevRot || h.Version != st.PrevVersion;
+            st.Moved = moved;
+            st.Edited = !st.HavePrev || h.Version != st.PrevVersion;
             if (moved)
             {
+                // What other grids' AO sees of it changed at both poses; restarted where its blocks changed.
+                if (st.HavePrev) _shapeChanges.Add((st.PrevWorldMin, st.PrevWorldMax, st.Edited));
+                if (h.HasSolid) _shapeChanges.Add((st.CurWorldMin, st.CurWorldMax, st.Edited));
                 _dbgShipsMoved++;
                 st.LightAll = true;
                 // Like a placed block: the ship may now shade what it didn't, so the bounce around both poses and
@@ -407,7 +427,7 @@ public sealed partial class GpuLightSystem
     private void CollectBounceClears()
     {
         _clearSlots.Clear();
-        if (_bounceClears.Count == 0) return;
+        if (_bounceClears.Count == 0 || _aoOnly) return; // AO only stores no bounce to clear
         foreach (var (mn, mx) in _bounceClears)
             foreach (var lg in _lit)
             {
@@ -659,6 +679,16 @@ public sealed partial class GpuLightSystem
                 foreach (int slot in lg.Handle.Slots) HoldSlot(slot, holdFrames);
             }
             else if (resetAll) { st.BounceAllFrames = holdFrames; st.BounceAllN = 0; }
+            else if (_aoOnly)
+            {
+                // A ship's own AO changes with its blocks, and with its pose only near another grid its rays reach;
+                // there it continues its running average instead of restarting every frame it moves.
+                st.WasNearOther = st.NearOther;
+                st.NearOther = st.Moved && NearOtherGrid(lg, st);
+                if (st.Edited) { st.BounceAllN = 0; st.BounceAllFrames = holdFrames; }
+                else if (st.Moved && (st.NearOther || st.WasNearOther))
+                    st.BounceAllFrames = System.Math.Max(st.BounceAllFrames, holdFrames);
+            }
             else if (st.AllThisFrame)
             {
                 // A relit ship restarts its running average (near the camera it then runs its whole hold this frame,
@@ -668,9 +698,11 @@ public sealed partial class GpuLightSystem
             }
         }
 
+        if (_aoOnly) { HoldShapeChanges(holdFrames); return; }
+
         // The world bricks within bounce reach of every relit one, gathered per chunk so the overlapping reaches of
         // neighbouring bricks are visited once.
-        const int m = BounceMarginBricks;
+        int m = BounceMarginBricks;
         var world = _staticVolume.Gpu;
         foreach (int slot in _relitList)
         {
@@ -685,6 +717,74 @@ public sealed partial class GpuLightSystem
         _holdFramesNow = holdFrames;
         _holdMarks.Flush(_holdSlotDelegate ??= s => HoldSlot(s, _holdFramesNow));
     }
+
+    /// <summary>
+    /// AO only: holds the world bricks within ray reach of this frame's changed geometry (chunks loaded, edited or
+    /// unloaded, ships that moved, and bricks newly given storage), whatever happened to direct light. Where blocks
+    /// changed the running average restarts; where a ship merely moved past, it continues, so AO under a moving ship
+    /// follows it smoothly instead of restarting from one slice of rays every frame.
+    /// </summary>
+    private void HoldShapeChanges(int holdFrames)
+    {
+        var world = _staticVolume.Gpu;
+        if (_worldIndex < 0) return;
+        int m = BounceMarginBricks;
+        _holdFramesNow = holdFrames;
+        foreach (int slot in _newSlots)
+        {
+            if (_store.SlotGrid[slot] != _worldIndex) continue;
+            var c = _store.SlotChunk[slot];
+            int b = _store.SlotBrick[slot];
+            int bx = c.X * 4 + (b & 3), by = c.Y * 4 + ((b >> 2) & 3), bz = c.Z * 4 + (b >> 4);
+            _holdMarks.AddBox(world, bx - m, by - m, bz - m, bx + m, by + m, bz + m);
+        }
+        foreach (var (mn, mx, restart) in _shapeChanges)
+            if (restart) AddBrickBox(_holdMarks, world, mn, mx, m);
+        if (!_holdMarks.IsEmpty) _holdMarks.Flush(_holdSlotDelegate ??= s => HoldSlot(s, _holdFramesNow));
+        foreach (var (mn, mx, restart) in _shapeChanges)
+            if (!restart) AddBrickBox(_holdMarks, world, mn, mx, m);
+        if (!_holdMarks.IsEmpty) _holdMarks.Flush(_extendSlotDelegate ??= s => ExtendSlot(s, _holdFramesNow));
+    }
+
+    private static void AddBrickBox(BrickMarks marks, GridHandle world, Vector3D<float> mn, Vector3D<float> mx, int m)
+        => marks.AddBox(world, (int)MathF.Floor(mn.X / 8f) - m, (int)MathF.Floor(mn.Y / 8f) - m, (int)MathF.Floor(mn.Z / 8f) - m,
+                        (int)MathF.Floor(mx.X / 8f) + m, (int)MathF.Floor(mx.Y / 8f) + m, (int)MathF.Floor(mx.Z / 8f) + m);
+
+    /// <summary>Holds a slot for at least <paramref name="holdFrames"/> more evaluations, continuing its running
+    /// average (a slot that has never been evaluated starts one).</summary>
+    private void ExtendSlot(int slot, int holdFrames)
+    {
+        if (_holdStamp[slot] == _frame) return;
+        _holdStamp[slot] = _frame;
+        _hold[slot] = (byte)System.Math.Max(_hold[slot], Grant(slot, holdFrames));
+        if (!_inHeld[slot]) { _inHeld[slot] = true; _heldQueue.Add(slot); }
+    }
+
+    /// <summary>AO only: whether a ship's rays can reach another grid, at its pose this frame.</summary>
+    private bool NearOtherGrid(in LitGrid ship, GridLightState st)
+    {
+        var pad = new Vector3D<float>(_bounceReach + 1f);
+        Vector3D<float> mn = st.CurWorldMin - pad, mx = st.CurWorldMax + pad;
+        foreach (var lg in _lit)
+        {
+            if (lg.Handle == ship.Handle) continue;
+            if (lg.Handle.IsWorld)
+            {
+                bool any = false;
+                ForEachSlotInBrickBox(lg.Handle, (int)MathF.Floor(mn.X / 8f), (int)MathF.Floor(mn.Y / 8f), (int)MathF.Floor(mn.Z / 8f),
+                                      (int)MathF.Floor(mx.X / 8f), (int)MathF.Floor(mx.Y / 8f), (int)MathF.Floor(mx.Z / 8f), _ => any = true);
+                if (any) return true;
+            }
+            else if (lg.Handle.HasSolid && _gridStates.TryGetValue(lg.Handle, out var other)
+                     && Overlaps(mn, mx, other.CurWorldMin, other.CurWorldMax)) return true;
+        }
+        return false;
+    }
+
+    private Action<int>? _extendSlotDelegate;
+    private readonly List<int> _newSlots = new();
+    // AO only: this frame's changed geometry (world space), and whether its blocks changed (restart) or it moved.
+    private readonly List<(Vector3D<float> min, Vector3D<float> max, bool restart)> _shapeChanges = new();
 
     private void HoldSlot(int slot, int holdFrames)
     {
@@ -871,7 +971,7 @@ public sealed partial class GpuLightSystem
             // is primed first (AO only), an evaluation on top of its hold; near the camera its whole hold still runs
             // this frame, after it.
             if (GiveAcc(slot)) { _n[slot] = 0; _primed[slot] = false; }
-            bool prime = !_primed[slot];
+            bool prime = !_aoOnly && !_primed[slot]; // with AO only there is no bounce for priming to protect
             _primed[slot] = true;
             if (!prime) _hold[slot]--;
             Push(ref n, (uint)slot);
@@ -996,7 +1096,7 @@ public sealed partial class GpuLightSystem
     private void ComposeNear(bool final)
     {
         _lampTimer.Start();
-        _rayLight.DispatchCompose(_store, _bounceEnabled ? _bounceScale : 0f, RayLightingSettings.Ambient,
+        _rayLight.DispatchCompose(_store, ShownBounceScale, RayLightingSettings.Ambient,
                                      RayLightingSettings.AoStrength, _nearComposeWork!, _nearCount, smooth: final);
         _lampTimer.Stop();
     }

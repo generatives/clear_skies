@@ -2,6 +2,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\ClearSkies.Engine\ClearSkies.Engine.csproj" />
+    <ProjectReference Include="..\ClearSkies.Net\ClearSkies.Net.csproj" />
   </ItemGroup>
 
   <ItemGroup>
