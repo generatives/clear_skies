@@ -1,5 +1,5 @@
-# Builds self-contained, single-file game executables (the .NET runtime included) for each platform and publishes
-# them as a GitHub Release every time main changes. Each release is tagged build-<run number>.
+# Builds self-contained game builds (the .NET runtime included) for each platform, both as a single executable and
+# as a folder, and publishes them as a GitHub Release every time main changes. Each release is tagged build-<run number>.
 name: Release
 
 on:
@@ -34,24 +34,31 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
-      # IncludeAllContentForSelfExtract bundles Resources/ and the native libraries into the one file; it unpacks
-      # them to a temp folder on first run.
+      # Single file: IncludeAllContentForSelfExtract bundles Resources/ and the native libraries into the one
+      # executable, which unpacks them to a temp folder on first run. Antivirus heuristics flag such self-extracting
+      # executables more often, so each release also has a folder build: the executable, the runtime and Resources/
+      # side by side, with saves next to the executable.
       - name: Publish
-        run: >
-          dotnet publish src/ClearSkies.Game -c Release -r ${{ matrix.rid }} --self-contained
-          -p:PublishSingleFile=true -p:IncludeAllContentForSelfExtract=true
-          -p:EnableCompressionInSingleFile=true -p:DebugType=none -o publish
+        run: |
+          dotnet publish src/ClearSkies.Game -c Release -r ${{ matrix.rid }} --self-contained \
+            -p:PublishSingleFile=true -p:IncludeAllContentForSelfExtract=true \
+            -p:EnableCompressionInSingleFile=true -p:DebugType=none -o single
+          dotnet publish src/ClearSkies.Game -c Release -r ${{ matrix.rid }} --self-contained \
+            -p:DebugType=none -o folder/ClearSkies
 
       - name: Package
         run: |
           mkdir dist
-          cd publish
           if [[ "${{ matrix.rid }}" == win-* ]]; then
-            mv ClearSkies.Game.exe ClearSkies.exe
-            zip -9 ../dist/ClearSkies-${{ matrix.rid }}.zip ClearSkies.exe
+            mv single/ClearSkies.Game.exe single/ClearSkies.exe
+            mv folder/ClearSkies/ClearSkies.Game.exe folder/ClearSkies/ClearSkies.exe
+            (cd single && zip -9 ../dist/ClearSkies-${{ matrix.rid }}.zip ClearSkies.exe)
+            (cd folder && zip -9 -r ../dist/ClearSkies-${{ matrix.rid }}-folder.zip ClearSkies)
           else
-            mv ClearSkies.Game ClearSkies
-            tar -czf ../dist/ClearSkies-${{ matrix.rid }}.tar.gz ClearSkies
+            mv single/ClearSkies.Game single/ClearSkies
+            mv folder/ClearSkies/ClearSkies.Game folder/ClearSkies/ClearSkies
+            tar -czf dist/ClearSkies-${{ matrix.rid }}.tar.gz -C single ClearSkies
+            tar -czf dist/ClearSkies-${{ matrix.rid }}-folder.tar.gz -C folder ClearSkies
           fi
 
       - uses: actions/upload-artifact@v4
