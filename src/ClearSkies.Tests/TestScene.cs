@@ -91,6 +91,9 @@ public sealed class HeadlessScene : IDisposable
         _tick.Insert(_tick.IndexOf(Physics), new ClearSkies.Net.Sync.FollowerSystem(World, Physics, RemoteBodies));
     }
 
+    /// <summary>Runs <paramref name="system"/> each tick just before the physics step (e.g. flight).</summary>
+    public void AddBeforePhysics(Engine.Core.ISystem system) => _tick.Insert(_tick.IndexOf(Physics), system);
+
     /// <summary>Saves to <paramref name="db"/> and streams entities from it, as the host does.</summary>
     public void EnablePersistence(SaveDatabase db)
     {

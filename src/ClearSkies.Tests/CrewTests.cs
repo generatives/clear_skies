@@ -82,6 +82,41 @@ public class CrewTests
     }
 
     [Fact]
+    public void ClimbingDoesNotTipTheCornerACrewMemberStandsOn()
+    {
+        // A small unlocked ship, flown up hard on its levers with a client's crew member on a corner. On the host the crew
+        // member is a servo copy, which used to hold its place in the world rather than on the deck: it pressed that
+        // corner against the climb as hard as the servo could, and tipped the ship over.
+        using var game = new LoopbackGame(50);
+        var voxels = new List<GridVoxel>();
+        for (int x = 0; x < 5; x++) for (int z = 0; z < 5; z++) voxels.Add(new(x, 0, z, BlockId.Wood, BlockOrientation.Upright));
+        var ship = game.Host.SpawnGrid(GridDescription.FromVoxels(new Vector3(0, 50, 0), voxels));
+        game.Host.SpawnLocalPlayer(new Vector3(30, 80, 30));
+        game.Host.AddBeforePhysics(new AirshipFlightSystem(game.Host.World, game.Host.Physics) { FreePropulsion = true });
+        game.Tick(2);
+        var (client, _) = game.Join("crew");
+        var crew = LocalPlayerOf(client);
+        Players.SetFreeFlying(crew, false);
+        crew.Get<CharacterControllerComponent>().Character.TeleportTo(new Vector3(2f, 51.4f, 2f));
+        var id = ship.Get<EntityId>();
+        game.Host.Commands.Send(new SetGridLocked { Grid = id, Locked = false });
+        game.Tick(60);
+
+        game.Host.Commands.Send(new SetShipThrust { Ship = id, Axis = ThrustAxis.Up, Value = 1f });
+        var body = ship.Get<PhysicsBodyComponent>().Body;
+        float startY = game.Host.Physics.GetBodyPose(body).position.Y, maxTilt = 0f;
+        for (int t = 0; t < 240; t++)
+        {
+            game.Tick();
+            var (_, q) = game.Host.Physics.GetBodyPose(body);
+            maxTilt = MathF.Max(maxTilt, MathF.Acos(Math.Clamp(Vector3.Transform(Vector3.UnitY, q).Y, -1f, 1f)) * 180f / MathF.PI);
+        }
+        Assert.True(game.Host.Physics.GetBodyPose(body).position.Y > startY + 20f); // it climbed
+        Assert.True(maxTilt < 20f, $"tipped {maxTilt:F1}°");
+        Assert.Equal(client.Registry.Find(id), crew.Get<Support>().Supporter); // still aboard
+    }
+
+    [Fact]
     public void CrewStayAboardWhileTheHostDrawsSlowly()
     {
         // The host at 8 fps (its window in the background, say), running its ticks as the game would; the client at 60.

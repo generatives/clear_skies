@@ -92,7 +92,7 @@ public sealed class FollowerSystem : ISystem, IDebugUiSystem
                 e.Set(new ServoBody { Body = _physics.AddFollowerCapsule(target, 0.3f, 1.0f, PlayerMass, new ColliderInfo(ColliderKind.Follower, e)) });
                 continue;
             }
-            Servo(e.Get<ServoBody>().Body, target, dt);
+            Servo(e.Get<ServoBody>().Body, target, SupportVelocityAt(s.Support, target), dt);
         }
     }
 
@@ -118,7 +118,17 @@ public sealed class FollowerSystem : ISystem, IDebugUiSystem
         _physics.SetBodyAngularVelocity(body, axis * (angle / dt));
     }
 
-    private void Servo(BepuPhysics.BodyHandle body, Vector3 target, float dt)
+    /// <summary>How fast the point <paramref name="at"/> of what a player stands on is moving here (zero if they stand on
+    /// nothing, or on something with no body here).</summary>
+    private Vector3 SupportVelocityAt(EntityId support, Vector3 at)
+    {
+        if (!_remote.TryGetSupport(support, out var s) || !s.Has<PhysicsBodyComponent>()) return Vector3.Zero;
+        var body = s.Get<PhysicsBodyComponent>().Body;
+        var (centre, _) = _physics.GetBodyPose(body);
+        return _physics.GetBodyLinearVelocity(body) + Vector3.Cross(_physics.GetBodyAngularVelocity(body), at - centre);
+    }
+
+    private void Servo(BepuPhysics.BodyHandle body, Vector3 target, Vector3 supportVelocity, float dt)
     {
         var (position, _) = _physics.GetBodyPose(body);
         if (Vector3.Distance(position, target) > ServoSnapDistance)
@@ -128,8 +138,11 @@ public sealed class FollowerSystem : ISystem, IDebugUiSystem
             _teleports++;
             return;
         }
-        // The velocity that reaches the target over the step, having gravity's pull this step already in hand.
-        var desired = (target - position) / dt - _physics.Gravity * dt;
+        // The velocity that reaches the target over the step, having gravity's pull this step already in hand. The target
+        // is on the deck as it is now, and the deck moves over the step: its velocity there is added, so the servo only
+        // corrects where the player is on the deck. Without it the servo held the copy still in the world, and pressed
+        // that corner of an accelerating ship against its motion as hard as it could.
+        var desired = (target - position) / dt + supportVelocity - _physics.Gravity * dt;
         var current = _physics.GetBodyLinearVelocity(body);
         var change = desired - current;
         float max = ServoMaxAcceleration * dt;

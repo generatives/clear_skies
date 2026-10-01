@@ -241,6 +241,13 @@ public sealed class RemoteBodySystem : ISystem
 
     /// <summary>A pose in a support's space (its block space if it's a grid), in world space, with the support as it
     /// is now.</summary>
+    /// <summary>The entity a snapshot's position is relative to, if it has one here.</summary>
+    public bool TryGetSupport(EntityId support, out Entity entity)
+    {
+        entity = default;
+        return !support.IsNone && _registry.TryGet(support, out entity);
+    }
+
     public (Vector3 Position, Quaternion Rotation) ToWorld(EntityId support, Vector3 position, Quaternion rotation)
     {
         if (support.IsNone || !_registry.TryGet(support, out var s) || !s.Has<Transform>()) return (position, rotation);

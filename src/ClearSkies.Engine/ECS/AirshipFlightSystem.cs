@@ -135,6 +135,9 @@ public sealed class AirshipFlightSystem : ISystem
     // required) — a debug shortcut for testing control feel.
     private bool _freePropulsion;
 
+    /// <summary>Applies the control law's force and torque directly, with no Fan blocks (see the debug panel's checkbox).</summary>
+    public bool FreePropulsion { get => _freePropulsion; set => _freePropulsion = value; }
+
     // Diagnostics — last Update()'s counters, shown in DrawDebugUi to make "is this system even
     // finding/running anything" observable instead of guessed at.
     private int _lastFanCount, _lastBuoyantCount, _lastGridsProcessed, _lastFreePropelled;
