@@ -23,13 +23,12 @@ public readonly struct BlockDef
 
     /// The colour a light-emitting block actually lights with (white when <see cref="LightColor"/> is unset).
     public Vector3D<float> EffectiveLightColor => LightColor == default ? Vector3D<float>.One : LightColor;
-    public byte            Opacity        { get; init; } // 0=transparent, 15=fully opaque (light blocked)
 
     /// True for a full-cube block you can see through (glass, water). <c>GreedyMesher</c> puts its faces in the chunk's
     /// separate transparent mesh, drawn alpha-blended after the opaque world (see <c>ChunkRenderSystem</c>), and it never
     /// hides a neighbour's face, except another block of its own type (so a wall of glass or a pool of water shows only
-    /// its outer surface). How much shows through is its texture's alpha times <see cref="Alpha"/>. Light passing through
-    /// is set separately, by <see cref="Opacity"/>.
+    /// its outer surface). How much shows through is its texture's alpha times <see cref="Alpha"/>. It lets light through
+    /// (see <see cref="BlocksLight"/>).
     public bool            Transparent    { get; init; }
 
     /// Opacity (0-1) a <see cref="Transparent"/> block's faces are drawn with, multiplying its texture's alpha: e.g. water,
@@ -91,6 +90,15 @@ public readonly struct BlockDef
     /// True for blocks drawn as a full cube by <c>GreedyMesher</c>: solid and not a model block. The mesher's
     /// face culling (and the neighbour remeshing that depends on it) keys off this rather than IsSolid.
     public bool IsFullCube => IsSolid && Model == null;
+
+    /// True for a model block that stops light like a full cube would (e.g. Fan, which nearly fills its cell). Model
+    /// blocks otherwise let light through (see <see cref="BlocksLight"/>).
+    public bool            ModelBlocksLight { get; init; }
+
+    /// True when this block stops light (sun, lamps, bounce) and darkens its neighbours' corners: a full cube unless
+    /// it's <see cref="Transparent"/>, and a model block only if it sets <see cref="ModelBlocksLight"/> (most only fill
+    /// part of their cell). The lighting system's occupancy is exactly this.
+    public bool BlocksLight => IsSolid && (Model == null ? !Transparent : ModelBlocksLight);
 
     /// True when this block hides the face of a <paramref name="neighbour"/> block that touches it: an opaque full cube
     /// hides every face against it, a <see cref="Transparent"/> one only those of its own type.

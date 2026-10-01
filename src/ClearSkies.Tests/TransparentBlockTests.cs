@@ -19,10 +19,22 @@ public class TransparentBlockTests
         var def = BlockRegistry.Get(id);
         Assert.True(def.Transparent);
         Assert.True(def.IsFullCube);
-        Assert.True(def.Opacity < 15); // lets light through
+        Assert.False(def.BlocksLight);
         Assert.NotNull(def.Texture);
         Assert.Contains(id, BlockActionSystem.PlaceableBlocks);
     }
+
+    [Theory]
+    [InlineData(BlockId.Stone, true)]   // opaque cube
+    [InlineData(BlockId.Lamp, true)]
+    [InlineData(BlockId.Fan, true)]     // model that opts in
+    [InlineData(BlockId.Lever, false)]  // model
+    [InlineData(BlockId.SteeringWheel, false)]
+    [InlineData(BlockId.Glass, false)]  // transparent cube
+    [InlineData(BlockId.Water, false)]
+    [InlineData(BlockId.Air, false)]
+    public void Blocks_light_by_category(BlockId id, bool blocks)
+        => Assert.Equal(blocks, BlockRegistry.Get(id).BlocksLight);
 
     [Fact]
     public void Water_is_passable_and_glass_collides()

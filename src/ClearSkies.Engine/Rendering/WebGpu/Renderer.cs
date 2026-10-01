@@ -718,10 +718,32 @@ fn fs_overdraw(in: VSOut) -> @location(0) vec4<f32> {
 
 // 3D models (GpuModel, e.g. glTF props and model blocks): group 3 holds the model's own single-layer texture instead
 // of the block array, sampled at the normalized uv.xy. A model block (grid >= 0) is lit from its own cell's voxel
-// light — sky/AO, lamp light and sun visibility, one flat value for the whole model — combined like fs_main does.
+// light — sky/AO, lamp light and sun visibility, one flat value for the whole model — combined like fs_main does. A
+// model block that blocks light (BlockDef.ModelBlocksLight) has no light of its own (the light pass gives such cells
+// only flat ambient and full sun), so it takes the brightest of its open neighbours' (see modelCell).
 // Any other model has no light data and is lit like an open-air surface: the brighter of the flat ambient and
 // Lambertian sun. Both are fogged like the terrain. Drawn with culling off (glTF doubleSided is common and cheap
 // here), so back faces flip their normal. Texels under the material's alpha cutoff are cut out.
+// The light a model block at voxel v is lit by: its own cell's, or if v blocks light, each channel's brightest over
+// its open face neighbours (all open neighbours blocked too: ambient in shadow).
+fn modelCell(v: vec3<i32>) -> Cell {
+    if (!isSolid(v)) { return cellAt(v); }
+    var c: Cell;
+    c.sky = 0.0; c.rgb = vec3<f32>(0.0); c.sun = 0.0;
+    var any = false;
+    for (var f = 0; f < 6; f = f + 1) {
+        var d = vec3<i32>(0);
+        d[f / 2] = select(1, -1, (f & 1) == 1);
+        let n = v + d;
+        if (isSolid(n)) { continue; }
+        let o = cellAt(n);
+        c.sky = max(c.sky, o.sky); c.rgb = max(c.rgb, o.rgb); c.sun = max(c.sun, o.sun);
+        any = true;
+    }
+    if (!any) { c.sky = camera.lightParams.z; }
+    return c;
+}
+
 @fragment
 fn fs_model(in: VSOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let tex = textureSample(atlasTex, atlasSamp, in.uv.xy, 0);
@@ -731,7 +753,7 @@ fn fs_model(in: VSOut, @builtin(front_facing) front: bool) -> @location(0) vec4<
     let ndotl = max(dot(n, -camera.sunDir.xyz), 0.0);
     var lit = vec3<f32>(max(camera.lightParams.z, ndotl * camera.sunDir.w));
     if (model.grid >= 0) {
-        let c = cellAt(model.chunk * 32 + vec3<i32>(model.params.yzw));
+        let c = modelCell(model.chunk * 32 + vec3<i32>(model.params.yzw));
         lit = max(vec3<f32>(max(c.sky, ndotl * c.sun * camera.sunDir.w)), c.rgb);
     }
     lit = max(lit, vec3<f32>(MIN_AMBIENT));
