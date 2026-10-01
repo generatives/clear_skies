@@ -1,65 +1,37 @@
 using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Gui;
-using ClearSkies.Engine.Input;
 using ClearSkies.Engine.Physics;
-using ClearSkies.Engine.Rendering.WebGpu;
-using ClearSkies.Engine.Windowing;
 using DefaultEcs;
 
 namespace ClearSkies.Engine.Core;
 
 /// <summary>
-/// Owns the window, ECS world, renderer, input, and the system schedule, and drives the main loop.
-/// The window is initialized eagerly in the constructor so game content (which uploads meshes via
-/// <see cref="Renderer"/>) can be built before <see cref="Run"/> starts the loop.
+/// Owns the ECS world, physics and the system schedule, and drives the update stages. On its own it has nothing that
+/// needs a display: <see cref="Run"/> runs the update stages from a timer, once per tick's worth of time, until
+/// <see cref="Quit"/> (a dedicated server, or a bot). <see cref="WindowedEngineHost"/> adds the window, GPU, input and
+/// debug UI, and the render stages.
 /// </summary>
-public sealed class EngineHost : IDisposable
+public class EngineHost : IDisposable
 {
     // Update stages hold ISystems, render stages IRenderSystems (enforced by AddSystem).
-    private readonly List<(object system, SystemStage stage)> _systems = new();
+    private protected readonly List<(object system, SystemStage stage)> _systems = new();
 
-    public EngineOptions Options { get; }
     public World World { get; }
-    public GameWindow Window { get; }
-    public GpuContext Context { get; }
-    public Renderer Renderer { get; }
-    public InputManager Input { get; }
     public PhysicsWorld Physics { get; }
     public Time Time { get; }
 
     /// <summary>Decides how many fixed ticks each frame runs (see <see cref="SystemStage.Simulation"/>).</summary>
     public TickClock Clock { get; } = new();
-    public ImGuiController Gui { get; }
 
-    /// <summary>The frame the render stages draw into, opened and closed by the host around them; its context is
-    /// what every <see cref="IRenderSystem"/> is handed.</summary>
-    internal RenderFrame Frame { get; }
-
-    public EngineHost(EngineOptions options)
+    public EngineHost()
     {
-        Options = options;
         World = new World();
-        Window = new GameWindow(options);
-        Window.Native.Initialize();   // create the native window now (needed for the WebGPU surface)
-
-        Context = GpuContext.Create(Window, options);
-        Renderer = new Renderer(Context);
-        Input = new InputManager(Window);
         Time = new Time();
         // Milestone 5 airships need real gravity for weight/lift to mean anything (a Buoyant block
         // counteracting nothing is meaningless). Gentler than Earth to fit the "magical steampunk sky
         // world" and give Fan/Buoyant tuning room (see AirshipFlightSystem's debug sliders).
         Physics = new PhysicsWorld(new System.Numerics.Vector3(0f, -6f, 0f), Time.FixedStep);
-        Gui = new ImGuiController(Renderer, Input);
-
-        Window.Update += OnUpdate;
-        Window.Render += OnRender;
-        Window.Resize += Renderer.OnResize;
-
-        Frame = new RenderFrame(World, Renderer, Gui, Time);
-        Gui.RegisterDebugUi(Frame);
-        Gui.RegisterDebugUi(new FrameTimingsPanel(this));
-        Gui.RegisterDebugUi(Context.Timer);
+        PowerThrottling.OptOut(); // keep full speed when another window is in front
     }
 
     /// <summary>Schedules <paramref name="system"/> in an update stage (Input, Simulation, Frame or PreRender), after the
@@ -82,40 +54,28 @@ public sealed class EngineHost : IDisposable
         Schedule(system, stage);
     }
 
-    /// <summary>Schedules <paramref name="system"/> in a render stage (RenderWorld onwards), after the systems already
-    /// in it.</summary>
-    public void AddSystem(IRenderSystem system, SystemStage stage)
-    {
-        if (!IsRenderStage(stage))
-            throw new ArgumentException($"{stage} is an update stage; it takes an {nameof(ISystem)}.", nameof(stage));
-        Schedule(system, stage);
-    }
+    private protected static bool IsRenderStage(SystemStage stage) => stage >= SystemStage.RenderWorld;
 
-    private static bool IsRenderStage(SystemStage stage) => stage >= SystemStage.RenderWorld;
-
-    private void Schedule(object system, SystemStage stage)
+    private protected void Schedule(object system, SystemStage stage)
     {
-        bool registered = _systems.Exists(s => s.system == system);
+        bool first = !_systems.Exists(s => s.system == system);
         _systems.Add((system, stage));
         _systemMs.Add(0.0);
         _frameMs.Add(0.0);
         _rawMs.Add(0.0);
-        if (system is IDebugUiSystem debugUi && !registered) Gui.RegisterDebugUi(debugUi);
+        if (first && system is IDebugUiSystem debugUi) OnDebugUiScheduled(debugUi);
     }
+
+    /// <summary>A system with a debug panel was scheduled (the debug UI shows it, where there is one).</summary>
+    private protected virtual void OnDebugUiScheduled(IDebugUiSystem panel) { }
 
     // Per-system CPU time per frame (ms, smoothed), parallel to _systems; _frameMs sums this frame's runs (a Simulation
     // system runs several times in some frames and not at all in others).
-    private readonly List<double> _systemMs = new();
-    private readonly List<double> _frameMs = new();
-    private readonly List<double> _rawMs = new(); // this frame's time per system, unsmoothed, for History
-
-    /// <summary>The last few hundred frames one by one (see the Frame timings panel).</summary>
-    public FrameHistory History { get; } = new();
-    private readonly int[] _gcSeen = new int[3];
-
-    /// <summary>Raised at the end of every frame, after it was presented: diagnostics that look at single frames
-    /// (the streaming flight test) read <see cref="LastSystemMs"/> here.</summary>
-    public event Action? FrameEnded;
+    private protected readonly List<double> _systemMs = new();
+    private protected readonly List<double> _frameMs = new();
+    private protected readonly List<double> _rawMs = new(); // this frame's time per system, unsmoothed
+    private protected readonly System.Diagnostics.Stopwatch _systemTimer = new();
+    private protected const double TimingSmoothing = 0.05;
 
     public int SystemCount => _systems.Count;
     public string SystemName(int i) => $"{_systems[i].system.GetType().Name} ({_systems[i].stage})";
@@ -123,26 +83,38 @@ public sealed class EngineHost : IDisposable
     /// <summary>A system's CPU time (ms) in the frame just ended.</summary>
     public double LastSystemMs(int i) => _rawMs[i];
 
-    /// <summary>CPU time (ms) opening (camera, acquire) and closing (ImGui, submit, present) the frame just ended.</summary>
-    public double LastFrameBeginMs { get; private set; }
-    public double LastFrameEndMs { get; private set; }
-    private readonly System.Diagnostics.Stopwatch _systemTimer = new();
-    private const double TimingSmoothing = 0.05;
+    private volatile bool _quit;
 
-    public void Run()
+    /// <summary>Runs the update stages, one frame per tick's worth of time, sleeping in between, until
+    /// <see cref="Quit"/>.</summary>
+    public virtual void Run()
     {
-        Window.Native.Title = Options.Title;
-        Window.Run();
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        double last = 0;
+        while (!_quit)
+        {
+            double now = clock.Elapsed.TotalSeconds;
+            double dt = now - last;
+            last = now;
+            Time.Advance(dt);
+            Update(dt);
+            double spare = Time.FixedStep - (clock.Elapsed.TotalSeconds - now);
+            if (spare > 0) Thread.Sleep(TimeSpan.FromSeconds(spare));
+        }
     }
 
-    private void OnUpdate(double dt)
+    /// <summary>Ends <see cref="Run"/> at the end of this frame.</summary>
+    public virtual void Quit() => _quit = true;
+
+    /// <summary>One frame of the update stages: Input, the ticks due (Simulation), Frame and PreRender.</summary>
+    private protected void Update(double dt)
     {
         RunStage(SystemStage.Input, (float)dt);
 
         int ticks = Clock.Advance(dt);
         for (int i = 0; i < ticks; i++)
         {
-            Time.Tick++;
+            Clock.Tick++;
             RunStage(SystemStage.Simulation, Time.TickSeconds);
         }
         Time.TicksLastFrame = ticks;
@@ -150,49 +122,8 @@ public sealed class EngineHost : IDisposable
 
         RunStage(SystemStage.Frame, (float)dt);
         RunStage(SystemStage.PreRender, (float)dt);
-        Input.NewFrame();   // clear after all stages read, before next frame's events fire
         SmoothTimes(render: false);
     }
-
-    private void OnRender(double dt)
-    {
-        Time.Advance(dt);
-        Window.Native.Title = $"{Options.Title} — {Time.FramesPerSecond} fps";
-
-        // The render stages only make sense inside an open frame; when it can't be opened (no active camera, no
-        // swapchain image) they're skipped entirely, and End still closes ImGui's frame.
-        _systemTimer.Restart();
-        bool open = Frame.TryBegin();
-        double beginMs = LastFrameBeginMs = _systemTimer.Elapsed.TotalMilliseconds;
-        _frameBeginMs += TimingSmoothing * (beginMs - _frameBeginMs);
-        if (open)
-            for (var stage = SystemStage.RenderWorld; stage <= SystemStage.RenderHud; stage++)
-                RunRenderStage(stage, Frame.Context);
-
-        _systemTimer.Restart();
-        Frame.End();
-        double endMs = LastFrameEndMs = _systemTimer.Elapsed.TotalMilliseconds;
-        _frameEndMs += TimingSmoothing * (endMs - _frameEndMs);
-        SmoothTimes(render: true);
-        History.Record(dt * 1000.0, Time.TicksLastFrame, GcGenerationSinceLastFrame(), _rawMs, beginMs, endMs);
-        FrameEnded?.Invoke();
-    }
-
-    /// <summary>The highest GC generation collected since the last call, or -1 for none.</summary>
-    private int GcGenerationSinceLastFrame()
-    {
-        int highest = -1;
-        for (int g = 0; g < 3; g++)
-        {
-            int count = GC.CollectionCount(g);
-            if (count != _gcSeen[g]) highest = g;
-            _gcSeen[g] = count;
-        }
-        return highest;
-    }
-
-    // Smoothed CPU time of opening (camera uniform, swapchain acquire) and closing (ImGui, submit, present) the frame.
-    private double _frameBeginMs, _frameEndMs;
 
     private void RunStage(SystemStage stage, float dt)
     {
@@ -207,22 +138,10 @@ public sealed class EngineHost : IDisposable
         }
     }
 
-    private void RunRenderStage(SystemStage stage, in Rendering.RenderContext frame)
-    {
-        for (int i = 0; i < _systems.Count; i++)
-        {
-            var (system, s) = _systems[i];
-            if (s != stage) continue;
-            _systemTimer.Restart();
-            ((IRenderSystem)system).Render(frame);
-            RecordTime(i);
-        }
-    }
-
-    private void RecordTime(int i) => _frameMs[i] += _systemTimer.Elapsed.TotalMilliseconds;
+    private protected void RecordTime(int i) => _frameMs[i] += _systemTimer.Elapsed.TotalMilliseconds;
 
     /// <summary>Folds this frame's time for the update (or render) systems into their smoothed times.</summary>
-    private void SmoothTimes(bool render)
+    private protected void SmoothTimes(bool render)
     {
         for (int i = 0; i < _systems.Count; i++)
         {
@@ -233,124 +152,10 @@ public sealed class EngineHost : IDisposable
         }
     }
 
-    /// <summary>Debug panel listing each system's CPU time per frame, slowest first. GPU work isn't timed
-    /// directly: if the frame takes much longer than the CPU total, the difference is GPU time (or vsync),
-    /// and it usually shows up in "Frame begin" / "Frame end", where the frame waits to acquire / present.</summary>
-    private sealed class FrameTimingsPanel : IDebugUiSystem
-    {
-        private readonly EngineHost _host;
-        public FrameTimingsPanel(EngineHost host) => _host = host;
-        public string DebugName => "Frame timings";
-
-        // Garbage collection: collections and pause time since the last sample, sampled about once a second. A pause
-        // stops every thread, so it shows up as time in whichever system was running.
-        private readonly System.Diagnostics.Stopwatch _gcClock = System.Diagnostics.Stopwatch.StartNew();
-        private readonly int[] _gcCounts = new int[3], _gcRate = new int[3];
-        private TimeSpan _gcPause;
-        private double _gcPausePerSec, _gcSampleSecs;
-        private long _allocBytes;
-        private double _allocMbPerSec;
-
-        private void SampleGc()
-        {
-            double secs = _gcClock.Elapsed.TotalSeconds;
-            if (secs < 1.0) return;
-            _gcClock.Restart();
-            _gcSampleSecs = secs;
-            for (int g = 0; g < 3; g++)
-            {
-                int c = GC.CollectionCount(g);
-                _gcRate[g] = c - _gcCounts[g];
-                _gcCounts[g] = c;
-            }
-            var pause = GC.GetTotalPauseDuration();
-            _gcPausePerSec = (pause - _gcPause).TotalMilliseconds / secs;
-            _gcPause = pause;
-            long alloc = GC.GetTotalAllocatedBytes();
-            _allocMbPerSec = (alloc - _allocBytes) / secs / (1024 * 1024);
-            _allocBytes = alloc;
-        }
-
-        public void DrawDebugUi()
-        {
-            var h = _host;
-            double total = 0;
-            var rows = new List<(string name, double ms)>(h._systems.Count);
-            for (int i = 0; i < h._systems.Count; i++)
-            {
-                var (system, stage) = h._systems[i];
-                rows.Add(($"{system.GetType().Name} ({stage})", h._systemMs[i]));
-                total += h._systemMs[i];
-            }
-            rows.Add(("Frame begin (camera, acquire)", h._frameBeginMs));
-            rows.Add(("Frame end (ImGui, submit, present)", h._frameEndMs));
-            total += h._frameBeginMs + h._frameEndMs;
-            rows.Sort((a, b) => b.ms.CompareTo(a.ms));
-
-            double frameMs = h.Time.FramesPerSecond > 0 ? 1000.0 / h.Time.FramesPerSecond : 0;
-            ImGuiNET.ImGui.Text($"Frame: {frameMs:F1} ms ({h.Time.FramesPerSecond} fps), systems CPU total: {total:F1} ms");
-            ImGuiNET.ImGui.Text($"Tick {h.Time.Tick}: {h.Time.TicksLastFrame} tick(s) last frame, {h.Clock.DroppedTicks} dropped in all");
-            bool vsync = h.Context.VSync;
-            if (ImGuiNET.ImGui.Checkbox("VSync", ref vsync)) h.Context.VSync = vsync;
-            ImGuiNET.ImGui.SameLine();
-            ImGuiNET.ImGui.TextDisabled(vsync ? "(frame rate capped at the display's refresh; the wait shows in Frame begin/end)"
-                                              : $"(presenting with {h.Context.PresentModeInUse})");
-            SampleGc();
-            ImGuiNET.ImGui.Text($"GC: {_gcPausePerSec:F1} ms paused per second; collections gen0/1/2 {_gcRate[0]}/{_gcRate[1]}/{_gcRate[2]} " +
-                                $"in the last {_gcSampleSecs:F1} s; allocating {_allocMbPerSec:F0} MB/s; heap {GC.GetTotalMemory(false) / (1024 * 1024)} MB");
-            DrawHistory();
-            ImGuiNET.ImGui.Separator();
-            ImGuiNET.ImGui.TextDisabled("Smoothed CPU time per frame:");
-            foreach (var (name, ms) in rows)
-                ImGuiNET.ImGui.Text($"{ms,7:F2} ms  {name}");
-        }
-
-        /// <summary>The last few hundred frames one by one, and where the slowest of them spent its time.</summary>
-        private void DrawHistory()
-        {
-            var history = _host.History;
-            if (history.Count == 0) return;
-            ImGuiNET.ImGui.Separator();
-            var (average, worst, spikes, slowestAgo) = history.Summarize();
-            ImGuiNET.ImGui.Text($"Last {history.Count} frames: average {average:F1} ms, longest {worst:F1} ms, " +
-                                $"{spikes} over 1.5x the average");
-            bool paused = history.Paused;
-            if (ImGuiNET.ImGui.Checkbox("Hold graph", ref paused)) history.Paused = paused;
-
-            float width = ImGuiNET.ImGui.GetContentRegionAvail().X;
-            float top = System.Math.Max(40f, worst * 1.1f);
-            ImGuiNET.ImGui.PlotLines("##frames", ref history.Milliseconds[0], history.Count, history.Offset,
-                                     $"frame ms (0 to {top:F0})", 0f, top, new System.Numerics.Vector2(width, 70));
-            ImGuiNET.ImGui.PlotHistogram("##ticks", ref history.TicksPerFrame[0], history.Count, history.Offset,
-                                         "ticks per frame (0 to 3)", 0f, 3f, new System.Numerics.Vector2(width, 30));
-
-            ref readonly var slowest = ref history.Get(slowestAgo);
-            string gc = slowest.GcGeneration < 0 ? "no GC" : $"GC gen {slowest.GcGeneration}";
-            ImGuiNET.ImGui.Text($"Longest: {slowest.Ms:F1} ms, {slowestAgo} frames ago; {slowest.Ticks} tick(s), {gc}, " +
-                                $"{slowest.CpuMs:F1} ms CPU in systems");
-            foreach (var (system, ms) in slowest.Slowest)
-            {
-                if (system == -1) break;
-                string name = system switch
-                {
-                    FrameHistory.FrameBegin => "Frame begin (camera, acquire)",
-                    FrameHistory.FrameEnd => "Frame end (ImGui, submit, present)",
-                    _ => $"{_host._systems[system].system.GetType().Name} ({_host._systems[system].stage})",
-                };
-                ImGuiNET.ImGui.Text($"  {ms,7:F2} ms  {name}");
-            }
-        }
-    }
-
-    public void Dispose()
+    public virtual void Dispose()
     {
         BackgroundWork.Stop(TimeSpan.FromSeconds(5)); // before freeing what running jobs may be using
         Physics.Dispose();
-        Gui.Dispose();
-        Renderer.Dispose();
-        Context.Dispose();
-        Input.Dispose();
         World.Dispose();
-        Window.Dispose();
     }
 }
