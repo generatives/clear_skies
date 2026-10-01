@@ -19,7 +19,9 @@ namespace ClearSkies.Net.Sync;
 public sealed class SnapshotBuffer
 {
     public const int Capacity = 32;
-    public const double MaxExtrapolationTicks = 15;
+    /// <summary>A second: long enough to carry a ship on through its owner stalling (another game loading on the same
+    /// machine, say) rather than stop it dead under whoever is aboard.</summary>
+    public const double MaxExtrapolationTicks = 60;
     /// <summary>Ticks between a sender's snapshots.</summary>
     public const double SendInterval = 2;
     /// <summary>Arrivals the lateness is judged over: about two seconds' worth.</summary>

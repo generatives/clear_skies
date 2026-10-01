@@ -24,7 +24,8 @@ public struct FollowerCharacter
 /// <list type="bullet">
 /// <item>A grid near the local player (<see cref="PhysicsMode.KinematicFollower"/>) has a kinematic body. It's given
 /// the velocity that carries it to its snapshot pose over the step, so a player standing on it rides it, and its
-/// deck's velocity is right for jumping and air control. Far off (a join, a hitch) it's placed there directly.</item>
+/// deck's velocity is right for jumping and air control. Just arrived, or after a hitch (further off than its own
+/// velocity explains: see <see cref="HitchDistance"/>), it's placed there directly, carrying the local players aboard.</item>
 /// <item>Another player within load range (<see cref="PhysicsMode.CharacterFollower"/>) gets a character body built as
 /// theirs is, standing on grids and terrain (never touching characters). It's walked, not pushed: its target velocity
 /// is theirs on what they stand on, plus enough to close the gap to where they are on it, and it jumps when they do.
@@ -36,7 +37,11 @@ public struct FollowerCharacter
 public sealed class FollowerSystem : ISystem, IDebugUiSystem
 {
     public const float SnapDistance = 2f;
-    public const float GridSnapDistance = 8f;
+    /// <summary>A copy that would have to move further than this in a tick beyond its own velocity, or turn more than
+    /// <see cref="HitchAngle"/>, has had a hitch (its owner stalled, the delay jumped): it's placed there outright, with
+    /// whoever is aboard, rather than yanked there through them.</summary>
+    public const float HitchDistance = 0.25f;
+    public const float HitchAngle = 0.05f;
     /// <summary>How fast a player's copy closes the gap to where they are: this fraction of it per second, at up to
     /// <see cref="MaxCatchUpSpeed"/> on top of their own speed.</summary>
     public const float CatchUpRate = 10f;
@@ -159,7 +164,12 @@ public sealed class FollowerSystem : ISystem, IDebugUiSystem
     private void FollowKinematic(Entity e, BepuPhysics.BodyHandle body, Vector3 target, Quaternion rotation, Vector3 velocity, float dt)
     {
         var (position, orientation) = _physics.GetBodyPose(body);
-        if (!_placed.Contains(e) || Vector3.Distance(position, target) > GridSnapDistance)
+        // The rotation from where it is to where it should be.
+        var delta = Quaternion.Normalize(rotation * Quaternion.Conjugate(orientation));
+        if (delta.W < 0) delta = new Quaternion(-delta.X, -delta.Y, -delta.Z, -delta.W);
+        float angle = 2f * MathF.Acos(System.Math.Clamp(delta.W, -1f, 1f));
+        bool hitch = Vector3.Distance(target - position, velocity * dt) > HitchDistance || angle > HitchAngle;
+        if (!_placed.Contains(e) || hitch)
         {
             // Placed straight there (just arrived, or a hitch), moving as it was then, with whoever is aboard: a step
             // short, as following leaves it, so the step brings it to the target rather than past it.
@@ -173,10 +183,7 @@ public sealed class FollowerSystem : ISystem, IDebugUiSystem
             return;
         }
         _physics.SetBodyLinearVelocity(body, (target - position) / dt);
-        // The rotation from where it is to where it should be, as an angular velocity over the step.
-        var delta = Quaternion.Normalize(rotation * Quaternion.Conjugate(orientation));
-        if (delta.W < 0) delta = new Quaternion(-delta.X, -delta.Y, -delta.Z, -delta.W);
-        float angle = 2f * MathF.Acos(System.Math.Clamp(delta.W, -1f, 1f));
+        // The rotation as an angular velocity over the step.
         float sin = MathF.Sqrt(MathF.Max(0f, 1f - delta.W * delta.W));
         var axis = sin > 1e-5f ? new Vector3(delta.X, delta.Y, delta.Z) / sin : Vector3.Zero;
         _physics.SetBodyAngularVelocity(body, axis * (angle / dt));

@@ -188,6 +188,38 @@ public class CrewTests
         Assert.InRange(client.RemoteBodies!.Delays.Most, 0, 12); // drawn a little behind, not seconds
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CrewStayPutOnDeckThroughAHostStall(bool turning)
+    {
+        // The host stalling to 1 fps for a few seconds (another game loading on the same machine, say), running a
+        // second of ticks at once each frame, while its ship flies on with a client's player aboard. Its snapshots
+        // arrive in bursts a second apart.
+        var (game, ship, client, crew) = ShipWithCrew(20);
+        using var _ = game;
+        var copy = client.Registry.Find(ship.Get<EntityId>())!.Value;
+        game.Host.Physics.SetBodyLinearVelocity(ship.Get<PhysicsBodyComponent>().Body, new Vector3(10, 0, 0));
+        // Turning, its copy can't be carried on along its snapshots' velocity: each burst puts it somewhere else.
+        if (turning) game.Host.Physics.SetBodyAngularVelocity(ship.Get<PhysicsBodyComponent>().Body, new Vector3(0, 0.3f, 0));
+        game.Tick(60);
+        var start = crew.Get<Support>().LocalPosition;
+        var hostClock = new ClearSkies.Engine.Core.TickClock();
+        float slid = 0f;
+        for (int frame = 1; frame <= 360; frame++)
+        {
+            game.Network.ManualTime += 1000.0 / 60.0;
+            bool stalled = frame <= 240;
+            if (!stalled || frame % 60 == 0) game.Host.Tick(hostClock.Advance(stalled ? 1.0 : 1 / 60.0));
+            client.Tick();
+            if (crew.Get<Support>().Supporter == copy)
+                slid = MathF.Max(slid, Vector2.Distance(new Vector2(crew.Get<Support>().LocalPosition.X, crew.Get<Support>().LocalPosition.Z),
+                                                        new Vector2(start.X, start.Z)));
+        }
+        Assert.Equal(copy, crew.Get<Support>().Supporter); // still on deck
+        Assert.True(slid < 0.5f, $"slid {slid:F2} on the deck");
+    }
+
     [Fact]
     public void BothPlayersWorkTheShipsControls()
     {
