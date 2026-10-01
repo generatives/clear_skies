@@ -37,6 +37,14 @@ public class TransparentBlockTests
         => Assert.Equal(blocks, BlockRegistry.Get(id).BlocksLight);
 
     [Fact]
+    public void Glass_is_cut_out_and_water_translucent()
+    {
+        Assert.Equal(RenderLayer.Cutout, BlockRegistry.Get(BlockId.Glass).Layer);
+        Assert.Equal(RenderLayer.Translucent, BlockRegistry.Get(BlockId.Water).Layer);
+        Assert.Equal(RenderLayer.Opaque, BlockRegistry.Get(BlockId.Stone).Layer);
+    }
+
+    [Fact]
     public void Water_is_passable_and_glass_collides()
     {
         Assert.False(BlockRegistry.Get(BlockId.Water).Collides);
@@ -52,12 +60,13 @@ public class TransparentBlockTests
         var mesher = new GreedyMesher();
         var (verts, _) = mesher.Mesh(data, null, null, null, null, null, null);
 
-        // Stone shows all 6 faces (its +X face is behind glass); glass shows 5 (not the one against the stone).
+        // Stone shows all 6 faces (its +X face is behind glass); glass shows 5 (not the one against the stone), in the
+        // cut-out mesh.
         Assert.Equal(6 * 4, verts.Count);
-        Assert.Equal(5 * 4, mesher.TransparentVertices.Count);
-        Assert.Equal(5 * 6, mesher.TransparentIndices.Count);
-        Assert.Equal(mesher.TransparentVertices.Count, mesher.TransparentAlphas.Count);
-        Assert.DoesNotContain(mesher.TransparentVertices, v => v.Normal.X < -0.5f);
+        Assert.Equal(5 * 4, mesher.CutoutVertices.Count);
+        Assert.Equal(5 * 6, mesher.CutoutIndices.Count);
+        Assert.Empty(mesher.TransparentVertices);
+        Assert.DoesNotContain(mesher.CutoutVertices, v => v.Normal.X < -0.5f);
     }
 
     [Fact]
@@ -83,7 +92,8 @@ public class TransparentBlockTests
         var mesher = new GreedyMesher();
         mesher.Mesh(data, null, null, null, null, null, null);
 
-        Assert.Equal(12 * 4, mesher.TransparentVertices.Count);
+        Assert.Equal(6 * 4, mesher.TransparentVertices.Count); // water
+        Assert.Equal(6 * 4, mesher.CutoutVertices.Count);      // glass
     }
 
     [Fact]
@@ -91,14 +101,13 @@ public class TransparentBlockTests
     {
         var data = new ChunkData();
         data.Set(4, 4, 4, BlockId.Water);
-        data.Set(8, 4, 4, BlockId.Glass);
         var mesher = new GreedyMesher();
         mesher.Mesh(data, null, null, null, null, null, null);
 
         byte water = (byte)MathF.Round(BlockRegistry.Get(BlockId.Water).EffectiveAlpha * 255f);
         Assert.True(water < 255);
-        Assert.Contains(water, mesher.TransparentAlphas);
-        Assert.Contains((byte)255, mesher.TransparentAlphas); // glass: its texture's alpha alone
+        Assert.Equal(mesher.TransparentVertices.Count, mesher.TransparentAlphas.Count);
+        Assert.All(mesher.TransparentAlphas, a => Assert.Equal(water, a));
     }
 
     [Fact]
@@ -133,7 +142,7 @@ public class TransparentBlockTests
         var (verts, _) = mesher.Mesh(data, null, null, null, null, null, null);
 
         // Neither the glass nor the stone draws its face on the Fan's side (it would flicker against the model).
-        Assert.Equal(5 * 4, mesher.TransparentVertices.Count);
+        Assert.Equal(5 * 4, mesher.CutoutVertices.Count);
         Assert.Equal(5 * 4, verts.Count);
     }
 
@@ -146,7 +155,7 @@ public class TransparentBlockTests
         var mesher = new GreedyMesher();
         mesher.Mesh(data, null, null, null, null, null, null);
 
-        Assert.Equal(6 * 4, mesher.TransparentVertices.Count);
+        Assert.Equal(6 * 4, mesher.CutoutVertices.Count);
     }
 
     [Fact]

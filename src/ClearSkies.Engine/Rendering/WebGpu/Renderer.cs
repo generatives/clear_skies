@@ -647,7 +647,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     return vec4<f32>(shadeBlock(in, blockColor(in).rgb), 1.0);
 }
 
-// Transparent blocks' faces (see BlockDef.Transparent), alpha-blended over the opaque world: lit like fs_main, with
+// Translucent blocks' faces (see RenderLayer.Translucent), alpha-blended over the opaque world: lit like fs_main, with
 // the texture's alpha times the block's opacity. Fully clear texels are cut out. Drawn only where the face is the
 // nearest transparent one (fs_chunk_transparent_depth laid that depth down first), so every pixel blends exactly one
 // transparent layer and the draw order doesn't matter.
@@ -657,6 +657,15 @@ fn fs_chunk_transparent(in: VSOut) -> @location(0) vec4<f32> {
     let alpha = c.a * in.alpha;
     if (alpha < 0.004) { discard; }
     return vec4<f32>(shadeBlock(in, c.rgb), alpha);
+}
+
+// Cut-out blocks' faces (RenderLayer.Cutout, e.g. glass): fs_main, minus the texels under half alpha. A separate entry
+// point so fs_main itself has no discard, which would cost every opaque fragment the early depth test.
+@fragment
+fn fs_cutout(in: VSOut) -> @location(0) vec4<f32> {
+    let c = blockColor(in);
+    if (c.a < 0.5) { discard; }
+    return vec4<f32>(shadeBlock(in, c.rgb), 1.0);
 }
 
 // Transparent faces' depth pre-pass: the nearest transparent face at each pixel, without its fully clear texels.
@@ -839,7 +848,8 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     private RenderPipeline* _chunkPipeline;          // vs_chunk: chunk meshes (ChunkVertex)
     private RenderPipeline* _chunkWireframePipeline;
     private RenderPipeline* _chunkOverdrawPipeline;  // debug overdraw view
-    private RenderPipeline* _chunkTransparentPipeline; // transparent blocks' faces, alpha-blended (fs_chunk_transparent)
+    private RenderPipeline* _chunkCutoutPipeline;    // cut-out blocks' faces (fs_cutout)
+    private RenderPipeline* _chunkTransparentPipeline; // translucent blocks' faces, alpha-blended (fs_chunk_transparent)
     private RenderPipeline* _chunkTransparentDepthPipeline; // their depth pre-pass (fs_chunk_transparent_depth)
 
     /// <summary>Debug: draw terrain additively without depth test, so brightness shows how many surfaces cover each
@@ -919,6 +929,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         _chunkPipeline          = CreateChunkPipeline(PrimitiveTopology.TriangleList, CullMode.Back);
         _chunkWireframePipeline = CreateChunkPipeline(PrimitiveTopology.LineList,     CullMode.None);
         _chunkOverdrawPipeline  = CreateOverdrawPipeline();
+        _chunkCutoutPipeline    = CreateChunkPipeline(PrimitiveTopology.TriangleList, CullMode.Back, "fs_cutout");
         _chunkTransparentPipeline = CreateTransparentChunkPipeline();
         _chunkTransparentDepthPipeline = CreateTransparentChunkDepthPipeline();
         // The background pass: a full-screen triangle at the far plane that only fills pixels still at the cleared
@@ -1029,15 +1040,16 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
                               depthTest ? CompareFunction.Greater : CompareFunction.Always); // reversed depth: nearer is greater
     }
 
-    /// <summary>A pipeline for chunk meshes (vs_chunk, one packed <see cref="ChunkVertex"/> per vertex) and fs_main.</summary>
-    private RenderPipeline* CreateChunkPipeline(PrimitiveTopology topology, CullMode cullMode)
+    /// <summary>A pipeline for chunk meshes (vs_chunk, one packed <see cref="ChunkVertex"/> per vertex) and fs_main (or
+    /// <paramref name="fragmentEntry"/>), depth-tested and depth-writing.</summary>
+    private RenderPipeline* CreateChunkPipeline(PrimitiveTopology topology, CullMode cullMode, string fragmentEntry = "fs_main")
     {
         var attr     = new VertexAttribute { Format = VertexFormat.Uint32x2, Offset = 0, ShaderLocation = 0 };
         var vbLayout = new VertexBufferLayout { ArrayStride = ChunkVertex.SizeBytes, StepMode = VertexStepMode.Vertex, AttributeCount = 1, Attributes = &attr };
-        return CreatePipeline("vs_chunk", "fs_main", &vbLayout, topology, cullMode, depthWrite: true, CompareFunction.Greater);
+        return CreatePipeline("vs_chunk", fragmentEntry, &vbLayout, topology, cullMode, depthWrite: true, CompareFunction.Greater);
     }
 
-    /// <summary>Transparent blocks' faces (vs_chunk, fs_chunk_transparent): alpha-blended over what's drawn, only where
+    /// <summary>Translucent blocks' faces (vs_chunk, fs_chunk_transparent): alpha-blended over what's drawn, only where
     /// they're the nearest transparent face (GreaterEqual against <see cref="CreateTransparentChunkDepthPipeline"/>'s
     /// depth), without writing depth. Both sides drawn, so a water surface is seen from under it too.</summary>
     private RenderPipeline* CreateTransparentChunkPipeline()
@@ -1544,6 +1556,13 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         => DrawChunk(mesh, model, grid, chunk, _chunkPipeline);
 
     /// <summary>
+    /// Draws a chunk's cut-out mesh (<see cref="ChunkRenderData.CutoutMesh"/>) like <see cref="DrawChunkMesh"/>, minus
+    /// its texels under half alpha. Call after the opaque chunk meshes.
+    /// </summary>
+    public void DrawCutoutChunkMesh(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk)
+        => DrawChunk(mesh, model, grid, chunk, _chunkCutoutPipeline);
+
+    /// <summary>
     /// Lays down a chunk's transparent mesh's depth (<see cref="ChunkRenderData.TransparentMesh"/>), so
     /// <see cref="DrawTransparentChunkMesh"/> draws only the nearest transparent face at each pixel. Call for every
     /// visible chunk's transparent mesh first. Skipped in the wireframe and overdraw views.
@@ -1654,6 +1673,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         if (_chunkPipeline      != null) _api.RenderPipelineRelease(_chunkPipeline);
         if (_chunkWireframePipeline != null) _api.RenderPipelineRelease(_chunkWireframePipeline);
         if (_chunkOverdrawPipeline != null) _api.RenderPipelineRelease(_chunkOverdrawPipeline);
+        if (_chunkCutoutPipeline != null) _api.RenderPipelineRelease(_chunkCutoutPipeline);
         if (_chunkTransparentPipeline != null) _api.RenderPipelineRelease(_chunkTransparentPipeline);
         if (_chunkTransparentDepthPipeline != null) _api.RenderPipelineRelease(_chunkTransparentDepthPipeline);
     }

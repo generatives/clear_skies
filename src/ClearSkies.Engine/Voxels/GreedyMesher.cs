@@ -17,9 +17,10 @@ namespace ClearSkies.Engine.Voxels;
 /// interpolated chunk-local position and the face normal — so a merged quad no longer needs per-cell
 /// light in its merge key.
 ///
-/// <see cref="BlockDef.Transparent"/> blocks (glass, water) are meshed alongside but into a separate mesh
-/// (<see cref="TransparentVertices"/>, <see cref="TransparentIndices"/>), drawn alpha-blended after the opaque
-/// world. They don't hide their neighbours' faces, so an opaque block behind glass still has its face; and a
+/// <see cref="BlockDef.Transparent"/> blocks are meshed alongside but into their own <see cref="RenderLayer"/>'s mesh:
+/// cut out (glass: <see cref="CutoutVertices"/>, <see cref="CutoutIndices"/>) or translucent (water:
+/// <see cref="TransparentVertices"/>, <see cref="TransparentIndices"/>, drawn alpha-blended after the opaque world).
+/// They don't hide their neighbours' faces, so an opaque block behind glass still has its face; and a
 /// transparent face is hidden only by an opaque block (or <see cref="BlockDef.OpaqueModel"/>) or another of its own
 /// type. An opaque model block hides faces against it like an opaque cube, since its model covers them.
 /// </summary>
@@ -54,8 +55,16 @@ public sealed class GreedyMesher
     private readonly List<Vertex> _tVerts   = new();
     private readonly List<uint>   _tIndices = new();
     private readonly List<byte>   _tAlphas  = new();
+    private readonly List<Vertex> _cVerts   = new();
+    private readonly List<uint>   _cIndices = new();
 
-    /// <summary>The last <see cref="Mesh"/>'s transparent faces (reused scratch, like its return value).</summary>
+    /// <summary>The last <see cref="Mesh"/>'s <see cref="RenderLayer.Cutout"/> faces (reused scratch, like its return
+    /// value).</summary>
+    public List<Vertex> CutoutVertices => _cVerts;
+    public List<uint>   CutoutIndices  => _cIndices;
+
+    /// <summary>The last <see cref="Mesh"/>'s <see cref="RenderLayer.Translucent"/> faces (reused scratch, like its
+    /// return value).</summary>
     public List<Vertex> TransparentVertices => _tVerts;
     public List<uint>   TransparentIndices  => _tIndices;
 
@@ -71,8 +80,8 @@ public sealed class GreedyMesher
     }
 
     /// <summary>
-    /// Mesh <paramref name="chunk"/>, returning its opaque faces; its transparent ones are left in
-    /// <see cref="TransparentVertices"/> and <see cref="TransparentIndices"/>. Neighbour ChunkData parameters are
+    /// Mesh <paramref name="chunk"/>, returning its opaque faces; its cut-out and translucent ones are left in
+    /// <see cref="CutoutVertices"/> and <see cref="TransparentVertices"/> (with their indices). Neighbour ChunkData parameters are
     /// for face-culling only; pass <c>null</c> for any unloaded neighbour (its side is treated as open air). With
     /// <paramref name="neighboursForTransparentOnly"/>, the neighbours only cull transparent faces, and every other
     /// border face is drawn as if the neighbour were air (see
@@ -96,6 +105,8 @@ public sealed class GreedyMesher
         _tVerts.Clear();
         _tIndices.Clear();
         _tAlphas.Clear();
+        _cVerts.Clear();
+        _cIndices.Clear();
         int sz      = ChunkData.Size;
 
         for (int fi = 0; fi < Faces.Length; fi++)
@@ -189,15 +200,19 @@ public sealed class GreedyMesher
                     if (_atlas != null && _atlas.TryGetLayer(texName, out int l))
                         layer = l;
 
-                    if (def.Transparent)
+                    switch (def.Layer)
                     {
-                        EmitQuad(_tVerts, _tIndices, face, slice + face.FaceOffset, u, v, du, dv, def.Color, layer);
-                        byte alpha = (byte)System.Math.Clamp((int)MathF.Round(def.EffectiveAlpha * 255f), 0, 255);
-                        for (int k = 0; k < 4; k++) _tAlphas.Add(alpha);
-                    }
-                    else
-                    {
-                        EmitQuad(verts, indices, face, slice + face.FaceOffset, u, v, du, dv, def.Color, layer);
+                        case RenderLayer.Translucent:
+                            EmitQuad(_tVerts, _tIndices, face, slice + face.FaceOffset, u, v, du, dv, def.Color, layer);
+                            byte alpha = (byte)System.Math.Clamp((int)MathF.Round(def.EffectiveAlpha * 255f), 0, 255);
+                            for (int k = 0; k < 4; k++) _tAlphas.Add(alpha);
+                            break;
+                        case RenderLayer.Cutout:
+                            EmitQuad(_cVerts, _cIndices, face, slice + face.FaceOffset, u, v, du, dv, def.Color, layer);
+                            break;
+                        default:
+                            EmitQuad(verts, indices, face, slice + face.FaceOffset, u, v, du, dv, def.Color, layer);
+                            break;
                     }
                 }
             }

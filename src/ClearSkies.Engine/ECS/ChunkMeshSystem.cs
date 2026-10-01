@@ -14,7 +14,7 @@ namespace ClearSkies.Engine.ECS;
 
 /// <summary>
 /// Remeshes chunks flagged dirty across all registered <see cref="ChunkVolume"/>s into their
-/// <see cref="ChunkRenderData"/>: the greedy-meshed cubes (opaque and transparent, as two meshes) plus the chunk's model blocks (found in the same worker
+/// <see cref="ChunkRenderData"/>: the greedy-meshed cubes (one mesh per <see cref="RenderLayer"/>) plus the chunk's model blocks (found in the same worker
 /// job, resolved to their shared models through <see cref="BlockModelLibrary"/>). The greedy mesh itself
 /// (~0.65ms per non-empty chunk, see StreamingBenchmark) runs on thread-pool workers, one
 /// <see cref="GreedyMesher"/> per thread; only the GPU upload and the hand-back to the owning volume happen
@@ -57,8 +57,9 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
         public static readonly Packed None = new(Array.Empty<byte>(), 0, 0, 0, 0, false);
     }
 
-    /// <summary>A meshed chunk: its opaque and transparent meshes, and its model blocks.</summary>
-    private sealed record Result(Entity Entity, Packed Opaque, Packed Transparent, ModelCell[] Models, Exception? Error);
+    /// <summary>A meshed chunk: its opaque, cut-out and translucent meshes, and its model blocks.</summary>
+    private sealed record Result(Entity Entity, Packed Opaque, Packed Cutout, Packed Transparent, ModelCell[] Models,
+                                 Exception? Error);
 
     /// <summary>Main-thread time spent uploading meshes per frame, at most (at least one goes each frame): results past
     /// it wait for the next frame, so a burst of finished jobs doesn't stall one.</summary>
@@ -91,9 +92,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
             if (e.Has<Rendered>()) continue; // back again already
             if (e.Has<ChunkRenderData>())
             {
-                ref readonly var rd = ref e.Get<ChunkRenderData>();
-                if (rd.Mesh is { } mesh) _removed.Add(mesh);
-                if (rd.TransparentMesh is { } transparent) _removed.Add(transparent);
+                _removed.AddRange(e.Get<ChunkRenderData>().Meshes());
                 e.Remove<ChunkRenderData>();
             }
             e.Set<NeedsRemeshFlag>();
@@ -104,9 +103,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     private void EntityDisposed(in Entity e)
     {
         if (!e.Has<ChunkRenderData>()) return;
-        ref readonly var rd = ref e.Get<ChunkRenderData>();
-        if (rd.Mesh is { } mesh) _removed.Add(mesh);
-        if (rd.TransparentMesh is { } transparent) _removed.Add(transparent);
+        _removed.AddRange(e.Get<ChunkRenderData>().Meshes());
     }
 
     public void Update(float dt)
@@ -235,14 +232,16 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                     var mesher = _meshers.Value!;
                     var (verts, idxs) = mesher.Mesh(data, nX, pX, nY, pY, nZ, pZ, neighboursForTransparentOnly: alone);
                     var opaque = PackMesh(CollectionsMarshal.AsSpan(verts), CollectionsMarshal.AsSpan(idxs), default, wireframe);
+                    var cutout = PackMesh(CollectionsMarshal.AsSpan(mesher.CutoutVertices),
+                                          CollectionsMarshal.AsSpan(mesher.CutoutIndices), default, wireframe);
                     var transparent = PackMesh(CollectionsMarshal.AsSpan(mesher.TransparentVertices),
                                                CollectionsMarshal.AsSpan(mesher.TransparentIndices),
                                                CollectionsMarshal.AsSpan(mesher.TransparentAlphas), wireframe);
-                    _results.Enqueue(new Result(entry.Entity, opaque, transparent, FindModelBlocks(data), null));
+                    _results.Enqueue(new Result(entry.Entity, opaque, cutout, transparent, FindModelBlocks(data), null));
                 }
                 catch (Exception e)
                 {
-                    _results.Enqueue(new Result(entry.Entity, Packed.None, Packed.None, Array.Empty<ModelCell>(), e));
+                    _results.Enqueue(new Result(entry.Entity, Packed.None, Packed.None, Packed.None, Array.Empty<ModelCell>(), e));
                 }
                 finally
                 {
@@ -278,7 +277,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                 var volume = entry.Volume;
 
                 var models = ResolveModels(r.Models);
-                if (r.Opaque.VertCount == 0 && r.Transparent.VertCount == 0 && models.Length == 0)
+                if (r.Opaque.VertCount == 0 && r.Cutout.VertCount == 0 && r.Transparent.VertCount == 0 && models.Length == 0)
                 {
                     bool redirtied = entity.Has<NeedsRemeshFlag>();
                     ClearMesh(entry);
@@ -287,6 +286,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                 }
 
                 var mesh = Upload(r.Opaque);
+                var cutoutMesh = Upload(r.Cutout);
                 var transparentMesh = Upload(r.Transparent);
 
                 // The chunk's voxel base and the volume dims are derived live at draw time from the volume's
@@ -297,14 +297,13 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
 
                     if (entity.Has<ChunkRenderData>())
                     {
-                        ref readonly var old = ref entry.Entity.Get<ChunkRenderData>();
-                        old.Mesh?.Dispose();
-                        old.TransparentMesh?.Dispose();
+                        foreach (var old in entry.Entity.Get<ChunkRenderData>().Meshes()) old.Dispose();
                     }
                     entry.Entity.Remove<NeedsRemeshFlag>();
                     entry.Entity.Set(new ChunkRenderData
                     {
                         Mesh     = mesh,
+                        CutoutMesh = cutoutMesh,
                         TransparentMesh = transparentMesh,
                         Models   = models,
                         Grid     = volume.Gpu,
@@ -318,6 +317,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
             finally
             {
                 if (r.Opaque.Data.Length > 0) ArrayPool<byte>.Shared.Return(r.Opaque.Data);
+                if (r.Cutout.Data.Length > 0) ArrayPool<byte>.Shared.Return(r.Cutout.Data);
                 if (r.Transparent.Data.Length > 0) ArrayPool<byte>.Shared.Return(r.Transparent.Data);
             }
         }
@@ -352,11 +352,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     {   
         entry.Entity.Remove<NeedsRemeshFlag>();
         if (entry.Entity.Has<ChunkRenderData>())
-        {
-            ref readonly var rd = ref entry.Entity.Get<ChunkRenderData>();
-            rd.Mesh?.Dispose();
-            rd.TransparentMesh?.Dispose();
-        }
+            foreach (var mesh in entry.Entity.Get<ChunkRenderData>().Meshes()) mesh.Dispose();
         entry.Entity.Remove<ChunkRenderData>();
     }
 

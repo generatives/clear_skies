@@ -24,15 +24,17 @@ public readonly struct BlockDef
     /// The colour a light-emitting block actually lights with (white when <see cref="LightColor"/> is unset).
     public Vector3D<float> EffectiveLightColor => LightColor == default ? Vector3D<float>.One : LightColor;
 
-    /// True for a full-cube block you can see through (glass, water). <c>GreedyMesher</c> puts its faces in the chunk's
-    /// separate transparent mesh, drawn alpha-blended after the opaque world (see <c>ChunkRenderSystem</c>), and it never
-    /// hides a neighbour's face, except another block of its own type (so a wall of glass or a pool of water shows only
-    /// its outer surface). How much shows through is its texture's alpha times <see cref="Alpha"/>. It lets light through
-    /// (see <see cref="BlocksLight"/>).
-    public bool            Transparent    { get; init; }
+    /// How a full-cube block's faces are drawn (see <see cref="RenderLayer"/>): opaque (the default), cut out (glass)
+    /// or blended (water).
+    public RenderLayer     Layer          { get; init; }
 
-    /// Opacity (0-1) a <see cref="Transparent"/> block's faces are drawn with, multiplying its texture's alpha: e.g. water,
-    /// whose texture is fully opaque. 0 (unset) means 1, the texture's alpha alone (glass).
+    /// True for a full-cube block you can see through: any <see cref="Layer"/> but <see cref="RenderLayer.Opaque"/>. It
+    /// never hides a neighbour's face, except another block of its own type (so a wall of glass or a pool of water shows
+    /// only its outer surface), and it lets light through (see <see cref="BlocksLight"/>).
+    public bool            Transparent    => Layer != RenderLayer.Opaque;
+
+    /// Opacity (0-1) a <see cref="RenderLayer.Translucent"/> block's faces are drawn with, multiplying its texture's
+    /// alpha: e.g. water, whose texture is fully opaque. 0 (unset) means 1, the texture's alpha alone.
     public float           Alpha          { get; init; }
 
     /// <see cref="Alpha"/>, with unset read as 1.
@@ -127,3 +129,19 @@ public readonly struct BlockDef
 }
 
 public enum FaceRole : byte { Side, Top, Bottom }
+
+/// <summary>How a full-cube block's faces are drawn; <c>GreedyMesher</c> gives each layer its own mesh per chunk.</summary>
+public enum RenderLayer : byte
+{
+    /// <summary>Solid faces, drawn with the world (<c>fs_main</c>).</summary>
+    Opaque,
+
+    /// <summary>Drawn with the world, but texels under half alpha are cut out (<c>fs_cutout</c>): fully see-through
+    /// there, solid (and depth-writing) elsewhere, so it needs no sorting. Back faces aren't drawn, so looking through a
+    /// block of glass you see only its near side. For mostly clear textures like glass.</summary>
+    Cutout,
+
+    /// <summary>Alpha-blended over the world after it (<c>fs_chunk_transparent</c>), its texture's alpha times
+    /// <see cref="BlockDef.Alpha"/>; only the nearest translucent face shows at each pixel. For water.</summary>
+    Translucent,
+}

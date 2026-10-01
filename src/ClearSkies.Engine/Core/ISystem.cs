@@ -32,7 +32,7 @@ public enum SystemStage
     /// <summary>World-space overlays over the opaque scene (e.g. the targeted-face wireframe).</summary>
     RenderOverlay,
 
-    /// <summary>Alpha-blended world geometry (transparent blocks), after the sky (which only fills pixels with no depth,
+    /// <summary>Alpha-blended world geometry (translucent blocks), after the sky (which only fills pixels with no depth,
     /// so it would paint over them) and the overlays (so a targeted block under water shows through it).</summary>
     RenderTransparent,
 
