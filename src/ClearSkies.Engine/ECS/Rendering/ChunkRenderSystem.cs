@@ -14,8 +14,8 @@ namespace ClearSkies.Engine.ECS;
 /// Draws every loaded chunk's <see cref="ChunkRenderData"/>: frustum-culls the chunks, draws their greedy-meshed
 /// cubes nearest first, then each visible chunk's model blocks — placed at their cell, turned to their stored
 /// <see cref="BlockOrientation"/> and lit from that cell's voxel light. Runs in <see cref="SystemStage.RenderWorld"/>.
-/// The same chunks' transparent meshes (glass, water) are drawn later, farthest first, by <see cref="TransparentPass"/>
-/// in <see cref="SystemStage.RenderTransparent"/>.
+/// The same chunks' transparent meshes (glass, water) are drawn later by <see cref="TransparentPass"/> in
+/// <see cref="SystemStage.RenderTransparent"/>.
 ///
 /// The static world's chunks (tens of thousands) are kept by column, with each column's height range, so a column
 /// outside the view is skipped in one test instead of one per chunk: looking at every chunk each frame cost ~6 ms.
@@ -44,8 +44,9 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     private static readonly Comparison<ChunkDraw> NearestFirst = (a, b) => a.DistSq.CompareTo(b.DistSq);
     private int _modelBlocksDrawn, _transparentDrawn;
 
-    /// <summary>Draws the transparent meshes of the chunks this system found visible this frame, farthest first so
-    /// nearer glass and water blend over farther. Add it in <see cref="SystemStage.RenderTransparent"/>.</summary>
+    /// <summary>Draws the transparent meshes of the chunks this system found visible this frame: their depth, then
+    /// their colour where they're the nearest transparent face, so each pixel shows one transparent layer whatever
+    /// order the chunks (and their faces) are drawn in. Add it in <see cref="SystemStage.RenderTransparent"/>.</summary>
     public IRenderSystem TransparentPass { get; }
 
     private sealed class TransparentRender(ChunkRenderSystem chunks) : IRenderSystem
@@ -174,11 +175,11 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
 
     private void RenderTransparent()
     {
-        // _draws is sorted nearest first (by chunk centre), so walk it backwards. Faces within a chunk aren't sorted.
         _transparentDrawn = 0;
-        for (int i = _draws.Count - 1; i >= 0; i--)
+        foreach (var d in _draws)
+            if (d.TransparentMesh != null) _renderer.DrawTransparentChunkDepth(d.TransparentMesh, d.Model, d.Grid, d.Chunk);
+        foreach (var d in _draws)
         {
-            var d = _draws[i];
             if (d.TransparentMesh == null) continue;
             _renderer.DrawTransparentChunkMesh(d.TransparentMesh, d.Model, d.Grid, d.Chunk);
             _transparentDrawn++;

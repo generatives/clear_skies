@@ -648,13 +648,22 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 }
 
 // Transparent blocks' faces (see BlockDef.Transparent), alpha-blended over the opaque world: lit like fs_main, with
-// the texture's alpha times the block's opacity. Fully clear texels are cut out.
+// the texture's alpha times the block's opacity. Fully clear texels are cut out. Drawn only where the face is the
+// nearest transparent one (fs_chunk_transparent_depth laid that depth down first), so every pixel blends exactly one
+// transparent layer and the draw order doesn't matter.
 @fragment
 fn fs_chunk_transparent(in: VSOut) -> @location(0) vec4<f32> {
     let c = blockColor(in);
     let alpha = c.a * in.alpha;
     if (alpha < 0.004) { discard; }
     return vec4<f32>(shadeBlock(in, c.rgb), alpha);
+}
+
+// Transparent faces' depth pre-pass: the nearest transparent face at each pixel, without its fully clear texels.
+@fragment
+fn fs_chunk_transparent_depth(in: VSOut) -> @location(0) vec4<f32> {
+    if (blockColor(in).a * in.alpha < 0.004) { discard; }
+    return vec4<f32>(0.0);
 }
 
 // A block face's lit, fogged colour (baseColor: its texture or colour). Debug (Renderer panel): lightParams2.y bit 2 =
@@ -831,6 +840,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     private RenderPipeline* _chunkWireframePipeline;
     private RenderPipeline* _chunkOverdrawPipeline;  // debug overdraw view
     private RenderPipeline* _chunkTransparentPipeline; // transparent blocks' faces, alpha-blended (fs_chunk_transparent)
+    private RenderPipeline* _chunkTransparentDepthPipeline; // their depth pre-pass (fs_chunk_transparent_depth)
 
     /// <summary>Debug: draw terrain additively without depth test, so brightness shows how many surfaces cover each
     /// pixel (sky and clouds are skipped).</summary>
@@ -910,6 +920,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         _chunkWireframePipeline = CreateChunkPipeline(PrimitiveTopology.LineList,     CullMode.None);
         _chunkOverdrawPipeline  = CreateOverdrawPipeline();
         _chunkTransparentPipeline = CreateTransparentChunkPipeline();
+        _chunkTransparentDepthPipeline = CreateTransparentChunkDepthPipeline();
         // The background pass: a full-screen triangle at the far plane that only fills pixels still at the cleared
         // depth (reversed: the far plane and the clear value are both 0), without writing depth.
         _skyPipeline       = CreatePipeline("vs_sky", "fs_sky", null, PrimitiveTopology.TriangleList, CullMode.None,
@@ -1026,9 +1037,9 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         return CreatePipeline("vs_chunk", "fs_main", &vbLayout, topology, cullMode, depthWrite: true, CompareFunction.Greater);
     }
 
-    /// <summary>Transparent blocks' faces (vs_chunk, fs_chunk_transparent): alpha-blended over what's drawn, depth-tested
-    /// but not depth-writing, so faces behind them still show; drawn back to front after the sky (see
-    /// <see cref="DrawTransparentChunkMesh"/>). Both sides drawn, so a water surface is seen from under it too.</summary>
+    /// <summary>Transparent blocks' faces (vs_chunk, fs_chunk_transparent): alpha-blended over what's drawn, only where
+    /// they're the nearest transparent face (GreaterEqual against <see cref="CreateTransparentChunkDepthPipeline"/>'s
+    /// depth), without writing depth. Both sides drawn, so a water surface is seen from under it too.</summary>
     private RenderPipeline* CreateTransparentChunkPipeline()
     {
         var attr     = new VertexAttribute { Format = VertexFormat.Uint32x2, Offset = 0, ShaderLocation = 0 };
@@ -1037,7 +1048,17 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         var alpha = new BlendComponent { Operation = BlendOperation.Add, SrcFactor = BlendFactor.One, DstFactor = BlendFactor.OneMinusSrcAlpha };
         var blend = new BlendState { Color = color, Alpha = alpha };
         return CreatePipeline("vs_chunk", "fs_chunk_transparent", &vbLayout, PrimitiveTopology.TriangleList, CullMode.None,
-                              depthWrite: false, CompareFunction.Greater, &blend);
+                              depthWrite: false, CompareFunction.GreaterEqual, &blend);
+    }
+
+    /// <summary>The transparent faces' depth pre-pass (vs_chunk, fs_chunk_transparent_depth): depth only, no colour, so
+    /// the colour pass draws just the nearest transparent face at each pixel.</summary>
+    private RenderPipeline* CreateTransparentChunkDepthPipeline()
+    {
+        var attr     = new VertexAttribute { Format = VertexFormat.Uint32x2, Offset = 0, ShaderLocation = 0 };
+        var vbLayout = new VertexBufferLayout { ArrayStride = ChunkVertex.SizeBytes, StepMode = VertexStepMode.Vertex, AttributeCount = 1, Attributes = &attr };
+        return CreatePipeline("vs_chunk", "fs_chunk_transparent_depth", &vbLayout, PrimitiveTopology.TriangleList, CullMode.None,
+                              depthWrite: true, CompareFunction.Greater, writeMask: ColorWriteMask.None);
     }
 
     /// <summary>Debug overdraw view (fs_overdraw): terrain drawn additively, depth-tested in the normal draw order, so
@@ -1069,13 +1090,14 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     /// vertex buffer, or null for none (the vertex shader makes its own geometry).</summary>
     private RenderPipeline* CreatePipeline(string vertexEntry, string fragmentEntry, VertexBufferLayout* vertexBuffer,
                                            PrimitiveTopology topology, CullMode cullMode, bool depthWrite,
-                                           CompareFunction depthCompare, BlendState* blend = null)
+                                           CompareFunction depthCompare, BlendState* blend = null,
+                                           ColorWriteMask writeMask = ColorWriteMask.All)
     {
         var vsEntry = (byte*)SilkMarshal.StringToPtr(vertexEntry, NativeStringEncoding.UTF8);
         var fsEntry = (byte*)SilkMarshal.StringToPtr(fragmentEntry, NativeStringEncoding.UTF8);
 
         var vertexState   = new VertexState { Module = _shader, EntryPoint = vsEntry, BufferCount = vertexBuffer == null ? 0u : 1u, Buffers = vertexBuffer };
-        var colorTarget   = new ColorTargetState { Format = _ctx.SurfaceFormat, Blend = blend, WriteMask = ColorWriteMask.All };
+        var colorTarget   = new ColorTargetState { Format = _ctx.SurfaceFormat, Blend = blend, WriteMask = writeMask };
         var fragmentState = new FragmentState { Module = _shader, EntryPoint = fsEntry, TargetCount = 1, Targets = &colorTarget };
 
         var keep  = StencilOperation.Keep;
@@ -1522,9 +1544,20 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         => DrawChunk(mesh, model, grid, chunk, _chunkPipeline);
 
     /// <summary>
-    /// Draws a chunk's transparent mesh (<see cref="ChunkRenderData.TransparentMesh"/>) alpha-blended over everything
-    /// drawn so far, without writing depth. Call after the opaque world and <see cref="DrawSky"/> (the sky only fills
-    /// pixels with no depth, so it would paint over them), farthest chunk first.
+    /// Lays down a chunk's transparent mesh's depth (<see cref="ChunkRenderData.TransparentMesh"/>), so
+    /// <see cref="DrawTransparentChunkMesh"/> draws only the nearest transparent face at each pixel. Call for every
+    /// visible chunk's transparent mesh first. Skipped in the wireframe and overdraw views.
+    /// </summary>
+    public void DrawTransparentChunkDepth(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk)
+    {
+        if (WireframeMode || OverdrawMode) return;
+        DrawChunk(mesh, model, grid, chunk, _chunkTransparentDepthPipeline);
+    }
+
+    /// <summary>
+    /// Draws a chunk's transparent mesh alpha-blended over everything drawn so far, where it's the nearest transparent
+    /// face (see <see cref="DrawTransparentChunkDepth"/>). Call after the opaque world and <see cref="DrawSky"/> (the sky
+    /// only fills pixels with no depth, so it would paint over them).
     /// </summary>
     public void DrawTransparentChunkMesh(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk)
         => DrawChunk(mesh, model, grid, chunk, _chunkTransparentPipeline);
@@ -1622,5 +1655,6 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         if (_chunkWireframePipeline != null) _api.RenderPipelineRelease(_chunkWireframePipeline);
         if (_chunkOverdrawPipeline != null) _api.RenderPipelineRelease(_chunkOverdrawPipeline);
         if (_chunkTransparentPipeline != null) _api.RenderPipelineRelease(_chunkTransparentPipeline);
+        if (_chunkTransparentDepthPipeline != null) _api.RenderPipelineRelease(_chunkTransparentDepthPipeline);
     }
 }
