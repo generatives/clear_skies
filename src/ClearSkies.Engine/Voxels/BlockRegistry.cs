@@ -50,12 +50,14 @@ public static class BlockRegistry
         Register(new BlockDef { Id = BlockId.Buoyant, Name = "Buoyant", Color = new(0.55f, 0.85f, 1.00f), IsSolid = true, LightEmission = 0, Opacity = 15, Weight = 1,
             Components = e => e.Set(new Buoyant()) });
 
-        // Floating-island world-gen biome blocks. Water is opaque (no alpha-blend render pipeline
-        // exists yet) — it renders, collides, and blocks movement like ordinary solid ground.
+        // Floating-island world-gen biome blocks.
         Register(new BlockDef { Id = BlockId.Sand,  Name = "Sand",  Color = new(0.66f, 0.50f, 0.32f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Opacity = 15, Weight = 2,
             Texture = "dirt_sand", TextureTop = "sand", TextureBottom = "dirt" });
-        Register(new BlockDef { Id = BlockId.Water, Name = "Water", Color = new(0.20f, 0.45f, 0.85f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Opacity = 15, Weight = 3,
-            Texture = "water" });
+        // Water is Transparent (drawn alpha-blended, its opaque texture faded by Alpha) and lets light through. It's
+        // Passable: raycasts still hit it (so it can be targeted, placed against and scooped up), but bodies sink
+        // through it instead of standing on it.
+        Register(new BlockDef { Id = BlockId.Water, Name = "Water", Color = new(0.20f, 0.45f, 0.85f), IsSolid = true, PlaceOriented = false, Passable = true, LightEmission = 0, Opacity = 0, Weight = 1,
+            Texture = "water", Transparent = true, Alpha = 0.6f });
         // Plain "snow" on every face: a thick snowpack should read as snow all the way round, not a
         // rock/snow blend on the sides (that blend texture is reserved for a thin single-layer cap —
         // the world generator gives Snow multiple layers of depth, so this is the common case).
@@ -63,10 +65,14 @@ public static class BlockRegistry
             Texture = "snow" });
         // Mountain-surface bare rock, one shade lighter than the Stone foundation beneath it. ("rock" is
         // a decorative, mostly-transparent overlay sprite meant to be composited over another texture,
-        // not a standalone block face — with no alpha-blend pipeline it shows its dark "empty" fill
-        // instead, so it's not used here.)
+        // not a standalone block face, so it's not used here.)
         Register(new BlockDef { Id = BlockId.Rock,  Name = "Rock",  Color = new(0.52f, 0.52f, 0.55f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Opacity = 15, Weight = 6,
             Texture = "stone" });
+
+        // Glass: a solid, colliding cube that light passes through. Transparent, so it's drawn alpha-blended: its
+        // texture is mostly clear, with a few streaks of glare.
+        Register(new BlockDef { Id = BlockId.Glass, Name = "Glass", Color = new(0.80f, 0.90f, 0.95f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Opacity = 0, Weight = 2,
+            Texture = "glass", Transparent = true });
     }
 
     private static void Register(BlockDef def) => Defs[(byte)def.Id] = def;

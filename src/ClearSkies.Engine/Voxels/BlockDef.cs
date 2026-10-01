@@ -25,6 +25,20 @@ public readonly struct BlockDef
     public Vector3D<float> EffectiveLightColor => LightColor == default ? Vector3D<float>.One : LightColor;
     public byte            Opacity        { get; init; } // 0=transparent, 15=fully opaque (light blocked)
 
+    /// True for a full-cube block you can see through (glass, water). <c>GreedyMesher</c> puts its faces in the chunk's
+    /// separate transparent mesh, drawn alpha-blended after the opaque world (see <c>ChunkRenderSystem</c>), and it never
+    /// hides a neighbour's face, except another block of its own type (so a wall of glass or a pool of water shows only
+    /// its outer surface). How much shows through is its texture's alpha times <see cref="Alpha"/>. Light passing through
+    /// is set separately, by <see cref="Opacity"/>.
+    public bool            Transparent    { get; init; }
+
+    /// Opacity (0-1) a <see cref="Transparent"/> block's faces are drawn with, multiplying its texture's alpha: e.g. water,
+    /// whose texture is fully opaque. 0 (unset) means 1, the texture's alpha alone (glass).
+    public float           Alpha          { get; init; }
+
+    /// <see cref="Alpha"/>, with unset read as 1.
+    public float           EffectiveAlpha => Alpha <= 0f ? 1f : Alpha;
+
     // Density used for dynamic-grid mass (PhysicsBodySystem): a box's mass = its volume * this. Air is 0;
     // every solid block should be > 0 so it contributes to the compound's mass and centre of mass.
     public float            Weight         { get; init; }
@@ -77,6 +91,10 @@ public readonly struct BlockDef
     /// True for blocks drawn as a full cube by <c>GreedyMesher</c>: solid and not a model block. The mesher's
     /// face culling (and the neighbour remeshing that depends on it) keys off this rather than IsSolid.
     public bool IsFullCube => IsSolid && Model == null;
+
+    /// True when this block hides the face of a <paramref name="neighbour"/> block that touches it: an opaque full cube
+    /// hides every face against it, a <see cref="Transparent"/> one only those of its own type.
+    public bool HidesFaceOf(BlockId neighbour) => IsFullCube && (!Transparent || Id == neighbour);
 
     /// Classifies which texture role <paramref name="faceNormal"/> plays for a voxel whose
     /// top points <paramref name="up"/>: Top if the face points that way, Bottom if it points the opposite way,

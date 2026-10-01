@@ -29,6 +29,10 @@ public enum SystemStage
     /// <summary>The sky background, after the world so it only shades the pixels it left uncovered.</summary>
     RenderSky,
 
+    /// <summary>Alpha-blended world geometry (transparent blocks), farthest first, after the sky: it doesn't write depth,
+    /// so the sky would otherwise paint over it.</summary>
+    RenderTransparent,
+
     /// <summary>World-space overlays over the finished scene (e.g. the targeted-face wireframe).</summary>
     RenderOverlay,
 

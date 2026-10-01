@@ -256,6 +256,7 @@ struct VSOut {
     @location(3)       localNormal: vec3<f32>,
     @location(4)       uv:          vec3<f32>,
     @location(5)       worldPos:    vec3<f32>,
+    @location(6)       alpha:       f32,          // chunk meshes: a transparent block's opacity (see fs_chunk_transparent)
 };
 
 @vertex
@@ -278,8 +279,8 @@ fn vs_main(
 }
 
 // A chunk mesh vertex, packed (see ChunkVertex): x, y, z in bits 0-17 (6 each), face in 18-20 (+X, -X, +Y, -Y, +Z,
-// -Z), texture layer in 21-28 (255: untextured); colour as RGB8. The texture coordinates follow from position and
-// face, as GreedyMesher.MakeUv makes them: V runs down world Y on the side faces.
+// -Z), texture layer in 21-28 (255: untextured); colour as RGB8, then the opacity (8 bits). The texture coordinates
+// follow from position and face, as GreedyMesher.MakeUv makes them: V runs down world Y on the side faces.
 @vertex
 fn vs_chunk(@location(0) packed: vec2<u32>) -> VSOut {
     let a = packed.x;
@@ -305,6 +306,7 @@ fn vs_chunk(@location(0) packed: vec2<u32>) -> VSOut {
     o.localPos    = position;
     o.localNormal = normal;
     o.uv          = vec3<f32>(uv2, layer);
+    o.alpha       = f32(c >> 24u) / 255.0;
     return o;
 }
 
@@ -629,20 +631,39 @@ fn cornerAoFast(localPos: vec3<f32>, localNormal: vec3<f32>) -> f32 {
     return mix(mix(ao00, ao10, s), mix(ao01, ao11, s), t);
 }
 
+// The block texture at a fragment, or for an untextured block (uv.z < 0, the no-texture sentinel) its vertex colour
+// (alpha 1). Sampled unconditionally (avoids implicit-derivative issues from branching on a per-fragment value).
+// Debug (Renderer panel, for measuring what the render pass spends): lightParams2.y bit 1 = no texture sample.
+fn blockColor(in: VSOut) -> vec4<f32> {
+    let dbg = u32(camera.lightParams2.y);
+    let layer = max(i32(round(in.uv.z)), 0);
+    var tex   = vec4<f32>(0.6, 0.6, 0.6, 1.0);
+    if ((dbg & 1u) == 0u) { tex = textureSample(atlasTex, atlasSamp, fract(in.uv.xy), layer); }
+    return select(vec4<f32>(lin(in.color), 1.0), tex, in.uv.z >= 0.0);
+}
+
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
-    // Sample unconditionally (avoids implicit-derivative issues from branching on a per-fragment value) and
-    // select against the vertex color for untextured blocks (uv.z < 0, the no-texture sentinel).
-    // Debug (Renderer panel, for measuring what the render pass spends): lightParams2.y bit 1 = no texture sample,
-    // bit 2 = no fog or haze; lightParams2.z = lighting mode (see below).
+    return vec4<f32>(shadeBlock(in, blockColor(in).rgb), 1.0);
+}
+
+// Transparent blocks' faces (see BlockDef.Transparent), alpha-blended over the opaque world: lit like fs_main, with
+// the texture's alpha times the block's opacity. Fully clear texels are cut out.
+@fragment
+fn fs_chunk_transparent(in: VSOut) -> @location(0) vec4<f32> {
+    let c = blockColor(in);
+    let alpha = c.a * in.alpha;
+    if (alpha < 0.004) { discard; }
+    return vec4<f32>(shadeBlock(in, c.rgb), alpha);
+}
+
+// A block face's lit, fogged colour (baseColor: its texture or colour). Debug (Renderer panel): lightParams2.y bit 2 =
+// no fog or haze; lightParams2.z = lighting mode (see below).
+fn shadeBlock(in: VSOut, baseColor: vec3<f32>) -> vec3<f32> {
     let dbg = u32(camera.lightParams2.y);
-    let layer     = max(i32(round(in.uv.z)), 0);
-    var texColor  = vec3<f32>(0.6);
-    if ((dbg & 1u) == 0u) { texColor = textureSample(atlasTex, atlasSamp, fract(in.uv.xy), layer).rgb; }
-    let baseColor = select(lin(in.color), texColor, in.uv.z >= 0.0);
 
     // Non-chunk draws (selection highlight, HUD, debug meshes) have no light data: full-bright.
-    if (model.grid < 0) { return vec4<f32>(baseColor, 1.0); }
+    if (model.grid < 0) { return baseColor; }
 
     let worldN = normalize(in.worldNormal);
     let ndotl  = max(dot(worldN, -(camera.sunDir.xyz)), 0.0);
@@ -683,8 +704,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let aoFactor = mix(AO_MIN, 1.0, ao);
 
     let shaded = baseColor * lit * aoFactor * camera.lightParams2.x;
-    if ((dbg & 2u) != 0u) { return vec4<f32>(shaded, 1.0); }
-    return vec4<f32>(applyFog(shaded, in.worldPos), 1.0);
+    if ((dbg & 2u) != 0u) { return shaded; }
+    return applyFog(shaded, in.worldPos);
 }
 
 // Debug overdraw view: every terrain fragment that passes the depth test (in the normal nearest-first draw order)
@@ -787,6 +808,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     private RenderPipeline* _chunkPipeline;          // vs_chunk: chunk meshes (ChunkVertex)
     private RenderPipeline* _chunkWireframePipeline;
     private RenderPipeline* _chunkOverdrawPipeline;  // debug overdraw view
+    private RenderPipeline* _chunkTransparentPipeline; // transparent blocks' faces, alpha-blended (fs_chunk_transparent)
 
     /// <summary>Debug: draw terrain additively without depth test, so brightness shows how many surfaces cover each
     /// pixel (sky and clouds are skipped).</summary>
@@ -865,6 +887,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         _chunkPipeline          = CreateChunkPipeline(PrimitiveTopology.TriangleList, CullMode.Back);
         _chunkWireframePipeline = CreateChunkPipeline(PrimitiveTopology.LineList,     CullMode.None);
         _chunkOverdrawPipeline  = CreateOverdrawPipeline();
+        _chunkTransparentPipeline = CreateTransparentChunkPipeline();
         // The background pass: a full-screen triangle at the far plane that only fills pixels still at the cleared
         // depth (reversed: the far plane and the clear value are both 0), without writing depth.
         _skyPipeline       = CreatePipeline("vs_sky", "fs_sky", null, PrimitiveTopology.TriangleList, CullMode.None,
@@ -979,6 +1002,20 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         var attr     = new VertexAttribute { Format = VertexFormat.Uint32x2, Offset = 0, ShaderLocation = 0 };
         var vbLayout = new VertexBufferLayout { ArrayStride = ChunkVertex.SizeBytes, StepMode = VertexStepMode.Vertex, AttributeCount = 1, Attributes = &attr };
         return CreatePipeline("vs_chunk", "fs_main", &vbLayout, topology, cullMode, depthWrite: true, CompareFunction.Greater);
+    }
+
+    /// <summary>Transparent blocks' faces (vs_chunk, fs_chunk_transparent): alpha-blended over what's drawn, depth-tested
+    /// but not depth-writing, so faces behind them still show; drawn back to front after the sky (see
+    /// <see cref="DrawTransparentChunkMesh"/>). Both sides drawn, so a water surface is seen from under it too.</summary>
+    private RenderPipeline* CreateTransparentChunkPipeline()
+    {
+        var attr     = new VertexAttribute { Format = VertexFormat.Uint32x2, Offset = 0, ShaderLocation = 0 };
+        var vbLayout = new VertexBufferLayout { ArrayStride = ChunkVertex.SizeBytes, StepMode = VertexStepMode.Vertex, AttributeCount = 1, Attributes = &attr };
+        var color = new BlendComponent { Operation = BlendOperation.Add, SrcFactor = BlendFactor.SrcAlpha, DstFactor = BlendFactor.OneMinusSrcAlpha };
+        var alpha = new BlendComponent { Operation = BlendOperation.Add, SrcFactor = BlendFactor.One, DstFactor = BlendFactor.OneMinusSrcAlpha };
+        var blend = new BlendState { Color = color, Alpha = alpha };
+        return CreatePipeline("vs_chunk", "fs_chunk_transparent", &vbLayout, PrimitiveTopology.TriangleList, CullMode.None,
+                              depthWrite: false, CompareFunction.Greater, &blend);
     }
 
     /// <summary>Debug overdraw view (fs_overdraw): terrain drawn additively, depth-tested in the normal draw order, so
@@ -1460,13 +1497,24 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     /// full-bright). <paramref name="chunk"/> is the chunk's coordinate in that grid.
     /// </summary>
     public void DrawChunkMesh(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk)
+        => DrawChunk(mesh, model, grid, chunk, _chunkPipeline);
+
+    /// <summary>
+    /// Draws a chunk's transparent mesh (<see cref="ChunkRenderData.TransparentMesh"/>) alpha-blended over everything
+    /// drawn so far, without writing depth. Call after the opaque world and <see cref="DrawSky"/> (the sky only fills
+    /// pixels with no depth, so it would paint over them), farthest chunk first.
+    /// </summary>
+    public void DrawTransparentChunkMesh(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk)
+        => DrawChunk(mesh, model, grid, chunk, _chunkTransparentPipeline);
+
+    private void DrawChunk(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk, RenderPipeline* solidPipeline)
     {
         if (_drawIndex >= MaxObjects) return;
 
         // Chunk meshes are packed (ChunkVertex): their own pipeline, set once for a run of chunk draws.
         // A mesh built while wireframe mode was off has no wireframe (see ChunkMeshSystem): solid until it's remeshed.
         bool wire = WireframeMode && mesh.WireframeIndexCount > 0;
-        var pipeline = OverdrawMode ? _chunkOverdrawPipeline : wire ? _chunkWireframePipeline : _chunkPipeline;
+        var pipeline = OverdrawMode ? _chunkOverdrawPipeline : wire ? _chunkWireframePipeline : solidPipeline;
         if (_boundPipeline != pipeline) SetPipeline(pipeline);
 
         uint dynOffset = StageModel(new ModelUniform { Model = model, ChunkX = chunk.X, ChunkY = chunk.Y, ChunkZ = chunk.Z, Grid = grid });
@@ -1551,5 +1599,6 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         if (_chunkPipeline      != null) _api.RenderPipelineRelease(_chunkPipeline);
         if (_chunkWireframePipeline != null) _api.RenderPipelineRelease(_chunkWireframePipeline);
         if (_chunkOverdrawPipeline != null) _api.RenderPipelineRelease(_chunkOverdrawPipeline);
+        if (_chunkTransparentPipeline != null) _api.RenderPipelineRelease(_chunkTransparentPipeline);
     }
 }

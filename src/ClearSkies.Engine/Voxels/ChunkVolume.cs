@@ -50,7 +50,10 @@ public class ChunkVolume
     /// chunk borders are always drawn (hidden where the neighbour is solid), so a chunk's mesh never changes when a
     /// neighbour loads, unloads or is edited. Set for the streamed world, where remeshing each chunk as its
     /// neighbouring columns arrived cost about as many meshes again as the chunks themselves, for about 13% more
-    /// vertices. Ships keep culling against their neighbours: they're small and never stream.</summary>
+    /// vertices. Ships keep culling against their neighbours: they're small and never stream. The one exception is
+    /// a <see cref="BlockDef.Transparent"/> face, hidden against the same block across the border (or water would show
+    /// a sheet at every chunk border in it), so chunks with transparent blocks on a border do remesh with that neighbour
+    /// (see <see cref="MarkBorder"/>).</summary>
     public bool MeshIgnoresNeighbours { get; set; }
 
     /// <summary>Current axis-aligned bounding box of loaded chunks (inclusive).</summary>
@@ -140,6 +143,7 @@ public class ChunkVolume
         if (cp.Y < EditableLayers.Min || cp.Y > EditableLayers.Max) return;
         var entry = EnsureChunk(cp);
 
+        bool transparent = BlockRegistry.Get(id).Transparent || BlockRegistry.Get(entry.Data.Get(lx, ly, lz)).Transparent;
         entry.Data.Set(lx, ly, lz, id, orientation);
         SyncBlockEntity(entry, new Vector3D<int>(lx, ly, lz), id, orientation);
         entry.Entity.Set(new NeedsRemeshFlag());
@@ -149,12 +153,12 @@ public class ChunkVolume
         entry.AddEdit(lx, ly, lz, placedSolid: BlockRegistry.Get(id).Opacity >= 15);
 
         // Adjacent-chunk face-cull invalidation.
-        if (lx == 0)                  TryMark(cp.Offset(-1,  0,  0));
-        if (lx == ChunkData.Size - 1) TryMark(cp.Offset( 1,  0,  0));
-        if (ly == 0)                  TryMark(cp.Offset( 0, -1,  0));
-        if (ly == ChunkData.Size - 1) TryMark(cp.Offset( 0,  1,  0));
-        if (lz == 0)                  TryMark(cp.Offset( 0,  0, -1));
-        if (lz == ChunkData.Size - 1) TryMark(cp.Offset( 0,  0,  1));
+        if (lx == 0)                  MarkBorder(cp.Offset(-1,  0,  0), transparent);
+        if (lx == ChunkData.Size - 1) MarkBorder(cp.Offset( 1,  0,  0), transparent);
+        if (ly == 0)                  MarkBorder(cp.Offset( 0, -1,  0), transparent);
+        if (ly == ChunkData.Size - 1) MarkBorder(cp.Offset( 0,  1,  0), transparent);
+        if (lz == 0)                  MarkBorder(cp.Offset( 0,  0, -1), transparent);
+        if (lz == ChunkData.Size - 1) MarkBorder(cp.Offset( 0,  0,  1), transparent);
     }
 
     /// <summary>The orientation of the block at a cell (<see cref="BlockOrientation.Upright"/> where nothing is loaded).</summary>
@@ -174,6 +178,7 @@ public class ChunkVolume
         var (lo, _, _, _) = Decompose(min.X, min.Y, min.Z);
         var (hi, _, _, _) = Decompose(max.X, max.Y, max.Z);
         bool placedSolid = BlockRegistry.Get(id).Opacity >= 15;
+        bool placedTransparent = BlockRegistry.Get(id).Transparent;
         for (int cz = lo.Z; cz <= hi.Z; cz++)
         for (int cy = lo.Y; cy <= hi.Y; cy++)
         for (int cx = lo.X; cx <= hi.X; cx++)
@@ -186,12 +191,14 @@ public class ChunkVolume
             int x0 = System.Math.Max(min.X - cx * S, 0), x1 = System.Math.Min(max.X - cx * S, S - 1);
             int y0 = System.Math.Max(min.Y - cy * S, 0), y1 = System.Math.Min(max.Y - cy * S, S - 1);
             int z0 = System.Math.Max(min.Z - cz * S, 0), z1 = System.Math.Min(max.Z - cz * S, S - 1);
-            bool changed = false;
+            bool changed = false, transparent = placedTransparent;
             for (int lz = z0; lz <= z1; lz++)
             for (int ly = y0; ly <= y1; ly++)
             for (int lx = x0; lx <= x1; lx++)
             {
-                if (entry.Data.Get(lx, ly, lz) == id && entry.Data.GetOrientation(lx, ly, lz) == orientation) continue;
+                var old = entry.Data.Get(lx, ly, lz);
+                if (old == id && entry.Data.GetOrientation(lx, ly, lz) == orientation) continue;
+                transparent |= BlockRegistry.Get(old).Transparent;
                 entry.Data.Set(lx, ly, lz, id, orientation);
                 SyncBlockEntity(entry, new Vector3D<int>(lx, ly, lz), id, orientation);
                 entry.AddEdit(lx, ly, lz, placedSolid);
@@ -203,12 +210,12 @@ public class ChunkVolume
             entry.Entity.Set(new NeedsRecollideFlag());
             entry.Entity.Set(new NeedsGpuUploadFlag());
             entry.PackedOpacityWords = null;
-            if (x0 == 0)     TryMark(cp.Offset(-1,  0,  0));
-            if (x1 == S - 1) TryMark(cp.Offset( 1,  0,  0));
-            if (y0 == 0)     TryMark(cp.Offset( 0, -1,  0));
-            if (y1 == S - 1) TryMark(cp.Offset( 0,  1,  0));
-            if (z0 == 0)     TryMark(cp.Offset( 0,  0, -1));
-            if (z1 == S - 1) TryMark(cp.Offset( 0,  0,  1));
+            if (x0 == 0)     MarkBorder(cp.Offset(-1,  0,  0), transparent);
+            if (x1 == S - 1) MarkBorder(cp.Offset( 1,  0,  0), transparent);
+            if (y0 == 0)     MarkBorder(cp.Offset( 0, -1,  0), transparent);
+            if (y1 == S - 1) MarkBorder(cp.Offset( 0,  1,  0), transparent);
+            if (z0 == 0)     MarkBorder(cp.Offset( 0,  0, -1), transparent);
+            if (z1 == S - 1) MarkBorder(cp.Offset( 0,  0,  1), transparent);
         }
     }
 
@@ -382,7 +389,17 @@ public class ChunkVolume
     /// times over during load-in.</summary>
     protected void MarkNeighboursDirty(ChunkPosition pos, ChunkData data)
     {
-        if (MeshIgnoresNeighbours) return; // spare the face scans too
+        if (MeshIgnoresNeighbours)
+        {
+            // Only transparent faces are culled across borders here, and only against their own block, which the
+            // neighbour's face can only have if this one has a transparent block there too.
+            for (int f = 0; f < 6; f++)
+            {
+                var (dx, dy, dz) = NeighbourOffsets[f];
+                if (FaceHasTransparent(data, f)) Mark(pos.Offset(dx, dy, dz));
+            }
+            return;
+        }
         if (FaceHasSolid(data, 0)) TryMark(pos.Offset(-1,  0,  0));
         if (FaceHasSolid(data, 1)) TryMark(pos.Offset( 1,  0,  0));
         if (FaceHasSolid(data, 2)) TryMark(pos.Offset( 0, -1,  0));
@@ -391,9 +408,19 @@ public class ChunkVolume
         if (FaceHasSolid(data, 5)) TryMark(pos.Offset( 0,  0,  1));
     }
 
+    // The neighbour on each side, in FaceHasSolid's order.
+    private static readonly (int X, int Y, int Z)[] NeighbourOffsets =
+        { (-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1) };
+
     /// <summary>True if the chunk's boundary layer on side <paramref name="face"/> (0=-X, 1=+X, 2=-Y, 3=+Y, 4=-Z,
     /// 5=+Z) contains any solid block, in the mesher's sense (<see cref="BlockDef.IsFullCube"/>).</summary>
-    public static bool FaceHasSolid(ChunkData data, int face)
+    public static bool FaceHasSolid(ChunkData data, int face) => FaceHasAny(data, face, transparentOnly: false);
+
+    /// <summary>True if the chunk's boundary layer on side <paramref name="face"/> (as <see cref="FaceHasSolid"/>)
+    /// contains any <see cref="BlockDef.Transparent"/> block.</summary>
+    public static bool FaceHasTransparent(ChunkData data, int face) => FaceHasAny(data, face, transparentOnly: true);
+
+    private static bool FaceHasAny(ChunkData data, int face, bool transparentOnly)
     {
         int s = ChunkData.Size, layer = (face & 1) == 0 ? 0 : s - 1;
         for (int a = 0; a < s; a++)
@@ -405,7 +432,8 @@ public class ChunkVolume
                 1 => data.Get(a, layer, b),
                 _ => data.Get(a, b, layer),
             };
-            if (BlockRegistry.Get(id).IsFullCube) return true;
+            ref readonly var def = ref BlockRegistry.Get(id);
+            if (def.IsFullCube && (!transparentOnly || def.Transparent)) return true;
         }
         return false;
     }
@@ -413,6 +441,20 @@ public class ChunkVolume
     protected void TryMark(ChunkPosition pos)
     {
         if (MeshIgnoresNeighbours) return; // no chunk's mesh depends on its neighbours
+        Mark(pos);
+    }
+
+    /// <summary>Remeshes the neighbour at <paramref name="pos"/> after an edit on the border it shares: always where
+    /// chunks cull against their neighbours, and where they don't (<see cref="MeshIgnoresNeighbours"/>) only if a
+    /// <see cref="BlockDef.Transparent"/> block was placed or removed there.</summary>
+    private void MarkBorder(ChunkPosition pos, bool transparent)
+    {
+        if (MeshIgnoresNeighbours && !transparent) return;
+        Mark(pos);
+    }
+
+    private void Mark(ChunkPosition pos)
+    {
         if (_chunks.TryGetValue(pos, out var e)) {
             e.Entity.Set(new NeedsRemeshFlag());
         }
