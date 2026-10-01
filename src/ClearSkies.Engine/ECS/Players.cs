@@ -14,17 +14,17 @@ public static class Players
     public static void SetFreeFlying(Entity player, bool flying)
     {
         if (flying == player.Has<FreeFlying>()) return;
-        ref var cc = ref player.Get<CharacterControllerComponent>();
         if (flying)
         {
             player.Set<FreeFlying>();
-            cc.Character.Suspend();
+            if (player.Has<CharacterControllerComponent>()) player.Get<CharacterControllerComponent>().Character.Suspend();
             if (player.Has<Support>()) player.Set(new Support()); // nothing supports a flying player
         }
         else
         {
             player.Remove<FreeFlying>();
-            cc.Character.Resume(ToPhys(player.Get<Transform>().Position));
+            if (player.Has<CharacterControllerComponent>()) // (another machine's player has none here)
+                player.Get<CharacterControllerComponent>().Character.Resume(ToPhys(player.Get<Transform>().Position));
         }
     }
 

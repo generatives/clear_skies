@@ -38,9 +38,9 @@ public sealed class StoredEntityIndex
 /// past <see cref="UnloadWindow"/>, so one near the edge doesn't flicker. A stored entity with no position (a global
 /// entity) is always loaded.
 ///
-/// Loading sends the entity's stored spawn command (its owner is the host). Unloading has it described for storage;
-/// <see cref="WorldSaver"/> writes it at the end of that same tick (it doesn't wait for an autosave), and then it's
-/// despawned.
+/// Loading spawns the entity from its stored description, owned by its kind's default (the host). Unloading saves it
+/// (<see cref="WorldSaver.Save"/>), then despawns it; this runs before the command system, so it's gone by the end of
+/// the tick.
 /// </summary>
 public sealed class EntityStreamingSystem : ISystem, IDebugUiSystem
 {
@@ -52,11 +52,11 @@ public sealed class EntityStreamingSystem : ISystem, IDebugUiSystem
     private readonly StoredEntityIndex _index;
     private readonly EntityRegistry _registry;
     private readonly CommandSystem _commands;
+    private readonly WorldSaver _saver;
     private readonly EntitySet _players;
     private readonly EntitySet _streamed;
     private readonly List<Vector3> _playerPositions = new();
-    private readonly HashSet<EntityId> _unloading = new();   // described for storage, not written yet
-    private readonly HashSet<EntityId> _despawning = new();  // written, despawn sent
+    private readonly List<Entity> _leaving = new();
     private int _loads, _unloads;
 
     public EntityStreamingSystem(World world, SaveDatabase db, StoredEntityIndex index, EntityRegistry registry,
@@ -66,13 +66,11 @@ public sealed class EntityStreamingSystem : ISystem, IDebugUiSystem
         _index = index;
         _registry = registry;
         _commands = commands;
+        _saver = saver;
         _players = world.GetEntities().With<Player>().With<Transform>().AsSet();
         // What streams: networked entities that position themselves and aren't players (grids today).
         _streamed = world.GetEntities().With<EntityId>().With<OwnPresence>().With<Transform>().Without<Player>().Without<Chunk>().AsSet();
-        saver.Stored += OnStored;
     }
-
-    public int Unloading => _unloading.Count;
 
     public void Update(float dt)
     {
@@ -84,10 +82,6 @@ public sealed class EntityStreamingSystem : ISystem, IDebugUiSystem
         }
         if (_playerPositions.Count == 0) return; // nobody to load around (yet)
 
-        // Entities that went away (despawned, or disposed some other way) are done with.
-        _despawning.RemoveWhere(id => !_registry.IsLive(id));
-        _unloading.RemoveWhere(id => !_registry.IsLive(id));
-
         // Load what came into a window.
         int loads = 0;
         foreach (var entry in _index.Entries)
@@ -97,21 +91,20 @@ public sealed class EntityStreamingSystem : ISystem, IDebugUiSystem
             if (entry.Position is { } pos && NearestPlayer(pos) > LoadWindow) continue;
             // The index and the entities table change together (WorldSaver writes and forgets both), so the row is there.
             var row = _db.ReadEntity(entry.Id) ?? throw new InvalidOperationException($"Stored entity {entry.Id} has no row in the save.");
-            _commands.SendSerialized(row.Kind, row.Data);
+            _commands.Spawn(row.Kind, entry.Id, row.Data);
             loads++;
             _loads++;
         }
 
         // Unload what left every window: until dynamic ownership every loaded entity is the host's already; with it, the
         // host takes ownership here.
+        _leaving.Clear();
         foreach (ref readonly var e in _streamed.GetEntities())
-        {
-            var id = e.Get<EntityId>();
-            if (_unloading.Contains(id) || _despawning.Contains(id)) continue;
-            if (NearestPlayer(Where(e)) <= UnloadWindow) continue;
-            _unloading.Add(id);
-            DescribeRequest.Request(e, DescribePurpose.Store);
-        }
+            if (!IsGlobal(_index, e.Get<EntityId>()) && NearestPlayer(Where(e)) > UnloadWindow) _leaving.Add(e);
+        if (_leaving.Count == 0) return;
+        _saver.Save(_leaving);
+        foreach (var e in _leaving) _commands.Send(new DespawnEntity { Entity = e.Get<EntityId>(), KeepStored = true });
+        _unloads += _leaving.Count;
     }
 
     /// <summary>Where an entity is, for the windows: its body if it has one (a grid's centre of mass, which may be well
@@ -122,6 +115,9 @@ public sealed class EntityStreamingSystem : ISystem, IDebugUiSystem
         return e.Has<PhysicsBodyComponent>() ? e.Get<PhysicsBodyComponent>().BodyPosition(t) : new Vector3(t.Position.X, t.Position.Y, t.Position.Z);
     }
 
+    /// <summary>Stored with no position: always loaded, so never unloaded either, and it stays global when saved.</summary>
+    internal static bool IsGlobal(StoredEntityIndex index, EntityId id) => index.TryGet(id, out var entry) && entry.Position is null;
+
     private float NearestPlayer(Vector3 pos)
     {
         float best = float.MaxValue;
@@ -129,29 +125,20 @@ public sealed class EntityStreamingSystem : ISystem, IDebugUiSystem
         return best;
     }
 
-    /// <summary>An entity being unloaded has been written: now it goes.</summary>
-    private void OnStored(EntityId id)
-    {
-        if (!_unloading.Remove(id)) return;
-        if (!_registry.IsLive(id)) return;
-        _despawning.Add(id);
-        _commands.Send(new DespawnEntity { Entity = id, KeepStored = true });
-        _unloads++;
-    }
-
     public string DebugName => "Entity streaming";
 
     public void DrawDebugUi()
     {
-        ImGui.Text($"Stored entities: {_index.Count}   Live: {_streamed.Count}   Unloading: {_unloading.Count}");
+        ImGui.Text($"Stored entities: {_index.Count}   Live: {_streamed.Count}");
         ImGui.Text($"Loaded {_loads}, unloaded {_unloads} this session (load within {LoadWindow:0}, unload past {UnloadWindow:0})");
     }
 }
 
 /// <summary>
-/// Writes descriptions to the save: every entity described for <see cref="DescribePurpose.Store"/> this tick goes into
-/// the entities table (players into the players table), all in one transaction together with the world's settings
-/// and, for an autosave, every edited terrain chunk. Autosaves every <see cref="AutosaveSeconds"/> and on exit.
+/// Writes entities to the save: each one's description (see <see cref="CommandSystem.Describe(IEnumerable{Entity})"/>)
+/// goes into the entities table (players into the players table), all in one transaction. Autosaves every
+/// <see cref="AutosaveSeconds"/>, and on exit: every live entity and player, with the world's settings and every
+/// edited terrain chunk.
 /// </summary>
 public sealed class WorldSaver : ISystem, IDebugUiSystem
 {
@@ -162,8 +149,6 @@ public sealed class WorldSaver : ISystem, IDebugUiSystem
     private readonly CommandSystem _commands;
     private readonly EntityIdAllocator _ids;
     private readonly EntitySet _saveable;
-    private readonly List<Description> _pending = new();
-    private bool _autosaving;
     private float _sinceSave;
     private DateTime _lastSave;
 
@@ -174,8 +159,6 @@ public sealed class WorldSaver : ISystem, IDebugUiSystem
         _commands = commands;
         _ids = ids;
         _saveable = world.GetEntities().With<EntityId>().With<OwnPresence>().Without<Chunk>().AsSet();
-        commands.Descriptions.Described += OnDescribed;
-        commands.DescribedAll += Commit;
         commands.Applied += (handler, _, evt) =>
         {
             // Despawned for good (deleted, broken up) rather than unloaded: it leaves the save too.
@@ -183,71 +166,54 @@ public sealed class WorldSaver : ISystem, IDebugUiSystem
         };
     }
 
-    /// <summary>Called during an autosave's transaction, to write edited terrain chunks.</summary>
+    /// <summary>Called during a full save's transaction, to write edited terrain chunks.</summary>
     public Action? SaveChunks { get; set; }
-
-    /// <summary>An entity's description was written to the save (its entity ID).</summary>
-    public event Action<EntityId>? Stored;
 
     public void Update(float dt)
     {
         _sinceSave += dt;
-        if (_sinceSave >= AutosaveSeconds) RequestAutosave();
+        if (_sinceSave >= AutosaveSeconds) SaveAll();
     }
 
-    /// <summary>Has every live entity and player described for storage this tick, and saves them with the chunks.</summary>
-    public void RequestAutosave()
+    /// <summary>Saves <paramref name="entities"/> as they are now (unloading, a player leaving), in one transaction.</summary>
+    public void Save(IEnumerable<Entity> entities)
+    {
+        var described = _commands.Describe(entities);
+        _db.InTransaction(() => Write(described));
+    }
+
+    /// <summary>Saves every live entity and player, and the edited terrain, in one transaction (autosave, exit).</summary>
+    public void SaveAll()
     {
         _sinceSave = 0;
-        _autosaving = true;
-        foreach (ref readonly var e in _saveable.GetEntities())
-            DescribeRequest.Request(e, DescribePurpose.Store);
-    }
-
-    /// <summary>Saves everything now (on exit): outside the tick, so it describes and writes straight away.</summary>
-    public void SaveNow()
-    {
-        RequestAutosave();
-        _commands.DescribeRequested();
-    }
-
-    private void OnDescribed(Description d)
-    {
-        if ((d.Request.Purpose & DescribePurpose.Store) != 0) _pending.Add(d);
-    }
-
-    private void Commit()
-    {
-        if (_pending.Count == 0 && !_autosaving) return;
-        var written = new List<EntityId>();
+        var described = _commands.Describe(_saveable.GetEntities().ToArray());
         _db.InTransaction(() =>
         {
-            foreach (var d in _pending)
-            {
-                if (d.Entity.IsAlive && d.Entity.Has<Player>())
-                {
-                    ref readonly var p = ref d.Entity.Get<Player>();
-                    _db.WritePlayer(p.Id, p.Name, d.Payload);
-                }
-                else
-                {
-                    Vector3? pos = d.Entity.IsAlive && d.Entity.Has<Transform>() ? EntityStreamingSystem.Where(d.Entity) : null;
-                    _db.WriteEntity(d.Id, d.HandlerId, pos, d.Payload);
-                    _index.Set(new StoredEntity(d.Id, d.HandlerId, pos));
-                }
-                written.Add(d.Id);
-            }
-            if (_autosaving) SaveChunks?.Invoke();
-            _db.NextFreeId = _ids.NextFree;
+            Write(described);
+            SaveChunks?.Invoke();
         });
-        if (_autosaving)
+        _lastSave = DateTime.Now;
+        Console.WriteLine($"[save] saved {described.Count} entities and players");
+    }
+
+    private void Write(List<EntityDescription> described)
+    {
+        foreach (var d in described)
         {
-            _lastSave = DateTime.Now;
-            Console.WriteLine($"[save] saved {written.Count} entities and players");
+            if (d.Entity.Has<Player>())
+            {
+                ref readonly var p = ref d.Entity.Get<Player>();
+                _db.WritePlayer(p.Id, p.Name, d.Data);
+            }
+            else
+            {
+                Vector3? pos = d.Entity.Has<Transform>() && !EntityStreamingSystem.IsGlobal(_index, d.Id)
+                    ? EntityStreamingSystem.Where(d.Entity) : null;
+                _db.WriteEntity(d.Id, d.Kind, pos, d.Data);
+                _index.Set(new StoredEntity(d.Id, d.Kind, pos));
+            }
         }
-        _pending.Clear();
-        _autosaving = false;
-        foreach (var id in written) Stored?.Invoke(id);
+        _db.NextFreeId = _ids.NextFree;
     }
 
     /// <summary>A despawned entity that was never meant to come back (deleted, or its grid broken up) leaves the save.</summary>
@@ -263,6 +229,6 @@ public sealed class WorldSaver : ISystem, IDebugUiSystem
     {
         ImGui.Text(_lastSave == default ? "Not saved yet this session" : $"Last saved at {_lastSave:T}");
         ImGui.Text($"Autosave in {System.Math.Max(0, AutosaveSeconds - _sinceSave):0} s");
-        if (ImGui.Button("Save now")) RequestAutosave();
+        if (ImGui.Button("Save now")) SaveAll();
     }
 }

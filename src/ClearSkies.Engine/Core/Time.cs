@@ -1,7 +1,7 @@
 namespace ClearSkies.Engine.Core;
 
 /// <summary>Frame and tick timing. Frames have a variable duration (<see cref="DeltaSeconds"/>); gameplay and physics
-/// run in fixed ticks of <see cref="TickSeconds"/> (see <see cref="TickClock"/>), numbered by <see cref="Tick"/>.</summary>
+/// run in fixed ticks of <see cref="TickSeconds"/> (see <see cref="TickClock"/>), numbered by <see cref="TickClock.Tick"/>.</summary>
 public sealed class Time
 {
     private double _fpsAccum;
@@ -15,9 +15,6 @@ public sealed class Time
 
     /// <summary>The same as <see cref="TickSeconds"/>; the physics step is one tick.</summary>
     public float FixedStep => TickSeconds;
-
-    /// <summary>The number of the tick running now, or of the last one run. Ticks count up from 1.</summary>
-    public uint Tick { get; internal set; }
 
     /// <summary>How far the frame being drawn is between the last two ticks (0 = the previous tick, 1 = the latest):
     /// interpolated drawing (see <see cref="ECS.TickInterpolationSystem"/>) places things this far along.</summary>

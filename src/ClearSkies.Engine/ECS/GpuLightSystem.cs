@@ -42,8 +42,15 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     // has a fixed set of rays x cycle directions, one slice of rays per evaluation, blended as a running average
     // over the first cycle and then with a weight of one cycle; the hold is how many evaluations a changed area gets
     // (rounded up to whole cycles); scale multiplies the stored bounce when the display is composed.
-    private bool _bounceEnabled = true;
+    // AO only: the same rays measure only ambient occlusion, which depends on the shape of the terrain alone, so only
+    // changed geometry is re-evaluated: shadows sweeping over the ground, lamps and the sun moving cost no rays.
+    private enum BounceMode { Off, AoOnly, Full }
+    private BounceMode _bounceMode = BounceMode.Full;
+    private bool _bounceEnabled => _bounceMode != BounceMode.Off;
+    private bool _aoOnly => _bounceMode == BounceMode.AoOnly;
     private float _bounceAlbedo = 0.5f;
+    // How far bounce and AO rays reach (voxels); everything within that of a change is re-evaluated, in whole bricks.
+    private float _bounceReach = 16f;
     // Within the near radius of the camera, a change runs its whole hold in the frame it happens (each evaluation reads
     // the one before, adding a hop), so it is settled that frame; with the hold at one full cycle that is exactly its
     // full ray set. Farther away, one evaluation per frame averages the set in over the hold's frames.
@@ -66,6 +73,53 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     // relit and bounced whole, on top of these.
     private int _maxRelitPerFrame = 1024;
     private int _maxBouncedPerFrame = 4096;
+
+    /// <summary>A quality level: every setting above that trades lighting quality for GPU time.</summary>
+    private readonly record struct LightingPreset(string Name, BounceMode Mode, int Rays, int Cycle, int Hold, float Reach,
+                                                  float NearRadius, float FullRadius, float MidRadius, int MidEvals,
+                                                  int FarEvals, int MaxRelit, int MaxBounced);
+
+    // High is the defaults above. Below it: fewer and shorter rays, changes near the camera spread over a few frames
+    // instead of settled in one (each change then costs one evaluation a frame, not its whole hold), smaller full
+    // quality radii and lower per-frame caps; Low keeps only AO, Minimal only direct light.
+    private static readonly LightingPreset[] Presets =
+    {
+        new("Minimal", BounceMode.Off,    4, 4, 4,  8f,  0f,  96f, 256f, 1, 1,  256,  512),
+        new("Low",     BounceMode.AoOnly, 4, 4, 4,  8f,  0f,  96f, 256f, 1, 1,  256, 1024),
+        new("Medium",  BounceMode.Full,   4, 4, 4, 12f, 32f, 128f, 384f, 2, 1,  512, 2048),
+        new("High",    BounceMode.Full,   8, 4, 4, 16f, 64f, 256f, 768f, 2, 1, 1024, 4096),
+    };
+
+    /// <summary>Applies the quality preset of this name (minimal, low, medium or high, any case); false if there is
+    /// none.</summary>
+    public bool ApplyPreset(string name)
+    {
+        foreach (var p in Presets)
+            if (string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase)) { ApplyPreset(p); return true; }
+        return false;
+    }
+
+    private void ApplyPreset(in LightingPreset p)
+    {
+        _bounceMode = p.Mode;
+        _bounceRays = p.Rays;
+        _bounceCycle = p.Cycle;
+        _bounceHoldFrames = p.Hold;
+        _bounceReach = p.Reach;
+        _bounceNearRadius = p.NearRadius;
+        _bounceFullRadius = p.FullRadius;
+        _bounceMidRadius = p.MidRadius;
+        _bounceMidEvals = p.MidEvals;
+        _bounceFarEvals = p.FarEvals;
+        _maxRelitPerFrame = p.MaxRelit;
+        _maxBouncedPerFrame = p.MaxBounced;
+    }
+
+    private bool Matches(in LightingPreset p)
+        => _bounceMode == p.Mode && _bounceRays == p.Rays && _bounceCycle == p.Cycle && _bounceHoldFrames == p.Hold
+           && _bounceReach == p.Reach && _bounceNearRadius == p.NearRadius && _bounceFullRadius == p.FullRadius
+           && _bounceMidRadius == p.MidRadius && _bounceMidEvals == p.MidEvals && _bounceFarEvals == p.FarEvals
+           && _maxRelitPerFrame == p.MaxRelit && _maxBouncedPerFrame == p.MaxBounced;
 
     // CPU-side submission timing only: WebGPU's queue is asynchronous, so a Stopwatch around Dispatch() measures
     // encoding + submission, not GPU execution. Compare against the Renderer panel's FPS for total cost.
@@ -121,13 +175,28 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         ImGui.TextDisabled($"  queued: {_lastRelitWaiting:N0} to relight, {_lastBounceWaiting:N0} to bounce");
 
         ImGui.Separator();
+        ImGui.Text("Quality preset");
+        string current = "Custom";
+        for (int i = 0; i < Presets.Length; i++)
+        {
+            if (i > 0) ImGui.SameLine();
+            if (ImGui.Button(Presets[i].Name)) ApplyPreset(Presets[i]);
+            if (Matches(Presets[i])) current = Presets[i].Name;
+        }
+        ImGui.SameLine();
+        ImGui.TextDisabled($"({current})");
+        ImGui.TextDisabled("  Minimal: direct light only. Low: AO only, short rays. Medium: fewer, shorter bounce rays.");
+
+        ImGui.Separator();
         ImGui.Text("Lighting settings");
         ImGui.SliderFloat("Ambient level", ref _ambientLevel, 0f, 15f, "%.0f");
         ImGui.SliderFloat("Exposure (lit surfaces)", ref RayLightingSettings.Exposure, 0.5f, 3f, "%.2f");
         ImGui.SliderFloat("Ray AO strength", ref _aoStrength, 0f, 1f, "%.2f");
-        ImGui.Checkbox("Bounce light + AO rays", ref _bounceEnabled);
+        int mode = (int)_bounceMode;
+        if (ImGui.Combo("Bounce rays", ref mode, "Off\0AO only\0Bounce light + AO\0")) _bounceMode = (BounceMode)mode;
         ImGui.SliderFloat("Bounce albedo", ref _bounceAlbedo, 0f, 0.9f, "%.2f");
-        ImGui.SliderInt("Bounce rays per evaluation", ref _bounceRays, 1, 64);
+        ImGui.SliderInt("Bounce rays per evaluation", ref _bounceRays, 1, 32);
+        ImGui.SliderFloat("Bounce ray reach (blocks)", ref _bounceReach, 4f, 16f, "%.0f");
         ImGui.SliderInt("Evaluations per full ray set", ref _bounceCycle, 1, 64);
         ImGui.TextDisabled($"  = {_bounceRays * _bounceCycle} fixed directions per voxel");
         ImGui.SliderInt("Bounce evaluations after a change", ref _bounceHoldFrames, 1, 64);
