@@ -27,7 +27,7 @@ struct Params {
     sunDir: vec4<f32>,
     counts: vec4<i32>,  // y: word offset of the lamp records in lists, z: work entries this dispatch
     bounce: vec4<f32>,  // x: albedo (fraction of incoming light a surface re-emits), y: sun strength (0-1),
-                        // z: bounce display scale (0 = bounce off)
+                        // compose: z: bounce display scale (0 = bounce off); bounce: z: 1 = AO only, w: ray reach (voxels)
     bounce2: vec4<f32>, // x: rays per evaluation, y: evaluations per full ray set (cycle); compose: z: ambient
                         // (0-1), w: ray AO strength (0-1)
 };
@@ -597,7 +597,7 @@ fn compose_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) 
 }
 
 // ── Bounce (one-hop indirect light, multi-hop through re-evaluation) ─────────────────────────────────────
-// Each evaluation, a surface air voxel fires p.bounce2.x short rays (up to BOUNCE_MAX), cosine-distributed
+// Each evaluation, a surface air voxel fires p.bounce2.x short rays (up to p.bounce.w voxels), cosine-distributed
 // around its surface normal, through its chunk's grids: one slice of a fixed per-voxel direction set that a full
 // cycle of p.bounce2.y evaluations covers (see bounceVoxel). At each ray's nearest hit it reads the light
 // arriving at the hit face from the air cell in front of it: the brighter of that cell's direct sun
@@ -606,7 +606,7 @@ fn compose_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) 
 // 24-31 of the light word) with weight alpha = max(1/cycle, 1/(n+1)), n being how many times the brick has
 // been evaluated since it changed: a running average over the first cycle (after which the value is exactly
 // the complete set's mean), then an EMA weighing one cycle.
-// The same rays measure ambient occlusion: the fraction that hit nothing within BOUNCE_MAX is the voxel's sky
+// The same rays measure ambient occlusion: the fraction that hit nothing within their reach is the voxel's sky
 // visibility (cosine-weighted, since the rays are), and one minus it is blended into bits 16-23 the same way.
 // The fragment shader scales the flat ambient by it, so caves and sealed rooms go dark while open ground,
 // whose rays all go up, stays fully lit. Rays cross grids, so a ship darkens the ground under it.
@@ -614,6 +614,7 @@ fn compose_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) 
 // each evaluation adds a hop, and the CPU keeps a changed area evaluating for a number of frames. Keep albedo
 // well below 1 or the feedback lingers (a removed light ghosts longer). Ambient is not bounced; it is
 // already uniform.
+// With AO only (p.bounce.z = 1) every evaluation is like a priming one: AO alone, no light read and no bounce stored.
 const BOUNCE_MAX: f32 = 16.0;
 const BOUNCE_MAX_RAYS: i32 = 32;
 
@@ -762,7 +763,7 @@ fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, slice: i32, list: u3
         }
 
         let dw = (v2w * vec4<f32>(dl, 0.0)).xyz;
-        var bestT = BOUNCE_MAX;
+        var bestT = clamp(p.bounce.w, 1.0, BOUNCE_MAX);
         var bestG = -1;
         var best: Hit;
         let gridCount = lists[list];
@@ -813,6 +814,7 @@ fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) n
     // bounceVoxel), which overwrites.
     let cycle = max(u32(p.bounce2.y), 1u);
     let prime = nu == PRIME;
+    let aoOnly = p.bounce.z > 0.5;
     let alpha = select(max(1.0 / f32(cycle), 1.0 / (f32(nu) + 1.0)), 1.0, prime);
     let slice = select(i32(nu % cycle), i32(cycle) - 1, prime);
     let list = listOf(it.g, it.v0);
@@ -831,7 +833,7 @@ fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) n
         let k = wList[i];
         let v = base + vec3<i32>(i32(k & 7u), i32((k >> 3u) & 7u), i32(k >> 6u));
         let a = accBase + i32(k);
-        lightPool[a] = bounceVoxel(it.g, v, lightPool[a], alpha, slice, list, prime);
+        lightPool[a] = bounceVoxel(it.g, v, lightPool[a], alpha, slice, list, prime || aoOnly);
     }
 }
 
@@ -927,14 +929,15 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
     /// One EMA step of bounce light for the listed bricks (see bounce_main). Reads direct light of every grid, so
     /// run it after the sun pass and before composing. <paramref name="work"/> holds <paramref name="count"/> pairs of (light slot,
     /// evaluations since that brick changed). Each voxel's fixed direction set is <paramref name="rays"/> x
-    /// <paramref name="cycle"/> directions, one slice of <paramref name="rays"/> per evaluation.
+    /// <paramref name="cycle"/> directions, one slice of <paramref name="rays"/> per evaluation, each reaching
+    /// <paramref name="reach"/> voxels (at most 16). <paramref name="aoOnly"/>: measure AO alone and store no bounce.
     /// </summary>
     public void DispatchBounce(GridStore store, Vector3D<float> sunDir, float sunStrength,
-                               float albedo, int rays, int cycle, GpuBuffer work, int count)
+                               float albedo, int rays, int cycle, float reach, bool aoOnly, GpuBuffer work, int count)
     {
         if (count <= 0) return;
-        var param = WriteParams(sunDir, count,
-                                new Vector4D<float>(albedo, sunStrength, 0f, 0f), new Vector4D<float>(rays, cycle, 0f, 0f));
+        var param = WriteParams(sunDir, count, new Vector4D<float>(albedo, sunStrength, aoOnly ? 1f : 0f, reach),
+                                new Vector4D<float>(rays, cycle, 0f, 0f));
         Dispatch(_bouncePipeline, BounceBindings, store, work, count, param, "Lighting: bounce");
     }
 
@@ -1020,7 +1023,7 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
     {
         public Vector4D<float> Sun;
         public int Unused, LampBase, WorkCount, Pad;
-        public Vector4D<float> Bounce;    // albedo, sun strength, bounce display scale, unused
+        public Vector4D<float> Bounce;    // albedo, sun strength, bounce display scale (compose) or AO only (bounce), reach
         public Vector4D<float> Bounce2;   // rays per evaluation, cycle
     }
 }
