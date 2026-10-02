@@ -14,6 +14,9 @@ namespace ClearSkies.Net.Session;
 /// in a row (<see cref="SampleCount"/>, four seconds) has found it within that: by then no answer from before the last
 /// snap, or from a hitch while loading, is left to pull the estimate later, so the game starts on the host's timeline
 /// rather than slewing towards it for seconds with players already moving.</para>
+/// <para>A frame too slow to run all its ticks (loading, a hitch) drops the rest, which leaves the clock exactly that
+/// many behind the host's. <see cref="Update"/> puts them straight back (skipping their numbers, not running them), so
+/// it isn't left to the estimate to notice, a few answers at a time, with a snap or two on the way.</para>
 /// </summary>
 public sealed class ClockSync
 {
@@ -31,7 +34,16 @@ public sealed class ClockSync
     private double _lastPing = double.NegativeInfinity;
     private readonly Queue<double> _snapTimes = new();
 
-    public ClockSync(ITickClock clock) => _clock = clock;
+    private long _dropped;
+
+    public ClockSync(ITickClock clock)
+    {
+        _clock = clock;
+        _dropped = clock.DroppedTicks;
+    }
+
+    /// <summary>Ticks put back after slow frames dropped them (see <see cref="Update"/>).</summary>
+    public long SkippedTicks { get; private set; }
 
     /// <summary>The round trip, in milliseconds (lowest-half average).</summary>
     public double RoundTripMs { get; private set; }
@@ -61,6 +73,18 @@ public sealed class ClockSync
         if (nowMs - _lastPing < PingIntervalMs) return false;
         _lastPing = nowMs;
         return true;
+    }
+
+    /// <summary>Each tick: skips any ticks the clock dropped since the last, back onto the host's timeline.
+    /// Every estimate stays good (it was measured before the drop, against where the clock is again), and snapshots'
+    /// lateness too, so nothing is shifted.</summary>
+    public void Update()
+    {
+        long dropped = _clock.DroppedTicks - _dropped;
+        _dropped = _clock.DroppedTicks;
+        if (dropped <= 0) return;
+        _clock.Skip((int)dropped);
+        SkippedTicks += dropped;
     }
 
     private double LocalTick => _clock.Tick + (double)_clock.Alpha;
