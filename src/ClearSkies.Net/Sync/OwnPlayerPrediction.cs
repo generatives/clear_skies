@@ -63,6 +63,7 @@ public sealed class OwnPlayerPrediction : ISystem
     private BodySnapshot? _answer;
     private uint _lastAnswer;
     private int _supportMismatches;
+    private int _modeMismatches;
 
     public OwnPlayerPrediction(ClientSession net, World world, EntityRegistry registry)
     {
@@ -136,7 +137,18 @@ public sealed class OwnPlayerPrediction : ISystem
         ref var predicted = ref _history[answer.Input % HistoryLength];
         if (predicted.Input != answer.Input) return; // too old, or never recorded
         bool flying = (answer.Flags & SnapshotFlags.FreeFlying) != 0;
-        if (predicted.FreeFlying != flying) return; // switching between walking and flying: the command settles it
+        // Walking or flying: each machine switches on the same input (V), so they differ only if that input was lost on
+        // the way; then the host's word goes.
+        if (predicted.FreeFlying != flying)
+        {
+            if (++_modeMismatches >= SupportMismatchAnswers)
+            {
+                _modeMismatches = 0;
+                Players.SetFreeFlying(e, flying);
+            }
+            return;
+        }
+        _modeMismatches = 0;
 
         // How far off, in the space of what they stood on (or the world's), and that in world space now.
         Vector3 error;
