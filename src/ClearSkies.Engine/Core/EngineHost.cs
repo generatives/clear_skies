@@ -117,7 +117,7 @@ public class EngineHost : IDisposable
             Console.WriteLine($"[time] a {dt * 1000:0} ms frame: {Clock.DroppedTicks - dropped} ticks dropped (the clock falls behind)");
         for (int i = 0; i < ticks; i++)
         {
-            Clock.Tick++;
+            Clock.Step();
             RunStage(SystemStage.Simulation, Time.TickSeconds);
         }
         Time.TicksLastFrame = ticks;
