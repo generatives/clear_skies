@@ -64,7 +64,7 @@ public sealed class HostSession : NetSession
         : base(transport, session, commands, registry, world, clock)
     {
         _spawns = new PendingSpawns(world, registry, terrainReady);
-        _inputs = new RemoteInputs(world);
+        _inputs = new RemoteInputs(world, registry);
         _ids = ids;
         _seed = seed;
         _checksum = generationChecksum;
