@@ -151,7 +151,8 @@ public sealed class HostSession : NetSession
             case MessageKind.TimePing:
             {
                 var ping = TimePing.Read(ref r);
-                Send(from, new TimePong(ping.ClientTimeMs, Clock.Tick, Clock.Alpha), Channel.Unreliable);
+                double now = Clock.Now; // not Tick: on a frame running several ticks, that's behind real time
+                Send(from, new TimePong(ping.ClientTimeMs, (uint)now, (float)(now - System.Math.Floor(now))), Channel.Unreliable);
                 break;
             }
             case MessageKind.Command:
@@ -244,7 +245,7 @@ public sealed class HostSession : NetSession
         peer.Spawn = PlayerFactory.WorldPosition(description, Registry);
         _spawns.Add(description, id, local: false, d => SendWorld(peer, d));
         var (first, count) = _ids.NextBlock();
-        Send(peer.Connection, new Welcome(id, first, count, _seed, Clock.Tick, peer.Spawn));
+        Send(peer.Connection, new Welcome(id, first, count, _seed, (uint)Clock.Now, peer.Spawn));
         Console.WriteLine($"[net] {name} joining as {id}");
     }
 

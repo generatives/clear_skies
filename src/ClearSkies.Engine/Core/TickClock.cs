@@ -31,6 +31,13 @@ public sealed class TickClock : ITickClock
     /// way to line a client up with the host.</summary>
     public double Rate { get; set; } = 1.0;
 
+    /// <summary>Where this frame is on the tick timeline: the frame's last tick (whichever of its ticks is running now),
+    /// plus <see cref="Alpha"/>. Clock sync measures and lines up this, not <see cref="Tick"/>: a frame running several
+    /// ticks hears the network on the first of them, when <see cref="Tick"/> still lags real time.</summary>
+    public double Now => Tick + _remaining + (double)Alpha;
+
+    private int _remaining; // this frame's ticks not yet run
+
     /// <summary>How far the current frame is from the last tick towards the next, 0 to 1.</summary>
     public float Alpha => (float)System.Math.Clamp(_accumulator / TickSeconds, 0.0, 1.0);
 
@@ -55,14 +62,22 @@ public sealed class TickClock : ITickClock
             if (_accumulator + Epsilon >= TickSeconds) _accumulator = 0;
         }
         if (_accumulator < 0) _accumulator = 0;
+        _remaining = ticks;
         return ticks;
     }
 
+    /// <summary>Runs the next of this frame's ticks: moves <see cref="Tick"/> on one.</summary>
+    public void Step()
+    {
+        Tick++;
+        if (_remaining > 0) _remaining--;
+    }
+
     /// <summary>Jumps to <paramref name="tick"/> (clock sync lining up with another machine's) and forgets any partial
-    /// tick.</summary>
+    /// tick: this frame's last tick will be <paramref name="tick"/>, so <see cref="Now"/> is.</summary>
     public void Snap(uint tick)
     {
-        Tick = tick;
+        Tick = tick - (uint)System.Math.Min(_remaining, (int)tick);
         _accumulator = 0;
     }
 

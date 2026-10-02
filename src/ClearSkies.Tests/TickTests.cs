@@ -8,6 +8,23 @@ namespace ClearSkies.Tests;
 
 public class TickClockTests
 {
+    [Fact]
+    public void NowIsTheFramesLastTickEvenWhileItsFirstRuns()
+    {
+        var clock = new TickClock();
+        clock.Snap(100);
+        Assert.Equal(3, clock.Advance(3.5 / 60));
+        clock.Step();                        // the first of three: the network is heard here
+        Assert.Equal(101u, clock.Tick);
+        Assert.Equal(103.5, clock.Now, 3);   // but the frame is at 103 and a half
+
+        clock.Snap(200);                     // clock sync, mid-frame: the frame ends on 200
+        clock.Step();
+        clock.Step();
+        Assert.Equal(200u, clock.Tick);
+        Assert.Equal(200.0, clock.Now, 3);
+    }
+
     [Theory]
     [InlineData(1.0 / 60.0)]
     [InlineData(1.0 / 144.0)]

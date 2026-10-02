@@ -87,7 +87,7 @@ public sealed class ClockSync
         SkippedTicks += dropped;
     }
 
-    private double LocalTick => _clock.Tick + (double)_clock.Alpha;
+    private double LocalTick => _clock.Now;
 
     /// <summary>Takes the host's answer to a ping and corrects the clock.</summary>
     public void OnPong(in TimePong pong, double nowMs)
