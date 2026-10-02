@@ -33,7 +33,7 @@ public sealed class ClientSession : NetSession
 
     /// <summary>The longest a join waits for the clock to settle, in milliseconds: a jittery connection may never
     /// quite, and it carries on slewing once joined.</summary>
-    public const double MaxSettleMs = 5000;
+    public const double MaxSettleMs = 10_000;
 
     /// <param name="welcome">The host's welcome (see <see cref="Connect"/>).</param>
     /// <param name="terrainLoaded">Whether the terrain around a point has loaded (ChunkLoadSystem).</param>
@@ -86,6 +86,10 @@ public sealed class ClientSession : NetSession
         {
             Send(Host, new TerrainReady());
             _terrainReadySent = true;
+            double waited = (NowMs - _settleFrom) / 1000;
+            Console.WriteLine(ClockSync.Settled
+                ? $"[net] clock settled after {waited:0.0} s: {ClockSync.Offset:+0.00;-0.00} ticks off, round trip {ClockSync.RoundTripMs:0} ms, {ClockSync.Snaps} snaps"
+                : $"[net] clock didn't settle in {waited:0.0} s: {ClockSync.Offset:+0.00;-0.00} ticks off, round trip {ClockSync.RoundTripMs:0} ms, {ClockSync.Snaps} snaps; joining anyway");
             ClockSync.Settling = false; // from here on, the world is drawn and predicted from it: slew
         }
         if (_anchor.IsAlive && _localPlayers.Count > 0)
