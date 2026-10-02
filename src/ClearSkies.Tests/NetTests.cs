@@ -273,6 +273,20 @@ public class JoinTests
     }
 
     [Fact]
+    public void TheClientsClockHasSettledByTheTimeItJoins()
+    {
+        // The welcome's tick is a one-way trip old by the time it arrives: joining waits for pings to put that right, so
+        // the game doesn't start with the clock running fast to catch up.
+        using var game = new LoopbackGame(latencyMs: 50);
+        game.Host.Clock.Tick = 5000;
+        var (client, net) = game.Join();
+        Assert.True(net.ClockSync.Settled);
+        Assert.False(net.ClockSync.Settling);
+        Assert.Equal(1.0, client.Clock.Rate);
+        Assert.InRange((int)client.Clock.Tick - (int)game.Host.Clock.Tick, -1, 1);
+    }
+
+    [Fact]
     public void TwoPlayersSeeEachOtherMove()
     {
         using var game = new LoopbackGame(latencyMs: 30);

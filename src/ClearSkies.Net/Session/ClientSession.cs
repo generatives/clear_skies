@@ -15,7 +15,8 @@ namespace ClearSkies.Net.Session;
 
 /// <summary>
 /// A client's side of the session: one connection, to the host. After the Welcome it loads terrain around where the
-/// player will spawn (a stand-in terrain interest until the player arrives), tells the host, and then receives the
+/// player will spawn (a stand-in terrain interest until the player arrives) and settles its clock on the host's (see
+/// <see cref="ClockSync.Settling"/>, for at most <see cref="MaxSettleMs"/>), tells the host, and then receives the
 /// world: every entity as a spawn event, then its own player, which the host simulates and this machine predicts
 /// (<see cref="OwnPlayerPrediction"/>, which sends the player's input). Everything it sends goes to the host, which
 /// applies or relays it. Keeps its clock on the host's with <see cref="ClockSync"/>.
@@ -28,6 +29,11 @@ public sealed class ClientSession : NetSession
     private readonly EntitySet _localPlayers;
     private Entity _anchor;
     private bool _terrainReadySent;
+    private double _settleFrom = double.NaN;
+
+    /// <summary>The longest a join waits for the clock to settle, in milliseconds: a jittery connection may never
+    /// quite, and it carries on slewing once joined.</summary>
+    public const double MaxSettleMs = 5000;
 
     /// <param name="welcome">The host's welcome (see <see cref="Connect"/>).</param>
     /// <param name="terrainLoaded">Whether the terrain around a point has loaded (ChunkLoadSystem).</param>
@@ -37,7 +43,7 @@ public sealed class ClientSession : NetSession
     {
         Welcome = welcome;
         _terrainLoaded = terrainLoaded;
-        ClockSync = new ClockSync(clock);
+        ClockSync = new ClockSync(clock) { Settling = true };
         session.BecomeClient(welcome.Peer);
         registry.AddIdBlock(welcome.IdFirst, welcome.IdCount);
         ClockSync.SnapTo(welcome.HostTick);
@@ -74,10 +80,13 @@ public sealed class ClientSession : NetSession
     {
         base.Update(dt);
         if (ClockSync.ShouldPing(NowMs)) Send(Host, new TimePing(NowMs), Channel.Unreliable);
-        if (!_terrainReadySent && _terrainLoaded(Welcome.Spawn))
+        if (double.IsNaN(_settleFrom)) _settleFrom = NowMs;
+        bool clockReady = ClockSync.Settled || NowMs - _settleFrom > MaxSettleMs;
+        if (!_terrainReadySent && clockReady && _terrainLoaded(Welcome.Spawn))
         {
             Send(Host, new TerrainReady());
             _terrainReadySent = true;
+            ClockSync.Settling = false; // from here on, the world is drawn and predicted from it: slew
         }
         if (_anchor.IsAlive && _localPlayers.Count > 0)
         {

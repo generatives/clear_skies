@@ -173,6 +173,71 @@ public class CrewTests
     }
 
     [Fact]
+    public void JoiningAboardAMovingShipTheCrewIsNotCorrectedOverAndOver()
+    {
+        // Joining starts the client's clock a little behind the host's, and it runs fast for a few seconds to catch
+        // up. Standing on a ship flying past, the crew member's prediction should agree with the host all that while:
+        // a correction up or down on the deck used to set off the next one, bouncing them for seconds.
+        using var game = new LoopbackGame(50);
+        var voxels = new List<GridVoxel>();
+        for (int x = 0; x < 8; x++) for (int z = 0; z < 8; z++) voxels.Add(new(x, 0, z, BlockId.Wood, BlockOrientation.Upright));
+        var ship = game.Host.SpawnGrid(GridDescription.FromVoxels(new Vector3(0, 50, 0), voxels));
+        game.Host.SpawnLocalPlayer(new Vector3(2, 52, 2));
+        game.Tick(2);
+        var body = ship.Get<PhysicsBodyComponent>().Body;
+        game.Host.Physics.SetBodyLinearVelocity(body, new Vector3(6, 0, 0));
+        game.Tick(10);
+        var (client, net) = game.Join("crew");
+        var crew = LocalPlayerOf(client);
+        PlaceCrew(game, crew, new Vector3(game.Host.Physics.GetBodyPose(body).position.X - 1, 51.4f, -1));
+        game.Tick(60); // landed
+        var prediction = (OwnPlayerPrediction)net.Prediction!;
+        long before = prediction.Corrections;
+        float low = float.MaxValue, high = float.MinValue;
+        for (int t = 0; t < 300; t++)
+        {
+            game.Tick();
+            float y = crew.Get<Support>().LocalPosition.Y;
+            (low, high) = (MathF.Min(low, y), MathF.Max(high, y));
+        }
+        Assert.Equal(client.Registry.Find(ship.Get<EntityId>()), crew.Get<Support>().Supporter);
+        Assert.True(prediction.Corrections - before <= 2, $"corrected {prediction.Corrections - before} times");
+        Assert.True(high - low < 0.01f, $"bounced between {low:F3} and {high:F3} on the deck");
+    }
+
+    [Fact]
+    public void JoiningOnAMovingTurningShipTheCrewStartsWhereTheHostHasThem()
+    {
+        // A client who left standing on a ship rejoins while it flies and turns. Its copy of the ship arrives with them,
+        // its body a tick later: they ride along on it meanwhile, rather than being left behind as it moves off and then
+        // corrected back.
+        using var game = new LoopbackGame(50);
+        var voxels = new List<GridVoxel>();
+        for (int x = 0; x < 8; x++) for (int z = 0; z < 8; z++) voxels.Add(new(x, 0, z, BlockId.Wood, BlockOrientation.Upright));
+        var ship = game.Host.SpawnGrid(GridDescription.FromVoxels(new Vector3(0, 50, 0), voxels));
+        game.Host.SpawnLocalPlayer(new Vector3(30, 80, 30), freeFly: true);
+        game.Tick(2);
+        var body = ship.Get<PhysicsBodyComponent>().Body;
+        game.Host.Physics.SetBodyLinearVelocity(body, new Vector3(4, 0, 3));
+        game.Host.Physics.SetBodyAngularVelocity(body, new Vector3(0, 0.3f, 0));
+        game.Tick(10);
+        var onDeck = new Vector3(1, 1.8f, 1);
+        game.Directory.Save("crew", new PlayerDescription { FreeFly = false, Support = ship.Get<EntityId>(), LocalPosition = onDeck });
+        var (client, net) = game.Join("crew");
+        var crew = LocalPlayerOf(client);
+        var copy = client.Registry.Find(ship.Get<EntityId>())!.Value;
+        var prediction = (OwnPlayerPrediction)net.Prediction!;
+        for (int t = 0; t < 60; t++)
+        {
+            game.Tick();
+            Assert.Equal(copy, crew.Get<Support>().Supporter);
+            var local = crew.Get<Support>().LocalPosition;
+            Assert.True(Vector2.Distance(new Vector2(local.X, local.Z), new Vector2(onDeck.X, onDeck.Z)) < 0.02f, $"at {local} on deck");
+        }
+        Assert.Equal(0, prediction.Corrections);
+    }
+
+    [Fact]
     public void CrewStayAboardWhileTheHostDrawsSlowly()
     {
         // The host at 8 fps (its window in the background, say), running its ticks as the game would; the client at 60.

@@ -36,6 +36,9 @@ public sealed class OwnPlayerPrediction : ISystem
     /// <summary>Velocity errors in the air smaller than this (m/s) are left alone. On the ground none are corrected: the
     /// character controller closes them itself within a tick or two.</summary>
     public const float VelocityTolerance = 0.5f;
+    /// <summary>Answers in a row that may say the player stands on something else than recorded before that's
+    /// corrected: a landing reaches each machine a tick or two apart, and settles itself.</summary>
+    public const int SupportMismatchAnswers = 30;
 
     /// <summary>Where a tick's input left the player: on <see cref="Support"/> (its space) or in the world.</summary>
     private struct Record
@@ -58,6 +61,7 @@ public sealed class OwnPlayerPrediction : ISystem
     private uint _input;
     private BodySnapshot? _answer;
     private uint _lastAnswer;
+    private int _supportMismatches;
 
     public OwnPlayerPrediction(ClientSession net, World world, EntityRegistry registry)
     {
@@ -138,12 +142,19 @@ public sealed class OwnPlayerPrediction : ISystem
         Vector3 worldError;
         if (predicted.Support == answer.Support)
         {
+            _supportMismatches = 0;
             error = answer.Position - predicted.Position;
+            // Standing on something, their height on it is the character controller's, here as there: moved up or down
+            // they'd be pushed back onto it, while the later records kept the move, so the next answer would say they
+            // were off the other way, and so on, a bounce that feeds itself.
+            if (predicted.Grounded && !flying) error.Y = 0;
             worldError = Vector3.Transform(error, RotationOf(answer.Support));
         }
         else
         {
-            // They stood on different things (one landed a tick before the other): compare where both are now.
+            // They stood on different things: one landed a tick before the other, which settles itself. Compared where
+            // both are now, a moving ship would count its motion since the record as error, so only if it lasts.
+            if (++_supportMismatches < SupportMismatchAnswers) return;
             error = default;
             worldError = ToWorld(answer.Support, answer.Position) - ToWorld(predicted.Support, predicted.Position);
         }

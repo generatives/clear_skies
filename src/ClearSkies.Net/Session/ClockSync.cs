@@ -9,6 +9,9 @@ namespace ClearSkies.Net.Session;
 /// round trip); the estimate used is the average of the lowest-round-trip half of the last 16 answers, because answers
 /// delayed by jitter overestimate the one-way time. Off by more than <see cref="SnapTicks"/> (joining, a hitch): snap.
 /// Otherwise slew, running ticks up to 2% faster or slower until within half a tick. The host never adjusts.
+/// <para>While joining (<see cref="Settling"/>), nothing is drawn or predicted from the clock yet, so it snaps to every
+/// estimate more than half a tick out instead: it's <see cref="Settled"/> after a couple of seconds of pings, and the
+/// game starts on the host's timeline rather than slewing towards it for seconds with players already moving.</para>
 /// </summary>
 public sealed class ClockSync
 {
@@ -17,6 +20,8 @@ public sealed class ClockSync
     public const double SnapTicks = 10;
     public const double MaxSlew = 0.02;
     public const double TickMs = 1000.0 / 60.0;
+    /// <summary>Answers it takes to be <see cref="Settled"/>: two seconds of pings.</summary>
+    public const int SettleSamples = 8;
 
     private readonly ITickClock _clock;
     private readonly List<(double RttMs, double Offset)> _samples = new();
@@ -32,6 +37,12 @@ public sealed class ClockSync
     public double Offset { get; private set; }
 
     public bool HasEstimate => _samples.Count > 0;
+
+    /// <summary>Joining: snap to every estimate more than half a tick out, rather than slew.</summary>
+    public bool Settling { get; set; }
+
+    /// <summary>Enough answers, and within half a tick of the host.</summary>
+    public bool Settled => _samples.Count >= SettleSamples && System.Math.Abs(Offset) < 0.5;
 
     /// <summary>Raised when the clock is snapped, with how many ticks it moved.</summary>
     public event Action<double>? Snapped;
@@ -69,7 +80,7 @@ public sealed class ClockSync
         Offset = best.Average(s => s.Offset);
 
         while (_snapTimes.Count > 0 && nowMs - _snapTimes.Peek() > 60_000) _snapTimes.Dequeue();
-        if (System.Math.Abs(Offset) > SnapTicks)
+        if (System.Math.Abs(Offset) > (Settling ? 0.5 : SnapTicks))
         {
             double before = LocalTick;
             long target = (long)System.Math.Round(before + Offset);

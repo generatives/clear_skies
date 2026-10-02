@@ -10,11 +10,17 @@ namespace ClearSkies.Net.Sync;
 /// extrapolated from its last velocity for up to <see cref="MaxExtrapolationTicks"/>, then held.
 /// <para>The delay is as short as keeps a newer snapshot in hand: each arrival's lateness (our tick when it arrived,
 /// less the tick it was taken on) is kept for a couple of seconds, and what's <see cref="Needed"/> is the latest of
-/// them plus the gap between snapshots. Arrivals wobble by a tick with frame timing, so the delay holds steady while
+/// them plus the gap between snapshots. A burst (<see cref="BurstSize"/> or more arriving on the same tick of ours)
+/// counts as one arrival, as late as the newest of them: after a stall on either machine the backlog comes all at once,
+/// and only the newest needs to be in hand, so the stall isn't taken for lasting lateness. (Two together is just frame
+/// timing, and each counts.) Arrivals wobble by a tick with frame timing, so the delay holds steady while
 /// it's within <see cref="Slack"/> above that: it only goes up when snapshots come later than it allows, and down when
 /// it's well over. Changing it plays the body faster or slower, up to <see cref="MaxSlew"/>, which shows as a stutter
-/// in how it moves; far off (a hitch on either machine) it jumps. Lateness includes any error in the clocks, so it
-/// copes with the sender's ticks running behind or ahead of ours as well as with the network.</para>
+/// in how it moves. Far too short (a hitch on either machine) it jumps up, since the body would otherwise run out of
+/// snapshots; well over (by more than <see cref="Slack"/> past where it's heading), it comes down at up to
+/// <see cref="MaxCatchUp"/>, since jumping down would move the body (and whoever is aboard) forward all at once.
+/// Lateness includes any error in the clocks, so it copes with the sender's ticks running behind or ahead of ours as
+/// well as with the network.</para>
 /// </summary>
 public sealed class SnapshotBuffer
 {
@@ -31,12 +37,25 @@ public sealed class SnapshotBuffer
     /// <summary>How far over <see cref="Needed"/> the delay may be before it comes down, in ticks; it's set half a tick
     /// over, so a tick's wobble either way in arrivals leaves it be.</summary>
     public const double Slack = 1.5, Headroom = 0.5;
-    /// <summary>Further off than this, in ticks, the delay jumps instead.</summary>
+    /// <summary>Shorter than needed by more than this, in ticks, the delay jumps up instead.</summary>
     public const double JumpTicks = 6;
+    /// <summary>The most faster than real time a delay too long is brought down by (10%).</summary>
+    public const double MaxCatchUp = 0.1;
     public const double MinDelay = 2;
+    /// <summary>Snapshots arriving on the same tick of ours that are a stall's backlog rather than frame timing.</summary>
+    public const int BurstSize = 3;
 
     private readonly List<(uint Tick, BodySnapshot Snapshot)> _samples = new(Capacity);
-    private readonly Queue<double> _lateness = new(LatenessWindow);
+
+    /// <summary>The snapshots that arrived on one tick of ours: how late the latest and the newest were.</summary>
+    private struct Arrival
+    {
+        public double Tick, Latest, Newest;
+        public int Count;
+        public readonly double Lateness => Count >= BurstSize ? Newest : Latest;
+    }
+
+    private readonly List<Arrival> _lateness = new(LatenessWindow);
     private bool _hasDelay;
 
     /// <summary>How far behind our tick the body is drawn, in ticks.</summary>
@@ -61,9 +80,19 @@ public sealed class SnapshotBuffer
     /// old or duplicate ticks (reordered packets) are ignored.</summary>
     public bool Add(uint tick, in BodySnapshot snapshot, double arrived)
     {
-        if (_lateness.Count == LatenessWindow) _lateness.Dequeue();
-        _lateness.Enqueue(arrived - tick);
-        Needed = System.Math.Max(MinDelay, _lateness.Max() + SendInterval) + Margin;
+        double late = arrived - tick;
+        if (_lateness.Count > 0 && _lateness[^1].Tick == arrived)
+        {
+            var a = _lateness[^1];
+            (a.Latest, a.Newest, a.Count) = (System.Math.Max(a.Latest, late), System.Math.Min(a.Newest, late), a.Count + 1);
+            _lateness[^1] = a;
+        }
+        else
+        {
+            if (_lateness.Count == LatenessWindow) _lateness.RemoveAt(0);
+            _lateness.Add(new Arrival { Tick = arrived, Latest = late, Newest = late, Count = 1 });
+        }
+        Needed = System.Math.Max(MinDelay, _lateness.Max(a => a.Lateness) + SendInterval) + Margin;
         if (!_hasDelay) (Delay, TargetDelay, _hasDelay) = (Needed + Headroom, Needed + Headroom, true);
 
         if (_samples.Count > 0 && tick <= _samples[^1].Tick)
@@ -84,7 +113,12 @@ public sealed class SnapshotBuffer
     {
         if (Delay < Needed || Delay > Needed + Slack) TargetDelay = Needed + Headroom;
         double off = TargetDelay - Delay;
-        if (System.Math.Abs(off) > JumpTicks)
+        if (off < -Slack)
+        {
+            Delay += System.Math.Max(off, -MaxCatchUp * ticks);
+            return false;
+        }
+        if (off > JumpTicks)
         {
             Delay = TargetDelay;
             return true;
@@ -97,8 +131,12 @@ public sealed class SnapshotBuffer
     /// moves with it, so the body carries on being drawn where it was.</summary>
     public void ShiftClock(double ticks)
     {
-        int n = _lateness.Count;
-        for (int i = 0; i < n; i++) _lateness.Enqueue(_lateness.Dequeue() + ticks);
+        for (int i = 0; i < _lateness.Count; i++)
+        {
+            var a = _lateness[i];
+            (a.Tick, a.Latest, a.Newest) = (a.Tick + ticks, a.Latest + ticks, a.Newest + ticks);
+            _lateness[i] = a;
+        }
         Needed += ticks;
         TargetDelay += ticks;
         Delay += ticks;
