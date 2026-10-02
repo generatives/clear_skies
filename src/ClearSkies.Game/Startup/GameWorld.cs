@@ -89,22 +89,15 @@ public sealed class GameWorld
     /// <summary>Bodies owned elsewhere, placed from their snapshots about 100 ms behind.</summary>
     public RemoteBodySystem RemoteBodies { get; }
 
-    /// <summary>Whether the terrain around a point has loaded (joining waits on it, and so do grids' bodies).</summary>
-    public bool TerrainLoaded(System.Numerics.Vector3 p) => ChunkLoad.IsTerrainLoaded(new Vector3D<float>(p.X, p.Y, p.Z), 64f);
-
     /// <summary>Whether the terrain around a point has loaded with colliders, so a body there won't fall through it
-    /// (grids loaded from the save, and the host's players, wait on it).</summary>
-    public bool TerrainReadyFor(System.Numerics.Vector3 p) => TerrainLoaded(p) && PhysicsBody.CollidersReady(StaticVolume, p, 64f);
+    /// (each spawn simulated here waits on it, see SpawnQueue).</summary>
+    public bool TerrainReadyFor(System.Numerics.Vector3 p) =>
+        ChunkLoad.IsTerrainLoaded(new Vector3D<float>(p.X, p.Y, p.Z), 64f) && PhysicsBody.CollidersReady(StaticVolume, p, 64f);
 
     /// <summary>Presence layers (bodies, drawing, terrain interest and colliders). Entities are drawn as far as the
-    /// terrain, but no further than the load window; a grid owned here gets a body once the terrain around it has loaded
-    /// with colliders, so nothing loaded from the save falls through the world.</summary>
+    /// terrain, but no further than the View Volume, past which the Host sends none.</summary>
     public EntityPresenceSystem CreatePresence() =>
-        new(Host.World, Session, StaticVolume, Options.ViewDistance)
-        {
-            RenderDistanceLimit = EntityStreamingSystem.LoadWindow,
-            TerrainReady = TerrainReadyFor,
-        };
+        new(Host.World, Session, StaticVolume, Options.ViewDistance) { RenderDistanceLimit = ClearSkies.Net.Session.Host.ViewRadius };
 
     /// <summary>Runs the game until it quits, then stops background work (no chunk still loading while what it loads
     /// into is freed).</summary>

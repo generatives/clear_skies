@@ -49,7 +49,7 @@ public sealed class OwnPlayerPrediction : ISystem
         public bool Grounded;
     }
 
-    private readonly ClientSession _net;
+    private readonly Participant _net;
     private readonly EntityRegistry _registry;
     private readonly EntitySet _local;
     private readonly Record[] _history = new Record[HistoryLength];
@@ -59,7 +59,7 @@ public sealed class OwnPlayerPrediction : ISystem
     private BodySnapshot? _answer;
     private uint _lastAnswer;
 
-    public OwnPlayerPrediction(ClientSession net, World world, EntityRegistry registry)
+    public OwnPlayerPrediction(Participant net, World world, EntityRegistry registry)
     {
         _net = net;
         _registry = registry;
@@ -92,17 +92,17 @@ public sealed class OwnPlayerPrediction : ISystem
                 _answer = null;
                 Correct(e, answer);
             }
-            Send(e.Get<PlayerInput>());
+            Send(e.Get<EntityId>(), e.Get<PlayerInput>());
             return; // one local player
         }
     }
 
-    private void Send(in PlayerInput input)
+    private void Send(EntityId player, in PlayerInput input)
     {
         var sample = new InputSample(++_input, input.Held, input.Pressed, input.Yaw, input.Pitch);
         if (_sentCount == _sent.Length) Array.Copy(_sent, 1, _sent, 0, --_sentCount);
         _sent[_sentCount++] = sample;
-        _net.SendInput(new PlayerInputMessage(_sent[.._sentCount]));
+        _net.SendInput(new PlayerInputMessage(player, _sent[.._sentCount]));
     }
 
     private static Record Capture(Entity e, uint input)

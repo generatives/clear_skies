@@ -20,9 +20,9 @@ namespace ClearSkies.Game.Startup;
 /// <item>Connect and say hello (name, protocol version, world-generation checksum); the host welcomes us or refuses
 /// with a reason. The welcome says who we are, the world's seed, the host's tick, and where our player will spawn.</item>
 /// <item>Build the world from the host's seed, with no save (the host keeps everything).</item>
-/// <item>The client session loads terrain around the spawn and tells the host, which then sends the world (every entity,
-/// as spawn events) and spawns our player; the camera waits at the spawn until then. The host simulates everything,
-/// our player included; we play it by sending our input, and predict it meanwhile.</item>
+/// <item>Join as a Participant: the Host streams us what's in our View Volume (around our player), each entity spawning
+/// once what it needs has loaded here; the camera waits at the spawn until our player has. The hosting machine
+/// simulates everything, our player included; we play it by sending our input, and predict it meanwhile.</item>
 /// </list>
 /// </summary>
 public static class ClientGame
@@ -34,8 +34,8 @@ public static class ClientGame
         using var view = new GameView(host, options);
         var world = new GameWorld(host, options, session, welcome.Seed, new NoChunkStore(), view.Budget, view.ChunkPreparer,
                                   view.PlayerModel);
-        using var net = new ClientSession(transport, welcome, session, world.Commands, world.Registry, host.World, host.Clock,
-                                          world.TerrainLoaded);
+        using var net = new Participant(transport, welcome, session, world.Commands, world.Registry, host.World, host.Clock,
+                                        world.TerrainReadyFor);
         net.Ended += reason => { Console.WriteLine($"[net] session ended: {reason}"); host.Quit(); };
         var input = host.Input;
         var renderer = host.Renderer;
@@ -110,7 +110,7 @@ public static class ClientGame
         host.AddSystem(gridPersistence, SystemStage.Frame);
         host.AddSystem(new AirshipDebugPanel(pilot, world.Flight, gridPersistence), SystemStage.Frame); // one "Airship" window
         host.AddSystem(new WireframeToggle(input, renderer), SystemStage.Frame);
-        host.Gui.RegisterDebugUi(new NetDebugPanel(net, world.RemoteBodies, transport));
+        host.Gui.RegisterDebugUi(new NetDebugPanel(net, null, world.RemoteBodies, transport));
 
         view.AddRender(world);
 
@@ -130,7 +130,7 @@ public static class ClientGame
         int port = colon > 0 ? int.Parse(joinAddress[(colon + 1)..]) : 7777;
         Console.WriteLine($"[net] joining {address}:{port} as {options.PlayerName}");
         var transport = new LaggedTransport(LiteNetTransport.Join(address, port));
-        var welcome = ClientSession.Connect(transport, new Hello(ProtocolVersion.Current, options.PlayerName, GenerationChecksum.Compute()),
+        var welcome = Participant.Connect(transport, new Hello(ProtocolVersion.Current, options.PlayerName, GenerationChecksum.Compute()),
                                             TimeSpan.FromSeconds(15));
         return (transport, welcome);
     }

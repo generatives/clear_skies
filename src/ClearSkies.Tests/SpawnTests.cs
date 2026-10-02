@@ -14,15 +14,6 @@ namespace ClearSkies.Tests;
 /// <summary>Players spawn where they left off, on their ship if they stood on one, once what they need has loaded.</summary>
 public class SpawnTests
 {
-    private sealed class OnePlayer : IPlayerDirectory
-    {
-        public readonly Dictionary<PlayerId, PlayerDescription> SavedPlayers = new();
-        public PlayerId PlayerFor(string name) => PlayerId.New();
-        public PlayerDescription? Saved(PlayerId player) => SavedPlayers.GetValueOrDefault(player);
-        public (Vector3 Position, float Yaw, float Pitch) NewPlayerSpawn => (new Vector3(0, 60, 0), 0, 0);
-        public void Leaving(Entity player) { }
-    }
-
     private static Entity? PlayerIn(HeadlessScene scene) =>
         scene.World.GetEntities().With<Player>().AsEnumerable().Cast<Entity?>().SingleOrDefault();
 
@@ -51,41 +42,38 @@ public class SpawnTests
         {
             PlayerId who;
             EntityId shipId;
-            using (var db = SaveDatabase.Open(path))
-            using (var scene = new HeadlessScene(firstFreeId: db.NextFreeId))
+            using (var game = new LoopbackGame(save: SaveDatabase.Open(path)))
             {
-                scene.EnablePersistence(db);
-                var ship = scene.SpawnPlatform(new Vector3(400, 50, 0), size: 5);
-                var player = scene.SpawnLocalPlayer(new Vector3(401, 51.4f, 1));
-                Assert.True(scene.TickUntil(() => player.Get<Support>().Supporter == ship, 120));
-                scene.Tick(30);
-                (who, shipId) = (player.Get<Player>().Id, ship.Get<EntityId>());
-                scene.Saver!.SaveAll();
+                var ship = game.Host.SpawnPlatform(new Vector3(400, 50, 0), size: 5);
+                var (client, _) = game.Join("crew");
+                var crew = client.World.GetEntities().With<LocalPlayer>().AsEnumerable().Single();
+                CrewTests.PlaceCrew(game, crew, new Vector3(401, 51.4f, 1));
+                var simulated = game.Simulated(crew);
+                Assert.True(game.Host.TickUntil(() => simulated.Get<Support>().Supporter == ship, 120));
+                game.Tick(30);
+                (who, shipId) = (crew.Get<Player>().Id, ship.Get<EntityId>());
+                game.SaveAll();
             }
             var saved = DescriptionBytes.Read<PlayerDescription>(ReadPlayer(path, who));
             Assert.Equal(shipId, saved.Support);
 
-            using (var db = SaveDatabase.Open(path))
-            using (var scene = new HeadlessScene(firstFreeId: db.NextFreeId))
+            bool terrain = false;
+            using (var game = new LoopbackGame(save: SaveDatabase.Open(path), hostTerrainReady: _ => terrain))
             {
-                bool terrain = false;
-                var net = new HostSession(null, scene.Session, scene.Commands, scene.Registry, scene.World, scene.Clock, scene.Ids,
-                                          1337, 42, new OnePlayer(), _ => terrain);
-                scene.AttachNet(net);
-                scene.EnablePersistence(db);
-                net.SpawnWhenReady(saved);
+                game.Join("crew", wait: false);
 
-                // The ship loads around where they wait; they don't spawn until the terrain there has too.
-                scene.Tick(30);
-                Assert.True(scene.Registry.IsLive(shipId));
-                Assert.Null(PlayerIn(scene));
-                Assert.Equal(1, net.PendingSpawns);
+                // The ship loads into their view, and they onto it, on the hosting machine; neither spawns until the
+                // terrain there has loaded.
+                game.Tick(30);
+                Assert.False(game.Host.Registry.IsLive(shipId));
+                Assert.Null(PlayerIn(game.Host));
+                Assert.Equal(2, game.HostNet.Spawns.Count);
 
                 terrain = true;
-                scene.Tick(2);
-                var player = PlayerIn(scene) ?? throw new Xunit.Sdk.XunitException("Never spawned.");
-                scene.Tick(120);
-                var ship = scene.Registry.Find(shipId)!.Value;
+                for (int i = 0; i < 120 && PlayerIn(game.Host) is null; i++) game.Tick();
+                var player = PlayerIn(game.Host) ?? throw new Xunit.Sdk.XunitException("Never spawned.");
+                game.Tick(120);
+                var ship = game.Host.Registry.Find(shipId)!.Value;
                 Assert.Equal(ship, player.Get<Support>().Supporter);
                 Assert.InRange(player.Get<Transform>().Position.Y, 51f, 52f); // on the deck, not through it
             }
@@ -107,12 +95,11 @@ public class SpawnTests
     {
         using var game = new LoopbackGame(latencyMs: 50);
         var ship = game.Host.SpawnPlatform(new Vector3(0, 50, 0), size: 6);
-        game.Host.SpawnLocalPlayer(new Vector3(30, 80, 30), freeFly: true);
         game.Tick(2);
         var spot = new Vector3(1, 1.4f, 1); // a block and a half from the stern, in the deck's block space
-        game.Directory.Save("crew", new PlayerDescription
+        game.SavePlayer("crew", new PlayerDescription
         {
-            Name = "crew", FreeFly = false, Position = new Vector3(1, 51.4f, 1), // where the ship was when they left
+            FreeFly = false, Position = new Vector3(1, 51.4f, 1), // where the ship was when they left
             Support = ship.Get<EntityId>(), LocalPosition = spot,
         });
         // The ship has flown on since, and still is. Its copy on the client used to sit still until the delay caught up

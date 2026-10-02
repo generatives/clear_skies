@@ -17,9 +17,9 @@ using Silk.NET.Maths;
 namespace ClearSkies.Net.Sync;
 
 /// <summary>
-/// Body sync: every second tick (30 Hz), each machine snapshots the bodies it owns, relative to their support, with
-/// streamed values (a player's look), and sends them unreliably: clients to the host, which passes each client's on to
-/// the others as they arrive (HostSession), and sends its own to everyone. Receivers buffer them per entity
+/// Body sync: every second tick (30 Hz), the authority snapshots the bodies it owns, relative to their support, with
+/// streamed values (a player's look), and sends them unreliably to the Host, which passes each Participant the ones it
+/// has (see <see cref="Host"/>). Receivers buffer them per entity
 /// (<see cref="RemoteBody"/>, which every synced body owned elsewhere has from when its owner is set) and draw them about
 /// 100 ms behind (<see cref="RemoteBodySystem"/>). A lost packet is simply replaced by the next one. Runs last in the
 /// tick, after support.
@@ -47,14 +47,14 @@ public sealed class BodySync : ISystem, IDebugUiSystem
         net.Bodies = this;
         _remote = world.GetEntities().With<RemoteBody>().AsSet();
         // Snapshots' lateness is measured against our clock: when clock sync snaps it, they move with it.
-        if (net is ClientSession client)
-            client.ClockSync.Snapped += ticks =>
+        if (net is Participant { ClockSync: { } sync })
+            sync.Snapped += ticks =>
             {
                 foreach (ref readonly var e in _remote.GetEntities()) e.Get<RemoteBody>().Buffer.ShiftClock(ticks);
             };
         _players = world.GetEntities().With<EntityId>().With<NetOwner>().With<Player>().With<Transform>().AsSet();
         _grids = world.GetEntities().With<EntityId>().With<NetOwner>().With<PhysicsBodyComponent>().With<Transform>().AsSet();
-        // Spawned owned elsewhere, or taken over by the host when its owner leaves.
+        // Spawned owned elsewhere.
         world.SubscribeComponentAdded((in Entity e, in NetOwner owner) => SetRemote(e, owner));
         world.SubscribeComponentChanged((in Entity e, in NetOwner _, in NetOwner owner) => SetRemote(e, owner));
     }
@@ -83,35 +83,26 @@ public sealed class BodySync : ISystem, IDebugUiSystem
             foreach (ref readonly var e in _grids.GetEntities())
                 if (e.Get<NetOwner>().IsLocal) _own.Add(GridSnapshot(e));
 
-        uint tick = _net.Clock.Tick;
-        switch (_net)
-        {
-            case ClientSession client:
-                SendFrames(tick, _own, packet => client.SendToHost(packet, Channel.Unreliable));
-                break;
-            case HostSession host:
-                SendFrames(tick, _own, packet =>
-                {
-                    foreach (var peer in host.Joined) host.SendUnreliable(peer.Peer, packet);
-                });
-                break;
-        }
+        if (_net is Participant participant)
+            WriteFrames(_writer, _net.Clock.Tick, _own, packet => participant.SendToHost(packet, Channel.Unreliable));
+        _snapshotsSent += _own.Count;
     }
 
-    private delegate void PacketSender(ReadOnlySpan<byte> packet);
+    public delegate void PacketSender(ReadOnlySpan<byte> packet);
 
-    private void SendFrames(uint tick, List<BodySnapshot> snapshots, PacketSender send)
+    /// <summary>Writes <paramref name="snapshots"/> as frames of up to <see cref="SnapshotsPerPacket"/>, each sent
+    /// as it's written.</summary>
+    public static void WriteFrames(NetWriter writer, uint tick, List<BodySnapshot> snapshots, PacketSender send)
     {
         for (int start = 0; start < snapshots.Count; start += SnapshotsPerPacket)
         {
             int count = System.Math.Min(SnapshotsPerPacket, snapshots.Count - start);
-            _writer.Clear();
-            _writer.WriteByte((byte)MessageKind.StateFrame);
-            _writer.WriteUInt32(tick);
-            _writer.WriteUInt16((ushort)count);
-            for (int i = 0; i < count; i++) snapshots[start + i].Write(_writer);
-            send(_writer.Written);
-            _snapshotsSent += count;
+            writer.Clear();
+            writer.WriteByte((byte)MessageKind.StateFrame);
+            writer.WriteUInt32(tick);
+            writer.WriteUInt16((ushort)count);
+            for (int i = 0; i < count; i++) snapshots[start + i].Write(writer);
+            send(writer.Written);
         }
     }
 
@@ -169,7 +160,7 @@ public sealed class BodySync : ISystem, IDebugUiSystem
             var s = BodySnapshot.Read(ref r);
             _snapshotsReceived++;
             if (!_net.Registry.TryGet(s.Entity, out var e)) continue; // not spawned here (yet)
-            if (e.Has<LocalPlayer>()) { _net.Prediction?.Answer(s); continue; } // ours, predicted: how the host has it
+            if (e.Has<LocalPlayer>()) { _net.Prediction?.Answer(s); continue; } // ours, predicted: how the authority has it
             if (!e.Has<RemoteBody>()) continue; // ours: we're the truth
             e.Get<RemoteBody>().Buffer.Add(tick, s, _net.Clock.Tick);
         }
