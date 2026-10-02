@@ -109,7 +109,12 @@ public sealed class SetMoveModeHandler : PredictedCommandHandler<SetMoveMode, (E
         => _registry.Find(c.Player) is { } e && e.Has<Player>() && (ctx.Sender == e.Get<Player>().Controller || ctx.Sender == PeerId.Host)
             ? Verdict.Accept : Verdict.Reject;
 
-    public override void Apply(in SetMoveMode e, in ApplyContext ctx) => Set(e.Player, e.FreeFly);
+    public override void Apply(in SetMoveMode e, in ApplyContext ctx)
+    {
+        // The host's word on a client's own player, which the client switched itself on the same input.
+        if (!ctx.IsAuthority && !ctx.IsPrediction && _registry.Find(e.Player) is { } p && p.Has<LocalPlayer>()) return;
+        Set(e.Player, e.FreeFly);
+    }
 
     public override (EntityId Player, bool FreeFly) Capture(in SetMoveMode c)
         => (c.Player, _registry.Find(c.Player) is { } p && p.Has<FreeFlying>());

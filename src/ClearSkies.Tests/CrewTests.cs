@@ -173,6 +173,39 @@ public class CrewTests
     }
 
     [Fact]
+    public void LandingOnADeckFromFlyingIsNotCorrected()
+    {
+        // (Still: a moving ship is seen here where the host had it a moment ago, so landing on one from the air comes
+        // down a little further along its deck there.)
+        var (game, ship, client, crew) = ShipWithCrew();
+        using var _ = game;
+        var simulated = Simulated(game, crew);
+        var prediction = (OwnPlayerPrediction)client.Net!.Prediction!;
+        var body = ship.Get<PhysicsBodyComponent>().Body;
+        game.Tick(30);
+
+        // Flying a few blocks over the middle of the deck, on both machines; then V, and down onto it.
+        foreach (var e in new[] { simulated, crew }) Players.SetFreeFlying(e, true);
+        var deck = game.Host.Physics.GetBodyPose(body).position;
+        game.Teleport(crew, deck + new Vector3(0, 4, 0));
+        game.Tick(10);
+        long correctionsBefore = prediction.Corrections;
+        crew.Get<PlayerInput>() = new PlayerInput { Pressed = PlayerButtons.ToggleFly };
+        game.Tick();
+        crew.Get<PlayerInput>() = default;
+        float largest = 0;
+        for (int t = 0; t < 120; t++)
+        {
+            game.Tick();
+            if (prediction.Corrections > correctionsBefore) largest = MathF.Max(largest, prediction.LastCorrection);
+        }
+        Assert.False(simulated.Has<FreeFlying>());
+        Assert.Equal(ship, simulated.Get<Support>().Supporter); // landed on the deck, there
+        Assert.Equal(client.Registry.Find(ship.Get<EntityId>()), crew.Get<Support>().Supporter); // and here
+        Assert.True(prediction.Corrections == correctionsBefore, $"corrected by up to {largest:F2} ({prediction.Corrections - correctionsBefore} times)");
+    }
+
+    [Fact]
     public void JoiningAboardAMovingShipTheCrewIsNotCorrectedOverAndOver()
     {
         // Joining starts the client's clock a little behind the host's, and it runs fast for a few seconds to catch
