@@ -97,7 +97,7 @@ public sealed class ClientSession : NetSession
             Console.WriteLine(ClockSync.Settled
                 ? $"[net] clock settled after {waited:0.0} s: {ClockSync.Offset:+0.00;-0.00} ticks off, round trip {ClockSync.RoundTripMs:0} ms, {ClockSync.Snaps} snaps, {ClockSync.SkippedTicks} dropped ticks put back"
                 : $"[net] clock didn't settle in {waited:0.0} s: {ClockSync.Offset:+0.00;-0.00} ticks off, round trip {ClockSync.RoundTripMs:0} ms, {ClockSync.Snaps} snaps, {ClockSync.SkippedTicks} dropped ticks put back; joining anyway");
-            ClockSync.Settling = false; // from here on, the world is drawn and predicted from it: slew
+            ClockSync.EndSettling(NowMs); // from here on, the world is drawn and predicted from it: slew
         }
         if (_anchor.IsAlive && _localPlayers.Count > 0)
         {

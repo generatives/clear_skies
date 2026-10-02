@@ -183,22 +183,73 @@ public class TransportTests
 
 public class ClockSyncTests
 {
+    /// <summary>A host and a client clock, both stepped in real time; the client's ticks run at its Rate.</summary>
+    private sealed class Pair
+    {
+        public readonly Engine.Core.ManualTickClock Client = new();
+        public readonly ClockSync Sync;
+        public double NowMs, HostStart;
+
+        public Pair(uint clientTick, double hostTick, bool settling = false)
+        {
+            Client.Tick = clientTick;
+            HostStart = hostTick;
+            Sync = new ClockSync(Client) { Settling = settling };
+        }
+
+        public double HostTick(double atMs) => HostStart + atMs / ClockSync.TickMs;
+
+        public void Advance(double ms)
+        {
+            double ticks = Client.Alpha + ms / ClockSync.TickMs * Client.Rate;
+            Client.Tick += (uint)ticks;
+            Client.Alpha = (float)(ticks - System.Math.Floor(ticks));
+            NowMs += ms;
+        }
+
+        /// <summary>A ping now, answered halfway through <paramref name="rttMs"/>; the answer is handled on arrival.</summary>
+        public void Ping(double rttMs)
+        {
+            double sent = NowMs, host = HostTick(sent + rttMs / 2);
+            Advance(rttMs);
+            Sync.OnPong(new TimePong(sent, (uint)host, (float)(host - System.Math.Floor(host))), NowMs);
+        }
+
+        /// <summary>The host's tick now less the client's.</summary>
+        public double Off => HostTick(NowMs) - Client.Now;
+    }
+
     [Fact]
     public void AFarOffClockSnapsAndACloseOneSlews()
     {
-        var clock = new Engine.Core.ManualTickClock { Tick = 0 };
-        var sync = new ClockSync(clock);
-        // The host is at tick 1000; 100 ms round trip.
-        sync.OnPong(new TimePong(0, 1000, 0), nowMs: 100);
-        Assert.InRange(clock.Tick, 1002u, 1004u); // snapped: 1000 + half the round trip (3 ticks)
-        Assert.Equal(1, sync.Snaps);
+        var p = new Pair(clientTick: 0, hostTick: 1000);
+        p.Ping(100);
+        Assert.Equal(1, p.Sync.Snaps);
+        Assert.InRange(p.Off, -0.5, 0.5);
 
-        // A little behind (the host 3 ticks further on than we'd think): run faster, no jump.
-        uint before = clock.Tick;
-        for (int i = 0; i < 4; i++) sync.OnPong(new TimePong(200 + i, clock.Tick + 3 + 3, 0), nowMs: 300 + i);
-        Assert.Equal(before, clock.Tick);
-        Assert.True(clock.Rate > 1);
-        Assert.True(clock.Rate <= 1 + ClockSync.MaxSlew);
+        // The host 3 ticks further on than we'd think: run faster, no jump.
+        p.HostStart += 3;
+        for (int i = 0; i < 4; i++) { p.Advance(150); p.Ping(100); }
+        Assert.Equal(1, p.Sync.Snaps);
+        Assert.True(p.Client.Rate > 1);
+        Assert.True(p.Client.Rate <= 1 + ClockSync.MaxSlew);
+    }
+
+    [Fact]
+    public void SlewingDoesNotOvershoot()
+    {
+        // 4 ticks behind: slews (no snap), and the answers from before it sped up don't keep it speeding past.
+        var p = new Pair(clientTick: 5000, hostTick: 5004);
+        double most = 0;
+        for (int i = 0; i < 80; i++)
+        {
+            p.Advance(150);
+            p.Ping(100);
+            most = System.Math.Min(most, p.Off);
+        }
+        Assert.Equal(0, p.Sync.Snaps);
+        Assert.InRange(p.Off, -0.5, 0.5);
+        Assert.True(most > -0.6, $"overshot to {most:0.00} ticks ahead");
     }
 
     [Fact]
@@ -206,7 +257,7 @@ public class ClockSyncTests
     {
         var clock = new Engine.Core.ManualTickClock { Tick = 5000 };
         var sync = new ClockSync(clock);
-        // Most answers: 60 ms round trip, host 3 ticks ahead of us... one very late one says otherwise.
+        // Most answers: 60 ms round trip... one very late one says otherwise.
         for (int i = 0; i < 12; i++) sync.OnPong(new TimePong(i * 250, 5000 + 1, 0), nowMs: i * 250 + 60);
         sync.OnPong(new TimePong(4000, 5001, 0), nowMs: 4000 + 600);
         Assert.InRange(sync.RoundTripMs, 55, 65);
@@ -215,23 +266,23 @@ public class ClockSyncTests
     [Fact]
     public void TicksASlowFrameDroppedArePutBackWithoutASnap()
     {
-        var clock = new Engine.Core.ManualTickClock { Tick = 5000 };
-        var sync = new ClockSync(clock) { Settling = true };
-        // On the host's timeline: the host 1 tick on, 60 ms round trip (2 ticks each way).
-        for (int i = 0; i < 8; i++) sync.OnPong(new TimePong(i * 250, clock.Tick - 1, 0), nowMs: i * 250 + 60);
-        long snaps = sync.Snaps;
+        var p = new Pair(clientTick: 5000, hostTick: 5000, settling: true);
+        for (int i = 0; i < 8; i++) { p.Advance(190); p.Ping(60); }
+        long snaps = p.Sync.Snaps;
 
         // A 400 ms frame (loading): 15 ticks run, 9 dropped, so the clock is 9 behind the host's.
-        clock.Tick += 15;
-        clock.DroppedTicks += 9;
-        sync.Update();
-        Assert.Equal(5024u, clock.Tick);
-        Assert.Equal(9, sync.SkippedTicks);
+        p.Advance(400);
+        p.Client.Tick -= 9;
+        p.Client.DroppedTicks += 9;
+        Assert.InRange(p.Off, 8.5, 9.5);
+        p.Sync.Update();
+        Assert.InRange(p.Off, -0.5, 0.5);
+        Assert.Equal(9, p.Sync.SkippedTicks);
 
-        // The host's answers find it on time: no snap, and still settling towards settled.
-        for (int i = 8; i < 8 + ClockSync.SampleCount; i++) sync.OnPong(new TimePong(i * 250, clock.Tick - 1, 0), nowMs: i * 250 + 60);
-        Assert.Equal(snaps, sync.Snaps);
-        Assert.True(sync.Settled);
+        // The host's answers find it on time: no snap, and settled.
+        for (int i = 0; i < ClockSync.SettleAnswers; i++) { p.Advance(190); p.Ping(60); }
+        Assert.Equal(snaps, p.Sync.Snaps);
+        Assert.True(p.Sync.Settled);
     }
 }
 
