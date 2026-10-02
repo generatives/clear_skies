@@ -1,11 +1,12 @@
 using ClearSkies.Engine.Core;
+using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Input;
 using DefaultEcs;
 
 namespace ClearSkies.Engine.ECS;
 
 /// <summary>
-/// Fills the local player's <see cref="PlayerInput"/> once per tick. Registered in two stages: in
+/// Fills the local player's <see cref="PlayerInput"/> once per tick (players played elsewhere get theirs from their machines). Registered in two stages: in
 /// <see cref="SystemStage.Input"/> (after the UI has claimed the mouse or keyboard) it latches the frame's presses and
 /// mouse movement, and first in <see cref="SystemStage.Simulation"/> it hands everything latched since the previous
 /// tick to the player's <see cref="PlayerInput"/>. The first tick of a frame gets the frame's presses; any further ticks that frame
@@ -20,7 +21,7 @@ public sealed class InputSampleSystem : IStagedSystem
 
     public InputSampleSystem(World world, InputManager input, Time time)
     {
-        _players = world.GetEntities().With<PlayerInput>().AsSet();
+        _players = world.GetEntities().With<LocalPlayer>().With<PlayerInput>().AsSet(); // others' input comes from their machines
         _input = input;
         _time = time;
     }

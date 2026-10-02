@@ -1,6 +1,7 @@
 using System.Numerics;
 using ClearSkies.Engine.Commands;
 using ClearSkies.Engine.Entities;
+using ClearSkies.Engine.Input;
 using ClearSkies.Engine.Serialization;
 
 namespace ClearSkies.Net.Protocol;
@@ -8,7 +9,7 @@ namespace ClearSkies.Net.Protocol;
 /// <summary>Bumped whenever any message or description format changes; a mismatch refuses the join.</summary>
 public static class ProtocolVersion
 {
-    public const ushort Current = 2;
+    public const ushort Current = 4;
 }
 
 /// <summary>The first byte of every packet.</summary>
@@ -33,6 +34,7 @@ public enum MessageKind : byte
     SnapshotRequest = 17,
     IdBlockRequest = 18,
     IdBlock = 19,
+    PlayerInput = 20,
 }
 
 /// <summary>A message: writes itself, kind byte first (see <see cref="Session.NetSession"/>'s Send).</summary>
@@ -65,6 +67,67 @@ public readonly record struct Welcome(PeerId Peer, uint IdFirst, uint IdCount, u
 public readonly record struct TerrainReady : IMessage
 {
     public void Write(NetWriter w) => w.WriteByte((byte)MessageKind.TerrainReady);
+}
+
+/// <summary>One tick of a player's input, numbered by the machine that plays them (see OwnPlayerPrediction).</summary>
+/// <param name="Landed">What the input before this one left the player standing on, when it's something new: a ship
+/// they landed on, as this machine saw it (see <see cref="Sync.RemoteInputs"/>). None otherwise.</param>
+/// <param name="LandedAt">Where on <paramref name="Landed"/>, in its space.</param>
+/// <param name="LandedVelocity">How fast they were moving then (world space).</param>
+public readonly record struct InputSample(uint Sequence, PlayerButtons Held, PlayerButtons Pressed, float Yaw, float Pitch,
+                                          EntityId Landed = default, Vector3 LandedAt = default, Vector3 LandedVelocity = default)
+{
+    public void Write(NetWriter w)
+    {
+        w.WriteUInt32(Sequence);
+        w.WriteUInt32((uint)Held);
+        w.WriteUInt32((uint)Pressed);
+        w.WriteSingle(Yaw); // exactly: the host moves them the way they predicted they moved
+        w.WriteSingle(Pitch);
+        w.WriteBool(!Landed.IsNone);
+        if (Landed.IsNone) return;
+        Landed.Write(w);
+        w.WriteSingle(LandedAt.X); w.WriteSingle(LandedAt.Y); w.WriteSingle(LandedAt.Z);
+        w.WriteSingle(LandedVelocity.X); w.WriteSingle(LandedVelocity.Y); w.WriteSingle(LandedVelocity.Z);
+    }
+
+    public static InputSample Read(ref NetReader r)
+    {
+        var s = new InputSample(r.ReadUInt32(), (PlayerButtons)r.ReadUInt32(), (PlayerButtons)r.ReadUInt32(), r.ReadSingle(), r.ReadSingle());
+        if (!r.ReadBool()) return s;
+        return s with
+        {
+            Landed = EntityId.Read(ref r),
+            LandedAt = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle()),
+            LandedVelocity = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle()),
+        };
+    }
+
+    public PlayerInput ToInput() => new() { Held = Held, Pressed = Pressed, Yaw = Yaw, Pitch = Pitch, Aiming = true };
+}
+
+/// <summary>Client → host, unreliable, every tick: the player's latest inputs, newest last. Each is sent in several of
+/// these (<see cref="MaxSamples"/>), so a lost packet loses nothing; the host skips the ones it already has.</summary>
+public readonly struct PlayerInputMessage : IMessage
+{
+    public const int MaxSamples = 4;
+    public readonly InputSample[] Samples;
+    public PlayerInputMessage(InputSample[] samples) => Samples = samples;
+
+    public void Write(NetWriter w)
+    {
+        w.WriteByte((byte)MessageKind.PlayerInput);
+        w.WriteByte((byte)Samples.Length);
+        foreach (var s in Samples) s.Write(w);
+    }
+
+    public static PlayerInputMessage Read(ref NetReader r)
+    {
+        int count = System.Math.Min((int)r.ReadByte(), MaxSamples);
+        var samples = new InputSample[count];
+        for (int i = 0; i < count; i++) samples[i] = InputSample.Read(ref r);
+        return new PlayerInputMessage(samples);
+    }
 }
 
 /// <summary>Client → host: its entity IDs are running low (answered with an <see cref="IdBlockMessage"/>).</summary>

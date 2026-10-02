@@ -7,8 +7,8 @@ using ImGuiNET;
 
 namespace ClearSkies.Net.Debug;
 
-/// <summary>The network panel: who's connected, round trip, clock offset and slew, interpolation delay, bandwidth per
-/// channel, and sliders for artificial latency and loss (default test setting: 150 ms round trip, 2% loss).</summary>
+/// <summary>The network panel: who's connected, round trip, clock offset and slew, players' input (queued on the host,
+/// predicted on a client), interpolation delay, bandwidth per channel, and sliders for artificial latency and loss (default test setting: 150 ms round trip, 2% loss).</summary>
 public sealed class NetDebugPanel : IDebugUiSystem
 {
     private readonly NetSession _net;
@@ -35,10 +35,14 @@ public sealed class NetDebugPanel : IDebugUiSystem
                 ImGui.Text(_net.Transport is null ? "Transport off (single-player): start with --host <port> to let others join"
                                                   : $"Players connected: {host.Peers.Count}");
                 foreach (var p in host.Peers) ImGui.Text($"  {p.Name} ({p.Peer}): {p.State}");
+                host.Inputs.DrawDebugUi();
                 break;
             case ClientSession client:
                 ImGui.Text($"Round trip {client.ClockSync.RoundTripMs:0} ms, clock offset {client.ClockSync.Offset:+0.00;-0.00} ticks, " +
                            $"rate {_net.Clock.Rate:0.000}, snaps {client.ClockSync.SnapsPerMinute}/min");
+                if (client.Prediction is { } prediction)
+                    ImGui.Text($"Own player: {prediction.Unanswered} inputs unanswered, corrected {prediction.Corrections:N0} times " +
+                               $"(last {prediction.LastCorrection:0.000}, largest {prediction.LargestCorrection:0.000})");
                 break;
         }
         var (least, most) = _remote.Delays;

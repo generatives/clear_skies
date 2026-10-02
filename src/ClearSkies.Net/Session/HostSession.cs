@@ -6,6 +6,7 @@ using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Serialization;
 using ClearSkies.Net.Protocol;
+using ClearSkies.Net.Sync;
 using ClearSkies.Net.Transport;
 using DefaultEcs;
 using EngineSession = ClearSkies.Engine.Entities.Session;
@@ -35,12 +36,13 @@ public sealed class RemotePeer
 }
 
 /// <summary>
-/// The host's side of the session: single-player is a host with the transport off. Welcomes clients; spawns every
-/// player, its own and joining clients', once what they need is here (<see cref="PendingSpawns"/>: their ship, and
-/// the terrain around them, loaded here for its own and by the client for theirs), first sending a client the world as
-/// it is then (every live entity, described); relays
-/// commands, events and body snapshots between clients; answers clock pings; and when a client leaves, saves and
-/// despawns their player.
+/// The host's side of the session: single-player is a host with the transport off. The host owns and simulates
+/// everything, every player included; a client plays its own player by sending its input (<see cref="RemoteInputs"/>),
+/// and predicts it meanwhile. Welcomes clients; spawns every player, its own and joining clients', once what they need is
+/// here (<see cref="PendingSpawns"/>: their ship, and the terrain around them, loaded here with colliders and, for a
+/// client, by the client too), first sending a client the world as it is then (every live entity, described); relays
+/// commands and events between clients; sends everyone the bodies' snapshots; answers clock pings; and when a client
+/// leaves, saves and despawns their player.
 /// </summary>
 public sealed class HostSession : NetSession
 {
@@ -52,6 +54,7 @@ public sealed class HostSession : NetSession
     private readonly IPlayerDirectory _directory;
     private readonly EntitySet _players;
     private readonly PendingSpawns _spawns;
+    private readonly RemoteInputs _inputs;
 
     /// <param name="terrainReady">Whether the terrain around a point has loaded here, with colliders: the host's own
     /// player waits for it (none: it doesn't wait).</param>
@@ -61,6 +64,7 @@ public sealed class HostSession : NetSession
         : base(transport, session, commands, registry, world, clock)
     {
         _spawns = new PendingSpawns(world, registry, terrainReady);
+        _inputs = new RemoteInputs(world, registry);
         _ids = ids;
         _seed = seed;
         _checksum = generationChecksum;
@@ -80,11 +84,16 @@ public sealed class HostSession : NetSession
     /// <summary>Players waiting to spawn.</summary>
     public int PendingSpawns => _spawns.Count;
 
-    /// <summary>Everything that arrived, then whoever is ready spawns: still first in the tick, so a joining client's
-    /// world is described as the last tick left it (see <see cref="SendWorld"/>).</summary>
+    /// <summary>Other machines' input, applied to the players they play (see <see cref="RemoteInputs"/>).</summary>
+    public RemoteInputs Inputs => _inputs;
+
+    /// <summary>Everything that arrived, then each player played elsewhere takes their next input, then whoever is ready
+    /// spawns: still first in the tick, so a joining client's world is described as the last tick left it (see
+    /// <see cref="SendWorld"/>).</summary>
     public override void Update(float dt)
     {
         base.Update(dt);
+        _inputs.Update();
         _spawns.Update();
     }
 
@@ -142,7 +151,8 @@ public sealed class HostSession : NetSession
             case MessageKind.TimePing:
             {
                 var ping = TimePing.Read(ref r);
-                Send(from, new TimePong(ping.ClientTimeMs, Clock.Tick, Clock.Alpha), Channel.Unreliable);
+                double now = Clock.Now; // not Tick: on a frame running several ticks, that's behind real time
+                Send(from, new TimePong(ping.ClientTimeMs, (uint)now, (float)(now - System.Math.Floor(now))), Channel.Unreliable);
                 break;
             }
             case MessageKind.Command:
@@ -168,6 +178,10 @@ public sealed class HostSession : NetSession
                 else if (PeerById(rej.To) is { } target) Forward(target.Connection, packet);
                 break;
             }
+            case MessageKind.PlayerInput:
+                if (peer.State == PeerState.Joined && Registry.TryGet(peer.PlayerEntity, out var played))
+                    _inputs.Receive(played, PlayerInputMessage.Read(ref r));
+                break;
             case MessageKind.StateFrame:
                 if (peer.State != PeerState.Joined) break;
                 Bodies?.ReceiveFrame(ref r);
@@ -231,7 +245,7 @@ public sealed class HostSession : NetSession
         peer.Spawn = PlayerFactory.WorldPosition(description, Registry);
         _spawns.Add(description, id, local: false, d => SendWorld(peer, d));
         var (first, count) = _ids.NextBlock();
-        Send(peer.Connection, new Welcome(id, first, count, _seed, Clock.Tick, peer.Spawn));
+        Send(peer.Connection, new Welcome(id, first, count, _seed, (uint)Clock.Now, peer.Spawn));
         Console.WriteLine($"[net] {name} joining as {id}");
     }
 
@@ -245,7 +259,9 @@ public sealed class HostSession : NetSession
     {
         foreach (var d in Commands.Describe(_describable.GetEntities().ToArray()))
         {
-            var owner = d.Entity.Has<NetOwner>() ? d.Entity.Get<NetOwner>().Owner : Session.LocalPeer;
+            // A player's spawn names who plays them (the host owns them all).
+            var owner = d.Entity.Has<Player>() ? d.Entity.Get<Player>().Controller
+                      : d.Entity.Has<NetOwner>() ? d.Entity.Get<NetOwner>().Owner : Session.LocalPeer;
             Send([peer.Connection], new EventMessage(d.Kind, Commands.StampEvent(d.Id), Commands.SpawnCommand(d.Kind, d.Id, owner, d.Data)));
         }
         peer.State = PeerState.Joined;

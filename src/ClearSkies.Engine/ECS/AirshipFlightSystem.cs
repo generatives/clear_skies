@@ -1,5 +1,6 @@
 using System.Numerics;
 using ClearSkies.Engine.Core;
+using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Input;
 using ClearSkies.Engine.Physics;
 using ClearSkies.Engine.Voxels;
@@ -159,7 +160,7 @@ public sealed class AirshipFlightSystem : ISystem
         _fans     = world.GetEntities().With<Fan>().With<BlockRef>().AsSet();
         _buoyants = world.GetEntities().With<Buoyant>().With<BlockRef>().AsSet();
         _physics = physics;
-        _players = world.GetEntities().With<PlayerInput>().AsSet();
+        _players = world.GetEntities().With<LocalPlayer>().With<PlayerInput>().AsSet();
     }
 
     public void Update(float dt)

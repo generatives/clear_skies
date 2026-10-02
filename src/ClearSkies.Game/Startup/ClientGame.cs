@@ -21,7 +21,8 @@ namespace ClearSkies.Game.Startup;
 /// with a reason. The welcome says who we are, the world's seed, the host's tick, and where our player will spawn.</item>
 /// <item>Build the world from the host's seed, with no save (the host keeps everything).</item>
 /// <item>The client session loads terrain around the spawn and tells the host, which then sends the world (every entity,
-/// as spawn events) and spawns our player; the camera waits at the spawn until then.</item>
+/// as spawn events) and spawns our player; the camera waits at the spawn until then. The host simulates everything,
+/// our player included; we play it by sending our input, and predict it meanwhile.</item>
 /// </list>
 /// </summary>
 public static class ClientGame
@@ -50,10 +51,12 @@ public static class ClientGame
 
         // Each 1/60 s tick (0 or more a frame, see TickClock). First everything that arrived (commands, events,
         // snapshots, session messages), the hierarchy, and the frame's input as the local player's PlayerInput (tick
-        // systems read only that).
+        // systems read only that). The host simulates our player; we predict them meanwhile: the prediction checks
+        // itself against what the host last said, then sends it this tick's input.
         host.AddSystem(net, SystemStage.Simulation);
         host.AddSystem(world.Hierarchy, SystemStage.Simulation);
         host.AddSystem(view.InputSample, SystemStage.Simulation);
+        host.AddSystem(new OwnPlayerPrediction(net, host.World, world.Registry), SystemStage.Simulation);
         host.AddSystem(world.PhysicsBody, SystemStage.Simulation);
         // Motion goals (WASD/jump/mode toggle) before the physics step, so its CollisionsDetected analysis sees them this
         // same tick (see Physics/Characters/).
@@ -69,12 +72,12 @@ public static class ClientGame
         host.AddSystem(wheels, SystemStage.Simulation);
         host.AddSystem(world.Flight, SystemStage.Simulation); // impulses before the physics step, integrated this same tick
         host.AddSystem(world.CreatePresence(), SystemStage.Simulation);
-        // Physics copies of bodies owned elsewhere (kinematic ships near the local player, servo copies of other
-        // players), placed before the step, once the presence system has decided which copies exist.
+        // Physics copies of ships simulated elsewhere (kinematic, near the local player), placed before the step, once the
+        // presence system has decided which copies exist.
         host.AddSystem(new FollowerSystem(host.World, host.Physics, world.RemoteBodies), SystemStage.Simulation);
         host.AddSystem(host.Physics, SystemStage.Simulation); // one step
         host.AddSystem(new PhysicsTransformSyncSystem(host.World, host.Physics), SystemStage.Simulation); // body poses -> Transform
-        host.AddSystem(world.RemoteBodies, SystemStage.Simulation); // bodies owned elsewhere -> Transform, about 100 ms behind
+        host.AddSystem(world.RemoteBodies, SystemStage.Simulation); // ships and other players -> Transform, about 100 ms behind
         host.AddSystem(world.Hierarchy, SystemStage.Simulation); // e.g. volume Transforms -> chunk Transforms
         host.AddSystem(new SupportSystem(host.World, host.Physics), SystemStage.Simulation); // what each character stands on or rides with
         host.AddSystem(world.Interpolation, SystemStage.Simulation); // records this tick's poses
@@ -103,6 +106,7 @@ public static class ClientGame
         host.AddSystem(new BlockTargetSystem(host.World, input, renderer, world.BlockActions, world.EditLimits), SystemStage.Frame);
         host.AddSystem(new HudUi(view.Ui, input, world.BlockActions, pilot, renderer.Atlas,
                                  Path.Combine(AppContext.BaseDirectory, "Resources", "Icons")), SystemStage.Frame);
+        host.AddSystem(new JoiningScreen(view.Ui, net), SystemStage.Frame); // over everything until our player arrives
         var gridPersistence = new GridPersistenceSystem(host.World, view.Meshes, host.Physics, world.Selection, commands);
         host.AddSystem(gridPersistence, SystemStage.Frame);
         host.AddSystem(new AirshipDebugPanel(pilot, world.Flight, gridPersistence), SystemStage.Frame); // one "Airship" window

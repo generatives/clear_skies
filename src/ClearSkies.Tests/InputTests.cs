@@ -2,6 +2,7 @@ using System.Numerics;
 using BepuPhysics.Collidables;
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.ECS;
+using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Input;
 using ClearSkies.Engine.Math;
 using ClearSkies.Engine.Physics;
@@ -111,6 +112,7 @@ public class PlayerMovementTests
             0.01f, 2f, 100f, 70f, 6f, 5f, entity: player);
         player.Set(new CharacterControllerComponent { Character = character, EyeHeight = 0.7f });
         player.Set(new PlayerInput());
+        player.Set<LocalPlayer>(); // played here: its toggle presses switch it
         Players.SetFreeFlying(player, freeFly);
         return (world, physics, player);
     }
@@ -218,6 +220,30 @@ public class TickInterpolationTests
         rig.Tick(1);
         Assert.Equal(0.25f, rig.Frame(0.25f), 4);
         Assert.Equal(0.75f, rig.Frame(0.75f), 4);
+    }
+
+    [Fact]
+    public void ASmoothedJumpIsDrawnEasingOver()
+    {
+        var rig = new Rig();
+        rig.Tick(0);
+        rig.Tick(0);
+        // A tick that corrects the entity by a whole block.
+        rig.Entity.Get<Transform>() = At(1);
+        rig.Entity.Get<InterpolatedTransform>().Smooth(new Vector3D<float>(1, 0, 0));
+        rig.System.Update(SystemStage.Simulation, 0);
+
+        float last = 0;
+        rig.Time.Alpha = 1;
+        for (int frame = 0; frame < 30; frame++)
+        {
+            rig.System.Update(SystemStage.Frame, 1 / 60f);
+            float x = rig.Entity.DrawnPose().Position.X;
+            Assert.InRange(x - last, 0, 0.2f); // a glide, not a jump
+            last = x;
+        }
+        Assert.Equal(1f, last, 2);                                    // all the way, in half a second
+        Assert.Equal(1f, rig.Entity.Get<Transform>().Position.X); // the tick saw it there at once
     }
 
     [Fact]

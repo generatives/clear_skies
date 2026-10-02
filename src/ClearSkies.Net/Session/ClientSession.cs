@@ -5,6 +5,7 @@ using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Serialization;
 using ClearSkies.Net.Protocol;
+using ClearSkies.Net.Sync;
 using ClearSkies.Net.Transport;
 using DefaultEcs;
 using Silk.NET.Maths;
@@ -14,9 +15,11 @@ namespace ClearSkies.Net.Session;
 
 /// <summary>
 /// A client's side of the session: one connection, to the host. After the Welcome it loads terrain around where the
-/// player will spawn (a stand-in terrain interest until the player arrives), tells the host, and then receives the
-/// world: every entity as a spawn event, then its own player. Everything it sends goes to the host, which applies or
-/// relays it. Keeps its clock on the host's with <see cref="ClockSync"/>.
+/// player will spawn (a stand-in terrain interest until the player arrives) and settles its clock on the host's (see
+/// <see cref="ClockSync.Settling"/>, for at most <see cref="MaxSettleMs"/>), tells the host, and then receives the
+/// world: every entity as a spawn event, then its own player, which the host simulates and this machine predicts
+/// (<see cref="OwnPlayerPrediction"/>, which sends the player's input). Everything it sends goes to the host, which
+/// applies or relays it. Keeps its clock on the host's with <see cref="ClockSync"/>.
 /// </summary>
 public sealed class ClientSession : NetSession
 {
@@ -26,6 +29,11 @@ public sealed class ClientSession : NetSession
     private readonly EntitySet _localPlayers;
     private Entity _anchor;
     private bool _terrainReadySent;
+    private double _settleFrom = double.NaN;
+
+    /// <summary>The longest a join waits for the clock to settle, in milliseconds: a jittery connection may never
+    /// quite, and it carries on slewing once joined.</summary>
+    public const double MaxSettleMs = 10_000;
 
     /// <param name="welcome">The host's welcome (see <see cref="Connect"/>).</param>
     /// <param name="terrainLoaded">Whether the terrain around a point has loaded (ChunkLoadSystem).</param>
@@ -35,7 +43,7 @@ public sealed class ClientSession : NetSession
     {
         Welcome = welcome;
         _terrainLoaded = terrainLoaded;
-        ClockSync = new ClockSync(clock);
+        ClockSync = new ClockSync(clock) { Settling = true };
         session.BecomeClient(welcome.Peer);
         registry.AddIdBlock(welcome.IdFirst, welcome.IdCount);
         ClockSync.SnapTo(welcome.HostTick);
@@ -50,6 +58,9 @@ public sealed class ClientSession : NetSession
     public Welcome Welcome { get; }
     public ClockSync ClockSync { get; }
     public bool Joined { get; private set; }
+
+    /// <summary>What joining is waiting on, for a loading screen: the world around the spawn, the clock, then the host.</summary>
+    public string JoinStatus { get; private set; } = "Loading the world";
     public override bool OthersConnected => true;
 
     /// <summary>
@@ -71,11 +82,22 @@ public sealed class ClientSession : NetSession
     public override void Update(float dt)
     {
         base.Update(dt);
+        ClockSync.Update();
         if (ClockSync.ShouldPing(NowMs)) Send(Host, new TimePing(NowMs), Channel.Unreliable);
-        if (!_terrainReadySent && _terrainLoaded(Welcome.Spawn))
+        if (double.IsNaN(_settleFrom)) _settleFrom = NowMs;
+        bool clockReady = ClockSync.Settled || NowMs - _settleFrom > MaxSettleMs;
+        bool terrainLoaded = !_terrainReadySent && _terrainLoaded(Welcome.Spawn);
+        if (!_terrainReadySent) JoinStatus = !terrainLoaded ? "Loading the world" : "Syncing with the host";
+        if (terrainLoaded && clockReady)
         {
+            JoinStatus = "Waiting for the host";
             Send(Host, new TerrainReady());
             _terrainReadySent = true;
+            double waited = (NowMs - _settleFrom) / 1000;
+            Console.WriteLine(ClockSync.Settled
+                ? $"[net] clock settled after {waited:0.0} s: {ClockSync.Offset:+0.00;-0.00} ticks off, round trip {ClockSync.RoundTripMs:0} ms, {ClockSync.Snaps} snaps, {ClockSync.SkippedTicks} dropped ticks put back"
+                : $"[net] clock didn't settle in {waited:0.0} s: {ClockSync.Offset:+0.00;-0.00} ticks off, round trip {ClockSync.RoundTripMs:0} ms, {ClockSync.Snaps} snaps, {ClockSync.SkippedTicks} dropped ticks put back; joining anyway");
+            ClockSync.EndSettling(NowMs); // from here on, the world is drawn and predicted from it: slew
         }
         if (_anchor.IsAlive && _localPlayers.Count > 0)
         {
@@ -158,6 +180,9 @@ public sealed class ClientSession : NetSession
     public override void SendRejection(PeerId to, uint seq) => Send(Host, new Rejection(to, Session.LocalPeer, seq));
 
     internal void SendToHost(ReadOnlySpan<byte> packet, Channel channel) => Forward(Host, packet, channel);
+
+    /// <summary>The player's latest inputs, for the host to move them by (see <see cref="OwnPlayerPrediction"/>).</summary>
+    internal void SendInput(in PlayerInputMessage message) => Send(Host, message, Channel.Unreliable);
 
     public override void Dispose()
     {

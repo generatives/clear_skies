@@ -12,8 +12,11 @@ using PhysVec = System.Numerics.Vector3;
 namespace ClearSkies.Engine.ECS;
 
 /// <summary>
-/// Each tick, before physics: the free-fly/walking toggle (V, sent as a SetMoveMode command, which applies later this
-/// same tick; see <see cref="Players.SetFreeFlying"/>) and per-mode movement, all from the tick's <see cref="PlayerInput"/>. Free-flying moves <see cref="Transform.Position"/> directly
+/// Each tick, before physics: every simulated player's free-fly/walking toggle (V) and movement, all from the tick's
+/// <see cref="PlayerInput"/>. The host sends the toggle as a SetMoveMode command, which applies later this same tick
+/// (see <see cref="Players.SetFreeFlying"/>) and tells everyone; a client predicting its own player switches it at
+/// once. A client's player switches on the same input on both machines that way, the host running it when that input
+/// comes up in the queue, rather than whenever the command happened to arrive. Free-flying moves <see cref="Transform.Position"/> directly
 /// the way the player looks; E and Q raise and lower its speed by <see cref="FlySpeedStep"/> (Ctrl triples it while
 /// held). Walking instead feeds WASD/Shift/Space into the character's motion goals
 /// (<see cref="PlayerCharacter.UpdateCharacterGoals"/>) — actual movement happens inside the physics step via the
@@ -51,7 +54,7 @@ public sealed class PlayerMovementSystem : ISystem
             if (e.Get<PlayerInput>().WasPressed(PlayerButtons.ToggleFly) && !e.Has<Piloting>()) _toggled.Add(e);
         foreach (var e in _toggled)
         {
-            if (_commands != null && e.Has<EntityId>())
+            if (_commands != null && _commands.Session.IsHost && e.Has<EntityId>())
                 _commands.Send(new SetMoveMode { Player = e.Get<EntityId>(), FreeFly = !e.Has<FreeFlying>() });
             else
                 Players.SetFreeFlying(e, !e.Has<FreeFlying>()); // changes which set it's in

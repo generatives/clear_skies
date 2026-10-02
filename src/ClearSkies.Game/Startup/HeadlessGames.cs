@@ -43,8 +43,8 @@ public static class DedicatedServerGame
         host.AddSystem(wheels, SystemStage.Simulation);
         host.AddSystem(world.Flight, SystemStage.Simulation);
         host.AddSystem(world.CreatePresence(), SystemStage.Simulation);
-        // Physics copies of bodies owned elsewhere (kinematic ships near the local player, servo copies of other
-        // players), placed before the step, once the presence system has decided which copies exist.
+        // Physics copies of ships simulated elsewhere (kinematic, near the local player), placed before the step, once the
+        // presence system has decided which copies exist.
         host.AddSystem(new FollowerSystem(host.World, host.Physics, world.RemoteBodies), SystemStage.Simulation);
         host.AddSystem(host.Physics, SystemStage.Simulation);
         host.AddSystem(new PhysicsTransformSyncSystem(host.World, host.Physics), SystemStage.Simulation);
@@ -87,6 +87,7 @@ public static class BotClientGame
 
         host.AddSystem(net, SystemStage.Simulation);
         host.AddSystem(world.Hierarchy, SystemStage.Simulation);
+        host.AddSystem(new OwnPlayerPrediction(net, host.World, world.Registry), SystemStage.Simulation); // its (idle) input to the host
         host.AddSystem(world.PhysicsBody, SystemStage.Simulation);
         host.AddSystem(new PlayerMovementSystem(host.World, commands), SystemStage.Simulation);
         host.AddSystem(world.BlockActions, SystemStage.Simulation);
@@ -97,8 +98,8 @@ public static class BotClientGame
         host.AddSystem(wheels, SystemStage.Simulation);
         host.AddSystem(world.Flight, SystemStage.Simulation);
         host.AddSystem(world.CreatePresence(), SystemStage.Simulation);
-        // Physics copies of bodies owned elsewhere (kinematic ships near the local player, servo copies of other
-        // players), placed before the step, once the presence system has decided which copies exist.
+        // Physics copies of ships simulated elsewhere (kinematic, near the local player), placed before the step, once the
+        // presence system has decided which copies exist.
         host.AddSystem(new FollowerSystem(host.World, host.Physics, world.RemoteBodies), SystemStage.Simulation);
         host.AddSystem(host.Physics, SystemStage.Simulation);
         host.AddSystem(new PhysicsTransformSyncSystem(host.World, host.Physics), SystemStage.Simulation);

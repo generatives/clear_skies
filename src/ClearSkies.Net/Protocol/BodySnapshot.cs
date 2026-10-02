@@ -12,6 +12,9 @@ public enum SnapshotFlags : byte
     HasLook = 1,
     /// <summary>A player free-flying: no character body, so nothing to stand on or push.</summary>
     FreeFlying = 2,
+    /// <summary>A player played on another machine: the last of its inputs applied (<see cref="BodySnapshot.Input"/>)
+    /// follows, so it can check its prediction.</summary>
+    HasInput = 4,
 }
 
 /// <summary>A player's look direction, streamed with their body.</summary>
@@ -31,6 +34,8 @@ public struct BodySnapshot
     public Vector3 LinearVelocity, AngularVelocity;
     public SnapshotFlags Flags;
     public LookAngles Look;
+    /// <summary>With <see cref="SnapshotFlags.HasInput"/>: the number of the player's last input applied.</summary>
+    public uint Input;
 
     public readonly void Write(NetWriter w)
     {
@@ -47,6 +52,7 @@ public struct BodySnapshot
             w.WriteInt16(ToShort(Look.Yaw, MathF.PI * 4));
             w.WriteInt16(ToShort(Look.Pitch, MathF.PI));
         }
+        if ((Flags & SnapshotFlags.HasInput) != 0) w.WriteUInt32(Input);
     }
 
     public static BodySnapshot Read(ref NetReader r)
@@ -64,6 +70,7 @@ public struct BodySnapshot
         };
         if ((s.Flags & SnapshotFlags.HasLook) != 0)
             s.Look = new LookAngles(FromShort(r.ReadInt16(), MathF.PI * 4), FromShort(r.ReadInt16(), MathF.PI));
+        if ((s.Flags & SnapshotFlags.HasInput) != 0) s.Input = r.ReadUInt32();
         return s;
     }
 

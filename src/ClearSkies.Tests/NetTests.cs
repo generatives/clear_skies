@@ -91,6 +91,16 @@ public sealed class LoopbackGame : IDisposable
         }
     }
 
+    /// <summary>The host's player for a client's <paramref name="player"/>: the one it simulates.</summary>
+    public Entity Simulated(Entity player) => Host.Registry.Find(player.Get<EntityId>())!.Value;
+
+    /// <summary>Moves a client's player, at rest: on the host, which simulates them, and on the client, which
+    /// predicts them.</summary>
+    public void Teleport(Entity player, Vector3 at)
+    {
+        foreach (var e in new[] { Simulated(player), player }) ClearSkies.Engine.ECS.Players.Teleport(e, new Vector3D<float>(at.X, at.Y, at.Z));
+    }
+
     public void Dispose()
     {
         foreach (var (scene, _) in Clients) scene.Dispose();
@@ -173,22 +183,73 @@ public class TransportTests
 
 public class ClockSyncTests
 {
+    /// <summary>A host and a client clock, both stepped in real time; the client's ticks run at its Rate.</summary>
+    private sealed class Pair
+    {
+        public readonly Engine.Core.ManualTickClock Client = new();
+        public readonly ClockSync Sync;
+        public double NowMs, HostStart;
+
+        public Pair(uint clientTick, double hostTick, bool settling = false)
+        {
+            Client.Tick = clientTick;
+            HostStart = hostTick;
+            Sync = new ClockSync(Client) { Settling = settling };
+        }
+
+        public double HostTick(double atMs) => HostStart + atMs / ClockSync.TickMs;
+
+        public void Advance(double ms)
+        {
+            double ticks = Client.Alpha + ms / ClockSync.TickMs * Client.Rate;
+            Client.Tick += (uint)ticks;
+            Client.Alpha = (float)(ticks - System.Math.Floor(ticks));
+            NowMs += ms;
+        }
+
+        /// <summary>A ping now, answered halfway through <paramref name="rttMs"/>; the answer is handled on arrival.</summary>
+        public void Ping(double rttMs)
+        {
+            double sent = NowMs, host = HostTick(sent + rttMs / 2);
+            Advance(rttMs);
+            Sync.OnPong(new TimePong(sent, (uint)host, (float)(host - System.Math.Floor(host))), NowMs);
+        }
+
+        /// <summary>The host's tick now less the client's.</summary>
+        public double Off => HostTick(NowMs) - Client.Now;
+    }
+
     [Fact]
     public void AFarOffClockSnapsAndACloseOneSlews()
     {
-        var clock = new Engine.Core.ManualTickClock { Tick = 0 };
-        var sync = new ClockSync(clock);
-        // The host is at tick 1000; 100 ms round trip.
-        sync.OnPong(new TimePong(0, 1000, 0), nowMs: 100);
-        Assert.InRange(clock.Tick, 1002u, 1004u); // snapped: 1000 + half the round trip (3 ticks)
-        Assert.Equal(1, sync.Snaps);
+        var p = new Pair(clientTick: 0, hostTick: 1000);
+        p.Ping(100);
+        Assert.Equal(1, p.Sync.Snaps);
+        Assert.InRange(p.Off, -0.5, 0.5);
 
-        // A little behind (the host 3 ticks further on than we'd think): run faster, no jump.
-        uint before = clock.Tick;
-        for (int i = 0; i < 4; i++) sync.OnPong(new TimePong(200 + i, clock.Tick + 3 + 3, 0), nowMs: 300 + i);
-        Assert.Equal(before, clock.Tick);
-        Assert.True(clock.Rate > 1);
-        Assert.True(clock.Rate <= 1 + ClockSync.MaxSlew);
+        // The host 3 ticks further on than we'd think: run faster, no jump.
+        p.HostStart += 3;
+        for (int i = 0; i < 4; i++) { p.Advance(150); p.Ping(100); }
+        Assert.Equal(1, p.Sync.Snaps);
+        Assert.True(p.Client.Rate > 1);
+        Assert.True(p.Client.Rate <= 1 + ClockSync.MaxSlew);
+    }
+
+    [Fact]
+    public void SlewingDoesNotOvershoot()
+    {
+        // 4 ticks behind: slews (no snap), and the answers from before it sped up don't keep it speeding past.
+        var p = new Pair(clientTick: 5000, hostTick: 5004);
+        double most = 0;
+        for (int i = 0; i < 80; i++)
+        {
+            p.Advance(150);
+            p.Ping(100);
+            most = System.Math.Min(most, p.Off);
+        }
+        Assert.Equal(0, p.Sync.Snaps);
+        Assert.InRange(p.Off, -0.5, 0.5);
+        Assert.True(most > -0.6, $"overshot to {most:0.00} ticks ahead");
     }
 
     [Fact]
@@ -196,10 +257,32 @@ public class ClockSyncTests
     {
         var clock = new Engine.Core.ManualTickClock { Tick = 5000 };
         var sync = new ClockSync(clock);
-        // Most answers: 60 ms round trip, host 3 ticks ahead of us... one very late one says otherwise.
+        // Most answers: 60 ms round trip... one very late one says otherwise.
         for (int i = 0; i < 12; i++) sync.OnPong(new TimePong(i * 250, 5000 + 1, 0), nowMs: i * 250 + 60);
         sync.OnPong(new TimePong(4000, 5001, 0), nowMs: 4000 + 600);
         Assert.InRange(sync.RoundTripMs, 55, 65);
+    }
+
+    [Fact]
+    public void TicksASlowFrameDroppedArePutBackWithoutASnap()
+    {
+        var p = new Pair(clientTick: 5000, hostTick: 5000, settling: true);
+        for (int i = 0; i < 8; i++) { p.Advance(190); p.Ping(60); }
+        long snaps = p.Sync.Snaps;
+
+        // A 400 ms frame (loading): 15 ticks run, 9 dropped, so the clock is 9 behind the host's.
+        p.Advance(400);
+        p.Client.Tick -= 9;
+        p.Client.DroppedTicks += 9;
+        Assert.InRange(p.Off, 8.5, 9.5);
+        p.Sync.Update();
+        Assert.InRange(p.Off, -0.5, 0.5);
+        Assert.Equal(9, p.Sync.SkippedTicks);
+
+        // The host's answers find it on time: no snap, and settled.
+        for (int i = 0; i < ClockSync.SettleAnswers; i++) { p.Advance(190); p.Ping(60); }
+        Assert.Equal(snaps, p.Sync.Snaps);
+        Assert.True(p.Sync.Settled);
     }
 }
 
@@ -221,14 +304,16 @@ public class JoinTests
         Assert.Equal(GridSerializer.Voxels(grid.Get<ChunkGrid>().Volume), GridSerializer.Voxels(copy!.Value.Get<ChunkGrid>().Volume));
         Assert.False(copy.Value.Get<NetOwner>().IsLocal); // the host's
 
-        // Its own player, owned by it; the host's player, owned by the host.
+        // Its own player, played here but owned by the host; and the host's player.
         var mine = client.World.GetEntities().With<LocalPlayer>().AsEnumerable().Single();
-        Assert.Equal(net.Session.LocalPeer, mine.Get<NetOwner>().Owner);
+        Assert.Equal(PeerId.Host, mine.Get<NetOwner>().Owner);
+        Assert.Equal(net.Session.LocalPeer, mine.Get<Player>().Controller);
         Assert.True(client.Registry.IsLive(hostPlayer.Get<EntityId>()));
-        // The host has the client's player too, owned by the client.
+        // The host simulates the client's player, from its input.
         var remote = game.Host.Registry.Find(mine.Get<EntityId>())!.Value;
-        Assert.False(remote.Get<NetOwner>().IsLocal);
-        Assert.False(remote.Has<CharacterControllerComponent>()); // simulated by its owner only
+        Assert.True(remote.Get<NetOwner>().IsLocal);
+        Assert.False(remote.Get<Player>().IsLocal);
+        Assert.True(remote.Has<CharacterControllerComponent>());
     }
 
     [Fact]
@@ -258,6 +343,20 @@ public class JoinTests
         game.Tick(120);
         Assert.InRange((int)client.Clock.Tick - (int)game.Host.Clock.Tick, -2, 2);
         Assert.InRange(net.ClockSync.RoundTripMs, 70, 100);
+    }
+
+    [Fact]
+    public void TheClientsClockHasSettledByTheTimeItJoins()
+    {
+        // The welcome's tick is a one-way trip old by the time it arrives: joining waits for pings to put that right, so
+        // the game doesn't start with the clock running fast to catch up.
+        using var game = new LoopbackGame(latencyMs: 50);
+        game.Host.Clock.Tick = 5000;
+        var (client, net) = game.Join();
+        Assert.True(net.ClockSync.Settled);
+        Assert.False(net.ClockSync.Settling);
+        Assert.Equal(1.0, client.Clock.Rate);
+        Assert.InRange((int)client.Clock.Tick - (int)game.Host.Clock.Tick, -1, 1);
     }
 
     [Fact]
@@ -296,7 +395,7 @@ public class JoinTests
         var (a, _) = game.Join("a");
         var (b, _) = game.Join("b");
         var aPlayer = a.World.GetEntities().With<LocalPlayer>().AsEnumerable().Single();
-        aPlayer.Get<Transform>().Position = new Vector3D<float>(12, 70, 3);
+        game.Teleport(aPlayer, new Vector3(12, 70, 3));
         game.Tick(30);
         var aSeenByB = b.Registry.Find(aPlayer.Get<EntityId>());
         Assert.NotNull(aSeenByB);
@@ -313,7 +412,7 @@ public class JoinTests
         var (a, _) = game.Join("a");
         var (b, _) = game.Join("b");
         var aPlayer = a.World.GetEntities().With<LocalPlayer>().AsEnumerable().Single();
-        aPlayer.Get<Transform>().Position = new Vector3D<float>(0, 57, 0);
+        game.Teleport(aPlayer, new Vector3(0, 57, 0));
         game.Tick(10);
         var gridId = grid.Get<EntityId>();
         a.Commands.Send(new EditVoxels { Volume = gridId, Editor = aPlayer.Get<EntityId>(),
@@ -336,7 +435,7 @@ public class JoinTests
         game.Tick(2);
         var (a, _) = game.Join("a");
         var aPlayer = a.World.GetEntities().With<LocalPlayer>().AsEnumerable().Single();
-        aPlayer.Get<Transform>().Position = new Vector3D<float>(0, 300, 0); // far out of reach, as the host will see
+        game.Teleport(aPlayer, new Vector3(0, 300, 0)); // far out of reach
         game.Tick(10);
         var gridId = grid.Get<EntityId>();
         a.Commands.Send(new EditVoxels { Volume = gridId, Editor = aPlayer.Get<EntityId>(),

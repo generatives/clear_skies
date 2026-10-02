@@ -45,6 +45,7 @@ public sealed class BodySync : ISystem, IDebugUiSystem
         _net = net;
         _physics = physics;
         net.Bodies = this;
+        if (net is HostSession host) host.Inputs.Physics = physics; // how fast the ship a client lands on moves
         _remote = world.GetEntities().With<RemoteBody>().AsSet();
         // Snapshots' lateness is measured against our clock: when clock sync snaps it, they move with it.
         if (net is ClientSession client)
@@ -62,11 +63,13 @@ public sealed class BodySync : ISystem, IDebugUiSystem
     /// <summary>Whether grids are synced too (on by default; players always are).</summary>
     public bool SyncGrids { get; init; } = true;
 
-    /// <summary>A synced body owned elsewhere is drawn from its snapshots; one owned here is the truth.</summary>
+    /// <summary>A synced body owned elsewhere is drawn from its snapshots; one owned here is the truth. The player
+    /// played here is neither: it's predicted (<see cref="OwnPlayerPrediction"/>), and its snapshots check that.</summary>
     private void SetRemote(Entity e, in NetOwner owner)
     {
         bool synced = e.Has<Player>() || (SyncGrids && e.Has<DynamicGrid>());
-        bool remote = synced && !owner.IsLocal;
+        bool predicted = e.Has<Player>() && e.Get<Player>().IsLocal;
+        bool remote = synced && !owner.IsLocal && !predicted;
         if (remote && !e.Has<RemoteBody>()) e.Set(new RemoteBody { Buffer = new SnapshotBuffer(), TeleportNext = true });
         else if (!remote && e.Has<RemoteBody>()) e.Remove<RemoteBody>();
     }
@@ -132,6 +135,12 @@ public sealed class BodySync : ISystem, IDebugUiSystem
             s.Look = new LookAngles(MathF.IEEERemainder(look.Yaw, 2 * MathF.PI), look.Pitch);
             s.Flags |= SnapshotFlags.HasLook;
         }
+        if (e.Has<RemoteInput>())
+        {
+            // Played on another machine: how far through its inputs this is, so it can check its prediction.
+            s.Input = e.Get<RemoteInput>().Queue.Applied;
+            s.Flags |= SnapshotFlags.HasInput;
+        }
         return s;
     }
 
@@ -161,6 +170,7 @@ public sealed class BodySync : ISystem, IDebugUiSystem
             var s = BodySnapshot.Read(ref r);
             _snapshotsReceived++;
             if (!_net.Registry.TryGet(s.Entity, out var e)) continue; // not spawned here (yet)
+            if (e.Has<LocalPlayer>()) { _net.Prediction?.Answer(s); continue; } // ours, predicted: how the host has it
             if (!e.Has<RemoteBody>()) continue; // ours: we're the truth
             e.Get<RemoteBody>().Buffer.Add(tick, s, _net.Clock.Tick);
         }
