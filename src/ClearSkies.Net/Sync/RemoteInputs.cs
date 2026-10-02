@@ -1,7 +1,10 @@
+using System.Numerics;
 using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Gui;
 using ClearSkies.Engine.Input;
+using ClearSkies.Engine.Physics;
+using ClearSkies.Engine.Physics.Support;
 using ClearSkies.Net.Protocol;
 using DefaultEcs;
 using ImGuiNET;
@@ -40,6 +43,10 @@ public struct RemoteInput
 /// presses. A queue that stays longer than it needs to (more than <see cref="Target"/> waiting all through
 /// <see cref="WindowTicks"/>, as when this machine dropped ticks it couldn't catch up) is shortened by skipping inputs,
 /// their presses kept, so the delay doesn't stay.</para>
+/// <para>An input can say the one before it landed the player on a ship, and where (<see cref="InputSample.Landed"/>).
+/// Their machine sees the ship where it was a moment ago, so here they'd come down further along its deck, or miss it:
+/// they're put where they landed there, if that's within reach of where they are here (<see cref="ClaimSlack"/>, and as
+/// far as the ship moves in <see cref="ClaimSeconds"/>). It's the same deck in its own space on both machines.</para>
 /// </summary>
 public sealed class RemoteInputs : IDebugUiSystem
 {
@@ -48,13 +55,24 @@ public sealed class RemoteInputs : IDebugUiSystem
     /// <summary>Ticks a queue is watched over before it's shortened (a second).</summary>
     public const int WindowTicks = 60;
 
-    private readonly EntitySet _players;
-    private long _received, _repeated, _skipped;
+    /// <summary>How far, in metres, from where a player is here a landing they claim may be, on a ship standing still.</summary>
+    public const float ClaimSlack = 1f;
+    /// <summary>...and further, as far as the ship's deck there moves in this many seconds: longer than a round trip and
+    /// the delay a ship is drawn with.</summary>
+    public const float ClaimSeconds = 0.5f;
 
-    public RemoteInputs(World world)
+    private readonly EntitySet _players;
+    private readonly EntityRegistry _registry;
+    private long _received, _repeated, _skipped, _landed, _landingsRefused;
+
+    public RemoteInputs(World world, EntityRegistry registry)
     {
         _players = world.GetEntities().With<RemoteInput>().With<PlayerInput>().AsSet();
+        _registry = registry;
     }
+
+    /// <summary>For how fast a ship moves (set by the body sync); without it, ships count as standing still.</summary>
+    public PhysicsWorld? Physics { get; set; }
 
     /// <summary>Inputs from the machine that plays <paramref name="player"/>.</summary>
     public void Receive(Entity player, in PlayerInputMessage message)
@@ -84,6 +102,7 @@ public sealed class RemoteInputs : IDebugUiSystem
                 queue.Waiting.RemoveAt(0);
                 input = next.ToInput();
                 queue.Applied = next.Sequence;
+                if (!next.Landed.IsNone) Land(e, next);
             }
             else
             {
@@ -100,6 +119,34 @@ public sealed class RemoteInputs : IDebugUiSystem
                 if (e.Has<Transform>()) e.Get<Transform>().Rotation = look.BodyRotation;
             }
         }
+    }
+
+    /// <summary>Puts the player where their machine had the last input land them, if it's within reach.</summary>
+    private void Land(Entity player, in InputSample claim)
+    {
+        if (player.Has<FreeFlying>() || !player.Has<Support>() || !player.Has<Transform>()) return;
+        if (!_registry.TryGet(claim.Landed, out var ship) || !ship.Has<Supportable>() || !ship.Has<Transform>()) return;
+        ref readonly var support = ref player.Get<Support>();
+        if (support.Supporter == ship && Vector3.Distance(support.LocalPosition, claim.LandedAt) < OwnPlayerPrediction.Tolerance) return;
+
+        ref readonly var st = ref ship.Get<Transform>();
+        var rotation = new Quaternion(st.Rotation.X, st.Rotation.Y, st.Rotation.Z, st.Rotation.W);
+        var spot = new Vector3(st.Position.X, st.Position.Y, st.Position.Z) + Vector3.Transform(claim.LandedAt, rotation);
+        float speed = 0f;
+        if (Physics != null && ship.Has<PhysicsBodyComponent>())
+        {
+            ref readonly var body = ref ship.Get<PhysicsBodyComponent>();
+            var centre = body.BodyPosition(st);
+            speed = (Physics.GetBodyLinearVelocity(body.Body) + Vector3.Cross(Physics.GetBodyAngularVelocity(body.Body), spot - centre)).Length();
+        }
+        ref readonly var t = ref player.Get<Transform>();
+        if (Vector3.Distance(new Vector3(t.Position.X, t.Position.Y, t.Position.Z), spot) > ClaimSlack + speed * ClaimSeconds)
+        {
+            _landingsRefused++;
+            return;
+        }
+        Players.PlaceOn(player, ship, claim.LandedAt, claim.LandedVelocity);
+        _landed++;
     }
 
     /// <summary>Skips inputs a queue has had more of than it needs all through the last <see cref="WindowTicks"/>,
@@ -124,6 +171,7 @@ public sealed class RemoteInputs : IDebugUiSystem
     public void DrawDebugUi()
     {
         ImGui.Text($"Inputs received {_received:N0}, held over {_repeated:N0}, skipped {_skipped:N0}");
+        ImGui.Text($"Landings put where their machine had them {_landed:N0}, out of reach {_landingsRefused:N0}");
         foreach (ref readonly var e in _players.GetEntities())
             ImGui.Text($"  {e.Get<Player>().Name}: {e.Get<RemoteInput>().Queue.Count} waiting, applied #{e.Get<RemoteInput>().Queue.Applied}");
     }

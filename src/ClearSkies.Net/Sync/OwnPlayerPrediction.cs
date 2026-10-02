@@ -23,7 +23,9 @@ namespace ClearSkies.Net.Sync;
 /// so is every later record, since they all carry the same mistake. Positions are compared in the space of what the
 /// player stands on (a ship's, or the world's), where a ship's own motion, which the two machines see at different
 /// times, doesn't count.</item>
-/// <item>This tick's input is numbered and sent to the host, with the few before it (<see cref="PlayerInputMessage"/>).</item>
+/// <item>This tick's input is numbered and sent to the host, with the few before it (<see cref="PlayerInputMessage"/>).
+/// If the last one landed the player on a ship, it says where on it (<see cref="InputSample.Landed"/>): the ship here is
+/// where the host had it a moment ago, so on its own the host would have them come down somewhere else on its deck.</item>
 /// </list>
 /// The host runs the same inputs in the same order (<see cref="RemoteInputs"/>), so the two agree unless the world
 /// differed: a ship seen at another moment, another player in the way, a stall.
@@ -64,6 +66,7 @@ public sealed class OwnPlayerPrediction : ISystem
     private uint _lastAnswer;
     private int _supportMismatches;
     private int _modeMismatches;
+    private uint _landedOn; // the last input that landed the player on a ship, which the next one tells the host
 
     public OwnPlayerPrediction(ClientSession net, World world, EntityRegistry registry)
     {
@@ -92,20 +95,34 @@ public sealed class OwnPlayerPrediction : ISystem
     {
         foreach (ref readonly var e in _local.GetEntities())
         {
-            if (_input > 0) _history[_input % HistoryLength] = Capture(e, _input);
+            EntityId landed = default;
+            Vector3 landedAt = default, landedVelocity = default;
+            if (_input > 0)
+            {
+                ref readonly var previous = ref _history[(_input - 1) % HistoryLength];
+                bool hadOne = previous.Input == _input - 1 && _input > 1; // (none for the first: placed by the host)
+                var before = previous.Support;
+                ref var record = ref _history[_input % HistoryLength];
+                record = Capture(e, _input);
+                if (hadOne && !record.Support.IsNone && record.Support != before && record.Grounded)
+                {
+                    (landed, landedAt, landedVelocity) = (record.Support, record.Position, record.Velocity);
+                    _landedOn = _input;
+                }
+            }
             if (_answer is { } answer)
             {
                 _answer = null;
                 Correct(e, answer);
             }
-            Send(e.Get<PlayerInput>());
+            Send(e.Get<PlayerInput>(), landed, landedAt, landedVelocity);
             return; // one local player
         }
     }
 
-    private void Send(in PlayerInput input)
+    private void Send(in PlayerInput input, EntityId landed, Vector3 landedAt, Vector3 landedVelocity)
     {
-        var sample = new InputSample(++_input, input.Held, input.Pressed, input.Yaw, input.Pitch);
+        var sample = new InputSample(++_input, input.Held, input.Pressed, input.Yaw, input.Pitch, landed, landedAt, landedVelocity);
         if (_sentCount == _sent.Length) Array.Copy(_sent, 1, _sent, 0, --_sentCount);
         _sent[_sentCount++] = sample;
         _net.SendInput(new PlayerInputMessage(_sent[.._sentCount]));
@@ -134,6 +151,9 @@ public sealed class OwnPlayerPrediction : ISystem
     /// with them.</summary>
     private void Correct(Entity e, in BodySnapshot answer)
     {
+        // Up to the input that landed on a ship, the host had them where it did itself: the next input puts them where
+        // they landed here.
+        if (answer.Input <= _landedOn) return;
         ref var predicted = ref _history[answer.Input % HistoryLength];
         if (predicted.Input != answer.Input) return; // too old, or never recorded
         bool flying = (answer.Flags & SnapshotFlags.FreeFlying) != 0;
