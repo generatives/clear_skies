@@ -10,8 +10,8 @@ namespace ClearSkies.Net.Session;
 /// delayed by jitter overestimate the one-way time. Off by more than <see cref="SnapTicks"/> (joining, a hitch): snap.
 /// Otherwise slew, running ticks up to 2% faster or slower until within half a tick. The host never adjusts.
 /// <para>While joining (<see cref="Settling"/>), nothing is drawn or predicted from the clock yet, so it snaps to every
-/// estimate more than half a tick out instead. It's <see cref="Settled"/> once a whole window of answers in a row
-/// (<see cref="SampleCount"/>, four seconds) has found it within half a tick: by then no answer from before the last
+/// estimate more than <see cref="SettleTicks"/> out instead. It's <see cref="Settled"/> once a whole window of answers
+/// in a row (<see cref="SampleCount"/>, four seconds) has found it within that: by then no answer from before the last
 /// snap, or from a hitch while loading, is left to pull the estimate later, so the game starts on the host's timeline
 /// rather than slewing towards it for seconds with players already moving.</para>
 /// </summary>
@@ -22,6 +22,9 @@ public sealed class ClockSync
     public const double SnapTicks = 10;
     public const double MaxSlew = 0.02;
     public const double TickMs = 1000.0 / 60.0;
+    /// <summary>How far out, in ticks, settling snaps, and the estimates must stay within to be settled: the answers'
+    /// own jitter is a good part of a tick, and snapping to it only adds more. The last of it is slewed.</summary>
+    public const double SettleTicks = 1;
 
     private readonly ITickClock _clock;
     private readonly List<(double RttMs, double Offset)> _samples = new();
@@ -38,10 +41,10 @@ public sealed class ClockSync
 
     public bool HasEstimate => _samples.Count > 0;
 
-    /// <summary>Joining: snap to every estimate more than half a tick out, rather than slew.</summary>
+    /// <summary>Joining: snap to every estimate more than <see cref="SettleTicks"/> out, rather than slew.</summary>
     public bool Settling { get; set; }
 
-    /// <summary>A whole window of answers in a row has found the clock within half a tick of the host's.</summary>
+    /// <summary>A whole window of answers in a row has found the clock within <see cref="SettleTicks"/> of the host's.</summary>
     public bool Settled => _steady >= SampleCount;
     private int _steady;
 
@@ -81,7 +84,7 @@ public sealed class ClockSync
         Offset = best.Average(s => s.Offset);
 
         while (_snapTimes.Count > 0 && nowMs - _snapTimes.Peek() > 60_000) _snapTimes.Dequeue();
-        if (System.Math.Abs(Offset) > (Settling ? 0.5 : SnapTicks))
+        if (System.Math.Abs(Offset) > (Settling ? SettleTicks : SnapTicks))
         {
             double before = LocalTick;
             long target = (long)System.Math.Round(before + Offset);
@@ -100,7 +103,7 @@ public sealed class ClockSync
         else
         {
             // Slew: faster when behind, slower when ahead, proportionally, until within half a tick.
-            _steady = System.Math.Abs(Offset) <= 0.5 ? _steady + 1 : 0; // (what settling doesn't snap)
+            _steady = System.Math.Abs(Offset) <= SettleTicks ? _steady + 1 : 0; // (what settling doesn't snap)
             if (!Settling && System.Math.Abs(Offset) >= 1 && System.Math.Abs(_clock.Rate - 1) < 1e-9)
                 Console.WriteLine($"[net] clock {System.Math.Abs(Offset):0.0} ticks {(Offset > 0 ? "behind" : "ahead")}: slewing");
             _clock.Rate = System.Math.Abs(Offset) < 0.5 ? 1 : 1 + System.Math.Clamp(Offset * 0.01, -MaxSlew, MaxSlew);
