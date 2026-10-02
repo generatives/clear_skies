@@ -2,6 +2,7 @@ using System.Numerics;
 using BepuPhysics.Collidables;
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.ECS;
+using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Input;
 using ClearSkies.Engine.Math;
 using ClearSkies.Engine.Physics;
@@ -111,6 +112,7 @@ public class PlayerMovementTests
             0.01f, 2f, 100f, 70f, 6f, 5f, entity: player);
         player.Set(new CharacterControllerComponent { Character = character, EyeHeight = 0.7f });
         player.Set(new PlayerInput());
+        player.Set<LocalPlayer>(); // played here: its toggle presses switch it
         Players.SetFreeFlying(player, freeFly);
         return (world, physics, player);
     }

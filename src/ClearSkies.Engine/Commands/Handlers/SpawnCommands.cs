@@ -18,7 +18,8 @@ public struct Spawn<TDescription> : ICommand where TDescription : class, IEntity
     /// <summary>None in a new spawn: the host assigns one.</summary>
     public EntityId Id;
 
-    /// <summary>Who will own it; None for the handler's default (see <see cref="SpawnHandler{TDescription, TKind}.DefaultOwner"/>).</summary>
+    /// <summary>Who will own it; None for the handler's default (see <see cref="SpawnHandler{TDescription, TKind}.DefaultOwner"/>).
+    /// For a player, who plays them: the host always owns (simulates) players (see <see cref="SpawnPlayerHandler"/>).</summary>
     public PeerId Owner;
 
     public TDescription Description;
@@ -138,7 +139,8 @@ public sealed class SpawnGridHandler : SpawnHandler<GridDescription, DynamicGrid
     protected override void Select(Entity grid) => _selection?.Select(grid);
 }
 
-/// <summary>Spawns players (at startup, and for each player joining). A player owns their own character. Players owned
+/// <summary>Spawns players (at startup, and for each player joining). The host owns and simulates every player; the
+/// spawn's owner is who plays them (<see cref="Player.Controller"/>), whose machine predicts them. Players played
 /// elsewhere are drawn with <see cref="PlayerModel"/>, where there's one (not headless).</summary>
 public sealed class SpawnPlayerHandler : SpawnHandler<PlayerDescription, Player>
 {
@@ -173,11 +175,14 @@ public sealed class SpawnPlayerHandler : SpawnHandler<PlayerDescription, Player>
                 d.Velocity = _physics.GetBodyLinearVelocity(body) + Vector3.Cross(_physics.GetBodyAngularVelocity(body), d.Position - centre);
             }
         }
-        var player = PlayerFactory.Create(World, _physics, id, owner, d);
+        // The spawn's owner plays them; the host simulates them.
+        var controller = owner.Owner;
+        bool controlledHere = owner.IsLocal;
+        var player = PlayerFactory.Create(World, _physics, id, Session.OwnerFor(PeerId.Host), controller, controlledHere, d);
         // Standing on it from the start (SupportSystem keeps it once they touch it), so whatever moves the ship before then
         // takes them along (a copy placed on its timeline, see FollowerSystem).
         if (ship.IsAlive && player.Has<Support>()) player.Get<Support>().Supporter = ship;
-        if (!owner.IsLocal && _model is not null) player.Set(_model.Create());
+        if (!controlledHere && _model is not null) player.Set(_model.Create());
         return player;
     }
 

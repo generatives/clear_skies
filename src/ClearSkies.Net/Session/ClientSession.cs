@@ -5,6 +5,7 @@ using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Serialization;
 using ClearSkies.Net.Protocol;
+using ClearSkies.Net.Sync;
 using ClearSkies.Net.Transport;
 using DefaultEcs;
 using Silk.NET.Maths;
@@ -15,8 +16,9 @@ namespace ClearSkies.Net.Session;
 /// <summary>
 /// A client's side of the session: one connection, to the host. After the Welcome it loads terrain around where the
 /// player will spawn (a stand-in terrain interest until the player arrives), tells the host, and then receives the
-/// world: every entity as a spawn event, then its own player. Everything it sends goes to the host, which applies or
-/// relays it. Keeps its clock on the host's with <see cref="ClockSync"/>.
+/// world: every entity as a spawn event, then its own player, which the host simulates and this machine predicts
+/// (<see cref="OwnPlayerPrediction"/>, which sends the player's input). Everything it sends goes to the host, which
+/// applies or relays it. Keeps its clock on the host's with <see cref="ClockSync"/>.
 /// </summary>
 public sealed class ClientSession : NetSession
 {
@@ -158,6 +160,9 @@ public sealed class ClientSession : NetSession
     public override void SendRejection(PeerId to, uint seq) => Send(Host, new Rejection(to, Session.LocalPeer, seq));
 
     internal void SendToHost(ReadOnlySpan<byte> packet, Channel channel) => Forward(Host, packet, channel);
+
+    /// <summary>The player's latest inputs, for the host to move them by (see <see cref="OwnPlayerPrediction"/>).</summary>
+    internal void SendInput(in PlayerInputMessage message) => Send(Host, message, Channel.Unreliable);
 
     public override void Dispose()
     {

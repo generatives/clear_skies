@@ -46,8 +46,7 @@ public class ShipDrawingTests
         game.Tick(2);
         var (client, _) = game.Join("crew");
         var crew = client.World.GetEntities().With<LocalPlayer>().AsEnumerable().Single();
-        Players.SetFreeFlying(crew, false);
-        crew.Get<CharacterControllerComponent>().Character.TeleportTo(new Vector3(1, 51.4f, 1));
+        CrewTests.PlaceCrew(game, crew, new Vector3(1, 51.4f, 1));
         game.Tick(60);
         if (holdingControls) crew.Set(new LookLockedComponent());
         var copy = client.Registry.Find(ship.Get<EntityId>())!.Value;

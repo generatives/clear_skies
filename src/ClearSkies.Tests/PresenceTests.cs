@@ -107,14 +107,14 @@ public class PresenceTests
     }
 
     [Fact]
-    public void AnotherPlayerWithinLoadRangeIsACharacterFollowerWithNoTerrainInterest()
+    public void AnotherPlayerIsNotSimulatedHere()
     {
         using var scene = new HeadlessScene();
         scene.SpawnLocalPlayer(new Vector3(0, 60, 0), freeFly: true);
         var near = RemoteEntity(scene, new Vector3(100, 60, 0), player: true);
         var far = RemoteEntity(scene, new Vector3(5000, 60, 0), player: true);
         scene.Tick();
-        Assert.Equal(PhysicsMode.CharacterFollower, near.Get<PhysicsPresence>().Mode);
+        Assert.False(near.Has<PhysicsPresence>()); // the host simulates them; here they're only drawn
         Assert.False(near.Has<TerrainInterest>());
         Assert.False(far.Has<PhysicsPresence>());
     }
@@ -138,16 +138,16 @@ public class PresenceTests
     {
         using var scene = new HeadlessScene();
         scene.SpawnLocalPlayer(new Vector3(0, 60, 0), freeFly: true);
-        var other = RemoteEntity(scene, new Vector3(990, 60, 0), player: true);
+        var other = RemoteEntity(scene, new Vector3(500, 60, 0), player: false); // a grid: a follower within 512
         scene.Tick();
         Assert.True(other.Has<PhysicsPresence>());
-        other.Get<Transform>().Position = new Vector3D<float>(1050, 60, 0); // past 1000 but within 1100
+        other.Get<Transform>().Position = new Vector3D<float>(530, 60, 0); // past 512 but within 563
         scene.Tick();
         Assert.True(other.Has<PhysicsPresence>());
-        other.Get<Transform>().Position = new Vector3D<float>(1200, 60, 0);
+        other.Get<Transform>().Position = new Vector3D<float>(600, 60, 0);
         scene.Tick();
         Assert.False(other.Has<PhysicsPresence>());
-        other.Get<Transform>().Position = new Vector3D<float>(1050, 60, 0); // coming back: not until within 1000
+        other.Get<Transform>().Position = new Vector3D<float>(530, 60, 0); // coming back: not until within 512
         scene.Tick();
         Assert.False(other.Has<PhysicsPresence>());
     }

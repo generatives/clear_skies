@@ -91,6 +91,16 @@ public sealed class LoopbackGame : IDisposable
         }
     }
 
+    /// <summary>The host's player for a client's <paramref name="player"/>: the one it simulates.</summary>
+    public Entity Simulated(Entity player) => Host.Registry.Find(player.Get<EntityId>())!.Value;
+
+    /// <summary>Moves a client's player, at rest: on the host, which simulates them, and on the client, which
+    /// predicts them.</summary>
+    public void Teleport(Entity player, Vector3 at)
+    {
+        foreach (var e in new[] { Simulated(player), player }) ClearSkies.Engine.ECS.Players.Teleport(e, new Vector3D<float>(at.X, at.Y, at.Z));
+    }
+
     public void Dispose()
     {
         foreach (var (scene, _) in Clients) scene.Dispose();
@@ -221,14 +231,16 @@ public class JoinTests
         Assert.Equal(GridSerializer.Voxels(grid.Get<ChunkGrid>().Volume), GridSerializer.Voxels(copy!.Value.Get<ChunkGrid>().Volume));
         Assert.False(copy.Value.Get<NetOwner>().IsLocal); // the host's
 
-        // Its own player, owned by it; the host's player, owned by the host.
+        // Its own player, played here but owned by the host; and the host's player.
         var mine = client.World.GetEntities().With<LocalPlayer>().AsEnumerable().Single();
-        Assert.Equal(net.Session.LocalPeer, mine.Get<NetOwner>().Owner);
+        Assert.Equal(PeerId.Host, mine.Get<NetOwner>().Owner);
+        Assert.Equal(net.Session.LocalPeer, mine.Get<Player>().Controller);
         Assert.True(client.Registry.IsLive(hostPlayer.Get<EntityId>()));
-        // The host has the client's player too, owned by the client.
+        // The host simulates the client's player, from its input.
         var remote = game.Host.Registry.Find(mine.Get<EntityId>())!.Value;
-        Assert.False(remote.Get<NetOwner>().IsLocal);
-        Assert.False(remote.Has<CharacterControllerComponent>()); // simulated by its owner only
+        Assert.True(remote.Get<NetOwner>().IsLocal);
+        Assert.False(remote.Get<Player>().IsLocal);
+        Assert.True(remote.Has<CharacterControllerComponent>());
     }
 
     [Fact]
@@ -296,7 +308,7 @@ public class JoinTests
         var (a, _) = game.Join("a");
         var (b, _) = game.Join("b");
         var aPlayer = a.World.GetEntities().With<LocalPlayer>().AsEnumerable().Single();
-        aPlayer.Get<Transform>().Position = new Vector3D<float>(12, 70, 3);
+        game.Teleport(aPlayer, new Vector3(12, 70, 3));
         game.Tick(30);
         var aSeenByB = b.Registry.Find(aPlayer.Get<EntityId>());
         Assert.NotNull(aSeenByB);
@@ -313,7 +325,7 @@ public class JoinTests
         var (a, _) = game.Join("a");
         var (b, _) = game.Join("b");
         var aPlayer = a.World.GetEntities().With<LocalPlayer>().AsEnumerable().Single();
-        aPlayer.Get<Transform>().Position = new Vector3D<float>(0, 57, 0);
+        game.Teleport(aPlayer, new Vector3(0, 57, 0));
         game.Tick(10);
         var gridId = grid.Get<EntityId>();
         a.Commands.Send(new EditVoxels { Volume = gridId, Editor = aPlayer.Get<EntityId>(),
@@ -336,7 +348,7 @@ public class JoinTests
         game.Tick(2);
         var (a, _) = game.Join("a");
         var aPlayer = a.World.GetEntities().With<LocalPlayer>().AsEnumerable().Single();
-        aPlayer.Get<Transform>().Position = new Vector3D<float>(0, 300, 0); // far out of reach, as the host will see
+        game.Teleport(aPlayer, new Vector3(0, 300, 0)); // far out of reach
         game.Tick(10);
         var gridId = grid.Get<EntityId>();
         a.Commands.Send(new EditVoxels { Volume = gridId, Editor = aPlayer.Get<EntityId>(),

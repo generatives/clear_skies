@@ -12,13 +12,13 @@ namespace ClearSkies.Net.Session;
 /// simulated, or seen) until then, so nothing is left falling through a world still loading under it. Each waits at a
 /// <see cref="SpawnAnchor"/>, which loads the save's entities around it (their ship, say) as a player would.
 /// <list type="bullet">
-/// <item>Standing on a ship: the ship is loaded (here, and so in the world a joining client is sent). The host's own
-/// player, simulated here, also waits for its body.</item>
-/// <item>The host's own player: the terrain around them has loaded, with colliders (its anchor streams the terrain).</item>
-/// <item>A joining client: they've loaded their own terrain there (<c>TerrainReady</c>).</item>
+/// <item>Standing on a ship: the ship is loaded (here, and so in the world a joining client is sent), with its body.</item>
+/// <item>The terrain around them has loaded here, with colliders, since every player is simulated here (the anchor
+/// streams it: all of it for the host's own player, colliders only for a client's).</item>
+/// <item>A joining client: they've loaded their own terrain there too (<c>TerrainReady</c>), to predict themselves on.</item>
 /// </list>
 /// What's here can't take for ever: a ship still missing after <see cref="SupportWaitTicks"/> is forgotten (they spawn
-/// where they were), and the host's own waits end after <see cref="GiveUpTicks"/>. A client is always waited for.
+/// where they were), and waits for this machine end after <see cref="GiveUpTicks"/>. A client is always waited for.
 /// </summary>
 public sealed class PendingSpawns
 {
@@ -53,7 +53,7 @@ public sealed class PendingSpawns
 
     public bool IsWaiting(PlayerId player) => _pending.Exists(p => p.Description.Id == player);
 
-    /// <summary>Waits to spawn <paramref name="description"/> for <paramref name="owner"/> (simulated here if
+    /// <summary>Waits to spawn <paramref name="description"/> for <paramref name="owner"/> (played here if
     /// <paramref name="local"/>), then calls <paramref name="spawn"/> with it, its position on its ship resolved.</summary>
     public void Add(PlayerDescription description, PeerId owner, bool local, Action<PlayerDescription> spawn)
     {
@@ -61,8 +61,9 @@ public sealed class PendingSpawns
         var p = description.Position;
         anchor.Set(new Transform { Position = new Vector3D<float>(p.X, p.Y, p.Z), Rotation = Quaternion<float>.Identity, Scale = Vector3D<float>.One });
         anchor.Set<SpawnAnchor>();
-        // The host's own player needs the terrain here (a client loads its own).
-        if (local) anchor.Set(new TerrainInterest { Radius = 1000, Kind = TerrainInterestKind.Full });
+        // The terrain here, to simulate them on: drawn for the host's own player, colliders only for a client's.
+        anchor.Set(local ? new TerrainInterest { Radius = 1000, Kind = TerrainInterestKind.Full }
+                         : new TerrainInterest { Radius = EntityPresenceSystem.ColliderRange, Kind = TerrainInterestKind.CollidersOnly });
         _pending.Add(new Pending { Description = description, Owner = owner, Local = local, Anchor = anchor, Spawn = spawn });
     }
 
@@ -111,9 +112,9 @@ public sealed class PendingSpawns
                 Console.WriteLine($"[net] {d.Name}'s ship ({d.Support}) never loaded: spawning where they were");
                 d.Support = EntityId.None;
             }
-            else if (p.Local && !ship.Has<PhysicsBodyComponent>() && !givenUp) return false;
+            else if (!ship.Has<PhysicsBodyComponent>() && !givenUp) return false;
         }
-        if (!p.Local) return p.ClientReady;
+        if (!p.Local && !p.ClientReady) return false;
         if (givenUp)
         {
             Console.WriteLine($"[net] {d.Name}: the world around them hasn't loaded after {GiveUpTicks / 60} s, spawning anyway");

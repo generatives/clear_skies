@@ -358,6 +358,16 @@ public struct PlayerCharacter
         characterBody.Awake = true;
     }
 
+    /// <summary>Moves the character by <paramref name="offset"/>, keeping its velocity and its jump, air and crouch state:
+    /// a correction, not a teleport.</summary>
+    public readonly void MoveBy(Vector3 offset)
+    {
+        if (suspended) return;
+        var characterBody = new BodyReference(bodyHandle, characters.Simulation.Bodies);
+        characterBody.Pose.Position += offset;
+        characterBody.Awake = true;
+    }
+
     /// <summary>Sets the character's velocity, waking it.</summary>
     public readonly void SetVelocity(Vector3 velocity)
     {
