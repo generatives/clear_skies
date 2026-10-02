@@ -1,6 +1,8 @@
+using System.Numerics;
 using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Physics;
+using ClearSkies.Engine.Physics.Support;
 using ClearSkies.Engine.Serialization;
 using ClearSkies.Engine.Voxels;
 using DefaultEcs;
@@ -157,7 +159,24 @@ public sealed class SpawnPlayerHandler : SpawnHandler<PlayerDescription, Player>
 
     protected override Entity Create(EntityId id, NetOwner owner, PlayerDescription d)
     {
+        // On their ship as it is here, if they stand on one, and moving with its deck there, so they don't start at rest
+        // on a moving ship and slide off it.
+        d.Position = PlayerFactory.WorldPosition(d, Registry);
+        Entity ship = default;
+        if (!d.FreeFly && !d.Support.IsNone && Registry.TryGet(d.Support, out var support))
+        {
+            ship = support;
+            if (support.Has<PhysicsBodyComponent>())
+            {
+                var body = support.Get<PhysicsBodyComponent>().Body;
+                var (centre, _) = _physics.GetBodyPose(body);
+                d.Velocity = _physics.GetBodyLinearVelocity(body) + Vector3.Cross(_physics.GetBodyAngularVelocity(body), d.Position - centre);
+            }
+        }
         var player = PlayerFactory.Create(World, _physics, id, owner, d);
+        // Standing on it from the start (SupportSystem keeps it once they touch it), so whatever moves the ship before then
+        // takes them along (a copy placed on its timeline, see FollowerSystem).
+        if (ship.IsAlive && player.Has<Support>()) player.Get<Support>().Supporter = ship;
         if (!owner.IsLocal && _model is not null) player.Set(_model.Create());
         return player;
     }

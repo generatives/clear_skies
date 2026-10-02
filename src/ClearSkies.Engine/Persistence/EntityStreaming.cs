@@ -42,6 +42,10 @@ public sealed class StoredEntityIndex
 /// (<see cref="WorldSaver.Save"/>), then despawns it; this runs before the command system, so it's gone by the end of
 /// the tick.
 /// </summary>
+/// <summary>A player waiting to spawn here: the save's entities stream around it as around a player, so what they stand
+/// on is loaded before they are.</summary>
+public struct SpawnAnchor { }
+
 public sealed class EntityStreamingSystem : ISystem, IDebugUiSystem
 {
     public const float LoadWindow = 1000f;
@@ -54,6 +58,7 @@ public sealed class EntityStreamingSystem : ISystem, IDebugUiSystem
     private readonly CommandSystem _commands;
     private readonly WorldSaver _saver;
     private readonly EntitySet _players;
+    private readonly EntitySet _anchors;
     private readonly EntitySet _streamed;
     private readonly List<Vector3> _playerPositions = new();
     private readonly List<Entity> _leaving = new();
@@ -68,6 +73,7 @@ public sealed class EntityStreamingSystem : ISystem, IDebugUiSystem
         _commands = commands;
         _saver = saver;
         _players = world.GetEntities().With<Player>().With<Transform>().AsSet();
+        _anchors = world.GetEntities().With<SpawnAnchor>().With<Transform>().AsSet();
         // What streams: networked entities that position themselves and aren't players (grids today).
         _streamed = world.GetEntities().With<EntityId>().With<OwnPresence>().With<Transform>().Without<Player>().Without<Chunk>().AsSet();
     }
@@ -78,6 +84,11 @@ public sealed class EntityStreamingSystem : ISystem, IDebugUiSystem
         foreach (ref readonly var p in _players.GetEntities())
         {
             var t = p.Get<Transform>().Position;
+            _playerPositions.Add(new Vector3(t.X, t.Y, t.Z));
+        }
+        foreach (ref readonly var a in _anchors.GetEntities())
+        {
+            var t = a.Get<Transform>().Position;
             _playerPositions.Add(new Vector3(t.X, t.Y, t.Z));
         }
         if (_playerPositions.Count == 0) return; // nobody to load around (yet)

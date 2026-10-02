@@ -2,6 +2,7 @@ using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Input;
 using ClearSkies.Engine.Math;
 using ClearSkies.Engine.Physics;
+using ClearSkies.Engine.Physics.Support;
 using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Voxels;
 using ClearSkies.Engine.Entities;
@@ -20,8 +21,8 @@ public enum GridCameraMode { ThirdPerson, Locked }
 /// <summary>
 /// Debug "take control" of a DynamicGrid (Milestone 5 Phase 5.1). <c>F</c> toggles piloting the
 /// currently Selected Grid; <c>C</c> swaps between third-person and locked camera modes while
-/// piloting; <c>End</c> toggles Lock on the Selected Grid (freezes it in place — kinematic, ignores
-/// gravity/impulses); <c>Home</c> resets the Selected Grid's rotation to upright. Piloting drives
+/// piloting; <c>End</c> toggles Lock on the grid the player stands on, else the Selected Grid (freezes it in place —
+/// kinematic, ignores gravity/impulses); <c>Home</c> resets that grid's rotation to upright. Piloting drives
 /// the player's own camera: while piloting it's a hierarchy child of the grid, orbiting it (third person) or sitting in
 /// it (locked), so it moves, and is drawn, with the grid; when piloting stops it goes back to the player's eye. The
 /// player stays where they are meanwhile (<see cref="Piloting"/>: standing still, riding along if they're aboard), so
@@ -70,7 +71,8 @@ public sealed class GridPilotSystem : ISystem
         _selectedGrid    = world.GetEntities().With<DynamicGrid>().With<SelectedGridComponent>().AsSet();
     }
 
-    /// <summary>Pilot mode is a single-player debug tool: while this says so (other players are connected), it's off.</summary>
+    /// <summary>Pilot mode is a single-player debug tool: while this says so (other players are connected), it's off.
+    /// Locking and righting (End, Home) are commands and still work.</summary>
     public Func<bool>? Disabled { get; set; }
 
     public void Update(float dt)
@@ -80,6 +82,7 @@ public sealed class GridPilotSystem : ISystem
         if (Disabled?.Invoke() == true)
         {
             if (_isPiloting) StopPiloting();
+            HandleLockAndRight(); // commands, not pilot mode: still work
             return;
         }
 
@@ -170,14 +173,21 @@ public sealed class GridPilotSystem : ISystem
         bool rightPressed = _input.WasKeyPressed(Key.Home);
         if (!lockPressed && !rightPressed) return;
 
-        foreach (ref readonly Entity e in _selectedGrid.GetEntities())
-        {
-            if (!e.Has<EntityId>()) return;
-            var id = e.Get<EntityId>();
-            if (lockPressed) _commands.Send(new SetGridLocked { Grid = id, Locked = !e.Get<DynamicGrid>().Locked });
-            if (rightPressed) _commands.Send(new RightGrid { Grid = id });
-            return;
-        }
+        if (LockTarget() is not { } e || !e.Has<EntityId>()) return;
+        var id = e.Get<EntityId>();
+        if (lockPressed) _commands.Send(new SetGridLocked { Grid = id, Locked = !e.Get<DynamicGrid>().Locked });
+        if (rightPressed) _commands.Send(new RightGrid { Grid = id });
+    }
+
+    /// <summary>The grid End and Home act on: the one the local player stands on, else the Selected Grid (the last one
+    /// spawned or edited here, which on a machine that joined may be none).</summary>
+    private Entity? LockTarget()
+    {
+        foreach (ref readonly Entity player in _players.GetEntities())
+            if (player.Has<Support>() && player.Get<Support>() is { HasSupporter: true } support && support.Supporter.Has<DynamicGrid>())
+                return support.Supporter;
+        foreach (ref readonly Entity e in _selectedGrid.GetEntities()) return e;
+        return null;
     }
 
     private void PlaceCamera()
@@ -208,7 +218,7 @@ public sealed class GridPilotSystem : ISystem
         ImGui.Text("Mouse: look around, relative to the ship's own facing");
         ImGui.Text("W/S: forward/back   A/D: left/right   Space/Shift: up/down   Q/E: yaw");
         ImGui.Separator();
-        ImGui.Text("End: toggle Lock on the Selected Grid");
+        ImGui.Text("End: toggle Lock on the grid you stand on (else the Selected Grid)");
         ImGui.Text("Home: right (reset rotation of) the Selected Grid");
 
         foreach (ref readonly Entity e in _selectedGrid.GetEntities())

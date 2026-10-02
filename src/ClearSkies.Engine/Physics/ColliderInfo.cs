@@ -15,6 +15,9 @@ public enum ColliderKind : byte
     VoxelTerrain,
     /// <summary>A grid's body (ship); <see cref="ColliderInfo.Entity"/> is the grid entity.</summary>
     VoxelGrid,
+    /// <summary>Another player's copy (see FollowerSystem): stands on grids and terrain, but never touches characters
+    /// (theirs or other copies): its owner already keeps them apart.</summary>
+    Follower,
 }
 
 public readonly record struct ColliderInfo(ColliderKind Kind, Entity Entity = default)

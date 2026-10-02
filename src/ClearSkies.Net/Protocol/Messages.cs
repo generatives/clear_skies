@@ -8,7 +8,7 @@ namespace ClearSkies.Net.Protocol;
 /// <summary>Bumped whenever any message or description format changes; a mismatch refuses the join.</summary>
 public static class ProtocolVersion
 {
-    public const ushort Current = 1;
+    public const ushort Current = 2;
 }
 
 /// <summary>The first byte of every packet.</summary>

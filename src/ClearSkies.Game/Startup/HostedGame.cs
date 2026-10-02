@@ -62,8 +62,12 @@ internal static class HostedGame
         host.AddSystem(wheels, SystemStage.Simulation);
         host.AddSystem(world.Flight, SystemStage.Simulation); // impulses before the physics step, integrated this same tick
         host.AddSystem(world.CreatePresence(), SystemStage.Simulation);
+        // Physics copies of bodies owned elsewhere (kinematic ships near the local player, servo copies of other
+        // players), placed before the step, once the presence system has decided which copies exist.
+        host.AddSystem(new FollowerSystem(host.World, host.Physics, world.RemoteBodies), SystemStage.Simulation);
         host.AddSystem(host.Physics, SystemStage.Simulation); // one step
         host.AddSystem(new PhysicsTransformSyncSystem(host.World, host.Physics), SystemStage.Simulation); // body poses -> Transform
+        host.AddSystem(world.RemoteBodies, SystemStage.Simulation); // bodies owned elsewhere -> Transform, about 100 ms behind
         host.AddSystem(world.Hierarchy, SystemStage.Simulation); // e.g. volume Transforms -> chunk Transforms
         host.AddSystem(new SupportSystem(host.World, host.Physics), SystemStage.Simulation); // what each character stands on or rides with
         host.AddSystem(world.Interpolation, SystemStage.Simulation); // records this tick's poses
@@ -72,8 +76,8 @@ internal static class HostedGame
         // Once each frame, after the ticks. What moves the camera itself, once a frame: --flight-test (flies once the world
         // has loaded, then quits), and the pilot, which puts the camera under a piloted grid (single-player only: off
         // while others are connected). Then the camera at the local player's eye (unless something moved it first),
-        // what's drawn between the last two ticks (children follow), bodies owned elsewhere (about 100 ms behind), and
-        // terrain streamed around the view.
+        // what's drawn between the last two ticks (children follow), and terrain streamed around the
+        // view.
         var spawn = WorldSpawn.For(save.Seed);
         bool flightTest = options.FlightTest;
         host.AddSystem(new StreamingFlightTest(host, world.StaticVolume, view.GridStore, flightTest,
@@ -86,7 +90,6 @@ internal static class HostedGame
         host.AddSystem(pilot, SystemStage.Frame);
         host.AddSystem(new EyeSystem(host.World), SystemStage.Frame);
         host.AddSystem(world.Interpolation, SystemStage.Frame);
-        host.AddSystem(world.RemoteBodies, SystemStage.Frame);
         host.AddSystem(world.Hierarchy, SystemStage.Frame);
         host.AddSystem(world.ChunkLoad, SystemStage.Frame);
         // What the player points at and uses, the HUD (crosshair, hotbar), grids saved and loaded, and the debug panels.
@@ -101,10 +104,15 @@ internal static class HostedGame
 
         view.AddRender(world);
 
-        var camera = TestScene.AddCamera(host, spawn.Eye, spawn.Yaw, spawn.Pitch, options.Camera);
+        // The camera waits where the local player left off (or at the world's spawn point) until they spawn there,
+        // once the world around them has loaded.
         var players = hosting.Players;
         var localPlayer = players.PlayerFor(options.PlayerName);
-        TestScene.SpawnLocalPlayer(commands, localPlayer, options.PlayerName, players.Saved(localPlayer), camera);
+        var saved = players.Saved(localPlayer);
+        var camera = saved is null
+            ? TestScene.AddCamera(host, spawn.Eye, spawn.Yaw, spawn.Pitch, options.Camera)
+            : TestScene.AddCamera(host, WorldSpawn.EyeAt(saved.Position), saved.Yaw, saved.Pitch, options.Camera);
+        net.SpawnWhenReady(TestScene.LocalPlayer(localPlayer, options.PlayerName, saved, camera));
         if (save.IsNew) TestScene.SpawnTestShip(commands, camera.Eye);
 
         using (new QuitOnSignal(host)) world.Run();

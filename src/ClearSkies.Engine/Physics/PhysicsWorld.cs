@@ -50,6 +50,7 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
     public CollidableProperty<ColliderInfo> Colliders { get; }
 
     private readonly BufferPool _pool = new();
+    private readonly ContactFilter _filter = new();
     private readonly float _fixedStep;
 
     public PhysicsWorld(Vector3 gravity, float fixedStep)
@@ -59,11 +60,12 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
         Characters = new CharacterControllers(_pool);
         Simulation = Simulation.Create(
             _pool,
-            new VoxelNarrowPhaseCallbacks(new SpringSettings(30, 1)) { Characters = Characters },
+            new VoxelNarrowPhaseCallbacks(new SpringSettings(30, 1)) { Characters = Characters, Filter = _filter },
             new VoxelPoseCallbacks(gravity, linearDamping: 0.03f, angularDamping: 0.03f),
             new SolveDescription(velocityIterationCount: 8, substepCount: 1));
         Colliders = new CollidableProperty<ColliderInfo>(Simulation, _pool);
         Characters.Colliders = Colliders;
+        _filter.Colliders = Colliders;
     }
 
     /// <summary>The Simulation stage's call: one step (the tick's duration is always the fixed step).</summary>
@@ -163,6 +165,14 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
         var body = Simulation.Bodies[handle];
         body.Awake = true;
         body.ApplyAngularImpulse(angularImpulse);
+    }
+
+    /// <summary>Removes a body and its shape.</summary>
+    public void RemoveBodyAndShape(BodyHandle handle)
+    {
+        var shape = Simulation.Bodies[handle].Collidable.Shape;
+        Simulation.Bodies.Remove(handle);
+        Simulation.Shapes.RecursivelyRemoveAndDispose(shape, _pool);
     }
 
     public void SetBodyLinearVelocity(BodyHandle handle, Vector3 linearVelocity)
@@ -392,9 +402,12 @@ internal struct VoxelNarrowPhaseCallbacks : INarrowPhaseCallbacks
         Characters?.Initialize(simulation);
     }
 
+    /// <summary>Which pairs may touch (set by <see cref="PhysicsWorld"/>'s constructor).</summary>
+    public ContactFilter Filter;
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public readonly bool AllowContactGeneration(int workerIndex, CollidableReference a, CollidableReference b, ref float speculativeMargin)
-        => true;
+        => Filter.Allow(a, b);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public readonly bool AllowContactGeneration(int workerIndex, CollidablePair pair, int childIndexA, int childIndexB)
@@ -460,5 +473,22 @@ internal struct VoxelPoseCallbacks : IPoseIntegratorCallbacks
     {
         velocity.Linear  = (velocity.Linear + _gravityDt) * _linearDampingDt;
         velocity.Angular = velocity.Angular * _angularDampingDt;
+    }
+}
+
+/// <summary>Decides which colliders may touch: another player's copy (<see cref="ColliderKind.Follower"/>) touches
+/// grids and terrain only.</summary>
+public sealed class ContactFilter
+{
+    /// <summary>Set by <see cref="PhysicsWorld"/>'s constructor, straight after the simulation it reads from exists.</summary>
+    public CollidableProperty<ColliderInfo> Colliders = null!;
+
+    public bool Allow(CollidableReference a, CollidableReference b)
+    {
+        var ka = Colliders[a].Kind;
+        var kb = Colliders[b].Kind;
+        if (ka == ColliderKind.Follower) return kb is ColliderKind.VoxelGrid or ColliderKind.VoxelTerrain;
+        if (kb == ColliderKind.Follower) return ka is ColliderKind.VoxelGrid or ColliderKind.VoxelTerrain;
+        return true;
     }
 }

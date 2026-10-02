@@ -37,7 +37,6 @@ public sealed class HeadlessScene : IDisposable
     public ClearSkies.Net.Session.NetSession? Net;
     public ClearSkies.Net.Sync.RemoteBodySystem? RemoteBodies;
     private readonly List<Engine.Core.ISystem> _tick = new();
-    private readonly TickInterpolationSystem _interpolation;
 
     public readonly EntityIdAllocator Ids;
     public WorldSaver? Saver;
@@ -72,8 +71,14 @@ public sealed class HeadlessScene : IDisposable
         _tick.Add(new PhysicsTransformSyncSystem(World, Physics));
         _tick.Add(hierarchy);
         _tick.Add(new SupportSystem(World, Physics));
-        _interpolation = new TickInterpolationSystem(World, new Engine.Core.Time()); // last, as in the game
+        Interpolation = new TickInterpolationSystem(World, Time);
+        _tick.Add(new LambdaSystem(() => Interpolation.Update(SystemStage.Simulation, Dt))); // records this tick's poses
     }
+
+    /// <summary>Frame timing, as the game's: <see cref="Frame"/> sets its Alpha, which drawing interpolates by.</summary>
+    public readonly Time Time = new();
+    public readonly TickInterpolationSystem Interpolation;
+    private readonly TickClock _frameClock = new();
 
     /// <summary>Puts a network session in the tick: the session first, body sync last.</summary>
     public void AttachNet(ClearSkies.Net.Session.NetSession net)
@@ -82,7 +87,12 @@ public sealed class HeadlessScene : IDisposable
         _tick.Insert(0, net);
         _tick.Add(new ClearSkies.Net.Sync.BodySync(net, World, Physics));
         RemoteBodies = new ClearSkies.Net.Sync.RemoteBodySystem(World, Registry, Clock);
+        _tick.Insert(_tick.FindIndex(s => s is PhysicsTransformSyncSystem) + 1, RemoteBodies);
+        _tick.Insert(_tick.IndexOf(Physics), new ClearSkies.Net.Sync.FollowerSystem(World, Physics, RemoteBodies));
     }
+
+    /// <summary>Runs <paramref name="system"/> each tick just before the physics step (e.g. flight).</summary>
+    public void AddBeforePhysics(Engine.Core.ISystem system) => _tick.Insert(_tick.IndexOf(Physics), system);
 
     /// <summary>Saves to <paramref name="db"/> and streams entities from it, as the host does.</summary>
     public void EnablePersistence(SaveDatabase db)
@@ -105,10 +115,32 @@ public sealed class HeadlessScene : IDisposable
                 _rateCredit -= 1;
                 Clock.Tick++;
                 foreach (var s in _tick) s.Update(Dt);
-                _interpolation.Update(Engine.Core.SystemStage.Simulation, Dt);
             }
-            RemoteBodies?.Update(Dt); // per frame in the game
+            Draw(Dt);
         }
+    }
+
+    /// <summary>One frame of <paramref name="seconds"/> as the game runs it: the ticks it's due (clock sync's Rate
+    /// included), then drawing <see cref="ManualTickClock.Alpha"/> of the way between the last two ticks.</summary>
+    public void Frame(double seconds)
+    {
+        _frameClock.Rate = Clock.Rate;
+        uint before = Clock.Tick;
+        int ticks = _frameClock.Advance(seconds);
+        for (int i = 0; i < ticks; i++)
+        {
+            Clock.Tick++;
+            foreach (var s in _tick) s.Update(Dt);
+        }
+        if (Clock.Tick != before + (uint)ticks) _frameClock.Snap(Clock.Tick); // clock sync snapped it, as the game's clock does
+        Clock.Alpha = _frameClock.Alpha;
+        Draw((float)seconds);
+    }
+
+    private void Draw(float dt)
+    {
+        Time.Alpha = Clock.Alpha;
+        Interpolation.Update(SystemStage.Frame, dt);
     }
 
     /// <summary>Runs ticks until <paramref name="done"/> or <paramref name="max"/> ticks.</summary>

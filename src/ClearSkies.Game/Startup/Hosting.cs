@@ -58,7 +58,7 @@ public sealed class Hosting : IDisposable
         Streaming = new EntityStreamingSystem(world.Host.World, save.Database, index, world.Registry, world.Commands, Saver);
         Players = new SavedPlayers(save.Database, Saver, save.Seed);
         Net = new HostSession(transport, world.Session, world.Commands, world.Registry, world.Host.World, world.Host.Clock, ids,
-                              save.Seed, GenerationChecksum.Compute(), Players);
+                              save.Seed, GenerationChecksum.Compute(), Players, world.TerrainReadyFor);
     }
 
     public HostSession Net { get; }

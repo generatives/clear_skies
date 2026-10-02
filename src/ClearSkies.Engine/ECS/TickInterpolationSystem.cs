@@ -18,6 +18,10 @@ public struct InterpolatedTransform
 
     internal Transform Previous, Current;
     internal bool Started;
+
+    /// <summary>This tick's move is a jump: draw it at its new pose from now, rather than sliding there over the tick.
+    /// (A move made outside the ticks is taken as one anyway.)</summary>
+    public void Teleport() => Started = false;
 }
 
 /// <summary>
@@ -63,6 +67,9 @@ public static class Drawing
 ///
 /// Dynamic grids get an <see cref="InterpolatedTransform"/> automatically. A grid's Transform is its block space, which
 /// edits don't move (only its body moves, to the new centre of mass), so an edit doesn't make the grid twitch.
+///
+/// Bodies owned by another machine are drawn the same way: their Transforms are set each tick from their snapshots
+/// (RemoteBodySystem), so here they're no different from anything simulated locally.
 /// </summary>
 public sealed class TickInterpolationSystem : IStagedSystem
 {
@@ -140,7 +147,7 @@ public sealed class TickInterpolationSystem : IStagedSystem
             DrawChildren(e, drawn);
         }
 
-        // Children no longer under anything interpolated are drawn where they are.
+        // Children no longer under anything interpolated (and entities not started) are drawn where they are.
         foreach (ref readonly Entity e in _drawn.GetEntities())
             if (e.Get<DrawnTransform>().FromParent && e.Get<DrawnTransform>().Frame != _frame) _stale.Add(e);
         foreach (var e in _stale) if (e.Has<DrawnTransform>()) e.Remove<DrawnTransform>();

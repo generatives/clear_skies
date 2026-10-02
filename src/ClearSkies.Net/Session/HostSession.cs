@@ -35,8 +35,10 @@ public sealed class RemotePeer
 }
 
 /// <summary>
-/// The host's side of the session: single-player is a host with the transport off. Welcomes clients, sends each the
-/// world as it is when they've loaded their terrain (every live entity, described), then spawns their player; relays
+/// The host's side of the session: single-player is a host with the transport off. Welcomes clients; spawns every
+/// player, its own and joining clients', once what they need is here (<see cref="PendingSpawns"/>: their ship, and
+/// the terrain around them, loaded here for its own and by the client for theirs), first sending a client the world as
+/// it is then (every live entity, described); relays
 /// commands, events and body snapshots between clients; answers clock pings; and when a client leaves, saves and
 /// despawns their player.
 /// </summary>
@@ -49,11 +51,16 @@ public sealed class HostSession : NetSession
     private readonly ulong _checksum;
     private readonly IPlayerDirectory _directory;
     private readonly EntitySet _players;
+    private readonly PendingSpawns _spawns;
 
+    /// <param name="terrainReady">Whether the terrain around a point has loaded here, with colliders: the host's own
+    /// player waits for it (none: it doesn't wait).</param>
     public HostSession(ITransport? transport, EngineSession session, CommandSystem commands, EntityRegistry registry, World world,
-                       ITickClock clock, EntityIdAllocator ids, ulong seed, ulong generationChecksum, IPlayerDirectory directory)
+                       ITickClock clock, EntityIdAllocator ids, ulong seed, ulong generationChecksum, IPlayerDirectory directory,
+                       Func<Vector3, bool>? terrainReady = null)
         : base(transport, session, commands, registry, world, clock)
     {
+        _spawns = new PendingSpawns(world, registry, terrainReady);
         _ids = ids;
         _seed = seed;
         _checksum = generationChecksum;
@@ -70,6 +77,23 @@ public sealed class HostSession : NetSession
 
     private RemotePeer? PeerById(PeerId id) => _peers.Values.FirstOrDefault(p => p.Peer == id);
 
+    /// <summary>Players waiting to spawn.</summary>
+    public int PendingSpawns => _spawns.Count;
+
+    /// <summary>Everything that arrived, then whoever is ready spawns: still first in the tick, so a joining client's
+    /// world is described as the last tick left it (see <see cref="SendWorld"/>).</summary>
+    public override void Update(float dt)
+    {
+        base.Update(dt);
+        _spawns.Update();
+    }
+
+    /// <summary>Spawns the host's own player once the world they need has loaded here (their ship, and the terrain
+    /// around them with colliders).</summary>
+    public void SpawnWhenReady(PlayerDescription description) =>
+        _spawns.Add(description, Session.LocalPeer, local: true,
+                    d => Commands.Send(new Spawn<PlayerDescription> { Description = d }));
+
     // ── connections ─────────────────────────────────────────────────────────
 
     protected override void OnConnected(ConnectionId connection) =>
@@ -78,6 +102,7 @@ public sealed class HostSession : NetSession
     protected override void OnDisconnected(ConnectionId connection, string reason)
     {
         if (!_peers.Remove(connection, out var peer) || peer.Peer == PeerId.None) return;
+        _spawns.Cancel(peer.Peer);
         Console.WriteLine($"[net] {peer.Name} ({peer.Peer}) left: {reason}");
         // Everything they owned is the host's now (their player, until it's despawned).
         foreach (var e in World.GetEntities().With<NetOwner>().AsEnumerable().ToList())
@@ -112,7 +137,7 @@ public sealed class HostSession : NetSession
         {
             case MessageKind.Hello: OnHello(peer, Hello.Read(ref r)); break;
             case MessageKind.TerrainReady:
-                if (peer.State == PeerState.LoadingTerrain) SendWorld(peer);
+                if (peer.State == PeerState.LoadingTerrain) _spawns.ClientReady(peer.Peer);
                 break;
             case MessageKind.TimePing:
             {
@@ -186,7 +211,7 @@ public sealed class HostSession : NetSession
         string name = hello.Name.Trim();
         if (name.Length == 0) { Refuse(peer.Connection, "A player name is needed"); return; }
         var player = _directory.PlayerFor(name);
-        if (_peers.Values.Any(p => p.Player == player && p != peer) || InGame(player))
+        if (_peers.Values.Any(p => p.Player == player && p != peer) || InGame(player) || _spawns.IsWaiting(player))
         {
             Refuse(peer.Connection, $"{name} is already in the game");
             return;
@@ -196,19 +221,27 @@ public sealed class HostSession : NetSession
         peer.Name = name;
         peer.Player = player;
         peer.State = PeerState.LoadingTerrain;
-        peer.Spawn = _directory.Saved(player)?.Position ?? _directory.NewPlayerSpawn.Position;
+
+        // Where they left off if they've played this world before (on their ship as it is now, if it's here), else new
+        // at the spawn point. The client loads its terrain there; they spawn once it has, and their ship has loaded.
+        var spawn = _directory.NewPlayerSpawn;
+        var description = _directory.Saved(player) ?? new PlayerDescription
+            { Id = player, FreeFly = true, Position = spawn.Position, Yaw = spawn.Yaw, Pitch = spawn.Pitch };
+        description.Name = name;
+        peer.Spawn = PlayerFactory.WorldPosition(description, Registry);
+        _spawns.Add(description, id, local: false, d => SendWorld(peer, d));
         var (first, count) = _ids.NextBlock();
         Send(peer.Connection, new Welcome(id, first, count, _seed, Clock.Tick, peer.Spawn));
         Console.WriteLine($"[net] {name} joining as {id}");
     }
 
     /// <summary>
-    /// The client has terrain: send them the world as it is now, then spawn their player for everyone. Runs first in the
-    /// tick (in the session's update), so every change of the last tick is in the descriptions, and every later event
+    /// The client has terrain, and their ship is here: send them the world as it is now, then spawn their player for
+    /// everyone. Runs first in the tick (in the session's update), so every change of the last tick is in the descriptions, and every later event
     /// goes out after them on the same ordered channel: nothing is missed or applied twice. Each is numbered after
     /// every event already sent for its entity (<see cref="CommandSystem.StampEvent"/>).
     /// </summary>
-    private void SendWorld(RemotePeer peer)
+    private void SendWorld(RemotePeer peer, PlayerDescription description)
     {
         foreach (var d in Commands.Describe(_describable.GetEntities().ToArray()))
         {
@@ -217,11 +250,6 @@ public sealed class HostSession : NetSession
         }
         peer.State = PeerState.Joined;
 
-        // Where they left off if they've played this world before, else new at the spawn point.
-        var spawn = _directory.NewPlayerSpawn;
-        var description = _directory.Saved(peer.Player) ?? new PlayerDescription
-            { Id = peer.Player, FreeFly = true, Position = spawn.Position, Yaw = spawn.Yaw, Pitch = spawn.Pitch };
-        description.Name = peer.Name;
         peer.PlayerEntity = Registry.Allocate();
         Commands.Send(new Spawn<PlayerDescription> { Id = peer.PlayerEntity, Owner = peer.Peer, Description = description });
 

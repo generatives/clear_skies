@@ -43,16 +43,19 @@ public static class DedicatedServerGame
         host.AddSystem(wheels, SystemStage.Simulation);
         host.AddSystem(world.Flight, SystemStage.Simulation);
         host.AddSystem(world.CreatePresence(), SystemStage.Simulation);
+        // Physics copies of bodies owned elsewhere (kinematic ships near the local player, servo copies of other
+        // players), placed before the step, once the presence system has decided which copies exist.
+        host.AddSystem(new FollowerSystem(host.World, host.Physics, world.RemoteBodies), SystemStage.Simulation);
         host.AddSystem(host.Physics, SystemStage.Simulation);
         host.AddSystem(new PhysicsTransformSyncSystem(host.World, host.Physics), SystemStage.Simulation);
+        host.AddSystem(world.RemoteBodies, SystemStage.Simulation);
         host.AddSystem(world.Hierarchy, SystemStage.Simulation);
         host.AddSystem(new SupportSystem(host.World, host.Physics), SystemStage.Simulation);
         host.AddSystem(world.Interpolation, SystemStage.Simulation);
         host.AddSystem(new BodySync(net, host.World, host.Physics), SystemStage.Simulation);
 
-        // Each frame: bodies owned elsewhere (about 100 ms behind), and terrain streamed around the interest.
+        // Each frame: terrain streamed around the interest.
         host.AddSystem(world.Interpolation, SystemStage.Frame);
-        host.AddSystem(world.RemoteBodies, SystemStage.Frame);
         host.AddSystem(world.Hierarchy, SystemStage.Frame);
         host.AddSystem(world.ChunkLoad, SystemStage.Frame);
 
@@ -94,16 +97,19 @@ public static class BotClientGame
         host.AddSystem(wheels, SystemStage.Simulation);
         host.AddSystem(world.Flight, SystemStage.Simulation);
         host.AddSystem(world.CreatePresence(), SystemStage.Simulation);
+        // Physics copies of bodies owned elsewhere (kinematic ships near the local player, servo copies of other
+        // players), placed before the step, once the presence system has decided which copies exist.
+        host.AddSystem(new FollowerSystem(host.World, host.Physics, world.RemoteBodies), SystemStage.Simulation);
         host.AddSystem(host.Physics, SystemStage.Simulation);
         host.AddSystem(new PhysicsTransformSyncSystem(host.World, host.Physics), SystemStage.Simulation);
+        host.AddSystem(world.RemoteBodies, SystemStage.Simulation);
         host.AddSystem(world.Hierarchy, SystemStage.Simulation);
         host.AddSystem(new SupportSystem(host.World, host.Physics), SystemStage.Simulation);
         host.AddSystem(world.Interpolation, SystemStage.Simulation);
         host.AddSystem(new BodySync(net, host.World, host.Physics), SystemStage.Simulation);
 
-        // Each frame: bodies owned elsewhere (about 100 ms behind), and terrain streamed around the interest.
+        // Each frame: terrain streamed around the interest.
         host.AddSystem(world.Interpolation, SystemStage.Frame);
-        host.AddSystem(world.RemoteBodies, SystemStage.Frame);
         host.AddSystem(world.Hierarchy, SystemStage.Frame);
         host.AddSystem(world.ChunkLoad, SystemStage.Frame);
 
