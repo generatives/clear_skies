@@ -30,6 +30,9 @@ namespace ClearSkies.Engine.ECS;
 /// is loaded but not drawn yet (not in the GPU store or not meshed), or else at the view distance: an island only
 /// partly loaded fades out where loading stopped instead of ending in a hard edge, and chunks appear behind the fog
 /// rather than popping in in front of it.
+///
+/// Bodies simulated here away from the view (other players' characters, on the host) have colliders-only interests:
+/// the columns around them are loaded too, for their colliders, never drawn (<see cref="StreamColliderColumns"/>).
 /// </summary>
 public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 {
@@ -63,6 +66,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     private readonly ChunkVolume    _staticVolume;
     private readonly IChunkBudget   _loadBudget;
     private readonly IChunkPreparer? _preparer;
+    private bool _hasView;
     private readonly ThreadLocal<IWorldGenerator> _generator;
     private readonly ThreadLocal<ChunkData> _scratch = new(() => new ChunkData());
     private readonly int            _minY;      // the lowest streamed layer: bit 0 of a column's bits
@@ -128,6 +132,13 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     private readonly List<ChunkPosition> _undrawn = new();
 
     private readonly List<ChunkPosition> _toUnload = new();
+
+    // Colliders-only streaming: columns wanted by colliders-only terrain interests (bodies this machine simulates away
+    // from its own view: other players' characters, ships) that aren't in view. Their chunks are loaded for colliders
+    // and never drawn, and aren't evicted to make room for the view.
+    private readonly HashSet<(int x, int z)> _colliderColumns = new();
+    private int _colliderRefresh;
+    private const int MaxColliderColumnJobs = 8;
 
     /// <summary>Horizontal distance from the centre at which the loaded world stops: the nearest chunk column still
     /// queued or loading, or else the view distance, eased over time. Fog should be total by here.</summary>
@@ -225,9 +236,20 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         _steps.Start();
 
         _budget.Restart();
-        bool hasCentre = TryGetInterestCentre(out var centre);
-        if (hasCentre)
+        bool hasView = TryGetInterestCentre(out var centre);
+        if (!hasView)
         {
+            // Nobody to draw for (a dedicated server, or before the player arrives): only what colliders want.
+            if (_hasView)
+            {
+                _hasView = false;
+                _lastCentreColumn = (int.MinValue, int.MinValue);
+                Rebuild();
+            }
+        }
+        else
+        {
+            _hasView = true;
             var centreColumn = ViewColumn(centre);
             bool idle = _scanDone && _queueHead == _queue.Count && _inFlight.Count == 0;
             if (centreColumn != _lastCentreColumn || (idle && (_skippedInFlight || _queueTruncated)))
@@ -236,9 +258,9 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
                 _skippedInFlight = false;
                 Rebuild();
             }
-            UnloadSome(BudgetLeft);
-            _steps.Lap(UnloadStep);
         }
+        UnloadSome(BudgetLeft);
+        _steps.Lap(UnloadStep);
 
         double applyUntil = _steps.SinceLap() + BudgetLeft;
         while (_steps.SinceLap() < applyUntil && _results.TryDequeue(out var job))
@@ -255,20 +277,25 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
                     continue;
                 }
                 // Dropped if the centre moved on while it generated, or an edit created the chunk meanwhile.
-                if (InView(pos.X, pos.Z) && !_staticVolume.IsLoaded(pos))
+                if (Wanted(pos.X, pos.Z) && !_staticVolume.IsLoaded(pos))
                 {
                     _staticVolume.AddChunk(pos, data, prepared);
-                    _undrawn.Add(pos);
+                    if (InView(pos.X, pos.Z)) _undrawn.Add(pos); // colliders-only chunks are never drawn
                 }
             }
         }
         _steps.Lap(ApplyStep);
-        if (!hasCentre) return;
+        if (!hasView)
+        {
+            StreamColliderColumns();
+            return;
+        }
 
         ScanSome(BudgetLeft);
         _steps.Lap(QueueStep);
 
         Dispatch();
+        StreamColliderColumns();
         _steps.Lap(DispatchStep);
         UpdateFog(centre, dt);
         _steps.Lap(FogStep);
@@ -296,12 +323,12 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         // (An edit that put blocks where there were none counts as a build once its chunk is saved: by the autosave,
         // or as it unloads. Until then the chunk is loaded, so the queue doesn't need to know.)
         foreach (var (p, _) in _staticVolume.All)
-            if (!InView(p.X, p.Z)) _toUnload.Add(p);
+            if (!Wanted(p.X, p.Z)) _toUnload.Add(p);
 
-        // Forget the columns out of view: their air is re-learned on return.
+        // Forget the columns no longer wanted: their air is re-learned on return.
         _columnsOutOfView.Clear();
         foreach (var key in _columns.Keys)
-            if (!InView(key.x, key.z)) _columnsOutOfView.Add(key);
+            if (!Wanted(key.x, key.z)) _columnsOutOfView.Add(key);
         foreach (var key in _columnsOutOfView) _columns.Remove(key);
         _steps.Lap(UnloadStep);
 
@@ -311,7 +338,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         _nothingToEvict = false;
         _evictNext = -1;
         _scanAt = 0;
-        _scanDone = false;
+        _scanDone = !_hasView; // with no view, nothing to scan for
         _steps.Lap(QueueStep);
     }
 
@@ -363,7 +390,55 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         return near ? _lastCentreColumn : column;
     }
 
-    private bool InView(int x, int z) => Sq(x - _lastCentreColumn.x) + Sq(z - _lastCentreColumn.z) <= Sq(_viewColumns);
+    private bool InView(int x, int z) => _hasView && Sq(x - _lastCentreColumn.x) + Sq(z - _lastCentreColumn.z) <= Sq(_viewColumns);
+
+    /// <summary>In view, or wanted for colliders.</summary>
+    private bool Wanted(int x, int z) => InView(x, z) || _colliderColumns.Contains((x, z));
+
+    /// <summary>Loads (as data only) the columns colliders-only interests want that aren't in view, and unloads the ones
+    /// no longer wanted. The wanted set is refreshed every 30 frames.</summary>
+    private void StreamColliderColumns()
+    {
+        if (++_colliderRefresh >= 30)
+        {
+            _colliderRefresh = 0;
+            var wanted = new HashSet<(int x, int z)>();
+            foreach (ref readonly Entity e in _interests.GetEntities())
+            {
+                ref readonly var interest = ref e.Get<TerrainInterest>();
+                if (interest.Kind != TerrainInterestKind.CollidersOnly) continue;
+                var p = e.Get<Transform>().Position;
+                int cx = (int)MathF.Floor(p.X / S), cz = (int)MathF.Floor(p.Z / S), r = (int)MathF.Ceiling(interest.Radius / S);
+                for (int dz = -r; dz <= r; dz++)
+                for (int dx = -r; dx <= r; dx++)
+                    if (dx * dx + dz * dz <= r * r && !InView(cx + dx, cz + dz)) wanted.Add((cx + dx, cz + dz));
+            }
+            var dropped = _colliderColumns.Where(c => !wanted.Contains(c)).ToList();
+            _colliderColumns.Clear();
+            _colliderColumns.UnionWith(wanted);
+            foreach (var (x, z) in dropped)
+            {
+                if (InView(x, z)) continue;
+                for (int layer = 0; layer < 64; layer++)
+                {
+                    var p = new ChunkPosition(x, _minY + layer, z);
+                    if (_staticVolume.IsLoaded(p)) Unload(p);
+                }
+                _columns.Remove((x, z));
+            }
+        }
+
+        int jobs = 0;
+        foreach (var col in _colliderColumns)
+        {
+            if (jobs >= MaxColliderColumnJobs || _inFlight.Count >= MaxInFlight) break;
+            if (_inFlight.ContainsKey(col)) continue;
+            var work = Missing(col.x, col.z);
+            if (work.Count == 0) continue;
+            DispatchColumn(col, work);
+            jobs++;
+        }
+    }
 
     private static long Sq(int v) => (long)v * v;
 
@@ -424,34 +499,40 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
             }
 
             _queueHead++;
-            _inFlight.Add(col, work.Count);
-            _inFlightChunks += work.Count;
-            BackgroundWork.Queue(() =>
-            {
-                var loaded = new List<(ChunkPosition, ChunkData?, ChunkPreparation?)>(work.Count);
-                foreach (var (pos, fromSave) in work)
-                {
-                    var data = _scratch.Value!;
-                    if (!(fromSave && _chunkStore.TryLoad(pos, data)))
-                        _generator.Value!.Generate(data, pos);
-                    data.Compact(); // stone inside an island, or sky, keeps one block instead of 64 KB
-                    if (data.HasAnySolid())
-                    {
-                        data.IsDirty = false;
-                        loaded.Add((pos, data, _preparer?.Prepare(data))); // off the main thread
-                        _scratch.Value = new ChunkData();
-                    }
-                    else
-                    {
-                        loaded.Add((pos, null, null));
-                        // Generation only ever writes blocks, so an empty result leaves the buffer all air and ready to
-                        // reuse; a loaded save may have overwritten more than blocks, so start that one afresh.
-                        if (fromSave) _scratch.Value = new ChunkData();
-                    }
-                }
-                _results.Enqueue((col, loaded));
-            });
+            DispatchColumn(col, work);
         }
+    }
+
+    /// <summary>Hands a column's missing chunks to a worker: each loaded from the store if saved, else generated.</summary>
+    private void DispatchColumn((int x, int z) col, List<(ChunkPosition Pos, bool FromSave)> work)
+    {
+        _inFlight.Add(col, work.Count);
+        _inFlightChunks += work.Count;
+        BackgroundWork.Queue(() =>
+        {
+            var loaded = new List<(ChunkPosition, ChunkData?, ChunkPreparation?)>(work.Count);
+            foreach (var (pos, fromSave) in work)
+            {
+                var data = _scratch.Value!;
+                if (!(fromSave && _chunkStore.TryLoad(pos, data)))
+                    _generator.Value!.Generate(data, pos);
+                data.Compact(); // stone inside an island, or sky, keeps one block instead of 64 KB
+                if (data.HasAnySolid())
+                {
+                    data.IsDirty = false;
+                    loaded.Add((pos, data, _preparer?.Prepare(data))); // off the main thread
+                    _scratch.Value = new ChunkData();
+                }
+                else
+                {
+                    loaded.Add((pos, null, null));
+                    // Generation only ever writes blocks, so an empty result leaves the buffer all air and ready to
+                    // reuse; a loaded save may have overwritten more than blocks, so start that one afresh.
+                    if (fromSave) _scratch.Value = new ChunkData();
+                }
+            }
+            _results.Enqueue((col, loaded));
+        });
     }
 
     /// <summary>Unloads the farthest loaded columns (not being loaded) that are more than a column farther than
@@ -501,7 +582,8 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     private void BuildEvictOrder()
     {
         _evictColumns.Clear();
-        foreach (var (p, _) in _staticVolume.All) _evictColumns.Add((p.X, p.Z));
+        foreach (var (p, _) in _staticVolume.All)
+            if (!_colliderColumns.Contains((p.X, p.Z))) _evictColumns.Add((p.X, p.Z)); // colliders-only columns aren't evicted for the view
         _evictOrder.Clear();
         _evictOrder.AddRange(_evictColumns);
         // Each column's distance once, farthest first (the comparison sort would compute it twice per comparison).
@@ -523,13 +605,12 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     /// loaded: every column there is in view, with nothing still to load or loading.</summary>
     public bool IsTerrainLoaded(Vector3D<float> centre, float radius)
     {
-        if (_lastCentreColumn.x == int.MinValue) return false;
         int cx = (int)MathF.Floor(centre.X / S), cz = (int)MathF.Floor(centre.Z / S), r = (int)MathF.Ceiling(radius / S);
         for (int dz = -r; dz <= r; dz++)
         for (int dx = -r; dx <= r; dx++)
         {
             int x = cx + dx, z = cz + dz;
-            if (!InView(x, z) || _inFlight.ContainsKey((x, z)) || HasMissing(x, z)) return false;
+            if (!Wanted(x, z) || _inFlight.ContainsKey((x, z)) || HasMissing(x, z)) return false;
         }
         return true;
     }
