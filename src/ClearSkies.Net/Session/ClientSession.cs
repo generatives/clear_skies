@@ -58,6 +58,9 @@ public sealed class ClientSession : NetSession
     public Welcome Welcome { get; }
     public ClockSync ClockSync { get; }
     public bool Joined { get; private set; }
+
+    /// <summary>What joining is waiting on, for a loading screen: the world around the spawn, the clock, then the host.</summary>
+    public string JoinStatus { get; private set; } = "Loading the world";
     public override bool OthersConnected => true;
 
     /// <summary>
@@ -82,8 +85,11 @@ public sealed class ClientSession : NetSession
         if (ClockSync.ShouldPing(NowMs)) Send(Host, new TimePing(NowMs), Channel.Unreliable);
         if (double.IsNaN(_settleFrom)) _settleFrom = NowMs;
         bool clockReady = ClockSync.Settled || NowMs - _settleFrom > MaxSettleMs;
-        if (!_terrainReadySent && clockReady && _terrainLoaded(Welcome.Spawn))
+        bool terrainLoaded = !_terrainReadySent && _terrainLoaded(Welcome.Spawn);
+        if (!_terrainReadySent) JoinStatus = !terrainLoaded ? "Loading the world" : "Syncing with the host";
+        if (terrainLoaded && clockReady)
         {
+            JoinStatus = "Waiting for the host";
             Send(Host, new TerrainReady());
             _terrainReadySent = true;
             double waited = (NowMs - _settleFrom) / 1000;
