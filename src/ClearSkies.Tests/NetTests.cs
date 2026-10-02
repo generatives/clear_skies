@@ -211,6 +211,28 @@ public class ClockSyncTests
         sync.OnPong(new TimePong(4000, 5001, 0), nowMs: 4000 + 600);
         Assert.InRange(sync.RoundTripMs, 55, 65);
     }
+
+    [Fact]
+    public void TicksASlowFrameDroppedArePutBackWithoutASnap()
+    {
+        var clock = new Engine.Core.ManualTickClock { Tick = 5000 };
+        var sync = new ClockSync(clock) { Settling = true };
+        // On the host's timeline: the host 1 tick on, 60 ms round trip (2 ticks each way).
+        for (int i = 0; i < 8; i++) sync.OnPong(new TimePong(i * 250, clock.Tick - 1, 0), nowMs: i * 250 + 60);
+        long snaps = sync.Snaps;
+
+        // A 400 ms frame (loading): 15 ticks run, 9 dropped, so the clock is 9 behind the host's.
+        clock.Tick += 15;
+        clock.DroppedTicks += 9;
+        sync.Update();
+        Assert.Equal(5024u, clock.Tick);
+        Assert.Equal(9, sync.SkippedTicks);
+
+        // The host's answers find it on time: no snap, and still settling towards settled.
+        for (int i = 8; i < 8 + ClockSync.SampleCount; i++) sync.OnPong(new TimePong(i * 250, clock.Tick - 1, 0), nowMs: i * 250 + 60);
+        Assert.Equal(snaps, sync.Snaps);
+        Assert.True(sync.Settled);
+    }
 }
 
 public class JoinTests

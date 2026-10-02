@@ -65,4 +65,8 @@ public sealed class TickClock : ITickClock
         Tick = tick;
         _accumulator = 0;
     }
+
+    /// <summary>Moves the tick number on by <paramref name="ticks"/> without running them (clock sync putting back
+    /// ticks a slow frame dropped), keeping the partial tick.</summary>
+    public void Skip(int ticks) => Tick += (uint)ticks;
 }
