@@ -18,7 +18,8 @@ namespace ClearSkies.Net.Sync;
 /// <item>Where the last tick left the player is recorded under that tick's input number.</item>
 /// <item>If the host has said where its simulation left them (a snapshot with the number of the last of their inputs it
 /// applied, <see cref="SnapshotFlags.HasInput"/>), that's compared with what was recorded for the same input. Any
-/// difference, beyond <see cref="Tolerance"/>, is how far the prediction went wrong: the player is moved by it now, and
+/// difference, beyond <see cref="Tolerance"/>, is how far the prediction went wrong: the player is moved by it now (and
+/// drawn easing over, <see cref="InterpolatedTransform.Smooth"/>), and
 /// so is every later record, since they all carry the same mistake. Positions are compared in the space of what the
 /// player stands on (a ship's, or the world's), where a ship's own motion, which the two machines see at different
 /// times, doesn't count.</item>
@@ -179,7 +180,9 @@ public sealed class OwnPlayerPrediction : ISystem
         if (move)
         {
             ref var t = ref e.Get<Transform>();
-            t.Position += new Vector3D<float>(worldError.X, worldError.Y, worldError.Z);
+            var by = new Vector3D<float>(worldError.X, worldError.Y, worldError.Z);
+            t.Position += by;
+            if (e.Has<InterpolatedTransform>()) e.Get<InterpolatedTransform>().Smooth(by); // eased out, not a pop
             if (!flying && e.Has<CharacterControllerComponent>()) e.Get<CharacterControllerComponent>().Character.MoveBy(worldError);
             LastCorrection = worldError.Length();
             LargestCorrection = MathF.Max(LargestCorrection, LastCorrection);
