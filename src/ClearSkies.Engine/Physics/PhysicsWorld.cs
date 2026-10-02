@@ -403,11 +403,11 @@ internal struct VoxelNarrowPhaseCallbacks : INarrowPhaseCallbacks
     }
 
     /// <summary>Which pairs may touch (set by <see cref="PhysicsWorld"/>'s constructor).</summary>
-    public ContactFilter? Filter;
+    public ContactFilter Filter;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public readonly bool AllowContactGeneration(int workerIndex, CollidableReference a, CollidableReference b, ref float speculativeMargin)
-        => Filter is null || Filter.Allow(a, b);
+        => Filter.Allow(a, b);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public readonly bool AllowContactGeneration(int workerIndex, CollidablePair pair, int childIndexA, int childIndexB)
@@ -480,13 +480,13 @@ internal struct VoxelPoseCallbacks : IPoseIntegratorCallbacks
 /// grids and terrain only.</summary>
 public sealed class ContactFilter
 {
-    public CollidableProperty<ColliderInfo>? Colliders;
+    /// <summary>Set by <see cref="PhysicsWorld"/>'s constructor, straight after the simulation it reads from exists.</summary>
+    public CollidableProperty<ColliderInfo> Colliders = null!;
 
     public bool Allow(CollidableReference a, CollidableReference b)
     {
-        if (Colliders is not { } colliders) return true;
-        var ka = colliders[a].Kind;
-        var kb = colliders[b].Kind;
+        var ka = Colliders[a].Kind;
+        var kb = Colliders[b].Kind;
         if (ka == ColliderKind.Follower) return kb is ColliderKind.VoxelGrid or ColliderKind.VoxelTerrain;
         if (kb == ColliderKind.Follower) return ka is ColliderKind.VoxelGrid or ColliderKind.VoxelTerrain;
         return true;

@@ -67,7 +67,7 @@ public sealed class BodySync : ISystem, IDebugUiSystem
     {
         bool synced = e.Has<Player>() || (SyncGrids && e.Has<DynamicGrid>());
         bool remote = synced && !owner.IsLocal;
-        if (remote && !e.Has<RemoteBody>()) e.Set(new RemoteBody { Buffer = new SnapshotBuffer(), Jumped = true });
+        if (remote && !e.Has<RemoteBody>()) e.Set(new RemoteBody { Buffer = new SnapshotBuffer(), TeleportNext = true });
         else if (!remote && e.Has<RemoteBody>()) e.Remove<RemoteBody>();
     }
 
@@ -230,14 +230,14 @@ public sealed class RemoteBodySystem : ISystem
                     }
                 }
                 else t.Rotation = new Quaternion<float>(rotation.X, rotation.Y, rotation.Z, rotation.W);
-                // Its first pose, or one after the delay jumped: appear there, don't slide there over the tick.
-                if (remote.Jumped && e.Has<InterpolatedTransform>()) e.Get<InterpolatedTransform>().Teleport();
-                remote.Jumped = false;
+                // Its first pose, or one after the delay leapt: appear there, don't slide there over the frame.
+                if (remote.TeleportNext && e.Has<InterpolatedTransform>()) e.Get<InterpolatedTransform>().Teleport();
+                remote.TeleportNext = false;
             }
 
             // For the next tick, which the physics copies are moved to before this runs again.
             buffer.Margin = Margin;
-            if (buffer.UpdateDelay(1)) remote.Jumped = true;
+            if (buffer.UpdateDelay(1)) remote.TeleportNext = true;
             (least, most) = (System.Math.Min(least, buffer.Delay), System.Math.Max(most, buffer.Delay));
         }
         Delays = most > 0 ? (least, most) : (0, 0);

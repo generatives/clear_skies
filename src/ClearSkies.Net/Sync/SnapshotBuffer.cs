@@ -159,6 +159,8 @@ public sealed class SnapshotBuffer
 public struct RemoteBody
 {
     public SnapshotBuffer Buffer;
-    /// <summary>Its next pose is a jump (its first, or the delay jumped), to be drawn there straight away.</summary>
-    public bool Jumped;
+    /// <summary>Draw its next pose straight away instead of smoothing to it over the frame: set for its first pose, and
+    /// when the buffer's delay leaps (<see cref="SnapshotBuffer.UpdateDelay"/>), where smoothing would slide it across
+    /// the gap.</summary>
+    public bool TeleportNext;
 }
