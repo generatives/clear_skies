@@ -86,7 +86,7 @@ public class ChunkVolume
     public bool IsEmpty()
     {
         foreach (var entry in _chunks.Values)
-            if (entry.Data.HasAnySolid()) return false;
+            if (entry.Data.HasAnyNonAir()) return false;
         return true;
     }
 

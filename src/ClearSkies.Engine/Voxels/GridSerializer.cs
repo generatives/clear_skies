@@ -21,7 +21,7 @@ public static class GridSerializer
         var voxels = new List<GridVoxel>();
         foreach (var (pos, entry) in grid.All)
         {
-            if (!entry.Data.HasAnySolid()) continue;
+            if (!entry.Data.HasAnyNonAir()) continue;
             var origin = pos.WorldOrigin;
             int ox = (int)origin.X, oy = (int)origin.Y, oz = (int)origin.Z;
 
