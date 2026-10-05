@@ -111,7 +111,10 @@ public class EngineHost : IDisposable
     {
         RunStage(SystemStage.Input, (float)dt);
 
+        long dropped = Clock.DroppedTicks;
         int ticks = Clock.Advance(dt);
+        if (Clock.DroppedTicks > dropped)
+            Console.WriteLine($"[time] a {dt * 1000:0} ms frame: {Clock.DroppedTicks - dropped} ticks dropped (the clock falls behind)");
         for (int i = 0; i < ticks; i++)
         {
             Clock.Tick++;
