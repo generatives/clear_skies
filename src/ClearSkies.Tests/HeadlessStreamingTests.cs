@@ -152,4 +152,36 @@ public class HeadlessStreamingTests
         Assert.True(limited.IsTerrainLoaded(new Vector3D<float>(16, 0, 16), 64));
         Assert.False(limited.IsTerrainLoaded(new Vector3D<float>(16, 0, 16), 160));
     }
+
+    [Fact]
+    public void ColumnsOnTheirWayAreEntitiesUntilTheyLoad()
+    {
+        using var scene = new HeadlessScene();
+        using var db = SaveDatabase.InMemory();
+        var load = Streaming(scene, db);
+        var loading = scene.World.GetEntities().With<TerrainColumnLoading>().AsSet();
+        var player = Interest(scene, 16, 16, View(64));
+        load.Update(1 / 60f); // the scan queues what's wanted, before anything has loaded
+        Assert.NotEqual(0, loading.Count);
+        Settle(load);
+        Assert.Equal(0, loading.Count);
+        Assert.Equal(float.PositiveInfinity, player.Get<TerrainScanned>().Radius);
+    }
+
+    [Fact]
+    public void TheFogSitsAtTheNearestColumnStillLoading()
+    {
+        using var scene = new HeadlessScene();
+        var fog = new FogSystem(scene.World, viewDistance: 500);
+        var player = Interest(scene, 16, 16, View(500));
+        player.Set(new TerrainScanned { Radius = float.PositiveInfinity });
+        var column = scene.World.CreateEntity();
+        column.Set(new TerrainColumnLoading { X = 4, Z = 0 }); // 112 blocks out (from x = 16 to the column's edge at 128)
+        for (int i = 0; i < 300; i++) fog.Update(1 / 60f);
+        Assert.InRange(fog.Distance, 110, 113);
+
+        column.Dispose(); // loaded: the fog opens out to the draw radius
+        for (int i = 0; i < 1200; i++) fog.Update(1 / 60f);
+        Assert.InRange(fog.Distance, 490, 500);
+    }
 }
