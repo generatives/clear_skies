@@ -35,19 +35,21 @@ public struct Rendered
 {
 }
 
-public enum TerrainInterestKind : byte
-{
-    /// <summary>Terrain data and colliders only, for simulating a body there.</summary>
-    CollidersOnly,
-    /// <summary>Everything, drawn: the local player's view.</summary>
-    Full,
-}
-
-/// <summary>Terrain layer: terrain is streamed around this entity. Chunks within <see cref="EntityPresenceSystem.ColliderRange"/>
-/// of any interest get colliders; a <see cref="TerrainInterestKind.Full"/> interest also streams the drawn world out to
-/// <see cref="Radius"/>.</summary>
+/// <summary>Terrain layer: terrain is streamed around this entity, out to the larger of its two radii (horizontally,
+/// <see cref="ChunkLoadSystem"/>). Loaded chunks within <see cref="ColliderRadius"/> of it get colliders, and those within
+/// <see cref="DrawRadius"/> are drawn (<see cref="EntityPresenceSystem"/>). A body simulated here away from the view
+/// (another player's character on the host, a ship) has only a collider radius; the local player's view has both.</summary>
 public struct TerrainInterest
 {
-    public float Radius;
-    public TerrainInterestKind Kind;
+    /// <summary>Terrain colliders are built within this distance (dropped a little further out).</summary>
+    public float ColliderRadius;
+
+    /// <summary>Terrain is drawn within this horizontal distance; 0 for none.</summary>
+    public float DrawRadius;
+
+    /// <summary>How far terrain is loaded around it.</summary>
+    public readonly float LoadRadius => MathF.Max(ColliderRadius, DrawRadius);
+
+    public override readonly string ToString() => DrawRadius > 0 ? $"drawn to {DrawRadius:0}, colliders to {ColliderRadius:0}"
+                                                                  : $"colliders to {ColliderRadius:0}";
 }

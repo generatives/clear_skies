@@ -44,7 +44,7 @@ public sealed class ClientSession : NetSession
         // Stream terrain around the spawn until the player is here to stream around.
         _anchor = world.CreateEntity();
         _anchor.Set(new Transform { Position = new Vector3D<float>(welcome.Spawn.X, welcome.Spawn.Y, welcome.Spawn.Z), Rotation = Quaternion<float>.Identity, Scale = Vector3D<float>.One });
-        _anchor.Set(new TerrainInterest { Radius = 1000, Kind = TerrainInterestKind.Full });
+        _anchor.Set(new TerrainInterest { ColliderRadius = EntityPresenceSystem.ColliderRange, DrawRadius = 1000 });
     }
 
     public Welcome Welcome { get; }
