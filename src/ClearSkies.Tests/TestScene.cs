@@ -28,6 +28,7 @@ public sealed class HeadlessScene : IDisposable
     public readonly GridSelection Selection;
     public readonly ChunkVolume WorldVolume;
     public readonly EntityPresenceSystem Presence;
+    public readonly PhysicsBodySystem PhysicsBodies;
     public readonly CommandSystem Commands;
     public readonly BlockEntities Blocks;
     public readonly EditLimits Limits = new();
@@ -63,7 +64,8 @@ public sealed class HeadlessScene : IDisposable
         GameCommands.RegisterAll(Commands, World, Session, Blocks, Limits, Registry, Physics, Selection);
         var hierarchy = new HierarchyTransformSystem(World);
         _tick.Add(hierarchy);
-        _tick.Add(new PhysicsBodySystem(World, Physics));
+        PhysicsBodies = new PhysicsBodySystem(World, Physics);
+        _tick.Add(PhysicsBodies);
         _tick.Add(new PlayerMovementSystem(World, Commands));
         _tick.Add(Commands);
         _tick.Add(Presence);
