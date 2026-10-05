@@ -459,7 +459,7 @@ public sealed class Host : ISystem, IDisposable
 
     private bool AnyoneSees(HostEntity e, bool already)
     {
-        foreach (var p in Welcomed) if (p.Ready && Sees(p, e, already)) return true;
+        foreach (var p in Joined) if (p.Ready && Sees(p, e, already)) return true;
         return false;
     }
 
@@ -474,7 +474,7 @@ public sealed class Host : ISystem, IDisposable
         if (Authority is not { } authority) return;
 
         // With no view anywhere (nobody in yet), there's nothing to load around and nothing is released.
-        bool viewed = Welcomed.Any(p => p.Ready && p.ViewRadius > 0);
+        bool viewed = Joined.Any(p => p.Ready && p.ViewRadius > 0);
         if (viewed)
             foreach (var e in _entities.Values)
                 if (e.Loaded && !e.Releasing && !e.IsPlayer && !AnyoneSees(e, already: true)) Release(e);
