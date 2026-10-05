@@ -90,7 +90,7 @@ public sealed class GameView : IDisposable
         host.AddSystem(_clouds, SystemStage.RenderWorld);
         host.AddSystem(new SkyRenderSystem(renderer), SystemStage.RenderSky);
         host.AddSystem(new WireframeRenderSystem(host.World, renderer), SystemStage.RenderOverlay);
-        host.AddSystem(chunks.TransparentPass, SystemStage.RenderTransparent);
+        host.AddSystem(chunks, SystemStage.RenderTransparent);
         host.AddSystem(new HudRenderSystem(host.World, renderer), SystemStage.RenderHud);
         host.AddSystem(_uiRenderer, SystemStage.RenderHud);
     }

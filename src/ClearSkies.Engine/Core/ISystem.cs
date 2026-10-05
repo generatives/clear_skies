@@ -63,3 +63,11 @@ public interface IRenderSystem
 {
     void Render(in Rendering.RenderContext frame);
 }
+
+/// <summary>A system that draws in more than one render stage (e.g. chunks: opaque in RenderWorld, translucent in
+/// RenderTransparent): registered with <see cref="WindowedEngineHost.AddSystem(IStagedRenderSystem, SystemStage)"/>
+/// once per stage, at the point in that stage where it should run, and told each time which stage is running.</summary>
+public interface IStagedRenderSystem
+{
+    void Render(SystemStage stage, in Rendering.RenderContext frame);
+}

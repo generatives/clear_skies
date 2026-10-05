@@ -84,6 +84,17 @@ public sealed class WindowedEngineHost : EngineHost
         Schedule(system, stage);
     }
 
+    /// <summary>Schedules one render stage of a system that draws in several: call once per stage it draws in, each at
+    /// the point in that stage where it should run.</summary>
+    public void AddSystem(IStagedRenderSystem system, SystemStage stage)
+    {
+        if (!IsRenderStage(stage))
+            throw new ArgumentException($"{stage} is an update stage; it takes an {nameof(ISystem)}.", nameof(stage));
+        if (_systems.Exists(s => s.system == system && s.stage == stage))
+            throw new ArgumentException($"{system.GetType().Name} is already scheduled in {stage}.", nameof(stage));
+        Schedule(system, stage);
+    }
+
     private protected override void OnDebugUiScheduled(IDebugUiSystem panel) => Gui.RegisterDebugUi(panel);
 
     /// <summary>The last few hundred frames one by one (see the Frame timings panel).</summary>
@@ -162,7 +173,8 @@ public sealed class WindowedEngineHost : EngineHost
             var (system, s) = _systems[i];
             if (s != stage) continue;
             _systemTimer.Restart();
-            ((IRenderSystem)system).Render(frame);
+            if (system is IStagedRenderSystem staged) staged.Render(stage, frame);
+            else ((IRenderSystem)system).Render(frame);
             RecordTime(i);
         }
     }
