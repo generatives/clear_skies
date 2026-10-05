@@ -195,7 +195,7 @@ public struct PlayerCharacter
     }
 
     /// <summary>Drives the character from another player's movement rather than keys: their copy here (see
-    /// FollowerSystem). <paramref name="velocity"/> is the horizontal velocity to reach, relative to what it stands on
+    /// RemoteBodyProxySystem). <paramref name="velocity"/> is the horizontal velocity to reach, relative to what it stands on
     /// (or, in the air, its air reference), as the keys' target is; <paramref name="jump"/> jumps.</summary>
     public void Drive(Vector3 velocity, bool jump)
     {
