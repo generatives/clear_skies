@@ -512,7 +512,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
                 if (!(fromSave && _chunkStore.TryLoad(pos, data)))
                     _generator.Value!.Generate(data, pos);
                 data.Compact(); // stone inside an island, or sky, keeps one block instead of 64 KB
-                if (data.HasAnySolid())
+                if (data.HasAnyNonAir())
                 {
                     data.IsDirty = false;
                     loaded.Add((pos, data, _preparer?.Prepare(data))); // off the main thread
@@ -647,7 +647,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         entry.Data.IsDirty = false;
         // What's there now is what a reload finds, so an edit off the island's terrain (a bridge, a tower) comes back,
         // and one that cleared a chunk out stops costing budget.
-        RecordSave(pos, entry.Data.HasAnySolid());
+        RecordSave(pos, entry.Data.HasAnyNonAir());
     }
 
 }

@@ -194,7 +194,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
             var volume = entry.Volume;
 
             // Fast path: pure air chunk.
-            if (!entry.Data.HasAnySolid())
+            if (!entry.Data.HasAnyNonAir())
             {
                 ClearMesh(entry);
                 continue;
