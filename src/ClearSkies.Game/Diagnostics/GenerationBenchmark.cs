@@ -69,12 +69,12 @@ public static class GenerationBenchmark
             dataByPos.TryGetValue(pos.Offset(0, 0, 1), out var pZ);
 
             sw.Restart();
-            var (verts, idxs) = mesher.Mesh(data, nX, pX, nY, pY, nZ, pZ);
+            var mesh = mesher.Mesh(data, nX, pX, nY, pY, nZ, pZ);
             sw.Stop();
 
             meshTimesUs.Add(sw.Elapsed.TotalMicroseconds);
-            totalVerts += verts.Count;
-            totalIdx   += idxs.Count;
+            totalVerts += mesh.Opaque.Vertices.Count + mesh.Cutout.Vertices.Count;
+            totalIdx   += mesh.Opaque.Indices.Count + mesh.Cutout.Indices.Count;
         }
         double meshWallMs = overall.Elapsed.TotalMilliseconds;
 
