@@ -234,7 +234,7 @@ public class JoinTests
         // Its own player, played here but owned by the host; and the host's player.
         var mine = client.World.GetEntities().With<LocalPlayer>().AsEnumerable().Single();
         Assert.Equal(PeerId.Host, mine.Get<NetOwner>().Owner);
-        Assert.Equal(net.Session.LocalPeer, mine.Get<Player>().Controller);
+        Assert.Equal(net.Session.LocalPeer, mine.Get<Player>().ControllingPeer);
         Assert.True(client.Registry.IsLive(hostPlayer.Get<EntityId>()));
         // The host simulates the client's player, from its input.
         var remote = game.Host.Registry.Find(mine.Get<EntityId>())!.Value;
