@@ -41,8 +41,8 @@ public sealed class WorldSave : IDisposable
 
 /// <summary>
 /// Hosting a world from its save: the Host, which has no world of its own (it keeps track of who has what, and relays
-/// everything), and this machine's Participant, joined to it over an in-process link, which has authority over every
-/// entity, with the save's streaming and autosave (<see cref="Streaming"/> and <see cref="Saver"/>, which the game puts
+/// everything), the network others join it over (<see cref="Network"/>, if any), and this machine's Participant, joined
+/// to it directly, which has authority over every entity, with the save's streaming and autosave (<see cref="Streaming"/> and <see cref="Saver"/>, which the game puts
 /// early in the tick, after the local player's input if any). With <paramref name="transport"/> off, nobody else can
 /// join (single-player).
 /// </summary>
@@ -51,20 +51,14 @@ public sealed class Hosting : IDisposable
     /// <param name="playerName">Who plays on this machine (none: nobody, a dedicated host).</param>
     public Hosting(GameWorld world, WorldSave save, LaggedTransport? transport, string? playerName)
     {
-        var link = new LoopbackNetwork();
         var (eye, yaw, pitch) = WorldSpawn.For(save.Seed);
         ulong checksum = GenerationChecksum.Compute();
-        Host = new Host(new HostTransport(link.Listen(), transport), save.Database, world.Host.Clock, save.Seed, checksum,
-                        (WorldSpawn.PlayerAt(eye), yaw, pitch));
-        var participant = link.Connect();
-        var welcome = Participant.Connect(participant, new Hello(ProtocolVersion.Current, playerName ?? "", checksum),
-                                          TimeSpan.FromSeconds(5), () => Host.Update(0));
-        Net = new Participant(participant, welcome, world.Session, world.Commands, world.Registry, world.Host.World, world.Host.Clock,
-                              world.TerrainReadyFor)
-        {
-            OthersHere = () => Host.OthersConnected,
-            Viewing = playerName is not null,
-        };
+        Host = new Host(save.Database, world.Host.Clock, save.Seed, checksum, (WorldSpawn.PlayerAt(eye), yaw, pitch));
+        Network = transport is null ? null : new RemoteParticipants(Host, transport);
+        Net = SimulationParticipant.Join(Host, new Hello(ProtocolVersion.Current, playerName ?? "", checksum), world.Session, world.Commands,
+                                         world.Registry, world.Host.World, world.Host.Clock, world.TerrainReadyFor);
+        Net.OthersHere = () => Host.OthersConnected;
+        Net.Viewing = playerName is not null;
         // Entities load within 1,000 blocks of a player and unload past 1,100, written to the save as they go; everything
         // is autosaved every 5 minutes and on exit, in one transaction.
         var index = new StoredEntityIndex(save.Database.ReadEntityIndex());
@@ -73,7 +67,9 @@ public sealed class Hosting : IDisposable
     }
 
     public Host Host { get; }
-    public Participant Net { get; }
+    /// <summary>Participants on other machines, joining over the network (none: single-player). First in the tick.</summary>
+    public RemoteParticipants? Network { get; }
+    public SimulationParticipant Net { get; }
     public EntityStreamingSystem Streaming { get; }
     public WorldSaver Saver { get; }
 
@@ -83,6 +79,6 @@ public sealed class Hosting : IDisposable
     public void Dispose()
     {
         Net.Dispose();
-        Host.Dispose();
+        Network?.Dispose();
     }
 }

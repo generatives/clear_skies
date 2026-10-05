@@ -40,10 +40,11 @@ internal static class HostedGame
         host.AddSystem(new LookInputSystem(host.World, input), SystemStage.Input);
         host.AddSystem(view.InputSample, SystemStage.Input);
 
-        // Each 1/60 s tick (0 or more a frame, see TickClock). First the Host (what it was sent, what each Participant
-        // is owed), then everything that arrived here (spawns, commands, other players' input, which the Participant
+        // Each 1/60 s tick (0 or more a frame, see TickClock). First what other machines sent, then the Host (what each
+        // Participant is owed), then what this machine's Participant was told (spawns, commands, other players' input, which the Participant
         // hands each of them as their PlayerInput), the hierarchy, the frame's input as the local player's PlayerInput
         // (tick systems read only that), and the save's streaming and autosave.
+        if (hosting.Network is { } network) host.AddSystem(network, SystemStage.Simulation);
         host.AddSystem(hosting.Host, SystemStage.Simulation);
         host.AddSystem(net, SystemStage.Simulation);
         host.AddSystem(world.Hierarchy, SystemStage.Simulation);
@@ -75,7 +76,6 @@ internal static class HostedGame
         host.AddSystem(new SupportSystem(host.World, host.Physics), SystemStage.Simulation); // what each character stands on or rides with
         host.AddSystem(world.Interpolation, SystemStage.Simulation); // records this tick's poses
         host.AddSystem(new BodySync(net, host.World, host.Physics), SystemStage.Simulation); // owned bodies, every second tick
-        host.AddSystem(hosting.Host.Relay, SystemStage.Simulation); // what this tick sent, passed on now
 
         // Once each frame, after the ticks. What moves the camera itself, once a frame: --flight-test (flies once the world
         // has loaded, then quits), and the pilot, which puts the camera under a piloted grid (single-player only: off

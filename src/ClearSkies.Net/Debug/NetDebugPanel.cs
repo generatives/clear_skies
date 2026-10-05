@@ -11,7 +11,7 @@ namespace ClearSkies.Net.Debug;
 /// and slew, players' input (queued on the authority, predicted elsewhere), interpolation delay, bandwidth per channel, and sliders for artificial latency and loss (default test setting: 150 ms round trip, 2% loss).</summary>
 public sealed class NetDebugPanel : IDebugUiSystem
 {
-    private readonly Participant _net;
+    private readonly SimulationParticipant _net;
     private readonly Host? _host;
     private readonly RemoteBodySystem _remote;
     private readonly LaggedTransport? _lag;
@@ -19,7 +19,7 @@ public sealed class NetDebugPanel : IDebugUiSystem
     private double _lastSample, _kbOut, _kbIn;
 
     /// <param name="host">The Host, when it's on this machine.</param>
-    public NetDebugPanel(Participant net, Host? host, RemoteBodySystem remote, LaggedTransport? lag)
+    public NetDebugPanel(SimulationParticipant net, Host? host, RemoteBodySystem remote, LaggedTransport? lag)
     {
         _net = net;
         _host = host;
@@ -34,8 +34,8 @@ public sealed class NetDebugPanel : IDebugUiSystem
         ImGui.Text($"Role: {_net.Session.Role}, {_net.Session.LocalPeer}   Tick {_net.Clock.Tick}");
         if (_host is { } host)
         {
-            ImGui.Text(host.Transport.Remote is null ? "Single-player: start with --host <port> to let others join"
-                                                     : $"Participants: {host.Peers.Count}");
+            ImGui.Text(_lag is null ? "Single-player: start with --host <port> to let others join"
+                                   : $"Participants: {host.Peers.Count}");
             foreach (var p in host.Peers)
                 ImGui.Text($"  {p.Name} ({p.Peer}): {p.Known.Count} entities, view at ({p.ViewCentre.X:0}, {p.ViewCentre.Y:0}, {p.ViewCentre.Z:0})");
             ImGui.Text($"Entities kept: {host.Entities.Count}; players released {host.Releases} this session");
@@ -53,7 +53,7 @@ public sealed class NetDebugPanel : IDebugUiSystem
         float margin = (float)_remote.Margin;
         if (ImGui.SliderFloat("Extra delay (ticks)", ref margin, 0, 10, "%.1f")) _remote.Margin = margin;
 
-        if ((_host?.Transport.Remote ?? _net.Transport) is { } t)
+        if (_lag is { } t)
         {
             double now = _net.NowMs;
             if (now - _lastSample > 1000)
