@@ -6,7 +6,7 @@ namespace ClearSkies.Game.Hud;
 
 /// <summary>
 /// While a client is joining, the screen is covered: the world is still loading around the spawn and the clock settling
-/// on the host's (see <see cref="ClientSession.JoinStatus"/>), and what's drawn meanwhile jumps about. A dark panel over
+/// on the Host's (see <see cref="Participant.JoinStatus"/>), and what's drawn meanwhile jumps about. A dark panel over
 /// everything, with what joining is waiting on, until our player arrives.
 /// </summary>
 public sealed class JoiningScreen : ISystem
@@ -15,10 +15,10 @@ public sealed class JoiningScreen : ISystem
     private static readonly UiColor TextColor = new(245, 232, 205);
 
     private readonly UiContext _ui;
-    private readonly ClientSession _net;
+    private readonly Participant _net;
     private float _seconds;
 
-    public JoiningScreen(UiContext ui, ClientSession net)
+    public JoiningScreen(UiContext ui, Participant net)
     {
         _ui = ui;
         _net = net;

@@ -14,8 +14,9 @@ namespace ClearSkies.Net.Session;
 /// estimate more than <see cref="SettleTicks"/> out instead. It's <see cref="Settled"/> once
 /// <see cref="SettleAnswers"/> answers in a row (two seconds) have found it within that, so the game starts on the
 /// host's timeline rather than slewing towards it for seconds with players already moving. Loose on purpose: while
-/// loading, long frames hold the answers back and make them a tick or so noisier than in play. <see cref="EndSettling"/>
-/// then snaps to the estimate, still behind the joining screen, rather than leave the last tick or two to slew.</para>
+/// loading, long frames hold the answers back and make them a tick or so noisier than in play. <see cref="Update"/>
+/// ends settling then, or after <see cref="MaxSettleMs"/> regardless (<see cref="Ready"/>), and snaps to the estimate,
+/// still behind the joining screen, rather than leave the last tick or two to slew.</para>
 /// <para>A frame too slow to run all its ticks (loading, a hitch) drops the rest, which leaves the clock exactly that
 /// many behind the host's. <see cref="Update"/> puts them straight back (skipping their numbers, not running them), so
 /// it isn't left to the estimate to notice, a few answers at a time, with a snap or two on the way.</para>
@@ -34,12 +35,17 @@ public sealed class ClockSync
     /// <summary>Answers in a row within <see cref="SettleTicks"/> to be <see cref="Settled"/>: two seconds' worth.</summary>
     public const int SettleAnswers = 8;
 
+    /// <summary>The longest settling waits, in milliseconds: a jittery connection may never quite settle, and it
+    /// carries on slewing once joined.</summary>
+    public const double MaxSettleMs = 10_000;
+
     private readonly ITickClock _clock;
     private readonly List<(double RttMs, double HostTick, double AtMs)> _samples = new(); // the host's tick at AtMs
     private double _lastPing = double.NegativeInfinity;
     private readonly Queue<double> _snapTimes = new();
 
     private long _dropped;
+    private double _settleFrom = double.NaN;
 
     public ClockSync(ITickClock clock)
     {
@@ -61,9 +67,24 @@ public sealed class ClockSync
     /// <summary>Joining: snap to every estimate more than <see cref="SettleTicks"/> out, rather than slew.</summary>
     public bool Settling { get; set; }
 
+    /// <summary>Done settling (or never settling): the game can be predicted from it.</summary>
+    public bool Ready => !Settling;
+
+    /// <summary>Ends settling once <see cref="Settled"/>, or after <see cref="MaxSettleMs"/> regardless.</summary>
+    private void Settle(double nowMs)
+    {
+        if (double.IsNaN(_settleFrom)) _settleFrom = nowMs;
+        if (!Settled && nowMs - _settleFrom <= MaxSettleMs) return;
+        double waited = (nowMs - _settleFrom) / 1000;
+        Console.WriteLine(Settled
+            ? $"[net] clock settled after {waited:0.0} s: {Offset:+0.00;-0.00} ticks off, round trip {RoundTripMs:0} ms, {Snaps} snaps, {SkippedTicks} dropped ticks put back"
+            : $"[net] clock didn't settle in {waited:0.0} s: {Offset:+0.00;-0.00} ticks off, round trip {RoundTripMs:0} ms, {Snaps} snaps, {SkippedTicks} dropped ticks put back; joining anyway");
+        EndSettling(nowMs);
+    }
+
     /// <summary>Joined: snaps to the estimate if it's more than a tick out (nothing is drawn from the clock yet), and
     /// from here on slews.</summary>
-    public void EndSettling(double nowMs)
+    private void EndSettling(double nowMs)
     {
         Settling = false;
         if (_samples.Count == 0) return;
@@ -90,16 +111,19 @@ public sealed class ClockSync
         return true;
     }
 
-    /// <summary>Each tick: skips any ticks the clock dropped since the last, back onto the host's timeline.
-    /// Every estimate stays good (it was measured before the drop, against where the clock is again), and snapshots'
-    /// lateness too, so nothing is shifted.</summary>
-    public void Update()
+    /// <summary>Each tick: skips any ticks the clock dropped since the last, back onto the host's timeline (every
+    /// estimate stays good: it was measured before the drop, against where the clock is again, and snapshots' lateness
+    /// too, so nothing is shifted); then, while <see cref="Settling"/>, sees whether that's done.</summary>
+    public void Update(double nowMs)
     {
         long dropped = _clock.DroppedTicks - _dropped;
         _dropped = _clock.DroppedTicks;
-        if (dropped <= 0) return;
-        _clock.Skip((int)dropped);
-        SkippedTicks += dropped;
+        if (dropped > 0)
+        {
+            _clock.Skip((int)dropped);
+            SkippedTicks += dropped;
+        }
+        if (Settling) Settle(nowMs);
     }
 
     private double LocalTick => _clock.Now;

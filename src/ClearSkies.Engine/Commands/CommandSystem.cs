@@ -220,6 +220,18 @@ public sealed class CommandSystem : ISystem, IDebugUiSystem
     public uint LastEventNumber(PeerId authority, EntityId target) =>
         authority == Session.LocalPeer ? _lastEventNumberSent.GetValueOrDefault(target) : _lastEventNumberApplied.GetValueOrDefault((authority, target));
 
+    /// <summary>As the authority over <paramref name="target"/>, coming back from a Description that includes its events
+    /// up to <paramref name="number"/>: its next event is numbered after that.</summary>
+    public void ContinueEventNumbers(EntityId target, uint number) => _lastEventNumberSent[target] = number;
+
+    /// <summary><paramref name="target"/> is gone from here: its event numbers start afresh if it comes back (from its
+    /// Description, which says where they're up to).</summary>
+    public void ForgetEvents(EntityId target)
+    {
+        _lastEventNumberSent.Remove(target);
+        foreach (var key in _lastEventNumberApplied.Keys.Where(k => k.Target == target).ToList()) _lastEventNumberApplied.Remove(key);
+    }
+
     /// <summary>False for an event already applied (numbers only go up per authority and target).</summary>
     internal bool AcceptEventNumber(in EventMeta meta)
     {

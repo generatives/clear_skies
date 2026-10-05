@@ -1,9 +1,5 @@
 # Clear Skies
 
-Click here for a quick demo video
-
-[![Video of Person Flying Ship Through Floating Islands](https://img.youtube.com/vi/-UUtK8j4EU0/0.jpg)](https://youtu.be/-UUtK8j4EU0)
-
 ## Repo
 This repository contains a Voxel Game and an Engine built for that game. This is a "minecraft clone" or "block game", with big textured blocks and simple, low poly graphics.
 

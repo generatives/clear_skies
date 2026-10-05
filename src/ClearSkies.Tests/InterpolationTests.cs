@@ -78,7 +78,7 @@ public class InterpolationTests
     {
         var (game, mover, seen) = Watch(0);
         using var _ = game;
-        const float far = 2000f; // far from everyone else
+        const float far = 800f; // far from everyone else, but in view
         void StepFar()
         {
             game.Network.ManualTime += 1000.0 / 60.0;
