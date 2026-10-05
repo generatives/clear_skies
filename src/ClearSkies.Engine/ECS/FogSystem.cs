@@ -24,8 +24,7 @@ public sealed class FogSystem : ISystem, IDebugUiSystem
     private readonly float _viewDistance;
     private readonly EntitySet _interests;
     private readonly EntitySet _loading;
-    private readonly EntitySet _notUploaded;
-    private readonly EntitySet _notMeshed;
+    private readonly EntitySet _notDrawnYet;
     private float _distance;
     private float _target;
 
@@ -35,9 +34,9 @@ public sealed class FogSystem : ISystem, IDebugUiSystem
         _viewDistance = viewDistance;
         _interests = world.GetEntities().With<TerrainInterest>().With<Transform>().AsSet();
         _loading = world.GetEntities().With<TerrainColumnLoading>().AsSet();
-        // Terrain chunks (each with its own presence; a grid's chunks inherit theirs) waiting to be drawn.
-        _notUploaded = world.GetEntities().With<Chunk>().With<OwnPresence>().With<NeedsGpuUploadFlag>().AsSet();
-        _notMeshed = world.GetEntities().With<Chunk>().With<OwnPresence>().With<NeedsRemeshFlag>().AsSet();
+        // Terrain chunks (each with its own presence; a grid's chunks inherit theirs) waiting to be uploaded or meshed.
+        _notDrawnYet = world.GetEntities().With<Chunk>().With<OwnPresence>()
+                            .WithEither<NeedsGpuUploadFlag>().Or<NeedsRemeshFlag>().AsSet();
     }
 
     /// <summary>Horizontal distance from the view at which the loaded world stops, eased over time. Fog is total by here.</summary>
@@ -54,8 +53,11 @@ public sealed class FogSystem : ISystem, IDebugUiSystem
             ref readonly var c = ref e.Get<TerrainColumnLoading>();
             target = MathF.Min(target, Within(centre, c.X, c.Z, radius));
         }
-        target = MathF.Min(target, NearestChunk(_notUploaded, centre, radius));
-        target = MathF.Min(target, NearestChunk(_notMeshed, centre, radius));
+        foreach (ref readonly Entity e in _notDrawnYet.GetEntities())
+        {
+            var pos = e.Get<Chunk>().Entry.Position;
+            target = MathF.Min(target, Within(centre, pos.X, pos.Z, radius));
+        }
         _target = target;
 
         float rate = target < _distance ? 8f : 1f;
@@ -79,17 +81,6 @@ public sealed class FogSystem : ISystem, IDebugUiSystem
         return false;
     }
 
-    private static float NearestChunk(EntitySet chunks, Vector3D<float> centre, float radius)
-    {
-        float nearest = float.PositiveInfinity;
-        foreach (ref readonly Entity e in chunks.GetEntities())
-        {
-            var pos = e.Get<Chunk>().Entry.Position;
-            nearest = MathF.Min(nearest, Within(centre, pos.X, pos.Z, radius));
-        }
-        return nearest;
-    }
-
     /// <summary>Horizontal distance from the centre to the nearest point of chunk column (x, z), if its middle is within
     /// <paramref name="radius"/> (so it's drawn); infinity otherwise.</summary>
     private static float Within(Vector3D<float> centre, int x, int z, float radius)
@@ -107,6 +98,6 @@ public sealed class FogSystem : ISystem, IDebugUiSystem
     public void DrawDebugUi()
     {
         ImGui.Text($"Fog distance: {_distance:F0} (target {_target:F0})");
-        ImGui.Text($"Columns loading: {_loading.Count}   Terrain chunks not uploaded: {_notUploaded.Count}   not meshed: {_notMeshed.Count}");
+        ImGui.Text($"Columns loading: {_loading.Count}   Terrain chunks not drawn yet: {_notDrawnYet.Count}");
     }
 }
