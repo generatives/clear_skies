@@ -138,7 +138,7 @@ public class StreamingTests
     }
 
     /// <summary>Moves the client's player, and ticks until the Host has its new View Volume.</summary>
-    private static void MovePlayer(LoopbackGame game, Entity player, float x, int ticks = Participant.ViewTicks + 5)
+    private static void MovePlayer(LoopbackGame game, Entity player, float x, int ticks = SimulationParticipant.ViewTicks + 5)
     {
         game.Teleport(player, new Vector3(x, 60, 0));
         game.Tick(ticks);
