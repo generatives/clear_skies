@@ -42,9 +42,9 @@ public sealed class WorldSave : IDisposable
 /// <summary>
 /// Hosting a world from its save: the Host, which has no world of its own (it keeps track of who has what, and relays
 /// everything), the network others join it over (<see cref="Network"/>, if any), and this machine's Participant, joined
-/// to it directly, which has authority over every entity, with the save's streaming and autosave (<see cref="Streaming"/> and <see cref="Saver"/>, which the game puts
-/// early in the tick, after the local player's input if any). With <paramref name="transport"/> off, nobody else can
-/// join (single-player).
+/// to it directly, which has authority over every entity, with the save's streaming and autosave
+/// (<see cref="Streaming"/> and <see cref="Saver"/>, which the game puts early in the tick, after the local player's
+/// input if any). With <paramref name="transport"/> off, nobody else can join (single-player).
 /// </summary>
 public sealed class Hosting : IDisposable
 {

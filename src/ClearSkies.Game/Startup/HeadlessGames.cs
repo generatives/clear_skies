@@ -27,8 +27,8 @@ public static class DedicatedServerGame
 
         var commands = world.Commands;
 
-        // Each 1/60 s tick: what other machines sent, the Host, what this machine's Participant was told, the hierarchy, and the save's streaming and autosave;
-        // then gameplay and physics as in a game with a window (see HostedGame).
+        // Each 1/60 s tick: what other machines sent, the Host, this machine's Participant, the hierarchy, and the save's
+        // streaming and autosave; then gameplay and physics as in a game with a window (see HostedGame).
 
         if (hosting.Network is { } network) host.AddSystem(network, SystemStage.Simulation);
         host.AddSystem(hosting.Host, SystemStage.Simulation);
