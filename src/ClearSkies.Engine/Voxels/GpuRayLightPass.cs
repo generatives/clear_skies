@@ -27,7 +27,7 @@ struct Params {
     sunDir: vec4<f32>,
     counts: vec4<i32>,  // y: word offset of the lamp records in lists, z: work entries this dispatch
     bounce: vec4<f32>,  // x: albedo (fraction of incoming light a surface re-emits), y: sun strength (0-1),
-                        // z: bounce display scale (0 = bounce off)
+                        // z: bounce display scale (0 = bounce off); bounce: w: checkerboard spread (1, 2 or 4)
     bounce2: vec4<f32>, // x: rays per evaluation, y: evaluations per full ray set (cycle); compose: z: ambient
                         // (0-1), w: ray AO strength (0-1)
 };
@@ -703,6 +703,18 @@ fn pcg(v: u32) -> u32 {
 
 fn rand01(h: u32) -> f32 { return f32(pcg(h) & 0xFFFFFFu) / 16777216.0; }
 
+// Checkerboard bounce: with a spread S of 2 or 4, an evaluation fires rays from only one in S surface voxels, those of
+// phase n mod S, so a brick's voxels take turns and each evaluation costs about 1/S. The phases are laid out so every
+// 2x2 patch of a floor, wall or ceiling holds each of them once (spread 2: a plain 3D checkerboard), and the compose
+// pass's neighbour smoothing blends them back together. A voxel counts only its own evaluations (n / S) for its
+// running average, and fires slice n mod cycle, so neighbouring phases fire different slices and together cover the
+// whole ray set. The CPU rounds every brick's evaluation count up to a multiple of S, so each voxel gets at least one.
+fn bouncePhase(v: vec3<i32>, spread: u32) -> u32 {
+    if (spread >= 4u) { return u32((v.x + v.y) & 1) + 2u * u32((v.y + v.z) & 1); }
+    if (spread == 2u) { return u32((v.x + v.y + v.z) & 1); }
+    return 0u;
+}
+
 // Blends one evaluation into the voxel's accumulation word (bounce RGB and AO) and returns the new word.
 // A priming evaluation (the first after a brick's average restarts) measures only AO and stores no bounce: until then
 // the brick's voxels were shown with no AO at all (nothing measured yet, or solid a moment ago), as bright as open
@@ -811,9 +823,14 @@ fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) n
     // A running average over the first full cycle (exactly the complete ray set's mean), then a weight of one
     // cycle, so each further cycle weighs the whole set about equally. N = PRIME: the priming evaluation (see
     // bounceVoxel), which overwrites.
+    // With a checkerboard spread (see bouncePhase) only this evaluation's phase fires, counting its own evaluations;
+    // the priming one is every voxel's.
     let cycle = max(u32(p.bounce2.y), 1u);
     let prime = nu == PRIME;
-    let alpha = select(max(1.0 / f32(cycle), 1.0 / (f32(nu) + 1.0)), 1.0, prime);
+    let spread = select(clamp(u32(p.bounce.w), 1u, 4u), 1u, prime);
+    let phase = nu % spread;
+    let own = nu / spread;
+    let alpha = select(min(1.0, max(f32(spread) / f32(cycle), 1.0 / (f32(own) + 1.0))), 1.0, prime);
     let slice = select(i32(nu % cycle), i32(cycle) - 1, prime);
     let list = listOf(it.g, it.v0);
     // Gather the surface voxels (see Surface compaction); other air has no bounce and no occlusion, solid keeps its word.
@@ -821,8 +838,8 @@ fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) n
     for (var e = 0u; e < 2u; e = e + 1u) {
         let v = it.v0 + vec3<i32>(i32(e), 0, 0);
         if (isSolid(it.g, v)) { continue; }
-        if (hasSolidNeighbour(it.g, v)) { wList[atomicAdd(&wCount, 1u)] = t * 2u + e; }
-        else { lightPool[it.acc + i32(e)] = 0u; }
+        if (!hasSolidNeighbour(it.g, v)) { lightPool[it.acc + i32(e)] = 0u; }
+        else if (bouncePhase(v, spread) == phase) { wList[atomicAdd(&wCount, 1u)] = t * 2u + e; }
     }
     workgroupBarrier();
     let n = atomicLoad(&wCount);
@@ -927,14 +944,15 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
     /// One EMA step of bounce light for the listed bricks (see bounce_main). Reads direct light of every grid, so
     /// run it after the sun pass and before composing. <paramref name="work"/> holds <paramref name="count"/> pairs of (light slot,
     /// evaluations since that brick changed). Each voxel's fixed direction set is <paramref name="rays"/> x
-    /// <paramref name="cycle"/> directions, one slice of <paramref name="rays"/> per evaluation.
+    /// <paramref name="cycle"/> directions, one slice of <paramref name="rays"/> per evaluation. <paramref name="spread"/>:
+    /// 1, or 2 or 4 for a checkerboard where only one in that many surface voxels fires each evaluation (bouncePhase).
     /// </summary>
     public void DispatchBounce(GridStore store, Vector3D<float> sunDir, float sunStrength,
-                               float albedo, int rays, int cycle, GpuBuffer work, int count)
+                               float albedo, int rays, int cycle, int spread, GpuBuffer work, int count)
     {
         if (count <= 0) return;
         var param = WriteParams(sunDir, count,
-                                new Vector4D<float>(albedo, sunStrength, 0f, 0f), new Vector4D<float>(rays, cycle, 0f, 0f));
+                                new Vector4D<float>(albedo, sunStrength, 0f, spread), new Vector4D<float>(rays, cycle, 0f, 0f));
         Dispatch(_bouncePipeline, BounceBindings, store, work, count, param, "Lighting: bounce");
     }
 
@@ -1020,7 +1038,7 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
     {
         public Vector4D<float> Sun;
         public int Unused, LampBase, WorkCount, Pad;
-        public Vector4D<float> Bounce;    // albedo, sun strength, bounce display scale, unused
+        public Vector4D<float> Bounce;    // albedo, sun strength, bounce display scale, checkerboard spread
         public Vector4D<float> Bounce2;   // rays per evaluation, cycle
     }
 }
