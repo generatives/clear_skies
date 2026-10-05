@@ -23,8 +23,8 @@ public sealed class FogSystem : ISystem, IDebugUiSystem
 
     private readonly float _viewDistance;
     private readonly EntitySet _interests;
-    private readonly EntitySet _loading;
-    private readonly EntitySet _notDrawnYet;
+    private readonly EntitySet _loadingColumns;
+    private readonly EntitySet _chunksNotDrawnYet;
     private float _distance;
     private float _target;
 
@@ -33,9 +33,9 @@ public sealed class FogSystem : ISystem, IDebugUiSystem
     {
         _viewDistance = viewDistance;
         _interests = world.GetEntities().With<TerrainInterest>().With<Transform>().AsSet();
-        _loading = world.GetEntities().With<TerrainColumnLoading>().AsSet();
+        _loadingColumns = world.GetEntities().With<TerrainColumnLoading>().AsSet();
         // Terrain chunks (each with its own presence; a grid's chunks inherit theirs) waiting to be uploaded or meshed.
-        _notDrawnYet = world.GetEntities().With<Chunk>().With<OwnPresence>()
+        _chunksNotDrawnYet = world.GetEntities().With<Chunk>().With<OwnPresence>()
                             .WithEither<NeedsGpuUploadFlag>().Or<NeedsRemeshFlag>().AsSet();
     }
 
@@ -48,12 +48,12 @@ public sealed class FogSystem : ISystem, IDebugUiSystem
 
         // Only what's within the draw radius counts: a column loaded beyond it for colliders is never drawn.
         float target = MathF.Min(radius, scanned);
-        foreach (ref readonly Entity e in _loading.GetEntities())
+        foreach (ref readonly Entity e in _loadingColumns.GetEntities())
         {
             ref readonly var c = ref e.Get<TerrainColumnLoading>();
             target = MathF.Min(target, Within(centre, c.X, c.Z, radius));
         }
-        foreach (ref readonly Entity e in _notDrawnYet.GetEntities())
+        foreach (ref readonly Entity e in _chunksNotDrawnYet.GetEntities())
         {
             var pos = e.Get<Chunk>().Entry.Position;
             target = MathF.Min(target, Within(centre, pos.X, pos.Z, radius));
@@ -98,6 +98,6 @@ public sealed class FogSystem : ISystem, IDebugUiSystem
     public void DrawDebugUi()
     {
         ImGui.Text($"Fog distance: {_distance:F0} (target {_target:F0})");
-        ImGui.Text($"Columns loading: {_loading.Count}   Terrain chunks not drawn yet: {_notDrawnYet.Count}");
+        ImGui.Text($"Columns loading: {_loadingColumns.Count}   Terrain chunks not drawn yet: {_chunksNotDrawnYet.Count}");
     }
 }
