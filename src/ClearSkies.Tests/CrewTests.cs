@@ -252,7 +252,7 @@ public class CrewTests
         var before = simulated.Get<Transform>().Position;
         var queue = simulated.Get<RemoteInput>().Queue;
         // "The last input put me on the ship, 30 blocks along its deck": nowhere near where the host has them.
-        game.HostNet.Inputs.Receive(simulated, new PlayerInputMessage(new[]
+        game.HostNet.Inputs!.Receive(simulated, new PlayerInputMessage(simulated.Get<EntityId>(), new[]
         {
             new InputSample(queue.Newest + 1, PlayerButtons.None, PlayerButtons.None, 0, 0, ship.Get<EntityId>(), new Vector3(30, 1.8f, 4)),
         }));
@@ -310,7 +310,7 @@ public class CrewTests
         game.Host.Physics.SetBodyAngularVelocity(body, new Vector3(0, 0.3f, 0));
         game.Tick(10);
         var onDeck = new Vector3(1, 1.8f, 1);
-        game.Directory.Save("crew", new PlayerDescription { FreeFly = false, Support = ship.Get<EntityId>(), LocalPosition = onDeck });
+        game.SavePlayer("crew", new PlayerDescription { FreeFly = false, Support = ship.Get<EntityId>(), LocalPosition = onDeck });
         var (client, net) = game.Join("crew");
         var crew = LocalPlayerOf(client);
         var copy = client.Registry.Find(ship.Get<EntityId>())!.Value;

@@ -80,32 +80,38 @@ public sealed class HeadlessScene : IDisposable
     public readonly TickInterpolationSystem Interpolation;
     private readonly TickClock _frameClock = new();
 
-    /// <summary>Puts a network session in the tick: the session first, body sync last.</summary>
-    public void AttachNet(ClearSkies.Net.Session.NetSession net)
+    /// <summary>Puts a network session in the tick: the session first (after <paramref name="host"/>, the Host, on the
+    /// hosting machine), body sync last (then the Host's relay). Entity IDs come from the Host from now on.</summary>
+    public void AttachNet(ClearSkies.Net.Session.NetSession net, ClearSkies.Net.Session.Host? host = null)
     {
         Net = net;
+        Registry.RequestBlock = null;
         _tick.Insert(0, net);
+        if (host is not null) _tick.Insert(0, host);
         _tick.Add(new ClearSkies.Net.Sync.BodySync(net, World, Physics));
+        if (host is not null) _tick.Add(host.Relay);
         RemoteBodies = new ClearSkies.Net.Sync.RemoteBodySystem(World, Registry, Clock);
         _tick.Insert(_tick.FindIndex(s => s is PhysicsTransformSyncSystem) + 1, RemoteBodies);
         _tick.Insert(_tick.IndexOf(Physics), new ClearSkies.Net.Sync.RemoteBodyProxySystem(World, Physics, RemoteBodies));
         // A client predicts its own player, from the input a test puts on it, before movement (as the game's input
         // sample does).
-        if (net is ClearSkies.Net.Session.ClientSession client)
+        if (net is ClearSkies.Net.Session.Participant { IsAuthority: false } client)
             _tick.Insert(_tick.FindIndex(s => s is PlayerMovementSystem), new ClearSkies.Net.Sync.OwnPlayerPrediction(client, World, Registry));
     }
 
     /// <summary>Runs <paramref name="system"/> each tick just before the physics step (e.g. flight).</summary>
     public void AddBeforePhysics(Engine.Core.ISystem system) => _tick.Insert(_tick.IndexOf(Physics), system);
 
-    /// <summary>Saves to <paramref name="db"/> and streams entities from it, as the host does.</summary>
-    public void EnablePersistence(SaveDatabase db)
+    /// <summary>Saves to <paramref name="db"/> and streams entities from it, as the authority does (after the hierarchy),
+    /// recording the next free ID of <paramref name="ids"/> (the scene's own if none: the Host's, once it has one).</summary>
+    public void EnablePersistence(SaveDatabase db, EntityIdAllocator? ids = null)
     {
         Index = new StoredEntityIndex(db.ReadEntityIndex());
-        Saver = new WorldSaver(World, db, Index, Commands, Ids);
+        Saver = new WorldSaver(World, db, Index, Commands, ids ?? Ids);
         Streaming = new EntityStreamingSystem(World, db, Index, Registry, Commands, Saver);
-        _tick.Insert(1, Streaming);
-        _tick.Insert(2, Saver);
+        int at = _tick.FindIndex(s => s is HierarchyTransformSystem) + 1;
+        _tick.Insert(at, Streaming);
+        _tick.Insert(at + 1, Saver);
     }
 
     public void Tick(int count = 1)

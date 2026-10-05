@@ -7,19 +7,22 @@ using ImGuiNET;
 
 namespace ClearSkies.Net.Debug;
 
-/// <summary>The network panel: who's connected, round trip, clock offset and slew, players' input (queued on the host,
-/// predicted on a client), interpolation delay, bandwidth per channel, and sliders for artificial latency and loss (default test setting: 150 ms round trip, 2% loss).</summary>
+/// <summary>The network panel: the Host's Participants and entities (where it's on this machine), round trip, clock offset
+/// and slew, players' input (queued on the authority, predicted elsewhere), interpolation delay, bandwidth per channel, and sliders for artificial latency and loss (default test setting: 150 ms round trip, 2% loss).</summary>
 public sealed class NetDebugPanel : IDebugUiSystem
 {
-    private readonly NetSession _net;
+    private readonly Participant _net;
+    private readonly Host? _host;
     private readonly RemoteBodySystem _remote;
     private readonly LaggedTransport? _lag;
     private long _lastBytesOut, _lastBytesIn;
     private double _lastSample, _kbOut, _kbIn;
 
-    public NetDebugPanel(NetSession net, RemoteBodySystem remote, LaggedTransport? lag)
+    /// <param name="host">The Host, when it's on this machine.</param>
+    public NetDebugPanel(Participant net, Host? host, RemoteBodySystem remote, LaggedTransport? lag)
     {
         _net = net;
+        _host = host;
         _remote = remote;
         _lag = lag;
     }
@@ -29,28 +32,28 @@ public sealed class NetDebugPanel : IDebugUiSystem
     public void DrawDebugUi()
     {
         ImGui.Text($"Role: {_net.Session.Role}, {_net.Session.LocalPeer}   Tick {_net.Clock.Tick}");
-        switch (_net)
+        if (_host is { } host)
         {
-            case HostSession host:
-                ImGui.Text(_net.Transport is null ? "Transport off (single-player): start with --host <port> to let others join"
-                                                  : $"Players connected: {host.Peers.Count}");
-                foreach (var p in host.Peers) ImGui.Text($"  {p.Name} ({p.Peer}): {p.State}");
-                host.Inputs.DrawDebugUi();
-                break;
-            case ClientSession client:
-                ImGui.Text($"Round trip {client.ClockSync.RoundTripMs:0} ms, clock offset {client.ClockSync.Offset:+0.00;-0.00} ticks, " +
-                           $"rate {_net.Clock.Rate:0.000}, snaps {client.ClockSync.SnapsPerMinute}/min");
-                if (client.Prediction is { } prediction)
-                    ImGui.Text($"Own player: {prediction.Unanswered} inputs unanswered, corrected {prediction.Corrections:N0} times " +
-                               $"(last {prediction.LastCorrection:0.000}, largest {prediction.LargestCorrection:0.000})");
-                break;
+            ImGui.Text(host.Transport.Remote is null ? "Single-player: start with --host <port> to let others join"
+                                                     : $"Participants: {host.Peers.Count}");
+            foreach (var p in host.Peers)
+                ImGui.Text($"  {p.Name} ({p.Peer}): {p.Known.Count} entities, view at ({p.ViewCentre.X:0}, {p.ViewCentre.Y:0}, {p.ViewCentre.Z:0})");
+            ImGui.Text($"Entities kept: {host.Entities.Count}; players released {host.Releases} this session");
         }
+        ImGui.Text($"Spawns waiting: {_net.Spawns.Count}");
+        _net.Inputs?.DrawDebugUi();
+        if (_net.ClockSync is { } sync)
+            ImGui.Text($"Round trip {sync.RoundTripMs:0} ms, clock offset {sync.Offset:+0.00;-0.00} ticks, " +
+                       $"rate {_net.Clock.Rate:0.000}, snaps {sync.SnapsPerMinute}/min");
+        if (_net.Prediction is { } prediction)
+            ImGui.Text($"Own player: {prediction.Unanswered} inputs unanswered, corrected {prediction.Corrections:N0} times " +
+                       $"(last {prediction.LastCorrection:0.000}, largest {prediction.LargestCorrection:0.000})");
         var (least, most) = _remote.Delays;
         ImGui.Text($"Others drawn {least:0.0}-{most:0.0} ticks behind");
         float margin = (float)_remote.Margin;
         if (ImGui.SliderFloat("Extra delay (ticks)", ref margin, 0, 10, "%.1f")) _remote.Margin = margin;
 
-        if (_net.Transport is { } t)
+        if ((_host?.Transport.Remote ?? _net.Transport) is { } t)
         {
             double now = _net.NowMs;
             if (now - _lastSample > 1000)

@@ -18,7 +18,6 @@ public enum MessageKind : byte
     Hello = 1,
     Welcome = 2,
     Disconnect = 3,
-    TerrainReady = 4,
     PlayerJoined = 5,
     PlayerLeft = 6,
     Command = 7,
@@ -35,6 +34,13 @@ public enum MessageKind : byte
     IdBlockRequest = 18,
     IdBlock = 19,
     PlayerInput = 20,
+    ViewVolume = 21,
+    Spawn = 22,
+    Forget = 23,
+    Release = 24,
+    DescribeRequest = 25,
+    Described = 26,
+    Deleted = 27,
 }
 
 /// <summary>A message: writes itself, kind byte first (see <see cref="Session.NetSession"/>'s Send).</summary>
@@ -43,7 +49,7 @@ public interface IMessage
     void Write(NetWriter w);
 }
 
-/// <summary>Client → host, first thing: who's joining (by name: the host gives each name its player ID) and whether
+/// <summary>Participant → Host, first thing: who's joining (by name: the host gives each name its player ID) and whether
 /// their game matches.</summary>
 public readonly record struct Hello(ushort Version, string Name, ulong GenerationChecksum) : IMessage
 {
@@ -51,8 +57,9 @@ public readonly record struct Hello(ushort Version, string Name, ulong Generatio
     public static Hello Read(ref NetReader r) => new(r.ReadUInt16(), r.ReadString(), r.ReadUInt64());
 }
 
-/// <summary>Host → client: the client's peer ID and first block of entity IDs, the world seed, the host's tick, and
-/// where the player will spawn (their saved position, or the spawn point), so terrain can load there first.</summary>
+/// <summary>Host → Participant: its peer ID (<see cref="PeerId.Host"/> for the hosting machine's, the authority) and first
+/// block of entity IDs, the world seed, the Host's tick, and where its player will spawn (their saved position, or the
+/// spawn point), for the camera to wait at.</summary>
 public readonly record struct Welcome(PeerId Peer, uint IdFirst, uint IdCount, ulong Seed, uint HostTick, Vector3 Spawn) : IMessage
 {
     public void Write(NetWriter w)
@@ -61,12 +68,6 @@ public readonly record struct Welcome(PeerId Peer, uint IdFirst, uint IdCount, u
         w.WriteUInt64(Seed); w.WriteUInt32(HostTick); w.WriteVector3(Spawn);
     }
     public static Welcome Read(ref NetReader r) => new(new PeerId(r.ReadUInt32()), r.ReadUInt32(), r.ReadUInt32(), r.ReadUInt64(), r.ReadUInt32(), r.ReadVector3());
-}
-
-/// <summary>Client → host: the terrain around the spawn has loaded, so the world can be sent.</summary>
-public readonly record struct TerrainReady : IMessage
-{
-    public void Write(NetWriter w) => w.WriteByte((byte)MessageKind.TerrainReady);
 }
 
 /// <summary>One tick of a player's input, numbered by the machine that plays them (see OwnPlayerPrediction).</summary>
@@ -106,27 +107,36 @@ public readonly record struct InputSample(uint Sequence, PlayerButtons Held, Pla
     public PlayerInput ToInput() => new() { Held = Held, Pressed = Pressed, Yaw = Yaw, Pitch = Pitch, Aiming = true };
 }
 
-/// <summary>Client → host, unreliable, every tick: the player's latest inputs, newest last. Each is sent in several of
-/// these (<see cref="MaxSamples"/>), so a lost packet loses nothing; the host skips the ones it already has.</summary>
+/// <summary>Participant → Host → the player's authority, unreliable, every tick: the player's latest inputs, newest
+/// last. Each is sent in several of these (<see cref="MaxSamples"/>), so a lost packet loses nothing; the authority skips
+/// the ones it already has. The Host passes it on only from the machine that plays <see cref="Player"/>.</summary>
 public readonly struct PlayerInputMessage : IMessage
 {
     public const int MaxSamples = 4;
+    public readonly EntityId Player;
     public readonly InputSample[] Samples;
-    public PlayerInputMessage(InputSample[] samples) => Samples = samples;
+
+    public PlayerInputMessage(EntityId player, InputSample[] samples)
+    {
+        Player = player;
+        Samples = samples;
+    }
 
     public void Write(NetWriter w)
     {
         w.WriteByte((byte)MessageKind.PlayerInput);
+        Player.Write(w);
         w.WriteByte((byte)Samples.Length);
         foreach (var s in Samples) s.Write(w);
     }
 
     public static PlayerInputMessage Read(ref NetReader r)
     {
+        var player = EntityId.Read(ref r);
         int count = System.Math.Min((int)r.ReadByte(), MaxSamples);
         var samples = new InputSample[count];
         for (int i = 0; i < count; i++) samples[i] = InputSample.Read(ref r);
-        return new PlayerInputMessage(samples);
+        return new PlayerInputMessage(player, samples);
     }
 }
 
@@ -213,3 +223,88 @@ public readonly record struct IdBlockMessage(uint First, uint Count) : IMessage
     public void Write(NetWriter w) { w.WriteByte((byte)MessageKind.IdBlock); w.WriteUInt32(First); w.WriteUInt32(Count); }
     public static IdBlockMessage Read(ref NetReader r) => new(r.ReadUInt32(), r.ReadUInt32());
 }
+
+/// <summary>Participant → Host, every half second: the space it wants to see (around its player, or where its player
+/// will spawn). The first tells the Host it's up.</summary>
+public readonly record struct ViewVolumeMessage(Vector3 Centre, float Radius) : IMessage
+{
+    public void Write(NetWriter w) { w.WriteByte((byte)MessageKind.ViewVolume); w.WriteVector3(Centre); w.WriteSingle(Radius); }
+    public static ViewVolumeMessage Read(ref NetReader r) => new(r.ReadVector3(), r.ReadSingle());
+}
+
+/// <summary>Host → Participant: an entity coming into its world, from its Description. <see cref="Owner"/> is who the
+/// spawn says owns it (a player's: who plays them); <see cref="EventNumber"/> is its authority's last event the
+/// Description includes, so later ones apply on top and earlier ones are skipped. <see cref="Position"/> is where it is in
+/// the world, as the Host has it (for a player standing on a ship, the ship as the Host last heard).</summary>
+public readonly ref struct SpawnMessage(EntityId id, ushort kind, PeerId owner, uint eventNumber, Vector3 position, ReadOnlySpan<byte> data)
+{
+    public readonly EntityId Id = id;
+    public readonly ushort Kind = kind;
+    public readonly PeerId Owner = owner;
+    public readonly uint EventNumber = eventNumber;
+    public readonly Vector3 Position = position;
+    public readonly ReadOnlySpan<byte> Data = data;
+
+    public void Write(NetWriter w)
+    {
+        w.WriteByte((byte)MessageKind.Spawn); Id.Write(w); w.WriteUInt16(Kind); w.WriteUInt32(Owner.Value); w.WriteUInt32(EventNumber);
+        w.WriteVector3(Position); w.WriteRaw(Data);
+    }
+
+    public static SpawnMessage Read(ref NetReader r) =>
+        new(EntityId.Read(ref r), r.ReadUInt16(), new PeerId(r.ReadUInt32()), r.ReadUInt32(), r.ReadVector3(), r.ReadRaw(r.Remaining));
+}
+
+/// <summary>An entity named by ID: Host → Participant <see cref="MessageKind.Forget"/> (released: drop your copy),
+/// Host → authority <see cref="MessageKind.Release"/> (a player leaving: describe them, then despawn them) and
+/// <see cref="MessageKind.DescribeRequest"/> (describe it now, for a Participant that doesn't have it), authority →
+/// Host <see cref="MessageKind.Deleted"/> (despawned: stop keeping it).</summary>
+public readonly record struct EntityMessage(MessageKind Kind, EntityId Id) : IMessage
+{
+    public void Write(NetWriter w) { w.WriteByte((byte)Kind); Id.Write(w); }
+    public static EntityMessage Read(MessageKind kind, ref NetReader r) => new(kind, EntityId.Read(ref r));
+}
+
+/// <summary>Why an authority describes an entity to the Host.</summary>
+public enum DescribedReason : byte
+{
+    /// <summary>It made it (a ship built, say): the Host starts keeping it.</summary>
+    Created,
+    /// <summary>The Host asked (<see cref="MessageKind.DescribeRequest"/>), to send to a Participant.</summary>
+    Requested,
+    /// <summary>The Host released it: this is its last Description, and the authority has despawned it.</summary>
+    Released,
+}
+
+/// <summary>Authority → Host: an entity's Description. Its kind (the spawn handler that recreates it), its authority's
+/// last event number, and where it is (none: a global entity, always loaded); the data is opaque to the Host, except a
+/// player's, whose position on their ship it reads.</summary>
+public readonly ref struct DescribedMessage(EntityId id, ushort kind, DescribedReason reason, uint eventNumber, Vector3? position,
+                                            ReadOnlySpan<byte> data)
+{
+    public readonly EntityId Id = id;
+    public readonly ushort Kind = kind;
+    public readonly DescribedReason Reason = reason;
+    public readonly uint EventNumber = eventNumber;
+    public readonly Vector3? Position = position;
+    public readonly ReadOnlySpan<byte> Data = data;
+
+    public void Write(NetWriter w)
+    {
+        w.WriteByte((byte)MessageKind.Described); Id.Write(w); w.WriteUInt16(Kind); w.WriteByte((byte)Reason); w.WriteUInt32(EventNumber);
+        w.WriteBool(Position.HasValue);
+        if (Position is { } p) w.WriteVector3(p);
+        w.WriteRaw(Data);
+    }
+
+    public static DescribedMessage Read(ref NetReader r)
+    {
+        var id = EntityId.Read(ref r);
+        ushort kind = r.ReadUInt16();
+        var reason = (DescribedReason)r.ReadByte();
+        uint number = r.ReadUInt32();
+        Vector3? position = r.ReadBool() ? r.ReadVector3() : null;
+        return new(id, kind, reason, number, position, r.ReadRaw(r.Remaining));
+    }
+}
+
