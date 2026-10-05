@@ -174,6 +174,10 @@ public sealed class SpawnPlayerHandler : SpawnHandler<PlayerDescription, Player>
                 var (centre, _) = _physics.GetBodyPose(body);
                 d.Velocity = _physics.GetBodyLinearVelocity(body) + Vector3.Cross(_physics.GetBodyAngularVelocity(body), d.Position - centre);
             }
+            // Its body isn't here yet (a ship's copy arriving with them as a client joins), and when it comes it's at
+            // rest until it's placed on its timeline: they ride along meanwhile (SupportSystem), and it carries them on
+            // from there (FollowerSystem), so they're not moving across it.
+            else d.Velocity = Vector3.Zero;
         }
         // The spawn's owner plays them; the host simulates them.
         var controllingPeer = owner.Owner;
@@ -181,7 +185,8 @@ public sealed class SpawnPlayerHandler : SpawnHandler<PlayerDescription, Player>
         var player = PlayerFactory.Create(World, _physics, id, Session.OwnerFor(PeerId.Host), controllingPeer, controlledHere, d);
         // Standing on it from the start (SupportSystem keeps it once they touch it), so whatever moves the ship before then
         // takes them along (a copy placed on its timeline, see FollowerSystem).
-        if (ship.IsAlive && player.Has<Support>()) player.Get<Support>().Supporter = ship;
+        if (ship.IsAlive && player.Has<Support>())
+            (player.Get<Support>().Supporter, player.Get<Support>().LocalPosition) = (ship, d.LocalPosition);
         if (!controlledHere && _model is not null) player.Set(_model.Create());
         return player;
     }

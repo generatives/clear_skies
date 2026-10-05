@@ -223,6 +223,30 @@ public class TickInterpolationTests
     }
 
     [Fact]
+    public void ASmoothedJumpIsDrawnEasingOver()
+    {
+        var rig = new Rig();
+        rig.Tick(0);
+        rig.Tick(0);
+        // A tick that corrects the entity by a whole block.
+        rig.Entity.Get<Transform>() = At(1);
+        rig.Entity.Get<InterpolatedTransform>().Smooth(new Vector3D<float>(1, 0, 0));
+        rig.System.Update(SystemStage.Simulation, 0);
+
+        float last = 0;
+        rig.Time.Alpha = 1;
+        for (int frame = 0; frame < 30; frame++)
+        {
+            rig.System.Update(SystemStage.Frame, 1 / 60f);
+            float x = rig.Entity.DrawnPose().Position.X;
+            Assert.InRange(x - last, 0, 0.2f); // a glide, not a jump
+            last = x;
+        }
+        Assert.Equal(1f, last, 2);                                    // all the way, in half a second
+        Assert.Equal(1f, rig.Entity.Get<Transform>().Position.X); // the tick saw it there at once
+    }
+
+    [Fact]
     public void DrawingNeverTouchesTheTransform()
     {
         var rig = new Rig();
