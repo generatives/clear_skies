@@ -95,34 +95,39 @@ public sealed class OwnPlayerPrediction : ISystem
     {
         foreach (ref readonly var e in _local.GetEntities())
         {
-            EntityId landed = default;
-            Vector3 landedAt = default, landedVelocity = default;
-            if (_input > 0)
-            {
-                ref readonly var previous = ref _history[(_input - 1) % HistoryLength];
-                bool hadOne = previous.Input == _input - 1 && _input > 1; // (none for the first: placed by the host)
-                var before = previous.Support;
-                ref var record = ref _history[_input % HistoryLength];
-                record = Capture(e, _input);
-                if (hadOne && !record.Support.IsNone && record.Support != before && record.Grounded)
-                {
-                    (landed, landedAt, landedVelocity) = (record.Support, record.Position, record.Velocity);
-                    _landedOn = _input;
-                }
-            }
+            var landing = _input > 0 ? Remember(e) : null;
             if (_answer is { } answer)
             {
                 _answer = null;
                 Correct(e, answer);
             }
-            Send(e.Get<PlayerInput>(), landed, landedAt, landedVelocity);
+            Send(e.Get<PlayerInput>(), landing);
             return; // one local player
         }
     }
 
-    private void Send(in PlayerInput input, EntityId landed, Vector3 landedAt, Vector3 landedVelocity)
+    /// <summary>Records where the last input left the player. If it landed them on something new, returns that record,
+    /// which the next input tells the host.</summary>
+    private Record? Remember(Entity e)
     {
-        var sample = new InputSample(++_input, input.Held, input.Pressed, input.Yaw, input.Pitch, landed, landedAt, landedVelocity);
+        var before = _history[(_input - 1) % HistoryLength];
+        var now = _history[_input % HistoryLength] = Capture(e, _input);
+        if (!Landed(before, now)) return null;
+        _landedOn = _input;
+        return now;
+    }
+
+    /// <summary>Whether the player came to stand on something they weren't on the input before.</summary>
+    private bool Landed(in Record before, in Record now)
+    {
+        bool hadBefore = _input > 1 && before.Input == _input - 1; // (the first input has none: the host placed them)
+        return hadBefore && now.Grounded && !now.Support.IsNone && now.Support != before.Support;
+    }
+
+    private void Send(in PlayerInput input, Record? landing)
+    {
+        var sample = new InputSample(++_input, input.Held, input.Pressed, input.Yaw, input.Pitch,
+                                     landing?.Support ?? default, landing?.Position ?? default, landing?.Velocity ?? default);
         if (_sentCount == _sent.Length) Array.Copy(_sent, 1, _sent, 0, --_sentCount);
         _sent[_sentCount++] = sample;
         _net.SendInput(new PlayerInputMessage(_sent[.._sentCount]));
