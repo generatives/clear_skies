@@ -181,7 +181,8 @@ public sealed class SpawnPlayerHandler : SpawnHandler<PlayerDescription, Player>
         var player = PlayerFactory.Create(World, _physics, id, Session.OwnerFor(PeerId.Host), controller, controlledHere, d);
         // Standing on it from the start (SupportSystem keeps it once they touch it), so whatever moves the ship before then
         // takes them along (a copy placed on its timeline, see FollowerSystem).
-        if (ship.IsAlive && player.Has<Support>()) player.Get<Support>().Supporter = ship;
+        if (ship.IsAlive && player.Has<Support>())
+            (player.Get<Support>().Supporter, player.Get<Support>().LocalPosition) = (ship, d.LocalPosition);
         if (!controlledHere && _model is not null) player.Set(_model.Create());
         return player;
     }

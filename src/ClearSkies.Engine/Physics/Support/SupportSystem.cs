@@ -14,7 +14,8 @@ namespace ClearSkies.Engine.Physics.Support;
 /// <item>Standing on a <see cref="Supportable"/> body: that's the support, switching on the same tick.</item>
 /// <item>Standing on the static world: no support.</item>
 /// <item>Airborne: the support is kept while the body is still above it (a ray straight down hits it first), and
-/// released <see cref="ReleaseSeconds"/> after it last was, or at once if the supporting entity no longer exists.</item>
+/// released <see cref="ReleaseSeconds"/> after it last was, or at once if the supporting entity no longer exists. One
+/// whose body isn't here yet is kept as long.</item>
 /// </list>
 /// The support becomes the character's air-control reference, so jumping on a moving deck doesn't leave the player
 /// behind. While standing on a support, the view turns with it: its change in heading turns the view's yaw, and its
@@ -63,6 +64,20 @@ public sealed class SupportSystem : ISystem, IDebugUiSystem
                 var supporterBody = support.Supporter.Get<PhysicsBodyComponent>().Body;
                 support.TimeAway = _physics.Characters.IsAbove(characterBody, supporterBody) ? 0f : support.TimeAway + dt;
                 if (support.TimeAway > ReleaseSeconds) Release(ref support);
+            }
+            else if (support.HasSupporter)
+            {
+                // Its body isn't here yet (a ship's copy arriving with the player on it, just as a client joins): kept a
+                // while, riding along where they were on it, so the copy carries them on once it's placed
+                // (FollowerSystem) rather than leaving them behind as it moves off.
+                support.TimeAway += dt;
+                if (support.TimeAway > ReleaseSeconds) Release(ref support);
+                else if (support.Supporter.Has<Transform>())
+                {
+                    ref readonly var st = ref support.Supporter.Get<Transform>();
+                    var at = ToNumerics(st.Position) + Vector3.Transform(support.LocalPosition, ToNumerics(st.Rotation));
+                    Players.Teleport(e, new Vector3D<float>(at.X, at.Y, at.Z));
+                }
             }
             else
                 Release(ref support); // the supporter no longer exists
