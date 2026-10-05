@@ -77,10 +77,11 @@ public sealed class HostEntity
 /// network; it relays every message between them, as none talk to each other. It keeps a record of every entity
 /// (<see cref="HostEntity"/>), loaded or in the save, and each Participant's View Volume, and from those:
 /// <list type="bullet">
-/// <item>loads what comes into any view (the save's Description, spawned on the authority first, then everyone else),
-/// and releases what leaves every view (the authority describes it a last time, for the save, and despawns it);</item>
-/// <item>streams to each Participant everything loaded (a fresh Description, asked of the authority) and has it forget
-/// what's released; events and snapshots go only to Participants that have their entity;</item>
+/// <item>loads what comes into any view (the save's Description, spawned on the authority first, then everyone who
+/// sees it), and releases what leaves every view (the authority describes it a last time, for the save, and despawns
+/// it);</item>
+/// <item>streams to each Participant what's in its view (a fresh Description, asked of the authority) and has it forget
+/// what's left it; events and snapshots go only to Participants that have their entity;</item>
 /// <item>lets players in (spawning their Character where they left off, on their ship as it is now) and out (released
 /// like anything else, even in someone's view);</item>
 /// <item>saves: the authority describes everything every <see cref="AutosaveSeconds"/> and on exit, written in one
@@ -89,8 +90,8 @@ public sealed class HostEntity
 /// </summary>
 public sealed class Host : ISystem, IDisposable
 {
-    /// <summary>How far a Participant sees entities (its View Volume's radius): an entity loads within this of any view,
-    /// and is released past this × <see cref="Hysteresis"/> from every view, so nothing near an edge flickers.</summary>
+    /// <summary>How far a Participant sees entities (its View Volume's radius); it forgets them past this ×
+    /// <see cref="Hysteresis"/>, and an entity is released past that from every view, so nothing near an edge flickers.</summary>
     public const float ViewRadius = 1000f;
     public const float Hysteresis = 1.1f;
     public const float AutosaveSeconds = 300f;
@@ -405,7 +406,8 @@ public sealed class Host : ISystem, IDisposable
         {
             case DescribedReason.Requested:
                 foreach (var p in Welcomed)
-                    if (p.Requested.Remove(e.Id) && e.Loaded && !e.Releasing) SendSpawn(p, e);
+                    if (p.Requested.Remove(e.Id) && e.Loaded && !e.Releasing && (Sees(p, e, already: false) || p.PlayerEntity == e.Id))
+                        SendSpawn(p, e);
                 break;
             case DescribedReason.Released:
                 OnReleased(e);
@@ -464,9 +466,10 @@ public sealed class Host : ISystem, IDisposable
 
     /// <summary>
     /// Each tick: entities that left every view are released, stored ones that came into a view are loaded (spawned on
-    /// the authority, from the save's Description), and each Participant is sent what has loaded since (a fresh
-    /// Description, asked of the authority unless it's already this tick's). Nothing happens before the authority is
-    /// here, and nothing is loaded or released while nobody has a view.
+    /// the authority, and on everyone who sees them, from the save's Description), and each Participant is sent what has
+    /// come into its view (a fresh Description, asked of the authority unless it's already this tick's) and told to forget
+    /// what has left it. Nothing happens before the authority is here, and nothing is loaded or released while nobody has
+    /// a view. A player's own Character is always theirs.
     /// </summary>
     private void Stream()
     {
@@ -502,7 +505,17 @@ public sealed class Host : ISystem, IDisposable
             _scratch.Clear();
             foreach (var e in _entities.Values)
             {
-                if (p.Known.Contains(e.Id) || !e.Loaded || e.Releasing || p.Requested.Contains(e.Id)) continue;
+                bool own = e.Id == p.PlayerEntity;
+                if (p.Known.Contains(e.Id))
+                {
+                    if (!own && !Sees(p, e, already: true))
+                    {
+                        p.Known.Remove(e.Id);
+                        Send(p.Connection, new EntityMessage(MessageKind.Forget, e.Id));
+                    }
+                    continue;
+                }
+                if (!e.Loaded || e.Releasing || p.Requested.Contains(e.Id) || !(own || Sees(p, e, already: false))) continue;
                 if (e.DescribedTick == _clock.Tick) SendSpawn(p, e);
                 else
                 {

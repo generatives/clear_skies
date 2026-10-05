@@ -122,7 +122,7 @@ public class SaveDatabaseTests
 }
 
 /// <summary>The Host streams entities by View Volume: loaded from the save as one comes into a view, released (saved,
-/// then despawned) once out of every view.</summary>
+/// then despawned) once out of every view, and a Participant has only what's in its own.</summary>
 public class StreamingTests
 {
     /// <summary>A ship with a lamp on it at (20, 50, 0), and a client's player beside it, free-flying.</summary>
@@ -270,6 +270,39 @@ public class StreamingTests
         Assert.Null(game.Save.ReadEntity(id));
         Assert.False(game.Host.Registry.IsLive(id));
         Assert.False(OnClient(game, id));
+    }
+
+    [Fact]
+    public void AClientHasOnlyWhatIsInItsView()
+    {
+        var (game, _, grid) = Scene();
+        using var __ = game;
+        var far = game.Host.SpawnPlatform(new Vector3(800, 50, 0), size: 3);
+        game.Tick(3);
+        Assert.True(OnClient(game, far.Get<EntityId>())); // 780 away: in view
+        var further = game.Host.SpawnPlatform(new Vector3(-1500, 50, 0), size: 3);
+        var id = further.Get<EntityId>();
+        game.Tick(3);
+        // Out of every view: released, and never sent.
+        Assert.False(further.IsAlive);
+        Assert.False(OnClient(game, id));
+        Assert.NotNull(game.Save.ReadEntity(id));
+    }
+
+    [Fact]
+    public void AnEntityOnlySomeoneElseSeesIsForgottenHere()
+    {
+        var (game, player, grid) = Scene();
+        using var _ = game;
+        var id = grid.Get<EntityId>();
+        var (other, __) = game.Join("other"); // beside the grid too
+        MovePlayer(game, player, 1200);
+        // Still in the other player's view: loaded, and theirs, but forgotten here.
+        Assert.True(grid.IsAlive);
+        Assert.True(other.Registry.IsLive(id));
+        Assert.False(OnClient(game, id));
+        MovePlayer(game, player, 0);
+        Assert.True(OnClient(game, id));
     }
 }
 
