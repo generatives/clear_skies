@@ -62,8 +62,7 @@ public sealed class PendingSpawns
         anchor.Set(new Transform { Position = new Vector3D<float>(p.X, p.Y, p.Z), Rotation = Quaternion<float>.Identity, Scale = Vector3D<float>.One });
         anchor.Set<SpawnAnchor>();
         // The terrain here, to simulate them on: drawn for the host's own player, colliders only for a client's.
-        anchor.Set(local ? new TerrainInterest { Radius = 1000, Kind = TerrainInterestKind.Full }
-                         : new TerrainInterest { Radius = EntityPresenceSystem.ColliderRange, Kind = TerrainInterestKind.CollidersOnly });
+        anchor.Set(new TerrainInterest { ColliderRadius = EntityPresenceSystem.ColliderRange, DrawRadius = local ? 1000 : 0 });
         _pending.Add(new Pending { Description = description, Owner = owner, Local = local, Anchor = anchor, Spawn = spawn });
     }
 
