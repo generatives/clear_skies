@@ -45,7 +45,7 @@ public static class DedicatedServerGame
         host.AddSystem(world.CreatePresence(), SystemStage.Simulation);
         // Physics copies of ships simulated elsewhere (kinematic, near the local player), placed before the step, once the
         // presence system has decided which copies exist.
-        host.AddSystem(new FollowerSystem(host.World, host.Physics, world.RemoteBodies), SystemStage.Simulation);
+        host.AddSystem(new RemoteBodyProxySystem(host.World, host.Physics, world.RemoteBodies), SystemStage.Simulation);
         host.AddSystem(host.Physics, SystemStage.Simulation);
         host.AddSystem(new PhysicsTransformSyncSystem(host.World, host.Physics), SystemStage.Simulation);
         host.AddSystem(world.RemoteBodies, SystemStage.Simulation);
@@ -101,7 +101,7 @@ public static class BotClientGame
         host.AddSystem(world.CreatePresence(), SystemStage.Simulation);
         // Physics copies of ships simulated elsewhere (kinematic, near the local player), placed before the step, once the
         // presence system has decided which copies exist.
-        host.AddSystem(new FollowerSystem(host.World, host.Physics, world.RemoteBodies), SystemStage.Simulation);
+        host.AddSystem(new RemoteBodyProxySystem(host.World, host.Physics, world.RemoteBodies), SystemStage.Simulation);
         host.AddSystem(host.Physics, SystemStage.Simulation);
         host.AddSystem(new PhysicsTransformSyncSystem(host.World, host.Physics), SystemStage.Simulation);
         host.AddSystem(world.RemoteBodies, SystemStage.Simulation);

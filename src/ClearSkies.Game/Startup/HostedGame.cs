@@ -65,7 +65,7 @@ internal static class HostedGame
         host.AddSystem(world.CreatePresence(), SystemStage.Simulation);
         // Physics copies of ships simulated elsewhere (kinematic, near the local player), placed before the step, once the
         // presence system has decided which copies exist.
-        host.AddSystem(new FollowerSystem(host.World, host.Physics, world.RemoteBodies), SystemStage.Simulation);
+        host.AddSystem(new RemoteBodyProxySystem(host.World, host.Physics, world.RemoteBodies), SystemStage.Simulation);
         host.AddSystem(host.Physics, SystemStage.Simulation); // one step
         host.AddSystem(new PhysicsTransformSyncSystem(host.World, host.Physics), SystemStage.Simulation); // body poses -> Transform
         host.AddSystem(world.RemoteBodies, SystemStage.Simulation); // ships and players simulated elsewhere -> Transform, about 100 ms behind

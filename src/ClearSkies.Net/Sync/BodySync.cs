@@ -176,7 +176,7 @@ public sealed class BodySync : ISystem, IDebugUiSystem
 /// Each tick, after physics: puts bodies owned elsewhere where their snapshots say they were
 /// <see cref="SnapshotBuffer.Delay"/> ticks ago, each as little behind as keeps a newer snapshot in hand, in their
 /// support's space (so a player standing on a moving ship stays on its deck). Players face the way they look. That's
-/// their Transform on this machine, the pose their physics copies are moved to (<see cref="FollowerSystem"/>); they're
+/// their Transform on this machine, the pose their physics copies are moved to (<see cref="RemoteBodyProxySystem"/>); they're
 /// drawn between ticks like anything simulated here (TickInterpolationSystem), which comes to the same thing as
 /// sampling the snapshots every frame, <see cref="ITickClock.Alpha"/> of a tick later.
 /// </summary>
