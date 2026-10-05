@@ -53,14 +53,14 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     private float _bounceNearRadius = 64f;
     private float _bounceScale = 1f;
 
-    // Checkerboard bounce (see bouncePhase in GpuRayLightPass): 1 = every surface voxel fires rays each evaluation;
-    // 2 or 4 = only one in that many does, in turn, and the compose pass's smoothing fills the gaps. Each evaluation
-    // costs about 1/spread; every count of evaluations is rounded up to a multiple of it, so each voxel gets at least one.
+    // Checkerboard bounce (see bouncePhase in GpuRayLightPass): 1 = every surface voxel fires all the rays each
+    // evaluation; 2 or 4 = each fires only that share, neighbours firing the others, and the compose pass's smoothing
+    // averages them. Each evaluation costs about 1/spread of the rays.
     private int _bounceSpread = 1;
     private static readonly int[] Spreads = { 1, 2, 4 };
-    private static readonly string[] SpreadNames = { "Off (every voxel)", "1 in 2 voxels", "1 in 4 voxels" };
+    private static readonly string[] SpreadNames = { "Off (all rays per voxel)", "1/2 of the rays per voxel", "1/4 of the rays per voxel" };
 
-    /// <summary>Checkerboard bounce: 1 (off), 2 or 4 surface voxels taking turns to fire rays; other values round to the
+    /// <summary>Checkerboard bounce: 1 (off), 2 or 4: each surface voxel fires 1/that of the rays; other values round to the
     /// nearest of those.</summary>
     public int BounceSpread
     {
@@ -147,7 +147,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         ImGui.TextDisabled($"  = {_bounceRays * _bounceCycle} fixed directions per voxel");
         int spreadIdx = System.Array.IndexOf(Spreads, _bounceSpread);
         if (ImGui.Combo("Checkerboard bounce", ref spreadIdx, SpreadNames, SpreadNames.Length)) _bounceSpread = Spreads[spreadIdx];
-        ImGui.TextDisabled("  rays from only some surface voxels per evaluation; smoothing fills the rest");
+        ImGui.TextDisabled("  neighbouring voxels fire different rays; compose smoothing averages them");
         ImGui.SliderInt("Bounce evaluations after a change", ref _bounceHoldFrames, 1, 64);
         ImGui.SliderFloat("Settled-in-one-frame radius", ref _bounceNearRadius, 0f, 256f, "%.0f");
         ImGui.TextDisabled("  changes within it run all their evaluations the frame they happen");

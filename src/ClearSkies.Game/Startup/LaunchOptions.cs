@@ -40,8 +40,8 @@ public sealed record LaunchOptions
     /// 2000 by default; headless, 256 (only what colliders need).</summary>
     public float ViewDistance { get; init; } = 2000f;
 
-    /// <summary>--checker-bounce N: bounce and AO rays from only one in N surface voxels per evaluation (2 or 4), in
-    /// turn, to compare its cost and look against the default (1, every voxel). Also in the GPU Lighting panel.</summary>
+    /// <summary>--checker-bounce N: each surface voxel fires only 1/N of the bounce and AO rays (2 or 4), neighbours firing
+    /// the rest, to compare its cost and look against the default (1, all of them). Also in the GPU Lighting panel.</summary>
     public int CheckerBounce { get; init; } = 1;
 
     /// <summary>--headless: no window, GPU, input or UI; just the simulation and the network, on a timer. Hosting, it's a

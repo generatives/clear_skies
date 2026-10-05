@@ -174,7 +174,7 @@ public sealed partial class GpuLightSystem
         _phaseTimer.Lap(2);
 
         // Evaluations a changed area gets, rounded up to whole cycles so it always stops having covered each voxel's
-        // complete ray set equally (and to whole checkerboard rounds, so every phase gets its turn).
+        // complete ray set equally.
         int hold = HoldEvals();
 
         // Bounce inputs that change what every surface receives (or which rays it fires): re-evaluate everything. The
@@ -699,25 +699,11 @@ public sealed partial class GpuLightSystem
         float midR = System.Math.Max(_bounceMidRadius, fullR);
         float d2 = Vector3D.DistanceSquared(BrickCentre(slot), _tierCam);
         int evals = d2 <= fullR * fullR ? full : d2 <= midR * midR ? _bounceMidEvals : _bounceFarEvals;
-        evals = (evals + _bounceSpread - 1) / _bounceSpread * _bounceSpread; // whole checkerboard rounds
         return System.Math.Clamp(evals, 1, full);
     }
 
-    /// <summary>A changed area's evaluations: the hold setting rounded up to a multiple of both the cycle and the
-    /// checkerboard spread, at most 64 (the hold is stored in a byte).</summary>
-    private int HoldEvals()
-    {
-        int unit = Lcm(_bounceCycle, _bounceSpread);
-        int hold = (_bounceHoldFrames + unit - 1) / unit * unit;
-        return hold <= 64 ? hold : System.Math.Max(unit, 64 / unit * unit);
-    }
-
-    private static int Lcm(int a, int b)
-    {
-        int x = a, y = b;
-        while (y != 0) (x, y) = (y, x % y);
-        return a / x * b;
-    }
+    /// <summary>A changed area's evaluations: the hold setting rounded up to whole cycles, at most 64.</summary>
+    private int HoldEvals() => System.Math.Min(64, (_bounceHoldFrames + _bounceCycle - 1) / _bounceCycle * _bounceCycle);
 
     /// <summary>
     /// Walks part of the list of bricks granted fewer than a full hold (all of it every 16 frames or so) and tops up

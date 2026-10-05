@@ -703,16 +703,14 @@ fn pcg(v: u32) -> u32 {
 
 fn rand01(h: u32) -> f32 { return f32(pcg(h) & 0xFFFFFFu) / 16777216.0; }
 
-// Checkerboard bounce: with a spread S of 2 or 4, an evaluation fires rays from only one in S surface voxels, those of
-// phase n mod S, so a brick's voxels take turns and each evaluation costs about 1/S. The phases are laid out so every
-// 2x2 patch of a floor, wall or ceiling holds each of them once (spread 2: a plain 3D checkerboard), and the compose
-// pass's neighbour smoothing blends them back together. A voxel counts only its own evaluations (n / S) for its
-// running average, and fires slice n mod cycle, so neighbouring phases fire different slices and together cover the
-// whole ray set. The CPU rounds every brick's evaluation count up to a multiple of S, so each voxel gets at least one.
-fn bouncePhase(v: vec3<i32>, spread: u32) -> u32 {
-    if (spread >= 4u) { return u32((v.x + v.y) & 1) + 2u * u32((v.y + v.z) & 1); }
-    if (spread == 2u) { return u32((v.x + v.y + v.z) & 1); }
-    return 0u;
+// Checkerboard bounce: with a spread S of 2 or 4, every surface voxel still updates each evaluation but fires only
+// 1/S of the rays, its phase's share of the slice: direction j*S + phase of the slice's directions. The phases are laid
+// out so every 2x2 patch of a floor, wall or ceiling holds each of them once (spread 2: a plain 3D checkerboard), so a
+// patch fires the whole slice between its voxels, and the compose pass's neighbour smoothing averages them back.
+fn bouncePhase(v: vec3<i32>, spread: i32) -> i32 {
+    if (spread >= 4) { return ((v.x + v.y) & 1) + 2 * ((v.y + v.z) & 1); }
+    if (spread == 2) { return (v.x + v.y + v.z) & 1; }
+    return 0;
 }
 
 // Blends one evaluation into the voxel's accumulation word (bounce RGB and AO) and returns the new word.
@@ -758,7 +756,11 @@ fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, slice: i32, list: u3
     let rays = clamp(i32(p.bounce2.x), 1, BOUNCE_MAX_RAYS);
     let cycle = max(i32(p.bounce2.y), 1);
     let total = f32(rays * cycle);
-    for (var k = 0; k < rays; k = k + 1) {
+    let spread = clamp(i32(p.bounce.w), 1, 4);
+    let phase = bouncePhase(v, spread);
+    let fired = max((rays - phase + spread - 1) / spread, 1); // this voxel's share of the slice's rays
+    for (var kk = 0; kk < fired; kk = kk + 1) {
+        let k = min(kk * spread + phase, rays - 1);
         let j = f32(k * cycle + slice);
         let u1 = fract((j + shift) / total);
         let phi = j * 2.39996323 + twist;
@@ -792,8 +794,8 @@ fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, slice: i32, list: u3
         if (bestG >= 0) { if (!prime) { sumL = sumL + radianceAt(bestG, best); } }
         else { escaped = escaped + 1.0; }
     }
-    let estimate = clamp(p.bounce.x * sumL / f32(rays), vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0;
-    let occEstimate = (1.0 - escaped / f32(rays)) * 255.0;
+    let estimate = clamp(p.bounce.x * sumL / f32(fired), vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0;
+    let occEstimate = (1.0 - escaped / f32(fired)) * 255.0;
     let r8 = blend8(f32(word & 0xFFu), estimate.r, alpha);
     let g8 = blend8(f32((word >> 8u) & 0xFFu), estimate.g, alpha);
     let b8 = blend8(f32((word >> 16u) & 0xFFu), estimate.b, alpha);
@@ -823,14 +825,9 @@ fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) n
     // A running average over the first full cycle (exactly the complete ray set's mean), then a weight of one
     // cycle, so each further cycle weighs the whole set about equally. N = PRIME: the priming evaluation (see
     // bounceVoxel), which overwrites.
-    // With a checkerboard spread (see bouncePhase) only this evaluation's phase fires, counting its own evaluations;
-    // the priming one is every voxel's.
     let cycle = max(u32(p.bounce2.y), 1u);
     let prime = nu == PRIME;
-    let spread = select(clamp(u32(p.bounce.w), 1u, 4u), 1u, prime);
-    let phase = nu % spread;
-    let own = nu / spread;
-    let alpha = select(min(1.0, max(f32(spread) / f32(cycle), 1.0 / (f32(own) + 1.0))), 1.0, prime);
+    let alpha = select(max(1.0 / f32(cycle), 1.0 / (f32(nu) + 1.0)), 1.0, prime);
     let slice = select(i32(nu % cycle), i32(cycle) - 1, prime);
     let list = listOf(it.g, it.v0);
     // Gather the surface voxels (see Surface compaction); other air has no bounce and no occlusion, solid keeps its word.
@@ -838,8 +835,8 @@ fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) n
     for (var e = 0u; e < 2u; e = e + 1u) {
         let v = it.v0 + vec3<i32>(i32(e), 0, 0);
         if (isSolid(it.g, v)) { continue; }
-        if (!hasSolidNeighbour(it.g, v)) { lightPool[it.acc + i32(e)] = 0u; }
-        else if (bouncePhase(v, spread) == phase) { wList[atomicAdd(&wCount, 1u)] = t * 2u + e; }
+        if (hasSolidNeighbour(it.g, v)) { wList[atomicAdd(&wCount, 1u)] = t * 2u + e; }
+        else { lightPool[it.acc + i32(e)] = 0u; }
     }
     workgroupBarrier();
     let n = atomicLoad(&wCount);
@@ -945,7 +942,7 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
     /// run it after the sun pass and before composing. <paramref name="work"/> holds <paramref name="count"/> pairs of (light slot,
     /// evaluations since that brick changed). Each voxel's fixed direction set is <paramref name="rays"/> x
     /// <paramref name="cycle"/> directions, one slice of <paramref name="rays"/> per evaluation. <paramref name="spread"/>:
-    /// 1, or 2 or 4 for a checkerboard where only one in that many surface voxels fires each evaluation (bouncePhase).
+    /// 1, or 2 or 4 for a checkerboard where each surface voxel fires only that share of the rays (bouncePhase).
     /// </summary>
     public void DispatchBounce(GridStore store, Vector3D<float> sunDir, float sunStrength,
                                float albedo, int rays, int cycle, int spread, GpuBuffer work, int count)
