@@ -53,3 +53,17 @@ public struct TerrainInterest
     public override readonly string ToString() => DrawRadius > 0 ? $"drawn to {DrawRadius:0}, colliders to {ColliderRadius:0}"
                                                                   : $"colliders to {ColliderRadius:0}";
 }
+
+/// <summary>On a terrain interest: how far around it (horizontally) every column it wants is known to
+/// <see cref="ChunkLoadSystem"/>, as queued, loading or loaded. Infinite once all of them are.</summary>
+public struct TerrainScanned
+{
+    public float Radius;
+}
+
+/// <summary>A terrain column that <see cref="ChunkLoadSystem"/> is going to load, or is loading: an entity of its own
+/// from when the column is queued until its chunks are added.</summary>
+public struct TerrainColumnLoading
+{
+    public int X, Z;
+}
