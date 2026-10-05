@@ -57,17 +57,11 @@ public interface IStagedSystem
 }
 
 /// <summary>A system that draws: runs in a render stage (<see cref="SystemStage.RenderWorld"/> onwards), inside the
-/// open frame, and is handed that frame's camera and time. Registered with the same
-/// <see cref="EngineHost.AddSystem(IRenderSystem, SystemStage)"/> as any other system.</summary>
+/// open frame, and is handed that frame's camera and time. Registered with
+/// <see cref="WindowedEngineHost.AddSystem(IRenderSystem, SystemStage)"/> once per render stage it draws in, and told
+/// each time which stage is running: most draw in just one and can ignore it, but one may draw in several (e.g. chunks:
+/// opaque in RenderWorld, translucent in RenderTransparent).</summary>
 public interface IRenderSystem
-{
-    void Render(in Rendering.RenderContext frame);
-}
-
-/// <summary>A system that draws in more than one render stage (e.g. chunks: opaque in RenderWorld, translucent in
-/// RenderTransparent): registered with <see cref="WindowedEngineHost.AddSystem(IStagedRenderSystem, SystemStage)"/>
-/// once per stage, at the point in that stage where it should run, and told each time which stage is running.</summary>
-public interface IStagedRenderSystem
 {
     void Render(SystemStage stage, in Rendering.RenderContext frame);
 }

@@ -21,7 +21,7 @@ namespace ClearSkies.Engine.ECS;
 /// outside the view is skipped in one test instead of one per chunk: looking at every chunk each frame cost ~6 ms.
 /// Ships' chunks, which move, are tested one by one.
 /// </summary>
-public sealed class ChunkRenderSystem : IStagedRenderSystem, IDebugUiSystem
+public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
 {
     private readonly Renderer _renderer;
     private readonly GridHandle _world;
