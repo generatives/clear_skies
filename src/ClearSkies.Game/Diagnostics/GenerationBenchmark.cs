@@ -73,8 +73,8 @@ public static class GenerationBenchmark
             sw.Stop();
 
             meshTimesUs.Add(sw.Elapsed.TotalMicroseconds);
-            totalVerts += mesh.Opaque.Vertices.Count + mesh.Cutout.Vertices.Count;
-            totalIdx   += mesh.Opaque.Indices.Count + mesh.Cutout.Indices.Count;
+            totalVerts += mesh.Opaque.Vertices.Count + mesh.Cutout.Vertices.Count + mesh.Translucent.Vertices.Count;
+            totalIdx   += mesh.Opaque.Indices.Count + mesh.Cutout.Indices.Count + mesh.Translucent.Indices.Count;
         }
         double meshWallMs = overall.Elapsed.TotalMilliseconds;
 

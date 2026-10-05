@@ -52,8 +52,8 @@ public class ChunkVolume
     /// neighbouring columns arrived cost about as many meshes again as the chunks themselves, for about 13% more
     /// vertices. Ships keep culling against their neighbours: they're small and never stream. The one exception is
     /// a <see cref="BlockDef.Transparent"/> face, which is seen through, so it is culled against its neighbour across
-    /// the border (or a wall of glass would show a pane at every chunk border in it, and flicker against the stone
-    /// beside it).
+    /// the border (or a lake or a wall of glass would show a sheet at every chunk border in it, and flicker against the
+    /// stone beside it).
     /// A chunk with a transparent block on its border remeshes when the cell beside it changes (see
     /// <see cref="MarkBorderCell"/>).</summary>
     public bool MeshIgnoresNeighbours { get; set; }

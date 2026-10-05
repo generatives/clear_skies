@@ -17,11 +17,12 @@ namespace ClearSkies.Engine.Voxels;
 /// interpolated chunk-local position and the face normal — so a merged quad no longer needs per-cell
 /// light in its merge key.
 ///
-/// <see cref="BlockDef.Transparent"/> blocks (glass) are meshed alongside but into their own <see cref="RenderLayer"/>'s
-/// mesh (<see cref="ChunkMeshLayers.Cutout"/>). They don't hide their neighbours' faces, so an opaque block behind
-/// glass still has its face; and a transparent face is hidden only by an opaque block (or
-/// <see cref="BlockDef.OpaqueModel"/>) or another of its own type. An opaque model block hides faces against it like
-/// an opaque cube, since its model covers them.
+/// <see cref="BlockDef.Transparent"/> blocks are meshed alongside but into their own <see cref="RenderLayer"/>'s mesh:
+/// cut out (glass: <see cref="ChunkMeshLayers.Cutout"/>) or translucent (water: <see cref="ChunkMeshLayers.Translucent"/>,
+/// drawn alpha-blended after the opaque world). They don't hide their neighbours' faces, so an opaque block behind glass
+/// still has its face; and a transparent face is hidden only by an opaque block (or <see cref="BlockDef.OpaqueModel"/>)
+/// or another of its own type. An opaque model block hides faces against it like an opaque cube, since its model
+/// covers them.
 /// </summary>
 public sealed class GreedyMesher
 {
@@ -51,6 +52,9 @@ public sealed class GreedyMesher
     private readonly bool[]     _consumed = new bool    [ChunkData.Size * ChunkData.Size];
     private readonly List<Vertex> _verts   = new();
     private readonly List<uint>   _indices = new();
+    private readonly List<Vertex> _tVerts   = new();
+    private readonly List<uint>   _tIndices = new();
+    private readonly List<byte>   _tAlphas  = new();
     private readonly List<Vertex> _cVerts   = new();
     private readonly List<uint>   _cIndices = new();
 
@@ -82,6 +86,9 @@ public sealed class GreedyMesher
         var indices = _indices;
         verts.Clear();
         indices.Clear();
+        _tVerts.Clear();
+        _tIndices.Clear();
+        _tAlphas.Clear();
         _cVerts.Clear();
         _cIndices.Clear();
         int sz      = ChunkData.Size;
@@ -179,6 +186,11 @@ public sealed class GreedyMesher
 
                     switch (def.Layer)
                     {
+                        case RenderLayer.Translucent:
+                            EmitQuad(_tVerts, _tIndices, face, slice + face.FaceOffset, u, v, du, dv, def.Color, layer);
+                            byte alpha = (byte)System.Math.Clamp((int)MathF.Round(def.EffectiveAlpha * 255f), 0, 255);
+                            for (int k = 0; k < 4; k++) _tAlphas.Add(alpha);
+                            break;
                         case RenderLayer.Cutout:
                             EmitQuad(_cVerts, _cIndices, face, slice + face.FaceOffset, u, v, du, dv, def.Color, layer);
                             break;
@@ -190,7 +202,8 @@ public sealed class GreedyMesher
             }
         }
 
-        return new ChunkMeshLayers(new LayerMesh(verts, indices), new LayerMesh(_cVerts, _cIndices));
+        return new ChunkMeshLayers(new LayerMesh(verts, indices), new LayerMesh(_cVerts, _cIndices),
+                                   new LayerMesh(_tVerts, _tIndices), _tAlphas);
     }
 
     // face.D/U/V are always a permutation of {0,1,2} (x,y,z); resolving the three coordinates with a
@@ -315,6 +328,8 @@ public sealed class GreedyMesher
 /// <summary>One render layer's faces: its vertices, and triangle indices into them.</summary>
 public readonly record struct LayerMesh(List<Vertex> Vertices, List<uint> Indices);
 
-/// <summary>A meshed chunk's faces, one <see cref="LayerMesh"/> per <see cref="RenderLayer"/>. The lists are
-/// <see cref="GreedyMesher"/>'s reused scratch buffers: consume them before it meshes again.</summary>
-public readonly record struct ChunkMeshLayers(LayerMesh Opaque, LayerMesh Cutout);
+/// <summary>A meshed chunk's faces, one <see cref="LayerMesh"/> per <see cref="RenderLayer"/>, and each translucent
+/// vertex's opacity (0-255: its block's <see cref="BlockDef.Alpha"/>, which the shader multiplies the texture's alpha
+/// by). The lists are <see cref="GreedyMesher"/>'s reused scratch buffers: consume them before it meshes again.</summary>
+public readonly record struct ChunkMeshLayers(LayerMesh Opaque, LayerMesh Cutout, LayerMesh Translucent,
+                                              List<byte> TranslucentAlphas);

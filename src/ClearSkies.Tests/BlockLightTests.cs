@@ -14,6 +14,7 @@ public class BlockLightTests
     [InlineData(BlockId.Lever, false)]  // model
     [InlineData(BlockId.SteeringWheel, false)]
     [InlineData(BlockId.Glass, false)]  // transparent cube
+    [InlineData(BlockId.Water, false)]
     [InlineData(BlockId.Air, false)]
     public void Blocks_light_by_category(BlockId id, bool blocks)
         => Assert.Equal(blocks, BlockRegistry.Get(id).BlocksLight);

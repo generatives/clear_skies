@@ -16,15 +16,20 @@ public struct ChunkRenderData
     /// clear texels; null when it has none.</summary>
     public GpuMesh? CutoutMesh;
 
+    /// <summary>The chunk's <see cref="RenderLayer.Translucent"/> cube faces (water), drawn alpha-blended after the
+    /// opaque world; null when it has none.</summary>
+    public GpuMesh? TransparentMesh;
+
     /// <summary>Each of the chunk's meshes that it has.</summary>
     public readonly IEnumerable<GpuMesh> Meshes()
     {
         if (Mesh != null) yield return Mesh;
         if (CutoutMesh != null) yield return CutoutMesh;
+        if (TransparentMesh != null) yield return TransparentMesh;
     }
 
     /// <summary>True when it has nothing to draw.</summary>
-    public readonly bool IsEmpty => Mesh == null && CutoutMesh == null && Models.Length == 0;
+    public readonly bool IsEmpty => Mesh == null && CutoutMesh == null && TransparentMesh == null && Models.Length == 0;
 
     /// <summary>Every static model block (<see cref="BlockDef.Model"/>, not an entity block) in the chunk; empty
     /// when there are none.</summary>

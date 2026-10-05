@@ -1,11 +1,14 @@
 using ClearSkies.Engine.ECS;
+using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Voxels;
+using Silk.NET.Maths;
 using Xunit;
 
 namespace ClearSkies.Tests;
 
-/// <summary>Transparent blocks: their registration, how GreedyMesher puts their faces in their layer's mesh and culls
-/// them, and the neighbour remeshing that culling across chunk borders needs.</summary>
+/// <summary>Transparent blocks (glass, water): their registration, how GreedyMesher puts their faces in their layer's
+/// mesh and culls them, the neighbour remeshing that culling across chunk borders needs, and the opacity carried in a
+/// chunk vertex.</summary>
 public class TransparentBlockTests
 {
     [Fact]
@@ -20,6 +23,19 @@ public class TransparentBlockTests
         Assert.NotNull(def.Texture);
         Assert.Contains(BlockId.Glass, BlockActionSystem.PlaceableBlocks);
         Assert.Equal(RenderLayer.Opaque, BlockRegistry.Get(BlockId.Stone).Layer);
+    }
+
+    [Fact]
+    public void Water_is_a_translucent_passable_transparent_cube_and_placeable()
+    {
+        Assert.True(BlockRegistry.IsDefined(BlockId.Water));
+        var def = BlockRegistry.Get(BlockId.Water);
+        Assert.Equal(RenderLayer.Translucent, def.Layer);
+        Assert.True(def.Transparent);
+        Assert.True(def.IsFullCube);
+        Assert.False(def.Collides);
+        Assert.NotNull(def.Texture);
+        Assert.Contains(BlockId.Water, BlockActionSystem.PlaceableBlocks);
     }
 
     [Fact]
@@ -51,6 +67,73 @@ public class TransparentBlockTests
         Assert.Empty(mesh.Opaque.Vertices);
         // A 2x1x1 box: the four long sides merge to one quad each, plus the two ends.
         Assert.Equal(6 * 4, mesh.Cutout.Vertices.Count);
+    }
+
+    [Fact]
+    public void Faces_between_water_blocks_are_hidden()
+    {
+        var data = new ChunkData();
+        data.Set(4, 4, 4, BlockId.Water);
+        data.Set(5, 4, 4, BlockId.Water);
+        var mesher = new GreedyMesher();
+        var mesh = mesher.Mesh(data, null, null, null, null, null, null);
+
+        Assert.Empty(mesh.Opaque.Vertices);
+        Assert.Empty(mesh.Cutout.Vertices);
+        Assert.Equal(6 * 4, mesh.Translucent.Vertices.Count);
+    }
+
+    [Fact]
+    public void Faces_between_different_transparent_blocks_are_both_drawn()
+    {
+        var data = new ChunkData();
+        data.Set(4, 4, 4, BlockId.Water);
+        data.Set(5, 4, 4, BlockId.Glass);
+        var mesher = new GreedyMesher();
+        var mesh = mesher.Mesh(data, null, null, null, null, null, null);
+
+        Assert.Equal(6 * 4, mesh.Translucent.Vertices.Count); // water
+        Assert.Equal(6 * 4, mesh.Cutout.Vertices.Count);      // glass
+    }
+
+    [Fact]
+    public void Translucent_alpha_is_the_blocks_opacity()
+    {
+        var data = new ChunkData();
+        data.Set(4, 4, 4, BlockId.Water);
+        var mesher = new GreedyMesher();
+        var mesh = mesher.Mesh(data, null, null, null, null, null, null);
+
+        byte water = (byte)MathF.Round(BlockRegistry.Get(BlockId.Water).EffectiveAlpha * 255f);
+        Assert.True(water < 255);
+        Assert.Equal(mesh.Translucent.Vertices.Count, mesh.TranslucentAlphas.Count);
+        Assert.All(mesh.TranslucentAlphas, a => Assert.Equal(water, a));
+    }
+
+    [Fact]
+    public void Chunk_vertex_carries_alpha()
+    {
+        var v = new Vertex(new Vector3D<float>(1, 2, 3), new Vector3D<float>(0, 1, 0), new Vector3D<float>(0.2f, 0.4f, 0.6f));
+        var packed = ChunkVertex.Pack(v, 153);
+        Assert.Equal(153 / 255f, packed.Alpha, 4);
+        Assert.Equal(1f, ChunkVertex.Pack(v).Alpha);
+        var back = packed.Unpack();
+        Assert.Equal(v.Position, back.Position);
+        Assert.Equal(0.4f, back.Color.Y, 2);
+    }
+
+    [Fact]
+    public void Water_across_a_border_is_culled_against_water_when_ignoring_neighbours()
+    {
+        int last = ChunkData.Size - 1;
+        var data = new ChunkData();
+        data.Set(last, 4, 4, BlockId.Water);
+        var px = new ChunkData();
+        px.Set(0, 4, 4, BlockId.Water);
+        var mesher = new GreedyMesher();
+
+        var mesh = mesher.Mesh(data, null, px, null, null, null, null, neighboursForTransparentOnly: true);
+        Assert.Equal(5 * 4, mesh.Translucent.Vertices.Count);
     }
 
     [Fact]

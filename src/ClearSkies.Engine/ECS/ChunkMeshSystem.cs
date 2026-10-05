@@ -57,8 +57,9 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
         public static readonly Packed None = new(Array.Empty<byte>(), 0, 0, 0, 0, false);
     }
 
-    /// <summary>A meshed chunk: its opaque and cut-out meshes, and its model blocks.</summary>
-    private sealed record Result(Entity Entity, Packed Opaque, Packed Cutout, ModelCell[] Models, Exception? Error);
+    /// <summary>A meshed chunk: its opaque, cut-out and translucent meshes, and its model blocks.</summary>
+    private sealed record Result(Entity Entity, Packed Opaque, Packed Cutout, Packed Transparent, ModelCell[] Models,
+                                 Exception? Error);
 
     /// <summary>Main-thread time spent uploading meshes per frame, at most (at least one goes each frame): results past
     /// it wait for the next frame, so a burst of finished jobs doesn't stall one.</summary>
@@ -135,8 +136,9 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
 
     /// <summary>Packs a chunk mesh for upload, off the main thread: the vertices as <see cref="ChunkVertex"/> (8 bytes,
     /// not a 48-byte <see cref="Vertex"/>), the indices, then (if <paramref name="wireframe"/>) the wireframe's line
-    /// list. Indices are 16-bit unless the mesh has more vertices than that reaches.</summary>
-    private static Packed PackMesh(LayerMesh mesh, bool wireframe)
+    /// list. Indices are 16-bit unless the mesh has more vertices than that reaches. <paramref name="alphas"/>, if not
+    /// null, is each vertex's opacity (see <see cref="ChunkVertex"/>).</summary>
+    private static Packed PackMesh(LayerMesh mesh, List<byte>? alphas, bool wireframe)
     {
         ReadOnlySpan<Vertex> verts = CollectionsMarshal.AsSpan(mesh.Vertices);
         ReadOnlySpan<uint> idxs = CollectionsMarshal.AsSpan(mesh.Indices);
@@ -149,7 +151,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
         var packed = ArrayPool<byte>.Shared.Rent(System.Math.Max(4, bytes));
 
         var cv = MemoryMarshal.Cast<byte, ChunkVertex>(packed.AsSpan(0, vLen));
-        for (int k = 0; k < verts.Length; k++) cv[k] = ChunkVertex.Pack(verts[k]);
+        for (int k = 0; k < verts.Length; k++) cv[k] = ChunkVertex.Pack(verts[k], alphas is null ? (byte)255 : alphas[k]);
 
         int at = vLen;
         if (wide)
@@ -230,13 +232,14 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                     // The mesher's lists are per-thread scratch, so copy out before this thread meshes again.
                     var mesher = _meshers.Value!;
                     var mesh = mesher.Mesh(data, nX, pX, nY, pY, nZ, pZ, neighboursForTransparentOnly: alone);
-                    var opaque = PackMesh(mesh.Opaque, wireframe);
-                    var cutout = PackMesh(mesh.Cutout, wireframe);
-                    _results.Enqueue(new Result(entry.Entity, opaque, cutout, FindModelBlocks(data), null));
+                    var opaque = PackMesh(mesh.Opaque, null, wireframe);
+                    var cutout = PackMesh(mesh.Cutout, null, wireframe);
+                    var transparent = PackMesh(mesh.Translucent, mesh.TranslucentAlphas, wireframe);
+                    _results.Enqueue(new Result(entry.Entity, opaque, cutout, transparent, FindModelBlocks(data), null));
                 }
                 catch (Exception e)
                 {
-                    _results.Enqueue(new Result(entry.Entity, Packed.None, Packed.None, Array.Empty<ModelCell>(), e));
+                    _results.Enqueue(new Result(entry.Entity, Packed.None, Packed.None, Packed.None, Array.Empty<ModelCell>(), e));
                 }
                 finally
                 {
@@ -272,7 +275,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                 var volume = entry.Volume;
 
                 var models = ResolveModels(r.Models);
-                if (r.Opaque.VertCount == 0 && r.Cutout.VertCount == 0 && models.Length == 0)
+                if (r.Opaque.VertCount == 0 && r.Cutout.VertCount == 0 && r.Transparent.VertCount == 0 && models.Length == 0)
                 {
                     bool redirtied = entity.Has<NeedsRemeshFlag>();
                     ClearMesh(entry);
@@ -282,6 +285,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
 
                 var mesh = Upload(r.Opaque);
                 var cutoutMesh = Upload(r.Cutout);
+                var transparentMesh = Upload(r.Transparent);
 
                 // The chunk's voxel base and the volume dims are derived live at draw time from the volume's
                 // GPU resources (see ChunkRenderSystem), so a volume reallocation needs no remesh here. SetMesh clears
@@ -298,6 +302,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                     {
                         Mesh     = mesh,
                         CutoutMesh = cutoutMesh,
+                        TransparentMesh = transparentMesh,
                         Models   = models,
                         Grid     = volume.Gpu,
                         ChunkPos = entry.Position,
@@ -311,6 +316,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
             {
                 if (r.Opaque.Data.Length > 0) ArrayPool<byte>.Shared.Return(r.Opaque.Data);
                 if (r.Cutout.Data.Length > 0) ArrayPool<byte>.Shared.Return(r.Cutout.Data);
+                if (r.Transparent.Data.Length > 0) ArrayPool<byte>.Shared.Return(r.Transparent.Data);
             }
         }
     }
