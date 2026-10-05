@@ -146,7 +146,7 @@ public class ChunkVolume
         entry.Entity.Set(new NeedsRecollideFlag());
         entry.Entity.Set(new NeedsGpuUploadFlag());
         entry.PackedOpacityWords  = null; // block data actually changed -- cached opacity is stale
-        entry.AddEdit(lx, ly, lz, placedSolid: BlockRegistry.Get(id).Opacity >= 15);
+        entry.AddEdit(lx, ly, lz, placedSolid: BlockRegistry.Get(id).BlocksLight);
 
         // Adjacent-chunk face-cull invalidation.
         if (lx == 0)                  TryMark(cp.Offset(-1,  0,  0));
@@ -173,7 +173,7 @@ public class ChunkVolume
         const int S = ChunkData.Size;
         var (lo, _, _, _) = Decompose(min.X, min.Y, min.Z);
         var (hi, _, _, _) = Decompose(max.X, max.Y, max.Z);
-        bool placedSolid = BlockRegistry.Get(id).Opacity >= 15;
+        bool placedSolid = BlockRegistry.Get(id).BlocksLight;
         for (int cz = lo.Z; cz <= hi.Z; cz++)
         for (int cy = lo.Y; cy <= hi.Y; cy++)
         for (int cx = lo.X; cx <= hi.X; cx++)
@@ -392,7 +392,7 @@ public class ChunkVolume
     }
 
     /// <summary>True if the chunk's boundary layer on side <paramref name="face"/> (0=-X, 1=+X, 2=-Y, 3=+Y, 4=-Z,
-    /// 5=+Z) contains any solid block, in the mesher's sense (<see cref="BlockDef.IsFullCube"/>).</summary>
+    /// 5=+Z) contains any block that can hide a neighbour's face (<see cref="BlockDef.HidesFaces"/>).</summary>
     public static bool FaceHasSolid(ChunkData data, int face)
     {
         int s = ChunkData.Size, layer = (face & 1) == 0 ? 0 : s - 1;
@@ -405,7 +405,7 @@ public class ChunkVolume
                 1 => data.Get(a, layer, b),
                 _ => data.Get(a, b, layer),
             };
-            if (BlockRegistry.Get(id).IsFullCube) return true;
+            if (BlockRegistry.Get(id).HidesFaces) return true;
         }
         return false;
     }

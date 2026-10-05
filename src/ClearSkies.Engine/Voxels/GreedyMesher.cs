@@ -16,6 +16,9 @@ namespace ClearSkies.Engine.Voxels;
 /// in the fragment shader, which samples the chunk light buffer at the air-side voxel using the
 /// interpolated chunk-local position and the face normal — so a merged quad no longer needs per-cell
 /// light in its merge key.
+///
+/// A face is hidden by a neighbour that <see cref="BlockDef.HidesFaceOf"/> it: an opaque cube, or an
+/// <see cref="BlockDef.OpaqueModel"/> block, whose model covers it.
 /// </summary>
 public sealed class GreedyMesher
 {
@@ -107,7 +110,7 @@ public sealed class GreedyMesher
                         adjId = GetBlock(chunk, face, adjSlice, u, v);
                     }
 
-                    if (!BlockRegistry.Get(adjId).IsFullCube)
+                    if (!BlockRegistry.Get(adjId).HidesFaceOf(blockId))
                     {
                         // Only look up this voxel's orientation (and classify this face's role) for block
                         // types whose Top/Bottom textures actually depend on it — every other block keeps
