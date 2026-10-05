@@ -69,7 +69,7 @@ public sealed class SupportSystem : ISystem, IDebugUiSystem
             {
                 // Its body isn't here yet (a ship's copy arriving with the player on it, just as a client joins): kept a
                 // while, riding along where they were on it, so the copy carries them on once it's placed
-                // (FollowerSystem) rather than leaving them behind as it moves off.
+                // (RemoteBodyProxySystem) rather than leaving them behind as it moves off.
                 support.TimeAway += dt;
                 if (support.TimeAway > ReleaseSeconds) Release(ref support);
                 else if (support.Supporter.Has<Transform>())

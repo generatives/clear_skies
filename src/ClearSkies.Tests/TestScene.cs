@@ -88,7 +88,7 @@ public sealed class HeadlessScene : IDisposable
         _tick.Add(new ClearSkies.Net.Sync.BodySync(net, World, Physics));
         RemoteBodies = new ClearSkies.Net.Sync.RemoteBodySystem(World, Registry, Clock);
         _tick.Insert(_tick.FindIndex(s => s is PhysicsTransformSyncSystem) + 1, RemoteBodies);
-        _tick.Insert(_tick.IndexOf(Physics), new ClearSkies.Net.Sync.FollowerSystem(World, Physics, RemoteBodies));
+        _tick.Insert(_tick.IndexOf(Physics), new ClearSkies.Net.Sync.RemoteBodyProxySystem(World, Physics, RemoteBodies));
         // A client predicts its own player, from the input a test puts on it, before movement (as the game's input
         // sample does).
         if (net is ClearSkies.Net.Session.ClientSession client)
