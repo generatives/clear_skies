@@ -28,10 +28,9 @@ namespace ClearSkies.Engine.ECS;
 /// budget is full, the queue stops; and if the next queued column is nearer (to its nearest interest) than the farthest
 /// loaded one, the farthest is unloaded to make room. So the loaded world is always what's nearest an interest that fits.
 ///
-/// The fog (see <see cref="FogDistance"/>) sits at the nearest column still queued or loading, or holding a chunk that
-/// is loaded but not drawn yet (not in the GPU store or not meshed), or else at the view distance: an island only
-/// partly loaded fades out where loading stopped instead of ending in a hard edge, and chunks appear behind the fog
-/// rather than popping in in front of it. It follows the first interest with a draw radius (the local player's view).
+/// What's on its way is in the ECS for other systems (the fog, see <see cref="FogSystem"/>): each column queued or
+/// loading is an entity with <see cref="TerrainColumnLoading"/> until its chunks are added, and each interest gets
+/// <see cref="TerrainScanned"/>, how far around it every wanted column is known (queued, loading or loaded).
 /// </summary>
 public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 {
@@ -74,16 +73,18 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     private readonly Dictionary<int, (short dx, short dz, int d)[]> _offsetsByDistance = new();
     private readonly float _viewDistance; // the farthest anything is drawn
 
-    /// <summary>An interest as streaming sees it: the column it's streamed around, and its load and draw radii in
-    /// columns (draw 0: not drawn).</summary>
-    private readonly record struct Ring((int x, int z) Column, int LoadColumns, int DrawColumns);
+    /// <summary>An interest as streaming sees it: its entity, the column it's streamed around, and its load radius in
+    /// columns.</summary>
+    private readonly record struct Ring(Entity Interest, (int x, int z) Column, int LoadColumns);
 
     private readonly List<Ring> _rings = new();   // as of the last rebuild
     private readonly List<Ring> _current = new(); // this frame's
     private readonly Dictionary<Entity, (int x, int z)> _interestColumns = new();
     private readonly HashSet<Entity> _seen = new();
-    private Vector3D<float>? _fogCentre; // the first drawn interest's position
-    private float _fogRadius;
+    private readonly World _world;
+
+    /// <summary>The entity standing for each column queued or loading (see <see cref="TerrainColumnLoading"/>).</summary>
+    private readonly Dictionary<(int x, int z), Entity> _loading = new();
 
     /// <summary>Per wanted column (layer bits): what the generator may fill, and what turned out to be air. Dropped
     /// once the column is no longer wanted, so returning re-learns its air.</summary>
@@ -135,16 +136,8 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     private bool _full;
     private int _evictions;
 
-    private float _fogDistance;
-    private float _fogTarget;
-    // Chunks loaded but perhaps not drawn yet: until each is uploaded to the GPU store and meshed, the fog stays short of it.
-    private readonly List<ChunkPosition> _undrawn = new();
 
     private readonly List<ChunkPosition> _toUnload = new();
-
-    /// <summary>Horizontal distance from the centre at which the loaded world stops: the nearest chunk column still
-    /// queued or loading, or else the view distance, eased over time. Fog should be total by here.</summary>
-    public float FogDistance => _fogDistance;
 
     /// <param name="budget">What limits what's loaded.</param>
     /// <param name="viewDistance">The farthest out chunks are streamed to be drawn, in blocks (horizontally): an interest's
@@ -159,6 +152,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
                            float viewDistance, int minChunkY, IChunkStore chunkStore, IChunkPreparer? preparer = null)
     {
         _chunkStore = chunkStore;
+        _world = world;
 
         _interests    = world.GetEntities().With<Transform>().With<TerrainInterest>().AsSet();
         _staticVolume = staticVolume;
@@ -198,7 +192,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         ImGui.Text($"Budget: {_loadBudget.Describe(_staticVolume)}" + (_full ? " (full)" : ""));
         ImGui.Text($"Loaded: {_staticVolume.LoadedCount:N0} chunks   Queued columns: {_queue.Count - _queueHead}" +
                    $"{(_queueTruncated ? "+" : "")}   In flight: {_inFlight.Count}");
-        ImGui.Text($"Fog distance: {_fogDistance:F0} (target {_fogTarget:F0})   Columns evicted: {_evictions}");
+        ImGui.Text($"Columns evicted: {_evictions}");
         ImGui.Text($"Saved chunks: {_saved.Count}   Layers: {_minY}..{_minY + 63}");
 
         ImGui.Separator();
@@ -206,10 +200,9 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     }
 
     // CPU time of each step, for the debug panel: which one a hitch while streaming came from.
-    private const int ApplyStep = 0, UnloadStep = 1, QueueStep = 2, DispatchStep = 3, EvictStep = 4, FogStep = 5,
-                      EvictOrderStep = 6;
+    private const int ApplyStep = 0, UnloadStep = 1, QueueStep = 2, DispatchStep = 3, EvictStep = 4, EvictOrderStep = 5;
     private readonly StepTimer _steps = new("Adding finished columns", "Rebuild: unloading what's unwanted",
-                                            "Rebuild: queueing columns", "Dispatching jobs", "Evicting far columns", "Fog",
+                                            "Rebuild: queueing columns", "Dispatching jobs", "Evicting far columns",
                                             "Evicting: ordering columns") { Owner = "Chunk Loading" };
 
     public void Update(float dt)
@@ -244,12 +237,9 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
                     continue;
                 }
                 // Dropped if the interests moved on while it generated, or an edit created the chunk meanwhile.
-                if (Wanted(pos.X, pos.Z) && !_staticVolume.IsLoaded(pos))
-                {
-                    _staticVolume.AddChunk(pos, data, prepared);
-                    if (Drawn(pos.X, pos.Z)) _undrawn.Add(pos);
-                }
+                if (Wanted(pos.X, pos.Z) && !_staticVolume.IsLoaded(pos)) _staticVolume.AddChunk(pos, data, prepared);
             }
+            Loaded(job.Column);
         }
         _steps.Lap(ApplyStep);
 
@@ -258,32 +248,27 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 
         Dispatch();
         _steps.Lap(DispatchStep);
-        if (_fogCentre is { } centre) UpdateFog(centre, dt);
-        _steps.Lap(FogStep);
     }
 
     /// <summary>This frame's interests as rings (<see cref="_current"/>, in a fixed order so a frame where none moved
-    /// compares equal to the last rebuild's), and the fog's centre.</summary>
+    /// compares equal to the last rebuild's).</summary>
     private void GatherRings()
     {
         _current.Clear();
         _seen.Clear();
-        _fogCentre = null;
         foreach (ref readonly Entity e in _interests.GetEntities())
         {
             var interest = e.Get<TerrainInterest>();
             var position = e.Get<Transform>().Position;
             float draw = MathF.Min(interest.DrawRadius, _viewDistance);
-            int drawColumns = draw > 0 ? (int)MathF.Ceiling(draw / S) : 0;
             int loadColumns = (int)MathF.Ceiling(MathF.Max(interest.ColliderRadius, draw) / S);
-            _current.Add(new Ring(InterestColumn(e, position), loadColumns, drawColumns));
+            _current.Add(new Ring(e, InterestColumn(e, position), loadColumns));
             _seen.Add(e);
-            if (drawColumns > 0 && _fogCentre is null) (_fogCentre, _fogRadius) = (position, draw);
         }
         if (_interestColumns.Count > _seen.Count)
             foreach (var gone in _interestColumns.Keys.Where(k => !_seen.Contains(k)).ToList()) _interestColumns.Remove(gone);
-        _current.Sort((a, b) => (a.Column.x, a.Column.z, a.LoadColumns, a.DrawColumns)
-                                .CompareTo((b.Column.x, b.Column.z, b.LoadColumns, b.DrawColumns)));
+        _current.Sort((a, b) => (a.Column.x, a.Column.z, a.LoadColumns, a.Interest.GetHashCode())
+                                .CompareTo((b.Column.x, b.Column.z, b.LoadColumns, b.Interest.GetHashCode())));
     }
 
     /// <summary>How many times the queue has been rebuilt (the view moved, or loading caught up).</summary>
@@ -315,6 +300,10 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         foreach (var key in _columns.Keys)
             if (!Wanted(key.x, key.z)) _columnsUnwanted.Add(key);
         foreach (var key in _columnsUnwanted) _columns.Remove(key);
+        _columnsUnwanted.Clear();
+        foreach (var key in _loading.Keys)
+            if (!Wanted(key.x, key.z)) _columnsUnwanted.Add(key);
+        foreach (var key in _columnsUnwanted) Loaded(key);
         _steps.Lap(UnloadStep);
 
         _queue.Clear();
@@ -325,6 +314,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         _scanOffsets = _rings.Select(r => OffsetsByDistance(r.LoadColumns)).ToArray();
         _scanAt = new int[_rings.Count];
         _scanDone = false;
+        PublishScanned();
         _steps.Lap(QueueStep);
     }
 
@@ -346,7 +336,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         while (true)
         {
             // Checked every column: one seen for the first time asks the generator for its layers, which isn't cheap.
-            if (_steps.SinceLap() - start >= budgetMs) return;
+            if (_steps.SinceLap() - start >= budgetMs) { PublishScanned(); return; }
             int next = 0;
             for (int i = 1; i < _scanOffsets.Length; i++)
                 if (_scanAt[i] < _scanOffsets[i].Length &&
@@ -358,11 +348,13 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
             if (_rings.Count > 1 && !NearestRing(next, x, z, d)) continue; // another ring's
             if (HasMissing(x, z))
             {
-                if (_queue.Count == MaxQueued) { _queueTruncated = true; break; }
+                if (_queue.Count == MaxQueued) { _queueTruncated = true; _scanAt[next]--; break; }
                 _queue.Add((x, z));
+                Loading((x, z));
             }
         }
         _scanDone = true;
+        PublishScanned();
         Console.WriteLine($"[load] rebuild: queued {_queue.Count}{(_queueTruncated ? "+" : "")} columns around {_rings.Count} " +
                           $"interests, loaded {_staticVolume.LoadedCount} chunks ({_loadBudget.Describe(_staticVolume)}), " +
                           $"unloaded {_toUnload.Count}, evicted {_evictions} columns so far");
@@ -386,6 +378,36 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         return _interestColumns[e] = column;
     }
 
+    /// <summary>Gives each interest <see cref="TerrainScanned"/>: how far around it the scan has looked, short of the
+    /// first column it hasn't (or all of its load radius once it's looked at everything).</summary>
+    private void PublishScanned()
+    {
+        for (int i = 0; i < _rings.Count; i++)
+        {
+            var e = _rings[i].Interest;
+            if (!e.IsAlive) continue;
+            var offsets = _scanOffsets[i];
+            float radius = _scanAt[i] >= offsets.Length ? float.PositiveInfinity
+                         : MathF.Max(0f, (MathF.Sqrt(offsets[_scanAt[i]].d) - 1f) * S);
+            if (!e.Has<TerrainScanned>() || e.Get<TerrainScanned>().Radius != radius) e.Set(new TerrainScanned { Radius = radius });
+        }
+    }
+
+    /// <summary>Column (x, z) is queued: it has an entity saying so (<see cref="TerrainColumnLoading"/>).</summary>
+    private void Loading((int x, int z) col)
+    {
+        if (_loading.ContainsKey(col)) return;
+        var e = _world.CreateEntity();
+        e.Set(new TerrainColumnLoading { X = col.x, Z = col.z });
+        _loading[col] = e;
+    }
+
+    /// <summary>Column (x, z) has loaded, or is no longer wanted, or had nothing to load: its entity goes.</summary>
+    private void Loaded((int x, int z) col)
+    {
+        if (_loading.Remove(col, out var e) && e.IsAlive) e.Dispose();
+    }
+
     /// <summary>Whether ring <paramref name="ring"/>, <paramref name="distSq"/> from column (x, z), is the nearest ring
     /// that wants it (the first, of rings as near), so it's scanned once.</summary>
     private bool NearestRing(int ring, int x, int z, long distSq)
@@ -404,14 +426,6 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     {
         foreach (var ring in _rings)
             if (Sq(x - ring.Column.x) + Sq(z - ring.Column.z) <= Sq(ring.LoadColumns)) return true;
-        return false;
-    }
-
-    /// <summary>Within an interest's draw radius.</summary>
-    private bool Drawn(int x, int z)
-    {
-        foreach (var ring in _rings)
-            if (ring.DrawColumns > 0 && Sq(x - ring.Column.x) + Sq(z - ring.Column.z) <= Sq(ring.DrawColumns)) return true;
         return false;
     }
 
@@ -463,7 +477,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
             var col = _queue[_queueHead];
             if (_inFlight.ContainsKey(col)) { _skippedInFlight = true; _queueHead++; continue; } // re-queued by the next rebuild
             var work = Missing(col.x, col.z);
-            if (work.Count == 0) { _queueHead++; continue; }
+            if (work.Count == 0) { _queueHead++; Loaded(col); continue; }
 
             int adding = _inFlightChunks + work.Count;
             if (!_loadBudget.HasRoomFor(_staticVolume, adding))
@@ -605,62 +619,6 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
             if (!_staticVolume.IsLoaded(p)) missing.Add((p, _saved.Contains(p)));
         }
         return missing;
-    }
-
-    /// <summary>Eases <see cref="FogDistance"/> toward the nearest column still queued or loading, or else the draw
-    /// radius (everything nearer is loaded): in fast, so a gap is covered before it shows, out slowly, so the view
-    /// opens up gently as loading catches up.</summary>
-    private void UpdateFog(Vector3D<float> centre, float dt)
-    {
-        // The queue is closest to any interest first, not to this one: every column still queued counts. While a
-        // rebuild's scan is still going, the nearest column it will find missing is known only up to where it has
-        // looked, so the target doesn't open up until it's done (it only moved by a column).
-        float target = _scanDone ? _fogRadius : _fogTarget;
-        for (int i = _queueHead; i < _queue.Count; i++) target = MathF.Min(target, ColumnDistance(centre, _queue[i].x, _queue[i].z));
-        foreach (var (x, z) in _inFlight.Keys) target = MathF.Min(target, ColumnDistance(centre, x, z));
-        PruneUndrawn();
-        target = MathF.Min(target, NearestUndrawn(centre));
-        _fogTarget = target;
-
-        float rate = target < _fogDistance ? 8f : 1f;
-        _fogDistance += (target - _fogDistance) * (1f - MathF.Exp(-rate * dt));
-        SkySettings.SetFogDistance(_fogDistance);
-    }
-
-    /// <summary>Forgets the chunks in <see cref="_undrawn"/> that no longer hold the fog back: drawn now (uploaded to
-    /// the GPU store and meshed) or unloaded. Whether a chunk is in the rendering layer isn't asked: a new chunk only
-    /// gets <see cref="Rendered"/> later in the frame (EntityPresenceSystem), and every drawn chunk gets it.</summary>
-    private void PruneUndrawn()
-    {
-        for (int i = _undrawn.Count - 1; i >= 0; i--)
-        {
-            if (!IsUndrawn(_undrawn[i]))
-            {
-                _undrawn[i] = _undrawn[^1];
-                _undrawn.RemoveAt(_undrawn.Count - 1);
-            }
-        }
-    }
-
-    private bool IsUndrawn(ChunkPosition pos)
-        => _staticVolume.GetEntry(pos)?.Entity is { IsAlive: true } e
-           && (e.Has<NeedsGpuUploadFlag>() || e.Has<NeedsRemeshFlag>());
-
-    /// <summary>The distance to the nearest chunk in <see cref="_undrawn"/> (infinity if none): call
-    /// <see cref="PruneUndrawn"/> first.</summary>
-    private float NearestUndrawn(Vector3D<float> centre)
-    {
-        float nearest = float.PositiveInfinity;
-        foreach (var pos in _undrawn) nearest = MathF.Min(nearest, ColumnDistance(centre, pos.X, pos.Z));
-        return nearest;
-    }
-
-    /// <summary>Horizontal distance from the centre to the nearest point of chunk column (x, z).</summary>
-    private static float ColumnDistance(Vector3D<float> cam, int x, int z)
-    {
-        float dx = MathF.Max(0f, MathF.Abs(cam.X - (x * S + S * 0.5f)) - S * 0.5f);
-        float dz = MathF.Max(0f, MathF.Abs(cam.Z - (z * S + S * 0.5f)) - S * 0.5f);
-        return MathF.Sqrt(dx * dx + dz * dz);
     }
 
     public void Unload(ChunkPosition pos)
