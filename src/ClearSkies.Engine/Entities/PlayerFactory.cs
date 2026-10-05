@@ -11,40 +11,48 @@ using Silk.NET.Maths;
 namespace ClearSkies.Engine.Entities;
 
 /// <summary>Builds player entities from descriptions: a construction helper for SpawnPlayerHandler, the only caller.
-/// Local and remote players alike get a character body; only the local one gets input and the camera.</summary>
+/// A player has a character body where they're simulated (their owner, the host) and where they're played (their
+/// controller, which predicts them); input wherever either is, and the camera only where they're played.</summary>
 public static class PlayerFactory
 {
     public const float EyeHeight = 0.7f;
     public const float LookSensitivity = 0.0025f;
 
-    public static Entity Create(World world, PhysicsWorld physics, EntityId id, NetOwner owner, PlayerDescription d)
+    /// <param name="owner">Who simulates them: the host.</param>
+    /// <param name="controllingPeer">Whose input drives them.</param>
+    public static Entity Create(World world, PhysicsWorld physics, EntityId id, NetOwner owner, PeerId controllingPeer, bool controlledHere,
+                                PlayerDescription d)
     {
         var player = world.CreateEntity();
         player.Set(new Transform { Position = PhysicsConv.ToSilk(d.Position), Rotation = Quaternion<float>.Identity, Scale = Vector3D<float>.One });
         player.Set(new MouseLookComponent { LookSensitivity = LookSensitivity });
         player.Set(new FreeFlyController { MoveSpeed = d.FlySpeed });
 
-        // Only the player's own machine simulates their character; everyone else draws them from body sync.
-        if (owner.IsLocal)
+        // Simulated by the host, and predicted by whoever plays them; everyone else draws them from body sync.
+        if (owner.IsLocal || controlledHere)
             player.Set(new CharacterControllerComponent { Character = CreateCharacter(physics, d.Position, player), EyeHeight = EyeHeight });
         player.Set(new Support());
-        player.Set(new Player { Id = d.Id, Name = d.Name, IsLocal = owner.IsLocal });
+        player.Set(new Player { Id = d.Id, Name = d.Name, ControllingPeer = controllingPeer, IsLocal = controlledHere });
         player.Set(id);
         player.Set(owner);
         player.Set<OwnPresence>();
-        if (owner.IsLocal)
+        if (controlledHere)
         {
             player.Set(new InterpolatedTransform { PositionOnly = true }); // moved by ticks, turned per frame by mouse-look
             player.Set<LocalPlayer>();
             player.Set(new PlayerInput()); // filled each tick by InputSampleSystem
         }
-        else player.Set(new InterpolatedTransform()); // moved and turned each tick by their snapshots
+        else
+        {
+            // Moved and turned each tick: by their snapshots, or, simulated here, by their input as it arrives.
+            player.Set(new InterpolatedTransform());
+            if (owner.IsLocal) player.Set(new PlayerInput()); // filled each tick from their machine's (ClearSkies.Net's RemoteInputs)
+        }
         Fill(player, d);
         return player;
     }
 
-    /// <summary>A player's character body at <paramref name="position"/>: the local player's, and the copies of other
-    /// players that stand on ships here (see FollowerSystem), so both press on a deck alike.</summary>
+    /// <summary>A player's character body at <paramref name="position"/>.</summary>
     public static PlayerCharacter CreateCharacter(PhysicsWorld physics, Vector3 position, Entity entity) =>
         new(physics.Characters, position, new Capsule(radius: 0.3f, length: 1.0f),
             // Light (two Wood blocks' worth): the character pushes off the deck it walks on as hard as it pushes

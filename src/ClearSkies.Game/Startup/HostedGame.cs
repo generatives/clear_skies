@@ -40,8 +40,9 @@ internal static class HostedGame
         host.AddSystem(view.InputSample, SystemStage.Input);
 
         // Each 1/60 s tick (0 or more a frame, see TickClock). First everything that arrived (commands, events,
-        // snapshots, session messages), the hierarchy, the frame's input as the local player's PlayerInput (tick systems
-        // read only that), and the save's streaming and autosave.
+        // snapshots, session messages, and other players' input, which the session hands each of them as their
+        // PlayerInput), the hierarchy, the frame's input as the local player's PlayerInput (tick systems read only that),
+        // and the save's streaming and autosave.
         host.AddSystem(net, SystemStage.Simulation);
         host.AddSystem(world.Hierarchy, SystemStage.Simulation);
         host.AddSystem(view.InputSample, SystemStage.Simulation);
@@ -62,12 +63,12 @@ internal static class HostedGame
         host.AddSystem(wheels, SystemStage.Simulation);
         host.AddSystem(world.Flight, SystemStage.Simulation); // impulses before the physics step, integrated this same tick
         host.AddSystem(world.CreatePresence(), SystemStage.Simulation);
-        // Physics copies of bodies owned elsewhere (kinematic ships near the local player, servo copies of other
-        // players), placed before the step, once the presence system has decided which copies exist.
+        // Physics copies of ships simulated elsewhere (kinematic, near the local player), placed before the step, once the
+        // presence system has decided which copies exist.
         host.AddSystem(new FollowerSystem(host.World, host.Physics, world.RemoteBodies), SystemStage.Simulation);
         host.AddSystem(host.Physics, SystemStage.Simulation); // one step
         host.AddSystem(new PhysicsTransformSyncSystem(host.World, host.Physics), SystemStage.Simulation); // body poses -> Transform
-        host.AddSystem(world.RemoteBodies, SystemStage.Simulation); // bodies owned elsewhere -> Transform, about 100 ms behind
+        host.AddSystem(world.RemoteBodies, SystemStage.Simulation); // ships and players simulated elsewhere -> Transform, about 100 ms behind
         host.AddSystem(world.Hierarchy, SystemStage.Simulation); // e.g. volume Transforms -> chunk Transforms
         host.AddSystem(new SupportSystem(host.World, host.Physics), SystemStage.Simulation); // what each character stands on or rides with
         host.AddSystem(world.Interpolation, SystemStage.Simulation); // records this tick's poses

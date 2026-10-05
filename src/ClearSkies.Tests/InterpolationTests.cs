@@ -71,14 +71,14 @@ public class InterpolationTests
         Assert.True(seen.Has<InterpolatedTransform>());
     }
 
-    /// <summary>A player too far off for this machine to give them a physics copy is still placed and drawn from their
-    /// snapshots, as smoothly as one nearby.</summary>
+    /// <summary>A player far off, with no physics here, is placed and drawn from their snapshots as smoothly as one
+    /// nearby.</summary>
     [Fact]
     public void AFarOffRemoteBodyWithNoPhysicsCopyIsDrawnSteadily()
     {
         var (game, mover, seen) = Watch(0);
         using var _ = game;
-        const float far = 2000f; // beyond the load window, where other players get physics copies
+        const float far = 2000f; // far from everyone else
         void StepFar()
         {
             game.Network.ManualTime += 1000.0 / 60.0;
@@ -87,7 +87,6 @@ public class InterpolationTests
             foreach (var (scene, _) in game.Clients) scene.Tick();
         }
         for (int i = 0; i < 120; i++) StepFar();
-        Assert.False(seen.Has<ClearSkies.Net.Sync.FollowerCharacter>());
         float last = seen.DrawnPose().Position.X;
         for (int i = 0; i < 60; i++)
         {
@@ -137,8 +136,7 @@ public class InterpolationTests
         game.Tick(2);
         var (client, _) = game.Join("walker");
         var clientPlayer = client.World.GetEntities().With<LocalPlayer>().AsEnumerable().Single();
-        Players.SetFreeFlying(clientPlayer, false);
-        clientPlayer.Get<CharacterControllerComponent>().Character.TeleportTo(new Vector3(3, 51.4f, 25));
+        CrewTests.PlaceCrew(game, clientPlayer, new Vector3(3, 51.4f, 25));
         game.Tick(60);
         var hostSeen = client.Registry.Find(hostPlayer.Get<EntityId>())!.Value;
         var clientSeen = game.Host.Registry.Find(clientPlayer.Get<EntityId>())!.Value;

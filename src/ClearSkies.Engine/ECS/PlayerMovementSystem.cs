@@ -12,8 +12,9 @@ using PhysVec = System.Numerics.Vector3;
 namespace ClearSkies.Engine.ECS;
 
 /// <summary>
-/// Each tick, before physics: the free-fly/walking toggle (V, sent as a SetMoveMode command, which applies later this
-/// same tick; see <see cref="Players.SetFreeFlying"/>) and per-mode movement, all from the tick's <see cref="PlayerInput"/>. Free-flying moves <see cref="Transform.Position"/> directly
+/// Each tick, before physics: the local player's free-fly/walking toggle (V, sent as a SetMoveMode command, which applies
+/// later this same tick; see <see cref="Players.SetFreeFlying"/>) and every simulated player's movement, all from the tick's
+/// <see cref="PlayerInput"/> (a player played elsewhere toggles with their own SetMoveMode, so only their movement is run here). Free-flying moves <see cref="Transform.Position"/> directly
 /// the way the player looks; E and Q raise and lower its speed by <see cref="FlySpeedStep"/> (Ctrl triples it while
 /// held). Walking instead feeds WASD/Shift/Space into the character's motion goals
 /// (<see cref="PlayerCharacter.UpdateCharacterGoals"/>) — actual movement happens inside the physics step via the
@@ -37,7 +38,7 @@ public sealed class PlayerMovementSystem : ISystem
     public PlayerMovementSystem(World world, CommandSystem? commands = null)
     {
         _commands = commands;
-        _players = world.GetEntities().With<PlayerInput>().With<CharacterControllerComponent>().AsSet();
+        _players = world.GetEntities().With<LocalPlayer>().With<PlayerInput>().With<CharacterControllerComponent>().AsSet();
         _walkers = world.GetEntities()
             .With<Transform>().With<PlayerInput>().With<CharacterControllerComponent>()
             .Without<FreeFlying>().AsSet();

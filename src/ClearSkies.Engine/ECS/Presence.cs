@@ -17,9 +17,6 @@ public enum PhysicsMode : byte
     Simulated,
     /// <summary>A copy of a body simulated elsewhere, moved kinematically to its buffered pose (from N2).</summary>
     KinematicFollower,
-    /// <summary>Another player's copy: a character body like theirs, walked towards its buffered pose, so it stands on
-    /// and pushes ships as they do (from N2).</summary>
-    CharacterFollower,
     /// <summary>A static terrain collider.</summary>
     Static,
 }

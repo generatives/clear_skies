@@ -89,6 +89,10 @@ public sealed class HeadlessScene : IDisposable
         RemoteBodies = new ClearSkies.Net.Sync.RemoteBodySystem(World, Registry, Clock);
         _tick.Insert(_tick.FindIndex(s => s is PhysicsTransformSyncSystem) + 1, RemoteBodies);
         _tick.Insert(_tick.IndexOf(Physics), new ClearSkies.Net.Sync.FollowerSystem(World, Physics, RemoteBodies));
+        // A client predicts its own player, from the input a test puts on it, before movement (as the game's input
+        // sample does).
+        if (net is ClearSkies.Net.Session.ClientSession client)
+            _tick.Insert(_tick.FindIndex(s => s is PlayerMovementSystem), new ClearSkies.Net.Sync.OwnPlayerPrediction(client, World, Registry));
     }
 
     /// <summary>Runs <paramref name="system"/> each tick just before the physics step (e.g. flight).</summary>
