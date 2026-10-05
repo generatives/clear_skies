@@ -19,6 +19,7 @@ namespace ClearSkies.Net.Session;
 /// terrain around it, with colliders, loaded meanwhile by a stand-in interest (all of it drawn for its own player,
 /// colliders only for anything else).</item>
 /// </list>
+/// Its own player also waits for <see cref="LocalReady"/>: on a client, for its clock to settle on the Host's.
 /// A copy that's only drawn here needs nothing but its ship. Nothing waits for ever: a ship that never comes is
 /// forgotten after <see cref="SupportWaitTicks"/> (they spawn where the Host last had them), and terrain after
 /// <see cref="GiveUpTicks"/>.
@@ -62,6 +63,9 @@ public sealed class SpawnQueue
         _terrainReady = terrainReady;
     }
 
+    /// <summary>Whether this machine's own player may spawn yet, besides what it needs (see above).</summary>
+    public Func<bool> LocalReady { get; set; } = () => true;
+
     public int Count => _pending.Count;
     public IReadOnlyList<Pending> All => _pending;
 
@@ -85,8 +89,7 @@ public sealed class SpawnQueue
         {
             p.Anchor = _world.CreateEntity();
             p.Anchor.Set(new Transform { Position = new Vector3D<float>(m.Position.X, m.Position.Y, m.Position.Z), Rotation = Quaternion<float>.Identity, Scale = Vector3D<float>.One });
-            p.Anchor.Set(p.Local ? new TerrainInterest { Radius = 1000, Kind = TerrainInterestKind.Full }
-                                 : new TerrainInterest { Radius = EntityPresenceSystem.ColliderRange, Kind = TerrainInterestKind.CollidersOnly });
+            p.Anchor.Set(new TerrainInterest { ColliderRadius = EntityPresenceSystem.ColliderRange, DrawRadius = p.Local ? 1000 : 0 });
         }
         _pending.Add(p);
     }
@@ -124,6 +127,7 @@ public sealed class SpawnQueue
 
     private bool Ready(Pending p)
     {
+        if (p.Local && !LocalReady()) return false;
         var position = p.Position;
         if (p.Player is { FreeFly: false } d && !d.Support.IsNone)
         {

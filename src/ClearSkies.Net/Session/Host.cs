@@ -55,7 +55,7 @@ public sealed class HostEntity
     public EntityId Support;
     public Vector3 LocalPosition;
     /// <summary>A player: who plays them (None for anything else), and who they are.</summary>
-    public PeerId Controller;
+    public PeerId ControllingPeer;
     public PlayerId Player;
     public string Name = "";
     /// <summary>Spawned on the authority (and so maybe elsewhere).</summary>
@@ -68,7 +68,7 @@ public sealed class HostEntity
     /// tick it's still current, so it can be sent as it is.</summary>
     public uint DescribedTick = uint.MaxValue;
 
-    public bool IsPlayer => Controller != PeerId.None;
+    public bool IsPlayer => ControllingPeer != PeerId.None;
 }
 
 /// <summary>
@@ -227,7 +227,7 @@ public sealed class Host : ISystem, IDisposable
             peer.Peer = id;
             peer.Name = "host";
             var (idFirst, idCount) = _ids.NextBlock();
-            Send(peer.Connection, new Welcome(id, idFirst, idCount, _seed, _clock.Tick, default));
+            Send(peer.Connection, new Welcome(id, idFirst, idCount, _seed, (uint)_clock.Now, default));
             return;
         }
         if (name.Length == 0) { Refuse(peer.Connection, "A player name is needed"); return; }
@@ -247,7 +247,7 @@ public sealed class Host : ISystem, IDisposable
         var character = new HostEntity
         {
             Id = AllocateId(), Kind = CommandIds.SpawnPlayer, Data = DescriptionBytes.Of(description), Position = description.Position,
-            Support = description.Support, LocalPosition = description.LocalPosition, Controller = id, Player = player, Name = name,
+            Support = description.Support, LocalPosition = description.LocalPosition, ControllingPeer = id, Player = player, Name = name,
         };
         _entities[character.Id] = character;
 
@@ -258,7 +258,7 @@ public sealed class Host : ISystem, IDisposable
         peer.ViewCentre = WorldPosition(character);
         peer.ViewRadius = ViewRadius;
         var (first, count) = _ids.NextBlock();
-        Send(peer.Connection, new Welcome(id, first, count, _seed, _clock.Tick, peer.ViewCentre));
+        Send(peer.Connection, new Welcome(id, first, count, _seed, (uint)_clock.Now, peer.ViewCentre));
         Send(Others(peer), new PlayerNotice(true, id, name));
         Console.WriteLine($"[net] {name} joining as {id}");
     }
@@ -286,8 +286,11 @@ public sealed class Host : ISystem, IDisposable
         switch (kind)
         {
             case MessageKind.TimePing:
-                Send(peer.Connection, new TimePong(TimePing.Read(ref r).ClientTimeMs, _clock.Tick, _clock.Alpha), Channel.Unreliable);
+            {
+                double now = _clock.Now; // not Tick: on a frame running several ticks, that's behind real time
+                Send(peer.Connection, new TimePong(TimePing.Read(ref r).ClientTimeMs, (uint)now, (float)(now - Math.Floor(now))), Channel.Unreliable);
                 break;
+            }
             case MessageKind.IdBlockRequest:
             {
                 var (first, count) = _ids.NextBlock();
@@ -528,7 +531,7 @@ public sealed class Host : ISystem, IDisposable
     /// a player played by their machine.</summary>
     private void SendSpawn(HostPeer peer, HostEntity e)
     {
-        var owner = e.IsPlayer ? e.Controller : PeerId.Host;
+        var owner = e.IsPlayer ? e.ControllingPeer : PeerId.Host;
         _writer.Clear();
         new SpawnMessage(e.Id, e.Kind, owner, e.EventNumber, WorldPosition(e), e.Data).Write(_writer);
         _transport.Send(peer.Connection, _writer.Written, Channel.Reliable);

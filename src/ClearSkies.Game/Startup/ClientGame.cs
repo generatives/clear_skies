@@ -102,10 +102,12 @@ public static class ClientGame
         host.AddSystem(world.Interpolation, SystemStage.Frame);
         host.AddSystem(world.Hierarchy, SystemStage.Frame);
         host.AddSystem(world.ChunkLoad, SystemStage.Frame);
+        host.AddSystem(new FogSystem(host.World, world.Options.ViewDistance), SystemStage.Frame); // at the nearest terrain not ready
         // What the player points at and uses, the HUD (crosshair, hotbar), grids saved and loaded, and the debug panels.
         host.AddSystem(new BlockTargetSystem(host.World, input, renderer, world.BlockActions, world.EditLimits), SystemStage.Frame);
         host.AddSystem(new HudUi(view.Ui, input, world.BlockActions, pilot, renderer.Atlas,
                                  Path.Combine(AppContext.BaseDirectory, "Resources", "Icons")), SystemStage.Frame);
+        host.AddSystem(new JoiningScreen(view.Ui, net), SystemStage.Frame); // over everything until our player arrives
         var gridPersistence = new GridPersistenceSystem(host.World, view.Meshes, host.Physics, world.Selection, commands);
         host.AddSystem(gridPersistence, SystemStage.Frame);
         host.AddSystem(new AirshipDebugPanel(pilot, world.Flight, gridPersistence), SystemStage.Frame); // one "Airship" window

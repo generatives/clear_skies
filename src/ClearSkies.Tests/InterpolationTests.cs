@@ -119,7 +119,8 @@ public class InterpolationTests
         double behind = Behind(game, seen);
         _out.WriteLine($"{rough} rough frames of 180; {behind:0.00} ticks behind");
         Assert.True(rough <= 10, $"{rough} rough frames");
-        Assert.InRange(behind, 0, 6);
+        // Not far behind: the clock is still slewing off the hitch, a tick or so of it.
+        Assert.InRange(behind, 0, 7);
     }
 
     /// <summary>Both players walk steadily across a platform, host and client each at 60 fps with a couple of
@@ -172,5 +173,53 @@ public class InterpolationTests
         double slope = path.Sum(p => (p.T - mt) * (p.Z - mz)) / path.Sum(p => (p.T - mt) * (p.T - mt));
         var off = path.Select(p => p.Z - mz - slope * (p.T - mt)).ToList();
         return (float)off.Zip(off.Skip(1), (a, b) => System.Math.Abs(b - a)).Max();
+    }
+}
+
+/// <summary>How a <see cref="SnapshotBuffer"/> takes a stall: the backlog's burst isn't lasting lateness, and a delay
+/// left too long comes down without a jump.</summary>
+public class SnapshotBufferTests
+{
+    private static ClearSkies.Net.Protocol.BodySnapshot At(uint tick) =>
+        new() { Position = new Vector3(tick * 0.1f, 0, 0), Rotation = Quaternion.Identity };
+
+    /// <summary>Snapshots every second tick arriving <paramref name="late"/> ticks after they're taken, up to
+    /// <paramref name="until"/>, the delay following each tick.</summary>
+    private static void Steady(ClearSkies.Net.Sync.SnapshotBuffer buffer, uint from, uint until, double late)
+    {
+        for (uint tick = from; tick <= until; tick++)
+        {
+            if (tick % 2 == 0) buffer.Add(tick, At(tick), tick + late);
+            buffer.UpdateDelay(1);
+        }
+    }
+
+    [Fact]
+    public void ABurstAfterAStallDoesNotRaiseTheDelay()
+    {
+        var buffer = new ClearSkies.Net.Sync.SnapshotBuffer();
+        Steady(buffer, 2, 200, 3);
+        double before = buffer.Delay;
+        // The sender stalled for half a second, then sent what it had caught up on all at once.
+        for (uint tick = 202; tick <= 230; tick += 2) buffer.Add(tick, At(tick), 233);
+        Assert.False(buffer.UpdateDelay(1));
+        Assert.Equal(before, buffer.Delay, 1);
+    }
+
+    [Fact]
+    public void ADelayFarTooLongComesDownWithoutAJump()
+    {
+        var buffer = new ClearSkies.Net.Sync.SnapshotBuffer();
+        Steady(buffer, 2, 100, 20); // a slow patch
+        Assert.InRange(buffer.Delay, 20, 24);
+        double last = buffer.Delay;
+        for (uint tick = 102; tick <= 400; tick++)
+        {
+            if (tick % 2 == 0) buffer.Add(tick, At(tick), tick + 3); // over, and the window forgets it
+            Assert.False(buffer.UpdateDelay(1));
+            Assert.True(last - buffer.Delay <= ClearSkies.Net.Sync.SnapshotBuffer.MaxCatchUp + 1e-9, $"fell {last - buffer.Delay:F2} at {tick}");
+            last = buffer.Delay;
+        }
+        Assert.InRange(buffer.Delay, 5.5, 5.5 + ClearSkies.Net.Sync.SnapshotBuffer.Slack); // back near what's needed (5.5)
     }
 }

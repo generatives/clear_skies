@@ -18,11 +18,14 @@ namespace ClearSkies.Net.Sync;
 /// <item>Where the last tick left the player is recorded under that tick's input number.</item>
 /// <item>If the host has said where its simulation left them (a snapshot with the number of the last of their inputs it
 /// applied, <see cref="SnapshotFlags.HasInput"/>), that's compared with what was recorded for the same input. Any
-/// difference, beyond <see cref="Tolerance"/>, is how far the prediction went wrong: the player is moved by it now, and
+/// difference, beyond <see cref="Tolerance"/>, is how far the prediction went wrong: the player is moved by it now (and
+/// drawn easing over, <see cref="InterpolatedTransform.Smooth"/>), and
 /// so is every later record, since they all carry the same mistake. Positions are compared in the space of what the
 /// player stands on (a ship's, or the world's), where a ship's own motion, which the two machines see at different
 /// times, doesn't count.</item>
-/// <item>This tick's input is numbered and sent to the host, with the few before it (<see cref="PlayerInputMessage"/>).</item>
+/// <item>This tick's input is numbered and sent to the host, with the few before it (<see cref="PlayerInputMessage"/>).
+/// If the last one landed the player on a ship, it says where on it (<see cref="InputSample.Landed"/>): the ship here is
+/// where the host had it a moment ago, so on its own the host would have them come down somewhere else on its deck.</item>
 /// </list>
 /// The host runs the same inputs in the same order (<see cref="RemoteInputs"/>), so the two agree unless the world
 /// differed: a ship seen at another moment, another player in the way, a stall.
@@ -36,6 +39,9 @@ public sealed class OwnPlayerPrediction : ISystem
     /// <summary>Velocity errors in the air smaller than this (m/s) are left alone. On the ground none are corrected: the
     /// character controller closes them itself within a tick or two.</summary>
     public const float VelocityTolerance = 0.5f;
+    /// <summary>Answers in a row that may say the player stands on something else than recorded before that's
+    /// corrected: a landing reaches each machine a tick or two apart, and settles itself.</summary>
+    public const int SupportMismatchAnswers = 30;
 
     /// <summary>Where a tick's input left the player: on <see cref="Support"/> (its space) or in the world.</summary>
     private struct Record
@@ -58,6 +64,9 @@ public sealed class OwnPlayerPrediction : ISystem
     private uint _input;
     private BodySnapshot? _answer;
     private uint _lastAnswer;
+    private int _supportMismatches;
+    private int _modeMismatches;
+    private uint _landedOn; // the last input that landed the player on a ship, which the next one tells the host
 
     public OwnPlayerPrediction(Participant net, World world, EntityRegistry registry)
     {
@@ -86,20 +95,39 @@ public sealed class OwnPlayerPrediction : ISystem
     {
         foreach (ref readonly var e in _local.GetEntities())
         {
-            if (_input > 0) _history[_input % HistoryLength] = Capture(e, _input);
+            var landing = _input > 0 ? Remember(e) : null;
             if (_answer is { } answer)
             {
                 _answer = null;
                 Correct(e, answer);
             }
-            Send(e.Get<EntityId>(), e.Get<PlayerInput>());
+            Send(e.Get<EntityId>(), e.Get<PlayerInput>(), landing);
             return; // one local player
         }
     }
 
-    private void Send(EntityId player, in PlayerInput input)
+    /// <summary>Records where the last input left the player. If it landed them on something new, returns that record,
+    /// which the next input tells the host.</summary>
+    private Record? Remember(Entity e)
     {
-        var sample = new InputSample(++_input, input.Held, input.Pressed, input.Yaw, input.Pitch);
+        var before = _history[(_input - 1) % HistoryLength];
+        var now = _history[_input % HistoryLength] = Capture(e, _input);
+        if (!Landed(before, now)) return null;
+        _landedOn = _input;
+        return now;
+    }
+
+    /// <summary>Whether the player came to stand on something they weren't on the input before.</summary>
+    private bool Landed(in Record before, in Record now)
+    {
+        bool hadBefore = _input > 1 && before.Input == _input - 1; // (the first input has none: the host placed them)
+        return hadBefore && now.Grounded && !now.Support.IsNone && now.Support != before.Support;
+    }
+
+    private void Send(EntityId player, in PlayerInput input, Record? landing)
+    {
+        var sample = new InputSample(++_input, input.Held, input.Pressed, input.Yaw, input.Pitch,
+                                     landing?.Support ?? default, landing?.Position ?? default, landing?.Velocity ?? default);
         if (_sentCount == _sent.Length) Array.Copy(_sent, 1, _sent, 0, --_sentCount);
         _sent[_sentCount++] = sample;
         _net.SendInput(new PlayerInputMessage(player, _sent[.._sentCount]));
@@ -128,22 +156,43 @@ public sealed class OwnPlayerPrediction : ISystem
     /// with them.</summary>
     private void Correct(Entity e, in BodySnapshot answer)
     {
+        // Up to the input that landed on a ship, the host had them where it did itself: the next input puts them where
+        // they landed here.
+        if (answer.Input <= _landedOn) return;
         ref var predicted = ref _history[answer.Input % HistoryLength];
         if (predicted.Input != answer.Input) return; // too old, or never recorded
         bool flying = (answer.Flags & SnapshotFlags.FreeFlying) != 0;
-        if (predicted.FreeFlying != flying) return; // switching between walking and flying: the command settles it
+        // Walking or flying: each machine switches on the same input (V), so they differ only if that input was lost on
+        // the way; then the host's word goes.
+        if (predicted.FreeFlying != flying)
+        {
+            if (++_modeMismatches >= SupportMismatchAnswers)
+            {
+                _modeMismatches = 0;
+                Players.SetFreeFlying(e, flying);
+            }
+            return;
+        }
+        _modeMismatches = 0;
 
         // How far off, in the space of what they stood on (or the world's), and that in world space now.
         Vector3 error;
         Vector3 worldError;
         if (predicted.Support == answer.Support)
         {
+            _supportMismatches = 0;
             error = answer.Position - predicted.Position;
+            // Standing on something, their height on it is the character controller's, here as there: moved up or down
+            // they'd be pushed back onto it, while the later records kept the move, so the next answer would say they
+            // were off the other way, and so on, a bounce that feeds itself.
+            if (predicted.Grounded && !flying) error.Y = 0;
             worldError = Vector3.Transform(error, RotationOf(answer.Support));
         }
         else
         {
-            // They stood on different things (one landed a tick before the other): compare where both are now.
+            // They stood on different things: one landed a tick before the other, which settles itself. Compared where
+            // both are now, a moving ship would count its motion since the record as error, so only if it lasts.
+            if (++_supportMismatches < SupportMismatchAnswers) return;
             error = default;
             worldError = ToWorld(answer.Support, answer.Position) - ToWorld(predicted.Support, predicted.Position);
         }
@@ -156,7 +205,9 @@ public sealed class OwnPlayerPrediction : ISystem
         if (move)
         {
             ref var t = ref e.Get<Transform>();
-            t.Position += new Vector3D<float>(worldError.X, worldError.Y, worldError.Z);
+            var by = new Vector3D<float>(worldError.X, worldError.Y, worldError.Z);
+            t.Position += by;
+            if (e.Has<InterpolatedTransform>()) e.Get<InterpolatedTransform>().Smooth(by); // eased out, not a pop
             if (!flying && e.Has<CharacterControllerComponent>()) e.Get<CharacterControllerComponent>().Character.MoveBy(worldError);
             LastCorrection = worldError.Length();
             LargestCorrection = MathF.Max(LargestCorrection, LastCorrection);

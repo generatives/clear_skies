@@ -16,15 +16,15 @@ namespace ClearSkies.Engine.ECS;
 /// Grids and players:
 /// <list type="bullet">
 /// <item>Owned here, or the local player (simulated here to predict them): simulated, drawn within render distance,
-/// terrain interest around it (the local player's is <see cref="TerrainInterestKind.Full"/>, anything else's colliders
-/// only).</item>
+/// terrain interest around it (colliders within <see cref="ColliderRange"/>, and for the local player, drawn out to the
+/// view distance).</item>
 /// <item>Another player simulated elsewhere: drawn within render distance.</item>
 /// <item>A grid owned elsewhere near the local player: a kinematic follower, drawn.</item>
 /// <item>Anything else: drawn within render distance, nothing more.</item>
 /// </list>
 /// Terrain chunks (children of the world volume, each with its own <see cref="OwnPresence"/>): static colliders within
-/// <see cref="ColliderRange"/> of any terrain interest (dropped past <see cref="ColliderDropRange"/>), and drawn within
-/// the local player's view distance.
+/// any terrain interest's <see cref="TerrainInterest.ColliderRadius"/> (dropped <see cref="ColliderDropSlack"/> past it),
+/// and drawn within any interest's <see cref="TerrainInterest.DrawRadius"/>.
 ///
 /// Everything else (a grid's chunks and block entities) inherits <see cref="Rendered"/> from its nearest ancestor with
 /// <see cref="OwnPresence"/>: when this system changes it, it's carried down; a child attached later takes it in
@@ -32,11 +32,12 @@ namespace ClearSkies.Engine.ECS;
 /// </summary>
 public sealed class EntityPresenceSystem : ISystem, IDebugUiSystem
 {
-    /// <summary>Terrain colliders are built within this distance of any terrain interest...</summary>
+    /// <summary>The collider radius of the terrain interests this system gives: terrain colliders are built within
+    /// this distance of a body simulated here...</summary>
     public const float ColliderRange = 192f;
 
-    /// <summary>...and dropped past this one.</summary>
-    public const float ColliderDropRange = 256f;
+    /// <summary>...and dropped this much further out than an interest's collider radius.</summary>
+    public const float ColliderDropSlack = 64f;
 
     /// <summary>Hysteresis on distance rules: a layer added within distance d is removed only past d × this.</summary>
     public const float Hysteresis = 1.1f;
@@ -51,9 +52,9 @@ public sealed class EntityPresenceSystem : ISystem, IDebugUiSystem
     private readonly EntitySet _terrainColliders;
     private readonly EntitySet _interests;
     private readonly EntitySet _localPlayers;
-    private readonly List<Vector3> _centres = new();
+    private readonly List<(Vector3 Position, TerrainInterest Interest)> _centres = new();
     private readonly List<Entity> _scratch = new();
-    private readonly (int dx, int dy, int dz)[] _rangeOffsets;
+    private readonly Dictionary<int, (int dx, int dy, int dz)[]> _rangeOffsets = new(); // by radius in chunks
     private int _sweep;
 
     /// <param name="viewDistance">How far (horizontally) the local player's terrain is drawn.</param>
@@ -67,11 +68,6 @@ public sealed class EntityPresenceSystem : ISystem, IDebugUiSystem
         _terrainColliders = world.GetEntities().With<Chunk>().With<PhysicsPresence>().With<OwnPresence>().AsSet();
         _interests = world.GetEntities().With<TerrainInterest>().With<Transform>().AsSet();
         _localPlayers = world.GetEntities().With<LocalPlayer>().With<Transform>().AsSet();
-        int r = (int)MathF.Ceiling(ColliderRange / S);
-        var offsets = new List<(int, int, int)>();
-        for (int dz = -r; dz <= r; dz++) for (int dy = -r; dy <= r; dy++) for (int dx = -r; dx <= r; dx++)
-            offsets.Add((dx, dy, dz));
-        _rangeOffsets = offsets.ToArray();
     }
 
     /// <summary>How far away grids and players are drawn: as far as the terrain (<see cref="ViewDistance"/>), up to
@@ -95,8 +91,9 @@ public sealed class EntityPresenceSystem : ISystem, IDebugUiSystem
         foreach (ref readonly Entity e in _roots.GetEntities())
             DecideRoot(e, hasLocal, local);
 
+        GatherCentres();
         foreach (ref readonly Entity e in _newTerrain.GetEntities())
-            SetRendered(e, !hasLocal || TerrainVisible(e.Get<Chunk>().Entry.Position, local, ViewDistance));
+            SetRendered(e, TerrainDrawn(e.Get<Chunk>().Entry.Position));
         _newTerrain.Complete();
 
         UpdateTerrainColliders();
@@ -104,7 +101,7 @@ public sealed class EntityPresenceSystem : ISystem, IDebugUiSystem
         if (++_sweep >= SweepTicks)
         {
             _sweep = 0;
-            SweepTerrain(hasLocal, local);
+            SweepTerrain();
         }
     }
 
@@ -142,9 +139,7 @@ public sealed class EntityPresenceSystem : ISystem, IDebugUiSystem
         // Terrain interest.
         if (owned)
         {
-            var interest = e.Has<LocalPlayer>()
-                ? new TerrainInterest { Radius = ViewDistance, Kind = TerrainInterestKind.Full }
-                : new TerrainInterest { Radius = ColliderRange, Kind = TerrainInterestKind.CollidersOnly };
+            var interest = new TerrainInterest { ColliderRadius = ColliderRange, DrawRadius = e.Has<LocalPlayer>() ? ViewDistance : 0 };
             if (!e.Has<TerrainInterest>() || !e.Get<TerrainInterest>().Equals(interest)) e.Set(interest);
         }
         else if (e.Has<TerrainInterest>()) e.Remove<TerrainInterest>();
@@ -163,63 +158,79 @@ public sealed class EntityPresenceSystem : ISystem, IDebugUiSystem
 
     // ── terrain ──────────────────────────────────────────────────────────────
 
-    private static bool TerrainVisible(ChunkPosition pos, Vector3 local, float viewDistance)
+    /// <summary>Whether chunk <paramref name="pos"/> is within an interest's draw radius (horizontally; with
+    /// hysteresis, and a chunk's width of slack so a chunk straddling the edge is drawn).</summary>
+    private bool TerrainDrawn(ChunkPosition pos)
     {
         var centre = new Vector2(pos.X * S + S / 2f, pos.Z * S + S / 2f);
-        return Vector2.Distance(centre, new Vector2(local.X, local.Z)) <= viewDistance * Hysteresis + S;
+        foreach (var (p, interest) in _centres)
+            if (interest.DrawRadius > 0 && Vector2.Distance(centre, new Vector2(p.X, p.Z)) <= interest.DrawRadius * Hysteresis + S)
+                return true;
+        return false;
     }
 
     private void GatherCentres()
     {
         _centres.Clear();
         foreach (ref readonly Entity e in _interests.GetEntities())
-            _centres.Add(ToNumerics(e.Get<Transform>().Position));
+            _centres.Add((ToNumerics(e.Get<Transform>().Position), e.Get<TerrainInterest>()));
     }
 
-    /// <summary>Distance squared from chunk <paramref name="pos"/>'s box to the nearest terrain interest.</summary>
-    private float NearestCentreSq(ChunkPosition pos)
+    /// <summary>Whether chunk <paramref name="pos"/>'s box is within an interest's collider radius plus
+    /// <paramref name="slack"/>.</summary>
+    private bool WithinColliderRadius(ChunkPosition pos, float slack)
     {
         var lo = new Vector3(pos.X * S, pos.Y * S, pos.Z * S);
-        float best = float.MaxValue;
-        foreach (var c in _centres)
+        foreach (var (c, interest) in _centres)
         {
+            if (interest.ColliderRadius <= 0) continue;
             var d = Vector3.Max(Vector3.Max(lo - c, c - (lo + new Vector3(S))), Vector3.Zero);
-            best = MathF.Min(best, d.LengthSquared());
+            float r = interest.ColliderRadius + slack;
+            if (d.LengthSquared() <= r * r) return true;
         }
-        return best;
+        return false;
     }
 
-    /// <summary>Gives static colliders to loaded terrain chunks within range of an interest.</summary>
+    private (int dx, int dy, int dz)[] RangeOffsets(float radius)
+    {
+        int r = (int)MathF.Ceiling(radius / S);
+        if (_rangeOffsets.TryGetValue(r, out var offsets)) return offsets;
+        var list = new List<(int, int, int)>();
+        for (int dz = -r; dz <= r; dz++) for (int dy = -r; dy <= r; dy++) for (int dx = -r; dx <= r; dx++)
+            list.Add((dx, dy, dz));
+        return _rangeOffsets[r] = list.ToArray();
+    }
+
+    /// <summary>Gives static colliders to loaded terrain chunks within an interest's collider radius.</summary>
     private void UpdateTerrainColliders()
     {
-        GatherCentres();
-        foreach (var c in _centres)
+        foreach (var (c, interest) in _centres)
         {
+            if (interest.ColliderRadius <= 0) continue;
             int cx = (int)MathF.Floor(c.X / S), cy = (int)MathF.Floor(c.Y / S), cz = (int)MathF.Floor(c.Z / S);
-            foreach (var (dx, dy, dz) in _rangeOffsets)
+            foreach (var (dx, dy, dz) in RangeOffsets(interest.ColliderRadius))
             {
                 if (_worldVolume.GetEntry(new ChunkPosition(cx + dx, cy + dy, cz + dz)) is not { } entry) continue;
                 var chunk = entry.Entity;
                 if (chunk.Has<PhysicsPresence>() || !chunk.Has<OwnPresence>()) continue;
-                if (NearestCentreSq(entry.Position) > ColliderRange * ColliderRange) continue;
+                if (!WithinColliderRadius(entry.Position, 0)) continue;
                 chunk.Set(new PhysicsPresence { Mode = PhysicsMode.Static });
             }
         }
     }
 
-    /// <summary>Drops colliders out of range of every interest, and redoes drawn-or-not for moved views.</summary>
-    private void SweepTerrain(bool hasLocal, Vector3 local)
+    /// <summary>Drops colliders out of every interest's range, and redoes drawn-or-not for moved interests.</summary>
+    private void SweepTerrain()
     {
         _scratch.Clear();
         foreach (ref readonly Entity e in _terrainColliders.GetEntities())
-            if (NearestCentreSq(e.Get<Chunk>().Entry.Position) > ColliderDropRange * ColliderDropRange) _scratch.Add(e);
+            if (!WithinColliderRadius(e.Get<Chunk>().Entry.Position, ColliderDropSlack)) _scratch.Add(e);
         foreach (var e in _scratch) e.Remove<PhysicsPresence>();
 
-        if (!hasLocal) return;
         foreach (var (pos, entry) in _worldVolume.All)
         {
             var e = entry.Entity;
-            if (e.Has<OwnPresence>()) SetRendered(e, TerrainVisible(pos, local, ViewDistance));
+            if (e.Has<OwnPresence>()) SetRendered(e, TerrainDrawn(pos));
         }
     }
 
@@ -240,7 +251,7 @@ public sealed class EntityPresenceSystem : ISystem, IDebugUiSystem
             string physics = e.Has<PhysicsPresence>() ? e.Get<PhysicsPresence>().Mode.ToString() : "none";
             string owner = e.Has<NetOwner>() ? (e.Get<NetOwner>().IsLocal ? "here" : e.Get<NetOwner>().Owner.ToString()) : "here";
             ImGui.Text($"  {kind} {id}: owner {owner}, physics {physics}, rendered {e.Has<Rendered>()}, " +
-                       $"terrain {(e.Has<TerrainInterest>() ? e.Get<TerrainInterest>().Kind.ToString() : "none")}");
+                       $"terrain {(e.Has<TerrainInterest>() ? e.Get<TerrainInterest>().ToString() : "none")}");
         }
     }
 }
