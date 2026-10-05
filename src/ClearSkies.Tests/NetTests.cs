@@ -18,17 +18,17 @@ namespace ClearSkies.Tests;
 
 /// <summary>A Host and Participants in one process, stepped tick by tick in lockstep, with network time advancing a tick
 /// per tick. The hosting machine's Participant (<see cref="Host"/>'s scene, the authority, with nobody playing on it)
-/// joins over a link of its own with no lag, as in the game; clients over <see cref="Network"/>.</summary>
+/// joins the Host directly, as in the game; clients over <see cref="Network"/>.</summary>
 public sealed class LoopbackGame : IDisposable
 {
     public const ulong Checksum = 42;
     public readonly LoopbackNetwork Network = new() { ManualTime = 0 };
-    private readonly LoopbackNetwork _link = new() { ManualTime = 0 };
     public readonly SaveDatabase Save;
     public readonly Host Hub;
     public readonly HeadlessScene Host = new();
-    public readonly Participant HostNet;
-    public readonly List<(HeadlessScene Scene, Participant Net)> Clients = new();
+    public readonly RemoteParticipants Remote;
+    public readonly SimulationParticipant HostNet;
+    public readonly List<(HeadlessScene Scene, SimulationParticipant Net)> Clients = new();
 
     /// <param name="save">The world's save (an empty one if none).</param>
     /// <param name="hostTerrainReady">Whether the terrain around a point is ready on the hosting machine (always, if
@@ -42,14 +42,13 @@ public sealed class LoopbackGame : IDisposable
         Network.LossChance = lossChance;
         Save = save ?? SaveDatabase.InMemory();
         if (hostPlayer is not null) SavePlayer("host", hostPlayer);
-        Hub = new Host(new HostTransport(_link.Listen(), Network.Listen()), Save, Host.Clock, seed: 1337, generationChecksum: Checksum,
-                       newPlayerSpawn: (new Vector3(0, 60, 0), 0, 0));
-        var link = _link.Connect();
-        var welcome = Participant.Connect(link, new Hello(ProtocolVersion.Current, hostPlayer is null ? "" : "host", Checksum),
-                                          TimeSpan.FromSeconds(1), () => Hub.Update(0));
-        HostNet = new Participant(link, welcome, Host.Session, Host.Commands, Host.Registry, Host.World, Host.Clock, hostTerrainReady ?? (_ => true))
-            { TimeSource = () => Network.Now, Viewing = hostPlayer is not null };
-        Host.AttachNet(HostNet, Hub);
+        Hub = new Host(Save, Host.Clock, seed: 1337, generationChecksum: Checksum, newPlayerSpawn: (new Vector3(0, 60, 0), 0, 0));
+        Remote = new RemoteParticipants(Hub, Network.Listen());
+        HostNet = SimulationParticipant.Join(Hub, new Hello(ProtocolVersion.Current, hostPlayer is null ? "" : "host", Checksum),
+                                             Host.Session, Host.Commands, Host.Registry, Host.World, Host.Clock, hostTerrainReady ?? (_ => true));
+        HostNet.TimeSource = () => Network.Now;
+        HostNet.Viewing = hostPlayer is not null;
+        Host.AttachNet(HostNet, Remote, Hub);
         if (hostPlayer is not null && !Host.TickUntil(() => HostNet.Joined, 60)) throw new TimeoutException("The host's player never spawned.");
     }
 
@@ -67,7 +66,6 @@ public sealed class LoopbackGame : IDisposable
         for (int i = 0; i < count; i++)
         {
             Network.ManualTime += 1000.0 / 60.0;
-            _link.ManualTime = Network.ManualTime;
             Host.Tick();
             foreach (var (scene, _) in Clients) scene.Tick();
         }
@@ -83,7 +81,7 @@ public sealed class LoopbackGame : IDisposable
 
     /// <summary>A client joining: hello, welcome, then (unless not to <paramref name="wait"/>) ticking until its player
     /// has arrived.</summary>
-    public (HeadlessScene Scene, Participant Net) Join(string name = "client", ulong checksum = Checksum, int maxTicks = 600, bool wait = true)
+    public (HeadlessScene Scene, SimulationParticipant Net) Join(string name = "client", ulong checksum = Checksum, int maxTicks = 600, bool wait = true)
     {
         var transport = Network.Connect();
         var scene = new HeadlessScene();
@@ -96,9 +94,10 @@ public sealed class LoopbackGame : IDisposable
                 if (++guard > maxTicks) throw new TimeoutException("No welcome.");
                 Tick();
             }
-            var net = new Participant(transport, welcome, scene.Session, scene.Commands, scene.Registry, scene.World, scene.Clock, _ => true)
-                { TimeSource = () => Network.Now };
-            scene.AttachNet(net);
+            var link = new RemoteHost(transport, welcome);
+            var net = SimulationParticipant.Join(link, scene.Session, scene.Commands, scene.Registry, scene.World, scene.Clock, _ => true);
+            net.TimeSource = () => Network.Now;
+            scene.AttachNet(net, link);
             Clients.Add((scene, net));
             if (!wait) return (scene, net);
             for (int i = 0; i < maxTicks && !net.Joined; i++) Tick();
@@ -121,7 +120,7 @@ public sealed class LoopbackGame : IDisposable
     {
         foreach (var (scene, _) in Clients) scene.Dispose();
         Host.Dispose();
-        Hub.Dispose();
+        Remote.Dispose();
         Save.Dispose();
     }
 }

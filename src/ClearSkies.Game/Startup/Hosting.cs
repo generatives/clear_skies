@@ -41,51 +41,43 @@ public sealed class WorldSave : IDisposable
 
 /// <summary>
 /// Hosting a world from its save: the Host, which has no world of its own (it keeps the save, decides what's loaded
-/// and who sees what, and relays everything), and this machine's Participant, joined to it over an in-process link,
-/// which has authority over every entity. With <paramref name="transport"/> off, nobody else can join (single-player).
+/// and who sees what, and relays everything), the network others join it over (<see cref="Network"/>, if any), and
+/// this machine's Participant, joined to it directly, which has authority over every entity. With
+/// <paramref name="transport"/> off, nobody else can join (single-player).
 /// </summary>
 public sealed class Hosting : IDisposable
 {
     /// <param name="playerName">Who plays on this machine (none: nobody, a dedicated host).</param>
     public Hosting(GameWorld world, WorldSave save, LaggedTransport? transport, string? playerName)
     {
-        var link = new LoopbackNetwork();
         var (eye, yaw, pitch) = WorldSpawn.For(save.Seed);
         ulong checksum = GenerationChecksum.Compute();
-        Host = new Host(new HostTransport(link.Listen(), transport), save.Database, world.Host.Clock, save.Seed, checksum,
-                        (WorldSpawn.PlayerAt(eye), yaw, pitch))
+        Host = new Host(save.Database, world.Host.Clock, save.Seed, checksum, (WorldSpawn.PlayerAt(eye), yaw, pitch))
         {
             SaveChunks = world.ChunkLoad.SaveAllDirty,
         };
-        var participant = link.Connect();
-        var welcome = Participant.Connect(participant, new Hello(ProtocolVersion.Current, playerName ?? "", checksum),
-                                          TimeSpan.FromSeconds(5), () => Host.Update(0));
-        Net = new Participant(participant, welcome, world.Session, world.Commands, world.Registry, world.Host.World, world.Host.Clock,
-                              world.TerrainReadyFor)
-        {
-            OthersHere = () => Host.OthersConnected,
-            Viewing = playerName is not null,
-        };
+        Network = transport is null ? null : new RemoteParticipants(Host, transport);
+        Net = SimulationParticipant.Join(Host, new Hello(ProtocolVersion.Current, playerName ?? "", checksum), world.Session, world.Commands,
+                                         world.Registry, world.Host.World, world.Host.Clock, world.TerrainReadyFor);
+        Net.OthersHere = () => Host.OthersConnected;
+        Net.Viewing = playerName is not null;
     }
 
     public Host Host { get; }
-    public Participant Net { get; }
+    /// <summary>Participants on other machines, joining over the network (none: single-player). First in the tick.</summary>
+    public RemoteParticipants? Network { get; }
+    public SimulationParticipant Net { get; }
 
     /// <summary>Saves everything, in one transaction (on exit): the authority describes it all, and the Host writes it.</summary>
     public void SaveAll()
     {
-        Host.SaveAll();
-        for (int i = 0; i < 100 && Host.Saving; i++)
-        {
-            Net.Transport!.Poll();
-            Host.Transport.Poll();
-        }
+        Host.SaveAll(); // the authority, on this machine, answers at once
         if (Host.Saving) Console.WriteLine("[save] the authority never finished describing the world: not saved");
     }
 
     public void Dispose()
     {
         Net.Dispose();
-        Host.Dispose();
+        Network?.Dispose();
     }
 }

@@ -34,7 +34,7 @@ public sealed class HeadlessScene : IDisposable
     public readonly ManualTickClock Clock = new();
     private double _rateCredit;
     public uint TickNumber => Clock.Tick;
-    public ClearSkies.Net.Session.NetSession? Net;
+    public ClearSkies.Net.Session.SimulationParticipant? Net;
     public ClearSkies.Net.Sync.RemoteBodySystem? RemoteBodies;
     private readonly List<Engine.Core.ISystem> _tick = new();
 
@@ -77,22 +77,22 @@ public sealed class HeadlessScene : IDisposable
     public readonly TickInterpolationSystem Interpolation;
     private readonly TickClock _frameClock = new();
 
-    /// <summary>Puts a network session in the tick: the session first (after <paramref name="host"/>, the Host, on the
-    /// hosting machine), body sync last (then the Host's relay). Entity IDs come from the Host from now on.</summary>
-    public void AttachNet(ClearSkies.Net.Session.NetSession net, ClearSkies.Net.Session.Host? host = null)
+    /// <summary>Puts a Participant in the tick: first, after <paramref name="first"/> (what carries messages to it over
+    /// the network, and the Host, on the hosting machine), and body sync last. Entity IDs come from the Host from now
+    /// on.</summary>
+    public void AttachNet(ClearSkies.Net.Session.SimulationParticipant net, params Engine.Core.ISystem[] first)
     {
         Net = net;
         Registry.RequestBlock = null;
         _tick.Insert(0, net);
-        if (host is not null) _tick.Insert(0, host);
+        _tick.InsertRange(0, first);
         _tick.Add(new ClearSkies.Net.Sync.BodySync(net, World, Physics));
-        if (host is not null) _tick.Add(host.Relay);
         RemoteBodies = new ClearSkies.Net.Sync.RemoteBodySystem(World, Registry, Clock);
         _tick.Insert(_tick.FindIndex(s => s is PhysicsTransformSyncSystem) + 1, RemoteBodies);
         _tick.Insert(_tick.IndexOf(Physics), new ClearSkies.Net.Sync.RemoteBodyProxySystem(World, Physics, RemoteBodies));
         // A client predicts its own player, from the input a test puts on it, before movement (as the game's input
         // sample does).
-        if (net is ClearSkies.Net.Session.Participant { IsAuthority: false } client)
+        if (net is { IsAuthority: false } client)
             _tick.Insert(_tick.FindIndex(s => s is PlayerMovementSystem), new ClearSkies.Net.Sync.OwnPlayerPrediction(client, World, Registry));
     }
 
