@@ -104,9 +104,10 @@ public sealed class SetMoveModeHandler : PredictedCommandHandler<SetMoveMode, (E
     public override void Write(NetWriter w, in SetMoveMode c) { c.Player.Write(w); w.WriteBool(c.FreeFly); }
     public override SetMoveMode Read(ref NetReader r) => new() { Player = EntityId.Read(ref r), FreeFly = r.ReadBool() };
 
-    /// <summary>Only from whoever plays them (or the host, which owns every player).</summary>
+    /// <summary>Only from whoever plays them, or whoever has authority over them (<see cref="NetOwner"/>).</summary>
     public override Verdict Validate(ref SetMoveMode c, in CommandContext ctx)
-        => _registry.Find(c.Player) is { } e && e.Has<Player>() && (ctx.Sender == e.Get<Player>().Controller || ctx.Sender == PeerId.Host)
+        => _registry.Find(c.Player) is { } e && e.Has<Player>() &&
+           (ctx.Sender == e.Get<Player>().ControllingPeer || e.Has<NetOwner>() && ctx.Sender == e.Get<NetOwner>().Owner)
             ? Verdict.Accept : Verdict.Reject;
 
     public override void Apply(in SetMoveMode e, in ApplyContext ctx)

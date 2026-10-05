@@ -259,7 +259,7 @@ public sealed class HostSession : NetSession
         foreach (var d in Commands.Describe(_describable.GetEntities().ToArray()))
         {
             // A player's spawn names who plays them (the host owns them all).
-            var owner = d.Entity.Has<Player>() ? d.Entity.Get<Player>().Controller
+            var owner = d.Entity.Has<Player>() ? d.Entity.Get<Player>().ControllingPeer
                       : d.Entity.Has<NetOwner>() ? d.Entity.Get<NetOwner>().Owner : Session.LocalPeer;
             Send([peer.Connection], new EventMessage(d.Kind, Commands.StampEvent(d.Id), Commands.SpawnCommand(d.Kind, d.Id, owner, d.Data)));
         }
