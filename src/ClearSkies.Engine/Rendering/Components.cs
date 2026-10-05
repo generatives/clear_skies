@@ -9,8 +9,22 @@ using Silk.NET.Maths;
 /// </summary>
 public struct ChunkRenderData
 {
-    /// <summary>The chunk's cube faces, or null when it holds only model blocks.</summary>
+    /// <summary>The chunk's opaque cube faces, or null when it has none.</summary>
     public GpuMesh? Mesh;
+
+    /// <summary>The chunk's <see cref="RenderLayer.Cutout"/> cube faces (glass), drawn with the opaque world minus their
+    /// clear texels; null when it has none.</summary>
+    public GpuMesh? CutoutMesh;
+
+    /// <summary>Each of the chunk's meshes that it has.</summary>
+    public readonly IEnumerable<GpuMesh> Meshes()
+    {
+        if (Mesh != null) yield return Mesh;
+        if (CutoutMesh != null) yield return CutoutMesh;
+    }
+
+    /// <summary>True when it has nothing to draw.</summary>
+    public readonly bool IsEmpty => Mesh == null && CutoutMesh == null && Models.Length == 0;
 
     /// <summary>Every static model block (<see cref="BlockDef.Model"/>, not an entity block) in the chunk; empty
     /// when there are none.</summary>

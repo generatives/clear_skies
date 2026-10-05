@@ -13,6 +13,7 @@ public class BlockLightTests
     [InlineData(BlockId.Fan, true)]     // opaque model
     [InlineData(BlockId.Lever, false)]  // model
     [InlineData(BlockId.SteeringWheel, false)]
+    [InlineData(BlockId.Glass, false)]  // transparent cube
     [InlineData(BlockId.Air, false)]
     public void Blocks_light_by_category(BlockId id, bool blocks)
         => Assert.Equal(blocks, BlockRegistry.Get(id).BlocksLight);
@@ -23,10 +24,10 @@ public class BlockLightTests
         var data = new ChunkData();
         data.Set(4, 4, 4, BlockId.Fan);
         data.Set(3, 4, 4, BlockId.Stone);
-        var (verts, _) = new GreedyMesher().Mesh(data, null, null, null, null, null, null);
+        var mesh = new GreedyMesher().Mesh(data, null, null, null, null, null, null);
 
         // The stone doesn't draw its face on the Fan's side (it would flicker against the model).
-        Assert.Equal(5 * 4, verts.Count);
+        Assert.Equal(5 * 4, mesh.Opaque.Vertices.Count);
     }
 
     [Fact]
@@ -35,8 +36,8 @@ public class BlockLightTests
         var data = new ChunkData();
         data.Set(4, 4, 4, BlockId.Lever);
         data.Set(3, 4, 4, BlockId.Stone);
-        var (verts, _) = new GreedyMesher().Mesh(data, null, null, null, null, null, null);
+        var mesh = new GreedyMesher().Mesh(data, null, null, null, null, null, null);
 
-        Assert.Equal(6 * 4, verts.Count);
+        Assert.Equal(6 * 4, mesh.Opaque.Vertices.Count);
     }
 }

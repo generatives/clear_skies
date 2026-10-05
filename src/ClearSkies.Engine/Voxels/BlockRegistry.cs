@@ -68,6 +68,11 @@ public static class BlockRegistry
         // instead, so it's not used here.)
         Register(new BlockDef { Id = BlockId.Rock,  Name = "Rock",  Color = new(0.52f, 0.52f, 0.55f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 6,
             Texture = "stone" });
+
+        // Glass: a solid, colliding cube that light passes through. Cut out like Minecraft's glass: its texture is
+        // mostly clear, with a few streaks of glare, so it's drawn with the world minus its clear texels, no blending.
+        Register(new BlockDef { Id = BlockId.Glass, Name = "Glass", Color = new(0.80f, 0.90f, 0.95f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 2,
+            Texture = "glass", Layer = RenderLayer.Cutout });
     }
 
     private static void Register(BlockDef def) => Defs[(byte)def.Id] = def;
