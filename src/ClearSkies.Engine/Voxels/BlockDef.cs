@@ -23,7 +23,6 @@ public readonly struct BlockDef
 
     /// The colour a light-emitting block actually lights with (white when <see cref="LightColor"/> is unset).
     public Vector3D<float> EffectiveLightColor => LightColor == default ? Vector3D<float>.One : LightColor;
-    public byte            Opacity        { get; init; } // 0=transparent, 15=fully opaque (light blocked)
 
     // Density used for dynamic-grid mass (PhysicsBodySystem): a box's mass = its volume * this. Air is 0;
     // every solid block should be > 0 so it contributes to the compound's mass and centre of mass.
@@ -77,6 +76,22 @@ public readonly struct BlockDef
     /// True for blocks drawn as a full cube by <c>GreedyMesher</c>: solid and not a model block. The mesher's
     /// face culling (and the neighbour remeshing that depends on it) keys off this rather than IsSolid.
     public bool IsFullCube => IsSolid && Model == null;
+
+    /// True for a model block whose model fills its whole cell (e.g. Fan): it's treated like an opaque cube, so it
+    /// stops light and hides the faces of blocks against it (which would otherwise be drawn on top of the model's
+    /// sides and flicker). Other model blocks only fill part of their cell, so they do neither.
+    public bool            OpaqueModel    { get; init; }
+
+    /// True when this block stops light (sun, lamps, bounce) and darkens its neighbours' corners: a full cube, or an
+    /// <see cref="OpaqueModel"/>. The lighting system's occupancy is exactly this.
+    public bool BlocksLight => IsSolid && (Model == null || OpaqueModel);
+
+    /// True when this block hides the face of a <paramref name="neighbour"/> block that touches it: an opaque cube or
+    /// <see cref="OpaqueModel"/> hides every face against it.
+    public bool HidesFaceOf(BlockId neighbour) => BlocksLight;
+
+    /// True when this block can hide a neighbour's face (see <see cref="HidesFaceOf"/>).
+    public bool HidesFaces => BlocksLight;
 
     /// Classifies which texture role <paramref name="faceNormal"/> plays for a voxel whose
     /// top points <paramref name="up"/>: Top if the face points that way, Bottom if it points the opposite way,
