@@ -41,7 +41,7 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
     // One BigCompound static per non-empty chunk; box count kept only for the debug panel.
     private readonly Dictionary<ChunkPosition, (StaticHandle handle, int boxes)> _colliders = new();
 
-    // Chunks whose collider was built and came out empty: they have blocks, but none that collide (e.g. levers), so
+    // Chunks whose collider was built and came out empty: they have blocks, but none that collide (water, levers), so
     // they have no static. Kept so CollidersReady counts them as done instead of waiting for them forever.
     private readonly HashSet<ChunkPosition> _emptyColliders = new();
     private readonly List<BodyHandle> _removedBodies = new();

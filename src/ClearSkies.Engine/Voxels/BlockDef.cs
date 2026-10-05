@@ -24,13 +24,21 @@ public readonly struct BlockDef
     /// The colour a light-emitting block actually lights with (white when <see cref="LightColor"/> is unset).
     public Vector3D<float> EffectiveLightColor => LightColor == default ? Vector3D<float>.One : LightColor;
 
-    /// How a full-cube block's faces are drawn (see <see cref="RenderLayer"/>): opaque (the default) or cut out (glass).
+    /// How a full-cube block's faces are drawn (see <see cref="RenderLayer"/>): opaque (the default), cut out (glass)
+    /// or blended (water).
     public RenderLayer     Layer          { get; init; }
 
     /// True for a full-cube block you can see through: any <see cref="Layer"/> but <see cref="RenderLayer.Opaque"/>. It
-    /// never hides a neighbour's face, except another block of its own type (so a wall of glass shows only its outer
-    /// surface), and it lets light through (see <see cref="BlocksLight"/>).
+    /// never hides a neighbour's face, except another block of its own type (so a wall of glass or a pool of water shows
+    /// only its outer surface), and it lets light through (see <see cref="BlocksLight"/>).
     public bool            Transparent    => Layer != RenderLayer.Opaque;
+
+    /// Opacity (0-1) a <see cref="RenderLayer.Translucent"/> block's faces are drawn with, multiplying its texture's
+    /// alpha: e.g. water, whose texture is fully opaque. 0 (unset) means 1, the texture's alpha alone.
+    public float           Alpha          { get; init; }
+
+    /// <see cref="Alpha"/>, with unset read as 1.
+    public float           EffectiveAlpha => Alpha <= 0f ? 1f : Alpha;
 
     // Density used for dynamic-grid mass (PhysicsBodySystem): a box's mass = its volume * this. Air is 0;
     // every solid block should be > 0 so it contributes to the compound's mass and centre of mass.
@@ -132,4 +140,8 @@ public enum RenderLayer : byte
     /// there, solid (and depth-writing) elsewhere, so it needs no sorting. Back faces aren't drawn, so looking through a
     /// block of glass you see only its near side. For mostly clear textures like glass.</summary>
     Cutout,
+
+    /// <summary>Alpha-blended over the world after it (<c>fs_chunk_transparent</c>), its texture's alpha times
+    /// <see cref="BlockDef.Alpha"/>; only the nearest translucent face shows at each pixel. For water.</summary>
+    Translucent,
 }

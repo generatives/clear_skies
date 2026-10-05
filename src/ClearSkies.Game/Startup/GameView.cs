@@ -84,11 +84,13 @@ public sealed class GameView : IDisposable
         SkySettings.CloudSeaAltitude = HeartGrid.CloudSeaAltitude; // below its lowest islands
         _clouds = new CloudRenderSystem(renderer, new HeartCloudDensity(world.Seed));
         _uiRenderer = new UiRenderSystem(Ui, renderer);
-        host.AddSystem(new ChunkRenderSystem(host.World, renderer, volume), SystemStage.RenderWorld);
+        var chunks = new ChunkRenderSystem(host.World, renderer, volume);
+        host.AddSystem(chunks, SystemStage.RenderWorld);
         host.AddSystem(new ModelRenderSystem(host.World, renderer, host.Time), SystemStage.RenderWorld);
         host.AddSystem(_clouds, SystemStage.RenderWorld);
         host.AddSystem(new SkyRenderSystem(renderer), SystemStage.RenderSky);
         host.AddSystem(new WireframeRenderSystem(host.World, renderer), SystemStage.RenderOverlay);
+        host.AddSystem(chunks.TransparentPass, SystemStage.RenderTransparent);
         host.AddSystem(new HudRenderSystem(host.World, renderer), SystemStage.RenderHud);
         host.AddSystem(_uiRenderer, SystemStage.RenderHud);
     }
