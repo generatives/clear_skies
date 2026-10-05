@@ -926,8 +926,8 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         _hudPipeline       = CreateMeshPipeline(PrimitiveTopology.TriangleList, CullMode.None, depthTest: false);
         _modelPipeline     = CreateMeshPipeline(PrimitiveTopology.TriangleList, CullMode.None, fragmentEntry: "fs_model");
         _cloudPipeline     = CreateCloudPipeline();
-        _chunkPipeline          = CreateChunkPipeline(PrimitiveTopology.TriangleList, CullMode.Back);
-        _chunkWireframePipeline = CreateChunkPipeline(PrimitiveTopology.LineList,     CullMode.None);
+        _chunkPipeline          = CreateChunkPipeline(PrimitiveTopology.TriangleList, CullMode.Back, "fs_main");
+        _chunkWireframePipeline = CreateChunkPipeline(PrimitiveTopology.LineList,     CullMode.None, "fs_main");
         _chunkOverdrawPipeline  = CreateOverdrawPipeline();
         _chunkCutoutPipeline    = CreateChunkPipeline(PrimitiveTopology.TriangleList, CullMode.Back, "fs_cutout");
         _chunkTransparentPipeline = CreateTransparentChunkPipeline();
@@ -1040,9 +1040,9 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
                               depthTest ? CompareFunction.Greater : CompareFunction.Always); // reversed depth: nearer is greater
     }
 
-    /// <summary>A pipeline for chunk meshes (vs_chunk, one packed <see cref="ChunkVertex"/> per vertex) and fs_main (or
-    /// <paramref name="fragmentEntry"/>), depth-tested and depth-writing.</summary>
-    private RenderPipeline* CreateChunkPipeline(PrimitiveTopology topology, CullMode cullMode, string fragmentEntry = "fs_main")
+    /// <summary>A pipeline for chunk meshes (vs_chunk, one packed <see cref="ChunkVertex"/> per vertex) and
+    /// <paramref name="fragmentEntry"/> (fs_main, or fs_cutout), depth-tested and depth-writing.</summary>
+    private RenderPipeline* CreateChunkPipeline(PrimitiveTopology topology, CullMode cullMode, string fragmentEntry)
     {
         var attr     = new VertexAttribute { Format = VertexFormat.Uint32x2, Offset = 0, ShaderLocation = 0 };
         var vbLayout = new VertexBufferLayout { ArrayStride = ChunkVertex.SizeBytes, StepMode = VertexStepMode.Vertex, AttributeCount = 1, Attributes = &attr };

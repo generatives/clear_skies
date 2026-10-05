@@ -137,10 +137,11 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     /// <summary>Packs a chunk mesh for upload, off the main thread: the vertices as <see cref="ChunkVertex"/> (8 bytes,
     /// not a 48-byte <see cref="Vertex"/>), the indices, then (if <paramref name="wireframe"/>) the wireframe's line
     /// list. Indices are 16-bit unless the mesh has more vertices than that reaches. <paramref name="alphas"/>, if not
-    /// empty, is each vertex's opacity (see <see cref="ChunkVertex"/>).</summary>
-    private static Packed PackMesh(ReadOnlySpan<Vertex> verts, ReadOnlySpan<uint> idxs, ReadOnlySpan<byte> alphas,
-                                   bool wireframe)
+    /// null, is each vertex's opacity (see <see cref="ChunkVertex"/>).</summary>
+    private static Packed PackMesh(LayerMesh mesh, List<byte>? alphas, bool wireframe)
     {
+        ReadOnlySpan<Vertex> verts = CollectionsMarshal.AsSpan(mesh.Vertices);
+        ReadOnlySpan<uint> idxs = CollectionsMarshal.AsSpan(mesh.Indices);
         if (verts.Length == 0) return Packed.None;
         bool wide = verts.Length > ushort.MaxValue + 1;
         int size = wide ? 4 : 2;
@@ -150,7 +151,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
         var packed = ArrayPool<byte>.Shared.Rent(System.Math.Max(4, bytes));
 
         var cv = MemoryMarshal.Cast<byte, ChunkVertex>(packed.AsSpan(0, vLen));
-        for (int k = 0; k < verts.Length; k++) cv[k] = ChunkVertex.Pack(verts[k], alphas.IsEmpty ? (byte)255 : alphas[k]);
+        for (int k = 0; k < verts.Length; k++) cv[k] = ChunkVertex.Pack(verts[k], alphas is null ? (byte)255 : alphas[k]);
 
         int at = vLen;
         if (wide)
@@ -230,13 +231,10 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                 {
                     // The mesher's lists are per-thread scratch, so copy out before this thread meshes again.
                     var mesher = _meshers.Value!;
-                    var (verts, idxs) = mesher.Mesh(data, nX, pX, nY, pY, nZ, pZ, neighboursForTransparentOnly: alone);
-                    var opaque = PackMesh(CollectionsMarshal.AsSpan(verts), CollectionsMarshal.AsSpan(idxs), default, wireframe);
-                    var cutout = PackMesh(CollectionsMarshal.AsSpan(mesher.CutoutVertices),
-                                          CollectionsMarshal.AsSpan(mesher.CutoutIndices), default, wireframe);
-                    var transparent = PackMesh(CollectionsMarshal.AsSpan(mesher.TransparentVertices),
-                                               CollectionsMarshal.AsSpan(mesher.TransparentIndices),
-                                               CollectionsMarshal.AsSpan(mesher.TransparentAlphas), wireframe);
+                    var mesh = mesher.Mesh(data, nX, pX, nY, pY, nZ, pZ, neighboursForTransparentOnly: alone);
+                    var opaque = PackMesh(mesh.Opaque, null, wireframe);
+                    var cutout = PackMesh(mesh.Cutout, null, wireframe);
+                    var transparent = PackMesh(mesh.Translucent, mesh.TranslucentAlphas, wireframe);
                     _results.Enqueue(new Result(entry.Entity, opaque, cutout, transparent, FindModelBlocks(data), null));
                 }
                 catch (Exception e)

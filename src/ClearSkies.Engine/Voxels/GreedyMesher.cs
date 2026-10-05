@@ -18,11 +18,11 @@ namespace ClearSkies.Engine.Voxels;
 /// light in its merge key.
 ///
 /// <see cref="BlockDef.Transparent"/> blocks are meshed alongside but into their own <see cref="RenderLayer"/>'s mesh:
-/// cut out (glass: <see cref="CutoutVertices"/>, <see cref="CutoutIndices"/>) or translucent (water:
-/// <see cref="TransparentVertices"/>, <see cref="TransparentIndices"/>, drawn alpha-blended after the opaque world).
-/// They don't hide their neighbours' faces, so an opaque block behind glass still has its face; and a transparent face
-/// is hidden only by an opaque block (or <see cref="BlockDef.OpaqueModel"/>) or another of its own type. An opaque
-/// model block hides faces against it like an opaque cube, since its model covers them.
+/// cut out (glass: <see cref="ChunkMeshLayers.Cutout"/>) or translucent (water: <see cref="ChunkMeshLayers.Translucent"/>,
+/// drawn alpha-blended after the opaque world). They don't hide their neighbours' faces, so an opaque block behind glass
+/// still has its face; and a transparent face is hidden only by an opaque block (or <see cref="BlockDef.OpaqueModel"/>)
+/// or another of its own type. An opaque model block hides faces against it like an opaque cube, since its model
+/// covers them.
 /// </summary>
 public sealed class GreedyMesher
 {
@@ -58,20 +58,6 @@ public sealed class GreedyMesher
     private readonly List<Vertex> _cVerts   = new();
     private readonly List<uint>   _cIndices = new();
 
-    /// <summary>The last <see cref="Mesh"/>'s <see cref="RenderLayer.Cutout"/> faces (reused scratch, like its return
-    /// value).</summary>
-    public List<Vertex> CutoutVertices => _cVerts;
-    public List<uint>   CutoutIndices  => _cIndices;
-
-    /// <summary>The last <see cref="Mesh"/>'s <see cref="RenderLayer.Translucent"/> faces (reused scratch, like its
-    /// return value).</summary>
-    public List<Vertex> TransparentVertices => _tVerts;
-    public List<uint>   TransparentIndices  => _tIndices;
-
-    /// <summary>Each of <see cref="TransparentVertices"/>' opacity (0-255): its block's <see cref="BlockDef.Alpha"/>,
-    /// which the shader multiplies the texture's alpha by.</summary>
-    public List<byte>   TransparentAlphas   => _tAlphas;
-
     private readonly TextureAtlas? _atlas;
 
     public GreedyMesher(TextureAtlas? atlas = null)
@@ -80,14 +66,13 @@ public sealed class GreedyMesher
     }
 
     /// <summary>
-    /// Mesh <paramref name="chunk"/>, returning its opaque faces; its cut-out and translucent ones are left in
-    /// <see cref="CutoutVertices"/> and <see cref="TransparentVertices"/> (with their indices). Neighbour ChunkData
-    /// parameters are for face-culling only; pass <c>null</c> for any unloaded neighbour (its side is treated as open
-    /// air). With <paramref name="neighboursForTransparentOnly"/>, the neighbours only cull transparent faces, and every
-    /// other border face is drawn as if the neighbour were air (see <see cref="ChunkVolume.MeshIgnoresNeighbours"/>).
-    /// The returned lists are reused scratch buffers (see field docs) — consume them before calling Mesh() again.
+    /// Mesh <paramref name="chunk"/>, returning its faces by <see cref="RenderLayer"/>. Neighbour ChunkData parameters
+    /// are for face-culling only; pass <c>null</c> for any unloaded neighbour (its side is treated as open air). With
+    /// <paramref name="neighboursForTransparentOnly"/>, the neighbours only cull transparent faces, and every other
+    /// border face is drawn as if the neighbour were air (see <see cref="ChunkVolume.MeshIgnoresNeighbours"/>). The
+    /// returned lists are reused scratch buffers (see field docs) — consume them before calling Mesh() again.
     /// </summary>
-    public (List<Vertex> vertices, List<uint> indices) Mesh(
+    public ChunkMeshLayers Mesh(
         ChunkData  chunk,
         ChunkData? nX, ChunkData? pX,
         ChunkData? nY, ChunkData? pY,
@@ -217,7 +202,8 @@ public sealed class GreedyMesher
             }
         }
 
-        return (verts, indices);
+        return new ChunkMeshLayers(new LayerMesh(verts, indices), new LayerMesh(_cVerts, _cIndices),
+                                   new LayerMesh(_tVerts, _tIndices), _tAlphas);
     }
 
     // face.D/U/V are always a permutation of {0,1,2} (x,y,z); resolving the three coordinates with a
@@ -338,3 +324,12 @@ public sealed class GreedyMesher
         public static bool operator !=(MaskCell a, MaskCell b) => !a.Equals(b);
     }
 }
+
+/// <summary>One render layer's faces: its vertices, and triangle indices into them.</summary>
+public readonly record struct LayerMesh(List<Vertex> Vertices, List<uint> Indices);
+
+/// <summary>A meshed chunk's faces, one <see cref="LayerMesh"/> per <see cref="RenderLayer"/>, and each translucent
+/// vertex's opacity (0-255: its block's <see cref="BlockDef.Alpha"/>, which the shader multiplies the texture's alpha
+/// by). The lists are <see cref="GreedyMesher"/>'s reused scratch buffers: consume them before it meshes again.</summary>
+public readonly record struct ChunkMeshLayers(LayerMesh Opaque, LayerMesh Cutout, LayerMesh Translucent,
+                                              List<byte> TranslucentAlphas);
