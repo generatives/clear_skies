@@ -80,18 +80,20 @@ public class PresenceTests
         scene.Tick();
         Assert.Equal(PhysicsMode.Simulated, grid.Get<PhysicsPresence>().Mode);
         Assert.True(grid.Has<Rendered>());
-        Assert.Equal(TerrainInterestKind.CollidersOnly, grid.Get<TerrainInterest>().Kind);
+        Assert.Equal(EntityPresenceSystem.ColliderRange, grid.Get<TerrainInterest>().ColliderRadius);
+        Assert.Equal(0f, grid.Get<TerrainInterest>().DrawRadius);
         scene.Tick();
         Assert.True(grid.Has<PhysicsBodyComponent>()); // the body follows the presence
     }
 
     [Fact]
-    public void LocalPlayerHasFullTerrainInterest()
+    public void LocalPlayersTerrainInterestIsDrawnToTheViewDistance()
     {
         using var scene = new HeadlessScene();
         var player = scene.SpawnLocalPlayer(new Vector3(0, 60, 0), freeFly: true);
         scene.Tick();
-        Assert.Equal(TerrainInterestKind.Full, player.Get<TerrainInterest>().Kind);
+        Assert.Equal(500f, player.Get<TerrainInterest>().DrawRadius); // the scene's view distance
+        Assert.Equal(EntityPresenceSystem.ColliderRange, player.Get<TerrainInterest>().ColliderRadius);
         Assert.Equal(PhysicsMode.Simulated, player.Get<PhysicsPresence>().Mode);
         Assert.True(player.Has<Rendered>());
     }
