@@ -24,6 +24,14 @@ public readonly struct BlockDef
     /// The colour a light-emitting block actually lights with (white when <see cref="LightColor"/> is unset).
     public Vector3D<float> EffectiveLightColor => LightColor == default ? Vector3D<float>.One : LightColor;
 
+    /// How a full-cube block's faces are drawn (see <see cref="RenderLayer"/>): opaque (the default) or cut out (glass).
+    public RenderLayer     Layer          { get; init; }
+
+    /// True for a full-cube block you can see through: any <see cref="Layer"/> but <see cref="RenderLayer.Opaque"/>. It
+    /// never hides a neighbour's face, except another block of its own type (so a wall of glass shows only its outer
+    /// surface), and it lets light through (see <see cref="BlocksLight"/>).
+    public bool            Transparent    => Layer != RenderLayer.Opaque;
+
     // Density used for dynamic-grid mass (PhysicsBodySystem): a box's mass = its volume * this. Air is 0;
     // every solid block should be > 0 so it contributes to the compound's mass and centre of mass.
     public float            Weight         { get; init; }
@@ -82,16 +90,16 @@ public readonly struct BlockDef
     /// sides and flicker). Other model blocks only fill part of their cell, so they do neither.
     public bool            OpaqueModel    { get; init; }
 
-    /// True when this block stops light (sun, lamps, bounce) and darkens its neighbours' corners: a full cube, or an
-    /// <see cref="OpaqueModel"/>. The lighting system's occupancy is exactly this.
-    public bool BlocksLight => IsSolid && (Model == null || OpaqueModel);
+    /// True when this block stops light (sun, lamps, bounce) and darkens its neighbours' corners: a full cube unless
+    /// it's <see cref="Transparent"/>, or an <see cref="OpaqueModel"/>. The lighting system's occupancy is exactly this.
+    public bool BlocksLight => IsSolid && (Model == null ? !Transparent : OpaqueModel);
 
     /// True when this block hides the face of a <paramref name="neighbour"/> block that touches it: an opaque cube or
-    /// <see cref="OpaqueModel"/> hides every face against it.
-    public bool HidesFaceOf(BlockId neighbour) => BlocksLight;
+    /// <see cref="OpaqueModel"/> hides every face against it, a <see cref="Transparent"/> cube only those of its own type.
+    public bool HidesFaceOf(BlockId neighbour) => BlocksLight || (IsFullCube && Transparent && Id == neighbour);
 
     /// True when this block can hide a neighbour's face (see <see cref="HidesFaceOf"/>).
-    public bool HidesFaces => BlocksLight;
+    public bool HidesFaces => BlocksLight || IsFullCube;
 
     /// Classifies which texture role <paramref name="faceNormal"/> plays for a voxel whose
     /// top points <paramref name="up"/>: Top if the face points that way, Bottom if it points the opposite way,
@@ -113,3 +121,15 @@ public readonly struct BlockDef
 }
 
 public enum FaceRole : byte { Side, Top, Bottom }
+
+/// <summary>How a full-cube block's faces are drawn; <c>GreedyMesher</c> gives each layer its own mesh per chunk.</summary>
+public enum RenderLayer : byte
+{
+    /// <summary>Solid faces, drawn with the world (<c>fs_main</c>).</summary>
+    Opaque,
+
+    /// <summary>Drawn with the world, but texels under half alpha are cut out (<c>fs_cutout</c>): fully see-through
+    /// there, solid (and depth-writing) elsewhere, so it needs no sorting. Back faces aren't drawn, so looking through a
+    /// block of glass you see only its near side. For mostly clear textures like glass.</summary>
+    Cutout,
+}

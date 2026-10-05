@@ -43,7 +43,7 @@ public sealed class BlockActionSystem : ISystem, IDisposable, IDebugUiSystem
 
     private static readonly BlockId[] Placeable =
         { BlockId.Stone, BlockId.Wood, BlockId.Grass, BlockId.Dirt, BlockId.Lamp, BlockId.RedLamp, BlockId.GreenLamp,
-          BlockId.BlueLamp, BlockId.Fan, BlockId.Buoyant, BlockId.Lever, BlockId.SteeringWheel };
+          BlockId.BlueLamp, BlockId.Fan, BlockId.Buoyant, BlockId.Lever, BlockId.SteeringWheel, BlockId.Glass };
     private static readonly string[] PlaceableNames = Array.ConvertAll(Placeable, id => BlockRegistry.Get(id).Name);
 
     /// <summary>The blocks the player can place, in hotbar order.</summary>

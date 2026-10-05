@@ -12,8 +12,8 @@ namespace ClearSkies.Engine.ECS;
 
 /// <summary>
 /// Draws every loaded chunk's <see cref="ChunkRenderData"/>: frustum-culls the chunks, draws their greedy-meshed
-/// cubes nearest first, then each visible chunk's model blocks — placed at their cell, turned to their stored
-/// <see cref="BlockOrientation"/> and lit from that cell's voxel light. Runs in <see cref="SystemStage.RenderWorld"/>.
+/// cubes nearest first (opaque, then cut out), then each visible chunk's model blocks — placed at their cell, turned to
+/// their stored <see cref="BlockOrientation"/> and lit from that cell's voxel light. Runs in <see cref="SystemStage.RenderWorld"/>.
 ///
 /// The static world's chunks (tens of thousands) are kept by column, with each column's height range, so a column
 /// outside the view is skipped in one test instead of one per chunk: looking at every chunk each frame cost ~6 ms.
@@ -36,8 +36,8 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     private int _columnsVisible;
 
     // One visible chunk, collected so they can be drawn nearest first.
-    private readonly record struct ChunkDraw(float DistSq, GpuMesh? Mesh, ModelBlock[] Models, Mat4 Model, int Grid,
-                                             ChunkPosition Chunk);
+    private readonly record struct ChunkDraw(float DistSq, GpuMesh? Mesh, GpuMesh? CutoutMesh, ModelBlock[] Models,
+                                             Mat4 Model, int Grid, ChunkPosition Chunk);
     private readonly List<ChunkDraw> _draws = new();
     private static readonly Comparison<ChunkDraw> NearestFirst = (a, b) => a.DistSq.CompareTo(b.DistSq);
     private int _modelBlocksDrawn;
@@ -109,12 +109,12 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
             {
                 if (!e.Has<Rendered>()) continue; // not in the rendering layer (see EntityPresenceSystem)
                 ref readonly var rd = ref e.Get<ChunkRenderData>();
-                if (rd.Mesh == null && rd.Models.Length == 0) continue; // buried stone: nothing to draw
+                if (rd.IsEmpty) continue; // buried stone: nothing to draw
                 var origin = e.Get<Transform>().Position;
                 if (!frame.Frustum.Intersects(origin, origin + size)) continue;
                 var centre = origin + half;
-                _draws.Add(new ChunkDraw(Vector3D.DistanceSquared(centre, frame.CameraPosition), rd.Mesh, rd.Models,
-                                         Mat4.Translation(origin), rd.Grid?.Index ?? -1, rd.ChunkPos));
+                _draws.Add(new ChunkDraw(Vector3D.DistanceSquared(centre, frame.CameraPosition), rd.Mesh, rd.CutoutMesh,
+                                         rd.Models, Mat4.Translation(origin), rd.Grid?.Index ?? -1, rd.ChunkPos));
             }
         }
 
@@ -122,7 +122,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         {
             if (!e.Has<Transform>() || !e.Has<Rendered>()) continue;
             ref readonly var rd = ref e.Get<ChunkRenderData>();
-            if (rd.Mesh == null && rd.Models.Length == 0) continue;
+            if (rd.IsEmpty) continue;
 
             var t = e.DrawnPose(); // ships are drawn where they're drawn, between ticks
             Mat4 model;
@@ -138,7 +138,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
             }
 
             float distSq = Vector3D.DistanceSquared(model.TransformPoint(half), frame.CameraPosition);
-            _draws.Add(new ChunkDraw(distSq, rd.Mesh, rd.Models, model, rd.Grid?.Index ?? -1, rd.ChunkPos));
+            _draws.Add(new ChunkDraw(distSq, rd.Mesh, rd.CutoutMesh, rd.Models, model, rd.Grid?.Index ?? -1, rd.ChunkPos));
         }
 
         // Nearest first, so the depth test rejects hidden fragments before the (expensive) lighting shader runs on
@@ -146,6 +146,10 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         _draws.Sort(NearestFirst);
         foreach (var d in _draws)
             if (d.Mesh != null) _renderer.DrawChunkMesh(d.Mesh, d.Model, d.Grid, d.Chunk);
+        // Cut-out faces after all the opaque ones: their shader discards texels, which costs the early depth test, so
+        // the opaque world is drawn without it first.
+        foreach (var d in _draws)
+            if (d.CutoutMesh != null) _renderer.DrawCutoutChunkMesh(d.CutoutMesh, d.Model, d.Grid, d.Chunk);
 
         _modelBlocksDrawn = 0;
         foreach (var d in _draws)

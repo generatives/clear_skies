@@ -17,8 +17,11 @@ namespace ClearSkies.Engine.Voxels;
 /// interpolated chunk-local position and the face normal — so a merged quad no longer needs per-cell
 /// light in its merge key.
 ///
-/// A face is hidden by a neighbour that <see cref="BlockDef.HidesFaceOf"/> it: an opaque cube, or an
-/// <see cref="BlockDef.OpaqueModel"/> block, whose model covers it.
+/// <see cref="BlockDef.Transparent"/> blocks (glass) are meshed alongside but into their own <see cref="RenderLayer"/>'s
+/// mesh (<see cref="CutoutVertices"/>, <see cref="CutoutIndices"/>). They don't hide their neighbours' faces, so an
+/// opaque block behind glass still has its face; and a transparent face is hidden only by an opaque block (or
+/// <see cref="BlockDef.OpaqueModel"/>) or another of its own type. An opaque model block hides faces against it like
+/// an opaque cube, since its model covers them.
 /// </summary>
 public sealed class GreedyMesher
 {
@@ -48,6 +51,14 @@ public sealed class GreedyMesher
     private readonly bool[]     _consumed = new bool    [ChunkData.Size * ChunkData.Size];
     private readonly List<Vertex> _verts   = new();
     private readonly List<uint>   _indices = new();
+    private readonly List<Vertex> _cVerts   = new();
+    private readonly List<uint>   _cIndices = new();
+
+    /// <summary>The last <see cref="Mesh"/>'s <see cref="RenderLayer.Cutout"/> faces (reused scratch, like its return
+    /// value).</summary>
+    public List<Vertex> CutoutVertices => _cVerts;
+    public List<uint>   CutoutIndices  => _cIndices;
+
 
     private readonly TextureAtlas? _atlas;
 
@@ -57,15 +68,20 @@ public sealed class GreedyMesher
     }
 
     /// <summary>
-    /// Mesh <paramref name="chunk"/>. Neighbour ChunkData parameters are for face-culling only;
-    /// pass <c>null</c> for any unloaded neighbour (its side is treated as open air). The returned lists
-    /// are reused scratch buffers (see field docs) — consume them before calling Mesh() again.
+    /// Mesh <paramref name="chunk"/>, returning its opaque faces; its cut-out ones are left in
+    /// <see cref="CutoutVertices"/> and <see cref="CutoutIndices"/>. Neighbour ChunkData parameters are
+    /// for face-culling only; pass <c>null</c> for any unloaded neighbour (its side is treated as open air). With
+    /// <paramref name="neighboursForTransparentOnly"/>, the neighbours only cull transparent faces, and every other
+    /// border face is drawn as if the neighbour were air (see
+    /// <see cref="ChunkVolume.MeshIgnoresNeighbours"/>). The returned lists are reused scratch buffers (see field
+    /// docs) — consume them before calling Mesh() again.
     /// </summary>
     public (List<Vertex> vertices, List<uint> indices) Mesh(
         ChunkData  chunk,
         ChunkData? nX, ChunkData? pX,
         ChunkData? nY, ChunkData? pY,
-        ChunkData? nZ, ChunkData? pZ)
+        ChunkData? nZ, ChunkData? pZ,
+        bool neighboursForTransparentOnly = false)
     {
         // Array order matches Faces[] (fi=0:+X, fi=1:-X, fi=2:+Y, fi=3:-Y, fi=4:+Z, fi=5:-Z).
         ChunkData?[] neighbors = { pX, nX, pY, nY, pZ, nZ };
@@ -74,6 +90,8 @@ public sealed class GreedyMesher
         var indices = _indices;
         verts.Clear();
         indices.Clear();
+        _cVerts.Clear();
+        _cIndices.Clear();
         int sz      = ChunkData.Size;
 
         for (int fi = 0; fi < Faces.Length; fi++)
@@ -94,7 +112,8 @@ public sealed class GreedyMesher
                 for (int v = 0; v < sz; v++)
                 {
                     var blockId = GetBlock(chunk, face, slice, u, v);
-                    if (!BlockRegistry.Get(blockId).IsFullCube) continue; // air, or a model block (drawn separately)
+                    ref readonly var blockDef = ref BlockRegistry.Get(blockId);
+                    if (!blockDef.IsFullCube) continue; // air, or a model block (drawn separately)
 
                     BlockId adjId;
                     if (adjSlice < 0 || adjSlice >= sz)
@@ -103,6 +122,8 @@ public sealed class GreedyMesher
                         else {
                             int nbSlice = face.FaceOffset == 1 ? 0 : sz - 1;
                             adjId = GetBlock(nb, face, nbSlice, u, v);
+                            // Only transparent faces are culled across the border.
+                            if (neighboursForTransparentOnly && !blockDef.Transparent) adjId = BlockId.Air;
                         }
                     }
                     else
@@ -164,7 +185,15 @@ public sealed class GreedyMesher
                     if (_atlas != null && _atlas.TryGetLayer(texName, out int l))
                         layer = l;
 
-                    EmitQuad(verts, indices, face, slice + face.FaceOffset, u, v, du, dv, def.Color, layer);
+                    switch (def.Layer)
+                    {
+                        case RenderLayer.Cutout:
+                            EmitQuad(_cVerts, _cIndices, face, slice + face.FaceOffset, u, v, du, dv, def.Color, layer);
+                            break;
+                        default:
+                            EmitQuad(verts, indices, face, slice + face.FaceOffset, u, v, du, dv, def.Color, layer);
+                            break;
+                    }
                 }
             }
         }
