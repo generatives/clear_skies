@@ -39,9 +39,6 @@ public sealed class HeadlessScene : IDisposable
     private readonly List<Engine.Core.ISystem> _tick = new();
 
     public readonly EntityIdAllocator Ids;
-    public WorldSaver? Saver;
-    public EntityStreamingSystem? Streaming;
-    public StoredEntityIndex? Index;
 
     public HeadlessScene(Session? session = null, uint firstFreeId = EntityRegistry.FirstFreeId)
     {
@@ -101,18 +98,6 @@ public sealed class HeadlessScene : IDisposable
 
     /// <summary>Runs <paramref name="system"/> each tick just before the physics step (e.g. flight).</summary>
     public void AddBeforePhysics(Engine.Core.ISystem system) => _tick.Insert(_tick.IndexOf(Physics), system);
-
-    /// <summary>Saves to <paramref name="db"/> and streams entities from it, as the authority does (after the hierarchy),
-    /// recording the next free ID of <paramref name="ids"/> (the scene's own if none: the Host's, once it has one).</summary>
-    public void EnablePersistence(SaveDatabase db, EntityIdAllocator? ids = null)
-    {
-        Index = new StoredEntityIndex(db.ReadEntityIndex());
-        Saver = new WorldSaver(World, db, Index, Commands, ids ?? Ids);
-        Streaming = new EntityStreamingSystem(World, db, Index, Registry, Commands, Saver);
-        int at = _tick.FindIndex(s => s is HierarchyTransformSystem) + 1;
-        _tick.Insert(at, Streaming);
-        _tick.Insert(at + 1, Saver);
-    }
 
     public void Tick(int count = 1)
     {

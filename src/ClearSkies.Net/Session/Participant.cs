@@ -15,13 +15,13 @@ namespace ClearSkies.Net.Session;
 
 /// <summary>
 /// A Participant: an ECS world kept in step with the game, on every machine that plays, the hosting one's included.
-/// One connection, to the Host, which everything it sends goes through. The Host spawns into it every entity the
-/// authority has and has it forget what's released; each spawn waits here, with its events, until what it needs has
-/// loaded (<see cref="SpawnQueue"/>). It keeps the Host told of its View Volume, around its player.
+/// One connection, to the Host, which everything it sends goes through. The Host spawns into it what's in its View
+/// Volume (which it keeps the Host told of, around its player) and has it forget what leaves; each spawn waits here,
+/// with its events, until what it needs has loaded (<see cref="SpawnQueue"/>).
 /// <para>The hosting machine's is the authority (<see cref="PeerId.Host"/>): it simulates every entity, players
 /// included (moving each by their machine's input, <see cref="RemoteInputs"/>), decides every command, and describes
-/// entities for the Host: ones it makes or loads, ones the Host asks for, and ones the Host releases (then despawns
-/// them); it tells the Host of every one it despawns. It shares the Host's clock. Any other simulates only its own player, predicting it
+/// entities for the Host: ones it makes, ones the Host asks for, ones the Host releases (then despawns them), and
+/// everything when the Host saves. It shares the Host's clock. Any other simulates only its own player, predicting it
 /// (<see cref="OwnPlayerPrediction"/>), and keeps its clock on the Host's (<see cref="ClockSync"/>). Its player spawns
 /// only once that has settled (<see cref="ClockSync.Settling"/>, for at most <see cref="MaxSettleMs"/>), so prediction
 /// starts on the Host's timeline.</para>
@@ -36,6 +36,7 @@ public sealed class Participant : NetSession
     private readonly SpawnQueue _spawns;
     private readonly RemoteInputs? _inputs;
     private readonly EntitySet _localPlayers;
+    private readonly EntitySet _describable;
     private readonly EntitySet _created;
     private readonly HashSet<EntityId> _fromHost = new();
     private readonly List<EntityId> _deleted = new();
@@ -71,6 +72,7 @@ public sealed class Participant : NetSession
         _spawns = new SpawnQueue(world, registry, commands, session, terrainReady) { LocalReady = () => _clockReady };
         _spawns.Spawning += id => _fromHost.Add(id);
         _localPlayers = world.GetEntities().With<LocalPlayer>().With<Transform>().AsSet();
+        _describable = world.GetEntities().With<EntityId>().With<OwnPresence>().Without<Chunk>().AsSet();
         _created = world.GetEntities().With<EntityId>().With<OwnPresence>().Without<Chunk>().WhenAdded<OwnPresence>().AsSet();
         commands.Applied += OnApplied;
     }
@@ -226,6 +228,11 @@ public sealed class Participant : NetSession
             case MessageKind.DescribeRequest when IsAuthority:
                 Describe(EntityMessage.Read(kind, ref r).Id, DescribedReason.Requested);
                 break;
+            case MessageKind.SaveRequest when IsAuthority:
+                foreach (var e in Commands.Describe(_describable.GetEntities().ToArray())) SendDescribed(e, DescribedReason.Save);
+                foreach (var p in _spawns.All) SendDescribed(p, DescribedReason.Save);
+                Send(HostConnection, new SignalMessage(MessageKind.SaveDone));
+                break;
             case MessageKind.TimePong:
                 ClockSync?.OnPong(TimePong.Read(ref r), NowMs);
                 break;
@@ -251,7 +258,7 @@ public sealed class Participant : NetSession
 
     // ── entities coming and going ───────────────────────────────────────────
 
-    /// <summary>Released: the copy goes.</summary>
+    /// <summary>Out of view: the copy goes (it's still in the game; it comes back as a spawn if it comes back into view).</summary>
     private void Forget(EntityId id)
     {
         if (_spawns.Cancel(id) is null && Registry.TryGet(id, out var e)) Hierarchy.DestroyRecursive(e);
@@ -293,9 +300,8 @@ public sealed class Participant : NetSession
     {
         if (evt is not DespawnEntity despawn) return;
         Commands.ForgetEvents(despawn.Entity);
-        // Gone from the authority (unloaded, deleted, broken up, released): the Host stops keeping it. Told next tick,
-        // after its event.
-        if (IsAuthority) _deleted.Add(despawn.Entity);
+        // Gone for good (deleted, broken up), not released: out of the save too. Told next tick, after its event.
+        if (IsAuthority && !despawn.KeepStored) _deleted.Add(despawn.Entity);
     }
 
     private void SendDescribed(EntityDescription d, DescribedReason reason)

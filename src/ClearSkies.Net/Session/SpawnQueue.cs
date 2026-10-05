@@ -2,7 +2,6 @@ using System.Numerics;
 using ClearSkies.Engine.Commands;
 using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Entities;
-using ClearSkies.Engine.Persistence;
 using ClearSkies.Net.Protocol;
 using DefaultEcs;
 using Silk.NET.Maths;
@@ -91,7 +90,6 @@ public sealed class SpawnQueue
             p.Anchor = _world.CreateEntity();
             p.Anchor.Set(new Transform { Position = new Vector3D<float>(m.Position.X, m.Position.Y, m.Position.Z), Rotation = Quaternion<float>.Identity, Scale = Vector3D<float>.One });
             p.Anchor.Set(new TerrainInterest { ColliderRadius = EntityPresenceSystem.ColliderRange, DrawRadius = p.Local ? 1000 : 0 });
-            p.Anchor.Set<SpawnAnchor>(); // the save's entities stream around it too (on the authority), so its ship loads
         }
         _pending.Add(p);
     }

@@ -36,18 +36,18 @@ public sealed class HostPeer
     public bool IsAuthority => Peer == PeerId.Host;
 }
 
-/// <summary>An entity as the Host keeps it: one the authority has, or a player about to spawn there. Everything but its kind,
+/// <summary>An entity as the Host keeps it: in the save, or loaded (simulated by the authority). Everything but its kind,
 /// where it is and its last event number is its Description, which only the authority reads; the Host reads a player's,
 /// for where they stand on their ship.</summary>
 public sealed class HostEntity
 {
     public required EntityId Id;
     public ushort Kind;
-    /// <summary>Its latest Description.</summary>
+    /// <summary>Its latest Description (null: in the save, not read yet).</summary>
     public byte[]? Data;
     /// <summary>The authority's last event the Description includes.</summary>
     public uint EventNumber;
-    /// <summary>Where it is (null: a global entity) and which way it faces, as last described or
+    /// <summary>Where it is (null: a global entity, in every view) and which way it faces, as last described or
     /// snapshotted.</summary>
     public Vector3? Position;
     public Quaternion Rotation = Quaternion.Identity;
@@ -64,7 +64,7 @@ public sealed class HostEntity
     public bool Releasing;
     /// <summary>A player whose machine left: they go once released.</summary>
     public bool Leaving;
-    /// <summary>The tick <see cref="Data"/> was last described (or read from the save, for a player): within that
+    /// <summary>The tick <see cref="Data"/> was last described (or read from the save, while not loaded): within that
     /// tick it's still current, so it can be sent as it is.</summary>
     public uint DescribedTick = uint.MaxValue;
 
@@ -72,22 +72,29 @@ public sealed class HostEntity
 }
 
 /// <summary>
-/// The Host: coordinates, and simulates nothing (it has no ECS world). Participants connect to it, the hosting machine's
-/// over an in-process link (it has authority over every entity, so far), everyone else's over the network; it relays
-/// every message between them, as none talk to each other. It keeps a record of every entity the authority has
-/// (<see cref="HostEntity"/>), as the authority announces them (made, loaded from the save, despawned), and from those:
+/// The Host: coordinates and persists, and simulates nothing (it has no ECS world). Participants connect to it, the
+/// hosting machine's over an in-process link (it has authority over every entity, so far), everyone else's over the
+/// network; it relays every message between them, as none talk to each other. It keeps a record of every entity
+/// (<see cref="HostEntity"/>), loaded or in the save, and each Participant's View Volume, and from those:
 /// <list type="bullet">
-/// <item>streams to each Participant every entity (a fresh Description, asked of the authority) and has it forget what's
-/// released; events and snapshots go only to Participants that have their entity;</item>
-/// <item>lets players in (spawning their Character where they left off, on their ship as it is now) and out (released:
-/// the authority describes them a last time, and the Host writes that to the save).</item>
+/// <item>loads what comes into any view (the save's Description, spawned on the authority first, then everyone else),
+/// and releases what leaves every view (the authority describes it a last time, for the save, and despawns it);</item>
+/// <item>streams to each Participant everything loaded (a fresh Description, asked of the authority) and has it forget
+/// what's released; events and snapshots go only to Participants that have their entity;</item>
+/// <item>lets players in (spawning their Character where they left off, on their ship as it is now) and out (released
+/// like anything else, even in someone's view);</item>
+/// <item>saves: the authority describes everything every <see cref="AutosaveSeconds"/> and on exit, written in one
+/// transaction.</item>
 /// </list>
-/// The authority's world loads, unloads and saves everything else itself.
 /// </summary>
 public sealed class Host : ISystem, IDisposable
 {
-    /// <summary>How far a Participant sees entities (its View Volume's radius).</summary>
+    /// <summary>How far a Participant sees entities (its View Volume's radius): an entity loads within this of any view,
+    /// and is released past this × <see cref="Hysteresis"/> from every view, so nothing near an edge flickers.</summary>
     public const float ViewRadius = 1000f;
+    public const float Hysteresis = 1.1f;
+    public const float AutosaveSeconds = 300f;
+    private const int MaxLoadsPerTick = 4;
 
     private readonly HostTransport _transport;
     private readonly SaveDatabase _db;
@@ -100,7 +107,9 @@ public sealed class Host : ISystem, IDisposable
     private readonly List<BodySnapshot> _snapshots = new();
     private readonly List<BodySnapshot> _frame = new();
     private readonly List<EntityId> _scratch = new();
+    private readonly List<(HostEntity Entity, byte[] Data, Vector3? Position)> _saving = new();
     private uint _idNext, _idEnd;
+    private float _sinceSave;
 
     /// <param name="newPlayerSpawn">Where a new player's Character spawns (its capsule's centre), and which way they face.</param>
     public Host(HostTransport transport, SaveDatabase db, ITickClock clock, ulong seed, ulong generationChecksum,
@@ -114,6 +123,8 @@ public sealed class Host : ISystem, IDisposable
         NewPlayerSpawn = newPlayerSpawn;
         // Entity IDs come in blocks from the save's next free ID, so they never repeat across sessions.
         _ids = new EntityIdAllocator(db.NextFreeId);
+        foreach (var stored in db.ReadEntityIndex())
+            _entities[stored.Id] = new HostEntity { Id = stored.Id, Kind = stored.Kind, Position = stored.Position };
         transport.Connected += OnConnected;
         transport.Disconnected += OnDisconnected;
         transport.Received += OnReceived;
@@ -121,8 +132,9 @@ public sealed class Host : ISystem, IDisposable
 
     public (Vector3 Position, float Yaw, float Pitch) NewPlayerSpawn { get; }
 
-    /// <summary>Where entity IDs come from, so the save can record the next free one.</summary>
-    public EntityIdAllocator Ids => _ids;
+    /// <summary>Called inside a save's transaction, to write edited terrain (until terrain chunks are described like
+    /// entities, the authority's world writes them itself).</summary>
+    public Action? SaveChunks { get; set; }
 
     public IReadOnlyCollection<HostPeer> Peers => _peers.Values;
     public IEnumerable<HostPeer> Welcomed => _peers.Values.Where(p => p.Welcomed);
@@ -135,16 +147,21 @@ public sealed class Host : ISystem, IDisposable
     /// <summary>Whether anyone but the hosting machine is in.</summary>
     public bool OthersConnected => _peers.Values.Any(p => p.Welcomed && !p.IsAuthority);
 
-    /// <summary>Players released this session (as they left).</summary>
+    /// <summary>Saves finished this session (each one's Descriptions written).</summary>
+    public int Saves { get; private set; }
+    public bool Saving { get; private set; }
+    public long Loads { get; private set; }
     public long Releases { get; private set; }
 
     private HostPeer? PeerById(PeerId id) => _peers.Values.FirstOrDefault(p => p.Peer == id);
 
-    /// <summary>Once a tick, first: everything that arrived, then what each Participant is owed.</summary>
+    /// <summary>Once a tick, first: everything that arrived, then what comes into and leaves each view, and the autosave.</summary>
     public void Update(float dt)
     {
         _transport.Poll();
         Stream();
+        _sinceSave += dt;
+        if (_sinceSave >= AutosaveSeconds) SaveAll();
     }
 
     /// <summary>Last in the hosting machine's tick: passes on at once what its Participant sent this tick (its events and
@@ -160,7 +177,8 @@ public sealed class Host : ISystem, IDisposable
     {
         if (!_peers.Remove(connection, out var peer) || !peer.Welcomed) return;
         Console.WriteLine($"[net] {peer.Name} ({peer.Peer}) left: {reason}");
-        // Their Character is released: its last Description is where they rejoin.
+        // Their Character goes through the handshake like anything else, even in someone's view: its last Description
+        // is where they rejoin.
         if (_entities.TryGetValue(peer.PlayerEntity, out var player))
         {
             player.Leaving = true;
@@ -312,6 +330,9 @@ public sealed class Host : ISystem, IDisposable
             case MessageKind.Deleted when peer.IsAuthority:
                 OnDeleted(EntityMessage.Read(kind, ref r).Id);
                 break;
+            case MessageKind.SaveDone when peer.IsAuthority:
+                WriteSave();
+                break;
             case MessageKind.Disconnect:
                 _transport.Disconnect(peer.Connection, DisconnectMessage.Read(ref r).Reason);
                 break;
@@ -389,6 +410,9 @@ public sealed class Host : ISystem, IDisposable
             case DescribedReason.Released:
                 OnReleased(e);
                 break;
+            case DescribedReason.Save:
+                _saving.Add((e, e.Data, e.Position));
+                break;
         }
     }
 
@@ -409,10 +433,11 @@ public sealed class Host : ISystem, IDisposable
     private void OnDeleted(EntityId id)
     {
         if (!_entities.Remove(id)) return;
+        _db.InTransaction(() => _db.DeleteEntity(id));
         foreach (var p in _peers.Values) { p.Known.Remove(id); p.Requested.Remove(id); }
     }
 
-    // ── streaming ───────────────────────────────────────────────────────────
+    // ── views ───────────────────────────────────────────────────────────────
 
     /// <summary>Where an entity is in the world: a player on their ship as the ship is now.</summary>
     public Vector3 WorldPosition(HostEntity e)
@@ -422,21 +447,53 @@ public sealed class Host : ISystem, IDisposable
         return e.Position ?? Vector3.Zero;
     }
 
+    /// <summary>Whether <paramref name="peer"/> sees <paramref name="e"/>: within its View Volume, or (if it
+    /// <paramref name="already"/> has it) a little past. A global entity is in every view.</summary>
+    private bool Sees(HostPeer peer, HostEntity e, bool already)
+    {
+        if (e.Position is null && !e.IsPlayer) return true;
+        if (peer.ViewRadius <= 0) return false;
+        return Vector3.Distance(WorldPosition(e), peer.ViewCentre) <= (already ? peer.ViewRadius * Hysteresis : peer.ViewRadius);
+    }
+
+    private bool AnyoneSees(HostEntity e, bool already)
+    {
+        foreach (var p in Welcomed) if (p.Ready && Sees(p, e, already)) return true;
+        return false;
+    }
+
     /// <summary>
-    /// Each tick: players not yet spawned are (on the authority, from their Description), and each Participant is sent
-    /// what it doesn't have yet (a fresh Description, asked of the authority unless it's already this tick's). Nothing
-    /// happens before the authority is here.
+    /// Each tick: entities that left every view are released, stored ones that came into a view are loaded (spawned on
+    /// the authority, from the save's Description), and each Participant is sent what has loaded since (a fresh
+    /// Description, asked of the authority unless it's already this tick's). Nothing happens before the authority is
+    /// here, and nothing is loaded or released while nobody has a view.
     /// </summary>
     private void Stream()
     {
         if (Authority is not { } authority) return;
 
+        // With no view anywhere (nobody in yet), there's nothing to load around and nothing is released.
+        bool viewed = Welcomed.Any(p => p.Ready && p.ViewRadius > 0);
+        if (viewed)
+            foreach (var e in _entities.Values)
+                if (e.Loaded && !e.Releasing && !e.IsPlayer && !AnyoneSees(e, already: true)) Release(e);
+
+        int loads = 0;
         foreach (var e in _entities.Values)
         {
-            if (e.Loaded || !e.IsPlayer) continue;
+            if (loads >= MaxLoadsPerTick || !viewed) break;
+            if (e.Loaded || e.Releasing || !(AnyoneSees(e, already: false) || e.IsPlayer)) continue;
+            if (e.Data is null)
+            {
+                // The index and the entities table change together (saved and deleted together), so the row is there.
+                var row = _db.ReadEntity(e.Id) ?? throw new InvalidOperationException($"Stored entity {e.Id} has no row in the save.");
+                (e.Kind, e.Data) = (row.Kind, row.Data);
+            }
             e.Loaded = true;
             e.DescribedTick = _clock.Tick; // the save's, and nothing newer exists anywhere
             SendSpawn(authority, e);
+            loads++;
+            Loads++;
         }
 
         foreach (var p in Welcomed)
@@ -478,6 +535,32 @@ public sealed class Host : ISystem, IDisposable
     }
 
     // ── saving ──────────────────────────────────────────────────────────────
+
+    /// <summary>Asks the authority to describe everything; written in one transaction once it has (see
+    /// <see cref="Saving"/>).</summary>
+    public void SaveAll()
+    {
+        _sinceSave = 0;
+        if (Authority is not { } authority || Saving) return;
+        Saving = true;
+        _saving.Clear();
+        Send(authority.Connection, new SignalMessage(MessageKind.SaveRequest));
+    }
+
+    private void WriteSave()
+    {
+        if (!Saving) return;
+        _db.InTransaction(() =>
+        {
+            foreach (var (e, data, position) in _saving) Write(e, data, position);
+            SaveChunks?.Invoke();
+            _db.NextFreeId = _ids.NextFree;
+        });
+        Console.WriteLine($"[save] saved {_saving.Count} entities and players");
+        _saving.Clear();
+        Saving = false;
+        Saves++;
+    }
 
     /// <summary>Writes one Description: a player's to the players table, anything else's to the entities table.</summary>
     private void Write(HostEntity e, byte[] data, Vector3? position)
