@@ -175,13 +175,13 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
     // here. One job in flight per chunk, same pattern as ChunkMeshSystem: a chunk re-dirtied mid-job is
     // re-dispatched once that job lands, and a result for a chunk unloaded meanwhile is dropped. A chunk's old
     // collider stays in place until its replacement arrives, so an edit never opens a hole for a frame.
-    /// <summary>Starts (or, for an empty chunk, completes) <paramref name="entry"/>'s collider rebuild; false if every
-    /// job slot is taken.</summary>
+    /// <summary>Starts (or, for a chunk with nothing that collides, completes) <paramref name="entry"/>'s collider
+    /// rebuild; false if every job slot is taken.</summary>
     private bool UpdateStaticCollider(ChunkEntry entry)
     {
         var pos = entry.Position;
 
-        if (!entry.Data.HasAnySolid())
+        if (!entry.Data.HasAnyColliding())
         {
             if (_colliders.Remove(pos, out var old)) _physics.RemoveStaticCompound(old.handle);
             return true;
@@ -243,8 +243,9 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
     /// collidable, as opposed to just loaded/rendered.</summary>
     public bool HasCollider(ChunkPosition pos) => _colliders.ContainsKey(pos);
 
-    /// <summary>Whether every loaded terrain chunk with blocks within <paramref name="radius"/> of
-    /// <paramref name="centre"/> has its collider, so a body placed there won't fall through.</summary>
+    /// <summary>Whether every loaded terrain chunk with colliding blocks within <paramref name="radius"/> of
+    /// <paramref name="centre"/> has its collider, so a body placed there won't fall through. (A chunk of only
+    /// passable blocks, e.g. levers, has blocks but never gets a collider.)</summary>
     public bool CollidersReady(ChunkVolume world, PhysVec centre, float radius)
     {
         int r = (int)MathF.Ceiling(radius / S);
@@ -252,7 +253,7 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
         for (int dz = -r; dz <= r; dz++) for (int dy = -r; dy <= r; dy++) for (int dx = -r; dx <= r; dx++)
         {
             var pos = new ChunkPosition(cx + dx, cy + dy, cz + dz);
-            if (world.GetEntry(pos) is { } entry && entry.Data.HasAnySolid() && !_colliders.ContainsKey(pos)) return false;
+            if (world.GetEntry(pos) is { } entry && entry.Data.HasAnyColliding() && !_colliders.ContainsKey(pos)) return false;
         }
         return true;
     }
@@ -281,7 +282,7 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
 
         foreach (var (pos, entry) in chunkVolume.All)
         {
-            if (!entry.Data.HasAnySolid()) continue;
+            if (!entry.Data.HasAnyColliding()) continue;
             var o = pos.WorldOrigin;
             foreach (var (c, s, id) in _decomposer.Decompose(entry.Data))
             {

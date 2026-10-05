@@ -83,7 +83,7 @@ public static class StreamingBenchmark
                 {
                     if (!loaded[p]) continue;
                     loaded[p] = false;
-                    if (!cache[p].HasAnySolid()) continue;
+                    if (!cache[p].HasAnyNonAir()) continue;
                     meshCount[p] = meshCount.GetValueOrDefault(p) + 1;
                     if (++built >= MeshesPerFrame) break;
                 }
@@ -104,7 +104,7 @@ public static class StreamingBenchmark
         var sw = new Stopwatch();
         foreach (var (p, d) in cache)
         {
-            if (!d.HasAnySolid()) continue;
+            if (!d.HasAnyNonAir()) continue;
             sw.Restart();
             var boxes = decomposer.Decompose(d);
             tDec.Add(sw.Elapsed.TotalMicroseconds);
@@ -144,7 +144,7 @@ public static class StreamingBenchmark
             var total = new List<double>(); var counts = new List<int>();
             foreach (var d in cache.Values)
             {
-                if (!d.HasAnySolid()) continue;
+                if (!d.HasAnyNonAir()) continue;
                 sw.Restart();
                 var boxes = decomposer.Decompose(d, merge);
                 pool.Take<CompoundChild>(boxes.Count, out var children);
@@ -180,7 +180,7 @@ public static class StreamingBenchmark
         var worker = new List<double>(); var main = new List<double>();
         foreach (var d in cache.Values)
         {
-            if (!d.HasAnySolid()) continue;
+            if (!d.HasAnyNonAir()) continue;
             sw.Restart();
             var boxes = decomposer.Decompose(d, mergeBlockTypes: true);
             if (boxes.Count == 0) continue;
@@ -195,7 +195,7 @@ public static class StreamingBenchmark
         int same = 0, diff = 0;
         foreach (var d in cache.Values)
         {
-            if (!d.HasAnySolid()) continue;
+            if (!d.HasAnyNonAir()) continue;
             var boxes = decomposer.Decompose(d, mergeBlockTypes: true);
             if (boxes.Count <= 1) continue; // single box: AddStaticCompound uses BigCompound's own constructor
             var build = ClearSkies.Engine.Physics.PhysicsWorld.PrepareStaticCompound(boxes);
