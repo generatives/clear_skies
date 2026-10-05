@@ -293,7 +293,7 @@ public class ClockSyncTests
         p.Client.Tick -= 9;
         p.Client.DroppedTicks += 9;
         Assert.InRange(p.Off, 8.5, 9.5);
-        p.Sync.Update();
+        p.Sync.Update(p.NowMs);
         Assert.InRange(p.Off, -0.5, 0.5);
         Assert.Equal(9, p.Sync.SkippedTicks);
 

@@ -23,7 +23,7 @@ namespace ClearSkies.Net.Session;
 /// entities for the Host: ones it makes, ones the Host asks for, ones the Host releases (then despawns them), and
 /// everything when the Host saves. It shares the Host's clock. Any other simulates only its own player, predicting it
 /// (<see cref="OwnPlayerPrediction"/>), and keeps its clock on the Host's (<see cref="ClockSync"/>). Its player spawns
-/// only once that has settled (<see cref="ClockSync.Settling"/>, for at most <see cref="MaxSettleMs"/>), so prediction
+/// only once that has settled (<see cref="ClockSync.Ready"/>, for at most <see cref="ClockSync.MaxSettleMs"/>), so prediction
 /// starts on the Host's timeline.</para>
 /// </summary>
 public sealed class Participant : NetSession
@@ -43,12 +43,6 @@ public sealed class Participant : NetSession
     private bool _idRequested;
     private int _viewTicks;
     private bool _viewSent;
-    private double _settleFrom = double.NaN;
-    private bool _clockReady;
-
-    /// <summary>The longest a join waits for the clock to settle, in milliseconds: a jittery connection may never
-    /// quite, and it carries on slewing once joined.</summary>
-    public const double MaxSettleMs = 10_000;
 
     /// <param name="welcome">The Host's welcome (see <see cref="Connect"/>).</param>
     /// <param name="terrainReady">Whether the terrain around a point has loaded here, with colliders.</param>
@@ -56,7 +50,7 @@ public sealed class Participant : NetSession
                        World world, ITickClock clock, Func<Vector3, bool> terrainReady)
         : base(transport, session, commands, registry, world, clock)
     {
-        Welcome = welcome;
+        SpawnPoint = welcome.Spawn;
         session.Join(welcome.Peer);
         registry.AddIdBlock(welcome.IdFirst, welcome.IdCount);
         if (!IsAuthority)
@@ -64,12 +58,8 @@ public sealed class Participant : NetSession
             ClockSync = new ClockSync(clock) { Settling = true };
             ClockSync.SnapTo(welcome.HostTick);
         }
-        else
-        {
-            _inputs = new RemoteInputs(world, registry);
-            _clockReady = true;
-        }
-        _spawns = new SpawnQueue(world, registry, commands, session, terrainReady) { LocalReady = () => _clockReady };
+        else _inputs = new RemoteInputs(world, registry);
+        _spawns = new SpawnQueue(world, registry, commands, session, terrainReady) { LocalReady = () => ClockReady };
         _spawns.Spawning += id => _fromHost.Add(id);
         _localPlayers = world.GetEntities().With<LocalPlayer>().With<Transform>().AsSet();
         _describable = world.GetEntities().With<EntityId>().With<OwnPresence>().Without<Chunk>().AsSet();
@@ -77,13 +67,16 @@ public sealed class Participant : NetSession
         commands.Applied += OnApplied;
     }
 
-    public Welcome Welcome { get; }
+    /// <summary>Where its player first spawns (or, for a dedicated host, nowhere in particular).</summary>
+    public Vector3 SpawnPoint { get; }
 
     /// <summary>The hosting machine's: authority over every entity.</summary>
     public bool IsAuthority => Session.LocalPeer == PeerId.Host;
 
     /// <summary>Keeps this machine's clock on the Host's (none on the authority, which shares it).</summary>
     public ClockSync? ClockSync { get; }
+
+    private bool ClockReady => ClockSync?.Ready ?? true;
 
     /// <summary>Other machines' input, applied to the players they play (the authority only).</summary>
     public RemoteInputs? Inputs => _inputs;
@@ -127,39 +120,42 @@ public sealed class Participant : NetSession
     public override void Update(float dt)
     {
         base.Update(dt);
-        foreach (var id in _deleted) Send(HostConnection, new EntityMessage(MessageKind.Deleted, id));
-        _deleted.Clear();
+        ReportDeleted();
         AnnounceCreated();
         _inputs?.Update();
         _spawns.Update();
-        if (!Joined && _localPlayers.Count > 0) Console.WriteLine($"[net] in the game, as {Session.LocalPeer}");
-        Joined = _localPlayers.Count > 0;
-        if (ClockSync is { } sync)
-        {
-            sync.Update();
-            if (sync.ShouldPing(NowMs)) Send(HostConnection, new TimePing(NowMs), Channel.Unreliable);
-            if (!_clockReady) Settle(sync);
-        }
-        if (!Joined) JoinStatus = !_clockReady ? "Syncing with the host" : _spawns.All.Any(p => p.Local) ? "Loading the world" : "Waiting for the host";
+        UpdateJoined();
+        SyncClock();
         if (!_viewSent || (Viewing && ++_viewTicks >= ViewTicks)) SendView();
-        if (Registry.IdsLeft < EntityRegistry.BlockSize / 4 && !_idRequested)
-        {
-            Send(HostConnection, new IdBlockRequest());
-            _idRequested = true;
-        }
+        RequestIdsIfLow();
     }
 
-    /// <summary>Lets its player spawn once the clock has settled, or after <see cref="MaxSettleMs"/> regardless.</summary>
-    private void Settle(ClockSync sync)
+    /// <summary>On the authority: what it despawned last tick, which the Host stops keeping.</summary>
+    private void ReportDeleted()
     {
-        if (double.IsNaN(_settleFrom)) _settleFrom = NowMs;
-        if (!sync.Settled && NowMs - _settleFrom <= MaxSettleMs) return;
-        _clockReady = true;
-        double waited = (NowMs - _settleFrom) / 1000;
-        Console.WriteLine(sync.Settled
-            ? $"[net] clock settled after {waited:0.0} s: {sync.Offset:+0.00;-0.00} ticks off, round trip {sync.RoundTripMs:0} ms, {sync.Snaps} snaps, {sync.SkippedTicks} dropped ticks put back"
-            : $"[net] clock didn't settle in {waited:0.0} s: {sync.Offset:+0.00;-0.00} ticks off, round trip {sync.RoundTripMs:0} ms, {sync.Snaps} snaps, {sync.SkippedTicks} dropped ticks put back; joining anyway");
-        sync.EndSettling(NowMs); // from here on, its player is predicted from it: slew
+        foreach (var id in _deleted) Send(HostConnection, new EntityMessage(MessageKind.Deleted, id));
+        _deleted.Clear();
+    }
+
+    private void UpdateJoined()
+    {
+        if (!Joined && _localPlayers.Count > 0) Console.WriteLine($"[net] in the game, as {Session.LocalPeer}");
+        Joined = _localPlayers.Count > 0;
+        if (!Joined) JoinStatus = !ClockReady ? "Syncing with the host" : _spawns.All.Any(p => p.Local) ? "Loading the world" : "Waiting for the host";
+    }
+
+    private void SyncClock()
+    {
+        if (ClockSync is not { } sync) return;
+        sync.Update(NowMs);
+        if (sync.ShouldPing(NowMs)) Send(HostConnection, new TimePing(NowMs), Channel.Unreliable);
+    }
+
+    private void RequestIdsIfLow()
+    {
+        if (_idRequested || Registry.IdsLeft >= EntityRegistry.BlockSize / 4) return;
+        Send(HostConnection, new IdBlockRequest());
+        _idRequested = true;
     }
 
     /// <summary>The View Volume: around its player, or where its player will spawn until then (none, but sent once, as
@@ -168,7 +164,7 @@ public sealed class Participant : NetSession
     {
         _viewTicks = 0;
         _viewSent = true;
-        var centre = Welcome.Spawn;
+        var centre = SpawnPoint;
         foreach (ref readonly var e in _localPlayers.GetEntities())
         {
             var t = e.Get<Transform>().Position;
