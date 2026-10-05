@@ -46,7 +46,7 @@ public static class GenerationBenchmark
             genTimesUs.Add(sw.Elapsed.TotalMicroseconds);
 
             dataByPos[pos] = data;
-            if (!data.HasAnySolid()) emptyCount++;
+            if (!data.HasAnyNonAir()) emptyCount++;
         }
         double genWallMs = overall.Elapsed.TotalMilliseconds;
 
@@ -59,7 +59,7 @@ public static class GenerationBenchmark
         foreach (var pos in positions)
         {
             var data = dataByPos[pos];
-            if (!data.HasAnySolid()) continue;
+            if (!data.HasAnyNonAir()) continue;
 
             dataByPos.TryGetValue(pos.Offset(-1, 0, 0), out var nX);
             dataByPos.TryGetValue(pos.Offset(1, 0, 0), out var pX);
@@ -86,7 +86,7 @@ public static class GenerationBenchmark
         foreach (var pos in positions)
         {
             var data = dataByPos[pos];
-            if (!data.HasAnySolid()) continue;
+            if (!data.HasAnyNonAir()) continue;
 
             sw.Restart();
             decomposer.Decompose(data);

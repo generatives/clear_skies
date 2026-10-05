@@ -40,10 +40,6 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
 
     // One BigCompound static per non-empty chunk; box count kept only for the debug panel.
     private readonly Dictionary<ChunkPosition, (StaticHandle handle, int boxes)> _colliders = new();
-
-    // Chunks whose collider was built and came out empty: they have blocks, but none that collide (water, levers), so
-    // they have no static. Kept so CollidersReady counts them as done instead of waiting for them forever.
-    private readonly HashSet<ChunkPosition> _emptyColliders = new();
     private readonly List<BodyHandle> _removedBodies = new();
     private readonly List<ChunkEntry> _removedChunks = new();
 
@@ -104,7 +100,7 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
         foreach (ref readonly Entity entity in _terrainGainedPresence.GetEntities()) entity.Set<NeedsRecollideFlag>();
         _terrainGainedPresence.Complete();
         foreach (ref readonly Entity entity in _terrainLostPresence.GetEntities())
-            RemoveCollider(entity.Get<Chunk>().Entry.Position);
+            if (_colliders.Remove(entity.Get<Chunk>().Entry.Position, out var old)) _physics.RemoveStaticCompound(old.handle);
         _terrainLostPresence.Complete();
 
         // Grids: a body while simulated here, none otherwise.
@@ -130,7 +126,7 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
             if (entity.Has<PhysicsPresence>()) _near.Add(entity);
             else
             {
-                RemoveCollider(entry.Position);
+                if (_colliders.Remove(entry.Position, out var old)) _physics.RemoveStaticCompound(old.handle);
                 _far.Add(entity);
             }
         }
@@ -179,15 +175,15 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
     // here. One job in flight per chunk, same pattern as ChunkMeshSystem: a chunk re-dirtied mid-job is
     // re-dispatched once that job lands, and a result for a chunk unloaded meanwhile is dropped. A chunk's old
     // collider stays in place until its replacement arrives, so an edit never opens a hole for a frame.
-    /// <summary>Starts (or, for an empty chunk, completes) <paramref name="entry"/>'s collider rebuild; false if every
-    /// job slot is taken.</summary>
+    /// <summary>Starts (or, for a chunk with nothing that collides, completes) <paramref name="entry"/>'s collider
+    /// rebuild; false if every job slot is taken.</summary>
     private bool UpdateStaticCollider(ChunkEntry entry)
     {
         var pos = entry.Position;
 
-        if (!entry.Data.HasAnySolid())
+        if (!entry.Data.HasAnyColliding())
         {
-            RemoveCollider(pos);
+            if (_colliders.Remove(pos, out var old)) _physics.RemoveStaticCompound(old.handle);
             return true;
         }
 
@@ -231,13 +227,12 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
             if (!r.Entry.Entity.Has<PhysicsPresence>()) continue; // out of range meanwhile
 
             _sw.Restart();
-            RemoveCollider(r.Pos);
+            if (_colliders.Remove(r.Pos, out var old)) _physics.RemoveStaticCompound(old.handle);
             if (r.Build is not null)
             {
                 var o = r.Pos.WorldOrigin;
                 _colliders[r.Pos] = (_physics.AddStaticCompound(r.Build, new PhysVec(o.X, o.Y, o.Z)), r.Build.BoxCount);
             }
-            else _emptyColliders.Add(r.Pos);
             _applyMs += 0.05 * (_sw.Elapsed.TotalMilliseconds - _applyMs);
             _totalBuilt++;
         }
@@ -248,15 +243,9 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
     /// collidable, as opposed to just loaded/rendered.</summary>
     public bool HasCollider(ChunkPosition pos) => _colliders.ContainsKey(pos);
 
-    /// <summary>Drops <paramref name="pos"/>'s static collider, or its record of having none, if it has either.</summary>
-    private void RemoveCollider(ChunkPosition pos)
-    {
-        if (_colliders.Remove(pos, out var old)) _physics.RemoveStaticCompound(old.handle);
-        _emptyColliders.Remove(pos);
-    }
-
-    /// <summary>Whether every loaded terrain chunk with blocks within <paramref name="radius"/> of
-    /// <paramref name="centre"/> has its collider, so a body placed there won't fall through.</summary>
+    /// <summary>Whether every loaded terrain chunk with colliding blocks within <paramref name="radius"/> of
+    /// <paramref name="centre"/> has its collider, so a body placed there won't fall through. (A chunk of only
+    /// passable blocks, e.g. levers, has blocks but never gets a collider.)</summary>
     public bool CollidersReady(ChunkVolume world, PhysVec centre, float radius)
     {
         int r = (int)MathF.Ceiling(radius / S);
@@ -264,8 +253,7 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
         for (int dz = -r; dz <= r; dz++) for (int dy = -r; dy <= r; dy++) for (int dx = -r; dx <= r; dx++)
         {
             var pos = new ChunkPosition(cx + dx, cy + dy, cz + dz);
-            if (world.GetEntry(pos) is { } entry && entry.Data.HasAnySolid() && !_colliders.ContainsKey(pos)
-                && !_emptyColliders.Contains(pos)) return false;
+            if (world.GetEntry(pos) is { } entry && entry.Data.HasAnyColliding() && !_colliders.ContainsKey(pos)) return false;
         }
         return true;
     }
@@ -294,7 +282,7 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
 
         foreach (var (pos, entry) in chunkVolume.All)
         {
-            if (!entry.Data.HasAnySolid()) continue;
+            if (!entry.Data.HasAnyColliding()) continue;
             var o = pos.WorldOrigin;
             foreach (var (c, s, id) in _decomposer.Decompose(entry.Data))
             {
@@ -361,7 +349,11 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
         foreach (var character in _removedCharacters) character.Dispose();
         _removedCharacters.Clear();
 
-        foreach (var entry in _removedChunks) RemoveCollider(entry.Position);
+        foreach (var entry in _removedChunks)
+        {
+            if (_colliders.Remove(entry.Position, out var c))
+                _physics.RemoveStaticCompound(c.handle);
+        }
         _removedChunks.Clear();
     }
 
