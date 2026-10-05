@@ -29,15 +29,15 @@ public struct NetOwner
 }
 
 /// <summary>A player: who they are across sessions (<see cref="Id"/>), and who plays them. Every player is owned (simulated)
-/// by the host (<see cref="NetOwner"/>); their <see cref="Controller"/> is the machine whose input drives them, which
+/// by the host (<see cref="NetOwner"/>); their <see cref="ControllingPeer"/> is the machine whose input drives them, which
 /// predicts them too (see ClearSkies.Net's OwnPlayerPrediction).</summary>
 public struct Player
 {
     public PlayerId Id;
     public string Name;
     /// <summary>The machine whose input drives this player.</summary>
-    public PeerId Controller;
-    /// <summary>Whether they're played on this machine (<see cref="Controller"/> is this machine).</summary>
+    public PeerId ControllingPeer;
+    /// <summary>Whether they're played on this machine (<see cref="ControllingPeer"/> is this machine).</summary>
     public bool IsLocal;
 }
 

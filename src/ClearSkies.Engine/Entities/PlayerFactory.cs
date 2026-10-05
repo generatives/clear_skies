@@ -19,8 +19,8 @@ public static class PlayerFactory
     public const float LookSensitivity = 0.0025f;
 
     /// <param name="owner">Who simulates them: the host.</param>
-    /// <param name="controller">Whose input drives them.</param>
-    public static Entity Create(World world, PhysicsWorld physics, EntityId id, NetOwner owner, PeerId controller, bool controlledHere,
+    /// <param name="controllingPeer">Whose input drives them.</param>
+    public static Entity Create(World world, PhysicsWorld physics, EntityId id, NetOwner owner, PeerId controllingPeer, bool controlledHere,
                                 PlayerDescription d)
     {
         var player = world.CreateEntity();
@@ -32,7 +32,7 @@ public static class PlayerFactory
         if (owner.IsLocal || controlledHere)
             player.Set(new CharacterControllerComponent { Character = CreateCharacter(physics, d.Position, player), EyeHeight = EyeHeight });
         player.Set(new Support());
-        player.Set(new Player { Id = d.Id, Name = d.Name, Controller = controller, IsLocal = controlledHere });
+        player.Set(new Player { Id = d.Id, Name = d.Name, ControllingPeer = controllingPeer, IsLocal = controlledHere });
         player.Set(id);
         player.Set(owner);
         player.Set<OwnPresence>();
