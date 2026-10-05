@@ -174,6 +174,10 @@ public sealed class SpawnPlayerHandler : SpawnHandler<PlayerDescription, Player>
                 var (centre, _) = _physics.GetBodyPose(body);
                 d.Velocity = _physics.GetBodyLinearVelocity(body) + Vector3.Cross(_physics.GetBodyAngularVelocity(body), d.Position - centre);
             }
+            // Its body isn't here yet (a ship's copy arriving with them as a client joins), and when it comes it's at
+            // rest until it's placed on its timeline: they ride along meanwhile (SupportSystem), and it carries them on
+            // from there (FollowerSystem), so they're not moving across it.
+            else d.Velocity = Vector3.Zero;
         }
         // The spawn's owner plays them; the host simulates them.
         var controller = owner.Owner;

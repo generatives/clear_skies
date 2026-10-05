@@ -51,7 +51,13 @@ public sealed class FollowerSystem : ISystem, IDebugUiSystem
         {
             if (e.Get<PhysicsPresence>().Mode != PhysicsMode.KinematicFollower) { _placed.Remove(e); continue; }
             var buffer = e.Get<RemoteBody>().Buffer;
-            if (buffer.At(_remote.SampleTick(buffer)) is not { } s) continue;
+            if (buffer.At(_remote.SampleTick(buffer)) is not { } s)
+            {
+                // Nothing heard yet (a copy just arrived): held where it was spawned until it can be placed, rather than
+                // drifting off along its spawn velocity from under whoever stands on it.
+                if (!_placed.Contains(e)) HoldStill(e.Get<PhysicsBodyComponent>().Body);
+                continue;
+            }
             var (origin, rotation) = _remote.ToWorld(s.Support, s.Position, s.Rotation);
             ref readonly var pb = ref e.Get<PhysicsBodyComponent>();
             FollowKinematic(e, pb.Body, pb.BodyPosition(origin, rotation), rotation, s.Velocity, dt);
@@ -84,6 +90,12 @@ public sealed class FollowerSystem : ISystem, IDebugUiSystem
         float sin = MathF.Sqrt(MathF.Max(0f, 1f - delta.W * delta.W));
         var axis = sin > 1e-5f ? new Vector3(delta.X, delta.Y, delta.Z) / sin : Vector3.Zero;
         _physics.SetBodyAngularVelocity(body, axis * (angle / dt));
+    }
+
+    private void HoldStill(BepuPhysics.BodyHandle body)
+    {
+        _physics.SetBodyLinearVelocity(body, Vector3.Zero);
+        _physics.SetBodyAngularVelocity(body, Vector3.Zero);
     }
 
     /// <summary>Moves the local players on <paramref name="ship"/> with it, where it's just been placed: to the same
