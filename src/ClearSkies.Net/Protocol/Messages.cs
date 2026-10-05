@@ -9,7 +9,7 @@ namespace ClearSkies.Net.Protocol;
 /// <summary>Bumped whenever any message or description format changes; a mismatch refuses the join.</summary>
 public static class ProtocolVersion
 {
-    public const ushort Current = 3;
+    public const ushort Current = 4;
 }
 
 /// <summary>The first byte of every packet.</summary>
@@ -70,7 +70,12 @@ public readonly record struct TerrainReady : IMessage
 }
 
 /// <summary>One tick of a player's input, numbered by the machine that plays them (see OwnPlayerPrediction).</summary>
-public readonly record struct InputSample(uint Sequence, PlayerButtons Held, PlayerButtons Pressed, float Yaw, float Pitch)
+/// <param name="Landed">What the input before this one left the player standing on, when it's something new: a ship
+/// they landed on, as this machine saw it (see <see cref="Sync.RemoteInputs"/>). None otherwise.</param>
+/// <param name="LandedAt">Where on <paramref name="Landed"/>, in its space.</param>
+/// <param name="LandedVelocity">How fast they were moving then (world space).</param>
+public readonly record struct InputSample(uint Sequence, PlayerButtons Held, PlayerButtons Pressed, float Yaw, float Pitch,
+                                          EntityId Landed = default, Vector3 LandedAt = default, Vector3 LandedVelocity = default)
 {
     public void Write(NetWriter w)
     {
@@ -79,10 +84,24 @@ public readonly record struct InputSample(uint Sequence, PlayerButtons Held, Pla
         w.WriteUInt32((uint)Pressed);
         w.WriteSingle(Yaw); // exactly: the host moves them the way they predicted they moved
         w.WriteSingle(Pitch);
+        w.WriteBool(!Landed.IsNone);
+        if (Landed.IsNone) return;
+        Landed.Write(w);
+        w.WriteSingle(LandedAt.X); w.WriteSingle(LandedAt.Y); w.WriteSingle(LandedAt.Z);
+        w.WriteSingle(LandedVelocity.X); w.WriteSingle(LandedVelocity.Y); w.WriteSingle(LandedVelocity.Z);
     }
 
-    public static InputSample Read(ref NetReader r) =>
-        new(r.ReadUInt32(), (PlayerButtons)r.ReadUInt32(), (PlayerButtons)r.ReadUInt32(), r.ReadSingle(), r.ReadSingle());
+    public static InputSample Read(ref NetReader r)
+    {
+        var s = new InputSample(r.ReadUInt32(), (PlayerButtons)r.ReadUInt32(), (PlayerButtons)r.ReadUInt32(), r.ReadSingle(), r.ReadSingle());
+        if (!r.ReadBool()) return s;
+        return s with
+        {
+            Landed = EntityId.Read(ref r),
+            LandedAt = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle()),
+            LandedVelocity = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle()),
+        };
+    }
 
     public PlayerInput ToInput() => new() { Held = Held, Pressed = Pressed, Yaw = Yaw, Pitch = Pitch, Aiming = true };
 }

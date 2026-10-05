@@ -45,6 +45,7 @@ public sealed class BodySync : ISystem, IDebugUiSystem
         _net = net;
         _physics = physics;
         net.Bodies = this;
+        if (net is HostSession host) host.Inputs.Physics = physics; // how fast the ship a client lands on moves
         _remote = world.GetEntities().With<RemoteBody>().AsSet();
         // Snapshots' lateness is measured against our clock: when clock sync snaps it, they move with it.
         if (net is ClientSession client)

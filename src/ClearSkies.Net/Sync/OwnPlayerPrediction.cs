@@ -23,7 +23,9 @@ namespace ClearSkies.Net.Sync;
 /// so is every later record, since they all carry the same mistake. Positions are compared in the space of what the
 /// player stands on (a ship's, or the world's), where a ship's own motion, which the two machines see at different
 /// times, doesn't count.</item>
-/// <item>This tick's input is numbered and sent to the host, with the few before it (<see cref="PlayerInputMessage"/>).</item>
+/// <item>This tick's input is numbered and sent to the host, with the few before it (<see cref="PlayerInputMessage"/>).
+/// If the last one landed the player on a ship, it says where on it (<see cref="InputSample.Landed"/>): the ship here is
+/// where the host had it a moment ago, so on its own the host would have them come down somewhere else on its deck.</item>
 /// </list>
 /// The host runs the same inputs in the same order (<see cref="RemoteInputs"/>), so the two agree unless the world
 /// differed: a ship seen at another moment, another player in the way, a stall.
@@ -63,6 +65,8 @@ public sealed class OwnPlayerPrediction : ISystem
     private BodySnapshot? _answer;
     private uint _lastAnswer;
     private int _supportMismatches;
+    private int _modeMismatches;
+    private uint _landedOn; // the last input that landed the player on a ship, which the next one tells the host
 
     public OwnPlayerPrediction(ClientSession net, World world, EntityRegistry registry)
     {
@@ -91,20 +95,39 @@ public sealed class OwnPlayerPrediction : ISystem
     {
         foreach (ref readonly var e in _local.GetEntities())
         {
-            if (_input > 0) _history[_input % HistoryLength] = Capture(e, _input);
+            var landing = _input > 0 ? Remember(e) : null;
             if (_answer is { } answer)
             {
                 _answer = null;
                 Correct(e, answer);
             }
-            Send(e.Get<PlayerInput>());
+            Send(e.Get<PlayerInput>(), landing);
             return; // one local player
         }
     }
 
-    private void Send(in PlayerInput input)
+    /// <summary>Records where the last input left the player. If it landed them on something new, returns that record,
+    /// which the next input tells the host.</summary>
+    private Record? Remember(Entity e)
     {
-        var sample = new InputSample(++_input, input.Held, input.Pressed, input.Yaw, input.Pitch);
+        var before = _history[(_input - 1) % HistoryLength];
+        var now = _history[_input % HistoryLength] = Capture(e, _input);
+        if (!Landed(before, now)) return null;
+        _landedOn = _input;
+        return now;
+    }
+
+    /// <summary>Whether the player came to stand on something they weren't on the input before.</summary>
+    private bool Landed(in Record before, in Record now)
+    {
+        bool hadBefore = _input > 1 && before.Input == _input - 1; // (the first input has none: the host placed them)
+        return hadBefore && now.Grounded && !now.Support.IsNone && now.Support != before.Support;
+    }
+
+    private void Send(in PlayerInput input, Record? landing)
+    {
+        var sample = new InputSample(++_input, input.Held, input.Pressed, input.Yaw, input.Pitch,
+                                     landing?.Support ?? default, landing?.Position ?? default, landing?.Velocity ?? default);
         if (_sentCount == _sent.Length) Array.Copy(_sent, 1, _sent, 0, --_sentCount);
         _sent[_sentCount++] = sample;
         _net.SendInput(new PlayerInputMessage(_sent[.._sentCount]));
@@ -133,10 +156,24 @@ public sealed class OwnPlayerPrediction : ISystem
     /// with them.</summary>
     private void Correct(Entity e, in BodySnapshot answer)
     {
+        // Up to the input that landed on a ship, the host had them where it did itself: the next input puts them where
+        // they landed here.
+        if (answer.Input <= _landedOn) return;
         ref var predicted = ref _history[answer.Input % HistoryLength];
         if (predicted.Input != answer.Input) return; // too old, or never recorded
         bool flying = (answer.Flags & SnapshotFlags.FreeFlying) != 0;
-        if (predicted.FreeFlying != flying) return; // switching between walking and flying: the command settles it
+        // Walking or flying: each machine switches on the same input (V), so they differ only if that input was lost on
+        // the way; then the host's word goes.
+        if (predicted.FreeFlying != flying)
+        {
+            if (++_modeMismatches >= SupportMismatchAnswers)
+            {
+                _modeMismatches = 0;
+                Players.SetFreeFlying(e, flying);
+            }
+            return;
+        }
+        _modeMismatches = 0;
 
         // How far off, in the space of what they stood on (or the world's), and that in world space now.
         Vector3 error;
