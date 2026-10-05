@@ -14,7 +14,7 @@ namespace ClearSkies.Net.Session;
 public sealed class HostPeer
 {
     public ConnectionId Connection;
-    /// <summary>None until welcomed; <see cref="PeerId.Host"/> for the hosting machine's (the authority).</summary>
+    /// <summary>None until it has joined; <see cref="PeerId.Host"/> for the hosting machine's (the authority).</summary>
     public PeerId Peer = PeerId.None;
     public string Name = "";
     public PlayerId Player;
@@ -32,7 +32,7 @@ public sealed class HostPeer
     /// sent before then would reach it.</summary>
     public bool Ready;
 
-    public bool Welcomed => Peer != PeerId.None;
+    public bool Joined => Peer != PeerId.None;
     public bool IsAuthority => Peer == PeerId.Host;
 }
 
@@ -137,7 +137,8 @@ public sealed class Host : ISystem, IDisposable
     public Action? SaveChunks { get; set; }
 
     public IReadOnlyCollection<HostPeer> Peers => _peers.Values;
-    public IEnumerable<HostPeer> Welcomed => _peers.Values.Where(p => p.Welcomed);
+    /// <summary>Participants that have joined (been welcomed).</summary>
+    public IEnumerable<HostPeer> Joined => _peers.Values.Where(p => p.Joined);
     public IReadOnlyDictionary<EntityId, HostEntity> Entities => _entities;
     public HostTransport Transport => _transport;
 
@@ -145,7 +146,7 @@ public sealed class Host : ISystem, IDisposable
     public HostPeer? Authority => _peers.Values.FirstOrDefault(p => p.IsAuthority && p.Ready);
 
     /// <summary>Whether anyone but the hosting machine is in.</summary>
-    public bool OthersConnected => _peers.Values.Any(p => p.Welcomed && !p.IsAuthority);
+    public bool OthersConnected => _peers.Values.Any(p => p.Joined && !p.IsAuthority);
 
     /// <summary>Saves finished this session (each one's Descriptions written).</summary>
     public int Saves { get; private set; }
@@ -175,7 +176,7 @@ public sealed class Host : ISystem, IDisposable
 
     private void OnDisconnected(ConnectionId connection, string reason)
     {
-        if (!_peers.Remove(connection, out var peer) || !peer.Welcomed) return;
+        if (!_peers.Remove(connection, out var peer) || !peer.Joined) return;
         Console.WriteLine($"[net] {peer.Name} ({peer.Peer}) left: {reason}");
         // Their Character goes through the handshake like anything else, even in someone's view: its last Description
         // is where they rejoin.
@@ -213,7 +214,7 @@ public sealed class Host : ISystem, IDisposable
 
     private void OnHello(HostPeer peer, Hello hello)
     {
-        if (peer.Welcomed) { Console.WriteLine($"[net] ignoring a second hello from {peer.Name} ({peer.Peer})"); return; }
+        if (peer.Joined) { Console.WriteLine($"[net] ignoring a second hello from {peer.Name} ({peer.Peer})"); return; }
         if (hello.Version != ProtocolVersion.Current) { Refuse(peer.Connection, $"Version mismatch: host {ProtocolVersion.Current}, you {hello.Version}"); return; }
         if (hello.GenerationChecksum != _checksum) { Refuse(peer.Connection, "World generation differs from the host's (different game build?)"); return; }
         // The hosting machine's Participant is the authority: known by the link it came on, never by anything it says.
@@ -272,7 +273,7 @@ public sealed class Host : ISystem, IDisposable
         try
         {
             if (kind == MessageKind.Hello) OnHello(peer, Hello.Read(ref r));
-            else if (peer.Welcomed) OnMessage(peer, kind, ref r, packet);
+            else if (peer.Joined) OnMessage(peer, kind, ref r, packet);
         }
         catch (Exception e) when (e is EndOfStreamException or InvalidDataException)
         {
@@ -345,7 +346,7 @@ public sealed class Host : ISystem, IDisposable
     private void OnEvent(HostPeer from, in EventMeta meta, ReadOnlySpan<byte> packet)
     {
         if (_entities.TryGetValue(meta.Target, out var entity) && (!entity.Loaded || entity.Releasing)) return;
-        foreach (var p in Welcomed)
+        foreach (var p in Joined)
             if (p != from && (entity is null || p.Known.Contains(meta.Target) || p.Peer == meta.Origin))
                 _transport.Send(p.Connection, packet, Channel.Reliable);
     }
@@ -370,7 +371,7 @@ public sealed class Host : ISystem, IDisposable
             }
             else if (e.Position is not null) (e.Position, e.Rotation) = (s.Position, s.Rotation);
         }
-        foreach (var p in Welcomed)
+        foreach (var p in Joined)
         {
             if (p == from) continue;
             _frame.Clear();
@@ -404,7 +405,7 @@ public sealed class Host : ISystem, IDisposable
         switch (m.Reason)
         {
             case DescribedReason.Requested:
-                foreach (var p in Welcomed)
+                foreach (var p in Joined)
                     if (p.Requested.Remove(e.Id) && e.Loaded && !e.Releasing) SendSpawn(p, e);
                 break;
             case DescribedReason.Released:
@@ -421,7 +422,7 @@ public sealed class Host : ISystem, IDisposable
         e.Loaded = e.Releasing = false;
         e.DescribedTick = _clock.Tick;
         _db.InTransaction(() => Write(e, e.Data!, e.Position));
-        foreach (var p in Welcomed)
+        foreach (var p in Joined)
         {
             p.Requested.Remove(e.Id);
             if (p.Known.Remove(e.Id) && !p.IsAuthority) Send(p.Connection, new EntityMessage(MessageKind.Forget, e.Id));
@@ -496,7 +497,7 @@ public sealed class Host : ISystem, IDisposable
             Loads++;
         }
 
-        foreach (var p in Welcomed)
+        foreach (var p in Joined)
         {
             if (p.IsAuthority || !p.Ready) continue;
             _scratch.Clear();
@@ -572,7 +573,7 @@ public sealed class Host : ISystem, IDisposable
 
     // ── sending ─────────────────────────────────────────────────────────────
 
-    private IEnumerable<ConnectionId> Others(HostPeer peer) => Welcomed.Where(p => p != peer).Select(p => p.Connection);
+    private IEnumerable<ConnectionId> Others(HostPeer peer) => Joined.Where(p => p != peer).Select(p => p.Connection);
 
     private void Send<T>(ConnectionId to, in T message, Channel channel = Channel.Reliable) where T : struct, IMessage
     {
