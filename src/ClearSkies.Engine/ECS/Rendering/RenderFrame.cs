@@ -40,6 +40,9 @@ public sealed class RenderFrame : IDebugUiSystem
     private bool _referenceLighting;
     private bool _dbgNoTextures, _dbgNoFog, _dbgOverdraw;
     private int _dbgLighting;
+    // Terrain lighting detail by distance (see shadeBlock): full within _detailNear blocks, flat light with corner AO to
+    // _detailMid, flat light past it. Most of a view's pixels are far, where the detail is sub-pixel anyway.
+    private float _detailNear = 48f, _detailMid = 96f;
     private static readonly string[] DbgLightingModes =
         { "Normal", "Flat light + corner shading", "Flat light only", "No voxel lighting" };
 
@@ -53,6 +56,9 @@ public sealed class RenderFrame : IDebugUiSystem
         if (ImGui.Checkbox("Wireframe", ref wireframe))
             _renderer.WireframeMode = wireframe;
         ImGui.Checkbox("Reference (slow) light + AO shader path", ref _referenceLighting);
+        ImGui.SliderFloat("Full light detail within (blocks)", ref _detailNear, 0f, 512f, "%.0f");
+        ImGui.SliderFloat("Corner shading within (blocks)", ref _detailMid, 0f, 1024f, "%.0f");
+        ImGui.TextDisabled("  past these, flat light; each step blends over 8 blocks");
         if (ImGui.CollapsingHeader("Render pass cost (debug)"))
         {
             ImGui.TextDisabled("Flip these and watch the render pass in GPU timings.");
@@ -108,6 +114,8 @@ public sealed class RenderFrame : IDebugUiSystem
             ReferenceLighting = _referenceLighting ? 1f : 0f,
             DebugFlags     = (_dbgNoTextures ? 1 : 0) | (_dbgNoFog ? 2 : 0),
             DebugLighting  = _dbgLighting,
+            DetailNear     = _detailNear,
+            DetailMid      = _detailMid,
             CameraPosition = camTransform.Position,
             ZenithColor    = ToVector3D(SkySettings.ZenithColor),
             HorizonColor   = ToVector3D(SkySettings.HorizonColor),
