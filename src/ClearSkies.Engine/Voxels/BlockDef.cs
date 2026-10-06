@@ -61,6 +61,11 @@ public readonly struct BlockDef
     public string?         TextureTop     { get; init; }
     public string?         TextureBottom  { get; init; }
 
+    /// For a <see cref="BlockShape.Cross"/> block: the sprites each of its two quads picks from, by a hash of its
+    /// cell, so a patch of grass isn't the same sprite over and over. List a sprite more than once to weight it. Null:
+    /// just <see cref="Texture"/>.
+    public string[]?       CrossTextures  { get; init; }
+
     /// True when this block's appearance actually depends on its stored orientation (i.e. it has a
     /// Top and/or Bottom texture distinct from Texture) — lets GreedyMesher skip the per-voxel
     /// orientation lookup entirely for blocks that look the same on every face regardless of orientation.

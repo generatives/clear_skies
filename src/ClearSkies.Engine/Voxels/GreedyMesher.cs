@@ -83,7 +83,8 @@ public sealed class GreedyMesher
         ChunkData? nX, ChunkData? pX,
         ChunkData? nY, ChunkData? pY,
         ChunkData? nZ, ChunkData? pZ,
-        bool neighboursForTransparentOnly = false)
+        bool neighboursForTransparentOnly = false,
+        ChunkPosition position = default)
     {
         // Array order matches Faces[] (fi=0:+X, fi=1:-X, fi=2:+Y, fi=3:-Y, fi=4:+Z, fi=5:-Z).
         ChunkData?[] neighbors = { pX, nX, pY, nY, pZ, nZ };
@@ -219,12 +220,27 @@ public sealed class GreedyMesher
                 var id = chunk.Get(x, y, z);
                 if (!IsCross[(byte)id]) continue;
                 ref readonly var def = ref BlockRegistry.Get(id);
-                float layer = _atlas != null && _atlas.TryGetLayer(def.Texture, out int l) ? l : -1f;
-                EmitCross(_cVerts, _cIndices, _cBlocks, x, y, z, id, def.Color, layer);
+                // Each quad's sprite, from CrossTextures by a hash of the world cell (so it's the same whichever
+                // chunk meshing finds it in), or the block's Texture.
+                uint h = CellHash(position.X * ChunkData.Size + x, position.Y * ChunkData.Size + y, position.Z * ChunkData.Size + z);
+                var variants = def.CrossTextures;
+                float layerA = Layer(variants is null ? def.Texture : variants[(h & 0xFFFF) % (uint)variants.Length]);
+                float layerB = Layer(variants is null ? def.Texture : variants[(h >> 16) % (uint)variants.Length]);
+                EmitCross(_cVerts, _cIndices, _cBlocks, x, y, z, id, def.Color, layerA, layerB);
             }
 
         return new ChunkMeshLayers(new LayerMesh(verts, indices, _blocks), new LayerMesh(_cVerts, _cIndices, _cBlocks),
                                    new LayerMesh(_tVerts, _tIndices, _tBlocks));
+    }
+
+    private float Layer(string? sprite) => _atlas != null && _atlas.TryGetLayer(sprite, out int l) ? l : -1f;
+
+    /// <summary>A well-mixed hash of a world cell.</summary>
+    private static uint CellHash(int x, int y, int z)
+    {
+        uint h = (uint)x * 0x8DA6B343u ^ (uint)y * 0xD8163841u ^ (uint)z * 0xCB1AB31Fu;
+        h ^= h >> 16; h *= 0x7FEB352Du; h ^= h >> 15; h *= 0x846CA68Bu; h ^= h >> 16;
+        return h;
     }
 
     // Which block ids are BlockShape.Cross, so the per-voxel scan for them is a table lookup.
@@ -247,13 +263,15 @@ public sealed class GreedyMesher
     /// along the diagonal and t up it; the front (which ChunkQuad packs with its side bit clear) has its corners in
     /// s-first order, (0,0) (1,0) (1,1) (0,1), the back t-first, which winds it the other way. U is s and V runs down
     /// world Y as on the cube's sides, so the sprite stands upright. vs_chunk rebuilds the same corners (faces 6 and 7).
+/// Each diagonal has its own sprite (<paramref name="layerA"/>, <paramref name="layerB"/>), the same on both its sides.
     /// </summary>
     private static void EmitCross(List<Vertex> verts, List<uint> indices, List<BlockId> blocks,
-                                  int x, int y, int z, BlockId id, Vector3D<float> color, float layer)
+                                  int x, int y, int z, BlockId id, Vector3D<float> color, float layerA, float layerB)
     {
         for (int diagonal = 0; diagonal < 2; diagonal++)
         for (int side = 0; side < 2; side++)
         {
+            float layer = diagonal == 0 ? layerA : layerB;
             // Front normals: A (-1, 0, 1), B (-1, 0, -1); the back's are their opposites.
             float sign = side == 0 ? -Diagonal : Diagonal;
             var normal = new Vector3D<float>(sign, 0, diagonal == 0 ? -sign : sign);

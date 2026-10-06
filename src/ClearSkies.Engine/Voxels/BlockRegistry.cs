@@ -78,10 +78,11 @@ public static class BlockRegistry
         // Plants and pebbles: crossed billboards (BlockShape.Cross) of one sprite each. Passable, so they're walked
         // through, but still targetable so they can be broken, and Replaceable: a block placed against one takes its
         // place. Colour is only a fallback (and the hotbar's swatch) if the sprite is missing.
-        RegisterCross(BlockId.ShortGrass,    "Short Grass",    "grass1",         new(0.20f, 0.70f, 0.40f));
-        RegisterCross(BlockId.GrassTuft,     "Grass Tuft",     "grass2",         new(0.20f, 0.70f, 0.40f));
-        RegisterCross(BlockId.GrassBlades,   "Grass Blades",   "grass3",         new(0.20f, 0.70f, 0.40f));
-        RegisterCross(BlockId.TallGrass,     "Tall Grass",     "grass4",         new(0.20f, 0.70f, 0.40f));
+        // The green grasses' quads each pick a sprite, mostly their own, sometimes a neighbouring height's.
+        RegisterCross(BlockId.ShortGrass,    "Short Grass",    "grass1",         new(0.20f, 0.70f, 0.40f), "grass1", "grass1", "grass2", "grass3");
+        RegisterCross(BlockId.GrassTuft,     "Grass Tuft",     "grass2",         new(0.20f, 0.70f, 0.40f), "grass2", "grass2", "grass1", "grass3");
+        RegisterCross(BlockId.GrassBlades,   "Grass Blades",   "grass3",         new(0.20f, 0.70f, 0.40f), "grass3", "grass3", "grass2", "grass4");
+        RegisterCross(BlockId.TallGrass,     "Tall Grass",     "grass4",         new(0.20f, 0.70f, 0.40f), "grass4", "grass4", "grass4", "grass3");
         RegisterCross(BlockId.DryGrass,      "Dry Grass",      "grass_tan",      new(0.85f, 0.78f, 0.60f));
         RegisterCross(BlockId.BrownGrass,    "Brown Grass",    "grass_brown",    new(0.62f, 0.40f, 0.20f));
         RegisterCross(BlockId.RedMushroom,   "Red Mushroom",   "mushroom_red",   new(0.95f, 0.40f, 0.15f));
@@ -102,9 +103,9 @@ public static class BlockRegistry
             Texture = "cactus_side", TextureTop = "cactus_top", TextureBottom = "cactus_top" });
     }
 
-    private static void RegisterCross(BlockId id, string name, string texture, Vector3D<float> color) =>
+    private static void RegisterCross(BlockId id, string name, string texture, Vector3D<float> color, params string[] variants) =>
         Register(new BlockDef { Id = id, Name = name, Color = color, IsSolid = true, Passable = true, Weight = 0.1f,
-            Shape = BlockShape.Cross, Texture = texture });
+            Shape = BlockShape.Cross, Texture = texture, CrossTextures = variants.Length > 0 ? variants : null });
 
     private static void Register(BlockDef def) => Defs[(byte)def.Id] = def;
 

@@ -331,21 +331,26 @@ fn chunkVertex(quad: vec2<u32>, corner: u32) -> VSOut {
     else {
         // A cross block: cu runs along the diagonal, cv up. Lit as an upward-facing surface (see shadeBlock), so its
         // two quads, and both their sides, match each other and the ground they stand on.
-        // Each plant is turned and nudged by a hash of its world cell, so plants don't line up in a grid but each
-        // looks the same every time it's meshed. A full turn, not just the quarter that covers every angle of the X,
-        // so a sprite also shows mirrored as often as not (its back side's texture runs the other way); the nudge
-        // keeps its middle within 0.2 of the cell's.
+        // Varied by hashes of its world cell, so plants don't line up in a grid but each looks the same every time
+        // it's meshed: the plant is turned a full circle (not just the quarter that covers every angle of the X, so a
+        // sprite shows mirrored as often as not: its back side's texture runs the other way), nudged up to 0.2 from
+        // the cell's middle and stretched to 0.75-1.15 tall; then each of its two quads (both sides alike) is twisted
+        // up to 25 degrees and shifted up to 0.08 on its own, so they don't meet in a perfect X.
         cross = vec4<i32>(vec3<i32>(position), 1);
         let h = cellHash(model.chunk * 32 + cross.xyz);
-        let turn = f32(h & 1023u) * (6.2831853 / 1024.0);
-        let nudge = (vec2<f32>(f32((h >> 10u) & 255u), f32((h >> 18u) & 255u)) / 255.0 - 0.5) * 0.4;
+        let q = mixHash(h ^ (face * 0x9e3779b9u));
+        let turn = f32(h & 1023u) * (6.2831853 / 1024.0) + (f32(q & 1023u) / 1023.0 - 0.5) * 0.87;
+        let nudge = (vec2<f32>(f32((h >> 10u) & 255u), f32((h >> 18u) & 255u)) / 255.0 - 0.5) * 0.4
+                  + (vec2<f32>(f32((q >> 10u) & 255u), f32((q >> 18u) & 255u)) / 255.0 - 0.5) * 0.16;
+        let tall = 0.75 + 0.4 * f32((h >> 26u) & 63u) / 63.0;
         let d = vec2<f32>(select(0.5 - cu, cu - 0.5, face == 6u), cu - 0.5); // from the cell's middle, in x and z
         let cs = cos(turn);
         let sn = sin(turn);
         let r = vec2<f32>(cs * d.x - sn * d.y, sn * d.x + cs * d.y) + 0.5 + nudge;
-        position += vec3<f32>(r.x, cv, r.y);
+        // V follows the unstretched height, so the sprite stretches with the quad rather than being cropped.
+        uv2 = vec2<f32>(cu, -(position.y + cv));
+        position += vec3<f32>(r.x, cv * tall, r.y);
         normal.y = 1.0;
-        uv2 = vec2<f32>(cu, -position.y);
     }
     let layerBits = (a >> 21u) & 255u;
     let layer = select(f32(layerBits), -1.0, layerBits == 255u);
@@ -367,9 +372,23 @@ fn chunkVertex(quad: vec2<u32>, corner: u32) -> VSOut {
 
 // A well-mixed hash of a world cell, for per-cell variation that's the same wherever the cell is meshed.
 fn cellHash(p: vec3<i32>) -> u32 {
-    var h = (bitcast<u32>(p.x) * 0x8da6b343u) ^ (bitcast<u32>(p.y) * 0xd8163841u) ^ (bitcast<u32>(p.z) * 0xcb1ab31fu);
+    let h = (bitcast<u32>(p.x) * 0x8da6b343u) ^ (bitcast<u32>(p.y) * 0xd8163841u) ^ (bitcast<u32>(p.z) * 0xcb1ab31fu);
+    return mixHash(h);
+}
+
+// Scrambles h's bits (a 32-bit finaliser), e.g. to draw a second, independent hash from one.
+fn mixHash(x: u32) -> u32 {
+    var h = x;
     h = h ^ (h >> 16u); h = h * 0x7feb352du; h = h ^ (h >> 15u); h = h * 0x846ca68bu; h = h ^ (h >> 16u);
     return h;
+}
+
+// A plant's colour, varied a little by its cell (see chunkVertex): 0.85-1.1 as bright, a touch yellower or bluer.
+fn plantTint(cell: vec3<i32>) -> vec3<f32> {
+    let h = mixHash(cellHash(cell) ^ 0x5bd1e995u);
+    let bright = 0.85 + 0.25 * f32(h & 255u) / 255.0;
+    let warm = (f32((h >> 8u) & 255u) / 255.0 - 0.5) * 0.16;
+    return bright * vec3<f32>(1.0 + warm, 1.0, 1.0 - warm);
 }
 
 // Voxel v in this draw's grid (grid voxel space). Unloaded → open.
@@ -727,7 +746,9 @@ fn fs_chunk_transparent(in: VSOut) -> @location(0) vec4<f32> {
 fn fs_cutout(in: VSOut) -> @location(0) vec4<f32> {
     let c = blockColor(in);
     if (c.a < 0.5) { discard; }
-    return vec4<f32>(shadeBlock(in, c.rgb), 1.0);
+    var base = c.rgb;
+    if (in.cross.w != 0) { base *= plantTint(model.chunk * 32 + in.cross.xyz); }
+    return vec4<f32>(shadeBlock(in, base), 1.0);
 }
 
 // Transparent faces' depth pre-pass: the nearest transparent face at each pixel, without its fully clear texels.
