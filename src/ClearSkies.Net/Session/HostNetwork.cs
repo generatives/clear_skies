@@ -36,7 +36,7 @@ public sealed class HostNetwork : ISystem, IDisposable
 
     private void OnDisconnected(ConnectionId connection, string reason)
     {
-        if (_connections.Remove(connection, out var from) && from.Joined is { } joined) _host.Leave(joined, reason);
+        if (_connections.Remove(connection, out var from) && from.JoinedPeer is { } joined) _host.Leave(joined, reason);
     }
 
     private void OnReceived(ConnectionId from, ReadOnlySpan<byte> packet, Channel channel)
@@ -47,26 +47,45 @@ public sealed class HostNetwork : ISystem, IDisposable
         try
         {
             if (kind == MessageKind.Hello) participant.Hello(Hello.Read(ref r));
-            else if (participant.Joined is { } joined) Dispatch(participant, joined, kind, ref r);
+            else Dispatch(participant, kind, ref r);
         }
         catch (Exception e) when (e is EndOfStreamException or InvalidDataException)
         {
-            Console.WriteLine($"[net] bad {kind} from {participant.Joined?.Name ?? from.ToString()}: {e.Message}");
+            Console.WriteLine($"[net] bad {kind} from {participant.JoinedPeer?.Name ?? from.ToString()}: {e.Message}");
         }
     }
 
-    private void Dispatch(RemoteParticipant from, JoinedParticipant joined, MessageKind kind, ref NetReader r)
+    private void Dispatch(RemoteParticipant from, MessageKind kind, ref NetReader r)
     {
-        switch (kind)
+        if (from.JoinedPeer is { } joined)
         {
-            case MessageKind.TimePing: _host.Ping(joined, TimePing.Read(ref r).ClientTimeMs); break;
-            case MessageKind.IdBlockRequest: _host.RequestIdBlock(joined); break;
-            case MessageKind.ViewVolume:
+            switch (kind)
             {
-                var view = ViewVolumeMessage.Read(ref r);
-                _host.SetView(joined, view.Centre, view.Radius);
-                break;
+                case MessageKind.TimePing: _host.Ping(joined, TimePing.Read(ref r).ClientTimeMs); break;
+                case MessageKind.IdBlockRequest: _host.RequestIdBlock(joined); break;
+                case MessageKind.ViewVolume:
+                {
+                    var view = ViewVolumeMessage.Read(ref r);
+                    _host.SetView(joined, view.Centre, view.Radius);
+                    break;
+                }
+                case MessageKind.Command: _host.SendCommand(joined, CommandMessage.Read(ref r)); break;
+                case MessageKind.Event: _host.SendEvent(joined, EventMessage.Read(ref r)); break;
+                case MessageKind.Rejection: _host.Reject(Rejection.Read(ref r)); break;
+                case MessageKind.PlayerInput: _host.SendInput(joined, PlayerInputMessage.Read(ref r)); break;
+                case MessageKind.StateFrame:
+                {
+                    uint tick = BodySync.ReadFrame(ref r, from.Frame);
+                    _host.SendFrame(joined, tick, from.Frame);
+                    break;
+                }
+                case MessageKind.Created: _host.EntityCreated(joined, DescriptionMessage.Read(kind, ref r)); break;
+                case MessageKind.Described: _host.EntityDescribed(joined, DescriptionMessage.Read(kind, ref r)); break;
+                case MessageKind.Released: _host.EntityReleased(joined, DescriptionMessage.Read(kind, ref r)); break;
+                case MessageKind.Deleted: _host.EntityDeleted(joined, EntityMessage.Read(kind, ref r).Id); break;
+                case MessageKind.Disconnect: from.Disconnect(DisconnectMessage.Read(ref r).Reason); break;
             }
+<<<<<<< HEAD
             case MessageKind.Command: _host.SendCommand(joined, CommandMessage.Read(ref r)); break;
             case MessageKind.Event: _host.SendEvent(joined, EventMessage.Read(ref r)); break;
             case MessageKind.Rejection: _host.Reject(Rejection.Read(ref r)); break;
@@ -84,6 +103,8 @@ public sealed class HostNetwork : ISystem, IDisposable
             case MessageKind.Saved: _host.EntitySaved(joined, DescriptionMessage.Read(kind, ref r)); break;
             case MessageKind.SaveDone: _host.SaveDone(joined); break;
             case MessageKind.Disconnect: from.Disconnect(DisconnectMessage.Read(ref r).Reason); break;
+=======
+>>>>>>> claude/mp-host-participant-interfaces
         }
     }
 
@@ -96,18 +117,18 @@ public sealed class HostNetwork : ISystem, IDisposable
         public readonly List<BodySnapshot> Frame = new();
 
         /// <summary>Its record at the Host, once it has joined.</summary>
-        public JoinedParticipant? Joined;
+        public JoinedPeer? JoinedPeer;
 
         public void Hello(in Hello hello)
         {
-            if (Joined is not null) { Console.WriteLine($"[net] ignoring a second hello from {Joined.Name} ({Joined.Peer})"); return; }
-            Joined = owner._host.Join(hello, local: false, out var welcome, out var refusal);
-            if (Joined is null)
+            if (JoinedPeer is not null) { Console.WriteLine($"[net] ignoring a second hello from {JoinedPeer.Name} ({JoinedPeer.Peer})"); return; }
+            JoinedPeer = owner._host.Join(hello, local: false, out var welcome, out var refusal);
+            if (JoinedPeer is null)
             {
                 Disconnected(refusal);
                 return;
             }
-            Joined.Participant = this;
+            JoinedPeer.Participant = this;
             Send(welcome);
         }
 
