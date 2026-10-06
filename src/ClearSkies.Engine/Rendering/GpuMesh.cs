@@ -39,19 +39,21 @@ public sealed class GpuMesh : IDisposable
     /// <summary>For a chunk mesh: how many <see cref="ChunkQuad"/>s its vertex buffer holds (it has no indices).</summary>
     public uint QuadCount { get; }
 
-    /// <summary>For a chunk mesh: its group-1 bind group (the model uniforms and its quads), released with it.</summary>
-    public nint DrawBindGroup { get; }
-    private readonly Action<nint>? _releaseBindGroup;
+    /// <summary>For a chunk mesh: its first quad in the renderer's shared quad buffer (ChunkQuadArena).</summary>
+    public uint QuadBase { get; }
+    private readonly Action? _free; // a chunk mesh: gives its run of the shared buffer back
 
-    /// <summary>A chunk mesh: <paramref name="quadCount"/> packed <see cref="ChunkQuad"/>s in a storage buffer, which
-    /// vs_chunk reads through <paramref name="drawBindGroup"/> (released by <paramref name="release"/>).</summary>
-    public GpuMesh(GpuBuffer quads, uint quadCount, nint drawBindGroup, Action<nint> release)
+    /// <summary>A chunk mesh: <paramref name="quadCount"/> packed <see cref="ChunkQuad"/>s from
+    /// <paramref name="quadBase"/> in the renderer's shared quad buffer <paramref name="arena"/>, which vs_chunk reads
+    /// through the draw's record; <paramref name="free"/> gives the run back when the mesh is disposed (the buffer itself
+    /// is the renderer's).</summary>
+    public GpuMesh(GpuBuffer arena, uint quadBase, uint quadCount, Action free)
     {
-        VertexBuffer = IndexBuffer = WireframeBuffer = quads;
+        VertexBuffer = IndexBuffer = WireframeBuffer = arena;
+        QuadBase    = quadBase;
         QuadCount   = quadCount;
         VertexBytes = quadCount * ChunkQuad.SizeBytes;
-        DrawBindGroup = drawBindGroup;
-        _releaseBindGroup = release;
+        _free = free;
         Count(1);
     }
 
@@ -91,7 +93,7 @@ public sealed class GpuMesh : IDisposable
         if (_disposed) return;
         _disposed = true;
         Count(-1);
-        if (DrawBindGroup != 0) _releaseBindGroup?.Invoke(DrawBindGroup);
+        if (_free != null) { _free(); return; }
         VertexBuffer.Dispose();
         if (IndexBuffer != VertexBuffer) IndexBuffer.Dispose();
         if (WireframeBuffer != VertexBuffer && WireframeBuffer != IndexBuffer) WireframeBuffer.Dispose();
