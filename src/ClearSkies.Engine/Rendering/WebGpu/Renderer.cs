@@ -331,8 +331,18 @@ fn chunkVertex(quad: vec2<u32>, corner: u32) -> VSOut {
     else {
         // A cross block: cu runs along the diagonal, cv up. Lit as an upward-facing surface (see shadeBlock), so its
         // two quads, and both their sides, match each other and the ground they stand on.
+        // Each plant is turned and nudged by a hash of its world cell, so plants don't line up in a grid but each
+        // looks the same every time it's meshed. A quarter turn covers every look of the X; the nudge keeps its
+        // middle within 0.2 of the cell's.
         cross = vec4<i32>(vec3<i32>(position), 1);
-        position += vec3<f32>(select(1.0 - cu, cu, face == 6u), cv, cu);
+        let h = cellHash(model.chunk * 32 + cross.xyz);
+        let turn = f32(h & 1023u) * (1.5707964 / 1024.0);
+        let nudge = (vec2<f32>(f32((h >> 10u) & 255u), f32((h >> 18u) & 255u)) / 255.0 - 0.5) * 0.4;
+        let d = vec2<f32>(select(0.5 - cu, cu - 0.5, face == 6u), cu - 0.5); // from the cell's middle, in x and z
+        let cs = cos(turn);
+        let sn = sin(turn);
+        let r = vec2<f32>(cs * d.x - sn * d.y, sn * d.x + cs * d.y) + 0.5 + nudge;
+        position += vec3<f32>(r.x, cv, r.y);
         normal.y = 1.0;
         uv2 = vec2<f32>(cu, -position.y);
     }
@@ -352,6 +362,13 @@ fn chunkVertex(quad: vec2<u32>, corner: u32) -> VSOut {
     o.alpha       = block.a;
     o.cross       = cross;
     return o;
+}
+
+// A well-mixed hash of a world cell, for per-cell variation that's the same wherever the cell is meshed.
+fn cellHash(p: vec3<i32>) -> u32 {
+    var h = (bitcast<u32>(p.x) * 0x8da6b343u) ^ (bitcast<u32>(p.y) * 0xd8163841u) ^ (bitcast<u32>(p.z) * 0xcb1ab31fu);
+    h = h ^ (h >> 16u); h = h * 0x7feb352du; h = h ^ (h >> 15u); h = h * 0x846ca68bu; h = h ^ (h >> 16u);
+    return h;
 }
 
 // Voxel v in this draw's grid (grid voxel space). Unloaded → open.
