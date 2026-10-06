@@ -33,9 +33,6 @@ public sealed class WorldSave : IDisposable
     /// <summary>Whether the world was just made (nothing in it yet).</summary>
     public bool IsNew { get; }
 
-    /// <summary>Where edited terrain chunks are kept.</summary>
-    public IChunkStore Chunks => new DatabaseChunkStore(Database);
-
     public void Dispose() => Database.Dispose();
 }
 
@@ -43,22 +40,21 @@ public sealed class WorldSave : IDisposable
 /// Hosting a world from its save: the Host, which has no world of its own (it keeps the save, decides what's loaded
 /// and who sees what, and relays everything), the network others join it over (<see cref="Network"/>, if any), and
 /// this machine's Participant, joined to it directly, which has authority over every entity. With
-/// <paramref name="transport"/> off, nobody else can join (single-player).
+/// <paramref name="transport"/> off, nobody else can join (single-player). The world's terrain streaming loads edited
+/// chunks from the Host like any other machine's (<paramref name="chunks"/>, which <paramref name="world"/> was made
+/// with).
 /// </summary>
 public sealed class Hosting : IDisposable
 {
     /// <param name="playerName">Who plays on this machine (none: nobody, a dedicated host).</param>
-    public Hosting(GameWorld world, WorldSave save, LaggedTransport? transport, string? playerName)
+    public Hosting(GameWorld world, HostChunkStore chunks, WorldSave save, LaggedTransport? transport, string? playerName)
     {
         var (eye, yaw, pitch) = WorldSpawn.For(save.Seed);
         ulong checksum = GenerationChecksum.Compute();
-        Host = new Host(save.Database, world.Host.Clock, save.Seed, checksum, (WorldSpawn.PlayerAt(eye), yaw, pitch))
-        {
-            SaveChunks = world.ChunkLoad.SaveAllDirty,
-        };
+        Host = new Host(save.Database, world.Host.Clock, save.Seed, checksum, (WorldSpawn.PlayerAt(eye), yaw, pitch));
         Network = transport is null ? null : new HostNetwork(Host, transport);
         Net = SimulationParticipant.Join(Host, new Hello(ProtocolVersion.Current, playerName ?? "", checksum), world.Session, world.Commands,
-                                         world.Registry, world.Host.World, world.Host.Clock, world.TerrainReadyFor);
+                                         world.Registry, world.Host.World, world.Host.Clock, world.TerrainReadyFor, chunks);
         Net.OthersHere = () => Host.OthersConnected;
         Net.Viewing = playerName is not null;
     }

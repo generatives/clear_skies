@@ -20,7 +20,10 @@ namespace ClearSkies.Engine.ECS;
 /// simulated here away from the view (another player's character on the host, a ship) one with only a collider radius. A rebuild is spread over frames (within <see cref="StreamBudgetMs"/>, for
 /// unloading what's no longer wanted and for scanning the wanted columns), so crossing a column doesn't cost one long frame.
 /// Only chunks that may hold something are queued: the layers the generator says
-/// it may fill (<see cref="IWorldGenerator.ColumnLayers"/>) and chunks with a save file (builds). The generator's
+/// it may fill (<see cref="IWorldGenerator.ColumnLayers"/>) and edited chunks (builds). An edited chunk is loaded from
+/// the store (<see cref="IChunkStore"/>, which asks the Host for it): a column keeps its place in the queue until its
+/// edited chunks are there, and the columns after it load meanwhile.
+/// The generator's
 /// layers are a loose bound, so chunks that turn out to be air are remembered (a bit per column) until their column
 /// is no longer wanted, and aren't queued again.
 ///
@@ -31,8 +34,12 @@ namespace ClearSkies.Engine.ECS;
 /// What's on its way is in the ECS for other systems (the fog, see <see cref="FogSystem"/>): each column queued or
 /// loading is an entity with <see cref="TerrainColumnLoading"/> until its chunks are added, and each interest gets
 /// <see cref="TerrainScanned"/>, how far around it every wanted column is known (queued, loading or loaded).
+///
+/// Edits ask it which chunks that aren't loaded are known to hold nothing (<see cref="IsKnownEmpty"/>): those an edit
+/// makes. Any other chunk an edit reaches is left to it (a <see cref="TerrainEditedElsewhere"/>): edited, loaded from
+/// the store from then on, and if its column was loading, that chunk is loaded again.
 /// </summary>
-public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
+public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
 {
     /// <summary>Column jobs (loading or generating a column's missing chunks) in flight at once. Most of a first visit is
     /// sky that generation rules out in microseconds, so this is well above the core count: the background workers queue
@@ -61,6 +68,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     private readonly IChunkStore _chunkStore;
 
     private readonly EntitySet      _interests;
+    private readonly EntitySet      _editedElsewhere;
     private readonly ChunkVolume    _staticVolume;
     private readonly IChunkBudget   _loadBudget;
     private readonly IChunkPreparer? _preparer;
@@ -90,10 +98,12 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     /// once the column is no longer wanted, so returning re-learns its air.</summary>
     private readonly Dictionary<(int x, int z), (ulong Generated, ulong Air)> _columns = new();
 
-    /// <summary>Every chunk with a save file (scanned once at startup, kept up to date by saves).</summary>
-    private readonly HashSet<ChunkPosition> _saved = new();
+    /// <summary>Every chunk edited since it was generated, loaded from the store (read from it as streaming starts, then
+    /// added to as chunks are edited here or elsewhere).</summary>
+    private readonly HashSet<ChunkPosition> _edited = new();
+    private bool _editsRead;
 
-    /// <summary>Per column (layer bits): chunks holding a build — a save with blocks, or an unsaved edit.</summary>
+    /// <summary>Per column (layer bits): chunks holding a build — edited, with blocks.</summary>
     private readonly Dictionary<(int x, int z), ulong> _built = new();
 
     // Columns with chunks still to generate or load, closest first, from _queueHead on; and the columns workers have
@@ -139,13 +149,16 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 
     private readonly List<ChunkPosition> _toUnload = new();
 
+    /// <summary>Chunks edited elsewhere while their column was loading: what loads is stale, so they load again.</summary>
+    private readonly HashSet<ChunkPosition> _stale = new();
+
     /// <param name="budget">What limits what's loaded.</param>
     /// <param name="viewDistance">The farthest out chunks are streamed to be drawn, in blocks (horizontally): an interest's
     /// draw radius is capped at it (the GPU store's world index is sized for it).</param>
     /// <param name="minChunkY">Lowest chunk layer the generator fills. Streaming covers 64 layers from
     /// <see cref="LayersBelow"/> under it; the generator's layers must fall inside them. Edits to the static world
     /// outside them are refused (see <see cref="ChunkVolume.EditableLayers"/>).</param>
-    /// <param name="chunkStore">Where edited chunks are kept (the world's save database on the host).</param>
+    /// <param name="chunkStore">Where edited chunks come from (the Host, which keeps them).</param>
     /// <param name="preparer">Work on each loaded chunk's data on the worker that loaded it (packing it for the GPU, for
     /// a drawn world).</param>
     public ChunkLoadSystem(World world, ChunkVolume staticVolume, IChunkBudget budget, Func<IWorldGenerator> generatorFactory,
@@ -155,6 +168,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         _world = world;
 
         _interests    = world.GetEntities().With<Transform>().With<TerrainInterest>().AsSet();
+        _editedElsewhere = world.GetEntities().With<TerrainEditedElsewhere>().AsSet();
         _staticVolume = staticVolume;
         _loadBudget   = budget;
         _preparer     = preparer;
@@ -162,7 +176,6 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         _minY         = minChunkY - LayersBelow;
         _staticVolume.EditableLayers = (_minY, _minY + 63); // only what streaming can load back
         _viewDistance = viewDistance;
-        ScanSaves();
     }
 
     /// <summary>Column offsets within <paramref name="radius"/> columns, closest first.</summary>
@@ -177,10 +190,13 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         return _offsetsByDistance[radius] = offsets.ToArray();
     }
 
-    private void ScanSaves()
+    /// <summary>The chunks edited before this machine joined, read once, as streaming starts (the store has them by
+    /// then).</summary>
+    private void ReadEdits()
     {
-        foreach (var pos in _chunkStore.SavedChunks())
-            RecordSave(pos, hasBlocks: true);
+        _editsRead = true;
+        foreach (var pos in _chunkStore.EditedChunks())
+            RecordEdited(pos, hasBlocks: true);
     }
 
     // ── debug UI ─────────────────────────────────────────────────────────────
@@ -193,7 +209,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         ImGui.Text($"Loaded: {_staticVolume.LoadedCount:N0} chunks   Queued columns: {_queue.Count - _queueHead}" +
                    $"{(_queueTruncated ? "+" : "")}   In flight: {_inFlight.Count}");
         ImGui.Text($"Columns evicted: {_evictions}");
-        ImGui.Text($"Saved chunks: {_saved.Count}   Layers: {_minY}..{_minY + 63}");
+        ImGui.Text($"Edited chunks: {_edited.Count}   Layers: {_minY}..{_minY + 63}");
 
         ImGui.Separator();
         _steps.Draw();
@@ -208,6 +224,8 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     public void Update(float dt)
     {
         _steps.Start();
+        if (!_editsRead) ReadEdits();
+        TakeEditsElsewhere();
 
         _budget.Restart();
         GatherRings();
@@ -229,9 +247,15 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
             _inFlight.Remove(job.Column);
             foreach (var (pos, data, prepared) in job.Chunks)
             {
+                if (_stale.Remove(pos))
+                {
+                    // Edited elsewhere while it loaded: loaded again, edit and all.
+                    if (_queue.IndexOf(job.Column, _queueHead) < 0) { _queue.Insert(_queueHead, job.Column); Loading(job.Column); }
+                    continue;
+                }
                 if (data == null)
                 {
-                    if (_saved.Contains(pos)) RecordBuild(pos, hasBlocks: false); // a build that was emptied out
+                    if (_edited.Contains(pos)) RecordBuild(pos, hasBlocks: false); // a build that was emptied out
                     else if (_columns.TryGetValue((pos.X, pos.Z), out var col))
                         _columns[(pos.X, pos.Z)] = (col.Generated, col.Air | Bit(pos));
                     continue;
@@ -290,8 +314,8 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
 
         _toUnload.Clear();
         _unloadAt = 0;
-        // (An edit that put blocks where there were none counts as a build once its chunk is saved: by the autosave,
-        // or as it unloads. Until then the chunk is loaded, so the queue doesn't need to know.)
+        // (An edit that put blocks where there were none counts as a build once its chunk unloads. Until then the chunk
+        // is loaded, so the queue doesn't need to know.)
         foreach (var (p, _) in _staticVolume.All)
             if (!Wanted(p.X, p.Z)) _toUnload.Add(p);
 
@@ -461,9 +485,9 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
             _columns[(p.X, p.Z)] = (col.Generated, hasBlocks ? col.Air & ~b : col.Air | b);
     }
 
-    private void RecordSave(ChunkPosition p, bool hasBlocks)
+    private void RecordEdited(ChunkPosition p, bool hasBlocks)
     {
-        _saved.Add(p);
+        _edited.Add(p);
         RecordBuild(p, hasBlocks);
     }
 
@@ -472,12 +496,16 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     private void Dispatch()
     {
         _full = false;
-        while (_inFlight.Count < MaxInFlight && _queueHead < _queue.Count)
+        // A column whose edited chunks haven't arrived stays where it is in the queue (they're asked for), and the
+        // columns after it go meanwhile, up to MaxInFlight of them looked past.
+        int i = _queueHead, waiting = 0;
+        while (_inFlight.Count < MaxInFlight && i < _queue.Count && waiting < MaxInFlight)
         {
-            var col = _queue[_queueHead];
-            if (_inFlight.ContainsKey(col)) { _skippedInFlight = true; _queueHead++; continue; } // re-queued by the next rebuild
+            var col = _queue[i];
+            if (_inFlight.ContainsKey(col)) { _skippedInFlight = true; Dequeue(ref i); continue; } // re-queued by the next rebuild
             var work = Missing(col.x, col.z);
-            if (work.Count == 0) { _queueHead++; Loaded(col); continue; }
+            if (work.Count == 0) { Dequeue(ref i); Loaded(col); continue; }
+            if (!Arrived(work)) { i++; waiting++; continue; }
 
             int adding = _inFlightChunks + work.Count;
             if (!_loadBudget.HasRoomFor(_staticVolume, adding))
@@ -493,23 +521,44 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
                 break;
             }
 
-            _queueHead++;
+            Dequeue(ref i);
             DispatchColumn(col, work);
         }
     }
 
-    /// <summary>Hands a column's missing chunks to a worker: each loaded from the store if saved, else generated.</summary>
-    private void DispatchColumn((int x, int z) col, List<(ChunkPosition Pos, bool FromSave)> work)
+    /// <summary>Takes the queue's column at <paramref name="i"/> out (the head, unless columns before it are waiting),
+    /// leaving <paramref name="i"/> at the next.</summary>
+    private void Dequeue(ref int i)
+    {
+        if (i == _queueHead) i = ++_queueHead;
+        else _queue.RemoveAt(i);
+    }
+
+    /// <summary>Whether a column's edited chunks are all here to load; asks the store for any that aren't.</summary>
+    private bool Arrived(List<(ChunkPosition Pos, bool Edited)> work)
+    {
+        bool all = true;
+        foreach (var (pos, edited) in work)
+        {
+            if (!edited || _chunkStore.IsReady(pos)) continue;
+            _chunkStore.Request(pos);
+            all = _chunkStore.IsReady(pos) && all; // a store on this machine may have it at once
+        }
+        return all;
+    }
+
+    /// <summary>Hands a column's missing chunks to a worker: each loaded from the store if edited, else generated.</summary>
+    private void DispatchColumn((int x, int z) col, List<(ChunkPosition Pos, bool Edited)> work)
     {
         _inFlight.Add(col, work.Count);
         _inFlightChunks += work.Count;
         BackgroundWork.Queue(() =>
         {
             var loaded = new List<(ChunkPosition, ChunkData?, ChunkPreparation?)>(work.Count);
-            foreach (var (pos, fromSave) in work)
+            foreach (var (pos, edited) in work)
             {
                 var data = _scratch.Value!;
-                if (!(fromSave && _chunkStore.TryLoad(pos, data)))
+                if (!(edited && _chunkStore.TryLoad(pos, data)))
                     _generator.Value!.Generate(data, pos);
                 data.Compact(); // stone inside an island, or sky, keeps one block instead of 64 KB
                 if (data.HasAnyNonAir())
@@ -522,8 +571,8 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
                 {
                     loaded.Add((pos, null, null));
                     // Generation only ever writes blocks, so an empty result leaves the buffer all air and ready to
-                    // reuse; a loaded save may have overwritten more than blocks, so start that one afresh.
-                    if (fromSave) _scratch.Value = new ChunkData();
+                    // reuse; a loaded edit may have overwritten more than blocks, so start that one afresh.
+                    if (edited) _scratch.Value = new ChunkData();
                 }
             }
             _results.Enqueue((col, loaded));
@@ -595,6 +644,38 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         return false;
     }
 
+    /// <summary>Whether chunk <paramref name="pos"/> (not loaded) is known to hold nothing: its column is wanted and
+    /// not loading, and it's neither something the generator may fill nor a build. Where streaming doesn't reach, or
+    /// hasn't looked yet, nothing is known.</summary>
+    public bool IsKnownEmpty(ChunkPosition pos)
+    {
+        if (pos.Y < _minY || pos.Y > _minY + 63) return true; // never loaded: nothing there
+        if (!Wanted(pos.X, pos.Z) || _inFlight.ContainsKey((pos.X, pos.Z))) return false;
+        return (MaybeContent(pos.X, pos.Z) & Bit(pos)) == 0;
+    }
+
+    /// <summary>Chunks edits couldn't change here since the last frame (see <see cref="TerrainEditedElsewhere"/>).</summary>
+    private void TakeEditsElsewhere()
+    {
+        if (_editedElsewhere.Count == 0) return;
+        foreach (var e in _editedElsewhere.GetEntities().ToArray())
+        {
+            EditedElsewhere(e.Get<TerrainEditedElsewhere>().Position);
+            e.Dispose();
+        }
+    }
+
+    /// <summary>An edit changed chunk <paramref name="pos"/> while it wasn't here: it's edited from now on (loaded
+    /// from the store, not generated), whatever the store had of it is stale, and if its column is loading, what loads
+    /// is stale too and loads again.</summary>
+    private void EditedElsewhere(ChunkPosition pos)
+    {
+        if (pos.Y < _minY || pos.Y > _minY + 63) return;
+        RecordEdited(pos, hasBlocks: true);
+        _chunkStore.Outdated(pos);
+        if (_inFlight.ContainsKey((pos.X, pos.Z))) _stale.Add(pos);
+    }
+
     /// <summary>Whether the terrain within <paramref name="radius"/> (horizontally) of <paramref name="centre"/> has
     /// loaded: every column there is wanted, with nothing still to load or loading.</summary>
     public bool IsTerrainLoaded(Vector3D<float> centre, float radius)
@@ -609,14 +690,14 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
         return true;
     }
 
-    /// <summary>Column (x, z)'s chunks that may hold something and aren't loaded yet, with whether each has a save.</summary>
-    private List<(ChunkPosition Pos, bool FromSave)> Missing(int x, int z)
+    /// <summary>Column (x, z)'s chunks that may hold something and aren't loaded yet, with whether each is edited.</summary>
+    private List<(ChunkPosition Pos, bool Edited)> Missing(int x, int z)
     {
         var missing = new List<(ChunkPosition, bool)>();
         for (ulong bits = MaybeContent(x, z); bits != 0; bits &= bits - 1)
         {
             var p = new ChunkPosition(x, _minY + BitOperations.TrailingZeroCount(bits), z);
-            if (!_staticVolume.IsLoaded(p)) missing.Add((p, _saved.Contains(p)));
+            if (!_staticVolume.IsLoaded(p)) missing.Add((p, _edited.Contains(p)));
         }
         return missing;
     }
@@ -624,30 +705,11 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem
     public void Unload(ChunkPosition pos)
     {
         var entry = _staticVolume.GetEntry(pos);
-        if (entry is not null)
-        {
-            SaveIfDirty(pos, entry);
-        }
+        // Edited while loaded: it loads from the store next time (the Host has every edit), so an edit off the island's
+        // terrain (a bridge, a tower) comes back, and one that cleared a chunk out stops costing budget.
+        if (entry is not null && entry.Data.IsDirty) RecordEdited(pos, entry.Data.HasAnyNonAir());
         _staticVolume.RemoveChunk(pos);
         entry?.Data.Release(); // its arrays go to the next chunk to load
-    }
-
-    /// <summary>Writes every currently loaded chunk with unsaved edits to the chunk store. Called by autosave (inside its
-    /// transaction) and on exit.</summary>
-    public void SaveAllDirty()
-    {
-        foreach (var (pos, entry) in _staticVolume.All)
-            SaveIfDirty(pos, entry);
-    }
-
-    private void SaveIfDirty(ChunkPosition pos, ChunkEntry entry)
-    {
-        if (!entry.Data.IsDirty) return;
-        _chunkStore.Save(pos, entry.Data);
-        entry.Data.IsDirty = false;
-        // What's there now is what a reload finds, so an edit off the island's terrain (a bridge, a tower) comes back,
-        // and one that cleared a chunk out stops costing budget.
-        RecordSave(pos, entry.Data.HasAnyNonAir());
     }
 
 }

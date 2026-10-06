@@ -7,11 +7,29 @@ using Xunit;
 
 namespace ClearSkies.Tests;
 
+/// <summary>Edited chunks straight from a save, for streaming with no Host: always there to load.</summary>
+internal sealed class SavedChunkStore(SaveDatabase db) : IChunkStore
+{
+    public IEnumerable<ChunkPosition> EditedChunks() => db.ChunkPositions();
+    public bool IsReady(ChunkPosition pos) => true;
+    public void Request(ChunkPosition pos) { }
+    public void Outdated(ChunkPosition pos) { }
+
+    public bool TryLoad(ChunkPosition pos, ChunkData data)
+    {
+        if (db.ReadChunk(pos) is not { } blob) return false;
+        StaticWorldSerializer.Read(blob, data);
+        return true;
+    }
+
+    public void Save(ChunkPosition pos, ChunkData data) => db.WriteChunk(pos, StaticWorldSerializer.ToBytes(data));
+}
+
 /// <summary>Terrain streaming with nothing drawn (headless): limited by a count of chunks.</summary>
 public class HeadlessStreamingTests
 {
     /// <summary>Stone below y = 0, air above.</summary>
-    private sealed class Flat : IWorldGenerator
+    internal sealed class Flat : IWorldGenerator
     {
         public void Generate(ChunkData data, ChunkPosition pos)
         {
@@ -24,7 +42,7 @@ public class HeadlessStreamingTests
         public ulong ColumnLayers(int chunkX, int chunkZ, int minChunkY) => 0xFF;
     }
 
-    private static DefaultEcs.Entity Interest(HeadlessScene scene, float x, float z, TerrainInterest interest)
+    internal static DefaultEcs.Entity Interest(HeadlessScene scene, float x, float z, TerrainInterest interest)
     {
         var e = scene.World.CreateEntity();
         e.Set(new Transform { Position = new Vector3D<float>(x, 10, z), Rotation = Quaternion<float>.Identity, Scale = Vector3D<float>.One });
@@ -32,12 +50,12 @@ public class HeadlessStreamingTests
         return e;
     }
 
-    private static TerrainInterest View(float radius) => new() { ColliderRadius = 16, DrawRadius = radius };
+    internal static TerrainInterest View(float radius) => new() { ColliderRadius = 16, DrawRadius = radius };
     private static TerrainInterest Colliders(float radius) => new() { ColliderRadius = radius };
 
     /// <summary>Runs streaming until it's quiet: nothing loading and nothing changing for a second of frames (at least
     /// <paramref name="frames"/> frames, at most 20 s).</summary>
-    private static void Settle(ChunkLoadSystem load, int frames = 60)
+    internal static void Settle(ChunkLoadSystem load, int frames = 60)
     {
         var deadline = DateTime.UtcNow.AddSeconds(20);
         int quiet = 0, last = -1;
@@ -51,9 +69,17 @@ public class HeadlessStreamingTests
         }
     }
 
-    private static ChunkLoadSystem Streaming(HeadlessScene scene, SaveDatabase db, int maxChunks = 100_000, float viewDistance = 64) =>
-        new(scene.World, scene.WorldVolume, new ChunkCountBudget(maxChunks), () => new Flat(), viewDistance, minChunkY: 0,
-            new DatabaseChunkStore(db));
+    internal static ChunkLoadSystem Streaming(HeadlessScene scene, SaveDatabase db, int maxChunks = 100_000, float viewDistance = 64) =>
+        Streaming(scene, new SavedChunkStore(db), maxChunks, viewDistance);
+
+    /// <summary>The scene's world streamed, as the game's: edits to it ask streaming what's there.</summary>
+    internal static ChunkLoadSystem Streaming(HeadlessScene scene, IChunkStore store, int maxChunks = 100_000, float viewDistance = 64)
+    {
+        var load = new ChunkLoadSystem(scene.World, scene.WorldVolume, new ChunkCountBudget(maxChunks), () => new Flat(), viewDistance,
+                                       minChunkY: 0, store);
+        ((ClearSkies.Engine.Commands.Handlers.EditVoxelsHandler)scene.Commands.HandlerFor(ClearSkies.Engine.Commands.CommandIds.EditVoxels)!).Terrain = load;
+        return load;
+    }
 
     [Fact]
     public void WithNoViewNothingIsStreamed()

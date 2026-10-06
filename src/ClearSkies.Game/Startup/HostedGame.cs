@@ -24,9 +24,10 @@ internal static class HostedGame
     {
         using var save = WorldSave.Open(options);
         using var view = new GameView(host, options);
-        var world = new GameWorld(host, options, Session.SinglePlayer(), save.Seed, save.Chunks, view.Budget, view.ChunkPreparer,
+        var chunks = new HostChunkStore();
+        var world = new GameWorld(host, options, Session.SinglePlayer(), save.Seed, chunks, view.Budget, view.ChunkPreparer,
                                   view.PlayerModel);
-        using var hosting = new Hosting(world, save, transport, options.PlayerName);
+        using var hosting = new Hosting(world, chunks, save, transport, options.PlayerName);
         var net = hosting.Net;
         var input = host.Input;
         var renderer = host.Renderer;

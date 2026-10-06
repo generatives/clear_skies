@@ -5,6 +5,7 @@ using ClearSkies.Engine.Commands.Handlers;
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Entities;
+using ClearSkies.Engine.Voxels;
 using ClearSkies.Net.Protocol;
 using ClearSkies.Net.Sync;
 using DefaultEcs;
@@ -22,7 +23,8 @@ namespace ClearSkies.Net.Session;
 /// <para>The hosting machine's is the authority (<see cref="PeerId.Host"/>): it simulates every entity, players
 /// included (moving each by their machine's input, <see cref="RemoteInputs"/>), decides every command, and describes
 /// entities for the Host: ones it makes, ones the Host asks for, ones the Host releases (then despawns them), and
-/// everything when the Host saves. It shares the Host's clock. Any other simulates only its own player, predicting it
+/// everything when the Host saves; and it describes each terrain chunk it edits, before the edit's event goes anywhere.
+/// It shares the Host's clock. Any other simulates only its own player, predicting it
 /// (<see cref="OwnPlayerPrediction"/>), and keeps its clock on the Host's (<see cref="ClockSync"/>). Its player spawns
 /// only once that has settled (<see cref="ClockSync.Ready"/>, for at most <see cref="ClockSync.MaxSettleMs"/>), so prediction
 /// starts on the Host's timeline.</para>
@@ -33,6 +35,7 @@ public sealed class SimulationParticipant : IParticipant, ISystem, ICommandRoute
     public const int ViewTicks = 30;
 
     private readonly IHost _host;
+    private readonly HostChunkStore? _chunks;
     private readonly SpawnQueue _spawns;
     private readonly RemoteInputs? _inputs;
     private readonly EntitySet _localPlayers;
@@ -42,6 +45,7 @@ public sealed class SimulationParticipant : IParticipant, ISystem, ICommandRoute
     private readonly List<EntityId> _deleted = new();
     private readonly List<EntityId> _toRelease = new();
     private readonly List<EntityId> _toDescribe = new();
+    private readonly HashSet<ChunkPosition> _editedChunks = new();
     private readonly Stopwatch _realTime = Stopwatch.StartNew();
     private bool _idRequested;
     private int _viewTicks;
@@ -51,10 +55,14 @@ public sealed class SimulationParticipant : IParticipant, ISystem, ICommandRoute
     /// <param name="host">What it tells the Host by, which <paramref name="welcome"/> came from. Whoever makes it then has
     /// the Host tell it things (see <see cref="Join(Host, Hello, EngineSession, CommandSystem, EntityRegistry, World, ITickClock, Func{Vector3, bool})"/>).</param>
     /// <param name="terrainReady">Whether the terrain around a point has loaded here, with colliders.</param>
+    /// <param name="chunks">Where its terrain streaming loads edited chunks from: the Host, through this (none: it streams
+    /// no terrain).</param>
     public SimulationParticipant(IHost host, Welcome welcome, EngineSession session, CommandSystem commands, EntityRegistry registry,
-                                 World world, ITickClock clock, Func<Vector3, bool> terrainReady)
+                                 World world, ITickClock clock, Func<Vector3, bool> terrainReady, HostChunkStore? chunks = null)
     {
         _host = host;
+        _chunks = chunks;
+        chunks?.Connect(host, welcome.EditedChunks);
         Session = session;
         Commands = commands;
         Registry = registry;
@@ -82,21 +90,21 @@ public sealed class SimulationParticipant : IParticipant, ISystem, ICommandRoute
     /// <summary>The hosting machine's, joining <paramref name="host"/> directly: the authority. Throws with the Host's
     /// reason if it refuses.</summary>
     public static SimulationParticipant Join(Host host, Hello hello, EngineSession session, CommandSystem commands, EntityRegistry registry,
-                                             World world, ITickClock clock, Func<Vector3, bool> terrainReady)
+                                             World world, ITickClock clock, Func<Vector3, bool> terrainReady, HostChunkStore? chunks = null)
     {
         var joined = host.Join(hello, local: true, out var welcome, out var refusal)
                      ?? throw new InvalidOperationException($"The host refused: {refusal}");
         var participant = new SimulationParticipant(new LocalHost(host, joined), welcome, session, commands, registry, world, clock,
-                                                     terrainReady);
+                                                     terrainReady, chunks);
         joined.Participant = participant;
         return participant;
     }
 
     /// <summary>Another machine's, joining the Host <paramref name="host"/> connects to, once it has welcomed us.</summary>
     public static SimulationParticipant Join(RemoteHost host, EngineSession session, CommandSystem commands, EntityRegistry registry,
-                                             World world, ITickClock clock, Func<Vector3, bool> terrainReady)
+                                             World world, ITickClock clock, Func<Vector3, bool> terrainReady, HostChunkStore? chunks = null)
     {
-        var participant = new SimulationParticipant(host, host.Welcome, session, commands, registry, world, clock, terrainReady);
+        var participant = new SimulationParticipant(host, host.Welcome, session, commands, registry, world, clock, terrainReady, chunks);
         host.Participant = participant;
         return participant;
     }
@@ -264,6 +272,8 @@ public sealed class SimulationParticipant : IParticipant, ISystem, ICommandRoute
     /// <inheritdoc cref="Release"/>
     public void Describe(EntityId id) { if (IsAuthority) _toDescribe.Add(id); }
 
+    public void ChunkData(in ChunkMessage chunk) => _chunks?.Received(chunk);
+
     /// <summary>Answered at once, so the save on exit needs no more ticks.</summary>
     public void Save()
     {
@@ -315,10 +325,32 @@ public sealed class SimulationParticipant : IParticipant, ISystem, ICommandRoute
 
     private void OnApplied(CommandHandlerBase handler, EventMeta meta, object evt)
     {
+        if (IsAuthority && evt is EditVoxels edit && edit.Volume == EntityRegistry.WorldVolume) DescribeChunks(edit);
         if (evt is not DespawnEntity despawn) return;
         Commands.ForgetEvents(despawn.Entity);
         // Gone for good (deleted, broken up), not released: out of the save too. Told next tick, after its event.
         if (IsAuthority && !despawn.KeepStored) _deleted.Add(despawn.Entity);
+    }
+
+    /// <summary>On the authority, as it applies a terrain edit (before its event goes anywhere): each chunk it changed,
+    /// for the Host to keep.</summary>
+    private void DescribeChunks(EditVoxels edit)
+    {
+        if (Registry.Find(EntityRegistry.WorldVolume) is not { } root) return;
+        var volume = root.Get<ChunkGrid>().Volume;
+        _editedChunks.Clear();
+        foreach (var op in edit.Ops)
+        {
+            var lo = ChunkPosition.FromVoxel(op.Min);
+            var hi = ChunkPosition.FromVoxel(op.Max);
+            for (int z = lo.Z; z <= hi.Z; z++)
+            for (int y = lo.Y; y <= hi.Y; y++)
+            for (int x = lo.X; x <= hi.X; x++)
+                _editedChunks.Add(new ChunkPosition(x, y, z));
+        }
+        foreach (var pos in _editedChunks)
+            if (volume.GetData(pos) is { } data)
+                _host.ChunkEdited(new ChunkMessage(MessageKind.ChunkEdited, pos, StaticWorldSerializer.ToBytes(data)));
     }
 
     private DescriptionMessage Description(MessageKind message, EntityDescription d)
