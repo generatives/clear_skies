@@ -105,6 +105,26 @@ public class CrossBlockTests
     }
 
     [Fact]
+    public void Grass_quads_pick_their_sprites_by_world_cell()
+    {
+        var atlas = new TextureAtlas(Resource("spritesheet_tiles.png"), Resource("spritesheet_tiles.xml"));
+        var data = new ChunkData();
+        for (int x = 0; x < 8; x++) data.Set(x, 1, 0, BlockId.ShortGrass);
+        var mesher = new GreedyMesher(atlas);
+        static List<float> Layers(LayerMesh m) => Enumerable.Range(0, m.Vertices.Count / 4).Select(q => m.Vertices[4 * q].Uv.Z).ToList();
+        var here = Layers(mesher.Mesh(data, null, null, null, null, null, null, position: new ChunkPosition(3, 0, -2)).Cutout);
+        var again = Layers(mesher.Mesh(data, null, null, null, null, null, null, position: new ChunkPosition(3, 0, -2)).Cutout);
+        var there = Layers(mesher.Mesh(data, null, null, null, null, null, null, position: new ChunkPosition(4, 0, -2)).Cutout);
+
+        Assert.Equal(here, again);                     // the same cell meshes the same
+        Assert.NotEqual(here, there);                  // other cells pick differently
+        Assert.True(here.Distinct().Count() > 1, "short grass mixes sprites");
+        var grasses = new[] { "grass1", "grass2", "grass3" }.Select(n => { atlas.TryGetLayer(n, out int l); return (float)l; });
+        Assert.All(here, l => Assert.Contains(l, grasses));
+        for (int q = 0; q < here.Count; q += 2) Assert.Equal(here[q], here[q + 1]); // a quad's two sides match
+    }
+
+    [Fact]
     public void Generated_plants_grow_on_solid_ground()
     {
         var generator = new HeartWorldGenerator(1337);
