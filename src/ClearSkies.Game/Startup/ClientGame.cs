@@ -29,14 +29,14 @@ public static class ClientGame
 {
     public static void Run(WindowedEngineHost host, LaunchOptions options)
     {
-        var (transport, link) = Connect(options);
-        using var hostLink = link;
-        var welcome = link.Welcome;
+        var (transport, remoteHost) = Connect(options);
+        using var hostLink = remoteHost;
+        var welcome = remoteHost.Welcome;
         var session = new Session(SessionRole.Client, welcome.Peer);
         using var view = new GameView(host, options);
         var world = new GameWorld(host, options, session, welcome.Seed, new NoChunkStore(), view.Budget, view.ChunkPreparer,
                                   view.PlayerModel);
-        using var net = SimulationParticipant.Join(link, session, world.Commands, world.Registry, host.World, host.Clock, world.TerrainReadyFor);
+        using var net = SimulationParticipant.Join(remoteHost, session, world.Commands, world.Registry, host.World, host.Clock, world.TerrainReadyFor);
         net.Ended += reason => { Console.WriteLine($"[net] session ended: {reason}"); host.Quit(); };
         var input = host.Input;
         var renderer = host.Renderer;
@@ -54,7 +54,7 @@ public static class ClientGame
         // snapshots, session messages), the hierarchy, and the frame's input as the local player's PlayerInput (tick
         // systems read only that). The host simulates our player; we predict them meanwhile: the prediction checks
         // itself against what the host last said, then sends it this tick's input.
-        host.AddSystem(link, SystemStage.Simulation);
+        host.AddSystem(remoteHost, SystemStage.Simulation);
         host.AddSystem(net, SystemStage.Simulation);
         host.AddSystem(world.Hierarchy, SystemStage.Simulation);
         host.AddSystem(view.InputSample, SystemStage.Simulation);
