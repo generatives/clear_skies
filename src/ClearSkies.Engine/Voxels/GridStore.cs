@@ -15,6 +15,10 @@ public sealed class GridHandle
     internal bool IsWorld;
     internal readonly Dictionary<ChunkPosition, ChunkRecord> Chunks = new();
 
+    /// <summary>Chunk <paramref name="pos"/>'s chunk-table entry (as the shaders' entryOf finds it), or -1 if it isn't
+    /// uploaded.</summary>
+    public int TableIndexOf(ChunkPosition pos) => Chunks.TryGetValue(pos, out var rec) ? rec.TableIndex : -1;
+
     /// <summary>The uploaded chunks that hold light emitters (lamps), so finding lamps doesn't walk every chunk.</summary>
     internal readonly Dictionary<ChunkPosition, ChunkEntry> EmitterChunks = new();
 

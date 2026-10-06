@@ -39,7 +39,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
 
     // One visible chunk, collected so they can be drawn nearest first.
     private readonly record struct ChunkDraw(float DistSq, GpuMesh? Mesh, GpuMesh? CutoutMesh, GpuMesh? TransparentMesh,
-                                             ModelBlock[] Models, Mat4 Model, int Grid, ChunkPosition Chunk);
+                                             ModelBlock[] Models, Mat4 Model, int Grid, ChunkPosition Chunk, int Entry);
     private readonly List<ChunkDraw> _draws = new();
     private readonly List<ChunkDraw> _translucentDraws = new(); // the visible chunks with translucent faces
     private static readonly Comparison<ChunkDraw> NearestFirst = (a, b) => a.DistSq.CompareTo(b.DistSq);
@@ -128,7 +128,8 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
                 if (!frame.Frustum.Intersects(origin, origin + size)) continue;
                 var centre = origin + half;
                 AddDraw(new ChunkDraw(Vector3D.DistanceSquared(centre, frame.CameraPosition), rd.Mesh, rd.CutoutMesh,
-                                         rd.TransparentMesh, rd.Models, Mat4.Translation(origin), rd.Grid?.Index ?? -1, rd.ChunkPos));
+                                         rd.TransparentMesh, rd.Models, Mat4.Translation(origin), rd.Grid?.Index ?? -1, rd.ChunkPos,
+                                         rd.Grid?.TableIndexOf(rd.ChunkPos) ?? -1));
             }
         }
 
@@ -153,18 +154,18 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
 
             float distSq = Vector3D.DistanceSquared(model.TransformPoint(half), frame.CameraPosition);
             AddDraw(new ChunkDraw(distSq, rd.Mesh, rd.CutoutMesh, rd.TransparentMesh, rd.Models, model, rd.Grid?.Index ?? -1,
-                                     rd.ChunkPos));
+                                     rd.ChunkPos, rd.Grid?.TableIndexOf(rd.ChunkPos) ?? -1));
         }
 
         // Nearest first, so the depth test rejects hidden fragments before the (expensive) lighting shader runs on
         // them instead of shading them and overwriting them later.
         _draws.Sort(NearestFirst);
         foreach (var d in _draws)
-            if (d.Mesh != null) _renderer.DrawChunkMesh(d.Mesh, d.Model, d.Grid, d.Chunk);
+            if (d.Mesh != null) _renderer.DrawChunkMesh(d.Mesh, d.Model, d.Grid, d.Chunk, d.Entry);
         // Cut-out faces after all the opaque ones: their shader discards texels, which costs the early depth test, so
         // the opaque world is drawn without it first.
         foreach (var d in _draws)
-            if (d.CutoutMesh != null) _renderer.DrawCutoutChunkMesh(d.CutoutMesh, d.Model, d.Grid, d.Chunk);
+            if (d.CutoutMesh != null) _renderer.DrawCutoutChunkMesh(d.CutoutMesh, d.Model, d.Grid, d.Chunk, d.Entry);
 
         _modelBlocksDrawn = 0;
         foreach (var d in _draws)
@@ -190,8 +191,8 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     /// order the chunks (and their faces) are drawn in.</summary>
     private void RenderTranslucent()
     {
-        foreach (var d in _translucentDraws) _renderer.DrawTransparentChunkDepth(d.TransparentMesh!, d.Model, d.Grid, d.Chunk);
-        foreach (var d in _translucentDraws) _renderer.DrawTransparentChunkMesh(d.TransparentMesh!, d.Model, d.Grid, d.Chunk);
+        foreach (var d in _translucentDraws) _renderer.DrawTransparentChunkDepth(d.TransparentMesh!, d.Model, d.Grid, d.Chunk, d.Entry);
+        foreach (var d in _translucentDraws) _renderer.DrawTransparentChunkMesh(d.TransparentMesh!, d.Model, d.Grid, d.Chunk, d.Entry);
     }
 
     private static Mat4[] BuildOrientationPlacements()

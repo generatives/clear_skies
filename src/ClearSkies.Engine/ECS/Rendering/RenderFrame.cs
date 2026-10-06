@@ -88,6 +88,13 @@ public sealed class RenderFrame : IDebugUiSystem
 
     private static Vector3D<float> ToVector3D(System.Numerics.Vector3 v) => new(v.X, v.Y, v.Z);
 
+    /// <summary>The shader's lin(): sRGB display values to linear light.</summary>
+    private static Vector3D<float> SrgbToLinear(Vector3D<float> c)
+    {
+        static float L(float x) => x <= 0.04045f ? x / 12.92f : MathF.Pow((x + 0.055f) / 1.055f, 2.4f);
+        return new(L(c.X), L(c.Y), L(c.Z));
+    }
+
     /// <summary>Opens the frame, or returns false to skip it: there's no active camera, or no swapchain image (e.g.
     /// the window is minimized, or the surface was just resized and is being reconfigured).</summary>
     internal bool TryBegin()
@@ -112,7 +119,9 @@ public sealed class RenderFrame : IDebugUiSystem
             ZenithColor    = ToVector3D(SkySettings.ZenithColor),
             HorizonColor   = ToVector3D(SkySettings.HorizonColor),
             HazeStrength   = SkySettings.HazeEnabled ? SkySettings.HazeStrength : 0f,
-            HazeColor      = ToVector3D(SkySettings.HazeColor),
+            // Linear on an sRGB surface, as the shader works (see lin): converted here once, not per pixel.
+            HazeColor      = _renderer.Context.SurfaceIsSrgb ? SrgbToLinear(ToVector3D(SkySettings.HazeColor))
+                                                             : ToVector3D(SkySettings.HazeColor),
             HazeDistance   = System.Math.Max(SkySettings.HazeDistance, 1f),
             SeaAltitude    = SkySettings.CloudSeaAltitude,
             SeaCoverage    = SkySettings.CloudSeaEnabled ? SkySettings.CloudSeaCoverage : 0f,

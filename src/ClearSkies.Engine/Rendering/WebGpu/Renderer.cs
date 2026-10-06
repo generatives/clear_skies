@@ -21,7 +21,7 @@ public sealed unsafe class Renderer : IDisposable
     private const ulong ModelStride = 256;   // >= minUniformBufferOffsetAlignment
     private const ulong BlockTableBytes = ChunkQuad.BlockTableSize * 16; // blockTable: one vec4<f32> per block
     private const ulong CameraSize  = 272;   // two mat4x4<f32> (view, proj) + nine vec4<f32> (sun, light params, camera position, fog, zenith, horizon, haze, sea, light params 2)
-    private const ulong ModelSize   = 96;    // mat4x4<f32> + vec3<i32> chunk + i32 grid + vec4<f32> params
+    private const ulong ModelSize   = 112;   // mat4x4<f32> + vec3<i32> chunk + i32 grid + vec4<f32> params + vec4<i32> entry
 
     private static readonly string Wgsl = @"
 const MIN_AMBIENT: f32 = 0.00;        // floor so no geometry is ever fully black
@@ -71,7 +71,9 @@ fn skyColor(dir: vec3<f32>) -> vec3<f32> {
     var c    = mix(hz, zn, sqrt(max(up, 0.0)));
     c        = mix(c, mix(hz, zn, 0.35), pow(max(-up, 0.0), 0.6));
     let toSun = max(dot(dir, -camera.sunDir.xyz), 0.0);
-    let glow  = 0.35 * pow(toSun, 8.0) + 0.25 * pow(toSun, 64.0);
+    // toSun^8 and ^64 by squaring: a few multiplies instead of two exp/log pairs, every hazed pixel.
+    let t2 = toSun * toSun; let t4 = t2 * t2; let t8 = t4 * t4; let t16 = t8 * t8; let t64 = t16 * t16 * t16 * t16;
+    let glow  = 0.35 * t8 + 0.25 * t64;
     return lin(c + vec3<f32>(1.0, 0.9, 0.7) * glow * camera.sunDir.w);
 }
 
@@ -80,7 +82,7 @@ fn skyColor(dir: vec3<f32>) -> vec3<f32> {
 // away and melt into the horizon.
 fn applyHaze(color: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
     let k = camera.horizon.w * (1.0 - exp(-length(d) / camera.haze.w));
-    return mix(color, mix(lin(camera.haze.rgb), skyColor(normalize(d)), k), k);
+    return mix(color, mix(camera.haze.rgb, skyColor(normalize(d)), k), k); // haze.rgb: already linear (see RenderFrame)
 }
 
 // Hazes a lit surface colour at worldPos, then fades it into what fs_sky draws behind it (the sky, or the cloud sea
@@ -231,7 +233,9 @@ fn cloudSea(ro: vec3<f32>, rd: vec3<f32>) -> vec4<f32> {
 // model: world transform. chunk: this chunk's coordinate in its grid. grid: the grid's index in the GridStore, or
 // -1 for a non-chunk draw (drawn full-bright). params.x: alpha-test cutoff for fs_model (0 = opaque); params.yzw: for a
 // model block (fs_model with grid >= 0), its cell's voxel coordinates within the chunk.
-struct Model { model: mat4x4<f32>, chunk: vec3<i32>, grid: i32, params: vec4<f32> };
+// entry.x: a chunk draw's chunk-table entry (see entryOf), found once on the CPU so a fragment whose air cell is in
+// the drawn chunk needn't look it up; -1 if unknown.
+struct Model { model: mat4x4<f32>, chunk: vec3<i32>, grid: i32, params: vec4<f32>, entry: vec4<i32> };
 @group(1) @binding(0) var<uniform> model: Model;
 
 // The shared voxel storage (see GridStore): occupancy pool, chunk table ((occupancy slot or code, chunk tag), then
@@ -592,7 +596,16 @@ fn shadeFast(localPos: vec3<f32>, localNormal: vec3<f32>) -> Shade {
     else if (n.y > 0.5) { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 0, 1); }
     else                { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 1, 0); }
 
-    let ai = entryOf(model.grid, air >> vec3<u32>(5u));
+    // The air cell's chunk-table entry: the draw's own (found on the CPU, model.entry) when the cell is in the drawn
+    // chunk, as all but border faces' are, checked against the entry's coordinate tag; else the full lookup.
+    let ac = air >> vec3<u32>(5u);
+    var ai = -1;
+    if (model.entry.x >= 0 && all(ac == model.chunk)) {
+        ai = model.entry.x;
+        if (any(chunkTable[2 * ai].yzw != ac)) { ai = entryOf(model.grid, ac); }
+    } else {
+        ai = entryOf(model.grid, ac);
+    }
     let m = solidMask(air, ai);
     let hb = air >> vec3<u32>(3u);
     let hs = brickSlot(ai, air);
@@ -1626,25 +1639,25 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     /// Draws a chunk mesh lit from grid <paramref name="grid"/> (its <see cref="GridHandle.Index"/>; -1 draws it
     /// full-bright). <paramref name="chunk"/> is the chunk's coordinate in that grid.
     /// </summary>
-    public void DrawChunkMesh(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk)
-        => DrawChunk(mesh, model, grid, chunk, _chunkPipeline);
+    public void DrawChunkMesh(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk, int entry = -1)
+        => DrawChunk(mesh, model, grid, chunk, _chunkPipeline, entry);
 
     /// <summary>
     /// Draws a chunk's cut-out mesh (<see cref="ChunkRenderData.CutoutMesh"/>) like <see cref="DrawChunkMesh"/>, minus
     /// its texels under half alpha. Call after the opaque chunk meshes.
     /// </summary>
-    public void DrawCutoutChunkMesh(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk)
-        => DrawChunk(mesh, model, grid, chunk, _chunkCutoutPipeline);
+    public void DrawCutoutChunkMesh(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk, int entry = -1)
+        => DrawChunk(mesh, model, grid, chunk, _chunkCutoutPipeline, entry);
 
     /// <summary>
     /// Lays down a chunk's transparent mesh's depth (<see cref="ChunkRenderData.TransparentMesh"/>), so
     /// <see cref="DrawTransparentChunkMesh"/> draws only the nearest transparent face at each pixel. Call for every
     /// visible chunk's transparent mesh first. Skipped in the wireframe and overdraw views.
     /// </summary>
-    public void DrawTransparentChunkDepth(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk)
+    public void DrawTransparentChunkDepth(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk, int entry = -1)
     {
         if (WireframeMode || OverdrawMode) return;
-        DrawChunk(mesh, model, grid, chunk, _chunkTransparentDepthPipeline);
+        DrawChunk(mesh, model, grid, chunk, _chunkTransparentDepthPipeline, entry);
     }
 
     /// <summary>
@@ -1652,10 +1665,11 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     /// face (see <see cref="DrawTransparentChunkDepth"/>). Call after the opaque world and <see cref="DrawSky"/> (the sky
     /// only fills pixels with no depth, so it would paint over them).
     /// </summary>
-    public void DrawTransparentChunkMesh(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk)
-        => DrawChunk(mesh, model, grid, chunk, _chunkTransparentPipeline);
+    public void DrawTransparentChunkMesh(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk, int entry = -1)
+        => DrawChunk(mesh, model, grid, chunk, _chunkTransparentPipeline, entry);
 
-    private void DrawChunk(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk, RenderPipeline* solidPipeline)
+    private void DrawChunk(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk, RenderPipeline* solidPipeline,
+                           int entry = -1)
     {
         if (_drawIndex >= MaxObjects) return;
 
@@ -1665,7 +1679,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         var pipeline = OverdrawMode ? _chunkOverdrawPipeline : wire ? _chunkWireframePipeline : solidPipeline;
         if (_boundPipeline != pipeline) SetPipeline(pipeline);
 
-        uint dynOffset = StageModel(new ModelUniform { Model = model, ChunkX = chunk.X, ChunkY = chunk.Y, ChunkZ = chunk.Z, Grid = grid });
+        uint dynOffset = StageModel(new ModelUniform { Model = model, ChunkX = chunk.X, ChunkY = chunk.Y, ChunkZ = chunk.Z, Grid = grid, Entry = entry });
         _api.RenderPassEncoderSetBindGroup(_pass, 1, (BindGroup*)mesh.DrawBindGroup, 1, &dynOffset);
         if (wire && !OverdrawMode) _api.RenderPassEncoderDraw(_pass, 8u * mesh.QuadCount, 1, 0, 0);
         else
@@ -1718,7 +1732,9 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         public int ChunkX, ChunkY, ChunkZ, Grid;
         public float AlphaCutoff;             // params.x (fs_model)
         public float VoxelX, VoxelY, VoxelZ;  // params.yzw (fs_model, model blocks)
-        // 64 + 16 + 16 = 96 == ModelSize bytes the shader reads, padded to ModelStride
+        public int Entry;                     // entry.x: a chunk draw's chunk-table entry, -1 unknown (shadeFast only)
+        private int _entryPad0, _entryPad1, _entryPad2;
+        // 64 + 16 + 16 + 16 = 112 == ModelSize bytes the shader reads, padded to ModelStride
 
         /// <summary>Non-chunk draws: no grid, drawn full-bright.</summary>
         public static ModelUniform Default(in Mat4 m) => new() { Model = m, Grid = -1 };
