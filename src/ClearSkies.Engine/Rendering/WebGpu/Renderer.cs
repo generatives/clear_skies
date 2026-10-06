@@ -335,13 +335,15 @@ fn chunkVertex(quad: vec2<u32>, corner: u32) -> VSOut {
         // it's meshed: the plant is turned a full circle (not just the quarter that covers every angle of the X, so a
         // sprite shows mirrored as often as not: its back side's texture runs the other way), nudged up to 0.2 from
         // the cell's middle and stretched to 0.75-1.15 tall; then each of its two quads (both sides alike) is twisted
-        // up to 25 degrees and shifted up to 0.08 on its own, so they don't meet in a perfect X.
+        // up to 25 degrees and shifted up to 0.08 on its own, so they don't meet in a perfect X, unless the block
+        // keeps a clean X (BlockDef.RigidCross: blockTable's a is 0, see ChunkQuad.BuildBlockTable).
         cross = vec4<i32>(vec3<i32>(position), 1);
         let h = cellHash(model.chunk * 32 + cross.xyz);
         let q = mixHash(h ^ (face * 0x9e3779b9u));
-        let turn = f32(h & 1023u) * (6.2831853 / 1024.0) + (f32(q & 1023u) / 1023.0 - 0.5) * 0.87;
+        let loose = blockTable[c & 255u].a;
+        let turn = f32(h & 1023u) * (6.2831853 / 1024.0) + loose * (f32(q & 1023u) / 1023.0 - 0.5) * 0.87;
         let nudge = (vec2<f32>(f32((h >> 10u) & 255u), f32((h >> 18u) & 255u)) / 255.0 - 0.5) * 0.4
-                  + (vec2<f32>(f32((q >> 10u) & 255u), f32((q >> 18u) & 255u)) / 255.0 - 0.5) * 0.16;
+                  + loose * (vec2<f32>(f32((q >> 10u) & 255u), f32((q >> 18u) & 255u)) / 255.0 - 0.5) * 0.16;
         let tall = 0.75 + 0.4 * f32((h >> 26u) & 63u) / 63.0;
         let d = vec2<f32>(select(0.5 - cu, cu - 0.5, face == 6u), cu - 0.5); // from the cell's middle, in x and z
         let cs = cos(turn);

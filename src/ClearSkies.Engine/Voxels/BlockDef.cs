@@ -62,6 +62,10 @@ public readonly struct BlockDef
     /// just <see cref="Texture"/>.
     public string[]?       CrossTextures  { get; init; }
 
+    /// For a <see cref="BlockShape.Cross"/> block: keep its two quads a clean X (mushrooms, pebbles) rather than
+    /// twisting and shifting each on its own as grass does. The whole plant is still turned, nudged and sized.
+    public bool            RigidCross     { get; init; }
+
     /// True when this block's appearance actually depends on its stored orientation (i.e. it has a
     /// Top and/or Bottom texture distinct from Texture) — lets GreedyMesher skip the per-voxel
     /// orientation lookup entirely for blocks that look the same on every face regardless of orientation.
