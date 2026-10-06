@@ -9,7 +9,7 @@ namespace ClearSkies.Net.Protocol;
 /// <summary>Bumped whenever any message or description format changes; a mismatch refuses the join.</summary>
 public static class ProtocolVersion
 {
-    public const ushort Current = 4;
+    public const ushort Current = 5;
 }
 
 /// <summary>The first byte of every packet.</summary>
@@ -41,9 +41,12 @@ public enum MessageKind : byte
     DescribeRequest = 25,
     Described = 26,
     Deleted = 27,
+    Created = 28,
+    Released = 29,
 }
 
-/// <summary>A message: writes itself, kind byte first (see <see cref="Session.NetSession"/>'s Send).</summary>
+/// <summary>A message: writes itself, kind byte first (see <see cref="Session.RemoteHost"/> and
+/// <see cref="Session.HostNetwork"/>, which carry calls between machines as these).</summary>
 public interface IMessage
 {
     void Write(NetWriter w);
@@ -265,46 +268,42 @@ public readonly record struct EntityMessage(MessageKind Kind, EntityId Id) : IMe
     public static EntityMessage Read(MessageKind kind, ref NetReader r) => new(kind, EntityId.Read(ref r));
 }
 
-/// <summary>Why an authority describes an entity to the Host.</summary>
-public enum DescribedReason : byte
+/// <summary>Authority → Host: an entity's Description, as one of three messages:
+/// <list type="bullet">
+/// <item><see cref="MessageKind.Created"/>: it made it (a ship built, say), and the Host starts keeping it;</item>
+/// <item><see cref="MessageKind.Described"/>: the Host asked (<see cref="MessageKind.DescribeRequest"/>), to send to a
+/// Participant that doesn't have it;</item>
+/// <item><see cref="MessageKind.Released"/>: the Host released it, and this is its last Description (the authority has
+/// despawned it).</item>
+/// </list>
+/// Its kind (the spawn handler that recreates it), its authority's last event number, and where it is (none: a global
+/// entity, always loaded); the data is opaque to the Host, except a player's, whose position on their ship it reads.</summary>
+public readonly ref struct DescriptionMessage(MessageKind message, EntityId id, ushort kind, uint eventNumber, Vector3? position,
+                                              ReadOnlySpan<byte> data)
 {
-    /// <summary>It made it (a ship built, say): the Host starts keeping it.</summary>
-    Created,
-    /// <summary>The Host asked (<see cref="MessageKind.DescribeRequest"/>), to send to a Participant.</summary>
-    Requested,
-    /// <summary>The Host released it: this is its last Description, and the authority has despawned it.</summary>
-    Released,
-}
-
-/// <summary>Authority → Host: an entity's Description. Its kind (the spawn handler that recreates it), its authority's
-/// last event number, and where it is (none: a global entity, always loaded); the data is opaque to the Host, except a
-/// player's, whose position on their ship it reads.</summary>
-public readonly ref struct DescribedMessage(EntityId id, ushort kind, DescribedReason reason, uint eventNumber, Vector3? position,
-                                            ReadOnlySpan<byte> data)
-{
+    public readonly MessageKind Message = message;
     public readonly EntityId Id = id;
     public readonly ushort Kind = kind;
-    public readonly DescribedReason Reason = reason;
     public readonly uint EventNumber = eventNumber;
     public readonly Vector3? Position = position;
     public readonly ReadOnlySpan<byte> Data = data;
 
+    public DescriptionMessage As(MessageKind message) => new(message, Id, Kind, EventNumber, Position, Data);
+
     public void Write(NetWriter w)
     {
-        w.WriteByte((byte)MessageKind.Described); Id.Write(w); w.WriteUInt16(Kind); w.WriteByte((byte)Reason); w.WriteUInt32(EventNumber);
+        w.WriteByte((byte)Message); Id.Write(w); w.WriteUInt16(Kind); w.WriteUInt32(EventNumber);
         w.WriteBool(Position.HasValue);
         if (Position is { } p) w.WriteVector3(p);
         w.WriteRaw(Data);
     }
 
-    public static DescribedMessage Read(ref NetReader r)
+    public static DescriptionMessage Read(MessageKind message, ref NetReader r)
     {
         var id = EntityId.Read(ref r);
         ushort kind = r.ReadUInt16();
-        var reason = (DescribedReason)r.ReadByte();
         uint number = r.ReadUInt32();
         Vector3? position = r.ReadBool() ? r.ReadVector3() : null;
-        return new(id, kind, reason, number, position, r.ReadRaw(r.Remaining));
+        return new(message, id, kind, number, position, r.ReadRaw(r.Remaining));
     }
 }
-

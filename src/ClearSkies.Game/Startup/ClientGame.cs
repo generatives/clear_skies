@@ -29,13 +29,14 @@ public static class ClientGame
 {
     public static void Run(WindowedEngineHost host, LaunchOptions options)
     {
-        var (transport, welcome) = Connect(options);
+        var (transport, remoteHost) = Connect(options);
+        using var hostLink = remoteHost;
+        var welcome = remoteHost.Welcome;
         var session = new Session(SessionRole.Client, welcome.Peer);
         using var view = new GameView(host, options);
         var world = new GameWorld(host, options, session, welcome.Seed, new NoChunkStore(), view.Budget, view.ChunkPreparer,
                                   view.PlayerModel);
-        using var net = new Participant(transport, welcome, session, world.Commands, world.Registry, host.World, host.Clock,
-                                        world.TerrainReadyFor);
+        using var net = SimulationParticipant.Join(remoteHost, session, world.Commands, world.Registry, host.World, host.Clock, world.TerrainReadyFor);
         net.Ended += reason => { Console.WriteLine($"[net] session ended: {reason}"); host.Quit(); };
         var input = host.Input;
         var renderer = host.Renderer;
@@ -53,6 +54,7 @@ public static class ClientGame
         // snapshots, session messages), the hierarchy, and the frame's input as the local player's PlayerInput (tick
         // systems read only that). The host simulates our player; we predict them meanwhile: the prediction checks
         // itself against what the host last said, then sends it this tick's input.
+        host.AddSystem(remoteHost, SystemStage.Simulation);
         host.AddSystem(net, SystemStage.Simulation);
         host.AddSystem(world.Hierarchy, SystemStage.Simulation);
         host.AddSystem(view.InputSample, SystemStage.Simulation);
@@ -124,7 +126,7 @@ public static class ClientGame
 
     /// <summary>Connects to <see cref="LaunchOptions.JoinAddress"/> (port 7777 by default) and says hello: returns once
     /// the host has welcomed us (or throws with its reason for refusing).</summary>
-    public static (LaggedTransport Transport, Welcome Welcome) Connect(LaunchOptions options)
+    public static (LaggedTransport Transport, RemoteHost Host) Connect(LaunchOptions options)
     {
         string joinAddress = options.JoinAddress!;
         int colon = joinAddress.LastIndexOf(':');
@@ -132,8 +134,8 @@ public static class ClientGame
         int port = colon > 0 ? int.Parse(joinAddress[(colon + 1)..]) : 7777;
         Console.WriteLine($"[net] joining {address}:{port} as {options.PlayerName}");
         var transport = new LaggedTransport(LiteNetTransport.Join(address, port));
-        var welcome = Participant.Connect(transport, new Hello(ProtocolVersion.Current, options.PlayerName, GenerationChecksum.Compute()),
-                                            TimeSpan.FromSeconds(15));
-        return (transport, welcome);
+        var link = RemoteHost.Connect(transport, new Hello(ProtocolVersion.Current, options.PlayerName, GenerationChecksum.Compute()),
+                                      TimeSpan.FromSeconds(15));
+        return (transport, link);
     }
 }

@@ -27,9 +27,10 @@ public static class DedicatedServerGame
 
         var commands = world.Commands;
 
-        // Each 1/60 s tick: the Host, everything that arrived here, the hierarchy, and the save's streaming and autosave;
-        // then gameplay and physics as in a game with a window (see HostedGame).
+        // Each 1/60 s tick: what other machines sent, the Host, this machine's Participant, the hierarchy, and the save's
+        // streaming and autosave; then gameplay and physics as in a game with a window (see HostedGame).
 
+        if (hosting.Network is { } network) host.AddSystem(network, SystemStage.Simulation);
         host.AddSystem(hosting.Host, SystemStage.Simulation);
         host.AddSystem(net, SystemStage.Simulation);
         host.AddSystem(world.Hierarchy, SystemStage.Simulation);
@@ -55,7 +56,6 @@ public static class DedicatedServerGame
         host.AddSystem(new SupportSystem(host.World, host.Physics), SystemStage.Simulation);
         host.AddSystem(world.Interpolation, SystemStage.Simulation);
         host.AddSystem(new BodySync(net, host.World, host.Physics), SystemStage.Simulation);
-        host.AddSystem(hosting.Host.Relay, SystemStage.Simulation);
 
         // Each frame: terrain streamed around the interest.
         host.AddSystem(world.Interpolation, SystemStage.Frame);
@@ -75,12 +75,13 @@ public static class BotClientGame
 {
     public static void Run(EngineHost host, LaunchOptions options)
     {
-        var (transport, welcome) = ClientGame.Connect(options);
+        var (_, link) = ClientGame.Connect(options);
+        using var hostLink = link;
+        var welcome = link.Welcome;
         var session = new Session(SessionRole.Client, welcome.Peer);
         var world = new GameWorld(host, options, session, welcome.Seed, new NoChunkStore(),
                                   new ChunkCountBudget(HeadlessWorld.MaxChunks));
-        using var net = new Participant(transport, welcome, session, world.Commands, world.Registry, host.World, host.Clock,
-                                        world.TerrainReadyFor);
+        using var net = SimulationParticipant.Join(link, session, world.Commands, world.Registry, host.World, host.Clock, world.TerrainReadyFor);
         net.Ended += reason => { Console.WriteLine($"[net] session ended: {reason}"); host.Quit(); };
 
         var commands = world.Commands;
@@ -88,6 +89,7 @@ public static class BotClientGame
         // Each 1/60 s tick: everything that arrived (commands, events, snapshots, session messages), the hierarchy; then
         // gameplay and physics as in a game with a window (see ClientGame).
 
+        host.AddSystem(link, SystemStage.Simulation);
         host.AddSystem(net, SystemStage.Simulation);
         host.AddSystem(world.Hierarchy, SystemStage.Simulation);
         host.AddSystem(new OwnPlayerPrediction(net, host.World, world.Registry), SystemStage.Simulation); // its (idle) input to the Host

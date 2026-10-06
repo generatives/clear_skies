@@ -55,7 +55,7 @@ public sealed class OwnPlayerPrediction : ISystem
         public bool Grounded;
     }
 
-    private readonly Participant _net;
+    private readonly SimulationParticipant _net;
     private readonly EntityRegistry _registry;
     private readonly EntitySet _local;
     private readonly Record[] _history = new Record[HistoryLength];
@@ -68,7 +68,7 @@ public sealed class OwnPlayerPrediction : ISystem
     private int _modeMismatches;
     private uint _landedOn; // the last input that landed the player on a ship, which the next one tells the host
 
-    public OwnPlayerPrediction(Participant net, World world, EntityRegistry registry)
+    public OwnPlayerPrediction(SimulationParticipant net, World world, EntityRegistry registry)
     {
         _net = net;
         _registry = registry;

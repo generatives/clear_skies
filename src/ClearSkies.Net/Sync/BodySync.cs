@@ -31,24 +31,23 @@ public sealed class BodySync : ISystem, IDebugUiSystem
 {
     public const int SnapshotsPerPacket = 20;
 
-    private readonly NetSession _net;
+    private readonly SimulationParticipant _net;
     private readonly PhysicsWorld _physics;
     private readonly EntitySet _players;
     private readonly EntitySet _grids;
     private readonly EntitySet _remote;
     private readonly List<BodySnapshot> _own = new();
-    private readonly NetWriter _writer = new(2048);
     private long _snapshotsSent, _snapshotsReceived;
 
-    public BodySync(NetSession net, World world, PhysicsWorld physics)
+    public BodySync(SimulationParticipant net, World world, PhysicsWorld physics)
     {
         _net = net;
         _physics = physics;
         net.Bodies = this;
-        if (net is Participant { Inputs: { } inputs }) inputs.Physics = physics; // how fast the ship a client lands on moves
+        if (net.Inputs is { } inputs) inputs.Physics = physics; // how fast the ship a client lands on moves
         _remote = world.GetEntities().With<RemoteBody>().AsSet();
         // Snapshots' lateness is measured against our clock: when clock sync snaps it, they move with it.
-        if (net is Participant { ClockSync: { } sync })
+        if (net.ClockSync is { } sync)
             sync.Snapped += ticks =>
             {
                 foreach (ref readonly var e in _remote.GetEntities()) e.Get<RemoteBody>().Buffer.ShiftClock(ticks);
@@ -84,8 +83,7 @@ public sealed class BodySync : ISystem, IDebugUiSystem
             foreach (ref readonly var e in _grids.GetEntities())
                 if (e.Get<NetOwner>().IsLocal) _own.Add(GridSnapshot(e));
 
-        if (_net is Participant participant)
-            WriteFrames(_writer, _net.Clock.Tick, _own, packet => participant.SendToHost(packet, Channel.Unreliable));
+        if (_own.Count > 0) _net.SendFrame(_net.Clock.Tick, _own);
         _snapshotsSent += _own.Count;
     }
 
@@ -93,7 +91,7 @@ public sealed class BodySync : ISystem, IDebugUiSystem
 
     /// <summary>Writes <paramref name="snapshots"/> as frames of up to <see cref="SnapshotsPerPacket"/>, each sent
     /// as it's written.</summary>
-    public static void WriteFrames(NetWriter writer, uint tick, List<BodySnapshot> snapshots, PacketSender send)
+    public static void WriteFrames(NetWriter writer, uint tick, IReadOnlyList<BodySnapshot> snapshots, PacketSender send)
     {
         for (int start = 0; start < snapshots.Count; start += SnapshotsPerPacket)
         {
@@ -151,14 +149,21 @@ public sealed class BodySync : ISystem, IDebugUiSystem
         };
     }
 
-    /// <summary>A frame of snapshots: buffer each on its entity.</summary>
-    public void ReceiveFrame(ref NetReader r)
+    /// <summary>Reads a frame written by <see cref="WriteFrames"/> into <paramref name="snapshots"/>; returns its tick.</summary>
+    public static uint ReadFrame(ref NetReader r, List<BodySnapshot> snapshots)
     {
         uint tick = r.ReadUInt32();
         int count = r.ReadUInt16();
-        for (int i = 0; i < count; i++)
+        snapshots.Clear();
+        for (int i = 0; i < count; i++) snapshots.Add(BodySnapshot.Read(ref r));
+        return tick;
+    }
+
+    /// <summary>A frame of snapshots: buffer each on its entity.</summary>
+    public void ReceiveFrame(uint tick, IReadOnlyList<BodySnapshot> snapshots)
+    {
+        foreach (var s in snapshots)
         {
-            var s = BodySnapshot.Read(ref r);
             _snapshotsReceived++;
             if (!_net.Registry.TryGet(s.Entity, out var e)) continue; // not spawned here (yet)
             if (e.Has<LocalPlayer>()) { _net.Prediction?.Answer(s); continue; } // ours, predicted: how the authority has it

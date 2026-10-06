@@ -10,17 +10,25 @@ using ClearSkies.Net.Transport;
 
 namespace ClearSkies.Net.Session;
 
-/// <summary>A Participant, as the Host sees it.</summary>
-public sealed class HostPeer
+/// <summary>A Participant that has joined (a peer, by its <see cref="PeerId"/>), as the Host keeps track of it.</summary>
+public sealed class JoinedPeer
 {
-    public ConnectionId Connection;
-    /// <summary>None until it has joined; <see cref="PeerId.Host"/> for the hosting machine's (the authority).</summary>
-    public PeerId Peer = PeerId.None;
-    public string Name = "";
+    internal JoinedPeer(PeerId peer, string name)
+    {
+        Peer = peer;
+        Name = name;
+    }
+
+    /// <summary>Who it is: <see cref="PeerId.Host"/> for the hosting machine's (the authority).</summary>
+    public PeerId Peer { get; }
+    public string Name { get; }
     public PlayerId Player;
     public EntityId PlayerEntity;
 
-    /// <summary>The space it wants to see (see <see cref="ViewVolumeMessage"/>).</summary>
+    /// <summary>What the Host tells it by (set by whoever let it join, before anything is).</summary>
+    public IParticipant Participant { get; set; } = null!;
+
+    /// <summary>The space it wants to see (see <see cref="IHost.SetView"/>).</summary>
     public Vector3 ViewCentre;
     public float ViewRadius;
 
@@ -28,12 +36,29 @@ public sealed class HostPeer
     public readonly HashSet<EntityId> Known = new();
     public readonly HashSet<EntityId> Requested = new();
 
-    /// <summary>Its Participant is up (its first View Volume has come): nothing is streamed to it before, as nothing
-    /// sent before then would reach it.</summary>
+    /// <summary>Its Participant is up (its first View Volume has come): nothing is streamed to it before.</summary>
     public bool Ready;
 
-    public bool Joined => Peer != PeerId.None;
     public bool IsAuthority => Peer == PeerId.Host;
+}
+
+/// <summary>The Host on this machine, as one Participant here calls it (where <see cref="RemoteHost"/> is the Host on
+/// another machine): each call reaches the Host as from that Participant.</summary>
+public sealed class LocalHost(Host host, JoinedPeer from) : IHost
+{
+    public void Ping(double clientTimeMs) => host.Ping(from, clientTimeMs);
+    public void RequestIdBlock() => host.RequestIdBlock(from);
+    public void SetView(Vector3 centre, float radius) => host.SetView(from, centre, radius);
+    public void SendCommand(in CommandMessage command) => host.SendCommand(from, command);
+    public void SendEvent(in EventMessage evt) => host.SendEvent(from, evt);
+    public void Reject(in Rejection rejection) => host.Reject(rejection);
+    public void SendInput(in PlayerInputMessage input) => host.SendInput(from, input);
+    public void SendFrame(uint tick, IReadOnlyList<BodySnapshot> snapshots) => host.SendFrame(from, tick, snapshots);
+    public void EntityCreated(in DescriptionMessage description) => host.EntityCreated(from, description);
+    public void EntityDescribed(in DescriptionMessage description) => host.EntityDescribed(from, description);
+    public void EntityReleased(in DescriptionMessage description) => host.EntityReleased(from, description);
+    public void EntityDeleted(EntityId id) => host.EntityDeleted(from, id);
+    public void Leave(string reason) => host.Leave(from, reason);
 }
 
 /// <summary>An entity as the Host keeps it: one the authority has, or a player about to spawn there. Everything but its kind,
@@ -72,9 +97,12 @@ public sealed class HostEntity
 }
 
 /// <summary>
-/// The Host: coordinates, and simulates nothing (it has no ECS world). Participants connect to it, the hosting machine's
-/// over an in-process link (it has authority over every entity, so far), everyone else's over the network; it relays
-/// every message between them, as none talk to each other. It keeps a record of every entity the authority has
+/// The Host: coordinates, and simulates nothing (it has no ECS world). Participants join it (<see cref="Join"/>), the
+/// hosting machine's directly (it has authority over every entity, so far), everyone else's over the network
+/// (<see cref="HostNetwork"/>). Each call on it says which Participant it's from (the hosting machine's makes them
+/// through a <see cref="LocalHost"/>, an <see cref="IHost"/>), and the Host calls each through its
+/// <see cref="IParticipant"/>. Everything between them goes through the Host, as
+/// none talk to each other. It keeps a record of every entity the authority has
 /// (<see cref="HostEntity"/>), as the authority announces them (made, loaded from the save, despawned), and from those:
 /// <list type="bullet">
 /// <item>streams to each Participant every entity (a fresh Description, asked of the authority) and has it forget what's
@@ -84,29 +112,25 @@ public sealed class HostEntity
 /// </list>
 /// The authority's world loads, unloads and saves everything else itself.
 /// </summary>
-public sealed class Host : ISystem, IDisposable
+public sealed class Host : ISystem
 {
     /// <summary>How far a Participant sees entities (its View Volume's radius).</summary>
     public const float ViewRadius = 1000f;
 
-    private readonly HostTransport _transport;
     private readonly SaveDatabase _db;
     private readonly EntityIdAllocator _ids;
     private readonly ulong _seed, _checksum;
     private readonly ITickClock _clock;
-    private readonly Dictionary<ConnectionId, HostPeer> _peers = new();
+    private readonly List<JoinedPeer> _joined = new();
     private readonly Dictionary<EntityId, HostEntity> _entities = new();
-    private readonly NetWriter _writer = new(1024);
-    private readonly List<BodySnapshot> _snapshots = new();
     private readonly List<BodySnapshot> _frame = new();
     private readonly List<EntityId> _scratch = new();
     private uint _idNext, _idEnd;
 
     /// <param name="newPlayerSpawn">Where a new player's Character spawns (its capsule's centre), and which way they face.</param>
-    public Host(HostTransport transport, SaveDatabase db, ITickClock clock, ulong seed, ulong generationChecksum,
+    public Host(SaveDatabase db, ITickClock clock, ulong seed, ulong generationChecksum,
                 (Vector3 Position, float Yaw, float Pitch) newPlayerSpawn)
     {
-        _transport = transport;
         _db = db;
         _clock = clock;
         _seed = seed;
@@ -114,9 +138,6 @@ public sealed class Host : ISystem, IDisposable
         NewPlayerSpawn = newPlayerSpawn;
         // Entity IDs come in blocks from the save's next free ID, so they never repeat across sessions.
         _ids = new EntityIdAllocator(db.NextFreeId);
-        transport.Connected += OnConnected;
-        transport.Disconnected += OnDisconnected;
-        transport.Received += OnReceived;
     }
 
     public (Vector3 Position, float Yaw, float Pitch) NewPlayerSpawn { get; }
@@ -124,63 +145,45 @@ public sealed class Host : ISystem, IDisposable
     /// <summary>Where entity IDs come from, so the save can record the next free one.</summary>
     public EntityIdAllocator Ids => _ids;
 
-    public IReadOnlyCollection<HostPeer> Peers => _peers.Values;
-    /// <summary>Participants that have joined (been welcomed).</summary>
-    public IEnumerable<HostPeer> Joined => _peers.Values.Where(p => p.Joined);
+    /// <summary>The Participants that have joined.</summary>
+    public IReadOnlyList<JoinedPeer> Participants => _joined;
     public IReadOnlyDictionary<EntityId, HostEntity> Entities => _entities;
-    public HostTransport Transport => _transport;
 
     /// <summary>The hosting machine's Participant, which has authority over every entity.</summary>
-    public HostPeer? Authority => _peers.Values.FirstOrDefault(p => p.IsAuthority && p.Ready);
+    public JoinedPeer? Authority => _joined.FirstOrDefault(p => p.IsAuthority && p.Ready);
 
     /// <summary>Whether anyone but the hosting machine is in.</summary>
-    public bool OthersConnected => _peers.Values.Any(p => p.Joined && !p.IsAuthority);
+    public bool OthersConnected => _joined.Any(p => !p.IsAuthority);
 
     /// <summary>Players released this session (as they left).</summary>
     public long Releases { get; private set; }
 
-    private HostPeer? PeerById(PeerId id) => _peers.Values.FirstOrDefault(p => p.Peer == id);
+    private JoinedPeer? JoinedAs(PeerId id) => _joined.FirstOrDefault(p => p.Peer == id);
 
-    /// <summary>Once a tick, first: everything that arrived, then what each Participant is owed.</summary>
-    public void Update(float dt)
+    /// <summary>Once a tick, after what arrived over the network: what each Participant is owed.</summary>
+    public void Update(float dt) => Stream();
+
+    // ── joining and leaving ─────────────────────────────────────────────────
+
+    /// <summary>It's leaving, and why.</summary>
+    public void Leave(JoinedPeer joined, string reason)
     {
-        _transport.Poll();
-        Stream();
-    }
-
-    /// <summary>Last in the hosting machine's tick: passes on at once what its Participant sent this tick (its events and
-    /// snapshots), rather than a tick later.</summary>
-    public ISystem Relay => _relay ??= new LambdaSystem(_transport.Poll);
-    private ISystem? _relay;
-
-    // ── connections ─────────────────────────────────────────────────────────
-
-    private void OnConnected(ConnectionId connection) => _peers[connection] = new HostPeer { Connection = connection };
-
-    private void OnDisconnected(ConnectionId connection, string reason)
-    {
-        if (!_peers.Remove(connection, out var peer) || !peer.Joined) return;
-        Console.WriteLine($"[net] {peer.Name} ({peer.Peer}) left: {reason}");
+        if (!_joined.Remove(joined)) return;
+        Console.WriteLine($"[net] {joined.Name} ({joined.Peer}) left: {reason}");
         // Their Character is released: its last Description is where they rejoin.
-        if (_entities.TryGetValue(peer.PlayerEntity, out var player))
+        if (_entities.TryGetValue(joined.PlayerEntity, out var player))
         {
             player.Leaving = true;
             if (player.Loaded) Release(player);
             else _entities.Remove(player.Id);
         }
-        Send(Others(peer), new PlayerNotice(false, peer.Peer, peer.Name));
-    }
-
-    private void Refuse(ConnectionId connection, string reason)
-    {
-        Send(connection, new DisconnectMessage(reason));
-        _transport.Disconnect(connection, reason);
+        foreach (var p in Others(joined)) p.Participant.PlayerNotice(new PlayerNotice(false, joined.Peer, joined.Name));
     }
 
     private PeerId FreePeerId()
     {
         for (uint i = 2; i < 64; i++)
-            if (_peers.Values.All(p => p.Peer.Value != i)) return new PeerId(i);
+            if (_joined.All(p => p.Peer.Value != i)) return new PeerId(i);
         return PeerId.None;
     }
 
@@ -194,30 +197,36 @@ public sealed class Host : ISystem, IDisposable
         return new EntityId(_idNext++);
     }
 
-    private void OnHello(HostPeer peer, Hello hello)
+    /// <summary>
+    /// Lets a Participant in, or says why not (<paramref name="refusal"/>). <paramref name="local"/>: it's on this
+    /// machine, so it's the authority (the first one only); only code on this machine can say so, never anything sent
+    /// over the network. Whoever lets it in then sets what the Host tells it by (<see cref="JoinedPeer.Participant"/>),
+    /// and makes each of its calls on the Host as from what this returns.
+    /// </summary>
+    public JoinedPeer? Join(in Hello hello, bool local, out Welcome welcome, out string refusal)
     {
-        if (peer.Joined) { Console.WriteLine($"[net] ignoring a second hello from {peer.Name} ({peer.Peer})"); return; }
-        if (hello.Version != ProtocolVersion.Current) { Refuse(peer.Connection, $"Version mismatch: host {ProtocolVersion.Current}, you {hello.Version}"); return; }
-        if (hello.GenerationChecksum != _checksum) { Refuse(peer.Connection, "World generation differs from the host's (different game build?)"); return; }
-        // The hosting machine's Participant is the authority: known by the link it came on, never by anything it says.
-        var id = HostTransport.IsLocal(peer.Connection) && _peers.Values.All(p => !p.IsAuthority) ? PeerId.Host : FreePeerId();
-        if (id == PeerId.None) { Refuse(peer.Connection, "The game is full"); return; }
+        welcome = default;
+        refusal = "";
+        if (hello.Version != ProtocolVersion.Current) { refusal = $"Version mismatch: host {ProtocolVersion.Current}, you {hello.Version}"; return null; }
+        if (hello.GenerationChecksum != _checksum) { refusal = "World generation differs from the host's (different game build?)"; return null; }
+        var id = local && _joined.All(p => !p.IsAuthority) ? PeerId.Host : FreePeerId();
+        if (id == PeerId.None) { refusal = "The game is full"; return null; }
         string name = hello.Name.Trim();
         if (name.Length == 0 && id == PeerId.Host)
         {
             // The hosting machine with nobody playing there (a dedicated host): the authority, with no view of its own.
-            peer.Peer = id;
-            peer.Name = "host";
             var (idFirst, idCount) = _ids.NextBlock();
-            Send(peer.Connection, new Welcome(id, idFirst, idCount, _seed, (uint)_clock.Now, default));
-            return;
+            welcome = new Welcome(id, idFirst, idCount, _seed, (uint)_clock.Now, default);
+            var host = new JoinedPeer(id, "host");
+            _joined.Add(host);
+            return host;
         }
-        if (name.Length == 0) { Refuse(peer.Connection, "A player name is needed"); return; }
+        if (name.Length == 0) { refusal = "A player name is needed"; return null; }
         var player = _db.PlayerFor(name);
-        if (_peers.Values.Any(p => p.Player == player && p != peer) || _entities.Values.Any(e => e.Player == player && e.IsPlayer))
+        if (_joined.Any(p => p.Player == player) || _entities.Values.Any(e => e.Player == player && e.IsPlayer))
         {
-            Refuse(peer.Connection, $"{name} is already in the game");
-            return;
+            refusal = $"{name} is already in the game";
+            return null;
         }
 
         // Where they left off if they've played this world before (on their ship as it is now), else new at the spawn.
@@ -233,115 +242,73 @@ public sealed class Host : ISystem, IDisposable
         };
         _entities[character.Id] = character;
 
-        peer.Peer = id;
-        peer.Name = name;
-        peer.Player = player;
-        peer.PlayerEntity = character.Id;
-        peer.ViewCentre = WorldPosition(character);
-        peer.ViewRadius = ViewRadius;
+        var joined = new JoinedPeer(id, name) { Player = player, PlayerEntity = character.Id };
+        joined.ViewCentre = WorldPosition(character);
+        joined.ViewRadius = ViewRadius;
         var (first, count) = _ids.NextBlock();
-        Send(peer.Connection, new Welcome(id, first, count, _seed, (uint)_clock.Now, peer.ViewCentre));
-        Send(Others(peer), new PlayerNotice(true, id, name));
+        welcome = new Welcome(id, first, count, _seed, (uint)_clock.Now, joined.ViewCentre);
+        foreach (var p in _joined) p.Participant.PlayerNotice(new PlayerNotice(true, id, name));
+        _joined.Add(joined);
         Console.WriteLine($"[net] {name} joining as {id}");
+        return joined;
     }
 
-    // ── messages ────────────────────────────────────────────────────────────
+    // ── what Participants send ──────────────────────────────────────────────
 
-    private void OnReceived(ConnectionId from, ReadOnlySpan<byte> packet, Channel channel)
+    public void Ping(JoinedPeer from, double clientTimeMs)
     {
-        if (packet.Length == 0 || !_peers.TryGetValue(from, out var peer)) return;
-        var r = new NetReader(packet);
-        var kind = (MessageKind)r.ReadByte();
-        try
-        {
-            if (kind == MessageKind.Hello) OnHello(peer, Hello.Read(ref r));
-            else if (peer.Joined) OnMessage(peer, kind, ref r, packet);
-        }
-        catch (Exception e) when (e is EndOfStreamException or InvalidDataException)
-        {
-            Console.WriteLine($"[net] bad {kind} from {peer.Name}: {e.Message}");
-        }
+        double now = _clock.Now; // not Tick: on a frame running several ticks, that's behind real time
+        from.Participant.Pong(new TimePong(clientTimeMs, (uint)now, (float)(now - Math.Floor(now))));
     }
 
-    private void OnMessage(HostPeer peer, MessageKind kind, ref NetReader r, ReadOnlySpan<byte> packet)
+    public void RequestIdBlock(JoinedPeer from)
     {
-        switch (kind)
-        {
-            case MessageKind.TimePing:
-            {
-                double now = _clock.Now; // not Tick: on a frame running several ticks, that's behind real time
-                Send(peer.Connection, new TimePong(TimePing.Read(ref r).ClientTimeMs, (uint)now, (float)(now - Math.Floor(now))), Channel.Unreliable);
-                break;
-            }
-            case MessageKind.IdBlockRequest:
-            {
-                var (first, count) = _ids.NextBlock();
-                Send(peer.Connection, new IdBlockMessage(first, count));
-                break;
-            }
-            case MessageKind.ViewVolume:
-            {
-                var view = ViewVolumeMessage.Read(ref r);
-                (peer.ViewCentre, peer.ViewRadius) = (view.Centre, MathF.Min(view.Radius, ViewRadius));
-                peer.Ready = true;
-                break;
-            }
-            case MessageKind.Command:
-            {
-                // To its authority, from whoever sent it, whatever it says.
-                var m = CommandMessage.Read(ref r);
-                if (PeerById(m.To) is { } to) SendCommand(to.Connection, m.WithFrom(peer.Peer));
-                break;
-            }
-            case MessageKind.Rejection:
-                if (PeerById(Rejection.Read(ref r).To) is { } rejected) _transport.Send(rejected.Connection, packet, Channel.Reliable);
-                break;
-            case MessageKind.Event:
-                OnEvent(peer, EventMessage.Read(ref r).Meta, packet);
-                break;
-            case MessageKind.PlayerInput:
-                // Only from the machine that plays them, on to their authority.
-                if (PlayerInputMessage.Read(ref r).Player == peer.PlayerEntity && Authority is { } authority)
-                    _transport.Send(authority.Connection, packet, Channel.Unreliable);
-                break;
-            case MessageKind.StateFrame:
-                OnFrame(peer, ref r);
-                break;
-            case MessageKind.Described when peer.IsAuthority:
-                OnDescribed(DescribedMessage.Read(ref r));
-                break;
-            case MessageKind.Deleted when peer.IsAuthority:
-                OnDeleted(EntityMessage.Read(kind, ref r).Id);
-                break;
-            case MessageKind.Disconnect:
-                _transport.Disconnect(peer.Connection, DisconnectMessage.Read(ref r).Reason);
-                break;
-        }
+        var (first, count) = _ids.NextBlock();
+        from.Participant.IdBlock(first, count);
+    }
+
+    public void SetView(JoinedPeer from, Vector3 centre, float radius)
+    {
+        (from.ViewCentre, from.ViewRadius) = (centre, MathF.Min(radius, ViewRadius));
+        from.Ready = true;
+    }
+
+    /// <summary>To its authority, from whoever sent it, whatever it says.</summary>
+    public void SendCommand(JoinedPeer from, in CommandMessage command)
+    {
+        if (JoinedAs(command.To) is { } to) to.Participant.ReceiveCommand(command.WithFrom(from.Peer));
+    }
+
+    public void Reject(in Rejection rejection)
+    {
+        if (JoinedAs(rejection.To) is { } to) to.Participant.Rejected(rejection);
+    }
+
+    /// <summary>Only from the machine that plays them, on to their authority.</summary>
+    public void SendInput(JoinedPeer from, in PlayerInputMessage input)
+    {
+        if (input.Player == from.PlayerEntity && Authority is { } authority) authority.Participant.ReceiveInput(input);
     }
 
     /// <summary>An event goes to everyone who has its entity, and back to whoever sent the command (to settle its
     /// prediction); nothing for an entity released or being released (its last Description has it). One for something
     /// the Host doesn't keep (the terrain) goes to everyone.</summary>
-    private void OnEvent(HostPeer from, in EventMeta meta, ReadOnlySpan<byte> packet)
+    public void SendEvent(JoinedPeer from, in EventMessage evt)
     {
+        var meta = evt.Meta;
         if (_entities.TryGetValue(meta.Target, out var entity) && (!entity.Loaded || entity.Releasing)) return;
-        foreach (var p in Joined)
+        foreach (var p in _joined)
             if (p != from && (entity is null || p.Known.Contains(meta.Target) || p.Peer == meta.Origin))
-                _transport.Send(p.Connection, packet, Channel.Reliable);
+                p.Participant.ReceiveEvent(evt);
     }
 
     /// <summary>The authority's snapshots: where its entities are now, then each Participant's share, as frames of
     /// their own.</summary>
-    private void OnFrame(HostPeer from, ref NetReader r)
+    public void SendFrame(JoinedPeer from, uint tick, IReadOnlyList<BodySnapshot> snapshots)
     {
-        uint tick = r.ReadUInt32();
-        int count = r.ReadUInt16();
-        _snapshots.Clear();
-        for (int i = 0; i < count; i++)
+        foreach (var s in snapshots)
         {
-            var s = BodySnapshot.Read(ref r);
             if (!_entities.TryGetValue(s.Entity, out var e) || !e.Loaded) continue;
-            _snapshots.Add(s);
             if (e.IsPlayer)
             {
                 e.Support = s.Support;
@@ -350,47 +317,61 @@ public sealed class Host : ISystem, IDisposable
             }
             else if (e.Position is not null) (e.Position, e.Rotation) = (s.Position, s.Rotation);
         }
-        foreach (var p in Joined)
+        foreach (var p in _joined)
         {
             if (p == from) continue;
             _frame.Clear();
-            foreach (var s in _snapshots) if (p.Known.Contains(s.Entity)) _frame.Add(s);
-            BodySync.WriteFrames(_writer, tick, _frame, packet => _transport.Send(p.Connection, packet, Channel.Unreliable));
+            foreach (var s in snapshots) if (p.Known.Contains(s.Entity) && _entities.TryGetValue(s.Entity, out var e) && e.Loaded) _frame.Add(s);
+            if (_frame.Count > 0) p.Participant.ReceiveFrame(tick, _frame);
         }
     }
 
     // ── descriptions ────────────────────────────────────────────────────────
 
-    private void OnDescribed(in DescribedMessage m)
+    /// <summary>The authority made an entity (anyone else's is ignored, as are all of these).</summary>
+    public void EntityCreated(JoinedPeer from, in DescriptionMessage d)
     {
-        if (!_entities.TryGetValue(m.Id, out var e))
+        if (!from.IsAuthority) return;
+        if (!_entities.TryGetValue(d.Id, out var e))
         {
-            if (m.Reason != DescribedReason.Created) return; // forgotten meanwhile (deleted)
-            _entities[m.Id] = e = new HostEntity { Id = m.Id, Loaded = true };
-            Authority?.Known.Add(m.Id);
+            _entities[d.Id] = e = new HostEntity { Id = d.Id, Loaded = true };
+            Authority?.Known.Add(d.Id);
         }
-        e.Kind = m.Kind;
-        e.Data = m.Data.ToArray();
-        e.EventNumber = m.EventNumber;
+        Record(e, d, created: true);
+    }
+
+    /// <summary>For the Participants that asked: sent on, unless it's been released meanwhile.</summary>
+    public void EntityDescribed(JoinedPeer from, in DescriptionMessage d)
+    {
+        if (!from.IsAuthority) return;
+        if (!_entities.TryGetValue(d.Id, out var e)) return; // forgotten meanwhile (deleted)
+        Record(e, d, created: false);
+        foreach (var p in _joined)
+            if (p.Requested.Remove(e.Id) && e.Loaded && !e.Releasing) SendSpawn(p, e);
+    }
+
+    public void EntityReleased(JoinedPeer from, in DescriptionMessage d)
+    {
+        if (!from.IsAuthority) return;
+        if (!_entities.TryGetValue(d.Id, out var e)) return;
+        Record(e, d, created: false);
+        OnReleased(e);
+    }
+
+    /// <summary>Keeps a Description, and where it says the entity is.</summary>
+    private void Record(HostEntity e, in DescriptionMessage d, bool created)
+    {
+        e.Kind = d.Kind;
+        e.Data = d.Data.ToArray();
+        e.EventNumber = d.EventNumber;
         e.DescribedTick = _clock.Tick;
         if (e.IsPlayer)
         {
-            var d = DescriptionBytes.Read<PlayerDescription>(m.Data);
-            (e.Support, e.LocalPosition) = d.FreeFly ? (EntityId.None, default) : (d.Support, d.LocalPosition);
-            e.Position = d.Position;
+            var player = DescriptionBytes.Read<PlayerDescription>(d.Data);
+            (e.Support, e.LocalPosition) = player.FreeFly ? (EntityId.None, default) : (player.Support, player.LocalPosition);
+            e.Position = player.Position;
         }
-        else if (e.Position is not null || m.Reason == DescribedReason.Created) e.Position = m.Position; // a global one stays global
-
-        switch (m.Reason)
-        {
-            case DescribedReason.Requested:
-                foreach (var p in Joined)
-                    if (p.Requested.Remove(e.Id) && e.Loaded && !e.Releasing) SendSpawn(p, e);
-                break;
-            case DescribedReason.Released:
-                OnReleased(e);
-                break;
-        }
+        else if (e.Position is not null || created) e.Position = d.Position; // a global one stays global
     }
 
     private void OnReleased(HostEntity e)
@@ -398,19 +379,20 @@ public sealed class Host : ISystem, IDisposable
         e.Loaded = e.Releasing = false;
         e.DescribedTick = _clock.Tick;
         _db.InTransaction(() => Write(e, e.Data!, e.Position));
-        foreach (var p in Joined)
+        foreach (var p in _joined)
         {
             p.Requested.Remove(e.Id);
-            if (p.Known.Remove(e.Id) && !p.IsAuthority) Send(p.Connection, new EntityMessage(MessageKind.Forget, e.Id));
+            if (p.Known.Remove(e.Id) && !p.IsAuthority) p.Participant.Forget(e.Id);
         }
         if (e.IsPlayer) _entities.Remove(e.Id); // a player's Character exists only while they play
         Releases++;
     }
 
-    private void OnDeleted(EntityId id)
+    public void EntityDeleted(JoinedPeer from, EntityId id)
     {
+        if (!from.IsAuthority) return;
         if (!_entities.Remove(id)) return;
-        foreach (var p in _peers.Values) { p.Known.Remove(id); p.Requested.Remove(id); }
+        foreach (var p in _joined) { p.Known.Remove(id); p.Requested.Remove(id); }
     }
 
     // ── streaming ───────────────────────────────────────────────────────────
@@ -440,7 +422,7 @@ public sealed class Host : ISystem, IDisposable
             SendSpawn(authority, e);
         }
 
-        foreach (var p in Joined)
+        foreach (var p in _joined)
         {
             if (p.IsAuthority || !p.Ready) continue;
             _scratch.Clear();
@@ -454,19 +436,17 @@ public sealed class Host : ISystem, IDisposable
                     _scratch.Add(e.Id);
                 }
             }
-            foreach (var id in _scratch) Send(authority.Connection, new EntityMessage(MessageKind.DescribeRequest, id));
+            foreach (var id in _scratch) authority.Participant.Describe(id);
         }
     }
 
-    /// <summary>Spawns <paramref name="e"/> on <paramref name="peer"/> from its Description: owned by the authority, and
+    /// <summary>Spawns <paramref name="e"/> on <paramref name="joined"/> from its Description: owned by the authority, and
     /// a player played by their machine.</summary>
-    private void SendSpawn(HostPeer peer, HostEntity e)
+    private void SendSpawn(JoinedPeer joined, HostEntity e)
     {
         var owner = e.IsPlayer ? e.ControllingPeer : PeerId.Host;
-        _writer.Clear();
-        new SpawnMessage(e.Id, e.Kind, owner, e.EventNumber, WorldPosition(e), e.Data).Write(_writer);
-        _transport.Send(peer.Connection, _writer.Written, Channel.Reliable);
-        peer.Known.Add(e.Id);
+        joined.Known.Add(e.Id);
+        joined.Participant.Spawn(new SpawnMessage(e.Id, e.Kind, owner, e.EventNumber, WorldPosition(e), e.Data));
     }
 
     /// <summary>Asks the authority for an entity's last Description; it despawns it, and the Host saves it and tells
@@ -475,7 +455,7 @@ public sealed class Host : ISystem, IDisposable
     {
         if (Authority is not { } authority) return;
         e.Releasing = true;
-        Send(authority.Connection, new EntityMessage(MessageKind.Release, e.Id));
+        authority.Participant.Release(e.Id);
     }
 
     // ── saving ──────────────────────────────────────────────────────────────
@@ -488,30 +468,5 @@ public sealed class Host : ISystem, IDisposable
         _db.NextFreeId = _ids.NextFree;
     }
 
-    // ── sending ─────────────────────────────────────────────────────────────
-
-    private IEnumerable<ConnectionId> Others(HostPeer peer) => Joined.Where(p => p != peer).Select(p => p.Connection);
-
-    private void Send<T>(ConnectionId to, in T message, Channel channel = Channel.Reliable) where T : struct, IMessage
-    {
-        _writer.Clear();
-        message.Write(_writer);
-        _transport.Send(to, _writer.Written, channel);
-    }
-
-    private void Send<T>(IEnumerable<ConnectionId> to, in T message) where T : struct, IMessage
-    {
-        _writer.Clear();
-        message.Write(_writer);
-        foreach (var c in to) _transport.Send(c, _writer.Written, Channel.Reliable);
-    }
-
-    private void SendCommand(ConnectionId to, in CommandMessage message)
-    {
-        _writer.Clear();
-        message.Write(_writer);
-        _transport.Send(to, _writer.Written, Channel.Reliable);
-    }
-
-    public void Dispose() => _transport.Dispose();
+    private IEnumerable<JoinedPeer> Others(JoinedPeer joined) => _joined.Where(p => p != joined);
 }
