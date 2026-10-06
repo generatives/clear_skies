@@ -140,14 +140,18 @@ public sealed class HeadlessScene : IDisposable
         Interpolation.Update(SystemStage.Frame, dt);
     }
 
-    /// <summary>Runs ticks until <paramref name="done"/> or <paramref name="max"/> ticks.</summary>
-    public bool TickUntil(Func<bool> done, int max = 600)
+    /// <summary>Runs ticks until <paramref name="done"/> or <paramref name="max"/> ticks, and if that is waiting on
+    /// background work (collider builds and the like, on worker threads), for at least <paramref name="minSeconds"/>:
+    /// ticks are near instant, so on a busy machine the workers can be behind by more than any tick count.</summary>
+    public bool TickUntil(Func<bool> done, int max = 600, double minSeconds = 0)
     {
-        for (int i = 0; i < max; i++)
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        for (int i = 0; i < max || clock.Elapsed.TotalSeconds < minSeconds; i++)
         {
             if (done()) return true;
             Tick();
-            Thread.Sleep(0);
+            if (i < max) Thread.Sleep(0);
+            else Thread.Sleep(1);
         }
         return done();
     }
