@@ -151,7 +151,7 @@ public sealed class ContinentTerrain
 
     /// <summary>What grows in the open cell (x, y, z) on top of <paramref name="ground"/> (the top block of a solid
     /// span, from <see cref="Block"/>), or air. Plants grow in stands: thick where <paramref name="flora"/> (from
-    /// <see cref="Flora"/>) is high, thinning at the edges, almost none between, each stand mostly one kind by
+    /// <see cref="Flora"/>) is high, thinning gradually to a sparse scattering between them, each stand mostly one kind by
     /// <paramref name="kind"/> (from <see cref="Kind"/>) with tall grass at its heart and mushrooms around its rim. Grass
     /// on grass, brown grass on bare dirt, dry grass on sand. Pebbles lie on mountain rock (mossy lower down) and snow,
     /// sparse and anywhere. Picked by a hash of the cell, so the same everywhere it's generated.</summary>
@@ -162,29 +162,29 @@ public sealed class ContinentTerrain
         h ^= h >> 32; h *= 0xD6E8FEB86659FD93UL; h ^= h >> 32;
         float r = (h & 0xFFFFFF) / 16777216f;            // whether something grows here
         float pick = ((h >> 40) & 0xFFFF) / 65536f;      // and what
-        float stand = Smoothstep(0.5f, 0.68f, flora);    // 0 between stands, 1 in their thick
-        float rim = MathF.Max(0f, 1f - MathF.Abs(flora - 0.5f) / 0.04f); // the edge of a stand
+        float stand = Smoothstep(0.3f, 0.8f, flora);     // 0 between stands, 1 in their thick
+        float rim = MathF.Max(0f, 1f - MathF.Abs(flora - 0.45f) / 0.05f); // the edge of a stand
         switch (ground)
         {
             case BlockId.Grass:
             {
-                if (r < 0.75f * stand + 0.004f)
+                if (r < 0.06f + 0.44f * stand)
                 {
                     // Tall grass towards a stand's heart; elsewhere its kind, with a little mixing.
-                    if (pick < Smoothstep(0.7f, 0.82f, flora) * 0.7f) return BlockId.TallGrass;
+                    if (pick < Smoothstep(0.62f, 0.85f, flora) * 0.6f) return BlockId.TallGrass;
                     float k = kind + 0.1f * (pick - 0.5f);
                     return k < 0.45f ? BlockId.ShortGrass : k < 0.52f ? BlockId.GrassTuft : k < 0.58f ? BlockId.GrassBlades : BlockId.TallGrass;
                 }
-                if (r > 1f - 0.05f * rim)
+                if (r > 1f - 0.03f * rim)
                     return kind < 0.45f ? BlockId.RedMushroom : kind < 0.55f ? BlockId.BrownMushroom : BlockId.TanMushroom;
                 return BlockId.Air;
             }
             case BlockId.Dirt:
-                if (r < 0.35f * stand + 0.002f) return BlockId.BrownGrass;
-                if (r > 1f - 0.05f * rim) return kind < 0.5f ? BlockId.BrownMushroom : BlockId.TanMushroom;
+                if (r < 0.03f + 0.22f * stand) return BlockId.BrownGrass;
+                if (r > 1f - 0.03f * rim) return kind < 0.5f ? BlockId.BrownMushroom : BlockId.TanMushroom;
                 return BlockId.Air;
             case BlockId.Sand:
-                return r < 0.3f * stand ? BlockId.DryGrass : BlockId.Air;
+                return r < 0.01f + 0.17f * stand ? BlockId.DryGrass : BlockId.Air;
             case BlockId.Rock:
                 if (r >= 0.008f) return BlockId.Air;
                 return pick < Math.Clamp((RockFull - y) / (RockFull - RockStart), 0f, 1f) ? BlockId.MossyPebbles : BlockId.Pebbles;
