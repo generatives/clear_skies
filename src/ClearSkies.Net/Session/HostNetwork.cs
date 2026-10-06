@@ -36,7 +36,7 @@ public sealed class HostNetwork : ISystem, IDisposable
 
     private void OnDisconnected(ConnectionId connection, string reason)
     {
-        if (_connections.Remove(connection, out var from) && from.JoinedParticipant is { } joined) _host.Leave(joined, reason);
+        if (_connections.Remove(connection, out var from) && from.JoinedPeer is { } joined) _host.Leave(joined, reason);
     }
 
     private void OnReceived(ConnectionId from, ReadOnlySpan<byte> packet, Channel channel)
@@ -51,13 +51,13 @@ public sealed class HostNetwork : ISystem, IDisposable
         }
         catch (Exception e) when (e is EndOfStreamException or InvalidDataException)
         {
-            Console.WriteLine($"[net] bad {kind} from {participant.JoinedParticipant?.Name ?? from.ToString()}: {e.Message}");
+            Console.WriteLine($"[net] bad {kind} from {participant.JoinedPeer?.Name ?? from.ToString()}: {e.Message}");
         }
     }
 
     private void Dispatch(RemoteParticipant from, MessageKind kind, ref NetReader r)
     {
-        if (from.JoinedParticipant is { } joined)
+        if (from.JoinedPeer is { } joined)
         {
             switch (kind)
             {
@@ -97,18 +97,18 @@ public sealed class HostNetwork : ISystem, IDisposable
         public readonly List<BodySnapshot> Frame = new();
 
         /// <summary>Its record at the Host, once it has joined.</summary>
-        public JoinedParticipant? JoinedParticipant;
+        public JoinedPeer? JoinedPeer;
 
         public void Hello(in Hello hello)
         {
-            if (JoinedParticipant is not null) { Console.WriteLine($"[net] ignoring a second hello from {JoinedParticipant.Name} ({JoinedParticipant.Peer})"); return; }
-            JoinedParticipant = owner._host.Join(hello, local: false, out var welcome, out var refusal);
-            if (JoinedParticipant is null)
+            if (JoinedPeer is not null) { Console.WriteLine($"[net] ignoring a second hello from {JoinedPeer.Name} ({JoinedPeer.Peer})"); return; }
+            JoinedPeer = owner._host.Join(hello, local: false, out var welcome, out var refusal);
+            if (JoinedPeer is null)
             {
                 Disconnected(refusal);
                 return;
             }
-            JoinedParticipant.Participant = this;
+            JoinedPeer.Participant = this;
             Send(welcome);
         }
 

@@ -10,10 +10,10 @@ using ClearSkies.Net.Transport;
 
 namespace ClearSkies.Net.Session;
 
-/// <summary>A Participant that has joined, as the Host keeps track of it.</summary>
-public sealed class JoinedParticipant
+/// <summary>A Participant that has joined (a peer, by its <see cref="PeerId"/>), as the Host keeps track of it.</summary>
+public sealed class JoinedPeer
 {
-    internal JoinedParticipant(PeerId peer, string name)
+    internal JoinedPeer(PeerId peer, string name)
     {
         Peer = peer;
         Name = name;
@@ -44,7 +44,7 @@ public sealed class JoinedParticipant
 
 /// <summary>The Host on this machine, as one Participant here calls it (where <see cref="RemoteHost"/> is the Host on
 /// another machine): each call reaches the Host as from that Participant.</summary>
-public sealed class LocalHost(Host host, JoinedParticipant from) : IHost
+public sealed class LocalHost(Host host, JoinedPeer from) : IHost
 {
     public void Ping(double clientTimeMs) => host.Ping(from, clientTimeMs);
     public void RequestIdBlock() => host.RequestIdBlock(from);
@@ -121,7 +121,7 @@ public sealed class Host : ISystem
     private readonly EntityIdAllocator _ids;
     private readonly ulong _seed, _checksum;
     private readonly ITickClock _clock;
-    private readonly List<JoinedParticipant> _joined = new();
+    private readonly List<JoinedPeer> _joined = new();
     private readonly Dictionary<EntityId, HostEntity> _entities = new();
     private readonly List<BodySnapshot> _frame = new();
     private readonly List<EntityId> _scratch = new();
@@ -146,11 +146,11 @@ public sealed class Host : ISystem
     public EntityIdAllocator Ids => _ids;
 
     /// <summary>The Participants that have joined.</summary>
-    public IReadOnlyList<JoinedParticipant> Participants => _joined;
+    public IReadOnlyList<JoinedPeer> Participants => _joined;
     public IReadOnlyDictionary<EntityId, HostEntity> Entities => _entities;
 
     /// <summary>The hosting machine's Participant, which has authority over every entity.</summary>
-    public JoinedParticipant? Authority => _joined.FirstOrDefault(p => p.IsAuthority && p.Ready);
+    public JoinedPeer? Authority => _joined.FirstOrDefault(p => p.IsAuthority && p.Ready);
 
     /// <summary>Whether anyone but the hosting machine is in.</summary>
     public bool OthersConnected => _joined.Any(p => !p.IsAuthority);
@@ -158,7 +158,7 @@ public sealed class Host : ISystem
     /// <summary>Players released this session (as they left).</summary>
     public long Releases { get; private set; }
 
-    private JoinedParticipant? JoinedAs(PeerId id) => _joined.FirstOrDefault(p => p.Peer == id);
+    private JoinedPeer? JoinedAs(PeerId id) => _joined.FirstOrDefault(p => p.Peer == id);
 
     /// <summary>Once a tick, after what arrived over the network: what each Participant is owed.</summary>
     public void Update(float dt) => Stream();
@@ -166,7 +166,7 @@ public sealed class Host : ISystem
     // ── joining and leaving ─────────────────────────────────────────────────
 
     /// <summary>It's leaving, and why.</summary>
-    public void Leave(JoinedParticipant joined, string reason)
+    public void Leave(JoinedPeer joined, string reason)
     {
         if (!_joined.Remove(joined)) return;
         Console.WriteLine($"[net] {joined.Name} ({joined.Peer}) left: {reason}");
@@ -200,10 +200,10 @@ public sealed class Host : ISystem
     /// <summary>
     /// Lets a Participant in, or says why not (<paramref name="refusal"/>). <paramref name="local"/>: it's on this
     /// machine, so it's the authority (the first one only); only code on this machine can say so, never anything sent
-    /// over the network. Whoever lets it in then sets what the Host tells it by (<see cref="JoinedParticipant.Participant"/>),
+    /// over the network. Whoever lets it in then sets what the Host tells it by (<see cref="JoinedPeer.Participant"/>),
     /// and makes each of its calls on the Host as from what this returns.
     /// </summary>
-    public JoinedParticipant? Join(in Hello hello, bool local, out Welcome welcome, out string refusal)
+    public JoinedPeer? Join(in Hello hello, bool local, out Welcome welcome, out string refusal)
     {
         welcome = default;
         refusal = "";
@@ -217,7 +217,7 @@ public sealed class Host : ISystem
             // The hosting machine with nobody playing there (a dedicated host): the authority, with no view of its own.
             var (idFirst, idCount) = _ids.NextBlock();
             welcome = new Welcome(id, idFirst, idCount, _seed, (uint)_clock.Now, default);
-            var host = new JoinedParticipant(id, "host");
+            var host = new JoinedPeer(id, "host");
             _joined.Add(host);
             return host;
         }
@@ -242,7 +242,7 @@ public sealed class Host : ISystem
         };
         _entities[character.Id] = character;
 
-        var joined = new JoinedParticipant(id, name) { Player = player, PlayerEntity = character.Id };
+        var joined = new JoinedPeer(id, name) { Player = player, PlayerEntity = character.Id };
         joined.ViewCentre = WorldPosition(character);
         joined.ViewRadius = ViewRadius;
         var (first, count) = _ids.NextBlock();
@@ -255,26 +255,26 @@ public sealed class Host : ISystem
 
     // ── what Participants send ──────────────────────────────────────────────
 
-    public void Ping(JoinedParticipant from, double clientTimeMs)
+    public void Ping(JoinedPeer from, double clientTimeMs)
     {
         double now = _clock.Now; // not Tick: on a frame running several ticks, that's behind real time
         from.Participant.Pong(new TimePong(clientTimeMs, (uint)now, (float)(now - Math.Floor(now))));
     }
 
-    public void RequestIdBlock(JoinedParticipant from)
+    public void RequestIdBlock(JoinedPeer from)
     {
         var (first, count) = _ids.NextBlock();
         from.Participant.IdBlock(first, count);
     }
 
-    public void SetView(JoinedParticipant from, Vector3 centre, float radius)
+    public void SetView(JoinedPeer from, Vector3 centre, float radius)
     {
         (from.ViewCentre, from.ViewRadius) = (centre, MathF.Min(radius, ViewRadius));
         from.Ready = true;
     }
 
     /// <summary>To its authority, from whoever sent it, whatever it says.</summary>
-    public void SendCommand(JoinedParticipant from, in CommandMessage command)
+    public void SendCommand(JoinedPeer from, in CommandMessage command)
     {
         if (JoinedAs(command.To) is { } to) to.Participant.ReceiveCommand(command.WithFrom(from.Peer));
     }
@@ -285,7 +285,7 @@ public sealed class Host : ISystem
     }
 
     /// <summary>Only from the machine that plays them, on to their authority.</summary>
-    public void SendInput(JoinedParticipant from, in PlayerInputMessage input)
+    public void SendInput(JoinedPeer from, in PlayerInputMessage input)
     {
         if (input.Player == from.PlayerEntity && Authority is { } authority) authority.Participant.ReceiveInput(input);
     }
@@ -293,7 +293,7 @@ public sealed class Host : ISystem
     /// <summary>An event goes to everyone who has its entity, and back to whoever sent the command (to settle its
     /// prediction); nothing for an entity released or being released (its last Description has it). One for something
     /// the Host doesn't keep (the terrain) goes to everyone.</summary>
-    public void SendEvent(JoinedParticipant from, in EventMessage evt)
+    public void SendEvent(JoinedPeer from, in EventMessage evt)
     {
         var meta = evt.Meta;
         if (_entities.TryGetValue(meta.Target, out var entity) && (!entity.Loaded || entity.Releasing)) return;
@@ -304,7 +304,7 @@ public sealed class Host : ISystem
 
     /// <summary>The authority's snapshots: where its entities are now, then each Participant's share, as frames of
     /// their own.</summary>
-    public void SendFrame(JoinedParticipant from, uint tick, IReadOnlyList<BodySnapshot> snapshots)
+    public void SendFrame(JoinedPeer from, uint tick, IReadOnlyList<BodySnapshot> snapshots)
     {
         foreach (var s in snapshots)
         {
@@ -329,7 +329,7 @@ public sealed class Host : ISystem
     // ── descriptions ────────────────────────────────────────────────────────
 
     /// <summary>The authority made an entity (anyone else's is ignored, as are all of these).</summary>
-    public void EntityCreated(JoinedParticipant from, in DescriptionMessage d)
+    public void EntityCreated(JoinedPeer from, in DescriptionMessage d)
     {
         if (!from.IsAuthority) return;
         if (!_entities.TryGetValue(d.Id, out var e))
@@ -341,7 +341,7 @@ public sealed class Host : ISystem
     }
 
     /// <summary>For the Participants that asked: sent on, unless it's been released meanwhile.</summary>
-    public void EntityDescribed(JoinedParticipant from, in DescriptionMessage d)
+    public void EntityDescribed(JoinedPeer from, in DescriptionMessage d)
     {
         if (!from.IsAuthority) return;
         if (!_entities.TryGetValue(d.Id, out var e)) return; // forgotten meanwhile (deleted)
@@ -350,7 +350,7 @@ public sealed class Host : ISystem
             if (p.Requested.Remove(e.Id) && e.Loaded && !e.Releasing) SendSpawn(p, e);
     }
 
-    public void EntityReleased(JoinedParticipant from, in DescriptionMessage d)
+    public void EntityReleased(JoinedPeer from, in DescriptionMessage d)
     {
         if (!from.IsAuthority) return;
         if (!_entities.TryGetValue(d.Id, out var e)) return;
@@ -388,7 +388,7 @@ public sealed class Host : ISystem
         Releases++;
     }
 
-    public void EntityDeleted(JoinedParticipant from, EntityId id)
+    public void EntityDeleted(JoinedPeer from, EntityId id)
     {
         if (!from.IsAuthority) return;
         if (!_entities.Remove(id)) return;
@@ -442,7 +442,7 @@ public sealed class Host : ISystem
 
     /// <summary>Spawns <paramref name="e"/> on <paramref name="joined"/> from its Description: owned by the authority, and
     /// a player played by their machine.</summary>
-    private void SendSpawn(JoinedParticipant joined, HostEntity e)
+    private void SendSpawn(JoinedPeer joined, HostEntity e)
     {
         var owner = e.IsPlayer ? e.ControllingPeer : PeerId.Host;
         joined.Known.Add(e.Id);
@@ -468,5 +468,5 @@ public sealed class Host : ISystem
         _db.NextFreeId = _ids.NextFree;
     }
 
-    private IEnumerable<JoinedParticipant> Others(JoinedParticipant joined) => _joined.Where(p => p != joined);
+    private IEnumerable<JoinedPeer> Others(JoinedPeer joined) => _joined.Where(p => p != joined);
 }
