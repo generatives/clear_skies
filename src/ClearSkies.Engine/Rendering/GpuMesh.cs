@@ -38,6 +38,9 @@ public sealed class GpuMesh : IDisposable
 
     /// <summary>For a chunk mesh: how many <see cref="ChunkQuad"/>s its vertex buffer holds (it has no indices).</summary>
     public uint QuadCount { get; }
+    /// <summary>For a chunk mesh whose quads are grouped by face (+X, -X, +Y, -Y, +Z, -Z, in that order): where each
+    /// face's group ends, so the groups facing away from the camera can be skipped; null if not grouped.</summary>
+    public int[]? FaceEnds { get; init; }
 
     /// <summary>For a chunk mesh: its group-1 bind group (the model uniforms and its quads), released with it.</summary>
     public nint DrawBindGroup { get; }

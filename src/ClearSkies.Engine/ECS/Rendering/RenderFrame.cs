@@ -47,6 +47,9 @@ public sealed class RenderFrame : IDebugUiSystem
     {
         ImGui.Text($"{_time.FramesPerSecond} fps");
         ImGui.Text($"Draw calls: {_renderer.DrawCount:N0}");
+        long drawn = _renderer.ChunkQuadsDrawn, skipped = _renderer.ChunkQuadsSkipped;
+        ImGui.Text($"Chunk quads drawn: {drawn:N0}, skipped facing away: {skipped:N0} " +
+                   $"({(drawn + skipped > 0 ? 100.0 * skipped / (drawn + skipped) : 0):F0}%)");
         ImGui.Text($"Swapchain acquire wait: {_renderer.AcquireMs:F2} ms, present: {_renderer.PresentMs:F2} ms");
         ImGui.TextDisabled("A large acquire/present wait means the frame is waiting on the GPU (vsync is on).");
         bool wireframe = _renderer.WireframeMode;

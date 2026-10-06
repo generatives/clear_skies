@@ -52,9 +52,9 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
 
     /// <summary>One packed mesh: its quads as <see cref="ChunkQuad"/>s (rented; the first <see cref="Bytes"/> are used),
     /// uploaded as one buffer.</summary>
-    private readonly record struct Packed(byte[] Data, int Bytes, int QuadCount)
+    private readonly record struct Packed(byte[] Data, int Bytes, int QuadCount, int[] FaceEnds)
     {
-        public static readonly Packed None = new(Array.Empty<byte>(), 0, 0);
+        public static readonly Packed None = new(Array.Empty<byte>(), 0, 0, Array.Empty<int>());
     }
 
     /// <summary>A meshed chunk: its opaque, cut-out and translucent meshes, and its model blocks.</summary>
@@ -128,7 +128,9 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     private readonly EntitySet _meshedChunks;
 
     /// <summary>Packs a chunk mesh for upload, off the main thread: each of the mesher's quads (four vertices; the
-    /// indices only ever join them as two triangles) as one 8-byte <see cref="ChunkQuad"/>.</summary>
+    /// indices only ever join them as two triangles) as one 8-byte <see cref="ChunkQuad"/>, grouped by the way they
+    /// face (+X, -X, +Y, -Y, +Z, -Z), with where each group ends, so a draw can skip the groups facing away from the
+    /// camera.</summary>
     private static Packed PackQuads(LayerMesh mesh)
     {
         ReadOnlySpan<Vertex> verts = CollectionsMarshal.AsSpan(mesh.Vertices);
@@ -137,8 +139,16 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
         int bytes = quads * (int)ChunkQuad.SizeBytes;
         var packed = ArrayPool<byte>.Shared.Rent(bytes);
         var dst = MemoryMarshal.Cast<byte, ChunkQuad>(packed.AsSpan(0, bytes));
-        for (int q = 0; q < quads; q++) dst[q] = ChunkQuad.Pack(verts.Slice(4 * q, 4), mesh.Blocks[q]);
-        return new Packed(packed, bytes, quads);
+        var ends = new int[6];
+        Span<int> at = stackalloc int[6];
+        for (int q = 0; q < quads; q++) ends[ChunkQuad.Pack(verts.Slice(4 * q, 4), mesh.Blocks[q]).Face]++;
+        for (int f = 0, sum = 0; f < 6; f++) { at[f] = sum; sum += ends[f]; ends[f] = sum; }
+        for (int q = 0; q < quads; q++)
+        {
+            var quad = ChunkQuad.Pack(verts.Slice(4 * q, 4), mesh.Blocks[q]);
+            dst[at[quad.Face]++] = quad;
+        }
+        return new Packed(packed, bytes, quads, ends);
     }
 
     private void Dispatch()
@@ -279,7 +289,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     {
         if (p.QuadCount == 0) return null;
         long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-        var mesh = _renderer.UploadChunkQuads(p.Data.AsSpan(0, p.Bytes), (uint)p.QuadCount);
+        var mesh = _renderer.UploadChunkQuads(p.Data.AsSpan(0, p.Bytes), (uint)p.QuadCount, p.FaceEnds);
         _uploadMs += 0.05 * (System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds - _uploadMs);
         _createMs += 0.05 * (_renderer.LastCreateMs - _createMs);
         _writeMs  += 0.05 * (_renderer.LastWriteMs - _writeMs);

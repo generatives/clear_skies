@@ -1386,7 +1386,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     /// <summary>Uploads a chunk mesh: <paramref name="quads"/> holds <paramref name="quadCount"/> packed
     /// <see cref="ChunkQuad"/>s, one storage buffer and one write, and the mesh's group-1 bind group (the model
     /// uniforms and its quads) for drawing it.</summary>
-    public GpuMesh UploadChunkQuads(ReadOnlySpan<byte> quads, uint quadCount)
+    public GpuMesh UploadChunkQuads(ReadOnlySpan<byte> quads, uint quadCount, int[]? faceEnds = null)
     {
         long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
         var buf = GpuBuffer.Create(_ctx, (ulong)quads.Length, BufferUsage.Storage | BufferUsage.CopyDst);
@@ -1402,7 +1402,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         var desc = new BindGroupDescriptor { Layout = _chunkModelLayout, EntryCount = 2, Entries = entries };
         var group = _api.DeviceCreateBindGroup(_ctx.Device, &desc);
         var api = _api;
-        return new GpuMesh(buf, quadCount, (nint)group, g => api.BindGroupRelease((BindGroup*)g));
+        return new GpuMesh(buf, quadCount, (nint)group, g => api.BindGroupRelease((BindGroup*)g)) { FaceEnds = faceEnds };
     }
 
     /// <summary>How long the last <see cref="UploadChunkQuads"/> spent creating its buffer and writing it (ms), for
@@ -1576,6 +1576,9 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
             return false;
         }
         _drawIndex = 0;
+        ChunkQuadsDrawn = _quadsDrawn;
+        ChunkQuadsSkipped = _quadsSkipped;
+        _quadsDrawn = _quadsSkipped = 0;
         EnsureVoxelBindGroup();
 
         var encDesc = new CommandEncoderDescriptor();
@@ -1619,6 +1622,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     {
         Span<CameraUniform> s = stackalloc CameraUniform[1];
         s[0] = camera;
+        _cameraPosition = camera.CameraPosition;
         _cameraBuffer.Write<CameraUniform>(0, s);
     }
 
@@ -1671,10 +1675,53 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         else
         {
             _api.RenderPassEncoderSetIndexBuffer(_pass, _quadIndices.Handle, IndexFormat.Uint32, 0, _quadIndices.SizeBytes);
-            _api.RenderPassEncoderDrawIndexed(_pass, 6u * System.Math.Min(mesh.QuadCount, (uint)MaxChunkQuads), 1, 0, 0, 0);
+            // Back-face culled pipelines skip the face groups that can't point at the camera (see FacingCamera); each
+            // run of groups that can is one draw from its range of the shared index buffer (vertex index 4q + corner).
+            bool cull = !OverdrawMode && mesh.FaceEnds is { Length: 6 } && (solidPipeline == _chunkPipeline || solidPipeline == _chunkCutoutPipeline);
+            int mask = cull ? FacingCamera(model) : 63;
+            int[]? ends = mesh.FaceEnds;
+            uint total = System.Math.Min(mesh.QuadCount, (uint)MaxChunkQuads);
+            if (mask == 63 || ends == null) { _api.RenderPassEncoderDrawIndexed(_pass, 6u * total, 1, 0, 0, 0); _quadsDrawn += total; }
+            else
+            {
+                uint drawn = 0;
+                int f = 0;
+                while (f < 6)
+                {
+                    if ((mask & (1 << f)) == 0) { f++; continue; }
+                    int g = f;
+                    while (g + 1 < 6 && (mask & (1 << (g + 1))) != 0) g++;
+                    uint start = (uint)(f == 0 ? 0 : ends[f - 1]), end = System.Math.Min((uint)ends[g], total);
+                    if (end > start) { _api.RenderPassEncoderDrawIndexed(_pass, 6u * (end - start), 1, 6u * start, 0, 0); drawn += end - start; }
+                    f = g + 1;
+                }
+                _quadsDrawn += drawn;
+                _quadsSkipped += total - drawn;
+            }
         }
         _drawIndex++;
     }
+
+    /// <summary>Which face groups of a chunk (bit f: +X, -X, +Y, -Y, +Z, -Z) can point at the camera: a +X face sits on a
+    /// plane x = 1..32 of the chunk (its local space), so none of them faces the camera unless it's at x > 0; a -X face on
+    /// x = 0..31, so only if it's at x < 32; and so on. The camera is brought into the chunk's space through the
+    /// transform's columns (rotation and uniform scale, as chunk transforms are).</summary>
+    private int FacingCamera(in Mat4 m)
+    {
+        var d = _cameraPosition - new Vector3D<float>(m.M12, m.M13, m.M14);
+        var c0 = new Vector3D<float>(m.M0, m.M1, m.M2);
+        var c1 = new Vector3D<float>(m.M4, m.M5, m.M6);
+        var c2 = new Vector3D<float>(m.M8, m.M9, m.M10);
+        float x = Vector3D.Dot(c0, d) / c0.LengthSquared, y = Vector3D.Dot(c1, d) / c1.LengthSquared, z = Vector3D.Dot(c2, d) / c2.LengthSquared;
+        const float S = ChunkData.Size;
+        return (x > 0 ? 1 : 0) | (x < S ? 2 : 0) | (y > 0 ? 4 : 0) | (y < S ? 8 : 0) | (z > 0 ? 16 : 0) | (z < S ? 32 : 0);
+    }
+
+    /// <summary>Chunk quads drawn last frame, and skipped as facing away from the camera (for reports).</summary>
+    public long ChunkQuadsDrawn { get; private set; }
+    public long ChunkQuadsSkipped { get; private set; }
+    private long _quadsDrawn, _quadsSkipped;
+    private Vector3D<float> _cameraPosition;
 
     /// <summary>Stages this draw's model uniform for <see cref="EndFrame"/>'s single upload; returns its dynamic offset.</summary>
     private uint StageModel(in ModelUniform u)

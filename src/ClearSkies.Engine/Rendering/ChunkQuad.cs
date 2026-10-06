@@ -53,6 +53,9 @@ public readonly struct ChunkQuad
     /// <summary>The quad's block.</summary>
     public BlockId Block => (BlockId)(B & 255);
 
+    /// <summary>The way it faces: 0 +X, 1 -X, 2 +Y, 3 -Y, 4 +Z, 5 -Z.</summary>
+    public int Face => (int)((A >> 18) & 7);
+
     /// <summary>Entries in <see cref="BuildBlockTable"/>: one per possible <see cref="BlockId"/>.</summary>
     public const int BlockTableSize = 256;
 
