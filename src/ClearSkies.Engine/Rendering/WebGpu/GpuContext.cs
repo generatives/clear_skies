@@ -26,6 +26,8 @@ public sealed unsafe class GpuContext : IDisposable
 
     private Texture* _depthTexture;
     private TextureView* _depthView;
+    private Texture* _msaaTexture;      // the multisampled colour target, resolved into the swapchain image (MSAA only)
+    private TextureView* _msaaView;
 
     private Texture* _currentTexture;
     private TextureView* _currentView;
@@ -56,6 +58,14 @@ public sealed unsafe class GpuContext : IDisposable
     internal Device* Device => _device;
     internal Queue* Queue => _queue;
     internal TextureView* DepthView => _depthView;
+
+    /// <summary>Samples per pixel of the world pass's targets (1, or 4 for MSAA): every pipeline drawn in it must use
+    /// this count.</summary>
+    public uint SampleCount { get; private set; } = 1;
+
+    /// <summary>The multisampled colour target the pass draws into, resolved into the swapchain image; null without
+    /// MSAA.</summary>
+    internal TextureView* MsaaView => _msaaView;
     internal TextureView* CurrentView => _currentView;
 
     private GpuContext(WebGPU api, bool logErrors)
@@ -67,7 +77,7 @@ public sealed unsafe class GpuContext : IDisposable
     public static GpuContext Create(GameWindow window, EngineOptions options)
     {
         var api = WebGPU.GetApi();
-        var ctx = new GpuContext(api, options.LogGpuErrors);
+        var ctx = new GpuContext(api, options.LogGpuErrors) { SampleCount = options.MsaaSamples >= 4 ? 4u : 1u };
         ctx.Init(window);
         return ctx;
     }
@@ -229,6 +239,22 @@ public sealed unsafe class GpuContext : IDisposable
     {
         if (_depthView != null) { _api.TextureViewRelease(_depthView); _depthView = null; }
         if (_depthTexture != null) { _api.TextureRelease(_depthTexture); _depthTexture = null; }
+        if (_msaaView != null) { _api.TextureViewRelease(_msaaView); _msaaView = null; }
+        if (_msaaTexture != null) { _api.TextureRelease(_msaaTexture); _msaaTexture = null; }
+        if (SampleCount > 1)
+        {
+            var colour = new TextureDescriptor
+            {
+                Usage = TextureUsage.RenderAttachment,
+                Dimension = TextureDimension.Dimension2D,
+                Size = new Extent3D(width, height, 1),
+                Format = SurfaceFormat,
+                MipLevelCount = 1,
+                SampleCount = SampleCount,
+            };
+            _msaaTexture = _api.DeviceCreateTexture(_device, &colour);
+            _msaaView = _api.TextureCreateView(_msaaTexture, null);
+        }
 
         var desc = new TextureDescriptor
         {
@@ -237,7 +263,7 @@ public sealed unsafe class GpuContext : IDisposable
             Size = new Extent3D(width, height, 1),
             Format = DepthFormat,
             MipLevelCount = 1,
-            SampleCount = 1,
+            SampleCount = SampleCount,
         };
         _depthTexture = _api.DeviceCreateTexture(_device, &desc);
         _depthView = _api.TextureCreateView(_depthTexture, null);
@@ -306,6 +332,8 @@ public sealed unsafe class GpuContext : IDisposable
         Timer?.Dispose();
         if (_depthView != null) _api.TextureViewRelease(_depthView);
         if (_depthTexture != null) _api.TextureRelease(_depthTexture);
+        if (_msaaView != null) _api.TextureViewRelease(_msaaView);
+        if (_msaaTexture != null) _api.TextureRelease(_msaaTexture);
         if (_instance != null) _api.InstanceRelease(_instance);
         _api.Dispose();
     }
