@@ -56,7 +56,7 @@ public sealed class Hosting : IDisposable
         {
             SaveChunks = world.ChunkLoad.SaveAllDirty,
         };
-        Network = transport is null ? null : new RemoteParticipants(Host, transport);
+        Network = transport is null ? null : new HostNetwork(Host, transport);
         Net = SimulationParticipant.Join(Host, new Hello(ProtocolVersion.Current, playerName ?? "", checksum), world.Session, world.Commands,
                                          world.Registry, world.Host.World, world.Host.Clock, world.TerrainReadyFor);
         Net.OthersHere = () => Host.OthersConnected;
@@ -65,7 +65,7 @@ public sealed class Hosting : IDisposable
 
     public Host Host { get; }
     /// <summary>Participants on other machines, joining over the network (none: single-player). First in the tick.</summary>
-    public RemoteParticipants? Network { get; }
+    public HostNetwork? Network { get; }
     public SimulationParticipant Net { get; }
 
     /// <summary>Saves everything, in one transaction (on exit): the authority describes it all, and the Host writes it.</summary>
