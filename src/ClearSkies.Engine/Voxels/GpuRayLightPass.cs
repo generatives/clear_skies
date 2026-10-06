@@ -69,7 +69,7 @@ fn occCode(g: i32, c: vec3<i32>) -> i32 {
     return chunkTable[2 * i].x;
 }
 
-// (occupancy code, solid-brick mask low, high, foliage slot + 1 or 0) of chunk c.
+// (occupancy code, solid-brick mask low, high, see-through slot + 1 or 0) of chunk c.
 fn chunkInfo(g: i32, c: vec3<i32>) -> vec4<i32> {
     let i = entryOf(g, c);
     if (i < 0) { return vec4<i32>(OCC_UNLOADED, 0, 0, 0); }
@@ -88,22 +88,22 @@ fn solidIn(code: i32, v: vec3<i32>) -> bool {
 
 fn isSolid(g: i32, v: vec3<i32>) -> bool { return solidIn(occCode(g, v >> vec3<u32>(5u)), v); }
 
-// Foliage (BlockDef.CatchesLight: leaves): lets light through, so rays never see it, but is lit like a surface. fol is
-// a chunk's foliage slot plus one (chunkInfo's w), 0 for none.
-fn foliageIn(fol: i32, v: vec3<i32>) -> bool {
+// See-through blocks (BlockDef.CatchesLight: leaves, glass, water, model blocks): they let light through, so rays never
+// see them, but are lit like surfaces. fol is a chunk's see-through slot plus one (chunkInfo's w), 0 for none.
+fn seeThroughIn(fol: i32, v: vec3<i32>) -> bool {
     if (fol <= 0) { return false; }
     let l = v & vec3<i32>(31);
     return ((occPool[u32((fol - 1) * WPC + l.y + 32 * l.z)] >> u32(l.x)) & 1u) == 1u;
 }
 
-fn isFoliage(g: i32, v: vec3<i32>) -> bool {
+fn isSeeThrough(g: i32, v: vec3<i32>) -> bool {
     let i = entryOf(g, v >> vec3<u32>(5u));
     if (i < 0) { return false; }
-    return foliageIn(chunkTable[2 * i + 1].z, v);
+    return seeThroughIn(chunkTable[2 * i + 1].z, v);
 }
 
-// Whether v makes a surface that the air beside it is lit for: solid or foliage.
-fn makesSurface(g: i32, v: vec3<i32>) -> bool { return isSolid(g, v) || isFoliage(g, v); }
+// Whether v makes a surface that the air beside it is lit for: solid or see-through.
+fn makesSurface(g: i32, v: vec3<i32>) -> bool { return isSolid(g, v) || isSeeThrough(g, v); }
 
 // Loads v's chunk info into *info unless it is already the cached chunk *cc (DDA loops).
 fn cacheChunk(g: i32, v: vec3<i32>, cc: ptr<function, vec3<i32>>, info: ptr<function, vec4<i32>>) {
@@ -458,10 +458,10 @@ var<workgroup> wList: array<u32, 512>;      // brick voxel indices (x + 8y + 64z
 var<workgroup> wCount: atomic<u32>;
 var<workgroup> wSun: array<u32, 512>;       // sun_main, compose_main: each voxel's result, for the paired write
 
-// Surface air: air (or foliage) that is foliage itself or has a solid or foliage face neighbour.
+// Surface air: a cell that blocks no light and is see-through itself or has a solid or see-through face neighbour.
 fn isSurfaceAir(g: i32, v: vec3<i32>) -> bool {
     if (isSolid(g, v)) { return false; }
-    if (isFoliage(g, v)) { return true; }
+    if (isSeeThrough(g, v)) { return true; }
     return makesSurface(g, v - vec3<i32>(1, 0, 0)) || makesSurface(g, v + vec3<i32>(1, 0, 0)) ||
            makesSurface(g, v - vec3<i32>(0, 1, 0)) || makesSurface(g, v + vec3<i32>(0, 1, 0)) ||
            makesSurface(g, v - vec3<i32>(0, 0, 1)) || makesSurface(g, v + vec3<i32>(0, 0, 1));
@@ -570,7 +570,7 @@ fn faceDir(f: i32) -> vec3<i32> {
 const C12: i32 = 12;  // cOcc's side: the brick (8) and 2 cells each way
 const C10: i32 = 10;  // cSurf / cAcc's side: the brick and 1 cell each way
 var<workgroup> cOcc: array<atomic<u32>, 54>;   // 1728 bits, cell x + 12y + 144z (origin: the brick's first voxel - 2)
-var<workgroup> cFol: array<atomic<u32>, 54>;   // the same cells' foliage
+var<workgroup> cSee: array<atomic<u32>, 54>;   // the same cells' see-through bits
 var<workgroup> cSurf: array<atomic<u32>, 32>;  // 1000 bits, cell x + 10y + 100z (origin: the brick's first voxel - 1)
 var<workgroup> cAcc: array<u32, 1000>;         // those cells' accumulation words, where cSurf is set
 
@@ -586,17 +586,17 @@ fn tileSurf(c: vec3<i32>) -> bool {
     return ((atomicLoad(&cSurf[i >> 5u]) >> (i & 31u)) & 1u) == 1u;
 }
 
-fn tileFoliage(c: vec3<i32>) -> bool { // c: 12³ cell
+fn tileSeeThrough(c: vec3<i32>) -> bool { // c: 12³ cell
     let i = u32(c.x + C12 * (c.y + C12 * c.z));
-    return ((atomicLoad(&cFol[i >> 5u]) >> (i & 31u)) & 1u) == 1u;
+    return ((atomicLoad(&cSee[i >> 5u]) >> (i & 31u)) & 1u) == 1u;
 }
 
 // Whether 12³ cell c is surface air (see isSurfaceAir); c is within one cell of the brick.
 fn tileSurfaceAir(c: vec3<i32>) -> bool {
     if (tileSolid(c)) { return false; }
-    if (tileFoliage(c)) { return true; }
+    if (tileSeeThrough(c)) { return true; }
     for (var f = 0; f < 6; f = f + 1) {
-        if (tileSolid(c + faceDir(f)) || tileFoliage(c + faceDir(f))) { return true; }
+        if (tileSolid(c + faceDir(f)) || tileSeeThrough(c + faceDir(f))) { return true; }
     }
     return false;
 }
@@ -662,7 +662,7 @@ fn compose_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) 
     let smoothed = p.bounce.x > 0.5;
     let ownAcc = accOf(slot); // -1: no accumulation (bounce off, or not evaluated yet): no bounce and no AO
     if (t == 0u) { atomicStore(&wCount, 0u); }
-    if (t < 54u) { atomicStore(&cOcc[t], 0u); atomicStore(&cFol[t], 0u); }
+    if (t < 54u) { atomicStore(&cOcc[t], 0u); atomicStore(&cSee[t], 0u); }
     if (t < 32u) { atomicStore(&cSurf[t], 0u); }
     workgroupBarrier();
 
@@ -673,7 +673,7 @@ fn compose_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) 
     for (var i = i32(t); i < C12 * C12 * C12; i = i + 256) {
         let c = vec3<i32>(i % C12, (i / C12) % C12, i / (C12 * C12));
         if (solidCached(it.g, base - vec3<i32>(2) + c, &cc, &info)) { atomicOr(&cOcc[u32(i) >> 5u], 1u << (u32(i) & 31u)); }
-        else if (foliageIn(info.w, base - vec3<i32>(2) + c)) { atomicOr(&cFol[u32(i) >> 5u], 1u << (u32(i) & 31u)); }
+        else if (seeThroughIn(info.w, base - vec3<i32>(2) + c)) { atomicOr(&cSee[u32(i) >> 5u], 1u << (u32(i) & 31u)); }
     }
     workgroupBarrier();
 

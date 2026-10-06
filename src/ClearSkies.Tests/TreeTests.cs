@@ -29,22 +29,40 @@ public class TreeTests
     }
 
     [Fact]
-    public void Leaves_let_light_through_but_are_packed_for_lighting_as_foliage()
+    public void Leaves_let_light_through_but_are_packed_for_lighting_as_see_through()
     {
         var leaves = BlockRegistry.Get(BlockId.Leaves);
         Assert.False(leaves.BlocksLight);
         Assert.True(leaves.CatchesLight);
-        Assert.False(BlockRegistry.Get(BlockId.Glass).CatchesLight);
+        Assert.True(BlockRegistry.Get(BlockId.Glass).CatchesLight);
+        Assert.True(BlockRegistry.Get(BlockId.Lever).CatchesLight);
+        Assert.False(BlockRegistry.Get(BlockId.TallGrass).CatchesLight);
+        Assert.False(BlockRegistry.Get(BlockId.Stone).CatchesLight);
 
         var data = new ChunkData();
         data.Set(9, 20, 3, BlockId.Leaves);
         data.Set(1, 1, 1, BlockId.Stone);
         var packed = GridStore.Pack(data);
         Assert.Equal(0u, packed.Words[20 + 32 * 3]);                 // the leaf stops no rays
-        Assert.NotNull(packed.Foliage);
-        Assert.Equal(1u << 9, packed.Foliage![20 + 32 * 3]);         // but is marked as foliage
-        Assert.Equal(1UL << (1 + 4 * (2 + 4 * 0)), packed.FoliageBricks);
-        Assert.Null(GridStore.Pack(new ChunkData()).Foliage);
+        Assert.NotNull(packed.SeeThrough);
+        Assert.Equal(1u << 9, packed.SeeThrough![20 + 32 * 3]);         // but is marked as see-through
+        Assert.Equal(1UL << (1 + 4 * (2 + 4 * 0)), packed.SeeThroughBricks);
+        Assert.Null(GridStore.Pack(new ChunkData()).SeeThrough);
+    }
+
+    [Fact]
+    public void Only_the_skin_of_a_pool_of_water_is_packed_for_lighting()
+    {
+        var data = new ChunkData();
+        for (int z = 4; z <= 12; z++)
+        for (int y = 4; y <= 12; y++)
+        for (int x = 4; x <= 12; x++)
+            data.Set(x, y, z, BlockId.Water);
+        var bits = GridStore.Pack(data).SeeThrough!;
+        static bool Has(uint[] b, int x, int y, int z) => ((b[y + 32 * z] >> x) & 1) == 1;
+        Assert.True(Has(bits, 4, 8, 8));    // its side
+        Assert.True(Has(bits, 8, 12, 8));   // its top
+        Assert.False(Has(bits, 8, 8, 8));   // its inside
     }
 
     [Theory]
