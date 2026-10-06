@@ -57,6 +57,9 @@ public sealed class GreedyMesher
     private readonly List<BlockId> _blocks  = new();
     private readonly List<BlockId> _tBlocks = new();
     private readonly List<BlockId> _cBlocks = new();
+    private readonly List<uint> _shades  = new();
+    private readonly List<uint> _tShades = new();
+    private readonly List<uint> _cShades = new();
     private readonly List<Vertex> _cVerts   = new();
     private readonly List<uint>   _cIndices = new();
 
@@ -93,6 +96,9 @@ public sealed class GreedyMesher
         _blocks.Clear();
         _tBlocks.Clear();
         _cBlocks.Clear();
+        _shades.Clear();
+        _tShades.Clear();
+        _cShades.Clear();
         _cVerts.Clear();
         _cIndices.Clear();
         int sz      = ChunkData.Size;
@@ -145,7 +151,7 @@ public sealed class GreedyMesher
                             var voxelUp = GetOrientation(chunk, face, slice, u, v).Up;
                             role = BlockDef.GetFaceRole(face.Normal, voxelUp);
                         }
-                        _mask[u + v * sz] = new MaskCell(blockId, role);
+                        _mask[u + v * sz] = new MaskCell(blockId, role, ShadingAt(chunk, face, slice, u, v));
                     }
                 }
 
@@ -193,22 +199,26 @@ public sealed class GreedyMesher
                         case RenderLayer.Translucent:
                             EmitQuad(_tVerts, _tIndices, face, slice + face.FaceOffset, u, v, du, dv, def.Color, layer);
                             _tBlocks.Add(start.Id);
+                            _tShades.Add(start.Shade);
                             break;
                         case RenderLayer.Cutout:
                             EmitQuad(_cVerts, _cIndices, face, slice + face.FaceOffset, u, v, du, dv, def.Color, layer);
                             _cBlocks.Add(start.Id);
+                            _cShades.Add(start.Shade);
                             break;
                         default:
                             EmitQuad(verts, indices, face, slice + face.FaceOffset, u, v, du, dv, def.Color, layer);
                             _blocks.Add(start.Id);
+                            _shades.Add(start.Shade);
                             break;
                     }
                 }
             }
         }
 
-        return new ChunkMeshLayers(new LayerMesh(verts, indices, _blocks), new LayerMesh(_cVerts, _cIndices, _cBlocks),
-                                   new LayerMesh(_tVerts, _tIndices, _tBlocks));
+        return new ChunkMeshLayers(new LayerMesh(verts, indices, _blocks, _shades),
+                                   new LayerMesh(_cVerts, _cIndices, _cBlocks, _cShades),
+                                   new LayerMesh(_tVerts, _tIndices, _tBlocks, _tShades));
     }
 
     // face.D/U/V are always a permutation of {0,1,2} (x,y,z); resolving the three coordinates with a
@@ -222,6 +232,58 @@ public sealed class GreedyMesher
         else if (face.D == 1) { y = slice; x = u; z = v; }
         else                  { z = slice; x = u; y = v; }
         return chunk.Get(x, y, z);
+    }
+
+    /// <summary>
+    /// The face cell's baked shading (see <see cref="ShadingAt(ChunkData, int, int, int, Vector3D{int})"/>) for face
+    /// <paramref name="face"/> of the block at (<paramref name="slice"/>, <paramref name="u"/>, <paramref name="v"/>).
+    /// </summary>
+    private static uint ShadingAt(ChunkData chunk, in FaceDesc face, int slice, int u, int v)
+    {
+        int x, y, z;
+        if (face.D == 0)      { x = slice; y = u; z = v; }
+        else if (face.D == 1) { y = slice; x = u; z = v; }
+        else                  { z = slice; x = u; y = v; }
+        return ShadingAt(chunk, x, y, z, face.Normal);
+    }
+
+    /// <summary>Set in <see cref="ShadingAt(ChunkData, int, int, int, Vector3D{int})"/>'s result when it's baked.</summary>
+    public const uint ShadingBaked = 1u << 16;
+
+    /// <summary>
+    /// What the fragment shader's lighting (shadeFast) needs to know about the blocks around a face cell, worked out
+    /// here once instead of per pixel: the air cell in front of the face (block + <paramref name="normal"/>) and, in
+    /// its plane (tangents T and B as the shader picks them: X faces y, z; Y faces x, z; Z faces x, y), which of its 8
+    /// neighbours block light (bits 0-7: -T, +T, -B, +B, -T-B, +T-B, -T+B, +T+B; corner AO), and which of them are open
+    /// surface cells (bits 8-15, same order: open, with a light-blocking block behind along the normal; a diagonal
+    /// only through an open side cell; smooth light). <see cref="ShadingBaked"/> is set when that whole neighbourhood
+    /// is inside the chunk; otherwise the result is 0 and the shader works it out from the GPU occupancy, since this
+    /// chunk is meshed without its neighbours. Quads merge only across cells with the same value.
+    /// </summary>
+    public static uint ShadingAt(ChunkData chunk, int x, int y, int z, Vector3D<int> normal)
+    {
+        int ax = x + normal.X, ay = y + normal.Y, az = z + normal.Z;
+        const int last = ChunkData.Size - 2;
+        if (ax < 1 || ay < 1 || az < 1 || ax > last || ay > last || az > last) return 0;
+        int tx, ty, tz, bx, by, bz;
+        if (normal.X != 0)      { tx = 0; ty = 1; tz = 0; bx = 0; by = 0; bz = 1; }
+        else if (normal.Y != 0) { tx = 1; ty = 0; tz = 0; bx = 0; by = 0; bz = 1; }
+        else                    { tx = 1; ty = 0; tz = 0; bx = 0; by = 1; bz = 0; }
+        bool Solid(int dt, int db, int dn) =>
+            BlockRegistry.Get(chunk.Get(ax + dt * tx + db * bx - dn * normal.X,
+                                        ay + dt * ty + db * by - dn * normal.Y,
+                                        az + dt * tz + db * bz - dn * normal.Z)).BlocksLight;
+        bool sTm = Solid(-1, 0, 0), sTp = Solid(1, 0, 0), sBm = Solid(0, -1, 0), sBp = Solid(0, 1, 0);
+        bool sMM = Solid(-1, -1, 0), sPM = Solid(1, -1, 0), sMP = Solid(-1, 1, 0), sPP = Solid(1, 1, 0);
+        bool oTm = !sTm && Solid(-1, 0, 1), oTp = !sTp && Solid(1, 0, 1);
+        bool oBm = !sBm && Solid(0, -1, 1), oBp = !sBp && Solid(0, 1, 1);
+        bool oMM = (oTm || oBm) && !sMM && Solid(-1, -1, 1), oPM = (oTp || oBm) && !sPM && Solid(1, -1, 1);
+        bool oMP = (oTm || oBp) && !sMP && Solid(-1, 1, 1), oPP = (oTp || oBp) && !sPP && Solid(1, 1, 1);
+        uint bits = 0;
+        void Set(bool b, int i) { if (b) bits |= 1u << i; }
+        Set(sTm, 0); Set(sTp, 1); Set(sBm, 2); Set(sBp, 3); Set(sMM, 4); Set(sPM, 5); Set(sMP, 6); Set(sPP, 7);
+        Set(oTm, 8); Set(oTp, 9); Set(oBm, 10); Set(oBp, 11); Set(oMM, 12); Set(oPM, 13); Set(oMP, 14); Set(oPP, 15);
+        return bits | ShadingBaked;
     }
 
     private static BlockOrientation GetOrientation(ChunkData chunk, in FaceDesc face, int slice, int u, int v)
@@ -319,20 +381,22 @@ public sealed class GreedyMesher
     {
         public readonly BlockId Id;
         public readonly FaceRole Role;
+        public readonly uint Shade; // ShadingAt: cells with different shading can't share a quad
 
-        public MaskCell(BlockId id, FaceRole role) { Id = id; Role = role; }
+        public MaskCell(BlockId id, FaceRole role, uint shade) { Id = id; Role = role; Shade = shade; }
 
-        public bool Equals(MaskCell other) => Id == other.Id && Role == other.Role;
+        public bool Equals(MaskCell other) => Id == other.Id && Role == other.Role && Shade == other.Shade;
         public override bool Equals(object? obj) => obj is MaskCell m && Equals(m);
-        public override int GetHashCode() => HashCode.Combine(Id, Role);
+        public override int GetHashCode() => HashCode.Combine(Id, Role, Shade);
         public static bool operator ==(MaskCell a, MaskCell b) => a.Equals(b);
         public static bool operator !=(MaskCell a, MaskCell b) => !a.Equals(b);
     }
 }
 
-/// <summary>One render layer's faces: its vertices, triangle indices into them, and each quad's block (four vertices
-/// apiece, in order), whose colour and opacity the renderer looks up (see ChunkQuad).</summary>
-public readonly record struct LayerMesh(List<Vertex> Vertices, List<uint> Indices, List<BlockId> Blocks);
+/// <summary>One render layer's faces: its vertices, triangle indices into them, and per quad (four vertices apiece, in
+/// order) its block, whose colour and opacity the renderer looks up (see ChunkQuad), and its baked shading
+/// (<see cref="GreedyMesher.ShadingAt(ChunkData, int, int, int, Vector3D{int})"/>).</summary>
+public readonly record struct LayerMesh(List<Vertex> Vertices, List<uint> Indices, List<BlockId> Blocks, List<uint> Shading);
 
 /// <summary>A meshed chunk's faces, one <see cref="LayerMesh"/> per <see cref="RenderLayer"/>. The lists are
 /// <see cref="GreedyMesher"/>'s reused scratch buffers: consume them before it meshes again.</summary>

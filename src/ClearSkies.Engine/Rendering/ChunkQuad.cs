@@ -13,8 +13,10 @@ namespace ClearSkies.Engine.Rendering;
 /// <item><see cref="A"/>: the quad's first corner (chunk-local, 0-32) in bits 0-5, 6-11, 12-17; the face (0 +X, 1 -X,
 /// 2 +Y, 3 -Y, 4 +Z, 5 -Z, the mesher's order) in bits 18-20; the texture layer in bits 21-28, 255 for untextured;
 /// the low 3 bits of its width - 1 in bits 29-31.</item>
-/// <item><see cref="B"/>: the block (<see cref="BlockId"/>) in bits 0-7; the high 2 bits of width - 1 in bits 24-25;
-/// height - 1 in bits 26-30. Bits 8-23 and 31 are free.</item>
+/// <item><see cref="B"/>: the block (<see cref="BlockId"/>) in bits 0-7; its cells' baked shading
+/// (<see cref="Voxels.GreedyMesher.ShadingAt(Voxels.ChunkData, int, int, int, Silk.NET.Maths.Vector3D{int})"/>: the
+/// solid and open-surface cells around them, which the shader would otherwise look up per pixel) in bits 8-23, and
+/// bit 31 set if that is baked; the high 2 bits of width - 1 in bits 24-25; height - 1 in bits 26-30.</item>
 /// </list>
 /// What's the same for every quad of a block type (its colour, shown on untextured blocks, and its opacity) isn't stored
 /// per quad: the shader looks it up by block in a table built from the <see cref="BlockRegistry"/>
@@ -35,7 +37,7 @@ public readonly struct ChunkQuad
 
     /// <summary>Packs the quad the mesher emitted as <paramref name="v"/> (its four corners, in its order), of
     /// <paramref name="block"/>.</summary>
-    public static ChunkQuad Pack(ReadOnlySpan<Vertex> v, BlockId block)
+    public static ChunkQuad Pack(ReadOnlySpan<Vertex> v, BlockId block, uint shading = 0)
     {
         var n = v[0].Normal;
         uint face = n.X > 0.5f ? 0u : n.X < -0.5f ? 1u : n.Y > 0.5f ? 2u : n.Y < -0.5f ? 3u : n.Z > 0.5f ? 4u : 5u;
@@ -46,12 +48,17 @@ public readonly struct ChunkQuad
         uint w = (uint)MathF.Round(su) - 1, h = (uint)MathF.Round(sv) - 1;
         uint layer = v[0].Uv.Z < 0f ? NoLayer : (uint)System.Math.Min((int)v[0].Uv.Z, NoLayer - 1);
         uint a = (uint)p.X | (uint)p.Y << 6 | (uint)p.Z << 12 | face << 18 | layer << 21 | (w & 7) << 29;
-        uint b = (uint)block | (w >> 3) << 24 | h << 26;
+        uint b = (uint)block | (shading & 0xFFFFu) << 8 | (w >> 3) << 24 | h << 26
+               | ((shading & GreedyMesher.ShadingBaked) != 0 ? 1u << 31 : 0u);
         return new ChunkQuad(a, b);
     }
 
     /// <summary>The quad's block.</summary>
     public BlockId Block => (BlockId)(B & 255);
+
+    /// <summary>Its cells' baked shading, as <see cref="GreedyMesher.ShadingAt(ChunkData, int, int, int, Vector3D{int})"/>
+    /// returns it (0 if not baked).</summary>
+    public uint Shading => (B >> 31) != 0 ? ((B >> 8) & 0xFFFFu) | GreedyMesher.ShadingBaked : 0u;
 
     /// <summary>Entries in <see cref="BuildBlockTable"/>: one per possible <see cref="BlockId"/>.</summary>
     public const int BlockTableSize = 256;

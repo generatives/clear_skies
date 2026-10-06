@@ -137,7 +137,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
         int bytes = quads * (int)ChunkQuad.SizeBytes;
         var packed = ArrayPool<byte>.Shared.Rent(bytes);
         var dst = MemoryMarshal.Cast<byte, ChunkQuad>(packed.AsSpan(0, bytes));
-        for (int q = 0; q < quads; q++) dst[q] = ChunkQuad.Pack(verts.Slice(4 * q, 4), mesh.Blocks[q]);
+        for (int q = 0; q < quads; q++) dst[q] = ChunkQuad.Pack(verts.Slice(4 * q, 4), mesh.Blocks[q], mesh.Shading[q]);
         return new Packed(packed, bytes, quads);
     }
 

@@ -261,6 +261,8 @@ struct VSOut {
     @location(4)       uv:          vec3<f32>,
     @location(5)       worldPos:    vec3<f32>,
     @location(6)       alpha:       f32,          // chunk meshes: a transparent block's opacity (see fs_chunk_transparent)
+    // Chunk meshes: the quad's baked shading (its b word: bits 8-23, bit 31 = baked; see shadeFast); 0 otherwise.
+    @location(7) @interpolate(flat) shade: u32,
 };
 
 @vertex
@@ -279,6 +281,7 @@ fn vs_main(
     o.localPos    = position;
     o.localNormal = normal;
     o.uv          = uv;
+    o.shade       = 0u;
     return o;
 }
 
@@ -336,6 +339,7 @@ fn chunkVertex(quad: vec2<u32>, corner: u32) -> VSOut {
     o.localNormal = normal;
     o.uv          = vec3<f32>(uv2, layer);
     o.alpha       = block.a;
+    o.shade       = c;
     return o;
 }
 
@@ -583,7 +587,7 @@ fn avg4(p: WCell, q: WCell, r: WCell, s: WCell) -> Corner4 {
 
 struct Shade { sky: f32, rgb: vec3<f32>, sun: f32, ao: f32 };
 
-fn shadeFast(localPos: vec3<f32>, localNormal: vec3<f32>) -> Shade {
+fn shadeFast(localPos: vec3<f32>, localNormal: vec3<f32>, shade: u32) -> Shade {
     let air = model.chunk * 32 + vec3<i32>(floor(localPos + 0.5 * localNormal));
     let N = vec3<i32>(round(localNormal));
     let n = abs(localNormal);
@@ -593,23 +597,40 @@ fn shadeFast(localPos: vec3<f32>, localNormal: vec3<f32>) -> Shade {
     else                { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 1, 0); }
 
     let ai = entryOf(model.grid, air >> vec3<u32>(5u));
-    let m = solidMask(air, ai);
     let hb = air >> vec3<u32>(3u);
     let hs = brickSlot(ai, air);
 
-    // Air-layer solids around the cell (AO, and the first half of onSurface).
-    let sTm = maskSolid(m, -T);     let sTp = maskSolid(m, T);
-    let sBm = maskSolid(m, -B);     let sBp = maskSolid(m, B);
-    let sMM = maskSolid(m, -T - B); let sPM = maskSolid(m, T - B);
-    let sMP = maskSolid(m, -T + B); let sPP = maskSolid(m, T + B);
-
-    // onSurface: open, with a solid directly behind along the normal. Diagonals need a side cell (corner rule).
-    let oTm = !sTm && maskSolid(m, -T - N);     let oTp = !sTp && maskSolid(m, T - N);
-    let oBm = !sBm && maskSolid(m, -B - N);     let oBp = !sBp && maskSolid(m, B - N);
-    let oMM = (oTm || oBm) && !sMM && maskSolid(m, -T - B - N);
-    let oPM = (oTp || oBm) && !sPM && maskSolid(m, T - B - N);
-    let oMP = (oTm || oBp) && !sMP && maskSolid(m, -T + B - N);
-    let oPP = (oTp || oBp) && !sPP && maskSolid(m, T + B - N);
+    // Air-layer solids around the cell (AO, and the first half of onSurface), and onSurface: open, with a solid
+    // directly behind along the normal; diagonals need a side cell (corner rule). Baked by the mesher for most faces
+    // (GreedyMesher.ShadingAt, bits 0-15 of shade >> 8 in this order); at a chunk border, from the occupancy.
+    var bits: u32;
+    if ((shade >> 31u) != 0u) {
+        bits = (shade >> 8u) & 0xFFFFu;
+    } else {
+        let m = solidMask(air, ai);
+        let sTm = maskSolid(m, -T);     let sTp = maskSolid(m, T);
+        let sBm = maskSolid(m, -B);     let sBp = maskSolid(m, B);
+        let sMM = maskSolid(m, -T - B); let sPM = maskSolid(m, T - B);
+        let sMP = maskSolid(m, -T + B); let sPP = maskSolid(m, T + B);
+        let oTm = !sTm && maskSolid(m, -T - N);     let oTp = !sTp && maskSolid(m, T - N);
+        let oBm = !sBm && maskSolid(m, -B - N);     let oBp = !sBp && maskSolid(m, B - N);
+        let oMM = (oTm || oBm) && !sMM && maskSolid(m, -T - B - N);
+        let oPM = (oTp || oBm) && !sPM && maskSolid(m, T - B - N);
+        let oMP = (oTm || oBp) && !sMP && maskSolid(m, -T + B - N);
+        let oPP = (oTp || oBp) && !sPP && maskSolid(m, T + B - N);
+        bits = select(0u, 1u, sTm) | select(0u, 2u, sTp) | select(0u, 4u, sBm) | select(0u, 8u, sBp)
+             | select(0u, 16u, sMM) | select(0u, 32u, sPM) | select(0u, 64u, sMP) | select(0u, 128u, sPP)
+             | select(0u, 256u, oTm) | select(0u, 512u, oTp) | select(0u, 1024u, oBm) | select(0u, 2048u, oBp)
+             | select(0u, 4096u, oMM) | select(0u, 8192u, oPM) | select(0u, 16384u, oMP) | select(0u, 32768u, oPP);
+    }
+    let sTm = (bits & 1u) != 0u;     let sTp = (bits & 2u) != 0u;
+    let sBm = (bits & 4u) != 0u;     let sBp = (bits & 8u) != 0u;
+    let sMM = (bits & 16u) != 0u;    let sPM = (bits & 32u) != 0u;
+    let sMP = (bits & 64u) != 0u;    let sPP = (bits & 128u) != 0u;
+    let oTm = (bits & 256u) != 0u;   let oTp = (bits & 512u) != 0u;
+    let oBm = (bits & 1024u) != 0u;  let oBp = (bits & 2048u) != 0u;
+    let oMM = (bits & 4096u) != 0u;  let oPM = (bits & 8192u) != 0u;
+    let oMP = (bits & 16384u) != 0u; let oPP = (bits & 32768u) != 0u;
 
     let cC  = weighed(true, air, hb, hs, ai);
     let cTm = weighed(oTm, air - T, hb, hs, ai);     let cTp = weighed(oTp, air + T, hb, hs, ai);
@@ -732,7 +753,7 @@ fn shadeBlock(in: VSOut, baseColor: vec3<f32>) -> vec3<f32> {
         s  = sampleLit(in.localPos, in.localNormal);
         ao = computeAO(in.localPos, in.localNormal);
     } else {
-        let f = shadeFast(in.localPos, in.localNormal);
+        let f = shadeFast(in.localPos, in.localNormal, in.shade);
         s.sky = f.sky; s.rgb = f.rgb; s.sun = f.sun;
         ao = f.ao;
     }
@@ -839,6 +860,7 @@ fn vs_cloud(@builtin(vertex_index) vi: u32, @location(0) cell: vec2<u32>) -> VSO
     o.localPos    = local;
     o.localNormal = normals[face];
     o.uv          = vec3<f32>(0.0, 0.0, -1.0);
+    o.shade = 0u;
     return o;
 }
 
