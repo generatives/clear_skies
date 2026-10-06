@@ -19,6 +19,7 @@ public sealed class GameView : IDisposable
     public GameView(WindowedEngineHost host, LaunchOptions options)
     {
         Host = host;
+        _lightingPreset = options.LightingPreset;
         host.Renderer.LoadTextureAtlas(
             Path.Combine(AppContext.BaseDirectory, "Resources", "spritesheet_tiles.png"),
             Path.Combine(AppContext.BaseDirectory, "Resources", "spritesheet_tiles.xml"));
@@ -46,7 +47,7 @@ public sealed class GameView : IDisposable
         InputSample = new InputSampleSystem(host.World, host.Input, host.Time);
     }
 
-    private readonly int _checkerBounce;
+    private readonly int? _checkerBounce;
 
     public WindowedEngineHost Host { get; }
     public BlockModelLibrary BlockModels { get; }
@@ -65,6 +66,7 @@ public sealed class GameView : IDisposable
     /// PlayerInput (early in the tick).</summary>
     public InputSampleSystem InputSample { get; }
 
+    private readonly string? _lightingPreset;
     private CloudRenderSystem? _clouds;
     private UiRenderSystem? _uiRenderer;
 
@@ -79,8 +81,11 @@ public sealed class GameView : IDisposable
         var renderer = host.Renderer;
         var volume = world.StaticVolume;
         host.AddSystem(new GpuResidencySystem(host.World, volume, GridStore), SystemStage.PreRender);
-        host.AddSystem(new GpuLightSystem(host.World, volume, host.Context, GridStore) { BounceSpread = _checkerBounce },
-                       SystemStage.PreRender);
+        var light = new GpuLightSystem(host.World, volume, host.Context, GridStore);
+        if (_lightingPreset != null && !light.ApplyPreset(_lightingPreset))
+            Console.WriteLine($"Unknown lighting preset '{_lightingPreset}' (minimal, low, medium or high); using medium.");
+        if (_checkerBounce is { } spread) light.BounceSpread = spread;
+        host.AddSystem(light, SystemStage.PreRender);
         host.AddSystem(Meshes, SystemStage.PreRender);
         host.AddSystem(new BlockModelSystem(host.World, BlockModels), SystemStage.PreRender); // block entities -> RenderedModel
 
