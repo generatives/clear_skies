@@ -132,7 +132,7 @@ public class CrossBlockTests
     public void Plants_suit_their_ground()
     {
         static IEnumerable<BlockId> On(BlockId ground) =>
-            Enumerable.Range(0, 4000).Select(i => ContinentTerrain.Plant(ground, i, 300, -i * 7, 0.7f, 99))
+            Enumerable.Range(0, 4000).Select(i => ContinentTerrain.Plant(ground, i, 300, -i * 7, 0.7f, 0.7f, 99))
                       .Where(b => b != BlockId.Air).Distinct();
 
         Assert.Contains(BlockId.TallGrass, On(BlockId.Grass));
