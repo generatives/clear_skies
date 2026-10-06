@@ -171,7 +171,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         CreateAtlasTexture();
     }
 
-    public void Render(in RenderContext frame)
+    public void Render(SystemStage stage, in RenderContext frame)
     {
         if (!_ui.EndLayout(out var commands)) return;
 

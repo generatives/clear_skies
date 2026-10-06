@@ -46,7 +46,7 @@ public static class GenerationBenchmark
             genTimesUs.Add(sw.Elapsed.TotalMicroseconds);
 
             dataByPos[pos] = data;
-            if (!data.HasAnySolid()) emptyCount++;
+            if (!data.HasAnyNonAir()) emptyCount++;
         }
         double genWallMs = overall.Elapsed.TotalMilliseconds;
 
@@ -59,7 +59,7 @@ public static class GenerationBenchmark
         foreach (var pos in positions)
         {
             var data = dataByPos[pos];
-            if (!data.HasAnySolid()) continue;
+            if (!data.HasAnyNonAir()) continue;
 
             dataByPos.TryGetValue(pos.Offset(-1, 0, 0), out var nX);
             dataByPos.TryGetValue(pos.Offset(1, 0, 0), out var pX);
@@ -69,12 +69,12 @@ public static class GenerationBenchmark
             dataByPos.TryGetValue(pos.Offset(0, 0, 1), out var pZ);
 
             sw.Restart();
-            var (verts, idxs) = mesher.Mesh(data, nX, pX, nY, pY, nZ, pZ);
+            var mesh = mesher.Mesh(data, nX, pX, nY, pY, nZ, pZ);
             sw.Stop();
 
             meshTimesUs.Add(sw.Elapsed.TotalMicroseconds);
-            totalVerts += verts.Count;
-            totalIdx   += idxs.Count;
+            totalVerts += mesh.Opaque.Vertices.Count + mesh.Cutout.Vertices.Count + mesh.Translucent.Vertices.Count;
+            totalIdx   += mesh.Opaque.Indices.Count + mesh.Cutout.Indices.Count + mesh.Translucent.Indices.Count;
         }
         double meshWallMs = overall.Elapsed.TotalMilliseconds;
 
@@ -86,7 +86,7 @@ public static class GenerationBenchmark
         foreach (var pos in positions)
         {
             var data = dataByPos[pos];
-            if (!data.HasAnySolid()) continue;
+            if (!data.HasAnyNonAir()) continue;
 
             sw.Restart();
             decomposer.Decompose(data);

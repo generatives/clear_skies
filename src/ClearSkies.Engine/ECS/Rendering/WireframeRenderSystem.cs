@@ -18,7 +18,7 @@ public sealed class WireframeRenderSystem : IRenderSystem
         _wireframes = world.GetEntities().With<Transform>().With<WireframeRenderer>().AsSet();
     }
 
-    public void Render(in RenderContext frame)
+    public void Render(SystemStage stage, in RenderContext frame)
     {
         foreach (ref readonly Entity e in _wireframes.GetEntities())
         {

@@ -17,8 +17,6 @@ public enum PhysicsMode : byte
     Simulated,
     /// <summary>A copy of a body simulated elsewhere, moved kinematically to its buffered pose (from N2).</summary>
     KinematicFollower,
-    /// <summary>A copy pulled towards its buffered pose by a force-limited servo, colliding only with grids (from N2).</summary>
-    ServoFollower,
     /// <summary>A static terrain collider.</summary>
     Static,
 }
@@ -34,19 +32,43 @@ public struct Rendered
 {
 }
 
-public enum TerrainInterestKind : byte
-{
-    /// <summary>Terrain data and colliders only, for simulating a body there.</summary>
-    CollidersOnly,
-    /// <summary>Everything, drawn: the local player's view.</summary>
-    Full,
-}
-
-/// <summary>Terrain layer: terrain is streamed around this entity. Chunks within <see cref="EntityPresenceSystem.ColliderRange"/>
-/// of any interest get colliders; a <see cref="TerrainInterestKind.Full"/> interest also streams the drawn world out to
-/// <see cref="Radius"/>.</summary>
+/// <summary>Terrain layer: terrain is streamed around this entity, out to the larger of its two radii (horizontally,
+/// <see cref="ChunkLoadSystem"/>). Loaded chunks within <see cref="ColliderRadius"/> of it get colliders, and those within
+/// <see cref="DrawRadius"/> are drawn (<see cref="EntityPresenceSystem"/>). A body simulated here away from the view
+/// (another player's character on the host, a ship) has only a collider radius; the local player's view has both.</summary>
 public struct TerrainInterest
 {
+    /// <summary>Terrain colliders are built within this distance (dropped a little further out).</summary>
+    public float ColliderRadius;
+
+    /// <summary>Terrain is drawn within this horizontal distance; 0 for none.</summary>
+    public float DrawRadius;
+
+    /// <summary>How far terrain is loaded around it.</summary>
+    public readonly float LoadRadius => MathF.Max(ColliderRadius, DrawRadius);
+
+    public override readonly string ToString() => DrawRadius > 0 ? $"drawn to {DrawRadius:0}, colliders to {ColliderRadius:0}"
+                                                                  : $"colliders to {ColliderRadius:0}";
+}
+
+/// <summary>On a terrain interest: how far around it (horizontally) every column it wants is known to
+/// <see cref="ChunkLoadSystem"/>, as queued, loading or loaded. Infinite once all of them are.</summary>
+public struct TerrainScanned
+{
     public float Radius;
-    public TerrainInterestKind Kind;
+}
+
+/// <summary>An edit changed a terrain chunk that wasn't here (not loaded, and not known to hold nothing), so it didn't
+/// change it here: an entity of its own until <see cref="ChunkLoadSystem"/> sees it and loads that chunk with the edit
+/// from then on.</summary>
+public struct TerrainEditedElsewhere
+{
+    public Voxels.ChunkPosition Position;
+}
+
+/// <summary>A terrain column that <see cref="ChunkLoadSystem"/> is going to load, or is loading: an entity of its own
+/// from when the column is queued until its chunks are added.</summary>
+public struct TerrainColumnLoading
+{
+    public int X, Z;
 }

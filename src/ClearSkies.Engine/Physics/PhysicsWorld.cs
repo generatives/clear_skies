@@ -165,6 +165,14 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
         body.ApplyAngularImpulse(angularImpulse);
     }
 
+    /// <summary>Removes a body and its shape.</summary>
+    public void RemoveBodyAndShape(BodyHandle handle)
+    {
+        var shape = Simulation.Bodies[handle].Collidable.Shape;
+        Simulation.Bodies.Remove(handle);
+        Simulation.Shapes.RecursivelyRemoveAndDispose(shape, _pool);
+    }
+
     public void SetBodyLinearVelocity(BodyHandle handle, Vector3 linearVelocity)
     {
         var body = Simulation.Bodies[handle];

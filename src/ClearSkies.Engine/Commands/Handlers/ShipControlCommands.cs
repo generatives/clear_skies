@@ -1,6 +1,7 @@
 using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Serialization;
+using ClearSkies.Engine.Voxels;
 using DefaultEcs;
 
 namespace ClearSkies.Engine.Commands.Handlers;
@@ -39,13 +40,13 @@ public sealed class SetShipThrustHandler : PredictedCommandHandler<SetShipThrust
 
     public override void Apply(in SetShipThrust e, in ApplyContext ctx)
     {
-        if (ShipControlCommands.Ship(_registry, e.Ship) is { } ship) ShipControlCommands.Controls(ship).SetThrust(e.Axis, e.Value);
+        if (ShipControlCommands.Ship(_registry, e.Ship) is { } ship) ship.Get<ShipControls>().SetThrust(e.Axis, e.Value);
     }
 
     /// <summary>The undo is the same command with the setting as it was.</summary>
     public override SetShipThrust Capture(in SetShipThrust c) => c with
     {
-        Value = ShipControlCommands.Ship(_registry, c.Ship) is { } ship && ship.Has<ShipControls>()
+        Value = ShipControlCommands.Ship(_registry, c.Ship) is { } ship
             ? ship.Get<ShipControls>().Thrust(c.Axis) : 0f,
     };
 
@@ -82,13 +83,13 @@ public sealed class SetShipTurnHandler : PredictedCommandHandler<SetShipTurn, Se
 
     public override void Apply(in SetShipTurn e, in ApplyContext ctx)
     {
-        if (ShipControlCommands.Ship(_registry, e.Ship) is { } ship) ShipControlCommands.Controls(ship).Turn = e.Value;
+        if (ShipControlCommands.Ship(_registry, e.Ship) is { } ship) ship.Get<ShipControls>().Turn = e.Value;
     }
 
     /// <summary>The undo is the same command with the setting as it was.</summary>
     public override SetShipTurn Capture(in SetShipTurn c) => c with
     {
-        Value = ShipControlCommands.Ship(_registry, c.Ship) is { } ship && ship.Has<ShipControls>()
+        Value = ShipControlCommands.Ship(_registry, c.Ship) is { } ship
             ? ship.Get<ShipControls>().Turn : 0f,
     };
 
@@ -97,14 +98,8 @@ public sealed class SetShipTurnHandler : PredictedCommandHandler<SetShipTurn, Se
 
 internal static class ShipControlCommands
 {
-    /// <summary>The volume root <paramref name="id"/> names, if it's live here: ship controls live on it.</summary>
+    /// <summary>The grid <paramref name="id"/> names, if it's live here: ship controls live on it (every grid has them:
+    /// see DynamicGridFactory).</summary>
     public static Entity? Ship(EntityRegistry registry, EntityId id) =>
-        registry.Find(id) is { } e && e.Has<ChunkGrid>() ? e : null;
-
-    /// <summary>The ship's controls, added (asking for nothing) if it has none yet.</summary>
-    public static ref ShipControls Controls(Entity ship)
-    {
-        if (!ship.Has<ShipControls>()) ship.Set(new ShipControls());
-        return ref ship.Get<ShipControls>();
-    }
+        registry.Find(id) is { } e && e.Has<DynamicGrid>() ? e : null;
 }

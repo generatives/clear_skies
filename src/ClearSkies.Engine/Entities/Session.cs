@@ -2,14 +2,14 @@ namespace ClearSkies.Engine.Entities;
 
 public enum SessionRole
 {
-    /// <summary>Owns the world: the save, streaming entities, and deciding everything nobody else owns.
-    /// Single-player is a host with nobody connected.</summary>
+    /// <summary>The hosting machine's: authority over every entity (the Host itself, which keeps the save and streams
+    /// entities, has no world). Single-player is hosting with nobody else able to join.</summary>
     Host,
     Client,
 }
 
-/// <summary>This machine's place in the session. Single-player is a <see cref="SessionRole.Host"/> session with the
-/// transport off. The role decides which systems are set up; gameplay checks <see cref="NetOwner.IsLocal"/> instead.</summary>
+/// <summary>This machine's place in the session. Single-player is a <see cref="SessionRole.Host"/> session nobody else can
+/// join. The role decides which systems are set up; gameplay checks <see cref="NetOwner.IsLocal"/> instead.</summary>
 public sealed class Session
 {
     public Session(SessionRole role, PeerId localPeer)
@@ -18,7 +18,7 @@ public sealed class Session
         LocalPeer = localPeer;
     }
 
-    /// <summary>A host session with nobody connected: single-player.</summary>
+    /// <summary>The hosting machine's session, before it has joined its Host (or with no network at all, in tests).</summary>
     public static Session SinglePlayer() => new(SessionRole.Host, PeerId.Host);
 
     public SessionRole Role { get; private set; }
@@ -31,10 +31,11 @@ public sealed class Session
     /// <summary>An owner record for <paramref name="owner"/>, local or not.</summary>
     public NetOwner OwnerFor(PeerId owner, ushort epoch = 0) => new() { Owner = owner, Epoch = epoch, IsLocal = owner == LocalPeer };
 
-    /// <summary>Becomes a client once the host has welcomed this machine and given it a peer ID.</summary>
-    public void BecomeClient(PeerId localPeer)
+    /// <summary>Joined a game: the Host has welcomed this machine and given it a peer ID (<see cref="PeerId.Host"/> for
+    /// the hosting machine's, which has authority).</summary>
+    public void Join(PeerId localPeer)
     {
-        Role = SessionRole.Client;
+        Role = localPeer == PeerId.Host ? SessionRole.Host : SessionRole.Client;
         LocalPeer = localPeer;
     }
 }

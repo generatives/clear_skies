@@ -16,7 +16,7 @@ namespace ClearSkies.Game.Startup;
 /// What every game runs, whichever way it started: this machine's session, the entity registry and command system,
 /// the static world streamed around the view, and the systems several places in a game's schedule share (the
 /// hierarchy and interpolation run in the tick and the frame; block actions, flight and remote bodies have debug panels
-/// and UI reading them). Built from a seed (the save's, or the host's), where edited terrain chunks come from, and
+/// and UI reading them). Built from a seed (the save's, or the host's), where edited terrain chunks come from (the Host), and
 /// what limits how much of the world loads. Nothing here draws or reads input: that's the <see cref="GameView"/>'s, in
 /// a game that has one. Each game schedules the systems itself, in order.
 /// </summary>
@@ -55,6 +55,7 @@ public sealed class GameWorld
         // view as far as the budget reaches.
         ChunkLoad = new ChunkLoadSystem(host.World, StaticVolume, budget, () => new HeartWorldGenerator(seed),
                                         options.ViewDistance, MinChunkY, chunkStore, chunkPreparer);
+        ((EditVoxelsHandler)Commands.HandlerFor(CommandIds.EditVoxels)!).Terrain = ChunkLoad; // edits to the world ask it what's there
 
         Interpolation = new TickInterpolationSystem(host.World, host.Time);
         Hierarchy = new HierarchyTransformSystem(host.World);
@@ -86,21 +87,18 @@ public sealed class GameWorld
     public BlockActionSystem BlockActions { get; }
     public AirshipFlightSystem Flight { get; }
 
-    /// <summary>Bodies owned elsewhere, drawn from their snapshots about 100 ms behind.</summary>
+    /// <summary>Bodies owned elsewhere, placed from their snapshots about 100 ms behind.</summary>
     public RemoteBodySystem RemoteBodies { get; }
 
-    /// <summary>Whether the terrain around a point has loaded (joining waits on it, and so do grids' bodies).</summary>
-    public bool TerrainLoaded(System.Numerics.Vector3 p) => ChunkLoad.IsTerrainLoaded(new Vector3D<float>(p.X, p.Y, p.Z), 64f);
+    /// <summary>Whether the terrain around a point has loaded with colliders, so a body there won't fall through it
+    /// (each spawn simulated here waits on it, see SpawnQueue).</summary>
+    public bool TerrainReadyFor(System.Numerics.Vector3 p) =>
+        ChunkLoad.IsTerrainLoaded(new Vector3D<float>(p.X, p.Y, p.Z), 64f) && PhysicsBody.CollidersReady(StaticVolume, p, 64f);
 
     /// <summary>Presence layers (bodies, drawing, terrain interest and colliders). Entities are drawn as far as the
-    /// terrain, but no further than the load window; a grid owned here gets a body once the terrain around it has loaded
-    /// with colliders, so nothing loaded from the save falls through the world.</summary>
+    /// terrain, but no further than the View Volume, past which the Host sends none.</summary>
     public EntityPresenceSystem CreatePresence() =>
-        new(Host.World, Session, StaticVolume, Options.ViewDistance)
-        {
-            RenderDistanceLimit = EntityStreamingSystem.LoadWindow,
-            TerrainReady = p => TerrainLoaded(p) && PhysicsBody.CollidersReady(StaticVolume, p, 64f),
-        };
+        new(Host.World, Session, StaticVolume, Options.ViewDistance) { RenderDistanceLimit = ClearSkies.Net.Session.Host.ViewRadius };
 
     /// <summary>Runs the game until it quits, then stops background work (no chunk still loading while what it loads
     /// into is freed).</summary>
