@@ -95,6 +95,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                 _removed.AddRange(e.Get<ChunkRenderData>().Meshes());
                 e.Remove<ChunkRenderData>();
             }
+            e.Remove<ChunkMeshedFlag>();
             e.Set<NeedsRemeshFlag>();
         }
         _unrendered.Complete();
@@ -298,6 +299,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                         foreach (var old in entry.Entity.Get<ChunkRenderData>().Meshes()) old.Dispose();
                     }
                     entry.Entity.Remove<NeedsRemeshFlag>();
+                    entry.Entity.Set<ChunkMeshedFlag>();
                     entry.Entity.Set(new ChunkRenderData
                     {
                         Mesh     = mesh,
@@ -349,6 +351,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     private static void ClearMesh(ChunkEntry entry)
     {   
         entry.Entity.Remove<NeedsRemeshFlag>();
+        entry.Entity.Set<ChunkMeshedFlag>();
         if (entry.Entity.Has<ChunkRenderData>())
             foreach (var mesh in entry.Entity.Get<ChunkRenderData>().Meshes()) mesh.Dispose();
         entry.Entity.Remove<ChunkRenderData>();
