@@ -194,6 +194,22 @@ public struct PlayerCharacter
         character.ViewDirection = viewDirection;
     }
 
+    /// <summary>Drives the character from another player's movement rather than keys: their copy here (see
+    /// RemoteBodyProxySystem). <paramref name="velocity"/> is the horizontal velocity to reach, relative to what it stands on
+    /// (or, in the air, its air reference), as the keys' target is; <paramref name="jump"/> jumps.</summary>
+    public void Drive(Vector3 velocity, bool jump)
+    {
+        ref var character = ref characters.GetCharacterByBodyHandle(bodyHandle);
+        var characterBody = new BodyReference(bodyHandle, characters.Simulation.Bodies);
+        if (jump) character.JumpRequestRemaining = JumpBufferTime;
+        // Facing -Z, the target's axes are world X (right) and -Z (forward).
+        var target = new Vector2(velocity.X, -velocity.Z);
+        if (!characterBody.Awake && (character.JumpPending || !character.Supported || target != character.TargetVelocity))
+            characters.Simulation.Awakener.AwakenBody(character.BodyHandle);
+        character.TargetVelocity = target;
+        character.ViewDirection = -Vector3.UnitZ;
+    }
+
     /// <summary>Crouch edge guard: clips the target velocity, one axis at a time (so the character still slides along an
     /// edge), wherever it would carry the character past an edge. Axes are the support's: world X/Z on terrain, the
     /// ship's own axes on a ship. Velocities are relative to the support, as the motion constraint's target is.</summary>
@@ -339,6 +355,16 @@ public struct PlayerCharacter
         characterBody.Pose.Position = position;
         characterBody.Velocity.Linear = default;
         characterBody.Velocity.Angular = default;
+        characterBody.Awake = true;
+    }
+
+    /// <summary>Moves the character by <paramref name="offset"/>, keeping its velocity and its jump, air and crouch state:
+    /// a correction, not a teleport.</summary>
+    public readonly void MoveBy(Vector3 offset)
+    {
+        if (suspended) return;
+        var characterBody = new BodyReference(bodyHandle, characters.Simulation.Bodies);
+        characterBody.Pose.Position += offset;
         characterBody.Awake = true;
     }
 

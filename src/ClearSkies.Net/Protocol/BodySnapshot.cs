@@ -10,6 +10,11 @@ public enum SnapshotFlags : byte
     None = 0,
     /// <summary>A <see cref="LookAngles"/> streamed value follows.</summary>
     HasLook = 1,
+    /// <summary>A player free-flying: no character body, so nothing to stand on or push.</summary>
+    FreeFlying = 2,
+    /// <summary>A player played on another machine: the last of its inputs applied (<see cref="BodySnapshot.Input"/>)
+    /// follows, so it can check its prediction.</summary>
+    HasInput = 4,
 }
 
 /// <summary>A player's look direction, streamed with their body.</summary>
@@ -17,7 +22,7 @@ public readonly record struct LookAngles(float Yaw, float Pitch);
 
 /// <summary>
 /// One body's pose and velocity at a tick, relative to what supports it (world space with no support), with any
-/// streamed values. About 50 bytes: the rotation is smallest-three encoded in 32 bits and velocities are halves.
+/// streamed values. About 55 bytes: the rotation is smallest-three encoded in 64 bits and velocities are halves.
 /// </summary>
 public struct BodySnapshot
 {
@@ -29,6 +34,8 @@ public struct BodySnapshot
     public Vector3 LinearVelocity, AngularVelocity;
     public SnapshotFlags Flags;
     public LookAngles Look;
+    /// <summary>With <see cref="SnapshotFlags.HasInput"/>: the number of the player's last input applied.</summary>
+    public uint Input;
 
     public readonly void Write(NetWriter w)
     {
@@ -36,7 +43,7 @@ public struct BodySnapshot
         w.WriteUInt16(Epoch);
         Support.Write(w);
         w.WriteVector3(Position);
-        w.WriteUInt32(QuaternionCodec.Pack(Rotation));
+        w.WriteUInt64(QuaternionCodec.Pack(Rotation));
         w.WriteHalf(LinearVelocity.X); w.WriteHalf(LinearVelocity.Y); w.WriteHalf(LinearVelocity.Z);
         w.WriteHalf(AngularVelocity.X); w.WriteHalf(AngularVelocity.Y); w.WriteHalf(AngularVelocity.Z);
         w.WriteByte((byte)Flags);
@@ -45,6 +52,7 @@ public struct BodySnapshot
             w.WriteInt16(ToShort(Look.Yaw, MathF.PI * 4));
             w.WriteInt16(ToShort(Look.Pitch, MathF.PI));
         }
+        if ((Flags & SnapshotFlags.HasInput) != 0) w.WriteUInt32(Input);
     }
 
     public static BodySnapshot Read(ref NetReader r)
@@ -55,13 +63,14 @@ public struct BodySnapshot
             Epoch = r.ReadUInt16(),
             Support = EntityId.Read(ref r),
             Position = r.ReadVector3(),
-            Rotation = QuaternionCodec.Unpack(r.ReadUInt32()),
+            Rotation = QuaternionCodec.Unpack(r.ReadUInt64()),
             LinearVelocity = new Vector3(r.ReadHalf(), r.ReadHalf(), r.ReadHalf()),
             AngularVelocity = new Vector3(r.ReadHalf(), r.ReadHalf(), r.ReadHalf()),
             Flags = (SnapshotFlags)r.ReadByte(),
         };
         if ((s.Flags & SnapshotFlags.HasLook) != 0)
             s.Look = new LookAngles(FromShort(r.ReadInt16(), MathF.PI * 4), FromShort(r.ReadInt16(), MathF.PI));
+        if ((s.Flags & SnapshotFlags.HasInput) != 0) s.Input = r.ReadUInt32();
         return s;
     }
 
@@ -70,42 +79,45 @@ public struct BodySnapshot
 }
 
 /// <summary>Smallest-three quaternion encoding: the index of the largest component in 2 bits, and the other three,
-/// each within ±1/√2, in 10 bits each. Good to about 0.1°.</summary>
+/// each within ±1/√2, in 20 bits each (64 bits in all). Good to about a millionth of a radian: coarser (10 bits, 0.1°)
+/// made a ship wobble visibly, turning everything seen from its deck with it, and moving its blocks and body, which
+/// are placed through the rotation from its block origin.</summary>
 public static class QuaternionCodec
 {
     private const float Range = 0.70710678f;
-    private const int Bits = 10, Max = (1 << Bits) - 1;
+    private const int Bits = 20;
+    private const ulong Max = (1UL << Bits) - 1;
 
-    public static uint Pack(Quaternion q)
+    public static ulong Pack(Quaternion q)
     {
         q = Quaternion.Normalize(q);
         Span<float> c = stackalloc float[] { q.X, q.Y, q.Z, q.W };
         int largest = 0;
         for (int i = 1; i < 4; i++) if (MathF.Abs(c[i]) > MathF.Abs(c[largest])) largest = i;
         float sign = c[largest] < 0 ? -1f : 1f;
-        uint packed = (uint)largest << 30;
-        int shift = 20;
+        ulong packed = (ulong)largest << 62;
+        int shift = 2 * Bits;
         for (int i = 0; i < 4; i++)
         {
             if (i == largest) continue;
-            float v = System.Math.Clamp(c[i] * sign, -Range, Range);
-            uint q10 = (uint)MathF.Round((v + Range) / (2 * Range) * Max);
-            packed |= q10 << shift;
+            double v = System.Math.Clamp(c[i] * sign, -Range, Range);
+            ulong q20 = (ulong)System.Math.Round((v + Range) / (2 * Range) * Max);
+            packed |= q20 << shift;
             shift -= Bits;
         }
         return packed;
     }
 
-    public static Quaternion Unpack(uint packed)
+    public static Quaternion Unpack(ulong packed)
     {
-        int largest = (int)(packed >> 30);
+        int largest = (int)(packed >> 62);
         Span<float> c = stackalloc float[4];
-        int shift = 20;
+        int shift = 2 * Bits;
         float sum = 0;
         for (int i = 0; i < 4; i++)
         {
             if (i == largest) continue;
-            float v = ((packed >> shift) & Max) / (float)Max * (2 * Range) - Range;
+            float v = (float)(((packed >> shift) & Max) / (double)Max * (2 * Range) - Range);
             c[i] = v;
             sum += v * v;
             shift -= Bits;

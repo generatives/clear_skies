@@ -52,6 +52,9 @@ public abstract class NetSession : ISystem, ICommandRouter, IDisposable
     /// <summary>Receives and relays body snapshots (set by the body sync system).</summary>
     public BodySync? Bodies { get; set; }
 
+    /// <summary>A client's prediction of its own player, which hears what the host makes of it (set by the prediction).</summary>
+    public OwnPlayerPrediction? Prediction { get; set; }
+
     /// <summary>Real time in milliseconds, for clock sync. Settable so tests can run on simulated time.</summary>
     public Func<double> TimeSource { get; set; }
 

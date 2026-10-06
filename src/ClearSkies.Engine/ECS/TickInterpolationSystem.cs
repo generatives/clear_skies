@@ -18,6 +18,24 @@ public struct InterpolatedTransform
 
     internal Transform Previous, Current;
     internal bool Started;
+    /// <summary>How far from its pose it's drawn: what's left of a jump <see cref="Smooth"/> eases out.</summary>
+    internal Vector3D<float> Offset;
+
+    /// <summary>Seconds a smoothed jump takes to ease out by about two thirds (it's all but gone in three times that).</summary>
+    public const float SmoothSeconds = 0.08f;
+
+    /// <summary>This tick's move is a jump: draw it at its new pose from now, rather than sliding there over the tick.
+    /// (A move made outside the ticks is taken as one anyway.)</summary>
+    public void Teleport() => Started = false;
+
+    /// <summary>This tick's move includes a jump of <paramref name="by"/> (a prediction corrected): draw it easing over
+    /// from where it was, in a fraction of a second (<see cref="SmoothSeconds"/>), rather than all at once.</summary>
+    public void Smooth(Vector3D<float> by)
+    {
+        if (!Started) return;
+        Offset -= by;
+        Current.Position += by; // so the tick's own move is drawn as usual
+    }
 }
 
 /// <summary>
@@ -63,6 +81,9 @@ public static class Drawing
 ///
 /// Dynamic grids get an <see cref="InterpolatedTransform"/> automatically. A grid's Transform is its block space, which
 /// edits don't move (only its body moves, to the new centre of mass), so an edit doesn't make the grid twitch.
+///
+/// Bodies owned by another machine are drawn the same way: their Transforms are set each tick from their snapshots
+/// (RemoteBodySystem), so here they're no different from anything simulated locally.
 /// </summary>
 public sealed class TickInterpolationSystem : IStagedSystem
 {
@@ -92,7 +113,7 @@ public sealed class TickInterpolationSystem : IStagedSystem
     public void Update(SystemStage stage, float dt)
     {
         if (stage == SystemStage.Simulation) EndTick();
-        else Draw();
+        else Draw(dt);
     }
 
     private void EndTick()
@@ -114,10 +135,11 @@ public sealed class TickInterpolationSystem : IStagedSystem
         }
     }
 
-    private void Draw()
+    private void Draw(float dt)
     {
         _frame++;
         float alpha = _alpha = _time.Alpha;
+        float ease = MathF.Exp(-dt / InterpolatedTransform.SmoothSeconds);
         foreach (ref readonly Entity e in _interpolated.GetEntities())
         {
             ref var s = ref e.Get<InterpolatedTransform>();
@@ -134,13 +156,18 @@ public sealed class TickInterpolationSystem : IStagedSystem
             // pose's magnitude, so far from the origin (the spawn is 18 km out) something standing still is drawn up to
             // a float's step off, differently every frame: it vibrates.
             drawn.Position = s.Previous.Position + (s.Current.Position - s.Previous.Position) * alpha;
+            if (s.Offset != Vector3D<float>.Zero)
+            {
+                s.Offset = s.Offset.LengthSquared < 1e-8f ? Vector3D<float>.Zero : s.Offset * ease;
+                drawn.Position += s.Offset;
+            }
             if (!s.PositionOnly) drawn.Rotation = Quaternion<float>.Slerp(s.Previous.Rotation, s.Current.Rotation, alpha);
             else if (e.Has<MouseLookComponent>()) DrawLook(e.Get<MouseLookComponent>(), ref drawn, alpha);
             SetDrawn(e, drawn, fromParent: false);
             DrawChildren(e, drawn);
         }
 
-        // Children no longer under anything interpolated are drawn where they are.
+        // Children no longer under anything interpolated (and entities not started) are drawn where they are.
         foreach (ref readonly Entity e in _drawn.GetEntities())
             if (e.Get<DrawnTransform>().FromParent && e.Get<DrawnTransform>().Frame != _frame) _stale.Add(e);
         foreach (var e in _stale) if (e.Has<DrawnTransform>()) e.Remove<DrawnTransform>();
@@ -192,6 +219,7 @@ public sealed class TickInterpolationSystem : IStagedSystem
     private static void Restart(ref InterpolatedTransform s, in Transform t, Entity e)
     {
         s.Previous = s.Current = t;
+        s.Offset = Vector3D<float>.Zero;
         s.Started = true;
     }
 

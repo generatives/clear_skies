@@ -1,5 +1,6 @@
 using System.Numerics;
 using ClearSkies.Engine.Core;
+using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Input;
 using ClearSkies.Engine.Physics;
 using ClearSkies.Engine.Voxels;
@@ -135,6 +136,9 @@ public sealed class AirshipFlightSystem : ISystem
     // required) — a debug shortcut for testing control feel.
     private bool _freePropulsion;
 
+    /// <summary>Applies the control law's force and torque directly, with no Fan blocks (see the debug panel's checkbox).</summary>
+    public bool FreePropulsion { get => _freePropulsion; set => _freePropulsion = value; }
+
     // Diagnostics — last Update()'s counters, shown in DrawDebugUi to make "is this system even
     // finding/running anything" observable instead of guessed at.
     private int _lastFanCount, _lastBuoyantCount, _lastGridsProcessed, _lastFreePropelled;
@@ -156,7 +160,7 @@ public sealed class AirshipFlightSystem : ISystem
         _fans     = world.GetEntities().With<Fan>().With<BlockRef>().AsSet();
         _buoyants = world.GetEntities().With<Buoyant>().With<BlockRef>().AsSet();
         _physics = physics;
-        _players = world.GetEntities().With<PlayerInput>().AsSet();
+        _players = world.GetEntities().With<LocalPlayer>().With<PlayerInput>().AsSet();
     }
 
     public void Update(float dt)
@@ -172,6 +176,8 @@ public sealed class AirshipFlightSystem : ISystem
             // Kinematic (Locked) grids skip gravity/impulses entirely via Bepu's own integrator — nothing
             // to fly. (An empty grid has no body yet, so it isn't in _grids at all.)
             if (dynamicGrid.Locked) continue;
+            // Only the owner flies a grid; everyone else follows its body sync.
+            if (e.Has<Entities.NetOwner>() && !e.Get<Entities.NetOwner>().IsLocal) continue;
             var body = e.Get<PhysicsBodyComponent>().Body;
 
             float mass = _physics.GetBodyMass(body);

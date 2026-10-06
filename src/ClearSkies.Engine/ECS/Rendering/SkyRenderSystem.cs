@@ -12,7 +12,7 @@ public sealed class SkyRenderSystem : IRenderSystem
 
     public SkyRenderSystem(Renderer renderer) => _renderer = renderer;
 
-    public void Render(in RenderContext frame)
+    public void Render(SystemStage stage, in RenderContext frame)
     {
         _renderer.DrawSky();
     }

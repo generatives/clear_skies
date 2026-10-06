@@ -14,8 +14,9 @@ namespace ClearSkies.Game.Startup;
 
 /// <summary>
 /// A game this machine hosts, alone (<see cref="SinglePlayerGame"/>) or with others joining
-/// (<see cref="HostGame"/>): the world's save, the host session deciding everything, the local player and the save's
-/// streaming. Alone is the same game with the transport off, so playing alone runs every command the way a host does.
+/// (<see cref="HostGame"/>): the world's save and the Host, and this machine's Participant, which has authority over
+/// everything (see <see cref="Hosting"/>). Alone is the same game with the transport off, so playing alone runs
+/// everything the way it does with others.
 /// </summary>
 internal static class HostedGame
 {
@@ -25,7 +26,7 @@ internal static class HostedGame
         using var view = new GameView(host, options);
         var world = new GameWorld(host, options, Session.SinglePlayer(), save.Seed, save.Chunks, view.Budget, view.ChunkPreparer,
                                   view.PlayerModel);
-        using var hosting = new Hosting(world, save, transport);
+        using var hosting = new Hosting(world, save, transport, options.PlayerName);
         var net = hosting.Net;
         var input = host.Input;
         var renderer = host.Renderer;
@@ -39,9 +40,11 @@ internal static class HostedGame
         host.AddSystem(new LookInputSystem(host.World, input), SystemStage.Input);
         host.AddSystem(view.InputSample, SystemStage.Input);
 
-        // Each 1/60 s tick (0 or more a frame, see TickClock). First everything that arrived (commands, events,
-        // snapshots, session messages), the hierarchy, the frame's input as the local player's PlayerInput (tick systems
-        // read only that), and the save's streaming and autosave.
+        // Each 1/60 s tick (0 or more a frame, see TickClock). First the Host (what it was sent, what each Participant
+        // is owed), then everything that arrived here (spawns, commands, other players' input, which the Participant
+        // hands each of them as their PlayerInput), the hierarchy, the frame's input as the local player's PlayerInput
+        // (tick systems read only that), and the save's streaming and autosave.
+        host.AddSystem(hosting.Host, SystemStage.Simulation);
         host.AddSystem(net, SystemStage.Simulation);
         host.AddSystem(world.Hierarchy, SystemStage.Simulation);
         host.AddSystem(view.InputSample, SystemStage.Simulation);
@@ -62,18 +65,23 @@ internal static class HostedGame
         host.AddSystem(wheels, SystemStage.Simulation);
         host.AddSystem(world.Flight, SystemStage.Simulation); // impulses before the physics step, integrated this same tick
         host.AddSystem(world.CreatePresence(), SystemStage.Simulation);
+        // Physics copies of ships simulated elsewhere (kinematic, near the local player), placed before the step, once the
+        // presence system has decided which copies exist.
+        host.AddSystem(new RemoteBodyProxySystem(host.World, host.Physics, world.RemoteBodies), SystemStage.Simulation);
         host.AddSystem(host.Physics, SystemStage.Simulation); // one step
         host.AddSystem(new PhysicsTransformSyncSystem(host.World, host.Physics), SystemStage.Simulation); // body poses -> Transform
+        host.AddSystem(world.RemoteBodies, SystemStage.Simulation); // ships and players simulated elsewhere -> Transform, about 100 ms behind
         host.AddSystem(world.Hierarchy, SystemStage.Simulation); // e.g. volume Transforms -> chunk Transforms
         host.AddSystem(new SupportSystem(host.World, host.Physics), SystemStage.Simulation); // what each character stands on or rides with
         host.AddSystem(world.Interpolation, SystemStage.Simulation); // records this tick's poses
         host.AddSystem(new BodySync(net, host.World, host.Physics), SystemStage.Simulation); // owned bodies, every second tick
+        host.AddSystem(hosting.Host.Relay, SystemStage.Simulation); // what this tick sent, passed on now
 
         // Once each frame, after the ticks. What moves the camera itself, once a frame: --flight-test (flies once the world
         // has loaded, then quits), and the pilot, which puts the camera under a piloted grid (single-player only: off
         // while others are connected). Then the camera at the local player's eye (unless something moved it first),
-        // what's drawn between the last two ticks (children follow), bodies owned elsewhere (about 100 ms behind), and
-        // terrain streamed around the view.
+        // what's drawn between the last two ticks (children follow), and terrain streamed around the
+        // view.
         var spawn = WorldSpawn.For(save.Seed);
         bool flightTest = options.FlightTest;
         host.AddSystem(new StreamingFlightTest(host, world.StaticVolume, view.GridStore, flightTest,
@@ -86,9 +94,9 @@ internal static class HostedGame
         host.AddSystem(pilot, SystemStage.Frame);
         host.AddSystem(new EyeSystem(host.World), SystemStage.Frame);
         host.AddSystem(world.Interpolation, SystemStage.Frame);
-        host.AddSystem(world.RemoteBodies, SystemStage.Frame);
         host.AddSystem(world.Hierarchy, SystemStage.Frame);
         host.AddSystem(world.ChunkLoad, SystemStage.Frame);
+        host.AddSystem(new FogSystem(host.World, world.Options.ViewDistance), SystemStage.Frame); // at the nearest terrain not ready
         // What the player points at and uses, the HUD (crosshair, hotbar), grids saved and loaded, and the debug panels.
         host.AddSystem(new BlockTargetSystem(host.World, input, renderer, world.BlockActions, world.EditLimits), SystemStage.Frame);
         host.AddSystem(new HudUi(view.Ui, input, world.BlockActions, pilot, renderer.Atlas,
@@ -97,14 +105,13 @@ internal static class HostedGame
         host.AddSystem(gridPersistence, SystemStage.Frame);
         host.AddSystem(new AirshipDebugPanel(pilot, world.Flight, gridPersistence), SystemStage.Frame); // one "Airship" window
         host.AddSystem(new WireframeToggle(input, renderer), SystemStage.Frame);
-        host.Gui.RegisterDebugUi(new NetDebugPanel(net, world.RemoteBodies, transport));
+        host.Gui.RegisterDebugUi(new NetDebugPanel(net, hosting.Host, world.RemoteBodies, transport));
 
         view.AddRender(world);
 
-        var camera = TestScene.AddCamera(host, spawn.Eye, spawn.Yaw, spawn.Pitch, options.Camera);
-        var players = hosting.Players;
-        var localPlayer = players.PlayerFor(options.PlayerName);
-        TestScene.SpawnLocalPlayer(commands, localPlayer, options.PlayerName, players.Saved(localPlayer), camera);
+        // The camera waits where the local player will spawn (where they left off, or the world's spawn point) until
+        // they do, once the world around them has loaded.
+        var camera = TestScene.AddCamera(host, WorldSpawn.EyeAt(net.SpawnPoint), spawn.Yaw, spawn.Pitch, options.Camera);
         if (save.IsNew) TestScene.SpawnTestShip(commands, camera.Eye);
 
         using (new QuitOnSignal(host)) world.Run();

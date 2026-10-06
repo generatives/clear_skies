@@ -76,11 +76,14 @@ public sealed class WindowedEngineHost : EngineHost
     }
 
     /// <summary>Schedules <paramref name="system"/> in a render stage (RenderWorld onwards), after the systems already
-    /// in it.</summary>
+    /// in it. A system that draws in several stages is added once per stage, each at the point in that stage where it
+    /// should run.</summary>
     public void AddSystem(IRenderSystem system, SystemStage stage)
     {
         if (!IsRenderStage(stage))
             throw new ArgumentException($"{stage} is an update stage; it takes an {nameof(ISystem)}.", nameof(stage));
+        if (_systems.Exists(s => s.system == system && s.stage == stage))
+            throw new ArgumentException($"{system.GetType().Name} is already scheduled in {stage}.", nameof(stage));
         Schedule(system, stage);
     }
 
@@ -162,7 +165,7 @@ public sealed class WindowedEngineHost : EngineHost
             var (system, s) = _systems[i];
             if (s != stage) continue;
             _systemTimer.Restart();
-            ((IRenderSystem)system).Render(frame);
+            ((IRenderSystem)system).Render(stage, frame);
             RecordTime(i);
         }
     }

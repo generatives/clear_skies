@@ -12,8 +12,10 @@ namespace ClearSkies.Engine.ECS;
 
 /// <summary>
 /// Draws every loaded chunk's <see cref="ChunkRenderData"/>: frustum-culls the chunks, draws their greedy-meshed
-/// cubes nearest first, then each visible chunk's model blocks — placed at their cell, turned to their stored
-/// <see cref="BlockOrientation"/> and lit from that cell's voxel light. Runs in <see cref="SystemStage.RenderWorld"/>.
+/// cubes nearest first (opaque, then cut out), then each visible chunk's model blocks — placed at their cell, turned to
+/// their stored <see cref="BlockOrientation"/> and lit from that cell's voxel light, in
+/// <see cref="SystemStage.RenderWorld"/>; then, in <see cref="SystemStage.RenderTransparent"/>, the same chunks'
+/// translucent meshes (water). Schedule it in both stages.
 ///
 /// The static world's chunks (tens of thousands) are kept by column, with each column's height range, so a column
 /// outside the view is skipped in one test instead of one per chunk: looking at every chunk each frame cost ~6 ms.
@@ -36,9 +38,10 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     private int _columnsVisible;
 
     // One visible chunk, collected so they can be drawn nearest first.
-    private readonly record struct ChunkDraw(float DistSq, GpuMesh? Mesh, ModelBlock[] Models, Mat4 Model, int Grid,
-                                             ChunkPosition Chunk);
+    private readonly record struct ChunkDraw(float DistSq, GpuMesh? Mesh, GpuMesh? CutoutMesh, GpuMesh? TransparentMesh,
+                                             ModelBlock[] Models, Mat4 Model, int Grid, ChunkPosition Chunk);
     private readonly List<ChunkDraw> _draws = new();
+    private readonly List<ChunkDraw> _translucentDraws = new(); // the visible chunks with translucent faces
     private static readonly Comparison<ChunkDraw> NearestFirst = (a, b) => a.DistSq.CompareTo(b.DistSq);
     private int _modelBlocksDrawn;
 
@@ -89,11 +92,22 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         }
     }
 
-    public void Render(in RenderContext frame)
+    public void Render(SystemStage stage, in RenderContext frame)
+    {
+        switch (stage)
+        {
+            case SystemStage.RenderWorld:       RenderWorld(frame); break;
+            case SystemStage.RenderTransparent: RenderTranslucent(); break;
+            default: throw new InvalidOperationException($"{nameof(ChunkRenderSystem)} doesn't draw in {stage}.");
+        }
+    }
+
+    private void RenderWorld(in RenderContext frame)
     {
         // Every chunk's box is exactly ChunkData.Size local units on a side (GreedyMesher's local space); its model
         // blocks sit in its cells, so the same box culls them too.
         _draws.Clear();
+        _translucentDraws.Clear();
         _columnsVisible = 0;
         var size = new Vector3D<float>(ChunkData.Size);
         var half = size * 0.5f;
@@ -109,12 +123,12 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
             {
                 if (!e.Has<Rendered>()) continue; // not in the rendering layer (see EntityPresenceSystem)
                 ref readonly var rd = ref e.Get<ChunkRenderData>();
-                if (rd.Mesh == null && rd.Models.Length == 0) continue; // buried stone: nothing to draw
+                if (rd.IsEmpty) continue; // buried stone: nothing to draw
                 var origin = e.Get<Transform>().Position;
                 if (!frame.Frustum.Intersects(origin, origin + size)) continue;
                 var centre = origin + half;
-                _draws.Add(new ChunkDraw(Vector3D.DistanceSquared(centre, frame.CameraPosition), rd.Mesh, rd.Models,
-                                         Mat4.Translation(origin), rd.Grid?.Index ?? -1, rd.ChunkPos));
+                AddDraw(new ChunkDraw(Vector3D.DistanceSquared(centre, frame.CameraPosition), rd.Mesh, rd.CutoutMesh,
+                                         rd.TransparentMesh, rd.Models, Mat4.Translation(origin), rd.Grid?.Index ?? -1, rd.ChunkPos));
             }
         }
 
@@ -122,7 +136,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         {
             if (!e.Has<Transform>() || !e.Has<Rendered>()) continue;
             ref readonly var rd = ref e.Get<ChunkRenderData>();
-            if (rd.Mesh == null && rd.Models.Length == 0) continue;
+            if (rd.IsEmpty) continue;
 
             var t = e.DrawnPose(); // ships are drawn where they're drawn, between ticks
             Mat4 model;
@@ -138,7 +152,8 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
             }
 
             float distSq = Vector3D.DistanceSquared(model.TransformPoint(half), frame.CameraPosition);
-            _draws.Add(new ChunkDraw(distSq, rd.Mesh, rd.Models, model, rd.Grid?.Index ?? -1, rd.ChunkPos));
+            AddDraw(new ChunkDraw(distSq, rd.Mesh, rd.CutoutMesh, rd.TransparentMesh, rd.Models, model, rd.Grid?.Index ?? -1,
+                                     rd.ChunkPos));
         }
 
         // Nearest first, so the depth test rejects hidden fragments before the (expensive) lighting shader runs on
@@ -146,6 +161,10 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         _draws.Sort(NearestFirst);
         foreach (var d in _draws)
             if (d.Mesh != null) _renderer.DrawChunkMesh(d.Mesh, d.Model, d.Grid, d.Chunk);
+        // Cut-out faces after all the opaque ones: their shader discards texels, which costs the early depth test, so
+        // the opaque world is drawn without it first.
+        foreach (var d in _draws)
+            if (d.CutoutMesh != null) _renderer.DrawCutoutChunkMesh(d.CutoutMesh, d.Model, d.Grid, d.Chunk);
 
         _modelBlocksDrawn = 0;
         foreach (var d in _draws)
@@ -158,6 +177,21 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
                 _modelBlocksDrawn++;
             }
         }
+    }
+
+    private void AddDraw(in ChunkDraw d)
+    {
+        _draws.Add(d);
+        if (d.TransparentMesh != null) _translucentDraws.Add(d);
+    }
+
+    /// <summary>The translucent meshes of the chunks <see cref="RenderWorld"/> found visible this frame: their depth,
+    /// then their colour where they're the nearest translucent face, so each pixel shows one translucent layer whatever
+    /// order the chunks (and their faces) are drawn in.</summary>
+    private void RenderTranslucent()
+    {
+        foreach (var d in _translucentDraws) _renderer.DrawTransparentChunkDepth(d.TransparentMesh!, d.Model, d.Grid, d.Chunk);
+        foreach (var d in _translucentDraws) _renderer.DrawTransparentChunkMesh(d.TransparentMesh!, d.Model, d.Grid, d.Chunk);
     }
 
     private static Mat4[] BuildOrientationPlacements()
@@ -180,6 +214,6 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     {
         ImGui.Text($"Chunks visible: {_draws.Count:N0} of {_columnOf.Count + _others.Count:N0}; world columns visible: " +
                    $"{_columnsVisible:N0} of {_columns.Count:N0}; ship chunks: {_others.Count:N0}");
-        ImGui.Text($"Model blocks drawn: {_modelBlocksDrawn:N0}");
+        ImGui.Text($"Model blocks drawn: {_modelBlocksDrawn:N0}; chunks with translucent faces drawn: {_translucentDraws.Count:N0}");
     }
 }

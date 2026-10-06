@@ -360,7 +360,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         {
             int s = (f & 1) == 0 ? 1 : -1;
             var n = f < 2 ? new Vector3D<int>(s, 0, 0) : f < 4 ? new Vector3D<int>(0, s, 0) : new Vector3D<int>(0, 0, s);
-            if (BlockRegistry.Get(vol.GetBlock(v.X + n.X, v.Y + n.Y, v.Z + n.Z)).Opacity < 15) open |= 1 << f;
+            if (!BlockRegistry.Get(vol.GetBlock(v.X + n.X, v.Y + n.Y, v.Z + n.Z)).BlocksLight) open |= 1 << f;
         }
         return open;
     }

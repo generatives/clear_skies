@@ -27,8 +27,11 @@ public struct PhysicsBodyComponent
     public Vector3D<float> Offset;
 
     /// <summary>Where the body is with the entity at <paramref name="t"/>.</summary>
-    public readonly Vector3 BodyPosition(in Transform t)
-        => PhysicsConv.ToBepu(t.Position) + Vector3.Transform(PhysicsConv.ToBepu(Offset), PhysicsConv.ToBepu(t.Rotation));
+    public readonly Vector3 BodyPosition(in Transform t) => BodyPosition(PhysicsConv.ToBepu(t.Position), PhysicsConv.ToBepu(t.Rotation));
+
+    /// <summary>Where the body is with the entity at <paramref name="position"/>, <paramref name="rotation"/>.</summary>
+    public readonly Vector3 BodyPosition(Vector3 position, Quaternion rotation)
+        => position + Vector3.Transform(PhysicsConv.ToBepu(Offset), rotation);
 
     /// <summary>Where the entity is (its Transform's position) with its body at <paramref name="position"/>,
     /// <paramref name="rotation"/>.</summary>
