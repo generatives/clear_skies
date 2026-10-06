@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using ClearSkies.Engine.Voxels;
 using Silk.NET.Maths;
 
 namespace ClearSkies.Engine.Rendering;
@@ -6,17 +7,18 @@ namespace ClearSkies.Engine.Rendering;
 /// <summary>
 /// One greedy-meshed chunk quad packed into 8 bytes (four 48-byte <see cref="Vertex"/>es and six indices before),
 /// drawn by the shader's vs_chunk as one 6-vertex instance (vs_chunk_lines: 8 for the wireframe). A chunk's quads sit
-/// on whole block corners, face one of six ways and take one colour and texture per block type, so:
+/// on whole block corners, face one of six ways and take one block type each, so:
 /// <list type="bullet">
 /// <item><see cref="A"/>: the quad's first corner (chunk-local, 0-32) in bits 0-5, 6-11, 12-17; the face (0 +X, 1 -X,
 /// 2 +Y, 3 -Y, 4 +Z, 5 -Z, the mesher's order) in bits 18-20; the texture layer in bits 21-28, 255 for untextured;
 /// the low 3 bits of its width - 1 in bits 29-31.</item>
-/// <item><see cref="B"/>: the colour, 8 bits each of R, G, B; the high 2 bits of width - 1 in bits 24-25; height - 1
-/// in bits 26-30.</item>
+/// <item><see cref="B"/>: the block (<see cref="BlockId"/>) in bits 0-7; the high 2 bits of width - 1 in bits 24-25;
+/// height - 1 in bits 26-30. Bits 8-23 and 31 are free.</item>
 /// </list>
-/// A translucent quad (<see cref="PackTranslucent"/>, drawn by vs_chunk_translucent) trades colour depth for its
-/// opacity: B's low 24 bits are the colour as RGB565, then the opacity (8 bits, 255 opaque) its texture's alpha is
-/// multiplied by (see <see cref="Voxels.BlockDef.Alpha"/>). The colour shows only on untextured blocks.
+/// What's the same for every quad of a block type (its colour, shown on untextured blocks, and its opacity) isn't stored
+/// per quad: the shader looks it up by block in a table built from the <see cref="BlockRegistry"/>
+/// (<see cref="BuildBlockTable"/>), so a new per-block property is a table column, not quad bits. The texture layer
+/// stays in the quad because it depends on the face and the block's orientation too.
 /// Width and height run along the face's two free axes as the mesher sets them (X faces: y, z; Y faces: x, z; Z faces:
 /// x, y); the corners' order and the texture coordinates follow from the face (see GreedyMesher.EmitQuad, MakeUv).
 /// </summary>
@@ -30,8 +32,9 @@ public readonly struct ChunkQuad
 
     private ChunkQuad(uint a, uint b) { A = a; B = b; }
 
-    /// <summary>Packs the quad the mesher emitted as <paramref name="v"/> (its four corners, in its order).</summary>
-    public static ChunkQuad Pack(ReadOnlySpan<Vertex> v)
+    /// <summary>Packs the quad the mesher emitted as <paramref name="v"/> (its four corners, in its order), of
+    /// <paramref name="block"/>.</summary>
+    public static ChunkQuad Pack(ReadOnlySpan<Vertex> v, BlockId block)
     {
         var n = v[0].Normal;
         uint face = n.X > 0.5f ? 0u : n.X < -0.5f ? 1u : n.Y > 0.5f ? 2u : n.Y < -0.5f ? 3u : n.Z > 0.5f ? 4u : 5u;
@@ -41,28 +44,33 @@ public readonly struct ChunkQuad
         float sv = face < 4 ? span.Z : span.Y;
         uint w = (uint)MathF.Round(su) - 1, h = (uint)MathF.Round(sv) - 1;
         uint layer = v[0].Uv.Z < 0f ? NoLayer : (uint)System.Math.Min((int)v[0].Uv.Z, NoLayer - 1);
-        var c = v[0].Color;
         uint a = (uint)p.X | (uint)p.Y << 6 | (uint)p.Z << 12 | face << 18 | layer << 21 | (w & 7) << 29;
-        uint b = Channel(c.X) | Channel(c.Y) << 8 | Channel(c.Z) << 16 | (w >> 3) << 24 | h << 26;
+        uint b = (uint)block | (w >> 3) << 24 | h << 26;
         return new ChunkQuad(a, b);
     }
 
-    /// <summary><see cref="Pack"/> for a translucent quad, with its <paramref name="alpha"/> (0-255; see the summary).</summary>
-    public static ChunkQuad PackTranslucent(ReadOnlySpan<Vertex> v, byte alpha)
+    /// <summary>The quad's block.</summary>
+    public BlockId Block => (BlockId)(B & 255);
+
+    /// <summary>Entries in <see cref="BuildBlockTable"/>: one per possible <see cref="BlockId"/>.</summary>
+    public const int BlockTableSize = 256;
+
+    /// <summary>What the shader looks up by a quad's block (blockTable): each block's colour (sRGB, as
+    /// <see cref="BlockDef.Color"/>) and opacity (<see cref="BlockDef.EffectiveAlpha"/>; 1 for opaque blocks).</summary>
+    public static Vector4D<float>[] BuildBlockTable()
     {
-        var q = Pack(v);
-        var c = v[0].Color;
-        uint rgb565 = Channel(c.X) >> 3 | (Channel(c.Y) >> 2) << 5 | (Channel(c.Z) >> 3) << 11;
-        return new ChunkQuad(q.A, (q.B & 0xFF000000u) | rgb565 | (uint)alpha << 16);
+        var table = new Vector4D<float>[BlockTableSize];
+        for (int i = 0; i < table.Length; i++)
+        {
+            ref readonly var def = ref BlockRegistry.Get((BlockId)i);
+            float alpha = def.Layer == RenderLayer.Translucent ? def.EffectiveAlpha : 1f;
+            table[i] = new Vector4D<float>(def.Color.X, def.Color.Y, def.Color.Z, alpha);
+        }
+        return table;
     }
 
-    /// <summary>A translucent quad's opacity (0-1; see <see cref="PackTranslucent"/>).</summary>
-    public float TranslucentAlpha => ((B >> 16) & 255) / 255f;
-
-    private static uint Channel(float c) => (uint)System.Math.Clamp((int)MathF.Round(c * 255f), 0, 255);
-
     /// <summary>What vs_chunk decodes for corner <paramref name="corner"/> (0-3, the mesher's order), for tests:
-    /// its position, normal and colour.</summary>
+    /// its position, normal and colour (its block's).</summary>
     public Vertex Corner(int corner)
     {
         var o = new Vector3D<float>(A & 63, (A >> 6) & 63, (A >> 12) & 63);
@@ -76,7 +84,6 @@ public readonly struct ChunkQuad
               : o + new Vector3D<float>(cu, cv, 0);
         float s = (face & 1) == 1 ? -1f : 1f;
         var n = face < 2 ? new Vector3D<float>(s, 0, 0) : face < 4 ? new Vector3D<float>(0, s, 0) : new Vector3D<float>(0, 0, s);
-        var c = new Vector3D<float>(B & 255, (B >> 8) & 255, (B >> 16) & 255) / 255f;
-        return new Vertex { Position = p, Normal = n, Color = c };
+        return new Vertex { Position = p, Normal = n, Color = BlockRegistry.Get(Block).Color };
     }
 }
