@@ -17,9 +17,6 @@ public class HostTerrainTests
 {
     private const int S = ChunkData.Size;
 
-    private static ChunkLoadSystem Streaming(HeadlessScene scene, IChunkStore store) =>
-        new(scene.World, scene.WorldVolume, new ChunkCountBudget(100_000), () => new Flat(), viewDistance: 64, minChunkY: 0, store);
-
     private static EditVoxels Edit(Entity editor, params VoxelOp[] ops) =>
         new() { Volume = EntityRegistry.WorldVolume, Editor = editor.Get<EntityId>(), Ops = ops };
 
@@ -114,9 +111,6 @@ public class HostTerrainTests
 public class ClientTerrainTests
 {
     private const int S = ChunkData.Size;
-
-    private static ChunkLoadSystem Streaming(HeadlessScene scene, IChunkStore store) =>
-        new(scene.World, scene.WorldVolume, new ChunkCountBudget(100_000), () => new Flat(), viewDistance: 64, minChunkY: 0, store);
 
     private static EditVoxels Edit(Entity editor, params VoxelOp[] ops) =>
         new() { Volume = EntityRegistry.WorldVolume, Editor = editor.Get<EntityId>(), Ops = ops };

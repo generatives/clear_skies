@@ -35,9 +35,9 @@ namespace ClearSkies.Engine.ECS;
 /// loading is an entity with <see cref="TerrainColumnLoading"/> until its chunks are added, and each interest gets
 /// <see cref="TerrainScanned"/>, how far around it every wanted column is known (queued, loading or loaded).
 ///
-/// It streams the static volume for edits too (<see cref="ChunkVolume.Streaming"/>): an edit makes a chunk that isn't
-/// loaded only where it knows there's nothing (<see cref="IsKnownEmpty"/>); anywhere else the chunk is edited, loaded
-/// from the store from then on, and if its column was loading, that chunk is loaded again.
+/// Edits ask it which chunks that aren't loaded are known to hold nothing (<see cref="IsKnownEmpty"/>): those an edit
+/// makes. Any other chunk an edit reaches is left to it (a <see cref="TerrainEditedElsewhere"/>): edited, loaded from
+/// the store from then on, and if its column was loading, that chunk is loaded again.
 /// </summary>
 public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
 {
@@ -68,6 +68,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
     private readonly IChunkStore _chunkStore;
 
     private readonly EntitySet      _interests;
+    private readonly EntitySet      _editedElsewhere;
     private readonly ChunkVolume    _staticVolume;
     private readonly IChunkBudget   _loadBudget;
     private readonly IChunkPreparer? _preparer;
@@ -167,13 +168,13 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
         _world = world;
 
         _interests    = world.GetEntities().With<Transform>().With<TerrainInterest>().AsSet();
+        _editedElsewhere = world.GetEntities().With<TerrainEditedElsewhere>().AsSet();
         _staticVolume = staticVolume;
         _loadBudget   = budget;
         _preparer     = preparer;
         _generator    = new ThreadLocal<IWorldGenerator>(generatorFactory);
         _minY         = minChunkY - LayersBelow;
         _staticVolume.EditableLayers = (_minY, _minY + 63); // only what streaming can load back
-        _staticVolume.Streaming = this;
         _viewDistance = viewDistance;
     }
 
@@ -224,6 +225,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
     {
         _steps.Start();
         if (!_editsRead) ReadEdits();
+        TakeEditsElsewhere();
 
         _budget.Restart();
         GatherRings();
@@ -652,10 +654,21 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
         return (MaybeContent(pos.X, pos.Z) & Bit(pos)) == 0;
     }
 
+    /// <summary>Chunks edits couldn't change here since the last frame (see <see cref="TerrainEditedElsewhere"/>).</summary>
+    private void TakeEditsElsewhere()
+    {
+        if (_editedElsewhere.Count == 0) return;
+        foreach (var e in _editedElsewhere.GetEntities().ToArray())
+        {
+            EditedElsewhere(e.Get<TerrainEditedElsewhere>().Position);
+            e.Dispose();
+        }
+    }
+
     /// <summary>An edit changed chunk <paramref name="pos"/> while it wasn't here: it's edited from now on (loaded
     /// from the store, not generated), whatever the store had of it is stale, and if its column is loading, what loads
     /// is stale too and loads again.</summary>
-    public void EditedElsewhere(ChunkPosition pos)
+    private void EditedElsewhere(ChunkPosition pos)
     {
         if (pos.Y < _minY || pos.Y > _minY + 63) return;
         RecordEdited(pos, hasBlocks: true);

@@ -55,6 +55,7 @@ public sealed class GameWorld
         // view as far as the budget reaches.
         ChunkLoad = new ChunkLoadSystem(host.World, StaticVolume, budget, () => new HeartWorldGenerator(seed),
                                         options.ViewDistance, MinChunkY, chunkStore, chunkPreparer);
+        ((EditVoxelsHandler)Commands.HandlerFor(CommandIds.EditVoxels)!).Terrain = ChunkLoad; // edits to the world ask it what's there
 
         Interpolation = new TickInterpolationSystem(host.World, host.Time);
         Hierarchy = new HierarchyTransformSystem(host.World);

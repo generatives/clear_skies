@@ -17,6 +17,13 @@ public class TerrainEditTests
 {
     private const int S = ChunkData.Size;
 
+    /// <summary>An edit applied as an event from elsewhere is: with no checks (the authority made them).</summary>
+    private static void Apply(HeadlessScene scene, params VoxelOp[] ops) =>
+        ((EditVoxelsHandler)scene.Commands.HandlerFor(CommandIds.EditVoxels)!)
+            .Apply(new EditVoxels { Volume = EntityRegistry.WorldVolume, Ops = ops }, default);
+
+    private static VoxelOp Set(Vector3D<int> cell, BlockId block) => VoxelOp.SetBlock(cell, block, BlockOrientation.Upright);
+
     private static Vector3D<int> Cell(ChunkPosition p, int x = 5, int y = 5, int z = 5) => new(p.X * S + x, p.Y * S + y, p.Z * S + z);
 
     [Fact]
@@ -31,12 +38,12 @@ public class TerrainEditTests
         // Ground and sky far off, where nothing is streamed: nothing is known there.
         var ground = new ChunkPosition(100, -1, 100);
         var sky = new ChunkPosition(100, 3, 100);
-        Assert.False(scene.WorldVolume.IsEditable(ground));
-        Assert.False(scene.WorldVolume.IsEditable(sky));
+        Assert.False(load.IsKnownEmpty(ground));
+        Assert.False(load.IsKnownEmpty(sky));
         var dig = Cell(ground);
-        scene.WorldVolume.FillBox(dig, dig, BlockId.Air, BlockOrientation.Upright);
         var place = Cell(sky);
-        scene.WorldVolume.SetBlock(place.X, place.Y, place.Z, BlockId.Wood, BlockOrientation.Upright);
+        Apply(scene, Set(dig, BlockId.Air), Set(place, BlockId.Wood));
+        Assert.Equal(2, scene.World.GetEntities().With<TerrainEditedElsewhere>().AsEnumerable().Count());
         Assert.False(scene.WorldVolume.IsLoaded(ground));
         Assert.False(scene.WorldVolume.IsLoaded(sky));
 
@@ -58,9 +65,9 @@ public class TerrainEditTests
 
         var sky = new ChunkPosition(0, 2, 0); // above the flat ground, within the view
         Assert.False(scene.WorldVolume.IsLoaded(sky));
-        Assert.True(scene.WorldVolume.IsEditable(sky));
+        Assert.True(load.IsKnownEmpty(sky));
         var place = Cell(sky);
-        scene.WorldVolume.SetBlock(place.X, place.Y, place.Z, BlockId.Wood, BlockOrientation.Upright);
+        Apply(scene, Set(place, BlockId.Wood));
         Assert.Equal(BlockId.Wood, scene.WorldVolume.GetBlock(place.X, place.Y, place.Z));
     }
 
@@ -76,12 +83,12 @@ public class TerrainEditTests
 
         // Meanwhile the chunk under the interest is edited elsewhere, and the store has it as edited (all wood).
         var under = new ChunkPosition(0, -1, 0);
-        Assert.False(scene.WorldVolume.IsEditable(under));
+        Assert.False(load.IsKnownEmpty(under));
         var edited = new ChunkData();
         for (int z = 0; z < S; z++) for (int y = 0; y < S; y++) for (int x = 0; x < S; x++) edited.Set(x, y, z, BlockId.Wood);
         new SavedChunkStore(db).Save(under, edited);
         var dig = Cell(under);
-        scene.WorldVolume.FillBox(dig, dig, BlockId.Air, BlockOrientation.Upright);
+        Apply(scene, Set(dig, BlockId.Air));
 
         Settle(load);
         Assert.Equal(BlockId.Wood, scene.WorldVolume.GetBlock(dig.X, dig.Y, dig.Z));
