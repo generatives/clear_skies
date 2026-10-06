@@ -59,6 +59,9 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     private int _bounceHoldFrames = 4;   // evaluations after a change
     private float _bounceNearRadius = 64f;
     private float _bounceScale = 1f;
+    // Around each brick relit by a direct-light change (mostly a moving ship's sun shadow), the bricks within one are
+    // re-bounced at once and the rest of the ray reach every this many frames, and once changes stop (see HoldBounce).
+    private int _shadowOuterEvery = 4;
 
     // Checkerboard bounce (see bouncePhase in GpuRayLightPass): 1 = every surface voxel fires all the rays each
     // evaluation; 2 or 4 = each fires only that share, neighbours firing the others, and the compose pass's smoothing
@@ -219,6 +222,8 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         ImGui.SliderFloat("Bounce albedo", ref _bounceAlbedo, 0f, 0.9f, "%.2f");
         ImGui.SliderInt("Bounce rays per evaluation", ref _bounceRays, 1, 32);
         ImGui.SliderFloat("Bounce ray reach (blocks)", ref _bounceReach, 4f, 16f, "%.0f");
+        ImGui.SliderInt("Shadow change: outer re-bounce every N frames", ref _shadowOuterEvery, 1, 8);
+        ImGui.TextDisabled("  past 1 brick of a moving shadow; 1 = every frame. Always once it stops moving.");
         ImGui.SliderInt("Evaluations per full ray set", ref _bounceCycle, 1, 64);
         ImGui.TextDisabled($"  = {_bounceRays * _bounceCycle} fixed directions per voxel");
         int spreadIdx = System.Array.IndexOf(Spreads, _bounceSpread);

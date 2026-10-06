@@ -634,6 +634,8 @@ public sealed partial class GpuLightSystem
 
     // World bricks marked this frame, per chunk; and the delegates they are flushed into (made once).
     private readonly BrickMarks _marks = new(), _holdMarks = new();
+    // World bricks (brick coordinates) relit since the last re-bounce of the outer ray reach around them (see HoldBounce).
+    private readonly HashSet<(int x, int y, int z)> _shadowOuter = new();
     private Action<int>? _markSlotDelegate, _holdSlotDelegate;
     private Action<int> _markSlot => _markSlotDelegate ??= MarkSlot;
     private int _holdFramesNow;
@@ -702,18 +704,44 @@ public sealed partial class GpuLightSystem
 
         if (_aoOnly) { HoldShapeChanges(holdFrames); return; }
 
-        // The world bricks within bounce reach of every relit one, gathered per chunk so the overlapping reaches of
-        // neighbouring bricks are visited once.
+        // The world bricks within bounce reach of changed geometry (chunks loaded, edited or unloaded, ships at both
+        // poses, bricks newly given storage): rays there hit or miss differently. Around every relit brick (mostly a
+        // moving ship's sun shadow, and lamp changes) the bricks within one brick go now, and the rest of the ray reach
+        // every _shadowOuterEvery frames, and on the first frame with nothing relit (a ship stopping): a cave whose
+        // entrance a ship shades still loses the bounce from it, a few frames late, while the full reach around a long
+        // moving shadow every frame was most of the bounce work while ships moved. Gathered per chunk, so overlapping
+        // reaches are visited once.
         int m = BounceMarginBricks;
+        int mr = System.Math.Min(1, m);
         var world = _staticVolume.Gpu;
+        if (_worldIndex >= 0)
+        {
+            foreach (int slot in _newSlots)
+            {
+                if (_store.SlotGrid[slot] != _worldIndex) continue;
+                var c = _store.SlotChunk[slot];
+                int b = _store.SlotBrick[slot];
+                int bx = c.X * 4 + (b & 3), by = c.Y * 4 + ((b >> 2) & 3), bz = c.Z * 4 + (b >> 4);
+                _holdMarks.AddBox(world, bx - m, by - m, bz - m, bx + m, by + m, bz + m);
+            }
+            foreach (var (mn, mx, _) in _shapeChanges) AddBrickBox(_holdMarks, world, mn, mx, m);
+        }
+        int relitWorld = 0;
         foreach (int slot in _relitList)
         {
             int gi = _store.SlotGrid[slot];
             if (_store.GridAt(gi) != world) continue;
+            relitWorld++;
             var c = _store.SlotChunk[slot];
             int b = _store.SlotBrick[slot];
             int bx = c.X * 4 + (b & 3), by = c.Y * 4 + ((b >> 2) & 3), bz = c.Z * 4 + (b >> 4);
-            _holdMarks.AddBox(world, bx - m, by - m, bz - m, bx + m, by + m, bz + m);
+            _holdMarks.AddBox(world, bx - mr, by - mr, bz - mr, bx + mr, by + mr, bz + mr);
+            if (m > mr) _shadowOuter.Add((bx, by, bz));
+        }
+        if (_shadowOuter.Count > 0 && (relitWorld == 0 || _frame % System.Math.Max(1, _shadowOuterEvery) == 0))
+        {
+            foreach (var (bx, by, bz) in _shadowOuter) _holdMarks.AddBox(world, bx - m, by - m, bz - m, bx + m, by + m, bz + m);
+            _shadowOuter.Clear();
         }
         if (_holdMarks.IsEmpty) return;
         _holdFramesNow = holdFrames;
