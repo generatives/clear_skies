@@ -365,13 +365,8 @@ public sealed class Host : ISystem
         Record(e, d, created: true);
     }
 
-<<<<<<< HEAD
     /// <summary>For the Participants that asked: sent on, unless it's been released or left their view meanwhile.</summary>
     public void EntityDescribed(JoinedPeer from, in DescriptionMessage d)
-=======
-    /// <summary>For the Participants that asked: sent on, unless it's been released meanwhile.</summary>
-    public void EntityDescribed(JoinedPeer from, in DescriptionMessage d)
->>>>>>> claude/mp-host-owns-save
     {
         if (!from.IsAuthority) return;
         if (!_entities.TryGetValue(d.Id, out var e)) return; // forgotten meanwhile (deleted)
