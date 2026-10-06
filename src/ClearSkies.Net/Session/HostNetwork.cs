@@ -83,28 +83,10 @@ public sealed class HostNetwork : ISystem, IDisposable
                 case MessageKind.Described: _host.EntityDescribed(joined, DescriptionMessage.Read(kind, ref r)); break;
                 case MessageKind.Released: _host.EntityReleased(joined, DescriptionMessage.Read(kind, ref r)); break;
                 case MessageKind.Deleted: _host.EntityDeleted(joined, EntityMessage.Read(kind, ref r).Id); break;
+                case MessageKind.Saved: _host.EntitySaved(joined, DescriptionMessage.Read(kind, ref r)); break;
+                case MessageKind.SaveDone: _host.SaveDone(joined); break;
                 case MessageKind.Disconnect: from.Disconnect(DisconnectMessage.Read(ref r).Reason); break;
             }
-<<<<<<< HEAD
-            case MessageKind.Command: _host.SendCommand(joined, CommandMessage.Read(ref r)); break;
-            case MessageKind.Event: _host.SendEvent(joined, EventMessage.Read(ref r)); break;
-            case MessageKind.Rejection: _host.Reject(Rejection.Read(ref r)); break;
-            case MessageKind.PlayerInput: _host.SendInput(joined, PlayerInputMessage.Read(ref r)); break;
-            case MessageKind.StateFrame:
-            {
-                uint tick = BodySync.ReadFrame(ref r, from.Frame);
-                _host.SendFrame(joined, tick, from.Frame);
-                break;
-            }
-            case MessageKind.Created: _host.EntityCreated(joined, DescriptionMessage.Read(kind, ref r)); break;
-            case MessageKind.Described: _host.EntityDescribed(joined, DescriptionMessage.Read(kind, ref r)); break;
-            case MessageKind.Released: _host.EntityReleased(joined, DescriptionMessage.Read(kind, ref r)); break;
-            case MessageKind.Deleted: _host.EntityDeleted(joined, EntityMessage.Read(kind, ref r).Id); break;
-            case MessageKind.Saved: _host.EntitySaved(joined, DescriptionMessage.Read(kind, ref r)); break;
-            case MessageKind.SaveDone: _host.SaveDone(joined); break;
-            case MessageKind.Disconnect: from.Disconnect(DisconnectMessage.Read(ref r).Reason); break;
-=======
->>>>>>> claude/mp-host-participant-interfaces
         }
     }
 
