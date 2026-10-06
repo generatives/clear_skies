@@ -46,7 +46,7 @@ public enum MessageKind : byte
 }
 
 /// <summary>A message: writes itself, kind byte first (see <see cref="Session.RemoteHost"/> and
-/// <see cref="Session.RemoteParticipants"/>, which carry calls between machines as these).</summary>
+/// <see cref="Session.HostNetwork"/>, which carry calls between machines as these).</summary>
 public interface IMessage
 {
     void Write(NetWriter w);
