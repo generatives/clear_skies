@@ -282,22 +282,27 @@ fn vs_main(
     return o;
 }
 
-// A chunk mesh quad, packed (see ChunkQuad), drawn as one instance: its first corner x, y, z in a bits 0-17 (6 each),
+// A chunk mesh quad, packed (see ChunkQuad): its first corner x, y, z in a bits 0-17 (6 each),
 // face in 18-20 (+X, -X, +Y, -Y, +Z, -Z), texture layer in 21-28 (255: untextured), width - 1 in a bits 29-31 and b
 // bits 24-25, height - 1 in b bits 26-30; the block in b bits 0-7, whose colour and opacity come from blockTable.
 // Corners follow the mesher's order (GreedyMesher.EmitQuad) and the texture coordinates follow from position and face,
 // as GreedyMesher.MakeUv makes them: V runs down world Y on the side faces.
+// The mesh's quads, read by vertex index. Drawn indexed through one shared index buffer (quad q's triangles are
+// 4q + 0, 1, 2 and 0, 2, 3), so vertex_index is 4q + corner and the GPU reuses the corners the two triangles share:
+// four shader runs per quad, as with the old four-vertex meshes, where six separate vertices (instanced or not) cost
+// about 1 ms a frame more on a laptop GPU.
+@group(1) @binding(1) var<storage, read> quads: array<vec2<u32>>;
+
 @vertex
-fn vs_chunk(@builtin(vertex_index) vi: u32, @location(0) quad: vec2<u32>) -> VSOut {
-    var corners = array<u32, 6>(0u, 1u, 2u, 0u, 2u, 3u); // two triangles
-    return chunkVertex(quad, corners[vi]);
+fn vs_chunk(@builtin(vertex_index) vi: u32) -> VSOut {
+    return chunkVertex(quads[vi / 4u], vi % 4u);
 }
 
 // The wireframe: each quad's outline as four lines.
 @vertex
-fn vs_chunk_lines(@builtin(vertex_index) vi: u32, @location(0) quad: vec2<u32>) -> VSOut {
+fn vs_chunk_lines(@builtin(vertex_index) vi: u32) -> VSOut {
     var corners = array<u32, 8>(0u, 1u, 1u, 2u, 2u, 3u, 3u, 0u);
-    return chunkVertex(quad, corners[vi]);
+    return chunkVertex(quads[vi / 8u], corners[vi % 8u]);
 }
 
 fn chunkVertex(quad: vec2<u32>, corner: u32) -> VSOut {
@@ -863,6 +868,9 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     private BindGroupLayout* _voxelLayout;
     private BindGroupLayout* _atlasLayout;
     private PipelineLayout* _pipelineLayout;
+    // Chunk meshes: group 1 also holds the mesh's quads (read by vs_chunk), one bind group per mesh.
+    private BindGroupLayout* _chunkModelLayout;
+    private PipelineLayout* _chunkPipelineLayout;
     private RenderPipeline* _pipeline;
     private RenderPipeline* _wireframePipeline;
     private RenderPipeline* _hudPipeline;
@@ -902,6 +910,13 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     private readonly GpuBuffer _blockTable; // per block type: colour and opacity (ChunkQuad.BuildBlockTable)
     private readonly GpuBuffer _hudCameraBuffer; // permanently holds identity view+proj
     private readonly GpuBuffer _modelBuffer;
+
+    // One index buffer for every chunk mesh: quad q's two triangles as 4q + (0, 1, 2, 0, 2, 3), for as many quads as a
+    // chunk can have (every block of a checkerboard showing all six faces). vs_chunk takes quad = index / 4 and
+    // corner = index % 4, so the GPU reuses the two corners the triangles share: four vertex shader runs per quad
+    // instead of six.
+    private const int MaxChunkQuads = ChunkData.Size * ChunkData.Size * ChunkData.Size / 2 * 6;
+    private readonly GpuBuffer _quadIndices;
     private BindGroup* _cameraBindGroup;
     private BindGroup* _hudCameraBindGroup;
     private BindGroup* _modelBindGroup;
@@ -967,6 +982,15 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         _blockTable.Write<Vector4D<float>>(0, ChunkQuad.BuildBlockTable());
         _hudCameraBuffer = GpuBuffer.CreateUniform(ctx, CameraSize);
         _modelBuffer     = GpuBuffer.CreateUniform(ctx, ModelStride * MaxObjects);
+        var quadIdx = new uint[MaxChunkQuads * 6];
+        for (uint q = 0, k = 0; q < MaxChunkQuads; q++)
+        {
+            uint b = 4 * q;
+            quadIdx[k++] = b; quadIdx[k++] = b + 1; quadIdx[k++] = b + 2;
+            quadIdx[k++] = b; quadIdx[k++] = b + 2; quadIdx[k++] = b + 3;
+        }
+        _quadIndices = GpuBuffer.Create(ctx, (ulong)quadIdx.Length * 4, BufferUsage.Index | BufferUsage.CopyDst);
+        _quadIndices.Write<uint>(0, quadIdx);
         CreateBindGroups();
         CreateFallbackAtlas();
 
@@ -1059,6 +1083,20 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         layouts[3] = _atlasLayout;
         var plDesc = new PipelineLayoutDescriptor { BindGroupLayoutCount = 4, BindGroupLayouts = layouts };
         _pipelineLayout = _api.DeviceCreatePipelineLayout(_ctx.Device, &plDesc);
+
+        BindGroupLayoutEntry* chunkEntries = stackalloc BindGroupLayoutEntry[2];
+        chunkEntries[0] = modelEntry;
+        chunkEntries[1] = new BindGroupLayoutEntry
+        {
+            Binding = 1,
+            Visibility = ShaderStage.Vertex,
+            Buffer = new BufferBindingLayout { Type = BufferBindingType.ReadOnlyStorage, HasDynamicOffset = false, MinBindingSize = ChunkQuad.SizeBytes },
+        };
+        var chunkDesc = new BindGroupLayoutDescriptor { EntryCount = 2, Entries = chunkEntries };
+        _chunkModelLayout = _api.DeviceCreateBindGroupLayout(_ctx.Device, &chunkDesc);
+        layouts[1] = _chunkModelLayout;
+        var chunkPlDesc = new PipelineLayoutDescriptor { BindGroupLayoutCount = 4, BindGroupLayouts = layouts };
+        _chunkPipelineLayout = _api.DeviceCreatePipelineLayout(_ctx.Device, &chunkPlDesc);
     }
 
     /// <summary>A pipeline for vs_main's vertex layout (<see cref="Vertex"/>): the world, wireframe, HUD and models.</summary>
@@ -1075,15 +1113,13 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
                               depthTest ? CompareFunction.Greater : CompareFunction.Always); // reversed depth: nearer is greater
     }
 
-    /// <summary>A pipeline for chunk meshes (<paramref name="vertexEntry"/>: one packed <see cref="ChunkQuad"/> per
-    /// instance) and <paramref name="fragmentEntry"/> (fs_main, or fs_cutout), depth-tested and depth-writing.</summary>
+    /// <summary>A pipeline for chunk meshes (<paramref name="vertexEntry"/>, which reads the mesh's packed
+    /// <see cref="ChunkQuad"/>s from a storage buffer in group 1: no vertex buffer) and <paramref name="fragmentEntry"/>
+    /// (fs_main, or fs_cutout), depth-tested and depth-writing.</summary>
     private RenderPipeline* CreateChunkPipeline(string vertexEntry, PrimitiveTopology topology, CullMode cullMode,
                                                 string fragmentEntry)
-    {
-        var attr     = new VertexAttribute { Format = VertexFormat.Uint32x2, Offset = 0, ShaderLocation = 0 };
-        var vbLayout = new VertexBufferLayout { ArrayStride = ChunkQuad.SizeBytes, StepMode = VertexStepMode.Instance, AttributeCount = 1, Attributes = &attr };
-        return CreatePipeline(vertexEntry, fragmentEntry, &vbLayout, topology, cullMode, depthWrite: true, CompareFunction.Greater);
-    }
+        => CreatePipeline(vertexEntry, fragmentEntry, null, topology, cullMode, depthWrite: true, CompareFunction.Greater,
+                          layout: _chunkPipelineLayout);
 
     /// <summary>Translucent blocks' faces (vs_chunk, fs_chunk_transparent): alpha-blended over what's drawn,
     /// only where they're the nearest transparent face (GreaterEqual against
@@ -1091,35 +1127,27 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     /// surface is seen from under it too.</summary>
     private RenderPipeline* CreateTransparentChunkPipeline()
     {
-        var attr     = new VertexAttribute { Format = VertexFormat.Uint32x2, Offset = 0, ShaderLocation = 0 };
-        var vbLayout = new VertexBufferLayout { ArrayStride = ChunkQuad.SizeBytes, StepMode = VertexStepMode.Instance, AttributeCount = 1, Attributes = &attr };
         var color = new BlendComponent { Operation = BlendOperation.Add, SrcFactor = BlendFactor.SrcAlpha, DstFactor = BlendFactor.OneMinusSrcAlpha };
         var alpha = new BlendComponent { Operation = BlendOperation.Add, SrcFactor = BlendFactor.One, DstFactor = BlendFactor.OneMinusSrcAlpha };
         var blend = new BlendState { Color = color, Alpha = alpha };
-        return CreatePipeline("vs_chunk", "fs_chunk_transparent", &vbLayout, PrimitiveTopology.TriangleList, CullMode.None,
-                              depthWrite: false, CompareFunction.GreaterEqual, &blend);
+        return CreatePipeline("vs_chunk", "fs_chunk_transparent", null, PrimitiveTopology.TriangleList, CullMode.None,
+                              depthWrite: false, CompareFunction.GreaterEqual, &blend, layout: _chunkPipelineLayout);
     }
 
     /// <summary>The transparent faces' depth pre-pass (vs_chunk, fs_chunk_transparent_depth): depth only, no
     /// colour, so the colour pass draws just the nearest transparent face at each pixel.</summary>
     private RenderPipeline* CreateTransparentChunkDepthPipeline()
-    {
-        var attr     = new VertexAttribute { Format = VertexFormat.Uint32x2, Offset = 0, ShaderLocation = 0 };
-        var vbLayout = new VertexBufferLayout { ArrayStride = ChunkQuad.SizeBytes, StepMode = VertexStepMode.Instance, AttributeCount = 1, Attributes = &attr };
-        return CreatePipeline("vs_chunk", "fs_chunk_transparent_depth", &vbLayout, PrimitiveTopology.TriangleList, CullMode.None,
-                              depthWrite: true, CompareFunction.Greater, writeMask: ColorWriteMask.None);
-    }
+        => CreatePipeline("vs_chunk", "fs_chunk_transparent_depth", null, PrimitiveTopology.TriangleList, CullMode.None,
+                          depthWrite: true, CompareFunction.Greater, writeMask: ColorWriteMask.None, layout: _chunkPipelineLayout);
 
     /// <summary>Debug overdraw view (fs_overdraw): terrain drawn additively, depth-tested in the normal draw order, so
     /// it counts the fragments that really get shaded (one per pixel is ideal).</summary>
     private RenderPipeline* CreateOverdrawPipeline()
     {
-        var attr     = new VertexAttribute { Format = VertexFormat.Uint32x2, Offset = 0, ShaderLocation = 0 };
-        var vbLayout = new VertexBufferLayout { ArrayStride = ChunkQuad.SizeBytes, StepMode = VertexStepMode.Instance, AttributeCount = 1, Attributes = &attr };
         var add = new BlendComponent { Operation = BlendOperation.Add, SrcFactor = BlendFactor.One, DstFactor = BlendFactor.One };
         var blend = new BlendState { Color = add, Alpha = add };
-        return CreatePipeline("vs_chunk", "fs_overdraw", &vbLayout, PrimitiveTopology.TriangleList, CullMode.Back,
-                              depthWrite: true, CompareFunction.Greater, &blend);
+        return CreatePipeline("vs_chunk", "fs_overdraw", null, PrimitiveTopology.TriangleList, CullMode.Back,
+                              depthWrite: true, CompareFunction.Greater, &blend, layout: _chunkPipelineLayout);
     }
 
     /// <summary>The cloud boxes (vs_cloud/fs_cloud): no vertex buffer, one <see cref="CloudLayer.CloudCell"/> instance
@@ -1140,7 +1168,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     private RenderPipeline* CreatePipeline(string vertexEntry, string fragmentEntry, VertexBufferLayout* vertexBuffer,
                                            PrimitiveTopology topology, CullMode cullMode, bool depthWrite,
                                            CompareFunction depthCompare, BlendState* blend = null,
-                                           ColorWriteMask writeMask = ColorWriteMask.All)
+                                           ColorWriteMask writeMask = ColorWriteMask.All, PipelineLayout* layout = null)
     {
         var vsEntry = (byte*)SilkMarshal.StringToPtr(vertexEntry, NativeStringEncoding.UTF8);
         var fsEntry = (byte*)SilkMarshal.StringToPtr(fragmentEntry, NativeStringEncoding.UTF8);
@@ -1161,7 +1189,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
 
         var desc = new RenderPipelineDescriptor
         {
-            Layout    = _pipelineLayout,
+            Layout    = layout != null ? layout : _pipelineLayout,
             Vertex    = vertexState,
             Primitive = new PrimitiveState
             {
@@ -1356,17 +1384,25 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     }
 
     /// <summary>Uploads a chunk mesh: <paramref name="quads"/> holds <paramref name="quadCount"/> packed
-    /// <see cref="ChunkQuad"/>s, one buffer and one write.</summary>
+    /// <see cref="ChunkQuad"/>s, one storage buffer and one write, and the mesh's group-1 bind group (the model
+    /// uniforms and its quads) for drawing it.</summary>
     public GpuMesh UploadChunkQuads(ReadOnlySpan<byte> quads, uint quadCount)
     {
         long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-        var buf = GpuBuffer.Create(_ctx, (ulong)quads.Length, BufferUsage.Vertex | BufferUsage.CopyDst);
+        var buf = GpuBuffer.Create(_ctx, (ulong)quads.Length, BufferUsage.Storage | BufferUsage.CopyDst);
         long t1 = System.Diagnostics.Stopwatch.GetTimestamp();
         buf.Write(0, quads);
         long t2 = System.Diagnostics.Stopwatch.GetTimestamp();
         LastCreateMs = (t1 - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
         LastWriteMs  = (t2 - t1) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
-        return new GpuMesh(buf, quadCount);
+
+        BindGroupEntry* entries = stackalloc BindGroupEntry[2];
+        entries[0] = new BindGroupEntry { Binding = 0, Buffer = _modelBuffer.Handle, Offset = 0, Size = ModelSize };
+        entries[1] = new BindGroupEntry { Binding = 1, Buffer = buf.Handle, Offset = 0, Size = (ulong)quads.Length };
+        var desc = new BindGroupDescriptor { Layout = _chunkModelLayout, EntryCount = 2, Entries = entries };
+        var group = _api.DeviceCreateBindGroup(_ctx.Device, &desc);
+        var api = _api;
+        return new GpuMesh(buf, quadCount, (nint)group, g => api.BindGroupRelease((BindGroup*)g));
     }
 
     /// <summary>How long the last <see cref="UploadChunkQuads"/> spent creating its buffer and writing it (ms), for
@@ -1623,16 +1659,20 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     {
         if (_drawIndex >= MaxObjects) return;
 
-        // Chunk meshes are packed quads (ChunkQuad), one instance each: their own pipeline, set once for a run of
+        // Chunk meshes are packed quads (ChunkQuad) read from a storage buffer: their own pipeline, set once for a run of
         // chunk draws. The wireframe draws the same quads as line loops.
         bool wire = WireframeMode;
         var pipeline = OverdrawMode ? _chunkOverdrawPipeline : wire ? _chunkWireframePipeline : solidPipeline;
         if (_boundPipeline != pipeline) SetPipeline(pipeline);
 
         uint dynOffset = StageModel(new ModelUniform { Model = model, ChunkX = chunk.X, ChunkY = chunk.Y, ChunkZ = chunk.Z, Grid = grid });
-        _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset);
-        _api.RenderPassEncoderSetVertexBuffer(_pass, 0, mesh.VertexBuffer.Handle, 0, mesh.VertexBytes);
-        _api.RenderPassEncoderDraw(_pass, wire && !OverdrawMode ? 8u : 6u, mesh.QuadCount, 0, 0);
+        _api.RenderPassEncoderSetBindGroup(_pass, 1, (BindGroup*)mesh.DrawBindGroup, 1, &dynOffset);
+        if (wire && !OverdrawMode) _api.RenderPassEncoderDraw(_pass, 8u * mesh.QuadCount, 1, 0, 0);
+        else
+        {
+            _api.RenderPassEncoderSetIndexBuffer(_pass, _quadIndices.Handle, IndexFormat.Uint32, 0, _quadIndices.SizeBytes);
+            _api.RenderPassEncoderDrawIndexed(_pass, 6u * System.Math.Min(mesh.QuadCount, (uint)MaxChunkQuads), 1, 0, 0, 0);
+        }
         _drawIndex++;
     }
 
@@ -1692,6 +1732,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         _blockTable.Dispose();
         _hudCameraBuffer.Dispose();
         _modelBuffer.Dispose();
+        _quadIndices.Dispose();
         if (_voxelBindGroup   != null) _api.BindGroupRelease(_voxelBindGroup);
         if (_atlasBindGroup   != null) _api.BindGroupRelease(_atlasBindGroup);
         if (_atlasSampler     != null) _api.SamplerRelease(_atlasSampler);
