@@ -96,12 +96,16 @@ fn applyFog(color: vec3<f32>, worldPos: vec3<f32>) -> vec3<f32> {
 }
 
 // Underwater, as Minecraft does it: with the camera in water (camPos.w > 0, how far it sees), everything fades
-// linearly into the water's colour by that distance, the sky included. The colour is dimmed with the daylight.
+// linearly into the water's colour by that distance, the sky included. Like Minecraft's, the fade starts
+// WATER_FOG_START blocks behind the camera, so even what is right in front of it is tinted (by about a quarter on first
+// going under). The colour is dimmed with the daylight.
 const WATER_FOG: vec3<f32> = vec3<f32>(0.03, 0.10, 0.25);
+const WATER_FOG_START: f32 = -8.0;
 fn waterFogColor() -> vec3<f32> { return WATER_FOG * max(camera.lightParams.z, 0.8 * camera.sunDir.w); }
 fn applyWater(color: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
     if (camera.camPos.w <= 0.0) { return color; }
-    return mix(color, waterFogColor(), clamp(length(d) / camera.camPos.w, 0.0, 1.0));
+    let f = (length(d) - WATER_FOG_START) / (camera.camPos.w - WATER_FOG_START);
+    return mix(color, waterFogColor(), clamp(f, 0.0, 1.0));
 }
 
 // What fs_sky draws along world direction dir (unit), without the sun disc: the sky (w = 0), or the cloud sea if the
