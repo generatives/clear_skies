@@ -25,8 +25,8 @@ public static class Trees
 
     /// <summary>What grows from the open cell above (x, top, z), whose block is <paramref name="ground"/> (from
     /// <see cref="ContinentTerrain.Block"/>): a tree, a cactus or nothing. Trees grow thickest where
-    /// <paramref name="patch"/> (from <see cref="ContinentTerrain.Patch"/>) is high, in the same meadows as the
-    /// grass.</summary>
+    /// <paramref name="patch"/> (from <see cref="ContinentTerrain.Patch"/>) is high, so they stand in groves with
+    /// clearings between and only the odd lone tree; cacti likewise gather in the sandiest stretches, where it is low.</summary>
     public static Kind At(BlockId ground, int x, int top, int z, float patch, ulong seed)
     {
         ulong h = Hash(x, top, z, seed);
@@ -37,13 +37,13 @@ public static class Trees
             case BlockId.Grass:
             {
                 if (top < ContinentTerrain.DryLine) return Kind.None;
-                if (r >= 0.002f + 0.015f * Smoothstep(0.45f, 0.85f, patch)) return Kind.None;
+                if (r >= 0.0003f + 0.03f * Grove(patch)) return Kind.None;
                 return pick < Smoothstep(PineStart, PineFull, top) ? Kind.Pine : Kind.Oak;
             }
             case BlockId.Snow:
-                return r < 0.006f ? Kind.Pine : Kind.None;
+                return r < 0.0003f + 0.02f * Grove(patch) ? Kind.Pine : Kind.None;
             case BlockId.Sand:
-                return r < 0.004f ? Kind.Cactus : Kind.None;
+                return r < 0.0005f + 0.012f * (1f - Smoothstep(0.1f, 0.35f, patch)) ? Kind.Cactus : Kind.None;
             default:
                 return Kind.None;
         }
@@ -115,6 +115,9 @@ public static class Trees
         h ^= h >> 32; h *= 0xD6E8FEB86659FD93UL; h ^= h >> 32;
         return h;
     }
+
+    /// <summary>0-1: how much of a grove (x, z) is in, by its patch: none in the clearings, full in the thick of it.</summary>
+    private static float Grove(float patch) => Smoothstep(0.55f, 0.8f, patch);
 
     private static bool Bit(ulong h, int i) => ((h >> (24 + i % 24)) & 1) != 0;
 
