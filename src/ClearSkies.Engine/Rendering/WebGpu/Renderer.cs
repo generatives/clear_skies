@@ -332,11 +332,12 @@ fn chunkVertex(quad: vec2<u32>, corner: u32) -> VSOut {
         // A cross block: cu runs along the diagonal, cv up. Lit as an upward-facing surface (see shadeBlock), so its
         // two quads, and both their sides, match each other and the ground they stand on.
         // Each plant is turned and nudged by a hash of its world cell, so plants don't line up in a grid but each
-        // looks the same every time it's meshed. A quarter turn covers every look of the X; the nudge keeps its
-        // middle within 0.2 of the cell's.
+        // looks the same every time it's meshed. A full turn, not just the quarter that covers every angle of the X,
+        // so a sprite also shows mirrored as often as not (its back side's texture runs the other way); the nudge
+        // keeps its middle within 0.2 of the cell's.
         cross = vec4<i32>(vec3<i32>(position), 1);
         let h = cellHash(model.chunk * 32 + cross.xyz);
-        let turn = f32(h & 1023u) * (1.5707964 / 1024.0);
+        let turn = f32(h & 1023u) * (6.2831853 / 1024.0);
         let nudge = (vec2<f32>(f32((h >> 10u) & 255u), f32((h >> 18u) & 255u)) / 255.0 - 0.5) * 0.4;
         let d = vec2<f32>(select(0.5 - cu, cu - 0.5, face == 6u), cu - 0.5); // from the cell's middle, in x and z
         let cs = cos(turn);
