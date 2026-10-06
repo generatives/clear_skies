@@ -53,6 +53,8 @@ internal sealed class ChunkRecord
     public int TableIndex;
     public int OccSlot = -1;          // occupancy pool slot, or -1 for a uniform chunk
     public ulong Solid, Air;          // per-8³-brick "has solid" / "has air" (bit = bx + 4*(by + 4*bz))
+    public int FolSlot = -1;          // occupancy pool slot of its foliage (BlockDef.CatchesLight) bits, or -1 for none
+    public ulong Foliage;             // per-8³-brick "has foliage"
     public ulong Surface;             // bricks holding (conservatively) a surface air voxel
     public int[]? BrickSlots;         // light slot per brick, -1 = none
     public bool Virtual;              // a ship's air chunk next to its blocks, with no ChunkEntry behind it
@@ -457,6 +459,13 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         rec.Virtual = false;
         rec.Solid = entry.BrickSolidMask;
         rec.Air   = entry.BrickAirMask;
+        rec.Foliage = entry.BrickFoliageMask;
+        if (entry.PackedFoliageWords is { } foliage)
+        {
+            if (rec.FolSlot < 0) rec.FolSlot = AllocOcc();
+            OccPool.Write<uint>((ulong)rec.FolSlot * WordsPerChunk * 4, foliage);
+        }
+        else FreeFoliage(rec);
 
         if (rec.Solid == 0 || rec.Air == 0)
         {
@@ -526,19 +535,22 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     {
         var words = new uint[WordsPerChunk];
         var emitters = new List<EmitterVoxel>();
-        PackOpacity(data, words, emitters);
+        var foliage = PackOpacity(data, words, emitters);
         var (solid, air) = BrickMasks(words);
-        return new PackedOpacity(words, solid, air, emitters);
+        return new PackedOpacity(words, solid, air, emitters, foliage, foliage == null ? 0 : BrickMasks(foliage).solid);
     }
 
     /// <summary>Packs a chunk's opacity into <paramref name="words"/> (lx is the in-word bit, ly + 32*lz the word),
-    /// listing its light emitters if <paramref name="emitters"/> is given.</summary>
-    private static void PackOpacity(ChunkData data, uint[] words, List<EmitterVoxel>? emitters)
+    /// listing its light emitters if <paramref name="emitters"/> is given. Returns its foliage
+    /// (<see cref="BlockDef.CatchesLight"/>) packed the same way, or null if it has none.</summary>
+    private static uint[]? PackOpacity(ChunkData data, uint[] words, List<EmitterVoxel>? emitters)
     {
+        uint[]? foliage = null;
         if (data.IsUniform(out var block) && BlockRegistry.Get(block).LightEmission == 0)
         {
             Array.Fill(words, BlockRegistry.Get(block).BlocksLight ? uint.MaxValue : 0u);
-            return;
+            if (BlockRegistry.Get(block).CatchesLight) { foliage = new uint[WordsPerChunk]; Array.Fill(foliage, uint.MaxValue); }
+            return foliage;
         }
         for (int lz = 0; lz < S; lz++)
         for (int ly = 0; ly < S; ly++)
@@ -548,11 +560,13 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
             {
                 var def = BlockRegistry.Get(data.Get(lx, ly, lz));
                 if (def.BlocksLight) bits |= 1u << lx;
+                if (def.CatchesLight) (foliage ??= new uint[WordsPerChunk])[ly + S * lz] |= 1u << lx;
                 if (def.LightEmission > 0)
                     emitters?.Add(new EmitterVoxel((byte)lx, (byte)ly, (byte)lz, def.LightEmission, def.Id));
             }
             words[ly + S * lz] = bits;
         }
+        return foliage;
     }
 
     /// <summary>Per-8³-brick "any opaque" / "any non-opaque" bits from a chunk's packed words. Each word is one
@@ -661,6 +675,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     private void FreeRecord(GridHandle g, ChunkRecord rec)
     {
         FreeOcc(rec);
+        FreeFoliage(rec);
         if (rec.BrickSlots != null)
         {
             for (int b = 0; b < 64; b++)
@@ -788,7 +803,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     }
 
     /// <summary>A chunk's table entry: (occupancy slot or code, cx, cy, cz), then which 8³ bricks hold any solid, so
-    /// rays can step over empty bricks whole.</summary>
+    /// rays can step over empty bricks whole, and its foliage's occupancy slot plus one (0: none).</summary>
     private static void EntryWords(ChunkRecord rec, Span<int> e)
     {
         int code = rec.OccSlot >= 0 ? rec.OccSlot
@@ -796,7 +811,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
                  : rec.Air == 0 ? OccAllSolid
                  : OccUnloaded;
         e[0] = code; e[1] = rec.Pos.X; e[2] = rec.Pos.Y; e[3] = rec.Pos.Z;
-        e[4] = (int)(uint)rec.Solid; e[5] = (int)(uint)(rec.Solid >> 32); e[6] = 0; e[7] = 0;
+        e[4] = (int)(uint)rec.Solid; e[5] = (int)(uint)(rec.Solid >> 32); e[6] = rec.FolSlot + 1; e[7] = 0;
     }
 
     private void WriteBrickRun(ChunkRecord rec)
@@ -858,13 +873,13 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         RecomputeSolidBounds(g);
     }
 
-    /// <summary>A brick is listed if it contains air and there is solid in it or in a face-adjacent brick
+    /// <summary>A brick is listed if it contains air and there is solid (or foliage) in it or in a face-adjacent brick
     /// (including across chunk boundaries) — a conservative superset of the bricks holding a surface air voxel,
     /// since a voxel's six neighbours are all in its own brick or a face-adjacent one. Bricks that joined get a
     /// fresh light slot; bricks that left give theirs back.</summary>
     private void RefreshSurface(GridHandle g, ChunkRecord rec)
     {
-        ulong s = rec.Solid;
+        ulong s = rec.Solid | rec.Foliage; // foliage is lit like a surface too (see BlockDef.CatchesLight)
         ulong near = s
             | ((s >> 1) & ~BxHi) | ((s << 1) & ~BxLo)   // solid at bx+1 / bx-1 within the chunk
             | ((s >> 4) & ~ByHi) | ((s << 4) & ~ByLo)   // by±1
@@ -898,8 +913,9 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         WriteBrickRun(rec);
     }
 
+    /// <summary>The bricks of a neighbouring chunk that make surfaces: solid or foliage.</summary>
     private static ulong NeighbourSolid(GridHandle g, ChunkPosition pos, int dx, int dy, int dz)
-        => g.Chunks.TryGetValue(pos.Offset(dx, dy, dz), out var n) ? n.Solid : 0UL;
+        => g.Chunks.TryGetValue(pos.Offset(dx, dy, dz), out var n) ? n.Solid | n.Foliage : 0UL;
 
     private static int[] NewBrickSlots() { var a = new int[64]; Array.Fill(a, -1); return a; }
 
@@ -945,6 +961,13 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         if (rec.OccSlot < 0) return;
         _occFree.Push(rec.OccSlot);
         rec.OccSlot = -1;
+    }
+
+    private void FreeFoliage(ChunkRecord rec)
+    {
+        if (rec.FolSlot < 0) return;
+        _occFree.Push(rec.FolSlot);
+        rec.FolSlot = -1;
     }
 
     private int AllocLight(GridHandle g, ChunkPosition pos, int brick)

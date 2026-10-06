@@ -28,6 +28,25 @@ public class TreeTests
         Assert.True(BlockRegistry.Get(BlockId.Glass).HidesFaceOf(BlockId.Glass));
     }
 
+    [Fact]
+    public void Leaves_let_light_through_but_are_packed_for_lighting_as_foliage()
+    {
+        var leaves = BlockRegistry.Get(BlockId.Leaves);
+        Assert.False(leaves.BlocksLight);
+        Assert.True(leaves.CatchesLight);
+        Assert.False(BlockRegistry.Get(BlockId.Glass).CatchesLight);
+
+        var data = new ChunkData();
+        data.Set(9, 20, 3, BlockId.Leaves);
+        data.Set(1, 1, 1, BlockId.Stone);
+        var packed = GridStore.Pack(data);
+        Assert.Equal(0u, packed.Words[20 + 32 * 3]);                 // the leaf stops no rays
+        Assert.NotNull(packed.Foliage);
+        Assert.Equal(1u << 9, packed.Foliage![20 + 32 * 3]);         // but is marked as foliage
+        Assert.Equal(1UL << (1 + 4 * (2 + 4 * 0)), packed.FoliageBricks);
+        Assert.Null(GridStore.Pack(new ChunkData()).Foliage);
+    }
+
     [Theory]
     [InlineData(Trees.Kind.Oak)]
     [InlineData(Trees.Kind.Pine)]
