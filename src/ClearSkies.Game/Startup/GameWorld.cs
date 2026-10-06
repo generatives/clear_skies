@@ -5,6 +5,7 @@ using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Persistence;
 using ClearSkies.Engine.Voxels;
+using ClearSkies.Engine.Weather;
 using ClearSkies.Game.Generation;
 using ClearSkies.Net.Session;
 using ClearSkies.Net.Sync;
@@ -62,6 +63,11 @@ public sealed class GameWorld
         PhysicsBody = new PhysicsBodySystem(host.World, host.Physics);
         BlockActions = new BlockActionSystem(host.World, Commands, EditLimits, Selection);
         Flight = new AirshipFlightSystem(host.World, host.Physics);
+        // Wind runs on the shared tick clock (clock sync lines a client's up with the host's), so every machine computes
+        // the same wind from the seed alone.
+        Wind = new WindField(seed, () => host.Clock.Tick, host.Clock.TickSeconds, StaticVolume);
+        AirShapes = new AirshipResistanceSystem(host.World, host.Physics);
+        AirResistance = new AirResistanceSystem(host.World, host.Physics, Wind);
         RemoteBodies = new RemoteBodySystem(host.World, Registry, host.Clock);
     }
 
@@ -86,6 +92,15 @@ public sealed class GameWorld
     public PhysicsBodySystem PhysicsBody { get; }
     public BlockActionSystem BlockActions { get; }
     public AirshipFlightSystem Flight { get; }
+
+    /// <summary>The world's wind, from the seed and the shared tick clock.</summary>
+    public WindField Wind { get; }
+
+    /// <summary>Works out each ship's drag entries from its blocks whenever it's edited.</summary>
+    public AirshipResistanceSystem AirShapes { get; }
+
+    /// <summary>Drag from each ship's and player's velocity relative to the wind, before the physics step.</summary>
+    public AirResistanceSystem AirResistance { get; }
 
     /// <summary>Bodies owned elsewhere, placed from their snapshots about 100 ms behind.</summary>
     public RemoteBodySystem RemoteBodies { get; }

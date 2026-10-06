@@ -44,6 +44,8 @@ public static class DedicatedServerGame
         host.AddSystem(levers, SystemStage.Simulation);
         host.AddSystem(wheels, SystemStage.Simulation);
         host.AddSystem(world.Flight, SystemStage.Simulation);
+        host.AddSystem(world.AirShapes, SystemStage.Simulation); // ships' drag entries, after any edit's new body shape
+        host.AddSystem(world.AirResistance, SystemStage.Simulation); // drag through the wind, also before the step
         host.AddSystem(world.CreatePresence(), SystemStage.Simulation);
         // Physics copies of ships simulated elsewhere (kinematic, near the local player), placed before the step, once the
         // presence system has decided which copies exist.
@@ -103,6 +105,8 @@ public static class BotClientGame
         host.AddSystem(levers, SystemStage.Simulation);
         host.AddSystem(wheels, SystemStage.Simulation);
         host.AddSystem(world.Flight, SystemStage.Simulation);
+        host.AddSystem(world.AirShapes, SystemStage.Simulation); // ships' drag entries, after any edit's new body shape
+        host.AddSystem(world.AirResistance, SystemStage.Simulation); // drag through the wind, also before the step
         host.AddSystem(world.CreatePresence(), SystemStage.Simulation);
         // Physics copies of ships simulated elsewhere (kinematic, near the local player), placed before the step, once the
         // presence system has decided which copies exist.

@@ -18,6 +18,9 @@ public static class PlayerFactory
     public const float EyeHeight = 0.7f;
     public const float LookSensitivity = 0.0025f;
 
+    /// <summary>The character's capsule: 0.6 m wide, 1.6 m tall.</summary>
+    public const float CapsuleRadius = 0.3f, CapsuleLength = 1.0f;
+
     /// <param name="owner">Who simulates them: the host.</param>
     /// <param name="controllingPeer">Whose input drives them.</param>
     public static Entity Create(World world, PhysicsWorld physics, EntityId id, NetOwner owner, PeerId controllingPeer, bool controlledHere,
@@ -32,6 +35,7 @@ public static class PlayerFactory
         if (owner.IsLocal || controlledHere)
             player.Set(new CharacterControllerComponent { Character = CreateCharacter(physics, d.Position, player), EyeHeight = EyeHeight });
         player.Set(new Support());
+        player.Set(ResistsAir.Player(CapsuleRadius, CapsuleLength)); // feels the wind (see AirResistanceSystem)
         player.Set(new Player { Id = d.Id, Name = d.Name, ControllingPeer = controllingPeer, IsLocal = controlledHere });
         player.Set(id);
         player.Set(owner);
@@ -54,7 +58,7 @@ public static class PlayerFactory
 
     /// <summary>A player's character body at <paramref name="position"/>.</summary>
     public static PlayerCharacter CreateCharacter(PhysicsWorld physics, Vector3 position, Entity entity) =>
-        new(physics.Characters, position, new Capsule(radius: 0.3f, length: 1.0f),
+        new(physics.Characters, position, new Capsule(CapsuleRadius, CapsuleLength),
             // Light (two Wood blocks' worth): the character pushes off the deck it walks on as hard as it pushes
             // itself, so a heavy character with strong forces shoved and twisted ships as hard as their Fans.
             minimumSpeculativeMargin: 0.01f, mass: 2f,

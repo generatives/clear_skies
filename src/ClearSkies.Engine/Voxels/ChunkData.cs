@@ -131,6 +131,10 @@ public sealed class ChunkData
     /// False for a chunk of air and passable blocks only (e.g. levers), which has blocks but no collider.</summary>
     public bool HasAnyColliding() => _blocks == null ? Colliding[(byte)_uniformBlock] : _colliding > 0;
 
+    /// <summary>How many blocks collide (<see cref="BlockDef.Collides"/>), out of <see cref="Volume"/>. Kept count of, like
+    /// <see cref="HasAnyColliding"/>: wind reads it for how much of a chunk is terrain.</summary>
+    public int CollidingCount => _blocks == null ? (Colliding[(byte)_uniformBlock] ? Volume : 0) : _colliding;
+
     // BlockDef.Collides by block id, so Set's bookkeeping is two array reads.
     private static readonly bool[] Colliding = BuildColliding();
 

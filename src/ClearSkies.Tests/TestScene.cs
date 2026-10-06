@@ -98,6 +98,16 @@ public sealed class HeadlessScene : IDisposable
             _tick.Insert(_tick.FindIndex(s => s is PlayerMovementSystem), new ClearSkies.Net.Sync.OwnPlayerPrediction(client, World, Registry));
     }
 
+    /// <summary>Air resistance as the game has it (ships' drag entries, then drag through the wind) just before the physics
+    /// step, in <paramref name="wind"/> everywhere (still air by default). Returns the wind, to change it.</summary>
+    public Engine.Weather.WindField AddAirResistance(Vector3? wind = null)
+    {
+        var field = new Engine.Weather.WindField(0, () => Clock.Tick, Dt, WorldVolume) { Override = wind ?? Vector3.Zero };
+        AddBeforePhysics(new AirshipResistanceSystem(World, Physics));
+        AddBeforePhysics(new AirResistanceSystem(World, Physics, field));
+        return field;
+    }
+
     /// <summary>Runs <paramref name="system"/> each tick just before the physics step (e.g. flight).</summary>
     public void AddBeforePhysics(Engine.Core.ISystem system) => _tick.Insert(_tick.IndexOf(Physics), system);
 

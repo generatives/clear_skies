@@ -103,6 +103,7 @@ public class CrewTests
         var corner = new Vector3(2f, 51.4f, 2f);
         game.Host.SpawnLocalPlayer(remote ? new Vector3(30, 80, 30) : corner, freeFly: remote);
         game.Host.AddBeforePhysics(new AirshipFlightSystem(game.Host.World, game.Host.Physics) { FreePropulsion = true });
+        game.Host.AddAirResistance(); // still air: what sets the climb's top speed
         game.Tick(2);
         Entity? crew = null;
         if (remote)
