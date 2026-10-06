@@ -427,7 +427,7 @@ fn sunLevel(g: i32, v: vec3<i32>, list: u32) -> u32 {
 // threads: the same work in far fewer (and full) SIMD groups.
 var<workgroup> wList: array<u32, 512>;      // brick voxel indices (x + 8y + 64z) of the surface air voxels
 var<workgroup> wCount: atomic<u32>;
-var<workgroup> wSun: array<u32, 512>;       // sun_main: each voxel's result, for the paired write
+var<workgroup> wSun: array<u32, 512>;       // sun_main, compose_main: each voxel's result, for the paired write
 
 fn isSurfaceAir(g: i32, v: vec3<i32>) -> bool { return !isSolid(g, v) && hasSolidNeighbour(g, v); }
 
@@ -525,11 +525,35 @@ fn faceDir(f: i32) -> vec3<i32> {
     return vec3<i32>(0, 0, s);
 }
 
-// Whether n is surface air (air with a solid face neighbour), testing through the cached chunk.
-fn surfaceAirCached(g: i32, n: vec3<i32>, cc: ptr<function, vec3<i32>>, info: ptr<function, vec4<i32>>) -> bool {
-    if (solidCached(g, n, cc, info)) { return false; }
+// ── Compose tile ──
+// compose_main is one workgroup per brick, and neighbouring voxels test nearly the same cells: whether each neighbour
+// is solid, whether it is surface air, and its stored bounce and AO. So the workgroup reads them once into workgroup
+// memory: the solidity of the brick and two cells around it (12³ bits, cOcc), and for the brick and one cell around it
+// (10³) which cells are surface air with light storage (cSurf, bits) and their accumulation words (cAcc). Every test
+// below reads those instead of the chunk and brick tables. The result is the same as testing each cell directly.
+const C12: i32 = 12;  // cOcc's side: the brick (8) and 2 cells each way
+const C10: i32 = 10;  // cSurf / cAcc's side: the brick and 1 cell each way
+var<workgroup> cOcc: array<atomic<u32>, 54>;   // 1728 bits, cell x + 12y + 144z (origin: the brick's first voxel - 2)
+var<workgroup> cSurf: array<atomic<u32>, 32>;  // 1000 bits, cell x + 10y + 100z (origin: the brick's first voxel - 1)
+var<workgroup> cAcc: array<u32, 1000>;         // those cells' accumulation words, where cSurf is set
+
+fn tileSolid(c: vec3<i32>) -> bool { // c: 12³ cell
+    let i = u32(c.x + C12 * (c.y + C12 * c.z));
+    return ((atomicLoad(&cOcc[i >> 5u]) >> (i & 31u)) & 1u) == 1u;
+}
+
+fn tileSurfIndex(c: vec3<i32>) -> u32 { return u32(c.x + C10 * (c.y + C10 * c.z)); } // c: 10³ cell
+
+fn tileSurf(c: vec3<i32>) -> bool {
+    let i = tileSurfIndex(c);
+    return ((atomicLoad(&cSurf[i >> 5u]) >> (i & 31u)) & 1u) == 1u;
+}
+
+// Whether 12³ cell c is surface air (air with a solid face neighbour); c is within one cell of the brick.
+fn tileSurfaceAir(c: vec3<i32>) -> bool {
+    if (tileSolid(c)) { return false; }
     for (var f = 0; f < 6; f = f + 1) {
-        if (solidCached(g, n + faceDir(f), cc, info)) { return true; }
+        if (tileSolid(c + faceDir(f))) { return true; }
     }
     return false;
 }
@@ -539,61 +563,117 @@ fn surfaceAirCached(g: i32, n: vec3<i32>, cc: ptr<function, vec3<i32>>, info: pt
 // edge), the voxel itself counting 2. Each voxel fires its own fixed ray directions, so this pools several voxels'
 // ray sets: one ray starting or stopping to hit a moving ship moves the result a few times less. The diagonals matter
 // on stepped surfaces such as rounded island undersides, where the surface air cells touch only diagonally. Other air
-// is skipped (it fires no rays, so it has no bounce or AO). Solidity is read through one cached chunk, since nearly
-// all of these cells share the voxel's.
-fn smoothedAcc(g: i32, v: vec3<i32>, own: u32) -> vec4<f32> {
-    var cc = vec3<i32>(v >> vec3<u32>(5u));
-    var info = chunkInfo(g, cc);
+// is skipped (it fires no rays, so it has no bounce or AO), as is any without light storage. lk: the voxel in its
+// brick (0-7); read from the compose tile.
+fn smoothedAcc(lk: vec3<i32>, own: u32) -> vec4<f32> {
+    let c12 = lk + vec3<i32>(2);
+    let c10 = lk + vec3<i32>(1);
     var sum = unpackAcc(own) * 2.0;
     var w = 2.0;
     var faceSolid: array<bool, 6>;
     for (var f = 0; f < 6; f = f + 1) {
-        let n = v + faceDir(f);
-        faceSolid[f] = solidCached(g, n, &cc, &info);
-        if (faceSolid[f] || !surfaceAirCached(g, n, &cc, &info)) { continue; }
-        let r = voxelRef(g, n);
-        if (r.ok) { sum = sum + unpackAcc(lightPool[r.acc]); w = w + 1.0; }
+        let d = faceDir(f);
+        faceSolid[f] = tileSolid(c12 + d);
+        if (faceSolid[f] || !tileSurf(c10 + d)) { continue; }
+        sum = sum + unpackAcc(cAcc[tileSurfIndex(c10 + d)]);
+        w = w + 1.0;
     }
     // Edge diagonals: faces fa < fb on different axes.
     for (var fa = 0; fa < 4; fa = fa + 1) {
         for (var fb = (fa & ~1) + 2; fb < 6; fb = fb + 1) {
             if (faceSolid[fa] && faceSolid[fb]) { continue; } // no air path around the edge
-            let n = v + faceDir(fa) + faceDir(fb);
-            if (!surfaceAirCached(g, n, &cc, &info)) { continue; }
-            let r = voxelRef(g, n);
-            if (r.ok) { sum = sum + 0.5 * unpackAcc(lightPool[r.acc]); w = w + 0.5; }
+            let n = c10 + faceDir(fa) + faceDir(fb);
+            if (!tileSurf(n)) { continue; }
+            sum = sum + 0.5 * unpackAcc(cAcc[tileSurfIndex(n)]);
+            w = w + 0.5;
         }
     }
     return sum / w;
 }
 
-// The voxel's display half: the flat ambient (p.bounce2.z) darkened by the ray AO (times its strength, p.bounce2.w),
-// its lamp light (traced now) and bounce (times the display scale, p.bounce.z), combined per channel by max, and the
-// given sun level; bounce and AO are the stored ones smoothed over neighbours (smoothedAcc). Air away from any
-// surface gets the plain ambient.
-fn composeVoxel(g: i32, v: vec3<i32>, acc: u32, sun: u32, list: u32) -> u32 {
+// A surface voxel's display half: the flat ambient (p.bounce2.z) darkened by the ray AO (times its strength,
+// p.bounce2.w), its lamp light (traced now) and bounce (times the display scale, p.bounce.z), combined per channel by
+// max, and the given sun level; bounce and AO are the stored ones, smoothed over neighbours (smoothedAcc) when smooth.
+fn composeSurface(g: i32, v: vec3<i32>, lk: vec3<i32>, acc: u32, sun: u32, list: u32, smooth: bool) -> u32 {
     let ambient = p.bounce2.z;
-    if (isSolid(g, v) || !hasSolidNeighbour(g, v)) { return encodeLight(vec3<f32>(ambient)) | (sun << 14u); }
-    // Only the frame's last compose of a brick smooths (p.bounce.x): the ones before it are there for the bounce passes
-    // to read current light, and each voxel's own value does for that at a fraction of the cost.
-    let sm = select(unpackAcc(acc), smoothedAcc(g, v, acc), p.bounce.x > 0.5);
+    let sm = select(unpackAcc(acc), smoothedAcc(lk, acc), smooth);
     let bounce = sm.rgb * p.bounce.z;
     let sky = ambient * (1.0 - p.bounce2.w * sm.a);
     let light = max(max(lampLight(g, v, list), bounce), vec3<f32>(sky));
     return encodeLight(light) | (sun << 14u);
 }
 
+// Recomposes a brick's display (see composeSurface): solid voxels and air away from any surface get the plain ambient;
+// the surface voxels are gathered into a list (lamp rays make their cost uneven) and composed by consecutive threads.
+// Only the frame's last compose of a brick smooths (p.bounce.x): the ones before it are there for the bounce passes to
+// read current light, and each voxel's own value does for that at a fraction of the cost.
 @compute @workgroup_size(256)
 fn compose_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
                 @builtin(local_invocation_index) t: u32) {
     let wi = wid.x + wid.y * nwg.x;
     if (wi >= u32(p.counts.z)) { return; }
-    let it = itemOf(work[wi], t);
+    let slot = work[wi];
+    let it = itemOf(slot, t);
+    let base = it.v0 - vec3<i32>(i32(t * 2u) & 7, (i32(t * 2u) >> 3u) & 7, i32(t * 2u) >> 6u); // the brick's first voxel
+    let smooth = p.bounce.x > 0.5;
+    if (t == 0u) { atomicStore(&wCount, 0u); }
+    if (t < 54u) { atomicStore(&cOcc[t], 0u); }
+    if (t < 32u) { atomicStore(&cSurf[t], 0u); }
+    workgroupBarrier();
+
+    // Solidity of the brick and two cells around it (smoothing tests its neighbours' neighbours), read through a
+    // cached chunk: a thread's cells are mostly in one.
+    var cc = vec3<i32>(base >> vec3<u32>(5u));
+    var info = chunkInfo(it.g, cc);
+    for (var i = i32(t); i < C12 * C12 * C12; i = i + 256) {
+        let c = vec3<i32>(i % C12, (i / C12) % C12, i / (C12 * C12));
+        if (solidCached(it.g, base - vec3<i32>(2) + c, &cc, &info)) { atomicOr(&cOcc[u32(i) >> 5u], 1u << (u32(i) & 31u)); }
+    }
+    workgroupBarrier();
+
+    // For smoothing: which cells of the brick and one around it are surface air with light storage, and their
+    // accumulation (the brick's own straight from its slot, its neighbours' through the tables).
+    if (smooth) {
+        for (var i = i32(t); i < C10 * C10 * C10; i = i + 256) {
+            let c = vec3<i32>(i % C10, (i / C10) % C10, i / (C10 * C10));
+            if (!tileSurfaceAir(c + vec3<i32>(1))) { continue; }
+            let lk = c - vec3<i32>(1);
+            var acc = -1;
+            if (all(lk >= vec3<i32>(0)) && all(lk < vec3<i32>(8))) {
+                acc = i32(slot) * SLOT_WORDS + ACC_BASE + lk.x + 8 * (lk.y + 8 * lk.z);
+            } else {
+                let r = voxelRef(it.g, base + lk);
+                if (r.ok) { acc = r.acc; }
+            }
+            if (acc < 0) { continue; }
+            cAcc[i] = lightPool[acc];
+            atomicOr(&cSurf[u32(i) >> 5u], 1u << (u32(i) & 31u));
+        }
+    }
+    workgroupBarrier();
+
+    // Every voxel starts as plain ambient with its sun level; the surface ones are listed to be composed.
+    let ambientWord = encodeLight(vec3<f32>(p.bounce2.z));
     let old = lightPool[it.disp];
+    for (var e = 0u; e < 2u; e = e + 1u) {
+        let k = t * 2u + e;
+        wSun[k] = ambientWord | (((old >> (16u * e + 14u)) & 3u) << 14u);
+        if (tileSurfaceAir(vec3<i32>(i32(k & 7u), i32((k >> 3u) & 7u), i32(k >> 6u)) + vec3<i32>(2))) {
+            wList[atomicAdd(&wCount, 1u)] = k;
+        }
+    }
+    workgroupBarrier();
+
+    let n = atomicLoad(&wCount);
     let list = listOf(it.g, it.v0);
-    let d0 = composeVoxel(it.g, it.v0, lightPool[it.acc], (old >> 14u) & 3u, list);
-    let d1 = composeVoxel(it.g, it.v0 + vec3<i32>(1, 0, 0), lightPool[it.acc + 1], (old >> 30u) & 3u, list);
-    lightPool[it.disp] = d0 | (d1 << 16u);
+    let accBase = it.acc - i32(t * 2u);
+    for (var i = t; i < n; i = i + 256u) {
+        let k = wList[i];
+        let lk = vec3<i32>(i32(k & 7u), i32((k >> 3u) & 7u), i32(k >> 6u));
+        wSun[k] = composeSurface(it.g, base + lk, lk, lightPool[accBase + i32(k)], (wSun[k] >> 14u) & 3u, list, smooth);
+    }
+    workgroupBarrier();
+    lightPool[it.disp] = wSun[t * 2u] | (wSun[t * 2u + 1u] << 16u);
 }
 
 // ── Bounce (one-hop indirect light, multi-hop through re-evaluation) ─────────────────────────────────────
