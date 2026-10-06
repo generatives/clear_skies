@@ -21,6 +21,13 @@ public class TreeTests
         Assert.Empty(On(BlockId.Dirt, 300));
     }
 
+    [Fact]
+    public void Leaves_keep_their_faces_against_each_other()
+    {
+        Assert.False(BlockRegistry.Get(BlockId.Leaves).HidesFaceOf(BlockId.Leaves));
+        Assert.True(BlockRegistry.Get(BlockId.Glass).HidesFaceOf(BlockId.Glass));
+    }
+
     [Theory]
     [InlineData(Trees.Kind.Oak)]
     [InlineData(Trees.Kind.Pine)]

@@ -91,11 +91,11 @@ public static class BlockRegistry
         RegisterCross(BlockId.MossyPebbles,  "Mossy Pebbles",  "rock_moss",      new(0.45f, 0.62f, 0.50f));
 
         // Trees and cacti, grown by world generation. Leaves are cut out like glass, so they show what's behind their
-        // gaps; pine needles are the solid leaf texture, so pines read darker and denser.
+        // gaps, and keep their faces against each other so a canopy looks full right through; pine needles are the solid leaf texture, so pines read darker and denser.
         Register(new BlockDef { Id = BlockId.Log, Name = "Log", Color = new(0.45f, 0.32f, 0.20f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 1,
             Texture = "trunk_side", TextureTop = "trunk_top", TextureBottom = "trunk_top" });
         Register(new BlockDef { Id = BlockId.Leaves, Name = "Leaves", Color = new(0.20f, 0.65f, 0.35f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 0.2f,
-            Texture = "leaves_transparent", Layer = RenderLayer.Cutout });
+            Texture = "leaves_transparent", Layer = RenderLayer.Cutout, ShowsInnerFaces = true });
         Register(new BlockDef { Id = BlockId.PineLeaves, Name = "Pine Needles", Color = new(0.15f, 0.50f, 0.30f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 0.2f,
             Texture = "leaves" });
         Register(new BlockDef { Id = BlockId.Cactus, Name = "Cactus", Color = new(0.25f, 0.65f, 0.35f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 1,

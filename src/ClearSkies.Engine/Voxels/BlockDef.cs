@@ -33,6 +33,10 @@ public readonly struct BlockDef
     /// only its outer surface), and it lets light through (see <see cref="BlocksLight"/>).
     public bool            Transparent    => Layer != RenderLayer.Opaque;
 
+    /// True for a <see cref="Transparent"/> cube that doesn't hide even its own type's faces, so a mass of it shows its
+    /// inside through its gaps: leaves, whose canopy should look dense rather than a thin shell.
+    public bool            ShowsInnerFaces { get; init; }
+
     /// Opacity (0-1) a <see cref="RenderLayer.Translucent"/> block's faces are drawn with, multiplying its texture's
     /// alpha: e.g. water, whose texture is fully opaque. 0 (unset) means 1, the texture's alpha alone.
     public float           Alpha          { get; init; }
@@ -119,8 +123,9 @@ public readonly struct BlockDef
     public bool BlocksLight => Model == null ? IsFullCube && !Transparent : IsSolid && OpaqueModel;
 
     /// True when this block hides the face of a <paramref name="neighbour"/> block that touches it: an opaque cube or
-    /// <see cref="OpaqueModel"/> hides every face against it, a <see cref="Transparent"/> cube only those of its own type.
-    public bool HidesFaceOf(BlockId neighbour) => BlocksLight || (IsFullCube && Transparent && Id == neighbour);
+    /// <see cref="OpaqueModel"/> hides every face against it, a <see cref="Transparent"/> cube only those of its own type
+    /// (unless it <see cref="ShowsInnerFaces"/>).
+    public bool HidesFaceOf(BlockId neighbour) => BlocksLight || (IsFullCube && Transparent && Id == neighbour && !ShowsInnerFaces);
 
     /// True when this block can hide a neighbour's face (see <see cref="HidesFaceOf"/>).
     public bool HidesFaces => BlocksLight || IsFullCube;
