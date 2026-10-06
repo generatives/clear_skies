@@ -40,11 +40,10 @@ public sealed class WorldSave : IDisposable
 }
 
 /// <summary>
-/// Hosting a world from its save: the Host, which has no world of its own (it keeps track of who has what, and relays
-/// everything), the network others join it over (<see cref="Network"/>, if any), and this machine's Participant, joined
-/// to it directly, which has authority over every entity, with the save's streaming and autosave
-/// (<see cref="Streaming"/> and <see cref="Saver"/>, which the game puts early in the tick, after the local player's
-/// input if any). With <paramref name="transport"/> off, nobody else can join (single-player).
+/// Hosting a world from its save: the Host, which has no world of its own (it keeps the save, decides what's loaded
+/// and who sees what, and relays everything), the network others join it over (<see cref="Network"/>, if any), and
+/// this machine's Participant, joined to it directly, which has authority over every entity. With
+/// <paramref name="transport"/> off, nobody else can join (single-player).
 /// </summary>
 public sealed class Hosting : IDisposable
 {
@@ -53,28 +52,28 @@ public sealed class Hosting : IDisposable
     {
         var (eye, yaw, pitch) = WorldSpawn.For(save.Seed);
         ulong checksum = GenerationChecksum.Compute();
-        Host = new Host(save.Database, world.Host.Clock, save.Seed, checksum, (WorldSpawn.PlayerAt(eye), yaw, pitch));
+        Host = new Host(save.Database, world.Host.Clock, save.Seed, checksum, (WorldSpawn.PlayerAt(eye), yaw, pitch))
+        {
+            SaveChunks = world.ChunkLoad.SaveAllDirty,
+        };
         Network = transport is null ? null : new HostNetwork(Host, transport);
         Net = SimulationParticipant.Join(Host, new Hello(ProtocolVersion.Current, playerName ?? "", checksum), world.Session, world.Commands,
                                          world.Registry, world.Host.World, world.Host.Clock, world.TerrainReadyFor);
         Net.OthersHere = () => Host.OthersConnected;
         Net.Viewing = playerName is not null;
-        // Entities load within 1,000 blocks of a player and unload past 1,100, written to the save as they go; everything
-        // is autosaved every 5 minutes and on exit, in one transaction.
-        var index = new StoredEntityIndex(save.Database.ReadEntityIndex());
-        Saver = new WorldSaver(world.Host.World, save.Database, index, world.Commands, Host.Ids) { SaveChunks = world.ChunkLoad.SaveAllDirty };
-        Streaming = new EntityStreamingSystem(world.Host.World, save.Database, index, world.Registry, world.Commands, Saver);
     }
 
     public Host Host { get; }
     /// <summary>Participants on other machines, joining over the network (none: single-player). First in the tick.</summary>
     public HostNetwork? Network { get; }
     public SimulationParticipant Net { get; }
-    public EntityStreamingSystem Streaming { get; }
-    public WorldSaver Saver { get; }
 
-    /// <summary>Saves everything, in one transaction (on exit).</summary>
-    public void SaveAll() => Saver.SaveAll();
+    /// <summary>Saves everything, in one transaction (on exit): the authority describes it all, and the Host writes it.</summary>
+    public void SaveAll()
+    {
+        Host.SaveAll(); // the authority, on this machine, answers at once
+        if (Host.Saving) Console.WriteLine("[save] the authority never finished describing the world: not saved");
+    }
 
     public void Dispose()
     {

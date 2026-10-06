@@ -5,6 +5,7 @@ using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Persistence;
 using ClearSkies.Engine.Voxels;
+using ClearSkies.Net.Session;
 using DefaultEcs;
 using Silk.NET.Maths;
 using Xunit;
@@ -107,144 +108,150 @@ public class SaveDatabaseTests
             var seen = new HashSet<EntityId>();
             for (int session = 0; session < 3; session++)
             {
-                using var db = SaveDatabase.Open(path);
-                using var scene = new HeadlessScene(firstFreeId: db.NextFreeId);
-                scene.EnablePersistence(db);
-                for (int i = 0; i < 1500; i++) Assert.True(seen.Add(scene.Registry.Allocate()));
-                scene.Saver!.SaveAll();
+                using var game = new LoopbackGame(save: SaveDatabase.Open(path));
+                for (int i = 0; i < 1500; i++)
+                {
+                    Assert.True(seen.Add(game.Host.Registry.Allocate()));
+                    if (i % 100 == 0) game.Tick(); // more IDs from the Host as they run low
+                }
+                game.SaveAll();
             }
         }
         finally { File.Delete(path); }
     }
 }
 
+/// <summary>The Host streams entities by View Volume: loaded from the save as one comes into a view, released (saved,
+/// then despawned) once out of every view.</summary>
 public class StreamingTests
 {
-    private static (HeadlessScene scene, SaveDatabase db, Entity player, Entity grid) Scene()
+    /// <summary>A ship with a lamp on it at (20, 50, 0), and a client's player beside it, free-flying.</summary>
+    private static (LoopbackGame Game, Entity Player, Entity Grid) Scene(SaveDatabase? save = null)
     {
-        var db = SaveDatabase.InMemory();
-        var scene = new HeadlessScene();
-        scene.EnablePersistence(db);
-        var player = scene.SpawnLocalPlayer(new Vector3(0, 60, 0), freeFly: true);
-        var grid = scene.SpawnPlatform(new Vector3(20, 50, 0), size: 3);
+        var game = new LoopbackGame(save: save);
+        var grid = game.Host.SpawnPlatform(new Vector3(20, 50, 0), size: 3);
         grid.Get<ChunkGrid>().Volume.SetBlock(1, 1, 1, BlockId.Lamp);
-        scene.Tick(2);
-        return (scene, db, player, grid);
+        game.Tick(2);
+        var (client, _) = game.Join();
+        var player = client.World.GetEntities().With<LocalPlayer>().AsEnumerable().Single();
+        return (game, player, grid);
     }
 
-    private static void MovePlayer(Entity player, float x) =>
-        player.Get<Transform>().Position = new Vector3D<float>(x, 60, 0);
+    /// <summary>Moves the client's player, and ticks until the Host has its new View Volume.</summary>
+    private static void MovePlayer(LoopbackGame game, Entity player, float x, int ticks = SimulationParticipant.ViewTicks + 5)
+    {
+        game.Teleport(player, new Vector3(x, 60, 0));
+        game.Tick(ticks);
+    }
+
+    private static bool OnClient(LoopbackGame game, EntityId id) => game.Clients[0].Scene.Registry.IsLive(id);
 
     [Fact]
-    public void AGridOutsideEveryWindowIsStoredAndDespawned()
+    public void AGridOutOfEveryViewIsSavedAndReleased()
     {
-        var (scene, db, player, grid) = Scene();
-        using var _ = scene; using var __ = db;
+        var (game, player, grid) = Scene();
+        using var _ = game;
         var id = grid.Get<EntityId>();
-        MovePlayer(player, 1200); // 1,180 from the grid: past the unload window
-        scene.Tick(3);
+        Assert.True(OnClient(game, id));
+        MovePlayer(game, player, 1200); // 1,180 from the grid: out of the view, even with hysteresis
         Assert.False(grid.IsAlive);
-        Assert.NotNull(db.ReadEntity(id));
-        Assert.True(scene.Index!.TryGet(id, out var entry));
-        Assert.True(Vector3.Distance(entry.Position!.Value, new Vector3(20, 50, 0)) < 1f);
+        Assert.False(OnClient(game, id));
+        Assert.NotNull(game.Save.ReadEntity(id));
+        var entry = game.Save.ReadEntityIndex().Single(e => e.Id == id);
+        Assert.True(Vector3.Distance(entry.Position!.Value, new Vector3(20, 50, 0)) < 3f);
     }
 
     [Fact]
     public void ComingBackLoadsItAgainAsItWas()
     {
-        var (scene, db, player, grid) = Scene();
-        using var _ = scene; using var __ = db;
+        var (game, player, grid) = Scene();
+        using var _ = game;
         var id = grid.Get<EntityId>();
-        var before = DescriptionTests.DescribeNow(scene, grid).Hash;
-        MovePlayer(player, 1200);
-        scene.Tick(3);
-        MovePlayer(player, 0);
-        scene.Tick(2);
-        var back = scene.Registry.Find(id);
+        var before = DescriptionTests.DescribeNow(game.Host, grid).Hash;
+        MovePlayer(game, player, 1200);
+        MovePlayer(game, player, 0);
+        var back = game.Host.Registry.Find(id);
         Assert.NotNull(back);
-        Assert.Equal(before, DescriptionTests.DescribeNow(scene, back!.Value).Hash);
+        Assert.Equal(before, DescriptionTests.DescribeNow(game.Host, back!.Value).Hash);
         Assert.Equal(BlockId.Lamp, back.Value.Get<ChunkGrid>().Volume.GetBlock(1, 1, 1));
+        var copy = game.Clients[0].Scene.Registry.Find(id);
+        Assert.NotNull(copy);
+        Assert.Equal(BlockId.Lamp, copy!.Value.Get<ChunkGrid>().Volume.GetBlock(1, 1, 1));
     }
 
     [Fact]
-    public void TheWindowsHaveHysteresis()
+    public void ViewsHaveHysteresis()
     {
-        var (scene, db, player, grid) = Scene();
-        using var _ = scene; using var __ = db;
+        var (game, player, grid) = Scene();
+        using var _ = game;
         var id = grid.Get<EntityId>();
-        MovePlayer(player, 1100); // 1,080 away: inside the unload window, outside the load window
-        scene.Tick(3);
+        MovePlayer(game, player, 1080); // 1,060 away: past the view, but within its hysteresis
         Assert.True(grid.IsAlive);
-        MovePlayer(player, 1200);
-        scene.Tick(3);
-        Assert.False(scene.Registry.IsLive(id));
-        MovePlayer(player, 1100); // back to 1,080: not yet within the load window
-        scene.Tick(3);
-        Assert.False(scene.Registry.IsLive(id));
-        MovePlayer(player, 1000);
-        scene.Tick(2);
-        Assert.True(scene.Registry.IsLive(id));
+        Assert.True(OnClient(game, id));
+        MovePlayer(game, player, 1200);
+        Assert.False(game.Host.Registry.IsLive(id));
+        MovePlayer(game, player, 1080); // back to 1,060: not yet in view
+        Assert.False(game.Host.Registry.IsLive(id));
+        MovePlayer(game, player, 1000);
+        Assert.True(game.Host.Registry.IsLive(id));
+        Assert.True(OnClient(game, id));
     }
 
     [Fact]
     public void ALiveEntityIsNeverLoadedTwice()
     {
-        var (scene, db, player, grid) = Scene();
-        using var _ = scene; using var __ = db;
-        scene.Saver!.SaveAll(); // now in the index and live
-        scene.Tick(5);
-        Assert.Single(scene.World.GetEntities().With<DynamicGrid>().AsEnumerable());
+        var (game, _, _) = Scene();
+        using var __ = game;
+        game.SaveAll(); // now in the save, and live
+        game.Tick(5);
+        Assert.Single(game.Host.World.GetEntities().With<DynamicGrid>().AsEnumerable());
+        Assert.Single(game.Clients[0].Scene.World.GetEntities().With<DynamicGrid>().AsEnumerable());
     }
 
     [Fact]
     public void AGlobalEntityIsAlwaysLoaded()
     {
-        var (scene, db, player, grid) = Scene();
-        using var _ = scene; using var __ = db;
-        // A stored row with no position, far from everyone as far as position goes.
-        var d = DescriptionTests.DescribeNow(scene, grid);
-        Hierarchy.DestroyRecursive(grid);
+        // A stored row with no position: in every view, however far anyone is.
+        var db = SaveDatabase.InMemory();
+        EntityDescription d;
+        using (var scene = new HeadlessScene())
+            d = DescriptionTests.DescribeNow(scene, scene.SpawnPlatform(new Vector3(20, 50, 0), size: 3));
         db.WriteEntity(d.Id, d.Kind, null, d.Data);
-        scene.Index!.Set(new StoredEntity(d.Id, d.Kind, null));
-        MovePlayer(player, 50_000);
-        scene.Tick(5); // loaded, and not unloaded again for being far away
-        Assert.True(scene.Registry.IsLive(d.Id));
-        scene.Saver!.SaveAll();
-        Assert.True(scene.Index.TryGet(d.Id, out var entry) && entry.Position is null); // still global
+
+        using var game = new LoopbackGame(save: db);
+        var (client, _) = game.Join();
+        var player = client.World.GetEntities().With<LocalPlayer>().AsEnumerable().Single();
+        MovePlayer(game, player, 50_000);
+        Assert.True(game.Host.Registry.IsLive(d.Id));
+        Assert.True(client.Registry.IsLive(d.Id));
+        game.SaveAll();
+        Assert.Null(db.ReadEntityIndex().Single(e => e.Id == d.Id).Position); // still global
     }
 
     [Fact]
-    public void AutosaveAndRestartRestoreShipsAndThePlayer()
+    public void SavingAndRestartingRestoreShipsAndThePlayer()
     {
         string path = Path.Combine(Path.GetTempPath(), $"cs-test-{Guid.NewGuid():N}.db");
         try
         {
             EntityId gridId;
             PlayerId who;
-            using (var db = SaveDatabase.Open(path))
-            using (var scene = new HeadlessScene(firstFreeId: db.NextFreeId))
+            var (game, player, grid) = Scene(SaveDatabase.Open(path));
+            using (game)
             {
-                scene.EnablePersistence(db);
-                var player = scene.SpawnLocalPlayer(new Vector3(5, 60, 5), freeFly: true);
-                var grid = scene.SpawnPlatform(new Vector3(20, 50, 0), size: 3);
-                scene.Tick(2);
                 (gridId, who) = (grid.Get<EntityId>(), player.Get<Player>().Id);
-                MovePlayer(player, 7);
-                scene.Saver!.SaveAll();
+                MovePlayer(game, player, 7);
+                game.SaveAll();
             }
-            using (var db = SaveDatabase.Open(path))
-            using (var scene = new HeadlessScene(firstFreeId: db.NextFreeId))
+            using (game = new LoopbackGame(save: SaveDatabase.Open(path)))
             {
-                scene.EnablePersistence(db);
-                var saved = db.ReadPlayer(who);
-                Assert.NotNull(saved);
-                scene.Commands.Send(new Spawn<PlayerDescription> { Description = DescriptionBytes.Read<PlayerDescription>(saved) });
-                scene.Tick(3);
-                var player = scene.World.GetEntities().With<Player>().AsEnumerable().Single();
+                var (client, _) = game.Join();
+                player = client.World.GetEntities().With<LocalPlayer>().AsEnumerable().Single();
                 Assert.Equal(who, player.Get<Player>().Id);
-                Assert.Equal(7f, player.Get<Transform>().Position.X);
-                Assert.True(scene.Registry.IsLive(gridId)); // loaded around the restored player
-                Assert.True(scene.Registry.Allocate().Value > gridId.Value);
+                Assert.Equal(7f, player.Get<Transform>().Position.X, 2);
+                Assert.True(game.Host.Registry.IsLive(gridId)); // loaded into the restored player's view
+                Assert.True(client.Registry.IsLive(gridId));
+                Assert.True(game.Host.Registry.Allocate().Value > gridId.Value);
             }
         }
         finally { File.Delete(path); }
@@ -253,38 +260,41 @@ public class StreamingTests
     [Fact]
     public void ADeletedGridLeavesTheSave()
     {
-        var (scene, db, player, grid) = Scene();
-        using var _ = scene; using var __ = db;
+        var (game, _, grid) = Scene();
+        using var __ = game;
         var id = grid.Get<EntityId>();
-        scene.Saver!.SaveAll();
-        Assert.NotNull(db.ReadEntity(id));
-        scene.Commands.Send(new DespawnEntity { Entity = id });
-        scene.Tick(3);
-        Assert.Null(db.ReadEntity(id));
-        Assert.False(scene.Registry.IsLive(id));
+        game.SaveAll();
+        Assert.NotNull(game.Save.ReadEntity(id));
+        game.Host.Commands.Send(new DespawnEntity { Entity = id });
+        game.Tick(3);
+        Assert.Null(game.Save.ReadEntity(id));
+        Assert.False(game.Host.Registry.IsLive(id));
+        Assert.False(OnClient(game, id));
     }
 }
 
-public class TerrainGatingTests
+public class SpawnQueueTests
 {
     [Fact]
-    public void AGridGetsABodyOnlyOnceTheTerrainAroundItIsReady()
+    public void AStoredGridSpawnsOnlyOnceTheTerrainAroundItIsReady()
     {
-        using var scene = new HeadlessScene();
+        var db = SaveDatabase.InMemory();
+        EntityDescription d;
+        using (var scene = new HeadlessScene())
+            d = DescriptionTests.DescribeNow(scene, scene.SpawnPlatform(new Vector3(20, 50, 0), size: 3));
+        db.WriteEntity(d.Id, d.Kind, new Vector3(20, 50, 0), d.Data);
+
         bool ready = false;
-        scene.Presence.TerrainReady = _ => ready;
-        scene.SpawnLocalPlayer(new Vector3(0, 60, 0), freeFly: true);
-        var grid = scene.SpawnPlatform(new Vector3(20, 50, 0), size: 3);
-        scene.Tick(3);
-        Assert.False(grid.Has<PhysicsPresence>());
-        Assert.False(grid.Has<PhysicsBodyComponent>());
-        Assert.True(grid.Has<TerrainInterest>()); // its terrain is being loaded meanwhile
+        using var game = new LoopbackGame(save: db, hostTerrainReady: _ => ready);
+        var (client, _) = game.Join(wait: false);
+        game.Tick(10);
+        Assert.False(game.Host.Registry.IsLive(d.Id));
+        Assert.True(game.Host.World.GetEntities().With<TerrainInterest>().AsEnumerable().Any()); // its terrain is loading meanwhile
+        Assert.True(client.Registry.IsLive(d.Id)); // only drawn there: it needs nothing
         ready = true;
-        scene.Tick(2);
-        Assert.True(grid.Has<PhysicsBodyComponent>());
-        ready = false; // once it has a body it keeps it
-        scene.Tick(2);
-        Assert.True(grid.Has<PhysicsBodyComponent>());
+        game.Tick(5);
+        Assert.True(game.Host.Registry.Find(d.Id)!.Value.Has<PhysicsBodyComponent>());
+        Assert.True(client.Registry.IsLive(d.Id));
     }
 
     [Fact]

@@ -83,6 +83,8 @@ public sealed class HostNetwork : ISystem, IDisposable
                 case MessageKind.Described: _host.EntityDescribed(joined, DescriptionMessage.Read(kind, ref r)); break;
                 case MessageKind.Released: _host.EntityReleased(joined, DescriptionMessage.Read(kind, ref r)); break;
                 case MessageKind.Deleted: _host.EntityDeleted(joined, EntityMessage.Read(kind, ref r).Id); break;
+                case MessageKind.Saved: _host.EntitySaved(joined, DescriptionMessage.Read(kind, ref r)); break;
+                case MessageKind.SaveDone: _host.SaveDone(joined); break;
                 case MessageKind.Disconnect: from.Disconnect(DisconnectMessage.Read(ref r).Reason); break;
             }
         }
@@ -143,6 +145,7 @@ public sealed class HostNetwork : ISystem, IDisposable
         public void ReceiveInput(in PlayerInputMessage input) => Send(input, Channel.Unreliable);
         public void Release(EntityId entity) => Send(new EntityMessage(MessageKind.Release, entity));
         public void Describe(EntityId entity) => Send(new EntityMessage(MessageKind.DescribeRequest, entity));
+        public void Save() => Send(new SignalMessage(MessageKind.SaveRequest));
 
         private void Send<T>(in T message, Channel channel = Channel.Reliable) where T : struct, IMessage
         {

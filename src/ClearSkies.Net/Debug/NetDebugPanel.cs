@@ -38,7 +38,9 @@ public sealed class NetDebugPanel : IDebugUiSystem
                                    : $"Participants: {host.Participants.Count}");
             foreach (var p in host.Participants)
                 ImGui.Text($"  {p.Name} ({p.Peer}): {p.Known.Count} entities, view at ({p.ViewCentre.X:0}, {p.ViewCentre.Y:0}, {p.ViewCentre.Z:0})");
-            ImGui.Text($"Entities kept: {host.Entities.Count}; players released {host.Releases} this session");
+            ImGui.Text($"Entities kept: {host.Entities.Count} ({host.Entities.Values.Count(e => e.Loaded)} loaded); " +
+                       $"loaded {host.Loads}, released {host.Releases} this session; saves {host.Saves}");
+            if (ImGui.Button("Save now")) host.SaveAll();
         }
         ImGui.Text($"Spawns waiting: {_net.Spawns.Count}");
         _net.Inputs?.DrawDebugUi();

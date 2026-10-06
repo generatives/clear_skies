@@ -16,14 +16,13 @@ namespace ClearSkies.Net.Session;
 /// A SimulationParticipant: an ECS world kept in step with the game, on every machine that plays, the hosting one's
 /// included. It tells the Host things through an <see cref="IHost"/> (on the hosting machine, the Host itself; on any
 /// other, a <see cref="RemoteHost"/>), and the Host tells it things as its <see cref="IParticipant"/>. The Host spawns
-/// into it every entity the authority has and has it forget what's released; each spawn waits here, with its events,
-/// until what it needs has loaded (<see cref="SpawnQueue"/>). It keeps the Host told of its View Volume, around its
-/// player. It's also the command router: commands go to their authority, events to everyone who applies them, always
+/// into it what's in its View Volume (which it keeps the Host told of, around its player) and has it forget what
+/// leaves; each spawn waits here, with its events, until what it needs has loaded (<see cref="SpawnQueue"/>). It's also the command router: commands go to their authority, events to everyone who applies them, always
 /// through the Host.
 /// <para>The hosting machine's is the authority (<see cref="PeerId.Host"/>): it simulates every entity, players
 /// included (moving each by their machine's input, <see cref="RemoteInputs"/>), decides every command, and describes
-/// entities for the Host: ones it makes or loads, ones the Host asks for, and ones the Host releases (then despawns
-/// them); it tells the Host of every one it despawns. It shares the Host's clock. Any other simulates only its own player, predicting it
+/// entities for the Host: ones it makes, ones the Host asks for, ones the Host releases (then despawns them), and
+/// everything when the Host saves. It shares the Host's clock. Any other simulates only its own player, predicting it
 /// (<see cref="OwnPlayerPrediction"/>), and keeps its clock on the Host's (<see cref="ClockSync"/>). Its player spawns
 /// only once that has settled (<see cref="ClockSync.Ready"/>, for at most <see cref="ClockSync.MaxSettleMs"/>), so prediction
 /// starts on the Host's timeline.</para>
@@ -37,6 +36,7 @@ public sealed class SimulationParticipant : IParticipant, ISystem, ICommandRoute
     private readonly SpawnQueue _spawns;
     private readonly RemoteInputs? _inputs;
     private readonly EntitySet _localPlayers;
+    private readonly EntitySet _describable;
     private readonly EntitySet _created;
     private readonly HashSet<EntityId> _fromHost = new();
     private readonly List<EntityId> _deleted = new();
@@ -74,6 +74,7 @@ public sealed class SimulationParticipant : IParticipant, ISystem, ICommandRoute
         _spawns = new SpawnQueue(world, registry, commands, session, terrainReady) { LocalReady = () => ClockReady };
         _spawns.Spawning += id => _fromHost.Add(id);
         _localPlayers = world.GetEntities().With<LocalPlayer>().With<Transform>().AsSet();
+        _describable = world.GetEntities().With<EntityId>().With<OwnPresence>().Without<Chunk>().AsSet();
         _created = world.GetEntities().With<EntityId>().With<OwnPresence>().Without<Chunk>().WhenAdded<OwnPresence>().AsSet();
         commands.Applied += OnApplied;
     }
@@ -214,7 +215,7 @@ public sealed class SimulationParticipant : IParticipant, ISystem, ICommandRoute
 
     public void Spawn(in SpawnMessage spawn) => _spawns.Add(spawn);
 
-    /// <summary>Released: the copy goes.</summary>
+    /// <summary>Out of view: the copy goes (it's still in the game; it comes back as a spawn if it comes back into view).</summary>
     public void Forget(EntityId id)
     {
         if (_spawns.Cancel(id) is null && Registry.TryGet(id, out var e)) Hierarchy.DestroyRecursive(e);
@@ -263,6 +264,15 @@ public sealed class SimulationParticipant : IParticipant, ISystem, ICommandRoute
     /// <inheritdoc cref="Release"/>
     public void Describe(EntityId id) { if (IsAuthority) _toDescribe.Add(id); }
 
+    /// <summary>Answered at once, so the save on exit needs no more ticks.</summary>
+    public void Save()
+    {
+        if (!IsAuthority) return;
+        foreach (var e in Commands.Describe(_describable.GetEntities().ToArray())) _host.EntitySaved(Description(MessageKind.Saved, e));
+        foreach (var p in _spawns.All) _host.EntitySaved(Description(MessageKind.Saved, p));
+        _host.SaveDone();
+    }
+
     // ── entities coming and going ───────────────────────────────────────────
 
     /// <summary>What the Host asked of the authority since its last update: Descriptions, and releases.</summary>
@@ -307,9 +317,8 @@ public sealed class SimulationParticipant : IParticipant, ISystem, ICommandRoute
     {
         if (evt is not DespawnEntity despawn) return;
         Commands.ForgetEvents(despawn.Entity);
-        // Gone from the authority (unloaded, deleted, broken up, released): the Host stops keeping it. Told next tick,
-        // after its event.
-        if (IsAuthority) _deleted.Add(despawn.Entity);
+        // Gone for good (deleted, broken up), not released: out of the save too. Told next tick, after its event.
+        if (IsAuthority && !despawn.KeepStored) _deleted.Add(despawn.Entity);
     }
 
     private DescriptionMessage Description(MessageKind message, EntityDescription d)

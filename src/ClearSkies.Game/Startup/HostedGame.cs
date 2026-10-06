@@ -40,17 +40,15 @@ internal static class HostedGame
         host.AddSystem(new LookInputSystem(host.World, input), SystemStage.Input);
         host.AddSystem(view.InputSample, SystemStage.Input);
 
-        // Each 1/60 s tick (0 or more a frame, see TickClock). First what other machines sent, then the Host (what each
-        // Participant is owed), then this machine's Participant (spawns, commands, other players' input, which it hands
-        // each of them as their PlayerInput), the hierarchy, the frame's input as the local player's PlayerInput (tick
-        // systems read only that), and the save's streaming and autosave.
+        // Each 1/60 s tick (0 or more a frame, see TickClock). First what other machines sent, then the Host (what comes
+        // into and leaves each view, the autosave), then this machine's Participant (spawns, commands, other players'
+        // input, which it hands each of them as their PlayerInput), the hierarchy, and the frame's input as the local
+        // player's PlayerInput (tick systems read only that).
         if (hosting.Network is { } network) host.AddSystem(network, SystemStage.Simulation);
         host.AddSystem(hosting.Host, SystemStage.Simulation);
         host.AddSystem(net, SystemStage.Simulation);
         host.AddSystem(world.Hierarchy, SystemStage.Simulation);
         host.AddSystem(view.InputSample, SystemStage.Simulation);
-        host.AddSystem(hosting.Streaming, SystemStage.Simulation);
-        host.AddSystem(hosting.Saver, SystemStage.Simulation);
         host.AddSystem(world.PhysicsBody, SystemStage.Simulation);
         // Motion goals (WASD/jump/mode toggle) before the physics step, so its CollisionsDetected analysis sees them this
         // same tick (see Physics/Characters/).

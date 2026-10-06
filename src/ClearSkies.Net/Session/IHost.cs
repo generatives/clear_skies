@@ -48,6 +48,12 @@ public interface IHost
     /// <summary>The authority despawned an entity: the Host stops keeping it.</summary>
     void EntityDeleted(EntityId id);
 
+    /// <summary>The authority's answer to <see cref="IParticipant.Save"/>: one entity's Description, of everything.</summary>
+    void EntitySaved(in DescriptionMessage description);
+
+    /// <summary>The authority has described everything for the save.</summary>
+    void SaveDone();
+
     /// <summary>It's leaving, and why.</summary>
     void Leave(string reason);
 }
@@ -86,4 +92,8 @@ public interface IParticipant
     /// <summary>The authority's: describe an entity now (<see cref="IHost.EntityDescribed"/>), for a Participant that
     /// doesn't have it.</summary>
     void Describe(EntityId id);
+
+    /// <summary>The authority's: describe everything now (<see cref="IHost.EntitySaved"/>, then
+    /// <see cref="IHost.SaveDone"/>), for the save.</summary>
+    void Save();
 }

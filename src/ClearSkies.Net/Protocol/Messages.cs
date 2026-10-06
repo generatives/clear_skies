@@ -43,6 +43,9 @@ public enum MessageKind : byte
     Deleted = 27,
     Created = 28,
     Released = 29,
+    SaveRequest = 30,
+    SaveDone = 31,
+    Saved = 32,
 }
 
 /// <summary>A message: writes itself, kind byte first (see <see cref="Session.RemoteHost"/> and
@@ -228,7 +231,7 @@ public readonly record struct IdBlockMessage(uint First, uint Count) : IMessage
 }
 
 /// <summary>Participant → Host, every half second: the space it wants to see (around its player, or where its player
-/// will spawn). The first tells the Host it's up.</summary>
+/// will spawn). The Host streams it the entities inside.</summary>
 public readonly record struct ViewVolumeMessage(Vector3 Centre, float Radius) : IMessage
 {
     public void Write(NetWriter w) { w.WriteByte((byte)MessageKind.ViewVolume); w.WriteVector3(Centre); w.WriteSingle(Radius); }
@@ -258,23 +261,24 @@ public readonly ref struct SpawnMessage(EntityId id, ushort kind, PeerId owner, 
         new(EntityId.Read(ref r), r.ReadUInt16(), new PeerId(r.ReadUInt32()), r.ReadUInt32(), r.ReadVector3(), r.ReadRaw(r.Remaining));
 }
 
-/// <summary>An entity named by ID: Host → Participant <see cref="MessageKind.Forget"/> (released: drop your copy),
-/// Host → authority <see cref="MessageKind.Release"/> (a player leaving: describe them, then despawn them) and
-/// <see cref="MessageKind.DescribeRequest"/> (describe it now, for a Participant that doesn't have it), authority →
-/// Host <see cref="MessageKind.Deleted"/> (despawned: stop keeping it).</summary>
+/// <summary>An entity named by ID: Host → Participant <see cref="MessageKind.Forget"/> (out of your view: drop your
+/// copy), Host → authority <see cref="MessageKind.Release"/> (out of every view: describe it, then despawn it) and
+/// <see cref="MessageKind.DescribeRequest"/> (describe it now, for a Participant it's come into view of), authority →
+/// Host <see cref="MessageKind.Deleted"/> (gone for good: out of the save too).</summary>
 public readonly record struct EntityMessage(MessageKind Kind, EntityId Id) : IMessage
 {
     public void Write(NetWriter w) { w.WriteByte((byte)Kind); Id.Write(w); }
     public static EntityMessage Read(MessageKind kind, ref NetReader r) => new(kind, EntityId.Read(ref r));
 }
 
-/// <summary>Authority → Host: an entity's Description, as one of three messages:
+/// <summary>Authority → Host: an entity's Description, as one of four messages:
 /// <list type="bullet">
 /// <item><see cref="MessageKind.Created"/>: it made it (a ship built, say), and the Host starts keeping it;</item>
 /// <item><see cref="MessageKind.Described"/>: the Host asked (<see cref="MessageKind.DescribeRequest"/>), to send to a
 /// Participant that doesn't have it;</item>
 /// <item><see cref="MessageKind.Released"/>: the Host released it, and this is its last Description (the authority has
-/// despawned it).</item>
+/// despawned it);</item>
+/// <item><see cref="MessageKind.Saved"/>: the Host is saving (<see cref="MessageKind.SaveRequest"/>).</item>
 /// </list>
 /// Its kind (the spawn handler that recreates it), its authority's last event number, and where it is (none: a global
 /// entity, always loaded); the data is opaque to the Host, except a player's, whose position on their ship it reads.</summary>
@@ -306,4 +310,11 @@ public readonly ref struct DescriptionMessage(MessageKind message, EntityId id, 
         Vector3? position = r.ReadBool() ? r.ReadVector3() : null;
         return new(message, id, kind, number, position, r.ReadRaw(r.Remaining));
     }
+}
+
+/// <summary>A message with nothing but its kind: Host → authority <see cref="MessageKind.SaveRequest"/> (describe
+/// everything), authority → Host <see cref="MessageKind.SaveDone"/> (that's everything).</summary>
+public readonly record struct SignalMessage(MessageKind Kind) : IMessage
+{
+    public void Write(NetWriter w) => w.WriteByte((byte)Kind);
 }

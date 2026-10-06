@@ -30,8 +30,7 @@ public sealed class LoopbackGame : IDisposable
     public readonly SimulationParticipant HostNet;
     public readonly List<(HeadlessScene Scene, SimulationParticipant Net)> Clients = new();
 
-    /// <param name="save">The world's save, which the hosting machine streams entities from and saves to (none: an empty
-    /// one, and no streaming).</param>
+    /// <param name="save">The world's save (an empty one if none).</param>
     /// <param name="hostTerrainReady">Whether the terrain around a point is ready on the hosting machine (always, if
     /// not given: test scenes stream none).</param>
     /// <param name="hostPlayer">Someone playing on the hosting machine, as the game has them: they join with its
@@ -50,7 +49,6 @@ public sealed class LoopbackGame : IDisposable
         HostNet.TimeSource = () => Network.Now;
         HostNet.Viewing = hostPlayer is not null;
         Host.AttachNet(HostNet, Remote, Hub);
-        if (save is not null) Host.EnablePersistence(Save, Hub.Ids);
         if (hostPlayer is not null && !Host.TickUntil(() => HostNet.Joined, 60)) throw new TimeoutException("The host's player never spawned.");
     }
 
@@ -73,8 +71,13 @@ public sealed class LoopbackGame : IDisposable
         }
     }
 
-    /// <summary>Saves, as on exit (the hosting machine's world writes everything).</summary>
-    public void SaveAll() => (Host.Saver ?? throw new InvalidOperationException("No save to write to.")).SaveAll();
+    /// <summary>Saves, as on exit: the authority describes everything, and the Host writes it.</summary>
+    public void SaveAll()
+    {
+        Hub.SaveAll();
+        for (int i = 0; i < 10 && Hub.Saving; i++) Tick();
+        Assert.False(Hub.Saving, "never saved");
+    }
 
     /// <summary>A client joining: hello, welcome, then (unless not to <paramref name="wait"/>) ticking until its player
     /// has arrived.</summary>

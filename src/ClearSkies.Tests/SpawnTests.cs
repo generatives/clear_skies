@@ -62,12 +62,12 @@ public class SpawnTests
             {
                 game.Join("crew", wait: false);
 
-                // The ship loads around where they wait, on the hosting machine; they don't spawn until the terrain
-                // there has too.
+                // The ship loads into their view, and they onto it, on the hosting machine; neither spawns until the
+                // terrain there has loaded.
                 game.Tick(30);
-                Assert.True(game.Host.Registry.IsLive(shipId));
+                Assert.False(game.Host.Registry.IsLive(shipId));
                 Assert.Null(PlayerIn(game.Host));
-                Assert.Equal(1, game.HostNet.Spawns.Count);
+                Assert.Equal(2, game.HostNet.Spawns.Count);
 
                 terrain = true;
                 for (int i = 0; i < 120 && PlayerIn(game.Host) is null; i++) game.Tick();

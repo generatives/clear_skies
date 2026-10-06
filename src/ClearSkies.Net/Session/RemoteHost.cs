@@ -75,6 +75,8 @@ public sealed class RemoteHost : IHost, ISystem, IDisposable
     public void EntityDescribed(in DescriptionMessage description) => Send(description);
     public void EntityReleased(in DescriptionMessage description) => Send(description);
     public void EntityDeleted(EntityId id) => Send(new EntityMessage(MessageKind.Deleted, id));
+    public void EntitySaved(in DescriptionMessage description) => Send(description);
+    public void SaveDone() => Send(new SignalMessage(MessageKind.SaveDone));
 
     public void Leave(string reason)
     {
@@ -152,6 +154,7 @@ public sealed class RemoteHost : IHost, ISystem, IDisposable
             case MessageKind.PlayerInput: p.ReceiveInput(PlayerInputMessage.Read(ref r)); break;
             case MessageKind.Release: p.Release(EntityMessage.Read(kind, ref r).Id); break;
             case MessageKind.DescribeRequest: p.Describe(EntityMessage.Read(kind, ref r).Id); break;
+            case MessageKind.SaveRequest: p.Save(); break;
             case MessageKind.Disconnect:
                 _left = true;
                 p.Disconnected(DisconnectMessage.Read(ref r).Reason);
