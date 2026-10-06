@@ -108,3 +108,137 @@ public class HostTerrainTests
         Assert.Equal(BlockId.Wood, game.Host.WorldVolume.GetBlock(16, 3, 16));
     }
 }
+
+/// <summary>Clients load edited terrain from the Host: chunks edited before they joined, while they were loading them,
+/// and while they were far away.</summary>
+public class ClientTerrainTests
+{
+    private const int S = ChunkData.Size;
+
+    private static ChunkLoadSystem Streaming(HeadlessScene scene, IChunkStore store) =>
+        new(scene.World, scene.WorldVolume, new ChunkCountBudget(100_000), () => new Flat(), viewDistance: 64, minChunkY: 0, store);
+
+    private static EditVoxels Edit(Entity editor, params VoxelOp[] ops) =>
+        new() { Volume = EntityRegistry.WorldVolume, Editor = editor.Get<EntityId>(), Ops = ops };
+
+    /// <summary>Ticks the game and streams on every machine until nothing's loading or asked for, for a second.</summary>
+    private static void Settle(LoopbackGame game, params (ChunkLoadSystem Load, HostChunkStore Chunks)[] streams)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(20);
+        int quiet = 0;
+        while (quiet < 60 && DateTime.UtcNow < deadline)
+        {
+            game.Tick();
+            bool idle = true;
+            foreach (var (load, chunks) in streams)
+            {
+                int before = load.LoadedChunks;
+                load.Update(1 / 60f);
+                idle &= load.ColumnsInFlight == 0 && chunks.Asked == 0 && load.LoadedChunks == before;
+            }
+            quiet = idle ? quiet + 1 : 0;
+            Thread.Sleep(0);
+        }
+    }
+
+    /// <summary>The Host with terrain streamed on the hosting machine, someone playing there at
+    /// <paramref name="hostAt"/>, and <paramref name="latencyMs"/> each way.</summary>
+    private static (LoopbackGame Game, ChunkLoadSystem Load, HostChunkStore Chunks, Entity Player) Hosted(Vector3 hostAt, double latencyMs = 0)
+    {
+        var chunks = new HostChunkStore();
+        var game = new LoopbackGame(latencyMs, hostPlayer: new PlayerDescription { FreeFly = true, Position = hostAt }, hostChunks: chunks);
+        var load = Streaming(game.Host, chunks);
+        var player = game.Host.World.GetEntities().With<LocalPlayer>().AsEnumerable().Single();
+        return (game, load, chunks, player);
+    }
+
+    private static (HeadlessScene Scene, ChunkLoadSystem Load, HostChunkStore Chunks) Join(LoopbackGame game, string name = "client")
+    {
+        var chunks = new HostChunkStore();
+        var (scene, _) = game.Join(name, chunks: chunks);
+        return (scene, Streaming(scene, chunks), chunks);
+    }
+
+    private static void AssertSameChunk(ChunkVolume a, ChunkVolume b, ChunkPosition pos)
+    {
+        Assert.True(a.IsLoaded(pos) && b.IsLoaded(pos), $"{pos} not loaded on both");
+        Assert.True(a.GetData(pos)!.BlocksAsBytes().SequenceEqual(b.GetData(pos)!.BlocksAsBytes()), $"{pos} differs");
+    }
+
+    [Fact]
+    public void AJoiningClientLoadsChunksEditedBeforeItJoined()
+    {
+        var (game, hostLoad, hostChunks, player) = Hosted(new Vector3(5, 3, 5));
+        using var _ = game;
+        Settle(game, (hostLoad, hostChunks));
+        game.Host.Commands.Send(Edit(player, VoxelOp.FillBox(new(5, -2, 5), 1, BlockId.Air, BlockOrientation.Upright),
+                                     VoxelOp.SetBlock(new(8, 6, 5), BlockId.Wood, BlockOrientation.Upright)));
+        game.Tick();
+        Assert.Equal(BlockId.Air, game.Host.WorldVolume.GetBlock(5, -2, 5));
+
+        var (client, load, chunks) = Join(game);
+        Assert.Contains(new ChunkPosition(0, -1, 0), chunks.EditedChunks());
+        Settle(game, (hostLoad, hostChunks), (load, chunks));
+        Assert.Equal(BlockId.Air, client.WorldVolume.GetBlock(5, -2, 5));
+        Assert.Equal(BlockId.Stone, client.WorldVolume.GetBlock(5, -4, 5));
+        Assert.Equal(BlockId.Wood, client.WorldVolume.GetBlock(8, 6, 5));
+        AssertSameChunk(game.Host.WorldVolume, client.WorldVolume, new ChunkPosition(0, -1, 0));
+    }
+
+    [Fact]
+    public void EditsBeforeDuringAndAfterAClientLoadsAChunkAllReachIt()
+    {
+        var (game, hostLoad, hostChunks, player) = Hosted(new Vector3(16, 3, 16), latencyMs: 75);
+        using var _ = game;
+        Settle(game, (hostLoad, hostChunks));
+        var ground = new ChunkPosition(0, -1, 0);
+
+        // A hole dug a cell a tick from before the client joins until well after it has the chunk.
+        int cell = 0;
+        void Dig()
+        {
+            int x = 4 + cell % 24, z = 4 + cell / 24 % 24;
+            game.Host.Commands.Send(Edit(player, VoxelOp.SetBlock(new(x, -1 - cell / 576, z), BlockId.Air, BlockOrientation.Upright)));
+            cell++;
+        }
+        for (int i = 0; i < 20; i++) { Dig(); game.Tick(); }
+        var chunks = new HostChunkStore();
+        var transport = game.Join("client", wait: false, chunks: chunks);
+        var load = Streaming(transport.Scene, chunks);
+        for (int i = 0; i < 200; i++)
+        {
+            Dig();
+            game.Tick();
+            hostLoad.Update(1 / 60f);
+            load.Update(1 / 60f);
+            Thread.Sleep(0);
+        }
+        Settle(game, (hostLoad, hostChunks), (load, chunks));
+        Assert.Equal(220, cell);
+        Assert.Equal(0, game.Host.Commands.Stats.Rejected);
+        AssertSameChunk(game.Host.WorldVolume, transport.Scene.WorldVolume, ground);
+        Assert.Equal(BlockId.Air, transport.Scene.WorldVolume.GetBlock(4 + 219 % 24, -1, 4 + 219 / 24 % 24));
+    }
+
+    [Fact]
+    public void AnEditFarFromAClientReachesItWhenItGoesThere()
+    {
+        var far = new Vector3(100 * S + 16, 3, 16);
+        var (game, hostLoad, hostChunks, player) = Hosted(far);
+        using var _ = game;
+        var (client, load, chunks) = Join(game);
+        Settle(game, (hostLoad, hostChunks), (load, chunks));
+        var there = new ChunkPosition(100, -1, 0);
+        Assert.False(client.WorldVolume.IsLoaded(there));
+
+        game.Host.Commands.Send(Edit(player, VoxelOp.SetBlock(new(100 * S + 16, -1, 16), BlockId.Air, BlockOrientation.Upright)));
+        Settle(game, (hostLoad, hostChunks), (load, chunks));
+        Assert.False(client.WorldVolume.IsLoaded(there)); // the edit didn't make it there
+
+        Interest(client, far.X, far.Z, View(64));
+        Settle(game, (hostLoad, hostChunks), (load, chunks));
+        Assert.Equal(BlockId.Air, client.WorldVolume.GetBlock(100 * S + 16, -1, 16));
+        Assert.Equal(BlockId.Stone, client.WorldVolume.GetBlock(100 * S + 17, -1, 16));
+        AssertSameChunk(game.Host.WorldVolume, client.WorldVolume, there);
+    }
+}

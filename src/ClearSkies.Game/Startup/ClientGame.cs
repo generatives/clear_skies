@@ -19,7 +19,8 @@ namespace ClearSkies.Game.Startup;
 /// <list type="number">
 /// <item>Connect and say hello (name, protocol version, world-generation checksum); the host welcomes us or refuses
 /// with a reason. The welcome says who we are, the world's seed, the host's tick, and where our player will spawn.</item>
-/// <item>Build the world from the host's seed, with no save (the host keeps everything).</item>
+/// <item>Build the world from the host's seed, with no save (the host keeps everything, edited terrain included: it's
+/// loaded from the host as it streams in).</item>
 /// <item>Join as a Participant: the Host streams us what's in our View Volume (around our player), each entity spawning
 /// once what it needs has loaded here; the camera waits at the spawn until our player has. The hosting machine
 /// simulates everything, our player included; we play it by sending our input, and predict it meanwhile.</item>
@@ -34,9 +35,11 @@ public static class ClientGame
         var welcome = remoteHost.Welcome;
         var session = new Session(SessionRole.Client, welcome.Peer);
         using var view = new GameView(host, options);
-        var world = new GameWorld(host, options, session, welcome.Seed, new NoChunkStore(), view.Budget, view.ChunkPreparer,
+        var chunks = new HostChunkStore();
+        var world = new GameWorld(host, options, session, welcome.Seed, chunks, view.Budget, view.ChunkPreparer,
                                   view.PlayerModel);
-        using var net = SimulationParticipant.Join(remoteHost, session, world.Commands, world.Registry, host.World, host.Clock, world.TerrainReadyFor);
+        using var net = SimulationParticipant.Join(remoteHost, session, world.Commands, world.Registry, host.World, host.Clock, world.TerrainReadyFor,
+                                                   chunks);
         net.Ended += reason => { Console.WriteLine($"[net] session ended: {reason}"); host.Quit(); };
         var input = host.Input;
         var renderer = host.Renderer;

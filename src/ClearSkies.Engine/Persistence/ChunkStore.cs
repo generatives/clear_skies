@@ -24,13 +24,3 @@ public interface IChunkStore
     /// <summary>The chunk was edited since it was asked for: what's here of it is stale.</summary>
     void Outdated(ChunkPosition pos);
 }
-
-/// <summary>A world with no edited chunks to load: everything is generated.</summary>
-public sealed class NoChunkStore : IChunkStore
-{
-    public IEnumerable<ChunkPosition> EditedChunks() => Array.Empty<ChunkPosition>();
-    public bool IsReady(ChunkPosition pos) => true;
-    public void Request(ChunkPosition pos) { }
-    public bool TryLoad(ChunkPosition pos, ChunkData data) => false;
-    public void Outdated(ChunkPosition pos) { }
-}
