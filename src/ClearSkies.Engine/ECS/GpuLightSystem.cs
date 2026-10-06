@@ -32,11 +32,11 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
 
     // Flat ambient (0-15, Minecraft-style level), baked into each voxel's displayed light (darkened by its ray AO) by
     // the compose pass; changing it relights everything.
-    private float _ambientLevel = 2f;
+    private float _ambientLevel = 1f;
 
     // How strongly ray AO (measured by the bounce rays, GpuRayLightPass bounce_main) darkens the ambient term,
     // 0-1. Applied by the compose pass (changing it relights everything); forced to 0 while bounce is off.
-    private float _aoStrength = 1f;
+    private float _aoStrength = 0.95f;
 
     // Bounce (GpuRayLightPass bounce_main): albedo feeds the pass (changing it re-evaluates everything); each voxel
     // has a fixed set of rays x cycle directions, one slice of rays per evaluation, blended as a running average
