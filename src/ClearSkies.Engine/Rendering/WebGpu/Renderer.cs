@@ -430,9 +430,13 @@ fn isSeeThrough(v: vec3<i32>) -> bool {
     return ((occPool[u32((fol - 1) * WPC + l.y + 32 * l.z)] >> u32(l.x)) & 1u) == 1u;
 }
 
-// Whether the face of the block at b (seen along N) belongs to the surface being smoothed: a solid block, or for a
-// see-through block's face (see), another see-through block, so a water surface or a canopy smooths across itself.
-fn behindSurface(b: vec3<i32>, see: bool) -> bool { return isSolid(b) || (see && isSeeThrough(b)); }
+// For a see-through block's face (see), whether open cell c lies on the same surface without a solid block behind it:
+// a see-through block behind it, so a water surface or a canopy smooths across itself, or, seen from inside the block
+// (inside: the face's own cell is see-through, e.g. the water surface from below), c is see-through too.
+fn seeSurface(c: vec3<i32>, N: vec3<i32>, see: bool, inside: bool) -> bool {
+    if (!see) { return false; }
+    return isSeeThrough(c - N) || (inside && isSeeThrough(c));
+}
 
 // Light slot of the brick holding voxel v, whose chunk-table entry is i (entryOf), or NO_SURFACE.
 fn brickSlot(i: i32, v: vec3<i32>) -> u32 {
@@ -480,15 +484,17 @@ const SMOOTH_LIGHT: bool = true;
 
 struct Lit { sky: f32, rgb: vec3<f32>, sun: f32 };
 
-fn onSurface(c: vec3<i32>, N: vec3<i32>, see: bool) -> bool { return !isSolid(c) && behindSurface(c - N, see); }
+fn onSurface(c: vec3<i32>, N: vec3<i32>, see: bool, inside: bool) -> bool {
+    return !isSolid(c) && (isSolid(c - N) || seeSurface(c, N, see, inside));
+}
 
 // (sky, r, g, b, sun) averaged over the usable cells at one corner.
 struct Corner { a: vec4<f32>, sun: f32 };
 
-fn cornerLit(air: vec3<i32>, s1: vec3<i32>, s2: vec3<i32>, dg: vec3<i32>, N: vec3<i32>, see: bool) -> Corner {
-    let inc1 = onSurface(s1, N, see);
-    let inc2 = onSurface(s2, N, see);
-    let incD = (inc1 || inc2) && onSurface(dg, N, see);
+fn cornerLit(air: vec3<i32>, s1: vec3<i32>, s2: vec3<i32>, dg: vec3<i32>, N: vec3<i32>, see: bool, inside: bool) -> Corner {
+    let inc1 = onSurface(s1, N, see, inside);
+    let inc2 = onSurface(s2, N, see, inside);
+    let incD = (inc1 || inc2) && onSurface(dg, N, see, inside);
     var cells = array<vec3<i32>, 4>(air, s1, s2, dg);
     var inc = array<bool, 4>(true, inc1, inc2, incD);
     var acc = vec4<f32>(0.0);
@@ -526,10 +532,11 @@ fn sampleLit(localPos: vec3<f32>, localNormal: vec3<f32>, see: bool) -> Lit {
     else if (n.y > 0.5) { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 0, 1); }
     else                { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 1, 0); }
 
-    let c00 = cornerLit(air, air - T, air - B, air - T - B, N, see);
-    let c10 = cornerLit(air, air + T, air - B, air + T - B, N, see);
-    let c01 = cornerLit(air, air - T, air + B, air - T + B, N, see);
-    let c11 = cornerLit(air, air + T, air + B, air + T + B, N, see);
+    let inside = see && isSeeThrough(air);
+    let c00 = cornerLit(air, air - T, air - B, air - T - B, N, see, inside);
+    let c10 = cornerLit(air, air + T, air - B, air + T - B, N, see, inside);
+    let c01 = cornerLit(air, air - T, air + B, air - T + B, N, see, inside);
+    let c11 = cornerLit(air, air + T, air + B, air + T + B, N, see, inside);
 
     // Plain bilinear across the cell face, like Minecraft's per-vertex interpolation.
     let s = fract(dot(localPos, vec3<f32>(T)));
@@ -685,15 +692,16 @@ fn shadeFast(localPos: vec3<f32>, localNormal: vec3<f32>, see: bool) -> Shade {
     let sMP = maskSolid(m, -T + B); let sPP = maskSolid(m, T + B);
 
     // onSurface: open, with a solid directly behind along the normal (or for a see-through block's face, a
-    // see-through block: see behindSurface). Diagonals need a side cell (corner rule).
-    let oTm = !sTm && (maskSolid(m, -T - N) || (see && isSeeThrough(air - T - N)));
-    let oTp = !sTp && (maskSolid(m, T - N) || (see && isSeeThrough(air + T - N)));
-    let oBm = !sBm && (maskSolid(m, -B - N) || (see && isSeeThrough(air - B - N)));
-    let oBp = !sBp && (maskSolid(m, B - N) || (see && isSeeThrough(air + B - N)));
-    let oMM = (oTm || oBm) && !sMM && (maskSolid(m, -T - B - N) || (see && isSeeThrough(air - T - B - N)));
-    let oPM = (oTp || oBm) && !sPM && (maskSolid(m, T - B - N) || (see && isSeeThrough(air + T - B - N)));
-    let oMP = (oTm || oBp) && !sMP && (maskSolid(m, -T + B - N) || (see && isSeeThrough(air - T + B - N)));
-    let oPP = (oTp || oBp) && !sPP && (maskSolid(m, T + B - N) || (see && isSeeThrough(air + T + B - N)));
+    // see-through block, or from inside one a see-through cell: see seeSurface). Diagonals need a side cell (corner rule).
+    let inside = see && isSeeThrough(air);
+    let oTm = !sTm && (maskSolid(m, -T - N) || seeSurface(air - T, N, see, inside));
+    let oTp = !sTp && (maskSolid(m, T - N) || seeSurface(air + T, N, see, inside));
+    let oBm = !sBm && (maskSolid(m, -B - N) || seeSurface(air - B, N, see, inside));
+    let oBp = !sBp && (maskSolid(m, B - N) || seeSurface(air + B, N, see, inside));
+    let oMM = (oTm || oBm) && !sMM && (maskSolid(m, -T - B - N) || seeSurface(air - T - B, N, see, inside));
+    let oPM = (oTp || oBm) && !sPM && (maskSolid(m, T - B - N) || seeSurface(air + T - B, N, see, inside));
+    let oMP = (oTm || oBp) && !sMP && (maskSolid(m, -T + B - N) || seeSurface(air - T + B, N, see, inside));
+    let oPP = (oTp || oBp) && !sPP && (maskSolid(m, T + B - N) || seeSurface(air + T + B, N, see, inside));
 
     let cC  = weighed(true, air, hb, hs, ai);
     let cTm = weighed(oTm, air - T, hb, hs, ai);     let cTp = weighed(oTp, air + T, hb, hs, ai);
