@@ -24,10 +24,10 @@ public static class Trees
     private const float PineStart = 380f, PineFull = 520f;
 
     /// <summary>What grows from the open cell above (x, top, z), whose block is <paramref name="ground"/> (from
-    /// <see cref="ContinentTerrain.Block"/>): a tree, a cactus or nothing. They grow in the thick of the plant stands,
-    /// where <paramref name="flora"/> (from <see cref="ContinentTerrain.Flora"/>) is high, so they thin from groves
-    /// to scattered trees, with the odd one standing alone in the open.</summary>
-    public static Kind At(BlockId ground, int x, int top, int z, float flora, ulong seed)
+    /// <see cref="ContinentTerrain.Block"/>): a tree, a cactus or nothing. They grow where <paramref name="woods"/>
+    /// (from <see cref="ContinentTerrain.Woods"/>) is high, so they thin from woods to scattered trees, with the odd one
+    /// standing alone in the open.</summary>
+    public static Kind At(BlockId ground, int x, int top, int z, float woods, ulong seed)
     {
         ulong h = Hash(x, top, z, seed);
         float r = (h & 0xFFFFFF) / 16777216f;
@@ -37,13 +37,13 @@ public static class Trees
             case BlockId.Grass:
             {
                 if (top < ContinentTerrain.DryLine) return Kind.None;
-                if (r >= 0.001f + 0.03f * Grove(flora)) return Kind.None;
+                if (r >= 0.001f + 0.03f * Grove(woods)) return Kind.None;
                 return pick < Smoothstep(PineStart, PineFull, top) ? Kind.Pine : Kind.Oak;
             }
             case BlockId.Snow:
-                return r < 0.001f + 0.02f * Grove(flora) ? Kind.Pine : Kind.None;
+                return r < 0.001f + 0.02f * Grove(woods) ? Kind.Pine : Kind.None;
             case BlockId.Sand:
-                return r < 0.001f + 0.012f * Grove(flora) ? Kind.Cactus : Kind.None;
+                return r < 0.001f + 0.012f * Grove(woods) ? Kind.Cactus : Kind.None;
             default:
                 return Kind.None;
         }
@@ -116,8 +116,8 @@ public static class Trees
         return h;
     }
 
-    /// <summary>0-1: how much of a grove a column is in, by its flora: ramping up from a stand's middle to its thick.</summary>
-    private static float Grove(float flora) => Smoothstep(0.5f, 0.85f, flora);
+    /// <summary>0-1: how far into a wood a column is, by its <see cref="ContinentTerrain.Woods"/>.</summary>
+    private static float Grove(float woods) => Smoothstep(0.5f, 0.85f, woods);
 
     private static bool Bit(ulong h, int i) => ((h >> (24 + i % 24)) & 1) != 0;
 

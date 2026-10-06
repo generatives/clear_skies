@@ -103,7 +103,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     private readonly byte[] _spanCount = new byte[S * S];
     private readonly float[] _strata = new float[S * S];
     private readonly float[] _patch = new float[S * S];
-    private readonly float[] _flora = new float[S * S], _kind = new float[S * S];
+    private readonly float[] _flora = new float[S * S], _kind = new float[S * S], _woods = new float[S * S];
     private readonly float[] _bare = new float[S * S * MaxSpans];
     private readonly float[] _height = new float[S * S];
     private readonly float[] _bottomAt = new float[S * S];
@@ -156,7 +156,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 if (s + 1 < _spanCount[col] && _spans[col * MaxSpans + s + 1].Lo <= hi + Trees.MaxHeight + 1) continue;
                 var ground = ContinentTerrain.Block(hi, hi, _strata[col], _patch[col], _bare[col * MaxSpans + s]);
                 int x = pos.X * S + lx, z = pos.Z * S + lz;
-                var kind = Trees.At(ground, x, hi, z, _flora[col], _seed);
+                var kind = Trees.At(ground, x, hi, z, _woods[col], _seed);
                 if (kind != Trees.Kind.None) Trees.Grow(data, originY, kind, lx, hi, lz, Trees.Hash(x, hi, z, _seed));
             }
         }
@@ -246,6 +246,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             _strata[col] = _terrain.Strata(wx, wz);
             _patch[col] = _terrain.Patch(wx, wz);
             _flora[col] = _terrain.Flora(wx, wz);
+            _woods[col] = _terrain.Woods(wx, wz);
             _kind[col] = _terrain.Kind(wx, wz);
             for (int sp = 0; sp < spans; sp++)
             {
