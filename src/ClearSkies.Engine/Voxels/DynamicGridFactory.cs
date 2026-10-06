@@ -28,6 +28,7 @@ public static class DynamicGridFactory
         entity.Set(new ChunkGrid() { Volume = volume });
         entity.Set<OwnPresence>();
         entity.Set<Supportable>();
+        entity.Set(new InterpolatedTransform()); // moved by ticks, drawn between them (TickInterpolationSystem)
         foreach (var v in description.Voxels) volume.SetBlock(v.X, v.Y, v.Z, v.Id, v.Orientation);
         entity.Set(description.Controls);
         entity.Set(new BodyStateOverride { LinearVelocity = b.LinearVelocity, AngularVelocity = b.AngularVelocity });

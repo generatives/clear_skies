@@ -1,6 +1,8 @@
+using System.Numerics;
 using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Physics;
+using ClearSkies.Engine.Physics.Support;
 using ClearSkies.Engine.Serialization;
 using ClearSkies.Engine.Voxels;
 using DefaultEcs;
@@ -16,7 +18,8 @@ public struct Spawn<TDescription> : ICommand where TDescription : class, IEntity
     /// <summary>None in a new spawn: the host assigns one.</summary>
     public EntityId Id;
 
-    /// <summary>Who will own it; None for the handler's default (see <see cref="SpawnHandler{TDescription, TKind}.DefaultOwner"/>).</summary>
+    /// <summary>Who will own it; None for the handler's default (see <see cref="SpawnHandler{TDescription, TKind}.DefaultOwner"/>).
+    /// For a player, who plays them: the host always owns (simulates) players (see <see cref="SpawnPlayerHandler"/>).</summary>
     public PeerId Owner;
 
     public TDescription Description;
@@ -136,18 +139,22 @@ public sealed class SpawnGridHandler : SpawnHandler<GridDescription, DynamicGrid
     protected override void Select(Entity grid) => _selection?.Select(grid);
 }
 
-/// <summary>Spawns players (at startup, and for each player joining). A player owns their own character. Players owned
-/// elsewhere are drawn with <see cref="PlayerModel"/>, where there's one (not headless).</summary>
+/// <summary>Spawns players (at startup, and for each player joining). The host owns and simulates every player; the
+/// spawn's owner is who plays them (<see cref="Player.ControllingPeer"/>), whose machine predicts them. Players played
+/// elsewhere are drawn with <see cref="PlayerModel"/>, where there's one (not headless). The local player gets the active
+/// camera at their eye, if it's attached to nothing (see <see cref="EyeSystem"/>).</summary>
 public sealed class SpawnPlayerHandler : SpawnHandler<PlayerDescription, Player>
 {
     private readonly PhysicsWorld _physics;
     private readonly PlayerModel? _model;
+    private readonly EntitySet _looseCameras;
 
     public SpawnPlayerHandler(World world, EntityRegistry registry, Session session, PhysicsWorld physics, PlayerModel? model = null)
         : base(world, registry, session)
     {
         _physics = physics;
         _model = model;
+        _looseCameras = world.GetEntities().With<CameraComponent>().Without<Parent>().AsSet();
     }
 
     public override ushort Id => CommandIds.SpawnPlayer;
@@ -157,8 +164,36 @@ public sealed class SpawnPlayerHandler : SpawnHandler<PlayerDescription, Player>
 
     protected override Entity Create(EntityId id, NetOwner owner, PlayerDescription d)
     {
-        var player = PlayerFactory.Create(World, _physics, id, owner, d);
-        if (!owner.IsLocal && _model is not null) player.Set(_model.Create());
+        // On their ship as it is here, if they stand on one, and moving with its deck there, so they don't start at rest
+        // on a moving ship and slide off it.
+        d.Position = PlayerFactory.WorldPosition(d, Registry);
+        Entity ship = default;
+        if (!d.FreeFly && !d.Support.IsNone && Registry.TryGet(d.Support, out var support))
+        {
+            ship = support;
+            if (support.Has<PhysicsBodyComponent>())
+            {
+                var body = support.Get<PhysicsBodyComponent>().Body;
+                var (centre, _) = _physics.GetBodyPose(body);
+                d.Velocity = _physics.GetBodyLinearVelocity(body) + Vector3.Cross(_physics.GetBodyAngularVelocity(body), d.Position - centre);
+            }
+            // Its body isn't here yet (a ship's copy arriving with them as a client joins), and when it comes it's at
+            // rest until it's placed on its timeline: they ride along meanwhile (SupportSystem), and it carries them on
+            // from there (RemoteBodyProxySystem), so they're not moving across it.
+            else d.Velocity = Vector3.Zero;
+        }
+        // The spawn's owner plays them; the host simulates them.
+        var controllingPeer = owner.Owner;
+        bool controlledHere = owner.IsLocal;
+        var player = PlayerFactory.Create(World, _physics, id, Session.OwnerFor(PeerId.Host), controllingPeer, controlledHere, d);
+        // Standing on it from the start (SupportSystem keeps it once they touch it), so whatever moves the ship before then
+        // takes them along (a copy placed on its timeline, see RemoteBodyProxySystem).
+        if (ship.IsAlive && player.Has<Support>())
+            (player.Get<Support>().Supporter, player.Get<Support>().LocalPosition) = (ship, d.LocalPosition);
+        if (!controlledHere && _model is not null) player.Set(_model.Create());
+        if (controlledHere)
+            foreach (var camera in _looseCameras.GetEntities().ToArray())
+                if (camera.Get<CameraComponent>().Active) { EyeSystem.Attach(camera, player); break; }
         return player;
     }
 

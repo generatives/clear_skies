@@ -132,7 +132,7 @@ which causes the next flood to recompute the affected region.
 
 ### `VolumeGpuResources` (one per volume)
 Buffers (all `array<u32>` storage):
-- **`Opacity`**: 1 bit/voxel (opaque = block opacity ≥ 15), **chunk-major**: one contiguous
+- **`Opacity`**: 1 bit/voxel (opaque = `BlockDef.BlocksLight`), **chunk-major**: one contiguous
   `WordsPerChunk = 1024`-word slice per chunk at slot `cx + DX*(cy + DY*cz)`; within a slice the word is
   `(ly + 32*lz)` and the bit is `lx`. This layout lets a single edited chunk upload as one contiguous
   4 KB write (see `UpdateChunkOpacity`) instead of re-uploading the whole bitset.

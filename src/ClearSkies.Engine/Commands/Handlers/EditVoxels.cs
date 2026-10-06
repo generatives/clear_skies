@@ -62,8 +62,12 @@ public sealed class EditLimits
 
 /// <summary>
 /// Applies <see cref="VoxelOp"/>s in voxel space. Validate enforces the <see cref="EditLimits"/>: box size by game mode,
-/// and reach from the editor's eye to every op, plus a margin. AfterApply despawns a grid left empty. The undo holds the
-/// old blocks in the ops' area.
+/// and reach from the editor's eye to every op, plus a margin; and turns down an op on terrain the authority hasn't
+/// loaded yet. AfterApply despawns a grid left empty. The undo holds the old blocks in the ops' area.
+/// <para>The streamed world (with <see cref="Terrain"/>) is edited chunk by chunk: an op changes the chunks that are
+/// here as they are (loaded, or known to hold nothing), and for each other chunk, which it can't change here, it leaves
+/// a <see cref="TerrainEditedElsewhere"/>, so streaming loads that chunk with the edit later. It never makes a chunk
+/// with nothing but the edit in it where the terrain hasn't loaded.</para>
 /// </summary>
 public sealed class EditVoxelsHandler : PredictedCommandHandler<EditVoxels, EditVoxelsHandler.Undo>
 {
@@ -77,6 +81,10 @@ public sealed class EditVoxelsHandler : PredictedCommandHandler<EditVoxels, Edit
     }
 
     public override ushort Id => CommandIds.EditVoxels;
+
+    /// <summary>What streaming knows of the static world's chunks (none: nothing streams it, so a chunk that isn't
+    /// loaded holds nothing, like a grid's).</summary>
+    public IChunkStreaming? Terrain { get; set; }
 
     public override void Write(NetWriter w, in EditVoxels c)
     {
@@ -129,9 +137,30 @@ public sealed class EditVoxelsHandler : PredictedCommandHandler<EditVoxels, Edit
             var nearest = Vector3D.Clamp(eyeLocal, new Vector3D<float>(op.Min.X, op.Min.Y, op.Min.Z),
                                          new Vector3D<float>(op.Max.X + 1, op.Max.Y + 1, op.Max.Z + 1));
             if (Vector3D.Distance(nearest, eyeLocal) > reach) return Verdict.Reject;
+            if (!AllHere(c.Volume, volume, op)) return Verdict.Reject;
         }
         return Verdict.Accept;
     }
+
+    /// <summary>Whether every chunk an op reaches is here as it is, so the authority's edit is whole: terrain still
+    /// loading here can't be edited yet.</summary>
+    private bool AllHere(EntityId id, ChunkVolume volume, in VoxelOp op)
+    {
+        var lo = ChunkPosition.FromVoxel(op.Min);
+        var hi = ChunkPosition.FromVoxel(op.Max);
+        for (int z = lo.Z; z <= hi.Z; z++)
+        for (int y = lo.Y; y <= hi.Y; y++)
+        for (int x = lo.X; x <= hi.X; x++)
+            if (!IsHere(id, volume, new ChunkPosition(x, y, z))) return false;
+        return true;
+    }
+
+    /// <summary>Whether a chunk is here as it is, so an edit changes it here: always, but for a chunk of the streamed
+    /// world that isn't loaded and isn't known to hold nothing (or outside the layers edits change, where they do
+    /// nothing).</summary>
+    private bool IsHere(EntityId id, ChunkVolume volume, ChunkPosition pos) =>
+        id != EntityRegistry.WorldVolume || Terrain is not { } terrain || volume.IsLoaded(pos) ||
+        pos.Y < volume.EditableLayers.Min || pos.Y > volume.EditableLayers.Max || terrain.IsKnownEmpty(pos);
 
     private static Vector3D<float> EyeOf(Entity editor)
     {
@@ -145,8 +174,34 @@ public sealed class EditVoxelsHandler : PredictedCommandHandler<EditVoxels, Edit
         if (_blocks.Volume(e.Volume) is not { } volume) return;
         foreach (var op in e.Ops)
         {
-            if (op.IsSingle) volume.SetBlock(op.Min.X, op.Min.Y, op.Min.Z, op.Block, op.Orientation);
+            if (e.Volume == EntityRegistry.WorldVolume && Terrain is not null) ApplyByChunk(volume, op);
+            else if (op.IsSingle) volume.SetBlock(op.Min.X, op.Min.Y, op.Min.Z, op.Block, op.Orientation);
             else volume.FillBox(op.Min, op.Max, op.Block, op.Orientation);
+        }
+    }
+
+    /// <summary>An op on the streamed world: each chunk it reaches that's here changes, and each other one is left for
+    /// streaming to load with the edit (a <see cref="TerrainEditedElsewhere"/>).</summary>
+    private void ApplyByChunk(ChunkVolume volume, in VoxelOp op)
+    {
+        const int S = ChunkData.Size;
+        var lo = ChunkPosition.FromVoxel(op.Min);
+        var hi = ChunkPosition.FromVoxel(op.Max);
+        for (int z = lo.Z; z <= hi.Z; z++)
+        for (int y = lo.Y; y <= hi.Y; y++)
+        for (int x = lo.X; x <= hi.X; x++)
+        {
+            var pos = new ChunkPosition(x, y, z);
+            if (!IsHere(EntityRegistry.WorldVolume, volume, pos))
+            {
+                volume.Root.World.CreateEntity().Set(new TerrainEditedElsewhere { Position = pos });
+                continue;
+            }
+            var origin = new Vector3D<int>(x * S, y * S, z * S);
+            var min = Vector3D.Max(op.Min, origin);
+            var max = Vector3D.Min(op.Max, origin + new Vector3D<int>(S - 1));
+            if (min == max) volume.SetBlock(min.X, min.Y, min.Z, op.Block, op.Orientation);
+            else volume.FillBox(min, max, op.Block, op.Orientation);
         }
     }
 

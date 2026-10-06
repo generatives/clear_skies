@@ -7,11 +7,29 @@ using Xunit;
 
 namespace ClearSkies.Tests;
 
+/// <summary>Edited chunks straight from a save, for streaming with no Host: always there to load.</summary>
+internal sealed class SavedChunkStore(SaveDatabase db) : IChunkStore
+{
+    public IEnumerable<ChunkPosition> EditedChunks() => db.ChunkPositions();
+    public bool IsReady(ChunkPosition pos) => true;
+    public void Request(ChunkPosition pos) { }
+    public void Outdated(ChunkPosition pos) { }
+
+    public bool TryLoad(ChunkPosition pos, ChunkData data)
+    {
+        if (db.ReadChunk(pos) is not { } blob) return false;
+        StaticWorldSerializer.Read(blob, data);
+        return true;
+    }
+
+    public void Save(ChunkPosition pos, ChunkData data) => db.WriteChunk(pos, StaticWorldSerializer.ToBytes(data));
+}
+
 /// <summary>Terrain streaming with nothing drawn (headless): limited by a count of chunks.</summary>
 public class HeadlessStreamingTests
 {
     /// <summary>Stone below y = 0, air above.</summary>
-    private sealed class Flat : IWorldGenerator
+    internal sealed class Flat : IWorldGenerator
     {
         public void Generate(ChunkData data, ChunkPosition pos)
         {
@@ -24,17 +42,20 @@ public class HeadlessStreamingTests
         public ulong ColumnLayers(int chunkX, int chunkZ, int minChunkY) => 0xFF;
     }
 
-    private static DefaultEcs.Entity Interest(HeadlessScene scene, float x, float z, float radius, TerrainInterestKind kind)
+    internal static DefaultEcs.Entity Interest(HeadlessScene scene, float x, float z, TerrainInterest interest)
     {
         var e = scene.World.CreateEntity();
         e.Set(new Transform { Position = new Vector3D<float>(x, 10, z), Rotation = Quaternion<float>.Identity, Scale = Vector3D<float>.One });
-        e.Set(new TerrainInterest { Radius = radius, Kind = kind });
+        e.Set(interest);
         return e;
     }
 
+    internal static TerrainInterest View(float radius) => new() { ColliderRadius = 16, DrawRadius = radius };
+    private static TerrainInterest Colliders(float radius) => new() { ColliderRadius = radius };
+
     /// <summary>Runs streaming until it's quiet: nothing loading and nothing changing for a second of frames (at least
     /// <paramref name="frames"/> frames, at most 20 s).</summary>
-    private static void Settle(ChunkLoadSystem load, int frames = 60)
+    internal static void Settle(ChunkLoadSystem load, int frames = 60)
     {
         var deadline = DateTime.UtcNow.AddSeconds(20);
         int quiet = 0, last = -1;
@@ -48,9 +69,17 @@ public class HeadlessStreamingTests
         }
     }
 
-    private static ChunkLoadSystem Streaming(HeadlessScene scene, SaveDatabase db, int maxChunks = 100_000) =>
-        new(scene.World, scene.WorldVolume, new ChunkCountBudget(maxChunks), () => new Flat(), viewDistance: 64, minChunkY: 0,
-            new DatabaseChunkStore(db));
+    internal static ChunkLoadSystem Streaming(HeadlessScene scene, SaveDatabase db, int maxChunks = 100_000, float viewDistance = 64) =>
+        Streaming(scene, new SavedChunkStore(db), maxChunks, viewDistance);
+
+    /// <summary>The scene's world streamed, as the game's: edits to it ask streaming what's there.</summary>
+    internal static ChunkLoadSystem Streaming(HeadlessScene scene, IChunkStore store, int maxChunks = 100_000, float viewDistance = 64)
+    {
+        var load = new ChunkLoadSystem(scene.World, scene.WorldVolume, new ChunkCountBudget(maxChunks), () => new Flat(), viewDistance,
+                                       minChunkY: 0, store);
+        ((ClearSkies.Engine.Commands.Handlers.EditVoxelsHandler)scene.Commands.HandlerFor(ClearSkies.Engine.Commands.CommandIds.EditVoxels)!).Terrain = load;
+        return load;
+    }
 
     [Fact]
     public void WithNoViewNothingIsStreamed()
@@ -69,7 +98,7 @@ public class HeadlessStreamingTests
         using var scene = new HeadlessScene();
         using var db = SaveDatabase.InMemory();
         var load = Streaming(scene, db);
-        var player = Interest(scene, 0.1f, 5, 64, TerrainInterestKind.Full);
+        var player = Interest(scene, 0.1f, 5, View(64));
         Settle(load);
         int rebuilds = load.Rebuilds;
         for (int i = 0; i < 20; i++)
@@ -91,17 +120,94 @@ public class HeadlessStreamingTests
         using var scene = new HeadlessScene();
         using var db = SaveDatabase.InMemory();
         var unlimited = Streaming(scene, db);
-        var player = Interest(scene, 16, 16, 64, TerrainInterestKind.Full);
+        var player = Interest(scene, 16, 16, View(64));
         Settle(unlimited);
         int all = unlimited.LoadedChunks;
 
         using var scene2 = new HeadlessScene();
         int max = all - 2 * 8; // two columns short of everything in view (a column is 8 chunks of stone)
         var limited = Streaming(scene2, db, maxChunks: max);
-        Interest(scene2, 16, 16, 64, TerrainInterestKind.Full);
+        Interest(scene2, 16, 16, View(64));
         Settle(limited);
         Assert.InRange(limited.LoadedChunks, max - 8, max);
         Assert.True(limited.IsTerrainLoaded(new Vector3D<float>(16, 0, 16), 16)); // the nearest loaded first
         Assert.False(limited.IsTerrainLoaded(new Vector3D<float>(16, 0, 16), 64));
+    }
+
+    [Fact]
+    public void AColliderInterestAwayFromTheViewGetsItsTerrainUntilItLeaves()
+    {
+        using var scene = new HeadlessScene();
+        using var db = SaveDatabase.InMemory();
+        var load = Streaming(scene, db);
+        Interest(scene, 16, 16, View(64));
+        Settle(load);
+        int viewOnly = load.LoadedChunks;
+
+        var far = new Vector3D<float>(3200, 0, 3200);
+        var ship = Interest(scene, far.X, far.Z, Colliders(48));
+        Settle(load);
+        Assert.True(load.IsTerrainLoaded(far, 32));
+        Assert.True(load.LoadedChunks > viewOnly);
+
+        ship.Dispose();
+        Settle(load);
+        Assert.False(load.IsTerrainLoaded(far, 32));
+        Assert.Equal(viewOnly, load.LoadedChunks);
+    }
+
+    [Fact]
+    public void WhenTheBudgetIsShortTheTerrainNearestAnyInterestIsKept()
+    {
+        using var scene = new HeadlessScene();
+        using var db = SaveDatabase.InMemory();
+        var unlimited = Streaming(scene, db, viewDistance: 160);
+        Interest(scene, 16, 16, View(160));
+        Settle(unlimited);
+        int view = unlimited.LoadedChunks;
+
+        // A colliders-only interest far off, with the budget short of the whole view by more than its terrain: its
+        // terrain is near it, so it's kept, and the view's far edge goes instead.
+        using var scene2 = new HeadlessScene();
+        var limited = Streaming(scene2, db, maxChunks: view - 4 * 8, viewDistance: 160);
+        Interest(scene2, 16, 16, View(160));
+        var far = new Vector3D<float>(3200, 0, 3200);
+        Interest(scene2, far.X, far.Z, Colliders(48));
+        Settle(limited);
+        Assert.True(limited.IsTerrainLoaded(far, 32));
+        Assert.True(limited.IsTerrainLoaded(new Vector3D<float>(16, 0, 16), 64));
+        Assert.False(limited.IsTerrainLoaded(new Vector3D<float>(16, 0, 16), 160));
+    }
+
+    [Fact]
+    public void ColumnsOnTheirWayAreEntitiesUntilTheyLoad()
+    {
+        using var scene = new HeadlessScene();
+        using var db = SaveDatabase.InMemory();
+        var load = Streaming(scene, db);
+        var loading = scene.World.GetEntities().With<TerrainColumnLoading>().AsSet();
+        var player = Interest(scene, 16, 16, View(64));
+        load.Update(1 / 60f); // the scan queues what's wanted, before anything has loaded
+        Assert.NotEqual(0, loading.Count);
+        Settle(load);
+        Assert.Equal(0, loading.Count);
+        Assert.Equal(float.PositiveInfinity, player.Get<TerrainScanned>().Radius);
+    }
+
+    [Fact]
+    public void TheFogSitsAtTheNearestColumnStillLoading()
+    {
+        using var scene = new HeadlessScene();
+        var fog = new FogSystem(scene.World, viewDistance: 500);
+        var player = Interest(scene, 16, 16, View(500));
+        player.Set(new TerrainScanned { Radius = float.PositiveInfinity });
+        var column = scene.World.CreateEntity();
+        column.Set(new TerrainColumnLoading { X = 4, Z = 0 }); // 112 blocks out (from x = 16 to the column's edge at 128)
+        for (int i = 0; i < 300; i++) fog.Update(1 / 60f);
+        Assert.InRange(fog.Distance, 110, 113);
+
+        column.Dispose(); // loaded: the fog opens out to the draw radius
+        for (int i = 0; i < 1200; i++) fog.Update(1 / 60f);
+        Assert.InRange(fog.Distance, 490, 500);
     }
 }

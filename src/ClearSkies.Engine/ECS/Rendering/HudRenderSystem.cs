@@ -19,7 +19,7 @@ public sealed class HudRenderSystem : IRenderSystem
         _huds     = world.GetEntities().With<HudRenderer>().AsSet();
     }
 
-    public void Render(in RenderContext frame)
+    public void Render(SystemStage stage, in RenderContext frame)
     {
         _renderer.BeginHudPass();
         foreach (ref readonly Entity e in _huds.GetEntities())

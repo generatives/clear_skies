@@ -259,6 +259,7 @@ struct VSOut {
     // The chunk (xyz, in its grid) and grid (w; -1 for none) this surface is lit from: from the model uniform, or for
     // the world's pooled chunks from the chunk table (vs_world).
     @location(6) @interpolate(flat) cg: vec4<i32>,
+    @location(7)       alpha:       f32,          // chunk meshes: a transparent block's opacity (see fs_chunk_transparent)
 };
 
 // The fragment's chunk and grid (from VSOut.cg, or the model uniform for fs_model), for the lighting lookups below.
@@ -287,9 +288,9 @@ fn vs_main(
 
 // A chunk mesh quad, packed (see ChunkQuad): its first corner x, y, z in a bits 0-17 (6 each),
 // face in 18-20 (+X, -X, +Y, -Y, +Z, -Z), texture layer in 21-28 (255: untextured), width - 1 in a bits 29-31 and b
-// bits 24-25, height - 1 in b bits 26-30; colour as RGB8 in b. Corners follow the mesher's order (GreedyMesher.EmitQuad)
-// and the texture coordinates follow from position and face, as GreedyMesher.MakeUv makes them: V runs down world Y on
-// the side faces.
+// bits 24-25, height - 1 in b bits 26-30; colour as RGB8 in b (a translucent quad, vs_chunk_translucent: RGB565, then
+// its opacity in bits 16-23). Corners follow the mesher's order (GreedyMesher.EmitQuad) and the texture coordinates
+// follow from position and face, as GreedyMesher.MakeUv makes them: V runs down world Y on the side faces.
 // The mesh's quads, read by vertex index. Drawn indexed through one shared index buffer (quad q's triangles are
 // 4q + 0, 1, 2 and 0, 2, 3), so vertex_index is 4q + corner and the GPU reuses the corners the two triangles share:
 // four shader runs per quad, as with the old four-vertex meshes, where six separate vertices (instanced or not) cost
@@ -298,14 +299,20 @@ fn vs_main(
 
 @vertex
 fn vs_chunk(@builtin(vertex_index) vi: u32) -> VSOut {
-    return chunkVertex(quads[vi / 4u], vi % 4u);
+    return chunkVertex(quads[vi / 4u], vi % 4u, false);
+}
+
+// A translucent quad (ChunkQuad.PackTranslucent): its colour as RGB565, then its opacity.
+@vertex
+fn vs_chunk_translucent(@builtin(vertex_index) vi: u32) -> VSOut {
+    return chunkVertex(quads[vi / 4u], vi % 4u, true);
 }
 
 // The wireframe: each quad's outline as four lines.
 @vertex
 fn vs_chunk_lines(@builtin(vertex_index) vi: u32) -> VSOut {
     var corners = array<u32, 8>(0u, 1u, 1u, 2u, 2u, 3u, 3u, 0u);
-    return chunkVertex(quads[vi / 8u], corners[vi % 8u]);
+    return chunkVertex(quads[vi / 8u], corners[vi % 8u], false);
 }
 
 // The world's chunks, all in one draw (see WorldMeshPool): their quads sit in one buffer in pages of 64, and each
@@ -338,7 +345,7 @@ fn worldVertex(ii: u32, q: u32, corner: u32) -> VSOut {
         o.pos = vec4<f32>(0.0, 0.0, 0.0, 1.0);
         return o;
     }
-    let c = quadCorner(quad, corner);
+    let c = quadCorner(quad, corner, false);
     let world     = vec3<f32>(at.xyz * 32) + c.position;
     o.pos         = camera.proj * camera.view * vec4<f32>(world, 1.0);
     o.worldPos    = world;
@@ -348,14 +355,16 @@ fn worldVertex(ii: u32, q: u32, corner: u32) -> VSOut {
     o.localNormal = c.normal;
     o.uv          = c.uv;
     o.cg          = at;
+    o.alpha       = 1.0;
     return o;
 }
 
 const PAGE_QUADS: u32 = 64u;
 
-struct QuadCorner { position: vec3<f32>, normal: vec3<f32>, uv: vec3<f32>, color: vec3<f32> };
+struct QuadCorner { position: vec3<f32>, normal: vec3<f32>, uv: vec3<f32>, color: vec3<f32>, alpha: f32 };
 
-fn quadCorner(quad: vec2<u32>, corner: u32) -> QuadCorner {
+// A quad's corner; translucent: a translucent quad (ChunkQuad.PackTranslucent), its colour RGB565 and then its opacity.
+fn quadCorner(quad: vec2<u32>, corner: u32, translucent: bool) -> QuadCorner {
     let a = quad.x;
     let c = quad.y;
     let face = (a >> 18u) & 7u;
@@ -378,11 +387,16 @@ fn quadCorner(quad: vec2<u32>, corner: u32) -> QuadCorner {
     r.normal   = normal;
     r.uv       = vec3<f32>(uv2, select(f32(layerBits), -1.0, layerBits == 255u));
     r.color    = vec3<f32>(f32(c & 255u), f32((c >> 8u) & 255u), f32((c >> 16u) & 255u)) / 255.0;
+    r.alpha    = 1.0;
+    if (translucent) {
+        r.color = vec3<f32>(f32(c & 31u) / 31.0, f32((c >> 5u) & 63u) / 63.0, f32((c >> 11u) & 31u) / 31.0);
+        r.alpha = f32((c >> 16u) & 255u) / 255.0;
+    }
     return r;
 }
 
-fn chunkVertex(quad: vec2<u32>, corner: u32) -> VSOut {
-    let c = quadCorner(quad, corner);
+fn chunkVertex(quad: vec2<u32>, corner: u32, translucent: bool) -> VSOut {
+    let c = quadCorner(quad, corner, translucent);
     var o: VSOut;
     let world     = model.model * vec4<f32>(c.position, 1.0);
     o.pos         = camera.proj * camera.view * world;
@@ -393,6 +407,7 @@ fn chunkVertex(quad: vec2<u32>, corner: u32) -> VSOut {
     o.localNormal = c.normal;
     o.uv          = c.uv;
     o.cg          = vec4<i32>(model.chunk, model.grid);
+    o.alpha       = c.alpha;
     return o;
 }
 
@@ -717,22 +732,59 @@ fn cornerAoFast(localPos: vec3<f32>, localNormal: vec3<f32>) -> f32 {
     return mix(mix(ao00, ao10, s), mix(ao01, ao11, s), t);
 }
 
+// The block texture at a fragment, or for an untextured block (uv.z < 0, the no-texture sentinel) its vertex colour
+// (alpha 1). Sampled unconditionally (avoids implicit-derivative issues from branching on a per-fragment value).
+// Debug (Renderer panel, for measuring what the render pass spends): lightParams2.y bit 1 = no texture sample.
+fn blockColor(in: VSOut) -> vec4<f32> {
+    let dbg = u32(camera.lightParams2.y);
+    let layer = max(i32(round(in.uv.z)), 0);
+    var tex   = vec4<f32>(0.6, 0.6, 0.6, 1.0);
+    if ((dbg & 1u) == 0u) { tex = textureSample(atlasTex, atlasSamp, fract(in.uv.xy), layer); }
+    return select(vec4<f32>(lin(in.color), 1.0), tex, in.uv.z >= 0.0);
+}
+
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(shadeBlock(in, blockColor(in).rgb), 1.0);
+}
+
+// Translucent blocks' faces (see RenderLayer.Translucent), alpha-blended over the opaque world: lit like fs_main, with
+// the texture's alpha times the block's opacity. Fully clear texels are cut out. Drawn only where the face is the
+// nearest transparent one (fs_chunk_transparent_depth laid that depth down first), so every pixel blends exactly one
+// transparent layer and the draw order doesn't matter.
+@fragment
+fn fs_chunk_transparent(in: VSOut) -> @location(0) vec4<f32> {
+    let c = blockColor(in);
+    let alpha = c.a * in.alpha;
+    if (alpha < 0.004) { discard; }
+    return vec4<f32>(shadeBlock(in, c.rgb), alpha);
+}
+
+// Cut-out blocks' faces (RenderLayer.Cutout, e.g. glass): fs_main, minus the texels under half alpha. A separate entry
+// point so fs_main itself has no discard, which would cost every opaque fragment the early depth test.
+@fragment
+fn fs_cutout(in: VSOut) -> @location(0) vec4<f32> {
+    let c = blockColor(in);
+    if (c.a < 0.5) { discard; }
+    return vec4<f32>(shadeBlock(in, c.rgb), 1.0);
+}
+
+// Transparent faces' depth pre-pass: the nearest transparent face at each pixel, without its fully clear texels.
+@fragment
+fn fs_chunk_transparent_depth(in: VSOut) -> @location(0) vec4<f32> {
+    if (blockColor(in).a * in.alpha < 0.004) { discard; }
+    return vec4<f32>(0.0);
+}
+
+// A block face's lit, fogged colour (baseColor: its texture or colour). Debug (Renderer panel): lightParams2.y bit 2 =
+// no fog or haze; lightParams2.z = lighting mode (see below).
+fn shadeBlock(in: VSOut, baseColor: vec3<f32>) -> vec3<f32> {
     drawChunk = in.cg.xyz;
     drawGrid  = in.cg.w;
-    // Sample unconditionally (avoids implicit-derivative issues from branching on a per-fragment value) and
-    // select against the vertex color for untextured blocks (uv.z < 0, the no-texture sentinel).
-    // Debug (Renderer panel, for measuring what the render pass spends): lightParams2.y bit 1 = no texture sample,
-    // bit 2 = no fog or haze; lightParams2.z = lighting mode (see below).
     let dbg = u32(camera.lightParams2.y);
-    let layer     = max(i32(round(in.uv.z)), 0);
-    var texColor  = vec3<f32>(0.6);
-    if ((dbg & 1u) == 0u) { texColor = textureSample(atlasTex, atlasSamp, fract(in.uv.xy), layer).rgb; }
-    let baseColor = select(lin(in.color), texColor, in.uv.z >= 0.0);
 
     // Non-chunk draws (selection highlight, HUD, debug meshes) have no light data: full-bright.
-    if (drawGrid < 0) { return vec4<f32>(baseColor, 1.0); }
+    if (drawGrid < 0) { return baseColor; }
 
     let worldN = normalize(in.worldNormal);
     let ndotl  = max(dot(worldN, -(camera.sunDir.xyz)), 0.0);
@@ -773,8 +825,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let aoFactor = mix(AO_MIN, 1.0, ao);
 
     let shaded = baseColor * lit * aoFactor * camera.lightParams2.x;
-    if ((dbg & 2u) != 0u) { return vec4<f32>(shaded, 1.0); }
-    return vec4<f32>(applyFog(shaded, in.worldPos), 1.0);
+    if ((dbg & 2u) != 0u) { return shaded; }
+    return applyFog(shaded, in.worldPos);
 }
 
 // Debug overdraw view: every terrain fragment that passes the depth test (in the normal nearest-first draw order)
@@ -787,10 +839,32 @@ fn fs_overdraw(in: VSOut) -> @location(0) vec4<f32> {
 
 // 3D models (GpuModel, e.g. glTF props and model blocks): group 3 holds the model's own single-layer texture instead
 // of the block array, sampled at the normalized uv.xy. A model block (grid >= 0) is lit from its own cell's voxel
-// light — sky/AO, lamp light and sun visibility, one flat value for the whole model — combined like fs_main does.
+// light — sky/AO, lamp light and sun visibility, one flat value for the whole model — combined like fs_main does. A
+// model block that blocks light (BlockDef.OpaqueModel) has no light of its own (the light pass gives such cells
+// only flat ambient and full sun), so it takes the brightest of its open neighbours' (see modelCell).
 // Any other model has no light data and is lit like an open-air surface: the brighter of the flat ambient and
 // Lambertian sun. Both are fogged like the terrain. Drawn with culling off (glTF doubleSided is common and cheap
 // here), so back faces flip their normal. Texels under the material's alpha cutoff are cut out.
+// The light a model block at voxel v is lit by: its own cell's, or if v blocks light, each channel's brightest over
+// its open face neighbours (all open neighbours blocked too: ambient in shadow).
+fn modelCell(v: vec3<i32>) -> Cell {
+    if (!isSolid(v)) { return cellAt(v); }
+    var c: Cell;
+    c.sky = 0.0; c.rgb = vec3<f32>(0.0); c.sun = 0.0;
+    var any = false;
+    for (var f = 0; f < 6; f = f + 1) {
+        var d = vec3<i32>(0);
+        d[f / 2] = select(1, -1, (f & 1) == 1);
+        let n = v + d;
+        if (isSolid(n)) { continue; }
+        let o = cellAt(n);
+        c.sky = max(c.sky, o.sky); c.rgb = max(c.rgb, o.rgb); c.sun = max(c.sun, o.sun);
+        any = true;
+    }
+    if (!any) { c.sky = camera.lightParams.z; }
+    return c;
+}
+
 @fragment
 fn fs_model(in: VSOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     drawChunk = model.chunk;
@@ -802,7 +876,7 @@ fn fs_model(in: VSOut, @builtin(front_facing) front: bool) -> @location(0) vec4<
     let ndotl = max(dot(n, -camera.sunDir.xyz), 0.0);
     var lit = vec3<f32>(max(camera.lightParams.z, ndotl * camera.sunDir.w));
     if (drawGrid >= 0) {
-        let c = cellAt(drawChunk * 32 + vec3<i32>(model.params.yzw));
+        let c = modelCell(drawChunk * 32 + vec3<i32>(model.params.yzw));
         lit = max(vec3<f32>(max(c.sky, ndotl * c.sun * camera.sunDir.w)), c.rgb);
     }
     lit = max(lit, vec3<f32>(MIN_AMBIENT));
@@ -896,6 +970,9 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
 
     /// <summary>The pooled static-world chunk meshes (for reports).</summary>
     public WorldMeshPool WorldPool => _worldPool;
+    private RenderPipeline* _chunkCutoutPipeline;    // cut-out blocks' faces (fs_cutout)
+    private RenderPipeline* _chunkTransparentPipeline; // translucent blocks' faces, alpha-blended (fs_chunk_transparent)
+    private RenderPipeline* _chunkTransparentDepthPipeline; // their depth pre-pass (fs_chunk_transparent_depth)
 
     /// <summary>Debug: draw terrain additively without depth test, so brightness shows how many surfaces cover each
     /// pixel (sky and clouds are skipped).</summary>
@@ -978,8 +1055,8 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         _hudPipeline       = CreateMeshPipeline(PrimitiveTopology.TriangleList, CullMode.None, depthTest: false);
         _modelPipeline     = CreateMeshPipeline(PrimitiveTopology.TriangleList, CullMode.None, fragmentEntry: "fs_model");
         _cloudPipeline     = CreateCloudPipeline();
-        _chunkPipeline          = CreateChunkPipeline("vs_chunk", PrimitiveTopology.TriangleList, CullMode.Back);
-        _chunkWireframePipeline = CreateChunkPipeline("vs_chunk_lines", PrimitiveTopology.LineList, CullMode.None);
+        _chunkPipeline          = CreateChunkPipeline("vs_chunk", PrimitiveTopology.TriangleList, CullMode.Back, "fs_main");
+        _chunkWireframePipeline = CreateChunkPipeline("vs_chunk_lines", PrimitiveTopology.LineList, CullMode.None, "fs_main");
         _chunkOverdrawPipeline  = CreateOverdrawPipeline("vs_chunk", _chunkPipelineLayout);
         _worldPipeline          = CreatePipeline("vs_world", "fs_main", null, PrimitiveTopology.TriangleList, CullMode.Back,
                                                  depthWrite: true, CompareFunction.Greater, layout: _worldPipelineLayout);
@@ -987,6 +1064,9 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
                                                  depthWrite: true, CompareFunction.Greater, layout: _worldPipelineLayout);
         _worldOverdrawPipeline  = CreateOverdrawPipeline("vs_world", _worldPipelineLayout);
         _worldPool = new WorldMeshPool(ctx);
+        _chunkCutoutPipeline    = CreateChunkPipeline("vs_chunk", PrimitiveTopology.TriangleList, CullMode.Back, "fs_cutout");
+        _chunkTransparentPipeline = CreateTransparentChunkPipeline();
+        _chunkTransparentDepthPipeline = CreateTransparentChunkDepthPipeline();
         // The background pass: a full-screen triangle at the far plane that only fills pixels still at the cleared
         // depth (reversed: the far plane and the clear value are both 0), without writing depth.
         _skyPipeline       = CreatePipeline("vs_sky", "fs_sky", null, PrimitiveTopology.TriangleList, CullMode.None,
@@ -1133,10 +1213,31 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     }
 
     /// <summary>A pipeline for chunk meshes (<paramref name="vertexEntry"/>, which reads the mesh's packed
-    /// <see cref="ChunkQuad"/>s from a storage buffer in group 1: no vertex buffer) and fs_main.</summary>
-    private RenderPipeline* CreateChunkPipeline(string vertexEntry, PrimitiveTopology topology, CullMode cullMode)
-        => CreatePipeline(vertexEntry, "fs_main", null, topology, cullMode, depthWrite: true, CompareFunction.Greater,
+    /// <see cref="ChunkQuad"/>s from a storage buffer in group 1: no vertex buffer) and <paramref name="fragmentEntry"/>
+    /// (fs_main, or fs_cutout), depth-tested and depth-writing.</summary>
+    private RenderPipeline* CreateChunkPipeline(string vertexEntry, PrimitiveTopology topology, CullMode cullMode,
+                                                string fragmentEntry)
+        => CreatePipeline(vertexEntry, fragmentEntry, null, topology, cullMode, depthWrite: true, CompareFunction.Greater,
                           layout: _chunkPipelineLayout);
+
+    /// <summary>Translucent blocks' faces (vs_chunk_translucent, fs_chunk_transparent): alpha-blended over what's drawn,
+    /// only where they're the nearest transparent face (GreaterEqual against
+    /// <see cref="CreateTransparentChunkDepthPipeline"/>'s depth), without writing depth. Both sides drawn, so a water
+    /// surface is seen from under it too.</summary>
+    private RenderPipeline* CreateTransparentChunkPipeline()
+    {
+        var color = new BlendComponent { Operation = BlendOperation.Add, SrcFactor = BlendFactor.SrcAlpha, DstFactor = BlendFactor.OneMinusSrcAlpha };
+        var alpha = new BlendComponent { Operation = BlendOperation.Add, SrcFactor = BlendFactor.One, DstFactor = BlendFactor.OneMinusSrcAlpha };
+        var blend = new BlendState { Color = color, Alpha = alpha };
+        return CreatePipeline("vs_chunk_translucent", "fs_chunk_transparent", null, PrimitiveTopology.TriangleList, CullMode.None,
+                              depthWrite: false, CompareFunction.GreaterEqual, &blend, layout: _chunkPipelineLayout);
+    }
+
+    /// <summary>The transparent faces' depth pre-pass (vs_chunk_translucent, fs_chunk_transparent_depth): depth only, no
+    /// colour, so the colour pass draws just the nearest transparent face at each pixel.</summary>
+    private RenderPipeline* CreateTransparentChunkDepthPipeline()
+        => CreatePipeline("vs_chunk_translucent", "fs_chunk_transparent_depth", null, PrimitiveTopology.TriangleList, CullMode.None,
+                          depthWrite: true, CompareFunction.Greater, writeMask: ColorWriteMask.None, layout: _chunkPipelineLayout);
 
     /// <summary>Debug overdraw view (fs_overdraw): terrain drawn additively, depth-tested in the normal draw order, so
     /// it counts the fragments that really get shaded (one per pixel is ideal).</summary>
@@ -1145,7 +1246,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         var add = new BlendComponent { Operation = BlendOperation.Add, SrcFactor = BlendFactor.One, DstFactor = BlendFactor.One };
         var blend = new BlendState { Color = add, Alpha = add };
         return CreatePipeline(vertexEntry, "fs_overdraw", null, PrimitiveTopology.TriangleList, CullMode.Back,
-                              depthWrite: true, CompareFunction.Greater, &blend, layout);
+                              depthWrite: true, CompareFunction.Greater, &blend, layout: layout);
     }
 
     /// <summary>The cloud boxes (vs_cloud/fs_cloud): no vertex buffer, one <see cref="CloudLayer.CloudCell"/> instance
@@ -1166,13 +1267,13 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     private RenderPipeline* CreatePipeline(string vertexEntry, string fragmentEntry, VertexBufferLayout* vertexBuffer,
                                            PrimitiveTopology topology, CullMode cullMode, bool depthWrite,
                                            CompareFunction depthCompare, BlendState* blend = null,
-                                           PipelineLayout* layout = null)
+                                           ColorWriteMask writeMask = ColorWriteMask.All, PipelineLayout* layout = null)
     {
         var vsEntry = (byte*)SilkMarshal.StringToPtr(vertexEntry, NativeStringEncoding.UTF8);
         var fsEntry = (byte*)SilkMarshal.StringToPtr(fragmentEntry, NativeStringEncoding.UTF8);
 
         var vertexState   = new VertexState { Module = _shader, EntryPoint = vsEntry, BufferCount = vertexBuffer == null ? 0u : 1u, Buffers = vertexBuffer };
-        var colorTarget   = new ColorTargetState { Format = _ctx.SurfaceFormat, Blend = blend, WriteMask = ColorWriteMask.All };
+        var colorTarget   = new ColorTargetState { Format = _ctx.SurfaceFormat, Blend = blend, WriteMask = writeMask };
         var fragmentState = new FragmentState { Module = _shader, EntryPoint = fsEntry, TargetCount = 1, Targets = &colorTarget };
 
         var keep  = StencilOperation.Keep;
@@ -1659,13 +1760,42 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     /// full-bright). <paramref name="chunk"/> is the chunk's coordinate in that grid.
     /// </summary>
     public void DrawChunkMesh(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk)
+        => DrawChunk(mesh, model, grid, chunk, _chunkPipeline);
+
+    /// <summary>
+    /// Draws a chunk's cut-out mesh (<see cref="ChunkRenderData.CutoutMesh"/>) like <see cref="DrawChunkMesh"/>, minus
+    /// its texels under half alpha. Call after the opaque chunk meshes.
+    /// </summary>
+    public void DrawCutoutChunkMesh(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk)
+        => DrawChunk(mesh, model, grid, chunk, _chunkCutoutPipeline);
+
+    /// <summary>
+    /// Lays down a chunk's transparent mesh's depth (<see cref="ChunkRenderData.TransparentMesh"/>), so
+    /// <see cref="DrawTransparentChunkMesh"/> draws only the nearest transparent face at each pixel. Call for every
+    /// visible chunk's transparent mesh first. Skipped in the wireframe and overdraw views.
+    /// </summary>
+    public void DrawTransparentChunkDepth(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk)
+    {
+        if (WireframeMode || OverdrawMode) return;
+        DrawChunk(mesh, model, grid, chunk, _chunkTransparentDepthPipeline);
+    }
+
+    /// <summary>
+    /// Draws a chunk's transparent mesh alpha-blended over everything drawn so far, where it's the nearest transparent
+    /// face (see <see cref="DrawTransparentChunkDepth"/>). Call after the opaque world and <see cref="DrawSky"/> (the sky
+    /// only fills pixels with no depth, so it would paint over them).
+    /// </summary>
+    public void DrawTransparentChunkMesh(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk)
+        => DrawChunk(mesh, model, grid, chunk, _chunkTransparentPipeline);
+
+    private void DrawChunk(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk, RenderPipeline* solidPipeline)
     {
         if (_drawIndex >= MaxObjects) return;
 
-        // Chunk meshes are packed quads (ChunkQuad), one instance each: their own pipeline, set once for a run of
+        // Chunk meshes are packed quads (ChunkQuad) read from a storage buffer: their own pipeline, set once for a run of
         // chunk draws. The wireframe draws the same quads as line loops.
         bool wire = WireframeMode;
-        var pipeline = OverdrawMode ? _chunkOverdrawPipeline : wire ? _chunkWireframePipeline : _chunkPipeline;
+        var pipeline = OverdrawMode ? _chunkOverdrawPipeline : wire ? _chunkWireframePipeline : solidPipeline;
         if (_boundPipeline != pipeline) SetPipeline(pipeline);
 
         uint dynOffset = StageModel(new ModelUniform { Model = model, ChunkX = chunk.X, ChunkY = chunk.Y, ChunkZ = chunk.Z, Grid = grid });
@@ -1753,5 +1883,8 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         if (_worldWireframePipeline != null) _api.RenderPipelineRelease(_worldWireframePipeline);
         if (_worldOverdrawPipeline != null) _api.RenderPipelineRelease(_worldOverdrawPipeline);
         _worldPool.Dispose();
+        if (_chunkCutoutPipeline != null) _api.RenderPipelineRelease(_chunkCutoutPipeline);
+        if (_chunkTransparentPipeline != null) _api.RenderPipelineRelease(_chunkTransparentPipeline);
+        if (_chunkTransparentDepthPipeline != null) _api.RenderPipelineRelease(_chunkTransparentDepthPipeline);
     }
 }

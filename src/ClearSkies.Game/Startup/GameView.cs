@@ -42,9 +42,12 @@ public sealed class GameView : IDisposable
                                   LightBudget.WorldIndexDim(options.ViewDistance));
         host.Renderer.AttachGridStore(GridStore);
         Budget = new LightBudget(GridStore);
+        _checkerBounce = options.CheckerBounce;
 
         InputSample = new InputSampleSystem(host.World, host.Input, host.Time);
     }
+
+    private readonly int? _checkerBounce;
 
     public WindowedEngineHost Host { get; }
     public BlockModelLibrary BlockModels { get; }
@@ -80,7 +83,8 @@ public sealed class GameView : IDisposable
         host.AddSystem(new GpuResidencySystem(host.World, volume, GridStore), SystemStage.PreRender);
         var light = new GpuLightSystem(host.World, volume, host.Context, GridStore);
         if (_lightingPreset != null && !light.ApplyPreset(_lightingPreset))
-            Console.WriteLine($"Unknown lighting preset '{_lightingPreset}' (minimal, low, medium or high); using high.");
+            Console.WriteLine($"Unknown lighting preset '{_lightingPreset}' (minimal, low, medium or high); using medium.");
+        if (_checkerBounce is { } spread) light.BounceSpread = spread;
         host.AddSystem(light, SystemStage.PreRender);
         host.AddSystem(Meshes, SystemStage.PreRender);
         host.AddSystem(new BlockModelSystem(host.World, BlockModels), SystemStage.PreRender); // block entities -> RenderedModel
@@ -89,11 +93,13 @@ public sealed class GameView : IDisposable
         SkySettings.CloudSeaAltitude = HeartGrid.CloudSeaAltitude; // below its lowest islands
         _clouds = new CloudRenderSystem(renderer, new HeartCloudDensity(world.Seed));
         _uiRenderer = new UiRenderSystem(Ui, renderer);
-        host.AddSystem(new ChunkRenderSystem(host.World, renderer, volume), SystemStage.RenderWorld);
+        var chunks = new ChunkRenderSystem(host.World, renderer, volume);
+        host.AddSystem(chunks, SystemStage.RenderWorld);
         host.AddSystem(new ModelRenderSystem(host.World, renderer, host.Time), SystemStage.RenderWorld);
         host.AddSystem(_clouds, SystemStage.RenderWorld);
         host.AddSystem(new SkyRenderSystem(renderer), SystemStage.RenderSky);
         host.AddSystem(new WireframeRenderSystem(host.World, renderer), SystemStage.RenderOverlay);
+        host.AddSystem(chunks, SystemStage.RenderTransparent);
         host.AddSystem(new HudRenderSystem(host.World, renderer), SystemStage.RenderHud);
         host.AddSystem(_uiRenderer, SystemStage.RenderHud);
     }

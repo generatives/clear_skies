@@ -64,7 +64,7 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
         _dirtyChunks = world.GetEntities().With<Chunk>().With<NeedsRecollideFlag>().AsSet();
         _terrainGainedPresence = world.GetEntities().With<Chunk>().With<OwnPresence>().WhenAdded<PhysicsPresence>().AsSet();
         _terrainLostPresence = world.GetEntities().With<Chunk>().With<OwnPresence>().WhenRemoved<PhysicsPresence>().AsSet();
-        _gridsGainedPresence = world.GetEntities().With<DynamicGrid>().With<ChunkGrid>().WhenAdded<PhysicsPresence>().AsSet();
+        _gridsGainedPresence = world.GetEntities().With<DynamicGrid>().With<ChunkGrid>().WhenAdded<PhysicsPresence>().WhenChanged<PhysicsPresence>().AsSet();
         _gridsLostPresence = world.GetEntities().With<DynamicGrid>().With<PhysicsBodyComponent>().WhenRemoved<PhysicsPresence>().AsSet();
         _bodyOverrides = world.GetEntities().With<BodyStateOverride>().With<PhysicsBodyComponent>().With<Transform>().AsSet();
         world.SubscribeEntityDisposed(OnEntityDisposed);
@@ -138,10 +138,14 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
             entity.Remove<NeedsRecollideFlag>();
         }
 
+        // A grid's body: simulated here, or a kinematic copy following its owner's snapshots. A grid with neither has no
+        // body here: its Transform alone places it.
         foreach (var entity in _grids)
         {
-            if (entity.IsAlive && entity.Has<PhysicsPresence>() && entity.Get<PhysicsPresence>().Mode == PhysicsMode.Simulated)
-                UpdateDynamicGrid(entity);
+            if (!entity.IsAlive) continue;
+            var mode = entity.Has<PhysicsPresence>() ? entity.Get<PhysicsPresence>().Mode : (PhysicsMode?)null;
+            UpdateDynamicGrid(entity, withBody: mode is PhysicsMode.Simulated or PhysicsMode.KinematicFollower,
+                              kinematic: mode == PhysicsMode.KinematicFollower);
         }
 
         // Spawned or overwritten from a description: the body takes the described pose and velocities.
@@ -152,7 +156,11 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
             ref readonly var t = ref entity.Get<Transform>();
             var o = entity.Get<BodyStateOverride>();
             _physics.SetBodyPose(body, pb.BodyPosition(t), PhysicsConv.ToBepu(t.Rotation));
-            if (_physics.GetBodyMass(body) > 0)
+            // A copy following its owner's snapshots moves too (kinematically) until the follower takes over from its first
+            // snapshot, so whoever spawns aboard doesn't ride a ship that stands still and then lurches off. A locked grid
+            // simulated here stays put.
+            bool following = entity.Has<PhysicsPresence>() && entity.Get<PhysicsPresence>().Mode == PhysicsMode.KinematicFollower;
+            if (_physics.GetBodyMass(body) > 0 || following)
             {
                 _physics.SetBodyLinearVelocity(body, o.LinearVelocity);
                 _physics.SetBodyAngularVelocity(body, o.AngularVelocity);
@@ -167,13 +175,13 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
     // here. One job in flight per chunk, same pattern as ChunkMeshSystem: a chunk re-dirtied mid-job is
     // re-dispatched once that job lands, and a result for a chunk unloaded meanwhile is dropped. A chunk's old
     // collider stays in place until its replacement arrives, so an edit never opens a hole for a frame.
-    /// <summary>Starts (or, for an empty chunk, completes) <paramref name="entry"/>'s collider rebuild; false if every
-    /// job slot is taken.</summary>
+    /// <summary>Starts (or, for a chunk with nothing that collides, completes) <paramref name="entry"/>'s collider
+    /// rebuild; false if every job slot is taken.</summary>
     private bool UpdateStaticCollider(ChunkEntry entry)
     {
         var pos = entry.Position;
 
-        if (!entry.Data.HasAnySolid())
+        if (!entry.Data.HasAnyColliding())
         {
             if (_colliders.Remove(pos, out var old)) _physics.RemoveStaticCompound(old.handle);
             return true;
@@ -235,8 +243,9 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
     /// collidable, as opposed to just loaded/rendered.</summary>
     public bool HasCollider(ChunkPosition pos) => _colliders.ContainsKey(pos);
 
-    /// <summary>Whether every loaded terrain chunk with blocks within <paramref name="radius"/> of
-    /// <paramref name="centre"/> has its collider, so a body placed there won't fall through.</summary>
+    /// <summary>Whether every loaded terrain chunk with colliding blocks within <paramref name="radius"/> of
+    /// <paramref name="centre"/> has its collider, so a body placed there won't fall through. (A chunk of only
+    /// passable blocks, e.g. levers, has blocks but never gets a collider.)</summary>
     public bool CollidersReady(ChunkVolume world, PhysVec centre, float radius)
     {
         int r = (int)MathF.Ceiling(radius / S);
@@ -244,14 +253,25 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
         for (int dz = -r; dz <= r; dz++) for (int dy = -r; dy <= r; dy++) for (int dx = -r; dx <= r; dx++)
         {
             var pos = new ChunkPosition(cx + dx, cy + dy, cz + dz);
-            if (world.GetEntry(pos) is { } entry && entry.Data.HasAnySolid() && !_colliders.ContainsKey(pos)) return false;
+            if (world.GetEntry(pos) is { } entry && entry.Data.HasAnyColliding() && !_colliders.ContainsKey(pos)) return false;
         }
         return true;
     }
 
     // ── dynamic grid bodies (moved from GridShapeSystem) ────────────────────────
-    private void UpdateDynamicGrid(Entity entity)
+    private void UpdateDynamicGrid(Entity entity, bool withBody, bool kinematic)
     {
+        if (!withBody)
+        {
+            // No body here; the grid is placed by its Transform alone.
+            if (entity.Has<PhysicsBodyComponent>())
+            {
+                _removedBodies.Add(entity.Get<PhysicsBodyComponent>().Body);
+                entity.Remove<PhysicsBodyComponent>();
+            }
+            return;
+        }
+
         // Gather merged boxes across all chunks, expressed in grid-local space. Each box is
         // homogeneous in BlockId (see VoxelBoxDecomposer), so its mass is volume * that block's
         // Weight — real per-block-type density instead of uniform volume.
@@ -262,7 +282,7 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
 
         foreach (var (pos, entry) in chunkVolume.All)
         {
-            if (!entry.Data.HasAnySolid()) continue;
+            if (!entry.Data.HasAnyColliding()) continue;
             var o = pos.WorldOrigin;
             foreach (var (c, s, id) in _decomposer.Decompose(entry.Data))
             {
@@ -278,6 +298,7 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
 
         var (shape, inertia, com) = _physics.BuildDynamicCompound(_dynamicBoxes);
         grid.Inertia = inertia;
+        bool zeroInertia = grid.Locked || kinematic;
 
         // Bepu recentres the compound on its centre of mass, so the body origin is the CoM, which sits at the body's
         // Offset inside the grid's block space. The grid's Transform is that block space and must not move as blocks
@@ -291,7 +312,7 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
             ref readonly var t = ref entity.Get<Transform>();
             var orient = PhysicsConv.ToBepu(t.Rotation);
             var pos    = PhysicsConv.ToBepu(t.Position) + Vector3.Transform(com, orient);
-            var body   = _physics.AddDynamicBody(shape, grid.Locked ? default : inertia, pos, orient,
+            var body   = _physics.AddDynamicBody(shape, zeroInertia ? default : inertia, pos, orient,
                                                  new ColliderInfo(ColliderKind.VoxelGrid, entity));
             entity.Set(new PhysicsBodyComponent { Body = body, Offset = PhysicsConv.ToSilk(com) });
         }
@@ -309,7 +330,7 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
             // While locked, keep the body's actual physics inertia zeroed (kinematic) even though
             // the shape/geometry updates — grid.Inertia (above) still tracks the real value for
             // GridPilotSystem to restore on unlock.
-            _physics.SetBodyShape(body, shape, grid.Locked ? default : inertia);
+            _physics.SetBodyShape(body, shape, zeroInertia ? default : inertia);
             _physics.SetBodyPose(body, pos + worldShift, orient);
             _physics.RemoveCompound(oldShape);
         }

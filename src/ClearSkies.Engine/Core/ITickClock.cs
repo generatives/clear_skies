@@ -8,11 +8,21 @@ public interface ITickClock
     uint Tick { get; }
     float Alpha { get; }
 
+    /// <summary>Where this frame is on the timeline: its last tick, plus <see cref="Alpha"/> (see
+    /// <see cref="TickClock.Now"/>).</summary>
+    double Now { get; }
+
     /// <summary>Tick rate relative to real time (1 = 60 Hz).</summary>
     double Rate { get; set; }
 
-    /// <summary>Jumps to <paramref name="tick"/> and drops any partial tick.</summary>
+    /// <summary>Jumps to <paramref name="tick"/> (this frame's last tick will be it) and drops any partial tick.</summary>
     void Snap(uint tick);
+
+    /// <summary>Ticks dropped so far by frames too slow to run them all.</summary>
+    long DroppedTicks { get; }
+
+    /// <summary>Moves the tick number on by <paramref name="ticks"/> without running them, keeping the partial tick.</summary>
+    void Skip(int ticks);
 }
 
 /// <summary>A clock stepped by hand, for tests and headless sessions.</summary>
@@ -21,5 +31,8 @@ public sealed class ManualTickClock : ITickClock
     public uint Tick { get; set; }
     public float Alpha { get; set; }
     public double Rate { get; set; } = 1.0;
+    public double Now => Tick + (double)Alpha;
     public void Snap(uint tick) { Tick = tick; Alpha = 0; }
+    public long DroppedTicks { get; set; }
+    public void Skip(int ticks) => Tick += (uint)ticks;
 }

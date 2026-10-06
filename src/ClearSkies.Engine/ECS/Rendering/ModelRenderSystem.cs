@@ -30,7 +30,7 @@ public sealed class ModelRenderSystem : IRenderSystem, IDebugUiSystem
         _models   = world.GetEntities().With<Transform>().With<RenderedModel>().With<Rendered>().AsSet();
     }
 
-    public void Render(in RenderContext frame)
+    public void Render(SystemStage stage, in RenderContext frame)
     {
         _drawn = 0;
         foreach (ref readonly Entity e in _models.GetEntities())

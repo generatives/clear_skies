@@ -50,7 +50,12 @@ public class ChunkVolume
     /// chunk borders are always drawn (hidden where the neighbour is solid), so a chunk's mesh never changes when a
     /// neighbour loads, unloads or is edited. Set for the streamed world, where remeshing each chunk as its
     /// neighbouring columns arrived cost about as many meshes again as the chunks themselves, for about 13% more
-    /// vertices. Ships keep culling against their neighbours: they're small and never stream.</summary>
+    /// vertices. Ships keep culling against their neighbours: they're small and never stream. The one exception is
+    /// a <see cref="BlockDef.Transparent"/> face, which is seen through, so it is culled against its neighbour across
+    /// the border (or a lake or a wall of glass would show a sheet at every chunk border in it, and flicker against the
+    /// stone beside it).
+    /// A chunk with a transparent block on its border remeshes when the cell beside it changes (see
+    /// <see cref="MarkBorderCell"/>).</summary>
     public bool MeshIgnoresNeighbours { get; set; }
 
     /// <summary>Whether this volume's chunk meshes go in the renderer's WorldMeshPool, all drawn in one GPU-culled draw.
@@ -85,7 +90,7 @@ public class ChunkVolume
     public bool IsEmpty()
     {
         foreach (var entry in _chunks.Values)
-            if (entry.Data.HasAnySolid()) return false;
+            if (entry.Data.HasAnyNonAir()) return false;
         return true;
     }
 
@@ -150,15 +155,16 @@ public class ChunkVolume
         entry.Entity.Set(new NeedsRecollideFlag());
         entry.Entity.Set(new NeedsGpuUploadFlag());
         entry.PackedOpacityWords  = null; // block data actually changed -- cached opacity is stale
-        entry.AddEdit(lx, ly, lz, placedSolid: BlockRegistry.Get(id).Opacity >= 15);
+        entry.AddEdit(lx, ly, lz, placedSolid: BlockRegistry.Get(id).BlocksLight);
 
         // Adjacent-chunk face-cull invalidation.
-        if (lx == 0)                  TryMark(cp.Offset(-1,  0,  0));
-        if (lx == ChunkData.Size - 1) TryMark(cp.Offset( 1,  0,  0));
-        if (ly == 0)                  TryMark(cp.Offset( 0, -1,  0));
-        if (ly == ChunkData.Size - 1) TryMark(cp.Offset( 0,  1,  0));
-        if (lz == 0)                  TryMark(cp.Offset( 0,  0, -1));
-        if (lz == ChunkData.Size - 1) TryMark(cp.Offset( 0,  0,  1));
+        const int L = ChunkData.Size - 1;
+        if (lx == 0) MarkBorderCell(cp.Offset(-1,  0,  0), L,  ly, lz);
+        if (lx == L) MarkBorderCell(cp.Offset( 1,  0,  0), 0,  ly, lz);
+        if (ly == 0) MarkBorderCell(cp.Offset( 0, -1,  0), lx, L,  lz);
+        if (ly == L) MarkBorderCell(cp.Offset( 0,  1,  0), lx, 0,  lz);
+        if (lz == 0) MarkBorderCell(cp.Offset( 0,  0, -1), lx, ly, L);
+        if (lz == L) MarkBorderCell(cp.Offset( 0,  0,  1), lx, ly, 0);
     }
 
     /// <summary>The orientation of the block at a cell (<see cref="BlockOrientation.Upright"/> where nothing is loaded).</summary>
@@ -177,7 +183,7 @@ public class ChunkVolume
         const int S = ChunkData.Size;
         var (lo, _, _, _) = Decompose(min.X, min.Y, min.Z);
         var (hi, _, _, _) = Decompose(max.X, max.Y, max.Z);
-        bool placedSolid = BlockRegistry.Get(id).Opacity >= 15;
+        bool placedSolid = BlockRegistry.Get(id).BlocksLight;
         for (int cz = lo.Z; cz <= hi.Z; cz++)
         for (int cy = lo.Y; cy <= hi.Y; cy++)
         for (int cx = lo.X; cx <= hi.X; cx++)
@@ -207,12 +213,13 @@ public class ChunkVolume
             entry.Entity.Set(new NeedsRecollideFlag());
             entry.Entity.Set(new NeedsGpuUploadFlag());
             entry.PackedOpacityWords = null;
-            if (x0 == 0)     TryMark(cp.Offset(-1,  0,  0));
-            if (x1 == S - 1) TryMark(cp.Offset( 1,  0,  0));
-            if (y0 == 0)     TryMark(cp.Offset( 0, -1,  0));
-            if (y1 == S - 1) TryMark(cp.Offset( 0,  1,  0));
-            if (z0 == 0)     TryMark(cp.Offset( 0,  0, -1));
-            if (z1 == S - 1) TryMark(cp.Offset( 0,  0,  1));
+            // Each neighbour, by the face of it that touches this chunk (FaceHasSolid's numbering).
+            if (x0 == 0)     MarkBorderFace(cp.Offset(-1,  0,  0), 1);
+            if (x1 == S - 1) MarkBorderFace(cp.Offset( 1,  0,  0), 0);
+            if (y0 == 0)     MarkBorderFace(cp.Offset( 0, -1,  0), 3);
+            if (y1 == S - 1) MarkBorderFace(cp.Offset( 0,  1,  0), 2);
+            if (z0 == 0)     MarkBorderFace(cp.Offset( 0,  0, -1), 5);
+            if (z1 == S - 1) MarkBorderFace(cp.Offset( 0,  0,  1), 4);
         }
     }
 
@@ -386,7 +393,17 @@ public class ChunkVolume
     /// times over during load-in.</summary>
     protected void MarkNeighboursDirty(ChunkPosition pos, ChunkData data)
     {
-        if (MeshIgnoresNeighbours) return; // spare the face scans too
+        if (MeshIgnoresNeighbours)
+        {
+            // Only transparent faces are culled across borders here: a neighbour's changes if it has one on the face
+            // touching this chunk (its face f ^ 1).
+            for (int f = 0; f < 6; f++)
+            {
+                var (dx, dy, dz) = NeighbourOffsets[f];
+                MarkBorderFace(pos.Offset(dx, dy, dz), f ^ 1);
+            }
+            return;
+        }
         if (FaceHasSolid(data, 0)) TryMark(pos.Offset(-1,  0,  0));
         if (FaceHasSolid(data, 1)) TryMark(pos.Offset( 1,  0,  0));
         if (FaceHasSolid(data, 2)) TryMark(pos.Offset( 0, -1,  0));
@@ -395,9 +412,19 @@ public class ChunkVolume
         if (FaceHasSolid(data, 5)) TryMark(pos.Offset( 0,  0,  1));
     }
 
+    // The neighbour on each side, in FaceHasSolid's order.
+    private static readonly (int X, int Y, int Z)[] NeighbourOffsets =
+        { (-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1) };
+
     /// <summary>True if the chunk's boundary layer on side <paramref name="face"/> (0=-X, 1=+X, 2=-Y, 3=+Y, 4=-Z,
-    /// 5=+Z) contains any solid block, in the mesher's sense (<see cref="BlockDef.IsFullCube"/>).</summary>
-    public static bool FaceHasSolid(ChunkData data, int face)
+    /// 5=+Z) contains any block that can hide a neighbour's face (<see cref="BlockDef.HidesFaces"/>).</summary>
+    public static bool FaceHasSolid(ChunkData data, int face) => FaceHasAny(data, face, transparentOnly: false);
+
+    /// <summary>True if the chunk's boundary layer on side <paramref name="face"/> (as <see cref="FaceHasSolid"/>)
+    /// contains any <see cref="BlockDef.Transparent"/> block.</summary>
+    public static bool FaceHasTransparent(ChunkData data, int face) => FaceHasAny(data, face, transparentOnly: true);
+
+    private static bool FaceHasAny(ChunkData data, int face, bool transparentOnly)
     {
         int s = ChunkData.Size, layer = (face & 1) == 0 ? 0 : s - 1;
         for (int a = 0; a < s; a++)
@@ -409,7 +436,8 @@ public class ChunkVolume
                 1 => data.Get(a, layer, b),
                 _ => data.Get(a, b, layer),
             };
-            if (BlockRegistry.Get(id).IsFullCube) return true;
+            ref readonly var def = ref BlockRegistry.Get(id);
+            if (transparentOnly ? def.IsFullCube && def.Transparent : def.HidesFaces) return true;
         }
         return false;
     }
@@ -420,5 +448,25 @@ public class ChunkVolume
         if (_chunks.TryGetValue(pos, out var e)) {
             e.Entity.Set(new NeedsRemeshFlag());
         }
+    }
+
+    /// <summary>Remeshes the neighbour at <paramref name="pos"/> after an edit beside its cell
+    /// (<paramref name="x"/>, <paramref name="y"/>, <paramref name="z"/>): always where chunks cull against their
+    /// neighbours, and where they don't (<see cref="MeshIgnoresNeighbours"/>) only if that cell is
+    /// <see cref="BlockDef.Transparent"/>, the only kind culled across the border.</summary>
+    private void MarkBorderCell(ChunkPosition pos, int x, int y, int z)
+    {
+        if (!_chunks.TryGetValue(pos, out var e)) return;
+        if (MeshIgnoresNeighbours && !BlockRegistry.Get(e.Data.Get(x, y, z)).Transparent) return;
+        e.Entity.Set(new NeedsRemeshFlag());
+    }
+
+    /// <summary>As <see cref="MarkBorderCell"/> for a change along the neighbour's whole face <paramref name="face"/>
+    /// (<see cref="FaceHasSolid"/>'s numbering).</summary>
+    private void MarkBorderFace(ChunkPosition pos, int face)
+    {
+        if (!_chunks.TryGetValue(pos, out var e)) return;
+        if (MeshIgnoresNeighbours && !FaceHasTransparent(e.Data, face)) return;
+        e.Entity.Set(new NeedsRemeshFlag());
     }
 }

@@ -23,7 +23,7 @@ public class ChunkQuadTests
             data.Set(x, y, z, (x + y) % 3 == 0 ? BlockId.Dirt : BlockId.Grass);
         data.Set(31, 31, 31, BlockId.Stone);
 
-        var (verts, _) = new GreedyMesher().Mesh(data, null, null, null, null, null, null);
+        var verts = new GreedyMesher().Mesh(data, null, null, null, null, null, null).Opaque.Vertices;
         Assert.True(verts.Count > 0 && verts.Count % 4 == 0);
         for (int q = 0; q < verts.Count / 4; q++)
         {
