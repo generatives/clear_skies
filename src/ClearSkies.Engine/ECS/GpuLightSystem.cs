@@ -104,7 +104,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         //   Name       Mode               Rays Spread Cycle Hold Reach Near  FullR  MidR  Mid Far Relit Bounced
         new("Minimal", BounceMode.Off,    4,   1,     4,    4,   8f,  0f,  96f, 256f, 1,  1,  256,  512),
         new("Low",     BounceMode.AoOnly, 8,   4,     4,    4,   8f,  0f,  96f, 256f, 1,  1,  256, 1024),
-        new("Medium",  BounceMode.Full,   8,   2,     4,    4,  12f, 32f, 128f, 384f, 2,  1,  512, 2048),
+        new("Medium",  BounceMode.Full,   8,   4,     4,    4,   8f, 32f, 128f, 384f, 2,  1,  512, 2048),
         new("High",    BounceMode.Full,   8,   1,     4,    4,  16f, 64f, 256f, 768f, 2,  1, 1024, 4096),
     };
 
