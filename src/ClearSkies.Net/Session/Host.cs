@@ -42,41 +42,25 @@ public sealed class JoinedParticipant
     public bool IsAuthority => Peer == PeerId.Host;
 }
 
-/// <summary>The Host on this machine, as one Participant calls it (where <see cref="RemoteHost"/> is the Host on another
-/// machine): each call reaches the Host as from that Participant, so nobody can call it as someone else. Calls only the
-/// authority makes are ignored from anyone else.</summary>
-public sealed class LocalHost : IHost
+/// <summary>The Host on this machine, as one Participant here calls it (where <see cref="RemoteHost"/> is the Host on
+/// another machine): each call reaches the Host as from that Participant.</summary>
+public sealed class LocalHost(Host host, JoinedParticipant from) : IHost
 {
-    private readonly Host _host;
-    private readonly JoinedParticipant _from;
-
-    internal LocalHost(Host host, JoinedParticipant from)
-    {
-        _host = host;
-        _from = from;
-    }
-
-    /// <summary>Who's calling.</summary>
-    public JoinedParticipant Joined => _from;
-
-    /// <summary>What the Host tells that Participant by (set by whoever let it join, before anything is).</summary>
-    public IParticipant Participant { set => _from.Participant = value; }
-
-    public void Ping(double clientTimeMs) => _host.Ping(_from, clientTimeMs);
-    public void RequestIdBlock() => _host.RequestIdBlock(_from);
-    public void SetView(Vector3 centre, float radius) => _host.SetView(_from, centre, radius);
-    public void SendCommand(in CommandMessage command) => _host.SendCommand(_from, command);
-    public void SendEvent(in EventMessage evt) => _host.SendEvent(_from, evt);
-    public void Reject(in Rejection rejection) => _host.Reject(rejection);
-    public void SendInput(in PlayerInputMessage input) => _host.SendInput(_from, input);
-    public void SendFrame(uint tick, IReadOnlyList<BodySnapshot> snapshots) => _host.SendFrame(_from, tick, snapshots);
-    public void EntityCreated(in DescriptionMessage description) { if (_from.IsAuthority) _host.EntityCreated(description); }
-    public void EntityDescribed(in DescriptionMessage description) { if (_from.IsAuthority) _host.EntityDescribed(description); }
-    public void EntityReleased(in DescriptionMessage description) { if (_from.IsAuthority) _host.EntityReleased(description); }
-    public void EntityDeleted(EntityId id) { if (_from.IsAuthority) _host.EntityDeleted(id); }
-    public void EntitySaved(in DescriptionMessage description) { if (_from.IsAuthority) _host.EntitySaved(description); }
-    public void SaveDone() { if (_from.IsAuthority) _host.SaveDone(); }
-    public void Leave(string reason) => _host.Leave(_from, reason);
+    public void Ping(double clientTimeMs) => host.Ping(from, clientTimeMs);
+    public void RequestIdBlock() => host.RequestIdBlock(from);
+    public void SetView(Vector3 centre, float radius) => host.SetView(from, centre, radius);
+    public void SendCommand(in CommandMessage command) => host.SendCommand(from, command);
+    public void SendEvent(in EventMessage evt) => host.SendEvent(from, evt);
+    public void Reject(in Rejection rejection) => host.Reject(rejection);
+    public void SendInput(in PlayerInputMessage input) => host.SendInput(from, input);
+    public void SendFrame(uint tick, IReadOnlyList<BodySnapshot> snapshots) => host.SendFrame(from, tick, snapshots);
+    public void EntityCreated(in DescriptionMessage description) => host.EntityCreated(from, description);
+    public void EntityDescribed(in DescriptionMessage description) => host.EntityDescribed(from, description);
+    public void EntityReleased(in DescriptionMessage description) => host.EntityReleased(from, description);
+    public void EntityDeleted(EntityId id) => host.EntityDeleted(from, id);
+    public void EntitySaved(in DescriptionMessage description) => host.EntitySaved(from, description);
+    public void SaveDone() => host.SaveDone(from);
+    public void Leave(string reason) => host.Leave(from, reason);
 }
 
 /// <summary>An entity as the Host keeps it: in the save, or loaded (simulated by the authority). Everything but its kind,
@@ -117,8 +101,9 @@ public sealed class HostEntity
 /// <summary>
 /// The Host: coordinates and persists, and simulates nothing (it has no ECS world). Participants join it
 /// (<see cref="Join"/>), the hosting machine's directly (it has authority over every entity, so far), everyone else's
-/// over the network (<see cref="RemoteParticipants"/>); each then calls it through a <see cref="LocalHost"/> of its own
-/// (an <see cref="IHost"/>), and the Host calls each through its <see cref="IParticipant"/>. Everything between them goes
+/// over the network (<see cref="HostNetwork"/>). Each call on it says which Participant it's from (the hosting machine's
+/// makes them through a <see cref="LocalHost"/>, an <see cref="IHost"/>), and the Host calls each through its
+/// <see cref="IParticipant"/>. Everything between them goes
 /// through the Host, as none talk to each other. It keeps a record of every entity (<see cref="HostEntity"/>), loaded
 /// or in the save, and each Participant's View Volume, and from those:
 /// <list type="bullet">
@@ -204,7 +189,8 @@ public sealed class Host : ISystem
 
     // ── joining and leaving ─────────────────────────────────────────────────
 
-    internal void Leave(JoinedParticipant joined, string reason)
+    /// <summary>It's leaving, and why.</summary>
+    public void Leave(JoinedParticipant joined, string reason)
     {
         if (!_joined.Remove(joined)) return;
         Console.WriteLine($"[net] {joined.Name} ({joined.Peer}) left: {reason}");
@@ -239,10 +225,10 @@ public sealed class Host : ISystem
     /// <summary>
     /// Lets a Participant in, or says why not (<paramref name="refusal"/>). <paramref name="local"/>: it's on this
     /// machine, so it's the authority (the first one only); only code on this machine can say so, never anything sent
-    /// over the network. It calls the Host through what this returns; whoever lets it in then sets what the Host tells it by
-    /// (<see cref="LocalHost.Participant"/>).
+    /// over the network. Whoever lets it in then sets what the Host tells it by (<see cref="JoinedParticipant.Participant"/>),
+    /// and makes each of its calls on the Host as from what this returns.
     /// </summary>
-    public LocalHost? Join(in Hello hello, bool local, out Welcome welcome, out string refusal)
+    public JoinedParticipant? Join(in Hello hello, bool local, out Welcome welcome, out string refusal)
     {
         welcome = default;
         refusal = "";
@@ -258,7 +244,7 @@ public sealed class Host : ISystem
             welcome = new Welcome(id, idFirst, idCount, _seed, (uint)_clock.Now, default);
             var host = new JoinedParticipant(id, "host");
             _joined.Add(host);
-            return new LocalHost(this, host);
+            return host;
         }
         if (name.Length == 0) { refusal = "A player name is needed"; return null; }
         var player = _db.PlayerFor(name);
@@ -289,42 +275,42 @@ public sealed class Host : ISystem
         foreach (var p in _joined) p.Participant.PlayerNotice(new PlayerNotice(true, id, name));
         _joined.Add(joined);
         Console.WriteLine($"[net] {name} joining as {id}");
-        return new LocalHost(this, joined);
+        return joined;
     }
 
     // ── what Participants send ──────────────────────────────────────────────
 
-    internal void Ping(JoinedParticipant from, double clientTimeMs)
+    public void Ping(JoinedParticipant from, double clientTimeMs)
     {
         double now = _clock.Now; // not Tick: on a frame running several ticks, that's behind real time
         from.Participant.Pong(new TimePong(clientTimeMs, (uint)now, (float)(now - Math.Floor(now))));
     }
 
-    internal void RequestIdBlock(JoinedParticipant from)
+    public void RequestIdBlock(JoinedParticipant from)
     {
         var (first, count) = _ids.NextBlock();
         from.Participant.IdBlock(first, count);
     }
 
-    internal void SetView(JoinedParticipant from, Vector3 centre, float radius)
+    public void SetView(JoinedParticipant from, Vector3 centre, float radius)
     {
         (from.ViewCentre, from.ViewRadius) = (centre, MathF.Min(radius, ViewRadius));
         from.Ready = true;
     }
 
     /// <summary>To its authority, from whoever sent it, whatever it says.</summary>
-    internal void SendCommand(JoinedParticipant from, in CommandMessage command)
+    public void SendCommand(JoinedParticipant from, in CommandMessage command)
     {
         if (JoinedAs(command.To) is { } to) to.Participant.ReceiveCommand(command.WithFrom(from.Peer));
     }
 
-    internal void Reject(in Rejection rejection)
+    public void Reject(in Rejection rejection)
     {
         if (JoinedAs(rejection.To) is { } to) to.Participant.Rejected(rejection);
     }
 
     /// <summary>Only from the machine that plays them, on to their authority.</summary>
-    internal void SendInput(JoinedParticipant from, in PlayerInputMessage input)
+    public void SendInput(JoinedParticipant from, in PlayerInputMessage input)
     {
         if (input.Player == from.PlayerEntity && Authority is { } authority) authority.Participant.ReceiveInput(input);
     }
@@ -332,7 +318,7 @@ public sealed class Host : ISystem
     /// <summary>An event goes to everyone who has its entity, and back to whoever sent the command (to settle its
     /// prediction); nothing for an entity released or being released (its last Description has it). One for something
     /// the Host doesn't keep (the terrain) goes to everyone.</summary>
-    internal void SendEvent(JoinedParticipant from, in EventMessage evt)
+    public void SendEvent(JoinedParticipant from, in EventMessage evt)
     {
         var meta = evt.Meta;
         if (_entities.TryGetValue(meta.Target, out var entity) && (!entity.Loaded || entity.Releasing)) return;
@@ -343,7 +329,7 @@ public sealed class Host : ISystem
 
     /// <summary>The authority's snapshots: where its entities are now, then each Participant's share, as frames of
     /// their own.</summary>
-    internal void SendFrame(JoinedParticipant from, uint tick, IReadOnlyList<BodySnapshot> snapshots)
+    public void SendFrame(JoinedParticipant from, uint tick, IReadOnlyList<BodySnapshot> snapshots)
     {
         foreach (var s in snapshots)
         {
@@ -367,8 +353,10 @@ public sealed class Host : ISystem
 
     // ── descriptions ────────────────────────────────────────────────────────
 
-    internal void EntityCreated(in DescriptionMessage d)
+    /// <summary>The authority made an entity (anyone else's is ignored, as are all of these).</summary>
+    public void EntityCreated(JoinedParticipant from, in DescriptionMessage d)
     {
+        if (!from.IsAuthority) return;
         if (!_entities.TryGetValue(d.Id, out var e))
         {
             _entities[d.Id] = e = new HostEntity { Id = d.Id, Loaded = true };
@@ -378,8 +366,9 @@ public sealed class Host : ISystem
     }
 
     /// <summary>For the Participants that asked: sent on, unless it's been released or left their view meanwhile.</summary>
-    internal void EntityDescribed(in DescriptionMessage d)
+    public void EntityDescribed(JoinedParticipant from, in DescriptionMessage d)
     {
+        if (!from.IsAuthority) return;
         if (!_entities.TryGetValue(d.Id, out var e)) return; // forgotten meanwhile (deleted)
         Record(e, d, created: false);
         foreach (var p in _joined)
@@ -387,17 +376,18 @@ public sealed class Host : ISystem
                 SendSpawn(p, e);
     }
 
-    internal void EntityReleased(in DescriptionMessage d)
+    public void EntityReleased(JoinedParticipant from, in DescriptionMessage d)
     {
+        if (!from.IsAuthority) return;
         if (!_entities.TryGetValue(d.Id, out var e)) return;
         Record(e, d, created: false);
         OnReleased(e);
     }
 
     /// <summary>One of everything the authority describes when the Host saves (see <see cref="SaveAll"/>).</summary>
-    internal void EntitySaved(in DescriptionMessage d)
+    public void EntitySaved(JoinedParticipant from, in DescriptionMessage d)
     {
-        if (!Saving || !_entities.TryGetValue(d.Id, out var e)) return;
+        if (!from.IsAuthority || !Saving || !_entities.TryGetValue(d.Id, out var e)) return;
         Record(e, d, created: false);
         _saving.Add((e, e.Data!, e.Position));
     }
@@ -432,8 +422,9 @@ public sealed class Host : ISystem
         Releases++;
     }
 
-    internal void EntityDeleted(EntityId id)
+    public void EntityDeleted(JoinedParticipant from, EntityId id)
     {
+        if (!from.IsAuthority) return;
         if (!_entities.Remove(id)) return;
         _db.InTransaction(() => _db.DeleteEntity(id));
         foreach (var p in _joined) { p.Known.Remove(id); p.Requested.Remove(id); }
@@ -559,9 +550,9 @@ public sealed class Host : ISystem
     }
 
     /// <summary>The authority has described everything: written in one transaction.</summary>
-    internal void SaveDone()
+    public void SaveDone(JoinedParticipant from)
     {
-        if (!Saving) return;
+        if (!from.IsAuthority || !Saving) return;
         _db.InTransaction(() =>
         {
             foreach (var (e, data, position) in _saving) Write(e, data, position);

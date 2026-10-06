@@ -84,10 +84,11 @@ public sealed class SimulationParticipant : IParticipant, ISystem, ICommandRoute
     public static SimulationParticipant Join(Host host, Hello hello, EngineSession session, CommandSystem commands, EntityRegistry registry,
                                              World world, ITickClock clock, Func<Vector3, bool> terrainReady)
     {
-        var local = host.Join(hello, local: true, out var welcome, out var refusal)
-                    ?? throw new InvalidOperationException($"The host refused: {refusal}");
-        var participant = new SimulationParticipant(local, welcome, session, commands, registry, world, clock, terrainReady);
-        local.Participant = participant;
+        var joined = host.Join(hello, local: true, out var welcome, out var refusal)
+                     ?? throw new InvalidOperationException($"The host refused: {refusal}");
+        var participant = new SimulationParticipant(new LocalHost(host, joined), welcome, session, commands, registry, world, clock,
+                                                     terrainReady);
+        joined.Participant = participant;
         return participant;
     }
 

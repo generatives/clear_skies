@@ -26,7 +26,7 @@ public sealed class LoopbackGame : IDisposable
     public readonly SaveDatabase Save;
     public readonly Host Hub;
     public readonly HeadlessScene Host = new();
-    public readonly RemoteParticipants Remote;
+    public readonly HostNetwork Remote;
     public readonly SimulationParticipant HostNet;
     public readonly List<(HeadlessScene Scene, SimulationParticipant Net)> Clients = new();
 
@@ -43,7 +43,7 @@ public sealed class LoopbackGame : IDisposable
         Save = save ?? SaveDatabase.InMemory();
         if (hostPlayer is not null) SavePlayer("host", hostPlayer);
         Hub = new Host(Save, Host.Clock, seed: 1337, generationChecksum: Checksum, newPlayerSpawn: (new Vector3(0, 60, 0), 0, 0));
-        Remote = new RemoteParticipants(Hub, Network.Listen());
+        Remote = new HostNetwork(Hub, Network.Listen());
         HostNet = SimulationParticipant.Join(Hub, new Hello(ProtocolVersion.Current, hostPlayer is null ? "" : "host", Checksum),
                                              Host.Session, Host.Commands, Host.Registry, Host.World, Host.Clock, hostTerrainReady ?? (_ => true));
         HostNet.TimeSource = () => Network.Now;
