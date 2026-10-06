@@ -5,9 +5,9 @@ using ClearSkies.Net.Protocol;
 namespace ClearSkies.Net.Session;
 
 /// <summary>
-/// What a Participant can tell the Host, as one Participant: the Host knows who's calling. On the hosting machine it's
-/// the Host's own record of that Participant (<see cref="HostPeer"/>), called directly; on any other, a
-/// <see cref="RemoteHost"/>, which carries each call over the network.
+/// What a Participant can tell the Host, as one Participant: the Host knows who's calling. A <see cref="LocalHost"/>
+/// calls the Host itself, on the machine it runs on; a <see cref="RemoteHost"/> carries each call over the network to
+/// the machine the Host runs on, where <see cref="RemoteParticipants"/> makes it on that Participant's LocalHost.
 /// </summary>
 public interface IHost
 {

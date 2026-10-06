@@ -35,8 +35,8 @@ public sealed class NetDebugPanel : IDebugUiSystem
         if (_host is { } host)
         {
             ImGui.Text(_lag is null ? "Single-player: start with --host <port> to let others join"
-                                   : $"Participants: {host.Peers.Count}");
-            foreach (var p in host.Peers)
+                                   : $"Participants: {host.Participants.Count}");
+            foreach (var p in host.Participants)
                 ImGui.Text($"  {p.Name} ({p.Peer}): {p.Known.Count} entities, view at ({p.ViewCentre.X:0}, {p.ViewCentre.Y:0}, {p.ViewCentre.Z:0})");
             ImGui.Text($"Entities kept: {host.Entities.Count}; players released {host.Releases} this session");
         }

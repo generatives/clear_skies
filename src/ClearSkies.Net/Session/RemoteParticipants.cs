@@ -10,7 +10,7 @@ namespace ClearSkies.Net.Session;
 
 /// <summary>
 /// The Host's end of the network: Participants on other machines join through it. Each connection says hello, and once
-/// the Host lets it in, every message from it is a call on its <see cref="HostPeer"/> (as an <see cref="IHost"/>), and
+/// the Host lets it in, every message from it is a call on the <see cref="LocalHost"/> the Host gave it, and
 /// every call the Host makes on it goes back as a message. A system, first in the hosting machine's tick: its update
 /// hands on everything that arrived since the last.
 /// </summary>
@@ -18,13 +18,13 @@ public sealed class RemoteParticipants : ISystem, IDisposable
 {
     private readonly Host _host;
     private readonly ITransport _transport;
-    private readonly Dictionary<ConnectionId, Connection> _connections = new();
+    private readonly Dictionary<ConnectionId, RemoteParticipant> _connections = new();
 
     public RemoteParticipants(Host host, ITransport transport)
     {
         _host = host;
         _transport = transport;
-        transport.Connected += c => _connections[c] = new Connection(this, c);
+        transport.Connected += c => _connections[c] = new RemoteParticipant(this, c);
         transport.Disconnected += OnDisconnected;
         transport.Received += OnReceived;
     }
@@ -36,76 +36,76 @@ public sealed class RemoteParticipants : ISystem, IDisposable
 
     private void OnDisconnected(ConnectionId connection, string reason)
     {
-        if (_connections.Remove(connection, out var c)) ((IHost?)c.Peer)?.Leave(reason);
+        if (_connections.Remove(connection, out var from)) from.Host?.Leave(reason);
     }
 
     private void OnReceived(ConnectionId from, ReadOnlySpan<byte> packet, Channel channel)
     {
-        if (packet.Length == 0 || !_connections.TryGetValue(from, out var c)) return;
+        if (packet.Length == 0 || !_connections.TryGetValue(from, out var participant)) return;
         var r = new NetReader(packet);
         var kind = (MessageKind)r.ReadByte();
         try
         {
-            if (kind == MessageKind.Hello) c.Hello(Hello.Read(ref r));
-            else if (c.Peer is { } peer) Dispatch(c, peer, kind, ref r);
+            if (kind == MessageKind.Hello) participant.Hello(Hello.Read(ref r));
+            else if (participant.Host is { } host) Dispatch(participant, host, kind, ref r);
         }
         catch (Exception e) when (e is EndOfStreamException or InvalidDataException)
         {
-            Console.WriteLine($"[net] bad {kind} from {c.Peer?.Name ?? from.ToString()}: {e.Message}");
+            Console.WriteLine($"[net] bad {kind} from {participant.Host?.Joined.Name ?? from.ToString()}: {e.Message}");
         }
     }
 
-    private static void Dispatch(Connection c, IHost peer, MessageKind kind, ref NetReader r)
+    private static void Dispatch(RemoteParticipant from, IHost host, MessageKind kind, ref NetReader r)
     {
         switch (kind)
         {
-            case MessageKind.TimePing: peer.Ping(TimePing.Read(ref r).ClientTimeMs); break;
-            case MessageKind.IdBlockRequest: peer.RequestIdBlock(); break;
+            case MessageKind.TimePing: host.Ping(TimePing.Read(ref r).ClientTimeMs); break;
+            case MessageKind.IdBlockRequest: host.RequestIdBlock(); break;
             case MessageKind.ViewVolume:
             {
                 var view = ViewVolumeMessage.Read(ref r);
-                peer.SetView(view.Centre, view.Radius);
+                host.SetView(view.Centre, view.Radius);
                 break;
             }
-            case MessageKind.Command: peer.SendCommand(CommandMessage.Read(ref r)); break;
-            case MessageKind.Event: peer.SendEvent(EventMessage.Read(ref r)); break;
-            case MessageKind.Rejection: peer.Reject(Rejection.Read(ref r)); break;
-            case MessageKind.PlayerInput: peer.SendInput(PlayerInputMessage.Read(ref r)); break;
+            case MessageKind.Command: host.SendCommand(CommandMessage.Read(ref r)); break;
+            case MessageKind.Event: host.SendEvent(EventMessage.Read(ref r)); break;
+            case MessageKind.Rejection: host.Reject(Rejection.Read(ref r)); break;
+            case MessageKind.PlayerInput: host.SendInput(PlayerInputMessage.Read(ref r)); break;
             case MessageKind.StateFrame:
             {
-                uint tick = BodySync.ReadFrame(ref r, c.Frame);
-                peer.SendFrame(tick, c.Frame);
+                uint tick = BodySync.ReadFrame(ref r, from.Frame);
+                host.SendFrame(tick, from.Frame);
                 break;
             }
-            case MessageKind.Created: peer.EntityCreated(DescriptionMessage.Read(kind, ref r)); break;
-            case MessageKind.Described: peer.EntityDescribed(DescriptionMessage.Read(kind, ref r)); break;
-            case MessageKind.Released: peer.EntityReleased(DescriptionMessage.Read(kind, ref r)); break;
-            case MessageKind.Deleted: peer.EntityDeleted(EntityMessage.Read(kind, ref r).Id); break;
-            case MessageKind.Disconnect: c.Disconnect(DisconnectMessage.Read(ref r).Reason); break;
+            case MessageKind.Created: host.EntityCreated(DescriptionMessage.Read(kind, ref r)); break;
+            case MessageKind.Described: host.EntityDescribed(DescriptionMessage.Read(kind, ref r)); break;
+            case MessageKind.Released: host.EntityReleased(DescriptionMessage.Read(kind, ref r)); break;
+            case MessageKind.Deleted: host.EntityDeleted(EntityMessage.Read(kind, ref r).Id); break;
+            case MessageKind.Disconnect: from.Disconnect(DisconnectMessage.Read(ref r).Reason); break;
         }
     }
 
     public void Dispose() => _transport.Dispose();
 
     /// <summary>One Participant over the network: what the Host tells it, as messages.</summary>
-    private sealed class Connection(RemoteParticipants owner, ConnectionId id) : IParticipant
+    private sealed class RemoteParticipant(RemoteParticipants owner, ConnectionId id) : IParticipant
     {
         private readonly NetWriter _writer = new(1024);
         public readonly List<BodySnapshot> Frame = new();
 
-        /// <summary>Its record at the Host, once it has joined.</summary>
-        public HostPeer? Peer;
+        /// <summary>What it calls the Host by, once it has joined.</summary>
+        public LocalHost? Host;
 
         public void Hello(in Hello hello)
         {
-            if (Peer is not null) { Console.WriteLine($"[net] ignoring a second hello from {Peer.Name} ({Peer.Peer})"); return; }
-            Peer = owner._host.Join(hello, local: false, out var welcome, out var refusal);
-            if (Peer is null)
+            if (Host is not null) { Console.WriteLine($"[net] ignoring a second hello from {Host.Joined.Name} ({Host.Joined.Peer})"); return; }
+            Host = owner._host.Join(hello, local: false, out var welcome, out var refusal);
+            if (Host is null)
             {
                 Disconnected(refusal);
                 return;
             }
-            Peer.Participant = this;
+            Host.Participant = this;
             Send(welcome);
         }
 
