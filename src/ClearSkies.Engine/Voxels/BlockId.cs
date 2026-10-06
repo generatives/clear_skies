@@ -33,4 +33,10 @@ public enum BlockId : byte
     TanMushroom   = 26,
     Pebbles       = 27,
     MossyPebbles  = 28,
+
+    // Trees and cacti.
+    Log           = 29,
+    Leaves        = 30,
+    PineLeaves    = 31,
+    Cactus        = 32,
 }

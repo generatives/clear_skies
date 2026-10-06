@@ -142,6 +142,23 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 if (plant != BlockId.Air) data.Set(lx, above - originY, lz, plant);
             }
         }
+
+        // Trees and cacti, over the ground and plants, on tops with room above them (see Trees).
+        for (int lz = Trees.Reach; lz < S - Trees.Reach; lz++)
+        for (int lx = Trees.Reach; lx < S - Trees.Reach; lx++)
+        {
+            int col = lx + S * lz;
+            for (int s = 0; s < _spanCount[col]; s++)
+            {
+                int hi = _spans[col * MaxSpans + s].Hi;
+                if (hi + Trees.MaxHeight < originY || hi >= originY + S) continue;
+                if (s + 1 < _spanCount[col] && _spans[col * MaxSpans + s + 1].Lo <= hi + Trees.MaxHeight + 1) continue;
+                var ground = ContinentTerrain.Block(hi, hi, _strata[col], _patch[col], _bare[col * MaxSpans + s]);
+                int x = pos.X * S + lx, z = pos.Z * S + lz;
+                var kind = Trees.At(ground, x, hi, z, _patch[col], _seed);
+                if (kind != Trees.Kind.None) Trees.Grow(data, originY, kind, lx, hi, lz, Trees.Hash(x, hi, z, _seed));
+            }
+        }
     }
 
     /// <summary>Works out chunk column (chunkX, chunkZ)'s solid spans, if it isn't the one last worked out.</summary>
