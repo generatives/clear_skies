@@ -19,6 +19,7 @@ public sealed unsafe class Renderer : IDisposable
     // ChunkLoadSystem) plus model blocks, ships and clouds used to cut distant islands off at 4096.
     private const int MaxObjects = 16384;
     private const ulong ModelStride = 256;   // >= minUniformBufferOffsetAlignment
+    private const ulong BlockTableBytes = ChunkQuad.BlockTableSize * 16; // blockTable: one vec4<f32> per block
     private const ulong CameraSize  = 272;   // two mat4x4<f32> (view, proj) + nine vec4<f32> (sun, light params, camera position, fog, zenith, horizon, haze, sea, light params 2)
     private const ulong ModelSize   = 96;    // mat4x4<f32> + vec3<i32> chunk + i32 grid + vec4<f32> params
 
@@ -46,6 +47,9 @@ struct Camera {
     lightParams2: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
+// Per block type (indexed by BlockId; see ChunkQuad.BuildBlockTable): its colour (sRGB, shown on untextured blocks) and
+// opacity (1 unless translucent). Chunk quads store only their block.
+@group(0) @binding(1) var<uniform> blockTable: array<vec4<f32>, 256>;
 
 // Authored colours (vertex colours, sky, haze, clouds, the cloud sea) are display (sRGB) values. On an sRGB surface
 // the shaders work in linear light and the output is encoded on write, so they're converted to linear first; textures
@@ -280,9 +284,9 @@ fn vs_main(
 
 // A chunk mesh quad, packed (see ChunkQuad): its first corner x, y, z in a bits 0-17 (6 each),
 // face in 18-20 (+X, -X, +Y, -Y, +Z, -Z), texture layer in 21-28 (255: untextured), width - 1 in a bits 29-31 and b
-// bits 24-25, height - 1 in b bits 26-30; colour as RGB8 in b (a translucent quad, vs_chunk_translucent: RGB565, then
-// its opacity in bits 16-23). Corners follow the mesher's order (GreedyMesher.EmitQuad) and the texture coordinates
-// follow from position and face, as GreedyMesher.MakeUv makes them: V runs down world Y on the side faces.
+// bits 24-25, height - 1 in b bits 26-30; the block in b bits 0-7, whose colour and opacity come from blockTable.
+// Corners follow the mesher's order (GreedyMesher.EmitQuad) and the texture coordinates follow from position and face,
+// as GreedyMesher.MakeUv makes them: V runs down world Y on the side faces.
 // The mesh's quads, read by vertex index. Drawn indexed through one shared index buffer (quad q's triangles are
 // 4q + 0, 1, 2 and 0, 2, 3), so vertex_index is 4q + corner and the GPU reuses the corners the two triangles share:
 // four shader runs per quad, as with the old four-vertex meshes, where six separate vertices (instanced or not) cost
@@ -291,23 +295,17 @@ fn vs_main(
 
 @vertex
 fn vs_chunk(@builtin(vertex_index) vi: u32) -> VSOut {
-    return chunkVertex(quads[vi / 4u], vi % 4u, false);
-}
-
-// A translucent quad (ChunkQuad.PackTranslucent): its colour as RGB565, then its opacity.
-@vertex
-fn vs_chunk_translucent(@builtin(vertex_index) vi: u32) -> VSOut {
-    return chunkVertex(quads[vi / 4u], vi % 4u, true);
+    return chunkVertex(quads[vi / 4u], vi % 4u);
 }
 
 // The wireframe: each quad's outline as four lines.
 @vertex
 fn vs_chunk_lines(@builtin(vertex_index) vi: u32) -> VSOut {
     var corners = array<u32, 8>(0u, 1u, 1u, 2u, 2u, 3u, 3u, 0u);
-    return chunkVertex(quads[vi / 8u], corners[vi % 8u], false);
+    return chunkVertex(quads[vi / 8u], corners[vi % 8u]);
 }
 
-fn chunkVertex(quad: vec2<u32>, corner: u32, translucent: bool) -> VSOut {
+fn chunkVertex(quad: vec2<u32>, corner: u32) -> VSOut {
     let a = quad.x;
     let c = quad.y;
     let face = (a >> 18u) & 7u;
@@ -326,23 +324,18 @@ fn chunkVertex(quad: vec2<u32>, corner: u32, translucent: bool) -> VSOut {
     else                { position.x += cu; position.y += cv; normal.z = s; uv2 = vec2<f32>(position.x, -position.y); }
     let layerBits = (a >> 21u) & 255u;
     let layer = select(f32(layerBits), -1.0, layerBits == 255u);
-    var color = vec3<f32>(f32(c & 255u), f32((c >> 8u) & 255u), f32((c >> 16u) & 255u)) / 255.0;
-    var alpha = 1.0;
-    if (translucent) {
-        color = vec3<f32>(f32(c & 31u) / 31.0, f32((c >> 5u) & 63u) / 63.0, f32((c >> 11u) & 31u) / 31.0);
-        alpha = f32((c >> 16u) & 255u) / 255.0;
-    }
+    let block = blockTable[c & 255u];
 
     var o: VSOut;
     let world     = model.model * vec4<f32>(position, 1.0);
     o.pos         = camera.proj * camera.view * world;
     o.worldPos    = world.xyz;
-    o.color       = color;
+    o.color       = block.rgb;
     o.worldNormal = (model.model * vec4<f32>(normal, 0.0)).xyz;
     o.localPos    = position;
     o.localNormal = normal;
     o.uv          = vec3<f32>(uv2, layer);
-    o.alpha       = alpha;
+    o.alpha       = block.a;
     return o;
 }
 
@@ -914,6 +907,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     public bool WireframeMode { get; set; }
 
     private readonly GpuBuffer _cameraBuffer;
+    private readonly GpuBuffer _blockTable; // per block type: colour and opacity (ChunkQuad.BuildBlockTable)
     private readonly GpuBuffer _hudCameraBuffer; // permanently holds identity view+proj
     private readonly GpuBuffer _modelBuffer;
 
@@ -984,6 +978,8 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
                                             depthWrite: false, CompareFunction.GreaterEqual);
 
         _cameraBuffer    = GpuBuffer.CreateUniform(ctx, CameraSize);
+        _blockTable      = GpuBuffer.CreateUniform(ctx, BlockTableBytes);
+        _blockTable.Write<Vector4D<float>>(0, ChunkQuad.BuildBlockTable());
         _hudCameraBuffer = GpuBuffer.CreateUniform(ctx, CameraSize);
         _modelBuffer     = GpuBuffer.CreateUniform(ctx, ModelStride * MaxObjects);
         var quadIdx = new uint[MaxChunkQuads * 6];
@@ -1030,7 +1026,15 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
             Visibility = ShaderStage.Vertex | ShaderStage.Fragment, // fragment reads sunDir
             Buffer = new BufferBindingLayout { Type = BufferBindingType.Uniform, HasDynamicOffset = false, MinBindingSize = CameraSize },
         };
-        var camDesc = new BindGroupLayoutDescriptor { EntryCount = 1, Entries = &camEntry };
+        BindGroupLayoutEntry* camEntries = stackalloc BindGroupLayoutEntry[2];
+        camEntries[0] = camEntry;
+        camEntries[1] = new BindGroupLayoutEntry
+        {
+            Binding = 1,
+            Visibility = ShaderStage.Vertex, // chunk quads' block colours and opacities
+            Buffer = new BufferBindingLayout { Type = BufferBindingType.Uniform, HasDynamicOffset = false, MinBindingSize = BlockTableBytes },
+        };
+        var camDesc = new BindGroupLayoutDescriptor { EntryCount = 2, Entries = camEntries };
         _cameraLayout = _api.DeviceCreateBindGroupLayout(_ctx.Device, &camDesc);
 
         var modelEntry = new BindGroupLayoutEntry
@@ -1117,7 +1121,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         => CreatePipeline(vertexEntry, fragmentEntry, null, topology, cullMode, depthWrite: true, CompareFunction.Greater,
                           layout: _chunkPipelineLayout);
 
-    /// <summary>Translucent blocks' faces (vs_chunk_translucent, fs_chunk_transparent): alpha-blended over what's drawn,
+    /// <summary>Translucent blocks' faces (vs_chunk, fs_chunk_transparent): alpha-blended over what's drawn,
     /// only where they're the nearest transparent face (GreaterEqual against
     /// <see cref="CreateTransparentChunkDepthPipeline"/>'s depth), without writing depth. Both sides drawn, so a water
     /// surface is seen from under it too.</summary>
@@ -1126,14 +1130,14 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         var color = new BlendComponent { Operation = BlendOperation.Add, SrcFactor = BlendFactor.SrcAlpha, DstFactor = BlendFactor.OneMinusSrcAlpha };
         var alpha = new BlendComponent { Operation = BlendOperation.Add, SrcFactor = BlendFactor.One, DstFactor = BlendFactor.OneMinusSrcAlpha };
         var blend = new BlendState { Color = color, Alpha = alpha };
-        return CreatePipeline("vs_chunk_translucent", "fs_chunk_transparent", null, PrimitiveTopology.TriangleList, CullMode.None,
+        return CreatePipeline("vs_chunk", "fs_chunk_transparent", null, PrimitiveTopology.TriangleList, CullMode.None,
                               depthWrite: false, CompareFunction.GreaterEqual, &blend, layout: _chunkPipelineLayout);
     }
 
-    /// <summary>The transparent faces' depth pre-pass (vs_chunk_translucent, fs_chunk_transparent_depth): depth only, no
+    /// <summary>The transparent faces' depth pre-pass (vs_chunk, fs_chunk_transparent_depth): depth only, no
     /// colour, so the colour pass draws just the nearest transparent face at each pixel.</summary>
     private RenderPipeline* CreateTransparentChunkDepthPipeline()
-        => CreatePipeline("vs_chunk_translucent", "fs_chunk_transparent_depth", null, PrimitiveTopology.TriangleList, CullMode.None,
+        => CreatePipeline("vs_chunk", "fs_chunk_transparent_depth", null, PrimitiveTopology.TriangleList, CullMode.None,
                           depthWrite: true, CompareFunction.Greater, writeMask: ColorWriteMask.None, layout: _chunkPipelineLayout);
 
     /// <summary>Debug overdraw view (fs_overdraw): terrain drawn additively, depth-tested in the normal draw order, so
@@ -1207,12 +1211,14 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
 
     private void CreateBindGroups()
     {
-        var camEntry = new BindGroupEntry { Binding = 0, Buffer = _cameraBuffer.Handle, Offset = 0, Size = CameraSize };
-        var camDesc = new BindGroupDescriptor { Layout = _cameraLayout, EntryCount = 1, Entries = &camEntry };
+        BindGroupEntry* camEntries = stackalloc BindGroupEntry[2];
+        camEntries[0] = new BindGroupEntry { Binding = 0, Buffer = _cameraBuffer.Handle, Offset = 0, Size = CameraSize };
+        camEntries[1] = new BindGroupEntry { Binding = 1, Buffer = _blockTable.Handle, Offset = 0, Size = BlockTableBytes };
+        var camDesc = new BindGroupDescriptor { Layout = _cameraLayout, EntryCount = 2, Entries = camEntries };
         _cameraBindGroup = _api.DeviceCreateBindGroup(_ctx.Device, &camDesc);
 
-        var hudCamEntry = new BindGroupEntry { Binding = 0, Buffer = _hudCameraBuffer.Handle, Offset = 0, Size = CameraSize };
-        var hudCamDesc  = new BindGroupDescriptor { Layout = _cameraLayout, EntryCount = 1, Entries = &hudCamEntry };
+        camEntries[0] = new BindGroupEntry { Binding = 0, Buffer = _hudCameraBuffer.Handle, Offset = 0, Size = CameraSize };
+        var hudCamDesc  = new BindGroupDescriptor { Layout = _cameraLayout, EntryCount = 2, Entries = camEntries };
         _hudCameraBindGroup = _api.DeviceCreateBindGroup(_ctx.Device, &hudCamDesc);
 
         var modelEntry = new BindGroupEntry { Binding = 0, Buffer = _modelBuffer.Handle, Offset = 0, Size = ModelSize };
@@ -1723,6 +1729,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     public void Dispose()
     {
         _cameraBuffer.Dispose();
+        _blockTable.Dispose();
         _hudCameraBuffer.Dispose();
         _modelBuffer.Dispose();
         _quadIndices.Dispose();

@@ -127,10 +127,8 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     private readonly EntitySet _meshedChunks;
 
     /// <summary>Packs a chunk mesh for upload, off the main thread: each of the mesher's quads (four vertices; the
-    /// indices only ever join them as two triangles) as one 8-byte <see cref="ChunkQuad"/>. <paramref name="alphas"/>, if
-    /// not null, is each vertex's opacity: the mesh is translucent, and its quads carry it (see
-    /// <see cref="ChunkQuad.PackTranslucent"/>).</summary>
-    private static Packed PackQuads(LayerMesh mesh, List<byte>? alphas)
+    /// indices only ever join them as two triangles) as one 8-byte <see cref="ChunkQuad"/>.</summary>
+    private static Packed PackQuads(LayerMesh mesh)
     {
         ReadOnlySpan<Vertex> verts = CollectionsMarshal.AsSpan(mesh.Vertices);
         int quads = verts.Length / 4;
@@ -138,9 +136,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
         int bytes = quads * (int)ChunkQuad.SizeBytes;
         var packed = ArrayPool<byte>.Shared.Rent(bytes);
         var dst = MemoryMarshal.Cast<byte, ChunkQuad>(packed.AsSpan(0, bytes));
-        for (int q = 0; q < quads; q++)
-            dst[q] = alphas is null ? ChunkQuad.Pack(verts.Slice(4 * q, 4))
-                                    : ChunkQuad.PackTranslucent(verts.Slice(4 * q, 4), alphas[4 * q]);
+        for (int q = 0; q < quads; q++) dst[q] = ChunkQuad.Pack(verts.Slice(4 * q, 4), mesh.Blocks[q]);
         return new Packed(packed, bytes, quads);
     }
 
@@ -187,9 +183,9 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                     // The mesher's lists are per-thread scratch, so copy out before this thread meshes again.
                     var mesher = _meshers.Value!;
                     var mesh = mesher.Mesh(data, nX, pX, nY, pY, nZ, pZ, neighboursForTransparentOnly: alone);
-                    var opaque = PackQuads(mesh.Opaque, null);
-                    var cutout = PackQuads(mesh.Cutout, null);
-                    var transparent = PackQuads(mesh.Translucent, mesh.TranslucentAlphas);
+                    var opaque = PackQuads(mesh.Opaque);
+                    var cutout = PackQuads(mesh.Cutout);
+                    var transparent = PackQuads(mesh.Translucent);
                     _results.Enqueue(new Result(entry.Entity, opaque, cutout, transparent, FindModelBlocks(data), null));
                 }
                 catch (Exception e)
