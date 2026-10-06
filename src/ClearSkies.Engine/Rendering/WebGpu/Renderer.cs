@@ -1199,7 +1199,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
                 CullMode         = cullMode,
             },
             DepthStencil = &depth,
-            Multisample  = new MultisampleState { Count = 1, Mask = ~0u, AlphaToCoverageEnabled = false },
+            Multisample  = new MultisampleState { Count = _ctx.SampleCount, Mask = ~0u, AlphaToCoverageEnabled = false },
             Fragment     = &fragmentState,
         };
         var pipeline = _api.DeviceCreateRenderPipeline(_ctx.Device, &desc);
@@ -1581,12 +1581,16 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         var encDesc = new CommandEncoderDescriptor();
         _encoder = _api.DeviceCreateCommandEncoder(_ctx.Device, &encDesc);
 
+        // With MSAA the pass draws into the multisampled target and resolves it into the swapchain image at the end; the
+        // samples themselves needn't be kept.
+        bool msaa = _ctx.MsaaView != null;
         var colorAtt = new RenderPassColorAttachment
         {
-            View = _ctx.CurrentView,
+            View = msaa ? _ctx.MsaaView : _ctx.CurrentView,
+            ResolveTarget = msaa ? _ctx.CurrentView : null,
             DepthSlice = uint.MaxValue, // WGPU_DEPTH_SLICE_UNDEFINED
             LoadOp = LoadOp.Clear,
-            StoreOp = StoreOp.Store,
+            StoreOp = msaa ? StoreOp.Discard : StoreOp.Store,
             // Sky blue; DrawSky paints over whatever the world leaves uncovered.
             ClearValue = OverdrawMode ? new Color { R = 0, G = 0, B = 0, A = 1 } : new Color { R = 0.10, G = 0.3078, B = 0.4804, A = 1.0 },
         };
