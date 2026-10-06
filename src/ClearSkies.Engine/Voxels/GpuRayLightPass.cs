@@ -594,9 +594,9 @@ fn smoothedAcc(lk: vec3<i32>, own: u32) -> vec4<f32> {
 // A surface voxel's display half: the flat ambient (p.bounce2.z) darkened by the ray AO (times its strength,
 // p.bounce2.w), its lamp light (traced now) and bounce (times the display scale, p.bounce.z), combined per channel by
 // max, and the given sun level; bounce and AO are the stored ones, smoothed over neighbours (smoothedAcc) when smooth.
-fn composeSurface(g: i32, v: vec3<i32>, lk: vec3<i32>, acc: u32, sun: u32, list: u32, smooth: bool) -> u32 {
+fn composeSurface(g: i32, v: vec3<i32>, lk: vec3<i32>, acc: u32, sun: u32, list: u32, smoothed: bool) -> u32 {
     let ambient = p.bounce2.z;
-    let sm = select(unpackAcc(acc), smoothedAcc(lk, acc), smooth);
+    let sm = select(unpackAcc(acc), smoothedAcc(lk, acc), smoothed);
     let bounce = sm.rgb * p.bounce.z;
     let sky = ambient * (1.0 - p.bounce2.w * sm.a);
     let light = max(max(lampLight(g, v, list), bounce), vec3<f32>(sky));
@@ -615,7 +615,7 @@ fn compose_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) 
     let slot = work[wi];
     let it = itemOf(slot, t);
     let base = it.v0 - vec3<i32>(i32(t * 2u) & 7, (i32(t * 2u) >> 3u) & 7, i32(t * 2u) >> 6u); // the brick's first voxel
-    let smooth = p.bounce.x > 0.5;
+    let smoothed = p.bounce.x > 0.5;
     if (t == 0u) { atomicStore(&wCount, 0u); }
     if (t < 54u) { atomicStore(&cOcc[t], 0u); }
     if (t < 32u) { atomicStore(&cSurf[t], 0u); }
@@ -633,7 +633,7 @@ fn compose_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) 
 
     // For smoothing: which cells of the brick and one around it are surface air with light storage, and their
     // accumulation (the brick's own straight from its slot, its neighbours' through the tables).
-    if (smooth) {
+    if (smoothed) {
         for (var i = i32(t); i < C10 * C10 * C10; i = i + 256) {
             let c = vec3<i32>(i % C10, (i / C10) % C10, i / (C10 * C10));
             if (!tileSurfaceAir(c + vec3<i32>(1))) { continue; }
@@ -670,7 +670,7 @@ fn compose_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) 
     for (var i = t; i < n; i = i + 256u) {
         let k = wList[i];
         let lk = vec3<i32>(i32(k & 7u), i32((k >> 3u) & 7u), i32(k >> 6u));
-        wSun[k] = composeSurface(it.g, base + lk, lk, lightPool[accBase + i32(k)], (wSun[k] >> 14u) & 3u, list, smooth);
+        wSun[k] = composeSurface(it.g, base + lk, lk, lightPool[accBase + i32(k)], (wSun[k] >> 14u) & 3u, list, smoothed);
     }
     workgroupBarrier();
     lightPool[it.disp] = wSun[t * 2u] | (wSun[t * 2u + 1u] << 16u);
