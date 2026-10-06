@@ -91,8 +91,17 @@ fn applyFog(color: vec3<f32>, worldPos: vec3<f32>) -> vec3<f32> {
     let d = worldPos - camera.camPos.xyz;
     let f = smoothstep(camera.fog.x, camera.fog.y, length(d.xz));
     let hazed = applyHaze(color, d);
-    if (f <= 0.0) { return hazed; } // only the fog band pays for tracing the sea
-    return mix(hazed, background(normalize(d)).rgb, f);
+    if (f <= 0.0) { return applyWater(hazed, d); } // only the fog band pays for tracing the sea
+    return applyWater(mix(hazed, background(normalize(d)).rgb, f), d);
+}
+
+// Underwater, as Minecraft does it: with the camera in water (camPos.w > 0, how far it sees), everything fades
+// linearly into the water's colour by that distance, the sky included. The colour is dimmed with the daylight.
+const WATER_FOG: vec3<f32> = vec3<f32>(0.03, 0.10, 0.25);
+fn waterFogColor() -> vec3<f32> { return WATER_FOG * max(camera.lightParams.z, 0.8 * camera.sunDir.w); }
+fn applyWater(color: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
+    if (camera.camPos.w <= 0.0) { return color; }
+    return mix(color, waterFogColor(), clamp(length(d) / camera.camPos.w, 0.0, 1.0));
 }
 
 // What fs_sky draws along world direction dir (unit), without the sun disc: the sky (w = 0), or the cloud sea if the
@@ -126,6 +135,7 @@ fn fs_sky(in: SkyOut) -> @location(0) vec4<f32> {
     let dir   = normalize(in.dir);
     let toSun = dot(dir, -camera.sunDir.xyz);
     let disc  = smoothstep(0.9992, 0.9996, toSun) * camera.sunDir.w;
+    if (camera.camPos.w > 0.0) { return vec4<f32>(waterFogColor(), 1.0); } // underwater: the fog hides the sky
     let b = background(dir);
     return vec4<f32>(b.rgb + vec3<f32>(1.0, 0.95, 0.85) * disc * (1.0 - b.w), 1.0);
 }
@@ -731,13 +741,17 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 // Translucent blocks' faces (see RenderLayer.Translucent), alpha-blended over the opaque world: lit like fs_main, with
 // the texture's alpha times the block's opacity. Fully clear texels are cut out. Drawn only where the face is the
 // nearest transparent one (fs_chunk_transparent_depth laid that depth down first), so every pixel blends exactly one
-// transparent layer and the draw order doesn't matter.
+// transparent layer and the draw order doesn't matter. Both sides are drawn; a face seen from behind (from inside the
+// water) is lit as facing the viewer, from the cell on the viewer's side, so it is lit like the water around it rather
+// than like the air beyond.
 @fragment
-fn fs_chunk_transparent(in: VSOut) -> @location(0) vec4<f32> {
+fn fs_chunk_transparent(in: VSOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let c = blockColor(in);
     let alpha = c.a * in.alpha;
     if (alpha < 0.004) { discard; }
-    return vec4<f32>(shadeBlock(in, c.rgb), alpha);
+    var v = in;
+    if (!front) { v.localNormal = -v.localNormal; v.worldNormal = -v.worldNormal; }
+    return vec4<f32>(shadeBlock(v, c.rgb), alpha);
 }
 
 // Cut-out blocks' faces (RenderLayer.Cutout, e.g. glass): fs_main, minus the texels under half alpha. A separate entry
@@ -915,7 +929,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     shade *= 0.9 + 0.1 * max(dot(n, -camera.sunDir.xyz), 0.0) * camera.sunDir.w;
     let d = in.worldPos - camera.camPos.xyz;
     let f = smoothstep(camera.fog.z, camera.fog.w, length(d));
-    return vec4<f32>(mix(applyHaze(lin(in.color * shade), d), skyColor(normalize(d)), f), 1.0);
+    return vec4<f32>(applyWater(mix(applyHaze(lin(in.color * shade), d), skyColor(normalize(d)), f), d), 1.0);
 }
 ";
 

@@ -8,7 +8,7 @@ namespace ClearSkies.Engine.Rendering;
 /// Per-frame camera uniform block (272 bytes). Must match @group(0) @binding(0) in the WGSL shader.
 /// Layout: view (64 B) + projection (64 B) + sunDir as vec4 (16 B: xyz direction, w strength)
 /// + lightParams vec4 (16 B: x ray AO strength, y reference-lighting flag, z ambient 0-1, w 1 on an sRGB surface)
-/// + camPos vec4 (xyz world position) + fog vec4 (xy: the world's fog start/end, horizontal; zw: the cloud layer's,
+/// + camPos vec4 (xyz world position, w underwater visibility or 0) + fog vec4 (xy: the world's fog start/end, horizontal; zw: the cloud layer's,
 /// see <see cref="CloudLayer"/>; blocks from the camera) + zenith and horizon sky colours as vec4s (horizon.w: the
 /// haze's strength) + haze vec4 (rgb colour, w distance) + sea vec4 (the cloud sea: altitude, coverage (0 = off), cell
 /// size and thickness in blocks; see <see cref="SkySettings"/>) + lightParams2 vec4 (x: exposure; y, z: render pass
@@ -30,7 +30,7 @@ public struct CameraUniform
     public float           Ambient;        // lightParams.z: RayLightingSettings.Ambient
     public float           LinearizeColors; // lightParams.w: 1 = sRGB surface, authored colours are converted to linear
     public Vector3D<float> CameraPosition; // camPos.xyz: fog distances and view directions are measured from here
-    private float          _pad1;
+    public float           UnderwaterFogEnd; // camPos.w: with the camera in water, how far it sees (blocks); 0 = not
     public float           FogStart, FogEnd, CloudFogStart, CloudFogEnd; // fog, blocks
     public Vector3D<float> ZenithColor;    // zenith.rgb
     private float          _pad2;
