@@ -3,13 +3,14 @@ using ClearSkies.Engine.Commands;
 using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Input;
 using ClearSkies.Engine.Serialization;
+using ClearSkies.Engine.Voxels;
 
 namespace ClearSkies.Net.Protocol;
 
 /// <summary>Bumped whenever any message or description format changes; a mismatch refuses the join.</summary>
 public static class ProtocolVersion
 {
-    public const ushort Current = 5;
+    public const ushort Current = 6;
 }
 
 /// <summary>The first byte of every packet.</summary>
@@ -46,6 +47,7 @@ public enum MessageKind : byte
     SaveRequest = 30,
     SaveDone = 31,
     Saved = 32,
+    ChunkEdited = 33,
 }
 
 /// <summary>A message: writes itself, kind byte first (see <see cref="Session.RemoteHost"/> and
@@ -64,16 +66,29 @@ public readonly record struct Hello(ushort Version, string Name, ulong Generatio
 }
 
 /// <summary>Host → Participant: its peer ID (<see cref="PeerId.Host"/> for the hosting machine's, the authority) and first
-/// block of entity IDs, the world seed, the Host's tick, and where its player will spawn (their saved position, or the
-/// spawn point), for the camera to wait at.</summary>
-public readonly record struct Welcome(PeerId Peer, uint IdFirst, uint IdCount, ulong Seed, uint HostTick, Vector3 Spawn) : IMessage
+/// block of entity IDs, the world seed, the Host's tick, where its player will spawn (their saved position, or the
+/// spawn point), for the camera to wait at, and every terrain chunk edited so far (loaded from the Host, not
+/// generated).</summary>
+public readonly record struct Welcome(PeerId Peer, uint IdFirst, uint IdCount, ulong Seed, uint HostTick, Vector3 Spawn,
+                                      ChunkPosition[] EditedChunks) : IMessage
 {
     public void Write(NetWriter w)
     {
         w.WriteByte((byte)MessageKind.Welcome); w.WriteUInt32(Peer.Value); w.WriteUInt32(IdFirst); w.WriteUInt32(IdCount);
         w.WriteUInt64(Seed); w.WriteUInt32(HostTick); w.WriteVector3(Spawn);
+        w.WriteVarUInt((uint)EditedChunks.Length);
+        foreach (var p in EditedChunks) ChunkMessage.WritePosition(w, p);
     }
-    public static Welcome Read(ref NetReader r) => new(new PeerId(r.ReadUInt32()), r.ReadUInt32(), r.ReadUInt32(), r.ReadUInt64(), r.ReadUInt32(), r.ReadVector3());
+
+    public static Welcome Read(ref NetReader r)
+    {
+        var (peer, idFirst, idCount, seed, tick, spawn) = (new PeerId(r.ReadUInt32()), r.ReadUInt32(), r.ReadUInt32(), r.ReadUInt64(), r.ReadUInt32(), r.ReadVector3());
+        uint count = r.ReadVarUInt();
+        if (count > r.Remaining / 12) throw new InvalidDataException($"Welcome with {count} edited chunks.");
+        var edited = new ChunkPosition[count];
+        for (int i = 0; i < count; i++) edited[i] = ChunkMessage.ReadPosition(ref r);
+        return new(peer, idFirst, idCount, seed, tick, spawn, edited);
+    }
 }
 
 /// <summary>One tick of a player's input, numbered by the machine that plays them (see OwnPlayerPrediction).</summary>
@@ -310,6 +325,29 @@ public readonly ref struct DescriptionMessage(MessageKind message, EntityId id, 
         Vector3? position = r.ReadBool() ? r.ReadVector3() : null;
         return new(message, id, kind, number, position, r.ReadRaw(r.Remaining));
     }
+}
+
+/// <summary>A terrain chunk: Participant → Host <see cref="MessageKind.ChunkRequest"/> (send me this edited chunk, with
+/// no data), Host → Participant <see cref="MessageKind.ChunkData"/> (the chunk as the Host has it; no data: it was
+/// never edited, so generate it), authority → Host <see cref="MessageKind.ChunkEdited"/> (it's just been edited: this is
+/// it now). The data is a chunk as <see cref="StaticWorldSerializer"/> writes it, opaque to the Host.</summary>
+public readonly ref struct ChunkMessage(MessageKind message, ChunkPosition position, ReadOnlySpan<byte> data)
+{
+    public readonly MessageKind Message = message;
+    public readonly ChunkPosition Position = position;
+    public readonly ReadOnlySpan<byte> Data = data;
+
+    public void Write(NetWriter w)
+    {
+        w.WriteByte((byte)Message);
+        WritePosition(w, Position);
+        w.WriteRaw(Data);
+    }
+
+    public static ChunkMessage Read(MessageKind message, ref NetReader r) => new(message, ReadPosition(ref r), r.ReadRaw(r.Remaining));
+
+    public static void WritePosition(NetWriter w, ChunkPosition p) { w.WriteInt32(p.X); w.WriteInt32(p.Y); w.WriteInt32(p.Z); }
+    public static ChunkPosition ReadPosition(ref NetReader r) => new(r.ReadInt32(), r.ReadInt32(), r.ReadInt32());
 }
 
 /// <summary>A message with nothing but its kind: Host → authority <see cref="MessageKind.SaveRequest"/> (describe

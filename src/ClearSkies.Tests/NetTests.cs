@@ -35,8 +35,10 @@ public sealed class LoopbackGame : IDisposable
     /// not given: test scenes stream none).</param>
     /// <param name="hostPlayer">Someone playing on the hosting machine, as the game has them: they join with its
     /// Participant, where this says (none: nobody, as on a dedicated host).</param>
+    /// <param name="hostChunks">Where terrain streaming on the hosting machine loads edited chunks from (the Host,
+    /// through this), if a test streams terrain there.</param>
     public LoopbackGame(double latencyMs = 0, double lossChance = 0, SaveDatabase? save = null, Func<Vector3, bool>? hostTerrainReady = null,
-                        PlayerDescription? hostPlayer = null)
+                        PlayerDescription? hostPlayer = null, HostChunkStore? hostChunks = null)
     {
         Network.LatencyMs = latencyMs;
         Network.LossChance = lossChance;
@@ -45,7 +47,8 @@ public sealed class LoopbackGame : IDisposable
         Hub = new Host(Save, Host.Clock, seed: 1337, generationChecksum: Checksum, newPlayerSpawn: (new Vector3(0, 60, 0), 0, 0));
         Remote = new HostNetwork(Hub, Network.Listen());
         HostNet = SimulationParticipant.Join(Hub, new Hello(ProtocolVersion.Current, hostPlayer is null ? "" : "host", Checksum),
-                                             Host.Session, Host.Commands, Host.Registry, Host.World, Host.Clock, hostTerrainReady ?? (_ => true));
+                                             Host.Session, Host.Commands, Host.Registry, Host.World, Host.Clock, hostTerrainReady ?? (_ => true),
+                                             hostChunks);
         HostNet.TimeSource = () => Network.Now;
         HostNet.Viewing = hostPlayer is not null;
         Host.AttachNet(HostNet, Remote, Hub);
@@ -80,8 +83,10 @@ public sealed class LoopbackGame : IDisposable
     }
 
     /// <summary>A client joining: hello, welcome, then (unless not to <paramref name="wait"/>) ticking until its player
-    /// has arrived.</summary>
-    public (HeadlessScene Scene, SimulationParticipant Net) Join(string name = "client", ulong checksum = Checksum, int maxTicks = 600, bool wait = true)
+    /// has arrived. <paramref name="chunks"/>: where its terrain streaming loads edited chunks from, if a test streams
+    /// terrain there.</summary>
+    public (HeadlessScene Scene, SimulationParticipant Net) Join(string name = "client", ulong checksum = Checksum, int maxTicks = 600, bool wait = true,
+                                                                 HostChunkStore? chunks = null)
     {
         var transport = Network.Connect();
         var scene = new HeadlessScene();
@@ -95,7 +100,7 @@ public sealed class LoopbackGame : IDisposable
                 Tick();
             }
             var link = new RemoteHost(transport, welcome);
-            var net = SimulationParticipant.Join(link, scene.Session, scene.Commands, scene.Registry, scene.World, scene.Clock, _ => true);
+            var net = SimulationParticipant.Join(link, scene.Session, scene.Commands, scene.Registry, scene.World, scene.Clock, _ => true, chunks);
             net.TimeSource = () => Network.Now;
             scene.AttachNet(net, link);
             Clients.Add((scene, net));

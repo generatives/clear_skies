@@ -20,9 +20,10 @@ public static class DedicatedServerGame
     {
         var transport = HostGame.Listen(options);
         using var save = WorldSave.Open(options);
-        var world = new GameWorld(host, options, Session.SinglePlayer(), save.Seed, save.Chunks,
+        var chunks = new HostChunkStore();
+        var world = new GameWorld(host, options, Session.SinglePlayer(), save.Seed, chunks,
                                   new ChunkCountBudget(HeadlessWorld.MaxChunks));
-        using var hosting = new Hosting(world, save, transport, playerName: null);
+        using var hosting = new Hosting(world, chunks, save, transport, playerName: null);
         var net = hosting.Net;
 
         var commands = world.Commands;

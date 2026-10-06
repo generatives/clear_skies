@@ -2,42 +2,35 @@ using ClearSkies.Engine.Voxels;
 
 namespace ClearSkies.Engine.Persistence;
 
-/// <summary>Where edited terrain chunks are kept. The host's is the save database; a client (from N3) fetches them
-/// from the host instead, and never reads or writes a save.</summary>
+/// <summary>Where edited terrain chunks come from (anything never edited is generated). The Host keeps them, and every
+/// machine asks it (see ClearSkies.Net's HostChunkStore): streaming asks for an edited chunk as it's about to load it
+/// (<see cref="Request"/>), waits until it's here (<see cref="IsReady"/>), and loads it once.</summary>
 public interface IChunkStore
 {
-    /// <summary>Every chunk with saved data, read once at startup.</summary>
-    IEnumerable<ChunkPosition> SavedChunks();
+    /// <summary>Every chunk edited before this machine joined, read as streaming starts. Edits since reach streaming
+    /// as they're made (a chunk edited here, or ECS.ChunkLoadSystem.EditedElsewhere).</summary>
+    IEnumerable<ChunkPosition> EditedChunks();
 
-    /// <summary>Loads a saved chunk into <paramref name="data"/>; false if there's none. Called from worker threads.</summary>
+    /// <summary>Whether an edited chunk's data is here to load; if not, <see cref="Request"/> it and try again.</summary>
+    bool IsReady(ChunkPosition pos);
+
+    /// <summary>Asks for an edited chunk that isn't <see cref="IsReady"/> yet.</summary>
+    void Request(ChunkPosition pos);
+
+    /// <summary>Loads an edited chunk into <paramref name="data"/> and lets go of it (asked for again if it loads again);
+    /// false if there's none (generate it). Called from worker threads.</summary>
     bool TryLoad(ChunkPosition pos, ChunkData data);
 
-    void Save(ChunkPosition pos, ChunkData data);
+    /// <summary>The chunk was edited since it was asked for: what's here of it is stale.</summary>
+    void Outdated(ChunkPosition pos);
 }
 
-/// <summary>The host's chunk store: the save database's chunks table.</summary>
-public sealed class DatabaseChunkStore : IChunkStore
-{
-    private readonly SaveDatabase _db;
-    public DatabaseChunkStore(SaveDatabase db) => _db = db;
-
-    public IEnumerable<ChunkPosition> SavedChunks() => _db.ChunkPositions();
-
-    public bool TryLoad(ChunkPosition pos, ChunkData data)
-    {
-        if (_db.ReadChunk(pos) is not { } blob) return false;
-        StaticWorldSerializer.Read(blob, data);
-        return true;
-    }
-
-    public void Save(ChunkPosition pos, ChunkData data) => _db.WriteChunk(pos, StaticWorldSerializer.ToBytes(data));
-}
-
-/// <summary>A client's store until N3 fetches chunks from the host: it has no save, so nothing was ever saved, and saves
-/// are dropped.</summary>
+/// <summary>A world with no edited chunks to load: everything is generated.</summary>
 public sealed class NoChunkStore : IChunkStore
 {
-    public IEnumerable<ChunkPosition> SavedChunks() => Array.Empty<ChunkPosition>();
+    public IEnumerable<ChunkPosition> EditedChunks() => Array.Empty<ChunkPosition>();
+    public bool IsReady(ChunkPosition pos) => true;
+    public void Request(ChunkPosition pos) { }
     public bool TryLoad(ChunkPosition pos, ChunkData data) => false;
-    public void Save(ChunkPosition pos, ChunkData data) { }
+    public void Outdated(ChunkPosition pos) { }
 }

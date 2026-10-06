@@ -72,16 +72,15 @@ public class SaveDatabaseTests
         Assert.Equal(new byte[] { 1, 2 }, db.ReadPlayer(id));
         Assert.Null(db.ReadPlayer(PlayerId.New()));
 
-        var store = new DatabaseChunkStore(db);
         var data = new ChunkData();
         data.Set(3, 4, 5, BlockId.Lever, BlockOrientation.From(Direction.Up, Direction.East));
-        store.Save(new ChunkPosition(-1, 2, 7), data);
-        Assert.Equal(new[] { new ChunkPosition(-1, 2, 7) }, store.SavedChunks());
+        db.WriteChunk(new ChunkPosition(-1, 2, 7), StaticWorldSerializer.ToBytes(data));
+        Assert.Equal(new[] { new ChunkPosition(-1, 2, 7) }, db.ChunkPositions());
         var back = new ChunkData();
-        Assert.True(store.TryLoad(new ChunkPosition(-1, 2, 7), back));
+        StaticWorldSerializer.Read(db.ReadChunk(new ChunkPosition(-1, 2, 7)), back);
         Assert.Equal(BlockId.Lever, back.Get(3, 4, 5));
         Assert.Equal(data.GetOrientation(3, 4, 5), back.GetOrientation(3, 4, 5));
-        Assert.False(store.TryLoad(new ChunkPosition(0, 0, 0), back));
+        Assert.Null(db.ReadChunk(new ChunkPosition(0, 0, 0)));
     }
 
     [Fact]

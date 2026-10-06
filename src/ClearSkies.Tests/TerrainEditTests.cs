@@ -79,7 +79,7 @@ public class TerrainEditTests
         Assert.False(scene.WorldVolume.IsEditable(under));
         var edited = new ChunkData();
         for (int z = 0; z < S; z++) for (int y = 0; y < S; y++) for (int x = 0; x < S; x++) edited.Set(x, y, z, BlockId.Wood);
-        new DatabaseChunkStore(db).Save(under, edited);
+        new SavedChunkStore(db).Save(under, edited);
         var dig = Cell(under);
         scene.WorldVolume.FillBox(dig, dig, BlockId.Air, BlockOrientation.Upright);
 

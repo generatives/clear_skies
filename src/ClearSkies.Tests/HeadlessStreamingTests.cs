@@ -7,6 +7,24 @@ using Xunit;
 
 namespace ClearSkies.Tests;
 
+/// <summary>Edited chunks straight from a save, for streaming with no Host: always there to load.</summary>
+internal sealed class SavedChunkStore(SaveDatabase db) : IChunkStore
+{
+    public IEnumerable<ChunkPosition> EditedChunks() => db.ChunkPositions();
+    public bool IsReady(ChunkPosition pos) => true;
+    public void Request(ChunkPosition pos) { }
+    public void Outdated(ChunkPosition pos) { }
+
+    public bool TryLoad(ChunkPosition pos, ChunkData data)
+    {
+        if (db.ReadChunk(pos) is not { } blob) return false;
+        StaticWorldSerializer.Read(blob, data);
+        return true;
+    }
+
+    public void Save(ChunkPosition pos, ChunkData data) => db.WriteChunk(pos, StaticWorldSerializer.ToBytes(data));
+}
+
 /// <summary>Terrain streaming with nothing drawn (headless): limited by a count of chunks.</summary>
 public class HeadlessStreamingTests
 {
@@ -53,7 +71,7 @@ public class HeadlessStreamingTests
 
     internal static ChunkLoadSystem Streaming(HeadlessScene scene, SaveDatabase db, int maxChunks = 100_000, float viewDistance = 64) =>
         new(scene.World, scene.WorldVolume, new ChunkCountBudget(maxChunks), () => new Flat(), viewDistance, minChunkY: 0,
-            new DatabaseChunkStore(db));
+            new SavedChunkStore(db));
 
     [Fact]
     public void WithNoViewNothingIsStreamed()

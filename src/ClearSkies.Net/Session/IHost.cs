@@ -1,5 +1,6 @@
 using System.Numerics;
 using ClearSkies.Engine.Entities;
+using ClearSkies.Engine.Voxels;
 using ClearSkies.Net.Protocol;
 
 namespace ClearSkies.Net.Session;
@@ -54,6 +55,13 @@ public interface IHost
     /// <summary>The authority has described everything for the save.</summary>
     void SaveDone();
 
+    /// <summary>Asks for an edited terrain chunk, to load (answered with <see cref="IParticipant.ChunkData"/>).</summary>
+    void RequestChunk(ChunkPosition pos);
+
+    /// <summary>The authority edited a terrain chunk: this is it now (sent before the edit's event, so the Host's copy
+    /// has every edit anyone has heard of).</summary>
+    void ChunkEdited(in ChunkMessage chunk);
+
     /// <summary>It's leaving, and why.</summary>
     void Leave(string reason);
 }
@@ -96,4 +104,8 @@ public interface IParticipant
     /// <summary>The authority's: describe everything now (<see cref="IHost.EntitySaved"/>, then
     /// <see cref="IHost.SaveDone"/>), for the save.</summary>
     void Save();
+
+    /// <summary>The answer to <see cref="IHost.RequestChunk"/>: the chunk as the Host has it, with every edit whose
+    /// event came before this.</summary>
+    void ChunkData(in ChunkMessage chunk);
 }

@@ -4,6 +4,7 @@ using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Persistence;
 using ClearSkies.Engine.Serialization;
+using ClearSkies.Engine.Voxels;
 using ClearSkies.Net.Protocol;
 using ClearSkies.Net.Sync;
 using ClearSkies.Net.Transport;
@@ -60,6 +61,8 @@ public sealed class LocalHost(Host host, JoinedPeer from) : IHost
     public void EntityDeleted(EntityId id) => host.EntityDeleted(from, id);
     public void EntitySaved(in DescriptionMessage description) => host.EntitySaved(from, description);
     public void SaveDone() => host.SaveDone(from);
+    public void RequestChunk(ChunkPosition pos) => host.RequestChunk(from, pos);
+    public void ChunkEdited(in ChunkMessage chunk) => host.ChunkEdited(from, chunk);
     public void Leave(string reason) => host.Leave(from, reason);
 }
 
@@ -98,6 +101,17 @@ public sealed class HostEntity
     public bool IsPlayer => ControllingPeer != PeerId.None;
 }
 
+/// <summary>An edited terrain chunk, as the Host keeps it: in the save, or as the authority last described it (every
+/// chunk never edited is generated, the same everywhere, so the Host keeps none of those).</summary>
+public sealed class HostChunk
+{
+    public required ChunkPosition Position;
+    /// <summary>Its data (null: in the save, not read yet).</summary>
+    public byte[]? Data;
+    /// <summary>Edited since the last save.</summary>
+    public bool Unsaved;
+}
+
 /// <summary>
 /// The Host: coordinates and persists, and simulates nothing (it has no ECS world). Participants join it
 /// (<see cref="Join"/>), the hosting machine's directly (it has authority over every entity, so far), everyone else's
@@ -114,8 +128,10 @@ public sealed class HostEntity
 /// what's left it; events and snapshots go only to Participants that have their entity;</item>
 /// <item>lets players in (spawning their Character where they left off, on their ship as it is now) and out (released
 /// like anything else, even in someone's view);</item>
+/// <item>keeps every edited terrain chunk (<see cref="HostChunk"/>): the authority describes each one as it edits it,
+/// before the edit's event goes anywhere, and every Participant loads them from here (<see cref="RequestChunk"/>);</item>
 /// <item>saves: the authority describes everything every <see cref="AutosaveSeconds"/> and on exit, written in one
-/// transaction.</item>
+/// transaction with the chunks edited since the last save.</item>
 /// </list>
 /// </summary>
 public sealed class Host : ISystem
@@ -133,6 +149,7 @@ public sealed class Host : ISystem
     private readonly ITickClock _clock;
     private readonly List<JoinedPeer> _joined = new();
     private readonly Dictionary<EntityId, HostEntity> _entities = new();
+    private readonly Dictionary<ChunkPosition, HostChunk> _chunks = new();
     private readonly List<BodySnapshot> _frame = new();
     private readonly List<EntityId> _scratch = new();
     private readonly List<(HostEntity Entity, byte[] Data, Vector3? Position)> _saving = new();
@@ -152,17 +169,16 @@ public sealed class Host : ISystem
         _ids = new EntityIdAllocator(db.NextFreeId);
         foreach (var stored in db.ReadEntityIndex())
             _entities[stored.Id] = new HostEntity { Id = stored.Id, Kind = stored.Kind, Position = stored.Position };
+        foreach (var pos in db.ChunkPositions())
+            _chunks[pos] = new HostChunk { Position = pos };
     }
 
     public (Vector3 Position, float Yaw, float Pitch) NewPlayerSpawn { get; }
 
-    /// <summary>Called inside a save's transaction, to write edited terrain (until terrain chunks are described like
-    /// entities, the authority's world writes them itself).</summary>
-    public Action? SaveChunks { get; set; }
-
     /// <summary>The Participants that have joined.</summary>
     public IReadOnlyList<JoinedPeer> Participants => _joined;
     public IReadOnlyDictionary<EntityId, HostEntity> Entities => _entities;
+    public IReadOnlyDictionary<ChunkPosition, HostChunk> Chunks => _chunks;
 
     /// <summary>The hosting machine's Participant, which has authority over every entity.</summary>
     public JoinedPeer? Authority => _joined.FirstOrDefault(p => p.IsAuthority && p.Ready);
@@ -241,7 +257,7 @@ public sealed class Host : ISystem
         {
             // The hosting machine with nobody playing there (a dedicated host): the authority, with no view of its own.
             var (idFirst, idCount) = _ids.NextBlock();
-            welcome = new Welcome(id, idFirst, idCount, _seed, (uint)_clock.Now, default);
+            welcome = new Welcome(id, idFirst, idCount, _seed, (uint)_clock.Now, default, _chunks.Keys.ToArray());
             var host = new JoinedPeer(id, "host");
             _joined.Add(host);
             return host;
@@ -271,7 +287,7 @@ public sealed class Host : ISystem
         joined.ViewCentre = WorldPosition(character);
         joined.ViewRadius = ViewRadius;
         var (first, count) = _ids.NextBlock();
-        welcome = new Welcome(id, first, count, _seed, (uint)_clock.Now, joined.ViewCentre);
+        welcome = new Welcome(id, first, count, _seed, (uint)_clock.Now, joined.ViewCentre, _chunks.Keys.ToArray());
         foreach (var p in _joined) p.Participant.PlayerNotice(new PlayerNotice(true, id, name));
         _joined.Add(joined);
         Console.WriteLine($"[net] {name} joining as {id}");
@@ -430,6 +446,31 @@ public sealed class Host : ISystem
         foreach (var p in _joined) { p.Known.Remove(id); p.Requested.Remove(id); }
     }
 
+    // ── terrain ─────────────────────────────────────────────────────────────
+
+    /// <summary>The chunk as the Host has it (empty: never edited, so generated), to whoever asked. The authority
+    /// describes each chunk it edits before its event goes anywhere, so this has every edit the asker has had an event
+    /// for, and every later edit's event reaches it after this.</summary>
+    public void RequestChunk(JoinedPeer from, ChunkPosition pos)
+    {
+        from.Participant.ChunkData(new ChunkMessage(MessageKind.ChunkData, pos, ChunkBytes(pos)));
+    }
+
+    private ReadOnlySpan<byte> ChunkBytes(ChunkPosition pos)
+    {
+        if (!_chunks.TryGetValue(pos, out var chunk)) return default;
+        return chunk.Data ??= _db.ReadChunk(pos) ?? throw new InvalidOperationException($"Edited chunk {pos} has no row in the save.");
+    }
+
+    /// <summary>The authority edited a chunk: kept as it is now, and saved with the next save.</summary>
+    public void ChunkEdited(JoinedPeer from, in ChunkMessage chunk)
+    {
+        if (!from.IsAuthority) return;
+        if (!_chunks.TryGetValue(chunk.Position, out var kept)) _chunks[chunk.Position] = kept = new HostChunk { Position = chunk.Position };
+        kept.Data = chunk.Data.ToArray();
+        kept.Unsaved = true;
+    }
+
     // ── views ───────────────────────────────────────────────────────────────
 
     /// <summary>Where an entity is in the world: a player on their ship as the ship is now.</summary>
@@ -553,16 +594,31 @@ public sealed class Host : ISystem
     public void SaveDone(JoinedPeer from)
     {
         if (!from.IsAuthority || !Saving) return;
+        int chunks = 0;
         _db.InTransaction(() =>
         {
             foreach (var (e, data, position) in _saving) Write(e, data, position);
-            SaveChunks?.Invoke();
+            chunks = SaveChunks();
             _db.NextFreeId = _ids.NextFree;
         });
-        Console.WriteLine($"[save] saved {_saving.Count} entities and players");
+        Console.WriteLine($"[save] saved {_saving.Count} entities and players, and {chunks} edited chunks");
         _saving.Clear();
         Saving = false;
         Saves++;
+    }
+
+    /// <summary>Writes every chunk edited since the last save; how many.</summary>
+    private int SaveChunks()
+    {
+        int saved = 0;
+        foreach (var chunk in _chunks.Values)
+        {
+            if (!chunk.Unsaved) continue;
+            _db.WriteChunk(chunk.Position, chunk.Data!);
+            chunk.Unsaved = false;
+            saved++;
+        }
+        return saved;
     }
 
     /// <summary>Writes one Description: a player's to the players table, anything else's to the entities table.</summary>

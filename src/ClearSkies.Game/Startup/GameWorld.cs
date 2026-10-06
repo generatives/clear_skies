@@ -16,7 +16,7 @@ namespace ClearSkies.Game.Startup;
 /// What every game runs, whichever way it started: this machine's session, the entity registry and command system,
 /// the static world streamed around the view, and the systems several places in a game's schedule share (the
 /// hierarchy and interpolation run in the tick and the frame; block actions, flight and remote bodies have debug panels
-/// and UI reading them). Built from a seed (the save's, or the host's), where edited terrain chunks come from, and
+/// and UI reading them). Built from a seed (the save's, or the host's), where edited terrain chunks come from (the Host), and
 /// what limits how much of the world loads. Nothing here draws or reads input: that's the <see cref="GameView"/>'s, in
 /// a game that has one. Each game schedules the systems itself, in order.
 /// </summary>

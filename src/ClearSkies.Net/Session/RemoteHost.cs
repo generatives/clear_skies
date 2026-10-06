@@ -2,6 +2,7 @@ using System.Numerics;
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Serialization;
+using ClearSkies.Engine.Voxels;
 using ClearSkies.Net.Protocol;
 using ClearSkies.Net.Sync;
 using ClearSkies.Net.Transport;
@@ -77,6 +78,8 @@ public sealed class RemoteHost : IHost, ISystem, IDisposable
     public void EntityDeleted(EntityId id) => Send(new EntityMessage(MessageKind.Deleted, id));
     public void EntitySaved(in DescriptionMessage description) => Send(description);
     public void SaveDone() => Send(new SignalMessage(MessageKind.SaveDone));
+    public void RequestChunk(ChunkPosition pos) { _writer.Clear(); new ChunkMessage(MessageKind.ChunkRequest, pos, default).Write(_writer); Send(); }
+    public void ChunkEdited(in ChunkMessage chunk) { _writer.Clear(); chunk.Write(_writer); Send(); }
 
     public void Leave(string reason)
     {
@@ -155,6 +158,7 @@ public sealed class RemoteHost : IHost, ISystem, IDisposable
             case MessageKind.Release: p.Release(EntityMessage.Read(kind, ref r).Id); break;
             case MessageKind.DescribeRequest: p.Describe(EntityMessage.Read(kind, ref r).Id); break;
             case MessageKind.SaveRequest: p.Save(); break;
+            case MessageKind.ChunkData: p.ChunkData(ChunkMessage.Read(kind, ref r)); break;
             case MessageKind.Disconnect:
                 _left = true;
                 p.Disconnected(DisconnectMessage.Read(ref r).Reason);
