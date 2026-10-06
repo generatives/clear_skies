@@ -1,0 +1,11 @@
+<Project>
+
+  <!-- Pass a runtime identifier (dotnet publish -r win-arm64) down through every project reference. The SDK strips it
+       from references to RID-agnostic projects, which would build ClearSkies.Engine without one and copy the wrong
+       Windows clay.dll (see ClearSkies.Engine.csproj). Set for all projects so no library in between, such as
+       ClearSkies.Net, drops it. -->
+  <PropertyGroup>
+    <IsRidAgnostic>false</IsRidAgnostic>
+  </PropertyGroup>
+
+</Project>

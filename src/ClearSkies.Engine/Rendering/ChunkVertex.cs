@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using ClearSkies.Engine.Voxels;
 using Silk.NET.Maths;
 
 namespace ClearSkies.Engine.Rendering;
@@ -9,7 +10,8 @@ namespace ClearSkies.Engine.Rendering;
 /// <list type="bullet">
 /// <item><see cref="A"/>: x, y, z (chunk-local, 0-32) in bits 0-5, 6-11, 12-17; the face (0 +X, 1 -X, 2 +Y, 3 -Y,
 /// 4 +Z, 5 -Z, the mesher's order) in bits 18-20; the texture layer in bits 21-28, 255 for untextured.</item>
-/// <item><see cref="B"/>: the colour, 8 bits each of R, G, B.</item>
+/// <item><see cref="B"/>: the colour, 8 bits each of R, G, B, then the opacity (8 bits, 255 opaque) a transparent
+/// block's face multiplies its texture's alpha by (see <see cref="BlockDef.Alpha"/>).</item>
 /// </list>
 /// The texture coordinates aren't stored: they follow from the position and the face (see GreedyMesher.MakeUv).
 /// </summary>
@@ -23,17 +25,20 @@ public readonly struct ChunkVertex
 
     private ChunkVertex(uint a, uint b) { A = a; B = b; }
 
-    public static ChunkVertex Pack(in Vertex v)
+    public static ChunkVertex Pack(in Vertex v, byte alpha = 255)
     {
         var n = v.Normal;
         uint face = n.X > 0.5f ? 0u : n.X < -0.5f ? 1u : n.Y > 0.5f ? 2u : n.Y < -0.5f ? 3u : n.Z > 0.5f ? 4u : 5u;
         uint layer = v.Uv.Z < 0f ? NoLayer : (uint)System.Math.Min((int)v.Uv.Z, NoLayer - 1);
         uint a = (uint)v.Position.X | (uint)v.Position.Y << 6 | (uint)v.Position.Z << 12 | face << 18 | layer << 21;
-        uint b = Channel(v.Color.X) | Channel(v.Color.Y) << 8 | Channel(v.Color.Z) << 16;
+        uint b = Channel(v.Color.X) | Channel(v.Color.Y) << 8 | Channel(v.Color.Z) << 16 | (uint)alpha << 24;
         return new ChunkVertex(a, b);
     }
 
     private static uint Channel(float c) => (uint)System.Math.Clamp((int)MathF.Round(c * 255f), 0, 255);
+
+    /// <summary>The packed opacity (0-1).</summary>
+    public float Alpha => (B >> 24) / 255f;
 
     /// <summary>What vs_chunk decodes (for tests): position, normal, colour and (u, v, layer).</summary>
     public Vertex Unpack()

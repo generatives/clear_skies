@@ -41,8 +41,12 @@ public sealed record LaunchOptions
     public float ViewDistance { get; init; } = 2000f;
 
     /// <summary>--lighting minimal|low|medium|high: the lighting quality preset to start on (the GPU Lighting panel
-    /// has the same buttons). High by default; lower for older GPUs.</summary>
+    /// has the same buttons). Medium by default; lower for older GPUs.</summary>
     public string? LightingPreset { get; init; }
+
+    /// <summary>--checker-bounce N: each surface voxel fires only 1/N of the bounce and AO rays (1, 2 or 4), neighbours
+    /// firing the rest, overriding the preset's. Also in the GPU Lighting panel.</summary>
+    public int? CheckerBounce { get; init; }
 
     /// <summary>--headless: no window, GPU, input or UI; just the simulation and the network, on a timer. Hosting, it's a
     /// dedicated server (no player of its own); joining, a player that stands where it spawns (a bot, for testing).
@@ -67,6 +71,7 @@ public sealed record LaunchOptions
             o = o with { Camera = camera.Split(',').Select(v => float.Parse(v, CultureInfo.InvariantCulture)).ToArray() };
         if (Value("--light-budget-mb") is { } budget) o = o with { LightBudgetMb = int.Parse(budget, CultureInfo.InvariantCulture) };
         if (Value("--lighting") is { Length: > 0 } lighting) o = o with { LightingPreset = lighting };
+        if (int.TryParse(Value("--checker-bounce"), out int checker)) o = o with { CheckerBounce = checker };
         if (Value("--view-distance") is { } view) o = o with { ViewDistance = float.Parse(view, CultureInfo.InvariantCulture) };
         return o with { FlightTest = args.Contains("--flight-test") };
     }

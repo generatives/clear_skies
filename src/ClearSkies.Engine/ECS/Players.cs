@@ -36,5 +36,26 @@ public static class Players
         if (player.Has<CharacterControllerComponent>()) player.Get<CharacterControllerComponent>().Character.TeleportTo(ToPhys(position));
     }
 
+    /// <summary>Puts the player on <paramref name="supporter"/> (a ship) at <paramref name="localPosition"/> in its space,
+    /// moving at <paramref name="velocity"/>, as if they'd just landed there.</summary>
+    public static void PlaceOn(Entity player, Entity supporter, PhysVec localPosition, PhysVec velocity)
+    {
+        ref readonly var st = ref supporter.Get<Transform>();
+        var rotation = new System.Numerics.Quaternion(st.Rotation.X, st.Rotation.Y, st.Rotation.Z, st.Rotation.W);
+        var at = new PhysVec(st.Position.X, st.Position.Y, st.Position.Z) + PhysVec.Transform(localPosition, rotation);
+        Teleport(player, new Vector3D<float>(at.X, at.Y, at.Z));
+        if (player.Has<CharacterControllerComponent>()) player.Get<CharacterControllerComponent>().Character.SetVelocity(velocity);
+        if (!player.Has<Support>()) return;
+        ref var support = ref player.Get<Support>();
+        if (support.Supporter != supporter)
+        {
+            support.Supporter = supporter;
+            support.WasStanding = false; // no turn to follow from the first tick on it
+        }
+        support.TimeAway = 0f;
+        support.LocalPosition = localPosition;
+        support.SupporterRotation = rotation;
+    }
+
     private static PhysVec ToPhys(Vector3D<float> v) => new(v.X, v.Y, v.Z);
 }

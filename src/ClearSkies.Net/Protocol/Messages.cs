@@ -1,14 +1,16 @@
 using System.Numerics;
 using ClearSkies.Engine.Commands;
 using ClearSkies.Engine.Entities;
+using ClearSkies.Engine.Input;
 using ClearSkies.Engine.Serialization;
+using ClearSkies.Engine.Voxels;
 
 namespace ClearSkies.Net.Protocol;
 
 /// <summary>Bumped whenever any message or description format changes; a mismatch refuses the join.</summary>
 public static class ProtocolVersion
 {
-    public const ushort Current = 1;
+    public const ushort Current = 6;
 }
 
 /// <summary>The first byte of every packet.</summary>
@@ -17,7 +19,6 @@ public enum MessageKind : byte
     Hello = 1,
     Welcome = 2,
     Disconnect = 3,
-    TerrainReady = 4,
     PlayerJoined = 5,
     PlayerLeft = 6,
     Command = 7,
@@ -33,15 +34,30 @@ public enum MessageKind : byte
     SnapshotRequest = 17,
     IdBlockRequest = 18,
     IdBlock = 19,
+    PlayerInput = 20,
+    ViewVolume = 21,
+    Spawn = 22,
+    Forget = 23,
+    Release = 24,
+    DescribeRequest = 25,
+    Described = 26,
+    Deleted = 27,
+    Created = 28,
+    Released = 29,
+    SaveRequest = 30,
+    SaveDone = 31,
+    Saved = 32,
+    ChunkEdited = 33,
 }
 
-/// <summary>A message: writes itself, kind byte first (see <see cref="Session.NetSession"/>'s Send).</summary>
+/// <summary>A message: writes itself, kind byte first (see <see cref="Session.RemoteHost"/> and
+/// <see cref="Session.HostNetwork"/>, which carry calls between machines as these).</summary>
 public interface IMessage
 {
     void Write(NetWriter w);
 }
 
-/// <summary>Client → host, first thing: who's joining (by name: the host gives each name its player ID) and whether
+/// <summary>Participant → Host, first thing: who's joining (by name: the host gives each name its player ID) and whether
 /// their game matches.</summary>
 public readonly record struct Hello(ushort Version, string Name, ulong GenerationChecksum) : IMessage
 {
@@ -49,22 +65,100 @@ public readonly record struct Hello(ushort Version, string Name, ulong Generatio
     public static Hello Read(ref NetReader r) => new(r.ReadUInt16(), r.ReadString(), r.ReadUInt64());
 }
 
-/// <summary>Host → client: the client's peer ID and first block of entity IDs, the world seed, the host's tick, and
-/// where the player will spawn (their saved position, or the spawn point), so terrain can load there first.</summary>
-public readonly record struct Welcome(PeerId Peer, uint IdFirst, uint IdCount, ulong Seed, uint HostTick, Vector3 Spawn) : IMessage
+/// <summary>Host → Participant: its peer ID (<see cref="PeerId.Host"/> for the hosting machine's, the authority) and first
+/// block of entity IDs, the world seed, the Host's tick, where its player will spawn (their saved position, or the
+/// spawn point), for the camera to wait at, and every terrain chunk edited so far (loaded from the Host, not
+/// generated).</summary>
+public readonly record struct Welcome(PeerId Peer, uint IdFirst, uint IdCount, ulong Seed, uint HostTick, Vector3 Spawn,
+                                      ChunkPosition[] EditedChunks) : IMessage
 {
     public void Write(NetWriter w)
     {
         w.WriteByte((byte)MessageKind.Welcome); w.WriteUInt32(Peer.Value); w.WriteUInt32(IdFirst); w.WriteUInt32(IdCount);
         w.WriteUInt64(Seed); w.WriteUInt32(HostTick); w.WriteVector3(Spawn);
+        w.WriteVarUInt((uint)EditedChunks.Length);
+        foreach (var p in EditedChunks) ChunkMessage.WritePosition(w, p);
     }
-    public static Welcome Read(ref NetReader r) => new(new PeerId(r.ReadUInt32()), r.ReadUInt32(), r.ReadUInt32(), r.ReadUInt64(), r.ReadUInt32(), r.ReadVector3());
+
+    public static Welcome Read(ref NetReader r)
+    {
+        var (peer, idFirst, idCount, seed, tick, spawn) = (new PeerId(r.ReadUInt32()), r.ReadUInt32(), r.ReadUInt32(), r.ReadUInt64(), r.ReadUInt32(), r.ReadVector3());
+        uint count = r.ReadVarUInt();
+        if (count > r.Remaining / 12) throw new InvalidDataException($"Welcome with {count} edited chunks.");
+        var edited = new ChunkPosition[count];
+        for (int i = 0; i < count; i++) edited[i] = ChunkMessage.ReadPosition(ref r);
+        return new(peer, idFirst, idCount, seed, tick, spawn, edited);
+    }
 }
 
-/// <summary>Client → host: the terrain around the spawn has loaded, so the world can be sent.</summary>
-public readonly record struct TerrainReady : IMessage
+/// <summary>One tick of a player's input, numbered by the machine that plays them (see OwnPlayerPrediction).</summary>
+/// <param name="Landed">What the input before this one left the player standing on, when it's something new: a ship
+/// they landed on, as this machine saw it (see <see cref="Sync.RemoteInputs"/>). None otherwise.</param>
+/// <param name="LandedAt">Where on <paramref name="Landed"/>, in its space.</param>
+/// <param name="LandedVelocity">How fast they were moving then (world space).</param>
+public readonly record struct InputSample(uint Sequence, PlayerButtons Held, PlayerButtons Pressed, float Yaw, float Pitch,
+                                          EntityId Landed = default, Vector3 LandedAt = default, Vector3 LandedVelocity = default)
 {
-    public void Write(NetWriter w) => w.WriteByte((byte)MessageKind.TerrainReady);
+    public void Write(NetWriter w)
+    {
+        w.WriteUInt32(Sequence);
+        w.WriteUInt32((uint)Held);
+        w.WriteUInt32((uint)Pressed);
+        w.WriteSingle(Yaw); // exactly: the host moves them the way they predicted they moved
+        w.WriteSingle(Pitch);
+        w.WriteBool(!Landed.IsNone);
+        if (Landed.IsNone) return;
+        Landed.Write(w);
+        w.WriteSingle(LandedAt.X); w.WriteSingle(LandedAt.Y); w.WriteSingle(LandedAt.Z);
+        w.WriteSingle(LandedVelocity.X); w.WriteSingle(LandedVelocity.Y); w.WriteSingle(LandedVelocity.Z);
+    }
+
+    public static InputSample Read(ref NetReader r)
+    {
+        var s = new InputSample(r.ReadUInt32(), (PlayerButtons)r.ReadUInt32(), (PlayerButtons)r.ReadUInt32(), r.ReadSingle(), r.ReadSingle());
+        if (!r.ReadBool()) return s;
+        return s with
+        {
+            Landed = EntityId.Read(ref r),
+            LandedAt = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle()),
+            LandedVelocity = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle()),
+        };
+    }
+
+    public PlayerInput ToInput() => new() { Held = Held, Pressed = Pressed, Yaw = Yaw, Pitch = Pitch, Aiming = true };
+}
+
+/// <summary>Participant → Host → the player's authority, unreliable, every tick: the player's latest inputs, newest
+/// last. Each is sent in several of these (<see cref="MaxSamples"/>), so a lost packet loses nothing; the authority skips
+/// the ones it already has. The Host passes it on only from the machine that plays <see cref="Player"/>.</summary>
+public readonly struct PlayerInputMessage : IMessage
+{
+    public const int MaxSamples = 4;
+    public readonly EntityId Player;
+    public readonly InputSample[] Samples;
+
+    public PlayerInputMessage(EntityId player, InputSample[] samples)
+    {
+        Player = player;
+        Samples = samples;
+    }
+
+    public void Write(NetWriter w)
+    {
+        w.WriteByte((byte)MessageKind.PlayerInput);
+        Player.Write(w);
+        w.WriteByte((byte)Samples.Length);
+        foreach (var s in Samples) s.Write(w);
+    }
+
+    public static PlayerInputMessage Read(ref NetReader r)
+    {
+        var player = EntityId.Read(ref r);
+        int count = System.Math.Min((int)r.ReadByte(), MaxSamples);
+        var samples = new InputSample[count];
+        for (int i = 0; i < count; i++) samples[i] = InputSample.Read(ref r);
+        return new PlayerInputMessage(player, samples);
+    }
 }
 
 /// <summary>Client → host: its entity IDs are running low (answered with an <see cref="IdBlockMessage"/>).</summary>
@@ -149,4 +243,116 @@ public readonly record struct IdBlockMessage(uint First, uint Count) : IMessage
 {
     public void Write(NetWriter w) { w.WriteByte((byte)MessageKind.IdBlock); w.WriteUInt32(First); w.WriteUInt32(Count); }
     public static IdBlockMessage Read(ref NetReader r) => new(r.ReadUInt32(), r.ReadUInt32());
+}
+
+/// <summary>Participant → Host, every half second: the space it wants to see (around its player, or where its player
+/// will spawn). The Host streams it the entities inside.</summary>
+public readonly record struct ViewVolumeMessage(Vector3 Centre, float Radius) : IMessage
+{
+    public void Write(NetWriter w) { w.WriteByte((byte)MessageKind.ViewVolume); w.WriteVector3(Centre); w.WriteSingle(Radius); }
+    public static ViewVolumeMessage Read(ref NetReader r) => new(r.ReadVector3(), r.ReadSingle());
+}
+
+/// <summary>Host → Participant: an entity coming into its world, from its Description. <see cref="Owner"/> is who the
+/// spawn says owns it (a player's: who plays them); <see cref="EventNumber"/> is its authority's last event the
+/// Description includes, so later ones apply on top and earlier ones are skipped. <see cref="Position"/> is where it is in
+/// the world, as the Host has it (for a player standing on a ship, the ship as the Host last heard).</summary>
+public readonly ref struct SpawnMessage(EntityId id, ushort kind, PeerId owner, uint eventNumber, Vector3 position, ReadOnlySpan<byte> data)
+{
+    public readonly EntityId Id = id;
+    public readonly ushort Kind = kind;
+    public readonly PeerId Owner = owner;
+    public readonly uint EventNumber = eventNumber;
+    public readonly Vector3 Position = position;
+    public readonly ReadOnlySpan<byte> Data = data;
+
+    public void Write(NetWriter w)
+    {
+        w.WriteByte((byte)MessageKind.Spawn); Id.Write(w); w.WriteUInt16(Kind); w.WriteUInt32(Owner.Value); w.WriteUInt32(EventNumber);
+        w.WriteVector3(Position); w.WriteRaw(Data);
+    }
+
+    public static SpawnMessage Read(ref NetReader r) =>
+        new(EntityId.Read(ref r), r.ReadUInt16(), new PeerId(r.ReadUInt32()), r.ReadUInt32(), r.ReadVector3(), r.ReadRaw(r.Remaining));
+}
+
+/// <summary>An entity named by ID: Host → Participant <see cref="MessageKind.Forget"/> (out of your view: drop your
+/// copy), Host → authority <see cref="MessageKind.Release"/> (out of every view: describe it, then despawn it) and
+/// <see cref="MessageKind.DescribeRequest"/> (describe it now, for a Participant it's come into view of), authority →
+/// Host <see cref="MessageKind.Deleted"/> (gone for good: out of the save too).</summary>
+public readonly record struct EntityMessage(MessageKind Kind, EntityId Id) : IMessage
+{
+    public void Write(NetWriter w) { w.WriteByte((byte)Kind); Id.Write(w); }
+    public static EntityMessage Read(MessageKind kind, ref NetReader r) => new(kind, EntityId.Read(ref r));
+}
+
+/// <summary>Authority → Host: an entity's Description, as one of four messages:
+/// <list type="bullet">
+/// <item><see cref="MessageKind.Created"/>: it made it (a ship built, say), and the Host starts keeping it;</item>
+/// <item><see cref="MessageKind.Described"/>: the Host asked (<see cref="MessageKind.DescribeRequest"/>), to send to a
+/// Participant that doesn't have it;</item>
+/// <item><see cref="MessageKind.Released"/>: the Host released it, and this is its last Description (the authority has
+/// despawned it);</item>
+/// <item><see cref="MessageKind.Saved"/>: the Host is saving (<see cref="MessageKind.SaveRequest"/>).</item>
+/// </list>
+/// Its kind (the spawn handler that recreates it), its authority's last event number, and where it is (none: a global
+/// entity, always loaded); the data is opaque to the Host, except a player's, whose position on their ship it reads.</summary>
+public readonly ref struct DescriptionMessage(MessageKind message, EntityId id, ushort kind, uint eventNumber, Vector3? position,
+                                              ReadOnlySpan<byte> data)
+{
+    public readonly MessageKind Message = message;
+    public readonly EntityId Id = id;
+    public readonly ushort Kind = kind;
+    public readonly uint EventNumber = eventNumber;
+    public readonly Vector3? Position = position;
+    public readonly ReadOnlySpan<byte> Data = data;
+
+    public DescriptionMessage As(MessageKind message) => new(message, Id, Kind, EventNumber, Position, Data);
+
+    public void Write(NetWriter w)
+    {
+        w.WriteByte((byte)Message); Id.Write(w); w.WriteUInt16(Kind); w.WriteUInt32(EventNumber);
+        w.WriteBool(Position.HasValue);
+        if (Position is { } p) w.WriteVector3(p);
+        w.WriteRaw(Data);
+    }
+
+    public static DescriptionMessage Read(MessageKind message, ref NetReader r)
+    {
+        var id = EntityId.Read(ref r);
+        ushort kind = r.ReadUInt16();
+        uint number = r.ReadUInt32();
+        Vector3? position = r.ReadBool() ? r.ReadVector3() : null;
+        return new(message, id, kind, number, position, r.ReadRaw(r.Remaining));
+    }
+}
+
+/// <summary>A terrain chunk: Participant → Host <see cref="MessageKind.ChunkRequest"/> (send me this edited chunk, with
+/// no data), Host → Participant <see cref="MessageKind.ChunkData"/> (the chunk as the Host has it; no data: it was
+/// never edited, so generate it), authority → Host <see cref="MessageKind.ChunkEdited"/> (it's just been edited: this is
+/// it now). The data is a chunk as <see cref="StaticWorldSerializer"/> writes it, opaque to the Host.</summary>
+public readonly ref struct ChunkMessage(MessageKind message, ChunkPosition position, ReadOnlySpan<byte> data)
+{
+    public readonly MessageKind Message = message;
+    public readonly ChunkPosition Position = position;
+    public readonly ReadOnlySpan<byte> Data = data;
+
+    public void Write(NetWriter w)
+    {
+        w.WriteByte((byte)Message);
+        WritePosition(w, Position);
+        w.WriteRaw(Data);
+    }
+
+    public static ChunkMessage Read(MessageKind message, ref NetReader r) => new(message, ReadPosition(ref r), r.ReadRaw(r.Remaining));
+
+    public static void WritePosition(NetWriter w, ChunkPosition p) { w.WriteInt32(p.X); w.WriteInt32(p.Y); w.WriteInt32(p.Z); }
+    public static ChunkPosition ReadPosition(ref NetReader r) => new(r.ReadInt32(), r.ReadInt32(), r.ReadInt32());
+}
+
+/// <summary>A message with nothing but its kind: Host → authority <see cref="MessageKind.SaveRequest"/> (describe
+/// everything), authority → Host <see cref="MessageKind.SaveDone"/> (that's everything).</summary>
+public readonly record struct SignalMessage(MessageKind Kind) : IMessage
+{
+    public void Write(NetWriter w) => w.WriteByte((byte)Kind);
 }

@@ -12,6 +12,12 @@ public readonly struct ChunkPosition : IEquatable<ChunkPosition>
 
     public Vector3D<float> WorldOrigin => new(X * ChunkData.Size, Y * ChunkData.Size, Z * ChunkData.Size);
 
+    /// <summary>The chunk holding cell <paramref name="voxel"/> (in its volume's voxel space).</summary>
+    public static ChunkPosition FromVoxel(Vector3D<int> voxel) =>
+        new(FloorDiv(voxel.X), FloorDiv(voxel.Y), FloorDiv(voxel.Z));
+
+    private static int FloorDiv(int v) => v >= 0 ? v / ChunkData.Size : (v + 1) / ChunkData.Size - 1;
+
     public ChunkPosition Offset(int dx, int dy, int dz) => new(X + dx, Y + dy, Z + dz);
 
     public bool Equals(ChunkPosition other) => X == other.X && Y == other.Y && Z == other.Z;

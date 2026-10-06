@@ -158,11 +158,15 @@ public sealed class PlayerDescription : IEntityDescription<PlayerDescription>
     public bool FreeFly = true;
     public float FlySpeed = 10f;
 
-    /// <summary>The character capsule's centre, in world space, and its velocity. A player standing on a ship is saved
-    /// at their world position; the support system picks the ship up again on their first tick there.</summary>
+    /// <summary>The character capsule's centre, in world space, and its velocity.</summary>
     public Vector3 Position;
     public Vector3 Velocity;
     public float Yaw, Pitch;
+
+    /// <summary>What they stand on (a ship), if anything, and where on it: <see cref="Position"/> in its space (its
+    /// Transform's). They spawn there on the ship as it is when they spawn, and only once it's loaded.</summary>
+    public EntityId Support;
+    public Vector3 LocalPosition;
 
     public void Write(NetWriter w)
     {
@@ -174,17 +178,26 @@ public sealed class PlayerDescription : IEntityDescription<PlayerDescription>
         w.WriteVector3(Velocity);
         w.WriteSingle(Yaw);
         w.WriteSingle(Pitch);
+        Support.Write(w);
+        w.WriteVector3(LocalPosition);
     }
 
-    public static PlayerDescription Read(ref NetReader r) => new()
+    public static PlayerDescription Read(ref NetReader r)
     {
-        Id = new PlayerId(r.ReadGuid()),
-        Name = r.ReadString(),
-        FreeFly = r.ReadBool(),
-        FlySpeed = r.ReadSingle(),
-        Position = r.ReadVector3(),
-        Velocity = r.ReadVector3(),
-        Yaw = r.ReadSingle(),
-        Pitch = r.ReadSingle(),
-    };
+        var d = new PlayerDescription
+        {
+            Id = new PlayerId(r.ReadGuid()),
+            Name = r.ReadString(),
+            FreeFly = r.ReadBool(),
+            FlySpeed = r.ReadSingle(),
+            Position = r.ReadVector3(),
+            Velocity = r.ReadVector3(),
+            Yaw = r.ReadSingle(),
+            Pitch = r.ReadSingle(),
+        };
+        if (r.Remaining == 0) return d; // saved before support was: standing on nothing
+        d.Support = EntityId.Read(ref r);
+        d.LocalPosition = r.ReadVector3();
+        return d;
+    }
 }

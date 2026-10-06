@@ -22,6 +22,11 @@ public sealed class ChunkData
     private BlockId _uniformBlock = BlockId.Air;
     private BlockOrientation _uniformOrientation = BlockOrientation.Upright;
 
+    // How many of _blocks are not air, and how many collide (BlockDef.Collides), kept up to date by every write so
+    // HasAnyNonAir and HasAnyColliding never scan. Only meaningful while _blocks exists: a uniform chunk's follow from
+    // _uniformBlock.
+    private int _nonAir, _colliding;
+
     public bool IsDirty { get; set; }
 
     // The owner's reference plus one per background job reading this chunk (see Retain); the arrays go back to the
@@ -63,9 +68,23 @@ public sealed class ChunkData
     public void Set(int x, int y, int z, BlockId id, BlockOrientation orientation)
     {
         int i = Index(x, y, z);
-        if (_blocks == null && id != _uniformBlock) _blocks = Filled(BlockPool, _uniformBlock);
+        if (_blocks == null && id != _uniformBlock)
+        {
+            _blocks = Filled(BlockPool, _uniformBlock);
+            _nonAir = _uniformBlock != BlockId.Air ? Volume : 0;
+            _colliding = Colliding[(byte)_uniformBlock] ? Volume : 0;
+        }
         if (_orientations == null && orientation != _uniformOrientation) _orientations = Filled(OrientationPool, _uniformOrientation);
-        if (_blocks != null) _blocks[i] = id;
+        if (_blocks != null)
+        {
+            var old = _blocks[i];
+            if (old != id)
+            {
+                _nonAir += (id != BlockId.Air ? 1 : 0) - (old != BlockId.Air ? 1 : 0);
+                _colliding += (Colliding[(byte)id] ? 1 : 0) - (Colliding[(byte)old] ? 1 : 0);
+                _blocks[i] = id;
+            }
+        }
         if (_orientations != null) _orientations[i] = orientation;
         IsDirty = true;
     }
@@ -104,9 +123,23 @@ public sealed class ChunkData
 
     public static int Index(int x, int y, int z) => x + Size * (y + Size * z);
 
-    // Vectorized: the streaming survey calls this for every chunk it generates, and nearly all of them are air.
-    public bool HasAnySolid() => _blocks == null ? _uniformBlock != BlockId.Air
-                                                 : BlocksAsBytes().IndexOfAnyExcept((byte)BlockId.Air) >= 0;
+    /// <summary>Whether any block isn't air. Kept count of, so it's as cheap for a dug-out chunk (all air, but with its
+    /// array still) as for a uniform one.</summary>
+    public bool HasAnyNonAir() => _blocks == null ? _uniformBlock != BlockId.Air : _nonAir > 0;
+
+    /// <summary>Whether any block collides (<see cref="BlockDef.Collides"/>): what a collider would be built from.
+    /// False for a chunk of air and passable blocks only (e.g. levers), which has blocks but no collider.</summary>
+    public bool HasAnyColliding() => _blocks == null ? Colliding[(byte)_uniformBlock] : _colliding > 0;
+
+    // BlockDef.Collides by block id, so Set's bookkeeping is two array reads.
+    private static readonly bool[] Colliding = BuildColliding();
+
+    private static bool[] BuildColliding()
+    {
+        var t = new bool[256];
+        for (int i = 0; i < t.Length; i++) t[i] = BlockRegistry.Get((BlockId)i).Collides;
+        return t;
+    }
 
     /// <summary>Zero-copy raw byte views of the block/orientation arrays, for bulk serialization (an orientation is
     /// its <see cref="BlockOrientation.ToByte"/>). A uniform chunk's view is a shared read-only array of its value.</summary>
@@ -134,6 +167,9 @@ public sealed class ChunkData
             throw new ArgumentException($"Expected {Volume} bytes, got {bytes.Length}.", nameof(bytes));
         _blocks ??= BlockPool.Rent();
         bytes.CopyTo(MemoryMarshal.Cast<BlockId, byte>(_blocks));
+        _nonAir = Volume - bytes.Count((byte)BlockId.Air);
+        _colliding = 0;
+        foreach (byte b in bytes) if (Colliding[b]) _colliding++;
     }
 
     internal void LoadOrientationBytes(ReadOnlySpan<byte> bytes)

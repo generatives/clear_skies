@@ -537,7 +537,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     {
         if (data.IsUniform(out var block) && BlockRegistry.Get(block).LightEmission == 0)
         {
-            Array.Fill(words, BlockRegistry.Get(block).Opacity >= 15 ? uint.MaxValue : 0u);
+            Array.Fill(words, BlockRegistry.Get(block).BlocksLight ? uint.MaxValue : 0u);
             return;
         }
         for (int lz = 0; lz < S; lz++)
@@ -547,7 +547,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
             for (int lx = 0; lx < S; lx++)
             {
                 var def = BlockRegistry.Get(data.Get(lx, ly, lz));
-                if (def.Opacity >= 15) bits |= 1u << lx;
+                if (def.BlocksLight) bits |= 1u << lx;
                 if (def.LightEmission > 0)
                     emitters?.Add(new EmitterVoxel((byte)lx, (byte)ly, (byte)lz, def.LightEmission, def.Id));
             }
