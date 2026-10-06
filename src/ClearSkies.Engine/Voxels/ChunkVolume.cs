@@ -46,6 +46,12 @@ public class ChunkVolume
     /// the layers it streams, since a chunk built outside them would be unloaded and never come back.</summary>
     public (int Min, int Max) EditableLayers { get; set; } = (int.MinValue, int.MaxValue);
 
+    /// <summary>What streams this volume's chunks (the static world's), if anything does. Without it, a chunk that isn't
+    /// loaded holds nothing (a grid's), so an edit there makes it. With it, an edit makes one only where streaming knows
+    /// there's nothing; elsewhere the chunk's content hasn't loaded here, so the edit skips it and tells streaming
+    /// (see <see cref="IChunkStreaming.EditedElsewhere"/>), rather than make the chunk with nothing else in it.</summary>
+    public IChunkStreaming? Streaming { get; set; }
+
     /// <summary>Whether this volume's chunks are meshed on their own, as if every neighbouring chunk were air: faces at
     /// chunk borders are always drawn (hidden where the neighbour is solid), so a chunk's mesh never changes when a
     /// neighbour loads, unloads or is edited. Set for the streamed world, where remeshing each chunk as its
@@ -81,6 +87,19 @@ public class ChunkVolume
         return n;
     }
     public bool IsLoaded(ChunkPosition pos) => _chunks.ContainsKey(pos);
+
+    /// <summary>Whether chunk <paramref name="pos"/> is here as it is (loaded, or known to hold nothing), so an edit to
+    /// it changes it here. Always, outside <see cref="EditableLayers"/>, where edits do nothing.</summary>
+    public bool IsEditable(ChunkPosition pos) =>
+        pos.Y < EditableLayers.Min || pos.Y > EditableLayers.Max || IsLoaded(pos) || Streaming is not { } s || s.IsKnownEmpty(pos);
+
+    /// <summary>An edit reaching chunk <paramref name="pos"/>: whether it changes it here (see <see cref="Streaming"/>).</summary>
+    private bool Reaches(ChunkPosition pos)
+    {
+        if (IsEditable(pos)) return true;
+        Streaming!.EditedElsewhere(pos);
+        return false;
+    }
 
     /// <summary>True if every loaded chunk is entirely air (no solid blocks anywhere in the volume).</summary>
     public bool IsEmpty()
@@ -142,7 +161,7 @@ public class ChunkVolume
     public void SetBlock(int x, int y, int z, BlockId id, BlockOrientation orientation)
     {
         var (cp, lx, ly, lz) = Decompose(x, y, z);
-        if (cp.Y < EditableLayers.Min || cp.Y > EditableLayers.Max) return;
+        if (cp.Y < EditableLayers.Min || cp.Y > EditableLayers.Max || !Reaches(cp)) return;
         var entry = EnsureChunk(cp);
 
         entry.Data.Set(lx, ly, lz, id, orientation);
@@ -185,7 +204,7 @@ public class ChunkVolume
         for (int cx = lo.X; cx <= hi.X; cx++)
         {
             var cp = new ChunkPosition(cx, cy, cz);
-            if (cp.Y < EditableLayers.Min || cp.Y > EditableLayers.Max) continue;
+            if (cp.Y < EditableLayers.Min || cp.Y > EditableLayers.Max || !Reaches(cp)) continue;
             var entry = id == BlockId.Air ? GetEntry(cp) : EnsureChunk(cp);
             if (entry is null) continue;
 

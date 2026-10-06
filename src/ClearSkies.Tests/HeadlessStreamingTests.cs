@@ -11,7 +11,7 @@ namespace ClearSkies.Tests;
 public class HeadlessStreamingTests
 {
     /// <summary>Stone below y = 0, air above.</summary>
-    private sealed class Flat : IWorldGenerator
+    internal sealed class Flat : IWorldGenerator
     {
         public void Generate(ChunkData data, ChunkPosition pos)
         {
@@ -24,7 +24,7 @@ public class HeadlessStreamingTests
         public ulong ColumnLayers(int chunkX, int chunkZ, int minChunkY) => 0xFF;
     }
 
-    private static DefaultEcs.Entity Interest(HeadlessScene scene, float x, float z, TerrainInterest interest)
+    internal static DefaultEcs.Entity Interest(HeadlessScene scene, float x, float z, TerrainInterest interest)
     {
         var e = scene.World.CreateEntity();
         e.Set(new Transform { Position = new Vector3D<float>(x, 10, z), Rotation = Quaternion<float>.Identity, Scale = Vector3D<float>.One });
@@ -32,12 +32,12 @@ public class HeadlessStreamingTests
         return e;
     }
 
-    private static TerrainInterest View(float radius) => new() { ColliderRadius = 16, DrawRadius = radius };
+    internal static TerrainInterest View(float radius) => new() { ColliderRadius = 16, DrawRadius = radius };
     private static TerrainInterest Colliders(float radius) => new() { ColliderRadius = radius };
 
     /// <summary>Runs streaming until it's quiet: nothing loading and nothing changing for a second of frames (at least
     /// <paramref name="frames"/> frames, at most 20 s).</summary>
-    private static void Settle(ChunkLoadSystem load, int frames = 60)
+    internal static void Settle(ChunkLoadSystem load, int frames = 60)
     {
         var deadline = DateTime.UtcNow.AddSeconds(20);
         int quiet = 0, last = -1;
@@ -51,7 +51,7 @@ public class HeadlessStreamingTests
         }
     }
 
-    private static ChunkLoadSystem Streaming(HeadlessScene scene, SaveDatabase db, int maxChunks = 100_000, float viewDistance = 64) =>
+    internal static ChunkLoadSystem Streaming(HeadlessScene scene, SaveDatabase db, int maxChunks = 100_000, float viewDistance = 64) =>
         new(scene.World, scene.WorldVolume, new ChunkCountBudget(maxChunks), () => new Flat(), viewDistance, minChunkY: 0,
             new DatabaseChunkStore(db));
 

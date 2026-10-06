@@ -62,7 +62,8 @@ public sealed class EditLimits
 
 /// <summary>
 /// Applies <see cref="VoxelOp"/>s in voxel space. Validate enforces the <see cref="EditLimits"/>: box size by game mode,
-/// and reach from the editor's eye to every op, plus a margin. AfterApply despawns a grid left empty. The undo holds the
+/// and reach from the editor's eye to every op, plus a margin; and turns down an op on terrain the authority hasn't
+/// loaded yet. AfterApply despawns a grid left empty. The undo holds the
 /// old blocks in the ops' area.
 /// </summary>
 public sealed class EditVoxelsHandler : PredictedCommandHandler<EditVoxels, EditVoxelsHandler.Undo>
@@ -129,8 +130,22 @@ public sealed class EditVoxelsHandler : PredictedCommandHandler<EditVoxels, Edit
             var nearest = Vector3D.Clamp(eyeLocal, new Vector3D<float>(op.Min.X, op.Min.Y, op.Min.Z),
                                          new Vector3D<float>(op.Max.X + 1, op.Max.Y + 1, op.Max.Z + 1));
             if (Vector3D.Distance(nearest, eyeLocal) > reach) return Verdict.Reject;
+            if (!Editable(volume, op)) return Verdict.Reject;
         }
         return Verdict.Accept;
+    }
+
+    /// <summary>Whether every chunk an op reaches is here as it is, so the authority's edit is whole: terrain still
+    /// loading here can't be edited yet (see <see cref="ChunkVolume.Streaming"/>).</summary>
+    private static bool Editable(ChunkVolume volume, in VoxelOp op)
+    {
+        var lo = ChunkPosition.FromVoxel(op.Min);
+        var hi = ChunkPosition.FromVoxel(op.Max);
+        for (int z = lo.Z; z <= hi.Z; z++)
+        for (int y = lo.Y; y <= hi.Y; y++)
+        for (int x = lo.X; x <= hi.X; x++)
+            if (!volume.IsEditable(new ChunkPosition(x, y, z))) return false;
+        return true;
     }
 
     private static Vector3D<float> EyeOf(Entity editor)
