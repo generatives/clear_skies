@@ -41,9 +41,12 @@ public sealed class GameView : IDisposable
                                   LightBudget.WorldIndexDim(options.ViewDistance));
         host.Renderer.AttachGridStore(GridStore);
         Budget = new LightBudget(GridStore);
+        _checkerBounce = options.CheckerBounce;
 
         InputSample = new InputSampleSystem(host.World, host.Input, host.Time);
     }
+
+    private readonly int _checkerBounce;
 
     public WindowedEngineHost Host { get; }
     public BlockModelLibrary BlockModels { get; }
@@ -76,7 +79,8 @@ public sealed class GameView : IDisposable
         var renderer = host.Renderer;
         var volume = world.StaticVolume;
         host.AddSystem(new GpuResidencySystem(host.World, volume, GridStore), SystemStage.PreRender);
-        host.AddSystem(new GpuLightSystem(host.World, volume, host.Context, GridStore), SystemStage.PreRender);
+        host.AddSystem(new GpuLightSystem(host.World, volume, host.Context, GridStore) { BounceSpread = _checkerBounce },
+                       SystemStage.PreRender);
         host.AddSystem(Meshes, SystemStage.PreRender);
         host.AddSystem(new BlockModelSystem(host.World, BlockModels), SystemStage.PreRender); // block entities -> RenderedModel
 

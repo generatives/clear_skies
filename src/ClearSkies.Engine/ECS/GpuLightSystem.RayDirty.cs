@@ -85,7 +85,7 @@ public sealed partial class GpuLightSystem
 
     private float _prevBounceAlbedo = -1f, _prevSunLevel = -1f;
     private bool _prevBounceEnabled;
-    private int _prevBounceRays = -1, _prevBounceCycle = -1;
+    private int _prevBounceRays = -1, _prevBounceCycle = -1, _prevBounceSpread = -1;
 
     private bool _rayWasActive, _relightRequested;
     private (float scale, float ambient, float ao) _prevShown = (-1f, -1f, -1f);
@@ -175,18 +175,20 @@ public sealed partial class GpuLightSystem
 
         // Evaluations a changed area gets, rounded up to whole cycles so it always stops having covered each voxel's
         // complete ray set equally.
-        int hold = System.Math.Min(64, (_bounceHoldFrames + _bounceCycle - 1) / _bounceCycle * _bounceCycle);
+        int hold = HoldEvals();
 
         // Bounce inputs that change what every surface receives (or which rays it fires): re-evaluate everything. The
         // displayed light bounce rays read includes the AO-darkened ambient, so that counts too.
         bool bounceOn = _bounceEnabled;
         bool bounceReset = bounceOn && (!_prevBounceEnabled || _bounceAlbedo != _prevBounceAlbedo || SunLight.Level != _prevSunLevel
-                                        || _bounceRays != _prevBounceRays || _bounceCycle != _prevBounceCycle || scaleChanged);
+                                        || _bounceRays != _prevBounceRays || _bounceCycle != _prevBounceCycle || scaleChanged
+                                        || _bounceSpread != _prevBounceSpread);
         _prevBounceEnabled = bounceOn;
         _prevBounceAlbedo = _bounceAlbedo;
         _prevSunLevel = SunLight.Level;
         _prevBounceRays = _bounceRays;
         _prevBounceCycle = _bounceCycle;
+        _prevBounceSpread = _bounceSpread;
 
         _sunTimer.Reset();
         _lampTimer.Reset();
@@ -259,7 +261,7 @@ public sealed partial class GpuLightSystem
             {
                 _bounceTimer.Start();
                 _rayLight.DispatchBounce(_store, sunDir, SunLight.Strength, _bounceAlbedo, _bounceRays,
-                                         _bounceCycle, _bounceWork!, nb);
+                                         _bounceCycle, _bounceSpread, _bounceWork!, nb);
 
                 // Extra evaluations of the held bricks near the camera, in the same frame. Each reads the previous
                 // one's result, so each adds a hop and more samples to the running average. Bounce rays read the
@@ -280,7 +282,7 @@ public sealed partial class GpuLightSystem
                         if (nr == 0) break;
                         ComposeNear(final: false);
                         _rayLight.DispatchBounce(_store, sunDir, SunLight.Strength, _bounceAlbedo, _bounceRays,
-                                                 _bounceCycle, _nearWorks[r]!, nr);
+                                                 _bounceCycle, _bounceSpread, _nearWorks[r]!, nr);
                         _lastNearTotal += nr;
                     }
                     ComposeNear(final: true);
@@ -699,6 +701,9 @@ public sealed partial class GpuLightSystem
         int evals = d2 <= fullR * fullR ? full : d2 <= midR * midR ? _bounceMidEvals : _bounceFarEvals;
         return System.Math.Clamp(evals, 1, full);
     }
+
+    /// <summary>A changed area's evaluations: the hold setting rounded up to whole cycles, at most 64.</summary>
+    private int HoldEvals() => System.Math.Min(64, (_bounceHoldFrames + _bounceCycle - 1) / _bounceCycle * _bounceCycle);
 
     /// <summary>
     /// Walks part of the list of bricks granted fewer than a full hold (all of it every 16 frames or so) and tops up

@@ -53,6 +53,21 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     private float _bounceNearRadius = 64f;
     private float _bounceScale = 1f;
 
+    // Checkerboard bounce (see bouncePhase in GpuRayLightPass): 1 = every surface voxel fires all the rays each
+    // evaluation; 2 or 4 = each fires only that share, neighbours firing the others, and the compose pass's smoothing
+    // averages them. Each evaluation costs about 1/spread of the rays.
+    private int _bounceSpread = 1;
+    private static readonly int[] Spreads = { 1, 2, 4 };
+    private static readonly string[] SpreadNames = { "Off (all rays per voxel)", "1/2 of the rays per voxel", "1/4 of the rays per voxel" };
+
+    /// <summary>Checkerboard bounce: 1 (off), 2 or 4: each surface voxel fires 1/that of the rays; other values round to the
+    /// nearest of those.</summary>
+    public int BounceSpread
+    {
+        get => _bounceSpread;
+        set => _bounceSpread = value >= 4 ? 4 : value >= 2 ? 2 : 1;
+    }
+
     // Gradual bounce: a changed world brick gets the full hold only within the first radius of the camera; out to
     // the second it gets the middle count, and past it the far count. As the camera comes closer, a brick is topped
     // up to its new distance's count, continuing its running average, so distant terrain costs a fraction of the
@@ -130,6 +145,9 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         ImGui.SliderInt("Bounce rays per evaluation", ref _bounceRays, 1, 64);
         ImGui.SliderInt("Evaluations per full ray set", ref _bounceCycle, 1, 64);
         ImGui.TextDisabled($"  = {_bounceRays * _bounceCycle} fixed directions per voxel");
+        int spreadIdx = System.Array.IndexOf(Spreads, _bounceSpread);
+        if (ImGui.Combo("Checkerboard bounce", ref spreadIdx, SpreadNames, SpreadNames.Length)) _bounceSpread = Spreads[spreadIdx];
+        ImGui.TextDisabled("  neighbouring voxels fire different rays; compose smoothing averages them");
         ImGui.SliderInt("Bounce evaluations after a change", ref _bounceHoldFrames, 1, 64);
         ImGui.SliderFloat("Settled-in-one-frame radius", ref _bounceNearRadius, 0f, 256f, "%.0f");
         ImGui.TextDisabled("  changes within it run all their evaluations the frame they happen");
@@ -139,7 +157,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         ImGui.SliderFloat("Middle evaluations within (blocks)", ref _bounceMidRadius, 16f, 8192f, "%.0f");
         ImGui.SliderInt("Middle evaluations", ref _bounceMidEvals, 1, 64);
         ImGui.SliderInt("Far evaluations", ref _bounceFarEvals, 1, 64);
-        ImGui.TextDisabled($"  of {System.Math.Min(64, (_bounceHoldFrames + _bounceCycle - 1) / _bounceCycle * _bounceCycle)} after a change; " +
+        ImGui.TextDisabled($"  of {HoldEvals()} after a change; " +
                            $"topped up as the camera nears. Waiting for more: {_coarse.Count:N0}, topped up this frame: {_dbgTopUps:N0}");
 
         ImGui.Separator();
