@@ -86,6 +86,7 @@ public sealed class GreedyMesher
     {
         // Array order matches Faces[] (fi=0:+X, fi=1:-X, fi=2:+Y, fi=3:-Y, fi=4:+Z, fi=5:-Z).
         ChunkData?[] neighbors = { pX, nX, pY, nY, pZ, nZ };
+        var hood = new Neighbourhood(chunk, nX, pX, nY, pY, nZ, pZ);
 
         var verts   = _verts;
         var indices = _indices;
@@ -151,7 +152,7 @@ public sealed class GreedyMesher
                             var voxelUp = GetOrientation(chunk, face, slice, u, v).Up;
                             role = BlockDef.GetFaceRole(face.Normal, voxelUp);
                         }
-                        _mask[u + v * sz] = new MaskCell(blockId, role, ShadingAt(chunk, face, slice, u, v));
+                        _mask[u + v * sz] = new MaskCell(blockId, role, ShadingAt(hood, face, slice, u, v));
                     }
                 }
 
@@ -238,14 +239,41 @@ public sealed class GreedyMesher
     /// The face cell's baked shading (see <see cref="ShadingAt(ChunkData, int, int, int, Vector3D{int})"/>) for face
     /// <paramref name="face"/> of the block at (<paramref name="slice"/>, <paramref name="u"/>, <paramref name="v"/>).
     /// </summary>
-    private static uint ShadingAt(ChunkData chunk, in FaceDesc face, int slice, int u, int v)
+    private static uint ShadingAt(in Neighbourhood hood, in FaceDesc face, int slice, int u, int v)
     {
         int x, y, z;
         if (face.D == 0)      { x = slice; y = u; z = v; }
         else if (face.D == 1) { y = slice; x = u; z = v; }
         else                  { z = slice; x = u; y = v; }
-        return ShadingAt(chunk, x, y, z, face.Normal);
+        return ShadingAt(hood, x, y, z, face.Normal);
     }
+
+    /// <summary>A chunk and its six face neighbours (null: not loaded, read as air), read across its borders. A cell
+    /// past two borders at once (in a diagonal neighbour, which the mesher isn't given) reads as air.</summary>
+    public readonly struct Neighbourhood
+    {
+        private readonly ChunkData _c;
+        private readonly ChunkData? _nX, _pX, _nY, _pY, _nZ, _pZ;
+
+        public Neighbourhood(ChunkData chunk, ChunkData? nX = null, ChunkData? pX = null, ChunkData? nY = null,
+                             ChunkData? pY = null, ChunkData? nZ = null, ChunkData? pZ = null)
+        { _c = chunk; _nX = nX; _pX = pX; _nY = nY; _pY = pY; _nZ = nZ; _pZ = pZ; }
+
+        public BlockId Get(int x, int y, int z)
+        {
+            const int S = ChunkData.Size;
+            int ox = x < 0 ? -1 : x >= S ? 1 : 0, oy = y < 0 ? -1 : y >= S ? 1 : 0, oz = z < 0 ? -1 : z >= S ? 1 : 0;
+            if ((ox | oy | oz) == 0) return _c.Get(x, y, z);
+            if ((ox != 0 ? 1 : 0) + (oy != 0 ? 1 : 0) + (oz != 0 ? 1 : 0) > 1) return BlockId.Air;
+            var n = ox < 0 ? _nX : ox > 0 ? _pX : oy < 0 ? _nY : oy > 0 ? _pY : oz < 0 ? _nZ : _pZ;
+            return n == null ? BlockId.Air : n.Get(x - ox * S, y - oy * S, z - oz * S);
+        }
+    }
+
+    /// <summary><see cref="ShadingAt(in Neighbourhood, int, int, int, Vector3D{int})"/> with no neighbours (cells
+    /// past the chunk read as air).</summary>
+    public static uint ShadingAt(ChunkData chunk, int x, int y, int z, Vector3D<int> normal)
+        => ShadingAt(new Neighbourhood(chunk), x, y, z, normal);
 
     /// <summary>Set in <see cref="ShadingAt(ChunkData, int, int, int, Vector3D{int})"/>'s result when it's baked.</summary>
     public const uint ShadingBaked = 1u << 16;
@@ -257,20 +285,19 @@ public sealed class GreedyMesher
     /// neighbours block light (bits 0-7: -T, +T, -B, +B, -T-B, +T-B, -T+B, +T+B; corner AO), and which of them are open
     /// surface cells (bits 8-15, same order: open, with a light-blocking block behind along the normal; a diagonal
     /// only through an open side cell; smooth light). <see cref="ShadingBaked"/> is set when that whole neighbourhood
-    /// is inside the chunk; otherwise the result is 0 and the shader works it out from the GPU occupancy, since this
-    /// chunk is meshed without its neighbours. Quads merge only across cells with the same value.
+    /// is known: always, cells past the chunk read from its face neighbours as given when it was meshed (see
+    /// <see cref="Neighbourhood"/>). Quads merge only across cells with the same value.
     /// </summary>
-    public static uint ShadingAt(ChunkData chunk, int x, int y, int z, Vector3D<int> normal)
+    public static uint ShadingAt(in Neighbourhood hood, int x, int y, int z, Vector3D<int> normal)
     {
         int ax = x + normal.X, ay = y + normal.Y, az = z + normal.Z;
-        const int last = ChunkData.Size - 2;
-        if (ax < 1 || ay < 1 || az < 1 || ax > last || ay > last || az > last) return 0;
         int tx, ty, tz, bx, by, bz;
         if (normal.X != 0)      { tx = 0; ty = 1; tz = 0; bx = 0; by = 0; bz = 1; }
         else if (normal.Y != 0) { tx = 1; ty = 0; tz = 0; bx = 0; by = 0; bz = 1; }
         else                    { tx = 1; ty = 0; tz = 0; bx = 0; by = 1; bz = 0; }
+        var h = hood;
         bool Solid(int dt, int db, int dn) =>
-            BlockRegistry.Get(chunk.Get(ax + dt * tx + db * bx - dn * normal.X,
+            BlockRegistry.Get(h.Get(ax + dt * tx + db * bx - dn * normal.X,
                                         ay + dt * ty + db * by - dn * normal.Y,
                                         az + dt * tz + db * bz - dn * normal.Z)).BlocksLight;
         bool sTm = Solid(-1, 0, 0), sTp = Solid(1, 0, 0), sBm = Solid(0, -1, 0), sBp = Solid(0, 1, 0);

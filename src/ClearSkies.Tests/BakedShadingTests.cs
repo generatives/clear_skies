@@ -30,7 +30,9 @@ public class BakedShadingTests
     public void BakedShadingMatchesTheShadersMaskWorking()
     {
         var data = Terrain();
-        bool Solid(int x, int y, int z) => BlockRegistry.Get(data.Get(x, y, z)).BlocksLight;
+        // Past the chunk reads as air (no neighbours given).
+        bool Solid(int x, int y, int z) => x >= 0 && y >= 0 && z >= 0 && x < ChunkData.Size && y < ChunkData.Size
+                                           && z < ChunkData.Size && BlockRegistry.Get(data.Get(x, y, z)).BlocksLight;
         var normals = new[] { new Vector3D<int>(1, 0, 0), new(-1, 0, 0), new(0, 1, 0), new(0, -1, 0), new(0, 0, 1), new(0, 0, -1) };
         int baked = 0;
         for (int x = 0; x < ChunkData.Size; x++)
@@ -40,8 +42,6 @@ public class BakedShadingTests
         {
             uint s = GreedyMesher.ShadingAt(data, x, y, z, n);
             var air = new Vector3D<int>(x, y, z) + n;
-            bool inside = air.X >= 1 && air.Y >= 1 && air.Z >= 1 && air.X <= 30 && air.Y <= 30 && air.Z <= 30;
-            if (!inside) { Assert.Equal(0u, s); continue; }
             Assert.NotEqual(0u, s & GreedyMesher.ShadingBaked);
             baked++;
 
@@ -63,6 +63,22 @@ public class BakedShadingTests
             for (int i = 0; i < 16; i++) Assert.Equal(want[i], ((s >> i) & 1) == 1);
         }
         Assert.True(baked > 1000);
+    }
+
+    [Fact]
+    public void BorderShadingReadsTheFaceNeighbour()
+    {
+        // A stone ledge in the +X neighbour, beside the air in front of a top face at this chunk's +X edge: the face's
+        // +T (+X) corner is shaded only if the neighbour is read.
+        var data = new ChunkData();
+        data.Set(31, 5, 10, BlockId.Stone);
+        var east = new ChunkData();
+        east.Set(0, 6, 10, BlockId.Stone);
+        var up = new Vector3D<int>(0, 1, 0);
+        uint alone = GreedyMesher.ShadingAt(data, 31, 5, 10, up);
+        uint withEast = GreedyMesher.ShadingAt(new GreedyMesher.Neighbourhood(data, pX: east), 31, 5, 10, up);
+        Assert.Equal(0u, alone & 2u);    // sTp: +T reads as air
+        Assert.Equal(2u, withEast & 2u); // the neighbour's block
     }
 
     [Fact]

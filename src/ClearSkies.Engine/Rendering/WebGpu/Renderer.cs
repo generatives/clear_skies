@@ -601,28 +601,9 @@ fn shadeFast(localPos: vec3<f32>, localNormal: vec3<f32>, shade: u32) -> Shade {
     let hs = brickSlot(ai, air);
 
     // Air-layer solids around the cell (AO, and the first half of onSurface), and onSurface: open, with a solid
-    // directly behind along the normal; diagonals need a side cell (corner rule). Baked by the mesher for most faces
-    // (GreedyMesher.ShadingAt, bits 0-15 of shade >> 8 in this order); at a chunk border, from the occupancy.
-    var bits: u32;
-    if ((shade >> 31u) != 0u) {
-        bits = (shade >> 8u) & 0xFFFFu;
-    } else {
-        let m = solidMask(air, ai);
-        let sTm = maskSolid(m, -T);     let sTp = maskSolid(m, T);
-        let sBm = maskSolid(m, -B);     let sBp = maskSolid(m, B);
-        let sMM = maskSolid(m, -T - B); let sPM = maskSolid(m, T - B);
-        let sMP = maskSolid(m, -T + B); let sPP = maskSolid(m, T + B);
-        let oTm = !sTm && maskSolid(m, -T - N);     let oTp = !sTp && maskSolid(m, T - N);
-        let oBm = !sBm && maskSolid(m, -B - N);     let oBp = !sBp && maskSolid(m, B - N);
-        let oMM = (oTm || oBm) && !sMM && maskSolid(m, -T - B - N);
-        let oPM = (oTp || oBm) && !sPM && maskSolid(m, T - B - N);
-        let oMP = (oTm || oBp) && !sMP && maskSolid(m, -T + B - N);
-        let oPP = (oTp || oBp) && !sPP && maskSolid(m, T + B - N);
-        bits = select(0u, 1u, sTm) | select(0u, 2u, sTp) | select(0u, 4u, sBm) | select(0u, 8u, sBp)
-             | select(0u, 16u, sMM) | select(0u, 32u, sPM) | select(0u, 64u, sMP) | select(0u, 128u, sPP)
-             | select(0u, 256u, oTm) | select(0u, 512u, oTp) | select(0u, 1024u, oBm) | select(0u, 2048u, oBp)
-             | select(0u, 4096u, oMM) | select(0u, 8192u, oPM) | select(0u, 16384u, oMP) | select(0u, 32768u, oPP);
-    }
+    // directly behind along the normal; diagonals need a side cell (corner rule). Baked by the mesher
+    // (GreedyMesher.ShadingAt), bits 0-15 of shade >> 8 in this order.
+    let bits = (shade >> 8u) & 0xFFFFu;
     let sTm = (bits & 1u) != 0u;     let sTp = (bits & 2u) != 0u;
     let sBm = (bits & 4u) != 0u;     let sBp = (bits & 8u) != 0u;
     let sMM = (bits & 16u) != 0u;    let sPM = (bits & 32u) != 0u;
