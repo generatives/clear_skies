@@ -132,6 +132,14 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 int y0 = System.Math.Max(lo, originY), y1 = System.Math.Min(hi, originY + S - 1);
                 for (int y = y0; y <= y1; y++)
                     data.Set(lx, y - originY, lz, ContinentTerrain.Block(y, hi, _strata[col], _patch[col], _bare[col * MaxSpans + s]));
+
+                // What grows on the span's top, in the open cell above it.
+                int above = hi + 1;
+                if (above < originY || above >= originY + S) continue;
+                if (s + 1 < _spanCount[col] && _spans[col * MaxSpans + s + 1].Lo <= above) continue;
+                var ground = ContinentTerrain.Block(hi, hi, _strata[col], _patch[col], _bare[col * MaxSpans + s]);
+                var plant = ContinentTerrain.Plant(ground, pos.X * S + lx, above, pos.Z * S + lz, _patch[col], _seed);
+                if (plant != BlockId.Air) data.Set(lx, above - originY, lz, plant);
             }
         }
     }

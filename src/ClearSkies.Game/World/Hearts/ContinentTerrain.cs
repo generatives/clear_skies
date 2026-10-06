@@ -139,6 +139,46 @@ public sealed class ContinentTerrain
         return (h & 0xFF) < 90 ? BlockId.Rock : BlockId.Stone;
     }
 
+    /// <summary>What grows in the open cell (x, y, z) on top of <paramref name="ground"/> (the top block of a solid
+    /// span, from <see cref="Block"/>), or air: grass on grass, thickest where <paramref name="patch"/> (from
+    /// <see cref="Patch"/>) is high, with the odd mushroom; brown grass and mushrooms on bare dirt; dry grass on sand;
+    /// pebbles on mountain rock (mossy lower down) and, rarely, on snow. Picked by a hash of the cell, so the same
+    /// everywhere it's generated.</summary>
+    public static BlockId Plant(BlockId ground, int x, int y, int z, float patch, ulong seed)
+    {
+        ulong h = (ulong)(uint)x * 0x9E3779B97F4A7C15UL ^ (ulong)(uint)y * 0xC2B2AE3D27D4EB4FUL
+                ^ (ulong)(uint)z * 0x165667B19E3779F9UL ^ seed * 0xD6E8FEB86659FD93UL;
+        h ^= h >> 32; h *= 0xD6E8FEB86659FD93UL; h ^= h >> 32;
+        float r = (h & 0xFFFFFF) / 16777216f;   // whether something grows here
+        uint pick = (uint)(h >> 40) & 0xFF;     // and what
+        switch (ground)
+        {
+            case BlockId.Grass:
+            {
+                float meadow = 0.06f + 0.34f * Smoothstep(0.35f, 0.8f, patch);
+                if (r < meadow)
+                    return pick < 100 ? BlockId.ShortGrass : pick < 165 ? BlockId.GrassTuft
+                         : pick < 205 ? BlockId.GrassBlades : BlockId.TallGrass;
+                if (r < meadow + 0.004f)
+                    return pick < 128 ? BlockId.RedMushroom : pick < 200 ? BlockId.BrownMushroom : BlockId.TanMushroom;
+                return BlockId.Air;
+            }
+            case BlockId.Dirt:
+                if (r < 0.05f) return BlockId.BrownGrass;
+                if (r < 0.065f) return pick < 160 ? BlockId.BrownMushroom : BlockId.TanMushroom;
+                return BlockId.Air;
+            case BlockId.Sand:
+                return r < 0.025f ? BlockId.DryGrass : BlockId.Air;
+            case BlockId.Rock:
+                if (r >= 0.04f) return BlockId.Air;
+                return pick < 255f * Math.Clamp((RockFull - y) / (RockFull - RockStart), 0f, 1f) ? BlockId.MossyPebbles : BlockId.Pebbles;
+            case BlockId.Snow:
+                return r < 0.01f ? BlockId.Pebbles : BlockId.Air;
+            default:
+                return BlockId.Air;
+        }
+    }
+
     private static float Smoothstep(float edge0, float edge1, float x)
     {
         float t = Math.Clamp((x - edge0) / (edge1 - edge0), 0f, 1f);

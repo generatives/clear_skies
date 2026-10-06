@@ -23,6 +23,10 @@ namespace ClearSkies.Engine.Voxels;
 /// still has its face; and a transparent face is hidden only by an opaque block (or <see cref="BlockDef.OpaqueModel"/>)
 /// or another of its own type. An opaque model block hides faces against it like an opaque cube, since its model
 /// covers them.
+///
+/// <see cref="BlockShape.Cross"/> blocks (plants) aren't greedy meshed: each gets two quads crossing diagonally through
+/// its cell, both sides of each (see <see cref="EmitCross"/>), in the cut-out mesh. They hide nothing and nothing hides
+/// them.
 /// </summary>
 public sealed class GreedyMesher
 {
@@ -207,8 +211,65 @@ public sealed class GreedyMesher
             }
         }
 
+        if (chunk.HasAnyNonAir())
+            for (int z = 0; z < sz; z++)
+            for (int y = 0; y < sz; y++)
+            for (int x = 0; x < sz; x++)
+            {
+                var id = chunk.Get(x, y, z);
+                if (!IsCross[(byte)id]) continue;
+                ref readonly var def = ref BlockRegistry.Get(id);
+                float layer = _atlas != null && _atlas.TryGetLayer(def.Texture, out int l) ? l : -1f;
+                EmitCross(_cVerts, _cIndices, _cBlocks, x, y, z, id, def.Color, layer);
+            }
+
         return new ChunkMeshLayers(new LayerMesh(verts, indices, _blocks), new LayerMesh(_cVerts, _cIndices, _cBlocks),
                                    new LayerMesh(_tVerts, _tIndices, _tBlocks));
+    }
+
+    // Which block ids are BlockShape.Cross, so the per-voxel scan for them is a table lookup.
+    private static readonly bool[] IsCross = BuildCrossTable();
+
+    private static bool[] BuildCrossTable()
+    {
+        var t = new bool[256];
+        for (int i = 0; i < t.Length; i++) t[i] = BlockRegistry.Get((BlockId)i).IsCross;
+        return t;
+    }
+
+    /// <summary>1/√2: a diagonal quad's normal components.</summary>
+    internal const float Diagonal = 0.70710677f;
+
+    /// <summary>
+    /// A cross block at (<paramref name="x"/>, <paramref name="y"/>, <paramref name="z"/>): two unit quads standing
+    /// on the cell's diagonals, A from its (0, 0) corner to (1, 1) in x, z and B from (1, 0) to (0, 1), each emitted
+    /// twice, once facing each way, so they're seen from both sides with back faces culled. Along a quad, s runs 0-1
+    /// along the diagonal and t up it; the front (which ChunkQuad packs with its side bit clear) has its corners in
+    /// s-first order, (0,0) (1,0) (1,1) (0,1), the back t-first, which winds it the other way. U is s and V runs down
+    /// world Y as on the cube's sides, so the sprite stands upright. vs_chunk rebuilds the same corners (faces 6 and 7).
+    /// </summary>
+    private static void EmitCross(List<Vertex> verts, List<uint> indices, List<BlockId> blocks,
+                                  int x, int y, int z, BlockId id, Vector3D<float> color, float layer)
+    {
+        for (int diagonal = 0; diagonal < 2; diagonal++)
+        for (int side = 0; side < 2; side++)
+        {
+            // Front normals: A (-1, 0, 1), B (-1, 0, -1); the back's are their opposites.
+            float sign = side == 0 ? -Diagonal : Diagonal;
+            var normal = new Vector3D<float>(sign, 0, diagonal == 0 ? -sign : sign);
+            uint b = (uint)verts.Count;
+            for (int corner = 0; corner < 4; corner++)
+            {
+                int s, t;
+                if (side == 0) { s = corner == 1 || corner == 2 ? 1 : 0; t = corner >= 2 ? 1 : 0; }
+                else           { s = corner >= 2 ? 1 : 0;                t = corner == 1 || corner == 2 ? 1 : 0; }
+                var position = new Vector3D<float>(diagonal == 0 ? x + s : x + 1 - s, y + t, z + s);
+                verts.Add(new Vertex { Position = position, Normal = normal, Color = color, Uv = new(s, -(y + t), layer) });
+            }
+            indices.Add(b);     indices.Add(b + 1); indices.Add(b + 2);
+            indices.Add(b);     indices.Add(b + 2); indices.Add(b + 3);
+            blocks.Add(id);
+        }
     }
 
     // face.D/U/V are always a permutation of {0,1,2} (x,y,z); resolving the three coordinates with a

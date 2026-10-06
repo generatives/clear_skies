@@ -74,7 +74,26 @@ public static class BlockRegistry
         // mostly clear, with a few streaks of glare, so it's drawn with the world minus its clear texels, no blending.
         Register(new BlockDef { Id = BlockId.Glass, Name = "Glass", Color = new(0.80f, 0.90f, 0.95f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 2,
             Texture = "glass", Layer = RenderLayer.Cutout });
+
+        // Plants and pebbles: crossed billboards (BlockShape.Cross) of one sprite each. Passable, so they're walked
+        // through, but still targetable so they can be broken, and Replaceable: a block placed against one takes its
+        // place. Colour is only a fallback (and the hotbar's swatch) if the sprite is missing.
+        RegisterCross(BlockId.ShortGrass,    "Short Grass",    "grass1",         new(0.20f, 0.70f, 0.40f));
+        RegisterCross(BlockId.GrassTuft,     "Grass Tuft",     "grass2",         new(0.20f, 0.70f, 0.40f));
+        RegisterCross(BlockId.GrassBlades,   "Grass Blades",   "grass3",         new(0.20f, 0.70f, 0.40f));
+        RegisterCross(BlockId.TallGrass,     "Tall Grass",     "grass4",         new(0.20f, 0.70f, 0.40f));
+        RegisterCross(BlockId.DryGrass,      "Dry Grass",      "grass_tan",      new(0.85f, 0.78f, 0.60f));
+        RegisterCross(BlockId.BrownGrass,    "Brown Grass",    "grass_brown",    new(0.62f, 0.40f, 0.20f));
+        RegisterCross(BlockId.RedMushroom,   "Red Mushroom",   "mushroom_red",   new(0.95f, 0.40f, 0.15f));
+        RegisterCross(BlockId.BrownMushroom, "Brown Mushroom", "mushroom_brown", new(0.55f, 0.35f, 0.20f));
+        RegisterCross(BlockId.TanMushroom,   "Tan Mushroom",   "mushroom_tan",   new(0.85f, 0.75f, 0.60f));
+        RegisterCross(BlockId.Pebbles,       "Pebbles",        "rock",           new(0.55f, 0.62f, 0.65f));
+        RegisterCross(BlockId.MossyPebbles,  "Mossy Pebbles",  "rock_moss",      new(0.45f, 0.62f, 0.50f));
     }
+
+    private static void RegisterCross(BlockId id, string name, string texture, Vector3D<float> color) =>
+        Register(new BlockDef { Id = id, Name = name, Color = color, IsSolid = true, Passable = true, Weight = 0.1f,
+            Shape = BlockShape.Cross, Texture = texture });
 
     private static void Register(BlockDef def) => Defs[(byte)def.Id] = def;
 

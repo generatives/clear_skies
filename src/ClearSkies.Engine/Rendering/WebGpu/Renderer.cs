@@ -261,6 +261,9 @@ struct VSOut {
     @location(4)       uv:          vec3<f32>,
     @location(5)       worldPos:    vec3<f32>,
     @location(6)       alpha:       f32,          // chunk meshes: a transparent block's opacity (see fs_chunk_transparent)
+    // Chunk meshes: for a cross block's quad (faces 6, 7), its cell (chunk-local) in xyz and w = 1, so it is lit from
+    // that cell (see shadeBlock); w = 0 for every other surface.
+    @location(7) @interpolate(flat) cross: vec4<i32>,
 };
 
 @vertex
@@ -286,7 +289,8 @@ fn vs_main(
 // face in 18-20 (+X, -X, +Y, -Y, +Z, -Z), texture layer in 21-28 (255: untextured), width - 1 in a bits 29-31 and b
 // bits 24-25, height - 1 in b bits 26-30; the block in b bits 0-7, whose colour and opacity come from blockTable.
 // Corners follow the mesher's order (GreedyMesher.EmitQuad) and the texture coordinates follow from position and face,
-// as GreedyMesher.MakeUv makes them: V runs down world Y on the side faces.
+// as GreedyMesher.MakeUv makes them: V runs down world Y on the side faces. Faces 6 and 7 are a cross block's two
+// diagonal quads, one cell in size from its low corner, with b bit 8 set for the back side (GreedyMesher.EmitCross).
 // The mesh's quads, read by vertex index. Drawn indexed through one shared index buffer (quad q's triangles are
 // 4q + 0, 1, 2 and 0, 2, 3), so vertex_index is 4q + corner and the GPU reuses the corners the two triangles share:
 // four shader runs per quad, as with the old four-vertex meshes, where six separate vertices (instanced or not) cost
@@ -311,17 +315,27 @@ fn chunkVertex(quad: vec2<u32>, corner: u32) -> VSOut {
     let face = (a >> 18u) & 7u;
     let du = f32(((a >> 29u) | (((c >> 24u) & 3u) << 3u)) + 1u);
     let dv = f32(((c >> 26u) & 31u) + 1u);
-    // The mesher winds +X, -Y and +Z the other way round (FaceDesc.Flip).
-    let flip = face == 0u || face == 3u || face == 4u;
+    // The mesher winds +X, -Y and +Z the other way round (FaceDesc.Flip), and a diagonal's front.
+    let back = (c & 256u) != 0u;
+    let flip = face == 0u || face == 3u || face == 4u || (face >= 6u && !back);
     let cu = select(select(0.0, du, corner >= 2u), select(0.0, du, corner == 1u || corner == 2u), flip);
     let cv = select(select(0.0, dv, corner == 1u || corner == 2u), select(0.0, dv, corner >= 2u), flip);
     var position = vec3<f32>(f32(a & 63u), f32((a >> 6u) & 63u), f32((a >> 12u) & 63u));
     let s = select(1.0, -1.0, (face & 1u) == 1u);
     var normal = vec3<f32>(0.0);
     var uv2: vec2<f32>;
+    var cross = vec4<i32>(0);
     if (face < 2u)      { position.y += cu; position.z += cv; normal.x = s; uv2 = vec2<f32>(position.z, -position.y); }
     else if (face < 4u) { position.x += cu; position.z += cv; normal.y = s; uv2 = position.xz; }
-    else                { position.x += cu; position.y += cv; normal.z = s; uv2 = vec2<f32>(position.x, -position.y); }
+    else if (face < 6u) { position.x += cu; position.y += cv; normal.z = s; uv2 = vec2<f32>(position.x, -position.y); }
+    else {
+        // A cross block: cu runs along the diagonal, cv up. Lit as an upward-facing surface (see shadeBlock), so its
+        // two quads, and both their sides, match each other and the ground they stand on.
+        cross = vec4<i32>(vec3<i32>(position), 1);
+        position += vec3<f32>(select(1.0 - cu, cu, face == 6u), cv, cu);
+        normal.y = 1.0;
+        uv2 = vec2<f32>(cu, -position.y);
+    }
     let layerBits = (a >> 21u) & 255u;
     let layer = select(f32(layerBits), -1.0, layerBits == 255u);
     let block = blockTable[c & 255u];
@@ -336,6 +350,7 @@ fn chunkVertex(quad: vec2<u32>, corner: u32) -> VSOut {
     o.localNormal = normal;
     o.uv          = vec3<f32>(uv2, layer);
     o.alpha       = block.a;
+    o.cross       = cross;
     return o;
 }
 
@@ -722,6 +737,12 @@ fn shadeBlock(in: VSOut, baseColor: vec3<f32>) -> vec3<f32> {
         // Debug: no voxel lighting at all (open sky, full sun, no AO).
         s.sky = camera.lightParams.z; s.rgb = vec3<f32>(0.0); s.sun = 1.0;
         ao = 1.0;
+    } else if (in.cross.w != 0) {
+        // A cross block (plant): its own cell's light, which it doesn't block, flat over the whole plant, darkening
+        // towards its foot in place of corner AO.
+        let c = cellAt(model.chunk * 32 + in.cross.xyz);
+        s.sky = c.sky; s.rgb = c.rgb; s.sun = c.sun;
+        ao = mix(0.6, 1.0, clamp(in.localPos.y - f32(in.cross.y), 0.0, 1.0));
     } else if (mode == 1 || mode == 2) {
         // Debug: flat light everywhere, with (1) or without (2) corner AO.
         let c = cellAt(air);
