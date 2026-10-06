@@ -11,8 +11,10 @@ namespace ClearSkies.Engine.ECS;
 /// <summary>
 /// Hides the edge of the loaded world: sets the fog (<see cref="SkySettings.FogDistance"/>) around the view, the first
 /// terrain interest with a draw radius, at the nearest terrain that isn't ready to be seen. That's a column still
-/// loading (<see cref="TerrainColumnLoading"/>), a terrain chunk not yet uploaded to the GPU store or meshed, or past
-/// how far streaming has looked (<see cref="TerrainScanned"/>); with none, the draw radius. So an island only partly
+/// loading (<see cref="TerrainColumnLoading"/>), a terrain chunk not yet uploaded to the GPU store or meshed since it
+/// started being drawn, or past how far streaming has looked (<see cref="TerrainScanned"/>); with none, the draw radius.
+/// A chunk already on screen that's only waiting to be remeshed or re-uploaded (after an edit, or a neighbour loading)
+/// doesn't count: it's drawn meanwhile with its last mesh and light, and counting it pulled the fog in and out. So an island only partly
 /// loaded fades out where loading stopped instead of ending in a hard edge, and chunks appear behind the fog rather
 /// than popping in in front of it. It closes in fast, so a gap is covered before it shows, and opens out slowly, so
 /// the view opens up gently as loading catches up.
@@ -24,7 +26,8 @@ public sealed class FogSystem : ISystem, IDebugUiSystem
     private readonly float _viewDistance;
     private readonly EntitySet _interests;
     private readonly EntitySet _loadingColumns;
-    private readonly EntitySet _chunksNotDrawnYet;
+    private readonly EntitySet _chunksNotMeshedYet;
+    private readonly EntitySet _chunksNotUploadedYet;
     private float _distance;
     private float _target;
 
@@ -34,9 +37,12 @@ public sealed class FogSystem : ISystem, IDebugUiSystem
         _viewDistance = viewDistance;
         _interests = world.GetEntities().With<TerrainInterest>().With<Transform>().AsSet();
         _loadingColumns = world.GetEntities().With<TerrainColumnLoading>().AsSet();
-        // Terrain chunks (each with its own presence; a grid's chunks inherit theirs) waiting to be uploaded or meshed.
-        _chunksNotDrawnYet = world.GetEntities().With<Chunk>().With<OwnPresence>()
-                            .WithEither<NeedsGpuUploadFlag>().Or<NeedsRemeshFlag>().AsSet();
+        // Terrain chunks (each with its own presence; a grid's chunks inherit theirs) waiting to be meshed or uploaded
+        // for the first time since they started being drawn.
+        _chunksNotMeshedYet = world.GetEntities().With<Chunk>().With<OwnPresence>()
+                             .With<NeedsRemeshFlag>().Without<ChunkMeshedFlag>().AsSet();
+        _chunksNotUploadedYet = world.GetEntities().With<Chunk>().With<OwnPresence>()
+                               .With<NeedsGpuUploadFlag>().Without<ChunkUploadedFlag>().AsSet();
     }
 
     /// <summary>Horizontal distance from the view at which the loaded world stops, eased over time. Fog is total by here.</summary>
@@ -53,11 +59,8 @@ public sealed class FogSystem : ISystem, IDebugUiSystem
             ref readonly var c = ref e.Get<TerrainColumnLoading>();
             target = MathF.Min(target, Within(centre, c.X, c.Z, radius));
         }
-        foreach (ref readonly Entity e in _chunksNotDrawnYet.GetEntities())
-        {
-            var pos = e.Get<Chunk>().Entry.Position;
-            target = MathF.Min(target, Within(centre, pos.X, pos.Z, radius));
-        }
+        target = MathF.Min(target, Nearest(_chunksNotMeshedYet, centre, radius));
+        target = MathF.Min(target, Nearest(_chunksNotUploadedYet, centre, radius));
         _target = target;
 
         float rate = target < _distance ? 8f : 1f;
@@ -81,6 +84,17 @@ public sealed class FogSystem : ISystem, IDebugUiSystem
         return false;
     }
 
+    private static float Nearest(EntitySet chunks, Vector3D<float> centre, float radius)
+    {
+        float best = float.PositiveInfinity;
+        foreach (ref readonly Entity e in chunks.GetEntities())
+        {
+            var pos = e.Get<Chunk>().Entry.Position;
+            best = MathF.Min(best, Within(centre, pos.X, pos.Z, radius));
+        }
+        return best;
+    }
+
     /// <summary>Horizontal distance from the centre to the nearest point of chunk column (x, z), if its middle is within
     /// <paramref name="radius"/> (so it's drawn); infinity otherwise.</summary>
     private static float Within(Vector3D<float> centre, int x, int z, float radius)
@@ -98,6 +112,7 @@ public sealed class FogSystem : ISystem, IDebugUiSystem
     public void DrawDebugUi()
     {
         ImGui.Text($"Fog distance: {_distance:F0} (target {_target:F0})");
-        ImGui.Text($"Columns loading: {_loadingColumns.Count}   Terrain chunks not drawn yet: {_chunksNotDrawnYet.Count}");
+        ImGui.Text($"Columns loading: {_loadingColumns.Count}   Terrain chunks not meshed yet: {_chunksNotMeshedYet.Count}, " +
+                   $"not uploaded yet: {_chunksNotUploadedYet.Count}");
     }
 }
