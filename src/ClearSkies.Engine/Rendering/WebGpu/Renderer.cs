@@ -667,7 +667,11 @@ fn blockColor(in: VSOut) -> vec4<f32> {
     let dbg = u32(camera.lightParams2.y);
     let layer = max(i32(round(in.uv.z)), 0);
     var tex   = vec4<f32>(0.6, 0.6, 0.6, 1.0);
-    if ((dbg & 1u) == 0u) { tex = textureSample(atlasTex, atlasSamp, fract(in.uv.xy), layer); }
+    // The mip level comes from the unwrapped coordinates' gradients: fract's jump at every block edge would make the
+    // GPU pick the smallest mip along each edge (thin lines between blocks).
+    let gx = dpdx(in.uv.xy);
+    let gy = dpdy(in.uv.xy);
+    if ((dbg & 1u) == 0u) { tex = textureSampleGrad(atlasTex, atlasSamp, fract(in.uv.xy), layer, gx, gy); }
     return select(vec4<f32>(lin(in.color), 1.0), tex, in.uv.z >= 0.0);
 }
 
@@ -1277,16 +1281,18 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
             AddressModeU  = AddressMode.Repeat,
             AddressModeV  = AddressMode.Repeat,
             AddressModeW  = AddressMode.Repeat,
+            // Texels stay crisp up close (nearest within a level); farther away the mip levels (see MipChain) blend, so
+            // a pixel covering many texels shows their average instead of an arbitrary one (moiré on distant terrain).
             MagFilter     = FilterMode.Nearest,
             MinFilter     = FilterMode.Nearest,
-            MipmapFilter  = MipmapFilterMode.Nearest,
+            MipmapFilter  = MipmapFilterMode.Linear,
             LodMinClamp   = 0,
-            LodMaxClamp   = 1,
+            LodMaxClamp   = 32,
             Compare       = CompareFunction.Undefined,
             MaxAnisotropy = 1,
         };
         CreateTextureArray(tileWidth, tileHeight, layers, samplerDesc,
-                           out _atlasTexture, out _atlasTextureView, out _atlasSampler, out _atlasBindGroup);
+                           out _atlasTexture, out _atlasTextureView, out _atlasSampler, out _atlasBindGroup, mipmaps: true);
     }
 
     /// <summary>Block and model textures are authored in sRGB: on an sRGB surface they're stored as such, so sampling
@@ -1296,27 +1302,36 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     /// <summary>Uploads <paramref name="layers"/> (RGBA8, <paramref name="width"/>×<paramref name="height"/> each) as a
     /// <c>texture_2d_array</c> and wraps it with a sampler in a bind group on the group-3 layout.</summary>
     private void CreateTextureArray(int width, int height, byte[][] layers, in SamplerDescriptor samplerDesc,
-                                    out Texture* texture, out TextureView* view, out Sampler* sampler, out BindGroup* bindGroup)
+                                    out Texture* texture, out TextureView* view, out Sampler* sampler, out BindGroup* bindGroup,
+                                    bool mipmaps = false)
     {
+        int levels = 1;
+        if (mipmaps) for (int m = System.Math.Max(width, height); m > 1; m >>= 1) levels++;
         var texDesc = new TextureDescriptor
         {
             Usage         = TextureUsage.TextureBinding | TextureUsage.CopyDst,
             Dimension     = TextureDimension.Dimension2D,
             Size          = new Extent3D((uint)width, (uint)height, (uint)layers.Length),
             Format        = TexelFormat, // sampled as linear colour when the surface is sRGB
-            MipLevelCount = 1,
+            MipLevelCount = (uint)levels,
             SampleCount   = 1,
         };
         texture = _api.DeviceCreateTexture(_ctx.Device, &texDesc);
 
         for (uint layer = 0; layer < layers.Length; layer++)
         {
-            fixed (byte* data = layers[layer])
+            byte[] pixels = layers[layer];
+            int w = width, h = height;
+            for (int level = 0; level < levels; level++)
             {
-                var dest = new ImageCopyTexture { Texture = texture, MipLevel = 0, Origin = new Origin3D(0, 0, layer), Aspect = TextureAspect.All };
-                var dataLayout = new TextureDataLayout { Offset = 0, BytesPerRow = (uint)(width * 4), RowsPerImage = (uint)height };
-                var writeSize = new Extent3D((uint)width, (uint)height, 1);
-                _api.QueueWriteTexture(_ctx.Queue, &dest, data, (nuint)layers[layer].Length, &dataLayout, &writeSize);
+                if (level > 0) (pixels, w, h) = MipChain.Halve(pixels, w, h, _ctx.SurfaceIsSrgb);
+                fixed (byte* data = pixels)
+                {
+                    var dest = new ImageCopyTexture { Texture = texture, MipLevel = (uint)level, Origin = new Origin3D(0, 0, layer), Aspect = TextureAspect.All };
+                    var dataLayout = new TextureDataLayout { Offset = 0, BytesPerRow = (uint)(w * 4), RowsPerImage = (uint)h };
+                    var writeSize = new Extent3D((uint)w, (uint)h, 1);
+                    _api.QueueWriteTexture(_ctx.Queue, &dest, data, (nuint)(w * h * 4), &dataLayout, &writeSize);
+                }
             }
         }
 
@@ -1325,7 +1340,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
             Format          = TexelFormat,
             Dimension       = TextureViewDimension.Dimension2DArray,
             BaseMipLevel    = 0,
-            MipLevelCount   = 1,
+            MipLevelCount   = (uint)levels,
             BaseArrayLayer  = 0,
             ArrayLayerCount = (uint)layers.Length,
             Aspect          = TextureAspect.All,
