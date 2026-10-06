@@ -34,24 +34,6 @@ public static class TestScene
         return (eye, yaw, pitch);
     }
 
-    /// <summary>The local player on a host (a client's is spawned by the host once it has joined), through the command
-    /// system (applied in the first tick): where they left off if they've played this world before, otherwise with
-    /// their eye at the camera.</summary>
-    public static void SpawnLocalPlayer(CommandSystem commands, PlayerId id, string name, PlayerDescription? saved,
-                                        (Vector3D<float> Eye, float Yaw, float Pitch) camera)
-    {
-        var description = saved ?? new PlayerDescription
-        {
-            Id = id,
-            FreeFly = true,
-            Position = WorldSpawn.PlayerAt(camera.Eye),
-            Yaw = camera.Yaw,
-            Pitch = camera.Pitch,
-        };
-        description.Name = name;
-        commands.Send(new Spawn<PlayerDescription> { Description = description });
-    }
-
     /// <summary>
     /// The ray-traced lighting prototype's test ship: a small solid hull with a Lamp exposed on top, near
     /// <paramref name="eye"/>, so its shadow should visibly fall on the terrain below once the ray-traced toggle is on.

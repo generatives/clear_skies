@@ -17,54 +17,59 @@ using Silk.NET.Maths;
 namespace ClearSkies.Net.Sync;
 
 /// <summary>
-/// Body sync: every second tick (30 Hz), each machine snapshots the bodies it owns, relative to their support, with
-/// streamed values (a player's look), and sends them unreliably: clients to the host, which passes each client's on to
-/// the others as they arrive (HostSession), and sends its own to everyone. Receivers buffer them per entity
+/// Body sync: every second tick (30 Hz), the authority snapshots the bodies it owns, relative to their support, with
+/// streamed values (a player's look), and sends them unreliably to the Host, which passes each Participant the ones it
+/// has (see <see cref="Host"/>). Receivers buffer them per entity
 /// (<see cref="RemoteBody"/>, which every synced body owned elsewhere has from when its owner is set) and draw them about
 /// 100 ms behind (<see cref="RemoteBodySystem"/>). A lost packet is simply replaced by the next one. Runs last in the
 /// tick, after support.
+/// <para>A grid's pose, and a pose on a grid, is its block space's (its Transform's), which no edit moves; its body
+/// sits at its centre of mass inside that, which edits do move, and when an edit reaches each machine isn't when any
+/// snapshot does.</para>
 /// </summary>
 public sealed class BodySync : ISystem, IDebugUiSystem
 {
     public const int SnapshotsPerPacket = 20;
 
-    private readonly NetSession _net;
+    private readonly SimulationParticipant _net;
     private readonly PhysicsWorld _physics;
     private readonly EntitySet _players;
     private readonly EntitySet _grids;
     private readonly EntitySet _remote;
     private readonly List<BodySnapshot> _own = new();
-    private readonly NetWriter _writer = new(2048);
     private long _snapshotsSent, _snapshotsReceived;
 
-    public BodySync(NetSession net, World world, PhysicsWorld physics)
+    public BodySync(SimulationParticipant net, World world, PhysicsWorld physics)
     {
         _net = net;
         _physics = physics;
         net.Bodies = this;
+        if (net.Inputs is { } inputs) inputs.Physics = physics; // how fast the ship a client lands on moves
         _remote = world.GetEntities().With<RemoteBody>().AsSet();
         // Snapshots' lateness is measured against our clock: when clock sync snaps it, they move with it.
-        if (net is ClientSession client)
-            client.ClockSync.Snapped += ticks =>
+        if (net.ClockSync is { } sync)
+            sync.Snapped += ticks =>
             {
                 foreach (ref readonly var e in _remote.GetEntities()) e.Get<RemoteBody>().Buffer.ShiftClock(ticks);
             };
         _players = world.GetEntities().With<EntityId>().With<NetOwner>().With<Player>().With<Transform>().AsSet();
         _grids = world.GetEntities().With<EntityId>().With<NetOwner>().With<PhysicsBodyComponent>().With<Transform>().AsSet();
-        // Spawned owned elsewhere, or taken over by the host when its owner leaves.
+        // Spawned owned elsewhere.
         world.SubscribeComponentAdded((in Entity e, in NetOwner owner) => SetRemote(e, owner));
         world.SubscribeComponentChanged((in Entity e, in NetOwner _, in NetOwner owner) => SetRemote(e, owner));
     }
 
-    /// <summary>Snapshots of grids too (from N2; players only until then).</summary>
-    public bool SyncGrids { get; init; }
+    /// <summary>Whether grids are synced too (on by default; players always are).</summary>
+    public bool SyncGrids { get; init; } = true;
 
-    /// <summary>A synced body owned elsewhere is drawn from its snapshots; one owned here is the truth.</summary>
+    /// <summary>A synced body owned elsewhere is drawn from its snapshots; one owned here is the truth. The player
+    /// played here is neither: it's predicted (<see cref="OwnPlayerPrediction"/>), and its snapshots check that.</summary>
     private void SetRemote(Entity e, in NetOwner owner)
     {
         bool synced = e.Has<Player>() || (SyncGrids && e.Has<DynamicGrid>());
-        bool remote = synced && !owner.IsLocal;
-        if (remote && !e.Has<RemoteBody>()) e.Set(new RemoteBody { Buffer = new SnapshotBuffer() });
+        bool predicted = e.Has<Player>() && e.Get<Player>().IsLocal;
+        bool remote = synced && !owner.IsLocal && !predicted;
+        if (remote && !e.Has<RemoteBody>()) e.Set(new RemoteBody { Buffer = new SnapshotBuffer(), TeleportNext = true });
         else if (!remote && e.Has<RemoteBody>()) e.Remove<RemoteBody>();
     }
 
@@ -78,35 +83,25 @@ public sealed class BodySync : ISystem, IDebugUiSystem
             foreach (ref readonly var e in _grids.GetEntities())
                 if (e.Get<NetOwner>().IsLocal) _own.Add(GridSnapshot(e));
 
-        uint tick = _net.Clock.Tick;
-        switch (_net)
-        {
-            case ClientSession client:
-                SendFrames(tick, _own, packet => client.SendToHost(packet, Channel.Unreliable));
-                break;
-            case HostSession host:
-                SendFrames(tick, _own, packet =>
-                {
-                    foreach (var peer in host.Joined) host.SendUnreliable(peer.Peer, packet);
-                });
-                break;
-        }
+        if (_own.Count > 0) _net.SendFrame(_net.Clock.Tick, _own);
+        _snapshotsSent += _own.Count;
     }
 
-    private delegate void PacketSender(ReadOnlySpan<byte> packet);
+    public delegate void PacketSender(ReadOnlySpan<byte> packet);
 
-    private void SendFrames(uint tick, List<BodySnapshot> snapshots, PacketSender send)
+    /// <summary>Writes <paramref name="snapshots"/> as frames of up to <see cref="SnapshotsPerPacket"/>, each sent
+    /// as it's written.</summary>
+    public static void WriteFrames(NetWriter writer, uint tick, IReadOnlyList<BodySnapshot> snapshots, PacketSender send)
     {
         for (int start = 0; start < snapshots.Count; start += SnapshotsPerPacket)
         {
             int count = System.Math.Min(SnapshotsPerPacket, snapshots.Count - start);
-            _writer.Clear();
-            _writer.WriteByte((byte)MessageKind.StateFrame);
-            _writer.WriteUInt32(tick);
-            _writer.WriteUInt16((ushort)count);
-            for (int i = 0; i < count; i++) snapshots[start + i].Write(_writer);
-            send(_writer.Written);
-            _snapshotsSent += count;
+            writer.Clear();
+            writer.WriteByte((byte)MessageKind.StateFrame);
+            writer.WriteUInt32(tick);
+            writer.WriteUInt16((ushort)count);
+            for (int i = 0; i < count; i++) snapshots[start + i].Write(writer);
+            send(writer.Written);
         }
     }
 
@@ -120,13 +115,20 @@ public sealed class BodySync : ISystem, IDebugUiSystem
             s.Support = support.Supporter.Get<EntityId>();
             s.Position = support.LocalPosition;
         }
-        if (e.Has<CharacterControllerComponent>() && !e.Has<FreeFlying>())
+        if (e.Has<FreeFlying>()) s.Flags |= SnapshotFlags.FreeFlying;
+        else if (e.Has<CharacterControllerComponent>())
             s.LinearVelocity = e.Get<CharacterControllerComponent>().Character.LinearVelocity;
         if (e.Has<MouseLookComponent>())
         {
             ref readonly var look = ref e.Get<MouseLookComponent>();
             s.Look = new LookAngles(MathF.IEEERemainder(look.Yaw, 2 * MathF.PI), look.Pitch);
             s.Flags |= SnapshotFlags.HasLook;
+        }
+        if (e.Has<RemoteInput>())
+        {
+            // Played on another machine: how far through its inputs this is, so it can check its prediction.
+            s.Input = e.Get<RemoteInput>().Queue.Applied;
+            s.Flags |= SnapshotFlags.HasInput;
         }
         return s;
     }
@@ -147,16 +149,24 @@ public sealed class BodySync : ISystem, IDebugUiSystem
         };
     }
 
-    /// <summary>A frame of snapshots: buffer each on its entity.</summary>
-    public void ReceiveFrame(ref NetReader r)
+    /// <summary>Reads a frame written by <see cref="WriteFrames"/> into <paramref name="snapshots"/>; returns its tick.</summary>
+    public static uint ReadFrame(ref NetReader r, List<BodySnapshot> snapshots)
     {
         uint tick = r.ReadUInt32();
         int count = r.ReadUInt16();
-        for (int i = 0; i < count; i++)
+        snapshots.Clear();
+        for (int i = 0; i < count; i++) snapshots.Add(BodySnapshot.Read(ref r));
+        return tick;
+    }
+
+    /// <summary>A frame of snapshots: buffer each on its entity.</summary>
+    public void ReceiveFrame(uint tick, IReadOnlyList<BodySnapshot> snapshots)
+    {
+        foreach (var s in snapshots)
         {
-            var s = BodySnapshot.Read(ref r);
             _snapshotsReceived++;
             if (!_net.Registry.TryGet(s.Entity, out var e)) continue; // not spawned here (yet)
+            if (e.Has<LocalPlayer>()) { _net.Prediction?.Answer(s); continue; } // ours, predicted: how the authority has it
             if (!e.Has<RemoteBody>()) continue; // ours: we're the truth
             e.Get<RemoteBody>().Buffer.Add(tick, s, _net.Clock.Tick);
         }
@@ -168,9 +178,12 @@ public sealed class BodySync : ISystem, IDebugUiSystem
 }
 
 /// <summary>
-/// Every frame: draws bodies owned elsewhere from their snapshots, each as little behind our tick as keeps a newer
-/// snapshot in hand (<see cref="SnapshotBuffer.Delay"/>), interpolated in their support's space (so a player standing on a moving ship stays on its
-/// deck). Players face the way they look.
+/// Each tick, after physics: puts bodies owned elsewhere where their snapshots say they were
+/// <see cref="SnapshotBuffer.Delay"/> ticks ago, each as little behind as keeps a newer snapshot in hand, in their
+/// support's space (so a player standing on a moving ship stays on its deck). Players face the way they look. That's
+/// their Transform on this machine, the pose their physics copies are moved to (<see cref="RemoteBodyProxySystem"/>); they're
+/// drawn between ticks like anything simulated here (TickInterpolationSystem), which comes to the same thing as
+/// sampling the snapshots every frame, <see cref="ITickClock.Alpha"/> of a tick later.
 /// </summary>
 public sealed class RemoteBodySystem : ISystem
 {
@@ -188,8 +201,8 @@ public sealed class RemoteBodySystem : ISystem
     /// <summary>Extra delay, in ticks, on top of what each body needs (a debug setting).</summary>
     public double Margin { get; set; }
 
-    /// <summary>The tick <paramref name="buffer"/>'s body is drawn at this frame.</summary>
-    public double RenderTick(SnapshotBuffer buffer) => _clock.Tick + (double)_clock.Alpha - buffer.Delay;
+    /// <summary>The tick <paramref name="buffer"/>'s body is at in tick <see cref="ITickClock.Tick"/>.</summary>
+    public double SampleTick(SnapshotBuffer buffer) => _clock.Tick - buffer.Delay;
 
     /// <summary>The longest and shortest delay remote bodies are drawn with, in ticks (for the network panel).</summary>
     public (double Least, double Most) Delays { get; private set; }
@@ -197,32 +210,54 @@ public sealed class RemoteBodySystem : ISystem
     public void Update(float dt)
     {
         double least = double.MaxValue, most = 0;
+        // Grids before players: a player standing on a ship is placed on the ship as it is this tick.
+        for (int pass = 0; pass < 2; pass++)
         foreach (ref readonly var e in _remote.GetEntities())
         {
-            var buffer = e.Get<RemoteBody>().Buffer;
+            if (e.Has<Player>() != (pass == 1)) continue;
+            ref var remote = ref e.Get<RemoteBody>();
+            var buffer = remote.Buffer;
             if (buffer.Count == 0) continue; // nothing heard yet
-            buffer.Margin = Margin;
-            buffer.UpdateDelay(dt * 60 * _clock.Rate);
-            (least, most) = (System.Math.Min(least, buffer.Delay), System.Math.Max(most, buffer.Delay));
-            if (buffer.At(RenderTick(buffer)) is not { } s) continue;
-            var (position, rotation) = ToWorld(s.Support, s.Position, s.Rotation);
-            ref var t = ref e.Get<Transform>();
-            t.Position = new Vector3D<float>(position.X, position.Y, position.Z);
-            if (e.Has<Player>())
+            if (buffer.At(SampleTick(buffer)) is { } s)
             {
-                if (s.HasLook && e.Has<MouseLookComponent>())
+                var (position, rotation) = ToWorld(s.Support, s.Position, s.Rotation);
+                ref var t = ref e.Get<Transform>();
+                t.Position = new Vector3D<float>(position.X, position.Y, position.Z);
+                if (e.Has<Player>())
                 {
-                    ref var look = ref e.Get<MouseLookComponent>();
-                    (look.Yaw, look.Pitch) = (s.Look.Yaw, s.Look.Pitch);
-                    t.Rotation = Quaternion<float>.CreateFromYawPitchRoll(s.Look.Yaw, 0, 0); // the body turns, the head nods
+                    // What they stand on, as their machine has it (their own SupportSystem keeps it), so that describing
+                    // them here (saving them as they leave, say) keeps it too.
+                    if (e.Has<Support>()) e.Get<Support>().Supporter = TryGetSupport(s.Support, out var on) ? on : default;
+                    if (s.HasLook && e.Has<MouseLookComponent>())
+                    {
+                        ref var look = ref e.Get<MouseLookComponent>();
+                        (look.Yaw, look.Pitch) = (s.Look.Yaw, s.Look.Pitch);
+                        t.Rotation = look.BodyRotation; // the body turns, the head nods
+                    }
                 }
+                else t.Rotation = new Quaternion<float>(rotation.X, rotation.Y, rotation.Z, rotation.W);
+                // Its first pose, or one after the delay leapt: appear there, don't slide there over the frame.
+                if (remote.TeleportNext && e.Has<InterpolatedTransform>()) e.Get<InterpolatedTransform>().Teleport();
+                remote.TeleportNext = false;
             }
-            else t.Rotation = new Quaternion<float>(rotation.X, rotation.Y, rotation.Z, rotation.W);
+
+            // For the next tick, which the physics copies are moved to before this runs again.
+            buffer.Margin = Margin;
+            if (buffer.UpdateDelay(1)) remote.TeleportNext = true;
+            (least, most) = (System.Math.Min(least, buffer.Delay), System.Math.Max(most, buffer.Delay));
         }
         Delays = most > 0 ? (least, most) : (0, 0);
     }
 
-    /// <summary>A pose in a support's space, in world space (as the support is drawn now).</summary>
+    /// <summary>A pose in a support's space (its block space if it's a grid), in world space, with the support as it
+    /// is now.</summary>
+    /// <summary>The entity a snapshot's position is relative to, if it has one here.</summary>
+    public bool TryGetSupport(EntityId support, out Entity entity)
+    {
+        entity = default;
+        return !support.IsNone && _registry.TryGet(support, out entity);
+    }
+
     public (Vector3 Position, Quaternion Rotation) ToWorld(EntityId support, Vector3 position, Quaternion rotation)
     {
         if (support.IsNone || !_registry.TryGet(support, out var s) || !s.Has<Transform>()) return (position, rotation);

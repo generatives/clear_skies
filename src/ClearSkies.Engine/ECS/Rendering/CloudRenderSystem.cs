@@ -19,7 +19,7 @@ public sealed class CloudRenderSystem : IRenderSystem, IDebugUiSystem, IDisposab
         _clouds = new CloudLayer(renderer, density);
     }
 
-    public void Render(in RenderContext frame)
+    public void Render(SystemStage stage, in RenderContext frame)
     {
         if (SkySettings.CloudsEnabled) _clouds.Draw(frame.CameraPosition, frame.TimeSeconds);
     }

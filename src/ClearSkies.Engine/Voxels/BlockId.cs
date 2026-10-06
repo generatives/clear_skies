@@ -19,4 +19,5 @@ public enum BlockId : byte
     BlueLamp  = 14,
     Lever     = 15,
     SteeringWheel = 16,
+    Glass         = 17,
 }

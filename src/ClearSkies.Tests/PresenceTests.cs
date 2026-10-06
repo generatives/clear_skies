@@ -80,18 +80,20 @@ public class PresenceTests
         scene.Tick();
         Assert.Equal(PhysicsMode.Simulated, grid.Get<PhysicsPresence>().Mode);
         Assert.True(grid.Has<Rendered>());
-        Assert.Equal(TerrainInterestKind.CollidersOnly, grid.Get<TerrainInterest>().Kind);
+        Assert.Equal(EntityPresenceSystem.ColliderRange, grid.Get<TerrainInterest>().ColliderRadius);
+        Assert.Equal(0f, grid.Get<TerrainInterest>().DrawRadius);
         scene.Tick();
         Assert.True(grid.Has<PhysicsBodyComponent>()); // the body follows the presence
     }
 
     [Fact]
-    public void LocalPlayerHasFullTerrainInterest()
+    public void LocalPlayersTerrainInterestIsDrawnToTheViewDistance()
     {
         using var scene = new HeadlessScene();
         var player = scene.SpawnLocalPlayer(new Vector3(0, 60, 0), freeFly: true);
         scene.Tick();
-        Assert.Equal(TerrainInterestKind.Full, player.Get<TerrainInterest>().Kind);
+        Assert.Equal(500f, player.Get<TerrainInterest>().DrawRadius); // the scene's view distance
+        Assert.Equal(EntityPresenceSystem.ColliderRange, player.Get<TerrainInterest>().ColliderRadius);
         Assert.Equal(PhysicsMode.Simulated, player.Get<PhysicsPresence>().Mode);
         Assert.True(player.Has<Rendered>());
     }
@@ -107,14 +109,14 @@ public class PresenceTests
     }
 
     [Fact]
-    public void AnotherPlayerWithinLoadRangeIsAServoFollowerWithNoTerrainInterest()
+    public void AnotherPlayerIsNotSimulatedHere()
     {
         using var scene = new HeadlessScene();
         scene.SpawnLocalPlayer(new Vector3(0, 60, 0), freeFly: true);
         var near = RemoteEntity(scene, new Vector3(100, 60, 0), player: true);
         var far = RemoteEntity(scene, new Vector3(5000, 60, 0), player: true);
         scene.Tick();
-        Assert.Equal(PhysicsMode.ServoFollower, near.Get<PhysicsPresence>().Mode);
+        Assert.False(near.Has<PhysicsPresence>()); // the host simulates them; here they're only drawn
         Assert.False(near.Has<TerrainInterest>());
         Assert.False(far.Has<PhysicsPresence>());
     }
@@ -138,16 +140,16 @@ public class PresenceTests
     {
         using var scene = new HeadlessScene();
         scene.SpawnLocalPlayer(new Vector3(0, 60, 0), freeFly: true);
-        var other = RemoteEntity(scene, new Vector3(990, 60, 0), player: true);
+        var other = RemoteEntity(scene, new Vector3(500, 60, 0), player: false); // a grid: a follower within 512
         scene.Tick();
         Assert.True(other.Has<PhysicsPresence>());
-        other.Get<Transform>().Position = new Vector3D<float>(1050, 60, 0); // past 1000 but within 1100
+        other.Get<Transform>().Position = new Vector3D<float>(530, 60, 0); // past 512 but within 563
         scene.Tick();
         Assert.True(other.Has<PhysicsPresence>());
-        other.Get<Transform>().Position = new Vector3D<float>(1200, 60, 0);
+        other.Get<Transform>().Position = new Vector3D<float>(600, 60, 0);
         scene.Tick();
         Assert.False(other.Has<PhysicsPresence>());
-        other.Get<Transform>().Position = new Vector3D<float>(1050, 60, 0); // coming back: not until within 1000
+        other.Get<Transform>().Position = new Vector3D<float>(530, 60, 0); // coming back: not until within 512
         scene.Tick();
         Assert.False(other.Has<PhysicsPresence>());
     }

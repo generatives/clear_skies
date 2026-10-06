@@ -20,4 +20,7 @@ public static class WorldSpawn
 
     /// <summary>A player's Transform (the character capsule's centre) for an eye at <paramref name="eye"/>.</summary>
     public static System.Numerics.Vector3 PlayerAt(Vector3D<float> eye) => new(eye.X, eye.Y - PlayerFactory.EyeHeight, eye.Z);
+
+    /// <summary>The eye of a player at <paramref name="player"/>.</summary>
+    public static Vector3D<float> EyeAt(System.Numerics.Vector3 player) => new(player.X, player.Y + PlayerFactory.EyeHeight, player.Z);
 }

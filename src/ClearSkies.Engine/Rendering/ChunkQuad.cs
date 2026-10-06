@@ -14,6 +14,9 @@ namespace ClearSkies.Engine.Rendering;
 /// <item><see cref="B"/>: the colour, 8 bits each of R, G, B; the high 2 bits of width - 1 in bits 24-25; height - 1
 /// in bits 26-30.</item>
 /// </list>
+/// A translucent quad (<see cref="PackTranslucent"/>, drawn by vs_chunk_translucent) trades colour depth for its
+/// opacity: B's low 24 bits are the colour as RGB565, then the opacity (8 bits, 255 opaque) its texture's alpha is
+/// multiplied by (see <see cref="Voxels.BlockDef.Alpha"/>). The colour shows only on untextured blocks.
 /// Width and height run along the face's two free axes as the mesher sets them (X faces: y, z; Y faces: x, z; Z faces:
 /// x, y); the corners' order and the texture coordinates follow from the face (see GreedyMesher.EmitQuad, MakeUv).
 /// </summary>
@@ -43,6 +46,18 @@ public readonly struct ChunkQuad
         uint b = Channel(c.X) | Channel(c.Y) << 8 | Channel(c.Z) << 16 | (w >> 3) << 24 | h << 26;
         return new ChunkQuad(a, b);
     }
+
+    /// <summary><see cref="Pack"/> for a translucent quad, with its <paramref name="alpha"/> (0-255; see the summary).</summary>
+    public static ChunkQuad PackTranslucent(ReadOnlySpan<Vertex> v, byte alpha)
+    {
+        var q = Pack(v);
+        var c = v[0].Color;
+        uint rgb565 = Channel(c.X) >> 3 | (Channel(c.Y) >> 2) << 5 | (Channel(c.Z) >> 3) << 11;
+        return new ChunkQuad(q.A, (q.B & 0xFF000000u) | rgb565 | (uint)alpha << 16);
+    }
+
+    /// <summary>A translucent quad's opacity (0-1; see <see cref="PackTranslucent"/>).</summary>
+    public float TranslucentAlpha => ((B >> 16) & 255) / 255f;
 
     private static uint Channel(float c) => (uint)System.Math.Clamp((int)MathF.Round(c * 255f), 0, 255);
 

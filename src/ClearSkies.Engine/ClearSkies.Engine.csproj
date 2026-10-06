@@ -30,9 +30,16 @@
 
   <!-- The native Clay library (UI layout, see native/clay/README.md), prebuilt per platform. Each platform's file has
        its own name (clay.dll, libclay.so, libclay.dylib), so all of them go straight into the output folder, where
-       [DllImport("clay")] finds the right one; this also flows on to the game project's output. -->
+       [DllImport("clay")] finds the right one; this also flows on to the game project's output. The exception is
+       Windows, whose x64 and ARM64 builds are both clay.dll: the ARM64 one is used when building for win-arm64, or
+       for no runtime identifier on an ARM64 machine. This relies on the repo-wide IsRidAgnostic=false
+       (Directory.Build.props) to receive the game's runtime identifier through every project reference. -->
+  <PropertyGroup>
+    <ClayWindowsRid>win-x64</ClayWindowsRid>
+    <ClayWindowsRid Condition="'$(RuntimeIdentifier)' == 'win-arm64' Or ('$(RuntimeIdentifier)' == '' And '$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)' == 'Arm64')">win-arm64</ClayWindowsRid>
+  </PropertyGroup>
   <ItemGroup>
-    <None Include="..\..\native\clay\bin\*\*.dll;..\..\native\clay\bin\*\*.so;..\..\native\clay\bin\*\*.dylib" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+    <None Include="..\..\native\clay\bin\$(ClayWindowsRid)\*.dll;..\..\native\clay\bin\*\*.so;..\..\native\clay\bin\*\*.dylib" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" Visible="false" />
   </ItemGroup>
 
 </Project>

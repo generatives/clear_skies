@@ -1,0 +1,85 @@
+# Builds self-contained game builds (the .NET runtime included) for each platform, both as a single executable and
+# as a folder, and publishes them as a GitHub Release every time main changes. Each release is tagged build-<run number>.
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Releases are created in push order; a newer push waits for the one before it instead of cancelling it.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - run: dotnet test src/ClearSkies.Tests -c Release
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rid: [win-x64, win-arm64, linux-x64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      # Single file: IncludeAllContentForSelfExtract bundles Resources/ and the native libraries into the one
+      # executable, which unpacks them to a temp folder on first run. Antivirus heuristics flag such self-extracting
+      # executables more often, so each release also has a folder build: the executable, the runtime and Resources/
+      # side by side, with saves next to the executable.
+      - name: Publish
+        run: |
+          dotnet publish src/ClearSkies.Game -c Release -r ${{ matrix.rid }} --self-contained \
+            -p:PublishSingleFile=true -p:IncludeAllContentForSelfExtract=true \
+            -p:EnableCompressionInSingleFile=true -p:DebugType=none -o single
+          dotnet publish src/ClearSkies.Game -c Release -r ${{ matrix.rid }} --self-contained \
+            -p:DebugType=none -o folder/ClearSkies
+
+      - name: Package
+        run: |
+          mkdir dist
+          if [[ "${{ matrix.rid }}" == win-* ]]; then
+            mv single/ClearSkies.Game.exe single/ClearSkies.exe
+            mv folder/ClearSkies/ClearSkies.Game.exe folder/ClearSkies/ClearSkies.exe
+            (cd single && zip -9 ../dist/ClearSkies-${{ matrix.rid }}.zip ClearSkies.exe)
+            (cd folder && zip -9 -r ../dist/ClearSkies-${{ matrix.rid }}-folder.zip ClearSkies)
+          else
+            mv single/ClearSkies.Game single/ClearSkies
+            mv folder/ClearSkies/ClearSkies.Game folder/ClearSkies/ClearSkies
+            tar -czf dist/ClearSkies-${{ matrix.rid }}.tar.gz -C single ClearSkies
+            tar -czf dist/ClearSkies-${{ matrix.rid }}-folder.tar.gz -C folder ClearSkies
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClearSkies-${{ matrix.rid }}
+          path: dist/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "build-${{ github.run_number }}" dist/*
+          --repo "${{ github.repository }}" --target "${{ github.sha }}"
+          --title "Build ${{ github.run_number }}" --generate-notes --latest

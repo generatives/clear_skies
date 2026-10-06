@@ -14,7 +14,7 @@ namespace ClearSkies.Engine.ECS;
 
 /// <summary>
 /// Remeshes chunks flagged dirty across all registered <see cref="ChunkVolume"/>s into their
-/// <see cref="ChunkRenderData"/>: the greedy-meshed cubes plus the chunk's model blocks (found in the same worker
+/// <see cref="ChunkRenderData"/>: the greedy-meshed cubes (one mesh per <see cref="RenderLayer"/>) plus the chunk's model blocks (found in the same worker
 /// job, resolved to their shared models through <see cref="BlockModelLibrary"/>). The greedy mesh itself
 /// (~0.65ms per non-empty chunk, see StreamingBenchmark) runs on thread-pool workers, one
 /// <see cref="GreedyMesher"/> per thread; only the GPU upload and the hand-back to the owning volume happen
@@ -50,9 +50,16 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     /// (which needs the GPU model) on the main thread.</summary>
     private readonly record struct ModelCell(byte X, byte Y, byte Z, BlockId Block, BlockOrientation Orientation);
 
-    /// <summary>A meshed chunk: its quads packed as <see cref="ChunkQuad"/>s (rented; the first <see cref="Bytes"/> are
-    /// used), uploaded as one buffer.</summary>
-    private sealed record Result(Entity Entity, byte[] Packed, int Bytes, int QuadCount, ModelCell[] Models, Exception? Error);
+    /// <summary>One packed mesh: its quads as <see cref="ChunkQuad"/>s (rented; the first <see cref="Bytes"/> are used),
+    /// uploaded as one buffer.</summary>
+    private readonly record struct Packed(byte[] Data, int Bytes, int QuadCount)
+    {
+        public static readonly Packed None = new(Array.Empty<byte>(), 0, 0);
+    }
+
+    /// <summary>A meshed chunk: its opaque, cut-out and translucent meshes, and its model blocks.</summary>
+    private sealed record Result(Entity Entity, Packed Opaque, Packed Cutout, Packed Transparent, ModelCell[] Models,
+                                 Exception? Error);
 
     /// <summary>Main-thread time spent uploading meshes per frame, at most (at least one goes each frame): results past
     /// it wait for the next frame, so a burst of finished jobs doesn't stall one.</summary>
@@ -85,7 +92,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
             if (e.Has<Rendered>()) continue; // back again already
             if (e.Has<ChunkRenderData>())
             {
-                if (e.Get<ChunkRenderData>().Mesh is { } mesh) _removed.Add(mesh);
+                _removed.AddRange(e.Get<ChunkRenderData>().Meshes());
                 e.Remove<ChunkRenderData>();
             }
             e.Set<NeedsRemeshFlag>();
@@ -95,8 +102,8 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
 
     private void EntityDisposed(in Entity e)
     {
-        if (e.Has<ChunkRenderData>() && e.Get<ChunkRenderData>().Mesh is { } mesh)
-            _removed.Add(mesh);
+        if (!e.Has<ChunkRenderData>()) return;
+        _removed.AddRange(e.Get<ChunkRenderData>().Meshes());
     }
 
     public void Update(float dt)
@@ -120,16 +127,21 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     private readonly EntitySet _meshedChunks;
 
     /// <summary>Packs a chunk mesh for upload, off the main thread: each of the mesher's quads (four vertices; the
-    /// indices only ever join them as two triangles) as one 8-byte <see cref="ChunkQuad"/>. Returns the rented block,
-    /// its used length and the quad count.</summary>
-    private static (byte[] Packed, int Bytes, int Quads) PackQuads(ReadOnlySpan<Vertex> verts)
+    /// indices only ever join them as two triangles) as one 8-byte <see cref="ChunkQuad"/>. <paramref name="alphas"/>, if
+    /// not null, is each vertex's opacity: the mesh is translucent, and its quads carry it (see
+    /// <see cref="ChunkQuad.PackTranslucent"/>).</summary>
+    private static Packed PackQuads(LayerMesh mesh, List<byte>? alphas)
     {
+        ReadOnlySpan<Vertex> verts = CollectionsMarshal.AsSpan(mesh.Vertices);
         int quads = verts.Length / 4;
+        if (quads == 0) return Packed.None;
         int bytes = quads * (int)ChunkQuad.SizeBytes;
-        var packed = ArrayPool<byte>.Shared.Rent(System.Math.Max(8, bytes));
+        var packed = ArrayPool<byte>.Shared.Rent(bytes);
         var dst = MemoryMarshal.Cast<byte, ChunkQuad>(packed.AsSpan(0, bytes));
-        for (int q = 0; q < quads; q++) dst[q] = ChunkQuad.Pack(verts.Slice(4 * q, 4));
-        return (packed, bytes, quads);
+        for (int q = 0; q < quads; q++)
+            dst[q] = alphas is null ? ChunkQuad.Pack(verts.Slice(4 * q, 4))
+                                    : ChunkQuad.PackTranslucent(verts.Slice(4 * q, 4), alphas[4 * q]);
+        return new Packed(packed, bytes, quads);
     }
 
     private void Dispatch()
@@ -146,7 +158,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
             var volume = entry.Volume;
 
             // Fast path: pure air chunk.
-            if (!entry.Data.HasAnySolid())
+            if (!entry.Data.HasAnyNonAir())
             {
                 ClearMesh(entry);
                 continue;
@@ -159,11 +171,12 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
             var data = entry.Data;
             _meshes++;
             if (e.Has<ChunkRenderData>()) _remeshes++;
-            // A volume meshed without its neighbours (the streamed world) passes none: its border faces are all drawn.
+            // A volume meshed without its neighbours (the streamed world) uses them only to cull transparent faces
+            // (see ChunkVolume.MeshIgnoresNeighbours): its other border faces are all drawn.
             bool alone = volume.MeshIgnoresNeighbours;
-            var nX = alone ? null : volume.GetData(pos.Offset(-1, 0, 0)); var pX = alone ? null : volume.GetData(pos.Offset(1, 0, 0));
-            var nY = alone ? null : volume.GetData(pos.Offset(0, -1, 0)); var pY = alone ? null : volume.GetData(pos.Offset(0, 1, 0));
-            var nZ = alone ? null : volume.GetData(pos.Offset(0, 0, -1)); var pZ = alone ? null : volume.GetData(pos.Offset(0, 0, 1));
+            var nX = volume.GetData(pos.Offset(-1, 0, 0)); var pX = volume.GetData(pos.Offset(1, 0, 0));
+            var nY = volume.GetData(pos.Offset(0, -1, 0)); var pY = volume.GetData(pos.Offset(0, 1, 0));
+            var nZ = volume.GetData(pos.Offset(0, 0, -1)); var pZ = volume.GetData(pos.Offset(0, 0, 1));
             var vol = volume;
             // Held until the job is done, so a chunk unloaded meanwhile doesn't hand its arrays to another chunk.
             data.Retain(); nX?.Retain(); pX?.Retain(); nY?.Retain(); pY?.Retain(); nZ?.Retain(); pZ?.Retain();
@@ -172,13 +185,16 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                 try
                 {
                     // The mesher's lists are per-thread scratch, so copy out before this thread meshes again.
-                    var (verts, _) = _meshers.Value!.Mesh(data, nX, pX, nY, pY, nZ, pZ);
-                    var (packed, bytes, quads) = PackQuads(CollectionsMarshal.AsSpan(verts));
-                    _results.Enqueue(new Result(entry.Entity, packed, bytes, quads, FindModelBlocks(data), null));
+                    var mesher = _meshers.Value!;
+                    var mesh = mesher.Mesh(data, nX, pX, nY, pY, nZ, pZ, neighboursForTransparentOnly: alone);
+                    var opaque = PackQuads(mesh.Opaque, null);
+                    var cutout = PackQuads(mesh.Cutout, null);
+                    var transparent = PackQuads(mesh.Translucent, mesh.TranslucentAlphas);
+                    _results.Enqueue(new Result(entry.Entity, opaque, cutout, transparent, FindModelBlocks(data), null));
                 }
                 catch (Exception e)
                 {
-                    _results.Enqueue(new Result(entry.Entity, Array.Empty<byte>(), 0, 0, Array.Empty<ModelCell>(), e));
+                    _results.Enqueue(new Result(entry.Entity, Packed.None, Packed.None, Packed.None, Array.Empty<ModelCell>(), e));
                 }
                 finally
                 {
@@ -214,7 +230,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                 var volume = entry.Volume;
 
                 var models = ResolveModels(r.Models);
-                if (r.QuadCount == 0 && models.Length == 0)
+                if (r.Opaque.QuadCount == 0 && r.Cutout.QuadCount == 0 && r.Transparent.QuadCount == 0 && models.Length == 0)
                 {
                     bool redirtied = entity.Has<NeedsRemeshFlag>();
                     ClearMesh(entry);
@@ -222,16 +238,9 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                     continue;
                 }
 
-                GpuMesh? mesh = null;
-                if (r.QuadCount > 0)
-                {
-                    long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-                    mesh = _renderer.UploadChunkQuads(r.Packed.AsSpan(0, r.Bytes), (uint)r.QuadCount);
-                    _uploadMs += 0.05 * (System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds - _uploadMs);
-                    _createMs += 0.05 * (_renderer.LastCreateMs - _createMs);
-                    _writeMs  += 0.05 * (_renderer.LastWriteMs - _writeMs);
-                    _uploadKb += 0.05 * (r.Bytes / 1024.0 - _uploadKb);
-                }
+                var mesh = Upload(r.Opaque);
+                var cutoutMesh = Upload(r.Cutout);
+                var transparentMesh = Upload(r.Transparent);
 
                 // The chunk's voxel base and the volume dims are derived live at draw time from the volume's
                 // GPU resources (see ChunkRenderSystem), so a volume reallocation needs no remesh here. SetMesh clears
@@ -241,12 +250,14 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
 
                     if (entity.Has<ChunkRenderData>())
                     {
-                        entry.Entity.Get<ChunkRenderData>().Mesh?.Dispose();
+                        foreach (var old in entry.Entity.Get<ChunkRenderData>().Meshes()) old.Dispose();
                     }
                     entry.Entity.Remove<NeedsRemeshFlag>();
                     entry.Entity.Set(new ChunkRenderData
                     {
                         Mesh     = mesh,
+                        CutoutMesh = cutoutMesh,
+                        TransparentMesh = transparentMesh,
                         Models   = models,
                         Grid     = volume.Gpu,
                         ChunkPos = entry.Position,
@@ -258,9 +269,24 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
             }
             finally
             {
-                if (r.Packed.Length > 0) ArrayPool<byte>.Shared.Return(r.Packed);
+                if (r.Opaque.Data.Length > 0) ArrayPool<byte>.Shared.Return(r.Opaque.Data);
+                if (r.Cutout.Data.Length > 0) ArrayPool<byte>.Shared.Return(r.Cutout.Data);
+                if (r.Transparent.Data.Length > 0) ArrayPool<byte>.Shared.Return(r.Transparent.Data);
             }
         }
+    }
+
+    /// <summary>Uploads one packed mesh (main thread), or returns null for an empty one.</summary>
+    private GpuMesh? Upload(in Packed p)
+    {
+        if (p.QuadCount == 0) return null;
+        long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        var mesh = _renderer.UploadChunkQuads(p.Data.AsSpan(0, p.Bytes), (uint)p.QuadCount);
+        _uploadMs += 0.05 * (System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds - _uploadMs);
+        _createMs += 0.05 * (_renderer.LastCreateMs - _createMs);
+        _writeMs  += 0.05 * (_renderer.LastWriteMs - _writeMs);
+        _uploadKb += 0.05 * (p.Bytes / 1024.0 - _uploadKb);
+        return mesh;
     }
 
     private void Cleanup()
@@ -277,7 +303,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     {   
         entry.Entity.Remove<NeedsRemeshFlag>();
         if (entry.Entity.Has<ChunkRenderData>())
-            entry.Entity.Get<ChunkRenderData>().Mesh?.Dispose();
+            foreach (var mesh in entry.Entity.Get<ChunkRenderData>().Meshes()) mesh.Dispose();
         entry.Entity.Remove<ChunkRenderData>();
     }
 

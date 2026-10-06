@@ -104,10 +104,18 @@ public sealed class SetMoveModeHandler : PredictedCommandHandler<SetMoveMode, (E
     public override void Write(NetWriter w, in SetMoveMode c) { c.Player.Write(w); w.WriteBool(c.FreeFly); }
     public override SetMoveMode Read(ref NetReader r) => new() { Player = EntityId.Read(ref r), FreeFly = r.ReadBool() };
 
+    /// <summary>Only from whoever plays them, or whoever has authority over them (<see cref="NetOwner"/>).</summary>
     public override Verdict Validate(ref SetMoveMode c, in CommandContext ctx)
-        => _registry.Find(c.Player) is { } e && e.Has<Player>() ? Verdict.Accept : Verdict.Reject;
+        => _registry.Find(c.Player) is { } e && e.Has<Player>() &&
+           (ctx.Sender == e.Get<Player>().ControllingPeer || e.Has<NetOwner>() && ctx.Sender == e.Get<NetOwner>().Owner)
+            ? Verdict.Accept : Verdict.Reject;
 
-    public override void Apply(in SetMoveMode e, in ApplyContext ctx) => Set(e.Player, e.FreeFly);
+    public override void Apply(in SetMoveMode e, in ApplyContext ctx)
+    {
+        // The host's word on a client's own player, which the client switched itself on the same input.
+        if (!ctx.IsAuthority && !ctx.IsPrediction && _registry.Find(e.Player) is { } p && p.Has<LocalPlayer>()) return;
+        Set(e.Player, e.FreeFly);
+    }
 
     public override (EntityId Player, bool FreeFly) Capture(in SetMoveMode c)
         => (c.Player, _registry.Find(c.Player) is { } p && p.Has<FreeFlying>());
