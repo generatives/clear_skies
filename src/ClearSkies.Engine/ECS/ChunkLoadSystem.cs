@@ -21,7 +21,8 @@ namespace ClearSkies.Engine.ECS;
 /// unloading what's no longer wanted and for scanning the wanted columns), so crossing a column doesn't cost one long frame.
 /// Only chunks that may hold something are queued: the layers the generator says
 /// it may fill (<see cref="IWorldGenerator.ColumnLayers"/>) and edited chunks (builds). An edited chunk is loaded from
-/// the store (<see cref="IChunkStore"/>, which asks the Host for it): a column waits until its edited chunks are there.
+/// the store (<see cref="IChunkStore"/>, which asks the Host for it): a column keeps its place in the queue until its
+/// edited chunks are there, and the columns after it load meanwhile.
 /// The generator's
 /// layers are a loose bound, so chunks that turn out to be air are remembered (a bit per column) until their column
 /// is no longer wanted, and aren't queued again.
@@ -150,10 +151,6 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
     /// <summary>Chunks edited elsewhere while their column was loading: what loads is stale, so they load again.</summary>
     private readonly HashSet<ChunkPosition> _stale = new();
 
-    /// <summary>Columns waiting for their edited chunks to arrive from the store, or with stale chunks to load again
-    /// (see <see cref="_stale"/>): dispatched ahead of the queue once they're all there.</summary>
-    private readonly List<(int x, int z)> _waiting = new();
-
     /// <param name="budget">What limits what's loaded.</param>
     /// <param name="viewDistance">The farthest out chunks are streamed to be drawn, in blocks (horizontally): an interest's
     /// draw radius is capped at it (the GPU store's world index is sized for it).</param>
@@ -211,7 +208,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
         ImGui.Text($"Loaded: {_staticVolume.LoadedCount:N0} chunks   Queued columns: {_queue.Count - _queueHead}" +
                    $"{(_queueTruncated ? "+" : "")}   In flight: {_inFlight.Count}");
         ImGui.Text($"Columns evicted: {_evictions}");
-        ImGui.Text($"Edited chunks: {_edited.Count}   Waiting for edited chunks: {_waiting.Count} columns   Layers: {_minY}..{_minY + 63}");
+        ImGui.Text($"Edited chunks: {_edited.Count}   Layers: {_minY}..{_minY + 63}");
 
         ImGui.Separator();
         _steps.Draw();
@@ -251,7 +248,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
                 if (_stale.Remove(pos))
                 {
                     // Edited elsewhere while it loaded: loaded again, edit and all.
-                    if (!_waiting.Contains(job.Column)) _waiting.Add(job.Column);
+                    if (_queue.IndexOf(job.Column, _queueHead) < 0) { _queue.Insert(_queueHead, job.Column); Loading(job.Column); }
                     continue;
                 }
                 if (data == null)
@@ -497,28 +494,16 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
     private void Dispatch()
     {
         _full = false;
-        for (int i = _waiting.Count - 1; i >= 0; i--)
+        // A column whose edited chunks haven't arrived stays where it is in the queue (they're asked for), and the
+        // columns after it go meanwhile, up to MaxInFlight of them looked past.
+        int i = _queueHead, waiting = 0;
+        while (_inFlight.Count < MaxInFlight && i < _queue.Count && waiting < MaxInFlight)
         {
-            var col = _waiting[i];
-            if (!Wanted(col.x, col.z)) { _waiting.RemoveAt(i); Loaded(col); continue; }
-            if (!Arrived(Missing(col.x, col.z))) continue;
-            _waiting.RemoveAt(i);
-            _queue.Insert(_queueHead, col);
-            Loading(col);
-        }
-        while (_inFlight.Count < MaxInFlight && _queueHead < _queue.Count)
-        {
-            var col = _queue[_queueHead];
-            if (_inFlight.ContainsKey(col)) { _skippedInFlight = true; _queueHead++; continue; } // re-queued by the next rebuild
+            var col = _queue[i];
+            if (_inFlight.ContainsKey(col)) { _skippedInFlight = true; Dequeue(ref i); continue; } // re-queued by the next rebuild
             var work = Missing(col.x, col.z);
-            if (work.Count == 0) { _queueHead++; Loaded(col); continue; }
-            if (!Arrived(work))
-            {
-                // Edited chunks not here yet: asked for, and the column goes once they are.
-                if (!_waiting.Contains(col)) _waiting.Add(col);
-                _queueHead++;
-                continue;
-            }
+            if (work.Count == 0) { Dequeue(ref i); Loaded(col); continue; }
+            if (!Arrived(work)) { i++; waiting++; continue; }
 
             int adding = _inFlightChunks + work.Count;
             if (!_loadBudget.HasRoomFor(_staticVolume, adding))
@@ -534,9 +519,17 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
                 break;
             }
 
-            _queueHead++;
+            Dequeue(ref i);
             DispatchColumn(col, work);
         }
+    }
+
+    /// <summary>Takes the queue's column at <paramref name="i"/> out (the head, unless columns before it are waiting),
+    /// leaving <paramref name="i"/> at the next.</summary>
+    private void Dequeue(ref int i)
+    {
+        if (i == _queueHead) i = ++_queueHead;
+        else _queue.RemoveAt(i);
     }
 
     /// <summary>Whether a column's edited chunks are all here to load; asks the store for any that aren't.</summary>
