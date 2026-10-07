@@ -426,10 +426,10 @@ fn occ(v: vec3<i32>) -> f32 { return select(0.0, 1.0, isSolid(v)); }
 fn isSeeThrough(v: vec3<i32>) -> bool {
     let i = entryOf(model.grid, v >> vec3<u32>(5u));
     if (i < 0) { return false; }
-    let fol = chunkTable[2 * i + 1].z;
-    if (fol <= 0) { return false; }
+    let seeSlot = chunkTable[2 * i + 1].z;
+    if (seeSlot <= 0) { return false; }
     let l = v & vec3<i32>(31);
-    return ((occPool[u32((fol - 1) * WPC + l.y + 32 * l.z)] >> u32(l.x)) & 1u) == 1u;
+    return ((occPool[u32((seeSlot - 1) * WPC + l.y + 32 * l.z)] >> u32(l.x)) & 1u) == 1u;
 }
 
 // For a see-through block's face (see), whether open cell c lies on the same surface without a solid block behind it:

@@ -89,11 +89,11 @@ fn solidIn(code: i32, v: vec3<i32>) -> bool {
 fn isSolid(g: i32, v: vec3<i32>) -> bool { return solidIn(occCode(g, v >> vec3<u32>(5u)), v); }
 
 // See-through blocks (BlockDef.CatchesLight: leaves, glass, water, model blocks): they let light through, so rays never
-// see them, but are lit like surfaces. fol is a chunk's see-through slot plus one (chunkInfo's w), 0 for none.
-fn seeThroughIn(fol: i32, v: vec3<i32>) -> bool {
-    if (fol <= 0) { return false; }
+// see them, but are lit like surfaces. seeSlot is a chunk's see-through slot plus one (chunkInfo's w), 0 for none.
+fn seeThroughIn(seeSlot: i32, v: vec3<i32>) -> bool {
+    if (seeSlot <= 0) { return false; }
     let l = v & vec3<i32>(31);
-    return ((occPool[u32((fol - 1) * WPC + l.y + 32 * l.z)] >> u32(l.x)) & 1u) == 1u;
+    return ((occPool[u32((seeSlot - 1) * WPC + l.y + 32 * l.z)] >> u32(l.x)) & 1u) == 1u;
 }
 
 fn isSeeThrough(g: i32, v: vec3<i32>) -> bool {

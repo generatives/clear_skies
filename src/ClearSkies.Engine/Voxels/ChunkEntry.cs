@@ -48,7 +48,7 @@ internal sealed class ChunkEntry
     public ulong BrickSolidMask { get; set; }
     public ulong BrickAirMask   { get; set; }
 
-    /// <summary>The <see cref="BlockDef.CatchesLight"/> blocks (leaves), packed like <see cref="PackedOpacityWords"/>
+    /// <summary>The <see cref="BlockDef.CatchesLight"/> blocks (leaves, glass, water, models), packed like <see cref="PackedOpacityWords"/>
     /// alongside it, and which bricks hold any; null and 0 for a chunk with none.</summary>
     public uint[]? PackedSeeThroughWords { get; private set; }
     public ulong BrickSeeThroughMask { get; private set; }
