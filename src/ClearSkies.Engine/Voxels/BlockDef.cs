@@ -131,11 +131,11 @@ public readonly struct BlockDef
     /// it's <see cref="Transparent"/>, or an <see cref="OpaqueModel"/>. The lighting system's occupancy is exactly this.
     public bool BlocksLight => Model == null ? IsFullCube && !Transparent : IsSolid && OpaqueModel;
 
-    /// True for a block that lets light through but is still lit like a surface: the lighting system works out light
-    /// in its cell and the cells around it (where an opaque block's faces would be), though rays pass through it.
-    /// Blocks that <see cref="ShowsInnerFaces"/> (leaves) are: a canopy is drawn right through, away from any opaque
-    /// block, and would otherwise get no light of its own.
-    public bool CatchesLight => IsFullCube && Transparent && ShowsInnerFaces;
+    /// True for a block that is drawn but lets light through, and so is lit like a surface: the lighting system works
+    /// out light in its cell and the cells around it (where an opaque block's faces would be), though rays pass
+    /// through it. Without this, leaves, glass, water and small model blocks (levers) away from any opaque block would
+    /// get no light of their own. Cross blocks (plants) aren't: they always stand on the ground, whose light they use.
+    public bool CatchesLight => IsSolid && !BlocksLight && !IsCross;
 
     /// True when this block hides the face of a <paramref name="neighbour"/> block that touches it: an opaque cube or
     /// <see cref="OpaqueModel"/> hides every face against it, a <see cref="Transparent"/> cube only those of its own type

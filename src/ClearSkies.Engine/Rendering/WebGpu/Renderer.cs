@@ -91,8 +91,21 @@ fn applyFog(color: vec3<f32>, worldPos: vec3<f32>) -> vec3<f32> {
     let d = worldPos - camera.camPos.xyz;
     let f = smoothstep(camera.fog.x, camera.fog.y, length(d.xz));
     let hazed = applyHaze(color, d);
-    if (f <= 0.0) { return hazed; } // only the fog band pays for tracing the sea
-    return mix(hazed, background(normalize(d)).rgb, f);
+    if (f <= 0.0) { return applyWater(hazed, d); } // only the fog band pays for tracing the sea
+    return applyWater(mix(hazed, background(normalize(d)).rgb, f), d);
+}
+
+// Underwater, as Minecraft does it: with the camera in water (camPos.w > 0, how far it sees), everything fades
+// linearly into the water's colour by that distance, the sky included. Like Minecraft's, the fade starts
+// WATER_FOG_START blocks behind the camera, so even what is right in front of it is tinted (by about a quarter on first
+// going under). The colour is dimmed with the daylight.
+const WATER_FOG: vec3<f32> = vec3<f32>(0.03, 0.10, 0.25);
+const WATER_FOG_START: f32 = -8.0;
+fn waterFogColor() -> vec3<f32> { return WATER_FOG * max(camera.lightParams.z, 0.8 * camera.sunDir.w); }
+fn applyWater(color: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
+    if (camera.camPos.w <= 0.0) { return color; }
+    let f = (length(d) - WATER_FOG_START) / (camera.camPos.w - WATER_FOG_START);
+    return mix(color, waterFogColor(), clamp(f, 0.0, 1.0));
 }
 
 // What fs_sky draws along world direction dir (unit), without the sun disc: the sky (w = 0), or the cloud sea if the
@@ -126,6 +139,7 @@ fn fs_sky(in: SkyOut) -> @location(0) vec4<f32> {
     let dir   = normalize(in.dir);
     let toSun = dot(dir, -camera.sunDir.xyz);
     let disc  = smoothstep(0.9992, 0.9996, toSun) * camera.sunDir.w;
+    if (camera.camPos.w > 0.0) { return vec4<f32>(waterFogColor(), 1.0); } // underwater: the fog hides the sky
     let b = background(dir);
     return vec4<f32>(b.rgb + vec3<f32>(1.0, 0.95, 0.85) * disc * (1.0 - b.w), 1.0);
 }
@@ -407,6 +421,25 @@ fn isSolid(v: vec3<i32>) -> bool {
 
 fn occ(v: vec3<i32>) -> f32 { return select(0.0, 1.0, isSolid(v)); }
 
+// Whether voxel v is a see-through block with light worked out around it (BlockDef.CatchesLight: water, glass, leaves),
+// from its chunk's see-through bits (slot + 1 in the chunk entry's second word's z; 0 for none).
+fn isSeeThrough(v: vec3<i32>) -> bool {
+    let i = entryOf(model.grid, v >> vec3<u32>(5u));
+    if (i < 0) { return false; }
+    let seeSlot = chunkTable[2 * i + 1].z;
+    if (seeSlot <= 0) { return false; }
+    let l = v & vec3<i32>(31);
+    return ((occPool[u32((seeSlot - 1) * WPC + l.y + 32 * l.z)] >> u32(l.x)) & 1u) == 1u;
+}
+
+// For a see-through block's face (see), whether open cell c lies on the same surface without a solid block behind it:
+// a see-through block behind it, so a water surface or a canopy smooths across itself, or, seen from inside the block
+// (inside: the face's own cell is see-through, e.g. the water surface from below), c is see-through too.
+fn seeSurface(c: vec3<i32>, N: vec3<i32>, see: bool, inside: bool) -> bool {
+    if (!see) { return false; }
+    return isSeeThrough(c - N) || (inside && isSeeThrough(c));
+}
+
 // Light slot of the brick holding voxel v, whose chunk-table entry is i (entryOf), or NO_SURFACE.
 fn brickSlot(i: i32, v: vec3<i32>) -> u32 {
     if (i < 0) { return NO_SURFACE; }
@@ -453,15 +486,17 @@ const SMOOTH_LIGHT: bool = true;
 
 struct Lit { sky: f32, rgb: vec3<f32>, sun: f32 };
 
-fn onSurface(c: vec3<i32>, N: vec3<i32>) -> bool { return !isSolid(c) && isSolid(c - N); }
+fn onSurface(c: vec3<i32>, N: vec3<i32>, see: bool, inside: bool) -> bool {
+    return !isSolid(c) && (isSolid(c - N) || seeSurface(c, N, see, inside));
+}
 
 // (sky, r, g, b, sun) averaged over the usable cells at one corner.
 struct Corner { a: vec4<f32>, sun: f32 };
 
-fn cornerLit(air: vec3<i32>, s1: vec3<i32>, s2: vec3<i32>, dg: vec3<i32>, N: vec3<i32>) -> Corner {
-    let inc1 = onSurface(s1, N);
-    let inc2 = onSurface(s2, N);
-    let incD = (inc1 || inc2) && onSurface(dg, N);
+fn cornerLit(air: vec3<i32>, s1: vec3<i32>, s2: vec3<i32>, dg: vec3<i32>, N: vec3<i32>, see: bool, inside: bool) -> Corner {
+    let inc1 = onSurface(s1, N, see, inside);
+    let inc2 = onSurface(s2, N, see, inside);
+    let incD = (inc1 || inc2) && onSurface(dg, N, see, inside);
     var cells = array<vec3<i32>, 4>(air, s1, s2, dg);
     var inc = array<bool, 4>(true, inc1, inc2, incD);
     var acc = vec4<f32>(0.0);
@@ -480,7 +515,7 @@ fn cornerLit(air: vec3<i32>, s1: vec3<i32>, s2: vec3<i32>, dg: vec3<i32>, N: vec
     return r;
 }
 
-fn sampleLit(localPos: vec3<f32>, localNormal: vec3<f32>) -> Lit {
+fn sampleLit(localPos: vec3<f32>, localNormal: vec3<f32>, see: bool) -> Lit {
     let air = model.chunk * 32 + vec3<i32>(floor(localPos + 0.5 * localNormal));
     var o: Lit;
 
@@ -499,10 +534,11 @@ fn sampleLit(localPos: vec3<f32>, localNormal: vec3<f32>) -> Lit {
     else if (n.y > 0.5) { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 0, 1); }
     else                { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 1, 0); }
 
-    let c00 = cornerLit(air, air - T, air - B, air - T - B, N);
-    let c10 = cornerLit(air, air + T, air - B, air + T - B, N);
-    let c01 = cornerLit(air, air - T, air + B, air - T + B, N);
-    let c11 = cornerLit(air, air + T, air + B, air + T + B, N);
+    let inside = see && isSeeThrough(air);
+    let c00 = cornerLit(air, air - T, air - B, air - T - B, N, see, inside);
+    let c10 = cornerLit(air, air + T, air - B, air + T - B, N, see, inside);
+    let c01 = cornerLit(air, air - T, air + B, air - T + B, N, see, inside);
+    let c11 = cornerLit(air, air + T, air + B, air + T + B, N, see, inside);
 
     // Plain bilinear across the cell face, like Minecraft's per-vertex interpolation.
     let s = fract(dot(localPos, vec3<f32>(T)));
@@ -637,7 +673,7 @@ fn avg4(p: WCell, q: WCell, r: WCell, s: WCell) -> Corner4 {
 
 struct Shade { sky: f32, rgb: vec3<f32>, sun: f32, ao: f32 };
 
-fn shadeFast(localPos: vec3<f32>, localNormal: vec3<f32>) -> Shade {
+fn shadeFast(localPos: vec3<f32>, localNormal: vec3<f32>, see: bool) -> Shade {
     let air = model.chunk * 32 + vec3<i32>(floor(localPos + 0.5 * localNormal));
     let N = vec3<i32>(round(localNormal));
     let n = abs(localNormal);
@@ -657,13 +693,17 @@ fn shadeFast(localPos: vec3<f32>, localNormal: vec3<f32>) -> Shade {
     let sMM = maskSolid(m, -T - B); let sPM = maskSolid(m, T - B);
     let sMP = maskSolid(m, -T + B); let sPP = maskSolid(m, T + B);
 
-    // onSurface: open, with a solid directly behind along the normal. Diagonals need a side cell (corner rule).
-    let oTm = !sTm && maskSolid(m, -T - N);     let oTp = !sTp && maskSolid(m, T - N);
-    let oBm = !sBm && maskSolid(m, -B - N);     let oBp = !sBp && maskSolid(m, B - N);
-    let oMM = (oTm || oBm) && !sMM && maskSolid(m, -T - B - N);
-    let oPM = (oTp || oBm) && !sPM && maskSolid(m, T - B - N);
-    let oMP = (oTm || oBp) && !sMP && maskSolid(m, -T + B - N);
-    let oPP = (oTp || oBp) && !sPP && maskSolid(m, T + B - N);
+    // onSurface: open, with a solid directly behind along the normal (or for a see-through block's face, a
+    // see-through block, or from inside one a see-through cell: see seeSurface). Diagonals need a side cell (corner rule).
+    let inside = see && isSeeThrough(air);
+    let oTm = !sTm && (maskSolid(m, -T - N) || seeSurface(air - T, N, see, inside));
+    let oTp = !sTp && (maskSolid(m, T - N) || seeSurface(air + T, N, see, inside));
+    let oBm = !sBm && (maskSolid(m, -B - N) || seeSurface(air - B, N, see, inside));
+    let oBp = !sBp && (maskSolid(m, B - N) || seeSurface(air + B, N, see, inside));
+    let oMM = (oTm || oBm) && !sMM && (maskSolid(m, -T - B - N) || seeSurface(air - T - B, N, see, inside));
+    let oPM = (oTp || oBm) && !sPM && (maskSolid(m, T - B - N) || seeSurface(air + T - B, N, see, inside));
+    let oMP = (oTm || oBp) && !sMP && (maskSolid(m, -T + B - N) || seeSurface(air - T + B, N, see, inside));
+    let oPP = (oTp || oBp) && !sPP && (maskSolid(m, T + B - N) || seeSurface(air + T + B, N, see, inside));
 
     let cC  = weighed(true, air, hb, hs, ai);
     let cTm = weighed(oTm, air - T, hb, hs, ai);     let cTp = weighed(oTp, air + T, hb, hs, ai);
@@ -727,19 +767,23 @@ fn blockColor(in: VSOut) -> vec4<f32> {
 
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
-    return vec4<f32>(shadeBlock(in, blockColor(in).rgb), 1.0);
+    return vec4<f32>(shadeBlock(in, blockColor(in).rgb, false), 1.0);
 }
 
 // Translucent blocks' faces (see RenderLayer.Translucent), alpha-blended over the opaque world: lit like fs_main, with
 // the texture's alpha times the block's opacity. Fully clear texels are cut out. Drawn only where the face is the
 // nearest transparent one (fs_chunk_transparent_depth laid that depth down first), so every pixel blends exactly one
-// transparent layer and the draw order doesn't matter.
+// transparent layer and the draw order doesn't matter. Both sides are drawn; a face seen from behind (from inside the
+// water) is lit as facing the viewer, from the cell on the viewer's side, so it is lit like the water around it rather
+// than like the air beyond.
 @fragment
-fn fs_chunk_transparent(in: VSOut) -> @location(0) vec4<f32> {
+fn fs_chunk_transparent(in: VSOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let c = blockColor(in);
     let alpha = c.a * in.alpha;
     if (alpha < 0.004) { discard; }
-    return vec4<f32>(shadeBlock(in, c.rgb), alpha);
+    var v = in;
+    if (!front) { v.localNormal = -v.localNormal; v.worldNormal = -v.worldNormal; }
+    return vec4<f32>(shadeBlock(v, c.rgb, true), alpha);
 }
 
 // Cut-out blocks' faces (RenderLayer.Cutout, e.g. glass): fs_main, minus the texels under half alpha. A separate entry
@@ -750,7 +794,7 @@ fn fs_cutout(in: VSOut) -> @location(0) vec4<f32> {
     if (c.a < 0.5) { discard; }
     var base = c.rgb;
     if (in.cross.w != 0) { base *= plantTint(model.chunk * 32 + in.cross.xyz); }
-    return vec4<f32>(shadeBlock(in, base), 1.0);
+    return vec4<f32>(shadeBlock(in, base, true), 1.0);
 }
 
 // Transparent faces' depth pre-pass: the nearest transparent face at each pixel, without its fully clear texels.
@@ -762,7 +806,7 @@ fn fs_chunk_transparent_depth(in: VSOut) -> @location(0) vec4<f32> {
 
 // A block face's lit, fogged colour (baseColor: its texture or colour). Debug (Renderer panel): lightParams2.y bit 2 =
 // no fog or haze; lightParams2.z = lighting mode (see below).
-fn shadeBlock(in: VSOut, baseColor: vec3<f32>) -> vec3<f32> {
+fn shadeBlock(in: VSOut, baseColor: vec3<f32>, see: bool) -> vec3<f32> {
     let dbg = u32(camera.lightParams2.y);
 
     // Non-chunk draws (selection highlight, HUD, debug meshes) have no light data: full-bright.
@@ -791,10 +835,10 @@ fn shadeBlock(in: VSOut, baseColor: vec3<f32>) -> vec3<f32> {
         ao = 1.0;
         if (mode == 1) { ao = cornerAoFast(in.localPos, in.localNormal); }
     } else if (camera.lightParams.y > 0.5) {
-        s  = sampleLit(in.localPos, in.localNormal);
+        s  = sampleLit(in.localPos, in.localNormal, see);
         ao = computeAO(in.localPos, in.localNormal);
     } else {
-        let f = shadeFast(in.localPos, in.localNormal);
+        let f = shadeFast(in.localPos, in.localNormal, see);
         s.sky = f.sky; s.rgb = f.rgb; s.sun = f.sun;
         ao = f.ao;
     }
@@ -917,7 +961,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     shade *= 0.9 + 0.1 * max(dot(n, -camera.sunDir.xyz), 0.0) * camera.sunDir.w;
     let d = in.worldPos - camera.camPos.xyz;
     let f = smoothstep(camera.fog.z, camera.fog.w, length(d));
-    return vec4<f32>(mix(applyHaze(lin(in.color * shade), d), skyColor(normalize(d)), f), 1.0);
+    return vec4<f32>(applyWater(mix(applyHaze(lin(in.color * shade), d), skyColor(normalize(d)), f), d), 1.0);
 }
 ";
 

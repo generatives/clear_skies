@@ -10,13 +10,13 @@ internal readonly record struct EmitterVoxel(byte Lx, byte Ly, byte Lz, byte Lev
 
 /// <summary>A chunk's opacity packed for the GPU store (see <c>GridStore.Pack</c>).</summary>
 internal sealed class PackedOpacity(uint[] words, ulong solid, ulong air, List<EmitterVoxel> emitters,
-                                     uint[]? foliage = null, ulong foliageBricks = 0) : ChunkPreparation
+                                     uint[]? seeThrough = null, ulong seeThroughBricks = 0) : ChunkPreparation
 {
     public uint[] Words { get; } = words;
     public ulong Solid { get; } = solid;
     public ulong Air { get; } = air;
-    public uint[]? Foliage { get; } = foliage;
-    public ulong FoliageBricks { get; } = foliageBricks;
+    public uint[]? SeeThrough { get; } = seeThrough;
+    public ulong SeeThroughBricks { get; } = seeThroughBricks;
     public List<EmitterVoxel> Emitters { get; } = emitters;
 
     internal override void ApplyTo(ChunkEntry entry) => entry.SetPacked(this);
@@ -48,10 +48,10 @@ internal sealed class ChunkEntry
     public ulong BrickSolidMask { get; set; }
     public ulong BrickAirMask   { get; set; }
 
-    /// <summary>The <see cref="BlockDef.CatchesLight"/> blocks (leaves), packed like <see cref="PackedOpacityWords"/>
+    /// <summary>The <see cref="BlockDef.CatchesLight"/> blocks (leaves, glass, water, models), packed like <see cref="PackedOpacityWords"/>
     /// alongside it, and which bricks hold any; null and 0 for a chunk with none.</summary>
-    public uint[]? PackedFoliageWords { get; private set; }
-    public ulong BrickFoliageMask { get; private set; }
+    public uint[]? PackedSeeThroughWords { get; private set; }
+    public ulong BrickSeeThroughMask { get; private set; }
 
     /// <summary>Chunk-local bounds (inclusive) of the blocks edited since the last GPU upload, so lighting relights
     /// around just those instead of the whole chunk. <see cref="HasEdits"/> false: nothing edited (a fresh load).</summary>
@@ -76,7 +76,7 @@ internal sealed class ChunkEntry
     {
         PackedOpacityWords = packed.Words;
         (BrickSolidMask, BrickAirMask) = (packed.Solid, packed.Air);
-        (PackedFoliageWords, BrickFoliageMask) = (packed.Foliage, packed.FoliageBricks);
+        (PackedSeeThroughWords, BrickSeeThroughMask) = (packed.SeeThrough, packed.SeeThroughBricks);
         Emitters.Clear();
         Emitters.AddRange(packed.Emitters);
     }
