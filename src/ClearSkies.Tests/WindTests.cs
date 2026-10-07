@@ -114,6 +114,37 @@ public class WindTests
     }
 
     [Fact]
+    public void WindNearTheGroundIsCalmEnoughToParkInAndNeverStrongerThanInOpenSky()
+    {
+        using var scene = new HeadlessScene();
+        // Ground: two chunks of stone under 20×20 chunks, its surface at y = 0.
+        scene.WorldVolume.FillBox(new Vector3D<int>(-320, -64, -320), new Vector3D<int>(319, -1, 319), BlockId.Stone, BlockOrientation.Upright);
+        uint t = 1;
+        var wind = new WindField(9, () => t, TickSeconds, scene.WorldVolume);
+        var open = new WindField(9, () => t, TickSeconds, null);
+        (float Near, float Open) Mean(float height)
+        {
+            var rng = new Random(2);
+            float near = 0, sky = 0;
+            for (int i = 0; i < 200; i++)
+            {
+                t = (uint)rng.Next(1, 1_000_000);
+                var p = new Vector3(rng.NextSingle() * 400 - 200, height, rng.NextSingle() * 400 - 200);
+                near += wind.Sample(p).Length();
+                sky += open.Sample(p).Length();
+            }
+            return (near / 200, sky / 200);
+        }
+        var parked = Mean(4f);
+        Assert.True(parked.Near < 0.05f * parked.Open, $"{parked.Near} m/s just above the ground, {parked.Open} in open sky");
+        foreach (float h in new[] { 16f, 32f, 48f, 64f, 96f })
+        {
+            var m = Mean(h);
+            Assert.True(m.Near <= m.Open * 1.01f, $"{m.Near} m/s at {h} m above the ground, {m.Open} in open sky");
+        }
+    }
+
+    [Fact]
     public void AnOverrideIsTheWindEverywhere()
     {
         var wind = new WindField(1, () => 1, TickSeconds, null) { Override = new Vector3(3, 0, -4) };

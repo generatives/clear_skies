@@ -36,10 +36,12 @@ public sealed class WindSettings
     /// <summary>How long dead zones take to open, close and wander.</summary>
     public float CalmPeriod = 600f;
 
-    /// <summary>Wind dies down within this many chunks of terrain, to zero at it.</summary>
-    public float TerrainReach = 3f;
-    /// <summary>A chunk counts as terrain when at least this fraction of it is solid.</summary>
-    public float TerrainFraction = 1f / 8f;
+    /// <summary>Wind dies down within this many chunks of terrain, to zero at it: with 4, it is about 2% of the open wind a
+    /// chunk from terrain, 25% two chunks out and 70% three out, so a ship can be parked beside an island.</summary>
+    public float TerrainReach = 4f;
+    /// <summary>A chunk counts as terrain when at least this fraction of it is solid (1/16: two layers of blocks, so a thin
+    /// crust of ground counts).</summary>
+    public float TerrainFraction = 1f / 16f;
 
     /// <summary>Scales vertical wind after the curl, to keep lift moderate (1: as much up and down as sideways).</summary>
     public float VerticalScale = 0.3f;
@@ -51,8 +53,8 @@ public sealed class WindSettings
 ///
 /// Wind is the curl of a vector potential P evaluated at each chunk's centre, w = ∇ × P, so it is divergence-free: air is
 /// never created or destroyed, ships don't pile up in traps, and where air converges sideways it has to rise or sink, giving
-/// steady updrafts and downdrafts. P is shaped, and the curl does the rest:
-/// <code>P = terrain · calm · gust · (base + eddies)</code>
+/// steady updrafts and downdrafts. P is shaped, and the curl does the rest; then terrain stills the wind near it:
+/// <code>w = terrain · ∇ × (calm · gust · (base + eddies))</code>
 /// <list type="bullet">
 /// <item>Base currents: large static noise, sharpened (tanh) so flow gathers into streams with calm between. The routes
 /// players learn.</item>
@@ -63,7 +65,12 @@ public sealed class WindSettings
 /// the loaded chunks, player edits included; an unloaded chunk counts as empty (the authority over a ship has the terrain
 /// around it loaded, and forces are worked out again next tick).</item>
 /// </list>
-/// Any scalar times P keeps the curl exactly divergence-free; only <see cref="WindSettings.VerticalScale"/> bends that, a
+/// Any scalar times P keeps the curl exactly divergence-free, but also adds a stray ∇m × P wind along the scalar's edges,
+/// in proportion to P. P is large (it is shaped for currents 1.5 km across), so a mask that changes over a few chunks
+/// would add far more wind than it takes away: masking P for terrain made the wind near islands up to three times the
+/// open wind. So terrain scales the wind itself, after the curl. That makes the wind not quite divergence-free within
+/// reach of terrain (air slows there), which is fine: it never draws ships in. Calm and gust masks change over hundreds
+/// of metres or more, so their stray wind is small. <see cref="WindSettings.VerticalScale"/> also bends divergence a
 /// little. Wind is derived per chunk by central differences of the neighbours' P, then sampled anywhere by trilinear
 /// interpolation between chunk centres, so it never steps at chunk borders.
 ///
@@ -152,7 +159,7 @@ public sealed class WindField
         var px0 = Potential(c.Offset(-1, 0, 0)); var px1 = Potential(c.Offset(1, 0, 0));
         var py0 = Potential(c.Offset(0, -1, 0)); var py1 = Potential(c.Offset(0, 1, 0));
         var pz0 = Potential(c.Offset(0, 0, -1)); var pz1 = Potential(c.Offset(0, 0, 1));
-        const float inv = 1f / (2 * S);
+        float inv = TerrainFactor(c) / (2 * S); // terrain stills the wind itself (see the class summary)
         w = new Vector3(
             ((py1.Z - py0.Z) - (pz1.Y - pz0.Y)) * inv,
             ((pz1.X - pz0.X) - (px1.Z - px0.Z)) * inv * Settings.VerticalScale,
@@ -199,7 +206,7 @@ public sealed class WindField
         var x = Centre(c);
         double t = Time;
 
-        float mask = TerrainFactor(c) * CalmFactor(x, t);
+        float mask = CalmFactor(x, t);
         if (mask > 0f)
         {
             // Speed from an octave scales as amplitude / wavelength: amplitude = speed · λ / 2π, times a factor measured so
