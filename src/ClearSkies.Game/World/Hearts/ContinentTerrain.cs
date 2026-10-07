@@ -34,6 +34,7 @@ public sealed class ContinentTerrain
     private readonly FastNoiseLite _strata;   // wobble of the rock layers that cliffs expose
     private readonly FastNoiseLite _patches;  // sand patches in low grass
     private readonly FastNoiseLite _flora, _kind; // where plants grow thick, and which kind
+    private readonly FastNoiseLite _woods;        // where trees grow thick, apart from the plants
 
     private ContinentTerrain(ulong seed)
     {
@@ -49,6 +50,7 @@ public sealed class ContinentTerrain
         _strata = Noise(seed + 16, FastNoiseLite.FractalType.FBm, 2, 0.01f);
         _patches = Noise(seed + 17, FastNoiseLite.FractalType.FBm, 3, 0.012f);
         _flora = Noise(seed + 22, FastNoiseLite.FractalType.FBm, 3, 0.02f);
+        _woods = Noise(seed + 24, FastNoiseLite.FractalType.FBm, 2, 0.008f);
         _kind = Noise(seed + 23, FastNoiseLite.FractalType.FBm, 2, 0.035f);
     }
 
@@ -111,6 +113,10 @@ public sealed class ContinentTerrain
     /// <summary>0-1 at column (x, z), for <see cref="Plant"/>: how thickly plants grow, in stands a few dozen blocks
     /// across with open ground between.</summary>
     public float Flora(float x, float z) => 0.5f + 0.5f * _flora.GetNoise(x, z);
+
+    /// <summary>0-1 at column (x, z), for <see cref="Trees"/>: how thickly trees grow, in woods a hundred or so blocks
+    /// across, laid out independently of the plant stands.</summary>
+    public float Woods(float x, float z) => 0.5f + 0.5f * _woods.GetNoise(x, z);
 
     /// <summary>0-1 at column (x, z), for <see cref="Plant"/>: which kind of plant a stand is mostly made of.</summary>
     public float Kind(float x, float z) => 0.5f + 0.5f * _kind.GetNoise(x, z);
