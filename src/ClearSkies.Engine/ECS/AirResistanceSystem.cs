@@ -38,10 +38,13 @@ public sealed class AirResistanceSystem : ISystem, IDebugUiSystem
     /// <summary>½ρC_d (N·s²/m⁴): a typical ship's 25 m² front at 10 m/s meets 500 N, so full lever gives about 10 m/s.</summary>
     public float AirConstant = 0.2f;
 
-    // Diagnostics: the local player's and the last ship's relative air, and the ship's drag.
-    private Vector3 _lastPlayerAir, _lastShipAir, _lastShipForce;
-    private float _lastShipFrontArea;
-    private int _lastShips, _lastPlayers;
+    // Diagnostics: the local player's relative air, and every ship's this tick (or why it has none).
+    private Vector3 _lastPlayerAir;
+    private int _lastPlayers;
+    private readonly List<ShipReading> _ships = new();
+    private readonly EntitySet _localPlayer;
+
+    private record struct ShipReading(Entity Ship, string? Skipped, Vector3 Relative, Vector3 Force, float FrontArea);
 
     public AirResistanceSystem(World world, PhysicsWorld physics, WindField wind)
     {
@@ -50,27 +53,27 @@ public sealed class AirResistanceSystem : ISystem, IDebugUiSystem
         _grids = world.GetEntities().With<ResistsAir>().With<DynamicGrid>().With<PhysicsBodyComponent>().AsSet();
         _players = world.GetEntities().With<ResistsAir>().With<PlayerInput>().With<CharacterControllerComponent>()
             .Without<FreeFlying>().AsSet();
+        _localPlayer = world.GetEntities().With<LocalPlayer>().With<Physics.Support.Support>().AsSet();
     }
 
     public string DebugName => "Air resistance";
 
     public void Update(float dt)
     {
-        int ships = 0, players = 0;
+        int players = 0;
+        _ships.Clear();
         foreach (ref readonly Entity e in _grids.GetEntities())
         {
-            if (e.Get<DynamicGrid>().Locked) continue;
-            // Only the owner simulates a grid; everyone else follows its body sync.
-            if (e.Has<NetOwner>() && !e.Get<NetOwner>().IsLocal) continue;
-            var body = e.Get<PhysicsBodyComponent>().Body;
             ref readonly var air = ref e.Get<ResistsAir>();
-            if (air.Faces is null) continue;
+            float front = air.Faces is null ? 0f : air.Faces[ResistsAir.Index(2, false)].Area; // the bow faces −z
+            if (e.Get<DynamicGrid>().Locked) { _ships.Add(new(e, "locked", default, default, front)); continue; }
+            // Only the owner simulates a grid; everyone else follows its body sync.
+            if (e.Has<NetOwner>() && !e.Get<NetOwner>().IsLocal) { _ships.Add(new(e, "simulated elsewhere", default, default, front)); continue; }
+            if (air.Faces is null) { _ships.Add(new(e, "no drag entries yet", default, default, front)); continue; }
+            var body = e.Get<PhysicsBodyComponent>().Body;
             var (pos, rot) = _physics.GetBodyPose(body);
             var force = Apply(body, pos, rot, air, turns: true, dt, out var relative);
-            ships++;
-            _lastShipAir = relative;
-            _lastShipForce = force;
-            _lastShipFrontArea = air.Faces[ResistsAir.Index(2, false)].Area; // the bow faces −z
+            _ships.Add(new(e, null, relative, force, front));
         }
 
         foreach (ref readonly Entity e in _players.GetEntities())
@@ -84,7 +87,6 @@ public sealed class AirResistanceSystem : ISystem, IDebugUiSystem
             players++;
             if (e.Has<LocalPlayer>()) _lastPlayerAir = relative;
         }
-        _lastShips = ships;
         _lastPlayers = players;
     }
 
@@ -131,15 +133,29 @@ public sealed class AirResistanceSystem : ISystem, IDebugUiSystem
     public void DrawDebugUi()
     {
         ImGui.SliderFloat("Air constant k = ½ρCd", ref AirConstant, 0f, 2f);
-        ImGui.Text($"Simulated here: {_lastShips} ship(s), {_lastPlayers} player(s)");
-        ImGui.Separator();
+        ImGui.Text($"Players simulated here: {_lastPlayers}");
         ImGui.Text($"Local player's relative air: {_lastPlayerAir.Length():0.0} m/s");
         ImGui.Separator();
-        ImGui.Text("Last ship");
-        ImGui.Text($"Relative air: {_lastShipAir.Length():0.0} m/s  ({_lastShipAir.X:0.0}, {_lastShipAir.Y:0.0}, {_lastShipAir.Z:0.0})");
-        ImGui.Text($"Drag: {_lastShipForce.Length():0} N");
-        ImGui.Text($"Front area: {_lastShipFrontArea:0} m²");
-        if (_lastShipFrontArea > 0)
-            ImGui.Text($"Top speed in still air at 500 N: {MathF.Sqrt(500f / (AirConstant * _lastShipFrontArea)):0.0} m/s");
+
+        // Every ship: the one being piloted or stood on is marked, and one with no drag says why.
+        Entity aboard = default;
+        foreach (ref readonly Entity p in _localPlayer.GetEntities()) aboard = p.Get<Physics.Support.Support>().Supporter;
+        ImGui.Text($"Ships: {_ships.Count}");
+        foreach (var r in _ships)
+        {
+            string id = r.Ship.Has<EntityId>() ? r.Ship.Get<EntityId>().ToString() : "ship";
+            string mark = r.Ship.Has<PilotedComponent>() ? " (piloted)" : r.Ship == aboard ? " (aboard)" : "";
+            if (!ImGui.TreeNodeEx($"{id}{mark}##{id}", ImGuiTreeNodeFlags.DefaultOpen)) continue;
+            if (r.Skipped is { } why) ImGui.TextDisabled($"No drag: {why}");
+            else
+            {
+                ImGui.Text($"Relative air: {r.Relative.Length():0.0} m/s  ({r.Relative.X:0.0}, {r.Relative.Y:0.0}, {r.Relative.Z:0.0})");
+                ImGui.Text($"Drag: {r.Force.Length():0} N");
+            }
+            ImGui.Text($"Front area: {r.FrontArea:0} m²");
+            if (r.FrontArea > 0)
+                ImGui.Text($"Top speed in still air at 500 N: {MathF.Sqrt(500f / (AirConstant * r.FrontArea)):0.0} m/s");
+            ImGui.TreePop();
+        }
     }
 }
