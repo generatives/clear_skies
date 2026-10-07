@@ -145,7 +145,9 @@ public class ChunkVolume
         if (cp.Y < EditableLayers.Min || cp.Y > EditableLayers.Max) return;
         var entry = EnsureChunk(cp);
 
+        bool wasOpaque = entry.Data.IsAllOpaque;
         entry.Data.Set(lx, ly, lz, id, orientation);
+        if (entry.Data.IsAllOpaque != wasOpaque) MarkBuriedNeighbours(cp);
         SyncBlockEntity(entry, new Vector3D<int>(lx, ly, lz), id, orientation);
         entry.Entity.Set(new NeedsRemeshFlag());
         entry.Entity.Set(new NeedsRecollideFlag());
@@ -192,7 +194,7 @@ public class ChunkVolume
             int x0 = System.Math.Max(min.X - cx * S, 0), x1 = System.Math.Min(max.X - cx * S, S - 1);
             int y0 = System.Math.Max(min.Y - cy * S, 0), y1 = System.Math.Min(max.Y - cy * S, S - 1);
             int z0 = System.Math.Max(min.Z - cz * S, 0), z1 = System.Math.Min(max.Z - cz * S, S - 1);
-            bool changed = false;
+            bool changed = false, wasOpaque = entry.Data.IsAllOpaque;
             for (int lz = z0; lz <= z1; lz++)
             for (int ly = y0; ly <= y1; ly++)
             for (int lx = x0; lx <= x1; lx++)
@@ -205,6 +207,7 @@ public class ChunkVolume
             }
             if (!changed) continue;
 
+            if (entry.Data.IsAllOpaque != wasOpaque) MarkBuriedNeighbours(cp);
             entry.Entity.Set(new NeedsRemeshFlag());
             entry.Entity.Set(new NeedsRecollideFlag());
             entry.Entity.Set(new NeedsGpuUploadFlag());
@@ -244,6 +247,7 @@ public class ChunkVolume
         _chunks[pos] = entry;
         UpdateBounds(pos);
         MarkNeighboursDirty(pos, data);
+        if (data.IsAllOpaque) MarkBuriedNeighbours(pos);
         return entry;
     }
 
@@ -258,6 +262,31 @@ public class ChunkVolume
 
         _chunks.Remove(pos);
         MarkNeighboursDirty(pos, entry.Data);
+        if (entry.Data.IsAllOpaque) MarkBuriedNeighbours(pos);
+    }
+
+    /// <summary>Whether the chunk at <paramref name="pos"/> can't be seen: it and the loaded chunk on each of its six
+    /// sides are all opaque cubes (<see cref="ChunkData.IsAllOpaque"/>), so every face it has is hidden, and it needs
+    /// no mesh (ChunkMeshSystem gives it none). Where neighbours are culled against anyway that's what meshing it would
+    /// find; where they aren't (<see cref="MeshIgnoresNeighbours"/>) it saves the six border sheets such a chunk would
+    /// draw, deep inside an island. A missing neighbour counts as open air, so a chunk at the edge of what's loaded
+    /// is drawn. Kept true by <see cref="MarkBuriedNeighbours"/>.</summary>
+    public bool IsBuried(ChunkPosition pos)
+    {
+        if (GetData(pos) is not { IsAllOpaque: true }) return false;
+        foreach (var (dx, dy, dz) in NeighbourOffsets)
+            if (GetData(pos.Offset(dx, dy, dz)) is not { IsAllOpaque: true }) return false;
+        return true;
+    }
+
+    /// <summary>Remeshes the all-opaque neighbours of <paramref name="pos"/>, whose <see cref="IsBuried"/> may have just
+    /// changed: the chunk there loaded or unloaded while all opaque, or an edit made it all opaque or broke into it.
+    /// A neighbour newly buried drops its mesh without meshing; one dug out is meshed again.</summary>
+    private void MarkBuriedNeighbours(ChunkPosition pos)
+    {
+        foreach (var (dx, dy, dz) in NeighbourOffsets)
+            if (_chunks.TryGetValue(pos.Offset(dx, dy, dz), out var e) && e.Data.IsAllOpaque)
+                e.Entity.Set(new NeedsRemeshFlag());
     }
 
     private protected ChunkEntry EnsureChunk(ChunkPosition pos) =>

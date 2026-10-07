@@ -22,10 +22,10 @@ public sealed class ChunkData
     private BlockId _uniformBlock = BlockId.Air;
     private BlockOrientation _uniformOrientation = BlockOrientation.Upright;
 
-    // How many of _blocks are not air, and how many collide (BlockDef.Collides), kept up to date by every write so
-    // HasAnyNonAir and HasAnyColliding never scan. Only meaningful while _blocks exists: a uniform chunk's follow from
-    // _uniformBlock.
-    private int _nonAir, _colliding;
+    // How many of _blocks are not air, how many collide (BlockDef.Collides) and how many are opaque cubes (see IsAllOpaque),
+    // kept up to date by every write so HasAnyNonAir, HasAnyColliding and IsAllOpaque never scan. Only meaningful while
+    // _blocks exists: a uniform chunk's follow from _uniformBlock.
+    private int _nonAir, _colliding, _opaque;
 
     public bool IsDirty { get; set; }
 
@@ -73,6 +73,7 @@ public sealed class ChunkData
             _blocks = Filled(BlockPool, _uniformBlock);
             _nonAir = _uniformBlock != BlockId.Air ? Volume : 0;
             _colliding = Colliding[(byte)_uniformBlock] ? Volume : 0;
+            _opaque = Opaque[(byte)_uniformBlock] ? Volume : 0;
         }
         if (_orientations == null && orientation != _uniformOrientation) _orientations = Filled(OrientationPool, _uniformOrientation);
         if (_blocks != null)
@@ -82,6 +83,7 @@ public sealed class ChunkData
             {
                 _nonAir += (id != BlockId.Air ? 1 : 0) - (old != BlockId.Air ? 1 : 0);
                 _colliding += (Colliding[(byte)id] ? 1 : 0) - (Colliding[(byte)old] ? 1 : 0);
+                _opaque += (Opaque[(byte)id] ? 1 : 0) - (Opaque[(byte)old] ? 1 : 0);
                 _blocks[i] = id;
             }
         }
@@ -135,13 +137,19 @@ public sealed class ChunkData
     /// <see cref="HasAnyColliding"/>: wind reads it for how much of a chunk is terrain.</summary>
     public int CollidingCount => _blocks == null ? (Colliding[(byte)_uniformBlock] ? Volume : 0) : _colliding;
 
-    // BlockDef.Collides by block id, so Set's bookkeeping is two array reads.
-    private static readonly bool[] Colliding = BuildColliding();
+    /// <summary>Whether every block is an opaque cube (<see cref="BlockDef.IsFullCube"/>, not
+    /// <see cref="BlockDef.Transparent"/>): nothing inside can be seen, and it hides every face against it. Kept count
+    /// of, like <see cref="HasAnyColliding"/>.</summary>
+    public bool IsAllOpaque => _blocks == null ? Opaque[(byte)_uniformBlock] : _opaque == Volume;
 
-    private static bool[] BuildColliding()
+    // BlockDef.Collides and IsAllOpaque's test by block id, so Set's bookkeeping is a few array reads.
+    private static readonly bool[] Colliding = Build(d => d.Collides);
+    private static readonly bool[] Opaque = Build(d => d.IsFullCube && !d.Transparent);
+
+    private static bool[] Build(Func<BlockDef, bool> test)
     {
         var t = new bool[256];
-        for (int i = 0; i < t.Length; i++) t[i] = BlockRegistry.Get((BlockId)i).Collides;
+        for (int i = 0; i < t.Length; i++) t[i] = test(BlockRegistry.Get((BlockId)i));
         return t;
     }
 
@@ -172,8 +180,12 @@ public sealed class ChunkData
         _blocks ??= BlockPool.Rent();
         bytes.CopyTo(MemoryMarshal.Cast<BlockId, byte>(_blocks));
         _nonAir = Volume - bytes.Count((byte)BlockId.Air);
-        _colliding = 0;
-        foreach (byte b in bytes) if (Colliding[b]) _colliding++;
+        _colliding = _opaque = 0;
+        foreach (byte b in bytes)
+        {
+            if (Colliding[b]) _colliding++;
+            if (Opaque[b]) _opaque++;
+        }
     }
 
     internal void LoadOrientationBytes(ReadOnlySpan<byte> bytes)
