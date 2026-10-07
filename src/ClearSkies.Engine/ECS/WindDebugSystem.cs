@@ -12,7 +12,7 @@ namespace ClearSkies.Engine.ECS;
 /// <summary>
 /// The "Wind" debug window, and wind arrows drawn over the view while testing: once a frame, a grid of arrows around the
 /// camera, each pointing the way the wind blows there, as long as its speed times <see cref="_arrowScale"/>, coloured
-/// from blue (calm) through green to red (fast). The window reads out the wind at the camera and what makes it up
+/// on a red scale from pale pink (calm) to full red (fast). The window reads out the wind at the camera and what makes it up
 /// (gust, dead zone, terrain), tunes the wind's settings live, and can override the wind with a fixed value everywhere.
 /// The override is this machine's alone: it changes the wind for whatever this machine simulates.
 /// </summary>
@@ -99,13 +99,11 @@ public sealed class WindDebugSystem : ISystem, IDebugUiSystem
         }
     }
 
-    // Blue at calm, green at 4 m/s, red from 8 m/s.
+    // One red scale, so the arrows stand out against the sky: pale pink at calm, deepening to full red from 8 m/s.
     private static Vector4 SpeedColour(float speed)
     {
         float t = System.Math.Clamp(speed / 8f, 0f, 1f);
-        return t < 0.5f
-            ? Vector4.Lerp(new Vector4(0.2f, 0.4f, 1f, 0.9f), new Vector4(0.2f, 1f, 0.3f, 0.9f), t * 2)
-            : Vector4.Lerp(new Vector4(0.2f, 1f, 0.3f, 0.9f), new Vector4(1f, 0.2f, 0.1f, 0.9f), t * 2 - 1);
+        return Vector4.Lerp(new Vector4(1f, 0.8f, 0.8f, 0.9f), new Vector4(0.9f, 0f, 0.05f, 0.9f), t);
     }
 
     public void DrawDebugUi()
