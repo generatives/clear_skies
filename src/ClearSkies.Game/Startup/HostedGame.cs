@@ -64,6 +64,8 @@ internal static class HostedGame
         host.AddSystem(levers, SystemStage.Simulation);
         host.AddSystem(wheels, SystemStage.Simulation);
         host.AddSystem(world.Flight, SystemStage.Simulation); // impulses before the physics step, integrated this same tick
+        host.AddSystem(world.AirShapes, SystemStage.Simulation); // ships' drag entries, after any edit's new body shape
+        host.AddSystem(world.AirResistance, SystemStage.Simulation); // drag through the wind, also before the step
         host.AddSystem(world.CreatePresence(), SystemStage.Simulation);
         // Physics copies of ships simulated elsewhere (kinematic, near the local player), placed before the step, once the
         // presence system has decided which copies exist.
@@ -104,6 +106,7 @@ internal static class HostedGame
         host.AddSystem(gridPersistence, SystemStage.Frame);
         host.AddSystem(new AirshipDebugPanel(pilot, world.Flight, gridPersistence), SystemStage.Frame); // one "Airship" window
         host.AddSystem(new WireframeToggle(input, renderer), SystemStage.Frame);
+        host.AddSystem(new WindDebugSystem(host.World, world.Wind), SystemStage.Frame); // the "Wind" window and arrows
         host.Gui.RegisterDebugUi(new NetDebugPanel(net, hosting.Host, world.RemoteBodies, transport));
 
         view.AddRender(world);

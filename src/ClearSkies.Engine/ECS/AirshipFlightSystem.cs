@@ -33,10 +33,10 @@ namespace ClearSkies.Engine.ECS;
 /// turn speeds up until air resistance on its rotation matches, and coasts to a stop when the turn is centred.</item>
 /// </list>
 ///
-/// Every unlocked grid also feels air resistance, a drag force against its velocity growing with the square of its
-/// speed, and a drag torque against its spin growing with the square of its turn rate, so a steady force or torque
-/// gives a top speed or turn rate (where the drag matches it) and a ship left alone slows to a stop. It's
-/// part of the world, not the controls: applied directly, not through the Fans.
+/// Air resistance against the ship's movement through the (moving) air is <see cref="AirResistanceSystem"/>'s. This
+/// system keeps an extra drag torque against the spin, growing with the square of the turn rate, so a steady wheel
+/// torque gives a top turn rate and a ship left alone stops turning (to be retuned now that the air also damps spin).
+/// It's part of the world, not the controls: applied directly, not through the Fans.
 ///
 /// Propulsion allocation solves for Fan thrusts rather than sharing the demand out: it finds each Fan's thrust,
 /// between 0 and the Fan's max (Fans only push), so that together they produce the desired force and torque as
@@ -115,11 +115,7 @@ public sealed class AirshipFlightSystem : ISystem
     // Not piloted: the torque (N·m) full turn asks for, about world up.
     private float _wheelMaxTorque = 500f;
 
-    // Air resistance: drag force = this × speed², against the velocity. With a lever's full force F, top speed is
-    // √(F / this): 10 m/s at the defaults.
-    private float _dragCoefficient = 5f;
-
-    // Air resistance on rotation: drag torque = this × turn rate², against the spin. With the wheel's full torque T,
+    // Extra air resistance on rotation: drag torque = this × turn rate², against the spin. With the wheel's full torque T,
     // top turn rate is √(T / this): 1 rad/s at the defaults.
     private float _angularDragCoefficient = 500f;
 
@@ -256,10 +252,8 @@ public sealed class AirshipFlightSystem : ISystem
                 desiredForce = leverForce - (_physics.Gravity + buoyantAccel * worldUp) * mass;
             }
 
-            // Air resistance, straight onto the body: part of the world, not something the Fans deliver.
-            float speed = linVel.Length();
-            if (speed > 1e-4f)
-                _physics.ApplyLinearImpulse(body, -_dragCoefficient * speed * linVel * dt);
+            // Extra air resistance on rotation, straight onto the body: part of the world, not something the Fans deliver.
+            // (AirResistanceSystem applies drag against the ship's movement through the air.)
             float spin = angVel.Length();
             if (spin > 1e-4f)
                 _physics.ApplyAngularImpulse(body, -_angularDragCoefficient * spin * angVel * dt);
@@ -507,10 +501,9 @@ public sealed class AirshipFlightSystem : ISystem
         ImGui.Separator();
         ImGui.Text("Ship's controls (not piloted)");
         ImGui.SliderFloat("Full lever force (N)", ref _leverMaxForce, 0f, 20000f);
-        ImGui.SliderFloat("Air resistance", ref _dragCoefficient, 0f, 100f);
-        ImGui.Text($"Top speed at full lever: {MathF.Sqrt(_leverMaxForce / MathF.Max(_dragCoefficient, 1e-4f)):0.0} m/s");
+        ImGui.TextDisabled("Air resistance: see the Air resistance and Wind panels");
         ImGui.SliderFloat("Full wheel torque (N·m)", ref _wheelMaxTorque, 0f, 20000f);
-        ImGui.SliderFloat("Rotation air resistance", ref _angularDragCoefficient, 0f, 5000f);
+        ImGui.SliderFloat("Extra rotation air resistance", ref _angularDragCoefficient, 0f, 5000f);
         ImGui.Text($"Top turn rate at full wheel: {MathF.Sqrt(_wheelMaxTorque / MathF.Max(_angularDragCoefficient, 1e-4f)):0.00} rad/s");
         ImGui.Separator();
         ImGui.Text("Top speeds (keyboard while piloted)");
