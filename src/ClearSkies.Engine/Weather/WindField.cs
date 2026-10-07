@@ -1,4 +1,5 @@
 using System.Numerics;
+using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Generation;
 using ClearSkies.Engine.Voxels;
 
@@ -96,8 +97,7 @@ public sealed class WindField
     private readonly Vector2 _eddyDirection;
 
     private readonly ChunkVolume? _terrain;
-    private readonly Func<uint> _tick;
-    private readonly double _tickSeconds;
+    private readonly ITickClock _clock;
 
     // Per tick: each chunk's potential and wind. Kept: terrain distance (chunks) with the tick it was found.
     private uint _cachedTick = uint.MaxValue;
@@ -107,12 +107,12 @@ public sealed class WindField
     private const int MaxKeptTerrain = 32768;
 
     /// <param name="seed">The world's seed.</param>
-    /// <param name="tick">The shared tick clock: wind drifts and gusts with it, so it must be the one every machine agrees on.</param>
+    /// <param name="clock">The shared tick clock: wind drifts and gusts with it, so it must be the one every machine agrees
+    /// on (clock sync lines a client's up with the host's).</param>
     /// <param name="terrain">The static world's chunks, for the terrain mask; null for none (open sky everywhere).</param>
-    public WindField(ulong seed, Func<uint> tick, double tickSeconds, ChunkVolume? terrain)
+    public WindField(ulong seed, ITickClock clock, ChunkVolume? terrain)
     {
-        _tick = tick;
-        _tickSeconds = tickSeconds;
+        _clock = clock;
         _terrain = terrain;
         for (int i = 0; i < 3; i++)
         {
@@ -131,7 +131,7 @@ public sealed class WindField
     public Vector3? Override { get; set; }
 
     /// <summary>Seconds of shared game time: the tick clock's.</summary>
-    public double Time => _tick() * _tickSeconds;
+    public double Time => _clock.Tick * _clock.TickSeconds;
 
     /// <summary>The wind (m/s) at a world position, interpolated between the 8 chunk centres around it.</summary>
     public Vector3 Sample(Vector3 position)
@@ -189,7 +189,7 @@ public sealed class WindField
 
     private void Refresh()
     {
-        uint tick = _tick();
+        uint tick = _clock.Tick;
         if (tick == _cachedTick) return;
         _cachedTick = tick;
         _potential.Clear();
@@ -258,7 +258,7 @@ public sealed class WindField
     /// <summary>Distance (chunks, centre to centre) to the nearest terrain chunk within reach, or the reach if none.</summary>
     private float TerrainDistance(ChunkPosition c)
     {
-        uint tick = _tick();
+        uint tick = _clock.Tick;
         if (_terrainDistance.TryGetValue(c, out var known) && tick - known.Tick < TerrainRefreshTicks) return known.Distance;
 
         float reach = Settings.TerrainReach;

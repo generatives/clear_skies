@@ -102,7 +102,7 @@ public sealed class HeadlessScene : IDisposable
     /// step, in <paramref name="wind"/> everywhere (still air by default). Returns the wind, to change it.</summary>
     public Engine.Weather.WindField AddAirResistance(Vector3? wind = null)
     {
-        var field = new Engine.Weather.WindField(0, () => Clock.Tick, Dt, WorldVolume) { Override = wind ?? Vector3.Zero };
+        var field = new Engine.Weather.WindField(0, Clock, WorldVolume) { Override = wind ?? Vector3.Zero };
         AddBeforePhysics(new AirshipResistanceSystem(World, Physics));
         AddBeforePhysics(new AirResistanceSystem(World, Physics, field));
         return field;

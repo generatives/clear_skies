@@ -28,6 +28,9 @@ public struct ResistsAir
 
     public static int Index(int axis, bool positive) => axis * 2 + (positive ? 0 : 1);
 
+    /// <summary>No area yet: a grid's, until AirshipResistanceSystem works its entries out from its blocks.</summary>
+    public static ResistsAir Unshaped() => new() { Faces = new AirFace[6], DragScale = 1f, ShapeKey = -1 };
+
     /// <summary>A box-shaped body of <paramref name="size"/> (m) centred on its centre of mass.</summary>
     public static ResistsAir Box(Vector3 size, float dragScale = 1f)
     {

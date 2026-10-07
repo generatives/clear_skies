@@ -1,3 +1,4 @@
+using ClearSkies.Engine.Core;
 using System.Numerics;
 using ClearSkies.Engine.Voxels;
 using ClearSkies.Engine.Weather;
@@ -8,16 +9,14 @@ namespace ClearSkies.Tests;
 
 public class WindTests
 {
-    private const double TickSeconds = 1 / 60.0;
-
     /// <summary>The horizontal wind speed exceeded 10% of the time over many random points and times.</summary>
-    private static float Speed90(WindField wind, Func<uint> setTick, Action<uint> tick)
+    private static float Speed90(WindField wind, ManualTickClock clock)
     {
         var rng = new Random(1);
         var speeds = new List<float>();
         for (int i = 0; i < 5000; i++)
         {
-            tick((uint)rng.Next(1, 10_000_000));
+            clock.Tick = (uint)rng.Next(1, 10_000_000);
             var p = new Vector3(rng.NextSingle() * 50000, rng.NextSingle() * 1000, rng.NextSingle() * 50000);
             var w = wind.Sample(p);
             speeds.Add(new Vector2(w.X, w.Z).Length());
@@ -29,22 +28,22 @@ public class WindTests
     [Fact]
     public void BaseAndEddySpeedsAreTheSpeedsExceededTenPercentOfTheTime()
     {
-        uint t = 1;
-        var wind = new WindField(42, () => t, TickSeconds, null);
+        var t = new ManualTickClock { Tick = 1 };
+        var wind = new WindField(42, t, null);
         var s = wind.Settings;
         (s.GustUp, s.GustDown, s.CalmFull, s.CalmEdge) = (0, 0, -2, -1.9f); // no gusts or dead zones
         s.EddySpeed = 0;
-        Assert.InRange(Speed90(wind, () => t, v => t = v), 3.6f, 4.4f);     // base currents' cores: 4 m/s
+        Assert.InRange(Speed90(wind, t), 3.6f, 4.4f);     // base currents' cores: 4 m/s
         (s.BaseSpeed, s.EddySpeed) = (0, 1);
         wind.Invalidate();
-        Assert.InRange(Speed90(wind, () => t, v => t = v), 0.9f, 1.1f);     // eddies: 1 m/s
+        Assert.InRange(Speed90(wind, t), 0.9f, 1.1f);     // eddies: 1 m/s
     }
 
     [Fact]
     public void WindIsDivergenceFree()
     {
-        uint t = 12345;
-        var wind = new WindField(7, () => t, TickSeconds, null);
+        var t = new ManualTickClock { Tick = 12345 };
+        var wind = new WindField(7, t, null);
         wind.Settings.VerticalScale = 1f; // the only thing that bends it
         float largestDivergence = 0f, largestGradient = 0f;
         for (int i = 0; i < 50; i++)
@@ -63,10 +62,10 @@ public class WindTests
     [Fact]
     public void EveryMachineComputesTheSameWindFromTheSeedAndTick()
     {
-        uint t = 999;
-        var a = new WindField(5, () => t, TickSeconds, null);
-        var b = new WindField(5, () => t, TickSeconds, null);
-        var other = new WindField(6, () => t, TickSeconds, null);
+        var t = new ManualTickClock { Tick = 999 };
+        var a = new WindField(5, t, null);
+        var b = new WindField(5, t, null);
+        var other = new WindField(6, t, null);
         var p = new Vector3(1234.5f, 300f, -987.25f);
         Assert.Equal(a.Sample(p), b.Sample(p));
         Assert.NotEqual(a.Sample(p), other.Sample(p));
@@ -75,8 +74,8 @@ public class WindTests
     [Fact]
     public void WindIsContinuousAcrossChunkBorders()
     {
-        uint t = 50;
-        var wind = new WindField(3, () => t, TickSeconds, null);
+        var t = new ManualTickClock { Tick = 50 };
+        var wind = new WindField(3, t, null);
         var below = wind.Sample(new Vector3(31.999f, 100f, 10f));
         var above = wind.Sample(new Vector3(32.001f, 100f, 10f));
         Assert.True(Vector3.Distance(below, above) < 0.01f, $"{below} then {above}");
@@ -85,11 +84,11 @@ public class WindTests
     [Fact]
     public void GustsAndEddiesChangeTheWindOverTime()
     {
-        uint t = 600;
-        var wind = new WindField(11, () => t, TickSeconds, null);
+        var t = new ManualTickClock { Tick = 600 };
+        var wind = new WindField(11, t, null);
         var p = new Vector3(500f, 200f, 500f);
         var before = wind.Sample(p);
-        t += 60 * 20; // 20 s on
+        t.Tick += 60 * 20; // 20 s on
         Assert.NotEqual(before, wind.Sample(p));
     }
 
@@ -97,9 +96,9 @@ public class WindTests
     public void WindDiesDownAtTerrainIncludingEdits()
     {
         using var scene = new HeadlessScene();
-        uint t = 1;
-        var wind = new WindField(9, () => t, TickSeconds, scene.WorldVolume);
-        var open = new WindField(9, () => t, TickSeconds, null);
+        var t = new ManualTickClock { Tick = 1 };
+        var wind = new WindField(9, t, scene.WorldVolume);
+        var open = new WindField(9, t, null);
         // A chunk of solid stone at (0, 0, 0): wind there is (nearly) still, and four chunks away untouched.
         scene.WorldVolume.FillBox(new Vector3D<int>(0, 0, 0), new Vector3D<int>(31, 31, 31), BlockId.Stone, BlockOrientation.Upright);
         var inside = new Vector3(16f, 16f, 16f);
@@ -109,7 +108,7 @@ public class WindTests
 
         // Dug out (a player's edit), the wind comes back once the terrain is looked at again.
         scene.WorldVolume.FillBox(new Vector3D<int>(0, 0, 0), new Vector3D<int>(31, 31, 31), BlockId.Air, BlockOrientation.Upright);
-        t += WindField.TerrainRefreshTicks;
+        t.Tick += WindField.TerrainRefreshTicks;
         Assert.Equal(open.Sample(inside), wind.Sample(inside));
     }
 
@@ -119,16 +118,16 @@ public class WindTests
         using var scene = new HeadlessScene();
         // Ground: two chunks of stone under 20×20 chunks, its surface at y = 0.
         scene.WorldVolume.FillBox(new Vector3D<int>(-320, -64, -320), new Vector3D<int>(319, -1, 319), BlockId.Stone, BlockOrientation.Upright);
-        uint t = 1;
-        var wind = new WindField(9, () => t, TickSeconds, scene.WorldVolume);
-        var open = new WindField(9, () => t, TickSeconds, null);
+        var t = new ManualTickClock { Tick = 1 };
+        var wind = new WindField(9, t, scene.WorldVolume);
+        var open = new WindField(9, t, null);
         (float Near, float Open) Mean(float height)
         {
             var rng = new Random(2);
             float near = 0, sky = 0;
             for (int i = 0; i < 200; i++)
             {
-                t = (uint)rng.Next(1, 1_000_000);
+                t.Tick = (uint)rng.Next(1, 1_000_000);
                 var p = new Vector3(rng.NextSingle() * 400 - 200, height, rng.NextSingle() * 400 - 200);
                 near += wind.Sample(p).Length();
                 sky += open.Sample(p).Length();
@@ -147,7 +146,7 @@ public class WindTests
     [Fact]
     public void AnOverrideIsTheWindEverywhere()
     {
-        var wind = new WindField(1, () => 1, TickSeconds, null) { Override = new Vector3(3, 0, -4) };
+        var wind = new WindField(1, new ManualTickClock { Tick = 1 }, null) { Override = new Vector3(3, 0, -4) };
         Assert.Equal(new Vector3(3, 0, -4), wind.Sample(new Vector3(100, 50, 7)));
         wind.Override = null;
         Assert.NotEqual(new Vector3(3, 0, -4), wind.Sample(new Vector3(100, 50, 7)));

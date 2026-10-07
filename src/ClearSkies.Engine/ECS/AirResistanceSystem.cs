@@ -3,9 +3,7 @@ using BepuPhysics;
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Gui;
-using ClearSkies.Engine.Input;
 using ClearSkies.Engine.Physics;
-using ClearSkies.Engine.Voxels;
 using ClearSkies.Engine.Weather;
 using DefaultEcs;
 using ImGuiNET;
@@ -14,8 +12,11 @@ namespace ClearSkies.Engine.ECS;
 
 /// <summary>
 /// Air resistance from velocity relative to the moving air, each tick before the physics step, for every body with
-/// <see cref="ResistsAir"/> simulated here: unlocked grids this machine owns, and the players it simulates or predicts
-/// (walking, not free-flying).
+/// <see cref="ResistsAir"/> simulated here: any dynamic body (<see cref="PhysicsBodyComponent"/>) this machine owns,
+/// and any character body (<see cref="CharacterControllerComponent"/>, which only exists where its player is simulated
+/// or predicted) that isn't free-flying. Bodies turn with their drag; characters stay upright, so theirs is applied
+/// along world axes with no torque. A kinematic body (zero mass: locked, or following another machine's snapshots)
+/// feels none.
 ///
 /// The wind is sampled once, at the centre of mass. For each body axis, the entry facing into the relative air is
 /// picked by the sign of the air's velocity along it (relative to the body), and drag applied at that entry's centre,
@@ -32,28 +33,27 @@ public sealed class AirResistanceSystem : ISystem, IDebugUiSystem
 {
     private readonly PhysicsWorld _physics;
     private readonly WindField _wind;
-    private readonly EntitySet _grids;
-    private readonly EntitySet _players;
+    private readonly EntitySet _bodies;
+    private readonly EntitySet _characters;
 
     /// <summary>½ρC_d (N·s²/m⁴): a typical ship's 25 m² front at 10 m/s meets 500 N, so full lever gives about 10 m/s.</summary>
     public float AirConstant = 0.2f;
 
-    // Diagnostics: the local player's relative air, and every ship's this tick (or why it has none).
+    // Diagnostics: the local player's relative air, and every body's this tick (or why it has none).
     private Vector3 _lastPlayerAir;
-    private int _lastPlayers;
-    private readonly List<ShipReading> _ships = new();
+    private int _lastCharacters;
+    private readonly List<BodyReading> _readings = new();
     private readonly EntitySet _localPlayer;
 
-    private record struct ShipReading(Entity Ship, string? Skipped, Vector3 Wind, Vector3 Velocity, Vector3 Relative,
+    private record struct BodyReading(Entity Entity, string? Skipped, Vector3 Wind, Vector3 Velocity, Vector3 Relative,
                                       Vector3 Force, float FrontArea);
 
     public AirResistanceSystem(World world, PhysicsWorld physics, WindField wind)
     {
         _physics = physics;
         _wind = wind;
-        _grids = world.GetEntities().With<ResistsAir>().With<DynamicGrid>().With<PhysicsBodyComponent>().AsSet();
-        _players = world.GetEntities().With<ResistsAir>().With<PlayerInput>().With<CharacterControllerComponent>()
-            .Without<FreeFlying>().AsSet();
+        _bodies = world.GetEntities().With<ResistsAir>().With<PhysicsBodyComponent>().AsSet();
+        _characters = world.GetEntities().With<ResistsAir>().With<CharacterControllerComponent>().Without<FreeFlying>().AsSet();
         _localPlayer = world.GetEntities().With<LocalPlayer>().With<Physics.Support.Support>().AsSet();
     }
 
@@ -61,40 +61,39 @@ public sealed class AirResistanceSystem : ISystem, IDebugUiSystem
 
     public void Update(float dt)
     {
-        int players = 0;
-        _ships.Clear();
-        foreach (ref readonly Entity e in _grids.GetEntities())
+        int characters = 0;
+        _readings.Clear();
+        foreach (ref readonly Entity e in _bodies.GetEntities())
         {
             ref readonly var air = ref e.Get<ResistsAir>();
-            float front = air.Faces is null ? 0f : air.Faces[ResistsAir.Index(2, false)].Area; // the bow faces −z
+            float front = air.Faces[ResistsAir.Index(2, false)].Area; // the front faces −z
             var body = e.Get<PhysicsBodyComponent>().Body;
             var (pos, rot) = _physics.GetBodyPose(body);
-            // Only the owner simulates a grid; everyone else follows its body sync.
-            string? skipped = e.Get<DynamicGrid>().Locked ? "locked"
-                : e.Has<NetOwner>() && !e.Get<NetOwner>().IsLocal ? "simulated elsewhere"
-                : air.Faces is null ? "no drag entries yet" : null;
+            // Only the owner simulates a body; everyone else follows its body sync.
+            string? skipped = e.Has<NetOwner>() && !e.Get<NetOwner>().IsLocal ? "simulated elsewhere"
+                : _physics.GetBodyMass(body) <= 0f ? "kinematic (locked, or following another machine)"
+                : null;
             if (skipped is not null)
             {
-                _ships.Add(new(e, skipped, _wind.Sample(pos), _physics.GetBodyLinearVelocity(body), default, default, front));
+                _readings.Add(new(e, skipped, _wind.Sample(pos), _physics.GetBodyLinearVelocity(body), default, default, front));
                 continue;
             }
             var force = Apply(body, pos, rot, air, turns: true, dt, out var relative);
             var velocity = _physics.GetBodyLinearVelocity(body);
-            _ships.Add(new(e, null, relative + velocity, velocity, relative, force, front));
+            _readings.Add(new(e, null, relative + velocity, velocity, relative, force, front));
         }
 
-        foreach (ref readonly Entity e in _players.GetEntities())
+        foreach (ref readonly Entity e in _characters.GetEntities())
         {
             var character = e.Get<CharacterControllerComponent>().Character;
             if (character.Suspended) continue;
             var body = character.BodyHandle;
             var (pos, _) = _physics.GetBodyPose(body);
-            // Players stay upright: their entries keep to world axes, and turning is left to the character.
             Apply(body, pos, Quaternion.Identity, e.Get<ResistsAir>(), turns: false, dt, out var relative);
-            players++;
+            characters++;
             if (e.Has<LocalPlayer>()) _lastPlayerAir = relative;
         }
-        _lastPlayers = players;
+        _lastCharacters = characters;
     }
 
     /// <summary>Applies one tick's drag to <paramref name="body"/>; returns the force, and the air's velocity relative to
@@ -140,20 +139,20 @@ public sealed class AirResistanceSystem : ISystem, IDebugUiSystem
     public void DrawDebugUi()
     {
         ImGui.SliderFloat("Air constant k = ½ρCd", ref AirConstant, 0f, 2f);
-        ImGui.Text($"Players simulated here: {_lastPlayers}");
+        ImGui.Text($"Characters simulated here: {_lastCharacters}");
         ImGui.Text($"Local player's relative air: {_lastPlayerAir.Length():0.0} m/s");
         ImGui.Separator();
 
-        // Every ship, the selected one first (the one spawned, edited or walked on last: see GridSelection), marked along
+        // Every body, the selected ship first (the one spawned, edited or walked on last: see GridSelection), marked along
         // with the one piloted or stood on; one with no drag says why.
         Entity aboard = default;
         foreach (ref readonly Entity p in _localPlayer.GetEntities()) aboard = p.Get<Physics.Support.Support>().Supporter;
         bool anySelected = false;
-        foreach (var r in _ships)
+        foreach (var r in _readings)
         {
-            if (!r.Ship.Has<SelectedGridComponent>()) continue;
+            if (!r.Entity.Has<SelectedGridComponent>()) continue;
             anySelected = true;
-            ImGui.TextColored(new Vector4(1f, 0.85f, 0.3f, 1f), $"Selected ship {Name(r.Ship)}");
+            ImGui.TextColored(new Vector4(1f, 0.85f, 0.3f, 1f), $"Selected ship {Name(r.Entity)}");
             ImGui.Text($"Wind there: {r.Wind.Length():0.0} m/s   ship's speed: {r.Velocity.Length():0.0} m/s");
             if (r.Skipped is { } why) ImGui.TextDisabled($"No drag: {why}");
             else ImGui.Text($"Relative air: {r.Relative.Length():0.0} m/s   drag: {r.Force.Length():0} N");
@@ -161,18 +160,18 @@ public sealed class AirResistanceSystem : ISystem, IDebugUiSystem
         if (!anySelected) ImGui.TextDisabled("No ship selected (spawn, edit or walk on one to select it)");
         ImGui.Separator();
 
-        ImGui.Text($"Ships: {_ships.Count}");
-        foreach (var r in _ships.OrderByDescending(r => r.Ship.Has<SelectedGridComponent>()))
+        ImGui.Text($"Bodies: {_readings.Count}");
+        foreach (var r in _readings.OrderByDescending(r => r.Entity.Has<SelectedGridComponent>()))
         {
-            string id = Name(r.Ship);
+            string id = Name(r.Entity);
             var marks = new List<string>();
-            if (r.Ship.Has<SelectedGridComponent>()) marks.Add("selected");
-            if (r.Ship.Has<PilotedComponent>()) marks.Add("piloted");
-            if (r.Ship == aboard) marks.Add("aboard");
+            if (r.Entity.Has<SelectedGridComponent>()) marks.Add("selected");
+            if (r.Entity.Has<PilotedComponent>()) marks.Add("piloted");
+            if (r.Entity == aboard) marks.Add("aboard");
             string mark = marks.Count > 0 ? $" ({string.Join(", ", marks)})" : "";
             if (!ImGui.TreeNodeEx($"{id}{mark}##{id}", ImGuiTreeNodeFlags.DefaultOpen)) continue;
             ImGui.Text($"Wind: {r.Wind.Length():0.0} m/s  ({r.Wind.X:0.0}, {r.Wind.Y:0.0}, {r.Wind.Z:0.0})");
-            ImGui.Text($"Ship's speed: {r.Velocity.Length():0.0} m/s");
+            ImGui.Text($"Speed: {r.Velocity.Length():0.0} m/s");
             if (r.Skipped is { } why) ImGui.TextDisabled($"No drag: {why}");
             else
             {
@@ -186,5 +185,5 @@ public sealed class AirResistanceSystem : ISystem, IDebugUiSystem
         }
     }
 
-    private static string Name(Entity ship) => ship.Has<EntityId>() ? ship.Get<EntityId>().ToString() : "ship";
+    private static string Name(Entity e) => e.Has<EntityId>() ? e.Get<EntityId>().ToString() : "body";
 }

@@ -65,7 +65,7 @@ public sealed class GameWorld
         Flight = new AirshipFlightSystem(host.World, host.Physics);
         // Wind runs on the shared tick clock (clock sync lines a client's up with the host's), so every machine computes
         // the same wind from the seed alone.
-        Wind = new WindField(seed, () => host.Clock.Tick, host.Clock.TickSeconds, StaticVolume);
+        Wind = new WindField(seed, host.Clock, StaticVolume);
         AirShapes = new AirshipResistanceSystem(host.World, host.Physics);
         AirResistance = new AirResistanceSystem(host.World, host.Physics, Wind);
         RemoteBodies = new RemoteBodySystem(host.World, Registry, host.Clock);

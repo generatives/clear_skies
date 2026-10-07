@@ -21,6 +21,7 @@ public static class DynamicGridFactory
     {
         var entity = world.CreateEntity();
         entity.Set(new DynamicGrid { Locked = description.Locked });
+        entity.Set(ResistsAir.Unshaped()); // feels the wind; AirshipResistanceSystem works out its entries from its blocks
         var b = description.Body;
         entity.Set(new Transform { Position = PhysicsConv.ToSilk(b.Position), Rotation = PhysicsConv.ToSilk(b.Rotation), Scale = Vector3D<float>.One });
         entity.Set(id);
