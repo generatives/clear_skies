@@ -12,7 +12,7 @@ namespace ClearSkies.Engine.Rendering;
 /// see <see cref="CloudLayer"/>; blocks from the camera) + zenith and horizon sky colours as vec4s (horizon.w: the
 /// haze's strength) + haze vec4 (rgb colour, w distance) + sea vec4 (the cloud sea: altitude, coverage (0 = off), cell
 /// size and thickness in blocks; see <see cref="SkySettings"/>) + lightParams2 vec4 (x: exposure; y, z: render pass
-/// debug toggles).
+/// debug toggles; w: the corner-AO detail distance). zenith.w: the full-detail distance.
 /// SunDirection is the unit vector pointing FROM the sun TOWARD the scene (i.e. the light direction).
 /// The shader scales sky light by max(dot(worldNormal, -SunDirection), 0).
 /// SunStrength (the vec4's w component) is a 0-1 multiplier on the direct-sun term, read from
@@ -33,7 +33,7 @@ public struct CameraUniform
     public float           UnderwaterFogEnd; // camPos.w: with the camera in water, how far it sees (blocks); 0 = not
     public float           FogStart, FogEnd, CloudFogStart, CloudFogEnd; // fog, blocks
     public Vector3D<float> ZenithColor;    // zenith.rgb
-    private float          _pad2;
+    public float           DetailNear;     // zenith.w: full light and AO detail within this many blocks (see shadeBlock)
     public Vector3D<float> HorizonColor;   // horizon.rgb
     public float           HazeStrength;   // horizon.w
     public Vector3D<float> HazeColor;      // haze.rgb
@@ -42,5 +42,5 @@ public struct CameraUniform
     public float           Exposure;       // lightParams2.x: multiplier on lit surfaces (RayLightingSettings.Exposure)
     public float           DebugFlags;     // lightParams2.y: 1 = no texture sample, 2 = no fog or haze
     public float           DebugLighting;  // lightParams2.z: 0 normal, 1 flat + corner AO, 2 flat only, 3 no voxel lighting
-    private float          _pad5;
+    public float           DetailMid;      // lightParams2.w: flat light with corner AO within this many blocks, flat past it
 }

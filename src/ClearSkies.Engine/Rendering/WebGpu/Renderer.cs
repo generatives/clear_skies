@@ -823,6 +823,8 @@ fn fs_chunk_transparent_depth(in: VSOut) -> @location(0) vec4<f32> {
 
 // A block face's lit, fogged colour (baseColor: its texture or colour). Debug (Renderer panel): lightParams2.y bit 2 =
 // no fog or haze; lightParams2.z = lighting mode (see below).
+const LOD_BAND: f32 = 8.0; // blocks over which each lighting detail step blends (see shadeBlock)
+
 fn shadeBlock(in: VSOut, baseColor: vec3<f32>, see: bool) -> vec3<f32> {
     drawChunk = in.cg.xyz;
     drawGrid  = in.cg.w;
@@ -835,9 +837,33 @@ fn shadeBlock(in: VSOut, baseColor: vec3<f32>, see: bool) -> vec3<f32> {
     let ndotl  = max(dot(worldN, -(camera.sunDir.xyz)), 0.0);
     var s: Lit;
     var ao: f32;
-    let mode = i32(camera.lightParams2.z);
+    var mode = i32(camera.lightParams2.z);
     let air = drawChunk * 32 + vec3<i32>(floor(in.localPos + 0.5 * in.localNormal));
-    if (mode == 3) {
+    // Detail by distance: the full light and AO within zenith.w blocks; past it, flat light (the air cell's) with the
+    // cheap corner AO out to lightParams2.w; past that, flat light only. Each step blends over LOD_BAND blocks so there's
+    // no line. Corner AO and smooth light are sub-pixel far away, while most of a view's pixels are far away.
+    let dist = distance(in.worldPos, camera.camPos.xyz);
+    let nearEnd = camera.zenith.w;
+    let midEnd = max(camera.lightParams2.w, nearEnd);
+    if (mode == 0 && dist > nearEnd && in.cross.w == 0) { // plants keep their own flat light (below)
+        let c = cellAt(air);
+        s.sky = c.sky; s.rgb = c.rgb; s.sun = c.sun;
+        ao = 1.0;
+        let tAo = 1.0 - smoothstep(midEnd, midEnd + LOD_BAND, dist); // corner AO's share, fading out
+        if (tAo > 0.0) { ao = mix(1.0, cornerAoFast(in.localPos, in.localNormal), tAo); }
+        let tNear = 1.0 - smoothstep(nearEnd, nearEnd + LOD_BAND, dist); // the full path's share, fading out
+        if (tNear > 0.0) {
+            var f: Lit;
+            var fao: f32;
+            if (camera.lightParams.y > 0.5) { f = sampleLit(in.localPos, in.localNormal, see); fao = computeAO(in.localPos, in.localNormal); }
+            else { let q = shadeFast(in.localPos, in.localNormal, see); f.sky = q.sky; f.rgb = q.rgb; f.sun = q.sun; fao = q.ao; }
+            s.sky = mix(s.sky, f.sky, tNear); s.rgb = mix(s.rgb, f.rgb, tNear); s.sun = mix(s.sun, f.sun, tNear);
+            ao = mix(ao, fao, tNear);
+        }
+        mode = -1; // done
+    }
+    if (mode == -1) {
+    } else if (mode == 3) {
         // Debug: no voxel lighting at all (open sky, full sun, no AO).
         s.sky = camera.lightParams.z; s.rgb = vec3<f32>(0.0); s.sun = 1.0;
         ao = 1.0;

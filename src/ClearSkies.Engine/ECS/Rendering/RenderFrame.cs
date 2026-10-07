@@ -64,6 +64,11 @@ public sealed class RenderFrame : IDebugUiSystem
     private bool _referenceLighting;
     private bool _dbgNoTextures, _dbgNoFog, _dbgOverdraw;
     private int _dbgLighting;
+    // Terrain lighting detail by distance (see shadeBlock): full within _detailNear blocks, past it flat light with corner
+    // AO, and past _detailMid flat light only. Most of a view's pixels are far, where smooth light is sub-pixel anyway.
+    // Corner AO is kept everywhere by default: its detail vanishes far away, but not its overall darkening, so flat
+    // light alone shows stepped surfaces such as cliffs too bright.
+    private float _detailNear = 48f, _detailMid = 100000f;
     private static readonly string[] DbgLightingModes =
         { "Normal", "Flat light + corner shading", "Flat light only", "No voxel lighting" };
 
@@ -79,6 +84,9 @@ public sealed class RenderFrame : IDebugUiSystem
         if (ImGui.Checkbox("Wireframe", ref wireframe))
             _renderer.WireframeMode = wireframe;
         ImGui.Checkbox("Reference (slow) light + AO shader path", ref _referenceLighting);
+        ImGui.SliderFloat("Full light detail within (blocks)", ref _detailNear, 0f, 512f, "%.0f");
+        ImGui.SliderFloat("Corner shading within (blocks)", ref _detailMid, 0f, 100000f, "%.0f", ImGuiSliderFlags.Logarithmic);
+        ImGui.TextDisabled("  past the first, flat light + corner shading; past the second, flat light (cliffs look brighter)");
         if (ImGui.CollapsingHeader("Render pass cost (debug)"))
         {
             ImGui.TextDisabled("Flip these and watch the render pass in GPU timings.");
@@ -134,6 +142,8 @@ public sealed class RenderFrame : IDebugUiSystem
             ReferenceLighting = _referenceLighting ? 1f : 0f,
             DebugFlags     = (_dbgNoTextures ? 1 : 0) | (_dbgNoFog ? 2 : 0),
             DebugLighting  = _dbgLighting,
+            DetailNear     = _detailNear,
+            DetailMid      = _detailMid,
             CameraPosition = camTransform.Position,
             UnderwaterFogEnd = UnderwaterFogEnd(camTransform.Position),
             ZenithColor    = ToVector3D(SkySettings.ZenithColor),
