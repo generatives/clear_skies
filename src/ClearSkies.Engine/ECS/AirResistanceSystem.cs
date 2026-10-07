@@ -44,7 +44,8 @@ public sealed class AirResistanceSystem : ISystem, IDebugUiSystem
     private readonly List<ShipReading> _ships = new();
     private readonly EntitySet _localPlayer;
 
-    private record struct ShipReading(Entity Ship, string? Skipped, Vector3 Relative, Vector3 Force, float FrontArea);
+    private record struct ShipReading(Entity Ship, string? Skipped, Vector3 Wind, Vector3 Velocity, Vector3 Relative,
+                                      Vector3 Force, float FrontArea);
 
     public AirResistanceSystem(World world, PhysicsWorld physics, WindField wind)
     {
@@ -66,14 +67,20 @@ public sealed class AirResistanceSystem : ISystem, IDebugUiSystem
         {
             ref readonly var air = ref e.Get<ResistsAir>();
             float front = air.Faces is null ? 0f : air.Faces[ResistsAir.Index(2, false)].Area; // the bow faces −z
-            if (e.Get<DynamicGrid>().Locked) { _ships.Add(new(e, "locked", default, default, front)); continue; }
-            // Only the owner simulates a grid; everyone else follows its body sync.
-            if (e.Has<NetOwner>() && !e.Get<NetOwner>().IsLocal) { _ships.Add(new(e, "simulated elsewhere", default, default, front)); continue; }
-            if (air.Faces is null) { _ships.Add(new(e, "no drag entries yet", default, default, front)); continue; }
             var body = e.Get<PhysicsBodyComponent>().Body;
             var (pos, rot) = _physics.GetBodyPose(body);
+            // Only the owner simulates a grid; everyone else follows its body sync.
+            string? skipped = e.Get<DynamicGrid>().Locked ? "locked"
+                : e.Has<NetOwner>() && !e.Get<NetOwner>().IsLocal ? "simulated elsewhere"
+                : air.Faces is null ? "no drag entries yet" : null;
+            if (skipped is not null)
+            {
+                _ships.Add(new(e, skipped, _wind.Sample(pos), _physics.GetBodyLinearVelocity(body), default, default, front));
+                continue;
+            }
             var force = Apply(body, pos, rot, air, turns: true, dt, out var relative);
-            _ships.Add(new(e, null, relative, force, front));
+            var velocity = _physics.GetBodyLinearVelocity(body);
+            _ships.Add(new(e, null, relative + velocity, velocity, relative, force, front));
         }
 
         foreach (ref readonly Entity e in _players.GetEntities())
@@ -137,15 +144,35 @@ public sealed class AirResistanceSystem : ISystem, IDebugUiSystem
         ImGui.Text($"Local player's relative air: {_lastPlayerAir.Length():0.0} m/s");
         ImGui.Separator();
 
-        // Every ship: the one being piloted or stood on is marked, and one with no drag says why.
+        // Every ship, the selected one first (the one spawned, edited or walked on last: see GridSelection), marked along
+        // with the one piloted or stood on; one with no drag says why.
         Entity aboard = default;
         foreach (ref readonly Entity p in _localPlayer.GetEntities()) aboard = p.Get<Physics.Support.Support>().Supporter;
-        ImGui.Text($"Ships: {_ships.Count}");
+        bool anySelected = false;
         foreach (var r in _ships)
         {
-            string id = r.Ship.Has<EntityId>() ? r.Ship.Get<EntityId>().ToString() : "ship";
-            string mark = r.Ship.Has<PilotedComponent>() ? " (piloted)" : r.Ship == aboard ? " (aboard)" : "";
+            if (!r.Ship.Has<SelectedGridComponent>()) continue;
+            anySelected = true;
+            ImGui.TextColored(new Vector4(1f, 0.85f, 0.3f, 1f), $"Selected ship {Name(r.Ship)}");
+            ImGui.Text($"Wind there: {r.Wind.Length():0.0} m/s   ship's speed: {r.Velocity.Length():0.0} m/s");
+            if (r.Skipped is { } why) ImGui.TextDisabled($"No drag: {why}");
+            else ImGui.Text($"Relative air: {r.Relative.Length():0.0} m/s   drag: {r.Force.Length():0} N");
+        }
+        if (!anySelected) ImGui.TextDisabled("No ship selected (spawn, edit or walk on one to select it)");
+        ImGui.Separator();
+
+        ImGui.Text($"Ships: {_ships.Count}");
+        foreach (var r in _ships.OrderByDescending(r => r.Ship.Has<SelectedGridComponent>()))
+        {
+            string id = Name(r.Ship);
+            var marks = new List<string>();
+            if (r.Ship.Has<SelectedGridComponent>()) marks.Add("selected");
+            if (r.Ship.Has<PilotedComponent>()) marks.Add("piloted");
+            if (r.Ship == aboard) marks.Add("aboard");
+            string mark = marks.Count > 0 ? $" ({string.Join(", ", marks)})" : "";
             if (!ImGui.TreeNodeEx($"{id}{mark}##{id}", ImGuiTreeNodeFlags.DefaultOpen)) continue;
+            ImGui.Text($"Wind: {r.Wind.Length():0.0} m/s  ({r.Wind.X:0.0}, {r.Wind.Y:0.0}, {r.Wind.Z:0.0})");
+            ImGui.Text($"Ship's speed: {r.Velocity.Length():0.0} m/s");
             if (r.Skipped is { } why) ImGui.TextDisabled($"No drag: {why}");
             else
             {
@@ -158,4 +185,6 @@ public sealed class AirResistanceSystem : ISystem, IDebugUiSystem
             ImGui.TreePop();
         }
     }
+
+    private static string Name(Entity ship) => ship.Has<EntityId>() ? ship.Get<EntityId>().ToString() : "ship";
 }
