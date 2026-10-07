@@ -261,6 +261,9 @@ struct VSOut {
     @location(4)       uv:          vec3<f32>,
     @location(5)       worldPos:    vec3<f32>,
     @location(6)       alpha:       f32,          // chunk meshes: a transparent block's opacity (see fs_chunk_transparent)
+    // Chunk meshes: for a cross block's quad (faces 6, 7), its cell (chunk-local) in xyz and w = 1, so it is lit from
+    // that cell (see shadeBlock); w = 0 for every other surface.
+    @location(7) @interpolate(flat) cross: vec4<i32>,
 };
 
 @vertex
@@ -286,7 +289,8 @@ fn vs_main(
 // face in 18-20 (+X, -X, +Y, -Y, +Z, -Z), texture layer in 21-28 (255: untextured), width - 1 in a bits 29-31 and b
 // bits 24-25, height - 1 in b bits 26-30; the block in b bits 0-7, whose colour and opacity come from blockTable.
 // Corners follow the mesher's order (GreedyMesher.EmitQuad) and the texture coordinates follow from position and face,
-// as GreedyMesher.MakeUv makes them: V runs down world Y on the side faces.
+// as GreedyMesher.MakeUv makes them: V runs down world Y on the side faces. Faces 6 and 7 are a cross block's two
+// diagonal quads, one cell in size from its low corner, with b bit 8 set for the back side (GreedyMesher.EmitCross).
 // The mesh's quads, read by vertex index. Drawn indexed through one shared index buffer (quad q's triangles are
 // 4q + 0, 1, 2 and 0, 2, 3), so vertex_index is 4q + corner and the GPU reuses the corners the two triangles share:
 // four shader runs per quad, as with the old four-vertex meshes, where six separate vertices (instanced or not) cost
@@ -311,17 +315,45 @@ fn chunkVertex(quad: vec2<u32>, corner: u32) -> VSOut {
     let face = (a >> 18u) & 7u;
     let du = f32(((a >> 29u) | (((c >> 24u) & 3u) << 3u)) + 1u);
     let dv = f32(((c >> 26u) & 31u) + 1u);
-    // The mesher winds +X, -Y and +Z the other way round (FaceDesc.Flip).
-    let flip = face == 0u || face == 3u || face == 4u;
+    // The mesher winds +X, -Y and +Z the other way round (FaceDesc.Flip), and a diagonal's front.
+    let back = (c & 256u) != 0u;
+    let flip = face == 0u || face == 3u || face == 4u || (face >= 6u && !back);
     let cu = select(select(0.0, du, corner >= 2u), select(0.0, du, corner == 1u || corner == 2u), flip);
     let cv = select(select(0.0, dv, corner == 1u || corner == 2u), select(0.0, dv, corner >= 2u), flip);
     var position = vec3<f32>(f32(a & 63u), f32((a >> 6u) & 63u), f32((a >> 12u) & 63u));
     let s = select(1.0, -1.0, (face & 1u) == 1u);
     var normal = vec3<f32>(0.0);
     var uv2: vec2<f32>;
+    var cross = vec4<i32>(0);
     if (face < 2u)      { position.y += cu; position.z += cv; normal.x = s; uv2 = vec2<f32>(position.z, -position.y); }
     else if (face < 4u) { position.x += cu; position.z += cv; normal.y = s; uv2 = position.xz; }
-    else                { position.x += cu; position.y += cv; normal.z = s; uv2 = vec2<f32>(position.x, -position.y); }
+    else if (face < 6u) { position.x += cu; position.y += cv; normal.z = s; uv2 = vec2<f32>(position.x, -position.y); }
+    else {
+        // A cross block: cu runs along the diagonal, cv up. Lit as an upward-facing surface (see shadeBlock), so its
+        // two quads, and both their sides, match each other and the ground they stand on.
+        // Varied by hashes of its world cell, so plants don't line up in a grid but each looks the same every time
+        // it's meshed: the plant is turned a full circle (not just the quarter that covers every angle of the X, so a
+        // sprite shows mirrored as often as not: its back side's texture runs the other way), nudged up to 0.2 from
+        // the cell's middle and stretched to 0.75-1.15 tall; then each of its two quads (both sides alike) is twisted
+        // up to 25 degrees and shifted up to 0.08 on its own, so they don't meet in a perfect X, unless the block
+        // keeps a clean X (BlockDef.RigidCross: blockTable's a is 0, see ChunkQuad.BuildBlockTable).
+        cross = vec4<i32>(vec3<i32>(position), 1);
+        let h = cellHash(model.chunk * 32 + cross.xyz);
+        let q = mixHash(h ^ (face * 0x9e3779b9u));
+        let loose = blockTable[c & 255u].a;
+        let turn = f32(h & 1023u) * (6.2831853 / 1024.0) + loose * (f32(q & 1023u) / 1023.0 - 0.5) * 0.87;
+        let nudge = (vec2<f32>(f32((h >> 10u) & 255u), f32((h >> 18u) & 255u)) / 255.0 - 0.5) * 0.4
+                  + loose * (vec2<f32>(f32((q >> 10u) & 255u), f32((q >> 18u) & 255u)) / 255.0 - 0.5) * 0.16;
+        let tall = 0.75 + 0.4 * f32((h >> 26u) & 63u) / 63.0;
+        let d = vec2<f32>(select(0.5 - cu, cu - 0.5, face == 6u), cu - 0.5); // from the cell's middle, in x and z
+        let cs = cos(turn);
+        let sn = sin(turn);
+        let r = vec2<f32>(cs * d.x - sn * d.y, sn * d.x + cs * d.y) + 0.5 + nudge;
+        // V follows the unstretched height, so the sprite stretches with the quad rather than being cropped.
+        uv2 = vec2<f32>(cu, -(position.y + cv));
+        position += vec3<f32>(r.x, cv * tall, r.y);
+        normal.y = 1.0;
+    }
     let layerBits = (a >> 21u) & 255u;
     let layer = select(f32(layerBits), -1.0, layerBits == 255u);
     let block = blockTable[c & 255u];
@@ -336,7 +368,29 @@ fn chunkVertex(quad: vec2<u32>, corner: u32) -> VSOut {
     o.localNormal = normal;
     o.uv          = vec3<f32>(uv2, layer);
     o.alpha       = block.a;
+    o.cross       = cross;
     return o;
+}
+
+// A well-mixed hash of a world cell, for per-cell variation that's the same wherever the cell is meshed.
+fn cellHash(p: vec3<i32>) -> u32 {
+    let h = (bitcast<u32>(p.x) * 0x8da6b343u) ^ (bitcast<u32>(p.y) * 0xd8163841u) ^ (bitcast<u32>(p.z) * 0xcb1ab31fu);
+    return mixHash(h);
+}
+
+// Scrambles h's bits (a 32-bit finaliser), e.g. to draw a second, independent hash from one.
+fn mixHash(x: u32) -> u32 {
+    var h = x;
+    h = h ^ (h >> 16u); h = h * 0x7feb352du; h = h ^ (h >> 15u); h = h * 0x846ca68bu; h = h ^ (h >> 16u);
+    return h;
+}
+
+// A plant's colour, varied a little by its cell (see chunkVertex): 0.85-1.1 as bright, a touch yellower or bluer.
+fn plantTint(cell: vec3<i32>) -> vec3<f32> {
+    let h = mixHash(cellHash(cell) ^ 0x5bd1e995u);
+    let bright = 0.85 + 0.25 * f32(h & 255u) / 255.0;
+    let warm = (f32((h >> 8u) & 255u) / 255.0 - 0.5) * 0.16;
+    return bright * vec3<f32>(1.0 + warm, 1.0, 1.0 - warm);
 }
 
 // Voxel v in this draw's grid (grid voxel space). Unloaded → open.
@@ -694,7 +748,9 @@ fn fs_chunk_transparent(in: VSOut) -> @location(0) vec4<f32> {
 fn fs_cutout(in: VSOut) -> @location(0) vec4<f32> {
     let c = blockColor(in);
     if (c.a < 0.5) { discard; }
-    return vec4<f32>(shadeBlock(in, c.rgb), 1.0);
+    var base = c.rgb;
+    if (in.cross.w != 0) { base *= plantTint(model.chunk * 32 + in.cross.xyz); }
+    return vec4<f32>(shadeBlock(in, base), 1.0);
 }
 
 // Transparent faces' depth pre-pass: the nearest transparent face at each pixel, without its fully clear texels.
@@ -722,6 +778,12 @@ fn shadeBlock(in: VSOut, baseColor: vec3<f32>) -> vec3<f32> {
         // Debug: no voxel lighting at all (open sky, full sun, no AO).
         s.sky = camera.lightParams.z; s.rgb = vec3<f32>(0.0); s.sun = 1.0;
         ao = 1.0;
+    } else if (in.cross.w != 0) {
+        // A cross block (plant): its own cell's light, which it doesn't block, flat over the whole plant, darkening
+        // towards its foot in place of corner AO.
+        let c = cellAt(model.chunk * 32 + in.cross.xyz);
+        s.sky = c.sky; s.rgb = c.rgb; s.sun = c.sun;
+        ao = mix(0.6, 1.0, clamp(in.localPos.y - f32(in.cross.y), 0.0, 1.0));
     } else if (mode == 1 || mode == 2) {
         // Debug: flat light everywhere, with (1) or without (2) corner AO.
         let c = cellAt(air);

@@ -20,4 +20,17 @@ public enum BlockId : byte
     Lever     = 15,
     SteeringWheel = 16,
     Glass         = 17,
+
+    // Plants and pebbles: crossed billboards (BlockShape.Cross).
+    ShortGrass    = 18,
+    GrassTuft     = 19,
+    GrassBlades   = 20,
+    TallGrass     = 21,
+    DryGrass      = 22,
+    BrownGrass    = 23,
+    RedMushroom   = 24,
+    BrownMushroom = 25,
+    TanMushroom   = 26,
+    Pebbles       = 27,
+    MossyPebbles  = 28,
 }

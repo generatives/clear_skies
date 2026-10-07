@@ -183,7 +183,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                 {
                     // The mesher's lists are per-thread scratch, so copy out before this thread meshes again.
                     var mesher = _meshers.Value!;
-                    var mesh = mesher.Mesh(data, nX, pX, nY, pY, nZ, pZ, neighboursForTransparentOnly: alone);
+                    var mesh = mesher.Mesh(data, nX, pX, nY, pY, nZ, pZ, neighboursForTransparentOnly: alone, position: pos);
                     var opaque = PackQuads(mesh.Opaque);
                     var cutout = PackQuads(mesh.Cutout);
                     var transparent = PackQuads(mesh.Translucent);
