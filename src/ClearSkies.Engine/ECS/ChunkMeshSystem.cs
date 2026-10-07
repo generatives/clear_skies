@@ -145,7 +145,8 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     {
         if (_inFlight >= MaxInFlight) return;
 
-        // Closest to the camera first (see NearestChunks); a few spare picks for all-air chunks, which take no job.
+        // Closest to the camera first (see NearestChunks); a few spare picks for all-air and buried chunks, which take
+        // no job.
         NearestChunks.Select(_dirtyChunks, _cameras, MaxInFlight - _inFlight + 4, _nearest);
         foreach (var e in _nearest)
         {
@@ -154,8 +155,8 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
             var pos = entry.Position;
             var volume = entry.Volume;
 
-            // Fast path: pure air chunk.
-            if (!entry.Data.HasAnyNonAir())
+            // Fast path: pure air chunk, or one buried in opaque chunks (see ChunkVolume.IsBuried), which shows nothing.
+            if (!entry.Data.HasAnyNonAir() || volume.IsBuried(pos))
             {
                 ClearMesh(entry);
                 continue;
@@ -227,7 +228,9 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                 var volume = entry.Volume;
 
                 var models = ResolveModels(r.Models);
-                if (r.Opaque.QuadCount == 0 && r.Cutout.QuadCount == 0 && r.Transparent.QuadCount == 0 && models.Length == 0)
+                // Nothing to draw, or buried since the job started (a neighbour loaded meanwhile).
+                if (r.Opaque.QuadCount == 0 && r.Cutout.QuadCount == 0 && r.Transparent.QuadCount == 0 && models.Length == 0
+                    || volume.IsBuried(entry.Position))
                 {
                     bool redirtied = entity.Has<NeedsRemeshFlag>();
                     ClearMesh(entry);
