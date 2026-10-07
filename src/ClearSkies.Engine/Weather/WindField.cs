@@ -37,12 +37,11 @@ public sealed class WindSettings
     /// <summary>How long dead zones take to open, close and wander.</summary>
     public float CalmPeriod = 600f;
 
-    /// <summary>Wind dies down within this many chunks of terrain, to zero at it: with 4, it is about 2% of the open wind a
-    /// chunk from terrain, 25% two chunks out and 70% three out, so a ship can be parked beside an island.</summary>
+    /// <summary>How far (chunks) terrain shelters the wind: the terrain amount counts the solid blocks this far around.</summary>
     public float TerrainReach = 4f;
-    /// <summary>A chunk counts as terrain when at least this fraction of it is solid (1/16: two layers of blocks, so a thin
-    /// crust of ground counts).</summary>
-    public float TerrainFraction = 1f / 16f;
+    /// <summary>Wind is (1 − terrain amount) to this power. With 2.2: still on a plain's surface, about a quarter of the open
+    /// wind 48 m above it and three quarters at 80 m; 60% on a 45° peak, 80% on a steep one, a quarter on a ridge.</summary>
+    public float ShelterExponent = 2.2f;
 
     /// <summary>Scales vertical wind after the curl, to keep lift moderate (1: as much up and down as sideways).</summary>
     public float VerticalScale = 0.3f;
@@ -62,9 +61,11 @@ public sealed class WindSettings
 /// <item>Eddies: smaller noise rolling across the world over time; bumps along a route.</item>
 /// <item>Gusts and lulls: an envelope over space and time that swells and eases the local wind over seconds.</item>
 /// <item>Dead zones: a slow calm mask that opens, closes and wanders over minutes.</item>
-/// <item>Terrain: s², s = smoothstep(distance to terrain / reach), so wind dies down near terrain and is zero at it. Read from
-/// the loaded chunks, player edits included; an unloaded chunk counts as empty (the authority over a ship has the terrain
-/// around it loaded, and forces are worked out again next tick).</item>
+/// <item>Terrain: (1 − a)^p, a the terrain amount around a chunk: the solid blocks within reach, nearer ones counting
+/// more, against how many a plain's surface has (1). So wind dies on a plain, in a hollow or under an overhang, but an
+/// exposed peak, with air on most sides, keeps most of it. Read from the loaded chunks, player edits included; an
+/// unloaded chunk counts as empty (the authority over a ship has the terrain around it loaded, and forces are worked
+/// out again next tick).</item>
 /// </list>
 /// Any scalar times P keeps the curl exactly divergence-free, but also adds a stray ∇m × P wind along the scalar's edges,
 /// in proportion to P. P is large (it is shaped for currents 1.5 km across), so a mask that changes over a few chunks
@@ -103,7 +104,12 @@ public sealed class WindField
     private uint _cachedTick = uint.MaxValue;
     private readonly Dictionary<ChunkPosition, Vector3> _potential = new();
     private readonly Dictionary<ChunkPosition, Vector3> _wind = new();
-    private readonly Dictionary<ChunkPosition, (float Distance, uint Tick)> _terrainDistance = new();
+    private readonly Dictionary<ChunkPosition, (float Amount, uint Tick)> _terrainAmount = new();
+
+    // The chunks within reach and how much each counts (1 / (1 + d²)), and what they add up to on a plain's surface:
+    // every chunk below solid. Rebuilt when the reach changes.
+    private (int X, int Y, int Z, float Weight)[] _shelterOffsets = Array.Empty<(int, int, int, float)>();
+    private float _shelterReach = -1f, _plainShelter;
     private const int MaxKeptTerrain = 32768;
 
     /// <param name="seed">The world's seed.</param>
@@ -169,13 +175,13 @@ public sealed class WindField
     }
 
     /// <summary>What makes up the wind at a chunk, for the debug panel.</summary>
-    public readonly record struct Parts(float Gust, float Calm, float Terrain, float TerrainDistance);
+    public readonly record struct Parts(float Gust, float Calm, float Terrain, float TerrainAmount);
 
     public Parts PartsAt(ChunkPosition c)
     {
         var centre = Centre(c);
         double t = Time;
-        return new Parts(GustFactor(centre, t), CalmFactor(centre, t), TerrainFactor(c), TerrainDistance(c));
+        return new Parts(GustFactor(centre, t), CalmFactor(centre, t), TerrainFactor(c), TerrainAmount(c));
     }
 
     /// <summary>Forgets every cached value (after changing a setting, say).</summary>
@@ -183,7 +189,7 @@ public sealed class WindField
     {
         _potential.Clear();
         _wind.Clear();
-        _terrainDistance.Clear();
+        _terrainAmount.Clear();
         _cachedTick = uint.MaxValue;
     }
 
@@ -194,7 +200,7 @@ public sealed class WindField
         _cachedTick = tick;
         _potential.Clear();
         _wind.Clear();
-        if (_terrainDistance.Count > MaxKeptTerrain) _terrainDistance.Clear();
+        if (_terrainAmount.Count > MaxKeptTerrain) _terrainAmount.Clear();
     }
 
     private static Vector3 Centre(ChunkPosition c) => new((c.X + 0.5f) * S, (c.Y + 0.5f) * S, (c.Z + 0.5f) * S);
@@ -247,37 +253,50 @@ public sealed class WindField
         return SmoothStep(s.CalmFull, s.CalmEdge, n);
     }
 
-    /// <summary>0 at terrain, 1 at <see cref="WindSettings.TerrainReach"/> chunks or further; squared so its slope is zero
-    /// at terrain too.</summary>
-    private float TerrainFactor(ChunkPosition c)
-    {
-        float s = SmoothStep(0f, 1f, TerrainDistance(c) / MathF.Max(Settings.TerrainReach, 1e-3f));
-        return s * s;
-    }
+    /// <summary>How much of the open wind terrain leaves: 0 on a plain's surface or inside terrain, 1 in open sky.</summary>
+    private float TerrainFactor(ChunkPosition c) =>
+        MathF.Pow(1f - TerrainAmount(c), MathF.Max(Settings.ShelterExponent, 0.01f));
 
-    /// <summary>Distance (chunks, centre to centre) to the nearest terrain chunk within reach, or the reach if none.</summary>
-    private float TerrainDistance(ChunkPosition c)
+    /// <summary>How much terrain is around a chunk, 0 (open sky) to 1 (a plain's surface, or more): each chunk within reach
+    /// adds its solid fraction, weighted by 1 / (1 + d²), against the same sum with every chunk below solid.</summary>
+    private float TerrainAmount(ChunkPosition c)
     {
         uint tick = _clock.Tick;
-        if (_terrainDistance.TryGetValue(c, out var known) && tick - known.Tick < TerrainRefreshTicks) return known.Distance;
+        if (_terrainAmount.TryGetValue(c, out var known) && tick - known.Tick < TerrainRefreshTicks) return known.Amount;
 
-        float reach = Settings.TerrainReach;
-        float best = reach;
+        float amount = 0f;
         if (_terrain is not null)
         {
-            int r = (int)MathF.Ceiling(reach);
-            int threshold = (int)MathF.Ceiling(Settings.TerrainFraction * ChunkData.Volume);
-            for (int dz = -r; dz <= r; dz++)
-            for (int dy = -r; dy <= r; dy++)
-            for (int dx = -r; dx <= r; dx++)
-            {
-                float d = MathF.Sqrt(dx * dx + dy * dy + dz * dz);
-                if (d >= best) continue;
-                if (_terrain.GetData(c.Offset(dx, dy, dz)) is { } data && data.CollidingCount >= threshold) best = d;
-            }
+            BuildShelterOffsets();
+            float sum = 0f;
+            foreach (var (dx, dy, dz, weight) in _shelterOffsets)
+                if (_terrain.GetData(c.Offset(dx, dy, dz)) is { } data)
+                    sum += weight * data.CollidingCount;
+            amount = System.Math.Clamp(sum / ChunkData.Volume / _plainShelter, 0f, 1f);
         }
-        _terrainDistance[c] = (best, tick);
-        return best;
+        _terrainAmount[c] = (amount, tick);
+        return amount;
+    }
+
+    private void BuildShelterOffsets()
+    {
+        float reach = MathF.Max(Settings.TerrainReach, 1f);
+        if (reach == _shelterReach) return;
+        _shelterReach = reach;
+        int r = (int)MathF.Floor(reach);
+        var offsets = new List<(int, int, int, float)>();
+        _plainShelter = 0f;
+        for (int dz = -r; dz <= r; dz++)
+        for (int dy = -r; dy <= r; dy++)
+        for (int dx = -r; dx <= r; dx++)
+        {
+            int d2 = dx * dx + dy * dy + dz * dz;
+            if (d2 > reach * reach) continue;
+            float weight = 1f / (1 + d2);
+            offsets.Add((dx, dy, dz, weight));
+            if (dy < 0) _plainShelter += weight;
+        }
+        _shelterOffsets = offsets.ToArray();
     }
 
     private static float SmoothStep(float edge0, float edge1, float x)

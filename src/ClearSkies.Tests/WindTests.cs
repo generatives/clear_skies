@@ -93,23 +93,55 @@ public class WindTests
     }
 
     [Fact]
-    public void WindDiesDownAtTerrainIncludingEdits()
+    public void WindDiesDownOverTerrainIncludingEdits()
     {
         using var scene = new HeadlessScene();
         var t = new ManualTickClock { Tick = 1 };
         var wind = new WindField(9, t, scene.WorldVolume);
         var open = new WindField(9, t, null);
-        // A chunk of solid stone at (0, 0, 0): wind there is (nearly) still, and four chunks away untouched.
-        scene.WorldVolume.FillBox(new Vector3D<int>(0, 0, 0), new Vector3D<int>(31, 31, 31), BlockId.Stone, BlockOrientation.Upright);
-        var inside = new Vector3(16f, 16f, 16f);
-        var far = new Vector3(16f + 32 * 5, 16f, 16f);
-        Assert.True(wind.Sample(inside).Length() < 0.15f * MathF.Max(open.Sample(inside).Length(), 0.5f), $"{wind.Sample(inside)} at the terrain");
-        Assert.Equal(open.Sample(far), wind.Sample(far));
+        // Ground: stone under 20×20 chunks, its surface at y = 0. Just above it the air is still; well above, untouched.
+        var min = new Vector3D<int>(-320, -64, -320);
+        var max = new Vector3D<int>(319, -1, 319);
+        scene.WorldVolume.FillBox(min, max, BlockId.Stone, BlockOrientation.Upright);
+        var parked = new Vector3(16f, 4f, 16f);
+        var high = new Vector3(16f, 16f + 32 * 5, 16f);
+        Assert.True(wind.Sample(parked).Length() < 0.02f * MathF.Max(open.Sample(parked).Length(), 0.5f), $"{wind.Sample(parked)} at the ground");
+        Assert.Equal(open.Sample(high), wind.Sample(high));
 
-        // Dug out (a player's edit), the wind comes back once the terrain is looked at again.
-        scene.WorldVolume.FillBox(new Vector3D<int>(0, 0, 0), new Vector3D<int>(31, 31, 31), BlockId.Air, BlockOrientation.Upright);
+        // Dug away (a player's edit), the wind comes back once the terrain is looked at again.
+        scene.WorldVolume.FillBox(min, max, BlockId.Air, BlockOrientation.Upright);
         t.Tick += WindField.TerrainRefreshTicks;
-        Assert.Equal(open.Sample(inside), wind.Sample(inside));
+        Assert.Equal(open.Sample(parked), wind.Sample(parked));
+    }
+
+    [Fact]
+    public void AnExposedPeakKeepsMostOfTheWind()
+    {
+        using var scene = new HeadlessScene();
+        // A 45° peak of chunks, its top chunk at (0, -1, 0): six chunk layers, each a chunk wider each way.
+        for (int y = -1; y >= -6; y--)
+        {
+            int r = -1 - y;
+            for (int x = -r; x <= r; x++) for (int z = -r; z <= r; z++)
+            {
+                if (System.Math.Abs(x) + System.Math.Abs(z) > r) continue;
+                scene.WorldVolume.FillBox(new Vector3D<int>(x * 32, y * 32, z * 32), new Vector3D<int>(x * 32 + 31, y * 32 + 31, z * 32 + 31),
+                                          BlockId.Stone, BlockOrientation.Upright);
+            }
+        }
+        var t = new ManualTickClock { Tick = 1 };
+        var wind = new WindField(9, t, scene.WorldVolume);
+        var open = new WindField(9, t, null);
+        var top = new Vector3(16f, 16f, 16f); // the centre of the chunk on the peak
+        float near = 0, sky = 0;
+        var rng = new Random(3);
+        for (int i = 0; i < 100; i++)
+        {
+            t.Tick = (uint)rng.Next(1, 1_000_000);
+            near += wind.Sample(top).Length();
+            sky += open.Sample(top).Length();
+        }
+        Assert.InRange(near / sky, 0.5f, 0.7f); // about 60% of the open wind
     }
 
     [Fact]

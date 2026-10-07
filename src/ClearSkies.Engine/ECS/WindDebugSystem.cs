@@ -121,7 +121,7 @@ public sealed class WindDebugSystem : ISystem, IDebugUiSystem
                                           (int)MathF.Floor(_cameraPosition.Z / ChunkData.Size));
                 var parts = _wind.PartsAt(c);
                 ImGui.Text($"Gust ×{parts.Gust:0.00}   Calm mask {parts.Calm:0.00}");
-                ImGui.Text($"Terrain mask {parts.Terrain:0.00} ({parts.TerrainDistance:0.0} chunks to terrain)");
+                ImGui.Text($"Terrain: wind ×{parts.Terrain:0.00} (terrain amount {parts.TerrainAmount:0.00}; 1 = a plain's surface)");
             }
         }
         ImGui.Text($"Wind time: {_wind.Time:0.0} s");
@@ -169,8 +169,8 @@ public sealed class WindDebugSystem : ISystem, IDebugUiSystem
             edited |= ImGui.SliderFloat("Calm edge", ref s.CalmEdge, -1f, 1f);
             edited |= ImGui.SliderFloat("Calm size (m)", ref s.CalmSize, 250f, 8000f);
             edited |= ImGui.SliderFloat("Calm period (s)", ref s.CalmPeriod, 10f, 3600f);
-            edited |= ImGui.SliderFloat("Terrain reach (chunks)", ref s.TerrainReach, 0f, 6f);
-            edited |= ImGui.SliderFloat("Terrain fraction", ref s.TerrainFraction, 0.01f, 1f);
+            edited |= ImGui.SliderFloat("Terrain reach (chunks)", ref s.TerrainReach, 1f, 6f);
+            edited |= ImGui.SliderFloat("Shelter exponent", ref s.ShelterExponent, 0.5f, 6f);
             edited |= ImGui.SliderFloat("Vertical scale", ref s.VerticalScale, 0f, 1f);
             if (edited) _wind.Invalidate();
         }
