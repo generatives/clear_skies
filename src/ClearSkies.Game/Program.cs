@@ -44,7 +44,7 @@ if (options.Headless)
     return;
 }
 
-using var host = new WindowedEngineHost(new EngineOptions("Clear Skies", 1280, 720, LogGpuErrors: true));
+using var host = new WindowedEngineHost(new EngineOptions("Clear Skies", 1280, 720, LogGpuErrors: true, MsaaSamples: options.Msaa));
 if (options.JoinAddress is not null) ClientGame.Run(host, options);
 else if (options.HostPort is not null) HostGame.Run(host, options);
 else SinglePlayerGame.Run(host, options);

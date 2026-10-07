@@ -572,7 +572,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             Vertex = new VertexState { Module = _shader, EntryPoint = vsEntry, BufferCount = 1, Buffers = &vbLayout },
             Primitive = new PrimitiveState { Topology = PrimitiveTopology.TriangleList, StripIndexFormat = IndexFormat.Undefined, FrontFace = FrontFace.Ccw, CullMode = CullMode.None },
             DepthStencil = &depth,
-            Multisample = new MultisampleState { Count = 1, Mask = ~0u, AlphaToCoverageEnabled = false },
+            Multisample = new MultisampleState { Count = _ctx.SampleCount, Mask = ~0u, AlphaToCoverageEnabled = false }, // drawn in the world pass
             Fragment = &fragmentState,
         };
         _pipeline = _api.DeviceCreateRenderPipeline(_ctx.Device, &pipelineDesc);

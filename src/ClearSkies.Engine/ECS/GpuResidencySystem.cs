@@ -119,6 +119,7 @@ public sealed class GpuResidencySystem : ISystem, IDebugUiSystem
             if (e.Has<Rendered>()) continue;
             var entry = e.Get<Chunk>().Entry;
             _store.RemoveChunk(entry.Volume.Gpu, entry.Position);
+            e.Remove<ChunkUploadedFlag>();
             e.Set<NeedsGpuUploadFlag>();
         }
         _unrenderedChunks.Complete();
@@ -155,6 +156,7 @@ public sealed class GpuResidencySystem : ISystem, IDebugUiSystem
             if (_store.WorldCellHolder(grid, pos, out var holder)) Release((grid, holder));
             _store.UploadChunk(grid, pos, entry);
             entity.Remove<NeedsGpuUploadFlag>();
+            entity.Set<ChunkUploadedFlag>();
             _uploaded++;
         }
         _steps.Lap(UploadStep);

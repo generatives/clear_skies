@@ -119,6 +119,7 @@ public sealed partial class GpuLightSystem
         _frame++;
         _dbgChangedChunks = _dbgShipsMoved = 0;
         EnsureSlotArrays(_store.LightSlotCapacity);
+        ReleaseSettledAccs();
         DropGoneGridStates();
         foreach (var lg in _lit)
             if (!_gridStates.ContainsKey(lg.Handle)) _gridStates[lg.Handle] = new GridLightState();
@@ -253,6 +254,26 @@ public sealed partial class GpuLightSystem
         BuildLists(_composeList.AsSpan(0, _composeCount), sunDir);
         _phaseTimer.Lap(6);
 
+        // Accumulation handed out this frame holds its last brick's data: zeroed before anything reads it.
+        _store.FlushAccMap();
+        if (_store.NewAccs.Count > 0)
+        {
+            var fresh = new uint[_store.NewAccs.Count];
+            for (int k = 0; k < fresh.Length; k++) fresh[k] = (uint)_store.NewAccs[k];
+            _zeroWork = UploadWords(_zeroWork, fresh);
+            _rayLight.DispatchZeroAcc(_store, _zeroWork, fresh.Length);
+            _store.NewAccs.Clear();
+        }
+        // With bounce on, a brick is composed only once it has accumulation (its bounce is being evaluated): until
+        // then it keeps its display (its sun, written by the sun pass, is current already).
+        if (bounceOn)
+        {
+            int kept0 = 0;
+            for (int k = 0; k < preCompose; k++)
+                if (_store.AccOf[(int)_composeList[k]] >= 0) _preCompose[kept0++] = _composeList[k];
+            preCompose = kept0;
+        }
+
         if (n > 0)
         {
             _sunTimer.Start();
@@ -263,7 +284,7 @@ public sealed partial class GpuLightSystem
         if (preCompose > 0 && bounceOn)
         {
             _lampTimer.Start();
-            _composeWork = UploadWords(_composeWork, _composeList.AsSpan(0, preCompose));
+            _composeWork = UploadWords(_composeWork, _preCompose.AsSpan(0, preCompose));
             _rayLight.DispatchCompose(_store, ShownBounceScale, RayLightingSettings.Ambient,
                                      RayLightingSettings.AoStrength, _composeWork, preCompose, smooth: false);
             _lampTimer.Stop();
@@ -308,7 +329,10 @@ public sealed partial class GpuLightSystem
         // Everything else the sun or bounce pass touched (the near bricks were composed above).
         int kept = 0;
         for (int k = 0; k < _composeCount; k++)
-            if (_nearStamp[(int)_composeList[k]] != _frame) _composeList[kept++] = _composeList[k];
+        {
+            int slot = (int)_composeList[k];
+            if (_nearStamp[slot] != _frame && (!bounceOn || _store.AccOf[slot] >= 0)) _composeList[kept++] = _composeList[k];
+        }
         _composeCount = kept;
         if (_composeCount > 0)
         {
@@ -825,7 +849,10 @@ public sealed partial class GpuLightSystem
                 int want = TierEvals(slot, full);
                 if (want > _given[slot])
                 {
-                    _hold[slot] = (byte)System.Math.Min(255, _hold[slot] + want - _given[slot]);
+                    // Its accumulation is gone once its first evaluations are done, so a top-up then restarts
+                    // the average with all the evaluations its new distance is owed.
+                    if (_store.AccOf[slot] < 0) { _n[slot] = 0; _hold[slot] = (byte)want; }
+                    else _hold[slot] = (byte)System.Math.Min(255, _hold[slot] + want - _given[slot]);
                     _given[slot] = (byte)want;
                     if (!_inHeld[slot]) { _inHeld[slot] = true; _heldQueue.Add(slot); }
                     _dbgTopUps++;
@@ -914,6 +941,7 @@ public sealed partial class GpuLightSystem
             st.BounceAllN += 1 + more;
             foreach (int slot in lg.Handle.Slots)
             {
+                GiveAcc(slot);
                 Push(ref n, (uint)slot);
                 Push(ref n, evals);
                 if (more > 0) AddNear((uint)slot, evals, more);
@@ -944,8 +972,10 @@ public sealed partial class GpuLightSystem
         // camera is finished within its frame; farther away it takes one per frame.
         foreach (int slot in _bounceChosen)
         {
-            // A brick starting over is primed first (AO only), an evaluation on top of its hold; near the camera
-            // its whole hold still runs this frame, after it.
+            // A brick starting its evaluations gets its accumulation now; one without any restarts its average, and
+            // is primed first (AO only), an evaluation on top of its hold; near the camera its whole hold still runs
+            // this frame, after it.
+            if (GiveAcc(slot)) { _n[slot] = 0; _primed[slot] = false; }
             bool prime = !_aoOnly && !_primed[slot]; // with AO only there is no bounce for priming to protect
             _primed[slot] = true;
             if (!prime) _hold[slot]--;
@@ -1135,6 +1165,49 @@ public sealed partial class GpuLightSystem
         Array.Resize(ref _composeStamp, capacity);
         Array.Resize(ref _nearStamp, capacity);
         Array.Resize(ref _clearStamp, capacity);
+        Array.Resize(ref _inAcc, capacity);
+        if (_preCompose.Length < capacity) Array.Resize(ref _preCompose, capacity);
+    }
+
+    // ── Accumulation ───────────────────────────────────────────────────────────
+
+    // Slots holding accumulation (GridStore.AccOf), so the settled ones can be found and freed.
+    private readonly List<int> _accSlots = new();
+    private bool[] _inAcc = Array.Empty<bool>();
+    private uint[] _preCompose = Array.Empty<uint>();
+    private GpuBuffer? _zeroWork;
+
+    /// <summary>Gives a brick about to be bounced its accumulation; true if it had none (its average restarts).</summary>
+    private bool GiveAcc(int slot)
+    {
+        if (!_store.AllocAcc(slot)) return false;
+        if (!_inAcc[slot]) { _inAcc[slot] = true; _accSlots.Add(slot); }
+        return true;
+    }
+
+    /// <summary>Frees the accumulation of bricks whose evaluations are done (last frame's compose has read it): a
+    /// settled brick keeps only its display.</summary>
+    private void ReleaseSettledAccs()
+    {
+        for (int k = _accSlots.Count - 1; k >= 0; k--)
+        {
+            int slot = _accSlots[k];
+            if (_store.AccOf[slot] >= 0 && StillEvaluating(slot)) continue;
+            _store.FreeAcc(slot);
+            _inAcc[slot] = false;
+            _accSlots[k] = _accSlots[^1];
+            _accSlots.RemoveAt(_accSlots.Count - 1);
+        }
+    }
+
+    /// <summary>Whether a brick has evaluations left: its own hold, or its ship's whole-grid one.</summary>
+    private bool StillEvaluating(int slot)
+    {
+        if (_hold[slot] > 0) return true;
+        int gi = _store.SlotGrid[slot];
+        if (gi < 0 || gi == _worldIndex) return false;
+        var g = _store.GridAt(gi);
+        return g != null && _gridStates.TryGetValue(g, out var st) && st.BounceAllFrames > 0;
     }
 
     /// <summary>Forgets tracking state for grids that were unregistered (a despawned ship).</summary>

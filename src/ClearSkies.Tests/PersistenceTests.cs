@@ -338,6 +338,7 @@ public class SpawnQueueTests
         scene.SpawnLocalPlayer(new Vector3(0, 60, 0), freeFly: true);
         scene.WorldVolume.SetBlock(4, 40, 4, BlockId.Lever);
         scene.WorldVolume.SetBlock(4, 10, 4, BlockId.Stone);
-        Assert.True(scene.TickUntil(() => scene.PhysicsBodies.CollidersReady(scene.WorldVolume, new Vector3(4, 40, 4), 64f), 120));
+        Assert.True(scene.TickUntil(() => scene.PhysicsBodies.CollidersReady(scene.WorldVolume, new Vector3(4, 40, 4), 64f), 120,
+                                     minSeconds: 10));
     }
 }

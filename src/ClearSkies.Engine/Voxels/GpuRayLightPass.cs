@@ -41,6 +41,8 @@ struct Params {
 @group(0) @binding(6) var<storage, read> work: array<u32>;
 @group(0) @binding(7) var<storage, read> lists: array<u32>;
 @group(0) @binding(8) var<uniform> p: Params;
+@group(0) @binding(9) var<storage, read_write> accPool: array<u32>;
+@group(0) @binding(10) var<storage, read> accMap: array<u32>;
 
 const WPC: i32 = " + GridStore.WordsPerChunk + @";
 const OCC_UNLOADED: i32 = " + GridStore.OccUnloaded + @";
@@ -67,12 +69,12 @@ fn occCode(g: i32, c: vec3<i32>) -> i32 {
     return chunkTable[2 * i].x;
 }
 
-// (occupancy code, solid-brick mask low, high, 0) of chunk c.
+// (occupancy code, solid-brick mask low, high, see-through slot + 1 or 0) of chunk c.
 fn chunkInfo(g: i32, c: vec3<i32>) -> vec4<i32> {
     let i = entryOf(g, c);
     if (i < 0) { return vec4<i32>(OCC_UNLOADED, 0, 0, 0); }
     let m = chunkTable[2 * i + 1];
-    return vec4<i32>(chunkTable[2 * i].x, m.x, m.y, 0);
+    return vec4<i32>(chunkTable[2 * i].x, m.x, m.y, m.z);
 }
 
 // Voxel v (grid space) against its chunk's occupancy code: a pool slot, or uniform / unloaded.
@@ -85,6 +87,23 @@ fn solidIn(code: i32, v: vec3<i32>) -> bool {
 }
 
 fn isSolid(g: i32, v: vec3<i32>) -> bool { return solidIn(occCode(g, v >> vec3<u32>(5u)), v); }
+
+// See-through blocks (BlockDef.CatchesLight: leaves, glass, water, model blocks): they let light through, so rays never
+// see them, but are lit like surfaces. seeSlot is a chunk's see-through slot plus one (chunkInfo's w), 0 for none.
+fn seeThroughIn(seeSlot: i32, v: vec3<i32>) -> bool {
+    if (seeSlot <= 0) { return false; }
+    let l = v & vec3<i32>(31);
+    return ((occPool[u32((seeSlot - 1) * WPC + l.y + 32 * l.z)] >> u32(l.x)) & 1u) == 1u;
+}
+
+fn isSeeThrough(g: i32, v: vec3<i32>) -> bool {
+    let i = entryOf(g, v >> vec3<u32>(5u));
+    if (i < 0) { return false; }
+    return seeThroughIn(chunkTable[2 * i + 1].z, v);
+}
+
+// Whether v makes a surface that the air beside it is lit for: solid or see-through.
+fn makesSurface(g: i32, v: vec3<i32>) -> bool { return isSolid(g, v) || isSeeThrough(g, v); }
 
 // Loads v's chunk info into *info unless it is already the cached chunk *cc (DDA loops).
 fn cacheChunk(g: i32, v: vec3<i32>, cc: ptr<function, vec3<i32>>, info: ptr<function, vec4<i32>>) {
@@ -154,21 +173,30 @@ fn jumpCell(v: vec3<i32>, size: i32, o: vec3<f32>, d: vec3<f32>, t1: f32) -> Jum
 
 // ── Light layout ──────────────────────────────────────────────────────────────────────────────────────────
 // A light slot (one 8³ brick, voxel k = x + 8*(y + 8*z)) is SLOT_WORDS u32s:
-//   [0, 256)    display: one u16 per voxel, two per word (k even = low half): bits 0-8 brightness, 9-13 warmth,
-//               14-15 sun visibility (0-3). Brightness and warmth hold all the non-sun light (ambient times the ray
-//               AO, lamps and bounce, combined per channel by max; see encodeLight). The fragment shader reads only
-//               this.
-//   [256, 768)  accumulation: one u32 per voxel: bits 0-7 bounce R, 8-15 G, 16-23 B (linear 0-1), 24-31 AO
-//               occlusion (0-255). Persistent between frames, blended by the bounce pass.
+//   display: one u16 per voxel, two per word (k even = low half): bits 0-8 brightness, 9-13 warmth, 14-15 sun
+//   visibility (0-3). Brightness and warmth hold all the non-sun light (ambient times the ray AO, lamps and bounce,
+//   combined per channel by max; see encodeLight). The fragment shader reads only this.
+// A brick whose bounce is being evaluated also has an accumulation slot in accPool (accMap[slot] = its index + 1, 0
+// for none), ACC_WORDS u32s, one per voxel: bits 0-7 bounce R, 8-15 G, 16-23 B (linear 0-1), 24-31 AO occlusion
+// (0-255), blended by the bounce pass. The CPU hands one out when the brick's evaluation starts and takes it back when
+// its evaluations are done, so a settled brick keeps only its display.
 const SLOT_WORDS: i32 = " + GridStore.WordsPerSlot + @";
-const ACC_BASE: i32 = 256;
+const ACC_WORDS: i32 = " + GridStore.AccWordsPerSlot + @";
+
+// First accPool word of light slot s's accumulation, or -1 if it has none.
+fn accOf(s: u32) -> i32 {
+    let a = accMap[s];
+    if (a == 0u) { return -1; }
+    return i32(a - 1u) * ACC_WORDS;
+}
 
 // Display light is a brightness (the brightest channel, 0-510 on a square curve, so ambient and bounce at the dark
 // end get fine steps; 511 is kept for no light storage) and a warmth (0-30) along one line of tints: 0 cool
 // blue-white, 15 white, 30 deep red. Other colours are carried to the nearest tint on that line.
 " + GridStore.LightCodecWgsl + @"
 
-struct VoxelRef { ok: bool, disp: i32, shift: u32, acc: i32 }; // disp: display word, shift: 0 or 16 into it
+// disp: display word, shift: 0 or 16 into it; acc: accPool word, or -1 if the brick has no accumulation.
+struct VoxelRef { ok: bool, disp: i32, shift: u32, acc: i32 };
 
 // Where voxel v of grid g lives in lightPool (ok = false: it has no light storage).
 fn voxelRef(g: i32, v: vec3<i32>) -> VoxelRef {
@@ -185,7 +213,8 @@ fn voxelRef(g: i32, v: vec3<i32>) -> VoxelRef {
     r.ok = true;
     r.disp = i32(s) * SLOT_WORDS + (k >> 1u);
     r.shift = u32(k & 1) * 16u;
-    r.acc = i32(s) * SLOT_WORDS + ACC_BASE + k;
+    let a = accOf(s);
+    r.acc = select(-1, a + k, a >= 0);
     return r;
 }
 
@@ -361,7 +390,7 @@ fn anyOccluderAlongSegment(list: u32, worldOrigin: vec3<f32>, worldDir: vec3<f32
 // display word and two accumulation words, so every pass writes whole words no other thread touches. The work list
 // can exceed the 65535 per-dimension dispatch limit, so it is dispatched as a 2D grid and flattened here.
 
-struct Item { g: i32, v0: vec3<i32>, disp: i32, acc: i32 }; // v0: the thread's first voxel (the second is +x)
+struct Item { g: i32, v0: vec3<i32>, disp: i32, slot: u32 }; // v0: the thread's first voxel (the second is +x)
 
 fn itemOf(slot: u32, t: u32) -> Item {
     let info = slotInfo[slot];
@@ -371,7 +400,7 @@ fn itemOf(slot: u32, t: u32) -> Item {
     it.g = info.x >> 6u;
     it.v0 = info.yzw * 32 + vec3<i32>(b & 3, (b >> 2u) & 3, b >> 4u) * 8 + vec3<i32>(k & 7, (k >> 3u) & 7, k >> 6u);
     it.disp = i32(slot) * SLOT_WORDS + i32(t);
-    it.acc = i32(slot) * SLOT_WORDS + ACC_BASE + k;
+    it.slot = slot;
     return it;
 }
 
@@ -394,7 +423,7 @@ fn hasSolidNeighbour(g: i32, v: vec3<i32>) -> bool {
 // Sun visibility of a surface air voxel, 0 (shadowed) to 3 (lit). Anything else reads 3: the fragment shader only
 // blends cells on the face's own surface, so the value never shows.
 fn sunLevel(g: i32, v: vec3<i32>, list: u32) -> u32 {
-    if (isSolid(g, v) || !hasSolidNeighbour(g, v)) { return 3u; }
+    if (!isSurfaceAir(g, v)) { return 3u; }
 
     // Nudge the sample point toward adjacent solid faces so contact shadows reach the foot of a wall instead of
     // being tested from the bare voxel centre.
@@ -421,15 +450,22 @@ fn sunLevel(g: i32, v: vec3<i32>, list: u32) -> u32 {
 }
 
 // ── Surface compaction ────────────────────────────────────────────────────────────────────────────────────
-// Only surface air voxels (air with a solid face neighbour) trace rays, usually a small share of a brick, scattered
+// Only surface air voxels (see isSurfaceAir) trace rays, usually a small share of a brick, scattered
 // through it. Given one voxel pair per thread, most lanes of every SIMD group would sit idle while a few traced, so
 // the ray passes first gather the brick's surface voxels into a workgroup list and then trace it with consecutive
 // threads: the same work in far fewer (and full) SIMD groups.
 var<workgroup> wList: array<u32, 512>;      // brick voxel indices (x + 8y + 64z) of the surface air voxels
 var<workgroup> wCount: atomic<u32>;
-var<workgroup> wSun: array<u32, 512>;       // sun_main: each voxel's result, for the paired write
+var<workgroup> wSun: array<u32, 512>;       // sun_main, compose_main: each voxel's result, for the paired write
 
-fn isSurfaceAir(g: i32, v: vec3<i32>) -> bool { return !isSolid(g, v) && hasSolidNeighbour(g, v); }
+// Surface air: a cell that blocks no light and is see-through itself or has a solid or see-through face neighbour.
+fn isSurfaceAir(g: i32, v: vec3<i32>) -> bool {
+    if (isSolid(g, v)) { return false; }
+    if (isSeeThrough(g, v)) { return true; }
+    return makesSurface(g, v - vec3<i32>(1, 0, 0)) || makesSurface(g, v + vec3<i32>(1, 0, 0)) ||
+           makesSurface(g, v - vec3<i32>(0, 1, 0)) || makesSurface(g, v + vec3<i32>(0, 1, 0)) ||
+           makesSurface(g, v - vec3<i32>(0, 0, 1)) || makesSurface(g, v + vec3<i32>(0, 0, 1));
+}
 
 @compute @workgroup_size(256)
 fn sun_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
@@ -525,11 +561,42 @@ fn faceDir(f: i32) -> vec3<i32> {
     return vec3<i32>(0, 0, s);
 }
 
-// Whether n is surface air (air with a solid face neighbour), testing through the cached chunk.
-fn surfaceAirCached(g: i32, n: vec3<i32>, cc: ptr<function, vec3<i32>>, info: ptr<function, vec4<i32>>) -> bool {
-    if (solidCached(g, n, cc, info)) { return false; }
+// ── Compose tile ──
+// compose_main is one workgroup per brick, and neighbouring voxels test nearly the same cells: whether each neighbour
+// is solid, whether it is surface air, and its stored bounce and AO. So the workgroup reads them once into workgroup
+// memory: the solidity of the brick and two cells around it (12³ bits, cOcc), and for the brick and one cell around it
+// (10³) which cells are surface air with light storage (cSurf, bits) and their accumulation words (cAcc). Every test
+// below reads those instead of the chunk and brick tables. The result is the same as testing each cell directly.
+const C12: i32 = 12;  // cOcc's side: the brick (8) and 2 cells each way
+const C10: i32 = 10;  // cSurf / cAcc's side: the brick and 1 cell each way
+var<workgroup> cOcc: array<atomic<u32>, 54>;   // 1728 bits, cell x + 12y + 144z (origin: the brick's first voxel - 2)
+var<workgroup> cSee: array<atomic<u32>, 54>;   // the same cells' see-through bits
+var<workgroup> cSurf: array<atomic<u32>, 32>;  // 1000 bits, cell x + 10y + 100z (origin: the brick's first voxel - 1)
+var<workgroup> cAcc: array<u32, 1000>;         // those cells' accumulation words, where cSurf is set
+
+fn tileSolid(c: vec3<i32>) -> bool { // c: 12³ cell
+    let i = u32(c.x + C12 * (c.y + C12 * c.z));
+    return ((atomicLoad(&cOcc[i >> 5u]) >> (i & 31u)) & 1u) == 1u;
+}
+
+fn tileSurfIndex(c: vec3<i32>) -> u32 { return u32(c.x + C10 * (c.y + C10 * c.z)); } // c: 10³ cell
+
+fn tileSurf(c: vec3<i32>) -> bool {
+    let i = tileSurfIndex(c);
+    return ((atomicLoad(&cSurf[i >> 5u]) >> (i & 31u)) & 1u) == 1u;
+}
+
+fn tileSeeThrough(c: vec3<i32>) -> bool { // c: 12³ cell
+    let i = u32(c.x + C12 * (c.y + C12 * c.z));
+    return ((atomicLoad(&cSee[i >> 5u]) >> (i & 31u)) & 1u) == 1u;
+}
+
+// Whether 12³ cell c is surface air (see isSurfaceAir); c is within one cell of the brick.
+fn tileSurfaceAir(c: vec3<i32>) -> bool {
+    if (tileSolid(c)) { return false; }
+    if (tileSeeThrough(c)) { return true; }
     for (var f = 0; f < 6; f = f + 1) {
-        if (solidCached(g, n + faceDir(f), cc, info)) { return true; }
+        if (tileSolid(c + faceDir(f)) || tileSeeThrough(c + faceDir(f))) { return true; }
     }
     return false;
 }
@@ -539,61 +606,120 @@ fn surfaceAirCached(g: i32, n: vec3<i32>, cc: ptr<function, vec3<i32>>, info: pt
 // edge), the voxel itself counting 2. Each voxel fires its own fixed ray directions, so this pools several voxels'
 // ray sets: one ray starting or stopping to hit a moving ship moves the result a few times less. The diagonals matter
 // on stepped surfaces such as rounded island undersides, where the surface air cells touch only diagonally. Other air
-// is skipped (it fires no rays, so it has no bounce or AO). Solidity is read through one cached chunk, since nearly
-// all of these cells share the voxel's.
-fn smoothedAcc(g: i32, v: vec3<i32>, own: u32) -> vec4<f32> {
-    var cc = vec3<i32>(v >> vec3<u32>(5u));
-    var info = chunkInfo(g, cc);
+// is skipped (it fires no rays, so it has no bounce or AO), as is any without light storage or accumulation (a settled
+// brick, whose bounce is in its display). lk: the voxel in its
+// brick (0-7); read from the compose tile.
+fn smoothedAcc(lk: vec3<i32>, own: u32) -> vec4<f32> {
+    let c12 = lk + vec3<i32>(2);
+    let c10 = lk + vec3<i32>(1);
     var sum = unpackAcc(own) * 2.0;
     var w = 2.0;
     var faceSolid: array<bool, 6>;
     for (var f = 0; f < 6; f = f + 1) {
-        let n = v + faceDir(f);
-        faceSolid[f] = solidCached(g, n, &cc, &info);
-        if (faceSolid[f] || !surfaceAirCached(g, n, &cc, &info)) { continue; }
-        let r = voxelRef(g, n);
-        if (r.ok) { sum = sum + unpackAcc(lightPool[r.acc]); w = w + 1.0; }
+        let d = faceDir(f);
+        faceSolid[f] = tileSolid(c12 + d);
+        if (faceSolid[f] || !tileSurf(c10 + d)) { continue; }
+        sum = sum + unpackAcc(cAcc[tileSurfIndex(c10 + d)]);
+        w = w + 1.0;
     }
     // Edge diagonals: faces fa < fb on different axes.
     for (var fa = 0; fa < 4; fa = fa + 1) {
         for (var fb = (fa & ~1) + 2; fb < 6; fb = fb + 1) {
             if (faceSolid[fa] && faceSolid[fb]) { continue; } // no air path around the edge
-            let n = v + faceDir(fa) + faceDir(fb);
-            if (!surfaceAirCached(g, n, &cc, &info)) { continue; }
-            let r = voxelRef(g, n);
-            if (r.ok) { sum = sum + 0.5 * unpackAcc(lightPool[r.acc]); w = w + 0.5; }
+            let n = c10 + faceDir(fa) + faceDir(fb);
+            if (!tileSurf(n)) { continue; }
+            sum = sum + 0.5 * unpackAcc(cAcc[tileSurfIndex(n)]);
+            w = w + 0.5;
         }
     }
     return sum / w;
 }
 
-// The voxel's display half: the flat ambient (p.bounce2.z) darkened by the ray AO (times its strength, p.bounce2.w),
-// its lamp light (traced now) and bounce (times the display scale, p.bounce.z), combined per channel by max, and the
-// given sun level; bounce and AO are the stored ones smoothed over neighbours (smoothedAcc). Air away from any
-// surface gets the plain ambient.
-fn composeVoxel(g: i32, v: vec3<i32>, acc: u32, sun: u32, list: u32) -> u32 {
+// A surface voxel's display half: the flat ambient (p.bounce2.z) darkened by the ray AO (times its strength,
+// p.bounce2.w), its lamp light (traced now) and bounce (times the display scale, p.bounce.z), combined per channel by
+// max, and the given sun level; bounce and AO are the stored ones, smoothed over neighbours (smoothedAcc) when smooth.
+fn composeSurface(g: i32, v: vec3<i32>, lk: vec3<i32>, acc: u32, sun: u32, list: u32, smoothed: bool) -> u32 {
     let ambient = p.bounce2.z;
-    if (isSolid(g, v) || !hasSolidNeighbour(g, v)) { return encodeLight(vec3<f32>(ambient)) | (sun << 14u); }
-    // Only the frame's last compose of a brick smooths (p.bounce.x): the ones before it are there for the bounce passes
-    // to read current light, and each voxel's own value does for that at a fraction of the cost.
-    let sm = select(unpackAcc(acc), smoothedAcc(g, v, acc), p.bounce.x > 0.5);
+    let sm = select(unpackAcc(acc), smoothedAcc(lk, acc), smoothed);
     let bounce = sm.rgb * p.bounce.z;
     let sky = ambient * (1.0 - p.bounce2.w * sm.a);
     let light = max(max(lampLight(g, v, list), bounce), vec3<f32>(sky));
     return encodeLight(light) | (sun << 14u);
 }
 
+// Recomposes a brick's display (see composeSurface): solid voxels and air away from any surface get the plain ambient;
+// the surface voxels are gathered into a list (lamp rays make their cost uneven) and composed by consecutive threads.
+// Only the frame's last compose of a brick smooths (p.bounce.x): the ones before it are there for the bounce passes to
+// read current light, and each voxel's own value does for that at a fraction of the cost.
 @compute @workgroup_size(256)
 fn compose_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
                 @builtin(local_invocation_index) t: u32) {
     let wi = wid.x + wid.y * nwg.x;
     if (wi >= u32(p.counts.z)) { return; }
-    let it = itemOf(work[wi], t);
+    let slot = work[wi];
+    let it = itemOf(slot, t);
+    let base = it.v0 - vec3<i32>(i32(t * 2u) & 7, (i32(t * 2u) >> 3u) & 7, i32(t * 2u) >> 6u); // the brick's first voxel
+    let smoothed = p.bounce.x > 0.5;
+    let ownAcc = accOf(slot); // -1: no accumulation (bounce off, or not evaluated yet): no bounce and no AO
+    if (t == 0u) { atomicStore(&wCount, 0u); }
+    if (t < 54u) { atomicStore(&cOcc[t], 0u); atomicStore(&cSee[t], 0u); }
+    if (t < 32u) { atomicStore(&cSurf[t], 0u); }
+    workgroupBarrier();
+
+    // Solidity of the brick and two cells around it (smoothing tests its neighbours' neighbours), read through a
+    // cached chunk: a thread's cells are mostly in one.
+    var cc = vec3<i32>(base >> vec3<u32>(5u));
+    var info = chunkInfo(it.g, cc);
+    for (var i = i32(t); i < C12 * C12 * C12; i = i + 256) {
+        let c = vec3<i32>(i % C12, (i / C12) % C12, i / (C12 * C12));
+        if (solidCached(it.g, base - vec3<i32>(2) + c, &cc, &info)) { atomicOr(&cOcc[u32(i) >> 5u], 1u << (u32(i) & 31u)); }
+        else if (seeThroughIn(info.w, base - vec3<i32>(2) + c)) { atomicOr(&cSee[u32(i) >> 5u], 1u << (u32(i) & 31u)); }
+    }
+    workgroupBarrier();
+
+    // For smoothing: which cells of the brick and one around it are surface air with light storage, and their
+    // accumulation (the brick's own straight from its accumulation slot, its neighbours' through the tables).
+    if (smoothed) {
+        for (var i = i32(t); i < C10 * C10 * C10; i = i + 256) {
+            let c = vec3<i32>(i % C10, (i / C10) % C10, i / (C10 * C10));
+            if (!tileSurfaceAir(c + vec3<i32>(1))) { continue; }
+            let lk = c - vec3<i32>(1);
+            var acc = -1;
+            if (all(lk >= vec3<i32>(0)) && all(lk < vec3<i32>(8))) {
+                if (ownAcc >= 0) { acc = ownAcc + lk.x + 8 * (lk.y + 8 * lk.z); }
+            } else {
+                let r = voxelRef(it.g, base + lk);
+                if (r.ok) { acc = r.acc; } // -1 for a settled brick: its bounce is in its display
+            }
+            if (acc < 0) { continue; }
+            cAcc[i] = accPool[acc];
+            atomicOr(&cSurf[u32(i) >> 5u], 1u << (u32(i) & 31u));
+        }
+    }
+    workgroupBarrier();
+
+    // Every voxel starts as plain ambient with its sun level; the surface ones are listed to be composed.
+    let ambientWord = encodeLight(vec3<f32>(p.bounce2.z));
     let old = lightPool[it.disp];
+    for (var e = 0u; e < 2u; e = e + 1u) {
+        let k = t * 2u + e;
+        wSun[k] = ambientWord | (((old >> (16u * e + 14u)) & 3u) << 14u);
+        if (tileSurfaceAir(vec3<i32>(i32(k & 7u), i32((k >> 3u) & 7u), i32(k >> 6u)) + vec3<i32>(2))) {
+            wList[atomicAdd(&wCount, 1u)] = k;
+        }
+    }
+    workgroupBarrier();
+
+    let n = atomicLoad(&wCount);
     let list = listOf(it.g, it.v0);
-    let d0 = composeVoxel(it.g, it.v0, lightPool[it.acc], (old >> 14u) & 3u, list);
-    let d1 = composeVoxel(it.g, it.v0 + vec3<i32>(1, 0, 0), lightPool[it.acc + 1], (old >> 30u) & 3u, list);
-    lightPool[it.disp] = d0 | (d1 << 16u);
+    for (var i = t; i < n; i = i + 256u) {
+        let k = wList[i];
+        let lk = vec3<i32>(i32(k & 7u), i32((k >> 3u) & 7u), i32(k >> 6u));
+        let acc = select(0u, accPool[max(ownAcc, 0) + i32(k)], ownAcc >= 0);
+        wSun[k] = composeSurface(it.g, base + lk, lk, acc, (wSun[k] >> 14u) & 3u, list, smoothed);
+    }
+    workgroupBarrier();
+    lightPool[it.disp] = wSun[t * 2u] | (wSun[t * 2u + 1u] << 16u);
 }
 
 // ── Bounce (one-hop indirect light, multi-hop through re-evaluation) ─────────────────────────────────────
@@ -688,7 +814,7 @@ fn radianceAt(g: i32, h: Hit) -> vec3<f32> {
     let r = voxelRef(g, h.cell);
     if (!r.ok) { return vec3<f32>(0.0); }
     let d = (lightPool[r.disp] >> r.shift) & 0xFFFFu;
-    let acc = lightPool[r.acc];
+    let acc = select(0u, accPool[max(r.acc, 0)], r.acc >= 0); // a settled brick: its bounce is in its display
     let shown = select(decodeLight(d), vec3<f32>(0.0), isEmptyLight(d)); // not composed yet: nothing to reflect
     let bnc = vec3<f32>(f32(acc & 0xFFu), f32((acc >> 8u) & 0xFFu), f32((acc >> 16u) & 0xFFu)) / 255.0;
     let nW = normalize((grids[g].v2w * vec4<f32>(h.n, 0.0)).xyz);
@@ -832,22 +958,24 @@ fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) n
     let alpha = select(max(1.0 / f32(cycle), 1.0 / (f32(nu) + 1.0)), 1.0, prime);
     let slice = select(i32(nu % cycle), i32(cycle) - 1, prime);
     let list = listOf(it.g, it.v0);
+    // The CPU gives every brick it lists an accumulation slot; without one there is nothing to write.
+    let accBase = accOf(it.slot);
+    let has = accBase >= 0;
     // Gather the surface voxels (see Surface compaction); other air has no bounce and no occlusion, solid keeps its word.
     let base = it.v0 - vec3<i32>(i32(t * 2u) & 7, (i32(t * 2u) >> 3u) & 7, i32(t * 2u) >> 6u);
     for (var e = 0u; e < 2u; e = e + 1u) {
         let v = it.v0 + vec3<i32>(i32(e), 0, 0);
-        if (isSolid(it.g, v)) { continue; }
+        if (!has || isSolid(it.g, v)) { continue; }
         if (hasSolidNeighbour(it.g, v)) { wList[atomicAdd(&wCount, 1u)] = t * 2u + e; }
-        else { lightPool[it.acc + i32(e)] = 0u; }
+        else { accPool[accBase + i32(t * 2u + e)] = 0u; }
     }
     workgroupBarrier();
     let n = atomicLoad(&wCount);
-    let accBase = it.acc - i32(t * 2u);
     for (var i = t; i < n; i = i + 256u) {
         let k = wList[i];
         let v = base + vec3<i32>(i32(k & 7u), i32((k >> 3u) & 7u), i32(k >> 6u));
         let a = accBase + i32(k);
-        lightPool[a] = bounceVoxel(it.g, v, lightPool[a], alpha, slice, list, prime || aoOnly);
+        accPool[a] = bounceVoxel(it.g, v, accPool[a], alpha, slice, list, prime || aoOnly);
     }
 }
 
@@ -859,9 +987,23 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
               @builtin(local_invocation_index) t: u32) {
     let wi = wid.x + wid.y * nwg.x;
     if (wi >= u32(p.counts.z)) { return; }
-    let base = i32(work[wi]) * SLOT_WORDS + ACC_BASE + i32(t) * 2;
-    lightPool[base]     = lightPool[base] & 0xFF000000u;
-    lightPool[base + 1] = lightPool[base + 1] & 0xFF000000u;
+    let a = accOf(work[wi]);
+    if (a < 0) { return; }
+    let base = a + i32(t) * 2;
+    accPool[base]     = accPool[base] & 0xFF000000u;
+    accPool[base + 1] = accPool[base + 1] & 0xFF000000u;
+}
+
+// Zeroes the listed accumulation slots (accPool slot numbers, not light slots): ones just handed out, which still
+// hold whatever their last brick left, before anything reads them.
+@compute @workgroup_size(256)
+fn zero_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
+             @builtin(local_invocation_index) t: u32) {
+    let wi = wid.x + wid.y * nwg.x;
+    if (wi >= u32(p.counts.z)) { return; }
+    let base = i32(work[wi]) * ACC_WORDS + i32(t) * 2;
+    accPool[base] = 0u;
+    accPool[base + 1] = 0u;
 }";
 
 
@@ -870,6 +1012,7 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
     private readonly ComputePipeline _composePipeline;
     private readonly ComputePipeline _bouncePipeline;
     private readonly ComputePipeline _clearPipeline;
+    private readonly ComputePipeline _zeroPipeline;
     // One small uniform buffer per dispatch of a frame: the dispatches are recorded into one command buffer, so every
     // parameter write lands before any of them runs and each needs its own.
     private readonly List<GpuBuffer> _params = new();
@@ -881,9 +1024,10 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
 
     // Bindings each entry point uses (auto layouts only contain what the entry point references).
     private static readonly uint[] SunBindings    = { 0, 1, 3, 4, 5, 6, 7, 8 };
-    private static readonly uint[] ComposeBindings = { 0, 1, 2, 3, 4, 5, 6, 7, 8 }; // 2: neighbour smoothing (voxelRef)
-    private static readonly uint[] BounceBindings = { 0, 1, 2, 3, 4, 5, 6, 7, 8 };
-    private static readonly uint[] ClearBindings  = { 3, 6, 8 };
+    private static readonly uint[] ComposeBindings = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 }; // 2: neighbour smoothing (voxelRef)
+    private static readonly uint[] BounceBindings = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
+    private static readonly uint[] ClearBindings  = { 6, 8, 9, 10 };
+    private static readonly uint[] ZeroBindings   = { 6, 8, 9 };
 
     public GpuRayLightPass(GpuContext ctx)
     {
@@ -892,6 +1036,7 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
         _composePipeline = new ComputePipeline(ctx, Wgsl, "compose_main");
         _bouncePipeline = new ComputePipeline(ctx, Wgsl, "bounce_main");
         _clearPipeline  = new ComputePipeline(ctx, Wgsl, "clear_main");
+        _zeroPipeline   = new ComputePipeline(ctx, Wgsl, "zero_main");
         _lists = GpuBuffer.CreateStorage(ctx, 65536);
     }
 
@@ -915,6 +1060,15 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
         if (count <= 0) return;
         var param = WriteParams(Vector3D<float>.Zero, count, default, default);
         Dispatch(_clearPipeline, ClearBindings, store, work, count, param, "Lighting: clear bounce");
+    }
+
+    /// <summary>Zeroes the <paramref name="count"/> accumulation slots (accumulation-pool numbers) listed in
+    /// <paramref name="work"/>; see zero_main.</summary>
+    public void DispatchZeroAcc(GridStore store, GpuBuffer work, int count)
+    {
+        if (count <= 0) return;
+        var param = WriteParams(Vector3D<float>.Zero, count, default, default);
+        Dispatch(_zeroPipeline, ZeroBindings, store, work, count, param, "Lighting: zero accumulation");
     }
 
     /// <summary>Sun visibility for the <paramref name="count"/> light slots listed in <paramref name="work"/>.</summary>
@@ -972,7 +1126,9 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
                 5 => store.Grids,
                 6 => work,
                 7 => _lists,
-                _ => param,
+                8 => param,
+                9 => store.AccPool,
+                _ => store.AccMap,
             });
         nint bg = pipeline.CreateBindGroupHandle(arr);
         _bindGroups.Add(bg);
@@ -1028,6 +1184,7 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
         _composePipeline.Dispose();
         _bouncePipeline.Dispose();
         _clearPipeline.Dispose();
+        _zeroPipeline.Dispose();
         Submit();
         foreach (var p in _params) p.Dispose();
         _lists.Dispose();

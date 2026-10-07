@@ -125,6 +125,11 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
     // loading or loaded.
     private (short dx, short dz, int d)[][] _scanOffsets = Array.Empty<(short, short, int)[]>();
     private int[] _scanAt = Array.Empty<int>();
+    // Per ring of the last rebuild: how far around it is known to be loaded or queued already (from before the rebuild),
+    // so its TerrainScanned doesn't fall back to nothing while the new scan catches up. And each interest's last
+    // published radius and the column it was around.
+    private float[] _scanCarry = Array.Empty<float>();
+    private readonly Dictionary<Entity, (float Radius, (int x, int z) Column)> _published = new();
     private bool _scanDone = true;
 
     // Chunks no longer wanted at the last rebuild, unloaded from _unloadAt on a few per frame.
@@ -291,6 +296,8 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
         }
         if (_interestColumns.Count > _seen.Count)
             foreach (var gone in _interestColumns.Keys.Where(k => !_seen.Contains(k)).ToList()) _interestColumns.Remove(gone);
+        if (_published.Count > _seen.Count)
+            foreach (var gone in _published.Keys.Where(k => !_seen.Contains(k)).ToList()) _published.Remove(gone);
         _current.Sort((a, b) => (a.Column.x, a.Column.z, a.LoadColumns, a.Interest.GetHashCode())
                                 .CompareTo((b.Column.x, b.Column.z, b.LoadColumns, b.Interest.GetHashCode())));
     }
@@ -337,6 +344,17 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
         _evictNext = -1;
         _scanOffsets = _rings.Select(r => OffsetsByDistance(r.LoadColumns)).ToArray();
         _scanAt = new int[_rings.Count];
+        _scanCarry = new float[_rings.Count];
+        for (int i = 0; i < _rings.Count; i++)
+        {
+            var r = _rings[i];
+            if (!_published.TryGetValue(r.Interest, out var last)) continue;
+            // Everything within the last radius of the old column was loaded or queued, and still is (only columns no
+            // longer wanted were dropped above), so within that radius less the move of the new one it's known.
+            float known = MathF.Min(last.Radius, r.LoadColumns * S);
+            float dx = r.Column.x - last.Column.x, dz = r.Column.z - last.Column.z;
+            _scanCarry[i] = MathF.Max(0f, known - MathF.Sqrt(dx * dx + dz * dz) * S);
+        }
         _scanDone = false;
         PublishScanned();
         _steps.Lap(QueueStep);
@@ -403,7 +421,9 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
     }
 
     /// <summary>Gives each interest <see cref="TerrainScanned"/>: how far around it the scan has looked, short of the
-    /// first column it hasn't (or all of its load radius once it's looked at everything).</summary>
+    /// first column it hasn't (or all of its load radius once it's looked at everything), and at least what it's known
+    /// to have from before the last rebuild (<see cref="_scanCarry"/>): another interest moving, or this one moving a
+    /// column, rebuilds the queue, and dropping to the new scan's progress pulled the fog in and out every time.</summary>
     private void PublishScanned()
     {
         for (int i = 0; i < _rings.Count; i++)
@@ -412,7 +432,8 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
             if (!e.IsAlive) continue;
             var offsets = _scanOffsets[i];
             float radius = _scanAt[i] >= offsets.Length ? float.PositiveInfinity
-                         : MathF.Max(0f, (MathF.Sqrt(offsets[_scanAt[i]].d) - 1f) * S);
+                         : MathF.Max(_scanCarry[i], MathF.Max(0f, (MathF.Sqrt(offsets[_scanAt[i]].d) - 1f) * S));
+            _published[e] = (radius, _rings[i].Column);
             if (!e.Has<TerrainScanned>() || e.Get<TerrainScanned>().Radius != radius) e.Set(new TerrainScanned { Radius = radius });
         }
     }

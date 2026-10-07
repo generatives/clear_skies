@@ -3,6 +3,7 @@ using ClearSkies.Engine.Gui;
 using ClearSkies.Engine.Math;
 using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Rendering.WebGpu;
+using ClearSkies.Engine.Voxels;
 using DefaultEcs;
 using ImGuiNET;
 using Silk.NET.Maths;
@@ -18,6 +19,7 @@ namespace ClearSkies.Engine.ECS;
 public sealed class RenderFrame : IDebugUiSystem
 {
     private readonly EntitySet _cameras;
+    private readonly EntitySet _volumes;
     private readonly Renderer _renderer;
     private readonly ImGuiController _gui;
     private readonly Time _time;
@@ -33,6 +35,28 @@ public sealed class RenderFrame : IDebugUiSystem
         _gui      = gui;
         _time     = time;
         _cameras  = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
+        _volumes  = world.GetEntities().With<ChunkGrid>().With<Transform>().AsSet();
+    }
+
+    // Underwater visibility, as Minecraft's: on going under you see UnderwaterMin of UnderwaterSight blocks, opening
+    // out to all of it over UnderwaterAdapt seconds; surfacing resets it.
+    private const float UnderwaterSight = 96f, UnderwaterMin = 0.25f, UnderwaterAdapt = 15f;
+    private double _underSince = -1;
+
+    /// <summary>How far the camera at <paramref name="eye"/> sees through water, or 0 if it isn't in water.</summary>
+    private float UnderwaterFogEnd(Vector3D<float> eye)
+    {
+        bool under = false;
+        foreach (ref readonly Entity e in _volumes.GetEntities())
+        {
+            var volume = e.Get<ChunkGrid>().Volume;
+            var v = volume.WorldToVoxel(e.DrawnPose(), eye);
+            if (volume.GetBlock((int)MathF.Floor(v.X), (int)MathF.Floor(v.Y), (int)MathF.Floor(v.Z)) == BlockId.Water) { under = true; break; }
+        }
+        if (!under) { _underSince = -1; return 0f; }
+        if (_underSince < 0) _underSince = _time.TotalSeconds;
+        float t = (float)(_time.TotalSeconds - _underSince) / UnderwaterAdapt;
+        return UnderwaterSight * System.Math.Clamp(UnderwaterMin + (1f - UnderwaterMin) * t, UnderwaterMin, 1f);
     }
 
     // ── debug UI ─────────────────────────────────────────────────────────────
@@ -47,6 +71,8 @@ public sealed class RenderFrame : IDebugUiSystem
     {
         ImGui.Text($"{_time.FramesPerSecond} fps");
         ImGui.Text($"Draw calls: {_renderer.DrawCount:N0}");
+        uint samples = _renderer.Context.SampleCount;
+        ImGui.Text(samples > 1 ? $"Anti-aliasing: {samples}x MSAA" : "Anti-aliasing: off (launch with --msaa 4)");
         ImGui.Text($"Swapchain acquire wait: {_renderer.AcquireMs:F2} ms, present: {_renderer.PresentMs:F2} ms");
         ImGui.TextDisabled("A large acquire/present wait means the frame is waiting on the GPU (vsync is on).");
         bool wireframe = _renderer.WireframeMode;
@@ -109,6 +135,7 @@ public sealed class RenderFrame : IDebugUiSystem
             DebugFlags     = (_dbgNoTextures ? 1 : 0) | (_dbgNoFog ? 2 : 0),
             DebugLighting  = _dbgLighting,
             CameraPosition = camTransform.Position,
+            UnderwaterFogEnd = UnderwaterFogEnd(camTransform.Position),
             ZenithColor    = ToVector3D(SkySettings.ZenithColor),
             HorizonColor   = ToVector3D(SkySettings.HorizonColor),
             HazeStrength   = SkySettings.HazeEnabled ? SkySettings.HazeStrength : 0f,

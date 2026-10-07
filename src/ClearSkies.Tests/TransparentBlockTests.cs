@@ -97,29 +97,18 @@ public class TransparentBlockTests
     }
 
     [Fact]
-    public void Translucent_alpha_is_the_blocks_opacity()
+    public void Translucent_quads_carry_their_block()
     {
         var data = new ChunkData();
         data.Set(4, 4, 4, BlockId.Water);
-        var mesher = new GreedyMesher();
-        var mesh = mesher.Mesh(data, null, null, null, null, null, null);
+        var mesh = new GreedyMesher().Mesh(data, null, null, null, null, null, null);
+        Assert.Equal(mesh.Translucent.Vertices.Count / 4, mesh.Translucent.Blocks.Count);
+        Assert.All(mesh.Translucent.Blocks, b => Assert.Equal(BlockId.Water, b));
 
-        byte water = (byte)MathF.Round(BlockRegistry.Get(BlockId.Water).EffectiveAlpha * 255f);
-        Assert.True(water < 255);
-        Assert.Equal(mesh.Translucent.Vertices.Count, mesh.TranslucentAlphas.Count);
-        Assert.All(mesh.TranslucentAlphas, a => Assert.Equal(water, a));
-    }
-
-    [Fact]
-    public void Chunk_vertex_carries_alpha()
-    {
-        var v = new Vertex(new Vector3D<float>(1, 2, 3), new Vector3D<float>(0, 1, 0), new Vector3D<float>(0.2f, 0.4f, 0.6f));
-        var packed = ChunkVertex.Pack(v, 153);
-        Assert.Equal(153 / 255f, packed.Alpha, 4);
-        Assert.Equal(1f, ChunkVertex.Pack(v).Alpha);
-        var back = packed.Unpack();
-        Assert.Equal(v.Position, back.Position);
-        Assert.Equal(0.4f, back.Color.Y, 2);
+        // Its opacity comes from the block table, by block.
+        var quad = ChunkQuad.Pack(mesh.Translucent.Vertices.GetRange(0, 4).ToArray(), BlockId.Water);
+        Assert.Equal(BlockId.Water, quad.Block);
+        Assert.Equal(BlockRegistry.Get(BlockId.Water).EffectiveAlpha, ChunkQuad.BuildBlockTable()[(int)quad.Block].W);
     }
 
     [Fact]

@@ -15,5 +15,5 @@ public static class RayLightingSettings
     /// <summary>Multiplier on lit surfaces (terrain, ships, models) before fog; the sky and clouds are unlit and keep
     /// their authored colours. Brightens the scene as a whole now that textures are shown as authored on the sRGB
     /// surface.</summary>
-    public static float Exposure = 1.3f;
+    public static float Exposure = 1.0f;
 }

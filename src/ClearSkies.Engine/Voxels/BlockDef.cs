@@ -33,6 +33,10 @@ public readonly struct BlockDef
     /// only its outer surface), and it lets light through (see <see cref="BlocksLight"/>).
     public bool            Transparent    => Layer != RenderLayer.Opaque;
 
+    /// True for a <see cref="Transparent"/> cube that doesn't hide even its own type's faces, so a mass of it shows its
+    /// inside through its gaps: leaves, whose canopy should look dense rather than a thin shell.
+    public bool            ShowsInnerFaces { get; init; }
+
     /// Opacity (0-1) a <see cref="RenderLayer.Translucent"/> block's faces are drawn with, multiplying its texture's
     /// alpha: e.g. water, whose texture is fully opaque. 0 (unset) means 1, the texture's alpha alone.
     public float           Alpha          { get; init; }
@@ -56,6 +60,15 @@ public readonly struct BlockDef
     public string?         Texture        { get; init; }
     public string?         TextureTop     { get; init; }
     public string?         TextureBottom  { get; init; }
+
+    /// For a <see cref="BlockShape.Cross"/> block: the sprites each of its two quads picks from, by a hash of its
+    /// cell, so a patch of grass isn't the same sprite over and over. List a sprite more than once to weight it. Null:
+    /// just <see cref="Texture"/>.
+    public string[]?       CrossTextures  { get; init; }
+
+    /// For a <see cref="BlockShape.Cross"/> block: keep its two quads a clean X (mushrooms, pebbles) rather than
+    /// twisting and shifting each on its own as grass does. The whole plant is still turned, nudged and sized.
+    public bool            RigidCross     { get; init; }
 
     /// True when this block's appearance actually depends on its stored orientation (i.e. it has a
     /// Top and/or Bottom texture distinct from Texture) — lets GreedyMesher skip the per-voxel
@@ -89,9 +102,25 @@ public readonly struct BlockDef
     /// animated), not with its chunk's static model blocks.
     public bool IsEntityBlock => Components != null;
 
-    /// True for blocks drawn as a full cube by <c>GreedyMesher</c>: solid and not a model block. The mesher's
-    /// face culling (and the neighbour remeshing that depends on it) keys off this rather than IsSolid.
-    public bool IsFullCube => IsSolid && Model == null;
+    /// How a block that isn't a <see cref="Model"/> block is drawn: a textured cube (the default), or a
+    /// <see cref="BlockShape.Cross"/> of two upright quads for plants and the like.
+    public BlockShape      Shape          { get; init; }
+
+    /// True for a <see cref="BlockShape.Cross"/> block (grass, mushrooms, pebbles): drawn by <c>GreedyMesher</c> as two
+    /// textured quads crossing diagonally through its cell, seen from both sides, with the texture's clear texels cut
+    /// out (the <see cref="RenderLayer.Cutout"/> mesh, whatever its <see cref="Layer"/>). It fills so little of its cell
+    /// that it stops no light and hides no neighbour's face. Usually also <see cref="Passable"/> (walked through) and
+    /// <see cref="Replaceable"/>.
+    public bool IsCross => IsSolid && Model == null && Shape == BlockShape.Cross;
+
+    /// True for a block that a block placed against it replaces, and that a block can be placed into (like Minecraft's
+    /// grass): clicking a tuft of grass puts the new block where the grass was, not on top of it. Cross blocks are.
+    public bool Replaceable => IsCross;
+
+    /// True for blocks drawn as a full cube by <c>GreedyMesher</c>: solid, not a model block and not a
+    /// <see cref="BlockShape.Cross"/>. The mesher's face culling (and the neighbour remeshing that depends on it) keys
+    /// off this rather than IsSolid.
+    public bool IsFullCube => IsSolid && Model == null && Shape == BlockShape.Cube;
 
     /// True for a model block whose model fills its whole cell (e.g. Fan): it's treated like an opaque cube, so it
     /// stops light and hides the faces of blocks against it (which would otherwise be drawn on top of the model's
@@ -100,11 +129,18 @@ public readonly struct BlockDef
 
     /// True when this block stops light (sun, lamps, bounce) and darkens its neighbours' corners: a full cube unless
     /// it's <see cref="Transparent"/>, or an <see cref="OpaqueModel"/>. The lighting system's occupancy is exactly this.
-    public bool BlocksLight => IsSolid && (Model == null ? !Transparent : OpaqueModel);
+    public bool BlocksLight => Model == null ? IsFullCube && !Transparent : IsSolid && OpaqueModel;
+
+    /// True for a block that is drawn but lets light through, and so is lit like a surface: the lighting system works
+    /// out light in its cell and the cells around it (where an opaque block's faces would be), though rays pass
+    /// through it. Without this, leaves, glass, water and small model blocks (levers) away from any opaque block would
+    /// get no light of their own. Cross blocks (plants) aren't: they always stand on the ground, whose light they use.
+    public bool CatchesLight => IsSolid && !BlocksLight && !IsCross;
 
     /// True when this block hides the face of a <paramref name="neighbour"/> block that touches it: an opaque cube or
-    /// <see cref="OpaqueModel"/> hides every face against it, a <see cref="Transparent"/> cube only those of its own type.
-    public bool HidesFaceOf(BlockId neighbour) => BlocksLight || (IsFullCube && Transparent && Id == neighbour);
+    /// <see cref="OpaqueModel"/> hides every face against it, a <see cref="Transparent"/> cube only those of its own type
+    /// (unless it <see cref="ShowsInnerFaces"/>).
+    public bool HidesFaceOf(BlockId neighbour) => BlocksLight || (IsFullCube && Transparent && Id == neighbour && !ShowsInnerFaces);
 
     /// True when this block can hide a neighbour's face (see <see cref="HidesFaceOf"/>).
     public bool HidesFaces => BlocksLight || IsFullCube;
@@ -129,6 +165,18 @@ public readonly struct BlockDef
 }
 
 public enum FaceRole : byte { Side, Top, Bottom }
+
+/// <summary>How a block that isn't a model block is drawn (see <see cref="BlockDef.Shape"/>).</summary>
+public enum BlockShape : byte
+{
+    /// <summary>A full cube, greedy meshed with its neighbours.</summary>
+    Cube,
+
+    /// <summary>Two upright quads crossing diagonally through the cell (a crossed billboard), each seen from both
+    /// sides: grass, flowers, mushrooms, pebbles. Textured with <see cref="BlockDef.Texture"/>, upright regardless of
+    /// the block's orientation.</summary>
+    Cross,
+}
 
 /// <summary>How a full-cube block's faces are drawn; <c>GreedyMesher</c> gives each layer its own mesh per chunk.</summary>
 public enum RenderLayer : byte

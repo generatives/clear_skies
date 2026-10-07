@@ -53,6 +53,8 @@ internal sealed class ChunkRecord
     public int TableIndex;
     public int OccSlot = -1;          // occupancy pool slot, or -1 for a uniform chunk
     public ulong Solid, Air;          // per-8³-brick "has solid" / "has air" (bit = bx + 4*(by + 4*bz))
+    public int SeeSlot = -1;          // occupancy pool slot of its see-through (BlockDef.CatchesLight) bits, or -1 for none
+    public ulong SeeThrough;          // per-8³-brick "has see-through"
     public ulong Surface;             // bricks holding (conservatively) a surface air voxel
     public int[]? BrickSlots;         // light slot per brick, -1 = none
     public bool Virtual;              // a ship's air chunk next to its blocks, with no ChunkEntry behind it
@@ -89,10 +91,14 @@ public sealed class GridStore : IDisposable
     public const int WordsPerChunk = 1024;
     public const int VoxelsPerBrick = 512;
 
-    /// <summary>Light-pool words per brick slot: 256 display words (two 16-bit voxels each) then 512
-    /// accumulation words.</summary>
-    public const int WordsPerSlot = 768;
+    /// <summary>Light-pool words per brick slot: 256 display words (two 16-bit voxels each). That is all a lit brick
+    /// keeps; the accumulation a brick needs while its bounce is being evaluated lives in <see cref="AccPool"/>.</summary>
+    public const int WordsPerSlot = 256;
     public const int SlotBytes = WordsPerSlot * 4;
+
+    /// <summary>Accumulation-pool words per slot: one u32 per voxel (bounce RGB and AO, 8 bits each).</summary>
+    public const int AccWordsPerSlot = 512;
+    public const int AccSlotBytes = AccWordsPerSlot * 4;
 
     // Chunk-table occupancy codes (entry.x). >= 0 is an occupancy slot.
     public const int OccUnloaded = -1, OccAllAir = -2, OccAllSolid = -3;
@@ -193,6 +199,11 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     internal GpuBuffer BrickTable { get; private set; }
     internal GpuBuffer LightPool { get; private set; }
     internal GpuBuffer SlotInfo { get; private set; }
+
+    /// <summary>Accumulation for the bricks whose bounce is being evaluated (see <see cref="AllocAcc"/>), and per light
+    /// slot where its accumulation is: the accumulation slot + 1, or 0 for none.</summary>
+    internal GpuBuffer AccPool { get; private set; }
+    internal GpuBuffer AccMap { get; private set; }
     internal GpuBuffer Grids { get; private set; }
 
     /// <summary>Bumped whenever a buffer above is replaced (pool growth). Bind groups over them are stale.</summary>
@@ -208,6 +219,16 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     private int _tableNext;
     private int _lightCapacity, _lightNext;
     private readonly Stack<int> _lightFree = new();
+
+    // Accumulation slots: per light slot, its accumulation slot (-1 none), the map's CPU copy (uploaded by
+    // FlushAccMap, the changed span only), and the accumulation slots handed out since the lighting system last
+    // drained NewAccs (they hold stale data and need zeroing before use).
+    internal int[] AccOf = Array.Empty<int>();
+    private uint[] _accMap = Array.Empty<uint>();
+    private int _accMapLo = int.MaxValue, _accMapHi = -1;
+    private int _accCapacity, _accNext;
+    private readonly Stack<int> _accFree = new();
+    internal List<int> NewAccs { get; } = new();
 
     // CPU mirror of each light slot's owner; -1 grid = free.
     internal int[] SlotGrid = Array.Empty<int>();
@@ -229,7 +250,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     private readonly Stack<int> _worldFree = new();
 
     /// <summary>Light slots allocated since the lighting system last drained this. They hold
-    /// <see cref="EmptyDisplayPair"/> and zeroed accumulation, and need lighting.</summary>
+    /// <see cref="EmptyDisplayPair"/> and need lighting.</summary>
     internal List<int> NewSlots { get; } = new();
 
     /// <summary>Occupancy changes since the lighting system last drained this: the grid-space voxel box that changed
@@ -243,6 +264,8 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     public int OccSlotsInUse => _occNext - _occFree.Count;
     public int OccSlotCapacity => _occCapacity;
     public int LightSlotHighWater => _lightNext;
+    public int AccSlotsInUse => _accNext - _accFree.Count;
+    public int AccSlotCapacity => _accCapacity;
     public int WorldChunkCount => _worldCells.Count;
 
     /// <summary>World chunks that unloaded and wait to be released (see GpuResidencySystem), and the light bricks they
@@ -298,7 +321,8 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
                                               NoWorldSlot);
         _tableCapacity = _worldCapacity + 4096;
         Console.WriteLine($"[grid-store] light budget {WorldLightBudget} bricks: light pool {_lightCapacity} bricks " +
-                          $"({(ulong)_lightCapacity * SlotBytes / (1024 * 1024)} MB), occupancy {_occCapacity} chunks " +
+                          $"({(ulong)_lightCapacity * SlotBytes / (1024 * 1024)} MB, accumulation from " +
+                          $"{8192L * AccSlotBytes / (1024 * 1024)} MB), occupancy {_occCapacity} chunks " +
                           $"({(ulong)_occCapacity * WordsPerChunk * 4 / (1024 * 1024)} MB), table {_tableCapacity} entries " +
                           $"({(ulong)_tableCapacity * (ChunkEntryBytes + 256) / (1024 * 1024)} MB), world index " +
                           $"{worldIndexDim}x{WorldLayers}x{worldIndexDim} ({_worldIndexBytes / (1024 * 1024)} MB)");
@@ -308,11 +332,14 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         BrickTable = GpuBuffer.CreateStorage(ctx, (ulong)_tableCapacity * 64 * 4);
         LightPool  = GpuBuffer.CreateStorage(ctx, (ulong)_lightCapacity * SlotBytes);
         SlotInfo   = GpuBuffer.CreateStorage(ctx, (ulong)_lightCapacity * 16);
+        AccMap     = GpuBuffer.CreateStorage(ctx, (ulong)_lightCapacity * 4);
+        _accCapacity = 8192; // grows with what's being evaluated at once
+        AccPool    = GpuBuffer.CreateStorage(ctx, (ulong)_accCapacity * AccSlotBytes);
         Grids      = GpuBuffer.CreateStorage(ctx, (ulong)_descs.Length * (ulong)Marshal.SizeOf<GridDesc>());
         ResizeSlotMirror(_lightCapacity);
 
         _emptyBrick = new uint[WordsPerSlot];
-        Array.Fill(_emptyBrick, EmptyDisplayPair, 0, 256);
+        Array.Fill(_emptyBrick, EmptyDisplayPair);
 
         ClearTableRange(0, _tableCapacity);
         _tableNext = 0;
@@ -432,6 +459,13 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         rec.Virtual = false;
         rec.Solid = entry.BrickSolidMask;
         rec.Air   = entry.BrickAirMask;
+        rec.SeeThrough = entry.BrickSeeThroughMask;
+        if (entry.PackedSeeThroughWords is { } seeThrough)
+        {
+            if (rec.SeeSlot < 0) rec.SeeSlot = AllocOcc();
+            OccPool.Write<uint>((ulong)rec.SeeSlot * WordsPerChunk * 4, seeThrough);
+        }
+        else FreeSeeThrough(rec);
 
         if (rec.Solid == 0 || rec.Air == 0)
         {
@@ -501,19 +535,25 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     {
         var words = new uint[WordsPerChunk];
         var emitters = new List<EmitterVoxel>();
-        PackOpacity(data, words, emitters);
+        var seeThrough = PackOpacity(data, words, emitters);
         var (solid, air) = BrickMasks(words);
-        return new PackedOpacity(words, solid, air, emitters);
+        return new PackedOpacity(words, solid, air, emitters, seeThrough, seeThrough == null ? 0 : BrickMasks(seeThrough).solid);
     }
 
     /// <summary>Packs a chunk's opacity into <paramref name="words"/> (lx is the in-word bit, ly + 32*lz the word),
-    /// listing its light emitters if <paramref name="emitters"/> is given.</summary>
-    private static void PackOpacity(ChunkData data, uint[] words, List<EmitterVoxel>? emitters)
+    /// listing its light emitters if <paramref name="emitters"/> is given. Returns its see-through blocks
+    /// (<see cref="BlockDef.CatchesLight"/>) packed the same way, or null if it has none: only those with a face to
+    /// light (see <see cref="NeedsLight"/>), so the inside of a lake or a glass block doesn't take light storage.</summary>
+    private static uint[]? PackOpacity(ChunkData data, uint[] words, List<EmitterVoxel>? emitters)
     {
+        uint[]? seeThrough = null;
         if (data.IsUniform(out var block) && BlockRegistry.Get(block).LightEmission == 0)
         {
             Array.Fill(words, BlockRegistry.Get(block).BlocksLight ? uint.MaxValue : 0u);
-            return;
+            // A uniform chunk's blocks hide each other's faces, unless they show them or are models.
+            var u = BlockRegistry.Get(block);
+            if (u.CatchesLight && (u.ShowsInnerFaces || !u.IsFullCube)) { seeThrough = new uint[WordsPerChunk]; Array.Fill(seeThrough, uint.MaxValue); }
+            return seeThrough;
         }
         for (int lz = 0; lz < S; lz++)
         for (int ly = 0; ly < S; ly++)
@@ -523,11 +563,25 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
             {
                 var def = BlockRegistry.Get(data.Get(lx, ly, lz));
                 if (def.BlocksLight) bits |= 1u << lx;
+                if (def.CatchesLight && NeedsLight(data, lx, ly, lz, def)) (seeThrough ??= new uint[WordsPerChunk])[ly + S * lz] |= 1u << lx;
                 if (def.LightEmission > 0)
                     emitters?.Add(new EmitterVoxel((byte)lx, (byte)ly, (byte)lz, def.LightEmission, def.Id));
             }
             words[ly + S * lz] = bits;
         }
+        return seeThrough;
+    }
+
+    /// <summary>Whether a see-through block needs light worked out in and around it: a model, a block that shows its
+    /// inner faces (leaves), or one with a face that is drawn (the edge of a pool of water, a pane of glass). A face
+    /// on the chunk's border counts as drawn, since what is across it isn't known here.</summary>
+    private static bool NeedsLight(ChunkData data, int lx, int ly, int lz, in BlockDef def)
+    {
+        if (def.ShowsInnerFaces || !def.IsFullCube) return true;
+        if (lx == 0 || ly == 0 || lz == 0 || lx == S - 1 || ly == S - 1 || lz == S - 1) return true;
+        return !BlockRegistry.Get(data.Get(lx - 1, ly, lz)).HidesFaceOf(def.Id) || !BlockRegistry.Get(data.Get(lx + 1, ly, lz)).HidesFaceOf(def.Id)
+            || !BlockRegistry.Get(data.Get(lx, ly - 1, lz)).HidesFaceOf(def.Id) || !BlockRegistry.Get(data.Get(lx, ly + 1, lz)).HidesFaceOf(def.Id)
+            || !BlockRegistry.Get(data.Get(lx, ly, lz - 1)).HidesFaceOf(def.Id) || !BlockRegistry.Get(data.Get(lx, ly, lz + 1)).HidesFaceOf(def.Id);
     }
 
     /// <summary>Per-8³-brick "any opaque" / "any non-opaque" bits from a chunk's packed words. Each word is one
@@ -636,6 +690,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     private void FreeRecord(GridHandle g, ChunkRecord rec)
     {
         FreeOcc(rec);
+        FreeSeeThrough(rec);
         if (rec.BrickSlots != null)
         {
             for (int b = 0; b < 64; b++)
@@ -763,7 +818,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     }
 
     /// <summary>A chunk's table entry: (occupancy slot or code, cx, cy, cz), then which 8³ bricks hold any solid, so
-    /// rays can step over empty bricks whole.</summary>
+    /// rays can step over empty bricks whole, and its see-through bits' occupancy slot plus one (0: none).</summary>
     private static void EntryWords(ChunkRecord rec, Span<int> e)
     {
         int code = rec.OccSlot >= 0 ? rec.OccSlot
@@ -771,7 +826,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
                  : rec.Air == 0 ? OccAllSolid
                  : OccUnloaded;
         e[0] = code; e[1] = rec.Pos.X; e[2] = rec.Pos.Y; e[3] = rec.Pos.Z;
-        e[4] = (int)(uint)rec.Solid; e[5] = (int)(uint)(rec.Solid >> 32); e[6] = 0; e[7] = 0;
+        e[4] = (int)(uint)rec.Solid; e[5] = (int)(uint)(rec.Solid >> 32); e[6] = rec.SeeSlot + 1; e[7] = 0;
     }
 
     private void WriteBrickRun(ChunkRecord rec)
@@ -833,13 +888,13 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         RecomputeSolidBounds(g);
     }
 
-    /// <summary>A brick is listed if it contains air and there is solid in it or in a face-adjacent brick
+    /// <summary>A brick is listed if it contains air and there is solid (or see-through) in it or in a face-adjacent brick
     /// (including across chunk boundaries) — a conservative superset of the bricks holding a surface air voxel,
     /// since a voxel's six neighbours are all in its own brick or a face-adjacent one. Bricks that joined get a
     /// fresh light slot; bricks that left give theirs back.</summary>
     private void RefreshSurface(GridHandle g, ChunkRecord rec)
     {
-        ulong s = rec.Solid;
+        ulong s = rec.Solid | rec.SeeThrough; // see-through blocks are lit like surfaces too (BlockDef.CatchesLight)
         ulong near = s
             | ((s >> 1) & ~BxHi) | ((s << 1) & ~BxLo)   // solid at bx+1 / bx-1 within the chunk
             | ((s >> 4) & ~ByHi) | ((s << 4) & ~ByLo)   // by±1
@@ -873,8 +928,9 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         WriteBrickRun(rec);
     }
 
+    /// <summary>The bricks of a neighbouring chunk that make surfaces: solid or see-through.</summary>
     private static ulong NeighbourSolid(GridHandle g, ChunkPosition pos, int dx, int dy, int dz)
-        => g.Chunks.TryGetValue(pos.Offset(dx, dy, dz), out var n) ? n.Solid : 0UL;
+        => g.Chunks.TryGetValue(pos.Offset(dx, dy, dz), out var n) ? n.Solid | n.SeeThrough : 0UL;
 
     private static int[] NewBrickSlots() { var a = new int[64]; Array.Fill(a, -1); return a; }
 
@@ -922,6 +978,13 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         rec.OccSlot = -1;
     }
 
+    private void FreeSeeThrough(ChunkRecord rec)
+    {
+        if (rec.SeeSlot < 0) return;
+        _occFree.Push(rec.SeeSlot);
+        rec.SeeSlot = -1;
+    }
+
     private int AllocLight(GridHandle g, ChunkPosition pos, int brick)
     {
         int slot;
@@ -947,6 +1010,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     private void FreeLight(int slot)
     {
         if (slot < 0 || SlotGrid[slot] < 0) return;
+        FreeAcc(slot);
         var g = _grids[SlotGrid[slot]]!;
         // Swap-remove from the owning grid's slot list.
         int pos = _slotListPos[slot];
@@ -967,6 +1031,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
             throw new InvalidOperationException($"Light pool is full at {_lightCapacity} brick slots, this device's max buffer size.");
         LightPool = Grow(LightPool, (ulong)cap * SlotBytes);
         SlotInfo  = Grow(SlotInfo, (ulong)cap * 16);
+        AccMap    = Grow(AccMap, (ulong)cap * 4); // new entries read 0: no accumulation
         _lightCapacity = cap;
         ResizeSlotMirror(cap);
         Console.WriteLine($"[grid-store] light pool grown to {cap} brick slots ({(ulong)cap * SlotBytes / (1024 * 1024)} MB)");
@@ -988,9 +1053,69 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         Console.WriteLine($"[grid-store] chunk tables grown to {cap} entries");
     }
 
+    // ── Accumulation ──────────────────────────────────────────────────────────
+
+    /// <summary>Gives light slot <paramref name="slot"/> an accumulation slot if it has none; true if it's new (it
+    /// holds stale data until the lighting system zeroes it: see <see cref="NewAccs"/>).</summary>
+    internal bool AllocAcc(int slot)
+    {
+        if (AccOf[slot] >= 0) return false;
+        int acc;
+        if (_accFree.Count > 0) acc = _accFree.Pop();
+        else
+        {
+            if (_accNext == _accCapacity) GrowAcc();
+            acc = _accNext++;
+        }
+        AccOf[slot] = acc;
+        SetAccMap(slot, (uint)acc + 1);
+        NewAccs.Add(acc);
+        return true;
+    }
+
+    /// <summary>Returns light slot <paramref name="slot"/>'s accumulation slot, if it has one.</summary>
+    internal void FreeAcc(int slot)
+    {
+        int acc = AccOf[slot];
+        if (acc < 0) return;
+        AccOf[slot] = -1;
+        SetAccMap(slot, 0);
+        _accFree.Push(acc);
+    }
+
+    private void SetAccMap(int slot, uint value)
+    {
+        _accMap[slot] = value;
+        _accMapLo = System.Math.Min(_accMapLo, slot);
+        _accMapHi = System.Math.Max(_accMapHi, slot);
+    }
+
+    /// <summary>Uploads the part of the accumulation map changed since the last flush.</summary>
+    internal void FlushAccMap()
+    {
+        if (_accMapHi < _accMapLo) return;
+        AccMap.Write<uint>((ulong)_accMapLo * 4, _accMap.AsSpan(_accMapLo, _accMapHi - _accMapLo + 1));
+        _accMapLo = int.MaxValue;
+        _accMapHi = -1;
+    }
+
+    private void GrowAcc()
+    {
+        ulong maxBytes = System.Math.Min(_ctx.AdapterLimits.MaxBufferSize, _ctx.AdapterLimits.MaxStorageBufferBindingSize);
+        int cap = (int)System.Math.Min((long)_accCapacity * 2, (long)(maxBytes / AccSlotBytes));
+        if (cap <= _accCapacity)
+            throw new InvalidOperationException($"Accumulation pool is full at {_accCapacity} slots, this device's max buffer size.");
+        AccPool = Grow(AccPool, (ulong)cap * AccSlotBytes);
+        _accCapacity = cap;
+        Console.WriteLine($"[grid-store] accumulation pool grown to {cap} slots ({(ulong)cap * AccSlotBytes / (1024 * 1024)} MB)");
+    }
+
     private void ResizeSlotMirror(int cap)
     {
         int old = SlotGrid.Length;
+        Array.Resize(ref AccOf, cap);
+        Array.Resize(ref _accMap, cap);
+        for (int i = old; i < cap; i++) AccOf[i] = -1;
         Array.Resize(ref SlotGrid, cap);
         Array.Resize(ref SlotChunk, cap);
         Array.Resize(ref SlotBrick, cap);
@@ -1015,6 +1140,8 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         BrickTable.Dispose();
         LightPool.Dispose();
         SlotInfo.Dispose();
+        AccPool.Dispose();
+        AccMap.Dispose();
         Grids.Dispose();
     }
 

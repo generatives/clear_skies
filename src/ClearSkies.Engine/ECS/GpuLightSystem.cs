@@ -104,7 +104,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         //   Name       Mode               Rays Spread Cycle Hold Reach Near  FullR  MidR  Mid Far Relit Bounced
         new("Minimal", BounceMode.Off,    4,   1,     4,    4,   8f,  0f,  96f, 256f, 1,  1,  256,  512),
         new("Low",     BounceMode.AoOnly, 8,   4,     4,    4,   8f,  0f,  96f, 256f, 1,  1,  256, 1024),
-        new("Medium",  BounceMode.Full,   8,   2,     4,    4,  12f, 32f, 128f, 384f, 2,  1,  512, 2048),
+        new("Medium",  BounceMode.Full,   8,   4,     4,    4,   8f, 32f, 128f, 384f, 2,  1,  512, 2048),
         new("High",    BounceMode.Full,   8,   1,     4,    4,  16f, 64f, 256f, 768f, 2,  1, 1024, 4096),
     };
 
@@ -249,6 +249,8 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
                            $"({(long)_store.LightSlotCapacity * GridStore.SlotBytes / (1024 * 1024)} MB), high water {_store.LightSlotHighWater:N0}");
         ImGui.TextDisabled($"  {(_store.WorldChunkCount > 0 ? (float)_store.LightSlotsInUse / _store.WorldChunkCount : 0f):F1} bricks per " +
                            $"loaded world chunk ({_store.WorldChunkCount:N0} chunks), world budget {_store.WorldLightBudget:N0} bricks");
+        ImGui.TextDisabled($"Accumulation: {_store.AccSlotsInUse:N0} / {_store.AccSlotCapacity:N0} bricks being evaluated " +
+                           $"({(long)_store.AccSlotCapacity * GridStore.AccSlotBytes / (1024 * 1024)} MB)");
         ImGui.TextDisabled($"Occupancy pool: {_store.OccSlotsInUse:N0} / {_store.OccSlotCapacity:N0} chunks " +
                            $"({(long)_store.OccSlotCapacity * GridStore.WordsPerChunk * 4 / (1024 * 1024)} MB)");
 
@@ -315,6 +317,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
                           $"gpu entry=({(int)e[0]},{(int)e[1]},{(int)e[2]},{(int)e[3]}) solid={((ulong)e[5] << 32 | e[4]):X16}");
         int hw = _store.LightSlotHighWater;
         var pool = Read(_store.LightPool, 0, hw * GridStore.WordsPerSlot);
+        var accPool = Read(_store.AccPool, 0, _store.AccSlotCapacity * GridStore.AccWordsPerSlot);
         var info = Read(_store.SlotInfo, 0, hw * 4);
         int badInfo = 0;
         for (int s = 0; s < hw; s++)
@@ -335,7 +338,8 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
             for (int k = 0; k < 512; k++)
             {
                 uint d = (pool[b0 + (k >> 1)] >> (16 * (k & 1))) & 0xFFFF;
-                uint acc = pool[b0 + 256 + k];
+                int a = _store.AccOf[s];
+                uint acc = a >= 0 ? accPool[a * GridStore.AccWordsPerSlot + k] : 0u;
                 voxels++;
                 if ((d & 511) == 511) { unlit++; continue; } // not composed yet
                 if (((d >> 14) & 3) < 3) shadowed++;
@@ -412,5 +416,6 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         _finalComposeWork?.Dispose();
         _nearComposeWork?.Dispose();
         _clearWork?.Dispose();
+        _zeroWork?.Dispose();
     }
 }
