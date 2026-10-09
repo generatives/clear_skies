@@ -69,6 +69,10 @@ public sealed class GameWorld
         AirShapes = new AirshipResistanceSystem(host.World, host.Physics);
         AirResistance = new AirResistanceSystem(host.World, host.Physics, Wind);
         RemoteBodies = new RemoteBodySystem(host.World, Registry, host.Clock);
+        // Block entity state streamed for animation: one line per field, IDs from SyncedFieldIds.
+        SyncedFields.Register<Fan>(SyncedFieldIds.FanThrust, fan => SyncedFields.FromFraction(fan.Thrust),
+                                   (ref Fan fan, byte v) => fan.Thrust = SyncedFields.ToFraction(v));
+        SyncedState = new SyncedStateSystem(host.World, SyncedFields, RemoteBodies, host.Clock);
     }
 
     public EngineHost Host { get; }
@@ -104,6 +108,13 @@ public sealed class GameWorld
 
     /// <summary>Bodies owned elsewhere, placed from their snapshots about 100 ms behind.</summary>
     public RemoteBodySystem RemoteBodies { get; }
+
+    /// <summary>The block entity fields synced for animation (a Fan's thrust, for its flames).</summary>
+    public SyncedFields SyncedFields { get; } = new();
+
+    /// <summary>Gathers changed synced fields of ships flown here for their snapshots, and applies those of ships flown
+    /// elsewhere as they're played back.</summary>
+    public SyncedStateSystem SyncedState { get; }
 
     /// <summary>Whether the terrain around a point has loaded with colliders, so a body there won't fall through it
     /// (each spawn simulated here waits on it, see SpawnQueue).</summary>

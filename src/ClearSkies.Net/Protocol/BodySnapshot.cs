@@ -19,7 +19,7 @@ public enum SnapshotFlags : byte
     HasState = 8,
 }
 
-/// <summary>One synced field of a block entity on a ship (see <see cref="ClearSkies.Engine.Entities.SyncedState"/>):
+/// <summary>One synced field of a block entity on a ship (see <see cref="ClearSkies.Engine.Entities.SyncedFields"/>):
 /// the block's cell in the ship, the field's ID and its value.</summary>
 public readonly record struct SyncedValue(short X, short Y, short Z, byte Field, byte Value);
 

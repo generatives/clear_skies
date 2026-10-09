@@ -170,12 +170,11 @@ public sealed class AirshipFlightSystem : ISystem
             var volume = e.Get<ChunkGrid>().Volume;
             var dynamicGrid = e.Get<DynamicGrid>();
             var blocks = _blocksByVolume.GetValueOrDefault(volume, NoBlocks);
-            // Only the owner flies a grid; everyone else follows its body sync (which brings its Fans' thrust too).
-            if (e.Has<Entities.NetOwner>() && !e.Get<Entities.NetOwner>().IsLocal) continue;
-            foreach (var fan in blocks.FanEntities) fan.Get<Fan>().Thrust = 0f; // off unless allocated thrust below
             // Kinematic (Locked) grids skip gravity/impulses entirely via Bepu's own integrator — nothing
             // to fly. (An empty grid has no body yet, so it isn't in _grids at all.)
             if (dynamicGrid.Locked) continue;
+            // Only the owner flies a grid; everyone else follows its body sync (which brings its Fans' thrust too).
+            if (e.Has<Entities.NetOwner>() && !e.Get<Entities.NetOwner>().IsLocal) continue;
             var body = e.Get<PhysicsBodyComponent>().Body;
 
             float mass = _physics.GetBodyMass(body);
@@ -353,6 +352,8 @@ public sealed class AirshipFlightSystem : ISystem
         foreach (ref readonly Entity e in _fans.GetEntities())
         {
             ref readonly var block = ref e.Get<BlockRef>();
+            // Off unless allocated thrust below; a ship flown elsewhere has its Fans' thrust synced instead.
+            if (!FlownElsewhere(block.Volume)) e.Get<Fan>().Thrust = 0f;
             var blocks = BlocksOf(block.Volume);
             blocks.Fans.Add(block);
             blocks.FanEntities.Add(e);
@@ -366,6 +367,9 @@ public sealed class AirshipFlightSystem : ISystem
         foreach (var (volume, blocks) in _blocksByVolume)
             if (blocks.Fans.Count == 0 && blocks.Buoyants.Count == 0) _blocksByVolume.Remove(volume);
     }
+
+    private static bool FlownElsewhere(ChunkVolume volume) =>
+        volume.Root.IsAlive && volume.Root.Has<Entities.NetOwner>() && !volume.Root.Get<Entities.NetOwner>().IsLocal;
 
     private ShipBlocks BlocksOf(ChunkVolume volume)
     {

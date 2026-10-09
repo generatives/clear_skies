@@ -35,22 +35,11 @@ public sealed class BodySync : ISystem, IDebugUiSystem
     /// ship's snapshot grows with its synced state).</summary>
     public const int MaxFrameBytes = 1000;
 
-    /// <summary>At most this many synced values ride on one ship's snapshot; the rest wait for the next.</summary>
-    public const int MaxValuesPerSnapshot = 100;
-
-    /// <summary>Every this many snapshots (about a second), each ship's synced state is sent whole, changed or not.</summary>
-    public const int StateRefreshInterval = 30;
-
     private readonly SimulationParticipant _net;
     private readonly PhysicsWorld _physics;
     private readonly EntitySet _players;
     private readonly EntitySet _grids;
     private readonly EntitySet _remote;
-    private readonly EntitySet _blockEntities;
-    private readonly Dictionary<ChunkVolume, List<Entity>> _blocksByVolume = new();
-    private readonly Dictionary<(Entity Block, byte Field), byte> _stateSent = new(); // since the last refresh
-    private readonly List<SyncedValue> _values = new();
-    private int _sinceRefresh;
     private readonly List<BodySnapshot> _own = new();
     private long _snapshotsSent, _snapshotsReceived;
 
@@ -69,7 +58,6 @@ public sealed class BodySync : ISystem, IDebugUiSystem
             };
         _players = world.GetEntities().With<EntityId>().With<NetOwner>().With<Player>().With<Transform>().AsSet();
         _grids = world.GetEntities().With<EntityId>().With<NetOwner>().With<PhysicsBodyComponent>().With<Transform>().AsSet();
-        _blockEntities = world.GetEntities().With<BlockRef>().AsSet();
         // Spawned owned elsewhere.
         world.SubscribeComponentAdded((in Entity e, in NetOwner owner) => SetRemote(e, owner));
         world.SubscribeComponentChanged((in Entity e, in NetOwner _, in NetOwner owner) => SetRemote(e, owner));
@@ -96,16 +84,8 @@ public sealed class BodySync : ISystem, IDebugUiSystem
         foreach (ref readonly var e in _players.GetEntities())
             if (e.Get<NetOwner>().IsLocal) _own.Add(PlayerSnapshot(e));
         if (SyncGrids)
-        {
-            if (++_sinceRefresh >= StateRefreshInterval)
-            {
-                _sinceRefresh = 0;
-                _stateSent.Clear(); // everything goes again, and nothing removed since lingers here
-            }
-            GroupBlockEntities();
             foreach (ref readonly var e in _grids.GetEntities())
                 if (e.Get<NetOwner>().IsLocal) _own.Add(GridSnapshot(e));
-        }
 
         if (_own.Count > 0) _net.SendFrame(_net.Clock.Tick, _own);
         _snapshotsSent += _own.Count;
@@ -166,7 +146,13 @@ public sealed class BodySync : ISystem, IDebugUiSystem
         ref readonly var pb = ref e.Get<PhysicsBodyComponent>();
         var body = pb.Body;
         var (p, q) = _physics.GetBodyPose(body);
-        var state = e.Has<ChunkGrid>() ? ChangedState(e.Get<ChunkGrid>().Volume) : null;
+        // The synced state SyncedStateSystem has gathered since the last snapshot.
+        SyncedValue[]? state = null;
+        if (e.Has<PendingSyncedState>() && e.Get<PendingSyncedState>().Values is { Count: > 0 } pending)
+        {
+            state = pending.ToArray();
+            pending.Clear();
+        }
         return new BodySnapshot
         {
             Flags = state != null ? SnapshotFlags.HasState : SnapshotFlags.None,
@@ -199,58 +185,8 @@ public sealed class BodySync : ISystem, IDebugUiSystem
             if (!_net.Registry.TryGet(s.Entity, out var e)) continue; // not spawned here (yet)
             if (e.Has<LocalPlayer>()) { _net.Prediction?.Answer(s); continue; } // ours, predicted: how the authority has it
             if (!e.Has<RemoteBody>()) continue; // ours: we're the truth
-            var buffer = e.Get<RemoteBody>().Buffer;
-            bool newest = buffer.Count == 0 || tick > buffer.LatestTick; // not a late packet's older state
-            buffer.Add(tick, s, _net.Clock.Tick);
-            if (newest && s.State != null && e.Has<ChunkGrid>()) ApplyState(e.Get<ChunkGrid>().Volume, s.State);
+            e.Get<RemoteBody>().Buffer.Add(tick, s, _net.Clock.Tick); // with its synced state, for SyncedStateSystem
         }
-    }
-
-    // ── synced block entity state (see SyncedState) ──────────────────────────
-
-    private void GroupBlockEntities()
-    {
-        foreach (var list in _blocksByVolume.Values) list.Clear();
-        foreach (ref readonly var e in _blockEntities.GetEntities())
-        {
-            var volume = e.Get<BlockRef>().Volume;
-            if (!_blocksByVolume.TryGetValue(volume, out var list)) _blocksByVolume[volume] = list = new List<Entity>();
-            list.Add(e);
-        }
-        foreach (var (volume, list) in _blocksByVolume)
-            if (list.Count == 0) _blocksByVolume.Remove(volume);
-    }
-
-    /// <summary>The synced fields of <paramref name="volume"/>'s block entities that changed since they were last sent
-    /// (all of them after a refresh), up to <see cref="MaxValuesPerSnapshot"/>; null if none.</summary>
-    private SyncedValue[]? ChangedState(ChunkVolume volume)
-    {
-        if (!_blocksByVolume.TryGetValue(volume, out var blocks)) return null;
-        _values.Clear();
-        foreach (var block in blocks)
-        {
-            var cell = block.Get<BlockRef>().Position;
-            if (!FitsShort(cell.X) || !FitsShort(cell.Y) || !FitsShort(cell.Z)) continue;
-            foreach (var field in SyncedState.Fields)
-            {
-                if (field.Get(block) is not { } value) continue;
-                if (_stateSent.TryGetValue((block, field.Id), out var sent) && sent == value) continue;
-                if (_values.Count == MaxValuesPerSnapshot) return _values.ToArray();
-                _stateSent[(block, field.Id)] = value;
-                _values.Add(new SyncedValue((short)cell.X, (short)cell.Y, (short)cell.Z, field.Id, value));
-            }
-        }
-        return _values.Count > 0 ? _values.ToArray() : null;
-    }
-
-    private static bool FitsShort(int v) => v >= short.MinValue && v <= short.MaxValue;
-
-    /// <summary>Sets the synced fields a ship flown elsewhere sent on its block entities here (those loaded).</summary>
-    public static void ApplyState(ChunkVolume volume, IEnumerable<SyncedValue> state)
-    {
-        foreach (var v in state)
-            if (SyncedState.Find(v.Field) is { } field && volume.TryGetBlockEntity(v.X, v.Y, v.Z, out var block))
-                field.Set(block, v.Value);
     }
 
     public string DebugName => "Body sync";

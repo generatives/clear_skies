@@ -224,7 +224,7 @@ public class TransportTests
     {
         var ship = new BodySnapshot
         {
-            Rotation = Quaternion.Identity, Flags = SnapshotFlags.HasState, State = new SyncedValue[BodySync.MaxValuesPerSnapshot],
+            Rotation = Quaternion.Identity, Flags = SnapshotFlags.HasState, State = new SyncedValue[SyncedStateSystem.MaxValuesPerSnapshot],
         };
         var snapshots = Enumerable.Repeat(ship, 5).ToList();
         int packets = 0, read = 0;
@@ -246,13 +246,51 @@ public class TransportTests
     public void FanThrustIsASyncedField()
     {
         using var world = new World();
-        var fan = world.CreateEntity();
-        fan.Set(new Fan { Thrust = 0.5f });
-        var field = SyncedState.Find(1)!;
-        Assert.Equal((byte?)SyncedState.FromFraction(0.5f), field.Get(fan));
-        field.Set(fan, 255);
-        Assert.Equal(1f, fan.Get<Fan>().Thrust);
-        Assert.Null(field.Get(world.CreateEntity())); // no Fan
+        var fields = new SyncedFields();
+        fields.Register<Fan>(SyncedFieldIds.FanThrust, fan => SyncedFields.FromFraction(fan.Thrust),
+                             (ref Fan fan, byte v) => fan.Thrust = SyncedFields.ToFraction(v));
+        var fanBlock = world.CreateEntity();
+        fanBlock.Set(new Fan { Thrust = 0.5f });
+        var field = fields.Find(SyncedFieldIds.FanThrust)!;
+        Assert.True(field.TryGet(fanBlock, out byte value));
+        Assert.Equal(SyncedFields.FromFraction(0.5f), value);
+        field.Set(fanBlock, 255);
+        Assert.Equal(1f, fanBlock.Get<Fan>().Thrust);
+        Assert.False(field.TryGet(world.CreateEntity(), out _)); // no Fan
+        Assert.Throws<ArgumentException>(() => fields.Register<Fan>(SyncedFieldIds.FanThrust, _ => 0, (ref Fan _, byte _) => { }));
+    }
+
+    [Fact]
+    public void ChangedStateIsCappedPerSnapshotAndSentOnce()
+    {
+        using var world = new World();
+        var fields = new SyncedFields();
+        fields.Register<Fan>(SyncedFieldIds.FanThrust, fan => SyncedFields.FromFraction(fan.Thrust),
+                             (ref Fan fan, byte v) => fan.Thrust = SyncedFields.ToFraction(v));
+        var blocks = new List<Entity>();
+        for (int i = 0; i < SyncedStateSystem.MaxValuesPerSnapshot + 50; i++)
+        {
+            var e = world.CreateEntity();
+            e.Set(new BlockRef { Position = new Vector3D<int>(i, 0, 0) });
+            e.Set(new Fan { Thrust = 1f });
+            blocks.Add(e);
+        }
+        var sent = new Dictionary<(Entity Block, byte Field), byte>();
+        var first = new List<SyncedValue>();
+        var second = new List<SyncedValue>();
+        var third = new List<SyncedValue>();
+        SyncedStateSystem.CollectChanged(fields, blocks, sent, first, SyncedStateSystem.MaxValuesPerSnapshot);
+        SyncedStateSystem.CollectChanged(fields, blocks, sent, second, SyncedStateSystem.MaxValuesPerSnapshot);
+        SyncedStateSystem.CollectChanged(fields, blocks, sent, third, SyncedStateSystem.MaxValuesPerSnapshot);
+        Assert.Equal(SyncedStateSystem.MaxValuesPerSnapshot, first.Count);
+        Assert.Equal(50, second.Count); // the rest, next time
+        Assert.Empty(third); // nothing changed
+        Assert.Equal(first.Count + second.Count, first.Concat(second).Select(v => v.X).Distinct().Count());
+
+        blocks[3].Get<Fan>().Thrust = 0f; // a change goes again
+        var fourth = new List<SyncedValue>();
+        SyncedStateSystem.CollectChanged(fields, blocks, sent, fourth, SyncedStateSystem.MaxValuesPerSnapshot);
+        Assert.Equal(new[] { new SyncedValue(3, 0, 0, SyncedFieldIds.FanThrust, 0) }, fourth);
     }
 }
 
