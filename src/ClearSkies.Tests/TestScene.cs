@@ -64,6 +64,7 @@ public sealed class HeadlessScene : IDisposable
         PhysicsBodies = new PhysicsBodySystem(World, Physics);
         _tick.Add(PhysicsBodies);
         _tick.Add(new PlayerMovementSystem(World, Commands));
+        _tick.Add(new GrappleSystem(World, Physics));
         _tick.Add(Commands);
         _tick.Add(Presence);
         _tick.Add(Physics);

@@ -121,6 +121,10 @@ namespace ClearSkies.Engine.Physics.Characters
         public float TimeAwayFromAirReference;
         /// <summary>Velocity air control steers and brakes relative to while unsupported.</summary>
         public Vector3 AirReferenceVelocity;
+        /// <summary>Whether the character hangs on a grapple rope (see <c>GrappleSystem</c>). While unsupported, air control
+        /// then only adds speed along the held direction, to pump a swing, and never brakes or bleeds off sideways drift,
+        /// so the swing keeps its momentum.</summary>
+        public bool Grappling;
 
         /// <summary>Whether a jump request is pending (see <see cref="JumpRequestRemaining"/>).</summary>
         public readonly bool JumpPending => JumpRequestRemaining > 0;
@@ -935,7 +939,8 @@ namespace ClearSkies.Engine.Physics.Characters
         /// simulation's gravity (from the step after a jump), and air control. Holding a direction (a nonzero <see cref="CharacterController.TargetVelocity"/>)
         /// accelerates along it up to the target speed times <see cref="CharacterController.AirControlSpeedScale"/>, never cutting
         /// speed already along it, while bleeding off sideways drift so the character can steer; with no target it brakes gently.
-        /// Both are relative to <see cref="CharacterController.AirReferenceVelocity"/> (the ship left behind, if any).
+        /// Both are relative to <see cref="CharacterController.AirReferenceVelocity"/> (the ship left behind, if any). On a
+        /// grapple rope (<see cref="CharacterController.Grappling"/>) there's no braking or bleeding off, only pumping.
         /// </summary>
         void UpdateAirborneCharacter(ref CharacterController character, ref SolverState state, float dt)
         {
@@ -960,11 +965,11 @@ namespace ClearSkies.Engine.Physics.Characters
                 var along = Vector3.Dot(horizontal, direction);
                 var newAlong = MathF.Max(along, MathF.Min(along + velocityChange, targetSpeed * character.AirControlSpeedScale));
                 var lateral = horizontal - direction * along;
-                newHorizontal = direction * newAlong + MoveTowardsZero(lateral, velocityChange);
+                newHorizontal = direction * newAlong + (character.Grappling ? lateral : MoveTowardsZero(lateral, velocityChange));
             }
             else
             {
-                newHorizontal = MoveTowardsZero(horizontal, velocityChange * character.AirBrakeScale);
+                newHorizontal = character.Grappling ? horizontal : MoveTowardsZero(horizontal, velocityChange * character.AirBrakeScale);
             }
             motion.Velocity.Linear += newHorizontal - horizontal;
         }

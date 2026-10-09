@@ -34,6 +34,8 @@ public enum PlayerButtons : uint
     SpawnGrid = 1 << 12,
     /// <summary>L: cycle the block to place.</summary>
     CycleBlock = 1 << 13,
+    /// <summary>R: fire a grapple rope where the player looks, and hang on it while held.</summary>
+    Grapple = 1 << 14,
 }
 
 /// <summary>
@@ -149,6 +151,7 @@ public static class PlayerInputBindings
         (Key.Q, PlayerButtons.Previous),
         (Key.G, PlayerButtons.SpawnGrid),
         (Key.L, PlayerButtons.CycleBlock),
+        (Key.R, PlayerButtons.Grapple),
     };
 
     public static readonly (MouseButton Button, PlayerButtons Buttons)[] MouseButtons =
