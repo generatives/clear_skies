@@ -28,17 +28,19 @@ public struct Grapple
 }
 
 /// <summary>
-/// Each tick, before physics: grapple ropes, from every walking player's <see cref="PlayerInput"/>. Pressing R
+/// Each tick, before physics: grapple ropes, from every walking player's <see cref="PlayerInput"/>. Pressing E
 /// (<see cref="PlayerButtons.Grapple"/>) fires a rope from the eye where the player looks, up to <see cref="Reach"/>, and
-/// hooks it onto the first block it meets, on the terrain or a ship; the rope holds while R is held and lets go on
-/// release. It also lets go when the player flies, uses a control or pilots, or what it's hooked to is gone.
+/// hooks it onto the first block it meets, on the terrain or a ship; the rope holds while E is held and lets go on
+/// release. Holding Space climbs the rope (shortens it) and holding Ctrl lets it out (lengthens it), at
+/// <see cref="ClimbSpeed"/>, between <see cref="MinimumLength"/> and <see cref="Reach"/>. It also lets go when the player flies, uses a control or pilots, or what it's hooked to is gone.
 ///
 /// The rope isn't a rigid constraint: it's a spring that only pulls, from its hooked length, with a little damping. So
 /// it's slack when the player is closer to the hook than that, and stretches a little under load: hanging still, about
 /// (gravity / <see cref="Stiffness"/>) ≈ 0.2 blocks, more at the bottom of a fast swing. The pull is a velocity change on
 /// the character each tick, and an equal and opposite impulse on a ship it's hooked to that's simulated here, at the
 /// hook, so swinging from a ship tugs it a little. While hooked, the character's air control doesn't brake or bleed off
-/// its swing (<see cref="Physics.Characters.CharacterControllers.CharacterController.Grappling"/>). The rope passes
+/// its swing (<see cref="Physics.Characters.CharacterControllers.CharacterController.Grappling"/>), though WASD still
+/// pushes the player the way they hold, up to walking speed, to steer the swing or keep off a cliff. The rope passes
 /// through everything: nothing collides with it.
 ///
 /// Runs on every machine that simulates the player (the host, and a client predicting its own), from the same input.
@@ -59,6 +61,12 @@ public sealed class GrappleSystem : ISystem
     /// <summary>The most the rope pulls, as an acceleration, so a long stretch (a ship pulling away) can't fling the
     /// player.</summary>
     public const float MaximumPull = 150f;
+
+    /// <summary>How fast Space climbs the rope and Ctrl lets it out, in blocks per second.</summary>
+    public const float ClimbSpeed = 4f;
+
+    /// <summary>The shortest the rope climbs to, in blocks.</summary>
+    public const float MinimumLength = 1f;
 
     private readonly PhysicsWorld _physics;
     private readonly EntitySet _players;
@@ -81,7 +89,11 @@ public sealed class GrappleSystem : ISystem
             if (e.Has<Grapple>())
             {
                 if (!able || !input.IsHeld(PlayerButtons.Grapple) || !Hooked(e.Get<Grapple>())) _released.Add(e);
-                else Pull(e, dt);
+                else
+                {
+                    Climb(e, input, dt);
+                    Pull(e, dt);
+                }
             }
             else if (able && input.WasPressed(PlayerButtons.Grapple) && input.Aiming)
                 Fire(e, input);
@@ -117,6 +129,22 @@ public sealed class GrappleSystem : ISystem
             Length = Vector3D.Distance(centre, at),
         });
         cc.Character.Grappling = true;
+    }
+
+    /// <summary>Shortens the rope while Space is held, lengthens it while Ctrl is. Climbing a slack rope starts from
+    /// where the player is, so it takes up the slack at once rather than after it.</summary>
+    private static void Climb(Entity player, in PlayerInput input, float dt)
+    {
+        float climb = input.Axis(PlayerButtons.Up, PlayerButtons.Crouch);
+        if (climb == 0f) return;
+        ref var g = ref player.Get<Grapple>();
+        if (climb > 0f)
+        {
+            var hook = g.WorldPoint(g.Anchor.Get<Transform>());
+            float distance = Vector3D.Distance(player.Get<Transform>().Position, hook);
+            g.Length = MathF.Max(MinimumLength, MathF.Min(g.Length, distance) - ClimbSpeed * dt);
+        }
+        else g.Length = MathF.Min(Reach, g.Length + ClimbSpeed * dt);
     }
 
     private void Pull(Entity player, float dt)

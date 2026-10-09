@@ -10,22 +10,24 @@ namespace ClearSkies.Tests;
 
 public class GrappleTests
 {
-    private const float Up = MathF.PI / 2;
+    private const float Up = MathF.PI / 2 - 0.01f; // as high as the view goes (LookInputSystem)
 
-    /// <summary>One tick with R pressed (or still held), looking at <paramref name="pitch"/>.</summary>
-    private static void Grapple(HeadlessScene scene, Entity player, bool press, float pitch = Up)
+    /// <summary>One tick with E pressed (or still held) and <paramref name="also"/> held, looking at
+    /// <paramref name="pitch"/>.</summary>
+    private static void Grapple(HeadlessScene scene, Entity player, bool press, float pitch = Up,
+                                PlayerButtons also = PlayerButtons.None)
     {
         player.Get<PlayerInput>() = new PlayerInput
         {
-            Held = PlayerButtons.Grapple, Pressed = press ? PlayerButtons.Grapple : PlayerButtons.None,
+            Held = PlayerButtons.Grapple | also, Pressed = press ? PlayerButtons.Grapple : PlayerButtons.None,
             Pitch = pitch, Aiming = true,
         };
         scene.Tick();
     }
 
-    private static void Hold(HeadlessScene scene, Entity player, int ticks)
+    private static void Hold(HeadlessScene scene, Entity player, int ticks, PlayerButtons also = PlayerButtons.None)
     {
-        for (int i = 0; i < ticks; i++) Grapple(scene, player, press: false);
+        for (int i = 0; i < ticks; i++) Grapple(scene, player, press: false, also: also);
     }
 
     private static Vector3 Position(Entity player) => player.Get<CharacterControllerComponent>().Character.Position;
@@ -54,7 +56,7 @@ public class GrappleTests
         using var _ = scene;
         Assert.True(player.Has<Grapple>());
         float length = player.Get<Grapple>().Length;
-        Assert.InRange(length, 9f, 10f);
+        Assert.InRange(length, 9.5f, 10.5f);
 
         Hold(scene, player, 60 * 4);
         float stretch = DistanceToHook(player) - length;
@@ -124,5 +126,38 @@ public class GrappleTests
         Hold(scene, player, 60 * 4);
         float stretch = DistanceToHook(player) - player.Get<Grapple>().Length;
         Assert.InRange(stretch, 0.05f, 0.5f);
+    }
+
+    [Fact]
+    public void SpaceClimbsTheRopeAndCtrlLetsItOut()
+    {
+        var (scene, player) = UnderAnOverhang();
+        using var _ = scene;
+        Hold(scene, player, 60 * 2);
+        float hanging = Position(player).Y;
+
+        Hold(scene, player, 60, PlayerButtons.Up); // a second at 4 blocks/s
+        Assert.InRange(player.Get<Grapple>().Length, 5.5f, 6.5f);
+        Hold(scene, player, 60 * 2);
+        Assert.InRange(Position(player).Y - hanging, 3.5f, 4.5f);
+
+        Hold(scene, player, 30, PlayerButtons.Crouch);
+        Assert.InRange(player.Get<Grapple>().Length, 7.5f, 8.5f);
+        Hold(scene, player, 60 * 2);
+        Assert.InRange(Position(player).Y - hanging, 1.5f, 2.5f);
+
+        Hold(scene, player, 60 * 5, PlayerButtons.Up); // no shorter than a block
+        Assert.Equal(GrappleSystem.MinimumLength, player.Get<Grapple>().Length);
+    }
+
+    [Fact]
+    public void WasdStillSteersWhileHanging()
+    {
+        var (scene, player) = UnderAnOverhang();
+        using var _ = scene;
+        Hold(scene, player, 60 * 2);
+        float x = Position(player).X;
+        Hold(scene, player, 30, PlayerButtons.Right); // facing -Z, so right is +X
+        Assert.True(Position(player).X - x > 0.3f, $"moved {Position(player).X - x} blocks");
     }
 }
