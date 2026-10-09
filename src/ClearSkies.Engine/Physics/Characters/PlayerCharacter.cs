@@ -111,6 +111,7 @@ public struct PlayerCharacter
         s.Supported = false; // no motion constraint to remove
         s.Support = default;
         s.TargetVelocity = default;
+        s.Grappling = false;
         character = s;
         character.ResetJumpAndAirState();
         eyeDrop = 0;
@@ -374,6 +375,22 @@ public struct PlayerCharacter
         if (suspended) return;
         var characterBody = new BodyReference(bodyHandle, characters.Simulation.Bodies);
         characterBody.Velocity.Linear = velocity;
+        characterBody.Awake = true;
+    }
+
+    /// <summary>Whether the character hangs on a grapple rope: see <see cref="CharacterController.Grappling"/>.</summary>
+    public readonly bool Grappling
+    {
+        get => !suspended && characters.GetCharacterByBodyHandle(bodyHandle).Grappling;
+        set { if (!suspended) characters.GetCharacterByBodyHandle(bodyHandle).Grappling = value; }
+    }
+
+    /// <summary>Adds <paramref name="change"/> to the character's velocity, waking it.</summary>
+    public readonly void AddVelocity(Vector3 change)
+    {
+        if (suspended) return;
+        var characterBody = new BodyReference(bodyHandle, characters.Simulation.Bodies);
+        characterBody.Velocity.Linear += change;
         characterBody.Awake = true;
     }
 

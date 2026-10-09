@@ -66,6 +66,7 @@ public static class ClientGame
         // Motion goals (WASD/jump/mode toggle) before the physics step, so its CollisionsDetected analysis sees them this
         // same tick (see Physics/Characters/).
         host.AddSystem(new PlayerMovementSystem(host.World, commands), SystemStage.Simulation);
+        host.AddSystem(new GrappleSystem(host.World, host.Physics), SystemStage.Simulation); // rope pulls, also before the step
         // Place, break, spawn and use controls (levers and wheels, whose control systems turn drags into commands as the
         // interactions are published), then apply every command sent this tick, then pose the controls from what the
         // commands set, so an arm is posed this tick where the view was turned to keep on it.
@@ -112,6 +113,7 @@ public static class ClientGame
         host.AddSystem(new FogSystem(host.World, world.Options.ViewDistance), SystemStage.Frame); // at the nearest terrain not ready
         // What the player points at and uses, the HUD (crosshair, hotbar), grids saved and loaded, and the debug panels.
         host.AddSystem(new BlockTargetSystem(host.World, input, renderer, world.BlockActions, world.EditLimits), SystemStage.Frame);
+        host.AddSystem(new GrappleRopeSystem(host.World, renderer), SystemStage.Frame);
         host.AddSystem(new HudUi(view.Ui, input, world.BlockActions, pilot, renderer.Atlas,
                                  Path.Combine(AppContext.BaseDirectory, "Resources", "Icons")), SystemStage.Frame);
         host.AddSystem(new JoiningScreen(view.Ui, net), SystemStage.Frame); // over everything until our player arrives

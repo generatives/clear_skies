@@ -37,6 +37,7 @@ public static class DedicatedServerGame
         host.AddSystem(world.Hierarchy, SystemStage.Simulation);
         host.AddSystem(world.PhysicsBody, SystemStage.Simulation);
         host.AddSystem(new PlayerMovementSystem(host.World, commands), SystemStage.Simulation);
+        host.AddSystem(new GrappleSystem(host.World, host.Physics), SystemStage.Simulation); // rope pulls, also before the step
         host.AddSystem(world.BlockActions, SystemStage.Simulation);
         var levers = new LeverControlSystem(host.World, commands);
         var wheels = new SteeringWheelControlSystem(host.World, commands);
@@ -98,6 +99,7 @@ public static class BotClientGame
         host.AddSystem(new OwnPlayerPrediction(net, host.World, world.Registry), SystemStage.Simulation); // its (idle) input to the Host
         host.AddSystem(world.PhysicsBody, SystemStage.Simulation);
         host.AddSystem(new PlayerMovementSystem(host.World, commands), SystemStage.Simulation);
+        host.AddSystem(new GrappleSystem(host.World, host.Physics), SystemStage.Simulation); // rope pulls, also before the step
         host.AddSystem(world.BlockActions, SystemStage.Simulation);
         var levers = new LeverControlSystem(host.World, commands);
         var wheels = new SteeringWheelControlSystem(host.World, commands);
