@@ -963,6 +963,33 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     let f = smoothstep(camera.fog.z, camera.fog.w, length(d));
     return vec4<f32>(applyWater(mix(applyHaze(lin(in.color * shade), d), skyColor(normalize(d)), f), d), 1.0);
 }
+
+// Particles (ParticleSystem): one camera-facing square per instance, 6 vertices. p.xyz: its centre in world space,
+// p.w: its size in blocks. color.rgb: sRGB, drawn unlit (flames glow).
+@vertex
+fn vs_particle(@builtin(vertex_index) vi: u32, @location(0) p: vec4<f32>, @location(1) color: vec4<f32>) -> VSOut {
+    var corners = array<vec2<f32>, 6>(vec2<f32>(-0.5, -0.5), vec2<f32>(0.5, -0.5), vec2<f32>(0.5, 0.5),
+                                      vec2<f32>(-0.5, -0.5), vec2<f32>(0.5, 0.5), vec2<f32>(-0.5, 0.5));
+    let c = corners[vi];
+    // The view matrix's rows are the camera's right, up and back axes in world space.
+    let right = vec3<f32>(camera.view[0].x, camera.view[1].x, camera.view[2].x);
+    let up    = vec3<f32>(camera.view[0].y, camera.view[1].y, camera.view[2].y);
+    let back  = vec3<f32>(camera.view[0].z, camera.view[1].z, camera.view[2].z);
+    let world = p.xyz + (right * c.x + up * c.y) * p.w;
+    var o: VSOut;
+    o.pos         = camera.proj * camera.view * vec4<f32>(world, 1.0);
+    o.worldPos    = world;
+    o.color       = color.rgb;
+    o.worldNormal = back;
+    o.localNormal = back;
+    o.uv          = vec3<f32>(0.0, 0.0, -1.0);
+    return o;
+}
+
+@fragment
+fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(applyFog(lin(in.color), in.worldPos), 1.0);
+}
 ";
 
     private readonly GpuContext _ctx;
@@ -982,6 +1009,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     private RenderPipeline* _hudPipeline;
     private RenderPipeline* _skyPipeline;
     private RenderPipeline* _cloudPipeline;
+    private RenderPipeline* _particlePipeline;
     private RenderPipeline* _modelPipeline;
     private RenderPipeline* _chunkPipeline;          // vs_chunk: chunk meshes (ChunkQuad instances)
     private RenderPipeline* _chunkWireframePipeline;
@@ -1072,6 +1100,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         _hudPipeline       = CreateMeshPipeline(PrimitiveTopology.TriangleList, CullMode.None, depthTest: false);
         _modelPipeline     = CreateMeshPipeline(PrimitiveTopology.TriangleList, CullMode.None, fragmentEntry: "fs_model");
         _cloudPipeline     = CreateCloudPipeline();
+        _particlePipeline  = CreateParticlePipeline();
         _chunkPipeline          = CreateChunkPipeline("vs_chunk", PrimitiveTopology.TriangleList, CullMode.Back, "fs_main");
         _chunkWireframePipeline = CreateChunkPipeline("vs_chunk_lines", PrimitiveTopology.LineList, CullMode.None, "fs_main");
         _chunkOverdrawPipeline  = CreateOverdrawPipeline();
@@ -1266,6 +1295,21 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
             ArrayStride = (ulong)sizeof(CloudLayer.CloudCell), StepMode = VertexStepMode.Instance, AttributeCount = 1, Attributes = &attr,
         };
         return CreatePipeline("vs_cloud", "fs_cloud", &vbLayout, PrimitiveTopology.TriangleList, CullMode.Back,
+                              depthWrite: true, CompareFunction.Greater);
+    }
+
+    /// <summary>The particle squares (vs_particle/fs_particle): no vertex buffer, one
+    /// <see cref="ParticleSystem.Instance"/> per particle, opaque and depth-writing like the world (no sorting).</summary>
+    private RenderPipeline* CreateParticlePipeline()
+    {
+        VertexAttribute* attrs = stackalloc VertexAttribute[2];
+        attrs[0] = new VertexAttribute { Format = VertexFormat.Float32x4, Offset = 0,  ShaderLocation = 0 };
+        attrs[1] = new VertexAttribute { Format = VertexFormat.Float32x4, Offset = 16, ShaderLocation = 1 };
+        var vbLayout = new VertexBufferLayout
+        {
+            ArrayStride = (ulong)sizeof(ParticleSystem.Instance), StepMode = VertexStepMode.Instance, AttributeCount = 2, Attributes = attrs,
+        };
+        return CreatePipeline("vs_particle", "fs_particle", &vbLayout, PrimitiveTopology.TriangleList, CullMode.None,
                               depthWrite: true, CompareFunction.Greater);
     }
 
@@ -1608,6 +1652,20 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         SetPipeline(WireframeMode ? _wireframePipeline : _pipeline);
     }
 
+    /// <summary>Draws the first <paramref name="count"/> particles in <paramref name="instances"/> (see
+    /// <see cref="ParticleSystem"/>) as camera-facing squares, depth-tested and depth-writing like the world.</summary>
+    public void DrawParticles(GpuBuffer instances, uint count)
+    {
+        if (OverdrawMode || count == 0 || _drawIndex >= MaxObjects) return;
+        SetPipeline(_particlePipeline);
+        uint dynOffset = StageModel(ModelUniform.Default(Mat4.Identity));
+        _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset);
+        _api.RenderPassEncoderSetVertexBuffer(_pass, 0, instances.Handle, 0, instances.SizeBytes);
+        _api.RenderPassEncoderDraw(_pass, 6, count, 0, 0);
+        _drawIndex++;
+        SetPipeline(WireframeMode ? _wireframePipeline : _pipeline);
+    }
+
     /// <summary>
     /// Fills every pixel the world didn't cover with the sky gradient and sun (see the shader's fs_sky). Call after
     /// the world draws, so the depth test skips covered pixels, and before overlays and the HUD.
@@ -1850,6 +1908,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         if (_atlasTexture     != null) _api.TextureRelease(_atlasTexture);
         if (_modelPipeline      != null) _api.RenderPipelineRelease(_modelPipeline);
         if (_cloudPipeline      != null) _api.RenderPipelineRelease(_cloudPipeline);
+        if (_particlePipeline   != null) _api.RenderPipelineRelease(_particlePipeline);
         if (_skyPipeline        != null) _api.RenderPipelineRelease(_skyPipeline);
         if (_hudPipeline        != null) _api.RenderPipelineRelease(_hudPipeline);
         if (_wireframePipeline  != null) _api.RenderPipelineRelease(_wireframePipeline);

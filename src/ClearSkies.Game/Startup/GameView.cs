@@ -68,6 +68,7 @@ public sealed class GameView : IDisposable
 
     private readonly string? _lightingPreset;
     private CloudRenderSystem? _clouds;
+    private ParticleSystem? _particles;
     private UiRenderSystem? _uiRenderer;
 
     /// <summary>
@@ -93,10 +94,14 @@ public sealed class GameView : IDisposable
         SkySettings.CloudSeaAltitude = HeartGrid.CloudSeaAltitude; // below its lowest islands
         _clouds = new CloudRenderSystem(renderer, new HeartCloudDensity(world.Seed));
         _uiRenderer = new UiRenderSystem(Ui, renderer);
+        _particles = new ParticleSystem(renderer);
+        host.AddSystem(new ThrusterFlameSystem(host.World, _particles), SystemStage.Frame);
+        host.AddSystem((ISystem)_particles, SystemStage.Frame);
         var chunks = new ChunkRenderSystem(host.World, renderer, volume);
         host.AddSystem(chunks, SystemStage.RenderWorld);
         host.AddSystem(new ModelRenderSystem(host.World, renderer, host.Time), SystemStage.RenderWorld);
         host.AddSystem(_clouds, SystemStage.RenderWorld);
+        host.AddSystem((IRenderSystem)_particles, SystemStage.RenderWorld);
         host.AddSystem(new SkyRenderSystem(renderer), SystemStage.RenderSky);
         host.AddSystem(new WireframeRenderSystem(host.World, renderer), SystemStage.RenderOverlay);
         host.AddSystem(chunks, SystemStage.RenderTransparent);
@@ -108,6 +113,7 @@ public sealed class GameView : IDisposable
     {
         _uiRenderer?.Dispose();
         _clouds?.Dispose();
+        _particles?.Dispose();
         PlayerModel.Dispose();
         BlockModels.Dispose();
         Ui.Dispose();
