@@ -15,9 +15,9 @@ public enum ThrustAxis : byte
 }
 
 /// <summary>
-/// What a ship's own controls ask of it: the real state its <see cref="Lever"/>s and <see cref="SteeringWheel"/>s show
-/// and set, like a UI over it. Set by the SetShipThrust and SetShipTurn commands, and read by
-/// <see cref="AirshipFlightSystem"/>. Lives on the volume's root entity (a grid, or the static world, where it does
+/// What a ship's own controls ask of it: the real state its <see cref="Lever"/>s, <see cref="SteeringWheel"/>s and
+/// <see cref="Toggle"/>s show and set, like a UI over it. Set by the SetShipThrust, SetShipTurn and SetShipAnchored
+/// commands, and read by <see cref="AirshipFlightSystem"/> and <see cref="AnchorSystem"/>. Lives on the volume's root entity (a grid, or the static world, where it does
 /// nothing); a volume without one asks for nothing.
 ///
 /// Every lever on one axis shows that axis' setting (see <see cref="LeverControlSystem"/>) and every wheel shows the
@@ -31,6 +31,10 @@ public struct ShipControls
 
     /// <summary>Turn setting, -1 to 1: clockwise seen from above (to starboard) for positive.</summary>
     public float Turn;
+
+    /// <summary>Whether the ship's toggles are on: its anchors hold it to what's beside them (see
+    /// <see cref="AnchorSystem"/>, which turns this back off when nothing is in reach).</summary>
+    public bool Anchored;
 
     public readonly float Thrust(ThrustAxis axis) => axis switch
     {

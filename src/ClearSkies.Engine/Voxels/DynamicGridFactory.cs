@@ -32,11 +32,12 @@ public static class DynamicGridFactory
         entity.Set(new InterpolatedTransform()); // moved by ticks, drawn between them (TickInterpolationSystem)
         foreach (var v in description.Voxels) volume.SetBlock(v.X, v.Y, v.Z, v.Id, v.Orientation);
         entity.Set(description.Controls);
+        if (description.Anchors.Count > 0) entity.Set(new AnchorLinks { All = new List<AnchorLink>(description.Anchors) });
         entity.Set(new BodyStateOverride { LinearVelocity = b.LinearVelocity, AngularVelocity = b.AngularVelocity });
         return entity;
     }
 
-    /// <summary>A live grid's description: its blocks, controls, lock, pose and velocities (from its body if it
+    /// <summary>A live grid's description: its blocks, controls, anchor, lock, pose and velocities (from its body if it
     /// has one, else its Transform).</summary>
     public static GridDescription Describe(Entity entity, PhysicsWorld physics)
     {
@@ -46,6 +47,7 @@ public static class DynamicGridFactory
             Voxels = GridSerializer.Voxels(volume),
             Locked = entity.Get<DynamicGrid>().Locked,
             Controls = entity.Has<ShipControls>() ? entity.Get<ShipControls>() : default,
+            Anchors = entity.Has<AnchorLinks>() ? new List<AnchorLink>(entity.Get<AnchorLinks>().All) : new List<AnchorLink>(),
         };
         if (entity.Has<PhysicsBodyComponent>())
         {

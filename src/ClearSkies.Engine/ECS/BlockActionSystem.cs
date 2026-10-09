@@ -43,7 +43,7 @@ public sealed class BlockActionSystem : ISystem, IDisposable, IDebugUiSystem
 
     private static readonly BlockId[] Placeable =
         { BlockId.Stone, BlockId.Wood, BlockId.Grass, BlockId.Dirt, BlockId.Lamp, BlockId.RedLamp, BlockId.GreenLamp,
-          BlockId.BlueLamp, BlockId.Fan, BlockId.Buoyant, BlockId.Lever, BlockId.SteeringWheel, BlockId.Glass, BlockId.Water,
+          BlockId.BlueLamp, BlockId.Fan, BlockId.Buoyant, BlockId.Lever, BlockId.SteeringWheel, BlockId.Toggle, BlockId.Anchor, BlockId.Glass, BlockId.Water,
           BlockId.TallGrass, BlockId.RedMushroom, BlockId.Pebbles };
     private static readonly string[] PlaceableNames = Array.ConvertAll(Placeable, id => BlockRegistry.Get(id).Name);
 

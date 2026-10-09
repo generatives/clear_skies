@@ -59,3 +59,17 @@ public struct SteeringWheel
     /// <summary>How far a wheel is turned (clockwise, radians) for its ship's current turn setting.</summary>
     public static float Angle(in BlockRef wheel) => ShipControls.Of(wheel.Volume).Turn * MaxAngle;
 }
+
+/// <summary>A toggle: a red lever the player flicks on or off (see <see cref="ToggleControlSystem"/>), showing and setting
+/// whether its ship is anchored (see <see cref="ShipControls.Anchored"/>): leaning to its north face when on, to its
+/// south face when off. It holds no setting of its own.</summary>
+public struct Toggle
+{
+}
+
+/// <summary>Marks an Anchor block entity: while its ship is anchored (see <see cref="ShipControls.Anchored"/>),
+/// <see cref="AnchorSystem"/> welds the ship to the nearest terrain or other ship within
+/// <see cref="AnchorSystem.Reach"/> of an anchor.</summary>
+public struct Anchor
+{
+}
