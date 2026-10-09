@@ -12,14 +12,14 @@ public class GrappleTests
 {
     private const float Up = MathF.PI / 2 - 0.01f; // as high as the view goes (LookInputSystem)
 
-    /// <summary>One tick with E pressed (or still held) and <paramref name="also"/> held, looking at
-    /// <paramref name="pitch"/>.</summary>
+    /// <summary>One tick with R pressed (or not, the rope then holding on its own) and <paramref name="also"/> held,
+    /// looking at <paramref name="pitch"/>.</summary>
     private static void Grapple(HeadlessScene scene, Entity player, bool press, float pitch = Up,
                                 PlayerButtons also = PlayerButtons.None)
     {
         player.Get<PlayerInput>() = new PlayerInput
         {
-            Held = PlayerButtons.Grapple | also, Pressed = press ? PlayerButtons.Grapple : PlayerButtons.None,
+            Held = (press ? PlayerButtons.Grapple : PlayerButtons.None) | also, Pressed = press ? PlayerButtons.Grapple : PlayerButtons.None,
             Pitch = pitch, Aiming = true,
         };
         scene.Tick();
@@ -65,14 +65,16 @@ public class GrappleTests
     }
 
     [Fact]
-    public void LettingGoOfRReleasesTheRope()
+    public void PressingRAgainReleasesTheRope()
     {
         var (scene, player) = UnderAnOverhang();
         using var _ = scene;
         Hold(scene, player, 60);
-        player.Get<PlayerInput>() = new PlayerInput { Pitch = Up, Aiming = true };
-        scene.Tick();
+        Assert.True(player.Has<Grapple>(), "holds with R up");
+        Grapple(scene, player, press: true);
         Assert.False(player.Has<Grapple>());
+        Hold(scene, player, 1);
+        Assert.False(player.Has<Grapple>(), "the same press doesn't fire another");
         Assert.False(player.Get<CharacterControllerComponent>().Character.Grappling);
         float y = Position(player).Y;
         scene.Tick(30);

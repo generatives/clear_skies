@@ -41,7 +41,7 @@ WASD to move and Mouse to look around
 Space to jump
 Ctrl to crouch, slows movement and prevents walking off edges
 Shift to sprint
-Hold E to fire a grapple rope at the block you're looking at (terrain or a ship, up to 40 blocks away) and swing from it; let go of E to release. While hanging, hold Space to climb the rope and Ctrl to let it out; WASD steers the swing
+Press R to fire a grapple rope at the block you're looking at (terrain or a ship, up to 40 blocks away) and swing from it; press R again to let go. While hanging, hold Space to climb the rope and Ctrl to let it out; WASD steers the swing
 
 #### Pilot Mode
 If you have selected an airship (recently spawned, walked on, or edited) you can press "F" to enter pilot mode. Doesn't work in multiplayer. You will be locked into an orbiting camera angle and can control the ship.

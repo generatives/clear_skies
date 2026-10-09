@@ -28,10 +28,9 @@ public struct Grapple
 }
 
 /// <summary>
-/// Each tick, before physics: grapple ropes, from every walking player's <see cref="PlayerInput"/>. Pressing E
+/// Each tick, before physics: grapple ropes, from every walking player's <see cref="PlayerInput"/>. Pressing R
 /// (<see cref="PlayerButtons.Grapple"/>) fires a rope from the eye where the player looks, up to <see cref="Reach"/>, and
-/// hooks it onto the first block it meets, on the terrain or a ship; the rope holds while E is held and lets go on
-/// release. Holding Space climbs the rope (shortens it) and holding Ctrl lets it out (lengthens it), at
+/// hooks it onto the first block it meets, on the terrain or a ship; the rope holds until R is pressed again. Holding Space climbs the rope (shortens it) and holding Ctrl lets it out (lengthens it), at
 /// <see cref="ClimbSpeed"/>, between <see cref="MinimumLength"/> and <see cref="Reach"/>. It also lets go when the player flies, uses a control or pilots, or what it's hooked to is gone.
 ///
 /// The rope isn't a rigid constraint: it's a spring that only pulls, from its hooked length, with a little damping. So
@@ -88,7 +87,7 @@ public sealed class GrappleSystem : ISystem
             bool able = !e.Has<FreeFlying>() && !e.Has<LookLockedComponent>() && !e.Has<Piloting>();
             if (e.Has<Grapple>())
             {
-                if (!able || !input.IsHeld(PlayerButtons.Grapple) || !Hooked(e.Get<Grapple>())) _released.Add(e);
+                if (!able || input.WasPressed(PlayerButtons.Grapple) || !Hooked(e.Get<Grapple>())) _released.Add(e);
                 else
                 {
                     Climb(e, input, dt);
