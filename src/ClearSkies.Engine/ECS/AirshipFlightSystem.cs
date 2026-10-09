@@ -73,8 +73,9 @@ public sealed class AirshipFlightSystem : ISystem
     /// <summary>This tick's Fan and Buoyant blocks of one volume, by cell and orientation.</summary>
     private sealed class ShipBlocks
     {
-        public readonly List<BlockRef> Fans     = new();
-        public readonly List<BlockRef> Buoyants = new();
+        public readonly List<BlockRef> Fans        = new();
+        public readonly List<Entity>   FanEntities = new(); // Fans' entities, in the same order
+        public readonly List<BlockRef> Buoyants    = new();
     }
     private readonly Dictionary<ChunkVolume, ShipBlocks> _blocksByVolume = new();
     private static readonly ShipBlocks NoBlocks = new();
@@ -294,6 +295,7 @@ public sealed class AirshipFlightSystem : ISystem
                 for (int i = 0; i < blocks.Fans.Count; i++)
                 {
                     float thrust = _fanThrusts[i];
+                    blocks.FanEntities[i].Get<Fan>().Thrust = thrust / MathF.Max(_fanMaxForce, 1e-3f);
                     if (thrust < 1e-3f) continue;
                     _physics.ApplyLinearImpulse(body, _fanDirs[i] * (thrust * dt), _fanOffsets[i]);
                     deliveredForceY += _fanDirs[i].Y * thrust;
@@ -343,13 +345,17 @@ public sealed class AirshipFlightSystem : ISystem
         foreach (var blocks in _blocksByVolume.Values)
         {
             blocks.Fans.Clear();
+            blocks.FanEntities.Clear();
             blocks.Buoyants.Clear();
         }
 
         foreach (ref readonly Entity e in _fans.GetEntities())
         {
+            e.Get<Fan>().Thrust = 0f; // off unless allocated thrust below
             ref readonly var block = ref e.Get<BlockRef>();
-            BlocksOf(block.Volume).Fans.Add(block);
+            var blocks = BlocksOf(block.Volume);
+            blocks.Fans.Add(block);
+            blocks.FanEntities.Add(e);
         }
         foreach (ref readonly Entity e in _buoyants.GetEntities())
         {
