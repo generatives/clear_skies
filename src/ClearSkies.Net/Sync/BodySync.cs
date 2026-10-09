@@ -31,6 +31,10 @@ public sealed class BodySync : ISystem, IDebugUiSystem
 {
     public const int SnapshotsPerPacket = 20;
 
+    /// <summary>A frame stops taking snapshots before it passes this many bytes, under an unreliable packet's limit (a
+    /// ship's snapshot grows with its synced state).</summary>
+    public const int MaxFrameBytes = 1000;
+
     private readonly SimulationParticipant _net;
     private readonly PhysicsWorld _physics;
     private readonly EntitySet _players;
@@ -89,13 +93,17 @@ public sealed class BodySync : ISystem, IDebugUiSystem
 
     public delegate void PacketSender(ReadOnlySpan<byte> packet);
 
-    /// <summary>Writes <paramref name="snapshots"/> as frames of up to <see cref="SnapshotsPerPacket"/>, each sent
-    /// as it's written.</summary>
+    /// <summary>Writes <paramref name="snapshots"/> as frames of up to <see cref="SnapshotsPerPacket"/> and
+    /// <see cref="MaxFrameBytes"/> (or one snapshot, whatever its size), each sent as it's written.</summary>
     public static void WriteFrames(NetWriter writer, uint tick, IReadOnlyList<BodySnapshot> snapshots, PacketSender send)
     {
-        for (int start = 0; start < snapshots.Count; start += SnapshotsPerPacket)
+        for (int start = 0, count; start < snapshots.Count; start += count)
         {
-            int count = System.Math.Min(SnapshotsPerPacket, snapshots.Count - start);
+            count = 1;
+            for (int bytes = snapshots[start].EncodedSize;
+                 count < SnapshotsPerPacket && start + count < snapshots.Count
+                 && bytes + snapshots[start + count].EncodedSize <= MaxFrameBytes; count++)
+                bytes += snapshots[start + count].EncodedSize;
             writer.Clear();
             writer.WriteByte((byte)MessageKind.StateFrame);
             writer.WriteUInt32(tick);
@@ -138,8 +146,17 @@ public sealed class BodySync : ISystem, IDebugUiSystem
         ref readonly var pb = ref e.Get<PhysicsBodyComponent>();
         var body = pb.Body;
         var (p, q) = _physics.GetBodyPose(body);
+        // The synced state SyncedStateSystem has gathered since the last snapshot.
+        SyncedValue[]? state = null;
+        if (e.Has<PendingSyncedState>() && e.Get<PendingSyncedState>().Values is { Count: > 0 } pending)
+        {
+            state = pending.ToArray();
+            pending.Clear();
+        }
         return new BodySnapshot
         {
+            Flags = state != null ? SnapshotFlags.HasState : SnapshotFlags.None,
+            State = state,
             Entity = e.Get<EntityId>(),
             Epoch = e.Get<NetOwner>().Epoch,
             Position = PhysicsConv.ToBepu(pb.EntityPosition(p, q)), // its block space, which edits don't move
@@ -168,7 +185,7 @@ public sealed class BodySync : ISystem, IDebugUiSystem
             if (!_net.Registry.TryGet(s.Entity, out var e)) continue; // not spawned here (yet)
             if (e.Has<LocalPlayer>()) { _net.Prediction?.Answer(s); continue; } // ours, predicted: how the authority has it
             if (!e.Has<RemoteBody>()) continue; // ours: we're the truth
-            e.Get<RemoteBody>().Buffer.Add(tick, s, _net.Clock.Tick);
+            e.Get<RemoteBody>().Buffer.Add(tick, s, _net.Clock.Tick); // with its synced state, for SyncedStateSystem
         }
     }
 

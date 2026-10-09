@@ -15,7 +15,13 @@ public enum SnapshotFlags : byte
     /// <summary>A player played on another machine: the last of its inputs applied (<see cref="BodySnapshot.Input"/>)
     /// follows, so it can check its prediction.</summary>
     HasInput = 4,
+    /// <summary>Synced block entity state on it follows (<see cref="BodySnapshot.State"/>).</summary>
+    HasState = 8,
 }
+
+/// <summary>One synced field of a block entity on a ship (see <see cref="ClearSkies.Engine.Entities.SyncedFields"/>):
+/// the block's cell in the ship, the field's ID and its value.</summary>
+public readonly record struct SyncedValue(short X, short Y, short Z, byte Field, byte Value);
 
 /// <summary>A player's look direction, streamed with their body.</summary>
 public readonly record struct LookAngles(float Yaw, float Pitch);
@@ -36,6 +42,9 @@ public struct BodySnapshot
     public LookAngles Look;
     /// <summary>With <see cref="SnapshotFlags.HasInput"/>: the number of the player's last input applied.</summary>
     public uint Input;
+    /// <summary>With <see cref="SnapshotFlags.HasState"/>: synced block entity fields that changed (or all of them, now
+    /// and then).</summary>
+    public SyncedValue[]? State;
 
     public readonly void Write(NetWriter w)
     {
@@ -53,7 +62,22 @@ public struct BodySnapshot
             w.WriteInt16(ToShort(Look.Pitch, MathF.PI));
         }
         if ((Flags & SnapshotFlags.HasInput) != 0) w.WriteUInt32(Input);
+        if ((Flags & SnapshotFlags.HasState) != 0)
+        {
+            var state = State ?? Array.Empty<SyncedValue>();
+            w.WriteUInt16((ushort)state.Length);
+            foreach (var v in state)
+            {
+                w.WriteInt16(v.X); w.WriteInt16(v.Y); w.WriteInt16(v.Z);
+                w.WriteByte(v.Field); w.WriteByte(v.Value);
+            }
+        }
     }
+
+    /// <summary>How many bytes <see cref="Write"/> writes.</summary>
+    public readonly int EncodedSize =>
+        43 + ((Flags & SnapshotFlags.HasLook) != 0 ? 4 : 0) + ((Flags & SnapshotFlags.HasInput) != 0 ? 4 : 0)
+           + ((Flags & SnapshotFlags.HasState) != 0 ? 2 + 8 * (State?.Length ?? 0) : 0);
 
     public static BodySnapshot Read(ref NetReader r)
     {
@@ -71,6 +95,12 @@ public struct BodySnapshot
         if ((s.Flags & SnapshotFlags.HasLook) != 0)
             s.Look = new LookAngles(FromShort(r.ReadInt16(), MathF.PI * 4), FromShort(r.ReadInt16(), MathF.PI));
         if ((s.Flags & SnapshotFlags.HasInput) != 0) s.Input = r.ReadUInt32();
+        if ((s.Flags & SnapshotFlags.HasState) != 0)
+        {
+            s.State = new SyncedValue[r.ReadUInt16()];
+            for (int i = 0; i < s.State.Length; i++)
+                s.State[i] = new SyncedValue(r.ReadInt16(), r.ReadInt16(), r.ReadInt16(), r.ReadByte(), r.ReadByte());
+        }
         return s;
     }
 

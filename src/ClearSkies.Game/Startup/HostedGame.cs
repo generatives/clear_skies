@@ -73,6 +73,7 @@ internal static class HostedGame
         host.AddSystem(host.Physics, SystemStage.Simulation); // one step
         host.AddSystem(new PhysicsTransformSyncSystem(host.World, host.Physics), SystemStage.Simulation); // body poses -> Transform
         host.AddSystem(world.RemoteBodies, SystemStage.Simulation); // ships and players simulated elsewhere -> Transform, about 100 ms behind
+        host.AddSystem(world.SyncedState, SystemStage.Simulation); // their block entities' synced state, as played back
         host.AddSystem(world.Hierarchy, SystemStage.Simulation); // e.g. volume Transforms -> chunk Transforms
         host.AddSystem(new SupportSystem(host.World, host.Physics), SystemStage.Simulation); // what each character stands on or rides with
         host.AddSystem(world.Interpolation, SystemStage.Simulation); // records this tick's poses

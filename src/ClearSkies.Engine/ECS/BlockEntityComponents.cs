@@ -27,7 +27,7 @@ public struct BlockRef
 public struct Fan
 {
     /// <summary>How hard it pushed last tick, as a fraction (0-1) of its max: 0 when off. Set by the flight system on
-    /// the machine flying its ship, so other players' ships read 0.</summary>
+    /// the machine flying its ship, and synced to everyone else (see <see cref="Entities.SyncedFields"/>).</summary>
     public float Thrust;
 }
 

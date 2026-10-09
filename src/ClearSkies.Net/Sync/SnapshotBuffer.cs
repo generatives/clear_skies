@@ -76,6 +76,9 @@ public sealed class SnapshotBuffer
     public uint LatestTick => _samples.Count > 0 ? _samples[^1].Tick : 0;
     public BodySnapshot? Latest => _samples.Count > 0 ? _samples[^1].Snapshot : null;
 
+    /// <summary>The snapshots held, oldest tick first (at most <see cref="Capacity"/>).</summary>
+    public IReadOnlyList<(uint Tick, BodySnapshot Snapshot)> Samples => _samples;
+
     /// <summary>Adds a snapshot taken on <paramref name="tick"/> that arrived on our tick <paramref name="arrived"/>;
     /// old or duplicate ticks (reordered packets) are ignored.</summary>
     public bool Add(uint tick, in BodySnapshot snapshot, double arrived)
@@ -201,4 +204,7 @@ public struct RemoteBody
     /// when the buffer's delay leaps (<see cref="SnapshotBuffer.UpdateDelay"/>), where smoothing would slide it across
     /// the gap.</summary>
     public bool TeleportNext;
+    /// <summary>The tick of the last snapshot whose synced block entity state has been applied (see
+    /// <see cref="SyncedStateSystem"/>).</summary>
+    public uint StateApplied;
 }
