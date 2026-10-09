@@ -2,6 +2,7 @@ using System.Numerics;
 using ClearSkies.Engine.Commands.Handlers;
 using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Entities;
+using ClearSkies.Engine.Input;
 using ClearSkies.Engine.Voxels;
 using DefaultEcs;
 using Xunit;
@@ -110,5 +111,133 @@ public class AirResistanceTests
         scene.Tick(60 * 3);
         var v = player.Get<CharacterControllerComponent>().Character.LinearVelocity;
         Assert.True(v.X > 1f, $"drifting at {v.X} m/s");
+    }
+
+    /// <summary>A player dropped high in still air, holding <paramref name="held"/> and looking ahead (−z) at
+    /// <paramref name="pitch"/>, for <paramref name="seconds"/>; their velocity then, and whether they're gliding.</summary>
+    private static (Vector3 Velocity, bool Gliding) Drop(PlayerButtons held, float pitch, float seconds)
+    {
+        using var scene = new HeadlessScene();
+        scene.AddAirResistance();
+        var player = scene.SpawnLocalPlayer(new Vector3(0, 2000, 0));
+        for (int t = 0; t < seconds * 60; t++)
+        {
+            player.Get<PlayerInput>() = new PlayerInput { Held = held, Pitch = pitch };
+            scene.Tick();
+        }
+        var character = player.Get<CharacterControllerComponent>().Character;
+        return (character.LinearVelocity, character.Gliding);
+    }
+
+    [Fact]
+    public void HoldingSpaceWhileFallingGlidesAheadSlowly()
+    {
+        var (falling, _) = Drop(PlayerButtons.None, 0f, 10f);
+        var (gliding, isGliding) = Drop(PlayerButtons.Up, 0f, 10f);
+        Assert.True(isGliding);
+        Assert.InRange(-gliding.Y, 0.3f, 3f); // sinking gently, against 15–30 m/s falling
+        Assert.True(-gliding.Y < -falling.Y / 5, $"gliding sinks at {-gliding.Y} m/s, falling at {-falling.Y}");
+        Assert.True(-gliding.Z > 2f * -gliding.Y, $"gliding {-gliding.Z} m/s ahead while sinking {-gliding.Y} m/s");
+    }
+
+    [Fact]
+    public void DivingPicksUpSpeed()
+    {
+        var (gliding, _) = Drop(PlayerButtons.Up, 0f, 10f);
+        var (diving, isGliding) = Drop(PlayerButtons.Up, -1.2f, 10f);
+        Assert.True(isGliding);
+        Assert.True(diving.Length() > 2f * gliding.Length(), $"diving at {diving.Length()} m/s, gliding at {gliding.Length()}");
+    }
+
+    /// <summary>A gliding player high in still air, run for <paramref name="seconds"/> at each look in turn.</summary>
+    private static Entity Glide(HeadlessScene scene, Entity player, float yaw, float pitch, float seconds)
+    {
+        for (int t = 0; t < seconds * 60; t++)
+        {
+            player.Get<PlayerInput>() = new PlayerInput { Held = PlayerButtons.Up, Yaw = yaw, Pitch = pitch };
+            scene.Tick();
+        }
+        return player;
+    }
+
+    [Fact]
+    public void AGliderBanksRoundToFollowTheLook()
+    {
+        using var scene = new HeadlessScene();
+        scene.AddAirResistance();
+        var player = scene.SpawnLocalPlayer(new Vector3(0, 2000, 0));
+        Glide(scene, player, 0f, 0f, 10f); // gliding ahead, along −z
+        Glide(scene, player, MathF.PI / 2, 0f, 1f); // looking left, along −x
+        var v = player.Get<CharacterControllerComponent>().Character.LinearVelocity;
+        Assert.True(-v.X > 4f * MathF.Abs(v.Z), $"a second after looking left, moving ({v.X}, {v.Z})");
+    }
+
+    [Fact]
+    public void PullingUpOutOfADiveClimbsUntilTheSpeedRunsOut()
+    {
+        using var scene = new HeadlessScene();
+        scene.AddAirResistance();
+        var player = scene.SpawnLocalPlayer(new Vector3(0, 2000, 0));
+        var character = () => player.Get<CharacterControllerComponent>().Character;
+        Glide(scene, player, 0f, -1f, 6f);
+        float bottom = character().Position.Y, fast = character().LinearVelocity.Length();
+        float top = bottom, slowest = fast;
+        for (int i = 0; i < 4 * 60; i++)
+        {
+            Glide(scene, player, 0f, 0.8f, 1f / 60);
+            top = MathF.Max(top, character().Position.Y);
+            slowest = MathF.Min(slowest, character().LinearVelocity.Length());
+        }
+        Assert.True(top > bottom + 5f, $"climbed {top - bottom} m");
+        Assert.True(slowest < fast / 3, $"slowed from {fast} to {slowest} m/s");
+        Assert.True(character().Position.Y < top - 1f, "kept climbing with no speed left");
+        Assert.True(-character().LinearVelocity.Z > 0f, "slid backwards after the climb");
+    }
+
+    [Fact]
+    public void ShiftInTheAirBoostsAlongTheWayTheCharacterMovesOncePerJump()
+    {
+        using var scene = new HeadlessScene();
+        scene.AddAirResistance();
+        var player = scene.SpawnLocalPlayer(new Vector3(0, 2000, 0));
+        var character = () => player.Get<CharacterControllerComponent>().Character;
+        Glide(scene, player, 0f, 0f, 10f);
+        var before = character().LinearVelocity;
+        player.Get<PlayerInput>() = new PlayerInput { Held = PlayerButtons.Up | PlayerButtons.Down, Pressed = PlayerButtons.Down };
+        scene.Tick();
+        Glide(scene, player, 0f, 0f, 0.25f);
+        var after = character().LinearVelocity;
+        Assert.True(after.Length() > before.Length() + 5f, $"boosted from {before.Length()} to {after.Length()} m/s");
+        Assert.True(Vector3.Dot(Vector3.Normalize(after), Vector3.Normalize(before)) > 0.95f, $"boosted from {before} to {after}");
+
+        // Spent until landing.
+        Glide(scene, player, 0f, 0f, 3f);
+        before = character().LinearVelocity;
+        player.Get<PlayerInput>() = new PlayerInput { Held = PlayerButtons.Up | PlayerButtons.Down, Pressed = PlayerButtons.Down };
+        scene.Tick();
+        Glide(scene, player, 0f, 0f, 0.25f);
+        Assert.True(character().LinearVelocity.Length() < before.Length() + 1f, "boosted twice in one flight");
+    }
+
+    [Fact]
+    public void TheGliderOpensOnlyOnTheWayDownAndClosesOnLanding()
+    {
+        using var scene = new HeadlessScene();
+        scene.AddAirResistance();
+        scene.SpawnPlatform(new Vector3(-4, 0, -4), 16);
+        var player = scene.SpawnLocalPlayer(new Vector3(0, 1.5f, 0));
+        var character = () => player.Get<CharacterControllerComponent>().Character;
+        Assert.True(scene.TickUntil(() => character().Supported, 120));
+
+        // Space held from the jump: rising, no glider; on the way down, it opens.
+        player.Get<PlayerInput>() = new PlayerInput { Held = PlayerButtons.Up, Pressed = PlayerButtons.Up };
+        scene.Tick();
+        player.Get<PlayerInput>() = new PlayerInput { Held = PlayerButtons.Up };
+        scene.Tick(3);
+        Assert.False(character().Gliding);
+        Assert.True(scene.TickUntil(() => character().Gliding, 120));
+        Assert.True(scene.TickUntil(() => character().Supported, 600));
+        scene.Tick();
+        Assert.False(character().Gliding);
     }
 }
