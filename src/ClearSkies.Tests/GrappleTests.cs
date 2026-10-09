@@ -162,4 +162,26 @@ public class GrappleTests
         Hold(scene, player, 30, PlayerButtons.Right); // facing -Z, so right is +X
         Assert.True(Position(player).X - x > 0.3f, $"moved {Position(player).X - x} blocks");
     }
+
+    [Theory]
+    [InlineData(PlayerButtons.Up)]
+    [InlineData(PlayerButtons.Crouch)]
+    public void StoppingAClimbOrLettingOutBarelyBounces(PlayerButtons keys)
+    {
+        var (scene, player) = UnderAnOverhang();
+        using var _ = scene;
+        Hold(scene, player, 60 * 3);
+        Hold(scene, player, 60, keys);
+        var ys = new List<float>();
+        for (int i = 0; i < 60 * 3; i++)
+        {
+            Hold(scene, player, 1);
+            ys.Add(Position(player).Y);
+        }
+        float rest = ys[^1];
+        float overshoot = keys == PlayerButtons.Up ? ys.Max() - rest : rest - ys.Min();
+        int settled = ys.FindLastIndex(y => MathF.Abs(y - rest) > 0.03f) + 1;
+        Assert.True(overshoot < 0.2f, $"overshot by {overshoot} blocks");
+        Assert.True(settled < 20, $"settled after {settled} ticks");
+    }
 }

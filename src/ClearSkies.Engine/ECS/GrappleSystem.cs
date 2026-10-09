@@ -23,6 +23,9 @@ public struct Grapple
     /// <summary>How long the rope is slack: it only pulls when stretched past this.</summary>
     public float Length;
 
+    /// <summary>Whether the player climbed the rope last tick (see <c>GrappleSystem</c>).</summary>
+    public bool Climbing;
+
     /// <summary>Where the hook is in the world, with the anchor at <paramref name="anchor"/>.</summary>
     public readonly Vector3D<float> WorldPoint(in Transform anchor) => anchor.Position + Vec.Rotate(anchor.Rotation, LocalPoint);
 }
@@ -35,7 +38,7 @@ public struct Grapple
 ///
 /// The rope isn't a rigid constraint: it's a spring that only pulls, from its hooked length, with a little damping. So
 /// it's slack when the player is closer to the hook than that, and stretches a little under load: hanging still, about
-/// (gravity / <see cref="Stiffness"/>) ≈ 0.2 blocks, more at the bottom of a fast swing. The pull is a velocity change on
+/// (gravity / <see cref="Stiffness"/>) ≈ 0.1 blocks, more at the bottom of a fast swing. The pull is a velocity change on
 /// the character each tick, and an equal and opposite impulse on a ship it's hooked to that's simulated here, at the
 /// hook, so swinging from a ship tugs it a little. While hooked, the character's air control doesn't brake or bleed off
 /// its swing (<see cref="Physics.Characters.CharacterControllers.CharacterController.Grappling"/>), though WASD still
@@ -51,11 +54,11 @@ public sealed class GrappleSystem : ISystem
 
     /// <summary>The rope's pull per block of stretch, as an acceleration (per second squared): its spring constant
     /// over the player's mass, so it feels the same at any mass.</summary>
-    public const float Stiffness = 80f;
+    public const float Stiffness = 200f;
 
     /// <summary>The rope's damping of stretching and springing back, as an acceleration per unit speed (per second):
-    /// about a quarter of critical damping at <see cref="Stiffness"/>, so it's springy but settles.</summary>
-    public const float Damping = 4.5f;
+    /// most of critical damping at <see cref="Stiffness"/>, so it gives a little but barely bounces.</summary>
+    public const float Damping = 24f;
 
     /// <summary>The most the rope pulls, as an acceleration, so a long stretch (a ship pulling away) can't fling the
     /// player.</summary>
@@ -90,8 +93,8 @@ public sealed class GrappleSystem : ISystem
                 if (!able || input.WasPressed(PlayerButtons.Grapple) || !Hooked(e.Get<Grapple>())) _released.Add(e);
                 else
                 {
-                    Climb(e, input, dt);
-                    Pull(e, dt);
+                    float reeling = Climb(e, input, dt);
+                    Pull(e, dt, reeling);
                 }
             }
             else if (able && input.WasPressed(PlayerButtons.Grapple) && input.Aiming)
@@ -131,32 +134,38 @@ public sealed class GrappleSystem : ISystem
     }
 
     /// <summary>Shortens the rope while Space is held, lengthens it while Ctrl is. Climbing a slack rope starts from
-    /// where the player is, so it takes up the slack at once rather than after it.</summary>
-    private static void Climb(Entity player, in PlayerInput input, float dt)
+    /// where the player is, so it takes up the slack at once rather than after it. Returns how fast the rope's
+    /// length changes (blocks per second, negative climbing).</summary>
+    private static float Climb(Entity player, in PlayerInput input, float dt)
     {
         float climb = input.Axis(PlayerButtons.Up, PlayerButtons.Crouch);
-        if (climb == 0f) return;
         ref var g = ref player.Get<Grapple>();
+        if (climb == 0f) return 0f;
+        float before = g.Length;
         if (climb > 0f)
         {
             var hook = g.WorldPoint(g.Anchor.Get<Transform>());
-            float distance = Vector3D.Distance(player.Get<Transform>().Position, hook);
-            g.Length = MathF.Max(MinimumLength, MathF.Min(g.Length, distance) - ClimbSpeed * dt);
+            before = MathF.Min(g.Length, Vector3D.Distance(player.Get<Transform>().Position, hook));
+            g.Length = MathF.Max(MinimumLength, before - ClimbSpeed * dt);
         }
         else g.Length = MathF.Min(Reach, g.Length + ClimbSpeed * dt);
+        return (g.Length - before) / dt;
     }
 
-    private void Pull(Entity player, float dt)
+    /// <param name="reeling">How fast the rope's length is changing (see <see cref="Climb"/>): damping acts on how
+    /// fast the stretch changes, so climbing at a steady speed doesn't stretch the rope further, and stopping has no
+    /// built-up stretch to spring back from.</param>
+    private void Pull(Entity player, float dt, float reeling)
     {
-        ref readonly var g = ref player.Get<Grapple>();
+        ref var g = ref player.Get<Grapple>();
         var character = player.Get<CharacterControllerComponent>().Character;
         var hook = PhysicsConv.ToBepu(g.WorldPoint(g.Anchor.Get<Transform>()));
         var toHook = hook - character.Position;
         float distance = toHook.Length();
+        if (distance < 1e-4f) return;
         float stretch = distance - g.Length;
-        if (stretch <= 0f || distance < 1e-4f) return; // slack
-
         var along = toHook / distance;
+
         bool onBody = g.Anchor.Has<PhysicsBodyComponent>();
         var hookVelocity = PhysVec.Zero;
         PhysVec centreOfMass = default;
@@ -168,9 +177,21 @@ public sealed class GrappleSystem : ISystem
                          + PhysVec.Cross(_physics.GetBodyAngularVelocity(body), hook - centreOfMass);
         }
 
-        // Springs back towards the hook, damped by how fast the player moves away from it (relative to the hook).
+        // Stopping a climb grips the rope: the speed it had towards the hook (relative to it) stops with it, rather
+        // than carrying the player on up past where they stopped and dropping them back onto the rope.
+        bool stoppedClimbing = g.Climbing && reeling >= 0f;
+        g.Climbing = reeling < 0f;
+        if (stoppedClimbing)
+        {
+            float towards = PhysVec.Dot(character.LinearVelocity - hookVelocity, along);
+            if (towards > 0f) character.AddVelocity(-along * towards);
+        }
+        if (stretch <= 0f) return; // slack
+
+        // Springs back towards the hook, damped by how fast the stretch grows: the player moving away from the hook
+        // (relative to it), less the rope being let out.
         float away = -PhysVec.Dot(character.LinearVelocity - hookVelocity, along);
-        float pull = System.Math.Clamp(Stiffness * stretch + Damping * away, 0f, MaximumPull); // a rope never pushes
+        float pull = System.Math.Clamp(Stiffness * stretch + Damping * (away - reeling), 0f, MaximumPull); // never pushes
         if (pull <= 0f) return;
         var change = along * (pull * dt);
         character.AddVelocity(change);
