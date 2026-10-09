@@ -12,7 +12,7 @@ namespace ClearSkies.Engine.Physics.Characters;
 /// control relative to the ship last stood on. This side turns the tick's keys into the
 /// character's goals each tick (target velocity, view direction, jump requests), and adds Minecraft-style crouching:
 /// slower, a lower eye, and a guard that won't walk off edges; and a glider (hold Space while falling, see
-/// <see cref="Gliding"/>). Started as an adaptation of BepuPhysics2's
+/// <see cref="Gliding"/>) with a boost (Shift in the air). Started as an adaptation of BepuPhysics2's
 /// Demos/Demos/Characters/CharacterInput.cs (v2.4.0).
 /// </summary>
 public struct PlayerCharacter
@@ -51,6 +51,13 @@ public struct PlayerCharacter
     private const float GlideMaximumAttack = 0.25f;
     private const float GlideBankPerTurn = 3f, GlideMaximumBank = 1f;
     private bool gliding;
+
+    // Air boost (Shift pressed while airborne, glider or not): a push of BoostSpeed (m/s) spread over BoostTime, along
+    // the way the character is moving at each tick of it (the look, if it's barely moving). One per time in the air,
+    // back on landing, so it can stretch a glide or a jump but not keep the character up forever.
+    private const float BoostSpeed = 8f, BoostTime = 0.25f;
+    private float boostRemaining;
+    private bool boostUsed;
     private Quaternion glideOrientation;
     private float extraFallGravity, airControlForceScale, airBrakeScale; // the character's own, restored on landing
 
@@ -138,6 +145,8 @@ public struct PlayerCharacter
         eyeDrop = 0;
         suspended = false;
         SetGliding(ref character, false);
+        boostRemaining = 0;
+        boostUsed = false;
     }
 
     /// <summary>Whether the glider is out: <see cref="CharacterInput.Glide"/> held since some moment the character was
@@ -186,6 +195,8 @@ public struct PlayerCharacter
         public bool JumpPressed;
         /// <summary>Held to glide (see <see cref="Gliding"/>).</summary>
         public bool Glide;
+        /// <summary>Pressed to boost while airborne.</summary>
+        public bool BoostPressed;
     }
 
     /// <summary>Updates the character's goals for this tick from its keys. <paramref name="viewDirectionWorld"/> is the
@@ -224,6 +235,18 @@ public struct PlayerCharacter
                     (gliding || Vector3.Dot(characterBody.Velocity.Linear, character.LocalUp) < 0);
         if (glide != gliding) SetGliding(ref character, glide);
         if (glide) glideOrientation = WingOrientation(viewDirection, characterBody.Velocity.Linear);
+
+        if (character.Supported) { boostUsed = false; boostRemaining = 0; }
+        else if (!frozen && keys.BoostPressed && !boostUsed) { boostUsed = true; boostRemaining = BoostTime; }
+        if (boostRemaining > 0)
+        {
+            var step = MathF.Min(dt, boostRemaining);
+            boostRemaining -= step;
+            var velocity = characterBody.Velocity.Linear;
+            var direction = velocity.LengthSquared() > 0.25f ? Vector3.Normalize(velocity)
+                : viewDirection / MathF.Max(viewDirection.Length(), 1e-6f);
+            characterBody.Velocity.Linear = velocity + direction * (BoostSpeed * step / BoostTime);
+        }
         if (crouching && character.Supported && !character.JumpPending && newTargetVelocity != Vector2.Zero)
             newTargetVelocity = KeepAwayFromEdges(character, characterBody, newTargetVelocity, viewDirection, dt);
 
@@ -427,6 +450,8 @@ public struct PlayerCharacter
         ref var character = ref characters.GetCharacterByBodyHandle(bodyHandle);
         character.ResetJumpAndAirState();
         SetGliding(ref character, false);
+        boostRemaining = 0;
+        boostUsed = false;
         eyeDrop = 0;
         var characterBody = new BodyReference(bodyHandle, characters.Simulation.Bodies);
         characterBody.Pose.Position = position;

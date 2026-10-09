@@ -195,6 +195,31 @@ public class AirResistanceTests
     }
 
     [Fact]
+    public void ShiftInTheAirBoostsAlongTheWayTheCharacterMovesOncePerJump()
+    {
+        using var scene = new HeadlessScene();
+        scene.AddAirResistance();
+        var player = scene.SpawnLocalPlayer(new Vector3(0, 2000, 0));
+        var character = () => player.Get<CharacterControllerComponent>().Character;
+        Glide(scene, player, 0f, 0f, 10f);
+        var before = character().LinearVelocity;
+        player.Get<PlayerInput>() = new PlayerInput { Held = PlayerButtons.Up | PlayerButtons.Down, Pressed = PlayerButtons.Down };
+        scene.Tick();
+        Glide(scene, player, 0f, 0f, 0.25f);
+        var after = character().LinearVelocity;
+        Assert.True(after.Length() > before.Length() + 5f, $"boosted from {before.Length()} to {after.Length()} m/s");
+        Assert.True(Vector3.Dot(Vector3.Normalize(after), Vector3.Normalize(before)) > 0.95f, $"boosted from {before} to {after}");
+
+        // Spent until landing.
+        Glide(scene, player, 0f, 0f, 3f);
+        before = character().LinearVelocity;
+        player.Get<PlayerInput>() = new PlayerInput { Held = PlayerButtons.Up | PlayerButtons.Down, Pressed = PlayerButtons.Down };
+        scene.Tick();
+        Glide(scene, player, 0f, 0f, 0.25f);
+        Assert.True(character().LinearVelocity.Length() < before.Length() + 1f, "boosted twice in one flight");
+    }
+
+    [Fact]
     public void TheGliderOpensOnlyOnTheWayDownAndClosesOnLanding()
     {
         using var scene = new HeadlessScene();
