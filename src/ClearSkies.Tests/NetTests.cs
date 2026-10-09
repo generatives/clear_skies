@@ -201,6 +201,59 @@ public class TransportTests
         Assert.Equal(0.4f, b.Look.Pitch, 2);
         Assert.True(r.AtEnd);
     }
+
+    [Fact]
+    public void ShipSnapshotsCarrySyncedState()
+    {
+        var s = new BodySnapshot
+        {
+            Entity = new EntityId(77), Rotation = Quaternion.Identity, Flags = SnapshotFlags.HasState,
+            State = new[] { new SyncedValue(1, -2, 300, 1, 128), new SyncedValue(-5, 0, 7, 1, 255) },
+        };
+        var w = new NetWriter();
+        s.Write(w);
+        Assert.Equal(s.EncodedSize, w.Length);
+        var r = new NetReader(w.Written);
+        var b = BodySnapshot.Read(ref r);
+        Assert.Equal(s.State, b.State);
+        Assert.True(r.AtEnd);
+    }
+
+    [Fact]
+    public void FramesStayUnderTheirByteBudget()
+    {
+        var ship = new BodySnapshot
+        {
+            Rotation = Quaternion.Identity, Flags = SnapshotFlags.HasState, State = new SyncedValue[BodySync.MaxValuesPerSnapshot],
+        };
+        var snapshots = Enumerable.Repeat(ship, 5).ToList();
+        int packets = 0, read = 0;
+        BodySync.WriteFrames(new NetWriter(), 5, snapshots, packet =>
+        {
+            Assert.True(packet.Length <= BodySync.MaxFrameBytes + 7); // plus the frame's kind, tick and count
+            var r = new NetReader(packet);
+            r.ReadByte(); // its kind
+            var frame = new List<BodySnapshot>();
+            Assert.Equal(5u, BodySync.ReadFrame(ref r, frame));
+            read += frame.Count;
+            packets++;
+        });
+        Assert.Equal(5, read);
+        Assert.Equal(5, packets); // 800-odd bytes each: one per frame
+    }
+
+    [Fact]
+    public void FanThrustIsASyncedField()
+    {
+        using var world = new World();
+        var fan = world.CreateEntity();
+        fan.Set(new Fan { Thrust = 0.5f });
+        var field = SyncedState.Find(1)!;
+        Assert.Equal((byte?)SyncedState.FromFraction(0.5f), field.Get(fan));
+        field.Set(fan, 255);
+        Assert.Equal(1f, fan.Get<Fan>().Thrust);
+        Assert.Null(field.Get(world.CreateEntity())); // no Fan
+    }
 }
 
 public class ClockSyncTests
