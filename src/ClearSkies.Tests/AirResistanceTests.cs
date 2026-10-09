@@ -149,6 +149,51 @@ public class AirResistanceTests
         Assert.True(diving.Length() > 2f * gliding.Length(), $"diving at {diving.Length()} m/s, gliding at {gliding.Length()}");
     }
 
+    /// <summary>A gliding player high in still air, run for <paramref name="seconds"/> at each look in turn.</summary>
+    private static Entity Glide(HeadlessScene scene, Entity player, float yaw, float pitch, float seconds)
+    {
+        for (int t = 0; t < seconds * 60; t++)
+        {
+            player.Get<PlayerInput>() = new PlayerInput { Held = PlayerButtons.Up, Yaw = yaw, Pitch = pitch };
+            scene.Tick();
+        }
+        return player;
+    }
+
+    [Fact]
+    public void AGliderBanksRoundToFollowTheLook()
+    {
+        using var scene = new HeadlessScene();
+        scene.AddAirResistance();
+        var player = scene.SpawnLocalPlayer(new Vector3(0, 2000, 0));
+        Glide(scene, player, 0f, 0f, 10f); // gliding ahead, along −z
+        Glide(scene, player, MathF.PI / 2, 0f, 1f); // looking left, along −x
+        var v = player.Get<CharacterControllerComponent>().Character.LinearVelocity;
+        Assert.True(-v.X > 4f * MathF.Abs(v.Z), $"a second after looking left, moving ({v.X}, {v.Z})");
+    }
+
+    [Fact]
+    public void PullingUpOutOfADiveClimbsUntilTheSpeedRunsOut()
+    {
+        using var scene = new HeadlessScene();
+        scene.AddAirResistance();
+        var player = scene.SpawnLocalPlayer(new Vector3(0, 2000, 0));
+        var character = () => player.Get<CharacterControllerComponent>().Character;
+        Glide(scene, player, 0f, -1f, 6f);
+        float bottom = character().Position.Y, fast = character().LinearVelocity.Length();
+        float top = bottom, slowest = fast;
+        for (int i = 0; i < 4 * 60; i++)
+        {
+            Glide(scene, player, 0f, 0.8f, 1f / 60);
+            top = MathF.Max(top, character().Position.Y);
+            slowest = MathF.Min(slowest, character().LinearVelocity.Length());
+        }
+        Assert.True(top > bottom + 5f, $"climbed {top - bottom} m");
+        Assert.True(slowest < fast / 3, $"slowed from {fast} to {slowest} m/s");
+        Assert.True(character().Position.Y < top - 1f, "kept climbing with no speed left");
+        Assert.True(-character().LinearVelocity.Z > 0f, "slid backwards after the climb");
+    }
+
     [Fact]
     public void TheGliderOpensOnlyOnTheWayDownAndClosesOnLanding()
     {

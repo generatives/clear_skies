@@ -40,11 +40,16 @@ public struct PlayerCharacter
 
     // Glider (Space held while falling, until landing or letting go): AirResistanceSystem swaps the capsule's drag for a
     // wing's (ResistsAir.Glider), turned the way the player looks. The extra fall gravity and air control are off
-    // meanwhile, so the air alone holds the character up and steers it: look ahead to glide, down to dive. Looking
-    // level holds the wing GlideTrim (radians) nose-down, so it glides ahead (about 4 m ahead per 1 m down, at 8 m/s)
-    // rather than sinking straight down. The wing never tilts nose-up past flat, where a flat plate would glide
-    // backwards: looking up flattens it, which brakes, or after a dive swoops ahead on the speed it picked up.
+    // meanwhile, so the air alone holds the character up and steers it (see WingOrientation): look ahead to glide, down
+    // to dive, up to climb on the speed picked up. Looking level holds the wing GlideTrim (radians) nose-down, so it
+    // glides ahead (about 4 m ahead per 1 m down, at 8 m/s) rather than sinking straight down. The nose is held to at
+    // most GlideMaximumAttack above the way the character is going, so a climb runs out of speed and the nose drops
+    // (a flat plate held nose-up while slow would glide backwards). Turning the look banks the wing, GlideBankPerTurn
+    // radians of bank per radian between the look's heading and the character's, up to GlideMaximumBank, so its push
+    // swings the character round to follow.
     private const float GlideTrim = 0.2f;
+    private const float GlideMaximumAttack = 0.25f;
+    private const float GlideBankPerTurn = 3f, GlideMaximumBank = 1f;
     private bool gliding;
     private Quaternion glideOrientation;
     private float extraFallGravity, airControlForceScale, airBrakeScale; // the character's own, restored on landing
@@ -139,8 +144,8 @@ public struct PlayerCharacter
     /// airborne and falling, and it hasn't landed since.</summary>
     public readonly bool Gliding => gliding && !suspended;
 
-    /// <summary>Which way the wing faces while <see cref="Gliding"/>: body −z ahead, +y its upper side, turned with the
-    /// look (held a little nose-down, and never nose-up).</summary>
+    /// <summary>Which way the wing faces while <see cref="Gliding"/>: body −z ahead, +y its upper side (see
+    /// <see cref="WingOrientation"/>).</summary>
     public readonly Quaternion GlideOrientation => glideOrientation;
 
     private void SetGliding(ref CharacterController character, bool on)
@@ -214,16 +219,11 @@ public struct PlayerCharacter
         var viewDirection = viewDirectionWorld;
 
         // The glider opens only on the way down (so holding Space through a jump doesn't open it at once) but then
-        // stays open, a pull-up included, until the key is let go or the character lands.
+        // stays open, a climb included, until the key is let go or the character lands.
         var glide = !frozen && keys.Glide && !character.Supported &&
                     (gliding || Vector3.Dot(characterBody.Velocity.Linear, character.LocalUp) < 0);
         if (glide != gliding) SetGliding(ref character, glide);
-        if (glide)
-        {
-            var yaw = MathF.Atan2(-viewDirection.X, -viewDirection.Z);
-            var pitch = MathF.Asin(System.Math.Clamp(viewDirection.Y / MathF.Max(viewDirection.Length(), 1e-6f), -1f, 1f));
-            glideOrientation = Quaternion.CreateFromYawPitchRoll(yaw, MathF.Min(pitch - GlideTrim, 0f), 0);
-        }
+        if (glide) glideOrientation = WingOrientation(viewDirection, characterBody.Velocity.Linear);
         if (crouching && character.Supported && !character.JumpPending && newTargetVelocity != Vector2.Zero)
             newTargetVelocity = KeepAwayFromEdges(character, characterBody, newTargetVelocity, viewDirection, dt);
 
@@ -256,6 +256,33 @@ public struct PlayerCharacter
             characters.Simulation.Awakener.AwakenBody(character.BodyHandle);
         character.TargetVelocity = target;
         character.ViewDirection = -Vector3.UnitZ;
+    }
+
+    /// <summary>The glider's wing for a look along <paramref name="view"/> while moving at <paramref name="velocity"/>:
+    /// turned to the look's heading, pitched to the look (less <see cref="GlideTrim"/>), but never more than
+    /// <see cref="GlideMaximumAttack"/> nose-up of the way it's actually going, and banked into the turn.</summary>
+    public static Quaternion WingOrientation(Vector3 view, Vector3 velocity)
+    {
+        var yaw = MathF.Atan2(-view.X, -view.Z);
+        var pitch = MathF.Asin(System.Math.Clamp(view.Y / MathF.Max(view.Length(), 1e-6f), -1f, 1f)) - GlideTrim;
+
+        // How the character is actually moving, measured along the look's heading: climbing, gliding or falling, and
+        // which way. With nothing left going ahead the path points straight down, which drops the nose: a stall.
+        var ahead = new Vector3(-MathF.Sin(yaw), 0, -MathF.Cos(yaw));
+        var forward = MathF.Max(Vector3.Dot(velocity, ahead), 0f);
+        var path = MathF.Atan2(velocity.Y, forward);
+        pitch = MathF.Min(pitch, path + GlideMaximumAttack);
+
+        // Bank towards the look's heading from the way the character is going, like a glider turning.
+        float roll = 0f;
+        var horizontal = new Vector2(velocity.X, velocity.Z);
+        if (horizontal.LengthSquared() > 1f)
+        {
+            var heading = MathF.Atan2(-velocity.X, -velocity.Z);
+            var turn = MathF.IEEERemainder(yaw - heading, 2 * MathF.PI);
+            roll = System.Math.Clamp(turn * GlideBankPerTurn, -GlideMaximumBank, GlideMaximumBank);
+        }
+        return Quaternion.CreateFromYawPitchRoll(yaw, pitch, roll);
     }
 
     /// <summary>Crouch edge guard: clips the target velocity, one axis at a time (so the character still slides along an
