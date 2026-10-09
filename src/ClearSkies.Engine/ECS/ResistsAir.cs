@@ -50,4 +50,11 @@ public struct ResistsAir
     /// top and bottom 0.36 m². Players don't turn, so where the faces are doesn't matter; they sit on the box.</summary>
     public static ResistsAir Player(float radius, float length) =>
         Box(new Vector3(2 * radius, length + 2 * radius, 2 * radius));
+
+    /// <summary>A player gliding (see PlayerCharacter.Gliding): a wing <paramref name="span"/> wide and
+    /// <paramref name="chord"/> deep, <paramref name="thickness"/> thick, the player lying along it. Its broad underside
+    /// (span × chord, about 50 times the capsule's) falls slowly; tilted, it pushes the player along the way it tilts, as a
+    /// flat panel does in a crosswind. Its edge-on front is small, so a dive picks up speed, and a pull-up spends it.</summary>
+    public static ResistsAir Glider(float span = 5f, float chord = 3.6f, float thickness = 0.02f) =>
+        Box(new Vector3(span, thickness, chord));
 }

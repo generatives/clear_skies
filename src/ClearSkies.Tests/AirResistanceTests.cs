@@ -2,6 +2,7 @@ using System.Numerics;
 using ClearSkies.Engine.Commands.Handlers;
 using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Entities;
+using ClearSkies.Engine.Input;
 using ClearSkies.Engine.Voxels;
 using DefaultEcs;
 using Xunit;
@@ -110,5 +111,63 @@ public class AirResistanceTests
         scene.Tick(60 * 3);
         var v = player.Get<CharacterControllerComponent>().Character.LinearVelocity;
         Assert.True(v.X > 1f, $"drifting at {v.X} m/s");
+    }
+
+    /// <summary>A player dropped high in still air, holding <paramref name="held"/> and looking ahead (−z) at
+    /// <paramref name="pitch"/>, for <paramref name="seconds"/>; their velocity then, and whether they're gliding.</summary>
+    private static (Vector3 Velocity, bool Gliding) Drop(PlayerButtons held, float pitch, float seconds)
+    {
+        using var scene = new HeadlessScene();
+        scene.AddAirResistance();
+        var player = scene.SpawnLocalPlayer(new Vector3(0, 2000, 0));
+        for (int t = 0; t < seconds * 60; t++)
+        {
+            player.Get<PlayerInput>() = new PlayerInput { Held = held, Pitch = pitch };
+            scene.Tick();
+        }
+        var character = player.Get<CharacterControllerComponent>().Character;
+        return (character.LinearVelocity, character.Gliding);
+    }
+
+    [Fact]
+    public void HoldingSpaceWhileFallingGlidesAheadSlowly()
+    {
+        var (falling, _) = Drop(PlayerButtons.None, 0f, 10f);
+        var (gliding, isGliding) = Drop(PlayerButtons.Up, 0f, 10f);
+        Assert.True(isGliding);
+        Assert.InRange(-gliding.Y, 0.3f, 3f); // sinking gently, against 15–30 m/s falling
+        Assert.True(-gliding.Y < -falling.Y / 5, $"gliding sinks at {-gliding.Y} m/s, falling at {-falling.Y}");
+        Assert.True(-gliding.Z > 2f * -gliding.Y, $"gliding {-gliding.Z} m/s ahead while sinking {-gliding.Y} m/s");
+    }
+
+    [Fact]
+    public void DivingPicksUpSpeed()
+    {
+        var (gliding, _) = Drop(PlayerButtons.Up, 0f, 10f);
+        var (diving, isGliding) = Drop(PlayerButtons.Up, -1.2f, 10f);
+        Assert.True(isGliding);
+        Assert.True(diving.Length() > 2f * gliding.Length(), $"diving at {diving.Length()} m/s, gliding at {gliding.Length()}");
+    }
+
+    [Fact]
+    public void TheGliderOpensOnlyOnTheWayDownAndClosesOnLanding()
+    {
+        using var scene = new HeadlessScene();
+        scene.AddAirResistance();
+        scene.SpawnPlatform(new Vector3(-4, 0, -4), 16);
+        var player = scene.SpawnLocalPlayer(new Vector3(0, 1.5f, 0));
+        var character = () => player.Get<CharacterControllerComponent>().Character;
+        Assert.True(scene.TickUntil(() => character().Supported, 120));
+
+        // Space held from the jump: rising, no glider; on the way down, it opens.
+        player.Get<PlayerInput>() = new PlayerInput { Held = PlayerButtons.Up, Pressed = PlayerButtons.Up };
+        scene.Tick();
+        player.Get<PlayerInput>() = new PlayerInput { Held = PlayerButtons.Up };
+        scene.Tick(3);
+        Assert.False(character().Gliding);
+        Assert.True(scene.TickUntil(() => character().Gliding, 120));
+        Assert.True(scene.TickUntil(() => character().Supported, 600));
+        scene.Tick();
+        Assert.False(character().Gliding);
     }
 }
