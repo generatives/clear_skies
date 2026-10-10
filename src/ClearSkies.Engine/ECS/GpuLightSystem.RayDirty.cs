@@ -795,7 +795,7 @@ public sealed partial class GpuLightSystem
                 // A ship moving with its blocks unchanged carries on its running average, one evaluation a frame (see
                 // BuildBounceWork); it restarts only if it has no accumulation (it had settled before it moved).
                 if (!HasAcc(lg.Handle)) st.BounceAllN = 0;
-                st.BounceAllFrames = System.Math.Max(st.BounceAllFrames, holdFrames);
+                st.BounceAllFrames = System.Math.Max(st.BounceAllFrames, AverageEvals(ChangeKind.Ship));
             }
             else if (st.AllThisFrame)
             {
@@ -879,13 +879,19 @@ public sealed partial class GpuLightSystem
                         (int)MathF.Floor(mx.X / 8f) + m, (int)MathF.Floor(mx.Y / 8f) + m, (int)MathF.Floor(mx.Z / 8f) + m);
 
     /// <summary>Holds a slot for at least <paramref name="holdFrames"/> more evaluations, continuing its running
-    /// average (a slot that has never been evaluated starts one).</summary>
+    /// average (a slot that has never been evaluated starts one). For an averaging change it is that kind's average
+    /// evaluations instead, scaled by the brick's distance tier as a restart's would be (see Grant): each evaluation
+    /// moves an under-way average only about 1/cycle of the way, so it takes more than a restart's to fade what was
+    /// there before.</summary>
     private void ExtendSlot(int slot, int holdFrames, ChangeKind kind = ChangeKind.Other)
     {
         if (_holdStamp[slot] == _frame) return;
         _holdStamp[slot] = _frame;
         _holdKind[slot] = (byte)kind;
-        _hold[slot] = (byte)System.Math.Max(_hold[slot], Grant(slot, holdFrames));
+        int grant = Grant(slot, holdFrames);
+        if (AverageAfter(kind) && holdFrames > 0)
+            grant = System.Math.Clamp((grant * AverageEvals(kind) + holdFrames - 1) / holdFrames, 1, 255);
+        _hold[slot] = (byte)System.Math.Max(_hold[slot], grant);
         if (!_inHeld[slot]) { _inHeld[slot] = true; _heldQueue.Add(slot); }
     }
 
