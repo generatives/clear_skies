@@ -131,12 +131,25 @@ public class AnchorTests
     }
 
     [Fact]
+    public void AnAnchorReachesAcrossTwoBlocksOfAir()
+    {
+        using var scene = new HeadlessScene();
+        scene.WorldVolume.SetBlock(0, 40, 0, BlockId.Stone);
+        var ship = Spawn(scene, Grid(new Vector3(0, 43, 0), locked: false, V(0, 0, 0, BlockId.Anchor)));
+        SetAnchored(scene, ship, true);
+        scene.Tick(60);
+        Assert.True(Anchored(ship));
+        Assert.Equal((true, true), scene.Anchors.HoldOn(ship, EntityRegistry.WorldVolume));
+        Assert.InRange(Position(ship).Y, 42.98f, 43.02f); // held where it was, gap and all
+    }
+
+    [Fact]
     public void WithNothingInReachTheTogglesGoBackOff()
     {
         using var scene = new HeadlessScene();
         scene.WorldVolume.SetBlock(0, 40, 0, BlockId.Stone);
-        // Two blocks of air between the anchor and the terrain: out of reach.
-        var ship = Spawn(scene, Grid(new Vector3(0, 43, 0), locked: true, V(0, 0, 0, BlockId.Anchor)));
+        // Three blocks of air between the anchor and the terrain: out of reach.
+        var ship = Spawn(scene, Grid(new Vector3(0, 44, 0), locked: true, V(0, 0, 0, BlockId.Anchor)));
         SetAnchored(scene, ship, true);
         scene.Tick(3);
         Assert.False(Anchored(ship));

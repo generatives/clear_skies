@@ -136,8 +136,8 @@ public struct AnchorLinks
 public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
 {
     /// <summary>How far an anchor reaches: from its block's centre to the nearest point of a block it can hold on to.
-    /// Anything touching it is half a block away.</summary>
-    public const float Reach = 1.5f;
+    /// Anything touching it is half a block away, so it reaches across up to two and a half blocks of air.</summary>
+    public const float Reach = 3f;
 
     // Weld offsets nearer than this to what's set (the centre of mass moving with an edit is far more) aren't re-sent.
     private const float OffsetEpsilon = 1e-4f;
