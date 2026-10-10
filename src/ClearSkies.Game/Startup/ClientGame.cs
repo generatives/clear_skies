@@ -66,15 +66,17 @@ public static class ClientGame
         // Motion goals (WASD/jump/mode toggle) before the physics step, so its CollisionsDetected analysis sees them this
         // same tick (see Physics/Characters/).
         host.AddSystem(new PlayerMovementSystem(host.World, commands), SystemStage.Simulation);
-        // Place, break, spawn and use controls (levers and wheels, whose control systems turn drags into commands as the
+        // Place, break, spawn and use controls (levers, wheels and toggles, whose control systems turn drags into commands as the
         // interactions are published), then apply every command sent this tick, then pose the controls from what the
         // commands set, so an arm is posed this tick where the view was turned to keep on it.
         host.AddSystem(world.BlockActions, SystemStage.Simulation);
         var levers = new LeverControlSystem(host.World, commands);
         var wheels = new SteeringWheelControlSystem(host.World, commands);
+        var toggles = new ToggleControlSystem(host.World, commands);
         host.AddSystem(commands, SystemStage.Simulation);
         host.AddSystem(levers, SystemStage.Simulation);
         host.AddSystem(wheels, SystemStage.Simulation);
+        host.AddSystem(toggles, SystemStage.Simulation);
         host.AddSystem(world.Flight, SystemStage.Simulation); // impulses before the physics step, integrated this same tick
         host.AddSystem(world.AirShapes, SystemStage.Simulation); // ships' drag entries, after any edit's new body shape
         host.AddSystem(world.AirResistance, SystemStage.Simulation); // drag through the wind, also before the step
@@ -82,6 +84,7 @@ public static class ClientGame
         // Physics copies of ships simulated elsewhere (kinematic, near the local player), placed before the step, once the
         // presence system has decided which copies exist.
         host.AddSystem(new RemoteBodyProxySystem(host.World, host.Physics, world.RemoteBodies), SystemStage.Simulation);
+        host.AddSystem(new AnchorSystem(host.World, host.Physics, commands, world.Registry), SystemStage.Simulation); // anchored ships held, before the step
         host.AddSystem(host.Physics, SystemStage.Simulation); // one step
         host.AddSystem(new PhysicsTransformSyncSystem(host.World, host.Physics), SystemStage.Simulation); // body poses -> Transform
         host.AddSystem(world.RemoteBodies, SystemStage.Simulation); // ships and other players -> Transform, about 100 ms behind

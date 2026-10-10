@@ -15,13 +15,16 @@ namespace ClearSkies.Net.Session;
 /// here:
 /// <list type="bullet">
 /// <item>a player standing on a ship: the ship (with its body, where they'll be simulated);</item>
+/// <item>a grid riding on another (held to it by anchors, see <see cref="AnchorLinks"/>): that grid (with its body, where it'll be simulated),
+/// so it's placed and welded on it as it is now;</item>
 /// <item>one simulated here (everything, on the authority; its own player, which it predicts, on any other): the
 /// terrain around it, with colliders, loaded meanwhile by a stand-in interest (all of it drawn for its own player,
 /// colliders only for anything else).</item>
 /// </list>
 /// Its own player also waits for <see cref="LocalReady"/>: on a client, for its clock to settle on the Host's.
 /// A copy that's only drawn here needs nothing but its ship. Nothing waits for ever: a ship that never comes is
-/// forgotten after <see cref="SupportWaitTicks"/> (they spawn where the Host last had them), and terrain after
+/// forgotten after <see cref="SupportWaitTicks"/> (they spawn where the Host last had them; an anchored grid where it
+/// was described, held there until it's let go or the other comes), and terrain after
 /// <see cref="GiveUpTicks"/>.
 /// </summary>
 public sealed class SpawnQueue
@@ -41,6 +44,7 @@ public sealed class SpawnQueue
         public bool Simulated;
         public bool Local;
         public PlayerDescription? Player;
+        public AnchorLink? GridSupport;
         public Entity Anchor;
         public int Ticks;
         public readonly List<(EventMeta Meta, ushort Handler, byte[] Payload)> Events = new();
@@ -84,6 +88,7 @@ public sealed class SpawnQueue
             p.Player = DescriptionBytes.Read<PlayerDescription>(p.Data);
             p.Local = m.Owner == _session.LocalPeer;
         }
+        else if (m.Kind == CommandIds.SpawnGrid) p.GridSupport = AnchorLinks.Support(GridDescription.ReadAnchors(p.Data));
         p.Simulated = IsAuthority || p.Local;
         if (p.Simulated)
         {
@@ -143,6 +148,24 @@ public sealed class SpawnQueue
             {
                 if (p.Simulated && !ship.Has<PhysicsBodyComponent>() && p.Ticks < GiveUpTicks) return false;
                 position = PlayerFactory.WorldPosition(d, _registry);
+            }
+        }
+        if (p.GridSupport is { } support)
+        {
+            if (!_registry.TryGet(support.Target, out var carrier))
+            {
+                if (p.Ticks < SupportWaitTicks) return false;
+                Console.WriteLine($"[net] grid {p.Id}'s support ({support.Target}) never came: spawning where it was");
+                p.GridSupport = null;
+            }
+            else
+            {
+                if (p.Simulated && !carrier.Has<PhysicsBodyComponent>() && p.Ticks < GiveUpTicks) return false;
+                if (carrier.Has<Transform>())
+                {
+                    var at = support.Place(carrier.Get<Transform>()).Position;
+                    position = new Vector3(at.X, at.Y, at.Z);
+                }
             }
         }
         if (!p.Simulated) return true;

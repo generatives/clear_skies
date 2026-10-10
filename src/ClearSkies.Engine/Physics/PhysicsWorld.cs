@@ -209,6 +209,43 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
         body.Awake = true;
     }
 
+    /// <summary>Whether a body is kinematic (zero inverse mass): a locked grid, a copy following its owner, a pin.</summary>
+    public bool IsKinematic(BodyHandle handle) => Simulation.Bodies[handle].LocalInertia.InverseMass == 0f;
+
+    // ── Welds (anchors) ──────────────────────────────────────────────────────────
+
+    /// <summary>How stiffly a weld holds: as stiff as contacts (see the narrow phase callbacks), critically damped.</summary>
+    public static readonly SpringSettings WeldSpring = new(30, 1);
+
+    /// <summary>Adds a pin: a kinematic body with no shape (nothing collides with it), standing still at a pose, for a
+    /// body to be welded to where there's no body to weld to (the terrain, whose colliders are statics).</summary>
+    public BodyHandle AddPin(Vector3 position, Quaternion orientation)
+    {
+        var handle = Simulation.Bodies.Add(BodyDescription.CreateKinematic(
+            new RigidPose(position, orientation), new CollidableDescription(default(TypedIndex)), new BodyActivityDescription(0.01f)));
+        Colliders.Allocate(handle) = new ColliderInfo(ColliderKind.Other);
+        return handle;
+    }
+
+    /// <summary>Welds <paramref name="b"/> to <paramref name="a"/>: holds it at <paramref name="offset"/> from
+    /// <paramref name="a"/> and turned by <paramref name="orientation"/>, both in <paramref name="a"/>'s own space. At
+    /// least one of them must be dynamic: Bepu drops a constraint between kinematic bodies (see
+    /// <see cref="IsKinematic"/>), including when a dynamic one becomes kinematic.</summary>
+    public ConstraintHandle AddWeld(BodyHandle a, BodyHandle b, Vector3 offset, Quaternion orientation) =>
+        Simulation.Solver.Add(a, b, new Weld { LocalOffset = offset, LocalOrientation = orientation, SpringSettings = WeldSpring });
+
+    /// <summary>Moves where a weld holds its second body (see <see cref="AddWeld"/>), waking both.</summary>
+    public void SetWeld(ConstraintHandle weld, Vector3 offset, Quaternion orientation) =>
+        Simulation.Solver.ApplyDescription(weld, new Weld { LocalOffset = offset, LocalOrientation = orientation, SpringSettings = WeldSpring });
+
+    /// <summary>Removes a weld, if Bepu hasn't already (it removes a body's constraints with the body).</summary>
+    public void RemoveWeld(ConstraintHandle weld)
+    {
+        if (Simulation.Solver.ConstraintExists(weld)) Simulation.Solver.Remove(weld);
+    }
+
+    public bool WeldExists(ConstraintHandle weld) => Simulation.Solver.ConstraintExists(weld);
+
     // ── Dynamic compounds (voxel grids) ──────────────────────────────────────────
 
     // Tracks the children buffer for each compound shape so it can be torn down on rebuild/removal.

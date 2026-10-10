@@ -31,6 +31,7 @@ public sealed class HeadlessScene : IDisposable
     public readonly PhysicsBodySystem PhysicsBodies;
     public readonly CommandSystem Commands;
     public readonly BlockEntities Blocks;
+    public readonly AnchorSystem Anchors;
     public readonly EditLimits Limits = new();
     public readonly ManualTickClock Clock = new();
     private double _rateCredit;
@@ -66,6 +67,8 @@ public sealed class HeadlessScene : IDisposable
         _tick.Add(new PlayerMovementSystem(World, Commands));
         _tick.Add(Commands);
         _tick.Add(Presence);
+        Anchors = new AnchorSystem(World, Physics, Commands, Registry);
+        _tick.Add(Anchors);
         _tick.Add(Physics);
         _tick.Add(new PhysicsTransformSyncSystem(World, Physics));
         _tick.Add(hierarchy);

@@ -40,9 +40,11 @@ public static class DedicatedServerGame
         host.AddSystem(world.BlockActions, SystemStage.Simulation);
         var levers = new LeverControlSystem(host.World, commands);
         var wheels = new SteeringWheelControlSystem(host.World, commands);
+        var toggles = new ToggleControlSystem(host.World, commands);
         host.AddSystem(commands, SystemStage.Simulation);
         host.AddSystem(levers, SystemStage.Simulation);
         host.AddSystem(wheels, SystemStage.Simulation);
+        host.AddSystem(toggles, SystemStage.Simulation);
         host.AddSystem(world.Flight, SystemStage.Simulation);
         host.AddSystem(world.AirShapes, SystemStage.Simulation); // ships' drag entries, after any edit's new body shape
         host.AddSystem(world.AirResistance, SystemStage.Simulation); // drag through the wind, also before the step
@@ -50,6 +52,7 @@ public static class DedicatedServerGame
         // Physics copies of ships simulated elsewhere (kinematic, near the local player), placed before the step, once the
         // presence system has decided which copies exist.
         host.AddSystem(new RemoteBodyProxySystem(host.World, host.Physics, world.RemoteBodies), SystemStage.Simulation);
+        host.AddSystem(new AnchorSystem(host.World, host.Physics, commands, world.Registry), SystemStage.Simulation); // anchored ships held, before the step
         host.AddSystem(host.Physics, SystemStage.Simulation);
         host.AddSystem(new PhysicsTransformSyncSystem(host.World, host.Physics), SystemStage.Simulation);
         host.AddSystem(world.RemoteBodies, SystemStage.Simulation);
@@ -101,9 +104,11 @@ public static class BotClientGame
         host.AddSystem(world.BlockActions, SystemStage.Simulation);
         var levers = new LeverControlSystem(host.World, commands);
         var wheels = new SteeringWheelControlSystem(host.World, commands);
+        var toggles = new ToggleControlSystem(host.World, commands);
         host.AddSystem(commands, SystemStage.Simulation);
         host.AddSystem(levers, SystemStage.Simulation);
         host.AddSystem(wheels, SystemStage.Simulation);
+        host.AddSystem(toggles, SystemStage.Simulation);
         host.AddSystem(world.Flight, SystemStage.Simulation);
         host.AddSystem(world.AirShapes, SystemStage.Simulation); // ships' drag entries, after any edit's new body shape
         host.AddSystem(world.AirResistance, SystemStage.Simulation); // drag through the wind, also before the step
@@ -111,6 +116,7 @@ public static class BotClientGame
         // Physics copies of ships simulated elsewhere (kinematic, near the local player), placed before the step, once the
         // presence system has decided which copies exist.
         host.AddSystem(new RemoteBodyProxySystem(host.World, host.Physics, world.RemoteBodies), SystemStage.Simulation);
+        host.AddSystem(new AnchorSystem(host.World, host.Physics, commands, world.Registry), SystemStage.Simulation); // anchored ships held, before the step
         host.AddSystem(host.Physics, SystemStage.Simulation);
         host.AddSystem(new PhysicsTransformSyncSystem(host.World, host.Physics), SystemStage.Simulation);
         host.AddSystem(world.RemoteBodies, SystemStage.Simulation);

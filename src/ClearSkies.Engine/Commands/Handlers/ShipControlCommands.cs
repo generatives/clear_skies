@@ -96,6 +96,42 @@ public sealed class SetShipTurnHandler : PredictedCommandHandler<SetShipTurn, Se
     public override void Restore(in SetShipTurn undo) => Apply(undo, default);
 }
 
+/// <summary>Anchors a ship or lets it go (see <see cref="ShipControls.Anchored"/>): what flicking a toggle sends, and
+/// what <see cref="AnchorSystem"/> sends to turn the toggles back off when nothing is in reach.</summary>
+public struct SetShipAnchored : ICommand
+{
+    public EntityId Ship;
+    public bool Anchored;
+    public readonly EntityAddress Target => EntityAddress.Of(Ship);
+}
+
+public sealed class SetShipAnchoredHandler : PredictedCommandHandler<SetShipAnchored, SetShipAnchored>
+{
+    private readonly EntityRegistry _registry;
+    public SetShipAnchoredHandler(EntityRegistry registry) => _registry = registry;
+
+    public override ushort Id => CommandIds.SetShipAnchored;
+
+    public override void Write(NetWriter w, in SetShipAnchored c) { c.Ship.Write(w); w.WriteBool(c.Anchored); }
+    public override SetShipAnchored Read(ref NetReader r) => new() { Ship = EntityId.Read(ref r), Anchored = r.ReadBool() };
+
+    public override Verdict Validate(ref SetShipAnchored c, in CommandContext ctx) =>
+        ShipControlCommands.Ship(_registry, c.Ship) is null ? Verdict.Reject : Verdict.Accept;
+
+    public override void Apply(in SetShipAnchored e, in ApplyContext ctx)
+    {
+        if (ShipControlCommands.Ship(_registry, e.Ship) is { } ship) ship.Get<ShipControls>().Anchored = e.Anchored;
+    }
+
+    /// <summary>The undo is the same command with the setting as it was.</summary>
+    public override SetShipAnchored Capture(in SetShipAnchored c) => c with
+    {
+        Anchored = ShipControlCommands.Ship(_registry, c.Ship) is { } ship && ship.Get<ShipControls>().Anchored,
+    };
+
+    public override void Restore(in SetShipAnchored undo) => Apply(undo, default);
+}
+
 internal static class ShipControlCommands
 {
     /// <summary>The grid <paramref name="id"/> names, if it's live here: ship controls live on it (every grid has them:
