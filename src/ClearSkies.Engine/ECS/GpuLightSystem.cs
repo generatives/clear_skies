@@ -60,12 +60,24 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     private float _bounceNearRadius = 64f;
     private float _bounceScale = 1f;
 
-    // Ship moves (a ship moving with its blocks unchanged, bounce light on): off, they take the placed-block path, the
-    // bounce around the ship and along its sun shadow cleared and settled within the frame near the camera; on, that
-    // bounce carries on its running average, one evaluation a frame, so it lags the ship a little but costs a fraction.
-    // Direct light (the ship's sun shadow) is redone the frame the ship moves either way.
-    private bool _shipMoveBlend;
-    private bool BlendShipMoves => _shipMoveBlend && _bounceMode == BounceMode.Full;
+    // After a change, by kind: block changes (placed or removed blocks, chunks loaded or unloaded), ship moves, and
+    // everything else (lamps, new light storage, settings), which always restarts within the general radius above.
+    // Clear: the bounce around the change and along its sun shadow is cleared and restarts (as everything did before
+    // these settings). Average: it carries on its running average instead, so it lags the change a little (a ship
+    // whose blocks changed, and the bricks right at a changed block, still restart; an averaging ship restarts where
+    // it comes to rest). Either way the direct light (a ship's sun shadow) is redone the frame it changes.
+    // Settle radius: within it of the camera, a brick the change held runs its whole hold that frame; past it, one
+    // evaluation a frame (0: one a frame everywhere).
+    private enum ChangeKind : byte { Other, Block, Ship }
+    private const int KindCount = 3;
+    private bool _blockAverage, _shipAverage;
+    private int _blockAverageIdx, _shipAverageIdx; // the debug panel's combos (0 clear, 1 average)
+    private float _blockSettleRadius = 64f, _shipSettleRadius = 64f;
+
+    /// <summary>Whether the bounce a change of this kind touches carries on its average rather than restarting
+    /// (only with bounce light on: AO alone always carries on).</summary>
+    private bool AverageAfter(ChangeKind kind)
+        => _bounceMode == BounceMode.Full && (kind == ChangeKind.Block ? _blockAverage : kind == ChangeKind.Ship && _shipAverage);
 
     // Checkerboard bounce (see bouncePhase in GpuRayLightPass): 1 = every surface voxel fires all the rays each
     // evaluation; 2 or 4 = each fires only that share, neighbours firing the others, and the compose pass's smoothing
@@ -135,6 +147,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         _bounceHoldFrames = p.Hold;
         _bounceReach = p.Reach;
         _bounceNearRadius = p.NearRadius;
+        _blockSettleRadius = _shipSettleRadius = p.NearRadius;
         _bounceFullRadius = p.FullRadius;
         _bounceMidRadius = p.MidRadius;
         _bounceMidEvals = p.MidEvals;
@@ -233,10 +246,17 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         ImGui.TextDisabled("  neighbouring voxels fire different rays; compose smoothing averages them");
         ImGui.SliderInt("Bounce evaluations after a change", ref _bounceHoldFrames, 1, 64);
         ImGui.SliderFloat("Settled-in-one-frame radius", ref _bounceNearRadius, 0f, 256f, "%.0f");
-        ImGui.TextDisabled("  changes within it run all their evaluations the frame they happen");
+        ImGui.TextDisabled("  changes within it run all their evaluations the frame they happen (lamps, new bricks;");
+        ImGui.TextDisabled("  block changes and ships have their own below)");
         ImGui.SliderFloat("Bounce display scale", ref _bounceScale, 0f, 4f, "%.2f");
-        ImGui.Checkbox("Moving ships: blend bounce over frames", ref _shipMoveBlend);
-        ImGui.TextDisabled("  off: cleared and settled the frame a ship moves; on: one evaluation a frame, lags a little");
+        ImGui.Text("After a change");
+        ImGui.Combo("Block changes", ref _blockAverageIdx, "Clear and restart\0Average\0");
+        ImGui.SliderFloat("  settled in one frame within##block", ref _blockSettleRadius, 0f, 256f, "%.0f");
+        ImGui.Combo("Moving ships", ref _shipAverageIdx, "Clear and restart\0Average\0");
+        ImGui.SliderFloat("  settled in one frame within##ship", ref _shipSettleRadius, 0f, 256f, "%.0f");
+        _blockAverage = _blockAverageIdx == 1;
+        _shipAverage = _shipAverageIdx == 1;
+        ImGui.TextDisabled("  average: bounce carries on over frames instead of restarting; past the radius, one evaluation a frame");
         ImGui.Text("Gradual bounce (world bricks)");
         ImGui.SliderFloat("Full evaluations within (blocks)", ref _bounceFullRadius, 16f, 4096f, "%.0f");
         ImGui.SliderFloat("Middle evaluations within (blocks)", ref _bounceMidRadius, 16f, 8192f, "%.0f");

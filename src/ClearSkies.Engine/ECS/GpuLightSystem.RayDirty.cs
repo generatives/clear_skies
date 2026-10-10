@@ -17,9 +17,9 @@ namespace ClearSkies.Engine.ECS;
 //    was edited, at its old and new pose): the bricks right next to it, every brick whose sun ray passes through it
 //    (its bounds swept along the sun direction), and the full radius of every lamp whose reach overlaps it;
 //    for a placed block or a moved ship the bounce there is also cleared, and those bricks are relit and bounced
-//    the same frame, past the caps; with ship moves blending (the debug panel's switch), a ship that moved with its
-//    blocks unchanged marks the same bricks and they are still relit past the cap, but nothing is cleared and their
-//    bounce carries on its running average, one evaluation a frame;
+//    the same frame (within the settle radius set for block changes or ship moves), past the caps; set to average
+//    instead, the same bricks are still relit past the cap but nothing is cleared and their bounce carries on its
+//    running average (see the settings in GpuLightSystem.cs and SettleRadius);
 //  - a lamp that appeared, disappeared or moved: its full radius, at old and new positions.
 // A ship is all-or-nothing (it is small) and always processed; the static world is tracked per brick, and its marked
 // bricks wait in a queue that is worked through nearest the camera first, up to a per-frame cap, so a burst of chunk
@@ -45,9 +45,12 @@ public sealed partial class GpuLightSystem
         // This frame: moved, and whether its blocks changed (or it appeared); for AO only, whether its rays can reach
         // another grid now or could last frame (only then does its AO change with its pose).
         public bool Moved, Edited, NearOther, WasNearOther;
-        // Moved this frame without its blocks changing, with ship moves blending (see _shipMoveBlend); stays set
-        // through the first frame it is still, which settles it.
+        // Moved this frame without its blocks changing, with ship moves averaging (see AverageAfter); stays set
+        // through the first frame it is still, which restarts it.
         public bool Blend;
+        // Its lighting changed this frame because it moved (or came to rest after averaging): its own bounce settles
+        // within the ships' settle radius.
+        public bool ShipChange;
     }
 
     private readonly Dictionary<GridHandle, GridLightState> _gridStates = new();
@@ -105,17 +108,25 @@ public sealed partial class GpuLightSystem
     private Vector3D<float> _prevSunDir;
     private readonly List<WorldLamp> _prevLamps = new();
     private HashSet<(int, int, int, int, int)> _prevLampKeys = new(), _curLampKeys = new();
-    private readonly List<(Vector3D<float> min, Vector3D<float> max)> _bounceClears = new();
+    private readonly List<(Vector3D<float> min, Vector3D<float> max, ChangeKind kind)> _bounceClears = new();
     private readonly List<int> _clearSlots = new();
     private GpuBuffer? _clearWork;
     // darkens: a placed block, which can take light away (bounce there is then cleared rather than left to decay).
-    private readonly List<(Vector3D<float> min, Vector3D<float> max, bool darkens)> _occluderChanges = new();
+    // average: the bounce it touches carries on its running average instead (see AverageAfter): nothing is cleared.
+    private readonly List<(Vector3D<float> min, Vector3D<float> max, bool darkens, ChangeKind kind, bool average)> _occluderChanges = new();
     private readonly List<(Vector3D<float> min, Vector3D<float> max)> _directChanges = new();
-    // Blending ship moves (see _shipMoveBlend): the world bounds of each such ship at its old and new pose; the world
-    // bricks marked for them this frame (relit past the cap), each stamped with the frame so its bounce carries on.
+    // Averaging ship moves: the world bounds of each such ship at its old and new pose (everything within bounce reach
+    // of them carries on its average too).
     private readonly List<(Vector3D<float> min, Vector3D<float> max)> _shipMoves = new();
-    private readonly List<int> _shipMarked = new();
-    private int[] _blendStamp = Array.Empty<int>();
+
+    // What last changed each light slot's lighting, for the settle radius and clear-or-average settings: the change
+    // that marked it for direct light, the one that last held it for bounce, and the one whose clear box it was in.
+    // Averaged and restarted: frame stamps of the bricks an averaging change and a restarting one marked this frame;
+    // the averaged ones (in _averageMarked) are relit past the cap, as cleared ones are.
+    private byte[] _markKind = Array.Empty<byte>(), _holdKind = Array.Empty<byte>(), _clearKind = Array.Empty<byte>();
+    private int[] _averageStamp = Array.Empty<int>(), _restartStamp = Array.Empty<int>();
+    private readonly List<int> _averageMarked = new();
+    private ChangeKind _curKind;
 
     // Debug-panel breakdown of why bricks were relit this frame.
     private string _dbgFullReason = "";
@@ -159,13 +170,14 @@ public sealed partial class GpuLightSystem
             _n[slot] = 0;
             _primed[slot] = false;
             _given[slot] = byte.MaxValue;
+            _holdKind[slot] = (byte)ChangeKind.Other;
             MarkSlot(slot);
         }
         _store.NewSlots.Clear();
 
         _occluderChanges.Clear();
         _shipMoves.Clear();
-        _shipMarked.Clear();
+        _averageMarked.Clear();
         _directChanges.Clear();
         _bounceClears.Clear();
         _shapeChanges.Clear();
@@ -185,25 +197,34 @@ public sealed partial class GpuLightSystem
         else
         {
             var pad = new Vector3D<float>(1.5f);
-            foreach (var (mn, mx, darkens) in _occluderChanges)
+            foreach (var (mn, mx, darkens, kind, average) in _occluderChanges)
             {
-                MarkRegion(mn - pad, mx + pad);             // surface voxels right at the change
-                MarkSunShadow(mn, mx, sunDir, darkens);     // voxels whose sun ray passes through it
-                MarkLampsTouching(mn, mx, darkens);         // lamps whose rays may pass through it
-                if (darkens) ClearBounceAround(mn - pad, mx + pad);
+                _curKind = kind; // tags the bounce clears below
+                var restart = _kindMarks[(int)kind];
+                var carryOn = average ? _averageMarks[(int)kind] : restart;
+                // Surface voxels right at the change. A placed or removed block changes their shape, so they restart
+                // even when averaging; a ship's move changes no terrain, so they carry on.
+                MarkRegion(mn - pad, mx + pad, kind == ChangeKind.Ship ? carryOn : restart);
+                MarkSunShadow(mn, mx, sunDir, darkens && !average, carryOn); // voxels whose sun ray passes through it
+                if (average)
+                {
+                    // Lamps whose rays may pass through it: their radius, carrying on.
+                    foreach (var lamp in _lamps) { var (a, b) = LampBox(lamp); if (Overlaps(a, b, mn, mx)) MarkRegion(a, b, carryOn); }
+                    foreach (var lamp in _prevLamps) { var (a, b) = LampBox(lamp); if (Overlaps(a, b, mn, mx)) MarkRegion(a, b, carryOn); }
+                }
+                else
+                {
+                    MarkLampsTouching(mn, mx, darkens);         // lamps whose rays may pass through it
+                    if (darkens) ClearBounceAround(mn - pad, mx + pad);
+                }
             }
-            // Ship moves when blending (see _shipMoveBlend): the same bricks, nothing cleared, marked separately so
-            // their direct light is still redone this frame past the cap and their bounce carries on.
-            foreach (var (mn, mx) in _shipMoves)
-            {
-                MarkRegion(mn - pad, mx + pad, _shipMarks);
-                MarkSunShadow(mn, mx, sunDir, false, _shipMarks);
-                foreach (var lamp in _lamps) { var (a, b) = LampBox(lamp); if (Overlaps(a, b, mn, mx)) MarkRegion(a, b, _shipMarks); }
-                foreach (var lamp in _prevLamps) { var (a, b) = LampBox(lamp); if (Overlaps(a, b, mn, mx)) MarkRegion(a, b, _shipMarks); }
-            }
+            _curKind = ChangeKind.Other;
             foreach (var (mn, mx) in _directChanges) MarkRegion(mn, mx);
-            _marks.Flush(_markSlot);
-            if (!_shipMarks.IsEmpty) _shipMarks.Flush(_shipMarkSlotDelegate ??= ShipMarkSlot);
+            for (int k = 0; k < KindCount; k++)
+            {
+                if (!_kindMarks[k].IsEmpty) _kindMarks[k].Flush(_restartSlot[k]);
+                if (!_averageMarks[k].IsEmpty) _averageMarks[k].Flush(_averageSlot[k]);
+            }
         }
         _phaseTimer.Lap(2);
 
@@ -383,7 +404,7 @@ public sealed partial class GpuLightSystem
         {
             if (!grid.IsWorld) continue;
             _dbgChangedChunks++;
-            if (solid && !relightAll) _occluderChanges.Add((mn, mx, darkens));
+            if (solid && !relightAll) _occluderChanges.Add((mn, mx, darkens, ChangeKind.Block, AverageAfter(ChangeKind.Block)));
             if (solid) _shapeChanges.Add((mn, mx, true));
         }
         _store.ChangedChunks.Clear();
@@ -397,6 +418,7 @@ public sealed partial class GpuLightSystem
             bool moved = !st.HavePrev || lg.Pos != st.PrevPos || lg.Rot != st.PrevRot || h.Version != st.PrevVersion;
             st.Moved = moved;
             st.Edited = !st.HavePrev || h.Version != st.PrevVersion;
+            st.ShipChange = moved;
             if (moved)
             {
                 // What other grids' AO sees of it changed at both poses; restarted where its blocks changed.
@@ -404,31 +426,28 @@ public sealed partial class GpuLightSystem
                 if (h.HasSolid) _shapeChanges.Add((st.CurWorldMin, st.CurWorldMax, st.Edited));
                 _dbgShipsMoved++;
                 st.LightAll = true;
-                st.Blend = BlendShipMoves && !st.Edited;
+                // Like a placed block: the ship may now shade what it didn't, so the bounce around both poses and along
+                // both sun shadows restarts (cleared, and settled this frame within the ships' settle radius) — or,
+                // averaging (and its blocks unchanged), the same bricks are relit but their bounce carries on its
+                // running average.
+                st.Blend = AverageAfter(ChangeKind.Ship) && !st.Edited;
+                if (st.HavePrev) _occluderChanges.Add((st.PrevWorldMin, st.PrevWorldMax, true, ChangeKind.Ship, st.Blend));
+                if (h.HasSolid) _occluderChanges.Add((st.CurWorldMin, st.CurWorldMax, true, ChangeKind.Ship, st.Blend));
                 if (st.Blend)
                 {
-                    // Blending: the same bricks are relit, but the bounce around both poses and along both sun
-                    // shadows carries on its running average, one evaluation a frame, instead of restarting.
                     if (st.HavePrev) _shipMoves.Add((st.PrevWorldMin, st.PrevWorldMax));
                     if (h.HasSolid) _shipMoves.Add((st.CurWorldMin, st.CurWorldMax));
-                }
-                else
-                {
-                    // Like a placed block: the ship may now shade what it didn't, so the bounce around both poses and
-                    // along both sun shadows restarts and is recomputed in full this frame, instead of blending with
-                    // last frame's (which lags behind the ship and flickers as it moves).
-                    if (st.HavePrev) _occluderChanges.Add((st.PrevWorldMin, st.PrevWorldMax, true));
-                    if (h.HasSolid) _occluderChanges.Add((st.CurWorldMin, st.CurWorldMax, true));
                 }
             }
             else if (st.Blend)
             {
-                // The first frame a blending ship is still: settle where it came to rest the way a placed block does
-                // (clear and recompute the bounce around it and along its sun shadow), so no bounce from before its
-                // shadow arrived lingers under it.
+                // The first frame an averaging ship is still: restart where it came to rest the way a placed block
+                // does (clear and recompute the bounce around it and along its sun shadow), so no bounce from before
+                // its shadow arrived lingers under it.
                 st.Blend = false;
+                st.ShipChange = true;
                 st.LightAll = true;
-                if (h.HasSolid) _occluderChanges.Add((st.CurWorldMin, st.CurWorldMax, true));
+                if (h.HasSolid) _occluderChanges.Add((st.CurWorldMin, st.CurWorldMax, true, ChangeKind.Ship, false));
             }
             st.HavePrev     = h.HasSolid;
             st.PrevPos      = lg.Pos;
@@ -458,7 +477,7 @@ public sealed partial class GpuLightSystem
             // Its light is gone, but bounce there sustains itself from neighbours still holding it: clear the bounce
             // within its reach plus the bounce ray length so it re-accumulates from what is left.
             var m = new Vector3D<float>(BounceMarginBricks * 8f);
-            _bounceClears.Add((a - m, b + m));
+            _bounceClears.Add((a - m, b + m, ChangeKind.Other));
         }
 
         (_prevLampKeys, _curLampKeys) = (_curLampKeys, _prevLampKeys);
@@ -472,7 +491,9 @@ public sealed partial class GpuLightSystem
     {
         _clearSlots.Clear();
         if (_bounceClears.Count == 0 || _aoOnly) return; // AO only stores no bounce to clear
-        foreach (var (mn, mx) in _bounceClears)
+        foreach (var (mn, mx, kind) in _bounceClears)
+        {
+            _curKind = kind; // AddClear tags each slot with the first change that cleared it
             foreach (var lg in _lit)
             {
                 if (lg.Handle.IsWorld)
@@ -485,6 +506,8 @@ public sealed partial class GpuLightSystem
                         foreach (int slot in lg.Handle.Slots) AddClear(slot);
                 }
             }
+        }
+        _curKind = ChangeKind.Other;
     }
 
     /// <summary>The cleared slots' bounce restarts from zero, held for a full set of evaluations (all of them this
@@ -500,6 +523,7 @@ public sealed partial class GpuLightSystem
                 continue;
             // Restart the running average outright, even if the brick was already held this frame.
             _holdStamp[slot] = _frame;
+            _holdKind[slot] = _clearKind[slot];
             _n[slot] = 0;
             _primed[slot] = false;
             _hold[slot] = (byte)Grant(slot, holdEvals);
@@ -511,6 +535,7 @@ public sealed partial class GpuLightSystem
     {
         if (_clearStamp[slot] == _frame) return;
         _clearStamp[slot] = _frame;
+        _clearKind[slot] = (byte)_curKind;
         _clearSlots.Add(slot);
     }
 
@@ -549,7 +574,7 @@ public sealed partial class GpuLightSystem
     private void ClearBounceAround(Vector3D<float> mn, Vector3D<float> mx)
     {
         var m = new Vector3D<float>(BounceMarginBricks * 8f);
-        _bounceClears.Add((mn - m, mx + m));
+        _bounceClears.Add((mn - m, mx + m, _curKind));
     }
 
     // ── Marking ────────────────────────────────────────────────────────────────
@@ -685,21 +710,38 @@ public sealed partial class GpuLightSystem
 
     private void MarkSlot(int slot)
     {
+        _markKind[slot] = (byte)ChangeKind.Other;
         if (_dirty[slot]) return;
         _dirty[slot] = true;
         _dirtyQueue.Add(slot);
     }
 
-    // World bricks a blending ship move marked: relit this frame, and their bounce carries on (see HoldBounce).
-    private readonly BrickMarks _shipMarks = new(), _blendMarks = new();
-    private Action<int>? _shipMarkSlotDelegate, _blendSlotDelegate;
-
-    private void ShipMarkSlot(int slot)
+    // World bricks marked this frame by kind of change, the ones whose bounce restarts and the ones whose bounce
+    // carries on (averaging changes; relit this frame past the cap), and the delegates they are flushed into.
+    private BrickMarks[]? _kindMarksField, _averageMarksField;
+    private BrickMarks[] _kindMarks => _kindMarksField ??= new[] { _marks, new BrickMarks(), new BrickMarks() };
+    private BrickMarks[] _averageMarks => _averageMarksField ??= new[] { new BrickMarks(), new BrickMarks(), new BrickMarks() };
+    private Action<int>[]? _restartSlotField, _averageSlotField;
+    private Action<int>[] _restartSlot => _restartSlotField ??= KindDelegates(k => slot =>
     {
         MarkSlot(slot);
-        if (_blendStamp[slot] == _frame) return;
-        _blendStamp[slot] = _frame;
-        _shipMarked.Add(slot);
+        _markKind[slot] = (byte)k;
+        _restartStamp[slot] = _frame;
+    });
+    private Action<int>[] _averageSlot => _averageSlotField ??= KindDelegates(k => slot =>
+    {
+        MarkSlot(slot);
+        _markKind[slot] = (byte)k;
+        if (_averageStamp[slot] == _frame) return;
+        _averageStamp[slot] = _frame;
+        _averageMarked.Add(slot);
+    });
+
+    private static Action<int>[] KindDelegates(Func<ChangeKind, Action<int>> make)
+    {
+        var d = new Action<int>[KindCount];
+        for (int k = 0; k < KindCount; k++) d[k] = make((ChangeKind)k);
+        return d;
     }
 
     private static bool Overlaps(Vector3D<float> aMin, Vector3D<float> aMax, Vector3D<float> bMin, Vector3D<float> bMax)
@@ -767,8 +809,9 @@ public sealed partial class GpuLightSystem
         if (_aoOnly) { HoldShapeChanges(holdFrames); return; }
 
         // The world bricks within bounce reach of every relit one, gathered per chunk so the overlapping reaches of
-        // neighbouring bricks are visited once. Those a blending ship move relit carry on their average instead, as
-        // does everything within bounce reach of such a ship (its hull blocks and reflects their rays).
+        // neighbouring bricks are visited once, by the kind of change that relit it. Those an averaging change relit
+        // (and no restarting one) carry on their average instead, as does everything within bounce reach of an
+        // averaging ship (its hull blocks and reflects their rays).
         int m = BounceMarginBricks;
         var world = _staticVolume.Gpu;
         foreach (int slot in _relitList)
@@ -778,23 +821,23 @@ public sealed partial class GpuLightSystem
             var c = _store.SlotChunk[slot];
             int b = _store.SlotBrick[slot];
             int bx = c.X * 4 + (b & 3), by = c.Y * 4 + ((b >> 2) & 3), bz = c.Z * 4 + (b >> 4);
-            (_blendStamp[slot] == _frame ? _blendMarks : _holdMarks).AddBox(world, bx - m, by - m, bz - m, bx + m, by + m, bz + m);
+            bool carryOn = _averageStamp[slot] == _frame && _restartStamp[slot] != _frame;
+            (carryOn ? _extendByKind : _holdByKind)[_markKind[slot]].AddBox(world, bx - m, by - m, bz - m, bx + m, by + m, bz + m);
         }
-        if (_worldIndex >= 0) foreach (var (mn, mx) in _shipMoves) AddBrickBox(_blendMarks, world, mn, mx, m);
+        if (_worldIndex >= 0) foreach (var (mn, mx) in _shipMoves) AddBrickBox(_extendByKind[(int)ChangeKind.Ship], world, mn, mx, m);
         _holdFramesNow = holdFrames;
-        // Restarts first: a brick both restarted and carried on restarts (ExtendSlot skips it).
-        if (!_holdMarks.IsEmpty) _holdMarks.Flush(_holdSlotDelegate ??= s => HoldSlot(s, _holdFramesNow));
-        if (!_blendMarks.IsEmpty) _blendMarks.Flush(_blendSlotDelegate ??= BlendSlot);
+        // Restarts first (a brick both restarted and carried on restarts: ExtendSlot skips it), and of each, ships
+        // first, then block changes, then the rest: the first to hold a brick sets its settle radius.
+        _holdBy ??= KindDelegates(k => s => HoldSlot(s, _holdFramesNow, k));
+        _extendBy ??= KindDelegates(k => s => ExtendSlot(s, _holdFramesNow, k));
+        for (int k = KindCount - 1; k >= 0; k--)
+            if (!_holdByKind[k].IsEmpty) _holdByKind[k].Flush(_holdBy[k]);
+        for (int k = KindCount - 1; k >= 0; k--)
+            if (!_extendByKind[k].IsEmpty) _extendByKind[k].Flush(_extendBy[k]);
     }
 
-    /// <summary>A world brick a blending ship move touched: held for at least a full set of evaluations, carrying on
-    /// its running average, and stamped so it gets one evaluation a frame, not a near-camera settle (see
-    /// <see cref="BuildBounceWork"/>).</summary>
-    private void BlendSlot(int slot)
-    {
-        _blendStamp[slot] = _frame;
-        ExtendSlot(slot, _holdFramesNow);
-    }
+    private readonly BrickMarks[] _holdByKind = { new(), new(), new() }, _extendByKind = { new(), new(), new() };
+    private Action<int>[]? _holdBy, _extendBy;
 
     /// <summary>Whether every light slot of a grid has accumulation.</summary>
     private bool HasAcc(GridHandle g)
@@ -837,10 +880,11 @@ public sealed partial class GpuLightSystem
 
     /// <summary>Holds a slot for at least <paramref name="holdFrames"/> more evaluations, continuing its running
     /// average (a slot that has never been evaluated starts one).</summary>
-    private void ExtendSlot(int slot, int holdFrames)
+    private void ExtendSlot(int slot, int holdFrames, ChangeKind kind = ChangeKind.Other)
     {
         if (_holdStamp[slot] == _frame) return;
         _holdStamp[slot] = _frame;
+        _holdKind[slot] = (byte)kind;
         _hold[slot] = (byte)System.Math.Max(_hold[slot], Grant(slot, holdFrames));
         if (!_inHeld[slot]) { _inHeld[slot] = true; _heldQueue.Add(slot); }
     }
@@ -871,10 +915,11 @@ public sealed partial class GpuLightSystem
     // AO only: this frame's changed geometry (world space), and whether its blocks changed (restart) or it moved.
     private readonly List<(Vector3D<float> min, Vector3D<float> max, bool restart)> _shapeChanges = new();
 
-    private void HoldSlot(int slot, int holdFrames)
+    private void HoldSlot(int slot, int holdFrames, ChangeKind kind = ChangeKind.Other)
     {
         if (_holdStamp[slot] == _frame) return;
         _holdStamp[slot] = _frame;
+        _holdKind[slot] = (byte)kind;
         _n[slot] = 0;
         _primed[slot] = false;
         _hold[slot] = (byte)Grant(slot, holdFrames);
@@ -975,8 +1020,8 @@ public sealed partial class GpuLightSystem
         _relitList.Clear();
         foreach (int slot in _clearSlots)
             if (_dirty[slot]) TakeDirty(slot, ref n);
-        // So are the bricks a blending ship move marked: its sun shadow moves with it, only the bounce lags.
-        foreach (int slot in _shipMarked)
+        // So are the bricks an averaging change marked: a ship's sun shadow moves with it, only the bounce lags.
+        foreach (int slot in _averageMarked)
             if (_dirty[slot]) TakeDirty(slot, ref n);
         int urgent = _relitList.Count;
         _dirtyQueue.Recentre(camPos, _keepDirty ??= slot => _dirty[slot]);
@@ -1020,9 +1065,10 @@ public sealed partial class GpuLightSystem
             // A ship near the camera runs the rest of its hold this frame too, whole (ships are small), so it is
             // settled the frame it changes; farther away it takes one evaluation per frame.
             uint evals = (uint)System.Math.Min(st.BounceAllN, 255);
-            // A blending ship (see _shipMoveBlend) takes one evaluation a frame once its average is under way.
-            bool shipNear = !lg.Handle.IsWorld && nearRadius >= 0f && !(st.Blend && st.BounceAllN > 0)
-                            && BoxDistanceSquared(camPos, st.CurWorldMin, st.CurWorldMax) <= nearR2;
+            // Within the settle radius (the ships' own after a move, see SettleRadius) it runs the rest of its hold now.
+            float shipR = lg.Handle.IsWorld ? -1f
+                        : SettleRadius(st.ShipChange ? ChangeKind.Ship : ChangeKind.Other, st.BounceAllN == 0, nearRadius);
+            bool shipNear = shipR >= 0f && BoxDistanceSquared(camPos, st.CurWorldMin, st.CurWorldMax) <= shipR * shipR;
             int more = shipNear ? System.Math.Min(extra, st.BounceAllFrames - 1) : 0;
             st.BounceAllFrames -= 1 + more;
             st.BounceAllN += 1 + more;
@@ -1064,14 +1110,14 @@ public sealed partial class GpuLightSystem
             // this frame, after it.
             if (GiveAcc(slot)) { _n[slot] = 0; _primed[slot] = false; }
             bool prime = !_aoOnly && !_primed[slot]; // with AO only there is no bounce for priming to protect
-            // Carried on by a blending ship move with its average under way: one evaluation this frame, wherever it is.
-            bool blendOnly = _blendStamp[slot] == _frame && _n[slot] > 0;
+            // Within the settle radius of the change that held it, the rest of its hold runs this frame.
+            float r = SettleRadius((ChangeKind)_holdKind[slot], prime || _n[slot] == 0, nearRadius);
             _primed[slot] = true;
             if (!prime) _hold[slot]--;
             Push(ref n, (uint)slot);
             Push(ref n, prime ? PrimeEval : _n[slot]);
             int more = 0;
-            if (!blendOnly && nearRadius >= 0f && Vector3D.DistanceSquared(SlotCentre(slot), camPos) <= nearR2)
+            if (r >= 0f && Vector3D.DistanceSquared(SlotCentre(slot), camPos) <= r * r)
             {
                 more = System.Math.Min(extra + (prime ? 1 : 0), (int)_hold[slot]);
                 if (more > 0) AddNear((uint)slot, prime ? PrimeEval : _n[slot], more);
@@ -1083,6 +1129,19 @@ public sealed partial class GpuLightSystem
         n /= 2;
         if (n > 0) Upload(ref _bounceWork, 2 * n);
         return n;
+    }
+
+    /// <summary>
+    /// Within what distance of the camera a brick held by a change of this kind runs its whole hold in one frame;
+    /// negative for nowhere. <paramref name="general"/> is the general radius (negative when nothing settles this
+    /// frame). Block changes and ship moves have their own radius, but a brick an averaging change starts from nothing
+    /// (<paramref name="restart"/>: it had settled, so it has no running average to carry on) uses the general one,
+    /// since one evaluation alone would show a single slice of its rays.
+    /// </summary>
+    private float SettleRadius(ChangeKind kind, bool restart, float general)
+    {
+        if (general < 0f || kind == ChangeKind.Other || (restart && AverageAfter(kind))) return general;
+        return kind == ChangeKind.Block ? _blockSettleRadius : _shipSettleRadius;
     }
 
     /// <summary>Whether a held slot still needs bounce (its grid is still there and its hold isn't used up); if not,
@@ -1254,7 +1313,11 @@ public sealed partial class GpuLightSystem
         Array.Resize(ref _composeStamp, capacity);
         Array.Resize(ref _nearStamp, capacity);
         Array.Resize(ref _clearStamp, capacity);
-        Array.Resize(ref _blendStamp, capacity);
+        Array.Resize(ref _averageStamp, capacity);
+        Array.Resize(ref _restartStamp, capacity);
+        Array.Resize(ref _markKind, capacity);
+        Array.Resize(ref _holdKind, capacity);
+        Array.Resize(ref _clearKind, capacity);
         Array.Resize(ref _inAcc, capacity);
         if (_preCompose.Length < capacity) Array.Resize(ref _preCompose, capacity);
     }
