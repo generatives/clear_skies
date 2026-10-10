@@ -795,7 +795,7 @@ public sealed partial class GpuLightSystem
                 // A ship moving with its blocks unchanged carries on its running average, one evaluation a frame (see
                 // BuildBounceWork); it restarts only if it has no accumulation (it had settled before it moved).
                 if (!HasAcc(lg.Handle)) st.BounceAllN = 0;
-                st.BounceAllFrames = System.Math.Max(st.BounceAllFrames, AverageEvals(ChangeKind.Ship));
+                st.BounceAllFrames = System.Math.Max(st.BounceAllFrames, AverageEvals());
             }
             else if (st.AllThisFrame)
             {
@@ -890,7 +890,7 @@ public sealed partial class GpuLightSystem
         _holdKind[slot] = (byte)kind;
         int grant = Grant(slot, holdFrames);
         if (AverageAfter(kind) && holdFrames > 0)
-            grant = System.Math.Clamp((grant * AverageEvals(kind) + holdFrames - 1) / holdFrames, 1, 255);
+            grant = System.Math.Clamp((grant * AverageEvals() + holdFrames - 1) / holdFrames, 1, 255);
         _hold[slot] = (byte)System.Math.Max(_hold[slot], grant);
         if (!_inHeld[slot]) { _inHeld[slot] = true; _heldQueue.Add(slot); }
     }

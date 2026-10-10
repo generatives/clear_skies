@@ -73,12 +73,21 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     private bool _blockAverage, _shipAverage;
     private int _blockAverageIdx, _shipAverageIdx; // the debug panel's combos (0 clear, 1 average)
     private float _blockSettleRadius = 64f, _shipSettleRadius = 64f;
-    // Average: how many evaluations a brick keeps getting after the change last touched it. An under-way average
-    // moves about 1/cycle of the way each one, so what was there before fades to (1 - 1/cycle)^n: about 32% after
-    // 4 with a cycle of 4, 10% after 8, 1% after 16.
-    private int _blockAverageEvals = 16, _shipAverageEvals = 16;
 
-    private int AverageEvals(ChangeKind kind) => kind == ChangeKind.Ship ? _shipAverageEvals : _blockAverageEvals;
+    /// <summary>
+    /// Averaging: how many evaluations a brick keeps getting after a change last touched it, so that whatever was
+    /// there before is gone to the last stored step. An under-way average moves 1/cycle of the way each evaluation,
+    /// so an old difference d (in 8-bit accumulation steps) shrinks to d(1 - 1/cycle)^n; once it is under 2 steps,
+    /// blend8's rounding moves it one step an evaluation, at most 2 more. The largest difference is a full AO swing,
+    /// 255 steps (bounce, at most 255 x albedo, is smaller), so a cycle of 4 needs 17 + 2 = 19; 2 needs 9, 8 needs 39.
+    /// </summary>
+    private int AverageEvals()
+    {
+        int cycle = System.Math.Max(_bounceCycle, 1);
+        if (cycle == 1) return 1; // each evaluation replaces the stored value outright
+        double fade = System.Math.Log(2.0 / 255.0) / System.Math.Log(1.0 - 1.0 / cycle);
+        return System.Math.Clamp((int)System.Math.Ceiling(fade) + 2, cycle, 64);
+    }
 
     /// <summary>Whether the bounce a change of this kind touches carries on its average rather than restarting
     /// (only with bounce light on: AO alone always carries on).</summary>
@@ -258,15 +267,12 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         ImGui.Text("After a change");
         ImGui.Combo("Block changes", ref _blockAverageIdx, "Clear and restart\0Average\0");
         ImGui.SliderFloat("  settled in one frame within##block", ref _blockSettleRadius, 0f, 256f, "%.0f");
-        ImGui.SliderInt("  evaluations when averaging##block", ref _blockAverageEvals, 4, 64);
         ImGui.Combo("Moving ships", ref _shipAverageIdx, "Clear and restart\0Average\0");
         ImGui.SliderFloat("  settled in one frame within##ship", ref _shipSettleRadius, 0f, 256f, "%.0f");
-        ImGui.SliderInt("  evaluations when averaging##ship", ref _shipAverageEvals, 4, 64);
         _blockAverage = _blockAverageIdx == 1;
         _shipAverage = _shipAverageIdx == 1;
         ImGui.TextDisabled("  average: bounce carries on over frames instead of restarting; past the radius, one evaluation a frame");
-        ImGui.TextDisabled($"  the old light left after N evaluations: {100f * MathF.Pow(1f - 1f / System.Math.Max(_bounceCycle, 1), _blockAverageEvals):F0}% (blocks), " +
-                           $"{100f * MathF.Pow(1f - 1f / System.Math.Max(_bounceCycle, 1), _shipAverageEvals):F0}% (ships)");
+        ImGui.TextDisabled($"  averaging runs {AverageEvals()} evaluations after the last change, until no stored step of the old light is left");
         ImGui.Text("Gradual bounce (world bricks)");
         ImGui.SliderFloat("Full evaluations within (blocks)", ref _bounceFullRadius, 16f, 4096f, "%.0f");
         ImGui.SliderFloat("Middle evaluations within (blocks)", ref _bounceMidRadius, 16f, 8192f, "%.0f");
