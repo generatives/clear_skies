@@ -60,6 +60,13 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     private float _bounceNearRadius = 64f;
     private float _bounceScale = 1f;
 
+    // Ship moves (a ship moving with its blocks unchanged, bounce light on): off, they take the placed-block path, the
+    // bounce around the ship and along its sun shadow cleared and settled within the frame near the camera; on, that
+    // bounce carries on its running average, one evaluation a frame, so it lags the ship a little but costs a fraction.
+    // Direct light (the ship's sun shadow) is redone the frame the ship moves either way.
+    private bool _shipMoveBlend;
+    private bool BlendShipMoves => _shipMoveBlend && _bounceMode == BounceMode.Full;
+
     // Checkerboard bounce (see bouncePhase in GpuRayLightPass): 1 = every surface voxel fires all the rays each
     // evaluation; 2 or 4 = each fires only that share, neighbours firing the others, and the compose pass's smoothing
     // averages them. Each evaluation costs about 1/spread of the rays.
@@ -228,6 +235,8 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         ImGui.SliderFloat("Settled-in-one-frame radius", ref _bounceNearRadius, 0f, 256f, "%.0f");
         ImGui.TextDisabled("  changes within it run all their evaluations the frame they happen");
         ImGui.SliderFloat("Bounce display scale", ref _bounceScale, 0f, 4f, "%.2f");
+        ImGui.Checkbox("Moving ships: blend bounce over frames", ref _shipMoveBlend);
+        ImGui.TextDisabled("  off: cleared and settled the frame a ship moves; on: one evaluation a frame, lags a little");
         ImGui.Text("Gradual bounce (world bricks)");
         ImGui.SliderFloat("Full evaluations within (blocks)", ref _bounceFullRadius, 16f, 4096f, "%.0f");
         ImGui.SliderFloat("Middle evaluations within (blocks)", ref _bounceMidRadius, 16f, 8192f, "%.0f");
