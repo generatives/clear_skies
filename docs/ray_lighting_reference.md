@@ -58,6 +58,12 @@ the smoothing on every compose through a `select`; it now runs only on the final
   then counts as N = cycle. It is used for a Block or Ship restart outside the settle radius, after the prime in the
   same frame.
 
+- **Whole cycles when averaging** (`WholeCycleDue`): a brick (or averaging ship) carrying on an Average change's
+  running average (N > 0) fires FULL_SET once every `cycle` frames, staggered by slot, instead of one slice a frame;
+  within its settle radius, every frame instead of the cycle of repeats. Same rays per frame on average; the shown
+  value is the full 8-direction mean and only changes when the light does. Fixes the slice-by-slice flicker and the
+  N = 255 freeze on one slice. Bounce lags a change by up to `cycle` frames.
+
 ## Holds: how many evaluations a change gets
 
 - **Hold** = the hold setting rounded up to whole cycles. All presets: **4** (one cycle).

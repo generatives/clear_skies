@@ -1078,6 +1078,20 @@ public sealed partial class GpuLightSystem
             float shipR = lg.Handle.IsWorld ? -1f
                         : SettleRadius(st.ShipChange ? ChangeKind.Ship : ChangeKind.Other, st.BounceAllN == 0, nearRadius);
             bool shipNear = shipR >= 0f && BoxDistanceSquared(camPos, st.CurWorldMin, st.CurWorldMax) <= shipR * shipR;
+            // An averaging ship carrying on its average: whole cycles (see WholeCycleDue).
+            if (!lg.Handle.IsWorld && st.Blend && st.BounceAllN > 0 && _bounceCycle > 1)
+            {
+                if (!WholeCycleDue(lg.Handle.Index, shipNear)) continue; // keeps its accumulation and its hold
+                st.BounceAllFrames = System.Math.Max(0, st.BounceAllFrames - _bounceCycle);
+                st.BounceAllN += _bounceCycle;
+                foreach (int slot in lg.Handle.Slots)
+                {
+                    GiveAcc(slot);
+                    Push(ref n, (uint)slot);
+                    Push(ref n, evals | FullSetEval);
+                }
+                continue;
+            }
             int more = shipNear ? System.Math.Min(extra, st.BounceAllFrames - 1) : 0;
             // A moved ship restarting away from the camera fires its whole ray set in its first evaluation, so it
             // starts from the full mean rather than one slice of it.
@@ -1125,10 +1139,21 @@ public sealed partial class GpuLightSystem
             bool prime = !_aoOnly && !_primed[slot]; // with AO only there is no bounce for priming to protect
             // Within the settle radius of the change that held it, the rest of its hold runs this frame.
             float r = SettleRadius((ChangeKind)_holdKind[slot], prime || _n[slot] == 0, nearRadius);
+            bool near = r >= 0f && Vector3D.DistanceSquared(SlotCentre(slot), camPos) <= r * r;
+            if (!prime && _n[slot] > 0 && _bounceCycle > 1 && AverageAfter((ChangeKind)_holdKind[slot]))
+            {
+                // Carrying on an averaging change's average: whole cycles (see WholeCycleDue).
+                if (!WholeCycleDue(slot, near)) continue; // keeps its accumulation and its hold
+                Push(ref n, (uint)slot);
+                Push(ref n, _n[slot] | FullSetEval);
+                _hold[slot] -= (byte)System.Math.Min(_bounceCycle, (int)_hold[slot]);
+                _n[slot] = (byte)System.Math.Min(_n[slot] + _bounceCycle, 255);
+                continue;
+            }
             _primed[slot] = true;
             if (!prime) _hold[slot]--;
             int more = 0;
-            if (r >= 0f && Vector3D.DistanceSquared(SlotCentre(slot), camPos) <= r * r)
+            if (near)
             {
                 Push(ref n, (uint)slot);
                 Push(ref n, prime ? PrimeEval : _n[slot]);
@@ -1172,6 +1197,19 @@ public sealed partial class GpuLightSystem
         if (n > 0) Upload(ref _bounceWork, 2 * n);
         return n;
     }
+
+    /// <summary>
+    /// Whether a brick (or ship, by grid index) carrying on an averaging change's running average evaluates this frame.
+    /// Such a brick fires its whole ray set in one evaluation (FULL_SET: every slice, replacing what it had) once a
+    /// cycle instead of one slice per evaluation, staggered by <paramref name="key"/> so a cycle's worth of bricks share
+    /// each frame; near the camera (<paramref name="near"/>, its settle radius) every frame, in place of the cycle's
+    /// worth of repeats it would run. One slice at a time blended in at 1/cycle made the shown value lean toward
+    /// whichever slice ran last, which flickered at one evaluation a frame, and once the count stopped at 255 left
+    /// every voxel on the same 2 rays (Medium). Whole cycles fire the same rays per frame on average, show the
+    /// complete set's mean, and change only when the light does; the cost is that bounce follows a change up to a
+    /// cycle of frames late.
+    /// </summary>
+    private bool WholeCycleDue(int key, bool near) => near || (_frame + key) % _bounceCycle == 0;
 
     /// <summary>
     /// Within what distance of the camera a brick held by a change of this kind runs its whole hold in one frame;
