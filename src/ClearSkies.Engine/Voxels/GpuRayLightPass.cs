@@ -847,9 +847,8 @@ fn bouncePhase(v: vec3<i32>, spread: i32) -> i32 {
 // it the brick is recomposed with its AO and the average starts over, reading walls lit as they really are.
 const PRIME: u32 = 0xFFFFFFFFu;
 const FULL_SET: u32 = 0x40000000u; // flag on N, see bounce_main
-const ALL_PHASES: u32 = 0x20000000u; // flag on N, see bounce_main
 
-fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, slice: i32, slices: i32, spreadIn: i32, list: u32, prime: bool) -> u32 {
+fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, slice: i32, slices: i32, list: u32, prime: bool) -> u32 {
     if (isSolid(g, v)) { return word; }
 
     let sxn = isSolid(g, v - vec3<i32>(1, 0, 0)); let sxp = isSolid(g, v + vec3<i32>(1, 0, 0));
@@ -885,7 +884,7 @@ fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, slice: i32, slices: 
     let rays = clamp(i32(p.bounce2.x), 1, BOUNCE_MAX_RAYS);
     let cycle = max(i32(p.bounce2.y), 1);
     let total = f32(rays * cycle);
-    let spread = clamp(spreadIn, 1, 4);
+    let spread = clamp(i32(p.bounce2.z), 1, 4);
     let phase = bouncePhase(v, spread);
     let fired = max((rays - phase + spread - 1) / spread, 1); // this voxel's share of the slice's rays
     // slices > 1: this evaluation fires that many consecutive slices (all of them: the whole set, see FULL_SET).
@@ -963,13 +962,7 @@ fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) n
     // FULL_SET: a first evaluation that fires the voxel's whole ray set at once and replaces what was stored, so a
     // restart away from the camera starts from the exact mean instead of one noisy slice.
     let full = !prime && (nuRaw & FULL_SET) != 0u;
-    // ALL_PHASES: the checkerboard is off for this evaluation, so every voxel fires the whole slice rather than its
-    // phase's share. The CPU sets it on bricks a block change or ship move is evaluating: a voxel's own share of its set
-    // is only rays * cycle / spread fixed directions, too few to see a small lamp-lit patch evenly (splotches under a
-    // moving ship's lamps at night); the whole set is rays * cycle.
-    let allPhases = !prime && (nuRaw & ALL_PHASES) != 0u;
-    let nu = select(nuRaw & ~(FULL_SET | ALL_PHASES), nuRaw, prime);
-    let spread = select(i32(p.bounce2.z), 1, allPhases);
+    let nu = select(nuRaw & ~FULL_SET, nuRaw, prime);
     let aoOnly = p.bounce.z > 0.5;
     let alpha = select(max(1.0 / f32(cycle), 1.0 / (f32(nu) + 1.0)), 1.0, prime || full);
     let slice = select(i32(nu % cycle), i32(cycle) - 1, prime);
@@ -991,7 +984,7 @@ fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) n
         let k = wList[i];
         let v = base + vec3<i32>(i32(k & 7u), i32((k >> 3u) & 7u), i32(k >> 6u));
         let a = accBase + i32(k);
-        accPool[a] = bounceVoxel(it.g, v, accPool[a], alpha, slice, select(1, i32(cycle), full), spread, list, prime || aoOnly);
+        accPool[a] = bounceVoxel(it.g, v, accPool[a], alpha, slice, select(1, i32(cycle), full), list, prime || aoOnly);
     }
 }
 

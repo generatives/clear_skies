@@ -53,11 +53,6 @@ bounce and AO: the voxel counts 2, face neighbours 1, edge diagonals ½. Only ne
 - **FULL_SET** flag (b543cad): one evaluation fires all `cycle` slices (Medium: 8 rays per voxel) with weight 1, and
   then counts as N = cycle. It is used for a Block or Ship restart outside the settle radius, after the prime in the
   same frame.
-- **ALL_PHASES** flag: the evaluation ignores the checkerboard, so each voxel fires the whole slice (Medium: 8 rays
-  per evaluation instead of 2, and 32 directions over a cycle instead of 8). With FULL_SET it fires all 32 at once.
-  Set on every evaluation of a brick held by a Block or Ship change (and a moved ship's own bricks); everything else
-  keeps the checkerboard. Reason: 8 fixed directions per voxel see a small lamp-lit patch unevenly, which showed as
-  splotchy ground around a moving ship at night (Declan confirmed spread 1 removes it).
 
 ## Holds: how many evaluations a change gets
 
