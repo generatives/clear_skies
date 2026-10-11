@@ -42,8 +42,12 @@ bounce and AO: the voxel counts 2, face neighbours 1, edge diagonals ½. Only ne
 - **Checkerboard spread** S (1, 2 or 4) makes each voxel fire only the rays with `k ≡ phase (mod S)`. Each 2×2
   patch holds every phase once, and smoothing pools them.
   - Per evaluation, a voxel fires `rays / S` rays. Medium: 8 / 4 = **2**.
-  - Over a full cycle, a voxel fires `rays × cycle / S`. Medium: **8** of its 32. It never fires the other 24; its
-    neighbours do.
+  - Over a full cycle, a voxel fires `rays × cycle / S`. Medium: **8** of its 32; its neighbours fire the rest.
+  - **Phase rotation**: the phase moves on by one each full cycle (`+ N / cycle`), so a brick that keeps evaluating
+    (ground averaging under a moving ship) fires all 32 over 4 cycles at the same 2 rays per evaluation. A brick that
+    restarts every frame (Clear) never gets past cycle 0, so it still sees only 8.
+- **N past 255** wraps by whole 4-cycle rotations (to 16-31 at cycle 4) instead of sticking at 255, which used to
+  freeze a long-averaging brick on one slice and one phase (2 directions per voxel on Medium).
 - A hit reads the brightest of: the hit face's sun, its composed display, and its stored bounce. That is how bounce
   goes multi-hop: each evaluation adds a hop. A miss counts as sky for AO.
 - Blend weight: `alpha = max(1/cycle, 1/(N+1))`. At cycle 4 that is 1, ½, ⅓, ¼, ¼, … So it is an exact running mean

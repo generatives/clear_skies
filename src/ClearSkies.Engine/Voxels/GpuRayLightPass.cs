@@ -834,6 +834,10 @@ fn rand01(h: u32) -> f32 { return f32(pcg(h) & 0xFFFFFFu) / 16777216.0; }
 // 1/S of the rays, its phase's share of the slice: direction j*S + phase of the slice's directions. The phases are laid
 // out so every 2x2 patch of a floor, wall or ceiling holds each of them once (spread 2: a plain 3D checkerboard), so a
 // patch fires the whole slice between its voxels, and the compose pass's neighbour smoothing averages them back.
+// Every voxel moves on to the next phase each full cycle (bounce_main's rotation), so a brick that keeps evaluating,
+// such as ground averaging under a moving ship, works through all of its directions over S cycles instead of
+// re-measuring the same rays * cycle / S of them: no more rays, just different ones. A shift shared by the whole brick
+// keeps every 2x2 patch holding each phase once.
 fn bouncePhase(v: vec3<i32>, spread: i32) -> i32 {
     if (spread >= 4) { return ((v.x + v.y) & 1) + 2 * ((v.y + v.z) & 1); }
     if (spread == 2) { return (v.x + v.y + v.z) & 1; }
@@ -848,7 +852,7 @@ fn bouncePhase(v: vec3<i32>, spread: i32) -> i32 {
 const PRIME: u32 = 0xFFFFFFFFu;
 const FULL_SET: u32 = 0x40000000u; // flag on N, see bounce_main
 
-fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, slice: i32, slices: i32, list: u32, prime: bool) -> u32 {
+fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, slice: i32, slices: i32, rotation: i32, list: u32, prime: bool) -> u32 {
     if (isSolid(g, v)) { return word; }
 
     let sxn = isSolid(g, v - vec3<i32>(1, 0, 0)); let sxp = isSolid(g, v + vec3<i32>(1, 0, 0));
@@ -885,7 +889,7 @@ fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, slice: i32, slices: 
     let cycle = max(i32(p.bounce2.y), 1);
     let total = f32(rays * cycle);
     let spread = clamp(i32(p.bounce2.z), 1, 4);
-    let phase = bouncePhase(v, spread);
+    let phase = (bouncePhase(v, spread) + rotation) % spread;
     let fired = max((rays - phase + spread - 1) / spread, 1); // this voxel's share of the slice's rays
     // slices > 1: this evaluation fires that many consecutive slices (all of them: the whole set, see FULL_SET).
     let sliceCount = clamp(slices, 1, cycle);
@@ -966,6 +970,8 @@ fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) n
     let aoOnly = p.bounce.z > 0.5;
     let alpha = select(max(1.0 / f32(cycle), 1.0 / (f32(nu) + 1.0)), 1.0, prime || full);
     let slice = select(i32(nu % cycle), i32(cycle) - 1, prime);
+    // The checkerboard phase moves on each full cycle (see bouncePhase).
+    let rotation = select(i32(nu / cycle), 0, prime);
     let list = listOf(it.g, it.v0);
     // The CPU gives every brick it lists an accumulation slot; without one there is nothing to write.
     let accBase = accOf(it.slot);
@@ -984,7 +990,7 @@ fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) n
         let k = wList[i];
         let v = base + vec3<i32>(i32(k & 7u), i32((k >> 3u) & 7u), i32(k >> 6u));
         let a = accBase + i32(k);
-        accPool[a] = bounceVoxel(it.g, v, accPool[a], alpha, slice, select(1, i32(cycle), full), list, prime || aoOnly);
+        accPool[a] = bounceVoxel(it.g, v, accPool[a], alpha, slice, select(1, i32(cycle), full), rotation, list, prime || aoOnly);
     }
 }
 

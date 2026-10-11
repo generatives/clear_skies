@@ -1072,7 +1072,7 @@ public sealed partial class GpuLightSystem
             if (!st.BounceAllThisFrame) continue;
             // A ship near the camera runs the rest of its hold this frame too, whole (ships are small), so it is
             // settled the frame it changes; farther away it takes one evaluation per frame.
-            uint evals = (uint)System.Math.Min(st.BounceAllN, 255);
+            uint evals = WrapN(st.BounceAllN);
             // Within the settle radius (the ships' own after a move, see SettleRadius) it runs the rest of its hold now.
             float shipR = lg.Handle.IsWorld ? -1f
                         : SettleRadius(st.ShipChange ? ChangeKind.Ship : ChangeKind.Other, st.BounceAllN == 0, nearRadius);
@@ -1164,12 +1164,25 @@ public sealed partial class GpuLightSystem
                 Push(ref n, (uint)slot);
                 Push(ref n, prime ? PrimeEval : _n[slot]);
             }
-            _n[slot] = (byte)System.Math.Min(_n[slot] + (prime ? 0 : 1) + more, 255);
+            _n[slot] = (byte)WrapN(_n[slot] + (prime ? 0 : 1) + more);
         }
 
         n /= 2;
         if (n > 0) Upload(ref _bounceWork, 2 * n);
         return n;
+    }
+
+    /// <summary>
+    /// An evaluation count kept within a byte. Past the first cycle the count only picks the ray slice (N mod cycle)
+    /// and the checkerboard phase rotation (N / cycle, see GpuRayLightPass bouncePhase); the blend weight is at its
+    /// floor. So instead of stopping at 255, which froze a long-averaging brick on one slice and one phase (a quarter
+    /// of a quarter of its directions on Medium), it wraps by whole rotations of four cycles, staying past the first.
+    /// </summary>
+    private uint WrapN(long n)
+    {
+        if (n < 255) return (uint)n;
+        long period = _bounceCycle * 8 <= 255 ? _bounceCycle * 4L : System.Math.Max(_bounceCycle, 1);
+        return (uint)(period + (n - period) % period);
     }
 
     /// <summary>
@@ -1271,7 +1284,7 @@ public sealed partial class GpuLightSystem
             if (_nearExtra[k] < repeat) continue;
             Push(ref n, _nearScratch[2 * k]);
             // After a priming evaluation (PrimeEval, which wraps round) the repeats count from 0.
-            uint evals = System.Math.Min(unchecked(_nearScratch[2 * k + 1] + (uint)repeat), 255u);
+            uint evals = WrapN(unchecked(_nearScratch[2 * k + 1] + (uint)repeat));
             Push(ref n, repeat == 1 && _nearFull[k] ? evals | FullSetEval : evals);
         }
         if (repeat >= _nearWorks.Length) Array.Resize(ref _nearWorks, repeat + 1);
