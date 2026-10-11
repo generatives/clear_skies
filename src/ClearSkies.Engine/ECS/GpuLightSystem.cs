@@ -100,6 +100,9 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     private int _bounceSpread = 1;
     private static readonly int[] Spreads = { 1, 2, 4 };
     private static readonly string[] SpreadNames = { "Off (all rays per voxel)", "1/2 of the rays per voxel", "1/4 of the rays per voxel" };
+    // Wide smoothing: the shown bounce and AO average surface air up to two cells away instead of one (see smoothedAcc
+    // in GpuRayLightPass), so each voxel's few fixed ray directions are pooled with about twice as many neighbours'.
+    private bool _wideSmoothing = true;
 
     /// <summary>Checkerboard bounce: 1 (off), 2 or 4: each surface voxel fires 1/that of the rays; other values round to the
     /// nearest of those.</summary>
@@ -259,6 +262,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         int spreadIdx = System.Array.IndexOf(Spreads, _bounceSpread);
         if (ImGui.Combo("Checkerboard bounce", ref spreadIdx, SpreadNames, SpreadNames.Length)) _bounceSpread = Spreads[spreadIdx];
         ImGui.TextDisabled("  neighbouring voxels fire different rays; compose smoothing averages them");
+        if (ImGui.Checkbox("Wide smoothing (2 cells, not 1)", ref _wideSmoothing)) _relightRequested = true;
         ImGui.SliderInt("Bounce evaluations after a change", ref _bounceHoldFrames, 1, 64);
         ImGui.SliderFloat("Settled-in-one-frame radius", ref _bounceNearRadius, 0f, 256f, "%.0f");
         ImGui.TextDisabled("  changes within it run all their evaluations the frame they happen (lamps, new bricks;");

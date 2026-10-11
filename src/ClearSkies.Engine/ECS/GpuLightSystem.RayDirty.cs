@@ -384,7 +384,8 @@ public sealed partial class GpuLightSystem
             _lampTimer.Start();
             _finalComposeWork = UploadWords(_finalComposeWork, _composeList.AsSpan(0, _composeCount));
             _rayLight.DispatchCompose(_store, ShownBounceScale, RayLightingSettings.Ambient,
-                                     RayLightingSettings.AoStrength, _finalComposeWork, _composeCount, smooth: true);
+                                     RayLightingSettings.AoStrength, _finalComposeWork, _composeCount, smooth: true,
+                                     wide: _wideSmoothing);
             _lampTimer.Stop();
         }
         _rayLight.Submit();
@@ -1296,7 +1297,8 @@ public sealed partial class GpuLightSystem
     {
         _lampTimer.Start();
         _rayLight.DispatchCompose(_store, ShownBounceScale, RayLightingSettings.Ambient,
-                                     RayLightingSettings.AoStrength, _nearComposeWork!, _nearCount, smooth: final);
+                                     RayLightingSettings.AoStrength, _nearComposeWork!, _nearCount, smooth: final,
+                                     wide: final && _wideSmoothing);
         _lampTimer.Stop();
     }
 
