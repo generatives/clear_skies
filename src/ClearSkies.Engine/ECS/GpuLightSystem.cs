@@ -54,9 +54,6 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     private int _bounceRays = 8;     // rays per group
     private int _bounceGroups = 4;   // direction groups: each voxel has rays x groups fixed directions
     private float _bounceScale = 1f;
-    // See UpdateBrick: whether a settled brick that restarts gets an AO pass first. Off: only bricks whose blocks changed
-    // do, which looked smoother in dark interiors (2026-10-11).
-    private bool _aoPassSettled;
 
     /// <summary>
     /// A distance band (near: within Radius of the camera; middle: within its Radius; far: the rest). A changed brick
@@ -236,8 +233,6 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         }
         ImGui.TextDisabled($"  = {_bounceRays} rays per group, {_bounceRays * _bounceGroups} directions; a hop fires one or more groups");
         ImGui.SliderFloat("Bounce display scale", ref _bounceScale, 0f, 4f, "%.2f");
-        ImGui.Checkbox("AO pass for settled bricks", ref _aoPassSettled);
-        ImGui.TextDisabled("  off: only bricks whose blocks changed measure AO before their bounce (brighter, as ships were)");
         ImGui.Text("Bounce by distance (every change alike)");
         ImGui.TextDisabled("  a changed brick gets updates, at most every so many frames; an update is hops back to back,");
         ImGui.TextDisabled("  firing that many groups. Hops in all = updates x hops per update");
@@ -438,7 +433,6 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         foreach (var b in _stepWorks) b?.Dispose();
         _composeWork?.Dispose();
         _finalComposeWork?.Dispose();
-        _aoPassWork?.Dispose();
         _clearWork?.Dispose();
         _zeroWork?.Dispose();
     }

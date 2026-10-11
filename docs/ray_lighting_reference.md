@@ -15,19 +15,20 @@ scheduling), `Voxels/GpuRayLightPass.cs` (WGSL passes).
 | Display (per voxel, 16 bits) | 9-bit brightness, 5-bit warmth, 2-bit sun | Brightness 0-510 on a square curve (fine steps in the dark). 511 means no storage. Warmth 0-30. Sun 0-3. |
 | Accumulation (per voxel, 32 bits) | 8-bit bounce R, G, B and 8-bit AO | 512 words per slot. Bounce on a square-root curve (fine steps for dim light); AO linear 0-255. |
 
-**Accumulation exists only while a brick has an update to come.** After its last update, its accumulation is freed
-(`ReleaseSettledAccs`), and the brick keeps only its composed display, so its bounce and AO are baked in. When
-anything touches a settled brick, it gets fresh, zeroed accumulation and restarts (`GiveAcc` in `UpdateBrick`). So
-only a brick that keeps changing, or is still owed updates, carries on its light.
+**A world brick has accumulation only while it has an update to come.** After its last update, its accumulation is
+freed (`ReleaseSettledAccs`), and the brick keeps only its composed display, so its bounce and AO are baked in. When
+anything touches a settled brick, it gets fresh accumulation seeded from its display (`seed_main`: bounce = shown
+light ÷ bounce scale, AO none), so it carries on from the light it was showing. **Ships keep their accumulation**
+while they have light storage: freeing and re-seeding lost a little light each time, which dimmed a ship's hold with
+every edit (2026-10-11).
 
 ## Passes, in frame order
 
 1. **Sun**: 4 jittered rays per surface voxel give the 2-bit sun level.
 2. **Clear**: zeroes bounce RGB (keeps AO) in the clear boxes. Does nothing to a brick without accumulation.
 3. **Compose** (unsmoothed), so bounce rays read current direct light.
-4. **Bounce**: the updates, one dispatch per step. Step 0 is every updating brick's first hop (or its AO pass),
-   step 1 each one's next, and so on. No compose between steps (a hit reads stored bounce directly), except that
-   bricks given an AO pass are recomposed before step 1 so the update sees their AO.
+4. **Bounce**: the updates, one dispatch per step. Step 0 is every updating brick's first hop, step 1 each one's
+   next, and so on. No compose between steps (a hit reads stored bounce directly).
 5. **Compose** (final, smoothed).
 
 Compose: `light = max(lamp, bounce × scale, ambient × (1 − aoStrength × AO))` per channel. Lamps are traced at
@@ -44,7 +45,7 @@ wider 2-cell smoothing was tried (2026-10-11) and made little visible difference
 | **Group** | One interleaved share of the directions, spanning the hemisphere coarsely | slice |
 | **Hop** | One dispatch: fire one or more groups, write the result; light travels one more bounce | evaluation |
 | **Update** | What a touched brick gets on its turn: the band's hops back to back in one frame | burst |
-| **AO pass** | An AO-only dispatch before a restarting brick's update | prime |
+| (removed) | An AO-only dispatch before a restarting brick's update; gone with restarts (2026-10-11) | AO pass, prime |
 | **Rays per voxel** | All, ½ or ¼ of each group's rays per voxel, neighbours firing the rest | checkerboard spread |
 
 ## Bounce rays
@@ -60,20 +61,16 @@ wider 2-cell smoothing was tried (2026-10-11) and made little visible difference
   them; changing directions or groups changes the directions themselves, so those stay global.
 - A hit reads the brightest of: the hit face's sun, its composed display, and its stored bounce. That is how bounce
   goes multi-hop: each dispatch adds a hop. A miss counts as sky for AO. `blend8` always moves at least one step.
-- **AO pass** (`AO_PASS`): before the first update after a restart whose own voxels changed. It measures AO only and
-  stores zero bounce, so a wall that just appeared isn't read as bright. A brick that still has accumulation (it's
-  carrying on, like a moving ship's) keeps its bounce through the AO pass (`KEEP_BOUNCE`), so a block edit on a moving
-  ship doesn't dim everything that reads it. A brick restarting only because it had
-  settled gets none by default (panel: "AO pass for settled bricks"); running it there made dark interiors noisy in
-  game.
+- **No restarts** (2026-10-11): every brick carries its light on through a change, and the update rule alone decides
+  replace or blend. Restarting the bricks at an edit (an AO pass, then a replacing update, while the rest blended) made
+  a patch that blinked. The shader still understands `AO_PASS` words, but nothing sends them.
 
 ## Updates and distance bands (every change alike)
 
 What a change touches differs (see below); what happens to a touched brick depends only on its distance band.
 
 - **Touched**: a relit brick, every world brick within bounce reach of one, and of a moving ship; all of a relit
-  ship's bricks. A brick whose own voxels changed (the surface right at a changed block, new storage, the bricks
-  at a ship's edited blocks, a bounce setting changed, a lamp's clear) is marked to **restart**. Settled bricks restart anyway.
+  ship's bricks. Nothing is marked to restart: what an update does depends only on the brick's recent updates.
 - **Bands**: near (within its radius of the camera), middle (within its radius), far. Each has five settings:
   - **hops per update** (H);
   - **groups per update** (up to all of them), always the same ones, split evenly over the H hops (rounding down,
@@ -83,15 +80,16 @@ What a change touches differs (see below); what happens to a touched brick depen
   - **update at most every** N frames, on its turn (`(frame + key) mod N = 0`, key = slot, or grid index for a
     ship's bricks, so a ship updates together). 1 = every frame;
   - **rays per voxel** (above).
-- **Update** (`UpdateBrick`): a restarting brick gets its AO pass first. Hop i weighs `1/(i+1)`, so the update
-  replaces the stored value with its mean. If the brick was touched again and updated on its previous turn too, and
-  isn't restarting (it keeps changing, as around a moving ship), it blends in at ½ instead: hop i weighs
+- **Update** (`UpdateBrick`): hop i weighs `1/(i+1)`, so the update replaces the stored value with its mean (the
+  hops read the old light through the neighbours, so it carries on). If the brick was touched again and updated on
+  its previous turn too (it keeps changing, as around a moving ship), and its accumulation is neither fresh nor
+  cleared this frame, it blends in at ½ instead: hop i weighs
   `1/(2H − i)`, so the old light keeps half and a fast-changing light fades between updates instead of stepping.
   After a blended update the brick is owed one more (`_tail`), which replaces, so no old light is left once it stops
   changing. The further updates per change (`_left`) always replace.
 - **Distant terrain sharpens** as the camera nears: a world brick that fired fewer groups than the most any band
   fires is touched again when its band now fires more (`TopUpNearing`).
-- **Caps** per frame, nearest first: relit bricks, and brick groups (an update costs its groups, an AO pass 1).
+- **Caps** per frame, nearest first: relit bricks, and brick groups (an update costs its groups).
   Ships go past both. Cleared bricks go past both and update at once. Bricks an occluder change marked (a block
   change, a moving ship: the pad, the sun sweep, lamps in reach) go past the relit cap, so a ship's shadow keeps up
   with it.
@@ -106,12 +104,12 @@ What a change touches differs (see below); what happens to a touched brick depen
 
 | Change | Marked for direct light | Bounce |
 |---|---|---|
-| Block placed or removed, chunk load or unload | A pad around it (restarts), its sun-shadow sweep, and lamps whose box touches it, relit this frame | Touched, plus ray reach |
-| Ship moved | Old and new pose plus pad, both sun sweeps, lamps, relit this frame | Its bricks touched (those at edited blocks restart), and everything within ray reach of the hull |
+| Block placed or removed, chunk load or unload | A pad around it, its sun-shadow sweep, and lamps whose box touches it, relit this frame | Touched, plus ray reach |
+| Ship moved | Old and new pose plus pad, both sun sweeps, lamps, relit this frame | Its bricks touched, and everything within ray reach of the hull |
 | Lamp added, moved or removed | The lamp's box (level + 1.5), queued | Touched, plus ray reach; a removed lamp clears its box plus ray reach |
-| New light storage | The brick (restarts), queued | Touched, plus ray reach |
+| New light storage | The brick (starts from nothing), queued | Touched, plus ray reach |
 | Sun moved, display settings changed | Everything, queued | Everything relit is touched |
-| Bounce setting changed | — | Everything restarts |
+| Bounce setting changed | — | Everything touched |
 
 ## Presets
 
@@ -126,6 +124,5 @@ What a change touches differs (see below); what happens to a touched brick depen
 | **Medium rays per voxel per group** | | | **8 near, 2 beyond** | |
 | Relit bricks / brick groups per frame | 256 / 512 | 256 / 1024 | 512 / 2048 | 1024 / 4096 |
 
-Medium, bounce rays per voxel: a one-off change costs 32 near (4 hops), 4 middle (2 hops), 2 far (1 hop), plus a
-AO pass when the brick restarts (8 near, 2 beyond); something that keeps changing costs about 8 a frame near, 1 middle,
+Medium, bounce rays per voxel: a one-off change costs 32 near (4 hops), 4 middle (2 hops), 2 far (1 hop); something that keeps changing costs about 8 a frame near, 1 middle,
 0.25 far. Updates per change U multiplies a one-off change's cost and hops by U. Near used spread 4 (8 rays, 2 a frame) until 2026-10-11, when spread 1 there looked steadier in game.
