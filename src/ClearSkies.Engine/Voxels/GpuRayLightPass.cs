@@ -620,10 +620,11 @@ fn tileSurfaceAir(l: vec3<i32>) -> bool {
 // is skipped (it fires no rays, so it has no bounce or AO), as is any without light storage or accumulation (a settled
 // brick, whose bounce is in its display). lk: the voxel in its
 // brick (0-7); read from the compose tile.
-// wide: also the surface air two cells out (within a radius of about 2.5: offsets with a 2 and squared length at most
-// 6), weight 1/2, each only where the cell one step back toward the voxel is not solid, so never through a wall. On
-// flat ground that pools about twice as many voxels' rays (an effective 16 voxels instead of 7), which evens out the
-// few fixed directions each voxel fires, at night most visibly, where a small lamp-lit patch is what the rays look for.
+// wide: the bounce also takes the surface air two cells out (within a radius of about 2.5: offsets with a 2 and
+// squared length at most 6), weight 1/2, each only where the cell one step back toward the voxel is not solid, so
+// never through a wall. On flat ground that pools about twice as many voxels' rays (an effective 16 voxels instead of
+// 7), which evens out the few fixed directions each voxel fires, at night most visibly, where a small lamp-lit patch is
+// what the rays look for. AO keeps the narrow smoothing, so contact shadows in corners stay as tight.
 fn smoothedAcc(lk: vec3<i32>, own: u32, wide: bool) -> vec4<f32> {
     var sum = unpackAcc(own) * 2.0;
     var w = 2.0;
@@ -645,6 +646,8 @@ fn smoothedAcc(lk: vec3<i32>, own: u32, wide: bool) -> vec4<f32> {
             w = w + 0.5;
         }
     }
+    var ring = vec3<f32>(0.0);
+    var ringW = 0.0;
     if (wide) {
         for (var dz = -2; dz <= 2; dz = dz + 1) {
             for (var dy = -2; dy <= 2; dy = dy + 1) {
@@ -657,13 +660,13 @@ fn smoothedAcc(lk: vec3<i32>, own: u32, wide: bool) -> vec4<f32> {
                     // One step back toward the voxel along each axis it is two away on.
                     let back = n - select(vec3<i32>(0), clamp(d, vec3<i32>(-1), vec3<i32>(1)), a == vec3<i32>(2));
                     if (tileSolid(back)) { continue; }
-                    sum = sum + 0.5 * unpackAcc(cAcc[tileSurfIndex(n)]);
-                    w = w + 0.5;
+                    ring = ring + 0.5 * unpackAcc(cAcc[tileSurfIndex(n)]).rgb;
+                    ringW = ringW + 0.5;
                 }
             }
         }
     }
-    return sum / w;
+    return vec4<f32>((sum.rgb + ring) / (w + ringW), sum.a / w);
 }
 
 // A surface voxel's display half: the flat ambient (p.bounce2.z) darkened by the ray AO (times its strength,

@@ -33,7 +33,7 @@ restarts, whatever the setting.
 Compose: `light = max(lamp, bounce × scale, ambient × (1 − aoStrength × AO))` per channel. Lamps are traced at
 compose time. Defaults: ambient level 1/15, AO strength 0.95, albedo 0.5, bounce scale 1. The final compose smooths
 bounce and AO: the voxel counts 2, face neighbours 1, edge diagonals ½. Only neighbours that have accumulation count.
-**Wide smoothing** (panel checkbox, on by default) adds the cells two away (squared offset ≤ 6) at ½, each only if
+**Wide smoothing** (panel checkbox, on by default) adds, for bounce only (AO keeps the narrow kernel), the cells two away (squared offset ≤ 6) at ½, each only if
 the cell one step back toward the voxel isn't solid. On flat ground that's an effective 16 voxels pooled instead of
 7. It needs a bigger compose tile: solidity 14³ (was 12³) and accumulation 12³ (was 10³). Earlier compose evaluated
 the smoothing on every compose through a `select`; it now runs only on the final one, as intended.
