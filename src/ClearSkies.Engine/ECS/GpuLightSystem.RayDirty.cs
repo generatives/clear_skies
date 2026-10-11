@@ -171,6 +171,7 @@ public sealed partial class GpuLightSystem
         _directChanges.Clear();
         _bounceClears.Clear();
         _shapeChanges.Clear();
+        _shipEdits.Clear();
         CollectOccluderChanges(relightAll);
         CollectLampChanges();
         _dbgLampChanges = _directChanges.Count;
@@ -364,7 +365,7 @@ public sealed partial class GpuLightSystem
         // NewSlots.
         foreach (var (grid, mn, mx, solid, _) in _store.ChangedChunks)
         {
-            if (!grid.IsWorld) continue;
+            if (!grid.IsWorld) { _shipEdits.Add((grid, mn, mx)); continue; }
             _dbgChangedChunks++;
             if (solid && !relightAll) _occluderChanges.Add((mn, mx, true));
             if (solid) _shapeChanges.Add((mn, mx, true));
@@ -664,10 +665,11 @@ public sealed partial class GpuLightSystem
                 // A ship's own AO changes with its blocks, and with its pose only near another grid its rays reach.
                 st.WasNearOther = st.NearOther;
                 st.NearOther = st.Moved && NearOtherGrid(lg, st);
-                if (st.Edited) TouchGrid(lg.Handle, restart: true);
+                if (st.Edited) TouchEditedShip(lg.Handle);
                 else if (st.Moved && (st.NearOther || st.WasNearOther)) TouchGrid(lg.Handle, restart: false);
             }
-            else if (st.AllThisFrame) TouchGrid(lg.Handle, restart: st.Edited);
+            else if (st.Edited) TouchEditedShip(lg.Handle);
+            else if (st.AllThisFrame) TouchGrid(lg.Handle, restart: false);
         }
 
         if (_aoOnly) { TouchShapeChanges(); return; }
@@ -693,6 +695,23 @@ public sealed partial class GpuLightSystem
     {
         foreach (int slot in g.Slots) Touch(slot, restart);
     }
+
+    /// <summary>A ship whose blocks changed: only the bricks at the change (the edited blocks' bounds, a brick
+    /// around) restart; the rest of the ship carries on, so its light doesn't drop back to a few hops' worth.</summary>
+    private void TouchEditedShip(GridHandle g)
+    {
+        TouchGrid(g, restart: false);
+        foreach (var (grid, mn, mx) in _shipEdits)
+            if (grid == g)
+                ForEachSlotInBrickBox(g, (int)MathF.Floor(mn.X / 8f) - 1, (int)MathF.Floor(mn.Y / 8f) - 1, (int)MathF.Floor(mn.Z / 8f) - 1,
+                                      (int)MathF.Floor(mx.X / 8f) + 1, (int)MathF.Floor(mx.Y / 8f) + 1, (int)MathF.Floor(mx.Z / 8f) + 1,
+                                      _restartSlot);
+    }
+
+    // Ships' changed blocks this frame, in grid space.
+    private readonly List<(GridHandle grid, Vector3D<float> min, Vector3D<float> max)> _shipEdits = new();
+    private Action<int>? _restartSlotField;
+    private Action<int> _restartSlot => _restartSlotField ??= slot => _restart[slot] = true;
 
     /// <summary>
     /// AO only: touches the world bricks within ray reach of this frame's changed geometry (chunks loaded, edited or

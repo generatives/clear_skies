@@ -56,8 +56,8 @@ wider 2-cell smoothing was tried (2026-10-11) and made little visible difference
 What a change touches differs (see below); what happens to a touched brick depends only on its distance band.
 
 - **Touched**: a relit brick, every world brick within bounce reach of one, and of a moving ship; all of a relit
-  ship's bricks. A brick whose own voxels changed (the surface right at a changed block, new storage, an edited
-  ship, a bounce setting changed, a lamp's clear) is marked to **restart**. Settled bricks restart anyway.
+  ship's bricks. A brick whose own voxels changed (the surface right at a changed block, new storage, the bricks
+  at a ship's edited blocks, a bounce setting changed, a lamp's clear) is marked to **restart**. Settled bricks restart anyway.
 - **Bands**: near (within its radius of the camera), middle (within its radius), far. Each has three settings:
   - **E**, evaluations per burst = hops;
   - **slices per burst** (up to the whole set), always the same ones, split evenly over the E evaluations;
@@ -85,7 +85,7 @@ What a change touches differs (see below); what happens to a touched brick depen
 | Change | Marked for direct light | Bounce |
 |---|---|---|
 | Block placed or removed, chunk load or unload | A pad around it (restarts), its sun-shadow sweep, and lamps whose box touches it, relit this frame | Touched, plus ray reach |
-| Ship moved | Old and new pose plus pad, both sun sweeps, lamps, relit this frame | Its bricks touched (restart if its blocks changed), and everything within ray reach of the hull |
+| Ship moved | Old and new pose plus pad, both sun sweeps, lamps, relit this frame | Its bricks touched (those at edited blocks restart), and everything within ray reach of the hull |
 | Lamp added, moved or removed | The lamp's box (level + 1.5), queued | Touched, plus ray reach; a removed lamp clears its box plus ray reach |
 | New light storage | The brick (restarts), queued | Touched, plus ray reach |
 | Sun moved, display settings changed | Everything, queued | Everything relit is touched |
