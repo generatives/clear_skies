@@ -13,7 +13,7 @@ scheduling), `Voxels/GpuRayLightPass.cs` (WGSL passes).
 |---|---|---|
 | Light slot | one 8³ brick that has a surface | 256 words of display, 2 voxels per word |
 | Display (per voxel, 16 bits) | 9-bit brightness, 5-bit warmth, 2-bit sun | Brightness 0-510 on a square curve (fine steps in the dark). 511 means no storage. Warmth 0-30. Sun 0-3. |
-| Accumulation (per voxel, 32 bits) | 8-bit bounce R, G, B and 8-bit AO | 512 words per slot. Linear 0-255. |
+| Accumulation (per voxel, 32 bits) | 8-bit bounce R, G, B and 8-bit AO | 512 words per slot. Bounce on a square-root curve (fine steps for dim light); AO linear 0-255. |
 
 **Accumulation exists only while a brick has an update to come.** After its last update, its accumulation is freed
 (`ReleaseSettledAccs`), and the brick keeps only its composed display, so its bounce and AO are baked in. When

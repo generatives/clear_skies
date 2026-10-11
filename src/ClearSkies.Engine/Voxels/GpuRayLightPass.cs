@@ -177,7 +177,8 @@ fn jumpCell(v: vec3<i32>, size: i32, o: vec3<f32>, d: vec3<f32>, t1: f32) -> Jum
 //   visibility (0-3). Brightness and warmth hold all the non-sun light (ambient times the ray AO, lamps and bounce,
 //   combined per channel by max; see encodeLight). The fragment shader reads only this.
 // A brick whose bounce is updating also has an accumulation slot in accPool (accMap[slot] = its index + 1, 0
-// for none), ACC_WORDS u32s, one per voxel: bits 0-7 bounce R, 8-15 G, 16-23 B (linear 0-1), 24-31 AO occlusion
+// for none), ACC_WORDS u32s, one per voxel: bits 0-7 bounce R, 8-15 G, 16-23 B (0-1 on a square-root curve, see
+// bounceOf), 24-31 AO occlusion
 // (0-255), blended by the bounce pass. The CPU hands one out when the brick's update starts and takes it back when
 // its updates are done, so a settled brick keeps only its display.
 const SLOT_WORDS: i32 = " + GridStore.WordsPerSlot + @";
@@ -549,8 +550,17 @@ fn lampLight(g: i32, v: vec3<i32>, list: u32) -> vec3<f32> {
     return min(best, vec3<f32>(15.0)) / 15.0;
 }
 
+// Stored bounce is on a square-root curve, as the display is on a squared one: 8 bits linear would give dim light (a
+// hold's few-hops bounce, ~0.02) only a handful of steps, each a fifth of it, and every blend would round it.
+fn bounceOf(a: u32) -> vec3<f32> {
+    let s = vec3<f32>(f32(a & 0xFFu), f32((a >> 8u) & 0xFFu), f32((a >> 16u) & 0xFFu)) / 255.0;
+    return s * s;
+}
+fn bounceCode(c: f32) -> f32 { return sqrt(clamp(c, 0.0, 1.0)) * 255.0; }
+
+// Bounce (linear) and AO occlusion (0-1) of an accumulation word.
 fn unpackAcc(a: u32) -> vec4<f32> {
-    return vec4<f32>(f32(a & 0xFFu), f32((a >> 8u) & 0xFFu), f32((a >> 16u) & 0xFFu), f32(a >> 24u)) / 255.0;
+    return vec4<f32>(bounceOf(a), f32(a >> 24u) / 255.0);
 }
 
 // Face direction f (0-5: +x, -x, +y, -y, +z, -z).
@@ -818,7 +828,7 @@ fn radianceAt(g: i32, h: Hit) -> vec3<f32> {
     let d = (lightPool[r.disp] >> r.shift) & 0xFFFFu;
     let acc = select(0u, accPool[max(r.acc, 0)], r.acc >= 0); // a settled brick: its bounce is in its display
     let shown = select(decodeLight(d), vec3<f32>(0.0), isEmptyLight(d)); // not composed yet: nothing to reflect
-    let bnc = vec3<f32>(f32(acc & 0xFFu), f32((acc >> 8u) & 0xFFu), f32((acc >> 16u) & 0xFFu)) / 255.0;
+    let bnc = bounceOf(acc);
     let nW = normalize((grids[g].v2w * vec4<f32>(h.n, 0.0)).xyz);
     let sun = f32((d >> 14u) & 3u) / 3.0 * p.bounce.y * max(dot(nW, -p.sunDir.xyz), 0.0);
     return max(vec3<f32>(sun), max(shown, bnc));
@@ -930,11 +940,11 @@ fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, first: i32, count: i
         else { escaped = escaped + 1.0; }
     }
     let firedAll = f32(fired * fireCount);
-    let estimate = clamp(p.bounce.x * sumL / firedAll, vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0;
+    let estimate = clamp(p.bounce.x * sumL / firedAll, vec3<f32>(0.0), vec3<f32>(1.0));
     let occEstimate = (1.0 - escaped / firedAll) * 255.0;
-    let r8 = blend8(f32(word & 0xFFu), estimate.r, alpha);
-    let g8 = blend8(f32((word >> 8u) & 0xFFu), estimate.g, alpha);
-    let b8 = blend8(f32((word >> 16u) & 0xFFu), estimate.b, alpha);
+    let r8 = blendBounce(f32(word & 0xFFu), estimate.r, alpha);
+    let g8 = blendBounce(f32((word >> 8u) & 0xFFu), estimate.g, alpha);
+    let b8 = blendBounce(f32((word >> 16u) & 0xFFu), estimate.b, alpha);
     let o8 = blend8(f32(word >> 24u), occEstimate, alpha);
     if (keepBounce) { return (word & 0xFFFFFFu) | (u32(o8) << 24u); }
     return u32(r8) | (u32(g8) << 8u) | (u32(b8) << 16u) | (u32(o8) << 24u);
@@ -946,6 +956,16 @@ fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, first: i32, count: i
 fn blend8(s8: f32, goal: f32, alpha: f32) -> f32 {
     var q = round(s8 + alpha * (goal - s8));
     if (q == s8 && abs(goal - s8) >= 1.0) { q = s8 + sign(goal - s8); }
+    return clamp(q, 0.0, 255.0);
+}
+
+// The same for a stored bounce channel (code s8 on the square-root curve, see bounceOf) toward a linear goal: blended
+// in linear light, then stored as the nearest code, again moving at least one code toward the goal.
+fn blendBounce(s8: f32, goal: f32, alpha: f32) -> f32 {
+    let old = (s8 / 255.0) * (s8 / 255.0);
+    var q = round(bounceCode(old + alpha * (goal - old)));
+    let g8 = bounceCode(goal);
+    if (q == s8 && abs(g8 - s8) >= 1.0) { q = s8 + sign(g8 - s8); }
     return clamp(q, 0.0, 255.0);
 }
 
@@ -1025,7 +1045,7 @@ fn seed_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg
     for (var e = 0u; e < 2u; e = e + 1u) {
         let d = (w >> (e * 16u)) & 0xFFFFu;
         var c = vec3<f32>(0.0);
-        if (!isEmptyLight(d)) { c = clamp(decodeLight(d) / scale, vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0; }
+        if (!isEmptyLight(d)) { let l = decodeLight(d) / scale; c = vec3<f32>(bounceCode(l.r), bounceCode(l.g), bounceCode(l.b)); }
         accPool[a + i32(t * 2u + e)] = u32(round(c.r)) | (u32(round(c.g)) << 8u) | (u32(round(c.b)) << 16u);
     }
 }
