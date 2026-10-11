@@ -24,7 +24,7 @@ internal sealed unsafe class GpuRayLightPass : IDisposable
 " + GridStore.LookupWgsl + @"
 
 struct Params {
-    sunDir: vec4<f32>,
+    sunDir: vec4<f32>,  // sun: w: tan of the sun cone's half-angle
     counts: vec4<i32>,  // y: word offset of the lamp records in lists, z: work entries this dispatch
     bounce: vec4<f32>,  // x: albedo (fraction of incoming light a surface re-emits), y: sun strength (0-1),
                         // compose: z: bounce display scale (0 = bounce off); bounce: z: 1 = AO only, w: ray reach (voxels)
@@ -433,19 +433,27 @@ fn sunLevel(g: i32, v: vec3<i32>, list: u32) -> u32 {
     // SUN_SAMPLES rays from points spread through the voxel (a tetrahedral pattern, clamped to stay inside this
     // air cell), stored as the lit fraction. A single binary ray per voxel made a moving caster's shadow edge
     // jump a whole voxel at a time; fractional coverage moves it in partial steps, which the fragment blend then
-    // smooths.
+    // smooths. Each ray also leans to a different side of a cone around the sun direction (half-angle tan in
+    // p.sunDir.w), so a shadow edge softens the further it falls from its caster, as under a real sun's disc.
     var offs = array<vec3<f32>, 4>(
         vec3<f32>( 1.0,  1.0,  1.0), vec3<f32>( 1.0, -1.0, -1.0),
         vec3<f32>(-1.0,  1.0, -1.0), vec3<f32>(-1.0, -1.0,  1.0));
     let cellLo = vec3<f32>(v) + vec3<f32>(0.02);
     let cellHi = vec3<f32>(v) + vec3<f32>(0.98);
     let v2w = grids[g].v2w;
+    let toSun = -p.sunDir.xyz;
+    // Two directions across the cone: any axis not along the sun, crossed with it.
+    let side = normalize(cross(toSun, select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(toSun.y) > 0.9)));
+    let up = cross(toSun, side);
+    var lean = array<vec2<f32>, 4>(vec2<f32>(1.0, 0.0), vec2<f32>(-1.0, 0.0), vec2<f32>(0.0, 1.0), vec2<f32>(0.0, -1.0));
     var lit = 0u;
     for (var s = 0; s < SUN_SAMPLES; s = s + 1) {
         let jitter = select(0.0, SUN_JITTER, SUN_SAMPLES > 1); // a single ray uses the unjittered nudged centre
         let sp = clamp(vc + offs[s] * jitter, cellLo, cellHi);
         let world = (v2w * vec4<f32>(sp, 1.0)).xyz;
-        if (!anyOccluderAlongSegment(list, world, -p.sunDir.xyz, SUN_MAX_DISTANCE, false)) { lit = lit + 1u; }
+        let spread = select(0.0, p.sunDir.w, SUN_SAMPLES > 1);
+        let dir = normalize(toSun + (side * lean[s].x + up * lean[s].y) * spread);
+        if (!anyOccluderAlongSegment(list, world, dir, SUN_MAX_DISTANCE, false)) { lit = lit + 1u; }
     }
     return u32(round(f32(lit) * 3.0 / f32(SUN_SAMPLES)));
 }
@@ -1153,10 +1161,10 @@ fn zero_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg
     }
 
     /// <summary>Sun visibility for the <paramref name="count"/> light slots listed in <paramref name="work"/>.</summary>
-    public void DispatchSun(GridStore store, Vector3D<float> sunDir, GpuBuffer work, int count)
+    public void DispatchSun(GridStore store, Vector3D<float> sunDir, float coneSpread, GpuBuffer work, int count)
     {
         if (count <= 0) return;
-        var param = WriteParams(sunDir, count, default, default);
+        var param = WriteParams(sunDir, count, default, default, coneSpread);
         Dispatch(_sunPipeline, SunBindings, store, work, count, param, "Lighting: sun");
     }
 
@@ -1243,14 +1251,15 @@ fn zero_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg
         _bindGroups.Clear();
     }
 
-    private GpuBuffer WriteParams(Vector3D<float> sunDir, int workCount, Vector4D<float> bounce, Vector4D<float> bounce2)
+    private GpuBuffer WriteParams(Vector3D<float> sunDir, int workCount, Vector4D<float> bounce, Vector4D<float> bounce2,
+                                  float sunW = 0f)
     {
         if (_paramNext == _params.Count) _params.Add(GpuBuffer.CreateUniform(_ctx, (ulong)Marshal.SizeOf<RayParams>()));
         var param = _params[_paramNext++];
         Span<RayParams> sp = stackalloc RayParams[1];
         sp[0] = new RayParams
         {
-            Sun = new Vector4D<float>(sunDir.X, sunDir.Y, sunDir.Z, 0f),
+            Sun = new Vector4D<float>(sunDir.X, sunDir.Y, sunDir.Z, sunW),
             LampBase = _lampBase, WorkCount = workCount,
             Bounce = bounce, Bounce2 = bounce2,
         };

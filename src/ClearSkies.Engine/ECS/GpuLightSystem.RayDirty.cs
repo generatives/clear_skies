@@ -101,6 +101,7 @@ public sealed partial class GpuLightSystem
     private bool _rayWasActive, _relightRequested;
     private (float scale, float ambient, float ao) _prevShown = (-1f, -1f, -1f);
     private Vector3D<float> _prevSunDir;
+    private float _prevSunCone = float.NaN;
     private readonly List<WorldLamp> _prevLamps = new();
     private HashSet<(int, int, int, int, int)> _prevLampKeys = new(), _curLampKeys = new();
     private readonly List<(Vector3D<float> min, Vector3D<float> max)> _bounceClears = new();
@@ -141,9 +142,12 @@ public sealed partial class GpuLightSystem
         var shown = (ShownBounceScale, RayLightingSettings.Ambient, RayLightingSettings.AoStrength);
         bool scaleChanged = shown != _prevShown;
         _prevShown = shown;
-        bool relightAll = !_rayWasActive || sunDir != _prevSunDir || _relightRequested || scaleChanged;
+        float sunCone = RayLightingSettings.SunConeSpread;
+        bool coneChanged = sunCone != _prevSunCone;
+        _prevSunCone = sunCone;
+        bool relightAll = !_rayWasActive || sunDir != _prevSunDir || _relightRequested || scaleChanged || coneChanged;
         _dbgFullReason = !_rayWasActive ? "first frame" : sunDir != _prevSunDir ? "sun moved" : _relightRequested ? "requested"
-                       : scaleChanged ? "display settings changed" : "";
+                       : scaleChanged ? "display settings changed" : coneChanged ? "sun softness changed" : "";
         _rayWasActive = true;
         _relightRequested = false;
         _prevSunDir = sunDir;
@@ -292,7 +296,7 @@ public sealed partial class GpuLightSystem
         if (n > 0)
         {
             _sunTimer.Start();
-            _rayLight.DispatchSun(_store, sunDir, _lightWork!, n);
+            _rayLight.DispatchSun(_store, sunDir, sunCone, _lightWork!, n);
             _sunTimer.Stop();
         }
         if (nClear > 0) _rayLight.DispatchClearBounce(_store, _clearWork!, nClear);
@@ -585,11 +589,13 @@ public sealed partial class GpuLightSystem
         // MarkRegion's ship test is).
         var half = (mx - mn) * 0.5f + new Vector3D<float>(4.5f);
         var centre = (mn + mx) * 0.5f;
+        float cone = RayLightingSettings.SunConeSpread;
         foreach (var lg in _lit)
         {
             if (lg.Handle.IsWorld || !lg.Handle.HasSolid) continue;
             var st = _gridStates[lg.Handle];
-            if (!st.LightAll && RayHitsBox(centre, sunDir, st.CurWorldMin - half, st.CurWorldMax + half)) st.LightAll = true;
+            var grow = half + new Vector3D<float>(cone * FarDistance(centre, st.CurWorldMin, st.CurWorldMax));
+            if (!st.LightAll && RayHitsBox(centre, sunDir, st.CurWorldMin - grow, st.CurWorldMax + grow)) st.LightAll = true;
         }
 
         var world = _staticVolume.Gpu;
@@ -600,7 +606,8 @@ public sealed partial class GpuLightSystem
 
         // The world, one brick layer at a time along the sun's steepest axis: in each layer, the exact extent of the
         // (padded) box swept through it, so each layer is one thin box one brick deep instead of a run of
-        // overlapping copies. Stops once the sweep has left the loaded world.
+        // overlapping copies. The sun rays spread over a cone, so the sweep widens by the cone's spread times how far
+        // it has travelled. Stops once the sweep has left the loaded world.
         var pad = new Vector3D<float>(SweepPad);
         Span<float> lo = stackalloc float[3], hi = stackalloc float[3], d = stackalloc float[3];
         Span<float> wLo = stackalloc float[3], wHi = stackalloc float[3];
@@ -623,8 +630,8 @@ public sealed partial class GpuLightSystem
             for (int i = 0; i < 3; i++)
             {
                 if (i == a) { b0[i] = b1[i] = j; continue; }
-                float l = lo[i] + MathF.Min(t0 * d[i], t1 * d[i]);
-                float h = hi[i] + MathF.Max(t0 * d[i], t1 * d[i]);
+                float l = lo[i] + MathF.Min(t0 * d[i], t1 * d[i]) - cone * t1;
+                float h = hi[i] + MathF.Max(t0 * d[i], t1 * d[i]) + cone * t1;
                 if ((d[i] >= 0 && l > wHi[i]) || (d[i] <= 0 && h < wLo[i])) gone = true; // past the world, moving away
                 b0[i] = (int)MathF.Floor(l / 8f);
                 b1[i] = (int)MathF.Floor(h / 8f);
@@ -635,6 +642,11 @@ public sealed partial class GpuLightSystem
     }
 
     private static void Put(Span<float> dst, Vector3D<float> v) { dst[0] = v.X; dst[1] = v.Y; dst[2] = v.Z; }
+
+    /// <summary>The distance from <paramref name="p"/> to the farthest corner of a box: the most a sun ray from p
+    /// travels before passing it, which sets how far a cone ray can stray sideways by then.</summary>
+    internal static float FarDistance(Vector3D<float> p, Vector3D<float> mn, Vector3D<float> mx)
+        => Vector3D.Max(Vector3D.Abs(p - mn), Vector3D.Abs(p - mx)).Length;
 
     // World bricks marked this frame, per chunk: queued for direct light (lamps), relit this frame past the cap
     // (occluder changes); and the bounce touches.

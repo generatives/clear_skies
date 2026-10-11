@@ -268,6 +268,8 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
 
         float elevation = SunLight.ElevationDegrees;
         if (ImGui.SliderFloat("Sun elevation", ref elevation, -90f, 90f, "%.0f°")) SunLight.ElevationDegrees = elevation;
+
+        ImGui.SliderFloat("Sun shadow softness (cone)", ref RayLightingSettings.SunConeDegrees, 0f, 5f, "%.1f°");
     }
 
     private void DrawBand(string name, int i, bool hasRadius)

@@ -1,3 +1,4 @@
+using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Voxels;
 using Silk.NET.Maths;
 
@@ -115,8 +116,10 @@ public sealed partial class GpuLightSystem
             if (!include && h.HasSolid)
             {
                 var st = _gridStates[h];
+                // The sun rays spread over a cone: grow the box by how far one can stray by the time it passes.
+                var grow = half + new Vector3D<float>(RayLightingSettings.SunConeSpread * FarDistance(centre, st.CurWorldMin, st.CurWorldMax));
                 include = Overlaps(cMin - reach, cMax + reach, st.CurWorldMin, st.CurWorldMax)
-                       || RayHitsBox(centre, -sunDir, st.CurWorldMin - half, st.CurWorldMax + half);
+                       || RayHitsBox(centre, -sunDir, st.CurWorldMin - grow, st.CurWorldMax + grow);
             }
             if (!include) continue;
             AppendListWord((uint)h.Index);
