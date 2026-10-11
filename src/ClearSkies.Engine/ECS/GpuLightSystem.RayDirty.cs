@@ -64,6 +64,8 @@ public sealed partial class GpuLightSystem
     // Whether a brick has had its priming evaluation since its average last restarted (see GpuRayLightPass PRIME).
     private bool[] _primed = Array.Empty<bool>();
     private const uint PrimeEval = uint.MaxValue;
+    // Flag on an evaluation count: fire the brick's whole ray set in this one evaluation (GpuRayLightPass FULL_SET).
+    private const uint FullSetEval = 0x40000000u;
     private bool[] _inHeld = Array.Empty<bool>();
     private int[] _holdStamp = Array.Empty<int>();
     // Gradual bounce (see GpuLightSystem's settings): the evaluations a world brick has been granted since it last
@@ -1076,8 +1078,12 @@ public sealed partial class GpuLightSystem
                         : SettleRadius(st.ShipChange ? ChangeKind.Ship : ChangeKind.Other, st.BounceAllN == 0, nearRadius);
             bool shipNear = shipR >= 0f && BoxDistanceSquared(camPos, st.CurWorldMin, st.CurWorldMax) <= shipR * shipR;
             int more = shipNear ? System.Math.Min(extra, st.BounceAllFrames - 1) : 0;
+            // A moved ship restarting away from the camera fires its whole ray set in its first evaluation, so it
+            // starts from the full mean rather than one slice of it.
+            bool fullSet = !lg.Handle.IsWorld && st.ShipChange && !shipNear && st.BounceAllN == 0;
             st.BounceAllFrames -= 1 + more;
-            st.BounceAllN += 1 + more;
+            st.BounceAllN += fullSet ? _bounceCycle : 1 + more;
+            if (fullSet) evals |= FullSetEval;
             foreach (int slot in lg.Handle.Slots)
             {
                 GiveAcc(slot);
@@ -1120,14 +1126,43 @@ public sealed partial class GpuLightSystem
             float r = SettleRadius((ChangeKind)_holdKind[slot], prime || _n[slot] == 0, nearRadius);
             _primed[slot] = true;
             if (!prime) _hold[slot]--;
-            Push(ref n, (uint)slot);
-            Push(ref n, prime ? PrimeEval : _n[slot]);
             int more = 0;
             if (r >= 0f && Vector3D.DistanceSquared(SlotCentre(slot), camPos) <= r * r)
             {
+                Push(ref n, (uint)slot);
+                Push(ref n, prime ? PrimeEval : _n[slot]);
                 more = System.Math.Min(extra + (prime ? 1 : 0), (int)_hold[slot]);
                 if (more > 0) AddNear((uint)slot, prime ? PrimeEval : _n[slot], more);
                 _hold[slot] -= (byte)more;
+            }
+            else if (_n[slot] == 0 && _holdKind[slot] != (byte)ChangeKind.Other)
+            {
+                // A block change or ship move restarting this brick's average away from the camera: its first
+                // evaluation fires the whole ray set, so the brick starts from the full mean, not one noisy slice
+                // (which showed as splotches, most under lamps at night). After a priming evaluation it follows in
+                // the same frame, so the brick doesn't show a frame without bounce.
+                // The full set counts as a whole cycle of evaluations for the running average.
+                Push(ref n, (uint)slot);
+                if (!prime)
+                {
+                    Push(ref n, FullSetEval);
+                    more = _bounceCycle - 1;
+                }
+                else
+                {
+                    Push(ref n, PrimeEval);
+                    if (_hold[slot] > 0)
+                    {
+                        AddNear((uint)slot, PrimeEval, 1, fullSet: true);
+                        _hold[slot]--;
+                        more = _bounceCycle;
+                    }
+                }
+            }
+            else
+            {
+                Push(ref n, (uint)slot);
+                Push(ref n, prime ? PrimeEval : _n[slot]);
             }
             _n[slot] = (byte)System.Math.Min(_n[slot] + (prime ? 0 : 1) + more, 255);
         }
@@ -1206,21 +1241,25 @@ public sealed partial class GpuLightSystem
 
     /// <summary>Queues a near-camera brick for <paramref name="extraEvals"/> more evaluations this frame, starting
     /// after evaluation number <paramref name="evals"/>.</summary>
-    private void AddNear(uint slot, uint evals, int extraEvals)
+    private void AddNear(uint slot, uint evals, int extraEvals, bool fullSet = false)
     {
         if (2 * _nearCount + 2 > _nearScratch.Length) Array.Resize(ref _nearScratch, _nearScratch.Length * 2);
         if (_nearCount + 1 > _nearSlots.Length)
         {
             Array.Resize(ref _nearSlots, _nearSlots.Length * 2);
             Array.Resize(ref _nearExtra, _nearSlots.Length);
+            Array.Resize(ref _nearFull, _nearSlots.Length);
         }
         _nearScratch[2 * _nearCount] = slot;
         _nearScratch[2 * _nearCount + 1] = evals;
         _nearExtra[_nearCount] = extraEvals;
+        _nearFull[_nearCount] = fullSet;
         _nearCount++;
     }
 
     private int[] _nearExtra = new int[1024];
+    // Whether a near brick's first repeat fires its whole ray set (a restart away from the camera, see BuildBounceWork).
+    private bool[] _nearFull = new bool[1024];
 
     /// <summary>Uploads, as (slot, N + repeat) pairs, the near-camera bricks that still have an evaluation left for
     /// extra evaluation number <paramref name="repeat"/> (a buffer per repeat), and returns how many.</summary>
@@ -1232,7 +1271,8 @@ public sealed partial class GpuLightSystem
             if (_nearExtra[k] < repeat) continue;
             Push(ref n, _nearScratch[2 * k]);
             // After a priming evaluation (PrimeEval, which wraps round) the repeats count from 0.
-            Push(ref n, System.Math.Min(unchecked(_nearScratch[2 * k + 1] + (uint)repeat), 255u));
+            uint evals = System.Math.Min(unchecked(_nearScratch[2 * k + 1] + (uint)repeat), 255u);
+            Push(ref n, repeat == 1 && _nearFull[k] ? evals | FullSetEval : evals);
         }
         if (repeat >= _nearWorks.Length) Array.Resize(ref _nearWorks, repeat + 1);
         if (n > 0) Upload(ref _nearWorks[repeat], n);

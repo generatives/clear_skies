@@ -846,8 +846,9 @@ fn bouncePhase(v: vec3<i32>, spread: i32) -> i32 {
 // air, and bounce rays reading those walls would start the average far too high, which then feeds on itself. After
 // it the brick is recomposed with its AO and the average starts over, reading walls lit as they really are.
 const PRIME: u32 = 0xFFFFFFFFu;
+const FULL_SET: u32 = 0x40000000u; // flag on N, see bounce_main
 
-fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, slice: i32, list: u32, prime: bool) -> u32 {
+fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, slice: i32, slices: i32, list: u32, prime: bool) -> u32 {
     if (isSolid(g, v)) { return word; }
 
     let sxn = isSolid(g, v - vec3<i32>(1, 0, 0)); let sxp = isSolid(g, v + vec3<i32>(1, 0, 0));
@@ -886,9 +887,12 @@ fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, slice: i32, list: u3
     let spread = clamp(i32(p.bounce2.z), 1, 4);
     let phase = bouncePhase(v, spread);
     let fired = max((rays - phase + spread - 1) / spread, 1); // this voxel's share of the slice's rays
-    for (var kk = 0; kk < fired; kk = kk + 1) {
+    // slices > 1: this evaluation fires that many consecutive slices (all of them: the whole set, see FULL_SET).
+    let sliceCount = clamp(slices, 1, cycle);
+    for (var ii = 0; ii < fired * sliceCount; ii = ii + 1) {
+        let kk = ii % fired;
         let k = min(kk * spread + phase, rays - 1);
-        let j = f32(k * cycle + slice);
+        let j = f32(k * cycle + (slice + ii / fired) % cycle);
         let u1 = fract((j + shift) / total);
         let phi = j * 2.39996323 + twist;
         var dl: vec3<f32>;
@@ -921,8 +925,9 @@ fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, slice: i32, list: u3
         if (bestG >= 0) { if (!prime) { sumL = sumL + radianceAt(bestG, best); } }
         else { escaped = escaped + 1.0; }
     }
-    let estimate = clamp(p.bounce.x * sumL / f32(fired), vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0;
-    let occEstimate = (1.0 - escaped / f32(fired)) * 255.0;
+    let firedAll = f32(fired * sliceCount);
+    let estimate = clamp(p.bounce.x * sumL / firedAll, vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0;
+    let occEstimate = (1.0 - escaped / firedAll) * 255.0;
     let r8 = blend8(f32(word & 0xFFu), estimate.r, alpha);
     let g8 = blend8(f32((word >> 8u) & 0xFFu), estimate.g, alpha);
     let b8 = blend8(f32((word >> 16u) & 0xFFu), estimate.b, alpha);
@@ -948,14 +953,18 @@ fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) n
     if (t == 0u) { atomicStore(&wCount, 0u); }
     workgroupBarrier();
     let it = itemOf(work[wi * 2u], t);
-    let nu = work[wi * 2u + 1u];
+    let nuRaw = work[wi * 2u + 1u];
     // A running average over the first full cycle (exactly the complete ray set's mean), then a weight of one
     // cycle, so each further cycle weighs the whole set about equally. N = PRIME: the priming evaluation (see
     // bounceVoxel), which overwrites.
     let cycle = max(u32(p.bounce2.y), 1u);
-    let prime = nu == PRIME;
+    let prime = nuRaw == PRIME;
+    // FULL_SET: a first evaluation that fires the voxel's whole ray set at once and replaces what was stored, so a
+    // restart away from the camera starts from the exact mean instead of one noisy slice.
+    let full = !prime && (nuRaw & FULL_SET) != 0u;
+    let nu = select(nuRaw & ~FULL_SET, nuRaw, prime);
     let aoOnly = p.bounce.z > 0.5;
-    let alpha = select(max(1.0 / f32(cycle), 1.0 / (f32(nu) + 1.0)), 1.0, prime);
+    let alpha = select(max(1.0 / f32(cycle), 1.0 / (f32(nu) + 1.0)), 1.0, prime || full);
     let slice = select(i32(nu % cycle), i32(cycle) - 1, prime);
     let list = listOf(it.g, it.v0);
     // The CPU gives every brick it lists an accumulation slot; without one there is nothing to write.
@@ -975,7 +984,7 @@ fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) n
         let k = wList[i];
         let v = base + vec3<i32>(i32(k & 7u), i32((k >> 3u) & 7u), i32(k >> 6u));
         let a = accBase + i32(k);
-        accPool[a] = bounceVoxel(it.g, v, accPool[a], alpha, slice, list, prime || aoOnly);
+        accPool[a] = bounceVoxel(it.g, v, accPool[a], alpha, slice, select(1, i32(cycle), full), list, prime || aoOnly);
     }
 }
 
