@@ -221,7 +221,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         int mode = (int)_bounceMode;
         if (ImGui.Combo("Bounce rays", ref mode, "Off\0AO only\0Bounce light + AO\0")) _bounceMode = (BounceMode)mode;
         ImGui.SliderFloat("Bounce albedo", ref _bounceAlbedo, 0f, 0.9f, "%.2f");
-        ImGui.SliderInt("Bounce rays per evaluation", ref _bounceRays, 1, 32);
+        ImGui.SliderInt("Bounce rays per slice", ref _bounceRays, 1, 32);
         ImGui.SliderFloat("Bounce ray reach (blocks)", ref _bounceReach, 4f, 16f, "%.0f");
         ImGui.SliderInt("Slices per ray set", ref _bounceCycle, 1, 64);
         ImGui.TextDisabled($"  = {_bounceRays * _bounceCycle} fixed directions per voxel; an evaluation fires one or more slices");

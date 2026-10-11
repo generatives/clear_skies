@@ -28,7 +28,7 @@ struct Params {
     counts: vec4<i32>,  // y: word offset of the lamp records in lists, z: work entries this dispatch
     bounce: vec4<f32>,  // x: albedo (fraction of incoming light a surface re-emits), y: sun strength (0-1),
                         // compose: z: bounce display scale (0 = bounce off); bounce: z: 1 = AO only, w: ray reach (voxels)
-    bounce2: vec4<f32>, // x: rays per evaluation, y: evaluations per full ray set (cycle); compose: z: ambient
+    bounce2: vec4<f32>, // x: rays per slice, y: slices per ray set (cycle); compose: z: ambient
                         // (0-1), w: ray AO strength (0-1)
 };
 
@@ -1204,6 +1204,6 @@ fn zero_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg
         public Vector4D<float> Sun;
         public int Unused, LampBase, WorkCount, Pad;
         public Vector4D<float> Bounce;    // albedo, sun strength, bounce display scale (compose) or AO only (bounce), reach
-        public Vector4D<float> Bounce2;   // rays per evaluation, cycle, ambient (compose), AO strength
+        public Vector4D<float> Bounce2;   // rays per slice, slices per ray set, ambient (compose), AO strength
     }
 }
