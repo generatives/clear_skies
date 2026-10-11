@@ -28,7 +28,7 @@ struct Params {
     counts: vec4<i32>,  // y: word offset of the lamp records in lists, z: work entries this dispatch
     bounce: vec4<f32>,  // x: albedo (fraction of incoming light a surface re-emits), y: sun strength (0-1),
                         // compose: z: bounce display scale (0 = bounce off); bounce: z: 1 = AO only, w: ray reach (voxels)
-    bounce2: vec4<f32>, // x: rays per slice, y: slices per ray set (cycle); compose: z: ambient
+    bounce2: vec4<f32>, // x: rays per group, y: direction groups; compose: z: ambient
                         // (0-1), w: ray AO strength (0-1)
 };
 
@@ -176,10 +176,10 @@ fn jumpCell(v: vec3<i32>, size: i32, o: vec3<f32>, d: vec3<f32>, t1: f32) -> Jum
 //   display: one u16 per voxel, two per word (k even = low half): bits 0-8 brightness, 9-13 warmth, 14-15 sun
 //   visibility (0-3). Brightness and warmth hold all the non-sun light (ambient times the ray AO, lamps and bounce,
 //   combined per channel by max; see encodeLight). The fragment shader reads only this.
-// A brick whose bounce is being evaluated also has an accumulation slot in accPool (accMap[slot] = its index + 1, 0
+// A brick whose bounce is updating also has an accumulation slot in accPool (accMap[slot] = its index + 1, 0
 // for none), ACC_WORDS u32s, one per voxel: bits 0-7 bounce R, 8-15 G, 16-23 B (linear 0-1), 24-31 AO occlusion
-// (0-255), blended by the bounce pass. The CPU hands one out when the brick's evaluation starts and takes it back when
-// its evaluations are done, so a settled brick keeps only its display.
+// (0-255), blended by the bounce pass. The CPU hands one out when the brick's update starts and takes it back when
+// its updates are done, so a settled brick keeps only its display.
 const SLOT_WORDS: i32 = " + GridStore.WordsPerSlot + @";
 const ACC_WORDS: i32 = " + GridStore.AccWordsPerSlot + @";
 
@@ -662,7 +662,7 @@ fn compose_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) 
     let it = itemOf(slot, t);
     let base = it.v0 - vec3<i32>(i32(t * 2u) & 7, (i32(t * 2u) >> 3u) & 7, i32(t * 2u) >> 6u); // the brick's first voxel
     let smoothed = p.bounce.x > 0.5;
-    let ownAcc = accOf(slot); // -1: no accumulation (bounce off, or not evaluated yet): no bounce and no AO
+    let ownAcc = accOf(slot); // -1: no accumulation (bounce off, or not updated yet): no bounce and no AO
     if (t == 0u) { atomicStore(&wCount, 0u); }
     if (t < 54u) { atomicStore(&cOcc[t], 0u); atomicStore(&cSee[t], 0u); }
     if (t < 32u) { atomicStore(&cSurf[t], 0u); }
@@ -724,25 +724,25 @@ fn compose_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) 
     lightPool[it.disp] = wSun[t * 2u] | (wSun[t * 2u + 1u] << 16u);
 }
 
-// ── Bounce (one-hop indirect light, multi-hop through re-evaluation) ─────────────────────────────────────
-// Each evaluation, a surface air voxel fires p.bounce2.x short rays (up to p.bounce.w voxels) per slice,
-// cosine-distributed around its surface normal, through its chunk's grids: one or more slices of a fixed per-voxel
-// direction set of p.bounce2.y slices (see bounceVoxel). At each ray's nearest hit it reads the light
+// ── Bounce (one hop of indirect light per dispatch) ─────────────────────────────────────────────────────
+// Each hop, a surface air voxel fires p.bounce2.x short rays (up to p.bounce.w voxels) per group,
+// cosine-distributed around its surface normal, through its chunk's grids: one or more of the p.bounce2.y groups of
+// its fixed directions (see bounceVoxel). At each ray's nearest hit it reads the light
 // arriving at the hit face from the air cell in front of it: the brighter of that cell's direct sun
 // (visibility x strength x the face's N.L), its lamp light and its own stored bounce; a miss reads 0. The
-// mean of those times the albedo is this evaluation's estimate, blended into the stored bounce (0-255, bits
-// 0-23 of the accumulation word) with the weight the CPU gives it: a brick bursts, a few evaluations back to back
-// that together fire a fixed share of its slices, weighted to make a running average of the burst (replacing what
-// was stored, or keeping half of it), so the stored value is always a complete burst's mean.
+// mean of those times the albedo is this hop's estimate, blended into the stored bounce (0-255, bits
+// 0-23 of the accumulation word) with the weight the CPU gives it: a brick updates, a few hops back to back
+// that together fire a fixed share of its groups, weighted to make a running average of the update (replacing what
+// was stored, or keeping half of it), so the stored value is always a complete update's mean.
 // The same rays measure ambient occlusion: the fraction that hit nothing within their reach is the voxel's sky
 // visibility (cosine-weighted, since the rays are), and one minus it is blended into bits 24-31 the same way.
 // The fragment shader scales the flat ambient by it, so caves and sealed rooms go dark while open ground,
 // whose rays all go up, stays fully lit. Rays cross grids, so a ship darkens the ground under it.
 // Reading the stored bounce at the hit is what makes it multi-hop:
-// each evaluation adds a hop, and the CPU keeps a changed area bursting while it changes. Keep albedo
+// each dispatch adds a hop, and the CPU keeps a changed area updating while it changes. Keep albedo
 // well below 1 or the feedback lingers (a removed light ghosts longer). Ambient is not bounced; it is
 // already uniform.
-// With AO only (p.bounce.z = 1) every evaluation is like a priming one: AO alone, no light read and no bounce stored.
+// With AO only (p.bounce.z = 1) every hop is like an AO pass: AO alone, no light read and no bounce stored.
 const BOUNCE_MAX: f32 = 16.0;
 const BOUNCE_MAX_RAYS: i32 = 32;
 
@@ -832,24 +832,25 @@ fn pcg(v: u32) -> u32 {
 
 fn rand01(h: u32) -> f32 { return f32(pcg(h) & 0xFFFFFFu) / 16777216.0; }
 
-// Checkerboard bounce: with a spread S of 2 or 4, every surface voxel still updates each evaluation but fires only
-// 1/S of the rays, its phase's share of the slice: direction j*S + phase of the slice's directions. The phases are laid
-// out so every 2x2 patch of a floor, wall or ceiling holds each of them once (spread 2: a plain 3D checkerboard), so a
-// patch fires the whole slice between its voxels, and the compose pass's neighbour smoothing averages them back.
+// Rays per voxel (the band's checkerboard): with a spread S of 2 or 4, every surface voxel still updates each hop but
+// fires only 1/S of the rays, its phase's share of each group: direction j*S + phase of the group's directions. The
+// phases are laid out so every 2x2 patch of a floor, wall or ceiling holds each of them once (spread 2: a plain 3D
+// checkerboard), so a patch fires the whole group between its voxels, and the compose pass's neighbour smoothing
+// averages them back.
 fn bouncePhase(v: vec3<i32>, spread: i32) -> i32 {
     if (spread >= 4) { return ((v.x + v.y) & 1) + 2 * ((v.y + v.z) & 1); }
     if (spread == 2) { return (v.x + v.y + v.z) & 1; }
     return 0;
 }
 
-// Blends one evaluation into the voxel's accumulation word (bounce RGB and AO) and returns the new word.
-// A priming evaluation (the first after a brick's average restarts) measures only AO and stores no bounce: until then
+// Blends one hop into the voxel's accumulation word (bounce RGB and AO) and returns the new word.
+// An AO pass (before the first update after a brick's blocks changed) measures only AO and stores no bounce: until then
 // the brick's voxels were shown with no AO at all (nothing measured yet, or solid a moment ago), as bright as open
 // air, and bounce rays reading those walls would start the average far too high, which then feeds on itself. After
 // it the brick is recomposed with its AO and the average starts over, reading walls lit as they really are.
-const PRIME: u32 = 0x80000000u; // flag bit of an evaluation word
+const AO_PASS: u32 = 0x80000000u; // flag bit of a hop word
 
-fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, slice: i32, slices: i32, spread: i32, list: u32, prime: bool) -> u32 {
+fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, first: i32, count: i32, spread: i32, list: u32, aoPass: bool) -> u32 {
     if (isSolid(g, v)) { return word; }
 
     let sxn = isSolid(g, v - vec3<i32>(1, 0, 0)); let sxp = isSolid(g, v + vec3<i32>(1, 0, 0));
@@ -873,26 +874,26 @@ fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, slice: i32, slices: 
 
     let v2w = grids[g].v2w;
     let origin = (v2w * vec4<f32>(vec3<f32>(v) + vec3<f32>(0.5), 1.0)).xyz;
-    // Each voxel has one fixed set of rays * cycle directions, set by its position alone: a cosine-weighted
+    // Each voxel has fixed directions, rays per group * groups of them, set by its position alone: a cosine-weighted
     // Fibonacci spiral (evenly spread, far less noisy than random directions), twisted and shifted per voxel so
-    // neighbours differ. An evaluation fires `slices` slices from `slice`; slices interleave (direction
-    // j = k*cycle + slice), so each one spans the whole hemisphere coarsely and all of them cover the complete set.
+    // neighbours differ. A hop fires `count` groups from `first`; groups interleave (group g is directions
+    // j = k*groups + g), so each one spans the whole hemisphere coarsely and all of them cover every direction.
     let seed = pcg(u32(v.x) ^ pcg(u32(v.y) ^ pcg(u32(v.z))));
     let twist = rand01(seed) * 6.2831853;
     let shift = rand01(seed + 1u);
     var sumL = vec3<f32>(0.0);
     var escaped = 0.0;
     let rays = clamp(i32(p.bounce2.x), 1, BOUNCE_MAX_RAYS);
-    let cycle = max(i32(p.bounce2.y), 1);
-    let total = f32(rays * cycle);
+    let groups = max(i32(p.bounce2.y), 1);
+    let total = f32(rays * groups);
     let phase = bouncePhase(v, spread);
-    let fired = max((rays - phase + spread - 1) / spread, 1); // this voxel's share of the slice's rays
-    // slices > 1: this evaluation fires that many consecutive slices.
-    let sliceCount = clamp(slices, 1, cycle);
-    for (var ii = 0; ii < fired * sliceCount; ii = ii + 1) {
+    let fired = max((rays - phase + spread - 1) / spread, 1); // this voxel's share of each group's rays
+    // count > 1: this hop fires that many consecutive groups.
+    let fireCount = clamp(count, 1, groups);
+    for (var ii = 0; ii < fired * fireCount; ii = ii + 1) {
         let kk = ii % fired;
         let k = min(kk * spread + phase, rays - 1);
-        let j = f32(k * cycle + (slice + ii / fired) % cycle);
+        let j = f32(k * groups + (first + ii / fired) % groups);
         let u1 = fract((j + shift) / total);
         let phi = j * 2.39996323 + twist;
         var dl: vec3<f32>;
@@ -922,10 +923,10 @@ fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, slice: i32, slices: 
             let h = ddaNearest(gi, lo, ld, clip.t0, clip.t1, gd.bmin.xyz, gd.bmax.xyz);
             if (h.hit && h.t < bestT) { bestT = h.t; bestG = gi; best = h; }
         }
-        if (bestG >= 0) { if (!prime) { sumL = sumL + radianceAt(bestG, best); } }
+        if (bestG >= 0) { if (!aoPass) { sumL = sumL + radianceAt(bestG, best); } }
         else { escaped = escaped + 1.0; }
     }
-    let firedAll = f32(fired * sliceCount);
+    let firedAll = f32(fired * fireCount);
     let estimate = clamp(p.bounce.x * sumL / firedAll, vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0;
     let occEstimate = (1.0 - escaped / firedAll) * 255.0;
     let r8 = blend8(f32(word & 0xFFu), estimate.r, alpha);
@@ -947,24 +948,24 @@ fn blend8(s8: f32, goal: f32, alpha: f32) -> f32 {
 @compute @workgroup_size(256)
 fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
                @builtin(local_invocation_index) t: u32) {
-    // The bounce work list is pairs: (light slot, evaluation). An evaluation word holds its checkerboard spread as
-    // log2 (bits 24-25, see bouncePhase) and is either PRIME (bit 31, see bounceVoxel), or its first slice (bits 0-7),
-    // how many slices it fires (8-15) and the denominator of its blend weight (16-23): weight
-    // 1/(i+1) for a burst's evaluation i makes the burst a running average that replaces what was stored, and
-    // 1/(2E-i) one that keeps half of it (see GpuLightSystem.Burst).
+    // The bounce work list is pairs: (light slot, hop word). A hop word holds its spread as log2 (bits 24-25, see
+    // bouncePhase) and is either AO_PASS (bit 31, see bounceVoxel), or its first group (bits 0-7), how many groups it
+    // fires (8-15) and the denominator of its blend weight (16-23): weight 1/(i+1) for an update's hop i makes the
+    // update a running average that replaces what was stored, and 1/(2H-i) one that keeps half of it (see
+    // GpuLightSystem.UpdateBrick).
     let wi = wid.x + wid.y * nwg.x;
     if (wi >= u32(p.counts.z)) { return; }
     if (t == 0u) { atomicStore(&wCount, 0u); }
     workgroupBarrier();
     let it = itemOf(work[wi * 2u], t);
     let ev = work[wi * 2u + 1u];
-    let cycle = max(u32(p.bounce2.y), 1u);
-    let prime = (ev & PRIME) != 0u; // overwrites
+    let groups = max(u32(p.bounce2.y), 1u);
+    let aoPass = (ev & AO_PASS) != 0u; // overwrites
     let spread = i32(1u << ((ev >> 24u) & 3u));
     let aoOnly = p.bounce.z > 0.5;
-    let alpha = select(1.0 / f32(max((ev >> 16u) & 0xFFu, 1u)), 1.0, prime);
-    let slice = select(i32((ev & 0xFFu) % cycle), i32(cycle) - 1, prime);
-    let slices = select(max(i32((ev >> 8u) & 0xFFu), 1), 1, prime);
+    let alpha = select(1.0 / f32(max((ev >> 16u) & 0xFFu, 1u)), 1.0, aoPass);
+    let first = select(i32((ev & 0xFFu) % groups), i32(groups) - 1, aoPass);
+    let count = select(max(i32((ev >> 8u) & 0xFFu), 1), 1, aoPass);
     let list = listOf(it.g, it.v0);
     // The CPU gives every brick it lists an accumulation slot; without one there is nothing to write.
     let accBase = accOf(it.slot);
@@ -983,13 +984,13 @@ fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) n
         let k = wList[i];
         let v = base + vec3<i32>(i32(k & 7u), i32((k >> 3u) & 7u), i32(k >> 6u));
         let a = accBase + i32(k);
-        accPool[a] = bounceVoxel(it.g, v, accPool[a], alpha, slice, slices, spread, list, prime || aoOnly);
+        accPool[a] = bounceVoxel(it.g, v, accPool[a], alpha, first, count, spread, list, aoPass || aoOnly);
     }
 }
 
 // Drops the stored bounce of the listed slots (keeping AO), where a light was removed or dimmed. Bounce there feeds
-// on itself — each evaluation reads neighbours whose bounce still holds the old light — so without a reset the old
-// colour decays only by the albedo per evaluation and leaves a visible ghost when the brick stops being evaluated.
+// on itself — each hop reads neighbours whose bounce still holds the old light — so without a reset the old
+// colour decays only by the albedo per hop and leaves a visible ghost when the brick stops updating.
 @compute @workgroup_size(256)
 fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
               @builtin(local_invocation_index) t: u32) {
@@ -1104,17 +1105,17 @@ fn zero_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg
     /// <summary>
     /// One EMA step of bounce light for the listed bricks (see bounce_main). Reads direct light of every grid, so
     /// run it after the sun pass and before composing. <paramref name="work"/> holds <paramref name="count"/> pairs of (light slot,
-    /// evaluations since that brick changed). Each voxel's fixed direction set is <paramref name="rays"/> x
-    /// <paramref name="cycle"/> directions, one slice of <paramref name="rays"/> per evaluation, each reaching
-    /// <paramref name="reach"/> voxels (at most 16). <paramref name="aoOnly"/>: measure AO alone and store no bounce.
-    /// Each evaluation word carries its own checkerboard spread (see bounce_main).
+    /// hop word). Each voxel has <paramref name="rays"/> x <paramref name="groups"/> fixed directions, in groups of
+    /// <paramref name="rays"/>, each ray reaching <paramref name="reach"/> voxels (at most 16). <paramref name="aoOnly"/>:
+    /// measure AO alone and store no bounce. Each hop word says which groups it fires, its blend weight and its rays per
+    /// voxel (see bounce_main).
     /// </summary>
     public void DispatchBounce(GridStore store, Vector3D<float> sunDir, float sunStrength,
-                               float albedo, int rays, int cycle, float reach, bool aoOnly, GpuBuffer work, int count)
+                               float albedo, int rays, int groups, float reach, bool aoOnly, GpuBuffer work, int count)
     {
         if (count <= 0) return;
         var param = WriteParams(sunDir, count, new Vector4D<float>(albedo, sunStrength, aoOnly ? 1f : 0f, reach),
-                                new Vector4D<float>(rays, cycle, 0f, 0f));
+                                new Vector4D<float>(rays, groups, 0f, 0f));
         Dispatch(_bouncePipeline, BounceBindings, store, work, count, param, "Lighting: bounce");
     }
 
@@ -1204,6 +1205,6 @@ fn zero_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg
         public Vector4D<float> Sun;
         public int Unused, LampBase, WorkCount, Pad;
         public Vector4D<float> Bounce;    // albedo, sun strength, bounce display scale (compose) or AO only (bounce), reach
-        public Vector4D<float> Bounce2;   // rays per slice, slices per ray set, ambient (compose), AO strength
+        public Vector4D<float> Bounce2;   // rays per group, direction groups, ambient (compose), AO strength
     }
 }
