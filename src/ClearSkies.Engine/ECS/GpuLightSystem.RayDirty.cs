@@ -33,6 +33,7 @@ public sealed partial class GpuLightSystem
     {
         public bool LightAll = true;          // relight every surface brick of the grid this frame
         public int BounceAllFrames, BounceAllN;
+        public bool FullSetNext;              // an averaging move woke it from settled: next evaluation fires the full set
         public bool AllThisFrame;             // relit whole this frame
         public bool BounceAllThisFrame;       // bounced whole this frame
 
@@ -66,6 +67,7 @@ public sealed partial class GpuLightSystem
     private const uint PrimeEval = uint.MaxValue;
     // Flag on an evaluation count: fire the brick's whole ray set in this one evaluation (GpuRayLightPass FULL_SET).
     private const uint FullSetEval = 0x40000000u;
+    private bool[] _fullSetNext = Array.Empty<bool>();
     private bool[] _inHeld = Array.Empty<bool>();
     private int[] _holdStamp = Array.Empty<int>();
     // Gradual bounce (see GpuLightSystem's settings): the evaluations a world brick has been granted since it last
@@ -173,6 +175,7 @@ public sealed partial class GpuLightSystem
             _primed[slot] = false;
             _given[slot] = byte.MaxValue;
             _holdKind[slot] = (byte)ChangeKind.Other;
+            _fullSetNext[slot] = false;
             MarkSlot(slot);
         }
         _store.NewSlots.Clear();
@@ -797,6 +800,7 @@ public sealed partial class GpuLightSystem
                 // A ship moving with its blocks unchanged carries on its running average, one evaluation a frame (see
                 // BuildBounceWork); it restarts only if it has no accumulation (it had settled before it moved).
                 if (!HasAcc(lg.Handle)) st.BounceAllN = 0;
+                else if (st.BounceAllFrames == 0) st.FullSetNext = true;
                 st.BounceAllFrames = System.Math.Max(st.BounceAllFrames, AverageEvals());
             }
             else if (st.AllThisFrame)
@@ -891,6 +895,9 @@ public sealed partial class GpuLightSystem
         _holdStamp[slot] = _frame;
         _holdKind[slot] = (byte)kind;
         int grant = Grant(slot, holdFrames);
+        // An averaging change waking a brick that had settled (it keeps its average): its next evaluation fires the
+        // whole ray set, so the change's first step isn't one noisy slice.
+        if (AverageAfter(kind) && _hold[slot] == 0 && _n[slot] > 0) _fullSetNext[slot] = true;
         if (AverageAfter(kind) && holdFrames > 0)
             grant = System.Math.Clamp((grant * AverageEvals() + holdFrames - 1) / holdFrames, 1, 255);
         _hold[slot] = (byte)System.Math.Max(_hold[slot], grant);
@@ -1080,7 +1087,8 @@ public sealed partial class GpuLightSystem
             int more = shipNear ? System.Math.Min(extra, st.BounceAllFrames - 1) : 0;
             // A moved ship restarting away from the camera fires its whole ray set in its first evaluation, so it
             // starts from the full mean rather than one slice of it.
-            bool fullSet = !lg.Handle.IsWorld && st.ShipChange && !shipNear && st.BounceAllN == 0;
+            bool fullSet = !lg.Handle.IsWorld && st.ShipChange && !shipNear && (st.BounceAllN == 0 || st.FullSetNext);
+            st.FullSetNext = false;
             st.BounceAllFrames -= 1 + more;
             st.BounceAllN += fullSet ? _bounceCycle : 1 + more;
             if (fullSet) evals |= FullSetEval;
@@ -1159,11 +1167,20 @@ public sealed partial class GpuLightSystem
                     }
                 }
             }
+            else if (_fullSetNext[slot] && !prime)
+            {
+                // Carrying on its average after an averaging change woke it (see ExtendSlot): the whole ray set, weighted
+                // as the cycle of evaluations it stands in for.
+                Push(ref n, (uint)slot);
+                Push(ref n, _n[slot] | FullSetEval);
+                more = _bounceCycle - 1;
+            }
             else
             {
                 Push(ref n, (uint)slot);
                 Push(ref n, prime ? PrimeEval : _n[slot]);
             }
+            if (!prime) _fullSetNext[slot] = false;
             _n[slot] = (byte)System.Math.Min(_n[slot] + (prime ? 0 : 1) + more, 255);
         }
 
@@ -1363,6 +1380,7 @@ public sealed partial class GpuLightSystem
         Array.Resize(ref _restartStamp, capacity);
         Array.Resize(ref _markKind, capacity);
         Array.Resize(ref _holdKind, capacity);
+        Array.Resize(ref _fullSetNext, capacity);
         Array.Resize(ref _clearKind, capacity);
         Array.Resize(ref _inAcc, capacity);
         if (_preCompose.Length < capacity) Array.Resize(ref _preCompose, capacity);
