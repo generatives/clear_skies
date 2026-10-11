@@ -27,10 +27,9 @@ namespace ClearSkies.Engine.ECS;
 // change. An update is the band's hops run back to back in one frame (one dispatch each, each reading the last, so
 // each adds a hop), together firing the band's groups of the voxel's directions, always the same ones. A brick updates
 // on its turn, once every so many frames (the band's setting), staggered by brick (a ship's bricks together); each
-// update reads the light the last one left, so a change gets updates x hops hops. Nothing restarts: an update
-// replaces what was there (reading it through its neighbours, so the light carries on), or blends in at 1/2 if the
-// brick was touched again and updated on its previous turn too (it keeps changing, as around a moving ship), so a fast-changing light fades between updates
-// instead of stepping; once it stops changing, one more update replaces, so none of the old light is left. A world
+// update reads the light the last one left, so a change gets updates x hops hops. Every update blends in at 1/2, so
+// any change fades in over the band's updates (3 by default: 1/2, 3/4, 7/8 of the way) instead of popping, except
+// where there is no light to keep (a brick new to light storage, or a removed lamp's clear), which replaces. A world
 // brick that settled has its accumulation freed; when it updates again it is seeded from its display. Only where a
 // lamp was removed is bounce cleared, since there it would otherwise sustain itself.
 public sealed partial class GpuLightSystem
@@ -60,11 +59,8 @@ public sealed partial class GpuLightSystem
     // updated on its previous turn.
     private bool[] _dirty = Array.Empty<bool>();
     private bool[] _pending = Array.Empty<bool>();
-    private bool[] _tail = Array.Empty<bool>();
     private byte[] _left = Array.Empty<byte>();
-    // Updates still to blend in after a top-up as the camera nears (see TopUpNearing), so the finer light fades in.
-    private byte[] _fade = Array.Empty<byte>();
-    private const int FadeUpdates = 3;
+    private const int NeverUpdated = int.MinValue / 2;
     private int[] _lastUpdate = Array.Empty<int>();
     private bool[] _inHeld = Array.Empty<bool>();
     // Distance bands: the groups a world brick last fired (255: none yet), and the bricks that fired fewer than the
@@ -159,10 +155,8 @@ public sealed partial class GpuLightSystem
         foreach (int slot in _store.NewSlots)
         {
             _pending[slot] = false;
-            _tail[slot] = false;
             _left[slot] = 0;
-            _fade[slot] = 0;
-            _lastUpdate[slot] = int.MinValue / 2;
+            _lastUpdate[slot] = NeverUpdated;
             _given[slot] = byte.MaxValue;
             MarkSlot(slot);
         }
@@ -773,7 +767,7 @@ public sealed partial class GpuLightSystem
 
     /// <summary>Whether a brick has an update to come: touched since its last, owed more for its last change, or owed
     /// the replacing one after a blend.</summary>
-    private bool NeedsUpdate(int slot) => _pending[slot] || _left[slot] > 0 || _tail[slot] || _fade[slot] > 0;
+    private bool NeedsUpdate(int slot) => _pending[slot] || _left[slot] > 0;
 
     /// <summary>AO only: whether a ship's rays can reach another grid, at its pose this frame.</summary>
     private bool NearOtherGrid(in LitGrid ship, GridLightState st)
@@ -845,7 +839,6 @@ public sealed partial class GpuLightSystem
                 if (!_pending[slot] && BandGroups(WorldBandOf(slot)) > _given[slot])
                 {
                     Touch(slot);
-                    _fade[slot] = FadeUpdates;
                     _dbgTopUps++;
                 }
                 _coarseAt++;
@@ -966,13 +959,12 @@ public sealed partial class GpuLightSystem
     }
 
     /// <summary>
-    /// Queues one update of a brick in this band, and returns the groups it costs (an AO pass counts as one). The
-    /// band's hops each fire an equal share of its groups, always the same ones (from the first), so a partial set
-    /// stays a fixed, coarser one rather than leaning toward whichever group ran last. The running average restarts
-    /// with each update: hop i weighs 1/(i+1), so the update replaces what was there with its mean; blending in at
-    /// 1/2 instead, hop i weighs 1/(2H - i), so each of the H counts 1/(2H) and the old light keeps half. An update
-    /// for a fresh touch owes the band's further updates per change; each of those replaces, reading the light the
-    /// last one left, so it adds the band's hops again.
+    /// Queues one update of a brick in this band, and returns the groups it costs. The band's hops each fire an equal
+    /// share of its groups, always the same ones (from the first), so a partial set stays a fixed, coarser one rather
+    /// than leaning toward whichever group ran last. An update blends in at 1/2: hop i weighs 1/(2H - i), so each of
+    /// the H counts 1/(2H) and the old light keeps half; replacing (no light to keep), hop i weighs 1/(i+1), so the
+    /// update is the mean of its hops. A touch owes the band's updates per change, one per turn, each reading the
+    /// light the last one left.
     /// </summary>
     private int UpdateBrick(int slot, int band)
     {
@@ -988,18 +980,15 @@ public sealed partial class GpuLightSystem
         // to light storage shows nothing yet, so it starts from nothing.
         bool seed = fresh && !_aoOnly;
         if (seed) _seedSlots.Add((uint)slot);
-        int every = System.Math.Max(1, b.Every);
-        // Blend only into light that is current: not a fresh accumulation, nor one cleared this frame (a removed lamp).
-        // A top-up's updates blend too, fresh or not (a settled brick's seeded accumulation is the light it showed), so
-        // nearing terrain fades to the finer light over a few turns instead of popping; they leave no replacing tail.
-        bool fading = _fade[slot] > 0 && _clearStamp[slot] != _frame;
-        bool changing = !fresh && _clearStamp[slot] != _frame && _pending[slot] && every > 1 && _frame - _lastUpdate[slot] <= every;
-        bool blend = changing || fading;
+        // Every update blends in at 1/2, so any change, and terrain sharpening as the camera nears, fades in over the
+        // band's updates instead of popping. Except where there is no light to keep: a brick never updated (new to
+        // light storage, its display empty) or whose bounce was just cleared (a removed lamp) replaces.
+        // A brick given fresh accumulation has no AO to keep (a seed holds only light: the display mixes AO into it), so
+        // its AO replaces.
+        bool blend = _lastUpdate[slot] != NeverUpdated && _clearStamp[slot] != _frame;
         int step = 0;
         for (int i = 0; i < hops; i++)
-            AddStep(step++, (uint)slot, HopWord(i * per, per, blend ? 2 * hops - i : i + 1, b.Spread));
-        _tail[slot] = changing;
-        if (_fade[slot] > 0) _fade[slot]--;
+            AddStep(step++, (uint)slot, HopWord(i * per, per, blend ? 2 * hops - i : i + 1, b.Spread, aoDenominator: blend && fresh ? i + 1 : 0));
         // A fresh touch owes the band's further updates; a follow-up uses one up.
         int owed = _pending[slot] ? System.Math.Clamp(b.Updates, 1, 255) - 1 : _left[slot] - 1;
         _left[slot] = (byte)System.Math.Max(owed, 0);
@@ -1015,9 +1004,10 @@ public sealed partial class GpuLightSystem
 
     /// <summary>A hop for the shader: fire <paramref name="count"/> groups from <paramref name="first"/> with rays per
     /// voxel 1/<paramref name="spread"/>, and blend the result in with weight 1/<paramref name="weightDenominator"/>
-    /// (see GpuRayLightPass bounce_main).</summary>
-    private static uint HopWord(int first, int count, int weightDenominator, int spread)
-        => (uint)(first & 0xFF) | ((uint)(count & 0xFF) << 8) | ((uint)(weightDenominator & 0xFF) << 16) | SpreadBits(spread);
+    /// (see GpuRayLightPass bounce_main); AO with 1/<paramref name="aoDenominator"/> instead when that is not 0.</summary>
+    private static uint HopWord(int first, int count, int weightDenominator, int spread, int aoDenominator = 0)
+        => (uint)(first & 0xFF) | ((uint)(count & 0xFF) << 8) | ((uint)(weightDenominator & 0xFF) << 16) | SpreadBits(spread)
+           | ((uint)(aoDenominator & 63) << 26);
 
     // Bits 24-25: log2 of the spread (1, 2 or 4: all, half or a quarter of the rays per voxel).
     private static uint SpreadBits(int spread) => (uint)(spread >= 4 ? 2 : spread >= 2 ? 1 : 0) << 24;
@@ -1130,9 +1120,7 @@ public sealed partial class GpuLightSystem
         if (_dirty.Length >= capacity) return;
         Array.Resize(ref _dirty, capacity);
         Array.Resize(ref _pending, capacity);
-        Array.Resize(ref _tail, capacity);
         Array.Resize(ref _left, capacity);
-        Array.Resize(ref _fade, capacity);
         Array.Resize(ref _lastUpdate, capacity);
         Array.Resize(ref _inHeld, capacity);
         Array.Resize(ref _given, capacity);

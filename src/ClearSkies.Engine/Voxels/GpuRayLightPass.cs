@@ -865,7 +865,8 @@ fn bouncePhase(v: vec3<i32>, spread: i32) -> i32 {
 
 // Blends one hop into the voxel's accumulation word (bounce RGB and AO) and returns the new word. aoOnly: measure AO
 // alone (no light read, no bounce stored).
-fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, first: i32, count: i32, spread: i32, list: u32, aoOnly: bool) -> u32 {
+// alphaAo: the AO's own blend weight (a seeded brick's AO is unknown, so its update replaces AO while bounce blends).
+fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, alphaAo: f32, first: i32, count: i32, spread: i32, list: u32, aoOnly: bool) -> u32 {
     if (isSolid(g, v)) { return word; }
 
     let sxn = isSolid(g, v - vec3<i32>(1, 0, 0)); let sxp = isSolid(g, v + vec3<i32>(1, 0, 0));
@@ -949,7 +950,7 @@ fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, first: i32, count: i
     let r8 = blendBounce(f32(word & 0xFFu), estimate.r, a);
     let g8 = blendBounce(f32((word >> 8u) & 0xFFu), estimate.g, a);
     let b8 = blendBounce(f32((word >> 16u) & 0xFFu), estimate.b, a);
-    let o8 = blend8(f32(word >> 24u), occEstimate, a);
+    let o8 = blend8(f32(word >> 24u), occEstimate, select(alphaAo, 1.0, word == 0u));
     return u32(r8) | (u32(g8) << 8u) | (u32(b8) << 16u) | (u32(o8) << 24u);
 }
 
@@ -976,7 +977,7 @@ fn blendBounce(s8: f32, goal: f32, alpha: f32) -> f32 {
 fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
                @builtin(local_invocation_index) t: u32) {
     // The bounce work list is pairs: (light slot, hop word). A hop word holds its spread as log2 (bits 24-25, see
-    // bouncePhase), its first group (bits 0-7), how many groups it fires (8-15) and the denominator of its blend weight (16-23): weight 1/(i+1) for an update's hop i makes the
+    // bouncePhase), its first group (bits 0-7), how many groups it fires (8-15), AO's own weight denominator if any (26-31) and the denominator of its blend weight (16-23): weight 1/(i+1) for an update's hop i makes the
     // update a running average that replaces what was stored, and 1/(2H-i) one that keeps half of it (see
     // GpuLightSystem.UpdateBrick).
     let wi = wid.x + wid.y * nwg.x;
@@ -989,6 +990,8 @@ fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) n
     let spread = i32(1u << ((ev >> 24u) & 3u));
     let aoOnly = p.bounce.z > 0.5;
     let alpha = 1.0 / f32(max((ev >> 16u) & 0xFFu, 1u));
+    let aoDen = (ev >> 26u) & 63u; // 0: AO blends like bounce
+    let alphaAo = select(alpha, 1.0 / f32(aoDen), aoDen != 0u);
     let first = i32((ev & 0xFFu) % groups);
     let count = max(i32((ev >> 8u) & 0xFFu), 1);
     let list = listOf(it.g, it.v0);
@@ -1009,7 +1012,7 @@ fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) n
         let k = wList[i];
         let v = base + vec3<i32>(i32(k & 7u), i32((k >> 3u) & 7u), i32(k >> 6u));
         let a = accBase + i32(k);
-        accPool[a] = bounceVoxel(it.g, v, accPool[a], alpha, first, count, spread, list, aoOnly);
+        accPool[a] = bounceVoxel(it.g, v, accPool[a], alpha, alphaAo, first, count, spread, list, aoOnly);
     }
 }
 

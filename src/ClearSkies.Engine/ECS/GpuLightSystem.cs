@@ -76,7 +76,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         }
     }
 
-    private readonly BounceBand[] _bands = { new(256f, 4, 4, 1, 4, 1), new(768f, 2, 2, 1, 4, 1), new(0f, 1, 1, 1, 8, 1) };
+    private readonly BounceBand[] _bands = { new(256f, 4, 4, 3, 4, 1), new(768f, 2, 2, 3, 4, 1), new(0f, 1, 1, 3, 8, 1) };
 
     private static readonly int[] Spreads = { 1, 2, 4 };
     private static readonly string[] SpreadNames = { "All", "1/2 (neighbours fire the rest)", "1/4 (neighbours fire the rest)" };
@@ -109,10 +109,10 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     private static readonly LightingPreset[] Presets =
     {
         //   Name       Mode               Rays Groups Reach Near (radius, hops, groups, updates, every, spread)  Mid                    Far                 Relit Groups
-        new("Minimal", BounceMode.Off,    4,   4,    8f,   new(96f, 4, 4, 1, 4, 1),  new(256f, 1, 1, 1, 4, 1), new(0f, 1, 1, 1, 8, 1),  256,  512),
-        new("Low",     BounceMode.AoOnly, 8,   4,    8f,   new(96f, 4, 4, 1, 4, 4),  new(256f, 1, 1, 1, 4, 4), new(0f, 1, 1, 1, 8, 4),  256, 1024),
-        new("Medium",  BounceMode.Full,   8,   4,    8f,   new(128f, 4, 4, 1, 4, 1), new(384f, 2, 2, 1, 4, 4), new(0f, 1, 1, 1, 8, 4),  512, 2048),
-        new("High",    BounceMode.Full,   8,   4,   16f,   new(256f, 4, 4, 1, 4, 1), new(768f, 2, 2, 1, 4, 1), new(0f, 1, 1, 1, 8, 1), 1024, 4096),
+        new("Minimal", BounceMode.Off,    4,   4,    8f,   new(96f, 4, 4, 3, 4, 1),  new(256f, 1, 1, 3, 4, 1), new(0f, 1, 1, 3, 8, 1),  256,  512),
+        new("Low",     BounceMode.AoOnly, 8,   4,    8f,   new(96f, 4, 4, 3, 4, 4),  new(256f, 1, 1, 3, 4, 4), new(0f, 1, 1, 3, 8, 4),  256, 1024),
+        new("Medium",  BounceMode.Full,   8,   4,    8f,   new(128f, 4, 4, 3, 4, 1), new(384f, 2, 2, 3, 4, 4), new(0f, 1, 1, 3, 8, 4),  512, 2048),
+        new("High",    BounceMode.Full,   8,   4,   16f,   new(256f, 4, 4, 3, 4, 1), new(768f, 2, 2, 3, 4, 1), new(0f, 1, 1, 3, 8, 1), 1024, 4096),
     };
 
     private const string DefaultPreset = "Medium";
