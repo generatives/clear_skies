@@ -42,11 +42,8 @@ bounce and AO: the voxel counts 2, face neighbours 1, edge diagonals ½. Only ne
 - **Checkerboard spread** S (1, 2 or 4) makes each voxel fire only the rays with `k ≡ phase (mod S)`. Each 2×2
   patch holds every phase once, and smoothing pools them.
   - Per evaluation, a voxel fires `rays / S` rays. Medium: 8 / 4 = **2**.
-  - Over a full cycle, a voxel fires `rays × cycle / S`. Medium: **8** of its 32; its neighbours fire the rest.
-  - Rotating the phase each cycle (tried 2026-10-11, 995008e) traded the splotches for flicker: with weight ¼ the
-    stored value swings as the voxel's ray subset changes. Reverted.
-- **N past 255** wraps by whole 4-cycle rotations (to 16-31 at cycle 4) instead of sticking at 255, which used to
-  freeze a long-averaging brick on one slice (2 directions per voxel on Medium instead of 8).
+  - Over a full cycle, a voxel fires `rays × cycle / S`. Medium: **8** of its 32. It never fires the other 24; its
+    neighbours do.
 - A hit reads the brightest of: the hit face's sun, its composed display, and its stored bounce. That is how bounce
   goes multi-hop: each evaluation adds a hop. A miss counts as sky for AO.
 - Blend weight: `alpha = max(1/cycle, 1/(N+1))`. At cycle 4 that is 1, ½, ⅓, ¼, ¼, … So it is an exact running mean
