@@ -725,7 +725,6 @@ public sealed partial class GpuLightSystem
     private void TouchEditedShip(GridHandle g)
     {
         TouchGrid(g, restart: false);
-        if (!_restartShipEdits) return;
         foreach (var (grid, mn, mx) in _shipEdits)
             if (grid == g)
                 ForEachSlotInBrickBox(g, (int)MathF.Floor(mn.X / 8f) - 1, (int)MathF.Floor(mn.Y / 8f) - 1, (int)MathF.Floor(mn.Z / 8f) - 1,
