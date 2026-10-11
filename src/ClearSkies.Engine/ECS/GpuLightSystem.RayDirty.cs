@@ -66,6 +66,8 @@ public sealed partial class GpuLightSystem
     private const uint PrimeEval = uint.MaxValue;
     // Flag on an evaluation count: fire the brick's whole ray set in this one evaluation (GpuRayLightPass FULL_SET).
     private const uint FullSetEval = 0x40000000u;
+    // Flag on an evaluation count: fire every checkerboard phase, the whole slice per voxel (GpuRayLightPass ALL_PHASES).
+    private const uint AllPhasesEval = 0x20000000u;
     private bool[] _inHeld = Array.Empty<bool>();
     private int[] _holdStamp = Array.Empty<int>();
     // Gradual bounce (see GpuLightSystem's settings): the evaluations a world brick has been granted since it last
@@ -1083,13 +1085,14 @@ public sealed partial class GpuLightSystem
             bool fullSet = !lg.Handle.IsWorld && st.ShipChange && !shipNear && st.BounceAllN == 0;
             st.BounceAllFrames -= 1 + more;
             st.BounceAllN += fullSet ? _bounceCycle : 1 + more;
+            bool allPhases = !lg.Handle.IsWorld && st.ShipChange;
             if (fullSet) evals |= FullSetEval;
             foreach (int slot in lg.Handle.Slots)
             {
                 GiveAcc(slot);
                 Push(ref n, (uint)slot);
-                Push(ref n, evals);
-                if (more > 0) AddNear((uint)slot, evals, more);
+                Push(ref n, AllPhases(evals, allPhases));
+                if (more > 0) AddNear((uint)slot, evals, more, allPhases: allPhases);
                 else if (lg.Handle.IsWorld && nearRadius >= 0f && IsNear(slot, lg.VoxelToWorld, camPos, nearR2)) AddNear((uint)slot, evals, extra);
             }
         }
@@ -1126,13 +1129,15 @@ public sealed partial class GpuLightSystem
             float r = SettleRadius((ChangeKind)_holdKind[slot], prime || _n[slot] == 0, nearRadius);
             _primed[slot] = true;
             if (!prime) _hold[slot]--;
+            // Held by a block change or ship move: it fires every checkerboard phase (see AllPhases).
+            bool allPhases = _holdKind[slot] != (byte)ChangeKind.Other;
             int more = 0;
             if (r >= 0f && Vector3D.DistanceSquared(SlotCentre(slot), camPos) <= r * r)
             {
                 Push(ref n, (uint)slot);
-                Push(ref n, prime ? PrimeEval : _n[slot]);
+                Push(ref n, prime ? PrimeEval : AllPhases(_n[slot], allPhases));
                 more = System.Math.Min(extra + (prime ? 1 : 0), (int)_hold[slot]);
-                if (more > 0) AddNear((uint)slot, prime ? PrimeEval : _n[slot], more);
+                if (more > 0) AddNear((uint)slot, prime ? PrimeEval : _n[slot], more, allPhases: allPhases);
                 _hold[slot] -= (byte)more;
             }
             else if (_n[slot] == 0 && _holdKind[slot] != (byte)ChangeKind.Other)
@@ -1145,7 +1150,7 @@ public sealed partial class GpuLightSystem
                 Push(ref n, (uint)slot);
                 if (!prime)
                 {
-                    Push(ref n, FullSetEval);
+                    Push(ref n, FullSetEval | AllPhasesEval);
                     more = _bounceCycle - 1;
                 }
                 else
@@ -1153,7 +1158,7 @@ public sealed partial class GpuLightSystem
                     Push(ref n, PrimeEval);
                     if (_hold[slot] > 0)
                     {
-                        AddNear((uint)slot, PrimeEval, 1, fullSet: true);
+                        AddNear((uint)slot, PrimeEval, 1, fullSet: true, allPhases: true);
                         _hold[slot]--;
                         more = _bounceCycle;
                     }
@@ -1162,7 +1167,7 @@ public sealed partial class GpuLightSystem
             else
             {
                 Push(ref n, (uint)slot);
-                Push(ref n, prime ? PrimeEval : _n[slot]);
+                Push(ref n, prime ? PrimeEval : AllPhases(_n[slot], allPhases));
             }
             _n[slot] = (byte)System.Math.Min(_n[slot] + (prime ? 0 : 1) + more, 255);
         }
@@ -1171,6 +1176,15 @@ public sealed partial class GpuLightSystem
         if (n > 0) Upload(ref _bounceWork, 2 * n);
         return n;
     }
+
+    /// <summary>
+    /// An evaluation count, flagged to fire every checkerboard phase when <paramref name="on"/> (a block change or ship
+    /// move held the brick): with spread S a voxel's own share of its ray set is only rays * cycle / S fixed directions
+    /// (8 on Medium), which sees a small lamp-lit patch unevenly, and the neighbour smoothing doesn't hide it while that
+    /// patch moves with a ship. With every phase it is the whole set (32). Costs S times the rays, only on those
+    /// bricks' evaluations; everything else keeps the checkerboard.
+    /// </summary>
+    private uint AllPhases(uint evals, bool on) => on && _bounceSpread > 1 ? evals | AllPhasesEval : evals;
 
     /// <summary>
     /// Within what distance of the camera a brick held by a change of this kind runs its whole hold in one frame;
@@ -1241,7 +1255,7 @@ public sealed partial class GpuLightSystem
 
     /// <summary>Queues a near-camera brick for <paramref name="extraEvals"/> more evaluations this frame, starting
     /// after evaluation number <paramref name="evals"/>.</summary>
-    private void AddNear(uint slot, uint evals, int extraEvals, bool fullSet = false)
+    private void AddNear(uint slot, uint evals, int extraEvals, bool fullSet = false, bool allPhases = false)
     {
         if (2 * _nearCount + 2 > _nearScratch.Length) Array.Resize(ref _nearScratch, _nearScratch.Length * 2);
         if (_nearCount + 1 > _nearSlots.Length)
@@ -1249,17 +1263,21 @@ public sealed partial class GpuLightSystem
             Array.Resize(ref _nearSlots, _nearSlots.Length * 2);
             Array.Resize(ref _nearExtra, _nearSlots.Length);
             Array.Resize(ref _nearFull, _nearSlots.Length);
+            Array.Resize(ref _nearAll, _nearSlots.Length);
         }
         _nearScratch[2 * _nearCount] = slot;
         _nearScratch[2 * _nearCount + 1] = evals;
         _nearExtra[_nearCount] = extraEvals;
         _nearFull[_nearCount] = fullSet;
+        _nearAll[_nearCount] = allPhases;
         _nearCount++;
     }
 
     private int[] _nearExtra = new int[1024];
     // Whether a near brick's first repeat fires its whole ray set (a restart away from the camera, see BuildBounceWork).
     private bool[] _nearFull = new bool[1024];
+    // Whether a near brick's repeats fire every checkerboard phase (see AllPhases).
+    private bool[] _nearAll = new bool[1024];
 
     /// <summary>Uploads, as (slot, N + repeat) pairs, the near-camera bricks that still have an evaluation left for
     /// extra evaluation number <paramref name="repeat"/> (a buffer per repeat), and returns how many.</summary>
@@ -1272,7 +1290,7 @@ public sealed partial class GpuLightSystem
             Push(ref n, _nearScratch[2 * k]);
             // After a priming evaluation (PrimeEval, which wraps round) the repeats count from 0.
             uint evals = System.Math.Min(unchecked(_nearScratch[2 * k + 1] + (uint)repeat), 255u);
-            Push(ref n, repeat == 1 && _nearFull[k] ? evals | FullSetEval : evals);
+            Push(ref n, AllPhases(repeat == 1 && _nearFull[k] ? evals | FullSetEval : evals, _nearAll[k]));
         }
         if (repeat >= _nearWorks.Length) Array.Resize(ref _nearWorks, repeat + 1);
         if (n > 0) Upload(ref _nearWorks[repeat], n);
