@@ -421,8 +421,8 @@ fn hasSolidNeighbour(g: i32, v: vec3<i32>) -> bool {
 
 // ── Sun ───────────────────────────────────────────────────────────────────────────────────────────────────
 
-// Sun visibility of a surface air voxel, 0 (shadowed) to 3 (lit). Anything else reads 3: the fragment shader only
-// blends cells on the face's own surface, so the value never shows.
+// Sun visibility of a surface air voxel, 0 (shadowed) to 3 (lit). Anything else reads 3, but sun_main asks only for
+// surface voxels: the others keep the sun they had (see sun_main).
 fn sunLevel(g: i32, v: vec3<i32>, list: u32) -> u32 {
     if (!isSurfaceAir(g, v)) { return 3u; }
 
@@ -477,9 +477,10 @@ fn sun_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg:
     workgroupBarrier();
     let it = itemOf(work[wi], t);
     let base = it.v0 - vec3<i32>(i32(t * 2u) & 7, (i32(t * 2u) >> 3u) & 7, i32(t * 2u) >> 6u);
+    let prev = lightPool[it.disp];
     for (var e = 0u; e < 2u; e = e + 1u) {
         let k = t * 2u + e;
-        wSun[k] = 3u; // not a surface voxel: reads lit (see sunLevel)
+        wSun[k] = (prev >> (16u * e + 14u)) & 3u; // not a surface voxel: keeps its sun (see below)
         if (isSurfaceAir(it.g, it.v0 + vec3<i32>(i32(e), 0, 0))) { wList[atomicAdd(&wCount, 1u)] = k; }
     }
     workgroupBarrier();
@@ -490,10 +491,13 @@ fn sun_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg:
         wSun[k] = sunLevel(it.g, base + vec3<i32>(i32(k & 7u), i32((k >> 3u) & 7u), i32(k >> 6u)), list);
     }
     workgroupBarrier();
+    // A voxel that stopped being surface air (a block placed in it, or the one beside it broken) is still read until
+    // its chunk's new mesh lands, a frame or more later: the old mesh's faces bordering it light from it. So it keeps
+    // the light it showed rather than reading lit, which flashed those faces (where the placed block is about to
+    // appear) bright in a dark room. Only stale faces read it: every current face's cell is surface air.
     let s0 = wSun[t * 2u];
     let s1 = wSun[t * 2u + 1u];
-    let old = lightPool[it.disp] & ~((3u << 14u) | (3u << 30u));
-    lightPool[it.disp] = old | (s0 << 14u) | (s1 << 30u);
+    lightPool[it.disp] = (prev & ~((3u << 14u) | (3u << 30u))) | (s0 << 14u) | (s1 << 30u);
 }
 
 // ── Lamps and composition ─────────────────────────────────────────────────────────────────────────────────
@@ -669,8 +673,8 @@ fn composeSurface(g: i32, v: vec3<i32>, lk: vec3<i32>, acc: u32, sun: u32, list:
     return encodeLight(light) | (sun << 14u);
 }
 
-// Recomposes a brick's display (see composeSurface): solid voxels and air away from any surface get the plain ambient;
-// the surface voxels are gathered into a list (lamp rays make their cost uneven) and composed by consecutive threads.
+// Recomposes a brick's display (see composeSurface): solid voxels and air away from any surface keep theirs (see
+// sun_main); the surface voxels are gathered into a list (lamp rays make their cost uneven) and composed by consecutive threads.
 // Only the frame's last compose of a brick smooths (p.bounce.x): the ones before it are there for the bounce passes to
 // read current light, and each voxel's own value does for that at a fraction of the cost.
 @compute @workgroup_size(256)
@@ -720,12 +724,11 @@ fn compose_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) 
     }
     workgroupBarrier();
 
-    // Every voxel starts as plain ambient with its sun level; the surface ones are listed to be composed.
-    let ambientWord = encodeLight(vec3<f32>(p.bounce2.z));
+    // Every voxel starts as it was (its sun level already current); the surface ones are listed to be composed.
     let old = lightPool[it.disp];
     for (var e = 0u; e < 2u; e = e + 1u) {
         let k = t * 2u + e;
-        wSun[k] = ambientWord | (((old >> (16u * e + 14u)) & 3u) << 14u);
+        wSun[k] = (old >> (16u * e)) & 0xFFFFu;
         if (tileSurfaceAir(vec3<i32>(i32(k & 7u), i32((k >> 3u) & 7u), i32(k >> 6u)) + vec3<i32>(2))) {
             wList[atomicAdd(&wCount, 1u)] = k;
         }
