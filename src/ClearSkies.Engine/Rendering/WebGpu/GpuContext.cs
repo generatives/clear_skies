@@ -134,6 +134,11 @@ public sealed unsafe class GpuContext : IDisposable
             required.Limits.MaxBufferSize = required.Limits.MaxStorageBufferBindingSize;
 
         AdapterLimits = required.Limits;
+        // The limits a weaker adapter is most likely to fall short on (the ray lighting binds 10 storage buffers).
+        Console.WriteLine($"[wgpu] limits: storage buffers per stage {required.Limits.MaxStorageBuffersPerShaderStage}, " +
+                          $"storage binding {required.Limits.MaxStorageBufferBindingSize >> 20} MiB, " +
+                          $"workgroup storage {required.Limits.MaxComputeWorkgroupStorageSize} B, " +
+                          $"invocations per workgroup {required.Limits.MaxComputeInvocationsPerWorkgroup}");
 
         // Request device + queue, with timestamp queries when the adapter has them (for GpuTimer).
         bool timestamps = _api.AdapterHasFeature(_adapter, FeatureName.TimestampQuery);
