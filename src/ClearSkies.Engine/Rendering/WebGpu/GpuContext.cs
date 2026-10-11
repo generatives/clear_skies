@@ -86,6 +86,9 @@ public sealed unsafe class GpuContext : IDisposable
     /// (the game's --backend).</summary>
     public static InstanceBackend? Backend { get; set; }
 
+    /// <summary>Which adapter to ask for. Set before the host is made (the game's --gpu).</summary>
+    public static GpuAdapterChoice Adapter { get; set; } = GpuAdapterChoice.Fast;
+
     private void Init(GameWindow window)
     {
         var instanceDesc = new InstanceDescriptor();
@@ -105,7 +108,8 @@ public sealed unsafe class GpuContext : IDisposable
         var adapterOpts = new RequestAdapterOptions
         {
             CompatibleSurface = _surface,
-            PowerPreference = PowerPreference.HighPerformance,
+            PowerPreference = Adapter == GpuAdapterChoice.LowPower ? PowerPreference.LowPower : PowerPreference.HighPerformance,
+            ForceFallbackAdapter = Adapter == GpuAdapterChoice.Software,
         };
         _api.InstanceRequestAdapter(_instance, &adapterOpts, PfnRequestAdapterCallback.From(HandleAdapter), null);
         if (_adapter == null)
@@ -337,4 +341,15 @@ public sealed unsafe class GpuContext : IDisposable
         if (_instance != null) _api.InstanceRelease(_instance);
         _api.Dispose();
     }
+}
+
+/// <summary>The adapter <see cref="GpuContext"/> asks for.</summary>
+public enum GpuAdapterChoice
+{
+    /// <summary>The fastest GPU (the default).</summary>
+    Fast,
+    /// <summary>The power-saving GPU, usually the integrated one; the same GPU on a machine with only one.</summary>
+    LowPower,
+    /// <summary>wgpu's software renderer on the CPU (WARP on DX12, lavapipe or llvmpipe on Vulkan, when installed).</summary>
+    Software,
 }
