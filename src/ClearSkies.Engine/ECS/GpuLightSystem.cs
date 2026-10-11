@@ -71,9 +71,11 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     // frame within the radius, once a cycle past it.
     private enum ChangeKind : byte { Other, Block, Ship }
     private const int KindCount = 3;
-    private bool _blockAverage, _shipAverage;
-    private int _blockAverageIdx, _shipAverageIdx; // the debug panel's combos (0 clear, 1 average)
-    private float _blockSettleRadius = 64f, _shipSettleRadius = 64f;
+    // Defaults: both average, settling nowhere in one frame (a whole set every 4 frames looked the same as one every
+    // frame, at a quarter of the rays).
+    private bool _blockAverage = true, _shipAverage = true;
+    private int _blockAverageIdx = 1, _shipAverageIdx = 1; // the debug panel's combos (0 clear, 1 average)
+    private float _blockSettleRadius, _shipSettleRadius;
 
     /// <summary>Whether the bounce a change of this kind touches carries on its average rather than restarting
     /// (only with bounce light on: AO alone always carries on).</summary>
@@ -148,7 +150,6 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         _bounceHoldFrames = p.Hold;
         _bounceReach = p.Reach;
         _bounceNearRadius = p.NearRadius;
-        _blockSettleRadius = _shipSettleRadius = p.NearRadius;
         _bounceFullRadius = p.FullRadius;
         _bounceMidRadius = p.MidRadius;
         _bounceMidEvals = p.MidEvals;

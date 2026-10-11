@@ -77,7 +77,9 @@ wider 2-cell smoothing was tried (2026-10-11) and made little visible difference
   evals beyond it. A brick is topped up as the camera approaches. Ships always get the full hold.
 - **Settle radius**: within it, a held brick runs the rest of its hold in the same frame (repeats). Outside it, the
   brick gets one evaluation per frame.
-  - Block and Ship changes each have their own radius; the preset sets both to the near radius.
+  - Block and Ship changes each have their own radius, default **0** (nowhere, not even a ship the camera is
+    inside), with both kinds defaulting to **Average**: a whole set every 4 frames looked no different in game
+    from one every frame, at a quarter of the rays. Presets don't change them.
   - Other changes, and averaging restarts, use the general near radius.
 - **Caps** per frame, nearest first: relit bricks and bounced bricks. Cleared bricks go past both caps, and
   averaging-marked bricks go past the relit cap.

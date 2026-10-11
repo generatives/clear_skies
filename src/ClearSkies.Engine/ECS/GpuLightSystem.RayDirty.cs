@@ -1236,7 +1236,8 @@ public sealed partial class GpuLightSystem
     private float SettleRadius(ChangeKind kind, bool restart, float general)
     {
         if (general < 0f || kind == ChangeKind.Other || (restart && AverageAfter(kind))) return general;
-        return kind == ChangeKind.Block ? _blockSettleRadius : _shipSettleRadius;
+        float r = kind == ChangeKind.Block ? _blockSettleRadius : _shipSettleRadius;
+        return r > 0f ? r : -1f; // 0: nowhere, not even a ship the camera is inside
     }
 
     /// <summary>Whether a held slot still needs bounce (its grid is still there and its hold isn't used up); if not,
