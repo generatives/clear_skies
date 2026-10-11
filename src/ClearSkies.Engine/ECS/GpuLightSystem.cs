@@ -54,7 +54,9 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     private int _bounceRays = 8;
     private int _bounceCycle = 4;   // slices per ray set: each voxel's fixed set is rays x cycle directions
     private float _bounceScale = 1f;
-    private bool _primeSettled = true; // see Burst: whether a settled brick that restarts is primed first
+    // See Burst: whether a settled brick that restarts is primed first. Off: only bricks whose blocks changed are, which
+    // looked smoother in dark interiors (2026-10-11).
+    private bool _primeSettled;
 
     /// <summary>
     /// A distance band (near: within Radius of the camera; middle: within its Radius; far: the rest). A changed brick
