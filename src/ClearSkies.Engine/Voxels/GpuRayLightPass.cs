@@ -29,7 +29,7 @@ struct Params {
     bounce: vec4<f32>,  // x: albedo (fraction of incoming light a surface re-emits), y: sun strength (0-1),
                         // compose: z: bounce display scale (0 = bounce off); bounce: z: 1 = AO only, w: ray reach (voxels)
     bounce2: vec4<f32>, // x: rays per evaluation, y: evaluations per full ray set (cycle); compose: z: ambient
-                        // (0-1), w: ray AO strength (0-1); bounce: z: checkerboard spread (1, 2 or 4)
+                        // (0-1), w: ray AO strength (0-1)
 };
 
 @group(0) @binding(0) var<storage, read> occPool: array<u32>;
@@ -847,9 +847,9 @@ fn bouncePhase(v: vec3<i32>, spread: i32) -> i32 {
 // the brick's voxels were shown with no AO at all (nothing measured yet, or solid a moment ago), as bright as open
 // air, and bounce rays reading those walls would start the average far too high, which then feeds on itself. After
 // it the brick is recomposed with its AO and the average starts over, reading walls lit as they really are.
-const PRIME: u32 = 0xFFFFFFFFu;
+const PRIME: u32 = 0x80000000u; // flag bit of an evaluation word
 
-fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, slice: i32, slices: i32, list: u32, prime: bool) -> u32 {
+fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, slice: i32, slices: i32, spread: i32, list: u32, prime: bool) -> u32 {
     if (isSolid(g, v)) { return word; }
 
     let sxn = isSolid(g, v - vec3<i32>(1, 0, 0)); let sxp = isSolid(g, v + vec3<i32>(1, 0, 0));
@@ -885,7 +885,6 @@ fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, slice: i32, slices: 
     let rays = clamp(i32(p.bounce2.x), 1, BOUNCE_MAX_RAYS);
     let cycle = max(i32(p.bounce2.y), 1);
     let total = f32(rays * cycle);
-    let spread = clamp(i32(p.bounce2.z), 1, 4);
     let phase = bouncePhase(v, spread);
     let fired = max((rays - phase + spread - 1) / spread, 1); // this voxel's share of the slice's rays
     // slices > 1: this evaluation fires that many consecutive slices.
@@ -948,8 +947,9 @@ fn blend8(s8: f32, goal: f32, alpha: f32) -> f32 {
 @compute @workgroup_size(256)
 fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
                @builtin(local_invocation_index) t: u32) {
-    // The bounce work list is pairs: (light slot, evaluation). An evaluation is PRIME (see bounceVoxel), or its first
-    // slice (bits 0-7), how many slices it fires (8-15) and the denominator of its blend weight (16-31): weight
+    // The bounce work list is pairs: (light slot, evaluation). An evaluation word holds its checkerboard spread as
+    // log2 (bits 24-25, see bouncePhase) and is either PRIME (bit 31, see bounceVoxel), or its first slice (bits 0-7),
+    // how many slices it fires (8-15) and the denominator of its blend weight (16-23): weight
     // 1/(i+1) for a burst's evaluation i makes the burst a running average that replaces what was stored, and
     // 1/(2E-i) one that keeps half of it (see GpuLightSystem.Burst).
     let wi = wid.x + wid.y * nwg.x;
@@ -959,9 +959,10 @@ fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) n
     let it = itemOf(work[wi * 2u], t);
     let ev = work[wi * 2u + 1u];
     let cycle = max(u32(p.bounce2.y), 1u);
-    let prime = ev == PRIME; // overwrites
+    let prime = (ev & PRIME) != 0u; // overwrites
+    let spread = i32(1u << ((ev >> 24u) & 3u));
     let aoOnly = p.bounce.z > 0.5;
-    let alpha = select(1.0 / f32(max(ev >> 16u, 1u)), 1.0, prime);
+    let alpha = select(1.0 / f32(max((ev >> 16u) & 0xFFu, 1u)), 1.0, prime);
     let slice = select(i32((ev & 0xFFu) % cycle), i32(cycle) - 1, prime);
     let slices = select(max(i32((ev >> 8u) & 0xFFu), 1), 1, prime);
     let list = listOf(it.g, it.v0);
@@ -982,7 +983,7 @@ fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) n
         let k = wList[i];
         let v = base + vec3<i32>(i32(k & 7u), i32((k >> 3u) & 7u), i32(k >> 6u));
         let a = accBase + i32(k);
-        accPool[a] = bounceVoxel(it.g, v, accPool[a], alpha, slice, slices, list, prime || aoOnly);
+        accPool[a] = bounceVoxel(it.g, v, accPool[a], alpha, slice, slices, spread, list, prime || aoOnly);
     }
 }
 
@@ -1106,15 +1107,14 @@ fn zero_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg
     /// evaluations since that brick changed). Each voxel's fixed direction set is <paramref name="rays"/> x
     /// <paramref name="cycle"/> directions, one slice of <paramref name="rays"/> per evaluation, each reaching
     /// <paramref name="reach"/> voxels (at most 16). <paramref name="aoOnly"/>: measure AO alone and store no bounce.
-    /// <paramref name="spread"/>: 1, or 2 or 4 for a checkerboard where each surface voxel fires only that share of the
-    /// rays (bouncePhase).
+    /// Each evaluation word carries its own checkerboard spread (see bounce_main).
     /// </summary>
     public void DispatchBounce(GridStore store, Vector3D<float> sunDir, float sunStrength,
-                               float albedo, int rays, int cycle, int spread, float reach, bool aoOnly, GpuBuffer work, int count)
+                               float albedo, int rays, int cycle, float reach, bool aoOnly, GpuBuffer work, int count)
     {
         if (count <= 0) return;
         var param = WriteParams(sunDir, count, new Vector4D<float>(albedo, sunStrength, aoOnly ? 1f : 0f, reach),
-                                new Vector4D<float>(rays, cycle, spread, 0f));
+                                new Vector4D<float>(rays, cycle, 0f, 0f));
         Dispatch(_bouncePipeline, BounceBindings, store, work, count, param, "Lighting: bounce");
     }
 
@@ -1204,6 +1204,6 @@ fn zero_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg
         public Vector4D<float> Sun;
         public int Unused, LampBase, WorkCount, Pad;
         public Vector4D<float> Bounce;    // albedo, sun strength, bounce display scale (compose) or AO only (bounce), reach
-        public Vector4D<float> Bounce2;   // rays per evaluation, cycle, ambient (compose) or checkerboard spread (bounce), AO strength
+        public Vector4D<float> Bounce2;   // rays per evaluation, cycle, ambient (compose), AO strength
     }
 }

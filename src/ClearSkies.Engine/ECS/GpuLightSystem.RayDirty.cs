@@ -62,7 +62,6 @@ public sealed partial class GpuLightSystem
     private bool[] _tail = Array.Empty<bool>();
     private int[] _lastBurst = Array.Empty<int>();
     private bool[] _inHeld = Array.Empty<bool>();
-    private const uint PrimeEval = uint.MaxValue;
     // Distance bands: the slices a world brick last fired (255: none yet), and the bricks that fired fewer than the
     // most any band fires, touched again as the camera nears them (see TopUpNearing).
     private byte[] _given = Array.Empty<byte>();
@@ -96,7 +95,7 @@ public sealed partial class GpuLightSystem
     private float _prevBounceAlbedo = -1f, _prevSunLevel = -1f;
     private BounceMode _prevBounceMode = BounceMode.Off;
     private float _prevBounceReach = -1f;
-    private int _prevBounceRays = -1, _prevBounceCycle = -1, _prevBounceSpread = -1;
+    private int _prevBounceRays = -1, _prevBounceCycle = -1;
 
     private bool _rayWasActive, _relightRequested;
     private (float scale, float ambient, float ao) _prevShown = (-1f, -1f, -1f);
@@ -214,7 +213,6 @@ public sealed partial class GpuLightSystem
         bool bounceOn = _bounceEnabled;
         bool bounceReset = bounceOn && (_bounceMode != _prevBounceMode || _bounceReach != _prevBounceReach
                                         || _bounceRays != _prevBounceRays || _bounceCycle != _prevBounceCycle
-                                        || _bounceSpread != _prevBounceSpread
                                         || !_aoOnly && (_bounceAlbedo != _prevBounceAlbedo || SunLight.Level != _prevSunLevel || scaleChanged));
         _prevBounceMode = _bounceMode;
         _prevBounceReach = _bounceReach;
@@ -222,7 +220,6 @@ public sealed partial class GpuLightSystem
         _prevSunLevel = SunLight.Level;
         _prevBounceRays = _bounceRays;
         _prevBounceCycle = _bounceCycle;
-        _prevBounceSpread = _bounceSpread;
 
         _sunTimer.Reset();
         _lampTimer.Reset();
@@ -326,7 +323,7 @@ public sealed partial class GpuLightSystem
                 }
                 var buf = r == 0 ? _bounceWork : _stepWorks[r];
                 _rayLight.DispatchBounce(_store, sunDir, SunLight.Strength, _bounceAlbedo, _bounceRays,
-                                         _bounceCycle, _bounceSpread, _bounceReach, _aoOnly, buf!, _stepLen[r] / 2);
+                                         _bounceCycle, _bounceReach, _aoOnly, buf!, _stepLen[r] / 2);
                 if (r > 0) _lastStepTotal += _stepLen[r] / 2;
             }
             _bounceTimer.Stop();
@@ -967,12 +964,12 @@ public sealed partial class GpuLightSystem
         int step = 0;
         if (prime)
         {
-            AddStep(step++, (uint)slot, PrimeEval);
+            AddStep(step++, (uint)slot, PrimeWord(b.Spread));
             if (_primedCount == _primed.Length) Array.Resize(ref _primed, _primed.Length * 2);
             _primed[_primedCount++] = (uint)slot;
         }
         for (int i = 0; i < evals; i++)
-            AddStep(step++, (uint)slot, EvalWord(i * per, per, blend ? 2 * evals - i : i + 1));
+            AddStep(step++, (uint)slot, EvalWord(i * per, per, blend ? 2 * evals - i : i + 1, b.Spread));
         _tail[slot] = blend;
         _pending[slot] = false;
         _restart[slot] = false;
@@ -985,10 +982,17 @@ public sealed partial class GpuLightSystem
         return per * evals + (prime ? 1 : 0);
     }
 
-    /// <summary>An evaluation for the shader: fire <paramref name="count"/> slices from <paramref name="first"/>, and
-    /// blend the result in with weight 1/<paramref name="weightDenominator"/> (see GpuRayLightPass bounce_main).</summary>
-    private static uint EvalWord(int first, int count, int weightDenominator)
-        => (uint)(first & 0xFF) | ((uint)(count & 0xFF) << 8) | ((uint)(weightDenominator & 0xFFFF) << 16);
+    /// <summary>An evaluation for the shader: fire <paramref name="count"/> slices from <paramref name="first"/> with
+    /// checkerboard <paramref name="spread"/>, and blend the result in with weight 1/<paramref name="weightDenominator"/>
+    /// (see GpuRayLightPass bounce_main).</summary>
+    private static uint EvalWord(int first, int count, int weightDenominator, int spread)
+        => (uint)(first & 0xFF) | ((uint)(count & 0xFF) << 8) | ((uint)(weightDenominator & 0xFF) << 16) | SpreadBits(spread);
+
+    /// <summary>A priming evaluation (AO only, see GpuRayLightPass bounceVoxel) with checkerboard <paramref name="spread"/>.</summary>
+    private static uint PrimeWord(int spread) => 0x80000000u | SpreadBits(spread);
+
+    // Bits 24-25: log2 of the checkerboard spread (1, 2 or 4).
+    private static uint SpreadBits(int spread) => (uint)(spread >= 4 ? 2 : spread >= 2 ? 1 : 0) << 24;
 
     private void AddStep(int step, uint slot, uint eval)
     {

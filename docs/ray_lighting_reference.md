@@ -43,9 +43,11 @@ wider 2-cell smoothing was tried (2026-10-11) and made little visible difference
   each slice spans the hemisphere coarsely.
 - An **evaluation** casts one or more slices and writes the result: `first` slice, `count` slices, and a blend
   weight `1/denominator`, packed in the work word (`EvalWord`; the shader's `bounce_main`).
-- **Checkerboard spread** S (1, 2 or 4) makes each voxel fire only the rays with `k ≡ phase (mod S)`. Each 2×2
-  patch holds every phase once, and smoothing pools them. Per slice a voxel fires `rays / S` rays (Medium: **2**);
-  over the whole set `rays × cycle / S` (Medium: **8** of its 32, its neighbours fire the rest).
+- **Checkerboard spread** S (1, 2 or 4, set per band and carried in the work word) makes each voxel fire only the
+  rays with `k ≡ phase (mod S)`. Each 2×2 patch holds every phase once, and smoothing pools them. Per slice a voxel
+  fires `rays / S` rays; over the whole set `rays × cycle / S` (Medium: all 32 near, **8** of its 32 beyond, its
+  neighbours firing the rest). Every spread fires part of the same set, so a brick crossing bands keeps its
+  directions; changing rays or cycle would change the set itself, so those stay global.
 - A hit reads the brightest of: the hit face's sun, its composed display, and its stored bounce. That is how bounce
   goes multi-hop: each evaluation adds a hop. A miss counts as sky for AO. `blend8` always moves at least one step.
 - **Prime** (`PRIME`): the first evaluation after a restart whose own voxels changed. It measures AO only and stores
@@ -59,11 +61,12 @@ What a change touches differs (see below); what happens to a touched brick depen
 - **Touched**: a relit brick, every world brick within bounce reach of one, and of a moving ship; all of a relit
   ship's bricks. A brick whose own voxels changed (the surface right at a changed block, new storage, the bricks
   at a ship's edited blocks, a bounce setting changed, a lamp's clear) is marked to **restart**. Settled bricks restart anyway.
-- **Bands**: near (within its radius of the camera), middle (within its radius), far. Each has three settings:
+- **Bands**: near (within its radius of the camera), middle (within its radius), far. Each has four settings:
   - **E**, evaluations per burst = hops;
   - **slices per burst** (up to the whole set), always the same ones, split evenly over the E evaluations;
   - **every**: a brick bursts at most once every that many frames, on its turn (`(frame + key) mod every = 0`,
-    key = slot, or grid index for a ship's bricks, so a ship bursts together). 1 = settled the frame it changes.
+    key = slot, or grid index for a ship's bricks, so a ship bursts together). 1 = settled the frame it changes;
+  - **checkerboard** spread (above).
 - **Burst** (`Burst`): a restarting brick primes first. Evaluation i weighs `1/(i+1)`, so the burst replaces the
   stored value with its mean. If the brick burst on its previous turn too and isn't restarting (it keeps changing,
   as around a moving ship), it blends in at ½ instead: evaluation i weighs `1/(2E − i)`, so the old light keeps half
@@ -98,14 +101,14 @@ What a change touches differs (see below); what happens to a touched brick depen
 |---|---|---|---|---|
 | Mode | Off | AO only | Full | Full |
 | Rays per slice (before spread) | 4 | 8 | 8 | 8 |
-| Spread | 1 | 4 | 4 | 1 |
-| **Rays per voxel per slice** | 4 | 2 | **2** | 8 |
 | Slices per ray set (cycle) | 4 | 4 | 4 | 4 |
 | Ray reach (voxels) | 8 | 8 | 8 | 16 |
-| Near band: radius, E, slices, every | 96, 4, 4, 4 | 96, 4, 4, 4 | **128, 4, 4, 4** | 256, 4, 4, 4 |
-| Middle band | 256, 1, 1, 4 | 256, 1, 1, 4 | **384, 2, 2, 4** | 768, 2, 2, 4 |
-| Far band: E, slices, every | 1, 1, 8 | 1, 1, 8 | **1, 1, 8** | 1, 1, 8 |
+| Near band: radius, E, slices, every, spread | 96, 4, 4, 4, 1 | 96, 4, 4, 4, 4 | **128, 4, 4, 4, 1** | 256, 4, 4, 4, 1 |
+| Middle band | 256, 1, 1, 4, 1 | 256, 1, 1, 4, 4 | **384, 2, 2, 4, 4** | 768, 2, 2, 4, 1 |
+| Far band: E, slices, every, spread | 1, 1, 8, 1 | 1, 1, 8, 4 | **1, 1, 8, 4** | 1, 1, 8, 1 |
+| **Medium rays per voxel per slice** | | | **8 near, 2 beyond** | |
 | Relit bricks / bounce slices per frame | 256 / 512 | 256 / 1024 | 512 / 2048 | 1024 / 4096 |
 
-Medium, bounce rays per voxel: a one-off change costs 8 near (4 hops), 4 middle (2 hops), 2 far (1 hop), plus 2 for a
-prime when the brick restarts; something that keeps changing costs about 2 a frame near, 1 middle, 0.25 far.
+Medium, bounce rays per voxel: a one-off change costs 32 near (4 hops), 4 middle (2 hops), 2 far (1 hop), plus a
+prime when the brick restarts (8 near, 2 beyond); something that keeps changing costs about 8 a frame near, 1 middle,
+0.25 far. Near used spread 4 (8 rays, 2 a frame) until 2026-10-11, when spread 1 there looked steadier in game.

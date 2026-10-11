@@ -62,30 +62,34 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     /// A distance band (near: within Radius of the camera; middle: within its Radius; far: the rest). A changed brick
     /// bursts there: Evals evaluations back to back in one frame, each reading the last (so each adds a hop),
     /// together firing Slices of the ray set's slices, always the same ones; at most once every Every frames, on its
-    /// turn (1: every frame, so a change there is settled the frame it happens).
+    /// turn (1: every frame, so a change there is settled the frame it happens). Spread is its checkerboard (see
+    /// bouncePhase in GpuRayLightPass): 1 = every surface voxel fires all of each slice's rays; 2 or 4 = each fires only
+    /// that share, neighbours firing the others, and the compose pass's smoothing averages them, for about 1/Spread of
+    /// the rays. Every spread fires part of the same fixed ray set, so a brick crossing bands keeps its directions.
     /// </summary>
     private struct BounceBand
     {
         public float Radius;
-        public int Evals, Slices, Every;
-        public BounceBand(float radius, int evals, int slices, int every) { Radius = radius; Evals = evals; Slices = slices; Every = every; }
+        public int Evals, Slices, Every, Spread;
+        public BounceBand(float radius, int evals, int slices, int every, int spread)
+        {
+            Radius = radius; Evals = evals; Slices = slices; Every = every; Spread = spread;
+        }
     }
 
-    private readonly BounceBand[] _bands = { new(256f, 4, 4, 4), new(768f, 2, 2, 4), new(0f, 1, 1, 8) };
+    private readonly BounceBand[] _bands = { new(256f, 4, 4, 4, 1), new(768f, 2, 2, 4, 1), new(0f, 1, 1, 8, 1) };
 
-    // Checkerboard bounce (see bouncePhase in GpuRayLightPass): 1 = every surface voxel fires all the rays each
-    // evaluation; 2 or 4 = each fires only that share, neighbours firing the others, and the compose pass's smoothing
-    // averages them. Each evaluation costs about 1/spread of the rays.
-    private int _bounceSpread = 1;
     private static readonly int[] Spreads = { 1, 2, 4 };
     private static readonly string[] SpreadNames = { "Off (all rays per voxel)", "1/2 of the rays per voxel", "1/4 of the rays per voxel" };
 
-    /// <summary>Checkerboard bounce: 1 (off), 2 or 4: each surface voxel fires 1/that of the rays; other values round to the
-    /// nearest of those.</summary>
+    private static int ToSpread(int value) => value >= 4 ? 4 : value >= 2 ? 2 : 1;
+
+    /// <summary>Checkerboard bounce in every band: 1 (off), 2 or 4: each surface voxel fires 1/that of the rays; other
+    /// values round to the nearest of those.</summary>
     public int BounceSpread
     {
-        get => _bounceSpread;
-        set => _bounceSpread = value >= 4 ? 4 : value >= 2 ? 2 : 1;
+        get => _bands[0].Spread;
+        set { for (int i = 0; i < _bands.Length; i++) _bands[i].Spread = ToSpread(value); }
     }
 
     // Per-frame work caps (world bricks, nearest the camera first; the rest wait for later frames): bricks relit, and
@@ -95,21 +99,22 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     private int _maxBouncedPerFrame = 4096;
 
     /// <summary>A quality level: every setting above that trades lighting quality for GPU time.</summary>
-    private readonly record struct LightingPreset(string Name, BounceMode Mode, int Rays, int Spread, int Cycle, float Reach,
+    private readonly record struct LightingPreset(string Name, BounceMode Mode, int Rays, int Cycle, float Reach,
                                                   BounceBand Near, BounceBand Mid, BounceBand Far, int MaxRelit, int MaxBounced);
 
     // High is the field values above; the game starts on Medium (see the constructor). Below High: the checkerboard
-    // (each voxel fires 1/Spread of the rays, its neighbours the rest, so a patch still covers all of them), shorter
-    // rays, smaller near and middle bands and lower per-frame caps; Low keeps only AO, Minimal only direct light.
+    // (each voxel fires 1/spread of the rays, its neighbours the rest, so a patch still covers all of them) beyond the
+    // near band (everywhere on Low), shorter rays, smaller near and middle bands and lower per-frame caps; Low keeps
+    // only AO, Minimal only direct light.
     // Near: the whole ray set in 4 hops. Medium and High: half of it in 2 hops in the middle band; Minimal and Low a
     // quarter in 1, as far away. A burst at most every 4 frames, 8 far.
     private static readonly LightingPreset[] Presets =
     {
-        //   Name       Mode               Rays Spread Cycle Reach  Near (radius, evals, slices, every)  Mid                       Far                    Relit Bounced
-        new("Minimal", BounceMode.Off,    4,   1,     4,    8f,   new(96f, 4, 4, 4),  new(256f, 1, 1, 4), new(0f, 1, 1, 8),  256,  512),
-        new("Low",     BounceMode.AoOnly, 8,   4,     4,    8f,   new(96f, 4, 4, 4),  new(256f, 1, 1, 4), new(0f, 1, 1, 8),  256, 1024),
-        new("Medium",  BounceMode.Full,   8,   4,     4,    8f,   new(128f, 4, 4, 4), new(384f, 2, 2, 4), new(0f, 1, 1, 8),  512, 2048),
-        new("High",    BounceMode.Full,   8,   1,     4,   16f,   new(256f, 4, 4, 4), new(768f, 2, 2, 4), new(0f, 1, 1, 8), 1024, 4096),
+        //   Name       Mode               Rays Cycle Reach  Near (radius, evals, slices, every, spread)  Mid                          Far                       Relit Bounced
+        new("Minimal", BounceMode.Off,    4,   4,    8f,   new(96f, 4, 4, 4, 1),  new(256f, 1, 1, 4, 1), new(0f, 1, 1, 8, 1),  256,  512),
+        new("Low",     BounceMode.AoOnly, 8,   4,    8f,   new(96f, 4, 4, 4, 4),  new(256f, 1, 1, 4, 4), new(0f, 1, 1, 8, 4),  256, 1024),
+        new("Medium",  BounceMode.Full,   8,   4,    8f,   new(128f, 4, 4, 4, 1), new(384f, 2, 2, 4, 4), new(0f, 1, 1, 8, 4),  512, 2048),
+        new("High",    BounceMode.Full,   8,   4,   16f,   new(256f, 4, 4, 4, 1), new(768f, 2, 2, 4, 1), new(0f, 1, 1, 8, 1), 1024, 4096),
     };
 
     private const string DefaultPreset = "Medium";
@@ -127,7 +132,6 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     {
         _bounceMode = p.Mode;
         _bounceRays = p.Rays;
-        _bounceSpread = p.Spread;
         _bounceCycle = p.Cycle;
         _bounceReach = p.Reach;
         _bands[0] = p.Near;
@@ -138,7 +142,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     }
 
     private bool Matches(in LightingPreset p)
-        => _bounceMode == p.Mode && _bounceRays == p.Rays && _bounceSpread == p.Spread && _bounceCycle == p.Cycle
+        => _bounceMode == p.Mode && _bounceRays == p.Rays && _bounceCycle == p.Cycle
            && _bounceReach == p.Reach && _bands[0].Equals(p.Near) && _bands[1].Equals(p.Mid) && _bands[2].Equals(p.Far)
            && _maxRelitPerFrame == p.MaxRelit && _maxBouncedPerFrame == p.MaxBounced;
 
@@ -221,15 +225,13 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         ImGui.SliderFloat("Bounce ray reach (blocks)", ref _bounceReach, 4f, 16f, "%.0f");
         ImGui.SliderInt("Slices per ray set", ref _bounceCycle, 1, 64);
         ImGui.TextDisabled($"  = {_bounceRays * _bounceCycle} fixed directions per voxel; an evaluation fires one or more slices");
-        int spreadIdx = System.Array.IndexOf(Spreads, _bounceSpread);
-        if (ImGui.Combo("Checkerboard bounce", ref spreadIdx, SpreadNames, SpreadNames.Length)) _bounceSpread = Spreads[spreadIdx];
-        ImGui.TextDisabled("  neighbouring voxels fire different rays; compose smoothing averages them");
         ImGui.SliderFloat("Bounce display scale", ref _bounceScale, 0f, 4f, "%.2f");
         ImGui.Checkbox("Prime settled bricks", ref _primeSettled);
         ImGui.TextDisabled("  off: only bricks whose blocks changed measure AO before their bounce (brighter, as ships were)");
         ImGui.Text("Bounce by distance (every change alike)");
         ImGui.TextDisabled("  a changed brick bursts: evaluations back to back (each a hop), firing that many slices,");
         ImGui.TextDisabled("  at most every so many frames (1: settled the frame it changes)");
+        ImGui.TextDisabled("  checkerboard: each voxel fires part of each slice, neighbours the rest; compose smoothing averages them");
         DrawBand("Near", 0, true);
         DrawBand("Middle", 1, true);
         DrawBand("Far", 2, false);
@@ -272,6 +274,8 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         ImGui.SliderInt($"  evaluations per burst##band{i}", ref b.Evals, 1, 16);
         ImGui.SliderInt($"  slices per burst##band{i}", ref b.Slices, 1, 64);
         ImGui.SliderInt($"  burst at most every (frames)##band{i}", ref b.Every, 1, 32);
+        int spreadIdx = System.Math.Max(0, System.Array.IndexOf(Spreads, b.Spread));
+        if (ImGui.Combo($"  checkerboard##band{i}", ref spreadIdx, SpreadNames, SpreadNames.Length)) b.Spread = Spreads[spreadIdx];
     }
 
     public void Update(float dt)
