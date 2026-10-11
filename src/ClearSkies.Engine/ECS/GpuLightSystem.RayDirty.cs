@@ -379,7 +379,9 @@ public sealed partial class GpuLightSystem
             var st = _gridStates[lg.Handle];
             var h = lg.Handle;
             WorldBounds(h, lg.VoxelToWorld, out st.CurWorldMin, out st.CurWorldMax);
-            bool moved = !st.HavePrev || lg.Pos != st.PrevPos || lg.Rot != st.PrevRot || h.Version != st.PrevVersion;
+            // Compared with the last pose that counted as a move, so float noise on a still (or locked) ship doesn't
+            // relight and restart it every frame, while slow drift still adds up to a move.
+            bool moved = !st.HavePrev || h.Version != st.PrevVersion || PoseChanged(lg.Pos, lg.Rot, st.PrevPos, st.PrevRot);
             st.Moved = moved;
             st.Edited = !st.HavePrev || h.Version != st.PrevVersion;
             if (moved)
@@ -395,12 +397,26 @@ public sealed partial class GpuLightSystem
                 if (h.HasSolid) { _occluderChanges.Add((st.CurWorldMin, st.CurWorldMax, false)); _shipMoves.Add((st.CurWorldMin, st.CurWorldMax)); }
             }
             st.HavePrev     = h.HasSolid;
+            st.PrevVersion  = h.Version;
+            if (!moved) continue;
             st.PrevPos      = lg.Pos;
             st.PrevRot      = lg.Rot;
-            st.PrevVersion  = h.Version;
             st.PrevWorldMin = st.CurWorldMin;
             st.PrevWorldMax = st.CurWorldMax;
         }
+    }
+
+    /// <summary>A ship moves for lighting once it has gone this far (in blocks) from its last counted pose.</summary>
+    private const float MovePosEpsilon = 1e-3f;
+    /// <summary>... or turned this far: the vector part of the relative rotation, about half the angle (~2e-4 rad).</summary>
+    private const float MoveRotEpsilon = 1e-4f;
+
+    private static bool PoseChanged(Vector3D<float> pos, Quaternion<float> rot, Vector3D<float> prevPos, Quaternion<float> prevRot)
+    {
+        var d = pos - prevPos;
+        if (Vector3D.Dot(d, d) > MovePosEpsilon * MovePosEpsilon) return true;
+        var rel = Quaternion<float>.Concatenate(Quaternion<float>.Conjugate(prevRot), rot);
+        return rel.X * rel.X + rel.Y * rel.Y + rel.Z * rel.Z > MoveRotEpsilon * MoveRotEpsilon;
     }
 
     /// <summary>Lamps that appeared, disappeared or moved since last frame: their full radius is dirty at the
