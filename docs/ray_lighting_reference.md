@@ -4,7 +4,7 @@ A short, checked summary of how the ray-traced lighting works and what its numbe
 code on branch `claude/project-thread-rcxbni` (2026-10-11). `lighting_system.md` describes the older flood-fill
 system and is out of date. When this file and the code disagree, the code is right; fix this file.
 
-Code: `ECS/GpuLightSystem.cs` (settings, presets, panel), `ECS/GpuLightSystem.RayDirty.cs` (what changed, holds,
+Code: `ECS/GpuLightSystem.cs` (settings, presets, panel), `ECS/GpuLightSystem.RayDirty.cs` (what changed, bursts,
 scheduling), `Voxels/GpuRayLightPass.cs` (WGSL passes).
 
 ## Storage
@@ -15,19 +15,19 @@ scheduling), `Voxels/GpuRayLightPass.cs` (WGSL passes).
 | Display (per voxel, 16 bits) | 9-bit brightness, 5-bit warmth, 2-bit sun | Brightness 0-510 on a square curve (fine steps in the dark). 511 means no storage. Warmth 0-30. Sun 0-3. |
 | Accumulation (per voxel, 32 bits) | 8-bit bounce R, G, B and 8-bit AO | 512 words per slot. Linear 0-255. |
 
-**Accumulation exists only while a brick is being evaluated.** When a brick's hold runs out, its accumulation is
-freed (`ReleaseSettledAccs`). After that the brick keeps only its composed display, so its bounce and AO are baked in.
-When anything wakes a settled brick, it gets fresh, zeroed accumulation and restarts at N = 0 (`GiveAcc` in
-`BuildBounceWork`). **So "Average" only carries on for bricks that are still mid-hold.** A settled brick always
-restarts, whatever the setting.
+**Accumulation exists only while a brick has a burst to come.** After its last burst, its accumulation is freed
+(`ReleaseSettledAccs`), and the brick keeps only its composed display, so its bounce and AO are baked in. When
+anything touches a settled brick, it gets fresh, zeroed accumulation and restarts (`GiveAcc` in `Burst`). So only
+a brick that keeps changing (touched again before its next turn) carries on its light.
 
 ## Passes, in frame order
 
 1. **Sun**: 4 jittered rays per surface voxel give the 2-bit sun level.
 2. **Clear**: zeroes bounce RGB (keeps AO) in the clear boxes. Does nothing to a brick without accumulation.
 3. **Compose** (unsmoothed), so bounce rays read current direct light.
-4. **Bounce**: one evaluation per listed brick. Then near-camera bricks get up to a hold's worth of repeats in the
-   same frame, each preceded by a recompose.
+4. **Bounce**: the bursts, one dispatch per step. Step 0 is every bursting brick's first evaluation (or its prime),
+   step 1 each one's next, and so on. No compose between steps (a hit reads stored bounce directly), except that
+   primed bricks are recomposed before step 1 so the burst sees their AO.
 5. **Compose** (final, smoothed).
 
 Compose: `light = max(lamp, bounce × scale, ambient × (1 − aoStrength × AO))` per channel. Lamps are traced at
@@ -36,79 +36,75 @@ bounce and AO: the voxel counts 2, face neighbours 1, edge diagonals ½. Only ne
 Only the final compose runs the smoothing (an `if`; it used to be a `select`, which ran it on every compose). A
 wider 2-cell smoothing was tried (2026-10-11) and made little visible difference, so it was dropped.
 
-## Bounce rays and the running average
+## Bounce rays
 
-- Every surface air voxel has a fixed set of **rays × cycle** directions (Medium: 8 × 4 = 32). The set is a
-  cosine-weighted spiral, twisted per voxel.
-- Each evaluation fires one **slice**: slice = N mod cycle, and directions are `j = k × cycle + slice`.
+- Every surface air voxel has a fixed **ray set** of **rays × cycle** directions (Medium: 8 × 4 = 32), in `cycle`
+  **slices**. The set is a cosine-weighted spiral, twisted per voxel. Slice s is directions `j = k × cycle + s`, so
+  each slice spans the hemisphere coarsely.
+- An **evaluation** casts one or more slices and writes the result: `first` slice, `count` slices, and a blend
+  weight `1/denominator`, packed in the work word (`EvalWord`; the shader's `bounce_main`).
 - **Checkerboard spread** S (1, 2 or 4) makes each voxel fire only the rays with `k ≡ phase (mod S)`. Each 2×2
-  patch holds every phase once, and smoothing pools them.
-  - Per evaluation, a voxel fires `rays / S` rays. Medium: 8 / 4 = **2**.
-  - Over a full cycle, a voxel fires `rays × cycle / S`. Medium: **8** of its 32. It never fires the other 24; its
-    neighbours do.
+  patch holds every phase once, and smoothing pools them. Per slice a voxel fires `rays / S` rays (Medium: **2**);
+  over the whole set `rays × cycle / S` (Medium: **8** of its 32, its neighbours fire the rest).
 - A hit reads the brightest of: the hit face's sun, its composed display, and its stored bounce. That is how bounce
-  goes multi-hop: each evaluation adds a hop. A miss counts as sky for AO.
-- Blend weight: `alpha = max(1/cycle, 1/(N+1))`. At cycle 4 that is 1, ½, ⅓, ¼, ¼, … So it is an exact running mean
-  over the first cycle, then an EMA weighing one cycle. `blend8` always moves at least one 8-bit step.
-- **Prime** (N = `PRIME`): the first evaluation after a restart. It measures AO only and stores zero bounce, so a wall
-  that just appeared isn't read as bright. It doesn't count toward the hold.
-- **FULL_SET** flag (b543cad): one evaluation fires all `cycle` slices (Medium: 8 rays per voxel) with weight 1, and
-  then counts as N = cycle. It is used for a Block or Ship restart outside the settle radius, after the prime in the
-  same frame.
-- **Whole cycles when averaging** (`WholeCycleDue`): a brick (or averaging ship) carrying on an Average change's
-  running average (N > 0) fires FULL_SET once every `cycle` frames, staggered by slot, instead of one slice a frame;
-  within its settle radius, every frame instead of the cycle of repeats. Same rays per frame on average; the shown
-  value is the full 8-direction mean and only changes when the light does. Fixes the slice-by-slice flicker and the
-  N = 255 freeze on one slice (N stops at 255; with whole cycles it no longer matters). Bounce lags a change by up
-  to `cycle` frames.
-- **Half blend away from the camera** (`WholeCycleEval`, HALF_BLEND): outside the settle radius each whole cycle
-  blends in at ½ instead of replacing. A held brick whose hold runs out on a blended cycle gets one extra cycle that
-  replaces (so no old light is left); a ship needs none, as it restarts once still. A full replace every 4 frames
-  made a rotating ship's light step visibly at angles where it changes fast (raised by lowering the settle radius).
-  Same rays; about one more cycle of lag while the light keeps changing.
+  goes multi-hop: each evaluation adds a hop. A miss counts as sky for AO. `blend8` always moves at least one step.
+- **Prime** (`PRIME`): the first evaluation after a restart. It measures AO only and stores zero bounce, so a wall
+  that just appeared isn't read as bright.
 
-## Holds: how many evaluations a change gets
+## Bursts and distance bands (every change alike)
 
-- **Hold** = the hold setting rounded up to whole cycles. All presets: **4** (one cycle).
-- **Averaging** changes grant the same hold, spent in whole cycles: a full set replaces what was there, so a hold
-  of one cycle leaves none of the old light (away from the camera, one extra replacing cycle after the blended
-  ones, see Half blend). (Before whole cycles they needed 19 evaluations to fade it at weight ¼.)
-- **Distance tiers** (world bricks): a full hold within the full radius, mid evals within the mid radius, and far
-  evals beyond it. A brick is topped up as the camera approaches. Ships always get the full hold.
-- **Settle radius**: within it, a held brick runs the rest of its hold in the same frame (repeats). Outside it, the
-  brick gets one evaluation per frame.
-  - Block and Ship changes each have their own radius, default **0** (nowhere, not even a ship the camera is
-    inside), with both kinds defaulting to **Average**: a whole set every 4 frames looked no different in game
-    from one every frame, at a quarter of the rays. Presets don't change them.
-  - Other changes, and averaging restarts, use the general near radius.
-- **Caps** per frame, nearest first: relit bricks and bounced bricks. Cleared bricks go past both caps, and
-  averaging-marked bricks go past the relit cap.
+What a change touches differs (see below); what happens to a touched brick depends only on its distance band.
+
+- **Touched**: a relit brick, every world brick within bounce reach of one, and of a moving ship; all of a relit
+  ship's bricks. A brick whose own voxels changed (the surface right at a changed block, new storage, an edited
+  ship, a bounce setting changed, a lamp's clear) is marked to **restart**. Settled bricks restart anyway.
+- **Bands**: near (within its radius of the camera), middle (within its radius), far. Each has three settings:
+  - **E**, evaluations per burst = hops;
+  - **slices per burst** (up to the whole set), always the same ones, split evenly over the E evaluations;
+  - **every**: a brick bursts at most once every that many frames, on its turn (`(frame + key) mod every = 0`,
+    key = slot, or grid index for a ship's bricks, so a ship bursts together). 1 = settled the frame it changes.
+- **Burst** (`Burst`): a restarting brick primes first. Evaluation i weighs `1/(i+1)`, so the burst replaces the
+  stored value with its mean. If the brick burst on its previous turn too and isn't restarting (it keeps changing,
+  as around a moving ship), it blends in at ½ instead: evaluation i weighs `1/(2E − i)`, so the old light keeps half
+  and a fast-changing light fades between bursts instead of stepping. After a blended burst the brick is owed one
+  more (`_tail`), which replaces, so no old light is left once it stops changing.
+- **Distant terrain sharpens** as the camera nears: a world brick that fired fewer slices than the most any band
+  fires is touched again when its band now fires more (`TopUpNearing`).
+- **Caps** per frame, nearest first: relit bricks, and bounce slices (a burst costs its slices, a prime 1). Ships
+  go past both. Cleared bricks go past both and burst at once. Bricks an occluder change marked (a block change, a
+  moving ship: the pad, the sun sweep, lamps in reach) go past the relit cap, so a ship's shadow keeps up with it.
+- **Clearing**: only where a lamp was removed (its box plus ray reach), since that light would otherwise sustain
+  itself through bounce. Everything else carries on.
+- History (2026-10-11): before the bands, block changes and ship moves had Clear/Average modes and their own settle
+  radii; Average fired the whole set once every 4 frames, blended at ½ away from the camera. Slices one at a time
+  blended at ¼ leaned toward the latest slice and flickered, and once the count stopped at 255 froze every voxel on
+  the same 2 rays. Bursts keep the cheap slice hops without that lean.
 
 ## What a change does
 
 | Change | Marked for direct light | Bounce |
 |---|---|---|
-| Block placed or removed, chunk load or unload (kind Block) | A pad around it, its sun-shadow sweep, and lamps whose box touches it | **Clear**: clears bounce around a placed block and along its sweep, plus ray reach. Everything relit restarts with a hold of 4. **Average**: the change site restarts; the sweep and lamp boxes carry on, one whole cycle per hold (but settled bricks restart anyway, see Storage). |
-| Ship moved (kind Ship) | Old and new pose plus pad, both sun sweeps, lamps | **Clear**: clears both poses and sweeps; restarts, settled within the ship radius. **Average** (blocks unchanged): carries on, and so does everything within ray reach of the hull. The ship's own blocks carry on in whole cycles too. When the ship stops, it restarts once with a clear. |
-| Ship blocks edited | Same as moved | Always restarts. |
-| Lamp added, moved or removed (Other) | The lamp's box (level + 1.5) | A removed lamp clears its box plus ray reach. |
-| Sun moved, settings changed | Everything | Everything restarts. |
+| Block placed or removed, chunk load or unload | A pad around it (restarts), its sun-shadow sweep, and lamps whose box touches it, relit this frame | Touched, plus ray reach |
+| Ship moved | Old and new pose plus pad, both sun sweeps, lamps, relit this frame | Its bricks touched (restart if its blocks changed), and everything within ray reach of the hull |
+| Lamp added, moved or removed | The lamp's box (level + 1.5), queued | Touched, plus ray reach; a removed lamp clears its box plus ray reach |
+| New light storage | The brick (restarts), queued | Touched, plus ray reach |
+| Sun moved, display settings changed | Everything, queued | Everything relit is touched |
+| Bounce setting changed | — | Everything restarts |
 
 ## Presets
 
 | | Minimal | Low | Medium (default) | High |
 |---|---|---|---|---|
 | Mode | Off | AO only | Full | Full |
-| Rays per evaluation (before spread) | 4 | 8 | 8 | 8 |
+| Rays per slice (before spread) | 4 | 8 | 8 | 8 |
 | Spread | 1 | 4 | 4 | 1 |
-| **Rays per voxel per evaluation** | 4 | 2 | **2** | 8 |
-| Cycle | 4 | 4 | 4 | 4 |
-| **Rays per voxel per full cycle** | 16 | 8 | **8** | 32 |
-| Hold (evaluations) | 4 | 4 | 4 | 4 |
+| **Rays per voxel per slice** | 4 | 2 | **2** | 8 |
+| Slices per ray set (cycle) | 4 | 4 | 4 | 4 |
 | Ray reach (voxels) | 8 | 8 | 8 | 16 |
-| Near / settle radius | 0 | 0 | **32** | 64 |
-| Full / mid radius | 96 / 256 | 96 / 256 | 128 / 384 | 256 / 768 |
-| Mid / far evaluations | 1 / 1 | 1 / 1 | 2 / 1 | 2 / 1 |
-| Relit / bounced caps | 256 / 512 | 256 / 1024 | 512 / 2048 | 1024 / 4096 |
+| Near band: radius, E, slices, every | 96, 4, 4, 4 | 96, 4, 4, 4 | **128, 4, 4, 4** | 256, 4, 4, 4 |
+| Middle band | 256, 1, 1, 4 | 256, 1, 1, 4 | **384, 2, 2, 4** | 768, 2, 2, 4 |
+| Far band: E, slices, every | 1, 1, 8 | 1, 1, 8 | **1, 1, 8** | 1, 1, 8 |
+| Relit bricks / bounce slices per frame | 256 / 512 | 256 / 1024 | 512 / 2048 | 1024 / 4096 |
 
-Rays per voxel per evaluation = `rays / spread`. Rays per voxel per full cycle = `rays × cycle / spread`.
+Medium, bounce rays per voxel: a one-off change costs 8 near (4 hops), 4 middle (2 hops), 2 far (1 hop), plus 2 for a
+prime when the brick restarts; something that keeps changing costs about 2 a frame near, 1 middle, 0.25 far.

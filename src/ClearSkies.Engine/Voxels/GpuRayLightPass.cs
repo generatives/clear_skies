@@ -725,21 +725,21 @@ fn compose_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) 
 }
 
 // ── Bounce (one-hop indirect light, multi-hop through re-evaluation) ─────────────────────────────────────
-// Each evaluation, a surface air voxel fires p.bounce2.x short rays (up to p.bounce.w voxels), cosine-distributed
-// around its surface normal, through its chunk's grids: one slice of a fixed per-voxel direction set that a full
-// cycle of p.bounce2.y evaluations covers (see bounceVoxel). At each ray's nearest hit it reads the light
+// Each evaluation, a surface air voxel fires p.bounce2.x short rays (up to p.bounce.w voxels) per slice,
+// cosine-distributed around its surface normal, through its chunk's grids: one or more slices of a fixed per-voxel
+// direction set of p.bounce2.y slices (see bounceVoxel). At each ray's nearest hit it reads the light
 // arriving at the hit face from the air cell in front of it: the brighter of that cell's direct sun
 // (visibility x strength x the face's N.L), its lamp light and its own stored bounce; a miss reads 0. The
 // mean of those times the albedo is this evaluation's estimate, blended into the stored bounce (0-255, bits
-// 24-31 of the light word) with weight alpha = max(1/cycle, 1/(n+1)), n being how many times the brick has
-// been evaluated since it changed: a running average over the first cycle (after which the value is exactly
-// the complete set's mean), then an EMA weighing one cycle.
+// 0-23 of the accumulation word) with the weight the CPU gives it: a brick bursts, a few evaluations back to back
+// that together fire a fixed share of its slices, weighted to make a running average of the burst (replacing what
+// was stored, or keeping half of it), so the stored value is always a complete burst's mean.
 // The same rays measure ambient occlusion: the fraction that hit nothing within their reach is the voxel's sky
-// visibility (cosine-weighted, since the rays are), and one minus it is blended into bits 16-23 the same way.
+// visibility (cosine-weighted, since the rays are), and one minus it is blended into bits 24-31 the same way.
 // The fragment shader scales the flat ambient by it, so caves and sealed rooms go dark while open ground,
 // whose rays all go up, stays fully lit. Rays cross grids, so a ship darkens the ground under it.
 // Reading the stored bounce at the hit is what makes it multi-hop:
-// each evaluation adds a hop, and the CPU keeps a changed area evaluating for a number of frames. Keep albedo
+// each evaluation adds a hop, and the CPU keeps a changed area bursting while it changes. Keep albedo
 // well below 1 or the feedback lingers (a removed light ghosts longer). Ambient is not bounced; it is
 // already uniform.
 // With AO only (p.bounce.z = 1) every evaluation is like a priming one: AO alone, no light read and no bounce stored.
@@ -848,8 +848,6 @@ fn bouncePhase(v: vec3<i32>, spread: i32) -> i32 {
 // air, and bounce rays reading those walls would start the average far too high, which then feeds on itself. After
 // it the brick is recomposed with its AO and the average starts over, reading walls lit as they really are.
 const PRIME: u32 = 0xFFFFFFFFu;
-const FULL_SET: u32 = 0x40000000u; // flag on N, see bounce_main
-const HALF_BLEND: u32 = 0x20000000u; // flag on N with FULL_SET, see bounce_main
 
 fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, slice: i32, slices: i32, list: u32, prime: bool) -> u32 {
     if (isSolid(g, v)) { return word; }
@@ -877,8 +875,8 @@ fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, slice: i32, slices: 
     let origin = (v2w * vec4<f32>(vec3<f32>(v) + vec3<f32>(0.5), 1.0)).xyz;
     // Each voxel has one fixed set of rays * cycle directions, set by its position alone: a cosine-weighted
     // Fibonacci spiral (evenly spread, far less noisy than random directions), twisted and shifted per voxel so
-    // neighbours differ. Evaluation n fires slice n mod cycle; slices interleave (direction j = k*cycle + slice), so
-    // each one spans the whole hemisphere coarsely and a full cycle covers the complete set.
+    // neighbours differ. An evaluation fires `slices` slices from `slice`; slices interleave (direction
+    // j = k*cycle + slice), so each one spans the whole hemisphere coarsely and all of them cover the complete set.
     let seed = pcg(u32(v.x) ^ pcg(u32(v.y) ^ pcg(u32(v.z))));
     let twist = rand01(seed) * 6.2831853;
     let shift = rand01(seed + 1u);
@@ -890,7 +888,7 @@ fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, slice: i32, slices: 
     let spread = clamp(i32(p.bounce2.z), 1, 4);
     let phase = bouncePhase(v, spread);
     let fired = max((rays - phase + spread - 1) / spread, 1); // this voxel's share of the slice's rays
-    // slices > 1: this evaluation fires that many consecutive slices (all of them: the whole set, see FULL_SET).
+    // slices > 1: this evaluation fires that many consecutive slices.
     let sliceCount = clamp(slices, 1, cycle);
     for (var ii = 0; ii < fired * sliceCount; ii = ii + 1) {
         let kk = ii % fired;
@@ -950,28 +948,22 @@ fn blend8(s8: f32, goal: f32, alpha: f32) -> f32 {
 @compute @workgroup_size(256)
 fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
                @builtin(local_invocation_index) t: u32) {
-    // The bounce work list is pairs: (light slot, evaluations since the brick changed).
+    // The bounce work list is pairs: (light slot, evaluation). An evaluation is PRIME (see bounceVoxel), or its first
+    // slice (bits 0-7), how many slices it fires (8-15) and the denominator of its blend weight (16-31): weight
+    // 1/(i+1) for a burst's evaluation i makes the burst a running average that replaces what was stored, and
+    // 1/(2E-i) one that keeps half of it (see GpuLightSystem.Burst).
     let wi = wid.x + wid.y * nwg.x;
     if (wi >= u32(p.counts.z)) { return; }
     if (t == 0u) { atomicStore(&wCount, 0u); }
     workgroupBarrier();
     let it = itemOf(work[wi * 2u], t);
-    let nuRaw = work[wi * 2u + 1u];
-    // A running average over the first full cycle (exactly the complete ray set's mean), then a weight of one
-    // cycle, so each further cycle weighs the whole set about equally. N = PRIME: the priming evaluation (see
-    // bounceVoxel), which overwrites.
+    let ev = work[wi * 2u + 1u];
     let cycle = max(u32(p.bounce2.y), 1u);
-    let prime = nuRaw == PRIME;
-    // FULL_SET: a first evaluation that fires the voxel's whole ray set at once and replaces what was stored, so a
-    // restart away from the camera starts from the exact mean instead of one noisy slice.
-    // HALF_BLEND with it: blend the whole set in at 1/2 instead (a carried-on average away from the camera, once a
-    // cycle, so a fast-changing light fades between cycles rather than stepping).
-    let full = !prime && (nuRaw & FULL_SET) != 0u;
-    let half = full && (nuRaw & HALF_BLEND) != 0u;
-    let nu = select(nuRaw & ~(FULL_SET | HALF_BLEND), nuRaw, prime);
+    let prime = ev == PRIME; // overwrites
     let aoOnly = p.bounce.z > 0.5;
-    let alpha = select(select(max(1.0 / f32(cycle), 1.0 / (f32(nu) + 1.0)), 1.0, prime || full), 0.5, half);
-    let slice = select(i32(nu % cycle), i32(cycle) - 1, prime);
+    let alpha = select(1.0 / f32(max(ev >> 16u, 1u)), 1.0, prime);
+    let slice = select(i32((ev & 0xFFu) % cycle), i32(cycle) - 1, prime);
+    let slices = select(max(i32((ev >> 8u) & 0xFFu), 1), 1, prime);
     let list = listOf(it.g, it.v0);
     // The CPU gives every brick it lists an accumulation slot; without one there is nothing to write.
     let accBase = accOf(it.slot);
@@ -990,7 +982,7 @@ fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) n
         let k = wList[i];
         let v = base + vec3<i32>(i32(k & 7u), i32((k >> 3u) & 7u), i32(k >> 6u));
         let a = accBase + i32(k);
-        accPool[a] = bounceVoxel(it.g, v, accPool[a], alpha, slice, select(1, i32(cycle), full), list, prime || aoOnly);
+        accPool[a] = bounceVoxel(it.g, v, accPool[a], alpha, slice, slices, list, prime || aoOnly);
     }
 }
 

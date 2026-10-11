@@ -39,9 +39,9 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     private float _aoStrength = 0.95f;
 
     // Bounce (GpuRayLightPass bounce_main): albedo feeds the pass (changing it re-evaluates everything); each voxel
-    // has a fixed set of rays x cycle directions, one slice of rays per evaluation, blended as a running average
-    // over the first cycle and then with a weight of one cycle; the hold is how many evaluations a changed area gets
-    // (rounded up to whole cycles); scale multiplies the stored bounce when the display is composed.
+    // has a fixed set of rays x cycle directions, its ray set, in cycle slices of rays; scale multiplies the stored
+    // bounce when the display is composed. How a brick's bounce is updated after any change depends only on its
+    // distance from the camera (see the bands below and GpuLightSystem.RayDirty.cs).
     // AO only: the same rays measure only ambient occlusion, which depends on the shape of the terrain alone, so only
     // changed geometry is re-evaluated: shadows sweeping over the ground, lamps and the sun moving cost no rays.
     private enum BounceMode { Off, AoOnly, Full }
@@ -51,36 +51,24 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     private float _bounceAlbedo = 0.5f;
     // How far bounce and AO rays reach (voxels); everything within that of a change is re-evaluated, in whole bricks.
     private float _bounceReach = 16f;
-    // Within the near radius of the camera, a change runs its whole hold in the frame it happens (each evaluation reads
-    // the one before, adding a hop), so it is settled that frame; with the hold at one full cycle that is exactly its
-    // full ray set. Farther away, one evaluation per frame averages the set in over the hold's frames.
     private int _bounceRays = 8;
-    private int _bounceCycle = 4;   // evaluations per full ray set: each voxel's fixed set is rays x cycle directions
-    private int _bounceHoldFrames = 4;   // evaluations after a change
-    private float _bounceNearRadius = 64f;
+    private int _bounceCycle = 4;   // slices per ray set: each voxel's fixed set is rays x cycle directions
     private float _bounceScale = 1f;
 
-    // After a change, by kind: block changes (placed or removed blocks, chunks loaded or unloaded), ship moves, and
-    // everything else (lamps, new light storage, settings), which always restarts within the general radius above.
-    // Clear: the bounce around the change and along its sun shadow is cleared and restarts (as everything did before
-    // these settings). Average: it carries on its running average instead, so it lags the change a little (a ship
-    // whose blocks changed, and the bricks right at a changed block, still restart; an averaging ship restarts where
-    // it comes to rest). Either way the direct light (a ship's sun shadow) is redone the frame it changes.
-    // Settle radius: within it of the camera, a brick the change held runs its whole hold that frame; past it, one
-    // evaluation a frame (0: one a frame everywhere). Averaging bricks fire their whole ray set at once instead: every
-    // frame within the radius, once a cycle past it.
-    private enum ChangeKind : byte { Other, Block, Ship }
-    private const int KindCount = 3;
-    // Defaults: both average, settling nowhere in one frame (a whole set every 4 frames looked the same as one every
-    // frame, at a quarter of the rays).
-    private bool _blockAverage = true, _shipAverage = true;
-    private int _blockAverageIdx = 1, _shipAverageIdx = 1; // the debug panel's combos (0 clear, 1 average)
-    private float _blockSettleRadius, _shipSettleRadius;
+    /// <summary>
+    /// A distance band (near: within Radius of the camera; middle: within its Radius; far: the rest). A changed brick
+    /// bursts there: Evals evaluations back to back in one frame, each reading the last (so each adds a hop),
+    /// together firing Slices of the ray set's slices, always the same ones; at most once every Every frames, on its
+    /// turn (1: every frame, so a change there is settled the frame it happens).
+    /// </summary>
+    private struct BounceBand
+    {
+        public float Radius;
+        public int Evals, Slices, Every;
+        public BounceBand(float radius, int evals, int slices, int every) { Radius = radius; Evals = evals; Slices = slices; Every = every; }
+    }
 
-    /// <summary>Whether the bounce a change of this kind touches carries on its average rather than restarting
-    /// (only with bounce light on: AO alone always carries on).</summary>
-    private bool AverageAfter(ChangeKind kind)
-        => _bounceMode == BounceMode.Full && (kind == ChangeKind.Block ? _blockAverage : kind == ChangeKind.Ship && _shipAverage);
+    private readonly BounceBand[] _bands = { new(256f, 4, 4, 4), new(768f, 2, 2, 4), new(0f, 1, 1, 8) };
 
     // Checkerboard bounce (see bouncePhase in GpuRayLightPass): 1 = every surface voxel fires all the rays each
     // evaluation; 2 or 4 = each fires only that share, neighbours firing the others, and the compose pass's smoothing
@@ -97,37 +85,28 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         set => _bounceSpread = value >= 4 ? 4 : value >= 2 ? 2 : 1;
     }
 
-    // Gradual bounce: a changed world brick gets the full hold only within the first radius of the camera; out to
-    // the second it gets the middle count, and past it the far count. As the camera comes closer, a brick is topped
-    // up to its new distance's count, continuing its running average, so distant terrain costs a fraction of the
-    // bounce work and sharpens as it's approached.
-    private float _bounceFullRadius = 256f;
-    private float _bounceMidRadius = 768f;
-    private int _bounceMidEvals = 2;
-    private int _bounceFarEvals = 1;
-
-    // Per-frame work caps (world bricks, nearest the camera first; the rest wait for later frames). Ships are always
-    // relit and bounced whole, on top of these.
+    // Per-frame work caps (world bricks, nearest the camera first; the rest wait for later frames): bricks relit, and
+    // slices fired by bounce bursts (a priming evaluation counts as one). Ships are always relit and bounced whole, on
+    // top of these.
     private int _maxRelitPerFrame = 1024;
     private int _maxBouncedPerFrame = 4096;
 
     /// <summary>A quality level: every setting above that trades lighting quality for GPU time.</summary>
-    private readonly record struct LightingPreset(string Name, BounceMode Mode, int Rays, int Spread, int Cycle, int Hold,
-                                                  float Reach, float NearRadius, float FullRadius, float MidRadius,
-                                                  int MidEvals, int FarEvals, int MaxRelit, int MaxBounced);
+    private readonly record struct LightingPreset(string Name, BounceMode Mode, int Rays, int Spread, int Cycle, float Reach,
+                                                  BounceBand Near, BounceBand Mid, BounceBand Far, int MaxRelit, int MaxBounced);
 
     // High is the field values above; the game starts on Medium (see the constructor). Below High: the checkerboard
     // (each voxel fires 1/Spread of the rays, its neighbours the rest, so a patch still covers all of them), shorter
-    // rays, changes near the camera spread over a few frames instead of settled in one (each change then costs one
-    // evaluation a frame, not its whole hold), smaller full-quality radii and lower per-frame caps; Low keeps only
-    // AO, Minimal only direct light.
+    // rays, smaller near and middle bands and lower per-frame caps; Low keeps only AO, Minimal only direct light.
+    // Near: the whole ray set in 4 hops. Medium and High: half of it in 2 hops in the middle band; Minimal and Low a
+    // quarter in 1, as far away. A burst at most every 4 frames, 8 far.
     private static readonly LightingPreset[] Presets =
     {
-        //   Name       Mode               Rays Spread Cycle Hold Reach Near  FullR  MidR  Mid Far Relit Bounced
-        new("Minimal", BounceMode.Off,    4,   1,     4,    4,   8f,  0f,  96f, 256f, 1,  1,  256,  512),
-        new("Low",     BounceMode.AoOnly, 8,   4,     4,    4,   8f,  0f,  96f, 256f, 1,  1,  256, 1024),
-        new("Medium",  BounceMode.Full,   8,   4,     4,    4,   8f, 32f, 128f, 384f, 2,  1,  512, 2048),
-        new("High",    BounceMode.Full,   8,   1,     4,    4,  16f, 64f, 256f, 768f, 2,  1, 1024, 4096),
+        //   Name       Mode               Rays Spread Cycle Reach  Near (radius, evals, slices, every)  Mid                       Far                    Relit Bounced
+        new("Minimal", BounceMode.Off,    4,   1,     4,    8f,   new(96f, 4, 4, 4),  new(256f, 1, 1, 4), new(0f, 1, 1, 8),  256,  512),
+        new("Low",     BounceMode.AoOnly, 8,   4,     4,    8f,   new(96f, 4, 4, 4),  new(256f, 1, 1, 4), new(0f, 1, 1, 8),  256, 1024),
+        new("Medium",  BounceMode.Full,   8,   4,     4,    8f,   new(128f, 4, 4, 4), new(384f, 2, 2, 4), new(0f, 1, 1, 8),  512, 2048),
+        new("High",    BounceMode.Full,   8,   1,     4,   16f,   new(256f, 4, 4, 4), new(768f, 2, 2, 4), new(0f, 1, 1, 8), 1024, 4096),
     };
 
     private const string DefaultPreset = "Medium";
@@ -147,21 +126,17 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         _bounceRays = p.Rays;
         _bounceSpread = p.Spread;
         _bounceCycle = p.Cycle;
-        _bounceHoldFrames = p.Hold;
         _bounceReach = p.Reach;
-        _bounceNearRadius = p.NearRadius;
-        _bounceFullRadius = p.FullRadius;
-        _bounceMidRadius = p.MidRadius;
-        _bounceMidEvals = p.MidEvals;
-        _bounceFarEvals = p.FarEvals;
+        _bands[0] = p.Near;
+        _bands[1] = p.Mid;
+        _bands[2] = p.Far;
         _maxRelitPerFrame = p.MaxRelit;
         _maxBouncedPerFrame = p.MaxBounced;
     }
 
     private bool Matches(in LightingPreset p)
-        => _bounceMode == p.Mode && _bounceRays == p.Rays && _bounceSpread == p.Spread && _bounceCycle == p.Cycle && _bounceHoldFrames == p.Hold
-           && _bounceReach == p.Reach && _bounceNearRadius == p.NearRadius && _bounceFullRadius == p.FullRadius
-           && _bounceMidRadius == p.MidRadius && _bounceMidEvals == p.MidEvals && _bounceFarEvals == p.FarEvals
+        => _bounceMode == p.Mode && _bounceRays == p.Rays && _bounceSpread == p.Spread && _bounceCycle == p.Cycle
+           && _bounceReach == p.Reach && _bands[0].Equals(p.Near) && _bands[1].Equals(p.Mid) && _bands[2].Equals(p.Far)
            && _maxRelitPerFrame == p.MaxRelit && _maxBouncedPerFrame == p.MaxBounced;
 
     // CPU-side submission timing only: WebGPU's queue is asynchronous, so a Stopwatch around Dispatch() measures
@@ -241,37 +216,25 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         ImGui.SliderFloat("Bounce albedo", ref _bounceAlbedo, 0f, 0.9f, "%.2f");
         ImGui.SliderInt("Bounce rays per evaluation", ref _bounceRays, 1, 32);
         ImGui.SliderFloat("Bounce ray reach (blocks)", ref _bounceReach, 4f, 16f, "%.0f");
-        ImGui.SliderInt("Evaluations per full ray set", ref _bounceCycle, 1, 64);
-        ImGui.TextDisabled($"  = {_bounceRays * _bounceCycle} fixed directions per voxel");
+        ImGui.SliderInt("Slices per ray set", ref _bounceCycle, 1, 64);
+        ImGui.TextDisabled($"  = {_bounceRays * _bounceCycle} fixed directions per voxel; an evaluation fires one or more slices");
         int spreadIdx = System.Array.IndexOf(Spreads, _bounceSpread);
         if (ImGui.Combo("Checkerboard bounce", ref spreadIdx, SpreadNames, SpreadNames.Length)) _bounceSpread = Spreads[spreadIdx];
         ImGui.TextDisabled("  neighbouring voxels fire different rays; compose smoothing averages them");
-        ImGui.SliderInt("Bounce evaluations after a change", ref _bounceHoldFrames, 1, 64);
-        ImGui.SliderFloat("Settled-in-one-frame radius", ref _bounceNearRadius, 0f, 256f, "%.0f");
-        ImGui.TextDisabled("  changes within it run all their evaluations the frame they happen (lamps, new bricks;");
-        ImGui.TextDisabled("  block changes and ships have their own below)");
         ImGui.SliderFloat("Bounce display scale", ref _bounceScale, 0f, 4f, "%.2f");
-        ImGui.Text("After a change");
-        ImGui.Combo("Block changes", ref _blockAverageIdx, "Clear and restart\0Average\0");
-        ImGui.SliderFloat("  settled in one frame within##block", ref _blockSettleRadius, 0f, 256f, "%.0f");
-        ImGui.Combo("Moving ships", ref _shipAverageIdx, "Clear and restart\0Average\0");
-        ImGui.SliderFloat("  settled in one frame within##ship", ref _shipSettleRadius, 0f, 256f, "%.0f");
-        _blockAverage = _blockAverageIdx == 1;
-        _shipAverage = _shipAverageIdx == 1;
-        ImGui.TextDisabled("  average: bounce carries on instead of restarting, its whole ray set once a cycle (every frame within the radius)");
-        ImGui.Text("Gradual bounce (world bricks)");
-        ImGui.SliderFloat("Full evaluations within (blocks)", ref _bounceFullRadius, 16f, 4096f, "%.0f");
-        ImGui.SliderFloat("Middle evaluations within (blocks)", ref _bounceMidRadius, 16f, 8192f, "%.0f");
-        ImGui.SliderInt("Middle evaluations", ref _bounceMidEvals, 1, 64);
-        ImGui.SliderInt("Far evaluations", ref _bounceFarEvals, 1, 64);
-        ImGui.TextDisabled($"  of {HoldEvals()} after a change; " +
-                           $"topped up as the camera nears. Waiting for more: {_coarse.Count:N0}, topped up this frame: {_dbgTopUps:N0}");
+        ImGui.Text("Bounce by distance (every change alike)");
+        ImGui.TextDisabled("  a changed brick bursts: evaluations back to back (each a hop), firing that many slices,");
+        ImGui.TextDisabled("  at most every so many frames (1: settled the frame it changes)");
+        DrawBand("Near", 0, true);
+        DrawBand("Middle", 1, true);
+        DrawBand("Far", 2, false);
+        ImGui.TextDisabled($"  far bricks fire more as the camera nears. Waiting for more: {_coarse.Count:N0}, touched this frame: {_dbgTopUps:N0}");
 
         ImGui.Separator();
         ImGui.SliderInt("Max bricks relit per frame", ref _maxRelitPerFrame, 64, 16384);
-        ImGui.SliderInt("Max bricks bounced per frame", ref _maxBouncedPerFrame, 64, 32768);
+        ImGui.SliderInt("Max slices bounced per frame", ref _maxBouncedPerFrame, 64, 32768);
         ImGui.TextDisabled($"Bricks relit this frame: {_lastDirtyTotal:N0} of {_store.LightSlotsInUse:N0} surface bricks, waiting: {_lastRelitWaiting:N0}");
-        ImGui.TextDisabled($"Bricks bounced this frame: {_lastBounceTotal:N0}, plus near-camera repeats: {_lastNearTotal:N0}, waiting: {_lastBounceWaiting:N0}");
+        ImGui.TextDisabled($"Bricks bounced this frame: {_lastBounceTotal:N0}, plus further burst evaluations: {_lastStepTotal:N0}, waiting: {_lastBounceWaiting:N0}");
         ImGui.TextDisabled($"  full relight: {(_dbgFullReason == "" ? "no" : _dbgFullReason)}, new bricks: {_dbgNewSlots}");
         ImGui.TextDisabled($"  world chunks changed: {_dbgChangedChunks}, ships moved: {_dbgShipsMoved}, lamp changes: {_dbgLampChanges}");
         ImGui.TextDisabled($"Chunk lists: {_dbgListChunks:N0} chunks, avg {(_dbgListChunks > 0 ? (float)_dbgListGrids / _dbgListChunks : 0f):F1} grids " +
@@ -294,6 +257,16 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
 
         float elevation = SunLight.ElevationDegrees;
         if (ImGui.SliderFloat("Sun elevation", ref elevation, -90f, 90f, "%.0f°")) SunLight.ElevationDegrees = elevation;
+    }
+
+    private void DrawBand(string name, int i, bool hasRadius)
+    {
+        ref var b = ref _bands[i];
+        ImGui.Text(name);
+        if (hasRadius) ImGui.SliderFloat($"  within (blocks)##band{i}", ref b.Radius, 16f, 8192f, "%.0f");
+        ImGui.SliderInt($"  evaluations per burst##band{i}", ref b.Evals, 1, 16);
+        ImGui.SliderInt($"  slices per burst##band{i}", ref b.Slices, 1, 64);
+        ImGui.SliderInt($"  burst at most every (frames)##band{i}", ref b.Every, 1, 32);
     }
 
     public void Update(float dt)
@@ -442,10 +415,10 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         _rayLight.Dispose();
         _lightWork?.Dispose();
         _bounceWork?.Dispose();
-        foreach (var b in _nearWorks) b?.Dispose();
+        foreach (var b in _stepWorks) b?.Dispose();
         _composeWork?.Dispose();
         _finalComposeWork?.Dispose();
-        _nearComposeWork?.Dispose();
+        _primedWork?.Dispose();
         _clearWork?.Dispose();
         _zeroWork?.Dispose();
     }
