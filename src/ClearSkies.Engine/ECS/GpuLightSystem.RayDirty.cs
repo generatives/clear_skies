@@ -725,6 +725,7 @@ public sealed partial class GpuLightSystem
     private void TouchEditedShip(GridHandle g)
     {
         TouchGrid(g, restart: false);
+        if (!_restartShipEdits) return;
         foreach (var (grid, mn, mx) in _shipEdits)
             if (grid == g)
                 ForEachSlotInBrickBox(g, (int)MathF.Floor(mn.X / 8f) - 1, (int)MathF.Floor(mn.Y / 8f) - 1, (int)MathF.Floor(mn.Z / 8f) - 1,
@@ -1181,14 +1182,17 @@ public sealed partial class GpuLightSystem
         return true;
     }
 
-    /// <summary>Frees the accumulation of bricks with no update to come (last frame's compose has read it): a settled
-    /// brick keeps only its display.</summary>
+    /// <summary>Frees the accumulation of world bricks with no update to come (last frame's compose has read it): a
+    /// settled brick keeps only its display.</summary>
     private void ReleaseSettledAccs()
     {
         for (int k = _accSlots.Count - 1; k >= 0; k--)
         {
             int slot = _accSlots[k];
             if (_store.AccOf[slot] >= 0 && NeedsUpdate(slot)) continue;
+            // Ships keep theirs while they have light storage: they are small, and freeing it would make every edit
+            // or move start them over from their display (and they update often anyway).
+            if (_store.AccOf[slot] >= 0 && _store.SlotGrid[slot] >= 0 && _store.SlotGrid[slot] != _worldIndex) continue;
             _store.FreeAcc(slot);
             _inAcc[slot] = false;
             _accSlots[k] = _accSlots[^1];
