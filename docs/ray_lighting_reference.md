@@ -63,7 +63,7 @@ wider 2-cell smoothing was tried (2026-10-11) and made little visible difference
   goes multi-hop: each dispatch adds a hop. A miss counts as sky for AO. `blend8` always moves at least one step.
 - **No restarts** (2026-10-11): every brick carries its light on through a change, and the update rule alone decides
   replace or blend. Restarting the bricks at an edit (an AO pass, then a replacing update, while the rest blended) made
-  a patch that blinked. The shader still understands `AO_PASS` words, but nothing sends them.
+  a patch that blinked.
 
 ## Updates and distance bands (every change alike)
 

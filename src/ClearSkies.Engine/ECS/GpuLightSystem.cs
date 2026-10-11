@@ -92,8 +92,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     }
 
     // Per-frame work caps (world bricks, nearest the camera first; the rest wait for later frames): bricks relit, and
-    // groups fired by bounce updates, per brick (an AO pass counts as one). Ships are always relit and bounced whole, on
-    // top of these.
+    // groups fired by bounce updates, per brick. Ships are always relit and bounced whole, on top of these.
     private int _maxRelitPerFrame = 1024;
     private int _maxGroupsPerFrame = 4096;
 
@@ -435,5 +434,6 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         _finalComposeWork?.Dispose();
         _clearWork?.Dispose();
         _zeroWork?.Dispose();
+        _seedWork?.Dispose();
     }
 }
