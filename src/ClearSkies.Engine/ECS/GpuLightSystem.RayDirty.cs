@@ -1173,15 +1173,14 @@ public sealed partial class GpuLightSystem
     }
 
     /// <summary>
-    /// An evaluation count kept within a byte. Past the first cycle the count only picks the ray slice (N mod cycle)
-    /// and the checkerboard phase rotation (N / cycle, see GpuRayLightPass bouncePhase); the blend weight is at its
-    /// floor. So instead of stopping at 255, which froze a long-averaging brick on one slice and one phase (a quarter
-    /// of a quarter of its directions on Medium), it wraps by whole rotations of four cycles, staying past the first.
+    /// An evaluation count kept within a byte. Past the first cycle the count only picks the ray slice (N mod cycle);
+    /// the blend weight is at its floor. So instead of stopping at 255, which froze a long-averaging brick on one slice
+    /// (a quarter of its directions), it wraps by whole cycles, staying past the first.
     /// </summary>
     private uint WrapN(long n)
     {
         if (n < 255) return (uint)n;
-        long period = _bounceCycle * 8 <= 255 ? _bounceCycle * 4L : System.Math.Max(_bounceCycle, 1);
+        long period = System.Math.Max(_bounceCycle, 1);
         return (uint)(period + (n - period) % period);
     }
 
