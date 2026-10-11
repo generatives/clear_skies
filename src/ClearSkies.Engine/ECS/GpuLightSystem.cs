@@ -274,7 +274,14 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     {
         ref var b = ref _bands[i];
         ImGui.Text(name);
-        if (hasRadius) ImGui.SliderFloat($"  within (blocks)##band{i}", ref b.Radius, 16f, 8192f, "%.0f");
+        // Each band starts where the one inside it ends: near goes up to the middle band's radius, the middle band
+        // down to the near one's.
+        if (hasRadius)
+        {
+            float min = i == 0 ? 0f : _bands[0].Radius, max = i == 0 ? _bands[1].Radius : 8192f;
+            b.Radius = System.Math.Clamp(b.Radius, min, max);
+            ImGui.SliderFloat($"  within (blocks)##band{i}", ref b.Radius, min, max, "%.0f");
+        }
         ImGui.SliderInt($"  hops per update##band{i}", ref b.Hops, 1, 16);
         ImGui.SliderInt($"  groups per update##band{i}", ref b.Groups, 1, 64);
         ImGui.SliderInt($"  updates per change##band{i}", ref b.Updates, 1, 16);
