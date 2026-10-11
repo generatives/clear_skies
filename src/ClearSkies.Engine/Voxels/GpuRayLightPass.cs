@@ -849,6 +849,7 @@ fn bouncePhase(v: vec3<i32>, spread: i32) -> i32 {
 // it the brick is recomposed with its AO and the average starts over, reading walls lit as they really are.
 const PRIME: u32 = 0xFFFFFFFFu;
 const FULL_SET: u32 = 0x40000000u; // flag on N, see bounce_main
+const HALF_BLEND: u32 = 0x20000000u; // flag on N with FULL_SET, see bounce_main
 
 fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, slice: i32, slices: i32, list: u32, prime: bool) -> u32 {
     if (isSolid(g, v)) { return word; }
@@ -963,10 +964,13 @@ fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) n
     let prime = nuRaw == PRIME;
     // FULL_SET: a first evaluation that fires the voxel's whole ray set at once and replaces what was stored, so a
     // restart away from the camera starts from the exact mean instead of one noisy slice.
+    // HALF_BLEND with it: blend the whole set in at 1/2 instead (a carried-on average away from the camera, once a
+    // cycle, so a fast-changing light fades between cycles rather than stepping).
     let full = !prime && (nuRaw & FULL_SET) != 0u;
-    let nu = select(nuRaw & ~FULL_SET, nuRaw, prime);
+    let half = full && (nuRaw & HALF_BLEND) != 0u;
+    let nu = select(nuRaw & ~(FULL_SET | HALF_BLEND), nuRaw, prime);
     let aoOnly = p.bounce.z > 0.5;
-    let alpha = select(max(1.0 / f32(cycle), 1.0 / (f32(nu) + 1.0)), 1.0, prime || full);
+    let alpha = select(select(max(1.0 / f32(cycle), 1.0 / (f32(nu) + 1.0)), 1.0, prime || full), 0.5, half);
     let slice = select(i32(nu % cycle), i32(cycle) - 1, prime);
     let list = listOf(it.g, it.v0);
     // The CPU gives every brick it lists an accumulation slot; without one there is nothing to write.

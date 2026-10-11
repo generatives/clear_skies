@@ -63,9 +63,14 @@ public sealed partial class GpuLightSystem
     private byte[] _n = Array.Empty<byte>();
     // Whether a brick has had its priming evaluation since its average last restarted (see GpuRayLightPass PRIME).
     private bool[] _primed = Array.Empty<bool>();
+    // Whether a held brick's last whole cycle blended in at 1/2 and its hold ran out: one more cycle, replacing,
+    // ends it (see WholeCycleEval).
+    private bool[] _tail = Array.Empty<bool>();
     private const uint PrimeEval = uint.MaxValue;
     // Flag on an evaluation count: fire the brick's whole ray set in this one evaluation (GpuRayLightPass FULL_SET).
     private const uint FullSetEval = 0x40000000u;
+    // Flag with FullSetEval: blend the whole set in at 1/2 instead of replacing (GpuRayLightPass HALF_BLEND).
+    private const uint HalfBlendEval = 0x20000000u;
     private bool[] _inHeld = Array.Empty<bool>();
     private int[] _holdStamp = Array.Empty<int>();
     // Gradual bounce (see GpuLightSystem's settings): the evaluations a world brick has been granted since it last
@@ -171,6 +176,7 @@ public sealed partial class GpuLightSystem
             _hold[slot] = 0;
             _n[slot] = 0;
             _primed[slot] = false;
+            _tail[slot] = false;
             _given[slot] = byte.MaxValue;
             _holdKind[slot] = (byte)ChangeKind.Other;
             MarkSlot(slot);
@@ -890,6 +896,7 @@ public sealed partial class GpuLightSystem
         _holdStamp[slot] = _frame;
         _holdKind[slot] = (byte)kind;
         _hold[slot] = (byte)System.Math.Max(_hold[slot], Grant(slot, holdFrames));
+        _tail[slot] = false; // changing again: back to blending
         if (!_inHeld[slot]) { _inHeld[slot] = true; _heldQueue.Add(slot); }
     }
 
@@ -1077,13 +1084,15 @@ public sealed partial class GpuLightSystem
             if (!lg.Handle.IsWorld && st.Blend && st.BounceAllN > 0 && _bounceCycle > 1)
             {
                 if (!WholeCycleDue(lg.Handle.Index, shipNear)) continue; // keeps its accumulation and its hold
+                // No tail cycle needed (see WholeCycleEval): it restarts the first frame it is still.
+                uint whole = WholeCycleEval(shipNear);
                 st.BounceAllFrames = System.Math.Max(0, st.BounceAllFrames - _bounceCycle);
                 st.BounceAllN += _bounceCycle;
                 foreach (int slot in lg.Handle.Slots)
                 {
                     GiveAcc(slot);
                     Push(ref n, (uint)slot);
-                    Push(ref n, evals | FullSetEval);
+                    Push(ref n, evals | whole);
                 }
                 continue;
             }
@@ -1139,9 +1148,13 @@ public sealed partial class GpuLightSystem
             {
                 // Carrying on an averaging change's average: whole cycles (see WholeCycleDue).
                 if (!WholeCycleDue(slot, near)) continue; // keeps its accumulation and its hold
+                bool replace = near || _tail[slot];
                 Push(ref n, (uint)slot);
-                Push(ref n, _n[slot] | FullSetEval);
+                Push(ref n, _n[slot] | WholeCycleEval(replace));
                 _hold[slot] -= (byte)System.Math.Min(_bounceCycle, (int)_hold[slot]);
+                // A blended cycle that spent the hold gets one more, replacing, so none of the old light is left.
+                _tail[slot] = !replace && _hold[slot] == 0;
+                if (_tail[slot]) _hold[slot] = (byte)_bounceCycle;
                 _n[slot] = (byte)System.Math.Min(_n[slot] + _bounceCycle, 255);
                 continue;
             }
@@ -1205,6 +1218,13 @@ public sealed partial class GpuLightSystem
     /// cycle of frames late.
     /// </summary>
     private bool WholeCycleDue(int key, bool near) => near || (_frame + key) % _bounceCycle == 0;
+
+    /// <summary>The flags of a whole cycle (see WholeCycleDue). Away from the camera, once a cycle, it blends in at
+    /// 1/2, so a light that changes quickly (a rotating ship) fades between cycles instead of stepping at every one:
+    /// same rays, about one more cycle of lag. <paramref name="replace"/>: near the camera (fired every frame, so
+    /// already smooth), and for a held brick one extra cycle after its hold runs out (the light has stopped
+    /// changing), so none of the old light is left; a ship needs none, as it restarts once it is still.</summary>
+    private static uint WholeCycleEval(bool replace) => replace ? FullSetEval : FullSetEval | HalfBlendEval;
 
     /// <summary>
     /// Within what distance of the camera a brick held by a change of this kind runs its whole hold in one frame;
@@ -1386,6 +1406,7 @@ public sealed partial class GpuLightSystem
         Array.Resize(ref _hold, capacity);
         Array.Resize(ref _n, capacity);
         Array.Resize(ref _primed, capacity);
+        Array.Resize(ref _tail, capacity);
         Array.Resize(ref _inHeld, capacity);
         Array.Resize(ref _holdStamp, capacity);
         Array.Resize(ref _given, capacity);

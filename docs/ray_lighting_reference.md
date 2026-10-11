@@ -61,12 +61,18 @@ wider 2-cell smoothing was tried (2026-10-11) and made little visible difference
   value is the full 8-direction mean and only changes when the light does. Fixes the slice-by-slice flicker and the
   N = 255 freeze on one slice (N stops at 255; with whole cycles it no longer matters). Bounce lags a change by up
   to `cycle` frames.
+- **Half blend away from the camera** (`WholeCycleEval`, HALF_BLEND): outside the settle radius each whole cycle
+  blends in at ½ instead of replacing. A held brick whose hold runs out on a blended cycle gets one extra cycle that
+  replaces (so no old light is left); a ship needs none, as it restarts once still. A full replace every 4 frames
+  made a rotating ship's light step visibly at angles where it changes fast (raised by lowering the settle radius).
+  Same rays; about one more cycle of lag while the light keeps changing.
 
 ## Holds: how many evaluations a change gets
 
 - **Hold** = the hold setting rounded up to whole cycles. All presets: **4** (one cycle).
-- **Averaging** changes grant the same hold, spent in whole cycles: one full set replaces what was there, so a hold
-  of one cycle leaves none of the old light. (Before whole cycles they needed 19 evaluations to fade it at weight ¼.)
+- **Averaging** changes grant the same hold, spent in whole cycles: a full set replaces what was there, so a hold
+  of one cycle leaves none of the old light (away from the camera, one extra replacing cycle after the blended
+  ones, see Half blend). (Before whole cycles they needed 19 evaluations to fade it at weight ¼.)
 - **Distance tiers** (world bricks): a full hold within the full radius, mid evals within the mid radius, and far
   evals beyond it. A brick is topped up as the camera approaches. Ships always get the full hold.
 - **Settle radius**: within it, a held brick runs the rest of its hold in the same frame (repeats). Outside it, the
