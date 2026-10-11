@@ -62,6 +62,9 @@ public sealed partial class GpuLightSystem
     private bool[] _pending = Array.Empty<bool>();
     private bool[] _tail = Array.Empty<bool>();
     private byte[] _left = Array.Empty<byte>();
+    // Updates still to blend in after a top-up as the camera nears (see TopUpNearing), so the finer light fades in.
+    private byte[] _fade = Array.Empty<byte>();
+    private const int FadeUpdates = 3;
     private int[] _lastUpdate = Array.Empty<int>();
     private bool[] _inHeld = Array.Empty<bool>();
     // Distance bands: the groups a world brick last fired (255: none yet), and the bricks that fired fewer than the
@@ -158,6 +161,7 @@ public sealed partial class GpuLightSystem
             _pending[slot] = false;
             _tail[slot] = false;
             _left[slot] = 0;
+            _fade[slot] = 0;
             _lastUpdate[slot] = int.MinValue / 2;
             _given[slot] = byte.MaxValue;
             MarkSlot(slot);
@@ -769,7 +773,7 @@ public sealed partial class GpuLightSystem
 
     /// <summary>Whether a brick has an update to come: touched since its last, owed more for its last change, or owed
     /// the replacing one after a blend.</summary>
-    private bool NeedsUpdate(int slot) => _pending[slot] || _left[slot] > 0 || _tail[slot];
+    private bool NeedsUpdate(int slot) => _pending[slot] || _left[slot] > 0 || _tail[slot] || _fade[slot] > 0;
 
     /// <summary>AO only: whether a ship's rays can reach another grid, at its pose this frame.</summary>
     private bool NearOtherGrid(in LitGrid ship, GridLightState st)
@@ -841,6 +845,7 @@ public sealed partial class GpuLightSystem
                 if (!_pending[slot] && BandGroups(WorldBandOf(slot)) > _given[slot])
                 {
                     Touch(slot);
+                    _fade[slot] = FadeUpdates;
                     _dbgTopUps++;
                 }
                 _coarseAt++;
@@ -985,11 +990,16 @@ public sealed partial class GpuLightSystem
         if (seed) _seedSlots.Add((uint)slot);
         int every = System.Math.Max(1, b.Every);
         // Blend only into light that is current: not a fresh accumulation, nor one cleared this frame (a removed lamp).
-        bool blend = !fresh && _clearStamp[slot] != _frame && _pending[slot] && every > 1 && _frame - _lastUpdate[slot] <= every;
+        // A top-up's updates blend too, fresh or not (a settled brick's seeded accumulation is the light it showed), so
+        // nearing terrain fades to the finer light over a few turns instead of popping; they leave no replacing tail.
+        bool fading = _fade[slot] > 0 && _clearStamp[slot] != _frame;
+        bool changing = !fresh && _clearStamp[slot] != _frame && _pending[slot] && every > 1 && _frame - _lastUpdate[slot] <= every;
+        bool blend = changing || fading;
         int step = 0;
         for (int i = 0; i < hops; i++)
             AddStep(step++, (uint)slot, HopWord(i * per, per, blend ? 2 * hops - i : i + 1, b.Spread));
-        _tail[slot] = blend;
+        _tail[slot] = changing;
+        if (_fade[slot] > 0) _fade[slot]--;
         // A fresh touch owes the band's further updates; a follow-up uses one up.
         int owed = _pending[slot] ? System.Math.Clamp(b.Updates, 1, 255) - 1 : _left[slot] - 1;
         _left[slot] = (byte)System.Math.Max(owed, 0);
@@ -1122,6 +1132,7 @@ public sealed partial class GpuLightSystem
         Array.Resize(ref _pending, capacity);
         Array.Resize(ref _tail, capacity);
         Array.Resize(ref _left, capacity);
+        Array.Resize(ref _fade, capacity);
         Array.Resize(ref _lastUpdate, capacity);
         Array.Resize(ref _inHeld, capacity);
         Array.Resize(ref _given, capacity);
