@@ -971,7 +971,9 @@ public sealed partial class GpuLightSystem
         int step = 0;
         if (aoPass)
         {
-            AddStep(step++, (uint)slot, AoPassWord(b.Spread));
+            // A brick carrying on (it had accumulation already) keeps its bounce through the AO pass: zeroing it would
+            // dim everything whose hops read it, a whole small ship when one of its blocks changed while it moved.
+            AddStep(step++, (uint)slot, AoPassWord(b.Spread, keepBounce: !fresh));
             if (_aoPassCount == _aoPassed.Length) Array.Resize(ref _aoPassed, _aoPassed.Length * 2);
             _aoPassed[_aoPassCount++] = (uint)slot;
         }
@@ -998,8 +1000,9 @@ public sealed partial class GpuLightSystem
     private static uint HopWord(int first, int count, int weightDenominator, int spread)
         => (uint)(first & 0xFF) | ((uint)(count & 0xFF) << 8) | ((uint)(weightDenominator & 0xFF) << 16) | SpreadBits(spread);
 
-    /// <summary>An AO pass (see GpuRayLightPass bounceVoxel) with rays per voxel 1/<paramref name="spread"/>.</summary>
-    private static uint AoPassWord(int spread) => 0x80000000u | SpreadBits(spread);
+    /// <summary>An AO pass (see GpuRayLightPass bounceVoxel) with rays per voxel 1/<paramref name="spread"/>;
+    /// <paramref name="keepBounce"/>: replace only AO, keeping the stored bounce.</summary>
+    private static uint AoPassWord(int spread, bool keepBounce) => 0x80000000u | (keepBounce ? 0x40000000u : 0u) | SpreadBits(spread);
 
     // Bits 24-25: log2 of the spread (1, 2 or 4: all, half or a quarter of the rays per voxel).
     private static uint SpreadBits(int spread) => (uint)(spread >= 4 ? 2 : spread >= 2 ? 1 : 0) << 24;

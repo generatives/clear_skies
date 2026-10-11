@@ -61,7 +61,9 @@ wider 2-cell smoothing was tried (2026-10-11) and made little visible difference
 - A hit reads the brightest of: the hit face's sun, its composed display, and its stored bounce. That is how bounce
   goes multi-hop: each dispatch adds a hop. A miss counts as sky for AO. `blend8` always moves at least one step.
 - **AO pass** (`AO_PASS`): before the first update after a restart whose own voxels changed. It measures AO only and
-  stores zero bounce, so a wall that just appeared isn't read as bright. A brick restarting only because it had
+  stores zero bounce, so a wall that just appeared isn't read as bright. A brick that still has accumulation (it's
+  carrying on, like a moving ship's) keeps its bounce through the AO pass (`KEEP_BOUNCE`), so a block edit on a moving
+  ship doesn't dim everything that reads it. A brick restarting only because it had
   settled gets none by default (panel: "AO pass for settled bricks"); running it there made dark interiors noisy in
   game.
 

@@ -848,9 +848,12 @@ fn bouncePhase(v: vec3<i32>, spread: i32) -> i32 {
 // the brick's voxels were shown with no AO at all (nothing measured yet, or solid a moment ago), as bright as open
 // air, and bounce rays reading those walls would start the average far too high, which then feeds on itself. After
 // it the brick is recomposed with its AO and the average starts over, reading walls lit as they really are.
-const AO_PASS: u32 = 0x80000000u; // flag bit of a hop word
+// KEEP_BOUNCE: an AO pass on a brick that is carrying on (it still has the bounce of its last update, as a moving
+// ship's bricks do) keeps that bounce and replaces only AO, so its neighbours' hops don't read it as suddenly dark.
+const AO_PASS: u32 = 0x80000000u;     // flag bits of a hop word
+const KEEP_BOUNCE: u32 = 0x40000000u;
 
-fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, first: i32, count: i32, spread: i32, list: u32, aoPass: bool) -> u32 {
+fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, first: i32, count: i32, spread: i32, list: u32, aoPass: bool, keepBounce: bool) -> u32 {
     if (isSolid(g, v)) { return word; }
 
     let sxn = isSolid(g, v - vec3<i32>(1, 0, 0)); let sxp = isSolid(g, v + vec3<i32>(1, 0, 0));
@@ -933,6 +936,7 @@ fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, first: i32, count: i
     let g8 = blend8(f32((word >> 8u) & 0xFFu), estimate.g, alpha);
     let b8 = blend8(f32((word >> 16u) & 0xFFu), estimate.b, alpha);
     let o8 = blend8(f32(word >> 24u), occEstimate, alpha);
+    if (keepBounce) { return (word & 0xFFFFFFu) | (u32(o8) << 24u); }
     return u32(r8) | (u32(g8) << 8u) | (u32(b8) << 16u) | (u32(o8) << 24u);
 }
 
@@ -949,7 +953,7 @@ fn blend8(s8: f32, goal: f32, alpha: f32) -> f32 {
 fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
                @builtin(local_invocation_index) t: u32) {
     // The bounce work list is pairs: (light slot, hop word). A hop word holds its spread as log2 (bits 24-25, see
-    // bouncePhase) and is either AO_PASS (bit 31, see bounceVoxel), or its first group (bits 0-7), how many groups it
+    // bouncePhase) and is either AO_PASS (bit 31, with KEEP_BOUNCE in bit 30; see bounceVoxel), or its first group (bits 0-7), how many groups it
     // fires (8-15) and the denominator of its blend weight (16-23): weight 1/(i+1) for an update's hop i makes the
     // update a running average that replaces what was stored, and 1/(2H-i) one that keeps half of it (see
     // GpuLightSystem.UpdateBrick).
@@ -961,6 +965,7 @@ fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) n
     let ev = work[wi * 2u + 1u];
     let groups = max(u32(p.bounce2.y), 1u);
     let aoPass = (ev & AO_PASS) != 0u; // overwrites
+    let keepBounce = aoPass && (ev & KEEP_BOUNCE) != 0u;
     let spread = i32(1u << ((ev >> 24u) & 3u));
     let aoOnly = p.bounce.z > 0.5;
     let alpha = select(1.0 / f32(max((ev >> 16u) & 0xFFu, 1u)), 1.0, aoPass);
@@ -984,7 +989,7 @@ fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) n
         let k = wList[i];
         let v = base + vec3<i32>(i32(k & 7u), i32((k >> 3u) & 7u), i32(k >> 6u));
         let a = accBase + i32(k);
-        accPool[a] = bounceVoxel(it.g, v, accPool[a], alpha, first, count, spread, list, aoPass || aoOnly);
+        accPool[a] = bounceVoxel(it.g, v, accPool[a], alpha, first, count, spread, list, aoPass || aoOnly, keepBounce);
     }
 }
 
