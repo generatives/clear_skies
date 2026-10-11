@@ -28,7 +28,8 @@ namespace ClearSkies.Engine.ECS;
 // each adds a hop), together firing the band's groups of the voxel's directions, always the same ones. A brick updates
 // on its turn, once every so many frames (the band's setting), staggered by brick (a ship's bricks together); each
 // update reads the light the last one left, so a change gets updates x hops hops. A brick whose own voxels changed
-// (or that had settled, its accumulation freed) restarts: an AO pass, then an update that replaces what was there. Any
+// (or that had settled, its accumulation freed) restarts: an AO pass, then an update that replaces what was there,
+// starting from the light it was showing (a settled brick's freed accumulation is seeded from its display). Any
 // other brick carries on: its update replaces, or blends in at 1/2 if the brick was touched again and updated on its
 // previous turn too (it keeps changing, as around a moving ship), so a fast-changing light fades between updates
 // instead of stepping; once it stops changing, one more update replaces, so none of the old light is left. Only where
@@ -988,17 +989,20 @@ public sealed partial class GpuLightSystem
         // only where the brick's own voxels changed: a settled brick's first hop then reads walls not yet showing their
         // AO (as ships always did before the bands), which is brighter.
         bool aoPass = (_aoPassSettled ? restart : _restart[slot]) && !_aoOnly;
-        // A settled brick (fresh accumulation, its own voxels unchanged) starts from the light it was showing: from
-        // nothing, a whole settled ship touched at once would read only dark neighbours and settle a few hops dim.
-        bool seed = fresh && !_restart[slot] && !_aoOnly;
+        // A brick given fresh accumulation (it had settled) starts from the light it was showing, whether or not its
+        // own voxels changed: from nothing, the bricks around a placed block read only dark neighbours and settle a
+        // few hops dim, and the rest of a settled ship reads them. Light a filled hole let in fades by the albedo each
+        // hop (a few percent is left after one update); only a removed lamp clears bounce (clear_main). A brick new
+        // to light storage shows nothing yet, so it starts from nothing.
+        bool seed = fresh && !_aoOnly;
         if (seed) _seedSlots.Add((uint)slot);
         int every = System.Math.Max(1, b.Every);
         bool blend = !restart && _pending[slot] && every > 1 && _frame - _lastUpdate[slot] <= every;
         int step = 0;
         if (aoPass)
         {
-            // A brick carrying on (it had accumulation already) keeps its bounce through the AO pass: zeroing it would
-            // dim everything whose hops read it, a whole small ship when one of its blocks changed while it moved.
+            // The brick keeps its bounce (carried on, or seeded) through the AO pass: zeroing it would dim everything
+            // whose hops read it, a whole small ship when one of its blocks changed.
             AddStep(step++, (uint)slot, AoPassWord(b.Spread, keepBounce: !fresh || seed));
             if (_aoPassCount == _aoPassed.Length) Array.Resize(ref _aoPassed, _aoPassed.Length * 2);
             _aoPassed[_aoPassCount++] = (uint)slot;
