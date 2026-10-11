@@ -619,17 +619,24 @@ fn tileSurfaceAir(c: vec3<i32>) -> bool {
 // is skipped (it fires no rays, so it has no bounce or AO), as is any without light storage or accumulation (a settled
 // brick, whose bounce is in its display). lk: the voxel in its
 // brick (0-7); read from the compose tile.
+//
+// A word of 0 is air not measured yet (bounce_main zeroes air away from any surface; a placed block makes it surface):
+// read as open and unlit, it would show full ambient, a flash in a dark room until its next hop. Such cells are left
+// out, so a new surface voxel shows its neighbours' light meanwhile.
 fn smoothedAcc(lk: vec3<i32>, own: u32) -> vec4<f32> {
     let c12 = lk + vec3<i32>(2);
     let c10 = lk + vec3<i32>(1);
-    var sum = unpackAcc(own) * 2.0;
-    var w = 2.0;
+    let ownW = select(2.0, 0.0, own == 0u);
+    var sum = unpackAcc(own) * ownW;
+    var w = ownW;
     var faceSolid: array<bool, 6>;
     for (var f = 0; f < 6; f = f + 1) {
         let d = faceDir(f);
         faceSolid[f] = tileSolid(c12 + d);
         if (faceSolid[f] || !tileSurf(c10 + d)) { continue; }
-        sum = sum + unpackAcc(cAcc[tileSurfIndex(c10 + d)]);
+        let a = cAcc[tileSurfIndex(c10 + d)];
+        if (a == 0u) { continue; }
+        sum = sum + unpackAcc(a);
         w = w + 1.0;
     }
     // Edge diagonals: faces fa < fb on different axes.
@@ -638,10 +645,13 @@ fn smoothedAcc(lk: vec3<i32>, own: u32) -> vec4<f32> {
             if (faceSolid[fa] && faceSolid[fb]) { continue; } // no air path around the edge
             let n = c10 + faceDir(fa) + faceDir(fb);
             if (!tileSurf(n)) { continue; }
-            sum = sum + 0.5 * unpackAcc(cAcc[tileSurfIndex(n)]);
+            let a = cAcc[tileSurfIndex(n)];
+            if (a == 0u) { continue; }
+            sum = sum + 0.5 * unpackAcc(a);
             w = w + 0.5;
         }
     }
+    if (w == 0.0) { return unpackAcc(own); }
     return sum / w;
 }
 
@@ -942,10 +952,12 @@ fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, first: i32, count: i
     let firedAll = f32(fired * fireCount);
     let estimate = clamp(p.bounce.x * sumL / firedAll, vec3<f32>(0.0), vec3<f32>(1.0));
     let occEstimate = (1.0 - escaped / firedAll) * 255.0;
-    let r8 = blendBounce(f32(word & 0xFFu), estimate.r, alpha);
-    let g8 = blendBounce(f32((word >> 8u) & 0xFFu), estimate.g, alpha);
-    let b8 = blendBounce(f32((word >> 16u) & 0xFFu), estimate.b, alpha);
-    let o8 = blend8(f32(word >> 24u), occEstimate, alpha);
+    // Air not measured yet (word 0, see smoothedAcc) takes the hop whole rather than blending from nothing.
+    let a = select(alpha, 1.0, word == 0u);
+    let r8 = blendBounce(f32(word & 0xFFu), estimate.r, a);
+    let g8 = blendBounce(f32((word >> 8u) & 0xFFu), estimate.g, a);
+    let b8 = blendBounce(f32((word >> 16u) & 0xFFu), estimate.b, a);
+    let o8 = blend8(f32(word >> 24u), occEstimate, a);
     if (keepBounce) { return (word & 0xFFFFFFu) | (u32(o8) << 24u); }
     return u32(r8) | (u32(g8) << 8u) | (u32(b8) << 16u) | (u32(o8) << 24u);
 }
