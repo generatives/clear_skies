@@ -133,6 +133,15 @@ public sealed unsafe class GpuContext : IDisposable
         if (required.Limits.MaxBufferSize == ulong.MaxValue || required.Limits.MaxBufferSize < required.Limits.MaxStorageBufferBindingSize)
             required.Limits.MaxBufferSize = required.Limits.MaxStorageBufferBindingSize;
 
+        // The same sentinel hits count limits: an adapter with no real cap (AMD's Vulkan driver reports uint.MaxValue
+        // storage buffers per stage) hands back the "undefined" value, so the device got the default of 8 and the ray
+        // lighting's 10 storage buffers failed validation. Ask for one less, a defined value within what it supports.
+        object boxed = required.Limits;
+        foreach (var field in typeof(Limits).GetFields())
+            if (field.FieldType == typeof(uint) && (uint)field.GetValue(boxed)! == uint.MaxValue)
+                field.SetValue(boxed, uint.MaxValue - 1);
+        required.Limits = (Limits)boxed;
+
         AdapterLimits = required.Limits;
         // The limits a weaker adapter is most likely to fall short on (the ray lighting binds 10 storage buffers).
         Console.WriteLine($"[wgpu] limits: storage buffers per stage {required.Limits.MaxStorageBuffersPerShaderStage}, " +
