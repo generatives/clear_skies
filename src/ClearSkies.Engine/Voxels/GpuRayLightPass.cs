@@ -959,16 +959,12 @@ fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) n
     // bounceVoxel), which overwrites.
     let cycle = max(u32(p.bounce2.y), 1u);
     let prime = nuRaw == PRIME;
-    // FULL_SET: fire the voxel's whole ray set (every slice) at once, weighted as the cycle of evaluations it stands
-    // in for: 1 - (1 - alpha)^cycle, so a restart (alpha 1) starts from the exact mean instead of one noisy slice, and
-    // a carried-on average takes the step a cycle of slices would.
+    // FULL_SET: a first evaluation that fires the voxel's whole ray set at once and replaces what was stored, so a
+    // restart away from the camera starts from the exact mean instead of one noisy slice.
     let full = !prime && (nuRaw & FULL_SET) != 0u;
     let nu = select(nuRaw & ~FULL_SET, nuRaw, prime);
     let aoOnly = p.bounce.z > 0.5;
-    let a1 = max(1.0 / f32(cycle), 1.0 / (f32(nu) + 1.0));
-    var keep = 1.0 - a1;
-    if (full) { for (var c = 1u; c < cycle; c = c + 1u) { keep = keep * (1.0 - max(1.0 / f32(cycle), 1.0 / (f32(nu + c) + 1.0))); } }
-    let alpha = select(1.0 - keep, 1.0, prime);
+    let alpha = select(max(1.0 / f32(cycle), 1.0 / (f32(nu) + 1.0)), 1.0, prime || full);
     let slice = select(i32(nu % cycle), i32(cycle) - 1, prime);
     let list = listOf(it.g, it.v0);
     // The CPU gives every brick it lists an accumulation slot; without one there is nothing to write.
