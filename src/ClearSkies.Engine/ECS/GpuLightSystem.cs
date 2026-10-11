@@ -67,27 +67,13 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     // whose blocks changed, and the bricks right at a changed block, still restart; an averaging ship restarts where
     // it comes to rest). Either way the direct light (a ship's sun shadow) is redone the frame it changes.
     // Settle radius: within it of the camera, a brick the change held runs its whole hold that frame; past it, one
-    // evaluation a frame (0: one a frame everywhere).
+    // evaluation a frame (0: one a frame everywhere). Averaging bricks fire their whole ray set at once instead: every
+    // frame within the radius, once a cycle past it.
     private enum ChangeKind : byte { Other, Block, Ship }
     private const int KindCount = 3;
     private bool _blockAverage, _shipAverage;
     private int _blockAverageIdx, _shipAverageIdx; // the debug panel's combos (0 clear, 1 average)
     private float _blockSettleRadius = 64f, _shipSettleRadius = 64f;
-
-    /// <summary>
-    /// Averaging: how many evaluations a brick keeps getting after a change last touched it, so that whatever was
-    /// there before is gone to the last stored step. An under-way average moves 1/cycle of the way each evaluation,
-    /// so an old difference d (in 8-bit accumulation steps) shrinks to d(1 - 1/cycle)^n; once it is under 2 steps,
-    /// blend8's rounding moves it one step an evaluation, at most 2 more. The largest difference is a full AO swing,
-    /// 255 steps (bounce, at most 255 x albedo, is smaller), so a cycle of 4 needs 17 + 2 = 19; 2 needs 9, 8 needs 39.
-    /// </summary>
-    private int AverageEvals()
-    {
-        int cycle = System.Math.Max(_bounceCycle, 1);
-        if (cycle == 1) return 1; // each evaluation replaces the stored value outright
-        double fade = System.Math.Log(2.0 / 255.0) / System.Math.Log(1.0 - 1.0 / cycle);
-        return System.Math.Clamp((int)System.Math.Ceiling(fade) + 2, cycle, 64);
-    }
 
     /// <summary>Whether the bounce a change of this kind touches carries on its average rather than restarting
     /// (only with bounce light on: AO alone always carries on).</summary>
@@ -100,9 +86,6 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     private int _bounceSpread = 1;
     private static readonly int[] Spreads = { 1, 2, 4 };
     private static readonly string[] SpreadNames = { "Off (all rays per voxel)", "1/2 of the rays per voxel", "1/4 of the rays per voxel" };
-    // Wide smoothing: the shown bounce and AO average surface air up to two cells away instead of one (see smoothedAcc
-    // in GpuRayLightPass), so each voxel's few fixed ray directions are pooled with about twice as many neighbours'.
-    private bool _wideSmoothing = true;
 
     /// <summary>Checkerboard bounce: 1 (off), 2 or 4: each surface voxel fires 1/that of the rays; other values round to the
     /// nearest of those.</summary>
@@ -262,7 +245,6 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         int spreadIdx = System.Array.IndexOf(Spreads, _bounceSpread);
         if (ImGui.Combo("Checkerboard bounce", ref spreadIdx, SpreadNames, SpreadNames.Length)) _bounceSpread = Spreads[spreadIdx];
         ImGui.TextDisabled("  neighbouring voxels fire different rays; compose smoothing averages them");
-        if (ImGui.Checkbox("Wide smoothing (2 cells, not 1)", ref _wideSmoothing)) _relightRequested = true;
         ImGui.SliderInt("Bounce evaluations after a change", ref _bounceHoldFrames, 1, 64);
         ImGui.SliderFloat("Settled-in-one-frame radius", ref _bounceNearRadius, 0f, 256f, "%.0f");
         ImGui.TextDisabled("  changes within it run all their evaluations the frame they happen (lamps, new bricks;");
@@ -275,8 +257,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         ImGui.SliderFloat("  settled in one frame within##ship", ref _shipSettleRadius, 0f, 256f, "%.0f");
         _blockAverage = _blockAverageIdx == 1;
         _shipAverage = _shipAverageIdx == 1;
-        ImGui.TextDisabled("  average: bounce carries on over frames instead of restarting; past the radius, one evaluation a frame");
-        ImGui.TextDisabled($"  averaging runs {AverageEvals()} evaluations after the last change, until no stored step of the old light is left");
+        ImGui.TextDisabled("  average: bounce carries on instead of restarting, its whole ray set once a cycle (every frame within the radius)");
         ImGui.Text("Gradual bounce (world bricks)");
         ImGui.SliderFloat("Full evaluations within (blocks)", ref _bounceFullRadius, 16f, 4096f, "%.0f");
         ImGui.SliderFloat("Middle evaluations within (blocks)", ref _bounceMidRadius, 16f, 8192f, "%.0f");

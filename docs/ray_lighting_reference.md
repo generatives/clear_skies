@@ -33,10 +33,8 @@ restarts, whatever the setting.
 Compose: `light = max(lamp, bounce × scale, ambient × (1 − aoStrength × AO))` per channel. Lamps are traced at
 compose time. Defaults: ambient level 1/15, AO strength 0.95, albedo 0.5, bounce scale 1. The final compose smooths
 bounce and AO: the voxel counts 2, face neighbours 1, edge diagonals ½. Only neighbours that have accumulation count.
-**Wide smoothing** (panel checkbox, on by default) adds, for bounce only (AO keeps the narrow kernel), the cells two away (squared offset ≤ 6) at ½, each only if
-the cell one step back toward the voxel isn't solid. On flat ground that's an effective 16 voxels pooled instead of
-7. It needs a bigger compose tile: solidity 14³ (was 12³) and accumulation 12³ (was 10³). Earlier compose evaluated
-the smoothing on every compose through a `select`; it now runs only on the final one, as intended.
+Only the final compose runs the smoothing (an `if`; it used to be a `select`, which ran it on every compose). A
+wider 2-cell smoothing was tried (2026-10-11) and made little visible difference, so it was dropped.
 
 ## Bounce rays and the running average
 
@@ -57,18 +55,18 @@ the smoothing on every compose through a `select`; it now runs only on the final
 - **FULL_SET** flag (b543cad): one evaluation fires all `cycle` slices (Medium: 8 rays per voxel) with weight 1, and
   then counts as N = cycle. It is used for a Block or Ship restart outside the settle radius, after the prime in the
   same frame.
-
 - **Whole cycles when averaging** (`WholeCycleDue`): a brick (or averaging ship) carrying on an Average change's
   running average (N > 0) fires FULL_SET once every `cycle` frames, staggered by slot, instead of one slice a frame;
   within its settle radius, every frame instead of the cycle of repeats. Same rays per frame on average; the shown
   value is the full 8-direction mean and only changes when the light does. Fixes the slice-by-slice flicker and the
-  N = 255 freeze on one slice. Bounce lags a change by up to `cycle` frames.
+  N = 255 freeze on one slice (N stops at 255; with whole cycles it no longer matters). Bounce lags a change by up
+  to `cycle` frames.
 
 ## Holds: how many evaluations a change gets
 
 - **Hold** = the hold setting rounded up to whole cycles. All presets: **4** (one cycle).
-- **Averaging** changes grant `AverageEvals()` instead: `ceil(ln(2/255) / ln(1 − 1/cycle)) + 2`, which is **19** at
-  cycle 4. That is how long a 255-step difference takes to fade under weight ¼.
+- **Averaging** changes grant the same hold, spent in whole cycles: one full set replaces what was there, so a hold
+  of one cycle leaves none of the old light. (Before whole cycles they needed 19 evaluations to fade it at weight ¼.)
 - **Distance tiers** (world bricks): a full hold within the full radius, mid evals within the mid radius, and far
   evals beyond it. A brick is topped up as the camera approaches. Ships always get the full hold.
 - **Settle radius**: within it, a held brick runs the rest of its hold in the same frame (repeats). Outside it, the
@@ -82,8 +80,8 @@ the smoothing on every compose through a `select`; it now runs only on the final
 
 | Change | Marked for direct light | Bounce |
 |---|---|---|
-| Block placed or removed, chunk load or unload (kind Block) | A pad around it, its sun-shadow sweep, and lamps whose box touches it | **Clear**: clears bounce around a placed block and along its sweep, plus ray reach. Everything relit restarts with a hold of 4. **Average**: the change site restarts; the sweep and lamp boxes carry on for 19 evaluations (but settled bricks restart anyway, see Storage). |
-| Ship moved (kind Ship) | Old and new pose plus pad, both sun sweeps, lamps | **Clear**: clears both poses and sweeps; restarts, settled within the ship radius. **Average** (blocks unchanged): carries on, and so does everything within ray reach of the hull. The ship's own blocks carry on one evaluation per frame. When the ship stops, it restarts once with a clear. |
+| Block placed or removed, chunk load or unload (kind Block) | A pad around it, its sun-shadow sweep, and lamps whose box touches it | **Clear**: clears bounce around a placed block and along its sweep, plus ray reach. Everything relit restarts with a hold of 4. **Average**: the change site restarts; the sweep and lamp boxes carry on, one whole cycle per hold (but settled bricks restart anyway, see Storage). |
+| Ship moved (kind Ship) | Old and new pose plus pad, both sun sweeps, lamps | **Clear**: clears both poses and sweeps; restarts, settled within the ship radius. **Average** (blocks unchanged): carries on, and so does everything within ray reach of the hull. The ship's own blocks carry on in whole cycles too. When the ship stops, it restarts once with a clear. |
 | Ship blocks edited | Same as moved | Always restarts. |
 | Lamp added, moved or removed (Other) | The lamp's box (level + 1.5) | A removed lamp clears its box plus ray reach. |
 | Sun moved, settings changed | Everything | Everything restarts. |
@@ -99,7 +97,6 @@ the smoothing on every compose through a `select`; it now runs only on the final
 | Cycle | 4 | 4 | 4 | 4 |
 | **Rays per voxel per full cycle** | 16 | 8 | **8** | 32 |
 | Hold (evaluations) | 4 | 4 | 4 | 4 |
-| Averaging evaluations | n/a | n/a | 19 | 19 |
 | Ray reach (voxels) | 8 | 8 | 8 | 16 |
 | Near / settle radius | 0 | 0 | **32** | 64 |
 | Full / mid radius | 96 / 256 | 96 / 256 | 128 / 384 | 256 / 768 |

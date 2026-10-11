@@ -384,8 +384,7 @@ public sealed partial class GpuLightSystem
             _lampTimer.Start();
             _finalComposeWork = UploadWords(_finalComposeWork, _composeList.AsSpan(0, _composeCount));
             _rayLight.DispatchCompose(_store, ShownBounceScale, RayLightingSettings.Ambient,
-                                     RayLightingSettings.AoStrength, _finalComposeWork, _composeCount, smooth: true,
-                                     wide: _wideSmoothing);
+                                     RayLightingSettings.AoStrength, _finalComposeWork, _composeCount, smooth: true);
             _lampTimer.Stop();
         }
         _rayLight.Submit();
@@ -795,10 +794,10 @@ public sealed partial class GpuLightSystem
             }
             else if (st.Blend)
             {
-                // A ship moving with its blocks unchanged carries on its running average, one evaluation a frame (see
+                // A ship moving with its blocks unchanged carries on its running average in whole cycles (see
                 // BuildBounceWork); it restarts only if it has no accumulation (it had settled before it moved).
                 if (!HasAcc(lg.Handle)) st.BounceAllN = 0;
-                st.BounceAllFrames = System.Math.Max(st.BounceAllFrames, AverageEvals());
+                st.BounceAllFrames = System.Math.Max(st.BounceAllFrames, holdFrames);
             }
             else if (st.AllThisFrame)
             {
@@ -882,19 +881,15 @@ public sealed partial class GpuLightSystem
                         (int)MathF.Floor(mx.X / 8f) + m, (int)MathF.Floor(mx.Y / 8f) + m, (int)MathF.Floor(mx.Z / 8f) + m);
 
     /// <summary>Holds a slot for at least <paramref name="holdFrames"/> more evaluations, continuing its running
-    /// average (a slot that has never been evaluated starts one). For an averaging change it is that kind's average
-    /// evaluations instead, scaled by the brick's distance tier as a restart's would be (see Grant): each evaluation
-    /// moves an under-way average only about 1/cycle of the way, so it takes more than a restart's to fade what was
-    /// there before.</summary>
+    /// average (a slot that has never been evaluated starts one). An averaging change's bricks spend it in whole
+    /// cycles (see WholeCycleDue), each replacing what was there, so a hold of one cycle leaves nothing of the old
+    /// light.</summary>
     private void ExtendSlot(int slot, int holdFrames, ChangeKind kind = ChangeKind.Other)
     {
         if (_holdStamp[slot] == _frame) return;
         _holdStamp[slot] = _frame;
         _holdKind[slot] = (byte)kind;
-        int grant = Grant(slot, holdFrames);
-        if (AverageAfter(kind) && holdFrames > 0)
-            grant = System.Math.Clamp((grant * AverageEvals() + holdFrames - 1) / holdFrames, 1, 255);
-        _hold[slot] = (byte)System.Math.Max(_hold[slot], grant);
+        _hold[slot] = (byte)System.Math.Max(_hold[slot], Grant(slot, holdFrames));
         if (!_inHeld[slot]) { _inHeld[slot] = true; _heldQueue.Add(slot); }
     }
 
@@ -1335,8 +1330,7 @@ public sealed partial class GpuLightSystem
     {
         _lampTimer.Start();
         _rayLight.DispatchCompose(_store, ShownBounceScale, RayLightingSettings.Ambient,
-                                     RayLightingSettings.AoStrength, _nearComposeWork!, _nearCount, smooth: final,
-                                     wide: final && _wideSmoothing);
+                                     RayLightingSettings.AoStrength, _nearComposeWork!, _nearCount, smooth: final);
         _lampTimer.Stop();
     }
 
