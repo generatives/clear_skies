@@ -282,6 +282,12 @@ public sealed partial class GpuLightSystem
             _rayLight.DispatchZeroAcc(_store, _zeroWork, fresh.Length);
             _store.NewAccs.Clear();
         }
+        if (_seedSlots.Count > 0)
+        {
+            _seedWork = UploadWords(_seedWork, CollectionsMarshal.AsSpan(_seedSlots));
+            _rayLight.DispatchSeedAcc(_store, ShownBounceScale, _seedWork, _seedSlots.Count);
+            _seedSlots.Clear();
+        }
         // With bounce on, a brick is composed only once it has accumulation (its bounce is updating): until
         // then it keeps its display (its sun, written by the sun pass, is current already).
         if (bounceOn)
@@ -982,6 +988,10 @@ public sealed partial class GpuLightSystem
         // only where the brick's own voxels changed: a settled brick's first hop then reads walls not yet showing their
         // AO (as ships always did before the bands), which is brighter.
         bool aoPass = (_aoPassSettled ? restart : _restart[slot]) && !_aoOnly;
+        // A settled brick (fresh accumulation, its own voxels unchanged) starts from the light it was showing: from
+        // nothing, a whole settled ship touched at once would read only dark neighbours and settle a few hops dim.
+        bool seed = fresh && !_restart[slot] && !_aoOnly;
+        if (seed) _seedSlots.Add((uint)slot);
         int every = System.Math.Max(1, b.Every);
         bool blend = !restart && _pending[slot] && every > 1 && _frame - _lastUpdate[slot] <= every;
         int step = 0;
@@ -989,7 +999,7 @@ public sealed partial class GpuLightSystem
         {
             // A brick carrying on (it had accumulation already) keeps its bounce through the AO pass: zeroing it would
             // dim everything whose hops read it, a whole small ship when one of its blocks changed while it moved.
-            AddStep(step++, (uint)slot, AoPassWord(b.Spread, keepBounce: !fresh));
+            AddStep(step++, (uint)slot, AoPassWord(b.Spread, keepBounce: !fresh || seed));
             if (_aoPassCount == _aoPassed.Length) Array.Resize(ref _aoPassed, _aoPassed.Length * 2);
             _aoPassed[_aoPassCount++] = (uint)slot;
         }
@@ -1155,7 +1165,9 @@ public sealed partial class GpuLightSystem
     private readonly List<int> _accSlots = new();
     private bool[] _inAcc = Array.Empty<bool>();
     private uint[] _preCompose = Array.Empty<uint>();
-    private GpuBuffer? _zeroWork;
+    private GpuBuffer? _zeroWork, _seedWork;
+    // Settled bricks updating again this frame, whose fresh accumulation starts from their display (see UpdateBrick).
+    private readonly List<uint> _seedSlots = new();
 
     /// <summary>Gives a brick about to update its accumulation; true if it had none (it restarts).</summary>
     private bool GiveAcc(int slot)

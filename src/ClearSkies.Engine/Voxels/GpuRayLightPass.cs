@@ -1008,6 +1008,28 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
     accPool[base + 1] = accPool[base + 1] & 0xFF000000u;
 }
 
+// Starts the listed light slots' fresh accumulation from their display instead of from nothing: bricks that had settled
+// (their bounce kept only in the display) and are updating again. Bounce becomes the shown light over the display scale
+// (p.bounce.z), so composing it gives back what was shown and neighbours' hops read the light that was there, not a dark
+// gap; their own hops then replace it. AO starts at none (an AO pass or the first hop writes it). Run after zero_main.
+@compute @workgroup_size(256)
+fn seed_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
+             @builtin(local_invocation_index) t: u32) {
+    let wi = wid.x + wid.y * nwg.x;
+    if (wi >= u32(p.counts.z)) { return; }
+    let slot = work[wi];
+    let a = accOf(slot);
+    if (a < 0) { return; }
+    let w = lightPool[i32(slot) * SLOT_WORDS + i32(t)];
+    let scale = max(p.bounce.z, 1e-3);
+    for (var e = 0u; e < 2u; e = e + 1u) {
+        let d = (w >> (e * 16u)) & 0xFFFFu;
+        var c = vec3<f32>(0.0);
+        if (!isEmptyLight(d)) { c = clamp(decodeLight(d) / scale, vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0; }
+        accPool[a + i32(t * 2u + e)] = u32(round(c.r)) | (u32(round(c.g)) << 8u) | (u32(round(c.b)) << 16u);
+    }
+}
+
 // Zeroes the listed accumulation slots (accPool slot numbers, not light slots): ones just handed out, which still
 // hold whatever their last brick left, before anything reads them.
 @compute @workgroup_size(256)
@@ -1027,6 +1049,7 @@ fn zero_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg
     private readonly ComputePipeline _bouncePipeline;
     private readonly ComputePipeline _clearPipeline;
     private readonly ComputePipeline _zeroPipeline;
+    private readonly ComputePipeline _seedPipeline;
     // One small uniform buffer per dispatch of a frame: the dispatches are recorded into one command buffer, so every
     // parameter write lands before any of them runs and each needs its own.
     private readonly List<GpuBuffer> _params = new();
@@ -1042,6 +1065,7 @@ fn zero_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg
     private static readonly uint[] BounceBindings = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
     private static readonly uint[] ClearBindings  = { 6, 8, 9, 10 };
     private static readonly uint[] ZeroBindings   = { 6, 8, 9 };
+    private static readonly uint[] SeedBindings   = { 3, 6, 8, 9, 10 };
 
     public GpuRayLightPass(GpuContext ctx)
     {
@@ -1051,6 +1075,7 @@ fn zero_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg
         _bouncePipeline = new ComputePipeline(ctx, Wgsl, "bounce_main");
         _clearPipeline  = new ComputePipeline(ctx, Wgsl, "clear_main");
         _zeroPipeline   = new ComputePipeline(ctx, Wgsl, "zero_main");
+        _seedPipeline   = new ComputePipeline(ctx, Wgsl, "seed_main");
         _lists = GpuBuffer.CreateStorage(ctx, 65536);
     }
 
@@ -1083,6 +1108,15 @@ fn zero_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg
         if (count <= 0) return;
         var param = WriteParams(Vector3D<float>.Zero, count, default, default);
         Dispatch(_zeroPipeline, ZeroBindings, store, work, count, param, "Lighting: zero accumulation");
+    }
+
+    /// <summary>Starts the accumulation of the <paramref name="count"/> light slots listed in <paramref name="work"/>
+    /// from their display (see seed_main); run after <see cref="DispatchZeroAcc"/>.</summary>
+    public void DispatchSeedAcc(GridStore store, float bounceScale, GpuBuffer work, int count)
+    {
+        if (count <= 0) return;
+        var param = WriteParams(Vector3D<float>.Zero, count, new Vector4D<float>(0f, 0f, bounceScale, 0f), default);
+        Dispatch(_seedPipeline, SeedBindings, store, work, count, param, "Lighting: seed accumulation");
     }
 
     /// <summary>Sun visibility for the <paramref name="count"/> light slots listed in <paramref name="work"/>.</summary>
@@ -1198,6 +1232,7 @@ fn zero_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg
         _bouncePipeline.Dispose();
         _clearPipeline.Dispose();
         _zeroPipeline.Dispose();
+        _seedPipeline.Dispose();
         Submit();
         foreach (var p in _params) p.Dispose();
         _lists.Dispose();
