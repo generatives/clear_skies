@@ -166,6 +166,7 @@ public sealed partial class GpuLightSystem
 
         _occluderChanges.Clear();
         _shipMoves.Clear();
+        _editBoxes.Clear();
         _urgentMarked.Clear();
         _directChanges.Clear();
         _bounceClears.Clear();
@@ -237,6 +238,7 @@ public sealed partial class GpuLightSystem
         _phaseTimer.Lap(3);
         TouchBounce(bounceReset);
         TouchBounceClears();
+        TouchEdits();
         _phaseTimer.Lap(4);
         if (n > 0) AddCompose(_scratch.AsSpan(0, n), 1);
 
@@ -356,6 +358,8 @@ public sealed partial class GpuLightSystem
         {
             if (!grid.IsWorld) continue; // a ship's edit shows as its version changing (see below)
             _dbgChangedChunks++;
+            // A block edit (bounds smaller than the chunk; a load or unload is the whole chunk): see _editSlots.
+            if (mx.X - mn.X < S || mx.Y - mn.Y < S || mx.Z - mn.Z < S) _editBoxes.Add((mn, mx));
             if (solid && !relightAll) _occluderChanges.Add((mn, mx));
             if (solid) _shapeChanges.Add((mn, mx));
         }
@@ -474,6 +478,33 @@ public sealed partial class GpuLightSystem
     private Action<int>? _addClearDelegate;
     private Action<int> _addClear => _addClearDelegate ??= AddClear;
     private int[] _clearStamp = Array.Empty<int>();
+
+    // World block edits this frame, and the bricks right at them (the edit plus a voxel and a half), which update this
+    // frame past the cap, as an edited ship's bricks do: air beside a placed block has never been measured, and until
+    // its first hop it reads as open and unlit, a bright face in a dark room.
+    private readonly List<(Vector3D<float> min, Vector3D<float> max)> _editBoxes = new();
+    private readonly List<int> _editSlots = new();
+    private int[] _editStamp = Array.Empty<int>();
+    private Action<int>? _addEditDelegate;
+
+    private void TouchEdits()
+    {
+        _editSlots.Clear();
+        if (_worldIndex < 0 || _editBoxes.Count == 0) return;
+        var world = _staticVolume.Gpu;
+        _addEditDelegate ??= slot =>
+        {
+            if (_editStamp[slot] == _frame) return;
+            _editStamp[slot] = _frame;
+            _editSlots.Add(slot);
+            Touch(slot);
+        };
+        const float pad = 1.5f;
+        foreach (var (mn, mx) in _editBoxes)
+            ForEachSlotInBrickBox(world, (int)MathF.Floor((mn.X - pad) / 8f), (int)MathF.Floor((mn.Y - pad) / 8f), (int)MathF.Floor((mn.Z - pad) / 8f),
+                                  (int)MathF.Floor((mx.X + pad) / 8f), (int)MathF.Floor((mx.Y + pad) / 8f), (int)MathF.Floor((mx.Z + pad) / 8f),
+                                  _addEditDelegate);
+    }
 
     // A lamp is its block: grid and grid-space voxel, plus level and colour (so replacing a lamp in place with a
     // different one counts as a removal and an addition). A lamp riding a moving ship keeps its key; the ship's own
@@ -890,13 +921,15 @@ public sealed partial class GpuLightSystem
             if (lg.Handle.IsWorld) continue;
             var st = _gridStates[lg.Handle];
             int band = _tiersOn ? BandOf(BoxDistanceSquared(camPos, st.CurWorldMin, st.CurWorldMax)) : 0;
-            bool due = Due(lg.Handle.Index, band);
+            bool due = Due(lg.Handle.Index, band) || st.Edited; // see _editSlots
             foreach (int slot in lg.Handle.Slots)
                 if (NeedsUpdate(slot) && (due || _clearStamp[slot] == _frame)) UpdateBrick(slot, band);
         }
 
         foreach (int slot in _clearSlots)
             if (_store.SlotGrid[slot] == _worldIndex && NeedsUpdate(slot)) UpdateBrick(slot, WorldBandOf(slot));
+        foreach (int slot in _editSlots)
+            if (_lastUpdate[slot] != _frame && NeedsUpdate(slot)) UpdateBrick(slot, WorldBandOf(slot));
 
         int spent = 0;
         _putBack.Clear();
@@ -1095,6 +1128,7 @@ public sealed partial class GpuLightSystem
         Array.Resize(ref _inCoarse, capacity);
         Array.Resize(ref _composeStamp, capacity);
         Array.Resize(ref _clearStamp, capacity);
+        Array.Resize(ref _editStamp, capacity);
         Array.Resize(ref _urgentStamp, capacity);
         Array.Resize(ref _inAcc, capacity);
         if (_preCompose.Length < capacity) Array.Resize(ref _preCompose, capacity);

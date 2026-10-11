@@ -104,7 +104,7 @@ What a change touches differs (see below); what happens to a touched brick depen
 
 | Change | Marked for direct light | Bounce |
 |---|---|---|
-| Block placed or removed, chunk load or unload | A pad around it, its sun-shadow sweep, and lamps whose box touches it, relit this frame | Touched, plus ray reach |
+| Block placed or removed, chunk load or unload | A pad around it, its sun-shadow sweep, and lamps whose box touches it, relit this frame | Touched, plus ray reach; the bricks at a block edit (and all of an edited ship) update this frame, past the cap, so air never measured before doesn't show as bright |
 | Ship moved | Old and new pose plus pad, both sun sweeps, lamps, relit this frame | Its bricks touched, and everything within ray reach of the hull |
 | Lamp added, moved or removed | The lamp's box (level + 1.5), queued | Touched, plus ray reach; a removed lamp clears its box plus ray reach |
 | New light storage | The brick (starts from nothing), queued | Touched, plus ray reach |
