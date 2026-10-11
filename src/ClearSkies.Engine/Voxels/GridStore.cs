@@ -244,6 +244,10 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     public const int WorldLayers = 64;
     private const int NoWorldSlot = 0xFFFF;
     private readonly int _worldDim;
+
+    /// <summary>About how far from the camera world chunks load (blocks): the view distance the world index was sized
+    /// for (see LightBudget.WorldIndexDim).</summary>
+    internal float WorldReach => (_worldDim - 3) / 2 * (float)ChunkData.Size;
     private readonly ulong _worldIndexBytes;
     private readonly Dictionary<int, ChunkRecord> _worldCells = new();
     private int _worldCapacity, _worldNext;

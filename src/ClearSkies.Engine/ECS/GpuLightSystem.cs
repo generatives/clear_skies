@@ -275,10 +275,11 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         ref var b = ref _bands[i];
         ImGui.Text(name);
         // Each band starts where the one inside it ends: near goes up to the middle band's radius, the middle band
-        // down to the near one's.
+        // from the near one's out to how far the world loads (the far band is the rest).
         if (hasRadius)
         {
-            float min = i == 0 ? 0f : _bands[0].Radius, max = i == 0 ? _bands[1].Radius : 8192f;
+            float min = i == 0 ? 0f : _bands[0].Radius;
+            float max = i == 0 ? _bands[1].Radius : System.Math.Max(_store.WorldReach, min);
             b.Radius = System.Math.Clamp(b.Radius, min, max);
             ImGui.SliderFloat($"  within (blocks)##band{i}", ref b.Radius, min, max, "%.0f");
         }
