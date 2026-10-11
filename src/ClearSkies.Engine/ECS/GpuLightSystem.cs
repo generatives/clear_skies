@@ -54,6 +54,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     private int _bounceRays = 8;
     private int _bounceCycle = 4;   // slices per ray set: each voxel's fixed set is rays x cycle directions
     private float _bounceScale = 1f;
+    private bool _primeSettled = true; // see Burst: whether a settled brick that restarts is primed first
 
     /// <summary>
     /// A distance band (near: within Radius of the camera; middle: within its Radius; far: the rest). A changed brick
@@ -222,6 +223,8 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         if (ImGui.Combo("Checkerboard bounce", ref spreadIdx, SpreadNames, SpreadNames.Length)) _bounceSpread = Spreads[spreadIdx];
         ImGui.TextDisabled("  neighbouring voxels fire different rays; compose smoothing averages them");
         ImGui.SliderFloat("Bounce display scale", ref _bounceScale, 0f, 4f, "%.2f");
+        ImGui.Checkbox("Prime settled bricks", ref _primeSettled);
+        ImGui.TextDisabled("  off: only bricks whose blocks changed measure AO before their bounce (brighter, as ships were)");
         ImGui.Text("Bounce by distance (every change alike)");
         ImGui.TextDisabled("  a changed brick bursts: evaluations back to back (each a hop), firing that many slices,");
         ImGui.TextDisabled("  at most every so many frames (1: settled the frame it changes)");

@@ -958,7 +958,10 @@ public sealed partial class GpuLightSystem
         int per = slices / evals;
         bool fresh = GiveAcc(slot);
         bool restart = fresh || _restart[slot];
-        bool prime = restart && !_aoOnly; // with AO only there is no bounce for priming to protect
+        // With AO only there is no bounce for priming to protect. Unchecking "prime settled bricks" primes only where
+        // the brick's own voxels changed: a settled brick's first evaluation then reads walls not yet showing their AO
+        // (as ships always did before the bands), which is brighter.
+        bool prime = (_primeSettled ? restart : _restart[slot]) && !_aoOnly;
         int every = System.Math.Max(1, b.Every);
         bool blend = !restart && _pending[slot] && every > 1 && _frame - _lastBurst[slot] <= every;
         int step = 0;
