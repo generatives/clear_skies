@@ -1037,7 +1037,10 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
 // Starts the listed light slots' fresh accumulation from their display instead of from nothing: bricks that had settled
 // (their bounce kept only in the display) and are updating again. Bounce becomes the shown light over the display scale
 // (p.bounce.z), so composing it gives back what was shown and neighbours' hops read the light that was there, not a dark
-// gap; their own hops then replace it. AO starts at none (an AO pass or the first hop writes it). Run after zero_main.
+// gap; their own hops then blend from it. AO starts at full occlusion, so the ambient term adds nothing and the
+// compose before the bounce pass shows just the seed, the light that was there; the first hop replaces it. (AO at none
+// lit the ambient term at full strength in that compose, and a dark area's hops read it as bright for an update: a
+// flash on edits in the dark.) An empty display seeds 0, unmeasured. Run after zero_main.
 @compute @workgroup_size(256)
 fn seed_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
              @builtin(local_invocation_index) t: u32) {
@@ -1050,9 +1053,13 @@ fn seed_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg
     let scale = max(p.bounce.z, 1e-3);
     for (var e = 0u; e < 2u; e = e + 1u) {
         let d = (w >> (e * 16u)) & 0xFFFFu;
-        var c = vec3<f32>(0.0);
-        if (!isEmptyLight(d)) { let l = decodeLight(d) / scale; c = vec3<f32>(bounceCode(l.r), bounceCode(l.g), bounceCode(l.b)); }
-        accPool[a + i32(t * 2u + e)] = u32(round(c.r)) | (u32(round(c.g)) << 8u) | (u32(round(c.b)) << 16u);
+        var word = 0u;
+        if (!isEmptyLight(d)) {
+            let l = decodeLight(d) / scale;
+            word = u32(round(bounceCode(l.r))) | (u32(round(bounceCode(l.g))) << 8u) | (u32(round(bounceCode(l.b))) << 16u)
+                   | (255u << 24u);
+        }
+        accPool[a + i32(t * 2u + e)] = word;
     }
 }
 

@@ -983,8 +983,8 @@ public sealed partial class GpuLightSystem
         // Every update blends in at 1/2, so any change, and terrain sharpening as the camera nears, fades in over the
         // band's updates instead of popping. Except where there is no light to keep: a brick never updated (new to
         // light storage, its display empty) or whose bounce was just cleared (a removed lamp) replaces.
-        // A brick given fresh accumulation has no AO to keep (a seed holds only light: the display mixes AO into it), so
-        // its AO replaces.
+        // A brick given fresh accumulation has no AO to keep (a seed holds only light, with AO a full-occlusion
+        // placeholder: the display mixes AO into it), so its AO replaces.
         bool blend = _lastUpdate[slot] != NeverUpdated && _clearStamp[slot] != _frame;
         int step = 0;
         for (int i = 0; i < hops; i++)
