@@ -28,7 +28,7 @@ struct Params {
     counts: vec4<i32>,  // y: word offset of the lamp records in lists, z: work entries this dispatch
     bounce: vec4<f32>,  // x: albedo (fraction of incoming light a surface re-emits), y: sun strength (0-1),
                         // compose: z: bounce display scale (0 = bounce off); bounce: z: 1 = AO only, w: ray reach (voxels)
-    bounce2: vec4<f32>, // x: rays per group, y: direction groups; compose: z: ambient
+    bounce2: vec4<f32>, // x: rays per group, y: direction groups; bounce: w: falloff per block (see fallOff); compose: z: ambient
                         // (0-1), w: ray AO strength (0-1)
 };
 
@@ -847,6 +847,17 @@ fn radianceAt(g: i32, h: Hit) -> vec3<f32> {
     return max(vec3<f32>(sun), max(shown, bnc));
 }
 
+// Minecraft-style falloff (p.bounce2.w > 0): light reaching a voxel along a bounce ray loses a fixed number of levels
+// per block travelled, p.bounce2.w of the full brightness each, on the display's level curve (brightness level =
+// sqrt(light)), so it dies out within level / step blocks. Every hop loses at least the step times its ray length,
+// so light can't sustain itself between surfaces, and dim light fades out entirely instead of lingering.
+fn fallOff(l: vec3<f32>, t: f32) -> vec3<f32> {
+    let step = p.bounce2.w;
+    if (step <= 0.0) { return l; }
+    let f = max(sqrt(max(l, vec3<f32>(0.0))) - vec3<f32>(step * t), vec3<f32>(0.0));
+    return f * f;
+}
+
 fn pcg(v: u32) -> u32 {
     let s = v * 747796405u + 2891336453u;
     let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
@@ -942,7 +953,7 @@ fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, alphaAo: f32, first:
             let h = ddaNearest(gi, lo, ld, clip.t0, clip.t1, gd.bmin.xyz, gd.bmax.xyz);
             if (h.hit && h.t < bestT) { bestT = h.t; bestG = gi; best = h; }
         }
-        if (bestG >= 0) { if (!aoOnly) { sumL = sumL + radianceAt(bestG, best); } }
+        if (bestG >= 0) { if (!aoOnly) { sumL = sumL + fallOff(radianceAt(bestG, best), bestT); } }
         else { escaped = escaped + 1.0; }
     }
     let firedAll = f32(fired * fireCount);
@@ -1183,11 +1194,12 @@ fn zero_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg
     /// voxel (see bounce_main).
     /// </summary>
     public void DispatchBounce(GridStore store, Vector3D<float> sunDir, float sunStrength,
-                               float albedo, int rays, int groups, float reach, bool aoOnly, GpuBuffer work, int count)
+                               float albedo, int rays, int groups, float reach, bool aoOnly, float falloffPerBlock,
+                               GpuBuffer work, int count)
     {
         if (count <= 0) return;
         var param = WriteParams(sunDir, count, new Vector4D<float>(albedo, sunStrength, aoOnly ? 1f : 0f, reach),
-                                new Vector4D<float>(rays, groups, 0f, 0f));
+                                new Vector4D<float>(rays, groups, 0f, falloffPerBlock));
         Dispatch(_bouncePipeline, BounceBindings, store, work, count, param, "Lighting: bounce");
     }
 

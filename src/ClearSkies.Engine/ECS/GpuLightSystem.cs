@@ -51,6 +51,8 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     private float _bounceAlbedo = 0.5f;
     // How far bounce and AO rays reach (voxels); everything within that of a change is updated, in whole bricks.
     private float _bounceReach = 16f;
+    // Levels (of 15) bounce light loses per block it travels, Minecraft-style (see fallOff); 0 = none.
+    private float _falloffLevels = 1f;
     private int _bounceRays = 8;     // rays per group
     private int _bounceGroups = 4;   // direction groups: each voxel has rays x groups fixed directions
     private float _bounceScale = 1f;
@@ -222,6 +224,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         if (ImGui.Combo("Bounce rays", ref mode, "Off\0AO only\0Bounce light + AO\0")) _bounceMode = (BounceMode)mode;
         ImGui.SliderFloat("Bounce albedo", ref _bounceAlbedo, 0f, 0.9f, "%.2f");
         ImGui.SliderFloat("Bounce ray reach (blocks)", ref _bounceReach, 4f, 16f, "%.0f");
+        ImGui.SliderFloat("Bounce falloff (levels per block, of 15)", ref _falloffLevels, 0f, 4f, "%.2f");
         // Directions per voxel and how many groups they're split into; rays per group follows from the two.
         int directions = _bounceRays * _bounceGroups;
         if (ImGui.SliderInt("Directions per voxel", ref directions, 1, 32 * 64))
