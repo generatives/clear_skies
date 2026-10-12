@@ -51,6 +51,8 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     private float _bounceAlbedo = 0.5f;
     // How far bounce and AO rays reach (voxels); everything within that of a change is updated, in whole bricks.
     private float _bounceReach = 16f;
+    // Each bounce ray reads the 3x3 patch of surface around its hit instead of one cell (see radianceAt).
+    private bool _smoothHits = true;
     private int _bounceRays = 8;     // rays per group
     private int _bounceGroups = 4;   // direction groups: each voxel has rays x groups fixed directions
     private float _bounceScale = 1f;
@@ -102,16 +104,16 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
 
     // High is the field values above; the game starts on Medium (see the constructor). Below High: fewer rays per voxel
     // (each voxel fires 1/spread of the rays, its neighbours the rest, so a patch still covers all of them) beyond the
-    // near band (everywhere on Low), shorter rays, smaller near and middle bands and lower per-frame caps; Low keeps
+    // near band (everywhere on Low and Medium, where smooth bounce hits make up for it), shorter rays, smaller near and middle bands and lower per-frame caps; Low keeps
     // only AO, Minimal only direct light.
     // Near: every direction group in 4 hops. Medium and High: half of them in 2 hops in the middle band; Minimal and
-    // Low a quarter in 1, as far away. One update per change, at most every 4 frames, 8 far.
+    // Low a quarter in 1, as far away. Three updates per change, at most every 4 frames, 8 far.
     private static readonly LightingPreset[] Presets =
     {
         //   Name       Mode               Rays Groups Reach Near (radius, hops, groups, updates, every, spread)  Mid                    Far                 Relit Groups
         new("Minimal", BounceMode.Off,    4,   4,    8f,   new(96f, 4, 4, 3, 4, 1),  new(256f, 1, 1, 3, 4, 1), new(0f, 1, 1, 3, 8, 1),  256,  512),
         new("Low",     BounceMode.AoOnly, 8,   4,    8f,   new(96f, 4, 4, 3, 4, 4),  new(256f, 1, 1, 3, 4, 4), new(0f, 1, 1, 3, 8, 4),  256, 1024),
-        new("Medium",  BounceMode.Full,   8,   4,    8f,   new(128f, 4, 4, 3, 4, 1), new(384f, 2, 2, 3, 4, 4), new(0f, 1, 1, 3, 8, 4),  512, 2048),
+        new("Medium",  BounceMode.Full,   8,   4,    8f,   new(128f, 4, 4, 3, 4, 4), new(384f, 2, 2, 3, 4, 4), new(0f, 1, 1, 3, 8, 4),  512, 2048),
         new("High",    BounceMode.Full,   8,   4,   16f,   new(256f, 4, 4, 3, 4, 1), new(768f, 2, 2, 3, 4, 1), new(0f, 1, 1, 3, 8, 1), 1024, 4096),
     };
 
@@ -220,6 +222,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         if (ImGui.Combo("Bounce rays", ref mode, "Off\0AO only\0Bounce light + AO\0")) _bounceMode = (BounceMode)mode;
         ImGui.SliderFloat("Bounce albedo", ref _bounceAlbedo, 0f, 0.9f, "%.2f");
         ImGui.SliderFloat("Bounce ray reach (blocks)", ref _bounceReach, 4f, 16f, "%.0f");
+        ImGui.Checkbox("Smooth bounce hits (read 3x3 at each hit)", ref _smoothHits);
         // Directions per voxel and how many groups they're split into; rays per group follows from the two.
         int directions = _bounceRays * _bounceGroups;
         if (ImGui.SliderInt("Directions per voxel", ref directions, 1, 32 * 64))

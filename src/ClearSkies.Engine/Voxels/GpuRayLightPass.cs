@@ -28,7 +28,7 @@ struct Params {
     counts: vec4<i32>,  // y: word offset of the lamp records in lists, z: work entries this dispatch
     bounce: vec4<f32>,  // x: albedo (fraction of incoming light a surface re-emits), y: sun strength (0-1),
                         // compose: z: bounce display scale (0 = bounce off); bounce: z: 1 = AO only, w: ray reach (voxels)
-    bounce2: vec4<f32>, // x: rays per group, y: direction groups; compose: z: ambient
+    bounce2: vec4<f32>, // x: rays per group, y: direction groups; bounce: z: 1 = smooth hits (3x3); compose: z: ambient
                         // (0-1), w: ray AO strength (0-1)
 };
 
@@ -829,22 +829,69 @@ fn ddaNearest(g: i32, o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, lo: vec3<i32
     return h;
 }
 
-// Light (linear 0-1 per channel) arriving at the hit face from the air cell in front of it, in grid g: the brighter
-// of the cell's direct sun (visibility x strength x the face's N.L, white) and its displayed light (which includes
-// its AO-darkened ambient, so ambient bounces too: it lifts deep corners a little), per channel.
-// Its accumulated bounce is read too: the display is recomposed once a frame, but near-camera repeats within the
-// frame need each other's fresh bounce to add their hops.
-fn radianceAt(g: i32, h: Hit) -> vec3<f32> {
-    if (!h.front) { return vec3<f32>(0.0); }
-    let r = voxelRef(g, h.cell);
-    if (!r.ok) { return vec3<f32>(0.0); }
+// Light (linear 0-1 per channel) leaving one air cell c of grid g toward a ray that hit the face below it (world
+// normal nW): the brighter of the cell's direct sun (visibility x strength x the face's N.L, white) and its displayed
+// light (which includes its AO-darkened ambient, so ambient bounces too: it lifts deep corners a little), per
+// channel. Its accumulated bounce is read too: the display is recomposed once a frame, but near-camera repeats within
+// the frame need each other's fresh bounce to add their hops. w = 0: nothing to read (no storage, or not composed
+// yet), so it doesn't count.
+struct CellLight { l: vec3<f32>, w: f32 };
+
+fn cellLight(g: i32, c: vec3<i32>, nW: vec3<f32>) -> CellLight {
+    var o: CellLight;
+    o.l = vec3<f32>(0.0); o.w = 0.0;
+    let r = voxelRef(g, c);
+    if (!r.ok) { return o; }
     let d = (lightPool[r.disp] >> r.shift) & 0xFFFFu;
     let acc = select(0u, accPool[max(r.acc, 0)], r.acc >= 0); // a settled brick: its bounce is in its display
-    let shown = select(decodeLight(d), vec3<f32>(0.0), isEmptyLight(d)); // not composed yet: nothing to reflect
-    let bnc = bounceOf(acc);
+    let empty = isEmptyLight(d); // not composed yet: only its fresh bounce to reflect
+    if (empty && acc == 0u) { return o; }
+    let shown = select(decodeLight(d), vec3<f32>(0.0), empty);
+    let sun = select(f32((d >> 14u) & 3u) / 3.0 * p.bounce.y * max(dot(nW, -p.sunDir.xyz), 0.0), 0.0, empty);
+    o.l = max(vec3<f32>(sun), max(shown, bounceOf(acc)));
+    o.w = 1.0;
+    return o;
+}
+
+// A 3x3 neighbour of the hit's cell, in the face plane: counts if it is open air on the same surface (solid behind
+// it, along the face normal).
+fn hitNeighbour(g: i32, c: vec3<i32>, back: vec3<i32>, nW: vec3<f32>) -> CellLight {
+    var o: CellLight;
+    o.l = vec3<f32>(0.0); o.w = 0.0;
+    if (isSolid(g, c) || !isSolid(g, c + back)) { return o; }
+    return cellLight(g, c, nW);
+}
+
+// Light arriving at the hit face from the air in front of it, in grid g. With hit smoothing on (p.bounce2.z), the
+// average over the 3x3 patch of that surface around the hit (the renderer's corner rule: a diagonal counts only
+// beside an open side cell), so each ray reads a patch rather than one cell and a band needs fewer rays for the same
+// smoothness; the ray itself is unchanged, so walls still block it.
+fn radianceAt(g: i32, h: Hit) -> vec3<f32> {
+    if (!h.front) { return vec3<f32>(0.0); }
     let nW = normalize((grids[g].v2w * vec4<f32>(h.n, 0.0)).xyz);
-    let sun = f32((d >> 14u) & 3u) / 3.0 * p.bounce.y * max(dot(nW, -p.sunDir.xyz), 0.0);
-    return max(vec3<f32>(sun), max(shown, bnc));
+    let centre = cellLight(g, h.cell, nW);
+    if (p.bounce2.z < 0.5) { return centre.l; }
+    let N = vec3<i32>(round(h.n));
+    let back = -N;
+    var T = vec3<i32>(1, 0, 0); var B = vec3<i32>(0, 0, 1);
+    if (N.x != 0) { T = vec3<i32>(0, 1, 0); } else if (N.z != 0) { B = vec3<i32>(0, 1, 0); }
+    let tm = hitNeighbour(g, h.cell - T, back, nW);
+    let tp = hitNeighbour(g, h.cell + T, back, nW);
+    let bm = hitNeighbour(g, h.cell - B, back, nW);
+    let bp = hitNeighbour(g, h.cell + B, back, nW);
+    var sum = centre.l * centre.w + tm.l * tm.w + tp.l * tp.w + bm.l * bm.w + bp.l * bp.w;
+    var n = centre.w + tm.w + tp.w + bm.w + bp.w;
+    for (var k = 0; k < 4; k = k + 1) {
+        let st = select(-1, 1, (k & 1) != 0);
+        let sb = select(-1, 1, (k & 2) != 0);
+        let sideT = select(tm.w, tp.w, st > 0);
+        let sideB = select(bm.w, bp.w, sb > 0);
+        if (sideT + sideB == 0.0) { continue; }
+        let dg = hitNeighbour(g, h.cell + T * st + B * sb, back, nW);
+        sum = sum + dg.l * dg.w;
+        n = n + dg.w;
+    }
+    return select(vec3<f32>(0.0), sum / max(n, 1.0), n > 0.0);
 }
 
 fn pcg(v: u32) -> u32 {
@@ -1183,11 +1230,12 @@ fn zero_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg
     /// voxel (see bounce_main).
     /// </summary>
     public void DispatchBounce(GridStore store, Vector3D<float> sunDir, float sunStrength,
-                               float albedo, int rays, int groups, float reach, bool aoOnly, GpuBuffer work, int count)
+                               float albedo, int rays, int groups, float reach, bool aoOnly, bool smoothHits,
+                               GpuBuffer work, int count)
     {
         if (count <= 0) return;
         var param = WriteParams(sunDir, count, new Vector4D<float>(albedo, sunStrength, aoOnly ? 1f : 0f, reach),
-                                new Vector4D<float>(rays, groups, 0f, 0f));
+                                new Vector4D<float>(rays, groups, smoothHits ? 1f : 0f, 0f));
         Dispatch(_bouncePipeline, BounceBindings, store, work, count, param, "Lighting: bounce");
     }
 
