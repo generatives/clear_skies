@@ -28,7 +28,7 @@ struct Params {
     counts: vec4<i32>,  // y: word offset of the lamp records in lists, z: work entries this dispatch
     bounce: vec4<f32>,  // x: albedo (fraction of incoming light a surface re-emits), y: sun strength (0-1),
                         // compose: z: bounce display scale (0 = bounce off); bounce: z: 1 = AO only, w: ray reach (voxels)
-    bounce2: vec4<f32>, // x: rays per group, y: direction groups; bounce: w: falloff per block (see fallOff); compose: z: ambient
+    bounce2: vec4<f32>, // x: rays per group, y: direction groups; bounce: z: max vs average, w: falloff per block (see fallOff); compose: z: ambient
                         // (0-1), w: ray AO strength (0-1)
 };
 
@@ -912,6 +912,7 @@ fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, alphaAo: f32, first:
     let twist = rand01(seed) * 6.2831853;
     let shift = rand01(seed + 1u);
     var sumL = vec3<f32>(0.0);
+    var maxL = vec3<f32>(0.0);
     var escaped = 0.0;
     let rays = clamp(i32(p.bounce2.x), 1, BOUNCE_MAX_RAYS);
     let groups = max(i32(p.bounce2.y), 1);
@@ -953,11 +954,16 @@ fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, alphaAo: f32, first:
             let h = ddaNearest(gi, lo, ld, clip.t0, clip.t1, gd.bmin.xyz, gd.bmax.xyz);
             if (h.hit && h.t < bestT) { bestT = h.t; bestG = gi; best = h; }
         }
-        if (bestG >= 0) { if (!aoOnly) { sumL = sumL + fallOff(radianceAt(bestG, best), bestT); } }
+        if (bestG >= 0) {
+            if (!aoOnly) { let l = fallOff(radianceAt(bestG, best), bestT); sumL = sumL + l; maxL = max(maxL, l); }
+        }
         else { escaped = escaped + 1.0; }
     }
     let firedAll = f32(fired * fireCount);
-    let estimate = clamp(p.bounce.x * sumL / firedAll, vec3<f32>(0.0), vec3<f32>(1.0));
+    // p.bounce2.z blends the rays' average (0: light weighed by how much of the view it fills) toward their brightest
+    // (1: the brightest surface in sight counts in full, however small, Minecraft-style with the falloff).
+    let gathered = mix(sumL / firedAll, maxL, clamp(p.bounce2.z, 0.0, 1.0));
+    let estimate = clamp(p.bounce.x * gathered, vec3<f32>(0.0), vec3<f32>(1.0));
     let occEstimate = (1.0 - escaped / firedAll) * 255.0;
     // Air not measured yet (word 0, see smoothedAcc) takes the hop whole rather than blending from nothing.
     let a = select(alpha, 1.0, word == 0u);
@@ -1195,11 +1201,11 @@ fn zero_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg
     /// </summary>
     public void DispatchBounce(GridStore store, Vector3D<float> sunDir, float sunStrength,
                                float albedo, int rays, int groups, float reach, bool aoOnly, float falloffPerBlock,
-                               GpuBuffer work, int count)
+                               float maxBlend, GpuBuffer work, int count)
     {
         if (count <= 0) return;
         var param = WriteParams(sunDir, count, new Vector4D<float>(albedo, sunStrength, aoOnly ? 1f : 0f, reach),
-                                new Vector4D<float>(rays, groups, 0f, falloffPerBlock));
+                                new Vector4D<float>(rays, groups, maxBlend, falloffPerBlock));
         Dispatch(_bouncePipeline, BounceBindings, store, work, count, param, "Lighting: bounce");
     }
 
