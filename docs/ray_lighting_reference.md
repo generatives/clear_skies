@@ -32,7 +32,7 @@ every edit (2026-10-11).
 5. **Compose** (final, smoothed).
 
 Compose: `light = max(lamp, bounce × scale, ambient × (1 − aoStrength × AO))` per channel. Lamps are traced at
-compose time. Defaults: ambient level 1/15, AO strength 0.95, albedo 0.5, bounce scale 1. The final compose smooths
+compose time. Defaults: ambient level 0.5/15 (a floor: bounce dimmer than it doesn't show), AO strength 0.95, albedo 0.5, bounce scale 1. The final compose smooths
 bounce and AO: the voxel counts 2, face neighbours 1, edge diagonals ½. Only neighbours that have accumulation count.
 Only the final compose runs the smoothing (an `if`; it used to be a `select`, which ran it on every compose). A
 wider 2-cell smoothing was tried (2026-10-11) and made little visible difference, so it was dropped.

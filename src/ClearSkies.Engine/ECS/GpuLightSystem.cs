@@ -32,7 +32,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
 
     // Flat ambient (0-15, Minecraft-style level), baked into each voxel's displayed light (darkened by its ray AO) by
     // the compose pass; changing it relights everything.
-    private float _ambientLevel = 1f;
+    private float _ambientLevel = 0.5f; // of 15: a floor under bounce, so it hides any bounce dimmer than it
 
     // How strongly ray AO (measured by the bounce rays, GpuRayLightPass bounce_main) darkens the ambient term,
     // 0-1. Applied by the compose pass (changing it relights everything); forced to 0 while bounce is off.
@@ -213,7 +213,9 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
 
         ImGui.Separator();
         ImGui.Text("Lighting settings");
-        ImGui.SliderFloat("Ambient level", ref _ambientLevel, 0f, 15f, "%.0f");
+        // Logarithmic with two decimals: the useful range is under 1 (ambient is a floor under bounce, see compose_main),
+        // where whole levels were too coarse.
+        ImGui.SliderFloat("Ambient level", ref _ambientLevel, 0f, 15f, "%.2f", ImGuiSliderFlags.Logarithmic);
         ImGui.SliderFloat("Exposure (lit surfaces)", ref RayLightingSettings.Exposure, 0.5f, 3f, "%.2f");
         ImGui.SliderFloat("Ray AO strength", ref _aoStrength, 0f, 1f, "%.2f");
         int mode = (int)_bounceMode;
