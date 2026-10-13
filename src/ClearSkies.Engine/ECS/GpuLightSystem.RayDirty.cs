@@ -98,7 +98,7 @@ public sealed partial class GpuLightSystem
     private int _prevBounceRays = -1, _prevBounceGroups = -1;
 
     private bool _rayWasActive, _relightRequested;
-    private (float scale, float ambient, float ao) _prevShown = (-1f, -1f, -1f);
+    private (float scale, float ambient, float ao, float aoOnBounce) _prevShown = (-1f, -1f, -1f, -1f);
     private Vector3D<float> _prevSunDir;
     private readonly List<WorldLamp> _prevLamps = new();
     private HashSet<(int, int, int, int, int)> _prevLampKeys = new(), _curLampKeys = new();
@@ -146,7 +146,7 @@ public sealed partial class GpuLightSystem
         var sunDir = SunLight.Direction;
         // The bounce display scale, ambient and AO strength are baked into the composed display, so changing any of them
         // (or bounce on/off) recomposes.
-        var shown = (ShownBounceScale, RayLightingSettings.Ambient, RayLightingSettings.AoStrength);
+        var shown = (ShownBounceScale, RayLightingSettings.Ambient, RayLightingSettings.AoStrength, _aoOnBounce);
         bool scaleChanged = shown != _prevShown;
         _prevShown = shown;
         bool relightAll = !_rayWasActive || sunDir != _prevSunDir || _relightRequested || scaleChanged;
@@ -311,7 +311,7 @@ public sealed partial class GpuLightSystem
             _lampTimer.Start();
             _composeWork = UploadWords(_composeWork, _preCompose.AsSpan(0, preCompose));
             _rayLight.DispatchCompose(_store, ShownBounceScale, RayLightingSettings.Ambient,
-                                     RayLightingSettings.AoStrength, _composeWork, preCompose, smooth: false);
+                                     RayLightingSettings.AoStrength, _aoOnBounce, _composeWork, preCompose, smooth: false);
             _lampTimer.Stop();
         }
 
@@ -344,7 +344,7 @@ public sealed partial class GpuLightSystem
             _lampTimer.Start();
             _finalComposeWork = UploadWords(_finalComposeWork, _composeList.AsSpan(0, _composeCount));
             _rayLight.DispatchCompose(_store, ShownBounceScale, RayLightingSettings.Ambient,
-                                     RayLightingSettings.AoStrength, _finalComposeWork, _composeCount, smooth: true);
+                                     RayLightingSettings.AoStrength, _aoOnBounce, _finalComposeWork, _composeCount, smooth: true);
             _lampTimer.Stop();
         }
         _rayLight.Submit();

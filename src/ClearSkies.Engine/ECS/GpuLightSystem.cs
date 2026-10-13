@@ -37,6 +37,8 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     // How strongly ray AO (measured by the bounce rays, GpuRayLightPass bounce_main) darkens the ambient term,
     // 0-1. Applied by the compose pass (changing it relights everything); forced to 0 while bounce is off.
     private float _aoStrength = 0.95f;
+    // How much of the AO darkening also applies to bounce (0: AO darkens only the ambient term; see composeSurface).
+    private float _aoOnBounce = 0.5f;
 
     // Bounce (GpuRayLightPass bounce_main): albedo feeds the pass (changing it updates everything); each voxel has
     // fixed directions, rays per group x direction groups of them; scale multiplies the stored
@@ -218,6 +220,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         ImGui.SliderFloat("Ambient level", ref _ambientLevel, 0f, 15f, "%.2f", ImGuiSliderFlags.Logarithmic);
         ImGui.SliderFloat("Exposure (lit surfaces)", ref RayLightingSettings.Exposure, 0.5f, 3f, "%.2f");
         ImGui.SliderFloat("Ray AO strength", ref _aoStrength, 0f, 1f, "%.2f");
+        ImGui.SliderFloat("AO on bounce (0: ambient only)", ref _aoOnBounce, 0f, 1f, "%.2f");
         int mode = (int)_bounceMode;
         if (ImGui.Combo("Bounce rays", ref mode, "Off\0AO only\0Bounce light + AO\0")) _bounceMode = (BounceMode)mode;
         ImGui.SliderFloat("Bounce albedo", ref _bounceAlbedo, 0f, 0.9f, "%.2f");

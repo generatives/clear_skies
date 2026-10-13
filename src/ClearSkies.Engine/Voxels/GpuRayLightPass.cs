@@ -27,7 +27,7 @@ struct Params {
     sunDir: vec4<f32>,
     counts: vec4<i32>,  // y: word offset of the lamp records in lists, z: work entries this dispatch
     bounce: vec4<f32>,  // x: albedo (fraction of incoming light a surface re-emits), y: sun strength (0-1),
-                        // compose: z: bounce display scale (0 = bounce off); bounce: z: 1 = AO only, w: ray reach (voxels)
+                        // compose: z: bounce display scale (0 = bounce off), w: AO on bounce; bounce: z: 1 = AO only, w: ray reach (voxels)
     bounce2: vec4<f32>, // x: rays per group, y: direction groups; compose: z: ambient
                         // (0-1), w: ray AO strength (0-1)
 };
@@ -662,13 +662,17 @@ fn smoothedAcc(lk: vec3<i32>, own: u32) -> vec4<f32> {
 // A surface voxel's display half: the flat ambient (p.bounce2.z) darkened by the ray AO (times its strength,
 // p.bounce2.w), its lamp light (traced now) and bounce (times the display scale, p.bounce.z), combined per channel by
 // max, and the given sun level; bounce and AO are the stored ones, smoothed over neighbours (smoothedAcc) when smooth.
+// The final compose darkens bounce by the AO too, times p.bounce.w of its strength, so corners and contact shadows show
+// in lit rooms, not only where ambient is the brightest term. Not the compose before the bounce pass: a seeded brick's
+// AO there is a full-occlusion placeholder (see seed_main), and the hops should read its light, not darken it.
 fn composeSurface(g: i32, v: vec3<i32>, lk: vec3<i32>, acc: u32, sun: u32, list: u32, smoothed: bool) -> u32 {
     let ambient = p.bounce2.z;
     // An if rather than a select: select evaluates both sides, so the smoothing would run on every compose.
     var sm = unpackAcc(acc);
     if (smoothed) { sm = smoothedAcc(lk, acc); }
-    let bounce = sm.rgb * p.bounce.z;
-    let sky = ambient * (1.0 - p.bounce2.w * sm.a);
+    let occ = p.bounce2.w * sm.a;
+    let bounce = sm.rgb * p.bounce.z * (1.0 - select(0.0, p.bounce.w * occ, smoothed));
+    let sky = ambient * (1.0 - occ);
     let light = max(max(lampLight(g, v, list), bounce), vec3<f32>(sky));
     return encodeLight(light) | (sun << 14u);
 }
@@ -1166,11 +1170,11 @@ fn zero_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg
     /// <paramref name="ambient"/> darkened by the stored AO times <paramref name="aoStrength"/>, keeping the sun level
     /// already in place. Run it after the sun and bounce passes. <paramref name="smooth"/>: average bounce and AO over
     /// neighbours (the frame's last compose of these bricks); otherwise each voxel's own.</summary>
-    public void DispatchCompose(GridStore store, float bounceScale, float ambient, float aoStrength, GpuBuffer work, int count,
-                                bool smooth)
+    public void DispatchCompose(GridStore store, float bounceScale, float ambient, float aoStrength, float aoOnBounce,
+                                GpuBuffer work, int count, bool smooth)
     {
         if (count <= 0) return;
-        var param = WriteParams(Vector3D<float>.Zero, count, new Vector4D<float>(smooth ? 1f : 0f, 0f, bounceScale, 0f),
+        var param = WriteParams(Vector3D<float>.Zero, count, new Vector4D<float>(smooth ? 1f : 0f, 0f, bounceScale, aoOnBounce),
                                 new Vector4D<float>(0f, 0f, ambient, aoStrength));
         Dispatch(_composePipeline, ComposeBindings, store, work, count, param, "Lighting: compose");
     }
