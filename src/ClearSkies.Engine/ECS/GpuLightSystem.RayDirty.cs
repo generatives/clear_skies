@@ -10,29 +10,35 @@ namespace ClearSkies.Engine.ECS;
 // Ray-traced lighting: change tracking and dispatch. Each frame only the surface bricks (light slots) whose lighting
 // can have changed are re-traced; every other voxel keeps its stored light.
 //
-// What makes a brick dirty:
+// What makes a brick dirty (its direct light is redone):
 //  - everything, on the first frame, when the sun direction changes, or on the debug panel's relight button;
 //  - being newly given light storage (a chunk loaded or edited next to it);
 //  - a changed occluder (a world chunk with solid in it that was loaded, edited or unloaded; a ship that moved or
 //    was edited, at its old and new pose): the bricks right next to it, every brick whose sun ray passes through it
-//    (its bounds swept along the sun direction), and the full radius of every lamp whose reach overlaps it;
-//    for a placed block or a moved ship the bounce there is also cleared, and those bricks are relit and bounced
-//    the same frame, past the caps;
+//    (its bounds swept along the sun direction), and the full radius of every lamp whose reach overlaps it; these are
+//    relit the frame they change, past the cap, so a moving ship's shadow keeps up with it;
 //  - a lamp that appeared, disappeared or moved: its full radius, at old and new positions.
 // A ship is all-or-nothing (it is small) and always processed; the static world is tracked per brick, and its marked
-// bricks wait in a queue that is worked through nearest the camera first, up to a per-frame cap, so a burst of chunk
+// bricks wait in a queue that is worked through nearest the camera first, up to a per-frame cap, so a rush of chunk
 // loads or a sun change spreads over frames instead of landing on one.
-// Bounce (and the ray AO it measures) follows the bricks actually relit, held for a number of evaluations around
-// each, grown by the bounce ray length; held bricks are also evaluated nearest-first under their own cap.
+//
+// Bounce (and the ray AO it measures) is the same for every kind of change; only the brick's distance from the camera
+// matters. Every brick relit, and every brick within bounce reach of one, is touched: it gets the band's updates per
+// change. An update is the band's hops run back to back in one frame (one dispatch each, each reading the last, so
+// each adds a hop), together firing the band's groups of the voxel's directions, always the same ones. A brick updates
+// on its turn, once every so many frames (the band's setting), staggered by brick (a ship's bricks together); each
+// update reads the light the last one left, so a change gets updates x hops hops. Every update blends in at 1/2, so
+// any change fades in over the band's updates (3 by default: 1/2, 3/4, 7/8 of the way) instead of popping, except
+// where there is no light to keep (a brick new to light storage, or a removed lamp's clear), which replaces. A world
+// brick that settled has its accumulation freed; when it updates again it is seeded from its display. Only where a
+// lamp was removed is bounce cleared, since there it would otherwise sustain itself.
 public sealed partial class GpuLightSystem
 {
     /// <summary>Per-grid tracking.</summary>
     private sealed class GridLightState
     {
         public bool LightAll = true;          // relight every surface brick of the grid this frame
-        public int BounceAllFrames, BounceAllN;
         public bool AllThisFrame;             // relit whole this frame
-        public bool BounceAllThisFrame;       // bounced whole this frame
 
         // Ships: last frame's pose / opacity version, and world-space bounds of their solid bricks.
         public bool HavePrev;
@@ -47,44 +53,40 @@ public sealed partial class GpuLightSystem
 
     private readonly Dictionary<GridHandle, GridLightState> _gridStates = new();
 
-    // Per light slot. Hold is how many more bounce evaluations the brick gets; N how many it has had since it went
-    // from idle to changed (it picks the ray slice, N mod cycle, and the shader's blend weight, max(1/cycle,
-    // 1/(N+1))). Every change restarts N at 0, so the first evaluation after it replaces what was there.
+    // Per light slot. Left: the updates it is owed (Touched: touched since its last update, owed the band's updates per
+    // change). Last update: the frame of its last update, or NeverUpdated when it has no light to keep (new to light
+    // storage, or its bounce cleared), so its next update replaces instead of blending.
     private bool[] _dirty = Array.Empty<bool>();
-    private byte[] _hold = Array.Empty<byte>();
-    private byte[] _n = Array.Empty<byte>();
-    // Whether a brick has had its priming evaluation since its average last restarted (see GpuRayLightPass PRIME).
-    private bool[] _primed = Array.Empty<bool>();
-    private const uint PrimeEval = uint.MaxValue;
-    private bool[] _inHeld = Array.Empty<bool>();
-    private int[] _holdStamp = Array.Empty<int>();
-    // Gradual bounce (see GpuLightSystem's settings): the evaluations a world brick has been granted since it last
-    // changed (255: none yet), and the bricks granted fewer than a full hold, topped up as the camera nears them.
-    private byte[] _given = Array.Empty<byte>();
+    private byte[] _left = Array.Empty<byte>();
+    private const byte Touched = byte.MaxValue;
+    private const int NeverUpdated = int.MinValue / 2;
+    private int[] _lastUpdate = Array.Empty<int>();
+    private bool[] _inQueue = Array.Empty<bool>();
+    // Distance bands: how much of the directions a world brick's last update covered (see BandRays; max: none yet), and the bricks that fired fewer than the
+    // most any band fires, touched again as the camera nears them (see TopUpNearing).
+    private ushort[] _given = Array.Empty<ushort>();
     private bool[] _inCoarse = Array.Empty<bool>();
     private readonly List<int> _coarse = new();
-    private int _coarseAt, _fullHold, _dbgTopUps;
-    private Vector3D<float> _tierCam;
-    private bool _tiersOn;
-    // Marked bricks waiting for direct light, and held bricks waiting for bounce, nearest the camera first. Stale
-    // entries (freed slots, holds run out) are dropped as they come up.
-    private NearestQueue? _dirtyQueueField, _heldQueueField;
+    private int _coarseAt, _dbgTopUps;
+    private Vector3D<float> _bandCam;
+    private bool _bandsOn;
+    // Marked bricks waiting for direct light, and touched bricks waiting for an update, nearest the camera first. Stale
+    // entries (freed slots, updates done) are dropped as they come up.
+    private NearestQueue? _dirtyQueueField, _updateQueueField;
     private NearestQueue _dirtyQueue => _dirtyQueueField ??= new NearestQueue(SlotCentre);
-    private NearestQueue _heldQueue => _heldQueueField ??= new NearestQueue(SlotCentre);
+    private NearestQueue _updateQueue => _updateQueueField ??= new NearestQueue(SlotCentre);
     private readonly List<(int slot, int bucket)> _putBack = new();
-    private Func<int, bool>? _keepDirty, _keepHeld;
+    private Func<int, bool>? _keepDirty, _keepQueued;
     private int _frame;
     private int _worldIndex = -1;
     private GridLightState? _worldState;
 
     // Every buffer written once per frame: the frame's dispatches go in one submit, after all the writes.
-    private GpuBuffer? _lightWork, _bounceWork;
-    private GpuBuffer?[] _nearWorks = new GpuBuffer?[4];
+    private GpuBuffer? _lightWork;
+    private GpuBuffer?[] _stepWorks = new GpuBuffer?[4];
     private uint[] _scratch = new uint[4096];
-    private uint[] _nearScratch = new uint[1024];
-    private int _nearCount;
 
-    private int _lastDirtyTotal, _lastBounceTotal, _lastNearTotal;
+    private int _lastDirtyTotal, _lastBounceTotal, _lastStepTotal;
     // The bricks within bounce ray reach of a brick, each way.
     private int BounceMarginBricks => (int)MathF.Ceiling(_bounceReach / 8f);
     // The stored bounce shown: none with AO only (the rays store none).
@@ -93,7 +95,7 @@ public sealed partial class GpuLightSystem
     private float _prevBounceAlbedo = -1f, _prevSunLevel = -1f;
     private BounceMode _prevBounceMode = BounceMode.Off;
     private float _prevBounceReach = -1f;
-    private int _prevBounceRays = -1, _prevBounceCycle = -1, _prevBounceSpread = -1;
+    private int _prevBounceRays = -1, _prevBounceGroups = -1;
 
     private bool _rayWasActive, _relightRequested;
     private (float scale, float ambient, float ao) _prevShown = (-1f, -1f, -1f);
@@ -103,9 +105,24 @@ public sealed partial class GpuLightSystem
     private readonly List<(Vector3D<float> min, Vector3D<float> max)> _bounceClears = new();
     private readonly List<int> _clearSlots = new();
     private GpuBuffer? _clearWork;
-    // darkens: a placed block, which can take light away (bounce there is then cleared rather than left to decay).
-    private readonly List<(Vector3D<float> min, Vector3D<float> max, bool darkens)> _occluderChanges = new();
+    private readonly List<(Vector3D<float> min, Vector3D<float> max)> _occluderChanges = new();
     private readonly List<(Vector3D<float> min, Vector3D<float> max)> _directChanges = new();
+    // This frame's lamp boxes relit (lamp changes, and lamps in reach of an occluder change): with AO only, their
+    // bricks are touched so they compose (see TouchBounce).
+    private readonly List<(Vector3D<float> min, Vector3D<float> max)> _lampRelit = new();
+
+    private void MarkLampBox(Vector3D<float> mn, Vector3D<float> mx)
+    {
+        MarkRegion(mn, mx, _urgentMarks);
+        _lampRelit.Add((mn, mx));
+    }
+    // Moving ships: the world bounds of each at its old and new pose (everything within bounce reach of them is
+    // touched: the hull blocks and reflects their rays).
+    private readonly List<(Vector3D<float> min, Vector3D<float> max)> _shipMoves = new();
+
+    // Bricks an occluder change marked this frame (stamped by frame): relit past the cap.
+    private int[] _urgentStamp = Array.Empty<int>();
+    private readonly List<int> _urgentMarked = new();
 
     // Debug-panel breakdown of why bricks were relit this frame.
     private string _dbgFullReason = "";
@@ -145,16 +162,19 @@ public sealed partial class GpuLightSystem
         _newSlots.AddRange(_store.NewSlots);
         foreach (int slot in _store.NewSlots)
         {
-            _hold[slot] = 0;
-            _n[slot] = 0;
-            _primed[slot] = false;
-            _given[slot] = byte.MaxValue;
+            _left[slot] = 0;
+            _lastUpdate[slot] = NeverUpdated;
+            _given[slot] = ushort.MaxValue;
             MarkSlot(slot);
         }
         _store.NewSlots.Clear();
 
         _occluderChanges.Clear();
+        _shipMoves.Clear();
+        _editBoxes.Clear();
+        _urgentMarked.Clear();
         _directChanges.Clear();
+        _lampRelit.Clear();
         _bounceClears.Clear();
         _shapeChanges.Clear();
         CollectOccluderChanges(relightAll);
@@ -172,61 +192,61 @@ public sealed partial class GpuLightSystem
         }
         else
         {
+            // One set of marks at a time (see BrickMarks): everything an occluder change touches (right at it,
+            // voxels whose sun ray passes through it, the radius of lamps whose rays may), relit this frame; then the
+            // lamp changes, queued.
             var pad = new Vector3D<float>(1.5f);
-            foreach (var (mn, mx, darkens) in _occluderChanges)
+            foreach (var (mn, mx) in _occluderChanges)
             {
-                MarkRegion(mn - pad, mx + pad);             // surface voxels right at the change
-                MarkSunShadow(mn, mx, sunDir, darkens);     // voxels whose sun ray passes through it
-                MarkLampsTouching(mn, mx, darkens);         // lamps whose rays may pass through it
-                if (darkens) ClearBounceAround(mn - pad, mx + pad);
+                MarkRegion(mn - pad, mx + pad, _urgentMarks);
+                MarkSunShadow(mn, mx, sunDir, _urgentMarks);
+                foreach (var lamp in _lamps) { var (a, b) = LampBox(lamp); if (Overlaps(a, b, mn, mx)) MarkLampBox(a, b); }
+                foreach (var lamp in _prevLamps) { var (a, b) = LampBox(lamp); if (Overlaps(a, b, mn, mx)) MarkLampBox(a, b); }
             }
+            if (!_urgentMarks.IsEmpty) _urgentMarks.Flush(_urgentSlotDelegate ??= MarkUrgent);
             foreach (var (mn, mx) in _directChanges) MarkRegion(mn, mx);
-            _marks.Flush(_markSlot);
+            _lampRelit.AddRange(_directChanges);
+            if (!_marks.IsEmpty) _marks.Flush(_markSlot);
         }
         _phaseTimer.Lap(2);
 
-        // Evaluations a changed area gets, rounded up to whole cycles so it always stops having covered each voxel's
-        // complete ray set equally.
-        int hold = HoldEvals();
-
-        // Bounce inputs that change what every surface receives (or which rays it fires): re-evaluate everything. The
+        // Bounce inputs that change what every surface receives (or which rays it fires): update everything. The
         // displayed light bounce rays read includes the AO-darkened ambient, so that counts too.
         // With AO only, nothing about direct light feeds the rays: only a change of what they measure counts.
         bool bounceOn = _bounceEnabled;
         bool bounceReset = bounceOn && (_bounceMode != _prevBounceMode || _bounceReach != _prevBounceReach
-                                        || _bounceRays != _prevBounceRays || _bounceCycle != _prevBounceCycle
-                                        || _bounceSpread != _prevBounceSpread
-                                        || !_aoOnly && (_bounceAlbedo != _prevBounceAlbedo || SunLight.Level != _prevSunLevel || scaleChanged));
+                                        || _bounceRays != _prevBounceRays || _bounceGroups != _prevBounceGroups
+                                        || scaleChanged // the display bakes in ambient x AO: recomposed only once updated
+                                        || !_aoOnly && (_bounceAlbedo != _prevBounceAlbedo || SunLight.Level != _prevSunLevel));
         _prevBounceMode = _bounceMode;
         _prevBounceReach = _bounceReach;
         _prevBounceAlbedo = _bounceAlbedo;
         _prevSunLevel = SunLight.Level;
         _prevBounceRays = _bounceRays;
-        _prevBounceCycle = _bounceCycle;
-        _prevBounceSpread = _bounceSpread;
+        _prevBounceGroups = _bounceGroups;
 
         _sunTimer.Reset();
         _lampTimer.Reset();
         _bounceTimer.Reset();
         _lastBounceTotal = 0;
-        _lastNearTotal = 0;
+        _lastStepTotal = 0;
         bool haveCam = CameraUtil.TryGetActive(_cameras, out var cam);
 
         // All of this frame's work is chosen first (it depends only on CPU state), so the per-chunk lists can be built
         // once for every chunk any pass touches. Then the order is: sun (display sun bits) -> clear bounce where light
-        // may have dropped -> compose what changed (so the bounce pass reads current direct light, not last frame's)
-        // -> bounce (accumulation; reads the display at its hits) -> compose again (display colour and AO, from lamp
-        // rays plus the new bounce). Every brick whose sun or bounce changed is recomposed.
+        // was removed -> compose what changed (so the bounce pass reads current direct light, not last frame's)
+        // -> bounce updates (accumulation; reads the display at its hits) -> compose again (display colour and AO, from
+        // lamp rays plus the new bounce). Every brick whose sun or bounce changed is recomposed.
         _composeCount = 0;
-        _fullHold = hold;
-        _tiersOn = haveCam;
-        _tierCam = cam.Position;
+        _bandsOn = haveCam;
+        _bandCam = cam.Position;
         CollectBounceClears(); // first, so the cleared bricks' direct light is redone this frame too
         int n = BuildLightWork(cam.Position);
         _lastDirtyTotal = n;
         _phaseTimer.Lap(3);
-        HoldBounce(hold, bounceReset);
-        HoldBounceClears(hold);
+        TouchBounce(bounceReset);
+        TouchBounceClears();
+        TouchEdits();
         _phaseTimer.Lap(4);
         if (n > 0) AddCompose(_scratch.AsSpan(0, n), 1);
 
@@ -240,14 +260,13 @@ public sealed partial class GpuLightSystem
         }
         int preCompose = _composeCount;
 
-        int nb = 0;
+        int steps = 0;
         if (bounceOn)
         {
             if (haveCam) TopUpNearing();
-            float nearR = haveCam && hold > 1 && _bounceNearRadius > 0f ? _bounceNearRadius : -1f;
-            nb = BuildBounceWork(cam.Position, nearR);
-            _lastBounceTotal = nb;
-            if (nb > 0) AddCompose(_scratch.AsSpan(0, 2 * nb), 2);
+            steps = BuildBounceWork(cam.Position);
+            _lastBounceTotal = steps > 0 ? _stepLen[0] / 2 : 0;
+            if (steps > 0) AddCompose(_stepWords[0].AsSpan(0, _stepLen[0]), 2);
         }
 
         _phaseTimer.Lap(5);
@@ -264,7 +283,13 @@ public sealed partial class GpuLightSystem
             _rayLight.DispatchZeroAcc(_store, _zeroWork, fresh.Length);
             _store.NewAccs.Clear();
         }
-        // With bounce on, a brick is composed only once it has accumulation (its bounce is being evaluated): until
+        if (_seedSlots.Count > 0)
+        {
+            _seedWork = UploadWords(_seedWork, CollectionsMarshal.AsSpan(_seedSlots));
+            _rayLight.DispatchSeedAcc(_store, ShownBounceScale, _seedWork, _seedSlots.Count);
+            _seedSlots.Clear();
+        }
+        // With bounce on, a brick is composed only once it has accumulation (its bounce is updating): until
         // then it keeps its display (its sun, written by the sun pass, is current already).
         if (bounceOn)
         {
@@ -290,48 +315,28 @@ public sealed partial class GpuLightSystem
             _lampTimer.Stop();
         }
 
-        if (bounceOn)
+        if (bounceOn && steps > 0)
         {
-            if (nb > 0)
+            // The updates, one dispatch per step: every brick's first hop, then each brick's next, and so on. Each step
+            // reads what the one before wrote, so each adds a hop; a hit reads the stored bounce directly, so no
+            // compose is needed between them.
+            _bounceTimer.Start();
+            for (int r = 0; r < steps; r++)
             {
-                _bounceTimer.Start();
+                var buf = _stepWorks[r];
                 _rayLight.DispatchBounce(_store, sunDir, SunLight.Strength, _bounceAlbedo, _bounceRays,
-                                         _bounceCycle, _bounceSpread, _bounceReach, _aoOnly, _bounceWork!, nb);
-
-                // Extra evaluations of the held bricks near the camera, in the same frame. Each reads the previous
-                // one's result, so each adds a hop and more samples to the running average. Bounce rays read the
-                // display at their hits, so the near bricks are recomposed before every repeat: otherwise a hit's
-                // stale display (last frame's max of lamp and bounce) would hide a drop in its bounce until next
-                // frame, and darkening would only spread one hop per frame.
-                if (_nearCount > 0)
-                {
-                    for (int k = 0; k < _nearCount; k++)
-                    {
-                        _nearSlots[k] = _nearScratch[2 * k];
-                        _nearStamp[(int)_nearSlots[k]] = _frame;
-                    }
-                    _nearComposeWork = UploadWords(_nearComposeWork, _nearSlots.AsSpan(0, _nearCount));
-                    for (int r = 1; r <= hold; r++) // up to a whole hold after a priming evaluation
-                    {
-                        int nr = UploadNearRepeat(r);
-                        if (nr == 0) break;
-                        ComposeNear(final: false);
-                        _rayLight.DispatchBounce(_store, sunDir, SunLight.Strength, _bounceAlbedo, _bounceRays,
-                                                 _bounceCycle, _bounceSpread, _bounceReach, _aoOnly, _nearWorks[r]!, nr);
-                        _lastNearTotal += nr;
-                    }
-                    ComposeNear(final: true);
-                }
-                _bounceTimer.Stop();
+                                         _bounceGroups, _bounceReach, _aoOnly, buf!, _stepLen[r] / 2);
+                if (r > 0) _lastStepTotal += _stepLen[r] / 2;
             }
+            _bounceTimer.Stop();
         }
 
-        // Everything else the sun or bounce pass touched (the near bricks were composed above).
+        // Everything the sun or bounce pass touched.
         int kept = 0;
         for (int k = 0; k < _composeCount; k++)
         {
             int slot = (int)_composeList[k];
-            if (_nearStamp[slot] != _frame && (!bounceOn || _store.AccOf[slot] >= 0)) _composeList[kept++] = _composeList[k];
+            if (!bounceOn || _store.AccOf[slot] >= 0) _composeList[kept++] = _composeList[k];
         }
         _composeCount = kept;
         if (_composeCount > 0)
@@ -357,12 +362,14 @@ public sealed partial class GpuLightSystem
         // World chunks: loads and unloads (the whole chunk) and edits (just the edited blocks' bounds). A chunk with no
         // solid before or after can't have shadowed anything; the bricks it gained or lost storage for are already in
         // NewSlots.
-        foreach (var (grid, mn, mx, solid, darkens) in _store.ChangedChunks)
+        foreach (var (grid, mn, mx, solid, _) in _store.ChangedChunks)
         {
-            if (!grid.IsWorld) continue;
+            if (!grid.IsWorld) continue; // a ship's edit shows as its version changing (see below)
             _dbgChangedChunks++;
-            if (solid && !relightAll) _occluderChanges.Add((mn, mx, darkens));
-            if (solid) _shapeChanges.Add((mn, mx, true));
+            // A block edit (bounds smaller than the chunk; a load or unload is the whole chunk): see TouchEdits.
+            if (mx.X - mn.X < S || mx.Y - mn.Y < S || mx.Z - mn.Z < S) _editBoxes.Add((mn, mx));
+            if (solid && !relightAll) _occluderChanges.Add((mn, mx));
+            if (solid) _shapeChanges.Add((mn, mx));
         }
         _store.ChangedChunks.Clear();
 
@@ -372,29 +379,44 @@ public sealed partial class GpuLightSystem
             var st = _gridStates[lg.Handle];
             var h = lg.Handle;
             WorldBounds(h, lg.VoxelToWorld, out st.CurWorldMin, out st.CurWorldMax);
-            bool moved = !st.HavePrev || lg.Pos != st.PrevPos || lg.Rot != st.PrevRot || h.Version != st.PrevVersion;
+            // Compared with the last pose that counted as a move, so float noise on a still (or locked) ship doesn't
+            // relight and touch it every frame, while slow drift still adds up to a move.
+            bool moved = !st.HavePrev || h.Version != st.PrevVersion || PoseChanged(lg.Pos, lg.Rot, st.PrevPos, st.PrevRot);
             st.Moved = moved;
             st.Edited = !st.HavePrev || h.Version != st.PrevVersion;
             if (moved)
             {
-                // What other grids' AO sees of it changed at both poses; restarted where its blocks changed.
-                if (st.HavePrev) _shapeChanges.Add((st.PrevWorldMin, st.PrevWorldMax, st.Edited));
-                if (h.HasSolid) _shapeChanges.Add((st.CurWorldMin, st.CurWorldMax, st.Edited));
+                // What other grids' AO sees of it changed at both poses.
+                if (st.HavePrev) _shapeChanges.Add((st.PrevWorldMin, st.PrevWorldMax));
+                if (h.HasSolid) _shapeChanges.Add((st.CurWorldMin, st.CurWorldMax));
                 _dbgShipsMoved++;
                 st.LightAll = true;
-                // Like a placed block: the ship may now shade what it didn't, so the bounce around both poses and
-                // along both sun shadows restarts and is recomputed in full this frame, instead of blending with
-                // last frame's (which lags behind the ship and flickers as it moves).
-                if (st.HavePrev) _occluderChanges.Add((st.PrevWorldMin, st.PrevWorldMax, true));
-                if (h.HasSolid) _occluderChanges.Add((st.CurWorldMin, st.CurWorldMax, true));
+                // Like a placed block, the ship may now shade what it didn't: the bricks around both poses and along
+                // both sun shadows are relit this frame, and everything within bounce reach of the hull is touched.
+                if (st.HavePrev) { _occluderChanges.Add((st.PrevWorldMin, st.PrevWorldMax)); _shipMoves.Add((st.PrevWorldMin, st.PrevWorldMax)); }
+                if (h.HasSolid) { _occluderChanges.Add((st.CurWorldMin, st.CurWorldMax)); _shipMoves.Add((st.CurWorldMin, st.CurWorldMax)); }
             }
             st.HavePrev     = h.HasSolid;
+            st.PrevVersion  = h.Version;
+            if (!moved) continue;
             st.PrevPos      = lg.Pos;
             st.PrevRot      = lg.Rot;
-            st.PrevVersion  = h.Version;
             st.PrevWorldMin = st.CurWorldMin;
             st.PrevWorldMax = st.CurWorldMax;
         }
+    }
+
+    /// <summary>A ship moves for lighting once it has gone this far (in blocks) from its last counted pose.</summary>
+    private const float MovePosEpsilon = 1e-3f;
+    /// <summary>... or turned this far: the vector part of the relative rotation, about half the angle (~2e-4 rad).</summary>
+    private const float MoveRotEpsilon = 1e-4f;
+
+    private static bool PoseChanged(Vector3D<float> pos, Quaternion<float> rot, Vector3D<float> prevPos, Quaternion<float> prevRot)
+    {
+        var d = pos - prevPos;
+        if (Vector3D.Dot(d, d) > MovePosEpsilon * MovePosEpsilon) return true;
+        var rel = Quaternion<float>.Concatenate(Quaternion<float>.Conjugate(prevRot), rot);
+        return rel.X * rel.X + rel.Y * rel.Y + rel.Z * rel.Z > MoveRotEpsilon * MoveRotEpsilon;
     }
 
     /// <summary>Lamps that appeared, disappeared or moved since last frame: their full radius is dirty at the
@@ -425,17 +447,19 @@ public sealed partial class GpuLightSystem
     }
 
     /// <summary>The slots inside this frame's bounce-clear boxes (per brick in the world, a whole ship it touches);
-    /// see <see cref="HoldBounceClears"/>.</summary>
+    /// see <see cref="TouchBounceClears"/>.</summary>
     private void CollectBounceClears()
     {
         _clearSlots.Clear();
+        _nowSlots.Clear();
         if (_bounceClears.Count == 0 || _aoOnly) return; // AO only stores no bounce to clear
         foreach (var (mn, mx) in _bounceClears)
+        {
             foreach (var lg in _lit)
             {
                 if (lg.Handle.IsWorld)
                     ForEachSlotInBrickBox(lg.Handle, (int)MathF.Floor(mn.X / 8f), (int)MathF.Floor(mn.Y / 8f), (int)MathF.Floor(mn.Z / 8f),
-                                          (int)MathF.Floor(mx.X / 8f), (int)MathF.Floor(mx.Y / 8f), (int)MathF.Floor(mx.Z / 8f), AddClear);
+                                          (int)MathF.Floor(mx.X / 8f), (int)MathF.Floor(mx.Y / 8f), (int)MathF.Floor(mx.Z / 8f), _addClear);
                 else
                 {
                     var st = _gridStates[lg.Handle];
@@ -443,26 +467,14 @@ public sealed partial class GpuLightSystem
                         foreach (int slot in lg.Handle.Slots) AddClear(slot);
                 }
             }
+        }
     }
 
-    /// <summary>The cleared slots' bounce restarts from zero, held for a full set of evaluations (all of them this
-    /// frame near the camera, see <see cref="BuildBounceWork"/>).</summary>
-    private void HoldBounceClears(int holdEvals)
+    /// <summary>The cleared slots update (replacing: they have no light to keep, see UpdateBrick) this frame wherever
+    /// they are: their display already dropped the old bounce, so waiting would show as a dip.</summary>
+    private void TouchBounceClears()
     {
-        foreach (int slot in _clearSlots)
-        {
-            // A ship relit whole restarts and finishes its bounce whole (HoldBounce); held per brick as well, it would
-            // be evaluated again next frame.
-            int gi = _store.SlotGrid[slot];
-            if (gi != _worldIndex && gi >= 0 && _store.GridAt(gi) is { } g && _gridStates.TryGetValue(g, out var gs) && gs.AllThisFrame)
-                continue;
-            // Restart the running average outright, even if the brick was already held this frame.
-            _holdStamp[slot] = _frame;
-            _n[slot] = 0;
-            _primed[slot] = false;
-            _hold[slot] = (byte)Grant(slot, holdEvals);
-            if (!_inHeld[slot]) { _inHeld[slot] = true; _heldQueue.Add(slot); }
-        }
+        foreach (int slot in _clearSlots) { _lastUpdate[slot] = NeverUpdated; TouchNow(slot); }
     }
 
     private void AddClear(int slot)
@@ -472,7 +484,40 @@ public sealed partial class GpuLightSystem
         _clearSlots.Add(slot);
     }
 
+    // Bricks that update this frame wherever they are, past the cap (see BuildBounceWork): cleared bricks, and the
+    // bricks right at a world block edit.
+    private readonly List<int> _nowSlots = new();
+    private int[] _nowStamp = Array.Empty<int>();
+
+    private void TouchNow(int slot)
+    {
+        Touch(slot);
+        if (_nowStamp[slot] == _frame) return;
+        _nowStamp[slot] = _frame;
+        _nowSlots.Add(slot);
+    }
+
+    private Action<int>? _addClearDelegate;
+    private Action<int> _addClear => _addClearDelegate ??= AddClear;
     private int[] _clearStamp = Array.Empty<int>();
+
+    // World block edits this frame. The bricks right at them (the edit plus a voxel and a half) update this frame past
+    // the cap, as an edited ship's bricks do: air beside a placed block has never been measured, and until its first
+    // hop it reads as open and unlit, a bright face in a dark room.
+    private readonly List<(Vector3D<float> min, Vector3D<float> max)> _editBoxes = new();
+    private Action<int>? _addEditDelegate;
+
+    private void TouchEdits()
+    {
+        if (_worldIndex < 0 || _editBoxes.Count == 0) return;
+        var world = _staticVolume.Gpu;
+        _addEditDelegate ??= TouchNow;
+        const float pad = 1.5f;
+        foreach (var (mn, mx) in _editBoxes)
+            ForEachSlotInBrickBox(world, (int)MathF.Floor((mn.X - pad) / 8f), (int)MathF.Floor((mn.Y - pad) / 8f), (int)MathF.Floor((mn.Z - pad) / 8f),
+                                  (int)MathF.Floor((mx.X + pad) / 8f), (int)MathF.Floor((mx.Y + pad) / 8f), (int)MathF.Floor((mx.Z + pad) / 8f),
+                                  _addEditDelegate);
+    }
 
     // A lamp is its block: grid and grid-space voxel, plus level and colour (so replacing a lamp in place with a
     // different one counts as a removal and an addition). A lamp riding a moving ship keeps its key; the ship's own
@@ -487,34 +532,12 @@ public sealed partial class GpuLightSystem
         return (l.World - r, l.World + r);
     }
 
-    /// <summary>A changed occluder can change what any lamp in reach of it sees, anywhere in that lamp's radius. When
-    /// it <paramref name="darkens"/> (a placed block may now block the lamp), the bounce there is cleared too.</summary>
-    private void MarkLampsTouching(Vector3D<float> mn, Vector3D<float> mx, bool darkens)
-    {
-        foreach (var lamp in _lamps)
-        {
-            var (a, b) = LampBox(lamp);
-            if (!Overlaps(a, b, mn, mx)) continue;
-            _directChanges.Add((a, b));
-            if (darkens) ClearBounceAround(a, b);
-        }
-        foreach (var lamp in _prevLamps) { var (a, b) = LampBox(lamp); if (Overlaps(a, b, mn, mx)) _directChanges.Add((a, b)); }
-    }
-
-    /// <summary>Clears bounce in a region whose light may have dropped, grown by the bounce ray length (everything
-    /// whose bounce rays can reach into it). Bounce there sustains itself from neighbours still holding the old light,
-    /// so left alone it only decays by the albedo per evaluation and freezes as a ghost when evaluation stops.</summary>
-    private void ClearBounceAround(Vector3D<float> mn, Vector3D<float> mx)
-    {
-        var m = new Vector3D<float>(BounceMarginBricks * 8f);
-        _bounceClears.Add((mn - m, mx + m));
-    }
-
     // ── Marking ────────────────────────────────────────────────────────────────
 
     /// <summary>Marks every surface brick overlapping the world-space box: per brick in the static world, the
-    /// whole grid for a ship whose solid bounds it touches.</summary>
-    private void MarkRegion(Vector3D<float> mn, Vector3D<float> mx)
+    /// whole grid for a ship whose solid bounds it touches. World bricks go into <paramref name="marks"/> (default
+    /// <see cref="_marks"/>).</summary>
+    private void MarkRegion(Vector3D<float> mn, Vector3D<float> mx, BrickMarks? marks = null)
     {
         foreach (var lg in _lit)
         {
@@ -522,7 +545,7 @@ public sealed partial class GpuLightSystem
             if (st.LightAll) continue;
             if (lg.Handle.IsWorld)
             {
-                MarkWorldBox(lg.Handle, mn, mx);
+                MarkWorldBox(lg.Handle, mn, mx, marks ?? _marks);
             }
             else if (lg.Handle.HasSolid)
             {
@@ -533,12 +556,12 @@ public sealed partial class GpuLightSystem
     }
 
     /// <summary>Marks the static world's surface bricks overlapping a box (world space = its voxel space).</summary>
-    private void MarkWorldBox(GridHandle world, Vector3D<float> mn, Vector3D<float> mx)
+    private void MarkWorldBox(GridHandle world, Vector3D<float> mn, Vector3D<float> mx, BrickMarks marks)
     {
         int bx0 = (int)MathF.Floor(mn.X / 8f), bx1 = (int)MathF.Floor(mx.X / 8f);
         int by0 = (int)MathF.Floor(mn.Y / 8f), by1 = (int)MathF.Floor(mx.Y / 8f);
         int bz0 = (int)MathF.Floor(mn.Z / 8f), bz1 = (int)MathF.Floor(mx.Z / 8f);
-        _marks.AddBox(world, bx0, by0, bz0, bx1, by1, bz1); // flushed into MarkSlot once marking is done
+        marks.AddBox(world, bx0, by0, bz0, bx1, by1, bz1); // flushed into MarkSlot once marking is done
     }
 
     /// <summary>Calls <paramref name="action"/> for every light slot in the inclusive brick-coordinate box.</summary>
@@ -570,9 +593,8 @@ public sealed partial class GpuLightSystem
 
     /// <summary>Marks the voxels whose sun ray passes through the box: every point p with p - t*sunDir in the
     /// box for some t >= 0, i.e. the box swept along the sun's travel direction, until it leaves the loaded world.
-    /// When the change <paramref name="darkens"/> (a placed block may now shade something), the bounce along the
-    /// sweep is cleared too.</summary>
-    private void MarkSunShadow(Vector3D<float> mn, Vector3D<float> mx, Vector3D<float> sunDir, bool darkens)
+    /// World bricks go into <paramref name="marks"/>.</summary>
+    private void MarkSunShadow(Vector3D<float> mn, Vector3D<float> mx, Vector3D<float> sunDir, BrickMarks marks)
     {
         // Ships: one test each against the whole sweep (the box moved along the sun direction, padded generously, as
         // MarkRegion's ship test is).
@@ -587,7 +609,7 @@ public sealed partial class GpuLightSystem
 
         var world = _staticVolume.Gpu;
         if (!world.HasBox || !_gridStates.TryGetValue(world, out var worldState)) return;
-        if (worldState.LightAll && !darkens) return;
+        if (worldState.LightAll) return;
         var wMin = world.BoxMin.WorldOrigin;
         var wMax = world.BoxMax.WorldOrigin + new Vector3D<float>(S);
 
@@ -623,26 +645,32 @@ public sealed partial class GpuLightSystem
                 b1[i] = (int)MathF.Floor(h / 8f);
             }
             if (gone) break;
-            if (!worldState.LightAll) _marks.AddBox(world, b0[0], b0[1], b0[2], b1[0], b1[1], b1[2]);
-            if (darkens)
-                ClearBounceAround(new Vector3D<float>(b0[0] * 8f, b0[1] * 8f, b0[2] * 8f),
-                                  new Vector3D<float>(b1[0] * 8f + 8f, b1[1] * 8f + 8f, b1[2] * 8f + 8f));
+            marks.AddBox(world, b0[0], b0[1], b0[2], b1[0], b1[1], b1[2]);
         }
     }
 
     private static void Put(Span<float> dst, Vector3D<float> v) { dst[0] = v.X; dst[1] = v.Y; dst[2] = v.Z; }
 
-    // World bricks marked this frame, per chunk; and the delegates they are flushed into (made once).
-    private readonly BrickMarks _marks = new(), _holdMarks = new();
-    private Action<int>? _markSlotDelegate, _holdSlotDelegate;
+    // World bricks marked this frame, per chunk: queued for direct light (lamps), relit this frame past the cap
+    // (occluder changes); and the bounce touches.
+    // Only one may be filling at a time (see BrickMarks).
+    private readonly BrickMarks _marks = new(), _urgentMarks = new(), _touchMarks = new();
+    private Action<int>? _markSlotDelegate, _urgentSlotDelegate, _touchSlotDelegate;
     private Action<int> _markSlot => _markSlotDelegate ??= MarkSlot;
-    private int _holdFramesNow;
 
     private void MarkSlot(int slot)
     {
         if (_dirty[slot]) return;
         _dirty[slot] = true;
         _dirtyQueue.Add(slot);
+    }
+
+    private void MarkUrgent(int slot)
+    {
+        MarkSlot(slot);
+        if (_urgentStamp[slot] == _frame) return;
+        _urgentStamp[slot] = _frame;
+        _urgentMarked.Add(slot);
     }
 
     private static bool Overlaps(Vector3D<float> aMin, Vector3D<float> aMax, Vector3D<float> bMin, Vector3D<float> bMax)
@@ -665,102 +693,103 @@ public sealed partial class GpuLightSystem
         }
     }
 
-    // ── Bounce holds ───────────────────────────────────────────────────────────
+    // ── Bounce touches ─────────────────────────────────────────────────────────
 
-    /// <summary>After this frame's direct-light bricks are chosen: hold whole ships that were relit, and every world
-    /// brick relit this frame plus the bricks within bounce range of it. <paramref name="resetAll"/> (a bounce setting
-    /// changed) restarts everything's running average.</summary>
-    private void HoldBounce(int holdFrames, bool resetAll)
+    /// <summary>After this frame's direct-light bricks are chosen: touch the ships that were relit (all their bricks),
+    /// and every world brick relit this frame plus the bricks within bounce range of it, and of a moving ship.
+    /// <paramref name="resetAll"/> (a bounce setting changed) updates everything.</summary>
+    private void TouchBounce(bool resetAll)
     {
         foreach (var lg in _lit)
         {
             var st = _gridStates[lg.Handle];
             if (lg.Handle.IsWorld)
             {
-                if (!resetAll) continue;
-                foreach (int slot in lg.Handle.Slots) HoldSlot(slot, holdFrames);
+                if (resetAll) foreach (int slot in lg.Handle.Slots) Touch(slot);
+                continue;
             }
-            else if (resetAll) { st.BounceAllFrames = holdFrames; st.BounceAllN = 0; }
-            else if (_aoOnly)
+            if (resetAll) { TouchGrid(lg.Handle); continue; }
+            if (_aoOnly)
             {
-                // A ship's own AO changes with its blocks, and with its pose only near another grid its rays reach;
-                // there it continues its running average instead of restarting every frame it moves.
+                // A ship's own AO changes with its blocks, and with its pose only near another grid its rays reach.
                 st.WasNearOther = st.NearOther;
                 st.NearOther = st.Moved && NearOtherGrid(lg, st);
-                if (st.Edited) { st.BounceAllN = 0; st.BounceAllFrames = holdFrames; }
-                else if (st.Moved && (st.NearOther || st.WasNearOther))
-                    st.BounceAllFrames = System.Math.Max(st.BounceAllFrames, holdFrames);
+                if (st.Edited) TouchGrid(lg.Handle);
+                else if (st.Moved && (st.NearOther || st.WasNearOther)) TouchGrid(lg.Handle);
             }
-            else if (st.AllThisFrame)
-            {
-                // A relit ship restarts its running average (near the camera it then runs its whole hold this frame,
-                // see BuildBounceWork).
-                st.BounceAllN = 0;
-                st.BounceAllFrames = holdFrames;
-            }
+            // A ship relit whole (it moved, or its blocks changed: that counts as a move) updates whole. An edit carries on
+            // like a move (it keeps its accumulation, see ReleaseSettledAccs): snapping the bricks at the change to one
+            // update's light while the rest blend made a patch that blinked.
+            else if (st.AllThisFrame) TouchGrid(lg.Handle);
         }
 
-        if (_aoOnly) { HoldShapeChanges(holdFrames); return; }
+        if (_aoOnly)
+        {
+            // A brick is composed only once it has accumulation, so with AO only (no direct light feeds the rays) the
+            // bricks whose lamp light changed are touched too, or settled terrain would never show a new lamp.
+            var w = _staticVolume.Gpu;
+            if (_worldIndex >= 0) foreach (var (mn, mx) in _lampRelit) AddBrickBox(_touchMarks, w, mn, mx, 0);
+            TouchShapeChanges();
+            return;
+        }
 
         // The world bricks within bounce reach of every relit one, gathered per chunk so the overlapping reaches of
-        // neighbouring bricks are visited once.
+        // neighbouring bricks are visited once, and everything within bounce reach of a moving ship (its hull blocks
+        // and reflects their rays).
         int m = BounceMarginBricks;
         var world = _staticVolume.Gpu;
         foreach (int slot in _relitList)
         {
-            int gi = _store.SlotGrid[slot];
-            if (_store.GridAt(gi) != world) continue;
+            if (_store.SlotGrid[slot] != _worldIndex) continue;
             var c = _store.SlotChunk[slot];
             int b = _store.SlotBrick[slot];
             int bx = c.X * 4 + (b & 3), by = c.Y * 4 + ((b >> 2) & 3), bz = c.Z * 4 + (b >> 4);
-            _holdMarks.AddBox(world, bx - m, by - m, bz - m, bx + m, by + m, bz + m);
+            _touchMarks.AddBox(world, bx - m, by - m, bz - m, bx + m, by + m, bz + m);
         }
-        if (_holdMarks.IsEmpty) return;
-        _holdFramesNow = holdFrames;
-        _holdMarks.Flush(_holdSlotDelegate ??= s => HoldSlot(s, _holdFramesNow));
+        if (_worldIndex >= 0) foreach (var (mn, mx) in _shipMoves) AddBrickBox(_touchMarks, world, mn, mx, m);
+        if (!_touchMarks.IsEmpty) _touchMarks.Flush(_touchSlotDelegate ??= s => Touch(s));
+    }
+
+    private void TouchGrid(GridHandle g)
+    {
+        foreach (int slot in g.Slots) Touch(slot);
     }
 
     /// <summary>
-    /// AO only: holds the world bricks within ray reach of this frame's changed geometry (chunks loaded, edited or
-    /// unloaded, ships that moved, and bricks newly given storage), whatever happened to direct light. Where blocks
-    /// changed the running average restarts; where a ship merely moved past, it continues, so AO under a moving ship
-    /// follows it smoothly instead of restarting from one slice of rays every frame.
+    /// AO only: touches the world bricks within ray reach of this frame's changed geometry (chunks loaded, edited or
+    /// unloaded, ships that moved, and bricks newly given storage), whatever happened to direct light.
     /// </summary>
-    private void HoldShapeChanges(int holdFrames)
+    private void TouchShapeChanges()
     {
         var world = _staticVolume.Gpu;
         if (_worldIndex < 0) return;
         int m = BounceMarginBricks;
-        _holdFramesNow = holdFrames;
         foreach (int slot in _newSlots)
         {
             if (_store.SlotGrid[slot] != _worldIndex) continue;
             var c = _store.SlotChunk[slot];
             int b = _store.SlotBrick[slot];
             int bx = c.X * 4 + (b & 3), by = c.Y * 4 + ((b >> 2) & 3), bz = c.Z * 4 + (b >> 4);
-            _holdMarks.AddBox(world, bx - m, by - m, bz - m, bx + m, by + m, bz + m);
+            _touchMarks.AddBox(world, bx - m, by - m, bz - m, bx + m, by + m, bz + m);
         }
-        foreach (var (mn, mx, restart) in _shapeChanges)
-            if (restart) AddBrickBox(_holdMarks, world, mn, mx, m);
-        if (!_holdMarks.IsEmpty) _holdMarks.Flush(_holdSlotDelegate ??= s => HoldSlot(s, _holdFramesNow));
-        foreach (var (mn, mx, restart) in _shapeChanges)
-            if (!restart) AddBrickBox(_holdMarks, world, mn, mx, m);
-        if (!_holdMarks.IsEmpty) _holdMarks.Flush(_extendSlotDelegate ??= s => ExtendSlot(s, _holdFramesNow));
+        foreach (var (mn, mx) in _shapeChanges) AddBrickBox(_touchMarks, world, mn, mx, m);
+        if (!_touchMarks.IsEmpty) _touchMarks.Flush(_touchSlotDelegate ??= s => Touch(s));
     }
 
     private static void AddBrickBox(BrickMarks marks, GridHandle world, Vector3D<float> mn, Vector3D<float> mx, int m)
         => marks.AddBox(world, (int)MathF.Floor(mn.X / 8f) - m, (int)MathF.Floor(mn.Y / 8f) - m, (int)MathF.Floor(mn.Z / 8f) - m,
                         (int)MathF.Floor(mx.X / 8f) + m, (int)MathF.Floor(mx.Y / 8f) + m, (int)MathF.Floor(mx.Z / 8f) + m);
 
-    /// <summary>Holds a slot for at least <paramref name="holdFrames"/> more evaluations, continuing its running
-    /// average (a slot that has never been evaluated starts one).</summary>
-    private void ExtendSlot(int slot, int holdFrames)
+    /// <summary>A brick needs updates. World bricks wait in the queue; a ship's are looked at with their ship every
+    /// frame.</summary>
+    private void Touch(int slot)
     {
-        if (_holdStamp[slot] == _frame) return;
-        _holdStamp[slot] = _frame;
-        _hold[slot] = (byte)System.Math.Max(_hold[slot], Grant(slot, holdFrames));
-        if (!_inHeld[slot]) { _inHeld[slot] = true; _heldQueue.Add(slot); }
+        _left[slot] = Touched;
+        if (!_inQueue[slot] && _store.SlotGrid[slot] == _worldIndex) { _inQueue[slot] = true; _updateQueue.Add(slot); }
     }
+
+    /// <summary>Whether a brick has an update to come: touched since its last, or owed more for its last change.</summary>
+    private bool NeedsUpdate(int slot) => _left[slot] > 0;
 
     /// <summary>AO only: whether a ship's rays can reach another grid, at its pose this frame.</summary>
     private bool NearOtherGrid(in LitGrid ship, GridLightState st)
@@ -783,81 +812,72 @@ public sealed partial class GpuLightSystem
         return false;
     }
 
-    private Action<int>? _extendSlotDelegate;
     private readonly List<int> _newSlots = new();
-    // AO only: this frame's changed geometry (world space), and whether its blocks changed (restart) or it moved.
-    private readonly List<(Vector3D<float> min, Vector3D<float> max, bool restart)> _shapeChanges = new();
+    // AO only: this frame's changed geometry (world space).
+    private readonly List<(Vector3D<float> min, Vector3D<float> max)> _shapeChanges = new();
 
-    private void HoldSlot(int slot, int holdFrames)
+    // ── Distance bands ─────────────────────────────────────────────────────────
+
+    /// <summary>The band of a point this far (squared) from the camera: 0 near, 1 middle, 2 far.</summary>
+    private int BandOf(float d2)
     {
-        if (_holdStamp[slot] == _frame) return;
-        _holdStamp[slot] = _frame;
-        _n[slot] = 0;
-        _primed[slot] = false;
-        _hold[slot] = (byte)Grant(slot, holdFrames);
-        if (!_inHeld[slot]) { _inHeld[slot] = true; _heldQueue.Add(slot); }
+        float nearR = _bands[0].Radius, midR = System.Math.Max(_bands[1].Radius, nearR);
+        return d2 <= nearR * nearR ? 0 : d2 <= midR * midR ? 1 : 2;
     }
 
-    // ── Gradual bounce ─────────────────────────────────────────────────────────
+    private int WorldBandOf(int slot) => _bandsOn ? BandOf(Vector3D.DistanceSquared(BrickCentre(slot), _bandCam)) : 0;
+
+    /// <summary>The groups an update in this band fires (at least one, at most all of them).</summary>
+    private int BandGroups(int band) => System.Math.Clamp(_bands[band].Groups, 1, System.Math.Max(_bounceGroups, 1));
+
+    /// <summary>An update's hops in this band (at most one per group).</summary>
+    private int BandHops(int band) => System.Math.Clamp(_bands[band].Hops, 1, BandGroups(band));
+
+    /// <summary>How much of the directions an update in this band covers, in quarter groups: the groups its hops fire
+    /// (an equal share each, rounding down) times 4 / rays per voxel spread. What TopUpNearing compares.</summary>
+    private int BandRays(int band)
+    {
+        int hops = BandHops(band);
+        return RaysOf(BandGroups(band) / hops * hops, _bands[band].Spread);
+    }
+
+    private static int RaysOf(int groups, int spread) => groups * 4 / System.Math.Clamp(spread, 1, 4);
+
+    private int MostRays() => System.Math.Max(BandRays(0), System.Math.Max(BandRays(1), BandRays(2)));
+
+    /// <summary>Whether it is this brick's turn (or ship's, by grid index) to update: once every band's frames,
+    /// staggered by <paramref name="key"/> so the bricks share the frames between them.</summary>
+    private bool Due(int key, int band)
+    {
+        int every = System.Math.Max(1, _bands[band].Every);
+        return (int)((uint)(_frame + key) % (uint)every) == 0;
+    }
 
     /// <summary>
-    /// The evaluations a changed brick gets now: a full hold near the camera, fewer farther out (world bricks only;
-    /// ships always get the full hold). A brick granted less is remembered, and <see cref="TopUpNearing"/> gives it
-    /// the rest as the camera comes closer, continuing its running average (the same ray set, the next slices of it)
-    /// rather than restarting it, so its bounce and AO sharpen in a few small steps instead of being relit.
-    /// </summary>
-    private int Grant(int slot, int full)
-    {
-        if (!_tiersOn || _store.SlotGrid[slot] != _worldIndex) return full;
-        int grant = TierEvals(slot, full);
-        _given[slot] = (byte)grant;
-        if (grant < full && !_inCoarse[slot]) { _inCoarse[slot] = true; _coarse.Add(slot); }
-        return grant;
-    }
-
-    /// <summary>The evaluations a world brick should have had at its distance from the camera, out of
-    /// <paramref name="full"/>.</summary>
-    private int TierEvals(int slot, int full)
-    {
-        float fullR = System.Math.Max(_bounceFullRadius, _bounceNearRadius);
-        float midR = System.Math.Max(_bounceMidRadius, fullR);
-        float d2 = Vector3D.DistanceSquared(BrickCentre(slot), _tierCam);
-        int evals = d2 <= fullR * fullR ? full : d2 <= midR * midR ? _bounceMidEvals : _bounceFarEvals;
-        return System.Math.Clamp(evals, 1, full);
-    }
-
-    /// <summary>A changed area's evaluations: the hold setting rounded up to whole cycles, at most 64.</summary>
-    private int HoldEvals() => System.Math.Min(64, (_bounceHoldFrames + _bounceCycle - 1) / _bounceCycle * _bounceCycle);
-
-    /// <summary>
-    /// Walks part of the list of bricks granted fewer than a full hold (all of it every 16 frames or so) and tops up
-    /// those the camera has come closer to: their hold grows by the evaluations they're now owed, and their
-    /// evaluation count carries on. Bricks that have had a full hold, were freed, or went to a ship leave the list.
+    /// Walks part of the list of world bricks that last fired fewer rays per voxel than the most any band fires (all of it
+    /// every 16 frames or so) and touches those the camera has come close enough to for more, so distant terrain
+    /// costs a fraction of the bounce work and sharpens as it's approached. Bricks that have fired the most, were
+    /// freed, or went to a ship leave the list.
     /// </summary>
     private void TopUpNearing()
     {
         _dbgTopUps = 0;
         if (_worldIndex < 0 || _coarse.Count == 0) return;
-        int full = _fullHold;
+        int most = MostRays();
         int budget = System.Math.Min(_coarse.Count, System.Math.Clamp(_coarse.Count / 16, 2048, 32768));
         for (int k = 0; k < budget && _coarse.Count > 0; k++)
         {
             if (_coarseAt >= _coarse.Count) _coarseAt = 0;
             int slot = _coarse[_coarseAt];
-            if (_store.SlotGrid[slot] == _worldIndex && _given[slot] < full)
+            if (_store.SlotGrid[slot] == _worldIndex && _given[slot] < most)
             {
-                int want = TierEvals(slot, full);
-                if (want > _given[slot])
+                if (_left[slot] != Touched && BandRays(WorldBandOf(slot)) > _given[slot])
                 {
-                    // Its accumulation is gone once its first evaluations are done, so a top-up then restarts
-                    // the average with all the evaluations its new distance is owed.
-                    if (_store.AccOf[slot] < 0) { _n[slot] = 0; _hold[slot] = (byte)want; }
-                    else _hold[slot] = (byte)System.Math.Min(255, _hold[slot] + want - _given[slot]);
-                    _given[slot] = (byte)want;
-                    if (!_inHeld[slot]) { _inHeld[slot] = true; _heldQueue.Add(slot); }
+                    Touch(slot);
                     _dbgTopUps++;
                 }
-                if (_given[slot] < full) { _coarseAt++; continue; }
+                _coarseAt++;
+                continue;
             }
             _inCoarse[slot] = false;
             _coarse[_coarseAt] = _coarse[^1];
@@ -871,7 +891,7 @@ public sealed partial class GpuLightSystem
     /// This frame's direct-light bricks into the light work buffer. Every brick of a ship marked whole goes in (ships
     /// are small and move every frame). Marked bricks go in nearest the camera first, up to the per-frame cap; the
     /// rest stay marked for later frames — deferred, never dropped. The marked bricks taken this frame are left in
-    /// <see cref="_relitList"/> for the bounce holds. Returns the count.
+    /// <see cref="_relitList"/> for the bounce touches. Returns the count.
     /// </summary>
     private int BuildLightWork(Vector3D<float> camPos)
     {
@@ -887,10 +907,13 @@ public sealed partial class GpuLightSystem
 
         // Marked bricks, nearest first up to the cap; the rest wait for later frames. Marks that no longer need work
         // (freed slots, bricks of a ship already listed whole) are dropped as they come up.
-        // Bricks whose bounce is cleared this frame (a placed block or moved ship darkening them) are relit now, past
-        // the cap: their bounce is recomputed in full this frame and should see the new direct light.
+        // Bricks whose bounce is cleared this frame (a lamp removed) are relit now, past the cap: their bounce is
+        // recomputed this frame and should see the new direct light. So are the bricks an occluder change marked: a
+        // ship's sun shadow moves with it.
         _relitList.Clear();
         foreach (int slot in _clearSlots)
+            if (_dirty[slot]) TakeDirty(slot, ref n);
+        foreach (int slot in _urgentMarked)
             if (_dirty[slot]) TakeDirty(slot, ref n);
         int urgent = _relitList.Count;
         _dirtyQueue.Recentre(camPos, _keepDirty ??= slot => _dirty[slot]);
@@ -911,112 +934,129 @@ public sealed partial class GpuLightSystem
         Push(ref n, (uint)slot);
     }
 
-    private readonly List<int> _relitList = new(), _bounceChosen = new();
+    private readonly List<int> _relitList = new();
     private int _lastRelitWaiting, _lastBounceWaiting;
 
-    /// <summary>This frame's bounce bricks as (light slot, evaluations since it changed) pairs: every brick of a grid
-    /// whose whole-grid hold lasts, plus the held bricks of the others. Counts holds down and evaluations up.
-    /// Bricks whose centre is within <paramref name="nearRadius"/> of <paramref name="camPos"/> (a negative radius
-    /// disables it) are also collected for extra same-frame evaluations, their N advanced by the repeat count so
-    /// the blend weight keeps falling. Returns the number of bricks.</summary>
-    private int BuildBounceWork(Vector3D<float> camPos, float nearRadius)
+    /// <summary>
+    /// This frame's updates, as step lists of (light slot, hop word) pairs: step 0 holds every updating brick's
+    /// first hop, step 1 each one's next, and so on. Ships' bricks update on their ship's turn, every brick that needs
+    /// one, past the cap (ships are small). World bricks: those cleared or at an edit this frame update now, past the
+    /// cap; the rest on their turn, nearest the camera first, until the frame's groups run out (the cap counts
+    /// the groups updates fire, per brick, so it bounds the rays per group whatever the bands are). Returns the
+    /// number of steps.
+    /// </summary>
+    private int BuildBounceWork(Vector3D<float> camPos)
     {
-        int n = 0;
-        _nearCount = 0;
-        float nearR2 = nearRadius * nearRadius;
-        int extra = System.Math.Max(0, _fullHold - 1); // same-frame evaluations after the first, near the camera
+        for (int r = 0; r < _stepLen.Length; r++) _stepLen[r] = 0;
 
         foreach (var lg in _lit)
         {
+            if (lg.Handle.IsWorld) continue;
             var st = _gridStates[lg.Handle];
-            st.BounceAllThisFrame = st.BounceAllFrames > 0;
-            if (!st.BounceAllThisFrame) continue;
-            // A ship near the camera runs the rest of its hold this frame too, whole (ships are small), so it is
-            // settled the frame it changes; farther away it takes one evaluation per frame.
-            uint evals = (uint)System.Math.Min(st.BounceAllN, 255);
-            bool shipNear = !lg.Handle.IsWorld && nearRadius >= 0f
-                            && BoxDistanceSquared(camPos, st.CurWorldMin, st.CurWorldMax) <= nearR2;
-            int more = shipNear ? System.Math.Min(extra, st.BounceAllFrames - 1) : 0;
-            st.BounceAllFrames -= 1 + more;
-            st.BounceAllN += 1 + more;
+            int band = _bandsOn ? BandOf(BoxDistanceSquared(camPos, st.CurWorldMin, st.CurWorldMax)) : 0;
+            bool due = Due(lg.Handle.Index, band) || st.Edited; // an edited ship updates at once, as world edits do
             foreach (int slot in lg.Handle.Slots)
-            {
-                GiveAcc(slot);
-                Push(ref n, (uint)slot);
-                Push(ref n, evals);
-                if (more > 0) AddNear((uint)slot, evals, more);
-                else if (lg.Handle.IsWorld && nearRadius >= 0f && IsNear(slot, lg.VoxelToWorld, camPos, nearR2)) AddNear((uint)slot, evals, extra);
-            }
+                if (NeedsUpdate(slot) && (due || _nowStamp[slot] == _frame)) UpdateBrick(slot, band);
         }
 
-        // Held bricks of the other grids, nearest first up to the cap; the rest keep their hold for later frames.
-        // Bounce cleared this frame is evaluated now, wherever it is, past the cap: its display already dropped the old
-        // bounce, so waiting would show as a dip.
-        _bounceChosen.Clear();
-        foreach (int slot in _clearSlots)
-            if (IsHeldAlone(slot)) _bounceChosen.Add(slot);
-        int forced = _bounceChosen.Count;
+        foreach (int slot in _nowSlots)
+            if (_store.SlotGrid[slot] == _worldIndex && _lastUpdate[slot] != _frame && NeedsUpdate(slot))
+                UpdateBrick(slot, WorldBandOf(slot));
+
+        int spent = 0;
         _putBack.Clear();
-        _heldQueue.Recentre(camPos, _keepHeld ??= IsHeld);
-        while (_bounceChosen.Count - forced < _maxBouncedPerFrame && _heldQueue.TryTake(out int slot, out int bucket))
+        _updateQueue.Recentre(camPos, _keepQueued ??= IsQueued);
+        while (spent < _maxGroupsPerFrame && _updateQueue.TryTake(out int slot, out int bucket))
         {
-            if (!IsHeld(slot)) continue;
-            // Evaluated with its whole grid, or already chosen above: still held, so it goes back in the queue.
-            // Otherwise chosen, and still put back: dropped when it next comes up if this frame uses up its hold.
-            _putBack.Add((slot, bucket));
-            if (IsHeldAlone(slot) && _clearStamp[slot] != _frame) _bounceChosen.Add(slot);
+            if (!IsQueued(slot)) continue;
+            _putBack.Add((slot, bucket)); // dropped when it next comes up if this update was its last
+            if (_lastUpdate[slot] == _frame) continue;
+            int band = WorldBandOf(slot);
+            if (Due(slot, band)) spent += UpdateBrick(slot, band);
         }
-        foreach (var (slot, bucket) in _putBack) _heldQueue.PutBack(slot, bucket);
-        _lastBounceWaiting = _heldQueue.Count;
-        // The hold counts evaluations, not frames: a near-camera brick runs all of it this frame, so a change near the
-        // camera is finished within its frame; farther away it takes one per frame.
-        foreach (int slot in _bounceChosen)
-        {
-            // A brick starting its evaluations gets its accumulation now; one without any restarts its average, and
-            // is primed first (AO only), an evaluation on top of its hold; near the camera its whole hold still runs
-            // this frame, after it.
-            if (GiveAcc(slot)) { _n[slot] = 0; _primed[slot] = false; }
-            bool prime = !_aoOnly && !_primed[slot]; // with AO only there is no bounce for priming to protect
-            _primed[slot] = true;
-            if (!prime) _hold[slot]--;
-            Push(ref n, (uint)slot);
-            Push(ref n, prime ? PrimeEval : _n[slot]);
-            int more = 0;
-            if (nearRadius >= 0f && Vector3D.DistanceSquared(SlotCentre(slot), camPos) <= nearR2)
-            {
-                more = System.Math.Min(extra + (prime ? 1 : 0), (int)_hold[slot]);
-                if (more > 0) AddNear((uint)slot, prime ? PrimeEval : _n[slot], more);
-                _hold[slot] -= (byte)more;
-            }
-            _n[slot] = (byte)System.Math.Min(_n[slot] + (prime ? 0 : 1) + more, 255);
-        }
+        foreach (var (slot, bucket) in _putBack) _updateQueue.PutBack(slot, bucket);
+        _lastBounceWaiting = _updateQueue.Count;
 
-        n /= 2;
-        if (n > 0) Upload(ref _bounceWork, 2 * n);
-        return n;
+        int steps = 0;
+        while (steps < _stepLen.Length && _stepLen[steps] > 0) steps++;
+        if (steps > _stepWorks.Length) Array.Resize(ref _stepWorks, steps);
+        for (int r = 0; r < steps; r++) _stepWorks[r] = UploadWords(_stepWorks[r], _stepWords[r].AsSpan(0, _stepLen[r]));
+        return steps;
     }
 
-    /// <summary>Whether a held slot still needs bounce (its grid is still there and its hold isn't used up); if not,
-    /// it is released.</summary>
-    private bool IsHeld(int slot)
+    /// <summary>
+    /// Queues one update of a brick in this band, and returns the groups it costs. The band's hops each fire an equal
+    /// share of its groups, always the same ones (from the first), so a partial set stays a fixed, coarser one rather
+    /// than leaning toward whichever group ran last. An update blends in at 1/2: hop i weighs 1/(2H - i), so each of
+    /// the H counts 1/(2H) and the old light keeps half; replacing (no light to keep), hop i weighs 1/(i+1), so the
+    /// update is the mean of its hops. A touch owes the band's updates per change, one per turn, each reading the
+    /// light the last one left.
+    /// </summary>
+    private int UpdateBrick(int slot, int band)
     {
-        int gi = _store.SlotGrid[slot];
-        if (gi >= 0 && gi == _worldIndex && _hold[slot] > 0) return true; // the common case, without the lookups
-        var g = gi >= 0 ? _store.GridAt(gi) : null;
-        if (g != null && _hold[slot] > 0 && _gridStates.ContainsKey(g)) return true;
-        _inHeld[slot] = false;
-        _hold[slot] = 0;
+        var b = _bands[band];
+        int groups = BandGroups(band);
+        int hops = BandHops(band);
+        int per = groups / hops;
+        bool fresh = GiveAcc(slot);
+        // Every update blends in at 1/2, so any change, and terrain sharpening as the camera nears, fades in over the
+        // band's updates instead of popping. Except where there is no light to keep (NeverUpdated: new to light
+        // storage, its display empty, or its bounce just cleared for a removed lamp): that replaces.
+        bool blend = _lastUpdate[slot] != NeverUpdated;
+        // A brick given fresh accumulation (it had settled) carries on from the light it was showing: from nothing,
+        // the bricks around a placed block read only dark neighbours and settle dim. Light a filled hole let in fades
+        // by half each update and the albedo each hop. A seed holds only light (the display mixes AO into it, so AO
+        // starts as a full-occlusion placeholder), so its AO replaces.
+        bool seed = fresh && blend && !_aoOnly;
+        if (seed) _seedSlots.Add((uint)slot);
+        for (int i = 0; i < hops; i++)
+            AddStep(i, (uint)slot, HopWord(i * per, per, blend ? 2 * hops - i : i + 1, b.Spread, aoReplaces: blend && fresh));
+        // A fresh touch owes the band's updates per change, this one included; a follow-up uses one up.
+        int owed = _left[slot] == Touched ? System.Math.Clamp(b.Updates, 1, Touched - 1) : _left[slot];
+        _left[slot] = (byte)System.Math.Max(owed - 1, 0);
+        _lastUpdate[slot] = _frame;
+        if (_store.SlotGrid[slot] == _worldIndex)
+        {
+            int rays = RaysOf(per * hops, b.Spread);
+            _given[slot] = (ushort)rays;
+            if (rays < MostRays() && !_inCoarse[slot]) { _inCoarse[slot] = true; _coarse.Add(slot); }
+        }
+        return per * hops;
+    }
+
+    /// <summary>A hop for the shader: fire <paramref name="count"/> groups from <paramref name="first"/> with rays per
+    /// voxel 1/<paramref name="spread"/>, and blend the result in with weight 1/<paramref name="weightDenominator"/>
+    /// (see GpuRayLightPass bounce_main). <paramref name="aoReplaces"/> (bit 26): AO replaces instead, hop i weighing
+    /// 1/(i+1), i = first / count.</summary>
+    private static uint HopWord(int first, int count, int weightDenominator, int spread, bool aoReplaces = false)
+        => (uint)(first & 0xFF) | ((uint)(count & 0xFF) << 8) | ((uint)(weightDenominator & 0xFF) << 16) | SpreadBits(spread)
+           | (aoReplaces ? 1u << 26 : 0u);
+
+    // Bits 24-25: log2 of the spread (1, 2 or 4: all, half or a quarter of the rays per voxel).
+    private static uint SpreadBits(int spread) => (uint)(spread >= 4 ? 2 : spread >= 2 ? 1 : 0) << 24;
+
+    private void AddStep(int step, uint slot, uint hop)
+    {
+        if (step >= _stepLen.Length)
+        {
+            Array.Resize(ref _stepLen, step + 1);
+            Array.Resize(ref _stepWords, step + 1);
+        }
+        _stepWords[step] ??= new uint[1024];
+        if (_stepLen[step] + 2 > _stepWords[step].Length) Array.Resize(ref _stepWords[step], _stepWords[step].Length * 2);
+        _stepWords[step][_stepLen[step]++] = slot;
+        _stepWords[step][_stepLen[step]++] = hop;
+    }
+
+    private int[] _stepLen = new int[4];
+    private uint[][] _stepWords = new uint[4][];
+
+    /// <summary>Whether a queued world slot still needs an update (its grid is still there); if not, it leaves the queue.</summary>
+    private bool IsQueued(int slot)
+    {
+        if (_store.SlotGrid[slot] == _worldIndex && _worldIndex >= 0 && NeedsUpdate(slot)) return true;
+        _inQueue[slot] = false;
         return false;
-    }
-
-    /// <summary>Whether a slot is held and not evaluated with its whole grid this frame.</summary>
-    private bool IsHeldAlone(int slot)
-    {
-        if (!_inHeld[slot] || _hold[slot] == 0) return false;
-        int gi = _store.SlotGrid[slot];
-        if (gi >= 0 && gi == _worldIndex) return !_worldState!.BounceAllThisFrame;
-        var g = gi >= 0 ? _store.GridAt(gi) : null;
-        return g != null && _gridStates.TryGetValue(g, out var st) && !st.BounceAllThisFrame;
     }
 
     /// <summary>World-space centre of a light slot's brick, for the queues.</summary>
@@ -1029,9 +1069,6 @@ public sealed partial class GpuLightSystem
 
     private static float BoxDistanceSquared(Vector3D<float> p, Vector3D<float> mn, Vector3D<float> mx)
         => Vector3D.DistanceSquared(p, Vector3D.Clamp(p, mn, mx));
-
-    private bool IsNear(int slot, in Mat4 voxelToWorld, Vector3D<float> camPos, float r2)
-        => Vector3D.DistanceSquared(BrickCentre(slot, voxelToWorld), camPos) <= r2;
 
     /// <summary>Grid-space centre of a light slot's brick (world space for the static world).</summary>
     private Vector3D<float> BrickCentre(int slot)
@@ -1050,61 +1087,11 @@ public sealed partial class GpuLightSystem
         return voxelToWorld.TransformPoint(centre);
     }
 
-    /// <summary>Queues a near-camera brick for <paramref name="extraEvals"/> more evaluations this frame, starting
-    /// after evaluation number <paramref name="evals"/>.</summary>
-    private void AddNear(uint slot, uint evals, int extraEvals)
-    {
-        if (2 * _nearCount + 2 > _nearScratch.Length) Array.Resize(ref _nearScratch, _nearScratch.Length * 2);
-        if (_nearCount + 1 > _nearSlots.Length)
-        {
-            Array.Resize(ref _nearSlots, _nearSlots.Length * 2);
-            Array.Resize(ref _nearExtra, _nearSlots.Length);
-        }
-        _nearScratch[2 * _nearCount] = slot;
-        _nearScratch[2 * _nearCount + 1] = evals;
-        _nearExtra[_nearCount] = extraEvals;
-        _nearCount++;
-    }
-
-    private int[] _nearExtra = new int[1024];
-
-    /// <summary>Uploads, as (slot, N + repeat) pairs, the near-camera bricks that still have an evaluation left for
-    /// extra evaluation number <paramref name="repeat"/> (a buffer per repeat), and returns how many.</summary>
-    private int UploadNearRepeat(int repeat)
-    {
-        int n = 0;
-        for (int k = 0; k < _nearCount; k++)
-        {
-            if (_nearExtra[k] < repeat) continue;
-            Push(ref n, _nearScratch[2 * k]);
-            // After a priming evaluation (PrimeEval, which wraps round) the repeats count from 0.
-            Push(ref n, System.Math.Min(unchecked(_nearScratch[2 * k + 1] + (uint)repeat), 255u));
-        }
-        if (repeat >= _nearWorks.Length) Array.Resize(ref _nearWorks, repeat + 1);
-        if (n > 0) Upload(ref _nearWorks[repeat], n);
-        return n / 2;
-    }
-
     // This frame's compose list: every slot the sun or bounce pass touched, once (stamped by frame).
     private uint[] _composeList = new uint[4096];
     private int _composeCount;
     private int[] _composeStamp = Array.Empty<int>();
     private GpuBuffer? _composeWork, _finalComposeWork;
-
-    // The near-camera bricks, recomposed after every bounce repeat (stamped so the final compose skips them).
-    private uint[] _nearSlots = new uint[1024];
-    private int[] _nearStamp = Array.Empty<int>();
-    private GpuBuffer? _nearComposeWork;
-
-    /// <summary>Recomposes the near-camera bricks; <paramref name="final"/> for their last compose this frame, the one
-    /// that's shown (smoothed over neighbours).</summary>
-    private void ComposeNear(bool final)
-    {
-        _lampTimer.Start();
-        _rayLight.DispatchCompose(_store, ShownBounceScale, RayLightingSettings.Ambient,
-                                     RayLightingSettings.AoStrength, _nearComposeWork!, _nearCount, smooth: final);
-        _lampTimer.Stop();
-    }
 
     /// <summary>Adds the slots of a work list (every <paramref name="stride"/>th word) to the compose list.</summary>
     private void AddCompose(ReadOnlySpan<uint> work, int stride)
@@ -1155,16 +1142,15 @@ public sealed partial class GpuLightSystem
     {
         if (_dirty.Length >= capacity) return;
         Array.Resize(ref _dirty, capacity);
-        Array.Resize(ref _hold, capacity);
-        Array.Resize(ref _n, capacity);
-        Array.Resize(ref _primed, capacity);
-        Array.Resize(ref _inHeld, capacity);
-        Array.Resize(ref _holdStamp, capacity);
+        Array.Resize(ref _left, capacity);
+        Array.Resize(ref _lastUpdate, capacity);
+        Array.Resize(ref _inQueue, capacity);
         Array.Resize(ref _given, capacity);
         Array.Resize(ref _inCoarse, capacity);
         Array.Resize(ref _composeStamp, capacity);
-        Array.Resize(ref _nearStamp, capacity);
         Array.Resize(ref _clearStamp, capacity);
+        Array.Resize(ref _nowStamp, capacity);
+        Array.Resize(ref _urgentStamp, capacity);
         Array.Resize(ref _inAcc, capacity);
         if (_preCompose.Length < capacity) Array.Resize(ref _preCompose, capacity);
     }
@@ -1175,9 +1161,11 @@ public sealed partial class GpuLightSystem
     private readonly List<int> _accSlots = new();
     private bool[] _inAcc = Array.Empty<bool>();
     private uint[] _preCompose = Array.Empty<uint>();
-    private GpuBuffer? _zeroWork;
+    private GpuBuffer? _zeroWork, _seedWork;
+    // Settled bricks updating again this frame, whose fresh accumulation starts from their display (see UpdateBrick).
+    private readonly List<uint> _seedSlots = new();
 
-    /// <summary>Gives a brick about to be bounced its accumulation; true if it had none (its average restarts).</summary>
+    /// <summary>Gives a brick about to update its accumulation; true if it had none (it is seeded, see UpdateBrick).</summary>
     private bool GiveAcc(int slot)
     {
         if (!_store.AllocAcc(slot)) return false;
@@ -1185,29 +1173,23 @@ public sealed partial class GpuLightSystem
         return true;
     }
 
-    /// <summary>Frees the accumulation of bricks whose evaluations are done (last frame's compose has read it): a
+    /// <summary>Frees the accumulation of world bricks with no update to come (last frame's compose has read it): a
     /// settled brick keeps only its display.</summary>
     private void ReleaseSettledAccs()
     {
         for (int k = _accSlots.Count - 1; k >= 0; k--)
         {
             int slot = _accSlots[k];
-            if (_store.AccOf[slot] >= 0 && StillEvaluating(slot)) continue;
+            if (_store.AccOf[slot] >= 0 && NeedsUpdate(slot)) continue;
+            // Ships keep theirs while they have light storage: they are small, and freeing it would make every edit
+            // or move start them over from their display (and they update often anyway).
+            // (Runs before _worldIndex is refreshed, so the world is named directly.)
+            if (_store.AccOf[slot] >= 0 && _store.SlotGrid[slot] >= 0 && _store.SlotGrid[slot] != _staticVolume.Gpu.Index) continue;
             _store.FreeAcc(slot);
             _inAcc[slot] = false;
             _accSlots[k] = _accSlots[^1];
             _accSlots.RemoveAt(_accSlots.Count - 1);
         }
-    }
-
-    /// <summary>Whether a brick has evaluations left: its own hold, or its ship's whole-grid one.</summary>
-    private bool StillEvaluating(int slot)
-    {
-        if (_hold[slot] > 0) return true;
-        int gi = _store.SlotGrid[slot];
-        if (gi < 0 || gi == _worldIndex) return false;
-        var g = _store.GridAt(gi);
-        return g != null && _gridStates.TryGetValue(g, out var st) && st.BounceAllFrames > 0;
     }
 
     /// <summary>Forgets tracking state for grids that were unregistered (a despawned ship).</summary>
