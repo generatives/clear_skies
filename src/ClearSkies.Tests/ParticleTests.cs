@@ -7,8 +7,9 @@ namespace ClearSkies.Tests;
 
 public class ParticleTests
 {
-    private static ParticleEmitter Emitter(int capacity) => new(new ParticleSettings
+    private static ParticleEmitter Emitter(int capacity, Vector3D<float> origin = default) => new(new ParticleSettings
     {
+        Origin = origin, Direction = new Vector3D<float>(0, 1, 0),
         Rate = 100f, MinLife = 10f, MaxLife = 10f, MinSpeed = 1f, MaxSpeed = 1f, Size = 1f, Capacity = capacity,
     });
 
@@ -56,8 +57,7 @@ public class ParticleTests
     [Fact]
     public void ParticlesSpawnFromTheEntitysPose()
     {
-        var group = Emitter(64);
-        group.LocalOffset = new Vector3D<float>(0, 1, 0);
+        var group = Emitter(64, origin: new Vector3D<float>(0, 1, 0));
         group.Intensity = 1f;
         var pose = Transform.Identity;
         pose.Position = new Vector3D<float>(10, 0, 0);

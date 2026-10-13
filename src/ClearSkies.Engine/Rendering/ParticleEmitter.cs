@@ -14,7 +14,13 @@ public struct ParticleSettings
     /// <summary>How long each lives, in seconds: a random time between these.</summary>
     public float MinLife, MaxLife;
 
-    /// <summary>Speed along the emitter's <see cref="ParticleEmitter.LocalDirection"/>, in blocks per second: from the first
+    /// <summary>Where particles spawn, in the emitting entity's space.</summary>
+    public Vector3D<float> Origin;
+
+    /// <summary>Which way they fly, in the emitting entity's space (unit).</summary>
+    public Vector3D<float> Direction;
+
+    /// <summary>Speed along <see cref="Direction"/>, in blocks per second: from the first
     /// at no intensity to the second at full.</summary>
     public float MinSpeed, MaxSpeed;
 
@@ -35,10 +41,10 @@ public struct ParticleSettings
 }
 
 /// <summary>
-/// A component that emits particles from its entity: the settings they spawn and move by, where on the entity they
-/// come from and which way they fly (<see cref="LocalOffset"/>, <see cref="LocalDirection"/>, in the entity's own
-/// space, so the emitter follows the entity's pose through the transform hierarchy), how hard
-/// (<see cref="Intensity"/>, which its owner sets), and the particles alive. The <see cref="ParticleRenderer"/> moves
+/// A component that emits particles from its entity: the settings they spawn and move by (including where on the
+/// entity they come from and which way they fly, in the entity's own space, so the emitter follows the entity's pose
+/// through the transform hierarchy), how hard (<see cref="Intensity"/>, which its owner sets), and the particles
+/// alive. The <see cref="ParticleRenderer"/> moves
 /// and draws every drawn entity's.
 /// </summary>
 public sealed class ParticleEmitter
@@ -61,12 +67,6 @@ public sealed class ParticleEmitter
 
     public ParticleSettings Settings { get; }
 
-    /// <summary>Where particles spawn, in the entity's space.</summary>
-    public Vector3D<float> LocalOffset;
-
-    /// <summary>Which way they fly, in the entity's space (unit): its up by default.</summary>
-    public Vector3D<float> LocalDirection = new(0f, 1f, 0f);
-
     /// <summary>0 (none spawn) to 1 (full rate and speed).</summary>
     public float Intensity;
 
@@ -88,8 +88,8 @@ public sealed class ParticleEmitter
         if (Intensity <= 0f) { _toSpawn = 0f; return; }
         _toSpawn += Settings.Rate * Intensity * dt;
         float speed = Settings.MinSpeed + (Settings.MaxSpeed - Settings.MinSpeed) * Intensity;
-        var origin = pose.Position + Vec.Rotate(pose.Rotation, LocalOffset);
-        var direction = Vec.Rotate(pose.Rotation, LocalDirection);
+        var origin = pose.Position + Vec.Rotate(pose.Rotation, Settings.Origin);
+        var direction = Vec.Rotate(pose.Rotation, Settings.Direction);
         for (; _toSpawn >= 1f; _toSpawn -= 1f)
         {
             int slot = _count < _particles.Length ? _count++ : Oldest();
