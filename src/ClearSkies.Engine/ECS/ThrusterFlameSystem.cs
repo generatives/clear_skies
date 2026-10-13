@@ -1,16 +1,16 @@
 using ClearSkies.Engine.Core;
-using ClearSkies.Engine.Math;
 using ClearSkies.Engine.Rendering;
-using ClearSkies.Engine.Voxels;
 using DefaultEcs;
 using Silk.NET.Maths;
 
 namespace ClearSkies.Engine.ECS;
 
 /// <summary>
-/// Gives every drawn <see cref="Fan"/> a flame <see cref="ParticleEmitter"/> (red squares, for now) and points it out
-/// of the Fan's exhaust (top) face each frame, as strong as the Fan's thrust (<see cref="Fan.Thrust"/>): more flames,
-/// and faster, the harder it pushes. Runs before the <see cref="ParticleRenderer"/> moves them.
+/// Gives every drawn <see cref="Fan"/> a flame <see cref="ParticleEmitter"/> (red squares, for now) blowing out of its
+/// exhaust (top) face, and each frame sets it as strong as the Fan's thrust (<see cref="Fan.Thrust"/>): more flames,
+/// and faster, the harder it pushes. The emitter follows the Fan's block entity through the transform hierarchy, whose
+/// origin is the middle of the face opposite its top, with its top along local up. Runs before the
+/// <see cref="ParticleRenderer"/> moves them.
 /// </summary>
 public sealed class ThrusterFlameSystem : ISystem
 {
@@ -26,27 +26,17 @@ public sealed class ThrusterFlameSystem : ISystem
 
     public ThrusterFlameSystem(World world)
     {
-        _fans = world.GetEntities().With<Fan>().With<BlockRef>().With<Rendered>().AsSet();
+        _fans = world.GetEntities().With<Fan>().With<Rendered>().AsSet();
     }
 
     public void Update(float dt)
     {
         foreach (ref readonly Entity e in _fans.GetEntities())
         {
-            if (!e.Has<ParticleEmitter>()) e.Set(new ParticleEmitter { Group = new ParticleGroup(Flame) });
-            var flames = e.Get<ParticleEmitter>().Group;
-
+            if (!e.Has<ParticleEmitter>())
+                e.Set(new ParticleEmitter(Flame) { LocalOffset = new Vector3D<float>(0f, 1.05f, 0f) }); // just past the top face
             float thrust = e.Get<Fan>().Thrust;
-            flames.Intensity = thrust < MinThrust ? 0f : thrust;
-            if (flames.Intensity == 0f) continue;
-
-            ref readonly var block = ref e.Get<BlockRef>();
-            var root = block.Volume.Root.DrawnPose();
-            var up = block.Orientation.Up.ToVector();
-            flames.Direction = Vec.Rotate(root.Rotation, new Vector3D<float>(up.X, up.Y, up.Z));
-            var p = block.Position;
-            flames.Origin = block.Volume.VoxelToWorld(root, new Vector3D<float>(p.X + 0.5f, p.Y + 0.5f, p.Z + 0.5f))
-                          + flames.Direction * 0.55f;
+            e.Get<ParticleEmitter>().Intensity = thrust < MinThrust ? 0f : thrust;
         }
     }
 }
