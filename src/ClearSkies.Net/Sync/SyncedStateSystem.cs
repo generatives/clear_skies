@@ -44,8 +44,6 @@ public sealed class SyncedStateSystem : ISystem, IDebugUiSystem
     private readonly ITickClock _clock;
     private readonly EntitySet _ships;
     private readonly EntitySet _remoteShips;
-    private readonly EntitySet _blockEntities;
-    private readonly Dictionary<ChunkVolume, List<Entity>> _blocksByVolume = new();
     // Per ship flown here, each field's value as last sent (since its last refresh). A ship this machine starts flying
     // (an ownership hand-off) has none, so its first snapshot carries everything: keep it so, and never seed this
     // from received values, or a hand-off could leave the old owner's stale values in place.
@@ -60,7 +58,6 @@ public sealed class SyncedStateSystem : ISystem, IDebugUiSystem
         _clock = clock;
         _ships = world.GetEntities().With<EntityId>().With<NetOwner>().With<ChunkGrid>().With<PhysicsBodyComponent>().AsSet();
         _remoteShips = world.GetEntities().With<RemoteBody>().With<ChunkGrid>().AsSet();
-        _blockEntities = world.GetEntities().With<BlockRef>().AsSet();
     }
 
     public void Update(float dt)
@@ -79,49 +76,29 @@ public sealed class SyncedStateSystem : ISystem, IDebugUiSystem
         }
         foreach (var ship in _sent.Keys)
             if (!_flownHere.Contains(ship)) _sent.Remove(ship); // if it comes back, everything goes again
-        if (_flownHere.Count == 0) return;
-
-        GroupBlockEntities();
         foreach (var ship in _flownHere)
         {
             if (!_sent.TryGetValue(ship, out var sent)) _sent[ship] = sent = new();
             if ((_clock.Tick + ship.Get<EntityId>().Value) % RefreshTicks == 0) sent.Clear();
             if (!ship.Has<PendingSyncedState>()) ship.Set(new PendingSyncedState { Values = new List<SyncedValue>() });
             var pending = ship.Get<PendingSyncedState>().Values;
-            if (_blocksByVolume.TryGetValue(ship.Get<ChunkGrid>().Volume, out var blocks))
-            {
-                int before = pending.Count;
-                _cellsSkipped += CollectChanged(_fields, blocks, sent, pending, MaxValuesPerSnapshot);
-                _valuesSent += pending.Count - before;
-            }
+            int before = pending.Count;
+            _cellsSkipped += CollectChanged(_fields, ship.Get<ChunkGrid>().Volume.BlockEntities, sent, pending, MaxValuesPerSnapshot);
+            _valuesSent += pending.Count - before;
         }
-    }
-
-    /// <summary>The block entities of the ships flown here, by volume.</summary>
-    private void GroupBlockEntities()
-    {
-        foreach (var list in _blocksByVolume.Values) list.Clear();
-        foreach (var ship in _flownHere)
-        {
-            var volume = ship.Get<ChunkGrid>().Volume;
-            if (!_blocksByVolume.ContainsKey(volume)) _blocksByVolume[volume] = new List<Entity>();
-        }
-        foreach (ref readonly var e in _blockEntities.GetEntities())
-            if (_blocksByVolume.TryGetValue(e.Get<BlockRef>().Volume, out var list)) list.Add(e);
-        foreach (var (volume, list) in _blocksByVolume)
-            if (list.Count == 0) _blocksByVolume.Remove(volume);
     }
 
     /// <summary>Adds to <paramref name="into"/> each of <paramref name="blocks"/>' fields whose value isn't the one in
     /// <paramref name="sent"/>, recording it there, until <paramref name="into"/> holds <paramref name="max"/> (the
     /// rest stay unsent, for next time). Returns how many blocks were skipped for having a cell out of a short's
     /// range (never, on a ship of any sensible size).</summary>
-    public static int CollectChanged(SyncedFields fields, IReadOnlyList<Entity> blocks,
+    public static int CollectChanged(SyncedFields fields, IEnumerable<Entity> blocks,
                                      Dictionary<(Entity Block, byte Field), byte> sent, List<SyncedValue> into, int max)
     {
         int skipped = 0;
         foreach (var block in blocks)
         {
+            if (!block.IsAlive) continue;
             var cell = block.Get<BlockRef>().Position;
             if (!FitsShort(cell.X) || !FitsShort(cell.Y) || !FitsShort(cell.Z)) { skipped++; continue; }
             foreach (var field in fields.All)

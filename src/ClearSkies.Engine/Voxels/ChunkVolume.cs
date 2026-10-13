@@ -37,6 +37,13 @@ public class ChunkVolume
 
     public Entity Root { get; }
 
+    private readonly HashSet<Entity> _blockEntities = new();
+
+    /// <summary>Every block entity in this volume's loaded chunks (see <see cref="BlockDef.Components"/>), kept as
+    /// they're created and destroyed, so systems reach a ship's Fans, levers and so on through its
+    /// <see cref="ChunkGrid"/> instead of grouping every block entity in the world by volume each tick.</summary>
+    public IReadOnlyCollection<Entity> BlockEntities => _blockEntities;
+
     /// <summary>This volume's registration in the shared GPU voxel storage (see <see cref="GridStore"/>), kept in
     /// sync by GpuResidencySystem.</summary>
     public GridHandle Gpu { get; } = new();
@@ -257,6 +264,8 @@ public class ChunkVolume
         if (entry is null) return;
 
         // Takes the chunk's block entities with it, immediately.
+        if (entry.BlockEntities is { } entities)
+            foreach (var e in entities.Values) _blockEntities.Remove(e);
         Hierarchy.DestroyRecursive(entry.Entity);
         entry.BlockEntities = null;
 
@@ -321,10 +330,11 @@ public class ChunkVolume
     {
         if (entry.BlockEntities is { } entities && entities.Remove(cell, out var existing))
         {
+            _blockEntities.Remove(existing);
             if (existing.IsAlive)
             {
                 ref readonly var r = ref existing.Get<BlockRef>();
-                if (r.Id == id && r.Orientation == orientation) { entities[cell] = existing; return; }
+                if (r.Id == id && r.Orientation == orientation) { entities[cell] = existing; _blockEntities.Add(existing); return; }
                 Hierarchy.DestroyRecursive(existing);
             }
         }
@@ -346,6 +356,7 @@ public class ChunkVolume
         Hierarchy.SetParent(e, entry.Entity, CellLocal(cell, orientation));
         BlockRegistry.Get(id).Components!(e);
         (entry.BlockEntities ??= new())[cell] = e;
+        _blockEntities.Add(e);
     }
 
     /// <summary>A block entity relative to its chunk entity: the same placement ChunkRenderSystem gives a static
