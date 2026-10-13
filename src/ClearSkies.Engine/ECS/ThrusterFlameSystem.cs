@@ -14,12 +14,13 @@ namespace ClearSkies.Engine.ECS;
 /// </summary>
 public sealed class ThrusterFlameSystem : ISystem
 {
-    private const float MinThrust = 0.02f; // below this a Fan counts as off
+    private const float MinThrust = 0.005f;  // below this a Fan counts as off
+    private const float MinIntensity = 0.3f; // a Fan that's on burns at least this hard, so lightly loaded ones still show
 
     public static readonly ParticleSettings Flame = new()
     {
         Rate = 60f, MinLife = 0.25f, MaxLife = 0.45f, MinSpeed = 3f, MaxSpeed = 8f,
-        Spread = 0.3f, Drift = 0.6f, Size = 0.3f, Color = new Vector3D<float>(1f, 0.1f, 0.05f), Capacity = 64,
+        Spread = 0.3f, Drift = 0.6f, Size = 0.15f, Color = new Vector3D<float>(1f, 0.1f, 0.05f), Capacity = 64,
     };
 
     private readonly EntitySet _fans;
@@ -36,7 +37,7 @@ public sealed class ThrusterFlameSystem : ISystem
             if (!e.Has<ParticleEmitter>())
                 e.Set(new ParticleEmitter(Flame) { LocalOffset = new Vector3D<float>(0f, 1.05f, 0f) }); // just past the top face
             float thrust = e.Get<Fan>().Thrust;
-            e.Get<ParticleEmitter>().Intensity = thrust < MinThrust ? 0f : thrust;
+            e.Get<ParticleEmitter>().Intensity = thrust < MinThrust ? 0f : MinIntensity + (1f - MinIntensity) * thrust;
         }
     }
 }

@@ -12,7 +12,8 @@ namespace ClearSkies.Engine.Rendering;
 /// Moves and draws the particles of every drawn entity's <see cref="ParticleEmitter"/>: each frame
 /// (<see cref="SystemStage.Frame"/>) it updates each emitter at its entity's drawn pose, and in
 /// <see cref="SystemStage.RenderWorld"/> draws them all as one instanced draw of camera-facing squares, opaque and
-/// depth-writing, so they need no sorting. Up to <see cref="MaxParticles"/> are drawn in all. Purely cosmetic: each
+/// depth-writing, so they need no sorting. Up to <see cref="MaxParticles"/> are drawn in all, from the nearest
+/// emitters out. Purely cosmetic: each
 /// machine runs its own.
 /// </summary>
 public sealed class ParticleRenderer : ISystem, IRenderSystem, IDisposable
@@ -31,6 +32,7 @@ public sealed class ParticleRenderer : ISystem, IRenderSystem, IDisposable
     private readonly EntitySet _emitters;
     private readonly GpuBuffer _buffer;
     private readonly Instance[] _instances = new Instance[MaxParticles];
+    private readonly List<(float Distance, ParticleEmitter Emitter)> _byDistance = new();
 
     public ParticleRenderer(World world, Renderer renderer)
     {
@@ -48,9 +50,19 @@ public sealed class ParticleRenderer : ISystem, IRenderSystem, IDisposable
 
     public void Render(SystemStage stage, in RenderContext frame)
     {
-        int count = 0;
+        // Nearest emitters first, so if there are more than MaxParticles the far ones are the ones left out.
+        _byDistance.Clear();
         foreach (ref readonly var e in _emitters.GetEntities())
-            count += e.Get<ParticleEmitter>().Write(_instances.AsSpan(count));
+        {
+            var emitter = e.Get<ParticleEmitter>();
+            if (emitter.Count > 0)
+                _byDistance.Add((Vector3D.DistanceSquared(e.DrawnPose().Position, frame.CameraPosition), emitter));
+        }
+        _byDistance.Sort(static (a, b) => a.Distance.CompareTo(b.Distance));
+
+        int count = 0;
+        foreach (var (_, emitter) in _byDistance)
+            count += emitter.Write(_instances.AsSpan(count));
         if (count == 0) return;
         _buffer.Write<Instance>(0, _instances.AsSpan(0, count));
         _renderer.DrawParticles(_buffer, (uint)count);
