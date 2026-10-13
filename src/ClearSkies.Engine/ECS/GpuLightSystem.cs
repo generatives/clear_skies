@@ -50,13 +50,13 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     private BounceMode _bounceMode = BounceMode.Full;
     private bool _bounceEnabled => _bounceMode != BounceMode.Off;
     private bool _aoOnly => _bounceMode == BounceMode.AoOnly;
-    private float _bounceAlbedo = 0.5f;
+    private float _bounceAlbedo = 1f;
     // How far bounce and AO rays reach (voxels); everything within that of a change is updated, in whole bricks.
     private float _bounceReach = 16f;
     // Levels (of 15) bounce light loses per block it travels, Minecraft-style (see fallOff); 0 = none.
     private float _falloffLevels = 1f;
     // 0: a voxel's bounce is its rays' average; 1: their brightest (see bounceVoxel).
-    private float _maxBlend = 0f;
+    private float _maxBlend = 0.5f;
     private int _bounceRays = 8;     // rays per group
     private int _bounceGroups = 4;   // direction groups: each voxel has rays x groups fixed directions
     private float _bounceScale = 1f;
