@@ -964,7 +964,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     return vec4<f32>(applyWater(mix(applyHaze(lin(in.color * shade), d), skyColor(normalize(d)), f), d), 1.0);
 }
 
-// Particles (ParticleSystem): one camera-facing square per instance, 6 vertices. p.xyz: its centre in world space,
+// Particles (ParticleRenderer): one camera-facing square per instance, 6 vertices. p.xyz: its centre in world space,
 // p.w: its size in blocks. color.rgb: sRGB, drawn unlit (flames glow).
 @vertex
 fn vs_particle(@builtin(vertex_index) vi: u32, @location(0) p: vec4<f32>, @location(1) color: vec4<f32>) -> VSOut {
@@ -1299,7 +1299,7 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
     }
 
     /// <summary>The particle squares (vs_particle/fs_particle): no vertex buffer, one
-    /// <see cref="ParticleSystem.Instance"/> per particle, opaque and depth-writing like the world (no sorting).</summary>
+    /// <see cref="ParticleRenderer.Instance"/> per particle, opaque and depth-writing like the world (no sorting).</summary>
     private RenderPipeline* CreateParticlePipeline()
     {
         VertexAttribute* attrs = stackalloc VertexAttribute[2];
@@ -1307,7 +1307,7 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
         attrs[1] = new VertexAttribute { Format = VertexFormat.Float32x4, Offset = 16, ShaderLocation = 1 };
         var vbLayout = new VertexBufferLayout
         {
-            ArrayStride = (ulong)sizeof(ParticleSystem.Instance), StepMode = VertexStepMode.Instance, AttributeCount = 2, Attributes = attrs,
+            ArrayStride = (ulong)sizeof(ParticleRenderer.Instance), StepMode = VertexStepMode.Instance, AttributeCount = 2, Attributes = attrs,
         };
         return CreatePipeline("vs_particle", "fs_particle", &vbLayout, PrimitiveTopology.TriangleList, CullMode.None,
                               depthWrite: true, CompareFunction.Greater);
@@ -1653,7 +1653,7 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
     }
 
     /// <summary>Draws the first <paramref name="count"/> particles in <paramref name="instances"/> (see
-    /// <see cref="ParticleSystem"/>) as camera-facing squares, depth-tested and depth-writing like the world.</summary>
+    /// <see cref="ParticleRenderer"/>) as camera-facing squares, depth-tested and depth-writing like the world.</summary>
     public void DrawParticles(GpuBuffer instances, uint count)
     {
         if (OverdrawMode || count == 0 || _drawIndex >= MaxObjects) return;

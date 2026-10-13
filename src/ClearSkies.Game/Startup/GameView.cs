@@ -68,7 +68,7 @@ public sealed class GameView : IDisposable
 
     private readonly string? _lightingPreset;
     private CloudRenderSystem? _clouds;
-    private ParticleSystem? _particles;
+    private ParticleRenderer? _particles;
     private UiRenderSystem? _uiRenderer;
 
     /// <summary>
@@ -94,9 +94,9 @@ public sealed class GameView : IDisposable
         SkySettings.CloudSeaAltitude = HeartGrid.CloudSeaAltitude; // below its lowest islands
         _clouds = new CloudRenderSystem(renderer, new HeartCloudDensity(world.Seed));
         _uiRenderer = new UiRenderSystem(Ui, renderer);
-        _particles = new ParticleSystem(renderer);
-        host.AddSystem(new ThrusterFlameSystem(host.World, _particles), SystemStage.Frame);
-        host.AddSystem((ISystem)_particles, SystemStage.Frame);
+        _particles = new ParticleRenderer(host.World, renderer);
+        host.AddSystem(new ThrusterFlameSystem(host.World), SystemStage.Frame); // aims each Fan's flames
+        host.AddSystem((ISystem)_particles, SystemStage.Frame); // moves every emitter's particles
         var chunks = new ChunkRenderSystem(host.World, renderer, volume);
         host.AddSystem(chunks, SystemStage.RenderWorld);
         host.AddSystem(new ModelRenderSystem(host.World, renderer, host.Time), SystemStage.RenderWorld);
