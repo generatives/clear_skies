@@ -86,6 +86,9 @@ public sealed unsafe class GpuContext : IDisposable
     /// (the game's --backend).</summary>
     public static InstanceBackend? Backend { get; set; }
 
+    /// <summary>Which adapter to ask for. Set before the host is made (the game's --gpu).</summary>
+    public static GpuAdapterChoice Adapter { get; set; } = GpuAdapterChoice.Fast;
+
     private void Init(GameWindow window)
     {
         var instanceDesc = new InstanceDescriptor();
@@ -105,7 +108,8 @@ public sealed unsafe class GpuContext : IDisposable
         var adapterOpts = new RequestAdapterOptions
         {
             CompatibleSurface = _surface,
-            PowerPreference = PowerPreference.HighPerformance,
+            PowerPreference = Adapter == GpuAdapterChoice.LowPower ? PowerPreference.LowPower : PowerPreference.HighPerformance,
+            ForceFallbackAdapter = Adapter == GpuAdapterChoice.Software,
         };
         _api.InstanceRequestAdapter(_instance, &adapterOpts, PfnRequestAdapterCallback.From(HandleAdapter), null);
         if (_adapter == null)
@@ -129,7 +133,21 @@ public sealed unsafe class GpuContext : IDisposable
         if (required.Limits.MaxBufferSize == ulong.MaxValue || required.Limits.MaxBufferSize < required.Limits.MaxStorageBufferBindingSize)
             required.Limits.MaxBufferSize = required.Limits.MaxStorageBufferBindingSize;
 
+        // The same sentinel hits count limits: an adapter with no real cap (AMD's Vulkan driver reports uint.MaxValue
+        // storage buffers per stage) hands back the "undefined" value, so the device got the default of 8 and the ray
+        // lighting's 10 storage buffers failed validation. Ask for one less, a defined value within what it supports.
+        object boxed = required.Limits;
+        foreach (var field in typeof(Limits).GetFields())
+            if (field.FieldType == typeof(uint) && (uint)field.GetValue(boxed)! == uint.MaxValue)
+                field.SetValue(boxed, uint.MaxValue - 1);
+        required.Limits = (Limits)boxed;
+
         AdapterLimits = required.Limits;
+        // The limits a weaker adapter is most likely to fall short on (the ray lighting binds 10 storage buffers).
+        Console.WriteLine($"[wgpu] limits: storage buffers per stage {required.Limits.MaxStorageBuffersPerShaderStage}, " +
+                          $"storage binding {required.Limits.MaxStorageBufferBindingSize >> 20} MiB, " +
+                          $"workgroup storage {required.Limits.MaxComputeWorkgroupStorageSize} B, " +
+                          $"invocations per workgroup {required.Limits.MaxComputeInvocationsPerWorkgroup}");
 
         // Request device + queue, with timestamp queries when the adapter has them (for GpuTimer).
         bool timestamps = _api.AdapterHasFeature(_adapter, FeatureName.TimestampQuery);
@@ -337,4 +355,15 @@ public sealed unsafe class GpuContext : IDisposable
         if (_instance != null) _api.InstanceRelease(_instance);
         _api.Dispose();
     }
+}
+
+/// <summary>The adapter <see cref="GpuContext"/> asks for.</summary>
+public enum GpuAdapterChoice
+{
+    /// <summary>The fastest GPU (the default).</summary>
+    Fast,
+    /// <summary>The power-saving GPU, usually the integrated one; the same GPU on a machine with only one.</summary>
+    LowPower,
+    /// <summary>wgpu's software renderer on the CPU (WARP on DX12, lavapipe or llvmpipe on Vulkan, when installed).</summary>
+    Software,
 }
