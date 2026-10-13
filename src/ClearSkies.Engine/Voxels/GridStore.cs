@@ -92,7 +92,7 @@ public sealed class GridStore : IDisposable
     public const int VoxelsPerBrick = 512;
 
     /// <summary>Light-pool words per brick slot: 256 display words (two 16-bit voxels each). That is all a lit brick
-    /// keeps; the accumulation a brick needs while its bounce is being evaluated lives in <see cref="AccPool"/>.</summary>
+    /// keeps; the accumulation a brick needs while its bounce is updating lives in <see cref="AccPool"/>.</summary>
     public const int WordsPerSlot = 256;
     public const int SlotBytes = WordsPerSlot * 4;
 
@@ -200,7 +200,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     internal GpuBuffer LightPool { get; private set; }
     internal GpuBuffer SlotInfo { get; private set; }
 
-    /// <summary>Accumulation for the bricks whose bounce is being evaluated (see <see cref="AllocAcc"/>), and per light
+    /// <summary>Accumulation for the bricks whose bounce is updating (see <see cref="AllocAcc"/>), and per light
     /// slot where its accumulation is: the accumulation slot + 1, or 0 for none.</summary>
     internal GpuBuffer AccPool { get; private set; }
     internal GpuBuffer AccMap { get; private set; }
@@ -337,7 +337,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         LightPool  = GpuBuffer.CreateStorage(ctx, (ulong)_lightCapacity * SlotBytes);
         SlotInfo   = GpuBuffer.CreateStorage(ctx, (ulong)_lightCapacity * 16);
         AccMap     = GpuBuffer.CreateStorage(ctx, (ulong)_lightCapacity * 4);
-        _accCapacity = 8192; // grows with what's being evaluated at once
+        _accCapacity = 8192; // grows with what's updating at once
         AccPool    = GpuBuffer.CreateStorage(ctx, (ulong)_accCapacity * AccSlotBytes);
         Grids      = GpuBuffer.CreateStorage(ctx, (ulong)_descs.Length * (ulong)Marshal.SizeOf<GridDesc>());
         ResizeSlotMirror(_lightCapacity);

@@ -83,7 +83,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
 
     private static int ToSpread(int value) => value >= 4 ? 4 : value >= 2 ? 2 : 1;
 
-    /// <summary>Rays per voxel in every band (the checkerboard): 1 (all), 2 or 4: each surface voxel fires 1/that of the
+    /// <summary>Rays per voxel in every band: 1 (all), 2 or 4: each surface voxel fires 1/that of the
     /// rays; other values round to the nearest of those.</summary>
     public int BounceSpread
     {
@@ -105,7 +105,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     // near band (everywhere on Low), shorter rays, smaller near and middle bands and lower per-frame caps; Low keeps
     // only AO, Minimal only direct light.
     // Near: every direction group in 4 hops. Medium and High: half of them in 2 hops in the middle band; Minimal and
-    // Low a quarter in 1, as far away. One update per change, at most every 4 frames, 8 far.
+    // Low a quarter in 1, as far away. Three updates per change, at most every 4 frames, 8 far.
     private static readonly LightingPreset[] Presets =
     {
         //   Name       Mode               Rays Groups Reach Near (radius, hops, groups, updates, every, spread)  Mid                    Far                 Relit Groups
@@ -156,7 +156,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
 
     /// <summary>CPU time of each phase of a frame's lighting, for the debug panel.</summary>
     private readonly StepTimer _phaseTimer = new(
-        "Poses + grid upload", "Gathering lamps", "Marking changes", "Choosing relit bricks", "Bounce holds",
+        "Poses + grid upload", "Gathering lamps", "Marking changes", "Choosing relit bricks", "Bounce touches",
         "Choosing bounce bricks", "Chunk lists", "Dispatch + upload") { Owner = "GPU lighting" };
 
     /// <summary>A grid with a pose this frame.</summary>
@@ -377,7 +377,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
                 if ((acc & 0xFFFFFF) != 0) bounce++;
             }
         }
-        Console.WriteLine($"[probe] voxels={voxels} not-composed={unlit} sun-shadowed={shadowed} lit={lit} tinted={coloured} ao={ao} bounce={bounce} held={_heldQueue.Count}");
+        Console.WriteLine($"[probe] voxels={voxels} not-composed={unlit} sun-shadowed={shadowed} lit={lit} tinted={coloured} ao={ao} bounce={bounce} held={_updateQueue.Count}");
     }
 
     /// <summary>Poses a registered grid for this frame from its root <see cref="Transform"/>.</summary>
@@ -438,7 +438,6 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     {
         _rayLight.Dispose();
         _lightWork?.Dispose();
-        _bounceWork?.Dispose();
         foreach (var b in _stepWorks) b?.Dispose();
         _composeWork?.Dispose();
         _finalComposeWork?.Dispose();

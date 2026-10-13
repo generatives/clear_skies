@@ -765,7 +765,7 @@ fn compose_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) 
 // each dispatch adds a hop, and the CPU keeps a changed area updating while it changes. Keep albedo
 // well below 1 or the feedback lingers (a removed light ghosts longer). Ambient is not bounced; it is
 // already uniform.
-// With AO only (p.bounce.z = 1) every hop is like an AO pass: AO alone, no light read and no bounce stored.
+// With AO only (p.bounce.z = 1) a hop measures AO alone: no light read and no bounce stored.
 const BOUNCE_MAX: f32 = 16.0;
 const BOUNCE_MAX_RAYS: i32 = 32;
 
@@ -832,8 +832,8 @@ fn ddaNearest(g: i32, o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, lo: vec3<i32
 // Light (linear 0-1 per channel) arriving at the hit face from the air cell in front of it, in grid g: the brighter
 // of the cell's direct sun (visibility x strength x the face's N.L, white) and its displayed light (which includes
 // its AO-darkened ambient, so ambient bounces too: it lifts deep corners a little), per channel.
-// Its accumulated bounce is read too: the display is recomposed once a frame, but near-camera repeats within the
-// frame need each other's fresh bounce to add their hops.
+// Its accumulated bounce is read too: the display is recomposed once a frame, but an update's hops within the frame
+// need each other's fresh bounce to add theirs.
 fn radianceAt(g: i32, h: Hit) -> vec3<f32> {
     if (!h.front) { return vec3<f32>(0.0); }
     let r = voxelRef(g, h.cell);
@@ -855,7 +855,7 @@ fn pcg(v: u32) -> u32 {
 
 fn rand01(h: u32) -> f32 { return f32(pcg(h) & 0xFFFFFFu) / 16777216.0; }
 
-// Rays per voxel (the band's checkerboard): with a spread S of 2 or 4, every surface voxel still updates each hop but
+// Rays per voxel (the band's spread): with a spread S of 2 or 4, every surface voxel still updates each hop but
 // fires only 1/S of the rays, its phase's share of each group: direction j*S + phase of the group's directions. The
 // phases are laid out so every 2x2 patch of a floor, wall or ceiling holds each of them once (spread 2: a plain 3D
 // checkerboard), so a patch fires the whole group between its voxels, and the compose pass's neighbour smoothing
@@ -979,10 +979,11 @@ fn blendBounce(s8: f32, goal: f32, alpha: f32) -> f32 {
 @compute @workgroup_size(256)
 fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
                @builtin(local_invocation_index) t: u32) {
-    // The bounce work list is pairs: (light slot, hop word). A hop word holds its spread as log2 (bits 24-25, see
-    // bouncePhase), its first group (bits 0-7), how many groups it fires (8-15), AO's own weight denominator if any (26-31) and the denominator of its blend weight (16-23): weight 1/(i+1) for an update's hop i makes the
-    // update a running average that replaces what was stored, and 1/(2H-i) one that keeps half of it (see
-    // GpuLightSystem.UpdateBrick).
+    // The bounce work list is pairs: (light slot, hop word). A hop word holds its first group (bits 0-7), how many groups
+    // it fires (8-15), the denominator of its blend weight (16-23), its spread as log2 (24-25, see bouncePhase) and
+    // whether AO replaces (26). Weight 1/(2H-i) for an update's hop i keeps half of what was stored; 1/(i+1) makes the
+    // update a running average that replaces it (see GpuLightSystem.UpdateBrick). AO replacing weighs hop i 1/(i+1)
+    // too, i = first / count (a brick given fresh accumulation: its seed holds no AO).
     let wi = wid.x + wid.y * nwg.x;
     if (wi >= u32(p.counts.z)) { return; }
     if (t == 0u) { atomicStore(&wCount, 0u); }
@@ -993,10 +994,10 @@ fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) n
     let spread = i32(1u << ((ev >> 24u) & 3u));
     let aoOnly = p.bounce.z > 0.5;
     let alpha = 1.0 / f32(max((ev >> 16u) & 0xFFu, 1u));
-    let aoDen = (ev >> 26u) & 63u; // 0: AO blends like bounce
-    let alphaAo = select(alpha, 1.0 / f32(aoDen), aoDen != 0u);
-    let first = i32((ev & 0xFFu) % groups);
     let count = max(i32((ev >> 8u) & 0xFFu), 1);
+    let hopIndex = (ev & 0xFFu) / u32(count);
+    let alphaAo = select(alpha, 1.0 / f32(hopIndex + 1u), ((ev >> 26u) & 1u) != 0u);
+    let first = i32((ev & 0xFFu) % groups);
     let list = listOf(it.g, it.v0);
     // The CPU gives every brick it lists an accumulation slot; without one there is nothing to write.
     let accBase = accOf(it.slot);
@@ -1038,7 +1039,7 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
 // (their bounce kept only in the display) and are updating again. Bounce becomes the shown light over the display scale
 // (p.bounce.z), so composing it gives back what was shown and neighbours' hops read the light that was there, not a dark
 // gap; their own hops then blend from it. AO starts at full occlusion, so the ambient term adds nothing and the
-// compose before the bounce pass shows just the seed, the light that was there; the first hop replaces it. (AO at none
+// compose before the bounce pass shows just the seed, the light that was there; the first hop replaces the AO. (AO at none
 // lit the ambient term at full strength in that compose, and a dark area's hops read it as bright for an update: a
 // flash on edits in the dark.) An empty display seeds 0, unmeasured. Run after zero_main.
 @compute @workgroup_size(256)
@@ -1175,7 +1176,7 @@ fn zero_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg
     }
 
     /// <summary>
-    /// One EMA step of bounce light for the listed bricks (see bounce_main). Reads direct light of every grid, so
+    /// One hop of bounce light for the listed bricks (see bounce_main). Reads direct light of every grid, so
     /// run it after the sun pass and before composing. <paramref name="work"/> holds <paramref name="count"/> pairs of (light slot,
     /// hop word). Each voxel has <paramref name="rays"/> x <paramref name="groups"/> fixed directions, in groups of
     /// <paramref name="rays"/>, each ray reaching <paramref name="reach"/> voxels (at most 16). <paramref name="aoOnly"/>:

@@ -13,12 +13,13 @@ scheduling), `Voxels/GpuRayLightPass.cs` (WGSL passes).
 |---|---|---|
 | Light slot | one 8³ brick that has a surface | 256 words of display, 2 voxels per word |
 | Display (per voxel, 16 bits) | 9-bit brightness, 5-bit warmth, 2-bit sun | Brightness 0-510 on a square curve (fine steps in the dark). 511 means no storage. Warmth 0-30. Sun 0-3. |
-| Accumulation (per voxel, 32 bits) | 8-bit bounce R, G, B and 8-bit AO | 512 words per slot. Bounce on a square-root curve (fine steps for dim light); AO linear 0-255. |
+| Accumulation (per voxel, 32 bits) | 8-bit bounce R, G, B and 8-bit AO | 512 words per slot. Bounce on a square-root curve (fine steps for dim light); AO linear 0-255. A word of 0 is air not measured yet: smoothing skips it, and its first hop replaces. |
 
 **A world brick has accumulation only while it has an update to come.** After its last update, its accumulation is
 freed (`ReleaseSettledAccs`), and the brick keeps only its composed display, so its bounce and AO are baked in. When
 anything touches a settled brick, it gets fresh accumulation seeded from its display (`seed_main`: bounce = shown
-light ÷ bounce scale, AO none), so it carries on from the light it was showing. **Ships keep their accumulation**
+light ÷ bounce scale, AO full occlusion as a placeholder that the first hop replaces), so it carries on from the light it
+was showing. The seed takes lamp and ambient light as bounce too, so a little of either can linger through a re-seed. **Ships keep their accumulation**
 while they have light storage: freeing and re-seeding lost a little light each time, which dimmed a ship's hold with
 every edit (2026-10-11).
 
@@ -53,7 +54,7 @@ wider 2-cell smoothing was tried (2026-10-11) and made little visible difference
 - Every surface air voxel has fixed **directions**, a cosine-weighted spiral twisted per voxel, split into
   **groups**: group g is directions `j = k × groups + g`, so each group spans the hemisphere coarsely.
 - A **hop** fires one or more groups and writes the result: `first` group, `count` groups, a blend weight
-  `1/denominator` and the spread, packed in the hop word (`HopWord`; the shader's `bounce_main`).
+  `1/denominator`, the spread, and whether AO replaces, packed in the hop word (`HopWord`; the shader's `bounce_main`).
 - **Rays per voxel** (spread S: 1, 2 or 4, set per band, carried in the hop word) makes each voxel fire only the
   rays with `k ≡ phase (mod S)`. Each 2×2 patch holds every phase once, and smoothing pools them. Per group a voxel
   fires `rays / S` rays; over all groups `rays × groups / S` (Medium: all 32 near, **8** of its 32 beyond, its
@@ -74,23 +75,22 @@ What a change touches differs (see below); what happens to a touched brick depen
 - **Bands**: near (within its radius of the camera), middle (within its radius), far. Each has five settings:
   - **hops per update** (H);
   - **groups per update** (up to all of them), always the same ones, split evenly over the H hops (rounding down,
-    so H should divide it);
+    so H should divide it; H is at most the groups);
   - **updates per change** (U): a touched brick gets U updates, one per turn, each reading the light the last one
     left, so a change gets U × H hops in all;
   - **update at most every** N frames, on its turn (`(frame + key) mod N = 0`, key = slot, or grid index for a
     ship's bricks, so a ship updates together). 1 = every frame;
   - **rays per voxel** (above).
-- **Update** (`UpdateBrick`): hop i weighs `1/(i+1)`, so the update replaces the stored value with its mean (the
-  hops read the old light through the neighbours, so it carries on). If the brick was touched again and updated on
-  its previous turn too (it keeps changing, as around a moving ship), and its accumulation is neither fresh nor
-  cleared this frame, it blends in at ½ instead: hop i weighs
-  `1/(2H − i)`, so the old light keeps half and a fast-changing light fades between updates instead of stepping.
-  After a blended update the brick is owed one more (`_tail`), which replaces, so no old light is left once it stops
-  changing. The further updates per change (`_left`) always replace.
-- **Distant terrain sharpens** as the camera nears: a world brick that fired fewer groups than the most any band
-  fires is touched again when its band now fires more (`TopUpNearing`).
+- **Update** (`UpdateBrick`): every update blends in at ½: hop i weighs `1/(2H − i)`, so the old light keeps half and
+  a change fades in over the band's updates instead of stepping. A brick with no light to keep (new to light storage,
+  or its bounce cleared for a removed lamp) replaces instead: hop i weighs `1/(i+1)`, the mean of its hops. A brick
+  given fresh accumulation blends its bounce from the seed but replaces its AO. A touch owes the band's U updates,
+  one per turn.
+- **Distant terrain sharpens** as the camera nears: a world brick whose last update covered less of the directions
+  (groups fired ÷ spread) than the most any band covers is touched again when its band now covers more
+  (`TopUpNearing`).
 - **Caps** per frame, nearest first: relit bricks, and brick groups (an update costs its groups).
-  Ships go past both. Cleared bricks go past both and update at once. Bricks an occluder change marked (a block
+  Ships go past both. Cleared bricks and the bricks at a world block edit go past both and update at once. Bricks an occluder change marked (a block
   change, a moving ship: the pad, the sun sweep, lamps in reach) go past the relit cap, so a ship's shadow keeps up
   with it.
 - **Clearing**: only where a lamp was removed (its box plus ray reach), since that light would otherwise sustain
@@ -118,11 +118,11 @@ What a change touches differs (see below); what happens to a touched brick depen
 | Mode | Off | AO only | Full | Full |
 | Directions per voxel (rays per group × groups) | 16 (4 × 4) | 32 (8 × 4) | 32 (8 × 4) | 32 (8 × 4) |
 | Ray reach (voxels) | 8 | 8 | 8 | 16 |
-| Near band: radius, hops, groups, updates, every, spread | 96, 4, 4, 1, 4, 1 | 96, 4, 4, 1, 4, 4 | **128, 4, 4, 1, 4, 1** | 256, 4, 4, 1, 4, 1 |
-| Middle band | 256, 1, 1, 1, 4, 1 | 256, 1, 1, 1, 4, 4 | **384, 2, 2, 1, 4, 4** | 768, 2, 2, 1, 4, 1 |
-| Far band: hops, groups, updates, every, spread | 1, 1, 1, 8, 1 | 1, 1, 1, 8, 4 | **1, 1, 1, 8, 4** | 1, 1, 1, 8, 1 |
+| Near band: radius, hops, groups, updates, every, spread | 96, 4, 4, 3, 4, 1 | 96, 4, 4, 3, 4, 4 | **128, 4, 4, 3, 4, 1** | 256, 4, 4, 3, 4, 1 |
+| Middle band | 256, 1, 1, 3, 4, 1 | 256, 1, 1, 3, 4, 4 | **384, 2, 2, 3, 4, 4** | 768, 2, 2, 3, 4, 1 |
+| Far band: hops, groups, updates, every, spread | 1, 1, 3, 8, 1 | 1, 1, 3, 8, 4 | **1, 1, 3, 8, 4** | 1, 1, 3, 8, 1 |
 | **Medium rays per voxel per group** | | | **8 near, 2 beyond** | |
 | Relit bricks / brick groups per frame | 256 / 512 | 256 / 1024 | 512 / 2048 | 1024 / 4096 |
 
-Medium, bounce rays per voxel: a one-off change costs 32 near (4 hops), 4 middle (2 hops), 2 far (1 hop); something that keeps changing costs about 8 a frame near, 1 middle,
-0.25 far. Updates per change U multiplies a one-off change's cost and hops by U. Near used spread 4 (8 rays, 2 a frame) until 2026-10-11, when spread 1 there looked steadier in game.
+Medium, bounce rays per voxel per update: 32 near (4 hops), 4 middle (2 hops), 2 far (1 hop). A one-off change gets U = 3
+updates, so 96 near, 12 middle, 6 far; something that keeps changing costs about 8 a frame near, 1 middle, 0.25 far. Near used spread 4 (8 rays, 2 a frame) until 2026-10-11, when spread 1 there looked steadier in game.
