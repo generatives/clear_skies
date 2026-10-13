@@ -174,13 +174,30 @@ public sealed class BlockActionSystem : ISystem, IDisposable, IDebugUiSystem
         }
     }
 
+    /// <summary>Spawns an anchor block, already anchored, in front of the player; nothing if it'd have nothing to
+    /// hold (see <see cref="AnchoredBlockAt"/>).</summary>
     private void SpawnGrid(Vector3D<float> eye, Vector3D<float> dir)
     {
         var spawn = eye + dir * 3f;
-        var grid = GridDescription.FromVoxels(new PhysVec(spawn.X, spawn.Y, spawn.Z),
-            new[] { new GridVoxel(0, 0, 0, BlockId.Stone, BlockOrientation.Upright) });
+        var at = new PhysVec(spawn.X, spawn.Y, spawn.Z);
+        if (AnchoredBlockAt(_volumes, at) is not { } grid)
+        {
+            Console.WriteLine($"[spawn] nothing for an anchor to hold at ({spawn.X:0.0},{spawn.Y:0.0},{spawn.Z:0.0})");
+            return;
+        }
         _commands.Send(new Spawn<GridDescription> { Description = grid, Select = true });
-        Console.WriteLine($"[spawn] grid at ({spawn.X:0.0},{spawn.Y:0.0},{spawn.Z:0.0})");
+        Console.WriteLine($"[spawn] anchor at ({spawn.X:0.0},{spawn.Y:0.0},{spawn.Z:0.0})");
+    }
+
+    /// <summary>A grid of one anchor block centred on <paramref name="position"/>, anchored, so it takes hold of what's
+    /// in reach as it spawns; null if no volume has a colliding block within <see cref="AnchorSystem.Reach"/>.</summary>
+    public static GridDescription? AnchoredBlockAt(EntitySet volumes, PhysVec position)
+    {
+        if (AnchorSystem.NearestInReach(volumes, position) is null) return null;
+        var grid = GridDescription.FromVoxels(position,
+            new[] { new GridVoxel(0, 0, 0, BlockId.Anchor, BlockOrientation.Upright) });
+        grid.Controls.Anchored = true;
+        return grid;
     }
 
     private static Vector3D<float> EyeOf(Entity player)

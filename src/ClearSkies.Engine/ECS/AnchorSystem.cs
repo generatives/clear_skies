@@ -354,25 +354,33 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
         foreach (var cell in _anchorsByShip[ship])
         {
             var world = shipPosition + Vector3.Transform(new Vector3(cell.X, cell.Y, cell.Z) + new Vector3(0.5f), shipRotation);
-            Entity? best = null;
-            float bestDistance = Reach;
-            foreach (ref readonly Entity volume in _volumes.GetEntities())
-            {
-                if (volume == ship) continue;
-                // A grid is held by its body (or a pin, once held); one with none here can't be taken hold of.
-                if (volume.Has<DynamicGrid>() && !volume.Has<PhysicsBodyComponent>()) continue;
-                ref readonly var vt = ref volume.Get<Transform>();
-                var local = Vector3.Transform(world - PhysicsConv.ToBepu(vt.Position), Quaternion.Conjugate(PhysicsConv.ToBepu(vt.Rotation)));
-                float distance = NearestCollidingBlock(volume.Get<ChunkGrid>().Volume, local, bestDistance);
-                if (distance < bestDistance)
-                {
-                    bestDistance = distance;
-                    best = volume;
-                }
-            }
+            var best = NearestInReach(_volumes, world, ship, needBody: true);
             if (best is { } b) reached.Add(b);
         }
         return reached;
+    }
+
+    /// <summary>The volume (the terrain, a grid) with a colliding block nearest <paramref name="world"/>, if one is
+    /// within <see cref="Reach"/>: what an anchor centred there would take hold of. <paramref name="needBody"/> skips
+    /// grids with no body here, which can't be held.</summary>
+    public static Entity? NearestInReach(EntitySet volumes, Vector3 world, Entity except = default, bool needBody = false)
+    {
+        Entity? best = null;
+        float bestDistance = Reach;
+        foreach (ref readonly Entity volume in volumes.GetEntities())
+        {
+            if (volume == except) continue;
+            if (needBody && volume.Has<DynamicGrid>() && !volume.Has<PhysicsBodyComponent>()) continue;
+            ref readonly var vt = ref volume.Get<Transform>();
+            var local = Vector3.Transform(world - PhysicsConv.ToBepu(vt.Position), Quaternion.Conjugate(PhysicsConv.ToBepu(vt.Rotation)));
+            float distance = NearestCollidingBlock(volume.Get<ChunkGrid>().Volume, local, bestDistance);
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+                best = volume;
+            }
+        }
+        return best;
     }
 
     /// <summary>The distance from <paramref name="point"/> (in <paramref name="volume"/>'s block space) to the nearest

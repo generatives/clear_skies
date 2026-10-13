@@ -157,6 +157,33 @@ public class AnchorTests
     }
 
     [Fact]
+    public void TheSpawnKeyMakesAnAnchoredAnchorOnlyWhereItCanHoldOn()
+    {
+        using var scene = new HeadlessScene();
+        scene.WorldVolume.SetBlock(0, 40, 0, BlockId.Stone);
+        using var volumes = scene.World.GetEntities().With<ChunkGrid>().With<Transform>().With<EntityId>().AsSet();
+
+        // Three blocks above the stone (2.5 from it): out of reach, so nothing to spawn.
+        Assert.Null(BlockActionSystem.AnchoredBlockAt(volumes, new Vector3(0.5f, 44.5f, 0.5f)));
+
+        var d = BlockActionSystem.AnchoredBlockAt(volumes, new Vector3(0.5f, 43.5f, 0.5f));
+        Assert.NotNull(d);
+        Assert.True(d!.Controls.Anchored);
+        Assert.Equal(BlockId.Anchor, Assert.Single(d.Voxels).Id);
+        Assert.True(d.Locked);
+        var anchor = Spawn(scene, d);
+        scene.Tick(10);
+        Assert.True(Anchored(anchor));
+        Assert.Equal((false, true), scene.Anchors.HoldOn(anchor, EntityRegistry.WorldVolume)); // locked: no weld needed yet
+
+        // Unlocked, the hold takes over: it's welded where it spawned rather than falling.
+        scene.Commands.Send(new SetGridLocked { Grid = anchor.Get<EntityId>(), Locked = false });
+        scene.Tick(60);
+        Assert.Equal((true, true), scene.Anchors.HoldOn(anchor, EntityRegistry.WorldVolume));
+        Assert.InRange(Position(anchor).Y, 42.98f, 43.02f);
+    }
+
+    [Fact]
     public void ALighterShipAnchoredOnAnotherRidesWithItThroughAnEdit()
     {
         using var scene = new HeadlessScene();
