@@ -170,16 +170,13 @@ public class AnchorTests
         Assert.NotNull(d);
         Assert.True(d!.Controls.Anchored);
         Assert.Equal(BlockId.Anchor, Assert.Single(d.Voxels).Id);
-        Assert.True(d.Locked);
+        Assert.False(d.Locked);
         var anchor = Spawn(scene, d);
-        scene.Tick(10);
-        Assert.True(Anchored(anchor));
-        Assert.Equal((false, true), scene.Anchors.HoldOn(anchor, EntityRegistry.WorldVolume)); // locked: no weld needed yet
-
-        // Unlocked, the hold takes over: it's welded where it spawned rather than falling.
-        scene.Commands.Send(new SetGridLocked { Grid = anchor.Get<EntityId>(), Locked = false });
         scene.Tick(60);
+        Assert.True(Anchored(anchor));
+        // Unlocked, it's the weld that keeps it where it spawned rather than falling.
         Assert.Equal((true, true), scene.Anchors.HoldOn(anchor, EntityRegistry.WorldVolume));
+        Assert.InRange(Position(anchor).Y, 42.95f, 43.02f);
         Assert.InRange(Position(anchor).Y, 42.98f, 43.02f);
     }
 

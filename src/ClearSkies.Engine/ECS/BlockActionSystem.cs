@@ -189,13 +189,14 @@ public sealed class BlockActionSystem : ISystem, IDisposable, IDebugUiSystem
         Console.WriteLine($"[spawn] anchor at ({spawn.X:0.0},{spawn.Y:0.0},{spawn.Z:0.0})");
     }
 
-    /// <summary>A grid of one anchor block centred on <paramref name="position"/>, anchored, so it takes hold of what's
+    /// <summary>A grid of one anchor block centred on <paramref name="position"/>, unlocked and anchored, so it takes hold of what's
     /// in reach as it spawns; null if no volume has a colliding block within <see cref="AnchorSystem.Reach"/>.</summary>
     public static GridDescription? AnchoredBlockAt(EntitySet volumes, PhysVec position)
     {
         if (AnchorSystem.NearestInReach(volumes, position) is null) return null;
         var grid = GridDescription.FromVoxels(position,
             new[] { new GridVoxel(0, 0, 0, BlockId.Anchor, BlockOrientation.Upright) });
+        grid.Locked = false; // held by its anchor alone, as in survival
         grid.Controls.Anchored = true;
         return grid;
     }
