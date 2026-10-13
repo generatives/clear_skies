@@ -14,6 +14,11 @@ using Silk.NET.Maths;
 
 namespace ClearSkies.Engine.ECS;
 
+/// <summary>Published on the <see cref="World"/> by <see cref="AnchorSystem"/> when a grid's holds change (taken, let
+/// go), at the end of its update: the Host only hears of them in the grid's description, so the authority sends it a
+/// fresh one (see SimulationParticipant), and the Host keeps the grid with what it's held to from then on.</summary>
+public readonly record struct AnchorsChanged(Entity Grid);
+
 /// <summary>
 /// One hold between two volumes, kept by the lighter of the two (the rider; see <see cref="AnchorLinks"/>): what it's
 /// held to (the heavier grid, or the terrain), where it sits on that, and whose anchors hold it. Who rides doesn't
@@ -142,6 +147,7 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
     // Weld offsets nearer than this to what's set (the centre of mass moving with an edit is far more) aren't re-sent.
     private const float OffsetEpsilon = 1e-4f;
 
+    private readonly World          _world;
     private readonly PhysicsWorld   _physics;
     private readonly CommandSystem  _commands;
     private readonly EntityRegistry _registry;
@@ -158,6 +164,7 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
     private readonly Dictionary<Entity, int> _holding = new(); // how many holds each grid's anchors keep
     private readonly List<Entity> _scratch = new();
     private readonly List<(Entity, EntityId)> _stale = new();
+    private readonly HashSet<Entity> _changed = new(); // grids whose holds changed this update
     private string _lastEvent = "";
 
     /// <summary>How a rider is held to one target: its body, welded to the target's body or to a pin.</summary>
@@ -173,6 +180,7 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
 
     public AnchorSystem(World world, PhysicsWorld physics, CommandSystem commands, EntityRegistry registry)
     {
+        _world    = world;
         _physics  = physics;
         _commands = commands;
         _registry = registry;
@@ -202,6 +210,8 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
         LetGoOfWhatNobodyHolds();
         TakeHold();
         Weld();
+        foreach (var grid in _changed) if (grid.IsAlive) _world.Publish(new AnchorsChanged(grid));
+        _changed.Clear();
     }
 
     /// <summary>Only the machine that owns a grid anchors it; everyone else follows its body.</summary>
@@ -243,6 +253,7 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
                 if (!link.Held)
                 {
                     links.RemoveAt(i);
+                    _changed.Add(rider);
                     continue;
                 }
                 links[i] = link;
@@ -310,6 +321,7 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
         var link = i >= 0 ? links[i] : AnchorLink.Between(targetId, target.Get<Transform>(), rider.Get<Transform>());
         if (shipRides) link.HeldByRider = true;
         else link.HeldByTarget = true;
+        _changed.Add(rider);
         if (i >= 0) links[i] = link;
         else if (link.ToGrid && AnchorLinks.Support(links) is null) links.Insert(0, link); // its first grid: what it rides on
         else links.Add(link);

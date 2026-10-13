@@ -279,6 +279,33 @@ public class AnchorTests
     // ── saving ──────────────────────────────────────────────────────────────
 
     [Fact]
+    public void AShipDockedOnAnotherLeavesWithItEvenWhenItsCloserToTheView()
+    {
+        using var game = new LoopbackGame();
+        var (client, _) = game.Join("crew");
+        var crew = client.World.GetEntities().With<LocalPlayer>().AsEnumerable().Single();
+
+        // A long carrier whose block space (and so where the Host has it) is at its far end, with a dinghy anchored at
+        // its near end, 100 blocks closer to the view.
+        var deck = Enumerable.Range(0, 101).Select(x => V(-x, 0, 0, BlockId.Stone)).ToArray();
+        var carrier = Spawn(game.Host, Grid(new Vector3(600, 50, 0), locked: true, deck));
+        var dinghy = Spawn(game.Host, Grid(new Vector3(502, 51, 0), locked: false, V(0, 0, 0, BlockId.Anchor)));
+        var (carrierId, dinghyId) = (carrier.Get<EntityId>(), dinghy.Get<EntityId>());
+        SetAnchored(game.Host, dinghy, true);
+        game.Tick(5);
+        // The Host hears of the hold straight away, not at the next save.
+        Assert.Equal(new[] { carrierId }, game.Hub.Entities[dinghyId].HeldTo);
+
+        // Stood still where the carrier is past the edge of the view (1160 away) and the dinghy isn't (1062): the dinghy
+        // goes with the carrier rather than staying, held to nothing.
+        game.Teleport(crew, new Vector3(-560, 60, 0));
+        for (int i = 0; i < 120 && game.Host.Registry.IsLive(carrierId); i++) game.Tick();
+        Assert.False(game.Host.Registry.IsLive(carrierId), "the carrier was never released");
+        game.Tick(5);
+        Assert.False(game.Host.Registry.IsLive(dinghyId), "the dinghy stayed behind");
+    }
+
+    [Fact]
     public void AShipDockedOnAnotherComesBackAboardItAfterARestart()
     {
         string path = Path.Combine(Path.GetTempPath(), $"cs-test-{Guid.NewGuid():N}.db");
