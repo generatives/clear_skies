@@ -95,6 +95,7 @@ public sealed partial class GpuLightSystem
     private float _prevBounceAlbedo = -1f, _prevSunLevel = -1f;
     private BounceMode _prevBounceMode = BounceMode.Off;
     private float _prevBounceReach = -1f;
+    private float _prevFalloff = -1f, _prevMaxBlend = -1f;
     private int _prevBounceRays = -1, _prevBounceGroups = -1;
 
     private bool _rayWasActive, _relightRequested;
@@ -216,10 +217,13 @@ public sealed partial class GpuLightSystem
         bool bounceOn = _bounceEnabled;
         bool bounceReset = bounceOn && (_bounceMode != _prevBounceMode || _bounceReach != _prevBounceReach
                                         || _bounceRays != _prevBounceRays || _bounceGroups != _prevBounceGroups
+                                        || _falloffLevels != _prevFalloff || _maxBlend != _prevMaxBlend
                                         || scaleChanged // the display bakes in ambient x AO: recomposed only once updated
                                         || !_aoOnly && (_bounceAlbedo != _prevBounceAlbedo || SunLight.Level != _prevSunLevel));
         _prevBounceMode = _bounceMode;
         _prevBounceReach = _bounceReach;
+        _prevFalloff = _falloffLevels;
+        _prevMaxBlend = _maxBlend;
         _prevBounceAlbedo = _bounceAlbedo;
         _prevSunLevel = SunLight.Level;
         _prevBounceRays = _bounceRays;
@@ -325,7 +329,7 @@ public sealed partial class GpuLightSystem
             {
                 var buf = _stepWorks[r];
                 _rayLight.DispatchBounce(_store, sunDir, SunLight.Strength, _bounceAlbedo, _bounceRays,
-                                         _bounceGroups, _bounceReach, _aoOnly, buf!, _stepLen[r] / 2);
+                                         _bounceGroups, _bounceReach, _aoOnly, _falloffLevels / 15f, _maxBlend, buf!, _stepLen[r] / 2);
                 if (r > 0) _lastStepTotal += _stepLen[r] / 2;
             }
             _bounceTimer.Stop();
