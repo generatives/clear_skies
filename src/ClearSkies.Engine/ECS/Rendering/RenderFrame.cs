@@ -61,7 +61,6 @@ public sealed class RenderFrame : IDebugUiSystem
 
     // ── debug UI ─────────────────────────────────────────────────────────────
     public string DebugName => "Renderer";
-    private bool _referenceLighting;
     private bool _dbgNoTextures, _dbgNoFog, _dbgOverdraw;
     private int _dbgLighting;
     private static readonly string[] DbgLightingModes =
@@ -78,7 +77,6 @@ public sealed class RenderFrame : IDebugUiSystem
         bool wireframe = _renderer.WireframeMode;
         if (ImGui.Checkbox("Wireframe", ref wireframe))
             _renderer.WireframeMode = wireframe;
-        ImGui.Checkbox("Reference (slow) light + AO shader path", ref _referenceLighting);
         if (ImGui.CollapsingHeader("Render pass cost (debug)"))
         {
             ImGui.TextDisabled("Flip these and watch the render pass in GPU timings.");
@@ -134,7 +132,6 @@ public sealed class RenderFrame : IDebugUiSystem
             Ambient        = RayLightingSettings.Ambient,
             LinearizeColors = _renderer.Context.SurfaceIsSrgb ? 1f : 0f,
             Exposure       = RayLightingSettings.Exposure,
-            ReferenceLighting = _referenceLighting ? 1f : 0f,
             DebugFlags     = (_dbgNoTextures ? 1 : 0) | (_dbgNoFog ? 2 : 0),
             DebugLighting  = _dbgLighting,
             CameraPosition = camTransform.Position,

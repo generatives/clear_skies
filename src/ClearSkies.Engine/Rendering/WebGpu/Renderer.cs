@@ -34,8 +34,8 @@ const NO_SURFACE: u32 = " + GridStore.NoSurface + @"u;
 const SLOT_WORDS: u32 = " + GridStore.WordsPerSlot + @"u;
 const EMPTY_DISPLAY: u32 = 0xFFFFu;   // no light storage (or not lit yet): ambient and full sun
 
-// sunDir.w: sun strength (SunLight.Strength). lightParams.x: unused (ray AO is in the voxel light), .y: 1 = reference light path (see
-// shadeFast), .z: ambient (0-1), .w: 1 on an sRGB surface (see lin). camPos.xyz: camera world position. fog.xy: the world's fog start/end
+// sunDir.w: sun strength (SunLight.Strength). lightParams.x, .y: unused (ray AO is in the voxel light), .z: ambient
+// (0-1), .w: 1 on an sRGB surface (see lin). camPos.xyz: camera world position. fog.xy: the world's fog start/end
 // (horizontal), fog.zw: the cloud layer's (see CloudLayer), in blocks from the camera. zenith/horizon.rgb: the sky
 // gradient (see SkySettings). horizon.w: the distance haze's strength (0-1), haze.rgb its colour, haze.w its distance.
 // sea: the cloud sea's altitude, coverage (0 = off), cell size and thickness, in blocks (see cloudSea).
@@ -436,27 +436,6 @@ fn isSolid(v: vec3<i32>) -> bool {
     return code == OCC_ALL_SOLID;
 }
 
-fn occ(v: vec3<i32>) -> f32 { return select(0.0, 1.0, isSolid(v)); }
-
-// Whether voxel v is a see-through block with light worked out around it (BlockDef.CatchesLight: water, glass, leaves),
-// from its chunk's see-through bits (slot + 1 in the chunk entry's second word's z; 0 for none).
-fn isSeeThrough(v: vec3<i32>) -> bool {
-    let i = entryOf(drawGrid, v >> vec3<u32>(5u));
-    if (i < 0) { return false; }
-    let seeSlot = chunkTable[2 * i + 1].z;
-    if (seeSlot <= 0) { return false; }
-    let l = v & vec3<i32>(31);
-    return ((occPool[u32((seeSlot - 1) * WPC + l.y + 32 * l.z)] >> u32(l.x)) & 1u) == 1u;
-}
-
-// For a see-through block's face (see), whether open cell c lies on the same surface without a solid block behind it:
-// a see-through block behind it, so a water surface or a canopy smooths across itself, or, seen from inside the block
-// (inside: the face's own cell is see-through, e.g. the water surface from below), c is see-through too.
-fn seeSurface(c: vec3<i32>, N: vec3<i32>, see: bool, inside: bool) -> bool {
-    if (!see) { return false; }
-    return isSeeThrough(c - N) || (inside && isSeeThrough(c));
-}
-
 // Light slot of the brick holding voxel v, whose chunk-table entry is i (entryOf), or NO_SURFACE.
 fn brickSlot(i: i32, v: vec3<i32>) -> u32 {
     if (i < 0) { return NO_SURFACE; }
@@ -491,82 +470,6 @@ fn cellAt(v: vec3<i32>) -> Cell {
     return c;
 }
 
-// Minecraft-style smooth lighting at the air side of this fragment: sky + block light (each 0..1) and sun
-// visibility (1 lit … 0 shadowed). Each of the 4 corners of the fragment's cell face averages the air cells
-// sharing that corner — the fragment's own air cell, the two beside it in the face plane, and the diagonal —
-// and the fragment interpolates the 4 corner values by its position on the face (Minecraft does this per
-// vertex; greedy-merged quads have no per-cell vertices, so it is done per fragment instead). Only cells on
-// the SAME surface count (air with a solid directly behind along the face normal), and the diagonal is used
-// only if at least one side cell is (Minecraft's corner rule), so light never reaches around an edge or
-// through a corner. SMOOTH_LIGHT = false falls back to the flat per-cell value.
-const SMOOTH_LIGHT: bool = true;
-
-struct Lit { sky: f32, rgb: vec3<f32>, sun: f32 };
-
-fn onSurface(c: vec3<i32>, N: vec3<i32>, see: bool, inside: bool) -> bool {
-    return !isSolid(c) && (isSolid(c - N) || seeSurface(c, N, see, inside));
-}
-
-// (sky, r, g, b, sun) averaged over the usable cells at one corner.
-struct Corner { a: vec4<f32>, sun: f32 };
-
-fn cornerLit(air: vec3<i32>, s1: vec3<i32>, s2: vec3<i32>, dg: vec3<i32>, N: vec3<i32>, see: bool, inside: bool) -> Corner {
-    let inc1 = onSurface(s1, N, see, inside);
-    let inc2 = onSurface(s2, N, see, inside);
-    let incD = (inc1 || inc2) && onSurface(dg, N, see, inside);
-    var cells = array<vec3<i32>, 4>(air, s1, s2, dg);
-    var inc = array<bool, 4>(true, inc1, inc2, incD);
-    var acc = vec4<f32>(0.0);
-    var accS = 0.0;
-    var n = 0.0;
-    for (var k = 0; k < 4; k = k + 1) {
-        if (!inc[k]) { continue; }
-        let c = cellAt(cells[k]);
-        acc += vec4<f32>(c.sky, c.rgb);
-        accS += c.sun;
-        n += 1.0;
-    }
-    var r: Corner;
-    r.a = acc / n;
-    r.sun = accS / n;
-    return r;
-}
-
-fn sampleLit(localPos: vec3<f32>, localNormal: vec3<f32>, see: bool) -> Lit {
-    let air = drawChunk * 32 + vec3<i32>(floor(localPos + 0.5 * localNormal));
-    var o: Lit;
-
-    if (!SMOOTH_LIGHT) {
-        let c = cellAt(air);
-        o.sky = c.sky;
-        o.rgb = c.rgb;
-        o.sun = c.sun;
-        return o;
-    }
-
-    let N = vec3<i32>(round(localNormal));
-    let n = abs(localNormal);
-    var T: vec3<i32>; var B: vec3<i32>;
-    if (n.x > 0.5)      { T = vec3<i32>(0, 1, 0); B = vec3<i32>(0, 0, 1); }
-    else if (n.y > 0.5) { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 0, 1); }
-    else                { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 1, 0); }
-
-    let inside = see && isSeeThrough(air);
-    let c00 = cornerLit(air, air - T, air - B, air - T - B, N, see, inside);
-    let c10 = cornerLit(air, air + T, air - B, air + T - B, N, see, inside);
-    let c01 = cornerLit(air, air - T, air + B, air - T + B, N, see, inside);
-    let c11 = cornerLit(air, air + T, air + B, air + T + B, N, see, inside);
-
-    // Plain bilinear across the cell face, like Minecraft's per-vertex interpolation.
-    let s = fract(dot(localPos, vec3<f32>(T)));
-    let t = fract(dot(localPos, vec3<f32>(B)));
-    let a = mix(mix(c00.a, c10.a, s), mix(c01.a, c11.a, s), t);
-    o.sky = a.x;
-    o.rgb = a.yzw;
-    o.sun = mix(mix(c00.sun, c10.sun, s), mix(c01.sun, c11.sun, s), t);
-    return o;
-}
-
 // Standard voxel corner AO: a corner flanked by two solids is fully dark; otherwise it dims by how many of the
 // two sides + diagonal are solid.
 fn vAO(s1: f32, s2: f32, c: f32) -> f32 {
@@ -574,39 +477,16 @@ fn vAO(s1: f32, s2: f32, c: f32) -> f32 {
     return (3.0 - (s1 + s2 + c)) / 3.0;
 }
 
-// Smooth ambient occlusion sampled from the opacity neighbourhood of the air-side cell. The face's two in-plane
-// axes give four corner AO values (from the side + diagonal neighbours); the fragment's fractional position
-// within the cell bilerps between them, so AO stays smooth across a greedy-merged quad and is light-independent.
-fn computeAO(localPos: vec3<f32>, localNormal: vec3<f32>) -> f32 {
-    let air = drawChunk * 32 + vec3<i32>(floor(localPos + 0.5 * localNormal));
-    let n   = abs(localNormal);
-    var T: vec3<i32>; var B: vec3<i32>;
-    if (n.x > 0.5)      { T = vec3<i32>(0, 1, 0); B = vec3<i32>(0, 0, 1); }
-    else if (n.y > 0.5) { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 0, 1); }
-    else                { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 1, 0); }
-
-    let tm = occ(air - T); let tp = occ(air + T);
-    let bm = occ(air - B); let bp = occ(air + B);
-    let ao00 = vAO(tm, bm, occ(air - T - B));
-    let ao10 = vAO(tp, bm, occ(air + T - B));
-    let ao01 = vAO(tm, bp, occ(air - T + B));
-    let ao11 = vAO(tp, bp, occ(air + T + B));
-
-    // Smoothstep the bilinear weights so the reconstructed AO is slope-continuous (C1) across cell boundaries:
-    // each cell's patch meets its neighbour with zero slope. Plain fract bilinear is only C0, so the slope jumps
-    // where the AO ramp meets the un-occluded plateau — the eye reads that slope discontinuity as a 'bright line'
-    // at the far edge of the AO.
-    let s = smoothstep(0.0, 1.0, fract(dot(localPos, vec3<f32>(T))));
-    let t = smoothstep(0.0, 1.0, fract(dot(localPos, vec3<f32>(B))));
-    return mix(mix(ao00, ao10, s), mix(ao01, ao11, s), t);
-}
-
-// ── Fast path ────────────────────────────────────────────────────────────────────────────────────────────────
-// sampleLit + computeAO above, written for clarity, look the same few cells up over and over: ~32 isSolid and ~16
-// displayAt per fragment, each walking grid → chunk table → pool again. shadeFast gives the same result from
-// one chunk-table lookup, one 27-bit solid mask of the air cell's 3x3x3 neighbourhood (9 occupancy words when it
-// lies inside one chunk) and one decode per in-plane cell (the brick slot is shared while cells stay in the air
-// cell's brick). camera.lightParams.y > 0.5 selects the reference path instead, for A/B comparison.
+// ── Smooth light and corner AO ───────────────────────────────────────────────────────────────────────────────
+// Minecraft-style smooth lighting at the air side of a fragment: each of the 4 corners of the fragment's cell face
+// averages the air cells sharing that corner (the fragment's own air cell, the two beside it in the face plane, and the
+// diagonal), and the fragment interpolates the 4 corner values by its position on the face (Minecraft does this per
+// vertex; greedy-merged quads have no per-cell vertices, so it is done per fragment instead). Only cells on the SAME
+// surface count (open, with a solid directly behind along the face normal), and the diagonal is used only if at least
+// one side cell is (Minecraft's corner rule), so light never reaches around an edge or through a corner. Corner AO
+// (vAO) comes from the same neighbourhood. shadeFast does it from one chunk-table lookup, one 27-bit solid mask of
+// the air cell's 3x3x3 neighbourhood (9 occupancy words when it lies inside one chunk) and one decode per in-plane
+// cell (the brick slot is shared while cells stay in the air cell's brick).
 
 // Bit of offset d (each component -1..1) in a neighbourhood mask.
 fn nbit(d: vec3<i32>) -> u32 { return u32((d.x + 1) + 3 * (d.y + 1) + 9 * (d.z + 1)); }
@@ -662,8 +542,9 @@ fn solidMask(air: vec3<i32>, i: i32) -> u32 {
 }
 
 // See-through mask of the 27 voxels around air (air's own chunk-table entry is i), laid out like solidMask's, from
-// the chunks' see-through bits (see isSeeThrough). Lets a see-through face's smoothing test its neighbours with one
-// chunk lookup instead of a full isSeeThrough lookup per neighbour.
+// the chunks' see-through bits (a see-through block with light worked out around it, BlockDef.CatchesLight: water, glass, leaves; slot + 1 in the
+// chunk entry's second word's z, 0 for none). Lets a see-through face's smoothing test its neighbours with one
+// chunk lookup.
 fn seeMask(air: vec3<i32>, i: i32) -> u32 {
     let l = air & vec3<i32>(31);
     if (all(l >= vec3<i32>(1)) && all(l <= vec3<i32>(30))) {
@@ -707,7 +588,10 @@ fn seeMask(air: vec3<i32>, i: i32) -> u32 {
     return m;
 }
 
-// seeSurface for the in-plane cell air + d, from the see-through mask sm (0 for a face that isn't see-through).
+// For a see-through block's face, whether the in-plane cell air + d lies on the same surface without a solid block
+// behind it: a see-through block behind it, so a water surface or a canopy smooths across itself, or, seen from inside
+// the block (inside: the face's own cell is see-through, e.g. the water surface from below), the cell is see-through
+// too. sm is the see-through mask (0 for a face that isn't see-through).
 fn seeAt(sm: u32, d: vec3<i32>, N: vec3<i32>, inside: bool) -> bool {
     return maskSolid(sm, d - N) || (inside && maskSolid(sm, d));
 }
@@ -755,14 +639,14 @@ fn shadeFast(localPos: vec3<f32>, localNormal: vec3<f32>, see: bool) -> Shade {
     let hb = air >> vec3<u32>(3u);
     let hs = brickSlot(ai, air);
 
-    // Air-layer solids around the cell (AO, and the first half of onSurface).
+    // Air-layer solids around the cell (AO, and the first half of the same-surface test).
     let sTm = maskSolid(m, -T);     let sTp = maskSolid(m, T);
     let sBm = maskSolid(m, -B);     let sBp = maskSolid(m, B);
     let sMM = maskSolid(m, -T - B); let sPM = maskSolid(m, T - B);
     let sMP = maskSolid(m, -T + B); let sPP = maskSolid(m, T + B);
 
-    // onSurface: open, with a solid directly behind along the normal (or for a see-through block's face, a
-    // see-through block, or from inside one a see-through cell: see seeSurface). Diagonals need a side cell (corner rule).
+    // Same surface: open, with a solid directly behind along the normal (or for a see-through block's face, a
+    // see-through block, or from inside one a see-through cell: see seeAt). Diagonals need a side cell (corner rule).
     // A see-through face reads its neighbours' see-through bits from one mask (seeMask).
     var sm = 0u;
     if (see) { sm = seeMask(air, ai); }
@@ -904,7 +788,7 @@ fn shadeBlock(in: VSOut, baseColor: vec3<f32>, see: bool) -> vec3<f32> {
 
     let worldN = normalize(in.worldNormal);
     let ndotl  = max(dot(worldN, -(camera.sunDir.xyz)), 0.0);
-    var s: Lit;
+    var s: Cell;
     var ao: f32;
     let mode = i32(camera.lightParams2.z);
     let air = drawChunk * 32 + vec3<i32>(floor(in.localPos + 0.5 * in.localNormal));
@@ -924,9 +808,6 @@ fn shadeBlock(in: VSOut, baseColor: vec3<f32>, see: bool) -> vec3<f32> {
         s.sky = c.sky; s.rgb = c.rgb; s.sun = c.sun;
         ao = 1.0;
         if (mode == 1) { ao = cornerAoFast(in.localPos, in.localNormal); }
-    } else if (camera.lightParams.y > 0.5) {
-        s  = sampleLit(in.localPos, in.localNormal, see);
-        ao = computeAO(in.localPos, in.localNormal);
     } else {
         let f = shadeFast(in.localPos, in.localNormal, see);
         s.sky = f.sky; s.rgb = f.rgb; s.sun = f.sun;
