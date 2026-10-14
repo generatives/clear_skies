@@ -54,7 +54,7 @@ public struct PlayerCharacter
 
     // Glider boost (Shift pressed while gliding): a push of BoostSpeed (m/s) spread over BoostTime, along the way the
     // character is moving at each tick of it (the look, if it's barely moving), cut short if the glider closes. Then
-    // none until BoostCooldown has passed since it started, in the air or not, as often as that allows.
+    // none until BoostCooldown has passed since it started, or the character lands, as often as that allows.
     private const float BoostSpeed = 24f, BoostTime = 0.4f, BoostCooldown = 10f;
     private float boostRemaining, boostCooldown;
     private Quaternion glideOrientation;
@@ -234,7 +234,7 @@ public struct PlayerCharacter
         if (glide != gliding) SetGliding(ref character, glide);
         if (glide) glideOrientation = WingOrientation(viewDirection, characterBody.Velocity.Linear);
 
-        boostCooldown = MathF.Max(boostCooldown - dt, 0);
+        boostCooldown = character.Supported ? 0 : MathF.Max(boostCooldown - dt, 0);
         if (!glide) boostRemaining = 0;
         else if (keys.BoostPressed && boostCooldown == 0) { boostRemaining = BoostTime; boostCooldown = BoostCooldown; }
         if (boostRemaining > 0)

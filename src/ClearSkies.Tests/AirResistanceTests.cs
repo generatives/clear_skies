@@ -236,6 +236,30 @@ public class AirResistanceTests
     }
 
     [Fact]
+    public void LandingRechargesTheBoost()
+    {
+        using var scene = new HeadlessScene();
+        scene.AddAirResistance();
+        scene.SpawnPlatform(Vector3.Zero, 128);
+        var player = scene.SpawnLocalPlayer(new Vector3(0, 1.5f, 60));
+        var character = () => player.Get<CharacterControllerComponent>().Character;
+        Assert.True(scene.TickUntil(() => character().Supported, 120), "the platform isn't there"); // its collider is built
+        player.Get<CharacterControllerComponent>().Character.TeleportTo(new Vector3(0, 10, 60));
+        Glide(scene, player, 0f, 0f, 1f);
+        Assert.True(Boost(scene, player, gliding: true) > 10f, "no first boost");
+        player.Get<PlayerInput>() = default; // let go: the glider closes and the player drops
+        Assert.True(scene.TickUntil(() => character().Supported, 600), $"never landed: at {character().Position}");
+        scene.Tick();
+
+        // Jump, open the glider on the way down, and boost again well within ten seconds.
+        player.Get<PlayerInput>() = new PlayerInput { Held = PlayerButtons.Up, Pressed = PlayerButtons.Up };
+        scene.Tick();
+        player.Get<PlayerInput>() = new PlayerInput { Held = PlayerButtons.Up };
+        Assert.True(scene.TickUntil(() => character().Gliding, 120), "the glider didn't open");
+        Assert.True(Boost(scene, player, gliding: true) > 5f, "no boost after landing");
+    }
+
+    [Fact]
     public void TheGliderOpensOnlyOnTheWayDownAndClosesOnLanding()
     {
         using var scene = new HeadlessScene();
