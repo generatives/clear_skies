@@ -1,6 +1,7 @@
 using System.Numerics;
 using ClearSkies.Engine.Commands;
 using ClearSkies.Engine.Core;
+using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Persistence;
 using ClearSkies.Engine.Serialization;
@@ -55,6 +56,7 @@ public sealed class LocalHost(Host host, JoinedPeer from) : IHost
     public void Reject(in Rejection rejection) => host.Reject(rejection);
     public void SendInput(in PlayerInputMessage input) => host.SendInput(from, input);
     public void SendFrame(uint tick, IReadOnlyList<BodySnapshot> snapshots) => host.SendFrame(from, tick, snapshots);
+    public void SendEntityState(uint tick, IReadOnlyList<EntityState> states) => host.SendEntityState(from, tick, states);
     public void EntityCreated(in DescriptionMessage description) => host.EntityCreated(from, description);
     public void EntityDescribed(in DescriptionMessage description) => host.EntityDescribed(from, description);
     public void EntityReleased(in DescriptionMessage description) => host.EntityReleased(from, description);
@@ -81,9 +83,13 @@ public sealed class HostEntity
     /// snapshotted.</summary>
     public Vector3? Position;
     public Quaternion Rotation = Quaternion.Identity;
-    /// <summary>A player standing on a ship: the ship, and where on it (its block space).</summary>
+    /// <summary>A player standing on a ship, or a grid riding on one (held to it by anchors, see AnchorLinks): the ship,
+    /// and where on it (its block space).</summary>
     public EntityId Support;
     public Vector3 LocalPosition;
+    /// <summary>A grid held to others by anchors: every grid it's held to (its support first). It's loaded only with or
+    /// after them, and released with any of them, so a held group comes and goes together.</summary>
+    public EntityId[] HeldTo = Array.Empty<EntityId>();
     /// <summary>A player: who plays them (None for anything else), and who they are.</summary>
     public PeerId ControllingPeer;
     public PlayerId Player;
@@ -151,10 +157,15 @@ public sealed class Host : ISystem
     private readonly Dictionary<EntityId, HostEntity> _entities = new();
     private readonly Dictionary<ChunkPosition, HostChunk> _chunks = new();
     private readonly List<BodySnapshot> _frame = new();
+    private readonly List<EntityState> _states = new();
     private readonly List<EntityId> _scratch = new();
     private readonly List<(HostEntity Entity, byte[] Data, Vector3? Position)> _saving = new();
     private uint _idNext, _idEnd;
     private float _sinceSave;
+
+    /// <summary>A hash of the components replicated here (see <see cref="Engine.Entities.ReplicatedComponents.Checksum"/>):
+    /// a joining machine's must match.</summary>
+    public ulong ReplicationChecksum { get; init; }
 
     /// <param name="newPlayerSpawn">Where a new player's Character spawns (its capsule's centre), and which way they face.</param>
     public Host(SaveDatabase db, ITickClock clock, ulong seed, ulong generationChecksum,
@@ -250,6 +261,7 @@ public sealed class Host : ISystem
         refusal = "";
         if (hello.Version != ProtocolVersion.Current) { refusal = $"Version mismatch: host {ProtocolVersion.Current}, you {hello.Version}"; return null; }
         if (hello.GenerationChecksum != _checksum) { refusal = "World generation differs from the host's (different game build?)"; return null; }
+        if (hello.ReplicationChecksum != ReplicationChecksum) { refusal = "Replicated components differ from the host's (different game build?)"; return null; }
         var id = local && _joined.All(p => !p.IsAuthority) ? PeerId.Host : FreePeerId();
         if (id == PeerId.None) { refusal = "The game is full"; return null; }
         string name = hello.Name.Trim();
@@ -367,6 +379,18 @@ public sealed class Host : ISystem
         }
     }
 
+    /// <summary>The replicated state of the entities a machine has authority over: to each Participant that has them.</summary>
+    public void SendEntityState(JoinedPeer from, uint tick, IReadOnlyList<EntityState> states)
+    {
+        foreach (var p in _joined)
+        {
+            if (p == from) continue;
+            _states.Clear();
+            foreach (var s in states) if (p.Known.Contains(s.Root) && _entities.TryGetValue(s.Root, out var e) && e.Loaded) _states.Add(s);
+            if (_states.Count > 0) p.Participant.ReceiveEntityState(tick, _states);
+        }
+    }
+
     // ── descriptions ────────────────────────────────────────────────────────
 
     /// <summary>The authority made an entity (anyone else's is ignored, as are all of these).</summary>
@@ -421,7 +445,21 @@ public sealed class Host : ISystem
             (e.Support, e.LocalPosition) = player.FreeFly ? (EntityId.None, default) : (player.Support, player.LocalPosition);
             e.Position = player.Position;
         }
-        else if (e.Position is not null || created) e.Position = d.Position; // a global one stays global
+        else
+        {
+            if (e.Position is not null || created) e.Position = d.Position; // a global one stays global
+            KeepAnchor(e);
+        }
+    }
+
+    /// <summary>A grid held to others by anchors: rides on its support, and comes and goes with all of them (see
+    /// <see cref="HostEntity.HeldTo"/>).</summary>
+    private static void KeepAnchor(HostEntity e)
+    {
+        if (e.Kind != CommandIds.SpawnGrid || e.Data is null) return;
+        var links = GridDescription.ReadAnchors(e.Data);
+        e.HeldTo = links.Where(l => l.ToGrid).Select(l => l.Target).ToArray();
+        (e.Support, e.LocalPosition) = AnchorLinks.Support(links) is { } s ? (s.Target, s.LocalPosition) : (EntityId.None, default);
     }
 
     private void OnReleased(HostEntity e)
@@ -473,12 +511,24 @@ public sealed class Host : ISystem
 
     // ── views ───────────────────────────────────────────────────────────────
 
-    /// <summary>Where an entity is in the world: a player on their ship as the ship is now.</summary>
-    public Vector3 WorldPosition(HostEntity e)
+    /// <summary>Where an entity is in the world: a player on their ship, or a grid anchored to another, as the ship is
+    /// now (wherever that is).</summary>
+    public Vector3 WorldPosition(HostEntity e) => WorldPosition(e, depth: 0);
+
+    private Vector3 WorldPosition(HostEntity e, int depth)
     {
-        if (e.IsPlayer && !e.Support.IsNone && _entities.TryGetValue(e.Support, out var ship) && ship.Position is { } on)
-            return on + Vector3.Transform(e.LocalPosition, ship.Rotation);
+        // A ship's position is its own unless it rides on another: a few deep at most (a dinghy in a ship in a hangar).
+        if (!e.Support.IsNone && depth < 8 && _entities.TryGetValue(e.Support, out var ship) && ship.Position is not null)
+            return WorldPosition(ship, depth + 1) + Vector3.Transform(e.LocalPosition, ship.Rotation);
         return e.Position ?? Vector3.Zero;
+    }
+
+    /// <summary>Whether <paramref name="e"/> is held to a grid that's loaded: it goes when that does.</summary>
+    private bool HeldToLoaded(HostEntity e)
+    {
+        foreach (var id in e.HeldTo)
+            if (_entities.TryGetValue(id, out var other) && other.Loaded && !other.Releasing) return true;
+        return false;
     }
 
     /// <summary>Whether <paramref name="joined"/> sees <paramref name="e"/>: within its View Volume, or (if it
@@ -511,24 +561,14 @@ public sealed class Host : ISystem
         bool viewed = _joined.Any(p => p.Ready && p.ViewRadius > 0);
         if (viewed)
             foreach (var e in _entities.Values)
-                if (e.Loaded && !e.Releasing && !e.IsPlayer && !AnyoneSees(e, already: true)) Release(e);
+                if (e.Loaded && !e.Releasing && !e.IsPlayer && !HeldToLoaded(e) && !AnyoneSees(e, already: true)) Release(e);
 
         int loads = 0;
         foreach (var e in _entities.Values)
         {
             if (loads >= MaxLoadsPerTick || !viewed) break;
             if (e.Loaded || e.Releasing || !(AnyoneSees(e, already: false) || e.IsPlayer)) continue;
-            if (e.Data is null)
-            {
-                // The index and the entities table change together (saved and deleted together), so the row is there.
-                var row = _db.ReadEntity(e.Id) ?? throw new InvalidOperationException($"Stored entity {e.Id} has no row in the save.");
-                (e.Kind, e.Data) = (row.Kind, row.Data);
-            }
-            e.Loaded = true;
-            e.DescribedTick = _clock.Tick; // the save's, and nothing newer exists anywhere
-            SendSpawn(authority, e);
-            loads++;
-            Loads++;
+            loads += Load(authority, e, depth: 0);
         }
 
         foreach (var p in _joined)
@@ -559,6 +599,30 @@ public sealed class Host : ISystem
         }
     }
 
+    /// <summary>Loads a stored entity: spawns it on the authority from the save's Description. A grid held to others
+    /// loads them first (its spawn waits for its support, see SpawnQueue), so they come back together; one held to a grid
+    /// still being released waits for it to go. How many were loaded.</summary>
+    private int Load(JoinedPeer authority, HostEntity e, int depth)
+    {
+        if (e.Data is null)
+        {
+            // The index and the entities table change together (saved and deleted together), so the row is there.
+            var row = _db.ReadEntity(e.Id) ?? throw new InvalidOperationException($"Stored entity {e.Id} has no row in the save.");
+            (e.Kind, e.Data) = (row.Kind, row.Data);
+            if (!e.IsPlayer) KeepAnchor(e);
+        }
+        foreach (var id in e.HeldTo)
+            if (_entities.TryGetValue(id, out var other) && other.Releasing) return 0;
+        int loads = 0;
+        e.Loaded = true; // before what it's held to, which may be held to it in turn
+        foreach (var id in e.HeldTo)
+            if (depth < 8 && _entities.TryGetValue(id, out var other) && !other.Loaded) loads += Load(authority, other, depth + 1);
+        e.DescribedTick = _clock.Tick; // the save's, and nothing newer exists anywhere
+        SendSpawn(authority, e);
+        Loads++;
+        return loads + 1;
+    }
+
     /// <summary>Spawns <paramref name="e"/> on <paramref name="joined"/> from its Description: owned by the authority, and
     /// a player played by their machine.</summary>
     private void SendSpawn(JoinedPeer joined, HostEntity e)
@@ -575,6 +639,9 @@ public sealed class Host : ISystem
         if (Authority is not { } authority) return;
         e.Releasing = true;
         authority.Participant.Release(e.Id);
+        // Grids held to it go with it, rather than being left held to nothing.
+        foreach (var rider in _entities.Values)
+            if (!rider.IsPlayer && rider.Loaded && !rider.Releasing && Array.IndexOf(rider.HeldTo, e.Id) >= 0) Release(rider);
     }
 
     // ── saving ──────────────────────────────────────────────────────────────

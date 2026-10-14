@@ -51,9 +51,13 @@ public sealed class Hosting : IDisposable
     {
         var (eye, yaw, pitch) = WorldSpawn.For(save.Seed);
         ulong checksum = GenerationChecksum.Compute();
-        Host = new Host(save.Database, world.Host.Clock, save.Seed, checksum, (WorldSpawn.PlayerAt(eye), yaw, pitch));
+        ulong replication = GameReplication.Checksum;
+        Host = new Host(save.Database, world.Host.Clock, save.Seed, checksum, (WorldSpawn.PlayerAt(eye), yaw, pitch))
+        {
+            ReplicationChecksum = replication,
+        };
         Network = transport is null ? null : new HostNetwork(Host, transport);
-        Net = SimulationParticipant.Join(Host, new Hello(ProtocolVersion.Current, playerName ?? "", checksum), world.Session, world.Commands,
+        Net = SimulationParticipant.Join(Host, new Hello(ProtocolVersion.Current, playerName ?? "", checksum, replication), world.Session, world.Commands,
                                          world.Registry, world.Host.World, world.Host.Clock, world.TerrainReadyFor, chunks);
         Net.OthersHere = () => Host.OthersConnected;
         Net.Viewing = playerName is not null;

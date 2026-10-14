@@ -28,8 +28,8 @@ struct Params {
     counts: vec4<i32>,  // y: word offset of the lamp records in lists, z: work entries this dispatch
     bounce: vec4<f32>,  // x: albedo (fraction of incoming light a surface re-emits), y: sun strength (0-1),
                         // compose: z: bounce display scale (0 = bounce off); bounce: z: 1 = AO only, w: ray reach (voxels)
-    bounce2: vec4<f32>, // x: rays per evaluation, y: evaluations per full ray set (cycle); compose: z: ambient
-                        // (0-1), w: ray AO strength (0-1); bounce: z: checkerboard spread (1, 2 or 4)
+    bounce2: vec4<f32>, // x: rays per group, y: direction groups; compose: z: ambient
+                        // (0-1), w: ray AO strength (0-1)
 };
 
 @group(0) @binding(0) var<storage, read> occPool: array<u32>;
@@ -176,10 +176,11 @@ fn jumpCell(v: vec3<i32>, size: i32, o: vec3<f32>, d: vec3<f32>, t1: f32) -> Jum
 //   display: one u16 per voxel, two per word (k even = low half): bits 0-8 brightness, 9-13 warmth, 14-15 sun
 //   visibility (0-3). Brightness and warmth hold all the non-sun light (ambient times the ray AO, lamps and bounce,
 //   combined per channel by max; see encodeLight). The fragment shader reads only this.
-// A brick whose bounce is being evaluated also has an accumulation slot in accPool (accMap[slot] = its index + 1, 0
-// for none), ACC_WORDS u32s, one per voxel: bits 0-7 bounce R, 8-15 G, 16-23 B (linear 0-1), 24-31 AO occlusion
-// (0-255), blended by the bounce pass. The CPU hands one out when the brick's evaluation starts and takes it back when
-// its evaluations are done, so a settled brick keeps only its display.
+// A brick whose bounce is updating also has an accumulation slot in accPool (accMap[slot] = its index + 1, 0
+// for none), ACC_WORDS u32s, one per voxel: bits 0-7 bounce R, 8-15 G, 16-23 B (0-1 on a square-root curve, see
+// bounceOf), 24-31 AO occlusion
+// (0-255), blended by the bounce pass. The CPU hands one out when the brick's update starts and takes it back when
+// its updates are done, so a settled brick keeps only its display.
 const SLOT_WORDS: i32 = " + GridStore.WordsPerSlot + @";
 const ACC_WORDS: i32 = " + GridStore.AccWordsPerSlot + @";
 
@@ -420,8 +421,8 @@ fn hasSolidNeighbour(g: i32, v: vec3<i32>) -> bool {
 
 // ── Sun ───────────────────────────────────────────────────────────────────────────────────────────────────
 
-// Sun visibility of a surface air voxel, 0 (shadowed) to 3 (lit). Anything else reads 3: the fragment shader only
-// blends cells on the face's own surface, so the value never shows.
+// Sun visibility of a surface air voxel, 0 (shadowed) to 3 (lit). Anything else reads 3, but sun_main asks only for
+// surface voxels: the others keep the sun they had (see sun_main).
 fn sunLevel(g: i32, v: vec3<i32>, list: u32) -> u32 {
     if (!isSurfaceAir(g, v)) { return 3u; }
 
@@ -476,9 +477,10 @@ fn sun_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg:
     workgroupBarrier();
     let it = itemOf(work[wi], t);
     let base = it.v0 - vec3<i32>(i32(t * 2u) & 7, (i32(t * 2u) >> 3u) & 7, i32(t * 2u) >> 6u);
+    let prev = lightPool[it.disp];
     for (var e = 0u; e < 2u; e = e + 1u) {
         let k = t * 2u + e;
-        wSun[k] = 3u; // not a surface voxel: reads lit (see sunLevel)
+        wSun[k] = (prev >> (16u * e + 14u)) & 3u; // not a surface voxel: keeps its sun (see below)
         if (isSurfaceAir(it.g, it.v0 + vec3<i32>(i32(e), 0, 0))) { wList[atomicAdd(&wCount, 1u)] = k; }
     }
     workgroupBarrier();
@@ -489,10 +491,13 @@ fn sun_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg:
         wSun[k] = sunLevel(it.g, base + vec3<i32>(i32(k & 7u), i32((k >> 3u) & 7u), i32(k >> 6u)), list);
     }
     workgroupBarrier();
+    // A voxel that stopped being surface air (a block placed in it, or the one beside it broken) is still read until
+    // its chunk's new mesh lands, a frame or more later: the old mesh's faces bordering it light from it. So it keeps
+    // the light it showed rather than reading lit, which flashed those faces (where the placed block is about to
+    // appear) bright in a dark room. Only stale faces read it: every current face's cell is surface air.
     let s0 = wSun[t * 2u];
     let s1 = wSun[t * 2u + 1u];
-    let old = lightPool[it.disp] & ~((3u << 14u) | (3u << 30u));
-    lightPool[it.disp] = old | (s0 << 14u) | (s1 << 30u);
+    lightPool[it.disp] = (prev & ~((3u << 14u) | (3u << 30u))) | (s0 << 14u) | (s1 << 30u);
 }
 
 // ── Lamps and composition ─────────────────────────────────────────────────────────────────────────────────
@@ -549,8 +554,17 @@ fn lampLight(g: i32, v: vec3<i32>, list: u32) -> vec3<f32> {
     return min(best, vec3<f32>(15.0)) / 15.0;
 }
 
+// Stored bounce is on a square-root curve, as the display is on a squared one: 8 bits linear would give dim light (a
+// hold's few-hops bounce, ~0.02) only a handful of steps, each a fifth of it, and every blend would round it.
+fn bounceOf(a: u32) -> vec3<f32> {
+    let s = vec3<f32>(f32(a & 0xFFu), f32((a >> 8u) & 0xFFu), f32((a >> 16u) & 0xFFu)) / 255.0;
+    return s * s;
+}
+fn bounceCode(c: f32) -> f32 { return sqrt(clamp(c, 0.0, 1.0)) * 255.0; }
+
+// Bounce (linear) and AO occlusion (0-1) of an accumulation word.
 fn unpackAcc(a: u32) -> vec4<f32> {
-    return vec4<f32>(f32(a & 0xFFu), f32((a >> 8u) & 0xFFu), f32((a >> 16u) & 0xFFu), f32(a >> 24u)) / 255.0;
+    return vec4<f32>(bounceOf(a), f32(a >> 24u) / 255.0);
 }
 
 // Face direction f (0-5: +x, -x, +y, -y, +z, -z).
@@ -609,17 +623,24 @@ fn tileSurfaceAir(c: vec3<i32>) -> bool {
 // is skipped (it fires no rays, so it has no bounce or AO), as is any without light storage or accumulation (a settled
 // brick, whose bounce is in its display). lk: the voxel in its
 // brick (0-7); read from the compose tile.
+//
+// A word of 0 is air not measured yet (bounce_main zeroes air away from any surface; a placed block makes it surface):
+// read as open and unlit, it would show full ambient, a flash in a dark room until its next hop. Such cells are left
+// out, so a new surface voxel shows its neighbours' light meanwhile.
 fn smoothedAcc(lk: vec3<i32>, own: u32) -> vec4<f32> {
     let c12 = lk + vec3<i32>(2);
     let c10 = lk + vec3<i32>(1);
-    var sum = unpackAcc(own) * 2.0;
-    var w = 2.0;
+    let ownW = select(2.0, 0.0, own == 0u);
+    var sum = unpackAcc(own) * ownW;
+    var w = ownW;
     var faceSolid: array<bool, 6>;
     for (var f = 0; f < 6; f = f + 1) {
         let d = faceDir(f);
         faceSolid[f] = tileSolid(c12 + d);
         if (faceSolid[f] || !tileSurf(c10 + d)) { continue; }
-        sum = sum + unpackAcc(cAcc[tileSurfIndex(c10 + d)]);
+        let a = cAcc[tileSurfIndex(c10 + d)];
+        if (a == 0u) { continue; }
+        sum = sum + unpackAcc(a);
         w = w + 1.0;
     }
     // Edge diagonals: faces fa < fb on different axes.
@@ -628,10 +649,13 @@ fn smoothedAcc(lk: vec3<i32>, own: u32) -> vec4<f32> {
             if (faceSolid[fa] && faceSolid[fb]) { continue; } // no air path around the edge
             let n = c10 + faceDir(fa) + faceDir(fb);
             if (!tileSurf(n)) { continue; }
-            sum = sum + 0.5 * unpackAcc(cAcc[tileSurfIndex(n)]);
+            let a = cAcc[tileSurfIndex(n)];
+            if (a == 0u) { continue; }
+            sum = sum + 0.5 * unpackAcc(a);
             w = w + 0.5;
         }
     }
+    if (w == 0.0) { return unpackAcc(own); }
     return sum / w;
 }
 
@@ -640,15 +664,17 @@ fn smoothedAcc(lk: vec3<i32>, own: u32) -> vec4<f32> {
 // max, and the given sun level; bounce and AO are the stored ones, smoothed over neighbours (smoothedAcc) when smooth.
 fn composeSurface(g: i32, v: vec3<i32>, lk: vec3<i32>, acc: u32, sun: u32, list: u32, smoothed: bool) -> u32 {
     let ambient = p.bounce2.z;
-    let sm = select(unpackAcc(acc), smoothedAcc(lk, acc), smoothed);
+    // An if rather than a select: select evaluates both sides, so the smoothing would run on every compose.
+    var sm = unpackAcc(acc);
+    if (smoothed) { sm = smoothedAcc(lk, acc); }
     let bounce = sm.rgb * p.bounce.z;
     let sky = ambient * (1.0 - p.bounce2.w * sm.a);
     let light = max(max(lampLight(g, v, list), bounce), vec3<f32>(sky));
     return encodeLight(light) | (sun << 14u);
 }
 
-// Recomposes a brick's display (see composeSurface): solid voxels and air away from any surface get the plain ambient;
-// the surface voxels are gathered into a list (lamp rays make their cost uneven) and composed by consecutive threads.
+// Recomposes a brick's display (see composeSurface): solid voxels and air away from any surface keep theirs (see
+// sun_main); the surface voxels are gathered into a list (lamp rays make their cost uneven) and composed by consecutive threads.
 // Only the frame's last compose of a brick smooths (p.bounce.x): the ones before it are there for the bounce passes to
 // read current light, and each voxel's own value does for that at a fraction of the cost.
 @compute @workgroup_size(256)
@@ -660,7 +686,7 @@ fn compose_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) 
     let it = itemOf(slot, t);
     let base = it.v0 - vec3<i32>(i32(t * 2u) & 7, (i32(t * 2u) >> 3u) & 7, i32(t * 2u) >> 6u); // the brick's first voxel
     let smoothed = p.bounce.x > 0.5;
-    let ownAcc = accOf(slot); // -1: no accumulation (bounce off, or not evaluated yet): no bounce and no AO
+    let ownAcc = accOf(slot); // -1: no accumulation (bounce off, or not updated yet): no bounce and no AO
     if (t == 0u) { atomicStore(&wCount, 0u); }
     if (t < 54u) { atomicStore(&cOcc[t], 0u); atomicStore(&cSee[t], 0u); }
     if (t < 32u) { atomicStore(&cSurf[t], 0u); }
@@ -698,12 +724,11 @@ fn compose_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) 
     }
     workgroupBarrier();
 
-    // Every voxel starts as plain ambient with its sun level; the surface ones are listed to be composed.
-    let ambientWord = encodeLight(vec3<f32>(p.bounce2.z));
+    // Every voxel starts as it was (its sun level already current); the surface ones are listed to be composed.
     let old = lightPool[it.disp];
     for (var e = 0u; e < 2u; e = e + 1u) {
         let k = t * 2u + e;
-        wSun[k] = ambientWord | (((old >> (16u * e + 14u)) & 3u) << 14u);
+        wSun[k] = (old >> (16u * e)) & 0xFFFFu;
         if (tileSurfaceAir(vec3<i32>(i32(k & 7u), i32((k >> 3u) & 7u), i32(k >> 6u)) + vec3<i32>(2))) {
             wList[atomicAdd(&wCount, 1u)] = k;
         }
@@ -722,25 +747,25 @@ fn compose_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) 
     lightPool[it.disp] = wSun[t * 2u] | (wSun[t * 2u + 1u] << 16u);
 }
 
-// ── Bounce (one-hop indirect light, multi-hop through re-evaluation) ─────────────────────────────────────
-// Each evaluation, a surface air voxel fires p.bounce2.x short rays (up to p.bounce.w voxels), cosine-distributed
-// around its surface normal, through its chunk's grids: one slice of a fixed per-voxel direction set that a full
-// cycle of p.bounce2.y evaluations covers (see bounceVoxel). At each ray's nearest hit it reads the light
+// ── Bounce (one hop of indirect light per dispatch) ─────────────────────────────────────────────────────
+// Each hop, a surface air voxel fires p.bounce2.x short rays (up to p.bounce.w voxels) per group,
+// cosine-distributed around its surface normal, through its chunk's grids: one or more of the p.bounce2.y groups of
+// its fixed directions (see bounceVoxel). At each ray's nearest hit it reads the light
 // arriving at the hit face from the air cell in front of it: the brighter of that cell's direct sun
 // (visibility x strength x the face's N.L), its lamp light and its own stored bounce; a miss reads 0. The
-// mean of those times the albedo is this evaluation's estimate, blended into the stored bounce (0-255, bits
-// 24-31 of the light word) with weight alpha = max(1/cycle, 1/(n+1)), n being how many times the brick has
-// been evaluated since it changed: a running average over the first cycle (after which the value is exactly
-// the complete set's mean), then an EMA weighing one cycle.
+// mean of those times the albedo is this hop's estimate, blended into the stored bounce (0-255, bits
+// 0-23 of the accumulation word) with the weight the CPU gives it: a brick updates, a few hops back to back
+// that together fire a fixed share of its groups, weighted to make a running average of the update (replacing what
+// was stored, or keeping half of it), so the stored value is always a complete update's mean.
 // The same rays measure ambient occlusion: the fraction that hit nothing within their reach is the voxel's sky
-// visibility (cosine-weighted, since the rays are), and one minus it is blended into bits 16-23 the same way.
+// visibility (cosine-weighted, since the rays are), and one minus it is blended into bits 24-31 the same way.
 // The fragment shader scales the flat ambient by it, so caves and sealed rooms go dark while open ground,
 // whose rays all go up, stays fully lit. Rays cross grids, so a ship darkens the ground under it.
 // Reading the stored bounce at the hit is what makes it multi-hop:
-// each evaluation adds a hop, and the CPU keeps a changed area evaluating for a number of frames. Keep albedo
+// each dispatch adds a hop, and the CPU keeps a changed area updating while it changes. Keep albedo
 // well below 1 or the feedback lingers (a removed light ghosts longer). Ambient is not bounced; it is
 // already uniform.
-// With AO only (p.bounce.z = 1) every evaluation is like a priming one: AO alone, no light read and no bounce stored.
+// With AO only (p.bounce.z = 1) a hop measures AO alone: no light read and no bounce stored.
 const BOUNCE_MAX: f32 = 16.0;
 const BOUNCE_MAX_RAYS: i32 = 32;
 
@@ -807,8 +832,8 @@ fn ddaNearest(g: i32, o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, lo: vec3<i32
 // Light (linear 0-1 per channel) arriving at the hit face from the air cell in front of it, in grid g: the brighter
 // of the cell's direct sun (visibility x strength x the face's N.L, white) and its displayed light (which includes
 // its AO-darkened ambient, so ambient bounces too: it lifts deep corners a little), per channel.
-// Its accumulated bounce is read too: the display is recomposed once a frame, but near-camera repeats within the
-// frame need each other's fresh bounce to add their hops.
+// Its accumulated bounce is read too: the display is recomposed once a frame, but an update's hops within the frame
+// need each other's fresh bounce to add theirs.
 fn radianceAt(g: i32, h: Hit) -> vec3<f32> {
     if (!h.front) { return vec3<f32>(0.0); }
     let r = voxelRef(g, h.cell);
@@ -816,7 +841,7 @@ fn radianceAt(g: i32, h: Hit) -> vec3<f32> {
     let d = (lightPool[r.disp] >> r.shift) & 0xFFFFu;
     let acc = select(0u, accPool[max(r.acc, 0)], r.acc >= 0); // a settled brick: its bounce is in its display
     let shown = select(decodeLight(d), vec3<f32>(0.0), isEmptyLight(d)); // not composed yet: nothing to reflect
-    let bnc = vec3<f32>(f32(acc & 0xFFu), f32((acc >> 8u) & 0xFFu), f32((acc >> 16u) & 0xFFu)) / 255.0;
+    let bnc = bounceOf(acc);
     let nW = normalize((grids[g].v2w * vec4<f32>(h.n, 0.0)).xyz);
     let sun = f32((d >> 14u) & 3u) / 3.0 * p.bounce.y * max(dot(nW, -p.sunDir.xyz), 0.0);
     return max(vec3<f32>(sun), max(shown, bnc));
@@ -830,24 +855,21 @@ fn pcg(v: u32) -> u32 {
 
 fn rand01(h: u32) -> f32 { return f32(pcg(h) & 0xFFFFFFu) / 16777216.0; }
 
-// Checkerboard bounce: with a spread S of 2 or 4, every surface voxel still updates each evaluation but fires only
-// 1/S of the rays, its phase's share of the slice: direction j*S + phase of the slice's directions. The phases are laid
-// out so every 2x2 patch of a floor, wall or ceiling holds each of them once (spread 2: a plain 3D checkerboard), so a
-// patch fires the whole slice between its voxels, and the compose pass's neighbour smoothing averages them back.
+// Rays per voxel (the band's spread): with a spread S of 2 or 4, every surface voxel still updates each hop but
+// fires only 1/S of the rays, its phase's share of each group: direction j*S + phase of the group's directions. The
+// phases are laid out so every 2x2 patch of a floor, wall or ceiling holds each of them once (spread 2: a plain 3D
+// checkerboard), so a patch fires the whole group between its voxels, and the compose pass's neighbour smoothing
+// averages them back.
 fn bouncePhase(v: vec3<i32>, spread: i32) -> i32 {
     if (spread >= 4) { return ((v.x + v.y) & 1) + 2 * ((v.y + v.z) & 1); }
     if (spread == 2) { return (v.x + v.y + v.z) & 1; }
     return 0;
 }
 
-// Blends one evaluation into the voxel's accumulation word (bounce RGB and AO) and returns the new word.
-// A priming evaluation (the first after a brick's average restarts) measures only AO and stores no bounce: until then
-// the brick's voxels were shown with no AO at all (nothing measured yet, or solid a moment ago), as bright as open
-// air, and bounce rays reading those walls would start the average far too high, which then feeds on itself. After
-// it the brick is recomposed with its AO and the average starts over, reading walls lit as they really are.
-const PRIME: u32 = 0xFFFFFFFFu;
-
-fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, slice: i32, list: u32, prime: bool) -> u32 {
+// Blends one hop into the voxel's accumulation word (bounce RGB and AO) and returns the new word. aoOnly: measure AO
+// alone (no light read, no bounce stored).
+// alphaAo: the AO's own blend weight (a seeded brick's AO is unknown, so its update replaces AO while bounce blends).
+fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, alphaAo: f32, first: i32, count: i32, spread: i32, list: u32, aoOnly: bool) -> u32 {
     if (isSolid(g, v)) { return word; }
 
     let sxn = isSolid(g, v - vec3<i32>(1, 0, 0)); let sxp = isSolid(g, v + vec3<i32>(1, 0, 0));
@@ -871,24 +893,26 @@ fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, slice: i32, list: u3
 
     let v2w = grids[g].v2w;
     let origin = (v2w * vec4<f32>(vec3<f32>(v) + vec3<f32>(0.5), 1.0)).xyz;
-    // Each voxel has one fixed set of rays * cycle directions, set by its position alone: a cosine-weighted
+    // Each voxel has fixed directions, rays per group * groups of them, set by its position alone: a cosine-weighted
     // Fibonacci spiral (evenly spread, far less noisy than random directions), twisted and shifted per voxel so
-    // neighbours differ. Evaluation n fires slice n mod cycle; slices interleave (direction j = k*cycle + slice), so
-    // each one spans the whole hemisphere coarsely and a full cycle covers the complete set.
+    // neighbours differ. A hop fires `count` groups from `first`; groups interleave (group g is directions
+    // j = k*groups + g), so each one spans the whole hemisphere coarsely and all of them cover every direction.
     let seed = pcg(u32(v.x) ^ pcg(u32(v.y) ^ pcg(u32(v.z))));
     let twist = rand01(seed) * 6.2831853;
     let shift = rand01(seed + 1u);
     var sumL = vec3<f32>(0.0);
     var escaped = 0.0;
     let rays = clamp(i32(p.bounce2.x), 1, BOUNCE_MAX_RAYS);
-    let cycle = max(i32(p.bounce2.y), 1);
-    let total = f32(rays * cycle);
-    let spread = clamp(i32(p.bounce2.z), 1, 4);
+    let groups = max(i32(p.bounce2.y), 1);
+    let total = f32(rays * groups);
     let phase = bouncePhase(v, spread);
-    let fired = max((rays - phase + spread - 1) / spread, 1); // this voxel's share of the slice's rays
-    for (var kk = 0; kk < fired; kk = kk + 1) {
+    let fired = max((rays - phase + spread - 1) / spread, 1); // this voxel's share of each group's rays
+    // count > 1: this hop fires that many consecutive groups.
+    let fireCount = clamp(count, 1, groups);
+    for (var ii = 0; ii < fired * fireCount; ii = ii + 1) {
+        let kk = ii % fired;
         let k = min(kk * spread + phase, rays - 1);
-        let j = f32(k * cycle + slice);
+        let j = f32(k * groups + (first + ii / fired) % groups);
         let u1 = fract((j + shift) / total);
         let phi = j * 2.39996323 + twist;
         var dl: vec3<f32>;
@@ -918,15 +942,18 @@ fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, slice: i32, list: u3
             let h = ddaNearest(gi, lo, ld, clip.t0, clip.t1, gd.bmin.xyz, gd.bmax.xyz);
             if (h.hit && h.t < bestT) { bestT = h.t; bestG = gi; best = h; }
         }
-        if (bestG >= 0) { if (!prime) { sumL = sumL + radianceAt(bestG, best); } }
+        if (bestG >= 0) { if (!aoOnly) { sumL = sumL + radianceAt(bestG, best); } }
         else { escaped = escaped + 1.0; }
     }
-    let estimate = clamp(p.bounce.x * sumL / f32(fired), vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0;
-    let occEstimate = (1.0 - escaped / f32(fired)) * 255.0;
-    let r8 = blend8(f32(word & 0xFFu), estimate.r, alpha);
-    let g8 = blend8(f32((word >> 8u) & 0xFFu), estimate.g, alpha);
-    let b8 = blend8(f32((word >> 16u) & 0xFFu), estimate.b, alpha);
-    let o8 = blend8(f32(word >> 24u), occEstimate, alpha);
+    let firedAll = f32(fired * fireCount);
+    let estimate = clamp(p.bounce.x * sumL / firedAll, vec3<f32>(0.0), vec3<f32>(1.0));
+    let occEstimate = (1.0 - escaped / firedAll) * 255.0;
+    // Air not measured yet (word 0, see smoothedAcc) takes the hop whole rather than blending from nothing.
+    let a = select(alpha, 1.0, word == 0u);
+    let r8 = blendBounce(f32(word & 0xFFu), estimate.r, a);
+    let g8 = blendBounce(f32((word >> 8u) & 0xFFu), estimate.g, a);
+    let b8 = blendBounce(f32((word >> 16u) & 0xFFu), estimate.b, a);
+    let o8 = blend8(f32(word >> 24u), occEstimate, select(alphaAo, 1.0, word == 0u));
     return u32(r8) | (u32(g8) << 8u) | (u32(b8) << 16u) | (u32(o8) << 24u);
 }
 
@@ -939,24 +966,38 @@ fn blend8(s8: f32, goal: f32, alpha: f32) -> f32 {
     return clamp(q, 0.0, 255.0);
 }
 
+// The same for a stored bounce channel (code s8 on the square-root curve, see bounceOf) toward a linear goal: blended
+// in linear light, then stored as the nearest code, again moving at least one code toward the goal.
+fn blendBounce(s8: f32, goal: f32, alpha: f32) -> f32 {
+    let old = (s8 / 255.0) * (s8 / 255.0);
+    var q = round(bounceCode(old + alpha * (goal - old)));
+    let g8 = bounceCode(goal);
+    if (q == s8 && abs(g8 - s8) >= 1.0) { q = s8 + sign(g8 - s8); }
+    return clamp(q, 0.0, 255.0);
+}
+
 @compute @workgroup_size(256)
 fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
                @builtin(local_invocation_index) t: u32) {
-    // The bounce work list is pairs: (light slot, evaluations since the brick changed).
+    // The bounce work list is pairs: (light slot, hop word). A hop word holds its first group (bits 0-7), how many groups
+    // it fires (8-15), the denominator of its blend weight (16-23), its spread as log2 (24-25, see bouncePhase) and
+    // whether AO replaces (26). Weight 1/(2H-i) for an update's hop i keeps half of what was stored; 1/(i+1) makes the
+    // update a running average that replaces it (see GpuLightSystem.UpdateBrick). AO replacing weighs hop i 1/(i+1)
+    // too, i = first / count (a brick given fresh accumulation: its seed holds no AO).
     let wi = wid.x + wid.y * nwg.x;
     if (wi >= u32(p.counts.z)) { return; }
     if (t == 0u) { atomicStore(&wCount, 0u); }
     workgroupBarrier();
     let it = itemOf(work[wi * 2u], t);
-    let nu = work[wi * 2u + 1u];
-    // A running average over the first full cycle (exactly the complete ray set's mean), then a weight of one
-    // cycle, so each further cycle weighs the whole set about equally. N = PRIME: the priming evaluation (see
-    // bounceVoxel), which overwrites.
-    let cycle = max(u32(p.bounce2.y), 1u);
-    let prime = nu == PRIME;
+    let ev = work[wi * 2u + 1u];
+    let groups = max(u32(p.bounce2.y), 1u);
+    let spread = i32(1u << ((ev >> 24u) & 3u));
     let aoOnly = p.bounce.z > 0.5;
-    let alpha = select(max(1.0 / f32(cycle), 1.0 / (f32(nu) + 1.0)), 1.0, prime);
-    let slice = select(i32(nu % cycle), i32(cycle) - 1, prime);
+    let alpha = 1.0 / f32(max((ev >> 16u) & 0xFFu, 1u));
+    let count = max(i32((ev >> 8u) & 0xFFu), 1);
+    let hopIndex = (ev & 0xFFu) / u32(count);
+    let alphaAo = select(alpha, 1.0 / f32(hopIndex + 1u), ((ev >> 26u) & 1u) != 0u);
+    let first = i32((ev & 0xFFu) % groups);
     let list = listOf(it.g, it.v0);
     // The CPU gives every brick it lists an accumulation slot; without one there is nothing to write.
     let accBase = accOf(it.slot);
@@ -975,13 +1016,13 @@ fn bounce_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) n
         let k = wList[i];
         let v = base + vec3<i32>(i32(k & 7u), i32((k >> 3u) & 7u), i32(k >> 6u));
         let a = accBase + i32(k);
-        accPool[a] = bounceVoxel(it.g, v, accPool[a], alpha, slice, list, prime || aoOnly);
+        accPool[a] = bounceVoxel(it.g, v, accPool[a], alpha, alphaAo, first, count, spread, list, aoOnly);
     }
 }
 
 // Drops the stored bounce of the listed slots (keeping AO), where a light was removed or dimmed. Bounce there feeds
-// on itself — each evaluation reads neighbours whose bounce still holds the old light — so without a reset the old
-// colour decays only by the albedo per evaluation and leaves a visible ghost when the brick stops being evaluated.
+// on itself — each hop reads neighbours whose bounce still holds the old light — so without a reset the old
+// colour decays only by the albedo per hop and leaves a visible ghost when the brick stops updating.
 @compute @workgroup_size(256)
 fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
               @builtin(local_invocation_index) t: u32) {
@@ -992,6 +1033,35 @@ fn clear_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw
     let base = a + i32(t) * 2;
     accPool[base]     = accPool[base] & 0xFF000000u;
     accPool[base + 1] = accPool[base + 1] & 0xFF000000u;
+}
+
+// Starts the listed light slots' fresh accumulation from their display instead of from nothing: bricks that had settled
+// (their bounce kept only in the display) and are updating again. Bounce becomes the shown light over the display scale
+// (p.bounce.z), so composing it gives back what was shown and neighbours' hops read the light that was there, not a dark
+// gap; their own hops then blend from it. AO starts at full occlusion, so the ambient term adds nothing and the
+// compose before the bounce pass shows just the seed, the light that was there; the first hop replaces the AO. (AO at none
+// lit the ambient term at full strength in that compose, and a dark area's hops read it as bright for an update: a
+// flash on edits in the dark.) An empty display seeds 0, unmeasured. Run after zero_main.
+@compute @workgroup_size(256)
+fn seed_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
+             @builtin(local_invocation_index) t: u32) {
+    let wi = wid.x + wid.y * nwg.x;
+    if (wi >= u32(p.counts.z)) { return; }
+    let slot = work[wi];
+    let a = accOf(slot);
+    if (a < 0) { return; }
+    let w = lightPool[i32(slot) * SLOT_WORDS + i32(t)];
+    let scale = max(p.bounce.z, 1e-3);
+    for (var e = 0u; e < 2u; e = e + 1u) {
+        let d = (w >> (e * 16u)) & 0xFFFFu;
+        var word = 0u;
+        if (!isEmptyLight(d)) {
+            let l = decodeLight(d) / scale;
+            word = u32(round(bounceCode(l.r))) | (u32(round(bounceCode(l.g))) << 8u) | (u32(round(bounceCode(l.b))) << 16u)
+                   | (255u << 24u);
+        }
+        accPool[a + i32(t * 2u + e)] = word;
+    }
 }
 
 // Zeroes the listed accumulation slots (accPool slot numbers, not light slots): ones just handed out, which still
@@ -1013,6 +1083,7 @@ fn zero_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg
     private readonly ComputePipeline _bouncePipeline;
     private readonly ComputePipeline _clearPipeline;
     private readonly ComputePipeline _zeroPipeline;
+    private readonly ComputePipeline _seedPipeline;
     // One small uniform buffer per dispatch of a frame: the dispatches are recorded into one command buffer, so every
     // parameter write lands before any of them runs and each needs its own.
     private readonly List<GpuBuffer> _params = new();
@@ -1028,6 +1099,7 @@ fn zero_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg
     private static readonly uint[] BounceBindings = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
     private static readonly uint[] ClearBindings  = { 6, 8, 9, 10 };
     private static readonly uint[] ZeroBindings   = { 6, 8, 9 };
+    private static readonly uint[] SeedBindings   = { 3, 6, 8, 9, 10 };
 
     public GpuRayLightPass(GpuContext ctx)
     {
@@ -1037,6 +1109,7 @@ fn zero_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg
         _bouncePipeline = new ComputePipeline(ctx, Wgsl, "bounce_main");
         _clearPipeline  = new ComputePipeline(ctx, Wgsl, "clear_main");
         _zeroPipeline   = new ComputePipeline(ctx, Wgsl, "zero_main");
+        _seedPipeline   = new ComputePipeline(ctx, Wgsl, "seed_main");
         _lists = GpuBuffer.CreateStorage(ctx, 65536);
     }
 
@@ -1071,6 +1144,15 @@ fn zero_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg
         Dispatch(_zeroPipeline, ZeroBindings, store, work, count, param, "Lighting: zero accumulation");
     }
 
+    /// <summary>Starts the accumulation of the <paramref name="count"/> light slots listed in <paramref name="work"/>
+    /// from their display (see seed_main); run after <see cref="DispatchZeroAcc"/>.</summary>
+    public void DispatchSeedAcc(GridStore store, float bounceScale, GpuBuffer work, int count)
+    {
+        if (count <= 0) return;
+        var param = WriteParams(Vector3D<float>.Zero, count, new Vector4D<float>(0f, 0f, bounceScale, 0f), default);
+        Dispatch(_seedPipeline, SeedBindings, store, work, count, param, "Lighting: seed accumulation");
+    }
+
     /// <summary>Sun visibility for the <paramref name="count"/> light slots listed in <paramref name="work"/>.</summary>
     public void DispatchSun(GridStore store, Vector3D<float> sunDir, GpuBuffer work, int count)
     {
@@ -1094,20 +1176,19 @@ fn zero_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg
     }
 
     /// <summary>
-    /// One EMA step of bounce light for the listed bricks (see bounce_main). Reads direct light of every grid, so
+    /// One hop of bounce light for the listed bricks (see bounce_main). Reads direct light of every grid, so
     /// run it after the sun pass and before composing. <paramref name="work"/> holds <paramref name="count"/> pairs of (light slot,
-    /// evaluations since that brick changed). Each voxel's fixed direction set is <paramref name="rays"/> x
-    /// <paramref name="cycle"/> directions, one slice of <paramref name="rays"/> per evaluation, each reaching
-    /// <paramref name="reach"/> voxels (at most 16). <paramref name="aoOnly"/>: measure AO alone and store no bounce.
-    /// <paramref name="spread"/>: 1, or 2 or 4 for a checkerboard where each surface voxel fires only that share of the
-    /// rays (bouncePhase).
+    /// hop word). Each voxel has <paramref name="rays"/> x <paramref name="groups"/> fixed directions, in groups of
+    /// <paramref name="rays"/>, each ray reaching <paramref name="reach"/> voxels (at most 16). <paramref name="aoOnly"/>:
+    /// measure AO alone and store no bounce. Each hop word says which groups it fires, its blend weight and its rays per
+    /// voxel (see bounce_main).
     /// </summary>
     public void DispatchBounce(GridStore store, Vector3D<float> sunDir, float sunStrength,
-                               float albedo, int rays, int cycle, int spread, float reach, bool aoOnly, GpuBuffer work, int count)
+                               float albedo, int rays, int groups, float reach, bool aoOnly, GpuBuffer work, int count)
     {
         if (count <= 0) return;
         var param = WriteParams(sunDir, count, new Vector4D<float>(albedo, sunStrength, aoOnly ? 1f : 0f, reach),
-                                new Vector4D<float>(rays, cycle, spread, 0f));
+                                new Vector4D<float>(rays, groups, 0f, 0f));
         Dispatch(_bouncePipeline, BounceBindings, store, work, count, param, "Lighting: bounce");
     }
 
@@ -1185,6 +1266,7 @@ fn zero_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg
         _bouncePipeline.Dispose();
         _clearPipeline.Dispose();
         _zeroPipeline.Dispose();
+        _seedPipeline.Dispose();
         Submit();
         foreach (var p in _params) p.Dispose();
         _lists.Dispose();
@@ -1197,6 +1279,6 @@ fn zero_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg
         public Vector4D<float> Sun;
         public int Unused, LampBase, WorkCount, Pad;
         public Vector4D<float> Bounce;    // albedo, sun strength, bounce display scale (compose) or AO only (bounce), reach
-        public Vector4D<float> Bounce2;   // rays per evaluation, cycle, ambient (compose) or checkerboard spread (bounce), AO strength
+        public Vector4D<float> Bounce2;   // rays per group, direction groups, ambient (compose), AO strength
     }
 }

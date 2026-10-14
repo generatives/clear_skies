@@ -37,6 +37,9 @@ public interface IHost
     /// <summary>Snapshots of the bodies it simulates, to everyone who has them.</summary>
     void SendFrame(uint tick, IReadOnlyList<BodySnapshot> snapshots);
 
+    /// <summary>The replicated state of the entities it has authority over, to everyone who has them.</summary>
+    void SendEntityState(uint tick, IReadOnlyList<EntityState> states);
+
     /// <summary>The authority made an entity (see <see cref="DescriptionMessage"/>).</summary>
     void EntityCreated(in DescriptionMessage description);
 
@@ -82,6 +85,7 @@ public interface IParticipant
     void ReceiveCommand(in CommandMessage command);
     void Rejected(in Rejection rejection);
     void ReceiveFrame(uint tick, IReadOnlyList<BodySnapshot> snapshots);
+    void ReceiveEntityState(uint tick, IReadOnlyList<EntityState> states);
     void Pong(in TimePong pong);
     void IdBlock(uint first, uint count);
 

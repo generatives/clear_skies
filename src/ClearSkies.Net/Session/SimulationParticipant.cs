@@ -85,7 +85,15 @@ public sealed class SimulationParticipant : IParticipant, ISystem, ICommandRoute
         _describable = world.GetEntities().With<EntityId>().With<OwnPresence>().Without<Chunk>().AsSet();
         _created = world.GetEntities().With<EntityId>().With<OwnPresence>().Without<Chunk>().WhenAdded<OwnPresence>().AsSet();
         commands.Applied += OnApplied;
+        // The Host keeps a grid with what it's held to by anchors, which it reads from the grid's description: tell it
+        // as soon as they change, not at the next save.
+        if (IsAuthority) _anchorsChanged = world.Subscribe((in AnchorsChanged c) =>
+        {
+            if (c.Grid.Has<EntityId>() && !_toDescribe.Contains(c.Grid.Get<EntityId>())) _toDescribe.Add(c.Grid.Get<EntityId>());
+        });
     }
+
+    private readonly IDisposable? _anchorsChanged;
 
     /// <summary>The hosting machine's, joining <paramref name="host"/> directly: the authority. Throws with the Host's
     /// reason if it refuses.</summary>
@@ -117,6 +125,9 @@ public sealed class SimulationParticipant : IParticipant, ISystem, ICommandRoute
 
     /// <summary>Receives and sends body snapshots (set by the body sync system).</summary>
     public BodySync? Bodies { get; set; }
+
+    /// <summary>Replicated component state (set by <see cref="ReplicationSystem"/>).</summary>
+    public ReplicationSystem? Replication { get; set; }
 
     /// <summary>A client's prediction of its own player, which hears what the host makes of it (set by the prediction).</summary>
     public OwnPlayerPrediction? Prediction { get; set; }
@@ -243,6 +254,8 @@ public sealed class SimulationParticipant : IParticipant, ISystem, ICommandRoute
     public void Rejected(in Rejection rejection) => Commands.ReceiveRejection(rejection.Authority, rejection.Seq);
 
     public void ReceiveFrame(uint tick, IReadOnlyList<BodySnapshot> snapshots) => Bodies?.ReceiveFrame(tick, snapshots);
+
+    public void ReceiveEntityState(uint tick, IReadOnlyList<EntityState> states) => Replication?.Receive(tick, states);
 
     public void Pong(in TimePong pong) => ClockSync?.OnPong(pong, NowMs);
 
@@ -388,11 +401,15 @@ public sealed class SimulationParticipant : IParticipant, ISystem, ICommandRoute
     /// <summary>Snapshots of the bodies it simulates (see <see cref="BodySync"/>).</summary>
     internal void SendFrame(uint tick, IReadOnlyList<BodySnapshot> snapshots) => _host.SendFrame(tick, snapshots);
 
+    /// <summary>Replicated state of the entities it has authority over (see <see cref="ReplicationSystem"/>).</summary>
+    internal void SendEntityState(uint tick, IReadOnlyList<EntityState> states) => _host.SendEntityState(tick, states);
+
     /// <summary>The player's latest inputs, for its authority to move them by (see <see cref="OwnPlayerPrediction"/>).</summary>
     internal void SendInput(in PlayerInputMessage message) => _host.SendInput(message);
 
     public void Dispose()
     {
+        _anchorsChanged?.Dispose();
         if (_left) return;
         _left = true;
         _host.Leave("left");

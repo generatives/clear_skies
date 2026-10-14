@@ -26,6 +26,10 @@ public struct BlockRef
 /// tuning for now.</summary>
 public struct Fan
 {
+    /// <summary>How hard it pushed last tick, as a fraction (0-1) of its max: 0 when off. Set by the flight system on
+    /// the machine with authority over its grid, and replicated to everyone else (see
+    /// <see cref="Entities.ReplicatedComponents"/>).</summary>
+    public float Thrust;
 }
 
 /// <summary>Marks a Buoyant block entity: constant passive lift, applied at the block by
@@ -58,4 +62,18 @@ public struct SteeringWheel
 
     /// <summary>How far a wheel is turned (clockwise, radians) for its ship's current turn setting.</summary>
     public static float Angle(in BlockRef wheel) => ShipControls.Of(wheel.Volume).Turn * MaxAngle;
+}
+
+/// <summary>A toggle: a red lever the player flicks on or off (see <see cref="ToggleControlSystem"/>), showing and setting
+/// whether its ship is anchored (see <see cref="ShipControls.Anchored"/>): leaning to its north face when on, to its
+/// south face when off. It holds no setting of its own.</summary>
+public struct Toggle
+{
+}
+
+/// <summary>Marks an Anchor block entity: while its ship is anchored (see <see cref="ShipControls.Anchored"/>),
+/// <see cref="AnchorSystem"/> welds the ship to the nearest terrain or other ship within
+/// <see cref="AnchorSystem.Reach"/> of an anchor.</summary>
+public struct Anchor
+{
 }

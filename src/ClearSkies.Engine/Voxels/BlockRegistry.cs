@@ -1,4 +1,5 @@
 using ClearSkies.Engine.ECS;
+using ClearSkies.Engine.Rendering;
 using Silk.NET.Maths;
 
 namespace ClearSkies.Engine.Voxels;
@@ -38,7 +39,7 @@ public static class BlockRegistry
         // Buoyant blocks through their entities instead of scanning voxels.
         Register(new BlockDef { Id = BlockId.Fan, Name = "Fan", Color = new(0.85f, 0.55f, 0.15f), IsSolid = true, PlaceOriented = true, LightEmission = 0, Weight = 3,
             OpaqueModel = true, // its housing fills the cell: it shades what's behind it and hides faces against it like a cube
-            Model = "thruster/thruster.gltf", IconTexture = "thruster.png", Components = e => e.Set(new Fan()) });
+            Model = "thruster/thruster.gltf", IconTexture = "thruster.png", Components = e => { e.Set(new Fan()); e.Set(new ParticleEmitter(ThrusterFlameSystem.Flame)); } });
         //Register(new BlockDef { Id = BlockId.Fan,     Name = "Fan",     Color = new(0.85f, 0.55f, 0.15f), IsSolid = true, LightEmission = 0, Weight = 3,
         //    Texture = "metal", TextureTop = "thruster" });
         // Model block (see BlockDef.Model): the Blockbench lever. It lets light through, since it only
@@ -48,6 +49,13 @@ public static class BlockRegistry
         // The Blockbench ship's wheel, also Passable: the player grabs its rim and turns it to steer (SteeringWheelControlSystem).
         Register(new BlockDef { Id = BlockId.SteeringWheel, Name = "Steering Wheel", Color = new(0.50f, 0.36f, 0.22f), IsSolid = true, PlaceOriented = true, Passable = true, LightEmission = 0, Weight = 1,
             Model = "steering_wheel/steering_wheel.gltf", IconTexture = "steering_wheel.png", Components = e => { e.Set(new SteeringWheel()); e.Set(new Interactive()); } });
+        // The lever, painted red: a switch the player flicks on or off, anchoring its ship (ToggleControlSystem).
+        Register(new BlockDef { Id = BlockId.Toggle, Name = "Toggle", Color = new(0.65f, 0.15f, 0.12f), IsSolid = true, PlaceOriented = true, Passable = true, LightEmission = 0, Weight = 1,
+            Model = "toggle/toggle.gltf", IconTexture = "toggle.png", Components = e => { e.Set(new Toggle()); e.Set(new Interactive()); } });
+        // A heavy iron block: while its ship's toggles are on it holds the ship to the nearest terrain or other ship
+        // beside it (AnchorSystem).
+        Register(new BlockDef { Id = BlockId.Anchor, Name = "Anchor", Color = new(0.30f, 0.30f, 0.32f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 6,
+            Texture = "oven", Components = e => e.Set(new Anchor()) });
         Register(new BlockDef { Id = BlockId.Buoyant, Name = "Buoyant", Color = new(0.55f, 0.85f, 1.00f), IsSolid = true, LightEmission = 0, Weight = 1,
             Components = e => e.Set(new Buoyant()) });
 

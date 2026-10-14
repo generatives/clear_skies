@@ -131,6 +131,10 @@ public sealed class SpawnGridHandler : SpawnHandler<GridDescription, DynamicGrid
     {
         var grid = DynamicGridFactory.Create(World, id, d);
         grid.Set(owner);
+        // Riding on a grid that's here (held to it by anchors): put it where it sits on that grid as it is now, not where
+        // the description has it in the world, so a ship docked on another comes back aboard however far that has moved.
+        if (AnchorLinks.Support(d.Anchors) is { } support && Registry.Find(support.Target) is { } target && target.Has<Transform>())
+            grid.Get<Transform>() = support.Place(target.Get<Transform>());
         return grid;
     }
 
