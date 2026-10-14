@@ -29,6 +29,7 @@ public static class GameCommands
         commands.Register(new EditVoxelsHandler(blocks, limits));
         commands.Register(new SetShipThrustHandler(registry));
         commands.Register(new SetShipTurnHandler(registry));
+        commands.Register(new SetShipAnchoredHandler(registry));
         commands.Register(new SetGridLockedHandler(registry, physics));
         commands.Register(new RightGridHandler(registry, physics));
         commands.Register(new SetMoveModeHandler(registry));
@@ -50,4 +51,5 @@ public static class CommandIds
     public const ushort SpawnGrid = 7;
     public const ushort SpawnPlayer = 8;
     public const ushort DespawnEntity = 9;
+    public const ushort SetShipAnchored = 10;
 }

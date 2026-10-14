@@ -39,4 +39,8 @@ public enum BlockId : byte
     Leaves        = 30,
     PineLeaves    = 31,
     Cactus        = 32,
+
+    // Anchoring: an anchor welds its ship to what's next to it while the ship's toggles are on.
+    Anchor        = 33,
+    Toggle        = 34,
 }
