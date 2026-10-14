@@ -17,6 +17,16 @@ public struct ReceivedState
     public uint Applied;
 }
 
+/// <summary>On an entity this machine has authority over: each replicated component's bytes as last sent (since its
+/// last refresh), and when it next refreshes. An entity this machine has just been given authority over has none, so
+/// everything goes: keep it so, and never seed this from received state, or a hand-off could leave the old authority's
+/// stale state in place.</summary>
+public struct SentState
+{
+    public Dictionary<(ulong Key, ushort Component), byte[]> Bytes;
+    public uint NextRefresh;
+}
+
 /// <summary>
 /// Replicates the components registered in <see cref="ReplicatedComponents"/>, each tick after remote bodies are posed:
 /// <list type="bullet">
@@ -44,18 +54,8 @@ public sealed class ReplicationSystem : ISystem, IDebugUiSystem
     private readonly NetWriter _scratch = new(64);
     private readonly List<EntityState> _outgoing = new();
 
-    /// <summary>Per entity with authority here: each component's bytes as last sent (since its last refresh), and when it
-    /// next refreshes. One this machine has just been given authority over has none, so everything goes: keep it so,
-    /// and never seed this from received state, or a hand-off could leave the old authority's stale state in place.</summary>
-    private readonly Dictionary<Entity, Sent> _sent = new();
-    private readonly HashSet<Entity> _local = new();
+    private int _local;
     private long _componentsSent, _componentsApplied, _statesDropped;
-
-    private sealed class Sent
-    {
-        public readonly Dictionary<(ulong Key, ushort Component), byte[]> Bytes = new();
-        public uint NextRefresh;
-    }
 
     public ReplicationSystem(SimulationParticipant net, World world, ReplicatedComponents components, RemoteBodySystem remoteBodies)
     {
@@ -79,16 +79,19 @@ public sealed class ReplicationSystem : ISystem, IDebugUiSystem
     private void Send()
     {
         uint tick = _net.Clock.Tick;
-        _local.Clear();
+        _local = 0;
         _outgoing.Clear();
-        foreach (ref readonly var e in _roots.GetEntities())
-            if (e.Get<NetOwner>().IsLocal) _local.Add(e);
-        foreach (var e in _sent.Keys)
-            if (!_local.Contains(e)) _sent.Remove(e); // if it comes back, everything goes again
-        foreach (var root in _local)
+        foreach (ref readonly var root in _roots.GetEntities())
         {
-            if (!_sent.TryGetValue(root, out var sent))
-                _sent[root] = sent = new Sent { NextRefresh = tick + (uint)(root.Get<EntityId>().Value % (uint)System.Math.Max(1, RefreshTicks)) };
+            if (!root.Get<NetOwner>().IsLocal)
+            {
+                if (root.Has<SentState>()) root.Remove<SentState>(); // if it comes back, everything goes again
+                continue;
+            }
+            _local++;
+            if (!root.Has<SentState>())
+                root.Set(new SentState { Bytes = new(), NextRefresh = tick + root.Get<EntityId>().Value % (uint)System.Math.Max(1, RefreshTicks) });
+            ref var sent = ref root.Get<SentState>();
             if (tick >= sent.NextRefresh || sent.NextRefresh - tick > (uint)System.Math.Max(2, RefreshTicks)) // due, or the clock jumped back
             {
                 sent.Bytes.Clear();
@@ -96,10 +99,10 @@ public sealed class ReplicationSystem : ISystem, IDebugUiSystem
             }
             var state = new EntityState { Root = root.Get<EntityId>() };
             int bytes = state.EncodedSize;
-            if (Collect(root, 0, sent, state, ref bytes))
+            if (Collect(root, 0, sent.Bytes, state, ref bytes))
                 foreach (var children in _components.ChildrenOf(root))
                     foreach (var (key, child) in children.ReplicatedChildren)
-                        if (!Collect(child, key, sent, state, ref bytes)) break;
+                        if (!Collect(child, key, sent.Bytes, state, ref bytes)) break;
             if (state.Components.Count == 0) continue;
             _componentsSent += state.Components.Count;
             _outgoing.Add(state);
@@ -110,18 +113,18 @@ public sealed class ReplicationSystem : ISystem, IDebugUiSystem
     /// <summary>Adds <paramref name="entity"/>'s replicated components whose bytes aren't those in
     /// <paramref name="sent"/> to <paramref name="state"/>, recording them there; returns false once
     /// <see cref="MaxStateBytes"/> is reached (the rest stay unsent, for next time).</summary>
-    private bool Collect(Entity entity, ulong key, Sent sent, EntityState state, ref int bytes)
+    private bool Collect(Entity entity, ulong key, Dictionary<(ulong Key, ushort Component), byte[]> sent, EntityState state, ref int bytes)
     {
         foreach (var component in _components.All)
         {
             _scratch.Clear();
             if (!component.TryWrite(entity, _scratch)) continue;
             var written = _scratch.Written;
-            if (sent.Bytes.TryGetValue((key, component.Id), out var last) && written.SequenceEqual(last)) continue;
+            if (sent.TryGetValue((key, component.Id), out var last) && written.SequenceEqual(last)) continue;
             var change = new ComponentState(key, component.Id, written.ToArray());
             if (bytes + change.EncodedSize > MaxStateBytes) return false;
             bytes += change.EncodedSize;
-            sent.Bytes[(key, component.Id)] = change.Data;
+            sent[(key, component.Id)] = change.Data;
             state.Components.Add(change);
         }
         return true;
@@ -178,7 +181,7 @@ public sealed class ReplicationSystem : ISystem, IDebugUiSystem
     {
         int refresh = RefreshTicks;
         if (ImGui.SliderInt("Full refresh (ticks)", ref refresh, 2, 600)) RefreshTicks = refresh;
-        ImGui.Text($"Components: {_components.All.Count}; entities with authority here: {_local.Count}");
+        ImGui.Text($"Components: {_components.All.Count}; entities with authority here: {_local}");
         ImGui.Text($"Sent {_componentsSent:N0}, applied {_componentsApplied:N0}, late states dropped {_statesDropped:N0}");
     }
 }
