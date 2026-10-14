@@ -661,6 +661,59 @@ fn solidMask(air: vec3<i32>, i: i32) -> u32 {
     return m;
 }
 
+// See-through mask of the 27 voxels around air (air's own chunk-table entry is i), laid out like solidMask's, from
+// the chunks' see-through bits (see isSeeThrough). Lets a see-through face's smoothing test its neighbours with one
+// chunk lookup instead of a full isSeeThrough lookup per neighbour.
+fn seeMask(air: vec3<i32>, i: i32) -> u32 {
+    let l = air & vec3<i32>(31);
+    if (all(l >= vec3<i32>(1)) && all(l <= vec3<i32>(30))) {
+        if (i < 0) { return 0u; }
+        let seeSlot = chunkTable[2 * i + 1].z;
+        if (seeSlot <= 0) { return 0u; }
+        let base = (seeSlot - 1) * WPC + l.y - 1 + 32 * (l.z - 1);
+        var m = 0u;
+        for (var dz = 0; dz < 3; dz = dz + 1) {
+            for (var dy = 0; dy < 3; dy = dy + 1) {
+                let w = occPool[u32(base + dy + 32 * dz)];
+                m = m | (((w >> u32(l.x - 1)) & 7u) << u32(3 * dy + 9 * dz));
+            }
+        }
+        return m;
+    }
+    // Chunk border: as solidMask, each of the up to 8 chunks involved is looked up once.
+    let c0 = air >> vec3<u32>(5u);
+    var sx = 0; if (l.x == 0) { sx = -1; } else if (l.x == 31) { sx = 1; }
+    var sy = 0; if (l.y == 0) { sy = -1; } else if (l.y == 31) { sy = 1; }
+    var sz = 0; if (l.z == 0) { sz = -1; } else if (l.z == 31) { sz = 1; }
+    var slots: array<i32, 8>;
+    for (var n = 0; n < 8; n = n + 1) {
+        if (((n & 1) != 0 && sx == 0) || ((n & 2) != 0 && sy == 0) || ((n & 4) != 0 && sz == 0)) { continue; }
+        let o = vec3<i32>(select(0, sx, (n & 1) != 0), select(0, sy, (n & 2) != 0), select(0, sz, (n & 4) != 0));
+        var e = i;
+        if (n != 0) { e = entryOf(drawGrid, c0 + o); }
+        slots[n] = select(chunkTable[2 * max(e, 0) + 1].z, 0, e < 0);
+    }
+    var m = 0u;
+    for (var k = 0; k < 27; k = k + 1) {
+        let d = vec3<i32>(k % 3, (k / 3) % 3, k / 9) - vec3<i32>(1);
+        let lv = l + d;
+        let n = select(0, 1, lv.x < 0 || lv.x > 31) | select(0, 2, lv.y < 0 || lv.y > 31) | select(0, 4, lv.z < 0 || lv.z > 31);
+        let seeSlot = slots[n];
+        if (seeSlot > 0) {
+            let w = lv & vec3<i32>(31);
+            if (((occPool[u32((seeSlot - 1) * WPC + w.y + 32 * w.z)] >> u32(w.x)) & 1u) == 1u) { m = m | (1u << u32(k)); }
+        }
+    }
+    return m;
+}
+
+// seeSurface for the in-plane cell air + d: from the see-through mask sm when useMask, else by the per-cell lookups.
+fn seeAt(useMask: bool, sm: u32, air: vec3<i32>, d: vec3<i32>, N: vec3<i32>, see: bool, inside: bool) -> bool {
+    if (!see) { return false; }
+    if (useMask) { return maskSolid(sm, d - N) || (inside && maskSolid(sm, d)); }
+    return seeSurface(air + d, N, see, inside);
+}
+
 // One in-plane cell's (sky, r, g, b), sun and weight (0 when not included in the smoothing).
 struct WCell { a: vec4<f32>, sun: f32, w: f32 };
 
@@ -712,15 +765,21 @@ fn shadeFast(localPos: vec3<f32>, localNormal: vec3<f32>, see: bool) -> Shade {
 
     // onSurface: open, with a solid directly behind along the normal (or for a see-through block's face, a
     // see-through block, or from inside one a see-through cell: see seeSurface). Diagonals need a side cell (corner rule).
-    let inside = see && isSeeThrough(air);
-    let oTm = !sTm && (maskSolid(m, -T - N) || seeSurface(air - T, N, see, inside));
-    let oTp = !sTp && (maskSolid(m, T - N) || seeSurface(air + T, N, see, inside));
-    let oBm = !sBm && (maskSolid(m, -B - N) || seeSurface(air - B, N, see, inside));
-    let oBp = !sBp && (maskSolid(m, B - N) || seeSurface(air + B, N, see, inside));
-    let oMM = (oTm || oBm) && !sMM && (maskSolid(m, -T - B - N) || seeSurface(air - T - B, N, see, inside));
-    let oPM = (oTp || oBm) && !sPM && (maskSolid(m, T - B - N) || seeSurface(air + T - B, N, see, inside));
-    let oMP = (oTm || oBp) && !sMP && (maskSolid(m, -T + B - N) || seeSurface(air - T + B, N, see, inside));
-    let oPP = (oTp || oBp) && !sPP && (maskSolid(m, T + B - N) || seeSurface(air + T + B, N, see, inside));
+    // A see-through face reads its neighbours' see-through bits from one mask (seeMask); the debug flag
+    // lightParams2.y bit 4 uses the per-cell lookups instead, for A/B timing.
+    let useMask = see && (u32(camera.lightParams2.y) & 4u) == 0u;
+    var sm = 0u;
+    var inside = false;
+    if (useMask) { sm = seeMask(air, ai); inside = maskSolid(sm, vec3<i32>(0)); }
+    else if (see) { inside = isSeeThrough(air); }
+    let oTm = !sTm && (maskSolid(m, -T - N) || seeAt(useMask, sm, air, -T, N, see, inside));
+    let oTp = !sTp && (maskSolid(m, T - N) || seeAt(useMask, sm, air, T, N, see, inside));
+    let oBm = !sBm && (maskSolid(m, -B - N) || seeAt(useMask, sm, air, -B, N, see, inside));
+    let oBp = !sBp && (maskSolid(m, B - N) || seeAt(useMask, sm, air, B, N, see, inside));
+    let oMM = (oTm || oBm) && !sMM && (maskSolid(m, -T - B - N) || seeAt(useMask, sm, air, -T - B, N, see, inside));
+    let oPM = (oTp || oBm) && !sPM && (maskSolid(m, T - B - N) || seeAt(useMask, sm, air, T - B, N, see, inside));
+    let oMP = (oTm || oBp) && !sMP && (maskSolid(m, -T + B - N) || seeAt(useMask, sm, air, -T + B, N, see, inside));
+    let oPP = (oTp || oBp) && !sPP && (maskSolid(m, T + B - N) || seeAt(useMask, sm, air, T + B, N, see, inside));
 
     let cC  = weighed(true, air, hb, hs, ai);
     let cTm = weighed(oTm, air - T, hb, hs, ai);     let cTp = weighed(oTp, air + T, hb, hs, ai);
