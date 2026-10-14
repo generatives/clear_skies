@@ -37,7 +37,7 @@ public class ReplicationTests
         using var world = new World();
         var components = new ReplicatedComponents();
         GameReplication.Register(components);
-        var fan = components.All.Single();
+        var fan = components.All.Single(c => c.Name == typeof(Fan).FullName);
         var from = world.CreateEntity();
         from.Set(new Fan { Thrust = 0.5f });
         var w = new NetWriter();

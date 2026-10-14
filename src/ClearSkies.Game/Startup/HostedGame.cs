@@ -54,6 +54,7 @@ internal static class HostedGame
         // Motion goals (WASD/jump/mode toggle) before the physics step, so its CollisionsDetected analysis sees them this
         // same tick (see Physics/Characters/).
         host.AddSystem(new PlayerMovementSystem(host.World, commands), SystemStage.Simulation);
+        host.AddSystem(new GrappleSystem(host.World, host.Physics), SystemStage.Simulation); // rope pulls, also before the step
         // Place, break, spawn and use controls (levers, wheels and toggles, whose control systems turn drags into commands as the
         // interactions are published), then apply every command sent this tick, then pose the controls from what the
         // commands set, so an arm is posed this tick where the view was turned to keep on it.

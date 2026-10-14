@@ -67,7 +67,9 @@ public sealed class PlayerMovementSystem : ISystem
             ref readonly var input = ref e.Get<PlayerInput>();
             var forward = LookForward(input);
             ref var character = ref e.Get<CharacterControllerComponent>().Character;
-            character.UpdateCharacterGoals(CharacterKeys(input), new PhysVec(forward.X, forward.Y, forward.Z), dt, Frozen(e));
+            var keys = CharacterKeys(input);
+            if (e.Has<Grapple>()) keys.Glide = false; // Space climbs the rope (GrappleSystem); the glider stays shut
+            character.UpdateCharacterGoals(keys, new PhysVec(forward.X, forward.Y, forward.Z), dt, Frozen(e));
             if (e.Has<ResistsAir>()) SetDrag(ref e.Get<ResistsAir>(), character);
         }
 

@@ -68,6 +68,7 @@ public sealed class GameView : IDisposable
 
     private readonly string? _lightingPreset;
     private CloudRenderSystem? _clouds;
+    private GrappleRopeSystem? _ropes;
     private ParticleRenderer? _particles;
     private UiRenderSystem? _uiRenderer;
 
@@ -104,6 +105,7 @@ public sealed class GameView : IDisposable
         host.AddSystem((IRenderSystem)_particles, SystemStage.RenderWorld);
         host.AddSystem(new SkyRenderSystem(renderer), SystemStage.RenderSky);
         host.AddSystem(new WireframeRenderSystem(host.World, renderer), SystemStage.RenderOverlay);
+        host.AddSystem(_ropes = new GrappleRopeSystem(host.World, renderer, world.Registry), SystemStage.RenderOverlay); // grapple ropes, ours and others'
         host.AddSystem(chunks, SystemStage.RenderTransparent);
         host.AddSystem(new HudRenderSystem(host.World, renderer), SystemStage.RenderHud);
         host.AddSystem(_uiRenderer, SystemStage.RenderHud);
@@ -113,6 +115,7 @@ public sealed class GameView : IDisposable
     {
         _uiRenderer?.Dispose();
         _clouds?.Dispose();
+        _ropes?.Dispose();
         _particles?.Dispose();
         PlayerModel.Dispose();
         BlockModels.Dispose();
