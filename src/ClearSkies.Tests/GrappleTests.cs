@@ -184,4 +184,19 @@ public class GrappleTests
         Assert.True(overshoot < 0.2f, $"overshot by {overshoot} blocks");
         Assert.True(settled < 20, $"settled after {settled} ticks");
     }
+
+    [Fact]
+    public void ClimbingDoesNotOpenTheGlider()
+    {
+        var (scene, player) = UnderAnOverhang();
+        using var _ = scene;
+        Hold(scene, player, 60 * 2);
+        ref var character = ref player.Get<CharacterControllerComponent>().Character;
+        character.SetVelocity(new Vector3(10, 0, 0)); // swinging: falling on the way back down, Space held
+        for (int i = 0; i < 60 * 2; i++)
+        {
+            Hold(scene, player, 1, PlayerButtons.Up);
+            Assert.False(player.Get<CharacterControllerComponent>().Character.Gliding, $"gliding after {i + 1} ticks");
+        }
+    }
 }

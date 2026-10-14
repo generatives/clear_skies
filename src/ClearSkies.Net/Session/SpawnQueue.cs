@@ -2,6 +2,7 @@ using System.Numerics;
 using ClearSkies.Engine.Commands;
 using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Entities;
+using ClearSkies.Engine.Physics;
 using ClearSkies.Net.Protocol;
 using DefaultEcs;
 using Silk.NET.Maths;
@@ -15,13 +16,16 @@ namespace ClearSkies.Net.Session;
 /// here:
 /// <list type="bullet">
 /// <item>a player standing on a ship: the ship (with its body, where they'll be simulated);</item>
+/// <item>a grid riding on another (held to it by anchors, see <see cref="AnchorLinks"/>): that grid (with its body, where it'll be simulated),
+/// so it's placed and welded on it as it is now;</item>
 /// <item>one simulated here (everything, on the authority; its own player, which it predicts, on any other): the
 /// terrain around it, with colliders, loaded meanwhile by a stand-in interest (all of it drawn for its own player,
 /// colliders only for anything else).</item>
 /// </list>
 /// Its own player also waits for <see cref="LocalReady"/>: on a client, for its clock to settle on the Host's.
 /// A copy that's only drawn here needs nothing but its ship. Nothing waits for ever: a ship that never comes is
-/// forgotten after <see cref="SupportWaitTicks"/> (they spawn where the Host last had them), and terrain after
+/// forgotten after <see cref="SupportWaitTicks"/> (they spawn where the Host last had them; an anchored grid where it
+/// was described, held there until it's let go or the other comes), and terrain after
 /// <see cref="GiveUpTicks"/>.
 /// </summary>
 public sealed class SpawnQueue
@@ -41,6 +45,10 @@ public sealed class SpawnQueue
         public bool Simulated;
         public bool Local;
         public PlayerDescription? Player;
+        /// <summary>What it's placed on, if anything (see above): a player's ship, or the grid a grid is held to; and
+        /// where on it, in its block space.</summary>
+        public EntityId Carrier;
+        public Vector3 OnCarrier;
         public Entity Anchor;
         public int Ticks;
         public readonly List<(EventMeta Meta, ushort Handler, byte[] Payload)> Events = new();
@@ -81,8 +89,13 @@ public sealed class SpawnQueue
         var p = new Pending { Id = m.Id, Kind = m.Kind, Owner = m.Owner, EventNumber = m.EventNumber, Position = m.Position, Data = m.Data.ToArray() };
         if (m.Kind == CommandIds.SpawnPlayer)
         {
-            p.Player = DescriptionBytes.Read<PlayerDescription>(p.Data);
+            var d = p.Player = DescriptionBytes.Read<PlayerDescription>(p.Data);
             p.Local = m.Owner == _session.LocalPeer;
+            if (!d.FreeFly) (p.Carrier, p.OnCarrier) = (d.Support, d.LocalPosition);
+        }
+        else if (m.Kind == CommandIds.SpawnGrid && AnchorLinks.Support(GridDescription.ReadAnchors(p.Data)) is { } support)
+        {
+            (p.Carrier, p.OnCarrier) = (support.Target, support.LocalPosition);
         }
         p.Simulated = IsAuthority || p.Local;
         if (p.Simulated)
@@ -129,20 +142,29 @@ public sealed class SpawnQueue
     {
         if (p.Local && !LocalReady()) return false;
         var position = p.Position;
-        if (p.Player is { FreeFly: false } d && !d.Support.IsNone)
+        if (!p.Carrier.IsNone)
         {
-            if (!_registry.TryGet(d.Support, out var ship))
+            if (!_registry.TryGet(p.Carrier, out var carrier))
             {
                 if (p.Ticks < SupportWaitTicks) return false;
-                Console.WriteLine($"[net] {d.Name}'s ship ({d.Support}) never came: spawning where they were");
-                d.Support = EntityId.None;
-                d.Position = p.Position;
-                p.Data = DescriptionBytes.Of(d);
+                Console.WriteLine($"[net] {p.Id}'s carrier ({p.Carrier}) never came: spawning where it was");
+                p.Carrier = EntityId.None;
+                if (p.Player is { } d)
+                {
+                    // A player comes off the ship; a grid keeps its hold, pinned where it was until the other comes.
+                    d.Support = EntityId.None;
+                    d.Position = p.Position;
+                    p.Data = DescriptionBytes.Of(d);
+                }
             }
             else
             {
-                if (p.Simulated && !ship.Has<PhysicsBodyComponent>() && p.Ticks < GiveUpTicks) return false;
-                position = PlayerFactory.WorldPosition(d, _registry);
+                if (p.Simulated && !carrier.Has<PhysicsBodyComponent>() && p.Ticks < GiveUpTicks) return false;
+                if (carrier.Has<Transform>())
+                {
+                    ref readonly var ct = ref carrier.Get<Transform>();
+                    position = PhysicsConv.ToBepu(ct.Position) + Vector3.Transform(p.OnCarrier, PhysicsConv.ToBepu(ct.Rotation));
+                }
             }
         }
         if (!p.Simulated) return true;

@@ -11,7 +11,8 @@ namespace ClearSkies.Engine.Physics.Characters;
 /// support detection, the grounded motion constraint, jumping (buffered, with coyote time), extra fall gravity and air
 /// control relative to the ship last stood on. This side turns the tick's keys into the
 /// character's goals each tick (target velocity, view direction, jump requests), and adds Minecraft-style crouching:
-/// slower, a lower eye, and a guard that won't walk off edges. Started as an adaptation of BepuPhysics2's
+/// slower, a lower eye, and a guard that won't walk off edges; and a glider (hold Space while falling, see
+/// <see cref="Gliding"/>) with a boost (Shift while gliding). Started as an adaptation of BepuPhysics2's
 /// Demos/Demos/Characters/CharacterInput.cs (v2.4.0).
 /// </summary>
 public struct PlayerCharacter
@@ -36,6 +37,28 @@ public struct PlayerCharacter
     private const float CrouchEdgeOverhang = 0.085f;
     private const float CrouchMaximumDrop = 0.6f;
     private float eyeDrop;
+
+    // Glider (Space held while falling, until landing or letting go): PlayerMovementSystem swaps the player's capsule
+    // drag entries for a wing's (ResistsAir.Glider), turned to GlideOrientation. The extra fall gravity and air control are off
+    // meanwhile, so the air alone holds the character up and steers it (see WingOrientation): look ahead to glide, down
+    // to dive, up to climb on the speed picked up. Looking level holds the wing GlideTrim (radians) nose-down, so it
+    // glides ahead (about 4 m ahead per 1 m down, at 8 m/s) rather than sinking straight down. The nose is held to at
+    // most GlideMaximumAttack above the way the character is going, so a climb runs out of speed and the nose drops
+    // (a flat plate held nose-up while slow would glide backwards). Turning the look banks the wing, GlideBankPerTurn
+    // radians of bank per radian between the look's heading and the character's, up to GlideMaximumBank, so its push
+    // swings the character round to follow.
+    private const float GlideTrim = 0.2f;
+    private const float GlideMaximumAttack = 0.25f;
+    private const float GlideBankPerTurn = 3f, GlideMaximumBank = 1f;
+    private bool gliding;
+
+    // Glider boost (Shift pressed while gliding): a push of BoostSpeed (m/s) spread over BoostTime, along the way the
+    // character is moving at each tick of it (the look, if it's barely moving), cut short if the glider closes. Then
+    // none until BoostCooldown has passed since it started, or the character lands, as often as that allows.
+    private const float BoostSpeed = 24f, BoostTime = 0.4f, BoostCooldown = 10f;
+    private float boostRemaining, boostCooldown;
+    private Quaternion glideOrientation;
+    private float extraFallGravity, airControlForceScale, airBrakeScale; // the character's own, restored on landing
 
     // To take the capsule out of the simulation and put it back (see Suspend): what its body and character were made from.
     private TypedIndex shapeIndex;
@@ -64,6 +87,11 @@ public struct PlayerCharacter
         this.shape = shape;
         settings = default;
         suspended = false;
+        gliding = false;
+        glideOrientation = Quaternion.Identity;
+        this.extraFallGravity = extraFallGravity;
+        this.airControlForceScale = airControlForceScale;
+        this.airBrakeScale = airBrakeScale;
         bodyHandle = AddBody(initialPosition);
         ref var character = ref characters.AllocateCharacter(bodyHandle, entity);
         character.LocalUp = new Vector3(0, 1, 0);
@@ -116,6 +144,24 @@ public struct PlayerCharacter
         character.ResetJumpAndAirState();
         eyeDrop = 0;
         suspended = false;
+        SetGliding(ref character, false);
+        boostRemaining = 0;
+    }
+
+    /// <summary>Whether the glider is out: <see cref="CharacterInput.Glide"/> held since some moment the character was
+    /// airborne and falling, and it hasn't landed since.</summary>
+    public readonly bool Gliding => gliding && !suspended;
+
+    /// <summary>Which way the wing faces while <see cref="Gliding"/>: body −z ahead, +y its upper side (see
+    /// <see cref="WingOrientation"/>).</summary>
+    public readonly Quaternion GlideOrientation => glideOrientation;
+
+    private void SetGliding(ref CharacterController character, bool on)
+    {
+        gliding = on;
+        character.ExtraFallGravity = on ? 0f : extraFallGravity;
+        character.AirControlForceScale = on ? 0f : airControlForceScale;
+        character.AirBrakeScale = on ? 0f : airBrakeScale;
     }
 
     public readonly bool Supported => !suspended && characters.GetCharacterByBodyHandle(bodyHandle).Supported;
@@ -146,6 +192,10 @@ public struct PlayerCharacter
         public bool Sprint;
         public bool Crouch;
         public bool JumpPressed;
+        /// <summary>Held to glide (see <see cref="Gliding"/>).</summary>
+        public bool Glide;
+        /// <summary>Pressed to boost while gliding.</summary>
+        public bool BoostPressed;
     }
 
     /// <summary>Updates the character's goals for this tick from its keys. <paramref name="viewDirectionWorld"/> is the
@@ -177,6 +227,26 @@ public struct PlayerCharacter
             : keys.Sprint ? speed * 1.75f : speed;
         var newTargetVelocity = movementDirection * effectiveSpeed;
         var viewDirection = viewDirectionWorld;
+
+        // The glider opens only on the way down (so holding Space through a jump doesn't open it at once) but then
+        // stays open, a climb included, until the key is let go or the character lands.
+        var glide = !frozen && keys.Glide && !character.Supported &&
+                    (gliding || Vector3.Dot(characterBody.Velocity.Linear, character.LocalUp) < 0);
+        if (glide != gliding) SetGliding(ref character, glide);
+        if (glide) glideOrientation = WingOrientation(viewDirection, characterBody.Velocity.Linear);
+
+        boostCooldown = character.Supported ? 0 : MathF.Max(boostCooldown - dt, 0);
+        if (!glide) boostRemaining = 0;
+        else if (keys.BoostPressed && boostCooldown == 0) { boostRemaining = BoostTime; boostCooldown = BoostCooldown; }
+        if (boostRemaining > 0)
+        {
+            var step = MathF.Min(dt, boostRemaining);
+            boostRemaining -= step;
+            var velocity = characterBody.Velocity.Linear;
+            var direction = velocity.LengthSquared() > 0.25f ? Vector3.Normalize(velocity)
+                : viewDirection / MathF.Max(viewDirection.Length(), 1e-6f);
+            characterBody.Velocity.Linear = velocity + direction * (BoostSpeed * step / BoostTime);
+        }
         if (crouching && character.Supported && !character.JumpPending && newTargetVelocity != Vector2.Zero)
             newTargetVelocity = KeepAwayFromEdges(character, characterBody, newTargetVelocity, viewDirection, dt);
 
@@ -209,6 +279,33 @@ public struct PlayerCharacter
             characters.Simulation.Awakener.AwakenBody(character.BodyHandle);
         character.TargetVelocity = target;
         character.ViewDirection = -Vector3.UnitZ;
+    }
+
+    /// <summary>The glider's wing for a look along <paramref name="view"/> while moving at <paramref name="velocity"/>:
+    /// turned to the look's heading, pitched to the look (less <see cref="GlideTrim"/>), but never more than
+    /// <see cref="GlideMaximumAttack"/> nose-up of the way it's actually going, and banked into the turn.</summary>
+    public static Quaternion WingOrientation(Vector3 view, Vector3 velocity)
+    {
+        var yaw = MathF.Atan2(-view.X, -view.Z);
+        var pitch = MathF.Asin(System.Math.Clamp(view.Y / MathF.Max(view.Length(), 1e-6f), -1f, 1f)) - GlideTrim;
+
+        // How the character is actually moving, measured along the look's heading: climbing, gliding or falling, and
+        // which way. With nothing left going ahead the path points straight down, which drops the nose: a stall.
+        var ahead = new Vector3(-MathF.Sin(yaw), 0, -MathF.Cos(yaw));
+        var forward = MathF.Max(Vector3.Dot(velocity, ahead), 0f);
+        var path = MathF.Atan2(velocity.Y, forward);
+        pitch = MathF.Min(pitch, path + GlideMaximumAttack);
+
+        // Bank towards the look's heading from the way the character is going, like a glider turning.
+        float roll = 0f;
+        var horizontal = new Vector2(velocity.X, velocity.Z);
+        if (horizontal.LengthSquared() > 1f)
+        {
+            var heading = MathF.Atan2(-velocity.X, -velocity.Z);
+            var turn = MathF.IEEERemainder(yaw - heading, 2 * MathF.PI);
+            roll = System.Math.Clamp(turn * GlideBankPerTurn, -GlideMaximumBank, GlideMaximumBank);
+        }
+        return Quaternion.CreateFromYawPitchRoll(yaw, pitch, roll);
     }
 
     /// <summary>Crouch edge guard: clips the target velocity, one axis at a time (so the character still slides along an
@@ -350,7 +447,10 @@ public struct PlayerCharacter
     public void TeleportTo(Vector3 position)
     {
         if (suspended) return; // put back where the player is when it resumes
-        characters.GetCharacterByBodyHandle(bodyHandle).ResetJumpAndAirState();
+        ref var character = ref characters.GetCharacterByBodyHandle(bodyHandle);
+        character.ResetJumpAndAirState();
+        SetGliding(ref character, false);
+        boostRemaining = 0;
         eyeDrop = 0;
         var characterBody = new BodyReference(bodyHandle, characters.Simulation.Bodies);
         characterBody.Pose.Position = position;

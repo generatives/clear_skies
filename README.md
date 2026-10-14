@@ -52,7 +52,7 @@ Shift/Space to move up and down
 Mouse to orbit camera
 
 ### Building Ships
-Press "G" to spawn a ship in front of you
+Press "G" to spawn an anchor block in front of you, unlocked and anchored (only where it has something within 3 blocks to hold)
 You can build out a ship using blocks. You will need Fans/Thrusters for it to keep itself stable and move around. There is a simple physics simulation so they need to be places in the right directions and evenly throughout the ship for stability. You can place levers to control thrust, levers control thrust along the axis the lever moves. Steering wheels control Yaw.
 
 Press "End" to lock and unlock a ship. Locked ships will not move, Unlocked ones are dynamic physics bodies. Press "Home" to reset the rotation on a ship, helpful if it looses stability.

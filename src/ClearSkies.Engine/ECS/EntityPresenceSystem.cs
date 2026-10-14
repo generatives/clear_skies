@@ -119,7 +119,7 @@ public sealed class EntityPresenceSystem : ISystem, IDebugUiSystem
     private void DecideRoot(Entity e, bool hasLocal, Vector3 local)
     {
         // The local player is simulated here even when the host owns them: to predict them.
-        bool owned = !e.Has<NetOwner>() || e.Get<NetOwner>().IsLocal || e.Has<LocalPlayer>();
+        bool owned = e.SimulatedHere() || e.Has<LocalPlayer>();
         bool isPlayer = e.Has<Player>();
         float distance = hasLocal ? Vector3.Distance(ToNumerics(e.Get<Transform>().Position), local) : 0f;
 
