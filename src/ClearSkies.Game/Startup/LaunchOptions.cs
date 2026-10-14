@@ -48,6 +48,10 @@ public sealed record LaunchOptions
     /// firing the rest, overriding the preset's. Also in the GPU Lighting panel.</summary>
     public int? CheckerBounce { get; init; }
 
+    /// <summary>--msaa 4: multisample anti-aliasing, 4 samples per pixel (smooths the edges of geometry, such as the
+    /// thin terrace steps on distant slopes); 1 or absent: off.</summary>
+    public int Msaa { get; init; } = 1;
+
     /// <summary>--headless: no window, GPU, input or UI; just the simulation and the network, on a timer. Hosting, it's a
     /// dedicated server (no player of its own); joining, a player that stands where it spawns (a bot, for testing).
     /// </summary>
@@ -72,6 +76,7 @@ public sealed record LaunchOptions
         if (Value("--light-budget-mb") is { } budget) o = o with { LightBudgetMb = int.Parse(budget, CultureInfo.InvariantCulture) };
         if (Value("--lighting") is { Length: > 0 } lighting) o = o with { LightingPreset = lighting };
         if (int.TryParse(Value("--checker-bounce"), out int checker)) o = o with { CheckerBounce = checker };
+        if (int.TryParse(Value("--msaa"), out int msaa)) o = o with { Msaa = msaa };
         if (Value("--view-distance") is { } view) o = o with { ViewDistance = float.Parse(view, CultureInfo.InvariantCulture) };
         return o with { FlightTest = args.Contains("--flight-test") };
     }

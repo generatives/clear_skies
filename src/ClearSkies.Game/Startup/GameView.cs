@@ -68,6 +68,8 @@ public sealed class GameView : IDisposable
 
     private readonly string? _lightingPreset;
     private CloudRenderSystem? _clouds;
+    private GrappleRopeSystem? _ropes;
+    private ParticleRenderer? _particles;
     private UiRenderSystem? _uiRenderer;
 
     /// <summary>
@@ -93,12 +95,17 @@ public sealed class GameView : IDisposable
         SkySettings.CloudSeaAltitude = HeartGrid.CloudSeaAltitude; // below its lowest islands
         _clouds = new CloudRenderSystem(renderer, new HeartCloudDensity(world.Seed));
         _uiRenderer = new UiRenderSystem(Ui, renderer);
+        _particles = new ParticleRenderer(host.World, renderer);
+        host.AddSystem(new ThrusterFlameSystem(host.World), SystemStage.Frame); // aims each Fan's flames
+        host.AddSystem((ISystem)_particles, SystemStage.Frame); // moves every emitter's particles
         var chunks = new ChunkRenderSystem(host.World, renderer, volume);
         host.AddSystem(chunks, SystemStage.RenderWorld);
         host.AddSystem(new ModelRenderSystem(host.World, renderer, host.Time), SystemStage.RenderWorld);
         host.AddSystem(_clouds, SystemStage.RenderWorld);
+        host.AddSystem((IRenderSystem)_particles, SystemStage.RenderWorld);
         host.AddSystem(new SkyRenderSystem(renderer), SystemStage.RenderSky);
         host.AddSystem(new WireframeRenderSystem(host.World, renderer), SystemStage.RenderOverlay);
+        host.AddSystem(_ropes = new GrappleRopeSystem(host.World, renderer, world.Registry), SystemStage.RenderOverlay); // grapple ropes, ours and others'
         host.AddSystem(chunks, SystemStage.RenderTransparent);
         host.AddSystem(new HudRenderSystem(host.World, renderer), SystemStage.RenderHud);
         host.AddSystem(_uiRenderer, SystemStage.RenderHud);
@@ -108,6 +115,8 @@ public sealed class GameView : IDisposable
     {
         _uiRenderer?.Dispose();
         _clouds?.Dispose();
+        _ropes?.Dispose();
+        _particles?.Dispose();
         PlayerModel.Dispose();
         BlockModels.Dispose();
         Ui.Dispose();

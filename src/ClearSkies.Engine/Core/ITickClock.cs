@@ -8,6 +8,9 @@ public interface ITickClock
     uint Tick { get; }
     float Alpha { get; }
 
+    /// <summary>Simulated time per tick.</summary>
+    double TickSeconds { get; }
+
     /// <summary>Where this frame is on the timeline: its last tick, plus <see cref="Alpha"/> (see
     /// <see cref="TickClock.Now"/>).</summary>
     double Now { get; }
@@ -30,6 +33,7 @@ public sealed class ManualTickClock : ITickClock
 {
     public uint Tick { get; set; }
     public float Alpha { get; set; }
+    public double TickSeconds { get; init; } = 1.0 / 60.0;
     public double Rate { get; set; } = 1.0;
     public double Now => Tick + (double)Alpha;
     public void Snap(uint tick) { Tick = tick; Alpha = 0; }

@@ -3,22 +3,25 @@ using Xunit;
 
 namespace ClearSkies.Tests;
 
-/// <summary><see cref="ChunkData.HasAnyNonAir"/> and <see cref="ChunkData.HasAnyColliding"/> come from counts kept up
-/// to date by every write; these check them against a full scan of the blocks.</summary>
+/// <summary><see cref="ChunkData.HasAnyNonAir"/>, <see cref="ChunkData.HasAnyColliding"/> and
+/// <see cref="ChunkData.IsAllOpaque"/> come from counts kept up to date by every write; these check them against a
+/// full scan of the blocks.</summary>
 public class ChunkDataCountTests
 {
     private static void AssertMatchesScan(ChunkData data)
     {
-        bool nonAir = false, colliding = false;
+        bool nonAir = false, colliding = false, allOpaque = true;
         int s = ChunkData.Size;
         for (int z = 0; z < s; z++) for (int y = 0; y < s; y++) for (int x = 0; x < s; x++)
         {
             var id = data.Get(x, y, z);
             nonAir |= id != BlockId.Air;
             colliding |= BlockRegistry.Get(id).Collides;
+            allOpaque &= BlockRegistry.Get(id).IsFullCube && !BlockRegistry.Get(id).Transparent;
         }
         Assert.Equal(nonAir, data.HasAnyNonAir());
         Assert.Equal(colliding, data.HasAnyColliding());
+        Assert.Equal(allOpaque, data.IsAllOpaque);
     }
 
     [Fact]
@@ -35,6 +38,8 @@ public class ChunkDataCountTests
         Assert.True(stone.IsUniform(out _));
         Assert.True(stone.HasAnyNonAir());
         Assert.True(stone.HasAnyColliding());
+        Assert.True(stone.IsAllOpaque);
+        Assert.False(air.IsAllOpaque);
     }
 
     [Fact]

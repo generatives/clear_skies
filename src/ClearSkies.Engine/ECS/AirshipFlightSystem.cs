@@ -33,10 +33,10 @@ namespace ClearSkies.Engine.ECS;
 /// turn speeds up until air resistance on its rotation matches, and coasts to a stop when the turn is centred.</item>
 /// </list>
 ///
-/// Every unlocked grid also feels air resistance, a drag force against its velocity growing with the square of its
-/// speed, and a drag torque against its spin growing with the square of its turn rate, so a steady force or torque
-/// gives a top speed or turn rate (where the drag matches it) and a ship left alone slows to a stop. It's
-/// part of the world, not the controls: applied directly, not through the Fans.
+/// Air resistance against the ship's movement through the (moving) air is <see cref="AirResistanceSystem"/>'s. This
+/// system keeps an extra drag torque against the spin, growing with the square of the turn rate, so a steady wheel
+/// torque gives a top turn rate and a ship left alone stops turning (to be retuned now that the air also damps spin).
+/// It's part of the world, not the controls: applied directly, not through the Fans.
 ///
 /// Propulsion allocation solves for Fan thrusts rather than sharing the demand out: it finds each Fan's thrust,
 /// between 0 and the Fan's max (Fans only push), so that together they produce the desired force and torque as
@@ -53,10 +53,10 @@ namespace ClearSkies.Engine.ECS;
 /// adds (feedforward): its force alongside gravity, and its torque about the centre of mass, which otherwise
 /// leaves a ship with off-centre Buoyant blocks settled at a tilt.
 ///
-/// Fan and Buoyant blocks are entity blocks (see <see cref="Fan"/>, <see cref="Buoyant"/>): each tick starts by
-/// grouping their entities by the volume they belong to (<see cref="BlockRef.Volume"/>), so a ship's blocks are
-/// found by walking its own lists instead of scanning its voxels. Fans and Buoyant blocks on the static world are
-/// ignored — only grids fly.
+/// Fan and Buoyant blocks are entity blocks (see <see cref="Fan"/>, <see cref="Buoyant"/>): a ship's are found among
+/// its volume's block entities (<see cref="ChunkVolume.BlockEntities"/>), which the volume keeps as they're created
+/// and destroyed, instead of by scanning its voxels. Fans and Buoyant blocks on the static world are ignored — only
+/// grids fly.
 ///
 /// Debug "free propulsion" mode (the "Free propulsion" checkbox in <see cref="DrawDebugUi"/>) applies the
 /// control law's force/torque directly at the grid's centre of mass instead of allocating it across Fan
@@ -67,17 +67,15 @@ namespace ClearSkies.Engine.ECS;
 public sealed class AirshipFlightSystem : ISystem
 {
     private readonly EntitySet       _grids;
-    private readonly EntitySet       _fans;
-    private readonly EntitySet       _buoyants;
 
-    /// <summary>This tick's Fan and Buoyant blocks of one volume, by cell and orientation.</summary>
+    /// <summary>The Fan and Buoyant blocks of the grid being simulated, by cell and orientation (reused for each).</summary>
     private sealed class ShipBlocks
     {
-        public readonly List<BlockRef> Fans     = new();
-        public readonly List<BlockRef> Buoyants = new();
+        public readonly List<BlockRef> Fans        = new();
+        public readonly List<Entity>   FanEntities = new(); // Fans' entities, in the same order
+        public readonly List<BlockRef> Buoyants    = new();
     }
-    private readonly Dictionary<ChunkVolume, ShipBlocks> _blocksByVolume = new();
-    private static readonly ShipBlocks NoBlocks = new();
+    private readonly ShipBlocks _ship = new();
 
     // AllocateThrust scratch, one entry per Fan of the grid being allocated; grown as needed.
     private Vector3[] _fanDirs    = new Vector3[16];
@@ -115,11 +113,7 @@ public sealed class AirshipFlightSystem : ISystem
     // Not piloted: the torque (N·m) full turn asks for, about world up.
     private float _wheelMaxTorque = 500f;
 
-    // Air resistance: drag force = this × speed², against the velocity. With a lever's full force F, top speed is
-    // √(F / this): 10 m/s at the defaults.
-    private float _dragCoefficient = 5f;
-
-    // Air resistance on rotation: drag torque = this × turn rate², against the spin. With the wheel's full torque T,
+    // Extra air resistance on rotation: drag torque = this × turn rate², against the spin. With the wheel's full torque T,
     // top turn rate is √(T / this): 1 rad/s at the defaults.
     private float _angularDragCoefficient = 500f;
 
@@ -157,8 +151,6 @@ public sealed class AirshipFlightSystem : ISystem
     public AirshipFlightSystem(World world, PhysicsWorld physics)
     {
         _grids    = world.GetEntities().With<DynamicGrid>().With<ChunkGrid>().With<PhysicsBodyComponent>().AsSet();
-        _fans     = world.GetEntities().With<Fan>().With<BlockRef>().AsSet();
-        _buoyants = world.GetEntities().With<Buoyant>().With<BlockRef>().AsSet();
         _physics = physics;
         _players = world.GetEntities().With<LocalPlayer>().With<PlayerInput>().AsSet();
     }
@@ -166,18 +158,18 @@ public sealed class AirshipFlightSystem : ISystem
     public void Update(float dt)
     {
         int fanCount = 0, buoyantCount = 0, gridsProcessed = 0, freePropelled = 0;
-        GroupBlocksByVolume();
 
         foreach (ref readonly Entity e in _grids.GetEntities())
         {
             var volume = e.Get<ChunkGrid>().Volume;
             var dynamicGrid = e.Get<DynamicGrid>();
-            var blocks = _blocksByVolume.GetValueOrDefault(volume, NoBlocks);
+            // Only the machine with authority over a grid simulates it; everyone else follows its body sync, and its
+            // Fans' thrust arrives as replicated state.
+            if (!e.SimulatedHere()) continue;
+            var blocks = BlocksOf(volume); // its Fans off, unless allocated thrust below
             // Kinematic (Locked) grids skip gravity/impulses entirely via Bepu's own integrator — nothing
             // to fly. (An empty grid has no body yet, so it isn't in _grids at all.)
             if (dynamicGrid.Locked) continue;
-            // Only the owner flies a grid; everyone else follows its body sync.
-            if (e.Has<Entities.NetOwner>() && !e.Get<Entities.NetOwner>().IsLocal) continue;
             var body = e.Get<PhysicsBodyComponent>().Body;
 
             float mass = _physics.GetBodyMass(body);
@@ -256,10 +248,8 @@ public sealed class AirshipFlightSystem : ISystem
                 desiredForce = leverForce - (_physics.Gravity + buoyantAccel * worldUp) * mass;
             }
 
-            // Air resistance, straight onto the body: part of the world, not something the Fans deliver.
-            float speed = linVel.Length();
-            if (speed > 1e-4f)
-                _physics.ApplyLinearImpulse(body, -_dragCoefficient * speed * linVel * dt);
+            // Extra air resistance on rotation, straight onto the body: part of the world, not something the Fans deliver.
+            // (AirResistanceSystem applies drag against the ship's movement through the air.)
             float spin = angVel.Length();
             if (spin > 1e-4f)
                 _physics.ApplyAngularImpulse(body, -_angularDragCoefficient * spin * angVel * dt);
@@ -300,6 +290,7 @@ public sealed class AirshipFlightSystem : ISystem
                 for (int i = 0; i < blocks.Fans.Count; i++)
                 {
                     float thrust = _fanThrusts[i];
+                    blocks.FanEntities[i].Get<Fan>().Thrust = thrust / MathF.Max(_fanMaxForce, 1e-3f);
                     if (thrust < 1e-3f) continue;
                     _physics.ApplyLinearImpulse(body, _fanDirs[i] * (thrust * dt), _fanOffsets[i]);
                     deliveredForceY += _fanDirs[i].Y * thrust;
@@ -342,36 +333,25 @@ public sealed class AirshipFlightSystem : ISystem
         return Vector4.Zero;
     }
 
-    /// <summary>Rebuilds <see cref="_blocksByVolume"/> from this tick's Fan and Buoyant entities. Lists are reused
-    /// across ticks; a volume left with neither is dropped so a despawned ship's lists don't linger.</summary>
-    private void GroupBlocksByVolume()
-    {
-        foreach (var blocks in _blocksByVolume.Values)
-        {
-            blocks.Fans.Clear();
-            blocks.Buoyants.Clear();
-        }
-
-        foreach (ref readonly Entity e in _fans.GetEntities())
-        {
-            ref readonly var block = ref e.Get<BlockRef>();
-            BlocksOf(block.Volume).Fans.Add(block);
-        }
-        foreach (ref readonly Entity e in _buoyants.GetEntities())
-        {
-            ref readonly var block = ref e.Get<BlockRef>();
-            BlocksOf(block.Volume).Buoyants.Add(block);
-        }
-
-        foreach (var (volume, blocks) in _blocksByVolume)
-            if (blocks.Fans.Count == 0 && blocks.Buoyants.Count == 0) _blocksByVolume.Remove(volume);
-    }
-
+    /// <summary>A ship's Fan and Buoyant blocks, from its volume's block entities, with each Fan's thrust reset to 0
+    /// (off unless allocated thrust).</summary>
     private ShipBlocks BlocksOf(ChunkVolume volume)
     {
-        if (!_blocksByVolume.TryGetValue(volume, out var blocks))
-            _blocksByVolume[volume] = blocks = new ShipBlocks();
-        return blocks;
+        _ship.Fans.Clear();
+        _ship.FanEntities.Clear();
+        _ship.Buoyants.Clear();
+        foreach (var e in volume.BlockEntities)
+        {
+            if (!e.IsAlive) continue;
+            if (e.Has<Fan>())
+            {
+                e.Get<Fan>().Thrust = 0f;
+                _ship.Fans.Add(e.Get<BlockRef>());
+                _ship.FanEntities.Add(e);
+            }
+            else if (e.Has<Buoyant>()) _ship.Buoyants.Add(e.Get<BlockRef>());
+        }
+        return _ship;
     }
 
     // World-space offset from centre of mass for a block's cell centre — the same rigid transform
@@ -507,10 +487,9 @@ public sealed class AirshipFlightSystem : ISystem
         ImGui.Separator();
         ImGui.Text("Ship's controls (not piloted)");
         ImGui.SliderFloat("Full lever force (N)", ref _leverMaxForce, 0f, 20000f);
-        ImGui.SliderFloat("Air resistance", ref _dragCoefficient, 0f, 100f);
-        ImGui.Text($"Top speed at full lever: {MathF.Sqrt(_leverMaxForce / MathF.Max(_dragCoefficient, 1e-4f)):0.0} m/s");
+        ImGui.TextDisabled("Air resistance: see the Air resistance and Wind panels");
         ImGui.SliderFloat("Full wheel torque (N·m)", ref _wheelMaxTorque, 0f, 20000f);
-        ImGui.SliderFloat("Rotation air resistance", ref _angularDragCoefficient, 0f, 5000f);
+        ImGui.SliderFloat("Extra rotation air resistance", ref _angularDragCoefficient, 0f, 5000f);
         ImGui.Text($"Top turn rate at full wheel: {MathF.Sqrt(_wheelMaxTorque / MathF.Max(_angularDragCoefficient, 1e-4f)):0.00} rad/s");
         ImGui.Separator();
         ImGui.Text("Top speeds (keyboard while piloted)");

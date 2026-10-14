@@ -1,4 +1,5 @@
 using ClearSkies.Engine.ECS;
+using ClearSkies.Engine.Rendering;
 using Silk.NET.Maths;
 
 namespace ClearSkies.Engine.Voxels;
@@ -38,7 +39,7 @@ public static class BlockRegistry
         // Buoyant blocks through their entities instead of scanning voxels.
         Register(new BlockDef { Id = BlockId.Fan, Name = "Fan", Color = new(0.85f, 0.55f, 0.15f), IsSolid = true, PlaceOriented = true, LightEmission = 0, Weight = 3,
             OpaqueModel = true, // its housing fills the cell: it shades what's behind it and hides faces against it like a cube
-            Model = "thruster/thruster.gltf", IconTexture = "thruster.png", Components = e => e.Set(new Fan()) });
+            Model = "thruster/thruster.gltf", IconTexture = "thruster.png", Components = e => { e.Set(new Fan()); e.Set(new ParticleEmitter(ThrusterFlameSystem.Flame)); } });
         //Register(new BlockDef { Id = BlockId.Fan,     Name = "Fan",     Color = new(0.85f, 0.55f, 0.15f), IsSolid = true, LightEmission = 0, Weight = 3,
         //    Texture = "metal", TextureTop = "thruster" });
         // Model block (see BlockDef.Model): the Blockbench lever. It lets light through, since it only
@@ -48,6 +49,13 @@ public static class BlockRegistry
         // The Blockbench ship's wheel, also Passable: the player grabs its rim and turns it to steer (SteeringWheelControlSystem).
         Register(new BlockDef { Id = BlockId.SteeringWheel, Name = "Steering Wheel", Color = new(0.50f, 0.36f, 0.22f), IsSolid = true, PlaceOriented = true, Passable = true, LightEmission = 0, Weight = 1,
             Model = "steering_wheel/steering_wheel.gltf", IconTexture = "steering_wheel.png", Components = e => { e.Set(new SteeringWheel()); e.Set(new Interactive()); } });
+        // The lever, painted red: a switch the player flicks on or off, anchoring its ship (ToggleControlSystem).
+        Register(new BlockDef { Id = BlockId.Toggle, Name = "Toggle", Color = new(0.65f, 0.15f, 0.12f), IsSolid = true, PlaceOriented = true, Passable = true, LightEmission = 0, Weight = 1,
+            Model = "toggle/toggle.gltf", IconTexture = "toggle.png", Components = e => { e.Set(new Toggle()); e.Set(new Interactive()); } });
+        // A heavy iron block: while its ship's toggles are on it holds the ship to the nearest terrain or other ship
+        // beside it (AnchorSystem).
+        Register(new BlockDef { Id = BlockId.Anchor, Name = "Anchor", Color = new(0.30f, 0.30f, 0.32f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 6,
+            Texture = "oven", Components = e => e.Set(new Anchor()) });
         Register(new BlockDef { Id = BlockId.Buoyant, Name = "Buoyant", Color = new(0.55f, 0.85f, 1.00f), IsSolid = true, LightEmission = 0, Weight = 1,
             Components = e => e.Set(new Buoyant()) });
 
@@ -74,7 +82,38 @@ public static class BlockRegistry
         // mostly clear, with a few streaks of glare, so it's drawn with the world minus its clear texels, no blending.
         Register(new BlockDef { Id = BlockId.Glass, Name = "Glass", Color = new(0.80f, 0.90f, 0.95f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 2,
             Texture = "glass", Layer = RenderLayer.Cutout });
+
+        // Plants and pebbles: crossed billboards (BlockShape.Cross) of one sprite each. Passable, so they're walked
+        // through, but still targetable so they can be broken, and Replaceable: a block placed against one takes its
+        // place. Colour is only a fallback (and the hotbar's swatch) if the sprite is missing.
+        // The green grasses' quads each pick a sprite, mostly their own, sometimes a neighbouring height's.
+        RegisterCross(BlockId.ShortGrass,    "Short Grass",    "grass1",         new(0.20f, 0.70f, 0.40f), ["grass1", "grass1", "grass2", "grass3"]);
+        RegisterCross(BlockId.GrassTuft,     "Grass Tuft",     "grass2",         new(0.20f, 0.70f, 0.40f), ["grass2", "grass2", "grass1", "grass3"]);
+        RegisterCross(BlockId.GrassBlades,   "Grass Blades",   "grass3",         new(0.20f, 0.70f, 0.40f), ["grass3", "grass3", "grass2", "grass4"]);
+        RegisterCross(BlockId.TallGrass,     "Tall Grass",     "grass4",         new(0.20f, 0.70f, 0.40f), ["grass4", "grass4", "grass4", "grass3"]);
+        RegisterCross(BlockId.DryGrass,      "Dry Grass",      "grass_tan",      new(0.85f, 0.78f, 0.60f));
+        RegisterCross(BlockId.BrownGrass,    "Brown Grass",    "grass_brown",    new(0.62f, 0.40f, 0.20f));
+        RegisterCross(BlockId.RedMushroom,   "Red Mushroom",   "mushroom_red",   new(0.95f, 0.40f, 0.15f), rigid: true);
+        RegisterCross(BlockId.BrownMushroom, "Brown Mushroom", "mushroom_brown", new(0.55f, 0.35f, 0.20f), rigid: true);
+        RegisterCross(BlockId.TanMushroom,   "Tan Mushroom",   "mushroom_tan",   new(0.85f, 0.75f, 0.60f), rigid: true);
+        RegisterCross(BlockId.Pebbles,       "Pebbles",        "rock",           new(0.55f, 0.62f, 0.65f), rigid: true);
+        RegisterCross(BlockId.MossyPebbles,  "Mossy Pebbles",  "rock_moss",      new(0.45f, 0.62f, 0.50f), rigid: true);
+
+        // Trees and cacti, grown by world generation. Leaves are cut out like glass, so they show what's behind their
+        // gaps, and keep their faces against each other so a canopy looks full right through; pine needles are the solid leaf texture, so pines read darker and denser.
+        Register(new BlockDef { Id = BlockId.Log, Name = "Log", Color = new(0.45f, 0.32f, 0.20f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 1,
+            Texture = "trunk_side", TextureTop = "trunk_top", TextureBottom = "trunk_top" });
+        Register(new BlockDef { Id = BlockId.Leaves, Name = "Leaves", Color = new(0.20f, 0.65f, 0.35f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 0.2f,
+            Texture = "leaves_transparent", Layer = RenderLayer.Cutout, ShowsInnerFaces = true });
+        Register(new BlockDef { Id = BlockId.PineLeaves, Name = "Pine Needles", Color = new(0.15f, 0.50f, 0.30f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 0.2f,
+            Texture = "leaves" });
+        Register(new BlockDef { Id = BlockId.Cactus, Name = "Cactus", Color = new(0.25f, 0.65f, 0.35f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 1,
+            Texture = "cactus_side", TextureTop = "cactus_top", TextureBottom = "cactus_top" });
     }
+
+    private static void RegisterCross(BlockId id, string name, string texture, Vector3D<float> color, string[]? variants = null, bool rigid = false) =>
+        Register(new BlockDef { Id = id, Name = name, Color = color, IsSolid = true, Passable = true, Weight = 0.1f,
+            Shape = BlockShape.Cross, Texture = texture, CrossTextures = variants, RigidCross = rigid });
 
     private static void Register(BlockDef def) => Defs[(byte)def.Id] = def;
 

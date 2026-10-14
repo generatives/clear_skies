@@ -139,6 +139,22 @@ public class EditVoxelsTests
     }
 
     [Fact]
+    public void AVolumeKeepsItsBlockEntities()
+    {
+        var (scene, grid, _) = Scene();
+        using var _s = scene;
+        var volume = Vol(grid);
+        var lever = BlockOrientation.From(Direction.Up, Direction.North);
+        volume.SetBlock(1, 1, 1, BlockId.Lever, lever);
+        Assert.True(volume.TryGetBlockEntity(1, 1, 1, out var e));
+        Assert.Contains(e, volume.BlockEntities);
+        volume.SetBlock(1, 1, 1, BlockId.Lever, lever); // unchanged: the same entity stays
+        Assert.Contains(e, volume.BlockEntities);
+        volume.SetBlock(1, 1, 1, BlockId.Wood, BlockOrientation.Upright);
+        Assert.DoesNotContain(e, volume.BlockEntities);
+    }
+
+    [Fact]
     public void ANewLeverShowsItsShipsSetting()
     {
         var (scene, grid, player) = Scene();

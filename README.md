@@ -41,6 +41,7 @@ WASD to move and Mouse to look around
 Space to jump
 Ctrl to crouch, slows movement and prevents walking off edges
 Shift to sprint
+Press R to fire a grapple rope at the block you're looking at (terrain or a ship, up to 40 blocks away) and swing from it; press R again to let go. While hanging, hold Space to climb the rope and Ctrl to let it out; WASD steers the swing
 
 #### Pilot Mode
 If you have selected an airship (recently spawned, walked on, or edited) you can press "F" to enter pilot mode. Doesn't work in multiplayer. You will be locked into an orbiting camera angle and can control the ship.
@@ -51,7 +52,7 @@ Shift/Space to move up and down
 Mouse to orbit camera
 
 ### Building Ships
-Press "G" to spawn a ship in front of you
+Press "G" to spawn an anchor block in front of you, unlocked and anchored (only where it has something within 3 blocks to hold)
 You can build out a ship using blocks. You will need Fans/Thrusters for it to keep itself stable and move around. There is a simple physics simulation so they need to be places in the right directions and evenly throughout the ship for stability. You can place levers to control thrust, levers control thrust along the axis the lever moves. Steering wheels control Yaw.
 
 Press "End" to lock and unlock a ship. Locked ships will not move, Unlocked ones are dynamic physics bodies. Press "Home" to reset the rotation on a ship, helpful if it looses stability.

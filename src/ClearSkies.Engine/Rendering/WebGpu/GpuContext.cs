@@ -26,6 +26,8 @@ public sealed unsafe class GpuContext : IDisposable
 
     private Texture* _depthTexture;
     private TextureView* _depthView;
+    private Texture* _msaaTexture;      // the multisampled colour target, resolved into the swapchain image (MSAA only)
+    private TextureView* _msaaView;
 
     private Texture* _currentTexture;
     private TextureView* _currentView;
@@ -56,6 +58,14 @@ public sealed unsafe class GpuContext : IDisposable
     internal Device* Device => _device;
     internal Queue* Queue => _queue;
     internal TextureView* DepthView => _depthView;
+
+    /// <summary>Samples per pixel of the world pass's targets (1, or 4 for MSAA): every pipeline drawn in it must use
+    /// this count.</summary>
+    public uint SampleCount { get; private set; } = 1;
+
+    /// <summary>The multisampled colour target the pass draws into, resolved into the swapchain image; null without
+    /// MSAA.</summary>
+    internal TextureView* MsaaView => _msaaView;
     internal TextureView* CurrentView => _currentView;
 
     private GpuContext(WebGPU api, bool logErrors)
@@ -67,7 +77,7 @@ public sealed unsafe class GpuContext : IDisposable
     public static GpuContext Create(GameWindow window, EngineOptions options)
     {
         var api = WebGPU.GetApi();
-        var ctx = new GpuContext(api, options.LogGpuErrors);
+        var ctx = new GpuContext(api, options.LogGpuErrors) { SampleCount = options.MsaaSamples >= 4 ? 4u : 1u };
         ctx.Init(window);
         return ctx;
     }
@@ -75,6 +85,9 @@ public sealed unsafe class GpuContext : IDisposable
     /// <summary>The graphics API to use (e.g. Vulkan or DX12), or null for wgpu's choice. Set before the host is made
     /// (the game's --backend).</summary>
     public static InstanceBackend? Backend { get; set; }
+
+    /// <summary>Which adapter to ask for. Set before the host is made (the game's --gpu).</summary>
+    public static GpuAdapterChoice Adapter { get; set; } = GpuAdapterChoice.Fast;
 
     private void Init(GameWindow window)
     {
@@ -95,7 +108,8 @@ public sealed unsafe class GpuContext : IDisposable
         var adapterOpts = new RequestAdapterOptions
         {
             CompatibleSurface = _surface,
-            PowerPreference = PowerPreference.HighPerformance,
+            PowerPreference = Adapter == GpuAdapterChoice.LowPower ? PowerPreference.LowPower : PowerPreference.HighPerformance,
+            ForceFallbackAdapter = Adapter == GpuAdapterChoice.Software,
         };
         _api.InstanceRequestAdapter(_instance, &adapterOpts, PfnRequestAdapterCallback.From(HandleAdapter), null);
         if (_adapter == null)
@@ -119,7 +133,21 @@ public sealed unsafe class GpuContext : IDisposable
         if (required.Limits.MaxBufferSize == ulong.MaxValue || required.Limits.MaxBufferSize < required.Limits.MaxStorageBufferBindingSize)
             required.Limits.MaxBufferSize = required.Limits.MaxStorageBufferBindingSize;
 
+        // The same sentinel hits count limits: an adapter with no real cap (AMD's Vulkan driver reports uint.MaxValue
+        // storage buffers per stage) hands back the "undefined" value, so the device got the default of 8 and the ray
+        // lighting's 10 storage buffers failed validation. Ask for one less, a defined value within what it supports.
+        object boxed = required.Limits;
+        foreach (var field in typeof(Limits).GetFields())
+            if (field.FieldType == typeof(uint) && (uint)field.GetValue(boxed)! == uint.MaxValue)
+                field.SetValue(boxed, uint.MaxValue - 1);
+        required.Limits = (Limits)boxed;
+
         AdapterLimits = required.Limits;
+        // The limits a weaker adapter is most likely to fall short on (the ray lighting binds 10 storage buffers).
+        Console.WriteLine($"[wgpu] limits: storage buffers per stage {required.Limits.MaxStorageBuffersPerShaderStage}, " +
+                          $"storage binding {required.Limits.MaxStorageBufferBindingSize >> 20} MiB, " +
+                          $"workgroup storage {required.Limits.MaxComputeWorkgroupStorageSize} B, " +
+                          $"invocations per workgroup {required.Limits.MaxComputeInvocationsPerWorkgroup}");
 
         // Request device + queue, with timestamp queries when the adapter has them (for GpuTimer).
         bool timestamps = _api.AdapterHasFeature(_adapter, FeatureName.TimestampQuery);
@@ -229,6 +257,22 @@ public sealed unsafe class GpuContext : IDisposable
     {
         if (_depthView != null) { _api.TextureViewRelease(_depthView); _depthView = null; }
         if (_depthTexture != null) { _api.TextureRelease(_depthTexture); _depthTexture = null; }
+        if (_msaaView != null) { _api.TextureViewRelease(_msaaView); _msaaView = null; }
+        if (_msaaTexture != null) { _api.TextureRelease(_msaaTexture); _msaaTexture = null; }
+        if (SampleCount > 1)
+        {
+            var colour = new TextureDescriptor
+            {
+                Usage = TextureUsage.RenderAttachment,
+                Dimension = TextureDimension.Dimension2D,
+                Size = new Extent3D(width, height, 1),
+                Format = SurfaceFormat,
+                MipLevelCount = 1,
+                SampleCount = SampleCount,
+            };
+            _msaaTexture = _api.DeviceCreateTexture(_device, &colour);
+            _msaaView = _api.TextureCreateView(_msaaTexture, null);
+        }
 
         var desc = new TextureDescriptor
         {
@@ -237,7 +281,7 @@ public sealed unsafe class GpuContext : IDisposable
             Size = new Extent3D(width, height, 1),
             Format = DepthFormat,
             MipLevelCount = 1,
-            SampleCount = 1,
+            SampleCount = SampleCount,
         };
         _depthTexture = _api.DeviceCreateTexture(_device, &desc);
         _depthView = _api.TextureCreateView(_depthTexture, null);
@@ -306,7 +350,20 @@ public sealed unsafe class GpuContext : IDisposable
         Timer?.Dispose();
         if (_depthView != null) _api.TextureViewRelease(_depthView);
         if (_depthTexture != null) _api.TextureRelease(_depthTexture);
+        if (_msaaView != null) _api.TextureViewRelease(_msaaView);
+        if (_msaaTexture != null) _api.TextureRelease(_msaaTexture);
         if (_instance != null) _api.InstanceRelease(_instance);
         _api.Dispose();
     }
+}
+
+/// <summary>The adapter <see cref="GpuContext"/> asks for.</summary>
+public enum GpuAdapterChoice
+{
+    /// <summary>The fastest GPU (the default).</summary>
+    Fast,
+    /// <summary>The power-saving GPU, usually the integrated one; the same GPU on a machine with only one.</summary>
+    LowPower,
+    /// <summary>wgpu's software renderer on the CPU (WARP on DX12, lavapipe or llvmpipe on Vulkan, when installed).</summary>
+    Software,
 }

@@ -1,4 +1,5 @@
 using ClearSkies.Engine.Serialization;
+using DefaultEcs;
 
 namespace ClearSkies.Engine.Entities;
 
@@ -26,6 +27,13 @@ public struct NetOwner
     public PeerId Owner;
     public ushort Epoch;
     public bool IsLocal;
+}
+
+public static class NetOwnership
+{
+    /// <summary>Whether this machine simulates <paramref name="e"/>: it owns it, or nobody does (it isn't networked).
+    /// Everyone else follows the owner's body sync.</summary>
+    public static bool SimulatedHere(this Entity e) => !e.Has<NetOwner>() || e.Get<NetOwner>().IsLocal;
 }
 
 /// <summary>A player: who they are across sessions (<see cref="Id"/>), and who plays them. Every player is owned (simulated)

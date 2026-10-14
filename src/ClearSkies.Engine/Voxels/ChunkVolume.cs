@@ -1,5 +1,6 @@
 using System.Buffers;
 using ClearSkies.Engine.ECS;
+using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Math;
 using ClearSkies.Engine.Rendering;
 using DefaultEcs;
@@ -30,12 +31,19 @@ namespace ClearSkies.Engine.Voxels;
 /// rides along with the volume like the chunk does. The voxel always wins: <see cref="SetBlock"/> is the one place
 /// an entity is reconciled with its voxel. Main thread only, like every entity create/destroy.
 /// </summary>
-public class ChunkVolume
+public class ChunkVolume : IReplicatedChildren
 {
     private protected readonly Dictionary<ChunkPosition, ChunkEntry> _chunks = new();
     protected readonly World _world;
 
     public Entity Root { get; }
+
+    private readonly HashSet<Entity> _blockEntities = new();
+
+    /// <summary>Every block entity in this volume's loaded chunks (see <see cref="BlockDef.Components"/>), kept as
+    /// they're created and destroyed, so systems reach a grid's Fans, levers and so on through its
+    /// <see cref="ChunkGrid"/> instead of grouping every block entity in the world by volume each tick.</summary>
+    public IReadOnlyCollection<Entity> BlockEntities => _blockEntities;
 
     /// <summary>This volume's registration in the shared GPU voxel storage (see <see cref="GridStore"/>), kept in
     /// sync by GpuResidencySystem.</summary>
@@ -135,6 +143,38 @@ public class ChunkVolume
         return false;
     }
 
+    /// <summary>Block entities replicate with the volume's root entity, each keyed by its cell (see
+    /// <see cref="ReplicatedComponents"/>).</summary>
+    public IEnumerable<(ulong Key, Entity Entity)> ReplicatedChildren
+    {
+        get
+        {
+            foreach (var e in _blockEntities)
+                if (e.IsAlive) yield return (CellKey(e.Get<BlockRef>().Position), e);
+        }
+    }
+
+    public bool TryGetReplicatedChild(ulong key, out Entity entity)
+    {
+        var cell = KeyCell(key);
+        return TryGetBlockEntity(cell.X, cell.Y, cell.Z, out entity);
+    }
+
+    private const int KeyBits = 21; // per axis: cells within ±a million
+
+    /// <summary>A cell as a replication key: each axis in 21 bits, with the top bit set so it's never 0 (the root).</summary>
+    public static ulong CellKey(Vector3D<int> cell)
+    {
+        const ulong mask = (1UL << KeyBits) - 1;
+        return 1UL << 63 | ((ulong)cell.X & mask) | ((ulong)cell.Y & mask) << KeyBits | ((ulong)cell.Z & mask) << (2 * KeyBits);
+    }
+
+    public static Vector3D<int> KeyCell(ulong key)
+    {
+        static int Axis(ulong key, int shift) => (int)((long)(key << (64 - KeyBits - shift)) >> (64 - KeyBits)); // sign-extended
+        return new Vector3D<int>(Axis(key, 0), Axis(key, KeyBits), Axis(key, 2 * KeyBits));
+    }
+
     public void SetBlock(int x, int y, int z, BlockId id) => SetBlock(x, y, z, id, BlockOrientation.Upright);
 
     /// <summary>Sets one block. For generation and loading only: during gameplay, blocks change through the EditVoxels
@@ -145,7 +185,9 @@ public class ChunkVolume
         if (cp.Y < EditableLayers.Min || cp.Y > EditableLayers.Max) return;
         var entry = EnsureChunk(cp);
 
+        bool wasOpaque = entry.Data.IsAllOpaque;
         entry.Data.Set(lx, ly, lz, id, orientation);
+        if (entry.Data.IsAllOpaque != wasOpaque) MarkBuriedNeighbours(cp);
         SyncBlockEntity(entry, new Vector3D<int>(lx, ly, lz), id, orientation);
         entry.Entity.Set(new NeedsRemeshFlag());
         entry.Entity.Set(new NeedsRecollideFlag());
@@ -192,7 +234,7 @@ public class ChunkVolume
             int x0 = System.Math.Max(min.X - cx * S, 0), x1 = System.Math.Min(max.X - cx * S, S - 1);
             int y0 = System.Math.Max(min.Y - cy * S, 0), y1 = System.Math.Min(max.Y - cy * S, S - 1);
             int z0 = System.Math.Max(min.Z - cz * S, 0), z1 = System.Math.Min(max.Z - cz * S, S - 1);
-            bool changed = false;
+            bool changed = false, wasOpaque = entry.Data.IsAllOpaque;
             for (int lz = z0; lz <= z1; lz++)
             for (int ly = y0; ly <= y1; ly++)
             for (int lx = x0; lx <= x1; lx++)
@@ -205,6 +247,7 @@ public class ChunkVolume
             }
             if (!changed) continue;
 
+            if (entry.Data.IsAllOpaque != wasOpaque) MarkBuriedNeighbours(cp);
             entry.Entity.Set(new NeedsRemeshFlag());
             entry.Entity.Set(new NeedsRecollideFlag());
             entry.Entity.Set(new NeedsGpuUploadFlag());
@@ -244,6 +287,7 @@ public class ChunkVolume
         _chunks[pos] = entry;
         UpdateBounds(pos);
         MarkNeighboursDirty(pos, data);
+        if (data.IsAllOpaque) MarkBuriedNeighbours(pos);
         return entry;
     }
 
@@ -253,11 +297,38 @@ public class ChunkVolume
         if (entry is null) return;
 
         // Takes the chunk's block entities with it, immediately.
+        if (entry.BlockEntities is { } entities)
+            foreach (var e in entities.Values) _blockEntities.Remove(e);
         Hierarchy.DestroyRecursive(entry.Entity);
         entry.BlockEntities = null;
 
         _chunks.Remove(pos);
         MarkNeighboursDirty(pos, entry.Data);
+        if (entry.Data.IsAllOpaque) MarkBuriedNeighbours(pos);
+    }
+
+    /// <summary>Whether the chunk at <paramref name="pos"/> can't be seen: it and the loaded chunk on each of its six
+    /// sides are all opaque cubes (<see cref="ChunkData.IsAllOpaque"/>), so every face it has is hidden, and it needs
+    /// no mesh (ChunkMeshSystem gives it none). Where neighbours are culled against anyway that's what meshing it would
+    /// find; where they aren't (<see cref="MeshIgnoresNeighbours"/>) it saves the six border sheets such a chunk would
+    /// draw, deep inside an island. A missing neighbour counts as open air, so a chunk at the edge of what's loaded
+    /// is drawn. Kept true by <see cref="MarkBuriedNeighbours"/>.</summary>
+    public bool IsBuried(ChunkPosition pos)
+    {
+        if (GetData(pos) is not { IsAllOpaque: true }) return false;
+        foreach (var (dx, dy, dz) in NeighbourOffsets)
+            if (GetData(pos.Offset(dx, dy, dz)) is not { IsAllOpaque: true }) return false;
+        return true;
+    }
+
+    /// <summary>Remeshes the all-opaque neighbours of <paramref name="pos"/>, whose <see cref="IsBuried"/> may have just
+    /// changed: the chunk there loaded or unloaded while all opaque, or an edit made it all opaque or broke into it.
+    /// A neighbour newly buried drops its mesh without meshing; one dug out is meshed again.</summary>
+    private void MarkBuriedNeighbours(ChunkPosition pos)
+    {
+        foreach (var (dx, dy, dz) in NeighbourOffsets)
+            if (_chunks.TryGetValue(pos.Offset(dx, dy, dz), out var e) && e.Data.IsAllOpaque)
+                e.Entity.Set(new NeedsRemeshFlag());
     }
 
     private protected ChunkEntry EnsureChunk(ChunkPosition pos) =>
@@ -292,10 +363,11 @@ public class ChunkVolume
     {
         if (entry.BlockEntities is { } entities && entities.Remove(cell, out var existing))
         {
+            _blockEntities.Remove(existing);
             if (existing.IsAlive)
             {
                 ref readonly var r = ref existing.Get<BlockRef>();
-                if (r.Id == id && r.Orientation == orientation) { entities[cell] = existing; return; }
+                if (r.Id == id && r.Orientation == orientation) { entities[cell] = existing; _blockEntities.Add(existing); return; }
                 Hierarchy.DestroyRecursive(existing);
             }
         }
@@ -317,6 +389,7 @@ public class ChunkVolume
         Hierarchy.SetParent(e, entry.Entity, CellLocal(cell, orientation));
         BlockRegistry.Get(id).Components!(e);
         (entry.BlockEntities ??= new())[cell] = e;
+        _blockEntities.Add(e);
     }
 
     /// <summary>A block entity relative to its chunk entity: the same placement ChunkRenderSystem gives a static

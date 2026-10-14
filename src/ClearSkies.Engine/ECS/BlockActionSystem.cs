@@ -43,7 +43,8 @@ public sealed class BlockActionSystem : ISystem, IDisposable, IDebugUiSystem
 
     private static readonly BlockId[] Placeable =
         { BlockId.Stone, BlockId.Wood, BlockId.Grass, BlockId.Dirt, BlockId.Lamp, BlockId.RedLamp, BlockId.GreenLamp,
-          BlockId.BlueLamp, BlockId.Fan, BlockId.Buoyant, BlockId.Lever, BlockId.SteeringWheel, BlockId.Glass, BlockId.Water };
+          BlockId.BlueLamp, BlockId.Fan, BlockId.Buoyant, BlockId.Lever, BlockId.SteeringWheel, BlockId.Toggle, BlockId.Anchor, BlockId.Glass, BlockId.Water,
+          BlockId.TallGrass, BlockId.RedMushroom, BlockId.Pebbles };
     private static readonly string[] PlaceableNames = Array.ConvertAll(Placeable, id => BlockRegistry.Get(id).Name);
 
     /// <summary>The blocks the player can place, in hotbar order.</summary>
@@ -139,8 +140,12 @@ public sealed class BlockActionSystem : ISystem, IDisposable, IDebugUiSystem
         }
         else if (place)
         {
-            var t = hit.Block + hit.Normal;
-            if (hit.Volume.GetBlock(t.X, t.Y, t.Z) != BlockId.Air) return;
+            // Into the targeted cell if what's there is Replaceable (a tuft of grass), else against its face, into air
+            // or something Replaceable.
+            bool replace = BlockRegistry.Get(hit.Volume.GetBlock(hit.Block.X, hit.Block.Y, hit.Block.Z)).Replaceable;
+            var t = replace ? hit.Block : hit.Block + hit.Normal;
+            var there = hit.Volume.GetBlock(t.X, t.Y, t.Z);
+            if (there == PlaceBlock || there != BlockId.Air && !BlockRegistry.Get(there).Replaceable) return;
             // Bottom on the face it was placed against: its top points away from that face, so e.g. a Fan placed
             // against a ship's east wall faces east, away from the ship. Then its north face turns towards the player
             // as far as it can while keeping that: onto whichever axis across the face is nearest the direction to
@@ -158,19 +163,42 @@ public sealed class BlockActionSystem : ISystem, IDisposable, IDebugUiSystem
         {
             var op = BrushRadius == 0 ? VoxelOp.SetBlock(hit.Block, BlockId.Air, BlockOrientation.Upright)
                                       : VoxelOp.FillBox(hit.Block, BrushRadius, BlockId.Air, BlockOrientation.Upright);
-            _commands.Send(new EditVoxels { Volume = volumeId, Editor = editor, Ops = new[] { op } });
+            // A plant (cross block) standing on a broken block goes with it rather than float.
+            var above = hit.Block + new Vector3D<int>(0, 1, 0);
+            var ops = BrushRadius == 0 && BlockRegistry.Get(hit.Volume.GetBlock(above.X, above.Y, above.Z)).IsCross
+                ? new[] { op, VoxelOp.SetBlock(above, BlockId.Air, BlockOrientation.Upright) }
+                : new[] { op };
+            _commands.Send(new EditVoxels { Volume = volumeId, Editor = editor, Ops = ops });
             if (isGrid) _selection.Select(hit.Root);
             Console.WriteLine($"[break] {(isGrid ? "grid" : "world")} ({hit.Block.X},{hit.Block.Y},{hit.Block.Z})");
         }
     }
 
+    /// <summary>Spawns an anchor block, already anchored, in front of the player; nothing if it'd have nothing to
+    /// hold (see <see cref="AnchoredBlockAt"/>).</summary>
     private void SpawnGrid(Vector3D<float> eye, Vector3D<float> dir)
     {
         var spawn = eye + dir * 3f;
-        var grid = GridDescription.FromVoxels(new PhysVec(spawn.X, spawn.Y, spawn.Z),
-            new[] { new GridVoxel(0, 0, 0, BlockId.Stone, BlockOrientation.Upright) });
+        var at = new PhysVec(spawn.X, spawn.Y, spawn.Z);
+        if (AnchoredBlockAt(_volumes, at) is not { } grid)
+        {
+            Console.WriteLine($"[spawn] nothing for an anchor to hold at ({spawn.X:0.0},{spawn.Y:0.0},{spawn.Z:0.0})");
+            return;
+        }
         _commands.Send(new Spawn<GridDescription> { Description = grid, Select = true });
-        Console.WriteLine($"[spawn] grid at ({spawn.X:0.0},{spawn.Y:0.0},{spawn.Z:0.0})");
+        Console.WriteLine($"[spawn] anchor at ({spawn.X:0.0},{spawn.Y:0.0},{spawn.Z:0.0})");
+    }
+
+    /// <summary>A grid of one anchor block centred on <paramref name="position"/>, unlocked and anchored, so it takes hold of what's
+    /// in reach as it spawns; null if no volume has a colliding block within <see cref="AnchorSystem.Reach"/>.</summary>
+    public static GridDescription? AnchoredBlockAt(EntitySet volumes, PhysVec position)
+    {
+        if (AnchorSystem.NearestInReach(volumes, position) is null) return null;
+        var grid = GridDescription.FromVoxels(position,
+            new[] { new GridVoxel(0, 0, 0, BlockId.Anchor, BlockOrientation.Upright) });
+        grid.Locked = false; // held by its anchor alone, as in survival
+        grid.Controls.Anchored = true;
+        return grid;
     }
 
     private static Vector3D<float> EyeOf(Entity player)

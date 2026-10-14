@@ -31,12 +31,15 @@ public sealed class HeadlessScene : IDisposable
     public readonly PhysicsBodySystem PhysicsBodies;
     public readonly CommandSystem Commands;
     public readonly BlockEntities Blocks;
+    public readonly AnchorSystem Anchors;
     public readonly EditLimits Limits = new();
     public readonly ManualTickClock Clock = new();
     private double _rateCredit;
     public uint TickNumber => Clock.Tick;
     public ClearSkies.Net.Session.SimulationParticipant? Net;
     public ClearSkies.Net.Sync.RemoteBodySystem? RemoteBodies;
+    /// <summary>The game's replicated components (registered when the network is attached).</summary>
+    public readonly ReplicatedComponents Replicated = new();
     private readonly List<Engine.Core.ISystem> _tick = new();
 
     public readonly EntityIdAllocator Ids;
@@ -64,8 +67,11 @@ public sealed class HeadlessScene : IDisposable
         PhysicsBodies = new PhysicsBodySystem(World, Physics);
         _tick.Add(PhysicsBodies);
         _tick.Add(new PlayerMovementSystem(World, Commands));
+        _tick.Add(new GrappleSystem(World, Physics));
         _tick.Add(Commands);
         _tick.Add(Presence);
+        Anchors = new AnchorSystem(World, Physics, Commands, Registry);
+        _tick.Add(Anchors);
         _tick.Add(Physics);
         _tick.Add(new PhysicsTransformSyncSystem(World, Physics));
         _tick.Add(hierarchy);
@@ -91,11 +97,23 @@ public sealed class HeadlessScene : IDisposable
         _tick.Add(new ClearSkies.Net.Sync.BodySync(net, World, Physics));
         RemoteBodies = new ClearSkies.Net.Sync.RemoteBodySystem(World, Registry, Clock);
         _tick.Insert(_tick.FindIndex(s => s is PhysicsTransformSyncSystem) + 1, RemoteBodies);
+        ClearSkies.Game.Startup.GameReplication.Register(Replicated);
+        _tick.Insert(_tick.IndexOf(RemoteBodies) + 1, new ClearSkies.Net.Sync.ReplicationSystem(net, World, Replicated, RemoteBodies));
         _tick.Insert(_tick.IndexOf(Physics), new ClearSkies.Net.Sync.RemoteBodyProxySystem(World, Physics, RemoteBodies));
         // A client predicts its own player, from the input a test puts on it, before movement (as the game's input
         // sample does).
         if (net is { IsAuthority: false } client)
             _tick.Insert(_tick.FindIndex(s => s is PlayerMovementSystem), new ClearSkies.Net.Sync.OwnPlayerPrediction(client, World, Registry));
+    }
+
+    /// <summary>Air resistance as the game has it (ships' drag entries, then drag through the wind) just before the physics
+    /// step, in <paramref name="wind"/> everywhere (still air by default). Returns the wind, to change it.</summary>
+    public Engine.Weather.WindField AddAirResistance(Vector3? wind = null)
+    {
+        var field = new Engine.Weather.WindField(0, Clock, WorldVolume) { Override = wind ?? Vector3.Zero };
+        AddBeforePhysics(new AirshipResistanceSystem(World, Physics));
+        AddBeforePhysics(new AirResistanceSystem(World, Physics, field));
+        return field;
     }
 
     /// <summary>Runs <paramref name="system"/> each tick just before the physics step (e.g. flight).</summary>

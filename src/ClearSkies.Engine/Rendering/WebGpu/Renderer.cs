@@ -21,7 +21,7 @@ public sealed unsafe class Renderer : IDisposable
     private const ulong ModelStride = 256;   // >= minUniformBufferOffsetAlignment
     private const ulong BlockTableBytes = ChunkQuad.BlockTableSize * 16; // blockTable: one vec4<f32> per block
     private const ulong CameraSize  = 272;   // two mat4x4<f32> (view, proj) + nine vec4<f32> (sun, light params, camera position, fog, zenith, horizon, haze, sea, light params 2)
-    private const ulong ModelSize   = 112;   // mat4x4<f32> + vec3<i32> chunk + i32 grid + vec4<f32> params + vec4<i32> entry
+    private const ulong ModelSize   = 96;    // mat4x4<f32> + vec3<i32> chunk + i32 grid + vec4<f32> params
 
     private static readonly string Wgsl = @"
 const MIN_AMBIENT: f32 = 0.00;        // floor so no geometry is ever fully black
@@ -34,8 +34,8 @@ const NO_SURFACE: u32 = " + GridStore.NoSurface + @"u;
 const SLOT_WORDS: u32 = " + GridStore.WordsPerSlot + @"u;
 const EMPTY_DISPLAY: u32 = 0xFFFFu;   // no light storage (or not lit yet): ambient and full sun
 
-// sunDir.w: sun strength (SunLight.Strength). lightParams.x: unused (ray AO is in the voxel light), .y: 1 = reference light path (see
-// shadeFast), .z: ambient (0-1), .w: 1 on an sRGB surface (see lin). camPos.xyz: camera world position. fog.xy: the world's fog start/end
+// sunDir.w: sun strength (SunLight.Strength). lightParams.x, .y: unused (ray AO is in the voxel light), .z: ambient
+// (0-1), .w: 1 on an sRGB surface (see lin). camPos.xyz: camera world position. fog.xy: the world's fog start/end
 // (horizontal), fog.zw: the cloud layer's (see CloudLayer), in blocks from the camera. zenith/horizon.rgb: the sky
 // gradient (see SkySettings). horizon.w: the distance haze's strength (0-1), haze.rgb its colour, haze.w its distance.
 // sea: the cloud sea's altitude, coverage (0 = off), cell size and thickness, in blocks (see cloudSea).
@@ -93,8 +93,21 @@ fn applyFog(color: vec3<f32>, worldPos: vec3<f32>) -> vec3<f32> {
     let d = worldPos - camera.camPos.xyz;
     let f = smoothstep(camera.fog.x, camera.fog.y, length(d.xz));
     let hazed = applyHaze(color, d);
-    if (f <= 0.0) { return hazed; } // only the fog band pays for tracing the sea
-    return mix(hazed, background(normalize(d)).rgb, f);
+    if (f <= 0.0) { return applyWater(hazed, d); } // only the fog band pays for tracing the sea
+    return applyWater(mix(hazed, background(normalize(d)).rgb, f), d);
+}
+
+// Underwater, as Minecraft does it: with the camera in water (camPos.w > 0, how far it sees), everything fades
+// linearly into the water's colour by that distance, the sky included. Like Minecraft's, the fade starts
+// WATER_FOG_START blocks behind the camera, so even what is right in front of it is tinted (by about a quarter on first
+// going under). The colour is dimmed with the daylight.
+const WATER_FOG: vec3<f32> = vec3<f32>(0.03, 0.10, 0.25);
+const WATER_FOG_START: f32 = -8.0;
+fn waterFogColor() -> vec3<f32> { return WATER_FOG * max(camera.lightParams.z, 0.8 * camera.sunDir.w); }
+fn applyWater(color: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
+    if (camera.camPos.w <= 0.0) { return color; }
+    let f = (length(d) - WATER_FOG_START) / (camera.camPos.w - WATER_FOG_START);
+    return mix(color, waterFogColor(), clamp(f, 0.0, 1.0));
 }
 
 // What fs_sky draws along world direction dir (unit), without the sun disc: the sky (w = 0), or the cloud sea if the
@@ -128,6 +141,7 @@ fn fs_sky(in: SkyOut) -> @location(0) vec4<f32> {
     let dir   = normalize(in.dir);
     let toSun = dot(dir, -camera.sunDir.xyz);
     let disc  = smoothstep(0.9992, 0.9996, toSun) * camera.sunDir.w;
+    if (camera.camPos.w > 0.0) { return vec4<f32>(waterFogColor(), 1.0); } // underwater: the fog hides the sky
     let b = background(dir);
     return vec4<f32>(b.rgb + vec3<f32>(1.0, 0.95, 0.85) * disc * (1.0 - b.w), 1.0);
 }
@@ -233,10 +247,23 @@ fn cloudSea(ro: vec3<f32>, rd: vec3<f32>) -> vec4<f32> {
 // model: world transform. chunk: this chunk's coordinate in its grid. grid: the grid's index in the GridStore, or
 // -1 for a non-chunk draw (drawn full-bright). params.x: alpha-test cutoff for fs_model (0 = opaque); params.yzw: for a
 // model block (fs_model with grid >= 0), its cell's voxel coordinates within the chunk.
-// entry.x: a chunk draw's chunk-table entry (see entryOf), found once on the CPU so a fragment whose air cell is in
-// the drawn chunk needn't look it up; -1 if unknown.
-struct Model { model: mat4x4<f32>, chunk: vec3<i32>, grid: i32, params: vec4<f32>, entry: vec4<i32> };
+struct Model { model: mat4x4<f32>, chunk: vec3<i32>, grid: i32, params: vec4<f32> };
 @group(1) @binding(0) var<uniform> model: Model;
+
+// Chunk draws (vs_chunk) use group 1 differently: every chunk mesh's quads sit in one shared buffer (quadArena), and
+// each draw's record (chunkDraws, picked by its instance index: the draw's firstInstance) says where its quads start
+// and where it's drawn, so a run of chunk draws needs no bind group or uniform per draw.
+// entry: the chunk's chunk-table entry (see entryOf), found once on the CPU so a fragment whose air cell is in the drawn
+// chunk needn't look it up; -1 if unknown.
+struct ChunkDraw { model: mat4x4<f32>, chunk: vec3<i32>, grid: i32, quadBase: u32, entry: i32, pad1: u32, pad2: u32 };
+@group(1) @binding(2) var<storage, read> chunkDraws: array<ChunkDraw>;
+@group(1) @binding(3) var<storage, read> quadArena: array<vec2<u32>>;
+
+// The chunk and grid a fragment is lit from (drawChunk, drawGrid): set from the vertex's cg at the top of each
+// fragment entry point that lights, since chunk draws carry them per draw rather than in the model uniform.
+var<private> drawChunk: vec3<i32>;
+var<private> drawGrid: i32;
+var<private> drawEntry: i32; // the drawn chunk's chunk-table entry, or -1 (see ChunkDraw)
 
 // The shared voxel storage (see GridStore): occupancy pool, chunk table ((occupancy slot or code, chunk tag), then
 // ray-only data), brick table (light slot per 8³ brick), light pool and grid descriptors. Only a slot's display half
@@ -256,8 +283,10 @@ struct Model { model: mat4x4<f32>, chunk: vec3<i32>, grid: i32, params: vec4<f32
 @group(3) @binding(0) var atlasTex:  texture_2d_array<f32>;
 @group(3) @binding(1) var atlasSamp: sampler;
 
+// pos is invariant so every pipeline drawing the same quad computes the same depth, which the cut-out faces' Equal
+// test against their own depth pre-pass relies on (see fs_cutout_shaded).
 struct VSOut {
-    @builtin(position) pos:         vec4<f32>,
+    @builtin(position) @invariant pos: vec4<f32>,
     @location(0)       color:       vec3<f32>,
     @location(1)       worldNormal: vec3<f32>,
     @location(2)       localPos:    vec3<f32>,
@@ -265,6 +294,14 @@ struct VSOut {
     @location(4)       uv:          vec3<f32>,
     @location(5)       worldPos:    vec3<f32>,
     @location(6)       alpha:       f32,          // chunk meshes: a transparent block's opacity (see fs_chunk_transparent)
+    // Chunk meshes: for a cross block's quad (faces 6, 7), its cell (chunk-local) in xyz and w = 1, so it is lit from
+    // that cell (see shadeBlock); w = 0 for every other surface.
+    @location(7) @interpolate(flat) cross: vec4<i32>,
+    // The chunk (xyz, in its grid) and grid (w; -1 for a non-chunk draw) this surface is lit from: the model uniform's,
+    // or a chunk draw's record's.
+    @location(8) @interpolate(flat) cg: vec4<i32>,
+    // The drawn chunk's chunk-table entry (a chunk draw's record's), or -1.
+    @location(9) @interpolate(flat) entry: i32,
 };
 
 @vertex
@@ -283,6 +320,8 @@ fn vs_main(
     o.localPos    = position;
     o.localNormal = normal;
     o.uv          = uv;
+    o.cg          = vec4<i32>(model.chunk, model.grid);
+    o.entry       = -1;
     return o;
 }
 
@@ -290,62 +329,115 @@ fn vs_main(
 // face in 18-20 (+X, -X, +Y, -Y, +Z, -Z), texture layer in 21-28 (255: untextured), width - 1 in a bits 29-31 and b
 // bits 24-25, height - 1 in b bits 26-30; the block in b bits 0-7, whose colour and opacity come from blockTable.
 // Corners follow the mesher's order (GreedyMesher.EmitQuad) and the texture coordinates follow from position and face,
-// as GreedyMesher.MakeUv makes them: V runs down world Y on the side faces.
-// The mesh's quads, read by vertex index. Drawn indexed through one shared index buffer (quad q's triangles are
-// 4q + 0, 1, 2 and 0, 2, 3), so vertex_index is 4q + corner and the GPU reuses the corners the two triangles share:
-// four shader runs per quad, as with the old four-vertex meshes, where six separate vertices (instanced or not) cost
-// about 1 ms a frame more on a laptop GPU.
-@group(1) @binding(1) var<storage, read> quads: array<vec2<u32>>;
-
+// as GreedyMesher.MakeUv makes them: V runs down world Y on the side faces. Faces 6 and 7 are a cross block's two
+// diagonal quads, one cell in size from its low corner, with b bit 8 set for the back side (GreedyMesher.EmitCross).
+// The mesh's quads, read by vertex index from its range of quadArena. Drawn indexed through one shared index buffer
+// (quad q's triangles are 4q + 0, 1, 2 and 0, 2, 3), so vertex_index is 4q + corner and the GPU reuses the corners the
+// two triangles share: four shader runs per quad, as with the old four-vertex meshes, where six separate vertices
+// (instanced or not) cost about 1 ms a frame more on a laptop GPU.
 @vertex
-fn vs_chunk(@builtin(vertex_index) vi: u32) -> VSOut {
-    return chunkVertex(quads[vi / 4u], vi % 4u);
+fn vs_chunk(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut {
+    let d = chunkDraws[ii];
+    return chunkVertex(d, quadArena[d.quadBase + vi / 4u], vi % 4u);
 }
 
 // The wireframe: each quad's outline as four lines.
 @vertex
-fn vs_chunk_lines(@builtin(vertex_index) vi: u32) -> VSOut {
+fn vs_chunk_lines(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut {
     var corners = array<u32, 8>(0u, 1u, 1u, 2u, 2u, 3u, 3u, 0u);
-    return chunkVertex(quads[vi / 8u], corners[vi % 8u]);
+    let d = chunkDraws[ii];
+    return chunkVertex(d, quadArena[d.quadBase + vi / 8u], corners[vi % 8u]);
 }
 
-fn chunkVertex(quad: vec2<u32>, corner: u32) -> VSOut {
+fn chunkVertex(d: ChunkDraw, quad: vec2<u32>, corner: u32) -> VSOut {
     let a = quad.x;
     let c = quad.y;
     let face = (a >> 18u) & 7u;
     let du = f32(((a >> 29u) | (((c >> 24u) & 3u) << 3u)) + 1u);
     let dv = f32(((c >> 26u) & 31u) + 1u);
-    // The mesher winds +X, -Y and +Z the other way round (FaceDesc.Flip).
-    let flip = face == 0u || face == 3u || face == 4u;
+    // The mesher winds +X, -Y and +Z the other way round (FaceDesc.Flip), and a diagonal's front.
+    let back = (c & 256u) != 0u;
+    let flip = face == 0u || face == 3u || face == 4u || (face >= 6u && !back);
     let cu = select(select(0.0, du, corner >= 2u), select(0.0, du, corner == 1u || corner == 2u), flip);
     let cv = select(select(0.0, dv, corner == 1u || corner == 2u), select(0.0, dv, corner >= 2u), flip);
     var position = vec3<f32>(f32(a & 63u), f32((a >> 6u) & 63u), f32((a >> 12u) & 63u));
     let s = select(1.0, -1.0, (face & 1u) == 1u);
     var normal = vec3<f32>(0.0);
     var uv2: vec2<f32>;
+    var cross = vec4<i32>(0);
     if (face < 2u)      { position.y += cu; position.z += cv; normal.x = s; uv2 = vec2<f32>(position.z, -position.y); }
     else if (face < 4u) { position.x += cu; position.z += cv; normal.y = s; uv2 = position.xz; }
-    else                { position.x += cu; position.y += cv; normal.z = s; uv2 = vec2<f32>(position.x, -position.y); }
+    else if (face < 6u) { position.x += cu; position.y += cv; normal.z = s; uv2 = vec2<f32>(position.x, -position.y); }
+    else {
+        // A cross block: cu runs along the diagonal, cv up. Lit as an upward-facing surface (see shadeBlock), so its
+        // two quads, and both their sides, match each other and the ground they stand on.
+        // Varied by hashes of its world cell, so plants don't line up in a grid but each looks the same every time
+        // it's meshed: the plant is turned a full circle (not just the quarter that covers every angle of the X, so a
+        // sprite shows mirrored as often as not: its back side's texture runs the other way), nudged up to 0.2 from
+        // the cell's middle and stretched to 0.75-1.15 tall; then each of its two quads (both sides alike) is twisted
+        // up to 25 degrees and shifted up to 0.08 on its own, so they don't meet in a perfect X, unless the block
+        // keeps a clean X (BlockDef.RigidCross: blockTable's a is 0, see ChunkQuad.BuildBlockTable).
+        cross = vec4<i32>(vec3<i32>(position), 1);
+        let h = cellHash(d.chunk * 32 + cross.xyz);
+        let q = mixHash(h ^ (face * 0x9e3779b9u));
+        let loose = blockTable[c & 255u].a;
+        let turn = f32(h & 1023u) * (6.2831853 / 1024.0) + loose * (f32(q & 1023u) / 1023.0 - 0.5) * 0.87;
+        let nudge = (vec2<f32>(f32((h >> 10u) & 255u), f32((h >> 18u) & 255u)) / 255.0 - 0.5) * 0.4
+                  + loose * (vec2<f32>(f32((q >> 10u) & 255u), f32((q >> 18u) & 255u)) / 255.0 - 0.5) * 0.16;
+        let tall = 0.75 + 0.4 * f32((h >> 26u) & 63u) / 63.0;
+        let d = vec2<f32>(select(0.5 - cu, cu - 0.5, face == 6u), cu - 0.5); // from the cell's middle, in x and z
+        let cs = cos(turn);
+        let sn = sin(turn);
+        let r = vec2<f32>(cs * d.x - sn * d.y, sn * d.x + cs * d.y) + 0.5 + nudge;
+        // V follows the unstretched height, so the sprite stretches with the quad rather than being cropped.
+        uv2 = vec2<f32>(cu, -(position.y + cv));
+        position += vec3<f32>(r.x, cv * tall, r.y);
+        normal.y = 1.0;
+    }
     let layerBits = (a >> 21u) & 255u;
     let layer = select(f32(layerBits), -1.0, layerBits == 255u);
     let block = blockTable[c & 255u];
 
     var o: VSOut;
-    let world     = model.model * vec4<f32>(position, 1.0);
+    let world     = d.model * vec4<f32>(position, 1.0);
     o.pos         = camera.proj * camera.view * world;
     o.worldPos    = world.xyz;
     o.color       = block.rgb;
-    o.worldNormal = (model.model * vec4<f32>(normal, 0.0)).xyz;
+    o.worldNormal = (d.model * vec4<f32>(normal, 0.0)).xyz;
     o.localPos    = position;
     o.localNormal = normal;
     o.uv          = vec3<f32>(uv2, layer);
     o.alpha       = block.a;
+    o.cross       = cross;
+    o.cg          = vec4<i32>(d.chunk, d.grid);
+    o.entry       = d.entry;
     return o;
+}
+
+// A well-mixed hash of a world cell, for per-cell variation that's the same wherever the cell is meshed.
+fn cellHash(p: vec3<i32>) -> u32 {
+    let h = (bitcast<u32>(p.x) * 0x8da6b343u) ^ (bitcast<u32>(p.y) * 0xd8163841u) ^ (bitcast<u32>(p.z) * 0xcb1ab31fu);
+    return mixHash(h);
+}
+
+// Scrambles h's bits (a 32-bit finaliser), e.g. to draw a second, independent hash from one.
+fn mixHash(x: u32) -> u32 {
+    var h = x;
+    h = h ^ (h >> 16u); h = h * 0x7feb352du; h = h ^ (h >> 15u); h = h * 0x846ca68bu; h = h ^ (h >> 16u);
+    return h;
+}
+
+// A plant's colour, varied a little by its cell (see chunkVertex): 0.85-1.1 as bright, a touch yellower or bluer.
+fn plantTint(cell: vec3<i32>) -> vec3<f32> {
+    let h = mixHash(cellHash(cell) ^ 0x5bd1e995u);
+    let bright = 0.85 + 0.25 * f32(h & 255u) / 255.0;
+    let warm = (f32((h >> 8u) & 255u) / 255.0 - 0.5) * 0.16;
+    return bright * vec3<f32>(1.0 + warm, 1.0, 1.0 - warm);
 }
 
 // Voxel v in this draw's grid (grid voxel space). Unloaded → open.
 fn isSolid(v: vec3<i32>) -> bool {
-    let i = entryOf(model.grid, v >> vec3<u32>(5u));
+    let i = entryOf(drawGrid, v >> vec3<u32>(5u));
     if (i < 0) { return false; }
     let code = chunkTable[2 * i].x;
     if (code >= 0) {
@@ -354,8 +446,6 @@ fn isSolid(v: vec3<i32>) -> bool {
     }
     return code == OCC_ALL_SOLID;
 }
-
-fn occ(v: vec3<i32>) -> f32 { return select(0.0, 1.0, isSolid(v)); }
 
 // Light slot of the brick holding voxel v, whose chunk-table entry is i (entryOf), or NO_SURFACE.
 fn brickSlot(i: i32, v: vec3<i32>) -> u32 {
@@ -373,7 +463,7 @@ fn slotDisplay(s: u32, v: vec3<i32>) -> u32 {
     return (lightPool[s * SLOT_WORDS + (k >> 1u)] >> ((k & 1u) * 16u)) & 0xFFFFu;
 }
 
-fn displayAt(v: vec3<i32>) -> u32 { return slotDisplay(brickSlot(entryOf(model.grid, v >> vec3<u32>(5u)), v), v); }
+fn displayAt(v: vec3<i32>) -> u32 { return slotDisplay(brickSlot(entryOf(drawGrid, v >> vec3<u32>(5u)), v), v); }
 
 " + GridStore.LightCodecWgsl + @"
 
@@ -391,79 +481,6 @@ fn cellAt(v: vec3<i32>) -> Cell {
     return c;
 }
 
-// Minecraft-style smooth lighting at the air side of this fragment: sky + block light (each 0..1) and sun
-// visibility (1 lit … 0 shadowed). Each of the 4 corners of the fragment's cell face averages the air cells
-// sharing that corner — the fragment's own air cell, the two beside it in the face plane, and the diagonal —
-// and the fragment interpolates the 4 corner values by its position on the face (Minecraft does this per
-// vertex; greedy-merged quads have no per-cell vertices, so it is done per fragment instead). Only cells on
-// the SAME surface count (air with a solid directly behind along the face normal), and the diagonal is used
-// only if at least one side cell is (Minecraft's corner rule), so light never reaches around an edge or
-// through a corner. SMOOTH_LIGHT = false falls back to the flat per-cell value.
-const SMOOTH_LIGHT: bool = true;
-
-struct Lit { sky: f32, rgb: vec3<f32>, sun: f32 };
-
-fn onSurface(c: vec3<i32>, N: vec3<i32>) -> bool { return !isSolid(c) && isSolid(c - N); }
-
-// (sky, r, g, b, sun) averaged over the usable cells at one corner.
-struct Corner { a: vec4<f32>, sun: f32 };
-
-fn cornerLit(air: vec3<i32>, s1: vec3<i32>, s2: vec3<i32>, dg: vec3<i32>, N: vec3<i32>) -> Corner {
-    let inc1 = onSurface(s1, N);
-    let inc2 = onSurface(s2, N);
-    let incD = (inc1 || inc2) && onSurface(dg, N);
-    var cells = array<vec3<i32>, 4>(air, s1, s2, dg);
-    var inc = array<bool, 4>(true, inc1, inc2, incD);
-    var acc = vec4<f32>(0.0);
-    var accS = 0.0;
-    var n = 0.0;
-    for (var k = 0; k < 4; k = k + 1) {
-        if (!inc[k]) { continue; }
-        let c = cellAt(cells[k]);
-        acc += vec4<f32>(c.sky, c.rgb);
-        accS += c.sun;
-        n += 1.0;
-    }
-    var r: Corner;
-    r.a = acc / n;
-    r.sun = accS / n;
-    return r;
-}
-
-fn sampleLit(localPos: vec3<f32>, localNormal: vec3<f32>) -> Lit {
-    let air = model.chunk * 32 + vec3<i32>(floor(localPos + 0.5 * localNormal));
-    var o: Lit;
-
-    if (!SMOOTH_LIGHT) {
-        let c = cellAt(air);
-        o.sky = c.sky;
-        o.rgb = c.rgb;
-        o.sun = c.sun;
-        return o;
-    }
-
-    let N = vec3<i32>(round(localNormal));
-    let n = abs(localNormal);
-    var T: vec3<i32>; var B: vec3<i32>;
-    if (n.x > 0.5)      { T = vec3<i32>(0, 1, 0); B = vec3<i32>(0, 0, 1); }
-    else if (n.y > 0.5) { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 0, 1); }
-    else                { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 1, 0); }
-
-    let c00 = cornerLit(air, air - T, air - B, air - T - B, N);
-    let c10 = cornerLit(air, air + T, air - B, air + T - B, N);
-    let c01 = cornerLit(air, air - T, air + B, air - T + B, N);
-    let c11 = cornerLit(air, air + T, air + B, air + T + B, N);
-
-    // Plain bilinear across the cell face, like Minecraft's per-vertex interpolation.
-    let s = fract(dot(localPos, vec3<f32>(T)));
-    let t = fract(dot(localPos, vec3<f32>(B)));
-    let a = mix(mix(c00.a, c10.a, s), mix(c01.a, c11.a, s), t);
-    o.sky = a.x;
-    o.rgb = a.yzw;
-    o.sun = mix(mix(c00.sun, c10.sun, s), mix(c01.sun, c11.sun, s), t);
-    return o;
-}
-
 // Standard voxel corner AO: a corner flanked by two solids is fully dark; otherwise it dims by how many of the
 // two sides + diagonal are solid.
 fn vAO(s1: f32, s2: f32, c: f32) -> f32 {
@@ -471,39 +488,16 @@ fn vAO(s1: f32, s2: f32, c: f32) -> f32 {
     return (3.0 - (s1 + s2 + c)) / 3.0;
 }
 
-// Smooth ambient occlusion sampled from the opacity neighbourhood of the air-side cell. The face's two in-plane
-// axes give four corner AO values (from the side + diagonal neighbours); the fragment's fractional position
-// within the cell bilerps between them, so AO stays smooth across a greedy-merged quad and is light-independent.
-fn computeAO(localPos: vec3<f32>, localNormal: vec3<f32>) -> f32 {
-    let air = model.chunk * 32 + vec3<i32>(floor(localPos + 0.5 * localNormal));
-    let n   = abs(localNormal);
-    var T: vec3<i32>; var B: vec3<i32>;
-    if (n.x > 0.5)      { T = vec3<i32>(0, 1, 0); B = vec3<i32>(0, 0, 1); }
-    else if (n.y > 0.5) { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 0, 1); }
-    else                { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 1, 0); }
-
-    let tm = occ(air - T); let tp = occ(air + T);
-    let bm = occ(air - B); let bp = occ(air + B);
-    let ao00 = vAO(tm, bm, occ(air - T - B));
-    let ao10 = vAO(tp, bm, occ(air + T - B));
-    let ao01 = vAO(tm, bp, occ(air - T + B));
-    let ao11 = vAO(tp, bp, occ(air + T + B));
-
-    // Smoothstep the bilinear weights so the reconstructed AO is slope-continuous (C1) across cell boundaries:
-    // each cell's patch meets its neighbour with zero slope. Plain fract bilinear is only C0, so the slope jumps
-    // where the AO ramp meets the un-occluded plateau — the eye reads that slope discontinuity as a 'bright line'
-    // at the far edge of the AO.
-    let s = smoothstep(0.0, 1.0, fract(dot(localPos, vec3<f32>(T))));
-    let t = smoothstep(0.0, 1.0, fract(dot(localPos, vec3<f32>(B))));
-    return mix(mix(ao00, ao10, s), mix(ao01, ao11, s), t);
-}
-
-// ── Fast path ────────────────────────────────────────────────────────────────────────────────────────────────
-// sampleLit + computeAO above, written for clarity, look the same few cells up over and over: ~32 isSolid and ~16
-// displayAt per fragment, each walking grid → chunk table → pool again. shadeFast gives the same result from
-// one chunk-table lookup, one 27-bit solid mask of the air cell's 3x3x3 neighbourhood (9 occupancy words when it
-// lies inside one chunk) and one decode per in-plane cell (the brick slot is shared while cells stay in the air
-// cell's brick). camera.lightParams.y > 0.5 selects the reference path instead, for A/B comparison.
+// ── Smooth light and corner AO ───────────────────────────────────────────────────────────────────────────────
+// Minecraft-style smooth lighting at the air side of a fragment: each of the 4 corners of the fragment's cell face
+// averages the air cells sharing that corner (the fragment's own air cell, the two beside it in the face plane, and the
+// diagonal), and the fragment interpolates the 4 corner values by its position on the face (Minecraft does this per
+// vertex; greedy-merged quads have no per-cell vertices, so it is done per fragment instead). Only cells on the SAME
+// surface count (open, with a solid directly behind along the face normal), and the diagonal is used only if at least
+// one side cell is (Minecraft's corner rule), so light never reaches around an edge or through a corner. Corner AO
+// (vAO) comes from the same neighbourhood. shadeFast does it from one chunk-table lookup, one 27-bit solid mask of
+// the air cell's 3x3x3 neighbourhood (9 occupancy words when it lies inside one chunk) and one decode per in-plane
+// cell (the brick slot is shared while cells stay in the air cell's brick).
 
 // Bit of offset d (each component -1..1) in a neighbourhood mask.
 fn nbit(d: vec3<i32>) -> u32 { return u32((d.x + 1) + 3 * (d.y + 1) + 9 * (d.z + 1)); }
@@ -539,7 +533,7 @@ fn solidMask(air: vec3<i32>, i: i32) -> u32 {
         if (((n & 1) != 0 && sx == 0) || ((n & 2) != 0 && sy == 0) || ((n & 4) != 0 && sz == 0)) { continue; }
         let o = vec3<i32>(select(0, sx, (n & 1) != 0), select(0, sy, (n & 2) != 0), select(0, sz, (n & 4) != 0));
         var e = i;
-        if (n != 0) { e = entryOf(model.grid, c0 + o); }
+        if (n != 0) { e = entryOf(drawGrid, c0 + o); }
         codes[n] = select(chunkTable[2 * max(e, 0)].x, OCC_UNLOADED, e < 0);
     }
     var m = 0u;
@@ -556,6 +550,61 @@ fn solidMask(air: vec3<i32>, i: i32) -> u32 {
         if (solid) { m = m | (1u << u32(k)); }
     }
     return m;
+}
+
+// See-through mask of the 27 voxels around air (air's own chunk-table entry is i), laid out like solidMask's, from
+// the chunks' see-through bits (a see-through block with light worked out around it, BlockDef.CatchesLight: water, glass, leaves; slot + 1 in the
+// chunk entry's second word's z, 0 for none). Lets a see-through face's smoothing test its neighbours with one
+// chunk lookup.
+fn seeMask(air: vec3<i32>, i: i32) -> u32 {
+    let l = air & vec3<i32>(31);
+    if (all(l >= vec3<i32>(1)) && all(l <= vec3<i32>(30))) {
+        if (i < 0) { return 0u; }
+        let seeSlot = chunkTable[2 * i + 1].z;
+        if (seeSlot <= 0) { return 0u; }
+        let base = (seeSlot - 1) * WPC + l.y - 1 + 32 * (l.z - 1);
+        var m = 0u;
+        for (var dz = 0; dz < 3; dz = dz + 1) {
+            for (var dy = 0; dy < 3; dy = dy + 1) {
+                let w = occPool[u32(base + dy + 32 * dz)];
+                m = m | (((w >> u32(l.x - 1)) & 7u) << u32(3 * dy + 9 * dz));
+            }
+        }
+        return m;
+    }
+    // Chunk border: as solidMask, each of the up to 8 chunks involved is looked up once.
+    let c0 = air >> vec3<u32>(5u);
+    var sx = 0; if (l.x == 0) { sx = -1; } else if (l.x == 31) { sx = 1; }
+    var sy = 0; if (l.y == 0) { sy = -1; } else if (l.y == 31) { sy = 1; }
+    var sz = 0; if (l.z == 0) { sz = -1; } else if (l.z == 31) { sz = 1; }
+    var slots: array<i32, 8>;
+    for (var n = 0; n < 8; n = n + 1) {
+        if (((n & 1) != 0 && sx == 0) || ((n & 2) != 0 && sy == 0) || ((n & 4) != 0 && sz == 0)) { continue; }
+        let o = vec3<i32>(select(0, sx, (n & 1) != 0), select(0, sy, (n & 2) != 0), select(0, sz, (n & 4) != 0));
+        var e = i;
+        if (n != 0) { e = entryOf(drawGrid, c0 + o); }
+        slots[n] = select(chunkTable[2 * max(e, 0) + 1].z, 0, e < 0);
+    }
+    var m = 0u;
+    for (var k = 0; k < 27; k = k + 1) {
+        let d = vec3<i32>(k % 3, (k / 3) % 3, k / 9) - vec3<i32>(1);
+        let lv = l + d;
+        let n = select(0, 1, lv.x < 0 || lv.x > 31) | select(0, 2, lv.y < 0 || lv.y > 31) | select(0, 4, lv.z < 0 || lv.z > 31);
+        let seeSlot = slots[n];
+        if (seeSlot > 0) {
+            let w = lv & vec3<i32>(31);
+            if (((occPool[u32((seeSlot - 1) * WPC + w.y + 32 * w.z)] >> u32(w.x)) & 1u) == 1u) { m = m | (1u << u32(k)); }
+        }
+    }
+    return m;
+}
+
+// For a see-through block's face, whether the in-plane cell air + d lies on the same surface without a solid block
+// behind it: a see-through block behind it, so a water surface or a canopy smooths across itself, or, seen from inside
+// the block (inside: the face's own cell is see-through, e.g. the water surface from below), the cell is see-through
+// too. sm is the see-through mask (0 for a face that isn't see-through).
+fn seeAt(sm: u32, d: vec3<i32>, N: vec3<i32>, inside: bool) -> bool {
+    return maskSolid(sm, d - N) || (inside && maskSolid(sm, d));
 }
 
 // One in-plane cell's (sky, r, g, b), sun and weight (0 when not included in the smoothing).
@@ -587,8 +636,8 @@ fn avg4(p: WCell, q: WCell, r: WCell, s: WCell) -> Corner4 {
 
 struct Shade { sky: f32, rgb: vec3<f32>, sun: f32, ao: f32 };
 
-fn shadeFast(localPos: vec3<f32>, localNormal: vec3<f32>) -> Shade {
-    let air = model.chunk * 32 + vec3<i32>(floor(localPos + 0.5 * localNormal));
+fn shadeFast(localPos: vec3<f32>, localNormal: vec3<f32>, see: bool) -> Shade {
+    let air = drawChunk * 32 + vec3<i32>(floor(localPos + 0.5 * localNormal));
     let N = vec3<i32>(round(localNormal));
     let n = abs(localNormal);
     var T: vec3<i32>; var B: vec3<i32>;
@@ -596,33 +645,40 @@ fn shadeFast(localPos: vec3<f32>, localNormal: vec3<f32>) -> Shade {
     else if (n.y > 0.5) { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 0, 1); }
     else                { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 1, 0); }
 
-    // The air cell's chunk-table entry: the draw's own (found on the CPU, model.entry) when the cell is in the drawn
-    // chunk, as all but border faces' are, checked against the entry's coordinate tag; else the full lookup.
+    // The air cell's chunk-table entry: the draw's own (found on the CPU) when the cell is in the drawn chunk, as all
+    // but border faces' are, checked against the entry's coordinate tag; else the full lookup.
     let ac = air >> vec3<u32>(5u);
     var ai = -1;
-    if (model.entry.x >= 0 && all(ac == model.chunk)) {
-        ai = model.entry.x;
-        if (any(chunkTable[2 * ai].yzw != ac)) { ai = entryOf(model.grid, ac); }
+    if (drawEntry >= 0 && all(ac == drawChunk)) {
+        ai = drawEntry;
+        if (any(chunkTable[2 * ai].yzw != ac)) { ai = entryOf(drawGrid, ac); }
     } else {
-        ai = entryOf(model.grid, ac);
+        ai = entryOf(drawGrid, ac);
     }
     let m = solidMask(air, ai);
     let hb = air >> vec3<u32>(3u);
     let hs = brickSlot(ai, air);
 
-    // Air-layer solids around the cell (AO, and the first half of onSurface).
+    // Air-layer solids around the cell (AO, and the first half of the same-surface test).
     let sTm = maskSolid(m, -T);     let sTp = maskSolid(m, T);
     let sBm = maskSolid(m, -B);     let sBp = maskSolid(m, B);
     let sMM = maskSolid(m, -T - B); let sPM = maskSolid(m, T - B);
     let sMP = maskSolid(m, -T + B); let sPP = maskSolid(m, T + B);
 
-    // onSurface: open, with a solid directly behind along the normal. Diagonals need a side cell (corner rule).
-    let oTm = !sTm && maskSolid(m, -T - N);     let oTp = !sTp && maskSolid(m, T - N);
-    let oBm = !sBm && maskSolid(m, -B - N);     let oBp = !sBp && maskSolid(m, B - N);
-    let oMM = (oTm || oBm) && !sMM && maskSolid(m, -T - B - N);
-    let oPM = (oTp || oBm) && !sPM && maskSolid(m, T - B - N);
-    let oMP = (oTm || oBp) && !sMP && maskSolid(m, -T + B - N);
-    let oPP = (oTp || oBp) && !sPP && maskSolid(m, T + B - N);
+    // Same surface: open, with a solid directly behind along the normal (or for a see-through block's face, a
+    // see-through block, or from inside one a see-through cell: see seeAt). Diagonals need a side cell (corner rule).
+    // A see-through face reads its neighbours' see-through bits from one mask (seeMask).
+    var sm = 0u;
+    if (see) { sm = seeMask(air, ai); }
+    let inside = maskSolid(sm, vec3<i32>(0));
+    let oTm = !sTm && (maskSolid(m, -T - N) || seeAt(sm, -T, N, inside));
+    let oTp = !sTp && (maskSolid(m, T - N) || seeAt(sm, T, N, inside));
+    let oBm = !sBm && (maskSolid(m, -B - N) || seeAt(sm, -B, N, inside));
+    let oBp = !sBp && (maskSolid(m, B - N) || seeAt(sm, B, N, inside));
+    let oMM = (oTm || oBm) && !sMM && (maskSolid(m, -T - B - N) || seeAt(sm, -T - B, N, inside));
+    let oPM = (oTp || oBm) && !sPM && (maskSolid(m, T - B - N) || seeAt(sm, T - B, N, inside));
+    let oMP = (oTm || oBp) && !sMP && (maskSolid(m, -T + B - N) || seeAt(sm, -T + B, N, inside));
+    let oPP = (oTp || oBp) && !sPP && (maskSolid(m, T + B - N) || seeAt(sm, T + B, N, inside));
 
     let cC  = weighed(true, air, hb, hs, ai);
     let cTm = weighed(oTm, air - T, hb, hs, ai);     let cTp = weighed(oTp, air + T, hb, hs, ai);
@@ -655,13 +711,13 @@ fn shadeFast(localPos: vec3<f32>, localNormal: vec3<f32>) -> Shade {
 
 // shadeFast's corner AO alone (the solid mask, no light lookups), for the flat-light debug mode.
 fn cornerAoFast(localPos: vec3<f32>, localNormal: vec3<f32>) -> f32 {
-    let air = model.chunk * 32 + vec3<i32>(floor(localPos + 0.5 * localNormal));
+    let air = drawChunk * 32 + vec3<i32>(floor(localPos + 0.5 * localNormal));
     let n = abs(localNormal);
     var T: vec3<i32>; var B: vec3<i32>;
     if (n.x > 0.5)      { T = vec3<i32>(0, 1, 0); B = vec3<i32>(0, 0, 1); }
     else if (n.y > 0.5) { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 0, 1); }
     else                { T = vec3<i32>(1, 0, 0); B = vec3<i32>(0, 1, 0); }
-    let m = solidMask(air, entryOf(model.grid, air >> vec3<u32>(5u)));
+    let m = solidMask(air, entryOf(drawGrid, air >> vec3<u32>(5u)));
     let sTm = select(0.0, 1.0, maskSolid(m, -T));     let sTp = select(0.0, 1.0, maskSolid(m, T));
     let sBm = select(0.0, 1.0, maskSolid(m, -B));     let sBp = select(0.0, 1.0, maskSolid(m, B));
     let ao00 = vAO(sTm, sBm, select(0.0, 1.0, maskSolid(m, -T - B)));
@@ -686,28 +742,42 @@ fn blockColor(in: VSOut) -> vec4<f32> {
 
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
-    return vec4<f32>(shadeBlock(in, blockColor(in).rgb), 1.0);
+    return vec4<f32>(shadeBlock(in, blockColor(in).rgb, false), 1.0);
 }
 
 // Translucent blocks' faces (see RenderLayer.Translucent), alpha-blended over the opaque world: lit like fs_main, with
 // the texture's alpha times the block's opacity. Fully clear texels are cut out. Drawn only where the face is the
 // nearest transparent one (fs_chunk_transparent_depth laid that depth down first), so every pixel blends exactly one
-// transparent layer and the draw order doesn't matter.
+// transparent layer and the draw order doesn't matter. Both sides are drawn; a face seen from behind (from inside the
+// water) is lit as facing the viewer, from the cell on the viewer's side, so it is lit like the water around it rather
+// than like the air beyond.
 @fragment
-fn fs_chunk_transparent(in: VSOut) -> @location(0) vec4<f32> {
+fn fs_chunk_transparent(in: VSOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let c = blockColor(in);
     let alpha = c.a * in.alpha;
     if (alpha < 0.004) { discard; }
-    return vec4<f32>(shadeBlock(in, c.rgb), alpha);
+    var v = in;
+    if (!front) { v.localNormal = -v.localNormal; v.worldNormal = -v.worldNormal; }
+    return vec4<f32>(shadeBlock(v, c.rgb, true), alpha);
 }
 
-// Cut-out blocks' faces (RenderLayer.Cutout, e.g. glass): fs_main, minus the texels under half alpha. A separate entry
-// point so fs_main itself has no discard, which would cost every opaque fragment the early depth test.
+// Cut-out blocks' faces (RenderLayer.Cutout: leaves, grass, glass), in two passes, after the opaque world.
+// fs_cutout_depth lays down the nearest cut-out face's depth at each pixel, cutting out the texels under half alpha;
+// fs_cutout_shaded then lights only the face that matches it exactly (depth Equal: a texel cut out of the pre-pass left a
+// farther depth there, so it fails too). A discard costs the early depth test, so with one discarding pass a leaf canopy
+// lit every face behind each pixel before the hidden ones lost the depth test. The lit pass has no discard and keeps it,
+// and neither has fs_main.
 @fragment
-fn fs_cutout(in: VSOut) -> @location(0) vec4<f32> {
-    let c = blockColor(in);
-    if (c.a < 0.5) { discard; }
-    return vec4<f32>(shadeBlock(in, c.rgb), 1.0);
+fn fs_cutout_depth(in: VSOut) -> @location(0) vec4<f32> {
+    if (blockColor(in).a < 0.5) { discard; }
+    return vec4<f32>(0.0);
+}
+
+@fragment
+fn fs_cutout_shaded(in: VSOut) -> @location(0) vec4<f32> {
+    var base = blockColor(in).rgb;
+    if (in.cross.w != 0) { base *= plantTint(in.cg.xyz * 32 + in.cross.xyz); }
+    return vec4<f32>(shadeBlock(in, base, true), 1.0);
 }
 
 // Transparent faces' depth pre-pass: the nearest transparent face at each pixel, without its fully clear texels.
@@ -719,33 +789,39 @@ fn fs_chunk_transparent_depth(in: VSOut) -> @location(0) vec4<f32> {
 
 // A block face's lit, fogged colour (baseColor: its texture or colour). Debug (Renderer panel): lightParams2.y bit 2 =
 // no fog or haze; lightParams2.z = lighting mode (see below).
-fn shadeBlock(in: VSOut, baseColor: vec3<f32>) -> vec3<f32> {
+fn shadeBlock(in: VSOut, baseColor: vec3<f32>, see: bool) -> vec3<f32> {
+    drawChunk = in.cg.xyz;
+    drawGrid  = in.cg.w;
+    drawEntry = in.entry;
     let dbg = u32(camera.lightParams2.y);
 
     // Non-chunk draws (selection highlight, HUD, debug meshes) have no light data: full-bright.
-    if (model.grid < 0) { return baseColor; }
+    if (drawGrid < 0) { return baseColor; }
 
     let worldN = normalize(in.worldNormal);
     let ndotl  = max(dot(worldN, -(camera.sunDir.xyz)), 0.0);
-    var s: Lit;
+    var s: Cell;
     var ao: f32;
     let mode = i32(camera.lightParams2.z);
-    let air = model.chunk * 32 + vec3<i32>(floor(in.localPos + 0.5 * in.localNormal));
+    let air = drawChunk * 32 + vec3<i32>(floor(in.localPos + 0.5 * in.localNormal));
     if (mode == 3) {
         // Debug: no voxel lighting at all (open sky, full sun, no AO).
         s.sky = camera.lightParams.z; s.rgb = vec3<f32>(0.0); s.sun = 1.0;
         ao = 1.0;
+    } else if (in.cross.w != 0) {
+        // A cross block (plant): its own cell's light, which it doesn't block, flat over the whole plant, darkening
+        // towards its foot in place of corner AO.
+        let c = cellAt(drawChunk * 32 + in.cross.xyz);
+        s.sky = c.sky; s.rgb = c.rgb; s.sun = c.sun;
+        ao = mix(0.6, 1.0, clamp(in.localPos.y - f32(in.cross.y), 0.0, 1.0));
     } else if (mode == 1 || mode == 2) {
         // Debug: flat light everywhere, with (1) or without (2) corner AO.
         let c = cellAt(air);
         s.sky = c.sky; s.rgb = c.rgb; s.sun = c.sun;
         ao = 1.0;
         if (mode == 1) { ao = cornerAoFast(in.localPos, in.localNormal); }
-    } else if (camera.lightParams.y > 0.5) {
-        s  = sampleLit(in.localPos, in.localNormal);
-        ao = computeAO(in.localPos, in.localNormal);
     } else {
-        let f = shadeFast(in.localPos, in.localNormal);
+        let f = shadeFast(in.localPos, in.localNormal, see);
         s.sky = f.sky; s.rgb = f.rgb; s.sun = f.sun;
         ao = f.ao;
     }
@@ -806,6 +882,8 @@ fn modelCell(v: vec3<i32>) -> Cell {
 
 @fragment
 fn fs_model(in: VSOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    drawChunk = model.chunk;
+    drawGrid  = model.grid;
     let tex = textureSample(atlasTex, atlasSamp, in.uv.xy, 0);
     if (tex.a < model.params.x) { discard; }
     var n = normalize(in.worldNormal);
@@ -852,6 +930,7 @@ fn vs_cloud(@builtin(vertex_index) vi: u32, @location(0) cell: vec2<u32>) -> VSO
     o.localPos    = local;
     o.localNormal = normals[face];
     o.uv          = vec3<f32>(0.0, 0.0, -1.0);
+    o.cg = vec4<i32>(0, 0, 0, -1);
     return o;
 }
 
@@ -868,7 +947,34 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     shade *= 0.9 + 0.1 * max(dot(n, -camera.sunDir.xyz), 0.0) * camera.sunDir.w;
     let d = in.worldPos - camera.camPos.xyz;
     let f = smoothstep(camera.fog.z, camera.fog.w, length(d));
-    return vec4<f32>(mix(applyHaze(lin(in.color * shade), d), skyColor(normalize(d)), f), 1.0);
+    return vec4<f32>(applyWater(mix(applyHaze(lin(in.color * shade), d), skyColor(normalize(d)), f), d), 1.0);
+}
+
+// Particles (ParticleRenderer): one camera-facing square per instance, 6 vertices. p.xyz: its centre in world space,
+// p.w: its size in blocks. color.rgb: sRGB, drawn unlit (flames glow).
+@vertex
+fn vs_particle(@builtin(vertex_index) vi: u32, @location(0) p: vec4<f32>, @location(1) color: vec4<f32>) -> VSOut {
+    var corners = array<vec2<f32>, 6>(vec2<f32>(-0.5, -0.5), vec2<f32>(0.5, -0.5), vec2<f32>(0.5, 0.5),
+                                      vec2<f32>(-0.5, -0.5), vec2<f32>(0.5, 0.5), vec2<f32>(-0.5, 0.5));
+    let c = corners[vi];
+    // The view matrix's rows are the camera's right, up and back axes in world space.
+    let right = vec3<f32>(camera.view[0].x, camera.view[1].x, camera.view[2].x);
+    let up    = vec3<f32>(camera.view[0].y, camera.view[1].y, camera.view[2].y);
+    let back  = vec3<f32>(camera.view[0].z, camera.view[1].z, camera.view[2].z);
+    let world = p.xyz + (right * c.x + up * c.y) * p.w;
+    var o: VSOut;
+    o.pos         = camera.proj * camera.view * vec4<f32>(world, 1.0);
+    o.worldPos    = world;
+    o.color       = color.rgb;
+    o.worldNormal = back;
+    o.localNormal = back;
+    o.uv          = vec3<f32>(0.0, 0.0, -1.0);
+    return o;
+}
+
+@fragment
+fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(applyFog(lin(in.color), in.worldPos), 1.0);
 }
 ";
 
@@ -889,17 +995,20 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     private RenderPipeline* _hudPipeline;
     private RenderPipeline* _skyPipeline;
     private RenderPipeline* _cloudPipeline;
+    private RenderPipeline* _particlePipeline;
     private RenderPipeline* _modelPipeline;
     private RenderPipeline* _chunkPipeline;          // vs_chunk: chunk meshes (ChunkQuad instances)
     private RenderPipeline* _chunkWireframePipeline;
     private RenderPipeline* _chunkOverdrawPipeline;  // debug overdraw view
-    private RenderPipeline* _chunkCutoutPipeline;    // cut-out blocks' faces (fs_cutout)
+    private RenderPipeline* _chunkCutoutDepthPipeline;  // their depth pre-pass (fs_cutout_depth)
+    private RenderPipeline* _chunkCutoutShadedPipeline; // then lit where they're nearest (fs_cutout_shaded)
     private RenderPipeline* _chunkTransparentPipeline; // translucent blocks' faces, alpha-blended (fs_chunk_transparent)
     private RenderPipeline* _chunkTransparentDepthPipeline; // their depth pre-pass (fs_chunk_transparent_depth)
 
     /// <summary>Debug: draw terrain additively without depth test, so brightness shows how many surfaces cover each
     /// pixel (sky and clouds are skipped).</summary>
     public bool OverdrawMode { get; set; }
+
     private RenderPipeline* _boundPipeline;          // the pipeline last set in this pass
 
     private void SetPipeline(RenderPipeline* pipeline)
@@ -930,6 +1039,20 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     // instead of six.
     private const int MaxChunkQuads = ChunkData.Size * ChunkData.Size * ChunkData.Size / 2 * 6;
     private readonly GpuBuffer _quadIndices;
+
+    // Chunk draws: every chunk mesh's quads in one buffer, and each frame's chunk draws' records (transform, chunk, grid,
+    // first quad) in another, read by instance index; one bind group over both, rebuilt when the quad buffer grows. So a
+    // run of chunk draws sets group 1 and the index buffer once, and each chunk is a single DrawIndexed.
+    private const int MaxChunkDraws = 16384;
+    private readonly GpuBufferArena _quadArena;
+    private readonly GpuBuffer _chunkDrawBuffer;
+    private readonly ChunkDrawRecord[] _chunkDrawStaging = new ChunkDrawRecord[MaxChunkDraws];
+    private int _chunkDrawCount;
+    private BindGroup* _chunkGroup;
+    private int _chunkGroupVersion = -1;
+    private bool _chunkStateBound; // group 1 and the index buffer are the chunk draws' (cleared by any other draw)
+    private bool _arenaFullWarned;
+
     private BindGroup* _cameraBindGroup;
     private BindGroup* _hudCameraBindGroup;
     private BindGroup* _modelBindGroup;
@@ -979,10 +1102,15 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         _hudPipeline       = CreateMeshPipeline(PrimitiveTopology.TriangleList, CullMode.None, depthTest: false);
         _modelPipeline     = CreateMeshPipeline(PrimitiveTopology.TriangleList, CullMode.None, fragmentEntry: "fs_model");
         _cloudPipeline     = CreateCloudPipeline();
+        _particlePipeline  = CreateParticlePipeline();
         _chunkPipeline          = CreateChunkPipeline("vs_chunk", PrimitiveTopology.TriangleList, CullMode.Back, "fs_main");
         _chunkWireframePipeline = CreateChunkPipeline("vs_chunk_lines", PrimitiveTopology.LineList, CullMode.None, "fs_main");
         _chunkOverdrawPipeline  = CreateOverdrawPipeline();
-        _chunkCutoutPipeline    = CreateChunkPipeline("vs_chunk", PrimitiveTopology.TriangleList, CullMode.Back, "fs_cutout");
+        _chunkCutoutDepthPipeline = CreatePipeline("vs_chunk", "fs_cutout_depth", null, PrimitiveTopology.TriangleList, CullMode.Back,
+                                                   depthWrite: true, CompareFunction.Greater, writeMask: ColorWriteMask.None,
+                                                   layout: _chunkPipelineLayout);
+        _chunkCutoutShadedPipeline = CreatePipeline("vs_chunk", "fs_cutout_shaded", null, PrimitiveTopology.TriangleList, CullMode.Back,
+                                                    depthWrite: false, CompareFunction.Equal, layout: _chunkPipelineLayout);
         _chunkTransparentPipeline = CreateTransparentChunkPipeline();
         _chunkTransparentDepthPipeline = CreateTransparentChunkDepthPipeline();
         // The background pass: a full-screen triangle at the far plane that only fills pixels still at the cleared
@@ -1004,6 +1132,9 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         }
         _quadIndices = GpuBuffer.Create(ctx, (ulong)quadIdx.Length * 4, BufferUsage.Index | BufferUsage.CopyDst);
         _quadIndices.Write<uint>(0, quadIdx);
+        _quadArena = new GpuBufferArena(ctx, ChunkQuad.SizeBytes, BufferUsage.Storage, 1 << 20, // 8 MB to start; doubles as needed
+                                        ctx.AdapterLimits.MaxStorageBufferBindingSize);
+        _chunkDrawBuffer = GpuBuffer.Create(ctx, (ulong)(MaxChunkDraws * sizeof(ChunkDrawRecord)), BufferUsage.Storage | BufferUsage.CopyDst);
         CreateBindGroups();
         CreateFallbackAtlas();
 
@@ -1098,10 +1229,15 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         _pipelineLayout = _api.DeviceCreatePipelineLayout(_ctx.Device, &plDesc);
 
         BindGroupLayoutEntry* chunkEntries = stackalloc BindGroupLayoutEntry[2];
-        chunkEntries[0] = modelEntry;
+        chunkEntries[0] = new BindGroupLayoutEntry
+        {
+            Binding = 2, // chunkDraws
+            Visibility = ShaderStage.Vertex,
+            Buffer = new BufferBindingLayout { Type = BufferBindingType.ReadOnlyStorage, HasDynamicOffset = false, MinBindingSize = (ulong)sizeof(ChunkDrawRecord) },
+        };
         chunkEntries[1] = new BindGroupLayoutEntry
         {
-            Binding = 1,
+            Binding = 3, // quadArena
             Visibility = ShaderStage.Vertex,
             Buffer = new BufferBindingLayout { Type = BufferBindingType.ReadOnlyStorage, HasDynamicOffset = false, MinBindingSize = ChunkQuad.SizeBytes },
         };
@@ -1128,7 +1264,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
 
     /// <summary>A pipeline for chunk meshes (<paramref name="vertexEntry"/>, which reads the mesh's packed
     /// <see cref="ChunkQuad"/>s from a storage buffer in group 1: no vertex buffer) and <paramref name="fragmentEntry"/>
-    /// (fs_main, or fs_cutout), depth-tested and depth-writing.</summary>
+    /// (fs_main), depth-tested and depth-writing.</summary>
     private RenderPipeline* CreateChunkPipeline(string vertexEntry, PrimitiveTopology topology, CullMode cullMode,
                                                 string fragmentEntry)
         => CreatePipeline(vertexEntry, fragmentEntry, null, topology, cullMode, depthWrite: true, CompareFunction.Greater,
@@ -1176,6 +1312,21 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
                               depthWrite: true, CompareFunction.Greater);
     }
 
+    /// <summary>The particle squares (vs_particle/fs_particle): no vertex buffer, one
+    /// <see cref="ParticleRenderer.Instance"/> per particle, opaque and depth-writing like the world (no sorting).</summary>
+    private RenderPipeline* CreateParticlePipeline()
+    {
+        VertexAttribute* attrs = stackalloc VertexAttribute[2];
+        attrs[0] = new VertexAttribute { Format = VertexFormat.Float32x4, Offset = 0,  ShaderLocation = 0 };
+        attrs[1] = new VertexAttribute { Format = VertexFormat.Float32x4, Offset = 16, ShaderLocation = 1 };
+        var vbLayout = new VertexBufferLayout
+        {
+            ArrayStride = (ulong)sizeof(ParticleRenderer.Instance), StepMode = VertexStepMode.Instance, AttributeCount = 2, Attributes = attrs,
+        };
+        return CreatePipeline("vs_particle", "fs_particle", &vbLayout, PrimitiveTopology.TriangleList, CullMode.None,
+                              depthWrite: true, CompareFunction.Greater);
+    }
+
     /// <summary>A pipeline over the shared shader and layouts. <paramref name="vertexBuffer"/> is the layout of its one
     /// vertex buffer, or null for none (the vertex shader makes its own geometry).</summary>
     private RenderPipeline* CreatePipeline(string vertexEntry, string fragmentEntry, VertexBufferLayout* vertexBuffer,
@@ -1212,7 +1363,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
                 CullMode         = cullMode,
             },
             DepthStencil = &depth,
-            Multisample  = new MultisampleState { Count = 1, Mask = ~0u, AlphaToCoverageEnabled = false },
+            Multisample  = new MultisampleState { Count = _ctx.SampleCount, Mask = ~0u, AlphaToCoverageEnabled = false },
             Fragment     = &fragmentState,
         };
         var pipeline = _api.DeviceCreateRenderPipeline(_ctx.Device, &desc);
@@ -1396,27 +1547,31 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         return new GpuMesh(vb, ib, wb, (uint)indices.Length, (uint)wfi.Length);
     }
 
-    /// <summary>Uploads a chunk mesh: <paramref name="quads"/> holds <paramref name="quadCount"/> packed
-    /// <see cref="ChunkQuad"/>s, one storage buffer and one write, and the mesh's group-1 bind group (the model
-    /// uniforms and its quads) for drawing it.</summary>
-    public GpuMesh UploadChunkQuads(ReadOnlySpan<byte> quads, uint quadCount)
+    /// <summary>
+    /// Uploads a chunk mesh: <paramref name="quadCount"/> packed <see cref="ChunkQuad"/>s into a run of the shared quad
+    /// buffer (grown if needed), drawn by <see cref="DrawChunkMesh"/> and the like and given back when the mesh is
+    /// disposed. Null if even the largest buffer the device allows has no room (the chunk isn't drawn).
+    /// </summary>
+    public GpuMesh? UploadChunkQuads(ReadOnlySpan<byte> quads, uint quadCount)
     {
         long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-        var buf = GpuBuffer.Create(_ctx, (ulong)quads.Length, BufferUsage.Storage | BufferUsage.CopyDst);
+        var span = _quadArena.Allocate(quadCount);
         long t1 = System.Diagnostics.Stopwatch.GetTimestamp();
-        buf.Write(0, quads);
+        if (span is null)
+        {
+            if (!_arenaFullWarned) Console.WriteLine($"[render] chunk quad buffer full at {_quadArena.CapacityElements:N0} quads: a chunk isn't drawn");
+            _arenaFullWarned = true;
+            return null;
+        }
+        span.Write(quads);
         long t2 = System.Diagnostics.Stopwatch.GetTimestamp();
         LastCreateMs = (t1 - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
         LastWriteMs  = (t2 - t1) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
-
-        BindGroupEntry* entries = stackalloc BindGroupEntry[2];
-        entries[0] = new BindGroupEntry { Binding = 0, Buffer = _modelBuffer.Handle, Offset = 0, Size = ModelSize };
-        entries[1] = new BindGroupEntry { Binding = 1, Buffer = buf.Handle, Offset = 0, Size = (ulong)quads.Length };
-        var desc = new BindGroupDescriptor { Layout = _chunkModelLayout, EntryCount = 2, Entries = entries };
-        var group = _api.DeviceCreateBindGroup(_ctx.Device, &desc);
-        var api = _api;
-        return new GpuMesh(buf, quadCount, (nint)group, g => api.BindGroupRelease((BindGroup*)g));
+        return new GpuMesh(span);
     }
+
+    /// <summary>The shared chunk quad buffer's size and use (quads), for reports.</summary>
+    public (long Used, long Capacity) ChunkQuadArenaUse => (_quadArena.UsedElements, _quadArena.CapacityElements);
 
     /// <summary>How long the last <see cref="UploadChunkQuads"/> spent creating its buffer and writing it (ms), for
     /// the meshing panel.</summary>
@@ -1433,6 +1588,25 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     }
 
     /// <summary>
+    /// Draws <paramref name="mesh"/>'s triangles with the general mesh pipeline (vertex colours, back faces culled),
+    /// depth-tested like the world, or as a wireframe while <see cref="WireframeMode"/> is on. For small dynamic shapes
+    /// such as a grapple rope.
+    /// </summary>
+    public void DrawMesh(GpuMesh mesh, in Mat4 model)
+    {
+        if (WireframeMode) { DrawMeshWireframe(mesh, model); return; }
+        if (_drawIndex >= MaxObjects) return;
+
+        uint dynOffset = StageModel(ModelUniform.Default(model));
+        _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset); _chunkStateBound = false;
+        _api.RenderPassEncoderSetVertexBuffer(_pass, 0, mesh.VertexBuffer.Handle, mesh.VertexOffset, mesh.VertexBytes);
+        SetPipeline(_pipeline);
+        _api.RenderPassEncoderSetIndexBuffer(_pass, mesh.IndexBuffer.Handle, mesh.IndexFormat, mesh.IndexOffset, mesh.IndexBytes);
+        _api.RenderPassEncoderDrawIndexed(_pass, mesh.IndexCount, 1, 0, 0, 0);
+        _drawIndex++;
+    }
+
+    /// <summary>
     /// Draws <paramref name="mesh"/> using the wireframe pipeline and wireframe index buffer, regardless
     /// of the current <see cref="WireframeMode"/>, then restores the previous pipeline.
     /// Intended for overlay elements (selection highlight, debug gizmos). Drawn full-bright (no grid), so the
@@ -1443,7 +1617,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         if (_drawIndex >= MaxObjects) return;
 
         uint dynOffset = StageModel(ModelUniform.Default(model));
-        _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset);
+        _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset); _chunkStateBound = false;
         _api.RenderPassEncoderSetVertexBuffer(_pass, 0, mesh.VertexBuffer.Handle, mesh.VertexOffset, mesh.VertexBytes);
         SetPipeline(_wireframePipeline);
         _api.RenderPassEncoderSetIndexBuffer(_pass, mesh.WireframeBuffer.Handle, mesh.IndexFormat, mesh.WireframeOffset, mesh.WireframeBytes);
@@ -1475,7 +1649,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
                 AlphaCutoff = part.AlphaCutoff, VoxelX = voxel.X, VoxelY = voxel.Y, VoxelZ = voxel.Z,
             };
             uint dynOffset = StageModel(u);
-            _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset);
+            _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset); _chunkStateBound = false;
             _api.RenderPassEncoderSetBindGroup(_pass, 3, part.Texture.BindGroup, 0, null);
             _api.RenderPassEncoderSetVertexBuffer(_pass, 0, part.Mesh.VertexBuffer.Handle, part.Mesh.VertexOffset, part.Mesh.VertexBytes);
 
@@ -1507,11 +1681,25 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         {
             if (_drawIndex >= MaxObjects) break;
             uint dynOffset = StageModel(ModelUniform.Default(tile.Model));
-            _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset);
+            _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset); _chunkStateBound = false;
             _api.RenderPassEncoderSetVertexBuffer(_pass, 0, tile.Instances.Handle, 0, tile.Instances.SizeBytes);
             _api.RenderPassEncoderDraw(_pass, 36, tile.Count, 0, 0);
             _drawIndex++;
         }
+        SetPipeline(WireframeMode ? _wireframePipeline : _pipeline);
+    }
+
+    /// <summary>Draws the first <paramref name="count"/> particles in <paramref name="instances"/> (see
+    /// <see cref="ParticleRenderer"/>) as camera-facing squares, depth-tested and depth-writing like the world.</summary>
+    public void DrawParticles(GpuBuffer instances, uint count)
+    {
+        if (OverdrawMode || count == 0 || _drawIndex >= MaxObjects) return;
+        SetPipeline(_particlePipeline);
+        uint dynOffset = StageModel(ModelUniform.Default(Mat4.Identity));
+        _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset); _chunkStateBound = false;
+        _api.RenderPassEncoderSetVertexBuffer(_pass, 0, instances.Handle, 0, instances.SizeBytes);
+        _api.RenderPassEncoderDraw(_pass, 6, count, 0, 0);
+        _drawIndex++;
         SetPipeline(WireframeMode ? _wireframePipeline : _pipeline);
     }
 
@@ -1527,7 +1715,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         // The sky shader only reads the camera, but the shared pipeline layout needs group 1 bound for any draw
         // (it isn't yet if no chunk was drawn this frame).
         uint dynOffset = StageModel(ModelUniform.Default(Mat4.Identity));
-        _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset);
+        _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset); _chunkStateBound = false;
         SetPipeline(_skyPipeline);
         _api.RenderPassEncoderDraw(_pass, 3, 1, 0, 0);
         SetPipeline(WireframeMode ? _wireframePipeline : _pipeline);
@@ -1556,7 +1744,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         if (_drawIndex >= MaxObjects) return;
 
         uint dynOffset = StageModel(ModelUniform.Default(model));
-        _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset);
+        _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset); _chunkStateBound = false;
         _api.RenderPassEncoderSetVertexBuffer(_pass, 0, mesh.VertexBuffer.Handle, mesh.VertexOffset, mesh.VertexBytes);
         _api.RenderPassEncoderSetIndexBuffer(_pass, mesh.IndexBuffer.Handle, mesh.IndexFormat, mesh.IndexOffset, mesh.IndexBytes);
         _api.RenderPassEncoderDrawIndexed(_pass, mesh.IndexCount, 1, 0, 0, 0);
@@ -1589,17 +1777,23 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
             return false;
         }
         _drawIndex = 0;
+        _chunkDrawCount = 0;
+        _chunkStateBound = false;
         EnsureVoxelBindGroup();
 
         var encDesc = new CommandEncoderDescriptor();
         _encoder = _api.DeviceCreateCommandEncoder(_ctx.Device, &encDesc);
 
+        // With MSAA the pass draws into the multisampled target and resolves it into the swapchain image at the end; the
+        // samples themselves needn't be kept.
+        bool msaa = _ctx.MsaaView != null;
         var colorAtt = new RenderPassColorAttachment
         {
-            View = _ctx.CurrentView,
+            View = msaa ? _ctx.MsaaView : _ctx.CurrentView,
+            ResolveTarget = msaa ? _ctx.CurrentView : null,
             DepthSlice = uint.MaxValue, // WGPU_DEPTH_SLICE_UNDEFINED
             LoadOp = LoadOp.Clear,
-            StoreOp = StoreOp.Store,
+            StoreOp = msaa ? StoreOp.Discard : StoreOp.Store,
             // Sky blue; DrawSky paints over whatever the world leaves uncovered.
             ClearValue = OverdrawMode ? new Color { R = 0, G = 0, B = 0, A = 1 } : new Color { R = 0.10, G = 0.3078, B = 0.4804, A = 1.0 },
         };
@@ -1643,11 +1837,23 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         => DrawChunk(mesh, model, grid, chunk, _chunkPipeline, entry);
 
     /// <summary>
-    /// Draws a chunk's cut-out mesh (<see cref="ChunkRenderData.CutoutMesh"/>) like <see cref="DrawChunkMesh"/>, minus
-    /// its texels under half alpha. Call after the opaque chunk meshes.
+    /// Lays down a chunk's cut-out mesh's depth (<see cref="ChunkRenderData.CutoutMesh"/>), minus its texels under half
+    /// alpha, so <see cref="DrawCutoutChunkMesh"/> lights only the nearest cut-out face at each pixel. Call for every
+    /// visible chunk's cut-out mesh after the opaque chunk meshes. Skipped in the wireframe and overdraw views.
+    /// </summary>
+    public void DrawCutoutChunkDepth(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk, int entry = -1)
+    {
+        if (WireframeMode || OverdrawMode) return;
+        DrawChunk(mesh, model, grid, chunk, _chunkCutoutDepthPipeline, entry);
+    }
+
+    /// <summary>
+    /// Draws a chunk's cut-out mesh (<see cref="ChunkRenderData.CutoutMesh"/>) like <see cref="DrawChunkMesh"/>, where
+    /// <see cref="DrawCutoutChunkDepth"/> laid it down (so minus its texels under half alpha). Call after every visible
+    /// chunk's cut-out depth.
     /// </summary>
     public void DrawCutoutChunkMesh(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk, int entry = -1)
-        => DrawChunk(mesh, model, grid, chunk, _chunkCutoutPipeline, entry);
+        => DrawChunk(mesh, model, grid, chunk, _chunkCutoutShadedPipeline, entry);
 
     /// <summary>
     /// Lays down a chunk's transparent mesh's depth (<see cref="ChunkRenderData.TransparentMesh"/>), so
@@ -1671,23 +1877,52 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     private void DrawChunk(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk, RenderPipeline* solidPipeline,
                            int entry = -1)
     {
-        if (_drawIndex >= MaxObjects) return;
+        if (_chunkDrawCount >= MaxChunkDraws || mesh.QuadCount == 0) return;
 
-        // Chunk meshes are packed quads (ChunkQuad) read from a storage buffer: their own pipeline, set once for a run of
+        // Chunk meshes are packed quads (ChunkQuad) in the shared quad buffer: their own pipeline, set once for a run of
         // chunk draws. The wireframe draws the same quads as line loops.
         bool wire = WireframeMode;
         var pipeline = OverdrawMode ? _chunkOverdrawPipeline : wire ? _chunkWireframePipeline : solidPipeline;
         if (_boundPipeline != pipeline) SetPipeline(pipeline);
-
-        uint dynOffset = StageModel(new ModelUniform { Model = model, ChunkX = chunk.X, ChunkY = chunk.Y, ChunkZ = chunk.Z, Grid = grid, Entry = entry });
-        _api.RenderPassEncoderSetBindGroup(_pass, 1, (BindGroup*)mesh.DrawBindGroup, 1, &dynOffset);
-        if (wire && !OverdrawMode) _api.RenderPassEncoderDraw(_pass, 8u * mesh.QuadCount, 1, 0, 0);
-        else
+        if (!_chunkStateBound)
         {
+            EnsureChunkGroup();
+            _api.RenderPassEncoderSetBindGroup(_pass, 1, _chunkGroup, 0, null);
             _api.RenderPassEncoderSetIndexBuffer(_pass, _quadIndices.Handle, IndexFormat.Uint32, 0, _quadIndices.SizeBytes);
-            _api.RenderPassEncoderDrawIndexed(_pass, 6u * System.Math.Min(mesh.QuadCount, (uint)MaxChunkQuads), 1, 0, 0, 0);
+            _chunkStateBound = true;
         }
-        _drawIndex++;
+
+        uint record = (uint)_chunkDrawCount++;
+        _chunkDrawStaging[record] = new ChunkDrawRecord
+        {
+            Model = model, ChunkX = chunk.X, ChunkY = chunk.Y, ChunkZ = chunk.Z, Grid = grid, QuadBase = mesh.QuadBase, Entry = entry,
+        };
+        if (wire && !OverdrawMode) _api.RenderPassEncoderDraw(_pass, 8u * mesh.QuadCount, 1, 0, record);
+        else _api.RenderPassEncoderDrawIndexed(_pass, 6u * System.Math.Min(mesh.QuadCount, (uint)MaxChunkQuads), 1, 0, 0, record);
+    }
+
+    /// <summary>The chunk draws' group-1 bind group over this frame's records and the shared quad buffer, rebuilt when
+    /// the quad buffer has been replaced (grown).</summary>
+    private void EnsureChunkGroup()
+    {
+        if (_chunkGroup != null && _chunkGroupVersion == _quadArena.Version) return;
+        if (_chunkGroup != null) _api.BindGroupRelease(_chunkGroup);
+        BindGroupEntry* entries = stackalloc BindGroupEntry[2];
+        entries[0] = new BindGroupEntry { Binding = 2, Buffer = _chunkDrawBuffer.Handle, Offset = 0, Size = _chunkDrawBuffer.SizeBytes };
+        entries[1] = new BindGroupEntry { Binding = 3, Buffer = _quadArena.Buffer.Handle, Offset = 0, Size = _quadArena.Buffer.SizeBytes };
+        var desc = new BindGroupDescriptor { Layout = _chunkModelLayout, EntryCount = 2, Entries = entries };
+        _chunkGroup = _api.DeviceCreateBindGroup(_ctx.Device, &desc);
+        _chunkGroupVersion = _quadArena.Version;
+    }
+
+    // A chunk draw's record (vs_chunk's ChunkDraw: 96 bytes).
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential, Size = 96)]
+    private struct ChunkDrawRecord
+    {
+        public Mat4 Model;
+        public int ChunkX, ChunkY, ChunkZ, Grid;
+        public uint QuadBase;
+        public int Entry;                     // the chunk's chunk-table entry, -1 unknown (shadeFast only)
     }
 
     /// <summary>Stages this draw's model uniform for <see cref="EndFrame"/>'s single upload; returns its dynamic offset.</summary>
@@ -1706,6 +1941,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         // One upload for every draw's model uniform (queue writes land before the submit below), instead of a
         // QueueWriteBuffer per draw.
         if (_drawIndex > 0) _modelBuffer.Write<ModelUniform>(0, _modelStaging.AsSpan(0, _drawIndex));
+        if (_chunkDrawCount > 0) _chunkDrawBuffer.Write<ChunkDrawRecord>(0, _chunkDrawStaging.AsSpan(0, _chunkDrawCount));
 
         _ctx.Timer.Resolve(_encoder);
         var cmdDesc = new CommandBufferDescriptor();
@@ -1719,7 +1955,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         long t0 = Stopwatch.GetTimestamp();
         _ctx.Present();
         PresentMs = Ema(PresentMs, Stopwatch.GetElapsedTime(t0).TotalMilliseconds);
-        DrawCount = _drawIndex;
+        DrawCount = _drawIndex + _chunkDrawCount;
     }
 
     private static double Ema(double prev, double sample) => prev + 0.05 * (sample - prev);
@@ -1732,9 +1968,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         public int ChunkX, ChunkY, ChunkZ, Grid;
         public float AlphaCutoff;             // params.x (fs_model)
         public float VoxelX, VoxelY, VoxelZ;  // params.yzw (fs_model, model blocks)
-        public int Entry;                     // entry.x: a chunk draw's chunk-table entry, -1 unknown (shadeFast only)
-        private int _entryPad0, _entryPad1, _entryPad2;
-        // 64 + 16 + 16 + 16 = 112 == ModelSize bytes the shader reads, padded to ModelStride
+        // 64 + 16 + 16 = 96 == ModelSize bytes the shader reads, padded to ModelStride
 
         /// <summary>Non-chunk draws: no grid, drawn full-bright.</summary>
         public static ModelUniform Default(in Mat4 m) => new() { Model = m, Grid = -1 };
@@ -1749,6 +1983,9 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         _hudCameraBuffer.Dispose();
         _modelBuffer.Dispose();
         _quadIndices.Dispose();
+        if (_chunkGroup != null) _api.BindGroupRelease(_chunkGroup);
+        _chunkDrawBuffer.Dispose();
+        _quadArena.Dispose();
         if (_voxelBindGroup   != null) _api.BindGroupRelease(_voxelBindGroup);
         if (_atlasBindGroup   != null) _api.BindGroupRelease(_atlasBindGroup);
         if (_atlasSampler     != null) _api.SamplerRelease(_atlasSampler);
@@ -1756,6 +1993,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         if (_atlasTexture     != null) _api.TextureRelease(_atlasTexture);
         if (_modelPipeline      != null) _api.RenderPipelineRelease(_modelPipeline);
         if (_cloudPipeline      != null) _api.RenderPipelineRelease(_cloudPipeline);
+        if (_particlePipeline   != null) _api.RenderPipelineRelease(_particlePipeline);
         if (_skyPipeline        != null) _api.RenderPipelineRelease(_skyPipeline);
         if (_hudPipeline        != null) _api.RenderPipelineRelease(_hudPipeline);
         if (_wireframePipeline  != null) _api.RenderPipelineRelease(_wireframePipeline);
@@ -1763,7 +2001,8 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         if (_chunkPipeline      != null) _api.RenderPipelineRelease(_chunkPipeline);
         if (_chunkWireframePipeline != null) _api.RenderPipelineRelease(_chunkWireframePipeline);
         if (_chunkOverdrawPipeline != null) _api.RenderPipelineRelease(_chunkOverdrawPipeline);
-        if (_chunkCutoutPipeline != null) _api.RenderPipelineRelease(_chunkCutoutPipeline);
+        if (_chunkCutoutDepthPipeline != null) _api.RenderPipelineRelease(_chunkCutoutDepthPipeline);
+        if (_chunkCutoutShadedPipeline != null) _api.RenderPipelineRelease(_chunkCutoutShadedPipeline);
         if (_chunkTransparentPipeline != null) _api.RenderPipelineRelease(_chunkTransparentPipeline);
         if (_chunkTransparentDepthPipeline != null) _api.RenderPipelineRelease(_chunkTransparentDepthPipeline);
     }
