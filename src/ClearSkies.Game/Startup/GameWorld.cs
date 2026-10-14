@@ -69,6 +69,7 @@ public sealed class GameWorld
         AirShapes = new AirshipResistanceSystem(host.World, host.Physics);
         AirResistance = new AirResistanceSystem(host.World, host.Physics, Wind);
         RemoteBodies = new RemoteBodySystem(host.World, Registry, host.Clock);
+        GameReplication.Register(Replicated);
     }
 
     public EngineHost Host { get; }
@@ -104,6 +105,10 @@ public sealed class GameWorld
 
     /// <summary>Bodies owned elsewhere, placed from their snapshots about 100 ms behind.</summary>
     public RemoteBodySystem RemoteBodies { get; }
+
+    /// <summary>The components whose state replicates from the machine with authority over an entity (see
+    /// <see cref="GameReplication"/>).</summary>
+    public ReplicatedComponents Replicated { get; } = new();
 
     /// <summary>Whether the terrain around a point has loaded with colliders, so a body there won't fall through it
     /// (each spawn simulated here waits on it, see SpawnQueue).</summary>

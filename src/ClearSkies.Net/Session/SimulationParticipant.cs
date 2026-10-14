@@ -126,6 +126,9 @@ public sealed class SimulationParticipant : IParticipant, ISystem, ICommandRoute
     /// <summary>Receives and sends body snapshots (set by the body sync system).</summary>
     public BodySync? Bodies { get; set; }
 
+    /// <summary>Replicated component state (set by <see cref="ReplicationSystem"/>).</summary>
+    public ReplicationSystem? Replication { get; set; }
+
     /// <summary>A client's prediction of its own player, which hears what the host makes of it (set by the prediction).</summary>
     public OwnPlayerPrediction? Prediction { get; set; }
 
@@ -251,6 +254,8 @@ public sealed class SimulationParticipant : IParticipant, ISystem, ICommandRoute
     public void Rejected(in Rejection rejection) => Commands.ReceiveRejection(rejection.Authority, rejection.Seq);
 
     public void ReceiveFrame(uint tick, IReadOnlyList<BodySnapshot> snapshots) => Bodies?.ReceiveFrame(tick, snapshots);
+
+    public void ReceiveEntityState(uint tick, IReadOnlyList<EntityState> states) => Replication?.Receive(tick, states);
 
     public void Pong(in TimePong pong) => ClockSync?.OnPong(pong, NowMs);
 
@@ -395,6 +400,9 @@ public sealed class SimulationParticipant : IParticipant, ISystem, ICommandRoute
 
     /// <summary>Snapshots of the bodies it simulates (see <see cref="BodySync"/>).</summary>
     internal void SendFrame(uint tick, IReadOnlyList<BodySnapshot> snapshots) => _host.SendFrame(tick, snapshots);
+
+    /// <summary>Replicated state of the entities it has authority over (see <see cref="ReplicationSystem"/>).</summary>
+    internal void SendEntityState(uint tick, IReadOnlyList<EntityState> states) => _host.SendEntityState(tick, states);
 
     /// <summary>The player's latest inputs, for its authority to move them by (see <see cref="OwnPlayerPrediction"/>).</summary>
     internal void SendInput(in PlayerInputMessage message) => _host.SendInput(message);

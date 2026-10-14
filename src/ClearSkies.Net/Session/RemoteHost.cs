@@ -21,6 +21,7 @@ public sealed class RemoteHost : IHost, ISystem, IDisposable
     private readonly ITransport _transport;
     private readonly NetWriter _writer = new(1024);
     private readonly List<BodySnapshot> _frame = new();
+    private readonly List<EntityState> _states = new();
     private bool _left;
 
     /// <param name="welcome">The Host's welcome (see <see cref="Connect"/>).</param>
@@ -71,6 +72,9 @@ public sealed class RemoteHost : IHost, ISystem, IDisposable
 
     public void SendFrame(uint tick, IReadOnlyList<BodySnapshot> snapshots) =>
         BodySync.WriteFrames(_writer, tick, snapshots, packet => _transport.Send(HostConnection, packet, Channel.Unreliable));
+
+    public void SendEntityState(uint tick, IReadOnlyList<EntityState> states) =>
+        EntityState.WriteFrames(_writer, tick, states, packet => _transport.Send(HostConnection, packet, Channel.Unreliable));
 
     public void EntityCreated(in DescriptionMessage description) => Send(description);
     public void EntityDescribed(in DescriptionMessage description) => Send(description);
@@ -141,6 +145,12 @@ public sealed class RemoteHost : IHost, ISystem, IDisposable
             {
                 uint tick = BodySync.ReadFrame(ref r, _frame);
                 p.ReceiveFrame(tick, _frame);
+                break;
+            }
+            case MessageKind.EntityStateFrame:
+            {
+                uint tick = EntityState.ReadFrame(ref r, _states);
+                p.ReceiveEntityState(tick, _states);
                 break;
             }
             case MessageKind.TimePong: p.Pong(TimePong.Read(ref r)); break;
