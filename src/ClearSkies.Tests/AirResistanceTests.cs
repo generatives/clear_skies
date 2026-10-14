@@ -276,8 +276,12 @@ public class AirResistanceTests
         scene.Tick(3);
         Assert.False(character().Gliding);
         Assert.True(scene.TickUntil(() => character().Gliding, 120));
+        float Underside() => player.Get<ResistsAir>().Faces[ResistsAir.Index(1, false)].Area;
+        Assert.True(Underside() > 10f, $"gliding on {Underside()} m²"); // the wing's, not the capsule's
         Assert.True(scene.TickUntil(() => character().Supported, 600));
         scene.Tick();
         Assert.False(character().Gliding);
+        Assert.True(Underside() < 1f, $"landed with {Underside()} m²");
+        Assert.Equal(Quaternion.Identity, player.Get<ResistsAir>().LocalOrientation);
     }
 }

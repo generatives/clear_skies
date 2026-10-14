@@ -15,8 +15,8 @@ namespace ClearSkies.Engine.ECS;
 /// <see cref="ResistsAir"/> simulated here: any dynamic body (<see cref="PhysicsBodyComponent"/>) this machine owns,
 /// and any character body (<see cref="CharacterControllerComponent"/>, which only exists where its player is simulated
 /// or predicted) that isn't free-flying. Bodies turn with their drag; characters stay upright, so theirs is applied
-/// along world axes with no torque, except that a gliding character's is a wing's (<see cref="ResistsAir.Glider"/>)
-/// along the wing's axes, still with no torque. A kinematic body (zero mass: locked, or following another machine's snapshots)
+/// along their entries' own axes (<see cref="ResistsAir.LocalOrientation"/>: the world's, or a gliding player's wing's)
+/// with no torque. A kinematic body (zero mass: locked, or following another machine's snapshots)
 /// feels none.
 ///
 /// The wind is sampled once, at the centre of mass. For each body axis, the entry facing into the relative air is
@@ -39,9 +39,6 @@ public sealed class AirResistanceSystem : ISystem, IDebugUiSystem
 
     /// <summary>½ρC_d (N·s²/m⁴): a typical ship's 25 m² front at 10 m/s meets 500 N, so full lever gives about 10 m/s.</summary>
     public float AirConstant = 0.2f;
-
-    /// <summary>A gliding character's drag entries, in place of its own (its own <see cref="ResistsAir.DragScale"/> kept).</summary>
-    private readonly ResistsAir _glider = ResistsAir.Glider();
 
     // Diagnostics: the local player's relative air, and every body's this tick (or why it has none).
     private Vector3 _lastPlayerAir;
@@ -84,7 +81,7 @@ public sealed class AirResistanceSystem : ISystem, IDebugUiSystem
                 _readings.Add(new(e, skipped, _wind.Sample(pos), _physics.GetBodyLinearVelocity(body), default, default, front));
                 continue;
             }
-            var force = Apply(body, pos, rot, air, turns: true, dt, out var relative);
+            var force = Apply(body, pos, Quaternion.Concatenate(air.LocalOrientation, rot), air, turns: true, dt, out var relative);
             var velocity = _physics.GetBodyLinearVelocity(body);
             _readings.Add(new(e, null, relative + velocity, velocity, relative, force, front));
         }
@@ -96,11 +93,7 @@ public sealed class AirResistanceSystem : ISystem, IDebugUiSystem
             var body = character.BodyHandle;
             var (pos, _) = _physics.GetBodyPose(body);
             ref readonly var air = ref e.Get<ResistsAir>();
-            Vector3 relative;
-            if (character.Gliding)
-                Apply(body, pos, character.GlideOrientation, _glider with { DragScale = air.DragScale }, turns: false, dt, out relative);
-            else
-                Apply(body, pos, Quaternion.Identity, air, turns: false, dt, out relative);
+            Apply(body, pos, air.LocalOrientation, air, turns: false, dt, out var relative);
             characters++;
             if (e.Has<LocalPlayer>())
             {

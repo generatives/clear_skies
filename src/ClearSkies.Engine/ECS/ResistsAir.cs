@@ -20,6 +20,11 @@ public struct ResistsAir
 {
     public AirFace[] Faces;
 
+    /// <summary>How <see cref="Faces"/> are turned relative to the body: identity for ships, which turn with their
+    /// body; a character's body never turns, so a gliding player's is their wing's (set each tick by
+    /// PlayerMovementSystem, see PlayerCharacter.GlideOrientation).</summary>
+    public Quaternion LocalOrientation;
+
     /// <summary>Multiplies the air constant for this body (1 for ships; players are tuned with it).</summary>
     public float DragScale;
 
@@ -29,7 +34,7 @@ public struct ResistsAir
     public static int Index(int axis, bool positive) => axis * 2 + (positive ? 0 : 1);
 
     /// <summary>No area yet: a grid's, until AirshipResistanceSystem works its entries out from its blocks.</summary>
-    public static ResistsAir Unshaped() => new() { Faces = new AirFace[6], DragScale = 1f, ShapeKey = -1 };
+    public static ResistsAir Unshaped() => new() { Faces = new AirFace[6], LocalOrientation = Quaternion.Identity, DragScale = 1f, ShapeKey = -1 };
 
     /// <summary>A box-shaped body of <paramref name="size"/> (m) centred on its centre of mass.</summary>
     public static ResistsAir Box(Vector3 size, float dragScale = 1f)
@@ -43,7 +48,7 @@ public struct ResistsAir
             faces[Index(axis, true)]  = new AirFace { Area = area, Centroid = normal * half };
             faces[Index(axis, false)] = new AirFace { Area = area, Centroid = -normal * half };
         }
-        return new ResistsAir { Faces = faces, DragScale = dragScale, ShapeKey = -1 };
+        return new ResistsAir { Faces = faces, LocalOrientation = Quaternion.Identity, DragScale = dragScale, ShapeKey = -1 };
     }
 
     /// <summary>A player's capsule (radius 0.3 m, length 1 m: 0.6 m wide, 1.6 m tall), drawn as its box: sides 0.96 m²,
@@ -51,7 +56,7 @@ public struct ResistsAir
     public static ResistsAir Player(float radius, float length) =>
         Box(new Vector3(2 * radius, length + 2 * radius, 2 * radius));
 
-    /// <summary>A player gliding (see PlayerCharacter.Gliding): a wing <paramref name="span"/> wide and
+    /// <summary>A player gliding (see PlayerCharacter.Gliding; PlayerMovementSystem swaps these entries in): a wing <paramref name="span"/> wide and
     /// <paramref name="chord"/> deep, <paramref name="thickness"/> thick, the player lying along it. Its broad underside
     /// (span × chord, about 50 times the capsule's) falls slowly; tilted, it pushes the player along the way it tilts, as a
     /// flat panel does in a crosswind. Its edge-on front is small, so a dive picks up speed, and a pull-up spends it.</summary>

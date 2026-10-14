@@ -38,8 +38,8 @@ public struct PlayerCharacter
     private const float CrouchMaximumDrop = 0.6f;
     private float eyeDrop;
 
-    // Glider (Space held while falling, until landing or letting go): AirResistanceSystem swaps the capsule's drag for a
-    // wing's (ResistsAir.Glider), turned the way the player looks. The extra fall gravity and air control are off
+    // Glider (Space held while falling, until landing or letting go): PlayerMovementSystem swaps the player's capsule
+    // drag entries for a wing's (ResistsAir.Glider), turned to GlideOrientation. The extra fall gravity and air control are off
     // meanwhile, so the air alone holds the character up and steers it (see WingOrientation): look ahead to glide, down
     // to dive, up to climb on the speed picked up. Looking level holds the wing GlideTrim (radians) nose-down, so it
     // glides ahead (about 4 m ahead per 1 m down, at 8 m/s) rather than sinking straight down. The nose is held to at

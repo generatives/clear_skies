@@ -8,6 +8,7 @@ using ClearSkies.Engine.Entities;
 using DefaultEcs;
 using Silk.NET.Maths;
 using PhysVec = System.Numerics.Vector3;
+using PhysQuat = System.Numerics.Quaternion;
 
 namespace ClearSkies.Engine.ECS;
 
@@ -19,7 +20,7 @@ namespace ClearSkies.Engine.ECS;
 /// comes up in the queue, rather than whenever the command happened to arrive. Free-flying moves <see cref="Transform.Position"/> directly
 /// the way the player looks; E and Q raise and lower its speed by <see cref="FlySpeedStep"/> (Ctrl triples it while
 /// held). Walking instead feeds WASD/Shift/Space into the character's motion goals
-/// (<see cref="PlayerCharacter.UpdateCharacterGoals"/>; Space held while falling glides, Shift boosts the glider) — actual movement happens inside the physics step via the
+/// (<see cref="PlayerCharacter.UpdateCharacterGoals"/>; Space held while falling glides, swapping the player's drag for a wing's, and Shift boosts the glider) — actual movement happens inside the physics step via the
 /// ported BepuPhysics2 character-controller constraint (see Physics/Characters/);
 /// <see cref="PhysicsTransformSyncSystem"/> reads the resulting body pose back into <see cref="Transform"/> after it.
 /// Mouse-look is per frame, in <see cref="LookInputSystem"/>. A player using an Interactive block
@@ -65,8 +66,9 @@ public sealed class PlayerMovementSystem : ISystem
         {
             ref readonly var input = ref e.Get<PlayerInput>();
             var forward = LookForward(input);
-            e.Get<CharacterControllerComponent>().Character.UpdateCharacterGoals(
-                CharacterKeys(input), new PhysVec(forward.X, forward.Y, forward.Z), dt, Frozen(e));
+            ref var character = ref e.Get<CharacterControllerComponent>().Character;
+            character.UpdateCharacterGoals(CharacterKeys(input), new PhysVec(forward.X, forward.Y, forward.Z), dt, Frozen(e));
+            if (e.Has<ResistsAir>()) SetDrag(ref e.Get<ResistsAir>(), character);
         }
 
         foreach (ref readonly Entity e in _flyers.GetEntities())
@@ -90,6 +92,17 @@ public sealed class PlayerMovementSystem : ISystem
         Glide = input.IsHeld(PlayerButtons.Up),
         BoostPressed = input.WasPressed(PlayerButtons.Down),
     };
+
+    private static readonly AirFace[] CapsuleFaces = ResistsAir.Player(PlayerFactory.CapsuleRadius, PlayerFactory.CapsuleLength).Faces;
+    private static readonly AirFace[] WingFaces = ResistsAir.Glider().Faces;
+
+    /// <summary>The player's drag (see AirResistanceSystem): their capsule's, or while gliding their wing's, turned the
+    /// way it faces.</summary>
+    private static void SetDrag(ref ResistsAir air, in PlayerCharacter character)
+    {
+        air.Faces = character.Gliding ? WingFaces : CapsuleFaces;
+        air.LocalOrientation = character.Gliding ? character.GlideOrientation : PhysQuat.Identity;
+    }
 
     /// <summary>Blocks per second each E/Q press adds or removes from the free-fly speed; also its minimum.</summary>
     public const float FlySpeedStep = 5f;
