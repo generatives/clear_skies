@@ -83,9 +83,6 @@ public sealed class RenderFrame : IDebugUiSystem
             ImGui.Combo("Terrain lighting", ref _dbgLighting, DbgLightingModes, DbgLightingModes.Length);
             ImGui.Checkbox("No textures", ref _dbgNoTextures);
             ImGui.Checkbox("No fog or haze", ref _dbgNoFog);
-            bool onePass = !_renderer.CutoutDepthPrePass;
-            if (ImGui.Checkbox("Cut-out faces: light every layer (old)", ref onePass)) _renderer.CutoutDepthPrePass = !onePass;
-            ImGui.TextDisabled("Leaves and grass in one pass, lighting each face behind a pixel, not only the nearest.");
             if (ImGui.Checkbox("Overdraw view", ref _dbgOverdraw)) _renderer.OverdrawMode = _dbgOverdraw;
             ImGui.TextDisabled("Overdraw: how many times each pixel's terrain is shaded (nearer surfaces hide later ones).");
             ImGui.TextDisabled("  Dim grey = once (ideal); each extra time is a step brighter; white = 5 or more.");

@@ -163,7 +163,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
             if (d.Mesh != null) _renderer.DrawChunkMesh(d.Mesh, d.Model, d.Grid, d.Chunk);
         // Cut-out faces after all the opaque ones: discarding texels costs the early depth test, so the opaque world is
         // drawn without it first. Their depth goes down first, so each pixel's nearest cut-out face is lit once rather
-        // than every leaf behind it too (see Renderer.CutoutDepthPrePass).
+        // than every leaf behind it too (see Renderer.DrawCutoutChunkDepth).
         foreach (var d in _draws)
             if (d.CutoutMesh != null) _renderer.DrawCutoutChunkDepth(d.CutoutMesh, d.Model, d.Grid, d.Chunk);
         foreach (var d in _draws)
