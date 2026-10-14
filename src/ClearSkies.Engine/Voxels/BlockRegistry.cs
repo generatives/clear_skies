@@ -55,7 +55,7 @@ public static class BlockRegistry
         // A heavy iron block: while its ship's toggles are on it holds the ship to the nearest terrain or other ship
         // beside it (AnchorSystem).
         Register(new BlockDef { Id = BlockId.Anchor, Name = "Anchor", Color = new(0.30f, 0.30f, 0.32f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 6,
-            Texture = "stone_iron", Components = e => e.Set(new Anchor()) });
+            Texture = "oven", Components = e => e.Set(new Anchor()) });
         Register(new BlockDef { Id = BlockId.Buoyant, Name = "Buoyant", Color = new(0.55f, 0.85f, 1.00f), IsSolid = true, LightEmission = 0, Weight = 1,
             Components = e => e.Set(new Buoyant()) });
 
