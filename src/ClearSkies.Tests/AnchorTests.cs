@@ -300,6 +300,66 @@ public class AnchorTests
         Assert.True(settled < 0.02f, $"settled {settled:F3} off");
     }
 
+    /// <summary>How far a grid is tipped from upright, in degrees.</summary>
+    private static float Tilt(HeadlessScene scene, Entity grid)
+    {
+        var (_, q) = scene.Physics.GetBodyPose(grid.Get<PhysicsBodyComponent>().Body);
+        return MathF.Acos(Math.Clamp(Vector3.Transform(Vector3.UnitY, q).Y, -1f, 1f)) * 180f / MathF.PI;
+    }
+
+    [Fact]
+    public void ACarrierLevelsItselfWithAShipDockedOnItsCorner()
+    {
+        using var scene = new HeadlessScene();
+        scene.AddBeforePhysics(new AirshipFlightSystem(scene.World, scene.Physics) { FreePropulsion = true });
+        var deck = Enumerable.Range(0, 64).Select(i => V(i % 8, 0, i / 8, BlockId.Stone)).ToArray();
+        var carrier = Spawn(scene, Grid(new Vector3(0, 60, 0), locked: false, deck));
+        var dinghy = Spawn(scene, Grid(new Vector3(0, 61, 0), locked: false,
+            V(0, 0, 0, BlockId.Anchor), V(1, 0, 0, BlockId.Stone), V(0, 0, 1, BlockId.Stone), V(1, 0, 1, BlockId.Stone),
+            V(0, 1, 0, BlockId.Stone), V(1, 1, 0, BlockId.Stone), V(0, 1, 1, BlockId.Stone), V(1, 1, 1, BlockId.Stone)));
+        SetAnchored(scene, dinghy, true);
+        scene.Tick(2);
+        Assert.Single(Links(dinghy));
+
+        // The carrier takes the dinghy's weight on one corner. Its pilot makes up the extra lift (that's theirs to do), and
+        // self-level trims out the torque: it comes back upright rather than sitting at a tilt.
+        var body = carrier.Get<PhysicsBodyComponent>().Body;
+        var weight = -scene.Physics.Gravity * scene.Physics.GetBodyMass(dinghy.Get<PhysicsBodyComponent>().Body);
+        float worst = 0f;
+        for (int t = 0; t < 40 * 60; t++) {
+            scene.Physics.ApplyLinearImpulse(body, weight * HeadlessScene.Dt);
+            scene.Tick();
+            worst = MathF.Max(worst, Tilt(scene, carrier));
+        }
+        Assert.True(worst > 1f, $"never tipped ({worst:F2}°): the dinghy isn't weighing on it");
+        Assert.True(Tilt(scene, carrier) < 0.5f, $"settled {Tilt(scene, carrier):F2}° off level (tipped {worst:F1}° at worst)");
+    }
+
+    [Fact]
+    public void AShipDockedOnAnotherTurnsItsFansOff()
+    {
+        using var scene = new HeadlessScene();
+        scene.AddBeforePhysics(new AirshipFlightSystem(scene.World, scene.Physics));
+        var deck = Enumerable.Range(0, 64).Select(i => V(i % 8, 0, i / 8, BlockId.Stone)).ToArray();
+        var carrier = Spawn(scene, Grid(new Vector3(0, 60, 0), locked: true, deck));
+        var down = BlockOrientation.From(Direction.Down, Direction.North); // exhaust down: lift
+        var dinghy = Spawn(scene, Grid(new Vector3(3, 61, 3), locked: false, V(1, 0, 1, BlockId.Anchor),
+            new GridVoxel(0, 0, 0, BlockId.Fan, down), new GridVoxel(2, 0, 0, BlockId.Fan, down),
+            new GridVoxel(0, 0, 2, BlockId.Fan, down), new GridVoxel(2, 0, 2, BlockId.Fan, down)));
+        var fans = dinghy.Get<ChunkGrid>().Volume.BlockEntities.Where(e => e.Has<Fan>()).ToList();
+        Assert.Equal(4, fans.Count);
+
+        // Flying, its Fans hold it up.
+        scene.Tick(30);
+        Assert.Contains(fans, f => f.Get<Fan>().Thrust > 0f);
+
+        // Docked, they're off: the carrier carries it.
+        SetAnchored(scene, dinghy, true);
+        scene.Tick(30);
+        Assert.Single(Links(dinghy));
+        Assert.All(fans, f => Assert.Equal(0f, f.Get<Fan>().Thrust));
+    }
+
     // ── saving ──────────────────────────────────────────────────────────────
 
     [Fact]
