@@ -194,29 +194,45 @@ public class AirResistanceTests
         Assert.True(-character().LinearVelocity.Z > 0f, "slid backwards after the climb");
     }
 
+    /// <summary>Presses Shift for one tick, keeping Space held if <paramref name="gliding"/>, then runs the boost's
+    /// length; how much faster the player is going.</summary>
+    private static float Boost(HeadlessScene scene, Entity player, bool gliding)
+    {
+        var held = gliding ? PlayerButtons.Up : PlayerButtons.None;
+        float before = player.Get<CharacterControllerComponent>().Character.LinearVelocity.Length();
+        player.Get<PlayerInput>() = new PlayerInput { Held = held | PlayerButtons.Down, Pressed = PlayerButtons.Down };
+        scene.Tick();
+        for (int t = 0; t < 24; t++)
+        {
+            player.Get<PlayerInput>() = new PlayerInput { Held = held };
+            scene.Tick();
+        }
+        return player.Get<CharacterControllerComponent>().Character.LinearVelocity.Length() - before;
+    }
+
     [Fact]
-    public void ShiftInTheAirBoostsAlongTheWayTheCharacterMovesOncePerJump()
+    public void ShiftBoostsAGliderAlongTheWayItMovesEveryTenSeconds()
     {
         using var scene = new HeadlessScene();
         scene.AddAirResistance();
-        var player = scene.SpawnLocalPlayer(new Vector3(0, 2000, 0));
+        var player = scene.SpawnLocalPlayer(new Vector3(0, 3000, 0));
         var character = () => player.Get<CharacterControllerComponent>().Character;
+
+        // Falling with no glider, at its terminal speed: nothing.
+        scene.Tick(60 * 10);
+        Assert.True(Boost(scene, player, gliding: false) < 1f, "boosted without the glider");
+
         Glide(scene, player, 0f, 0f, 10f);
         var before = character().LinearVelocity;
-        player.Get<PlayerInput>() = new PlayerInput { Held = PlayerButtons.Up | PlayerButtons.Down, Pressed = PlayerButtons.Down };
-        scene.Tick();
-        Glide(scene, player, 0f, 0f, 0.25f);
+        Assert.True(Boost(scene, player, gliding: true) > 10f, "a weak boost");
         var after = character().LinearVelocity;
-        Assert.True(after.Length() > before.Length() + 5f, $"boosted from {before.Length()} to {after.Length()} m/s");
         Assert.True(Vector3.Dot(Vector3.Normalize(after), Vector3.Normalize(before)) > 0.95f, $"boosted from {before} to {after}");
 
-        // Spent until landing.
-        Glide(scene, player, 0f, 0f, 3f);
-        before = character().LinearVelocity;
-        player.Get<PlayerInput>() = new PlayerInput { Held = PlayerButtons.Up | PlayerButtons.Down, Pressed = PlayerButtons.Down };
-        scene.Tick();
-        Glide(scene, player, 0f, 0f, 0.25f);
-        Assert.True(character().LinearVelocity.Length() < before.Length() + 1f, "boosted twice in one flight");
+        // Not again until ten seconds after it started, then again.
+        Glide(scene, player, 0f, 0f, 5f);
+        Assert.True(Boost(scene, player, gliding: true) < 1f, "boosted again within ten seconds");
+        Glide(scene, player, 0f, 0f, 5f);
+        Assert.True(Boost(scene, player, gliding: true) > 10f, "no boost after ten seconds");
     }
 
     [Fact]
