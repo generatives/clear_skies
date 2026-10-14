@@ -1707,7 +1707,7 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
         if (OverdrawMode || count == 0 || _drawIndex >= MaxObjects) return;
         SetPipeline(_particlePipeline);
         uint dynOffset = StageModel(ModelUniform.Default(Mat4.Identity));
-        _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset);
+        _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset); _chunkStateBound = false;
         _api.RenderPassEncoderSetVertexBuffer(_pass, 0, instances.Handle, 0, instances.SizeBytes);
         _api.RenderPassEncoderDraw(_pass, 6, count, 0, 0);
         _drawIndex++;
