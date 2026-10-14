@@ -169,7 +169,6 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
     private readonly Dictionary<Entity, int> _holdingScratch = new();                      // how many holds each grid's anchors keep
     private readonly Dictionary<Entity, List<Vector3D<int>>> _anchorCellsScratch = new(); // each ship's anchor cells
     private readonly HashSet<(Entity, EntityId)> _keptScratch = new();                    // welds a hold still needs
-    private readonly List<(Entity, EntityId)> _staleScratch = new();                      // welds none does
     private readonly List<Entity> _emptyScratch = new();                                  // ships with no anchors left
     private readonly HashSet<Entity> _changedScratch = new();                             // grids whose holds changed this update
     private string _lastEvent = "";
@@ -294,9 +293,9 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
                 Hold(ship, target);
                 held++;
             }
-            if (held == 0) StopAnchoring(ship, "found nothing in reach");
-            else
-            {
+            if (held == 0) {
+                StopAnchoring(ship, "found nothing in reach");
+            } else {
                 _holdingScratch[ship] = held;
                 _lastEvent = $"{ship.Get<EntityId>()} took hold of {held} {(held == 1 ? "thing" : "things")}";
             }
@@ -319,8 +318,7 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
         var (rider, target) = shipRides ? (ship, other) : (other, ship);
         var targetId = target.Get<EntityId>();
 
-        if (!rider.Has<AnchorLinks>())
-        {
+        if (!rider.Has<AnchorLinks>()) {
             rider.Set(new AnchorLinks { All = new List<AnchorLink>() });
         }
         var links = rider.Get<AnchorLinks>().All;
@@ -331,25 +329,17 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
             ? links[i]
             : AnchorLink.Between(targetId, target.Get<Transform>(), rider.Get<Transform>());
 
-        if (shipRides)
-        {
+        if (shipRides) {
             link.HeldByRider = true;
-        }
-        else
-        {
+        } else {
             link.HeldByTarget = true;
         }
 
-        if (i >= 0)
-        {
+        if (i >= 0) {
             links[i] = link;
-        }
-        else if (link.ToGrid && AnchorLinks.Support(links) is null)
-        {
+        } else if (link.ToGrid && AnchorLinks.Support(links) is null) {
             links.Insert(0, link); // its first grid: what it rides on
-        }
-        else
-        {
+        } else {
             links.Add(link);
         }
 
@@ -444,9 +434,12 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
                 Weld(rider, link);
             }
         }
-        _staleScratch.Clear();
-        foreach (var key in _held.Keys) if (!_keptScratch.Contains(key)) _staleScratch.Add(key);
-        foreach (var key in _staleScratch) Drop(key);
+        // A Dictionary may have entries removed while it's enumerated.
+        foreach (var key in _held.Keys) {
+            if (!_keptScratch.Contains(key)) {
+                Drop(key);
+            }
+        }
     }
 
     /// <summary>Welds the rider where the link puts it: to the target's body if it has one here, else to a pin.</summary>
@@ -460,32 +453,42 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
         BodyHandle partner;
         Vector3 offset;
         Quaternion orientation;
-        if (target is { } t && t != rider && t.Has<PhysicsBodyComponent>())
-        {
+        if (target is { } t && t != rider && t.Has<PhysicsBodyComponent>()) {
             // The rider's body in the target's: its block space where the link puts it, then out to its centre of mass,
             // then from the target's centre of mass rather than its block space.
             ref readonly var tpb = ref t.Get<PhysicsBodyComponent>();
             partner = tpb.Body;
             offset = link.LocalPosition + Vector3.Transform(PhysicsConv.ToBepu(pb.Offset), link.LocalRotation) - PhysicsConv.ToBepu(tpb.Offset);
             orientation = link.LocalRotation;
-            if (held?.Pin is not null) { Drop(key); held = null; } // the target's body is here now: off the pin
-        }
-        else
-        {
+            if (held?.Pin is not null) {
+                // The target's body is here now: off the pin.
+                Drop(key);
+                held = null;
+            }
+        } else {
             // A pin where the rider's body belongs: on the terrain, on the target as it stands (or, with that gone
             // altogether, wherever the rider is).
             var (position, rotation) = _physics.GetBodyPose(pb.Body);
-            if (target is { } placed && placed != rider && placed.Has<Transform>())
-            {
+            if (target is { } placed && placed != rider && placed.Has<Transform>()) {
                 var at = link.Place(placed.Get<Transform>());
                 position = pb.BodyPosition(at);
                 rotation = PhysicsConv.ToBepu(at.Rotation);
+            } else if (held?.Pin is { } kept) {
+                (position, rotation) = _physics.GetBodyPose(kept);
             }
-            else if (held?.Pin is { } kept) (position, rotation) = _physics.GetBodyPose(kept);
 
-            if (held is not null && held.Pin is null) { Drop(key); held = null; } // was on a body that's gone
-            if (held?.Pin is { } pin) _physics.SetBodyPose(pin, position, rotation);
-            else _held[key] = held = new Held { Pin = _physics.AddPin(position, rotation) };
+            if (held is not null && held.Pin is null) {
+                // Was on a body that's gone.
+                Drop(key);
+                held = null;
+            }
+
+            if (held?.Pin is { } pin) {
+                _physics.SetBodyPose(pin, position, rotation);
+            } else {
+                _held[key] = held = new Held { Pin = _physics.AddPin(position, rotation) };
+            }
+
             partner = held.Pin!.Value;
             offset = Vector3.Zero;
             orientation = Quaternion.Identity;
@@ -496,16 +499,13 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
         if (held.Welded && (held.Rider != pb.Body || held.Partner != partner || bothKinematic)) Unweld(held);
         if (bothKinematic) return; // neither moves: welded once one can
 
-        if (!held.Welded)
-        {
+        if (!held.Welded) {
             held.Rider = pb.Body;
             held.Partner = partner;
             held.Weld = _physics.AddWeld(partner, pb.Body, offset, orientation);
             held.Welded = true;
-        }
-        else if (Vector3.DistanceSquared(held.Offset, offset) > OffsetEpsilon * OffsetEpsilon ||
-                 MathF.Abs(Quaternion.Dot(held.Orientation, orientation)) < 1f - OffsetEpsilon)
-        {
+        } else if (Vector3.DistanceSquared(held.Offset, offset) > OffsetEpsilon * OffsetEpsilon ||
+                   MathF.Abs(Quaternion.Dot(held.Orientation, orientation)) < 1f - OffsetEpsilon) {
             _physics.SetWeld(held.Weld, offset, orientation);
         }
         held.Offset = offset;
