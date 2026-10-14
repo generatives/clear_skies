@@ -70,7 +70,7 @@ public sealed class AirResistanceSystem : ISystem, IDebugUiSystem
             var body = e.Get<PhysicsBodyComponent>().Body;
             var (pos, rot) = _physics.GetBodyPose(body);
             // Only the owner simulates a body; everyone else follows its body sync.
-            string? skipped = e.Has<NetOwner>() && !e.Get<NetOwner>().IsLocal ? "simulated elsewhere"
+            string? skipped = !e.SimulatedHere() ? "simulated elsewhere"
                 : _physics.GetBodyMass(body) <= 0f ? "kinematic (locked, or following another machine)"
                 : null;
             if (skipped is not null)

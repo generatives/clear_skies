@@ -174,7 +174,7 @@ public sealed class AirshipFlightSystem : ISystem
             // to fly. (An empty grid has no body yet, so it isn't in _grids at all.)
             if (dynamicGrid.Locked) continue;
             // Only the owner flies a grid; everyone else follows its body sync.
-            if (e.Has<Entities.NetOwner>() && !e.Get<Entities.NetOwner>().IsLocal) continue;
+            if (!e.SimulatedHere()) continue;
             var body = e.Get<PhysicsBodyComponent>().Body;
 
             float mass = _physics.GetBodyMass(body);

@@ -157,14 +157,17 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
     private readonly EntitySet      _volumes;
     private readonly IDisposable    _bodyRemoved, _disposed;
 
-    private readonly Dictionary<(Entity Rider, EntityId Target), Held> _held = new();
-    private readonly HashSet<(Entity, EntityId)> _touched = new();
+    // What this system keeps between updates.
+    private readonly Dictionary<(Entity Rider, EntityId Target), Held> _held = new(); // the welds (and pins) holding riders
     private readonly HashSet<Entity> _lettingGo = new(); // let go for want of a hold; the toggles' command is on its way
-    private readonly Dictionary<Entity, List<Vector3D<int>>> _anchorsByShip = new();
     private readonly Dictionary<Entity, int> _holding = new(); // how many holds each grid's anchors keep
-    private readonly List<Entity> _scratch = new();
-    private readonly List<(Entity, EntityId)> _stale = new();
-    private readonly HashSet<Entity> _changed = new(); // grids whose holds changed this update
+
+    // Scratch, rebuilt every update and kept only so it isn't reallocated.
+    private readonly Dictionary<Entity, List<Vector3D<int>>> _anchorCellsScratch = new(); // each ship's anchor cells
+    private readonly HashSet<(Entity, EntityId)> _keptScratch = new();  // welds a hold still needs
+    private readonly List<(Entity, EntityId)> _staleScratch = new();    // welds none does
+    private readonly List<Entity> _emptyScratch = new();               // ships with no anchors left
+    private readonly HashSet<Entity> _changedScratch = new();          // grids whose holds changed this update
     private string _lastEvent = "";
 
     /// <summary>How a rider is held to one target: its body, welded to the target's body or to a pin.</summary>
@@ -210,28 +213,25 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
         LetGoOfWhatNobodyHolds();
         TakeHold();
         Weld();
-        foreach (var grid in _changed) if (grid.IsAlive) _world.Publish(new AnchorsChanged(grid));
-        _changed.Clear();
+        foreach (var grid in _changedScratch) if (grid.IsAlive) _world.Publish(new AnchorsChanged(grid));
+        _changedScratch.Clear();
     }
-
-    /// <summary>Only the machine that owns a grid anchors it; everyone else follows its body.</summary>
-    private static bool Simulates(Entity grid) => !grid.Has<NetOwner>() || grid.Get<NetOwner>().IsLocal;
 
     private static bool Anchored(Entity grid) => grid.Has<ShipControls>() && grid.Get<ShipControls>().Anchored;
 
     private void GroupAnchors()
     {
-        foreach (var cells in _anchorsByShip.Values) cells.Clear();
+        foreach (var cells in _anchorCellsScratch.Values) cells.Clear();
         foreach (ref readonly Entity e in _anchors.GetEntities())
         {
             ref readonly var block = ref e.Get<BlockRef>();
             var root = block.Volume.Root;
-            if (!_anchorsByShip.TryGetValue(root, out var cells)) _anchorsByShip[root] = cells = new List<Vector3D<int>>();
+            if (!_anchorCellsScratch.TryGetValue(root, out var cells)) _anchorCellsScratch[root] = cells = new List<Vector3D<int>>();
             cells.Add(block.Position);
         }
-        _scratch.Clear();
-        foreach (var (root, cells) in _anchorsByShip) if (cells.Count == 0 || !root.IsAlive) _scratch.Add(root);
-        foreach (var root in _scratch) _anchorsByShip.Remove(root);
+        _emptyScratch.Clear();
+        foreach (var (root, cells) in _anchorCellsScratch) if (cells.Count == 0 || !root.IsAlive) _emptyScratch.Add(root);
+        foreach (var root in _emptyScratch) _anchorCellsScratch.Remove(root);
     }
 
     /// <summary>Drops each grid's holds whose anchors have all let go (their ships' toggles off), and counts what each
@@ -239,10 +239,10 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
     private void LetGoOfWhatNobodyHolds()
     {
         _holding.Clear();
-        _scratch.Clear();
+        _emptyScratch.Clear();
         foreach (ref readonly Entity rider in _riders.GetEntities())
         {
-            if (!Simulates(rider)) continue;
+            if (!rider.SimulatedHere()) continue;
             var links = rider.Get<AnchorLinks>().All;
             for (int i = links.Count - 1; i >= 0; i--)
             {
@@ -253,16 +253,16 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
                 if (!link.Held)
                 {
                     links.RemoveAt(i);
-                    _changed.Add(rider);
+                    _changedScratch.Add(rider);
                     continue;
                 }
                 links[i] = link;
                 if (link.HeldByRider) _holding[rider] = _holding.GetValueOrDefault(rider) + 1;
                 if (link.HeldByTarget && target is { } t) _holding[t] = _holding.GetValueOrDefault(t) + 1;
             }
-            if (links.Count == 0) _scratch.Add(rider);
+            if (links.Count == 0) _emptyScratch.Add(rider);
         }
-        foreach (var rider in _scratch) rider.Remove<AnchorLinks>();
+        foreach (var rider in _emptyScratch) rider.Remove<AnchorLinks>();
     }
 
     /// <summary>Ships whose toggles just went on (anchored, holding nothing) take hold of whatever their anchors reach,
@@ -271,13 +271,13 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
     {
         foreach (ref readonly Entity ship in _ships.GetEntities())
         {
-            if (!Simulates(ship) || !ship.Get<ShipControls>().Anchored)
+            if (!ship.SimulatedHere() || !ship.Get<ShipControls>().Anchored)
             {
                 _lettingGo.Remove(ship);
                 continue;
             }
             if (_lettingGo.Contains(ship) || !ship.Has<PhysicsBodyComponent>()) continue; // its holds are kept meanwhile
-            if (!_anchorsByShip.ContainsKey(ship))
+            if (!_anchorCellsScratch.ContainsKey(ship))
             {
                 StopAnchoring(ship, "has no anchor");
                 continue;
@@ -315,16 +315,42 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
         bool shipRides = !other.Has<DynamicGrid>() || Lighter(ship, other);
         var (rider, target) = shipRides ? (ship, other) : (other, ship);
         var targetId = target.Get<EntityId>();
-        if (!rider.Has<AnchorLinks>()) rider.Set(new AnchorLinks { All = new List<AnchorLink>() });
+
+        if (!rider.Has<AnchorLinks>())
+        {
+            rider.Set(new AnchorLinks { All = new List<AnchorLink>() });
+        }
         var links = rider.Get<AnchorLinks>().All;
+
+        // Join the hold already between them, if there is one; otherwise hold them as they are now.
         int i = links.FindIndex(l => l.Target == targetId);
-        var link = i >= 0 ? links[i] : AnchorLink.Between(targetId, target.Get<Transform>(), rider.Get<Transform>());
-        if (shipRides) link.HeldByRider = true;
-        else link.HeldByTarget = true;
-        _changed.Add(rider);
-        if (i >= 0) links[i] = link;
-        else if (link.ToGrid && AnchorLinks.Support(links) is null) links.Insert(0, link); // its first grid: what it rides on
-        else links.Add(link);
+        var link = i >= 0
+            ? links[i]
+            : AnchorLink.Between(targetId, target.Get<Transform>(), rider.Get<Transform>());
+
+        if (shipRides)
+        {
+            link.HeldByRider = true;
+        }
+        else
+        {
+            link.HeldByTarget = true;
+        }
+
+        if (i >= 0)
+        {
+            links[i] = link;
+        }
+        else if (link.ToGrid && AnchorLinks.Support(links) is null)
+        {
+            links.Insert(0, link); // its first grid: what it rides on
+        }
+        else
+        {
+            links.Add(link);
+        }
+
+        _changedScratch.Add(rider);
     }
 
     /// <summary>Whether <paramref name="a"/> is lighter than <paramref name="b"/> (the same: the newer one).</summary>
@@ -351,7 +377,7 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
         ref readonly var st = ref ship.Get<Transform>();
         var shipPosition = PhysicsConv.ToBepu(st.Position);
         var shipRotation = PhysicsConv.ToBepu(st.Rotation);
-        foreach (var cell in _anchorsByShip[ship])
+        foreach (var cell in _anchorCellsScratch[ship])
         {
             var world = shipPosition + Vector3.Transform(new Vector3(cell.X, cell.Y, cell.Z) + new Vector3(0.5f), shipRotation);
             var best = NearestInReach(_volumes, world, ship, needBody: true);
@@ -405,19 +431,19 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
     /// <summary>Welds every rider simulated here to each thing it's held to, and drops the welds no hold keeps.</summary>
     private void Weld()
     {
-        _touched.Clear();
+        _keptScratch.Clear();
         foreach (ref readonly Entity rider in _riders.GetEntities())
         {
-            if (!Simulates(rider) || !rider.Has<PhysicsBodyComponent>()) continue; // held once its body is here
+            if (!rider.SimulatedHere() || !rider.Has<PhysicsBodyComponent>()) continue; // held once its body is here
             foreach (var link in rider.Get<AnchorLinks>().All)
             {
-                _touched.Add((rider, link.Target));
+                _keptScratch.Add((rider, link.Target));
                 Weld(rider, link);
             }
         }
-        _stale.Clear();
-        foreach (var key in _held.Keys) if (!_touched.Contains(key)) _stale.Add(key);
-        foreach (var key in _stale) Drop(key);
+        _staleScratch.Clear();
+        foreach (var key in _held.Keys) if (!_keptScratch.Contains(key)) _staleScratch.Add(key);
+        foreach (var key in _staleScratch) Drop(key);
     }
 
     /// <summary>Welds the rider where the link puts it: to the target's body if it has one here, else to a pin.</summary>
@@ -523,7 +549,7 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
             if (held.Welded) welded++;
             if (held.Pin is not null) pinned++;
         }
-        ImGui.Text($"Anchor blocks: {_anchors.Count:N0}, on {_anchorsByShip.Count:N0} ships");
+        ImGui.Text($"Anchor blocks: {_anchors.Count:N0}, on {_anchorCellsScratch.Count:N0} ships");
         ImGui.Text($"Holds: {_held.Count:N0} ({welded:N0} welded, {pinned:N0} on pins), on {_riders.Count:N0} grids");
         ImGui.TextDisabled(_lastEvent.Length > 0 ? _lastEvent : "Flick a toggle on a ship with an anchor.");
     }
