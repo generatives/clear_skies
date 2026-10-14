@@ -25,7 +25,7 @@ namespace ClearSkies.Engine.ECS;
 public sealed class GrappleRopeSystem : IRenderSystem, IDisposable
 {
     /// <summary>How thick the rope is drawn, in blocks.</summary>
-    public const float Width = 0.04f;
+    public const float Width = 0.02f;
 
     /// <summary>Where another player's rope leaves them, in their space from the capsule's centre: their right hand.</summary>
     private static readonly Vector3D<float> Hand = new(0.3f, 0.2f, -0.2f);
