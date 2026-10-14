@@ -57,6 +57,7 @@ public static class DedicatedServerGame
         host.AddSystem(host.Physics, SystemStage.Simulation);
         host.AddSystem(new PhysicsTransformSyncSystem(host.World, host.Physics), SystemStage.Simulation);
         host.AddSystem(world.RemoteBodies, SystemStage.Simulation);
+        host.AddSystem(new ReplicationSystem(net, host.World, world.Replicated, world.RemoteBodies), SystemStage.Simulation);
         host.AddSystem(world.Hierarchy, SystemStage.Simulation);
         host.AddSystem(new SupportSystem(host.World, host.Physics), SystemStage.Simulation);
         host.AddSystem(world.Interpolation, SystemStage.Simulation);
@@ -122,6 +123,7 @@ public static class BotClientGame
         host.AddSystem(host.Physics, SystemStage.Simulation);
         host.AddSystem(new PhysicsTransformSyncSystem(host.World, host.Physics), SystemStage.Simulation);
         host.AddSystem(world.RemoteBodies, SystemStage.Simulation);
+        host.AddSystem(new ReplicationSystem(net, host.World, world.Replicated, world.RemoteBodies), SystemStage.Simulation);
         host.AddSystem(world.Hierarchy, SystemStage.Simulation);
         host.AddSystem(new SupportSystem(host.World, host.Physics), SystemStage.Simulation);
         host.AddSystem(world.Interpolation, SystemStage.Simulation);

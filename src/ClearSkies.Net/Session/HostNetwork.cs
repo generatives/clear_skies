@@ -79,6 +79,12 @@ public sealed class HostNetwork : ISystem, IDisposable
                     _host.SendFrame(joined, tick, from.Frame);
                     break;
                 }
+                case MessageKind.EntityStateFrame:
+                {
+                    uint tick = EntityState.ReadFrame(ref r, from.States);
+                    _host.SendEntityState(joined, tick, from.States);
+                    break;
+                }
                 case MessageKind.Created: _host.EntityCreated(joined, DescriptionMessage.Read(kind, ref r)); break;
                 case MessageKind.Described: _host.EntityDescribed(joined, DescriptionMessage.Read(kind, ref r)); break;
                 case MessageKind.Released: _host.EntityReleased(joined, DescriptionMessage.Read(kind, ref r)); break;
@@ -99,6 +105,7 @@ public sealed class HostNetwork : ISystem, IDisposable
     {
         private readonly NetWriter _writer = new(1024);
         public readonly List<BodySnapshot> Frame = new();
+        public readonly List<EntityState> States = new();
 
         /// <summary>Its record at the Host, once it has joined.</summary>
         public JoinedPeer? JoinedPeer;
@@ -133,6 +140,9 @@ public sealed class HostNetwork : ISystem, IDisposable
 
         public void ReceiveFrame(uint tick, IReadOnlyList<BodySnapshot> snapshots) =>
             BodySync.WriteFrames(_writer, tick, snapshots, packet => owner._transport.Send(id, packet, Channel.Unreliable));
+
+        public void ReceiveEntityState(uint tick, IReadOnlyList<EntityState> states) =>
+            EntityState.WriteFrames(_writer, tick, states, packet => owner._transport.Send(id, packet, Channel.Unreliable));
 
         public void Pong(in TimePong pong) => Send(pong, Channel.Unreliable);
         public void IdBlock(uint first, uint count) => Send(new IdBlockMessage(first, count));
