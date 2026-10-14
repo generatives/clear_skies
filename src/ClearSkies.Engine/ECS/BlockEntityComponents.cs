@@ -26,6 +26,9 @@ public struct BlockRef
 /// tuning for now.</summary>
 public struct Fan
 {
+    /// <summary>How hard it pushed last tick, as a fraction (0-1) of its max: 0 when off. Set by the flight system on
+    /// the machine flying its ship, so other players' ships read 0.</summary>
+    public float Thrust;
 }
 
 /// <summary>Marks a Buoyant block entity: constant passive lift, applied at the block by

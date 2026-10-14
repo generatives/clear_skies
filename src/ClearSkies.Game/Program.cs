@@ -33,6 +33,20 @@ System.Runtime.GCSettings.LatencyMode = System.Runtime.GCLatencyMode.SustainedLo
         };
 }
 
+// --gpu fast|low|software: the fastest GPU (default), the power-saving one (usually integrated), or the CPU software
+// renderer, to try the game on a weaker machine.
+{
+    int g = Array.IndexOf(args, "--gpu");
+    if (g >= 0 && g + 1 < args.Length)
+        ClearSkies.Engine.Rendering.WebGpu.GpuContext.Adapter = args[g + 1].ToLowerInvariant() switch
+        {
+            "fast" => ClearSkies.Engine.Rendering.WebGpu.GpuAdapterChoice.Fast,
+            "low" => ClearSkies.Engine.Rendering.WebGpu.GpuAdapterChoice.LowPower,
+            "software" => ClearSkies.Engine.Rendering.WebGpu.GpuAdapterChoice.Software,
+            var other => throw new ArgumentException($"Unknown --gpu {other}: fast, low or software."),
+        };
+}
+
 var options = LaunchOptions.Parse(args);
 if (options.Headless)
 {
