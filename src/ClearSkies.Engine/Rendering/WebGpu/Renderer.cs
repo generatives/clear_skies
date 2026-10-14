@@ -278,8 +278,10 @@ var<private> drawGrid: i32;
 @group(3) @binding(0) var atlasTex:  texture_2d_array<f32>;
 @group(3) @binding(1) var atlasSamp: sampler;
 
+// pos is invariant so every pipeline drawing the same quad computes the same depth, which the cut-out faces' Equal
+// test against their own depth pre-pass relies on (see fs_cutout_shaded).
 struct VSOut {
-    @builtin(position) pos:         vec4<f32>,
+    @builtin(position) @invariant pos: vec4<f32>,
     @location(0)       color:       vec3<f32>,
     @location(1)       worldNormal: vec3<f32>,
     @location(2)       localPos:    vec3<f32>,
@@ -754,8 +756,9 @@ fn fs_cutout(in: VSOut) -> @location(0) vec4<f32> {
 
 // Cut-out faces in two passes (see Renderer.CutoutDepthPrePass): fs_cutout_depth lays down the nearest cut-out face's
 // depth at each pixel, cutting out the texels under half alpha; fs_cutout_shaded then lights only the face that matches
-// it. A leaf canopy shows many faces behind each other, and fs_cutout's discard costs the early depth test, so in one
-// pass every layer was lit before the depth test threw the hidden ones away. With no discard, the shaded pass keeps it.
+// it exactly (depth Equal: a texel cut out of the pre-pass left a farther depth there, so it fails too). A leaf canopy
+// shows many faces behind each other, and fs_cutout's discard costs the early depth test, so in one pass every layer
+// was lit before the depth test threw the hidden ones away. With no discard, the shaded pass keeps it.
 @fragment
 fn fs_cutout_depth(in: VSOut) -> @location(0) vec4<f32> {
     if (blockColor(in).a < 0.5) { discard; }
@@ -1106,7 +1109,7 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
                                                    depthWrite: true, CompareFunction.Greater, writeMask: ColorWriteMask.None,
                                                    layout: _chunkPipelineLayout);
         _chunkCutoutShadedPipeline = CreatePipeline("vs_chunk", "fs_cutout_shaded", null, PrimitiveTopology.TriangleList, CullMode.Back,
-                                                    depthWrite: false, CompareFunction.GreaterEqual, layout: _chunkPipelineLayout);
+                                                    depthWrite: false, CompareFunction.Equal, layout: _chunkPipelineLayout);
         _chunkTransparentPipeline = CreateTransparentChunkPipeline();
         _chunkTransparentDepthPipeline = CreateTransparentChunkDepthPipeline();
         // The background pass: a full-screen triangle at the far plane that only fills pixels still at the cleared
