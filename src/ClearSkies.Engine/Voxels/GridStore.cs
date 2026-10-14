@@ -61,6 +61,7 @@ internal sealed class ChunkRecord
     public int WorldCell = -1;        // world only: its world index cell, and its entry's offset in the world block
     public int WorldSlot = -1;
     public ulong Marks;               // bricks marked by the BrickMarks being filled (GpuLightSystem), 0 between uses
+    public int LightStamp;            // changes whenever light this chunk's faces show may have changed (GridStore.LightStampOf)
 }
 
 /// <summary>
@@ -130,17 +131,19 @@ fn decodeLight(d: u32) -> vec3<f32> {
     let f = f32(d & 511u) / 510.0;
     return f * f * warmTint(f32((d >> 9u) & 31u) / 30.0);
 }
+// Where colour c sits on the tint line, 0-1 (see warmTint): 0.5 for white or black.
+fn lightWarmth(c: vec3<f32>) -> f32 {
+    let m = max(c.r, max(c.g, c.b));
+    if (m <= 0.0) { return 0.5; }
+    // Along the tint line red minus blue runs from -0.4 (cool end) through 0 (white) to 0.9 (red end), so warmth
+    // follows it alone: continuous, and green (which the line can't show) doesn't push a colour either way.
+    let t = c / m;
+    let d = t.r - t.b;
+    return select(0.5 - 0.5 * clamp(-d / 0.4, 0.0, 1.0), 0.5 + 0.5 * clamp(d / 0.9, 0.0, 1.0), d >= 0.0);
+}
 fn encodeLight(c: vec3<f32>) -> u32 {
     let m = max(c.r, max(c.g, c.b));
-    var w = 0.5;
-    if (m > 0.0) {
-        // Along the tint line red minus blue runs from -0.4 (cool end) through 0 (white) to 0.9 (red end), so warmth
-        // follows it alone: continuous, and green (which the line can't show) doesn't push a colour either way.
-        let t = c / m;
-        let d = t.r - t.b;
-        w = select(0.5 - 0.5 * clamp(-d / 0.4, 0.0, 1.0), 0.5 + 0.5 * clamp(d / 0.9, 0.0, 1.0), d >= 0.0);
-    }
-    return u32(round(510.0 * sqrt(clamp(m, 0.0, 1.0)))) | (u32(round(w * 30.0)) << 9u);
+    return u32(round(510.0 * sqrt(clamp(m, 0.0, 1.0)))) | (u32(round(lightWarmth(c) * 30.0)) << 9u);
 }
 ";
 
@@ -276,6 +279,44 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     /// hold as of when they unloaded: as good as free already, for whoever budgets what's loaded.</summary>
     public int WorldChunksReleasing { get; internal set; }
     public int WorldBricksReleasing { get; internal set; }
+
+    // The last light stamp handed out (see LightStampOf).
+    private int _lightStamp;
+
+    /// <summary>A number that changes whenever the light the faces of chunk <paramref name="pos"/> show may have changed:
+    /// the display of a brick in it or right next to it was rewritten, light storage came or went there, or the chunk or
+    /// one of its neighbours loaded, changed or unloaded. A chunk mesh's light map (see Rendering.WebGpu.QuadLightmap) is
+    /// baked again when it changes. 0 for a chunk with no storage.</summary>
+    public int LightStampOf(GridHandle g, ChunkPosition pos) => g.Chunks.TryGetValue(pos, out var rec) ? rec.LightStamp : 0;
+
+    /// <summary>Notes that light slot <paramref name="slot"/>'s display is being rewritten (see <see cref="LightStampOf"/>).</summary>
+    internal void TouchLight(int slot)
+    {
+        if (slot < 0 || slot >= SlotGrid.Length || SlotGrid[slot] < 0) return;
+        if (_grids[SlotGrid[slot]] is { } g) TouchBrick(g, SlotChunk[slot], SlotBrick[slot]);
+    }
+
+    // A brick's light changed: its chunk's faces read it, and so do the faces of a neighbouring chunk (across a face,
+    // edge or corner) the brick touches, whose smoothing reaches one voxel into this chunk.
+    private void TouchBrick(GridHandle g, ChunkPosition pos, int brick)
+    {
+        int stamp = ++_lightStamp;
+        int bx = brick & 3, by = (brick >> 2) & 3, bz = brick >> 4;
+        for (int dz = bz == 0 ? -1 : 0; dz <= (bz == 3 ? 1 : 0); dz++)
+        for (int dy = by == 0 ? -1 : 0; dy <= (by == 3 ? 1 : 0); dy++)
+        for (int dx = bx == 0 ? -1 : 0; dx <= (bx == 3 ? 1 : 0); dx++)
+            if (g.Chunks.TryGetValue(pos.Offset(dx, dy, dz), out var rec)) rec.LightStamp = stamp;
+    }
+
+    // A chunk loaded, changed or unloaded: its faces and every neighbour's may read different occupancy or light now.
+    private void TouchChunk(GridHandle g, ChunkPosition pos)
+    {
+        int stamp = ++_lightStamp;
+        for (int dz = -1; dz <= 1; dz++)
+        for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++)
+            if (g.Chunks.TryGetValue(pos.Offset(dx, dy, dz), out var rec)) rec.LightStamp = stamp;
+    }
 
     /// <summary>Light bricks chunk <paramref name="pos"/> of grid <paramref name="g"/> holds.</summary>
     internal int BricksOf(GridHandle g, ChunkPosition pos)
@@ -494,6 +535,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
             }
 
         RefreshSurfaceAround(g, rec);
+        TouchChunk(g, pos);
         g.Version++;
         ChangedChunks.Add((g, changedMin, changedMax, hadSolid || rec.Solid != 0, darkens));
     }
@@ -512,6 +554,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
             var (dx, dy, dz) = FaceDir(f);
             if (g.Chunks.TryGetValue(pos.Offset(dx, dy, dz), out var n)) RefreshSurface(g, n);
         }
+        TouchChunk(g, pos);
         g.Version++;
         // A world chunk unloading isn't a change to the world: what it shadowed stays shadowed, and relighting the far
         // edge for it would only undo that. (A ship's chunk going is a real change.)
@@ -614,7 +657,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     {
         if (g.Chunks.TryGetValue(pos, out var rec)) return rec;
 
-        rec = new ChunkRecord { Pos = pos, Virtual = isVirtual, Air = isVirtual ? ulong.MaxValue : 0UL };
+        rec = new ChunkRecord { Pos = pos, Virtual = isVirtual, Air = isVirtual ? ulong.MaxValue : 0UL, LightStamp = ++_lightStamp };
         if (g.IsWorld)
         {
             int cell = WorldCell(pos);
@@ -1008,6 +1051,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         SlotInfo.Write<int>((ulong)slot * 16, info);
         LightPool.Write<uint>((ulong)slot * SlotBytes, _emptyBrick);
         NewSlots.Add(slot);
+        TouchBrick(g, pos, brick);
         return slot;
     }
 
@@ -1016,6 +1060,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         if (slot < 0 || SlotGrid[slot] < 0) return;
         FreeAcc(slot);
         var g = _grids[SlotGrid[slot]]!;
+        TouchBrick(g, SlotChunk[slot], SlotBrick[slot]);
         // Swap-remove from the owning grid's slot list.
         int pos = _slotListPos[slot];
         int last = g.Slots[^1];

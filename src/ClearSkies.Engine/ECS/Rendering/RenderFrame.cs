@@ -64,7 +64,8 @@ public sealed class RenderFrame : IDebugUiSystem
     private bool _dbgNoTextures, _dbgNoFog, _dbgOverdraw;
     private int _dbgLighting;
     private static readonly string[] DbgLightingModes =
-        { "Normal", "Flat light + corner shading", "Flat light only", "No voxel lighting" };
+        { "Normal (light maps)", "Flat light + corner shading", "Flat light only", "No voxel lighting",
+          "Smoothing per pixel (before light maps)" };
 
     public void DrawDebugUi()
     {
