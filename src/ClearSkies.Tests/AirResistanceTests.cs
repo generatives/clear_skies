@@ -122,7 +122,7 @@ public class AirResistanceTests
         var player = scene.SpawnLocalPlayer(new Vector3(0, 2000, 0));
         for (int t = 0; t < seconds * 60; t++)
         {
-            player.Get<PlayerInput>() = new PlayerInput { Held = held, Pitch = pitch };
+            player.Get<PlayerInput>() = new PlayerInput { Held = held, Pressed = t == 0 ? held : default, Pitch = pitch };
             scene.Tick();
         }
         var character = player.Get<CharacterControllerComponent>().Character;
@@ -149,12 +149,13 @@ public class AirResistanceTests
         Assert.True(diving.Length() > 2f * gliding.Length(), $"diving at {diving.Length()} m/s, gliding at {gliding.Length()}");
     }
 
-    /// <summary>A gliding player high in still air, run for <paramref name="seconds"/> at each look in turn.</summary>
+    /// <summary>A gliding player high in still air (Space pressed, opening the glider, and held), run for
+    /// <paramref name="seconds"/> at each look in turn.</summary>
     private static Entity Glide(HeadlessScene scene, Entity player, float yaw, float pitch, float seconds)
     {
         for (int t = 0; t < seconds * 60; t++)
         {
-            player.Get<PlayerInput>() = new PlayerInput { Held = PlayerButtons.Up, Yaw = yaw, Pitch = pitch };
+            player.Get<PlayerInput>() = new PlayerInput { Held = PlayerButtons.Up, Pressed = t == 0 ? PlayerButtons.Up : default, Yaw = yaw, Pitch = pitch };
             scene.Tick();
         }
         return player;
@@ -245,13 +246,19 @@ public class AirResistanceTests
         var character = () => player.Get<CharacterControllerComponent>().Character;
         Assert.True(scene.TickUntil(() => character().Supported, 120), "the platform isn't there"); // its collider is built
         player.Get<CharacterControllerComponent>().Character.TeleportTo(new Vector3(0, 10, 60));
+        player.Get<PlayerInput>() = default;
+        scene.Tick(); // off the platform, so the press below is in the air
         Glide(scene, player, 0f, 0f, 1f);
         Assert.True(Boost(scene, player, gliding: true) > 10f, "no first boost");
         player.Get<PlayerInput>() = default; // let go: the glider closes and the player drops
         Assert.True(scene.TickUntil(() => character().Supported, 600), $"never landed: at {character().Position}");
         scene.Tick();
 
-        // Jump, open the glider on the way down, and boost again well within ten seconds.
+        // Jump, open the glider with a second press, and boost again well within ten seconds.
+        player.Get<PlayerInput>() = new PlayerInput { Held = PlayerButtons.Up, Pressed = PlayerButtons.Up };
+        scene.Tick();
+        player.Get<PlayerInput>() = default;
+        scene.Tick(10);
         player.Get<PlayerInput>() = new PlayerInput { Held = PlayerButtons.Up, Pressed = PlayerButtons.Up };
         scene.Tick();
         player.Get<PlayerInput>() = new PlayerInput { Held = PlayerButtons.Up };
@@ -260,7 +267,7 @@ public class AirResistanceTests
     }
 
     [Fact]
-    public void TheGliderOpensOnlyOnTheWayDownAndClosesOnLanding()
+    public void TheGliderOpensOnASecondPressInTheAirAndClosesOnLanding()
     {
         using var scene = new HeadlessScene();
         scene.AddAirResistance();
@@ -269,13 +276,29 @@ public class AirResistanceTests
         var character = () => player.Get<CharacterControllerComponent>().Character;
         Assert.True(scene.TickUntil(() => character().Supported, 120));
 
-        // Space held from the jump: rising, no glider; on the way down, it opens.
+        // Space held from the jump: no glider, all the way back down.
         player.Get<PlayerInput>() = new PlayerInput { Held = PlayerButtons.Up, Pressed = PlayerButtons.Up };
         scene.Tick();
         player.Get<PlayerInput>() = new PlayerInput { Held = PlayerButtons.Up };
         scene.Tick(3);
+        Assert.False(character().Supported);
+        for (int t = 0; t < 120 && !character().Supported; t++)
+        {
+            scene.Tick();
+            Assert.False(character().Gliding, "opened without a second press");
+        }
+        Assert.True(character().Supported);
+
+        // Jump, let go, and press again in the air: it opens.
+        player.Get<PlayerInput>() = new PlayerInput { Held = PlayerButtons.Up, Pressed = PlayerButtons.Up };
+        scene.Tick();
+        player.Get<PlayerInput>() = default;
+        scene.Tick(10);
         Assert.False(character().Gliding);
-        Assert.True(scene.TickUntil(() => character().Gliding, 120));
+        player.Get<PlayerInput>() = new PlayerInput { Held = PlayerButtons.Up, Pressed = PlayerButtons.Up };
+        scene.Tick();
+        player.Get<PlayerInput>() = new PlayerInput { Held = PlayerButtons.Up };
+        Assert.True(character().Gliding);
         float Underside() => player.Get<ResistsAir>().Faces[ResistsAir.Index(1, false)].Area;
         Assert.True(Underside() > 10f, $"gliding on {Underside()} m²"); // the wing's, not the capsule's
         Assert.True(scene.TickUntil(() => character().Supported, 600));

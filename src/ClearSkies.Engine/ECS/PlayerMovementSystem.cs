@@ -20,7 +20,7 @@ namespace ClearSkies.Engine.ECS;
 /// comes up in the queue, rather than whenever the command happened to arrive. Free-flying moves <see cref="Transform.Position"/> directly
 /// the way the player looks; E and Q raise and lower its speed by <see cref="FlySpeedStep"/> (Ctrl triples it while
 /// held). Walking instead feeds WASD/Shift/Space into the character's motion goals
-/// (<see cref="PlayerCharacter.UpdateCharacterGoals"/>; Space held while falling glides, swapping the player's drag for a wing's, and Shift boosts the glider) — actual movement happens inside the physics step via the
+/// (<see cref="PlayerCharacter.UpdateCharacterGoals"/>; Space pressed again in the air glides while held, swapping the player's drag for a wing's, and Shift boosts the glider) — actual movement happens inside the physics step via the
 /// ported BepuPhysics2 character-controller constraint (see Physics/Characters/);
 /// <see cref="PhysicsTransformSyncSystem"/> reads the resulting body pose back into <see cref="Transform"/> after it.
 /// Mouse-look is per frame, in <see cref="LookInputSystem"/>. A player using an Interactive block
