@@ -184,7 +184,7 @@ public enum RenderLayer : byte
     /// <summary>Solid faces, drawn with the world (<c>fs_main</c>).</summary>
     Opaque,
 
-    /// <summary>Drawn with the world, but texels under half alpha are cut out (<c>fs_cutout</c>): fully see-through
+    /// <summary>Drawn with the world, but texels under half alpha are cut out (<c>fs_cutout_depth</c>): fully see-through
     /// there, solid (and depth-writing) elsewhere, so it needs no sorting. Back faces aren't drawn, so looking through a
     /// block of glass you see only its near side. For mostly clear textures like glass.</summary>
     Cutout,
