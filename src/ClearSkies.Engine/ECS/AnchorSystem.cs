@@ -157,7 +157,6 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
     private readonly EntityRegistry _registry;
     private readonly EntitySet      _ships;
     private readonly EntitySet      _riders;
-    private readonly EntitySet      _anchors;
     private readonly EntitySet      _volumes;
     private readonly IDisposable    _bodyRemoved, _disposed;
 
@@ -167,9 +166,8 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
 
     // Rebuilt every update; kept only so it isn't reallocated.
     private readonly Dictionary<Entity, int> _holdingScratch = new();                      // how many holds each grid's anchors keep
-    private readonly Dictionary<Entity, List<Vector3D<int>>> _anchorCellsScratch = new(); // each ship's anchor cells
     private readonly HashSet<(Entity, EntityId)> _keptScratch = new();                    // welds a hold still needs
-    private readonly List<Entity> _emptyScratch = new();                                  // ships with no anchors left
+    private readonly List<Entity> _emptyScratch = new();                                  // riders with no holds left
     private readonly HashSet<Entity> _changedScratch = new();                             // grids whose holds changed this update
     private string _lastEvent = "";
 
@@ -192,7 +190,6 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
         _registry = registry;
         _ships    = world.GetEntities().With<DynamicGrid>().With<ChunkGrid>().With<Transform>().With<ShipControls>().With<EntityId>().AsSet();
         _riders   = world.GetEntities().With<DynamicGrid>().With<AnchorLinks>().With<EntityId>().AsSet();
-        _anchors  = world.GetEntities().With<Anchor>().With<BlockRef>().AsSet();
         _volumes  = world.GetEntities().With<ChunkGrid>().With<Transform>().With<EntityId>().AsSet();
         // Bepu removes a body's constraints with it, so a weld on a body going away is already gone.
         _bodyRemoved = world.SubscribeComponentRemoved((in Entity _, in PhysicsBodyComponent pb) => Unweld(pb.Body));
@@ -212,7 +209,6 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
 
     public void Update(float dt)
     {
-        GroupAnchors();
         LetGoOfWhatNobodyHolds();
         TakeHold();
         Weld();
@@ -222,19 +218,14 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
 
     private static bool Anchored(Entity grid) => grid.Has<ShipControls>() && grid.Get<ShipControls>().Anchored;
 
-    private void GroupAnchors()
+    /// <summary>The ship's anchor blocks: its volume's block entities with an <see cref="Anchor"/>.</summary>
+    private static IEnumerable<BlockRef> AnchorsOf(Entity ship)
     {
-        foreach (var cells in _anchorCellsScratch.Values) cells.Clear();
-        foreach (ref readonly Entity e in _anchors.GetEntities())
-        {
-            ref readonly var block = ref e.Get<BlockRef>();
-            var root = block.Volume.Root;
-            if (!_anchorCellsScratch.TryGetValue(root, out var cells)) _anchorCellsScratch[root] = cells = new List<Vector3D<int>>();
-            cells.Add(block.Position);
+        foreach (var e in ship.Get<ChunkGrid>().Volume.BlockEntities) {
+            if (e.IsAlive && e.Has<Anchor>() && e.Has<BlockRef>()) {
+                yield return e.Get<BlockRef>();
+            }
         }
-        _emptyScratch.Clear();
-        foreach (var (root, cells) in _anchorCellsScratch) if (cells.Count == 0 || !root.IsAlive) _emptyScratch.Add(root);
-        foreach (var root in _emptyScratch) _anchorCellsScratch.Remove(root);
     }
 
     /// <summary>Drops each grid's holds whose anchors have all let go (their ships' toggles off), and counts what each
@@ -280,7 +271,7 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
                 continue;
             }
             if (ship.Has<LettingGo>() || !ship.Has<PhysicsBodyComponent>()) continue; // its holds are kept meanwhile
-            if (!_anchorCellsScratch.ContainsKey(ship))
+            if (!AnchorsOf(ship).Any())
             {
                 StopAnchoring(ship, "has no anchor");
                 continue;
@@ -370,8 +361,8 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
         ref readonly var st = ref ship.Get<Transform>();
         var shipPosition = PhysicsConv.ToBepu(st.Position);
         var shipRotation = PhysicsConv.ToBepu(st.Rotation);
-        foreach (var cell in _anchorCellsScratch[ship])
-        {
+        foreach (var anchor in AnchorsOf(ship)) {
+            var cell = anchor.Position;
             var world = shipPosition + Vector3.Transform(new Vector3(cell.X, cell.Y, cell.Z) + new Vector3(0.5f), shipRotation);
             var best = NearestInReach(_volumes, world, ship, needBody: true);
             if (best is { } b) reached.Add(b);
@@ -552,7 +543,6 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
             if (held.Welded) welded++;
             if (held.Pin is not null) pinned++;
         }
-        ImGui.Text($"Anchor blocks: {_anchors.Count:N0}, on {_anchorCellsScratch.Count:N0} ships");
         ImGui.Text($"Holds: {_held.Count:N0} ({welded:N0} welded, {pinned:N0} on pins), on {_riders.Count:N0} grids");
         ImGui.TextDisabled(_lastEvent.Length > 0 ? _lastEvent : "Flick a toggle on a ship with an anchor.");
     }
