@@ -40,7 +40,7 @@ public struct CameraUniform
     public float           HazeDistance;   // haze.w
     public float           SeaAltitude, SeaCoverage, SeaCell, SeaThickness; // sea
     public float           Exposure;       // lightParams2.x: multiplier on lit surfaces (RayLightingSettings.Exposure)
-    public float           DebugFlags;     // lightParams2.y: 1 = no texture sample, 2 = no fog or haze, 4 = per-cell see-through lookups
+    public float           DebugFlags;     // lightParams2.y: 1 = no texture sample, 2 = no fog or haze
     public float           DebugLighting;  // lightParams2.z: 0 normal, 1 flat + corner AO, 2 flat only, 3 no voxel lighting
     private float          _pad5;
 }

@@ -707,11 +707,9 @@ fn seeMask(air: vec3<i32>, i: i32) -> u32 {
     return m;
 }
 
-// seeSurface for the in-plane cell air + d: from the see-through mask sm when useMask, else by the per-cell lookups.
-fn seeAt(useMask: bool, sm: u32, air: vec3<i32>, d: vec3<i32>, N: vec3<i32>, see: bool, inside: bool) -> bool {
-    if (!see) { return false; }
-    if (useMask) { return maskSolid(sm, d - N) || (inside && maskSolid(sm, d)); }
-    return seeSurface(air + d, N, see, inside);
+// seeSurface for the in-plane cell air + d, from the see-through mask sm (0 for a face that isn't see-through).
+fn seeAt(sm: u32, d: vec3<i32>, N: vec3<i32>, inside: bool) -> bool {
+    return maskSolid(sm, d - N) || (inside && maskSolid(sm, d));
 }
 
 // One in-plane cell's (sky, r, g, b), sun and weight (0 when not included in the smoothing).
@@ -765,21 +763,18 @@ fn shadeFast(localPos: vec3<f32>, localNormal: vec3<f32>, see: bool) -> Shade {
 
     // onSurface: open, with a solid directly behind along the normal (or for a see-through block's face, a
     // see-through block, or from inside one a see-through cell: see seeSurface). Diagonals need a side cell (corner rule).
-    // A see-through face reads its neighbours' see-through bits from one mask (seeMask); the debug flag
-    // lightParams2.y bit 4 uses the per-cell lookups instead, for A/B timing.
-    let useMask = see && (u32(camera.lightParams2.y) & 4u) == 0u;
+    // A see-through face reads its neighbours' see-through bits from one mask (seeMask).
     var sm = 0u;
-    var inside = false;
-    if (useMask) { sm = seeMask(air, ai); inside = maskSolid(sm, vec3<i32>(0)); }
-    else if (see) { inside = isSeeThrough(air); }
-    let oTm = !sTm && (maskSolid(m, -T - N) || seeAt(useMask, sm, air, -T, N, see, inside));
-    let oTp = !sTp && (maskSolid(m, T - N) || seeAt(useMask, sm, air, T, N, see, inside));
-    let oBm = !sBm && (maskSolid(m, -B - N) || seeAt(useMask, sm, air, -B, N, see, inside));
-    let oBp = !sBp && (maskSolid(m, B - N) || seeAt(useMask, sm, air, B, N, see, inside));
-    let oMM = (oTm || oBm) && !sMM && (maskSolid(m, -T - B - N) || seeAt(useMask, sm, air, -T - B, N, see, inside));
-    let oPM = (oTp || oBm) && !sPM && (maskSolid(m, T - B - N) || seeAt(useMask, sm, air, T - B, N, see, inside));
-    let oMP = (oTm || oBp) && !sMP && (maskSolid(m, -T + B - N) || seeAt(useMask, sm, air, -T + B, N, see, inside));
-    let oPP = (oTp || oBp) && !sPP && (maskSolid(m, T + B - N) || seeAt(useMask, sm, air, T + B, N, see, inside));
+    if (see) { sm = seeMask(air, ai); }
+    let inside = maskSolid(sm, vec3<i32>(0));
+    let oTm = !sTm && (maskSolid(m, -T - N) || seeAt(sm, -T, N, inside));
+    let oTp = !sTp && (maskSolid(m, T - N) || seeAt(sm, T, N, inside));
+    let oBm = !sBm && (maskSolid(m, -B - N) || seeAt(sm, -B, N, inside));
+    let oBp = !sBp && (maskSolid(m, B - N) || seeAt(sm, B, N, inside));
+    let oMM = (oTm || oBm) && !sMM && (maskSolid(m, -T - B - N) || seeAt(sm, -T - B, N, inside));
+    let oPM = (oTp || oBm) && !sPM && (maskSolid(m, T - B - N) || seeAt(sm, T - B, N, inside));
+    let oMP = (oTm || oBp) && !sMP && (maskSolid(m, -T + B - N) || seeAt(sm, -T + B, N, inside));
+    let oPP = (oTp || oBp) && !sPP && (maskSolid(m, T + B - N) || seeAt(sm, T + B, N, inside));
 
     let cC  = weighed(true, air, hb, hs, ai);
     let cTm = weighed(oTm, air - T, hb, hs, ai);     let cTp = weighed(oTp, air + T, hb, hs, ai);
@@ -869,6 +864,23 @@ fn fs_cutout(in: VSOut) -> @location(0) vec4<f32> {
     let c = blockColor(in);
     if (c.a < 0.5) { discard; }
     var base = c.rgb;
+    if (in.cross.w != 0) { base *= plantTint(in.cg.xyz * 32 + in.cross.xyz); }
+    return vec4<f32>(shadeBlock(in, base, true), 1.0);
+}
+
+// Cut-out faces in two passes (see Renderer.CutoutDepthPrePass): fs_cutout_depth lays down the nearest cut-out face's
+// depth at each pixel, cutting out the texels under half alpha; fs_cutout_shaded then lights only the face that matches
+// it. A leaf canopy shows many faces behind each other, and fs_cutout's discard costs the early depth test, so in one
+// pass every layer was lit before the depth test threw the hidden ones away. With no discard, the shaded pass keeps it.
+@fragment
+fn fs_cutout_depth(in: VSOut) -> @location(0) vec4<f32> {
+    if (blockColor(in).a < 0.5) { discard; }
+    return vec4<f32>(0.0);
+}
+
+@fragment
+fn fs_cutout_shaded(in: VSOut) -> @location(0) vec4<f32> {
+    var base = blockColor(in).rgb;
     if (in.cross.w != 0) { base *= plantTint(in.cg.xyz * 32 + in.cross.xyz); }
     return vec4<f32>(shadeBlock(in, base, true), 1.0);
 }
@@ -1096,12 +1108,21 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
     private RenderPipeline* _chunkWireframePipeline;
     private RenderPipeline* _chunkOverdrawPipeline;  // debug overdraw view
     private RenderPipeline* _chunkCutoutPipeline;    // cut-out blocks' faces (fs_cutout)
+    private RenderPipeline* _chunkCutoutDepthPipeline;  // their depth pre-pass (fs_cutout_depth)
+    private RenderPipeline* _chunkCutoutShadedPipeline; // then lit where they're nearest (fs_cutout_shaded)
     private RenderPipeline* _chunkTransparentPipeline; // translucent blocks' faces, alpha-blended (fs_chunk_transparent)
     private RenderPipeline* _chunkTransparentDepthPipeline; // their depth pre-pass (fs_chunk_transparent_depth)
 
     /// <summary>Debug: draw terrain additively without depth test, so brightness shows how many surfaces cover each
     /// pixel (sky and clouds are skipped).</summary>
     public bool OverdrawMode { get; set; }
+
+    /// <summary>Cut-out faces (leaves, grass, glass) lay down their depth first (<see cref="DrawCutoutChunkDepth"/>), so
+    /// <see cref="DrawCutoutChunkMesh"/> lights only the nearest one at each pixel. Off: one pass that lights every
+    /// layer (for A/B timing). Ignored in the wireframe and overdraw views.</summary>
+    public bool CutoutDepthPrePass { get; set; } = true;
+
+    private bool CutoutPrePassOn => CutoutDepthPrePass && !WireframeMode && !OverdrawMode;
     private RenderPipeline* _boundPipeline;          // the pipeline last set in this pass
 
     private void SetPipeline(RenderPipeline* pipeline)
@@ -1200,6 +1221,11 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
         _chunkWireframePipeline = CreateChunkPipeline("vs_chunk_lines", PrimitiveTopology.LineList, CullMode.None, "fs_main");
         _chunkOverdrawPipeline  = CreateOverdrawPipeline();
         _chunkCutoutPipeline    = CreateChunkPipeline("vs_chunk", PrimitiveTopology.TriangleList, CullMode.Back, "fs_cutout");
+        _chunkCutoutDepthPipeline = CreatePipeline("vs_chunk", "fs_cutout_depth", null, PrimitiveTopology.TriangleList, CullMode.Back,
+                                                   depthWrite: true, CompareFunction.Greater, writeMask: ColorWriteMask.None,
+                                                   layout: _chunkPipelineLayout);
+        _chunkCutoutShadedPipeline = CreatePipeline("vs_chunk", "fs_cutout_shaded", null, PrimitiveTopology.TriangleList, CullMode.Back,
+                                                    depthWrite: false, CompareFunction.GreaterEqual, layout: _chunkPipelineLayout);
         _chunkTransparentPipeline = CreateTransparentChunkPipeline();
         _chunkTransparentDepthPipeline = CreateTransparentChunkDepthPipeline();
         // The background pass: a full-screen triangle at the far plane that only fills pixels still at the cleared
@@ -1926,11 +1952,24 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
         => DrawChunk(mesh, model, grid, chunk, _chunkPipeline);
 
     /// <summary>
+    /// Lays down a chunk's cut-out mesh's depth (<see cref="ChunkRenderData.CutoutMesh"/>) while
+    /// <see cref="CutoutDepthPrePass"/> is on, so <see cref="DrawCutoutChunkMesh"/> lights only the nearest cut-out face
+    /// at each pixel. Call for every visible chunk's cut-out mesh after the opaque chunk meshes.
+    /// </summary>
+    public void DrawCutoutChunkDepth(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk)
+    {
+        if (!CutoutPrePassOn) return;
+        DrawChunk(mesh, model, grid, chunk, _chunkCutoutDepthPipeline);
+    }
+
+    /// <summary>
     /// Draws a chunk's cut-out mesh (<see cref="ChunkRenderData.CutoutMesh"/>) like <see cref="DrawChunkMesh"/>, minus
-    /// its texels under half alpha. Call after the opaque chunk meshes.
+    /// its texels under half alpha: where <see cref="DrawCutoutChunkDepth"/> laid it down, or with
+    /// <see cref="CutoutDepthPrePass"/> off, cutting them out itself. Call after the opaque chunk meshes (and the cut-out
+    /// depth).
     /// </summary>
     public void DrawCutoutChunkMesh(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk)
-        => DrawChunk(mesh, model, grid, chunk, _chunkCutoutPipeline);
+        => DrawChunk(mesh, model, grid, chunk, CutoutPrePassOn ? _chunkCutoutShadedPipeline : _chunkCutoutPipeline);
 
     /// <summary>
     /// Lays down a chunk's transparent mesh's depth (<see cref="ChunkRenderData.TransparentMesh"/>), so
@@ -2077,6 +2116,8 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
         if (_chunkWireframePipeline != null) _api.RenderPipelineRelease(_chunkWireframePipeline);
         if (_chunkOverdrawPipeline != null) _api.RenderPipelineRelease(_chunkOverdrawPipeline);
         if (_chunkCutoutPipeline != null) _api.RenderPipelineRelease(_chunkCutoutPipeline);
+        if (_chunkCutoutDepthPipeline != null) _api.RenderPipelineRelease(_chunkCutoutDepthPipeline);
+        if (_chunkCutoutShadedPipeline != null) _api.RenderPipelineRelease(_chunkCutoutShadedPipeline);
         if (_chunkTransparentPipeline != null) _api.RenderPipelineRelease(_chunkTransparentPipeline);
         if (_chunkTransparentDepthPipeline != null) _api.RenderPipelineRelease(_chunkTransparentDepthPipeline);
     }

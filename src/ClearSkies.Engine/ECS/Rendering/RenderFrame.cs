@@ -62,7 +62,7 @@ public sealed class RenderFrame : IDebugUiSystem
     // ── debug UI ─────────────────────────────────────────────────────────────
     public string DebugName => "Renderer";
     private bool _referenceLighting;
-    private bool _dbgNoTextures, _dbgNoFog, _dbgOverdraw, _dbgSeeLookups;
+    private bool _dbgNoTextures, _dbgNoFog, _dbgOverdraw;
     private int _dbgLighting;
     private static readonly string[] DbgLightingModes =
         { "Normal", "Flat light + corner shading", "Flat light only", "No voxel lighting" };
@@ -85,8 +85,9 @@ public sealed class RenderFrame : IDebugUiSystem
             ImGui.Combo("Terrain lighting", ref _dbgLighting, DbgLightingModes, DbgLightingModes.Length);
             ImGui.Checkbox("No textures", ref _dbgNoTextures);
             ImGui.Checkbox("No fog or haze", ref _dbgNoFog);
-            ImGui.Checkbox("See-through faces: per-cell lookups (old)", ref _dbgSeeLookups);
-            ImGui.TextDisabled("Leaves, glass and water test their neighbours one lookup each instead of from one mask.");
+            bool onePass = !_renderer.CutoutDepthPrePass;
+            if (ImGui.Checkbox("Cut-out faces: light every layer (old)", ref onePass)) _renderer.CutoutDepthPrePass = !onePass;
+            ImGui.TextDisabled("Leaves and grass in one pass, lighting each face behind a pixel, not only the nearest.");
             if (ImGui.Checkbox("Overdraw view", ref _dbgOverdraw)) _renderer.OverdrawMode = _dbgOverdraw;
             ImGui.TextDisabled("Overdraw: how many times each pixel's terrain is shaded (nearer surfaces hide later ones).");
             ImGui.TextDisabled("  Dim grey = once (ideal); each extra time is a step brighter; white = 5 or more.");
@@ -134,7 +135,7 @@ public sealed class RenderFrame : IDebugUiSystem
             LinearizeColors = _renderer.Context.SurfaceIsSrgb ? 1f : 0f,
             Exposure       = RayLightingSettings.Exposure,
             ReferenceLighting = _referenceLighting ? 1f : 0f,
-            DebugFlags     = (_dbgNoTextures ? 1 : 0) | (_dbgNoFog ? 2 : 0) | (_dbgSeeLookups ? 4 : 0),
+            DebugFlags     = (_dbgNoTextures ? 1 : 0) | (_dbgNoFog ? 2 : 0),
             DebugLighting  = _dbgLighting,
             CameraPosition = camTransform.Position,
             UnderwaterFogEnd = UnderwaterFogEnd(camTransform.Position),
