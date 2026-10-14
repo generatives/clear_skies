@@ -84,6 +84,10 @@ public struct AnchorLink
     }
 }
 
+/// <summary>A ship whose anchors found nothing to hold: <see cref="AnchorSystem"/> has asked for its toggles to go off,
+/// and leaves it be until they have.</summary>
+public struct LettingGo { }
+
 /// <summary>
 /// On a grid held to anything (see <see cref="AnchorSystem"/>): its holds, one per volume it's held to, each to
 /// something at least as heavy as it is (or the terrain), so following them never comes back round. The first one to a
@@ -157,17 +161,17 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
     private readonly EntitySet      _volumes;
     private readonly IDisposable    _bodyRemoved, _disposed;
 
-    // What this system keeps between updates.
-    private readonly Dictionary<(Entity Rider, EntityId Target), Held> _held = new(); // the welds (and pins) holding riders
-    private readonly HashSet<Entity> _lettingGo = new(); // let go for want of a hold; the toggles' command is on its way
-    private readonly Dictionary<Entity, int> _holding = new(); // how many holds each grid's anchors keep
+    // The welds (and pins) holding riders, kept between updates. Not a component on the rider: a pin outlives the
+    // rider's entity until it's dropped, and a body going away is looked up across every rider's welds.
+    private readonly Dictionary<(Entity Rider, EntityId Target), Held> _held = new();
 
-    // Scratch, rebuilt every update and kept only so it isn't reallocated.
+    // Rebuilt every update; kept only so it isn't reallocated.
+    private readonly Dictionary<Entity, int> _holdingScratch = new();                      // how many holds each grid's anchors keep
     private readonly Dictionary<Entity, List<Vector3D<int>>> _anchorCellsScratch = new(); // each ship's anchor cells
-    private readonly HashSet<(Entity, EntityId)> _keptScratch = new();  // welds a hold still needs
-    private readonly List<(Entity, EntityId)> _staleScratch = new();    // welds none does
-    private readonly List<Entity> _emptyScratch = new();               // ships with no anchors left
-    private readonly HashSet<Entity> _changedScratch = new();          // grids whose holds changed this update
+    private readonly HashSet<(Entity, EntityId)> _keptScratch = new();                    // welds a hold still needs
+    private readonly List<(Entity, EntityId)> _staleScratch = new();                      // welds none does
+    private readonly List<Entity> _emptyScratch = new();                                  // ships with no anchors left
+    private readonly HashSet<Entity> _changedScratch = new();                             // grids whose holds changed this update
     private string _lastEvent = "";
 
     /// <summary>How a rider is held to one target: its body, welded to the target's body or to a pin.</summary>
@@ -205,7 +209,7 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
         _held.TryGetValue((rider, target), out var h) ? (h.Welded, h.Pin is not null) : (false, false);
 
     /// <summary>How many holds <paramref name="ship"/>'s anchors keep, as of the last tick.</summary>
-    public int Holding(Entity ship) => _holding.GetValueOrDefault(ship);
+    public int Holding(Entity ship) => _holdingScratch.GetValueOrDefault(ship);
 
     public void Update(float dt)
     {
@@ -238,7 +242,7 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
     /// grid's anchors still hold. A hold whose holder isn't here (released, or not loaded yet) is kept.</summary>
     private void LetGoOfWhatNobodyHolds()
     {
-        _holding.Clear();
+        _holdingScratch.Clear();
         _emptyScratch.Clear();
         foreach (ref readonly Entity rider in _riders.GetEntities())
         {
@@ -257,8 +261,8 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
                     continue;
                 }
                 links[i] = link;
-                if (link.HeldByRider) _holding[rider] = _holding.GetValueOrDefault(rider) + 1;
-                if (link.HeldByTarget && target is { } t) _holding[t] = _holding.GetValueOrDefault(t) + 1;
+                if (link.HeldByRider) _holdingScratch[rider] = _holdingScratch.GetValueOrDefault(rider) + 1;
+                if (link.HeldByTarget && target is { } t) _holdingScratch[t] = _holdingScratch.GetValueOrDefault(t) + 1;
             }
             if (links.Count == 0) _emptyScratch.Add(rider);
         }
@@ -273,10 +277,10 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
         {
             if (!ship.SimulatedHere() || !ship.Get<ShipControls>().Anchored)
             {
-                _lettingGo.Remove(ship);
+                if (ship.Has<LettingGo>()) ship.Remove<LettingGo>();
                 continue;
             }
-            if (_lettingGo.Contains(ship) || !ship.Has<PhysicsBodyComponent>()) continue; // its holds are kept meanwhile
+            if (ship.Has<LettingGo>() || !ship.Has<PhysicsBodyComponent>()) continue; // its holds are kept meanwhile
             if (!_anchorCellsScratch.ContainsKey(ship))
             {
                 StopAnchoring(ship, "has no anchor");
@@ -293,17 +297,16 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
             if (held == 0) StopAnchoring(ship, "found nothing in reach");
             else
             {
-                _holding[ship] = held;
+                _holdingScratch[ship] = held;
                 _lastEvent = $"{ship.Get<EntityId>()} took hold of {held} {(held == 1 ? "thing" : "things")}";
             }
         }
-        _lettingGo.RemoveWhere(ship => !ship.IsAlive);
     }
 
     /// <summary>Turns the ship's toggles off: it isn't holding anything.</summary>
     private void StopAnchoring(Entity ship, string why)
     {
-        _lettingGo.Add(ship);
+        ship.Set(new LettingGo());
         _commands.Send(new SetShipAnchored { Ship = ship.Get<EntityId>(), Anchored = false });
         _lastEvent = $"{ship.Get<EntityId>()} {why}: toggles off";
     }

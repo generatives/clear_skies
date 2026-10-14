@@ -2,6 +2,7 @@ using System.Numerics;
 using ClearSkies.Engine.Commands;
 using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Entities;
+using ClearSkies.Engine.Physics;
 using ClearSkies.Net.Protocol;
 using DefaultEcs;
 using Silk.NET.Maths;
@@ -44,7 +45,10 @@ public sealed class SpawnQueue
         public bool Simulated;
         public bool Local;
         public PlayerDescription? Player;
-        public AnchorLink? GridSupport;
+        /// <summary>What it's placed on, if anything (see above): a player's ship, or the grid a grid is held to; and
+        /// where on it, in its block space.</summary>
+        public EntityId Carrier;
+        public Vector3 OnCarrier;
         public Entity Anchor;
         public int Ticks;
         public readonly List<(EventMeta Meta, ushort Handler, byte[] Payload)> Events = new();
@@ -85,10 +89,14 @@ public sealed class SpawnQueue
         var p = new Pending { Id = m.Id, Kind = m.Kind, Owner = m.Owner, EventNumber = m.EventNumber, Position = m.Position, Data = m.Data.ToArray() };
         if (m.Kind == CommandIds.SpawnPlayer)
         {
-            p.Player = DescriptionBytes.Read<PlayerDescription>(p.Data);
+            var d = p.Player = DescriptionBytes.Read<PlayerDescription>(p.Data);
             p.Local = m.Owner == _session.LocalPeer;
+            if (!d.FreeFly) (p.Carrier, p.OnCarrier) = (d.Support, d.LocalPosition);
         }
-        else if (m.Kind == CommandIds.SpawnGrid) p.GridSupport = AnchorLinks.Support(GridDescription.ReadAnchors(p.Data));
+        else if (m.Kind == CommandIds.SpawnGrid && AnchorLinks.Support(GridDescription.ReadAnchors(p.Data)) is { } support)
+        {
+            (p.Carrier, p.OnCarrier) = (support.Target, support.LocalPosition);
+        }
         p.Simulated = IsAuthority || p.Local;
         if (p.Simulated)
         {
@@ -134,37 +142,28 @@ public sealed class SpawnQueue
     {
         if (p.Local && !LocalReady()) return false;
         var position = p.Position;
-        if (p.Player is { FreeFly: false } d && !d.Support.IsNone)
+        if (!p.Carrier.IsNone)
         {
-            if (!_registry.TryGet(d.Support, out var ship))
+            if (!_registry.TryGet(p.Carrier, out var carrier))
             {
                 if (p.Ticks < SupportWaitTicks) return false;
-                Console.WriteLine($"[net] {d.Name}'s ship ({d.Support}) never came: spawning where they were");
-                d.Support = EntityId.None;
-                d.Position = p.Position;
-                p.Data = DescriptionBytes.Of(d);
-            }
-            else
-            {
-                if (p.Simulated && !ship.Has<PhysicsBodyComponent>() && p.Ticks < GiveUpTicks) return false;
-                position = PlayerFactory.WorldPosition(d, _registry);
-            }
-        }
-        if (p.GridSupport is { } support)
-        {
-            if (!_registry.TryGet(support.Target, out var carrier))
-            {
-                if (p.Ticks < SupportWaitTicks) return false;
-                Console.WriteLine($"[net] grid {p.Id}'s support ({support.Target}) never came: spawning where it was");
-                p.GridSupport = null;
+                Console.WriteLine($"[net] {p.Id}'s carrier ({p.Carrier}) never came: spawning where it was");
+                p.Carrier = EntityId.None;
+                if (p.Player is { } d)
+                {
+                    // A player comes off the ship; a grid keeps its hold, pinned where it was until the other comes.
+                    d.Support = EntityId.None;
+                    d.Position = p.Position;
+                    p.Data = DescriptionBytes.Of(d);
+                }
             }
             else
             {
                 if (p.Simulated && !carrier.Has<PhysicsBodyComponent>() && p.Ticks < GiveUpTicks) return false;
                 if (carrier.Has<Transform>())
                 {
-                    var at = support.Place(carrier.Get<Transform>()).Position;
-                    position = new Vector3(at.X, at.Y, at.Z);
+                    ref readonly var ct = ref carrier.Get<Transform>();
+                    position = PhysicsConv.ToBepu(ct.Position) + Vector3.Transform(p.OnCarrier, PhysicsConv.ToBepu(ct.Rotation));
                 }
             }
         }
