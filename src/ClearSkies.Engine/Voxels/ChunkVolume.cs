@@ -1,5 +1,6 @@
 using System.Buffers;
 using ClearSkies.Engine.ECS;
+using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Math;
 using ClearSkies.Engine.Rendering;
 using DefaultEcs;
@@ -30,7 +31,7 @@ namespace ClearSkies.Engine.Voxels;
 /// rides along with the volume like the chunk does. The voxel always wins: <see cref="SetBlock"/> is the one place
 /// an entity is reconciled with its voxel. Main thread only, like every entity create/destroy.
 /// </summary>
-public class ChunkVolume
+public class ChunkVolume : IReplicatedChildren
 {
     private protected readonly Dictionary<ChunkPosition, ChunkEntry> _chunks = new();
     protected readonly World _world;
@@ -40,7 +41,7 @@ public class ChunkVolume
     private readonly HashSet<Entity> _blockEntities = new();
 
     /// <summary>Every block entity in this volume's loaded chunks (see <see cref="BlockDef.Components"/>), kept as
-    /// they're created and destroyed, so systems reach a ship's Fans, levers and so on through its
+    /// they're created and destroyed, so systems reach a grid's Fans, levers and so on through its
     /// <see cref="ChunkGrid"/> instead of grouping every block entity in the world by volume each tick.</summary>
     public IReadOnlyCollection<Entity> BlockEntities => _blockEntities;
 
@@ -140,6 +141,38 @@ public class ChunkVolume
             return true;
         entity = default;
         return false;
+    }
+
+    /// <summary>Block entities replicate with the volume's root entity, each keyed by its cell (see
+    /// <see cref="ReplicatedComponents"/>).</summary>
+    public IEnumerable<(ulong Key, Entity Entity)> ReplicatedChildren
+    {
+        get
+        {
+            foreach (var e in _blockEntities)
+                if (e.IsAlive) yield return (CellKey(e.Get<BlockRef>().Position), e);
+        }
+    }
+
+    public bool TryGetReplicatedChild(ulong key, out Entity entity)
+    {
+        var cell = KeyCell(key);
+        return TryGetBlockEntity(cell.X, cell.Y, cell.Z, out entity);
+    }
+
+    private const int KeyBits = 21; // per axis: cells within ±a million
+
+    /// <summary>A cell as a replication key: each axis in 21 bits, with the top bit set so it's never 0 (the root).</summary>
+    public static ulong CellKey(Vector3D<int> cell)
+    {
+        const ulong mask = (1UL << KeyBits) - 1;
+        return 1UL << 63 | ((ulong)cell.X & mask) | ((ulong)cell.Y & mask) << KeyBits | ((ulong)cell.Z & mask) << (2 * KeyBits);
+    }
+
+    public static Vector3D<int> KeyCell(ulong key)
+    {
+        static int Axis(ulong key, int shift) => (int)((long)(key << (64 - KeyBits - shift)) >> (64 - KeyBits)); // sign-extended
+        return new Vector3D<int>(Axis(key, 0), Axis(key, KeyBits), Axis(key, 2 * KeyBits));
     }
 
     public void SetBlock(int x, int y, int z, BlockId id) => SetBlock(x, y, z, id, BlockOrientation.Upright);

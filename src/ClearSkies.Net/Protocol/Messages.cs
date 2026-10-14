@@ -48,6 +48,7 @@ public enum MessageKind : byte
     SaveDone = 31,
     Saved = 32,
     ChunkEdited = 33,
+    EntityStateFrame = 34,
 }
 
 /// <summary>A message: writes itself, kind byte first (see <see cref="Session.RemoteHost"/> and
@@ -59,10 +60,19 @@ public interface IMessage
 
 /// <summary>Participant → Host, first thing: who's joining (by name: the host gives each name its player ID) and whether
 /// their game matches.</summary>
-public readonly record struct Hello(ushort Version, string Name, ulong GenerationChecksum) : IMessage
+/// <param name="ReplicationChecksum">A hash of the components it replicates, in order (see
+/// <see cref="Engine.Entities.ReplicatedComponents.Checksum"/>).</param>
+public readonly record struct Hello(ushort Version, string Name, ulong GenerationChecksum, ulong ReplicationChecksum = 0) : IMessage
 {
-    public void Write(NetWriter w) { w.WriteByte((byte)MessageKind.Hello); w.WriteUInt16(Version); w.WriteString(Name); w.WriteUInt64(GenerationChecksum); }
-    public static Hello Read(ref NetReader r) => new(r.ReadUInt16(), r.ReadString(), r.ReadUInt64());
+    public void Write(NetWriter w)
+    {
+        w.WriteByte((byte)MessageKind.Hello); w.WriteUInt16(Version); w.WriteString(Name); w.WriteUInt64(GenerationChecksum);
+        w.WriteUInt64(ReplicationChecksum);
+    }
+
+    // An older build's Hello ends before the replication checksum: read it so its version is what turns it away.
+    public static Hello Read(ref NetReader r) =>
+        new(r.ReadUInt16(), r.ReadString(), r.ReadUInt64(), r.AtEnd ? 0 : r.ReadUInt64());
 }
 
 /// <summary>Host → Participant: its peer ID (<see cref="PeerId.Host"/> for the hosting machine's, the authority) and first

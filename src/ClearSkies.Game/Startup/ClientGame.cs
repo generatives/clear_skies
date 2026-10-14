@@ -85,7 +85,7 @@ public static class ClientGame
         host.AddSystem(host.Physics, SystemStage.Simulation); // one step
         host.AddSystem(new PhysicsTransformSyncSystem(host.World, host.Physics), SystemStage.Simulation); // body poses -> Transform
         host.AddSystem(world.RemoteBodies, SystemStage.Simulation); // ships and other players -> Transform, about 100 ms behind
-        host.AddSystem(world.SyncedState, SystemStage.Simulation); // their block entities' synced state, as played back
+        host.AddSystem(new ReplicationSystem(net, host.World, world.Replicated, world.RemoteBodies), SystemStage.Simulation); // replicated component state, sent and played back
         host.AddSystem(world.Hierarchy, SystemStage.Simulation); // e.g. volume Transforms -> chunk Transforms
         host.AddSystem(new SupportSystem(host.World, host.Physics), SystemStage.Simulation); // what each character stands on or rides with
         host.AddSystem(world.Interpolation, SystemStage.Simulation); // records this tick's poses
@@ -141,7 +141,7 @@ public static class ClientGame
         int port = colon > 0 ? int.Parse(joinAddress[(colon + 1)..]) : 7777;
         Console.WriteLine($"[net] joining {address}:{port} as {options.PlayerName}");
         var transport = new LaggedTransport(LiteNetTransport.Join(address, port));
-        var link = RemoteHost.Connect(transport, new Hello(ProtocolVersion.Current, options.PlayerName, GenerationChecksum.Compute()),
+        var link = RemoteHost.Connect(transport, new Hello(ProtocolVersion.Current, options.PlayerName, GenerationChecksum.Compute(), GameReplication.Checksum),
                                       TimeSpan.FromSeconds(15));
         return (transport, link);
     }

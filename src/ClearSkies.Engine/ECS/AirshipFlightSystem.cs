@@ -68,7 +68,7 @@ public sealed class AirshipFlightSystem : ISystem
 {
     private readonly EntitySet       _grids;
 
-    /// <summary>The Fan and Buoyant blocks of the ship being flown, by cell and orientation (reused for each).</summary>
+    /// <summary>The Fan and Buoyant blocks of the grid being simulated, by cell and orientation (reused for each).</summary>
     private sealed class ShipBlocks
     {
         public readonly List<BlockRef> Fans        = new();
@@ -163,7 +163,8 @@ public sealed class AirshipFlightSystem : ISystem
         {
             var volume = e.Get<ChunkGrid>().Volume;
             var dynamicGrid = e.Get<DynamicGrid>();
-            // Only the owner flies a grid; everyone else follows its body sync (which brings its Fans' thrust too).
+            // Only the machine with authority over a grid simulates it; everyone else follows its body sync, and its
+            // Fans' thrust arrives as replicated state.
             if (e.Has<Entities.NetOwner>() && !e.Get<Entities.NetOwner>().IsLocal) continue;
             var blocks = BlocksOf(volume); // its Fans off, unless allocated thrust below
             // Kinematic (Locked) grids skip gravity/impulses entirely via Bepu's own integrator — nothing

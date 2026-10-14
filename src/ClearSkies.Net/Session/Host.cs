@@ -55,6 +55,7 @@ public sealed class LocalHost(Host host, JoinedPeer from) : IHost
     public void Reject(in Rejection rejection) => host.Reject(rejection);
     public void SendInput(in PlayerInputMessage input) => host.SendInput(from, input);
     public void SendFrame(uint tick, IReadOnlyList<BodySnapshot> snapshots) => host.SendFrame(from, tick, snapshots);
+    public void SendEntityState(uint tick, IReadOnlyList<EntityState> states) => host.SendEntityState(from, tick, states);
     public void EntityCreated(in DescriptionMessage description) => host.EntityCreated(from, description);
     public void EntityDescribed(in DescriptionMessage description) => host.EntityDescribed(from, description);
     public void EntityReleased(in DescriptionMessage description) => host.EntityReleased(from, description);
@@ -151,10 +152,15 @@ public sealed class Host : ISystem
     private readonly Dictionary<EntityId, HostEntity> _entities = new();
     private readonly Dictionary<ChunkPosition, HostChunk> _chunks = new();
     private readonly List<BodySnapshot> _frame = new();
+    private readonly List<EntityState> _states = new();
     private readonly List<EntityId> _scratch = new();
     private readonly List<(HostEntity Entity, byte[] Data, Vector3? Position)> _saving = new();
     private uint _idNext, _idEnd;
     private float _sinceSave;
+
+    /// <summary>A hash of the components replicated here (see <see cref="Engine.Entities.ReplicatedComponents.Checksum"/>):
+    /// a joining machine's must match.</summary>
+    public ulong ReplicationChecksum { get; init; }
 
     /// <param name="newPlayerSpawn">Where a new player's Character spawns (its capsule's centre), and which way they face.</param>
     public Host(SaveDatabase db, ITickClock clock, ulong seed, ulong generationChecksum,
@@ -250,6 +256,7 @@ public sealed class Host : ISystem
         refusal = "";
         if (hello.Version != ProtocolVersion.Current) { refusal = $"Version mismatch: host {ProtocolVersion.Current}, you {hello.Version}"; return null; }
         if (hello.GenerationChecksum != _checksum) { refusal = "World generation differs from the host's (different game build?)"; return null; }
+        if (hello.ReplicationChecksum != ReplicationChecksum) { refusal = "Replicated components differ from the host's (different game build?)"; return null; }
         var id = local && _joined.All(p => !p.IsAuthority) ? PeerId.Host : FreePeerId();
         if (id == PeerId.None) { refusal = "The game is full"; return null; }
         string name = hello.Name.Trim();
@@ -364,6 +371,18 @@ public sealed class Host : ISystem
             _frame.Clear();
             foreach (var s in snapshots) if (p.Known.Contains(s.Entity) && _entities.TryGetValue(s.Entity, out var e) && e.Loaded) _frame.Add(s);
             if (_frame.Count > 0) p.Participant.ReceiveFrame(tick, _frame);
+        }
+    }
+
+    /// <summary>The replicated state of the entities a machine has authority over: to each Participant that has them.</summary>
+    public void SendEntityState(JoinedPeer from, uint tick, IReadOnlyList<EntityState> states)
+    {
+        foreach (var p in _joined)
+        {
+            if (p == from) continue;
+            _states.Clear();
+            foreach (var s in states) if (p.Known.Contains(s.Root) && _entities.TryGetValue(s.Root, out var e) && e.Loaded) _states.Add(s);
+            if (_states.Count > 0) p.Participant.ReceiveEntityState(tick, _states);
         }
     }
 
