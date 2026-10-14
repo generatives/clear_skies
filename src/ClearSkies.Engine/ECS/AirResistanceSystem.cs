@@ -15,7 +15,8 @@ namespace ClearSkies.Engine.ECS;
 /// <see cref="ResistsAir"/> simulated here: any dynamic body (<see cref="PhysicsBodyComponent"/>) this machine owns,
 /// and any character body (<see cref="CharacterControllerComponent"/>, which only exists where its player is simulated
 /// or predicted) that isn't free-flying. Bodies turn with their drag; characters stay upright, so theirs is applied
-/// along world axes with no torque. A kinematic body (zero mass: locked, or following another machine's snapshots)
+/// along their entries' own axes (<see cref="ResistsAir.LocalOrientation"/>: the world's, or a gliding player's wing's)
+/// with no torque. A kinematic body (zero mass: locked, or following another machine's snapshots)
 /// feels none.
 ///
 /// The wind is sampled once, at the centre of mass. For each body axis, the entry facing into the relative air is
@@ -41,6 +42,8 @@ public sealed class AirResistanceSystem : ISystem, IDebugUiSystem
 
     // Diagnostics: the local player's relative air, and every body's this tick (or why it has none).
     private Vector3 _lastPlayerAir;
+    private Vector3 _lastPlayerVelocity;
+    private bool _lastPlayerGliding;
     private int _lastCharacters;
     private readonly List<BodyReading> _readings = new();
     private readonly EntitySet _localPlayer;
@@ -78,7 +81,7 @@ public sealed class AirResistanceSystem : ISystem, IDebugUiSystem
                 _readings.Add(new(e, skipped, _wind.Sample(pos), _physics.GetBodyLinearVelocity(body), default, default, front));
                 continue;
             }
-            var force = Apply(body, pos, rot, air, turns: true, dt, out var relative);
+            var force = Apply(body, pos, Quaternion.Concatenate(air.LocalOrientation, rot), air, turns: true, dt, out var relative);
             var velocity = _physics.GetBodyLinearVelocity(body);
             _readings.Add(new(e, null, relative + velocity, velocity, relative, force, front));
         }
@@ -89,9 +92,15 @@ public sealed class AirResistanceSystem : ISystem, IDebugUiSystem
             if (character.Suspended) continue;
             var body = character.BodyHandle;
             var (pos, _) = _physics.GetBodyPose(body);
-            Apply(body, pos, Quaternion.Identity, e.Get<ResistsAir>(), turns: false, dt, out var relative);
+            ref readonly var air = ref e.Get<ResistsAir>();
+            Apply(body, pos, air.LocalOrientation, air, turns: false, dt, out var relative);
             characters++;
-            if (e.Has<LocalPlayer>()) _lastPlayerAir = relative;
+            if (e.Has<LocalPlayer>())
+            {
+                _lastPlayerAir = relative;
+                _lastPlayerVelocity = _physics.GetBodyLinearVelocity(body);
+                _lastPlayerGliding = character.Gliding;
+            }
         }
         _lastCharacters = characters;
     }
@@ -141,6 +150,8 @@ public sealed class AirResistanceSystem : ISystem, IDebugUiSystem
         ImGui.SliderFloat("Air constant k = ½ρCd", ref AirConstant, 0f, 2f);
         ImGui.Text($"Characters simulated here: {_lastCharacters}");
         ImGui.Text($"Local player's relative air: {_lastPlayerAir.Length():0.0} m/s");
+        if (_lastPlayerGliding)
+            ImGui.Text($"Gliding: {new Vector2(_lastPlayerVelocity.X, _lastPlayerVelocity.Z).Length():0.0} m/s ahead, sinking {-_lastPlayerVelocity.Y:0.0} m/s");
         ImGui.Separator();
 
         // Every body, the selected ship first (the one spawned, edited or walked on last: see GridSelection), marked along
