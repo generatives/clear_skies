@@ -14,7 +14,7 @@ public enum PlayerButtons : uint
     Back = 1 << 1,
     Left = 1 << 2,
     Right = 1 << 3,
-    /// <summary>Space: jump (held while falling, glide), or rise while flying.</summary>
+    /// <summary>Space: jump (pressed again in the air and held, glide), or rise while flying.</summary>
     Up = 1 << 4,
     /// <summary>Shift: sprint (pressed while gliding, boost), or sink while flying.</summary>
     Down = 1 << 5,

@@ -11,7 +11,7 @@ namespace ClearSkies.Engine.Physics.Characters;
 /// support detection, the grounded motion constraint, jumping (buffered, with coyote time), extra fall gravity and air
 /// control relative to the ship last stood on. This side turns the tick's keys into the
 /// character's goals each tick (target velocity, view direction, jump requests), and adds Minecraft-style crouching:
-/// slower, a lower eye, and a guard that won't walk off edges; and a glider (hold Space while falling, see
+/// slower, a lower eye, and a guard that won't walk off edges; and a glider (press Space in the air and hold it, see
 /// <see cref="Gliding"/>) with a boost (Shift while gliding). Started as an adaptation of BepuPhysics2's
 /// Demos/Demos/Characters/CharacterInput.cs (v2.4.0).
 /// </summary>
@@ -38,7 +38,7 @@ public struct PlayerCharacter
     private const float CrouchMaximumDrop = 0.6f;
     private float eyeDrop;
 
-    // Glider (Space held while falling, until landing or letting go): PlayerMovementSystem swaps the player's capsule
+    // Glider (Space pressed in the air, then held until landing or letting go): PlayerMovementSystem swaps the player's capsule
     // drag entries for a wing's (ResistsAir.Glider), turned to GlideOrientation. The extra fall gravity and air control are off
     // meanwhile, so the air alone holds the character up and steers it (see WingOrientation): look ahead to glide, down
     // to dive, up to climb on the speed picked up. Looking level holds the wing GlideTrim (radians) nose-down, so it
@@ -148,8 +148,8 @@ public struct PlayerCharacter
         boostRemaining = 0;
     }
 
-    /// <summary>Whether the glider is out: <see cref="CharacterInput.Glide"/> held since some moment the character was
-    /// airborne and falling, and it hasn't landed since.</summary>
+    /// <summary>Whether the glider is out: <see cref="CharacterInput.Glide"/> held since it was pressed while the
+    /// character was airborne, and it hasn't landed since.</summary>
     public readonly bool Gliding => gliding && !suspended;
 
     /// <summary>Which way the wing faces while <see cref="Gliding"/>: body −z ahead, +y its upper side (see
@@ -192,7 +192,7 @@ public struct PlayerCharacter
         public bool Sprint;
         public bool Crouch;
         public bool JumpPressed;
-        /// <summary>Held to glide (see <see cref="Gliding"/>).</summary>
+        /// <summary>Held to glide, once pressed in the air (see <see cref="Gliding"/>).</summary>
         public bool Glide;
         /// <summary>Pressed to boost while gliding.</summary>
         public bool BoostPressed;
@@ -228,10 +228,10 @@ public struct PlayerCharacter
         var newTargetVelocity = movementDirection * effectiveSpeed;
         var viewDirection = viewDirectionWorld;
 
-        // The glider opens only on the way down (so holding Space through a jump doesn't open it at once) but then
-        // stays open, a climb included, until the key is let go or the character lands.
-        var glide = !frozen && keys.Glide && !character.Supported &&
-                    (gliding || Vector3.Dot(characterBody.Velocity.Linear, character.LocalUp) < 0);
+        // The glider opens on a press of its key in the air (not the press that jumped, which happens on the ground, so
+        // jumping and gliding take two presses) and then stays open while it's held, until it's let go or the character
+        // lands.
+        var glide = !frozen && keys.Glide && !character.Supported && (gliding || keys.JumpPressed);
         if (glide != gliding) SetGliding(ref character, glide);
         if (glide) glideOrientation = WingOrientation(viewDirection, characterBody.Velocity.Linear);
 
