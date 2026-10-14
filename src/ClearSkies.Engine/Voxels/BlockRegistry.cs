@@ -1,4 +1,5 @@
 using ClearSkies.Engine.ECS;
+using ClearSkies.Engine.Rendering;
 using Silk.NET.Maths;
 
 namespace ClearSkies.Engine.Voxels;
@@ -38,7 +39,7 @@ public static class BlockRegistry
         // Buoyant blocks through their entities instead of scanning voxels.
         Register(new BlockDef { Id = BlockId.Fan, Name = "Fan", Color = new(0.85f, 0.55f, 0.15f), IsSolid = true, PlaceOriented = true, LightEmission = 0, Weight = 3,
             OpaqueModel = true, // its housing fills the cell: it shades what's behind it and hides faces against it like a cube
-            Model = "thruster/thruster.gltf", IconTexture = "thruster.png", Components = e => e.Set(new Fan()) });
+            Model = "thruster/thruster.gltf", IconTexture = "thruster.png", Components = e => { e.Set(new Fan()); e.Set(new ParticleEmitter(ThrusterFlameSystem.Flame)); } });
         //Register(new BlockDef { Id = BlockId.Fan,     Name = "Fan",     Color = new(0.85f, 0.55f, 0.15f), IsSolid = true, LightEmission = 0, Weight = 3,
         //    Texture = "metal", TextureTop = "thruster" });
         // Model block (see BlockDef.Model): the Blockbench lever. It lets light through, since it only
