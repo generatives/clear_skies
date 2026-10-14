@@ -72,8 +72,13 @@ public sealed class GridDescription : IEntityDescription<GridDescription>
 
     public List<GridVoxel> Voxels = new();
 
-    /// <summary>What its levers and wheels ask of it.</summary>
+    /// <summary>What its levers, wheels and toggles ask of it.</summary>
     public ShipControls Controls;
+
+    /// <summary>What it's held to by anchors, and where it sits on each (see <see cref="AnchorLinks"/>). A grid held to
+    /// another is spawned where its support (the first) puts it on that grid as it is now, if that's here, rather than at
+    /// <see cref="Body"/>.</summary>
+    public List<AnchorLink> Anchors = new();
 
     /// <summary>A new grid of <paramref name="voxels"/> whose bounding box centre is at <paramref name="position"/>.</summary>
     public static GridDescription FromVoxels(Vector3 position, IEnumerable<GridVoxel> voxels)
@@ -110,6 +115,8 @@ public sealed class GridDescription : IEntityDescription<GridDescription>
         w.WriteSingle(Controls.Right);
         w.WriteSingle(Controls.Up);
         w.WriteSingle(Controls.Turn);
+        w.WriteBool(Controls.Anchored);
+        AnchorLinks.Write(w, Anchors);
     }
 
     public static GridDescription Read(ref NetReader r)
@@ -117,7 +124,24 @@ public sealed class GridDescription : IEntityDescription<GridDescription>
         var d = new GridDescription { Body = BodyState.Read(ref r), Locked = r.ReadBool() };
         using (var ms = new MemoryStream(r.ReadBytes().ToArray())) d.Voxels = GridSerializer.Read(ms);
         d.Controls = new ShipControls { Forward = r.ReadSingle(), Right = r.ReadSingle(), Up = r.ReadSingle(), Turn = r.ReadSingle() };
+        if (r.Remaining == 0) return d; // saved before anchors
+        d.Controls.Anchored = r.ReadBool();
+        d.Anchors = AnchorLinks.Read(ref r);
         return d;
+    }
+
+    /// <summary>Just the <see cref="Anchors"/> of a described grid, without reading its blocks: what the Host and
+    /// spawns waiting keep of a grid's description (a grid held to another comes and goes with it, see AnchorLinks).</summary>
+    public static List<AnchorLink> ReadAnchors(ReadOnlySpan<byte> description)
+    {
+        var r = new NetReader(description);
+        BodyState.Read(ref r);
+        r.ReadBool();
+        r.ReadBytes();
+        for (int i = 0; i < 4; i++) r.ReadSingle();
+        if (r.Remaining == 0) return new List<AnchorLink>();
+        r.ReadBool();
+        return AnchorLinks.Read(ref r);
     }
 
     // ── .grid files ─────────────────────────────────────────────────────────

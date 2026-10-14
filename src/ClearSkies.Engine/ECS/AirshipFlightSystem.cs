@@ -165,7 +165,7 @@ public sealed class AirshipFlightSystem : ISystem
             var dynamicGrid = e.Get<DynamicGrid>();
             // Only the machine with authority over a grid simulates it; everyone else follows its body sync, and its
             // Fans' thrust arrives as replicated state.
-            if (e.Has<Entities.NetOwner>() && !e.Get<Entities.NetOwner>().IsLocal) continue;
+            if (!e.SimulatedHere()) continue;
             var blocks = BlocksOf(volume); // its Fans off, unless allocated thrust below
             // Kinematic (Locked) grids skip gravity/impulses entirely via Bepu's own integrator — nothing
             // to fly. (An empty grid has no body yet, so it isn't in _grids at all.)

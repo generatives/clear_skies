@@ -85,7 +85,15 @@ public sealed class SimulationParticipant : IParticipant, ISystem, ICommandRoute
         _describable = world.GetEntities().With<EntityId>().With<OwnPresence>().Without<Chunk>().AsSet();
         _created = world.GetEntities().With<EntityId>().With<OwnPresence>().Without<Chunk>().WhenAdded<OwnPresence>().AsSet();
         commands.Applied += OnApplied;
+        // The Host keeps a grid with what it's held to by anchors, which it reads from the grid's description: tell it
+        // as soon as they change, not at the next save.
+        if (IsAuthority) _anchorsChanged = world.Subscribe((in AnchorsChanged c) =>
+        {
+            if (c.Grid.Has<EntityId>() && !_toDescribe.Contains(c.Grid.Get<EntityId>())) _toDescribe.Add(c.Grid.Get<EntityId>());
+        });
     }
+
+    private readonly IDisposable? _anchorsChanged;
 
     /// <summary>The hosting machine's, joining <paramref name="host"/> directly: the authority. Throws with the Host's
     /// reason if it refuses.</summary>
@@ -401,6 +409,7 @@ public sealed class SimulationParticipant : IParticipant, ISystem, ICommandRoute
 
     public void Dispose()
     {
+        _anchorsChanged?.Dispose();
         if (_left) return;
         _left = true;
         _host.Leave("left");
