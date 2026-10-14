@@ -30,6 +30,15 @@ public struct Grapple
     public readonly Vector3D<float> WorldPoint(in Transform anchor) => anchor.Position + Vec.Rotate(anchor.Rotation, LocalPoint);
 }
 
+/// <summary>What other machines know of a player's rope, to draw it: what it's hooked onto (<see cref="EntityId.None"/>
+/// for no rope) and where on it, in its space. Every player has one; the machine simulating them keeps it in step with
+/// their <see cref="Grapple"/> (see <see cref="GrappleSystem"/>), and it replicates from there.</summary>
+public struct RopeHook
+{
+    public EntityId Anchor;
+    public Vector3D<float> LocalPoint;
+}
+
 /// <summary>
 /// Each tick, before physics: grapple ropes, from every walking player's <see cref="PlayerInput"/>. Pressing R
 /// (<see cref="PlayerButtons.Grapple"/>) fires a rope from the eye where the player looks, up to <see cref="Reach"/>, and
@@ -46,6 +55,7 @@ public struct Grapple
 /// through everything: nothing collides with it.
 ///
 /// Runs on every machine that simulates the player (the host, and a client predicting its own), from the same input.
+/// Each player's <see cref="RopeHook"/> follows their rope, so the host's replicates it to clients that only draw them.
 /// </summary>
 public sealed class GrappleSystem : ISystem
 {
@@ -102,6 +112,16 @@ public sealed class GrappleSystem : ISystem
         }
         foreach (var e in _released) Release(e);
         _released.Clear();
+
+        foreach (ref readonly Entity e in _players.GetEntities())
+            if (e.Has<RopeHook>()) e.Get<RopeHook>() = HookOf(e);
+    }
+
+    private static RopeHook HookOf(Entity player)
+    {
+        if (!player.Has<Grapple>()) return default;
+        ref readonly var g = ref player.Get<Grapple>();
+        return g.Anchor.IsAlive && g.Anchor.Has<EntityId>() ? new RopeHook { Anchor = g.Anchor.Get<EntityId>(), LocalPoint = g.LocalPoint } : default;
     }
 
     /// <summary>Lets go of the player's rope, if they have one.</summary>

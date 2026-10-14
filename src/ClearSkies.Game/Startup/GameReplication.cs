@@ -21,6 +21,19 @@ public static class GameReplication
         components.Register<Fan>((in Fan fan, NetWriter w) =>
                                 w.WriteByte((byte)MathF.Round(System.Math.Clamp(fan.Thrust, 0f, 1f) * 255f)),
                             (ref Fan fan, ref NetReader r) => fan.Thrust = r.ReadByte() / 255f);
+
+        // A player's grapple rope, to draw: what it's hooked onto, and where on it.
+        components.Register<RopeHook>((in RopeHook hook, NetWriter w) =>
+                                     {
+                                         w.WriteUInt32(hook.Anchor.Value);
+                                         if (hook.Anchor.IsNone) return;
+                                         w.WriteSingle(hook.LocalPoint.X); w.WriteSingle(hook.LocalPoint.Y); w.WriteSingle(hook.LocalPoint.Z);
+                                     },
+                                     (ref RopeHook hook, ref NetReader r) =>
+                                     {
+                                         hook.Anchor = new EntityId(r.ReadUInt32());
+                                         hook.LocalPoint = hook.Anchor.IsNone ? default : new(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
+                                     });
     }
 
     /// <summary>A hash of the registered components, in order.</summary>

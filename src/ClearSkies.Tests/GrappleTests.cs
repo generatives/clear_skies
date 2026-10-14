@@ -199,4 +199,48 @@ public class GrappleTests
             Assert.False(player.Get<CharacterControllerComponent>().Character.Gliding, $"gliding after {i + 1} ticks");
         }
     }
+
+    [Fact]
+    public void ARopeIsSeenOnOtherMachinesAndLetGoThereToo()
+    {
+        using var game = new LoopbackGame(latencyMs: 50);
+        game.Host.WorldVolume.SetBlock(0, 520, 0, BlockId.Stone);
+        var player = game.Host.SpawnLocalPlayer(new Vector3(0.5f, 510, 0.5f), freeFly: true); // held there while the client joins
+        game.Tick(2);
+        var (client, _) = game.Join();
+        game.Tick(30);
+        Players.SetFreeFlying(player, false);
+        var there = client.Registry.Find(player.Get<EntityId>())!.Value;
+        Assert.True(there.Get<RopeHook>().Anchor.IsNone);
+
+        player.Get<PlayerInput>() = new PlayerInput { Held = PlayerButtons.Grapple, Pressed = PlayerButtons.Grapple, Pitch = Up, Aiming = true };
+        game.Tick();
+        player.Get<PlayerInput>() = new PlayerInput { Pitch = Up, Aiming = true };
+        game.Tick(40); // past the client's playback delay
+        Assert.Equal(EntityRegistry.WorldVolume, there.Get<RopeHook>().Anchor);
+        var hook = there.Get<RopeHook>().LocalPoint;
+        var expected = player.Get<Grapple>().LocalPoint;
+        Assert.True(Vector3.Distance(new Vector3(hook.X, hook.Y, hook.Z), new Vector3(expected.X, expected.Y, expected.Z)) < 1e-3f);
+
+        player.Get<PlayerInput>() = new PlayerInput { Held = PlayerButtons.Grapple, Pressed = PlayerButtons.Grapple, Pitch = Up, Aiming = true };
+        game.Tick();
+        player.Get<PlayerInput>() = new PlayerInput { Pitch = Up, Aiming = true };
+        game.Tick(40);
+        Assert.True(there.Get<RopeHook>().Anchor.IsNone);
+    }
+
+    [Fact]
+    public void AClientsRopeIsSimulatedOnTheHost()
+    {
+        var (game, _, client, crew) = CrewTests.ShipWithCrew();
+        using var _ = game;
+        foreach (var volume in new[] { game.Host.WorldVolume, client.WorldVolume }) // terrain both have
+            for (int x = -3; x <= 1; x++) for (int z = -3; z <= 1; z++) volume.SetBlock(x, 70, z, BlockId.Stone);
+        crew.Get<PlayerInput>() = new PlayerInput { Held = PlayerButtons.Grapple, Pressed = PlayerButtons.Grapple, Pitch = Up, Aiming = true };
+        game.Tick();
+        crew.Get<PlayerInput>() = new PlayerInput { Pitch = Up, Aiming = true };
+        game.Tick(20);
+        Assert.True(crew.Has<Grapple>(), "hooked on the client");
+        Assert.True(game.Simulated(crew).Has<Grapple>(), "and on the host");
+    }
 }

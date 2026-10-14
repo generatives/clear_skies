@@ -1618,6 +1618,25 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
     }
 
     /// <summary>
+    /// Draws <paramref name="mesh"/>'s triangles with the general mesh pipeline (vertex colours, back faces culled),
+    /// depth-tested like the world, or as a wireframe while <see cref="WireframeMode"/> is on. For small dynamic shapes
+    /// such as a grapple rope.
+    /// </summary>
+    public void DrawMesh(GpuMesh mesh, in Mat4 model)
+    {
+        if (WireframeMode) { DrawMeshWireframe(mesh, model); return; }
+        if (_drawIndex >= MaxObjects) return;
+
+        uint dynOffset = StageModel(ModelUniform.Default(model));
+        _api.RenderPassEncoderSetBindGroup(_pass, 1, _modelBindGroup, 1, &dynOffset); _chunkStateBound = false;
+        _api.RenderPassEncoderSetVertexBuffer(_pass, 0, mesh.VertexBuffer.Handle, mesh.VertexOffset, mesh.VertexBytes);
+        SetPipeline(_pipeline);
+        _api.RenderPassEncoderSetIndexBuffer(_pass, mesh.IndexBuffer.Handle, mesh.IndexFormat, mesh.IndexOffset, mesh.IndexBytes);
+        _api.RenderPassEncoderDrawIndexed(_pass, mesh.IndexCount, 1, 0, 0, 0);
+        _drawIndex++;
+    }
+
+    /// <summary>
     /// Draws <paramref name="mesh"/> using the wireframe pipeline and wireframe index buffer, regardless
     /// of the current <see cref="WireframeMode"/>, then restores the previous pipeline.
     /// Intended for overlay elements (selection highlight, debug gizmos). Drawn full-bright (no grid), so the

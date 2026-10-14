@@ -35,6 +35,7 @@ public static class PlayerFactory
         if (owner.IsLocal || controlledHere)
             player.Set(new CharacterControllerComponent { Character = CreateCharacter(physics, d.Position, player), EyeHeight = EyeHeight });
         player.Set(new Support());
+        player.Set(new RopeHook()); // their grapple rope, replicated from the host (see GrappleSystem)
         player.Set(ResistsAir.Player(CapsuleRadius, CapsuleLength)); // feels the wind (see AirResistanceSystem)
         player.Set(new Player { Id = d.Id, Name = d.Name, ControllingPeer = controllingPeer, IsLocal = controlledHere });
         player.Set(id);

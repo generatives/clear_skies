@@ -105,7 +105,6 @@ internal static class HostedGame
         host.AddSystem(new FogSystem(host.World, world.Options.ViewDistance), SystemStage.Frame); // at the nearest terrain not ready
         // What the player points at and uses, the HUD (crosshair, hotbar), grids saved and loaded, and the debug panels.
         host.AddSystem(new BlockTargetSystem(host.World, input, renderer, world.BlockActions, world.EditLimits), SystemStage.Frame);
-        host.AddSystem(new GrappleRopeSystem(host.World, renderer), SystemStage.Frame);
         host.AddSystem(new HudUi(view.Ui, input, world.BlockActions, pilot, renderer.Atlas,
                                  Path.Combine(AppContext.BaseDirectory, "Resources", "Icons")), SystemStage.Frame);
         var gridPersistence = new GridPersistenceSystem(host.World, view.Meshes, host.Physics, world.Selection, commands);
