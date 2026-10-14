@@ -1050,7 +1050,7 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     // first quad) in another, read by instance index; one bind group over both, rebuilt when the quad buffer grows. So a
     // run of chunk draws sets group 1 and the index buffer once, and each chunk is a single DrawIndexed.
     private const int MaxChunkDraws = 16384;
-    private readonly ChunkQuadArena _quadArena;
+    private readonly GpuBufferArena _quadArena;
     private readonly GpuBuffer _chunkDrawBuffer;
     private readonly ChunkDrawRecord[] _chunkDrawStaging = new ChunkDrawRecord[MaxChunkDraws];
     private int _chunkDrawCount;
@@ -1133,7 +1133,8 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
         }
         _quadIndices = GpuBuffer.Create(ctx, (ulong)quadIdx.Length * 4, BufferUsage.Index | BufferUsage.CopyDst);
         _quadIndices.Write<uint>(0, quadIdx);
-        _quadArena = new ChunkQuadArena(ctx, 1 << 20); // 8 MB to start; doubles as needed
+        _quadArena = new GpuBufferArena(ctx, ChunkQuad.SizeBytes, BufferUsage.Storage, 1 << 20, // 8 MB to start; doubles as needed
+                                        ctx.AdapterLimits.MaxStorageBufferBindingSize);
         _chunkDrawBuffer = GpuBuffer.Create(ctx, (ulong)(MaxChunkDraws * sizeof(ChunkDrawRecord)), BufferUsage.Storage | BufferUsage.CopyDst);
         CreateBindGroups();
         CreateFallbackAtlas();
@@ -1535,30 +1536,28 @@ fn fs_cloud(in: VSOut) -> @location(0) vec4<f32> {
     /// <summary>
     /// Uploads a chunk mesh: <paramref name="quadCount"/> packed <see cref="ChunkQuad"/>s into a run of the shared quad
     /// buffer (grown if needed), drawn by <see cref="DrawChunkMesh"/> and the like and given back when the mesh is
-    /// disposed. If even the largest buffer the device allows has no room, the mesh is empty (drawn as nothing).
+    /// disposed. Null if even the largest buffer the device allows has no room (the chunk isn't drawn).
     /// </summary>
-    public GpuMesh UploadChunkQuads(ReadOnlySpan<byte> quads, uint quadCount)
+    public GpuMesh? UploadChunkQuads(ReadOnlySpan<byte> quads, uint quadCount)
     {
         long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-        long at = _quadArena.Alloc(quadCount);
+        var span = _quadArena.Allocate(quadCount);
         long t1 = System.Diagnostics.Stopwatch.GetTimestamp();
-        if (at < 0)
+        if (span is null)
         {
-            if (!_arenaFullWarned) Console.WriteLine($"[render] chunk quad buffer full at {_quadArena.CapacityQuads:N0} quads: a chunk isn't drawn");
+            if (!_arenaFullWarned) Console.WriteLine($"[render] chunk quad buffer full at {_quadArena.CapacityElements:N0} quads: a chunk isn't drawn");
             _arenaFullWarned = true;
-            return new GpuMesh(_quadArena.Buffer, 0, 0, () => { });
+            return null;
         }
-        uint start = (uint)at;
-        _quadArena.Buffer.Write(start * (ulong)ChunkQuad.SizeBytes, quads);
+        span.Write(quads);
         long t2 = System.Diagnostics.Stopwatch.GetTimestamp();
         LastCreateMs = (t1 - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
         LastWriteMs  = (t2 - t1) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
-        var arena = _quadArena;
-        return new GpuMesh(arena.Buffer, start, quadCount, () => arena.Free(start, quadCount));
+        return new GpuMesh(span);
     }
 
     /// <summary>The shared chunk quad buffer's size and use (quads), for reports.</summary>
-    public (long Used, long Capacity) ChunkQuadArenaUse => (_quadArena.UsedQuads, _quadArena.CapacityQuads);
+    public (long Used, long Capacity) ChunkQuadArenaUse => (_quadArena.UsedElements, _quadArena.CapacityElements);
 
     /// <summary>How long the last <see cref="UploadChunkQuads"/> spent creating its buffer and writing it (ms), for
     /// the meshing panel.</summary>
