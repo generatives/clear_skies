@@ -89,11 +89,15 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         public int Y;
         public GpuMesh? Opaque, Cutout, Transparent;
         public PackedOpacity? Occupancy; // for the grid (shared for all-air and all-solid chunks)
+        public ChunkPosition Pos;        // in coarse chunks
+        public Mat4 Model;               // coarse cells to world
+        public Vector3D<float> Min, Centre;
     }
 
     private sealed class CoarseColumn
     {
         public readonly List<CoarseChunk> Chunks = new();
+        public readonly List<CoarseChunk> Shown = new(); // the chunks with faces (not buried)
         public int MinY, MaxY;
         public bool Drawn;       // this frame: not all four full columns are ready
         public bool ChildEdited; // a full chunk under it was edited while it was hidden
@@ -132,8 +136,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     private bool _wasEnabled;
     private Vector3D<float> _view;
 
-    private readonly record struct Draw(float DistSq, CoarseChunk Chunk, Mat4 Model, ChunkPosition Pos, int Grid, bool Bake,
-                                        float Dissolve);
+    private readonly record struct Draw(float DistSq, CoarseChunk Chunk, int Grid, bool Bake, float Dissolve);
     private readonly List<Draw> _draws = new();
     private static readonly Comparison<Draw> NearestFirst = (a, b) => a.DistSq.CompareTo(b.DistSq);
     private int _built, _chunksDrawn;
@@ -429,12 +432,17 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
                     {
                         Y = b.Y, Opaque = Upload(b.Opaque, LightmapKind.Opaque), Cutout = Upload(b.Cutout, LightmapKind.SeeThrough),
                         Transparent = Upload(b.Transparent, LightmapKind.SeeThrough | LightmapKind.TwoSided),
-                        Occupancy = b.Occupancy,
+                        Occupancy = b.Occupancy, Pos = new ChunkPosition(r.Column.x, b.Y, r.Column.z),
+                        Min = new Vector3D<float>(r.Column.x * ColumnBlocks, b.Y * ColumnBlocks, r.Column.z * ColumnBlocks),
                     };
+                    chunk.Centre = chunk.Min + new Vector3D<float>(ColumnBlocks * 0.5f);
+                    chunk.Model = Mat4.Multiply(Mat4.Translation(chunk.Min), Mat4.Scale(new Vector3D<float>(Cell)));
                     column.Chunks.Add(chunk);
+                    if (chunk.Opaque != null || chunk.Cutout != null || chunk.Transparent != null) column.Shown.Add(chunk);
                     column.MinY = System.Math.Min(column.MinY, b.Y);
                     column.MaxY = System.Math.Max(column.MaxY, b.Y);
                 }
+                column.Shown.Sort((a, b) => a.Pos.Y.CompareTo(b.Pos.Y)); // so the first and last bound it
                 Unload(r.Column); // a column made again replaces the one drawn meanwhile
                 _columns[r.Column] = column;
                 _built++;
@@ -655,36 +663,32 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         if (stage == SystemStage.RenderTransparent)
         {
             foreach (var d in _draws)
-                if (d.Chunk.Transparent != null) _renderer.DrawTransparentChunkDepth(d.Chunk.Transparent, d.Model, d.Grid, d.Pos, d.Dissolve);
+                if (d.Chunk.Transparent != null) _renderer.DrawTransparentChunkDepth(d.Chunk.Transparent, d.Chunk.Model, d.Grid, d.Chunk.Pos, d.Dissolve);
             foreach (var d in _draws)
-                if (d.Chunk.Transparent != null) _renderer.DrawTransparentChunkMesh(d.Chunk.Transparent, d.Model, d.Grid, d.Pos, d.Dissolve);
+                if (d.Chunk.Transparent != null) _renderer.DrawTransparentChunkMesh(d.Chunk.Transparent, d.Chunk.Model, d.Grid, d.Chunk.Pos, d.Dissolve);
             _steps.Lap(DrawStep);
             return;
         }
 
         _draws.Clear();
         var size = new Vector3D<float>(ColumnBlocks);
-        var scale = Mat4.Scale(new Vector3D<float>(Cell));
+        var camera = frame.CameraPosition;
         foreach (var ((cx, cz), column) in _columns)
         {
             // Drawn, or dissolving over the full detail that replaced it.
             float dissolve = column.Drawn ? 0f : Faded(column.FadeOutAt);
-            if (dissolve >= 1f || column.Chunks.Count == 0) continue;
-            var min = new Vector3D<float>(cx * ColumnBlocks, column.MinY * ColumnBlocks, cz * ColumnBlocks);
-            var max = new Vector3D<float>((cx + 1) * ColumnBlocks, (column.MaxY + 1) * ColumnBlocks, (cz + 1) * ColumnBlocks);
-            if (!frame.Frustum.Intersects(min, max)) continue;
+            var shown = column.Shown;
+            if (dissolve >= 1f || shown.Count == 0) continue;
+            if (!frame.Frustum.Intersects(shown[0].Min, shown[^1].Min + size)) continue; // shown is in Y order
             // Lit from the grid once it's settled there; until then (or leaving it) with the light maps it last baked,
             // or as open air if it has none.
             bool bake = column.Settled && Grid.Index >= 0;
             if (bake) column.Baked = true;
             int grid = column.Baked && Grid.Index >= 0 ? Grid.Index : Renderer.LodGrid;
-            foreach (var c in column.Chunks)
+            foreach (var c in shown)
             {
-                if (c.Opaque == null && c.Cutout == null && c.Transparent == null) continue; // buried
-                var origin = new Vector3D<float>(cx * ColumnBlocks, c.Y * ColumnBlocks, cz * ColumnBlocks);
-                if (!frame.Frustum.Intersects(origin, origin + size)) continue;
-                float distSq = Vector3D.DistanceSquared(origin + size * 0.5f, frame.CameraPosition);
-                _draws.Add(new Draw(distSq, c, Mat4.Multiply(Mat4.Translation(origin), scale), new ChunkPosition(cx, c.Y, cz), grid, bake, dissolve));
+                if (shown.Count > 1 && !frame.Frustum.Intersects(c.Min, c.Min + size)) continue;
+                _draws.Add(new Draw(Vector3D.DistanceSquared(c.Centre, camera), c, grid, bake, dissolve));
             }
         }
 
@@ -694,10 +698,11 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         foreach (var d in _draws)
         {
             if (!d.Bake) continue;
-            int stamp = _renderer.LightStampOf(Grid, d.Pos);
-            _renderer.PrepareLightmap(d.Chunk.Opaque, Grid, d.Pos, stamp);
-            _renderer.PrepareLightmap(d.Chunk.Cutout, Grid, d.Pos, stamp);
-            _renderer.PrepareLightmap(d.Chunk.Transparent, Grid, d.Pos, stamp);
+            var pos = d.Chunk.Pos;
+            int stamp = _renderer.LightStampOf(Grid, pos);
+            _renderer.PrepareLightmap(d.Chunk.Opaque, Grid, pos, stamp);
+            _renderer.PrepareLightmap(d.Chunk.Cutout, Grid, pos, stamp);
+            _renderer.PrepareLightmap(d.Chunk.Transparent, Grid, pos, stamp);
         }
         _renderer.BakeLightmaps();
         _steps.Lap(LightmapStep);
@@ -705,11 +710,11 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         _draws.Sort(NearestFirst);
         _chunksDrawn = _draws.Count;
         foreach (var d in _draws)
-            if (d.Chunk.Opaque != null) _renderer.DrawChunkMesh(d.Chunk.Opaque, d.Model, d.Grid, d.Pos, d.Dissolve);
+            if (d.Chunk.Opaque != null) _renderer.DrawChunkMesh(d.Chunk.Opaque, d.Chunk.Model, d.Grid, d.Chunk.Pos, d.Dissolve);
         foreach (var d in _draws)
-            if (d.Chunk.Cutout != null) _renderer.DrawCutoutChunkDepth(d.Chunk.Cutout, d.Model, d.Grid, d.Pos, d.Dissolve);
+            if (d.Chunk.Cutout != null) _renderer.DrawCutoutChunkDepth(d.Chunk.Cutout, d.Chunk.Model, d.Grid, d.Chunk.Pos, d.Dissolve);
         foreach (var d in _draws)
-            if (d.Chunk.Cutout != null) _renderer.DrawCutoutChunkMesh(d.Chunk.Cutout, d.Model, d.Grid, d.Pos, d.Dissolve);
+            if (d.Chunk.Cutout != null) _renderer.DrawCutoutChunkMesh(d.Chunk.Cutout, d.Chunk.Model, d.Grid, d.Chunk.Pos, d.Dissolve);
         _steps.Lap(DrawStep);
     }
 
