@@ -85,7 +85,7 @@ public sealed class IslandSurface
     /// peaks with valleys between, in ranges a few kilometres long with lowland between them.</summary>
     public float Mountains(float x, float z)
     {
-        float range = Smoothstep(-0.15f, 0.35f, _ranges.GetNoise(x, z));
+        float range = Smoothstep(0.05f, 0.45f, _ranges.GetNoise(x, z));
         if (range <= 0f) return 0f;
         // A broad rise under the whole range, ridged peaks standing on it.
         float p = (_peaks.GetNoise(x, z) + 1f) * 0.5f;

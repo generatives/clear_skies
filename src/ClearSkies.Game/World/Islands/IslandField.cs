@@ -62,7 +62,7 @@ public static class IslandField
 
     // Landmasses: blobs of value noise at LandSpacing, roughened by a finer one; land from LandFrom, whole by LandFull,
     // and fully inside a core past CoreAt.
-    private const float LandSpacing = 9000f, LandDetail = 2600f, LandFrom = 0.45f, LandFull = 0.6f, CoreAt = 0.68f;
+    private const float LandSpacing = 9000f, LandDetail = 2600f, LandFrom = 0.53f, LandFull = 0.66f, CoreAt = 0.72f;
 
     /// <summary>0-1: how much of landscape <paramref name="layer"/> is there at (x, z): the chance that a piece whose
     /// point is there is.</summary>
