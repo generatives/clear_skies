@@ -32,7 +32,7 @@ public sealed class IslandWorldGenerator : IWorldGenerator
     private const float CrackUp = 0.75f;
 
     // Pieces are worn at their edges, in blocks: tops slope down by up to BankDrop over the last BankWidth before a
-    // side crack, so cracks open out of valleys rather than off flat ground, and undersides are rounded off over
+    // crack (shut ones too, which so read as shallow valleys), so cracks open out of valleys rather than off flat ground, and undersides are rounded off over
     // UnderRound; where two side cracks meet (rounded over EdgeRound) or are closer than MinWidth (wedges and fins),
     // worn down from the top, and up from the underside, by Taper blocks for each block in; and slabs against a crack
     // worn back to a rounded nose, gone where thinner than Slab.
@@ -45,7 +45,7 @@ public sealed class IslandWorldGenerator : IWorldGenerator
     /// <summary>Leaning and stacked cracks (fading in from half <see cref="Upright"/> to one and a half) narrow from
     /// CloseDepth blocks below the top of the land (banked down towards its side cracks) and are shut from CloseFrom
     /// up, so where one comes out on a slope there is no ledge.</summary>
-    private const float CloseFrom = 16f, CloseDepth = 60f;
+    private const float CloseFrom = 24f, CloseDepth = 120f;
 
     // Where a landscape's coverage thins, its pieces' tops keep only (1 - Flatten) of how far the surface there stands
     // above the surface at their point, and they sink by up to Sink (each its own share); at full coverage, neither.
@@ -520,6 +520,19 @@ public sealed class IslandWorldGenerator : IWorldGenerator
         // so that is one run, worked out exactly), then on from where another point becomes nearest.
         float wearNoise = Lerp(_gWear, lx, lz);
         float across = l.Crack * wearNoise, up = l.Crack * CrackUp * wearNoise * V;
+        // The top is banked down towards the cracks around the piece at the surface (all of them, so the bank is the
+        // same for every run in the column and doesn't step where one crack takes over from another).
+        float bank;
+        {
+            int i0 = 0;
+            float best = float.MaxValue;
+            for (int k = 0; k < sites; k++)
+            {
+                float d = sxz[k] + (tTop - sy[k]) * (tTop - sy[k]);
+                if (d < best) { best = d; i0 = k; }
+            }
+            bank = Bank(CrackDistance(i0, sites, sxz, sx, sy, sz, across, up, tTop));
+        }
         float t = tBottom;
         while (t < tTop && count < found.Length)
         {
@@ -531,9 +544,7 @@ public sealed class IslandWorldGenerator : IWorldGenerator
                 if (d < best) { best = d; i = k; }
             }
             float lo = tBottom, hi = tTop, exit = tTop, loStacked = 0f, loClosed = 0f, loOpen = 0f;
-            // How deep a crack is is measured from the top banked down towards this piece's side cracks.
-            SideCracks(i, sites, sxz, sx, sy, sz, across, up, tTop, out float toSide, out _);
-            float tCeiling = tTop - Bank(toSide) * V;
+            float tCeiling = tTop - bank * V; // how deep a crack is is measured from the banked top
             for (int j = 0; j < sites; j++)
             {
                 if (j == i) continue;
@@ -577,11 +588,9 @@ public sealed class IslandWorldGenerator : IWorldGenerator
             // The landscape's top and underside rounded off towards the side cracks: under a ceiling and over a floor
             // that every run keeps to, so a run whose top a leaning crack cuts off short isn't left standing as a wall.
             bool atBottom = lo <= tBottom;
-            // (Measured at the run's own top and bottom, which are inside its piece: at the surface's height a run
-            // whose top is cut short by a piece above would be measuring from inside that piece.)
-            SideCracks(i, sites, sxz, sx, sy, sz, across, up, hi, out float fromCrack, out _);
-            yHi = MathF.Min(yHi, pieceTop - Bank(fromCrack));
-            SideCracks(i, sites, sxz, sx, sy, sz, across, up, lo, out fromCrack, out _);
+            yHi = MathF.Min(yHi, pieceTop - bank);
+            // (Measured at the run's own bottom, which is inside its piece.)
+            SideCracks(i, sites, sxz, sx, sy, sz, across, up, lo, out float fromCrack, out _);
             yLo = MathF.Max(yLo, bottom + Round(fromCrack, UnderRound));
             // A thin slab against a crack, worn back to a rounded nose: from its underside if that is the landscape's,
             // else from the top. (The same however it is bounded, so land doesn't step where a crack above it meets
@@ -621,6 +630,24 @@ public sealed class IslandWorldGenerator : IWorldGenerator
             if (d < first) { second = first; first = d; }
             else if (d < second) second = d;
         }
+    }
+
+    /// <summary>How far, in blocks, point i's piece is from its nearest crack of any tilt at scaled height t, less
+    /// the wear.</summary>
+    private static float CrackDistance(int i, int sites, Span<float> sxz, Span<float> sx, Span<float> sy, Span<float> sz,
+                                       float across, float up, float t)
+    {
+        float nearest = float.MaxValue;
+        for (int j = 0; j < sites; j++)
+        {
+            if (j == i) continue;
+            float ax = sx[j] - sx[i], ay = sy[j] - sy[i], az = sz[j] - sz[i];
+            float len2 = ax * ax + ay * ay + az * az;
+            float wear = across + (up - across) * (ay * ay / len2);
+            float dj = sxz[j] + (t - sy[j]) * (t - sy[j]), di = sxz[i] + (t - sy[i]) * (t - sy[i]);
+            nearest = MathF.Min(nearest, (dj - di) / (2f * MathF.Sqrt(len2)) - wear);
+        }
+        return nearest;
     }
 
     /// <summary>How far a top is worn down <paramref name="fromCrack"/> blocks from a side crack: a bank, steepening
