@@ -57,6 +57,11 @@ public sealed record LaunchOptions
     /// </summary>
     public bool Headless { get; init; }
 
+    /// <summary>--lod [blocks]: start with distant terrain drawn coarse (the Distant Terrain panel's toggle), optionally
+    /// out to this distance.</summary>
+    public bool Lod { get; init; }
+    public float? LodDistance { get; init; }
+
     /// <summary>--flight-test: fly once the world has loaded, then quit.</summary>
     public bool FlightTest { get; init; }
 
@@ -77,7 +82,8 @@ public sealed record LaunchOptions
         if (Value("--lighting") is { Length: > 0 } lighting) o = o with { LightingPreset = lighting };
         if (int.TryParse(Value("--checker-bounce"), out int checker)) o = o with { CheckerBounce = checker };
         if (int.TryParse(Value("--msaa"), out int msaa)) o = o with { Msaa = msaa };
+        if (float.TryParse(Value("--lod"), NumberStyles.Float, CultureInfo.InvariantCulture, out float lod)) o = o with { LodDistance = lod };
         if (Value("--view-distance") is { } view) o = o with { ViewDistance = float.Parse(view, CultureInfo.InvariantCulture) };
-        return o with { FlightTest = args.Contains("--flight-test") };
+        return o with { FlightTest = args.Contains("--flight-test"), Lod = args.Contains("--lod") };
     }
 }

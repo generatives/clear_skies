@@ -28,6 +28,7 @@ const MIN_AMBIENT: f32 = 0.00;        // floor so no geometry is ever fully blac
 const AO_MIN: f32 = 0.15;             // darkest ambient-occluded corner (1 = no AO). 0.15 provides exaggeration for evaluation;
                                       // 0.45 is the subtler default.
 const NO_LIGHTMAP: u32 = 0xFFFFFFFFu; // a quad without a light map (see VSOut.lm)
+const LOD_GRID: i32 = -2;              // a coarse distant chunk's grid (Renderer.LodGrid): lit as open air
 
 // sunDir.w: sun strength (SunLight.Strength). lightParams.x, .y: unused (ray AO is in the voxel light), .z: ambient
 // (0-1), .w: 1 on an sRGB surface (see lin). camPos.xyz: camera world position. fog.xy: the world's fog start/end
@@ -606,8 +607,9 @@ fn shadeBlock(in: VSOut, baseColor: vec3<f32>, see: bool, back: bool) -> vec3<f3
     drawGrid  = in.cg.w;
     let dbg = u32(camera.lightParams2.y);
 
-    // A chunk drawn without a grid has no light data: full-bright.
-    if (drawGrid < 0) { return baseColor; }
+    // A chunk drawn without a grid has no light data: full-bright. Coarse distant terrain (LOD_GRID) has none either,
+    // and is lit as open air below.
+    if (drawGrid < 0 && drawGrid != LOD_GRID) { return baseColor; }
 
     let worldN = normalize(in.worldNormal);
     let ndotl  = max(dot(worldN, -(camera.sunDir.xyz)), 0.0);
@@ -615,8 +617,8 @@ fn shadeBlock(in: VSOut, baseColor: vec3<f32>, see: bool, back: bool) -> vec3<f3
     var ao: f32;
     let mode = i32(camera.lightParams2.z);
     let air = drawChunk * 32 + vec3<i32>(floor(in.localPos + 0.5 * in.localNormal));
-    if (mode == 3) {
-        // Debug: no voxel lighting at all (open sky, full sun, no AO).
+    if (mode == 3 || drawGrid == LOD_GRID) {
+        // Debug: no voxel lighting at all (open sky, full sun, no AO); and coarse distant terrain, always.
         s.sky = camera.lightParams.z; s.rgb = vec3<f32>(0.0); s.sun = 1.0;
         ao = 1.0;
     } else if (in.cross.w != 0) {
@@ -1696,9 +1698,13 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
         _cameraBuffer.Write<CameraUniform>(0, s);
     }
 
+    /// <summary>The grid a coarse distant chunk is drawn with (see LodTerrainSystem): it has no voxel light, and is lit
+    /// as open air (ambient and sun).</summary>
+    public const int LodGrid = -2;
+
     /// <summary>
     /// Draws a chunk mesh lit from grid <paramref name="grid"/> (its <see cref="GridHandle.Index"/>; -1 draws it
-    /// full-bright). <paramref name="chunk"/> is the chunk's coordinate in that grid.
+    /// full-bright, <see cref="LodGrid"/> lit as open air). <paramref name="chunk"/> is the chunk's coordinate in that grid.
     /// </summary>
     public void DrawChunkMesh(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk)
         => DrawChunk(mesh, model, grid, chunk, _chunkPipeline);

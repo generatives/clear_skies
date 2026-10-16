@@ -34,6 +34,7 @@ public sealed class GameWorld
     {
         Host = host;
         Options = options;
+        ChunkStore = chunkStore;
         Session = session;
         Seed = seed;
         Registry = new EntityRegistry(host.World);
@@ -83,6 +84,9 @@ public sealed class GameWorld
     public BlockEntities Blocks { get; }
     public EditLimits EditLimits { get; } = new();
     public ChunkLoadSystem ChunkLoad { get; }
+
+    /// <summary>Where edited terrain chunks come from (the Host).</summary>
+    public IChunkStore ChunkStore { get; }
 
     /// <summary>Records each tick's poses (in the tick), and draws between the last two (in the frame).</summary>
     public TickInterpolationSystem Interpolation { get; }

@@ -51,6 +51,10 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     /// about the cell centre to the orientation, standing on the cell face opposite its top.</summary>
     private static readonly Mat4[] OrientationPlacement = BuildOrientationPlacements();
 
+    /// <summary>Whether a static world column is drawn by something else instead (coarse distant terrain, see
+    /// LodTerrainSystem.Covers): its chunks are skipped.</summary>
+    public Func<int, int, bool>? Covered { get; set; }
+
     /// <param name="staticVolume">The static world, whose chunks are culled by column (it never moves).</param>
     public ChunkRenderSystem(World world, Renderer renderer, ChunkVolume staticVolume)
     {
@@ -119,6 +123,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
             var min = new Vector3D<float>(cx * ChunkData.Size, column.MinY * ChunkData.Size, cz * ChunkData.Size);
             var max = new Vector3D<float>((cx + 1) * ChunkData.Size, (column.MaxY + 1) * ChunkData.Size, (cz + 1) * ChunkData.Size);
             if (!frame.Frustum.Intersects(min, max)) continue;
+            if (Covered?.Invoke(cx, cz) == true) continue; // drawn coarse instead (see LodTerrainSystem)
             _columnsVisible++;
             foreach (var e in column.Chunks)
             {

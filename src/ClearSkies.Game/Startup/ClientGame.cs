@@ -114,7 +114,8 @@ public static class ClientGame
         host.AddSystem(world.Interpolation, SystemStage.Frame);
         host.AddSystem(world.Hierarchy, SystemStage.Frame);
         host.AddSystem(world.ChunkLoad, SystemStage.Frame);
-        host.AddSystem(new FogSystem(host.World, world.Options.ViewDistance), SystemStage.Frame); // at the nearest terrain not ready
+        var fog = new FogSystem(host.World, world.Options.ViewDistance);
+        host.AddSystem(fog, SystemStage.Frame); // at the nearest terrain not ready
         // What the player points at and uses, the HUD (crosshair, hotbar), grids saved and loaded, and the debug panels.
         host.AddSystem(new BlockTargetSystem(host.World, input, renderer, world.BlockActions, world.EditLimits), SystemStage.Frame);
         host.AddSystem(new HudUi(view.Ui, input, world.BlockActions, pilot, renderer.Atlas,
@@ -128,6 +129,7 @@ public static class ClientGame
         host.Gui.RegisterDebugUi(new NetDebugPanel(net, null, world.RemoteBodies, transport));
 
         view.AddRender(world);
+        fog.Far = view.Lod;
 
         var s = welcome.Spawn;
         TestScene.AddCamera(host, new Vector3D<float>(s.X, s.Y + PlayerFactory.EyeHeight, s.Z), spawn.Yaw, spawn.Pitch, options.Camera);
