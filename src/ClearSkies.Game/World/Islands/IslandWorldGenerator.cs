@@ -5,14 +5,16 @@ using ClearSkies.Engine.Voxels;
 namespace ClearSkies.Game.Generation;
 
 /// <summary>
-/// Generates the islands world: the islands <see cref="IslandField"/> places, each shaped on its own.
+/// Generates the islands world: the landscapes of <see cref="IslandField"/>, each broken into pieces.
 ///
-/// An island is a lump of land floating at its base height: its outline is a ragged blob around its centre; its top
-/// rises from a low rim at the edge to its relief inland (<see cref="IslandSurface.Hills"/>, and mountains on the
-/// landmasses); its underside hangs down deepest under its middle. Cracks run all through it, top to bottom: it is
-/// split into shards, like a jigsaw, with a gap between each and the next. Shards near the middle stay level with each
-/// other, so the land reads as one across the cracks; towards the edge they sink and tilt away, and a few at the rim
-/// are gone, so the edge is broken.
+/// A landscape is a continuous surface at its own height: hills (<see cref="IslandSurface.Hills"/>), mountains on the
+/// landmasses, gentle swells, and land under it down to a lumpy underside, hanging lower under high ground. Its pieces
+/// fit together like a 3D jigsaw: each holds the land nearest its point, with distances counting vertical offsets
+/// <see cref="IslandField.VerticalScale"/> times over, so pieces are wide and flat and stack in layers, and with a
+/// crack between each and the next, across and up and down. A piece is there or not by its landscape's coverage (see
+/// <see cref="IslandField.Coverage"/>). Where coverage is full, its pieces keep the landscape's surface, so the land
+/// reads as one across the cracks; where it thins, their tops are worn down towards the height at their point and sink
+/// a little, each its own amount, so broken land steps and tilts.
 ///
 /// Per chunk column this is worked out once, block column by block column, as solid spans (runs of solid blocks), then
 /// filled in chunk by chunk.
@@ -22,39 +24,43 @@ public sealed class IslandWorldGenerator : IWorldGenerator
     private const int S = ChunkData.Size;
     private const int MaxSpans = 32; // per block column
 
-    // Wobble of a column's position before finding its shard, in blocks, so cracks are ragged rather than straight.
-    private const float CrackWarp = 18f, CrackWarpFrequency = 0.012f;
+    // Wobble of a column's position before finding its piece, in blocks, so cracks are ragged rather than straight:
+    // across, and up and down, so layers wave.
+    private const float CrackWarp = 18f, LayerWarp = 6f, CrackWarpFrequency = 0.012f;
 
-    /// <summary>How far a shard's top and bottom are rounded off at a crack, in blocks.</summary>
+    /// <summary>Cracks between stacked pieces are this much as wide as those between side-by-side ones.</summary>
+    private const float CrackUp = 0.75f;
+
+    /// <summary>How far a piece's top and underside are rounded off at a crack, in blocks.</summary>
     private const float Rounding = 6f;
 
-    /// <summary>How far in from the edge (as a share of the radius) an island's top rises to its full relief.</summary>
-    private const float RimWidth = 0.3f;
+    // Where a landscape's coverage thins, its pieces' tops keep only (1 - Flatten) of how far the surface there stands
+    // above the surface at their point, and they sink by up to Sink (each its own share); at full coverage, neither.
+    private const float Flatten = 0.6f, Sink = 30f, CoreSink = 3f;
 
-    // Shards sink: up to InnerSink in an island's middle, up to EdgeSink at its edge; past MissingFrom of the way out
-    // to the edge, MissingChance of them are gone.
-    private const float InnerSink = 3f, EdgeSink = 40f, MissingFrom = 0.12f, MissingChance = 0.35f;
+    /// <summary>Solid runs thinner than this are worn away: slivers where a surface just grazes a piece.</summary>
+    private const int MinThickness = 5;
 
-    /// <summary>Solid runs thinner than this are worn away: slivers at an island's rim.</summary>
-    private const int MinThickness = 4;
+    /// <summary>The most layers of piece points a column searches.</summary>
+    private const int MaxRows = 16;
 
     // A top is bare (see IslandSurface.Block) if land lies over it within ShadeReach blocks.
     private const float Shaded = 0.75f, ShadeReach = 250f;
 
     private readonly ulong _seed;
     private readonly IslandSurface _surface;
-    private readonly FastNoiseLite _edge, _coast, _under, _warpX, _warpZ, _crack;
+    private readonly FastNoiseLite _swell, _under, _warpX, _warpY, _warpZ, _crack;
 
     public IslandWorldGenerator(ulong seed)
     {
         _seed = seed;
         _surface = IslandSurface.For(seed);
-        _edge = Noise(seed + 41, 3, 1f);       // sampled in radii, per island: the outline's big bays and headlands
-        _coast = Noise(seed + 42, 3, 0.02f);   // the outline's small wiggles
-        _under = Noise(seed + 43, 3, 0.015f);  // lumps on the underside
+        _swell = Noise(seed + 41, 2, 0.0006f);  // each landscape's broad rises and dips (sampled offset per landscape)
+        _under = Noise(seed + 43, 3, 0.015f);   // lumps on the undersides
         _warpX = Noise(seed + 31, 2, CrackWarpFrequency);
+        _warpY = Noise(seed + 32, 2, CrackWarpFrequency);
         _warpZ = Noise(seed + 33, 2, CrackWarpFrequency);
-        _crack = Noise(seed + 34, 2, 0.03f);   // how wide the cracks are
+        _crack = Noise(seed + 34, 2, 0.03f);    // how wide the cracks are
     }
 
     private static FastNoiseLite Noise(ulong seed, int octaves, float frequency)
@@ -67,22 +73,168 @@ public sealed class IslandWorldGenerator : IWorldGenerator
         return n;
     }
 
-    private readonly List<Island> _near = new();
+    /// <summary>Each landscape samples the shared noise this far over, so their surfaces differ.</summary>
+    private static float Offset(int layer) => layer * 7919f;
+
+    /// <summary>World Y of landscape <paramref name="layer"/>'s surface at (x, z), and the level its hills stand on.</summary>
+    private float Surface(int layer, float x, float z, out float level)
+    {
+        var l = IslandField.Layers[layer];
+        float o = Offset(layer);
+        level = l.Base + l.Swell * _swell.GetNoise(x + o, z - o);
+        float top = level + l.Hills * (0.5f + 0.5f * _surface.Hills(x + o, z + o));
+        if (l.Mountains > 0f) top += l.Mountains * _surface.Mountains(x, z);
+        return top;
+    }
+
+    /// <summary>World Y of landscape <paramref name="layer"/>'s underside at (x, z), under its surface
+    /// <paramref name="top"/> standing on <paramref name="level"/>.</summary>
+    private float Underside(int layer, float x, float z, float top, float level)
+    {
+        var l = IslandField.Layers[layer];
+        float o = Offset(layer);
+        return level - l.Thickness * (0.8f + 0.25f * _under.GetNoise(x + o, z + o)) - IslandField.Roots * (top - level);
+    }
 
     public ulong ColumnLayers(int chunkX, int chunkZ, int minChunkY)
     {
-        _near.Clear();
-        IslandField.Near(_seed, chunkX * S, chunkZ * S, chunkX * S + S, chunkZ * S + S, _near);
-        if (_near.Count == 0) return 0;
         float top = float.MinValue, bottom = float.MaxValue;
-        foreach (var island in _near)
+        for (int layer = 0; layer < IslandField.Layers.Length; layer++)
         {
-            top = MathF.Max(top, island.TopBound);
-            bottom = MathF.Min(bottom, island.BottomBound);
+            if (!AnyPiece(layer, chunkX, chunkZ)) continue;
+            top = MathF.Max(top, IslandField.Layers[layer].TopBound);
+            bottom = MathF.Min(bottom, IslandField.Layers[layer].BottomBound);
         }
+        if (top < bottom) return 0;
         int lo = System.Math.Max((int)MathF.Floor(MathF.Max(bottom, IslandField.LowestBottom) / S) - minChunkY, 0);
         int hi = System.Math.Min((int)MathF.Floor(MathF.Min(top, IslandField.WorldTop - 1) / S) - minChunkY, 63);
         return lo > hi ? 0 : (ulong.MaxValue >> (63 - hi)) & (ulong.MaxValue << lo);
+    }
+
+    /// <summary>Whether any piece of landscape <paramref name="layer"/> that block columns of chunk column (chunkX,
+    /// chunkZ) can fall in is there by its coverage (not yet counting whether it is clear of the landmasses).</summary>
+    private bool AnyPiece(int layer, int chunkX, int chunkZ)
+    {
+        var (cx0, cz0, cy0, nx, nz, ny) = CellRange(layer, chunkX, chunkZ);
+        for (int k = 0; k < ny; k++)
+        for (int j = 0; j < nz; j++)
+        for (int i = 0; i < nx; i++)
+            if (Present(layer, cx0 + i, cy0 + k, cz0 + j)) return true;
+        return false;
+    }
+
+    /// <summary>The cells of landscape <paramref name="layer"/> whose pieces block columns of chunk column (chunkX,
+    /// chunkZ) can fall in: from (cx0, cy0, cz0), nx by ny by nz of them.</summary>
+    private static (int Cx0, int Cz0, int Cy0, int Nx, int Nz, int Ny) CellRange(int layer, int chunkX, int chunkZ)
+    {
+        var l = IslandField.Layers[layer];
+        int cx0 = (int)MathF.Floor((chunkX * S - CrackWarp) / l.CellSize) - 1;
+        int cx1 = (int)MathF.Floor((chunkX * S + S + CrackWarp) / l.CellSize) + 1;
+        int cz0 = (int)MathF.Floor((chunkZ * S - CrackWarp) / l.CellSize) - 1;
+        int cz1 = (int)MathF.Floor((chunkZ * S + S + CrackWarp) / l.CellSize) + 1;
+        int cy0 = Row(l, l.BottomBound - LayerWarp) - 1, cy1 = Row(l, l.TopBound + LayerWarp) + 1;
+        return (cx0, cz0, cy0, cx1 - cx0 + 1, cz1 - cz0 + 1, cy1 - cy0 + 1);
+    }
+
+    private static int Row(in IslandField.Layer l, float y) => (int)MathF.Floor(y * IslandField.VerticalScale / l.CellSize);
+
+    // ── Pieces ──────────────────────────────────────────────────────────────
+
+    /// <summary>A piece: its point (x, scaled y, z); whether it is there (0 not worked out yet, 1 there, 2 not); how
+    /// much of the surface's rise above the surface at its point its top keeps; that surface height; and how far it
+    /// sinks.</summary>
+    private struct Piece
+    {
+        public float X, Y, Z;
+        public byte State;
+        public float Keep, Level, Sink;
+    }
+
+    /// <summary>The pieces of each landscape around the chunk column being profiled (see CellRange), points worked out
+    /// up front and the rest when first needed.</summary>
+    private sealed class PieceGrid
+    {
+        public int Cx0, Cz0, Cy0, Nx, Nz, Ny;
+        public Piece[] Pieces = Array.Empty<Piece>();
+        public int Index(int i, int k, int j) => (i - Cx0) + Nx * ((j - Cz0) + Nz * (k - Cy0));
+    }
+
+    private readonly PieceGrid[] _grids = Enumerable.Range(0, IslandField.Layers.Length).Select(_ => new PieceGrid()).ToArray();
+
+    /// <summary>Loads landscape <paramref name="layer"/>'s pieces around chunk column (chunkX, chunkZ); whether any of
+    /// them is there.</summary>
+    private bool LoadGrid(int layer, int chunkX, int chunkZ)
+    {
+        var g = _grids[layer];
+        (g.Cx0, g.Cz0, g.Cy0, g.Nx, g.Nz, g.Ny) = CellRange(layer, chunkX, chunkZ);
+        int n = g.Nx * g.Nz * g.Ny;
+        if (g.Pieces.Length < n) g.Pieces = new Piece[n];
+        for (int k = 0; k < g.Ny; k++)
+        for (int j = 0; j < g.Nz; j++)
+        for (int i = 0; i < g.Nx; i++)
+        {
+            ref var p = ref g.Pieces[i + g.Nx * (j + g.Nz * k)];
+            PointOf(layer, g.Cx0 + i, g.Cy0 + k, g.Cz0 + j, out p.X, out p.Y, out p.Z, out _);
+            p.State = 0;
+        }
+        bool any = false;
+        for (int k = 0; k < g.Ny; k++)
+        for (int j = 0; j < g.Nz; j++)
+        for (int i = 0; i < g.Nx; i++)
+            any |= PieceAt(layer, g.Cx0 + i, g.Cy0 + k, g.Cz0 + j).State == 1;
+        return any;
+    }
+
+    private void PointOf(int layer, int i, int k, int j, out float x, out float y, out float z, out ulong h)
+    {
+        float size = IslandField.Layers[layer].CellSize;
+        h = IslandField.Hash(_seed, 500 + layer, i, k, j);
+        x = (i + 0.1f + 0.8f * ((h & 0xFFFFF) / 1048576f)) * size;
+        y = (k + 0.1f + 0.8f * (((h >> 20) & 0xFFFFF) / 1048576f)) * size;
+        z = (j + 0.1f + 0.8f * (((h >> 40) & 0xFFFFF) / 1048576f)) * size;
+    }
+
+    /// <summary>Whether piece (i, k, j) of landscape <paramref name="layer"/> is there by its coverage alone.</summary>
+    private bool Present(int layer, int i, int k, int j)
+    {
+        PointOf(layer, i, k, j, out float x, out _, out float z, out ulong h);
+        float there = (IslandField.Hash(h, 1, 0, 0, 0) & 0xFFFFFF) / 16777216f;
+        return there < IslandField.Coverage(_seed, layer, x, z);
+    }
+
+    /// <summary>Piece (i, k, j) of landscape <paramref name="layer"/>'s grid, worked out if it isn't yet.</summary>
+    private ref Piece PieceAt(int layer, int i, int k, int j)
+    {
+        var g = _grids[layer];
+        ref var p = ref g.Pieces[g.Index(i, k, j)];
+        if (p.State != 0) return ref p;
+        PointOf(layer, i, k, j, out _, out _, out _, out ulong h);
+        ulong h2 = IslandField.Hash(h, 1, 0, 0, 0);
+        float there = (h2 & 0xFFFFFF) / 16777216f, sinkShare = ((h2 >> 24) & 0xFFFFFF) / 16777216f;
+        float coverage = IslandField.Coverage(_seed, layer, p.X, p.Z);
+        bool present = there < coverage;
+        float rim = 1f - Smoothstep(0.75f, 1f, coverage); // 0 where the landscape is whole
+        if (present)
+        {
+            float surface = Surface(layer, p.X, p.Z, out float level);
+            p.Level = surface;
+            present = ClearOfLandmass(layer, p.X, p.Z, surface, Underside(layer, p.X, p.Z, surface, level));
+        }
+        p.State = present ? (byte)1 : (byte)2;
+        p.Keep = 1f - Flatten * rim;
+        p.Sink = sinkShare * (CoreSink + Sink * rim);
+        return ref p;
+    }
+
+    /// <summary>Whether land of landscape <paramref name="layer"/> at (x, z), from <paramref name="underside"/> up to
+    /// <paramref name="top"/>, is clear of the landmasses there.</summary>
+    private bool ClearOfLandmass(int layer, float x, float z, float top, float underside)
+    {
+        if (layer == IslandField.Landmass || IslandField.Coverage(_seed, IslandField.Landmass, x, z) <= 0f) return true;
+        float landTop = Surface(IslandField.Landmass, x, z, out float level);
+        return layer == IslandField.Underworld
+            ? top + IslandField.Clearance < Underside(IslandField.Landmass, x, z, landTop, level)
+            : underside - IslandField.Clearance > landTop;
     }
 
     // ── Generation ──────────────────────────────────────────────────────────
@@ -164,31 +316,70 @@ public sealed class IslandWorldGenerator : IWorldGenerator
         return spans.Length > 0;
     }
 
-    /// <summary>A point on solid ground near the middle of the landmass nearest (x, z): world X and Z, and its top.</summary>
+    /// <summary>A point on solid ground in the core of the landmass nearest (x, z): world X and Z, and its top.</summary>
     public (int X, int Top, int Z) GroundNear(float x, float z)
     {
-        var land = IslandField.NearestLandmass(_seed, x, z);
+        var (cx, cz) = IslandField.NearestLandmassCore(_seed, x, z);
         for (int ring = 0; ; ring++)
         for (int k = 0; k < System.Math.Max(1, ring * 8); k++)
         {
             float a = k * MathF.Tau / System.Math.Max(1, ring * 8);
-            int px = (int)(land.X + ring * 16f * MathF.Cos(a)), pz = (int)(land.Z + ring * 16f * MathF.Sin(a));
+            int px = (int)(cx + ring * 16f * MathF.Cos(a)), pz = (int)(cz + ring * 16f * MathF.Sin(a));
             if (TryTopAt(px, pz, out int top)) return (px, top, pz);
         }
     }
 
-    private readonly List<Island> _islands = new();
-    private readonly Dictionary<(int Island, int I, int J), float> _shardSink = new();
+    private readonly bool[] _layerLive = new bool[IslandField.Layers.Length];
+
+    // The smooth samples (see BuildProfile): every Step blocks, G by G of them over the chunk column.
+    private const int Step = 4, G = S / Step + 1;
+    private readonly float[] _gWarpX = new float[G * G], _gWarpZ = new float[G * G], _gLift = new float[G * G], _gWear = new float[G * G];
+    private readonly float[][] _gTop = Enumerable.Range(0, IslandField.Layers.Length).Select(_ => new float[G * G]).ToArray();
+    private readonly float[][] _gBottom = Enumerable.Range(0, IslandField.Layers.Length).Select(_ => new float[G * G]).ToArray();
+
+    /// <summary>Samples <paramref name="grid"/> at block column (lx, lz) of the chunk column, bilinearly.</summary>
+    private static float Lerp(float[] grid, int lx, int lz)
+    {
+        int gx = lx / Step, gz = lz / Step;
+        float tx = (lx - gx * Step) * (1f / Step), tz = (lz - gz * Step) * (1f / Step);
+        int c = gx + G * gz;
+        float a = grid[c] + (grid[c + 1] - grid[c]) * tx;
+        float b = grid[c + G] + (grid[c + G + 1] - grid[c + G]) * tx;
+        return a + (b - a) * tz;
+    }
 
     private void BuildProfile(int chunkX, int chunkZ)
     {
         _profileX = chunkX; _profileZ = chunkZ;
         float x0 = chunkX * S, z0 = chunkZ * S;
-        _islands.Clear();
-        _shardSink.Clear();
-        IslandField.Near(_seed, x0, z0, x0 + S, z0 + S, _islands);
         Array.Clear(_spanCount);
-        if (_islands.Count == 0) return;
+        bool any = false;
+        for (int layer = 0; layer < _layerLive.Length; layer++)
+        {
+            _layerLive[layer] = AnyPiece(layer, chunkX, chunkZ) && LoadGrid(layer, chunkX, chunkZ);
+            any |= _layerLive[layer];
+        }
+        if (!any) return;
+
+        // What varies smoothly over the chunk column, sampled every Step blocks and interpolated between: each live
+        // landscape's surface and underside, and the wobble and crack width.
+        for (int gz = 0; gz < G; gz++)
+        for (int gx = 0; gx < G; gx++)
+        {
+            int c = gx + G * gz;
+            float x = x0 + gx * Step, z = z0 + gz * Step;
+            _gWarpX[c] = CrackWarp * _warpX.GetNoise(x, z);
+            _gWarpZ[c] = CrackWarp * _warpZ.GetNoise(x, z);
+            _gLift[c] = LayerWarp * _warpY.GetNoise(x, z);
+            _gWear[c] = 0.6f + 0.4f * (_crack.GetNoise(x, z) + 1f);
+            for (int layer = 0; layer < _layerLive.Length; layer++)
+            {
+                if (!_layerLive[layer]) continue;
+                float top = Surface(layer, x, z, out float level);
+                _gTop[layer][c] = top;
+                _gBottom[layer][c] = Underside(layer, x, z, top, level);
+            }
+        }
 
         Span<(short Lo, short Hi)> found = stackalloc (short, short)[MaxSpans];
         for (int lz = 0; lz < S; lz++)
@@ -197,8 +388,8 @@ public sealed class IslandWorldGenerator : IWorldGenerator
             int col = lx + S * lz;
             float x = x0 + lx, z = z0 + lz;
             int count = 0;
-            for (int n = 0; n < _islands.Count && count < MaxSpans; n++)
-                if (Column(n, x, z, out int lo, out int hi)) found[count++] = ((short)lo, (short)hi);
+            for (int layer = 0; layer < _layerLive.Length; layer++)
+                if (_layerLive[layer]) Column(layer, lx, lz, x, z, found, ref count);
             if (count == 0) continue;
 
             // Bottom up, overlapping ones merged.
@@ -229,102 +420,112 @@ public sealed class IslandWorldGenerator : IWorldGenerator
         }
     }
 
-    /// <summary>0 at the edge of <paramref name="island"/>'s outline at (x, z), rising to 1 at its middle; under 0
-    /// outside it.</summary>
-    private float Inland(in Island island, float x, float z)
+    /// <summary>Adds landscape <paramref name="layer"/>'s solid runs in block column (x, z) to <paramref name="found"/>:
+    /// one per piece there that the column passes through, between the landscape's underside and the piece's top, and
+    /// clear of the cracks.</summary>
+    private void Column(int layer, int lx, int lz, float x, float z, Span<(short Lo, short Hi)> found, ref int count)
     {
-        float inv = 1f / island.Radius;
-        float ox = (island.Id & 0xFFFF) * 0.37f, oz = ((island.Id >> 16) & 0xFFFF) * 0.37f;
-        float ux = (x - island.X) * inv * 1.2f, uz = (z - island.Z) * inv * 1.2f;
-        float wx = x + IslandField.EdgeWarp * island.Radius * _edge.GetNoise(ux + ox, uz + oz);
-        float wz = z + IslandField.EdgeWarp * island.Radius * _edge.GetNoise(ux + oz + 100f, uz + ox);
-        float dx = wx - island.X, dz = wz - island.Z;
-        return 1f - MathF.Sqrt(dx * dx + dz * dz) * inv + IslandField.CoastWiggle * _coast.GetNoise(x, z) * inv;
+        var l = IslandField.Layers[layer];
+        var g = _grids[layer];
+        float top = Lerp(_gTop[layer], lx, lz), bottom = Lerp(_gBottom[layer], lx, lz);
+
+        // The pieces around the column (wobbled), from just under the underside to just over the top.
+        const float V = IslandField.VerticalScale;
+        float px = x + Lerp(_gWarpX, lx, lz), pz = z + Lerp(_gWarpZ, lx, lz);
+        float lift = Lerp(_gLift, lx, lz);
+        float size = l.CellSize;
+        int gx = (int)MathF.Floor(px / size), gz = (int)MathF.Floor(pz / size);
+        float tBottom = (bottom + lift) * V, tTop = (top + lift) * V;
+        int gy0 = System.Math.Max((int)MathF.Floor(tBottom / size) - 1, g.Cy0);
+        int gy1 = System.Math.Min((int)MathF.Floor(tTop / size) + 1, g.Cy0 + g.Ny - 1);
+        int sites = 9 * System.Math.Min(gy1 - gy0 + 1, MaxRows);
+        if (sites <= 0) return;
+        Span<float> sxz = stackalloc float[9 * MaxRows], sx = stackalloc float[9 * MaxRows];
+        Span<float> sy = stackalloc float[9 * MaxRows], sz = stackalloc float[9 * MaxRows];
+        Span<int> index = stackalloc int[9 * MaxRows];
+        for (int k = 0; k < sites; k++)
+        {
+            int at = g.Index(gx + k % 3 - 1, gy0 + k / 9, gz + (k / 3) % 3 - 1);
+            ref var p = ref g.Pieces[at];
+            index[k] = at;
+            sx[k] = p.X; sy[k] = p.Y; sz[k] = p.Z;
+            sxz[k] = (p.X - px) * (p.X - px) + (p.Z - pz) * (p.Z - pz);
+        }
+
+        // Up the column, piece by piece: the nearest point at t, the run where its piece is solid (at least the wear
+        // from every face between it and another: each point's squared distance less the nearest's is linear in t,
+        // so that is one run, worked out exactly), then on from where another point becomes nearest.
+        float wearNoise = Lerp(_gWear, lx, lz);
+        float across = l.Crack * wearNoise, up = l.Crack * CrackUp * wearNoise * V;
+        float t = tBottom;
+        while (t < tTop && count < found.Length)
+        {
+            int i = 0;
+            float best = float.MaxValue;
+            for (int k = 0; k < sites; k++)
+            {
+                float d = sxz[k] + (t - sy[k]) * (t - sy[k]);
+                if (d < best) { best = d; i = k; }
+            }
+            float lo = tBottom, hi = tTop, exit = tTop;
+            for (int j = 0; j < sites; j++)
+            {
+                if (j == i) continue;
+                float ax = sx[j] - sx[i], ay = sy[j] - sy[i], az = sz[j] - sz[i];
+                float len2 = ax * ax + ay * ay + az * az;
+                float wear = across + (up - across) * (ay * ay / len2);
+                float a = sxz[j] - sxz[i] + sy[j] * sy[j] - sy[i] * sy[i], b = -2f * ay; // dj^2 - di^2 = a + b t
+                float need = 2f * MathF.Sqrt(len2) * wear - a;                       // b t >= need
+                if (b > 0f) lo = MathF.Max(lo, need / b);
+                else if (b < 0f) { hi = MathF.Min(hi, need / b); exit = MathF.Min(exit, -a / b); }
+                else if (need > 0f) hi = lo;
+            }
+            t = MathF.Max(exit, t) + 0.01f;
+            if (lo >= hi) continue;
+
+            ref var piece = ref PieceAt(layer, g.Cx0 + index[i] % g.Nx, g.Cy0 + index[i] / (g.Nx * g.Nz), g.Cz0 + (index[i] / g.Nx) % g.Nz);
+            if (piece.State != 1) continue;
+
+            // Its top: the surface, worn down towards the surface at its point where the landscape is broken.
+            float pieceTop = top - MathF.Max(0f, top - piece.Level) * (1f - piece.Keep);
+            float tPieceTop = (pieceTop + lift) * V;
+            if (lo >= tPieceTop) continue;
+            bool atTop = hi >= tPieceTop;
+            hi = MathF.Min(hi, tPieceTop);
+            float yLo = lo / V - lift, yHi = hi / V - lift;
+            // Where it is the landscape's top or underside, rounded off towards the side cracks.
+            if (atTop) yHi -= 0.5f * Rounded(FromCrack(i, sites, sxz, sx, sy, sz, across, up, hi));
+            if (lo <= tBottom) yLo += Rounded(FromCrack(i, sites, sxz, sx, sy, sz, across, up, lo));
+            yLo = MathF.Max(yLo - piece.Sink * 0.8f, IslandField.LowestBottom);
+            yHi = MathF.Min(yHi - piece.Sink, IslandField.WorldTop - 1);
+            int bLo = (int)MathF.Ceiling(yLo), bHi = (int)MathF.Floor(yHi);
+            if (bHi - bLo + 1 >= MinThickness) found[count++] = ((short)bLo, (short)bHi);
+        }
     }
 
-    /// <summary>The solid run of island <paramref name="n"/> (of those near the chunk column) in block column (x, z), if
-    /// any: inside its outline and not in a crack.</summary>
-    private bool Column(int n, float x, float z, out int lo, out int hi)
+    /// <summary>How far, in blocks, point i's piece is from its nearest crack at scaled height t, less the wear.</summary>
+    private static float FromCrack(int i, int sites, Span<float> sxz, Span<float> sx, Span<float> sy, Span<float> sz,
+                                   float across, float up, float t)
     {
-        lo = hi = 0;
-        var island = _islands[n];
-        float dx = x - island.X, dz = z - island.Z;
-        if (dx * dx + dz * dz > island.Reach * island.Reach) return false;
-        float inland = Inland(island, x, z);
-        if (inland <= 0f) return false;
-        var b = island.Info;
-
-        // Its shard: the nearest of the band's shard points, jittered on a grid, to the column (wobbled), and how far
-        // the column is from the nearest crack (halfway to another point).
-        float px = x + CrackWarp * _warpX.GetNoise(x, z), pz = z + CrackWarp * _warpZ.GetNoise(x, z);
-        int gx = (int)MathF.Floor(px / b.ShardSize), gz = (int)MathF.Floor(pz / b.ShardSize);
-        Span<float> sx = stackalloc float[9], sz = stackalloc float[9];
-        int best = 0;
-        float bestD = float.MaxValue;
-        for (int k = 0; k < 9; k++)
+        float least = float.MaxValue;
+        for (int j = 0; j < sites; j++)
         {
-            int i = gx + k % 3 - 1, j = gz + k / 3 - 1;
-            ShardPoint(island.Band, i, j, b.ShardSize, out sx[k], out sz[k]);
-            float d = (sx[k] - px) * (sx[k] - px) + (sz[k] - pz) * (sz[k] - pz);
-            if (d < bestD) { bestD = d; best = k; }
+            if (j == i) continue;
+            float ax = sx[j] - sx[i], ay = sy[j] - sy[i], az = sz[j] - sz[i];
+            float len2 = ax * ax + ay * ay + az * az;
+            float wear = across + (up - across) * (ay * ay / len2);
+            float dj = sxz[j] + (t - sy[j]) * (t - sy[j]), di = sxz[i] + (t - sy[i]) * (t - sy[i]);
+            least = MathF.Min(least, (dj - di) / (2f * MathF.Sqrt(len2)) - wear);
         }
-        float toCrack = float.MaxValue;
-        for (int k = 0; k < 9; k++)
-        {
-            if (k == best) continue;
-            float ex = sx[k] - sx[best], ez = sz[k] - sz[best];
-            float d = (sx[k] - px) * (sx[k] - px) + (sz[k] - pz) * (sz[k] - pz);
-            toCrack = MathF.Min(toCrack, (d - bestD) / (2f * MathF.Sqrt(ex * ex + ez * ez)));
-        }
-        float crack = b.Crack * (0.6f + 0.4f * (_crack.GetNoise(x, z) + 1f));
-        float fromCrack = toCrack - crack;
-        if (fromCrack <= 0f) return false;
-
-        // The shard sinks the further out it is, and near the edge may be gone.
-        int si = gx + best % 3 - 1, sj = gz + best / 3 - 1;
-        if (!_shardSink.TryGetValue((n, si, sj), out float sink))
-        {
-            ulong h = IslandField.Mix(island.Id ^ ((ulong)(uint)si * 0x9E3779B97F4A7C15UL) ^ ((ulong)(uint)sj * 0xC2B2AE3D27D4EB4FUL));
-            float r = (h & 0xFFFFFF) / 16777216f, gone = ((h >> 24) & 0xFFFFFF) / 16777216f;
-            float at = Inland(island, sx[best], sz[best]); // how far out the shard is
-            float edge = 1f - Smoothstep(0.05f, 0.45f, at);
-            sink = at < MissingFrom && gone < MissingChance ? float.NaN : r * (InnerSink + EdgeSink * edge);
-            _shardSink[(n, si, sj)] = sink;
-        }
-        if (float.IsNaN(sink)) return false;
-
-        // Top: a low rim rising inland to hills, and to mountains on a landmass's inland parts.
-        float interior = Smoothstep(0f, RimWidth, inland);
-        float top = island.Base + 3f + b.Hills * (0.5f + 0.5f * _surface.Hills(x, z)) * interior;
-        if (b.Mountains > 0f) top += b.Mountains * _surface.Mountains(x, z) * Smoothstep(0.15f, 0.6f, inland);
-        // Underside: deepest under the middle, lumpy, and hanging further down under high ground, as roots under
-        // mountains.
-        float bottom = island.Base - 4f - b.Thickness * MathF.Sqrt(MathF.Min(inland, 1f)) * (0.7f + 0.3f * _under.GetNoise(x, z))
-                     - IslandField.Roots * (top - island.Base);
-        // Rounded off along the cracks.
-        if (fromCrack < Rounding)
-        {
-            float r = Rounding - fromCrack;
-            top -= r * r / (2f * Rounding);
-            bottom += r * r / Rounding;
-        }
-        top -= sink;
-        bottom -= sink * 0.8f;
-        bottom = MathF.Max(bottom, IslandField.LowestBottom);
-        top = MathF.Min(top, IslandField.WorldTop - 1);
-
-        lo = (int)MathF.Ceiling(bottom);
-        hi = (int)MathF.Floor(top);
-        return hi - lo + 1 >= MinThickness;
+        return least;
     }
 
-    private void ShardPoint(int band, int i, int j, float size, out float x, out float z)
+    /// <summary>How far a top or underside is worn back <paramref name="fromCrack"/> blocks from a crack.</summary>
+    private static float Rounded(float fromCrack)
     {
-        ulong h = _seed ^ ((ulong)(uint)(band + 500) * 0xD6E8FEB86659FD93UL);
-        h ^= (ulong)(uint)i * 0x9E3779B97F4A7C15UL; h = IslandField.Mix(h);
-        h ^= (ulong)(uint)j * 0xC2B2AE3D27D4EB4FUL; h = IslandField.Mix(h);
-        x = (i + 0.1f + 0.8f * ((h & 0xFFFFFF) / 16777216f)) * size;
-        z = (j + 0.1f + 0.8f * (((h >> 24) & 0xFFFFFF) / 16777216f)) * size;
+        if (fromCrack >= Rounding) return 0f;
+        float r = Rounding - MathF.Max(fromCrack, 0f);
+        return r * r / Rounding;
     }
 
     private static float Smoothstep(float edge0, float edge1, float x)
@@ -334,8 +535,8 @@ public sealed class IslandWorldGenerator : IWorldGenerator
     }
 }
 
-/// <summary>Clouds lie over the landmasses, thinner over the smaller islands, and clear over the open sky between: land
-/// shows from afar as a bank of cloud. Thread-safe: cloud tiles are built on worker threads.</summary>
+/// <summary>Clouds lie over the landmasses, thinner over the higher landscapes' clusters, and clear over the open sky
+/// between: land shows from afar as a bank of cloud. Thread-safe: cloud tiles are built on worker threads.</summary>
 public sealed class IslandCloudDensity : ICloudDensityMap
 {
     private readonly ulong _seed;
@@ -343,17 +544,6 @@ public sealed class IslandCloudDensity : ICloudDensityMap
     public IslandCloudDensity(ulong seed) => _seed = seed;
 
     public float Density(float x, float z)
-    {
-        var near = new List<Island>();
-        IslandField.Near(_seed, x, z, x, z, near);
-        float density = 0f;
-        foreach (var island in near)
-        {
-            if (island.Band == IslandField.Underworld) continue;
-            float d = MathF.Sqrt((x - island.X) * (x - island.X) + (z - island.Z) * (z - island.Z));
-            float cover = Math.Clamp((island.Reach - d) / (0.4f * island.Radius), 0f, 1f);
-            density = MathF.Max(density, (island.Band == IslandField.Landmass ? 1f : 0.6f) * cover);
-        }
-        return density;
-    }
+        => MathF.Max(IslandField.Coverage(_seed, IslandField.Landmass, x, z),
+                     MathF.Max(0.8f * IslandField.Coverage(_seed, 2, x, z), 0.6f * IslandField.Coverage(_seed, 3, x, z)));
 }

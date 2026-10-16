@@ -32,18 +32,14 @@ public class IslandTests
     }
 
     [Fact]
-    public void Islands_float_clear_of_the_landmasses()
+    public void Landmass_cores_are_whole_and_the_sky_between_is_open()
     {
-        var near = new List<Island>();
-        IslandField.Near(1337, -20000f, -20000f, 20000f, 20000f, near);
-        var lands = near.Where(i => i.Band == IslandField.Landmass).ToList();
-        Assert.NotEmpty(lands);
-        foreach (var island in near.Where(i => i.Band != IslandField.Landmass))
-        foreach (var land in lands)
-        {
-            float dx = island.X - land.X, dz = island.Z - land.Z, reach = island.Reach + land.Reach;
-            if (dx * dx + dz * dz > reach * reach) continue;
-            Assert.True(island.TopBound < land.BottomBound || island.BottomBound > land.TopBound, $"{island} overlaps {land}");
-        }
+        var (x, z) = IslandField.NearestLandmassCore(1337, 0f, 0f);
+        Assert.Equal(1f, IslandField.Coverage(1337, IslandField.Landmass, x, z));
+        // Somewhere within a few landmasses' reach there is open sky, with no landmass at all.
+        bool open = false;
+        for (int i = 0; i < 400 && !open; i++)
+            open = IslandField.Coverage(1337, IslandField.Landmass, x + (i % 20) * 1500f, z + (i / 20) * 1500f) == 0f;
+        Assert.True(open);
     }
 }
