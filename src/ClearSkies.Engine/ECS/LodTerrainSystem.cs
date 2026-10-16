@@ -49,6 +49,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     private const int Cell = 2;                  // blocks per coarse cell
     private const int ColumnBlocks = S * Cell;   // a coarse column's width
     private const int MaxInFlight = 16;
+    private const double ResidentBudgetMs = 1.0;
     private const double UploadBudgetMs = 2.0;
 
     private readonly World _world;
@@ -141,10 +142,11 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     private int _editScan; // which ready column UpdateDrawn checks for edits this frame
 
     // CPU time of each step, for the debug panel.
-    private const int ApplyStep = 0, DispatchStep = 1, SwapStep = 2, ListStep = 3, LightmapStep = 4, DrawStep = 5;
+    private const int ApplyStep = 0, DispatchStep = 1, SwapStep = 2, ListStep = 3, LightmapStep = 4, DrawStep = 5, ResidentStep = 6;
     private readonly StepTimer _steps = new("Adding finished columns", "Queueing and dispatching columns",
                                             "Swaps: readiness, edits, lighting checks", "Render: listing draws",
-                                            "Render: light maps", "Render: recording draws") { Owner = "Distant Terrain" };
+                                            "Render: light maps", "Render: recording draws",
+                                            "Swaps: putting columns in the light grid") { Owner = "Distant Terrain" };
 
     public LodTerrainSystem(World world, Renderer renderer, ChunkLoadSystem load, ChunkVolume staticVolume,
                             Func<IWorldGenerator> generatorFactory, IChunkStore store, GridStore? gridStore = null)
@@ -458,15 +460,16 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     }
 
     private readonly SortedSet<int> _layers = new();
+    private bool _gridFull; // a column didn't fit in the grid: none is tried again until one is evicted
 
     /// <summary>Puts a column's chunks in <see cref="Grid"/>, with the air right above and below each run of them, for
     /// the lighting to light.</summary>
     private void MakeResident((int x, int z) key, CoarseColumn column)
     {
-        if (_gridStore == null || Grid.Index < 0 || column.Chunks.Count == 0) return;
+        if (_gridStore == null || Grid.Index < 0 || column.Chunks.Count == 0 || _gridFull) return;
         _layers.Clear();
         foreach (var c in column.Chunks) { _layers.Add(c.Y - 1); _layers.Add(c.Y); _layers.Add(c.Y + 1); }
-        if (!_gridStore.CanHold(Grid, _layers.Count)) return; // full: drawn as open air
+        if (!_gridStore.CanHold(Grid, _layers.Count)) { _gridFull = true; return; } // drawn as open air until one goes
         foreach (int y in _layers)
         {
             var occupancy = AllAir;
@@ -482,6 +485,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     {
         if (_gridStore == null) return;
         foreach (int y in column.Resident) _gridStore.RemoveChunk(Grid, new ChunkPosition(key.x, y, key.z));
+        if (column.Resident.Count > 0) _gridFull = false;
         column.Resident.Clear();
         column.Settled = false;
     }
@@ -521,10 +525,16 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     {
         // Edits under hidden columns are looked for in one of them a frame (round the ready ones in turn), and in each
         // as it comes back into view, rather than in all of them every frame (256 chunks each).
+        // Only columns near the view can have full detail ready (it loads to FullDetailRadius, in the 2x2 groups that
+        // coarse columns are); a far one that's drawn, settled and uncovered has nothing to do.
         int readyIndex = 0, scan = _editScan;
+        long nearSq = Sq((int)MathF.Ceiling(FullDetailRadius / ColumnBlocks) + 2);
+        long start = System.Diagnostics.Stopwatch.GetTimestamp();
         foreach (var (key, column) in _columns)
         {
-            bool ready = true;
+            bool near = Sq(key.x - _centre.x) + Sq(key.z - _centre.z) <= nearSq;
+            if (!near && column.Drawn && column.Settled && !column.Covered && !column.Leaving) continue;
+            bool ready = near;
             for (int j = 0; j < 4 && ready; j++) ready = _load.IsColumnReady(key.x * 2 + (j & 1), key.z * 2 + (j >> 1));
             if (ready)
             {
@@ -539,7 +549,14 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
             // column keeps the light maps it baked before, or is lit as open air if it never had any.
             if (column.Resident.Count == 0)
             {
-                MakeResident(key, column);
+                // Putting a column in the grid writes each chunk's occupancy and its surface bricks: as many a frame as
+                // fit the budget, the rest on later frames (lit as open air meanwhile).
+                if (System.Diagnostics.Stopwatch.GetElapsedTime(start).TotalMilliseconds < ResidentBudgetMs)
+                {
+                    _steps.Lap(SwapStep);
+                    MakeResident(key, column);
+                    _steps.Lap(ResidentStep);
+                }
                 column.Settled = false;
                 column.Waiting = 0;
             }
