@@ -42,11 +42,16 @@ public sealed class IslandWorldGenerator : IWorldGenerator
     /// its tilt).</summary>
     private const float Upright = 0.3f;
 
+    /// <summary>Stacked cracks (further from upright than <see cref="Upright"/>) narrow from CloseDepth blocks below the
+    /// surface and are shut from CloseFrom up, so where one comes out on a slope there is no ledge.</summary>
+    private const float CloseFrom = 16f, CloseDepth = 60f;
+
     // Where a landscape's coverage thins, its pieces' tops keep only (1 - Flatten) of how far the surface there stands
     // above the surface at their point, and they sink by up to Sink (each its own share); at full coverage, neither.
     private const float Flatten = 0.6f, Sink = 12f, CoreSink = 3f;
 
-    /// <summary>Solid runs thinner than this are worn away: slivers where a surface just grazes a piece.</summary>
+    /// <summary>Solid runs thinner than this (after joining those that touch) are worn away: slivers where a surface
+    /// just grazes a piece.</summary>
     private const int MinThickness = 8;
 
     /// <summary>The most layers of piece points a column searches.</summary>
@@ -414,6 +419,14 @@ public sealed class IslandWorldGenerator : IWorldGenerator
                 }
                 else _spans[col * MaxSpans + spans++] = found[i];
             }
+            // Thin ones (after merging, so a run resting on another counts with it) worn away.
+            int kept = 0;
+            for (int i = 0; i < spans; i++)
+            {
+                var span = _spans[col * MaxSpans + i];
+                if (span.Hi - span.Lo + 1 >= MinThickness) _spans[col * MaxSpans + kept++] = span;
+            }
+            spans = kept;
             _spanCount[col] = (byte)spans;
 
             _strata[col] = _surface.Strata(x, z);
@@ -516,16 +529,21 @@ public sealed class IslandWorldGenerator : IWorldGenerator
                 float d = sxz[k] + (t - sy[k]) * (t - sy[k]);
                 if (d < best) { best = d; i = k; }
             }
-            float lo = tBottom, hi = tTop, exit = tTop;
+            float lo = tBottom, hi = tTop, exit = tTop, loStacked = 0f, loClosed = 0f;
             for (int j = 0; j < sites; j++)
             {
                 if (j == i) continue;
                 float ax = sx[j] - sx[i], ay = sy[j] - sy[i], az = sz[j] - sz[i];
                 float len2 = ax * ax + ay * ay + az * az;
-                float wear = across + (up - across) * (ay * ay / len2);
+                float tilt = ay * ay / len2;
+                float wear = across + (up - across) * tilt;
                 float a = sxz[j] - sxz[i] + sy[j] * sy[j] - sy[i] * sy[i], b = -2f * ay; // dj^2 - di^2 = a + b t
+                // A stacked crack shuts as it nears the surface (see CloseDepth).
+                float stacked = Smoothstep(Upright, 2f * Upright, tilt);
+                float closed = b != 0f ? (1f - Smoothstep(CloseFrom, CloseDepth, (tTop + a / b) / V)) * stacked : 0f;
+                wear *= 1f - closed;
                 float need = 2f * MathF.Sqrt(len2) * wear - a;                       // b t >= need
-                if (b > 0f) lo = MathF.Max(lo, need / b);
+                if (b > 0f) { if (need / b > lo) { lo = need / b; loStacked = stacked; loClosed = closed; } }
                 else if (b < 0f) { hi = MathF.Min(hi, need / b); exit = MathF.Min(exit, -a / b); }
                 else if (need > 0f) hi = lo;
             }
@@ -563,18 +581,19 @@ public sealed class IslandWorldGenerator : IWorldGenerator
             yLo = MathF.Max(yLo, bottom + Round(fromCrack, UnderRound));
             // A thin slab against a crack, worn back to a rounded nose: from its underside if that is the landscape's,
             // else from the top. (The same however it is bounded, so land doesn't step where a crack above it meets
-            // the surface.)
+            // the surface; not over a stacked crack, where the slab thins out into the slope as the crack shuts.)
             if (!(atTop && atBottom) && yHi - yLo < 2f * Slab)
             {
                 float th = yHi - yLo, worn = MathF.Sqrt(MathF.Max(th * th - Slab * Slab, 0f));
-                if (atBottom) yLo = yHi - worn; else yHi = yLo + worn;
+                if (atBottom) yLo = yHi - worn; else yHi = yLo + worn + (th - worn) * loStacked;
             }
             yHi -= taper;
             if (atBottom) yLo += taper;
-            yLo = MathF.Max(yLo - piece.Sink * 0.8f, IslandField.LowestBottom);
+            // (Down over a shut crack by as much as the piece under it could sink, so sinking doesn't open it.)
+            yLo = MathF.Max(yLo - piece.Sink * 0.8f - (CoreSink + Sink) * loClosed, IslandField.LowestBottom);
             yHi = MathF.Min(yHi - piece.Sink, IslandField.WorldTop - 1);
             int bLo = (int)MathF.Ceiling(yLo), bHi = (int)MathF.Floor(yHi);
-            if (bHi - bLo + 1 >= MinThickness) found[count++] = ((short)bLo, (short)bHi);
+            if (bHi >= bLo) found[count++] = ((short)bLo, (short)bHi);
         }
     }
 
