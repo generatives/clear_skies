@@ -26,8 +26,11 @@ public interface IFarTerrain
 
 /// <summary>
 /// Distant terrain at half resolution (level 1 of the LOD plan): past <see cref="FullDetailRadius"/> the world is drawn
-/// from coarse 32³ chunks whose cells are 2 blocks a side, out to <see cref="OuterRadius"/>, lit as open air (sun and
-/// ambient, no voxel light). A coarse column covers a 2x2 group of full columns, and ChunkLoadSystem loads full detail
+/// from coarse 32³ chunks whose cells are 2 blocks a side, out to <see cref="OuterRadius"/>. The drawn coarse columns
+/// are a grid of their own in the GridStore (<see cref="Grid"/>, voxels 2 blocks a side), which GpuLightSystem lights
+/// like the world: sun shadows, bounce and AO, with rays crossing between it and the world. Their meshes bake light maps
+/// from it as full-detail chunks do from the world. A column is in the grid only while it's drawn, so it never shadows
+/// the full-detail terrain that replaced it. A coarse column covers a 2x2 group of full columns, and ChunkLoadSystem loads full detail
 /// in whole groups (<see cref="ChunkLoadSystem.FullDetailRadius"/>), so each coarse column swaps for its four full ones
 /// in one frame: it's drawn (and they're hidden, see <see cref="Covers"/>) until all four are loaded and meshed.
 ///
@@ -50,6 +53,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     private readonly ChunkLoadSystem _load;
     private readonly ChunkVolume _volume;
     private readonly IChunkStore _store;
+    private readonly GridStore? _gridStore;
     private readonly ThreadLocal<IWorldGenerator> _generator;
     private readonly ThreadLocal<GreedyMesher> _meshers;
     private readonly EntitySet _interests;
@@ -63,10 +67,15 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     /// <summary>How far coarse terrain is drawn (blocks).</summary>
     public float OuterRadius = 1024f;
 
+    /// <summary>The drawn coarse columns as a grid of 2-block voxels, lit like the world (see
+    /// GpuLightSystem.AddStaticGrid). Unregistered (index -1) without a GridStore: then they're lit as open air.</summary>
+    public GridHandle Grid { get; } = new();
+
     private sealed class CoarseChunk
     {
         public int Y;
         public GpuMesh? Opaque, Cutout, Transparent;
+        public PackedOpacity? Occupancy; // for the grid (shared for all-air and all-solid chunks)
     }
 
     private sealed class CoarseColumn
@@ -75,10 +84,16 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         public int MinY, MaxY;
         public bool Drawn;       // this frame: not all four full columns are ready
         public bool ChildEdited; // a full chunk under it was edited while it was hidden
+        public readonly List<int> Resident = new(); // the chunk layers it has in the grid (empty: not in it)
     }
 
+    // Shared occupancy for the coarse chunks that are all one thing, and for the air right above and below a column's
+    // chunks (so the faces there have air with light in it).
+    private static readonly PackedOpacity AllAir = new(new uint[GridStore.WordsPerChunk], 0UL, ulong.MaxValue, new(), null, 0UL);
+    private static readonly PackedOpacity AllSolid = new(new uint[GridStore.WordsPerChunk], ulong.MaxValue, 0UL, new(), null, 0UL);
+
     private readonly record struct Built(int Y, ChunkMeshSystem.Packed Opaque, ChunkMeshSystem.Packed Cutout,
-                                         ChunkMeshSystem.Packed Transparent);
+                                         ChunkMeshSystem.Packed Transparent, PackedOpacity Occupancy);
     private readonly record struct Result((int x, int z) Column, List<Built> Chunks, Exception? Error);
 
     private readonly Dictionary<(int x, int z), CoarseColumn> _columns = new();
@@ -91,20 +106,22 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     private bool _wasEnabled;
     private Vector3D<float> _view;
 
-    private readonly record struct Draw(float DistSq, CoarseChunk Chunk, Mat4 Model, ChunkPosition Pos);
+    private readonly record struct Draw(float DistSq, CoarseChunk Chunk, Mat4 Model, ChunkPosition Pos, int Grid);
     private readonly List<Draw> _draws = new();
     private static readonly Comparison<Draw> NearestFirst = (a, b) => a.DistSq.CompareTo(b.DistSq);
     private int _built, _chunksDrawn;
     private long _quads;
 
     public LodTerrainSystem(World world, Renderer renderer, ChunkLoadSystem load, ChunkVolume staticVolume,
-                            Func<IWorldGenerator> generatorFactory, IChunkStore store)
+                            Func<IWorldGenerator> generatorFactory, IChunkStore store, GridStore? gridStore = null)
     {
         _world = world;
         _renderer = renderer;
         _load = load;
         _volume = staticVolume;
         _store = store;
+        _gridStore = gridStore;
+        gridStore?.RegisterStatic(Grid, Cell);
         _generator = new ThreadLocal<IWorldGenerator>(generatorFactory);
         var atlas = renderer.Atlas;
         _meshers = new ThreadLocal<GreedyMesher>(() => new GreedyMesher(atlas));
@@ -253,9 +270,9 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
                         var mesh = _meshers.Value!.Mesh(coarse, null, null, null, null, null, null,
                                                         neighboursForTransparentOnly: true,
                                                         position: new ChunkPosition(col.x, group.Key, col.z));
-                        var b = new Built(group.Key, ChunkMeshSystem.PackQuads(mesh.Opaque), ChunkMeshSystem.PackQuads(mesh.Cutout),
-                                          ChunkMeshSystem.PackQuads(mesh.Translucent, twoSided: true));
-                        if (b.Opaque.QuadCount + b.Cutout.QuadCount + b.Transparent.QuadCount > 0) built.Add(b);
+                        // Buried chunks have no faces but still shadow and reflect, so every chunk with blocks is kept.
+                        built.Add(new Built(group.Key, ChunkMeshSystem.PackQuads(mesh.Opaque), ChunkMeshSystem.PackQuads(mesh.Cutout),
+                                            ChunkMeshSystem.PackQuads(mesh.Translucent, twoSided: true), Occupancy(coarse)));
                     }
                     coarse.Release();
                 }
@@ -294,6 +311,14 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         }
     }
 
+    /// <summary>A coarse chunk's occupancy for the grid; the shared one for a chunk that's all air or all solid.</summary>
+    private static PackedOpacity Occupancy(ChunkData coarse)
+    {
+        var p = GridStore.Pack(coarse);
+        if (p.SeeThrough != null) return p;
+        return p.Solid == 0 ? AllAir : p.Air == 0 ? AllSolid : p;
+    }
+
     private static bool IsCube(BlockId id) => id != BlockId.Air && BlockRegistry.Get(id).IsFullCube;
 
     private static BlockId MostCommon(ReadOnlySpan<BlockId> cell, bool opaque)
@@ -329,6 +354,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
                     {
                         Y = b.Y, Opaque = Upload(b.Opaque, LightmapKind.Opaque), Cutout = Upload(b.Cutout, LightmapKind.SeeThrough),
                         Transparent = Upload(b.Transparent, LightmapKind.SeeThrough | LightmapKind.TwoSided),
+                        Occupancy = b.Occupancy,
                     };
                     column.Chunks.Add(chunk);
                     column.MinY = System.Math.Min(column.MinY, b.Y);
@@ -350,17 +376,45 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         if (p.Data.Length > 0) System.Buffers.ArrayPool<byte>.Shared.Return(p.Data);
     }
 
-    /// <summary>Uploads a coarse mesh without a light map: it's lit as open air.</summary>
+    /// <summary>Uploads a coarse mesh, with room for a light map (baked from <see cref="Grid"/> while it's in it).</summary>
     private GpuMesh? Upload(in ChunkMeshSystem.Packed p, LightmapKind kind)
     {
         if (p.QuadCount == 0) return null;
         _quads += p.QuadCount;
-        return _renderer.UploadChunkQuads(p.Data.AsSpan(0, p.Bytes), (uint)p.QuadCount, 0, kind);
+        return _renderer.UploadChunkQuads(p.Data.AsSpan(0, p.Bytes), (uint)p.QuadCount, _gridStore != null ? p.LightWords : 0, kind);
+    }
+
+    private readonly SortedSet<int> _layers = new();
+
+    /// <summary>Puts a drawn column's chunks in <see cref="Grid"/>, with the air right above and below each run of them,
+    /// for the lighting to light.</summary>
+    private void MakeResident((int x, int z) key, CoarseColumn column)
+    {
+        if (_gridStore == null || Grid.Index < 0 || column.Chunks.Count == 0) return;
+        _layers.Clear();
+        foreach (var c in column.Chunks) { _layers.Add(c.Y - 1); _layers.Add(c.Y); _layers.Add(c.Y + 1); }
+        if (!_gridStore.CanHold(Grid, _layers.Count)) return; // full: drawn as open air
+        foreach (int y in _layers)
+        {
+            var occupancy = AllAir;
+            foreach (var c in column.Chunks) if (c.Y == y) { occupancy = c.Occupancy ?? AllAir; break; }
+            _gridStore.UploadPacked(Grid, new ChunkPosition(key.x, y, key.z), occupancy);
+            column.Resident.Add(y);
+        }
+    }
+
+    /// <summary>Takes a column's chunks out of <see cref="Grid"/> (it's no longer drawn).</summary>
+    private void Evict((int x, int z) key, CoarseColumn column)
+    {
+        if (_gridStore == null) return;
+        foreach (int y in column.Resident) _gridStore.RemoveChunk(Grid, new ChunkPosition(key.x, y, key.z));
+        column.Resident.Clear();
     }
 
     private void Unload((int x, int z) key)
     {
         if (!_columns.Remove(key, out var column)) return;
+        Evict(key, column);
         foreach (var c in column.Chunks)
         {
             _quads -= (c.Opaque?.QuadCount ?? 0) + (c.Cutout?.QuadCount ?? 0) + (c.Transparent?.QuadCount ?? 0);
@@ -395,6 +449,8 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
                 _queue.Insert(_queueHead, key); // drawn as it was until it's made again
             }
             column.Drawn = !ready;
+            if (column.Drawn && column.Resident.Count == 0) MakeResident(key, column);
+            else if (!column.Drawn && column.Resident.Count > 0) Evict(key, column);
         }
     }
 
@@ -434,9 +490,9 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         if (stage == SystemStage.RenderTransparent)
         {
             foreach (var d in _draws)
-                if (d.Chunk.Transparent != null) _renderer.DrawTransparentChunkDepth(d.Chunk.Transparent, d.Model, Renderer.LodGrid, d.Pos);
+                if (d.Chunk.Transparent != null) _renderer.DrawTransparentChunkDepth(d.Chunk.Transparent, d.Model, d.Grid, d.Pos);
             foreach (var d in _draws)
-                if (d.Chunk.Transparent != null) _renderer.DrawTransparentChunkMesh(d.Chunk.Transparent, d.Model, Renderer.LodGrid, d.Pos);
+                if (d.Chunk.Transparent != null) _renderer.DrawTransparentChunkMesh(d.Chunk.Transparent, d.Model, d.Grid, d.Pos);
             return;
         }
 
@@ -449,22 +505,37 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
             var min = new Vector3D<float>(cx * ColumnBlocks, column.MinY * ColumnBlocks, cz * ColumnBlocks);
             var max = new Vector3D<float>((cx + 1) * ColumnBlocks, (column.MaxY + 1) * ColumnBlocks, (cz + 1) * ColumnBlocks);
             if (!frame.Frustum.Intersects(min, max)) continue;
+            // In the grid: lit from it like the world. Not (it was full): lit as open air.
+            int grid = column.Resident.Count > 0 && Grid.Index >= 0 ? Grid.Index : Renderer.LodGrid;
             foreach (var c in column.Chunks)
             {
+                if (c.Opaque == null && c.Cutout == null && c.Transparent == null) continue; // buried
                 var origin = new Vector3D<float>(cx * ColumnBlocks, c.Y * ColumnBlocks, cz * ColumnBlocks);
                 if (!frame.Frustum.Intersects(origin, origin + size)) continue;
                 float distSq = Vector3D.DistanceSquared(origin + size * 0.5f, frame.CameraPosition);
-                _draws.Add(new Draw(distSq, c, Mat4.Multiply(Mat4.Translation(origin), scale), new ChunkPosition(cx, c.Y, cz)));
+                _draws.Add(new Draw(distSq, c, Mat4.Multiply(Mat4.Translation(origin), scale), new ChunkPosition(cx, c.Y, cz), grid));
             }
         }
+
+        // Light maps whose light changed since they were baked, as ChunkRenderSystem does for full-detail chunks.
+        foreach (var d in _draws)
+        {
+            if (d.Grid < 0) continue;
+            int stamp = _renderer.LightStampOf(Grid, d.Pos);
+            _renderer.PrepareLightmap(d.Chunk.Opaque, Grid, d.Pos, stamp);
+            _renderer.PrepareLightmap(d.Chunk.Cutout, Grid, d.Pos, stamp);
+            _renderer.PrepareLightmap(d.Chunk.Transparent, Grid, d.Pos, stamp);
+        }
+        _renderer.BakeLightmaps();
+
         _draws.Sort(NearestFirst);
         _chunksDrawn = _draws.Count;
         foreach (var d in _draws)
-            if (d.Chunk.Opaque != null) _renderer.DrawChunkMesh(d.Chunk.Opaque, d.Model, Renderer.LodGrid, d.Pos);
+            if (d.Chunk.Opaque != null) _renderer.DrawChunkMesh(d.Chunk.Opaque, d.Model, d.Grid, d.Pos);
         foreach (var d in _draws)
-            if (d.Chunk.Cutout != null) _renderer.DrawCutoutChunkDepth(d.Chunk.Cutout, d.Model, Renderer.LodGrid, d.Pos);
+            if (d.Chunk.Cutout != null) _renderer.DrawCutoutChunkDepth(d.Chunk.Cutout, d.Model, d.Grid, d.Pos);
         foreach (var d in _draws)
-            if (d.Chunk.Cutout != null) _renderer.DrawCutoutChunkMesh(d.Chunk.Cutout, d.Model, Renderer.LodGrid, d.Pos);
+            if (d.Chunk.Cutout != null) _renderer.DrawCutoutChunkMesh(d.Chunk.Cutout, d.Model, d.Grid, d.Pos);
     }
 
     // ── debug UI ─────────────────────────────────────────────────────────────
@@ -482,5 +553,9 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         ImGui.Text($"Coarse chunks: {chunks:N0} ({_chunksDrawn:N0} drawn this frame), {_quads:N0} quads " +
                    $"(~{_quads * ChunkQuad.SizeBytes / (1024.0 * 1024.0):F1} MB); made so far: {_built:N0}");
         ImGui.Text($"Full-detail chunks loaded: {_volume.LoadedCount:N0}");
+        if (Grid.Index >= 0)
+            ImGui.Text($"Lit as a grid: {Grid.Chunks.Count:N0} coarse chunks, {Grid.Slots.Count:N0} light bricks " +
+                       $"({(long)Grid.Slots.Count * GridStore.SlotBytes / (1024 * 1024)} MB)");
+        else ImGui.TextDisabled("Lit as open air (no light store)");
     }
 }

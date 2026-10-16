@@ -5,14 +5,28 @@ using Silk.NET.Maths;
 
 namespace ClearSkies.Engine.Voxels;
 
-/// <summary>A voxel grid's registration in the <see cref="GridStore"/>: the static world or one ship. Owned by
-/// its <see cref="ChunkVolume"/>; <see cref="Index"/> is -1 until the grid's first chunk is uploaded.</summary>
+/// <summary>A voxel grid's registration in the <see cref="GridStore"/>: the static world, a ship, or distant terrain
+/// (see <see cref="GridStore.RegisterStatic"/>). A ship's or the world's is owned by its <see cref="ChunkVolume"/>;
+/// <see cref="Index"/> is -1 until the grid's first chunk is uploaded.</summary>
 public sealed class GridHandle
 {
     /// <summary>Descriptor index in the GPU grid table, or -1 while not registered.</summary>
     public int Index { get; internal set; } = -1;
 
+    /// <summary>A static grid, found through a world index and lit per brick: the world, or distant terrain. Ships
+    /// aren't.</summary>
     internal bool IsWorld;
+
+    /// <summary>A static grid's voxel size in blocks: its voxel space times this is world space (1 for the world, 2 for
+    /// half-resolution distant terrain). Static grids are never moved or turned.</summary>
+    public int Scale { get; internal set; } = 1;
+
+    // A static grid's world index (which of the store's, see GridStore) and the block of entries it points into, handed
+    // out as offsets: per index cell, the chunk there.
+    internal int IndexSlot = -1;
+    internal readonly Dictionary<int, ChunkRecord> WorldCells = new();
+    internal int WorldCapacity, WorldNext;
+    internal readonly Stack<int> WorldFree = new();
     internal readonly Dictionary<ChunkPosition, ChunkRecord> Chunks = new();
 
     /// <summary>The uploaded chunks that hold light emitters (lamps), so finding lamps doesn't walk every chunk.</summary>
@@ -242,19 +256,26 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     // Grid registry; grows (with the descriptor buffer) when every index is taken, so there is no ship limit.
     private GridHandle?[] _grids = new GridHandle?[16];
     private GridDesc[] _descs = new GridDesc[16];
-    // The world index: _worldDim x WorldLayers x _worldDim cells after the chunk table's entries (see the class
-    // summary), and the world's block of entries it points into, handed out as offsets.
+    // The world indexes, one after another after the chunk table's entries (see the class summary): the world's,
+    // _worldDim x WorldLayers x _worldDim cells, then distant terrain's, FarIndexDim x WorldLayers x FarIndexDim. Each
+    // static grid's block of entries is on its handle.
     public const int WorldLayers = 64;
     private const int NoWorldSlot = 0xFFFF;
     private readonly int _worldDim;
 
+    /// <summary>Distant terrain's world index width (in its own chunks, x and z): wide enough for the farthest it's
+    /// drawn (4096 blocks each way at 64 blocks a chunk) so its chunks never share a cell.</summary>
+    private const int FarIndexDim = 136;
+    private const int IndexSlots = 2;
+    private readonly GridHandle?[] _indexOwners = new GridHandle?[IndexSlots];
+    private readonly ulong[] _indexAt = new ulong[IndexSlots]; // each index's byte offset from the first
+    private readonly int[] _indexDim = new int[IndexSlots];
+
     /// <summary>About how far from the camera world chunks load (blocks): the view distance the world index was sized
     /// for (see LightBudget.WorldIndexDim).</summary>
     internal float WorldReach => (_worldDim - 3) / 2 * (float)ChunkData.Size;
-    private readonly ulong _worldIndexBytes;
-    private readonly Dictionary<int, ChunkRecord> _worldCells = new();
-    private int _worldCapacity, _worldNext;
-    private readonly Stack<int> _worldFree = new();
+    private readonly ulong _worldIndexBytes; // every index's
+    private int _worldCapacity; // a new static grid's block of entries
 
     /// <summary>Light slots allocated since the lighting system last drained this. They hold
     /// <see cref="EmptyDisplayPair"/> and need lighting.</summary>
@@ -273,7 +294,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     public int LightSlotHighWater => _lightNext;
     public int AccSlotsInUse => _accNext - _accFree.Count;
     public int AccSlotCapacity => _accCapacity;
-    public int WorldChunkCount => _worldCells.Count;
+    public int WorldChunkCount => _indexOwners[0]?.WorldCells.Count ?? 0;
 
     /// <summary>World chunks that unloaded and wait to be released (see GpuResidencySystem), and the light bricks they
     /// hold as of when they unloaded: as good as free already, for whoever budgets what's loaded.</summary>
@@ -343,7 +364,13 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     {
         _ctx = ctx;
         _worldDim = worldIndexDim;
-        _worldIndexBytes = ((ulong)worldIndexDim * WorldLayers * (ulong)worldIndexDim * 2 + 15) & ~15UL;
+        _indexDim[0] = worldIndexDim;
+        _indexDim[1] = FarIndexDim;
+        for (int i = 0; i < IndexSlots; i++)
+        {
+            _indexAt[i] = _worldIndexBytes;
+            _worldIndexBytes += ((ulong)_indexDim[i] * WorldLayers * (ulong)_indexDim[i] * 2 + 15) & ~15UL;
+        }
         _worldCapacity = 16384; // grows (to MaxWorldChunks) with what streaming loads
 
         // Pools start sized to the budget so they don't grow (a copy + rebind hitch) during normal play: the light
@@ -370,7 +397,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
                           $"{8192L * AccSlotBytes / (1024 * 1024)} MB), occupancy {_occCapacity} chunks " +
                           $"({(ulong)_occCapacity * WordsPerChunk * 4 / (1024 * 1024)} MB), table {_tableCapacity} entries " +
                           $"({(ulong)_tableCapacity * (ChunkEntryBytes + 256) / (1024 * 1024)} MB), world index " +
-                          $"{worldIndexDim}x{WorldLayers}x{worldIndexDim} ({_worldIndexBytes / (1024 * 1024)} MB)");
+                          $"{worldIndexDim}x{WorldLayers}x{worldIndexDim} plus distant terrain's ({_worldIndexBytes / (1024 * 1024)} MB)");
 
         OccPool    = GpuBuffer.CreateStorage(ctx, (ulong)_occCapacity * WordsPerChunk * 4);
         ChunkTable = GpuBuffer.CreateStorage(ctx, (ulong)_tableCapacity * ChunkEntryBytes + _worldIndexBytes);
@@ -394,8 +421,11 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
             ChunkTable.Write<uint>(WorldIndexOffset + at, none.AsSpan(0, (int)System.Math.Min((ulong)none.Length, (_worldIndexBytes - at) / 4)));
     }
 
-    /// <summary>Byte offset of the world index in <see cref="ChunkTable"/>: right after the entries.</summary>
+    /// <summary>Byte offset of the world indexes in <see cref="ChunkTable"/>: right after the entries.</summary>
     private ulong WorldIndexOffset => (ulong)_tableCapacity * ChunkEntryBytes;
+
+    /// <summary>Byte offset of static grid <paramref name="g"/>'s world index in <see cref="ChunkTable"/>.</summary>
+    private ulong IndexOffset(GridHandle g) => WorldIndexOffset + _indexAt[g.IndexSlot];
 
     // ── Grid registration ─────────────────────────────────────────────────────
 
@@ -416,9 +446,26 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         g.IsWorld = isWorld;
         if (isWorld)
         {
-            g.TableBase = AllocRange(_worldCapacity);
-            g.TDX = _worldDim; g.TDY = WorldLayers; g.TDZ = _worldDim;
+            int slot = isWorld && g.Scale == 1 ? 0 : 1;
+            if (_indexOwners[slot] != null) throw new InvalidOperationException($"World index {slot} is taken.");
+            _indexOwners[slot] = g;
+            g.IndexSlot = slot;
+            g.WorldCapacity = slot == 0 ? _worldCapacity : 4096; // distant terrain's grows with what it holds
+            g.TableBase = AllocRange(g.WorldCapacity);
+            g.TDX = _indexDim[slot]; g.TDY = WorldLayers; g.TDZ = _indexDim[slot];
         }
+    }
+
+    /// <summary>Registers distant terrain: a static grid like the world, lit per brick, whose voxels are
+    /// <paramref name="scale"/> blocks a side (world space = its voxel space times the scale). Its chunks are uploaded
+    /// with <see cref="UploadPacked"/>. There is room for one.</summary>
+    internal void RegisterStatic(GridHandle g, int scale)
+    {
+        if (scale < 2) throw new ArgumentOutOfRangeException(nameof(scale), "The world is the only static grid at scale 1.");
+        g.Scale = scale;
+        g.VoxelToWorld = Mat4.Scale(new Vector3D<float>(scale));
+        g.WorldToVoxel = Mat4.Scale(new Vector3D<float>(1f / scale));
+        Register(g, isWorld: true);
     }
 
     /// <summary>Releases everything a grid holds (a despawned ship).</summary>
@@ -429,6 +476,13 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         g.Chunks.Clear();
         g.EmitterChunks.Clear();
         if (g.TableBase >= 0) FreeSection(g);
+        if (g.IndexSlot >= 0)
+        {
+            _indexOwners[g.IndexSlot] = null;
+            g.IndexSlot = -1;
+            g.WorldFree.Clear();
+            g.WorldNext = 0;
+        }
         _grids[g.Index] = null;
         _descs[g.Index] = default;
         g.Index = -1;
@@ -460,7 +514,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
             d.WorldToVoxel = g.WorldToVoxel;
             d.TableBase = g.TableBase; d.TDX = g.TDX; d.TDY = g.TDY; d.TDZ = g.TDZ;
             if (!g.Posed || g.TableBase < 0) d.TDX = d.TDY = d.TDZ = 0;
-            d.WorldIndex = g.IsWorld ? (int)(WorldIndexOffset / 16) : 0;
+            d.WorldIndex = g.IndexSlot >= 0 ? (int)(IndexOffset(g) / 16) : 0;
             g.Posed = false;
             if (g.HasBox)
             {
@@ -498,25 +552,41 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         if (entry.Emitters.Count > 0) g.EmitterChunks[pos] = entry;
         else g.EmitterChunks.Remove(pos);
 
+        if (!Store(g, pos, words, entry.BrickSolidMask, entry.BrickAirMask, entry.PackedSeeThroughWords,
+                   entry.BrickSeeThroughMask, changedMin, changedMax, darkens))
+            entry.PackedOpacityWords = null; // all one value: not worth keeping 4 KB of it per buried chunk
+    }
+
+    /// <summary>Uploads a chunk of a static grid registered with <see cref="RegisterStatic"/> (distant terrain) from its
+    /// packed opacity (see <see cref="Pack"/>). Its lamps aren't listed: distant terrain is lit by the sun and bounce.</summary>
+    internal void UploadPacked(GridHandle g, ChunkPosition pos, PackedOpacity packed)
+    {
+        var origin = pos.WorldOrigin;
+        Store(g, pos, packed.Words, packed.Solid, packed.Air, packed.SeeThrough, packed.SeeThroughBricks,
+              origin, origin + new Vector3D<float>(S), false);
+    }
+
+    /// <summary>Stores a chunk's occupancy and brick masks, then updates which of its and its neighbours' bricks need
+    /// light storage. Returns whether its opacity words were kept (false: the chunk is all air or all solid).</summary>
+    private bool Store(GridHandle g, ChunkPosition pos, uint[] words, ulong solid, ulong air, uint[]? seeThrough,
+                       ulong seeThroughBricks, Vector3D<float> changedMin, Vector3D<float> changedMax, bool darkens)
+    {
         var rec = EnsureRecord(g, pos);
-        if (rec == null) return;
+        if (rec == null) return true;
         bool hadSolid = rec.Solid != 0;
         rec.Virtual = false;
-        rec.Solid = entry.BrickSolidMask;
-        rec.Air   = entry.BrickAirMask;
-        rec.SeeThrough = entry.BrickSeeThroughMask;
-        if (entry.PackedSeeThroughWords is { } seeThrough)
+        rec.Solid = solid;
+        rec.Air   = air;
+        rec.SeeThrough = seeThroughBricks;
+        if (seeThrough != null)
         {
             if (rec.SeeSlot < 0) rec.SeeSlot = AllocOcc();
             OccPool.Write<uint>((ulong)rec.SeeSlot * WordsPerChunk * 4, seeThrough);
         }
         else FreeSeeThrough(rec);
 
-        if (rec.Solid == 0 || rec.Air == 0)
-        {
-            FreeOcc(rec);
-            entry.PackedOpacityWords = null; // all one value: not worth keeping 4 KB of it per buried chunk
-        }
+        bool kept = rec.Solid != 0 && rec.Air != 0;
+        if (!kept) FreeOcc(rec);
         else
         {
             if (rec.OccSlot < 0) rec.OccSlot = AllocOcc();
@@ -538,6 +608,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         TouchChunk(g, pos);
         g.Version++;
         ChangedChunks.Add((g, changedMin, changedMax, hadSolid || rec.Solid != 0, darkens));
+        return kept;
     }
 
     /// <summary>Drops a chunk that unloaded.</summary>
@@ -660,18 +731,18 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         rec = new ChunkRecord { Pos = pos, Virtual = isVirtual, Air = isVirtual ? ulong.MaxValue : 0UL, LightStamp = ++_lightStamp };
         if (g.IsWorld)
         {
-            int cell = WorldCell(pos);
-            if (_worldCells.TryGetValue(cell, out var taken))
+            int cell = WorldCell(g, pos);
+            if (g.WorldCells.TryGetValue(cell, out var taken))
             {
                 Console.WriteLine($"[grid-store] chunk {pos} wraps onto loaded chunk {taken.Pos} in the world index; not stored.");
                 return null;
             }
-            if (_worldFree.Count == 0 && _worldNext == _worldCapacity) GrowWorldBlock(g);
-            rec.WorldSlot = _worldFree.Count > 0 ? _worldFree.Pop() : _worldNext++;
+            if (g.WorldFree.Count == 0 && g.WorldNext == g.WorldCapacity) GrowWorldBlock(g);
+            rec.WorldSlot = g.WorldFree.Count > 0 ? g.WorldFree.Pop() : g.WorldNext++;
             rec.WorldCell = cell;
             rec.TableIndex = g.TableBase + rec.WorldSlot;
-            _worldCells[cell] = rec;
-            WriteWorldIndex(cell);
+            g.WorldCells[cell] = rec;
+            WriteWorldIndex(g, cell);
         }
         else
         {
@@ -689,35 +760,39 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     internal bool WorldCellHolder(GridHandle g, ChunkPosition pos, out ChunkPosition holder)
     {
         holder = default;
-        if (!g.IsWorld || !_worldCells.TryGetValue(WorldCell(pos), out var rec) || rec.Pos == pos) return false;
+        if (!g.IsWorld || !g.WorldCells.TryGetValue(WorldCell(g, pos), out var rec) || rec.Pos == pos) return false;
         holder = rec.Pos;
         return true;
     }
 
-    private int WorldCell(ChunkPosition p)
-        => Wrap(p.X, _worldDim) + _worldDim * (Wrap(p.Y, WorldLayers) + WorldLayers * Wrap(p.Z, _worldDim));
+    private static int WorldCell(GridHandle g, ChunkPosition p)
+        => Wrap(p.X, g.TDX) + g.TDX * (Wrap(p.Y, g.TDY) + g.TDY * Wrap(p.Z, g.TDZ));
 
-    /// <summary>Writes the world index word holding <paramref name="cell"/> (two cells to a word).</summary>
-    private void WriteWorldIndex(int cell)
+    /// <summary>Writes the word of <paramref name="g"/>'s world index holding <paramref name="cell"/> (two cells to a word).</summary>
+    private void WriteWorldIndex(GridHandle g, int cell)
     {
         int pair = cell & ~1;
-        uint lo = _worldCells.TryGetValue(pair, out var a) ? (uint)a.WorldSlot : NoWorldSlot;
-        uint hi = _worldCells.TryGetValue(pair + 1, out var b) ? (uint)b.WorldSlot : NoWorldSlot;
+        uint lo = g.WorldCells.TryGetValue(pair, out var a) ? (uint)a.WorldSlot : NoWorldSlot;
+        uint hi = g.WorldCells.TryGetValue(pair + 1, out var b) ? (uint)b.WorldSlot : NoWorldSlot;
         Span<uint> word = stackalloc uint[1] { lo | hi << 16 };
-        ChunkTable.Write<uint>(WorldIndexOffset + (ulong)pair * 2, word);
+        ChunkTable.Write<uint>(IndexOffset(g) + (ulong)pair * 2, word);
     }
+
+    /// <summary>Whether static grid <paramref name="g"/> can take <paramref name="more"/> chunks: its index's offsets
+    /// are 16-bit.</summary>
+    internal bool CanHold(GridHandle g, int more) => g.Chunks.Count + more < MaxWorldChunks;
 
     /// <summary>Moves the world's block of entries to one twice the size. Offsets into it stay the same, so the world
     /// index doesn't change; only the entries move.</summary>
     private void GrowWorldBlock(GridHandle g)
     {
-        if (_worldCapacity >= NoWorldSlot)
+        if (g.WorldCapacity >= NoWorldSlot)
             throw new InvalidOperationException($"More than {NoWorldSlot} world chunks loaded: the world index's 16-bit offsets can't address them.");
-        int cap = System.Math.Min(_worldCapacity * 2, NoWorldSlot);
-        Console.WriteLine($"[grid-store] world block grown to {cap} entries");
-        int oldBase = g.TableBase, oldCap = _worldCapacity;
+        int cap = System.Math.Min(g.WorldCapacity * 2, NoWorldSlot);
+        Console.WriteLine($"[grid-store] {(g.Scale == 1 ? "world" : "distant terrain")} block grown to {cap} entries");
+        int oldBase = g.TableBase, oldCap = g.WorldCapacity;
         g.TableBase = AllocRange(cap);
-        _worldCapacity = cap;
+        g.WorldCapacity = cap;
         // The moved entries in two writes (AllocRange cleared the new block to unloaded), not two per chunk.
         var entries = new int[oldCap * 8];
         var bricks = new uint[oldCap * 64];
@@ -753,9 +828,9 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
 
         if (rec.WorldCell >= 0)
         {
-            _worldCells.Remove(rec.WorldCell);
-            WriteWorldIndex(rec.WorldCell);
-            _worldFree.Push(rec.WorldSlot);
+            g.WorldCells.Remove(rec.WorldCell);
+            WriteWorldIndex(g, rec.WorldCell);
+            g.WorldFree.Push(rec.WorldSlot);
             rec.WorldCell = rec.WorldSlot = -1;
         }
     }
@@ -801,7 +876,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
 
     private void FreeSection(GridHandle g)
     {
-        FreeRange(g.TableBase, g.TDX * g.TDY * g.TDZ);
+        FreeRange(g.TableBase, g.IndexSlot >= 0 ? g.WorldCapacity : g.TDX * g.TDY * g.TDZ);
         g.TableBase = -1;
     }
 
@@ -1088,7 +1163,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
 
     private void GrowTables(int cap)
     {
-        // The world index follows the entries, so it moves to after the new ones.
+        // The world indexes follow the entries, so they move to after the new ones.
         var table = GpuBuffer.CreateStorage(_ctx, (ulong)cap * ChunkEntryBytes + _worldIndexBytes);
         _ctx.CopyBufferToBuffer(ChunkTable, table, WorldIndexOffset);
         _ctx.CopyBufferToBuffer(ChunkTable, table, _worldIndexBytes, WorldIndexOffset, (ulong)cap * ChunkEntryBytes);

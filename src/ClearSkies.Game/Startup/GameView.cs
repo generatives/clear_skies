@@ -109,7 +109,8 @@ public sealed class GameView : IDisposable
         host.AddSystem(chunks, SystemStage.RenderWorld);
         // Distant terrain drawn coarse past the full-detail terrain (off until ticked in its panel), after it.
         Lod = new LodTerrainSystem(host.World, renderer, world.ChunkLoad, volume, () => new HeartWorldGenerator(world.Seed),
-                                   world.ChunkStore) { Enabled = _lod };
+                                   world.ChunkStore, GridStore) { Enabled = _lod };
+        light.AddStaticGrid(Lod.Grid); // lit like the world
         if (_lodDistance is { } lodDistance) Lod.OuterRadius = lodDistance;
         chunks.Covered = Lod.Covers;
         host.AddSystem((ISystem)Lod, SystemStage.PreRender);
