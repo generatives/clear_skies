@@ -32,8 +32,8 @@ public sealed class IslandWorldGenerator : IWorldGenerator
     private const float CrackUp = 0.75f;
 
     // Pieces are worn at their edges, in blocks: tops slope down by up to BankDrop over the last BankWidth before a
-    // crack (shut ones too, which so read as shallow valleys), so cracks open out of valleys rather than off flat ground, and undersides are rounded off over
-    // UnderRound; where two side cracks meet (rounded over EdgeRound) or are closer than MinWidth (wedges and fins),
+    // crack (shut ones too, which then read as shallow valleys), so cracks open out of valleys rather than off flat
+    // ground, and undersides are rounded off over UnderRound; where two side cracks meet (rounded over EdgeRound) or are closer than MinWidth (wedges and fins),
     // worn down from the top, and up from the underside, by Taper blocks for each block in; and slabs against a crack
     // worn back to a rounded nose, gone where thinner than Slab.
     private const float BankWidth = 36f, BankDrop = 22f, UnderRound = 18f, EdgeRound = 20f, MinWidth = 24f, Taper = 4f, Slab = 24f;
