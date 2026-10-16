@@ -9,33 +9,33 @@ namespace ClearSkies.Game.Generation;
 /// is, and the landscape holds together, cracked; where it thins, more pieces are missing and the land breaks up into
 /// islands, then islets, then open sky. Islands are never drawn as shapes: they are what is left of a landscape.
 ///
-/// Low down, the landmasses: coverage in great blobs many kilometres across, intact at their cores. Under them, an
-/// underworld of smaller pieces; above, landscapes whose coverage gathers into ever sparser clusters with height, around
-/// the landmasses' rims and over each other.
+/// Low down, the landmasses: coverage in great blobs many kilometres across, intact at their cores. Under them and
+/// around, an underworld of smaller pieces; above, landscapes whose coverage gathers into ever sparser clusters with
+/// height, around the landmasses' rims and over each other.
 ///
 /// Thread-safe: everything is worked out from the seed alone.
 /// </summary>
 public static class IslandField
 {
     /// <summary>A landscape: its surface at about <see cref="Base"/> (swelling up and down by up to
-    /// <see cref="Swell"/>), with hills up to <see cref="Hills"/> high and mountains up to <see cref="Mountains"/>; land
-    /// about <see cref="Thickness"/> deep under it; broken into pieces from cells <see cref="CellSize"/> across, with
+    /// <see cref="Swell"/>), with hills up to <see cref="Hills"/> high in its hilliest parts and mountains up to
+    /// <see cref="Mountains"/>; land about <see cref="Thickness"/> deep under it; broken into pieces from cells <see cref="CellSize"/> across, with
     /// cracks about twice <see cref="Crack"/> wide between them.</summary>
     public readonly record struct Layer(
         float Base, float Swell, float Hills, float Mountains, float Thickness, float CellSize, float Crack)
     {
         /// <summary>Highest its surface reaches, and lowest its underside does.</summary>
         public float TopBound => Base + Swell + Hills + Mountains + 8f;
-        public float BottomBound => Base - Swell - Thickness - Roots * (Hills + Mountains) - 8f;
+        public float BottomBound => Base - Swell - 1.05f * Thickness - Roots * Mountains - 8f;
     }
 
     /// <summary>The landscapes, bottom up: the underworld, the landmasses, the middle and the high.</summary>
     public static readonly Layer[] Layers =
     {
-        new(Base: -110f, Swell: 25f,  Hills: 25f, Mountains: 0f,   Thickness: 60f,  CellSize: 180f, Crack: 9f),
-        new(Base: 150f,  Swell: 50f,  Hills: 70f, Mountains: 650f, Thickness: 150f, CellSize: 320f, Crack: 11f),
-        new(Base: 640f,  Swell: 90f,  Hills: 50f, Mountains: 0f,   Thickness: 110f, CellSize: 260f, Crack: 10f),
-        new(Base: 1200f, Swell: 120f, Hills: 35f, Mountains: 0f,   Thickness: 70f,  CellSize: 200f, Crack: 9f),
+        new(Base: -110f, Swell: 25f,  Hills: 40f,  Mountains: 0f,   Thickness: 60f,  CellSize: 180f, Crack: 9f),
+        new(Base: 150f,  Swell: 50f,  Hills: 130f, Mountains: 650f, Thickness: 150f, CellSize: 320f, Crack: 11f),
+        new(Base: 640f,  Swell: 90f,  Hills: 80f,  Mountains: 0f,   Thickness: 110f, CellSize: 260f, Crack: 10f),
+        new(Base: 1200f, Swell: 120f, Hills: 55f,  Mountains: 0f,   Thickness: 70f,  CellSize: 200f, Crack: 9f),
     };
 
     public const int Underworld = 0, Landmass = 1;
@@ -44,8 +44,7 @@ public static class IslandField
     /// this many times wider than tall, so they stack in layers.</summary>
     public const float VerticalScale = 1.6f;
 
-    /// <summary>How far a landscape's underside hangs down under high ground on top, as a share of how high it is:
-    /// roots under mountains.</summary>
+    /// <summary>How far a landscape's underside hangs down under its mountains, as a share of how high they are.</summary>
     public const float Roots = 0.3f;
 
     /// <summary>How far a piece floats clear of the landscape under it, at least: closer, and it isn't there.</summary>
@@ -75,35 +74,40 @@ public static class IslandField
                 // Whole at their cores, breaking up towards their rims into islands.
                 return Smoothstep(LandFrom, LandFull, LandBlobs(seed, x, z));
             case Underworld:
-                return 0.8f * Smoothstep(0.5f, 0.7f, Blobs(seed, 0xA3, x, z, 1100f, 350f, 0.3f));
+                // Under the landmasses and the gaps around them, none out under open sky.
+                return 0.8f * Smoothstep(0.32f, 0.46f, LandBlobs(seed, x, z))
+                            * Smoothstep(0.56f, 0.74f, Blobs(seed, 0xA3, x, z, 1100f, 350f, 0.3f));
             case 2:
             {
                 // Clusters gathered around the landmasses: over their broken rims and the gaps just off them, thinning
                 // over their cores, none out over open sky.
                 float v = LandBlobs(seed, x, z);
                 float near = Smoothstep(0.36f, 0.5f, v) * (1f - 0.7f * Smoothstep(0.66f, 0.76f, v));
-                return 0.85f * near * Smoothstep(0.5f, 0.72f, MiddleBlobs(seed, x, z));
+                return 0.85f * near * Smoothstep(0.6f, 0.78f, MiddleBlobs(seed, x, z));
             }
             default:
                 // Sparser, smaller clusters up over the middle ones.
                 return 0.75f * Smoothstep(0.45f, 0.65f, MiddleBlobs(seed, x, z))
-                             * Smoothstep(0.6f, 0.8f, Blobs(seed, 0xA5, x, z, 1200f, 320f, 0.3f));
+                             * Smoothstep(0.68f, 0.85f, Blobs(seed, 0xA5, x, z, 1200f, 320f, 0.3f));
         }
     }
 
     /// <summary>Whether a piece of landscape <paramref name="layer"/> whose point is at (x, z) is there, given its own
     /// 0-1 <paramref name="jitter"/>. It is where its coverage beats a breakup field: noise a few pieces across, so
     /// neighbouring pieces mostly go together, and where coverage thins the land breaks into groups of pieces rather
-    /// than scattered single ones; the jitter only roughens the edges.</summary>
+    /// than scattered single ones, until it is too thin for any; the jitter only roughens the edges.</summary>
     public static bool Present(ulong seed, int layer, float x, float z, float jitter)
     {
         float size = Layers[layer].CellSize;
         float breakup = Smoothstep(0.15f, 0.85f, Blobs(seed, 0xB0u + (uint)layer, x, z, 2.5f * size, size, 0.35f));
-        return (1f - Jitter) * breakup + Jitter * jitter < Coverage(seed, layer, x, z);
+        return MinBreakup + (1f - MinBreakup) * ((1f - Jitter) * breakup + Jitter * jitter) < Coverage(seed, layer, x, z);
     }
 
     /// <summary>How much a piece's own chance counts in whether it is there (see <see cref="Present"/>).</summary>
-    private const float Jitter = 0.15f;
+    private const float Jitter = 0.08f;
+
+    /// <summary>Coverage below this holds no pieces at all: thin coverage would only leave lone pieces.</summary>
+    private const float MinBreakup = 0.25f;
 
     /// <summary>A point near (x, z) well inside a landmass's core, spiralling out on a coarse grid.</summary>
     public static (float X, float Z) NearestLandmassCore(ulong seed, float x, float z)

@@ -28,6 +28,8 @@ public sealed class IslandSurface
     private readonly FastNoiseLite _hills;    // one octave, summed by Hills with its slope damping the finer ones
     private readonly FastNoiseLite _peaks;    // ridged: peaks and valleys within a range
     private readonly FastNoiseLite _ranges;   // where the ranges are
+    private readonly FastNoiseLite _rangeSize; // how great each range is
+    private readonly FastNoiseLite _relief;   // how hilly the land is
     private readonly FastNoiseLite _strata;   // wobble of the rock layers that cliffs expose
     private readonly FastNoiseLite _patches;  // sand patches in low grass
     private readonly FastNoiseLite _flora, _kind; // where plants grow thick, and which kind
@@ -38,6 +40,8 @@ public sealed class IslandSurface
         _hills = Noise(seed + 11, FastNoiseLite.FractalType.None, 1, 1f);
         _peaks = Noise(seed + 18, FastNoiseLite.FractalType.Ridged, 4, 0.0012f);
         _ranges = Noise(seed + 13, FastNoiseLite.FractalType.FBm, 2, 0.00035f);
+        _rangeSize = Noise(seed + 14, FastNoiseLite.FractalType.FBm, 1, 0.00012f);
+        _relief = Noise(seed + 15, FastNoiseLite.FractalType.FBm, 2, 0.0004f);
         _strata = Noise(seed + 16, FastNoiseLite.FractalType.FBm, 2, 0.01f);
         _patches = Noise(seed + 17, FastNoiseLite.FractalType.FBm, 3, 0.012f);
         _flora = Noise(seed + 22, FastNoiseLite.FractalType.FBm, 3, 0.02f);
@@ -81,15 +85,21 @@ public sealed class IslandSurface
         return sum / norm * 1.6f;
     }
 
+    /// <summary>0.25-1 at (x, z): how hilly the land is, in regions a few kilometres across: rolling lowland, then
+    /// hill country, then rough uplands.</summary>
+    public float Relief(float x, float z) => 0.25f + 0.75f * Smoothstep(-0.5f, 0.6f, _relief.GetNoise(x, z));
+
     /// <summary>0-1 at (x, z): mountain ranges where <see cref="IslandField"/>'s landmasses carry them, sharp ridged
-    /// peaks with valleys between, in ranges a few kilometres long with lowland between them.</summary>
+    /// peaks with valleys between, in ranges a few kilometres long with lowland between them. Ranges differ: most are
+    /// a few hundred blocks high, and only the odd one is great; each rises from foothills at its edges.</summary>
     public float Mountains(float x, float z)
     {
-        float range = Smoothstep(0.05f, 0.45f, _ranges.GetNoise(x, z));
+        float range = Smoothstep(0.2f, 0.6f, _ranges.GetNoise(x, z));
         if (range <= 0f) return 0f;
-        // A broad rise under the whole range, ridged peaks standing on it.
+        float size = 0.15f + 0.85f * Smoothstep(-0.2f, 0.7f, _rangeSize.GetNoise(x, z));
+        // A broad rise under the whole range, ridged peaks standing on it, both growing in from its edges.
         float p = (_peaks.GetNoise(x, z) + 1f) * 0.5f;
-        return range * (0.3f + 0.7f * p * MathF.Sqrt(p));
+        return size * range * range * (0.3f + 0.7f * p * MathF.Sqrt(p));
     }
 
     /// <summary>How far the rock layers at column (x, z) are shifted up or down, for <see cref="Block"/>.</summary>

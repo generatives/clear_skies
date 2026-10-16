@@ -31,15 +31,22 @@ public sealed class IslandWorldGenerator : IWorldGenerator
     /// <summary>Cracks between stacked pieces are this much as wide as those between side-by-side ones.</summary>
     private const float CrackUp = 0.75f;
 
-    /// <summary>How far a piece's top and underside are rounded off at a crack, in blocks.</summary>
-    private const float Rounding = 6f;
+    // Pieces are worn at their edges, in blocks: tops rounded off over TopRound from a side crack and undersides over
+    // UnderRound; where two side cracks meet (rounded over EdgeRound) or are closer than MinWidth (wedges and fins),
+    // worn down from the top, and up from the underside, by Taper blocks for each block in; and slabs against a crack
+    // worn back to a rounded nose, gone where thinner than Slab.
+    private const float TopRound = 12f, UnderRound = 18f, EdgeRound = 20f, MinWidth = 24f, Taper = 4f, Slab = 24f;
+
+    /// <summary>A crack face counts as a side crack when it is at most this steep from upright (sine squared of
+    /// its tilt).</summary>
+    private const float Upright = 0.3f;
 
     // Where a landscape's coverage thins, its pieces' tops keep only (1 - Flatten) of how far the surface there stands
     // above the surface at their point, and they sink by up to Sink (each its own share); at full coverage, neither.
-    private const float Flatten = 0.6f, Sink = 30f, CoreSink = 3f;
+    private const float Flatten = 0.6f, Sink = 12f, CoreSink = 3f;
 
     /// <summary>Solid runs thinner than this are worn away: slivers where a surface just grazes a piece.</summary>
-    private const int MinThickness = 5;
+    private const int MinThickness = 8;
 
     /// <summary>The most layers of piece points a column searches.</summary>
     private const int MaxRows = 16;
@@ -56,7 +63,7 @@ public sealed class IslandWorldGenerator : IWorldGenerator
         _seed = seed;
         _surface = IslandSurface.For(seed);
         _swell = Noise(seed + 41, 2, 0.0006f);  // each landscape's broad rises and dips (sampled offset per landscape)
-        _under = Noise(seed + 43, 3, 0.015f);   // lumps on the undersides
+        _under = Noise(seed + 43, 2, 0.007f);   // lumps on the undersides
         _warpX = Noise(seed + 31, 2, CrackWarpFrequency);
         _warpY = Noise(seed + 32, 2, CrackWarpFrequency);
         _warpZ = Noise(seed + 33, 2, CrackWarpFrequency);
@@ -82,18 +89,20 @@ public sealed class IslandWorldGenerator : IWorldGenerator
         var l = IslandField.Layers[layer];
         float o = Offset(layer);
         level = l.Base + l.Swell * _swell.GetNoise(x + o, z - o);
-        float top = level + l.Hills * (0.5f + 0.5f * _surface.Hills(x + o, z + o));
+        float top = level + l.Hills * _surface.Relief(x + o, z - o) * (0.5f + 0.5f * _surface.Hills(x + o, z + o));
         if (l.Mountains > 0f) top += l.Mountains * _surface.Mountains(x, z);
         return top;
     }
 
-    /// <summary>World Y of landscape <paramref name="layer"/>'s underside at (x, z), under its surface
-    /// <paramref name="top"/> standing on <paramref name="level"/>.</summary>
-    private float Underside(int layer, float x, float z, float top, float level)
+    /// <summary>World Y of landscape <paramref name="layer"/>'s underside at (x, z), under its surface standing on
+    /// <paramref name="level"/>.</summary>
+    private float Underside(int layer, float x, float z, float level)
     {
         var l = IslandField.Layers[layer];
         float o = Offset(layer);
-        return level - l.Thickness * (0.8f + 0.25f * _under.GetNoise(x + o, z + o)) - IslandField.Roots * (top - level);
+        // Roots hang under the mountains only: hanging under every hill too, they make a comb of spikes.
+        float roots = l.Mountains > 0f ? IslandField.Roots * l.Mountains * _surface.Mountains(x, z) : 0f;
+        return level - l.Thickness * (0.85f + 0.2f * _under.GetNoise(x + o, z + o)) - roots;
     }
 
     public ulong ColumnLayers(int chunkX, int chunkZ, int minChunkY)
@@ -217,7 +226,7 @@ public sealed class IslandWorldGenerator : IWorldGenerator
         {
             float surface = Surface(layer, p.X, p.Z, out float level);
             p.Level = surface;
-            present = ClearOfLandmass(layer, p.X, p.Z, surface, Underside(layer, p.X, p.Z, surface, level));
+            present = ClearOfLandmass(layer, p.X, p.Z, surface, Underside(layer, p.X, p.Z, level));
         }
         p.State = present ? (byte)1 : (byte)2;
         p.Keep = 1f - Flatten * rim;
@@ -232,7 +241,7 @@ public sealed class IslandWorldGenerator : IWorldGenerator
         if (layer == IslandField.Landmass || IslandField.Coverage(_seed, IslandField.Landmass, x, z) <= 0f) return true;
         float landTop = Surface(IslandField.Landmass, x, z, out float level);
         return layer == IslandField.Underworld
-            ? top + IslandField.Clearance < Underside(IslandField.Landmass, x, z, landTop, level)
+            ? top + IslandField.Clearance < Underside(IslandField.Landmass, x, z, level)
             : underside - IslandField.Clearance > landTop;
     }
 
@@ -247,6 +256,7 @@ public sealed class IslandWorldGenerator : IWorldGenerator
     private readonly float[] _patch = new float[S * S];
     private readonly float[] _flora = new float[S * S], _kind = new float[S * S], _woods = new float[S * S];
     private readonly float[] _bare = new float[S * S * MaxSpans];
+    private readonly bool[] _scrap = new bool[S * S * MaxSpans];
 
     public void Generate(ChunkData data, ChunkPosition pos)
     {
@@ -376,7 +386,7 @@ public sealed class IslandWorldGenerator : IWorldGenerator
                 if (!_layerLive[layer]) continue;
                 float top = Surface(layer, x, z, out float level);
                 _gTop[layer][c] = top;
-                _gBottom[layer][c] = Underside(layer, x, z, top, level);
+                _gBottom[layer][c] = Underside(layer, x, z, level);
             }
         }
 
@@ -410,13 +420,52 @@ public sealed class IslandWorldGenerator : IWorldGenerator
             _flora[col] = _surface.Flora(x, z);
             _woods[col] = _surface.Woods(x, z);
             _kind[col] = _surface.Kind(x, z);
-            for (int sp = 0; sp < spans; sp++)
+        }
+
+        DropScraps();
+        for (int col = 0; col < S * S; col++)
+        for (int sp = 0; sp < _spanCount[col]; sp++)
+        {
+            int hi = _spans[col * MaxSpans + sp].Hi;
+            bool shaded = sp + 1 < _spanCount[col] && _spans[col * MaxSpans + sp + 1].Lo - hi < ShadeReach;
+            _bare[col * MaxSpans + sp] = shaded ? Shaded : 0f;
+        }
+    }
+
+    /// <summary>Drops scraps a block wide, where a piece wears away to nothing: runs with no run beside them along x,
+    /// or none along z. Beyond the chunk column counts as beside.</summary>
+    private void DropScraps()
+    {
+        for (int lz = 0; lz < S; lz++)
+        for (int lx = 0; lx < S; lx++)
+        {
+            int col = lx + S * lz;
+            for (int sp = 0; sp < _spanCount[col]; sp++)
             {
-                int hi = _spans[col * MaxSpans + sp].Hi;
-                bool shaded = sp + 1 < spans && _spans[col * MaxSpans + sp + 1].Lo - hi < ShadeReach;
-                _bare[col * MaxSpans + sp] = shaded ? Shaded : 0f;
+                var (lo, hi) = _spans[col * MaxSpans + sp];
+                bool alongX = lx == 0 || lx == S - 1 || Beside(col - 1, lo, hi) || Beside(col + 1, lo, hi);
+                bool alongZ = lz == 0 || lz == S - 1 || Beside(col - S, lo, hi) || Beside(col + S, lo, hi);
+                _scrap[col * MaxSpans + sp] = !(alongX && alongZ);
             }
         }
+        for (int col = 0; col < S * S; col++)
+        {
+            int kept = 0;
+            for (int sp = 0; sp < _spanCount[col]; sp++)
+                if (!_scrap[col * MaxSpans + sp]) _spans[col * MaxSpans + kept++] = _spans[col * MaxSpans + sp];
+            _spanCount[col] = (byte)kept;
+        }
+    }
+
+    /// <summary>Whether column <paramref name="col"/> has a run overlapping heights lo..hi.</summary>
+    private bool Beside(int col, short lo, short hi)
+    {
+        for (int sp = 0; sp < _spanCount[col]; sp++)
+        {
+            var other = _spans[col * MaxSpans + sp];
+            if (other.Lo <= hi && other.Hi >= lo) return true;
+        }
+        return false;
     }
 
     /// <summary>Adds landscape <paramref name="layer"/>'s solid runs in block column (x, z) to <paramref name="found"/>:
@@ -491,10 +540,39 @@ public sealed class IslandWorldGenerator : IWorldGenerator
             if (lo >= tPieceTop) continue;
             bool atTop = hi >= tPieceTop;
             hi = MathF.Min(hi, tPieceTop);
+            // Worn down from the top (and up from the underside) where it is narrow between two side cracks, or outside
+            // the rounding where they meet: wedges and fins between cracks taper away.
+            SideCracks(i, sites, sxz, sx, sy, sz, across, up, 0.5f * (lo + hi), out float side1, out float side2);
+            float narrow = MinWidth - side1 - side2;
+            if (side2 < EdgeRound)
+            {
+                float a = EdgeRound - side1, b = EdgeRound - side2;
+                narrow = MathF.Max(narrow, MathF.Sqrt(a * a + b * b) - EdgeRound);
+            }
+            float taper = Taper * MathF.Max(narrow, 0f);
             float yLo = lo / V - lift, yHi = hi / V - lift;
             // Where it is the landscape's top or underside, rounded off towards the side cracks.
-            if (atTop) yHi -= 0.5f * Rounded(FromCrack(i, sites, sxz, sx, sy, sz, across, up, hi));
-            if (lo <= tBottom) yLo += Rounded(FromCrack(i, sites, sxz, sx, sy, sz, across, up, lo));
+            bool atBottom = lo <= tBottom;
+            if (atTop)
+            {
+                SideCracks(i, sites, sxz, sx, sy, sz, across, up, hi, out float fromCrack, out _);
+                yHi -= Round(fromCrack, TopRound);
+            }
+            if (atBottom)
+            {
+                SideCracks(i, sites, sxz, sx, sy, sz, across, up, lo, out float fromCrack, out _);
+                yLo += Round(fromCrack, UnderRound);
+            }
+            // A thin slab against a crack, worn back to a rounded nose: from its underside if that is the landscape's,
+            // else from the top. One between two cracks is a scrap of a piece, so wears away sooner.
+            float slab = atTop || atBottom ? Slab : 2f * Slab;
+            if (!(atTop && atBottom) && yHi - yLo < 2f * slab)
+            {
+                float th = yHi - yLo, worn = MathF.Sqrt(MathF.Max(th * th - slab * slab, 0f));
+                if (atBottom) yLo = yHi - worn; else yHi = yLo + worn;
+            }
+            yHi -= taper;
+            if (atBottom) yLo += taper;
             yLo = MathF.Max(yLo - piece.Sink * 0.8f, IslandField.LowestBottom);
             yHi = MathF.Min(yHi - piece.Sink, IslandField.WorldTop - 1);
             int bLo = (int)MathF.Ceiling(yLo), bHi = (int)MathF.Floor(yHi);
@@ -502,29 +580,34 @@ public sealed class IslandWorldGenerator : IWorldGenerator
         }
     }
 
-    /// <summary>How far, in blocks, point i's piece is from its nearest crack at scaled height t, less the wear.</summary>
-    private static float FromCrack(int i, int sites, Span<float> sxz, Span<float> sx, Span<float> sy, Span<float> sz,
-                                   float across, float up, float t)
+    /// <summary>How far, in blocks, point i's piece is from its two nearest side cracks (see <see cref="Upright"/>)
+    /// at scaled height t, less the wear: <paramref name="first"/> the nearer.</summary>
+    private static void SideCracks(int i, int sites, Span<float> sxz, Span<float> sx, Span<float> sy, Span<float> sz,
+                                   float across, float up, float t, out float first, out float second)
     {
-        float least = float.MaxValue;
+        first = second = float.MaxValue;
         for (int j = 0; j < sites; j++)
         {
             if (j == i) continue;
             float ax = sx[j] - sx[i], ay = sy[j] - sy[i], az = sz[j] - sz[i];
             float len2 = ax * ax + ay * ay + az * az;
-            float wear = across + (up - across) * (ay * ay / len2);
+            float tilt = ay * ay / len2;
+            if (tilt > Upright) continue;
+            float wear = across + (up - across) * tilt;
             float dj = sxz[j] + (t - sy[j]) * (t - sy[j]), di = sxz[i] + (t - sy[i]) * (t - sy[i]);
-            least = MathF.Min(least, (dj - di) / (2f * MathF.Sqrt(len2)) - wear);
+            float d = (dj - di) / (2f * MathF.Sqrt(len2)) - wear;
+            if (d < first) { second = first; first = d; }
+            else if (d < second) second = d;
         }
-        return least;
     }
 
-    /// <summary>How far a top or underside is worn back <paramref name="fromCrack"/> blocks from a crack.</summary>
-    private static float Rounded(float fromCrack)
+    /// <summary>How far a top or underside is worn back <paramref name="fromCrack"/> blocks from a crack: a quarter
+    /// circle of <paramref name="radius"/>, meeting the crack wall upright.</summary>
+    private static float Round(float fromCrack, float radius)
     {
-        if (fromCrack >= Rounding) return 0f;
-        float r = Rounding - MathF.Max(fromCrack, 0f);
-        return r * r / Rounding;
+        if (fromCrack >= radius) return 0f;
+        float r = radius - MathF.Max(fromCrack, 0f);
+        return radius - MathF.Sqrt(radius * radius - r * r);
     }
 
     private static float Smoothstep(float edge0, float edge1, float x)
