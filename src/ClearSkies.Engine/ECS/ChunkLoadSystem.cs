@@ -81,9 +81,10 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
     private readonly Dictionary<int, (short dx, short dz, int d)[]> _offsetsByDistance = new();
     private readonly float _viewDistance; // the farthest anything is drawn
 
-    /// <summary>An interest as streaming sees it: its entity, the column it's streamed around, and its load radius in
-    /// columns.</summary>
-    private readonly record struct Ring(Entity Interest, (int x, int z) Column, int LoadColumns);
+    /// <summary>An interest as streaming sees it: its entity, the column it's streamed around, its load radius in
+    /// columns, and how many columns a side it's wanted in: 1, or 2 for a view whose distant terrain is drawn coarse
+    /// (see <see cref="FullDetailRadius"/>), so each coarse column's four columns are wanted together.</summary>
+    private readonly record struct Ring(Entity Interest, (int x, int z) Column, int LoadColumns, int Align);
 
     private readonly List<Ring> _rings = new();   // as of the last rebuild
     private readonly List<Ring> _current = new(); // this frame's
@@ -290,8 +291,14 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
             var interest = e.Get<TerrainInterest>();
             var position = e.Get<Transform>().Position;
             float draw = MathF.Min(interest.DrawRadius, _viewDistance);
+            int align = 1;
+            if (draw > 0 && FullDetailRadius is { } full)
+            {
+                draw = MathF.Min(draw, full);
+                if (draw >= interest.ColliderRadius) align = 2;
+            }
             int loadColumns = (int)MathF.Ceiling(MathF.Max(interest.ColliderRadius, draw) / S);
-            _current.Add(new Ring(e, InterestColumn(e, position), loadColumns));
+            _current.Add(new Ring(e, InterestColumn(e, position), loadColumns, align));
             _seen.Add(e);
         }
         if (_interestColumns.Count > _seen.Count)
@@ -342,7 +349,8 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
         _queueTruncated = false;
         _nothingToEvict = false;
         _evictNext = -1;
-        _scanOffsets = _rings.Select(r => OffsetsByDistance(r.LoadColumns)).ToArray();
+        // An aligned ring wants whole 2x2 groups, which reach up to two columns past its radius.
+        _scanOffsets = _rings.Select(r => OffsetsByDistance(r.LoadColumns + (r.Align == 1 ? 0 : 2))).ToArray();
         _scanAt = new int[_rings.Count];
         _scanCarry = new float[_rings.Count];
         for (int i = 0; i < _rings.Count; i++)
@@ -387,6 +395,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
             if (next >= _scanOffsets.Length || _scanAt[next] >= _scanOffsets[next].Length) break;
             var (dx, dz, d) = _scanOffsets[next][_scanAt[next]++];
             int x = _rings[next].Column.x + dx, z = _rings[next].Column.z + dz;
+            if (!WantedBy(_rings[next], x, z)) continue; // past an aligned ring's 2x2 groups
             if (_rings.Count > 1 && !NearestRing(next, x, z, d)) continue; // another ring's
             if (HasMissing(x, z))
             {
@@ -461,7 +470,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
         {
             if (i == ring) continue;
             long d = Sq(x - _rings[i].Column.x) + Sq(z - _rings[i].Column.z);
-            if (d <= Sq(_rings[i].LoadColumns) && (d < distSq || (d == distSq && i < ring))) return false;
+            if (WantedBy(_rings[i], x, z) && (d < distSq || (d == distSq && i < ring))) return false;
         }
         return true;
     }
@@ -470,8 +479,45 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
     private bool Wanted(int x, int z)
     {
         foreach (var ring in _rings)
-            if (Sq(x - ring.Column.x) + Sq(z - ring.Column.z) <= Sq(ring.LoadColumns)) return true;
+            if (WantedBy(ring, x, z)) return true;
         return false;
+    }
+
+    /// <summary>Within <paramref name="ring"/>'s load radius: of its column, or for an aligned ring, of the 2x2 group
+    /// it's in (the group's distance from the group the interest is in).</summary>
+    private static bool WantedBy(in Ring ring, int x, int z)
+    {
+        if (ring.Align == 1) return Sq(x - ring.Column.x) + Sq(z - ring.Column.z) <= Sq(ring.LoadColumns);
+        int r = (ring.LoadColumns + 1) / 2;
+        return Sq((x >> 1) - (ring.Column.x >> 1)) + Sq((z >> 1) - (ring.Column.z >> 1)) <= Sq(r);
+    }
+
+    // ── Distant terrain (see LodTerrainSystem) ──────────────────────────────────
+
+    /// <summary>When set, the view's terrain loads in full detail only this far (blocks), in whole 2x2 groups of
+    /// columns, and <see cref="LodTerrainSystem"/> draws the rest coarse. Null: full detail as far as the view.</summary>
+    public float? FullDetailRadius { get; set; }
+
+    /// <summary>The lowest streamed chunk layer.</summary>
+    public int MinLayer => _minY;
+
+    /// <summary>Layers of column (x, z) holding builds (edited chunks with blocks), as bits from <see cref="MinLayer"/>.</summary>
+    public ulong BuiltLayers(int x, int z) => _built.GetValueOrDefault((x, z));
+
+    /// <summary>Whether chunk <paramref name="pos"/> has been edited since it was generated (it's loaded from the store).</summary>
+    public bool IsEdited(ChunkPosition pos) => _edited.Contains(pos);
+
+    /// <summary>Whether column (x, z) is wanted and drawn in full: nothing in it still to load, and every chunk of it
+    /// that may hold something loaded and meshed.</summary>
+    public bool IsColumnReady(int x, int z)
+    {
+        if (!Wanted(x, z) || _inFlight.ContainsKey((x, z))) return false;
+        for (ulong bits = MaybeContent(x, z); bits != 0; bits &= bits - 1)
+        {
+            var entry = _staticVolume.GetEntry(new ChunkPosition(x, _minY + BitOperations.TrailingZeroCount(bits), z));
+            if (entry == null || !entry.Entity.Has<ChunkMeshedFlag>()) return false;
+        }
+        return true;
     }
 
     private static long Sq(int v) => (long)v * v;

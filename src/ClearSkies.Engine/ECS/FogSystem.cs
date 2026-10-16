@@ -48,9 +48,19 @@ public sealed class FogSystem : ISystem, IDebugUiSystem
     /// <summary>Horizontal distance from the view at which the loaded world stops, eased over time. Fog is total by here.</summary>
     public float Distance => _distance;
 
+    /// <summary>Distant terrain drawn beyond the full-detail terrain (see LodTerrainSystem): while it's active, the fog
+    /// follows it instead, since it covers full-detail terrain that isn't ready yet.</summary>
+    public IFarTerrain? Far { get; set; }
+
     public void Update(float dt)
     {
         if (!TryView(out var centre, out float radius, out float scanned)) return;
+
+        if (Far is { Active: true } far)
+        {
+            Ease(far.ReadyRadius(centre), dt);
+            return;
+        }
 
         // Only what's within the draw radius counts: a column loaded beyond it for colliders is never drawn.
         float target = MathF.Min(radius, scanned);
@@ -61,6 +71,11 @@ public sealed class FogSystem : ISystem, IDebugUiSystem
         }
         target = MathF.Min(target, Nearest(_chunksNotMeshedYet, centre, radius));
         target = MathF.Min(target, Nearest(_chunksNotUploadedYet, centre, radius));
+        Ease(target, dt);
+    }
+
+    private void Ease(float target, float dt)
+    {
         _target = target;
 
         float rate = target < _distance ? 8f : 1f;

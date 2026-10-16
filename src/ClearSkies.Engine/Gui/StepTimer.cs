@@ -81,6 +81,10 @@ public sealed class StepTimer
     /// taken so far, for work that stops at a time budget.</summary>
     public double SinceLap() => _sw.Elapsed.TotalMilliseconds - _last;
 
+    /// <summary>Picks the frame's timing up again after a gap that isn't this system's (other systems ran since the
+    /// last lap): the next lap counts from here.</summary>
+    public void Resume() => _last = _sw.Elapsed.TotalMilliseconds;
+
     public void Reset() => Array.Clear(_worstEver);
 
     private void Commit()

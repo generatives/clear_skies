@@ -69,11 +69,17 @@ fn occCode(g: i32, c: vec3<i32>) -> i32 {
     return chunkTable[2 * i].x;
 }
 
-// (occupancy code, solid-brick mask low, high, see-through slot + 1 or 0) of chunk c.
+// Set while a ray crosses a grid other than the one it was fired from: it then passes through that grid's covered
+// chunks (distant terrain where full detail is loaded), so each level of terrain is lit by its own blocks alone.
+var<private> skipCovered: bool;
+
+// (occupancy code, solid-brick mask low, high, see-through slot + 1 or 0) of chunk c; unloaded for a covered chunk
+// while skipCovered is set.
 fn chunkInfo(g: i32, c: vec3<i32>) -> vec4<i32> {
     let i = entryOf(g, c);
     if (i < 0) { return vec4<i32>(OCC_UNLOADED, 0, 0, 0); }
     let m = chunkTable[2 * i + 1];
+    if (skipCovered && m.w != 0) { return vec4<i32>(OCC_UNLOADED, 0, 0, 0); }
     return vec4<i32>(chunkTable[2 * i].x, m.x, m.y, m.z);
 }
 
@@ -369,20 +375,23 @@ fn ddaMarch(g: i32, o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, lo: vec3<i32>,
 // direction is rotated into it.
 // skipOrigin: ignore the cell containing worldOrigin in any grid the ray starts inside (clip.t0 == 0) — used for
 // lamp rays, which start at the lamp's own opaque block.
-fn anyOccluderAlongSegment(list: u32, worldOrigin: vec3<f32>, worldDir: vec3<f32>, segLen: f32, skipOrigin: bool) -> bool {
+// src: the grid the ray is fired from (see skipCovered).
+fn anyOccluderAlongSegment(list: u32, src: i32, worldOrigin: vec3<f32>, worldDir: vec3<f32>, segLen: f32, skipOrigin: bool) -> bool {
     if (segLen <= 0.0) { return false; }
     let count = lists[list];
     for (var k = 0u; k < count; k = k + 1u) {
         let gi = i32(lists[list + 1u + k]);
         let gd = grids[gi];
         if (gd.table.y <= 0) { continue; }
+        skipCovered = gi != src;
         let lo = (gd.w2v * vec4<f32>(worldOrigin, 1.0)).xyz;
         let ld = (gd.w2v * vec4<f32>(worldDir, 0.0)).xyz; // w=0 drops translation: rotation-only direction transform
         let clip = slabClip(lo, ld, vec3<f32>(gd.bmin.xyz), vec3<f32>(gd.bmax.xyz), 0.0, segLen);
         if (!clip.hit) { continue; }
         let skip = skipOrigin && clip.t0 <= 1e-4;
-        if (ddaMarch(gi, lo, ld, clip.t0, clip.t1, gd.bmin.xyz, gd.bmax.xyz, skip)) { return true; }
+        if (ddaMarch(gi, lo, ld, clip.t0, clip.t1, gd.bmin.xyz, gd.bmax.xyz, skip)) { skipCovered = false; return true; }
     }
+    skipCovered = false;
     return false;
 }
 
@@ -445,7 +454,7 @@ fn sunLevel(g: i32, v: vec3<i32>, list: u32) -> u32 {
         let jitter = select(0.0, SUN_JITTER, SUN_SAMPLES > 1); // a single ray uses the unjittered nudged centre
         let sp = clamp(vc + offs[s] * jitter, cellLo, cellHi);
         let world = (v2w * vec4<f32>(sp, 1.0)).xyz;
-        if (!anyOccluderAlongSegment(list, world, -p.sunDir.xyz, SUN_MAX_DISTANCE, false)) { lit = lit + 1u; }
+        if (!anyOccluderAlongSegment(list, g, world, -p.sunDir.xyz, SUN_MAX_DISTANCE, false)) { lit = lit + 1u; }
     }
     return u32(round(f32(lit) * 3.0 / f32(SUN_SAMPLES)));
 }
@@ -508,7 +517,7 @@ fn sun_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg:
 // exactly as one open only at the bottom. Starting at the face rather than the lamp's centre keeps a lamp set in a
 // ceiling or wall from being blocked by the blocks beside it, so it lights along a tunnel; starting in the open cell
 // (not stopping short of the lamp) still tests every block the light passes, so it can't leak through diagonals.
-fn lampReaches(list: u32, c: vec3<f32>, open: u32, g: i32, dest: vec3<f32>) -> bool {
+fn lampReaches(list: u32, src: i32, c: vec3<f32>, open: u32, g: i32, dest: vec3<f32>) -> bool {
     let m = grids[g].v2w;
     for (var f = 0u; f < 6u; f = f + 1u) {
         if ((open & (1u << f)) == 0u) { continue; }
@@ -520,7 +529,7 @@ fn lampReaches(list: u32, c: vec3<f32>, open: u32, g: i32, dest: vec3<f32>) -> b
         let d = dest - o;
         if (dot(d, n) <= 0.0) { continue; } // behind this face
         let len = length(d);
-        if (len < 1e-4 || !anyOccluderAlongSegment(list, o, d / len, len, false)) { return true; }
+        if (len < 1e-4 || !anyOccluderAlongSegment(list, src, o, d / len, len, false)) { return true; }
     }
     return false;
 }
@@ -547,7 +556,7 @@ fn lampLight(g: i32, v: vec3<i32>, list: u32) -> vec3<f32> {
         if (contribF <= 0.0 || all(c <= best)) { continue; }
 
         let faces = lists[r + 7u];
-        if (lampReaches(list, lamp.xyz, faces & 63u, i32(faces >> 6u), world)) {
+        if (lampReaches(list, g, lamp.xyz, faces & 63u, i32(faces >> 6u), world)) {
             best = max(best, c);
         }
     }
@@ -939,7 +948,9 @@ fn bounceVoxel(g: i32, v: vec3<i32>, word: u32, alpha: f32, alphaAo: f32, first:
             let ld = (gd.w2v * vec4<f32>(dw, 0.0)).xyz;
             let clip = slabClip(lo, ld, vec3<f32>(gd.bmin.xyz), vec3<f32>(gd.bmax.xyz), 0.0, bestT);
             if (!clip.hit) { continue; }
+            skipCovered = gi != g;
             let h = ddaNearest(gi, lo, ld, clip.t0, clip.t1, gd.bmin.xyz, gd.bmax.xyz);
+            skipCovered = false;
             if (h.hit && h.t < bestT) { bestT = h.t; bestG = gi; best = h; }
         }
         if (bestG >= 0) { if (!aoOnly) { sumL = sumL + radianceAt(bestG, best); } }

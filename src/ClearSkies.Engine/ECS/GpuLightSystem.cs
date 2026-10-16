@@ -159,9 +159,16 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         "Poses + grid upload", "Gathering lamps", "Marking changes", "Choosing relit bricks", "Bounce touches",
         "Choosing bounce bricks", "Chunk lists", "Dispatch + upload") { Owner = "GPU lighting" };
 
-    /// <summary>A grid with a pose this frame.</summary>
-    private readonly record struct LitGrid(ChunkVolume Vol, GridHandle Handle, Mat4 VoxelToWorld,
+    /// <summary>A grid with a pose this frame. Vol is null for distant terrain (see <see cref="AddStaticGrid"/>).</summary>
+    private readonly record struct LitGrid(ChunkVolume? Vol, GridHandle Handle, Mat4 VoxelToWorld,
                                            Vector3D<float> Pos, Quaternion<float> Rot);
+
+    // Static grids with no entity of their own (distant terrain), lit like the world.
+    private readonly List<GridHandle> _staticGrids = new();
+
+    /// <summary>Lights static grid <paramref name="g"/> (registered with GridStore.RegisterStatic: distant terrain)
+    /// like the world, per brick, at its scale.</summary>
+    public void AddStaticGrid(GridHandle g) => _staticGrids.Add(g);
 
     private readonly List<LitGrid>             _lit   = new();
     private readonly List<WorldLamp>           _lamps = new();
@@ -303,6 +310,13 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
         _lit.Clear();
         foreach (ref readonly Entity e in _grids.GetEntities())
             AddLit(e.Get<ChunkGrid>().Volume, e.DrawnPose()); // lit where it's drawn
+        foreach (var g in _staticGrids)
+        {
+            if (g.Index < 0) continue;
+            var v2w = Mat4.Scale(new Vector3D<float>(g.Scale));
+            _store.SetPose(g, v2w, Mat4.Scale(new Vector3D<float>(1f / g.Scale)));
+            _lit.Add(new LitGrid(null, g, v2w, default, Quaternion<float>.Identity));
+        }
         _store.UploadGrids();
         _phaseTimer.Lap(0);
 
@@ -394,6 +408,8 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     {
         _lamps.Clear();
         foreach (var lg in _lit)
+        {
+            if (lg.Vol == null) continue; // distant terrain lists no lamps
             foreach (var (cpos, entry) in lg.Handle.EmitterChunks) // only the chunks with lamps, not every loaded one
             {
                 var origin = cpos.WorldOrigin;
@@ -406,6 +422,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
                     _lamps.Add(new WorldLamp(world, em.Level, col, lg.Handle.Index, voxel, OpenFaces(lg.Vol, voxel)));
                 }
             }
+        }
     }
 
     /// <summary>Which faces of the block at <paramref name="v"/> border a cell light passes through (bit f: +x, -x,

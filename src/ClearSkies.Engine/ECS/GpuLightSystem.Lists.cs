@@ -111,7 +111,9 @@ public sealed partial class GpuLightSystem
         foreach (var other in _lit)
         {
             var h = other.Handle;
-            bool include = h.IsWorld || h == lg.Handle;
+            // Distant terrain's rays don't see the world: where full detail is loaded too, each level is lit by its own
+            // blocks (the world's rays pass through covered distant terrain likewise, see GridStore.SetCovered).
+            bool include = h == lg.Handle || (h.IsWorld && lg.Handle.Scale == 1);
             if (!include && h.HasSolid)
             {
                 var st = _gridStates[h];
@@ -160,7 +162,13 @@ public sealed partial class GpuLightSystem
     private static void ChunkWorldBox(in LitGrid lg, ChunkPosition pos, out Vector3D<float> mn, out Vector3D<float> mx)
     {
         var lo = pos.WorldOrigin;
-        if (lg.Handle.IsWorld) { mn = lo; mx = lo + new Vector3D<float>(S); return; }
+        if (lg.Handle.IsWorld)
+        {
+            int k = lg.Handle.Scale;
+            mn = lo * k;
+            mx = mn + new Vector3D<float>(S * k);
+            return;
+        }
         mn = new Vector3D<float>(float.MaxValue);
         mx = new Vector3D<float>(float.MinValue);
         for (int c = 0; c < 8; c++)

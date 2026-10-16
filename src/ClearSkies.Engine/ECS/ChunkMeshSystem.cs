@@ -52,7 +52,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
 
     /// <summary>One packed mesh: its quads as <see cref="ChunkQuad"/>s (rented; the first <see cref="Bytes"/> are used),
     /// uploaded as one buffer, and the words its light map takes (see <see cref="ChunkQuad.AssignLightOffsets"/>).</summary>
-    private readonly record struct Packed(byte[] Data, int Bytes, int QuadCount, uint LightWords)
+    internal readonly record struct Packed(byte[] Data, int Bytes, int QuadCount, uint LightWords)
     {
         public static readonly Packed None = new(Array.Empty<byte>(), 0, 0, 0);
     }
@@ -130,7 +130,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     /// <summary>Packs a chunk mesh for upload, off the main thread: each of the mesher's quads (four vertices; the
     /// indices only ever join them as two triangles) as one 8-byte <see cref="ChunkQuad"/>, with its light map laid out
     /// (both sides of each quad for a <paramref name="twoSided"/> mesh).</summary>
-    private static Packed PackQuads(LayerMesh mesh, bool twoSided = false)
+    internal static Packed PackQuads(LayerMesh mesh, bool twoSided = false)
     {
         ReadOnlySpan<Vertex> verts = CollectionsMarshal.AsSpan(mesh.Vertices);
         int quads = verts.Length / 4;

@@ -43,11 +43,15 @@ public sealed class GameView : IDisposable
         host.Renderer.AttachGridStore(GridStore);
         Budget = new LightBudget(GridStore);
         _checkerBounce = options.CheckerBounce;
+        _lod = options.Lod;
+        _lodDistance = options.LodDistance;
 
         InputSample = new InputSampleSystem(host.World, host.Input, host.Time);
     }
 
     private readonly int? _checkerBounce;
+    private readonly bool _lod;
+    private readonly float? _lodDistance;
 
     public WindowedEngineHost Host { get; }
     public BlockModelLibrary BlockModels { get; }
@@ -55,6 +59,9 @@ public sealed class GameView : IDisposable
     public PlayerModel PlayerModel { get; }
     public UiContext Ui { get; }
     public GridStore GridStore { get; }
+
+    /// <summary>Distant terrain drawn coarse (made in <see cref="AddRender"/>); the fog follows it while it's on.</summary>
+    public LodTerrainSystem? Lod { get; private set; }
 
     /// <summary>How much of the world loads: as much as the light storage holds.</summary>
     public IChunkBudget Budget { get; }
@@ -100,6 +107,15 @@ public sealed class GameView : IDisposable
         host.AddSystem((ISystem)_particles, SystemStage.Frame); // moves every emitter's particles
         var chunks = new ChunkRenderSystem(host.World, renderer, volume);
         host.AddSystem(chunks, SystemStage.RenderWorld);
+        // Distant terrain drawn coarse past the full-detail terrain (off until ticked in its panel), after it.
+        Lod = new LodTerrainSystem(host.World, renderer, world.ChunkLoad, volume, () => new HeartWorldGenerator(world.Seed),
+                                   world.ChunkStore, GridStore) { Enabled = _lod };
+        light.AddStaticGrid(Lod.Grid); // lit like the world
+        Lod.IsLit = light.IsLit;       // swaps wait for the incoming terrain's light
+        if (_lodDistance is { } lodDistance) Lod.OuterRadius = lodDistance;
+        chunks.Cover = Lod.CoverOf;
+        host.AddSystem((ISystem)Lod, SystemStage.PreRender);
+        host.AddSystem((IRenderSystem)Lod, SystemStage.RenderWorld);
         host.AddSystem(new ModelRenderSystem(host.World, renderer, host.Time), SystemStage.RenderWorld);
         host.AddSystem(_clouds, SystemStage.RenderWorld);
         host.AddSystem((IRenderSystem)_particles, SystemStage.RenderWorld);
@@ -107,6 +123,7 @@ public sealed class GameView : IDisposable
         host.AddSystem(new WireframeRenderSystem(host.World, renderer), SystemStage.RenderOverlay);
         host.AddSystem(_ropes = new GrappleRopeSystem(host.World, renderer, world.Registry), SystemStage.RenderOverlay); // grapple ropes, ours and others'
         host.AddSystem(chunks, SystemStage.RenderTransparent);
+        host.AddSystem((IRenderSystem)Lod, SystemStage.RenderTransparent);
         host.AddSystem(new HudRenderSystem(host.World, renderer), SystemStage.RenderHud);
         host.AddSystem(_uiRenderer, SystemStage.RenderHud);
     }

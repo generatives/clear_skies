@@ -102,7 +102,8 @@ internal static class HostedGame
         host.AddSystem(world.Interpolation, SystemStage.Frame);
         host.AddSystem(world.Hierarchy, SystemStage.Frame);
         host.AddSystem(world.ChunkLoad, SystemStage.Frame);
-        host.AddSystem(new FogSystem(host.World, world.Options.ViewDistance), SystemStage.Frame); // at the nearest terrain not ready
+        var fog = new FogSystem(host.World, world.Options.ViewDistance);
+        host.AddSystem(fog, SystemStage.Frame); // at the nearest terrain not ready
         // What the player points at and uses, the HUD (crosshair, hotbar), grids saved and loaded, and the debug panels.
         host.AddSystem(new BlockTargetSystem(host.World, input, renderer, world.BlockActions, world.EditLimits), SystemStage.Frame);
         host.AddSystem(new HudUi(view.Ui, input, world.BlockActions, pilot, renderer.Atlas,
@@ -115,6 +116,7 @@ internal static class HostedGame
         host.Gui.RegisterDebugUi(new NetDebugPanel(net, hosting.Host, world.RemoteBodies, transport));
 
         view.AddRender(world);
+        fog.Far = view.Lod;
 
         // The camera waits where the local player will spawn (where they left off, or the world's spawn point) until
         // they do, once the world around them has loaded.

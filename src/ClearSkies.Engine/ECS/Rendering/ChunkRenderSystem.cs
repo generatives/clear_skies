@@ -39,7 +39,8 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
 
     // One visible chunk, collected so they can be drawn nearest first.
     private readonly record struct ChunkDraw(float DistSq, GpuMesh? Mesh, GpuMesh? CutoutMesh, GpuMesh? TransparentMesh,
-                                             ModelBlock[] Models, Mat4 Model, int Grid, ChunkPosition Chunk, GridHandle? Handle);
+                                             ModelBlock[] Models, Mat4 Model, int Grid, ChunkPosition Chunk, GridHandle? Handle,
+                                             float Dissolve = 0f);
     private readonly List<ChunkDraw> _draws = new();
     private readonly List<ChunkDraw> _translucentDraws = new(); // the visible chunks with translucent faces
     private static readonly Comparison<ChunkDraw> NearestFirst = (a, b) => a.DistSq.CompareTo(b.DistSq);
@@ -50,6 +51,11 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     /// authored Blockbench-style (x/z centred on the origin, standing on y = 0, 1 unit = 1 block), so it is rotated
     /// about the cell centre to the orientation, standing on the cell face opposite its top.</summary>
     private static readonly Mat4[] OrientationPlacement = BuildOrientationPlacements();
+
+    /// <summary>How much a static world column is drawn by something else instead (coarse distant terrain, see
+    /// LodTerrainSystem.CoverOf): 1 skips its chunks, between 0 and 1 dissolves that share of their pixels (a swap
+    /// fading out), 0 draws them.</summary>
+    public Func<int, int, float>? Cover { get; set; }
 
     /// <param name="staticVolume">The static world, whose chunks are culled by column (it never moves).</param>
     public ChunkRenderSystem(World world, Renderer renderer, ChunkVolume staticVolume)
@@ -119,6 +125,8 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
             var min = new Vector3D<float>(cx * ChunkData.Size, column.MinY * ChunkData.Size, cz * ChunkData.Size);
             var max = new Vector3D<float>((cx + 1) * ChunkData.Size, (column.MaxY + 1) * ChunkData.Size, (cz + 1) * ChunkData.Size);
             if (!frame.Frustum.Intersects(min, max)) continue;
+            float cover = Cover?.Invoke(cx, cz) ?? 0f;
+            if (cover >= 1f) continue; // drawn coarse instead (see LodTerrainSystem)
             _columnsVisible++;
             foreach (var e in column.Chunks)
             {
@@ -130,7 +138,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
                 var centre = origin + half;
                 AddDraw(new ChunkDraw(Vector3D.DistanceSquared(centre, frame.CameraPosition), rd.Mesh, rd.CutoutMesh,
                                          rd.TransparentMesh, rd.Models, Mat4.Translation(origin), rd.Grid?.Index ?? -1, rd.ChunkPos,
-                                         rd.Grid));
+                                         rd.Grid, cover));
             }
         }
 
@@ -176,14 +184,14 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         // them instead of shading them and overwriting them later.
         _draws.Sort(NearestFirst);
         foreach (var d in _draws)
-            if (d.Mesh != null) _renderer.DrawChunkMesh(d.Mesh, d.Model, d.Grid, d.Chunk);
+            if (d.Mesh != null) _renderer.DrawChunkMesh(d.Mesh, d.Model, d.Grid, d.Chunk, d.Dissolve);
         // Cut-out faces after all the opaque ones: discarding texels costs the early depth test, so the opaque world is
         // drawn without it first. Their depth goes down first, so each pixel's nearest cut-out face is lit once rather
         // than every leaf behind it too (see Renderer.DrawCutoutChunkDepth).
         foreach (var d in _draws)
-            if (d.CutoutMesh != null) _renderer.DrawCutoutChunkDepth(d.CutoutMesh, d.Model, d.Grid, d.Chunk);
+            if (d.CutoutMesh != null) _renderer.DrawCutoutChunkDepth(d.CutoutMesh, d.Model, d.Grid, d.Chunk, d.Dissolve);
         foreach (var d in _draws)
-            if (d.CutoutMesh != null) _renderer.DrawCutoutChunkMesh(d.CutoutMesh, d.Model, d.Grid, d.Chunk);
+            if (d.CutoutMesh != null) _renderer.DrawCutoutChunkMesh(d.CutoutMesh, d.Model, d.Grid, d.Chunk, d.Dissolve);
 
         _modelBlocksDrawn = 0;
         foreach (var d in _draws)
@@ -209,8 +217,8 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     /// order the chunks (and their faces) are drawn in.</summary>
     private void RenderTranslucent()
     {
-        foreach (var d in _translucentDraws) _renderer.DrawTransparentChunkDepth(d.TransparentMesh!, d.Model, d.Grid, d.Chunk);
-        foreach (var d in _translucentDraws) _renderer.DrawTransparentChunkMesh(d.TransparentMesh!, d.Model, d.Grid, d.Chunk);
+        foreach (var d in _translucentDraws) _renderer.DrawTransparentChunkDepth(d.TransparentMesh!, d.Model, d.Grid, d.Chunk, d.Dissolve);
+        foreach (var d in _translucentDraws) _renderer.DrawTransparentChunkMesh(d.TransparentMesh!, d.Model, d.Grid, d.Chunk, d.Dissolve);
     }
 
     private static Mat4[] BuildOrientationPlacements()
