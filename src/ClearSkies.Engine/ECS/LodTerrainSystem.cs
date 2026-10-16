@@ -29,8 +29,10 @@ public interface IFarTerrain
 /// from coarse 32³ chunks whose cells are 2 blocks a side, out to <see cref="OuterRadius"/>. The drawn coarse columns
 /// are a grid of their own in the GridStore (<see cref="Grid"/>, voxels 2 blocks a side), which GpuLightSystem lights
 /// like the world: sun shadows, bounce and AO, with rays crossing between it and the world. Their meshes bake light maps
-/// from it as full-detail chunks do from the world. A column is in the grid only while it's drawn, so it never shadows
-/// the full-detail terrain that replaced it. A coarse column covers a 2x2 group of full columns, and ChunkLoadSystem loads full detail
+/// from it as full-detail chunks do from the world. Every loaded column is in the grid, lit by its own blocks: distant
+/// terrain's rays don't see the world, and the world's pass through a column whose full detail is ready (covered), so
+/// both levels are lit where they overlap and a swap shows settled light either way. A swap to full detail waits until
+/// the full-detail chunks are lit. A coarse column covers a 2x2 group of full columns, and ChunkLoadSystem loads full detail
 /// in whole groups (<see cref="ChunkLoadSystem.FullDetailRadius"/>), so each coarse column swaps for its four full ones
 /// in one frame: it's drawn (and they're hidden, see <see cref="Covers"/>) until all four are loaded and meshed.
 ///
@@ -72,7 +74,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     /// made afterwards.</summary>
     public bool Majority = true;
 
-    /// <summary>The drawn coarse columns as a grid of 2-block voxels, lit like the world (see
+    /// <summary>The loaded coarse columns as a grid of 2-block voxels, lit like the world (see
     /// GpuLightSystem.AddStaticGrid). Unregistered (index -1) without a GridStore: then they're lit as open air.</summary>
     public GridHandle Grid { get; } = new();
 
@@ -92,8 +94,9 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         public readonly List<int> Resident = new(); // the chunk layers it has in the grid (empty: not in it)
         public bool Settled;   // in the grid and lit since it went in: its light maps follow the grid
         public bool Baked;     // its light maps were baked from a settled grid at least once
-        public bool Leaving;   // its full columns are ready: out of the grid, still drawn until they're lit
-        public int Waiting;    // frames spent settling or leaving
+        public bool Covered;   // its full columns are ready, so the world's rays pass through it (GridStore.SetCovered)
+        public bool Leaving;   // its full columns are ready: still drawn until they're lit
+        public int Waiting, LeaveWait; // frames spent settling, and leaving
     }
 
     // A swap waits for the incoming terrain's light (see UpdateDrawn): at least this many frames, since a change is
@@ -427,8 +430,8 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
 
     private readonly SortedSet<int> _layers = new();
 
-    /// <summary>Puts a drawn column's chunks in <see cref="Grid"/>, with the air right above and below each run of them,
-    /// for the lighting to light.</summary>
+    /// <summary>Puts a column's chunks in <see cref="Grid"/>, with the air right above and below each run of them, for
+    /// the lighting to light.</summary>
     private void MakeResident((int x, int z) key, CoarseColumn column)
     {
         if (_gridStore == null || Grid.Index < 0 || column.Chunks.Count == 0) return;
@@ -442,9 +445,10 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
             _gridStore.UploadPacked(Grid, new ChunkPosition(key.x, y, key.z), occupancy);
             column.Resident.Add(y);
         }
+        column.Covered = false; // fresh records aren't
     }
 
-    /// <summary>Takes a column's chunks out of <see cref="Grid"/> (it's no longer drawn).</summary>
+    /// <summary>Takes a column's chunks out of <see cref="Grid"/> (it's unloaded).</summary>
     private void Evict((int x, int z) key, CoarseColumn column)
     {
         if (_gridStore == null) return;
@@ -499,38 +503,43 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
                 column.ChildEdited = false;
                 _queue.Insert(_queueHead, key); // drawn as it was until it's made again
             }
+            // In the grid while it's loaded, so it's lit and ready whenever full detail goes; until it's lit, a drawn
+            // column keeps the light maps it baked before, or is lit as open air if it never had any.
+            if (column.Resident.Count == 0)
+            {
+                MakeResident(key, column);
+                column.Settled = false;
+                column.Waiting = 0;
+            }
+            else if (!column.Settled)
+                column.Settled = ++column.Waiting >= MinSwapFrames && (ResidentLit(key, column) || column.Waiting > MaxSwapFrames);
+            // Covered while its full detail is ready: the world's rays then see only full-detail blocks there.
+            if (column.Covered != ready) SetCovered(key, column, ready);
+
             if (!ready)
             {
-                // Drawn, and in the grid; its light maps follow the grid once it has been lit (until then they keep
-                // what they showed before, or it's lit as open air), so it doesn't flash in unlit.
                 column.Leaving = false;
                 column.Drawn = true;
-                if (column.Resident.Count == 0)
-                {
-                    MakeResident(key, column);
-                    column.Settled = false;
-                    column.Waiting = 0;
-                }
-                else if (!column.Settled)
-                    column.Settled = ++column.Waiting >= MinSwapFrames && (ResidentLit(key, column) || column.Waiting > MaxSwapFrames);
             }
             else if (column.Drawn)
             {
-                // Swapping to full detail: out of the grid first, so it stops shadowing the full-detail terrain, and
-                // hidden once that terrain is lit, so it comes in showing its light.
-                if (column.Resident.Count > 0)
-                {
-                    Evict(key, column);
-                    column.Leaving = true;
-                    column.Waiting = 0;
-                }
-                if (!column.Leaving || (++column.Waiting >= MinSwapFrames && (ChildrenLit(key) || column.Waiting > MaxSwapFrames)))
+                // Swapping to full detail: hidden once that terrain is lit by its own blocks (not the coarse ones over
+                // it), so it comes in showing its light.
+                if (!column.Leaving) { column.Leaving = true; column.LeaveWait = 0; }
+                if (++column.LeaveWait >= MinSwapFrames && (ChildrenLit(key) || column.LeaveWait > MaxSwapFrames))
                 {
                     column.Drawn = false;
                     column.Leaving = false;
                 }
             }
         }
+    }
+
+    private void SetCovered((int x, int z) key, CoarseColumn column, bool covered)
+    {
+        column.Covered = covered;
+        if (_gridStore == null) return;
+        foreach (int y in column.Resident) _gridStore.SetCovered(Grid, new ChunkPosition(key.x, y, key.z), covered);
     }
 
     private bool ResidentLit((int x, int z) key, CoarseColumn column)

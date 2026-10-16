@@ -107,7 +107,8 @@ public sealed partial class GpuLightSystem
     private readonly List<(Vector3D<float> min, Vector3D<float> max)> _bounceClears = new();
     private readonly List<int> _clearSlots = new();
     private GpuBuffer? _clearWork;
-    private readonly List<(Vector3D<float> min, Vector3D<float> max)> _occluderChanges = new();
+    private readonly List<(Vector3D<float> min, Vector3D<float> max, bool worldOnly)> _occluderChanges = new();
+    private bool _skipCoarse; // marking for a world change: distant terrain's bricks can't have changed
     private readonly List<(Vector3D<float> min, Vector3D<float> max)> _directChanges = new();
     // This frame's lamp boxes relit (lamp changes, and lamps in reach of an occluder change): with AO only, their
     // bricks are touched so they compose (see TouchBounce).
@@ -206,10 +207,13 @@ public sealed partial class GpuLightSystem
             // voxels whose sun ray passes through it, the radius of lamps whose rays may), relit this frame; then the
             // lamp changes, queued.
             var pad = new Vector3D<float>(1.5f);
-            foreach (var (mn, mx) in _occluderChanges)
+            foreach (var (mn, mx, worldOnly) in _occluderChanges)
             {
+                // A world chunk's change isn't seen by distant terrain's rays (see AppendChunkList).
+                _skipCoarse = worldOnly;
                 MarkRegion(mn - pad, mx + pad, _urgentMarks);
                 MarkSunShadow(mn, mx, sunDir, _urgentMarks);
+                _skipCoarse = false;
                 foreach (var lamp in _lamps) { var (a, b) = LampBox(lamp); if (Overlaps(a, b, mn, mx)) MarkLampBox(a, b); }
                 foreach (var lamp in _prevLamps) { var (a, b) = LampBox(lamp); if (Overlaps(a, b, mn, mx)) MarkLampBox(a, b); }
             }
@@ -381,7 +385,7 @@ public sealed partial class GpuLightSystem
             if (vmx.X - vmn.X < S || vmx.Y - vmn.Y < S || vmx.Z - vmn.Z < S) _editBoxes.Add((vmn, vmx));
             var mn = vmn * (float)grid.Scale; // world space
             var mx = vmx * (float)grid.Scale;
-            if (solid && !relightAll) _occluderChanges.Add((mn, mx));
+            if (solid && !relightAll) _occluderChanges.Add((mn, mx, grid.Scale == 1));
             if (solid) _shapeChanges.Add((mn, mx));
         }
         _store.ChangedChunks.Clear();
@@ -406,8 +410,8 @@ public sealed partial class GpuLightSystem
                 st.LightAll = true;
                 // Like a placed block, the ship may now shade what it didn't: the bricks around both poses and along
                 // both sun shadows are relit this frame, and everything within bounce reach of the hull is touched.
-                if (st.HavePrev) { _occluderChanges.Add((st.PrevWorldMin, st.PrevWorldMax)); _shipMoves.Add((st.PrevWorldMin, st.PrevWorldMax)); }
-                if (h.HasSolid) { _occluderChanges.Add((st.CurWorldMin, st.CurWorldMax)); _shipMoves.Add((st.CurWorldMin, st.CurWorldMax)); }
+                if (st.HavePrev) { _occluderChanges.Add((st.PrevWorldMin, st.PrevWorldMax, false)); _shipMoves.Add((st.PrevWorldMin, st.PrevWorldMax)); }
+                if (h.HasSolid) { _occluderChanges.Add((st.CurWorldMin, st.CurWorldMax, false)); _shipMoves.Add((st.CurWorldMin, st.CurWorldMax)); }
             }
             st.HavePrev     = h.HasSolid;
             st.PrevVersion  = h.Version;
@@ -556,7 +560,7 @@ public sealed partial class GpuLightSystem
             if (st.LightAll) continue;
             if (lg.Handle.IsWorld)
             {
-                MarkWorldBox(lg.Handle, mn, mx, marks ?? _marks);
+                if (!(_skipCoarse && lg.Handle.Scale > 1)) MarkWorldBox(lg.Handle, mn, mx, marks ?? _marks);
             }
             else if (lg.Handle.HasSolid)
             {
@@ -628,7 +632,8 @@ public sealed partial class GpuLightSystem
             if (!st.LightAll && RayHitsBox(centre, sunDir, st.CurWorldMin - half, st.CurWorldMax + half)) st.LightAll = true;
         }
 
-        foreach (var g in _static) SweepSunShadow(g, mn, mx, sunDir, marks);
+        foreach (var g in _static)
+            if (!(_skipCoarse && g.Scale > 1)) SweepSunShadow(g, mn, mx, sunDir, marks);
     }
 
     /// <summary>The static grid part of <see cref="MarkSunShadow"/>, in <paramref name="world"/>'s voxel space.</summary>

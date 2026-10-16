@@ -76,6 +76,7 @@ internal sealed class ChunkRecord
     public int WorldSlot = -1;
     public ulong Marks;               // bricks marked by the BrickMarks being filled (GpuLightSystem), 0 between uses
     public int LightStamp;            // changes whenever light this chunk's faces show may have changed (GridStore.LightStampOf)
+    public bool Covered;              // distant terrain where full detail is loaded: rays from other grids pass through it
 }
 
 /// <summary>
@@ -566,6 +567,18 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
               origin, origin + new Vector3D<float>(S), false);
     }
 
+    /// <summary>Marks a chunk of distant terrain as covered by full detail (or not): rays fired from other grids (the
+    /// world) pass through a covered chunk, so where both levels are loaded each is lit by its own blocks. What the world
+    /// sees changes, so it counts as an occluder change there.</summary>
+    internal void SetCovered(GridHandle g, ChunkPosition pos, bool covered)
+    {
+        if (!g.Chunks.TryGetValue(pos, out var rec) || rec.Covered == covered) return;
+        rec.Covered = covered;
+        WriteChunkEntry(rec);
+        var origin = pos.WorldOrigin;
+        if (rec.Solid != 0) ChangedChunks.Add((g, origin, origin + new Vector3D<float>(S), true, false));
+    }
+
     /// <summary>Stores a chunk's occupancy and brick masks, then updates which of its and its neighbours' bricks need
     /// light storage. Returns whether its opacity words were kept (false: the chunk is all air or all solid).</summary>
     private bool Store(GridHandle g, ChunkPosition pos, uint[] words, ulong solid, ulong air, uint[]? seeThrough,
@@ -941,7 +954,8 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     }
 
     /// <summary>A chunk's table entry: (occupancy slot or code, cx, cy, cz), then which 8³ bricks hold any solid, so
-    /// rays can step over empty bricks whole, and its see-through bits' occupancy slot plus one (0: none).</summary>
+    /// rays can step over empty bricks whole, its see-through bits' occupancy slot plus one (0: none), and whether it's
+    /// covered (see <see cref="SetCovered"/>).</summary>
     private static void EntryWords(ChunkRecord rec, Span<int> e)
     {
         int code = rec.OccSlot >= 0 ? rec.OccSlot
@@ -949,7 +963,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
                  : rec.Air == 0 ? OccAllSolid
                  : OccUnloaded;
         e[0] = code; e[1] = rec.Pos.X; e[2] = rec.Pos.Y; e[3] = rec.Pos.Z;
-        e[4] = (int)(uint)rec.Solid; e[5] = (int)(uint)(rec.Solid >> 32); e[6] = rec.SeeSlot + 1; e[7] = 0;
+        e[4] = (int)(uint)rec.Solid; e[5] = (int)(uint)(rec.Solid >> 32); e[6] = rec.SeeSlot + 1; e[7] = rec.Covered ? 1 : 0;
     }
 
     private void WriteBrickRun(ChunkRecord rec)
