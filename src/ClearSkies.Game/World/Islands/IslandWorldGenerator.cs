@@ -551,18 +551,13 @@ public sealed class IslandWorldGenerator : IWorldGenerator
             }
             float taper = Taper * MathF.Max(narrow, 0f);
             float yLo = lo / V - lift, yHi = hi / V - lift;
-            // Where it is the landscape's top or underside, rounded off towards the side cracks.
+            // The landscape's top and underside rounded off towards the side cracks: under a ceiling and over a floor
+            // that every run keeps to, so a run whose top a leaning crack cuts off short isn't left standing as a wall.
             bool atBottom = lo <= tBottom;
-            if (atTop)
-            {
-                SideCracks(i, sites, sxz, sx, sy, sz, across, up, hi, out float fromCrack, out _);
-                yHi -= Round(fromCrack, TopRound);
-            }
-            if (atBottom)
-            {
-                SideCracks(i, sites, sxz, sx, sy, sz, across, up, lo, out float fromCrack, out _);
-                yLo += Round(fromCrack, UnderRound);
-            }
+            SideCracks(i, sites, sxz, sx, sy, sz, across, up, tPieceTop, out float fromCrack, out _);
+            yHi = MathF.Min(yHi, pieceTop - Round(fromCrack, TopRound));
+            SideCracks(i, sites, sxz, sx, sy, sz, across, up, tBottom, out fromCrack, out _);
+            yLo = MathF.Max(yLo, bottom + Round(fromCrack, UnderRound));
             // A thin slab against a crack, worn back to a rounded nose: from its underside if that is the landscape's,
             // else from the top. One between two cracks is a scrap of a piece, so wears away sooner.
             float slab = atTop || atBottom ? Slab : 2f * Slab;

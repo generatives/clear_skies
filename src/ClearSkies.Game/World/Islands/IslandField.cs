@@ -62,7 +62,7 @@ public static class IslandField
 
     // Landmasses: blobs of value noise at LandSpacing, roughened by a finer one; land from LandFrom, whole by LandFull,
     // and fully inside a core past CoreAt.
-    private const float LandSpacing = 9000f, LandDetail = 2600f, LandFrom = 0.53f, LandFull = 0.66f, CoreAt = 0.72f;
+    private const float LandSpacing = 7000f, LandDetail = 2200f, LandFrom = 0.58f, LandFull = 0.7f, CoreAt = 0.74f;
 
     /// <summary>0-1: how much of landscape <paramref name="layer"/> is there at (x, z): roughly the share of pieces
     /// whose points are there that are (see <see cref="Present"/>).</summary>
@@ -75,14 +75,14 @@ public static class IslandField
                 return Smoothstep(LandFrom, LandFull, LandBlobs(seed, x, z));
             case Underworld:
                 // Under the landmasses and the gaps around them, none out under open sky.
-                return 0.8f * Smoothstep(0.32f, 0.46f, LandBlobs(seed, x, z))
+                return 0.8f * Smoothstep(0.37f, 0.51f, LandBlobs(seed, x, z))
                             * Smoothstep(0.56f, 0.74f, Blobs(seed, 0xA3, x, z, 1100f, 350f, 0.3f));
             case 2:
             {
                 // Clusters gathered around the landmasses: over their broken rims and the gaps just off them, thinning
                 // over their cores, none out over open sky.
                 float v = LandBlobs(seed, x, z);
-                float near = Smoothstep(0.36f, 0.5f, v) * (1f - 0.7f * Smoothstep(0.66f, 0.76f, v));
+                float near = Smoothstep(0.41f, 0.55f, v) * (1f - 0.7f * Smoothstep(0.7f, 0.8f, v));
                 return 0.85f * near * Smoothstep(0.6f, 0.78f, MiddleBlobs(seed, x, z));
             }
             default:
