@@ -85,7 +85,18 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         public bool Drawn;       // this frame: not all four full columns are ready
         public bool ChildEdited; // a full chunk under it was edited while it was hidden
         public readonly List<int> Resident = new(); // the chunk layers it has in the grid (empty: not in it)
+        public bool Settled;   // in the grid and lit since it went in: its light maps follow the grid
+        public bool Baked;     // its light maps were baked from a settled grid at least once
+        public bool Leaving;   // its full columns are ready: out of the grid, still drawn until they're lit
+        public int Waiting;    // frames spent settling or leaving
     }
+
+    // A swap waits for the incoming terrain's light (see UpdateDrawn): at least this many frames, since a change is
+    // marked for lighting the frame after it's made, and at most the other, in case lighting never settles there.
+    private const int MinSwapFrames = 2, MaxSwapFrames = 240;
+
+    /// <summary>Whether a chunk of a grid is lit (GpuLightSystem.IsLit); without it, everything counts as lit.</summary>
+    public Func<GridHandle, ChunkPosition, bool>? IsLit;
 
     // Shared occupancy for the coarse chunks that are all one thing, and for the air right above and below a column's
     // chunks (so the faces there have air with light in it).
@@ -106,7 +117,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     private bool _wasEnabled;
     private Vector3D<float> _view;
 
-    private readonly record struct Draw(float DistSq, CoarseChunk Chunk, Mat4 Model, ChunkPosition Pos, int Grid);
+    private readonly record struct Draw(float DistSq, CoarseChunk Chunk, Mat4 Model, ChunkPosition Pos, int Grid, bool Bake);
     private readonly List<Draw> _draws = new();
     private static readonly Comparison<Draw> NearestFirst = (a, b) => a.DistSq.CompareTo(b.DistSq);
     private int _built, _chunksDrawn;
@@ -409,6 +420,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         if (_gridStore == null) return;
         foreach (int y in column.Resident) _gridStore.RemoveChunk(Grid, new ChunkPosition(key.x, y, key.z));
         column.Resident.Clear();
+        column.Settled = false;
     }
 
     private void Unload((int x, int z) key)
@@ -448,10 +460,56 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
                 column.ChildEdited = false;
                 _queue.Insert(_queueHead, key); // drawn as it was until it's made again
             }
-            column.Drawn = !ready;
-            if (column.Drawn && column.Resident.Count == 0) MakeResident(key, column);
-            else if (!column.Drawn && column.Resident.Count > 0) Evict(key, column);
+            if (!ready)
+            {
+                // Drawn, and in the grid; its light maps follow the grid once it has been lit (until then they keep
+                // what they showed before, or it's lit as open air), so it doesn't flash in unlit.
+                column.Leaving = false;
+                column.Drawn = true;
+                if (column.Resident.Count == 0)
+                {
+                    MakeResident(key, column);
+                    column.Settled = false;
+                    column.Waiting = 0;
+                }
+                else if (!column.Settled)
+                    column.Settled = ++column.Waiting >= MinSwapFrames && (ResidentLit(key, column) || column.Waiting > MaxSwapFrames);
+            }
+            else if (column.Drawn)
+            {
+                // Swapping to full detail: out of the grid first, so it stops shadowing the full-detail terrain, and
+                // hidden once that terrain is lit, so it comes in showing its light.
+                if (column.Resident.Count > 0)
+                {
+                    Evict(key, column);
+                    column.Leaving = true;
+                    column.Waiting = 0;
+                }
+                if (!column.Leaving || (++column.Waiting >= MinSwapFrames && (ChildrenLit(key) || column.Waiting > MaxSwapFrames)))
+                {
+                    column.Drawn = false;
+                    column.Leaving = false;
+                }
+            }
         }
+    }
+
+    private bool ResidentLit((int x, int z) key, CoarseColumn column)
+    {
+        if (IsLit == null) return true;
+        foreach (int y in column.Resident)
+            if (!IsLit(Grid, new ChunkPosition(key.x, y, key.z))) return false;
+        return true;
+    }
+
+    private bool ChildrenLit((int x, int z) key)
+    {
+        if (IsLit == null) return true;
+        int minY = _load.MinLayer;
+        for (int j = 0; j < 4; j++)
+        for (int layer = 0; layer < 64; layer++)
+            if (!IsLit(_volume.Gpu, new ChunkPosition(key.x * 2 + (j & 1), minY + layer, key.z * 2 + (j >> 1)))) return false;
+        return true;
     }
 
     private bool AnyEdited((int x, int z) key)
@@ -505,22 +563,25 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
             var min = new Vector3D<float>(cx * ColumnBlocks, column.MinY * ColumnBlocks, cz * ColumnBlocks);
             var max = new Vector3D<float>((cx + 1) * ColumnBlocks, (column.MaxY + 1) * ColumnBlocks, (cz + 1) * ColumnBlocks);
             if (!frame.Frustum.Intersects(min, max)) continue;
-            // In the grid: lit from it like the world. Not (it was full): lit as open air.
-            int grid = column.Resident.Count > 0 && Grid.Index >= 0 ? Grid.Index : Renderer.LodGrid;
+            // Lit from the grid once it's settled there; until then (or leaving it) with the light maps it last baked,
+            // or as open air if it has none.
+            bool bake = column.Settled && Grid.Index >= 0;
+            if (bake) column.Baked = true;
+            int grid = column.Baked && Grid.Index >= 0 ? Grid.Index : Renderer.LodGrid;
             foreach (var c in column.Chunks)
             {
                 if (c.Opaque == null && c.Cutout == null && c.Transparent == null) continue; // buried
                 var origin = new Vector3D<float>(cx * ColumnBlocks, c.Y * ColumnBlocks, cz * ColumnBlocks);
                 if (!frame.Frustum.Intersects(origin, origin + size)) continue;
                 float distSq = Vector3D.DistanceSquared(origin + size * 0.5f, frame.CameraPosition);
-                _draws.Add(new Draw(distSq, c, Mat4.Multiply(Mat4.Translation(origin), scale), new ChunkPosition(cx, c.Y, cz), grid));
+                _draws.Add(new Draw(distSq, c, Mat4.Multiply(Mat4.Translation(origin), scale), new ChunkPosition(cx, c.Y, cz), grid, bake));
             }
         }
 
         // Light maps whose light changed since they were baked, as ChunkRenderSystem does for full-detail chunks.
         foreach (var d in _draws)
         {
-            if (d.Grid < 0) continue;
+            if (!d.Bake) continue;
             int stamp = _renderer.LightStampOf(Grid, d.Pos);
             _renderer.PrepareLightmap(d.Chunk.Opaque, Grid, d.Pos, stamp);
             _renderer.PrepareLightmap(d.Chunk.Cutout, Grid, d.Pos, stamp);

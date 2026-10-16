@@ -111,6 +111,7 @@ public sealed class GameView : IDisposable
         Lod = new LodTerrainSystem(host.World, renderer, world.ChunkLoad, volume, () => new HeartWorldGenerator(world.Seed),
                                    world.ChunkStore, GridStore) { Enabled = _lod };
         light.AddStaticGrid(Lod.Grid); // lit like the world
+        Lod.IsLit = light.IsLit;       // swaps wait for the incoming terrain's light
         if (_lodDistance is { } lodDistance) Lod.OuterRadius = lodDistance;
         chunks.Covered = Lod.Covers;
         host.AddSystem((ISystem)Lod, SystemStage.PreRender);

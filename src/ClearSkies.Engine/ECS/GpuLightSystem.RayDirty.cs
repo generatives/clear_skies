@@ -818,6 +818,24 @@ public sealed partial class GpuLightSystem
         if (!_inQueue[slot] && IsStaticSlot(slot)) { _inQueue[slot] = true; _updateQueue.Add(slot); }
     }
 
+    /// <summary>
+    /// Whether chunk <paramref name="pos"/> of grid <paramref name="g"/> is lit: none of its bricks waits for direct
+    /// light, and with bounce on each has had a bounce update since it was last touched (that update blends in half the
+    /// change; later ones refine it). For holding a terrain swap until what comes in shows its light (LodTerrainSystem).
+    /// Bricks given storage since the last lighting frame aren't marked yet: ask a frame after a change.
+    /// </summary>
+    public bool IsLit(GridHandle g, ChunkPosition pos)
+    {
+        if (!g.Chunks.TryGetValue(pos, out var rec) || rec.BrickSlots is not { } slots) return true;
+        foreach (int slot in slots)
+        {
+            if (slot < 0) continue;
+            if (slot >= _dirty.Length || _dirty[slot]) return false;
+            if (_bounceEnabled && (_left[slot] == Touched || _lastUpdate[slot] == NeverUpdated)) return false;
+        }
+        return true;
+    }
+
     /// <summary>Whether a brick has an update to come: touched since its last, or owed more for its last change.</summary>
     private bool NeedsUpdate(int slot) => _left[slot] > 0;
 
