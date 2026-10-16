@@ -1,4 +1,5 @@
 using System.Numerics;
+using BepuPhysics;
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Entities;
 using ClearSkies.Engine.Input;
@@ -8,6 +9,16 @@ using DefaultEcs;
 using ImGuiNET;
 
 namespace ClearSkies.Engine.ECS;
+
+/// <summary>On a grid <see cref="AirshipFlightSystem"/> flies: its self-level trim, the integral of its tilt, in the grid's
+/// own frame (so a load it carries off-centre stays trimmed for as it turns).</summary>
+public struct LevelTrim
+{
+    public Vector3 Integral;
+
+    /// <summary>Its Fans couldn't give the torque asked for last tick: the trim holds rather than winding up further.</summary>
+    public bool Saturated;
+}
 
 /// <summary>
 /// Full airship flight pipeline (Milestone 5 Phases 5.3/5.4), per dynamic grid each tick: first a
@@ -21,7 +32,10 @@ namespace ClearSkies.Engine.ECS;
 /// per-tick computation. Runs before <see cref="PhysicsWorld"/> steps, so impulses are integrated the
 /// same tick they're computed.
 ///
-/// The control law always self-levels (pitch/roll) and cancels gravity and the ship's Buoyant lift (feedforward). Past
+/// The control law always self-levels (pitch/roll) and cancels gravity and the ship's Buoyant lift (feedforward). Self-level
+/// asks for an angular acceleration and turns it into torque through the ship's own inertia, so a long ship levels as
+/// briskly as a small one; and it keeps a trim (<see cref="LevelTrim"/>, an integral of the tilt) that builds up against
+/// any steady torque it doesn't know about, like a ship docked off-centre on its deck, instead of settling at a tilt. Past
 /// that it has two modes:
 /// <list type="bullet">
 /// <item>Piloted (the grid carries <see cref="PilotedComponent"/>, set by <see cref="GridPilotSystem"/>): forward,
@@ -52,6 +66,9 @@ namespace ClearSkies.Engine.ECS;
 /// Buoyant blocks apply constant passive lift at their own cells. The control law cancels both what that lift
 /// adds (feedforward): its force alongside gravity, and its torque about the centre of mass, which otherwise
 /// leaves a ship with off-centre Buoyant blocks settled at a tilt.
+///
+/// A ship docked on another (held to another grid by anchors; see <see cref="AnchorLinks"/>) doesn't fly: its Fans stay
+/// off and the ship it's held to carries it, its weight and all, as cargo. Its Buoyant blocks still lift, being passive.
 ///
 /// Fan and Buoyant blocks are entity blocks (see <see cref="Fan"/>, <see cref="Buoyant"/>): a ship's are found among
 /// its volume's block entities (<see cref="ChunkVolume.BlockEntities"/>), which the volume keeps as they're created
@@ -92,8 +109,13 @@ public sealed class AirshipFlightSystem : ISystem
 
     // ── control law tuning ──────────────────────────────────────────────────
     // Self-level (pitch/roll) — always on.
+    // Acceleration-space (rad/s² per radian of tilt, per rad/s, per radian-second): turned into torque by the ship's inertia.
     private float _levelGain = 6f;
     private float _levelDamp = 2f;
+    private float _levelTrimGain = 1f;
+
+    // The trim's integral is held within this (radian-seconds), so it can't wind up past what any load needs.
+    private float _levelTrimLimit = 2f;
 
     // Velocity targets (piloted only) + tracking gains (always). Gains are acceleration-space (1/s) —
     // the resulting force gets multiplied by the grid's actual mass below, so the resulting acceleration
@@ -175,6 +197,20 @@ public sealed class AirshipFlightSystem : ISystem
             float mass = _physics.GetBodyMass(body);
             if (mass <= 0f) continue; // shouldn't happen for an unlocked body, but guard the degenerate case
 
+            var com = PhysicsConv.ToBepu(e.Get<PhysicsBodyComponent>().Offset); // the body sits at the centre of mass
+            var buoyantLift = Vector3.UnitY * _buoyantForce;
+
+            // Docked on another ship: cargo, its Fans off (already reset above). Only its Buoyant lift still acts.
+            if (DockedOnAnotherGrid(e)) {
+                var (_, dockedRot) = _physics.GetBodyPose(body);
+                foreach (var buoyant in blocks.Buoyants) {
+                    buoyantCount++;
+                    _physics.ApplyLinearImpulse(body, buoyantLift * dt, LocalOffset(buoyant, com, dockedRot));
+                }
+                if (e.Has<LevelTrim>()) e.Remove<LevelTrim>(); // trimmed afresh when it flies again
+                continue;
+            }
+
             gridsProcessed++;
 
             // ── control law: this tick's desired force/torque ──────────────────
@@ -189,11 +225,15 @@ public sealed class AirshipFlightSystem : ISystem
             var right   = Vector3.Transform(new Vector3(1, 0, 0), rot);
             var gridUp  = Vector3.Transform(worldUp, rot);
 
-            // Self-level: torque rotating gridUp toward worldUp, damped by the pitch/roll component of
-            // angular velocity only — the component along worldUp (yaw) is left for the yaw term below.
-            var tiltTorque = _levelGain * Vector3.Cross(gridUp, worldUp);
+            // Self-level: an angular acceleration rotating gridUp toward worldUp, damped by the pitch/roll component of
+            // angular velocity only — the component along worldUp (yaw) is left for the yaw term below — plus the trim.
+            var tilt = Vector3.Cross(gridUp, worldUp);
             var angVelPitchRoll = angVel - Vector3.Dot(angVel, worldUp) * worldUp;
-            tiltTorque -= _levelDamp * angVelPitchRoll;
+            if (!e.Has<LevelTrim>()) e.Set(new LevelTrim());
+            ref var trim = ref e.Get<LevelTrim>();
+            var levelAccel = _levelGain * tilt - _levelDamp * angVelPitchRoll + LevelTrimAccel(ref trim, tilt, rot, held: e.Has<AnchorLinks>(), dt);
+            levelAccel -= Vector3.Dot(levelAccel, worldUp) * worldUp;
+            var tiltTorque = WorldInertia(dynamicGrid.Inertia, rot, levelAccel);
 
             // Where the velocity targets come from: the keyboard while piloted, the ship's own controls otherwise.
             var controls = piloted
@@ -227,14 +267,14 @@ public sealed class AirshipFlightSystem : ISystem
                                - _physics.Gravity - buoyantAccel * worldUp;
 
             // Mass-scaled so a given gain produces the same ACCELERATION regardless of how heavy the
-            // grid is (F = m·a) — torque uses the same scalar as an approximation (real rotational
+            // grid is (F = m·a) — yaw torque uses the same scalar as an approximation (real rotational
             // inertia is a tensor, not a scalar, but this is close enough for a prototype and keeps
-            // yaw/self-level similarly mass-independent in feel).
+            // yaw similarly mass-independent in feel). Self-level's torque already went through the inertia.
             // Piloted, yaw tracks a rate target; otherwise the wheel's torque, with no rate tracking (air resistance on
             // rotation sets the top turn rate).
             var desiredTorque = piloted
-                ? (tiltTorque + yawTorque) * mass
-                : tiltTorque * mass + controls.W * _wheelMaxTorque * worldUp;
+                ? tiltTorque + yawTorque * mass
+                : tiltTorque + controls.W * _wheelMaxTorque * worldUp;
             Vector3 desiredForce;
             if (piloted)
             {
@@ -256,8 +296,6 @@ public sealed class AirshipFlightSystem : ISystem
 
             // Feedforward, like the Buoyant force above: cancel the torque this grid's Buoyant lift adds about its
             // centre of mass, so the self-level term isn't left fighting it with a steady tilt.
-            var com = PhysicsConv.ToBepu(e.Get<PhysicsBodyComponent>().Offset); // the body sits at the centre of mass
-            var buoyantLift = Vector3.UnitY * _buoyantForce;
             foreach (var buoyant in blocks.Buoyants)
                 desiredTorque -= Vector3.Cross(LocalOffset(buoyant, com, rot), buoyantLift);
 
@@ -287,6 +325,7 @@ public sealed class AirshipFlightSystem : ISystem
             if (!_freePropulsion && blocks.Fans.Count > 0)
             {
                 (_lastUnmetForce, _lastUnmetTorque) = AllocateKeepingTorque(blocks.Fans, com, rot, desiredForce, desiredTorque);
+                trim.Saturated = _lastUnmetTorque.Length() > TorqueTolerance + 0.01f * desiredTorque.Length();
                 for (int i = 0; i < blocks.Fans.Count; i++)
                 {
                     float thrust = _fanThrusts[i];
@@ -305,6 +344,43 @@ public sealed class AirshipFlightSystem : ISystem
         _lastBuoyantCount    = buoyantCount;
         _lastGridsProcessed  = gridsProcessed;
         _lastFreePropelled   = freePropelled;
+    }
+
+    /// <summary>Whether a grid is docked on another: held by anchors to a grid rather than (only) the terrain.</summary>
+    private static bool DockedOnAnotherGrid(in Entity grid) =>
+        grid.Has<AnchorLinks>() && AnchorLinks.Support(grid.Get<AnchorLinks>().All) is not null;
+
+    /// <summary>
+    /// Self-level's trim: integrates the tilt (in the grid's own frame) and returns the angular acceleration it asks for,
+    /// in the world. It holds still while the Fans couldn't give the torque asked for last tick, and while the grid is held
+    /// by anchors (to the terrain: it can't level itself there, and shouldn't come off it wound up), so it never winds up
+    /// past what levelling needs. Within <see cref="_levelTrimLimit"/> either way.
+    /// </summary>
+    private Vector3 LevelTrimAccel(ref LevelTrim trim, Vector3 tilt, Quaternion rot, bool held, float dt)
+    {
+        if (!trim.Saturated && !held) {
+            trim.Integral += Vector3.Transform(tilt, Quaternion.Conjugate(rot)) * dt;
+            float length = trim.Integral.Length();
+            if (length > _levelTrimLimit) trim.Integral *= _levelTrimLimit / length;
+        }
+        trim.Saturated = false;
+
+        return _levelTrimGain * Vector3.Transform(trim.Integral, rot);
+    }
+
+    /// <summary>The torque giving a body with <paramref name="inertia"/> (in its own frame, about its centre of mass) at
+    /// <paramref name="rot"/> the world angular acceleration <paramref name="accel"/>.</summary>
+    private static Vector3 WorldInertia(in BodyInertia inertia, Quaternion rot, Vector3 accel)
+    {
+        var t = inertia.InverseInertiaTensor;
+        var inverse = new Matrix4x4(t.XX, t.YX, t.ZX, 0f,
+                                    t.YX, t.YY, t.ZY, 0f,
+                                    t.ZX, t.ZY, t.ZZ, 0f,
+                                    0f,   0f,   0f,   1f);
+        if (!Matrix4x4.Invert(inverse, out var local)) return Vector3.Zero;
+
+        var localAccel = Vector3.Transform(accel, Quaternion.Conjugate(rot));
+        return Vector3.Transform(Vector3.TransformNormal(localAccel, local), rot);
     }
 
     /// <summary>A ship's own controls, as fractions (-1 to 1) of the full force and torque: forward, right and vertical
@@ -484,6 +560,8 @@ public sealed class AirshipFlightSystem : ISystem
         ImGui.Text("Self-level (always on)");
         ImGui.SliderFloat("Level gain", ref _levelGain, 0f, 20f);
         ImGui.SliderFloat("Level damping", ref _levelDamp, 0f, 10f);
+        ImGui.SliderFloat("Level trim gain", ref _levelTrimGain, 0f, 5f);
+        ImGui.SliderFloat("Level trim limit", ref _levelTrimLimit, 0f, 10f);
         ImGui.Separator();
         ImGui.Text("Ship's controls (not piloted)");
         ImGui.SliderFloat("Full lever force (N)", ref _leverMaxForce, 0f, 20000f);
