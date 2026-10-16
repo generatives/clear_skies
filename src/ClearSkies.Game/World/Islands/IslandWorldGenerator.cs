@@ -555,16 +555,18 @@ public sealed class IslandWorldGenerator : IWorldGenerator
             // The landscape's top and underside rounded off towards the side cracks: under a ceiling and over a floor
             // that every run keeps to, so a run whose top a leaning crack cuts off short isn't left standing as a wall.
             bool atBottom = lo <= tBottom;
-            SideCracks(i, sites, sxz, sx, sy, sz, across, up, tPieceTop, out float fromCrack, out _);
+            // (Measured at the run's own top and bottom, which are inside its piece: at the surface's height a run
+            // whose top is cut short by a piece above would be measuring from inside that piece.)
+            SideCracks(i, sites, sxz, sx, sy, sz, across, up, hi, out float fromCrack, out _);
             yHi = MathF.Min(yHi, pieceTop - Bank(fromCrack));
-            SideCracks(i, sites, sxz, sx, sy, sz, across, up, tBottom, out fromCrack, out _);
+            SideCracks(i, sites, sxz, sx, sy, sz, across, up, lo, out fromCrack, out _);
             yLo = MathF.Max(yLo, bottom + Round(fromCrack, UnderRound));
             // A thin slab against a crack, worn back to a rounded nose: from its underside if that is the landscape's,
-            // else from the top. One between two cracks is a scrap of a piece, so wears away sooner.
-            float slab = atTop || atBottom ? Slab : 2f * Slab;
-            if (!(atTop && atBottom) && yHi - yLo < 2f * slab)
+            // else from the top. (The same however it is bounded, so land doesn't step where a crack above it meets
+            // the surface.)
+            if (!(atTop && atBottom) && yHi - yLo < 2f * Slab)
             {
-                float th = yHi - yLo, worn = MathF.Sqrt(MathF.Max(th * th - slab * slab, 0f));
+                float th = yHi - yLo, worn = MathF.Sqrt(MathF.Max(th * th - Slab * Slab, 0f));
                 if (atBottom) yLo = yHi - worn; else yHi = yLo + worn;
             }
             yHi -= taper;
