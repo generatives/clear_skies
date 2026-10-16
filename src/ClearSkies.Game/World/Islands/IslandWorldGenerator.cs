@@ -42,8 +42,9 @@ public sealed class IslandWorldGenerator : IWorldGenerator
     /// its tilt).</summary>
     private const float Upright = 0.3f;
 
-    /// <summary>Stacked cracks (further from upright than <see cref="Upright"/>) narrow from CloseDepth blocks below the
-    /// surface and are shut from CloseFrom up, so where one comes out on a slope there is no ledge.</summary>
+    /// <summary>Leaning and stacked cracks (fading in from half <see cref="Upright"/> to one and a half) narrow from
+    /// CloseDepth blocks below the top of the land (banked down towards its side cracks) and are shut from CloseFrom
+    /// up, so where one comes out on a slope there is no ledge.</summary>
     private const float CloseFrom = 16f, CloseDepth = 60f;
 
     // Where a landscape's coverage thins, its pieces' tops keep only (1 - Flatten) of how far the surface there stands
@@ -529,7 +530,10 @@ public sealed class IslandWorldGenerator : IWorldGenerator
                 float d = sxz[k] + (t - sy[k]) * (t - sy[k]);
                 if (d < best) { best = d; i = k; }
             }
-            float lo = tBottom, hi = tTop, exit = tTop, loStacked = 0f, loClosed = 0f;
+            float lo = tBottom, hi = tTop, exit = tTop, loStacked = 0f, loClosed = 0f, loOpen = 0f;
+            // How deep a crack is is measured from the top banked down towards this piece's side cracks.
+            SideCracks(i, sites, sxz, sx, sy, sz, across, up, tTop, out float toSide, out _);
+            float tCeiling = tTop - Bank(toSide) * V;
             for (int j = 0; j < sites; j++)
             {
                 if (j == i) continue;
@@ -539,11 +543,11 @@ public sealed class IslandWorldGenerator : IWorldGenerator
                 float wear = across + (up - across) * tilt;
                 float a = sxz[j] - sxz[i] + sy[j] * sy[j] - sy[i] * sy[i], b = -2f * ay; // dj^2 - di^2 = a + b t
                 // A stacked crack shuts as it nears the surface (see CloseDepth).
-                float stacked = Smoothstep(Upright, 2f * Upright, tilt);
-                float closed = b != 0f ? (1f - Smoothstep(CloseFrom, CloseDepth, (tTop + a / b) / V)) * stacked : 0f;
-                wear *= 1f - closed;
-                float need = 2f * MathF.Sqrt(len2) * wear - a;                       // b t >= need
-                if (b > 0f) { if (need / b > lo) { lo = need / b; loStacked = stacked; loClosed = closed; } }
+                float stacked = Smoothstep(0.5f * Upright, 1.5f * Upright, tilt);
+                float closed = b != 0f ? (1f - Smoothstep(CloseFrom, CloseDepth, (tCeiling + a / b) / V)) * stacked : 0f;
+                float gap = 2f * MathF.Sqrt(len2) * wear;
+                float need = gap * (1f - closed) - a;                                // b t >= need
+                if (b > 0f) { if (need / b > lo) { lo = need / b; loStacked = stacked; loClosed = closed; loOpen = gap / b / V; } }
                 else if (b < 0f) { hi = MathF.Min(hi, need / b); exit = MathF.Min(exit, -a / b); }
                 else if (need > 0f) hi = lo;
             }
@@ -589,8 +593,9 @@ public sealed class IslandWorldGenerator : IWorldGenerator
             }
             yHi -= taper;
             if (atBottom) yLo += taper;
-            // (Down over a shut crack by as much as the piece under it could sink, so sinking doesn't open it.)
-            yLo = MathF.Max(yLo - piece.Sink * 0.8f - (CoreSink + Sink) * loClosed, IslandField.LowestBottom);
+            // (Down over a shut crack by as far as the piece under it could have kept it open, by its own depth, and
+            // sink, so neither opens it.)
+            yLo = MathF.Max(yLo - piece.Sink * 0.8f - (loOpen + CoreSink + Sink) * loClosed, IslandField.LowestBottom);
             yHi = MathF.Min(yHi - piece.Sink, IslandField.WorldTop - 1);
             int bLo = (int)MathF.Ceiling(yLo), bHi = (int)MathF.Floor(yHi);
             if (bHi >= bLo) found[count++] = ((short)bLo, (short)bHi);
