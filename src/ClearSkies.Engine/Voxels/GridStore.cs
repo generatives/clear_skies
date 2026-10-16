@@ -628,8 +628,9 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         TouchChunk(g, pos);
         g.Version++;
         // A world chunk unloading isn't a change to the world: what it shadowed stays shadowed, and relighting the far
-        // edge for it would only undo that. (A ship's chunk going is a real change.)
-        ChangedChunks.Add((g, pos.WorldOrigin, pos.WorldOrigin + new Vector3D<float>(S), hadSolid && !g.IsWorld, false));
+        // edge for it would only undo that. A ship's chunk going is a real change, and so is distant terrain's: it
+        // leaves when full detail replaces it, and the full-detail terrain it shadowed meanwhile must be relit.
+        ChangedChunks.Add((g, pos.WorldOrigin, pos.WorldOrigin + new Vector3D<float>(S), hadSolid && (!g.IsWorld || g.Scale > 1), false));
     }
 
     /// <summary>The light slot holding brick (bx,by,bz) of chunk <paramref name="pos"/>, or -1.</summary>
