@@ -92,8 +92,8 @@ public sealed class GameView : IDisposable
         host.AddSystem(new BlockModelSystem(host.World, BlockModels), SystemStage.PreRender); // block entities -> RenderedModel
 
         SkySettings.CloudAltitude = 1250f; // the islands are mostly low: clouds among the hills
-        SkySettings.CloudSeaAltitude = HeartGrid.CloudSeaAltitude; // below its lowest islands
-        _clouds = new CloudRenderSystem(renderer, new HeartCloudDensity(world.Seed));
+        SkySettings.CloudSeaAltitude = IslandField.CloudSeaAltitude; // below its lowest islands
+        _clouds = new CloudRenderSystem(renderer, new IslandCloudDensity(world.Seed));
         _uiRenderer = new UiRenderSystem(Ui, renderer);
         _particles = new ParticleRenderer(host.World, renderer);
         host.AddSystem(new ThrusterFlameSystem(host.World), SystemStage.Frame); // aims each Fan's flames

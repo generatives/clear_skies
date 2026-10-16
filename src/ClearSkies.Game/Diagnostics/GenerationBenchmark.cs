@@ -7,22 +7,22 @@ namespace ClearSkies.Game.Diagnostics;
 /// <summary>
 /// Headless, single-threaded timing harness for the chunk-generation and meshing pipeline. Run with
 /// <c>--benchmark</c> (see Program.cs) so it can be measured without spinning up a GPU window. Generates
-/// a chunk cube centred on the island cluster nearest the origin (so the sample mixes island interior with
+/// a chunk cube centred on the landmass nearest the origin (so the sample mixes island interior with
 /// the surrounding empty sky, matching what a real loaded view volume actually contains) and reports
 /// per-stage timing distributions.
 /// </summary>
 public static class GenerationBenchmark
 {
-    /// <summary>Generates a box of chunks around the nearest island cluster (the old fixed view box ChunkLoadSystem used to
+    /// <summary>Generates a box of chunks around the nearest landmass (the old fixed view box ChunkLoadSystem used to
     /// load); pass larger radii to stress-test.</summary>
     public static void Run(ulong seed = 1337, int xzRadius = 8, int yRadius = 3)
     {
         Console.WriteLine($"=== Generation benchmark (seed={seed}, xzRadius={xzRadius}, yRadius={yRadius}) ===");
 
-        var generator = new HeartWorldGenerator(seed);
+        var generator = new IslandWorldGenerator(seed);
         var focus      = FindFocusChunk(seed);
 
-        Console.WriteLine($"Focus chunk: {focus} (nearest island cluster to origin)");
+        Console.WriteLine($"Focus chunk: {focus} (nearest landmass to origin)");
 
         var positions = new List<ChunkPosition>();
         for (int dy = -yRadius; dy <= yRadius; dy++)
@@ -140,13 +140,12 @@ public static class GenerationBenchmark
                            $"p95={Percentile(0.95):F2}us  p99={Percentile(0.99):F2}us  max={sorted[^1]:F2}us");
     }
 
-    /// <summary>The chunk at the ground in the middle of the island cluster nearest the origin (as the game's
-    /// spawn uses).</summary>
+    /// <summary>The chunk at the ground near the middle of the landmass nearest the origin (as the game's spawn
+    /// uses).</summary>
     internal static ChunkPosition FindFocusChunk(ulong seed)
     {
-        if (!HeartGrid.TryFindCluster(seed, 0f, 0f, out float x, out float z)) return new ChunkPosition(0, 0, 0);
-        float y = ContinentTerrain.For(seed).Height(x, z);
-        return new ChunkPosition((int)MathF.Floor(x / ChunkData.Size), (int)MathF.Floor(y / ChunkData.Size),
-                                 (int)MathF.Floor(z / ChunkData.Size));
+        var (x, y, z) = new IslandWorldGenerator(seed).GroundNear(0f, 0f);
+        return new ChunkPosition((int)MathF.Floor(x / (float)ChunkData.Size), (int)MathF.Floor(y / (float)ChunkData.Size),
+                                 (int)MathF.Floor(z / (float)ChunkData.Size));
     }
 }

@@ -23,7 +23,7 @@ namespace ClearSkies.Game.Startup;
 /// </summary>
 public sealed class GameWorld
 {
-    /// <summary>The islands stream from layer 0 (blocks -256..1792: HeartGrid's WorldBottom..WorldTop).</summary>
+    /// <summary>The islands stream from layer 0 (blocks -256..1792: IslandField's WorldBottom..WorldTop).</summary>
     private const int MinChunkY = 0;
 
     /// <param name="budget">What limits how much of the world loads.</param>
@@ -52,9 +52,9 @@ public sealed class GameWorld
         Blocks = new BlockEntities(host.World, Registry);
         GameCommands.RegisterAll(Commands, host.World, session, Blocks, EditLimits, Registry, host.Physics, Selection, playerModel);
 
-        // Islands cut out of a continental terrain around island hearts (see HeartWorldGenerator), streamed around the
+        // Islands floating at every height (see IslandWorldGenerator), streamed around the
         // view as far as the budget reaches.
-        ChunkLoad = new ChunkLoadSystem(host.World, StaticVolume, budget, () => new HeartWorldGenerator(seed),
+        ChunkLoad = new ChunkLoadSystem(host.World, StaticVolume, budget, () => new IslandWorldGenerator(seed),
                                         options.ViewDistance, MinChunkY, chunkStore, chunkPreparer);
         ((EditVoxelsHandler)Commands.HandlerFor(CommandIds.EditVoxels)!).Terrain = ChunkLoad; // edits to the world ask it what's there
 
