@@ -3,6 +3,18 @@ using Silk.NET.WebGPU;
 
 namespace ClearSkies.Engine.Rendering;
 
+/// <summary>How a chunk mesh's faces are lit, for baking its light map (see WebGpu.QuadLightmap).</summary>
+[Flags]
+public enum LightmapKind
+{
+    /// <summary>Opaque faces: smoothed over the open cells in front of solid blocks.</summary>
+    Opaque = 0,
+    /// <summary>A see-through block's faces (leaves, glass, water), which also smooth across see-through blocks.</summary>
+    SeeThrough = 1,
+    /// <summary>Faces drawn from both sides (water), each side lit from the cell on its own side.</summary>
+    TwoSided = 2,
+}
+
 /// <summary>Uploaded GPU buffers for one mesh, including a pre-built wireframe index buffer. The vertices, indices and
 /// wireframe indices may share one buffer (a chunk mesh: one allocation and one upload instead of three), so draw
 /// from their offsets and sizes.</summary>
@@ -46,13 +58,25 @@ public sealed class GpuMesh : IDisposable
     public uint QuadCount => Quads?.Count ?? 0;
     public uint QuadBase => Quads?.Start ?? 0;
 
+    /// <summary>For a chunk mesh: its quads' light map, a run of the renderer's shared light map buffer (see
+    /// <see cref="ChunkQuad.LightOffset"/>), or null when no quad has one. Baked on the GPU before the mesh is first drawn
+    /// and whenever its chunk's light changes.</summary>
+    public BufferSpan? Light { get; }
+    public uint LightBase => Light?.Start ?? 0;
+    public LightmapKind LightKind { get; }
+
+    /// <summary>What <see cref="Light"/> was last baked for (the renderer's), or -1 for never.</summary>
+    internal long BakedStamp = -1;
+
     /// <summary>A chunk mesh: <paramref name="quads"/>, a run of packed <see cref="ChunkQuad"/>s in the renderer's
     /// shared quad buffer, which vs_chunk reads through the draw's record. The run is given back when the mesh is
     /// disposed (the buffer itself is the renderer's).</summary>
-    public GpuMesh(BufferSpan quads)
+    public GpuMesh(BufferSpan quads, BufferSpan? light = null, LightmapKind lightKind = LightmapKind.Opaque)
     {
         Quads       = quads;
-        VertexBytes = quads.Bytes;
+        Light       = light;
+        LightKind   = lightKind;
+        VertexBytes = quads.Bytes + (light?.Bytes ?? 0);
         Count(1);
     }
 
@@ -92,7 +116,7 @@ public sealed class GpuMesh : IDisposable
         if (_disposed) return;
         _disposed = true;
         Count(-1);
-        if (Quads != null) { Quads.Dispose(); return; }
+        if (Quads != null) { Quads.Dispose(); Light?.Dispose(); return; }
         VertexBuffer.Dispose();
         if (IndexBuffer != VertexBuffer) IndexBuffer.Dispose();
         if (WireframeBuffer != VertexBuffer && WireframeBuffer != IndexBuffer) WireframeBuffer.Dispose();
