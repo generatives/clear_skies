@@ -31,11 +31,12 @@ public sealed class IslandWorldGenerator : IWorldGenerator
     /// <summary>Cracks between stacked pieces are this much as wide as those between side-by-side ones.</summary>
     private const float CrackUp = 0.75f;
 
-    // Pieces are worn at their edges, in blocks: tops rounded off over TopRound from a side crack and undersides over
+    // Pieces are worn at their edges, in blocks: tops slope down by up to BankDrop over the last BankWidth before a
+    // side crack, so cracks open out of valleys rather than off flat ground, and undersides are rounded off over
     // UnderRound; where two side cracks meet (rounded over EdgeRound) or are closer than MinWidth (wedges and fins),
     // worn down from the top, and up from the underside, by Taper blocks for each block in; and slabs against a crack
     // worn back to a rounded nose, gone where thinner than Slab.
-    private const float TopRound = 12f, UnderRound = 18f, EdgeRound = 20f, MinWidth = 24f, Taper = 4f, Slab = 24f;
+    private const float BankWidth = 36f, BankDrop = 22f, UnderRound = 18f, EdgeRound = 20f, MinWidth = 24f, Taper = 4f, Slab = 24f;
 
     /// <summary>A crack face counts as a side crack when it is at most this steep from upright (sine squared of
     /// its tilt).</summary>
@@ -555,7 +556,7 @@ public sealed class IslandWorldGenerator : IWorldGenerator
             // that every run keeps to, so a run whose top a leaning crack cuts off short isn't left standing as a wall.
             bool atBottom = lo <= tBottom;
             SideCracks(i, sites, sxz, sx, sy, sz, across, up, tPieceTop, out float fromCrack, out _);
-            yHi = MathF.Min(yHi, pieceTop - Round(fromCrack, TopRound));
+            yHi = MathF.Min(yHi, pieceTop - Bank(fromCrack));
             SideCracks(i, sites, sxz, sx, sy, sz, across, up, tBottom, out fromCrack, out _);
             yLo = MathF.Max(yLo, bottom + Round(fromCrack, UnderRound));
             // A thin slab against a crack, worn back to a rounded nose: from its underside if that is the landscape's,
@@ -596,7 +597,16 @@ public sealed class IslandWorldGenerator : IWorldGenerator
         }
     }
 
-    /// <summary>How far a top or underside is worn back <paramref name="fromCrack"/> blocks from a crack: a quarter
+    /// <summary>How far a top is worn down <paramref name="fromCrack"/> blocks from a side crack: a bank, steepening
+    /// towards the crack.</summary>
+    private static float Bank(float fromCrack)
+    {
+        if (fromCrack >= BankWidth) return 0f;
+        float r = 1f - MathF.Max(fromCrack, 0f) / BankWidth;
+        return BankDrop * r * r;
+    }
+
+    /// <summary>How far an underside is worn back <paramref name="fromCrack"/> blocks from a crack: a quarter
     /// circle of <paramref name="radius"/>, meeting the crack wall upright.</summary>
     private static float Round(float fromCrack, float radius)
     {
