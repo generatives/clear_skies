@@ -34,7 +34,8 @@ public interface IFarTerrain
 /// both levels are lit where they overlap and a swap shows settled light either way. A swap to full detail waits until
 /// the full-detail chunks are lit. A coarse column covers a 2x2 group of full columns, and ChunkLoadSystem loads full detail
 /// in whole groups (<see cref="ChunkLoadSystem.FullDetailRadius"/>), so each coarse column swaps for its four full ones
-/// in one frame: it's drawn (and they're hidden, see <see cref="Covers"/>) until all four are loaded and meshed.
+/// in one frame: it's drawn (and they're hidden, see <see cref="CoverOf"/>) until all four are loaded and meshed.
+/// A swap dissolves the level going away over the one coming in, in a screen dither, over <see cref="FadeSeconds"/>.
 ///
 /// A coarse chunk is made by generating the eight full chunks under it (or loading the edited ones from the store) on a
 /// worker, shrinking them (<see cref="Shrink"/>) and meshing the result; only its meshes are kept. Coarse columns are
@@ -69,6 +70,10 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     /// <summary>How far coarse terrain is drawn (blocks).</summary>
     public float OuterRadius = 1024f;
 
+    /// <summary>How long a swap between detail levels takes to dissolve one into the other (seconds; 0: at once).</summary>
+    public float FadeSeconds = 0.5f;
+    private float _time;
+
     /// <summary>How a coarse cell is made from its 8 blocks (see <see cref="Shrink"/>): by majority, or solid if any
     /// block is (the first rule tried; it raises coarse ground half a block on average). Changing it applies to columns
     /// made afterwards.</summary>
@@ -97,6 +102,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         public bool Covered;   // its full columns are ready, so the world's rays pass through it (GridStore.SetCovered)
         public bool Leaving;   // its full columns are ready: still drawn until they're lit
         public int Waiting, LeaveWait; // frames spent settling, and leaving
+        public float FadeInAt = float.NegativeInfinity, FadeOutAt = float.NegativeInfinity; // when it was last shown, hidden
     }
 
     // A swap waits for the incoming terrain's light (see UpdateDrawn): at least this many frames, since a change is
@@ -125,7 +131,8 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     private bool _wasEnabled;
     private Vector3D<float> _view;
 
-    private readonly record struct Draw(float DistSq, CoarseChunk Chunk, Mat4 Model, ChunkPosition Pos, int Grid, bool Bake);
+    private readonly record struct Draw(float DistSq, CoarseChunk Chunk, Mat4 Model, ChunkPosition Pos, int Grid, bool Bake,
+                                        float Dissolve);
     private readonly List<Draw> _draws = new();
     private static readonly Comparison<Draw> NearestFirst = (a, b) => a.DistSq.CompareTo(b.DistSq);
     private int _built, _chunksDrawn;
@@ -149,12 +156,20 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
 
     public bool Active => Enabled;
 
-    /// <summary>Whether full column (x, z) is hidden because the coarse column over it is drawn instead.</summary>
-    public bool Covers(int x, int z)
-        => Enabled && _columns.TryGetValue((x >> 1, z >> 1), out var c) && c.Drawn;
+    /// <summary>How much full column (x, z) is hidden by the coarse column over it (see ChunkRenderSystem.Cover): 1
+    /// while it's drawn, rising from 0 to 1 over <see cref="FadeSeconds"/> as it comes in, 0 when it isn't.</summary>
+    public float CoverOf(int x, int z)
+    {
+        if (!Enabled || !_columns.TryGetValue((x >> 1, z >> 1), out var c) || !c.Drawn) return 0f;
+        return Faded(c.FadeInAt);
+    }
+
+    /// <summary>How far through its fade a swap that started at <paramref name="at"/> is, 0-1.</summary>
+    private float Faded(float at) => FadeSeconds <= 0f ? 1f : System.Math.Clamp((_time - at) / FadeSeconds, 0f, 1f);
 
     public void Update(float dt)
     {
+        _time += dt;
         if (!Enabled)
         {
             if (_wasEnabled) { _load.FullDetailRadius = null; UnloadAll(); _wasEnabled = false; }
@@ -519,6 +534,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
             if (!ready)
             {
                 column.Leaving = false;
+                if (!column.Drawn) column.FadeInAt = _time;
                 column.Drawn = true;
             }
             else if (column.Drawn)
@@ -530,6 +546,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
                 {
                     column.Drawn = false;
                     column.Leaving = false;
+                    column.FadeOutAt = _time;
                 }
             }
         }
@@ -596,9 +613,9 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         if (stage == SystemStage.RenderTransparent)
         {
             foreach (var d in _draws)
-                if (d.Chunk.Transparent != null) _renderer.DrawTransparentChunkDepth(d.Chunk.Transparent, d.Model, d.Grid, d.Pos);
+                if (d.Chunk.Transparent != null) _renderer.DrawTransparentChunkDepth(d.Chunk.Transparent, d.Model, d.Grid, d.Pos, d.Dissolve);
             foreach (var d in _draws)
-                if (d.Chunk.Transparent != null) _renderer.DrawTransparentChunkMesh(d.Chunk.Transparent, d.Model, d.Grid, d.Pos);
+                if (d.Chunk.Transparent != null) _renderer.DrawTransparentChunkMesh(d.Chunk.Transparent, d.Model, d.Grid, d.Pos, d.Dissolve);
             return;
         }
 
@@ -607,7 +624,9 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         var scale = Mat4.Scale(new Vector3D<float>(Cell));
         foreach (var ((cx, cz), column) in _columns)
         {
-            if (!column.Drawn || column.Chunks.Count == 0) continue;
+            // Drawn, or dissolving over the full detail that replaced it.
+            float dissolve = column.Drawn ? 0f : Faded(column.FadeOutAt);
+            if (dissolve >= 1f || column.Chunks.Count == 0) continue;
             var min = new Vector3D<float>(cx * ColumnBlocks, column.MinY * ColumnBlocks, cz * ColumnBlocks);
             var max = new Vector3D<float>((cx + 1) * ColumnBlocks, (column.MaxY + 1) * ColumnBlocks, (cz + 1) * ColumnBlocks);
             if (!frame.Frustum.Intersects(min, max)) continue;
@@ -622,7 +641,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
                 var origin = new Vector3D<float>(cx * ColumnBlocks, c.Y * ColumnBlocks, cz * ColumnBlocks);
                 if (!frame.Frustum.Intersects(origin, origin + size)) continue;
                 float distSq = Vector3D.DistanceSquared(origin + size * 0.5f, frame.CameraPosition);
-                _draws.Add(new Draw(distSq, c, Mat4.Multiply(Mat4.Translation(origin), scale), new ChunkPosition(cx, c.Y, cz), grid, bake));
+                _draws.Add(new Draw(distSq, c, Mat4.Multiply(Mat4.Translation(origin), scale), new ChunkPosition(cx, c.Y, cz), grid, bake, dissolve));
             }
         }
 
@@ -640,11 +659,11 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         _draws.Sort(NearestFirst);
         _chunksDrawn = _draws.Count;
         foreach (var d in _draws)
-            if (d.Chunk.Opaque != null) _renderer.DrawChunkMesh(d.Chunk.Opaque, d.Model, d.Grid, d.Pos);
+            if (d.Chunk.Opaque != null) _renderer.DrawChunkMesh(d.Chunk.Opaque, d.Model, d.Grid, d.Pos, d.Dissolve);
         foreach (var d in _draws)
-            if (d.Chunk.Cutout != null) _renderer.DrawCutoutChunkDepth(d.Chunk.Cutout, d.Model, d.Grid, d.Pos);
+            if (d.Chunk.Cutout != null) _renderer.DrawCutoutChunkDepth(d.Chunk.Cutout, d.Model, d.Grid, d.Pos, d.Dissolve);
         foreach (var d in _draws)
-            if (d.Chunk.Cutout != null) _renderer.DrawCutoutChunkMesh(d.Chunk.Cutout, d.Model, d.Grid, d.Pos);
+            if (d.Chunk.Cutout != null) _renderer.DrawCutoutChunkMesh(d.Chunk.Cutout, d.Model, d.Grid, d.Pos, d.Dissolve);
     }
 
     // ── debug UI ─────────────────────────────────────────────────────────────
@@ -655,6 +674,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         ImGui.Checkbox("Draw distant terrain coarse (LOD)", ref Enabled);
         ImGui.SliderFloat("Full detail out to (blocks)", ref FullDetailRadius, 64f, 1024f, "%.0f");
         ImGui.SliderFloat("Coarse terrain out to (blocks)", ref OuterRadius, 128f, 4096f, "%.0f");
+        ImGui.SliderFloat("Swap fade (seconds)", ref FadeSeconds, 0f, 2f, "%.2f");
         if (ImGui.Checkbox("Coarse cells by majority (else any block)", ref Majority)) Remake();
         ImGui.TextDisabled("  majority: 4 of 8 blocks fill a cell (leaves: any), so coarse ground meets full detail flush");
         int drawnColumns = _columns.Values.Count(c => c.Drawn);

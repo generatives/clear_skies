@@ -113,7 +113,7 @@ public sealed class GameView : IDisposable
         light.AddStaticGrid(Lod.Grid); // lit like the world
         Lod.IsLit = light.IsLit;       // swaps wait for the incoming terrain's light
         if (_lodDistance is { } lodDistance) Lod.OuterRadius = lodDistance;
-        chunks.Covered = Lod.Covers;
+        chunks.Cover = Lod.CoverOf;
         host.AddSystem((ISystem)Lod, SystemStage.PreRender);
         host.AddSystem((IRenderSystem)Lod, SystemStage.RenderWorld);
         host.AddSystem(new ModelRenderSystem(host.World, renderer, host.Time), SystemStage.RenderWorld);
