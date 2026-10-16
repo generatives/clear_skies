@@ -137,6 +137,14 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     private static readonly Comparison<Draw> NearestFirst = (a, b) => a.DistSq.CompareTo(b.DistSq);
     private int _built, _chunksDrawn;
     private long _quads;
+    private int _frame;
+    private int _editScan; // which ready column UpdateDrawn checks for edits this frame
+
+    // CPU time of each step, for the debug panel.
+    private const int ApplyStep = 0, DispatchStep = 1, SwapStep = 2, ListStep = 3, LightmapStep = 4, DrawStep = 5;
+    private readonly StepTimer _steps = new("Adding finished columns", "Queueing and dispatching columns",
+                                            "Swaps: readiness, edits, lighting checks", "Render: listing draws",
+                                            "Render: light maps", "Render: recording draws") { Owner = "Distant Terrain" };
 
     public LodTerrainSystem(World world, Renderer renderer, ChunkLoadSystem load, ChunkVolume staticVolume,
                             Func<IWorldGenerator> generatorFactory, IChunkStore store, GridStore? gridStore = null)
@@ -169,7 +177,9 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
 
     public void Update(float dt)
     {
+        _steps.Start();
         _time += dt;
+        _frame++;
         if (!Enabled)
         {
             if (_wasEnabled) { _load.FullDetailRadius = null; UnloadAll(); _wasEnabled = false; }
@@ -184,10 +194,14 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         var centre = ((int)MathF.Floor(_view.X / ColumnBlocks), (int)MathF.Floor(_view.Z / ColumnBlocks));
         int outer = (int)MathF.Ceiling(OuterRadius / ColumnBlocks);
         if (centre != _centre || outer != _outerColumns) Rebuild(centre, outer);
+        _steps.Lap(DispatchStep);
 
         ApplyResults();
+        _steps.Lap(ApplyStep);
         Dispatch();
+        _steps.Lap(DispatchStep);
         UpdateDrawn();
+        _steps.Lap(SwapStep);
     }
 
     private bool TryView(out Vector3D<float> centre)
@@ -505,15 +519,18 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     /// under full detail notes any edit to the chunks there, and is made again when it's next drawn.</summary>
     private void UpdateDrawn()
     {
+        // Edits under hidden columns are looked for in one of them a frame (round the ready ones in turn), and in each
+        // as it comes back into view, rather than in all of them every frame (256 chunks each).
+        int readyIndex = 0, scan = _editScan;
         foreach (var (key, column) in _columns)
         {
             bool ready = true;
             for (int j = 0; j < 4 && ready; j++) ready = _load.IsColumnReady(key.x * 2 + (j & 1), key.z * 2 + (j >> 1));
             if (ready)
             {
-                if (!column.ChildEdited) column.ChildEdited = AnyEdited(key);
+                if (readyIndex++ == scan && !column.ChildEdited) column.ChildEdited = AnyEdited(key);
             }
-            else if (!column.Drawn && column.ChildEdited && !_inFlight.Contains(key))
+            else if (!column.Drawn && !_inFlight.Contains(key) && (column.ChildEdited || (column.Covered && AnyEdited(key))))
             {
                 column.ChildEdited = false;
                 _queue.Insert(_queueHead, key); // drawn as it was until it's made again
@@ -527,7 +544,8 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
                 column.Waiting = 0;
             }
             else if (!column.Settled)
-                column.Settled = ++column.Waiting >= MinSwapFrames && (ResidentLit(key, column) || column.Waiting > MaxSwapFrames);
+                column.Settled = ++column.Waiting >= MinSwapFrames && CheckNow(key)
+                                 && (column.Waiting > MaxSwapFrames || ResidentLit(key, column));
             // Covered while its full detail is ready: the world's rays then see only full-detail blocks there.
             if (column.Covered != ready) SetCovered(key, column, ready);
 
@@ -542,7 +560,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
                 // Swapping to full detail: hidden once that terrain is lit by its own blocks (not the coarse ones over
                 // it), so it comes in showing its light.
                 if (!column.Leaving) { column.Leaving = true; column.LeaveWait = 0; }
-                if (++column.LeaveWait >= MinSwapFrames && (ChildrenLit(key) || column.LeaveWait > MaxSwapFrames))
+                if (++column.LeaveWait >= MinSwapFrames && CheckNow(key) && (column.LeaveWait > MaxSwapFrames || ChildrenLit(key)))
                 {
                     column.Drawn = false;
                     column.Leaving = false;
@@ -550,7 +568,13 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
                 }
             }
         }
+        _editScan = readyIndex == 0 ? 0 : (scan + 1) % readyIndex;
     }
+
+    /// <summary>Whether a column waiting on lighting looks again this frame: every <see cref="LitCheckEvery"/> frames,
+    /// staggered across columns, as a check can read hundreds of chunks' bricks.</summary>
+    private bool CheckNow((int x, int z) key) => ((_frame + key.x * 3 + key.z * 5) & (LitCheckEvery - 1)) == 0;
+    private const int LitCheckEvery = 4;
 
     private void SetCovered((int x, int z) key, CoarseColumn column, bool covered)
     {
@@ -610,12 +634,14 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     public void Render(SystemStage stage, in RenderContext frame)
     {
         if (!Enabled) return;
+        _steps.Resume();
         if (stage == SystemStage.RenderTransparent)
         {
             foreach (var d in _draws)
                 if (d.Chunk.Transparent != null) _renderer.DrawTransparentChunkDepth(d.Chunk.Transparent, d.Model, d.Grid, d.Pos, d.Dissolve);
             foreach (var d in _draws)
                 if (d.Chunk.Transparent != null) _renderer.DrawTransparentChunkMesh(d.Chunk.Transparent, d.Model, d.Grid, d.Pos, d.Dissolve);
+            _steps.Lap(DrawStep);
             return;
         }
 
@@ -645,6 +671,8 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
             }
         }
 
+        _steps.Lap(ListStep);
+
         // Light maps whose light changed since they were baked, as ChunkRenderSystem does for full-detail chunks.
         foreach (var d in _draws)
         {
@@ -655,6 +683,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
             _renderer.PrepareLightmap(d.Chunk.Transparent, Grid, d.Pos, stamp);
         }
         _renderer.BakeLightmaps();
+        _steps.Lap(LightmapStep);
 
         _draws.Sort(NearestFirst);
         _chunksDrawn = _draws.Count;
@@ -664,6 +693,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
             if (d.Chunk.Cutout != null) _renderer.DrawCutoutChunkDepth(d.Chunk.Cutout, d.Model, d.Grid, d.Pos, d.Dissolve);
         foreach (var d in _draws)
             if (d.Chunk.Cutout != null) _renderer.DrawCutoutChunkMesh(d.Chunk.Cutout, d.Model, d.Grid, d.Pos, d.Dissolve);
+        _steps.Lap(DrawStep);
     }
 
     // ── debug UI ─────────────────────────────────────────────────────────────
@@ -688,5 +718,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
             ImGui.Text($"Lit as a grid: {Grid.Chunks.Count:N0} coarse chunks, {Grid.Slots.Count:N0} light bricks " +
                        $"({(long)Grid.Slots.Count * GridStore.SlotBytes / (1024 * 1024)} MB)");
         else ImGui.TextDisabled("Lit as open air (no light store)");
+        ImGui.Separator();
+        _steps.Draw();
     }
 }
