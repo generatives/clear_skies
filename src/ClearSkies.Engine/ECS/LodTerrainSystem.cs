@@ -107,6 +107,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         public bool Covered;   // its full columns are ready, so the world's rays pass through it (GridStore.SetCovered)
         public bool Leaving;   // its full columns are ready: still drawn until they're lit
         public int Waiting, LeaveWait; // frames spent settling, and leaving
+        public int LitSoFar, ChildrenLitSoFar; // how many of the chunks it waits on (settling, leaving) were found lit
         public float FadeInAt = float.NegativeInfinity, FadeOutAt = float.NegativeInfinity; // when it was last shown, hidden
     }
 
@@ -308,27 +309,34 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
             var built = new List<Built>();
             try
             {
-                foreach (var group in work.GroupBy(w => w.Pos.Y >> 1))
+                // One full column at a time, bottom to top: the generator profiles a column once for all its chunks,
+                // so going layer by layer across the four (each coarse chunk in turn) made it profile again for every
+                // chunk, about ten times the work.
+                var coarse = new SortedDictionary<int, ChunkData>();
+                bool majority = Majority;
+                foreach (var (pos, edited) in work)
                 {
-                    var coarse = new ChunkData();
-                    bool majority = Majority;
-                    foreach (var (pos, edited) in group)
+                    var full = new ChunkData();
+                    if (!(edited && _store.TryLoad(pos, full))) _generator.Value!.Generate(full, pos);
+                    if (!full.IsUniform(out var only) || only != BlockId.Air)
                     {
-                        var full = new ChunkData();
-                        if (!(edited && _store.TryLoad(pos, full))) _generator.Value!.Generate(full, pos);
-                        Shrink(full, coarse, (pos.X & 1) * 16, (pos.Y & 1) * 16, (pos.Z & 1) * 16, majority);
-                        full.Release();
+                        if (!coarse.TryGetValue(pos.Y >> 1, out var into)) coarse[pos.Y >> 1] = into = new ChunkData();
+                        Shrink(full, into, (pos.X & 1) * 16, (pos.Y & 1) * 16, (pos.Z & 1) * 16, majority);
                     }
-                    if (coarse.HasAnyNonAir())
+                    full.Release();
+                }
+                foreach (var (y, chunk) in coarse)
+                {
+                    if (chunk.HasAnyNonAir())
                     {
-                        var mesh = _meshers.Value!.Mesh(coarse, null, null, null, null, null, null,
+                        var mesh = _meshers.Value!.Mesh(chunk, null, null, null, null, null, null,
                                                         neighboursForTransparentOnly: true,
-                                                        position: new ChunkPosition(col.x, group.Key, col.z));
+                                                        position: new ChunkPosition(col.x, y, col.z));
                         // Buried chunks have no faces but still shadow and reflect, so every chunk with blocks is kept.
-                        built.Add(new Built(group.Key, ChunkMeshSystem.PackQuads(mesh.Opaque), ChunkMeshSystem.PackQuads(mesh.Cutout),
-                                            ChunkMeshSystem.PackQuads(mesh.Translucent, twoSided: true), Occupancy(coarse)));
+                        built.Add(new Built(y, ChunkMeshSystem.PackQuads(mesh.Opaque), ChunkMeshSystem.PackQuads(mesh.Cutout),
+                                            ChunkMeshSystem.PackQuads(mesh.Translucent, twoSided: true), Occupancy(chunk)));
                     }
-                    coarse.Release();
+                    chunk.Release();
                 }
                 _results.Enqueue(new Result(col, built, null));
             }
@@ -567,6 +575,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
                 }
                 column.Settled = false;
                 column.Waiting = 0;
+                column.LitSoFar = 0;
             }
             else if (!column.Settled)
                 column.Settled = ++column.Waiting >= MinSwapFrames && CheckNow(key)
@@ -584,8 +593,8 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
             {
                 // Swapping to full detail: hidden once that terrain is lit by its own blocks (not the coarse ones over
                 // it), so it comes in showing its light.
-                if (!column.Leaving) { column.Leaving = true; column.LeaveWait = 0; }
-                if (++column.LeaveWait >= MinSwapFrames && CheckNow(key) && (column.LeaveWait > MaxSwapFrames || ChildrenLit(key)))
+                if (!column.Leaving) { column.Leaving = true; column.LeaveWait = 0; column.ChildrenLitSoFar = 0; }
+                if (++column.LeaveWait >= MinSwapFrames && CheckNow(key) && (column.LeaveWait > MaxSwapFrames || ChildrenLit(key, column)))
                 {
                     column.Drawn = false;
                     column.Leaving = false;
@@ -608,22 +617,41 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         foreach (int y in column.Resident) _gridStore.SetCovered(Grid, new ChunkPosition(key.x, y, key.z), covered);
     }
 
+    // Both go on from the first chunk not lit last time (LitSoFar, ChildrenLitSoFar), rather than reading every chunk's
+    // bricks again on each look, and read them all once more when they get to the end, for any that went unlit since.
     private bool ResidentLit((int x, int z) key, CoarseColumn column)
     {
         if (IsLit == null) return true;
-        foreach (int y in column.Resident)
-            if (!IsLit(Grid, new ChunkPosition(key.x, y, key.z))) return false;
+        while (column.LitSoFar < column.Resident.Count)
+        {
+            for (; column.LitSoFar < column.Resident.Count; column.LitSoFar++)
+                if (!IsLit(Grid, new ChunkPosition(key.x, column.Resident[column.LitSoFar], key.z))) return false;
+            column.LitSoFar = FirstUnlit(column.Resident.Count, i => new ChunkPosition(key.x, column.Resident[i], key.z), Grid);
+        }
         return true;
     }
 
-    private bool ChildrenLit((int x, int z) key)
+    private bool ChildrenLit((int x, int z) key, CoarseColumn column)
     {
         if (IsLit == null) return true;
         int minY = _load.MinLayer;
-        for (int j = 0; j < 4; j++)
-        for (int layer = 0; layer < 64; layer++)
-            if (!IsLit(_volume.Gpu, new ChunkPosition(key.x * 2 + (j & 1), minY + layer, key.z * 2 + (j >> 1)))) return false;
+        ChunkPosition At(int i) => new(key.x * 2 + ((i >> 6) & 1), minY + (i & 63), key.z * 2 + (i >> 7));
+        while (column.ChildrenLitSoFar < 4 * 64)
+        {
+            for (; column.ChildrenLitSoFar < 4 * 64; column.ChildrenLitSoFar++)
+                if (!IsLit(_volume.Gpu, At(column.ChildrenLitSoFar))) return false;
+            column.ChildrenLitSoFar = FirstUnlit(4 * 64, At, _volume.Gpu);
+        }
         return true;
+    }
+
+    /// <summary>The first of <paramref name="count"/> chunks not lit, or <paramref name="count"/> past the end if all
+    /// are.</summary>
+    private int FirstUnlit(int count, Func<int, ChunkPosition> at, GridHandle grid)
+    {
+        for (int i = 0; i < count; i++)
+            if (!IsLit!(grid, at(i))) return i;
+        return int.MaxValue;
     }
 
     private bool AnyEdited((int x, int z) key)
