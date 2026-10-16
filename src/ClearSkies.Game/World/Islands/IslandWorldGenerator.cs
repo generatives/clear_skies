@@ -198,8 +198,7 @@ public sealed class IslandWorldGenerator : IWorldGenerator
     private bool Present(int layer, int i, int k, int j)
     {
         PointOf(layer, i, k, j, out float x, out _, out float z, out ulong h);
-        float there = (IslandField.Hash(h, 1, 0, 0, 0) & 0xFFFFFF) / 16777216f;
-        return there < IslandField.Coverage(_seed, layer, x, z);
+        return IslandField.Present(_seed, layer, x, z, (IslandField.Hash(h, 1, 0, 0, 0) & 0xFFFFFF) / 16777216f);
     }
 
     /// <summary>Piece (i, k, j) of landscape <paramref name="layer"/>'s grid, worked out if it isn't yet.</summary>
@@ -210,9 +209,9 @@ public sealed class IslandWorldGenerator : IWorldGenerator
         if (p.State != 0) return ref p;
         PointOf(layer, i, k, j, out _, out _, out _, out ulong h);
         ulong h2 = IslandField.Hash(h, 1, 0, 0, 0);
-        float there = (h2 & 0xFFFFFF) / 16777216f, sinkShare = ((h2 >> 24) & 0xFFFFFF) / 16777216f;
+        float jitter = (h2 & 0xFFFFFF) / 16777216f, sinkShare = ((h2 >> 24) & 0xFFFFFF) / 16777216f;
         float coverage = IslandField.Coverage(_seed, layer, p.X, p.Z);
-        bool present = there < coverage;
+        bool present = IslandField.Present(_seed, layer, p.X, p.Z, jitter);
         float rim = 1f - Smoothstep(0.75f, 1f, coverage); // 0 where the landscape is whole
         if (present)
         {

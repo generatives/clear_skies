@@ -10,7 +10,8 @@ namespace ClearSkies.Game.Generation;
 /// islands, then islets, then open sky. Islands are never drawn as shapes: they are what is left of a landscape.
 ///
 /// Low down, the landmasses: coverage in great blobs many kilometres across, intact at their cores. Under them, an
-/// underworld of smaller pieces; above, landscapes whose coverage gathers into ever sparser clusters with height.
+/// underworld of smaller pieces; above, landscapes whose coverage gathers into ever sparser clusters with height, around
+/// the landmasses' rims and over each other.
 ///
 /// Thread-safe: everything is worked out from the seed alone.
 /// </summary>
@@ -64,28 +65,45 @@ public static class IslandField
     // and fully inside a core past CoreAt.
     private const float LandSpacing = 9000f, LandDetail = 2600f, LandFrom = 0.53f, LandFull = 0.66f, CoreAt = 0.72f;
 
-    /// <summary>0-1: how much of landscape <paramref name="layer"/> is there at (x, z): the chance that a piece whose
-    /// point is there is.</summary>
+    /// <summary>0-1: how much of landscape <paramref name="layer"/> is there at (x, z): roughly the share of pieces
+    /// whose points are there that are (see <see cref="Present"/>).</summary>
     public static float Coverage(ulong seed, int layer, float x, float z)
     {
         switch (layer)
         {
             case Landmass:
-            {
-                // Whole at their cores, breaking up towards their rims into islands, with islets scattered off them.
-                float v = Blobs(seed, 0xA1, x, z, LandSpacing, LandDetail, 0.25f);
-                float land = Smoothstep(LandFrom, LandFull, v);
-                float islets = Smoothstep(0.62f, 0.8f, Blobs(seed, 0xA2, x, z, 900f, 300f, 0.3f)) * Smoothstep(0.3f, LandFrom, v);
-                return MathF.Max(land, 0.7f * islets);
-            }
+                // Whole at their cores, breaking up towards their rims into islands.
+                return Smoothstep(LandFrom, LandFull, LandBlobs(seed, x, z));
             case Underworld:
                 return 0.8f * Smoothstep(0.5f, 0.7f, Blobs(seed, 0xA3, x, z, 1100f, 350f, 0.3f));
             case 2:
-                return 0.85f * Smoothstep(0.62f, 0.8f, Blobs(seed, 0xA4, x, z, 1600f, 450f, 0.3f));
+            {
+                // Clusters gathered around the landmasses: over their broken rims and the gaps just off them, thinning
+                // over their cores, none out over open sky.
+                float v = LandBlobs(seed, x, z);
+                float near = Smoothstep(0.36f, 0.5f, v) * (1f - 0.7f * Smoothstep(0.66f, 0.76f, v));
+                return 0.85f * near * Smoothstep(0.5f, 0.72f, MiddleBlobs(seed, x, z));
+            }
             default:
-                return 0.75f * Smoothstep(0.7f, 0.86f, Blobs(seed, 0xA5, x, z, 1200f, 320f, 0.3f));
+                // Sparser, smaller clusters up over the middle ones.
+                return 0.75f * Smoothstep(0.45f, 0.65f, MiddleBlobs(seed, x, z))
+                             * Smoothstep(0.6f, 0.8f, Blobs(seed, 0xA5, x, z, 1200f, 320f, 0.3f));
         }
     }
+
+    /// <summary>Whether a piece of landscape <paramref name="layer"/> whose point is at (x, z) is there, given its own
+    /// 0-1 <paramref name="jitter"/>. It is where its coverage beats a breakup field: noise a few pieces across, so
+    /// neighbouring pieces mostly go together, and where coverage thins the land breaks into groups of pieces rather
+    /// than scattered single ones; the jitter only roughens the edges.</summary>
+    public static bool Present(ulong seed, int layer, float x, float z, float jitter)
+    {
+        float size = Layers[layer].CellSize;
+        float breakup = Smoothstep(0.15f, 0.85f, Blobs(seed, 0xB0u + (uint)layer, x, z, 2.5f * size, size, 0.35f));
+        return (1f - Jitter) * breakup + Jitter * jitter < Coverage(seed, layer, x, z);
+    }
+
+    /// <summary>How much a piece's own chance counts in whether it is there (see <see cref="Present"/>).</summary>
+    private const float Jitter = 0.15f;
 
     /// <summary>A point near (x, z) well inside a landmass's core, spiralling out on a coarse grid.</summary>
     public static (float X, float Z) NearestLandmassCore(ulong seed, float x, float z)
@@ -97,9 +115,12 @@ public static class IslandField
         {
             if (Math.Max(Math.Abs(i), Math.Abs(j)) != ring) continue;
             float px = x + i * Step, pz = z + j * Step;
-            if (Blobs(seed, 0xA1, px, pz, LandSpacing, LandDetail, 0.25f) > CoreAt) return (px, pz);
+            if (LandBlobs(seed, px, pz) > CoreAt) return (px, pz);
         }
     }
+
+    private static float LandBlobs(ulong seed, float x, float z) => Blobs(seed, 0xA1, x, z, LandSpacing, LandDetail, 0.25f);
+    private static float MiddleBlobs(ulong seed, float x, float z) => Blobs(seed, 0xA4, x, z, 1600f, 450f, 0.3f);
 
     /// <summary>Value noise at <paramref name="spacing"/>, roughened by <paramref name="detailShare"/> of a finer one at
     /// <paramref name="detail"/>: about 0-1.</summary>
