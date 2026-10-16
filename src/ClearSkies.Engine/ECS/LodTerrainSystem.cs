@@ -67,6 +67,11 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     /// <summary>How far coarse terrain is drawn (blocks).</summary>
     public float OuterRadius = 1024f;
 
+    /// <summary>How a coarse cell is made from its 8 blocks (see <see cref="Shrink"/>): by majority, or solid if any
+    /// block is (the first rule tried; it raises coarse ground half a block on average). Changing it applies to columns
+    /// made afterwards.</summary>
+    public bool Majority = true;
+
     /// <summary>The drawn coarse columns as a grid of 2-block voxels, lit like the world (see
     /// GpuLightSystem.AddStaticGrid). Unregistered (index -1) without a GridStore: then they're lit as open air.</summary>
     public GridHandle Grid { get; } = new();
@@ -269,11 +274,12 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
                 foreach (var group in work.GroupBy(w => w.Pos.Y >> 1))
                 {
                     var coarse = new ChunkData();
+                    bool majority = Majority;
                     foreach (var (pos, edited) in group)
                     {
                         var full = new ChunkData();
                         if (!(edited && _store.TryLoad(pos, full))) _generator.Value!.Generate(full, pos);
-                        Shrink(full, coarse, (pos.X & 1) * 16, (pos.Y & 1) * 16, (pos.Z & 1) * 16);
+                        Shrink(full, coarse, (pos.X & 1) * 16, (pos.Y & 1) * 16, (pos.Z & 1) * 16, majority);
                         full.Release();
                     }
                     if (coarse.HasAnyNonAir())
@@ -297,10 +303,13 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     }
 
     /// <summary>Shrinks full chunk <paramref name="full"/> into the 16³ octant of <paramref name="coarse"/> at
-    /// (ox, oy, oz): each coarse cell takes the most common opaque cube among its 8 blocks, or if there's none, the most
-    /// common see-through cube (leaves, glass, water). Plants and model blocks are left out, so a cell is solid if any
-    /// of its blocks is a cube: thin edges and trees stay, a little thicker.</summary>
-    internal static void Shrink(ChunkData full, ChunkData coarse, int ox, int oy, int oz)
+    /// (ox, oy, oz). Plants and model blocks are left out. By <paramref name="majority"/>: a cell is filled when at least
+    /// 4 of its 8 blocks are cubes, with the more common kind (opaque or see-through) and its most common block, so coarse
+    /// surfaces round to the nearest cell and meet full detail flush on average; thin things (a fence of cubes, a
+    /// one-block ledge) may go, except leaves (<see cref="BlockDef.ShowsInnerFaces"/>), which fill a cell if any of its
+    /// blocks is one, so trees stay. Otherwise any cube fills the cell: the most common opaque one, else the most common
+    /// see-through one.</summary>
+    internal static void Shrink(ChunkData full, ChunkData coarse, int ox, int oy, int oz, bool majority = true)
     {
         if (full.IsUniform(out var only))
         {
@@ -316,10 +325,30 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         {
             for (int k = 0; k < 8; k++)
                 cell[k] = full.Get(2 * x + (k & 1), 2 * y + ((k >> 1) & 1), 2 * z + (k >> 2));
-            var pick = MostCommon(cell, opaque: true);
-            if (pick == BlockId.Air) pick = MostCommon(cell, opaque: false);
+            var pick = majority ? ByMajority(cell) : ByAny(cell);
             if (pick != BlockId.Air) coarse.Set(ox + x, oy + y, oz + z, pick);
         }
+    }
+
+    private static BlockId ByAny(ReadOnlySpan<BlockId> cell)
+    {
+        var pick = MostCommon(cell, opaque: true);
+        return pick != BlockId.Air ? pick : MostCommon(cell, opaque: false);
+    }
+
+    private static BlockId ByMajority(ReadOnlySpan<BlockId> cell)
+    {
+        int opaque = 0, see = 0;
+        bool leaves = false;
+        foreach (var id in cell)
+        {
+            if (!IsCube(id)) continue;
+            var def = BlockRegistry.Get(id);
+            if (def.Transparent) { see++; leaves |= def.ShowsInnerFaces; }
+            else opaque++;
+        }
+        if (opaque + see >= 4) return MostCommon(cell, opaque: opaque >= see);
+        return leaves ? MostCommon(cell, opaque: false, leavesOnly: true) : BlockId.Air;
     }
 
     /// <summary>A coarse chunk's occupancy for the grid; the shared one for a chunk that's all air or all solid.</summary>
@@ -332,7 +361,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
 
     private static bool IsCube(BlockId id) => id != BlockId.Air && BlockRegistry.Get(id).IsFullCube;
 
-    private static BlockId MostCommon(ReadOnlySpan<BlockId> cell, bool opaque)
+    private static BlockId MostCommon(ReadOnlySpan<BlockId> cell, bool opaque, bool leavesOnly = false)
     {
         BlockId best = BlockId.Air;
         int bestCount = 0;
@@ -340,6 +369,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         {
             var id = cell[i];
             if (!IsCube(id) || BlockRegistry.Get(id).Transparent == opaque) continue;
+            if (leavesOnly && !BlockRegistry.Get(id).ShowsInnerFaces) continue;
             int n = 0;
             for (int j = 0; j < cell.Length; j++) if (cell[j] == id) n++;
             if (n > bestCount) { best = id; bestCount = n; }
@@ -432,6 +462,15 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
             _quads -= (c.Opaque?.QuadCount ?? 0) + (c.Cutout?.QuadCount ?? 0) + (c.Transparent?.QuadCount ?? 0);
             c.Opaque?.Dispose(); c.Cutout?.Dispose(); c.Transparent?.Dispose();
         }
+    }
+
+    /// <summary>Makes every coarse column again (the shrink rule changed); each is drawn as it was until then.</summary>
+    private void Remake()
+    {
+        foreach (var key in _columns.Keys)
+            if (!_inFlight.Contains(key) && !_queue.Contains(key)) _queue.Add(key);
+        _queue.Sort(_queueHead, _queue.Count - _queueHead, Comparer<(int x, int z)>.Create(
+            (a, b) => (Sq(a.x - _centre.x) + Sq(a.z - _centre.z)).CompareTo(Sq(b.x - _centre.x) + Sq(b.z - _centre.z))));
     }
 
     private void UnloadAll()
@@ -607,6 +646,8 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         ImGui.Checkbox("Draw distant terrain coarse (LOD)", ref Enabled);
         ImGui.SliderFloat("Full detail out to (blocks)", ref FullDetailRadius, 64f, 1024f, "%.0f");
         ImGui.SliderFloat("Coarse terrain out to (blocks)", ref OuterRadius, 128f, 4096f, "%.0f");
+        if (ImGui.Checkbox("Coarse cells by majority (else any block)", ref Majority)) Remake();
+        ImGui.TextDisabled("  majority: 4 of 8 blocks fill a cell (leaves: any), so coarse ground meets full detail flush");
         int drawnColumns = _columns.Values.Count(c => c.Drawn);
         int chunks = _columns.Values.Sum(c => c.Chunks.Count);
         ImGui.Text($"Coarse columns: {_columns.Count:N0} loaded ({drawnColumns:N0} drawn), {_inFlight.Count} being made, " +
