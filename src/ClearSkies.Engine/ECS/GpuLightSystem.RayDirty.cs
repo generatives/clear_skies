@@ -107,8 +107,8 @@ public sealed partial class GpuLightSystem
     private readonly List<(Vector3D<float> min, Vector3D<float> max)> _bounceClears = new();
     private readonly List<int> _clearSlots = new();
     private GpuBuffer? _clearWork;
-    private readonly List<(Vector3D<float> min, Vector3D<float> max, bool worldOnly)> _occluderChanges = new();
-    private bool _skipCoarse; // marking for a world change: distant terrain's bricks can't have changed
+    private readonly List<(Vector3D<float> min, Vector3D<float> max, int seenUpTo)> _occluderChanges = new();
+    private int _seenUpTo = int.MaxValue; // marking for a static grid's change: only grids up to this scale see it
     private readonly List<(Vector3D<float> min, Vector3D<float> max)> _directChanges = new();
     // This frame's lamp boxes relit (lamp changes, and lamps in reach of an occluder change): with AO only, their
     // bricks are touched so they compose (see TouchBounce).
@@ -207,13 +207,13 @@ public sealed partial class GpuLightSystem
             // voxels whose sun ray passes through it, the radius of lamps whose rays may), relit this frame; then the
             // lamp changes, queued.
             var pad = new Vector3D<float>(1.5f);
-            foreach (var (mn, mx, worldOnly) in _occluderChanges)
+            foreach (var (mn, mx, seenUpTo) in _occluderChanges)
             {
-                // A world chunk's change isn't seen by distant terrain's rays (see AppendChunkList).
-                _skipCoarse = worldOnly;
+                // A static grid's change isn't seen by coarser grids' rays (see AppendChunkList).
+                _seenUpTo = seenUpTo;
                 MarkRegion(mn - pad, mx + pad, _urgentMarks);
                 MarkSunShadow(mn, mx, sunDir, _urgentMarks);
-                _skipCoarse = false;
+                _seenUpTo = int.MaxValue;
                 foreach (var lamp in _lamps) { var (a, b) = LampBox(lamp); if (Overlaps(a, b, mn, mx)) MarkLampBox(a, b); }
                 foreach (var lamp in _prevLamps) { var (a, b) = LampBox(lamp); if (Overlaps(a, b, mn, mx)) MarkLampBox(a, b); }
             }
@@ -376,7 +376,7 @@ public sealed partial class GpuLightSystem
         // World chunks: loads and unloads (the whole chunk) and edits (just the edited blocks' bounds). A chunk with no
         // solid before or after can't have shadowed anything; the bricks it gained or lost storage for are already in
         // NewSlots.
-        foreach (var (grid, vmn, vmx, solid, _) in _store.ChangedChunks)
+        foreach (var (grid, vmn, vmx, solid, _, cover) in _store.ChangedChunks)
         {
             if (!grid.IsWorld) continue; // a ship's edit shows as its version changing (see below)
             _dbgChangedChunks++;
@@ -385,7 +385,8 @@ public sealed partial class GpuLightSystem
             if (vmx.X - vmn.X < S || vmx.Y - vmn.Y < S || vmx.Z - vmn.Z < S) _editBoxes.Add((vmn, vmx));
             var mn = vmn * (float)grid.Scale; // world space
             var mx = vmx * (float)grid.Scale;
-            if (solid && !relightAll) _occluderChanges.Add((mn, mx, grid.Scale == 1));
+            // Seen by the rays of its own grid and finer ones (see AppendChunkList); covering, by the finer ones only.
+            if (solid && !relightAll) _occluderChanges.Add((mn, mx, cover ? grid.Scale / 2 : grid.Scale));
             if (solid) _shapeChanges.Add((mn, mx));
         }
         _store.ChangedChunks.Clear();
@@ -410,8 +411,8 @@ public sealed partial class GpuLightSystem
                 st.LightAll = true;
                 // Like a placed block, the ship may now shade what it didn't: the bricks around both poses and along
                 // both sun shadows are relit this frame, and everything within bounce reach of the hull is touched.
-                if (st.HavePrev) { _occluderChanges.Add((st.PrevWorldMin, st.PrevWorldMax, false)); _shipMoves.Add((st.PrevWorldMin, st.PrevWorldMax)); }
-                if (h.HasSolid) { _occluderChanges.Add((st.CurWorldMin, st.CurWorldMax, false)); _shipMoves.Add((st.CurWorldMin, st.CurWorldMax)); }
+                if (st.HavePrev) { _occluderChanges.Add((st.PrevWorldMin, st.PrevWorldMax, int.MaxValue)); _shipMoves.Add((st.PrevWorldMin, st.PrevWorldMax)); }
+                if (h.HasSolid) { _occluderChanges.Add((st.CurWorldMin, st.CurWorldMax, int.MaxValue)); _shipMoves.Add((st.CurWorldMin, st.CurWorldMax)); }
             }
             st.HavePrev     = h.HasSolid;
             st.PrevVersion  = h.Version;
@@ -560,7 +561,7 @@ public sealed partial class GpuLightSystem
             if (st.LightAll) continue;
             if (lg.Handle.IsWorld)
             {
-                if (!(_skipCoarse && lg.Handle.Scale > 1)) MarkWorldBox(lg.Handle, mn, mx, marks ?? _marks);
+                if (lg.Handle.Scale <= _seenUpTo) MarkWorldBox(lg.Handle, mn, mx, marks ?? _marks);
             }
             else if (lg.Handle.HasSolid)
             {
@@ -633,7 +634,7 @@ public sealed partial class GpuLightSystem
         }
 
         foreach (var g in _static)
-            if (!(_skipCoarse && g.Scale > 1)) SweepSunShadow(g, mn, mx, sunDir, marks);
+            if (g.Scale <= _seenUpTo) SweepSunShadow(g, mn, mx, sunDir, marks);
     }
 
     /// <summary>The static grid part of <see cref="MarkSunShadow"/>, in <paramref name="world"/>'s voxel space.</summary>

@@ -287,8 +287,9 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     /// <summary>Occupancy changes since the lighting system last drained this: the grid-space voxel box that changed
     /// (the edited blocks' bounds for an edit, the whole chunk for a load or unload), and whether the chunk had or has
     /// any solid (an all-air change can't have changed any shadow), and whether it was an edit that placed a
-    /// light-blocking block (the only kind of change that can darken what was already lit).</summary>
-    internal List<(GridHandle grid, Vector3D<float> min, Vector3D<float> max, bool solid, bool darkens)> ChangedChunks { get; } = new();
+    /// light-blocking block (the only kind of change that can darken what was already lit), and whether only finer
+    /// grids' rays see it (distant terrain covered or uncovered, see <see cref="SetCovered"/>).</summary>
+    internal List<(GridHandle grid, Vector3D<float> min, Vector3D<float> max, bool solid, bool darkens, bool cover)> ChangedChunks { get; } = new();
 
     public int LightSlotsInUse => _lightNext - _lightFree.Count;
     public int LightSlotCapacity => _lightCapacity;
@@ -579,7 +580,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         rec.Covered = covered;
         WriteChunkEntry(rec);
         var origin = pos.WorldOrigin;
-        if (rec.Solid != 0) ChangedChunks.Add((g, origin, origin + new Vector3D<float>(S), true, false));
+        if (rec.Solid != 0) ChangedChunks.Add((g, origin, origin + new Vector3D<float>(S), true, false, true));
     }
 
     /// <summary>Stores a chunk's occupancy and brick masks, then updates which of its and its neighbours' bricks need
@@ -624,7 +625,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         RefreshSurfaceAround(g, rec);
         TouchChunk(g, pos);
         g.Version++;
-        ChangedChunks.Add((g, changedMin, changedMax, hadSolid || rec.Solid != 0, darkens));
+        ChangedChunks.Add((g, changedMin, changedMax, hadSolid || rec.Solid != 0, darkens, false));
         return kept;
     }
 
@@ -657,10 +658,10 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         if (g.Chunks.TryGetValue(pos, out var left)) RefreshSurface(g, left);
         TouchChunk(g, pos);
         g.Version++;
-        // A world chunk unloading isn't a change to the world: what it shadowed stays shadowed, and relighting the far
-        // edge for it would only undo that. A ship's chunk going is a real change, and so is distant terrain's: it
-        // leaves when full detail replaces it, and the full-detail terrain it shadowed meanwhile must be relit.
-        ChangedChunks.Add((g, pos.WorldOrigin, pos.WorldOrigin + new Vector3D<float>(S), hadSolid && (!g.IsWorld || g.Scale > 1), false));
+        // A static grid's chunk unloading isn't a change to it: what it shadowed stays shadowed, and relighting the far
+        // edge for it would only undo that (distant terrain stays loaded under finer levels, and leaves only past its
+        // own range, or when it's made again over itself). A ship's chunk going is a real change.
+        ChangedChunks.Add((g, pos.WorldOrigin, pos.WorldOrigin + new Vector3D<float>(S), hadSolid && !g.IsWorld, false, false));
     }
 
     /// <summary>The light slot holding brick (bx,by,bz) of chunk <paramref name="pos"/>, or -1.</summary>
