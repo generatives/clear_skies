@@ -119,6 +119,12 @@ public static class BlockRegistry
             Texture = "redsand" });
         Register(new BlockDef { Id = BlockId.RedRock, Name = "Red Rock", Color = new(0.62f, 0.30f, 0.20f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 6,
             Texture = "redstone" });
+
+        // Cave crystals: lamps grown into cave floors and ceilings, amber in hot biomes and blue elsewhere.
+        Register(new BlockDef { Id = BlockId.AmberCrystal, Name = "Amber Crystal", Color = new(1.00f, 0.60f, 0.30f), IsSolid = true, PlaceOriented = false, LightEmission = 12, Weight = 4,
+            LightColor = new(1.00f, 0.55f, 0.25f), Texture = "greystone_ruby" });
+        Register(new BlockDef { Id = BlockId.BlueCrystal, Name = "Blue Crystal", Color = new(0.45f, 0.80f, 1.00f), IsSolid = true, PlaceOriented = false, LightEmission = 12, Weight = 4,
+            LightColor = new(0.35f, 0.75f, 1.00f), Texture = "stone_diamond" });
     }
 
     private static void RegisterCross(BlockId id, string name, string texture, Vector3D<float> color, string[]? variants = null, bool rigid = false, bool tint = false) =>

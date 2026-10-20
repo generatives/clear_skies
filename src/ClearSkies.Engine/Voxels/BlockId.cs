@@ -49,4 +49,8 @@ public enum BlockId : byte
     RedRock       = 36,
     BirchLog      = 37,
     AutumnLeaves  = 38,
+
+    // Glowing crystals set into cave floors and ceilings.
+    AmberCrystal  = 39,
+    BlueCrystal   = 40,
 }

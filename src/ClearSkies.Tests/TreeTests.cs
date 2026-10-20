@@ -42,6 +42,23 @@ public class TreeTests
     }
 
     [Fact]
+    public void Cave_crystals_glow_and_come_in_sparse_clusters()
+    {
+        Assert.True(BlockRegistry.Get(BlockId.AmberCrystal).LightEmission > 0);
+        Assert.True(BlockRegistry.Get(BlockId.BlueCrystal).LightEmission > 0);
+        Assert.Equal(BlockId.AmberCrystal, Crystals.For(Biome.Badlands));
+        Assert.Equal(BlockId.BlueCrystal, Crystals.For(Biome.Autumn));
+
+        var lit = new List<(int X, int Z)>();
+        for (int z = 0; z < 480; z++)
+        for (int x = 0; x < 480; x++)
+            if (Crystals.At(x, 300, z, 7)) lit.Add((x, z));
+        Assert.InRange(lit.Count, 20, 480 * 480 / 500);                     // a few, not a sprinkle everywhere
+        Assert.All(lit, a => Assert.Contains(lit, b => b != a                // and each beside others in its cluster
+            && System.Math.Abs(a.X - b.X) <= 2 * Crystals.Radius && System.Math.Abs(a.Z - b.Z) <= 2 * Crystals.Radius));
+    }
+
+    [Fact]
     public void Leaves_keep_their_faces_against_each_other()
     {
         Assert.False(BlockRegistry.Get(BlockId.Leaves).HidesFaceOf(BlockId.Leaves));

@@ -138,6 +138,14 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 for (int y = y0; y <= y1; y++)
                     data.Set(lx, y - originY, lz, ContinentTerrain.Block(y, hi, _strata[col], _patch[col], _bare[col * MaxSpans + s], _biome[col * MaxSpans + s]));
 
+                // Crystals in caves: in a floor under other land, and in a ceiling over another span.
+                int x = pos.X * S + lx, z = pos.Z * S + lz;
+                var crystal = Crystals.For(_biome[col * MaxSpans + s]);
+                if (_bare[col * MaxSpans + s] == Shaded && hi >= originY && hi < originY + S && Crystals.At(x, hi, z, _seed))
+                    data.Set(lx, hi - originY, lz, crystal);
+                if (s > 0 && lo - _spans[col * MaxSpans + s - 1].Hi < ShadeReach && lo >= originY && lo < originY + S && Crystals.At(x, lo, z, _seed))
+                    data.Set(lx, lo - originY, lz, crystal);
+
                 // What grows on the span's top, in the open cell above it.
                 int above = hi + 1;
                 if (above < originY || above >= originY + S) continue;
