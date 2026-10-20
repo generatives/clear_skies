@@ -48,9 +48,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     // So tops are flatter than the land they came from, and neighbours don't line up.
     private const float Flatten = 0.45f, MaxDrop = 30f;
 
-    // A top is bare (see ContinentTerrain.Block) the further it is below the terrain surface, from BareFrom to
-    // BareFull blocks, and at least Shaded if land lies over it within ShadeReach blocks.
-    private const float BareFrom = 12f, BareFull = 60f, Shaded = 0.75f, ShadeReach = 250f;
+    // A top is bare (see ContinentTerrain.Block) to Shaded if land lies over it within ShadeReach blocks.
+    private const float Shaded = 0.75f, ShadeReach = 250f;
 
     /// <summary>How far above <see cref="HeartGrid.LowestBottom"/> the world's rough bottom reaches.</summary>
     private const float BottomRoughness = 30f;
@@ -190,8 +189,9 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             _bottomAt[col] = HeartGrid.LowestBottom + BottomRoughness * (0.5f + 0.5f * _bottom.GetNoise(wx, wz));
             top = MathF.Max(top, _height[col]);
         }
+        // (Hearts are placed by depth under the surface: heights from here on are relative to it.)
         LoadHearts(x0 - WarpAcross, z0 - WarpAcross, x0 + S + WarpAcross, z0 + S + WarpAcross,
-                   HeartGrid.LowestBottom - WarpUp, top + WarpUp);
+                   HeartGrid.LowestBottom - top - WarpUp, WarpUp);
 
         // Between islands most columns have no live heart near them at all: nothing to walk.
         bool anyAlive = false;
@@ -227,7 +227,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                     float t = WearBlend(y);
                     float across = (FloorWear + (UpperWear - FloorWear) * t) * wearNoise + CrackSlack;
                     float up = (FloorWearUp + (UpperWearUp - FloorWearUp) * t) * wearNoise * HeartGrid.VerticalScale + CrackSlack;
-                    solid = Solid(px, (y + lift) * HeartGrid.VerticalScale, pz, y, _height[col], across, up, out float clear);
+                    solid = Solid(px, (y - _height[col] + lift) * HeartGrid.VerticalScale, pz, y, _height[col], across, up, out float clear);
                     step = System.Math.Max(1, (int)clear);
                     // Where wear grows with height, not so far that it grows by more than CrackSlack.
                     if (y > HeartGrid.FloorTop + CrackFrom && y < HeartGrid.FloorTop + CrackFrom + CrackOver)
@@ -251,8 +251,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             for (int sp = 0; sp < spans; sp++)
             {
                 int hi = _spans[col * MaxSpans + sp].Hi;
-                float bare = Math.Clamp((_height[col] - hi - BareFrom) / (BareFull - BareFrom), 0f, 1f);
-                if (sp + 1 < spans && _spans[col * MaxSpans + sp + 1].Lo - hi < ShadeReach) bare = MathF.Max(bare, Shaded);
+                float bare = sp + 1 < spans && _spans[col * MaxSpans + sp + 1].Lo - hi < ShadeReach ? Shaded : 0f;
                 _bare[col * MaxSpans + sp] = bare;
             }
         }
@@ -389,7 +388,11 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             float rate = _faceRate[n]; // how fast the face nears, per block up
             if (rate > 0f) toFace = MathF.Min(toFace, plane / rate);
             if (!alive) continue;
-            float f = plane - (wearAcross + (wearUp - wearAcross) * _faceUpness[n]);
+            // Against a dead heart above, the piece is the top of the land there: its face is the land's surface
+            // lowered (parallel to it in this space, the hearts being placed by depth), so it isn't worn like a
+            // crack, only rounded where it meets the sides, like the terrain top below.
+            bool landTop = rate > 0f && _faceUpness[n] > 0.5f && !_alive[_near[n]];
+            float f = landTop ? plane : plane - (wearAcross + (wearUp - wearAcross) * _faceUpness[n]);
             rates[faces] = rate;
             worn[faces++] = f;
             least = MathF.Min(least, f);
@@ -477,12 +480,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         {
             int h = _first[l] + i + _nx[l] * (j + _ny[l] * k);
             var heart = HeartGrid.At(_seed, l, _cx0[l] + i, _cy0[l] + j, _cz0[l] + k);
-            _hx[h] = heart.X; _hy[h] = heart.Y * HeartGrid.VerticalScale; _hz[h] = heart.Z;
-            // A heart above the terrain there would hold only a sliver of ground under the surface, thick in the
-            // middle and thin at its edges: it gives way, and the hearts below fill out to the surface in its place.
-            _hs[h] = heart.Exists ? _terrain.Height(heart.X, heart.Z) : 0f;
-            _exists[h] = heart.Exists && heart.Y < _hs[h];
-            _alive[h] = heart.Alive && _exists[h]; _drop[h] = heart.Drop;
+            _hx[h] = heart.X; _hy[h] = -heart.Depth * HeartGrid.VerticalScale; _hz[h] = heart.Z;
+            _alive[h] = heart.Alive; _exists[h] = heart.Exists; _drop[h] = heart.Drop; _hs[h] = heart.Surface;
         }
     }
 }
