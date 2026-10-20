@@ -153,15 +153,11 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
     private const int MinSwapFrames = 2, MaxSwapFrames = 240;
 
     // A chunk that's never been shown waits for its light longer: it's hidden (behind the fog) meanwhile, rather than
-    // showing light that's still coming in. The limit is for lighting that never settles there.
+    // showing open-air light. The limit is for lighting that never comes there.
     private const int MaxFirstLightFrames = 1800;
 
     /// <summary>Whether a chunk of a grid is lit (GpuLightSystem.IsLit); without it, everything counts as lit.</summary>
     public Func<GridHandle, ChunkPosition, bool>? IsLit;
-
-    /// <summary>Whether a chunk of a grid is lit and its light done changing (GpuLightSystem.IsSettled), for a chunk
-    /// shown for the first time; without it, <see cref="IsLit"/> is used.</summary>
-    public Func<GridHandle, ChunkPosition, bool>? IsSettled;
 
     /// <summary>Lights a chunk of a grid ahead of the light queues (GpuLightSystem.Hurry), for the nearest chunks held
     /// back for their first light (see <see cref="HurryFirstLight"/>).</summary>
@@ -969,10 +965,12 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
     }
 
     /// <summary>Whether a chunk in the grid shows its light: its bricks, and the air bricks above and below it that its
-    /// top and bottom faces read, are lit (settled, the first time it's shown).</summary>
+    /// top and bottom faces read, are lit.</summary>
     private bool ChunkLit(CoarseChunk c)
     {
-        var lit = c.Baked ? IsLit : IsSettled ?? IsLit;
+        // Shown for the first time once lit too, not once its light is done changing (three bounce updates, far ones
+        // eight frames apart): it comes in behind the fog, where the rest of its light settling barely shows.
+        var lit = IsLit;
         if (lit == null) return true;
         _steps.Lap(SwapStep);
         bool result = Budgeted(lit, Grid, c.Pos) && Budgeted(lit, Grid, Above(c.Pos, 1)) && Budgeted(lit, Grid, Above(c.Pos, -1));

@@ -854,25 +854,17 @@ public sealed partial class GpuLightSystem
     /// <summary>
     /// Whether chunk <paramref name="pos"/> of grid <paramref name="g"/> is lit: none of its bricks waits for direct
     /// light, and with bounce on each has had a bounce update since it was last touched (that update blends in half the
-    /// change; later ones refine it). For holding a terrain swap until what comes in shows its light (LodTerrainSystem).
+    /// change; later ones refine it). For holding terrain back until it shows its light (LodTerrainSystem).
     /// Bricks given storage since the last lighting frame aren't marked yet: ask a frame after a change.
     /// </summary>
-    public bool IsLit(GridHandle g, ChunkPosition pos) => IsLit(g, pos, settled: false);
-
-    /// <summary>Like <see cref="IsLit"/>, but with bounce on each brick has had every update its last change asked for,
-    /// so its light won't visibly change any more (until something near it does). For showing terrain for the first
-    /// time (LodTerrainSystem): slower to reach than <see cref="IsLit"/>.</summary>
-    public bool IsSettled(GridHandle g, ChunkPosition pos) => IsLit(g, pos, settled: true);
-
-    private bool IsLit(GridHandle g, ChunkPosition pos, bool settled)
+    public bool IsLit(GridHandle g, ChunkPosition pos)
     {
         if (!g.Chunks.TryGetValue(pos, out var rec) || rec.BrickSlots is not { } slots) return true;
         foreach (int slot in slots)
         {
             if (slot < 0) continue;
             if (slot >= _dirty.Length || _dirty[slot]) return false;
-            if (_bounceEnabled && (_lastUpdate[slot] == NeverUpdated || (settled ? _left[slot] != 0 : _left[slot] == Touched)))
-                return false;
+            if (_bounceEnabled && (_lastUpdate[slot] == NeverUpdated || _left[slot] == Touched)) return false;
         }
         return true;
     }
@@ -883,8 +875,8 @@ public sealed partial class GpuLightSystem
 
     /// <summary>
     /// Lights chunk <paramref name="pos"/> of static grid <paramref name="g"/> ahead of the queues on the next lighting
-    /// frame: its bricks waiting for direct light are relit past the cap, and those owed bounce updates get one, until
-    /// it's settled (see <see cref="IsSettled"/>). For terrain held back for its first light where the fog stops
+    /// frame: its bricks waiting for direct light are relit past the cap, and those owed bounce updates get one (see
+    /// <see cref="IsLit"/>). For terrain held back for its first light where the fog stops
     /// (LodTerrainSystem): the queues go nearest the camera first, and while the view moves nearer work keeps coming.
     /// Ask every frame it's wanted.
     /// </summary>
