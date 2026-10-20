@@ -137,6 +137,7 @@ public sealed class GameView : IDisposable
         FarthestLod = levels[^1];
         if (_lodDistance is { } lodDistance) levels[System.Math.Clamp(_lodLevels, 1, levels.Count) - 1].OuterRadius = lodDistance;
         chunks.Cover = Lod.CoverOf;
+        world.ChunkLoad.HeldBy = Lod.HoldsFullColumn; // full detail leaving stays until the coarse terrain is in over it
         host.AddSystem(new ModelRenderSystem(host.World, renderer, host.Time), SystemStage.RenderWorld);
         host.AddSystem(_clouds, SystemStage.RenderWorld);
         host.AddSystem((IRenderSystem)_particles, SystemStage.RenderWorld);

@@ -262,6 +262,10 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
         return own == 0f && Coarser is { Live: true } coarser ? coarser.CoverOf(x, z) : own;
     }
 
+    /// <summary>Whether full column (x, z), no longer wanted in full detail, stays loaded for now (ChunkLoadSystem.HeldBy):
+    /// until distant terrain has faded in over it, so it doesn't vanish first.</summary>
+    public bool HoldsFullColumn(int x, int z) => Live && Wanted((x >> Level, z >> Level)) && CoverOf(x, z) < 1f;
+
     private float OwnCoverOf(int x, int z)
     {
         if (!Live || !_columns.TryGetValue((x >> Level, z >> Level), out var c) || WaitsForLight(c)) return 0f;
@@ -861,6 +865,8 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
                 column.Settled = ++column.Waiting >= MinSwapFrames && CheckNow(key)
                                  && (column.Waiting > (column.Baked ? MaxSwapFrames : MaxFirstLightFrames)
                                      || ResidentLit(key, column));
+                // One held back for its light swaps in from when it's first shown (the full detail is held till then).
+                if (column.Settled && !column.Baked && column.Drawn && float.IsFinite(column.FadeInAt)) column.FadeInAt = _time;
             }
             // Covered while its full detail is ready: the world's rays then see only full-detail blocks there.
             if (column.Covered != ready) SetCovered(key, column, ready);

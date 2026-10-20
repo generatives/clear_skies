@@ -154,6 +154,13 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
 
 
     private readonly List<ChunkPosition> _toUnload = new();
+    // Chunks no longer wanted but held (see HeldBy), with the frame each was first held; unloaded once let go.
+    private readonly Dictionary<ChunkPosition, int> _held = new();
+    private readonly List<ChunkPosition> _letGo = new();
+    private int _frame;
+
+    /// <summary>A chunk is held at most this many frames (in case what holds it never lets go).</summary>
+    private const int MaxHoldFrames = 600;
 
     /// <summary>Chunks edited elsewhere while their column was loading: what loads is stale, so they load again.</summary>
     private readonly HashSet<ChunkPosition> _stale = new();
@@ -230,6 +237,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
     public void Update(float dt)
     {
         _steps.Start();
+        _frame++;
         if (!_editsRead) ReadEdits();
         TakeEditsElsewhere();
 
@@ -332,13 +340,17 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
         // (An edit that put blocks where there were none counts as a build once its chunk unloads. Until then the chunk
         // is loaded, so the queue doesn't need to know.)
         foreach (var (p, _) in _staticVolume.All)
-            if (!Wanted(p.X, p.Z)) _toUnload.Add(p);
+            if (!Wanted(p.X, p.Z) && !_held.ContainsKey(p)) _toUnload.Add(p);
 
         // Forget the columns no longer wanted: their air is re-learned on return.
         _columnsUnwanted.Clear();
         foreach (var key in _columns.Keys)
             if (!Wanted(key.x, key.z)) _columnsUnwanted.Add(key);
-        foreach (var key in _columnsUnwanted) _columns.Remove(key);
+        foreach (var key in _columnsUnwanted)
+        {
+            _columns.Remove(key);
+            ColumnChanged?.Invoke(key.x, key.z); // no longer ready (see IsColumnReady), though still loaded for now
+        }
         _columnsUnwanted.Clear();
         foreach (var key in _loading.Keys)
             if (!Wanted(key.x, key.z)) _columnsUnwanted.Add(key);
@@ -374,7 +386,17 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
     {
         double start = _steps.SinceLap();
         while (_unloadAt < _toUnload.Count && _steps.SinceLap() - start < budgetMs)
-            Unload(_toUnload[_unloadAt++]); // a no-op if eviction already unloaded it
+        {
+            var p = _toUnload[_unloadAt++];
+            if (HeldBy?.Invoke(p.X, p.Z) == true && _staticVolume.GetEntry(p) != null) { _held.TryAdd(p, _frame); continue; }
+            Unload(p); // a no-op if eviction already unloaded it
+        }
+        if (_held.Count == 0) return;
+        _letGo.Clear();
+        foreach (var (p, since) in _held)
+            if (Wanted(p.X, p.Z) || _staticVolume.GetEntry(p) == null) _letGo.Add(p); // wanted again, or gone already
+            else if (HeldBy?.Invoke(p.X, p.Z) != true || _frame - since > MaxHoldFrames) { Unload(p); _letGo.Add(p); }
+        foreach (var p in _letGo) _held.Remove(p);
     }
 
     /// <summary>Carries on the rebuild's scan of the wanted columns, closest to an interest first, for up to
@@ -498,6 +520,10 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
     /// <summary>When set, the view's terrain loads in full detail only this far (blocks), in whole 2x2 groups of
     /// columns, and <see cref="LodTerrainSystem"/> draws the rest coarse. Null: full detail as far as the view.</summary>
     public float? FullDetailRadius { get; set; }
+
+    /// <summary>Whether a column no longer wanted stays loaded for now (its chunks are unloaded once it says no): while
+    /// distant terrain fades in over it, so the full detail goes as it comes in rather than before.</summary>
+    public Func<int, int, bool>? HeldBy { get; set; }
 
     /// <summary>The lowest streamed chunk layer.</summary>
     public int MinLayer => _minY;
