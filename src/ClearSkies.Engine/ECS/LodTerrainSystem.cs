@@ -49,7 +49,7 @@ public interface IFarTerrain
 /// level is its own grid (scale 2^k); a level's rays see it and the coarser levels, passing through their covered
 /// columns. Above, "full detail" and "full columns" mean the finer level for any level but the first.
 /// </summary>
-public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, IFarTerrain
+public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
 {
     private const int S = ChunkData.Size;
     /// <summary>Which level of detail this is: 1 for half resolution, 2 for a quarter, and so on.</summary>
@@ -213,7 +213,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
                                "Render: light maps", "Render: recording draws",
                                "Swaps: putting columns in the light grid",
                                "Swaps: finer level readiness", "Swaps: edit checks",
-                               "Swaps: lighting checks") { Owner = DebugName };
+                               "Swaps: lighting checks") { Owner = Name };
         _world = world;
         _renderer = renderer;
         _load = load;
@@ -1120,31 +1120,34 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         int Stale(GpuMesh? mesh) => _renderer.LightmapStale(mesh, Grid, stamp) ? (int)mesh!.QuadCount : 0;
     }
 
-    // ── debug UI ─────────────────────────────────────────────────────────────
-    public string DebugName => Level == 1 ? "Distant Terrain" : $"Distant Terrain {Level}";
+    // ── debug UI (in DistantTerrainPanel, one window for every level) ─────────
+    public string Name => Level == 1 ? "Distant Terrain" : $"Distant Terrain (level {Level})";
 
-    public void DrawDebugUi()
+    /// <summary>Remakes every column (a shrink setting changed, see <see cref="Majority"/>, <see cref="Plants"/>).</summary>
+    public void RemakeAll() => Remake();
+
+    /// <summary>This level's settings, counts and step timings.</summary>
+    public void DrawLevelUi()
     {
-        ImGui.Checkbox(Level == 1 ? "Draw distant terrain coarse (LOD)" : $"Draw level {Level} past level {Level - 1}", ref Enabled);
-        if (Finer is { Live: false }) ImGui.TextDisabled($"  (off while level {Level - 1} is)");
-        if (Finer == null) ImGui.SliderFloat("Full detail out to (blocks)", ref FullDetailRadius, 64f, 1024f, "%.0f");
-        ImGui.SliderFloat($"Level {Level} out to (blocks, {Cell}-block cells)", ref OuterRadius, 128f, 4096f, "%.0f");
-        ImGui.SliderFloat("Swap fade (seconds)", ref FadeSeconds, 0f, 2f, "%.2f");
-        if (ImGui.Checkbox("Coarse cells by majority (else any block)", ref Majority)) Remake();
-        if (ImGui.Checkbox("Coarse plants (grass)", ref Plants)) Remake();
-        ImGui.TextDisabled("  majority: 4 of 8 blocks fill a cell (leaves: any), so coarse ground meets full detail flush");
+        if (Finer != null)
+        {
+            ImGui.Checkbox($"Draw level {Level} past level {Level - 1}##lod{Level}", ref Enabled);
+            if (Finer is { Live: false }) ImGui.TextDisabled($"  (off while level {Level - 1} is)");
+        }
+        ImGui.SliderFloat($"Out to (blocks)##lod{Level}", ref OuterRadius, 128f, 4096f, "%.0f");
         int drawnColumns = _columns.Values.Count(c => c.Drawn);
         int chunks = _columns.Values.Sum(c => c.Chunks.Count);
-        ImGui.Text($"Coarse columns: {_columns.Count:N0} loaded ({drawnColumns:N0} drawn), {_inFlight.Count} being made, " +
+        ImGui.Text($"Columns: {_columns.Count:N0} loaded ({drawnColumns:N0} drawn), {_inFlight.Count} being made, " +
                    $"{_queue.Count - _queueHead:N0} queued");
-        ImGui.Text($"Coarse chunks: {chunks:N0} ({_chunksDrawn:N0} drawn this frame), {_quads:N0} quads " +
+        ImGui.Text($"Chunks: {chunks:N0} ({_chunksDrawn:N0} drawn this frame), {_quads:N0} quads " +
                    $"(~{_quads * ChunkQuad.SizeBytes / (1024.0 * 1024.0):F1} MB); made so far: {_built:N0}");
-        ImGui.Text($"Full-detail chunks loaded: {_volume.LoadedCount:N0}");
         if (Grid.Index >= 0)
-            ImGui.Text($"Lit as a grid: {Grid.Chunks.Count:N0} coarse chunks, {Grid.Slots.Count:N0} light bricks " +
+            ImGui.Text($"Lit as a grid: {Grid.Chunks.Count:N0} chunks, {Grid.Slots.Count:N0} light bricks " +
                        $"({(long)Grid.Slots.Count * GridStore.SlotBytes / (1024 * 1024)} MB)");
         else ImGui.TextDisabled("Lit as open air (no light store)");
-        ImGui.Separator();
         _steps.Draw();
     }
+
+    /// <summary>Full-detail chunks loaded (for the panel).</summary>
+    public int FullDetailChunks => _volume.LoadedCount;
 }

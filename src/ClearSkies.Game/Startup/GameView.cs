@@ -132,6 +132,7 @@ public sealed class GameView : IDisposable
             host.AddSystem((ISystem)level, SystemStage.PreRender);
             host.AddSystem((IRenderSystem)level, SystemStage.RenderWorld);
         }
+        host.AddSystem(new DistantTerrainPanel(levels), SystemStage.Frame); // one window for every level
         Lod = levels[0];
         FarthestLod = levels[^1];
         if (_lodDistance is { } lodDistance) levels[System.Math.Clamp(_lodLevels, 1, levels.Count) - 1].OuterRadius = lodDistance;
