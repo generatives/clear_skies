@@ -19,7 +19,7 @@ public static class GenerationChecksum
         ulong hash = 14695981039346656037UL;
         var data = new ChunkData();
         // Around the plains spawn: surface, underground and sky.
-        for (int y = -2; y <= 6; y += 2)
+        for (int y = -2; y <= 16; y += 2)
         for (int x = 351; x <= 352; x++)
         {
             data = new ChunkData();

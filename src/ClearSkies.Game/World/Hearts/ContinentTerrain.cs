@@ -22,8 +22,8 @@ public sealed class ContinentTerrain
     // Surface bands (world Y of a top): hot and sandy low down (the underworld under the plains), sand patches in
     // grass growing sparser up to DryLine; grass giving way to bare rock from RockStart to RockFull, and rock to snow
     // from SnowStart to SnowFull, both in patches.
-    public const float SandLine = -60f, DryLine = 120f;
-    public const float RockStart = 550f, RockFull = 720f, SnowStart = 720f, SnowFull = 950f;
+    public const float SandLine = 240f, DryLine = 420f;
+    public const float RockStart = 850f, RockFull = 1020f, SnowStart = 1020f, SnowFull = 1250f;
 
     private readonly FastNoiseLite _plains;   // broad, gently rolling lowlands
     private readonly FastNoiseLite _hills;    // hills in the foothills
@@ -117,9 +117,9 @@ public sealed class ContinentTerrain
     private const float RangeEdge = 0.3f, HighCore = 0.05f, HighEdge = 1f, RangeWarp = 800f;
     private const float HighRise = 250f, RangeRise = 500f, MinorRise = 320f, KnollRise = 260f, CragShare = 0.25f;
 
-    /// <summary>The plains' average height: a floor of land under the broken-up highlands and ranges, with a sparser
-    /// underworld of smaller pieces below it, down to the cloud sea.</summary>
-    public const float PlainsLevel = 150f;
+    /// <summary>The plains' average height: a floor of land under the broken-up highlands and ranges, with a sparse
+    /// underworld below it, open caves hundreds of blocks high, down to the cloud sea.</summary>
+    public const float PlainsLevel = 450f;
 
     /// <summary>How far the rock layers at column (x, z) are shifted up or down, for <see cref="Block"/>.</summary>
     public float Strata(float x, float z) => 5f * _strata.GetNoise(x, z);

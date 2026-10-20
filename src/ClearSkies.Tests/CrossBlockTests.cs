@@ -130,7 +130,7 @@ public class CrossBlockTests
         var generator = new HeartWorldGenerator(1337);
         int plants = 0;
         // Around the plains spawn (as GenerationChecksum), surface layers.
-        for (int y = 2; y <= 6; y++)
+        for (int y = 11; y <= 16; y++)
         for (int x = 350; x <= 353; x++)
         for (int z = -197; z <= -195; z++)
         {

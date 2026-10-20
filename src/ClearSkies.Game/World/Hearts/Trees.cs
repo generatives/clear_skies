@@ -21,7 +21,7 @@ public static class Trees
     public const int MaxHeight = 11;
 
     // Oaks fade out and pines in over these heights (world Y of the top).
-    private const float PineStart = 380f, PineFull = 520f;
+    private const float PineStart = 680f, PineFull = 820f;
 
     /// <summary>What grows from the open cell above (x, top, z), whose block is <paramref name="ground"/> (from
     /// <see cref="ContinentTerrain.Block"/>): a tree, a cactus or nothing. They grow where <paramref name="woods"/>

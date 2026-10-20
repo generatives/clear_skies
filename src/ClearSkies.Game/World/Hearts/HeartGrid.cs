@@ -39,9 +39,9 @@ public static class HeartGrid
         new(500f, float.MinValue, 0f),
     };
 
-    /// <summary>The top of the underworld: below it, under the plains, pieces are smaller and fewer, so there is room
-    /// to fly among them.</summary>
-    public const float DeepTop = 0f;
+    /// <summary>The top of the underworld: below it, under the plains' top layer of pieces, most are gone, leaving
+    /// caves hundreds of blocks high with the remaining pieces standing and hanging in them.</summary>
+    public const float DeepTop = ContinentTerrain.PlainsLevel - 150f;
 
     /// <summary>How much more a vertical offset counts than a horizontal one when finding a block's nearest heart.</summary>
     public const float VerticalScale = 1.6f;
@@ -64,7 +64,7 @@ public static class HeartGrid
     // Alive by height: FloorChance up to FloorTop, easing over FloorFade to UpperChance (in the middle of a cluster),
     // and thinning further to half of that ThinOver blocks higher. Inside a mountain range, MountainChance instead,
     // so a mountain holds together as one cracked whole.
-    private const float FloorChance = 0.96f, FloorFade = 350f, DeepChance = 0.45f, DeepFade = 80f;
+    private const float FloorChance = 0.96f, FloorFade = 350f, DeepChance = 0.3f, DeepFade = 80f;
     public const float FloorTop = ContinentTerrain.PlainsLevel - 30f;
     private const float UpperChance = 0.45f, ThinOver = 1200f, MountainChance = 0.85f;
 

@@ -91,7 +91,7 @@ public sealed class GameView : IDisposable
         host.AddSystem(Meshes, SystemStage.PreRender);
         host.AddSystem(new BlockModelSystem(host.World, BlockModels), SystemStage.PreRender); // block entities -> RenderedModel
 
-        SkySettings.CloudAltitude = 1250f; // the islands are mostly low: clouds among the hills
+        SkySettings.CloudAltitude = 1550f; // the islands are mostly low: clouds among the hills
         SkySettings.CloudSeaAltitude = HeartGrid.CloudSeaAltitude; // below its lowest islands
         _clouds = new CloudRenderSystem(renderer, new HeartCloudDensity(world.Seed));
         _uiRenderer = new UiRenderSystem(Ui, renderer);
