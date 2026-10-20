@@ -632,10 +632,8 @@ public sealed class IslandWorldGenerator : IWorldGenerator
         }
     }
 
-    /// <summary>How far across, in blocks, a point at scaled height t in point i's piece is from its nearest crack of
-    /// any tilt, less a side crack's wear. (Across, not straight-line: a stacked crack just under the surface is far
-    /// from where it comes out, so it doesn't flatten the land over it. The same wear for every crack, so where the
-    /// piece at the surface changes, which is on a crack, both sides agree.)</summary>
+    /// <summary>How far, in blocks, point i's piece is from its nearest crack of any tilt at scaled height t, less
+    /// the wear.</summary>
     private static float CrackDistance(int i, int sites, Span<float> sxz, Span<float> sx, Span<float> sy, Span<float> sz,
                                        float across, float up, float t)
     {
@@ -645,12 +643,11 @@ public sealed class IslandWorldGenerator : IWorldGenerator
             if (j == i) continue;
             float ax = sx[j] - sx[i], ay = sy[j] - sy[i], az = sz[j] - sz[i];
             float len2 = ax * ax + ay * ay + az * az;
-            float flat = ax * ax + az * az;
-            if (flat <= 0f) continue;
+            float wear = across + (up - across) * (ay * ay / len2);
             float dj = sxz[j] + (t - sy[j]) * (t - sy[j]), di = sxz[i] + (t - sy[i]) * (t - sy[i]);
-            nearest = MathF.Min(nearest, (dj - di) / (2f * MathF.Sqrt(flat)));
+            nearest = MathF.Min(nearest, (dj - di) / (2f * MathF.Sqrt(len2)) - wear);
         }
-        return nearest - across;
+        return nearest;
     }
 
     /// <summary>How far a top is worn down <paramref name="fromCrack"/> blocks from a side crack: a bank, steepening
