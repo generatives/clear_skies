@@ -1442,6 +1442,11 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
         _lightmap.Queue(mesh, grid.Index, chunk);
     }
 
+    /// <summary>Whether <see cref="PrepareLightmap"/> would list <paramref name="mesh"/> for baking (its light map hasn't
+    /// been baked at <paramref name="stamp"/>), for callers that bake to a budget.</summary>
+    public bool LightmapStale(GpuMesh? mesh, GridHandle? grid, int stamp)
+        => mesh?.Light != null && grid != null && grid.Index >= 0 && mesh.BakedStamp != ((long)_lightmapEpoch << 32 | (uint)stamp);
+
     /// <summary>The light stamp <see cref="PrepareLightmap"/> takes for a chunk (see <see cref="GridStore.LightStampOf"/>).</summary>
     public int LightStampOf(GridHandle? grid, ChunkPosition chunk) => grid == null ? 0 : _gridStore?.LightStampOf(grid, chunk) ?? 0;
 

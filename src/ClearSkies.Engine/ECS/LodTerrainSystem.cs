@@ -92,6 +92,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         public ChunkPosition Pos;        // in coarse chunks
         public Mat4 Model;               // coarse cells to world
         public Vector3D<float> Min, Centre;
+        public bool EverBaked;           // its light maps have been baked from the grid (it can be drawn lit from it)
     }
 
     private sealed class CoarseColumn
@@ -104,7 +105,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         public bool ChildEdited; // a full chunk under it was edited while it was hidden
         public readonly List<int> Resident = new(); // the chunk layers it has in the grid (empty: not in it)
         public bool Settled;   // in the grid and lit since it went in: its light maps follow the grid
-        public bool Baked;     // its light maps were baked from a settled grid at least once
+        public bool Baked;     // lit from the grid: it settled there at least once
         public bool Covered;   // its full columns are ready, so the world's rays pass through it (GridStore.SetCovered)
         public bool Leaving;   // its full columns are ready: still drawn until they're lit
         public int Waiting, LeaveWait; // frames spent settling, and leaving
@@ -147,6 +148,11 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     private Vector3D<float> _view;
 
     private readonly record struct Draw(float DistSq, CoarseChunk Chunk, int Grid, bool Bake, float Dissolve);
+
+    // Light map baking a frame for coarse chunks, in quads (nearest first; one that's been drawn before is drawn with its
+    // last light meanwhile, one never baked waits). Columns settling in bulk (loading, flying) bake over a few frames.
+    private const int BakeQuadBudget = 65536;
+    private int _bakedQuads;
     private readonly List<Draw> _draws = new();
     private static readonly Comparison<Draw> NearestFirst = (a, b) => a.DistSq.CompareTo(b.DistSq);
     private int _built, _chunksDrawn;
@@ -155,11 +161,14 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     private int _editScan; // which ready column UpdateDrawn checks for edits this frame
 
     // CPU time of each step, for the debug panel.
-    private const int ApplyStep = 0, DispatchStep = 1, SwapStep = 2, ListStep = 3, LightmapStep = 4, DrawStep = 5, ResidentStep = 6;
+    private const int ApplyStep = 0, DispatchStep = 1, SwapStep = 2, ListStep = 3, LightmapStep = 4, DrawStep = 5, ResidentStep = 6,
+                      ReadyStep = 7, EditStep = 8, LitStep = 9;
     private readonly StepTimer _steps = new("Adding finished columns", "Queueing and dispatching columns",
-                                            "Swaps: readiness, edits, lighting checks", "Render: listing draws",
+                                            "Swaps: the rest", "Render: listing draws",
                                             "Render: light maps", "Render: recording draws",
-                                            "Swaps: putting columns in the light grid") { Owner = "Distant Terrain" };
+                                            "Swaps: putting columns in the light grid",
+                                            "Swaps: full detail readiness", "Swaps: edit checks",
+                                            "Swaps: lighting checks") { Owner = "Distant Terrain" };
 
     public LodTerrainSystem(World world, Renderer renderer, ChunkLoadSystem load, ChunkVolume staticVolume,
                             Func<IWorldGenerator> generatorFactory, IChunkStore store, GridStore? gridStore = null)
@@ -226,6 +235,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         var centre = ((int)MathF.Floor(_view.X / ColumnBlocks), (int)MathF.Floor(_view.Z / ColumnBlocks));
         int outer = (int)MathF.Ceiling(OuterRadius / ColumnBlocks);
         if (centre != _centre || outer != _outerColumns) Rebuild(centre, outer);
+        FreeSome();
         _steps.Lap(DispatchStep);
 
         ApplyResults();
@@ -259,7 +269,13 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     {
         _centre = centre;
         _outerColumns = outer;
-        foreach (var key in _columns.Keys.Where(k => !Wanted(k)).ToList()) Unload(key);
+        // Out of range: not drawn from now on, and freed (out of the grid, meshes released) a few a frame.
+        foreach (var key in _columns.Keys.Where(k => !Wanted(k)).ToList())
+        {
+            _columns.Remove(key, out var gone);
+            if (_toFree.Remove(key, out var older)) Free(key, older);
+            _toFree[key] = gone!;
+        }
 
         _queue.Clear();
         _queueHead = 0;
@@ -532,9 +548,31 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         column.Settled = false;
     }
 
+    private readonly Dictionary<(int x, int z), CoarseColumn> _toFree = new();
+    private const double FreeBudgetMs = 0.5;
+
+    /// <summary>Frees out-of-range columns (see Rebuild) while the budget lasts.</summary>
+    private void FreeSome()
+    {
+        if (_toFree.Count == 0) return;
+        long start = System.Diagnostics.Stopwatch.GetTimestamp();
+        while (_toFree.Count > 0 && System.Diagnostics.Stopwatch.GetElapsedTime(start).TotalMilliseconds < FreeBudgetMs)
+        {
+            var (key, column) = _toFree.First();
+            _toFree.Remove(key);
+            Free(key, column);
+        }
+    }
+
     private void Unload((int x, int z) key)
     {
-        if (!_columns.Remove(key, out var column)) return;
+        // One out of range still to be freed goes first: its chunks in the grid are at the same places.
+        if (_toFree.Remove(key, out var older)) Free(key, older);
+        if (_columns.Remove(key, out var column)) Free(key, column);
+    }
+
+    private void Free((int x, int z) key, CoarseColumn column)
+    {
         Evict(key, column);
         foreach (var c in column.Chunks)
         {
@@ -555,6 +593,8 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     private void UnloadAll()
     {
         foreach (var key in _columns.Keys.ToList()) Unload(key);
+        foreach (var (key, column) in _toFree) Free(key, column);
+        _toFree.Clear();
         _queue.Clear();
         _queueHead = 0;
         _centre = (int.MinValue, int.MinValue);
@@ -585,8 +625,10 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
             if (near) { due = nearIndex >= recheckFrom && nearIndex < recheckTo; nearIndex++; }
             if (near && (due || !column.ReadyKnown || _readyDirty.Contains(key)))
             {
+                _steps.Lap(SwapStep);
                 bool all = true;
                 for (int j = 0; j < 4 && all; j++) all = _load.IsColumnReady(key.x * 2 + (j & 1), key.z * 2 + (j >> 1));
+                _steps.Lap(ReadyStep);
                 column.Ready = all;
                 column.ReadyKnown = true;
             }
@@ -665,6 +707,14 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     // bricks again on each look, and read them all once more when they get to the end, for any that went unlit since.
     private bool ResidentLit((int x, int z) key, CoarseColumn column)
     {
+        _steps.Lap(SwapStep);
+        bool result = ResidentLitUntimed(key, column);
+        _steps.Lap(LitStep);
+        return result;
+    }
+
+    private bool ResidentLitUntimed((int x, int z) key, CoarseColumn column)
+    {
         var lit = column.Baked ? IsLit : IsSettled ?? IsLit; // shown for the first time: once its light is done
         if (lit == null) return true;
         while (column.LitSoFar < column.Resident.Count)
@@ -677,6 +727,14 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     }
 
     private bool ChildrenLit((int x, int z) key, CoarseColumn column)
+    {
+        _steps.Lap(SwapStep);
+        bool result = ChildrenLitUntimed(key, column);
+        _steps.Lap(LitStep);
+        return result;
+    }
+
+    private bool ChildrenLitUntimed((int x, int z) key, CoarseColumn column)
     {
         if (IsLit == null) return true;
         int minY = _load.MinLayer;
@@ -701,6 +759,14 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     }
 
     private bool AnyEdited((int x, int z) key)
+    {
+        _steps.Lap(SwapStep);
+        bool result = AnyEditedUntimed(key);
+        _steps.Lap(EditStep);
+        return result;
+    }
+
+    private bool AnyEditedUntimed((int x, int z) key)
     {
         int minY = _load.MinLayer;
         for (int j = 0; j < 4; j++)
@@ -772,23 +838,23 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
                 _draws.Add(new Draw(Vector3D.DistanceSquared(c.Centre, camera), c, grid, bake, dissolve));
             }
         }
-
+        _draws.Sort(NearestFirst);
         _steps.Lap(ListStep);
 
-        // Light maps whose light changed since they were baked, as ChunkRenderSystem does for full-detail chunks.
-        foreach (var d in _draws)
+        // Light maps whose light changed since they were baked, as ChunkRenderSystem does for full-detail chunks, nearest
+        // first up to the budget; a chunk never baked isn't drawn until it is.
+        _bakedQuads = 0;
+        int kept = 0;
+        for (int i = 0; i < _draws.Count; i++)
         {
-            if (!d.Bake) continue;
-            var pos = d.Chunk.Pos;
-            int stamp = _renderer.LightStampOf(Grid, pos);
-            _renderer.PrepareLightmap(d.Chunk.Opaque, Grid, pos, stamp);
-            _renderer.PrepareLightmap(d.Chunk.Cutout, Grid, pos, stamp);
-            _renderer.PrepareLightmap(d.Chunk.Transparent, Grid, pos, stamp);
+            var d = _draws[i];
+            if (d.Bake && !Bake(d.Chunk)) continue;
+            _draws[kept++] = d;
         }
+        _draws.RemoveRange(kept, _draws.Count - kept);
         _renderer.BakeLightmaps();
         _steps.Lap(LightmapStep);
 
-        _draws.Sort(NearestFirst);
         _chunksDrawn = _draws.Count;
         foreach (var d in _draws)
             if (d.Chunk.Opaque != null) _renderer.DrawChunkMesh(d.Chunk.Opaque, d.Chunk.Model, d.Grid, d.Chunk.Pos, d.Dissolve);
@@ -797,6 +863,24 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         foreach (var d in _draws)
             if (d.Chunk.Cutout != null) _renderer.DrawCutoutChunkMesh(d.Chunk.Cutout, d.Chunk.Model, d.Grid, d.Chunk.Pos, d.Dissolve);
         _steps.Lap(DrawStep);
+    }
+
+    /// <summary>Lists a chunk's stale light maps for baking if the frame's budget has room (always the first). Returns
+    /// whether it can be drawn: its maps are baked, or were once.</summary>
+    private bool Bake(CoarseChunk c)
+    {
+        int stamp = _renderer.LightStampOf(Grid, c.Pos);
+        int quads = Stale(c.Opaque) + Stale(c.Cutout) + Stale(c.Transparent);
+        if (quads == 0) return true;
+        if (_bakedQuads > 0 && _bakedQuads + quads > BakeQuadBudget) return c.EverBaked;
+        _bakedQuads += quads;
+        _renderer.PrepareLightmap(c.Opaque, Grid, c.Pos, stamp);
+        _renderer.PrepareLightmap(c.Cutout, Grid, c.Pos, stamp);
+        _renderer.PrepareLightmap(c.Transparent, Grid, c.Pos, stamp);
+        c.EverBaked = true;
+        return true;
+
+        int Stale(GpuMesh? mesh) => _renderer.LightmapStale(mesh, Grid, stamp) ? (int)mesh!.QuadCount : 0;
     }
 
     // ── debug UI ─────────────────────────────────────────────────────────────
