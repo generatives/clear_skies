@@ -112,6 +112,7 @@ public sealed class GameView : IDisposable
                                    world.ChunkStore, GridStore) { Enabled = _lod };
         light.AddStaticGrid(Lod.Grid); // lit like the world
         Lod.IsLit = light.IsLit;       // swaps wait for the incoming terrain's light
+        Lod.IsSettled = light.IsSettled; // and terrain shown for the first time for its light to be done
         if (_lodDistance is { } lodDistance) Lod.OuterRadius = lodDistance;
         chunks.Cover = Lod.CoverOf;
         host.AddSystem((ISystem)Lod, SystemStage.PreRender);

@@ -115,8 +115,16 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     // marked for lighting the frame after it's made, and at most the other, in case lighting never settles there.
     private const int MinSwapFrames = 2, MaxSwapFrames = 240;
 
+    // A column that's never been shown waits for its light longer: it's hidden (behind the fog) meanwhile, rather than
+    // showing light that's still coming in. The limit is for lighting that never settles there.
+    private const int MaxFirstLightFrames = 1800;
+
     /// <summary>Whether a chunk of a grid is lit (GpuLightSystem.IsLit); without it, everything counts as lit.</summary>
     public Func<GridHandle, ChunkPosition, bool>? IsLit;
+
+    /// <summary>Whether a chunk of a grid is lit and its light done changing (GpuLightSystem.IsSettled), for a column
+    /// shown for the first time; without it, <see cref="IsLit"/> is used.</summary>
+    public Func<GridHandle, ChunkPosition, bool>? IsSettled;
 
     // Shared occupancy for the coarse chunks that are all one thing, and for the air right above and below a column's
     // chunks (so the faces there have air with light in it).
@@ -581,7 +589,8 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
             }
             else if (!column.Settled)
                 column.Settled = ++column.Waiting >= MinSwapFrames && CheckNow(key)
-                                 && (column.Waiting > MaxSwapFrames || ResidentLit(key, column));
+                                 && (column.Waiting > (column.Baked ? MaxSwapFrames : MaxFirstLightFrames)
+                                     || ResidentLit(key, column));
             // Covered while its full detail is ready: the world's rays then see only full-detail blocks there.
             if (column.Covered != ready) SetCovered(key, column, ready);
 
@@ -623,12 +632,13 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     // bricks again on each look, and read them all once more when they get to the end, for any that went unlit since.
     private bool ResidentLit((int x, int z) key, CoarseColumn column)
     {
-        if (IsLit == null) return true;
+        var lit = column.Baked ? IsLit : IsSettled ?? IsLit; // shown for the first time: once its light is done
+        if (lit == null) return true;
         while (column.LitSoFar < column.Resident.Count)
         {
             for (; column.LitSoFar < column.Resident.Count; column.LitSoFar++)
-                if (!IsLit(Grid, new ChunkPosition(key.x, column.Resident[column.LitSoFar], key.z))) return false;
-            column.LitSoFar = FirstUnlit(column.Resident.Count, i => new ChunkPosition(key.x, column.Resident[i], key.z), Grid);
+                if (!lit(Grid, new ChunkPosition(key.x, column.Resident[column.LitSoFar], key.z))) return false;
+            column.LitSoFar = FirstUnlit(lit, column.Resident.Count, i => new ChunkPosition(key.x, column.Resident[i], key.z), Grid);
         }
         return true;
     }
@@ -642,17 +652,18 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         {
             for (; column.ChildrenLitSoFar < 4 * 64; column.ChildrenLitSoFar++)
                 if (!IsLit(_volume.Gpu, At(column.ChildrenLitSoFar))) return false;
-            column.ChildrenLitSoFar = FirstUnlit(4 * 64, At, _volume.Gpu);
+            column.ChildrenLitSoFar = FirstUnlit(IsLit, 4 * 64, At, _volume.Gpu);
         }
         return true;
     }
 
     /// <summary>The first of <paramref name="count"/> chunks not lit, or <paramref name="count"/> past the end if all
     /// are.</summary>
-    private int FirstUnlit(int count, Func<int, ChunkPosition> at, GridHandle grid)
+    private static int FirstUnlit(Func<GridHandle, ChunkPosition, bool> lit, int count, Func<int, ChunkPosition> at,
+                                  GridHandle grid)
     {
         for (int i = 0; i < count; i++)
-            if (!IsLit!(grid, at(i))) return i;
+            if (!lit(grid, at(i))) return i;
         return int.MaxValue;
     }
 
