@@ -331,9 +331,13 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
     private void Rebuild()
     {
         Rebuilds++;
-        // Whatever the last rebuild didn't get to unload goes now: a chunk that stays loaded out of view could share a
-        // cell of the GPU store's world index with one coming into view on the other side (see LightBudget.WorldIndexDim).
-        UnloadSome(double.PositiveInfinity);
+        // Whatever the last rebuild didn't get to unload goes now if it could matter: a chunk that stays loaded out of
+        // view could share a cell of the GPU store's world index with one coming into view on the other side (see
+        // LightBudget.WorldIndexDim). The index is sized for the view distance, so while the rings load much less than
+        // that (full detail only near, see FullDetailRadius) it can't, and the rest goes on under the frame's budget:
+        // unloading it all here made a long frame at every column crossed.
+        int indexDim = LightBudget.WorldIndexDim(_viewDistance);
+        if (_rings.Any(r => 2 * (r.LoadColumns + 4) + 3 >= indexDim)) UnloadSome(double.PositiveInfinity);
 
         _toUnload.Clear();
         _unloadAt = 0;
