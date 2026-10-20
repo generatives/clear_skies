@@ -85,6 +85,7 @@ public class TreeTests
     [InlineData(Trees.Kind.Oak)]
     [InlineData(Trees.Kind.Pine)]
     [InlineData(Trees.Kind.Cactus)]
+    [InlineData(Trees.Kind.Birch)]
     public void A_grown_tree_stands_on_its_top_within_its_reach(Trees.Kind kind)
     {
         for (ulong h = 0; h < 50; h++)
@@ -92,7 +93,7 @@ public class TreeTests
             var data = new ChunkData();
             const int x = 16, z = 16, top = 0;
             Trees.Grow(data, originY: 0, kind, x, top, z, h * 0x9E3779B97F4A7C15UL);
-            var stem = kind == Trees.Kind.Cactus ? BlockId.Cactus : BlockId.Log;
+            var stem = kind switch { Trees.Kind.Cactus => BlockId.Cactus, Trees.Kind.Birch => BlockId.BirchLog, _ => BlockId.Log };
             Assert.Equal(stem, data.Get(x, top + 1, z));
             for (int ly = 0; ly < ChunkData.Size; ly++)
             for (int lz = 0; lz < ChunkData.Size; lz++)

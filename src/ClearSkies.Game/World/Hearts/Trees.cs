@@ -66,14 +66,12 @@ public static class Trees
         switch (kind)
         {
             case Kind.Oak:
-            case Kind.Birch:
             {
-                // A trunk 4-6 tall (a birch's 5-7); two wide layers of leaves round its top, then two narrow, the top
-                // one a plus. Some corners are left off.
-                bool birch = kind == Kind.Birch;
-                int height = (birch ? 5 : 4) + (int)((h >> 48) % 3);
+                // A trunk 4-6 tall; two wide layers of leaves round its top, then two narrow, the top one a plus. Some
+                // corners are left off.
+                int height = 4 + (int)((h >> 48) % 3);
                 int crown = y0 + height - 1;
-                for (int y = y0; y <= crown; y++) Set(data, originY, x, y, z, birch ? BlockId.BirchLog : BlockId.Log);
+                for (int y = y0; y <= crown; y++) Set(data, originY, x, y, z, BlockId.Log);
                 int bit = 0;
                 for (int y = crown - 2; y <= crown + 1; y++)
                 {
@@ -83,9 +81,36 @@ public static class Trees
                     {
                         bool corner = Math.Abs(dx) == reach && Math.Abs(dz) == reach;
                         if (corner && (y > crown || Bit(h, bit++))) continue;
-                        Set(data, originY, x + dx, y, z + dz, birch ? BlockId.AutumnLeaves : BlockId.Leaves);
+                        Set(data, originY, x + dx, y, z + dz, BlockId.Leaves);
                     }
                 }
+                break;
+            }
+            case Kind.Birch:
+            {
+                // Tall and slender: a bare trunk 7-9 tall, then a narrow column of leaves up its top half, a plus
+                // round the trunk with a clump bulging out to one side here and there, ending in a point.
+                int height = 7 + (int)((h >> 48) % 3);
+                int crown = y0 + height - 1;
+                for (int y = y0; y <= crown; y++) Set(data, originY, x, y, z, BlockId.BirchLog);
+                int bit = 0;
+                for (int y = crown - height / 2; y <= crown + 1; y++)
+                {
+                    for (int d = 0; d < 4; d++)
+                    {
+                        int dx = d == 0 ? 1 : d == 1 ? -1 : 0, dz = d == 2 ? 1 : d == 3 ? -1 : 0;
+                        if (y <= crown) Set(data, originY, x + dx, y, z + dz, BlockId.AutumnLeaves);
+                        // A clump: the plus's arm reaching a block further, with its corners filled.
+                        if (y < crown && Bit(h, bit++) && Bit(h, bit++))
+                        {
+                            Set(data, originY, x + 2 * dx, y, z + 2 * dz, BlockId.AutumnLeaves);
+                            Set(data, originY, x + dx + dz, y, z + dz + dx, BlockId.AutumnLeaves);
+                            Set(data, originY, x + dx - dz, y, z + dz - dx, BlockId.AutumnLeaves);
+                        }
+                    }
+                }
+                Set(data, originY, x, crown + 1, z, BlockId.AutumnLeaves);
+                Set(data, originY, x, crown + 2, z, BlockId.AutumnLeaves);
                 break;
             }
             case Kind.Pine:

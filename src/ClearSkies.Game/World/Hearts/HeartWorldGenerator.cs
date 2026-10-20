@@ -51,6 +51,10 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     // A top is bare (see ContinentTerrain.Block) to Shaded if land lies over it within ShadeReach blocks.
     private const float Shaded = 0.75f, ShadeReach = 250f;
 
+    /// <summary>How far off a column's climate may be read, in blocks: the width of the mixed fringe between
+    /// biomes.</summary>
+    private const float BiomeBlend = 24f;
+
     /// <summary>How far above <see cref="HeartGrid.LowestBottom"/> the world's rough bottom reaches.</summary>
     private const float BottomRoughness = 30f;
 
@@ -250,11 +254,12 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             _flora[col] = _terrain.Flora(wx, wz);
             _woods[col] = _terrain.Woods(wx, wz);
             _kind[col] = _terrain.Kind(wx, wz);
-            // The climate, roughened a little so biomes meet in a ragged, mixed fringe rather than a line: by the
-            // patch and plant fields (tens of blocks across) and a little by the column itself.
+            // The climate, read up to BiomeBlend blocks off (by the column, wobbled by the patch field) so biomes
+            // meet in a ragged, mixed fringe a few dozen blocks wide rather than a line.
             uint ch = (uint)(int)wx * 0x9E3779B1u ^ (uint)(int)wz * 0x85EBCA77u; ch ^= ch >> 15; ch *= 0xC2B2AE3Du; ch ^= ch >> 13;
-            float heat = _terrain.Heat(wx, wz) + 0.35f * (_patch[col] - 0.5f) + 0.15f * ((ch & 0xFFFF) / 65536f - 0.5f);
-            float wet = _terrain.Wet(wx, wz) + 0.3f * (_flora[col] - 0.5f) + 0.15f * ((ch >> 16) / 65536f - 0.5f);
+            float cx = wx + BiomeBlend * ((ch & 0xFFFF) / 65536f - 0.5f + _patch[col] - 0.5f);
+            float cz = wz + BiomeBlend * ((ch >> 16) / 65536f - 0.5f + _flora[col] - 0.5f);
+            float heat = _terrain.Heat(cx, cz), wet = _terrain.Wet(cx, cz);
             for (int sp = 0; sp < spans; sp++)
             {
                 int hi = _spans[col * MaxSpans + sp].Hi;
