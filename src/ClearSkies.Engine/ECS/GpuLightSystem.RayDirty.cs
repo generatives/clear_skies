@@ -107,7 +107,9 @@ public sealed partial class GpuLightSystem
     private readonly List<(Vector3D<float> min, Vector3D<float> max)> _bounceClears = new();
     private readonly List<int> _clearSlots = new();
     private GpuBuffer? _clearWork;
-    private readonly List<(Vector3D<float> min, Vector3D<float> max, int seenUpTo)> _occluderChanges = new();
+    // Each with the scale of the coarsest grid whose rays see it, and whether what it marks is relit this frame (see
+    // BuildLightWork) or queued nearest first under the cap.
+    private readonly List<(Vector3D<float> min, Vector3D<float> max, int seenUpTo, bool urgent)> _occluderChanges = new();
     private int _seenUpTo = int.MaxValue; // marking for a static grid's change: only grids up to this scale see it
     private readonly List<(Vector3D<float> min, Vector3D<float> max)> _directChanges = new();
     // This frame's lamp boxes relit (lamp changes, and lamps in reach of an occluder change): with AO only, their
@@ -203,24 +205,18 @@ public sealed partial class GpuLightSystem
         }
         else
         {
-            // One set of marks at a time (see BrickMarks): everything an occluder change touches (right at it,
+            // One set of marks at a time (see BrickMarks): everything an urgent occluder change touches (right at it,
             // voxels whose sun ray passes through it, the radius of lamps whose rays may), relit this frame; then the
-            // lamp changes, queued.
-            var pad = new Vector3D<float>(1.5f);
-            foreach (var (mn, mx, seenUpTo) in _occluderChanges)
-            {
-                // A static grid's change isn't seen by coarser grids' rays (see AppendChunkList).
-                _seenUpTo = seenUpTo;
-                MarkRegion(mn - pad, mx + pad, _urgentMarks);
-                MarkSunShadow(mn, mx, sunDir, _urgentMarks);
-                _seenUpTo = int.MaxValue;
-                foreach (var lamp in _lamps) { var (a, b) = LampBox(lamp); if (Overlaps(a, b, mn, mx)) MarkLampBox(a, b); }
-                foreach (var lamp in _prevLamps) { var (a, b) = LampBox(lamp); if (Overlaps(a, b, mn, mx)) MarkLampBox(a, b); }
-            }
+            // other changes and the lamp changes, queued.
+            MarkOccluderChanges(sunDir, urgent: true, _urgentMarks);
+            MarkLampsAt(urgent: true);
             if (!_urgentMarks.IsEmpty) _urgentMarks.Flush(_urgentSlotDelegate ??= MarkUrgent);
+            MarkOccluderChanges(sunDir, urgent: false, _marks);
             foreach (var (mn, mx) in _directChanges) MarkRegion(mn, mx);
             _lampRelit.AddRange(_directChanges);
             if (!_marks.IsEmpty) _marks.Flush(_markSlot);
+            MarkLampsAt(urgent: false); // lamps whose light a change may block are relit now either way
+            if (!_urgentMarks.IsEmpty) _urgentMarks.Flush(_urgentSlotDelegate ??= MarkUrgent);
         }
         _phaseTimer.Lap(2);
 
@@ -382,11 +378,14 @@ public sealed partial class GpuLightSystem
             _dbgChangedChunks++;
             // A block edit (bounds smaller than the chunk; a load or unload is the whole chunk): see TouchEdits. Only the
             // world is edited; distant terrain is uploaded whole.
-            if (vmx.X - vmn.X < S || vmx.Y - vmn.Y < S || vmx.Z - vmn.Z < S) _editBoxes.Add((vmn, vmx));
+            bool edit = vmx.X - vmn.X < S || vmx.Y - vmn.Y < S || vmx.Z - vmn.Z < S;
+            if (edit) _editBoxes.Add((vmn, vmx));
             var mn = vmn * (float)grid.Scale; // world space
             var mx = vmx * (float)grid.Scale;
             // Seen by the rays of its own grid and finer ones (see AppendChunkList); covering, by the finer ones only.
-            if (solid && !relightAll) _occluderChanges.Add((mn, mx, cover ? grid.Scale / 2 : grid.Scale));
+            // An edit shows at once; terrain loading, unloading or swapping level (a whole chunk, many at once as the
+            // view moves on) goes in the queue: relit all in one frame, the sun pass took tens of ms each column crossed.
+            if (solid && !relightAll) _occluderChanges.Add((mn, mx, cover ? grid.Scale / 2 : grid.Scale, edit));
             if (solid) _shapeChanges.Add((mn, mx));
         }
         _store.ChangedChunks.Clear();
@@ -411,8 +410,8 @@ public sealed partial class GpuLightSystem
                 st.LightAll = true;
                 // Like a placed block, the ship may now shade what it didn't: the bricks around both poses and along
                 // both sun shadows are relit this frame, and everything within bounce reach of the hull is touched.
-                if (st.HavePrev) { _occluderChanges.Add((st.PrevWorldMin, st.PrevWorldMax, int.MaxValue)); _shipMoves.Add((st.PrevWorldMin, st.PrevWorldMax)); }
-                if (h.HasSolid) { _occluderChanges.Add((st.CurWorldMin, st.CurWorldMax, int.MaxValue)); _shipMoves.Add((st.CurWorldMin, st.CurWorldMax)); }
+                if (st.HavePrev) { _occluderChanges.Add((st.PrevWorldMin, st.PrevWorldMax, int.MaxValue, true)); _shipMoves.Add((st.PrevWorldMin, st.PrevWorldMax)); }
+                if (h.HasSolid) { _occluderChanges.Add((st.CurWorldMin, st.CurWorldMax, int.MaxValue, true)); _shipMoves.Add((st.CurWorldMin, st.CurWorldMax)); }
             }
             st.HavePrev     = h.HasSolid;
             st.PrevVersion  = h.Version;
@@ -549,6 +548,33 @@ public sealed partial class GpuLightSystem
     }
 
     // ── Marking ────────────────────────────────────────────────────────────────
+
+    /// <summary>Marks what this frame's urgent (or other) occluder changes touch (at them, and in their sun shadow) into
+    /// <paramref name="marks"/>.</summary>
+    private void MarkOccluderChanges(Vector3D<float> sunDir, bool urgent, BrickMarks marks)
+    {
+        var pad = new Vector3D<float>(1.5f);
+        foreach (var (mn, mx, seenUpTo, isUrgent) in _occluderChanges)
+        {
+            if (isUrgent != urgent) continue;
+            // A static grid's change isn't seen by coarser grids' rays (see AppendChunkList).
+            _seenUpTo = seenUpTo;
+            MarkRegion(mn - pad, mx + pad, marks);
+            MarkSunShadow(mn, mx, sunDir, marks);
+            _seenUpTo = int.MaxValue;
+        }
+    }
+
+    /// <summary>Marks the lamps whose reach this frame's urgent (or other) occluder changes overlap (urgent marks).</summary>
+    private void MarkLampsAt(bool urgent)
+    {
+        foreach (var (mn, mx, _, isUrgent) in _occluderChanges)
+        {
+            if (isUrgent != urgent) continue;
+            foreach (var lamp in _lamps) { var (a, b) = LampBox(lamp); if (Overlaps(a, b, mn, mx)) MarkLampBox(a, b); }
+            foreach (var lamp in _prevLamps) { var (a, b) = LampBox(lamp); if (Overlaps(a, b, mn, mx)) MarkLampBox(a, b); }
+        }
+    }
 
     /// <summary>Marks every surface brick overlapping the world-space box: per brick in the static world, the
     /// whole grid for a ship whose solid bounds it touches. World bricks go into <paramref name="marks"/> (default
