@@ -103,7 +103,9 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         public bool Drawn;       // this frame: not all four full columns are ready
         public bool Ready, ReadyKnown; // whether all four are ready, as last found (see _readyDirty)
         public bool ChildEdited; // a full chunk under it was edited while it was hidden
-        public readonly List<int> Resident = new(); // the chunk layers it has in the grid (empty: not in it)
+        public readonly List<int> Resident = new(); // the chunk layers it has in the grid so far
+        public List<int>? ToPut;                    // the layers still to put in the grid (null: not started)
+        public bool InGrid => ToPut is { Count: 0 };
         public bool Settled;   // in the grid and lit since it went in: its light maps follow the grid
         public bool Baked;     // lit from the grid: it settled there at least once
         public bool Covered;   // its full columns are ready, so the world's rays pass through it (GridStore.SetCovered)
@@ -202,6 +204,9 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
 
     private readonly HashSet<(int x, int z)> _readyDirty = new();
     private int _recheck; // where the round of near columns looked at anyway is up to
+    private readonly HashSet<(int x, int z)> _editChecks = new();
+    private readonly Queue<(int x, int z)> _editCheckOrder = new();
+    private const int EditChecksPerFrame = 2;
     private const int RecheckPerFrame = 16;
 
     public bool Active => Enabled;
@@ -523,20 +528,29 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
 
     /// <summary>Puts a column's chunks in <see cref="Grid"/>, with the air right above and below each run of them, for
     /// the lighting to light.</summary>
-    private void MakeResident((int x, int z) key, CoarseColumn column)
+    /// <summary>Puts more of a column's chunks in the grid, until <paramref name="until"/> (a timestamp): each writes
+    /// its occupancy and surface bricks, which for a tall column adds up to more than a frame should spend.</summary>
+    private void MakeResident((int x, int z) key, CoarseColumn column, long until)
     {
-        if (_gridStore == null || Grid.Index < 0 || column.Chunks.Count == 0 || _gridFull) return;
-        _layers.Clear();
-        foreach (var c in column.Chunks) { _layers.Add(c.Y - 1); _layers.Add(c.Y); _layers.Add(c.Y + 1); }
-        if (!_gridStore.CanHold(Grid, _layers.Count)) { _gridFull = true; return; } // drawn as open air until one goes
-        foreach (int y in _layers)
+        if (_gridStore == null || Grid.Index < 0 || column.Chunks.Count == 0) return;
+        if (column.ToPut == null)
         {
+            if (_gridFull) return;
+            _layers.Clear();
+            foreach (var c in column.Chunks) { _layers.Add(c.Y - 1); _layers.Add(c.Y); _layers.Add(c.Y + 1); }
+            if (!_gridStore.CanHold(Grid, _layers.Count)) { _gridFull = true; return; } // drawn as open air until one goes
+            column.ToPut = new List<int>(_layers);
+        }
+        while (column.ToPut.Count > 0 && System.Diagnostics.Stopwatch.GetTimestamp() < until)
+        {
+            int y = column.ToPut[^1];
+            column.ToPut.RemoveAt(column.ToPut.Count - 1);
             var occupancy = AllAir;
             foreach (var c in column.Chunks) if (c.Y == y) { occupancy = c.Occupancy ?? AllAir; break; }
             _gridStore.UploadPacked(Grid, new ChunkPosition(key.x, y, key.z), occupancy);
             column.Resident.Add(y);
+            column.Covered = false; // fresh records aren't: set again for all of them below if it should be
         }
-        column.Covered = false; // fresh records aren't
     }
 
     /// <summary>Takes a column's chunks out of <see cref="Grid"/> (it's unloaded).</summary>
@@ -546,6 +560,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         foreach (int y in column.Resident) _gridStore.RemoveChunk(Grid, new ChunkPosition(key.x, y, key.z));
         if (column.Resident.Count > 0) _gridFull = false;
         column.Resident.Clear();
+        column.ToPut = null;
         column.Settled = false;
     }
 
@@ -617,6 +632,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         // looked at anyway, round them in turn, in case a change came without a mark.
         int nearIndex = 0, recheckFrom = _recheck, recheckTo = _recheck + RecheckPerFrame;
         double residentMs = 0; // spent putting columns in the grid this frame (not the rest of this loop)
+        _litChecksLeft = LitChecksPerFrame;
         foreach (var (key, column) in _columns)
         {
             bool near = Sq(key.x - _centre.x) + Sq(key.z - _centre.z) <= nearSq;
@@ -638,22 +654,23 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
             {
                 if (readyIndex++ == scan && !column.ChildEdited) column.ChildEdited = AnyEdited(key);
             }
-            else if (!column.Drawn && !_inFlight.Contains(key) && (column.ChildEdited || (column.Covered && AnyEdited(key))))
+            else if (!column.Drawn && !_inFlight.Contains(key) && column.ChildEdited)
             {
                 column.ChildEdited = false;
                 _queue.Insert(_queueHead, key); // drawn as it was until it's made again
             }
+            else if (!column.Drawn && column.Covered && _editChecks.Add(key)) _editCheckOrder.Enqueue(key); // see below
             // In the grid while it's loaded, so it's lit and ready whenever full detail goes; until it's lit, a drawn
             // column keeps the light maps it baked before, or is lit as open air if it never had any.
-            if (column.Resident.Count == 0)
+            if (!column.InGrid)
             {
                 // Putting a column in the grid writes each chunk's occupancy and its surface bricks: as many a frame as
-                // fit the budget, the rest on later frames (lit as open air meanwhile).
+                // fit the budget, the rest on later frames (held back, or lit as before, meanwhile).
                 if (residentMs < ResidentBudgetMs)
                 {
                     long start = System.Diagnostics.Stopwatch.GetTimestamp();
                     _steps.Lap(SwapStep);
-                    MakeResident(key, column);
+                    MakeResident(key, column, start + (long)((ResidentBudgetMs - residentMs) * System.Diagnostics.Stopwatch.Frequency / 1000));
                     _steps.Lap(ResidentStep);
                     residentMs += System.Diagnostics.Stopwatch.GetElapsedTime(start).TotalMilliseconds;
                 }
@@ -692,6 +709,14 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         }
         _editScan = readyIndex == 0 ? 0 : (scan + 1) % readyIndex;
         _readyDirty.Clear();
+
+        // Columns coming back into view are checked for edits under them a few a frame (256 chunks each): many come
+        // back at once when the view moves on. Each is drawn as it was meanwhile, and made again if edited.
+        for (int n = 0; n < EditChecksPerFrame && _editCheckOrder.TryDequeue(out var k); n++)
+        {
+            _editChecks.Remove(k);
+            if (_columns.ContainsKey(k) && !_inFlight.Contains(k) && AnyEdited(k)) _queue.Insert(_queueHead, k);
+        }
         _recheck = recheckTo < nearIndex ? recheckTo : 0;
     }
 
@@ -724,7 +749,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         while (column.LitSoFar < column.Resident.Count)
         {
             for (; column.LitSoFar < column.Resident.Count; column.LitSoFar++)
-                if (!lit(Grid, new ChunkPosition(key.x, column.Resident[column.LitSoFar], key.z))) return false;
+                if (!Budgeted(lit, Grid, new ChunkPosition(key.x, column.Resident[column.LitSoFar], key.z))) return false;
             column.LitSoFar = FirstUnlit(lit, column.Resident.Count, i => new ChunkPosition(key.x, column.Resident[i], key.z), Grid);
         }
         return true;
@@ -746,19 +771,26 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         while (column.ChildrenLitSoFar < 4 * 64)
         {
             for (; column.ChildrenLitSoFar < 4 * 64; column.ChildrenLitSoFar++)
-                if (!IsLit(_volume.Gpu, At(column.ChildrenLitSoFar))) return false;
+                if (!Budgeted(IsLit, _volume.Gpu, At(column.ChildrenLitSoFar))) return false;
             column.ChildrenLitSoFar = FirstUnlit(IsLit, 4 * 64, At, _volume.Gpu);
         }
         return true;
     }
 
+    /// <summary>A chunk's light check, while the frame's budget of them lasts (each reads up to 64 bricks); past it
+    /// every chunk counts as not lit yet, to be looked at again from there on a later frame.</summary>
+    private bool Budgeted(Func<GridHandle, ChunkPosition, bool> lit, GridHandle grid, ChunkPosition pos)
+        => _litChecksLeft-- > 0 && lit(grid, pos);
+    private int _litChecksLeft;
+    private const int LitChecksPerFrame = 2048;
+
     /// <summary>The first of <paramref name="count"/> chunks not lit, or <paramref name="count"/> past the end if all
     /// are.</summary>
-    private static int FirstUnlit(Func<GridHandle, ChunkPosition, bool> lit, int count, Func<int, ChunkPosition> at,
-                                  GridHandle grid)
+    private int FirstUnlit(Func<GridHandle, ChunkPosition, bool> lit, int count, Func<int, ChunkPosition> at,
+                           GridHandle grid)
     {
         for (int i = 0; i < count; i++)
-            if (!lit(grid, at(i))) return i;
+            if (!Budgeted(lit, grid, at(i))) return i;
         return int.MaxValue;
     }
 
