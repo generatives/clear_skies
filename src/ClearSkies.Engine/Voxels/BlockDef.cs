@@ -70,6 +70,10 @@ public readonly struct BlockDef
     /// twisting and shifting each on its own as grass does. The whole plant is still turned, nudged and sized.
     public bool            RigidCross     { get; init; }
 
+    /// Which of the block's faces take the world's <see cref="Rendering.ClimateTint"/>: none, the top only (grass,
+    /// whose sides are mostly dirt) or all (leaves, plants).
+    public BlockTint       Tint           { get; init; }
+
     /// True when this block's appearance actually depends on its stored orientation (i.e. it has a
     /// Top and/or Bottom texture distinct from Texture) — lets GreedyMesher skip the per-voxel
     /// orientation lookup entirely for blocks that look the same on every face regardless of orientation.
@@ -193,3 +197,6 @@ public enum RenderLayer : byte
     /// <see cref="BlockDef.Alpha"/>; only the nearest translucent face shows at each pixel. For water.</summary>
     Translucent,
 }
+
+/// <summary>Which faces of a block take the world's <see cref="Rendering.ClimateTint"/>.</summary>
+public enum BlockTint : byte { None, Top, All }

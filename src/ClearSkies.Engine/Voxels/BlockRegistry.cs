@@ -12,7 +12,7 @@ public static class BlockRegistry
     {
         Register(new BlockDef { Id = BlockId.Air,   Name = "Air",   Color = default,                   IsSolid = false, PlaceOriented = false, LightEmission = 0,  Weight = 0 });
         Register(new BlockDef { Id = BlockId.Grass, Name = "Grass", Color = new(0.35f, 0.75f, 0.25f), IsSolid = true, PlaceOriented = false,  LightEmission = 0, Weight = 2,
-            Texture = "dirt_grass", TextureTop = "leaves", TextureBottom = "dirt" });
+            Texture = "dirt_grass", TextureTop = "leaves", TextureBottom = "dirt", Tint = BlockTint.Top });
         Register(new BlockDef { Id = BlockId.Dirt,  Name = "Dirt",  Color = new(0.55f, 0.38f, 0.22f), IsSolid = true, PlaceOriented = false,  LightEmission = 0, Weight = 2,
             Texture = "dirt" });
         // Deep/foundation fill (island core, dome underside, subsurface everywhere) — "greystone" is a
@@ -87,10 +87,10 @@ public static class BlockRegistry
         // through, but still targetable so they can be broken, and Replaceable: a block placed against one takes its
         // place. Colour is only a fallback (and the hotbar's swatch) if the sprite is missing.
         // The green grasses' quads each pick a sprite, mostly their own, sometimes a neighbouring height's.
-        RegisterCross(BlockId.ShortGrass,    "Short Grass",    "grass1",         new(0.20f, 0.70f, 0.40f), ["grass1", "grass1", "grass2", "grass3"]);
-        RegisterCross(BlockId.GrassTuft,     "Grass Tuft",     "grass2",         new(0.20f, 0.70f, 0.40f), ["grass2", "grass2", "grass1", "grass3"]);
-        RegisterCross(BlockId.GrassBlades,   "Grass Blades",   "grass3",         new(0.20f, 0.70f, 0.40f), ["grass3", "grass3", "grass2", "grass4"]);
-        RegisterCross(BlockId.TallGrass,     "Tall Grass",     "grass4",         new(0.20f, 0.70f, 0.40f), ["grass4", "grass4", "grass4", "grass3"]);
+        RegisterCross(BlockId.ShortGrass,    "Short Grass",    "grass1",         new(0.20f, 0.70f, 0.40f), ["grass1", "grass1", "grass2", "grass3"], tint: true);
+        RegisterCross(BlockId.GrassTuft,     "Grass Tuft",     "grass2",         new(0.20f, 0.70f, 0.40f), ["grass2", "grass2", "grass1", "grass3"], tint: true);
+        RegisterCross(BlockId.GrassBlades,   "Grass Blades",   "grass3",         new(0.20f, 0.70f, 0.40f), ["grass3", "grass3", "grass2", "grass4"], tint: true);
+        RegisterCross(BlockId.TallGrass,     "Tall Grass",     "grass4",         new(0.20f, 0.70f, 0.40f), ["grass4", "grass4", "grass4", "grass3"], tint: true);
         RegisterCross(BlockId.DryGrass,      "Dry Grass",      "grass_tan",      new(0.85f, 0.78f, 0.60f));
         RegisterCross(BlockId.BrownGrass,    "Brown Grass",    "grass_brown",    new(0.62f, 0.40f, 0.20f));
         RegisterCross(BlockId.RedMushroom,   "Red Mushroom",   "mushroom_red",   new(0.95f, 0.40f, 0.15f), rigid: true);
@@ -104,7 +104,7 @@ public static class BlockRegistry
         Register(new BlockDef { Id = BlockId.Log, Name = "Log", Color = new(0.45f, 0.32f, 0.20f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 1,
             Texture = "trunk_side", TextureTop = "trunk_top", TextureBottom = "trunk_top" });
         Register(new BlockDef { Id = BlockId.Leaves, Name = "Leaves", Color = new(0.20f, 0.65f, 0.35f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 0.2f,
-            Texture = "leaves_transparent", Layer = RenderLayer.Cutout, ShowsInnerFaces = true });
+            Texture = "leaves_transparent", Layer = RenderLayer.Cutout, ShowsInnerFaces = true, Tint = BlockTint.All });
         Register(new BlockDef { Id = BlockId.PineLeaves, Name = "Pine Needles", Color = new(0.15f, 0.50f, 0.30f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 0.2f,
             Texture = "leaves" });
         Register(new BlockDef { Id = BlockId.Cactus, Name = "Cactus", Color = new(0.25f, 0.65f, 0.35f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 1,
@@ -114,10 +114,6 @@ public static class BlockRegistry
         Register(new BlockDef { Id = BlockId.AutumnLeaves, Name = "Autumn Leaves", Color = new(0.90f, 0.50f, 0.15f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 0.2f,
             Texture = "leaves_orange_transparent", Layer = RenderLayer.Cutout, ShowsInnerFaces = true });
 
-        // Autumn woods' ground: orange-topped grass over dirt.
-        Register(new BlockDef { Id = BlockId.AutumnGrass, Name = "Autumn Grass", Color = new(0.85f, 0.50f, 0.20f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 2,
-            Texture = "dirt", TextureTop = "leaves_orange", TextureBottom = "dirt" });
-
         // Badlands: red sand over red rock, in layers on cliff faces.
         Register(new BlockDef { Id = BlockId.RedSand, Name = "Red Sand", Color = new(0.78f, 0.42f, 0.22f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 2,
             Texture = "redsand" });
@@ -125,9 +121,9 @@ public static class BlockRegistry
             Texture = "redstone" });
     }
 
-    private static void RegisterCross(BlockId id, string name, string texture, Vector3D<float> color, string[]? variants = null, bool rigid = false) =>
+    private static void RegisterCross(BlockId id, string name, string texture, Vector3D<float> color, string[]? variants = null, bool rigid = false, bool tint = false) =>
         Register(new BlockDef { Id = id, Name = name, Color = color, IsSolid = true, Passable = true, Weight = 0.1f,
-            Shape = BlockShape.Cross, Texture = texture, CrossTextures = variants, RigidCross = rigid });
+            Shape = BlockShape.Cross, Texture = texture, CrossTextures = variants, RigidCross = rigid, Tint = tint ? BlockTint.All : BlockTint.None });
 
     private static void Register(BlockDef def) => Defs[(byte)def.Id] = def;
 

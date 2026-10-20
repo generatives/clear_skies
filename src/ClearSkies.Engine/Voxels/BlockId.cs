@@ -49,5 +49,4 @@ public enum BlockId : byte
     RedRock       = 36,
     BirchLog      = 37,
     AutumnLeaves  = 38,
-    AutumnGrass   = 39,
 }

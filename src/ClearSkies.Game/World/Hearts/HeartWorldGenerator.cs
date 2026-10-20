@@ -51,8 +51,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     // A top is bare (see ContinentTerrain.Block) to Shaded if land lies over it within ShadeReach blocks.
     private const float Shaded = 0.75f, ShadeReach = 250f;
 
-    /// <summary>How far off a column's climate may be read, in blocks: the width of the mixed fringe between
-    /// biomes.</summary>
+    /// <summary>How far off a column's climate may be read, in blocks: how far the border between biomes'
+    /// ground wanders.</summary>
     private const float BiomeBlend = 24f;
 
     /// <summary>How far above <see cref="HeartGrid.LowestBottom"/> the world's rough bottom reaches.</summary>
@@ -161,7 +161,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 var biome = _biome[col * MaxSpans + s];
                 var ground = ContinentTerrain.Block(hi, hi, _strata[col], _patch[col], _bare[col * MaxSpans + s], biome);
                 int x = pos.X * S + lx, z = pos.Z * S + lz;
-                var kind = Trees.At(ground, x, hi, z, _woods[col], _seed);
+                var kind = Trees.At(ground, x, hi, z, _woods[col], _seed, biome);
                 if (kind != Trees.Kind.None) Trees.Grow(data, originY, kind, lx, hi, lz, Trees.Hash(x, hi, z, _seed));
             }
         }
@@ -254,11 +254,11 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             _flora[col] = _terrain.Flora(wx, wz);
             _woods[col] = _terrain.Woods(wx, wz);
             _kind[col] = _terrain.Kind(wx, wz);
-            // The climate, read up to BiomeBlend blocks off (by the column, wobbled by the patch field) so biomes
-            // meet in a ragged, mixed fringe a few dozen blocks wide rather than a line.
-            uint ch = (uint)(int)wx * 0x9E3779B1u ^ (uint)(int)wz * 0x85EBCA77u; ch ^= ch >> 15; ch *= 0xC2B2AE3Du; ch ^= ch >> 13;
-            float cx = wx + BiomeBlend * ((ch & 0xFFFF) / 65536f - 0.5f + _patch[col] - 0.5f);
-            float cz = wz + BiomeBlend * ((ch >> 16) / 65536f - 0.5f + _flora[col] - 0.5f);
+            // The climate, read up to BiomeBlend blocks off by the patch and plant fields, so the border where the
+            // ground changes wanders rather than following the climate's smooth contours (the colours of grass and
+            // leaves blend across it: see BiomeTintSystem).
+            float cx = wx + 2f * BiomeBlend * (_patch[col] - 0.5f);
+            float cz = wz + 2f * BiomeBlend * (_flora[col] - 0.5f);
             float heat = _terrain.Heat(cx, cz), wet = _terrain.Wet(cx, cz);
             for (int sp = 0; sp < spans; sp++)
             {
