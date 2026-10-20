@@ -488,7 +488,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
 /// continents: other land shows from afar as a bank of cloud.</summary>
 public sealed class HeartCloudDensity : ICloudDensityMap
 {
-    private const float Reach = 300f;
+    private const float Reach = 750f;
 
     private readonly ulong _seed;
 

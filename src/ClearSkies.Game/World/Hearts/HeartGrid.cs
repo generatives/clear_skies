@@ -30,14 +30,14 @@ public static class HeartGrid
         public int CellY(float y) => (int)MathF.Floor(y * VerticalScale / CellSize);
     }
 
-    /// <summary>The layers, bottom up: small pieces in the underworld, big in the floor, nearly as big in the
+    /// <summary>The layers, bottom up: smaller pieces in the underworld, big in the floor, nearly as big in the
     /// highlands, smaller in the mountains.</summary>
     public static readonly Layer[] Layers =
     {
-        new(180f, float.MinValue, DeepTop),
-        new(360f, DeepTop, 400f),
-        new(300f, 400f, 850f),
-        new(210f, 850f, float.MaxValue),
+        new(280f, float.MinValue, DeepTop),
+        new(560f, DeepTop, 400f),
+        new(480f, 400f, 850f),
+        new(340f, 850f, float.MaxValue),
     };
 
     /// <summary>The top of the underworld: below it, under the plains, pieces are smaller and fewer, so there is room
@@ -77,19 +77,19 @@ public static class HeartGrid
     // across the open sky, never a lone piece on its own. So a continent is a scatter of island clusters with open
     // sky between, each still carrying the continent's surface on top.
     private const float IslandFrom = 0.1f, IslandFull = 0.6f, MountainInside = 0.55f;
-    private const float IsletChance = 0.6f, IsletSpacing = 780f, IsletDetail = 255f, IsletFrom = 0.74f, IsletFull = 0.84f;
+    private const float IsletChance = 0.6f, IsletSpacing = 1300f, IsletDetail = 420f, IsletFrom = 0.74f, IsletFull = 0.84f;
 
     /// <summary>How much of FloorChance the floor keeps even inside a cluster: it breaks into islands with gaps between,
     /// not one cracked landmass.</summary>
-    private const float IslandFloor = 0.55f;
+    private const float IslandFloor = 0.8f;
 
     // Continents: value noise at ContinentSpacing, roughened by a finer one at ContinentDetail; land where it is over
     // ContinentEdgeLow, fading in until ContinentEdgeHigh.
-    private const float ContinentSpacing = 16000f, ContinentDetail = 5000f, ContinentEdgeLow = 0.46f, ContinentEdgeHigh = 0.56f;
+    private const float ContinentSpacing = 24000f, ContinentDetail = 7500f, ContinentEdgeLow = 0.46f, ContinentEdgeHigh = 0.56f;
 
     // Clumps: value noise at these spacings (blocks). Clusters: blobs of value noise at ClusterSpacing, their edges
     // roughened by a finer one at ClusterDetail, gathered where the clumps are.
-    private const float ClumpSpacing = 9000f, ClumpDetail = 3000f, ClusterSpacing = 1400f, ClusterDetail = 450f;
+    private const float ClumpSpacing = 16000f, ClumpDetail = 5000f, ClusterSpacing = 3500f, ClusterDetail = 1100f;
 
     /// <summary>The heart of cell (cx, cy, cz) of layer <paramref name="layer"/>.</summary>
     public static Heart At(ulong seed, int layer, int cx, int cy, int cz)
@@ -140,7 +140,7 @@ public static class HeartGrid
     }
 
     /// <summary>0-1: how far inside a cluster (x, z) is, rising gradually from its fringe to its core. Clusters are a
-    /// kilometre or two across, a few hundred blocks apart where the big clumps are, and rare outside them.</summary>
+    /// few kilometres across, under a kilometre apart where the big clumps are, and rare outside them.</summary>
     public static float ClusterField(ulong seed, float x, float z)
     {
         float v = 0.75f * ValueNoise((uint)seed ^ 0xC5u, x / ClusterSpacing, z / ClusterSpacing)

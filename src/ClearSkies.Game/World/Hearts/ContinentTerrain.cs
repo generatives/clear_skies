@@ -31,6 +31,8 @@ public sealed class ContinentTerrain
     private readonly FastNoiseLite _warpX, _warpZ; // bend the ranges
     private readonly FastNoiseLite _peaks;    // ridged detail: peaks and valleys within a range
     private readonly FastNoiseLite _minor, _minorMask; // smaller, shorter ranges, in patches
+    private readonly FastNoiseLite _size;     // how big the mountains are around here
+    private readonly FastNoiseLite _knolls;   // lone peaks, a few hundred blocks across
     private readonly FastNoiseLite _detail;   // small bumps everywhere
     private readonly FastNoiseLite _strata;   // wobble of the rock layers that cliffs expose
     private readonly FastNoiseLite _patches;  // sand patches in low grass
@@ -47,6 +49,8 @@ public sealed class ContinentTerrain
         _peaks = Noise(seed + 18, FastNoiseLite.FractalType.Ridged, 4, 0.0009f);
         _minor = Noise(seed + 19, FastNoiseLite.FractalType.Ridged, 3, 0.0004f);
         _minorMask = Noise(seed + 20, FastNoiseLite.FractalType.FBm, 2, 0.00015f);
+        _size = Noise(seed + 25, FastNoiseLite.FractalType.FBm, 2, 0.00012f);
+        _knolls = Noise(seed + 26, FastNoiseLite.FractalType.FBm, 2, 0.0015f);
         _detail = Noise(seed + 21, FastNoiseLite.FractalType.FBm, 2, 0.004f);
         _strata = Noise(seed + 16, FastNoiseLite.FractalType.FBm, 2, 0.01f);
         _patches = Noise(seed + 17, FastNoiseLite.FractalType.FBm, 3, 0.012f);
@@ -66,8 +70,9 @@ public sealed class ContinentTerrain
     }
 
     /// <summary>World Y of the terrain surface at (x, z): plains, rising very gradually through highlands to sharp
-    /// mountain ranges a few kilometres across and several apart, peaking at about 1,100; smaller, shorter ranges in
-    /// patches across the plains and highlands; small bumps everywhere.</summary>
+    /// mountain ranges a few kilometres across and several apart, peaking at up to about 1,300; smaller, shorter ranges
+    /// in patches across the plains and highlands; lone peaks here and there; small bumps everywhere. How big the
+    /// mountains are varies from region to region, so a range swells and dwindles along its length.</summary>
     public float Height(float x, float z)
     {
         float plains = PlainsLevel + 45f * _plains.GetNoise(x, z) + 14f * _detail.GetNoise(x, z);
@@ -77,11 +82,14 @@ public sealed class ContinentTerrain
 
         float hills = high * (HighRise * high + 180f * MathF.Max(0f, _hills.GetNoise(x, z)));
         float r = (_minor.GetNoise(x, z) + 1f) * 0.5f;
-        float minor = MinorRise * r * r * Smoothstep(0f, 0.35f, _minorMask.GetNoise(x, z));
+        float size = 0.5f + 0.5f * _size.GetNoise(x, z);                // 0 small mountains, 1 big
+        float minor = MinorRise * (0.3f + 1.1f * (1f - size)) * r * r * Smoothstep(0f, 0.35f, _minorMask.GetNoise(x, z));
+        float k = MathF.Max(0f, _knolls.GetNoise(x, z) - 0.35f) / 0.65f;
+        float knolls = KnollRise * (0.4f + 0.6f * (1f - size)) * k * k * (1f - core);
         // Sharp peaks: ridged detail, its ridges sharpened, standing on the range's rise.
         float p = (_peaks.GetNoise(x, z) + 1f) * 0.5f;
-        float mountains = RangeRise * MathF.Pow(core, 1.6f) * (0.5f + 0.5f * p * MathF.Sqrt(p));
-        return Math.Clamp(plains + hills + minor + mountains, HeartGrid.WorldBottom + 64f, HeartGrid.WorldTop - 32f);
+        float mountains = RangeRise * (0.4f + 1f * size) * MathF.Pow(core, 1.6f) * (0.5f + 0.5f * p * MathF.Sqrt(p));
+        return Math.Clamp(plains + hills + minor + knolls + mountains, HeartGrid.WorldBottom + 64f, HeartGrid.WorldTop - 32f);
     }
 
     /// <summary>0-1: how far into a mountain range (x, z) is: 1 on its spine, 0 past its edge.</summary>
@@ -99,7 +107,7 @@ public sealed class ContinentTerrain
     // Ranges: the spine's noise within RangeEdge of zero is mountains, within HighEdge highlands (full height inside
     // HighCore); bent by up to RangeWarp blocks.
     private const float RangeEdge = 0.3f, HighCore = 0.05f, HighEdge = 1f, RangeWarp = 800f;
-    private const float HighRise = 250f, RangeRise = 500f, MinorRise = 320f;
+    private const float HighRise = 250f, RangeRise = 500f, MinorRise = 320f, KnollRise = 260f;
 
     /// <summary>The plains' average height: a floor of land under the broken-up highlands and ranges, with a sparser
     /// underworld of smaller pieces below it, down to the cloud sea.</summary>
