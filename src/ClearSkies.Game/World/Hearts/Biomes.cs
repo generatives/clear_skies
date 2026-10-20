@@ -25,7 +25,7 @@ public static class Biomes
     };
 
     /// <summary>How far apart in the climate (squared) biomes' tints mix over.</summary>
-    private const float TintBlend = 0.004f;
+    private const float TintBlend = 0.002f;
 
     /// <summary>How hot a top at <paramref name="top"/> is, with <paramref name="regional"/> (-1 to 1) from
     /// <see cref="ContinentTerrain.Heat"/>: cooler by a unit every 900 blocks up from the plains.</summary>
@@ -44,12 +44,12 @@ public static class Biomes
         return best;
     }
 
-    /// <summary>How far apart in the climate (squared) a desert's sandy fringe reaches.</summary>
-    private const float DryBlend = 0.004f;
+    /// <summary>How far apart in the climate (squared) a desert's sandy fringe reaches, and its drying grass.</summary>
+    public const float SandBlend = 0.008f, DryBlend = 0.008f;
 
-    /// <summary>0-1: how near (heat, wet) is to being desert, reaching 1 at its border, for the sand patches that thicken
-    /// ahead of one (see <see cref="ContinentTerrain.Block"/>).</summary>
-    public static float Dry(float heat, float wet)
+    /// <summary>0-1: how near (heat, wet) is to being desert, reaching 1 at its border, over <paramref name="blend"/>:
+    /// for the sand patches that thicken ahead of one (see <see cref="ContinentTerrain.Block"/>) and grass drying.</summary>
+    public static float Dry(float heat, float wet, float blend)
     {
         float desert = float.MaxValue, other = float.MaxValue;
         foreach (var e in Table)
@@ -57,7 +57,7 @@ public static class Biomes
             float d = (heat - e.Heat) * (heat - e.Heat) + (wet - e.Wet) * (wet - e.Wet);
             if (e.Biome == Biome.Desert) desert = d; else other = MathF.Min(other, d);
         }
-        return MathF.Min(1f, 2f / (1f + MathF.Exp((desert - other) / DryBlend)));
+        return MathF.Min(1f, 2f / (1f + MathF.Exp((desert - other) / blend)));
     }
 
     /// <summary>The tint at (heat, wet): each biome's weighted by how near it is, the nearest most, so it shifts across
@@ -75,7 +75,16 @@ public static class Biomes
             r += weight * e.Strength * e.R; g += weight * e.Strength * e.G; b += weight * e.Strength * e.B;
             a += weight * e.Strength;
         }
-        if (a <= 0f) return (0f, 0f, 0f, 0f);
-        return (r / a, g / a, b / a, a / sum);
+        if (a > 0f) { r /= a; g /= a; b /= a; a /= sum; }
+        // Grass dries toward a desert's straw colour over its sandy fringe (see Dry), fully at its border.
+        var desert = Table[(int)Biome.Desert];
+        float dry = Dry(heat, wet, DryBlend) * desert.Strength;
+        if (dry > a)
+        {
+            float k = a / dry;
+            r = desert.R + k * (r - desert.R); g = desert.G + k * (g - desert.G); b = desert.B + k * (b - desert.B);
+            a = dry;
+        }
+        return (r, g, b, a);
     }
 }

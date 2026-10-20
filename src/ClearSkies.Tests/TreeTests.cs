@@ -36,8 +36,10 @@ public class TreeTests
         Assert.Equal(BlockId.RedSand, ContinentTerrain.Block(500, 500, 0f, 0.5f, 0f, Biome.Badlands));
         Assert.True(Biomes.Tint(0.55f, 0.55f).A < 0.05f);                   // temperate keeps its green
         Assert.True(Biomes.Tint(0.3f, 0.75f).A > 0.8f);                     // autumn tints strongly
-        Assert.InRange(Biomes.Tint(0.43f, 0.65f).A, 0.2f, 0.6f);            // and halfway it blends
+        Assert.InRange(Biomes.Tint(0.425f, 0.65f).A, 0.2f, 0.6f);           // and halfway it blends
         Assert.Equal(BlockId.Sand, ContinentTerrain.Block(500, 500, 0f, 0.5f, 0f, Biome.Desert));
+        var edge = Biomes.Tint(0.645f, 0.455f);                             // grass by a desert's edge dries yellow
+        Assert.True(Biomes.Pick(0.645f, 0.455f) == Biome.Temperate && edge.A > 0.5f && edge.R > edge.B);
     }
 
     [Fact]

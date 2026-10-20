@@ -267,7 +267,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 _bare[col * MaxSpans + sp] = bare;
                 float h = Biomes.Heat(hi, heat);
                 _biome[col * MaxSpans + sp] = Biomes.Pick(h, wet);
-                _dry[col * MaxSpans + sp] = Biomes.Dry(h, wet);
+                _dry[col * MaxSpans + sp] = Biomes.Dry(h, wet, Biomes.SandBlend);
             }
         }
     }

@@ -63,8 +63,8 @@ public sealed class ContinentTerrain
         _kind = Noise(seed + 23, FastNoiseLite.FractalType.FBm, 2, 0.035f);
         _heat = Noise(seed + 28, FastNoiseLite.FractalType.FBm, 2, 0.00025f);
         _wet = Noise(seed + 29, FastNoiseLite.FractalType.FBm, 2, 0.0003f);
-        _climateWarpX = Noise(seed + 30, FastNoiseLite.FractalType.FBm, 3, 0.002f);
-        _climateWarpZ = Noise(seed + 31, FastNoiseLite.FractalType.FBm, 3, 0.002f);
+        _climateWarpX = Noise(seed + 30, FastNoiseLite.FractalType.FBm, 5, 0.002f);
+        _climateWarpZ = Noise(seed + 31, FastNoiseLite.FractalType.FBm, 5, 0.002f);
     }
 
     private static FastNoiseLite Noise(ulong seed, FastNoiseLite.FractalType fractal, int octaves, float frequency)
@@ -142,7 +142,7 @@ public sealed class ContinentTerrain
     public float Woods(float x, float z) => 0.5f + 0.5f * _woods.GetNoise(x, z);
 
     /// <summary>How far the climate is read off from a column, in blocks: bends the borders between biomes into
-    /// bays and headlands a few hundred blocks across, with smaller wiggles along them, while keeping each biome in one
+    /// bays and headlands a few hundred blocks across, ragged with smaller wiggles down to a few dozen blocks, while keeping each biome in one
     /// piece (no islands of one stranded in another).</summary>
     public const float ClimateWarp = 200f;
 
@@ -185,9 +185,10 @@ public sealed class ContinentTerrain
             // DryLine (and rises toward a desert, by dry), bare dirt along the patches' edges, grass elsewhere.
             float sandy = Math.Max(Math.Clamp((DryLine - top) / (DryLine - SandLine), 0f, 1f), dry);
             float edge = patch - (0.1f + 0.62f * sandy);
+            float dirtEdge = 0.12f * Math.Clamp(strata / 5f, 0f, 1f); // dirt along the edge: none here, wide there
             if (sandy > 0f && edge < 0f) { if (depth < 4) return BlockId.Sand; }
             else if (isBare && bare > 0.7f) { if (depth < 1) return BlockId.Rock; }
-            else if (depth == 0) return isBare || (sandy > 0f && edge < 0.03f) ? BlockId.Dirt : BlockId.Grass;
+            else if (depth == 0) return isBare || (sandy > 0f && edge < dirtEdge) ? BlockId.Dirt : BlockId.Grass;
             else if (depth < 4) return BlockId.Dirt;
         }
         else if (depth < 2) return BlockId.Rock;
