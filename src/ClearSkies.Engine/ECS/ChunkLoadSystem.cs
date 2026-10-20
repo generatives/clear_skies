@@ -323,7 +323,6 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
     private void Rebuild()
     {
         Rebuilds++;
-        WantedVersion++;
         // Whatever the last rebuild didn't get to unload goes now: a chunk that stays loaded out of view could share a
         // cell of the GPU store's world index with one coming into view on the other side (see LightBudget.WorldIndexDim).
         UnloadSome(double.PositiveInfinity);
@@ -510,12 +509,10 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
     public bool IsEdited(ChunkPosition pos) => _edited.Contains(pos);
 
     /// <summary>Column (x, z) started or finished loading, or one of its chunks unloaded: whether it's ready (see
-    /// <see cref="IsColumnReady"/>) may have changed, as it may when a chunk's mesh comes or goes, or when
-    /// <see cref="WantedVersion"/> changes.</summary>
+    /// <see cref="IsColumnReady"/>) may have changed, as it may when a chunk's mesh comes or goes. (The interests
+    /// moving on changes which columns are wanted without this: a column that stops being wanted is ready until its
+    /// chunks unload, as far as anyone can see.)</summary>
     public event Action<int, int>? ColumnChanged;
-
-    /// <summary>Changes whenever which columns are wanted does (the interests moved to other columns).</summary>
-    public int WantedVersion { get; private set; }
 
     /// <summary>Whether column (x, z) is wanted and drawn in full: nothing in it still to load, and every chunk of it
     /// that may hold something loaded and meshed.</summary>

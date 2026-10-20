@@ -191,7 +191,8 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     }
 
     private readonly HashSet<(int x, int z)> _readyDirty = new();
-    private int _wantedVersion = -1;
+    private int _recheck; // where the round of near columns looked at anyway is up to
+    private const int RecheckPerFrame = 16;
 
     public bool Active => Enabled;
 
@@ -570,15 +571,19 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         // coarse columns are); a far one that's drawn, settled and uncovered has nothing to do.
         int readyIndex = 0, scan = _editScan;
         long nearSq = Sq((int)MathF.Ceiling(FullDetailRadius / ColumnBlocks) + 2);
-        bool allDirty = _wantedVersion != _load.WantedVersion;
-        _wantedVersion = _load.WantedVersion;
+        // Moving on changes which full columns are wanted, but that alone changes no column's readiness until its
+        // chunks load or unload (which mark it), so it's not looked at all again. A few near columns a frame are
+        // looked at anyway, round them in turn, in case a change came without a mark.
+        int nearIndex = 0, recheckFrom = _recheck, recheckTo = _recheck + RecheckPerFrame;
         double residentMs = 0; // spent putting columns in the grid this frame (not the rest of this loop)
         foreach (var (key, column) in _columns)
         {
             bool near = Sq(key.x - _centre.x) + Sq(key.z - _centre.z) <= nearSq;
             if (!near) column.ReadyKnown = false; // found again when it's next near (changes meanwhile aren't kept)
             if (!near && column.Drawn && column.Settled && !column.Covered && !column.Leaving) continue;
-            if (near && (allDirty || !column.ReadyKnown || _readyDirty.Contains(key)))
+            bool due = false;
+            if (near) { due = nearIndex >= recheckFrom && nearIndex < recheckTo; nearIndex++; }
+            if (near && (due || !column.ReadyKnown || _readyDirty.Contains(key)))
             {
                 bool all = true;
                 for (int j = 0; j < 4 && all; j++) all = _load.IsColumnReady(key.x * 2 + (j & 1), key.z * 2 + (j >> 1));
@@ -641,6 +646,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         }
         _editScan = readyIndex == 0 ? 0 : (scan + 1) % readyIndex;
         _readyDirty.Clear();
+        _recheck = recheckTo < nearIndex ? recheckTo : 0;
     }
 
     /// <summary>Whether a column waiting on lighting looks again this frame: every <see cref="LitCheckEvery"/> frames,
