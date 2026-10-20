@@ -35,6 +35,8 @@ public sealed class DistantTerrainPanel : ISystem, IDebugUiSystem
         if (remake)
             foreach (var l in _levels) { l.Majority = majority; l.Plants = plants; l.RemakeAll(); }
         ImGui.Text($"Full-detail chunks loaded: {first.FullDetailChunks:N0}");
+        var farthest = _levels.LastOrDefault(l => l.Live) ?? first;
+        ImGui.Text($"Fog held by: {farthest.FogHeldBy}");
         foreach (var l in _levels)
         {
             ImGui.Separator();

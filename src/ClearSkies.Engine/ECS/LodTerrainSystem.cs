@@ -1005,26 +1005,54 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
     public float ReadyRadius(Vector3D<float> centre)
     {
         if (!Live) return Finer?.ReadyRadius(centre) ?? OuterRadius;
-        float best = OuterRadius;
-        for (var level = this; level != null; level = level.Finer) best = MathF.Min(best, level.NotReadyAt(centre));
+        // Columns in the outermost band don't count: the view moving on a column brings a ring of new ones in there
+        // at once, and the fog pulled in for each and went out again (they come in behind nearly total fog anyway).
+        float best = OuterRadius, ignoreFrom = OuterRadius - 2 * ColumnBlocks;
+        _fogHeld = default;
+        for (var level = this; level != null; level = level.Finer)
+        {
+            float at = level.NotReadyAt(centre, out var why, out int frames);
+            if (at < best && at < ignoreFrom) { best = at; _fogHeld = (level.Level, why, frames, at); }
+        }
         return best;
     }
 
+    private enum FogReason { None, Making, Queued, Lighting }
+    private (int Level, FogReason Why, int Frames, float At) _fogHeld;
+
+    /// <summary>What the fog last stopped at (see <see cref="ReadyRadius"/>), for the panel.</summary>
+    public string FogHeldBy => _fogHeld.Why switch
+    {
+        FogReason.Making   => $"level {_fogHeld.Level} column being made, {_fogHeld.At:F0} blocks out",
+        FogReason.Queued   => $"level {_fogHeld.Level} column queued, {_fogHeld.At:F0} blocks out",
+        FogReason.Lighting => $"level {_fogHeld.Level} column waiting {_fogHeld.Frames} frames for its light, {_fogHeld.At:F0} blocks out",
+        _ => "nothing (out to the full range)",
+    };
+
     /// <summary>The nearest of this level's columns not ready to be seen: being made, or held back for its light, where
     /// nothing else shows instead (the finer level's ready, or the coarser one drawn).</summary>
-    private float NotReadyAt(Vector3D<float> centre)
+    private float NotReadyAt(Vector3D<float> centre, out FogReason why, out int frames)
     {
         float best = float.PositiveInfinity;
+        why = FogReason.None;
+        frames = 0;
         var coarser = Coarser is { Live: true } up ? up : null;
-        bool Hidden((int x, int z) k) => coarser != null && coarser.Shows((k.x >> 1, k.z >> 1));
         foreach (var c in _inFlight)
-            if (!_columns.ContainsKey(c) && !Hidden(c)) best = MathF.Min(best, Distance(centre, c)); // one being made again is drawn meanwhile
+            if (!_columns.ContainsKey(c) && !Hidden(c) && Distance(centre, c) is var d && d < best) // one being made again is drawn meanwhile
+                (best, why) = (d, FogReason.Making);
         for (int i = _queueHead; i < _queue.Count; i++)
-            if (!_columns.ContainsKey(_queue[i]) && !Hidden(_queue[i])) { best = MathF.Min(best, Distance(centre, _queue[i])); break; }
+            if (!_columns.ContainsKey(_queue[i]) && !Hidden(_queue[i]))
+            {
+                if (Distance(centre, _queue[i]) is var d && d < best) (best, why) = (d, FogReason.Queued);
+                break;
+            }
         foreach (var (k, column) in _columns)
-            if (WaitsForLight(column) && !(column.ReadyKnown && column.Ready) && !Hidden(k)) // what's under it shows instead
-                best = MathF.Min(best, Distance(centre, k));
+            if (WaitsForLight(column) && !(column.ReadyKnown && column.Ready) && !Hidden(k) // what's under it shows instead
+                && Distance(centre, k) is var d && d < best)
+                (best, why, frames) = (d, FogReason.Lighting, column.Waiting);
         return best;
+
+        bool Hidden((int x, int z) k) => coarser != null && coarser.Shows((k.x >> 1, k.z >> 1));
     }
 
     /// <summary>Whether a column is held back until it's lit: it's never been lit from the grid, and it can be (the grid
