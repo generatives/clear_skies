@@ -34,6 +34,30 @@ public class LodShrinkTests
     public void SeeThroughCubeKeptWithoutOpaque() => Assert.Equal(BlockId.Glass, Any((3, BlockId.Glass)));
 
     [Fact]
+    public void AnOpenCellKeepsItsPlant()
+    {
+        var full = new ChunkData();
+        full.Set(1, 0, 0, BlockId.TallGrass);
+        var coarse = new ChunkData();
+        LodTerrainSystem.Shrink(full, coarse, 0, 0, 0, majority: true, plants: true);
+        Assert.Equal(BlockId.TallGrass, coarse.Get(0, 0, 0));
+    }
+
+    [Fact]
+    public void APlantOnFilledGroundMovesUpACell()
+    {
+        // Ground fills the lower 3 blocks of a 2-block column pair, grass on top at y 3: the cell it's in (y 2-3) fills
+        // by majority, so the grass goes in the open cell above.
+        var full = new ChunkData();
+        for (int x = 0; x < 2; x++) for (int z = 0; z < 2; z++) for (int y = 0; y < 3; y++) full.Set(x, y, z, BlockId.Dirt);
+        full.Set(0, 3, 0, BlockId.ShortGrass);
+        var coarse = new ChunkData();
+        LodTerrainSystem.Shrink(full, coarse, 0, 0, 0, majority: true, plants: true);
+        Assert.Equal(BlockId.Dirt, coarse.Get(0, 1, 0));
+        Assert.Equal(BlockId.ShortGrass, coarse.Get(0, 2, 0));
+    }
+
+    [Fact]
     public void PlantsAndModelsAreLeftOut()
         => Assert.Equal(BlockId.Air, Majority((0, BlockId.TallGrass), (1, BlockId.Lever), (2, BlockId.Stone), (3, BlockId.Stone)));
 

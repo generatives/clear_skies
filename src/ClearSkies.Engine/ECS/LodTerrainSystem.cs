@@ -80,6 +80,10 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     /// made afterwards.</summary>
     public bool Majority = true;
 
+    /// <summary>Whether coarse cells keep plants (grass, mushrooms) at their own scale, 2 blocks, so distant ground is as
+    /// busy as full detail where it swaps (see <see cref="Shrink"/>). Changing it applies to columns made afterwards.</summary>
+    public bool Plants = true;
+
     /// <summary>The loaded coarse columns as a grid of 2-block voxels, lit like the world (see
     /// GpuLightSystem.AddStaticGrid). Unregistered (index -1) without a GridStore: then they're lit as open air.</summary>
     public GridHandle Grid { get; } = new();
@@ -361,7 +365,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
                 // so going layer by layer across the four (each coarse chunk in turn) made it profile again for every
                 // chunk, about ten times the work.
                 var coarse = new SortedDictionary<int, ChunkData>();
-                bool majority = Majority;
+                bool majority = Majority, plants = Plants;
                 foreach (var (pos, edited) in work)
                 {
                     var full = new ChunkData();
@@ -369,7 +373,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
                     if (!full.IsUniform(out var only) || only != BlockId.Air)
                     {
                         if (!coarse.TryGetValue(pos.Y >> 1, out var into)) coarse[pos.Y >> 1] = into = new ChunkData();
-                        Shrink(full, into, (pos.X & 1) * 16, (pos.Y & 1) * 16, (pos.Z & 1) * 16, majority);
+                        Shrink(full, into, (pos.X & 1) * 16, (pos.Y & 1) * 16, (pos.Z & 1) * 16, majority, plants);
                     }
                     full.Release();
                 }
@@ -396,13 +400,14 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     }
 
     /// <summary>Shrinks full chunk <paramref name="full"/> into the 16³ octant of <paramref name="coarse"/> at
-    /// (ox, oy, oz). Plants and model blocks are left out. By <paramref name="majority"/>: a cell is filled when at least
+    /// (ox, oy, oz). Model blocks are left out, and plants unless <paramref name="plants"/> (then an open cell keeps one, see below). By <paramref name="majority"/>: a cell is filled when at least
     /// 4 of its 8 blocks are cubes, with the more common kind (opaque or see-through) and its most common block, so coarse
     /// surfaces round to the nearest cell and meet full detail flush on average; thin things (a fence of cubes, a
     /// one-block ledge) may go, except leaves (<see cref="BlockDef.ShowsInnerFaces"/>), which fill a cell if any of its
     /// blocks is one, so trees stay. Otherwise any cube fills the cell: the most common opaque one, else the most common
     /// see-through one.</summary>
-    internal static void Shrink(ChunkData full, ChunkData coarse, int ox, int oy, int oz, bool majority = true)
+    internal static void Shrink(ChunkData full, ChunkData coarse, int ox, int oy, int oz, bool majority = true,
+                                bool plants = false)
     {
         if (full.IsUniform(out var only))
         {
@@ -412,15 +417,46 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
             return;
         }
         Span<BlockId> cell = stackalloc BlockId[8];
+        Span<BlockId> plantOn = stackalloc BlockId[16]; // per x: a plant on top of the cell below (for the cell above)
         for (int z = 0; z < 16; z++)
-        for (int y = 0; y < 16; y++)
-        for (int x = 0; x < 16; x++)
         {
-            for (int k = 0; k < 8; k++)
-                cell[k] = full.Get(2 * x + (k & 1), 2 * y + ((k >> 1) & 1), 2 * z + (k >> 2));
-            var pick = majority ? ByMajority(cell) : ByAny(cell);
-            if (pick != BlockId.Air) coarse.Set(ox + x, oy + y, oz + z, pick);
+            plantOn.Clear();
+            for (int y = 0; y < 16; y++)
+            for (int x = 0; x < 16; x++)
+            {
+                for (int k = 0; k < 8; k++)
+                    cell[k] = full.Get(2 * x + (k & 1), 2 * y + ((k >> 1) & 1), 2 * z + (k >> 2));
+                var pick = majority ? ByMajority(cell) : ByAny(cell);
+                if (pick != BlockId.Air) coarse.Set(ox + x, oy + y, oz + z, pick);
+                if (!plants) continue;
+                // Plants (grass, mushrooms): a cell left open keeps the commonest one in it, or failing that one that
+                // grew on top of the cell below, whose ground filled it; so coarse ground stays as grassy as full detail.
+                if (pick == BlockId.Air)
+                {
+                    var plant = MostCommonPlant(cell, upperOnly: false);
+                    if (plant == BlockId.Air) plant = plantOn[x];
+                    if (plant != BlockId.Air) coarse.Set(ox + x, oy + y, oz + z, plant);
+                    plantOn[x] = BlockId.Air;
+                }
+                else plantOn[x] = MostCommonPlant(cell, upperOnly: true);
+            }
         }
+    }
+
+    private static BlockId MostCommonPlant(ReadOnlySpan<BlockId> cell, bool upperOnly)
+    {
+        BlockId best = BlockId.Air;
+        int bestCount = 0;
+        for (int i = 0; i < cell.Length; i++)
+        {
+            if (upperOnly && ((i >> 1) & 1) == 0) continue;
+            var id = cell[i];
+            if (id == BlockId.Air || !BlockRegistry.Get(id).IsCross) continue;
+            int n = 0;
+            for (int j = 0; j < cell.Length; j++) if (cell[j] == id) n++;
+            if (n > bestCount) { best = id; bestCount = n; }
+        }
+        return best;
     }
 
     private static BlockId ByAny(ReadOnlySpan<BlockId> cell)
@@ -930,6 +966,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         ImGui.SliderFloat("Coarse terrain out to (blocks)", ref OuterRadius, 128f, 4096f, "%.0f");
         ImGui.SliderFloat("Swap fade (seconds)", ref FadeSeconds, 0f, 2f, "%.2f");
         if (ImGui.Checkbox("Coarse cells by majority (else any block)", ref Majority)) Remake();
+        if (ImGui.Checkbox("Coarse plants (grass)", ref Plants)) Remake();
         ImGui.TextDisabled("  majority: 4 of 8 blocks fill a cell (leaves: any), so coarse ground meets full detail flush");
         int drawnColumns = _columns.Values.Count(c => c.Drawn);
         int chunks = _columns.Values.Sum(c => c.Chunks.Count);
