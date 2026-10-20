@@ -14,7 +14,8 @@ namespace ClearSkies.Engine.Rendering;
 /// 2 +Y, 3 -Y, 4 +Z, 5 -Z, the mesher's order; 6 and 7 a cross block's diagonals, see below) in bits 18-20; the texture
 /// layer in bits 21-28, 255 for untextured; the low 3 bits of its width - 1 in bits 29-31.</item>
 /// <item><see cref="B"/>: the block (<see cref="BlockId"/>) in bits 0-7; for a diagonal, which side it faces in bit 8;
-/// the high 2 bits of width - 1 in bits 24-25; height - 1 in bits 26-30. Bits 9-23 and 31 are free.</item>
+/// the high 2 bits of width - 1 in bits 24-25; height - 1 in bits 26-30; where its light map starts in its mesh's (see
+/// <see cref="LightOffset"/>) in bits 9-23 (low 15 bits) and 31 (top bit).</item>
 /// </list>
 /// A <see cref="BlockShape.Cross"/> block's quads (GreedyMesher.EmitCross) are faces 6 (diagonal A, from the cell's
 /// low x, z corner to its high one) and 7 (diagonal B, from high x, low z to low x, high z), one cell in size, with the
@@ -69,6 +70,45 @@ public readonly struct ChunkQuad
 
     /// <summary>The quad's block.</summary>
     public BlockId Block => (BlockId)(B & 255);
+
+    /// <summary>A <see cref="LightOffset"/> for a quad without a light map: a cross block's (lit flat from its cell), or
+    /// one past what 16 bits reach in a huge mesh (lit flat from the cell in front of it).</summary>
+    public const uint NoLightmap = 0xFFFF;
+
+    /// <summary>Where the quad's light map starts, in 32-bit words from its mesh's (see
+    /// Rendering.WebGpu.QuadLightmap): its (width + 1) x (height + 1) face corners, 16 bits each, row by row along its
+    /// width, then for a two-sided mesh (water) as many again for its back. <see cref="NoLightmap"/> for none.</summary>
+    public uint LightOffset => ((B >> 9) & 0x7FFF) | (B >> 31) << 15;
+
+    /// <summary>This quad with its light map at <paramref name="words"/> (see <see cref="LightOffset"/>).</summary>
+    public ChunkQuad WithLightOffset(uint words)
+        => new(A, (B & ~(0x7FFFu << 9 | 1u << 31)) | (words & 0x7FFF) << 9 | (words >> 15 & 1) << 31);
+
+    /// <summary>How many face corners the quad's light map holds on one side: none for a cross block's quad.</summary>
+    public int LightCorners
+    {
+        get
+        {
+            if (((A >> 18) & 7) >= 6) return 0;
+            int w = (int)((A >> 29) | ((B >> 24) & 3) << 3) + 1, h = (int)((B >> 26) & 31) + 1;
+            return (w + 1) * (h + 1);
+        }
+    }
+
+    /// <summary>Lays out a mesh's light map: gives each quad its <see cref="LightOffset"/>, each starting on a whole
+    /// word, both sides of every quad for a <paramref name="twoSided"/> mesh. Returns the words the light map takes.</summary>
+    public static uint AssignLightOffsets(Span<ChunkQuad> quads, bool twoSided)
+    {
+        uint words = 0;
+        for (int i = 0; i < quads.Length; i++)
+        {
+            uint corners = (uint)quads[i].LightCorners * (twoSided ? 2u : 1u);
+            if (corners == 0 || words >= NoLightmap) { quads[i] = quads[i].WithLightOffset(NoLightmap); continue; }
+            quads[i] = quads[i].WithLightOffset(words);
+            words += (corners + 1) / 2;
+        }
+        return words;
+    }
 
     /// <summary>Entries in <see cref="BuildBlockTable"/>: one per possible <see cref="BlockId"/>.</summary>
     public const int BlockTableSize = 256;

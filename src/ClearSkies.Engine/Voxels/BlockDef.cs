@@ -181,7 +181,7 @@ public enum BlockShape : byte
 /// <summary>How a full-cube block's faces are drawn; <c>GreedyMesher</c> gives each layer its own mesh per chunk.</summary>
 public enum RenderLayer : byte
 {
-    /// <summary>Solid faces, drawn with the world (<c>fs_main</c>).</summary>
+    /// <summary>Solid faces, drawn with the world (<c>fs_chunk</c>).</summary>
     Opaque,
 
     /// <summary>Drawn with the world, but texels under half alpha are cut out (<c>fs_cutout_depth</c>): fully see-through

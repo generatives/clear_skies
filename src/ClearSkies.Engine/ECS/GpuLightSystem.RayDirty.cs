@@ -1093,7 +1093,8 @@ public sealed partial class GpuLightSystem
     private int[] _composeStamp = Array.Empty<int>();
     private GpuBuffer? _composeWork, _finalComposeWork;
 
-    /// <summary>Adds the slots of a work list (every <paramref name="stride"/>th word) to the compose list.</summary>
+    /// <summary>Adds the slots of a work list (every <paramref name="stride"/>th word) to the compose list. Their display
+    /// is rewritten this frame, so the chunk meshes showing it bake their light maps again (GridStore.TouchLight).</summary>
     private void AddCompose(ReadOnlySpan<uint> work, int stride)
     {
         for (int k = 0; k < work.Length; k += stride)
@@ -1101,6 +1102,7 @@ public sealed partial class GpuLightSystem
             int slot = (int)work[k];
             if (_composeStamp[slot] == _frame) continue;
             _composeStamp[slot] = _frame;
+            _store.TouchLight(slot);
             if (_composeCount == _composeList.Length) Array.Resize(ref _composeList, _composeCount * 2);
             _composeList[_composeCount++] = (uint)slot;
         }

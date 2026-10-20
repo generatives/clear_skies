@@ -127,15 +127,12 @@ public class CrossBlockTests
     [Fact]
     public void Generated_plants_grow_on_solid_ground()
     {
-        var generator = new IslandWorldGenerator(1337);
+        var generator = new HeartWorldGenerator(1337);
         int plants = 0;
-        // Around the spawn (as GenerationChecksum), surface layers.
-        var (gx, gy, gz) = generator.GroundNear(0f, 0f);
-        int cx = (int)MathF.Floor(gx / (float)ChunkData.Size), cy = (int)MathF.Floor(gy / (float)ChunkData.Size);
-        int cz = (int)MathF.Floor(gz / (float)ChunkData.Size);
-        for (int y = cy - 2; y <= cy + 2; y++)
-        for (int x = cx - 2; x <= cx + 1; x++)
-        for (int z = cz - 1; z <= cz + 1; z++)
+        // Around the plains spawn (as GenerationChecksum), surface layers.
+        for (int y = 2; y <= 6; y++)
+        for (int x = 568; x <= 571; x++)
+        for (int z = 33; z <= 35; z++)
         {
             var data = new ChunkData();
             generator.Generate(data, new ChunkPosition(x, y, z));
@@ -155,7 +152,7 @@ public class CrossBlockTests
     public void Plants_suit_their_ground()
     {
         static IEnumerable<BlockId> On(BlockId ground) =>
-            Enumerable.Range(0, 4000).Select(i => IslandSurface.Plant(ground, i, 300, -i * 7, 0.7f, 0.7f, 99))
+            Enumerable.Range(0, 4000).Select(i => ContinentTerrain.Plant(ground, i, 300, -i * 7, 0.7f, 0.7f, 99))
                       .Where(b => b != BlockId.Air).Distinct();
 
         Assert.Contains(BlockId.TallGrass, On(BlockId.Grass));

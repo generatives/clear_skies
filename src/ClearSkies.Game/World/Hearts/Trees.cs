@@ -3,7 +3,7 @@ using ClearSkies.Engine.Voxels;
 namespace ClearSkies.Game.Generation;
 
 /// <summary>
-/// Trees and cacti on <see cref="IslandSurface"/>'s tops, kept simple, Minecraft style: round-topped oaks on grass
+/// Trees and cacti on <see cref="ContinentTerrain"/>'s tops, kept simple, Minecraft style: round-topped oaks on grass
 /// across the middle heights, giving way to pines higher up (they go on up into the snow), and cacti on sand.
 ///
 /// Whether a column grows one is picked by a hash of its top, so the same in every chunk that generates it. A tree is
@@ -24,8 +24,8 @@ public static class Trees
     private const float PineStart = 380f, PineFull = 520f;
 
     /// <summary>What grows from the open cell above (x, top, z), whose block is <paramref name="ground"/> (from
-    /// <see cref="IslandSurface.Block"/>): a tree, a cactus or nothing. They grow where <paramref name="woods"/>
-    /// (from <see cref="IslandSurface.Woods"/>) is high, so they thin from woods to scattered trees, with the odd one
+    /// <see cref="ContinentTerrain.Block"/>): a tree, a cactus or nothing. They grow where <paramref name="woods"/>
+    /// (from <see cref="ContinentTerrain.Woods"/>) is high, so they thin from woods to scattered trees, with the odd one
     /// standing alone in the open.</summary>
     public static Kind At(BlockId ground, int x, int top, int z, float woods, ulong seed)
     {
@@ -36,7 +36,7 @@ public static class Trees
         {
             case BlockId.Grass:
             {
-                if (top < IslandSurface.DryLine) return Kind.None;
+                if (top < ContinentTerrain.DryLine) return Kind.None;
                 if (r >= 0.001f + 0.03f * Grove(woods)) return Kind.None;
                 return pick < Smoothstep(PineStart, PineFull, top) ? Kind.Pine : Kind.Oak;
             }
@@ -116,7 +116,7 @@ public static class Trees
         return h;
     }
 
-    /// <summary>0-1: how far into a wood a column is, by its <see cref="IslandSurface.Woods"/>.</summary>
+    /// <summary>0-1: how far into a wood a column is, by its <see cref="ContinentTerrain.Woods"/>.</summary>
     private static float Grove(float woods) => Smoothstep(0.5f, 0.85f, woods);
 
     private static bool Bit(ulong h, int i) => ((h >> (24 + i % 24)) & 1) != 0;

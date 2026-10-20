@@ -43,6 +43,50 @@ public class ChunkQuadTests
     }
 
     [Fact]
+    public void LightMapOffsetsLeaveTheQuadAndSitEndToEnd()
+    {
+        var data = new ChunkData();
+        for (int x = 0; x < ChunkData.Size; x++)
+        for (int z = 0; z < ChunkData.Size; z++)
+            data.Set(x, 0, z, BlockId.Stone);
+        for (int x = 3; x < 9; x++)
+        for (int y = 1; y < 6; y++)
+            data.Set(x, y, 7, BlockId.Dirt);
+        var verts = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(
+            new GreedyMesher().Mesh(data, null, null, null, null, null, null).Opaque.Vertices);
+        var blocks = new GreedyMesher().Mesh(data, null, null, null, null, null, null).Opaque.Blocks;
+        foreach (bool twoSided in new[] { false, true })
+        {
+            var quads = new ChunkQuad[verts.Length / 4];
+            for (int q = 0; q < quads.Length; q++) quads[q] = ChunkQuad.Pack(verts.Slice(4 * q, 4), blocks[q]);
+            var plain = (ChunkQuad[])quads.Clone();
+            uint words = ChunkQuad.AssignLightOffsets(quads, twoSided);
+
+            uint next = 0;
+            for (int q = 0; q < quads.Length; q++)
+            {
+                // Everything else about the quad is as packed.
+                for (int c = 0; c < 4; c++) Assert.Equal(plain[q].Corner(c).Position, quads[q].Corner(c).Position);
+                Assert.Equal(plain[q].Block, quads[q].Block);
+                // Each quad's corners start on a whole word, right after the last quad's.
+                Assert.Equal(next, quads[q].LightOffset);
+                next += ((uint)quads[q].LightCorners * (twoSided ? 2u : 1u) + 1) / 2;
+            }
+            Assert.Equal(next, words);
+        }
+
+        // Offsets use all 16 bits (bits 9-23 and 31 of B) and leave the rest alone.
+        var one = ChunkQuad.Pack(verts.Slice(0, 4), blocks[0]);
+        foreach (uint off in new uint[] { 0, 1, 0x7FFF, 0x8000, 0xABCD, ChunkQuad.NoLightmap })
+        {
+            var moved = one.WithLightOffset(off);
+            Assert.Equal(off, moved.LightOffset);
+            Assert.Equal(one.A, moved.A);
+            Assert.Equal(one.B & ~(0x7FFFu << 9 | 1u << 31), moved.B & ~(0x7FFFu << 9 | 1u << 31));
+        }
+    }
+
+    [Fact]
     public void BlockTableHoldsEachBlocksColourAndOpacity()
     {
         var table = ChunkQuad.BuildBlockTable();

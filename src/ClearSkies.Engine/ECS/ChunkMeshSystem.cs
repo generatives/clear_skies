@@ -51,10 +51,10 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     private readonly record struct ModelCell(byte X, byte Y, byte Z, BlockId Block, BlockOrientation Orientation);
 
     /// <summary>One packed mesh: its quads as <see cref="ChunkQuad"/>s (rented; the first <see cref="Bytes"/> are used),
-    /// uploaded as one buffer.</summary>
-    private readonly record struct Packed(byte[] Data, int Bytes, int QuadCount)
+    /// uploaded as one buffer, and the words its light map takes (see <see cref="ChunkQuad.AssignLightOffsets"/>).</summary>
+    private readonly record struct Packed(byte[] Data, int Bytes, int QuadCount, uint LightWords)
     {
-        public static readonly Packed None = new(Array.Empty<byte>(), 0, 0);
+        public static readonly Packed None = new(Array.Empty<byte>(), 0, 0, 0);
     }
 
     /// <summary>A meshed chunk: its opaque, cut-out and translucent meshes, and its model blocks.</summary>
@@ -128,8 +128,9 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     private readonly EntitySet _meshedChunks;
 
     /// <summary>Packs a chunk mesh for upload, off the main thread: each of the mesher's quads (four vertices; the
-    /// indices only ever join them as two triangles) as one 8-byte <see cref="ChunkQuad"/>.</summary>
-    private static Packed PackQuads(LayerMesh mesh)
+    /// indices only ever join them as two triangles) as one 8-byte <see cref="ChunkQuad"/>, with its light map laid out
+    /// (both sides of each quad for a <paramref name="twoSided"/> mesh).</summary>
+    private static Packed PackQuads(LayerMesh mesh, bool twoSided = false)
     {
         ReadOnlySpan<Vertex> verts = CollectionsMarshal.AsSpan(mesh.Vertices);
         int quads = verts.Length / 4;
@@ -138,7 +139,8 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
         var packed = ArrayPool<byte>.Shared.Rent(bytes);
         var dst = MemoryMarshal.Cast<byte, ChunkQuad>(packed.AsSpan(0, bytes));
         for (int q = 0; q < quads; q++) dst[q] = ChunkQuad.Pack(verts.Slice(4 * q, 4), mesh.Blocks[q]);
-        return new Packed(packed, bytes, quads);
+        uint lightWords = ChunkQuad.AssignLightOffsets(dst, twoSided);
+        return new Packed(packed, bytes, quads, lightWords);
     }
 
     private void Dispatch()
@@ -187,7 +189,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                     var mesh = mesher.Mesh(data, nX, pX, nY, pY, nZ, pZ, neighboursForTransparentOnly: alone, position: pos);
                     var opaque = PackQuads(mesh.Opaque);
                     var cutout = PackQuads(mesh.Cutout);
-                    var transparent = PackQuads(mesh.Translucent);
+                    var transparent = PackQuads(mesh.Translucent, twoSided: true); // water is seen from below too
                     _results.Enqueue(new Result(entry.Entity, opaque, cutout, transparent, FindModelBlocks(data), null));
                 }
                 catch (Exception e)
@@ -238,9 +240,9 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
                     continue;
                 }
 
-                var mesh = Upload(r.Opaque);
-                var cutoutMesh = Upload(r.Cutout);
-                var transparentMesh = Upload(r.Transparent);
+                var mesh = Upload(r.Opaque, LightmapKind.Opaque);
+                var cutoutMesh = Upload(r.Cutout, LightmapKind.SeeThrough);
+                var transparentMesh = Upload(r.Transparent, LightmapKind.SeeThrough | LightmapKind.TwoSided);
 
                 // The chunk's voxel base and the volume dims are derived live at draw time from the volume's
                 // GPU resources (see ChunkRenderSystem), so a volume reallocation needs no remesh here. SetMesh clears
@@ -278,11 +280,11 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     }
 
     /// <summary>Uploads one packed mesh (main thread), or returns null for an empty one.</summary>
-    private GpuMesh? Upload(in Packed p)
+    private GpuMesh? Upload(in Packed p, LightmapKind kind)
     {
         if (p.QuadCount == 0) return null;
         long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-        var mesh = _renderer.UploadChunkQuads(p.Data.AsSpan(0, p.Bytes), (uint)p.QuadCount);
+        var mesh = _renderer.UploadChunkQuads(p.Data.AsSpan(0, p.Bytes), (uint)p.QuadCount, p.LightWords, kind);
         _uploadMs += 0.05 * (System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds - _uploadMs);
         _createMs += 0.05 * (_renderer.LastCreateMs - _createMs);
         _writeMs  += 0.05 * (_renderer.LastWriteMs - _writeMs);

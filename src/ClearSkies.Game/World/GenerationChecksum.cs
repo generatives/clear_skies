@@ -15,17 +15,15 @@ public static class GenerationChecksum
 
     public static ulong Compute()
     {
-        var generator = new IslandWorldGenerator(ProbeSeed);
+        var generator = new HeartWorldGenerator(ProbeSeed);
         ulong hash = 14695981039346656037UL;
         var data = new ChunkData();
-        // At the spawn: surface, underground and sky.
-        var (gx, gy, gz) = generator.GroundNear(0f, 0f);
-        int cx = (int)MathF.Floor(gx / (float)ChunkData.Size), cy = (int)MathF.Floor(gy / (float)ChunkData.Size), cz = (int)MathF.Floor(gz / (float)ChunkData.Size);
-        for (int y = cy - 4; y <= cy + 4; y += 2)
-        for (int x = cx; x <= cx + 1; x++)
+        // Around the plains spawn, 18 km east: surface, underground and sky.
+        for (int y = -2; y <= 6; y += 2)
+        for (int x = 569; x <= 570; x++)
         {
             data = new ChunkData();
-            generator.Generate(data, new ChunkPosition(x, y, cz));
+            generator.Generate(data, new ChunkPosition(x, y, 34));
             hash = hash * 31 + DescriptionHash.Of(data.BlocksAsBytes());
         }
         return hash;

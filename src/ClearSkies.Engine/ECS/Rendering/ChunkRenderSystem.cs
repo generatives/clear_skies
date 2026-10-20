@@ -39,11 +39,12 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
 
     // One visible chunk, collected so they can be drawn nearest first.
     private readonly record struct ChunkDraw(float DistSq, GpuMesh? Mesh, GpuMesh? CutoutMesh, GpuMesh? TransparentMesh,
-                                             ModelBlock[] Models, Mat4 Model, int Grid, ChunkPosition Chunk);
+                                             ModelBlock[] Models, Mat4 Model, int Grid, ChunkPosition Chunk, GridHandle? Handle);
     private readonly List<ChunkDraw> _draws = new();
     private readonly List<ChunkDraw> _translucentDraws = new(); // the visible chunks with translucent faces
     private static readonly Comparison<ChunkDraw> NearestFirst = (a, b) => a.DistSq.CompareTo(b.DistSq);
     private int _modelBlocksDrawn;
+    private double _bakedMeshesEma, _bakedGroupsEma;
 
     /// <summary>Cell-local placement per <see cref="BlockOrientation"/> (indexed by its byte): a model block's model is
     /// authored Blockbench-style (x/z centred on the origin, standing on y = 0, 1 unit = 1 block), so it is rotated
@@ -128,7 +129,8 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
                 if (!frame.Frustum.Intersects(origin, origin + size)) continue;
                 var centre = origin + half;
                 AddDraw(new ChunkDraw(Vector3D.DistanceSquared(centre, frame.CameraPosition), rd.Mesh, rd.CutoutMesh,
-                                         rd.TransparentMesh, rd.Models, Mat4.Translation(origin), rd.Grid?.Index ?? -1, rd.ChunkPos));
+                                         rd.TransparentMesh, rd.Models, Mat4.Translation(origin), rd.Grid?.Index ?? -1, rd.ChunkPos,
+                                         rd.Grid));
             }
         }
 
@@ -153,8 +155,22 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
 
             float distSq = Vector3D.DistanceSquared(model.TransformPoint(half), frame.CameraPosition);
             AddDraw(new ChunkDraw(distSq, rd.Mesh, rd.CutoutMesh, rd.TransparentMesh, rd.Models, model, rd.Grid?.Index ?? -1,
-                                     rd.ChunkPos));
+                                     rd.ChunkPos, rd.Grid));
         }
+
+        // Light maps whose chunk's light changed since they were baked (or never baked) are baked before anything draws:
+        // only the chunks in view, so one out of view waits until it's seen.
+        foreach (var d in _draws)
+        {
+            int stamp = _renderer.LightStampOf(d.Handle, d.Chunk);
+            _renderer.PrepareLightmap(d.Mesh, d.Handle, d.Chunk, stamp);
+            _renderer.PrepareLightmap(d.CutoutMesh, d.Handle, d.Chunk, stamp);
+            _renderer.PrepareLightmap(d.TransparentMesh, d.Handle, d.Chunk, stamp);
+        }
+        _renderer.BakeLightmaps();
+        var (bakedMeshes, bakedGroups) = _renderer.LastLightmapBake;
+        _bakedMeshesEma += 0.05 * (bakedMeshes - _bakedMeshesEma);
+        _bakedGroupsEma += 0.05 * (bakedGroups - _bakedGroupsEma);
 
         // Nearest first, so the depth test rejects hidden fragments before the (expensive) lighting shader runs on
         // them instead of shading them and overwriting them later.
@@ -218,5 +234,8 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         ImGui.Text($"Chunks visible: {_draws.Count:N0} of {_columnOf.Count + _others.Count:N0}; world columns visible: " +
                    $"{_columnsVisible:N0} of {_columns.Count:N0}; ship chunks: {_others.Count:N0}");
         ImGui.Text($"Model blocks drawn: {_modelBlocksDrawn:N0}; chunks with translucent faces drawn: {_translucentDraws.Count:N0}");
+        var (used, capacity) = _renderer.LightmapArenaUse;
+        ImGui.Text($"Light maps: {used * 4 / 1048576.0:F1} of {capacity * 4 / 1048576.0:F1} MB; baked per frame (smoothed): " +
+                   $"{_bakedMeshesEma:F1} meshes, {_bakedGroupsEma * Renderer.LightmapQuadsPerGroup:N0} quads at most");
     }
 }
