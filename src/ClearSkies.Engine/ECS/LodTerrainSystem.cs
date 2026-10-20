@@ -545,7 +545,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         // coarse columns are); a far one that's drawn, settled and uncovered has nothing to do.
         int readyIndex = 0, scan = _editScan;
         long nearSq = Sq((int)MathF.Ceiling(FullDetailRadius / ColumnBlocks) + 2);
-        long start = System.Diagnostics.Stopwatch.GetTimestamp();
+        double residentMs = 0; // spent putting columns in the grid this frame (not the rest of this loop)
         foreach (var (key, column) in _columns)
         {
             bool near = Sq(key.x - _centre.x) + Sq(key.z - _centre.z) <= nearSq;
@@ -567,11 +567,13 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
             {
                 // Putting a column in the grid writes each chunk's occupancy and its surface bricks: as many a frame as
                 // fit the budget, the rest on later frames (lit as open air meanwhile).
-                if (System.Diagnostics.Stopwatch.GetElapsedTime(start).TotalMilliseconds < ResidentBudgetMs)
+                if (residentMs < ResidentBudgetMs)
                 {
+                    long start = System.Diagnostics.Stopwatch.GetTimestamp();
                     _steps.Lap(SwapStep);
                     MakeResident(key, column);
                     _steps.Lap(ResidentStep);
+                    residentMs += System.Diagnostics.Stopwatch.GetElapsedTime(start).TotalMilliseconds;
                 }
                 column.Settled = false;
                 column.Waiting = 0;
