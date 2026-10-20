@@ -270,6 +270,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
                 if (Wanted(pos.X, pos.Z) && !_staticVolume.IsLoaded(pos)) _staticVolume.AddChunk(pos, data, prepared);
             }
             Loaded(job.Column);
+            ColumnChanged?.Invoke(job.Column.x, job.Column.z);
         }
         _steps.Lap(ApplyStep);
 
@@ -322,6 +323,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
     private void Rebuild()
     {
         Rebuilds++;
+        WantedVersion++;
         // Whatever the last rebuild didn't get to unload goes now: a chunk that stays loaded out of view could share a
         // cell of the GPU store's world index with one coming into view on the other side (see LightBudget.WorldIndexDim).
         UnloadSome(double.PositiveInfinity);
@@ -507,6 +509,14 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
     /// <summary>Whether chunk <paramref name="pos"/> has been edited since it was generated (it's loaded from the store).</summary>
     public bool IsEdited(ChunkPosition pos) => _edited.Contains(pos);
 
+    /// <summary>Column (x, z) started or finished loading, or one of its chunks unloaded: whether it's ready (see
+    /// <see cref="IsColumnReady"/>) may have changed, as it may when a chunk's mesh comes or goes, or when
+    /// <see cref="WantedVersion"/> changes.</summary>
+    public event Action<int, int>? ColumnChanged;
+
+    /// <summary>Changes whenever which columns are wanted does (the interests moved to other columns).</summary>
+    public int WantedVersion { get; private set; }
+
     /// <summary>Whether column (x, z) is wanted and drawn in full: nothing in it still to load, and every chunk of it
     /// that may hold something loaded and meshed.</summary>
     public bool IsColumnReady(int x, int z)
@@ -619,6 +629,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
     {
         _inFlight.Add(col, work.Count);
         _inFlightChunks += work.Count;
+        ColumnChanged?.Invoke(col.x, col.z);
         BackgroundWork.Queue(() =>
         {
             var loaded = new List<(ChunkPosition, ChunkData?, ChunkPreparation?)>(work.Count);
@@ -777,6 +788,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
         if (entry is not null && entry.Data.IsDirty) RecordEdited(pos, entry.Data.HasAnyNonAir());
         _staticVolume.RemoveChunk(pos);
         entry?.Data.Release(); // its arrays go to the next chunk to load
+        ColumnChanged?.Invoke(pos.X, pos.Z);
     }
 
 }

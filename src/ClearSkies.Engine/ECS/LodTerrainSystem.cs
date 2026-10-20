@@ -100,6 +100,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         public readonly List<CoarseChunk> Shown = new(); // the chunks with faces (not buried)
         public int MinY, MaxY;
         public bool Drawn;       // this frame: not all four full columns are ready
+        public bool Ready, ReadyKnown; // whether all four are ready, as last found (see _readyDirty)
         public bool ChildEdited; // a full chunk under it was edited while it was hidden
         public readonly List<int> Resident = new(); // the chunk layers it has in the grid (empty: not in it)
         public bool Settled;   // in the grid and lit since it went in: its light maps follow the grid
@@ -174,7 +175,23 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         var atlas = renderer.Atlas;
         _meshers = new ThreadLocal<GreedyMesher>(() => new GreedyMesher(atlas));
         _interests = world.GetEntities().With<TerrainInterest>().With<Transform>().AsSet();
+
+        // Whether a coarse column's full detail is ready is found again only when something it depends on changes.
+        load.ColumnChanged += (x, z) => _readyDirty.Add((x >> 1, z >> 1));
+        world.SubscribeComponentAdded((in Entity e, in ChunkMeshedFlag _) => ChunkChanged(e));
+        world.SubscribeComponentRemoved((in Entity e, in ChunkMeshedFlag _) => ChunkChanged(e));
+        world.SubscribeEntityDisposed((in Entity e) => ChunkChanged(e));
     }
+
+    private void ChunkChanged(in Entity e)
+    {
+        if (!e.Has<Chunk>()) return;
+        var entry = e.Get<Chunk>().Entry;
+        if (entry.Volume == _volume) _readyDirty.Add((entry.Position.X >> 1, entry.Position.Z >> 1));
+    }
+
+    private readonly HashSet<(int x, int z)> _readyDirty = new();
+    private int _wantedVersion = -1;
 
     public bool Active => Enabled;
 
@@ -553,13 +570,22 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         // coarse columns are); a far one that's drawn, settled and uncovered has nothing to do.
         int readyIndex = 0, scan = _editScan;
         long nearSq = Sq((int)MathF.Ceiling(FullDetailRadius / ColumnBlocks) + 2);
+        bool allDirty = _wantedVersion != _load.WantedVersion;
+        _wantedVersion = _load.WantedVersion;
         double residentMs = 0; // spent putting columns in the grid this frame (not the rest of this loop)
         foreach (var (key, column) in _columns)
         {
             bool near = Sq(key.x - _centre.x) + Sq(key.z - _centre.z) <= nearSq;
+            if (!near) column.ReadyKnown = false; // found again when it's next near (changes meanwhile aren't kept)
             if (!near && column.Drawn && column.Settled && !column.Covered && !column.Leaving) continue;
-            bool ready = near;
-            for (int j = 0; j < 4 && ready; j++) ready = _load.IsColumnReady(key.x * 2 + (j & 1), key.z * 2 + (j >> 1));
+            if (near && (allDirty || !column.ReadyKnown || _readyDirty.Contains(key)))
+            {
+                bool all = true;
+                for (int j = 0; j < 4 && all; j++) all = _load.IsColumnReady(key.x * 2 + (j & 1), key.z * 2 + (j >> 1));
+                column.Ready = all;
+                column.ReadyKnown = true;
+            }
+            bool ready = near && column.Ready;
             if (ready)
             {
                 if (readyIndex++ == scan && !column.ChildEdited) column.ChildEdited = AnyEdited(key);
@@ -614,6 +640,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
             }
         }
         _editScan = readyIndex == 0 ? 0 : (scan + 1) % readyIndex;
+        _readyDirty.Clear();
     }
 
     /// <summary>Whether a column waiting on lighting looks again this frame: every <see cref="LitCheckEvery"/> frames,
