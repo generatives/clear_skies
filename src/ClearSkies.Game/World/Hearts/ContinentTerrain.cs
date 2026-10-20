@@ -41,6 +41,7 @@ public sealed class ContinentTerrain
     private readonly FastNoiseLite _woods;        // where trees grow thick, apart from the plants
     private readonly FastNoiseLite _heat, _wet;   // the climate's broad regional fields (see Biomes)
     private readonly FastNoiseLite _mottle;       // clumps of a neighbouring climate near a border
+    private readonly FastNoiseLite _stands;       // which biome's colour a clump of grass and trees takes near a border
 
     private ContinentTerrain(ulong seed)
     {
@@ -64,6 +65,7 @@ public sealed class ContinentTerrain
         _heat = Noise(seed + 28, FastNoiseLite.FractalType.FBm, 2, 0.00025f);
         _wet = Noise(seed + 29, FastNoiseLite.FractalType.FBm, 2, 0.0003f);
         _mottle = Noise(seed + 30, FastNoiseLite.FractalType.FBm, 2, 0.006f);
+        _stands = Noise(seed + 31, FastNoiseLite.FractalType.FBm, 2, 0.012f);
     }
 
     private static FastNoiseLite Noise(ulong seed, FastNoiseLite.FractalType fractal, int octaves, float frequency)
@@ -149,6 +151,10 @@ public sealed class ContinentTerrain
 
     /// <summary>0-1 at column (x, z), for <see cref="Biomes.Pick"/>: how wet the region is.</summary>
     public float Wet(float x, float z) => Math.Clamp(0.5f + 0.9f * _wet.GetNoise(x, z) - 0.08f * _mottle.GetNoise(x, z), 0f, 1f);
+
+    /// <summary>0-1 at column (x, z), about evenly spread, in clumps forty or so blocks across: which nearby biome's
+    /// colour grass and leaves take there (see <see cref="Biomes.Tint"/>).</summary>
+    public float Stands(float x, float z) => Math.Clamp(0.5f + 0.8f * _stands.GetNoise(x, z), 0f, 0.999f);
 
     /// <summary>0-1 at column (x, z), for <see cref="Plant"/>: which kind of plant a stand is mostly made of.</summary>
     public float Kind(float x, float z) => 0.5f + 0.5f * _kind.GetNoise(x, z);

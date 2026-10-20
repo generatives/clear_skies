@@ -20,11 +20,11 @@ public static class Biomes
     {
         (Biome.Temperate, 0.55f, 0.55f, 0f,    0f,    0f,    0f),
         (Biome.Autumn,    0.30f, 0.75f, 0.93f, 0.52f, 0.18f, 0.85f),
-        (Biome.Desert,    0.75f, 0.35f, 0.78f, 0.74f, 0.42f, 0.6f),
-        (Biome.Badlands,  0.95f, 0.10f, 0.72f, 0.48f, 0.30f, 0.6f),
+        (Biome.Desert,    0.75f, 0.35f, 0.88f, 0.76f, 0.30f, 0.85f),
+        (Biome.Badlands,  0.95f, 0.10f, 0.80f, 0.50f, 0.26f, 0.75f),
     };
 
-    /// <summary>How far apart in the climate (squared) biomes' tints blend over.</summary>
+    /// <summary>How far apart in the climate (squared) biomes' tints mix over.</summary>
     private const float TintBlend = 0.015f;
 
     /// <summary>How hot a top at <paramref name="top"/> is, with <paramref name="regional"/> (-1 to 1) from
@@ -60,22 +60,30 @@ public static class Biomes
         return MathF.Min(1f, 2f / (1f + MathF.Exp((desert - other) / DryBlend)));
     }
 
-    /// <summary>The tint at (heat, wet): each biome's weighted by how near it is, the nearest most. rgb is the colour
-    /// (sRGB) and a how strongly it applies, all 0-1.</summary>
-    public static (float R, float G, float B, float A) Tint(float heat, float wet)
+    /// <summary>The tint at (heat, wet): one biome's, chosen by <paramref name="pick"/> (0-1, spread evenly) among the
+    /// nearby biomes with odds by how near each is in the climate. With pick from a patchy noise, a border is clumps of
+    /// one biome's colour or the other's, the clumps of each thinning out across it, rather than a smooth fade between
+    /// them. rgb is the colour (sRGB) and a how strongly it applies, all 0-1.</summary>
+    public static (float R, float G, float B, float A) Tint(float heat, float wet, float pick)
     {
         float nearest = float.MaxValue;
         foreach (var e in Table) nearest = MathF.Min(nearest, (heat - e.Heat) * (heat - e.Heat) + (wet - e.Wet) * (wet - e.Wet));
-        float sum = 0f, r = 0f, g = 0f, b = 0f, a = 0f;
-        foreach (var e in Table)
+        Span<float> weights = stackalloc float[Table.Length];
+        float sum = 0f;
+        for (int i = 0; i < Table.Length; i++)
         {
+            var e = Table[i];
             float d = (heat - e.Heat) * (heat - e.Heat) + (wet - e.Wet) * (wet - e.Wet);
-            float weight = MathF.Exp(-(d - nearest) / TintBlend);
-            sum += weight;
-            r += weight * e.Strength * e.R; g += weight * e.Strength * e.G; b += weight * e.Strength * e.B;
-            a += weight * e.Strength;
+            sum += weights[i] = MathF.Exp(-(d - nearest) / TintBlend);
         }
-        if (a <= 0f) return (0f, 0f, 0f, 0f);
-        return (r / a, g / a, b / a, a / sum);
+        float at = pick * sum;
+        int chosen = Table.Length - 1;
+        for (int i = 0; i < Table.Length; i++)
+        {
+            if (at < weights[i]) { chosen = i; break; }
+            at -= weights[i];
+        }
+        var c = Table[chosen];
+        return (c.R, c.G, c.B, c.Strength);
     }
 }
