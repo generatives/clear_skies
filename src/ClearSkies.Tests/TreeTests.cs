@@ -13,12 +13,12 @@ public class TreeTests
             Enumerable.Range(0, 20000).Select(i => Trees.At(ground, i, top, -i * 7, 0.8f, 99))
                       .Where(k => k != Trees.Kind.None).Distinct();
 
-        Assert.Equal(new[] { Trees.Kind.Oak }, On(BlockId.Grass, 200));
-        Assert.Equal(new[] { Trees.Kind.Pine }, On(BlockId.Grass, 600));
-        Assert.Equal(new[] { Trees.Kind.Pine }, On(BlockId.Snow, 800));
-        Assert.Equal(new[] { Trees.Kind.Cactus }, On(BlockId.Sand, 50));
-        Assert.Empty(On(BlockId.Rock, 300));
-        Assert.Empty(On(BlockId.Dirt, 300));
+        Assert.Equal(new[] { Trees.Kind.Oak }, On(BlockId.Grass, 500));
+        Assert.Equal(new[] { Trees.Kind.Pine }, On(BlockId.Grass, 900));
+        Assert.Equal(new[] { Trees.Kind.Pine }, On(BlockId.Snow, 1100));
+        Assert.Equal(new[] { Trees.Kind.Cactus }, On(BlockId.Sand, 350));
+        Assert.Empty(On(BlockId.Rock, 600));
+        Assert.Empty(On(BlockId.Dirt, 600));
     }
 
     [Fact]

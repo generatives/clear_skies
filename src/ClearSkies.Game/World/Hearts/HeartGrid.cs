@@ -1,18 +1,20 @@
 namespace ClearSkies.Game.Generation;
 
 /// <summary>One island heart: it holds up the ground nearer to it than to any other heart (its piece), if it is alive.
-/// Positions are world blocks. A heart that doesn't <paramref name="Exists"/> (outside its layer's band) is no heart at
-/// all: it holds nothing and leaves the ground to others. <paramref name="Drop"/> is how far its piece's top is worn
-/// down, 0-1 of the most (see HeartWorldGenerator).</summary>
-public readonly record struct Heart(float X, float Y, float Z, bool Alive, bool Exists, float Drop);
+/// X and Z are world blocks; <paramref name="Depth"/> is how far below the terrain surface at (X, Z) it sits, and
+/// <paramref name="Surface"/> that surface's height. A heart that doesn't <paramref name="Exists"/> (above the surface)
+/// is no heart at all: it holds nothing and leaves the ground to others. <paramref name="Drop"/> is how far its piece's
+/// top is worn down, 0-1 of the most (see HeartWorldGenerator).</summary>
+public readonly record struct Heart(float X, float Depth, float Z, float Surface, bool Alive, bool Exists, float Drop);
 
 /// <summary>
 /// Where island hearts are. The world is a <see cref="ContinentTerrain"/> broken into pieces: hearts sit all through
 /// the ground, one per cell of a 3D grid, and each holds the ground nearest to it, so the pieces fit together like a
-/// jigsaw, with a crack between neighbours (see HeartWorldGenerator). Distances count vertical offsets
-/// <see cref="VerticalScale"/> times over, so pieces are wide and flat rather than cubes, and the ground splits into
-/// layers as well as columns. Each height band (<see cref="Layers"/>) has its own grid, finer higher up, so pieces get
-/// smaller with height.
+/// jigsaw, with a crack between neighbours (see HeartWorldGenerator). The grid's rows go down from the terrain surface,
+/// not up from a fixed height: the islands are built around their hearts, so the top row's pieces always hold the
+/// surface, and the layers under them follow the land's shape (the cracks between them run along it, not across its
+/// slopes). Distances count depth <see cref="VerticalScale"/> times over, so pieces are wide and flat rather than
+/// cubes.
 ///
 /// A dead heart's piece doesn't exist: a hole. Whether a heart is alive goes by height: nearly all are low down, so the
 /// plains are a floor of land cracked into pieces (under it, the underworld is sparser); above it they die off gradually, so the highlands break up into
@@ -22,7 +24,8 @@ public readonly record struct Heart(float X, float Y, float Z, bool Alive, bool 
 public static class HeartGrid
 {
     /// <summary>A layer of hearts: a grid of cells <see cref="CellSize"/> blocks across (and that over
-    /// <see cref="VerticalScale"/> tall), whose hearts exist only from <see cref="YMin"/> up to <see cref="YMax"/>.</summary>
+    /// <see cref="VerticalScale"/> tall), whose hearts exist only from <see cref="YMin"/> up to <see cref="YMax"/>
+    /// (heights relative to the terrain surface: minus depth).</summary>
     public readonly record struct Layer(float CellSize, float YMin, float YMax)
     {
         public float CellHeight => CellSize / VerticalScale;
@@ -30,19 +33,15 @@ public static class HeartGrid
         public int CellY(float y) => (int)MathF.Floor(y * VerticalScale / CellSize);
     }
 
-    /// <summary>The layers, bottom up: small pieces in the underworld, big in the floor, nearly as big in the
-    /// highlands, smaller in the mountains.</summary>
+    /// <summary>The layers: one grid, all through the ground under the surface.</summary>
     public static readonly Layer[] Layers =
     {
-        new(180f, float.MinValue, DeepTop),
-        new(360f, DeepTop, 400f),
-        new(300f, 400f, 850f),
-        new(210f, 850f, float.MaxValue),
+        new(500f, float.MinValue, 0f),
     };
 
-    /// <summary>The top of the underworld: below it, under the plains, pieces are smaller and fewer, so there is room
-    /// to fly among them.</summary>
-    public const float DeepTop = 0f;
+    /// <summary>The top of the underworld: below it, under the plains' top layer of pieces, most are gone, leaving
+    /// caves hundreds of blocks high with the remaining pieces standing and hanging in them.</summary>
+    public const float DeepTop = ContinentTerrain.PlainsLevel - 150f;
 
     /// <summary>How much more a vertical offset counts than a horizontal one when finding a block's nearest heart.</summary>
     public const float VerticalScale = 1.6f;
@@ -65,7 +64,7 @@ public static class HeartGrid
     // Alive by height: FloorChance up to FloorTop, easing over FloorFade to UpperChance (in the middle of a cluster),
     // and thinning further to half of that ThinOver blocks higher. Inside a mountain range, MountainChance instead,
     // so a mountain holds together as one cracked whole.
-    private const float FloorChance = 0.96f, FloorFade = 350f, DeepChance = 0.45f, DeepFade = 80f;
+    private const float FloorChance = 0.96f, FloorFade = 350f, DeepChance = 0.3f, DeepFade = 80f;
     public const float FloorTop = ContinentTerrain.PlainsLevel - 30f;
     private const float UpperChance = 0.45f, ThinOver = 1200f, MountainChance = 0.85f;
 
@@ -77,21 +76,23 @@ public static class HeartGrid
     // across the open sky, never a lone piece on its own. So a continent is a scatter of island clusters with open
     // sky between, each still carrying the continent's surface on top.
     private const float IslandFrom = 0.1f, IslandFull = 0.6f, MountainInside = 0.55f;
-    private const float IsletChance = 0.6f, IsletSpacing = 780f, IsletDetail = 255f, IsletFrom = 0.74f, IsletFull = 0.84f;
+    private const float IsletChance = 0.6f, IsletSpacing = 1300f, IsletDetail = 420f, IsletFrom = 0.74f, IsletFull = 0.84f;
 
-    /// <summary>How much of FloorChance the floor keeps even inside a cluster: it breaks into islands with gaps between,
-    /// not one cracked landmass.</summary>
-    private const float IslandFloor = 0.55f;
+    /// <summary>How much of FloorChance the floor keeps inside a cluster's fringe, rising to all of it in the cluster's
+    /// core (from CoreFrom to CoreFull of it): a landmass is whole in the middle and breaks up towards its edges. A
+    /// range in a cluster's core holds together the same way, up to MountainCore of MountainChance.</summary>
+    private const float IslandFloor = 0.8f, CoreFrom = 0.4f, CoreFull = 0.75f, MountainCore = 0.9f;
 
     // Continents: value noise at ContinentSpacing, roughened by a finer one at ContinentDetail; land where it is over
     // ContinentEdgeLow, fading in until ContinentEdgeHigh.
-    private const float ContinentSpacing = 16000f, ContinentDetail = 5000f, ContinentEdgeLow = 0.46f, ContinentEdgeHigh = 0.56f;
+    private const float ContinentSpacing = 24000f, ContinentDetail = 7500f, ContinentEdgeLow = 0.46f, ContinentEdgeHigh = 0.56f;
 
     // Clumps: value noise at these spacings (blocks). Clusters: blobs of value noise at ClusterSpacing, their edges
     // roughened by a finer one at ClusterDetail, gathered where the clumps are.
-    private const float ClumpSpacing = 9000f, ClumpDetail = 3000f, ClusterSpacing = 1400f, ClusterDetail = 450f;
+    private const float ClumpSpacing = 16000f, ClumpDetail = 5000f, ClusterSpacing = 3500f, ClusterDetail = 1100f;
 
-    /// <summary>The heart of cell (cx, cy, cz) of layer <paramref name="layer"/>.</summary>
+    /// <summary>The heart of cell (cx, cy, cz) of layer <paramref name="layer"/>. Row cy is minus its depth below the
+    /// surface, in cells: -1 is the top row.</summary>
     public static Heart At(ulong seed, int layer, int cx, int cy, int cz)
     {
         var l = Layers[layer];
@@ -100,8 +101,11 @@ public static class HeartGrid
         float y = (cy + 0.5f + Jitter * (rng.NextFloat01() - 0.5f)) * l.CellHeight;
         float z = (cz + 0.5f + Jitter * (rng.NextFloat01() - 0.5f)) * l.CellSize;
         bool exists = y >= l.YMin && y < l.YMax;
-        bool alive = exists && rng.NextFloat01() < AliveChance(seed, x, y, z);
-        return new Heart(x, y, z, alive, exists, rng.NextFloat01());
+        float surface = exists ? ContinentTerrain.For(seed).Height(x, z) : 0f;
+        // Alive by the height of the top of its row: the top row by the surface's own height (plains floor,
+        // highlands, ranges), the rows under it by how far down they reach (under the plains, the underworld).
+        bool alive = exists && rng.NextFloat01() < AliveChance(seed, x, surface + (cy + 1) * l.CellHeight, z);
+        return new Heart(x, -y, z, surface, alive, exists, rng.NextFloat01());
     }
 
     /// <summary>How likely a heart at (x, y, z) is to be alive: by height and the mountain ranges, within a continent.</summary>
@@ -127,12 +131,13 @@ public static class HeartGrid
         float cluster = ClusterField(seed, x, z);
         float inIsland = Smoothstep(IslandFrom, IslandFull, cluster);
         float islet = inIsland < 1f ? IsletField(seed, x, z) : 0f;
-        float island = Lerp(IsletChance * islet, IslandFloor, inIsland);
+        float inCore = Smoothstep(CoreFrom, CoreFull, cluster);
+        float island = Lerp(IsletChance * islet, Lerp(IslandFloor, 1f, inCore), inIsland);
         if (y < DeepTop) return island * Lerp(DeepChance, FloorChance, Smoothstep(DeepTop - DeepFade, DeepTop, y));
         float up = Smoothstep(FloorTop, FloorTop + FloorFade, y);
         float floor = island * FloorChance;
         float mountain = Smoothstep(0.1f, 0.6f, ContinentTerrain.For(seed).RangeCore(x, z));
-        float mountainChance = MountainChance * MountainInside * inIsland;
+        float mountainChance = MountainChance * Lerp(MountainInside, MountainCore, inCore) * inIsland;
         if (up <= 0f) return Lerp(floor, mountainChance, mountain);
         float thin = Lerp(1f, 0.5f, Math.Clamp((y - FloorTop - FloorFade) / ThinOver, 0f, 1f));
         float upper = MathF.Min(UpperChance * thin * Lerp(0.5f * islet, 1.8f, cluster), 1f);
@@ -140,7 +145,7 @@ public static class HeartGrid
     }
 
     /// <summary>0-1: how far inside a cluster (x, z) is, rising gradually from its fringe to its core. Clusters are a
-    /// kilometre or two across, a few hundred blocks apart where the big clumps are, and rare outside them.</summary>
+    /// few kilometres across, under a kilometre apart where the big clumps are, and rare outside them.</summary>
     public static float ClusterField(ulong seed, float x, float z)
     {
         float v = 0.75f * ValueNoise((uint)seed ^ 0xC5u, x / ClusterSpacing, z / ClusterSpacing)
