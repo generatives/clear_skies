@@ -675,8 +675,15 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
             if (!_columns.ContainsKey(c)) best = MathF.Min(best, Distance(centre, c)); // one being made again is drawn meanwhile
         for (int i = _queueHead; i < _queue.Count; i++)
             if (!_columns.ContainsKey(_queue[i])) { best = MathF.Min(best, Distance(centre, _queue[i])); break; }
+        foreach (var (c, column) in _columns)
+            if (WaitsForLight(column)) best = MathF.Min(best, Distance(centre, c));
         return best;
     }
+
+    /// <summary>Whether a column is held back until it's lit: it's never been lit from the grid, and it can be (the grid
+    /// isn't full). Drawn meanwhile it would show as open air, bright where it should be shadowed.</summary>
+    private bool WaitsForLight(CoarseColumn column)
+        => Grid.Index >= 0 && !_gridFull && !column.Baked && !column.Settled && column.Shown.Count > 0;
 
     /// <summary>Horizontal distance from <paramref name="centre"/> to the nearest point of coarse column <paramref name="c"/>.</summary>
     private static float Distance(Vector3D<float> centre, (int x, int z) c)
@@ -708,10 +715,10 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
             // Drawn, or dissolving over the full detail that replaced it.
             float dissolve = column.Drawn ? 0f : Faded(column.FadeOutAt);
             var shown = column.Shown;
-            if (dissolve >= 1f || shown.Count == 0) continue;
+            if (dissolve >= 1f || shown.Count == 0 || WaitsForLight(column)) continue;
             if (!frame.Frustum.Intersects(shown[0].Min, shown[^1].Min + size)) continue; // shown is in Y order
-            // Lit from the grid once it's settled there; until then (or leaving it) with the light maps it last baked,
-            // or as open air if it has none.
+            // Lit from the grid once it's settled there; until then (or leaving it) with the light maps it last baked;
+            // one never lit isn't drawn (above) unless the grid is full, when it's lit as open air.
             bool bake = column.Settled && Grid.Index >= 0;
             if (bake) column.Baked = true;
             int grid = column.Baked && Grid.Index >= 0 ? Grid.Index : Renderer.LodGrid;
