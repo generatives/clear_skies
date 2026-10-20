@@ -126,6 +126,7 @@ public sealed class GameView : IDisposable
             light.AddStaticGrid(level.Grid);     // lit like the world
             level.IsLit = light.IsLit;           // swaps wait for the incoming terrain's light
             level.IsSettled = light.IsSettled;   // and terrain shown for the first time for its light to be done
+            level.Hurry = light.Hurry;           // which, where it holds the fog, goes ahead of the light queues
             // Each level reaches four times as far as the one before, from 1024 blocks for level 1 (2048 alone).
             level.OuterRadius = i == 0 && _lodLevels <= 1 ? 2048f : 1024f * (1 << (2 * i));
             levels.Add(level);

@@ -129,6 +129,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
         public bool Ready, ReadyKnown; // whether all four are ready, as last found (see _readyDirty)
         public bool ChildEdited; // a full chunk under it was edited while it was hidden
         public readonly List<int> Resident = new(); // the chunk layers it has in the grid so far
+        public bool Hurried;                         // picked this frame (HurryFirstLight)
         public List<int>? ToPut;                    // the layers still to put in the grid (null: not started)
         public bool InGrid => ToPut is { Count: 0 };
         public bool Settled;   // in the grid and lit since it went in: its light maps follow the grid
@@ -155,6 +156,12 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
     /// <summary>Whether a chunk of a grid is lit and its light done changing (GpuLightSystem.IsSettled), for a column
     /// shown for the first time; without it, <see cref="IsLit"/> is used.</summary>
     public Func<GridHandle, ChunkPosition, bool>? IsSettled;
+
+    /// <summary>Lights a chunk of a grid ahead of the light queues (GpuLightSystem.Hurry), for the nearest columns held
+    /// back for their first light (see <see cref="HurryFirstLight"/>).</summary>
+    public Action<GridHandle, ChunkPosition>? Hurry;
+    private const int HurriedColumns = 2;
+    private readonly CoarseColumn?[] _hurriedNow = new CoarseColumn?[HurriedColumns];
 
     // Shared occupancy for the coarse chunks that are all one thing, and for the air right above and below a column's
     // chunks (so the faces there have air with light in it).
@@ -325,6 +332,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
         Dispatch();
         _steps.Lap(DispatchStep);
         UpdateDrawn();
+        HurryFirstLight();
         _steps.Lap(SwapStep);
     }
 
@@ -1059,6 +1067,30 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
     /// isn't full). Drawn meanwhile it would show as open air, bright where it should be shadowed.</summary>
     private bool WaitsForLight(CoarseColumn column)
         => Grid.Index >= 0 && !_gridFull && !column.Baked && !column.Settled && column.Shown.Count > 0;
+
+    /// <summary>The nearest columns held back for their first light hold the fog where they are (see NotReadyAt). The
+    /// light queues go nearest the camera first, so while the view moves the full detail loading nearer keeps them
+    /// waiting, and the fog stuck until it stopped. Their chunks are lit ahead of the queues instead.</summary>
+    private void HurryFirstLight()
+    {
+        if (Hurry == null) return;
+        int picked = 0;
+        for (; picked < HurriedColumns; picked++)
+        {
+            float best = float.PositiveInfinity;
+            (int x, int z) bestKey = default;
+            CoarseColumn? bestColumn = null;
+            foreach (var (k, column) in _columns)
+                if (WaitsForLight(column) && !column.Hurried && Distance(_view, k) is var d && d < best)
+                    (best, bestKey, bestColumn) = (d, k, column);
+            if (bestColumn == null) break;
+            bestColumn.Hurried = true;
+            _hurriedNow[picked] = bestColumn;
+            for (int i = bestColumn.LitSoFar; i < bestColumn.Resident.Count; i++)
+                Hurry(Grid, new ChunkPosition(bestKey.x, bestColumn.Resident[i], bestKey.z));
+        }
+        for (int n = 0; n < picked; n++) _hurriedNow[n]!.Hurried = false;
+    }
 
     /// <summary>Horizontal distance from <paramref name="centre"/> to the nearest point of coarse column <paramref name="c"/>.</summary>
     private float Distance(Vector3D<float> centre, (int x, int z) c)

@@ -251,6 +251,7 @@ public sealed partial class GpuLightSystem
         _bandsOn = haveCam;
         _bandCam = cam.Position;
         CollectBounceClears(); // first, so the cleared bricks' direct light is redone this frame too
+        TakeHurried();
         int n = BuildLightWork(cam.Position);
         _lastDirtyTotal = n;
         _phaseTimer.Lap(3);
@@ -874,6 +875,44 @@ public sealed partial class GpuLightSystem
                 return false;
         }
         return true;
+    }
+
+    // Chunks asked for ahead of the queues (see Hurry), until this frame's lighting takes them.
+    private readonly List<(GridHandle Grid, ChunkPosition Pos)> _hurried = new();
+    private const int MaxHurried = 256;
+
+    /// <summary>
+    /// Lights chunk <paramref name="pos"/> of static grid <paramref name="g"/> ahead of the queues on the next lighting
+    /// frame: its bricks waiting for direct light are relit past the cap, and those owed bounce updates get one, until
+    /// it's settled (see <see cref="IsSettled"/>). For terrain held back for its first light where the fog stops
+    /// (LodTerrainSystem): the queues go nearest the camera first, and while the view moves nearer work keeps coming.
+    /// Ask every frame it's wanted.
+    /// </summary>
+    public void Hurry(GridHandle g, ChunkPosition pos)
+    {
+        if (_hurried.Count < MaxHurried) _hurried.Add((g, pos));
+    }
+
+    private void TakeHurried()
+    {
+        foreach (var (g, pos) in _hurried)
+        {
+            if (!g.Chunks.TryGetValue(pos, out var rec) || rec.BrickSlots is not { } slots) continue;
+            foreach (int slot in slots)
+            {
+                if (slot < 0 || slot >= _dirty.Length) continue;
+                if (_dirty[slot]) MarkUrgent(slot);
+                else if (!_bounceEnabled) continue;
+                else if (NeedsUpdate(slot))
+                {
+                    if (_nowStamp[slot] == _frame) continue;
+                    _nowStamp[slot] = _frame;
+                    _nowSlots.Add(slot);
+                }
+                else if (_lastUpdate[slot] == NeverUpdated) TouchNow(slot);
+            }
+        }
+        _hurried.Clear();
     }
 
     /// <summary>Whether a brick has an update to come: touched since its last, or owed more for its last change.</summary>
