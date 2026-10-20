@@ -34,11 +34,9 @@ public class TreeTests
             .Select(i => Trees.At(BlockId.Grass, i, 500, -i * 7, 0.8f, 99, Biome.Autumn))
             .Where(k => k != Trees.Kind.None).Distinct());
         Assert.Equal(BlockId.RedSand, ContinentTerrain.Block(500, 500, 0f, 0.5f, 0f, Biome.Badlands));
-        Assert.Equal(0f, Biomes.Tint(0.55f, 0.55f, 0.5f).A);                // temperate keeps its green
-        Assert.True(Biomes.Tint(0.3f, 0.75f, 0.5f).A > 0.8f);               // autumn tints strongly
-        float autumnShare = Enumerable.Range(0, 100)                         // and halfway, clumps of each
-            .Count(i => Biomes.Tint(0.43f, 0.65f, i / 100f).A > 0.8f) / 100f;
-        Assert.InRange(autumnShare, 0.3f, 0.7f);
+        Assert.True(Biomes.Tint(0.55f, 0.55f).A < 0.05f);                   // temperate keeps its green
+        Assert.True(Biomes.Tint(0.3f, 0.75f).A > 0.8f);                     // autumn tints strongly
+        Assert.InRange(Biomes.Tint(0.43f, 0.65f).A, 0.2f, 0.6f);            // and halfway it blends
         Assert.Equal(BlockId.Sand, ContinentTerrain.Block(500, 500, 0f, 0.5f, 0f, Biome.Desert));
     }
 

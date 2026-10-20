@@ -25,7 +25,7 @@ public static class Biomes
     };
 
     /// <summary>How far apart in the climate (squared) biomes' tints mix over.</summary>
-    private const float TintBlend = 0.015f;
+    private const float TintBlend = 0.004f;
 
     /// <summary>How hot a top at <paramref name="top"/> is, with <paramref name="regional"/> (-1 to 1) from
     /// <see cref="ContinentTerrain.Heat"/>: cooler by a unit every 900 blocks up from the plains.</summary>
@@ -45,7 +45,7 @@ public static class Biomes
     }
 
     /// <summary>How far apart in the climate (squared) a desert's sandy fringe reaches.</summary>
-    private const float DryBlend = 0.012f;
+    private const float DryBlend = 0.004f;
 
     /// <summary>0-1: how near (heat, wet) is to being desert, reaching 1 at its border, for the sand patches that thicken
     /// ahead of one (see <see cref="ContinentTerrain.Block"/>).</summary>
@@ -60,30 +60,22 @@ public static class Biomes
         return MathF.Min(1f, 2f / (1f + MathF.Exp((desert - other) / DryBlend)));
     }
 
-    /// <summary>The tint at (heat, wet): one biome's, chosen by <paramref name="pick"/> (0-1, spread evenly) among the
-    /// nearby biomes with odds by how near each is in the climate. With pick from a patchy noise, a border is clumps of
-    /// one biome's colour or the other's, the clumps of each thinning out across it, rather than a smooth fade between
-    /// them. rgb is the colour (sRGB) and a how strongly it applies, all 0-1.</summary>
-    public static (float R, float G, float B, float A) Tint(float heat, float wet, float pick)
+    /// <summary>The tint at (heat, wet): each biome's weighted by how near it is, the nearest most, so it shifts across
+    /// a border over a few dozen blocks. rgb is the colour (sRGB) and a how strongly it applies, all 0-1.</summary>
+    public static (float R, float G, float B, float A) Tint(float heat, float wet)
     {
         float nearest = float.MaxValue;
         foreach (var e in Table) nearest = MathF.Min(nearest, (heat - e.Heat) * (heat - e.Heat) + (wet - e.Wet) * (wet - e.Wet));
-        Span<float> weights = stackalloc float[Table.Length];
-        float sum = 0f;
-        for (int i = 0; i < Table.Length; i++)
+        float sum = 0f, r = 0f, g = 0f, b = 0f, a = 0f;
+        foreach (var e in Table)
         {
-            var e = Table[i];
             float d = (heat - e.Heat) * (heat - e.Heat) + (wet - e.Wet) * (wet - e.Wet);
-            sum += weights[i] = MathF.Exp(-(d - nearest) / TintBlend);
+            float weight = MathF.Exp(-(d - nearest) / TintBlend);
+            sum += weight;
+            r += weight * e.Strength * e.R; g += weight * e.Strength * e.G; b += weight * e.Strength * e.B;
+            a += weight * e.Strength;
         }
-        float at = pick * sum;
-        int chosen = Table.Length - 1;
-        for (int i = 0; i < Table.Length; i++)
-        {
-            if (at < weights[i]) { chosen = i; break; }
-            at -= weights[i];
-        }
-        var c = Table[chosen];
-        return (c.R, c.G, c.B, c.Strength);
+        if (a <= 0f) return (0f, 0f, 0f, 0f);
+        return (r / a, g / a, b / a, a / sum);
     }
 }

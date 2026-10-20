@@ -40,8 +40,7 @@ public sealed class ContinentTerrain
     private readonly FastNoiseLite _flora, _kind; // where plants grow thick, and which kind
     private readonly FastNoiseLite _woods;        // where trees grow thick, apart from the plants
     private readonly FastNoiseLite _heat, _wet;   // the climate's broad regional fields (see Biomes)
-    private readonly FastNoiseLite _mottle;       // clumps of a neighbouring climate near a border
-    private readonly FastNoiseLite _stands;       // which biome's colour a clump of grass and trees takes near a border
+    private readonly FastNoiseLite _climateWarpX, _climateWarpZ; // bend the borders between biomes
 
     private ContinentTerrain(ulong seed)
     {
@@ -64,8 +63,8 @@ public sealed class ContinentTerrain
         _kind = Noise(seed + 23, FastNoiseLite.FractalType.FBm, 2, 0.035f);
         _heat = Noise(seed + 28, FastNoiseLite.FractalType.FBm, 2, 0.00025f);
         _wet = Noise(seed + 29, FastNoiseLite.FractalType.FBm, 2, 0.0003f);
-        _mottle = Noise(seed + 30, FastNoiseLite.FractalType.FBm, 2, 0.006f);
-        _stands = Noise(seed + 31, FastNoiseLite.FractalType.FBm, 2, 0.012f);
+        _climateWarpX = Noise(seed + 30, FastNoiseLite.FractalType.FBm, 3, 0.002f);
+        _climateWarpZ = Noise(seed + 31, FastNoiseLite.FractalType.FBm, 3, 0.002f);
     }
 
     private static FastNoiseLite Noise(ulong seed, FastNoiseLite.FractalType fractal, int octaves, float frequency)
@@ -142,19 +141,23 @@ public sealed class ContinentTerrain
     /// across, laid out independently of the plant stands.</summary>
     public float Woods(float x, float z) => 0.5f + 0.5f * _woods.GetNoise(x, z);
 
+    /// <summary>How far the climate is read off from a column, in blocks: bends the borders between biomes into
+    /// bays and headlands a few hundred blocks across, with smaller wiggles along them, while keeping each biome in one
+    /// piece (no islands of one stranded in another).</summary>
+    public const float ClimateWarp = 200f;
+
     /// <summary>-1 to 1 at column (x, z), for <see cref="Biomes.Heat"/>: regions a few kilometres across that run hotter
     /// or cooler than their height alone would make them.</summary>
-    // Mottled a little along the line from cool and wet to hot and dry (where the biomes lie), so near a border the
-    // climate crosses back and forth in clumps a hundred blocks or so across: stands of autumn trees reaching into
-    // green woods, sand creeping in ahead of a desert.
-    public float Heat(float x, float z) => _heat.GetNoise(x, z) + 0.15f * _mottle.GetNoise(x, z);
+    public float Heat(float x, float z) { Warp(ref x, ref z); return _heat.GetNoise(x, z); }
 
     /// <summary>0-1 at column (x, z), for <see cref="Biomes.Pick"/>: how wet the region is.</summary>
-    public float Wet(float x, float z) => Math.Clamp(0.5f + 0.9f * _wet.GetNoise(x, z) - 0.08f * _mottle.GetNoise(x, z), 0f, 1f);
+    public float Wet(float x, float z) { Warp(ref x, ref z); return Math.Clamp(0.5f + 0.9f * _wet.GetNoise(x, z), 0f, 1f); }
 
-    /// <summary>0-1 at column (x, z), about evenly spread, in clumps forty or so blocks across: which nearby biome's
-    /// colour grass and leaves take there (see <see cref="Biomes.Tint"/>).</summary>
-    public float Stands(float x, float z) => Math.Clamp(0.5f + 0.8f * _stands.GetNoise(x, z), 0f, 0.999f);
+    private void Warp(ref float x, ref float z)
+    {
+        float wx = _climateWarpX.GetNoise(x, z), wz = _climateWarpZ.GetNoise(x, z);
+        x += ClimateWarp * wx; z += ClimateWarp * wz;
+    }
 
     /// <summary>0-1 at column (x, z), for <see cref="Plant"/>: which kind of plant a stand is mostly made of.</summary>
     public float Kind(float x, float z) => 0.5f + 0.5f * _kind.GetNoise(x, z);

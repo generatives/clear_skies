@@ -40,11 +40,11 @@ public sealed class BiomeTintSystem : ISystem
         for (int i = 0; i < N; i++)
         {
             float x = originX + (i + 0.5f) * ClimateTint.CellXZ, z = originZ + (k + 0.5f) * ClimateTint.CellXZ;
-            float regional = terrain.Heat(x, z), wet = terrain.Wet(x, z), pick = terrain.Stands(x, z);
+            float regional = terrain.Heat(x, z), wet = terrain.Wet(x, z);
             for (int j = 0; j < ClimateTint.SizeY; j++)
             {
                 float y = ClimateTint.BottomY + (j + 0.5f) * ClimateTint.CellY;
-                var (r, g, b, a) = Biomes.Tint(Biomes.Heat(y, regional), wet, pick);
+                var (r, g, b, a) = Biomes.Tint(Biomes.Heat(y, regional), wet);
                 int at = 4 * (i + N * (k + N * j));
                 texels[at] = (byte)(r * 255f + 0.5f);
                 texels[at + 1] = (byte)(g * 255f + 0.5f);
