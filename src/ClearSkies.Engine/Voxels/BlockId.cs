@@ -52,5 +52,5 @@ public enum BlockId : byte
 
     // Glowing crystals set into cave floors and ceilings.
     AmberCrystal  = 39,
-    BlueCrystal   = 40,
+    GoldCrystal   = 40,
 }

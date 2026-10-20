@@ -45,9 +45,9 @@ public class TreeTests
     public void Cave_crystals_glow_and_come_in_sparse_clusters()
     {
         Assert.True(BlockRegistry.Get(BlockId.AmberCrystal).LightEmission > 0);
-        Assert.True(BlockRegistry.Get(BlockId.BlueCrystal).LightEmission > 0);
+        Assert.True(BlockRegistry.Get(BlockId.GoldCrystal).LightEmission > 0);
         Assert.Equal(BlockId.AmberCrystal, Crystals.For(Biome.Badlands));
-        Assert.Equal(BlockId.BlueCrystal, Crystals.For(Biome.Autumn));
+        Assert.Equal(BlockId.GoldCrystal, Crystals.For(Biome.Autumn));
 
         var lit = new List<(int X, int Z)>();
         for (int z = 0; z < 480; z++)
