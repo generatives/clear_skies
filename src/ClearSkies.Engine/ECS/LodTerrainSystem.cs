@@ -868,9 +868,6 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
                 // One held back for its light swaps in from when it's first shown (the full detail is held till then).
                 if (column.Settled && !column.Baked && column.Drawn && float.IsFinite(column.FadeInAt)) column.FadeInAt = _time;
             }
-            // Covered while its full detail is ready: the world's rays then see only full-detail blocks there.
-            if (column.Covered != ready) SetCovered(key, column, ready);
-
             if (!ready)
             {
                 column.Leaving = false;
@@ -889,6 +886,11 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
                     column.FadeOutAt = _time;
                 }
             }
+            // Covered while its full detail is ready, and while that's still drawn as this swaps in over it: the world's
+            // rays then see only full-detail blocks there. (Uncovered at once, the full detail fading out was shadowed
+            // by the coarse blocks in it, and darkened.)
+            bool covered = ready || column.Drawn && (WaitsForLight(column) || CoarseShare(column) < 1f);
+            if (column.Covered != covered) SetCovered(key, column, covered);
             column.WasReady = ready;
         }
         _editScan = readyIndex == 0 ? 0 : (scan + 1) % readyIndex;
