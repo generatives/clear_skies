@@ -9,9 +9,9 @@ namespace ClearSkies.Game.Generation;
 ///
 /// A landscape is a continuous surface at its own height: hills (<see cref="IslandSurface.Hills"/>), mountains on the
 /// landmasses, gentle swells, and land under it down to a lumpy underside, hanging lower under high ground. Its pieces
-/// fit together like a 3D jigsaw: each holds the land nearest its point, with distances counting vertical offsets
-/// <see cref="IslandField.VerticalScale"/> times over, so pieces are wide and flat and stack in layers, and with a
-/// crack between each and the next, across and up and down. A piece is there or not by its landscape's coverage (see
+/// fit together like a jigsaw: each holds the land nearest its point, all the way from the underside to the surface
+/// (no cracks across a landscape, which would run along its slopes as ledges), with an upright crack between each and
+/// the next. A piece is there or not by its landscape's coverage (see
 /// <see cref="IslandField.Coverage"/>). Where coverage is full, its pieces keep the landscape's surface, so the land
 /// reads as one across the cracks; where it thins, their tops are worn down towards the height at their point and sink
 /// a little, each its own amount, so broken land steps and tilts.
@@ -42,11 +42,6 @@ public sealed class IslandWorldGenerator : IWorldGenerator
     /// its tilt).</summary>
     private const float Upright = 0.3f;
 
-    /// <summary>Leaning and stacked cracks (fading in from half <see cref="Upright"/> to one and a half) narrow from
-    /// CloseDepth blocks below the top of the land (banked down towards its side cracks) and are shut from CloseFrom
-    /// up, so where one comes out on a slope there is no ledge.</summary>
-    private const float CloseFrom = 24f, CloseDepth = 120f;
-
     // Where a landscape's coverage thins, its pieces' tops keep only (1 - Flatten) of how far the surface there stands
     // above the surface at their point, and they sink by up to Sink (each its own share); at full coverage, neither.
     private const float Flatten = 0.6f, Sink = 12f, CoreSink = 3f;
@@ -54,9 +49,6 @@ public sealed class IslandWorldGenerator : IWorldGenerator
     /// <summary>Solid runs thinner than this (after joining those that touch) are worn away: slivers where a surface
     /// just grazes a piece.</summary>
     private const int MinThickness = 8;
-
-    /// <summary>The most layers of piece points a column searches.</summary>
-    private const int MaxRows = 16;
 
     // A top is bare (see IslandSurface.Block) if land lies over it within ShadeReach blocks.
     private const float Shaded = 0.75f, ShadeReach = 250f;
@@ -148,11 +140,8 @@ public sealed class IslandWorldGenerator : IWorldGenerator
         int cx1 = (int)MathF.Floor((chunkX * S + S + CrackWarp) / l.CellSize) + 1;
         int cz0 = (int)MathF.Floor((chunkZ * S - CrackWarp) / l.CellSize) - 1;
         int cz1 = (int)MathF.Floor((chunkZ * S + S + CrackWarp) / l.CellSize) + 1;
-        int cy0 = Row(l, l.BottomBound - LayerWarp) - 1, cy1 = Row(l, l.TopBound + LayerWarp) + 1;
-        return (cx0, cz0, cy0, cx1 - cx0 + 1, cz1 - cz0 + 1, cy1 - cy0 + 1);
+        return (cx0, cz0, 0, cx1 - cx0 + 1, cz1 - cz0 + 1, 1);
     }
-
-    private static int Row(in IslandField.Layer l, float y) => (int)MathF.Floor(y * IslandField.VerticalScale / l.CellSize);
 
     // ── Pieces ──────────────────────────────────────────────────────────────
 
@@ -206,7 +195,7 @@ public sealed class IslandWorldGenerator : IWorldGenerator
         float size = IslandField.Layers[layer].CellSize;
         h = IslandField.Hash(_seed, 500 + layer, i, k, j);
         x = (i + 0.1f + 0.8f * ((h & 0xFFFFF) / 1048576f)) * size;
-        y = (k + 0.1f + 0.8f * (((h >> 20) & 0xFFFFF) / 1048576f)) * size;
+        y = 0f; // one row: pieces run through the whole landscape, with upright cracks only
         z = (j + 0.1f + 0.8f * (((h >> 40) & 0xFFFFF) / 1048576f)) * size;
     }
 
@@ -499,16 +488,13 @@ public sealed class IslandWorldGenerator : IWorldGenerator
         float size = l.CellSize;
         int gx = (int)MathF.Floor(px / size), gz = (int)MathF.Floor(pz / size);
         float tBottom = (bottom + lift) * V, tTop = (top + lift) * V;
-        int gy0 = System.Math.Max((int)MathF.Floor(tBottom / size) - 1, g.Cy0);
-        int gy1 = System.Math.Min((int)MathF.Floor(tTop / size) + 1, g.Cy0 + g.Ny - 1);
-        int sites = 9 * System.Math.Min(gy1 - gy0 + 1, MaxRows);
-        if (sites <= 0) return;
-        Span<float> sxz = stackalloc float[9 * MaxRows], sx = stackalloc float[9 * MaxRows];
-        Span<float> sy = stackalloc float[9 * MaxRows], sz = stackalloc float[9 * MaxRows];
-        Span<int> index = stackalloc int[9 * MaxRows];
+        const int sites = 9;
+        Span<float> sxz = stackalloc float[sites], sx = stackalloc float[sites];
+        Span<float> sy = stackalloc float[sites], sz = stackalloc float[sites];
+        Span<int> index = stackalloc int[sites];
         for (int k = 0; k < sites; k++)
         {
-            int at = g.Index(gx + k % 3 - 1, gy0 + k / 9, gz + (k / 3) % 3 - 1);
+            int at = g.Index(gx + k % 3 - 1, 0, gz + (k / 3) % 3 - 1);
             ref var p = ref g.Pieces[at];
             index[k] = at;
             sx[k] = p.X; sy[k] = p.Y; sz[k] = p.Z;
@@ -543,8 +529,7 @@ public sealed class IslandWorldGenerator : IWorldGenerator
                 float d = sxz[k] + (t - sy[k]) * (t - sy[k]);
                 if (d < best) { best = d; i = k; }
             }
-            float lo = tBottom, hi = tTop, exit = tTop, loStacked = 0f, loClosed = 0f, loOpen = 0f;
-            float tCeiling = tTop - bank * V; // how deep a crack is is measured from the banked top
+            float lo = tBottom, hi = tTop, exit = tTop;
             for (int j = 0; j < sites; j++)
             {
                 if (j == i) continue;
@@ -553,12 +538,8 @@ public sealed class IslandWorldGenerator : IWorldGenerator
                 float tilt = ay * ay / len2;
                 float wear = across + (up - across) * tilt;
                 float a = sxz[j] - sxz[i] + sy[j] * sy[j] - sy[i] * sy[i], b = -2f * ay; // dj^2 - di^2 = a + b t
-                // A stacked crack shuts as it nears the surface (see CloseDepth).
-                float stacked = Smoothstep(0.5f * Upright, 1.5f * Upright, tilt);
-                float closed = b != 0f ? (1f - Smoothstep(CloseFrom, CloseDepth, (tCeiling + a / b) / V)) * stacked : 0f;
-                float gap = 2f * MathF.Sqrt(len2) * wear;
-                float need = gap * (1f - closed) - a;                                // b t >= need
-                if (b > 0f) { if (need / b > lo) { lo = need / b; loStacked = stacked; loClosed = closed; loOpen = gap / b / V; } }
+                float need = 2f * MathF.Sqrt(len2) * wear - a;                      // b t >= need
+                if (b > 0f) lo = MathF.Max(lo, need / b);
                 else if (b < 0f) { hi = MathF.Min(hi, need / b); exit = MathF.Min(exit, -a / b); }
                 else if (need > 0f) hi = lo;
             }
@@ -594,17 +575,15 @@ public sealed class IslandWorldGenerator : IWorldGenerator
             yLo = MathF.Max(yLo, bottom + Round(fromCrack, UnderRound));
             // A thin slab against a crack, worn back to a rounded nose: from its underside if that is the landscape's,
             // else from the top. (The same however it is bounded, so land doesn't step where a crack above it meets
-            // the surface; not over a stacked crack, where the slab thins out into the slope as the crack shuts.)
+            // the surface.)
             if (!(atTop && atBottom) && yHi - yLo < 2f * Slab)
             {
                 float th = yHi - yLo, worn = MathF.Sqrt(MathF.Max(th * th - Slab * Slab, 0f));
-                if (atBottom) yLo = yHi - worn; else yHi = yLo + worn + (th - worn) * loStacked;
+                if (atBottom) yLo = yHi - worn; else yHi = yLo + worn;
             }
             yHi -= taper;
             if (atBottom) yLo += taper;
-            // (Down over a shut crack by as far as the piece under it could have kept it open, by its own depth, and
-            // sink, so neither opens it.)
-            yLo = MathF.Max(yLo - piece.Sink * 0.8f - (loOpen + CoreSink + Sink) * loClosed, IslandField.LowestBottom);
+            yLo = MathF.Max(yLo - piece.Sink * 0.8f, IslandField.LowestBottom);
             yHi = MathF.Min(yHi - piece.Sink, IslandField.WorldTop - 1);
             int bLo = (int)MathF.Ceiling(yLo), bHi = (int)MathF.Floor(yHi);
             if (bHi >= bLo) found[count++] = ((short)bLo, (short)bHi);
