@@ -413,7 +413,8 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     /// surfaces round to the nearest cell and meet full detail flush on average; thin things (a fence of cubes, a
     /// one-block ledge) may go, except leaves (<see cref="BlockDef.ShowsInnerFaces"/>), which fill a cell if any of its
     /// blocks is one, so trees stay. Otherwise any cube fills the cell: the most common opaque one, else the most common
-    /// see-through one.</summary>
+    /// see-through one. Either way the block picked is the most common of the cell's top blocks (those with no opaque
+    /// cube over them) when it has any of that kind, so grass on dirt stays grass, as it's seen from above.</summary>
     internal static void Shrink(ChunkData full, ChunkData coarse, int ox, int oy, int oz, bool majority = true,
                                 bool plants = false)
     {
@@ -425,6 +426,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
             return;
         }
         Span<BlockId> cell = stackalloc BlockId[8];
+        Span<BlockId> tops = stackalloc BlockId[8]; // the cell's blocks with no opaque cube over them (others air)
         Span<BlockId> plantOn = stackalloc BlockId[16]; // per x: a plant on top of the cell below (for the cell above)
         for (int z = 0; z < 16; z++)
         {
@@ -434,7 +436,13 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
             {
                 for (int k = 0; k < 8; k++)
                     cell[k] = full.Get(2 * x + (k & 1), 2 * y + ((k >> 1) & 1), 2 * z + (k >> 2));
-                var pick = majority ? ByMajority(cell) : ByAny(cell);
+                for (int k = 0; k < 8; k++)
+                {
+                    int by = 2 * y + ((k >> 1) & 1) + 1; // the block over it (in the cell, or the one above's)
+                    var over = (k & 2) == 0 ? cell[k + 2] : by < S ? full.Get(2 * x + (k & 1), by, 2 * z + (k >> 2)) : BlockId.Air;
+                    tops[k] = IsCube(over) && !BlockRegistry.Get(over).Transparent ? BlockId.Air : cell[k];
+                }
+                var pick = majority ? ByMajority(cell, tops) : ByAny(cell, tops);
                 if (pick != BlockId.Air) coarse.Set(ox + x, oy + y, oz + z, pick);
                 if (!plants) continue;
                 // Plants (grass, mushrooms): a cell left open keeps the commonest one in it, or failing that one that
@@ -467,13 +475,30 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         return best;
     }
 
-    private static BlockId ByAny(ReadOnlySpan<BlockId> cell)
+    private static BlockId ByAny(ReadOnlySpan<BlockId> cell, ReadOnlySpan<BlockId> tops)
     {
-        var pick = MostCommon(cell, opaque: true);
-        return pick != BlockId.Air ? pick : MostCommon(cell, opaque: false);
+        var pick = TopOrCommon(cell, tops, opaque: true);
+        return pick != BlockId.Air ? pick : TopOrCommon(cell, tops, opaque: false);
     }
 
-    private static BlockId ByMajority(ReadOnlySpan<BlockId> cell)
+    /// <summary>The most common cube of a kind among a cell's top blocks (a tie going to the commoner in the whole cell),
+    /// or failing any, among all its blocks.</summary>
+    private static BlockId TopOrCommon(ReadOnlySpan<BlockId> cell, ReadOnlySpan<BlockId> tops, bool opaque)
+    {
+        BlockId best = BlockId.Air;
+        int bestScore = 0;
+        for (int i = 0; i < tops.Length; i++)
+        {
+            var id = tops[i];
+            if (!IsCube(id) || BlockRegistry.Get(id).Transparent == opaque) continue;
+            int score = 0;
+            for (int j = 0; j < cell.Length; j++) score += (tops[j] == id ? 16 : 0) + (cell[j] == id ? 1 : 0);
+            if (score > bestScore) { best = id; bestScore = score; }
+        }
+        return best != BlockId.Air ? best : MostCommon(cell, opaque);
+    }
+
+    private static BlockId ByMajority(ReadOnlySpan<BlockId> cell, ReadOnlySpan<BlockId> tops)
     {
         int opaque = 0, see = 0;
         bool leaves = false;
@@ -484,7 +509,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
             if (def.Transparent) { see++; leaves |= def.ShowsInnerFaces; }
             else opaque++;
         }
-        if (opaque + see >= 4) return MostCommon(cell, opaque: opaque >= see);
+        if (opaque + see >= 4) return TopOrCommon(cell, tops, opaque: opaque >= see);
         return leaves ? MostCommon(cell, opaque: false, leavesOnly: true) : BlockId.Air;
     }
 

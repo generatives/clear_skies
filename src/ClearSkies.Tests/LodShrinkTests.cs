@@ -58,6 +58,24 @@ public class LodShrinkTests
     }
 
     [Fact]
+    public void TheTopBlockWinsOverMoreBlocksUnderIt()
+    {
+        // Grass on dirt, the surface in the cell's upper layer: 4 dirt to 4 grass, but grass is what's seen.
+        Assert.Equal(BlockId.Grass, Majority((0, BlockId.Dirt), (1, BlockId.Dirt), (4, BlockId.Dirt), (5, BlockId.Dirt),
+                                            (2, BlockId.Grass), (3, BlockId.Grass), (6, BlockId.Dirt), (7, BlockId.Grass)));
+        // The surface lower down: grass on the bottom layer, nothing over it.
+        Assert.Equal(BlockId.Grass, Majority((0, BlockId.Grass), (1, BlockId.Grass), (4, BlockId.Grass), (2, BlockId.Dirt)));
+    }
+
+    [Fact]
+    public void BlocksUnderOpaqueCubesAreNotTops()
+    {
+        // Stone over sand: the sand is buried, the stone is the top.
+        Assert.Equal(BlockId.Stone, Majority((0, BlockId.Sand), (1, BlockId.Sand), (4, BlockId.Sand), (5, BlockId.Sand),
+                                            (2, BlockId.Stone), (3, BlockId.Stone), (6, BlockId.Stone), (7, BlockId.Stone)));
+    }
+
+    [Fact]
     public void PlantsAndModelsAreLeftOut()
         => Assert.Equal(BlockId.Air, Majority((0, BlockId.TallGrass), (1, BlockId.Lever), (2, BlockId.Stone), (3, BlockId.Stone)));
 
