@@ -79,9 +79,10 @@ public static class HeartGrid
     private const float IslandFrom = 0.1f, IslandFull = 0.6f, MountainInside = 0.55f;
     private const float IsletChance = 0.6f, IsletSpacing = 1300f, IsletDetail = 420f, IsletFrom = 0.74f, IsletFull = 0.84f;
 
-    /// <summary>How much of FloorChance the floor keeps even inside a cluster: it breaks into islands with gaps between,
-    /// not one cracked landmass.</summary>
-    private const float IslandFloor = 0.8f;
+    /// <summary>How much of FloorChance the floor keeps inside a cluster's fringe, rising to all of it in the cluster's
+    /// core (from CoreFrom to CoreFull of it): a landmass is whole in the middle and breaks up towards its edges. A
+    /// range in a cluster's core holds together the same way, up to MountainCore of MountainChance.</summary>
+    private const float IslandFloor = 0.8f, CoreFrom = 0.4f, CoreFull = 0.75f, MountainCore = 0.9f;
 
     // Continents: value noise at ContinentSpacing, roughened by a finer one at ContinentDetail; land where it is over
     // ContinentEdgeLow, fading in until ContinentEdgeHigh.
@@ -127,12 +128,13 @@ public static class HeartGrid
         float cluster = ClusterField(seed, x, z);
         float inIsland = Smoothstep(IslandFrom, IslandFull, cluster);
         float islet = inIsland < 1f ? IsletField(seed, x, z) : 0f;
-        float island = Lerp(IsletChance * islet, IslandFloor, inIsland);
+        float inCore = Smoothstep(CoreFrom, CoreFull, cluster);
+        float island = Lerp(IsletChance * islet, Lerp(IslandFloor, 1f, inCore), inIsland);
         if (y < DeepTop) return island * Lerp(DeepChance, FloorChance, Smoothstep(DeepTop - DeepFade, DeepTop, y));
         float up = Smoothstep(FloorTop, FloorTop + FloorFade, y);
         float floor = island * FloorChance;
         float mountain = Smoothstep(0.1f, 0.6f, ContinentTerrain.For(seed).RangeCore(x, z));
-        float mountainChance = MountainChance * MountainInside * inIsland;
+        float mountainChance = MountainChance * Lerp(MountainInside, MountainCore, inCore) * inIsland;
         if (up <= 0f) return Lerp(floor, mountainChance, mountain);
         float thin = Lerp(1f, 0.5f, Math.Clamp((y - FloorTop - FloorFade) / ThinOver, 0f, 1f));
         float upper = MathF.Min(UpperChance * thin * Lerp(0.5f * islet, 1.8f, cluster), 1f);
