@@ -161,6 +161,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
     /// back for their first light (see <see cref="HurryFirstLight"/>).</summary>
     public Action<GridHandle, ChunkPosition>? Hurry;
     private const int HurriedColumns = 2;
+    private readonly List<(float Distance, (int x, int z) Key, CoarseColumn Column)> _toPlace = new();
     private readonly CoarseColumn?[] _hurriedNow = new CoarseColumn?[HurriedColumns];
 
     // Shared occupancy for the coarse chunks that are all one thing, and for the air right above and below a column's
@@ -817,7 +818,6 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
         // chunks load or unload (which mark it), so it's not looked at all again. A few near columns a frame are
         // looked at anyway, round them in turn, in case a change came without a mark.
         int nearIndex = 0, recheckFrom = _recheck, recheckTo = _recheck + RecheckPerFrame;
-        double residentMs = 0; // spent putting columns in the grid this frame (not the rest of this loop)
         _litChecksLeft = LitChecksPerFrame;
         foreach (var (key, column) in _columns)
         {
@@ -854,16 +854,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
             // column keeps the light maps it baked before, or is lit as open air if it never had any.
             if (!column.InGrid)
             {
-                // Putting a column in the grid writes each chunk's occupancy and its surface bricks: as many a frame as
-                // fit the budget, the rest on later frames (held back, or lit as before, meanwhile).
-                if (residentMs < ResidentBudgetMs)
-                {
-                    long start = System.Diagnostics.Stopwatch.GetTimestamp();
-                    _steps.Lap(SwapStep);
-                    MakeResident(key, column, start + (long)((ResidentBudgetMs - residentMs) * System.Diagnostics.Stopwatch.Frequency / 1000));
-                    _steps.Lap(ResidentStep);
-                    residentMs += System.Diagnostics.Stopwatch.GetElapsedTime(start).TotalMilliseconds;
-                }
+                _toPlace.Add((Distance(_view, key), key, column)); // put in the grid after this loop, nearest first
                 column.Settled = false;
                 column.Waiting = 0;
                 column.LitSoFar = 0;
@@ -903,6 +894,26 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
         }
         _editScan = readyIndex == 0 ? 0 : (scan + 1) % readyIndex;
         _readyDirty.Clear();
+
+        // Putting a column in the grid writes each chunk's occupancy and its surface bricks: as many a frame as fit the
+        // budget, the rest on later frames (held back, or lit as before, meanwhile). Nearest first: the nearest held
+        // back holds the fog, and in the dictionary's order, while the view moved, columns arriving far away took the
+        // budget and the fog stopped until it caught up.
+        if (_toPlace.Count > 0)
+        {
+            _toPlace.Sort((a, b) => a.Distance.CompareTo(b.Distance));
+            double residentMs = 0;
+            _steps.Lap(SwapStep);
+            foreach (var (_, key, column) in _toPlace)
+            {
+                if (residentMs >= ResidentBudgetMs) break;
+                long start = System.Diagnostics.Stopwatch.GetTimestamp();
+                MakeResident(key, column, start + (long)((ResidentBudgetMs - residentMs) * System.Diagnostics.Stopwatch.Frequency / 1000));
+                residentMs += System.Diagnostics.Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+            }
+            _steps.Lap(ResidentStep);
+            _toPlace.Clear();
+        }
 
         // Columns coming back into view are checked for edits under them a few a frame (256 chunks each): many come
         // back at once when the view moves on. Each is drawn as it was meanwhile, and made again if edited.
@@ -1025,7 +1036,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
         return best;
     }
 
-    private enum FogReason { None, Making, Queued, Lighting }
+    private enum FogReason { None, Making, Queued, Placing, Lighting }
     private (int Level, FogReason Why, int Frames, float At) _fogHeld;
 
     /// <summary>What the fog last stopped at (see <see cref="ReadyRadius"/>), for the panel.</summary>
@@ -1033,6 +1044,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
     {
         FogReason.Making   => $"level {_fogHeld.Level} column being made, {_fogHeld.At:F0} blocks out",
         FogReason.Queued   => $"level {_fogHeld.Level} column queued, {_fogHeld.At:F0} blocks out",
+        FogReason.Placing  => $"level {_fogHeld.Level} column waiting to go in the light grid, {_fogHeld.At:F0} blocks out",
         FogReason.Lighting => $"level {_fogHeld.Level} column waiting {_fogHeld.Frames} frames for its light, {_fogHeld.At:F0} blocks out",
         _ => "nothing (out to the full range)",
     };
@@ -1057,7 +1069,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
         foreach (var (k, column) in _columns)
             if (WaitsForLight(column) && !(column.ReadyKnown && column.Ready) && !Hidden(k) // what's under it shows instead
                 && Distance(centre, k) is var d && d < best)
-                (best, why, frames) = (d, FogReason.Lighting, column.Waiting);
+                (best, why, frames) = (d, column.InGrid ? FogReason.Lighting : FogReason.Placing, column.Waiting);
         return best;
 
         bool Hidden((int x, int z) k) => coarser != null && coarser.Shows((k.x >> 1, k.z >> 1));
