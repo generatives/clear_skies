@@ -43,4 +43,10 @@ public enum BlockId : byte
     // Anchoring: an anchor welds its ship to what's next to it while the ship's toggles are on.
     Anchor        = 33,
     Toggle        = 34,
+
+    // Biomes: badlands' red sand and rock, autumn woods' birches.
+    RedSand       = 35,
+    RedRock       = 36,
+    BirchLog      = 37,
+    AutumnLeaves  = 38,
 }

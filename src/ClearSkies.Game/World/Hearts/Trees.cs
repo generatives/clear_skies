@@ -4,7 +4,8 @@ namespace ClearSkies.Game.Generation;
 
 /// <summary>
 /// Trees and cacti on <see cref="ContinentTerrain"/>'s tops, kept simple, Minecraft style: round-topped oaks on grass
-/// across the middle heights, giving way to pines higher up (they go on up into the snow), and cacti on sand.
+/// across the middle heights (birches with orange leaves in autumn woods), giving way to pines higher up (they go on up
+/// into the snow), and cacti on sand, sparser on red sand.
 ///
 /// Whether a column grows one is picked by a hash of its top, so the same in every chunk that generates it. A tree is
 /// only grown at least <see cref="Reach"/> blocks in from a chunk column's sides, so all of it lands in the chunk
@@ -12,7 +13,7 @@ namespace ClearSkies.Game.Generation;
 /// </summary>
 public static class Trees
 {
-    public enum Kind : byte { None, Oak, Pine, Cactus }
+    public enum Kind : byte { None, Oak, Pine, Cactus, Birch }
 
     /// <summary>How far a tree reaches out from its trunk, at most.</summary>
     public const int Reach = 3;
@@ -27,7 +28,7 @@ public static class Trees
     /// <see cref="ContinentTerrain.Block"/>): a tree, a cactus or nothing. They grow where <paramref name="woods"/>
     /// (from <see cref="ContinentTerrain.Woods"/>) is high, so they thin from woods to scattered trees, with the odd one
     /// standing alone in the open.</summary>
-    public static Kind At(BlockId ground, int x, int top, int z, float woods, ulong seed)
+    public static Kind At(BlockId ground, int x, int top, int z, float woods, ulong seed, Biome biome = Biome.Temperate)
     {
         ulong h = Hash(x, top, z, seed);
         float r = (h & 0xFFFFFF) / 16777216f;
@@ -38,12 +39,14 @@ public static class Trees
             {
                 if (top < ContinentTerrain.DryLine) return Kind.None;
                 if (r >= 0.001f + 0.03f * Grove(woods)) return Kind.None;
-                return pick < Smoothstep(PineStart, PineFull, top) ? Kind.Pine : Kind.Oak;
+                return pick < Smoothstep(PineStart, PineFull, top) ? Kind.Pine : biome == Biome.Autumn ? Kind.Birch : Kind.Oak;
             }
             case BlockId.Snow:
                 return r < 0.001f + 0.02f * Grove(woods) ? Kind.Pine : Kind.None;
             case BlockId.Sand:
                 return r < 0.001f + 0.012f * Grove(woods) ? Kind.Cactus : Kind.None;
+            case BlockId.RedSand:
+                return r < 0.0005f + 0.004f * Grove(woods) ? Kind.Cactus : Kind.None;
             default:
                 return Kind.None;
         }
@@ -58,12 +61,14 @@ public static class Trees
         switch (kind)
         {
             case Kind.Oak:
+            case Kind.Birch:
             {
-                // A trunk 4-6 tall; two wide layers of leaves round its top, then two narrow, the top one a plus. Some
-                // corners are left off.
-                int height = 4 + (int)((h >> 48) % 3);
+                // A trunk 4-6 tall (a birch's 5-7); two wide layers of leaves round its top, then two narrow, the top
+                // one a plus. Some corners are left off.
+                bool birch = kind == Kind.Birch;
+                int height = (birch ? 5 : 4) + (int)((h >> 48) % 3);
                 int crown = y0 + height - 1;
-                for (int y = y0; y <= crown; y++) Set(data, originY, x, y, z, BlockId.Log);
+                for (int y = y0; y <= crown; y++) Set(data, originY, x, y, z, birch ? BlockId.BirchLog : BlockId.Log);
                 int bit = 0;
                 for (int y = crown - 2; y <= crown + 1; y++)
                 {
@@ -73,7 +78,7 @@ public static class Trees
                     {
                         bool corner = Math.Abs(dx) == reach && Math.Abs(dz) == reach;
                         if (corner && (y > crown || Bit(h, bit++))) continue;
-                        Set(data, originY, x + dx, y, z + dz, BlockId.Leaves);
+                        Set(data, originY, x + dx, y, z + dz, birch ? BlockId.AutumnLeaves : BlockId.Leaves);
                     }
                 }
                 break;

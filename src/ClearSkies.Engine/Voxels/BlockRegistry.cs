@@ -109,6 +109,16 @@ public static class BlockRegistry
             Texture = "leaves" });
         Register(new BlockDef { Id = BlockId.Cactus, Name = "Cactus", Color = new(0.25f, 0.65f, 0.35f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 1,
             Texture = "cactus_side", TextureTop = "cactus_top", TextureBottom = "cactus_top" });
+        Register(new BlockDef { Id = BlockId.BirchLog, Name = "Birch Log", Color = new(0.85f, 0.83f, 0.78f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 1,
+            Texture = "trunk_white_side", TextureTop = "trunk_white_top", TextureBottom = "trunk_white_top" });
+        Register(new BlockDef { Id = BlockId.AutumnLeaves, Name = "Autumn Leaves", Color = new(0.90f, 0.50f, 0.15f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 0.2f,
+            Texture = "leaves_orange_transparent", Layer = RenderLayer.Cutout, ShowsInnerFaces = true });
+
+        // Badlands: red sand over red rock, in layers on cliff faces.
+        Register(new BlockDef { Id = BlockId.RedSand, Name = "Red Sand", Color = new(0.78f, 0.42f, 0.22f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 2,
+            Texture = "redsand" });
+        Register(new BlockDef { Id = BlockId.RedRock, Name = "Red Rock", Color = new(0.62f, 0.30f, 0.20f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 6,
+            Texture = "redstone" });
     }
 
     private static void RegisterCross(BlockId id, string name, string texture, Vector3D<float> color, string[]? variants = null, bool rigid = false) =>

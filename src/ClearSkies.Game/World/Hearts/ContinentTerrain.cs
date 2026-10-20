@@ -39,6 +39,7 @@ public sealed class ContinentTerrain
     private readonly FastNoiseLite _patches;  // sand patches in low grass
     private readonly FastNoiseLite _flora, _kind; // where plants grow thick, and which kind
     private readonly FastNoiseLite _woods;        // where trees grow thick, apart from the plants
+    private readonly FastNoiseLite _heat, _wet;   // the climate's broad regional fields (see Biomes)
 
     private ContinentTerrain(ulong seed)
     {
@@ -59,6 +60,8 @@ public sealed class ContinentTerrain
         _flora = Noise(seed + 22, FastNoiseLite.FractalType.FBm, 3, 0.02f);
         _woods = Noise(seed + 24, FastNoiseLite.FractalType.FBm, 2, 0.008f);
         _kind = Noise(seed + 23, FastNoiseLite.FractalType.FBm, 2, 0.035f);
+        _heat = Noise(seed + 28, FastNoiseLite.FractalType.FBm, 2, 0.00025f);
+        _wet = Noise(seed + 29, FastNoiseLite.FractalType.FBm, 2, 0.0003f);
     }
 
     private static FastNoiseLite Noise(ulong seed, FastNoiseLite.FractalType fractal, int octaves, float frequency)
@@ -135,14 +138,22 @@ public sealed class ContinentTerrain
     /// across, laid out independently of the plant stands.</summary>
     public float Woods(float x, float z) => 0.5f + 0.5f * _woods.GetNoise(x, z);
 
+    /// <summary>-1 to 1 at column (x, z), for <see cref="Biomes.Heat"/>: regions a few kilometres across that run hotter
+    /// or cooler than their height alone would make them.</summary>
+    public float Heat(float x, float z) => _heat.GetNoise(x, z);
+
+    /// <summary>0-1 at column (x, z), for <see cref="Biomes.Pick"/>: how wet the region is.</summary>
+    public float Wet(float x, float z) => Math.Clamp(0.5f + 0.9f * _wet.GetNoise(x, z), 0f, 1f);
+
     /// <summary>0-1 at column (x, z), for <see cref="Plant"/>: which kind of plant a stand is mostly made of.</summary>
     public float Kind(float x, float z) => 0.5f + 0.5f * _kind.GetNoise(x, z);
 
     /// <summary>The block at height y in a column whose solid span ends at <paramref name="top"/>: cover by the top's
     /// height (whether it is the terrain surface or a support's own top; those are to be decorated differently
     /// later), then rock layers (<paramref name="strata"/> from <see cref="Strata"/>, <paramref name="patch"/> from
-    /// <see cref="Patch"/>). <paramref name="bare"/>, 0-1, is how little the top is out in the open.</summary>
-    public static BlockId Block(int y, int top, float strata, float patch, float bare)
+    /// <see cref="Patch"/>). <paramref name="bare"/>, 0-1, is how little the top is out in the open. Deserts are sand
+    /// and badlands red sand over red rock (see <see cref="Biomes"/>), under the same snow and bare rock up high.</summary>
+    public static BlockId Block(int y, int top, float strata, float patch, float bare, Biome biome = Biome.Temperate)
     {
         int depth = top - y;
         // A bare top (shaded by land above it, or well below where the surface was) grows nothing and holds no snow:
@@ -152,6 +163,8 @@ public sealed class ContinentTerrain
         bool rocky = patch < Math.Clamp((top - RockStart) / (RockFull - RockStart), 0f, 1f) * 1.2f - 0.1f;
         bool snowy = !isBare && patch < Math.Clamp((top - SnowStart) / (SnowFull - SnowStart), 0f, 1f) * 1.2f - 0.1f;
         if (snowy) { if (depth < 3) return BlockId.Snow; }
+        else if (!rocky && biome == Biome.Desert) { if (depth < 5) return BlockId.Sand; }
+        else if (!rocky && biome == Biome.Badlands) { if (depth < 3) return BlockId.RedSand; }
         else if (!rocky)
         {
             // Sand where the patch field is under a threshold that falls from mostly sand at SandLine to none by
@@ -169,6 +182,7 @@ public sealed class ContinentTerrain
         // show strata.
         uint h = (uint)(int)MathF.Floor((y + strata) / 6f) * 0x9E3779B1u;
         h ^= h >> 15; h *= 0x85EBCA77u; h ^= h >> 13;
+        if (biome == Biome.Badlands) return (h & 0xFF) < 150 ? BlockId.RedRock : (h & 0xFF) < 200 ? BlockId.RedSand : BlockId.Rock;
         return (h & 0xFF) < 90 ? BlockId.Rock : BlockId.Stone;
     }
 
@@ -208,6 +222,8 @@ public sealed class ContinentTerrain
                 return BlockId.Air;
             case BlockId.Sand:
                 return r < 0.01f + 0.17f * stand ? BlockId.DryGrass : BlockId.Air;
+            case BlockId.RedSand:
+                return r < 0.004f + 0.05f * stand ? BlockId.DryGrass : BlockId.Air;
             case BlockId.Rock:
                 if (r >= 0.008f) return BlockId.Air;
                 return pick < Math.Clamp((RockFull - y) / (RockFull - RockStart), 0f, 1f) ? BlockId.MossyPebbles : BlockId.Pebbles;
