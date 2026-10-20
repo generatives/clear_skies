@@ -157,7 +157,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 var biome = _biome[col * MaxSpans + s];
                 var ground = ContinentTerrain.Block(hi, hi, _strata[col], _patch[col], _bare[col * MaxSpans + s], biome);
                 int x = pos.X * S + lx, z = pos.Z * S + lz;
-                var kind = Trees.At(ground, x, hi, z, _woods[col], _seed, biome);
+                var kind = Trees.At(ground, x, hi, z, _woods[col], _seed);
                 if (kind != Trees.Kind.None) Trees.Grow(data, originY, kind, lx, hi, lz, Trees.Hash(x, hi, z, _seed));
             }
         }
@@ -250,7 +250,11 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             _flora[col] = _terrain.Flora(wx, wz);
             _woods[col] = _terrain.Woods(wx, wz);
             _kind[col] = _terrain.Kind(wx, wz);
-            float heat = _terrain.Heat(wx, wz), wet = _terrain.Wet(wx, wz);
+            // The climate, roughened a little so biomes meet in a ragged, mixed fringe rather than a line: by the
+            // patch and plant fields (tens of blocks across) and a little by the column itself.
+            uint ch = (uint)(int)wx * 0x9E3779B1u ^ (uint)(int)wz * 0x85EBCA77u; ch ^= ch >> 15; ch *= 0xC2B2AE3Du; ch ^= ch >> 13;
+            float heat = _terrain.Heat(wx, wz) + 0.35f * (_patch[col] - 0.5f) + 0.15f * ((ch & 0xFFFF) / 65536f - 0.5f);
+            float wet = _terrain.Wet(wx, wz) + 0.3f * (_flora[col] - 0.5f) + 0.15f * ((ch >> 16) / 65536f - 0.5f);
             for (int sp = 0; sp < spans; sp++)
             {
                 int hi = _spans[col * MaxSpans + sp].Hi;

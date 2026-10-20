@@ -114,6 +114,10 @@ public static class BlockRegistry
         Register(new BlockDef { Id = BlockId.AutumnLeaves, Name = "Autumn Leaves", Color = new(0.90f, 0.50f, 0.15f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 0.2f,
             Texture = "leaves_orange_transparent", Layer = RenderLayer.Cutout, ShowsInnerFaces = true });
 
+        // Autumn woods' ground: orange-topped grass over dirt.
+        Register(new BlockDef { Id = BlockId.AutumnGrass, Name = "Autumn Grass", Color = new(0.85f, 0.50f, 0.20f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 2,
+            Texture = "dirt", TextureTop = "leaves_orange", TextureBottom = "dirt" });
+
         // Badlands: red sand over red rock, in layers on cliff faces.
         Register(new BlockDef { Id = BlockId.RedSand, Name = "Red Sand", Color = new(0.78f, 0.42f, 0.22f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 2,
             Texture = "redsand" });

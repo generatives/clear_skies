@@ -16,8 +16,8 @@ public static class Biomes
     {
         (Biome.Temperate, 0.55f, 0.55f),
         (Biome.Autumn,    0.30f, 0.75f),
-        (Biome.Desert,    0.80f, 0.30f),
-        (Biome.Badlands,  1.00f, 0.00f),
+        (Biome.Desert,    0.75f, 0.35f),
+        (Biome.Badlands,  0.95f, 0.10f),
     };
 
     /// <summary>How hot a top at <paramref name="top"/> is, with <paramref name="regional"/> (-1 to 1) from

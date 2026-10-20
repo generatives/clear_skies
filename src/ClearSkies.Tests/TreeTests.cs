@@ -31,7 +31,7 @@ public class TreeTests
         Assert.True(Biomes.Heat(200f, 0f) > Biomes.Heat(1200f, 0f)); // hotter deep down
 
         Assert.Equal(new[] { Trees.Kind.Birch }, Enumerable.Range(0, 20000)
-            .Select(i => Trees.At(BlockId.Grass, i, 500, -i * 7, 0.8f, 99, Biome.Autumn))
+            .Select(i => Trees.At(BlockId.AutumnGrass, i, 500, -i * 7, 0.8f, 99))
             .Where(k => k != Trees.Kind.None).Distinct());
         Assert.Equal(BlockId.RedSand, ContinentTerrain.Block(500, 500, 0f, 0.5f, 0f, Biome.Badlands));
         Assert.Equal(BlockId.Sand, ContinentTerrain.Block(500, 500, 0f, 0.5f, 0f, Biome.Desert));

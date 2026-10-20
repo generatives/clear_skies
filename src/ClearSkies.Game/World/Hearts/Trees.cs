@@ -28,7 +28,7 @@ public static class Trees
     /// <see cref="ContinentTerrain.Block"/>): a tree, a cactus or nothing. They grow where <paramref name="woods"/>
     /// (from <see cref="ContinentTerrain.Woods"/>) is high, so they thin from woods to scattered trees, with the odd one
     /// standing alone in the open.</summary>
-    public static Kind At(BlockId ground, int x, int top, int z, float woods, ulong seed, Biome biome = Biome.Temperate)
+    public static Kind At(BlockId ground, int x, int top, int z, float woods, ulong seed)
     {
         ulong h = Hash(x, top, z, seed);
         float r = (h & 0xFFFFFF) / 16777216f;
@@ -39,7 +39,12 @@ public static class Trees
             {
                 if (top < ContinentTerrain.DryLine) return Kind.None;
                 if (r >= 0.001f + 0.03f * Grove(woods)) return Kind.None;
-                return pick < Smoothstep(PineStart, PineFull, top) ? Kind.Pine : biome == Biome.Autumn ? Kind.Birch : Kind.Oak;
+                return pick < Smoothstep(PineStart, PineFull, top) ? Kind.Pine : Kind.Oak;
+            }
+            case BlockId.AutumnGrass:
+            {
+                if (r >= 0.001f + 0.03f * Grove(woods)) return Kind.None;
+                return pick < Smoothstep(PineStart, PineFull, top) ? Kind.Pine : Kind.Birch;
             }
             case BlockId.Snow:
                 return r < 0.001f + 0.02f * Grove(woods) ? Kind.Pine : Kind.None;

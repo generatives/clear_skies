@@ -173,7 +173,7 @@ public sealed class ContinentTerrain
             float edge = patch - (0.1f + 0.62f * sandy);
             if (sandy > 0f && edge < 0f) { if (depth < 4) return BlockId.Sand; }
             else if (isBare && bare > 0.7f) { if (depth < 1) return BlockId.Rock; }
-            else if (depth == 0) return isBare || (sandy > 0f && edge < 0.03f) ? BlockId.Dirt : BlockId.Grass;
+            else if (depth == 0) return isBare || (sandy > 0f && edge < 0.03f) ? BlockId.Dirt : biome == Biome.Autumn ? BlockId.AutumnGrass : BlockId.Grass;
             else if (depth < 4) return BlockId.Dirt;
         }
         else if (depth < 2) return BlockId.Rock;
@@ -216,6 +216,11 @@ public sealed class ContinentTerrain
                     return kind < 0.45f ? BlockId.RedMushroom : kind < 0.55f ? BlockId.BrownMushroom : BlockId.TanMushroom;
                 return BlockId.Air;
             }
+            case BlockId.AutumnGrass:
+                // Autumn woods: brown and dry grasses, and mushrooms round the stands.
+                if (r < 0.04f + 0.3f * stand) return pick < 0.6f ? BlockId.BrownGrass : BlockId.DryGrass;
+                if (r > 1f - 0.04f * rim) return kind < 0.5f ? BlockId.RedMushroom : BlockId.BrownMushroom;
+                return BlockId.Air;
             case BlockId.Dirt:
                 if (r < 0.03f + 0.22f * stand) return BlockId.BrownGrass;
                 if (r > 1f - 0.03f * rim) return kind < 0.5f ? BlockId.BrownMushroom : BlockId.TanMushroom;
