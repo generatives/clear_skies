@@ -33,6 +33,7 @@ public sealed class ContinentTerrain
     private readonly FastNoiseLite _minor, _minorMask; // smaller, shorter ranges, in patches
     private readonly FastNoiseLite _size;     // how big the mountains are around here
     private readonly FastNoiseLite _knolls;   // lone peaks, a few hundred blocks across
+    private readonly FastNoiseLite _crags;    // fine ridged detail on every mountain, so none is a smooth dome
     private readonly FastNoiseLite _detail;   // small bumps everywhere
     private readonly FastNoiseLite _strata;   // wobble of the rock layers that cliffs expose
     private readonly FastNoiseLite _patches;  // sand patches in low grass
@@ -51,6 +52,7 @@ public sealed class ContinentTerrain
         _minorMask = Noise(seed + 20, FastNoiseLite.FractalType.FBm, 2, 0.00015f);
         _size = Noise(seed + 25, FastNoiseLite.FractalType.FBm, 2, 0.00012f);
         _knolls = Noise(seed + 26, FastNoiseLite.FractalType.FBm, 2, 0.0015f);
+        _crags = Noise(seed + 27, FastNoiseLite.FractalType.Ridged, 3, 0.003f);
         _detail = Noise(seed + 21, FastNoiseLite.FractalType.FBm, 2, 0.004f);
         _strata = Noise(seed + 16, FastNoiseLite.FractalType.FBm, 2, 0.01f);
         _patches = Noise(seed + 17, FastNoiseLite.FractalType.FBm, 3, 0.012f);
@@ -85,11 +87,17 @@ public sealed class ContinentTerrain
         float size = 0.5f + 0.5f * _size.GetNoise(x, z);                // 0 small mountains, 1 big
         float minor = MinorRise * (0.3f + 1.1f * (1f - size)) * r * r * Smoothstep(0f, 0.35f, _minorMask.GetNoise(x, z));
         float k = MathF.Max(0f, _knolls.GetNoise(x, z) - 0.35f) / 0.65f;
-        float knolls = KnollRise * (0.4f + 0.6f * (1f - size)) * k * k * (1f - core);
+        float knolls = KnollRise * (0.4f + 0.6f * (1f - size)) * k * (1f - core);
         // Sharp peaks: ridged detail, its ridges sharpened, standing on the range's rise.
         float p = (_peaks.GetNoise(x, z) + 1f) * 0.5f;
-        float mountains = RangeRise * (0.4f + 1f * size) * MathF.Pow(core, 1.6f) * (0.5f + 0.5f * p * MathF.Sqrt(p));
-        return Math.Clamp(plains + hills + minor + knolls + mountains, HeartGrid.WorldBottom + 64f, HeartGrid.WorldTop - 32f);
+        float peaked = 0.5f + 0.5f * p * MathF.Sqrt(p);
+        float mountains = RangeRise * (0.4f + 1f * size) * MathF.Pow(core, 1.6f) * peaked;
+        knolls *= peaked;
+        // Crags: ridges and gullies a few hundred blocks apart, up to a third of a mountain's height, so its slopes
+        // break into ribs and spurs rather than one smooth swell.
+        float c = (_crags.GetNoise(x, z) + 1f) * 0.5f;
+        float crags = CragShare * (c * c - 0.4f) * (minor + knolls + mountains);
+        return Math.Clamp(plains + hills + minor + knolls + mountains + crags, HeartGrid.WorldBottom + 64f, HeartGrid.WorldTop - 32f);
     }
 
     /// <summary>0-1: how far into a mountain range (x, z) is: 1 on its spine, 0 past its edge.</summary>
@@ -107,7 +115,7 @@ public sealed class ContinentTerrain
     // Ranges: the spine's noise within RangeEdge of zero is mountains, within HighEdge highlands (full height inside
     // HighCore); bent by up to RangeWarp blocks.
     private const float RangeEdge = 0.3f, HighCore = 0.05f, HighEdge = 1f, RangeWarp = 800f;
-    private const float HighRise = 250f, RangeRise = 500f, MinorRise = 320f, KnollRise = 260f;
+    private const float HighRise = 250f, RangeRise = 500f, MinorRise = 320f, KnollRise = 260f, CragShare = 0.6f;
 
     /// <summary>The plains' average height: a floor of land under the broken-up highlands and ranges, with a sparser
     /// underworld of smaller pieces below it, down to the cloud sea.</summary>

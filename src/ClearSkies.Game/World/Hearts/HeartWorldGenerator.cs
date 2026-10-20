@@ -32,7 +32,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     private const float FloorWear = 18f, UpperWear = 24f, FloorWearUp = 13f, UpperWearUp = 18f;
 
     /// <summary>How far round a piece's edges and corners are worn, in scaled space (see Solid).</summary>
-    private const float Rounding = 8f;
+    private const float Rounding = 14f;
 
     // Wear grows from the floor's to the upper over CrackOver blocks from CrackFrom above the floor's top: at most
     // (UpperWearUp - FloorWearUp) * VerticalScale * 1.5 / CrackOver per block (a smoothstep's steepest), times 1.4
@@ -478,8 +478,11 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             int h = _first[l] + i + _nx[l] * (j + _ny[l] * k);
             var heart = HeartGrid.At(_seed, l, _cx0[l] + i, _cy0[l] + j, _cz0[l] + k);
             _hx[h] = heart.X; _hy[h] = heart.Y * HeartGrid.VerticalScale; _hz[h] = heart.Z;
-            _alive[h] = heart.Alive; _exists[h] = heart.Exists; _drop[h] = heart.Drop;
-            _hs[h] = heart.Alive ? _terrain.Height(heart.X, heart.Z) : 0f;
+            // A heart above the terrain there would hold only a sliver of ground under the surface, thick in the
+            // middle and thin at its edges: it gives way, and the hearts below fill out to the surface in its place.
+            _hs[h] = heart.Exists ? _terrain.Height(heart.X, heart.Z) : 0f;
+            _exists[h] = heart.Exists && heart.Y < _hs[h];
+            _alive[h] = heart.Alive && _exists[h]; _drop[h] = heart.Drop;
         }
     }
 }
