@@ -40,6 +40,7 @@ public sealed class ContinentTerrain
     private readonly FastNoiseLite _flora, _kind; // where plants grow thick, and which kind
     private readonly FastNoiseLite _woods;        // where trees grow thick, apart from the plants
     private readonly FastNoiseLite _heat, _wet;   // the climate's broad regional fields (see Biomes)
+    private readonly FastNoiseLite _mottle;       // clumps of a neighbouring climate near a border
 
     private ContinentTerrain(ulong seed)
     {
@@ -62,6 +63,7 @@ public sealed class ContinentTerrain
         _kind = Noise(seed + 23, FastNoiseLite.FractalType.FBm, 2, 0.035f);
         _heat = Noise(seed + 28, FastNoiseLite.FractalType.FBm, 2, 0.00025f);
         _wet = Noise(seed + 29, FastNoiseLite.FractalType.FBm, 2, 0.0003f);
+        _mottle = Noise(seed + 30, FastNoiseLite.FractalType.FBm, 2, 0.006f);
     }
 
     private static FastNoiseLite Noise(ulong seed, FastNoiseLite.FractalType fractal, int octaves, float frequency)
@@ -140,10 +142,13 @@ public sealed class ContinentTerrain
 
     /// <summary>-1 to 1 at column (x, z), for <see cref="Biomes.Heat"/>: regions a few kilometres across that run hotter
     /// or cooler than their height alone would make them.</summary>
-    public float Heat(float x, float z) => _heat.GetNoise(x, z);
+    // Mottled a little along the line from cool and wet to hot and dry (where the biomes lie), so near a border the
+    // climate crosses back and forth in clumps a hundred blocks or so across: stands of autumn trees reaching into
+    // green woods, sand creeping in ahead of a desert.
+    public float Heat(float x, float z) => _heat.GetNoise(x, z) + 0.15f * _mottle.GetNoise(x, z);
 
     /// <summary>0-1 at column (x, z), for <see cref="Biomes.Pick"/>: how wet the region is.</summary>
-    public float Wet(float x, float z) => Math.Clamp(0.5f + 0.9f * _wet.GetNoise(x, z), 0f, 1f);
+    public float Wet(float x, float z) => Math.Clamp(0.5f + 0.9f * _wet.GetNoise(x, z) - 0.08f * _mottle.GetNoise(x, z), 0f, 1f);
 
     /// <summary>0-1 at column (x, z), for <see cref="Plant"/>: which kind of plant a stand is mostly made of.</summary>
     public float Kind(float x, float z) => 0.5f + 0.5f * _kind.GetNoise(x, z);
@@ -153,7 +158,7 @@ public sealed class ContinentTerrain
     /// later), then rock layers (<paramref name="strata"/> from <see cref="Strata"/>, <paramref name="patch"/> from
     /// <see cref="Patch"/>). <paramref name="bare"/>, 0-1, is how little the top is out in the open. Deserts are sand
     /// and badlands red sand over red rock (see <see cref="Biomes"/>), under the same snow and bare rock up high.</summary>
-    public static BlockId Block(int y, int top, float strata, float patch, float bare, Biome biome = Biome.Temperate)
+    public static BlockId Block(int y, int top, float strata, float patch, float bare, Biome biome = Biome.Temperate, float dry = 0f)
     {
         int depth = top - y;
         // A bare top (shaded by land above it, or well below where the surface was) grows nothing and holds no snow:
@@ -168,8 +173,8 @@ public sealed class ContinentTerrain
         else if (!rocky)
         {
             // Sand where the patch field is under a threshold that falls from mostly sand at SandLine to none by
-            // DryLine, bare dirt along the patches' edges, grass elsewhere.
-            float sandy = Math.Clamp((DryLine - top) / (DryLine - SandLine), 0f, 1f);
+            // DryLine (and rises toward a desert, by dry), bare dirt along the patches' edges, grass elsewhere.
+            float sandy = Math.Max(Math.Clamp((DryLine - top) / (DryLine - SandLine), 0f, 1f), dry);
             float edge = patch - (0.1f + 0.62f * sandy);
             if (sandy > 0f && edge < 0f) { if (depth < 4) return BlockId.Sand; }
             else if (isBare && bare > 0.7f) { if (depth < 1) return BlockId.Rock; }

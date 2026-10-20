@@ -44,6 +44,22 @@ public static class Biomes
         return best;
     }
 
+    /// <summary>How far apart in the climate (squared) a desert's sandy fringe reaches.</summary>
+    private const float DryBlend = 0.012f;
+
+    /// <summary>0-1: how near (heat, wet) is to being desert, reaching 1 at its border, for the sand patches that thicken
+    /// ahead of one (see <see cref="ContinentTerrain.Block"/>).</summary>
+    public static float Dry(float heat, float wet)
+    {
+        float desert = float.MaxValue, other = float.MaxValue;
+        foreach (var e in Table)
+        {
+            float d = (heat - e.Heat) * (heat - e.Heat) + (wet - e.Wet) * (wet - e.Wet);
+            if (e.Biome == Biome.Desert) desert = d; else other = MathF.Min(other, d);
+        }
+        return MathF.Min(1f, 2f / (1f + MathF.Exp((desert - other) / DryBlend)));
+    }
+
     /// <summary>The tint at (heat, wet): each biome's weighted by how near it is, the nearest most. rgb is the colour
     /// (sRGB) and a how strongly it applies, all 0-1.</summary>
     public static (float R, float G, float B, float A) Tint(float heat, float wet)
