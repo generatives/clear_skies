@@ -41,7 +41,7 @@ public interface IFarTerrain
 /// worker, shrinking them (<see cref="Shrink"/>) and meshing the result; only its meshes are kept. Coarse columns are
 /// kept within the outer radius, including under the full-detail terrain, so moving back out needs nothing loaded.
 /// One under full detail whose chunks were edited meanwhile is made again when it's next drawn.
-/// Off by default: a panel toggle (Distant Terrain) for comparing against full detail everywhere.
+/// A panel toggle (Distant Terrain) turns it off, for comparing against full detail everywhere; the game starts it on.
 /// </summary>
 public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, IFarTerrain
 {
@@ -66,13 +66,13 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     public bool Enabled;
 
     /// <summary>How far the view's terrain loads in full detail (blocks).</summary>
-    public float FullDetailRadius = 256f;
+    public float FullDetailRadius = 1024f;
 
     /// <summary>How far coarse terrain is drawn (blocks).</summary>
-    public float OuterRadius = 1024f;
+    public float OuterRadius = 2048f;
 
     /// <summary>How long a swap between detail levels takes to dissolve one into the other (seconds; 0: at once).</summary>
-    public float FadeSeconds = 0.5f;
+    public float FadeSeconds = 2f;
     private float _time;
 
     /// <summary>How a coarse cell is made from its 8 blocks (see <see cref="Shrink"/>): by majority, or solid if any
