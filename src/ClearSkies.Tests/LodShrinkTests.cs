@@ -10,10 +10,11 @@ public class LodShrinkTests
     private static BlockId ShrinkCell(bool majority, params (int k, BlockId id)[] blocks)
     {
         var full = new ChunkData();
-        foreach (var (k, id) in blocks) full.Set(k & 1, (k >> 1) & 1, k >> 2, id);
+        // A cell in the middle of the chunk, so its blocks' neighbours are in it (past the chunk counts as showing).
+        foreach (var (k, id) in blocks) full.Set(16 + (k & 1), 16 + ((k >> 1) & 1), 16 + (k >> 2), id);
         var coarse = new ChunkData();
         LodTerrainSystem.Shrink(full, coarse, 0, 0, 0, majority);
-        return coarse.Get(0, 0, 0);
+        return coarse.Get(8, 8, 8);
     }
 
     private static BlockId Any(params (int k, BlockId id)[] blocks) => ShrinkCell(false, blocks);
@@ -57,23 +58,35 @@ public class LodShrinkTests
         Assert.Equal(BlockId.ShortGrass, coarse.Get(0, 2, 0));
     }
 
-    [Fact]
-    public void TheTopBlockWinsOverMoreBlocksUnderIt()
+    /// <summary>The cell at the middle of a chunk of flat layers (block by height, air where null), shrunk.</summary>
+    private static BlockId Layers(Func<int, BlockId> at)
     {
-        // Grass on dirt, the surface in the cell's upper layer: 4 dirt to 4 grass, but grass is what's seen.
-        Assert.Equal(BlockId.Grass, Majority((0, BlockId.Dirt), (1, BlockId.Dirt), (4, BlockId.Dirt), (5, BlockId.Dirt),
-                                            (2, BlockId.Grass), (3, BlockId.Grass), (6, BlockId.Dirt), (7, BlockId.Grass)));
-        // The surface lower down: grass on the bottom layer, nothing over it.
-        Assert.Equal(BlockId.Grass, Majority((0, BlockId.Grass), (1, BlockId.Grass), (4, BlockId.Grass), (2, BlockId.Dirt)));
+        var full = new ChunkData();
+        for (int y = 0; y < ChunkData.Size; y++)
+        {
+            var id = at(y);
+            if (id == BlockId.Air) continue;
+            for (int z = 0; z < ChunkData.Size; z++) for (int x = 0; x < ChunkData.Size; x++) full.Set(x, y, z, id);
+        }
+        var coarse = new ChunkData();
+        LodTerrainSystem.Shrink(full, coarse, 0, 0, 0);
+        return coarse.Get(8, 8, 8);
     }
 
     [Fact]
-    public void BlocksUnderOpaqueCubesAreNotTops()
-    {
-        // Stone over sand: the sand is buried, the stone is the top.
-        Assert.Equal(BlockId.Stone, Majority((0, BlockId.Sand), (1, BlockId.Sand), (4, BlockId.Sand), (5, BlockId.Sand),
-                                            (2, BlockId.Stone), (3, BlockId.Stone), (6, BlockId.Stone), (7, BlockId.Stone)));
-    }
+    public void GroundShowsItsTopBlock()
+        // Grass on dirt, the cell spanning y 16-17: 4 dirt to 4 grass, but only the grass shows.
+        => Assert.Equal(BlockId.Grass, Layers(y => y < 17 ? BlockId.Dirt : y == 17 ? BlockId.Grass : BlockId.Air));
+
+    [Fact]
+    public void AnUndersideShowsWhatsUnderneath()
+        // An overhang: stone under dirt, open below; seen from below it's stone.
+        => Assert.Equal(BlockId.Stone, Layers(y => y < 16 ? BlockId.Air : y == 16 ? BlockId.Stone : BlockId.Dirt));
+
+    [Fact]
+    public void BuriedBlocksDontCount()
+        // Sand under stone at the surface: the stone shows.
+        => Assert.Equal(BlockId.Stone, Layers(y => y == 16 ? BlockId.Sand : y <= 17 ? BlockId.Stone : BlockId.Air));
 
     [Fact]
     public void PlantsAndModelsAreLeftOut()
