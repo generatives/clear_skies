@@ -216,12 +216,19 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     public bool Active => Enabled;
 
     /// <summary>How much full column (x, z) is hidden by the coarse column over it (see ChunkRenderSystem.Cover): 1
-    /// while it's drawn, rising from 0 to 1 over <see cref="FadeSeconds"/> as it comes in, 0 when it isn't.</summary>
+    /// while it's drawn, rising from 0 to 1 over <see cref="FadeSeconds"/> as it comes in, 0 when it isn't; while the
+    /// coarse column dissolves away, -t: the full column draws only the share t of pixels the coarse one has left.</summary>
     public float CoverOf(int x, int z)
     {
-        if (!Enabled || !_columns.TryGetValue((x >> 1, z >> 1), out var c) || !c.Drawn || WaitsForLight(c)) return 0f;
-        return Faded(MathF.Max(c.FadeInAt, c.SettledAt));
+        if (!Enabled || !_columns.TryGetValue((x >> 1, z >> 1), out var c) || WaitsForLight(c)) return 0f;
+        if (c.Drawn) return CoarseShare(c);
+        float t = Faded(c.FadeOutAt);
+        return t >= 1f || c.Shown.Count == 0 ? 0f : t <= 0f ? 1f : -t;
     }
+
+    /// <summary>How much of a drawn coarse column shows, 0-1, rising over <see cref="FadeSeconds"/> from when it was
+    /// first shown lit.</summary>
+    private float CoarseShare(CoarseColumn c) => Faded(MathF.Max(c.FadeInAt, c.SettledAt));
 
     /// <summary>How far through its fade a swap that started at <paramref name="at"/> is, 0-1.</summary>
     private float Faded(float at) => FadeSeconds <= 0f ? 1f : System.Math.Clamp((_time - at) / FadeSeconds, 0f, 1f);
@@ -895,10 +902,13 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         var camera = frame.CameraPosition;
         foreach (var ((cx, cz), column) in _columns)
         {
-            // Drawn, or dissolving over the full detail that replaced it.
-            float dissolve = column.Drawn ? 0f : Faded(column.FadeOutAt);
+            // Coming in over the full detail it replaces (drawing the pixels that leaves out), drawn, or going away
+            // (leaving out the pixels the full detail coming back draws): a pixel shows one level, never both.
+            float share = column.Drawn ? CoarseShare(column) : 1f - Faded(column.FadeOutAt);
+            if (share <= 0f) continue;
+            float dissolve = column.Drawn ? (share < 1f ? -share : 0f) : 1f - share;
             var shown = column.Shown;
-            if (dissolve >= 1f || shown.Count == 0 || WaitsForLight(column)) continue;
+            if (shown.Count == 0 || WaitsForLight(column)) continue;
             if (!frame.Frustum.Intersects(shown[0].Min, shown[^1].Min + size)) continue; // shown is in Y order
             // Lit from the grid once it's settled there; until then (or leaving it) with the light maps it last baked;
             // one never lit isn't drawn (above) unless the grid is full, when it's lit as open air.

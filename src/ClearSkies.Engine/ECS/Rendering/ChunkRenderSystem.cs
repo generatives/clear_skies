@@ -54,7 +54,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
 
     /// <summary>How much a static world column is drawn by something else instead (coarse distant terrain, see
     /// LodTerrainSystem.CoverOf): 1 skips its chunks, between 0 and 1 dissolves that share of their pixels (a swap
-    /// fading out), 0 draws them.</summary>
+    /// fading out), between -1 and 0 draws only that share (a swap fading in), 0 draws them.</summary>
     public Func<int, int, float>? Cover { get; set; }
 
     /// <param name="staticVolume">The static world, whose chunks are culled by column (it never moves).</param>

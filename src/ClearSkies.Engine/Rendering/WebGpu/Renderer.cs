@@ -419,13 +419,16 @@ fn chunkVertex(d: ChunkDraw, quad: vec2<u32>, corner: u32) -> VSOut {
     return o;
 }
 
-// Whether this pixel of a dissolving chunk draw is left out: a 4x4 ordered dither on the screen, so the level of
-// terrain going away thins out evenly over the one coming in (see LodTerrainSystem).
+// Whether this pixel of a dissolving chunk draw is left out: a 4x4 ordered dither on the screen. A level of terrain
+// going away (dissolve d > 0) leaves out the pixels under d; one coming in (dissolve -d) draws only those, so through a
+// swap each pixel shows one level or the other, never both (see LodTerrainSystem).
 fn dissolved(in: VSOut) -> bool {
-    if (in.dissolve <= 0.0) { return false; }
+    if (in.dissolve == 0.0) { return false; }
     var bayer = array<f32, 16>(0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);
     let p = vec2<u32>(in.pos.xy) & vec2<u32>(3u);
-    return (bayer[p.x + 4u * p.y] + 0.5) / 16.0 < in.dissolve;
+    let b = (bayer[p.x + 4u * p.y] + 0.5) / 16.0;
+    if (in.dissolve > 0.0) { return b < in.dissolve; }
+    return b >= -in.dissolve;
 }
 
 // A well-mixed hash of a world cell, for per-cell variation that's the same wherever the cell is meshed.
@@ -1731,11 +1734,12 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
     /// <summary>
     /// Draws a chunk mesh lit from grid <paramref name="grid"/> (its <see cref="GridHandle.Index"/>; -1 draws it
     /// full-bright, <see cref="LodGrid"/> lit as open air). <paramref name="chunk"/> is the chunk's coordinate in that grid.
-    /// <paramref name="dissolve"/> (0-1, here and in the other chunk draws): the share of its pixels left out, in an
-    /// even screen dither, while terrain swaps detail level.
+    /// <paramref name="dissolve"/> (here and in the other chunk draws), while terrain swaps detail level: 0 draws it
+    /// whole; d (0-1) leaves out that share of its pixels in an even screen dither (going away); -d draws only that
+    /// share, the very pixels d leaves out (coming in).
     /// </summary>
     public void DrawChunkMesh(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk, float dissolve = 0f)
-        => DrawChunk(mesh, model, grid, chunk, dissolve > 0f ? _chunkDissolvePipeline : _chunkPipeline, dissolve);
+        => DrawChunk(mesh, model, grid, chunk, dissolve != 0f ? _chunkDissolvePipeline : _chunkPipeline, dissolve);
 
     /// <summary>
     /// Lays down a chunk's cut-out mesh's depth (<see cref="ChunkRenderData.CutoutMesh"/>), minus its texels under half
