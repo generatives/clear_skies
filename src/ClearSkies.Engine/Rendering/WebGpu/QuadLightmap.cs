@@ -386,18 +386,61 @@ fn bakeCell(job: Job, q: vec2<u32>, k: u32) {
     // The quad's first corner is its lowest; the face lies on the block's side N points out of, so the open cell is
     // the one in front of the plane along N.
     let o = vec3<i32>(i32(q.x & 63u), i32((q.x >> 6u) & 63u), i32((q.x >> 12u) & 63u));
-    let lc = o + T * i32(i) + B * i32(j) + min(N, vec3<i32>(0));
-    let air = vec3<i32>(job.cx, job.cy, job.cz) * 32 + lc;
-    let f = faceCorners(air, N, T, B, (job.flags & 1u) != 0u);
+    let air0 = vec3<i32>(job.cx, job.cy, job.cz) * 32 + o + min(N, vec3<i32>(0));
+    let see = (job.flags & 1u) != 0u;
 
     let stride = w + 1u;
     let base = 2u * (job.lightBase + lightOffset(q)) + select(0u, stride * (h + 1u), back) + i + stride * j;
     let lastI = i == w - 1u;
     let lastJ = j == h - 1u;
-    putCorner(base, encodeCorner(f.c00, f.ao.x));
-    if (lastI) { putCorner(base + 1u, encodeCorner(f.c10, f.ao.y)); }
-    if (lastJ) { putCorner(base + stride, encodeCorner(f.c01, f.ao.z)); }
-    if (lastI && lastJ) { putCorner(base + stride + 1u, encodeCorner(f.c11, f.ao.w)); }
+    let c = vec2<u32>(i, j);
+    let air = air0 + T * i32(i) + B * i32(j);
+    if (!voxelSolid(air)) {
+        let f = faceCorners(air, N, T, B, see);
+        putCorner(base, encodeCorner(f.c00, f.ao.x));
+        if (lastI) { putCorner(base + 1u, encodeCorner(f.c10, f.ao.y)); }
+        if (lastJ) { putCorner(base + stride, encodeCorner(f.c01, f.ao.z)); }
+        if (lastI && lastJ) { putCorner(base + stride + 1u, encodeCorner(f.c11, f.ao.w)); }
+        return;
+    }
+    // A face is meshed at a chunk's edge whatever is in front of it (the mesher doesn't look into the next chunk), so
+    // this cell's open cell can be a solid block there, its face hidden. Its own view of a corner (itself always
+    // counted, with whatever light word a solid voxel holds: often the empty one, full sun) isn't what its visible
+    // neighbours see, and each corner it writes is shared with them, so it's worked out from one of them instead.
+    putCorner(base, hiddenCorner(air0, N, T, B, see, w, h, c, c));
+    if (lastI) { putCorner(base + 1u, hiddenCorner(air0, N, T, B, see, w, h, c, c + vec2<u32>(1u, 0u))); }
+    if (lastJ) { putCorner(base + stride, hiddenCorner(air0, N, T, B, see, w, h, c, c + vec2<u32>(0u, 1u))); }
+    if (lastI && lastJ) { putCorner(base + stride + 1u, hiddenCorner(air0, N, T, B, see, w, h, c, c + vec2<u32>(1u))); }
+}
+
+// Grid corner k of a w x h quad whose cell (0, 0) has open cell air0, written by cell own, whose face is hidden (see
+// bakeCell): as one of the other cells around the corner with an open cell sees it, or as own does if none has.
+fn hiddenCorner(air0: vec3<i32>, N: vec3<i32>, T: vec3<i32>, B: vec3<i32>, see: bool, w: u32, h: u32,
+                own: vec2<u32>, k: vec2<u32>) -> u32 {
+    var cell = own;
+    for (var n = 0u; n < 4u; n++) {
+        let d = vec2<u32>(n & 1u, n >> 1u);
+        if (any(k < d)) { continue; }
+        let o = k - d;
+        if (o.x >= w || o.y >= h || all(o == own)) { continue; }
+        if (!voxelSolid(air0 + T * i32(o.x) + B * i32(o.y))) { cell = o; break; }
+    }
+    let f = faceCorners(air0 + T * i32(cell.x) + B * i32(cell.y), N, T, B, see);
+    let d = k - cell;
+    if (d.x == 0u && d.y == 0u) { return encodeCorner(f.c00, f.ao.x); }
+    if (d.y == 0u) { return encodeCorner(f.c10, f.ao.y); }
+    if (d.x == 0u) { return encodeCorner(f.c01, f.ao.z); }
+    return encodeCorner(f.c11, f.ao.w);
+}
+
+// Whether voxel v of the draw's grid is solid (unloaded reads as open).
+fn voxelSolid(v: vec3<i32>) -> bool {
+    let e = entryOf(drawGrid, v >> vec3<u32>(5u));
+    if (e < 0) { return false; }
+    let code = chunkTable[2 * e].x;
+    if (code < 0) { return code == OCC_ALL_SOLID; }
+    let l = v & vec3<i32>(31);
+    return ((occPool[u32(code * WPC + l.y + 32 * l.z)] >> u32(l.x)) & 1u) == 1u;
 }
 
 fn putCorner(i: u32, e: u32) { atomicOr(&lightArena[i >> 1u], e << ((i & 1u) * 16u)); }
