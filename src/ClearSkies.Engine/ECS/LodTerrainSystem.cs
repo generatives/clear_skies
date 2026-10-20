@@ -111,6 +111,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         public int Waiting, LeaveWait; // frames spent settling, and leaving
         public int LitSoFar, ChildrenLitSoFar; // how many of the chunks it waits on (settling, leaving) were found lit
         public float FadeInAt = float.NegativeInfinity, FadeOutAt = float.NegativeInfinity; // when it was last shown, hidden
+        public float SettledAt = float.NegativeInfinity; // when it settled (a column held back for light shows from then)
     }
 
     // A swap waits for the incoming terrain's light (see UpdateDrawn): at least this many frames, since a change is
@@ -209,8 +210,8 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     /// while it's drawn, rising from 0 to 1 over <see cref="FadeSeconds"/> as it comes in, 0 when it isn't.</summary>
     public float CoverOf(int x, int z)
     {
-        if (!Enabled || !_columns.TryGetValue((x >> 1, z >> 1), out var c) || !c.Drawn) return 0f;
-        return Faded(c.FadeInAt);
+        if (!Enabled || !_columns.TryGetValue((x >> 1, z >> 1), out var c) || !c.Drawn || WaitsForLight(c)) return 0f;
+        return Faded(MathF.Max(c.FadeInAt, c.SettledAt));
     }
 
     /// <summary>How far through its fade a swap that started at <paramref name="at"/> is, 0-1.</summary>
@@ -661,9 +662,12 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
                 column.LitSoFar = 0;
             }
             else if (!column.Settled)
+            {
                 column.Settled = ++column.Waiting >= MinSwapFrames && CheckNow(key)
                                  && (column.Waiting > (column.Baked ? MaxSwapFrames : MaxFirstLightFrames)
                                      || ResidentLit(key, column));
+                if (column.Settled && !column.Baked) column.SettledAt = _time; // shown from now
+            }
             // Covered while its full detail is ready: the world's rays then see only full-detail blocks there.
             if (column.Covered != ready) SetCovered(key, column, ready);
 
@@ -786,7 +790,8 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         for (int i = _queueHead; i < _queue.Count; i++)
             if (!_columns.ContainsKey(_queue[i])) { best = MathF.Min(best, Distance(centre, _queue[i])); break; }
         foreach (var (c, column) in _columns)
-            if (WaitsForLight(column)) best = MathF.Min(best, Distance(centre, c));
+            if (WaitsForLight(column) && !(column.ReadyKnown && column.Ready)) // full detail shows there instead
+                best = MathF.Min(best, Distance(centre, c));
         return best;
     }
 
