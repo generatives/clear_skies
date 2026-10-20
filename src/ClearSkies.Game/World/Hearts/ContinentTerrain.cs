@@ -90,10 +90,10 @@ public sealed class ContinentTerrain
         float knolls = KnollRise * (0.4f + 0.6f * (1f - size)) * k * (1f - core);
         // Sharp peaks: ridged detail, its ridges sharpened, standing on the range's rise.
         float p = (_peaks.GetNoise(x, z) + 1f) * 0.5f;
-        float peaked = 0.5f + 0.5f * p * MathF.Sqrt(p);
+        float peaked = 0.6f + 0.4f * p;
         float mountains = RangeRise * (0.4f + 1f * size) * MathF.Pow(core, 1.6f) * peaked;
         knolls *= peaked;
-        // Crags: ridges and gullies a few hundred blocks apart, up to a third of a mountain's height, so its slopes
+        // Crags: ridges and gullies a few hundred blocks apart, up to a seventh of a mountain's height, so its slopes
         // break into ribs and spurs rather than one smooth swell.
         float c = (_crags.GetNoise(x, z) + 1f) * 0.5f;
         float crags = CragShare * (c * c - 0.4f) * (minor + knolls + mountains);
@@ -115,7 +115,7 @@ public sealed class ContinentTerrain
     // Ranges: the spine's noise within RangeEdge of zero is mountains, within HighEdge highlands (full height inside
     // HighCore); bent by up to RangeWarp blocks.
     private const float RangeEdge = 0.3f, HighCore = 0.05f, HighEdge = 1f, RangeWarp = 800f;
-    private const float HighRise = 250f, RangeRise = 500f, MinorRise = 320f, KnollRise = 260f, CragShare = 0.6f;
+    private const float HighRise = 250f, RangeRise = 500f, MinorRise = 320f, KnollRise = 260f, CragShare = 0.25f;
 
     /// <summary>The plains' average height: a floor of land under the broken-up highlands and ranges, with a sparser
     /// underworld of smaller pieces below it, down to the cloud sea.</summary>
