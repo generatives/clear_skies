@@ -52,6 +52,19 @@ public sealed unsafe class GpuTimer : IDebugUiSystem, IDisposable
     private readonly List<string> _order = new();
     private double _spanMs, _busyMs;
 
+    // Per name (and for the frame's busy total, under ""), the most ms in one frame over about the last 5 s: replaced
+    // by a frame's own once it's that old, so a spike shows a while and then goes.
+    private readonly Dictionary<string, (double ms, long at)> _worst = new();
+    private static readonly long WorstWindow = 5 * Stopwatch.Frequency;
+
+    private void NoteWorst(string name, double ms, long now)
+    {
+        if (!_worst.TryGetValue(name, out var w) || ms >= w.ms || now - w.at > WorstWindow) _worst[name] = (ms, now);
+    }
+
+    private double WorstOf(string name)
+        => _worst.TryGetValue(name, out var w) && Stopwatch.GetTimestamp() - w.at <= WorstWindow ? w.ms : 0;
+
     // Tick length calibration: a reference (GPU ticks, CPU time) pair, replaced once the current one is old.
     private ulong _refTicks;
     private long _refCpu;
@@ -204,7 +217,9 @@ public sealed unsafe class GpuTimer : IDebugUiSystem, IDisposable
             if (!_stats.ContainsKey(name)) _order.Add(name);
             var s = _stats.GetValueOrDefault(name);
             _stats[name] = (Ema(s.ms, ticks * _nsPerTick * 1e-6), Ema(s.count, count));
+            NoteWorst(name, ticks * _nsPerTick * 1e-6, r.CpuTicks);
         }
+        NoteWorst("", busy * _nsPerTick * 1e-6, r.CpuTicks);
         // Passes not run this frame decay toward zero.
         foreach (var name in _order)
             if (!_frameSums.ContainsKey(name)) { var s = _stats[name]; _stats[name] = (Ema(s.ms, 0), Ema(s.count, 0)); }
@@ -252,13 +267,16 @@ public sealed unsafe class GpuTimer : IDebugUiSystem, IDisposable
         }
         ImGui.Checkbox("Measure", ref Enabled);
         ImGui.TextDisabled(_calibrated ? $"tick = {_nsPerTick:F3} ns (measured)" : "tick length not measured yet (assuming 1 ns)");
-        ImGui.Text($"Timed passes: {_busyMs:F2} ms busy per frame, first start to last end {_spanMs:F2} ms");
+        ImGui.Text($"Timed passes: {_busyMs:F2} ms busy per frame (worst in 5 s: {WorstOf(""):F2}), first start to last end {_spanMs:F2} ms");
+        ImGui.SameLine();
+        if (ImGui.SmallButton("Reset worst")) _worst.Clear();
         ImGui.Separator();
+        ImGui.TextDisabled("   average   worst in 5 s");
         var rows = new List<(string name, double ms, double count)>(_order.Count);
         foreach (var name in _order) { var s = _stats[name]; rows.Add((name, s.ms, s.count)); }
         rows.Sort((a, b) => b.ms.CompareTo(a.ms));
         foreach (var (name, ms, count) in rows)
-            ImGui.Text($"{ms,7:F2} ms  {name}" + (count > 1.05 ? $"  (x{count:F1})" : "") +
+            ImGui.Text($"{ms,7:F2} ms  {WorstOf(name),7:F2} ms  {name}" + (count > 1.05 ? $"  (x{count:F1})" : "") +
                        (_perItem.TryGetValue(name, out var pi) && pi.items > 0 ? $"  {pi.ms * 1000.0 / pi.items:F2} us/brick" : ""));
         if (ImGui.Button("Reset per-brick averages")) _perItem.Clear();
         ImGui.Separator();
