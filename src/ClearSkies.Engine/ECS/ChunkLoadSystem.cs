@@ -392,10 +392,18 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
             Unload(p); // a no-op if eviction already unloaded it
         }
         if (_held.Count == 0) return;
+        // Held ones let go are unloaded under the same budget (a frame's share, even from Rebuild): many are let go
+        // at once, as a ring of coarse columns finishes fading in.
+        double heldBudget = System.Math.Min(budgetMs, StreamBudgetMs);
         _letGo.Clear();
         foreach (var (p, since) in _held)
-            if (Wanted(p.X, p.Z) || _staticVolume.GetEntry(p) == null) _letGo.Add(p); // wanted again, or gone already
-            else if (HeldBy?.Invoke(p.X, p.Z) != true || _frame - since > MaxHoldFrames) { Unload(p); _letGo.Add(p); }
+        {
+            if (Wanted(p.X, p.Z) || _staticVolume.GetEntry(p) == null) { _letGo.Add(p); continue; } // wanted again, or gone already
+            if (HeldBy?.Invoke(p.X, p.Z) == true && _frame - since <= MaxHoldFrames) continue;
+            if (_steps.SinceLap() - start >= heldBudget) break;
+            Unload(p);
+            _letGo.Add(p);
+        }
         foreach (var p in _letGo) _held.Remove(p);
     }
 
