@@ -258,16 +258,18 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     private GridHandle?[] _grids = new GridHandle?[16];
     private GridDesc[] _descs = new GridDesc[16];
     // The world indexes, one after another after the chunk table's entries (see the class summary): the world's,
-    // _worldDim x WorldLayers x _worldDim cells, then distant terrain's, FarIndexDim x WorldLayers x FarIndexDim. Each
+    // _worldDim x WorldLayers x _worldDim cells, then each level of distant terrain's (see FarIndexDim). Each
     // static grid's block of entries is on its handle.
     public const int WorldLayers = 64;
     private const int NoWorldSlot = 0xFFFF;
     private readonly int _worldDim;
 
-    /// <summary>Distant terrain's world index width (in its own chunks, x and z): wide enough for the farthest it's
-    /// drawn (4096 blocks each way at 64 blocks a chunk) so its chunks never share a cell.</summary>
-    private const int FarIndexDim = 136;
-    private const int IndexSlots = 2;
+    /// <summary>A level of distant terrain's world index width (in its own chunks, x and z): wide enough for the
+    /// farthest it's drawn (<see cref="FarReach"/> blocks each way) so its chunks never share a cell.</summary>
+    private static int FarIndexDim(int scale) => 2 * (FarReach / (S * scale)) + 8;
+    private const int FarReach = 4096;
+    /// <summary>World indexes: the world's, then one for each level of distant terrain (scale 2, 4, ...).</summary>
+    private const int IndexSlots = 4;
     private readonly GridHandle?[] _indexOwners = new GridHandle?[IndexSlots];
     private readonly ulong[] _indexAt = new ulong[IndexSlots]; // each index's byte offset from the first
     private readonly int[] _indexDim = new int[IndexSlots];
@@ -366,7 +368,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         _ctx = ctx;
         _worldDim = worldIndexDim;
         _indexDim[0] = worldIndexDim;
-        _indexDim[1] = FarIndexDim;
+        for (int i = 1; i < IndexSlots; i++) _indexDim[i] = FarIndexDim(1 << i);
         for (int i = 0; i < IndexSlots; i++)
         {
             _indexAt[i] = _worldIndexBytes;
@@ -447,7 +449,8 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         g.IsWorld = isWorld;
         if (isWorld)
         {
-            int slot = isWorld && g.Scale == 1 ? 0 : 1;
+            int slot = System.Numerics.BitOperations.Log2((uint)g.Scale); // the world, then each level of distant terrain
+            if (slot >= IndexSlots || 1 << slot != g.Scale) throw new InvalidOperationException($"No world index for scale {g.Scale}.");
             if (_indexOwners[slot] != null) throw new InvalidOperationException($"World index {slot} is taken.");
             _indexOwners[slot] = g;
             g.IndexSlot = slot;
@@ -458,8 +461,8 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     }
 
     /// <summary>Registers distant terrain: a static grid like the world, lit per brick, whose voxels are
-    /// <paramref name="scale"/> blocks a side (world space = its voxel space times the scale). Its chunks are uploaded
-    /// with <see cref="UploadPacked"/>. There is room for one.</summary>
+    /// <paramref name="scale"/> blocks a side (world space = its voxel space times the scale; a power of two). Its chunks
+    /// are uploaded with <see cref="UploadPacked"/>. There is room for one of each scale up to 8.</summary>
     internal void RegisterStatic(GridHandle g, int scale)
     {
         if (scale < 2) throw new ArgumentOutOfRangeException(nameof(scale), "The world is the only static grid at scale 1.");

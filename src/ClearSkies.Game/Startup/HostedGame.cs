@@ -116,7 +116,7 @@ internal static class HostedGame
         host.Gui.RegisterDebugUi(new NetDebugPanel(net, hosting.Host, world.RemoteBodies, transport));
 
         view.AddRender(world);
-        fog.Far = view.Lod;
+        fog.Far = view.FarthestLod;
 
         // The camera waits where the local player will spawn (where they left off, or the world's spawn point) until
         // they do, once the world around them has loaded.

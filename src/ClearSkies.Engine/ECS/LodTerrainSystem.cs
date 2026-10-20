@@ -42,12 +42,32 @@ public interface IFarTerrain
 /// kept within the outer radius, including under the full-detail terrain, so moving back out needs nothing loaded.
 /// One under full detail whose chunks were edited meanwhile is made again when it's next drawn.
 /// A panel toggle (Distant Terrain) turns it off, for comparing against full detail everywhere; the game starts it on.
+///
+/// Levels chain: level k has cells 2^k blocks a side, and is drawn past level k-1 (<see cref="Finer"/>) out to its own
+/// <see cref="OuterRadius"/>, swapping with it as level 1 does with full detail: a column of it covers a 2x2 group of
+/// the finer level's, which keeps whole groups (see InRange), and it's drawn until all four are loaded and lit. Each
+/// level is its own grid (scale 2^k); a level's rays see it and the coarser levels, passing through their covered
+/// columns. Above, "full detail" and "full columns" mean the finer level for any level but the first.
 /// </summary>
 public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, IFarTerrain
 {
     private const int S = ChunkData.Size;
-    private const int Cell = 2;                  // blocks per coarse cell
-    private const int ColumnBlocks = S * Cell;   // a coarse column's width
+    /// <summary>Which level of detail this is: 1 for half resolution, 2 for a quarter, and so on.</summary>
+    public int Level { get; }
+    private readonly int Cell;          // blocks per coarse cell: 2 to the level
+    private readonly int ColumnBlocks;  // a coarse column's width (and a coarse chunk's)
+
+    /// <summary>The level drawn nearer the view, which this one swaps with: null for full detail (level 1).</summary>
+    public LodTerrainSystem? Finer { get; }
+
+    /// <summary>The level drawn past this one, if any (see <see cref="Finer"/>).</summary>
+    public LodTerrainSystem? Coarser { get; private set; }
+
+    /// <summary>Whether this level is on and drawing: it and every finer level are enabled.</summary>
+    public bool Live => Enabled && (Finer?.Live ?? true);
+
+    /// <summary>Where this level's terrain starts (blocks): where the finer level stops.</summary>
+    public float InnerRadius => Finer?.OuterRadius ?? FullDetailRadius;
     private const int MaxInFlight = 16;
     private const double ResidentBudgetMs = 1.0;
     private const double UploadBudgetMs = 2.0;
@@ -65,7 +85,8 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     /// <summary>Whether distant terrain is drawn coarse (and full detail only loads to <see cref="FullDetailRadius"/>).</summary>
     public bool Enabled;
 
-    /// <summary>How far the view's terrain loads in full detail (blocks).</summary>
+    /// <summary>How far the view's terrain loads in full detail (blocks): level 1's (the others start where the finer
+    /// level stops).</summary>
     public float FullDetailRadius = 512f;
 
     /// <summary>How far coarse terrain is drawn (blocks).</summary>
@@ -151,6 +172,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     private readonly ConcurrentQueue<Result> _results = new();
     private (int x, int z) _centre = (int.MinValue, int.MinValue);
     private int _outerColumns = -1;
+    private bool _grouped; // the range is in whole 2x2 groups (see InRange)
     private bool _wasEnabled;
     private Vector3D<float> _view;
 
@@ -170,16 +192,28 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     // CPU time of each step, for the debug panel.
     private const int ApplyStep = 0, DispatchStep = 1, SwapStep = 2, ListStep = 3, LightmapStep = 4, DrawStep = 5, ResidentStep = 6,
                       ReadyStep = 7, EditStep = 8, LitStep = 9;
-    private readonly StepTimer _steps = new("Adding finished columns", "Queueing and dispatching columns",
-                                            "Swaps: the rest", "Render: listing draws",
-                                            "Render: light maps", "Render: recording draws",
-                                            "Swaps: putting columns in the light grid",
-                                            "Swaps: full detail readiness", "Swaps: edit checks",
-                                            "Swaps: lighting checks") { Owner = "Distant Terrain" };
+    private readonly StepTimer _steps;
 
+    /// <param name="finer">The level under this one (its level is one less), or null for level 1, over full detail.</param>
     public LodTerrainSystem(World world, Renderer renderer, ChunkLoadSystem load, ChunkVolume staticVolume,
-                            Func<IWorldGenerator> generatorFactory, IChunkStore store, GridStore? gridStore = null)
+                            Func<IWorldGenerator> generatorFactory, IChunkStore store, GridStore? gridStore = null,
+                            LodTerrainSystem? finer = null)
     {
+        Finer = finer;
+        Level = finer == null ? 1 : finer.Level + 1;
+        Cell = 1 << Level;
+        ColumnBlocks = S * Cell;
+        if (finer != null)
+        {
+            if (finer.Coarser != null) throw new InvalidOperationException("That level already has a coarser one.");
+            finer.Coarser = this;
+        }
+        _steps = new StepTimer("Adding finished columns", "Queueing and dispatching columns",
+                               "Swaps: the rest", "Render: listing draws",
+                               "Render: light maps", "Render: recording draws",
+                               "Swaps: putting columns in the light grid",
+                               "Swaps: finer level readiness", "Swaps: edit checks",
+                               "Swaps: lighting checks") { Owner = DebugName };
         _world = world;
         _renderer = renderer;
         _load = load;
@@ -192,7 +226,9 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         _meshers = new ThreadLocal<GreedyMesher>(() => new GreedyMesher(atlas));
         _interests = world.GetEntities().With<TerrainInterest>().With<Transform>().AsSet();
 
-        // Whether a coarse column's full detail is ready is found again only when something it depends on changes.
+        // Whether a coarse column's full detail is ready is found again only when something it depends on changes (a
+        // coarser level's columns look at the finer level's every frame: there are few of them).
+        if (finer != null) return;
         load.ColumnChanged += (x, z) => _readyDirty.Add((x >> 1, z >> 1));
         world.SubscribeComponentAdded((in Entity e, in ChunkMeshedFlag _) => ChunkChanged(e));
         world.SubscribeComponentRemoved((in Entity e, in ChunkMeshedFlag _) => ChunkChanged(e));
@@ -213,18 +249,36 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     private const int EditChecksPerFrame = 2;
     private const int RecheckPerFrame = 16;
 
-    public bool Active => Enabled;
+    public bool Active => Live || Finer is { Active: true };
 
     /// <summary>How much full column (x, z) is hidden by the coarse column over it (see ChunkRenderSystem.Cover): 1
     /// while it's drawn, rising from 0 to 1 over <see cref="FadeSeconds"/> as it comes in, 0 when it isn't; while the
-    /// coarse column dissolves away, -t: the full column draws only the share t of pixels the coarse one has left.</summary>
+    /// coarse column dissolves away, -t: the full column draws only the share t of pixels the coarse one has left.
+    /// Where this level hides nothing there, a coarser level may (it's drawn where this one isn't ready). (x, z) are in
+    /// full columns, for every level.</summary>
     public float CoverOf(int x, int z)
     {
-        if (!Enabled || !_columns.TryGetValue((x >> 1, z >> 1), out var c) || WaitsForLight(c)) return 0f;
+        float own = OwnCoverOf(x, z);
+        return own == 0f && Coarser is { Live: true } coarser ? coarser.CoverOf(x, z) : own;
+    }
+
+    private float OwnCoverOf(int x, int z)
+    {
+        if (!Live || !_columns.TryGetValue((x >> Level, z >> Level), out var c) || WaitsForLight(c)) return 0f;
         if (c.Drawn) return CoarseShare(c);
         float t = Faded(c.FadeOutAt);
         return t >= 1f || c.Shown.Count == 0 ? 0f : t <= 0f ? 1f : -t;
     }
+
+    /// <summary>Whether this level draws column <paramref name="key"/> (its own columns) now, lit: what's under it
+    /// doesn't show.</summary>
+    private bool Shows((int x, int z) key)
+        => _columns.TryGetValue(key, out var c) && c.Drawn && !WaitsForLight(c);
+
+    /// <summary>Whether this level's column <paramref name="key"/> can stand in for it in a coarser level's swap: it's
+    /// loaded and lit (or all air), or not drawn because what's under it is ready.</summary>
+    private bool Covers((int x, int z) key)
+        => Wanted(key) && _columns.TryGetValue(key, out var c) && !WaitsForLight(c);
 
     /// <summary>How much of a drawn coarse column shows, 0-1: rising over <see cref="FadeSeconds"/> as it swaps in for
     /// the full detail that was drawn there; all of it when it comes in over nothing, which happens behind the fog (see
@@ -239,20 +293,26 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         _steps.Start();
         _time += dt;
         _frame++;
-        if (!Enabled)
+        if (!Live)
         {
-            if (_wasEnabled) { _load.FullDetailRadius = null; UnloadAll(); _wasEnabled = false; }
+            if (_wasEnabled)
+            {
+                if (Finer == null) _load.FullDetailRadius = null;
+                UnloadAll();
+                _wasEnabled = false;
+            }
             return;
         }
         _wasEnabled = true;
         FullDetailRadius = MathF.Max(FullDetailRadius, 64f);
-        OuterRadius = MathF.Max(OuterRadius, FullDetailRadius + ColumnBlocks);
-        _load.FullDetailRadius = FullDetailRadius;
+        OuterRadius = MathF.Max(OuterRadius, InnerRadius + ColumnBlocks);
+        if (Finer == null) _load.FullDetailRadius = FullDetailRadius;
         if (!TryView(out _view)) return;
 
         var centre = ((int)MathF.Floor(_view.X / ColumnBlocks), (int)MathF.Floor(_view.Z / ColumnBlocks));
         int outer = (int)MathF.Ceiling(OuterRadius / ColumnBlocks);
-        if (centre != _centre || outer != _outerColumns) Rebuild(centre, outer);
+        bool grouped = Coarser is { Live: true };
+        if (centre != _centre || outer != _outerColumns || grouped != _grouped) Rebuild(centre, outer, grouped);
         FreeSome();
         _steps.Lap(DispatchStep);
 
@@ -276,19 +336,35 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         return false;
     }
 
-    private bool Wanted((int x, int z) c)
-        => Sq(c.x - _centre.x) + Sq(c.z - _centre.z) <= Sq(_outerColumns);
+    private bool Wanted((int x, int z) c) => InRange(c, _centre, _outerColumns, _grouped);
+
+    /// <summary>Whether a loaded column is kept: those wanted, and with a coarser level past this one a ring more, so
+    /// one that's just gone out of range is still drawn while the coarser level fades in over it (the coarser level
+    /// counts only wanted columns as ready, see <see cref="Covers"/>).</summary>
+    private bool Kept((int x, int z) c) => InRange(c, _centre, _outerColumns + (_grouped ? 2 : 0), _grouped);
+
+    /// <summary>Whether column <paramref name="c"/> is within <paramref name="outer"/> columns of
+    /// <paramref name="centre"/>. With a coarser level drawn past this one (<paramref name="grouped"/>), by the middle
+    /// of the 2x2 group it's in, so this level ends in whole coarser columns, each swapping for its four in one go (as
+    /// ChunkLoadSystem.FullDetailRadius does for full detail).</summary>
+    private static bool InRange((int x, int z) c, (int x, int z) centre, int outer, bool grouped)
+    {
+        if (!grouped) return Sq(c.x - centre.x) + Sq(c.z - centre.z) <= Sq(outer);
+        double dx = (c.x >> 1) * 2 + 1 - (centre.x + 0.5), dz = (c.z >> 1) * 2 + 1 - (centre.z + 0.5);
+        return dx * dx + dz * dz <= (double)outer * outer;
+    }
 
     private static long Sq(int v) => (long)v * v;
 
     /// <summary>The view moved to another coarse column (or the radius changed): drops what's out of range and queues
     /// what's missing, nearest first.</summary>
-    private void Rebuild((int x, int z) centre, int outer)
+    private void Rebuild((int x, int z) centre, int outer, bool grouped)
     {
         _centre = centre;
         _outerColumns = outer;
+        _grouped = grouped;
         // Out of range: not drawn from now on, and freed (out of the grid, meshes released) a few a frame.
-        foreach (var key in _columns.Keys.Where(k => !Wanted(k)).ToList())
+        foreach (var key in _columns.Keys.Where(k => !Kept(k)).ToList())
         {
             _columns.Remove(key, out var gone);
             if (_toFree.Remove(key, out var older)) Free(key, older);
@@ -297,11 +373,11 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
 
         _queue.Clear();
         _queueHead = 0;
-        for (int dz = -outer; dz <= outer; dz++)
-        for (int dx = -outer; dx <= outer; dx++)
+        for (int dz = -outer - 2; dz <= outer + 2; dz++)
+        for (int dx = -outer - 2; dx <= outer + 2; dx++)
         {
             var c = (centre.x + dx, centre.z + dz);
-            if (dx * dx + dz * dz > outer * outer || _columns.ContainsKey(c) || _inFlight.Contains(c)) continue;
+            if (!Wanted(c) || _columns.ContainsKey(c) || _inFlight.Contains(c)) continue;
             _queue.Add(c);
         }
         _queue.Sort((a, b) => (Sq(a.Item1 - centre.x) + Sq(a.Item2 - centre.z))
@@ -336,9 +412,9 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     {
         var work = new List<(ChunkPosition, bool)>();
         int minY = _load.MinLayer;
-        for (int j = 0; j < 4; j++)
+        for (int j = 0; j < Cell * Cell; j++)
         {
-            int x = col.x * 2 + (j & 1), z = col.z * 2 + (j >> 1);
+            int x = col.x * Cell + j % Cell, z = col.z * Cell + j / Cell;
             ulong bits = _generator.Value!.ColumnLayers(x, z, minY) | _load.BuiltLayers(x, z);
             for (; bits != 0; bits &= bits - 1)
             {
@@ -372,20 +448,28 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
                 // One full column at a time, bottom to top: the generator profiles a column once for all its chunks,
                 // so going layer by layer across the four (each coarse chunk in turn) made it profile again for every
                 // chunk, about ten times the work.
-                var coarse = new SortedDictionary<int, ChunkData>();
+                // Each full chunk is shrunk into level 1's chunk over it as it's made; for a coarser level those are
+                // shrunk again in turn, a level at a time.
+                var coarse = new Dictionary<ChunkPosition, ChunkData>();
                 bool majority = Majority, plants = Plants;
                 foreach (var (pos, edited) in work)
                 {
                     var full = new ChunkData();
                     if (!(edited && _store.TryLoad(pos, full))) _generator.Value!.Generate(full, pos);
-                    if (!full.IsUniform(out var only) || only != BlockId.Air)
-                    {
-                        if (!coarse.TryGetValue(pos.Y >> 1, out var into)) coarse[pos.Y >> 1] = into = new ChunkData();
-                        Shrink(full, into, (pos.X & 1) * 16, (pos.Y & 1) * 16, (pos.Z & 1) * 16, majority, plants);
-                    }
+                    if (!full.IsUniform(out var only) || only != BlockId.Air) ShrinkInto(coarse, pos, full, majority, plants);
                     full.Release();
                 }
-                foreach (var (y, chunk) in coarse)
+                for (int level = 2; level <= Level; level++)
+                {
+                    var finer = coarse;
+                    coarse = new Dictionary<ChunkPosition, ChunkData>();
+                    foreach (var (pos, chunk) in finer)
+                    {
+                        if (chunk.HasAnyNonAir()) ShrinkInto(coarse, pos, chunk, majority, plants);
+                        chunk.Release();
+                    }
+                }
+                foreach (var (y, chunk) in coarse.Select(kv => (kv.Key.Y, kv.Value)).OrderBy(c => c.Y))
                 {
                     if (chunk.HasAnyNonAir())
                     {
@@ -405,6 +489,16 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
                 _results.Enqueue(new Result(col, built, e));
             }
         });
+    }
+
+    /// <summary>Shrinks <paramref name="chunk"/> (at <paramref name="pos"/>, in its level's chunks) into the chunk of
+    /// the next level over it, in <paramref name="into"/>.</summary>
+    private static void ShrinkInto(Dictionary<ChunkPosition, ChunkData> into, ChunkPosition pos, ChunkData chunk,
+                                   bool majority, bool plants)
+    {
+        var at = new ChunkPosition(pos.X >> 1, pos.Y >> 1, pos.Z >> 1);
+        if (!into.TryGetValue(at, out var coarse)) into[at] = coarse = new ChunkData();
+        Shrink(chunk, coarse, (pos.X & 1) * 16, (pos.Y & 1) * 16, (pos.Z & 1) * 16, majority, plants);
     }
 
     /// <summary>Shrinks full chunk <paramref name="full"/> into the 16³ octant of <paramref name="coarse"/> at
@@ -560,7 +654,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
             try
             {
                 if (r.Error != null) { Console.WriteLine($"[lod] coarse column failed: {r.Error}"); continue; }
-                if (!Enabled || !Wanted(r.Column)) continue;
+                if (!Live || !Wanted(r.Column)) continue;
                 var column = new CoarseColumn { MinY = int.MaxValue, MaxY = int.MinValue };
                 foreach (var b in r.Chunks)
                 {
@@ -706,7 +800,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         // Only columns near the view can have full detail ready (it loads to FullDetailRadius, in the 2x2 groups that
         // coarse columns are); a far one that's drawn, settled and uncovered has nothing to do.
         int readyIndex = 0, scan = _editScan;
-        long nearSq = Sq((int)MathF.Ceiling(FullDetailRadius / ColumnBlocks) + 2);
+        long nearSq = Sq((int)MathF.Ceiling(InnerRadius / ColumnBlocks) + 2);
         // Moving on changes which full columns are wanted, but that alone changes no column's readiness until its
         // chunks load or unload (which mark it), so it's not looked at all again. A few near columns a frame are
         // looked at anyway, round them in turn, in case a change came without a mark.
@@ -720,11 +814,15 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
             if (!near && column.Drawn && column.Settled && !column.Covered && !column.Leaving) continue;
             bool due = false;
             if (near) { due = nearIndex >= recheckFrom && nearIndex < recheckTo; nearIndex++; }
-            if (near && (due || !column.ReadyKnown || _readyDirty.Contains(key)))
+            if (near && (due || !column.ReadyKnown || _readyDirty.Contains(key) || Finer != null))
             {
                 _steps.Lap(SwapStep);
                 bool all = true;
-                for (int j = 0; j < 4 && all; j++) all = _load.IsColumnReady(key.x * 2 + (j & 1), key.z * 2 + (j >> 1));
+                for (int j = 0; j < 4 && all; j++)
+                {
+                    int x = key.x * 2 + (j & 1), z = key.z * 2 + (j >> 1);
+                    all = Finer?.Covers((x, z)) ?? _load.IsColumnReady(x, z);
+                }
                 _steps.Lap(ReadyStep);
                 column.Ready = all;
                 column.ReadyKnown = true;
@@ -845,7 +943,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
 
     private bool ChildrenLitUntimed((int x, int z) key, CoarseColumn column)
     {
-        if (IsLit == null) return true;
+        if (IsLit == null || Finer != null) return true; // a finer level's columns are lit before they're ready (Covers)
         int minY = _load.MinLayer;
         ChunkPosition At(int i) => new(key.x * 2 + ((i >> 6) & 1), minY + (i & 63), key.z * 2 + (i >> 7));
         while (column.ChildrenLitSoFar < 4 * 64)
@@ -885,25 +983,39 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     private bool AnyEditedUntimed((int x, int z) key)
     {
         int minY = _load.MinLayer;
-        for (int j = 0; j < 4; j++)
+        for (int j = 0; j < Cell * Cell; j++)
         for (int layer = 0; layer < 64; layer++)
         {
-            var data = _volume.GetData(new ChunkPosition(key.x * 2 + (j & 1), minY + layer, key.z * 2 + (j >> 1)));
+            var data = _volume.GetData(new ChunkPosition(key.x * Cell + j % Cell, minY + layer, key.z * Cell + j / Cell));
             if (data is { IsDirty: true }) return true;
         }
         return false;
     }
 
+    /// <summary>For the fog, which follows the coarsest level (see <see cref="IFarTerrain"/>): the nearest terrain not
+    /// ready to be seen in any level, out to the coarsest live one's outer radius.</summary>
     public float ReadyRadius(Vector3D<float> centre)
     {
+        if (!Live) return Finer?.ReadyRadius(centre) ?? OuterRadius;
         float best = OuterRadius;
+        for (var level = this; level != null; level = level.Finer) best = MathF.Min(best, level.NotReadyAt(centre));
+        return best;
+    }
+
+    /// <summary>The nearest of this level's columns not ready to be seen: being made, or held back for its light, where
+    /// nothing else shows instead (the finer level's ready, or the coarser one drawn).</summary>
+    private float NotReadyAt(Vector3D<float> centre)
+    {
+        float best = float.PositiveInfinity;
+        var coarser = Coarser is { Live: true } up ? up : null;
+        bool Hidden((int x, int z) k) => coarser != null && coarser.Shows((k.x >> 1, k.z >> 1));
         foreach (var c in _inFlight)
-            if (!_columns.ContainsKey(c)) best = MathF.Min(best, Distance(centre, c)); // one being made again is drawn meanwhile
+            if (!_columns.ContainsKey(c) && !Hidden(c)) best = MathF.Min(best, Distance(centre, c)); // one being made again is drawn meanwhile
         for (int i = _queueHead; i < _queue.Count; i++)
-            if (!_columns.ContainsKey(_queue[i])) { best = MathF.Min(best, Distance(centre, _queue[i])); break; }
-        foreach (var (c, column) in _columns)
-            if (WaitsForLight(column) && !(column.ReadyKnown && column.Ready)) // full detail shows there instead
-                best = MathF.Min(best, Distance(centre, c));
+            if (!_columns.ContainsKey(_queue[i]) && !Hidden(_queue[i])) { best = MathF.Min(best, Distance(centre, _queue[i])); break; }
+        foreach (var (k, column) in _columns)
+            if (WaitsForLight(column) && !(column.ReadyKnown && column.Ready) && !Hidden(k)) // what's under it shows instead
+                best = MathF.Min(best, Distance(centre, k));
         return best;
     }
 
@@ -913,7 +1025,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         => Grid.Index >= 0 && !_gridFull && !column.Baked && !column.Settled && column.Shown.Count > 0;
 
     /// <summary>Horizontal distance from <paramref name="centre"/> to the nearest point of coarse column <paramref name="c"/>.</summary>
-    private static float Distance(Vector3D<float> centre, (int x, int z) c)
+    private float Distance(Vector3D<float> centre, (int x, int z) c)
     {
         float dx = MathF.Max(0f, MathF.Max(c.x * ColumnBlocks - centre.X, centre.X - (c.x + 1) * ColumnBlocks));
         float dz = MathF.Max(0f, MathF.Max(c.z * ColumnBlocks - centre.Z, centre.Z - (c.z + 1) * ColumnBlocks));
@@ -922,7 +1034,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
 
     public void Render(SystemStage stage, in RenderContext frame)
     {
-        if (!Enabled) return;
+        if (!Live) return;
         _steps.Resume();
         if (stage == SystemStage.RenderTransparent)
         {
@@ -937,13 +1049,18 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         _draws.Clear();
         var size = new Vector3D<float>(ColumnBlocks);
         var camera = frame.CameraPosition;
+        var coarser = Coarser is { Live: true } c0 ? c0 : null;
         foreach (var ((cx, cz), column) in _columns)
         {
-            // Coming in over the full detail it replaces (drawing the pixels that leaves out), drawn, or going away
-            // (leaving out the pixels the full detail coming back draws): a pixel shows one level, never both.
+            // Coming in over the finer level it replaces (drawing the pixels that leaves out), drawn, or going away
+            // (leaving out the pixels the finer level coming back draws): a pixel shows one level, never both.
             float share = column.Drawn ? CoarseShare(column) : 1f - Faded(column.FadeOutAt);
             if (share <= 0f) continue;
             float dissolve = column.Drawn ? (share < 1f ? -share : 0f) : 1f - share;
+            // A coarser level over it hides it the same way.
+            float over = coarser?.OwnCoverOf(cx << Level, cz << Level) ?? 0f;
+            if (over >= 1f) continue;
+            if (over != 0f) dissolve = over;
             var shown = column.Shown;
             if (shown.Count == 0 || WaitsForLight(column)) continue;
             if (!frame.Frustum.Intersects(shown[0].Min, shown[^1].Min + size)) continue; // shown is in Y order
@@ -1004,13 +1121,14 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
     }
 
     // ── debug UI ─────────────────────────────────────────────────────────────
-    public string DebugName => "Distant Terrain";
+    public string DebugName => Level == 1 ? "Distant Terrain" : $"Distant Terrain {Level}";
 
     public void DrawDebugUi()
     {
-        ImGui.Checkbox("Draw distant terrain coarse (LOD)", ref Enabled);
-        ImGui.SliderFloat("Full detail out to (blocks)", ref FullDetailRadius, 64f, 1024f, "%.0f");
-        ImGui.SliderFloat("Coarse terrain out to (blocks)", ref OuterRadius, 128f, 4096f, "%.0f");
+        ImGui.Checkbox(Level == 1 ? "Draw distant terrain coarse (LOD)" : $"Draw level {Level} past level {Level - 1}", ref Enabled);
+        if (Finer is { Live: false }) ImGui.TextDisabled($"  (off while level {Level - 1} is)");
+        if (Finer == null) ImGui.SliderFloat("Full detail out to (blocks)", ref FullDetailRadius, 64f, 1024f, "%.0f");
+        ImGui.SliderFloat($"Level {Level} out to (blocks, {Cell}-block cells)", ref OuterRadius, 128f, 4096f, "%.0f");
         ImGui.SliderFloat("Swap fade (seconds)", ref FadeSeconds, 0f, 2f, "%.2f");
         if (ImGui.Checkbox("Coarse cells by majority (else any block)", ref Majority)) Remake();
         if (ImGui.Checkbox("Coarse plants (grass)", ref Plants)) Remake();

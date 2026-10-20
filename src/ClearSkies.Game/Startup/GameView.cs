@@ -45,6 +45,7 @@ public sealed class GameView : IDisposable
         _checkerBounce = options.CheckerBounce;
         _lod = options.Lod;
         _lodDistance = options.LodDistance;
+        _lodLevels = options.LodLevels;
 
         InputSample = new InputSampleSystem(host.World, host.Input, host.Time);
     }
@@ -52,6 +53,7 @@ public sealed class GameView : IDisposable
     private readonly int? _checkerBounce;
     private readonly bool _lod;
     private readonly float? _lodDistance;
+    private readonly int _lodLevels;
 
     public WindowedEngineHost Host { get; }
     public BlockModelLibrary BlockModels { get; }
@@ -60,8 +62,14 @@ public sealed class GameView : IDisposable
     public UiContext Ui { get; }
     public GridStore GridStore { get; }
 
-    /// <summary>Distant terrain drawn coarse (made in <see cref="AddRender"/>); the fog follows it while it's on.</summary>
+    /// <summary>Distant terrain drawn coarse (made in <see cref="AddRender"/>): level 1, past full detail.</summary>
     public LodTerrainSystem? Lod { get; private set; }
+
+    /// <summary>The coarsest level of distant terrain, which the fog follows while it's on (see LodTerrainSystem.ReadyRadius).</summary>
+    public LodTerrainSystem? FarthestLod { get; private set; }
+
+    /// <summary>Levels of distant terrain made (each drawn past the one before when ticked in its panel).</summary>
+    private const int LodLevelsMade = 2;
 
     /// <summary>How much of the world loads: as much as the light storage holds.</summary>
     public IChunkBudget Budget { get; }
@@ -107,16 +115,27 @@ public sealed class GameView : IDisposable
         host.AddSystem((ISystem)_particles, SystemStage.Frame); // moves every emitter's particles
         var chunks = new ChunkRenderSystem(host.World, renderer, volume);
         host.AddSystem(chunks, SystemStage.RenderWorld);
-        // Distant terrain drawn coarse past the full-detail terrain (off until ticked in its panel), after it.
-        Lod = new LodTerrainSystem(host.World, renderer, world.ChunkLoad, volume, () => new HeartWorldGenerator(world.Seed),
-                                   world.ChunkStore, GridStore) { Enabled = _lod };
-        light.AddStaticGrid(Lod.Grid); // lit like the world
-        Lod.IsLit = light.IsLit;       // swaps wait for the incoming terrain's light
-        Lod.IsSettled = light.IsSettled; // and terrain shown for the first time for its light to be done
-        if (_lodDistance is { } lodDistance) Lod.OuterRadius = lodDistance;
+        // Distant terrain drawn coarse past the full-detail terrain, after it, in levels each past the one before (level
+        // 1 on unless --no-lod; the rest with --lod-levels).
+        var levels = new List<LodTerrainSystem>();
+        for (int i = 0; i < LodLevelsMade; i++)
+        {
+            var level = new LodTerrainSystem(host.World, renderer, world.ChunkLoad, volume, () => new HeartWorldGenerator(world.Seed),
+                                             world.ChunkStore, GridStore, levels.LastOrDefault())
+                        { Enabled = _lod && i < _lodLevels };
+            light.AddStaticGrid(level.Grid);     // lit like the world
+            level.IsLit = light.IsLit;           // swaps wait for the incoming terrain's light
+            level.IsSettled = light.IsSettled;   // and terrain shown for the first time for its light to be done
+            // Each level reaches four times as far as the one before, from 1024 blocks for level 1 (2048 alone).
+            level.OuterRadius = i == 0 && _lodLevels <= 1 ? 2048f : 1024f * (1 << (2 * i));
+            levels.Add(level);
+            host.AddSystem((ISystem)level, SystemStage.PreRender);
+            host.AddSystem((IRenderSystem)level, SystemStage.RenderWorld);
+        }
+        Lod = levels[0];
+        FarthestLod = levels[^1];
+        if (_lodDistance is { } lodDistance) levels[System.Math.Clamp(_lodLevels, 1, levels.Count) - 1].OuterRadius = lodDistance;
         chunks.Cover = Lod.CoverOf;
-        host.AddSystem((ISystem)Lod, SystemStage.PreRender);
-        host.AddSystem((IRenderSystem)Lod, SystemStage.RenderWorld);
         host.AddSystem(new ModelRenderSystem(host.World, renderer, host.Time), SystemStage.RenderWorld);
         host.AddSystem(_clouds, SystemStage.RenderWorld);
         host.AddSystem((IRenderSystem)_particles, SystemStage.RenderWorld);
@@ -124,7 +143,7 @@ public sealed class GameView : IDisposable
         host.AddSystem(new WireframeRenderSystem(host.World, renderer), SystemStage.RenderOverlay);
         host.AddSystem(_ropes = new GrappleRopeSystem(host.World, renderer, world.Registry), SystemStage.RenderOverlay); // grapple ropes, ours and others'
         host.AddSystem(chunks, SystemStage.RenderTransparent);
-        host.AddSystem((IRenderSystem)Lod, SystemStage.RenderTransparent);
+        foreach (var level in levels) host.AddSystem((IRenderSystem)level, SystemStage.RenderTransparent);
         host.AddSystem(new HudRenderSystem(host.World, renderer), SystemStage.RenderHud);
         host.AddSystem(_uiRenderer, SystemStage.RenderHud);
     }

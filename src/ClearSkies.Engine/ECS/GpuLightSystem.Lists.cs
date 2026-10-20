@@ -111,9 +111,10 @@ public sealed partial class GpuLightSystem
         foreach (var other in _lit)
         {
             var h = other.Handle;
-            // Distant terrain's rays don't see the world: where full detail is loaded too, each level is lit by its own
-            // blocks (the world's rays pass through covered distant terrain likewise, see GridStore.SetCovered).
-            bool include = h == lg.Handle || (h.IsWorld && lg.Handle.Scale == 1);
+            // A level of terrain's rays see it and the coarser levels, not the finer ones: where a finer level is loaded
+            // too, each is lit by its own blocks (rays pass through a coarser level where it's covered, see
+            // GridStore.SetCovered). Ships' rays see every level.
+            bool include = h == lg.Handle || (h.IsWorld && (!lg.Handle.IsWorld || h.Scale > lg.Handle.Scale));
             if (!include && h.HasSolid)
             {
                 var st = _gridStates[h];

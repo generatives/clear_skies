@@ -129,7 +129,7 @@ public static class ClientGame
         host.Gui.RegisterDebugUi(new NetDebugPanel(net, null, world.RemoteBodies, transport));
 
         view.AddRender(world);
-        fog.Far = view.Lod;
+        fog.Far = view.FarthestLod;
 
         var s = welcome.Spawn;
         TestScene.AddCamera(host, new Vector3D<float>(s.X, s.Y + PlayerFactory.EyeHeight, s.Z), spawn.Yaw, spawn.Pitch, options.Camera);
