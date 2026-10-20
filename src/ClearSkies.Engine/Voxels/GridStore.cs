@@ -71,7 +71,7 @@ internal sealed class ChunkRecord
     public ulong SeeThrough;          // per-8³-brick "has see-through"
     public ulong Surface;             // bricks holding (conservatively) a surface air voxel
     public int[]? BrickSlots;         // light slot per brick, -1 = none
-    public bool Virtual;              // a ship's air chunk next to its blocks, with no ChunkEntry behind it
+    public bool Virtual;              // an air chunk next to a grid's blocks, with no ChunkEntry behind it
     public int WorldCell = -1;        // world only: its world index cell, and its entry's offset in the world block
     public int WorldSlot = -1;
     public ulong Marks;               // bricks marked by the BrickMarks being filled (GpuLightSystem), 0 between uses
@@ -607,9 +607,10 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         }
         WriteChunkEntry(rec);
 
-        // A ship's air right next to its blocks may lie in a chunk it has no data for (a hull sitting at the bottom
-        // of its chunk); give those chunks records so their surface bricks get light too.
-        if (!g.IsWorld && rec.Solid != 0)
+        // Air right next to a grid's blocks may lie in a chunk it has no data for (a hull sitting at the bottom of
+        // its chunk; the sky under an island, whose all-air chunks the world doesn't load); give those chunks
+        // records so their surface bricks get light too. Without one, that air reads as open sky: lit in full.
+        if (rec.Solid != 0)
             for (int f = 0; f < 6; f++)
             {
                 var (dx, dy, dz) = FaceDir(f);
@@ -627,17 +628,30 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     /// <summary>Drops a chunk that unloaded.</summary>
     internal void RemoveChunk(GridHandle g, ChunkPosition pos)
     {
-        if (!g.Chunks.TryGetValue(pos, out var rec)) return;
+        if (!g.Chunks.TryGetValue(pos, out var rec) || rec.Virtual) return;
         bool hadSolid = rec.Solid != 0;
         FreeRecord(g, rec);
         g.Chunks.Remove(pos);
         g.EmitterChunks.Remove(pos);
         g.BoxDirty = true;
+        // The air records it kept (see Store) go with it, unless another chunk's blocks still need them; and where its
+        // own place is air next to blocks, it leaves one behind.
+        if (g.IsWorld)
+        {
+            for (int f = 0; f < 6; f++)
+            {
+                var (dx, dy, dz) = FaceDir(f);
+                var npos = pos.Offset(dx, dy, dz);
+                if (g.Chunks.TryGetValue(npos, out var n) && n.Virtual && !NextToBlocks(g, npos)) DropVirtual(g, n);
+            }
+            if (NextToBlocks(g, pos)) EnsureRecord(g, pos, isVirtual: true);
+        }
         for (int f = 0; f < 6; f++)
         {
             var (dx, dy, dz) = FaceDir(f);
             if (g.Chunks.TryGetValue(pos.Offset(dx, dy, dz), out var n)) RefreshSurface(g, n);
         }
+        if (g.Chunks.TryGetValue(pos, out var left)) RefreshSurface(g, left);
         TouchChunk(g, pos);
         g.Version++;
         // A world chunk unloading isn't a change to the world: what it shadowed stays shadowed, and relighting the far
@@ -738,6 +752,28 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
 
     // ── Records and table sections ────────────────────────────────────────────
 
+    /// <summary>Whether a chunk of <paramref name="g"/> with blocks (a real one) is face-adjacent to <paramref name="pos"/>.</summary>
+    private static bool NextToBlocks(GridHandle g, ChunkPosition pos)
+    {
+        for (int f = 0; f < 6; f++)
+        {
+            var (dx, dy, dz) = FaceDir(f);
+            if (g.Chunks.TryGetValue(pos.Offset(dx, dy, dz), out var n) && !n.Virtual && n.Solid != 0) return true;
+        }
+        return false;
+    }
+
+    /// <summary>Drops a world air record (see Store) no chunk's blocks need any more, or whose world index cell a real
+    /// chunk needs. Air going isn't a change to what's lit.</summary>
+    private void DropVirtual(GridHandle g, ChunkRecord rec)
+    {
+        FreeRecord(g, rec);
+        g.Chunks.Remove(rec.Pos);
+        g.BoxDirty = true;
+        TouchChunk(g, rec.Pos);
+        g.Version++;
+    }
+
     private ChunkRecord? EnsureRecord(GridHandle g, ChunkPosition pos, bool isVirtual = false)
     {
         if (g.Chunks.TryGetValue(pos, out var rec)) return rec;
@@ -746,8 +782,11 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         if (g.IsWorld)
         {
             int cell = WorldCell(g, pos);
+            // An air record gives way to a real chunk, and never takes a cell that's held.
+            if (g.WorldCells.TryGetValue(cell, out var held) && held.Virtual && !isVirtual) DropVirtual(g, held);
             if (g.WorldCells.TryGetValue(cell, out var taken))
             {
+                if (isVirtual) return null;
                 Console.WriteLine($"[grid-store] chunk {pos} wraps onto loaded chunk {taken.Pos} in the world index; not stored.");
                 return null;
             }
@@ -774,7 +813,8 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     internal bool WorldCellHolder(GridHandle g, ChunkPosition pos, out ChunkPosition holder)
     {
         holder = default;
-        if (!g.IsWorld || !g.WorldCells.TryGetValue(WorldCell(g, pos), out var rec) || rec.Pos == pos) return false;
+        if (!g.IsWorld || !g.WorldCells.TryGetValue(WorldCell(g, pos), out var rec) || rec.Pos == pos || rec.Virtual)
+            return false; // an air record makes way by itself (EnsureRecord)
         holder = rec.Pos;
         return true;
     }
