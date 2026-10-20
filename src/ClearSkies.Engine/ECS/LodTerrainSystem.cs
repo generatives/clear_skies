@@ -116,8 +116,8 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         public bool Leaving;   // its full columns are ready: still drawn until they're lit
         public int Waiting, LeaveWait; // frames spent settling, and leaving
         public int LitSoFar, ChildrenLitSoFar; // how many of the chunks it waits on (settling, leaving) were found lit
-        public float FadeInAt = float.NegativeInfinity, FadeOutAt = float.NegativeInfinity; // when it was last shown, hidden
-        public float SettledAt = float.NegativeInfinity; // when it settled (a column held back for light shows from then)
+        public float FadeInAt = float.NegativeInfinity, FadeOutAt = float.NegativeInfinity; // when it last swapped in, out
+        public bool WasReady;  // its full columns were ready when last looked at, so they were drawn
     }
 
     // A swap waits for the incoming terrain's light (see UpdateDrawn): at least this many frames, since a change is
@@ -226,9 +226,10 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
         return t >= 1f || c.Shown.Count == 0 ? 0f : t <= 0f ? 1f : -t;
     }
 
-    /// <summary>How much of a drawn coarse column shows, 0-1, rising over <see cref="FadeSeconds"/> from when it was
-    /// first shown lit.</summary>
-    private float CoarseShare(CoarseColumn c) => Faded(MathF.Max(c.FadeInAt, c.SettledAt));
+    /// <summary>How much of a drawn coarse column shows, 0-1: rising over <see cref="FadeSeconds"/> as it swaps in for
+    /// the full detail that was drawn there; all of it when it comes in over nothing, which happens behind the fog (see
+    /// <see cref="ReadyRadius"/>), as dithering terrain in from nothing looks out of place.</summary>
+    private float CoarseShare(CoarseColumn c) => Faded(c.FadeInAt);
 
     /// <summary>How far through its fade a swap that started at <paramref name="at"/> is, 0-1.</summary>
     private float Faded(float at) => FadeSeconds <= 0f ? 1f : System.Math.Clamp((_time - at) / FadeSeconds, 0f, 1f);
@@ -726,7 +727,6 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
                 column.Settled = ++column.Waiting >= MinSwapFrames && CheckNow(key)
                                  && (column.Waiting > (column.Baked ? MaxSwapFrames : MaxFirstLightFrames)
                                      || ResidentLit(key, column));
-                if (column.Settled && !column.Baked) column.SettledAt = _time; // shown from now
             }
             // Covered while its full detail is ready: the world's rays then see only full-detail blocks there.
             if (column.Covered != ready) SetCovered(key, column, ready);
@@ -734,7 +734,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
             if (!ready)
             {
                 column.Leaving = false;
-                if (!column.Drawn) column.FadeInAt = _time;
+                if (!column.Drawn) column.FadeInAt = column.WasReady ? _time : float.NegativeInfinity;
                 column.Drawn = true;
             }
             else if (column.Drawn)
@@ -749,6 +749,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IDebugUiSystem, I
                     column.FadeOutAt = _time;
                 }
             }
+            column.WasReady = ready;
         }
         _editScan = readyIndex == 0 ? 0 : (scan + 1) % readyIndex;
         _readyDirty.Clear();
