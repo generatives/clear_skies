@@ -7,7 +7,7 @@ namespace ClearSkies.Engine.Rendering;
 /// <summary>
 /// Per-frame camera uniform block (272 bytes). Must match @group(0) @binding(0) in the WGSL shader.
 /// Layout: view (64 B) + projection (64 B) + sunDir as vec4 (16 B: xyz direction, w strength)
-/// + lightParams vec4 (16 B: x ray AO strength, y the <see cref="ClimateTint"/> volume's origin x, z ambient 0-1, w 1 on
+/// + lightParams vec4 (16 B: x ray AO strength, y the climate tint volume (<see cref="ECS.ClimateTintSystem"/>)'s origin x, z ambient 0-1, w 1 on
 /// an sRGB surface)
 /// + camPos vec4 (xyz world position, w underwater visibility or 0) + fog vec4 (xy: the world's fog start/end, horizontal; zw: the cloud layer's,
 /// see <see cref="CloudLayer"/>; blocks from the camera) + zenith and horizon sky colours as vec4s (horizon.w: the
@@ -27,7 +27,7 @@ public struct CameraUniform
     public Vector3D<float> SunDirection; // xyz direction; w is SunStrength (rounds this to 16 bytes/vec4)
     public float           SunStrength;
     public float           RayAoStrength;  // lightParams.x: RayLightingSettings.AoStrength
-    public float           TintOriginX;    // lightParams.y: ClimateTint's origin x (set by the renderer)
+    public float           TintOriginX;    // lightParams.y: the climate tint volume's origin x (set by the renderer)
     public float           Ambient;        // lightParams.z: RayLightingSettings.Ambient
     public float           LinearizeColors; // lightParams.w: 1 = sRGB surface, authored colours are converted to linear
     public Vector3D<float> CameraPosition; // camPos.xyz: fog distances and view directions are measured from here
@@ -43,5 +43,5 @@ public struct CameraUniform
     public float           Exposure;       // lightParams2.x: multiplier on lit surfaces (RayLightingSettings.Exposure)
     public float           DebugFlags;     // lightParams2.y: 1 = no texture sample, 2 = no fog or haze
     public float           DebugLighting;  // lightParams2.z: 0 normal, 1 flat + corner AO, 2 flat only, 3 no voxel lighting, 4 smoothing per pixel
-    public float           TintOriginZ;    // lightParams2.w: ClimateTint's origin z (set by the renderer)
+    public float           TintOriginZ;    // lightParams2.w: the climate tint volume's origin z (set by the renderer)
 }

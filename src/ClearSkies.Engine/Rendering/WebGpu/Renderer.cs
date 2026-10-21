@@ -1,3 +1,4 @@
+using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Math;
 using ClearSkies.Engine.Voxels;
 using Silk.NET.Core.Native;
@@ -46,13 +47,13 @@ struct Camera {
 // Per block type (indexed by BlockId; see ChunkQuad.BuildBlockTable): its colour (sRGB, shown on untextured blocks) and
 // opacity (1 unless translucent). Chunk quads store only their block.
 @group(0) @binding(1) var<uniform> blockTable: array<vec4<f32>, 256>;
-// The climate tint around the camera (ClimateTint): x, z, then y across the texture's width, height and depth, rgb its
+// The climate tint around the camera (ClimateTintSystem): x, z, then y across the texture's width, height and depth, rgb its
 // colour (sRGB) and a its strength, sampled with linear filtering so it blends smoothly between texels.
 @group(0) @binding(2) var tintTex: texture_3d<f32>;
 @group(0) @binding(3) var tintSamp: sampler;
-const TINT_EXTENT_XZ: f32 = " + (ClimateTint.SizeXZ * ClimateTint.CellXZ) + @".0;
-const TINT_EXTENT_Y: f32 = " + (ClimateTint.SizeY * ClimateTint.CellY) + @".0;
-const TINT_BOTTOM: f32 = " + ClimateTint.BottomY + @".0;
+const TINT_EXTENT_XZ: f32 = " + (ClimateTintSystem.SizeXZ * ClimateTintSystem.CellXZ) + @".0;
+const TINT_EXTENT_Y: f32 = " + (ClimateTintSystem.SizeY * ClimateTintSystem.CellY) + @".0;
+const TINT_BOTTOM: f32 = " + ClimateTintSystem.BottomY + @".0;
 
 // A tinted face's base colour (linear) at world position p: as bright as before, shifted towards the tint's colour by
 // its strength there.
@@ -905,11 +906,12 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
     private BindGroup* _cameraBindGroup;
     private BindGroup* _hudCameraBindGroup;
 
-    // The climate tint volume (ClimateTint), bound beside the camera; zero (no tint) until the game submits one.
+    // The climate tint volume (ClimateTintSystem), bound beside the camera; zero (no tint) until the game submits one.
     private Texture*     _tintTexture;
     private TextureView* _tintView;
     private Sampler*     _tintSampler;
     private float        _tintOriginX, _tintOriginZ;
+    private (float X, float Z, byte[] Texels)? _pendingTint; // the next climate tint volume, uploaded with the next camera
     private BindGroup* _modelBindGroup;
 
     // Group 2: the shared voxel storage. Rebuilt when the store's buffers are replaced (pool growth).
@@ -1036,7 +1038,7 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
         };
         camEntries[2] = new BindGroupLayoutEntry
         {
-            Binding    = 2, // the climate tint volume (ClimateTint)
+            Binding    = 2, // the climate tint volume (ClimateTintSystem)
             Visibility = ShaderStage.Fragment,
             Texture    = new TextureBindingLayout { SampleType = TextureSampleType.Float, ViewDimension = TextureViewDimension.Dimension3D, Multisampled = false },
         };
@@ -1291,7 +1293,7 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
         {
             Usage         = TextureUsage.TextureBinding | TextureUsage.CopyDst,
             Dimension     = TextureDimension.Dimension3D,
-            Size          = new Extent3D(ClimateTint.SizeXZ, ClimateTint.SizeXZ, ClimateTint.SizeY),
+            Size          = new Extent3D(ClimateTintSystem.SizeXZ, ClimateTintSystem.SizeXZ, ClimateTintSystem.SizeY),
             Format        = TextureFormat.Rgba8Unorm, // sRGB colours, decoded in the shader (climateTinted)
             MipLevelCount = 1,
             SampleCount   = 1,
@@ -1310,7 +1312,16 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
             LodMinClamp = 0, LodMaxClamp = 1, Compare = CompareFunction.Undefined, MaxAnisotropy = 1,
         };
         _tintSampler = _api.DeviceCreateSampler(_ctx.Device, &samplerDesc);
-        UploadTint(0f, 0f, new byte[ClimateTint.Bytes]); // textures start uninitialised in some backends: clear it
+        UploadTint(0f, 0f, new byte[ClimateTintSystem.Bytes]); // textures start uninitialised in some backends: clear it
+    }
+
+    /// <summary>Hands the shader a new climate tint volume (<see cref="ClimateTintSystem.Bytes"/> long, laid out as
+    /// that describes) whose low corner is at world (<paramref name="originX"/>, <paramref name="originZ"/>). It is
+    /// drawn from the next frame on, so its origin and texels change together.</summary>
+    public void SetClimateTint(float originX, float originZ, byte[] texels)
+    {
+        if (texels.Length != ClimateTintSystem.Bytes) throw new ArgumentException($"A tint volume is {ClimateTintSystem.Bytes} bytes.", nameof(texels));
+        _pendingTint = (originX, originZ, texels);
     }
 
     private void UploadTint(float originX, float originZ, byte[] texels)
@@ -1318,8 +1329,8 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
         fixed (byte* data = texels)
         {
             var dest = new ImageCopyTexture { Texture = _tintTexture, MipLevel = 0, Origin = new Origin3D(0, 0, 0), Aspect = TextureAspect.All };
-            var layout = new TextureDataLayout { Offset = 0, BytesPerRow = ClimateTint.SizeXZ * 4, RowsPerImage = ClimateTint.SizeXZ };
-            var size = new Extent3D(ClimateTint.SizeXZ, ClimateTint.SizeXZ, ClimateTint.SizeY);
+            var layout = new TextureDataLayout { Offset = 0, BytesPerRow = ClimateTintSystem.SizeXZ * 4, RowsPerImage = ClimateTintSystem.SizeXZ };
+            var size = new Extent3D(ClimateTintSystem.SizeXZ, ClimateTintSystem.SizeXZ, ClimateTintSystem.SizeY);
             _api.QueueWriteTexture(_ctx.Queue, &dest, data, (nuint)texels.Length, &layout, &size);
         }
         _tintOriginX = originX;
@@ -1781,8 +1792,7 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
 
     public void SetCameraUniform(in CameraUniform camera)
     {
-        ClimateTint.Focus = new System.Numerics.Vector3(camera.CameraPosition.X, camera.CameraPosition.Y, camera.CameraPosition.Z);
-        if (ClimateTint.TakePending(out float tintX, out float tintZ, out byte[] texels)) UploadTint(tintX, tintZ, texels);
+        if (_pendingTint is { } tint) { UploadTint(tint.X, tint.Z, tint.Texels); _pendingTint = null; }
         Span<CameraUniform> s = stackalloc CameraUniform[1];
         s[0] = camera;
         s[0].TintOriginX = _tintOriginX;

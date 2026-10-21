@@ -70,7 +70,7 @@ public readonly struct BlockDef
     /// twisting and shifting each on its own as grass does. The whole plant is still turned, nudged and sized.
     public bool            RigidCross     { get; init; }
 
-    /// Which of the block's faces take the world's <see cref="Rendering.ClimateTint"/>: none, the top only (grass,
+    /// Which of the block's faces take the world's climate tint (<see cref="Rendering.IClimateTintMap"/>): none, the top only (grass,
     /// whose sides are mostly dirt) or all (leaves, plants).
     public BlockTint       Tint           { get; init; }
 
@@ -198,5 +198,5 @@ public enum RenderLayer : byte
     Translucent,
 }
 
-/// <summary>Which faces of a block take the world's <see cref="Rendering.ClimateTint"/>.</summary>
+/// <summary>Which faces of a block take the world's climate tint (<see cref="Rendering.IClimateTintMap"/>).</summary>
 public enum BlockTint : byte { None, Top, All }
