@@ -113,7 +113,7 @@ public sealed class Lakes
 
     private static long Key(int tx, int tz) => ((long)tx << 32) ^ (uint)tz;
 
-    /// <summary>Tile (tx, tz)'s lake level per sample cell of its core, int.MinValue where it is dry.</summary>
+    /// <summary>The levels of the lakes tile (tx, tz) owns, per sample cell of its window, int.MinValue elsewhere.</summary>
     private int[] Build(int tx, int tz)
     {
         float x0 = tx * Tile - Margin + Step * 0.5f, z0 = tz * Tile - Margin + Step * 0.5f;
@@ -184,7 +184,7 @@ public sealed class Lakes
             int si = start % Window, sk = start / Window;
             if (si < Off || sk < Off || si >= Off + Core || sk >= Off + Core) continue;
             if (!inside || deepest < MinDepth || cells.Count < MinCells || cells.Count > MaxCells) continue;
-            int lakeLevel0 = (int)MathF.Floor(filled[start]) - 1;
+            int lakeLevel = (int)MathF.Floor(filled[start]) - 1;
             bool perched = false;
             foreach (int c in cells)
             {
@@ -193,7 +193,7 @@ public sealed class Lakes
                 for (int i = ci - Perch; i <= ci + Perch; i++)
                 {
                     float f = filled[i + Window * k];
-                    if (f != Drain && f < lakeLevel0 - PerchDrop) { perched = true; break; }
+                    if (f != Drain && f < lakeLevel - PerchDrop) { perched = true; break; }
                 }
                 if (perched) break;
             }
@@ -208,7 +208,6 @@ public sealed class Lakes
             float chance = Smoothstep(WetFrom, WetFull, _terrain.Wet(sx, sz));
             int gsx = tx * Core - Off + si, gsz = tz * Core - Off + sk;
             if (Trees.Hash(gsx, 0, gsz, _seed ^ 0x1A4E) % 1000 >= chance * 1000f) continue;
-            int lakeLevel = (int)MathF.Floor(filled[start]) - 1;
             // Only cells actually under the water are kept, so the shore round them (see Level) is just by the water,
             // not over the flats round it at its level.
             foreach (int c in cells)

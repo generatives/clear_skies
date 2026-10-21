@@ -161,12 +161,11 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 if (s > 0 && lo - _spans[col * MaxSpans + s - 1].Hi < ShadeReach && lo >= originY && lo < originY + S && Crystals.At(x, lo, z, _seed))
                     data.Set(lx, lo - originY, lz, crystal);
 
-                // A lake over the top span: water (lava in the volcanic wastes, iced over in tundra) up to its level on a
-                // bed of sand and gravel, with a sandy shore.
-                bool top = s == _spanCount[col] - 1;
-                int level = top ? _level[col] : int.MinValue;
-                if (level != int.MinValue && hi <= level + 2 && (hi < level || _shore[col]))
+                // A lake over the top span: water (lava in the volcanic wastes, partly iced over in tundra) up to its
+                // level on a bed of sand and gravel, with a sandy shore.
+                if (Lakeside(col, s))
                 {
+                    int level = _level[col];
                     var biome = _biome[col * MaxSpans + s];
                     var bed = _patch[col] < 0.35f ? BlockId.Gravel : BlockId.Sand;
                     if (biome == Biome.Volcanic) bed = BlockId.Ash;
@@ -208,13 +207,20 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 int x = pos.X * S + lx, z = pos.Z * S + lz;
                 var kind = Trees.At(ground, x, hi, z, _woods[col], _seed, biome);
                 if (kind == Trees.Kind.None) continue;
-                if (s == _spanCount[col] - 1 && _level[col] != int.MinValue && hi <= _level[col] + 2 && (hi < _level[col] || _shore[col])) continue; // not on a shore
+                if (Lakeside(col, s)) continue;
                 int reach = Trees.ReachOf(kind);
                 if (lx < reach || lz < reach || lx >= S - reach || lz >= S - reach) continue;
                 if (s + 1 < _spanCount[col] && _spans[col * MaxSpans + s + 1].Lo <= hi + Trees.HeightOf(kind) + 1) continue;
                 Trees.Grow(data, originY, kind, lx, hi, lz, Trees.Hash(x, hi, z, _seed));
             }
         }
+    }
+
+    /// <summary>Whether span <paramref name="s"/> of column <paramref name="col"/> is under a lake or on its shore.</summary>
+    private bool Lakeside(int col, int s)
+    {
+        int level = _level[col], hi = _spans[col * MaxSpans + s].Hi;
+        return s == _spanCount[col] - 1 && level != int.MinValue && hi <= level + 2 && (hi < level || _shore[col]);
     }
 
     /// <summary>Works out chunk column (chunkX, chunkZ)'s solid spans, if it isn't the one last worked out.</summary>
