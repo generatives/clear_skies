@@ -160,13 +160,10 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
     /// <summary>Whether a chunk of a grid is lit (GpuLightSystem.IsLit); without it, everything counts as lit.</summary>
     public Func<GridHandle, ChunkPosition, bool>? IsLit;
 
-    /// <summary>Lights a chunk of a grid ahead of the light queues (GpuLightSystem.Hurry), for the nearest chunks held
-    /// back for their first light (see <see cref="HurryFirstLight"/>).</summary>
-    public Action<GridHandle, ChunkPosition>? Hurry;
-    private const int HurriedChunks = 4;
+    /// <summary>Puts a chunk of a grid ahead of the light queues (GpuLightSystem.ShowFirst), asked every frame for terrain
+    /// waiting to be shown: a chunk held back for its first light, and the full detail waiting to swap in for one.</summary>
+    public Action<GridHandle, ChunkPosition>? ShowFirst;
     private readonly List<(float Distance, CoarseChunk Chunk)> _toPlace = new();
-    private readonly CoarseChunk?[] _hurriedNow = new CoarseChunk?[HurriedChunks];
-    private readonly float[] _hurriedDistance = new float[HurriedChunks];
 
     // Shared occupancy for the coarse chunks that are all one thing.
     private static readonly PackedOpacity AllAir = new(new uint[GridStore.WordsPerChunk], 0UL, ulong.MaxValue, new(), null, 0UL);
@@ -341,7 +338,6 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
         Dispatch();
         _steps.Lap(DispatchStep);
         UpdateDrawn();
-        HurryFirstLight();
         _steps.Lap(SwapStep);
     }
 
@@ -897,6 +893,15 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
                     // One held back for its light swaps in from when it's first shown (the full detail is held till then).
                     if (c.Settled && !c.Baked && c.Drawn && float.IsFinite(c.FadeInAt)) c.FadeInAt = _time;
                 }
+                // Terrain waiting to be shown is lit ahead of light changes on terrain already shown (nearest first, see
+                // ShowFirst): this chunk while it's held back for its first light (it holds the fog there), with the chunks
+                // above and below it that ChunkLit looks at too.
+                if (c.InGrid && WaitsForLight(c) && ShowFirst != null)
+                {
+                    ShowFirst(Grid, c.Pos);
+                    ShowFirst(Grid, Above(c.Pos, 1));
+                    ShowFirst(Grid, Above(c.Pos, -1));
+                }
                 if (!ready)
                 {
                     c.Leaving = false;
@@ -908,6 +913,10 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
                     // Swapping to full detail: hidden once that terrain is lit by its own blocks (not the coarse ones over
                     // it), so it comes in showing its light.
                     if (!c.Leaving) { c.Leaving = true; c.LeaveWait = 0; }
+                    // And the full detail swapping in for it, which waits for its own light (ChildrenLit).
+                    if (Finer == null && ShowFirst != null)
+                        for (int j = 0; j < 8; j++)
+                            ShowFirst(_volume.Gpu, new ChunkPosition(c.Pos.X * 2 + (j & 1), c.Pos.Y * 2 + ((j >> 1) & 1), c.Pos.Z * 2 + (j >> 2)));
                     if (++c.LeaveWait >= MinSwapFrames && CheckNow(c.Pos) && (c.LeaveWait > MaxSwapFrames || ChildrenLit(c.Pos)))
                     {
                         c.Drawn = false;
@@ -1111,38 +1120,6 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
     /// isn't full). Drawn meanwhile it would show as open air, bright where it should be shadowed.</summary>
     private bool WaitsForLight(CoarseChunk c)
         => Grid.Index >= 0 && !_gridFull && !c.Baked && !c.Settled && c.HasFaces;
-
-    /// <summary>The nearest chunks held back for their first light hold the fog where they are (see NotReadyAt). The
-    /// light queues go nearest the camera first, so while the view moves the full detail loading nearer keeps them
-    /// waiting, and the fog stuck until it stopped. Their chunks are lit ahead of the queues instead.</summary>
-    private void HurryFirstLight()
-    {
-        if (Hurry == null) return;
-        // The nearest few, in one pass: _hurriedNow kept nearest first.
-        int picked = 0;
-        foreach (var (k, column) in _columns)
-        {
-            if (picked == HurriedChunks && Across(_view, k) >= _hurriedDistance[picked - 1]) continue;
-            foreach (var c in column.Chunks)
-            {
-                if (!c.InGrid || !WaitsForLight(c)) continue;
-                float d = Distance(_view, c.Pos);
-                if (picked == HurriedChunks && d >= _hurriedDistance[picked - 1]) continue;
-                int at = picked < HurriedChunks ? picked++ : picked - 1;
-                for (; at > 0 && _hurriedDistance[at - 1] > d; at--)
-                    (_hurriedNow[at], _hurriedDistance[at]) = (_hurriedNow[at - 1], _hurriedDistance[at - 1]);
-                (_hurriedNow[at], _hurriedDistance[at]) = (c, d);
-            }
-        }
-        for (int n = 0; n < picked; n++)
-        {
-            var pos = _hurriedNow[n]!.Pos;
-            Hurry(Grid, pos);
-            Hurry(Grid, Above(pos, 1));
-            Hurry(Grid, Above(pos, -1));
-            _hurriedNow[n] = null;
-        }
-    }
 
     /// <summary>Horizontal distance from <paramref name="centre"/> to the nearest point of coarse column <paramref name="c"/>.</summary>
     private float Across(Vector3D<float> centre, (int x, int z) c)

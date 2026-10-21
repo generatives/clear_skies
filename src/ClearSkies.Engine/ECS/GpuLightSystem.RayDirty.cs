@@ -251,7 +251,6 @@ public sealed partial class GpuLightSystem
         _bandsOn = haveCam;
         _bandCam = cam.Position;
         CollectBounceClears(); // first, so the cleared bricks' direct light is redone this frame too
-        TakeHurried();
         int n = BuildLightWork(cam.Position);
         _lastDirtyTotal = n;
         _phaseTimer.Lap(3);
@@ -869,42 +868,36 @@ public sealed partial class GpuLightSystem
         return true;
     }
 
-    // Chunks asked for ahead of the queues (see Hurry), until this frame's lighting takes them.
-    private readonly List<(GridHandle Grid, ChunkPosition Pos)> _hurried = new();
-    private const int MaxHurried = 256;
+    // Chunks waiting to be shown (see ShowFirst), until this frame's lighting takes them; then nearest the camera first.
+    private readonly List<(GridHandle Grid, ChunkPosition Pos)> _showFirst = new();
+    private readonly List<(float DistSq, GridHandle Grid, ChunkPosition Pos)> _showOrder = new();
+    private const int MaxShowFirst = 4096;
 
     /// <summary>
-    /// Lights chunk <paramref name="pos"/> of static grid <paramref name="g"/> ahead of the queues on the next lighting
-    /// frame: its bricks waiting for direct light are relit past the cap, and those owed bounce updates get one (see
-    /// <see cref="IsLit"/>). For terrain held back for its first light where the fog stops
-    /// (LodTerrainSystem): the queues go nearest the camera first, and while the view moves nearer work keeps coming.
-    /// Ask every frame it's wanted.
+    /// Puts chunk <paramref name="pos"/> of static grid <paramref name="g"/> ahead of the queues on the next lighting
+    /// frame, within their caps: for terrain waiting to be shown until it's lit (LodTerrainSystem: distant terrain held
+    /// back for its first light, behind the fog; full detail waiting to swap in for it). Its bricks waiting for direct
+    /// light are relit, and those owed a bounce update get one, before any other queued brick, nearest the camera first.
+    /// The rest of the queues (light changing on terrain already shown) go on with what's left. Ask every frame it's
+    /// wanted.
     /// </summary>
-    public void Hurry(GridHandle g, ChunkPosition pos)
+    public void ShowFirst(GridHandle g, ChunkPosition pos)
     {
-        if (_hurried.Count < MaxHurried) _hurried.Add((g, pos));
+        if (_showFirst.Count < MaxShowFirst) _showFirst.Add((g, pos));
     }
 
-    private void TakeHurried()
+    /// <summary>This frame's chunks to show first, nearest the camera first (see <see cref="ShowFirst"/>).</summary>
+    private void OrderShowFirst(Vector3D<float> camPos)
     {
-        foreach (var (g, pos) in _hurried)
+        _showOrder.Clear();
+        foreach (var (g, pos) in _showFirst)
         {
-            if (!g.Chunks.TryGetValue(pos, out var rec) || rec.BrickSlots is not { } slots) continue;
-            foreach (int slot in slots)
-            {
-                if (slot < 0 || slot >= _dirty.Length) continue;
-                if (_dirty[slot]) MarkUrgent(slot);
-                else if (!_bounceEnabled) continue;
-                else if (NeedsUpdate(slot))
-                {
-                    if (_nowStamp[slot] == _frame) continue;
-                    _nowStamp[slot] = _frame;
-                    _nowSlots.Add(slot);
-                }
-                else if (_lastUpdate[slot] == NeverUpdated) TouchNow(slot);
-            }
+            float size = ChunkData.Size * g.Scale;
+            var centre = new Vector3D<float>((pos.X + 0.5f) * size, (pos.Y + 0.5f) * size, (pos.Z + 0.5f) * size);
+            _showOrder.Add((Vector3D.DistanceSquared(centre, camPos), g, pos));
         }
-        _hurried.Clear();
+        _showFirst.Clear();
+        _showOrder.Sort((a, b) => a.DistSq.CompareTo(b.DistSq));
     }
 
     /// <summary>Whether a brick has an update to come: touched since its last, or owed more for its last change.</summary>
@@ -1034,6 +1027,15 @@ public sealed partial class GpuLightSystem
         foreach (int slot in _urgentMarked)
             if (_dirty[slot]) TakeDirty(slot, ref n);
         int urgent = _relitList.Count;
+        // Then terrain waiting to be shown (see ShowFirst), then the rest, each nearest first, up to the cap.
+        OrderShowFirst(camPos);
+        foreach (var (_, g, pos) in _showOrder)
+        {
+            if (_relitList.Count - urgent >= _maxRelitPerFrame) break;
+            if (!g.Chunks.TryGetValue(pos, out var rec) || rec.BrickSlots is not { } slots) continue;
+            foreach (int slot in slots)
+                if (slot >= 0 && slot < _dirty.Length && _dirty[slot]) TakeDirty(slot, ref n);
+        }
         _dirtyQueue.Recentre(camPos, _keepDirty ??= slot => _dirty[slot]);
         while (_relitList.Count - urgent < _maxRelitPerFrame && _dirtyQueue.TryTake(out int slot))
             if (_dirty[slot]) TakeDirty(slot, ref n);
@@ -1081,7 +1083,25 @@ public sealed partial class GpuLightSystem
             if (IsStaticSlot(slot) && _lastUpdate[slot] != _frame && NeedsUpdate(slot))
                 UpdateBrick(slot, WorldBandOf(slot));
 
+        // Terrain waiting to be shown first (see ShowFirst), whether or not its band is due: it's held back until each
+        // brick has had an update. Then the queue, with what's left.
         int spent = 0;
+        foreach (var (_, g, pos) in _showOrder)
+        {
+            if (spent >= _maxGroupsPerFrame) break;
+            if (!g.Chunks.TryGetValue(pos, out var rec) || rec.BrickSlots is not { } slots) continue;
+            foreach (int slot in slots)
+            {
+                if (slot < 0 || slot >= _dirty.Length || _dirty[slot] || _lastUpdate[slot] == _frame) continue; // direct light first
+                if (!NeedsUpdate(slot))
+                {
+                    if (_lastUpdate[slot] != NeverUpdated) continue;
+                    Touch(slot);
+                }
+                spent += UpdateBrick(slot, WorldBandOf(slot));
+            }
+        }
+        _showOrder.Clear();
         _putBack.Clear();
         _updateQueue.Recentre(camPos, _keepQueued ??= IsQueued);
         while (spent < _maxGroupsPerFrame && _updateQueue.TryTake(out int slot, out int bucket))
