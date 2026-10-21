@@ -1233,32 +1233,69 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     // New light slots whose info and empty display aren't written to the GPU yet, and the info (what SlotInfo holds).
     private readonly List<int> _unwritten = new();
     private int[] _slotInfo = System.Array.Empty<int>();
-    private uint[]? _emptyRun;
-    private const int RunSlots = 64; // slots of empty display written at once (64 KB)
+    // Set up on the GPU (init_slots): uploading a whole empty display (1 KB) per new slot cost more than everything else
+    // in setting it up. The work list: the count, then each slot and its four info words.
+    private ComputePipeline? _initSlots;
+    private GpuBuffer? _initWork;
+    private int[] _initWords = System.Array.Empty<int>();
+    private readonly (uint, GpuBuffer)[] _initBindings = new (uint, GpuBuffer)[3];
 
-    /// <summary>Writes the new slots' info and empty display (see AllocLight), a run of neighbouring slots in one write
-    /// each. Called before every submit (GpuContext.FlushPending), so nothing on the GPU sees a new slot unwritten.</summary>
-    private void FlushNewSlots()
+    private const string InitSlotsWgsl = @"
+@group(0) @binding(0) var<storage, read_write> light: array<u32>;
+@group(0) @binding(1) var<storage, read_write> info: array<vec4<i32>>;
+@group(0) @binding(2) var<storage, read> work: array<i32>;
+
+// One workgroup per new slot: its display all empty, and its info.
+@compute @workgroup_size(64)
+fn init_slots(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>,
+              @builtin(local_invocation_index) li: u32) {
+    let i = wg.y * nw.x + wg.x;
+    if (i >= u32(work[0])) { return; }
+    let at = 1u + i * 5u;
+    let slot = u32(work[at]);
+    for (var k = li; k < WORDS_PER_SLOTu; k += 64u) { light[slot * WORDS_PER_SLOTu + k] = EMPTYu; }
+    if (li == 0u) { info[slot] = vec4<i32>(work[at + 1u], work[at + 2u], work[at + 3u], work[at + 4u]); }
+}";
+
+    /// <summary>Sets up the new slots (see AllocLight) on the GPU: their display all empty and their info, in one
+    /// dispatch. Called before every submit (GpuContext.FlushPending), so nothing on the GPU sees a new slot unset.</summary>
+    private unsafe void FlushNewSlots()
     {
-        if (_unwritten.Count == 0) return;
-        _unwritten.Sort();
-        _emptyRun ??= CreateEmptyRun();
-        int i = 0;
-        while (i < _unwritten.Count)
+        int count = _unwritten.Count;
+        if (count == 0) return;
+        int words = 1 + count * 5;
+        if (_initWords.Length < words) _initWords = new int[System.Math.Max(words, _initWords.Length * 2)];
+        _initWords[0] = count;
+        for (int i = 0; i < count; i++)
         {
-            int first = _unwritten[i], last = first;
-            for (i++; i < _unwritten.Count && _unwritten[i] <= last + 1; i++) last = _unwritten[i]; // a slot listed twice too
-            int count = last - first + 1;
-            SlotInfo.Write<int>((ulong)first * 16, _slotInfo.AsSpan(first * 4, count * 4));
-            for (int s = first; s <= last; s += RunSlots)
-            {
-                int n = System.Math.Min(RunSlots, last - s + 1);
-                LightPool.Write<uint>((ulong)s * SlotBytes, _emptyRun.AsSpan(0, n * WordsPerSlot));
-            }
+            int slot = _unwritten[i], at = 1 + i * 5;
+            _initWords[at] = slot;
+            for (int k = 0; k < 4; k++) _initWords[at + 1 + k] = _slotInfo[slot * 4 + k];
         }
         _unwritten.Clear();
+        if (_initWork == null || _initWork.SizeBytes < (ulong)words * 4)
+        {
+            _initWork?.Dispose();
+            _initWork = GpuBuffer.CreateStorage(_ctx, (ulong)_initWords.Length * 4);
+        }
+        _initWork.Write<int>(0, _initWords.AsSpan(0, words));
 
-        uint[] CreateEmptyRun() { var a = new uint[RunSlots * WordsPerSlot]; Array.Fill(a, EmptyDisplayPair); return a; }
+        _initSlots ??= new ComputePipeline(_ctx, InitSlotsWgsl.Replace("WORDS_PER_SLOT", WordsPerSlot.ToString())
+                                                               .Replace("EMPTY", EmptyDisplayPair.ToString()), "init_slots");
+        _initBindings[0] = (0, LightPool); _initBindings[1] = (1, SlotInfo); _initBindings[2] = (2, _initWork);
+        var bg = _initSlots.CreateBindGroup(_initBindings);
+        var api = _ctx.Api;
+        var encDesc = new Silk.NET.WebGPU.CommandEncoderDescriptor();
+        var enc = api.DeviceCreateCommandEncoder(_ctx.Device, &encDesc);
+        const int MaxPerDim = 65535;
+        uint gx = (uint)System.Math.Min(count, MaxPerDim), gy = ((uint)count + gx - 1u) / gx;
+        _initSlots.Record(enc, bg, gx, gy, 1u, "Light slots: set up", count);
+        var cmdDesc = new Silk.NET.WebGPU.CommandBufferDescriptor();
+        var cmd = api.CommandEncoderFinish(enc, &cmdDesc);
+        api.QueueSubmit(_ctx.Queue, 1, &cmd); // not through FlushPending: this is part of it
+        api.CommandBufferRelease(cmd);
+        api.CommandEncoderRelease(enc);
+        api.BindGroupRelease(bg);
     }
 
     private void GrowLight()
@@ -1375,6 +1412,8 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     public void Dispose()
     {
         _ctx.BeforeSubmit -= FlushNewSlots;
+        _initSlots?.Dispose();
+        _initWork?.Dispose();
         OccPool.Dispose();
         ChunkTable.Dispose();
         BrickTable.Dispose();
