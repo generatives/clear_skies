@@ -46,16 +46,13 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     // A piece's top is the terrain worn down: where the terrain there stands above the terrain at its heart, only
     // Flatten of the difference is left, and the whole top is lowered by up to MaxDrop (each piece its own amount).
     // So tops are flatter than the land they came from, and neighbours don't line up.
-    private const float Flatten = 0.45f, MaxDrop = 30f;
+    internal const float Flatten = 0.45f, MaxDrop = 30f;
 
     // A top is bare (see ContinentTerrain.Block) to Shaded if land lies over it within ShadeReach blocks.
     private const float Shaded = 0.75f, ShadeReach = 250f;
 
     /// <summary>One lava block in this many glows.</summary>
     private const int LavaGlowOdds = 40;
-
-    /// <summary>How deep under the surface the land round a lake is made whole.</summary>
-    private const int LakePlug = 12;
 
     /// <summary>How far above <see cref="HeartGrid.LowestBottom"/> the world's rough bottom reaches.</summary>
     private const float BottomRoughness = 30f;
@@ -291,16 +288,6 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                     runLo = int.MinValue;
                 }
                 y = System.Math.Min(y + step, System.Math.Max(y + 1, yTop + 1));
-            }
-            // Round a lake the land is made whole down to LakePlug blocks under the surface, so no crack between pieces
-            // of land lets the water out.
-            if (_level[col] != int.MinValue)
-            {
-                int last = spans - 1;
-                if (spans > 0 && _spans[col * MaxSpans + last].Hi >= yTop - LakePlug)
-                    _spans[col * MaxSpans + last] = (_spans[col * MaxSpans + last].Lo, (short)yTop);
-                else if (spans < MaxSpans)
-                    _spans[col * MaxSpans + spans++] = ((short)(yTop - LakePlug), (short)yTop);
             }
             _spanCount[col] = (byte)spans;
             if (spans == 0) continue;

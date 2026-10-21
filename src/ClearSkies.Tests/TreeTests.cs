@@ -65,35 +65,28 @@ public class TreeTests
     }
 
     [Fact]
-    public void Lakes_fill_hollows_below_their_banks()
+    public void Lakes_rest_on_the_ground_and_stay_in_their_banks()
     {
         var lakes = Lakes.For(1337);
-        var terrain = ContinentTerrain.For(1337);
+        var generator = new HeartWorldGenerator(1337);
+        int Top(int x, int z)
+        {
+            generator.Prepare(x >> 5, z >> 5);
+            var spans = generator.Spans(x & 31, z & 31);
+            return spans.Length == 0 ? int.MinValue : spans[^1].Hi;
+        }
         int wet = 0;
         // Around the spawn island of this seed.
-        for (int z = -7250; z < -5250 && wet < 50; z += 16)
-        for (int x = 10250; x < 12250 && wet < 50; x += 16)
+        for (int z = -7250; z < -5250 && wet < 200; z += 4)
+        for (int x = 10250; x < 12250 && wet < 200; x += 4)
         {
-            int level = lakes.Level(x, z);
-            if (level == int.MinValue) continue;
-            float h = terrain.Height(x, z);
-            if (h > level) continue; // a shore column beside the water
+            int level = lakes.Level(x, z), ground = level == int.MinValue ? 0 : Top(x, z);
+            if (level == int.MinValue || ground >= level) continue; // dry, or a shore column beside the water
             wet++;
-            Assert.True(level - h < 40); // a shallow-ish hollow, not water hanging over a drop
-            // Banks rise above the water somewhere around it, so it sits in a bowl.
-            float rim = float.MinValue;
-            for (int i = 0; i < 16; i++)
-            {
-                float a = i * MathF.Tau / 16;
-                for (int r = 8; r <= 400; r += 8)
-                {
-                    float bx = x + r * MathF.Cos(a), bz = z + r * MathF.Sin(a);
-                    if (lakes.Level((int)bx, (int)bz) != int.MinValue) continue;
-                    rim = MathF.Max(rim, terrain.Height(bx, bz));
-                    break;
-                }
-            }
-            Assert.True(rim > level);
+            Assert.True(level - ground < 40); // on the ground, not hanging over a drop
+            // Every dry column beside the water stands up to its level, so none of it is a wall of water in the air.
+            foreach (var (nx, nz) in new[] { (x + 1, z), (x - 1, z), (x, z + 1), (x, z - 1) })
+                Assert.True(lakes.Level(nx, nz) != int.MinValue || Top(nx, nz) >= level);
         }
         Assert.True(wet > 0);
     }
