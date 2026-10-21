@@ -125,6 +125,20 @@ public static class BlockRegistry
             LightColor = new(1.00f, 0.40f, 0.25f), Texture = "greystone_ruby" });
         Register(new BlockDef { Id = BlockId.GoldCrystal, Name = "Gold Crystal", Color = new(1.00f, 0.85f, 0.40f), IsSolid = true, PlaceOriented = false, LightEmission = 12, Weight = 4,
             LightColor = new(1.00f, 0.82f, 0.45f), Texture = "stone_gold" });
+
+        // Tundra, steppe and volcanic ground.
+        Register(new BlockDef { Id = BlockId.SnowyDirt, Name = "Snowy Dirt", Color = new(0.90f, 0.92f, 0.95f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 2,
+            Texture = "dirt_snow", TextureTop = "snow", TextureBottom = "dirt" });
+        Register(new BlockDef { Id = BlockId.Ice, Name = "Ice", Color = new(0.70f, 0.85f, 0.95f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 2,
+            Texture = "ice" });
+        Register(new BlockDef { Id = BlockId.Gravel, Name = "Gravel", Color = new(0.55f, 0.50f, 0.45f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 3,
+            Texture = "gravel_dirt" });
+        Register(new BlockDef { Id = BlockId.Ash, Name = "Ash", Color = new(0.45f, 0.45f, 0.45f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 2,
+            Texture = "greysand" });
+        Register(new BlockDef { Id = BlockId.Lava, Name = "Lava", Color = new(1.00f, 0.45f, 0.10f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 4,
+            Texture = "lava" });
+        Register(new BlockDef { Id = BlockId.GlowingLava, Name = "Glowing Lava", Color = new(1.00f, 0.45f, 0.10f), IsSolid = true, PlaceOriented = false, LightEmission = 13, Weight = 4,
+            LightColor = new(1.00f, 0.45f, 0.15f), Texture = "lava" });
     }
 
     private static void RegisterCross(BlockId id, string name, string texture, Vector3D<float> color, string[]? variants = null, bool rigid = false, bool tint = false) =>
