@@ -332,8 +332,10 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
         int outer = (int)MathF.Ceiling(OuterRadius / ColumnBlocks);
         bool grouped = Coarser is { Live: true };
         if (centre != _centre || outer != _outerChunks || grouped != _grouped) Rebuild(centre, outer, grouped);
+        _gridStore?.BeginRemovals(); // chunks next to those going are looked at once (see GridStore.BeginRemovals)
         FreeSome();
         EvictSome();
+        _gridStore?.EndRemovals();
         _steps.Lap(DispatchStep);
 
         ApplyResults();

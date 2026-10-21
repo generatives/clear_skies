@@ -119,6 +119,7 @@ public sealed unsafe class ComputePipeline : IDisposable
 
         var cmdDesc = new CommandBufferDescriptor();
         var cmd = _api.CommandEncoderFinish(enc, &cmdDesc);
+        _ctx.FlushPending();
         _api.QueueSubmit(_ctx.Queue, 1, &cmd);
         _api.CommandBufferRelease(cmd);
         _api.CommandEncoderRelease(enc);
@@ -159,6 +160,7 @@ public sealed unsafe class ComputePipeline : IDisposable
 
         var cmdDesc = new CommandBufferDescriptor();
         var cmd = _api.CommandEncoderFinish(enc, &cmdDesc);
+        _ctx.FlushPending();
         _api.QueueSubmit(_ctx.Queue, 1, &cmd);
         _api.CommandBufferRelease(cmd);
         _api.CommandEncoderRelease(enc);

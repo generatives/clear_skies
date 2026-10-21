@@ -1247,6 +1247,7 @@ fn zero_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg
         if (_enc == null) return;
         var cmdDesc = new CommandBufferDescriptor();
         var cmd = _ctx.Api.CommandEncoderFinish(_enc, &cmdDesc);
+        _ctx.FlushPending();
         _ctx.Api.QueueSubmit(_ctx.Queue, 1, &cmd);
         _ctx.Api.CommandBufferRelease(cmd);
         _ctx.Api.CommandEncoderRelease(_enc);

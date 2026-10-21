@@ -183,6 +183,7 @@ public sealed partial class GpuLightSystem
             _left[slot] = 0;
             _lastUpdate[slot] = NeverUpdated;
             _given[slot] = ushort.MaxValue;
+            KeepCentre(slot);
             MarkSlot(slot);
         }
         _store.NewSlots.Clear();
@@ -1223,8 +1224,22 @@ public sealed partial class GpuLightSystem
         return false;
     }
 
-    /// <summary>World-space centre of a light slot's brick, for the queues.</summary>
-    private Vector3D<float> SlotCentre(int slot)
+    /// <summary>World-space centre of a light slot's brick, for the queues: kept for the world's and distant terrain's
+    /// (they don't move), as the queues and bands ask for it tens of thousands of times a frame.</summary>
+    private Vector3D<float> SlotCentre(int slot) => _centreKept[slot] ? _centre[slot] : MeasureCentre(slot);
+
+    // Each static slot's brick centre, from when it was handed out (see KeepCentre).
+    private Vector3D<float>[] _centre = System.Array.Empty<Vector3D<float>>();
+    private bool[] _centreKept = System.Array.Empty<bool>();
+
+    /// <summary>Notes a newly handed-out slot's centre if its grid doesn't move (the world, distant terrain).</summary>
+    private void KeepCentre(int slot)
+    {
+        _centreKept[slot] = IsStaticSlot(slot);
+        if (_centreKept[slot]) _centre[slot] = MeasureCentre(slot);
+    }
+
+    private Vector3D<float> MeasureCentre(int slot)
     {
         int gi = _store.SlotGrid[slot];
         var g = gi >= 0 ? _store.GridAt(gi) : null;
@@ -1313,6 +1328,8 @@ public sealed partial class GpuLightSystem
         Array.Resize(ref _lastUpdate, capacity);
         Array.Resize(ref _inQueue, capacity);
         Array.Resize(ref _given, capacity);
+        Array.Resize(ref _centre, capacity);
+        Array.Resize(ref _centreKept, capacity);
         Array.Resize(ref _inCoarse, capacity);
         Array.Resize(ref _composeStamp, capacity);
         Array.Resize(ref _clearStamp, capacity);
