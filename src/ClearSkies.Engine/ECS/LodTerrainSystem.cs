@@ -556,6 +556,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
                 coarse.Set(ox + x, oy + y, oz + z, only);
             return;
         }
+        var cube = CubeTable;
         Span<BlockId> cell = stackalloc BlockId[8];
         Span<int> faces = stackalloc int[8]; // how many faces each of the cell's blocks shows
         Span<BlockId> plantOn = stackalloc BlockId[16]; // per x: a plant on top of the cell below (for the cell above)
@@ -565,11 +566,24 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
             for (int y = 0; y < 16; y++)
             for (int x = 0; x < 16; x++)
             {
+                bool anyCube = false, same = true;
                 for (int k = 0; k < 8; k++)
-                    cell[k] = full.Get(2 * x + (k & 1), 2 * y + ((k >> 1) & 1), 2 * z + (k >> 2));
-                for (int k = 0; k < 8; k++)
-                    faces[k] = IsCube(cell[k]) ? ShownFaces(full, 2 * x + (k & 1), 2 * y + ((k >> 1) & 1), 2 * z + (k >> 2)) : 0;
-                var pick = majority ? ByMajority(cell, faces) : ByAny(cell, faces);
+                {
+                    var id = cell[k] = full.Get(2 * x + (k & 1), 2 * y + ((k >> 1) & 1), 2 * z + (k >> 2));
+                    anyCube |= cube[(byte)id];
+                    same &= id == cell[0];
+                }
+                // Most cells are all one block (air, or rock under the ground): without a cube that's air, and all one
+                // cube that cube, whichever rule; neither needs the faces counted.
+                BlockId pick;
+                if (!anyCube) pick = BlockId.Air;
+                else if (same) pick = cell[0];
+                else
+                {
+                    for (int k = 0; k < 8; k++)
+                        faces[k] = cube[(byte)cell[k]] ? ShownFaces(full, 2 * x + (k & 1), 2 * y + ((k >> 1) & 1), 2 * z + (k >> 2)) : 0;
+                    pick = majority ? ByMajority(cell, faces) : ByAny(cell, faces);
+                }
                 if (pick != BlockId.Air) coarse.Set(ox + x, oy + y, oz + z, pick);
                 if (!plants) continue;
                 // Plants (grass, mushrooms): a cell left open keeps the commonest one in it, or failing that one that
@@ -581,9 +595,19 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
                     if (plant != BlockId.Air) coarse.Set(ox + x, oy + y, oz + z, plant);
                     plantOn[x] = BlockId.Air;
                 }
-                else plantOn[x] = MostCommonPlant(cell, upperOnly: true);
+                else plantOn[x] = same ? BlockId.Air : MostCommonPlant(cell, upperOnly: true); // one cube: no plant in it
             }
         }
+    }
+
+    // Per block id: a full cube; an opaque one (hides what's against it).
+    private static readonly bool[] CubeTable = BuildTable(id => IsCube(id));
+    private static readonly bool[] OpaqueCubeTable = BuildTable(id => IsCube(id) && !BlockRegistry.Get(id).Transparent);
+    private static bool[] BuildTable(Func<BlockId, bool> of)
+    {
+        var t = new bool[256];
+        for (int i = 0; i < t.Length; i++) t[i] = of((BlockId)i);
+        return t;
     }
 
     private static BlockId MostCommonPlant(ReadOnlySpan<BlockId> cell, bool upperOnly)
@@ -628,15 +652,12 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
     /// <summary>How many faces of full chunk block (x, y, z) aren't against an opaque cube (past the chunk: showing).</summary>
     private static int ShownFaces(ChunkData full, int x, int y, int z)
     {
-        return Shows(full, x - 1, y, z) + Shows(full, x + 1, y, z) + Shows(full, x, y - 1, z)
-             + Shows(full, x, y + 1, z) + Shows(full, x, y, z - 1) + Shows(full, x, y, z + 1);
+        var opaque = OpaqueCubeTable;
+        return Shows(x - 1, y, z) + Shows(x + 1, y, z) + Shows(x, y - 1, z) + Shows(x, y + 1, z) + Shows(x, y, z - 1)
+             + Shows(x, y, z + 1);
 
-        static int Shows(ChunkData full, int x, int y, int z)
-        {
-            if ((uint)x >= S || (uint)y >= S || (uint)z >= S) return 1;
-            var id = full.Get(x, y, z);
-            return IsCube(id) && !BlockRegistry.Get(id).Transparent ? 0 : 1;
-        }
+        int Shows(int x, int y, int z)
+            => (uint)x >= S || (uint)y >= S || (uint)z >= S || !opaque[(byte)full.Get(x, y, z)] ? 1 : 0;
     }
 
     private static BlockId ByMajority(ReadOnlySpan<BlockId> cell, ReadOnlySpan<int> faces)

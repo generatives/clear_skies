@@ -52,8 +52,11 @@ public sealed class GreedyMesher
     // the largest chunk seen needs instead of re-growing (doubling + copying) from empty every call.
     // Safe to hand back directly: callers (ChunkMeshSystem) upload the span to the GPU synchronously
     // before this mesher is invoked again.
+    // A slice's faces. All air between slices: the merge below clears each cell as it takes it into a quad, so every
+    // face it set is cleared again by the end of the slice (clearing the whole mask per slice was most of the time
+    // meshing distant terrain took).
     private readonly MaskCell[] _mask     = new MaskCell[ChunkData.Size * ChunkData.Size];
-    private readonly bool[]     _consumed = new bool    [ChunkData.Size * ChunkData.Size];
+    private bool _maskInUse; // set while a slice is in it: still set at the next Mesh, the last one threw part way
     private readonly List<Vertex> _verts   = new();
     private readonly List<uint>   _indices = new();
     private readonly List<Vertex> _tVerts   = new();
@@ -101,6 +104,8 @@ public sealed class GreedyMesher
         _cVerts.Clear();
         _cIndices.Clear();
         int sz      = ChunkData.Size;
+        if (_maskInUse) Array.Clear(_mask);
+        _maskInUse = true;
 
         for (int fi = 0; fi < Faces.Length; fi++)
         {
@@ -109,9 +114,7 @@ public sealed class GreedyMesher
 
             for (int slice = 0; slice < sz; slice++)
             {
-                // ── Build the 2-D face mask for this slice ──────────────────────────
-                Array.Clear(_mask,     0, _mask.Length); // default(MaskCell) == MaskCell.Air (Id=0=Air, Role=Side)
-                Array.Clear(_consumed, 0, _consumed.Length);
+                // ── Build the 2-D face mask for this slice (all air coming in, see _mask) ─────
 
                 // adjSlice is constant for all (u,v) at this face/slice.
                 int adjSlice = slice + (face.FaceOffset == 1 ? 1 : -1);
@@ -159,13 +162,11 @@ public sealed class GreedyMesher
                 for (int u = 0; u < sz; u++)
                 {
                     MaskCell start = _mask[u + v * sz];
-                    if (start.Id == BlockId.Air || _consumed[u + v * sz]) continue;
+                    if (start.Id == BlockId.Air) continue; // air, or taken into a quad already
 
                     // Expand width along U (same cell)
                     int du = 1;
-                    while (u + du < sz
-                        && _mask[(u + du) + v * sz] == start
-                        && !_consumed[(u + du) + v * sz])
+                    while (u + du < sz && _mask[(u + du) + v * sz] == start)
                         du++;
 
                     // Expand height along V (all cells in the row must match)
@@ -175,16 +176,16 @@ public sealed class GreedyMesher
                     {
                         for (int k = u; k < u + du; k++)
                         {
-                            if (_mask[k + (v + dv) * sz] != start || _consumed[k + (v + dv) * sz])
+                            if (_mask[k + (v + dv) * sz] != start)
                             { canExpand = false; break; }
                         }
                         if (canExpand) dv++;
                     }
 
-                    // Mark rectangle as consumed
+                    // Taken: cleared back to air (default(MaskCell) == MaskCell.Air: Id=0=Air, Role=Side)
                     for (int dv2 = 0; dv2 < dv; dv2++)
                     for (int du2 = 0; du2 < du; du2++)
-                        _consumed[(u + du2) + (v + dv2) * sz] = true;
+                        _mask[(u + du2) + (v + dv2) * sz] = default;
 
                     ref readonly var def = ref BlockRegistry.Get(start.Id);
                     string? texName = def.GetFaceTexture(start.Role);
@@ -211,6 +212,8 @@ public sealed class GreedyMesher
                 }
             }
         }
+
+        _maskInUse = false;
 
         if (chunk.HasAnyNonAir())
             for (int z = 0; z < sz; z++)
