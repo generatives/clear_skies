@@ -54,6 +54,12 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     /// <summary>One lava block in this many glows.</summary>
     private const int LavaGlowOdds = 40;
 
+    /// <summary>About how far (blocks) a lake's sandy shore reaches from the middle of its sample cells (see Lakes).</summary>
+    private const float ShoreReach = 3.5f;
+
+    /// <summary>Where noise is under this (-1 to 1) a tundra lake is open water, not ice.</summary>
+    private const float IceOpen = -0.25f;
+
     /// <summary>How far above <see cref="HeartGrid.LowestBottom"/> the world's rough bottom reaches.</summary>
     private const float BottomRoughness = 30f;
 
@@ -113,6 +119,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     private readonly float[] _dry = new float[S * S * MaxSpans];   // per span top: how near a desert (Biomes.Dry)
     private readonly float[] _height = new float[S * S];
     private readonly int[] _level = new int[S * S];         // the level of a lake here or beside, or int.MinValue (Lakes.Level)
+    private readonly bool[] _shore = new bool[S * S];       // whether a dry column by a lake is its sandy shore
     private readonly float[] _bottomAt = new float[S * S];
 
     // The hearts around the chunk column being profiled, per layer: cells from (_cx0, _cy0, _cz0), _nx by _ny by _nz of
@@ -158,7 +165,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 // bed of sand and gravel, with a sandy shore.
                 bool top = s == _spanCount[col] - 1;
                 int level = top ? _level[col] : int.MinValue;
-                if (level != int.MinValue && hi <= level + 2)
+                if (level != int.MinValue && hi <= level + 2 && (hi < level || _shore[col]))
                 {
                     var biome = _biome[col * MaxSpans + s];
                     var bed = _patch[col] < 0.35f ? BlockId.Gravel : BlockId.Sand;
@@ -166,9 +173,11 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                     for (int y = System.Math.Max(hi - 1, originY); y <= System.Math.Min(hi, originY + S - 1); y++)
                         data.Set(lx, y - originY, lz, bed);
                     var liquid = biome == Biome.Volcanic ? BlockId.Lava : BlockId.Water;
+                    // A tundra lake's ice is broken, with open water between the floes.
+                    bool iced = biome == Biome.Tundra && _crack.GetNoise(x * 4f, z * 4f) > IceOpen;
                     for (int y = System.Math.Max(hi + 1, originY); y <= System.Math.Min(level, originY + S - 1); y++)
                     {
-                        var b = y < level ? liquid : biome == Biome.Tundra ? BlockId.Ice
+                        var b = y < level ? liquid : iced ? BlockId.Ice
                               : liquid == BlockId.Lava && Trees.Hash(x, y, z, _seed ^ 0x1A7A) % LavaGlowOdds == 0 ? BlockId.GlowingLava : liquid;
                         data.Set(lx, y - originY, lz, b);
                     }
@@ -199,7 +208,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 int x = pos.X * S + lx, z = pos.Z * S + lz;
                 var kind = Trees.At(ground, x, hi, z, _woods[col], _seed, biome);
                 if (kind == Trees.Kind.None) continue;
-                if (s == _spanCount[col] - 1 && _level[col] != int.MinValue && hi <= _level[col] + 2) continue; // not on a shore
+                if (s == _spanCount[col] - 1 && _level[col] != int.MinValue && hi <= _level[col] + 2 && (hi < _level[col] || _shore[col])) continue; // not on a shore
                 int reach = Trees.ReachOf(kind);
                 if (lx < reach || lz < reach || lx >= S - reach || lz >= S - reach) continue;
                 if (s + 1 < _spanCount[col] && _spans[col * MaxSpans + s + 1].Lo <= hi + Trees.HeightOf(kind) + 1) continue;
@@ -233,7 +242,9 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             int col = lx + S * lz;
             float wx = x0 + lx, wz = z0 + lz;
             _height[col] = MathF.Min(_terrain.Height(wx, wz), HeartGrid.WorldTop - 1);
-            _level[col] = _lakes.Level((int)wx, (int)wz);
+            _level[col] = _lakes.Level((int)wx, (int)wz, out float off);
+            // The shore reaches a ragged ShoreReach from the lake's sample cells, not their square outline.
+            _shore[col] = off < ShoreReach * (0.6f + 0.4f * (_crack.GetNoise(wx * 3f, wz * 3f) + 1f));
             _bottomAt[col] = HeartGrid.LowestBottom + BottomRoughness * (0.5f + 0.5f * _bottom.GetNoise(wx, wz));
             top = MathF.Max(top, _height[col]);
         }

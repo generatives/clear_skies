@@ -10,7 +10,7 @@ namespace ClearSkies.Game.Generation;
 /// it down (flattened and dropped from the terrain surface). The cracks between pieces and the gaps where a piece is
 /// gone are drains, so no lake sits over a crack, hangs over a gap or rests against a piece's worn edge. A tile keeps
 /// only lakes lying wholly inside it, so each lake is decided by exactly one tile and every chunk agrees. Its level is
-/// a block under the spill point, so the water stands below its banks.
+/// a block under the spill point, so the water stands below its banks. None lies in a desert.
 /// </summary>
 public sealed class Lakes
 {
@@ -44,19 +44,27 @@ public sealed class Lakes
 
     /// <summary>The level (world Y of the top water block) of the lake at or right beside column (x, z), or
     /// int.MinValue for none. Water fills the column from its ground up to the level, where the ground is under it.</summary>
-    public int Level(int x, int z)
+    public int Level(int x, int z) => Level(x, z, out _);
+
+    /// <summary>As <see cref="Level(int, int)"/>, with how far (blocks) column (x, z) is from the middle of the
+    /// lake's nearest sample cell.</summary>
+    public int Level(int x, int z, out float off)
     {
         int gx = FloorDiv(x, Step), gz = FloorDiv(z, Step);
-        int own = CellLevel(gx, gz);
-        if (own != int.MinValue) return own;
         // Just past a lake's sampled cells the ground can still dip under its level between samples: fill those too.
+        int level = int.MinValue;
+        float best = float.MaxValue;
         for (int dz = -1; dz <= 1; dz++)
         for (int dx = -1; dx <= 1; dx++)
         {
             int l = CellLevel(gx + dx, gz + dz);
-            if (l != int.MinValue) return l;
+            if (l == int.MinValue) continue;
+            float cx = (gx + dx + 0.5f) * Step - (x + 0.5f), cz = (gz + dz + 0.5f) * Step - (z + 0.5f);
+            float d = cx * cx + cz * cz;
+            if (d < best) { best = d; level = l; }
         }
-        return int.MinValue;
+        off = MathF.Sqrt(best);
+        return level;
     }
 
     private int CellLevel(int gx, int gz)
@@ -134,8 +142,15 @@ public sealed class Lakes
                 }
             }
             if (!inside || deepest < MinDepth || cells.Count < MinCells || cells.Count > MaxCells) continue;
+            bool dry = false;
+            foreach (int c in cells)
+                if (Dry(x0 + (c % Window) * Step, z0 + (c / Window) * Step, height[c])) { dry = true; break; }
+            if (dry) continue;
             int lakeLevel = (int)MathF.Floor(filled[start]) - 1;
-            foreach (int c in cells) levels[(c % Window - Off) + Core * (c / Window - Off)] = lakeLevel;
+            // Only cells actually under the water are kept, so the shore round them (see Level) is just by the water,
+            // not over the flats round it at its level.
+            foreach (int c in cells)
+                if (height[c] < lakeLevel) levels[(c % Window - Off) + Core * (c / Window - Off)] = lakeLevel;
         }
         return levels;
     }
@@ -151,6 +166,15 @@ public sealed class Lakes
         for (int i = i0; i <= i1; i++)
             hearts.Add(HeartGrid.At(_seed, 0, i, -1, k));
         return hearts;
+    }
+
+    /// <summary>Whether ground at (x, z) and <paramref name="top"/> high is desert, badlands or a desert's edge: no
+    /// lakes there.</summary>
+    private bool Dry(float x, float z, float top)
+    {
+        float heat = Biomes.Heat(top, _terrain.Heat(x, z)), wet = _terrain.Wet(x, z);
+        var biome = Biomes.Pick(heat, wet);
+        return biome is Biome.Desert or Biome.Badlands || Biomes.Dry(heat, wet, Biomes.SandBlend) > 0.5f;
     }
 
     /// <summary>The land's real top at (x, z): its top piece's top (see HeartWorldGenerator.Solid), or
