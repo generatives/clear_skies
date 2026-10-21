@@ -143,6 +143,9 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
     private sealed class CoarseColumn
     {
         public readonly List<CoarseChunk> Chunks = new();
+        // The chunks with faces, bottom first: most of a column is air above the land, or rock under it, and the
+        // per-frame walks that only care about what's drawn (listing draws, the fog) skip reading those.
+        public readonly List<CoarseChunk> Faced = new();
         public int MinY;
         public bool ChildEdited; // a full chunk under it was edited while it was hidden
         public bool Quiet;       // far from full detail, and every chunk kept is drawn, settled and uncovered: nothing to do
@@ -710,6 +713,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
                         chunk.Occupancy = b.Occupancy;
                     }
                     column.Chunks.Add(chunk);
+                    if (chunk.HasFaces) column.Faced.Add(chunk);
                 }
                 Unload(r.Column); // a column made again replaces the one drawn meanwhile
                 _columns[r.Column] = column;
@@ -1105,7 +1109,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
         foreach (var (k, column) in _columns)
         {
             if (Across(centre, k) >= best) continue;
-            foreach (var c in column.Chunks)
+            foreach (var c in column.Faced) // only one with faces waits for light
                 if (WaitsForLight(c) && !(c.ReadyKnown && c.Ready) && Kept((k.x, c.Pos.Y, k.z))
                     && !(coarser != null && coarser.Shows((k.x >> 1, c.Pos.Y >> 1, k.z >> 1))) // what's under it shows instead
                     && Distance(centre, c.Pos) is var d && d < best)
@@ -1158,11 +1162,11 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
         var coarser = Coarser is { Live: true } c0 ? c0 : null;
         foreach (var ((cx, cz), column) in _columns)
         {
-            if (column.Chunks.Count == 0) continue;
-            if (!frame.Frustum.Intersects(column.Chunks[0].Min, column.Chunks[^1].Min + size)) continue; // in Y order
-            foreach (var c in column.Chunks)
+            var faced = column.Faced;
+            if (faced.Count == 0) continue;
+            if (!frame.Frustum.Intersects(faced[0].Min, faced[^1].Min + size)) continue; // in Y order
+            foreach (var c in faced)
             {
-                if (!c.HasFaces) continue;
                 // Coming in over the finer level it replaces (drawing the pixels that leaves out), drawn, or going away
                 // (leaving out the pixels the finer level coming back draws): a pixel shows one level, never both.
                 float share = c.Drawn ? CoarseShare(c) : 1f - Faded(c.FadeOutAt);

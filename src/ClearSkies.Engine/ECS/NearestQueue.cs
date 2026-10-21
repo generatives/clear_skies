@@ -105,6 +105,21 @@ internal sealed class NearestQueue
         return false;
     }
 
+    /// <summary>Empties the queue into <paramref name="into"/>, those still waiting to be re-bucketed included.</summary>
+    public void TakeAll(List<int> into)
+    {
+        for (int i = _pendingAt; i < _pending.Count; i++) into.Add(_pending[i]);
+        _pending.Clear();
+        _pendingAt = 0;
+        for (int i = _first; i < Buckets; i++)
+        {
+            into.AddRange(_buckets[i]);
+            _buckets[i].Clear();
+        }
+        _first = Buckets;
+        _count = 0;
+    }
+
     private int Bucket(int slot)
     {
         float d = Vector3D.Distance(_centre(slot), _ref);

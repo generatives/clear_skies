@@ -391,7 +391,7 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
                 if ((acc & 0xFFFFFF) != 0) bounce++;
             }
         }
-        Console.WriteLine($"[probe] voxels={voxels} not-composed={unlit} sun-shadowed={shadowed} lit={lit} tinted={coloured} ao={ao} bounce={bounce} held={_updateQueue.Count}");
+        Console.WriteLine($"[probe] voxels={voxels} not-composed={unlit} sun-shadowed={shadowed} lit={lit} tinted={coloured} ao={ao} bounce={bounce} held={UpdateQueued}");
     }
 
     /// <summary>Poses a registered grid for this frame from its root <see cref="Transform"/>.</summary>
