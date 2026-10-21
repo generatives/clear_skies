@@ -3,30 +3,20 @@ using System.Collections.Concurrent;
 namespace ClearSkies.Game.Generation;
 
 /// <summary>
-/// Lakes in the land's surface: still water filling a bowl carved into the terrain, no flow. The world is cut into
-/// <see cref="Cell"/>-block cells; one in a few holds a lake, placed well inside it so each column has at most its own
-/// cell's lake, and worked out from the cell alone so every chunk agrees.
-///
-/// A lake's outline is a wobbly circle. Its level is a block under the lowest of the terrain round its rim, so the water
-/// never stands above its banks; inside, the ground is carved down into a bowl under that level, deepest in the middle.
-/// A lake only forms where the land round it is there (the whole rim on live pieces of the top row, see
-/// <see cref="HeartGrid.At"/>) and fairly level, so it never spills off an island or down a mountainside. Round it the
-/// generator makes the land whole a little way down, so cracks between pieces don't drain it.
+/// Lakes: still water filling the hollows the terrain already has, no flow and no carving. The world is cut into
+/// <see cref="Tile"/>-block tiles; each works out its lakes once from the terrain's height over itself and a margin
+/// round it, sampled every <see cref="Step"/> blocks, by filling every hollow up to the point where it would spill
+/// over (a priority flood). A tile keeps only lakes lying wholly inside it, so each lake is decided by exactly one tile
+/// and every chunk agrees, and only lakes wholly on live land (see <see cref="HeartGrid.At"/>), so none hangs over a
+/// gap between islands. Its level is a block under the spill point, so the water stands below its banks.
 /// </summary>
 public sealed class Lakes
 {
-    public const int Cell = 384;
+    public const int Tile = 512, Margin = 96, Step = 4;
 
-    private const int Odds = 3;                           // one cell in this many holds a lake
-    private const float MinRadius = 22f, MaxRadius = 56f;
-    private const float Wobble = 0.25f;                   // how far the outline strays from a circle, as a share of radius
-    private const float MaxRimRise = 40f;                 // a rim higher than its lowest point by more is too steep
-    private const int RimSamples = 24;
-    private const float Shore = 1.25f;                    // how far out (in radii) a sandy shore can reach
-
-    /// <summary>A lake: its middle, radius, level (world Y of its top water block) and deepest point's depth, and the
-    /// phases of its outline's wobble.</summary>
-    public readonly record struct Lake(float X, float Z, float Radius, int Level, float Depth, float P1, float P2, float P3);
+    private const int Core = Tile / Step, Window = (Tile + 2 * Margin) / Step, Off = Margin / Step;
+    private const float MinDepth = 2.5f;                  // shallower hollows are left dry
+    private const int MinCells = 10, MaxCells = 2500;     // lakes of about 160 to 40,000 square blocks
 
     private static readonly ConcurrentDictionary<ulong, Lakes> BySeed = new();
 
@@ -35,7 +25,7 @@ public sealed class Lakes
 
     private readonly ulong _seed;
     private readonly ContinentTerrain _terrain;
-    private readonly ConcurrentDictionary<long, Lake?> _cells = new();
+    private readonly ConcurrentDictionary<long, int[]> _tiles = new();
 
     private Lakes(ulong seed)
     {
@@ -43,78 +33,133 @@ public sealed class Lakes
         _terrain = ContinentTerrain.For(seed);
     }
 
-    /// <summary>Column (x, z) with terrain <paramref name="height"/> as carved by a lake: the ground's new height, the
-    /// lake's <paramref name="level"/> out to its shore a little past the outline (int.MinValue elsewhere) and whether
-    /// the column is <paramref name="inside"/> the outline, where water fills it up to the level.
-    /// <paramref name="near"/> is 0-1, how far into the lake's surroundings the column is (1 inside its outline, 0 from
-    /// 1.3 times its radius out).</summary>
-    public float Carve(float x, float z, float height, out int level, out bool inside, out float near)
+    /// <summary>The level (world Y of the top water block) of the lake at or right beside column (x, z), or
+    /// int.MinValue for none. Water fills the column from its ground up to the level, where the ground is under it.</summary>
+    public int Level(int x, int z)
     {
-        level = int.MinValue;
-        inside = false;
-        near = 0f;
-        int cx = (int)MathF.Floor(x / Cell), cz = (int)MathF.Floor(z / Cell);
-        if (In(cx, cz) is not { } lake) return height;
-        float dx = x - lake.X, dz = z - lake.Z;
-        float r = Outline(lake, MathF.Atan2(dz, dx));
-        float d = MathF.Sqrt(dx * dx + dz * dz) / r;       // 1 on the outline
-        near = Math.Clamp((1.3f - d) / 0.3f, 0f, 1f);
-        if (d < Shore) level = lake.Level;
-        if (d >= 1f) return height;
-        inside = true;
-        // A bowl: deepest in the middle, rising to the level at the outline (and above it the banks as they were).
-        float bed = lake.Level - lake.Depth * (1f - d * d) + 1f;
-        return MathF.Min(height, bed);
-    }
-
-    /// <summary>The lake in cell (cx, cz), if it has one.</summary>
-    public Lake? In(int cx, int cz) => _cells.GetOrAdd(((long)cx << 32) ^ (uint)cz, _ => Make(cx, cz));
-
-    private Lake? Make(int cx, int cz)
-    {
-        var rng = new SplitMix64Rng(_seed ^ 0x1A4E5UL ^ (ulong)(uint)cx * 0x9E3779B97F4A7C15UL ^ (ulong)(uint)cz * 0xC2B2AE3D27D4EB4FUL);
-        if (rng.NextFloat01() * Odds >= 1f) return null;
-        float radius = MinRadius + (MaxRadius - MinRadius) * rng.NextFloat01();
-        float margin = radius * (1f + Wobble) * 1.3f + 4f;
-        float x = cx * Cell + margin + (Cell - 2f * margin) * rng.NextFloat01();
-        float z = cz * Cell + margin + (Cell - 2f * margin) * rng.NextFloat01();
-        var lake = new Lake(x, z, radius, 0, 0f, 6.28f * rng.NextFloat01(), 6.28f * rng.NextFloat01(), 6.28f * rng.NextFloat01());
-
-        // Round the rim: the land must be sure, and the terrain fairly level.
-        float low = float.MaxValue, high = float.MinValue;
-        for (int i = 0; i < RimSamples; i++)
+        int gx = FloorDiv(x, Step), gz = FloorDiv(z, Step);
+        int own = CellLevel(gx, gz);
+        if (own != int.MinValue) return own;
+        // Just past a lake's sampled cells the ground can still dip under its level between samples: fill those too.
+        for (int dz = -1; dz <= 1; dz++)
+        for (int dx = -1; dx <= 1; dx++)
         {
-            float a = i * MathF.Tau / RimSamples;
-            float r = Outline(lake, a) * 1.15f;
-            float sx = x + r * MathF.Cos(a), sz = z + r * MathF.Sin(a);
-            float h = _terrain.Height(sx, sz);
-            if (!OnLand(sx, sz)) return null;
-            low = MathF.Min(low, h); high = MathF.Max(high, h);
+            int l = CellLevel(gx + dx, gz + dz);
+            if (l != int.MinValue) return l;
         }
-        if (high - low > MaxRimRise || !OnLand(x, z)) return null;
-        float depth = 4f + radius * 0.12f + 4f * rng.NextFloat01();
-        return lake with { Level = (int)MathF.Floor(low) - 1, Depth = depth };
+        return int.MinValue;
     }
 
-    /// <summary>Whether the land's top piece nearest (x, z) is there: the live heart of the top row whose cell holds
-    /// the nearest heart point (see <see cref="HeartGrid.At"/>).</summary>
-    private bool OnLand(float x, float z)
+    private int CellLevel(int gx, int gz)
+    {
+        int tx = FloorDiv(gx, Core), tz = FloorDiv(gz, Core);
+        var levels = _tiles.GetOrAdd(((long)tx << 32) ^ (uint)tz, _ => Build(tx, tz));
+        return levels[(gx - tx * Core) + Core * (gz - tz * Core)];
+    }
+
+    /// <summary>Tile (tx, tz)'s lake level per sample cell of its core, int.MinValue where it is dry.</summary>
+    private int[] Build(int tx, int tz)
+    {
+        float x0 = tx * Tile - Margin + Step * 0.5f, z0 = tz * Tile - Margin + Step * 0.5f;
+        var height = new float[Window * Window];
+        for (int k = 0; k < Window; k++)
+        for (int i = 0; i < Window; i++)
+            height[i + Window * k] = _terrain.Height(x0 + i * Step, z0 + k * Step);
+
+        // Priority flood: from the window's edge inwards, lowest first, each cell filled to at least the level it was
+        // reached at, so each hollow fills to its lowest way out.
+        var filled = new float[Window * Window];
+        var done = new bool[Window * Window];
+        var queue = new PriorityQueue<int, float>();
+        for (int k = 0; k < Window; k++)
+        for (int i = 0; i < Window; i++)
+            if (i == 0 || k == 0 || i == Window - 1 || k == Window - 1)
+            {
+                int c = i + Window * k;
+                filled[c] = height[c]; done[c] = true; queue.Enqueue(c, height[c]);
+            }
+        while (queue.TryDequeue(out int c, out float level))
+        {
+            int ci = c % Window, ck = c / Window;
+            for (int n = 0; n < 4; n++)
+            {
+                int ni = ci + (n == 0 ? 1 : n == 1 ? -1 : 0), nk = ck + (n == 2 ? 1 : n == 3 ? -1 : 0);
+                if (ni < 0 || nk < 0 || ni >= Window || nk >= Window) continue;
+                int nc = ni + Window * nk;
+                if (done[nc]) continue;
+                done[nc] = true;
+                filled[nc] = MathF.Max(height[nc], level);
+                queue.Enqueue(nc, filled[nc]);
+            }
+        }
+
+        // Each hollow (cells filled over their ground, joined side by side) is a lake if it is deep and big enough and
+        // lies wholly in the core and on live land.
+        var levels = new int[Core * Core];
+        Array.Fill(levels, int.MinValue);
+        var seen = new bool[Window * Window];
+        var cells = new List<int>();
+        var stack = new Stack<int>();
+        var hearts = TopHearts(tx, tz);
+        for (int start = 0; start < Window * Window; start++)
+        {
+            if (seen[start] || filled[start] - height[start] < 0.01f) continue;
+            cells.Clear();
+            stack.Push(start); seen[start] = true;
+            bool inside = true;
+            float deepest = 0f;
+            while (stack.Count > 0)
+            {
+                int c = stack.Pop();
+                cells.Add(c);
+                int ci = c % Window, ck = c / Window;
+                if (ci <= Off || ck <= Off || ci >= Off + Core - 1 || ck >= Off + Core - 1) inside = false;
+                deepest = MathF.Max(deepest, filled[c] - height[c]);
+                for (int n = 0; n < 4; n++)
+                {
+                    int ni = ci + (n == 0 ? 1 : n == 1 ? -1 : 0), nk = ck + (n == 2 ? 1 : n == 3 ? -1 : 0);
+                    if (ni < 0 || nk < 0 || ni >= Window || nk >= Window) continue;
+                    int nc = ni + Window * nk;
+                    if (seen[nc] || filled[nc] - height[nc] < 0.01f) continue;
+                    seen[nc] = true; stack.Push(nc);
+                }
+            }
+            if (!inside || deepest < MinDepth || cells.Count < MinCells || cells.Count > MaxCells) continue;
+            bool onLand = true;
+            foreach (int c in cells)
+                if (!OnLand(hearts, x0 + (c % Window) * Step, z0 + (c / Window) * Step)) { onLand = false; break; }
+            if (!onLand) continue;
+            int lakeLevel = (int)MathF.Floor(filled[start]) - 1;
+            foreach (int c in cells) levels[(c % Window - Off) + Core * (c / Window - Off)] = lakeLevel;
+        }
+        return levels;
+    }
+
+    /// <summary>The top row's hearts round tile (tx, tz) (see <see cref="HeartGrid.At"/>).</summary>
+    private List<Heart> TopHearts(int tx, int tz)
     {
         float size = HeartGrid.Layers[0].CellSize;
-        int cx = (int)MathF.Floor(x / size), cz = (int)MathF.Floor(z / size);
+        int i0 = (int)MathF.Floor((tx * Tile - Margin) / size) - 1, i1 = (int)MathF.Floor(((tx + 1) * Tile + Margin) / size) + 1;
+        int k0 = (int)MathF.Floor((tz * Tile - Margin) / size) - 1, k1 = (int)MathF.Floor(((tz + 1) * Tile + Margin) / size) + 1;
+        var hearts = new List<Heart>();
+        for (int k = k0; k <= k1; k++)
+        for (int i = i0; i <= i1; i++)
+            hearts.Add(HeartGrid.At(_seed, 0, i, -1, k));
+        return hearts;
+    }
+
+    /// <summary>Whether the land's top piece nearest (x, z) is there: the nearest of the top row's hearts is alive.</summary>
+    private static bool OnLand(List<Heart> hearts, float x, float z)
+    {
         float best = float.MaxValue;
         bool alive = false;
-        for (int j = cz - 1; j <= cz + 1; j++)
-        for (int i = cx - 1; i <= cx + 1; i++)
+        foreach (var h in hearts)
         {
-            var heart = HeartGrid.At(_seed, 0, i, -1, j);
-            float d = (heart.X - x) * (heart.X - x) + (heart.Z - z) * (heart.Z - z);
-            if (d < best) { best = d; alive = heart.Alive; }
+            float d = (h.X - x) * (h.X - x) + (h.Z - z) * (h.Z - z);
+            if (d < best) { best = d; alive = h.Alive; }
         }
         return alive;
     }
 
-    private static float Outline(in Lake lake, float angle) =>
-        lake.Radius * (1f + Wobble * (0.5f * MathF.Sin(2f * angle + lake.P1) + 0.3f * MathF.Sin(3f * angle + lake.P2)
-                                      + 0.2f * MathF.Sin(5f * angle + lake.P3)));
+    private static int FloorDiv(int a, int b) => a >= 0 ? a / b : (a - b + 1) / b;
 }

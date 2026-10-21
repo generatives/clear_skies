@@ -115,9 +115,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     private readonly Biome[] _biome = new Biome[S * S * MaxSpans]; // per span top
     private readonly float[] _dry = new float[S * S * MaxSpans];   // per span top: how near a desert (Biomes.Dry)
     private readonly float[] _height = new float[S * S];
-    private readonly int[] _level = new int[S * S];         // a lake's level here, out to its shore (Lakes.Carve)
-    private readonly bool[] _inLake = new bool[S * S];      // within a lake's outline: filled up to the level
-    private readonly float[] _lakeNear = new float[S * S];  // 0-1: how near a lake (its land is made whole, see BuildProfile)
+    private readonly int[] _level = new int[S * S];         // the level of a lake here or beside, or int.MinValue (Lakes.Level)
     private readonly float[] _bottomAt = new float[S * S];
 
     // The hearts around the chunk column being profiled, per layer: cells from (_cx0, _cy0, _cz0), _nx by _ny by _nz of
@@ -160,7 +158,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                     data.Set(lx, lo - originY, lz, crystal);
 
                 // A lake over the top span: water (lava in the volcanic wastes, iced over in tundra) up to its level on a
-                // bed of sand and gravel, and a sandy shore round it.
+                // bed of sand and gravel, with a sandy shore.
                 bool top = s == _spanCount[col] - 1;
                 int level = top ? _level[col] : int.MinValue;
                 if (level != int.MinValue && hi <= level + 2)
@@ -170,17 +168,14 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                     if (biome == Biome.Volcanic) bed = BlockId.Ash;
                     for (int y = System.Math.Max(hi - 1, originY); y <= System.Math.Min(hi, originY + S - 1); y++)
                         data.Set(lx, y - originY, lz, bed);
-                    if (_inLake[col])
+                    var liquid = biome == Biome.Volcanic ? BlockId.Lava : BlockId.Water;
+                    for (int y = System.Math.Max(hi + 1, originY); y <= System.Math.Min(level, originY + S - 1); y++)
                     {
-                        var liquid = biome == Biome.Volcanic ? BlockId.Lava : BlockId.Water;
-                        for (int y = System.Math.Max(hi + 1, originY); y <= System.Math.Min(level, originY + S - 1); y++)
-                        {
-                            var b = y < level ? liquid : biome == Biome.Tundra ? BlockId.Ice
-                                  : liquid == BlockId.Lava && Trees.Hash(x, y, z, _seed ^ 0x1A7A) % LavaGlowOdds == 0 ? BlockId.GlowingLava : liquid;
-                            data.Set(lx, y - originY, lz, b);
-                        }
+                        var b = y < level ? liquid : biome == Biome.Tundra ? BlockId.Ice
+                              : liquid == BlockId.Lava && Trees.Hash(x, y, z, _seed ^ 0x1A7A) % LavaGlowOdds == 0 ? BlockId.GlowingLava : liquid;
+                        data.Set(lx, y - originY, lz, b);
                     }
-                    if (_inLake[col] && level > hi) continue; // nothing grows under water
+                    if (level > hi) continue; // nothing grows under water
                 }
 
                 // What grows on the span's top, in the open cell above it.
@@ -240,8 +235,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         {
             int col = lx + S * lz;
             float wx = x0 + lx, wz = z0 + lz;
-            float carved = _lakes.Carve(wx, wz, _terrain.Height(wx, wz), out _level[col], out _inLake[col], out _lakeNear[col]);
-            _height[col] = MathF.Min(carved, HeartGrid.WorldTop - 1);
+            _height[col] = MathF.Min(_terrain.Height(wx, wz), HeartGrid.WorldTop - 1);
+            _level[col] = _lakes.Level((int)wx, (int)wz);
             _bottomAt[col] = HeartGrid.LowestBottom + BottomRoughness * (0.5f + 0.5f * _bottom.GetNoise(wx, wz));
             top = MathF.Max(top, _height[col]);
         }
@@ -299,7 +294,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             }
             // Round a lake the land is made whole down to LakePlug blocks under the surface, so no crack between pieces
             // of land lets the water out.
-            if (_lakeNear[col] > 0f)
+            if (_level[col] != int.MinValue)
             {
                 int last = spans - 1;
                 if (spans > 0 && _spans[col * MaxSpans + last].Hi >= yTop - LakePlug)

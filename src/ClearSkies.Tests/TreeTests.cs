@@ -65,30 +65,37 @@ public class TreeTests
     }
 
     [Fact]
-    public void Lakes_lie_below_their_banks_in_carved_bowls()
+    public void Lakes_fill_hollows_below_their_banks()
     {
         var lakes = Lakes.For(1337);
         var terrain = ContinentTerrain.For(1337);
-        int found = 0;
-        for (int cz = -30; cz < 30 && found < 5; cz++)
-        for (int cx = -30; cx < 30 && found < 5; cx++)
+        int wet = 0;
+        // Around the spawn island of this seed.
+        for (int z = -7250; z < -5250 && wet < 50; z += 16)
+        for (int x = 10250; x < 12250 && wet < 50; x += 16)
         {
-            if (lakes.In(cx, cz) is not { } lake) continue;
-            found++;
-            // Water fills the middle: the bed is under the level.
-            float bed = lakes.Carve(lake.X, lake.Z, terrain.Height(lake.X, lake.Z), out int level, out bool inside, out _);
-            Assert.True(inside && level == lake.Level && bed < level);
-            // And round it no water, the banks standing above its level.
+            int level = lakes.Level(x, z);
+            if (level == int.MinValue) continue;
+            float h = terrain.Height(x, z);
+            if (h > level) continue; // a shore column beside the water
+            wet++;
+            Assert.True(level - h < 40); // a shallow-ish hollow, not water hanging over a drop
+            // Banks rise above the water somewhere around it, so it sits in a bowl.
+            float rim = float.MinValue;
             for (int i = 0; i < 16; i++)
             {
-                float a = i * MathF.Tau / 16, r = lake.Radius * 1.6f;
-                float x = lake.X + r * MathF.Cos(a), z = lake.Z + r * MathF.Sin(a);
-                lakes.Carve(x, z, terrain.Height(x, z), out _, out bool wet, out _);
-                Assert.False(wet);
-                Assert.True(terrain.Height(x, z) > lake.Level - 20); // not a lake hanging over a drop
+                float a = i * MathF.Tau / 16;
+                for (int r = 8; r <= 400; r += 8)
+                {
+                    float bx = x + r * MathF.Cos(a), bz = z + r * MathF.Sin(a);
+                    if (lakes.Level((int)bx, (int)bz) != int.MinValue) continue;
+                    rim = MathF.Max(rim, terrain.Height(bx, bz));
+                    break;
+                }
             }
+            Assert.True(rim > level);
         }
-        Assert.True(found > 0);
+        Assert.True(wet > 0);
     }
 
     [Fact]
