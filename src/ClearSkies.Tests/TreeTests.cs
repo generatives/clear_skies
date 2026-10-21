@@ -43,6 +43,28 @@ public class TreeTests
     }
 
     [Fact]
+    public void Cold_and_deep_biomes_have_their_own_ground_and_trees()
+    {
+        Assert.Equal(Biome.Tundra, Biomes.Pick(0.05f, 0.5f));
+        Assert.Equal(Biome.Steppe, Biomes.Pick(0.15f, 0.05f));
+        Assert.Equal(Biome.Jungle, Biomes.Pick(1.05f, 0.8f));
+        Assert.Equal(Biome.Volcanic, Biomes.Pick(1.4f, 0.3f));
+
+        Assert.Equal(BlockId.SnowyDirt, ContinentTerrain.Block(600, 600, 0f, 0.2f, 0f, Biome.Tundra));
+        Assert.Equal(BlockId.Ice, ContinentTerrain.Block(600, 600, 0f, 0.9f, 0f, Biome.Tundra));
+        Assert.Equal(BlockId.Gravel, ContinentTerrain.Block(600, 600, 0f, 0.2f, 0f, Biome.Steppe));
+        Assert.Equal(BlockId.Lava, ContinentTerrain.Block(100, 100, 0f, 0.8f, 0f, Biome.Volcanic));
+        Assert.Equal(BlockId.Ash, ContinentTerrain.Block(100, 100, 0f, 0.5f, 0f, Biome.Volcanic));
+        Assert.True(BlockRegistry.Get(BlockId.GlowingLava).LightEmission > 0);
+        Assert.Equal(0, BlockRegistry.Get(BlockId.Lava).LightEmission);
+
+        static Trees.Kind[] Grown(Biome biome) => Enumerable.Range(0, 20000)
+            .Select(i => Trees.At(BlockId.Grass, i, 500, -i * 7, 0.8f, 99, biome)).Where(k => k != Trees.Kind.None).Distinct().ToArray();
+        Assert.Equal(new[] { Trees.Kind.Jungle }, Grown(Biome.Jungle));
+        Assert.Equal(new[] { Trees.Kind.Pine }, Grown(Biome.Tundra));
+    }
+
+    [Fact]
     public void Cave_crystals_glow_and_come_in_sparse_clusters()
     {
         Assert.True(BlockRegistry.Get(BlockId.AmberCrystal).LightEmission > 0);
@@ -108,6 +130,7 @@ public class TreeTests
     [InlineData(Trees.Kind.Pine)]
     [InlineData(Trees.Kind.Cactus)]
     [InlineData(Trees.Kind.Birch)]
+    [InlineData(Trees.Kind.Jungle)]
     public void A_grown_tree_stands_on_its_top_within_its_reach(Trees.Kind kind)
     {
         for (ulong h = 0; h < 50; h++)

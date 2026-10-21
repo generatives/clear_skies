@@ -13,7 +13,7 @@ namespace ClearSkies.Game.Generation;
 /// </summary>
 public static class Trees
 {
-    public enum Kind : byte { None, Oak, Pine, Cactus, Birch }
+    public enum Kind : byte { None, Oak, Pine, Cactus, Birch, Jungle }
 
     /// <summary>How far a tree reaches out from its trunk, at most.</summary>
     public const int Reach = 3;
@@ -37,12 +37,20 @@ public static class Trees
         {
             case BlockId.Grass:
             {
-                if (top < ContinentTerrain.DryLine) return Kind.None;
+                if (top < ContinentTerrain.DryLine && biome != Biome.Jungle) return Kind.None;
+                switch (biome)
+                {
+                    case Biome.Jungle: return r < 0.004f + 0.09f * Grove(woods) ? Kind.Jungle : Kind.None;
+                    case Biome.Tundra: return r < 0.0005f + 0.012f * Grove(woods) ? Kind.Pine : Kind.None;
+                    case Biome.Steppe: return r < 0.0003f ? Kind.Pine : Kind.None;
+                }
                 if (r >= 0.001f + 0.03f * Grove(woods)) return Kind.None;
                 return pick < Smoothstep(PineStart, PineFull, top) ? Kind.Pine : biome == Biome.Autumn ? Kind.Birch : Kind.Oak;
             }
             case BlockId.Snow:
                 return r < 0.001f + 0.02f * Grove(woods) ? Kind.Pine : Kind.None;
+            case BlockId.SnowyDirt:
+                return r < 0.0005f + 0.008f * Grove(woods) ? Kind.Pine : Kind.None;
             case BlockId.Sand:
                 return r < 0.001f + 0.012f * Grove(woods) ? Kind.Cactus : Kind.None;
             case BlockId.RedSand:
@@ -106,6 +114,29 @@ public static class Trees
                 }
                 Set(data, originY, x, crown + 1, z, BlockId.AutumnLeaves);
                 Set(data, originY, x, crown + 2, z, BlockId.AutumnLeaves);
+                break;
+            }
+            case Kind.Jungle:
+            {
+                // Tall, with a broad flat canopy: a trunk 8-10 tall under a ragged disc of leaves Reach wide, a smaller
+                // disc over it and a plus on top.
+                int height = 8 + (int)((h >> 48) % 3);
+                int crown = y0 + height - 1;
+                for (int y = y0; y <= crown; y++) Set(data, originY, x, y, z, BlockId.Log);
+                int bit = 0;
+                for (int y = crown - 1; y <= crown + 1; y++)
+                {
+                    int reach = y < crown ? Reach : y == crown ? 2 : 1;
+                    float within = reach * reach + 0.5f;
+                    for (int dz = -reach; dz <= reach; dz++)
+                    for (int dx = -reach; dx <= reach; dx++)
+                    {
+                        int d2 = dx * dx + dz * dz;
+                        if (d2 > within || (y > crown && d2 > 1)) continue;
+                        if (d2 > (reach - 1) * (reach - 1) && Bit(h, bit++) && Bit(h, bit + 7)) continue; // a ragged rim
+                        Set(data, originY, x + dx, y, z + dz, BlockId.Leaves);
+                    }
+                }
                 break;
             }
             case Kind.Pine:

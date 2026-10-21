@@ -51,6 +51,9 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     // A top is bare (see ContinentTerrain.Block) to Shaded if land lies over it within ShadeReach blocks.
     private const float Shaded = 0.75f, ShadeReach = 250f;
 
+    /// <summary>One lava block in this many glows.</summary>
+    private const int LavaGlowOdds = 40;
+
     /// <summary>How far above <see cref="HeartGrid.LowestBottom"/> the world's rough bottom reaches.</summary>
     private const float BottomRoughness = 30f;
 
@@ -135,8 +138,13 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 for (int y = y0; y <= y1; y++)
                     data.Set(lx, y - originY, lz, ContinentTerrain.Block(y, hi, _strata[col], _patch[col], _bare[col * MaxSpans + s], _biome[col * MaxSpans + s], _dry[col * MaxSpans + s]));
 
-                // Crystals in caves: in a floor under other land, and in a ceiling over another span.
                 int x = pos.X * S + lx, z = pos.Z * S + lz;
+                // Some of a lava pool glows: a lamp each, so only one block in LavaGlowOdds.
+                if (hi >= originY && hi < originY + S && data.Get(lx, hi - originY, lz) == BlockId.Lava
+                    && Trees.Hash(x, hi, z, _seed ^ 0x1A7A) % LavaGlowOdds == 0)
+                    data.Set(lx, hi - originY, lz, BlockId.GlowingLava);
+
+                // Crystals in caves: in a floor under other land, and in a ceiling over another span.
                 var crystal = Crystals.For(_biome[col * MaxSpans + s]);
                 if (_bare[col * MaxSpans + s] == Shaded && hi >= originY && hi < originY + S && Crystals.At(x, hi, z, _seed))
                     data.Set(lx, hi - originY, lz, crystal);

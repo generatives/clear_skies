@@ -165,8 +165,10 @@ public sealed class ContinentTerrain
     /// <summary>The block at height y in a column whose solid span ends at <paramref name="top"/>: cover by the top's
     /// height (whether it is the terrain surface or a support's own top; those are to be decorated differently
     /// later), then rock layers (<paramref name="strata"/> from <see cref="Strata"/>, <paramref name="patch"/> from
-    /// <see cref="Patch"/>). <paramref name="bare"/>, 0-1, is how little the top is out in the open. Deserts are sand
-    /// and badlands red sand over red rock (see <see cref="Biomes"/>), under the same snow and bare rock up high.</summary>
+    /// <see cref="Patch"/>). <paramref name="bare"/>, 0-1, is how little the top is out in the open. Deserts are sand,
+    /// badlands red sand over red rock, tundra grass among snowy dirt and ice, steppe grass among gravel and the
+    /// volcanic wastes ash with pools of lava (see <see cref="Biomes"/>), all under the same snow and bare rock up
+    /// high; jungle has temperate ground.</summary>
     public static BlockId Block(int y, int top, float strata, float patch, float bare, Biome biome = Biome.Temperate, float dry = 0f)
     {
         int depth = top - y;
@@ -179,6 +181,23 @@ public sealed class ContinentTerrain
         if (snowy) { if (depth < 3) return BlockId.Snow; }
         else if (!rocky && biome == Biome.Desert) { if (depth < 5) return BlockId.Sand; }
         else if (!rocky && biome == Biome.Badlands) { if (depth < 3) return BlockId.RedSand; }
+        else if (!rocky && biome == Biome.Tundra)
+        {
+            // Grass between patches of snow-crusted dirt, frozen over in the hollows of the patch field.
+            if (depth == 0) return patch < 0.4f ? BlockId.SnowyDirt : patch > 0.85f ? BlockId.Ice : BlockId.Grass;
+            if (depth < 3) return BlockId.Dirt;
+        }
+        else if (!rocky && biome == Biome.Steppe)
+        {
+            if (depth == 0) return patch < 0.35f ? BlockId.Gravel : BlockId.Grass;
+            if (depth < 3) return BlockId.Dirt;
+        }
+        else if (!rocky && biome == Biome.Volcanic)
+        {
+            // Ash, with pools of lava where the patch field is high.
+            if (depth == 0 && patch > 0.72f) return BlockId.Lava;
+            if (depth < 3) return BlockId.Ash;
+        }
         else if (!rocky)
         {
             // Sand where the patch field is under a threshold that falls from mostly sand at SandLine to none by
@@ -243,7 +262,10 @@ public sealed class ContinentTerrain
                 if (r >= 0.008f) return BlockId.Air;
                 return pick < Math.Clamp((RockFull - y) / (RockFull - RockStart), 0f, 1f) ? BlockId.MossyPebbles : BlockId.Pebbles;
             case BlockId.Snow:
+            case BlockId.SnowyDirt:
                 return r < 0.002f ? BlockId.Pebbles : BlockId.Air;
+            case BlockId.Gravel:
+                return r < 0.01f + 0.1f * stand ? BlockId.DryGrass : r > 0.995f ? BlockId.Pebbles : BlockId.Air;
             default:
                 return BlockId.Air;
         }

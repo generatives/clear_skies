@@ -53,4 +53,13 @@ public enum BlockId : byte
     // Glowing crystals set into cave floors and ceilings.
     AmberCrystal  = 39,
     GoldCrystal   = 40,
+
+    // More biomes: tundra's snowy dirt and ice, steppe's gravel, the volcanic wastes' ash and lava (only some of
+    // which glows, so a lava pool isn't hundreds of lamps).
+    SnowyDirt     = 41,
+    Ice           = 42,
+    Gravel        = 43,
+    Ash           = 44,
+    Lava          = 45,
+    GlowingLava   = 46,
 }

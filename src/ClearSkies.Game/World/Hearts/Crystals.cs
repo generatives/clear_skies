@@ -31,7 +31,7 @@ public static class Crystals
 
     /// <summary>Red crystals in hot biomes, gold ones elsewhere (not blue: from afar it reads as holes to the sky).</summary>
     public static BlockId For(Biome biome) =>
-        biome is Biome.Desert or Biome.Badlands ? BlockId.AmberCrystal : BlockId.GoldCrystal;
+        biome is Biome.Desert or Biome.Badlands or Biome.Volcanic ? BlockId.AmberCrystal : BlockId.GoldCrystal;
 
     private static int FloorDiv(int a, int b) => a >= 0 ? a / b : (a - b + 1) / b;
 }
