@@ -24,6 +24,11 @@ public sealed class Lakes
     /// than the wear, the rounding of its rim and the wobble of its outline together.</summary>
     private const float FaceMargin = 64f;
 
+    // A lake sits in open ground, not perched on a slope or by a cliff: no ground within Perch cells of it may be
+    // more than PerchDrop blocks under its level (a drain counts as a drop; its own bed, filled to its level, not).
+    private const int Perch = 8;
+    private const float PerchDrop = 10f;
+
     /// <summary>The ground of a drain: lower than any land, so whatever reaches it spills out.</summary>
     private const float Drain = -1e6f;
 
@@ -142,6 +147,17 @@ public sealed class Lakes
                 }
             }
             if (!inside || deepest < MinDepth || cells.Count < MinCells || cells.Count > MaxCells) continue;
+            int lakeLevel0 = (int)MathF.Floor(filled[start]) - 1;
+            bool perched = false;
+            foreach (int c in cells)
+            {
+                int ci = c % Window, ck = c / Window;
+                for (int k = ck - Perch; k <= ck + Perch && !perched; k++)
+                for (int i = ci - Perch; i <= ci + Perch; i++)
+                    if (filled[i + Window * k] < lakeLevel0 - PerchDrop) { perched = true; break; }
+                if (perched) break;
+            }
+            if (perched) continue;
             bool dry = false;
             foreach (int c in cells)
                 if (Dry(x0 + (c % Window) * Step, z0 + (c / Window) * Step, height[c])) { dry = true; break; }
