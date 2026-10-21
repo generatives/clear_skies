@@ -104,6 +104,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     private readonly float[] _patch = new float[S * S];
     private readonly float[] _flora = new float[S * S], _kind = new float[S * S], _woods = new float[S * S];
     private readonly float[] _bare = new float[S * S * MaxSpans];
+    private readonly Biome[] _biome = new Biome[S * S * MaxSpans]; // per span top
+    private readonly float[] _dry = new float[S * S * MaxSpans];   // per span top: how near a desert (Biomes.Dry)
     private readonly float[] _height = new float[S * S];
     private readonly float[] _bottomAt = new float[S * S];
 
@@ -131,13 +133,21 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 var (lo, hi) = _spans[col * MaxSpans + s];
                 int y0 = System.Math.Max(lo, originY), y1 = System.Math.Min(hi, originY + S - 1);
                 for (int y = y0; y <= y1; y++)
-                    data.Set(lx, y - originY, lz, ContinentTerrain.Block(y, hi, _strata[col], _patch[col], _bare[col * MaxSpans + s]));
+                    data.Set(lx, y - originY, lz, ContinentTerrain.Block(y, hi, _strata[col], _patch[col], _bare[col * MaxSpans + s], _biome[col * MaxSpans + s], _dry[col * MaxSpans + s]));
+
+                // Crystals in caves: in a floor under other land, and in a ceiling over another span.
+                int x = pos.X * S + lx, z = pos.Z * S + lz;
+                var crystal = Crystals.For(_biome[col * MaxSpans + s]);
+                if (_bare[col * MaxSpans + s] == Shaded && hi >= originY && hi < originY + S && Crystals.At(x, hi, z, _seed))
+                    data.Set(lx, hi - originY, lz, crystal);
+                if (s > 0 && lo - _spans[col * MaxSpans + s - 1].Hi < ShadeReach && lo >= originY && lo < originY + S && Crystals.At(x, lo, z, _seed))
+                    data.Set(lx, lo - originY, lz, crystal);
 
                 // What grows on the span's top, in the open cell above it.
                 int above = hi + 1;
                 if (above < originY || above >= originY + S) continue;
                 if (s + 1 < _spanCount[col] && _spans[col * MaxSpans + s + 1].Lo <= above) continue;
-                var ground = ContinentTerrain.Block(hi, hi, _strata[col], _patch[col], _bare[col * MaxSpans + s]);
+                var ground = ContinentTerrain.Block(hi, hi, _strata[col], _patch[col], _bare[col * MaxSpans + s], _biome[col * MaxSpans + s], _dry[col * MaxSpans + s]);
                 var plant = ContinentTerrain.Plant(ground, pos.X * S + lx, above, pos.Z * S + lz, _flora[col], _kind[col], _seed);
                 if (plant != BlockId.Air) data.Set(lx, above - originY, lz, plant);
             }
@@ -153,9 +163,10 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 int hi = _spans[col * MaxSpans + s].Hi;
                 if (hi + Trees.MaxHeight < originY || hi >= originY + S) continue;
                 if (s + 1 < _spanCount[col] && _spans[col * MaxSpans + s + 1].Lo <= hi + Trees.MaxHeight + 1) continue;
-                var ground = ContinentTerrain.Block(hi, hi, _strata[col], _patch[col], _bare[col * MaxSpans + s]);
+                var biome = _biome[col * MaxSpans + s];
+                var ground = ContinentTerrain.Block(hi, hi, _strata[col], _patch[col], _bare[col * MaxSpans + s], biome, _dry[col * MaxSpans + s]);
                 int x = pos.X * S + lx, z = pos.Z * S + lz;
-                var kind = Trees.At(ground, x, hi, z, _woods[col], _seed);
+                var kind = Trees.At(ground, x, hi, z, _woods[col], _seed, biome);
                 if (kind != Trees.Kind.None) Trees.Grow(data, originY, kind, lx, hi, lz, Trees.Hash(x, hi, z, _seed));
             }
         }
@@ -248,11 +259,15 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             _flora[col] = _terrain.Flora(wx, wz);
             _woods[col] = _terrain.Woods(wx, wz);
             _kind[col] = _terrain.Kind(wx, wz);
+            float heat = _terrain.Heat(wx, wz), wet = _terrain.Wet(wx, wz);
             for (int sp = 0; sp < spans; sp++)
             {
                 int hi = _spans[col * MaxSpans + sp].Hi;
                 float bare = sp + 1 < spans && _spans[col * MaxSpans + sp + 1].Lo - hi < ShadeReach ? Shaded : 0f;
                 _bare[col * MaxSpans + sp] = bare;
+                float h = Biomes.Heat(hi, heat);
+                _biome[col * MaxSpans + sp] = Biomes.Pick(h, wet);
+                _dry[col * MaxSpans + sp] = Biomes.Dry(h, wet, Biomes.SandBlend);
             }
         }
     }

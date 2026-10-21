@@ -1,3 +1,4 @@
+using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Math;
 using ClearSkies.Engine.Voxels;
 using Silk.NET.Core.Native;
@@ -29,7 +30,8 @@ const AO_MIN: f32 = 0.15;             // darkest ambient-occluded corner (1 = no
                                       // 0.45 is the subtler default.
 const NO_LIGHTMAP: u32 = 0xFFFFFFFFu; // a quad without a light map (see VSOut.lm)
 
-// sunDir.w: sun strength (SunLight.Strength). lightParams.x, .y: unused (ray AO is in the voxel light), .z: ambient
+// sunDir.w: sun strength (SunLight.Strength). lightParams.x: unused (ray AO is in the voxel light), .y: the climate
+// tint volume's origin x (lightParams2.w its z; see climateTinted), .z: ambient
 // (0-1), .w: 1 on an sRGB surface (see lin). camPos.xyz: camera world position. fog.xy: the world's fog start/end
 // (horizontal), fog.zw: the cloud layer's (see CloudLayer), in blocks from the camera. zenith/horizon.rgb: the sky
 // gradient (see SkySettings). horizon.w: the distance haze's strength (0-1), haze.rgb its colour, haze.w its distance.
@@ -45,6 +47,25 @@ struct Camera {
 // Per block type (indexed by BlockId; see ChunkQuad.BuildBlockTable): its colour (sRGB, shown on untextured blocks) and
 // opacity (1 unless translucent). Chunk quads store only their block.
 @group(0) @binding(1) var<uniform> blockTable: array<vec4<f32>, 256>;
+// The climate tint around the camera (ClimateTintSystem): x, z, then y across the texture's width, height and depth, rgb its
+// colour (sRGB) and a its strength, sampled with linear filtering so it blends smoothly between texels.
+@group(0) @binding(2) var tintTex: texture_3d<f32>;
+@group(0) @binding(3) var tintSamp: sampler;
+const TINT_EXTENT_XZ: f32 = " + (ClimateTintSystem.SizeXZ * ClimateTintSystem.CellXZ) + @".0;
+const TINT_EXTENT_Y: f32 = " + (ClimateTintSystem.SizeY * ClimateTintSystem.CellY) + @".0;
+const TINT_BOTTOM: f32 = " + ClimateTintSystem.BottomY + @".0;
+
+// A tinted face's base colour (linear) at world position p: as bright as before, shifted towards the tint's colour by
+// its strength there.
+fn climateTinted(base: vec3<f32>, p: vec3<f32>) -> vec3<f32> {
+    let uvw = vec3<f32>((p.x - camera.lightParams.y) / TINT_EXTENT_XZ, (p.z - camera.lightParams2.w) / TINT_EXTENT_XZ,
+                        (p.y - TINT_BOTTOM) / TINT_EXTENT_Y);
+    let t = textureSampleLevel(tintTex, tintSamp, uvw, 0.0);
+    let luma = vec3<f32>(0.2126, 0.7152, 0.0722);
+    let colour = lin(t.rgb);
+    let shifted = colour * (dot(base, luma) / max(dot(colour, luma), 0.001));
+    return mix(base, shifted, t.a);
+}
 
 // Authored colours (vertex colours, sky, haze, clouds, the cloud sea) are display (sRGB) values. On an sRGB surface
 // the shaders work in linear light and the output is encoded on write, so they're converted to linear first; textures
@@ -377,7 +398,7 @@ fn chunkVertex(d: ChunkDraw, quad: vec2<u32>, corner: u32) -> VSOut {
         cross = vec4<i32>(vec3<i32>(position), 1);
         let h = cellHash(d.chunk * 32 + cross.xyz);
         let q = mixHash(h ^ (face * 0x9e3779b9u));
-        let loose = blockTable[c & 255u].a;
+        let loose = blockTable[c & 255u].a % 2.0; // less the tint flags (see below)
         let turn = f32(h & 1023u) * (6.2831853 / 1024.0) + loose * (f32(q & 1023u) / 1023.0 - 0.5) * 0.87;
         let nudge = (vec2<f32>(f32((h >> 10u) & 255u), f32((h >> 18u) & 255u)) / 255.0 - 0.5) * 0.4
                   + loose * (vec2<f32>(f32((q >> 10u) & 255u), f32((q >> 18u) & 255u)) / 255.0 - 0.5) * 0.16;
@@ -394,6 +415,10 @@ fn chunkVertex(d: ChunkDraw, quad: vec2<u32>, corner: u32) -> VSOut {
     let layerBits = (a >> 21u) & 255u;
     let layer = select(f32(layerBits), -1.0, layerBits == 255u);
     let block = blockTable[c & 255u];
+    // Its alpha is the opacity plus 2 if the block's top takes the climate tint, 4 if all its faces do.
+    let tintAll = block.a >= 3.5;
+    let tintTop = !tintAll && block.a >= 1.5;
+    let opacity = block.a - select(select(0.0, 2.0, tintTop), 4.0, tintAll);
 
     var o: VSOut;
     let world     = d.model * vec4<f32>(position, 1.0);
@@ -404,12 +429,13 @@ fn chunkVertex(d: ChunkDraw, quad: vec2<u32>, corner: u32) -> VSOut {
     o.localPos    = position;
     o.localNormal = normal;
     o.uv          = vec3<f32>(uv2, layer);
-    o.alpha       = block.a;
+    o.alpha       = opacity;
     o.cross       = cross;
     o.cg          = vec4<i32>(d.chunk, d.grid);
     // The quad's light map (ChunkQuad.LightOffset), unless it has none (a cross block's, or past a huge mesh's 16 bits).
     let lightOffset = ((c >> 9u) & 0x7FFFu) | ((c >> 31u) << 15u);
-    o.lm          = vec4<u32>(NO_LIGHTMAP, w, h, 0u);
+    // lm.w: whether this face takes the climate tint (see climateTinted).
+    o.lm          = vec4<u32>(NO_LIGHTMAP, w, h, select(0u, 1u, tintAll || (tintTop && face == 2u)));
     if (face < 6u && lightOffset != 0xFFFFu && d.lightBase != NO_LIGHTMAP) { o.lm.x = 2u * (d.lightBase + lightOffset); }
     o.quv         = vec2<f32>(cu, cv);
     return o;
@@ -554,7 +580,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 // Opaque chunk faces.
 @fragment
 fn fs_chunk(in: VSOut) -> @location(0) vec4<f32> {
-    return vec4<f32>(shadeBlock(in, blockColor(in).rgb, false, false), 1.0);
+    var base = blockColor(in).rgb;
+    if (in.lm.w != 0u) { base = climateTinted(base, in.worldPos); }
+    return vec4<f32>(shadeBlock(in, base, false, false), 1.0);
 }
 
 // Translucent blocks' faces (see RenderLayer.Translucent), alpha-blended over the opaque world: lit like fs_main, with
@@ -588,6 +616,7 @@ fn fs_cutout_depth(in: VSOut) -> @location(0) vec4<f32> {
 @fragment
 fn fs_cutout_shaded(in: VSOut) -> @location(0) vec4<f32> {
     var base = blockColor(in).rgb;
+    if (in.lm.w != 0u) { base = climateTinted(base, in.worldPos); }
     if (in.cross.w != 0) { base *= plantTint(in.cg.xyz * 32 + in.cross.xyz); }
     return vec4<f32>(shadeBlock(in, base, true, false), 1.0);
 }
@@ -876,6 +905,13 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
 
     private BindGroup* _cameraBindGroup;
     private BindGroup* _hudCameraBindGroup;
+
+    // The climate tint volume (ClimateTintSystem), bound beside the camera; zero (no tint) until the game submits one.
+    private Texture*     _tintTexture;
+    private TextureView* _tintView;
+    private Sampler*     _tintSampler;
+    private float        _tintOriginX, _tintOriginZ;
+    private (float X, float Z, byte[] Texels)? _pendingTint; // the next climate tint volume, uploaded with the next camera
     private BindGroup* _modelBindGroup;
 
     // Group 2: the shared voxel storage. Rebuilt when the store's buffers are replaced (pool growth).
@@ -992,7 +1028,7 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
             Visibility = ShaderStage.Vertex | ShaderStage.Fragment, // fragment reads sunDir
             Buffer = new BufferBindingLayout { Type = BufferBindingType.Uniform, HasDynamicOffset = false, MinBindingSize = CameraSize },
         };
-        BindGroupLayoutEntry* camEntries = stackalloc BindGroupLayoutEntry[2];
+        BindGroupLayoutEntry* camEntries = stackalloc BindGroupLayoutEntry[4];
         camEntries[0] = camEntry;
         camEntries[1] = new BindGroupLayoutEntry
         {
@@ -1000,7 +1036,19 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
             Visibility = ShaderStage.Vertex, // chunk quads' block colours and opacities
             Buffer = new BufferBindingLayout { Type = BufferBindingType.Uniform, HasDynamicOffset = false, MinBindingSize = BlockTableBytes },
         };
-        var camDesc = new BindGroupLayoutDescriptor { EntryCount = 2, Entries = camEntries };
+        camEntries[2] = new BindGroupLayoutEntry
+        {
+            Binding    = 2, // the climate tint volume (ClimateTintSystem)
+            Visibility = ShaderStage.Fragment,
+            Texture    = new TextureBindingLayout { SampleType = TextureSampleType.Float, ViewDimension = TextureViewDimension.Dimension3D, Multisampled = false },
+        };
+        camEntries[3] = new BindGroupLayoutEntry
+        {
+            Binding    = 3,
+            Visibility = ShaderStage.Fragment,
+            Sampler    = new SamplerBindingLayout { Type = SamplerBindingType.Filtering },
+        };
+        var camDesc = new BindGroupLayoutDescriptor { EntryCount = 4, Entries = camEntries };
         _cameraLayout = _api.DeviceCreateBindGroupLayout(_ctx.Device, &camDesc);
 
         var modelEntry = new BindGroupLayoutEntry
@@ -1203,14 +1251,17 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
 
     private void CreateBindGroups()
     {
-        BindGroupEntry* camEntries = stackalloc BindGroupEntry[2];
+        CreateTintVolume();
+        BindGroupEntry* camEntries = stackalloc BindGroupEntry[4];
         camEntries[0] = new BindGroupEntry { Binding = 0, Buffer = _cameraBuffer.Handle, Offset = 0, Size = CameraSize };
         camEntries[1] = new BindGroupEntry { Binding = 1, Buffer = _blockTable.Handle, Offset = 0, Size = BlockTableBytes };
-        var camDesc = new BindGroupDescriptor { Layout = _cameraLayout, EntryCount = 2, Entries = camEntries };
+        camEntries[2] = new BindGroupEntry { Binding = 2, TextureView = _tintView };
+        camEntries[3] = new BindGroupEntry { Binding = 3, Sampler = _tintSampler };
+        var camDesc = new BindGroupDescriptor { Layout = _cameraLayout, EntryCount = 4, Entries = camEntries };
         _cameraBindGroup = _api.DeviceCreateBindGroup(_ctx.Device, &camDesc);
 
         camEntries[0] = new BindGroupEntry { Binding = 0, Buffer = _hudCameraBuffer.Handle, Offset = 0, Size = CameraSize };
-        var hudCamDesc  = new BindGroupDescriptor { Layout = _cameraLayout, EntryCount = 2, Entries = camEntries };
+        var hudCamDesc  = new BindGroupDescriptor { Layout = _cameraLayout, EntryCount = 4, Entries = camEntries };
         _hudCameraBindGroup = _api.DeviceCreateBindGroup(_ctx.Device, &hudCamDesc);
 
         var modelEntry = new BindGroupEntry { Binding = 0, Buffer = _modelBuffer.Handle, Offset = 0, Size = ModelSize };
@@ -1234,6 +1285,56 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
         var desc = new BindGroupDescriptor { Layout = _voxelLayout, EntryCount = 5, Entries = entries };
         _voxelBindGroup = _api.DeviceCreateBindGroup(_ctx.Device, &desc);
         _voxelBindingVersion = s.BindingVersion;
+    }
+
+    private void CreateTintVolume()
+    {
+        var texDesc = new TextureDescriptor
+        {
+            Usage         = TextureUsage.TextureBinding | TextureUsage.CopyDst,
+            Dimension     = TextureDimension.Dimension3D,
+            Size          = new Extent3D(ClimateTintSystem.SizeXZ, ClimateTintSystem.SizeXZ, ClimateTintSystem.SizeY),
+            Format        = TextureFormat.Rgba8Unorm, // sRGB colours, decoded in the shader (climateTinted)
+            MipLevelCount = 1,
+            SampleCount   = 1,
+        };
+        _tintTexture = _api.DeviceCreateTexture(_ctx.Device, &texDesc);
+        var viewDesc = new TextureViewDescriptor
+        {
+            Format = TextureFormat.Rgba8Unorm, Dimension = TextureViewDimension.Dimension3D,
+            BaseMipLevel = 0, MipLevelCount = 1, BaseArrayLayer = 0, ArrayLayerCount = 1, Aspect = TextureAspect.All,
+        };
+        _tintView = _api.TextureCreateView(_tintTexture, &viewDesc);
+        var samplerDesc = new SamplerDescriptor
+        {
+            AddressModeU = AddressMode.ClampToEdge, AddressModeV = AddressMode.ClampToEdge, AddressModeW = AddressMode.ClampToEdge,
+            MagFilter = FilterMode.Linear, MinFilter = FilterMode.Linear, MipmapFilter = MipmapFilterMode.Nearest,
+            LodMinClamp = 0, LodMaxClamp = 1, Compare = CompareFunction.Undefined, MaxAnisotropy = 1,
+        };
+        _tintSampler = _api.DeviceCreateSampler(_ctx.Device, &samplerDesc);
+        UploadTint(0f, 0f, new byte[ClimateTintSystem.Bytes]); // textures start uninitialised in some backends: clear it
+    }
+
+    /// <summary>Hands the shader a new climate tint volume (<see cref="ClimateTintSystem.Bytes"/> long, laid out as
+    /// that describes) whose low corner is at world (<paramref name="originX"/>, <paramref name="originZ"/>). It is
+    /// drawn from the next frame on, so its origin and texels change together.</summary>
+    public void SetClimateTint(float originX, float originZ, byte[] texels)
+    {
+        if (texels.Length != ClimateTintSystem.Bytes) throw new ArgumentException($"A tint volume is {ClimateTintSystem.Bytes} bytes.", nameof(texels));
+        _pendingTint = (originX, originZ, texels);
+    }
+
+    private void UploadTint(float originX, float originZ, byte[] texels)
+    {
+        fixed (byte* data = texels)
+        {
+            var dest = new ImageCopyTexture { Texture = _tintTexture, MipLevel = 0, Origin = new Origin3D(0, 0, 0), Aspect = TextureAspect.All };
+            var layout = new TextureDataLayout { Offset = 0, BytesPerRow = ClimateTintSystem.SizeXZ * 4, RowsPerImage = ClimateTintSystem.SizeXZ };
+            var size = new Extent3D(ClimateTintSystem.SizeXZ, ClimateTintSystem.SizeXZ, ClimateTintSystem.SizeY);
+            _api.QueueWriteTexture(_ctx.Queue, &dest, data, (nuint)texels.Length, &layout, &size);
+        }
+        _tintOriginX = originX;
+        _tintOriginZ = originZ;
     }
 
     /// <summary>1x1 white single-layer array texture, bound as group 3 until <see cref="LoadTextureAtlas"/>
@@ -1691,8 +1792,11 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
 
     public void SetCameraUniform(in CameraUniform camera)
     {
+        if (_pendingTint is { } tint) { UploadTint(tint.X, tint.Z, tint.Texels); _pendingTint = null; }
         Span<CameraUniform> s = stackalloc CameraUniform[1];
         s[0] = camera;
+        s[0].TintOriginX = _tintOriginX;
+        s[0].TintOriginZ = _tintOriginZ;
         _cameraBuffer.Write<CameraUniform>(0, s);
     }
 
@@ -1857,6 +1961,9 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
         _quadArena.Dispose();
         _lightmap.Dispose();
         if (_voxelBindGroup   != null) _api.BindGroupRelease(_voxelBindGroup);
+        if (_tintSampler      != null) _api.SamplerRelease(_tintSampler);
+        if (_tintView         != null) _api.TextureViewRelease(_tintView);
+        if (_tintTexture      != null) _api.TextureRelease(_tintTexture);
         if (_atlasBindGroup   != null) _api.BindGroupRelease(_atlasBindGroup);
         if (_atlasSampler     != null) _api.SamplerRelease(_atlasSampler);
         if (_atlasTextureView != null) _api.TextureViewRelease(_atlasTextureView);

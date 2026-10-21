@@ -115,7 +115,8 @@ public readonly struct ChunkQuad
 
     /// <summary>What the shader looks up by a quad's block (blockTable): each block's colour (sRGB, as
     /// <see cref="BlockDef.Color"/>) and opacity (<see cref="BlockDef.EffectiveAlpha"/>; 1 for opaque blocks; for a
-    /// cross block, 0 if it's <see cref="BlockDef.RigidCross"/>).</summary>
+    /// cross block, 0 if it's <see cref="BlockDef.RigidCross"/>), plus 2 if its top takes the climate tint, 4 if all
+    /// its faces do (<see cref="BlockDef.Tint"/>; opacities are 0-1, so the shader splits them apart).</summary>
     public static Vector4D<float>[] BuildBlockTable()
     {
         var table = new Vector4D<float>[BlockTableSize];
@@ -125,6 +126,7 @@ public readonly struct ChunkQuad
             // A cross block is always drawn cut out, never blended, so its opacity is free to say whether its two
             // quads are twisted and shifted apart (1) or kept a clean X (0, BlockDef.RigidCross); see vs_chunk.
             float alpha = def.IsCross ? (def.RigidCross ? 0f : 1f) : def.Layer == RenderLayer.Translucent ? def.EffectiveAlpha : 1f;
+            alpha += def.Tint == BlockTint.Top ? 2f : def.Tint == BlockTint.All ? 4f : 0f;
             table[i] = new Vector4D<float>(def.Color.X, def.Color.Y, def.Color.Z, alpha);
         }
         return table;

@@ -90,6 +90,7 @@ public sealed class GameView : IDisposable
         host.AddSystem(light, SystemStage.PreRender);
         host.AddSystem(Meshes, SystemStage.PreRender);
         host.AddSystem(new BlockModelSystem(host.World, BlockModels), SystemStage.PreRender); // block entities -> RenderedModel
+        host.AddSystem(new ClimateTintSystem(renderer, new BiomeTintMap(world.Seed)), SystemStage.RenderWorld); // grass and leaves coloured by biome
 
         SkySettings.CloudAltitude = 1550f; // the islands are mostly low: clouds among the hills
         SkySettings.CloudSeaAltitude = HeartGrid.CloudSeaAltitude; // below its lowest islands
