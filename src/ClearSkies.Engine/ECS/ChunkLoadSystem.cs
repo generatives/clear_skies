@@ -137,7 +137,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
     // Chunks no longer wanted at the last rebuild, unloaded from _unloadAt on a few per frame.
     private int _unloadAt;
     private readonly List<(int x, int z)> _columnsUnwanted = new();
-    private readonly Dictionary<(int x, int z), int> _inFlight = new();
+    private readonly Dictionary<(int x, int z), (int Chunks, ulong Layers)> _inFlight = new(); // per column job: its chunks, as a count and layer bits
     private int _inFlightChunks;
     private readonly ConcurrentQueue<((int x, int z) Column, List<(ChunkPosition Pos, ChunkData? Data, ChunkPreparation? Prepared)> Chunks)> _results = new();
 
@@ -258,7 +258,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
         double applyUntil = _steps.SinceLap() + BudgetLeft;
         while (_steps.SinceLap() < applyUntil && _results.TryDequeue(out var job))
         {
-            _inFlightChunks -= _inFlight[job.Column];
+            _inFlightChunks -= _inFlight[job.Column].Chunks;
             _inFlight.Remove(job.Column);
             foreach (var (pos, data, prepared) in job.Chunks)
             {
@@ -585,11 +585,12 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
     /// mesh comes or goes.</summary>
     public event Action<int, int>? ColumnChanged;
 
-    /// <summary>Whether chunk <paramref name="p"/> is wanted and drawn in full: its column isn't loading, and if it may
-    /// hold something, it's loaded and meshed.</summary>
+    /// <summary>Whether chunk <paramref name="p"/> is wanted and drawn in full: it isn't loading, and if it may hold
+    /// something, it's loaded and meshed.</summary>
     public bool IsChunkReady(ChunkPosition p)
     {
-        if (!Wanted(p) || _inFlight.ContainsKey((p.X, p.Z))) return false;
+        // Only the chunks a job is loading: a column already shown gets more layers loaded as the ball moves.
+        if (!Wanted(p) || _inFlight.TryGetValue((p.X, p.Z), out var job) && (job.Layers & Bit(p)) != 0) return false;
         if ((MaybeContent(p.X, p.Z) & Bit(p)) == 0) return true;
         var entry = _staticVolume.GetEntry(p);
         return entry != null && entry.Entity.Has<ChunkMeshedFlag>();
@@ -692,7 +693,9 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
     /// <summary>Hands a column's missing chunks to a worker: each loaded from the store if edited, else generated.</summary>
     private void DispatchColumn((int x, int z) col, List<(ChunkPosition Pos, bool Edited)> work)
     {
-        _inFlight.Add(col, work.Count);
+        ulong layers = 0;
+        foreach (var (pos, _) in work) layers |= Bit(pos);
+        _inFlight.Add(col, (work.Count, layers));
         _inFlightChunks += work.Count;
         ColumnChanged?.Invoke(col.x, col.z);
         BackgroundWork.Queue(() =>
