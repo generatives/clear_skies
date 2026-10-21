@@ -8,9 +8,10 @@ namespace ClearSkies.Game.Generation;
 /// round it, sampled every <see cref="Step"/> blocks, by filling every hollow up to the point where it would spill
 /// over (a priority flood). The ground it fills is the land's real top: each piece's top as HeartWorldGenerator wears
 /// it down (flattened and dropped from the terrain surface). The cracks between pieces and the gaps where a piece is
-/// gone are drains, so no lake sits over a crack, hangs over a gap or rests against a piece's worn edge. A tile keeps
-/// only lakes lying wholly inside it, so each lake is decided by exactly one tile and every chunk agrees. Its level is
-/// a block under the spill point, so the water stands below its banks. None lies in a desert.
+/// gone are drains, so no lake sits over a crack, hangs over a gap or rests against a piece's worn edge. Each lake is
+/// decided by exactly one tile, the one holding its first cell, and may reach into its neighbours (not too near the
+/// edge of its window), so every chunk agrees. Its level is a block under the spill point, so the water stands below
+/// its banks. None lies in a desert.
 /// </summary>
 public sealed class Lakes
 {
@@ -25,7 +26,8 @@ public sealed class Lakes
     private const float FaceMargin = 64f;
 
     // A lake sits in open ground, not perched on a slope or by a cliff: no ground within Perch cells of it may be
-    // more than PerchDrop blocks under its level (a drain counts as a drop; its own bed, filled to its level, not).
+    // more than PerchDrop blocks under its level (its own bed, filled to its level, doesn't count; nor do drains,
+    // already FaceMargin away).
     private const int Perch = 8;
     private const float PerchDrop = 10f;
 
@@ -39,7 +41,7 @@ public sealed class Lakes
 
     private readonly ulong _seed;
     private readonly ContinentTerrain _terrain;
-    private readonly ConcurrentDictionary<long, int[]> _tiles = new();
+    private readonly ConcurrentDictionary<long, int[]> _tiles = new(), _owned = new();
 
     private Lakes(ulong seed)
     {
@@ -75,9 +77,37 @@ public sealed class Lakes
     private int CellLevel(int gx, int gz)
     {
         int tx = FloorDiv(gx, Core), tz = FloorDiv(gz, Core);
-        var levels = _tiles.GetOrAdd(((long)tx << 32) ^ (uint)tz, _ => Build(tx, tz));
+        var levels = _tiles.GetOrAdd(Key(tx, tz), _ => Gather(tx, tz));
         return levels[(gx - tx * Core) + Core * (gz - tz * Core)];
     }
+
+    /// <summary>Tile (tx, tz)'s lake level per sample cell of its core, int.MinValue where it is dry: from the lakes
+    /// it and its neighbours own.</summary>
+    private int[] Gather(int tx, int tz)
+    {
+        var levels = new int[Core * Core];
+        Array.Fill(levels, int.MinValue);
+        for (int nz = tz - 1; nz <= tz + 1; nz++)
+        for (int nx = tx - 1; nx <= tx + 1; nx++)
+        {
+            var owned = _owned.GetOrAdd(Key(nx, nz), _ => Build(nx, nz));
+            int di = Off + (tx - nx) * Core, dk = Off + (tz - nz) * Core;
+            for (int k = 0; k < Core; k++)
+            {
+                int wk = k + dk;
+                if (wk < 0 || wk >= Window) continue;
+                for (int i = 0; i < Core; i++)
+                {
+                    int wi = i + di;
+                    if (wi < 0 || wi >= Window || owned[wi + Window * wk] == int.MinValue) continue;
+                    levels[i + Core * k] = owned[wi + Window * wk];
+                }
+            }
+        }
+        return levels;
+    }
+
+    private static long Key(int tx, int tz) => ((long)tx << 32) ^ (uint)tz;
 
     /// <summary>Tile (tx, tz)'s lake level per sample cell of its core, int.MinValue where it is dry.</summary>
     private int[] Build(int tx, int tz)
@@ -117,8 +147,9 @@ public sealed class Lakes
         }
 
         // Each hollow (cells filled over their ground, joined side by side) is a lake if it is deep and big enough and
-        // lies wholly in the core.
-        var levels = new int[Core * Core];
+        // is this tile's: its first cell (lowest row, then column: the same whichever window finds it) in the core, and
+        // all of it far enough inside the window that the flood saw its surroundings.
+        var levels = new int[Window * Window];
         Array.Fill(levels, int.MinValue);
         var seen = new bool[Window * Window];
         var cells = new List<int>();
@@ -135,7 +166,7 @@ public sealed class Lakes
                 int c = stack.Pop();
                 cells.Add(c);
                 int ci = c % Window, ck = c / Window;
-                if (ci <= Off || ck <= Off || ci >= Off + Core - 1 || ck >= Off + Core - 1) inside = false;
+                if (ci <= Perch || ck <= Perch || ci >= Window - 1 - Perch || ck >= Window - 1 - Perch) inside = false;
                 deepest = MathF.Max(deepest, filled[c] - height[c]);
                 for (int n = 0; n < 4; n++)
                 {
@@ -146,6 +177,8 @@ public sealed class Lakes
                     seen[nc] = true; stack.Push(nc);
                 }
             }
+            int si = start % Window, sk = start / Window;
+            if (si < Off || sk < Off || si >= Off + Core || sk >= Off + Core) continue;
             if (!inside || deepest < MinDepth || cells.Count < MinCells || cells.Count > MaxCells) continue;
             int lakeLevel0 = (int)MathF.Floor(filled[start]) - 1;
             bool perched = false;
@@ -154,7 +187,10 @@ public sealed class Lakes
                 int ci = c % Window, ck = c / Window;
                 for (int k = ck - Perch; k <= ck + Perch && !perched; k++)
                 for (int i = ci - Perch; i <= ci + Perch; i++)
-                    if (filled[i + Window * k] < lakeLevel0 - PerchDrop) { perched = true; break; }
+                {
+                    float f = filled[i + Window * k];
+                    if (f != Drain && f < lakeLevel0 - PerchDrop) { perched = true; break; }
+                }
                 if (perched) break;
             }
             if (perched) continue;
@@ -166,7 +202,7 @@ public sealed class Lakes
             // Only cells actually under the water are kept, so the shore round them (see Level) is just by the water,
             // not over the flats round it at its level.
             foreach (int c in cells)
-                if (height[c] < lakeLevel) levels[(c % Window - Off) + Core * (c / Window - Off)] = lakeLevel;
+                if (height[c] < lakeLevel) levels[c] = lakeLevel;
         }
         return levels;
     }
