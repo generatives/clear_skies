@@ -135,6 +135,32 @@ public class HeadlessStreamingTests
     }
 
     [Fact]
+    public void FullDetailLoadsInABallOfGroupsAroundTheView()
+    {
+        using var scene = new HeadlessScene();
+        using var db = SaveDatabase.InMemory();
+        var load = Streaming(scene, db, viewDistance: 256);
+        load.FullDetailRadius = 128; // 2 groups of 2x2x2 chunks
+        var player = Interest(scene, 16, 16, View(256)); // in group (0, 0, 0); stone fills layers -8 to -1
+        Settle(load);
+        bool Loaded(int x, int y, int z) => scene.WorldVolume.IsLoaded(new ChunkPosition(x, y, z));
+        // Under the view, the groups 2 down: layers -4 to -1, not the stone below them.
+        Assert.True(Loaded(0, -1, 0) && Loaded(0, -4, 0));
+        Assert.False(Loaded(0, -5, 0));
+        // A group across, one down: layers -2 and -1 (sqrt(4 - 1) rounds down to 1 group).
+        Assert.True(Loaded(2, -2, 0));
+        Assert.False(Loaded(2, -3, 0));
+        // Two groups across: only the view's own height, where there's no stone.
+        Assert.False(Loaded(4, -1, 0));
+
+        // Down among the stone, the ball goes with the view.
+        player.Get<Transform>().Position = new Vector3D<float>(16, -200, 16); // layer -7, group -4
+        Settle(load);
+        Assert.True(Loaded(0, -8, 0) && Loaded(4, -7, 0));
+        Assert.False(Loaded(0, -1, 0)); // 3 groups up
+    }
+
+    [Fact]
     public void AColliderInterestAwayFromTheViewGetsItsTerrainUntilItLeaves()
     {
         using var scene = new HeadlessScene();

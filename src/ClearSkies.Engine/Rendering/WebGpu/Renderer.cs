@@ -32,7 +32,7 @@ const LOD_GRID: i32 = -2;              // a coarse distant chunk's grid (Rendere
 
 // sunDir.w: sun strength (SunLight.Strength). lightParams.x, .y: unused (ray AO is in the voxel light), .z: ambient
 // (0-1), .w: 1 on an sRGB surface (see lin). camPos.xyz: camera world position. fog.xy: the world's fog start/end
-// (horizontal), fog.zw: the cloud layer's (see CloudLayer), in blocks from the camera. zenith/horizon.rgb: the sky
+// (by distance), fog.zw: the cloud layer's (see CloudLayer), in blocks from the camera. zenith/horizon.rgb: the sky
 // gradient (see SkySettings). horizon.w: the distance haze's strength (0-1), haze.rgb its colour, haze.w its distance.
 // sea: the cloud sea's altitude, coverage (0 = off), cell size and thickness, in blocks (see cloudSea).
 // lightParams2.x: exposure, a multiplier on lit surfaces before fog. lightParams2.y/.z: render pass debug toggles
@@ -80,12 +80,13 @@ fn applyHaze(color: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
 }
 
 // Hazes a lit surface colour at worldPos, then fades it into what fs_sky draws behind it (the sky, or the cloud sea
-// below) by horizontal distance: streaming loads whole chunk columns, so the loaded world ends only sideways, where
-// the fog is total (see SkySettings.FogDistance). Fading into the sky colour alone would leave islands showing as
-// blue shapes over the white sea as they load in.
+// below) by distance: the loaded world ends in a ball around the view (distant terrain's levels are balls; without
+// them, streaming loads whole columns, which reach at least as far), where the fog is total (see
+// SkySettings.FogDistance). Fading into the sky colour alone would leave islands showing as blue shapes over the white
+// sea as they load in.
 fn applyFog(color: vec3<f32>, worldPos: vec3<f32>) -> vec3<f32> {
     let d = worldPos - camera.camPos.xyz;
-    let f = smoothstep(camera.fog.x, camera.fog.y, length(d.xz));
+    let f = smoothstep(camera.fog.x, camera.fog.y, length(d));
     let hazed = applyHaze(color, d);
     if (f <= 0.0) { return applyWater(hazed, d); } // only the fog band pays for tracing the sea
     return applyWater(mix(hazed, background(normalize(d)).rgb, f), d);

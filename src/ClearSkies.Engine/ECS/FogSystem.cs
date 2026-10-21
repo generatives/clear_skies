@@ -45,7 +45,7 @@ public sealed class FogSystem : ISystem, IDebugUiSystem
                                .With<NeedsGpuUploadFlag>().Without<ChunkUploadedFlag>().AsSet();
     }
 
-    /// <summary>Horizontal distance from the view at which the loaded world stops, eased over time. Fog is total by here.</summary>
+    /// <summary>Distance from the view at which the loaded world stops, eased over time. Fog is total by here.</summary>
     public float Distance => _distance;
 
     /// <summary>Distant terrain drawn beyond the full-detail terrain (see LodTerrainSystem): while it's active, the fog

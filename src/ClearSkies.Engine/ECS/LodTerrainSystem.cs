@@ -20,34 +20,38 @@ public interface IFarTerrain
     /// <summary>Whether it's drawing: the fog then follows it instead of the full-detail terrain.</summary>
     bool Active { get; }
 
-    /// <summary>How far from <paramref name="centre"/> (horizontally) the terrain is ready to be seen.</summary>
+    /// <summary>How far from <paramref name="centre"/> the terrain is ready to be seen.</summary>
     float ReadyRadius(Vector3D<float> centre);
 }
 
 /// <summary>
 /// Distant terrain at half resolution (level 1 of the LOD plan): past <see cref="FullDetailRadius"/> the world is drawn
-/// from coarse 32³ chunks whose cells are 2 blocks a side, out to <see cref="OuterRadius"/>. The drawn coarse columns
-/// are a grid of their own in the GridStore (<see cref="Grid"/>, voxels 2 blocks a side), which GpuLightSystem lights
-/// like the world: sun shadows, bounce and AO, with rays crossing between it and the world. Their meshes bake light maps
-/// from it as full-detail chunks do from the world. Every loaded column is in the grid, lit by its own blocks: distant
-/// terrain's rays don't see the world, and the world's pass through a column whose full detail is ready (covered), so
-/// both levels are lit where they overlap and a swap shows settled light either way. A swap to full detail waits until
-/// the full-detail chunks are lit. A coarse column covers a 2x2 group of full columns, and ChunkLoadSystem loads full detail
-/// in whole groups (<see cref="ChunkLoadSystem.FullDetailRadius"/>), so each coarse column swaps for its four full ones
-/// in one frame: it's drawn (and they're hidden, see <see cref="CoverOf"/>) until all four are loaded and meshed.
-/// A swap dissolves the level going away over the one coming in, in a screen dither, over <see cref="FadeSeconds"/>.
+/// from coarse 32³ chunks whose cells are 2 blocks a side, out to <see cref="OuterRadius"/>. Both are balls around the
+/// view: full detail loads in a ball of 2x2x2 groups of chunks (<see cref="ChunkLoadSystem.FullDetailRadius"/>), each
+/// group under one coarse chunk, and a coarse chunk is drawn (and the eight full chunks under it hidden, see
+/// <see cref="CoverOf"/>) until all eight are loaded and meshed, then swaps for them in one go. A swap dissolves the
+/// level going away over the one coming in, in a screen dither, over <see cref="FadeSeconds"/>.
 ///
-/// A coarse chunk is made by generating the eight full chunks under it (or loading the edited ones from the store) on a
-/// worker, shrinking them (<see cref="Shrink"/>) and meshing the result; only its meshes are kept. Coarse columns are
-/// kept within the outer radius, including under the full-detail terrain, so moving back out needs nothing loaded.
-/// One under full detail whose chunks were edited meanwhile is made again when it's next drawn.
-/// A panel toggle (Distant Terrain) turns it off, for comparing against full detail everywhere; the game starts it on.
+/// The coarse chunks in range are a grid of their own in the GridStore (<see cref="Grid"/>, voxels 2 blocks a side),
+/// which GpuLightSystem lights like the world: sun shadows, bounce and AO, with rays crossing between it and the world.
+/// Their meshes bake light maps from it as full-detail chunks do from the world. Every coarse chunk in range is in the
+/// grid, lit by its own blocks: distant terrain's rays don't see the world, and the world's pass through a coarse chunk
+/// whose full detail is ready (covered), so both levels are lit where they overlap and a swap shows settled light either
+/// way. A swap to full detail waits until the full-detail chunks are lit.
+///
+/// Coarse terrain is made a column at a time (the generator works out a column's shape once for all its chunks): the
+/// full chunks under it are generated (or the edited ones loaded from the store) on a worker, shrunk
+/// (<see cref="Shrink"/>) and meshed; only the meshes are kept, for every layer of the column, so the view moving up or
+/// down needs nothing made. Columns are kept within the outer radius (across), including under the full-detail terrain,
+/// so moving back out needs nothing made either. One under full detail whose chunks were edited meanwhile is made again
+/// when it's next drawn. A panel toggle (Distant Terrain) turns it off, for comparing against full detail everywhere;
+/// the game starts it on.
 ///
 /// Levels chain: level k has cells 2^k blocks a side, and is drawn past level k-1 (<see cref="Finer"/>) out to its own
-/// <see cref="OuterRadius"/>, swapping with it as level 1 does with full detail: a column of it covers a 2x2 group of
-/// the finer level's, which keeps whole groups (see InRange), and it's drawn until all four are loaded and lit. Each
+/// <see cref="OuterRadius"/>, swapping with it as level 1 does with full detail: a chunk of it covers a 2x2x2 group of
+/// the finer level's, which keeps whole groups (see InRange), and it's drawn until all eight are loaded and lit. Each
 /// level is its own grid (scale 2^k); a level's rays see it and the coarser levels, passing through their covered
-/// columns. Above, "full detail" and "full columns" mean the finer level for any level but the first.
+/// chunks. Above, "full detail" and "full chunks" mean the finer level for any level but the first.
 /// </summary>
 public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
 {
@@ -55,7 +59,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
     /// <summary>Which level of detail this is: 1 for half resolution, 2 for a quarter, and so on.</summary>
     public int Level { get; }
     private readonly int Cell;          // blocks per coarse cell: 2 to the level
-    private readonly int ColumnBlocks;  // a coarse column's width (and a coarse chunk's)
+    private readonly int ColumnBlocks;  // a coarse chunk's size (and a coarse column's width)
 
     /// <summary>The level drawn nearer the view, which this one swaps with: null for full detail (level 1).</summary>
     public LodTerrainSystem? Finer { get; }
@@ -105,89 +109,91 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
     /// busy as full detail where it swaps (see <see cref="Shrink"/>). Changing it applies to columns made afterwards.</summary>
     public bool Plants = true;
 
-    /// <summary>The loaded coarse columns as a grid of 2-block voxels, lit like the world (see
+    /// <summary>The coarse chunks in range as a grid of 2-block voxels, lit like the world (see
     /// GpuLightSystem.AddStaticGrid). Unregistered (index -1) without a GridStore: then they're lit as open air.</summary>
     public GridHandle Grid { get; } = new();
 
+    /// <summary>A coarse chunk: what's drawn of it, and where it is in swapping with the finer level and in the grid.
+    /// Every layer of a made column has one, air included, so every place has a state to hide full detail by.</summary>
     private sealed class CoarseChunk
     {
-        public int Y;
         public GpuMesh? Opaque, Cutout, Transparent;
-        public PackedOpacity? Occupancy; // for the grid (shared for all-air and all-solid chunks)
+        public PackedOpacity Occupancy = AllAir; // for the grid (shared for all-air and all-solid chunks)
         public ChunkPosition Pos;        // in coarse chunks
         public Mat4 Model;               // coarse cells to world
         public Vector3D<float> Min, Centre;
         public bool EverBaked;           // its light maps have been baked from the grid (it can be drawn lit from it)
+        public bool HasFaces => Opaque != null || Cutout != null || Transparent != null;
+        public bool Gridded;             // goes in the grid while kept: it has blocks, or is the air next to some
+
+        public bool Drawn;       // this frame: not all eight finer chunks under it are ready
+        public bool Ready, ReadyKnown; // whether all eight are ready, as last found (see _readyDirty)
+        public bool InGrid;      // its occupancy is in the grid
+        public bool Settled;     // in the grid and lit since it went in: its light maps follow the grid
+        public bool Baked;       // lit from the grid: it settled there at least once
+        public bool Covered;     // its full chunks are ready, so the world's rays pass through it (GridStore.SetCovered)
+        public bool Leaving;     // its full chunks are ready: still drawn until they're lit
+        public int Waiting, LeaveWait; // frames spent settling, and leaving
+        public float FadeInAt = float.NegativeInfinity, FadeOutAt = float.NegativeInfinity; // when it last swapped in, out
+        public bool WasReady;    // its full chunks were ready when last looked at, so they were drawn
     }
 
+    /// <summary>A made coarse column: a chunk for every layer from <see cref="MinY"/> up, bottom first.</summary>
     private sealed class CoarseColumn
     {
         public readonly List<CoarseChunk> Chunks = new();
-        public readonly List<CoarseChunk> Shown = new(); // the chunks with faces (not buried)
-        public int MinY, MaxY;
-        public bool Drawn;       // this frame: not all four full columns are ready
-        public bool Ready, ReadyKnown; // whether all four are ready, as last found (see _readyDirty)
+        public int MinY;
         public bool ChildEdited; // a full chunk under it was edited while it was hidden
-        public readonly List<int> Resident = new(); // the chunk layers it has in the grid so far
-        public bool Hurried;                         // picked this frame (HurryFirstLight)
-        public List<int>? ToPut;                    // the layers still to put in the grid (null: not started)
-        public bool InGrid => ToPut is { Count: 0 };
-        public bool Settled;   // in the grid and lit since it went in: its light maps follow the grid
-        public bool Baked;     // lit from the grid: it settled there at least once
-        public bool Covered;   // its full columns are ready, so the world's rays pass through it (GridStore.SetCovered)
-        public bool Leaving;   // its full columns are ready: still drawn until they're lit
-        public int Waiting, LeaveWait; // frames spent settling, and leaving
-        public int LitSoFar, ChildrenLitSoFar; // how many of the chunks it waits on (settling, leaving) were found lit
-        public float FadeInAt = float.NegativeInfinity, FadeOutAt = float.NegativeInfinity; // when it last swapped in, out
-        public bool WasReady;  // its full columns were ready when last looked at, so they were drawn
+        public bool Quiet;       // far from full detail, and every chunk kept is drawn, settled and uncovered: nothing to do
+        public CoarseChunk? At(int y) => y >= MinY && y < MinY + Chunks.Count ? Chunks[y - MinY] : null;
     }
 
     // A swap waits for the incoming terrain's light (see UpdateDrawn): at least this many frames, since a change is
     // marked for lighting the frame after it's made, and at most the other, in case lighting never settles there.
     private const int MinSwapFrames = 2, MaxSwapFrames = 240;
 
-    // A column that's never been shown waits for its light longer: it's hidden (behind the fog) meanwhile, rather than
+    // A chunk that's never been shown waits for its light longer: it's hidden (behind the fog) meanwhile, rather than
     // showing light that's still coming in. The limit is for lighting that never settles there.
     private const int MaxFirstLightFrames = 1800;
 
     /// <summary>Whether a chunk of a grid is lit (GpuLightSystem.IsLit); without it, everything counts as lit.</summary>
     public Func<GridHandle, ChunkPosition, bool>? IsLit;
 
-    /// <summary>Whether a chunk of a grid is lit and its light done changing (GpuLightSystem.IsSettled), for a column
+    /// <summary>Whether a chunk of a grid is lit and its light done changing (GpuLightSystem.IsSettled), for a chunk
     /// shown for the first time; without it, <see cref="IsLit"/> is used.</summary>
     public Func<GridHandle, ChunkPosition, bool>? IsSettled;
 
-    /// <summary>Lights a chunk of a grid ahead of the light queues (GpuLightSystem.Hurry), for the nearest columns held
+    /// <summary>Lights a chunk of a grid ahead of the light queues (GpuLightSystem.Hurry), for the nearest chunks held
     /// back for their first light (see <see cref="HurryFirstLight"/>).</summary>
     public Action<GridHandle, ChunkPosition>? Hurry;
-    private const int HurriedColumns = 2;
-    private readonly List<(float Distance, (int x, int z) Key, CoarseColumn Column)> _toPlace = new();
-    private readonly CoarseColumn?[] _hurriedNow = new CoarseColumn?[HurriedColumns];
+    private const int HurriedChunks = 4;
+    private readonly List<(float Distance, CoarseChunk Chunk)> _toPlace = new();
+    private readonly CoarseChunk?[] _hurriedNow = new CoarseChunk?[HurriedChunks];
+    private readonly float[] _hurriedDistance = new float[HurriedChunks];
 
-    // Shared occupancy for the coarse chunks that are all one thing, and for the air right above and below a column's
-    // chunks (so the faces there have air with light in it).
+    // Shared occupancy for the coarse chunks that are all one thing.
     private static readonly PackedOpacity AllAir = new(new uint[GridStore.WordsPerChunk], 0UL, ulong.MaxValue, new(), null, 0UL);
     private static readonly PackedOpacity AllSolid = new(new uint[GridStore.WordsPerChunk], ulong.MaxValue, 0UL, new(), null, 0UL);
 
     private readonly record struct Built(int Y, ChunkMeshSystem.Packed Opaque, ChunkMeshSystem.Packed Cutout,
                                          ChunkMeshSystem.Packed Transparent, PackedOpacity Occupancy);
-    private readonly record struct Result((int x, int z) Column, List<Built> Chunks, Exception? Error);
+    private readonly record struct Result((int x, int z) Column, int MinY, int MaxY, List<Built> Chunks, Exception? Error);
 
     private readonly Dictionary<(int x, int z), CoarseColumn> _columns = new();
     private readonly HashSet<(int x, int z)> _inFlight = new();
     private readonly List<(int x, int z)> _queue = new();
     private int _queueHead;
     private readonly ConcurrentQueue<Result> _results = new();
-    private (int x, int z) _centre = (int.MinValue, int.MinValue);
-    private int _outerColumns = -1;
-    private bool _grouped; // the range is in whole 2x2 groups (see InRange)
+    private (int x, int y, int z) _centre = (int.MinValue, int.MinValue, int.MinValue);
+    private int _outerChunks = -1;
+    private bool _grouped; // the range is in whole 2x2x2 groups (see InRange)
     private bool _wasEnabled;
     private Vector3D<float> _view;
 
     private readonly record struct Draw(float DistSq, CoarseChunk Chunk, int Grid, bool Bake, float Dissolve);
 
     // Light map baking a frame for coarse chunks, in quads (nearest first; one that's been drawn before is drawn with its
-    // last light meanwhile, one never baked waits). Columns settling in bulk (loading, flying) bake over a few frames.
+    // last light meanwhile, one never baked waits). Chunks settling in bulk (loading, flying) bake over a few frames.
     private const int BakeQuadBudget = 65536;
     private int _bakedQuads;
     private readonly List<Draw> _draws = new();
@@ -195,7 +201,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
     private int _built, _chunksDrawn;
     private long _quads;
     private int _frame;
-    private int _editScan; // which ready column UpdateDrawn checks for edits this frame
+    private int _editScan; // which column with ready chunks UpdateDrawn checks for edits this frame
 
     // CPU time of each step, for the debug panel.
     private const int ApplyStep = 0, DispatchStep = 1, SwapStep = 2, ListStep = 3, LightmapStep = 4, DrawStep = 5, ResidentStep = 6,
@@ -219,7 +225,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
         _steps = new StepTimer("Adding finished columns", "Queueing and dispatching columns",
                                "Swaps: the rest", "Render: listing draws",
                                "Render: light maps", "Render: recording draws",
-                               "Swaps: putting columns in the light grid",
+                               "Swaps: putting chunks in the light grid",
                                "Swaps: finer level readiness", "Swaps: edit checks",
                                "Swaps: lighting checks") { Owner = Name };
         _world = world;
@@ -234,8 +240,8 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
         _meshers = new ThreadLocal<GreedyMesher>(() => new GreedyMesher(atlas));
         _interests = world.GetEntities().With<TerrainInterest>().With<Transform>().AsSet();
 
-        // Whether a coarse column's full detail is ready is found again only when something it depends on changes (a
-        // coarser level's columns look at the finer level's every frame: there are few of them).
+        // Whether a coarse chunk's full detail is ready is found again only when something it depends on changes (a
+        // coarser level's chunks look at the finer level's every frame: there are few of them).
         if (finer != null) return;
         load.ColumnChanged += (x, z) => _readyDirty.Add((x >> 1, z >> 1));
         world.SubscribeComponentAdded((in Entity e, in ChunkMeshedFlag _) => ChunkChanged(e));
@@ -250,52 +256,55 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
         if (entry.Volume == _volume) _readyDirty.Add((entry.Position.X >> 1, entry.Position.Z >> 1));
     }
 
-    private readonly HashSet<(int x, int z)> _readyDirty = new();
-    private int _recheck; // where the round of near columns looked at anyway is up to
+    private readonly HashSet<(int x, int z)> _readyDirty = new(); // columns whose chunks' readiness may have changed
+    private int _recheck; // where the round of near chunks looked at anyway is up to
     private readonly HashSet<(int x, int z)> _editChecks = new();
     private readonly Queue<(int x, int z)> _editCheckOrder = new();
     private const int EditChecksPerFrame = 2;
-    private const int RecheckPerFrame = 16;
+    private const int RecheckPerFrame = 32;
 
     public bool Active => Live || Finer is { Active: true };
 
-    /// <summary>How much full column (x, z) is hidden by the coarse column over it (see ChunkRenderSystem.Cover): 1
+    private CoarseChunk? ChunkAt(int x, int y, int z) => _columns.TryGetValue((x, z), out var c) ? c.At(y) : null;
+
+    /// <summary>How much full chunk (x, y, z) is hidden by the coarse chunk over it (see ChunkRenderSystem.Cover): 1
     /// while it's drawn, rising from 0 to 1 over <see cref="FadeSeconds"/> as it comes in, 0 when it isn't; while the
-    /// coarse column dissolves away, -t: the full column draws only the share t of pixels the coarse one has left.
-    /// Where this level hides nothing there, a coarser level may (it's drawn where this one isn't ready). (x, z) are in
-    /// full columns, for every level.</summary>
-    public float CoverOf(int x, int z)
+    /// coarse chunk dissolves away, -t: the full chunk draws only the share t of pixels the coarse one has left.
+    /// Where this level hides nothing there, a coarser level may (it's drawn where this one isn't ready). (x, y, z) are
+    /// in full chunks, for every level.</summary>
+    public float CoverOf(int x, int y, int z)
     {
-        float own = OwnCoverOf(x, z);
-        return own == 0f && Coarser is { Live: true } coarser ? coarser.CoverOf(x, z) : own;
+        float own = OwnCoverOf(x, y, z);
+        return own == 0f && Coarser is { Live: true } coarser ? coarser.CoverOf(x, y, z) : own;
     }
 
-    /// <summary>Whether full column (x, z), no longer wanted in full detail, stays loaded for now (ChunkLoadSystem.HeldBy):
-    /// until distant terrain has faded in over it, so it doesn't vanish first.</summary>
-    public bool HoldsFullColumn(int x, int z) => Live && Wanted((x >> Level, z >> Level)) && CoverOf(x, z) < 1f;
+    /// <summary>Whether full chunk (x, y, z), no longer wanted in full detail, stays loaded for now
+    /// (ChunkLoadSystem.HeldBy): until distant terrain has faded in over it, so it doesn't vanish first.</summary>
+    public bool HoldsFullChunk(int x, int y, int z)
+        => Live && Wanted((x >> Level, y >> Level, z >> Level)) && CoverOf(x, y, z) < 1f;
 
-    private float OwnCoverOf(int x, int z)
+    private float OwnCoverOf(int x, int y, int z)
     {
-        if (!Live || !_columns.TryGetValue((x >> Level, z >> Level), out var c) || WaitsForLight(c)) return 0f;
+        if (!Live || ChunkAt(x >> Level, y >> Level, z >> Level) is not { } c || WaitsForLight(c)) return 0f;
         if (c.Drawn) return CoarseShare(c);
         float t = Faded(c.FadeOutAt);
-        return t >= 1f || c.Shown.Count == 0 ? 0f : t <= 0f ? 1f : -t;
+        return t >= 1f ? 0f : t <= 0f ? 1f : -t;
     }
 
-    /// <summary>Whether this level draws column <paramref name="key"/> (its own columns) now, lit: what's under it
-    /// doesn't show.</summary>
-    private bool Shows((int x, int z) key)
-        => _columns.TryGetValue(key, out var c) && c.Drawn && !WaitsForLight(c);
+    /// <summary>Whether this level draws chunk <paramref name="key"/> (its own chunks) now, lit: what's under it doesn't
+    /// show.</summary>
+    private bool Shows((int x, int y, int z) key) => ChunkAt(key.x, key.y, key.z) is { Drawn: true } c && !WaitsForLight(c);
 
-    /// <summary>Whether this level's column <paramref name="key"/> can stand in for it in a coarser level's swap: it's
-    /// loaded and lit (or all air), or not drawn because what's under it is ready.</summary>
-    private bool Covers((int x, int z) key)
-        => Wanted(key) && _columns.TryGetValue(key, out var c) && !WaitsForLight(c);
+    /// <summary>Whether this level's chunk <paramref name="key"/> can stand in for it in a coarser level's swap: it's
+    /// in range, made and lit (or air), or not drawn because what's under it is ready.</summary>
+    private bool Covers((int x, int y, int z) key)
+        => Wanted(key) && _columns.TryGetValue((key.x, key.z), out var column)
+           && (column.At(key.y) is not { } c || !WaitsForLight(c));
 
-    /// <summary>How much of a drawn coarse column shows, 0-1: rising over <see cref="FadeSeconds"/> as it swaps in for
+    /// <summary>How much of a drawn coarse chunk shows, 0-1: rising over <see cref="FadeSeconds"/> as it swaps in for
     /// the full detail that was drawn there; all of it when it comes in over nothing, which happens behind the fog (see
     /// <see cref="ReadyRadius"/>), as dithering terrain in from nothing looks out of place.</summary>
-    private float CoarseShare(CoarseColumn c) => Faded(c.FadeInAt);
+    private float CoarseShare(CoarseChunk c) => Faded(c.FadeInAt);
 
     /// <summary>How far through its fade a swap that started at <paramref name="at"/> is, 0-1.</summary>
     private float Faded(float at) => FadeSeconds <= 0f ? 1f : System.Math.Clamp((_time - at) / FadeSeconds, 0f, 1f);
@@ -321,10 +330,11 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
         if (Finer == null) _load.FullDetailRadius = FullDetailRadius;
         if (!TryView(out _view)) return;
 
-        var centre = ((int)MathF.Floor(_view.X / ColumnBlocks), (int)MathF.Floor(_view.Z / ColumnBlocks));
+        var centre = ((int)MathF.Floor(_view.X / ColumnBlocks), (int)MathF.Floor(_view.Y / ColumnBlocks),
+                      (int)MathF.Floor(_view.Z / ColumnBlocks));
         int outer = (int)MathF.Ceiling(OuterRadius / ColumnBlocks);
         bool grouped = Coarser is { Live: true };
-        if (centre != _centre || outer != _outerColumns || grouped != _grouped) Rebuild(centre, outer, grouped);
+        if (centre != _centre || outer != _outerChunks || grouped != _grouped) Rebuild(centre, outer, grouped);
         FreeSome();
         _steps.Lap(DispatchStep);
 
@@ -349,40 +359,47 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
         return false;
     }
 
-    private bool Wanted((int x, int z) c) => InRange(c, _centre, _outerColumns, _grouped);
+    /// <summary>Whether chunk <paramref name="c"/> is in range: drawn here (where the finer level isn't ready).</summary>
+    private bool Wanted((int x, int y, int z) c) => InRange(c, _centre, _outerChunks, _grouped);
 
-    /// <summary>Whether a loaded column is kept: those wanted, and with a coarser level past this one a ring more, so
-    /// one that's just gone out of range is still drawn while the coarser level fades in over it (the coarser level
-    /// counts only wanted columns as ready, see <see cref="Covers"/>).</summary>
-    private bool Kept((int x, int z) c) => InRange(c, _centre, _outerColumns + (_grouped ? 2 : 0), _grouped);
+    /// <summary>Whether a chunk is kept (in the grid, and drawn while not ready): those wanted, and with a coarser level
+    /// past this one a shell more, so one that's just gone out of range is still drawn while the coarser level fades in
+    /// over it (the coarser level counts only wanted chunks as ready, see <see cref="Covers"/>).</summary>
+    private bool Kept((int x, int y, int z) c) => InRange(c, _centre, _outerChunks + (_grouped ? 2 : 0), _grouped);
 
-    /// <summary>Whether column <paramref name="c"/> is within <paramref name="outer"/> columns of
+    /// <summary>Whether some of column <paramref name="c"/> is wanted (it's made and queued by this), and kept.</summary>
+    private bool WantedColumn((int x, int z) c) => InRange((c.x, _centre.y, c.z), _centre, _outerChunks, _grouped);
+    private bool KeptColumn((int x, int z) c) => InRange((c.x, _centre.y, c.z), _centre, _outerChunks + (_grouped ? 2 : 0), _grouped);
+
+    /// <summary>Whether chunk <paramref name="c"/> is within <paramref name="outer"/> chunks of
     /// <paramref name="centre"/>. With a coarser level drawn past this one (<paramref name="grouped"/>), by the middle
-    /// of the 2x2 group it's in, so this level ends in whole coarser columns, each swapping for its four in one go (as
+    /// of the 2x2x2 group it's in, so this level ends in whole coarser chunks, each swapping for its eight in one go (as
     /// ChunkLoadSystem.FullDetailRadius does for full detail).</summary>
-    private static bool InRange((int x, int z) c, (int x, int z) centre, int outer, bool grouped)
+    private static bool InRange((int x, int y, int z) c, (int x, int y, int z) centre, int outer, bool grouped)
     {
-        if (!grouped) return Sq(c.x - centre.x) + Sq(c.z - centre.z) <= Sq(outer);
-        double dx = (c.x >> 1) * 2 + 1 - (centre.x + 0.5), dz = (c.z >> 1) * 2 + 1 - (centre.z + 0.5);
-        return dx * dx + dz * dz <= (double)outer * outer;
+        if (!grouped) return Sq(c.x - centre.x) + Sq(c.y - centre.y) + Sq(c.z - centre.z) <= Sq(outer);
+        double dx = (c.x >> 1) * 2 + 1 - (centre.x + 0.5), dy = (c.y >> 1) * 2 + 1 - (centre.y + 0.5),
+               dz = (c.z >> 1) * 2 + 1 - (centre.z + 0.5);
+        return dx * dx + dy * dy + dz * dz <= (double)outer * outer;
     }
 
     private static long Sq(int v) => (long)v * v;
 
-    /// <summary>The view moved to another coarse column (or the radius changed): drops what's out of range and queues
-    /// what's missing, nearest first.</summary>
-    private void Rebuild((int x, int z) centre, int outer, bool grouped)
+    /// <summary>The view moved to another coarse chunk (or the radius changed): drops the columns out of range and
+    /// queues those missing, nearest first. Which chunks of the rest are in range is looked at again (UpdateDrawn).</summary>
+    private void Rebuild((int x, int y, int z) centre, int outer, bool grouped)
     {
         _centre = centre;
-        _outerColumns = outer;
+        _outerChunks = outer;
         _grouped = grouped;
         // Out of range: not drawn from now on, and freed (out of the grid, meshes released) a few a frame.
-        foreach (var key in _columns.Keys.Where(k => !Kept(k)).ToList())
+        foreach (var key in _columns.Keys.Where(k => !KeptColumn(k)).ToList())
         {
             _columns.Remove(key, out var gone);
-            if (_toFree.Remove(key, out var older)) Free(key, older);
+            if (_toFree.Remove(key, out var older)) Free(older);
             _toFree[key] = gone!;
         }
+        foreach (var column in _columns.Values) column.Quiet = false;
 
         _queue.Clear();
         _queueHead = 0;
@@ -390,7 +407,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
         for (int dx = -outer - 2; dx <= outer + 2; dx++)
         {
             var c = (centre.x + dx, centre.z + dz);
-            if (!Wanted(c) || _columns.ContainsKey(c) || _inFlight.Contains(c)) continue;
+            if (!WantedColumn(c) || _columns.ContainsKey(c) || _inFlight.Contains(c)) continue;
             _queue.Add(c);
         }
         _queue.Sort((a, b) => (Sq(a.Item1 - centre.x) + Sq(a.Item2 - centre.z))
@@ -405,7 +422,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
         while (_inFlight.Count < MaxInFlight && i < _queue.Count && waiting < MaxInFlight)
         {
             var col = _queue[i];
-            if (_inFlight.Contains(col) || !Wanted(col)) { Dequeue(ref i); continue; }
+            if (_inFlight.Contains(col) || !WantedColumn(col)) { Dequeue(ref i); continue; }
             var work = Work(col);
             if (!Arrived(work)) { i++; waiting++; continue; }
             Dequeue(ref i);
@@ -453,6 +470,13 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
     private void DispatchColumn((int x, int z) col, List<(ChunkPosition Pos, bool Edited)> work)
     {
         _inFlight.Add(col);
+        // The column's layers in this level's chunks: every one gets a chunk, air included (see CoarseColumn).
+        int minY = 0, maxY = -1;
+        if (work.Count > 0)
+        {
+            minY = work.Min(w => w.Pos.Y) >> Level;
+            maxY = work.Max(w => w.Pos.Y) >> Level;
+        }
         BackgroundWork.Queue(() =>
         {
             var built = new List<Built>();
@@ -495,11 +519,11 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
                     }
                     chunk.Release();
                 }
-                _results.Enqueue(new Result(col, built, null));
+                _results.Enqueue(new Result(col, minY, maxY, built, null));
             }
             catch (Exception e)
             {
-                _results.Enqueue(new Result(col, built, e));
+                _results.Enqueue(new Result(col, minY, maxY, built, e));
             }
         });
     }
@@ -667,25 +691,32 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
             try
             {
                 if (r.Error != null) { Console.WriteLine($"[lod] coarse column failed: {r.Error}"); continue; }
-                if (!Live || !Wanted(r.Column)) continue;
-                var column = new CoarseColumn { MinY = int.MaxValue, MaxY = int.MinValue };
-                foreach (var b in r.Chunks)
+                if (!Live || !WantedColumn(r.Column)) continue;
+                // A chunk for every layer, and one of air above and below them all, so their faces there have air with
+                // light in it.
+                var column = new CoarseColumn { MinY = r.MinY - 1 };
+                var made = new Dictionary<int, Built>();
+                foreach (var b in r.Chunks) made[b.Y] = b;
+                for (int y = r.MinY - 1; y <= r.MaxY + 1; y++)
                 {
                     var chunk = new CoarseChunk
                     {
-                        Y = b.Y, Opaque = Upload(b.Opaque, LightmapKind.Opaque), Cutout = Upload(b.Cutout, LightmapKind.SeeThrough),
-                        Transparent = Upload(b.Transparent, LightmapKind.SeeThrough | LightmapKind.TwoSided),
-                        Occupancy = b.Occupancy, Pos = new ChunkPosition(r.Column.x, b.Y, r.Column.z),
-                        Min = new Vector3D<float>(r.Column.x * ColumnBlocks, b.Y * ColumnBlocks, r.Column.z * ColumnBlocks),
+                        Pos = new ChunkPosition(r.Column.x, y, r.Column.z),
+                        Min = new Vector3D<float>(r.Column.x * ColumnBlocks, y * ColumnBlocks, r.Column.z * ColumnBlocks),
+                        // In the grid if it has blocks or is next to some: air far from any has nothing to light.
+                        Gridded = made.ContainsKey(y - 1) || made.ContainsKey(y) || made.ContainsKey(y + 1),
                     };
                     chunk.Centre = chunk.Min + new Vector3D<float>(ColumnBlocks * 0.5f);
                     chunk.Model = Mat4.Multiply(Mat4.Translation(chunk.Min), Mat4.Scale(new Vector3D<float>(Cell)));
+                    if (made.TryGetValue(y, out var b))
+                    {
+                        chunk.Opaque = Upload(b.Opaque, LightmapKind.Opaque);
+                        chunk.Cutout = Upload(b.Cutout, LightmapKind.SeeThrough);
+                        chunk.Transparent = Upload(b.Transparent, LightmapKind.SeeThrough | LightmapKind.TwoSided);
+                        chunk.Occupancy = b.Occupancy;
+                    }
                     column.Chunks.Add(chunk);
-                    if (chunk.Opaque != null || chunk.Cutout != null || chunk.Transparent != null) column.Shown.Add(chunk);
-                    column.MinY = System.Math.Min(column.MinY, b.Y);
-                    column.MaxY = System.Math.Max(column.MaxY, b.Y);
                 }
-                column.Shown.Sort((a, b) => a.Pos.Y.CompareTo(b.Pos.Y)); // so the first and last bound it
                 Unload(r.Column); // a column made again replaces the one drawn meanwhile
                 _columns[r.Column] = column;
                 _built++;
@@ -710,45 +741,26 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
         return _renderer.UploadChunkQuads(p.Data.AsSpan(0, p.Bytes), (uint)p.QuadCount, _gridStore != null ? p.LightWords : 0, kind);
     }
 
-    private readonly SortedSet<int> _layers = new();
-    private bool _gridFull; // a column didn't fit in the grid: none is tried again until one is evicted
+    private bool _gridFull; // a chunk didn't fit in the grid: none is tried again until one is evicted
 
-    /// <summary>Puts a column's chunks in <see cref="Grid"/>, with the air right above and below each run of them, for
-    /// the lighting to light.</summary>
-    /// <summary>Puts more of a column's chunks in the grid, until <paramref name="until"/> (a timestamp): each writes
-    /// its occupancy and surface bricks, which for a tall column adds up to more than a frame should spend.</summary>
-    private void MakeResident((int x, int z) key, CoarseColumn column, long until)
+    /// <summary>Puts a chunk in <see cref="Grid"/> for the lighting to light: its occupancy and surface bricks.</summary>
+    private void MakeResident(CoarseChunk c)
     {
-        if (_gridStore == null || Grid.Index < 0 || column.Chunks.Count == 0) return;
-        if (column.ToPut == null)
-        {
-            if (_gridFull) return;
-            _layers.Clear();
-            foreach (var c in column.Chunks) { _layers.Add(c.Y - 1); _layers.Add(c.Y); _layers.Add(c.Y + 1); }
-            if (!_gridStore.CanHold(Grid, _layers.Count)) { _gridFull = true; return; } // drawn as open air until one goes
-            column.ToPut = new List<int>(_layers);
-        }
-        while (column.ToPut.Count > 0 && System.Diagnostics.Stopwatch.GetTimestamp() < until)
-        {
-            int y = column.ToPut[^1];
-            column.ToPut.RemoveAt(column.ToPut.Count - 1);
-            var occupancy = AllAir;
-            foreach (var c in column.Chunks) if (c.Y == y) { occupancy = c.Occupancy ?? AllAir; break; }
-            _gridStore.UploadPacked(Grid, new ChunkPosition(key.x, y, key.z), occupancy);
-            column.Resident.Add(y);
-            column.Covered = false; // fresh records aren't: set again for all of them below if it should be
-        }
+        if (_gridStore == null || Grid.Index < 0 || _gridFull || c.InGrid) return;
+        if (!_gridStore.CanHold(Grid, 1)) { _gridFull = true; return; } // drawn as open air until one goes
+        _gridStore.UploadPacked(Grid, c.Pos, c.Occupancy);
+        c.InGrid = true;
+        c.Covered = false; // a fresh record isn't: set again (UpdateDrawn) if it should be
     }
 
-    /// <summary>Takes a column's chunks out of <see cref="Grid"/> (it's unloaded).</summary>
-    private void Evict((int x, int z) key, CoarseColumn column)
+    /// <summary>Takes a chunk out of <see cref="Grid"/> (it's out of range, or unloaded).</summary>
+    private void Evict(CoarseChunk c)
     {
-        if (_gridStore == null) return;
-        foreach (int y in column.Resident) _gridStore.RemoveChunk(Grid, new ChunkPosition(key.x, y, key.z));
-        if (column.Resident.Count > 0) _gridFull = false;
-        column.Resident.Clear();
-        column.ToPut = null;
-        column.Settled = false;
+        c.Settled = false;
+        if (!c.InGrid) return;
+        c.InGrid = false;
+        _gridStore?.RemoveChunk(Grid, c.Pos);
+        _gridFull = false;
     }
 
     private readonly Dictionary<(int x, int z), CoarseColumn> _toFree = new();
@@ -763,22 +775,22 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
         {
             var (key, column) = _toFree.First();
             _toFree.Remove(key);
-            Free(key, column);
+            Free(column);
         }
     }
 
     private void Unload((int x, int z) key)
     {
         // One out of range still to be freed goes first: its chunks in the grid are at the same places.
-        if (_toFree.Remove(key, out var older)) Free(key, older);
-        if (_columns.Remove(key, out var column)) Free(key, column);
+        if (_toFree.Remove(key, out var older)) Free(older);
+        if (_columns.Remove(key, out var column)) Free(column);
     }
 
-    private void Free((int x, int z) key, CoarseColumn column)
+    private void Free(CoarseColumn column)
     {
-        Evict(key, column);
         foreach (var c in column.Chunks)
         {
+            Evict(c);
             _quads -= (c.Opaque?.QuadCount ?? 0) + (c.Cutout?.QuadCount ?? 0) + (c.Transparent?.QuadCount ?? 0);
             c.Opaque?.Dispose(); c.Cutout?.Dispose(); c.Transparent?.Dispose();
         }
@@ -796,120 +808,120 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
     private void UnloadAll()
     {
         foreach (var key in _columns.Keys.ToList()) Unload(key);
-        foreach (var (key, column) in _toFree) Free(key, column);
+        foreach (var (_, column) in _toFree) Free(column);
         _toFree.Clear();
         _queue.Clear();
         _queueHead = 0;
-        _centre = (int.MinValue, int.MinValue);
-        _outerColumns = -1;
+        _centre = (int.MinValue, int.MinValue, int.MinValue);
+        _outerChunks = -1;
     }
 
-    /// <summary>Which coarse columns are drawn this frame: those whose four full columns aren't all ready. One hidden
-    /// under full detail notes any edit to the chunks there, and is made again when it's next drawn.</summary>
+    /// <summary>Which coarse chunks are drawn this frame: those in range whose eight full chunks aren't all ready. A
+    /// column with chunks hidden under full detail notes any edit to the chunks there, and is made again when one of
+    /// them is next drawn.</summary>
     private void UpdateDrawn()
     {
-        // Edits under hidden columns are looked for in one of them a frame (round the ready ones in turn), and in each
-        // as it comes back into view, rather than in all of them every frame (256 chunks each).
-        // Only columns near the view can have full detail ready (it loads to FullDetailRadius, in the 2x2 groups that
-        // coarse columns are); a far one that's drawn, settled and uncovered has nothing to do.
+        // Edits under hidden chunks are looked for in one column a frame (round those with ready chunks in turn), and in
+        // each as its chunks come back into view, rather than in all of them every frame (256 chunks each).
+        // Only chunks near the view can have full detail ready (it loads to FullDetailRadius, in the 2x2x2 groups that
+        // coarse chunks are); a far column whose chunks are drawn, settled and uncovered has nothing to do.
         int readyIndex = 0, scan = _editScan;
         long nearSq = Sq((int)MathF.Ceiling(InnerRadius / ColumnBlocks) + 2);
-        // Moving on changes which full columns are wanted, but that alone changes no column's readiness until its
-        // chunks load or unload (which mark it), so it's not looked at all again. A few near columns a frame are
-        // looked at anyway, round them in turn, in case a change came without a mark.
+        // Moving on changes which full chunks are wanted, which marks their columns (ChunkLoadSystem.ColumnChanged); a few
+        // near chunks a frame are looked at anyway, round them in turn, in case a change came without a mark.
         int nearIndex = 0, recheckFrom = _recheck, recheckTo = _recheck + RecheckPerFrame;
         _litChecksLeft = LitChecksPerFrame;
         foreach (var (key, column) in _columns)
         {
-            bool near = Sq(key.x - _centre.x) + Sq(key.z - _centre.z) <= nearSq;
-            if (!near) column.ReadyKnown = false; // found again when it's next near (changes meanwhile aren't kept)
-            if (!near && column.Drawn && column.Settled && !column.Covered && !column.Leaving) continue;
-            bool due = false;
-            if (near) { due = nearIndex >= recheckFrom && nearIndex < recheckTo; nearIndex++; }
-            if (near && (due || !column.ReadyKnown || _readyDirty.Contains(key) || Finer != null))
+            long across = Sq(key.x - _centre.x) + Sq(key.z - _centre.z);
+            bool nearColumn = across <= nearSq;
+            if (!nearColumn && column.Quiet) continue;
+            bool dirty = _readyDirty.Contains(key), quiet = !nearColumn, anyReady = false;
+            foreach (var c in column.Chunks)
             {
-                _steps.Lap(SwapStep);
-                bool all = true;
-                for (int j = 0; j < 4 && all; j++)
+                var k = (key.x, c.Pos.Y, key.z);
+                if (!Kept(k)) { Drop(c); continue; }
+                bool near = nearColumn && across + Sq(c.Pos.Y - _centre.y) <= nearSq;
+                if (!near) c.ReadyKnown = false; // found again when it's next near (changes meanwhile aren't kept)
+                bool due = false;
+                if (near) { due = nearIndex >= recheckFrom && nearIndex < recheckTo; nearIndex++; }
+                if (near && (due || !c.ReadyKnown || dirty || Finer != null))
                 {
-                    int x = key.x * 2 + (j & 1), z = key.z * 2 + (j >> 1);
-                    all = Finer?.Covers((x, z)) ?? _load.IsColumnReady(x, z);
+                    _steps.Lap(SwapStep);
+                    c.Ready = ChildrenReady(c.Pos);
+                    _steps.Lap(ReadyStep);
+                    c.ReadyKnown = true;
                 }
-                _steps.Lap(ReadyStep);
-                column.Ready = all;
-                column.ReadyKnown = true;
-            }
-            bool ready = near && column.Ready;
-            if (ready)
-            {
-                if (readyIndex++ == scan && !column.ChildEdited) column.ChildEdited = AnyEdited(key);
-            }
-            else if (!column.Drawn && !_inFlight.Contains(key) && column.ChildEdited)
-            {
-                column.ChildEdited = false;
-                _queue.Insert(_queueHead, key); // drawn as it was until it's made again
-            }
-            else if (!column.Drawn && column.Covered && _editChecks.Add(key)) _editCheckOrder.Enqueue(key); // see below
-            // In the grid while it's loaded, so it's lit and ready whenever full detail goes; until it's lit, a drawn
-            // column keeps the light maps it baked before, or is lit as open air if it never had any.
-            if (!column.InGrid)
-            {
-                _toPlace.Add((Distance(_view, key), key, column)); // put in the grid after this loop, nearest first
-                column.Settled = false;
-                column.Waiting = 0;
-                column.LitSoFar = 0;
-            }
-            else if (!column.Settled)
-            {
-                column.Settled = ++column.Waiting >= MinSwapFrames && CheckNow(key)
-                                 && (column.Waiting > (column.Baked ? MaxSwapFrames : MaxFirstLightFrames)
-                                     || ResidentLit(key, column));
-                // One held back for its light swaps in from when it's first shown (the full detail is held till then).
-                if (column.Settled && !column.Baked && column.Drawn && float.IsFinite(column.FadeInAt)) column.FadeInAt = _time;
-            }
-            if (!ready)
-            {
-                column.Leaving = false;
-                if (!column.Drawn) column.FadeInAt = column.WasReady ? _time : float.NegativeInfinity;
-                column.Drawn = true;
-            }
-            else if (column.Drawn)
-            {
-                // Swapping to full detail: hidden once that terrain is lit by its own blocks (not the coarse ones over
-                // it), so it comes in showing its light.
-                if (!column.Leaving) { column.Leaving = true; column.LeaveWait = 0; column.ChildrenLitSoFar = 0; }
-                if (++column.LeaveWait >= MinSwapFrames && CheckNow(key) && (column.LeaveWait > MaxSwapFrames || ChildrenLit(key, column)))
+                bool ready = near && c.Ready;
+                if (ready) anyReady = true;
+                else if (!c.Drawn && !_inFlight.Contains(key) && column.ChildEdited)
                 {
-                    column.Drawn = false;
-                    column.Leaving = false;
-                    column.FadeOutAt = _time;
+                    column.ChildEdited = false;
+                    _queue.Insert(_queueHead, key); // drawn as it was until it's made again
                 }
+                else if (!c.Drawn && c.Covered && _editChecks.Add(key)) _editCheckOrder.Enqueue(key); // see below
+                // In the grid while it's kept, so it's lit and ready whenever full detail goes; until it's lit, a drawn
+                // chunk keeps the light maps it baked before, or is held back if it never had any.
+                if (!c.Gridded) c.Settled = true; // air with no blocks near: nothing to light
+                else if (!c.InGrid)
+                {
+                    _toPlace.Add((Distance(_view, c.Pos), c)); // put in the grid after this loop, nearest first
+                    c.Settled = false;
+                    c.Waiting = 0;
+                }
+                else if (!c.Settled)
+                {
+                    c.Settled = ++c.Waiting >= MinSwapFrames && CheckNow(c.Pos)
+                                && (c.Waiting > (c.Baked ? MaxSwapFrames : MaxFirstLightFrames) || ChunkLit(c));
+                    // One held back for its light swaps in from when it's first shown (the full detail is held till then).
+                    if (c.Settled && !c.Baked && c.Drawn && float.IsFinite(c.FadeInAt)) c.FadeInAt = _time;
+                }
+                if (!ready)
+                {
+                    c.Leaving = false;
+                    if (!c.Drawn) c.FadeInAt = c.WasReady ? _time : float.NegativeInfinity;
+                    c.Drawn = true;
+                }
+                else if (c.Drawn)
+                {
+                    // Swapping to full detail: hidden once that terrain is lit by its own blocks (not the coarse ones over
+                    // it), so it comes in showing its light.
+                    if (!c.Leaving) { c.Leaving = true; c.LeaveWait = 0; }
+                    if (++c.LeaveWait >= MinSwapFrames && CheckNow(c.Pos) && (c.LeaveWait > MaxSwapFrames || ChildrenLit(c.Pos)))
+                    {
+                        c.Drawn = false;
+                        c.Leaving = false;
+                        c.FadeOutAt = _time;
+                    }
+                }
+                // Covered while its full detail is ready, and while that's still drawn as this swaps in over it: the world's
+                // rays then see only full-detail blocks there. (Uncovered at once, the full detail fading out was shadowed
+                // by the coarse blocks in it, and darkened.)
+                bool covered = ready || c.Drawn && (WaitsForLight(c) || CoarseShare(c) < 1f);
+                if (c.Covered != covered) SetCovered(c, covered);
+                c.WasReady = ready;
+                quiet &= c.Drawn && c.Settled && !c.Covered && !c.Leaving && (c.InGrid || !c.Gridded);
             }
-            // Covered while its full detail is ready, and while that's still drawn as this swaps in over it: the world's
-            // rays then see only full-detail blocks there. (Uncovered at once, the full detail fading out was shadowed
-            // by the coarse blocks in it, and darkened.)
-            bool covered = ready || column.Drawn && (WaitsForLight(column) || CoarseShare(column) < 1f);
-            if (column.Covered != covered) SetCovered(key, column, covered);
-            column.WasReady = ready;
+            column.Quiet = quiet;
+            if (anyReady && readyIndex++ == scan && !column.ChildEdited) column.ChildEdited = AnyEdited(key);
         }
         _editScan = readyIndex == 0 ? 0 : (scan + 1) % readyIndex;
         _readyDirty.Clear();
 
-        // Putting a column in the grid writes each chunk's occupancy and its surface bricks: as many a frame as fit the
-        // budget, the rest on later frames (held back, or lit as before, meanwhile). Nearest first: the nearest held
-        // back holds the fog, and in the dictionary's order, while the view moved, columns arriving far away took the
-        // budget and the fog stopped until it caught up.
+        // Putting a chunk in the grid writes its occupancy and its surface bricks: as many a frame as fit the budget, the
+        // rest on later frames (held back, or lit as before, meanwhile). Nearest first: the nearest held back holds the
+        // fog, and in the dictionary's order, while the view moved, chunks arriving far away took the budget and the fog
+        // stopped until it caught up.
         if (_toPlace.Count > 0)
         {
             _toPlace.Sort((a, b) => a.Distance.CompareTo(b.Distance));
-            double residentMs = 0;
             _steps.Lap(SwapStep);
-            foreach (var (_, key, column) in _toPlace)
+            long until = System.Diagnostics.Stopwatch.GetTimestamp()
+                         + (long)(ResidentBudgetMs * System.Diagnostics.Stopwatch.Frequency / 1000);
+            foreach (var (_, c) in _toPlace)
             {
-                if (residentMs >= ResidentBudgetMs) break;
-                long start = System.Diagnostics.Stopwatch.GetTimestamp();
-                MakeResident(key, column, start + (long)((ResidentBudgetMs - residentMs) * System.Diagnostics.Stopwatch.Frequency / 1000));
-                residentMs += System.Diagnostics.Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+                if (_gridFull || System.Diagnostics.Stopwatch.GetTimestamp() >= until) break;
+                MakeResident(c);
             }
             _steps.Lap(ResidentStep);
             _toPlace.Clear();
@@ -925,79 +937,69 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
         _recheck = recheckTo < nearIndex ? recheckTo : 0;
     }
 
-    /// <summary>Whether a column waiting on lighting looks again this frame: every <see cref="LitCheckEvery"/> frames,
-    /// staggered across columns, as a check can read hundreds of chunks' bricks.</summary>
-    private bool CheckNow((int x, int z) key) => ((_frame + key.x * 3 + key.z * 5) & (LitCheckEvery - 1)) == 0;
+    /// <summary>A chunk out of range (past the kept shell): not drawn, and out of the grid.</summary>
+    private void Drop(CoarseChunk c)
+    {
+        Evict(c);
+        c.Drawn = c.Leaving = c.ReadyKnown = c.WasReady = c.Covered = false;
+        c.FadeOutAt = float.NegativeInfinity; // gone at once: it's at the fog, or under full detail
+        c.Waiting = 0;
+    }
+
+    /// <summary>Whether the eight finer chunks under coarse chunk <paramref name="p"/> are ready to be seen.</summary>
+    private bool ChildrenReady(ChunkPosition p)
+    {
+        for (int j = 0; j < 8; j++)
+        {
+            int x = p.X * 2 + (j & 1), y = p.Y * 2 + ((j >> 1) & 1), z = p.Z * 2 + (j >> 2);
+            if (!(Finer?.Covers((x, y, z)) ?? _load.IsChunkReady(new ChunkPosition(x, y, z)))) return false;
+        }
+        return true;
+    }
+
+    /// <summary>Whether a chunk waiting on lighting looks again this frame: every <see cref="LitCheckEvery"/> frames,
+    /// staggered across chunks, as a check reads up to a few hundred bricks.</summary>
+    private bool CheckNow(ChunkPosition p) => ((_frame + p.X * 3 + p.Y * 7 + p.Z * 5) & (LitCheckEvery - 1)) == 0;
     private const int LitCheckEvery = 4;
 
-    private void SetCovered((int x, int z) key, CoarseColumn column, bool covered)
+    private void SetCovered(CoarseChunk c, bool covered)
     {
-        column.Covered = covered;
-        if (_gridStore == null) return;
-        foreach (int y in column.Resident) _gridStore.SetCovered(Grid, new ChunkPosition(key.x, y, key.z), covered);
+        c.Covered = covered;
+        if (_gridStore != null && c.InGrid) _gridStore.SetCovered(Grid, c.Pos, covered);
     }
 
-    // Both go on from the first chunk not lit last time (LitSoFar, ChildrenLitSoFar), rather than reading every chunk's
-    // bricks again on each look, and read them all once more when they get to the end, for any that went unlit since.
-    private bool ResidentLit((int x, int z) key, CoarseColumn column)
+    /// <summary>Whether a chunk in the grid shows its light: its bricks, and the air bricks above and below it that its
+    /// top and bottom faces read, are lit (settled, the first time it's shown).</summary>
+    private bool ChunkLit(CoarseChunk c)
     {
-        _steps.Lap(SwapStep);
-        bool result = ResidentLitUntimed(key, column);
-        _steps.Lap(LitStep);
-        return result;
-    }
-
-    private bool ResidentLitUntimed((int x, int z) key, CoarseColumn column)
-    {
-        var lit = column.Baked ? IsLit : IsSettled ?? IsLit; // shown for the first time: once its light is done
+        var lit = c.Baked ? IsLit : IsSettled ?? IsLit;
         if (lit == null) return true;
-        while (column.LitSoFar < column.Resident.Count)
-        {
-            for (; column.LitSoFar < column.Resident.Count; column.LitSoFar++)
-                if (!Budgeted(lit, Grid, new ChunkPosition(key.x, column.Resident[column.LitSoFar], key.z))) return false;
-            column.LitSoFar = FirstUnlit(lit, column.Resident.Count, i => new ChunkPosition(key.x, column.Resident[i], key.z), Grid);
-        }
-        return true;
-    }
-
-    private bool ChildrenLit((int x, int z) key, CoarseColumn column)
-    {
         _steps.Lap(SwapStep);
-        bool result = ChildrenLitUntimed(key, column);
+        bool result = Budgeted(lit, Grid, c.Pos) && Budgeted(lit, Grid, Above(c.Pos, 1)) && Budgeted(lit, Grid, Above(c.Pos, -1));
         _steps.Lap(LitStep);
         return result;
     }
 
-    private bool ChildrenLitUntimed((int x, int z) key, CoarseColumn column)
+    private static ChunkPosition Above(ChunkPosition p, int dy) => new(p.X, p.Y + dy, p.Z);
+
+    /// <summary>Whether the full-detail chunks under coarse chunk <paramref name="p"/> are lit by their own blocks.</summary>
+    private bool ChildrenLit(ChunkPosition p)
     {
-        if (IsLit == null || Finer != null) return true; // a finer level's columns are lit before they're ready (Covers)
-        int minY = _load.MinLayer;
-        ChunkPosition At(int i) => new(key.x * 2 + ((i >> 6) & 1), minY + (i & 63), key.z * 2 + (i >> 7));
-        while (column.ChildrenLitSoFar < 4 * 64)
-        {
-            for (; column.ChildrenLitSoFar < 4 * 64; column.ChildrenLitSoFar++)
-                if (!Budgeted(IsLit, _volume.Gpu, At(column.ChildrenLitSoFar))) return false;
-            column.ChildrenLitSoFar = FirstUnlit(IsLit, 4 * 64, At, _volume.Gpu);
-        }
-        return true;
+        if (IsLit == null || Finer != null) return true; // a finer level's chunks are lit before they're ready (Covers)
+        _steps.Lap(SwapStep);
+        bool result = true;
+        for (int j = 0; j < 8 && result; j++)
+            result = Budgeted(IsLit, _volume.Gpu, new ChunkPosition(p.X * 2 + (j & 1), p.Y * 2 + ((j >> 1) & 1), p.Z * 2 + (j >> 2)));
+        _steps.Lap(LitStep);
+        return result;
     }
 
     /// <summary>A chunk's light check, while the frame's budget of them lasts (each reads up to 64 bricks); past it
-    /// every chunk counts as not lit yet, to be looked at again from there on a later frame.</summary>
+    /// every chunk counts as not lit yet, to be looked at again on a later frame.</summary>
     private bool Budgeted(Func<GridHandle, ChunkPosition, bool> lit, GridHandle grid, ChunkPosition pos)
         => _litChecksLeft-- > 0 && lit(grid, pos);
     private int _litChecksLeft;
     private const int LitChecksPerFrame = 2048;
-
-    /// <summary>The first of <paramref name="count"/> chunks not lit, or <paramref name="count"/> past the end if all
-    /// are.</summary>
-    private int FirstUnlit(Func<GridHandle, ChunkPosition, bool> lit, int count, Func<int, ChunkPosition> at,
-                           GridHandle grid)
-    {
-        for (int i = 0; i < count; i++)
-            if (!Budgeted(lit, grid, at(i))) return i;
-        return int.MaxValue;
-    }
 
     private bool AnyEdited((int x, int z) key)
     {
@@ -1024,8 +1026,8 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
     public float ReadyRadius(Vector3D<float> centre)
     {
         if (!Live) return Finer?.ReadyRadius(centre) ?? OuterRadius;
-        // Columns in the outermost band don't count: the view moving on a column brings a ring of new ones in there
-        // at once, and the fog pulled in for each and went out again (they come in behind nearly total fog anyway).
+        // Chunks in the outermost band don't count: the view moving on a chunk brings a shell of new ones in there at
+        // once, and the fog pulled in for each and went out again (they come in behind nearly total fog anyway).
         float best = OuterRadius, ignoreFrom = OuterRadius - 2 * ColumnBlocks;
         _fogHeld = default;
         for (var level = this; level != null; level = level.Finer)
@@ -1044,12 +1046,13 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
     {
         FogReason.Making   => $"level {_fogHeld.Level} column being made, {_fogHeld.At:F0} blocks out",
         FogReason.Queued   => $"level {_fogHeld.Level} column queued, {_fogHeld.At:F0} blocks out",
-        FogReason.Placing  => $"level {_fogHeld.Level} column waiting to go in the light grid, {_fogHeld.At:F0} blocks out",
-        FogReason.Lighting => $"level {_fogHeld.Level} column waiting {_fogHeld.Frames} frames for its light, {_fogHeld.At:F0} blocks out",
+        FogReason.Placing  => $"level {_fogHeld.Level} chunk waiting to go in the light grid, {_fogHeld.At:F0} blocks out",
+        FogReason.Lighting => $"level {_fogHeld.Level} chunk waiting {_fogHeld.Frames} frames for its light, {_fogHeld.At:F0} blocks out",
         _ => "nothing (out to the full range)",
     };
 
-    /// <summary>The nearest of this level's columns not ready to be seen: being made, or held back for its light, where
+    /// <summary>The nearest of this level's terrain not ready to be seen: a column being made or queued (by its distance
+    /// across, as which of its chunks are in range isn't known yet), or a chunk in range held back for its light, where
     /// nothing else shows instead (the finer level's ready, or the coarser one drawn).</summary>
     private float NotReadyAt(Vector3D<float> centre, out FogReason why, out int frames)
     {
@@ -1058,58 +1061,80 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
         frames = 0;
         var coarser = Coarser is { Live: true } up ? up : null;
         foreach (var c in _inFlight)
-            if (!_columns.ContainsKey(c) && !Hidden(c) && Distance(centre, c) is var d && d < best) // one being made again is drawn meanwhile
+            if (!_columns.ContainsKey(c) && !HiddenColumn(c) && Across(centre, c) is var d && d < best) // one being made again is drawn meanwhile
                 (best, why) = (d, FogReason.Making);
         for (int i = _queueHead; i < _queue.Count; i++)
-            if (!_columns.ContainsKey(_queue[i]) && !Hidden(_queue[i]))
+            if (!_columns.ContainsKey(_queue[i]) && !HiddenColumn(_queue[i]))
             {
-                if (Distance(centre, _queue[i]) is var d && d < best) (best, why) = (d, FogReason.Queued);
+                if (Across(centre, _queue[i]) is var d && d < best) (best, why) = (d, FogReason.Queued);
                 break;
             }
         foreach (var (k, column) in _columns)
-            if (WaitsForLight(column) && !(column.ReadyKnown && column.Ready) && !Hidden(k) // what's under it shows instead
-                && Distance(centre, k) is var d && d < best)
-                (best, why, frames) = (d, column.InGrid ? FogReason.Lighting : FogReason.Placing, column.Waiting);
+        {
+            if (Across(centre, k) >= best) continue;
+            foreach (var c in column.Chunks)
+                if (WaitsForLight(c) && !(c.ReadyKnown && c.Ready) && Kept((k.x, c.Pos.Y, k.z))
+                    && !(coarser != null && coarser.Shows((k.x >> 1, c.Pos.Y >> 1, k.z >> 1))) // what's under it shows instead
+                    && Distance(centre, c.Pos) is var d && d < best)
+                    (best, why, frames) = (d, c.InGrid ? FogReason.Lighting : FogReason.Placing, c.Waiting);
+        }
         return best;
 
-        bool Hidden((int x, int z) k) => coarser != null && coarser.Shows((k.x >> 1, k.z >> 1));
+        bool HiddenColumn((int x, int z) k) => coarser != null && coarser.Shows((k.x >> 1, _centre.y >> 1, k.z >> 1));
     }
 
-    /// <summary>Whether a column is held back until it's lit: it's never been lit from the grid, and it can be (the grid
+    /// <summary>Whether a chunk is held back until it's lit: it's never been lit from the grid, and it can be (the grid
     /// isn't full). Drawn meanwhile it would show as open air, bright where it should be shadowed.</summary>
-    private bool WaitsForLight(CoarseColumn column)
-        => Grid.Index >= 0 && !_gridFull && !column.Baked && !column.Settled && column.Shown.Count > 0;
+    private bool WaitsForLight(CoarseChunk c)
+        => Grid.Index >= 0 && !_gridFull && !c.Baked && !c.Settled && c.HasFaces;
 
-    /// <summary>The nearest columns held back for their first light hold the fog where they are (see NotReadyAt). The
+    /// <summary>The nearest chunks held back for their first light hold the fog where they are (see NotReadyAt). The
     /// light queues go nearest the camera first, so while the view moves the full detail loading nearer keeps them
     /// waiting, and the fog stuck until it stopped. Their chunks are lit ahead of the queues instead.</summary>
     private void HurryFirstLight()
     {
         if (Hurry == null) return;
+        // The nearest few, in one pass: _hurriedNow kept nearest first.
         int picked = 0;
-        for (; picked < HurriedColumns; picked++)
+        foreach (var (k, column) in _columns)
         {
-            float best = float.PositiveInfinity;
-            (int x, int z) bestKey = default;
-            CoarseColumn? bestColumn = null;
-            foreach (var (k, column) in _columns)
-                if (WaitsForLight(column) && !column.Hurried && Distance(_view, k) is var d && d < best)
-                    (best, bestKey, bestColumn) = (d, k, column);
-            if (bestColumn == null) break;
-            bestColumn.Hurried = true;
-            _hurriedNow[picked] = bestColumn;
-            for (int i = bestColumn.LitSoFar; i < bestColumn.Resident.Count; i++)
-                Hurry(Grid, new ChunkPosition(bestKey.x, bestColumn.Resident[i], bestKey.z));
+            if (picked == HurriedChunks && Across(_view, k) >= _hurriedDistance[picked - 1]) continue;
+            foreach (var c in column.Chunks)
+            {
+                if (!c.InGrid || !WaitsForLight(c)) continue;
+                float d = Distance(_view, c.Pos);
+                if (picked == HurriedChunks && d >= _hurriedDistance[picked - 1]) continue;
+                int at = picked < HurriedChunks ? picked++ : picked - 1;
+                for (; at > 0 && _hurriedDistance[at - 1] > d; at--)
+                    (_hurriedNow[at], _hurriedDistance[at]) = (_hurriedNow[at - 1], _hurriedDistance[at - 1]);
+                (_hurriedNow[at], _hurriedDistance[at]) = (c, d);
+            }
         }
-        for (int n = 0; n < picked; n++) _hurriedNow[n]!.Hurried = false;
+        for (int n = 0; n < picked; n++)
+        {
+            var pos = _hurriedNow[n]!.Pos;
+            Hurry(Grid, pos);
+            Hurry(Grid, Above(pos, 1));
+            Hurry(Grid, Above(pos, -1));
+            _hurriedNow[n] = null;
+        }
     }
 
     /// <summary>Horizontal distance from <paramref name="centre"/> to the nearest point of coarse column <paramref name="c"/>.</summary>
-    private float Distance(Vector3D<float> centre, (int x, int z) c)
+    private float Across(Vector3D<float> centre, (int x, int z) c)
     {
         float dx = MathF.Max(0f, MathF.Max(c.x * ColumnBlocks - centre.X, centre.X - (c.x + 1) * ColumnBlocks));
         float dz = MathF.Max(0f, MathF.Max(c.z * ColumnBlocks - centre.Z, centre.Z - (c.z + 1) * ColumnBlocks));
         return MathF.Sqrt(dx * dx + dz * dz);
+    }
+
+    /// <summary>Distance from <paramref name="centre"/> to the nearest point of coarse chunk <paramref name="p"/>.</summary>
+    private float Distance(Vector3D<float> centre, ChunkPosition p)
+    {
+        float dx = MathF.Max(0f, MathF.Max(p.X * ColumnBlocks - centre.X, centre.X - (p.X + 1) * ColumnBlocks));
+        float dy = MathF.Max(0f, MathF.Max(p.Y * ColumnBlocks - centre.Y, centre.Y - (p.Y + 1) * ColumnBlocks));
+        float dz = MathF.Max(0f, MathF.Max(p.Z * ColumnBlocks - centre.Z, centre.Z - (p.Z + 1) * ColumnBlocks));
+        return MathF.Sqrt(dx * dx + dy * dy + dz * dz);
     }
 
     public void Render(SystemStage stage, in RenderContext frame)
@@ -1132,26 +1157,27 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
         var coarser = Coarser is { Live: true } c0 ? c0 : null;
         foreach (var ((cx, cz), column) in _columns)
         {
-            // Coming in over the finer level it replaces (drawing the pixels that leaves out), drawn, or going away
-            // (leaving out the pixels the finer level coming back draws): a pixel shows one level, never both.
-            float share = column.Drawn ? CoarseShare(column) : 1f - Faded(column.FadeOutAt);
-            if (share <= 0f) continue;
-            float dissolve = column.Drawn ? (share < 1f ? -share : 0f) : 1f - share;
-            // A coarser level over it hides it the same way.
-            float over = coarser?.OwnCoverOf(cx << Level, cz << Level) ?? 0f;
-            if (over >= 1f) continue;
-            if (over != 0f) dissolve = over;
-            var shown = column.Shown;
-            if (shown.Count == 0 || WaitsForLight(column)) continue;
-            if (!frame.Frustum.Intersects(shown[0].Min, shown[^1].Min + size)) continue; // shown is in Y order
-            // Lit from the grid once it's settled there; until then (or leaving it) with the light maps it last baked;
-            // one never lit isn't drawn (above) unless the grid is full, when it's lit as open air.
-            bool bake = column.Settled && Grid.Index >= 0;
-            if (bake) column.Baked = true;
-            int grid = column.Baked && Grid.Index >= 0 ? Grid.Index : Renderer.LodGrid;
-            foreach (var c in shown)
+            if (column.Chunks.Count == 0) continue;
+            if (!frame.Frustum.Intersects(column.Chunks[0].Min, column.Chunks[^1].Min + size)) continue; // in Y order
+            foreach (var c in column.Chunks)
             {
-                if (shown.Count > 1 && !frame.Frustum.Intersects(c.Min, c.Min + size)) continue;
+                if (!c.HasFaces) continue;
+                // Coming in over the finer level it replaces (drawing the pixels that leaves out), drawn, or going away
+                // (leaving out the pixels the finer level coming back draws): a pixel shows one level, never both.
+                float share = c.Drawn ? CoarseShare(c) : 1f - Faded(c.FadeOutAt);
+                if (share <= 0f) continue;
+                float dissolve = c.Drawn ? (share < 1f ? -share : 0f) : 1f - share;
+                // A coarser level over it hides it the same way.
+                float over = coarser?.OwnCoverOf(cx << Level, c.Pos.Y << Level, cz << Level) ?? 0f;
+                if (over >= 1f) continue;
+                if (over != 0f) dissolve = over;
+                if (WaitsForLight(c)) continue;
+                if (!frame.Frustum.Intersects(c.Min, c.Min + size)) continue;
+                // Lit from the grid once it's settled there; until then (or leaving it) with the light maps it last
+                // baked; one never lit isn't drawn (above) unless the grid is full, when it's lit as open air.
+                bool bake = c.Settled && c.InGrid;
+                if (bake) c.Baked = true;
+                int grid = c.Baked && Grid.Index >= 0 ? Grid.Index : Renderer.LodGrid;
                 _draws.Add(new Draw(Vector3D.DistanceSquared(c.Centre, camera), c, grid, bake, dissolve));
             }
         }
@@ -1215,14 +1241,19 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
             if (Finer is { Live: false }) ImGui.TextDisabled($"  (off while level {Level - 1} is)");
         }
         ImGui.SliderFloat($"Out to (blocks)##lod{Level}", ref OuterRadius, 128f, 4096f, "%.0f");
-        int drawnColumns = _columns.Values.Count(c => c.Drawn);
-        int chunks = _columns.Values.Sum(c => c.Chunks.Count);
-        ImGui.Text($"Columns: {_columns.Count:N0} loaded ({drawnColumns:N0} drawn), {_inFlight.Count} being made, " +
-                   $"{_queue.Count - _queueHead:N0} queued");
-        ImGui.Text($"Chunks: {chunks:N0} ({_chunksDrawn:N0} drawn this frame), {_quads:N0} quads " +
-                   $"(~{_quads * ChunkQuad.SizeBytes / (1024.0 * 1024.0):F1} MB); made so far: {_built:N0}");
+        int withFaces = 0, drawn = 0, inGrid = 0;
+        foreach (var column in _columns.Values)
+            foreach (var c in column.Chunks)
+            {
+                if (c.HasFaces) withFaces++;
+                if (c.Drawn && c.HasFaces) drawn++;
+                if (c.InGrid) inGrid++;
+            }
+        ImGui.Text($"Columns: {_columns.Count:N0} made, {_inFlight.Count} being made, {_queue.Count - _queueHead:N0} queued");
+        ImGui.Text($"Chunks with faces: {withFaces:N0} ({drawn:N0} drawn, {_chunksDrawn:N0} in view), {_quads:N0} quads " +
+                   $"(~{_quads * ChunkQuad.SizeBytes / (1024.0 * 1024.0):F1} MB); columns made so far: {_built:N0}");
         if (Grid.Index >= 0)
-            ImGui.Text($"Lit as a grid: {Grid.Chunks.Count:N0} chunks, {Grid.Slots.Count:N0} light bricks " +
+            ImGui.Text($"Lit as a grid: {inGrid:N0} chunks, {Grid.Slots.Count:N0} light bricks " +
                        $"({(long)Grid.Slots.Count * GridStore.SlotBytes / (1024 * 1024)} MB)");
         else ImGui.TextDisabled("Lit as open air (no light store)");
         _steps.Draw();

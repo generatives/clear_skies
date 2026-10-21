@@ -81,14 +81,15 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
     private readonly Dictionary<int, (short dx, short dz, int d)[]> _offsetsByDistance = new();
     private readonly float _viewDistance; // the farthest anything is drawn
 
-    /// <summary>An interest as streaming sees it: its entity, the column it's streamed around, its load radius in
-    /// columns, and how many columns a side it's wanted in: 1, or 2 for a view whose distant terrain is drawn coarse
-    /// (see <see cref="FullDetailRadius"/>), so each coarse column's four columns are wanted together.</summary>
-    private readonly record struct Ring(Entity Interest, (int x, int z) Column, int LoadColumns, int Align);
+    /// <summary>An interest as streaming sees it: its entity, the column and chunk layer it's streamed around, its load
+    /// radius in columns, and how many chunks a side it's wanted in: 1, whole columns within the radius; or 2 for a view
+    /// whose distant terrain is drawn coarse (see <see cref="FullDetailRadius"/>), a sphere of 2x2x2 groups of chunks, so
+    /// each coarse chunk's eight are wanted together.</summary>
+    private readonly record struct Ring(Entity Interest, (int x, int z) Column, int Layer, int LoadColumns, int Align);
 
     private readonly List<Ring> _rings = new();   // as of the last rebuild
     private readonly List<Ring> _current = new(); // this frame's
-    private readonly Dictionary<Entity, (int x, int z)> _interestColumns = new();
+    private readonly Dictionary<Entity, (int x, int y, int z)> _interestChunks = new();
     private readonly HashSet<Entity> _seen = new();
     private readonly World _world;
 
@@ -275,7 +276,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
                     continue;
                 }
                 // Dropped if the interests moved on while it generated, or an edit created the chunk meanwhile.
-                if (Wanted(pos.X, pos.Z) && !_staticVolume.IsLoaded(pos)) _staticVolume.AddChunk(pos, data, prepared);
+                if (Wanted(pos) && !_staticVolume.IsLoaded(pos)) _staticVolume.AddChunk(pos, data, prepared);
             }
             Loaded(job.Column);
             ColumnChanged?.Invoke(job.Column.x, job.Column.z);
@@ -307,15 +308,16 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
                 if (draw >= interest.ColliderRadius) align = 2;
             }
             int loadColumns = (int)MathF.Ceiling(MathF.Max(interest.ColliderRadius, draw) / S);
-            _current.Add(new Ring(e, InterestColumn(e, position), loadColumns, align));
+            var (cx, cy, cz) = InterestChunk(e, position);
+            _current.Add(new Ring(e, (cx, cz), cy, loadColumns, align));
             _seen.Add(e);
         }
-        if (_interestColumns.Count > _seen.Count)
-            foreach (var gone in _interestColumns.Keys.Where(k => !_seen.Contains(k)).ToList()) _interestColumns.Remove(gone);
+        if (_interestChunks.Count > _seen.Count)
+            foreach (var gone in _interestChunks.Keys.Where(k => !_seen.Contains(k)).ToList()) _interestChunks.Remove(gone);
         if (_published.Count > _seen.Count)
             foreach (var gone in _published.Keys.Where(k => !_seen.Contains(k)).ToList()) _published.Remove(gone);
-        _current.Sort((a, b) => (a.Column.x, a.Column.z, a.LoadColumns, a.Interest.GetHashCode())
-                                .CompareTo((b.Column.x, b.Column.z, b.LoadColumns, b.Interest.GetHashCode())));
+        _current.Sort((a, b) => (a.Column.x, a.Column.z, a.Layer, a.LoadColumns, a.Interest.GetHashCode())
+                                .CompareTo((b.Column.x, b.Column.z, b.Layer, b.LoadColumns, b.Interest.GetHashCode())));
     }
 
     /// <summary>How many times the queue has been rebuilt (the view moved, or loading caught up).</summary>
@@ -344,7 +346,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
         // (An edit that put blocks where there were none counts as a build once its chunk unloads. Until then the chunk
         // is loaded, so the queue doesn't need to know.)
         foreach (var (p, _) in _staticVolume.All)
-            if (!Wanted(p.X, p.Z) && !_held.ContainsKey(p)) _toUnload.Add(p);
+            if (!Wanted(p) && !_held.ContainsKey(p)) _toUnload.Add(p);
 
         // Forget the columns no longer wanted: their air is re-learned on return.
         _columnsUnwanted.Clear();
@@ -353,8 +355,10 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
         foreach (var key in _columnsUnwanted)
         {
             _columns.Remove(key);
-            ColumnChanged?.Invoke(key.x, key.z); // no longer ready (see IsColumnReady), though still loaded for now
+            ColumnChanged?.Invoke(key.x, key.z); // no longer ready (see IsChunkReady), though still loaded for now
         }
+        // Which of their layers are wanted may have changed too (an aligned ring's ball moved up or down).
+        foreach (var key in _columns.Keys) ColumnChanged?.Invoke(key.x, key.z);
         _columnsUnwanted.Clear();
         foreach (var key in _loading.Keys)
             if (!Wanted(key.x, key.z)) _columnsUnwanted.Add(key);
@@ -392,7 +396,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
         while (_unloadAt < _toUnload.Count && _steps.SinceLap() - start < budgetMs)
         {
             var p = _toUnload[_unloadAt++];
-            if (HeldBy?.Invoke(p.X, p.Z) == true && _staticVolume.GetEntry(p) != null) { _held.TryAdd(p, _frame); continue; }
+            if (HeldBy?.Invoke(p.X, p.Y, p.Z) == true && _staticVolume.GetEntry(p) != null) { _held.TryAdd(p, _frame); continue; }
             Unload(p); // a no-op if eviction already unloaded it
         }
         if (_held.Count == 0) return;
@@ -402,8 +406,8 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
         _letGo.Clear();
         foreach (var (p, since) in _held)
         {
-            if (Wanted(p.X, p.Z) || _staticVolume.GetEntry(p) == null) { _letGo.Add(p); continue; } // wanted again, or gone already
-            if (HeldBy?.Invoke(p.X, p.Z) == true && _frame - since <= MaxHoldFrames) continue;
+            if (Wanted(p) || _staticVolume.GetEntry(p) == null) { _letGo.Add(p); continue; } // wanted again, or gone already
+            if (HeldBy?.Invoke(p.X, p.Y, p.Z) == true && _frame - since <= MaxHoldFrames) continue;
             if (_steps.SinceLap() - start >= heldBudget) break;
             Unload(p);
             _letGo.Add(p);
@@ -446,22 +450,23 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
                           $"unloaded {_toUnload.Count}, evicted {_evictions} columns so far");
     }
 
-    /// <summary>Blocks an interest must be past its column's edge before it's streamed around the next, so standing on
-    /// a column boundary doesn't unload and reload the edge of the view every wobble.</summary>
+    /// <summary>Blocks an interest must be past its chunk's edge before it's streamed around the next, so standing on
+    /// a chunk boundary doesn't unload and reload the edge of the view every wobble.</summary>
     private const float ViewHysteresis = 2f;
 
-    /// <summary>The column an interest is streamed around: the one it's in, once it's clearly left the last one.</summary>
-    private (int x, int z) InterestColumn(Entity e, Vector3D<float> position)
+    /// <summary>The chunk an interest is streamed around: the one it's in, once it's clearly left the last one.</summary>
+    private (int x, int y, int z) InterestChunk(Entity e, Vector3D<float> position)
     {
-        var column = ((int)MathF.Floor(position.X / S), (int)MathF.Floor(position.Z / S));
-        if (_interestColumns.TryGetValue(e, out var last) && column != last)
+        var chunk = ((int)MathF.Floor(position.X / S), (int)MathF.Floor(position.Y / S), (int)MathF.Floor(position.Z / S));
+        if (_interestChunks.TryGetValue(e, out var last) && chunk != last)
         {
-            float x0 = last.x * S, z0 = last.z * S;
+            float x0 = last.x * S, y0 = last.y * S, z0 = last.z * S;
             bool near = position.X >= x0 - ViewHysteresis && position.X < x0 + S + ViewHysteresis &&
+                        position.Y >= y0 - ViewHysteresis && position.Y < y0 + S + ViewHysteresis &&
                         position.Z >= z0 - ViewHysteresis && position.Z < z0 + S + ViewHysteresis;
-            if (near) column = last;
+            if (near) chunk = last;
         }
-        return _interestColumns[e] = column;
+        return _interestChunks[e] = chunk;
     }
 
     /// <summary>Gives each interest <see cref="TerrainScanned"/>: how far around it the scan has looked, short of the
@@ -510,7 +515,7 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
         return true;
     }
 
-    /// <summary>Within an interest's load radius.</summary>
+    /// <summary>Some chunk of column (x, z) is within an interest's load radius.</summary>
     private bool Wanted(int x, int z)
     {
         foreach (var ring in _rings)
@@ -518,8 +523,36 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
         return false;
     }
 
-    /// <summary>Within <paramref name="ring"/>'s load radius: of its column, or for an aligned ring, of the 2x2 group
-    /// it's in (the group's distance from the group the interest is in).</summary>
+    /// <summary>Chunk <paramref name="p"/> is within an interest's load radius.</summary>
+    private bool Wanted(ChunkPosition p)
+        => p.Y >= _minY && p.Y <= _minY + 63 && (WantedLayers(p.X, p.Z) & Bit(p)) != 0;
+
+    /// <summary>The layers of column (x, z) within an interest's load radius, as bits from <see cref="MinLayer"/>.</summary>
+    private ulong WantedLayers(int x, int z)
+    {
+        ulong bits = 0;
+        foreach (var ring in _rings) bits |= LayersBy(ring, x, z);
+        return bits;
+    }
+
+    /// <summary>The layers of column (x, z) <paramref name="ring"/> wants: all of a column within its radius, or for an
+    /// aligned ring, those whose 2x2x2 group is within its radius of the group the interest is in (by groups, as
+    /// <see cref="WantedBy"/> measures across), so its full detail is a ball of whole coarse chunks.</summary>
+    private ulong LayersBy(in Ring ring, int x, int z)
+    {
+        if (!WantedBy(ring, x, z)) return 0;
+        if (ring.Align == 1) return ulong.MaxValue;
+        int r = (ring.LoadColumns + 1) / 2;
+        long across = Sq((x >> 1) - (ring.Column.x >> 1)) + Sq((z >> 1) - (ring.Column.z >> 1));
+        int up = (int)System.Math.Sqrt(Sq(r) - across); // groups above and below the interest's
+        int lo = ((ring.Layer >> 1) - up) * 2 - _minY, hi = ((ring.Layer >> 1) + up) * 2 + 1 - _minY;
+        lo = System.Math.Max(lo, 0);
+        hi = System.Math.Min(hi, 63);
+        return lo > hi ? 0 : (ulong.MaxValue >> (63 - hi)) & (ulong.MaxValue << lo);
+    }
+
+    /// <summary>Some of column (x, z) is within <paramref name="ring"/>'s load radius: of its column, or for an aligned
+    /// ring, of the 2x2 group it's in (the group's distance from the group the interest is in).</summary>
     private static bool WantedBy(in Ring ring, int x, int z)
     {
         if (ring.Align == 1) return Sq(x - ring.Column.x) + Sq(z - ring.Column.z) <= Sq(ring.LoadColumns);
@@ -529,13 +562,14 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
 
     // ── Distant terrain (see LodTerrainSystem) ──────────────────────────────────
 
-    /// <summary>When set, the view's terrain loads in full detail only this far (blocks), in whole 2x2 groups of
-    /// columns, and <see cref="LodTerrainSystem"/> draws the rest coarse. Null: full detail as far as the view.</summary>
+    /// <summary>When set, the view's terrain loads in full detail only this far (blocks), in a ball of whole 2x2x2
+    /// groups of chunks, and <see cref="LodTerrainSystem"/> draws the rest coarse. Null: full detail in whole columns as
+    /// far as the view.</summary>
     public float? FullDetailRadius { get; set; }
 
-    /// <summary>Whether a column no longer wanted stays loaded for now (its chunks are unloaded once it says no): while
+    /// <summary>Whether chunk (x, y, z), no longer wanted, stays loaded for now (it's unloaded once this says no): while
     /// distant terrain fades in over it, so the full detail goes as it comes in rather than before.</summary>
-    public Func<int, int, bool>? HeldBy { get; set; }
+    public Func<int, int, int, bool>? HeldBy { get; set; }
 
     /// <summary>The lowest streamed chunk layer.</summary>
     public int MinLayer => _minY;
@@ -546,23 +580,19 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
     /// <summary>Whether chunk <paramref name="pos"/> has been edited since it was generated (it's loaded from the store).</summary>
     public bool IsEdited(ChunkPosition pos) => _edited.Contains(pos);
 
-    /// <summary>Column (x, z) started or finished loading, or one of its chunks unloaded: whether it's ready (see
-    /// <see cref="IsColumnReady"/>) may have changed, as it may when a chunk's mesh comes or goes. (The interests
-    /// moving on changes which columns are wanted without this: a column that stops being wanted is ready until its
-    /// chunks unload, as far as anyone can see.)</summary>
+    /// <summary>Column (x, z) started or finished loading, one of its chunks unloaded, or which of its chunks are wanted
+    /// changed: whether its chunks are ready (see <see cref="IsChunkReady"/>) may have changed, as it may when a chunk's
+    /// mesh comes or goes.</summary>
     public event Action<int, int>? ColumnChanged;
 
-    /// <summary>Whether column (x, z) is wanted and drawn in full: nothing in it still to load, and every chunk of it
-    /// that may hold something loaded and meshed.</summary>
-    public bool IsColumnReady(int x, int z)
+    /// <summary>Whether chunk <paramref name="p"/> is wanted and drawn in full: its column isn't loading, and if it may
+    /// hold something, it's loaded and meshed.</summary>
+    public bool IsChunkReady(ChunkPosition p)
     {
-        if (!Wanted(x, z) || _inFlight.ContainsKey((x, z))) return false;
-        for (ulong bits = MaybeContent(x, z); bits != 0; bits &= bits - 1)
-        {
-            var entry = _staticVolume.GetEntry(new ChunkPosition(x, _minY + BitOperations.TrailingZeroCount(bits), z));
-            if (entry == null || !entry.Entity.Has<ChunkMeshedFlag>()) return false;
-        }
-        return true;
+        if (!Wanted(p) || _inFlight.ContainsKey((p.X, p.Z))) return false;
+        if ((MaybeContent(p.X, p.Z) & Bit(p)) == 0) return true;
+        var entry = _staticVolume.GetEntry(p);
+        return entry != null && entry.Entity.Has<ChunkMeshedFlag>();
     }
 
     private static long Sq(int v) => (long)v * v;
@@ -749,10 +779,10 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
         _evictNext = 0;
     }
 
-    /// <summary>Whether column (x, z) has chunks that may hold something and aren't loaded yet.</summary>
+    /// <summary>Whether column (x, z) has wanted chunks that may hold something and aren't loaded yet.</summary>
     private bool HasMissing(int x, int z)
     {
-        for (ulong bits = MaybeContent(x, z); bits != 0; bits &= bits - 1)
+        for (ulong bits = MaybeContent(x, z) & WantedLayers(x, z); bits != 0; bits &= bits - 1)
             if (!_staticVolume.IsLoaded(new ChunkPosition(x, _minY + BitOperations.TrailingZeroCount(bits), z))) return true;
         return false;
     }
@@ -803,11 +833,12 @@ public sealed class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
         return true;
     }
 
-    /// <summary>Column (x, z)'s chunks that may hold something and aren't loaded yet, with whether each is edited.</summary>
+    /// <summary>Column (x, z)'s wanted chunks that may hold something and aren't loaded yet, with whether each is
+    /// edited.</summary>
     private List<(ChunkPosition Pos, bool Edited)> Missing(int x, int z)
     {
         var missing = new List<(ChunkPosition, bool)>();
-        for (ulong bits = MaybeContent(x, z); bits != 0; bits &= bits - 1)
+        for (ulong bits = MaybeContent(x, z) & WantedLayers(x, z); bits != 0; bits &= bits - 1)
         {
             var p = new ChunkPosition(x, _minY + BitOperations.TrailingZeroCount(bits), z);
             if (!_staticVolume.IsLoaded(p)) missing.Add((p, _edited.Contains(p)));
