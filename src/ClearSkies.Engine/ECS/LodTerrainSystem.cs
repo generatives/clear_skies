@@ -133,6 +133,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
         public bool Baked;       // lit from the grid: it settled there at least once
         public bool Covered;     // its full chunks are ready, so the world's rays pass through it (GridStore.SetCovered)
         public bool Leaving;     // its full chunks are ready: still drawn until they're lit
+        public bool Evicting;    // out of range, in _toEvict: taken out of the grid a few a frame
         public int Waiting, LeaveWait; // frames spent settling, and leaving
         public float FadeInAt = float.NegativeInfinity, FadeOutAt = float.NegativeInfinity; // when it last swapped in, out
         public bool WasReady;    // its full chunks were ready when last looked at, so they were drawn
@@ -332,6 +333,7 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
         bool grouped = Coarser is { Live: true };
         if (centre != _centre || outer != _outerChunks || grouped != _grouped) Rebuild(centre, outer, grouped);
         FreeSome();
+        EvictSome();
         _steps.Lap(DispatchStep);
 
         ApplyResults();
@@ -759,6 +761,26 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
         _gridFull = false;
     }
 
+    // Chunks gone out of range, to take out of the grid: a step of the view takes a whole shell of them out of range at
+    // once, and taking them all out in that frame (each refreshes its neighbours' surfaces) made a long one.
+    private readonly List<CoarseChunk> _toEvict = new();
+    private int _evictAt;
+    private const double EvictBudgetMs = 0.5;
+
+    /// <summary>Takes chunks gone out of range out of the grid while the budget lasts; one back in range meanwhile
+    /// stays.</summary>
+    private void EvictSome()
+    {
+        long start = System.Diagnostics.Stopwatch.GetTimestamp();
+        while (_evictAt < _toEvict.Count && System.Diagnostics.Stopwatch.GetElapsedTime(start).TotalMilliseconds < EvictBudgetMs)
+        {
+            var c = _toEvict[_evictAt++];
+            c.Evicting = false;
+            if (!Kept((c.Pos.X, c.Pos.Y, c.Pos.Z))) Evict(c);
+        }
+        if (_evictAt == _toEvict.Count) { _toEvict.Clear(); _evictAt = 0; }
+    }
+
     private readonly Dictionary<(int x, int z), CoarseColumn> _toFree = new();
     private const double FreeBudgetMs = 0.5;
 
@@ -806,6 +828,9 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
         foreach (var key in _columns.Keys.ToList()) Unload(key);
         foreach (var (_, column) in _toFree) Free(column);
         _toFree.Clear();
+        foreach (var c in _toEvict) c.Evicting = false;
+        _toEvict.Clear();
+        _evictAt = 0;
         _queue.Clear();
         _queueHead = 0;
         _centre = (int.MinValue, int.MinValue, int.MinValue);
@@ -933,10 +958,11 @@ public sealed class LodTerrainSystem : ISystem, IRenderSystem, IFarTerrain
         _recheck = recheckTo < nearIndex ? recheckTo : 0;
     }
 
-    /// <summary>A chunk out of range (past the kept shell): not drawn, and out of the grid.</summary>
+    /// <summary>A chunk out of range (past the kept shell): not drawn, and out of the grid a few a frame (see
+    /// <see cref="EvictSome"/>).</summary>
     private void Drop(CoarseChunk c)
     {
-        Evict(c);
+        if (c.InGrid && !c.Evicting) { c.Evicting = true; _toEvict.Add(c); }
         c.Drawn = c.Leaving = c.ReadyKnown = c.WasReady = c.Covered = false;
         c.FadeOutAt = float.NegativeInfinity; // gone at once: it's at the fog, or under full detail
         c.Waiting = 0;
