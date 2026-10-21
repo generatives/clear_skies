@@ -170,12 +170,15 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             {
                 int hi = _spans[col * MaxSpans + s].Hi;
                 if (hi + Trees.MaxHeight < originY || hi >= originY + S) continue;
-                if (s + 1 < _spanCount[col] && _spans[col * MaxSpans + s + 1].Lo <= hi + Trees.MaxHeight + 1) continue;
                 var biome = _biome[col * MaxSpans + s];
                 var ground = ContinentTerrain.Block(hi, hi, _strata[col], _patch[col], _bare[col * MaxSpans + s], biome, _dry[col * MaxSpans + s]);
                 int x = pos.X * S + lx, z = pos.Z * S + lz;
                 var kind = Trees.At(ground, x, hi, z, _woods[col], _seed, biome);
-                if (kind != Trees.Kind.None) Trees.Grow(data, originY, kind, lx, hi, lz, Trees.Hash(x, hi, z, _seed));
+                if (kind == Trees.Kind.None) continue;
+                int reach = Trees.ReachOf(kind);
+                if (lx < reach || lz < reach || lx >= S - reach || lz >= S - reach) continue;
+                if (s + 1 < _spanCount[col] && _spans[col * MaxSpans + s + 1].Lo <= hi + Trees.HeightOf(kind) + 1) continue;
+                Trees.Grow(data, originY, kind, lx, hi, lz, Trees.Hash(x, hi, z, _seed));
             }
         }
     }

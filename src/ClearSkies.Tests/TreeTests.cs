@@ -145,9 +145,9 @@ public class TreeTests
             for (int lx = 0; lx < ChunkData.Size; lx++)
             {
                 if (data.Get(lx, ly, lz) == BlockId.Air) continue;
-                Assert.InRange(lx, x - Trees.Reach, x + Trees.Reach);
-                Assert.InRange(lz, z - Trees.Reach, z + Trees.Reach);
-                Assert.InRange(ly, top + 1, top + Trees.MaxHeight);
+                Assert.InRange(lx, x - Trees.ReachOf(kind), x + Trees.ReachOf(kind));
+                Assert.InRange(lz, z - Trees.ReachOf(kind), z + Trees.ReachOf(kind));
+                Assert.InRange(ly, top + 1, top + Trees.HeightOf(kind));
             }
         }
     }
