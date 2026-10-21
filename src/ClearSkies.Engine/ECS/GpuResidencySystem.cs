@@ -111,6 +111,7 @@ public sealed class GpuResidencySystem : ISystem, IDebugUiSystem
     {
         _steps.Start();
         _uploaded = 0;
+        _store.BeginRemovals(); // the chunks next to those released are looked at once, at the end (see GridStore)
         // No longer drawn: a chunk's storage and light bricks go, and a grid's whole GPU registration (re-registered on
         // its first upload). The flag is what uploads a chunk again if it's drawn again; nothing is uploaded meanwhile,
         // since only drawn chunks are (_needsGpuUpload requires Rendered).
@@ -159,6 +160,7 @@ public sealed class GpuResidencySystem : ISystem, IDebugUiSystem
             entity.Set<ChunkUploadedFlag>();
             _uploaded++;
         }
+        _store.EndRemovals();
         _steps.Lap(UploadStep);
     }
 }
