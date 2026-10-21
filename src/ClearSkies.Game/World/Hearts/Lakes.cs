@@ -11,7 +11,7 @@ namespace ClearSkies.Game.Generation;
 /// gone are drains, so no lake sits over a crack, hangs over a gap or rests against a piece's worn edge. Each lake is
 /// decided by exactly one tile, the one holding its first cell, and may reach into its neighbours (not too near the
 /// edge of its window), so every chunk agrees. Its level is a block under the spill point, so the water stands below
-/// its banks. None lies in a desert.
+/// its banks. None lies in a desert, and the drier the climate the fewer hollows hold one.
 /// </summary>
 public sealed class Lakes
 {
@@ -30,6 +30,10 @@ public sealed class Lakes
     // already FaceMargin away).
     private const int Perch = 8;
     private const float PerchDrop = 10f;
+
+    /// <summary>A hollow holds a lake by the climate's wetness (see ContinentTerrain.Wet): never at WetFrom or drier,
+    /// always at WetFull or wetter.</summary>
+    private const float WetFrom = 0.3f, WetFull = 0.85f;
 
     /// <summary>The ground of a drain: lower than any land, so whatever reaches it spills out.</summary>
     private const float Drain = -1e6f;
@@ -198,6 +202,12 @@ public sealed class Lakes
             foreach (int c in cells)
                 if (Dry(x0 + (c % Window) * Step, z0 + (c / Window) * Step, height[c])) { dry = true; break; }
             if (dry) continue;
+            // The wetter the climate, the more hollows hold a lake: decided by the lake's first cell, so the same in
+            // every window.
+            float sx = x0 + si * Step, sz = z0 + sk * Step;
+            float chance = Smoothstep(WetFrom, WetFull, _terrain.Wet(sx, sz));
+            int gsx = tx * Core - Off + si, gsz = tz * Core - Off + sk;
+            if (Trees.Hash(gsx, 0, gsz, _seed ^ 0x1A4E) % 1000 >= chance * 1000f) continue;
             int lakeLevel = (int)MathF.Floor(filled[start]) - 1;
             // Only cells actually under the water are kept, so the shore round them (see Level) is just by the water,
             // not over the flats round it at its level.
@@ -257,6 +267,12 @@ public sealed class Lakes
         }
         float surface = _terrain.Height(x, z);
         return surface - MathF.Max(0f, surface - b.Surface) * (1f - HeartWorldGenerator.Flatten) - HeartWorldGenerator.MaxDrop * b.Drop;
+    }
+
+    private static float Smoothstep(float edge0, float edge1, float x)
+    {
+        float t = Math.Clamp((x - edge0) / (edge1 - edge0), 0f, 1f);
+        return t * t * (3f - 2f * t);
     }
 
     private static int FloorDiv(int a, int b) => a >= 0 ? a / b : (a - b + 1) / b;
