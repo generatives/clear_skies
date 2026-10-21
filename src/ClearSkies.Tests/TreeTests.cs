@@ -22,6 +22,66 @@ public class TreeTests
     }
 
     [Fact]
+    public void Biomes_go_by_heat_and_wetness_and_set_what_grows()
+    {
+        Assert.Equal(Biome.Badlands, Biomes.Pick(1.2f, 0f));
+        Assert.Equal(Biome.Desert, Biomes.Pick(0.8f, 0.3f));
+        Assert.Equal(Biome.Autumn, Biomes.Pick(0.2f, 0.8f));
+        Assert.Equal(Biome.Temperate, Biomes.Pick(0.55f, 0.5f));
+        Assert.True(Biomes.Heat(200f, 0f) > Biomes.Heat(1200f, 0f)); // hotter deep down
+
+        Assert.Equal(new[] { Trees.Kind.Birch }, Enumerable.Range(0, 20000)
+            .Select(i => Trees.At(BlockId.Grass, i, 500, -i * 7, 0.8f, 99, Biome.Autumn))
+            .Where(k => k != Trees.Kind.None).Distinct());
+        Assert.Equal(BlockId.RedSand, ContinentTerrain.Block(500, 500, 0f, 0.5f, 0f, Biome.Badlands));
+        Assert.True(Biomes.Tint(0.55f, 0.55f).A < 0.05f);                   // temperate keeps its green
+        Assert.True(Biomes.Tint(0.3f, 0.75f).A > 0.8f);                     // autumn tints strongly
+        Assert.InRange(Biomes.Tint(0.425f, 0.65f).A, 0.2f, 0.6f);           // and halfway it blends
+        Assert.Equal(BlockId.Sand, ContinentTerrain.Block(500, 500, 0f, 0.5f, 0f, Biome.Desert));
+        var edge = Biomes.Tint(0.645f, 0.455f);                             // grass by a desert's edge dries yellow
+        Assert.True(Biomes.Pick(0.645f, 0.455f) == Biome.Temperate && edge.A > 0.5f && edge.R > edge.B);
+    }
+
+    [Fact]
+    public void Cold_and_deep_biomes_have_their_own_ground_and_trees()
+    {
+        Assert.Equal(Biome.Tundra, Biomes.Pick(0.05f, 0.5f));
+        Assert.Equal(Biome.Steppe, Biomes.Pick(0.15f, 0.05f));
+        Assert.Equal(Biome.Jungle, Biomes.Pick(1.05f, 0.8f));
+        Assert.Equal(Biome.Volcanic, Biomes.Pick(1.4f, 0.3f));
+
+        Assert.Equal(BlockId.SnowyDirt, ContinentTerrain.Block(600, 600, 0f, 0.2f, 0f, Biome.Tundra));
+        Assert.Equal(BlockId.Ice, ContinentTerrain.Block(600, 600, 0f, 0.9f, 0f, Biome.Tundra));
+        Assert.Equal(BlockId.Gravel, ContinentTerrain.Block(600, 600, 0f, 0.2f, 0f, Biome.Steppe));
+        Assert.Equal(BlockId.Lava, ContinentTerrain.Block(100, 100, 0f, 0.8f, 0f, Biome.Volcanic));
+        Assert.Equal(BlockId.Ash, ContinentTerrain.Block(100, 100, 0f, 0.5f, 0f, Biome.Volcanic));
+        Assert.True(BlockRegistry.Get(BlockId.GlowingLava).LightEmission > 0);
+        Assert.Equal(0, BlockRegistry.Get(BlockId.Lava).LightEmission);
+
+        static Trees.Kind[] Grown(Biome biome) => Enumerable.Range(0, 20000)
+            .Select(i => Trees.At(BlockId.Grass, i, 500, -i * 7, 0.8f, 99, biome)).Where(k => k != Trees.Kind.None).Distinct().ToArray();
+        Assert.Equal(new[] { Trees.Kind.Jungle }, Grown(Biome.Jungle));
+        Assert.Equal(new[] { Trees.Kind.Pine }, Grown(Biome.Tundra));
+    }
+
+    [Fact]
+    public void Cave_crystals_glow_and_come_in_sparse_clusters()
+    {
+        Assert.True(BlockRegistry.Get(BlockId.AmberCrystal).LightEmission > 0);
+        Assert.True(BlockRegistry.Get(BlockId.GoldCrystal).LightEmission > 0);
+        Assert.Equal(BlockId.AmberCrystal, Crystals.For(Biome.Badlands));
+        Assert.Equal(BlockId.GoldCrystal, Crystals.For(Biome.Autumn));
+
+        var lit = new List<(int X, int Z)>();
+        for (int z = 0; z < 480; z++)
+        for (int x = 0; x < 480; x++)
+            if (Crystals.At(x, 300, z, 7)) lit.Add((x, z));
+        Assert.InRange(lit.Count, 20, 480 * 480 / 500);                     // a few, not a sprinkle everywhere
+        Assert.All(lit, a => Assert.Contains(lit, b => b != a                // and each beside others in its cluster
+            && System.Math.Abs(a.X - b.X) <= 2 * Crystals.Radius && System.Math.Abs(a.Z - b.Z) <= 2 * Crystals.Radius));
+    }
+
+    [Fact]
     public void Leaves_keep_their_faces_against_each_other()
     {
         Assert.False(BlockRegistry.Get(BlockId.Leaves).HidesFaceOf(BlockId.Leaves));
@@ -69,6 +129,8 @@ public class TreeTests
     [InlineData(Trees.Kind.Oak)]
     [InlineData(Trees.Kind.Pine)]
     [InlineData(Trees.Kind.Cactus)]
+    [InlineData(Trees.Kind.Birch)]
+    [InlineData(Trees.Kind.Jungle)]
     public void A_grown_tree_stands_on_its_top_within_its_reach(Trees.Kind kind)
     {
         for (ulong h = 0; h < 50; h++)
@@ -76,16 +138,16 @@ public class TreeTests
             var data = new ChunkData();
             const int x = 16, z = 16, top = 0;
             Trees.Grow(data, originY: 0, kind, x, top, z, h * 0x9E3779B97F4A7C15UL);
-            var stem = kind == Trees.Kind.Cactus ? BlockId.Cactus : BlockId.Log;
+            var stem = kind switch { Trees.Kind.Cactus => BlockId.Cactus, Trees.Kind.Birch => BlockId.BirchLog, _ => BlockId.Log };
             Assert.Equal(stem, data.Get(x, top + 1, z));
             for (int ly = 0; ly < ChunkData.Size; ly++)
             for (int lz = 0; lz < ChunkData.Size; lz++)
             for (int lx = 0; lx < ChunkData.Size; lx++)
             {
                 if (data.Get(lx, ly, lz) == BlockId.Air) continue;
-                Assert.InRange(lx, x - Trees.Reach, x + Trees.Reach);
-                Assert.InRange(lz, z - Trees.Reach, z + Trees.Reach);
-                Assert.InRange(ly, top + 1, top + Trees.MaxHeight);
+                Assert.InRange(lx, x - Trees.ReachOf(kind), x + Trees.ReachOf(kind));
+                Assert.InRange(lz, z - Trees.ReachOf(kind), z + Trees.ReachOf(kind));
+                Assert.InRange(ly, top + 1, top + Trees.HeightOf(kind));
             }
         }
     }

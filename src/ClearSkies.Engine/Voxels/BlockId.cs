@@ -43,4 +43,23 @@ public enum BlockId : byte
     // Anchoring: an anchor welds its ship to what's next to it while the ship's toggles are on.
     Anchor        = 33,
     Toggle        = 34,
+
+    // Biomes: badlands' red sand and rock, autumn woods' birches.
+    RedSand       = 35,
+    RedRock       = 36,
+    BirchLog      = 37,
+    AutumnLeaves  = 38,
+
+    // Glowing crystals set into cave floors and ceilings.
+    AmberCrystal  = 39,
+    GoldCrystal   = 40,
+
+    // More biomes: tundra's snowy dirt and ice, steppe's gravel, the volcanic wastes' ash and lava (only some of
+    // which glows, so a lava pool isn't hundreds of lamps).
+    SnowyDirt     = 41,
+    Ice           = 42,
+    Gravel        = 43,
+    Ash           = 44,
+    Lava          = 45,
+    GlowingLava   = 46,
 }

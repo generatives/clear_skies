@@ -12,7 +12,7 @@ public static class BlockRegistry
     {
         Register(new BlockDef { Id = BlockId.Air,   Name = "Air",   Color = default,                   IsSolid = false, PlaceOriented = false, LightEmission = 0,  Weight = 0 });
         Register(new BlockDef { Id = BlockId.Grass, Name = "Grass", Color = new(0.35f, 0.75f, 0.25f), IsSolid = true, PlaceOriented = false,  LightEmission = 0, Weight = 2,
-            Texture = "dirt_grass", TextureTop = "leaves", TextureBottom = "dirt" });
+            Texture = "dirt_grass", TextureTop = "leaves", TextureBottom = "dirt", Tint = BlockTint.Top });
         Register(new BlockDef { Id = BlockId.Dirt,  Name = "Dirt",  Color = new(0.55f, 0.38f, 0.22f), IsSolid = true, PlaceOriented = false,  LightEmission = 0, Weight = 2,
             Texture = "dirt" });
         // Deep/foundation fill (island core, dome underside, subsurface everywhere) — "greystone" is a
@@ -87,10 +87,10 @@ public static class BlockRegistry
         // through, but still targetable so they can be broken, and Replaceable: a block placed against one takes its
         // place. Colour is only a fallback (and the hotbar's swatch) if the sprite is missing.
         // The green grasses' quads each pick a sprite, mostly their own, sometimes a neighbouring height's.
-        RegisterCross(BlockId.ShortGrass,    "Short Grass",    "grass1",         new(0.20f, 0.70f, 0.40f), ["grass1", "grass1", "grass2", "grass3"]);
-        RegisterCross(BlockId.GrassTuft,     "Grass Tuft",     "grass2",         new(0.20f, 0.70f, 0.40f), ["grass2", "grass2", "grass1", "grass3"]);
-        RegisterCross(BlockId.GrassBlades,   "Grass Blades",   "grass3",         new(0.20f, 0.70f, 0.40f), ["grass3", "grass3", "grass2", "grass4"]);
-        RegisterCross(BlockId.TallGrass,     "Tall Grass",     "grass4",         new(0.20f, 0.70f, 0.40f), ["grass4", "grass4", "grass4", "grass3"]);
+        RegisterCross(BlockId.ShortGrass,    "Short Grass",    "grass1",         new(0.20f, 0.70f, 0.40f), ["grass1", "grass1", "grass2", "grass3"], tint: true);
+        RegisterCross(BlockId.GrassTuft,     "Grass Tuft",     "grass2",         new(0.20f, 0.70f, 0.40f), ["grass2", "grass2", "grass1", "grass3"], tint: true);
+        RegisterCross(BlockId.GrassBlades,   "Grass Blades",   "grass3",         new(0.20f, 0.70f, 0.40f), ["grass3", "grass3", "grass2", "grass4"], tint: true);
+        RegisterCross(BlockId.TallGrass,     "Tall Grass",     "grass4",         new(0.20f, 0.70f, 0.40f), ["grass4", "grass4", "grass4", "grass3"], tint: true);
         RegisterCross(BlockId.DryGrass,      "Dry Grass",      "grass_tan",      new(0.85f, 0.78f, 0.60f));
         RegisterCross(BlockId.BrownGrass,    "Brown Grass",    "grass_brown",    new(0.62f, 0.40f, 0.20f));
         RegisterCross(BlockId.RedMushroom,   "Red Mushroom",   "mushroom_red",   new(0.95f, 0.40f, 0.15f), rigid: true);
@@ -104,16 +104,46 @@ public static class BlockRegistry
         Register(new BlockDef { Id = BlockId.Log, Name = "Log", Color = new(0.45f, 0.32f, 0.20f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 1,
             Texture = "trunk_side", TextureTop = "trunk_top", TextureBottom = "trunk_top" });
         Register(new BlockDef { Id = BlockId.Leaves, Name = "Leaves", Color = new(0.20f, 0.65f, 0.35f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 0.2f,
-            Texture = "leaves_transparent", Layer = RenderLayer.Cutout, ShowsInnerFaces = true });
+            Texture = "leaves_transparent", Layer = RenderLayer.Cutout, ShowsInnerFaces = true, Tint = BlockTint.All });
         Register(new BlockDef { Id = BlockId.PineLeaves, Name = "Pine Needles", Color = new(0.15f, 0.50f, 0.30f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 0.2f,
             Texture = "leaves" });
         Register(new BlockDef { Id = BlockId.Cactus, Name = "Cactus", Color = new(0.25f, 0.65f, 0.35f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 1,
             Texture = "cactus_side", TextureTop = "cactus_top", TextureBottom = "cactus_top" });
+        Register(new BlockDef { Id = BlockId.BirchLog, Name = "Birch Log", Color = new(0.85f, 0.83f, 0.78f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 1,
+            Texture = "trunk_white_side", TextureTop = "trunk_white_top", TextureBottom = "trunk_white_top" });
+        Register(new BlockDef { Id = BlockId.AutumnLeaves, Name = "Autumn Leaves", Color = new(0.90f, 0.50f, 0.15f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 0.2f,
+            Texture = "leaves_orange_transparent", Layer = RenderLayer.Cutout, ShowsInnerFaces = true });
+
+        // Badlands: red sand over red rock, in layers on cliff faces.
+        Register(new BlockDef { Id = BlockId.RedSand, Name = "Red Sand", Color = new(0.78f, 0.42f, 0.22f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 2,
+            Texture = "redsand" });
+        Register(new BlockDef { Id = BlockId.RedRock, Name = "Red Rock", Color = new(0.62f, 0.30f, 0.20f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 6,
+            Texture = "redstone" });
+
+        // Cave crystals: lamps grown into cave floors and ceilings, ruby-red in hot biomes and gold elsewhere.
+        Register(new BlockDef { Id = BlockId.AmberCrystal, Name = "Amber Crystal", Color = new(1.00f, 0.60f, 0.30f), IsSolid = true, PlaceOriented = false, LightEmission = 12, Weight = 4,
+            LightColor = new(1.00f, 0.40f, 0.25f), Texture = "greystone_ruby" });
+        Register(new BlockDef { Id = BlockId.GoldCrystal, Name = "Gold Crystal", Color = new(1.00f, 0.85f, 0.40f), IsSolid = true, PlaceOriented = false, LightEmission = 12, Weight = 4,
+            LightColor = new(1.00f, 0.82f, 0.45f), Texture = "stone_gold" });
+
+        // Tundra, steppe and volcanic ground.
+        Register(new BlockDef { Id = BlockId.SnowyDirt, Name = "Snowy Dirt", Color = new(0.90f, 0.92f, 0.95f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 2,
+            Texture = "dirt_snow", TextureTop = "snow", TextureBottom = "dirt" });
+        Register(new BlockDef { Id = BlockId.Ice, Name = "Ice", Color = new(0.70f, 0.85f, 0.95f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 2,
+            Texture = "ice" });
+        Register(new BlockDef { Id = BlockId.Gravel, Name = "Gravel", Color = new(0.55f, 0.50f, 0.45f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 3,
+            Texture = "gravel_dirt" });
+        Register(new BlockDef { Id = BlockId.Ash, Name = "Ash", Color = new(0.45f, 0.45f, 0.45f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 2,
+            Texture = "greysand" });
+        Register(new BlockDef { Id = BlockId.Lava, Name = "Lava", Color = new(1.00f, 0.45f, 0.10f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 4,
+            Texture = "lava" });
+        Register(new BlockDef { Id = BlockId.GlowingLava, Name = "Glowing Lava", Color = new(1.00f, 0.45f, 0.10f), IsSolid = true, PlaceOriented = false, LightEmission = 13, Weight = 4,
+            LightColor = new(1.00f, 0.45f, 0.15f), Texture = "lava" });
     }
 
-    private static void RegisterCross(BlockId id, string name, string texture, Vector3D<float> color, string[]? variants = null, bool rigid = false) =>
+    private static void RegisterCross(BlockId id, string name, string texture, Vector3D<float> color, string[]? variants = null, bool rigid = false, bool tint = false) =>
         Register(new BlockDef { Id = id, Name = name, Color = color, IsSolid = true, Passable = true, Weight = 0.1f,
-            Shape = BlockShape.Cross, Texture = texture, CrossTextures = variants, RigidCross = rigid });
+            Shape = BlockShape.Cross, Texture = texture, CrossTextures = variants, RigidCross = rigid, Tint = tint ? BlockTint.All : BlockTint.None });
 
     private static void Register(BlockDef def) => Defs[(byte)def.Id] = def;
 
