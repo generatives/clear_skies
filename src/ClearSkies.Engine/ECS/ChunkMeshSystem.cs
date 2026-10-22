@@ -87,13 +87,12 @@ public sealed partial class ChunkMeshSystem : ISystem, IDebugUiSystem
         _meshers  = new ThreadLocal<GreedyMesher>(() => new GreedyMesher(atlas));
 
         _ecsWorld.SubscribeEntityDisposed(EntityDisposed);
-        _ecsWorld.SubscribeComponentAdded((in Entity e, in PreparedMesh _) =>
-            (e.Get<Chunk>().Entry.Volume.IsLowResolutionCopy ? _preparedCoarse : _prepared).Enqueue(e));
+        _ecsWorld.SubscribeComponentAdded((in Entity e, in PreparedMesh _) => _prepared.Enqueue(e));
     }
 
-    // Chunks meshed as they loaded, in the order they loaded (nearest first), to upload: full detail, then the coarse
-    // levels'; those not drawn yet wait in _notDrawnYet for a frame.
-    private readonly Queue<Entity> _prepared = new(), _preparedCoarse = new();
+    // Chunks meshed as they loaded, in the order they loaded (nearest first), to upload; those not drawn yet wait in
+    // _notDrawnYet for a frame.
+    private readonly Queue<Entity> _prepared = new();
     private readonly List<Entity> _notDrawnYet = new();
     private int _totalPrepared, _preparedStale, _preparedBuried;
 
@@ -288,25 +287,12 @@ public sealed partial class ChunkMeshSystem : ISystem, IDebugUiSystem
             }
         }
 
-        // Then the meshes made as chunks loaded. A coarse chunk isn't drawn until its light maps are baked once, which
-        // goes to a budget of quads a frame (ChunkRenderSystem.ScaledBakeQuadBudget), and the fog counts it ready once
-        // it's meshed: so coarse meshes go up no faster than they can be baked, or a burst of them would show only after
-        // the fog had passed.
-        UploadPrepared(_prepared, InBudget, int.MaxValue);
-        UploadPrepared(_preparedCoarse, InBudget, ChunkRenderSystem.ScaledBakeQuadBudget);
-    }
-
-    /// <summary>Uploads meshes made as chunks loaded from <paramref name="queue"/>, while <paramref name="inBudget"/>
-    /// and until <paramref name="maxQuads"/> are up (at least one mesh).</summary>
-    private void UploadPrepared(Queue<Entity> queue, Func<bool> inBudget, int maxQuads)
-    {
-        int quads = 0;
-        while (inBudget() && quads < maxQuads && queue.TryDequeue(out var e))
+        // Then the meshes made as chunks loaded.
+        while (InBudget() && _prepared.TryDequeue(out var e))
         {
             if (!e.IsAlive || !e.Has<PreparedMesh>()) continue; // unloaded, or meshed again since
             if (!e.Has<Rendered>()) { _notDrawnYet.Add(e); continue; } // its presence is decided on the next tick
             var prepared = e.Get<PreparedMesh>();
-            quads += prepared.Opaque.QuadCount + prepared.Cutout.QuadCount + prepared.Transparent.QuadCount;
             e.Remove<PreparedMesh>();
             try
             {
@@ -331,7 +317,7 @@ public sealed partial class ChunkMeshSystem : ISystem, IDebugUiSystem
                 prepared.Release();
             }
         }
-        foreach (var e in _notDrawnYet) queue.Enqueue(e);
+        foreach (var e in _notDrawnYet) _prepared.Enqueue(e);
         _notDrawnYet.Clear();
     }
 
@@ -468,8 +454,7 @@ public sealed partial class ChunkMeshSystem : ISystem, IDebugUiSystem
         ImGui.Text($"Upload (main thread, smoothed): {_uploadMs:F2} ms per chunk " +
                    $"(creating the buffer {_createMs:F2} ms, writing it {_writeMs:F2} ms, {_uploadKb:F0} KB)");
         ImGui.Text($"Chunks meshed (lifetime): {_totalMeshed}; of the jobs, {_remeshes:N0} of {_meshes:N0} were remeshes");
-        ImGui.Text($"Meshed as they loaded: {_totalPrepared:N0} uploaded, {_prepared.Count:N0} waiting " +
-                   $"({_preparedCoarse.Count:N0} more coarse, paced to the light-map bake budget); " +
+        ImGui.Text($"Meshed as they loaded: {_totalPrepared:N0} uploaded, {_prepared.Count:N0} waiting; " +
                    $"{_preparedStale:N0} remeshed after for a see-through face's neighbour, " +
                    $"{_preparedBuried:N0} solid ones left unmeshed and found buried");
     }
