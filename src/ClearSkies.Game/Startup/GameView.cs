@@ -63,8 +63,8 @@ public sealed class GameView : IDisposable
     /// <summary>How much of the world loads: as much as the light storage holds.</summary>
     public IChunkBudget Budget { get; }
 
-    /// <summary>Packs each loaded chunk for the light storage as it loads.</summary>
-    public IChunkPreparer ChunkPreparer { get; } = new LightPacking();
+    /// <summary>Packs each loaded chunk for the light storage, then meshes it, as it loads.</summary>
+    public IReadOnlyList<IChunkPreparer> ChunkPreparers => [new LightPacking(), Meshes.Stage];
 
     /// <summary>Latches each frame's input (in the Input stage), and hands it to the tick as the local player's
     /// PlayerInput (early in the tick).</summary>

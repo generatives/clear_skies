@@ -74,7 +74,7 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
     private readonly EntitySet      _interests;
     private readonly EntitySet      _editedElsewhere;
     private readonly ChunkVolume    _staticVolume;
-    private readonly IChunkPreparer? _preparer;
+    private readonly IReadOnlyList<IChunkPreparer> _preparers;
     private readonly ThreadLocal<IWorldGenerator> _generator;
     private readonly ThreadLocal<ChunkData> _scratch = new(() => new ChunkData());
     private readonly int            _minY;      // the lowest streamed layer: bit 0 of a column's bits
@@ -119,7 +119,7 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
     // Each interest's last published scan radius (TerrainScanned) and the column it was around.
     private readonly Dictionary<Entity, (float Radius, (int x, int z) Column)> _published = new();
 
-    private readonly ConcurrentQueue<(TerrainLevel Level, (int x, int z) Column, List<(ChunkPosition Pos, ChunkData? Data, ChunkPreparation? Prepared)> Chunks)> _results = new();
+    private readonly ConcurrentQueue<(TerrainLevel Level, (int x, int z) Column, List<(ChunkPosition Pos, ChunkData? Data, ChunkPreparation?[]? Prepared)> Chunks)> _results = new();
 
     /// <summary>Full-detail chunks edited elsewhere while their column was loading: what loads is stale, so they load again.</summary>
     private readonly HashSet<ChunkPosition> _stale = new();
@@ -131,10 +131,10 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
     /// <see cref="LayersBelow"/> under it; the generator's layers must fall inside them. Edits to the static world
     /// outside them are refused (see <see cref="ChunkVolume.EditableLayers"/>).</param>
     /// <param name="chunkStore">Where edited chunks come from (the Host, which keeps them).</param>
-    /// <param name="preparer">Work on each loaded chunk's data on the worker that loaded it (packing it for the GPU, for
-    /// a drawn world).</param>
+    /// <param name="preparers">Stages of work on each loaded chunk's data on the worker that loaded it, in order (packing
+    /// it for the GPU and meshing it, for a drawn world).</param>
     public ChunkLoadSystem(World world, ChunkVolume staticVolume, IChunkBudget budget, Func<IWorldGenerator> generatorFactory,
-                           float viewDistance, int minChunkY, IChunkStore chunkStore, IChunkPreparer? preparer = null)
+                           float viewDistance, int minChunkY, IChunkStore chunkStore, IReadOnlyList<IChunkPreparer>? preparers = null)
     {
         _chunkStore = chunkStore;
         _world = world;
@@ -142,7 +142,7 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         _interests    = world.GetEntities().With<Transform>().With<TerrainInterest>().AsSet();
         _editedElsewhere = world.GetEntities().With<TerrainEditedElsewhere>().AsSet();
         _staticVolume = staticVolume;
-        _preparer     = preparer;
+        _preparers    = preparers ?? Array.Empty<IChunkPreparer>();
         _generator    = new ThreadLocal<IWorldGenerator>(generatorFactory);
         _minY         = minChunkY - LayersBelow;
         _staticVolume.EditableLayers = (_minY, _minY + 63); // only what streaming can load back
@@ -698,7 +698,7 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         if (level.Level > 0) { DispatchCoarseColumn(level, col, layers); return; }
         BackgroundWork.Queue(() =>
         {
-            var loaded = new List<(ChunkPosition, ChunkData?, ChunkPreparation?)>(work.Count);
+            var loaded = new List<(ChunkPosition, ChunkData?)>(work.Count);
             foreach (var (pos, edited) in work)
             {
                 var data = _scratch.Value!;
@@ -708,19 +708,42 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
                 if (data.HasAnyNonAir())
                 {
                     data.IsDirty = false;
-                    loaded.Add((pos, data, _preparer?.Prepare(data))); // off the main thread
+                    loaded.Add((pos, data));
                     _scratch.Value = new ChunkData();
                 }
                 else
                 {
-                    loaded.Add((pos, null, null));
+                    loaded.Add((pos, null));
                     // Generation only ever writes blocks, so an empty result leaves the buffer all air and ready to
                     // reuse; a loaded edit may have overwritten more than blocks, so start that one afresh.
                     if (edited) _scratch.Value = new ChunkData();
                 }
             }
-            _results.Enqueue((level, col, loaded));
+            _results.Enqueue((level, col, Prepare(loaded)));
         });
+    }
+
+    /// <summary>Runs <see cref="_preparers"/> over a job's chunks (worker thread), each stage over them all before the
+    /// next, so a stage that looks across chunk borders finds the job's neighbours as the stages before it left them.</summary>
+    private List<(ChunkPosition, ChunkData?, ChunkPreparation?[]?)> Prepare(List<(ChunkPosition Pos, ChunkData? Data)> made)
+    {
+        var result = new List<(ChunkPosition, ChunkData?, ChunkPreparation?[]?)>(made.Count);
+        var job = new Dictionary<ChunkPosition, ChunkData>();
+        foreach (var (pos, data) in made)
+            if (data != null) job[pos] = data;
+        var prepared = new ChunkPreparation?[made.Count][];
+        for (int i = 0; i < made.Count; i++)
+            if (made[i].Data != null && _preparers.Count > 0) prepared[i] = new ChunkPreparation?[_preparers.Count];
+        for (int s = 0; s < _preparers.Count; s++)
+        for (int i = 0; i < made.Count; i++)
+        {
+            if (made[i].Data is not { } data) continue;
+            // A stage that fails leaves the chunk to whatever does that work on the main thread's side.
+            try { prepared[i][s] = _preparers[s].Prepare(made[i].Pos, data, job); }
+            catch (Exception e) { Console.WriteLine($"[load] preparing chunk {made[i].Pos} failed: {e}"); }
+        }
+        for (int i = 0; i < made.Count; i++) result.Add((made[i].Pos, made[i].Data, prepared[i]));
+        return result;
     }
 
     /// <summary>Adds finished columns, until <paramref name="budgetMs"/> is spent. A chunk is dropped if its level

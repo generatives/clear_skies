@@ -58,5 +58,6 @@ public sealed class LightBudget(GridStore store) : IChunkBudget
 /// it doesn't have to.</summary>
 public sealed class LightPacking : IChunkPreparer
 {
-    public ChunkPreparation Prepare(ChunkData data) => GridStore.Pack(data);
+    public ChunkPreparation Prepare(ChunkPosition pos, ChunkData data, IReadOnlyDictionary<ChunkPosition, ChunkData> job)
+        => GridStore.Pack(data);
 }

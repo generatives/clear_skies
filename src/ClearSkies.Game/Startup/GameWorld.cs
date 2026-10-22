@@ -27,10 +27,11 @@ public sealed class GameWorld
     private const int MinChunkY = 0;
 
     /// <param name="budget">What limits how much of the world loads.</param>
-    /// <param name="chunkPreparer">Work on each loaded chunk as it loads (the view's packing for the GPU).</param>
+    /// <param name="chunkPreparers">Stages of work on each loaded chunk as it loads (the view's packing for the GPU, and
+    /// meshing).</param>
     /// <param name="playerModel">What other players are drawn as, in a game that draws them.</param>
     public GameWorld(EngineHost host, LaunchOptions options, Session session, ulong seed, IChunkStore chunkStore,
-                     IChunkBudget budget, IChunkPreparer? chunkPreparer = null, PlayerModel? playerModel = null)
+                     IChunkBudget budget, IReadOnlyList<IChunkPreparer>? chunkPreparers = null, PlayerModel? playerModel = null)
     {
         Host = host;
         Options = options;
@@ -55,7 +56,7 @@ public sealed class GameWorld
         // Islands cut out of a continental terrain around island hearts (see HeartWorldGenerator), streamed around the
         // view as far as the budget reaches.
         ChunkLoad = new ChunkLoadSystem(host.World, StaticVolume, budget, () => new HeartWorldGenerator(seed),
-                                        options.ViewDistance, MinChunkY, chunkStore, chunkPreparer);
+                                        options.ViewDistance, MinChunkY, chunkStore, chunkPreparers);
         ((EditVoxelsHandler)Commands.HandlerFor(CommandIds.EditVoxels)!).Terrain = ChunkLoad; // edits to the world ask it what's there
         TerrainSwaps = new TerrainSwapSystem(host.World, ChunkLoad); // swaps coarse terrain in and out as full detail loads
 

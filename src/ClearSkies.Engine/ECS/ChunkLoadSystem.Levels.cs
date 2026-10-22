@@ -228,7 +228,7 @@ public sealed partial class ChunkLoadSystem
         }
         BackgroundWork.Queue(() =>
         {
-            var made = new List<(ChunkPosition, ChunkData?, ChunkPreparation?)>();
+            var made = new List<(ChunkPosition Pos, ChunkData? Data)>();
             try
             {
                 var coarse = new Dictionary<ChunkPosition, ChunkData>();
@@ -266,22 +266,22 @@ public sealed partial class ChunkLoadSystem
                         if (chunk.HasAnyNonAir())
                         {
                             chunk.IsDirty = false;
-                            made.Add((pos, chunk, _preparer?.Prepare(chunk)));
+                            made.Add((pos, chunk));
                             continue;
                         }
                         chunk.Release();
                     }
-                    made.Add((pos, null, null));
+                    made.Add((pos, null));
                 }
                 foreach (var (_, chunk) in coarse) chunk.Release();
             }
             catch (Exception e)
             {
                 Console.WriteLine($"[load] level {level.Level} column {col} failed: {e}");
-                foreach (var (_, data, _) in made) data?.Release();
+                foreach (var (_, data) in made) data?.Release();
                 made.Clear();
             }
-            _results.Enqueue((level, col, made));
+            _results.Enqueue((level, col, Prepare(made)));
         });
     }
 

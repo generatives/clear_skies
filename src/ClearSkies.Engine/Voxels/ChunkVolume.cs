@@ -298,12 +298,11 @@ public class ChunkVolume : IReplicatedChildren
     public bool ChunksOwnPresence { get; init; }
 
     /// <param name="prepared">What was made of the chunk's data off the main thread as it loaded (its opacity packed
-    /// for the GPU store, say), if anything; otherwise whatever needs it makes it later.</param>
-    internal ChunkEntry AddChunk(ChunkPosition pos, ChunkData data, ChunkPreparation? prepared = null)
+    /// for the GPU store, its mesh), applied in order; what's missing, whatever needs it makes later.</param>
+    internal ChunkEntry AddChunk(ChunkPosition pos, ChunkData data, IReadOnlyList<ChunkPreparation?>? prepared = null)
     {
         var entity = _world.CreateEntity();
         var entry = new ChunkEntry(data, entity, this, pos);
-        prepared?.ApplyTo(entry);
         // The world's chunks spread across the whole world, so each decides its own presence layers (see
         // EntityPresenceSystem); a grid's chunks inherit the grid's.
         if (ChunksOwnPresence) entity.Set<OwnPresence>();
@@ -312,11 +311,13 @@ public class ChunkVolume : IReplicatedChildren
         entry.Entity.Set(new NeedsRemeshFlag());
         entry.Entity.Set(new NeedsRecollideFlag());
         entry.Entity.Set(new NeedsGpuUploadFlag());
+        if (prepared != null)
+            foreach (var p in prepared) p?.ApplyTo(entry); // after the flags, which a preparation may answer
         if (!IsLowResolutionCopy) CreateBlockEntities(entry);
 
         _chunks[pos] = entry;
         UpdateBounds(pos);
-        MarkNeighboursDirty(pos, data);
+        MarkNeighboursDirty(pos, data, adding: true);
         if (data.IsAllOpaque) MarkBuriedNeighbours(pos);
         return entry;
     }
@@ -333,7 +334,7 @@ public class ChunkVolume : IReplicatedChildren
         entry.BlockEntities = null;
 
         _chunks.Remove(pos);
-        MarkNeighboursDirty(pos, entry.Data);
+        MarkNeighboursDirty(pos, entry.Data, adding: false);
         if (entry.Data.IsAllOpaque) MarkBuriedNeighbours(pos);
     }
 
@@ -357,7 +358,9 @@ public class ChunkVolume : IReplicatedChildren
     private void MarkBuriedNeighbours(ChunkPosition pos)
     {
         foreach (var (dx, dy, dz) in NeighbourOffsets)
-            if (_chunks.TryGetValue(pos.Offset(dx, dy, dz), out var e) && e.Data.IsAllOpaque)
+            // One meshed as it loaded and not uploaded yet is checked for being buried as it's uploaded.
+            if (_chunks.TryGetValue(pos.Offset(dx, dy, dz), out var e) && e.Data.IsAllOpaque
+                && !e.Entity.Has<ChunkMeshSystem.PreparedMesh>())
                 e.Entity.Set(new NeedsRemeshFlag());
     }
 
@@ -490,7 +493,7 @@ public class ChunkVolume : IReplicatedChildren
     /// neighbour's mesh only changes where this chunk's touching face holds a solid block — most streamed chunks in
     /// a sky world are air (or air at that face), and marking all six unconditionally remeshed each chunk several
     /// times over during load-in.</summary>
-    protected void MarkNeighboursDirty(ChunkPosition pos, ChunkData data)
+    protected void MarkNeighboursDirty(ChunkPosition pos, ChunkData data, bool adding)
     {
         if (MeshIgnoresNeighbours)
         {
@@ -499,7 +502,7 @@ public class ChunkVolume : IReplicatedChildren
             for (int f = 0; f < 6; f++)
             {
                 var (dx, dy, dz) = NeighbourOffsets[f];
-                MarkBorderFace(pos.Offset(dx, dy, dz), f ^ 1);
+                MarkBorderFace(pos.Offset(dx, dy, dz), f ^ 1, adding ? data : null);
             }
             return;
         }
@@ -561,11 +564,14 @@ public class ChunkVolume : IReplicatedChildren
     }
 
     /// <summary>As <see cref="MarkBorderCell"/> for a change along the neighbour's whole face <paramref name="face"/>
-    /// (<see cref="FaceHasSolid"/>'s numbering).</summary>
-    private void MarkBorderFace(ChunkPosition pos, int face)
+    /// (<see cref="FaceHasSolid"/>'s numbering): <paramref name="added"/> arriving beside it, or the chunk there
+    /// leaving. A neighbour whose mesh, made as it loaded, was made against <paramref name="added"/> already (they
+    /// loaded in the same job) is left as it is.</summary>
+    private void MarkBorderFace(ChunkPosition pos, int face, ChunkData? added = null)
     {
         if (!_chunks.TryGetValue(pos, out var e)) return;
         if (MeshIgnoresNeighbours && !FaceHasTransparent(e.Data, face)) return;
+        if (added != null && e.Entity.Has<ChunkMeshSystem.PreparedMesh>() && e.Entity.Get<ChunkMeshSystem.PreparedMesh>().MadeAgainst(face, added)) return;
         e.Entity.Set(new NeedsRemeshFlag());
     }
 }

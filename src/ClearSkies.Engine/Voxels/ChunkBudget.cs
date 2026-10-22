@@ -31,12 +31,17 @@ public readonly record struct ChunkCost(int Chunks, int Units)
 }
 
 /// <summary>
-/// Work on a chunk's data once it has loaded, on the worker thread that loaded it, rather than in the frame the chunk
-/// is added: packing it for the GPU, say (<see cref="LightPacking"/>). What it returns goes to the chunk as it's added.
+/// A stage of work on a chunk's data once it has loaded, on the worker thread that loaded it, rather than in the frame
+/// the chunk is added: packing it for the GPU, say (<see cref="LightPacking"/>), or meshing it. What it returns goes to
+/// the chunk as it's added. A loader runs its stages in order, each over all the chunks of a job before the next.
 /// </summary>
 public interface IChunkPreparer
 {
-    ChunkPreparation Prepare(ChunkData data);
+    /// <param name="job">The chunks made in the same job, by position (this one among them): a stage that looks across a
+    /// chunk's borders finds its neighbours here, since the volume's own chunks belong to the main thread. A position
+    /// that isn't here may hold a chunk loaded earlier.</param>
+    /// <returns>What to hand the chunk as it's added, or null for nothing.</returns>
+    ChunkPreparation? Prepare(ChunkPosition pos, ChunkData data, IReadOnlyDictionary<ChunkPosition, ChunkData> job);
 }
 
 /// <summary>What an <see cref="IChunkPreparer"/> made of a chunk's data, handed to the chunk as it's added.</summary>
