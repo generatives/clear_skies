@@ -35,6 +35,7 @@ public sealed class ContinentTerrain
     private readonly FastNoiseLite _knolls;   // lone peaks, a few hundred blocks across
     private readonly FastNoiseLite _crags;    // fine ridged detail on every mountain, so none is a smooth dome
     private readonly FastNoiseLite _detail;   // small bumps everywhere
+    private readonly FastNoiseLite _dells;    // shallow dips in open ground, where lakes gather (see Lakes)
     private readonly FastNoiseLite _strata;   // wobble of the rock layers that cliffs expose
     private readonly FastNoiseLite _patches;  // sand patches in low grass
     private readonly FastNoiseLite _flora, _kind; // where plants grow thick, and which kind
@@ -56,6 +57,7 @@ public sealed class ContinentTerrain
         _knolls = Noise(seed + 26, FastNoiseLite.FractalType.FBm, 2, 0.0015f);
         _crags = Noise(seed + 27, FastNoiseLite.FractalType.Ridged, 3, 0.003f);
         _detail = Noise(seed + 21, FastNoiseLite.FractalType.FBm, 2, 0.004f);
+        _dells = Noise(seed + 32, FastNoiseLite.FractalType.FBm, 2, 0.005f);
         _strata = Noise(seed + 16, FastNoiseLite.FractalType.FBm, 2, 0.01f);
         _patches = Noise(seed + 17, FastNoiseLite.FractalType.FBm, 3, 0.012f);
         _flora = Noise(seed + 22, FastNoiseLite.FractalType.FBm, 3, 0.02f);
@@ -103,7 +105,9 @@ public sealed class ContinentTerrain
         // break into ribs and spurs rather than one smooth swell.
         float c = (_crags.GetNoise(x, z) + 1f) * 0.5f;
         float crags = CragShare * (c * c - 0.4f) * (minor + knolls + mountains);
-        return Math.Clamp(plains + hills + minor + knolls + mountains + crags, HeartGrid.WorldBottom + 64f, HeartGrid.WorldTop - 32f);
+        // Dells: flat-bottomed dips a hundred or so blocks across, out of the ranges, for lakes to fill.
+        float dells = DellDepth * Smoothstep(DellFrom, DellFull, _dells.GetNoise(x, z)) * (1f - core);
+        return Math.Clamp(plains + hills + minor + knolls + mountains + crags - dells, HeartGrid.WorldBottom + 64f, HeartGrid.WorldTop - 32f);
     }
 
     /// <summary>0-1: how far into a mountain range (x, z) is: 1 on its spine, 0 past its edge.</summary>
@@ -121,6 +125,7 @@ public sealed class ContinentTerrain
     // Ranges: the spine's noise within RangeEdge of zero is mountains, within HighEdge highlands (full height inside
     // HighCore); bent by up to RangeWarp blocks.
     private const float RangeEdge = 0.3f, HighCore = 0.05f, HighEdge = 1f, RangeWarp = 800f;
+    private const float DellDepth = 14f, DellFrom = 0.25f, DellFull = 0.6f;
     private const float HighRise = 250f, RangeRise = 500f, MinorRise = 320f, KnollRise = 260f, CragShare = 0.25f;
 
     /// <summary>The plains' average height: a floor of land under the broken-up highlands and ranges, with a sparse

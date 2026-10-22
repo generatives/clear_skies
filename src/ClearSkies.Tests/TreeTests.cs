@@ -65,6 +65,33 @@ public class TreeTests
     }
 
     [Fact]
+    public void Lakes_rest_on_the_ground_and_stay_in_their_banks()
+    {
+        var lakes = Lakes.For(1337);
+        var generator = new HeartWorldGenerator(1337);
+        int Top(int x, int z)
+        {
+            generator.Prepare(x >> 5, z >> 5);
+            var spans = generator.Spans(x & 31, z & 31);
+            return spans.Length == 0 ? int.MinValue : spans[^1].Hi;
+        }
+        int wet = 0;
+        // Around the spawn island of this seed.
+        for (int z = -7250; z < -5250 && wet < 200; z += 4)
+        for (int x = 10250; x < 12250 && wet < 200; x += 4)
+        {
+            int level = lakes.Level(x, z), ground = level == int.MinValue ? 0 : Top(x, z);
+            if (level == int.MinValue || ground >= level) continue; // dry, or a shore column beside the water
+            wet++;
+            Assert.True(level - ground < 40); // on the ground, not hanging over a drop
+            // Every dry column beside the water stands up to its level, so none of it is a wall of water in the air.
+            foreach (var (nx, nz) in new[] { (x + 1, z), (x - 1, z), (x, z + 1), (x, z - 1) })
+                Assert.True(lakes.Level(nx, nz) != int.MinValue || Top(nx, nz) >= level);
+        }
+        Assert.True(wet > 0);
+    }
+
+    [Fact]
     public void Cave_crystals_glow_and_come_in_sparse_clusters()
     {
         Assert.True(BlockRegistry.Get(BlockId.AmberCrystal).LightEmission > 0);

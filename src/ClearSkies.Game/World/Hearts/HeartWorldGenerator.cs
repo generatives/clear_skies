@@ -48,23 +48,36 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     // So tops are flatter than the land they came from, and neighbours don't line up.
     private const float Flatten = 0.45f, MaxDrop = 30f;
 
+    /// <summary>The top of a piece where the terrain surface is <paramref name="surface"/>, for a heart where it is
+    /// <paramref name="heartSurface"/>, worn down by <paramref name="drop"/> (0-1, see <see cref="Heart.Drop"/>).</summary>
+    internal static float PieceTop(float surface, float heartSurface, float drop) =>
+        surface - MathF.Max(0f, surface - heartSurface) * (1f - Flatten) - MaxDrop * drop;
+
     // A top is bare (see ContinentTerrain.Block) to Shaded if land lies over it within ShadeReach blocks.
     private const float Shaded = 0.75f, ShadeReach = 250f;
 
     /// <summary>One lava block in this many glows.</summary>
     private const int LavaGlowOdds = 40;
 
+    /// <summary>About how far (blocks) a lake's sandy shore reaches from the middle of its sample cells (see Lakes).</summary>
+    private const float ShoreReach = 3.5f;
+
+    /// <summary>Where noise is under this (-1 to 1) a tundra lake is open water, not ice.</summary>
+    private const float IceOpen = -0.25f;
+
     /// <summary>How far above <see cref="HeartGrid.LowestBottom"/> the world's rough bottom reaches.</summary>
     private const float BottomRoughness = 30f;
 
     private readonly ulong _seed;
     private readonly ContinentTerrain _terrain;
+    private readonly Lakes _lakes;
     private readonly FastNoiseLite _warpX, _warpY, _warpZ, _crack, _bottom;
 
     public HeartWorldGenerator(ulong seed)
     {
         _seed = seed;
         _terrain = ContinentTerrain.For(seed);
+        _lakes = Lakes.For(seed);
         _warpX = Noise(seed + 31, WarpFrequency);
         _warpY = Noise(seed + 32, WarpFrequency);
         _warpZ = Noise(seed + 33, WarpFrequency);
@@ -110,6 +123,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     private readonly Biome[] _biome = new Biome[S * S * MaxSpans]; // per span top
     private readonly float[] _dry = new float[S * S * MaxSpans];   // per span top: how near a desert (Biomes.Dry)
     private readonly float[] _height = new float[S * S];
+    private readonly int[] _level = new int[S * S];         // the level of a lake here or beside, or int.MinValue (Lakes.Level)
+    private readonly bool[] _shore = new bool[S * S];       // whether a dry column by a lake is its sandy shore
     private readonly float[] _bottomAt = new float[S * S];
 
     // The hearts around the chunk column being profiled, per layer: cells from (_cx0, _cy0, _cz0), _nx by _ny by _nz of
@@ -151,12 +166,39 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 if (s > 0 && lo - _spans[col * MaxSpans + s - 1].Hi < ShadeReach && lo >= originY && lo < originY + S && Crystals.At(x, lo, z, _seed))
                     data.Set(lx, lo - originY, lz, crystal);
 
+                // A lake over the top span: water (lava in the volcanic wastes, partly iced over in tundra) up to its
+                // level on a bed of sand and gravel, with a sandy shore (grassy in a desert).
+                BlockId? ground = null;
+                if (Lakeside(col, s))
+                {
+                    int level = _level[col];
+                    var biome = _biome[col * MaxSpans + s];
+                    var bed = _patch[col] < 0.35f ? BlockId.Gravel : BlockId.Sand;
+                    if (biome == Biome.Volcanic) bed = BlockId.Ash;
+                    for (int y = System.Math.Max(hi - 1, originY); y <= System.Math.Min(hi, originY + S - 1); y++)
+                        data.Set(lx, y - originY, lz, bed);
+                    // A desert lake is an oasis: grass round it, not more sand.
+                    bool oasis = biome is Biome.Desert or Biome.Badlands && hi >= level;
+                    if (oasis && hi >= originY && hi < originY + S) data.Set(lx, hi - originY, lz, BlockId.Grass);
+                    var liquid = biome == Biome.Volcanic ? BlockId.Lava : BlockId.Water;
+                    // A tundra lake's ice is broken, with open water between the floes.
+                    bool iced = biome == Biome.Tundra && _crack.GetNoise(x * 4f, z * 4f) > IceOpen;
+                    for (int y = System.Math.Max(hi + 1, originY); y <= System.Math.Min(level, originY + S - 1); y++)
+                    {
+                        var b = y < level ? liquid : iced ? BlockId.Ice
+                              : liquid == BlockId.Lava && Trees.Hash(x, y, z, _seed ^ 0x1A7A) % LavaGlowOdds == 0 ? BlockId.GlowingLava : liquid;
+                        data.Set(lx, y - originY, lz, b);
+                    }
+                    if (level > hi) continue; // nothing grows under water
+                    if (oasis) ground = BlockId.Grass;
+                }
+
                 // What grows on the span's top, in the open cell above it.
                 int above = hi + 1;
                 if (above < originY || above >= originY + S) continue;
                 if (s + 1 < _spanCount[col] && _spans[col * MaxSpans + s + 1].Lo <= above) continue;
-                var ground = ContinentTerrain.Block(hi, hi, _strata[col], _patch[col], _bare[col * MaxSpans + s], _biome[col * MaxSpans + s], _dry[col * MaxSpans + s]);
-                var plant = ContinentTerrain.Plant(ground, pos.X * S + lx, above, pos.Z * S + lz, _flora[col], _kind[col], _seed);
+                ground ??= ContinentTerrain.Block(hi, hi, _strata[col], _patch[col], _bare[col * MaxSpans + s], _biome[col * MaxSpans + s], _dry[col * MaxSpans + s]);
+                var plant = ContinentTerrain.Plant(ground.Value, pos.X * S + lx, above, pos.Z * S + lz, _flora[col], _kind[col], _seed);
                 if (plant != BlockId.Air) data.Set(lx, above - originY, lz, plant);
             }
         }
@@ -175,12 +217,20 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 int x = pos.X * S + lx, z = pos.Z * S + lz;
                 var kind = Trees.At(ground, x, hi, z, _woods[col], _seed, biome);
                 if (kind == Trees.Kind.None) continue;
+                if (Lakeside(col, s)) continue;
                 int reach = Trees.ReachOf(kind);
                 if (lx < reach || lz < reach || lx >= S - reach || lz >= S - reach) continue;
                 if (s + 1 < _spanCount[col] && _spans[col * MaxSpans + s + 1].Lo <= hi + Trees.HeightOf(kind) + 1) continue;
                 Trees.Grow(data, originY, kind, lx, hi, lz, Trees.Hash(x, hi, z, _seed));
             }
         }
+    }
+
+    /// <summary>Whether span <paramref name="s"/> of column <paramref name="col"/> is under a lake or on its shore.</summary>
+    private bool Lakeside(int col, int s)
+    {
+        int level = _level[col], hi = _spans[col * MaxSpans + s].Hi;
+        return s == _spanCount[col] - 1 && level != int.MinValue && hi <= level + 2 && (hi < level || _shore[col]);
     }
 
     /// <summary>Works out chunk column (chunkX, chunkZ)'s solid spans, if it isn't the one last worked out.</summary>
@@ -208,6 +258,9 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             int col = lx + S * lz;
             float wx = x0 + lx, wz = z0 + lz;
             _height[col] = MathF.Min(_terrain.Height(wx, wz), HeartGrid.WorldTop - 1);
+            _level[col] = _lakes.Level((int)wx, (int)wz, out float off);
+            // The shore reaches a ragged ShoreReach from the lake's sample cells, not their square outline.
+            _shore[col] = off < ShoreReach * (0.6f + 0.4f * (_crack.GetNoise(wx * 3f, wz * 3f) + 1f));
             _bottomAt[col] = HeartGrid.LowestBottom + BottomRoughness * (0.5f + 0.5f * _bottom.GetNoise(wx, wz));
             top = MathF.Max(top, _height[col]);
         }
@@ -432,7 +485,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
 
         // The piece's top, worn down from the terrain: a face like the others, so the rim where it meets the sides is
         // rounded too (but not worn back: the top is where it is).
-        float top = surface - MathF.Max(0f, surface - _hs[bi]) * (1f - Flatten) - MaxDrop * _drop[bi];
+        float top = PieceTop(surface, _hs[bi], _drop[bi]);
         rates[faces] = HeartGrid.VerticalScale;
         worn[faces] = (top - y) * HeartGrid.VerticalScale;
         least = MathF.Min(least, worn[faces++]);
