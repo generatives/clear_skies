@@ -636,8 +636,7 @@ fn fs_chunk_transparent(in: VSOut, @builtin(front_facing) front: bool) -> @locat
     if (front && in.cg.w >= 0) {
         drawChunk = in.cg.xyz;
         drawGrid  = in.cg.w;
-        let rd = normalize(in.localView);
-        let clear = exp(-waterPath(vec3<f32>(drawChunk * 32) + in.localPos + rd * 0.001, rd) / WATER_CLEAR);
+        let clear = exp(-waterPath(in.localPos, vec3<i32>(floor(in.localPos - 0.5 * in.localNormal)), normalize(in.localView)) / WATER_CLEAR);
         alpha = 1.0 - (1.0 - WATER_SHALLOW_ALPHA) * clear;
         waterShare = 1.0 - (1.0 - WATER_SHALLOW_FOG) * clear;
     }
@@ -667,17 +666,18 @@ fn isWater(v: vec3<i32>) -> bool {
     return ((occPool[u32((slot - 1) * WPC + l.y + 32 * l.z)] >> u32(l.x)) & 1u) == 1u;
 }
 
-// How far the view goes from p (grid space, just inside a water face) along rd (normalized, grid space) before it
-// leaves the water, onto the bed or out into air (through a waterfall), in blocks, up to WATER_MAX_PATH: a walk
-// through the cells it crosses.
-fn waterPath(p: vec3<f32>, rd: vec3<f32>) -> f32 {
-    var cell = vec3<i32>(floor(p));
+// How far the view goes from p on a water face, into its cell (both chunk-local, so precise however far the chunk
+// is from the origin: in grid space, nudging p into the cell got lost in rounding there, and the walk started in the
+// air in front) along rd (normalized, grid space) before it leaves the water, onto the bed or out into air (through
+// a waterfall), in blocks, up to WATER_MAX_PATH: a walk through the cells it crosses.
+fn waterPath(p: vec3<f32>, start: vec3<i32>, rd: vec3<f32>) -> f32 {
+    var cell = start;
     let stepC = vec3<i32>(select(-1, 1, rd.x > 0.0), select(-1, 1, rd.y > 0.0), select(-1, 1, rd.z > 0.0));
     let tDelta = 1.0 / max(abs(rd), vec3<f32>(1e-6));
-    var tMax = abs(select(floor(p), floor(p) + 1.0, rd > vec3<f32>(0.0)) - p) * tDelta;
+    var tMax = abs(vec3<f32>(select(cell, cell + 1, rd > vec3<f32>(0.0))) - p) * tDelta;
     var t = 0.0;
     for (var i = 0; i < 64; i++) {
-        if (!isWater(cell)) { return t; }
+        if (!isWater(drawChunk * 32 + cell)) { return t; }
         t = min(tMax.x, min(tMax.y, tMax.z));
         if (t >= WATER_MAX_PATH) { break; }
         if (tMax.x <= tMax.y && tMax.x <= tMax.z) { tMax.x += tDelta.x; cell.x += stepC.x; }
