@@ -40,8 +40,8 @@ public sealed class Water
     /// <summary>How far from its piece's faces a lake keeps, further than a river: the rounding of its rim as well.</summary>
     private const float LakeMargin = 64f;
 
-    private const float MinDepth = 4f;                    // shallower hollows hold no lake
-    private const int MinCells = 16, MaxCells = 1200;     // lakes of about 250 to 19,000 square blocks
+    private const float MinDepth = 5f;                    // shallower hollows hold no lake
+    private const int MinCells = 16, MaxCells = 600;      // lakes of about 250 to 10,000 square blocks
 
     // A lake sits in open ground, not perched on a slope or by a cliff: no ground within Perch cells of it may be
     // more than PerchDrop blocks under its level (its own bed, filled to its level, doesn't count; nor do drains).
@@ -52,12 +52,12 @@ public sealed class Water
     private const float RainFrom = 0.3f, RainFull = 0.85f;
 
     /// <summary>A hollow fills if the rain gathering into it is at least LakeNeed times its own samples.</summary>
-    private const float LakeNeed = 8f;
+    private const float LakeNeed = 18f;
 
     // A river starts where RiverFrom samples' rain has gathered, RiverNarrowest blocks wide, widening by RiverWiden
     // blocks per square root of what it carries beyond that, up to RiverWidest; and some stretches up to RiverVary wider
     // or narrower.
-    private const float RiverFrom = 160f, RiverNarrowest = 3f, RiverWiden = 0.3f, RiverWidest = 10f, RiverVary = 0.35f;
+    private const float RiverFrom = 320f, RiverNarrowest = 3f, RiverWiden = 0.3f, RiverWidest = 10f, RiverVary = 0.35f;
 
     // A river winds up to Meander blocks either side of the way its water goes; its banks slope up from a block over
     // it by BankSlope blocks per block out, for BankReach blocks.
