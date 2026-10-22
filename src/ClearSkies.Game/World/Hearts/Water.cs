@@ -113,6 +113,7 @@ public sealed class Water
         public int[] River = Array.Empty<int>();   // level of the river through the sample, or int.MinValue
         public byte[] Width = Array.Empty<byte>(); // its width, blocks
         public int[] Down = Array.Empty<int>();    // the sample its water goes on to, or -1
+        public float[] Edge = Array.Empty<float>(); // 0 at its piece's crack to 1 well inside (see EdgeFade)
     }
 
     /// <summary>The water at column (x, z): a lake over it or right beside it (water fills it from its ground up to
@@ -127,17 +128,18 @@ public sealed class Water
         int own = piece.Lake[ci + Window * ck];
 
         // A river: within half its width of the line from a sample's middle to the next one's down its way, that line
-        // bent by noise so the river winds (less so near a lake, so it still meets it). Its banks slope up from it.
+        // bent by noise so the river winds (less so near a lake, so it still meets it, and near its piece's crack, so
+        // it doesn't wind out onto the cliff's lip). Its banks slope up from the nearest river.
         float nearLake = float.MaxValue;
         for (int dk = -4; dk <= 4; dk++)
         for (int di = -4; di <= 4; di++)
             if (piece.Lake[Math.Clamp(ci + di, 0, Window - 1) + Window * Math.Clamp(ck + dk, 0, Window - 1)] != int.MinValue)
                 nearLake = MathF.Min(nearLake, MathF.Sqrt(di * di + dk * dk) * Step);
-        float bend = Meander * Math.Clamp((nearLake - 2f * Step) / (2f * Step), 0f, 1f);
+        float bend = Meander * Math.Clamp((nearLake - 2f * Step) / (2f * Step), 0f, 1f) * piece.Edge[ci + Window * ck];
         float qx = px + bend * _meanderX.GetNoise(px, pz), qz = pz + bend * _meanderZ.GetNoise(px, pz);
         int qi = FloorDiv((int)MathF.Floor(qx), Step) - piece.X0, qk = FloorDiv((int)MathF.Floor(qz), Step) - piece.Z0;
         int riverLevel = int.MinValue, width = 0, bank = int.MaxValue;
-        float bestRiver = float.MaxValue;
+        float bestRiver = float.MaxValue, bestBank = float.MaxValue;
         for (int dk = -Search; dk <= Search; dk++)
         for (int di = -Search; di <= Search; di++)
         {
@@ -154,8 +156,11 @@ public sealed class Water
             int to = d < 0 ? piece.River[c] : piece.River[d] != int.MinValue ? piece.River[d] : piece.Lake[d] != int.MinValue ? piece.Lake[d] : piece.River[c];
             int at = (int)MathF.Floor(piece.River[c] + t * (to - piece.River[c]));
             if (dist <= half && dist < bestRiver) { bestRiver = dist; riverLevel = at; width = piece.Width[c]; }
-            else if (dist > half && dist < half + BankReach)
-                bank = Math.Min(bank, at + 1 + (int)((dist - half) * BankSlope));
+            else if (dist > half && dist - half < MathF.Min(BankReach, bestBank))
+            {
+                bestBank = dist - half;
+                bank = at + 1 + (int)(bestBank * BankSlope);
+            }
         }
         int depth = width >= 8 ? 3 : width >= 4 ? 2 : 1;
         if (own != int.MinValue)
@@ -231,7 +236,7 @@ public sealed class Water
             if (i == 0 || k == 0 || i == Window - 1 || k == Window - 1 || face[c] < FaceMargin) { ground[c] = Drain; continue; }
             ground[c] = HeartWorldGenerator.PieceTop(_terrain.Height(x, z), self.Surface, self.Drop);
             rain[c] = Smoothstep(RainFrom, RainFull, _terrain.Wet(x, z));
-            lean[c] = Wander * _wander.GetNoise(x, z);
+            lean[c] = Wander * _wander.GetNoise(x, z) * EdgeFade(face[c]);
         }
 
         // Priority flood from the drains inwards, lowest first: each sample filled to at least the level it was
@@ -355,6 +360,8 @@ public sealed class Water
         piece.River = new int[N];
         piece.Width = new byte[N];
         piece.Down = down;
+        piece.Edge = new float[N];
+        for (int c = 0; c < N; c++) piece.Edge[c] = EdgeFade(face[c]);
         Array.Fill(piece.River, int.MaxValue);
         for (int o = count - 1; o >= 0; o--)
         {
@@ -477,6 +484,10 @@ public sealed class Water
     private Heart TopHeart(int i, int k) => _hearts.GetOrAdd(Key(i, k), _ => HeartGrid.At(_seed, 0, i, -1, k));
 
     private static long Key(int i, int k) => ((long)i << 32) ^ (uint)k;
+
+    /// <summary>How freely a river may wander at this far from its piece's faces: not at all where they count as its
+    /// crack, fully once as far in as a lake keeps.</summary>
+    private static float EdgeFade(float face) => Math.Clamp((face - FaceMargin) / (LakeMargin - FaceMargin), 0f, 1f);
 
     private static float Smoothstep(float edge0, float edge1, float x)
     {
