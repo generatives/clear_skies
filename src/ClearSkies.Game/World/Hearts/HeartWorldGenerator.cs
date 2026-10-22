@@ -353,7 +353,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             if (topSpan.Hi > _bank[col]) topSpan.Hi = (short)System.Math.Max(topSpan.Lo, _bank[col]);
         }
 
-        // Rivers cut their beds into the top: the water no higher than the dry ground beside it, so it doesn't stand
+        // Rivers cut their beds into the top: the water a block under the dry ground beside it, so it doesn't stand
         // against air; none where the top is far under the river, a crack or a cliff, where it ends.
         for (int col = 0; col < S * S; col++)
             _top[col] = _spanCount[col] == 0 ? int.MinValue : _spans[col * MaxSpans + _spanCount[col] - 1].Hi;
@@ -363,7 +363,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         {
             if (_riverDepth[col] == 0 || _level[col] == int.MinValue) continue;
             int hi = _top[col];
-            int water = _level[col];
+            // (The dry ground beside it, and the water of a lake it runs into.)
+            int dry = int.MaxValue, lake = int.MinValue;
             int lx = col % S, lz = col / S;
             for (int n = 0; n < 4; n++)
             {
@@ -372,15 +373,20 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 {
                     // (Beyond this chunk, the ground as Water reckons it: the same from either side.)
                     var beside = _water.At(chunkX * S + nx, chunkZ * S + nz);
-                    if (beside.Level == int.MinValue && _water.Ground(chunkX * S + nx, chunkZ * S + nz) is float g)
-                        water = System.Math.Min(water, System.Math.Min((int)MathF.Floor(g), beside.Bank));
+                    if (beside.RiverDepth > 0 || _water.Ground(chunkX * S + nx, chunkZ * S + nz) is not float g) continue;
+                    if (beside.Level == int.MinValue) dry = System.Math.Min(dry, System.Math.Min((int)MathF.Floor(g), beside.Bank));
+                    else if (g < beside.Level) lake = System.Math.Max(lake, beside.Level);
+                    else dry = System.Math.Min(dry, (int)MathF.Floor(g));
                     continue;
                 }
                 int nc = nx + S * nz;
-                // (A neighbour is dry where its water, if any, doesn't reach over its ground: by a lake's rim, say.)
-                if (_top[nc] != int.MinValue && (_level[nc] == int.MinValue || _level[nc] <= _top[nc]))
-                    water = System.Math.Min(water, _top[nc]);
+                if (_top[nc] == int.MinValue || (_riverDepth[nc] > 0 && _level[nc] != int.MinValue)) continue;
+                if (_level[nc] == int.MinValue || _level[nc] <= _top[nc]) dry = System.Math.Min(dry, _top[nc]);
+                else lake = System.Math.Max(lake, _level[nc]);
             }
+            // A block under the dry ground beside it, but level with a lake it runs into.
+            int water = System.Math.Min(_level[col], dry == int.MaxValue ? int.MaxValue : dry - 1);
+            if (lake != int.MinValue) water = System.Math.Max(water, System.Math.Min(System.Math.Min(_level[col], lake), dry));
             _level[col] = water;
             ref var topSpan = ref _spans[col * MaxSpans + _spanCount[col] - 1];
             topSpan.Hi = (short)System.Math.Max(topSpan.Lo, System.Math.Min(hi, water - _riverDepth[col]));

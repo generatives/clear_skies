@@ -142,7 +142,7 @@ public sealed class Water
         float bend = Meander * Math.Clamp((nearLake - 2f * Step) / (2f * Step), 0f, 1f) * piece.Edge[ci + Window * ck];
         float qx = px + bend * _meanderX.GetNoise(px, pz), qz = pz + bend * _meanderZ.GetNoise(px, pz);
         int qi = FloorDiv((int)MathF.Floor(qx), Step) - piece.X0, qk = FloorDiv((int)MathF.Floor(qz), Step) - piece.Z0;
-        int riverLevel = int.MinValue, width = 0, bank = int.MaxValue;
+        int riverLevel = int.MinValue, width = 0, bank = int.MaxValue, riverLow = 0, bankLow = 0;
         float bestRiver = float.MaxValue, bestBank = float.MaxValue;
         for (int dk = -Search; dk <= Search; dk++)
         for (int di = -Search; di <= Search; di++)
@@ -155,23 +155,33 @@ public sealed class Water
             float bx = ax, bz = az;
             int d = piece.Down[c];
             if (d >= 0) { bx = (piece.X0 + d % Window + 0.5f) * Step; bz = (piece.Z0 + d / Window + 0.5f) * Step; }
-            float dist = SegmentDistance(qx, qz, ax, az, bx, bz), half = piece.Width[c] * 0.5f;
-            // (Its level is this sample's, as high as the ground round it lets the water stand, so the water follows
-            // the ground's steps down rather than sinking under them.)
-            int at = piece.River[c];
-            if (dist <= half && dist < bestRiver) { bestRiver = dist; riverLevel = at; width = piece.Width[c]; }
-            else if (dist > half && dist - half < MathF.Min(BankReach, bestBank))
-            {
-                bestBank = dist - half;
-                bank = at + 1 + (int)(bestBank * BankSlope);
-            }
+            float dist = SegmentDistance(qx, qz, ax, az, bx, bz, out float t), half = piece.Width[c] * 0.5f;
+            // (Its level runs down from this sample's to the next one's, or to the lake's it flows into: no higher
+            // than the first, no lower than the straight line between them.)
+            int to = d < 0 ? piece.River[c] : piece.River[d] != int.MinValue ? piece.River[d] : piece.Lake[d] != int.MinValue ? piece.Lake[d] : piece.River[c];
+            int low = (int)MathF.Floor(piece.River[c] + t * (to - piece.River[c]));
+            if (dist <= half && dist < bestRiver) { bestRiver = dist; riverLevel = piece.River[c]; riverLow = low; width = piece.Width[c]; }
+            else if (dist > half && dist - half < MathF.Min(BankReach, bestBank)) { bestBank = dist - half; bank = piece.River[c]; bankLow = low; }
+        }
+        // Between those, a block under the ground here: so the water follows the ground's steps down, neither sinking
+        // under them nor standing over them.
+        float? ground = riverLevel != int.MinValue || bank != int.MaxValue ? Ground(x, z) : null;
+        int Follow(int high, int low) => ground is float g ? Math.Clamp((int)MathF.Floor(g) - 1, Math.Min(low, high), high) : high;
+        if (riverLevel != int.MinValue) riverLevel = Follow(riverLevel, riverLow);
+        if (bank != int.MaxValue)
+        {
+            // (Steeper where the ground stands high over the river, so the bank meets it within BankReach rather than
+            // leaving a wall at the end.)
+            int foot = Follow(bank, bankLow) + 1;
+            float slope = ground is float g ? MathF.Max(BankSlope, (g - foot) / BankReach) : BankSlope;
+            bank = foot + (int)(bestBank * slope);
         }
         int depth = width >= 8 ? 3 : width >= 4 ? 2 : 1;
         if (own != int.MinValue)
         {
             // Where a river comes in over the lake's shore, it runs on down to the lake's water (the ground round it
             // letting it down) rather than standing back behind the shore.
-            if (riverLevel != int.MinValue && Ground(x, z) is float g && g >= own) return new(Math.Max(riverLevel, own), 0f, depth);
+            if (riverLevel != int.MinValue && ground is float g && g >= own) return new(Math.Max(riverLevel, own), 0f, depth);
             return new(own, Off(ci, ck, px, pz, piece), 0);
         }
         if (riverLevel != int.MinValue) return new(riverLevel, 0f, depth);
@@ -207,10 +217,10 @@ public sealed class Water
         return MathF.Sqrt(cx * cx + cz * cz);
     }
 
-    private static float SegmentDistance(float px, float pz, float ax, float az, float bx, float bz)
+    private static float SegmentDistance(float px, float pz, float ax, float az, float bx, float bz, out float t)
     {
         float vx = bx - ax, vz = bz - az, len2 = vx * vx + vz * vz;
-        float t = len2 > 0f ? Math.Clamp(((px - ax) * vx + (pz - az) * vz) / len2, 0f, 1f) : 0f;
+        t = len2 > 0f ? Math.Clamp(((px - ax) * vx + (pz - az) * vz) / len2, 0f, 1f) : 0f;
         float dx = px - (ax + t * vx), dz = pz - (az + t * vz);
         return MathF.Sqrt(dx * dx + dz * dz);
     }
