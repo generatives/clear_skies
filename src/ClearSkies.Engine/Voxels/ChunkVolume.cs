@@ -80,6 +80,11 @@ public class ChunkVolume : IReplicatedChildren
     /// hold no block entities, and it is lit as a static grid at its scale (see GridStore.RegisterStatic).</summary>
     public bool IsLowResolutionCopy { get; }
 
+    /// <summary>For a low-resolution copy: the nearest (blocks, horizontally) any of its chunks counts as for meshing and
+    /// upload order (see NearestChunks), where it starts being drawn, so the full-detail chunks nearer the view go
+    /// first.</summary>
+    public float RankedFrom { get; set; }
+
     public ChunkVolume(Entity entity, World world) : this(entity, world, 1, false) { }
 
     private ChunkVolume(Entity entity, World world, int scale, bool scaledCopy)

@@ -43,11 +43,16 @@ public sealed class GameView : IDisposable
         host.Renderer.AttachGridStore(GridStore);
         Budget = new LightBudget(GridStore);
         _checkerBounce = options.CheckerBounce;
+        _lodLevels = options.LodLevels;
 
         InputSample = new InputSampleSystem(host.World, host.Input, host.Time);
     }
 
     private readonly int? _checkerBounce;
+    private readonly int _lodLevels;
+
+    /// <summary>How far full detail loads with distant terrain drawn coarse (blocks).</summary>
+    private const float FullDetailRadius = 512f;
 
     public WindowedEngineHost Host { get; }
     public BlockModelLibrary BlockModels { get; }
@@ -101,6 +106,9 @@ public sealed class GameView : IDisposable
         host.AddSystem((ISystem)_particles, SystemStage.Frame); // moves every emitter's particles
         var chunks = new ChunkRenderSystem(host.World, renderer, volume);
         host.AddSystem(chunks, SystemStage.RenderWorld);
+        // Distant terrain drawn coarse past full detail, in levels (--lod-levels).
+        if (_lodLevels > 0)
+            world.ChunkLoad.SetLevels(FullDetailRadius, Enumerable.Range(1, _lodLevels).Select(k => FullDetailRadius * (1 << k)).ToArray());
         host.AddSystem(new ModelRenderSystem(host.World, renderer, host.Time), SystemStage.RenderWorld);
         host.AddSystem(_clouds, SystemStage.RenderWorld);
         host.AddSystem((IRenderSystem)_particles, SystemStage.RenderWorld);

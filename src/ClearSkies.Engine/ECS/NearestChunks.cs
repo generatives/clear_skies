@@ -14,7 +14,8 @@ namespace ClearSkies.Engine.ECS;
 /// World chunks go by horizontal distance, height only breaking ties: the fog that hides the edge of what's drawn is
 /// horizontal (see ChunkLoadSystem), so this way whole columns come in nearest first, the order the fog clears in. By
 /// 3D distance, a chunk far below the camera's own column would wait behind everything nearer in 3D and hold the fog
-/// at the camera meanwhile, though no fog can hide it.
+/// at the camera meanwhile, though no fog can hide it. A low-resolution copy of the world (a coarse level) goes by the nearest
+/// point of each chunk's footprint, and no nearer than <see cref="ChunkVolume.RankedFrom"/>.
 /// </summary>
 internal static class NearestChunks
 {
@@ -34,8 +35,16 @@ internal static class NearestChunks
         foreach (ref readonly Entity e in set.GetEntities())
         {
             var entry = e.Get<Chunk>().Entry;
+            var volume = entry.Volume;
             float d = 0f;
-            if (haveCam && entry.Volume.Gpu.IsWorld)
+            if (haveCam && volume.IsLowResolutionCopy)
+            {
+                // By the nearest point of its footprint, but no nearer than where its volume starts being drawn.
+                float r = MathF.Max(BoxDistance.ToColumn(cam.Position, entry.Position.X, entry.Position.Z, S * volume.Scale),
+                                    volume.RankedFrom);
+                d = r * r;
+            }
+            else if (haveCam && volume.Gpu.IsWorld)
             {
                 var c = entry.Position.WorldOrigin + new Vector3D<float>(S * 0.5f) - cam.Position;
                 d = c.X * c.X + c.Z * c.Z + HeightWeight * c.Y * c.Y;

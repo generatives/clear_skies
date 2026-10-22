@@ -72,4 +72,18 @@ public class ScaledVolumeTests
         volume.AddChunk(new ChunkPosition(0, 0, 0), data);
         Assert.Empty(volume.BlockEntities);
     }
+
+    [Fact]
+    public void DroppingItsBlocksLeavesAllAirAndReleasesThem()
+    {
+        using var scene = new HeadlessScene();
+        var volume = Scaled(scene, 2);
+        var data = Solid();
+        var entry = volume.AddChunk(new ChunkPosition(0, 0, 0), data);
+        entry.DropData();
+        Assert.True(entry.DataDropped);
+        Assert.False(entry.Data.HasAnyNonAir());
+        Assert.Equal(BlockId.Air, data.Get(0, 0, 0)); // its arrays went back to the pool
+        volume.RemoveChunk(new ChunkPosition(0, 0, 0));
+    }
 }
