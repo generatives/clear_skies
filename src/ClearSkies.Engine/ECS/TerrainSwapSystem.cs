@@ -525,12 +525,11 @@ public sealed class TerrainSwapSystem : ISystem
         foreach (var level in Levels.Skip(1))
         {
             var coarser = level.Coarser;
-            int coarserY = (int)MathF.Floor(centre.Y / level.Blocks) >> 1;
-            foreach (var col in level.InFlight.Keys)
-                if (!HiddenColumn(col) && BoxDistance.ToColumn(centre, col.x, col.z, level.Blocks) is var d && d < best && d < ignoreFrom)
+            foreach (var (col, job) in level.InFlight)
+                if (!HiddenColumn(col, job.Layers) && BoxDistance.ToColumn(centre, col.x, col.z, level.Blocks) is var d && d < best && d < ignoreFrom)
                     (best, FogHeldBy) = (d, $"level {level.Level} column being made, {d:F0} blocks out");
             for (int i = level.QueueHead; i < level.Queue.Count; i++)
-                if (!HiddenColumn(level.Queue[i]))
+                if (!HiddenColumn(level.Queue[i], Missing(level, level.Queue[i])))
                 {
                     if (BoxDistance.ToColumn(centre, level.Queue[i].x, level.Queue[i].z, level.Blocks) is var d && d < best && d < ignoreFrom)
                         (best, FogHeldBy) = (d, $"level {level.Level} column queued, {d:F0} blocks out");
@@ -546,10 +545,34 @@ public sealed class TerrainSwapSystem : ISystem
                     (best, FogHeldBy) = (d, $"level {level.Level} chunk waiting for {WaitsFor(level, c, p)}, {d:F0} blocks out");
             }
 
-            bool HiddenColumn((int x, int z) k)
-                => coarser != null && Shows(coarser, new ChunkPosition(k.x >> 1, coarserY, k.z >> 1));
+            // A column's chunks being made (layer bits) are hidden where the coarser level shows over each of them, or
+            // knows there's nothing there. (Testing only the coarser chunk at the view's height missed columns seen
+            // from above it, where that chunk is air: every new chunk near the view held the fog in.)
+            bool HiddenColumn((int x, int z) k, ulong layers)
+            {
+                if (coarser == null) return false;
+                for (int y = level.MinY; y <= level.MaxY; y++)
+                {
+                    if ((layers & 1UL << (y - level.MinY)) == 0) continue;
+                    var over = new ChunkPosition(k.x >> 1, y >> 1, k.z >> 1);
+                    if (!Shows(coarser, over) && (coarser.Volume.IsLoaded(over) || !_load.Has(coarser, over))) return false;
+                }
+                return true;
+            }
         }
         return best;
+    }
+
+    /// <summary>The layers of the level's column it wants and doesn't have yet (see <see cref="ChunkLoadSystem.Has"/>).</summary>
+    private ulong Missing(TerrainLevel level, (int x, int z) col)
+    {
+        ulong layers = 0;
+        for (int y = level.MinY; y <= level.MaxY; y++)
+        {
+            var p = new ChunkPosition(col.x, y, col.z);
+            if (ChunkLoadSystem.Wanted(level, p) && !_load.Has(level, p)) layers |= level.Bit(p);
+        }
+        return layers;
     }
 
     /// <summary>What a chunk held back (see <see cref="Waits"/>) waits for: its mesh, its place in the light store, or

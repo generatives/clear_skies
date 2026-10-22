@@ -216,6 +216,42 @@ public class HeadlessStreamingTests
     }
 
     [Fact]
+    public void FlyingOverCoarseTerrainNewLevel1ColumnsShownByLevel2DoNotHoldTheFog()
+    {
+        using var scene = new HeadlessScene();
+        using var db = SaveDatabase.InMemory();
+        var load = Streaming(scene, db, viewDistance: 1024);
+        load.SetLevels(128, new[] { 512f, 1024f });
+        var swaps = new TerrainSwapSystem(scene.World, load) { FadeSeconds = 0f };
+        var player = Interest(scene, 16, 16, View(1024));
+        var at = new Vector3D<float>(16, 300, 16); // high over the ground: the level-2 chunk at the view's height is air
+        player.Get<Transform>().Position = at;
+        void LoadAndShow()
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(30);
+            do
+            {
+                Settle(load, swaps: swaps);
+                foreach (var level in load.Levels) foreach (var (_, entry) in level.Volume.All) entry.Entity.Set<ChunkMeshedFlag>();
+                for (int i = 0; i < 5; i++) { load.Update(1 / 60f); swaps.Update(1 / 60f); }
+            } while (!load.LevelsIdle && DateTime.UtcNow < deadline);
+        }
+        LoadAndShow();
+
+        // Each move brings level-1 chunks in near the view, under level 2, which shows there meanwhile.
+        for (int step = 0; step < 6; step++)
+        {
+            at.X += 48;
+            player.Get<Transform>().Position = at;
+            load.Update(1 / 60f);
+            swaps.Update(1 / 60f);
+            swaps.FarReadyRadius(at);
+            Assert.DoesNotContain("level 1 column", swaps.FogHeldBy);
+            LoadAndShow();
+        }
+    }
+
+    [Fact]
     public void ChangingOnlyTheRadiiKeepsTheLevels()
     {
         using var scene = new HeadlessScene();
