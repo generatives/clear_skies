@@ -638,8 +638,8 @@ fn fs_chunk_transparent(in: VSOut, @builtin(front_facing) front: bool) -> @locat
         drawGrid  = in.cg.w;
         let rd = normalize(in.localView);
         let clear = exp(-waterPath(vec3<f32>(drawChunk * 32) + in.localPos + rd * 0.001, rd) / WATER_CLEAR);
-        alpha = 1.0 - (1.0 - alpha) * clear;
-        waterShare = 1.0 - clear;
+        alpha = 1.0 - (1.0 - WATER_SHALLOW_ALPHA) * clear;
+        waterShare = 1.0 - (1.0 - WATER_SHALLOW_FOG) * clear;
     }
     var v = in;
     if (!front) { v.localNormal = -v.localNormal; v.worldNormal = -v.worldNormal; }
@@ -648,8 +648,12 @@ fn fs_chunk_transparent(in: VSOut, @builtin(front_facing) front: bool) -> @locat
 
 // Water depth shading (fs_chunk_transparent): each WATER_CLEAR blocks the view goes through cut what shows through the
 // water to about a third, and the water's own colour turns as much towards the underwater fog's (waterFogColor), so
-// deep water looks the same colour from above as from inside it.
+// deep water looks the same colour from above as from inside it. The thinnest water is WATER_SHALLOW_ALPHA opaque
+// and already WATER_SHALLOW_FOG of the way to the fog's colour (the rest its lit texture, for the ripples), so the
+// shallows are the depths' colour, only clearer.
 const WATER_CLEAR: f32 = 5.0;
+const WATER_SHALLOW_ALPHA: f32 = 0.3;
+const WATER_SHALLOW_FOG: f32 = 0.6;
 const WATER_MAX_PATH: f32 = 16.0;
 
 // Whether voxel v in this draw's grid holds water (a translucent block): its chunk's translucent bits, whose occupancy
