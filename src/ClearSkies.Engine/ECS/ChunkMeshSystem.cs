@@ -94,7 +94,7 @@ public sealed partial class ChunkMeshSystem : ISystem, IDebugUiSystem
     // _notDrawnYet for a frame.
     private readonly Queue<Entity> _prepared = new();
     private readonly List<Entity> _notDrawnYet = new();
-    private int _totalPrepared, _preparedStale;
+    private int _totalPrepared, _preparedStale, _preparedBuried;
 
     /// <summary>Drops the mesh <paramref name="e"/> was given as it loaded, if it still has it (a newer one is coming, or
     /// it isn't wanted).</summary>
@@ -297,6 +297,12 @@ public sealed partial class ChunkMeshSystem : ISystem, IDebugUiSystem
             try
             {
                 var entry = e.Get<Chunk>().Entry;
+                if (!prepared.Meshed)
+                {
+                    if (entry.Volume.IsBuried(entry.Position)) { ClearMesh(entry); _preparedBuried++; }
+                    else e.Set<NeedsRemeshFlag>();
+                    continue;
+                }
                 // A see-through face's neighbour came or went since it was made: shown as it is until it's remeshed.
                 if (!prepared.CurrentIn(entry.Volume, entry.Position))
                 {
@@ -449,6 +455,7 @@ public sealed partial class ChunkMeshSystem : ISystem, IDebugUiSystem
                    $"(creating the buffer {_createMs:F2} ms, writing it {_writeMs:F2} ms, {_uploadKb:F0} KB)");
         ImGui.Text($"Chunks meshed (lifetime): {_totalMeshed}; of the jobs, {_remeshes:N0} of {_meshes:N0} were remeshes");
         ImGui.Text($"Meshed as they loaded: {_totalPrepared:N0} uploaded, {_prepared.Count:N0} waiting; " +
-                   $"{_preparedStale:N0} remeshed after for a see-through face's neighbour");
+                   $"{_preparedStale:N0} remeshed after for a see-through face's neighbour, " +
+                   $"{_preparedBuried:N0} solid ones left unmeshed and found buried");
     }
 }

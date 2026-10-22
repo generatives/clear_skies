@@ -23,6 +23,10 @@ public sealed partial class ChunkMeshSystem
         public ChunkPreparation? Prepare(ChunkPosition pos, ChunkData data, IReadOnlyDictionary<ChunkPosition, ChunkData> job)
         {
             var around = new ChunkData?[6];
+            // Solid stone between solid stone above and below is most likely buried once its sides load (four in ten
+            // chunks of an island are all opaque): it's left to be found buried as it's uploaded, and meshed then if not.
+            if (data.IsAllOpaque && Opaque(job, pos.Offset(0, 1, 0)) && Opaque(job, pos.Offset(0, -1, 0)))
+                return PreparedMesh.Unmeshed;
             int seeThrough = 0;
             for (int f = 0; f < 6; f++)
             {
@@ -32,6 +36,9 @@ public sealed partial class ChunkMeshSystem
             var (opaque, cutout, transparent) = MeshAndPack(meshers.Value!, data, around, alone: true, pos);
             return new PreparedMesh(opaque, cutout, transparent, FindModelBlocks(data), around, seeThrough);
         }
+
+        private static bool Opaque(IReadOnlyDictionary<ChunkPosition, ChunkData> job, ChunkPosition p)
+            => job.TryGetValue(p, out var d) && d.IsAllOpaque;
     }
 
     // The neighbour on each side, in ChunkVolume.FaceHasSolid's order.
@@ -46,6 +53,12 @@ public sealed partial class ChunkMeshSystem
         public Packed Cutout { get; } = cutout;
         public Packed Transparent { get; } = transparent;
         public ModelCell[] Models { get; } = models;
+
+        /// <summary>No mesh: made for a chunk likely to be buried (see <see cref="Stage"/>), which is meshed as it's
+        /// uploaded only if it isn't.</summary>
+        public static PreparedMesh Unmeshed => new(Packed.None, Packed.None, Packed.None, Array.Empty<ModelCell>(),
+                                                   new ChunkData?[6], 0) { Meshed = false };
+        public bool Meshed { get; private init; } = true;
 
         /// <summary>Whether this mesh was made with <paramref name="neighbour"/> beside face <paramref name="face"/>, so
         /// its arriving there changes nothing.</summary>

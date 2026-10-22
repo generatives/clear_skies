@@ -68,6 +68,23 @@ public class MeshStageTests
     }
 
     [Fact]
+    public void Solid_chunks_between_solid_chunks_are_left_unmeshed()
+    {
+        var job = new Dictionary<ChunkPosition, ChunkData>();
+        for (int y = 0; y < 3; y++)
+        {
+            var d = new ChunkData();
+            for (int z = 0; z < ChunkData.Size; z++) for (int yy = 0; yy < ChunkData.Size; yy++) for (int x = 0; x < ChunkData.Size; x++)
+                d.Set(x, yy, z, BlockId.Stone);
+            job[new ChunkPosition(0, y, 0)] = d;
+        }
+        bool Meshed(int y) => ((ChunkMeshSystem.PreparedMesh)Stage.Prepare(new(0, y, 0), job[new(0, y, 0)], job)!).Meshed;
+        Assert.True(Meshed(0));  // open below
+        Assert.False(Meshed(1));
+        Assert.True(Meshed(2));  // open above
+    }
+
+    [Fact]
     public void Streamed_chunks_come_meshed()
     {
         using var scene = new HeadlessScene();
