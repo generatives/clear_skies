@@ -136,6 +136,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     private readonly int[] _top = new int[S * S];           // the top of the top span before a river cuts it
     private readonly int[] _bank = new int[S * S];          // beside a river, the highest its bank may stand, or int.MaxValue
     private readonly int[] _planned = new int[S * S];       // a river's level as Water gave it, before it was fitted in
+    private const int LakeSide = S + 2 * MouthReach;
+    private readonly int[] _lakeNear = new int[LakeSide * LakeSide]; // a lake's water over the ground, MouthReach round the chunk too
     private readonly float[] _bottomAt = new float[S * S];
 
     // The hearts around the chunk column being profiled, per layer: cells from (_cx0, _cy0, _cz0), _nx by _ny by _nz of
@@ -363,14 +365,37 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         for (int col = 0; col < S * S; col++)
             if (_riverDepth[col] > 0 && _level[col] != int.MinValue && Beside(col).Dry < _level[col] - RiverGap) _level[col] = int.MinValue;
         Array.Copy(_level, _planned, S * S);
+        // Lakes' water, out to MouthReach past the chunk (a river's mouth by a lake in the next chunk is level with it
+        // too, not a block under it up to the chunk's edge).
+        bool anyRiver = false;
+        for (int col = 0; col < S * S && !anyRiver; col++) anyRiver = _riverDepth[col] > 0 && _level[col] != int.MinValue;
+        if (anyRiver)
+            for (int pz = -MouthReach; pz < S + MouthReach; pz++)
+            for (int px = -MouthReach; px < S + MouthReach; px++)
+            {
+                int lake = int.MinValue;
+                if (px >= 0 && pz >= 0 && px < S && pz < S)
+                {
+                    int nc = px + S * pz;
+                    if (_riverDepth[nc] == 0 && _level[nc] != int.MinValue && _top[nc] != int.MinValue && _level[nc] > _top[nc]) lake = _level[nc];
+                }
+                else
+                {
+                    var w = _water.At(chunkX * S + px, chunkZ * S + pz);
+                    if (w.RiverDepth == 0 && w.Level != int.MinValue && _water.Ground(chunkX * S + px, chunkZ * S + pz) is float g && g < w.Level)
+                        lake = w.Level;
+                }
+                _lakeNear[px + MouthReach + LakeSide * (pz + MouthReach)] = lake;
+            }
         for (int col = 0; col < S * S; col++)
         {
             if (_riverDepth[col] == 0 || _level[col] == int.MinValue) continue;
             int hi = _top[col];
             var (dry, lake) = Beside(col);
-            // A block under the dry ground beside it, but level with a lake it runs into.
+            // A block under the dry ground beside it, but level with a lake it runs into or out of (even a block over its
+            // own level, so the lake's edge isn't a step down into it).
             int water = System.Math.Min(_level[col], dry == int.MaxValue ? int.MaxValue : dry - 1);
-            if (lake != int.MinValue) water = System.Math.Max(water, System.Math.Min(System.Math.Min(_level[col], lake), dry));
+            if (lake != int.MinValue) water = System.Math.Max(water, System.Math.Min(lake, dry));
             _level[col] = water;
             ref var topSpan = ref _spans[col * MaxSpans + _spanCount[col] - 1];
             topSpan.Hi = (short)System.Math.Max(topSpan.Lo, System.Math.Min(hi, water - _riverDepth[col]));
@@ -406,13 +431,9 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         {
             int dry = int.MaxValue, lake = int.MinValue;
             int lx = col % S, lz = col / S;
-            for (int nz = System.Math.Max(0, lz - MouthReach); nz <= System.Math.Min(S - 1, lz + MouthReach); nz++)
-            for (int nx = System.Math.Max(0, lx - MouthReach); nx <= System.Math.Min(S - 1, lx + MouthReach); nx++)
-            {
-                int nc = nx + S * nz;
-                if (_riverDepth[nc] == 0 && _level[nc] != int.MinValue && _top[nc] != int.MinValue && _level[nc] > _top[nc])
-                    lake = System.Math.Max(lake, _level[nc]);
-            }
+            for (int nz = lz; nz <= lz + 2 * MouthReach; nz++)
+            for (int nx = lx; nx <= lx + 2 * MouthReach; nx++)
+                lake = System.Math.Max(lake, _lakeNear[nx + LakeSide * nz]);
             for (int n = 0; n < 4; n++)
             {
                 int nx = lx + (n == 0 ? 1 : n == 1 ? -1 : 0), nz = lz + (n == 2 ? 1 : n == 3 ? -1 : 0);
