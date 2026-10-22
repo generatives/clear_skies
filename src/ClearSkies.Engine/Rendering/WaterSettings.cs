@@ -26,6 +26,6 @@ public static class WaterSettings
     /// <summary>How much the water's thickness varies through it (0-1: up to that much murkier or clearer than
     /// <see cref="Clarity"/> says), so there are darker and lighter stretches of water rather than one even body, and
     /// how big those stretches are, in blocks.</summary>
-    public static float Pattern = 0.6f;
-    public static float PatternSize = 6f;
+    public static float Pattern = 0.2f;
+    public static float PatternSize = 3f;
 }
