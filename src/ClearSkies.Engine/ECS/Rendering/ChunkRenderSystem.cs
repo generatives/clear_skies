@@ -89,17 +89,18 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     private int UnbakedCount => _unbaked.Values.Sum(l => l.Count);
     private int _bakedQuads;
 
-    /// <summary>How long a static volume's chunk takes to fade in from when it's first drawn: terrain arriving shows by
-    /// fading in, not popping, the fog staying where it is (see FogSystem). Remeshing it doesn't fade it again.</summary>
+    /// <summary>How long a static volume's chunk takes to fade in from when it arrives (becomes drawable, see
+    /// <see cref="LightmapsBakedFlag"/>), wherever the camera looks: terrain arriving shows by fading in, not popping,
+    /// the fog staying where it is (see FogSystem). Remeshing it doesn't fade it again.</summary>
     public const double ArrivalFadeSeconds = 1.0;
-    private readonly Dictionary<Entity, double> _firstDrawn = new(); // when each loaded chunk was first drawn (seconds)
+    private readonly Dictionary<Entity, double> _arrivedAt = new(); // when each arrived (seconds), till its fade is over
 
-    /// <summary>Whether a chunk of a grid is lit (GpuLightSystem.IsLit): a static volume's chunk arriving on its own (not
-    /// swapped in, see TerrainSwapSystem) isn't first drawn until it is, so it doesn't fade in unlit. Unset: all are.</summary>
+    /// <summary>Whether a chunk of a grid is lit (GpuLightSystem.IsLit): a static volume's chunk is first baked, and
+    /// arrives, once it is, so it isn't shown unlit. Unset: all are.</summary>
     public Func<GridHandle, ChunkPosition, bool>? IsLit { get; set; }
-    /// <summary>Puts a chunk ahead of the light queues (GpuLightSystem.ShowFirst): one waiting for its light to be first drawn.</summary>
+    /// <summary>Puts a chunk ahead of the light queues (GpuLightSystem.ShowFirst): one waiting for its light to arrive.</summary>
     public Action<GridHandle, ChunkPosition>? ShowFirst { get; set; }
-    // When each chunk waiting for its light to be first drawn started waiting; drawn unlit after LightWaitSeconds anyway.
+    // When each chunk waiting for its light to arrive started waiting; it arrives unlit after LightWaitSeconds anyway.
     private readonly Dictionary<Entity, double> _waitingLight = new();
     private const double LightWaitSeconds = 5.0;
     private double _now; // this frame's time (seconds)
@@ -118,11 +119,10 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         world.SubscribeComponentRemoved<ChunkRenderData>((in Entity e, in ChunkRenderData _) =>
         {
             Forget(e);
-            // Meshed again, baked again before it's drawable; but one already drawn stays drawable (it's baked over the
-            // budget when next drawn, see Bake), so it doesn't vanish and its swap doesn't wait for it again.
-            if (e.Has<LightmapsBakedFlag>() && !_firstDrawn.ContainsKey(e)) e.Remove<LightmapsBakedFlag>();
+            // Meshed again: one that's arrived stays drawable (its new mesh is baked over the budget when next drawn, see
+            // Bake), so it doesn't vanish and its swap doesn't wait for it again.
         });
-        world.SubscribeEntityDisposed((in Entity e) => { Forget(e); _firstDrawn.Remove(e); _waitingLight.Remove(e); });
+        world.SubscribeEntityDisposed((in Entity e) => { Forget(e); _arrivedAt.Remove(e); _waitingLight.Remove(e); });
     }
 
     private StaticVolume StaticOf(ChunkVolume volume)
@@ -246,28 +246,20 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         }
         _draws.RemoveRange(kept, _draws.Count - kept);
         BakeFirstTimes();
-        // A chunk fades in over ArrivalFadeSeconds from when it's first drawn, unless something else is fading it (a
-        // swap between levels of detail, whose first draw this then is). One arriving on its own waits for its light.
+        // A chunk fades in over ArrivalFadeSeconds from when it arrived, unless something else is fading it (a swap
+        // between levels of detail).
         draws = CollectionsMarshal.AsSpan(_draws);
-        kept = 0;
         for (int i = 0; i < draws.Length; i++)
         {
-            var d = draws[i];
-            if (d.Entity != default)
+            ref var d = ref draws[i];
+            if (d.Entity != default && _arrivedAt.TryGetValue(d.Entity, out var at))
             {
-                if (!_firstDrawn.TryGetValue(d.Entity, out var at))
-                {
-                    if (d.Dissolve == 0f && !LitForFirstDraw(in d)) continue;
-                    _firstDrawn[d.Entity] = at = d.Dissolve == 0f ? _now : 0;
-                    _waitingLight.Remove(d.Entity);
-                }
                 double t = (_now - at) / ArrivalFadeSeconds;
-                if (t < 1.0 && d.Dissolve == 0f) d = d with { Dissolve = (float)(1.0 - t) };
+                if (t >= 1.0) _arrivedAt.Remove(d.Entity);
+                else if (d.Dissolve == 0f) d = d with { Dissolve = (float)(1.0 - t) };
             }
-            draws[kept++] = d;
             if (d.TransparentMesh != null) _translucentDraws.Add(d);
         }
-        _draws.RemoveRange(kept, _draws.Count - kept);
         Array.Clear(_levelCounts);
         foreach (ref readonly var d in CollectionsMarshal.AsSpan(_draws))
         {
@@ -379,14 +371,14 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     /// <summary>Flags the static volumes' chunks whose light maps are now baked (<see cref="LightmapsBakedFlag"/>), and
     /// lists the next never baked, out of view or held back, for what's left of the frame's budget. A chunk not in the
     /// light store yet waits for its place there.</summary>
-    /// <summary>Whether a chunk arriving on its own can be first drawn as far as its light goes: lit, or waited long
-    /// enough (LightWaitSeconds). Until then it's put ahead of the light queues.</summary>
-    private bool LitForFirstDraw(in ChunkDraw d)
+    /// <summary>Whether a chunk can be first baked as far as its light goes: lit, or waited long enough
+    /// (LightWaitSeconds). Until then it's put ahead of the light queues.</summary>
+    private bool LitForFirstBake(Entity e, in ChunkRenderData rd)
     {
-        if (IsLit == null || d.Handle == null || IsLit(d.Handle, d.Chunk)) return true;
-        if (!_waitingLight.TryGetValue(d.Entity, out var since)) _waitingLight[d.Entity] = since = _now;
+        if (IsLit == null || rd.Grid is not { } grid || IsLit(grid, rd.ChunkPos)) return true;
+        if (!_waitingLight.TryGetValue(e, out var since)) _waitingLight[e] = since = _now;
         if (_now - since >= LightWaitSeconds) return true;
-        ShowFirst?.Invoke(d.Handle, d.Chunk);
+        ShowFirst?.Invoke(grid, rd.ChunkPos);
         return false;
     }
 
@@ -403,7 +395,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
             var e = unbaked[i];
             if (!e.IsAlive || !e.Has<ChunkRenderData>()) continue;
             ref readonly var rd = ref e.Get<ChunkRenderData>();
-            if (!Baked(rd) && e.Has<ChunkUploadedFlag>() && _bakedQuads < BakeQuadBudget)
+            if (!Baked(rd) && e.Has<ChunkUploadedFlag>() && _bakedQuads < BakeQuadBudget && LitForFirstBake(e, rd))
             {
                 int stamp = _renderer.LightStampOf(rd.Grid, rd.ChunkPos);
                 foreach (var mesh in rd.Meshes())
@@ -413,7 +405,12 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
                     _renderer.PrepareLightmap(mesh, rd.Grid, rd.ChunkPos, stamp);
                 }
             }
-            if (Baked(rd)) e.Set<LightmapsBakedFlag>();
+            if (Baked(rd))
+            {
+                e.Set<LightmapsBakedFlag>();
+                _arrivedAt[e] = _now;
+                _waitingLight.Remove(e);
+            }
             else unbaked[kept++] = e;
         }
         unbaked.RemoveRange(kept, unbaked.Count - kept);
@@ -427,6 +424,9 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     /// budget lasts (always the first). Returns whether it can be drawn: its maps are baked, or were once.</summary>
     private bool Bake(in ChunkDraw d)
     {
+        // A static volume's chunk is first baked once lit, wherever the camera looks (see BakeFirstTimes): till it
+        // arrives it isn't drawn.
+        if (d.Budgeted && d.Entity != default && !d.Entity.Has<LightmapsBakedFlag>()) { _waitingFirstBake++; return false; }
         if (d.Light == ChunkLight.OpenAir) return true;
         if (d.Light == ChunkLight.Kept) return AllBaked(in d);
         int stamp = _renderer.LightStampOf(d.Handle, d.Chunk);
@@ -438,9 +438,9 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
             if (_bakedQuads > 0 && _bakedQuads + quads > BakeQuadBudget)
             {
                 if (AllBaked(in d)) return true;
-                // One already on screen and just remeshed (its new mesh never baked) is baked over the budget rather
+                // One that's arrived and was just remeshed (its new mesh never baked) is baked over the budget rather
                 // than vanish till there's room: remeshes are few a frame, held to the upload budget.
-                if (d.Entity == default || !_firstDrawn.ContainsKey(d.Entity)) { _waitingFirstBake++; return false; }
+                if (d.Entity == default) { _waitingFirstBake++; return false; }
             }
             _bakedQuads += quads;
         }
