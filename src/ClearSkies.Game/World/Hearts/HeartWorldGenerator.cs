@@ -130,6 +130,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     private readonly bool[] _shore = new bool[S * S];       // whether a dry column by a lake is its sandy shore
     private readonly byte[] _riverDepth = new byte[S * S];  // how deep a river's bed is cut under its level here, 0 for none
     private readonly int[] _top = new int[S * S];           // the top of the top span before a river cuts it
+    private readonly int[] _bank = new int[S * S];          // beside a river, the highest its bank may stand, or int.MaxValue
     private readonly float[] _bottomAt = new float[S * S];
 
     // The hearts around the chunk column being profiled, per layer: cells from (_cx0, _cy0, _cz0), _nx by _ny by _nz of
@@ -266,6 +267,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             var water = _water.At((int)wx, (int)wz);
             _level[col] = water.Level;
             _riverDepth[col] = (byte)water.RiverDepth;
+            _bank[col] = water.Bank;
             // A lake's shore reaches a ragged ShoreReach from its sample cells, not their square outline; a river's
             // banks stay as they are.
             _shore[col] = water.RiverDepth == 0 && water.Off < ShoreReach * (0.6f + 0.4f * (_crack.GetNoise(wx * 3f, wz * 3f) + 1f));
@@ -343,22 +345,38 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             }
         }
 
+        // A river's banks slope down to it.
+        for (int col = 0; col < S * S; col++)
+        {
+            if (_bank[col] == int.MaxValue || _level[col] != int.MinValue || _spanCount[col] == 0) continue;
+            ref var topSpan = ref _spans[col * MaxSpans + _spanCount[col] - 1];
+            if (topSpan.Hi > _bank[col]) topSpan.Hi = (short)System.Math.Max(topSpan.Lo, _bank[col]);
+        }
+
         // Rivers cut their beds into the top: the water a block under the ground here, and no higher than the dry
         // ground beside it, so it doesn't stand against air; none where the top is far under the river, a crack or a
         // cliff, where it ends.
         for (int col = 0; col < S * S; col++)
             _top[col] = _spanCount[col] == 0 ? int.MinValue : _spans[col * MaxSpans + _spanCount[col] - 1].Hi;
         for (int col = 0; col < S * S; col++)
+            if (_riverDepth[col] > 0 && (_top[col] == int.MinValue || _top[col] < _level[col] - RiverGap)) _level[col] = int.MinValue;
+        for (int col = 0; col < S * S; col++)
         {
             if (_riverDepth[col] == 0 || _level[col] == int.MinValue) continue;
             int hi = _top[col];
-            if (hi == int.MinValue || hi < _level[col] - RiverGap) { _level[col] = int.MinValue; continue; }
             int water = System.Math.Min(_level[col], hi - 1);
             int lx = col % S, lz = col / S;
             for (int n = 0; n < 4; n++)
             {
                 int nx = lx + (n == 0 ? 1 : n == 1 ? -1 : 0), nz = lz + (n == 2 ? 1 : n == 3 ? -1 : 0);
-                if (nx < 0 || nz < 0 || nx >= S || nz >= S) continue;
+                if (nx < 0 || nz < 0 || nx >= S || nz >= S)
+                {
+                    // (Beyond this chunk, the ground as Water reckons it: the same from either side.)
+                    var beside = _water.At(chunkX * S + nx, chunkZ * S + nz);
+                    if (beside.Level == int.MinValue && _water.Ground(chunkX * S + nx, chunkZ * S + nz) is float g)
+                        water = System.Math.Min(water, System.Math.Min((int)MathF.Floor(g), beside.Bank));
+                    continue;
+                }
                 int nc = nx + S * nz;
                 if (_level[nc] == int.MinValue && _top[nc] != int.MinValue) water = System.Math.Min(water, _top[nc]);
             }
