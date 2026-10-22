@@ -40,7 +40,7 @@ public sealed class Water
     /// <summary>How far from its piece's faces a lake keeps, further than a river: the rounding of its rim as well.</summary>
     private const float LakeMargin = 64f;
 
-    private const float MinDepth = 5f;                    // shallower hollows hold no lake
+    private const float MinDepth = 5f, FedDepth = 2f;     // shallower hollows hold no lake (FedDepth: one a river feeds)
     private const int MinCells = 16, MaxCells = 600;      // lakes of about 250 to 10,000 square blocks
 
     // A lake sits in open ground, not perched on a slope or by a cliff: no ground within Perch cells of it may be
@@ -69,6 +69,9 @@ public sealed class Water
 
     /// <summary>How many samples from a lake its rivers' ways start to lean.</summary>
     private const int ShoreLean = 4;
+
+    /// <summary>How far from a lake (blocks) a river widens, up to MouthWiden times wider, and wears down to it.</summary>
+    private const float MouthReach = 16f, MouthWiden = 1f;
 
     /// <summary>How many samples round a column to look for a river through it or beside it.</summary>
     private const int Search = 6;
@@ -139,10 +142,17 @@ public sealed class Water
         // bent by noise so the river winds (less so near a lake, so it still meets it, and near its piece's crack, so
         // it doesn't wind out onto the cliff's lip). Its banks slope up from the nearest river.
         float nearLake = float.MaxValue;
+        int lakeLevel = int.MinValue;
         for (int dk = -4; dk <= 4; dk++)
         for (int di = -4; di <= 4; di++)
-            if (piece.Lake[Math.Clamp(ci + di, 0, Window - 1) + Window * Math.Clamp(ck + dk, 0, Window - 1)] != int.MinValue)
-                nearLake = MathF.Min(nearLake, MathF.Sqrt(di * di + dk * dk) * Step);
+        {
+            int l = piece.Lake[Math.Clamp(ci + di, 0, Window - 1) + Window * Math.Clamp(ck + dk, 0, Window - 1)];
+            float dd = MathF.Sqrt(di * di + dk * dk) * Step;
+            if (l != int.MinValue && dd < nearLake) { nearLake = dd; lakeLevel = l; }
+        }
+        // (Coming into a lake, a river widens and wears its way down to the lake's level, cutting a bay into the
+        // shore rather than tumbling over it.)
+        float mouth = Math.Clamp(1f - nearLake / MouthReach, 0f, 1f);
         float bend = Meander * Math.Clamp((nearLake - 2f * Step) / (2f * Step), 0f, 1f) * piece.Edge[ci + Window * ck];
         float qx = px + bend * _meanderX.GetNoise(px, pz), qz = pz + bend * _meanderZ.GetNoise(px, pz);
         int qi = FloorDiv((int)MathF.Floor(qx), Step) - piece.X0, qk = FloorDiv((int)MathF.Floor(qz), Step) - piece.Z0;
@@ -159,7 +169,7 @@ public sealed class Water
             float bx = ax, bz = az;
             int d = piece.Down[c];
             if (d >= 0) { bx = (piece.X0 + d % Window + 0.5f) * Step; bz = (piece.Z0 + d / Window + 0.5f) * Step; }
-            float dist = SegmentDistance(qx, qz, ax, az, bx, bz, out float t), half = piece.Width[c] * 0.5f;
+            float dist = SegmentDistance(qx, qz, ax, az, bx, bz, out float t), half = piece.Width[c] * 0.5f * (1f + MouthWiden * mouth);
             // (Its level runs down from this sample's to the next one's, or to the lake's it flows into: no higher
             // than the first, no lower than the straight line between them.)
             int to = d < 0 ? piece.River[c] : piece.River[d] != int.MinValue ? piece.River[d] : piece.Lake[d] != int.MinValue ? piece.Lake[d] : piece.River[c];
@@ -172,8 +182,11 @@ public sealed class Water
         // Between those, a block under the ground on the river's middle line: so the water follows the ground's steps
         // down, neither sinking under them nor standing over them, and lies level across the river.
         float? ground = riverLevel != int.MinValue || bank != int.MaxValue ? Ground(x, z) : null;
-        int Follow(int high, int low, float mx, float mz) =>
-            Ground((int)MathF.Floor(mx), (int)MathF.Floor(mz)) is float g ? Math.Clamp((int)MathF.Floor(g) - 1, Math.Min(low, high), high) : high;
+        int Follow(int high, int low, float mx, float mz)
+        {
+            int l = Ground((int)MathF.Floor(mx), (int)MathF.Floor(mz)) is float g ? Math.Clamp((int)MathF.Floor(g) - 1, Math.Min(low, high), high) : high;
+            return mouth > 0f && lakeLevel < l ? (int)MathF.Round(l + (lakeLevel - l) * mouth) : l;
+        }
         if (riverLevel != int.MinValue) riverLevel = Follow(riverLevel, riverLow, riverX, riverZ);
         if (bank != int.MaxValue)
         {
@@ -353,7 +366,8 @@ public sealed class Water
         {
             level[h] = int.MinValue;
             var cells = cellsOf[h];
-            if (deepest[h] < MinDepth) continue;
+            // (A hollow a river runs into holds a lake even if shallower: a river ending short of one looks wrong.)
+            if (deepest[h] < (inflow[h] >= RiverFrom ? FedDepth : MinDepth)) continue;
             sink[h] = true;
             int spill = (int)MathF.Floor(filled[cells[0]]) - 1;
             // (Near its piece's faces it stays dry: no higher than the lowest ground there.)

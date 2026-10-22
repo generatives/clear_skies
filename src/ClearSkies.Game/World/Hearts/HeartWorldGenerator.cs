@@ -67,7 +67,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     private const int RiverGap = 8, RiverFall = 24;
 
     /// <summary>How near (blocks) a lake's water a river's comes level with it.</summary>
-    private const int MouthReach = 3;
+    private const int MouthReach = 6;
 
     /// <summary>Where noise is under this (-1 to 1) a tundra lake is open water, not ice.</summary>
     private const float IceOpen = -0.25f;
