@@ -54,9 +54,10 @@ public sealed class Water
     /// <summary>A hollow fills if the rain gathering into it is at least LakeNeed times its own samples.</summary>
     private const float LakeNeed = 6f;
 
-    // A river starts where RiverFrom samples' rain has gathered, a block wide, widening by RiverWiden blocks per square
-    // root of what it carries beyond that, up to RiverWidest; and some stretches up to RiverVary wider or narrower.
-    private const float RiverFrom = 160f, RiverWiden = 0.3f, RiverWidest = 10f, RiverVary = 0.35f;
+    // A river starts where RiverFrom samples' rain has gathered, RiverNarrowest blocks wide, widening by RiverWiden
+    // blocks per square root of what it carries beyond that, up to RiverWidest; and some stretches up to RiverVary wider
+    // or narrower.
+    private const float RiverFrom = 160f, RiverNarrowest = 3f, RiverWiden = 0.3f, RiverWidest = 10f, RiverVary = 0.35f;
 
     // A river winds up to Meander blocks either side of the way its water goes; its banks slope up from a block over
     // it by BankSlope blocks per block out, for BankReach blocks.
@@ -65,6 +66,9 @@ public sealed class Water
     /// <summary>How far (blocks) smooth noise raises or lowers the ground the rivers' ways are worked over: on gentle
     /// slopes that is enough to turn them, so they wander; steep ones still send them straight down.</summary>
     private const float Wander = 3f;
+
+    /// <summary>How many samples from a lake its rivers' ways start to lean.</summary>
+    private const int ShoreLean = 4;
 
     /// <summary>How many samples round a column to look for a river through it or beside it.</summary>
     private const int Search = 6;
@@ -151,10 +155,10 @@ public sealed class Water
             float bx = ax, bz = az;
             int d = piece.Down[c];
             if (d >= 0) { bx = (piece.X0 + d % Window + 0.5f) * Step; bz = (piece.Z0 + d / Window + 0.5f) * Step; }
-            float dist = SegmentDistance(qx, qz, ax, az, bx, bz, out float t), half = piece.Width[c] * 0.5f;
-            // (Its level runs down the line from this sample's to the next one's, or the lake's it flows into.)
-            int to = d < 0 ? piece.River[c] : piece.River[d] != int.MinValue ? piece.River[d] : piece.Lake[d] != int.MinValue ? piece.Lake[d] : piece.River[c];
-            int at = (int)MathF.Floor(piece.River[c] + t * (to - piece.River[c]));
+            float dist = SegmentDistance(qx, qz, ax, az, bx, bz), half = piece.Width[c] * 0.5f;
+            // (Its level is this sample's, as high as the ground round it lets the water stand, so the water follows
+            // the ground's steps down rather than sinking under them.)
+            int at = piece.River[c];
             if (dist <= half && dist < bestRiver) { bestRiver = dist; riverLevel = at; width = piece.Width[c]; }
             else if (dist > half && dist - half < MathF.Min(BankReach, bestBank))
             {
@@ -165,9 +169,10 @@ public sealed class Water
         int depth = width >= 8 ? 3 : width >= 4 ? 2 : 1;
         if (own != int.MinValue)
         {
-            // Where a river comes in over the lake's shore, its bed is cut on through to the lake's water.
-            bool shore = riverLevel != int.MinValue && Ground(x, z) is float g && g >= own;
-            return new(own, Off(ci, ck, px, pz, piece), shore ? depth : 0);
+            // Where a river comes in over the lake's shore, it runs on down to the lake's water (the ground round it
+            // letting it down) rather than standing back behind the shore.
+            if (riverLevel != int.MinValue && Ground(x, z) is float g && g >= own) return new(Math.Max(riverLevel, own), 0f, depth);
+            return new(own, Off(ci, ck, px, pz, piece), 0);
         }
         if (riverLevel != int.MinValue) return new(riverLevel, 0f, depth);
 
@@ -202,10 +207,10 @@ public sealed class Water
         return MathF.Sqrt(cx * cx + cz * cz);
     }
 
-    private static float SegmentDistance(float px, float pz, float ax, float az, float bx, float bz, out float t)
+    private static float SegmentDistance(float px, float pz, float ax, float az, float bx, float bz)
     {
         float vx = bx - ax, vz = bz - az, len2 = vx * vx + vz * vz;
-        t = len2 > 0f ? Math.Clamp(((px - ax) * vx + (pz - az) * vz) / len2, 0f, 1f) : 0f;
+        float t = len2 > 0f ? Math.Clamp(((px - ax) * vx + (pz - az) * vz) / len2, 0f, 1f) : 0f;
         float dx = px - (ax + t * vx), dz = pz - (az + t * vz);
         return MathF.Sqrt(dx * dx + dz * dz);
     }
@@ -329,7 +334,22 @@ public sealed class Water
 
         // The ways again, now ending in the lakes that keep what reaches them and in the deep hollows left dry; an
         // overflowing lake's water level, flat, passes on what reaches it out over its spill point. These ways lean
-        // with the noise, so rivers wander over gentle ground.
+        // with the noise, so rivers wander over gentle ground, but not by a lake, so they don't wander along its shore.
+        for (int k = 0; k < Window; k++)
+        for (int i = 0; i < Window; i++)
+        {
+            int c = i + Window * k;
+            if (lean[c] == 0f) continue;
+            float near = float.MaxValue;
+            for (int dk = -ShoreLean; dk <= ShoreLean; dk++)
+            for (int di = -ShoreLean; di <= ShoreLean; di++)
+            {
+                int ni = i + di, nk = k + dk;
+                if (ni >= 0 && nk >= 0 && ni < Window && nk < Window && piece.Lake[ni + Window * nk] != int.MinValue)
+                    near = MathF.Min(near, MathF.Sqrt(di * di + dk * dk));
+            }
+            lean[c] *= Math.Clamp((near - 1f) / (ShoreLean - 1f), 0f, 1f);
+        }
         var surface = new float[N];
         for (int c = 0; c < N; c++)
         {
@@ -374,7 +394,7 @@ public sealed class Water
                 lakeBeside = Math.Max(lakeBeside, piece.Lake[i + Window * k]);
             piece.River[c] = Math.Max(Math.Min(piece.River[c], (int)MathF.Floor(ground[c]) - 1), lakeBeside);
             float vary = 1f + RiverVary * _widths.GetNoise((piece.X0 + ci) * Step, (piece.Z0 + ck) * Step);
-            piece.Width[c] = (byte)Math.Clamp(MathF.Round((1f + RiverWiden * MathF.Sqrt(gathered[c] - RiverFrom)) * vary), 1f, RiverWidest);
+            piece.Width[c] = (byte)Math.Clamp(MathF.Round((RiverNarrowest + RiverWiden * MathF.Sqrt(gathered[c] - RiverFrom)) * vary), 2f, RiverWidest);
             int d = down[c];
             if (d >= 0 && piece.River[d] != int.MinValue) piece.River[d] = Math.Min(piece.River[d], piece.River[c]);
         }

@@ -377,7 +377,9 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                     continue;
                 }
                 int nc = nx + S * nz;
-                if (_level[nc] == int.MinValue && _top[nc] != int.MinValue) water = System.Math.Min(water, _top[nc]);
+                // (A neighbour is dry where its water, if any, doesn't reach over its ground: by a lake's rim, say.)
+                if (_top[nc] != int.MinValue && (_level[nc] == int.MinValue || _level[nc] <= _top[nc]))
+                    water = System.Math.Min(water, _top[nc]);
             }
             _level[col] = water;
             ref var topSpan = ref _spans[col * MaxSpans + _spanCount[col] - 1];
