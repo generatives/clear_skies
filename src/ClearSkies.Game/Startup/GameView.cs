@@ -105,6 +105,8 @@ public sealed class GameView : IDisposable
         host.AddSystem((ISystem)_particles, SystemStage.Frame); // moves every emitter's particles
         var chunks = new ChunkRenderSystem(host.World, renderer, volume);
         host.AddSystem(chunks, SystemStage.RenderWorld);
+        chunks.IsLit = light.IsLit;               // terrain arriving on its own is first drawn once lit
+        chunks.ShowFirst = light.ShowFirst;
         // Distant terrain drawn coarse past full detail, in levels (--lod-levels, and the Distant Terrain panel).
         var load = world.ChunkLoad;
         var swaps = world.TerrainSwaps;
