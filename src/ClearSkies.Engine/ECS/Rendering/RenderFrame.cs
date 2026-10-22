@@ -71,6 +71,11 @@ public sealed class RenderFrame : IDebugUiSystem
     {
         ImGui.Text($"{_time.FramesPerSecond} fps");
         ImGui.Text($"Draw calls: {_renderer.DrawCount:N0}");
+        long drawn = _renderer.ChunkQuadsDrawn, skipped = _renderer.ChunkQuadsSkipped;
+        ImGui.Text($"Chunk quads drawn: {drawn:N0}, skipped facing away: {skipped:N0} " +
+                   $"({(drawn + skipped > 0 ? 100.0 * skipped / (drawn + skipped) : 0):F0}%)");
+        bool skip = _renderer.SkipFacingAway;
+        if (ImGui.Checkbox("Skip chunk faces facing away", ref skip)) _renderer.SkipFacingAway = skip;
         uint samples = _renderer.Context.SampleCount;
         ImGui.Text(samples > 1 ? $"Anti-aliasing: {samples}x MSAA" : "Anti-aliasing: off (launch with --msaa 4)");
         ImGui.Text($"Swapchain acquire wait: {_renderer.AcquireMs:F2} ms, present: {_renderer.PresentMs:F2} ms");
