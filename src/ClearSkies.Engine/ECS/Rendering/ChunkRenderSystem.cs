@@ -60,6 +60,13 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     private int _modelBlocksDrawn;
     private double _bakedMeshesEma, _bakedGroupsEma;
 
+    // Where RenderWorld's time goes (smoothed ms): choosing the chunks in view (less the draw-state calls, timed on
+    // their own), sorting, the light-map checks and the bake's encoding, and the draw calls; RenderTranslucent's draws.
+    private double _cullMs, _stateMs, _sortMs, _bakeCheckMs, _bakeEncodeMs, _submitMs, _modelsMs, _translucentMs;
+    private long _stateTicks;
+    private static double Ms(long a, long b) => (b - a) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+    private static void Smooth(ref double ema, double ms) => ema += 0.05 * (ms - ema);
+
     /// <summary>The most light-map quads of scaled volumes' chunks baked a frame (always at least one chunk's): a level
     /// of distant terrain coming into view has far more than the world's chunks do, and baking them all at once was a
     /// spike of several ms. A chunk past the budget keeps the maps it last baked, and one never baked waits.</summary>
@@ -145,6 +152,8 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         _columnsVisible = 0;
         var size = new Vector3D<float>(ChunkData.Size);
         var half = size * 0.5f;
+        long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        _stateTicks = 0;
 
         foreach (var sv in _static.Values) DrawStatic(sv, frame);
 
@@ -174,7 +183,9 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
 
         // Nearest first, so the depth test rejects hidden fragments before the (expensive) lighting shader runs on
         // them instead of shading them and overwriting them later (and the nearest are baked first).
+        long t1 = System.Diagnostics.Stopwatch.GetTimestamp();
         _draws.Sort(NearestFirst);
+        long t2 = System.Diagnostics.Stopwatch.GetTimestamp();
 
         // Light maps whose chunk's light changed since they were baked (or never baked) are baked before anything draws:
         // only the chunks in view, so one out of view waits until it's seen. A scaled volume's go to a budget, and a
@@ -189,7 +200,9 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
             if (d.TransparentMesh != null) _translucentDraws.Add(d);
         }
         _draws.RemoveRange(kept, _draws.Count - kept);
+        long t3 = System.Diagnostics.Stopwatch.GetTimestamp();
         _renderer.BakeLightmaps();
+        long t4 = System.Diagnostics.Stopwatch.GetTimestamp();
         var (bakedMeshes, bakedGroups) = _renderer.LastLightmapBake;
         _bakedMeshesEma += 0.05 * (bakedMeshes - _bakedMeshesEma);
         _bakedGroupsEma += 0.05 * (bakedGroups - _bakedGroupsEma);
@@ -204,6 +217,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         foreach (var d in _draws)
             if (d.CutoutMesh != null) _renderer.DrawCutoutChunkMesh(d.CutoutMesh, d.Model, d.Grid, d.Chunk, d.Dissolve);
 
+        long t5 = System.Diagnostics.Stopwatch.GetTimestamp();
         _modelBlocksDrawn = 0;
         foreach (var d in _draws)
         {
@@ -215,6 +229,16 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
                 _modelBlocksDrawn++;
             }
         }
+        long t6 = System.Diagnostics.Stopwatch.GetTimestamp();
+
+        double stateMs = _stateTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        Smooth(ref _cullMs, Ms(t0, t1) - stateMs);
+        Smooth(ref _stateMs, stateMs);
+        Smooth(ref _sortMs, Ms(t1, t2));
+        Smooth(ref _bakeCheckMs, Ms(t2, t3));
+        Smooth(ref _bakeEncodeMs, Ms(t3, t4));
+        Smooth(ref _submitMs, Ms(t4, t5));
+        Smooth(ref _modelsMs, Ms(t5, t6));
     }
 
     /// <summary>Lists one static volume's chunks in view. It sits unrotated at its scale (see ChunkVolume), so a chunk's
@@ -240,7 +264,9 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
                 if (rd.IsEmpty) continue; // buried stone: nothing to draw
                 var origin = e.Get<Transform>().Position;
                 if (!frame.Frustum.Intersects(origin, origin + size)) continue;
+                long s0 = System.Diagnostics.Stopwatch.GetTimestamp();
                 var how = state?.Invoke(rd.ChunkPos) ?? ChunkDrawState.Whole;
+                _stateTicks += System.Diagnostics.Stopwatch.GetTimestamp() - s0;
                 if (how.Dissolve >= 1f) continue;
                 var model = Mat4.Multiply(Mat4.Translation(origin), scale);
                 // A scaled volume not in the light store yet has no light to show: lit as open air meanwhile.
@@ -283,8 +309,10 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     /// order the chunks (and their faces) are drawn in.</summary>
     private void RenderTranslucent()
     {
+        long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
         foreach (var d in _translucentDraws) _renderer.DrawTransparentChunkDepth(d.TransparentMesh!, d.Model, d.Grid, d.Chunk, d.Dissolve);
         foreach (var d in _translucentDraws) _renderer.DrawTransparentChunkMesh(d.TransparentMesh!, d.Model, d.Grid, d.Chunk, d.Dissolve);
+        Smooth(ref _translucentMs, Ms(t0, System.Diagnostics.Stopwatch.GetTimestamp()));
     }
 
     private static Mat4[] BuildOrientationPlacements()
@@ -308,6 +336,9 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         ImGui.Text($"Chunks visible: {_draws.Count:N0} of {_columnOf.Count + _others.Count:N0}; world columns visible: " +
                    $"{_columnsVisible:N0} of {_columnCount:N0}; ship chunks: {_others.Count:N0}");
         ImGui.Text($"Model blocks drawn: {_modelBlocksDrawn:N0}; chunks with translucent faces drawn: {_translucentDraws.Count:N0}");
+        ImGui.Text($"Main thread (smoothed): choosing {_cullMs:F2} ms + draw states {_stateMs:F2} ms, sort {_sortMs:F2} ms, " +
+                   $"light-map checks {_bakeCheckMs:F2} ms + bake encode {_bakeEncodeMs:F2} ms");
+        ImGui.Text($"Draw calls (smoothed): chunks {_submitMs:F2} ms, model blocks {_modelsMs:F2} ms, translucent {_translucentMs:F2} ms");
         var (used, capacity) = _renderer.LightmapArenaUse;
         ImGui.Text($"Light maps: {used * 4 / 1048576.0:F1} of {capacity * 4 / 1048576.0:F1} MB; baked per frame (smoothed): " +
                    $"{_bakedMeshesEma:F1} meshes, {_bakedGroupsEma * Renderer.LightmapQuadsPerGroup:N0} quads at most");
