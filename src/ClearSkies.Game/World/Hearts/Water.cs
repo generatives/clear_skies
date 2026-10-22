@@ -103,7 +103,14 @@ public sealed class Water
         _meanderZ = Noise(seed + 42, 0.018f);
         _widths = Noise(seed + 43, 0.01f);
         _wander = Noise(seed + 44, 0.008f);
+        _settle = new WaterSettle(this, seed);
     }
+
+    private readonly WaterSettle _settle;
+
+    /// <summary>The water at column (x, z) once it has settled on the blocks (see <see cref="WaterSettle"/>): its level,
+    /// or int.MinValue for none; and the top of the ground there once a river has cut it, or int.MaxValue.</summary>
+    public (int Level, int Ground) Settled(int x, int z) => _settle.At(x, z);
 
     private static FastNoiseLite Noise(ulong seed, float frequency)
     {

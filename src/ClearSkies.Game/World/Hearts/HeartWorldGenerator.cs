@@ -62,15 +62,6 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     /// <summary>About how far (blocks) a lake's sandy shore reaches from the middle of its sample cells (see Water).</summary>
     private const float ShoreReach = 3.5f;
 
-    /// <summary>How far under a river's level the ground may lie and still be its bed; past that, down to RiverFall, a
-    /// hollow it falls into and pools in; further, a drop it ends at.</summary>
-    private const int RiverGap = 8, RiverFall = 24;
-
-    /// <summary>How near (blocks) a lake's water a river's comes level with it.</summary>
-    private const int MouthReach = 6;
-    /// <summary>How many columns across a river's water may dip under the water either side and still be filled up.</summary>
-    private const int DipAcross = 3;
-
     /// <summary>Where noise is under this (-1 to 1) a tundra lake is open water, not ice.</summary>
     private const float IceOpen = -0.25f;
 
@@ -134,12 +125,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     private readonly float[] _height = new float[S * S];
     private readonly int[] _level = new int[S * S];         // the level of water here (a lake here or beside, or a river), or int.MinValue
     private readonly bool[] _shore = new bool[S * S];       // whether a dry column by a lake is its sandy shore
-    private readonly byte[] _riverDepth = new byte[S * S];  // how deep a river's bed is cut under its level here, 0 for none
-    private readonly int[] _top = new int[S * S];           // the top of the top span before a river cuts it
-    private readonly int[] _bank = new int[S * S];          // beside a river, the highest its bank may stand, or int.MaxValue
-    private readonly int[] _planned = new int[S * S];       // a river's level as Water gave it, before it was fitted in
-    private const int LakeSide = S + 2 * MouthReach;
-    private readonly int[] _lakeNear = new int[LakeSide * LakeSide]; // a lake's water over the ground, MouthReach round the chunk too
+    private readonly int[] _lake = new int[S * S];          // the level of a lake planned here or beside, or int.MinValue
+    private readonly int[] _cut = new int[S * S];           // the top of the ground once a river cuts it, or int.MaxValue
     private readonly float[] _bottomAt = new float[S * S];
 
     // The hearts around the chunk column being profiled, per layer: cells from (_cx0, _cy0, _cz0), _nx by _ny by _nz of
@@ -275,9 +262,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             float wx = x0 + lx, wz = z0 + lz;
             _height[col] = MathF.Min(_terrain.Height(wx, wz), HeartGrid.WorldTop - 1);
             var water = _water.At((int)wx, (int)wz);
-            _level[col] = water.Level;
-            _riverDepth[col] = (byte)water.RiverDepth;
-            _bank[col] = water.Bank;
+            (_level[col], _cut[col]) = _water.Settled((int)wx, (int)wz);
+            _lake[col] = water.RiverDepth == 0 ? water.Level : int.MinValue;
             // A lake's shore reaches a ragged ShoreReach from its sample cells, not their square outline; a river's
             // banks stay as they are.
             _shore[col] = water.RiverDepth == 0 && water.Off < ShoreReach * (0.6f + 0.4f * (_crack.GetNoise(wx * 3f, wz * 3f) + 1f));
@@ -345,153 +331,14 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             }
         }
 
-        // A river's banks slope down to it.
+        // Rivers cut their beds and banks, and water stands as it settled (see WaterSettle); a lake's shore is sandy
+        // round it.
         for (int col = 0; col < S * S; col++)
         {
-            if (_bank[col] == int.MaxValue || _level[col] != int.MinValue || _spanCount[col] == 0) continue;
+            if (_spanCount[col] == 0) continue;
             ref var topSpan = ref _spans[col * MaxSpans + _spanCount[col] - 1];
-            if (topSpan.Hi > _bank[col]) topSpan.Hi = (short)System.Math.Max(topSpan.Lo, _bank[col]);
-        }
-
-        // Rivers cut their beds into the top: the water a block under the dry ground beside it, so it doesn't stand
-        // against air; none where the top is far under the river, a crack or a cliff, where it ends.
-        for (int col = 0; col < S * S; col++)
-            _top[col] = _spanCount[col] == 0 ? int.MinValue : _spans[col * MaxSpans + _spanCount[col] - 1].Hi;
-        for (int col = 0; col < S * S; col++)
-        {
-            if (_riverDepth[col] == 0 || _level[col] == int.MinValue || _top[col] >= _level[col] - RiverGap) continue;
-            // (Where it falls into a hollow the samples missed, it pools at the bottom; over a cliff, it ends.)
-            _level[col] = _top[col] != int.MinValue && _top[col] >= _level[col] - RiverFall ? _top[col] + _riverDepth[col] : int.MinValue;
-        }
-        // (Nor where the dry ground beside it is: it ends at the cliff's edge rather than standing over it.)
-        for (int col = 0; col < S * S; col++)
-            if (_riverDepth[col] > 0 && _level[col] != int.MinValue && Beside(col).Dry < _level[col] - RiverGap) _level[col] = int.MinValue;
-        Array.Copy(_level, _planned, S * S);
-        // Lakes' water, out to MouthReach past the chunk (a river's mouth by a lake in the next chunk is level with it
-        // too, not a block under it up to the chunk's edge).
-        bool anyRiver = false;
-        for (int col = 0; col < S * S && !anyRiver; col++) anyRiver = _riverDepth[col] > 0 && _level[col] != int.MinValue;
-        if (anyRiver)
-            for (int pz = -MouthReach; pz < S + MouthReach; pz++)
-            for (int px = -MouthReach; px < S + MouthReach; px++)
-            {
-                int lake = int.MinValue;
-                if (px >= 0 && pz >= 0 && px < S && pz < S)
-                {
-                    int nc = px + S * pz;
-                    if (_riverDepth[nc] == 0 && _level[nc] != int.MinValue && _top[nc] != int.MinValue && _level[nc] > _top[nc]) lake = _level[nc];
-                }
-                else
-                {
-                    var w = _water.At(chunkX * S + px, chunkZ * S + pz);
-                    if (w.RiverDepth == 0 && w.Level != int.MinValue && _water.Ground(chunkX * S + px, chunkZ * S + pz) is float g && g < w.Level)
-                        lake = w.Level;
-                }
-                _lakeNear[px + MouthReach + LakeSide * (pz + MouthReach)] = lake;
-            }
-        for (int col = 0; col < S * S; col++)
-        {
-            if (_riverDepth[col] == 0 || _level[col] == int.MinValue) continue;
-            int hi = _top[col];
-            var (dry, lake) = Beside(col);
-            // A block under the dry ground beside it, but level with a lake it runs into or out of (even a block over its
-            // own level, so the lake's edge isn't a step down into it).
-            int water = System.Math.Min(_level[col], dry == int.MaxValue ? int.MaxValue : dry - 1);
-            if (lake != int.MinValue) water = System.Math.Max(water, System.Math.Min(lake, dry));
-            _level[col] = water;
-            ref var topSpan = ref _spans[col * MaxSpans + _spanCount[col] - 1];
-            topSpan.Hi = (short)System.Math.Max(topSpan.Lo, System.Math.Min(hi, water - _riverDepth[col]));
-        }
-        // Across a river (where Water gave its columns the same level, give or take a block) the water stands no more
-        // than a block over its neighbour's, so where a bank lowers it at the side it doesn't stand up in the middle.
-        for (bool changed = true; changed;)
-        {
-            changed = false;
-            for (int col = 0; col < S * S; col++)
-            {
-                if (_riverDepth[col] == 0 || _level[col] == int.MinValue) continue;
-                int lx = col % S, lz = col / S, water = _level[col];
-                for (int n = 0; n < 4; n++)
-                {
-                    int nx = lx + (n == 0 ? 1 : n == 1 ? -1 : 0), nz = lz + (n == 2 ? 1 : n == 3 ? -1 : 0);
-                    if (nx < 0 || nz < 0 || nx >= S || nz >= S) continue;
-                    int nc = nx + S * nz;
-                    if (_riverDepth[nc] > 0 && _level[nc] != int.MinValue && System.Math.Abs(_planned[nc] - _planned[col]) <= 1)
-                        water = System.Math.Min(water, _level[nc] + 1);
-                }
-                if (water == _level[col]) continue;
-                _level[col] = water;
-                ref var topSpan = ref _spans[col * MaxSpans + _spanCount[col] - 1];
-                topSpan.Hi = (short)System.Math.Max(topSpan.Lo, System.Math.Min(topSpan.Hi, water - _riverDepth[col]));
-                changed = true;
-            }
-        }
-        // Nor does a column dip under the water either side of it, a few columns across (where a low bank holds them a
-        // block down): it fills up to the lower of them, no higher than the dry ground beside it.
-        for (bool changed = true; changed;)
-        {
-            changed = false;
-            for (int col = 0; col < S * S; col++)
-            {
-                if (_riverDepth[col] == 0 || _level[col] == int.MinValue) continue;
-                int lx = col % S, lz = col / S;
-                int fill = System.Math.Min(Higher(col, lx, 1, 0), Higher(col, lx, -1, 0));
-                fill = System.Math.Max(fill, System.Math.Min(Higher(col, lz, 0, 1), Higher(col, lz, 0, -1)));
-                if (fill <= _level[col]) continue;
-                int water = System.Math.Min(fill, Beside(col).Dry);
-                if (water <= _level[col]) continue;
-                _level[col] = water;
-                changed = true;
-            }
-        }
-
-        // The first water higher than column col's, going (dx, dz) from it (at, its x or z) over water no higher, within
-        // DipAcross columns; or int.MinValue.
-        int Higher(int col, int at, int dx, int dz)
-        {
-            int d = dx + dz, step = dx + S * dz;
-            for (int n = 1; n <= DipAcross; n++)
-            {
-                int a = at + n * d;
-                if (a < 0 || a >= S) return int.MinValue;
-                int w = WaterOf(col + n * step);
-                if (w == int.MinValue || w > _level[col]) return w;
-            }
-            return int.MinValue;
-        }
-
-        // The water standing in a column (a river's, or a lake's over its ground), or int.MinValue.
-        int WaterOf(int col) =>
-            _level[col] != int.MinValue && (_riverDepth[col] > 0 || (_top[col] != int.MinValue && _level[col] > _top[col])) ? _level[col] : int.MinValue;
-
-        // The lowest dry ground beside a river's column, and the highest water of a lake beside it or nearly (so the
-        // river's mouth is level with it, not a block under the shore between).
-        (int Dry, int Lake) Beside(int col)
-        {
-            int dry = int.MaxValue, lake = int.MinValue;
-            int lx = col % S, lz = col / S;
-            for (int nz = lz; nz <= lz + 2 * MouthReach; nz++)
-            for (int nx = lx; nx <= lx + 2 * MouthReach; nx++)
-                lake = System.Math.Max(lake, _lakeNear[nx + LakeSide * nz]);
-            for (int n = 0; n < 4; n++)
-            {
-                int nx = lx + (n == 0 ? 1 : n == 1 ? -1 : 0), nz = lz + (n == 2 ? 1 : n == 3 ? -1 : 0);
-                if (nx < 0 || nz < 0 || nx >= S || nz >= S)
-                {
-                    // (Beyond this chunk, the ground as Water reckons it: the same from either side.)
-                    var beside = _water.At(chunkX * S + nx, chunkZ * S + nz);
-                    if (beside.RiverDepth > 0 || _water.Ground(chunkX * S + nx, chunkZ * S + nz) is not float g) continue;
-                    if (beside.Level == int.MinValue) dry = System.Math.Min(dry, System.Math.Min((int)MathF.Floor(g), beside.Bank));
-                    else if (g < beside.Level) lake = System.Math.Max(lake, beside.Level);
-                    else dry = System.Math.Min(dry, (int)MathF.Floor(g));
-                    continue;
-                }
-                int nc = nx + S * nz;
-                if (_top[nc] == int.MinValue || (_riverDepth[nc] > 0 && _level[nc] != int.MinValue)) continue;
-                if (_level[nc] == int.MinValue || _level[nc] <= _top[nc]) dry = System.Math.Min(dry, _top[nc]);
-                else lake = System.Math.Max(lake, _level[nc]);
-            }
-            return (dry, lake);
+            if (_cut[col] != int.MaxValue) topSpan.Hi = (short)System.Math.Max(topSpan.Lo, System.Math.Min(topSpan.Hi, _cut[col]));
+            if (_level[col] == int.MinValue && _lake[col] != int.MinValue) _level[col] = System.Math.Min(_lake[col], topSpan.Hi);
         }
     }
 
