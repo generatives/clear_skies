@@ -353,9 +353,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             if (topSpan.Hi > _bank[col]) topSpan.Hi = (short)System.Math.Max(topSpan.Lo, _bank[col]);
         }
 
-        // Rivers cut their beds into the top: the water a block under the ground here, and no higher than the dry
-        // ground beside it, so it doesn't stand against air; none where the top is far under the river, a crack or a
-        // cliff, where it ends.
+        // Rivers cut their beds into the top: the water no higher than the dry ground beside it, so it doesn't stand
+        // against air; none where the top is far under the river, a crack or a cliff, where it ends.
         for (int col = 0; col < S * S; col++)
             _top[col] = _spanCount[col] == 0 ? int.MinValue : _spans[col * MaxSpans + _spanCount[col] - 1].Hi;
         for (int col = 0; col < S * S; col++)
@@ -364,7 +363,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         {
             if (_riverDepth[col] == 0 || _level[col] == int.MinValue) continue;
             int hi = _top[col];
-            int water = System.Math.Min(_level[col], hi - 1);
+            int water = _level[col];
             int lx = col % S, lz = col / S;
             for (int n = 0; n < 4; n++)
             {
