@@ -28,6 +28,9 @@ internal sealed class WaterSettle
     /// <summary>How many columns across water may dip under the water either side and still be filled up.</summary>
     private const int DipAcross = 3;
 
+    /// <summary>How far (blocks) out a river's banks reach at most (see Water).</summary>
+    private const int BankFar = 18;
+
     private const int Dry = 0, Planned = 1, Filled = 2;
 
     /// <summary>At most this many rounds of coming down and rising (it settles in a few).</summary>
@@ -197,6 +200,25 @@ internal sealed class WaterSettle
                 raised[c] = true;
                 settling = 1;
             }
+        }
+
+        // Where a river settled lower than planned, its banks come down as far with it (so they still slope down to its
+        // water, not stand over it), though never under the water beside them.
+        var drop = new int[N * N];
+        for (int c = 0; c < N * N; c++)
+            if (kind[c] == Planned && depth[c] > 0) drop[c] = Math.Max(0, plan[c] - level[c]);
+        for (int pass = 0; pass < BankFar; pass++)
+            for (int c = 0; c < N * N; c++)
+            {
+                if (kind[c] != Dry || bank[c] == int.MaxValue || plan[c] != int.MinValue) continue;
+                foreach (int n in Neighbours(c)) drop[c] = Math.Max(drop[c], kind[n] != Dry || bank[n] != int.MaxValue ? drop[n] : 0);
+            }
+        for (int c = 0; c < N * N; c++)
+        {
+            if (drop[c] == 0 || kind[c] != Dry || bank[c] == int.MaxValue || top[c] == int.MaxValue || top[c] == int.MinValue) continue;
+            int g = Math.Min(ground[c], bank[c] - drop[c]);
+            foreach (int n in Neighbours(c)) if (kind[n] != Dry) g = Math.Max(g, level[n]);
+            ground[c] = Math.Min(ground[c], g);
         }
 
         var settled = new Settled();

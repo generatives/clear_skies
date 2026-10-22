@@ -60,8 +60,9 @@ public sealed class Water
     private const float RiverFrom = 320f, RiverNarrowest = 3f, RiverWiden = 0.3f, RiverWidest = 10f, RiverVary = 0.35f;
 
     // A river winds up to Meander blocks either side of the way its water goes; its banks slope up from a block over
-    // it by BankSlope blocks per block out, for BankReach blocks.
-    private const float Meander = 9f, BankSlope = 0.6f, BankReach = 8f;
+    // it by BankSlope blocks per block out, or steeper to meet the ground within its reach: BankNear blocks (a cut) to
+    // BankFar (a gentle slope), varying along the river by noise.
+    private const float Meander = 9f, BankSlope = 0.6f, BankNear = 6f, BankFar = 18f;
 
     /// <summary>How far (blocks) smooth noise raises or lowers the ground the rivers' ways are worked over: on gentle
     /// slopes that is enough to turn them, so they wander; steep ones still send them straight down.</summary>
@@ -93,7 +94,7 @@ public sealed class Water
     private readonly ContinentTerrain _terrain;
     private readonly ConcurrentDictionary<long, Heart> _hearts = new();
     private readonly ConcurrentDictionary<long, Piece> _pieces = new();
-    private readonly FastNoiseLite _meanderX, _meanderZ, _widths, _wander;
+    private readonly FastNoiseLite _meanderX, _meanderZ, _widths, _wander, _banks;
 
     private Water(ulong seed)
     {
@@ -103,6 +104,7 @@ public sealed class Water
         _meanderZ = Noise(seed + 42, 0.018f);
         _widths = Noise(seed + 43, 0.01f);
         _wander = Noise(seed + 44, 0.008f);
+        _banks = Noise(seed + 45, 0.006f);
         _settle = new WaterSettle(this, seed);
     }
 
@@ -184,7 +186,7 @@ public sealed class Water
             // (The point on the river's middle line this column is across from, back in the column's own space.)
             float mx = ax + t * (bx - ax) + px - qx, mz = az + t * (bz - az) + pz - qz;
             if (dist <= half && dist < bestRiver) { bestRiver = dist; riverLevel = piece.River[c]; riverLow = low; width = piece.Width[c]; riverX = mx; riverZ = mz; }
-            else if (dist > half && dist - half < MathF.Min(BankReach, bestBank)) { bestBank = dist - half; bank = piece.River[c]; bankLow = low; bankX = mx; bankZ = mz; }
+            else if (dist > half && dist - half < MathF.Min(BankFar, bestBank)) { bestBank = dist - half; bank = piece.River[c]; bankLow = low; bankX = mx; bankZ = mz; }
         }
         // Between those, a block under the ground on the river's middle line: so the water follows the ground's steps
         // down, neither sinking under them nor standing over them, and lies level across the river.
@@ -195,12 +197,14 @@ public sealed class Water
             return mouth > 0f && lakeLevel < l ? (int)MathF.Round(l + (lakeLevel - l) * mouth) : l;
         }
         if (riverLevel != int.MinValue) riverLevel = Follow(riverLevel, riverLow, riverX, riverZ);
+        float reach = BankNear + (BankFar - BankNear) * Smoothstep(-0.3f, 0.3f, _banks.GetNoise(px, pz));
+        if (bank != int.MaxValue && bestBank >= reach) bank = int.MaxValue;
         if (bank != int.MaxValue)
         {
-            // (Steeper where the ground stands high over the river, so the bank meets it within BankReach rather than
+            // (Steeper where the ground stands high over the river, so the bank meets it within its reach rather than
             // leaving a wall at the end.)
             int foot = Follow(bank, bankLow, bankX, bankZ) + 1;
-            float slope = ground is float g ? MathF.Max(BankSlope, (g - foot) / BankReach) : BankSlope;
+            float slope = ground is float g ? MathF.Max(BankSlope, (g - foot) / reach) : BankSlope;
             bank = foot + (int)(bestBank * slope);
         }
         int depth = width >= 8 ? 3 : width >= 4 ? 2 : 1;
