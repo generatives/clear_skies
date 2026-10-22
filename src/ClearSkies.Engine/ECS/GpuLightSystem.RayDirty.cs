@@ -72,9 +72,14 @@ public sealed partial class GpuLightSystem
     private bool _bandsOn;
     // Marked bricks waiting for direct light, and touched bricks waiting for an update, nearest the camera first. Stale
     // entries (freed slots, updates done) are dropped as they come up.
-    private NearestQueue? _dirtyQueueField, _updateQueueField;
+    private NearestQueue? _dirtyQueueField;
     private NearestQueue _dirtyQueue => _dirtyQueueField ??= new NearestQueue(SlotCentre);
-    private NearestQueue _updateQueue => _updateQueueField ??= new NearestQueue(SlotCentre);
+    // The update queue is split by phase: a brick is due when (frame + slot) % its band's Every is 0, so with P the
+    // greatest common divisor of the bands' Every, only slots with (frame + slot) % P == 0 can be due this frame, and
+    // they're all in one of P queues (by slot % P). Each frame takes from that one alone, rather than walking past the
+    // bricks of the other phases (most of the queue) to put them back.
+    private NearestQueue[] _updateQueues = System.Array.Empty<NearestQueue>();
+    private int UpdateQueued { get { int n = 0; foreach (var q in _updateQueues) n += q.Count; return n; } }
     private readonly List<(int slot, int bucket)> _putBack = new();
     private Func<int, bool>? _keepDirty, _keepQueued;
     private int _frame;
@@ -165,6 +170,7 @@ public sealed partial class GpuLightSystem
             _left[slot] = 0;
             _lastUpdate[slot] = NeverUpdated;
             _given[slot] = ushort.MaxValue;
+            KeepCentre(slot);
             MarkSlot(slot);
         }
         _store.NewSlots.Clear();
@@ -785,7 +791,7 @@ public sealed partial class GpuLightSystem
     private void Touch(int slot)
     {
         _left[slot] = Touched;
-        if (!_inQueue[slot] && _store.SlotGrid[slot] == _worldIndex) { _inQueue[slot] = true; _updateQueue.Add(slot); }
+        if (!_inQueue[slot] && _store.SlotGrid[slot] == _worldIndex) { _inQueue[slot] = true; UpdateQueues()[slot % _updateQueues.Length].Add(slot); }
     }
 
     /// <summary>Whether a brick has an update to come: touched since its last, or owed more for its last change.</summary>
@@ -965,8 +971,10 @@ public sealed partial class GpuLightSystem
 
         int spent = 0;
         _putBack.Clear();
-        _updateQueue.Recentre(camPos, _keepQueued ??= IsQueued);
-        while (spent < _maxGroupsPerFrame && _updateQueue.TryTake(out int slot, out int bucket))
+        var queues = UpdateQueues();
+        var queue = queues[(int)((uint)(queues.Length - (uint)_frame % (uint)queues.Length) % (uint)queues.Length)];
+        queue.Recentre(camPos, _keepQueued ??= IsQueued);
+        while (spent < _maxGroupsPerFrame && queue.TryTake(out int slot, out int bucket))
         {
             if (!IsQueued(slot)) continue;
             _putBack.Add((slot, bucket)); // dropped when it next comes up if this update was its last
@@ -974,8 +982,8 @@ public sealed partial class GpuLightSystem
             int band = WorldBandOf(slot);
             if (Due(slot, band)) spent += UpdateBrick(slot, band);
         }
-        foreach (var (slot, bucket) in _putBack) _updateQueue.PutBack(slot, bucket);
-        _lastBounceWaiting = _updateQueue.Count;
+        foreach (var (slot, bucket) in _putBack) queue.PutBack(slot, bucket);
+        _lastBounceWaiting = UpdateQueued;
 
         int steps = 0;
         while (steps < _stepLen.Length && _stepLen[steps] > 0) steps++;
@@ -1051,6 +1059,25 @@ public sealed partial class GpuLightSystem
     private int[] _stepLen = new int[4];
     private uint[][] _stepWords = new uint[4][];
 
+    /// <summary>The update queues, one per phase (see <see cref="_updateQueues"/>); remade, keeping what they hold, when
+    /// the bands' Every settings change the phase count.</summary>
+    private NearestQueue[] UpdateQueues()
+    {
+        int phases = 0;
+        foreach (var b in _bands) phases = Gcd(phases, System.Math.Max(1, b.Every));
+        if (phases == _updateQueues.Length) return _updateQueues;
+        var old = _updateQueues;
+        _updateQueues = new NearestQueue[phases];
+        for (int i = 0; i < phases; i++) _updateQueues[i] = new NearestQueue(SlotCentre);
+        var held = new List<int>();
+        foreach (var q in old) q.TakeAll(held);
+        foreach (int slot in held)
+            if (IsQueued(slot)) _updateQueues[slot % phases].Add(slot);
+        return _updateQueues;
+
+        static int Gcd(int a, int b) { while (b != 0) (a, b) = (b, a % b); return a; }
+    }
+
     /// <summary>Whether a queued world slot still needs an update (its grid is still there); if not, it leaves the queue.</summary>
     private bool IsQueued(int slot)
     {
@@ -1059,8 +1086,21 @@ public sealed partial class GpuLightSystem
         return false;
     }
 
-    /// <summary>World-space centre of a light slot's brick, for the queues.</summary>
-    private Vector3D<float> SlotCentre(int slot)
+    /// <summary>World-space centre of a light slot's brick, for the queues: kept for the world's (it doesn't move), as the queues and bands ask for it tens of thousands of times a frame.</summary>
+    private Vector3D<float> SlotCentre(int slot) => _centreKept[slot] ? _centre[slot] : MeasureCentre(slot);
+
+    // Each static slot's brick centre, from when it was handed out (see KeepCentre).
+    private Vector3D<float>[] _centre = System.Array.Empty<Vector3D<float>>();
+    private bool[] _centreKept = System.Array.Empty<bool>();
+
+    /// <summary>Notes a newly handed-out slot's centre if it's the world's (which doesn't move).</summary>
+    private void KeepCentre(int slot)
+    {
+        _centreKept[slot] = _store.SlotGrid[slot] == _worldIndex;
+        if (_centreKept[slot]) _centre[slot] = MeasureCentre(slot);
+    }
+
+    private Vector3D<float> MeasureCentre(int slot)
     {
         int gi = _store.SlotGrid[slot];
         var g = gi >= 0 ? _store.GridAt(gi) : null;
@@ -1148,6 +1188,8 @@ public sealed partial class GpuLightSystem
         Array.Resize(ref _lastUpdate, capacity);
         Array.Resize(ref _inQueue, capacity);
         Array.Resize(ref _given, capacity);
+        Array.Resize(ref _centre, capacity);
+        Array.Resize(ref _centreKept, capacity);
         Array.Resize(ref _inCoarse, capacity);
         Array.Resize(ref _composeStamp, capacity);
         Array.Resize(ref _clearStamp, capacity);

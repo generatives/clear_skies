@@ -329,7 +329,6 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
 
     // Scratch.
     private readonly uint[] _brickRun = new uint[64];
-    private readonly uint[] _emptyBrick;
 
     /// <summary>How many light bricks the static world may use (see ChunkLoadSystem): what was asked for, or less if
     /// this device's max buffer size can't hold it along with the ships' allowance and headroom.</summary>
@@ -382,9 +381,8 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         AccPool    = GpuBuffer.CreateStorage(ctx, (ulong)_accCapacity * AccSlotBytes);
         Grids      = GpuBuffer.CreateStorage(ctx, (ulong)_descs.Length * (ulong)Marshal.SizeOf<GridDesc>());
         ResizeSlotMirror(_lightCapacity);
+        ctx.BeforeSubmit += FlushNewSlots;
 
-        _emptyBrick = new uint[WordsPerSlot];
-        Array.Fill(_emptyBrick, EmptyDisplayPair);
 
         ClearTableRange(0, _tableCapacity);
         _tableNext = 0;
@@ -552,13 +550,37 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         for (int f = 0; f < 6; f++)
         {
             var (dx, dy, dz) = FaceDir(f);
-            if (g.Chunks.TryGetValue(pos.Offset(dx, dy, dz), out var n)) RefreshSurface(g, n);
+            RefreshSurfaceSoon(g, pos.Offset(dx, dy, dz));
         }
         TouchChunk(g, pos);
         g.Version++;
         // A world chunk unloading isn't a change to the world: what it shadowed stays shadowed, and relighting the far
         // edge for it would only undo that. (A ship's chunk going is a real change.)
         ChangedChunks.Add((g, pos.WorldOrigin, pos.WorldOrigin + new Vector3D<float>(S), hadSolid && !g.IsWorld, false));
+    }
+
+    // Chunks to look at for surface bricks once a batch of removals is done (see BeginRemovals), or null outside one.
+    private HashSet<(GridHandle Grid, ChunkPosition Pos)>? _refreshAfterRemovals;
+
+    /// <summary>Starts a batch of <see cref="RemoveChunk"/>s: the chunks next to those removed are looked at for surface
+    /// bricks once, at <see cref="EndRemovals"/>, and not at all if they go too. (Each looked at as it was uncovered,
+    /// a row of chunks unloading together set up light for the faces each one's going left, just to free it again.)</summary>
+    internal void BeginRemovals() => _refreshAfterRemovals ??= new();
+
+    /// <summary>Ends a batch of removals (see <see cref="BeginRemovals"/>).</summary>
+    internal void EndRemovals()
+    {
+        var pending = _refreshAfterRemovals;
+        if (pending == null) return;
+        _refreshAfterRemovals = null;
+        foreach (var (g, pos) in pending)
+            if (g.Chunks.TryGetValue(pos, out var rec)) RefreshSurface(g, rec);
+    }
+
+    private void RefreshSurfaceSoon(GridHandle g, ChunkPosition pos)
+    {
+        if (_refreshAfterRemovals != null) _refreshAfterRemovals.Add((g, pos));
+        else if (g.Chunks.TryGetValue(pos, out var rec)) RefreshSurface(g, rec);
     }
 
     /// <summary>The light slot holding brick (bx,by,bz) of chunk <paramref name="pos"/>, or -1.</summary>
@@ -1047,9 +1069,11 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         _slotListPos[slot] = g.Slots.Count;
         g.Slots.Add(slot);
 
-        Span<int> info = stackalloc int[4] { brick | (g.Index << 6), pos.X, pos.Y, pos.Z };
-        SlotInfo.Write<int>((ulong)slot * 16, info);
-        LightPool.Write<uint>((ulong)slot * SlotBytes, _emptyBrick);
+        // Its info and empty display are written with the rest of the frame's new slots (FlushNewSlots): a chunk coming
+        // in or going out sets up many at once, and a queue write each cost more than the bricks' data.
+        int at = slot * 4;
+        (_slotInfo[at], _slotInfo[at + 1], _slotInfo[at + 2], _slotInfo[at + 3]) = (brick | (g.Index << 6), pos.X, pos.Y, pos.Z);
+        _unwritten.Add(slot);
         NewSlots.Add(slot);
         TouchBrick(g, pos, brick);
         return slot;
@@ -1070,6 +1094,74 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
 
         SlotGrid[slot] = -1;
         _lightFree.Push(slot);
+    }
+
+    // New light slots whose info and empty display aren't written to the GPU yet, and the info (what SlotInfo holds).
+    private readonly List<int> _unwritten = new();
+    private int[] _slotInfo = System.Array.Empty<int>();
+    // Set up on the GPU (init_slots): uploading a whole empty display (1 KB) per new slot cost more than everything else
+    // in setting it up. The work list: the count, then each slot and its four info words.
+    private ComputePipeline? _initSlots;
+    private GpuBuffer? _initWork;
+    private int[] _initWords = System.Array.Empty<int>();
+    private readonly (uint, GpuBuffer)[] _initBindings = new (uint, GpuBuffer)[3];
+
+    private const string InitSlotsWgsl = @"
+@group(0) @binding(0) var<storage, read_write> light: array<u32>;
+@group(0) @binding(1) var<storage, read_write> info: array<vec4<i32>>;
+@group(0) @binding(2) var<storage, read> work: array<i32>;
+
+// One workgroup per new slot: its display all empty, and its info.
+@compute @workgroup_size(64)
+fn init_slots(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>,
+              @builtin(local_invocation_index) li: u32) {
+    let i = wg.y * nw.x + wg.x;
+    if (i >= u32(work[0])) { return; }
+    let at = 1u + i * 5u;
+    let slot = u32(work[at]);
+    for (var k = li; k < WORDS_PER_SLOTu; k += 64u) { light[slot * WORDS_PER_SLOTu + k] = EMPTYu; }
+    if (li == 0u) { info[slot] = vec4<i32>(work[at + 1u], work[at + 2u], work[at + 3u], work[at + 4u]); }
+}";
+
+    /// <summary>Sets up the new slots (see AllocLight) on the GPU: their display all empty and their info, in one
+    /// dispatch. Called before every submit (GpuContext.FlushPending), so nothing on the GPU sees a new slot unset.</summary>
+    private unsafe void FlushNewSlots()
+    {
+        int count = _unwritten.Count;
+        if (count == 0) return;
+        int words = 1 + count * 5;
+        if (_initWords.Length < words) _initWords = new int[System.Math.Max(words, _initWords.Length * 2)];
+        _initWords[0] = count;
+        for (int i = 0; i < count; i++)
+        {
+            int slot = _unwritten[i], at = 1 + i * 5;
+            _initWords[at] = slot;
+            for (int k = 0; k < 4; k++) _initWords[at + 1 + k] = _slotInfo[slot * 4 + k];
+        }
+        _unwritten.Clear();
+        if (_initWork == null || _initWork.SizeBytes < (ulong)words * 4)
+        {
+            _initWork?.Dispose();
+            _initWork = GpuBuffer.CreateStorage(_ctx, (ulong)_initWords.Length * 4);
+        }
+        _initWork.Write<int>(0, _initWords.AsSpan(0, words));
+
+        _initSlots ??= new ComputePipeline(_ctx, InitSlotsWgsl.Replace("WORDS_PER_SLOT", WordsPerSlot.ToString())
+                                                               .Replace("EMPTY", EmptyDisplayPair.ToString()), "init_slots");
+        _initBindings[0] = (0, LightPool); _initBindings[1] = (1, SlotInfo); _initBindings[2] = (2, _initWork);
+        var bg = _initSlots.CreateBindGroup(_initBindings);
+        var api = _ctx.Api;
+        var encDesc = new Silk.NET.WebGPU.CommandEncoderDescriptor();
+        var enc = api.DeviceCreateCommandEncoder(_ctx.Device, &encDesc);
+        const int MaxPerDim = 65535;
+        uint gx = (uint)System.Math.Min(count, MaxPerDim), gy = ((uint)count + gx - 1u) / gx;
+        _initSlots.Record(enc, bg, gx, gy, 1u, "Light slots: set up", count);
+        var cmdDesc = new Silk.NET.WebGPU.CommandBufferDescriptor();
+        var cmd = api.CommandEncoderFinish(enc, &cmdDesc);
+        api.QueueSubmit(_ctx.Queue, 1, &cmd); // not through FlushPending: this is part of it
+        api.CommandBufferRelease(cmd);
+        api.CommandEncoderRelease(enc);
+        api.BindGroupRelease(bg);
     }
 
     private void GrowLight()
@@ -1169,6 +1261,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         Array.Resize(ref SlotChunk, cap);
         Array.Resize(ref SlotBrick, cap);
         Array.Resize(ref _slotListPos, cap);
+        Array.Resize(ref _slotInfo, cap * 4);
         for (int i = old; i < cap; i++) SlotGrid[i] = -1;
     }
 
@@ -1184,6 +1277,9 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
 
     public void Dispose()
     {
+        _ctx.BeforeSubmit -= FlushNewSlots;
+        _initSlots?.Dispose();
+        _initWork?.Dispose();
         OccPool.Dispose();
         ChunkTable.Dispose();
         BrickTable.Dispose();

@@ -315,6 +315,13 @@ public sealed unsafe class GpuContext : IDisposable
     /// (needed so a mapped readback callback actually fires under wgpu-native).</summary>
     internal void Poll(bool wait = true) => _wgpu.DevicePoll(_device, new Silk.NET.Core.Bool32(wait), null);
 
+    /// <summary>Writes held back to be made in batches (see <see cref="FlushPending"/>), made before every submit.</summary>
+    internal event Action? BeforeSubmit;
+
+    /// <summary>Makes the queue writes held back for batching, so the next submit sees them: call it right before every
+    /// QueueSubmit (queue writes land before the command buffers submitted after them).</summary>
+    internal void FlushPending() => BeforeSubmit?.Invoke();
+
     /// <summary>Encodes and submits a single GPU→GPU buffer copy.</summary>
     internal void CopyBufferToBuffer(GpuBuffer src, GpuBuffer dst, ulong size, ulong srcOffset = 0, ulong dstOffset = 0)
     {
@@ -323,6 +330,7 @@ public sealed unsafe class GpuContext : IDisposable
         _api.CommandEncoderCopyBufferToBuffer(enc, src.Handle, srcOffset, dst.Handle, dstOffset, size);
         var cmdDesc = new CommandBufferDescriptor();
         var cmd = _api.CommandEncoderFinish(enc, &cmdDesc);
+        FlushPending();
         _api.QueueSubmit(_queue, 1, &cmd);
         _api.CommandBufferRelease(cmd);
         _api.CommandEncoderRelease(enc);

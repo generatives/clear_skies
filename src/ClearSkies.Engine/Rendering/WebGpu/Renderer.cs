@@ -1919,6 +1919,7 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
         _ctx.Timer.Resolve(_encoder);
         var cmdDesc = new CommandBufferDescriptor();
         var cmd = _api.CommandEncoderFinish(_encoder, &cmdDesc);
+        _ctx.FlushPending();
         _api.QueueSubmit(_ctx.Queue, 1, &cmd);
         _api.CommandBufferRelease(cmd);
         _api.CommandEncoderRelease(_encoder);

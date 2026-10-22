@@ -525,6 +525,7 @@ fn putCorner(i: u32, e: u32) { atomicOr(&lightArena[i >> 1u], e << ((i & 1u) * 1
         _bake.Record(enc, bg, gx, gy, 1u, "Light maps: bake", _jobCount);
         var cmdDesc = new CommandBufferDescriptor();
         var cmd = _ctx.Api.CommandEncoderFinish(enc, &cmdDesc);
+        _ctx.FlushPending();
         _ctx.Api.QueueSubmit(_ctx.Queue, 1, &cmd);
         _ctx.Api.CommandBufferRelease(cmd);
         _ctx.Api.CommandEncoderRelease(enc);
