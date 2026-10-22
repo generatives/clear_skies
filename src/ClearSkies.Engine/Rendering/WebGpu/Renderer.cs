@@ -21,7 +21,7 @@ public sealed unsafe class Renderer : IDisposable
     private const int MaxObjects = 16384;
     private const ulong ModelStride = 256;   // >= minUniformBufferOffsetAlignment
     private const ulong BlockTableBytes = ChunkQuad.BlockTableSize * 16; // blockTable: one vec4<f32> per block
-    private const ulong CameraSize  = 272;   // two mat4x4<f32> (view, proj) + nine vec4<f32> (sun, light params, camera position, fog, zenith, horizon, haze, sea, light params 2)
+    private const ulong CameraSize  = 304;   // two mat4x4<f32> (view, proj) + eleven vec4<f32> (sun, light params, camera position, fog, zenith, horizon, haze, sea, light params 2, water, water 2)
     private const ulong ModelSize   = 96;    // mat4x4<f32> + vec3<i32> chunk + i32 grid + vec4<f32> params
 
     private static readonly string Wgsl = @"
@@ -38,11 +38,12 @@ const OPEN_AIR_GRID: i32 = -2;         // a chunk lit as open air, with no light
 // gradient (see SkySettings). horizon.w: the distance haze's strength (0-1), haze.rgb its colour, haze.w its distance.
 // sea: the cloud sea's altitude, coverage (0 = off), cell size and thickness, in blocks (see cloudSea).
 // lightParams2.x: exposure, a multiplier on lit surfaces before fog. lightParams2.y/.z: render pass debug toggles
-// (see shadeBlock).
+// (see shadeBlock). water.rgb: the deep water and underwater fog colour, .w its clarity; water2.x: the thinnest
+// water's opacity, .y its tint (see WaterSettings and fs_chunk_transparent).
 struct Camera {
     view: mat4x4<f32>, proj: mat4x4<f32>, sunDir: vec4<f32>, lightParams: vec4<f32>,
     camPos: vec4<f32>, fog: vec4<f32>, zenith: vec4<f32>, horizon: vec4<f32>, haze: vec4<f32>, sea: vec4<f32>,
-    lightParams2: vec4<f32>,
+    lightParams2: vec4<f32>, water: vec4<f32>, water2: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 // Per block type (indexed by BlockId; see ChunkQuad.BuildBlockTable): its colour (sRGB, shown on untextured blocks) and
@@ -113,12 +114,11 @@ fn applyFog(color: vec3<f32>, worldPos: vec3<f32>) -> vec3<f32> {
 }
 
 // Underwater, as Minecraft does it: with the camera in water (camPos.w > 0, how far it sees), everything fades
-// linearly into the water's colour by that distance, the sky included. Like Minecraft's, the fade starts
+// linearly into the water's colour (camera.water.rgb) by that distance, the sky included. Like Minecraft's, the fade starts
 // WATER_FOG_START blocks behind the camera, so even what is right in front of it is tinted (by about a quarter on first
 // going under). The colour is dimmed with the daylight.
-const WATER_FOG: vec3<f32> = vec3<f32>(0.03, 0.10, 0.25);
 const WATER_FOG_START: f32 = -8.0;
-fn waterFogColor() -> vec3<f32> { return WATER_FOG * max(camera.lightParams.z, 0.8 * camera.sunDir.w); }
+fn waterFogColor() -> vec3<f32> { return camera.water.rgb * max(camera.lightParams.z, 0.8 * camera.sunDir.w); }
 fn applyWater(color: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
     if (camera.camPos.w <= 0.0) { return color; }
     let f = (length(d) - WATER_FOG_START) / (camera.camPos.w - WATER_FOG_START);
@@ -638,23 +638,20 @@ fn fs_chunk_transparent(in: VSOut, @builtin(front_facing) front: bool) -> @locat
     if (dot(in.localView, in.localNormal) < 0.0 && in.cg.w >= 0) {
         drawChunk = in.cg.xyz;
         drawGrid  = in.cg.w;
-        let clear = exp(-waterPath(in.localPos, vec3<i32>(floor(in.localPos - 0.5 * in.localNormal)), normalize(in.localView)) / WATER_CLEAR);
-        alpha = 1.0 - (1.0 - WATER_SHALLOW_ALPHA) * clear;
-        waterShare = 1.0 - (1.0 - WATER_SHALLOW_FOG) * clear;
+        let clear = exp(-waterPath(in.localPos, vec3<i32>(floor(in.localPos - 0.5 * in.localNormal)), normalize(in.localView)) / max(camera.water.w, 0.1));
+        alpha = 1.0 - (1.0 - camera.water2.x) * clear;
+        waterShare = 1.0 - (1.0 - camera.water2.y) * clear;
     }
     var v = in;
     if (!front) { v.localNormal = -v.localNormal; v.worldNormal = -v.worldNormal; }
     return vec4<f32>(shadeBlock(v, c.rgb, true, !front), alpha);
 }
 
-// Water depth shading (fs_chunk_transparent): each WATER_CLEAR blocks the view goes through cut what shows through the
-// water to about a third, and the water's own colour turns as much towards the underwater fog's (waterFogColor), so
-// deep water looks the same colour from above as from inside it. The thinnest water is WATER_SHALLOW_ALPHA opaque
-// and already WATER_SHALLOW_FOG of the way to the fog's colour (the rest its lit texture, for the ripples), so the
-// shallows are the depths' colour, only clearer.
-const WATER_CLEAR: f32 = 5.0;
-const WATER_SHALLOW_ALPHA: f32 = 0.3;
-const WATER_SHALLOW_FOG: f32 = 0.6;
+// Water depth shading (fs_chunk_transparent): each camera.water.w blocks the view goes through cut what shows through
+// the water to about a third, and the water's own colour turns as much towards the underwater fog's (waterFogColor),
+// so deep water looks the same colour from above as from inside it. The thinnest water is camera.water2.x opaque and
+// already camera.water2.y of the way to the fog's colour (the rest its lit texture, for the ripples), so the shallows
+// are the depths' colour, only clearer. (See WaterSettings.)
 const WATER_MAX_PATH: f32 = 16.0;
 const WATER_REACH: f32 = 32.0;
 

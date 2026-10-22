@@ -5,7 +5,7 @@ using Silk.NET.Maths;
 namespace ClearSkies.Engine.Rendering;
 
 /// <summary>
-/// Per-frame camera uniform block (272 bytes). Must match @group(0) @binding(0) in the WGSL shader.
+/// Per-frame camera uniform block (304 bytes). Must match @group(0) @binding(0) in the WGSL shader.
 /// Layout: view (64 B) + projection (64 B) + sunDir as vec4 (16 B: xyz direction, w strength)
 /// + lightParams vec4 (16 B: x ray AO strength, y the climate tint volume (<see cref="ECS.ClimateTintSystem"/>)'s origin x, z ambient 0-1, w 1 on
 /// an sRGB surface)
@@ -13,7 +13,8 @@ namespace ClearSkies.Engine.Rendering;
 /// see <see cref="CloudLayer"/>; blocks from the camera) + zenith and horizon sky colours as vec4s (horizon.w: the
 /// haze's strength) + haze vec4 (rgb colour, w distance) + sea vec4 (the cloud sea: altitude, coverage (0 = off), cell
 /// size and thickness in blocks; see <see cref="SkySettings"/>) + lightParams2 vec4 (x: exposure; y, z: render pass
-/// debug toggles; w: the tint volume's origin z).
+/// debug toggles; w: the tint volume's origin z) + water vec4 (rgb colour, w clarity) + water2 vec4 (x shallow
+/// opacity, y shallow tint; see <see cref="WaterSettings"/>).
 /// SunDirection is the unit vector pointing FROM the sun TOWARD the scene (i.e. the light direction).
 /// The shader scales sky light by max(dot(worldNormal, -SunDirection), 0).
 /// SunStrength (the vec4's w component) is a 0-1 multiplier on the direct-sun term, read from
@@ -44,4 +45,8 @@ public struct CameraUniform
     public float           DebugFlags;     // lightParams2.y: 1 = no texture sample, 2 = no fog or haze
     public float           DebugLighting;  // lightParams2.z: 0 normal, 1 flat + corner AO, 2 flat only, 3 no voxel lighting, 4 smoothing per pixel
     public float           TintOriginZ;    // lightParams2.w: the climate tint volume's origin z (set by the renderer)
+    public Vector3D<float> WaterColor;     // water.rgb: WaterSettings.Color
+    public float           WaterClarity;   // water.w
+    public float           WaterShallowOpacity, WaterShallowTint; // water2.xy
+    private float          _pad3, _pad4;
 }
