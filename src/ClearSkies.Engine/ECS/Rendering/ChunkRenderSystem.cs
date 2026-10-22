@@ -54,13 +54,18 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     // baked to a budget (see ScaledBakeQuadBudget); Light says how it's lit (see ChunkDrawState).
     private readonly record struct ChunkDraw(float DistSq, GpuMesh? Mesh, GpuMesh? CutoutMesh, GpuMesh? TransparentMesh,
                                              ModelBlock[] Models, Mat4 Model, int Grid, ChunkPosition Chunk, GridHandle? Handle,
-                                             float Dissolve = 0f, ChunkLight Light = ChunkLight.Baked, bool Budgeted = false);
+                                             float Dissolve = 0f, ChunkLight Light = ChunkLight.Baked, bool Budgeted = false,
+                                             int Level = -1);
     private List<ChunkDraw> _draws = new(), _sorted = new();
     private readonly List<ChunkDraw> _translucentDraws = new(); // the visible chunks with translucent faces
     // The sort's keys: each draw's distance and place in _draws (sorting the draws themselves moved ~150 bytes a swap).
     private float[] _sortKeys = Array.Empty<float>();
     private int[] _sortOrder = Array.Empty<int>();
     private int _modelBlocksDrawn;
+    // Per level of detail (0 full detail, k a low-resolution copy at 2^k; ships last), this frame's chunks drawn and their
+    // opaque and cut-out quads (all of them, before any are skipped as facing away), for the panel.
+    private const int LevelRows = 8;
+    private readonly (int Chunks, long Opaque, long Cutout)[] _levelCounts = new (int, long, long)[LevelRows + 1];
     private double _bakedMeshesEma, _bakedGroupsEma;
 
     // Where RenderWorld's time goes (smoothed ms): choosing the chunks in view (less the draw-state calls, timed on
@@ -205,6 +210,14 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
             kept++;
         }
         _draws.RemoveRange(kept, _draws.Count - kept);
+        Array.Clear(_levelCounts);
+        foreach (ref readonly var d in CollectionsMarshal.AsSpan(_draws))
+        {
+            ref var c = ref _levelCounts[d.Level is >= 0 and < LevelRows ? d.Level : LevelRows];
+            c.Chunks++;
+            c.Opaque += d.Mesh?.QuadCount ?? 0;
+            c.Cutout += d.CutoutMesh?.QuadCount ?? 0;
+        }
         long t3 = System.Diagnostics.Stopwatch.GetTimestamp();
         _renderer.BakeLightmaps();
         long t4 = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -272,6 +285,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         int k = sv.Volume.Scale, blocks = ChunkData.Size * k;
         var size = new Vector3D<float>(blocks);
         var scale = Mat4.Scale(new Vector3D<float>(k));
+        int level = System.Numerics.BitOperations.Log2((uint)k);
         var root = sv.Volume.Root;
         var state = root.Has<ChunkDrawStates>() ? root.Get<ChunkDrawStates>().Of : null;
         bool copy = sv.Volume.IsLowResolutionCopy;
@@ -299,7 +313,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
                 var centre = origin + size * 0.5f;
                 _draws.Add(new ChunkDraw(Vector3D.DistanceSquared(centre, frame.CameraPosition), rd.Mesh, rd.CutoutMesh,
                                          rd.TransparentMesh, rd.Models, model, grid, rd.ChunkPos, rd.Grid, how.Dissolve,
-                                         how.Light, Budgeted: copy));
+                                         how.Light, Budgeted: copy, Level: level));
             }
         }
     }
@@ -369,6 +383,13 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         ImGui.Text($"Model blocks drawn: {_modelBlocksDrawn:N0}; chunks with translucent faces drawn: {_translucentDraws.Count:N0}");
         ImGui.Text($"Main thread (smoothed): choosing {_cullMs:F2} ms + draw states {_stateMs:F2} ms, sort {_sortMs:F2} ms, " +
                    $"light-map checks {_bakeCheckMs:F2} ms + bake encode {_bakeEncodeMs:F2} ms");
+        for (int i = 0; i <= LevelRows; i++)
+        {
+            var (chunks, opaque, cutout) = _levelCounts[i];
+            if (chunks == 0) continue;
+            string name = i == LevelRows ? "Ships" : i == 0 ? "Full detail" : $"Level {i}";
+            ImGui.Text($"{name}: {chunks:N0} chunks drawn, {opaque:N0} opaque quads, {cutout:N0} cut-out quads");
+        }
         ImGui.Text($"Draw calls (smoothed): chunks {_submitMs:F2} ms, model blocks {_modelsMs:F2} ms, translucent {_translucentMs:F2} ms");
         var (used, capacity) = _renderer.LightmapArenaUse;
         ImGui.Text($"Light maps: {used * 4 / 1048576.0:F1} of {capacity * 4 / 1048576.0:F1} MB; baked per frame (smoothed): " +
