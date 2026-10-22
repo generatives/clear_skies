@@ -117,12 +117,17 @@ public sealed partial class ChunkLoadSystem
 
     /// <summary>Draws the view's distant terrain coarse: full detail to <paramref name="fullDetailRadius"/> (blocks),
     /// then a level per radius in <paramref name="radii"/> (level k to the k-th, in blocks, each farther than the
-    /// last). An empty list turns it off: full detail as far as the view. The coarse levels are made anew.</summary>
+    /// last, and at most <see cref="GridStore.ScaledReach"/>). An empty list turns it off: full detail as far as the
+    /// view. With as many levels as before, only the radii change (each level streams to match, as when the view
+    /// moves); otherwise the coarse levels are made anew.</summary>
     public void SetLevels(float fullDetailRadius, IReadOnlyList<float> radii)
     {
-        foreach (var level in _levels.Skip(1)) RemoveLevel(level);
-        _levels.RemoveRange(1, _levels.Count - 1);
-        FullDetail.Coarser = null;
+        if (radii.Count != _levels.Count - 1)
+        {
+            foreach (var level in _levels.Skip(1)) RemoveLevel(level);
+            _levels.RemoveRange(1, _levels.Count - 1);
+            FullDetail.Coarser = null;
+        }
         if (radii.Count == 0)
         {
             FullDetail.Radius = _viewDistance;
@@ -130,22 +135,26 @@ public sealed partial class ChunkLoadSystem
         }
 
         FullDetail.Radius = MathF.Max(fullDetailRadius, 2 * S);
-        for (int i = 0; i < radii.Count; i++)
+        for (int k = 1; k <= radii.Count; k++)
         {
-            int k = i + 1;
-            var finer = _levels[^1];
-            var root = _world.CreateEntity();
-            var volume = ChunkVolume.CreateLowResolutionCopy(root, _world, 1 << k);
-            root.Set<Rendered>();
-            var level = new TerrainLevel(k, volume, null, _minY >> k, (_minY + 63) >> k)
-            {
-                Radius = MathF.Max(radii[i], finer.Radius + (S << k)),
-                Finer = finer,
-            };
-            volume.RankedFrom = finer.Radius;
-            finer.Coarser = level;
-            _levels.Add(level);
+            var finer = _levels[k - 1];
+            if (k == _levels.Count) _levels.Add(NewLevel(k, finer));
+            var level = _levels[k];
+            level.Radius = MathF.Min(MathF.Max(radii[k - 1], finer.Radius + (S << k)), GridStore.ScaledReach);
+            level.Volume.RankedFrom = finer.Radius;
         }
+    }
+
+    /// <summary>Coarse level <paramref name="k"/>, over <paramref name="finer"/>: a low-resolution copy of the world,
+    /// drawn.</summary>
+    private TerrainLevel NewLevel(int k, TerrainLevel finer)
+    {
+        var root = _world.CreateEntity();
+        var volume = ChunkVolume.CreateLowResolutionCopy(root, _world, 1 << k);
+        root.Set<Rendered>();
+        var level = new TerrainLevel(k, volume, null, _minY >> k, (_minY + 63) >> k) { Finer = finer };
+        finer.Coarser = level;
+        return level;
     }
 
     private void RemoveLevel(TerrainLevel level)

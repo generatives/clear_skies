@@ -270,7 +270,9 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     /// <summary>A scaled static grid's world index width (in its own chunks, x and z): wide enough for
     /// <see cref="ScaledReach"/> blocks each way, so its chunks never share a cell.</summary>
     private static int ScaledIndexDim(int scale) => 2 * (ScaledReach / (S * scale)) + 8;
-    private const int ScaledReach = 4096;
+    /// <summary>How far (blocks, each way) a scaled static grid's chunks can be from the view: past it, they'd share
+    /// world index cells.</summary>
+    public const int ScaledReach = 4096;
     /// <summary>World indexes: the world's, then one for each scale (2, 4, 8).</summary>
     private const int IndexSlots = 4;
     private readonly GridHandle?[] _indexOwners = new GridHandle?[IndexSlots];

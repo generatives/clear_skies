@@ -216,6 +216,34 @@ public class HeadlessStreamingTests
     }
 
     [Fact]
+    public void ChangingOnlyTheRadiiKeepsTheLevels()
+    {
+        using var scene = new HeadlessScene();
+        using var db = SaveDatabase.InMemory();
+        var load = Streaming(scene, db, viewDistance: 256);
+        load.SetLevels(64, new[] { 256f });
+        var level = load.Levels[1];
+        load.SetLevels(128, new[] { 384f, 100000f });
+        Assert.False(level.Root.IsAlive);
+        Assert.Equal(128f, load.FullDetailRadius);
+        Assert.Equal(GridStore.ScaledReach, load.Levels[2].Radius); // as far as a scaled grid's index reaches
+
+        level = load.Levels[1];
+        load.SetLevels(128, new[] { 512f, 2048f });
+        Assert.Same(level, load.Levels[1]);
+        Assert.Equal(512f, level.Radius);
+
+        // Each level, and full detail while there are levels, says how its chunks are drawn (the swaps tell it).
+        var swaps = new TerrainSwapSystem(scene.World, load);
+        swaps.Update(1 / 60f);
+        Assert.True(level.Root.Has<ChunkDrawStates>());
+        Assert.True(scene.WorldVolume.Root.Has<ChunkDrawStates>());
+        load.SetLevels(128, Array.Empty<float>());
+        swaps.Update(1 / 60f);
+        Assert.False(scene.WorldVolume.Root.Has<ChunkDrawStates>());
+    }
+
+    [Fact]
     public void AColliderInterestAwayFromTheViewGetsItsTerrainUntilItLeaves()
     {
         using var scene = new HeadlessScene();

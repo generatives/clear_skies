@@ -49,18 +49,30 @@ struct Camera {
 // opacity (1 unless translucent). Chunk quads store only their block.
 @group(0) @binding(1) var<uniform> blockTable: array<vec4<f32>, 256>;
 // The climate tint around the camera (ClimateTintSystem): x, z, then y across the texture's width, height and depth, rgb its
-// colour (sRGB) and a its strength, sampled with linear filtering so it blends smoothly between texels.
+// colour (sRGB) and a its strength, sampled with linear filtering so it blends smoothly between texels. The near volume
+// is the first half of the depth, the far one (coarser cells, around the same middle) the second.
 @group(0) @binding(2) var tintTex: texture_3d<f32>;
 @group(0) @binding(3) var tintSamp: sampler;
 const TINT_EXTENT_XZ: f32 = " + (ClimateTintSystem.SizeXZ * ClimateTintSystem.CellXZ) + @".0;
 const TINT_EXTENT_Y: f32 = " + (ClimateTintSystem.SizeY * ClimateTintSystem.CellY) + @".0;
 const TINT_BOTTOM: f32 = " + ClimateTintSystem.BottomY + @".0;
+const TINT_SIZE_XZ: f32 = " + ClimateTintSystem.SizeXZ + @".0;
+const TINT_SIZE_Y: f32 = " + ClimateTintSystem.SizeY + @".0;
+const TINT_FAR_EXTENT_XZ: f32 = " + (ClimateTintSystem.SizeXZ * ClimateTintSystem.FarCellXZ) + @".0;
+const TINT_FAR_OFFSET: f32 = " + ClimateTintSystem.FarOffset + @".0;
 
 // A tinted face's base colour (linear) at world position p: as bright as before, shifted towards the tint's colour by
 // its strength there.
 fn climateTinted(base: vec3<f32>, p: vec3<f32>) -> vec3<f32> {
-    let uvw = vec3<f32>((p.x - camera.lightParams.y) / TINT_EXTENT_XZ, (p.z - camera.lightParams2.w) / TINT_EXTENT_XZ,
-                        (p.y - TINT_BOTTOM) / TINT_EXTENT_Y);
+    // Each half's layers kept to their texel middles, so the filter never blends one volume into the other.
+    let y = clamp((p.y - TINT_BOTTOM) / TINT_EXTENT_Y, 0.5 / TINT_SIZE_Y, 1.0 - 0.5 / TINT_SIZE_Y) * 0.5;
+    let origin = vec2<f32>(camera.lightParams.y, camera.lightParams2.w);
+    let nearUv = (p.xz - origin) / TINT_EXTENT_XZ;
+    let edge = 0.5 / TINT_SIZE_XZ;
+    var uvw = vec3<f32>(nearUv, y);
+    if (any(nearUv < vec2<f32>(edge)) || any(nearUv > vec2<f32>(1.0 - edge))) {
+        uvw = vec3<f32>((p.xz - origin - TINT_FAR_OFFSET) / TINT_FAR_EXTENT_XZ, 0.5 + y);
+    }
     let t = textureSampleLevel(tintTex, tintSamp, uvw, 0.0);
     let luma = vec3<f32>(0.2126, 0.7152, 0.0722);
     let colour = lin(t.rgb);
@@ -1322,7 +1334,7 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
         {
             Usage         = TextureUsage.TextureBinding | TextureUsage.CopyDst,
             Dimension     = TextureDimension.Dimension3D,
-            Size          = new Extent3D(ClimateTintSystem.SizeXZ, ClimateTintSystem.SizeXZ, ClimateTintSystem.SizeY),
+            Size          = new Extent3D(ClimateTintSystem.SizeXZ, ClimateTintSystem.SizeXZ, ClimateTintSystem.SizeY * 2),
             Format        = TextureFormat.Rgba8Unorm, // sRGB colours, decoded in the shader (climateTinted)
             MipLevelCount = 1,
             SampleCount   = 1,
@@ -1359,7 +1371,7 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
         {
             var dest = new ImageCopyTexture { Texture = _tintTexture, MipLevel = 0, Origin = new Origin3D(0, 0, 0), Aspect = TextureAspect.All };
             var layout = new TextureDataLayout { Offset = 0, BytesPerRow = ClimateTintSystem.SizeXZ * 4, RowsPerImage = ClimateTintSystem.SizeXZ };
-            var size = new Extent3D(ClimateTintSystem.SizeXZ, ClimateTintSystem.SizeXZ, ClimateTintSystem.SizeY);
+            var size = new Extent3D(ClimateTintSystem.SizeXZ, ClimateTintSystem.SizeXZ, ClimateTintSystem.SizeY * 2);
             _api.QueueWriteTexture(_ctx.Queue, &dest, data, (nuint)texels.Length, &layout, &size);
         }
         _tintOriginX = originX;
