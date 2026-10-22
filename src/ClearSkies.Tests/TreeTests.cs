@@ -162,6 +162,24 @@ public class TreeTests
         Assert.False(Has(bits, 8, 8, 8));   // its inside
     }
 
+    [Fact]
+    public void All_of_a_pool_of_water_is_packed_for_the_water_shading()
+    {
+        var data = new ChunkData();
+        for (int z = 4; z <= 12; z++)
+        for (int y = 4; y <= 12; y++)
+        for (int x = 4; x <= 12; x++)
+            data.Set(x, y, z, BlockId.Water);
+        data.Set(1, 1, 1, BlockId.Glass);
+        var bits = GridStore.Pack(data).Translucent!;
+        static bool Has(uint[] b, int x, int y, int z) => ((b[y + 32 * z] >> x) & 1) == 1;
+        Assert.True(Has(bits, 8, 12, 8));   // its top
+        Assert.True(Has(bits, 8, 8, 8));    // and its inside
+        Assert.False(Has(bits, 8, 13, 8));  // not the air above
+        Assert.False(Has(bits, 1, 1, 1));   // nor other see-through blocks
+        Assert.Null(GridStore.Pack(new ChunkData()).Translucent);
+    }
+
     [Theory]
     [InlineData(Trees.Kind.Oak)]
     [InlineData(Trees.Kind.Pine)]

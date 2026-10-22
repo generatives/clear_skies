@@ -10,13 +10,15 @@ internal readonly record struct EmitterVoxel(byte Lx, byte Ly, byte Lz, byte Lev
 
 /// <summary>A chunk's opacity packed for the GPU store (see <c>GridStore.Pack</c>).</summary>
 internal sealed class PackedOpacity(uint[] words, ulong solid, ulong air, List<EmitterVoxel> emitters,
-                                     uint[]? seeThrough = null, ulong seeThroughBricks = 0) : ChunkPreparation
+                                     uint[]? seeThrough = null, ulong seeThroughBricks = 0,
+                                     uint[]? translucent = null) : ChunkPreparation
 {
     public uint[] Words { get; } = words;
     public ulong Solid { get; } = solid;
     public ulong Air { get; } = air;
     public uint[]? SeeThrough { get; } = seeThrough;
     public ulong SeeThroughBricks { get; } = seeThroughBricks;
+    public uint[]? Translucent { get; } = translucent;
     public List<EmitterVoxel> Emitters { get; } = emitters;
 
     internal override void ApplyTo(ChunkEntry entry) => entry.SetPacked(this);
@@ -24,7 +26,26 @@ internal sealed class PackedOpacity(uint[] words, ulong solid, ulong air, List<E
 
 internal sealed class ChunkEntry
 {
-    public ChunkData  Data        { get; }
+    public ChunkData  Data        { get; private set; }
+
+    /// <summary>Whether <see cref="Data"/> was dropped (see <see cref="DropData"/>): it reads all air from then on, and
+    /// isn't this chunk's to release.</summary>
+    public bool DataDropped { get; private set; }
+
+    // What a dropped chunk's Data reads: all air, shared, never written or released.
+    private static readonly ChunkData Dropped = new();
+
+    /// <summary>Lets go of this chunk's blocks, for a chunk that won't need them again once meshed and in the GPU store
+    /// (a coarse level's, which is never edited, collided with or remeshed against a neighbour): its arrays go back to
+    /// the pool, and <see cref="Data"/> reads all air from then on.</summary>
+    public void DropData()
+    {
+        if (DataDropped) return;
+        var data = Data;
+        Data = Dropped;
+        DataDropped = true;
+        data.Release();
+    }
     public ChunkVolume Volume { get; }
     public ChunkPosition Position { get; }
     public Entity     Entity      { get; }
@@ -53,6 +74,10 @@ internal sealed class ChunkEntry
     public uint[]? PackedSeeThroughWords { get; private set; }
     public ulong BrickSeeThroughMask { get; private set; }
 
+    /// <summary>The <see cref="RenderLayer.Translucent"/> blocks (water), every one of them, packed like
+    /// <see cref="PackedOpacityWords"/>; null for a chunk with none. For the water shading (Renderer's waterPath).</summary>
+    public uint[]? PackedTranslucentWords { get; private set; }
+
     /// <summary>Chunk-local bounds (inclusive) of the blocks edited since the last GPU upload, so lighting relights
     /// around just those instead of the whole chunk. <see cref="HasEdits"/> false: nothing edited (a fresh load).</summary>
     public bool HasEdits { get; private set; }
@@ -77,6 +102,7 @@ internal sealed class ChunkEntry
         PackedOpacityWords = packed.Words;
         (BrickSolidMask, BrickAirMask) = (packed.Solid, packed.Air);
         (PackedSeeThroughWords, BrickSeeThroughMask) = (packed.SeeThrough, packed.SeeThroughBricks);
+        PackedTranslucentWords = packed.Translucent;
         Emitters.Clear();
         Emitters.AddRange(packed.Emitters);
     }

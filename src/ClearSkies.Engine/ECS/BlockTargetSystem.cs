@@ -38,7 +38,7 @@ public sealed class BlockTargetSystem : ISystem, IDisposable, Gui.IDebugUiSystem
     public BlockTargetSystem(World world, Input.InputManager input, Renderer renderer, BlockActionSystem actions, EditLimits limits)
     {
         _cameras = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
-        _volumes = world.GetEntities().With<ChunkGrid>().With<Transform>().AsSet();
+        _volumes = world.GetEntities().With<ChunkGrid>().Without<LowResolutionCopy>().With<Transform>().AsSet();
         _input = input;
         _actions = actions;
         _limits = limits;

@@ -111,7 +111,10 @@ public sealed partial class GpuLightSystem
         foreach (var other in _lit)
         {
             var h = other.Handle;
-            bool include = h.IsWorld || h == lg.Handle;
+            // A level of terrain's rays see it and the coarser levels, not the finer ones (the world included): where a
+            // finer level is loaded too, each is lit by its own blocks (rays pass through a coarser level where it's
+            // covered, see GridStore.SetCovered). Ships' rays see every level.
+            bool include = h == lg.Handle || (h.IsWorld && (!lg.Handle.IsWorld || h.Scale > lg.Handle.Scale));
             if (!include && h.HasSolid)
             {
                 var st = _gridStates[h];
@@ -160,7 +163,13 @@ public sealed partial class GpuLightSystem
     private static void ChunkWorldBox(in LitGrid lg, ChunkPosition pos, out Vector3D<float> mn, out Vector3D<float> mx)
     {
         var lo = pos.WorldOrigin;
-        if (lg.Handle.IsWorld) { mn = lo; mx = lo + new Vector3D<float>(S); return; }
+        if (lg.Handle.IsWorld)
+        {
+            int k = lg.Handle.Scale;
+            mn = lo * k;
+            mx = mn + new Vector3D<float>(S * k);
+            return;
+        }
         mn = new Vector3D<float>(float.MaxValue);
         mx = new Vector3D<float>(float.MinValue);
         for (int c = 0; c < 8; c++)

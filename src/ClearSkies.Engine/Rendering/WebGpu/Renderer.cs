@@ -21,7 +21,7 @@ public sealed unsafe class Renderer : IDisposable
     private const int MaxObjects = 16384;
     private const ulong ModelStride = 256;   // >= minUniformBufferOffsetAlignment
     private const ulong BlockTableBytes = ChunkQuad.BlockTableSize * 16; // blockTable: one vec4<f32> per block
-    private const ulong CameraSize  = 272;   // two mat4x4<f32> (view, proj) + nine vec4<f32> (sun, light params, camera position, fog, zenith, horizon, haze, sea, light params 2)
+    private const ulong CameraSize  = 304;   // two mat4x4<f32> (view, proj) + eleven vec4<f32> (sun, light params, camera position, fog, zenith, horizon, haze, sea, light params 2, water, water 2)
     private const ulong ModelSize   = 96;    // mat4x4<f32> + vec3<i32> chunk + i32 grid + vec4<f32> params
 
     private static readonly string Wgsl = @"
@@ -29,37 +29,52 @@ const MIN_AMBIENT: f32 = 0.00;        // floor so no geometry is ever fully blac
 const AO_MIN: f32 = 0.15;             // darkest ambient-occluded corner (1 = no AO). 0.15 provides exaggeration for evaluation;
                                       // 0.45 is the subtler default.
 const NO_LIGHTMAP: u32 = 0xFFFFFFFFu; // a quad without a light map (see VSOut.lm)
+const OPEN_AIR_GRID: i32 = -2;         // a chunk lit as open air, with no light data (Renderer.OpenAirGrid)
 
 // sunDir.w: sun strength (SunLight.Strength). lightParams.x: unused (ray AO is in the voxel light), .y: the climate
 // tint volume's origin x (lightParams2.w its z; see climateTinted), .z: ambient
 // (0-1), .w: 1 on an sRGB surface (see lin). camPos.xyz: camera world position. fog.xy: the world's fog start/end
-// (horizontal), fog.zw: the cloud layer's (see CloudLayer), in blocks from the camera. zenith/horizon.rgb: the sky
+// (by distance), fog.zw: the cloud layer's (see CloudLayer), in blocks from the camera. zenith/horizon.rgb: the sky
 // gradient (see SkySettings). horizon.w: the distance haze's strength (0-1), haze.rgb its colour, haze.w its distance.
 // sea: the cloud sea's altitude, coverage (0 = off), cell size and thickness, in blocks (see cloudSea).
 // lightParams2.x: exposure, a multiplier on lit surfaces before fog. lightParams2.y/.z: render pass debug toggles
-// (see shadeBlock).
+// (see shadeBlock). water.rgb: the deep water and underwater fog colour, .w its clarity; water2.x: the thinnest
+// water's opacity, .y its tint, .z how much its thickness varies through it, .w the size of those variations in blocks
+// (see WaterSettings and fs_chunk_transparent).
 struct Camera {
     view: mat4x4<f32>, proj: mat4x4<f32>, sunDir: vec4<f32>, lightParams: vec4<f32>,
     camPos: vec4<f32>, fog: vec4<f32>, zenith: vec4<f32>, horizon: vec4<f32>, haze: vec4<f32>, sea: vec4<f32>,
-    lightParams2: vec4<f32>,
+    lightParams2: vec4<f32>, water: vec4<f32>, water2: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 // Per block type (indexed by BlockId; see ChunkQuad.BuildBlockTable): its colour (sRGB, shown on untextured blocks) and
 // opacity (1 unless translucent). Chunk quads store only their block.
 @group(0) @binding(1) var<uniform> blockTable: array<vec4<f32>, 256>;
 // The climate tint around the camera (ClimateTintSystem): x, z, then y across the texture's width, height and depth, rgb its
-// colour (sRGB) and a its strength, sampled with linear filtering so it blends smoothly between texels.
+// colour (sRGB) and a its strength, sampled with linear filtering so it blends smoothly between texels. The near volume
+// is the first half of the depth, the far one (coarser cells, around the same middle) the second.
 @group(0) @binding(2) var tintTex: texture_3d<f32>;
 @group(0) @binding(3) var tintSamp: sampler;
 const TINT_EXTENT_XZ: f32 = " + (ClimateTintSystem.SizeXZ * ClimateTintSystem.CellXZ) + @".0;
 const TINT_EXTENT_Y: f32 = " + (ClimateTintSystem.SizeY * ClimateTintSystem.CellY) + @".0;
 const TINT_BOTTOM: f32 = " + ClimateTintSystem.BottomY + @".0;
+const TINT_SIZE_XZ: f32 = " + ClimateTintSystem.SizeXZ + @".0;
+const TINT_SIZE_Y: f32 = " + ClimateTintSystem.SizeY + @".0;
+const TINT_FAR_EXTENT_XZ: f32 = " + (ClimateTintSystem.SizeXZ * ClimateTintSystem.FarCellXZ) + @".0;
+const TINT_FAR_OFFSET: f32 = " + ClimateTintSystem.FarOffset + @".0;
 
 // A tinted face's base colour (linear) at world position p: as bright as before, shifted towards the tint's colour by
 // its strength there.
 fn climateTinted(base: vec3<f32>, p: vec3<f32>) -> vec3<f32> {
-    let uvw = vec3<f32>((p.x - camera.lightParams.y) / TINT_EXTENT_XZ, (p.z - camera.lightParams2.w) / TINT_EXTENT_XZ,
-                        (p.y - TINT_BOTTOM) / TINT_EXTENT_Y);
+    // Each half's layers kept to their texel middles, so the filter never blends one volume into the other.
+    let y = clamp((p.y - TINT_BOTTOM) / TINT_EXTENT_Y, 0.5 / TINT_SIZE_Y, 1.0 - 0.5 / TINT_SIZE_Y) * 0.5;
+    let origin = vec2<f32>(camera.lightParams.y, camera.lightParams2.w);
+    let nearUv = (p.xz - origin) / TINT_EXTENT_XZ;
+    let edge = 0.5 / TINT_SIZE_XZ;
+    var uvw = vec3<f32>(nearUv, y);
+    if (any(nearUv < vec2<f32>(edge)) || any(nearUv > vec2<f32>(1.0 - edge))) {
+        uvw = vec3<f32>((p.xz - origin - TINT_FAR_OFFSET) / TINT_FAR_EXTENT_XZ, 0.5 + y);
+    }
     let t = textureSampleLevel(tintTex, tintSamp, uvw, 0.0);
     let luma = vec3<f32>(0.2126, 0.7152, 0.0722);
     let colour = lin(t.rgb);
@@ -100,24 +115,24 @@ fn applyHaze(color: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
 }
 
 // Hazes a lit surface colour at worldPos, then fades it into what fs_sky draws behind it (the sky, or the cloud sea
-// below) by horizontal distance: streaming loads whole chunk columns, so the loaded world ends only sideways, where
-// the fog is total (see SkySettings.FogDistance). Fading into the sky colour alone would leave islands showing as
-// blue shapes over the white sea as they load in.
+// below) by distance: the loaded world ends in a ball around the view (coarse levels of terrain are balls; without
+// them, streaming loads whole columns, which reach at least as far), where the fog is total (see
+// SkySettings.FogDistance). Fading into the sky colour alone would leave islands showing as blue shapes over the white
+// sea as they load in.
 fn applyFog(color: vec3<f32>, worldPos: vec3<f32>) -> vec3<f32> {
     let d = worldPos - camera.camPos.xyz;
-    let f = smoothstep(camera.fog.x, camera.fog.y, length(d.xz));
+    let f = smoothstep(camera.fog.x, camera.fog.y, length(d));
     let hazed = applyHaze(color, d);
     if (f <= 0.0) { return applyWater(hazed, d); } // only the fog band pays for tracing the sea
     return applyWater(mix(hazed, background(normalize(d)).rgb, f), d);
 }
 
 // Underwater, as Minecraft does it: with the camera in water (camPos.w > 0, how far it sees), everything fades
-// linearly into the water's colour by that distance, the sky included. Like Minecraft's, the fade starts
+// linearly into the water's colour (camera.water.rgb) by that distance, the sky included. Like Minecraft's, the fade starts
 // WATER_FOG_START blocks behind the camera, so even what is right in front of it is tinted (by about a quarter on first
 // going under). The colour is dimmed with the daylight.
-const WATER_FOG: vec3<f32> = vec3<f32>(0.03, 0.10, 0.25);
 const WATER_FOG_START: f32 = -8.0;
-fn waterFogColor() -> vec3<f32> { return WATER_FOG * max(camera.lightParams.z, 0.8 * camera.sunDir.w); }
+fn waterFogColor() -> vec3<f32> { return camera.water.rgb * max(camera.lightParams.z, 0.8 * camera.sunDir.w); }
 fn applyWater(color: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
     if (camera.camPos.w <= 0.0) { return color; }
     let f = (length(d) - WATER_FOG_START) / (camera.camPos.w - WATER_FOG_START);
@@ -269,7 +284,7 @@ struct Model { model: mat4x4<f32>, chunk: vec3<i32>, grid: i32, params: vec4<f32
 // and where it's drawn, so a run of chunk draws needs no bind group or uniform per draw. Their light maps (see
 // QuadLightmap) sit in another (lightArena, 16-bit corners two to a word), from the record's lightBase (in words;
 // NO_LIGHTMAP for a mesh without one).
-struct ChunkDraw { model: mat4x4<f32>, chunk: vec3<i32>, grid: i32, quadBase: u32, lightBase: u32, pad1: u32, pad2: u32 };
+struct ChunkDraw { model: mat4x4<f32>, chunk: vec3<i32>, grid: i32, quadBase: u32, lightBase: u32, dissolve: f32, pad2: u32 };
 @group(1) @binding(2) var<storage, read> chunkDraws: array<ChunkDraw>;
 @group(1) @binding(3) var<storage, read> quadArena: array<vec2<u32>>;
 @group(1) @binding(4) var<storage, read> lightArena: array<u32>;
@@ -278,6 +293,9 @@ struct ChunkDraw { model: mat4x4<f32>, chunk: vec3<i32>, grid: i32, quadBase: u3
 // fragment entry point that lights, since chunk draws carry them per draw rather than in the model uniform.
 var<private> drawChunk: vec3<i32>;
 var<private> drawGrid: i32;
+// How much of a lit chunk face's colour is the underwater fog's instead (0-1), before the world's fog: set by
+// fs_chunk_transparent for deep water seen from above (see shadeBlock).
+var<private> waterShare: f32;
 
 // The shared voxel storage (see GridStore): occupancy pool, chunk table ((occupancy slot or code, chunk tag), then
 // ray-only data), brick table (light slot per 8³ brick), light pool and grid descriptors. Only a slot's display half
@@ -318,6 +336,11 @@ struct VSOut {
     // light map: the first corner's index in lightArena (16-bit units; NO_LIGHTMAP for none), width and height.
     @location(9) quv: vec2<f32>,
     @location(10) @interpolate(flat) lm: vec4<u32>,
+    // Chunk draws: the share of its pixels dissolved (see dissolved), while one chunk swaps for another.
+    @location(11) @interpolate(flat) dissolve: f32,
+    // Chunk draws: the direction from the camera to the fragment in the chunk's own (grid) space, not normalized (see
+    // waterPath).
+    @location(12) localView: vec3<f32>,
 };
 
 @vertex
@@ -438,7 +461,23 @@ fn chunkVertex(d: ChunkDraw, quad: vec2<u32>, corner: u32) -> VSOut {
     o.lm          = vec4<u32>(NO_LIGHTMAP, w, h, select(0u, 1u, tintAll || (tintTop && face == 2u)));
     if (face < 6u && lightOffset != 0xFFFFu && d.lightBase != NO_LIGHTMAP) { o.lm.x = 2u * (d.lightBase + lightOffset); }
     o.quv         = vec2<f32>(cu, cv);
+    o.dissolve    = d.dissolve;
+    // The model is a rotation, uniform scale and translation, so its transposed 3x3 turns a world direction back
+    // into a grid one (scaled, which normalizing undoes).
+    o.localView   = transpose(mat3x3<f32>(d.model[0].xyz, d.model[1].xyz, d.model[2].xyz)) * (world.xyz - camera.camPos.xyz);
     return o;
+}
+
+// Whether this pixel of a dissolving chunk draw is left out: a 4x4 ordered dither on the screen. A chunk going away
+// (dissolve d > 0) leaves out the pixels under d; one coming in over it (dissolve -d) draws only those, so through a
+// swap each pixel shows one or the other, never both (see ChunkDrawStates).
+fn dissolved(in: VSOut) -> bool {
+    if (in.dissolve == 0.0) { return false; }
+    var bayer = array<f32, 16>(0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);
+    let p = vec2<u32>(in.pos.xy) & vec2<u32>(3u);
+    let b = (bayer[p.x + 4u * p.y] + 0.5) / 16.0;
+    if (in.dissolve > 0.0) { return b < in.dissolve; }
+    return b >= -in.dissolve;
 }
 
 // A well-mixed hash of a world cell, for per-cell variation that's the same wherever the cell is meshed.
@@ -585,20 +624,116 @@ fn fs_chunk(in: VSOut) -> @location(0) vec4<f32> {
     return vec4<f32>(shadeBlock(in, base, false, false), 1.0);
 }
 
+// Opaque chunk faces dissolving (one chunk swapping for another): its own pipeline, since a discard costs the early
+// depth test.
+@fragment
+fn fs_chunk_dissolve(in: VSOut) -> @location(0) vec4<f32> {
+    if (dissolved(in)) { discard; }
+    var base = blockColor(in).rgb;
+    if (in.lm.w != 0u) { base = climateTinted(base, in.worldPos); }
+    return vec4<f32>(shadeBlock(in, base, false, false), 1.0);
+}
+
 // Translucent blocks' faces (see RenderLayer.Translucent), alpha-blended over the opaque world: lit like fs_main, with
 // the texture's alpha times the block's opacity. Fully clear texels are cut out. Drawn only where the face is the
 // nearest transparent one (fs_chunk_transparent_depth laid that depth down first), so every pixel blends exactly one
 // transparent layer and the draw order doesn't matter. Both sides are drawn; a face seen from behind (from inside the
 // water) is lit as facing the viewer, from the cell on the viewer's side, so it is lit like the water around it rather
 // than like the air beyond.
+//
+// Seen from outside, the water darkens and turns opaque with how much of it the view looks through, along the view
+// from the face to what's behind it (see waterPath). Seen from inside, the underwater fog does that
+// instead (see applyWater).
 @fragment
 fn fs_chunk_transparent(in: VSOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let c = blockColor(in);
-    let alpha = c.a * in.alpha;
-    if (alpha < 0.004) { discard; }
+    var alpha = c.a * in.alpha;
+    if (alpha < 0.004 || dissolved(in)) { discard; }
+    // Seen from outside: the view runs into the face against its normal (out of the water). Decided from the geometry
+    // rather than front_facing, so it holds whatever a face's winding.
+    if (dot(in.localView, in.localNormal) < 0.0 && in.cg.w >= 0) {
+        drawChunk = in.cg.xyz;
+        drawGrid  = in.cg.w;
+        let clear = exp(-waterPath(in.localPos, vec3<i32>(floor(in.localPos - 0.5 * in.localNormal)), normalize(in.localView)) / max(camera.water.w, 0.1));
+        alpha = 1.0 - (1.0 - camera.water2.x) * clear;
+        waterShare = 1.0 - (1.0 - camera.water2.y) * clear;
+    }
     var v = in;
     if (!front) { v.localNormal = -v.localNormal; v.worldNormal = -v.worldNormal; }
     return vec4<f32>(shadeBlock(v, c.rgb, true, !front), alpha);
+}
+
+// Water depth shading (fs_chunk_transparent): each camera.water.w blocks the view goes through cut what shows through
+// the water to about a third, and the water's own colour turns as much towards the underwater fog's (waterFogColor),
+// so deep water looks the same colour from above as from inside it. The thinnest water is camera.water2.x opaque and
+// already camera.water2.y of the way to the fog's colour (the rest its lit texture, for the ripples), so the shallows
+// are the depths' colour, only clearer. (See WaterSettings.) The view's walk through the water (waterPath) counts up
+// to WATER_MAX_PATH blocks of water, over at most WATER_REACH blocks.
+const WATER_MAX_PATH: f32 = 16.0;
+const WATER_REACH: f32 = 32.0;
+
+// How thick the water is at p (grid space), as a multiple of its clarity's: 1 give or take camera.water2.z, by smooth
+// noise camera.water2.w blocks across, so there are murkier and clearer stretches of water rather than one even body.
+fn waterDensity(p: vec3<f32>) -> f32 {
+    return 1.0 + camera.water2.z * (2.0 * valueNoise3(p / max(camera.water2.w, 0.5)) - 1.0);
+}
+
+// Smooth 3D value noise, 0-1, varying over about one unit of p.
+fn valueNoise3(p: vec3<f32>) -> f32 {
+    let i = vec3<i32>(floor(p));
+    let f = p - floor(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    var c: array<f32, 8>;
+    for (var k = 0; k < 8; k++) {
+        let o = vec3<i32>(k & 1, (k >> 1u) & 1, k >> 2u);
+        c[k] = f32(cellHash(i + o) & 1023u);
+    }
+    let x0 = mix(mix(c[0], c[1], u.x), mix(c[2], c[3], u.x), u.y);
+    let x1 = mix(mix(c[4], c[5], u.x), mix(c[6], c[7], u.x), u.y);
+    return mix(x0, x1, u.z) / 1023.0;
+}
+
+// What voxel v in this draw's grid holds: 2 a block that blocks light, 1 water (a translucent block: its chunk's
+// translucent bits, whose occupancy slot plus one is its chunk-table entry's second word's w less its covered bit, 0
+// for none; see GridStore.EntryWords), 0 anything else. One chunk lookup for both.
+fn waterOrSolid(v: vec3<i32>) -> i32 {
+    let i = entryOf(drawGrid, v >> vec3<u32>(5u));
+    if (i < 0) { return 0; }
+    let code = chunkTable[2 * i].x;
+    let l = v & vec3<i32>(31);
+    let w = u32(l.y + 32 * l.z);
+    if (code == OCC_ALL_SOLID) { return 2; }
+    if (code >= 0 && ((occPool[u32(code * WPC) + w] >> u32(l.x)) & 1u) == 1u) { return 2; }
+    let slot = chunkTable[2 * i + 1].w >> 1u;
+    if (slot > 0 && ((occPool[u32((slot - 1) * WPC) + w] >> u32(l.x)) & 1u) == 1u) { return 1; }
+    return 0;
+}
+
+// How much water the view goes through from p on a water face, into its cell (both chunk-local, so precise however
+// far the chunk is from the origin), along rd (normalized, grid space), in blocks, up to WATER_MAX_PATH: a walk
+// through the cells it crosses, adding up the water in them (not stopping where it first leaves the water, so a ragged
+// waterfall's air gaps don't break its shading into bands), each stretch weighed by how thick the water is there
+// (waterDensity), until a block that blocks light or WATER_REACH blocks.
+fn waterPath(p: vec3<f32>, start: vec3<i32>, rd: vec3<f32>) -> f32 {
+    var cell = start;
+    let stepC = vec3<i32>(select(-1, 1, rd.x > 0.0), select(-1, 1, rd.y > 0.0), select(-1, 1, rd.z > 0.0));
+    let tDelta = 1.0 / max(abs(rd), vec3<f32>(1e-6));
+    var tMax = abs(vec3<f32>(select(cell, cell + 1, rd > vec3<f32>(0.0))) - p) * tDelta;
+    var t = 0.0;
+    var path = 0.0;
+    let origin = vec3<f32>(drawChunk * 32);
+    for (var i = 0; i < 64; i++) {
+        let what = waterOrSolid(drawChunk * 32 + cell);
+        if (what == 2) { break; }
+        let tNext = min(tMax.x, min(tMax.y, tMax.z));
+        if (what == 1) { path += (tNext - t) * waterDensity(origin + p + rd * (0.5 * (t + tNext))); }
+        t = tNext;
+        if (path >= WATER_MAX_PATH || t >= WATER_REACH) { break; }
+        if (tMax.x <= tMax.y && tMax.x <= tMax.z) { tMax.x += tDelta.x; cell.x += stepC.x; }
+        else if (tMax.y <= tMax.z)                { tMax.y += tDelta.y; cell.y += stepC.y; }
+        else                                      { tMax.z += tDelta.z; cell.z += stepC.z; }
+    }
+    return min(path, WATER_MAX_PATH);
 }
 
 // Cut-out blocks' faces (RenderLayer.Cutout: leaves, grass, glass), in two passes, after the opaque world.
@@ -609,7 +744,7 @@ fn fs_chunk_transparent(in: VSOut, @builtin(front_facing) front: bool) -> @locat
 // and neither has fs_main.
 @fragment
 fn fs_cutout_depth(in: VSOut) -> @location(0) vec4<f32> {
-    if (blockColor(in).a < 0.5) { discard; }
+    if (blockColor(in).a < 0.5 || dissolved(in)) { discard; }
     return vec4<f32>(0.0);
 }
 
@@ -624,7 +759,7 @@ fn fs_cutout_shaded(in: VSOut) -> @location(0) vec4<f32> {
 // Transparent faces' depth pre-pass: the nearest transparent face at each pixel, without its fully clear texels.
 @fragment
 fn fs_chunk_transparent_depth(in: VSOut) -> @location(0) vec4<f32> {
-    if (blockColor(in).a * in.alpha < 0.004) { discard; }
+    if (blockColor(in).a * in.alpha < 0.004 || dissolved(in)) { discard; }
     return vec4<f32>(0.0);
 }
 
@@ -635,8 +770,8 @@ fn shadeBlock(in: VSOut, baseColor: vec3<f32>, see: bool, back: bool) -> vec3<f3
     drawGrid  = in.cg.w;
     let dbg = u32(camera.lightParams2.y);
 
-    // A chunk drawn without a grid has no light data: full-bright.
-    if (drawGrid < 0) { return baseColor; }
+    // A chunk drawn without a grid has no light data: full-bright; or lit as open air below (OPEN_AIR_GRID).
+    if (drawGrid < 0 && drawGrid != OPEN_AIR_GRID) { return baseColor; }
 
     let worldN = normalize(in.worldNormal);
     let ndotl  = max(dot(worldN, -(camera.sunDir.xyz)), 0.0);
@@ -644,8 +779,8 @@ fn shadeBlock(in: VSOut, baseColor: vec3<f32>, see: bool, back: bool) -> vec3<f3
     var ao: f32;
     let mode = i32(camera.lightParams2.z);
     let air = drawChunk * 32 + vec3<i32>(floor(in.localPos + 0.5 * in.localNormal));
-    if (mode == 3) {
-        // Debug: no voxel lighting at all (open sky, full sun, no AO).
+    if (mode == 3 || drawGrid == OPEN_AIR_GRID) {
+        // No voxel lighting at all (open sky, full sun, no AO): a debug view, and a chunk lit as open air.
         s.sky = camera.lightParams.z; s.rgb = vec3<f32>(0.0); s.sun = 1.0;
         ao = 1.0;
     } else if (in.cross.w != 0) {
@@ -684,7 +819,7 @@ fn shadeBlock(in: VSOut, baseColor: vec3<f32>, see: bool, back: bool) -> vec3<f3
     // Ambient occlusion darkens inner corners / block junctions; lerp from AO_MIN so corners aren't pure black.
     let aoFactor = mix(AO_MIN, 1.0, ao);
 
-    let shaded = baseColor * lit * aoFactor * camera.lightParams2.x;
+    let shaded = mix(baseColor * lit * aoFactor * camera.lightParams2.x, waterFogColor(), waterShare);
     if ((dbg & 2u) != 0u) { return shaded; }
     return applyFog(shaded, in.worldPos);
 }
@@ -843,6 +978,7 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
     private RenderPipeline* _particlePipeline;
     private RenderPipeline* _modelPipeline;
     private RenderPipeline* _chunkPipeline;          // vs_chunk: chunk meshes (ChunkQuad instances)
+    private RenderPipeline* _chunkDissolvePipeline;  // dissolving ones (fs_chunk_dissolve)
     private RenderPipeline* _chunkWireframePipeline;
     private RenderPipeline* _chunkOverdrawPipeline;  // debug overdraw view
     private RenderPipeline* _chunkCutoutDepthPipeline;  // their depth pre-pass (fs_cutout_depth)
@@ -961,6 +1097,7 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
         _cloudPipeline     = CreateCloudPipeline();
         _particlePipeline  = CreateParticlePipeline();
         _chunkPipeline          = CreateChunkPipeline("vs_chunk", PrimitiveTopology.TriangleList, CullMode.Back, "fs_chunk");
+        _chunkDissolvePipeline  = CreateChunkPipeline("vs_chunk", PrimitiveTopology.TriangleList, CullMode.Back, "fs_chunk_dissolve");
         _chunkWireframePipeline = CreateChunkPipeline("vs_chunk_lines", PrimitiveTopology.LineList, CullMode.None, "fs_chunk");
         _chunkOverdrawPipeline  = CreateOverdrawPipeline();
         _chunkCutoutDepthPipeline = CreatePipeline("vs_chunk", "fs_cutout_depth", null, PrimitiveTopology.TriangleList, CullMode.Back,
@@ -1293,7 +1430,7 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
         {
             Usage         = TextureUsage.TextureBinding | TextureUsage.CopyDst,
             Dimension     = TextureDimension.Dimension3D,
-            Size          = new Extent3D(ClimateTintSystem.SizeXZ, ClimateTintSystem.SizeXZ, ClimateTintSystem.SizeY),
+            Size          = new Extent3D(ClimateTintSystem.SizeXZ, ClimateTintSystem.SizeXZ, ClimateTintSystem.SizeY * 2),
             Format        = TextureFormat.Rgba8Unorm, // sRGB colours, decoded in the shader (climateTinted)
             MipLevelCount = 1,
             SampleCount   = 1,
@@ -1330,7 +1467,7 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
         {
             var dest = new ImageCopyTexture { Texture = _tintTexture, MipLevel = 0, Origin = new Origin3D(0, 0, 0), Aspect = TextureAspect.All };
             var layout = new TextureDataLayout { Offset = 0, BytesPerRow = ClimateTintSystem.SizeXZ * 4, RowsPerImage = ClimateTintSystem.SizeXZ };
-            var size = new Extent3D(ClimateTintSystem.SizeXZ, ClimateTintSystem.SizeXZ, ClimateTintSystem.SizeY);
+            var size = new Extent3D(ClimateTintSystem.SizeXZ, ClimateTintSystem.SizeXZ, ClimateTintSystem.SizeY * 2);
             _api.QueueWriteTexture(_ctx.Queue, &dest, data, (nuint)texels.Length, &layout, &size);
         }
         _tintOriginX = originX;
@@ -1519,6 +1656,14 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
         mesh.BakedStamp = baked;
         _lightmap.Queue(mesh, grid.Index, chunk);
     }
+
+    /// <summary>Whether <see cref="PrepareLightmap"/> would list <paramref name="mesh"/> for baking (its light map hasn't
+    /// been baked at <paramref name="stamp"/>), for callers that bake to a budget.</summary>
+    public bool LightmapStale(GpuMesh? mesh, GridHandle? grid, int stamp)
+        => mesh?.Light != null && grid != null && grid.Index >= 0 && mesh.BakedStamp != ((long)_lightmapEpoch << 32 | (uint)stamp);
+
+    /// <summary>Whether <paramref name="mesh"/>'s light map has ever been baked (true for one without a light map).</summary>
+    public bool LightmapEverBaked(GpuMesh? mesh) => mesh?.Light == null || mesh.BakedStamp != -1;
 
     /// <summary>The light stamp <see cref="PrepareLightmap"/> takes for a chunk (see <see cref="GridStore.LightStampOf"/>).</summary>
     public int LightStampOf(GridHandle? grid, ChunkPosition chunk) => grid == null ? 0 : _gridStore?.LightStampOf(grid, chunk) ?? 0;
@@ -1800,22 +1945,29 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
         _cameraBuffer.Write<CameraUniform>(0, s);
     }
 
+    /// <summary>The grid a chunk is drawn with to be lit as open air (ambient and sun), when it has no voxel light to
+    /// show (see ChunkRenderSystem).</summary>
+    public const int OpenAirGrid = -2;
+
     /// <summary>
     /// Draws a chunk mesh lit from grid <paramref name="grid"/> (its <see cref="GridHandle.Index"/>; -1 draws it
-    /// full-bright). <paramref name="chunk"/> is the chunk's coordinate in that grid.
+    /// full-bright, <see cref="OpenAirGrid"/> lit as open air). <paramref name="chunk"/> is the chunk's coordinate in that grid.
+    /// <paramref name="dissolve"/> (here and in the other chunk draws), while one chunk swaps for another: 0 draws it
+    /// whole; d (0-1) leaves out that share of its pixels in an even screen dither (going away); -d draws only that
+    /// share, the very pixels d leaves out (coming in).
     /// </summary>
-    public void DrawChunkMesh(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk)
-        => DrawChunk(mesh, model, grid, chunk, _chunkPipeline);
+    public void DrawChunkMesh(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk, float dissolve = 0f)
+        => DrawChunk(mesh, model, grid, chunk, dissolve != 0f ? _chunkDissolvePipeline : _chunkPipeline, dissolve);
 
     /// <summary>
     /// Lays down a chunk's cut-out mesh's depth (<see cref="ChunkRenderData.CutoutMesh"/>), minus its texels under half
     /// alpha, so <see cref="DrawCutoutChunkMesh"/> lights only the nearest cut-out face at each pixel. Call for every
     /// visible chunk's cut-out mesh after the opaque chunk meshes. Skipped in the wireframe and overdraw views.
     /// </summary>
-    public void DrawCutoutChunkDepth(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk)
+    public void DrawCutoutChunkDepth(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk, float dissolve = 0f)
     {
         if (WireframeMode || OverdrawMode) return;
-        DrawChunk(mesh, model, grid, chunk, _chunkCutoutDepthPipeline);
+        DrawChunk(mesh, model, grid, chunk, _chunkCutoutDepthPipeline, dissolve);
     }
 
     /// <summary>
@@ -1823,18 +1975,18 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
     /// <see cref="DrawCutoutChunkDepth"/> laid it down (so minus its texels under half alpha). Call after every visible
     /// chunk's cut-out depth.
     /// </summary>
-    public void DrawCutoutChunkMesh(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk)
-        => DrawChunk(mesh, model, grid, chunk, _chunkCutoutShadedPipeline);
+    public void DrawCutoutChunkMesh(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk, float dissolve = 0f)
+        => DrawChunk(mesh, model, grid, chunk, _chunkCutoutShadedPipeline, dissolve);
 
     /// <summary>
     /// Lays down a chunk's transparent mesh's depth (<see cref="ChunkRenderData.TransparentMesh"/>), so
     /// <see cref="DrawTransparentChunkMesh"/> draws only the nearest transparent face at each pixel. Call for every
     /// visible chunk's transparent mesh first. Skipped in the wireframe and overdraw views.
     /// </summary>
-    public void DrawTransparentChunkDepth(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk)
+    public void DrawTransparentChunkDepth(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk, float dissolve = 0f)
     {
         if (WireframeMode || OverdrawMode) return;
-        DrawChunk(mesh, model, grid, chunk, _chunkTransparentDepthPipeline);
+        DrawChunk(mesh, model, grid, chunk, _chunkTransparentDepthPipeline, dissolve);
     }
 
     /// <summary>
@@ -1842,10 +1994,11 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
     /// face (see <see cref="DrawTransparentChunkDepth"/>). Call after the opaque world and <see cref="DrawSky"/> (the sky
     /// only fills pixels with no depth, so it would paint over them).
     /// </summary>
-    public void DrawTransparentChunkMesh(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk)
-        => DrawChunk(mesh, model, grid, chunk, _chunkTransparentPipeline);
+    public void DrawTransparentChunkMesh(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk, float dissolve = 0f)
+        => DrawChunk(mesh, model, grid, chunk, _chunkTransparentPipeline, dissolve);
 
-    private void DrawChunk(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk, RenderPipeline* solidPipeline)
+    private void DrawChunk(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk, RenderPipeline* solidPipeline,
+                           float dissolve = 0f)
     {
         if (_chunkDrawCount >= MaxChunkDraws || mesh.QuadCount == 0) return;
 
@@ -1866,7 +2019,7 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
         _chunkDrawStaging[record] = new ChunkDrawRecord
         {
             Model = model, ChunkX = chunk.X, ChunkY = chunk.Y, ChunkZ = chunk.Z, Grid = grid, QuadBase = mesh.QuadBase,
-            LightBase = mesh.Light != null ? mesh.LightBase : uint.MaxValue,
+            LightBase = mesh.Light != null ? mesh.LightBase : uint.MaxValue, Dissolve = dissolve,
         };
         if (wire && !OverdrawMode) _api.RenderPassEncoderDraw(_pass, 8u * mesh.QuadCount, 1, 0, record);
         else _api.RenderPassEncoderDrawIndexed(_pass, 6u * System.Math.Min(mesh.QuadCount, (uint)MaxChunkQuads), 1, 0, 0, record);
@@ -1896,6 +2049,7 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
         public Mat4 Model;
         public int ChunkX, ChunkY, ChunkZ, Grid;
         public uint QuadBase, LightBase;
+        public float Dissolve;
     }
 
     /// <summary>Stages this draw's model uniform for <see cref="EndFrame"/>'s single upload; returns its dynamic offset.</summary>
@@ -1977,6 +2131,7 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
         if (_wireframePipeline  != null) _api.RenderPipelineRelease(_wireframePipeline);
         if (_pipeline           != null) _api.RenderPipelineRelease(_pipeline);
         if (_chunkPipeline      != null) _api.RenderPipelineRelease(_chunkPipeline);
+        if (_chunkDissolvePipeline != null) _api.RenderPipelineRelease(_chunkDissolvePipeline);
         if (_chunkWireframePipeline != null) _api.RenderPipelineRelease(_chunkWireframePipeline);
         if (_chunkOverdrawPipeline != null) _api.RenderPipelineRelease(_chunkOverdrawPipeline);
         if (_chunkCutoutDepthPipeline != null) _api.RenderPipelineRelease(_chunkCutoutDepthPipeline);

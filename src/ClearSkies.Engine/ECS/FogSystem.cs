@@ -45,12 +45,23 @@ public sealed class FogSystem : ISystem, IDebugUiSystem
                                .With<NeedsGpuUploadFlag>().Without<ChunkUploadedFlag>().AsSet();
     }
 
-    /// <summary>Horizontal distance from the view at which the loaded world stops, eased over time. Fog is total by here.</summary>
+    /// <summary>Distance from the view at which the loaded world stops, eased over time. Fog is total by here.</summary>
     public float Distance => _distance;
+
+    /// <summary>With coarse levels of terrain drawn past full detail, the nearest of them not ready to be seen
+    /// (ChunkLoadSystem.FarReadyRadius; null while they're off): the fog follows that instead, since they cover full
+    /// detail that isn't ready yet.</summary>
+    public Func<Vector3D<float>, float?>? Far { get; set; }
 
     public void Update(float dt)
     {
         if (!TryView(out var centre, out float radius, out float scanned)) return;
+
+        if (Far?.Invoke(centre) is { } far)
+        {
+            Ease(far, dt);
+            return;
+        }
 
         // Only what's within the draw radius counts: a column loaded beyond it for colliders is never drawn.
         float target = MathF.Min(radius, scanned);
@@ -61,6 +72,11 @@ public sealed class FogSystem : ISystem, IDebugUiSystem
         }
         target = MathF.Min(target, Nearest(_chunksNotMeshedYet, centre, radius));
         target = MathF.Min(target, Nearest(_chunksNotUploadedYet, centre, radius));
+        Ease(target, dt);
+    }
+
+    private void Ease(float target, float dt)
+    {
         _target = target;
 
         float rate = target < _distance ? 8f : 1f;

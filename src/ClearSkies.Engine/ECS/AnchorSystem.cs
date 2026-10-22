@@ -190,7 +190,7 @@ public sealed class AnchorSystem : ISystem, IDisposable, IDebugUiSystem
         _registry = registry;
         _ships    = world.GetEntities().With<DynamicGrid>().With<ChunkGrid>().With<Transform>().With<ShipControls>().With<EntityId>().AsSet();
         _riders   = world.GetEntities().With<DynamicGrid>().With<AnchorLinks>().With<EntityId>().AsSet();
-        _volumes  = world.GetEntities().With<ChunkGrid>().With<Transform>().With<EntityId>().AsSet();
+        _volumes  = world.GetEntities().With<ChunkGrid>().Without<LowResolutionCopy>().With<Transform>().With<EntityId>().AsSet();
         // Bepu removes a body's constraints with it, so a weld on a body going away is already gone.
         _bodyRemoved = world.SubscribeComponentRemoved((in Entity _, in PhysicsBodyComponent pb) => Unweld(pb.Body));
         _disposed = world.SubscribeEntityDisposed((in Entity e) =>

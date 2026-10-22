@@ -39,6 +39,11 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     private readonly ThreadLocal<GreedyMesher> _meshers;
 
     private int _inFlight = 0;
+    // Of those, the one kept for the coarse levels of terrain while they wait (0 or 1): without it they waited behind
+    // every full-detail chunk (they rank no nearer than where full detail ends, see NearestChunks), and while the view
+    // moves full detail never runs out, so a coarse chunk could hold the fog waiting for its mesh.
+    private int _coarseInFlight = 0;
+    private readonly EntitySet _dirtyCoarse;
     private int _meshes, _remeshes; // jobs started, and those for a chunk that already had a mesh
     private readonly ConcurrentQueue<Result> _results = new();
     private readonly List<GpuMesh> _removed = new();
@@ -59,7 +64,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
 
     /// <summary>A meshed chunk: its opaque, cut-out and translucent meshes, and its model blocks.</summary>
     private sealed record Result(Entity Entity, Packed Opaque, Packed Cutout, Packed Transparent, ModelCell[] Models,
-                                 Exception? Error);
+                                 Exception? Error, bool Coarse);
 
     /// <summary>Main-thread time spent uploading meshes per frame, at most (at least one goes each frame): results past
     /// it wait for the next frame, so a burst of finished jobs doesn't stall one.</summary>
@@ -69,6 +74,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     {
         _ecsWorld = ecsWorld;
         _dirtyChunks = ecsWorld.GetEntities().With<Chunk>().With<Transform>().With<NeedsRemeshFlag>().With<Rendered>().AsSet();
+        _dirtyCoarse = ecsWorld.GetEntities().With<Chunk>(IsCoarse).With<Transform>().With<NeedsRemeshFlag>().With<Rendered>().AsSet();
         _meshedChunks = ecsWorld.GetEntities().With<Chunk>().With<ChunkRenderData>().AsSet();
         _unrendered = ecsWorld.GetEntities().With<Chunk>().WhenRemoved<Rendered>().AsSet();
         _cameras = ecsWorld.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
@@ -143,67 +149,81 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
         return new Packed(packed, bytes, quads, lightWords);
     }
 
+    private static bool IsCoarse(in Chunk chunk) => chunk.Entry.Volume.IsLowResolutionCopy;
+
     private void Dispatch()
     {
-        if (_inFlight >= MaxInFlight) return;
-
-        // Closest to the camera first (see NearestChunks); a few spare picks for all-air and buried chunks, which take
-        // no job.
-        NearestChunks.Select(_dirtyChunks, _cameras, MaxInFlight - _inFlight + 4, _nearest);
-        foreach (var e in _nearest)
+        // The coarse levels' job: the nearest coarse chunk waiting, whatever full detail is waiting.
+        if (_coarseInFlight == 0 && _inFlight < MaxInFlight)
         {
-            var chunk = e.Get<Chunk>();
-            var entry = chunk.Entry;
-            var pos = entry.Position;
-            var volume = entry.Volume;
-
-            // Fast path: pure air chunk, or one buried in opaque chunks (see ChunkVolume.IsBuried), which shows nothing.
-            if (!entry.Data.HasAnyNonAir() || volume.IsBuried(pos))
-            {
-                ClearMesh(entry);
-                continue;
-            }
-
-            entry.Entity.Remove<NeedsRemeshFlag>();
-
-            _inFlight += 1;
-
-            var data = entry.Data;
-            _meshes++;
-            if (e.Has<ChunkRenderData>()) _remeshes++;
-            // A volume meshed without its neighbours (the streamed world) uses them only to cull transparent faces
-            // (see ChunkVolume.MeshIgnoresNeighbours): its other border faces are all drawn.
-            bool alone = volume.MeshIgnoresNeighbours;
-            var nX = volume.GetData(pos.Offset(-1, 0, 0)); var pX = volume.GetData(pos.Offset(1, 0, 0));
-            var nY = volume.GetData(pos.Offset(0, -1, 0)); var pY = volume.GetData(pos.Offset(0, 1, 0));
-            var nZ = volume.GetData(pos.Offset(0, 0, -1)); var pZ = volume.GetData(pos.Offset(0, 0, 1));
-            var vol = volume;
-            // Held until the job is done, so a chunk unloaded meanwhile doesn't hand its arrays to another chunk.
-            data.Retain(); nX?.Retain(); pX?.Retain(); nY?.Retain(); pY?.Retain(); nZ?.Retain(); pZ?.Retain();
-            BackgroundWork.Soon(() =>
-            {
-                try
-                {
-                    // The mesher's lists are per-thread scratch, so copy out before this thread meshes again.
-                    var mesher = _meshers.Value!;
-                    var mesh = mesher.Mesh(data, nX, pX, nY, pY, nZ, pZ, neighboursForTransparentOnly: alone, position: pos);
-                    var opaque = PackQuads(mesh.Opaque);
-                    var cutout = PackQuads(mesh.Cutout);
-                    var transparent = PackQuads(mesh.Translucent, twoSided: true); // water is seen from below too
-                    _results.Enqueue(new Result(entry.Entity, opaque, cutout, transparent, FindModelBlocks(data), null));
-                }
-                catch (Exception e)
-                {
-                    _results.Enqueue(new Result(entry.Entity, Packed.None, Packed.None, Packed.None, Array.Empty<ModelCell>(), e));
-                }
-                finally
-                {
-                    data.Unretain(); nX?.Unretain(); pX?.Unretain(); nY?.Unretain(); pY?.Unretain(); nZ?.Unretain(); pZ?.Unretain();
-                }
-            });
-
-            if (_inFlight >= MaxInFlight) return;
+            NearestChunks.Select(_dirtyCoarse, _cameras, 1 + 4, _nearest);
+            foreach (var e in _nearest)
+                if (Start(e, coarse: true)) break;
         }
+
+        // The rest: closest to the camera first (see NearestChunks); a few spare picks for all-air and buried chunks,
+        // which take no job.
+        // While coarse chunks wait, one job is left for them (taken next frame if full detail has them all now).
+        int free = MaxInFlight - _inFlight - (_coarseInFlight == 0 && _dirtyCoarse.Count > 0 ? 1 : 0);
+        if (free <= 0) return;
+        NearestChunks.Select(_dirtyChunks, _cameras, free + 4, _nearest);
+        foreach (var e in _nearest)
+            if (Start(e, coarse: false) && --free == 0) return;
+    }
+
+    /// <summary>Meshes a chunk: on a worker, or at once for an all-air or buried one. Whether it took a job.</summary>
+    private bool Start(Entity e, bool coarse)
+    {
+        var chunk = e.Get<Chunk>();
+        var entry = chunk.Entry;
+        var pos = entry.Position;
+        var volume = entry.Volume;
+
+        // Fast path: pure air chunk, or one buried in opaque chunks (see ChunkVolume.IsBuried), which shows nothing.
+        if (!entry.Data.HasAnyNonAir() || volume.IsBuried(pos))
+        {
+            ClearMesh(entry);
+            return false;
+        }
+
+        entry.Entity.Remove<NeedsRemeshFlag>();
+
+        _inFlight += 1;
+        if (coarse) _coarseInFlight += 1;
+
+        var data = entry.Data;
+        _meshes++;
+        if (e.Has<ChunkRenderData>()) _remeshes++;
+        // A volume meshed without its neighbours (the streamed world) uses them only to cull transparent faces
+        // (see ChunkVolume.MeshIgnoresNeighbours): its other border faces are all drawn.
+        bool alone = volume.MeshIgnoresNeighbours;
+        var nX = volume.GetData(pos.Offset(-1, 0, 0)); var pX = volume.GetData(pos.Offset(1, 0, 0));
+        var nY = volume.GetData(pos.Offset(0, -1, 0)); var pY = volume.GetData(pos.Offset(0, 1, 0));
+        var nZ = volume.GetData(pos.Offset(0, 0, -1)); var pZ = volume.GetData(pos.Offset(0, 0, 1));
+        // Held until the job is done, so a chunk unloaded meanwhile doesn't hand its arrays to another chunk.
+        data.Retain(); nX?.Retain(); pX?.Retain(); nY?.Retain(); pY?.Retain(); nZ?.Retain(); pZ?.Retain();
+        BackgroundWork.Soon(() =>
+        {
+            try
+            {
+                // The mesher's lists are per-thread scratch, so copy out before this thread meshes again.
+                var mesher = _meshers.Value!;
+                var mesh = mesher.Mesh(data, nX, pX, nY, pY, nZ, pZ, neighboursForTransparentOnly: alone, position: pos);
+                var opaque = PackQuads(mesh.Opaque);
+                var cutout = PackQuads(mesh.Cutout);
+                var transparent = PackQuads(mesh.Translucent, twoSided: true); // water is seen from below too
+                _results.Enqueue(new Result(entry.Entity, opaque, cutout, transparent, FindModelBlocks(data), null, coarse));
+            }
+            catch (Exception e)
+            {
+                _results.Enqueue(new Result(entry.Entity, Packed.None, Packed.None, Packed.None, Array.Empty<ModelCell>(), e, coarse));
+            }
+            finally
+            {
+                data.Unretain(); nX?.Unretain(); pX?.Unretain(); nY?.Unretain(); pY?.Unretain(); nZ?.Unretain(); pZ?.Unretain();
+            }
+        });
+        return true;
     }
 
     private void ApplyResults()
@@ -212,6 +232,7 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
         while (Ms(start, System.Diagnostics.Stopwatch.GetTimestamp()) < UploadBudgetMs && _results.TryDequeue(out var r))
         {
             _inFlight -= 1;
+            if (r.Coarse) _coarseInFlight -= 1;
             var entity = r.Entity;
             try
             {
@@ -359,7 +380,8 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
 
     public void DrawDebugUi()
     {
-        ImGui.Text($"Jobs in flight: {_inFlight} / {MaxInFlight}, chunks waiting to mesh: {_dirtyChunks.Count:N0}");
+        ImGui.Text($"Jobs in flight: {_inFlight} / {MaxInFlight} ({_coarseInFlight} kept for coarse terrain), " +
+                   $"chunks waiting to mesh: {_dirtyChunks.Count:N0} ({_dirtyCoarse.Count:N0} coarse)");
         ImGui.Text($"Main thread (smoothed): results {_applyMs:F2} ms, choosing + dispatch {_dispatchMs:F2} ms, " +
                    $"freeing meshes {_cleanupMs:F2} ms");
         ImGui.Text($"Upload (main thread, smoothed): {_uploadMs:F2} ms per chunk " +
