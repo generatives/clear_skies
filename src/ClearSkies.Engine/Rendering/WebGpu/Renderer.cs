@@ -628,8 +628,10 @@ fn fs_chunk_transparent(in: VSOut, @builtin(front_facing) front: bool) -> @locat
     if (front && in.cg.w >= 0) {
         drawChunk = in.cg.xyz;
         drawGrid  = in.cg.w;
-        var path = waterDepth(drawChunk * 32 + vec3<i32>(floor(in.localPos - 0.5 * in.localNormal)));
+        let p = vec3<f32>(drawChunk * 32) + in.localPos - 0.5 * in.localNormal;
+        var path = waterDepth(vec3<i32>(floor(p)));
         if (in.localNormal.y > 0.5) {
+            path = smoothWaterDepth(p);
             path /= max(dot(normalize(camera.camPos.xyz - in.worldPos), normalize(in.worldNormal)), 0.25);
         }
         let clear = exp(-path / WATER_CLEAR);
@@ -646,6 +648,41 @@ fn fs_chunk_transparent(in: VSOut, @builtin(front_facing) front: bool) -> @locat
 const WATER_CLEAR: f32 = 5.0;
 const WATER_DEEP_SHADE: f32 = 0.3;
 const WATER_MAX_DEPTH: i32 = 16;
+// Smoothing across the top (smoothWaterDepth): the depth blends between columns WATER_SMOOTH blocks apart, sampled up
+// to WATER_WOBBLE blocks off, by noise WATER_WOBBLE_SIZE blocks across.
+const WATER_SMOOTH: f32 = 3.0;
+const WATER_WOBBLE: f32 = 2.0;
+const WATER_WOBBLE_SIZE: f32 = 7.0;
+
+// The water's depth under p (grid space, a point in the top cell), smoothed so the lake's blocky outline doesn't
+// show through its surface: blended between the four columns around it, WATER_SMOOTH blocks apart, at a spot
+// nudged by noise so the blend's own grid doesn't show either.
+fn smoothWaterDepth(p: vec3<f32>) -> f32 {
+    let n = p.xz / WATER_WOBBLE_SIZE;
+    let q = p.xz + WATER_WOBBLE * 2.0 * (vec2<f32>(valueNoise(n), valueNoise(n + vec2<f32>(37.1, 11.7))) - 0.5);
+    let g = q / WATER_SMOOTH - 0.5;
+    let b = floor(g);
+    let f = g - b;
+    let y = i32(floor(p.y));
+    var d: array<f32, 4>;
+    for (var k = 0; k < 4; k++) {
+        let c = (b + vec2<f32>(f32(k & 1), f32(k >> 1u)) + 0.5) * WATER_SMOOTH;
+        d[k] = waterDepth(vec3<i32>(i32(floor(c.x)), y, i32(floor(c.y))));
+    }
+    return mix(mix(d[0], d[1], f.x), mix(d[2], d[3], f.x), f.y);
+}
+
+// Smooth value noise, 0-1, varying over about one unit of p.
+fn valueNoise(p: vec2<f32>) -> f32 {
+    let i = vec2<i32>(floor(p));
+    let f = p - floor(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let a = f32(cellHash(vec3<i32>(i.x,     0, i.y))     & 1023u);
+    let b = f32(cellHash(vec3<i32>(i.x + 1, 0, i.y))     & 1023u);
+    let c = f32(cellHash(vec3<i32>(i.x,     0, i.y + 1)) & 1023u);
+    let e = f32(cellHash(vec3<i32>(i.x + 1, 0, i.y + 1)) & 1023u);
+    return mix(mix(a, b, u.x), mix(c, e, u.x), u.y) / 1023.0;
+}
 
 // How many cells straight down from v in this draw's grid, v included, before the floor (a block that blocks light),
 // up to WATER_MAX_DEPTH. The see-through bits can't be used: they only mark the water cells with a face (and those on
