@@ -57,7 +57,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     private readonly record struct ChunkDraw(float DistSq, GpuMesh? Mesh, GpuMesh? CutoutMesh, GpuMesh? TransparentMesh,
                                              ModelBlock[] Models, Mat4 Model, int Grid, ChunkPosition Chunk, GridHandle? Handle,
                                              float Dissolve = 0f, ChunkLight Light = ChunkLight.Baked, bool Budgeted = false,
-                                             int Level = -1);
+                                             int Level = -1, Entity Entity = default);
     private List<ChunkDraw> _draws = new(), _sorted = new();
     private readonly List<ChunkDraw> _translucentDraws = new(); // the visible chunks with translucent faces
     // The sort's keys: each draw's distance and place in _draws (sorting the draws themselves moved ~150 bytes a swap).
@@ -88,6 +88,12 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     private readonly SortedDictionary<int, List<Entity>> _unbaked = new();
     private int UnbakedCount => _unbaked.Values.Sum(l => l.Count);
     private int _bakedQuads;
+
+    /// <summary>How long a static volume's chunk takes to fade in from when it can first be drawn (its light maps baked
+    /// once): terrain arriving shows by fading in, not popping, the fog staying where it is (see FogSystem).</summary>
+    public const double ArrivalFadeSeconds = 1.0;
+    private readonly Dictionary<Entity, double> _arrivedAt = new(); // when each could first be drawn (seconds)
+    private double _now; // this frame's time (seconds)
 
     /// <summary>Cell-local placement per <see cref="BlockOrientation"/> (indexed by its byte): a model block's model is
     /// authored Blockbench-style (x/z centred on the origin, standing on y = 0, 1 unit = 1 block), so it is rotated
@@ -134,6 +140,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     private void Forget(Entity e)
     {
         _others.Remove(e);
+        _arrivedAt.Remove(e);
         if (!_columnOf.Remove(e, out var at)) return;
         var column = at.Volume.Columns[at.Key];
         column.Chunks.Remove(e);
@@ -178,6 +185,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         var size = new Vector3D<float>(ChunkData.Size);
         var half = size * 0.5f;
         long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        _now = t0 / (double)System.Diagnostics.Stopwatch.Frequency;
         _stateTicks = 0;
 
         foreach (var sv in _static.Values) DrawStatic(sv, frame);
@@ -223,12 +231,25 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         {
             ref readonly var d = ref draws[i];
             if (!Bake(in d)) continue;
-            if (d.TransparentMesh != null) _translucentDraws.Add(d);
             if (kept != i) draws[kept] = d;
             kept++;
         }
         _draws.RemoveRange(kept, _draws.Count - kept);
         BakeFirstTimes();
+        // A chunk fades in over ArrivalFadeSeconds from when it could first be drawn, unless something else is fading it
+        // (a swap between levels of detail).
+        draws = CollectionsMarshal.AsSpan(_draws);
+        for (int i = 0; i < draws.Length; i++)
+        {
+            ref var d = ref draws[i];
+            if (d.Entity != default && _arrivedAt.TryGetValue(d.Entity, out var at))
+            {
+                double t = (_now - at) / ArrivalFadeSeconds;
+                if (t >= 1.0) _arrivedAt.Remove(d.Entity);
+                else if (d.Dissolve == 0f) d = d with { Dissolve = (float)(1.0 - t) };
+            }
+            if (d.TransparentMesh != null) _translucentDraws.Add(d);
+        }
         Array.Clear(_levelCounts);
         foreach (ref readonly var d in CollectionsMarshal.AsSpan(_draws))
         {
@@ -332,7 +353,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
                 var centre = origin + size * 0.5f;
                 _draws.Add(new ChunkDraw(Vector3D.DistanceSquared(centre, frame.CameraPosition), rd.Mesh, rd.CutoutMesh,
                                          rd.TransparentMesh, rd.Models, model, grid, rd.ChunkPos, rd.Grid, how.Dissolve,
-                                         how.Light, Budgeted: true, Level: level));
+                                         how.Light, Budgeted: true, Level: level, Entity: e));
             }
         }
     }
@@ -363,7 +384,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
                     _renderer.PrepareLightmap(mesh, rd.Grid, rd.ChunkPos, stamp);
                 }
             }
-            if (Baked(rd)) e.Set<LightmapsBakedFlag>();
+            if (Baked(rd)) { e.Set<LightmapsBakedFlag>(); _arrivedAt[e] = _now; }
             else unbaked[kept++] = e;
         }
         unbaked.RemoveRange(kept, unbaked.Count - kept);

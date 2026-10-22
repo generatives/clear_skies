@@ -17,8 +17,8 @@ namespace ClearSkies.Engine.ECS;
 /// chunks are held (the loader keeps them loaded though no longer wanted, see <see cref="Holds"/>) while the coarse
 /// chunk dissolves in over them.
 ///
-/// A coarse chunk is never shown before it's lit: until then it's left out, behind the fog, which follows the nearest
-/// terrain not ready in any level (<see cref="FarReadyRadius"/>). Terrain waiting to be shown is lit first
+/// A coarse chunk is never shown before it's lit and its light maps are baked: until then it's left out, and the finer
+/// level stays where there is one. Terrain waiting to be shown is lit first
 /// (<see cref="ShowFirst"/>). While a finer level has a coarse chunk's eight, the coarse chunk is covered in the light
 /// store (<see cref="SetCovered"/>): the finer grid's rays pass through it, so each level is lit by its own blocks.
 ///
@@ -520,95 +520,14 @@ public sealed class TerrainSwapSystem : ISystem
         return false;
     }
 
-    /// <summary>What <see cref="FarReadyRadius"/> last found holding the fog in (for the panel).</summary>
-    internal string FogHeldBy { get; private set; } = "nothing";
+    /// <summary>With coarse levels on, how far the farthest is drawn (for the fog); null while they're off.</summary>
+    public float? DrawnRange => Levels.Count > 1 ? Levels[^1].Radius : null;
 
-    /// <summary>For the fog while coarse levels are on (null otherwise): the nearest terrain not ready to be seen in any
-    /// coarse level, out to the farthest level's radius. That's a column being made or queued (by its distance across, as
-    /// which of its chunks are in range isn't known yet), or a chunk in range held back for its light, where nothing else
-    /// shows instead (the finer level's ready, or the coarser one drawn). Full detail not ready is covered by level 1.</summary>
-    public float? FarReadyRadius(Vector3D<float> centre)
-    {
-        if (Levels.Count == 1) return null;
-        var last = Levels[^1];
-        // Chunks in the outermost band don't count: the view moving on a chunk brings a shell of new ones in there at
-        // once, and the fog pulled in for each and went out again (they come in behind nearly total fog anyway).
-        float best = last.Radius, ignoreFrom = last.Radius - 2 * last.Blocks;
-        FogHeldBy = "nothing (out to the full range)";
-        foreach (var level in Levels.Skip(1))
-        {
-            var coarser = level.Coarser;
-            foreach (var (col, job) in level.InFlight)
-                if (!HiddenColumn(col, job.Layers) && BoxDistance.ToColumn(centre, col.x, col.z, level.Blocks) is var d && d < best && d < ignoreFrom)
-                    (best, FogHeldBy) = (d, $"level {level.Level} column being made, {d:F0} blocks out");
-            for (int i = level.QueueHead; i < level.Queue.Count; i++)
-                if (!HiddenColumn(level.Queue[i], Missing(level, level.Queue[i])))
-                {
-                    if (BoxDistance.ToColumn(centre, level.Queue[i].x, level.Queue[i].z, level.Blocks) is var d && d < best && d < ignoreFrom)
-                        (best, FogHeldBy) = (d, $"level {level.Level} column queued, {d:F0} blocks out");
-                    break;
-                }
-            foreach (var (p, c) in SwapsOf(level))
-            {
-                if (c.Quiet || c.WasReady || !Kept(level, p)) continue; // a quiet one doesn't wait
-                if (!Waits(level, c, p)) continue;
-                if (EntityOf(level, p) is { } e && e.Has<ChunkRenderData>() && e.Get<ChunkRenderData>().IsEmpty) continue;
-                if (coarser != null && Shows(coarser, new ChunkPosition(p.X >> 1, p.Y >> 1, p.Z >> 1))) continue;
-                float d = BoxDistance.ToChunk(centre, p.X, p.Y, p.Z, level.Blocks);
-                if (d < best && d < ignoreFrom)
-                    (best, FogHeldBy) = (d, $"level {level.Level} chunk waiting for {WaitsFor(level, c, p)}, {d:F0} blocks out");
-            }
-
-            // A column's chunks being made (layer bits) are hidden where the coarser level shows over each of them, or
-            // knows there's nothing there. (Testing only the coarser chunk at the view's height missed columns seen
-            // from above it, where that chunk is air: every new chunk near the view held the fog in.)
-            bool HiddenColumn((int x, int z) k, ulong layers)
-            {
-                if (coarser == null) return false;
-                for (int y = level.MinY; y <= level.MaxY; y++)
-                {
-                    if ((layers & 1UL << (y - level.MinY)) == 0) continue;
-                    var over = new ChunkPosition(k.x >> 1, y >> 1, k.z >> 1);
-                    if (!Shows(coarser, over) && (coarser.Volume.IsLoaded(over) || !_load.Has(coarser, over))) return false;
-                }
-                return true;
-            }
-        }
-        return best;
-    }
-
-    /// <summary>The layers of the level's column it wants and doesn't have yet (see <see cref="ChunkLoadSystem.Has"/>).</summary>
-    private ulong Missing(TerrainLevel level, (int x, int z) col)
-    {
-        ulong layers = 0;
-        for (int y = level.MinY; y <= level.MaxY; y++)
-        {
-            var p = new ChunkPosition(col.x, y, col.z);
-            if (ChunkLoadSystem.Wanted(level, p) && !_load.Has(level, p)) layers |= level.Bit(p);
-        }
-        return layers;
-    }
-
-    /// <summary>What a chunk held back (see <see cref="Waits"/>) waits for: its mesh, its place in the light store, or
-    /// its light there. A chunk lit but not yet meshed waits on the mesher however long it was lit for.</summary>
-    private static string WaitsFor(TerrainLevel level, Swap c, ChunkPosition p)
-    {
-        if (EntityOf(level, p) is not { } e || !e.Has<ChunkMeshedFlag>())
-            return c.Settled ? "its mesh (lit already)" : "its mesh";
-        if (!e.Has<ChunkUploadedFlag>()) return "the light store";
-        return $"its light ({c.Waiting} frames)";
-    }
-
-    /// <summary>Whether the level draws chunk <paramref name="p"/> now, lit: what's under it doesn't show.</summary>
-    private bool Shows(TerrainLevel level, ChunkPosition p)
-        => SwapsOf(level).TryGetValue(p, out var c) && c.Drawn && !Waits(level, c, p) && !Unbaked(level, p);
-
-    /// <summary>The Distant Terrain panel's part: the fade, what the fog waits on, and each level's swaps.</summary>
+    /// <summary>The Distant Terrain panel's part: the fade and each level's swaps.</summary>
     internal void DrawUi()
     {
         float fade = FadeSeconds;
         if (ImGui.SliderFloat("Swap fade (seconds)", ref fade, 0f, 4f, "%.2f")) FadeSeconds = fade;
-        ImGui.Text($"Fog held by: {FogHeldBy}");
         ImGui.Text($"Last frame: {_shown.Visited:N0} of {_shown.Swaps:N0} swaps looked at, {_shown.Readiness:N0} readiness checks, " +
                    $"{_shown.LitChecks:N0} light checks, {_shown.ShowFirst:N0} asked to light first, {_shown.Covers:N0} covers told");
         _steps.Draw();

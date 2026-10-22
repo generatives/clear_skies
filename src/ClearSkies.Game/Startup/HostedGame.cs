@@ -103,7 +103,7 @@ internal static class HostedGame
         host.AddSystem(world.Hierarchy, SystemStage.Frame);
         host.AddSystem(world.ChunkLoad, SystemStage.Frame);
         host.AddSystem(world.TerrainSwaps, SystemStage.Frame);
-        host.AddSystem(new FogSystem(host.World, world.Options.ViewDistance) { Far = world.TerrainSwaps.FarReadyRadius },
+        host.AddSystem(new FogSystem(host.World, world.Options.ViewDistance) { Range = () => world.TerrainSwaps.DrawnRange },
                        SystemStage.Frame); // at the nearest terrain not ready (in any level, with distant terrain drawn coarse)
         // What the player points at and uses, the HUD (crosshair, hotbar), grids saved and loaded, and the debug panels.
         host.AddSystem(new BlockTargetSystem(host.World, input, renderer, world.BlockActions, world.EditLimits), SystemStage.Frame);
