@@ -647,18 +647,15 @@ const WATER_CLEAR: f32 = 5.0;
 const WATER_DEEP_SHADE: f32 = 0.3;
 const WATER_MAX_DEPTH: i32 = 16;
 
-// How many see-through cells (water) stand straight down from v in this draw's grid, v included, up to
-// WATER_MAX_DEPTH: it stops at the floor, at air under the water, or where nothing is loaded.
+// How many cells straight down from v in this draw's grid, v included, before the floor (a block that blocks light),
+// up to WATER_MAX_DEPTH. The see-through bits can't be used: they only mark the water cells with a face (and those on
+// chunk borders), not the inside of a lake. Air under the water would count as more water, but water doesn't hang
+// over air.
 fn waterDepth(v: vec3<i32>) -> f32 {
     var c = v;
     var n = 0;
     for (; n < WATER_MAX_DEPTH; n++) {
-        let i = entryOf(drawGrid, c >> vec3<u32>(5u));
-        if (i < 0) { break; }
-        let seeSlot = chunkTable[2 * i + 1].z;
-        if (seeSlot <= 0) { break; }
-        let l = c & vec3<i32>(31);
-        if (((occPool[u32((seeSlot - 1) * WPC + l.y + 32 * l.z)] >> u32(l.x)) & 1u) == 0u) { break; }
+        if (isSolid(c)) { break; }
         c.y -= 1;
     }
     return f32(n);
