@@ -117,8 +117,8 @@ public sealed class RenderFrame : IDebugUiSystem
         ImGui.SliderFloat("Shallow opacity", ref WaterSettings.ShallowOpacity, 0f, 1f, "%.2f");
         ImGui.SliderFloat("Shallow tint", ref WaterSettings.ShallowTint, 0f, 1f, "%.2f");
         ImGui.TextDisabled("How far the thinnest water is already the deep colour (the rest is its texture).");
-        ImGui.SliderFloat("Murk variation", ref WaterSettings.Pattern, 0f, 1f, "%.2f");
-        ImGui.SliderFloat("Murk patch size (blocks)", ref WaterSettings.PatternSize, 1f, 32f, "%.1f");
+        ImGui.SliderFloat("Murk variation", ref WaterSettings.MurkVariation, 0f, 1f, "%.2f");
+        ImGui.SliderFloat("Murk patch size (blocks)", ref WaterSettings.MurkSize, 1f, 32f, "%.1f");
         ImGui.TextDisabled("Darker and clearer patches through the water, not on its surface.");
     }
 
@@ -160,8 +160,8 @@ public sealed class RenderFrame : IDebugUiSystem
             WaterClarity   = WaterSettings.Clarity,
             WaterShallowOpacity = WaterSettings.ShallowOpacity,
             WaterShallowTint    = WaterSettings.ShallowTint,
-            WaterPattern        = WaterSettings.Pattern,
-            WaterPatternSize    = WaterSettings.PatternSize,
+            WaterMurkVariation  = WaterSettings.MurkVariation,
+            WaterMurkSize       = WaterSettings.MurkSize,
         };
         if (SkySettings.FogEnabled)
         {

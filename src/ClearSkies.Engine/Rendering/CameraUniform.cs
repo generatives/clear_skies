@@ -48,5 +48,5 @@ public struct CameraUniform
     public Vector3D<float> WaterColor;     // water.rgb: WaterSettings.Color
     public float           WaterClarity;   // water.w
     public float           WaterShallowOpacity, WaterShallowTint; // water2.xy
-    public float           WaterPattern, WaterPatternSize;        // water2.zw
+    public float           WaterMurkVariation, WaterMurkSize;     // water2.zw
 }
