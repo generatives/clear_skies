@@ -162,7 +162,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                     data.Set(lx, lo - originY, lz, crystal);
 
                 // A lake over the top span: water (lava in the volcanic wastes, partly iced over in tundra) up to its
-                // level on a bed of sand and gravel, with a sandy shore.
+                // level on a bed of sand and gravel, with a sandy shore (grassy in a desert).
+                BlockId? ground = null;
                 if (Lakeside(col, s))
                 {
                     int level = _level[col];
@@ -171,6 +172,9 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                     if (biome == Biome.Volcanic) bed = BlockId.Ash;
                     for (int y = System.Math.Max(hi - 1, originY); y <= System.Math.Min(hi, originY + S - 1); y++)
                         data.Set(lx, y - originY, lz, bed);
+                    // A desert lake is an oasis: grass round it, not more sand.
+                    bool oasis = biome is Biome.Desert or Biome.Badlands && hi >= level;
+                    if (oasis && hi >= originY && hi < originY + S) data.Set(lx, hi - originY, lz, BlockId.Grass);
                     var liquid = biome == Biome.Volcanic ? BlockId.Lava : BlockId.Water;
                     // A tundra lake's ice is broken, with open water between the floes.
                     bool iced = biome == Biome.Tundra && _crack.GetNoise(x * 4f, z * 4f) > IceOpen;
@@ -181,14 +185,15 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                         data.Set(lx, y - originY, lz, b);
                     }
                     if (level > hi) continue; // nothing grows under water
+                    if (oasis) ground = BlockId.Grass;
                 }
 
                 // What grows on the span's top, in the open cell above it.
                 int above = hi + 1;
                 if (above < originY || above >= originY + S) continue;
                 if (s + 1 < _spanCount[col] && _spans[col * MaxSpans + s + 1].Lo <= above) continue;
-                var ground = ContinentTerrain.Block(hi, hi, _strata[col], _patch[col], _bare[col * MaxSpans + s], _biome[col * MaxSpans + s], _dry[col * MaxSpans + s]);
-                var plant = ContinentTerrain.Plant(ground, pos.X * S + lx, above, pos.Z * S + lz, _flora[col], _kind[col], _seed);
+                ground ??= ContinentTerrain.Block(hi, hi, _strata[col], _patch[col], _bare[col * MaxSpans + s], _biome[col * MaxSpans + s], _dry[col * MaxSpans + s]);
+                var plant = ContinentTerrain.Plant(ground.Value, pos.X * S + lx, above, pos.Z * S + lz, _flora[col], _kind[col], _seed);
                 if (plant != BlockId.Air) data.Set(lx, above - originY, lz, plant);
             }
         }
