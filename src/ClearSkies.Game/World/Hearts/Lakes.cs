@@ -11,7 +11,7 @@ namespace ClearSkies.Game.Generation;
 /// gone are drains, so no lake sits over a crack, hangs over a gap or rests against a piece's worn edge. Each lake is
 /// decided by exactly one tile, the one holding its first cell, and may reach into its neighbours (not too near the
 /// edge of its window), so every chunk agrees. Its level is a block under the spill point, so the water stands below
-/// its banks. None lies in a desert, and the drier the climate the fewer hollows hold one.
+/// its banks. The drier the climate, the fewer hollows hold one: none in deserts and steppe.
 /// </summary>
 public sealed class Lakes
 {
@@ -198,10 +198,6 @@ public sealed class Lakes
                 if (perched) break;
             }
             if (perched) continue;
-            bool dry = false;
-            foreach (int c in cells)
-                if (Dry(x0 + (c % Window) * Step, z0 + (c / Window) * Step, height[c])) { dry = true; break; }
-            if (dry) continue;
             // The wetter the climate, the more hollows hold a lake: decided by the lake's first cell, so the same in
             // every window.
             float sx = x0 + si * Step, sz = z0 + sk * Step;
@@ -227,15 +223,6 @@ public sealed class Lakes
         for (int i = i0; i <= i1; i++)
             hearts.Add(HeartGrid.At(_seed, 0, i, -1, k));
         return hearts;
-    }
-
-    /// <summary>Whether ground at (x, z) and <paramref name="top"/> high is desert, badlands or a desert's edge: no
-    /// lakes there.</summary>
-    private bool Dry(float x, float z, float top)
-    {
-        float heat = Biomes.Heat(top, _terrain.Heat(x, z)), wet = _terrain.Wet(x, z);
-        var biome = Biomes.Pick(heat, wet);
-        return biome is Biome.Desert or Biome.Badlands || Biomes.Dry(heat, wet, Biomes.SandBlend) > 0.5f;
     }
 
     /// <summary>The land's real top at (x, z): its top piece's top (see HeartWorldGenerator.Solid), or
