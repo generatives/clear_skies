@@ -143,7 +143,7 @@ public sealed class Water
         float qx = px + bend * _meanderX.GetNoise(px, pz), qz = pz + bend * _meanderZ.GetNoise(px, pz);
         int qi = FloorDiv((int)MathF.Floor(qx), Step) - piece.X0, qk = FloorDiv((int)MathF.Floor(qz), Step) - piece.Z0;
         int riverLevel = int.MinValue, width = 0, bank = int.MaxValue, riverLow = 0, bankLow = 0;
-        float bestRiver = float.MaxValue, bestBank = float.MaxValue;
+        float bestRiver = float.MaxValue, bestBank = float.MaxValue, riverX = 0f, riverZ = 0f, bankX = 0f, bankZ = 0f;
         for (int dk = -Search; dk <= Search; dk++)
         for (int di = -Search; di <= Search; di++)
         {
@@ -160,19 +160,22 @@ public sealed class Water
             // than the first, no lower than the straight line between them.)
             int to = d < 0 ? piece.River[c] : piece.River[d] != int.MinValue ? piece.River[d] : piece.Lake[d] != int.MinValue ? piece.Lake[d] : piece.River[c];
             int low = (int)MathF.Floor(piece.River[c] + t * (to - piece.River[c]));
-            if (dist <= half && dist < bestRiver) { bestRiver = dist; riverLevel = piece.River[c]; riverLow = low; width = piece.Width[c]; }
-            else if (dist > half && dist - half < MathF.Min(BankReach, bestBank)) { bestBank = dist - half; bank = piece.River[c]; bankLow = low; }
+            // (The point on the river's middle line this column is across from, back in the column's own space.)
+            float mx = ax + t * (bx - ax) + px - qx, mz = az + t * (bz - az) + pz - qz;
+            if (dist <= half && dist < bestRiver) { bestRiver = dist; riverLevel = piece.River[c]; riverLow = low; width = piece.Width[c]; riverX = mx; riverZ = mz; }
+            else if (dist > half && dist - half < MathF.Min(BankReach, bestBank)) { bestBank = dist - half; bank = piece.River[c]; bankLow = low; bankX = mx; bankZ = mz; }
         }
-        // Between those, a block under the ground here: so the water follows the ground's steps down, neither sinking
-        // under them nor standing over them.
+        // Between those, a block under the ground on the river's middle line: so the water follows the ground's steps
+        // down, neither sinking under them nor standing over them, and lies level across the river.
         float? ground = riverLevel != int.MinValue || bank != int.MaxValue ? Ground(x, z) : null;
-        int Follow(int high, int low) => ground is float g ? Math.Clamp((int)MathF.Floor(g) - 1, Math.Min(low, high), high) : high;
-        if (riverLevel != int.MinValue) riverLevel = Follow(riverLevel, riverLow);
+        int Follow(int high, int low, float mx, float mz) =>
+            Ground((int)MathF.Floor(mx), (int)MathF.Floor(mz)) is float g ? Math.Clamp((int)MathF.Floor(g) - 1, Math.Min(low, high), high) : high;
+        if (riverLevel != int.MinValue) riverLevel = Follow(riverLevel, riverLow, riverX, riverZ);
         if (bank != int.MaxValue)
         {
             // (Steeper where the ground stands high over the river, so the bank meets it within BankReach rather than
             // leaving a wall at the end.)
-            int foot = Follow(bank, bankLow) + 1;
+            int foot = Follow(bank, bankLow, bankX, bankZ) + 1;
             float slope = ground is float g ? MathF.Max(BankSlope, (g - foot) / BankReach) : BankSlope;
             bank = foot + (int)(bestBank * slope);
         }

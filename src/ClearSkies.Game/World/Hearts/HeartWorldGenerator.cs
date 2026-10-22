@@ -131,6 +131,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     private readonly byte[] _riverDepth = new byte[S * S];  // how deep a river's bed is cut under its level here, 0 for none
     private readonly int[] _top = new int[S * S];           // the top of the top span before a river cuts it
     private readonly int[] _bank = new int[S * S];          // beside a river, the highest its bank may stand, or int.MaxValue
+    private readonly int[] _planned = new int[S * S];       // a river's level as Water gave it, before it was fitted in
     private readonly float[] _bottomAt = new float[S * S];
 
     // The hearts around the chunk column being profiled, per layer: cells from (_cx0, _cy0, _cz0), _nx by _ny by _nz of
@@ -362,6 +363,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         // (Nor where the dry ground beside it is: it ends at the cliff's edge rather than standing over it.)
         for (int col = 0; col < S * S; col++)
             if (_riverDepth[col] > 0 && _level[col] != int.MinValue && Beside(col).Dry < _level[col] - RiverGap) _level[col] = int.MinValue;
+        Array.Copy(_level, _planned, S * S);
         for (int col = 0; col < S * S; col++)
         {
             if (_riverDepth[col] == 0 || _level[col] == int.MinValue) continue;
@@ -373,6 +375,30 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             _level[col] = water;
             ref var topSpan = ref _spans[col * MaxSpans + _spanCount[col] - 1];
             topSpan.Hi = (short)System.Math.Max(topSpan.Lo, System.Math.Min(hi, water - _riverDepth[col]));
+        }
+        // Across a river (where Water gave its columns the same level, give or take a block) the water stands no more
+        // than a block over its neighbour's, so where a bank lowers it at the side it doesn't stand up in the middle.
+        for (bool changed = true; changed;)
+        {
+            changed = false;
+            for (int col = 0; col < S * S; col++)
+            {
+                if (_riverDepth[col] == 0 || _level[col] == int.MinValue) continue;
+                int lx = col % S, lz = col / S, water = _level[col];
+                for (int n = 0; n < 4; n++)
+                {
+                    int nx = lx + (n == 0 ? 1 : n == 1 ? -1 : 0), nz = lz + (n == 2 ? 1 : n == 3 ? -1 : 0);
+                    if (nx < 0 || nz < 0 || nx >= S || nz >= S) continue;
+                    int nc = nx + S * nz;
+                    if (_riverDepth[nc] > 0 && _level[nc] != int.MinValue && System.Math.Abs(_planned[nc] - _planned[col]) <= 1)
+                        water = System.Math.Min(water, _level[nc] + 1);
+                }
+                if (water == _level[col]) continue;
+                _level[col] = water;
+                ref var topSpan = ref _spans[col * MaxSpans + _spanCount[col] - 1];
+                topSpan.Hi = (short)System.Math.Max(topSpan.Lo, System.Math.Min(topSpan.Hi, water - _riverDepth[col]));
+                changed = true;
+            }
         }
 
         // The lowest dry ground beside a river's column, and the highest water of a lake beside it.
