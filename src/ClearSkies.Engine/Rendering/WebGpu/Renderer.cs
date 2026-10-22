@@ -426,13 +426,16 @@ fn chunkVertex(d: ChunkDraw, quad: vec2<u32>, corner: u32) -> VSOut {
         let nudge = (vec2<f32>(f32((h >> 10u) & 255u), f32((h >> 18u) & 255u)) / 255.0 - 0.5) * 0.4
                   + loose * (vec2<f32>(f32((q >> 10u) & 255u), f32((q >> 18u) & 255u)) / 255.0 - 0.5) * 0.16;
         let tall = 0.75 + 0.4 * f32((h >> 26u) & 63u) / 63.0;
+        // In a low-resolution copy (scaled 2^k, see LowResolutionCopy) a cell is 2^k blocks across, but the plant stays
+        // a plant's height: it keeps the cell's width (the same patchy cover from afar) without standing 2^k blocks tall.
+        let cellBlocks = length(d.model[0].xyz);
         let d = vec2<f32>(select(0.5 - cu, cu - 0.5, face == 6u), cu - 0.5); // from the cell's middle, in x and z
         let cs = cos(turn);
         let sn = sin(turn);
         let r = vec2<f32>(cs * d.x - sn * d.y, sn * d.x + cs * d.y) + 0.5 + nudge;
         // V follows the unstretched height, so the sprite stretches with the quad rather than being cropped.
         uv2 = vec2<f32>(cu, -(position.y + cv));
-        position += vec3<f32>(r.x, cv * tall, r.y);
+        position += vec3<f32>(r.x, cv * tall / cellBlocks, r.y);
         normal.y = 1.0;
     }
     let layerBits = (a >> 21u) & 255u;
