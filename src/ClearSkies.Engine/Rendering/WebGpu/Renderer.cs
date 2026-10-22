@@ -633,7 +633,9 @@ fn fs_chunk_transparent(in: VSOut, @builtin(front_facing) front: bool) -> @locat
     let c = blockColor(in);
     var alpha = c.a * in.alpha;
     if (alpha < 0.004 || dissolved(in)) { discard; }
-    if (front && in.cg.w >= 0) {
+    // Seen from outside: the view runs into the face against its normal (out of the water). Decided from the geometry
+    // rather than front_facing, so it holds whatever a face's winding.
+    if (dot(in.localView, in.localNormal) < 0.0 && in.cg.w >= 0) {
         drawChunk = in.cg.xyz;
         drawGrid  = in.cg.w;
         let clear = exp(-waterPath(in.localPos, vec3<i32>(floor(in.localPos - 0.5 * in.localNormal)), normalize(in.localView)) / WATER_CLEAR);
