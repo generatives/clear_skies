@@ -615,14 +615,53 @@ fn fs_chunk_dissolve(in: VSOut) -> @location(0) vec4<f32> {
 // transparent layer and the draw order doesn't matter. Both sides are drawn; a face seen from behind (from inside the
 // water) is lit as facing the viewer, from the cell on the viewer's side, so it is lit like the water around it rather
 // than like the air beyond.
+//
+// Seen from outside, the water darkens and turns opaque with how much of it the view looks through: its depth below the
+// face (see waterDepth), longer when looked at from a low angle across the top. Seen from inside, the underwater fog
+// does that instead (see applyWater).
 @fragment
 fn fs_chunk_transparent(in: VSOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let c = blockColor(in);
-    let alpha = c.a * in.alpha;
+    var alpha = c.a * in.alpha;
     if (alpha < 0.004 || dissolved(in)) { discard; }
+    var base = c.rgb;
+    if (front && in.cg.w >= 0) {
+        drawChunk = in.cg.xyz;
+        drawGrid  = in.cg.w;
+        var path = waterDepth(drawChunk * 32 + vec3<i32>(floor(in.localPos - 0.5 * in.localNormal)));
+        if (in.localNormal.y > 0.5) {
+            path /= max(dot(normalize(camera.camPos.xyz - in.worldPos), normalize(in.worldNormal)), 0.25);
+        }
+        let clear = exp(-path / WATER_CLEAR);
+        alpha = 1.0 - (1.0 - alpha) * clear;
+        base *= mix(WATER_DEEP_SHADE, 1.0, clear);
+    }
     var v = in;
     if (!front) { v.localNormal = -v.localNormal; v.worldNormal = -v.worldNormal; }
-    return vec4<f32>(shadeBlock(v, c.rgb, true, !front), alpha);
+    return vec4<f32>(shadeBlock(v, base, true, !front), alpha);
+}
+
+// Water depth shading (fs_chunk_transparent): each WATER_CLEAR blocks the view goes through cut what shows through the
+// water to about a third, and the water's own colour darkens towards WATER_DEEP_SHADE of itself as the view goes deeper.
+const WATER_CLEAR: f32 = 5.0;
+const WATER_DEEP_SHADE: f32 = 0.3;
+const WATER_MAX_DEPTH: i32 = 16;
+
+// How many see-through cells (water) stand straight down from v in this draw's grid, v included, up to
+// WATER_MAX_DEPTH: it stops at the floor, at air under the water, or where nothing is loaded.
+fn waterDepth(v: vec3<i32>) -> f32 {
+    var c = v;
+    var n = 0;
+    for (; n < WATER_MAX_DEPTH; n++) {
+        let i = entryOf(drawGrid, c >> vec3<u32>(5u));
+        if (i < 0) { break; }
+        let seeSlot = chunkTable[2 * i + 1].z;
+        if (seeSlot <= 0) { break; }
+        let l = c & vec3<i32>(31);
+        if (((occPool[u32((seeSlot - 1) * WPC + l.y + 32 * l.z)] >> u32(l.x)) & 1u) == 0u) { break; }
+        c.y -= 1;
+    }
+    return f32(n);
 }
 
 // Cut-out blocks' faces (RenderLayer.Cutout: leaves, grass, glass), in two passes, after the opaque world.
