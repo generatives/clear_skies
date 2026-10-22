@@ -324,6 +324,9 @@ struct VSOut {
     @location(10) @interpolate(flat) lm: vec4<u32>,
     // Chunk draws: the share of its pixels dissolved (see dissolved), while one chunk swaps for another.
     @location(11) @interpolate(flat) dissolve: f32,
+    // Chunk draws: the direction from the camera to the fragment in the chunk's own (grid) space, not normalized (see
+    // waterPath).
+    @location(12) localView: vec3<f32>,
 };
 
 @vertex
@@ -445,6 +448,9 @@ fn chunkVertex(d: ChunkDraw, quad: vec2<u32>, corner: u32) -> VSOut {
     if (face < 6u && lightOffset != 0xFFFFu && d.lightBase != NO_LIGHTMAP) { o.lm.x = 2u * (d.lightBase + lightOffset); }
     o.quv         = vec2<f32>(cu, cv);
     o.dissolve    = d.dissolve;
+    // The model is a rotation, uniform scale and translation, so its transposed 3x3 turns a world direction back
+    // into a grid one (scaled, which normalizing undoes).
+    o.localView   = transpose(mat3x3<f32>(d.model[0].xyz, d.model[1].xyz, d.model[2].xyz)) * (world.xyz - camera.camPos.xyz);
     return o;
 }
 
@@ -619,86 +625,51 @@ fn fs_chunk_dissolve(in: VSOut) -> @location(0) vec4<f32> {
 // water) is lit as facing the viewer, from the cell on the viewer's side, so it is lit like the water around it rather
 // than like the air beyond.
 //
-// Seen from outside, the water darkens and turns opaque with how much of it the view looks through: its depth below the
-// face (see waterDepth), longer when looked at from a low angle across the top. Seen from inside, the underwater fog
-// does that instead (see applyWater).
+// Seen from outside, the water darkens and turns opaque with how much of it the view looks through: the distance
+// along the view from the face to what's behind it (see waterPath). Seen from inside, the underwater fog does that
+// instead (see applyWater).
 @fragment
 fn fs_chunk_transparent(in: VSOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let c = blockColor(in);
     var alpha = c.a * in.alpha;
     if (alpha < 0.004 || dissolved(in)) { discard; }
-    var base = c.rgb;
     if (front && in.cg.w >= 0) {
         drawChunk = in.cg.xyz;
         drawGrid  = in.cg.w;
-        let p = vec3<f32>(drawChunk * 32) + in.localPos - 0.5 * in.localNormal;
-        var path = waterDepth(vec3<i32>(floor(p)));
-        if (in.localNormal.y > 0.5) {
-            path = smoothWaterDepth(p);
-            path /= max(dot(normalize(camera.camPos.xyz - in.worldPos), normalize(in.worldNormal)), 0.25);
-        }
-        let clear = exp(-path / WATER_CLEAR);
+        let rd = normalize(in.localView);
+        let clear = exp(-waterPath(vec3<f32>(drawChunk * 32) + in.localPos + rd * 0.001, rd) / WATER_CLEAR);
         alpha = 1.0 - (1.0 - alpha) * clear;
         waterShare = 1.0 - clear;
     }
     var v = in;
     if (!front) { v.localNormal = -v.localNormal; v.worldNormal = -v.worldNormal; }
-    return vec4<f32>(shadeBlock(v, base, true, !front), alpha);
+    return vec4<f32>(shadeBlock(v, c.rgb, true, !front), alpha);
 }
 
 // Water depth shading (fs_chunk_transparent): each WATER_CLEAR blocks the view goes through cut what shows through the
 // water to about a third, and the water's own colour turns as much towards the underwater fog's (waterFogColor), so
 // deep water looks the same colour from above as from inside it.
 const WATER_CLEAR: f32 = 5.0;
-const WATER_MAX_DEPTH: i32 = 16;
-// Smoothing across the top (smoothWaterDepth): the depth blends between columns WATER_SMOOTH blocks apart, sampled up
-// to WATER_WOBBLE blocks off, by noise WATER_WOBBLE_SIZE blocks across.
-const WATER_SMOOTH: f32 = 3.0;
-const WATER_WOBBLE: f32 = 2.0;
-const WATER_WOBBLE_SIZE: f32 = 7.0;
+const WATER_MAX_PATH: f32 = 16.0;
 
-// The water's depth under p (grid space, a point in the top cell), smoothed so the lake's blocky outline doesn't
-// show through its surface: blended between the four columns around it, WATER_SMOOTH blocks apart, at a spot
-// nudged by noise so the blend's own grid doesn't show either.
-fn smoothWaterDepth(p: vec3<f32>) -> f32 {
-    let n = p.xz / WATER_WOBBLE_SIZE;
-    let q = p.xz + WATER_WOBBLE * 2.0 * (vec2<f32>(valueNoise(n), valueNoise(n + vec2<f32>(37.1, 11.7))) - 0.5);
-    let g = q / WATER_SMOOTH - 0.5;
-    let b = floor(g);
-    let f = g - b;
-    let y = i32(floor(p.y));
-    var d: array<f32, 4>;
-    for (var k = 0; k < 4; k++) {
-        let c = (b + vec2<f32>(f32(k & 1), f32(k >> 1u)) + 0.5) * WATER_SMOOTH;
-        d[k] = waterDepth(vec3<i32>(i32(floor(c.x)), y, i32(floor(c.y))));
+// How far the view goes from p (grid space, just inside a water face) along rd (normalized, grid space) before it
+// reaches a block that blocks light, in blocks, up to WATER_MAX_PATH: a walk through the cells it crosses. Air behind
+// the water (seen through a wall of it) would count as more water, but water doesn't stand in walls.
+fn waterPath(p: vec3<f32>, rd: vec3<f32>) -> f32 {
+    var cell = vec3<i32>(floor(p));
+    let stepC = vec3<i32>(select(-1, 1, rd.x > 0.0), select(-1, 1, rd.y > 0.0), select(-1, 1, rd.z > 0.0));
+    let tDelta = 1.0 / max(abs(rd), vec3<f32>(1e-6));
+    var tMax = abs(select(floor(p), floor(p) + 1.0, rd > vec3<f32>(0.0)) - p) * tDelta;
+    var t = 0.0;
+    for (var i = 0; i < 64; i++) {
+        if (isSolid(cell)) { return t; }
+        t = min(tMax.x, min(tMax.y, tMax.z));
+        if (t >= WATER_MAX_PATH) { break; }
+        if (tMax.x <= tMax.y && tMax.x <= tMax.z) { tMax.x += tDelta.x; cell.x += stepC.x; }
+        else if (tMax.y <= tMax.z)                { tMax.y += tDelta.y; cell.y += stepC.y; }
+        else                                      { tMax.z += tDelta.z; cell.z += stepC.z; }
     }
-    return mix(mix(d[0], d[1], f.x), mix(d[2], d[3], f.x), f.y);
-}
-
-// Smooth value noise, 0-1, varying over about one unit of p.
-fn valueNoise(p: vec2<f32>) -> f32 {
-    let i = vec2<i32>(floor(p));
-    let f = p - floor(p);
-    let u = f * f * (3.0 - 2.0 * f);
-    let a = f32(cellHash(vec3<i32>(i.x,     0, i.y))     & 1023u);
-    let b = f32(cellHash(vec3<i32>(i.x + 1, 0, i.y))     & 1023u);
-    let c = f32(cellHash(vec3<i32>(i.x,     0, i.y + 1)) & 1023u);
-    let e = f32(cellHash(vec3<i32>(i.x + 1, 0, i.y + 1)) & 1023u);
-    return mix(mix(a, b, u.x), mix(c, e, u.x), u.y) / 1023.0;
-}
-
-// How many cells straight down from v in this draw's grid, v included, before the floor (a block that blocks light),
-// up to WATER_MAX_DEPTH. The see-through bits can't be used: they only mark the water cells with a face (and those on
-// chunk borders), not the inside of a lake. Air under the water would count as more water, but water doesn't hang
-// over air.
-fn waterDepth(v: vec3<i32>) -> f32 {
-    var c = v;
-    var n = 0;
-    for (; n < WATER_MAX_DEPTH; n++) {
-        if (isSolid(c)) { break; }
-        c.y -= 1;
-    }
-    return f32(n);
+    return WATER_MAX_PATH;
 }
 
 // Cut-out blocks' faces (RenderLayer.Cutout: leaves, grass, glass), in two passes, after the opaque world.
