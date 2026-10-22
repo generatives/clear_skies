@@ -64,6 +64,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     /// of distant terrain coming into view has far more than the world's chunks do, and baking them all at once was a
     /// spike of several ms. A chunk past the budget keeps the maps it last baked, and one never baked waits.</summary>
     public const int ScaledBakeQuadBudget = 65536;
+    private int _waitingFirstBake; // scaled volumes' chunks in view left out this frame: past the budget, never baked
     private int _bakedQuads;
 
     /// <summary>Cell-local placement per <see cref="BlockOrientation"/> (indexed by its byte): a model block's model is
@@ -180,6 +181,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         // only the chunks in view, so one out of view waits until it's seen. A scaled volume's go to a budget, and a
         // chunk of one never baked isn't drawn until it is.
         _bakedQuads = 0;
+        _waitingFirstBake = 0;
         int kept = 0;
         for (int i = 0; i < _draws.Count; i++)
         {
@@ -266,7 +268,11 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
             int quads = Stale(d.Mesh) + Stale(d.CutoutMesh) + Stale(d.TransparentMesh);
             if (quads == 0) return true;
             if (_bakedQuads > 0 && _bakedQuads + quads > ScaledBakeQuadBudget)
-                return Baked(d.Mesh) && Baked(d.CutoutMesh) && Baked(d.TransparentMesh);
+            {
+                bool drawn = Baked(d.Mesh) && Baked(d.CutoutMesh) && Baked(d.TransparentMesh);
+                if (!drawn) _waitingFirstBake++;
+                return drawn;
+            }
             _bakedQuads += quads;
         }
         _renderer.PrepareLightmap(d.Mesh, d.Handle, d.Chunk, stamp);
@@ -311,6 +317,8 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         var (used, capacity) = _renderer.LightmapArenaUse;
         ImGui.Text($"Light maps: {used * 4 / 1048576.0:F1} of {capacity * 4 / 1048576.0:F1} MB; baked per frame (smoothed): " +
                    $"{_bakedMeshesEma:F1} meshes, {_bakedGroupsEma * Renderer.LightmapQuadsPerGroup:N0} quads at most");
+        ImGui.Text($"Coarse chunks in view not drawn yet, waiting for their first bake (past {ScaledBakeQuadBudget:N0} " +
+                   $"quads this frame): {_waitingFirstBake:N0}");
     }
 }
 
