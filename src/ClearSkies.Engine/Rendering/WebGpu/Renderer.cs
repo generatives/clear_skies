@@ -1896,24 +1896,47 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
 
         var encDesc = new CommandEncoderDescriptor();
         _encoder = _api.DeviceCreateCommandEncoder(_ctx.Device, &encDesc);
+        _splitting = SplitPassTimers;
+        BeginPass(_splitting ? "Render: before the world" : "Render pass (world, sky, HUD, ImGui)", first: true);
+        return true;
+    }
 
+    /// <summary>Debug: <see cref="Section"/> ends the render pass and goes on in a new one, so the GPU timings show each
+    /// part of the frame on its own line. Each extra pass costs a little, so the parts add up to a bit more.</summary>
+    public bool SplitPassTimers { get; set; }
+    private bool _splitting; // SplitPassTimers as of this frame's BeginFrame
+
+    /// <summary>With <see cref="SplitPassTimers"/>, ends this part of the render pass and times what's drawn next as
+    /// <paramref name="name"/>; otherwise does nothing.</summary>
+    public void Section(string name)
+    {
+        if (!_splitting || _pass == null) return;
+        EndPass(resolve: false);
+        BeginPass(name, first: false);
+    }
+
+    /// <summary>Opens the frame's render pass (<paramref name="first"/>: clearing the targets), or, splitting it, the
+    /// next part of it, drawing over what the last part left.</summary>
+    private void BeginPass(string name, bool first)
+    {
         // With MSAA the pass draws into the multisampled target and resolves it into the swapchain image at the end; the
         // samples themselves needn't be kept.
         bool msaa = _ctx.MsaaView != null;
         var colorAtt = new RenderPassColorAttachment
         {
             View = msaa ? _ctx.MsaaView : _ctx.CurrentView,
-            ResolveTarget = msaa ? _ctx.CurrentView : null,
+            // Split into parts, the samples are kept for the next part, and resolved by an empty last one (EndPass).
+            ResolveTarget = msaa && !_splitting ? _ctx.CurrentView : null,
             DepthSlice = uint.MaxValue, // WGPU_DEPTH_SLICE_UNDEFINED
-            LoadOp = LoadOp.Clear,
-            StoreOp = msaa ? StoreOp.Discard : StoreOp.Store,
+            LoadOp = first ? LoadOp.Clear : LoadOp.Load,
+            StoreOp = msaa && !_splitting ? StoreOp.Discard : StoreOp.Store,
             // Sky blue; DrawSky paints over whatever the world leaves uncovered.
             ClearValue = OverdrawMode ? new Color { R = 0, G = 0, B = 0, A = 1 } : new Color { R = 0.10, G = 0.3078, B = 0.4804, A = 1.0 },
         };
         var depthAtt = new RenderPassDepthStencilAttachment
         {
             View = _ctx.DepthView,
-            DepthLoadOp = LoadOp.Clear,
+            DepthLoadOp = first ? LoadOp.Clear : LoadOp.Load,
             DepthStoreOp = StoreOp.Store,
             DepthClearValue = 0.0f, // reversed depth: 0 is the far plane
         };
@@ -1923,16 +1946,34 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
             ColorAttachments = &colorAtt,
             DepthStencilAttachment = &depthAtt,
         };
-        if (_ctx.Timer.TimeRender("Render pass (world, sky, HUD, ImGui)", out var tsw)) passDesc.TimestampWrites = &tsw;
+        if (_ctx.Timer.TimeRender(name, out var tsw)) passDesc.TimestampWrites = &tsw;
         _pass = _api.CommandEncoderBeginRenderPass(_encoder, &passDesc);
         _boundPipeline = null;
+        _chunkStateBound = false;
         SetPipeline(WireframeMode ? _wireframePipeline : _pipeline);
         _api.RenderPassEncoderSetBindGroup(_pass, 0, _cameraBindGroup, 0, null);
         // Groups 2 (voxel storage) and 3 (block texture array) are the same for every draw and persist across
         // pipeline switches (all pipelines share the layout), so bind them once here.
         _api.RenderPassEncoderSetBindGroup(_pass, 2, _voxelBindGroup, 0, null);
         _api.RenderPassEncoderSetBindGroup(_pass, 3, _atlasBindGroup, 0, null);
-        return true;
+    }
+
+    private void EndPass(bool resolve)
+    {
+        _api.RenderPassEncoderEnd(_pass);
+        _api.RenderPassEncoderRelease(_pass);
+        _pass = null;
+        if (!resolve || _ctx.MsaaView == null) return;
+        // Split into parts with MSAA: an empty pass resolves the samples into the swapchain image.
+        var colorAtt = new RenderPassColorAttachment
+        {
+            View = _ctx.MsaaView, ResolveTarget = _ctx.CurrentView, DepthSlice = uint.MaxValue,
+            LoadOp = LoadOp.Load, StoreOp = StoreOp.Discard,
+        };
+        var passDesc = new RenderPassDescriptor { ColorAttachmentCount = 1, ColorAttachments = &colorAtt };
+        var pass = _api.CommandEncoderBeginRenderPass(_encoder, &passDesc);
+        _api.RenderPassEncoderEnd(pass);
+        _api.RenderPassEncoderRelease(pass);
     }
 
     public void SetCameraUniform(in CameraUniform camera)
@@ -2061,9 +2102,7 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
 
     public void EndFrame()
     {
-        _api.RenderPassEncoderEnd(_pass);
-        _api.RenderPassEncoderRelease(_pass);
-        _pass = null;
+        EndPass(resolve: _splitting);
 
         // One upload for every draw's model uniform (queue writes land before the submit below), instead of a
         // QueueWriteBuffer per draw.

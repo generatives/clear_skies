@@ -213,17 +213,21 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         _bakedGroupsEma += 0.05 * (bakedGroups - _bakedGroupsEma);
 
         draws = CollectionsMarshal.AsSpan(_draws);
+        _renderer.Section("Render: opaque chunks");
         foreach (ref readonly var d in draws)
             if (d.Mesh != null) _renderer.DrawChunkMesh(d.Mesh, d.Model, d.Grid, d.Chunk, d.Dissolve);
         // Cut-out faces after all the opaque ones: discarding texels costs the early depth test, so the opaque world is
         // drawn without it first. Their depth goes down first, so each pixel's nearest cut-out face is lit once rather
         // than every leaf behind it too (see Renderer.DrawCutoutChunkDepth).
+        _renderer.Section("Render: cut-out depth (leaves, grass)");
         foreach (ref readonly var d in draws)
             if (d.CutoutMesh != null) _renderer.DrawCutoutChunkDepth(d.CutoutMesh, d.Model, d.Grid, d.Chunk, d.Dissolve);
+        _renderer.Section("Render: cut-out shaded");
         foreach (ref readonly var d in draws)
             if (d.CutoutMesh != null) _renderer.DrawCutoutChunkMesh(d.CutoutMesh, d.Model, d.Grid, d.Chunk, d.Dissolve);
 
         long t5 = System.Diagnostics.Stopwatch.GetTimestamp();
+        _renderer.Section("Render: model blocks");
         _modelBlocksDrawn = 0;
         foreach (ref readonly var d in draws)
         {
@@ -235,6 +239,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
                 _modelBlocksDrawn++;
             }
         }
+        _renderer.Section("Render: after the world (sky, ...)");
         long t6 = System.Diagnostics.Stopwatch.GetTimestamp();
 
         double stateMs = _stateTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
@@ -333,8 +338,11 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     private void RenderTranslucent()
     {
         long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        _renderer.Section("Render: translucent depth");
         foreach (var d in _translucentDraws) _renderer.DrawTransparentChunkDepth(d.TransparentMesh!, d.Model, d.Grid, d.Chunk, d.Dissolve);
+        _renderer.Section("Render: translucent");
         foreach (var d in _translucentDraws) _renderer.DrawTransparentChunkMesh(d.TransparentMesh!, d.Model, d.Grid, d.Chunk, d.Dissolve);
+        _renderer.Section("Render: after translucent (HUD, ImGui)");
         Smooth(ref _translucentMs, Ms(t0, System.Diagnostics.Stopwatch.GetTimestamp()));
     }
 
