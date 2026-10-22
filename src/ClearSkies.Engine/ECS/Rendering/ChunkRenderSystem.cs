@@ -18,33 +18,53 @@ namespace ClearSkies.Engine.ECS;
 /// translucent meshes (water). Schedule it in both stages.
 ///
 /// The static world's chunks (tens of thousands) are kept by column, with each column's height range, so a column
-/// outside the view is skipped in one test instead of one per chunk: looking at every chunk each frame cost ~6 ms.
-/// Ships' chunks, which move, are tested one by one.
+/// outside the view is skipped in one test instead of one per chunk: looking at every chunk each frame cost ~6 ms. So are
+/// a low-resolution copy of the world's (see <see cref="LowResolutionCopy"/>), drawn at their scale. Ships' chunks, which move, are
+/// tested one by one.
+///
+/// Whoever manages a static volume can say how each of its chunks is drawn each frame (see <see cref="ChunkDrawStates"/>):
+/// left out, dissolving in or out, and lit from its light maps, from the maps it last baked, or as open air. A scaled
+/// volume's light maps are baked nearest first up to <see cref="ScaledBakeQuadBudget"/> quads a frame.
 /// </summary>
 public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
 {
     private readonly Renderer _renderer;
-    private readonly GridHandle _world;
+    private readonly ChunkVolume _world;
 
-    // The static world's chunks with render data, by column; every other chunk (ships') on its own.
+    // A static volume's chunks with render data, by column (the world's, and each low-resolution copy's); every other chunk
+    // (ships') on its own.
     private sealed class WorldColumn
     {
         public readonly List<Entity> Chunks = new();
         public int MinY, MaxY; // chunk layers, inclusive
     }
-    private readonly Dictionary<(int X, int Z), WorldColumn> _columns = new();
-    private readonly Dictionary<Entity, (int X, int Z)> _columnOf = new();
+    private sealed class StaticVolume(ChunkVolume volume)
+    {
+        public readonly ChunkVolume Volume = volume;
+        public readonly Dictionary<(int X, int Z), WorldColumn> Columns = new();
+        public ChunkDrawStateOf? State;
+    }
+    private readonly Dictionary<ChunkVolume, StaticVolume> _static = new();
+    private readonly Dictionary<Entity, (StaticVolume Volume, (int X, int Z) Key)> _columnOf = new();
     private readonly HashSet<Entity> _others = new();
-    private int _columnsVisible;
+    private int _columnsVisible, _columnCount;
 
-    // One visible chunk, collected so they can be drawn nearest first.
+    // One visible chunk, collected so they can be drawn nearest first. Budgeted: a scaled volume's, whose light maps are
+    // baked to a budget (see ScaledBakeQuadBudget); Light says how it's lit (see ChunkDrawState).
     private readonly record struct ChunkDraw(float DistSq, GpuMesh? Mesh, GpuMesh? CutoutMesh, GpuMesh? TransparentMesh,
-                                             ModelBlock[] Models, Mat4 Model, int Grid, ChunkPosition Chunk, GridHandle? Handle);
+                                             ModelBlock[] Models, Mat4 Model, int Grid, ChunkPosition Chunk, GridHandle? Handle,
+                                             float Dissolve = 0f, ChunkLight Light = ChunkLight.Baked, bool Budgeted = false);
     private readonly List<ChunkDraw> _draws = new();
     private readonly List<ChunkDraw> _translucentDraws = new(); // the visible chunks with translucent faces
     private static readonly Comparison<ChunkDraw> NearestFirst = (a, b) => a.DistSq.CompareTo(b.DistSq);
     private int _modelBlocksDrawn;
     private double _bakedMeshesEma, _bakedGroupsEma;
+
+    /// <summary>The most light-map quads of scaled volumes' chunks baked a frame (always at least one chunk's): a level
+    /// of distant terrain coming into view has far more than the world's chunks do, and baking them all at once was a
+    /// spike of several ms. A chunk past the budget keeps the maps it last baked, and one never baked waits.</summary>
+    public const int ScaledBakeQuadBudget = 65536;
+    private int _bakedQuads;
 
     /// <summary>Cell-local placement per <see cref="BlockOrientation"/> (indexed by its byte): a model block's model is
     /// authored Blockbench-style (x/z centred on the origin, standing on y = 0, 1 unit = 1 block), so it is rotated
@@ -55,29 +75,42 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     public ChunkRenderSystem(World world, Renderer renderer, ChunkVolume staticVolume)
     {
         _renderer = renderer;
-        _world    = staticVolume.Gpu;
+        _world    = staticVolume;
         world.SubscribeComponentAdded<ChunkRenderData>(OnAdded);
         world.SubscribeComponentRemoved<ChunkRenderData>((in Entity e, in ChunkRenderData _) => Forget(e));
         world.SubscribeEntityDisposed((in Entity e) => Forget(e));
     }
 
+    private StaticVolume StaticOf(ChunkVolume volume)
+    {
+        if (!_static.TryGetValue(volume, out var sv)) _static[volume] = sv = new StaticVolume(volume);
+        return sv;
+    }
+
     private void OnAdded(in Entity e, in ChunkRenderData rd)
     {
-        if (rd.Grid != _world) { _others.Add(e); return; }
+        var volume = e.Has<Chunk>() ? e.Get<Chunk>().Entry.Volume : null;
+        if (volume == null || (volume != _world && !volume.IsLowResolutionCopy)) { _others.Add(e); return; }
+        var sv = StaticOf(volume);
         var key = (rd.ChunkPos.X, rd.ChunkPos.Z);
-        if (!_columns.TryGetValue(key, out var column)) _columns[key] = column = new WorldColumn();
+        if (!sv.Columns.TryGetValue(key, out var column)) { sv.Columns[key] = column = new WorldColumn(); _columnCount++; }
         column.Chunks.Add(e);
-        _columnOf[e] = key;
+        _columnOf[e] = (sv, key);
         UpdateRange(column);
     }
 
     private void Forget(Entity e)
     {
         _others.Remove(e);
-        if (!_columnOf.Remove(e, out var key)) return;
-        var column = _columns[key];
+        if (!_columnOf.Remove(e, out var at)) return;
+        var column = at.Volume.Columns[at.Key];
         column.Chunks.Remove(e);
-        if (column.Chunks.Count == 0) _columns.Remove(key);
+        if (column.Chunks.Count == 0)
+        {
+            at.Volume.Columns.Remove(at.Key);
+            _columnCount--;
+            if (at.Volume.Columns.Count == 0) _static.Remove(at.Volume.Volume); // a volume gone, or emptied
+        }
         else UpdateRange(column);
     }
 
@@ -113,26 +146,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         var size = new Vector3D<float>(ChunkData.Size);
         var half = size * 0.5f;
 
-        // The static world sits at the origin unrotated (see ChunkVolume), so a chunk's box is its position's.
-        foreach (var ((cx, cz), column) in _columns)
-        {
-            var min = new Vector3D<float>(cx * ChunkData.Size, column.MinY * ChunkData.Size, cz * ChunkData.Size);
-            var max = new Vector3D<float>((cx + 1) * ChunkData.Size, (column.MaxY + 1) * ChunkData.Size, (cz + 1) * ChunkData.Size);
-            if (!frame.Frustum.Intersects(min, max)) continue;
-            _columnsVisible++;
-            foreach (var e in column.Chunks)
-            {
-                if (!e.Has<Rendered>()) continue; // not in the rendering layer (see EntityPresenceSystem)
-                ref readonly var rd = ref e.Get<ChunkRenderData>();
-                if (rd.IsEmpty) continue; // buried stone: nothing to draw
-                var origin = e.Get<Transform>().Position;
-                if (!frame.Frustum.Intersects(origin, origin + size)) continue;
-                var centre = origin + half;
-                AddDraw(new ChunkDraw(Vector3D.DistanceSquared(centre, frame.CameraPosition), rd.Mesh, rd.CutoutMesh,
-                                         rd.TransparentMesh, rd.Models, Mat4.Translation(origin), rd.Grid?.Index ?? -1, rd.ChunkPos,
-                                         rd.Grid));
-            }
-        }
+        foreach (var sv in _static.Values) DrawStatic(sv, frame);
 
         foreach (var e in _others)
         {
@@ -154,36 +168,41 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
             }
 
             float distSq = Vector3D.DistanceSquared(model.TransformPoint(half), frame.CameraPosition);
-            AddDraw(new ChunkDraw(distSq, rd.Mesh, rd.CutoutMesh, rd.TransparentMesh, rd.Models, model, rd.Grid?.Index ?? -1,
+            _draws.Add(new ChunkDraw(distSq, rd.Mesh, rd.CutoutMesh, rd.TransparentMesh, rd.Models, model, rd.Grid?.Index ?? -1,
                                      rd.ChunkPos, rd.Grid));
         }
 
+        // Nearest first, so the depth test rejects hidden fragments before the (expensive) lighting shader runs on
+        // them instead of shading them and overwriting them later (and the nearest are baked first).
+        _draws.Sort(NearestFirst);
+
         // Light maps whose chunk's light changed since they were baked (or never baked) are baked before anything draws:
-        // only the chunks in view, so one out of view waits until it's seen.
-        foreach (var d in _draws)
+        // only the chunks in view, so one out of view waits until it's seen. A scaled volume's go to a budget, and a
+        // chunk of one never baked isn't drawn until it is.
+        _bakedQuads = 0;
+        int kept = 0;
+        for (int i = 0; i < _draws.Count; i++)
         {
-            int stamp = _renderer.LightStampOf(d.Handle, d.Chunk);
-            _renderer.PrepareLightmap(d.Mesh, d.Handle, d.Chunk, stamp);
-            _renderer.PrepareLightmap(d.CutoutMesh, d.Handle, d.Chunk, stamp);
-            _renderer.PrepareLightmap(d.TransparentMesh, d.Handle, d.Chunk, stamp);
+            var d = _draws[i];
+            if (!Bake(d)) continue;
+            _draws[kept++] = d;
+            if (d.TransparentMesh != null) _translucentDraws.Add(d);
         }
+        _draws.RemoveRange(kept, _draws.Count - kept);
         _renderer.BakeLightmaps();
         var (bakedMeshes, bakedGroups) = _renderer.LastLightmapBake;
         _bakedMeshesEma += 0.05 * (bakedMeshes - _bakedMeshesEma);
         _bakedGroupsEma += 0.05 * (bakedGroups - _bakedGroupsEma);
 
-        // Nearest first, so the depth test rejects hidden fragments before the (expensive) lighting shader runs on
-        // them instead of shading them and overwriting them later.
-        _draws.Sort(NearestFirst);
         foreach (var d in _draws)
-            if (d.Mesh != null) _renderer.DrawChunkMesh(d.Mesh, d.Model, d.Grid, d.Chunk);
+            if (d.Mesh != null) _renderer.DrawChunkMesh(d.Mesh, d.Model, d.Grid, d.Chunk, d.Dissolve);
         // Cut-out faces after all the opaque ones: discarding texels costs the early depth test, so the opaque world is
         // drawn without it first. Their depth goes down first, so each pixel's nearest cut-out face is lit once rather
         // than every leaf behind it too (see Renderer.DrawCutoutChunkDepth).
         foreach (var d in _draws)
-            if (d.CutoutMesh != null) _renderer.DrawCutoutChunkDepth(d.CutoutMesh, d.Model, d.Grid, d.Chunk);
+            if (d.CutoutMesh != null) _renderer.DrawCutoutChunkDepth(d.CutoutMesh, d.Model, d.Grid, d.Chunk, d.Dissolve);
         foreach (var d in _draws)
-            if (d.CutoutMesh != null) _renderer.DrawCutoutChunkMesh(d.CutoutMesh, d.Model, d.Grid, d.Chunk);
+            if (d.CutoutMesh != null) _renderer.DrawCutoutChunkMesh(d.CutoutMesh, d.Model, d.Grid, d.Chunk, d.Dissolve);
 
         _modelBlocksDrawn = 0;
         foreach (var d in _draws)
@@ -198,10 +217,65 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         }
     }
 
-    private void AddDraw(in ChunkDraw d)
+    /// <summary>Lists one static volume's chunks in view. It sits unrotated at its scale (see ChunkVolume), so a chunk's
+    /// box is its position's times the chunk size and scale.</summary>
+    private void DrawStatic(StaticVolume sv, in RenderContext frame)
     {
-        _draws.Add(d);
-        if (d.TransparentMesh != null) _translucentDraws.Add(d);
+        int k = sv.Volume.Scale, blocks = ChunkData.Size * k;
+        var size = new Vector3D<float>(blocks);
+        var scale = Mat4.Scale(new Vector3D<float>(k));
+        var root = sv.Volume.Root;
+        var state = root.Has<ChunkDrawStates>() ? root.Get<ChunkDrawStates>().Of : null;
+        bool copy = sv.Volume.IsLowResolutionCopy;
+        foreach (var ((cx, cz), column) in sv.Columns)
+        {
+            var min = new Vector3D<float>(cx * blocks, column.MinY * blocks, cz * blocks);
+            var max = new Vector3D<float>((cx + 1) * blocks, (column.MaxY + 1) * blocks, (cz + 1) * blocks);
+            if (!frame.Frustum.Intersects(min, max)) continue;
+            _columnsVisible++;
+            foreach (var e in column.Chunks)
+            {
+                if (!e.Has<Rendered>()) continue; // not in the rendering layer (see EntityPresenceSystem)
+                ref readonly var rd = ref e.Get<ChunkRenderData>();
+                if (rd.IsEmpty) continue; // buried stone: nothing to draw
+                var origin = e.Get<Transform>().Position;
+                if (!frame.Frustum.Intersects(origin, origin + size)) continue;
+                var how = state?.Invoke(rd.ChunkPos) ?? ChunkDrawState.Whole;
+                if (how.Dissolve >= 1f) continue;
+                var model = Mat4.Multiply(Mat4.Translation(origin), scale);
+                // A scaled volume not in the light store yet has no light to show: lit as open air meanwhile.
+                int grid = rd.Grid?.Index ?? -1;
+                if (copy && (how.Light == ChunkLight.OpenAir || grid < 0)) { grid = Renderer.OpenAirGrid; how = how with { Light = ChunkLight.OpenAir }; }
+                var centre = origin + size * 0.5f;
+                _draws.Add(new ChunkDraw(Vector3D.DistanceSquared(centre, frame.CameraPosition), rd.Mesh, rd.CutoutMesh,
+                                         rd.TransparentMesh, rd.Models, model, grid, rd.ChunkPos, rd.Grid, how.Dissolve,
+                                         how.Light, Budgeted: copy));
+            }
+        }
+    }
+
+    /// <summary>Lists a draw's stale light maps for baking, if it's lit from them. A scaled volume's go while the frame's
+    /// budget lasts (always the first). Returns whether it can be drawn: its maps are baked, or were once.</summary>
+    private bool Bake(ChunkDraw d)
+    {
+        if (d.Light == ChunkLight.OpenAir) return true;
+        if (d.Light == ChunkLight.Kept) return Baked(d.Mesh) && Baked(d.CutoutMesh) && Baked(d.TransparentMesh);
+        int stamp = _renderer.LightStampOf(d.Handle, d.Chunk);
+        if (d.Budgeted)
+        {
+            int quads = Stale(d.Mesh) + Stale(d.CutoutMesh) + Stale(d.TransparentMesh);
+            if (quads == 0) return true;
+            if (_bakedQuads > 0 && _bakedQuads + quads > ScaledBakeQuadBudget)
+                return Baked(d.Mesh) && Baked(d.CutoutMesh) && Baked(d.TransparentMesh);
+            _bakedQuads += quads;
+        }
+        _renderer.PrepareLightmap(d.Mesh, d.Handle, d.Chunk, stamp);
+        _renderer.PrepareLightmap(d.CutoutMesh, d.Handle, d.Chunk, stamp);
+        _renderer.PrepareLightmap(d.TransparentMesh, d.Handle, d.Chunk, stamp);
+        return true;
+
+        int Stale(GpuMesh? mesh) => _renderer.LightmapStale(mesh, d.Handle, stamp) ? (int)mesh!.QuadCount : 0;
+        bool Baked(GpuMesh? mesh) => _renderer.LightmapEverBaked(mesh);
     }
 
     /// <summary>The translucent meshes of the chunks <see cref="RenderWorld"/> found visible this frame: their depth,
@@ -209,8 +283,8 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     /// order the chunks (and their faces) are drawn in.</summary>
     private void RenderTranslucent()
     {
-        foreach (var d in _translucentDraws) _renderer.DrawTransparentChunkDepth(d.TransparentMesh!, d.Model, d.Grid, d.Chunk);
-        foreach (var d in _translucentDraws) _renderer.DrawTransparentChunkMesh(d.TransparentMesh!, d.Model, d.Grid, d.Chunk);
+        foreach (var d in _translucentDraws) _renderer.DrawTransparentChunkDepth(d.TransparentMesh!, d.Model, d.Grid, d.Chunk, d.Dissolve);
+        foreach (var d in _translucentDraws) _renderer.DrawTransparentChunkMesh(d.TransparentMesh!, d.Model, d.Grid, d.Chunk, d.Dissolve);
     }
 
     private static Mat4[] BuildOrientationPlacements()
@@ -232,10 +306,41 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     public void DrawDebugUi()
     {
         ImGui.Text($"Chunks visible: {_draws.Count:N0} of {_columnOf.Count + _others.Count:N0}; world columns visible: " +
-                   $"{_columnsVisible:N0} of {_columns.Count:N0}; ship chunks: {_others.Count:N0}");
+                   $"{_columnsVisible:N0} of {_columnCount:N0}; ship chunks: {_others.Count:N0}");
         ImGui.Text($"Model blocks drawn: {_modelBlocksDrawn:N0}; chunks with translucent faces drawn: {_translucentDraws.Count:N0}");
         var (used, capacity) = _renderer.LightmapArenaUse;
         ImGui.Text($"Light maps: {used * 4 / 1048576.0:F1} of {capacity * 4 / 1048576.0:F1} MB; baked per frame (smoothed): " +
                    $"{_bakedMeshesEma:F1} meshes, {_bakedGroupsEma * Renderer.LightmapQuadsPerGroup:N0} quads at most");
     }
+}
+
+/// <summary>How a static volume's chunk is lit (see <see cref="ChunkDrawState"/>).</summary>
+public enum ChunkLight
+{
+    /// <summary>From its light maps, baked again whenever its light changes.</summary>
+    Baked,
+    /// <summary>From the light maps it last baked, not baked again (left out until it has some).</summary>
+    Kept,
+    /// <summary>As open air: ambient and full sun, with no light maps.</summary>
+    OpenAir,
+}
+
+/// <summary>How a static volume's chunk is drawn this frame (see <see cref="ChunkDrawStates"/>).
+/// <see cref="Dissolve"/>: 0 draws it whole; 1 leaves it out; d between 0 and 1 leaves out that share of its pixels in an
+/// even screen dither (going away); -d draws only that share, the very pixels d leaves out (coming in over something
+/// going away).</summary>
+public readonly record struct ChunkDrawState(float Dissolve, ChunkLight Light = ChunkLight.Baked)
+{
+    public static readonly ChunkDrawState Whole = new(0f);
+    public static readonly ChunkDrawState Hidden = new(1f);
+}
+
+/// <summary>How the chunk at <paramref name="pos"/> is drawn this frame.</summary>
+public delegate ChunkDrawState ChunkDrawStateOf(ChunkPosition pos);
+
+/// <summary>On a static volume's root (the world's, or a low-resolution copy's): how each of its chunks is drawn, asked for each
+/// one in view every frame. Without it, they're all drawn whole, lit from their light maps.</summary>
+public struct ChunkDrawStates
+{
+    public ChunkDrawStateOf Of;
 }
