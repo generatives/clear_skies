@@ -24,7 +24,9 @@ namespace ClearSkies.Engine.ECS;
 ///
 /// Whoever manages a static volume can say how each of its chunks is drawn each frame (see <see cref="ChunkDrawStates"/>):
 /// left out, dissolving in or out, and lit from its light maps, from the maps it last baked, or as open air. A scaled
-/// volume's light maps are baked nearest first up to <see cref="ScaledBakeQuadBudget"/> quads a frame.
+/// volume's light maps are baked nearest first up to <see cref="ScaledBakeQuadBudget"/> quads a frame; what the budget
+/// leaves goes to its chunks out of view never baked, so each is baked once in the end, and gets
+/// <see cref="LightmapsBakedFlag"/>: what waits for it to be drawable can tell.
 /// </summary>
 public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
 {
@@ -65,6 +67,8 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     /// spike of several ms. A chunk past the budget keeps the maps it last baked, and one never baked waits.</summary>
     public const int ScaledBakeQuadBudget = 65536;
     private int _waitingFirstBake; // scaled volumes' chunks in view left out this frame: past the budget, never baked
+    // Scaled volumes' chunks with something to draw whose light maps were never baked, in the order they were meshed.
+    private readonly List<Entity> _unbaked = new();
     private int _bakedQuads;
 
     /// <summary>Cell-local placement per <see cref="BlockOrientation"/> (indexed by its byte): a model block's model is
@@ -78,7 +82,11 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         _renderer = renderer;
         _world    = staticVolume;
         world.SubscribeComponentAdded<ChunkRenderData>(OnAdded);
-        world.SubscribeComponentRemoved<ChunkRenderData>((in Entity e, in ChunkRenderData _) => Forget(e));
+        world.SubscribeComponentRemoved<ChunkRenderData>((in Entity e, in ChunkRenderData _) =>
+        {
+            Forget(e);
+            if (e.Has<LightmapsBakedFlag>()) e.Remove<LightmapsBakedFlag>(); // meshed again, baked again
+        });
         world.SubscribeEntityDisposed((in Entity e) => Forget(e));
     }
 
@@ -92,6 +100,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     {
         var volume = e.Has<Chunk>() ? e.Get<Chunk>().Entry.Volume : null;
         if (volume == null || (volume != _world && !volume.IsLowResolutionCopy)) { _others.Add(e); return; }
+        if (volume.IsLowResolutionCopy && !rd.IsEmpty && !e.Has<LightmapsBakedFlag>()) _unbaked.Add(e);
         var sv = StaticOf(volume);
         var key = (rd.ChunkPos.X, rd.ChunkPos.Z);
         if (!sv.Columns.TryGetValue(key, out var column)) { sv.Columns[key] = column = new WorldColumn(); _columnCount++; }
@@ -191,6 +200,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
             if (d.TransparentMesh != null) _translucentDraws.Add(d);
         }
         _draws.RemoveRange(kept, _draws.Count - kept);
+        BakeFirstTimes();
         _renderer.BakeLightmaps();
         var (bakedMeshes, bakedGroups) = _renderer.LastLightmapBake;
         _bakedMeshesEma += 0.05 * (bakedMeshes - _bakedMeshesEma);
@@ -256,6 +266,37 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         }
     }
 
+    /// <summary>Flags the scaled volumes' chunks whose light maps are now baked (<see cref="LightmapsBakedFlag"/>), and
+    /// lists the next never baked, out of view or held back, for what's left of the frame's budget. A chunk not in the
+    /// light store yet waits for its place there.</summary>
+    private void BakeFirstTimes()
+    {
+        int kept = 0;
+        for (int i = 0; i < _unbaked.Count; i++)
+        {
+            var e = _unbaked[i];
+            if (!e.IsAlive || !e.Has<ChunkRenderData>()) continue;
+            ref readonly var rd = ref e.Get<ChunkRenderData>();
+            if (!Baked(rd) && e.Has<ChunkUploadedFlag>() && _bakedQuads < ScaledBakeQuadBudget)
+            {
+                int stamp = _renderer.LightStampOf(rd.Grid, rd.ChunkPos);
+                foreach (var mesh in rd.Meshes())
+                {
+                    if (_renderer.LightmapEverBaked(mesh)) continue;
+                    _bakedQuads += (int)mesh.QuadCount;
+                    _renderer.PrepareLightmap(mesh, rd.Grid, rd.ChunkPos, stamp);
+                }
+            }
+            if (Baked(rd)) e.Set<LightmapsBakedFlag>();
+            else _unbaked[kept++] = e;
+        }
+        _unbaked.RemoveRange(kept, _unbaked.Count - kept);
+
+        bool Baked(in ChunkRenderData rd)
+            => _renderer.LightmapEverBaked(rd.Mesh) && _renderer.LightmapEverBaked(rd.CutoutMesh)
+               && _renderer.LightmapEverBaked(rd.TransparentMesh);
+    }
+
     /// <summary>Lists a draw's stale light maps for baking, if it's lit from them. A scaled volume's go while the frame's
     /// budget lasts (always the first). Returns whether it can be drawn: its maps are baked, or were once.</summary>
     private bool Bake(ChunkDraw d)
@@ -318,7 +359,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         ImGui.Text($"Light maps: {used * 4 / 1048576.0:F1} of {capacity * 4 / 1048576.0:F1} MB; baked per frame (smoothed): " +
                    $"{_bakedMeshesEma:F1} meshes, {_bakedGroupsEma * Renderer.LightmapQuadsPerGroup:N0} quads at most");
         ImGui.Text($"Coarse chunks in view not drawn yet, waiting for their first bake (past {ScaledBakeQuadBudget:N0} " +
-                   $"quads this frame): {_waitingFirstBake:N0}");
+                   $"quads this frame): {_waitingFirstBake:N0}; never baked in all: {_unbaked.Count:N0}");
     }
 }
 

@@ -109,6 +109,7 @@ public sealed class GameView : IDisposable
         var load = world.ChunkLoad;
         var swaps = world.TerrainSwaps;
         swaps.IsLit = light.IsLit;                // swaps wait for the incoming terrain's light
+        swaps.WaitsForBake = true;                // and its first light-map bake, before it's drawn (ChunkRenderSystem)
         swaps.ShowFirst = light.ShowFirst;        // terrain waiting to be shown is lit ahead of the rest
         swaps.SetCovered = GridStore.SetCovered;  // each level lit by its own blocks where a finer one is in
         if (_lodLevels > 0)

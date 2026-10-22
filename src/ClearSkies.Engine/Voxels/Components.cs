@@ -25,4 +25,8 @@ public struct ChunkMeshedFlag { }
 /// <summary>The chunk has been uploaded to the GPU store since it started being drawn, so it's lit (with its last data
 /// while a re-upload is pending). Removed when it stops being drawn. See <see cref="ECS.FogSystem"/>.</summary>
 public struct ChunkUploadedFlag { }
+
+/// <summary>A coarse chunk's light maps have been baked once since it was meshed, so it can be drawn: one never baked
+/// isn't (see ECS.Rendering.ChunkRenderSystem). Set by the renderer; removed with the chunk's mesh.</summary>
+public struct LightmapsBakedFlag { }
 public struct NeedsRecollideFlag { }

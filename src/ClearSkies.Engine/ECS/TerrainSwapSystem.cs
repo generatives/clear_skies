@@ -61,6 +61,7 @@ public sealed class TerrainSwapSystem : ISystem
         // the eight a level-1 swap waits for.
         world.SubscribeComponentAdded((in Entity e, in ChunkMeshedFlag _) => Woken(e));
         world.SubscribeComponentAdded((in Entity e, in ChunkUploadedFlag _) => Woken(e));
+        world.SubscribeComponentAdded((in Entity e, in LightmapsBakedFlag _) => Woken(e));
         // Coarse chunks loading and unloading, followed as they come (see Track).
         world.SubscribeComponentAdded((in Entity _, in Chunk c) =>
         {
@@ -108,6 +109,10 @@ public sealed class TerrainSwapSystem : ISystem
 
     /// <summary>Whether a chunk of a grid is lit (GpuLightSystem.IsLit); without it, everything counts as lit.</summary>
     public Func<GridHandle, ChunkPosition, bool>? IsLit { get; set; }
+
+    /// <summary>Whether a coarse chunk is drawn only once its light maps are baked (<see cref="LightmapsBakedFlag"/>), so
+    /// one not baked yet isn't ready to be seen: true where a renderer draws the terrain.</summary>
+    public bool WaitsForBake { get; set; }
 
     /// <summary>Puts a chunk of a grid ahead of the light queues (GpuLightSystem.ShowFirst), asked every frame for
     /// terrain waiting to be shown: a coarse chunk held back for its first light, and what's swapping in for one.</summary>
@@ -233,8 +238,14 @@ public sealed class TerrainSwapSystem : ISystem
     {
         if (!_load.Has(level, p)) return false;
         if (EntityOf(level, p) is not { } e) return true; // air
-        return SwapsOf(level).TryGetValue(p, out var c) ? !Waits(level, c, p) : e.Has<ChunkMeshedFlag>();
+        return SwapsOf(level).TryGetValue(p, out var c) ? !Waits(level, c, p) && !Unbaked(level, p) : e.Has<ChunkMeshedFlag>();
     }
+
+    /// <summary>Whether a coarse chunk with faces is waiting for its light maps' first bake (see
+    /// <see cref="WaitsForBake"/>): until then it isn't drawn, whatever its swap says.</summary>
+    private bool Unbaked(TerrainLevel level, ChunkPosition p)
+        => WaitsForBake && EntityOf(level, p) is { } e && e.Has<ChunkRenderData>() && !e.Get<ChunkRenderData>().IsEmpty
+           && !e.Has<LightmapsBakedFlag>();
 
     /// <summary>Whether the eight finer chunks under coarse chunk <paramref name="p"/> are ready to be seen.</summary>
     private bool ChildrenReady(TerrainLevel level, ChunkPosition p)
@@ -403,8 +414,9 @@ public sealed class TerrainSwapSystem : ISystem
                 // Parked: as done, but for its mesh or its place in the store (it's lit already if it has that), which
                 // wake it when they come.
                 bool still = c.Leaving == 0 && !(ready && c.Drawn) && Faded(c.FadeAt) >= 1f;
-                c.Quiet = still && uploaded && c.Settled && !waits;
-                c.Parked = still && !c.Quiet && (!uploaded || c.Settled && !e!.Value.Has<ChunkMeshedFlag>());
+                bool unbaked = Unbaked(level, p);
+                c.Quiet = still && uploaded && c.Settled && !waits && !unbaked;
+                c.Parked = still && !c.Quiet && (!uploaded || c.Settled && (!e!.Value.Has<ChunkMeshedFlag>() || unbaked));
                 t1 = Stopwatch.GetTimestamp();
                 _lightTicks += t1 - t3;
             }
@@ -524,7 +536,8 @@ public sealed class TerrainSwapSystem : ISystem
                 }
             foreach (var (p, c) in SwapsOf(level))
             {
-                if (c.Quiet || c.WasReady || !Kept(level, p) || !Waits(level, c, p)) continue; // a quiet one doesn't wait
+                if (c.Quiet || c.WasReady || !Kept(level, p)) continue; // a quiet one doesn't wait
+                if (!Waits(level, c, p) && !(c.Drawn && Unbaked(level, p))) continue;
                 if (EntityOf(level, p) is { } e && e.Has<ChunkRenderData>() && e.Get<ChunkRenderData>().IsEmpty) continue;
                 if (coarser != null && Shows(coarser, new ChunkPosition(p.X >> 1, p.Y >> 1, p.Z >> 1))) continue;
                 float d = BoxDistance.ToChunk(centre, p.X, p.Y, p.Z, level.Blocks);
@@ -545,11 +558,13 @@ public sealed class TerrainSwapSystem : ISystem
         if (EntityOf(level, p) is not { } e || !e.Has<ChunkMeshedFlag>())
             return c.Settled ? "its mesh (lit already)" : "its mesh";
         if (!e.Has<ChunkUploadedFlag>()) return "the light store";
-        return $"its light ({c.Waiting} frames)";
+        if (!c.Settled) return $"its light ({c.Waiting} frames)";
+        return "its light maps' first bake";
     }
 
     /// <summary>Whether the level draws chunk <paramref name="p"/> now, lit: what's under it doesn't show.</summary>
-    private bool Shows(TerrainLevel level, ChunkPosition p) => SwapsOf(level).TryGetValue(p, out var c) && c.Drawn && !Waits(level, c, p);
+    private bool Shows(TerrainLevel level, ChunkPosition p)
+        => SwapsOf(level).TryGetValue(p, out var c) && c.Drawn && !Waits(level, c, p) && !Unbaked(level, p);
 
     /// <summary>The Distant Terrain panel's part: the fade, what the fog waits on, and each level's swaps.</summary>
     internal void DrawUi()
