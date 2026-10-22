@@ -279,6 +279,9 @@ struct ChunkDraw { model: mat4x4<f32>, chunk: vec3<i32>, grid: i32, quadBase: u3
 // fragment entry point that lights, since chunk draws carry them per draw rather than in the model uniform.
 var<private> drawChunk: vec3<i32>;
 var<private> drawGrid: i32;
+// How much of a lit chunk face's colour is the underwater fog's instead (0-1), before the world's fog: set by
+// fs_chunk_transparent for deep water seen from above (see shadeBlock).
+var<private> waterShare: f32;
 
 // The shared voxel storage (see GridStore): occupancy pool, chunk table ((occupancy slot or code, chunk tag), then
 // ray-only data), brick table (light slot per 8³ brick), light pool and grid descriptors. Only a slot's display half
@@ -636,7 +639,7 @@ fn fs_chunk_transparent(in: VSOut, @builtin(front_facing) front: bool) -> @locat
         }
         let clear = exp(-path / WATER_CLEAR);
         alpha = 1.0 - (1.0 - alpha) * clear;
-        base *= mix(WATER_DEEP_SHADE, 1.0, clear);
+        waterShare = 1.0 - clear;
     }
     var v = in;
     if (!front) { v.localNormal = -v.localNormal; v.worldNormal = -v.worldNormal; }
@@ -644,9 +647,9 @@ fn fs_chunk_transparent(in: VSOut, @builtin(front_facing) front: bool) -> @locat
 }
 
 // Water depth shading (fs_chunk_transparent): each WATER_CLEAR blocks the view goes through cut what shows through the
-// water to about a third, and the water's own colour darkens towards WATER_DEEP_SHADE of itself as the view goes deeper.
+// water to about a third, and the water's own colour turns as much towards the underwater fog's (waterFogColor), so
+// deep water looks the same colour from above as from inside it.
 const WATER_CLEAR: f32 = 5.0;
-const WATER_DEEP_SHADE: f32 = 0.3;
 const WATER_MAX_DEPTH: i32 = 16;
 // Smoothing across the top (smoothWaterDepth): the depth blends between columns WATER_SMOOTH blocks apart, sampled up
 // to WATER_WOBBLE blocks off, by noise WATER_WOBBLE_SIZE blocks across.
@@ -781,7 +784,7 @@ fn shadeBlock(in: VSOut, baseColor: vec3<f32>, see: bool, back: bool) -> vec3<f3
     // Ambient occlusion darkens inner corners / block junctions; lerp from AO_MIN so corners aren't pure black.
     let aoFactor = mix(AO_MIN, 1.0, ao);
 
-    let shaded = baseColor * lit * aoFactor * camera.lightParams2.x;
+    let shaded = mix(baseColor * lit * aoFactor * camera.lightParams2.x, waterFogColor(), waterShare);
     if ((dbg & 2u) != 0u) { return shaded; }
     return applyFog(shaded, in.worldPos);
 }
