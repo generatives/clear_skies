@@ -89,10 +89,10 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     private int UnbakedCount => _unbaked.Values.Sum(l => l.Count);
     private int _bakedQuads;
 
-    /// <summary>How long a static volume's chunk takes to fade in from when it can first be drawn (its light maps baked
-    /// once): terrain arriving shows by fading in, not popping, the fog staying where it is (see FogSystem).</summary>
+    /// <summary>How long a static volume's chunk takes to fade in from when it's first drawn: terrain arriving shows by
+    /// fading in, not popping, the fog staying where it is (see FogSystem). Remeshing it doesn't fade it again.</summary>
     public const double ArrivalFadeSeconds = 1.0;
-    private readonly Dictionary<Entity, double> _arrivedAt = new(); // when each could first be drawn (seconds)
+    private readonly Dictionary<Entity, double> _firstDrawn = new(); // when each loaded chunk was first drawn (seconds)
     private double _now; // this frame's time (seconds)
 
     /// <summary>Cell-local placement per <see cref="BlockOrientation"/> (indexed by its byte): a model block's model is
@@ -111,7 +111,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
             Forget(e);
             if (e.Has<LightmapsBakedFlag>()) e.Remove<LightmapsBakedFlag>(); // meshed again, baked again
         });
-        world.SubscribeEntityDisposed((in Entity e) => Forget(e));
+        world.SubscribeEntityDisposed((in Entity e) => { Forget(e); _firstDrawn.Remove(e); });
     }
 
     private StaticVolume StaticOf(ChunkVolume volume)
@@ -140,7 +140,6 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     private void Forget(Entity e)
     {
         _others.Remove(e);
-        _arrivedAt.Remove(e);
         if (!_columnOf.Remove(e, out var at)) return;
         var column = at.Volume.Columns[at.Key];
         column.Chunks.Remove(e);
@@ -236,17 +235,17 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         }
         _draws.RemoveRange(kept, _draws.Count - kept);
         BakeFirstTimes();
-        // A chunk fades in over ArrivalFadeSeconds from when it could first be drawn, unless something else is fading it
-        // (a swap between levels of detail).
+        // A chunk fades in over ArrivalFadeSeconds from when it's first drawn, unless something else is fading it (a
+        // swap between levels of detail, whose first draw this then is).
         draws = CollectionsMarshal.AsSpan(_draws);
         for (int i = 0; i < draws.Length; i++)
         {
             ref var d = ref draws[i];
-            if (d.Entity != default && _arrivedAt.TryGetValue(d.Entity, out var at))
+            if (d.Entity != default)
             {
+                if (!_firstDrawn.TryGetValue(d.Entity, out var at)) _firstDrawn[d.Entity] = at = d.Dissolve == 0f ? _now : 0;
                 double t = (_now - at) / ArrivalFadeSeconds;
-                if (t >= 1.0) _arrivedAt.Remove(d.Entity);
-                else if (d.Dissolve == 0f) d = d with { Dissolve = (float)(1.0 - t) };
+                if (t < 1.0 && d.Dissolve == 0f) d = d with { Dissolve = (float)(1.0 - t) };
             }
             if (d.TransparentMesh != null) _translucentDraws.Add(d);
         }
@@ -384,7 +383,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
                     _renderer.PrepareLightmap(mesh, rd.Grid, rd.ChunkPos, stamp);
                 }
             }
-            if (Baked(rd)) { e.Set<LightmapsBakedFlag>(); _arrivedAt[e] = _now; }
+            if (Baked(rd)) e.Set<LightmapsBakedFlag>();
             else unbaked[kept++] = e;
         }
         unbaked.RemoveRange(kept, unbaked.Count - kept);
