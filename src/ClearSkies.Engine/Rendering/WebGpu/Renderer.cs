@@ -626,8 +626,8 @@ fn fs_chunk_dissolve(in: VSOut) -> @location(0) vec4<f32> {
 // water) is lit as facing the viewer, from the cell on the viewer's side, so it is lit like the water around it rather
 // than like the air beyond.
 //
-// Seen from outside, the water darkens and turns opaque with how much of it the view looks through: the distance
-// along the view from the face to what's behind it (see waterPath). Seen from inside, the underwater fog does that
+// Seen from outside, the water darkens and turns opaque with how much of it the view looks through, along the view
+// from the face to what's behind it (see waterPath). Seen from inside, the underwater fog does that
 // instead (see applyWater).
 @fragment
 fn fs_chunk_transparent(in: VSOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
@@ -652,8 +652,10 @@ fn fs_chunk_transparent(in: VSOut, @builtin(front_facing) front: bool) -> @locat
 // the water to about a third, and the water's own colour turns as much towards the underwater fog's (waterFogColor),
 // so deep water looks the same colour from above as from inside it. The thinnest water is camera.water2.x opaque and
 // already camera.water2.y of the way to the fog's colour (the rest its lit texture, for the ripples), so the shallows
-// are the depths' colour, only clearer. (See WaterSettings.)
+// are the depths' colour, only clearer. (See WaterSettings.) The view's walk through the water (waterPath) counts up
+// to WATER_MAX_PATH blocks of water, over at most WATER_REACH blocks.
 const WATER_MAX_PATH: f32 = 16.0;
+const WATER_REACH: f32 = 32.0;
 
 // How thick the water is at p (grid space), as a multiple of its clarity's: 1 give or take camera.water2.z, by smooth
 // noise camera.water2.w blocks across, so there are murkier and clearer stretches of water rather than one even body.
@@ -675,7 +677,6 @@ fn valueNoise3(p: vec3<f32>) -> f32 {
     let x1 = mix(mix(c[4], c[5], u.x), mix(c[6], c[7], u.x), u.y);
     return mix(x0, x1, u.z) / 1023.0;
 }
-const WATER_REACH: f32 = 32.0;
 
 // What voxel v in this draw's grid holds: 2 a block that blocks light, 1 water (a translucent block: its chunk's
 // translucent bits, whose occupancy slot plus one is its chunk-table entry's second word's w, 0 for none; see
