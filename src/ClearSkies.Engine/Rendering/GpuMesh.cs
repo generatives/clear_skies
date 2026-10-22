@@ -58,6 +58,16 @@ public sealed class GpuMesh : IDisposable
     public uint QuadCount => Quads?.Count ?? 0;
     public uint QuadBase => Quads?.Start ?? 0;
 
+    /// <summary>For a chunk mesh whose quads are grouped by the way they face (+X, -X, +Y, -Y, +Z, -Z, then cross
+    /// blocks', see <see cref="FaceGroupOf"/>): where each group ends, so a draw can skip the groups facing away from
+    /// the camera; null if they aren't grouped.</summary>
+    public int[]? FaceEnds { get; init; }
+
+    public const int FaceGroups = 7;
+
+    /// <summary>A quad's face group: its face, or 6 for both of a cross block's diagonals (seen from anywhere).</summary>
+    public static int FaceGroupOf(ChunkQuad quad) => System.Math.Min(quad.Face, 6);
+
     /// <summary>For a chunk mesh: its quads' light map, a run of the renderer's shared light map buffer (see
     /// <see cref="ChunkQuad.LightOffset"/>), or null when no quad has one. Baked on the GPU before the mesh is first drawn
     /// and whenever its chunk's light changes.</summary>
