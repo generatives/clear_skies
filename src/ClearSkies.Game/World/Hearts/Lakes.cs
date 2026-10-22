@@ -251,8 +251,7 @@ public sealed class Lakes
             float ex = h.X - b.X, ey = hy - by, ez = h.Z - b.Z;
             if ((d - bestD) / (2f * MathF.Sqrt(ex * ex + ey * ey + ez * ez)) < FaceMargin) return Drain;
         }
-        float surface = _terrain.Height(x, z);
-        return surface - MathF.Max(0f, surface - b.Surface) * (1f - HeartWorldGenerator.Flatten) - HeartWorldGenerator.MaxDrop * b.Drop;
+        return HeartWorldGenerator.PieceTop(_terrain.Height(x, z), b.Surface, b.Drop);
     }
 
     private static float Smoothstep(float edge0, float edge1, float x)

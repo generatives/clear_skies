@@ -46,7 +46,12 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     // A piece's top is the terrain worn down: where the terrain there stands above the terrain at its heart, only
     // Flatten of the difference is left, and the whole top is lowered by up to MaxDrop (each piece its own amount).
     // So tops are flatter than the land they came from, and neighbours don't line up.
-    internal const float Flatten = 0.45f, MaxDrop = 30f;
+    private const float Flatten = 0.45f, MaxDrop = 30f;
+
+    /// <summary>The top of a piece where the terrain surface is <paramref name="surface"/>, for a heart where it is
+    /// <paramref name="heartSurface"/>, worn down by <paramref name="drop"/> (0-1, see <see cref="Heart.Drop"/>).</summary>
+    internal static float PieceTop(float surface, float heartSurface, float drop) =>
+        surface - MathF.Max(0f, surface - heartSurface) * (1f - Flatten) - MaxDrop * drop;
 
     // A top is bare (see ContinentTerrain.Block) to Shaded if land lies over it within ShadeReach blocks.
     private const float Shaded = 0.75f, ShadeReach = 250f;
@@ -480,7 +485,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
 
         // The piece's top, worn down from the terrain: a face like the others, so the rim where it meets the sides is
         // rounded too (but not worn back: the top is where it is).
-        float top = surface - MathF.Max(0f, surface - _hs[bi]) * (1f - Flatten) - MaxDrop * _drop[bi];
+        float top = PieceTop(surface, _hs[bi], _drop[bi]);
         rates[faces] = HeartGrid.VerticalScale;
         worn[faces] = (top - y) * HeartGrid.VerticalScale;
         least = MathF.Min(least, worn[faces++]);
