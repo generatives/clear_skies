@@ -118,7 +118,9 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         world.SubscribeComponentRemoved<ChunkRenderData>((in Entity e, in ChunkRenderData _) =>
         {
             Forget(e);
-            if (e.Has<LightmapsBakedFlag>()) e.Remove<LightmapsBakedFlag>(); // meshed again, baked again
+            // Meshed again, baked again before it's drawable; but one already drawn stays drawable (it's baked over the
+            // budget when next drawn, see Bake), so it doesn't vanish and its swap doesn't wait for it again.
+            if (e.Has<LightmapsBakedFlag>() && !_firstDrawn.ContainsKey(e)) e.Remove<LightmapsBakedFlag>();
         });
         world.SubscribeEntityDisposed((in Entity e) => { Forget(e); _firstDrawn.Remove(e); _waitingLight.Remove(e); });
     }
@@ -435,9 +437,10 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
             if (quads == 0) return true;
             if (_bakedQuads > 0 && _bakedQuads + quads > BakeQuadBudget)
             {
-                bool drawn = AllBaked(in d);
-                if (!drawn) _waitingFirstBake++;
-                return drawn;
+                if (AllBaked(in d)) return true;
+                // One already on screen and just remeshed (its new mesh never baked) is baked over the budget rather
+                // than vanish till there's room: remeshes are few a frame, held to the upload budget.
+                if (d.Entity == default || !_firstDrawn.ContainsKey(d.Entity)) { _waitingFirstBake++; return false; }
             }
             _bakedQuads += quads;
         }
