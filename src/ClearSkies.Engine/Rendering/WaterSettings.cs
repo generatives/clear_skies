@@ -14,7 +14,7 @@ public static class WaterSettings
 
     /// <summary>Blocks of water the view goes through to cut what shows through it to about a third, and turn the
     /// water's own colour as far towards <see cref="Color"/>. Lower is murkier.</summary>
-    public static float Clarity = 3f;
+    public static float Clarity = 4f;
 
     /// <summary>How opaque the thinnest water is (0-1).</summary>
     public static float ShallowOpacity = 0.45f;
@@ -25,6 +25,6 @@ public static class WaterSettings
 
     /// <summary>How strong the pattern in the deep colour is (0-1: up to that much brighter or darker), so deep water
     /// isn't one flat colour, and how big it is, in blocks.</summary>
-    public static float Pattern = 0.3f;
+    public static float Pattern = 0.2f;
     public static float PatternSize = 6f;
 }
