@@ -59,8 +59,11 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     /// <summary>One lava block in this many glows.</summary>
     private const int LavaGlowOdds = 40;
 
-    /// <summary>About how far (blocks) a lake's sandy shore reaches from the middle of its sample cells (see Lakes).</summary>
+    /// <summary>About how far (blocks) a lake's sandy shore reaches from the middle of its sample cells (see Water).</summary>
     private const float ShoreReach = 3.5f;
+
+    /// <summary>How far under a river's level the ground may lie and still be its bed, not a drop it ends at.</summary>
+    private const int RiverGap = 8;
 
     /// <summary>Where noise is under this (-1 to 1) a tundra lake is open water, not ice.</summary>
     private const float IceOpen = -0.25f;
@@ -70,14 +73,14 @@ public sealed class HeartWorldGenerator : IWorldGenerator
 
     private readonly ulong _seed;
     private readonly ContinentTerrain _terrain;
-    private readonly Lakes _lakes;
+    private readonly Water _water;
     private readonly FastNoiseLite _warpX, _warpY, _warpZ, _crack, _bottom;
 
     public HeartWorldGenerator(ulong seed)
     {
         _seed = seed;
         _terrain = ContinentTerrain.For(seed);
-        _lakes = Lakes.For(seed);
+        _water = Water.For(seed);
         _warpX = Noise(seed + 31, WarpFrequency);
         _warpY = Noise(seed + 32, WarpFrequency);
         _warpZ = Noise(seed + 33, WarpFrequency);
@@ -123,8 +126,10 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     private readonly Biome[] _biome = new Biome[S * S * MaxSpans]; // per span top
     private readonly float[] _dry = new float[S * S * MaxSpans];   // per span top: how near a desert (Biomes.Dry)
     private readonly float[] _height = new float[S * S];
-    private readonly int[] _level = new int[S * S];         // the level of a lake here or beside, or int.MinValue (Lakes.Level)
+    private readonly int[] _level = new int[S * S];         // the level of water here (a lake here or beside, or a river), or int.MinValue
     private readonly bool[] _shore = new bool[S * S];       // whether a dry column by a lake is its sandy shore
+    private readonly byte[] _riverDepth = new byte[S * S];  // how deep a river's bed is cut under its level here, 0 for none
+    private readonly int[] _top = new int[S * S];           // the top of the top span before a river cuts it
     private readonly float[] _bottomAt = new float[S * S];
 
     // The hearts around the chunk column being profiled, per layer: cells from (_cx0, _cy0, _cz0), _nx by _ny by _nz of
@@ -166,8 +171,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 if (s > 0 && lo - _spans[col * MaxSpans + s - 1].Hi < ShadeReach && lo >= originY && lo < originY + S && Crystals.At(x, lo, z, _seed))
                     data.Set(lx, lo - originY, lz, crystal);
 
-                // A lake over the top span: water (lava in the volcanic wastes, partly iced over in tundra) up to its
-                // level on a bed of sand and gravel, with a sandy shore (grassy in a desert).
+                // A lake or river over the top span: water (lava in the volcanic wastes, partly iced over in tundra) up
+                // to its level on a bed of sand and gravel; a lake with a sandy shore (grassy in a desert).
                 BlockId? ground = null;
                 if (Lakeside(col, s))
                 {
@@ -181,7 +186,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                     bool oasis = biome is Biome.Desert or Biome.Badlands && hi >= level;
                     if (oasis && hi >= originY && hi < originY + S) data.Set(lx, hi - originY, lz, BlockId.Grass);
                     var liquid = biome == Biome.Volcanic ? BlockId.Lava : BlockId.Water;
-                    // A tundra lake's ice is broken, with open water between the floes.
+                    // Tundra ice is broken, with open water between the floes.
                     bool iced = biome == Biome.Tundra && _crack.GetNoise(x * 4f, z * 4f) > IceOpen;
                     for (int y = System.Math.Max(hi + 1, originY); y <= System.Math.Min(level, originY + S - 1); y++)
                     {
@@ -226,7 +231,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         }
     }
 
-    /// <summary>Whether span <paramref name="s"/> of column <paramref name="col"/> is under a lake or on its shore.</summary>
+    /// <summary>Whether span <paramref name="s"/> of column <paramref name="col"/> is under water or on a lake's shore.</summary>
     private bool Lakeside(int col, int s)
     {
         int level = _level[col], hi = _spans[col * MaxSpans + s].Hi;
@@ -258,9 +263,12 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             int col = lx + S * lz;
             float wx = x0 + lx, wz = z0 + lz;
             _height[col] = MathF.Min(_terrain.Height(wx, wz), HeartGrid.WorldTop - 1);
-            _level[col] = _lakes.Level((int)wx, (int)wz, out float off);
-            // The shore reaches a ragged ShoreReach from the lake's sample cells, not their square outline.
-            _shore[col] = off < ShoreReach * (0.6f + 0.4f * (_crack.GetNoise(wx * 3f, wz * 3f) + 1f));
+            var water = _water.At((int)wx, (int)wz);
+            _level[col] = water.Level;
+            _riverDepth[col] = (byte)water.RiverDepth;
+            // A lake's shore reaches a ragged ShoreReach from its sample cells, not their square outline; a river's
+            // banks stay as they are.
+            _shore[col] = water.RiverDepth == 0 && water.Off < ShoreReach * (0.6f + 0.4f * (_crack.GetNoise(wx * 3f, wz * 3f) + 1f));
             _bottomAt[col] = HeartGrid.LowestBottom + BottomRoughness * (0.5f + 0.5f * _bottom.GetNoise(wx, wz));
             top = MathF.Max(top, _height[col]);
         }
@@ -333,6 +341,30 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 _biome[col * MaxSpans + sp] = Biomes.Pick(h, wet);
                 _dry[col * MaxSpans + sp] = Biomes.Dry(h, wet, Biomes.SandBlend);
             }
+        }
+
+        // Rivers cut their beds into the top: the water a block under the ground here, and no higher than the dry
+        // ground beside it, so it doesn't stand against air; none where the top is far under the river, a crack or a
+        // cliff, where it ends.
+        for (int col = 0; col < S * S; col++)
+            _top[col] = _spanCount[col] == 0 ? int.MinValue : _spans[col * MaxSpans + _spanCount[col] - 1].Hi;
+        for (int col = 0; col < S * S; col++)
+        {
+            if (_riverDepth[col] == 0 || _level[col] == int.MinValue) continue;
+            int hi = _top[col];
+            if (hi == int.MinValue || hi < _level[col] - RiverGap) { _level[col] = int.MinValue; continue; }
+            int water = System.Math.Min(_level[col], hi - 1);
+            int lx = col % S, lz = col / S;
+            for (int n = 0; n < 4; n++)
+            {
+                int nx = lx + (n == 0 ? 1 : n == 1 ? -1 : 0), nz = lz + (n == 2 ? 1 : n == 3 ? -1 : 0);
+                if (nx < 0 || nz < 0 || nx >= S || nz >= S) continue;
+                int nc = nx + S * nz;
+                if (_level[nc] == int.MinValue && _top[nc] != int.MinValue) water = System.Math.Min(water, _top[nc]);
+            }
+            _level[col] = water;
+            ref var topSpan = ref _spans[col * MaxSpans + _spanCount[col] - 1];
+            topSpan.Hi = (short)System.Math.Max(topSpan.Lo, System.Math.Min(hi, water - _riverDepth[col]));
         }
     }
 

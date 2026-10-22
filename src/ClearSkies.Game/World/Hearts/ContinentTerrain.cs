@@ -35,7 +35,7 @@ public sealed class ContinentTerrain
     private readonly FastNoiseLite _knolls;   // lone peaks, a few hundred blocks across
     private readonly FastNoiseLite _crags;    // fine ridged detail on every mountain, so none is a smooth dome
     private readonly FastNoiseLite _detail;   // small bumps everywhere
-    private readonly FastNoiseLite _dells;    // shallow dips in open ground, where lakes gather (see Lakes)
+    private readonly FastNoiseLite _dells;    // shallow dips in open ground, where lakes gather (see Water)
     private readonly FastNoiseLite _strata;   // wobble of the rock layers that cliffs expose
     private readonly FastNoiseLite _patches;  // sand patches in low grass
     private readonly FastNoiseLite _flora, _kind; // where plants grow thick, and which kind

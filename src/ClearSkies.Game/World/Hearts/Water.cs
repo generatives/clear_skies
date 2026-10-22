@@ -1,0 +1,427 @@
+using System.Collections.Concurrent;
+
+namespace ClearSkies.Game.Generation;
+
+/// <summary>What water there is at a block column (see <see cref="Water.At"/>).</summary>
+/// <param name="Level">World Y of the top water block, or int.MinValue for none.</param>
+/// <param name="Off">For a lake, how far (blocks) the column is from the middle of the lake's nearest sample cell.</param>
+/// <param name="RiverDepth">For a river, how deep its bed is cut under its level; 0 for a lake.</param>
+public readonly record struct WaterColumn(int Level, float Off, int RiverDepth)
+{
+    public static readonly WaterColumn None = new(int.MinValue, float.MaxValue, 0);
+}
+
+/// <summary>
+/// Still water, no flow: lakes and the rivers between them, worked out one piece of land at a time. A piece (the
+/// ground held by one of the top row's hearts, see <see cref="HeartGrid"/>) is ringed by cracks, so whatever rains on
+/// it drains off its own edges: it is a watershed of its own, worked out whole once and cached, so every chunk agrees.
+///
+/// Over the piece's real top (as HeartWorldGenerator wears it down), sampled every <see cref="Step"/> blocks, a
+/// priority flood from its edges fills every hollow to where it would spill and gives each sample the way its water
+/// goes, down to the edge. Rain (more the wetter the climate, see ContinentTerrain.Wet) gathers along those ways. A
+/// hollow holds a lake if enough rain gathers into it to fill it; one left dry swallows what reaches it. Where enough
+/// has gathered on its way down, it is a river, wider the more it carries, its level stepping down from a block under
+/// the lowest ground round it, its bed cut a little under that.
+/// </summary>
+public sealed class Water
+{
+    public const int Step = 4;
+
+    /// <summary>How far past its heart's cell (blocks) a piece's ground can reach: the window worked out round it.</summary>
+    private const int Reach = 400;
+    private const int Window = (500 + 2 * Reach) / Step;
+
+    /// <summary>How near a piece's side face (scaled space, see HeartWorldGenerator.Solid) counts as its crack, for
+    /// rivers: more than the wear and the wobble of its outline together.</summary>
+    private const float FaceMargin = 44f;
+
+    /// <summary>How far from its piece's faces a lake keeps, further than a river: the rounding of its rim as well.</summary>
+    private const float LakeMargin = 64f;
+
+    private const float MinDepth = 2.5f;                  // shallower hollows hold no lake
+    private const int MinCells = 10, MaxCells = 2500;     // lakes of about 160 to 40,000 square blocks
+
+    // A lake sits in open ground, not perched on a slope or by a cliff: no ground within Perch cells of it may be
+    // more than PerchDrop blocks under its level (its own bed, filled to its level, doesn't count; nor do drains).
+    private const int Perch = 8;
+    private const float PerchDrop = 10f;
+
+    /// <summary>Rain per sample by the climate's wetness: none at RainFrom or drier, a full share at RainFull.</summary>
+    private const float RainFrom = 0.3f, RainFull = 0.85f;
+
+    /// <summary>A hollow fills if the rain gathering into it is at least LakeNeed times its own samples.</summary>
+    private const float LakeNeed = 2.5f;
+
+    // A river starts where RiverFrom samples' rain has gathered, a block wide, widening by RiverWiden blocks per square
+    // root of what it carries beyond that, up to RiverWidest.
+    private const float RiverFrom = 80f, RiverWiden = 0.15f, RiverWidest = 8f;
+
+    /// <summary>The ground of a drain: lower than any land, so whatever reaches it spills out.</summary>
+    private const float Drain = -1e6f;
+
+    private static readonly int[] Di = { 1, -1, 0, 0, 1, 1, -1, -1 }, Dk = { 0, 0, 1, -1, 1, -1, 1, -1 };
+
+    private static readonly ConcurrentDictionary<ulong, Water> BySeed = new();
+
+    /// <summary>The water of the world with this seed.</summary>
+    public static Water For(ulong seed) => BySeed.GetOrAdd(seed, s => new Water(s));
+
+    private readonly ulong _seed;
+    private readonly ContinentTerrain _terrain;
+    private readonly ConcurrentDictionary<long, Heart> _hearts = new();
+    private readonly ConcurrentDictionary<long, Piece> _pieces = new();
+
+    private Water(ulong seed)
+    {
+        _seed = seed;
+        _terrain = ContinentTerrain.For(seed);
+    }
+
+    /// <summary>One piece's water, per sample of its window (cells from (X0, Z0), world sample coordinates).</summary>
+    private sealed class Piece
+    {
+        public int X0, Z0;
+        public int[] Lake = Array.Empty<int>();    // level of the lake over the sample, or int.MinValue
+        public int[] River = Array.Empty<int>();   // level of the river through the sample, or int.MinValue
+        public byte[] Width = Array.Empty<byte>(); // its width, blocks
+        public int[] Down = Array.Empty<int>();    // the sample its water goes on to, or -1
+    }
+
+    /// <summary>The water at column (x, z): a lake over it or right beside it (water fills it from its ground up to
+    /// the level, where the ground is under it), or a river through it.</summary>
+    public WaterColumn At(int x, int z)
+    {
+        float px = x + 0.5f, pz = z + 0.5f;
+        if (Nearest(px, pz, out int hi, out int hk) is not { Alive: true }) return WaterColumn.None;
+        var piece = _pieces.GetOrAdd(Key(hi, hk), _ => Build(hi, hk));
+        int ci = FloorDiv(x, Step) - piece.X0, ck = FloorDiv(z, Step) - piece.Z0;
+        if (ci < 2 || ck < 2 || ci >= Window - 2 || ck >= Window - 2) return WaterColumn.None;
+        int own = piece.Lake[ci + Window * ck];
+        if (own != int.MinValue) return new(own, Off(ci, ck, px, pz, piece), 0);
+
+        // A river: within half its width of the line from a sample's middle to the next one's down its way.
+        int riverLevel = int.MinValue, width = 0;
+        float bestRiver = float.MaxValue;
+        for (int dk = -2; dk <= 2; dk++)
+        for (int di = -2; di <= 2; di++)
+        {
+            int c = ci + di + Window * (ck + dk);
+            if (piece.Width[c] == 0) continue;
+            float ax = (piece.X0 + ci + di + 0.5f) * Step, az = (piece.Z0 + ck + dk + 0.5f) * Step;
+            float bx = ax, bz = az;
+            int d = piece.Down[c];
+            if (d >= 0) { bx = (piece.X0 + d % Window + 0.5f) * Step; bz = (piece.Z0 + d / Window + 0.5f) * Step; }
+            float dist = SegmentDistance(px, pz, ax, az, bx, bz);
+            if (dist <= piece.Width[c] * 0.5f && dist < bestRiver) { bestRiver = dist; riverLevel = piece.River[c]; width = piece.Width[c]; }
+        }
+        if (riverLevel != int.MinValue) return new(riverLevel, 0f, width >= 6 ? 3 : width >= 3 ? 2 : 1);
+
+        // Just past a lake's sampled cells the ground can still dip under its level between samples: fill those too.
+        int level = int.MinValue;
+        float best = float.MaxValue;
+        for (int dk = -1; dk <= 1; dk++)
+        for (int di = -1; di <= 1; di++)
+        {
+            int l = piece.Lake[ci + di + Window * (ck + dk)];
+            if (l == int.MinValue) continue;
+            float cx = (piece.X0 + ci + di + 0.5f) * Step - px, cz = (piece.Z0 + ck + dk + 0.5f) * Step - pz;
+            float dd = cx * cx + cz * cz;
+            if (dd < best) { best = dd; level = l; }
+        }
+        return level == int.MinValue ? WaterColumn.None : new(level, MathF.Sqrt(best), 0);
+    }
+
+    private static float Off(int ci, int ck, float px, float pz, Piece piece)
+    {
+        float cx = (piece.X0 + ci + 0.5f) * Step - px, cz = (piece.Z0 + ck + 0.5f) * Step - pz;
+        return MathF.Sqrt(cx * cx + cz * cz);
+    }
+
+    private static float SegmentDistance(float px, float pz, float ax, float az, float bx, float bz)
+    {
+        float vx = bx - ax, vz = bz - az, len2 = vx * vx + vz * vz;
+        float t = len2 > 0f ? Math.Clamp(((px - ax) * vx + (pz - az) * vz) / len2, 0f, 1f) : 0f;
+        float dx = px - (ax + t * vx), dz = pz - (az + t * vz);
+        return MathF.Sqrt(dx * dx + dz * dz);
+    }
+
+    /// <summary>Works out the water of the piece of the top row's heart in cell (hi, hk).</summary>
+    private Piece Build(int hi, int hk)
+    {
+        const int N = Window * Window;
+        float size = HeartGrid.Layers[0].CellSize;
+        var piece = new Piece { X0 = FloorDiv(hi * (int)size - Reach, Step), Z0 = FloorDiv(hk * (int)size - Reach, Step) };
+        var self = TopHeart(hi, hk);
+        var hearts = new List<Heart>();
+        for (int k = hk - 2; k <= hk + 2; k++)
+        for (int i = hi - 2; i <= hi + 2; i++)
+            hearts.Add(TopHeart(i, k));
+
+        // The piece's ground, and how far each sample is from its faces; elsewhere drains.
+        var ground = new float[N];
+        var face = new float[N];
+        var rain = new float[N];
+        for (int k = 0; k < Window; k++)
+        for (int i = 0; i < Window; i++)
+        {
+            int c = i + Window * k;
+            float x = (piece.X0 + i + 0.5f) * Step, z = (piece.Z0 + k + 0.5f) * Step;
+            face[c] = FaceDistance(hearts, self, x, z);
+            if (i == 0 || k == 0 || i == Window - 1 || k == Window - 1 || face[c] < FaceMargin) { ground[c] = Drain; continue; }
+            ground[c] = HeartWorldGenerator.PieceTop(_terrain.Height(x, z), self.Surface, self.Drop);
+            rain[c] = Smoothstep(RainFrom, RainFull, _terrain.Wet(x, z));
+        }
+
+        // Priority flood from the drains inwards, lowest first: each sample filled to at least the level it was
+        // reached at, so each hollow fills to its lowest way out, and its water goes back the way it was reached.
+        var filled = new float[N];
+        var down = new int[N];
+        var order = new int[N];
+        int count = Flood(ground, filled, down, order, c => ground[c] == Drain ? Drain : float.NaN);
+
+        // The hollows: samples filled over their ground, joined side by side.
+        var hollow = new int[N];
+        Array.Fill(hollow, -1);
+        var cellsOf = new List<List<int>>();
+        var deepest = new List<float>();
+        var stack = new Stack<int>();
+        for (int s = 0; s < N; s++)
+        {
+            if (hollow[s] >= 0 || ground[s] == Drain || filled[s] - ground[s] < 0.01f) continue;
+            int id = cellsOf.Count;
+            var cells = new List<int>();
+            float deep = 0f;
+            hollow[s] = id; stack.Push(s);
+            while (stack.Count > 0)
+            {
+                int c = stack.Pop();
+                cells.Add(c);
+                deep = MathF.Max(deep, filled[c] - ground[c]);
+                int ci = c % Window, ck = c / Window;
+                for (int n = 0; n < 4; n++)
+                {
+                    int nc = ci + Di[n] + Window * (ck + Dk[n]);
+                    if (hollow[nc] >= 0 || ground[nc] == Drain || filled[nc] - ground[nc] < 0.01f) continue;
+                    hollow[nc] = id; stack.Push(nc);
+                }
+            }
+            cellsOf.Add(cells);
+            deepest.Add(deep);
+        }
+
+        // Rain gathers down the ways, from the furthest upstream first, through every hollow: how much reaches each.
+        var gathered = new float[N];
+        var inflow = new float[cellsOf.Count];
+        Array.Copy(rain, gathered, N);
+        for (int o = count - 1; o >= 0; o--)
+        {
+            int c = order[o], d = down[c], h = hollow[c];
+            if (h >= 0 && (d < 0 || hollow[d] != h)) inflow[h] += gathered[c];
+            if (d >= 0) gathered[d] += gathered[c];
+        }
+
+        // Each deep enough hollow fills as far as the rain reaching it can keep it: to a block under its spill point,
+        // overflowing, if that covers no more than inflow / LakeNeed samples, otherwise to the level that does, keeping
+        // what reaches it. None perched; one too small to be a pond is left dry.
+        piece.Lake = new int[N];
+        Array.Fill(piece.Lake, int.MinValue);
+        var level = new int[cellsOf.Count];
+        var full = new bool[cellsOf.Count];
+        var sink = new bool[cellsOf.Count]; // deep enough to keep what reaches it, full or not
+        for (int h = 0; h < cellsOf.Count; h++)
+        {
+            level[h] = int.MinValue;
+            var cells = cellsOf[h];
+            if (deepest[h] < MinDepth) continue;
+            sink[h] = true;
+            int spill = (int)MathF.Floor(filled[cells[0]]) - 1;
+            // (Near its piece's faces it stays dry: no higher than the lowest ground there.)
+            int l = spill;
+            foreach (int c in cells)
+                if (face[c] < LakeMargin) l = Math.Min(l, (int)MathF.Floor(ground[c]));
+            var beds = new List<float>();
+            foreach (int c in cells)
+                if (ground[c] < l) beds.Add(ground[c]);
+            if (beds.Count < MinCells) continue;
+            beds.Sort();
+            int target = (int)(inflow[h] / LakeNeed);
+            if (target < beds.Count)
+            {
+                if (target < MinCells) continue;
+                l = Math.Min(l, (int)MathF.Floor(beds[target]));
+            }
+            if (Perched(cells, filled, l)) continue;
+            int wet = 0;
+            foreach (int c in cells) if (ground[c] < l) wet++;
+            if (wet < MinCells) continue;
+            level[h] = l;
+            full[h] = l == spill;
+            foreach (int c in cells)
+                if (ground[c] < l) piece.Lake[c] = l;
+        }
+
+        // The ways again, now ending in the lakes that keep what reaches them and in the deep hollows left dry; an
+        // overflowing lake's water level, flat, passes on what reaches it out over its spill point.
+        var surface = new float[N];
+        for (int c = 0; c < N; c++)
+        {
+            int h = hollow[c];
+            surface[c] = h >= 0 && full[h] && piece.Lake[c] != int.MinValue ? level[h] : ground[c];
+        }
+        count = Flood(surface, filled, down, order, c =>
+        {
+            if (ground[c] == Drain) return Drain;
+            int h = hollow[c];
+            if (h < 0 || !sink[h] || full[h]) return float.NaN;
+            return level[h] != int.MinValue ? (piece.Lake[c] != int.MinValue ? level[h] : float.NaN) : ground[c];
+        });
+        Array.Copy(rain, gathered, N);
+        for (int o = count - 1; o >= 0; o--)
+        {
+            int c = order[o], d = down[c];
+            if (d >= 0 && !Ends(d)) gathered[d] += gathered[c];
+        }
+        bool Ends(int c)
+        {
+            int h = hollow[c];
+            return ground[c] == Drain || (h >= 0 && sink[h] && !full[h] && (level[h] == int.MinValue || piece.Lake[c] != int.MinValue));
+        }
+
+        // Rivers: where enough has gathered. Each one's level steps down from a block under the lowest ground round
+        // it (lake beds aside), never rising on its way (worked from upstream down), and not under a lake it meets.
+        piece.River = new int[N];
+        piece.Width = new byte[N];
+        piece.Down = down;
+        Array.Fill(piece.River, int.MaxValue);
+        for (int o = count - 1; o >= 0; o--)
+        {
+            int c = order[o];
+            if (gathered[c] < RiverFrom || piece.Lake[c] != int.MinValue || Ends(c)) { piece.River[c] = int.MinValue; continue; }
+            int ci = c % Window, ck = c / Window;
+            float low = ground[c];
+            int lakeBeside = int.MinValue;
+            for (int k = ck - 1; k <= ck + 1; k++)
+            for (int i = ci - 1; i <= ci + 1; i++)
+            {
+                int n = i + Window * k;
+                if (piece.Lake[n] != int.MinValue) lakeBeside = Math.Max(lakeBeside, piece.Lake[n]);
+                else if (ground[n] != Drain) low = MathF.Min(low, ground[n]);
+            }
+            piece.River[c] = Math.Max(Math.Min(piece.River[c], (int)MathF.Floor(low) - 1), lakeBeside);
+            piece.Width[c] = (byte)Math.Clamp(1f + RiverWiden * MathF.Sqrt(gathered[c] - RiverFrom), 1f, RiverWidest);
+            int d = down[c];
+            if (d >= 0 && piece.River[d] != int.MinValue) piece.River[d] = Math.Min(piece.River[d], piece.River[c]);
+        }
+        for (int c = 0; c < N; c++)
+            if (piece.River[c] == int.MaxValue) piece.River[c] = int.MinValue;
+        return piece;
+    }
+
+    /// <summary>Priority flood over <paramref name="ground"/>: from the sources (where <paramref name="source"/> gives a
+    /// level rather than NaN) inwards, lowest first, each sample filled to at least the level it was reached at; its
+    /// water goes back the way it was reached (<paramref name="down"/>, -1 for none). Returns how many samples it
+    /// reached, in <paramref name="order"/>, sources and drains aside.</summary>
+    private static int Flood(float[] ground, float[] filled, int[] down, int[] order, Func<int, float> source)
+    {
+        const int N = Window * Window;
+        var done = new bool[N];
+        var queue = new PriorityQueue<int, float>();
+        var isSource = new bool[N];
+        for (int c = 0; c < N; c++)
+        {
+            down[c] = -1;
+            float s = source(c);
+            if (float.IsNaN(s)) continue;
+            filled[c] = s; done[c] = true; isSource[c] = true;
+            queue.Enqueue(c, s);
+        }
+        int count = 0;
+        while (queue.TryDequeue(out int c, out float level))
+        {
+            if (!isSource[c]) order[count++] = c;
+            int ci = c % Window, ck = c / Window;
+            // (Eight ways round, so rivers can run on the diagonals too.)
+            for (int n = 0; n < 8; n++)
+            {
+                int ni = ci + Di[n], nk = ck + Dk[n];
+                if (ni < 0 || nk < 0 || ni >= Window || nk >= Window) continue;
+                int nc = ni + Window * nk;
+                if (done[nc]) continue;
+                done[nc] = true;
+                filled[nc] = MathF.Max(ground[nc], level);
+                down[nc] = ground[c] == Drain ? -1 : c;
+                queue.Enqueue(nc, filled[nc]);
+            }
+        }
+        return count;
+    }
+
+    /// <summary>Whether a lake at <paramref name="level"/> over these samples would be perched: ground within Perch
+    /// samples of it more than PerchDrop under it (drains aside).</summary>
+    private static bool Perched(List<int> cells, float[] filled, int level)
+    {
+        foreach (int c in cells)
+        {
+            int ci = c % Window, ck = c / Window;
+            for (int k = Math.Max(0, ck - Perch); k <= Math.Min(Window - 1, ck + Perch); k++)
+            for (int i = Math.Max(0, ci - Perch); i <= Math.Min(Window - 1, ci + Perch); i++)
+            {
+                float f = filled[i + Window * k];
+                if (f != Drain && f < level - PerchDrop) return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>How far (x, z) is inside the piece of heart <paramref name="self"/> (scaled space, see
+    /// HeartWorldGenerator.Solid): less than 0 if it is another's, or 0 if that piece is gone.</summary>
+    private static float FaceDistance(List<Heart> hearts, Heart self, float x, float z)
+    {
+        if (!self.Alive) return 0f;
+        float by = self.Depth * HeartGrid.VerticalScale;
+        float bestD = (self.X - x) * (self.X - x) + by * by + (self.Z - z) * (self.Z - z);
+        float least = float.MaxValue;
+        foreach (var h in hearts)
+        {
+            if (!h.Exists || h == self) continue;
+            float hy = h.Depth * HeartGrid.VerticalScale;
+            float d = (h.X - x) * (h.X - x) + hy * hy + (h.Z - z) * (h.Z - z);
+            float ex = h.X - self.X, ey = hy - by, ez = h.Z - self.Z;
+            least = MathF.Min(least, (d - bestD) / (2f * MathF.Sqrt(ex * ex + ey * ey + ez * ez)));
+        }
+        return least;
+    }
+
+    /// <summary>The top row's heart nearest (x, z) at the surface (counting depth VerticalScale times over), and its
+    /// cell.</summary>
+    private Heart? Nearest(float x, float z, out int hi, out int hk)
+    {
+        float size = HeartGrid.Layers[0].CellSize;
+        int i0 = (int)MathF.Floor(x / size), k0 = (int)MathF.Floor(z / size);
+        Heart? best = null;
+        float bestD = float.MaxValue;
+        hi = hk = 0;
+        for (int k = k0 - 1; k <= k0 + 1; k++)
+        for (int i = i0 - 1; i <= i0 + 1; i++)
+        {
+            var h = TopHeart(i, k);
+            if (!h.Exists) continue;
+            float hy = h.Depth * HeartGrid.VerticalScale;
+            float d = (h.X - x) * (h.X - x) + hy * hy + (h.Z - z) * (h.Z - z);
+            if (d < bestD) { bestD = d; best = h; hi = i; hk = k; }
+        }
+        return best;
+    }
+
+    private Heart TopHeart(int i, int k) => _hearts.GetOrAdd(Key(i, k), _ => HeartGrid.At(_seed, 0, i, -1, k));
+
+    private static long Key(int i, int k) => ((long)i << 32) ^ (uint)k;
+
+    private static float Smoothstep(float edge0, float edge1, float x)
+    {
+        float t = Math.Clamp((x - edge0) / (edge1 - edge0), 0f, 1f);
+        return t * t * (3f - 2f * t);
+    }
+
+    private static int FloorDiv(int a, int b) => a >= 0 ? a / b : (a - b + 1) / b;
+}
