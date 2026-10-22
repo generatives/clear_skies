@@ -15,8 +15,8 @@ namespace ClearSkies.Engine.ECS;
 /// from the store if edited), shrinking each into the level above it (<see cref="CoarseTerrain"/>), and again for each
 /// level up to its own.
 ///
-/// A level's chunk is left out where the level nearer the view has its eight chunks; every level ends in whole 2x2x2
-/// groups, so each chunk of the next swaps for its eight in one go. A coarse chunk's blocks are dropped once it's
+/// A level's chunk swaps with the eight of the level nearer the view under it (see <see cref="TerrainSwapSystem"/>); every level
+/// ends in whole 2x2x2 groups, so each chunk of the next swaps for its eight in one go. A coarse chunk's blocks are dropped once it's
 /// meshed and in the GPU store: it's never edited or collided with.
 /// </summary>
 public sealed partial class ChunkLoadSystem
@@ -42,9 +42,6 @@ public sealed partial class ChunkLoadSystem
 
         public ChunkVolume Volume { get; }
         internal Entity Root => Volume.Root;
-
-        /// <summary>How each of a coarse level's chunks is drawn (its root's <see cref="ChunkDrawStates"/>).</summary>
-        public ChunkDrawStateOf? DrawState { get; internal set; }
 
         internal TerrainLevel? Finer, Coarser;
         internal int Blocks => S << Level; // a chunk's size, in blocks
@@ -96,6 +93,10 @@ public sealed partial class ChunkLoadSystem
 
         internal readonly HashSet<ChunkPosition> ToDrop = new(); // loaded chunks whose blocks can go once they're meshed and uploaded
         internal int Dropped;
+
+        /// <summary>Chunks no longer wanted but held loaded (see <see cref="KeepLoaded"/>), with the frame each was
+        /// first held.</summary>
+        internal readonly Dictionary<ChunkPosition, int> Held = new();
     }
 
     /// <summary>Most coarse-level column jobs in flight at once: they're slow (a level-1 column generates four full
@@ -122,7 +123,11 @@ public sealed partial class ChunkLoadSystem
         foreach (var level in _levels.Skip(1)) RemoveLevel(level);
         _levels.RemoveRange(1, _levels.Count - 1);
         FullDetail.Coarser = null;
-        if (radii.Count == 0) { FullDetail.Radius = _viewDistance; return; }
+        if (radii.Count == 0)
+        {
+            FullDetail.Radius = _viewDistance;
+            return;
+        }
 
         FullDetail.Radius = MathF.Max(fullDetailRadius, 2 * S);
         for (int i = 0; i < radii.Count; i++)
@@ -138,8 +143,6 @@ public sealed partial class ChunkLoadSystem
                 Finer = finer,
             };
             volume.RankedFrom = finer.Radius;
-            level.DrawState = p => DrawState(level, p);
-            root.Set(new ChunkDrawStates { Of = level.DrawState });
             finer.Coarser = level;
             _levels.Add(level);
         }
@@ -152,19 +155,8 @@ public sealed partial class ChunkLoadSystem
         if (level.Root.IsAlive) level.Root.Dispose();
     }
 
-    /// <summary>A coarse chunk is left out where the finer level has its eight, and out of range.</summary>
-    private ChunkDrawState DrawState(TerrainLevel level, ChunkPosition p)
-    {
-        if (!Wanted(level, p)) return ChunkDrawState.Hidden;
-        for (int j = 0; j < 8; j++)
-            if (!Has(level.Finer!, Child(p, j))) return ChunkDrawState.Whole;
-        return ChunkDrawState.Hidden;
-    }
-
-    private static ChunkPosition Child(ChunkPosition p, int j) => new(p.X * 2 + (j & 1), p.Y * 2 + ((j >> 1) & 1), p.Z * 2 + (j >> 2));
-
     /// <summary>Whether the level has chunk <paramref name="p"/>: it's wanted, and loaded or known to be air.</summary>
-    private bool Has(TerrainLevel level, ChunkPosition p)
+    internal bool Has(TerrainLevel level, ChunkPosition p)
     {
         if (!Wanted(level, p)) return false;
         if (!level.Columns.TryGetValue((p.X, p.Z), out var col)) return false;
@@ -319,9 +311,8 @@ public sealed partial class ChunkLoadSystem
         }
     }
 
-    private void DrawLevelsUi()
+    internal void DrawLevelsUi()
     {
-        if (_levels.Count == 1) return;
         ImGui.Separator();
         ImGui.Text($"Full detail to {FullDetailRadius:F0} blocks; coarse level jobs in flight: {_levelJobs}");
         foreach (var level in _levels.Skip(1))

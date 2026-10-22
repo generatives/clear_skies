@@ -108,7 +108,13 @@ public sealed class GameView : IDisposable
         host.AddSystem(chunks, SystemStage.RenderWorld);
         // Distant terrain drawn coarse past full detail, in levels (--lod-levels).
         if (_lodLevels > 0)
+        {
             world.ChunkLoad.SetLevels(FullDetailRadius, Enumerable.Range(1, _lodLevels).Select(k => FullDetailRadius * (1 << k)).ToArray());
+            world.TerrainSwaps.IsLit = light.IsLit;           // swaps wait for the incoming terrain's light
+            world.TerrainSwaps.ShowFirst = light.ShowFirst;   // terrain waiting to be shown is lit ahead of the rest
+            world.TerrainSwaps.SetCovered = GridStore.SetCovered; // each level lit by its own blocks where a finer one is in
+        }
+        host.AddSystem(new DistantTerrainPanel(world.ChunkLoad, world.TerrainSwaps), SystemStage.Frame);
         host.AddSystem(new ModelRenderSystem(host.World, renderer, host.Time), SystemStage.RenderWorld);
         host.AddSystem(_clouds, SystemStage.RenderWorld);
         host.AddSystem((IRenderSystem)_particles, SystemStage.RenderWorld);
