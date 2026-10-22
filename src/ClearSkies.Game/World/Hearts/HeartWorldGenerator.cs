@@ -68,6 +68,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator
 
     /// <summary>How near (blocks) a lake's water a river's comes level with it.</summary>
     private const int MouthReach = 6;
+    /// <summary>How many columns across a river's water may dip under the water either side and still be filled up.</summary>
+    private const int DipAcross = 3;
 
     /// <summary>Where noise is under this (-1 to 1) a tundra lake is open water, not ice.</summary>
     private const float IceOpen = -0.25f;
@@ -424,6 +426,43 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 changed = true;
             }
         }
+        // Nor does a column dip under the water either side of it, a few columns across (where a low bank holds them a
+        // block down): it fills up to the lower of them, no higher than the dry ground beside it.
+        for (bool changed = true; changed;)
+        {
+            changed = false;
+            for (int col = 0; col < S * S; col++)
+            {
+                if (_riverDepth[col] == 0 || _level[col] == int.MinValue) continue;
+                int lx = col % S, lz = col / S;
+                int fill = System.Math.Min(Higher(col, lx, 1, 0), Higher(col, lx, -1, 0));
+                fill = System.Math.Max(fill, System.Math.Min(Higher(col, lz, 0, 1), Higher(col, lz, 0, -1)));
+                if (fill <= _level[col]) continue;
+                int water = System.Math.Min(fill, Beside(col).Dry);
+                if (water <= _level[col]) continue;
+                _level[col] = water;
+                changed = true;
+            }
+        }
+
+        // The first water higher than column col's, going (dx, dz) from it (at, its x or z) over water no higher, within
+        // DipAcross columns; or int.MinValue.
+        int Higher(int col, int at, int dx, int dz)
+        {
+            int d = dx + dz, step = dx + S * dz;
+            for (int n = 1; n <= DipAcross; n++)
+            {
+                int a = at + n * d;
+                if (a < 0 || a >= S) return int.MinValue;
+                int w = WaterOf(col + n * step);
+                if (w == int.MinValue || w > _level[col]) return w;
+            }
+            return int.MinValue;
+        }
+
+        // The water standing in a column (a river's, or a lake's over its ground), or int.MinValue.
+        int WaterOf(int col) =>
+            _level[col] != int.MinValue && (_riverDepth[col] > 0 || (_top[col] != int.MinValue && _level[col] > _top[col])) ? _level[col] : int.MinValue;
 
         // The lowest dry ground beside a river's column, and the highest water of a lake beside it or nearly (so the
         // river's mouth is level with it, not a block under the shore between).
