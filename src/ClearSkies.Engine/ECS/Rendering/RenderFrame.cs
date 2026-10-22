@@ -35,7 +35,7 @@ public sealed class RenderFrame : IDebugUiSystem
         _gui      = gui;
         _time     = time;
         _cameras  = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
-        _volumes  = world.GetEntities().With<ChunkGrid>().With<Transform>().AsSet();
+        _volumes  = world.GetEntities().With<ChunkGrid>().Without<LowResolutionCopy>().With<Transform>().AsSet();
     }
 
     // Underwater visibility, as Minecraft's: on going under you see UnderwaterMin of UnderwaterSight blocks, opening

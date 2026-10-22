@@ -385,8 +385,8 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     {
         var h = vol.Gpu;
         if (h.Index < 0) return;
-        var v2w = VoxelToWorld(root.Position, root.Rotation);
-        _store.SetPose(h, v2w, WorldToVoxel(root.Position, root.Rotation));
+        var v2w = VoxelToWorld(root.Position, root.Rotation, vol.Scale);
+        _store.SetPose(h, v2w, WorldToVoxel(root.Position, root.Rotation, vol.Scale));
         _lit.Add(new LitGrid(vol, h, v2w, root.Position, root.Rotation));
     }
 
@@ -425,14 +425,20 @@ public sealed partial class GpuLightSystem : ISystem, IDisposable, IDebugUiSyste
     // ── Grid transforms ───────────────────────────────────────────────────────
 
     // A grid's voxel space is its local block space (chunk*32 + local); its root Transform carries it to world
-    // space: world = T(pos)·R·voxel (see ChunkVolume). The static world's is the identity.
-    private static Mat4 VoxelToWorld(Vector3D<float> pos, Quaternion<float> rot)
-        => Mat4.Multiply(Mat4.Translation(pos), Mat4.FromQuaternion(rot));
+    // space: world = T(pos)·R·k·voxel, k its scale (see ChunkVolume). The static world's is the identity.
+    private static Mat4 VoxelToWorld(Vector3D<float> pos, Quaternion<float> rot, int scale)
+    {
+        var m = Mat4.Multiply(Mat4.Translation(pos), Mat4.FromQuaternion(rot));
+        return Mat4.Multiply(m, Mat4.Scale(new Vector3D<float>(scale)));
+    }
 
-    /// <summary>Inverse of <see cref="VoxelToWorld"/>, built analytically since the transform is rigid:
-    /// voxel = R⁻¹ · T(−pos) · world.</summary>
-    private static Mat4 WorldToVoxel(Vector3D<float> pos, Quaternion<float> rot)
-        => Mat4.Multiply(Mat4.FromQuaternion(Vec.Conjugate(rot)), Mat4.Translation(-pos));
+    /// <summary>Inverse of <see cref="VoxelToWorld"/>, built analytically since the transform is rigid but for its
+    /// scale: voxel = k⁻¹ · R⁻¹ · T(−pos) · world.</summary>
+    private static Mat4 WorldToVoxel(Vector3D<float> pos, Quaternion<float> rot, int scale)
+    {
+        var m = Mat4.Multiply(Mat4.FromQuaternion(Vec.Conjugate(rot)), Mat4.Translation(-pos));
+        return Mat4.Multiply(Mat4.Scale(new Vector3D<float>(1f / scale)), m);
+    }
 
     public void Dispose()
     {

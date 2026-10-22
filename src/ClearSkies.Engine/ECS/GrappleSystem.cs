@@ -89,7 +89,7 @@ public sealed class GrappleSystem : ISystem
     {
         _physics = physics;
         _players = world.GetEntities().With<Transform>().With<PlayerInput>().With<CharacterControllerComponent>().AsSet();
-        _volumes = world.GetEntities().With<ChunkGrid>().With<Transform>().AsSet();
+        _volumes = world.GetEntities().With<ChunkGrid>().Without<LowResolutionCopy>().With<Transform>().AsSet();
     }
 
     public void Update(float dt)

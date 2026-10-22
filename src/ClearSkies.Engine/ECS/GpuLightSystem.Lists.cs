@@ -111,7 +111,8 @@ public sealed partial class GpuLightSystem
         foreach (var other in _lit)
         {
             var h = other.Handle;
-            bool include = h.IsWorld || h == lg.Handle;
+            // A low-resolution copy of the world is seen only by its own rays: the world it copies is already in everyone's.
+            bool include = h == lg.Handle || (h.IsWorld && !h.IsLowResolutionCopy);
             if (!include && h.HasSolid)
             {
                 var st = _gridStates[h];
@@ -160,7 +161,13 @@ public sealed partial class GpuLightSystem
     private static void ChunkWorldBox(in LitGrid lg, ChunkPosition pos, out Vector3D<float> mn, out Vector3D<float> mx)
     {
         var lo = pos.WorldOrigin;
-        if (lg.Handle.IsWorld) { mn = lo; mx = lo + new Vector3D<float>(S); return; }
+        if (lg.Handle.IsWorld)
+        {
+            int k = lg.Handle.Scale;
+            mn = lo * k;
+            mx = mn + new Vector3D<float>(S * k);
+            return;
+        }
         mn = new Vector3D<float>(float.MaxValue);
         mx = new Vector3D<float>(float.MinValue);
         for (int c = 0; c < 8; c++)

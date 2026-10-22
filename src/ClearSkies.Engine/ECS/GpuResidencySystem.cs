@@ -81,10 +81,10 @@ public sealed class GpuResidencySystem : ISystem, IDebugUiSystem
             var entry = chunk.Entry;
             var key = (entry.Volume.Gpu, entry.Position);
             if (_waitingRemoval.ContainsKey(key)) return;
-            int bricks = key.Gpu.IsWorld ? _store.BricksOf(key.Gpu, key.Position) : 0;
+            int bricks = IsTheWorld(key.Gpu) ? _store.BricksOf(key.Gpu, key.Position) : 0;
             _waitingRemoval[key] = bricks;
             _removedChunks.Add(key);
-            if (key.Gpu.IsWorld && key.Gpu.Chunks.ContainsKey(key.Position))
+            if (IsTheWorld(key.Gpu) && key.Gpu.Chunks.ContainsKey(key.Position))
             {
                 _store.WorldChunksReleasing++;
                 _store.WorldBricksReleasing += bricks;
@@ -94,11 +94,15 @@ public sealed class GpuResidencySystem : ISystem, IDebugUiSystem
 
     private readonly EntitySet _unrenderedChunks, _unrenderedGrids;
 
+    /// <summary>Whether a grid is the world itself, whose chunks count against its light budget (see
+    /// GridStore.WorldChunksReleasing); a scaled static grid's don't.</summary>
+    private static bool IsTheWorld(GridHandle g) => g.IsWorld && !g.IsLowResolutionCopy;
+
     /// <summary>Releases a chunk if it is waiting to be.</summary>
     private bool Release((GridHandle Grid, ChunkPosition Pos) key)
     {
         if (!_waitingRemoval.Remove(key, out int bricks)) return false;
-        if (key.Grid.IsWorld && key.Grid.Chunks.ContainsKey(key.Pos))
+        if (IsTheWorld(key.Grid) && key.Grid.Chunks.ContainsKey(key.Pos))
         {
             _store.WorldChunksReleasing--;
             _store.WorldBricksReleasing -= bricks;
@@ -152,6 +156,7 @@ public sealed class GpuResidencySystem : ISystem, IDebugUiSystem
             var entry = chunk.Entry;
             var grid = entry.Volume.Gpu;
             var pos = entry.Position;
+            if (entry.Volume.IsLowResolutionCopy) _store.RegisterStatic(grid, entry.Volume.Scale); // lit as a static grid
             // Its position's (or its world index cell's) old chunk, if that is still waiting to be released, goes first.
             Release((grid, pos));
             if (_store.WorldCellHolder(grid, pos, out var holder)) Release((grid, holder));
