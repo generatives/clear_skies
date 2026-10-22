@@ -77,6 +77,10 @@ public sealed class StepTimer
         _last = t;
     }
 
+    /// <summary>Adds <paramref name="ms"/> to step <paramref name="step"/>: time measured in turns inside other work,
+    /// for steps that interleave (it isn't a lap, so the next lap still counts from the last).</summary>
+    public void Add(int step, double ms) => _frame[step] += ms;
+
     /// <summary>Time (ms) since the last <see cref="Lap"/> (or <see cref="Start"/>): how long the current step has
     /// taken so far, for work that stops at a time budget.</summary>
     public double SinceLap() => _sw.Elapsed.TotalMilliseconds - _last;

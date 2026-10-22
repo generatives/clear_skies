@@ -184,15 +184,13 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         ImGui.Text($"Columns evicted: {full.Evictions}");
         ImGui.Text($"Edited chunks: {_edited.Count}   Layers: {_minY}..{_minY + 63}");
 
-        DrawLevelsUi();
-
         ImGui.Separator();
         _steps.Draw();
     }
 
     // CPU time of each step, for the debug panel: which one a hitch while streaming came from.
     private const int ApplyStep = 0, UnloadStep = 1, QueueStep = 2, DispatchStep = 3, EvictStep = 4, EvictOrderStep = 5,
-                      DropStep = 6;
+                      LevelsStep = 6;
     private readonly StepTimer _steps = new("Adding finished columns", "Rebuild: unloading what's unwanted",
                                             "Rebuild: queueing columns", "Dispatching jobs", "Evicting far columns",
                                             "Evicting: ordering columns", "Dropping coarse blocks") { Owner = "Chunk Loading" };
@@ -200,6 +198,7 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
     public void Update(float dt)
     {
         _steps.Start();
+        _frame++;
         if (!_editsRead) ReadEdits();
         TakeEditsElsewhere();
 
@@ -232,7 +231,7 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         _steps.Lap(DispatchStep);
 
         DropSome();
-        _steps.Lap(DropStep);
+        _steps.Lap(LevelsStep);
     }
 
     /// <summary>This frame's interests as <paramref name="level"/> streams them (<see cref="TerrainLevel.Current"/>, in
@@ -300,7 +299,7 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         // (An edit that put blocks where there were none counts as a build once its chunk unloads. Until then the chunk
         // is loaded, so the queue doesn't need to know.)
         foreach (var (p, _) in level.Volume.All)
-            if (!Wanted(level, p)) level.ToUnload.Add(p);
+            if (!Wanted(level, p) && !level.Held.ContainsKey(p)) level.ToUnload.Add(p);
 
         // Forget the columns no longer wanted: their air is re-learned on return.
         foreach (var key in level.Columns.Keys.Where(k => !Wanted(level, k.x, k.z)).ToList()) level.Columns.Remove(key);
@@ -340,7 +339,39 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
     {
         double start = _steps.SinceLap();
         while (level.UnloadAt < level.ToUnload.Count && _steps.SinceLap() - start < budgetMs)
-            Unload(level, level.ToUnload[level.UnloadAt++]); // a no-op if eviction already unloaded it
+        {
+            var p = level.ToUnload[level.UnloadAt++];
+            if (KeepLoaded?.Invoke(level, p) == true && level.Volume.IsLoaded(p)) { level.Held.TryAdd(p, _frame); continue; }
+            Unload(level, p); // a no-op if eviction already unloaded it
+        }
+        // Held ones let go are unloaded under the same budget (a frame's share, even from Rebuild): many are let go at
+        // once, as a ring of coarse chunks finishes fading in.
+        LetGo(level, start, System.Math.Min(budgetMs, StreamBudgetMs));
+    }
+
+    /// <summary>Whether a level's chunk no longer wanted stays loaded for now (see <see cref="TerrainSwapSystem"/>:
+    /// until the coarser level has faded in over it, so it doesn't vanish first). Unset: everything unloads at once.</summary>
+    public Func<TerrainLevel, ChunkPosition, bool>? KeepLoaded { get; set; }
+
+    // Chunks are held at most this long, in case what they're held for never comes.
+    private const int MaxHoldFrames = 600;
+    private int _frame;
+
+    /// <summary>Lets go of the level's held chunks once they needn't stay (or they're wanted again, or held too long),
+    /// unloading them until <paramref name="budgetMs"/> after <paramref name="start"/>.</summary>
+    private void LetGo(TerrainLevel level, double start, double budgetMs)
+    {
+        if (level.Held.Count == 0) return;
+        var letGo = new List<ChunkPosition>();
+        foreach (var (p, since) in level.Held)
+        {
+            if (Wanted(level, p) || !level.Volume.IsLoaded(p)) { letGo.Add(p); continue; } // wanted again, or gone already
+            if (KeepLoaded?.Invoke(level, p) == true && _frame - since <= MaxHoldFrames) continue;
+            if (_steps.SinceLap() - start >= budgetMs) break;
+            Unload(level, p);
+            letGo.Add(p);
+        }
+        foreach (var p in letGo) level.Held.Remove(p);
     }
 
     /// <summary>Carries on the level's scan of the wanted columns, closest to an interest first, for up to
@@ -461,7 +492,7 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
     }
 
     /// <summary>The level's chunk <paramref name="p"/> is within an interest's load radius.</summary>
-    private static bool Wanted(TerrainLevel level, ChunkPosition p)
+    internal static bool Wanted(TerrainLevel level, ChunkPosition p)
         => p.Y >= level.MinY && p.Y <= level.MaxY && (WantedLayers(level, p.X, p.Z) & level.Bit(p)) != 0;
 
     /// <summary>The layers of the level's column (x, z) within an interest's load radius, as bits from its lowest

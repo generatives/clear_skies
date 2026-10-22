@@ -112,7 +112,10 @@ public sealed partial class GpuLightSystem
     private readonly List<(Vector3D<float> min, Vector3D<float> max)> _bounceClears = new();
     private readonly List<int> _clearSlots = new();
     private GpuBuffer? _clearWork;
-    private readonly List<(Vector3D<float> min, Vector3D<float> max)> _occluderChanges = new();
+    // Each with the scale of the coarsest grid whose rays see it, and whether what it marks is relit this frame (see
+    // BuildLightWork) or queued nearest first under the cap.
+    private readonly List<(Vector3D<float> min, Vector3D<float> max, int seenUpTo, bool urgent)> _occluderChanges = new();
+    private int _seenUpTo = int.MaxValue; // marking for a static grid's change: only grids up to this scale see it
     private readonly List<(Vector3D<float> min, Vector3D<float> max)> _directChanges = new();
     // This frame's lamp boxes relit (lamp changes, and lamps in reach of an occluder change): with AO only, their
     // bricks are touched so they compose (see TouchBounce).
@@ -208,21 +211,18 @@ public sealed partial class GpuLightSystem
         }
         else
         {
-            // One set of marks at a time (see BrickMarks): everything an occluder change touches (right at it,
+            // One set of marks at a time (see BrickMarks): everything an urgent occluder change touches (right at it,
             // voxels whose sun ray passes through it, the radius of lamps whose rays may), relit this frame; then the
-            // lamp changes, queued.
-            var pad = new Vector3D<float>(1.5f);
-            foreach (var (mn, mx) in _occluderChanges)
-            {
-                MarkRegion(mn - pad, mx + pad, _urgentMarks);
-                MarkSunShadow(mn, mx, sunDir, _urgentMarks);
-                foreach (var lamp in _lamps) { var (a, b) = LampBox(lamp); if (Overlaps(a, b, mn, mx)) MarkLampBox(a, b); }
-                foreach (var lamp in _prevLamps) { var (a, b) = LampBox(lamp); if (Overlaps(a, b, mn, mx)) MarkLampBox(a, b); }
-            }
+            // other changes and the lamp changes, queued.
+            MarkOccluderChanges(sunDir, urgent: true, _urgentMarks);
+            MarkLampsAt(urgent: true);
             if (!_urgentMarks.IsEmpty) _urgentMarks.Flush(_urgentSlotDelegate ??= MarkUrgent);
+            MarkOccluderChanges(sunDir, urgent: false, _marks);
             foreach (var (mn, mx) in _directChanges) MarkRegion(mn, mx);
             _lampRelit.AddRange(_directChanges);
             if (!_marks.IsEmpty) _marks.Flush(_markSlot);
+            MarkLampsAt(urgent: false); // lamps whose light a change may block are relit now either way
+            if (!_urgentMarks.IsEmpty) _urgentMarks.Flush(_urgentSlotDelegate ??= MarkUrgent);
         }
         _phaseTimer.Lap(2);
 
@@ -378,16 +378,20 @@ public sealed partial class GpuLightSystem
         // World chunks: loads and unloads (the whole chunk) and edits (just the edited blocks' bounds). A chunk with no
         // solid before or after can't have shadowed anything; the bricks it gained or lost storage for are already in
         // NewSlots.
-        foreach (var (grid, vmn, vmx, solid, _) in _store.ChangedChunks)
+        foreach (var (grid, vmn, vmx, solid, _, cover) in _store.ChangedChunks)
         {
             if (!grid.IsWorld) continue; // a ship's edit shows as its version changing (see below)
             _dbgChangedChunks++;
             // A block edit (bounds smaller than the chunk; a load or unload is the whole chunk): see TouchEdits. Only the
-            // world is edited.
-            if (vmx.X - vmn.X < S || vmx.Y - vmn.Y < S || vmx.Z - vmn.Z < S) _editBoxes.Add((vmn, vmx));
+            // world is edited; a low-resolution copy of it is uploaded whole.
+            bool edit = vmx.X - vmn.X < S || vmx.Y - vmn.Y < S || vmx.Z - vmn.Z < S;
+            if (edit) _editBoxes.Add((vmn, vmx));
             var mn = vmn * (float)grid.Scale; // world space
             var mx = vmx * (float)grid.Scale;
-            if (solid && !relightAll) _occluderChanges.Add((mn, mx));
+            // Seen by the rays of its own grid and finer ones (see AppendChunkList); covering, by the finer ones only.
+            // An edit shows at once; terrain loading, unloading or being covered (whole chunks, many at once as the view
+            // moves on) goes in the queue: relit all in one frame, the sun pass took tens of ms each column crossed.
+            if (solid && !relightAll) _occluderChanges.Add((mn, mx, cover ? grid.Scale / 2 : grid.Scale, edit));
             if (solid) _shapeChanges.Add((mn, mx));
         }
         _store.ChangedChunks.Clear();
@@ -412,8 +416,8 @@ public sealed partial class GpuLightSystem
                 st.LightAll = true;
                 // Like a placed block, the ship may now shade what it didn't: the bricks around both poses and along
                 // both sun shadows are relit this frame, and everything within bounce reach of the hull is touched.
-                if (st.HavePrev) { _occluderChanges.Add((st.PrevWorldMin, st.PrevWorldMax)); _shipMoves.Add((st.PrevWorldMin, st.PrevWorldMax)); }
-                if (h.HasSolid) { _occluderChanges.Add((st.CurWorldMin, st.CurWorldMax)); _shipMoves.Add((st.CurWorldMin, st.CurWorldMax)); }
+                if (st.HavePrev) { _occluderChanges.Add((st.PrevWorldMin, st.PrevWorldMax, int.MaxValue, true)); _shipMoves.Add((st.PrevWorldMin, st.PrevWorldMax)); }
+                if (h.HasSolid) { _occluderChanges.Add((st.CurWorldMin, st.CurWorldMax, int.MaxValue, true)); _shipMoves.Add((st.CurWorldMin, st.CurWorldMax)); }
             }
             st.HavePrev     = h.HasSolid;
             st.PrevVersion  = h.Version;
@@ -554,6 +558,33 @@ public sealed partial class GpuLightSystem
     /// <summary>Marks every surface brick overlapping the world-space box: per brick in the static world, the
     /// whole grid for a ship whose solid bounds it touches. World bricks go into <paramref name="marks"/> (default
     /// <see cref="_marks"/>).</summary>
+    /// <summary>Marks what this frame's urgent (or other) occluder changes touch (at them, and in their sun shadow) into
+    /// <paramref name="marks"/>.</summary>
+    private void MarkOccluderChanges(Vector3D<float> sunDir, bool urgent, BrickMarks marks)
+    {
+        var pad = new Vector3D<float>(1.5f);
+        foreach (var (mn, mx, seenUpTo, isUrgent) in _occluderChanges)
+        {
+            if (isUrgent != urgent) continue;
+            // A static grid's change isn't seen by coarser grids' rays (see AppendChunkList).
+            _seenUpTo = seenUpTo;
+            MarkRegion(mn - pad, mx + pad, marks);
+            MarkSunShadow(mn, mx, sunDir, marks);
+            _seenUpTo = int.MaxValue;
+        }
+    }
+
+    /// <summary>Marks the lamps whose reach this frame's urgent (or other) occluder changes overlap (urgent marks).</summary>
+    private void MarkLampsAt(bool urgent)
+    {
+        foreach (var (mn, mx, _, isUrgent) in _occluderChanges)
+        {
+            if (isUrgent != urgent) continue;
+            foreach (var lamp in _lamps) { var (a, b) = LampBox(lamp); if (Overlaps(a, b, mn, mx)) MarkLampBox(a, b); }
+            foreach (var lamp in _prevLamps) { var (a, b) = LampBox(lamp); if (Overlaps(a, b, mn, mx)) MarkLampBox(a, b); }
+        }
+    }
+
     private void MarkRegion(Vector3D<float> mn, Vector3D<float> mx, BrickMarks? marks = null)
     {
         foreach (var lg in _lit)
@@ -562,7 +593,7 @@ public sealed partial class GpuLightSystem
             if (st.LightAll) continue;
             if (lg.Handle.IsWorld)
             {
-                MarkWorldBox(lg.Handle, mn, mx, marks ?? _marks);
+                if (lg.Handle.Scale <= _seenUpTo) MarkWorldBox(lg.Handle, mn, mx, marks ?? _marks);
             }
             else if (lg.Handle.HasSolid)
             {
@@ -634,7 +665,8 @@ public sealed partial class GpuLightSystem
             if (!st.LightAll && RayHitsBox(centre, sunDir, st.CurWorldMin - half, st.CurWorldMax + half)) st.LightAll = true;
         }
 
-        foreach (var g in _static) SweepSunShadow(g, mn, mx, sunDir, marks);
+        foreach (var g in _static)
+            if (g.Scale <= _seenUpTo) SweepSunShadow(g, mn, mx, sunDir, marks);
     }
 
     /// <summary>The static grid part of <see cref="MarkSunShadow"/>, in <paramref name="world"/>'s voxel space.</summary>
@@ -827,6 +859,55 @@ public sealed partial class GpuLightSystem
     /// <summary>Whether a brick has an update to come: touched since its last, or owed more for its last change.</summary>
     private bool NeedsUpdate(int slot) => _left[slot] > 0;
 
+    /// <summary>
+    /// Whether chunk <paramref name="pos"/> of grid <paramref name="g"/> is lit: none of its bricks waits for direct
+    /// light, and with bounce on each has had a bounce update since it was last touched (that update blends in half the
+    /// change; later ones refine it). For holding terrain back until it shows its light (see ChunkLoadSystem's levels).
+    /// Bricks given storage since the last lighting frame aren't marked yet: ask a frame after a change.
+    /// </summary>
+    public bool IsLit(GridHandle g, ChunkPosition pos)
+    {
+        if (!g.Chunks.TryGetValue(pos, out var rec) || rec.BrickSlots is not { } slots) return true;
+        foreach (int slot in slots)
+        {
+            if (slot < 0) continue;
+            if (slot >= _dirty.Length || _dirty[slot]) return false;
+            if (_bounceEnabled && (_lastUpdate[slot] == NeverUpdated || _left[slot] == Touched)) return false;
+        }
+        return true;
+    }
+
+    // Chunks waiting to be shown (see ShowFirst), until this frame's lighting takes them; then nearest the camera first.
+    private readonly List<(GridHandle Grid, ChunkPosition Pos)> _showFirst = new();
+    private readonly List<(float DistSq, GridHandle Grid, ChunkPosition Pos)> _showOrder = new();
+    private const int MaxShowFirst = 4096;
+
+    /// <summary>
+    /// Puts chunk <paramref name="pos"/> of static grid <paramref name="g"/> ahead of the queues on the next lighting
+    /// frame, within their caps: for terrain waiting to be shown until it's lit (a coarse level's chunk held back for
+    /// its first light, behind the fog; full detail waiting to swap in for one). Its bricks waiting for direct light are
+    /// relit, and those owed a bounce update get one, before any other queued brick, nearest the camera first. The rest
+    /// of the queues (light changing on terrain already shown) go on with what's left. Ask every frame it's wanted.
+    /// </summary>
+    public void ShowFirst(GridHandle g, ChunkPosition pos)
+    {
+        if (_showFirst.Count < MaxShowFirst) _showFirst.Add((g, pos));
+    }
+
+    /// <summary>This frame's chunks to show first, nearest the camera first (see <see cref="ShowFirst"/>).</summary>
+    private void OrderShowFirst(Vector3D<float> camPos)
+    {
+        _showOrder.Clear();
+        foreach (var (g, pos) in _showFirst)
+        {
+            float size = ChunkData.Size * g.Scale;
+            var centre = new Vector3D<float>((pos.X + 0.5f) * size, (pos.Y + 0.5f) * size, (pos.Z + 0.5f) * size);
+            _showOrder.Add((Vector3D.DistanceSquared(centre, camPos), g, pos));
+        }
+        _showFirst.Clear();
+        _showOrder.Sort((a, b) => a.DistSq.CompareTo(b.DistSq));
+    }
+
     /// <summary>AO only: whether a ship's rays can reach another grid, at its pose this frame.</summary>
     private bool NearOtherGrid(in LitGrid ship, GridLightState st)
     {
@@ -951,6 +1032,15 @@ public sealed partial class GpuLightSystem
         foreach (int slot in _urgentMarked)
             if (_dirty[slot]) TakeDirty(slot, ref n);
         int urgent = _relitList.Count;
+        // Then terrain waiting to be shown (see ShowFirst), then the rest, each nearest first, up to the cap.
+        OrderShowFirst(camPos);
+        foreach (var (_, g, pos) in _showOrder)
+        {
+            if (_relitList.Count - urgent >= _maxRelitPerFrame) break;
+            if (!g.Chunks.TryGetValue(pos, out var rec) || rec.BrickSlots is not { } slots) continue;
+            foreach (int slot in slots)
+                if (slot >= 0 && slot < _dirty.Length && _dirty[slot]) TakeDirty(slot, ref n);
+        }
         _dirtyQueue.Recentre(camPos, _keepDirty ??= slot => _dirty[slot]);
         while (_relitList.Count - urgent < _maxRelitPerFrame && _dirtyQueue.TryTake(out int slot))
             if (_dirty[slot]) TakeDirty(slot, ref n);
@@ -998,7 +1088,25 @@ public sealed partial class GpuLightSystem
             if (IsStaticSlot(slot) && _lastUpdate[slot] != _frame && NeedsUpdate(slot))
                 UpdateBrick(slot, WorldBandOf(slot));
 
+        // Terrain waiting to be shown first (see ShowFirst), whether or not its band is due: it's held back until each
+        // brick has had an update. Then the queue, with what's left.
         int spent = 0;
+        foreach (var (_, g, pos) in _showOrder)
+        {
+            if (spent >= _maxGroupsPerFrame) break;
+            if (!g.Chunks.TryGetValue(pos, out var rec) || rec.BrickSlots is not { } slots) continue;
+            foreach (int slot in slots)
+            {
+                if (slot < 0 || slot >= _dirty.Length || _dirty[slot] || _lastUpdate[slot] == _frame) continue; // direct light first
+                if (!NeedsUpdate(slot))
+                {
+                    if (_lastUpdate[slot] != NeverUpdated) continue;
+                    Touch(slot);
+                }
+                spent += UpdateBrick(slot, WorldBandOf(slot));
+            }
+        }
+        _showOrder.Clear();
         _putBack.Clear();
         var queues = UpdateQueues();
         var queue = queues[(int)((uint)(queues.Length - (uint)_frame % (uint)queues.Length) % (uint)queues.Length)];

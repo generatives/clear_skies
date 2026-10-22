@@ -34,7 +34,7 @@ const OPEN_AIR_GRID: i32 = -2;         // a chunk lit as open air, with no light
 // sunDir.w: sun strength (SunLight.Strength). lightParams.x: unused (ray AO is in the voxel light), .y: the climate
 // tint volume's origin x (lightParams2.w its z; see climateTinted), .z: ambient
 // (0-1), .w: 1 on an sRGB surface (see lin). camPos.xyz: camera world position. fog.xy: the world's fog start/end
-// (horizontal), fog.zw: the cloud layer's (see CloudLayer), in blocks from the camera. zenith/horizon.rgb: the sky
+// (by distance), fog.zw: the cloud layer's (see CloudLayer), in blocks from the camera. zenith/horizon.rgb: the sky
 // gradient (see SkySettings). horizon.w: the distance haze's strength (0-1), haze.rgb its colour, haze.w its distance.
 // sea: the cloud sea's altitude, coverage (0 = off), cell size and thickness, in blocks (see cloudSea).
 // lightParams2.x: exposure, a multiplier on lit surfaces before fog. lightParams2.y/.z: render pass debug toggles
@@ -101,12 +101,13 @@ fn applyHaze(color: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
 }
 
 // Hazes a lit surface colour at worldPos, then fades it into what fs_sky draws behind it (the sky, or the cloud sea
-// below) by horizontal distance: streaming loads whole chunk columns, so the loaded world ends only sideways, where
-// the fog is total (see SkySettings.FogDistance). Fading into the sky colour alone would leave islands showing as
-// blue shapes over the white sea as they load in.
+// below) by distance: the loaded world ends in a ball around the view (coarse levels of terrain are balls; without
+// them, streaming loads whole columns, which reach at least as far), where the fog is total (see
+// SkySettings.FogDistance). Fading into the sky colour alone would leave islands showing as blue shapes over the white
+// sea as they load in.
 fn applyFog(color: vec3<f32>, worldPos: vec3<f32>) -> vec3<f32> {
     let d = worldPos - camera.camPos.xyz;
-    let f = smoothstep(camera.fog.x, camera.fog.y, length(d.xz));
+    let f = smoothstep(camera.fog.x, camera.fog.y, length(d));
     let hazed = applyHaze(color, d);
     if (f <= 0.0) { return applyWater(hazed, d); } // only the fog band pays for tracing the sea
     return applyWater(mix(hazed, background(normalize(d)).rgb, f), d);
@@ -606,7 +607,9 @@ fn fs_chunk(in: VSOut) -> @location(0) vec4<f32> {
 @fragment
 fn fs_chunk_dissolve(in: VSOut) -> @location(0) vec4<f32> {
     if (dissolved(in)) { discard; }
-    return vec4<f32>(shadeBlock(in, blockColor(in).rgb, false, false), 1.0);
+    var base = blockColor(in).rgb;
+    if (in.lm.w != 0u) { base = climateTinted(base, in.worldPos); }
+    return vec4<f32>(shadeBlock(in, base, false, false), 1.0);
 }
 
 // Translucent blocks' faces (see RenderLayer.Translucent), alpha-blended over the opaque world: lit like fs_main, with
