@@ -40,6 +40,10 @@ public sealed class TerrainSwapSystem : ISystem
         public float FadeAt = float.NegativeInfinity; // when it last swapped in (while drawn) or out
         public bool Quiet;    // done swapping and settled: looked at again only when something changes (see Update)
         public bool Parked;   // waiting only for its mesh or its place in the light store: looked at again when it comes
+        // As of its last look (see Remember): how it's drawn, less what a coarser level over it hides, and how much it
+        // hides the finer chunks under it. Neither changes while it's quiet or parked, so the renderer reads them.
+        public ChunkDrawState State = ChunkDrawState.Hidden;
+        public float Cover;
     }
 
     private const int S = ChunkData.Size;
@@ -162,17 +166,19 @@ public sealed class TerrainSwapSystem : ISystem
     /// finer level coming back draws); and for any level, hidden the same way by a coarser level over it. A coarse chunk
     /// is lit from the store once it's settled there; until then with the light maps it last baked; one never lit isn't
     /// drawn (it waits behind the fog) unless there's no lighting, when it's lit as open air.</summary>
+    /// <remarks>Asked for every chunk in view every frame, so it reads what each swap worked out when last looked at
+    /// (see <see cref="Remember"/>) rather than working it out again.</remarks>
     public ChunkDrawState DrawState(TerrainLevel level, ChunkPosition p)
     {
         Swap? c = null;
-        float dissolve = 0f;
+        var own = ChunkDrawState.Whole;
         if (level.Level > 0)
         {
-            if (!SwapsOf(level).TryGetValue(p, out c) || !Kept(level, p)) return ChunkDrawState.Hidden;
-            float share = c.Drawn ? Faded(c.FadeAt) : 1f - Faded(c.FadeAt);
-            if (share <= 0f) return ChunkDrawState.Hidden;
-            dissolve = c.Drawn ? (share < 1f ? -share : 0f) : 1f - share;
+            if (!SwapsOf(level).TryGetValue(p, out c)) return ChunkDrawState.Hidden;
+            own = c.State;
+            if (own.Dissolve >= 1f) return ChunkDrawState.Hidden;
         }
+        float dissolve = own.Dissolve;
         if (level.Coarser is { } coarser)
         {
             float over = CoverOf(coarser, p);
@@ -180,11 +186,22 @@ public sealed class TerrainSwapSystem : ISystem
             if (over != 0f) dissolve = over;
         }
         if (c == null) return dissolve == 0f ? ChunkDrawState.Whole : new ChunkDrawState(dissolve);
-        if (Waits(level, c, p)) return ChunkDrawState.Hidden;
-        ChunkLight light;
-        if (c.Settled && Uploaded(level, p)) { light = ChunkLight.Baked; c.Baked = true; }
-        else light = c.Baked ? ChunkLight.Kept : ChunkLight.OpenAir;
-        return new ChunkDrawState(dissolve, light);
+        if (own.Light == ChunkLight.Baked) c.Baked = true;
+        return new ChunkDrawState(dissolve, own.Light);
+    }
+
+    /// <summary>Works out how a coarse chunk is drawn (as <see cref="DrawState"/> says, less a coarser level over it)
+    /// and how much it hides the finer level under it (see <see cref="CoverOf"/>), after a look at its swap.</summary>
+    private void Remember(TerrainLevel level, Swap c, ChunkPosition p)
+    {
+        bool waits = Waits(level, c, p);
+        float t = Faded(c.FadeAt);
+        c.Cover = waits ? 0f : c.Drawn ? t : t >= 1f ? 0f : t <= 0f ? 1f : -t;
+        float share = c.Drawn ? t : 1f - t;
+        if (waits || share <= 0f || !Kept(level, p)) { c.State = ChunkDrawState.Hidden; return; }
+        float dissolve = c.Drawn ? (share < 1f ? -share : 0f) : 1f - share;
+        var light = c.Settled && Uploaded(level, p) ? ChunkLight.Baked : c.Baked ? ChunkLight.Kept : ChunkLight.OpenAir;
+        c.State = new ChunkDrawState(dissolve, light);
     }
 
     /// <summary>How much the finer level's chunk <paramref name="finer"/> is hidden by <paramref name="level"/> over
@@ -194,12 +211,7 @@ public sealed class TerrainSwapSystem : ISystem
     private float CoverOf(TerrainLevel level, ChunkPosition finer)
     {
         var p = new ChunkPosition(finer.X >> 1, finer.Y >> 1, finer.Z >> 1);
-        float own = 0f;
-        if (SwapsOf(level).TryGetValue(p, out var c) && !Waits(level, c, p))
-        {
-            float t = Faded(c.FadeAt);
-            own = c.Drawn ? t : t >= 1f ? 0f : t <= 0f ? 1f : -t;
-        }
+        float own = SwapsOf(level).TryGetValue(p, out var c) ? c.Cover : 0f;
         return own == 0f && level.Coarser is { } coarser ? CoverOf(coarser, p) : own;
     }
 
@@ -342,6 +354,7 @@ public sealed class TerrainSwapSystem : ISystem
                     c.FadeAt = float.NegativeInfinity;
                     SetCover(level, p, c, uploaded, false);
                     c.Quiet = true;
+                    Remember(level, c, p);
                     t1 = Stopwatch.GetTimestamp();
                     _readyTicks += t1 - t2;
                     continue;
@@ -405,6 +418,7 @@ public sealed class TerrainSwapSystem : ISystem
                 bool still = c.Leaving == 0 && !(ready && c.Drawn) && Faded(c.FadeAt) >= 1f;
                 c.Quiet = still && uploaded && c.Settled && !waits;
                 c.Parked = still && !c.Quiet && (!uploaded || c.Settled && !e!.Value.Has<ChunkMeshedFlag>());
+                Remember(level, c, p);
                 t1 = Stopwatch.GetTimestamp();
                 _lightTicks += t1 - t3;
             }
