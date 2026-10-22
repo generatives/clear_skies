@@ -72,6 +72,7 @@ internal sealed class ChunkRecord
     public ulong Solid, Air;          // per-8³-brick "has solid" / "has air" (bit = bx + 4*(by + 4*bz))
     public int SeeSlot = -1;          // occupancy pool slot of its see-through (BlockDef.CatchesLight) bits, or -1 for none
     public ulong SeeThrough;          // per-8³-brick "has see-through"
+    public int TranslucentSlot = -1;  // occupancy pool slot of its translucent (water) bits, or -1 for none
     public ulong Surface;             // bricks holding (conservatively) a surface air voxel
     public int[]? BrickSlots;         // light slot per brick, -1 = none
     public bool Virtual;              // a ship's air chunk next to its blocks, with no ChunkEntry behind it
@@ -573,6 +574,12 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
             OccPool.Write<uint>((ulong)rec.SeeSlot * WordsPerChunk * 4, seeThrough);
         }
         else FreeSeeThrough(rec);
+        if (entry.PackedTranslucentWords is { } translucent)
+        {
+            if (rec.TranslucentSlot < 0) rec.TranslucentSlot = AllocOcc();
+            OccPool.Write<uint>((ulong)rec.TranslucentSlot * WordsPerChunk * 4, translucent);
+        }
+        else FreeTranslucent(rec);
 
         if (rec.Solid == 0 || rec.Air == 0)
         {
@@ -668,24 +675,29 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     {
         var words = new uint[WordsPerChunk];
         var emitters = new List<EmitterVoxel>();
-        var seeThrough = PackOpacity(data, words, emitters);
+        var seeThrough = PackOpacity(data, words, emitters, out var translucent);
         var (solid, air) = BrickMasks(words);
-        return new PackedOpacity(words, solid, air, emitters, seeThrough, seeThrough == null ? 0 : BrickMasks(seeThrough).solid);
+        return new PackedOpacity(words, solid, air, emitters, seeThrough, seeThrough == null ? 0 : BrickMasks(seeThrough).solid,
+                                 translucent);
     }
 
     /// <summary>Packs a chunk's opacity into <paramref name="words"/> (lx is the in-word bit, ly + 32*lz the word),
     /// listing its light emitters if <paramref name="emitters"/> is given. Returns its see-through blocks
     /// (<see cref="BlockDef.CatchesLight"/>) packed the same way, or null if it has none: only those with a face to
-    /// light (see <see cref="NeedsLight"/>), so the inside of a lake or a glass block doesn't take light storage.</summary>
-    private static uint[]? PackOpacity(ChunkData data, uint[] words, List<EmitterVoxel>? emitters)
+    /// light (see <see cref="NeedsLight"/>), so the inside of a lake or a glass block doesn't take light storage.
+    /// <paramref name="translucent"/>: its <see cref="RenderLayer.Translucent"/> blocks (water), all of them, packed the
+    /// same way, or null if it has none.</summary>
+    private static uint[]? PackOpacity(ChunkData data, uint[] words, List<EmitterVoxel>? emitters, out uint[]? translucent)
     {
         uint[]? seeThrough = null;
+        translucent = null;
         if (data.IsUniform(out var block) && BlockRegistry.Get(block).LightEmission == 0)
         {
             Array.Fill(words, BlockRegistry.Get(block).BlocksLight ? uint.MaxValue : 0u);
             // A uniform chunk's blocks hide each other's faces, unless they show them or are models.
             var u = BlockRegistry.Get(block);
             if (u.CatchesLight && (u.ShowsInnerFaces || !u.IsFullCube)) { seeThrough = new uint[WordsPerChunk]; Array.Fill(seeThrough, uint.MaxValue); }
+            if (u.Layer == RenderLayer.Translucent) { translucent = new uint[WordsPerChunk]; Array.Fill(translucent, uint.MaxValue); }
             return seeThrough;
         }
         for (int lz = 0; lz < S; lz++)
@@ -697,6 +709,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
                 var def = BlockRegistry.Get(data.Get(lx, ly, lz));
                 if (def.BlocksLight) bits |= 1u << lx;
                 if (def.CatchesLight && NeedsLight(data, lx, ly, lz, def)) (seeThrough ??= new uint[WordsPerChunk])[ly + S * lz] |= 1u << lx;
+                if (def.Layer == RenderLayer.Translucent) (translucent ??= new uint[WordsPerChunk])[ly + S * lz] |= 1u << lx;
                 if (def.LightEmission > 0)
                     emitters?.Add(new EmitterVoxel((byte)lx, (byte)ly, (byte)lz, def.LightEmission, def.Id));
             }
@@ -829,6 +842,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     {
         FreeOcc(rec);
         FreeSeeThrough(rec);
+        FreeTranslucent(rec);
         if (rec.BrickSlots != null)
         {
             for (int b = 0; b < 64; b++)
@@ -956,7 +970,8 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     }
 
     /// <summary>A chunk's table entry: (occupancy slot or code, cx, cy, cz), then which 8³ bricks hold any solid, so
-    /// rays can step over empty bricks whole, and its see-through bits' occupancy slot plus one (0: none).</summary>
+    /// rays can step over empty bricks whole, its see-through bits' occupancy slot plus one (0: none) and its translucent
+    /// bits' likewise.</summary>
     private static void EntryWords(ChunkRecord rec, Span<int> e)
     {
         int code = rec.OccSlot >= 0 ? rec.OccSlot
@@ -964,7 +979,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
                  : rec.Air == 0 ? OccAllSolid
                  : OccUnloaded;
         e[0] = code; e[1] = rec.Pos.X; e[2] = rec.Pos.Y; e[3] = rec.Pos.Z;
-        e[4] = (int)(uint)rec.Solid; e[5] = (int)(uint)(rec.Solid >> 32); e[6] = rec.SeeSlot + 1; e[7] = 0;
+        e[4] = (int)(uint)rec.Solid; e[5] = (int)(uint)(rec.Solid >> 32); e[6] = rec.SeeSlot + 1; e[7] = rec.TranslucentSlot + 1;
     }
 
     private void WriteBrickRun(ChunkRecord rec)
@@ -1121,6 +1136,13 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         if (rec.SeeSlot < 0) return;
         _occFree.Push(rec.SeeSlot);
         rec.SeeSlot = -1;
+    }
+
+    private void FreeTranslucent(ChunkRecord rec)
+    {
+        if (rec.TranslucentSlot < 0) return;
+        _occFree.Push(rec.TranslucentSlot);
+        rec.TranslucentSlot = -1;
     }
 
     private int AllocLight(GridHandle g, ChunkPosition pos, int brick)

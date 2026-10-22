@@ -652,9 +652,20 @@ fn fs_chunk_transparent(in: VSOut, @builtin(front_facing) front: bool) -> @locat
 const WATER_CLEAR: f32 = 5.0;
 const WATER_MAX_PATH: f32 = 16.0;
 
+// Whether voxel v in this draw's grid holds water (a translucent block): its chunk's translucent bits, whose occupancy
+// slot plus one is its chunk-table entry's second word's w (0 for none, see GridStore.EntryWords).
+fn isWater(v: vec3<i32>) -> bool {
+    let i = entryOf(drawGrid, v >> vec3<u32>(5u));
+    if (i < 0) { return false; }
+    let slot = chunkTable[2 * i + 1].w;
+    if (slot <= 0) { return false; }
+    let l = v & vec3<i32>(31);
+    return ((occPool[u32((slot - 1) * WPC + l.y + 32 * l.z)] >> u32(l.x)) & 1u) == 1u;
+}
+
 // How far the view goes from p (grid space, just inside a water face) along rd (normalized, grid space) before it
-// reaches a block that blocks light, in blocks, up to WATER_MAX_PATH: a walk through the cells it crosses. Air behind
-// the water (seen through a wall of it) would count as more water, but water doesn't stand in walls.
+// leaves the water, onto the bed or out into air (through a waterfall), in blocks, up to WATER_MAX_PATH: a walk
+// through the cells it crosses.
 fn waterPath(p: vec3<f32>, rd: vec3<f32>) -> f32 {
     var cell = vec3<i32>(floor(p));
     let stepC = vec3<i32>(select(-1, 1, rd.x > 0.0), select(-1, 1, rd.y > 0.0), select(-1, 1, rd.z > 0.0));
@@ -662,7 +673,7 @@ fn waterPath(p: vec3<f32>, rd: vec3<f32>) -> f32 {
     var tMax = abs(select(floor(p), floor(p) + 1.0, rd > vec3<f32>(0.0)) - p) * tDelta;
     var t = 0.0;
     for (var i = 0; i < 64; i++) {
-        if (isSolid(cell)) { return t; }
+        if (!isWater(cell)) { return t; }
         t = min(tMax.x, min(tMax.y, tMax.z));
         if (t >= WATER_MAX_PATH) { break; }
         if (tMax.x <= tMax.y && tMax.x <= tMax.z) { tMax.x += tDelta.x; cell.x += stepC.x; }
