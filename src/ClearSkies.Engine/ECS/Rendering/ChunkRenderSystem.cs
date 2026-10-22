@@ -83,7 +83,10 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     public const int BakeQuadBudget = 65536;
     private int _waitingFirstBake; // static volumes' chunks in view left out this frame: past the budget, never baked
     // Static volumes' chunks with something to draw whose light maps were never baked, in the order they were meshed.
-    private readonly List<Entity> _unbaked = new();
+    // By the volume's scale, finest first: a coarser level's chunk is often only standing in for the finer one's, which
+    // the fog waits on.
+    private readonly SortedDictionary<int, List<Entity>> _unbaked = new();
+    private int UnbakedCount => _unbaked.Values.Sum(l => l.Count);
     private int _bakedQuads;
 
     /// <summary>Cell-local placement per <see cref="BlockOrientation"/> (indexed by its byte): a model block's model is
@@ -115,7 +118,11 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     {
         var volume = e.Has<Chunk>() ? e.Get<Chunk>().Entry.Volume : null;
         if (volume == null || (volume != _world && !volume.IsLowResolutionCopy)) { _others.Add(e); return; }
-        if (!rd.IsEmpty && !e.Has<LightmapsBakedFlag>()) _unbaked.Add(e);
+        if (!rd.IsEmpty && !e.Has<LightmapsBakedFlag>())
+        {
+            if (!_unbaked.TryGetValue(volume.Scale, out var list)) _unbaked[volume.Scale] = list = new();
+            list.Add(e);
+        }
         var sv = StaticOf(volume);
         var key = (rd.ChunkPos.X, rd.ChunkPos.Z);
         if (!sv.Columns.TryGetValue(key, out var column)) { sv.Columns[key] = column = new WorldColumn(); _columnCount++; }
@@ -335,10 +342,15 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     /// light store yet waits for its place there.</summary>
     private void BakeFirstTimes()
     {
+        foreach (var unbaked in _unbaked.Values) BakeFirstTimes(unbaked);
+    }
+
+    private void BakeFirstTimes(List<Entity> unbaked)
+    {
         int kept = 0;
-        for (int i = 0; i < _unbaked.Count; i++)
+        for (int i = 0; i < unbaked.Count; i++)
         {
-            var e = _unbaked[i];
+            var e = unbaked[i];
             if (!e.IsAlive || !e.Has<ChunkRenderData>()) continue;
             ref readonly var rd = ref e.Get<ChunkRenderData>();
             if (!Baked(rd) && e.Has<ChunkUploadedFlag>() && _bakedQuads < BakeQuadBudget)
@@ -352,9 +364,9 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
                 }
             }
             if (Baked(rd)) e.Set<LightmapsBakedFlag>();
-            else _unbaked[kept++] = e;
+            else unbaked[kept++] = e;
         }
-        _unbaked.RemoveRange(kept, _unbaked.Count - kept);
+        unbaked.RemoveRange(kept, unbaked.Count - kept);
 
         bool Baked(in ChunkRenderData rd)
             => _renderer.LightmapEverBaked(rd.Mesh) && _renderer.LightmapEverBaked(rd.CutoutMesh)
@@ -443,7 +455,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         ImGui.Text($"Light maps: {used * 4 / 1048576.0:F1} of {capacity * 4 / 1048576.0:F1} MB; baked per frame (smoothed): " +
                    $"{_bakedMeshesEma:F1} meshes, {_bakedGroupsEma * Renderer.LightmapQuadsPerGroup:N0} quads at most");
         ImGui.Text($"Chunks in view not drawn yet, waiting for their first bake (past {BakeQuadBudget:N0} " +
-                   $"quads this frame): {_waitingFirstBake:N0}; never baked in all: {_unbaked.Count:N0}");
+                   $"quads this frame): {_waitingFirstBake:N0}; never baked in all: {UnbakedCount:N0}");
     }
 }
 
