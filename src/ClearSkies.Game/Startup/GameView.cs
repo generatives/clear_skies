@@ -44,15 +44,14 @@ public sealed class GameView : IDisposable
         Budget = new LightBudget(GridStore);
         _checkerBounce = options.CheckerBounce;
         _lodLevels = options.LodLevels;
+        _lodDistance = options.LodDistance;
 
         InputSample = new InputSampleSystem(host.World, host.Input, host.Time);
     }
 
     private readonly int? _checkerBounce;
     private readonly int _lodLevels;
-
-    /// <summary>How far full detail loads with distant terrain drawn coarse (blocks).</summary>
-    private const float FullDetailRadius = 512f;
+    private readonly float? _lodDistance;
 
     public WindowedEngineHost Host { get; }
     public BlockModelLibrary BlockModels { get; }
@@ -106,9 +105,19 @@ public sealed class GameView : IDisposable
         host.AddSystem((ISystem)_particles, SystemStage.Frame); // moves every emitter's particles
         var chunks = new ChunkRenderSystem(host.World, renderer, volume);
         host.AddSystem(chunks, SystemStage.RenderWorld);
-        // Distant terrain drawn coarse past full detail, in levels (--lod-levels).
+        // Distant terrain drawn coarse past full detail, in levels (--lod-levels, and the Distant Terrain panel).
+        var load = world.ChunkLoad;
+        var swaps = world.TerrainSwaps;
+        swaps.IsLit = light.IsLit;                // swaps wait for the incoming terrain's light
+        swaps.ShowFirst = light.ShowFirst;        // terrain waiting to be shown is lit ahead of the rest
+        swaps.SetCovered = GridStore.SetCovered;  // each level lit by its own blocks where a finer one is in
         if (_lodLevels > 0)
-            world.ChunkLoad.SetLevels(FullDetailRadius, Enumerable.Range(1, _lodLevels).Select(k => FullDetailRadius * (1 << k)).ToArray());
+        {
+            var radii = DistantTerrainPanel.DefaultRadii(_lodLevels);
+            if (_lodDistance is { } far) radii[^1] = far;
+            load.SetLevels(DistantTerrainPanel.DefaultFullDetailRadius, radii);
+        }
+        host.AddSystem(new DistantTerrainPanel(load, swaps), SystemStage.Frame);
         host.AddSystem(new ModelRenderSystem(host.World, renderer, host.Time), SystemStage.RenderWorld);
         host.AddSystem(_clouds, SystemStage.RenderWorld);
         host.AddSystem((IRenderSystem)_particles, SystemStage.RenderWorld);

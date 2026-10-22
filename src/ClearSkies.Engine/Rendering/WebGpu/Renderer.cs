@@ -34,7 +34,7 @@ const OPEN_AIR_GRID: i32 = -2;         // a chunk lit as open air, with no light
 // sunDir.w: sun strength (SunLight.Strength). lightParams.x: unused (ray AO is in the voxel light), .y: the climate
 // tint volume's origin x (lightParams2.w its z; see climateTinted), .z: ambient
 // (0-1), .w: 1 on an sRGB surface (see lin). camPos.xyz: camera world position. fog.xy: the world's fog start/end
-// (horizontal), fog.zw: the cloud layer's (see CloudLayer), in blocks from the camera. zenith/horizon.rgb: the sky
+// (by distance), fog.zw: the cloud layer's (see CloudLayer), in blocks from the camera. zenith/horizon.rgb: the sky
 // gradient (see SkySettings). horizon.w: the distance haze's strength (0-1), haze.rgb its colour, haze.w its distance.
 // sea: the cloud sea's altitude, coverage (0 = off), cell size and thickness, in blocks (see cloudSea).
 // lightParams2.x: exposure, a multiplier on lit surfaces before fog. lightParams2.y/.z: render pass debug toggles
@@ -51,18 +51,30 @@ struct Camera {
 // opacity (1 unless translucent). Chunk quads store only their block.
 @group(0) @binding(1) var<uniform> blockTable: array<vec4<f32>, 256>;
 // The climate tint around the camera (ClimateTintSystem): x, z, then y across the texture's width, height and depth, rgb its
-// colour (sRGB) and a its strength, sampled with linear filtering so it blends smoothly between texels.
+// colour (sRGB) and a its strength, sampled with linear filtering so it blends smoothly between texels. The near volume
+// is the first half of the depth, the far one (coarser cells, around the same middle) the second.
 @group(0) @binding(2) var tintTex: texture_3d<f32>;
 @group(0) @binding(3) var tintSamp: sampler;
 const TINT_EXTENT_XZ: f32 = " + (ClimateTintSystem.SizeXZ * ClimateTintSystem.CellXZ) + @".0;
 const TINT_EXTENT_Y: f32 = " + (ClimateTintSystem.SizeY * ClimateTintSystem.CellY) + @".0;
 const TINT_BOTTOM: f32 = " + ClimateTintSystem.BottomY + @".0;
+const TINT_SIZE_XZ: f32 = " + ClimateTintSystem.SizeXZ + @".0;
+const TINT_SIZE_Y: f32 = " + ClimateTintSystem.SizeY + @".0;
+const TINT_FAR_EXTENT_XZ: f32 = " + (ClimateTintSystem.SizeXZ * ClimateTintSystem.FarCellXZ) + @".0;
+const TINT_FAR_OFFSET: f32 = " + ClimateTintSystem.FarOffset + @".0;
 
 // A tinted face's base colour (linear) at world position p: as bright as before, shifted towards the tint's colour by
 // its strength there.
 fn climateTinted(base: vec3<f32>, p: vec3<f32>) -> vec3<f32> {
-    let uvw = vec3<f32>((p.x - camera.lightParams.y) / TINT_EXTENT_XZ, (p.z - camera.lightParams2.w) / TINT_EXTENT_XZ,
-                        (p.y - TINT_BOTTOM) / TINT_EXTENT_Y);
+    // Each half's layers kept to their texel middles, so the filter never blends one volume into the other.
+    let y = clamp((p.y - TINT_BOTTOM) / TINT_EXTENT_Y, 0.5 / TINT_SIZE_Y, 1.0 - 0.5 / TINT_SIZE_Y) * 0.5;
+    let origin = vec2<f32>(camera.lightParams.y, camera.lightParams2.w);
+    let nearUv = (p.xz - origin) / TINT_EXTENT_XZ;
+    let edge = 0.5 / TINT_SIZE_XZ;
+    var uvw = vec3<f32>(nearUv, y);
+    if (any(nearUv < vec2<f32>(edge)) || any(nearUv > vec2<f32>(1.0 - edge))) {
+        uvw = vec3<f32>((p.xz - origin - TINT_FAR_OFFSET) / TINT_FAR_EXTENT_XZ, 0.5 + y);
+    }
     let t = textureSampleLevel(tintTex, tintSamp, uvw, 0.0);
     let luma = vec3<f32>(0.2126, 0.7152, 0.0722);
     let colour = lin(t.rgb);
@@ -103,12 +115,13 @@ fn applyHaze(color: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
 }
 
 // Hazes a lit surface colour at worldPos, then fades it into what fs_sky draws behind it (the sky, or the cloud sea
-// below) by horizontal distance: streaming loads whole chunk columns, so the loaded world ends only sideways, where
-// the fog is total (see SkySettings.FogDistance). Fading into the sky colour alone would leave islands showing as
-// blue shapes over the white sea as they load in.
+// below) by distance: the loaded world ends in a ball around the view (coarse levels of terrain are balls; without
+// them, streaming loads whole columns, which reach at least as far), where the fog is total (see
+// SkySettings.FogDistance). Fading into the sky colour alone would leave islands showing as blue shapes over the white
+// sea as they load in.
 fn applyFog(color: vec3<f32>, worldPos: vec3<f32>) -> vec3<f32> {
     let d = worldPos - camera.camPos.xyz;
-    let f = smoothstep(camera.fog.x, camera.fog.y, length(d.xz));
+    let f = smoothstep(camera.fog.x, camera.fog.y, length(d));
     let hazed = applyHaze(color, d);
     if (f <= 0.0) { return applyWater(hazed, d); } // only the fog band pays for tracing the sea
     return applyWater(mix(hazed, background(normalize(d)).rgb, f), d);
@@ -616,7 +629,9 @@ fn fs_chunk(in: VSOut) -> @location(0) vec4<f32> {
 @fragment
 fn fs_chunk_dissolve(in: VSOut) -> @location(0) vec4<f32> {
     if (dissolved(in)) { discard; }
-    return vec4<f32>(shadeBlock(in, blockColor(in).rgb, false, false), 1.0);
+    var base = blockColor(in).rgb;
+    if (in.lm.w != 0u) { base = climateTinted(base, in.worldPos); }
+    return vec4<f32>(shadeBlock(in, base, false, false), 1.0);
 }
 
 // Translucent blocks' faces (see RenderLayer.Translucent), alpha-blended over the opaque world: lit like fs_main, with
@@ -679,8 +694,8 @@ fn valueNoise3(p: vec3<f32>) -> f32 {
 }
 
 // What voxel v in this draw's grid holds: 2 a block that blocks light, 1 water (a translucent block: its chunk's
-// translucent bits, whose occupancy slot plus one is its chunk-table entry's second word's w, 0 for none; see
-// GridStore.EntryWords), 0 anything else. One chunk lookup for both.
+// translucent bits, whose occupancy slot plus one is its chunk-table entry's second word's w less its covered bit, 0
+// for none; see GridStore.EntryWords), 0 anything else. One chunk lookup for both.
 fn waterOrSolid(v: vec3<i32>) -> i32 {
     let i = entryOf(drawGrid, v >> vec3<u32>(5u));
     if (i < 0) { return 0; }
@@ -689,7 +704,7 @@ fn waterOrSolid(v: vec3<i32>) -> i32 {
     let w = u32(l.y + 32 * l.z);
     if (code == OCC_ALL_SOLID) { return 2; }
     if (code >= 0 && ((occPool[u32(code * WPC) + w] >> u32(l.x)) & 1u) == 1u) { return 2; }
-    let slot = chunkTable[2 * i + 1].w;
+    let slot = chunkTable[2 * i + 1].w >> 1u;
     if (slot > 0 && ((occPool[u32((slot - 1) * WPC) + w] >> u32(l.x)) & 1u) == 1u) { return 1; }
     return 0;
 }
@@ -1415,7 +1430,7 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
         {
             Usage         = TextureUsage.TextureBinding | TextureUsage.CopyDst,
             Dimension     = TextureDimension.Dimension3D,
-            Size          = new Extent3D(ClimateTintSystem.SizeXZ, ClimateTintSystem.SizeXZ, ClimateTintSystem.SizeY),
+            Size          = new Extent3D(ClimateTintSystem.SizeXZ, ClimateTintSystem.SizeXZ, ClimateTintSystem.SizeY * 2),
             Format        = TextureFormat.Rgba8Unorm, // sRGB colours, decoded in the shader (climateTinted)
             MipLevelCount = 1,
             SampleCount   = 1,
@@ -1452,7 +1467,7 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
         {
             var dest = new ImageCopyTexture { Texture = _tintTexture, MipLevel = 0, Origin = new Origin3D(0, 0, 0), Aspect = TextureAspect.All };
             var layout = new TextureDataLayout { Offset = 0, BytesPerRow = ClimateTintSystem.SizeXZ * 4, RowsPerImage = ClimateTintSystem.SizeXZ };
-            var size = new Extent3D(ClimateTintSystem.SizeXZ, ClimateTintSystem.SizeXZ, ClimateTintSystem.SizeY);
+            var size = new Extent3D(ClimateTintSystem.SizeXZ, ClimateTintSystem.SizeXZ, ClimateTintSystem.SizeY * 2);
             _api.QueueWriteTexture(_ctx.Queue, &dest, data, (nuint)texels.Length, &layout, &size);
         }
         _tintOriginX = originX;

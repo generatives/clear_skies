@@ -23,8 +23,8 @@ public static class CoarseTerrain
     /// (ox, oy, oz). Model blocks are left out, and plants unless <paramref name="plants"/> (then an open cell keeps one, see below). By <paramref name="majority"/>: a cell is filled when at least
     /// 4 of its 8 blocks are cubes, with the more common kind (opaque or see-through) and its most common block, so coarse
     /// surfaces round to the nearest cell and meet full detail flush on average; thin things (a fence of cubes, a
-    /// one-block ledge) may go, except leaves (<see cref="BlockDef.ShowsInnerFaces"/>), which fill a cell if any of its
-    /// blocks is one, so trees stay. Otherwise any cube fills the cell: the most common opaque one, else the most common
+    /// one-block ledge) may go, except leaves (<see cref="BlockDef.ShowsInnerFaces"/>), which fill a cell with
+    /// <see cref="LeavesToFill"/> of its blocks, so trees stay about the size they are. Otherwise any cube fills the cell: the most common opaque one, else the most common
     /// see-through one. Either way blocks count by how many of their faces show (aren't against an opaque cube; past
     /// the full chunk counts as showing), and only buried blocks count when none of that kind shows, so the cell takes
     /// what's seen: grass on dirt stays grass, a cliff face or an overhang's underside the stone it shows.</summary>
@@ -142,19 +142,25 @@ public static class CoarseTerrain
             => (uint)x >= S || (uint)y >= S || (uint)z >= S || !opaque[(byte)full.Get(x, y, z)] ? 1 : 0;
     }
 
+    /// <summary>Leaf blocks that fill a cell short of a majority of cubes. With any one, trees grew: a canopy seen
+    /// from above covered 1.2 to 1.9 times what it does in full detail, and an autumn birch's orange crown shrank to
+    /// show the grass under it as full detail swapped in. With 3, coarse canopies cover what full detail's do (0.9 to
+    /// 1.0 times, measured over generated forests).</summary>
+    private const int LeavesToFill = 3;
+
     private static BlockId ByMajority(ReadOnlySpan<BlockId> cell, ReadOnlySpan<int> faces)
     {
         int opaque = 0, see = 0;
-        bool leaves = false;
+        int leaves = 0;
         foreach (var id in cell)
         {
             if (!IsCube(id)) continue;
             var def = BlockRegistry.Get(id);
-            if (def.Transparent) { see++; leaves |= def.ShowsInnerFaces; }
+            if (def.Transparent) { see++; if (def.ShowsInnerFaces) leaves++; }
             else opaque++;
         }
         if (opaque + see >= 4) return Seen(cell, faces, opaque: opaque >= see);
-        return leaves ? MostCommon(cell, opaque: false, leavesOnly: true) : BlockId.Air;
+        return leaves >= LeavesToFill ? MostCommon(cell, opaque: false, leavesOnly: true) : BlockId.Air;
     }
 
     private static bool IsCube(BlockId id) => id != BlockId.Air && BlockRegistry.Get(id).IsFullCube;

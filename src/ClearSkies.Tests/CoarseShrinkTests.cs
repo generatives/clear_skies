@@ -106,7 +106,11 @@ public class CoarseShrinkTests
     }
 
     [Fact]
-    public void LeavesFillACellAlone() => Assert.Equal(BlockId.Leaves, Majority((6, BlockId.Leaves)));
+    public void ThreeLeavesFillACellAlone()
+    {
+        Assert.Equal(BlockId.Air, Majority((6, BlockId.Leaves), (7, BlockId.Leaves)));
+        Assert.Equal(BlockId.Leaves, Majority((5, BlockId.Leaves), (6, BlockId.Leaves), (7, BlockId.Leaves)));
+    }
 
     [Fact]
     public void UniformChunkFillsItsOctant()

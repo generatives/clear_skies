@@ -54,14 +54,15 @@ public class HeadlessStreamingTests
     private static TerrainInterest Colliders(float radius) => new() { ColliderRadius = radius };
 
     /// <summary>Runs streaming until it's quiet: nothing loading and nothing changing for a second of frames (at least
-    /// <paramref name="frames"/> frames, at most 20 s).</summary>
-    internal static void Settle(ChunkLoadSystem load, int frames = 60)
+    /// <paramref name="frames"/> frames, at most 20 s); with the swaps, if any, updated after it each frame.</summary>
+    internal static void Settle(ChunkLoadSystem load, int frames = 60, TerrainSwapSystem? swaps = null)
     {
         var deadline = DateTime.UtcNow.AddSeconds(20);
         int quiet = 0, last = -1;
         for (int i = 0; (i < frames || quiet < 60) && DateTime.UtcNow < deadline; i++)
         {
             load.Update(1 / 60f);
+            swaps?.Update(1 / 60f);
             bool idle = load.ColumnsInFlight == 0 && load.LoadedChunks == last;
             quiet = idle ? quiet + 1 : 0;
             last = load.LoadedChunks;
@@ -167,9 +168,10 @@ public class HeadlessStreamingTests
         using var db = SaveDatabase.InMemory();
         var load = Streaming(scene, db, viewDistance: 256);
         load.SetLevels(64, new[] { 256f }); // full detail to one group; level 1 (64-block chunks) to 4 chunks
+        var swaps = new TerrainSwapSystem(scene.World, load);
         var player = Interest(scene, 16, 16, View(256));
         var deadline = DateTime.UtcNow.AddSeconds(20);
-        do { Settle(load); } while (!load.LevelsIdle && DateTime.UtcNow < deadline);
+        do { Settle(load, swaps: swaps); } while (!load.LevelsIdle && DateTime.UtcNow < deadline);
         Assert.True(load.LevelsIdle);
 
         var level = load.Levels[1];
@@ -180,13 +182,29 @@ public class HeadlessStreamingTests
         Assert.True(level.Volume.GetData(far)!.IsUniform(out var block) && block == BlockId.Stone);
         Assert.False(level.Volume.IsLoaded(new ChunkPosition(3, 0, 0))); // air
         Assert.False(level.Volume.IsLoaded(new ChunkPosition(5, -1, 0))); // out of range
-        Assert.Equal(ChunkDrawState.Hidden, level.DrawState(near));
-        Assert.Equal(ChunkDrawState.Whole, level.DrawState(far));
-        Assert.Equal(ChunkDrawState.Whole, level.DrawState(new ChunkPosition(0, -4, 0))); // below full detail's ball
+        var fullDetail = load.Levels[0];
+        // Nothing's meshed (headless): no level is shown yet, and the full detail is left whole.
+        Assert.Equal(ChunkDrawState.Hidden, swaps.DrawState(level, far));
+        Assert.Equal(ChunkDrawState.Whole, swaps.DrawState(fullDetail, new ChunkPosition(0, -1, 0)));
+        // The fog says what it's held by: a chunk nobody has meshed waits for that, not for its light.
+        swaps.FarReadyRadius(player.Get<Transform>().Position);
+        Assert.Contains("waiting for its mesh", swaps.FogHeldBy);
+
+        // Meshed (as the renderer would), with swaps at once: level 1 is drawn past full detail, and swaps out where full
+        // detail has its eight, which is drawn there; past it, full detail is left out under level 1.
+        swaps.FadeSeconds = 0f;
+        foreach (var (_, entry) in scene.WorldVolume.All) entry.Entity.Set<ChunkMeshedFlag>();
+        foreach (var (_, entry) in level.Volume.All) entry.Entity.Set<ChunkMeshedFlag>();
+        for (int i = 0; i < 10; i++) { load.Update(1 / 60f); swaps.Update(1 / 60f); }
+        Assert.Equal(1f, swaps.DrawState(level, near).Dissolve);
+        Assert.Equal(0f, swaps.DrawState(level, far).Dissolve);
+        Assert.Equal(0f, swaps.DrawState(level, new ChunkPosition(0, -4, 0)).Dissolve); // below full detail's ball
+        Assert.Equal(ChunkDrawState.Whole, swaps.DrawState(fullDetail, new ChunkPosition(0, -1, 0)));
+        Assert.Equal(ChunkDrawState.Hidden, swaps.DrawState(fullDetail, new ChunkPosition(0, -7, 0)));
 
         // The level streams with the view like full detail: what's left behind unloads.
         player.Get<Transform>().Position = new Vector3D<float>(16 + 1024, 10, 16);
-        do { Settle(load); } while (!load.LevelsIdle && DateTime.UtcNow < deadline.AddSeconds(20));
+        do { Settle(load, swaps: swaps); } while (!load.LevelsIdle && DateTime.UtcNow < deadline.AddSeconds(20));
         Assert.False(level.Volume.IsLoaded(far));
         Assert.True(level.Volume.IsLoaded(new ChunkPosition(16 + 3, -1, 0)));
 
@@ -195,6 +213,34 @@ public class HeadlessStreamingTests
         Assert.Null(load.FullDetailRadius);
         Assert.Single(load.Levels); // full detail
         Assert.False(level.Root.IsAlive);
+    }
+
+    [Fact]
+    public void ChangingOnlyTheRadiiKeepsTheLevels()
+    {
+        using var scene = new HeadlessScene();
+        using var db = SaveDatabase.InMemory();
+        var load = Streaming(scene, db, viewDistance: 256);
+        load.SetLevels(64, new[] { 256f });
+        var level = load.Levels[1];
+        load.SetLevels(128, new[] { 384f, 100000f });
+        Assert.False(level.Root.IsAlive);
+        Assert.Equal(128f, load.FullDetailRadius);
+        Assert.Equal(GridStore.ScaledReach, load.Levels[2].Radius); // as far as a scaled grid's index reaches
+
+        level = load.Levels[1];
+        load.SetLevels(128, new[] { 512f, 2048f });
+        Assert.Same(level, load.Levels[1]);
+        Assert.Equal(512f, level.Radius);
+
+        // Each level, and full detail while there are levels, says how its chunks are drawn (the swaps tell it).
+        var swaps = new TerrainSwapSystem(scene.World, load);
+        swaps.Update(1 / 60f);
+        Assert.True(level.Root.Has<ChunkDrawStates>());
+        Assert.True(scene.WorldVolume.Root.Has<ChunkDrawStates>());
+        load.SetLevels(128, Array.Empty<float>());
+        swaps.Update(1 / 60f);
+        Assert.False(scene.WorldVolume.Root.Has<ChunkDrawStates>());
     }
 
     [Fact]

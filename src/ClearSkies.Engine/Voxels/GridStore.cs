@@ -80,6 +80,7 @@ internal sealed class ChunkRecord
     public int WorldSlot = -1;
     public ulong Marks;               // bricks marked by the BrickMarks being filled (GpuLightSystem), 0 between uses
     public int LightStamp;            // changes whenever light this chunk's faces show may have changed (GridStore.LightStampOf)
+    public bool Covered;              // a scaled grid's chunk where the finer grid has it: other grids' rays pass through it
 }
 
 /// <summary>
@@ -270,7 +271,9 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     /// <summary>A scaled static grid's world index width (in its own chunks, x and z): wide enough for
     /// <see cref="ScaledReach"/> blocks each way, so its chunks never share a cell.</summary>
     private static int ScaledIndexDim(int scale) => 2 * (ScaledReach / (S * scale)) + 8;
-    private const int ScaledReach = 4096;
+    /// <summary>How far (blocks, each way) a scaled static grid's chunks can be from the view: past it, they'd share
+    /// world index cells.</summary>
+    public const int ScaledReach = 4096;
     /// <summary>World indexes: the world's, then one for each scale (2, 4, 8).</summary>
     private const int IndexSlots = 4;
     private readonly GridHandle?[] _indexOwners = new GridHandle?[IndexSlots];
@@ -290,8 +293,9 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     /// <summary>Occupancy changes since the lighting system last drained this: the grid-space voxel box that changed
     /// (the edited blocks' bounds for an edit, the whole chunk for a load or unload), and whether the chunk had or has
     /// any solid (an all-air change can't have changed any shadow), and whether it was an edit that placed a
-    /// light-blocking block (the only kind of change that can darken what was already lit).</summary>
-    internal List<(GridHandle grid, Vector3D<float> min, Vector3D<float> max, bool solid, bool darkens)> ChangedChunks { get; } = new();
+    /// light-blocking block (the only kind of change that can darken what was already lit), and whether only finer
+    /// grids' rays see it (a scaled grid's chunk covered or uncovered, see <see cref="SetCovered"/>).</summary>
+    internal List<(GridHandle grid, Vector3D<float> min, Vector3D<float> max, bool solid, bool darkens, bool cover)> ChangedChunks { get; } = new();
 
     public int LightSlotsInUse => _lightNext - _lightFree.Count;
     public int LightSlotCapacity => _lightCapacity;
@@ -606,7 +610,19 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         RefreshSurfaceAround(g, rec);
         TouchChunk(g, pos);
         g.Version++;
-        ChangedChunks.Add((g, changedMin, changedMax, hadSolid || rec.Solid != 0, darkens));
+        ChangedChunks.Add((g, changedMin, changedMax, hadSolid || rec.Solid != 0, darkens, false));
+    }
+
+    /// <summary>Marks a chunk of a scaled static grid as covered by the finer grid under it (or not): rays fired from
+    /// other grids pass through a covered chunk, so where both are loaded each is lit by its own blocks. What the finer
+    /// grids see changes, so it counts as an occluder change for them.</summary>
+    public void SetCovered(GridHandle g, ChunkPosition pos, bool covered)
+    {
+        if (!g.Chunks.TryGetValue(pos, out var rec) || rec.Covered == covered) return;
+        rec.Covered = covered;
+        WriteChunkEntry(rec);
+        var origin = pos.WorldOrigin;
+        if (rec.Solid != 0) ChangedChunks.Add((g, origin, origin + new Vector3D<float>(S), true, false, true));
     }
 
     /// <summary>Drops a chunk that unloaded.</summary>
@@ -627,7 +643,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
         g.Version++;
         // A world chunk unloading isn't a change to the world: what it shadowed stays shadowed, and relighting the far
         // edge for it would only undo that. (A ship's chunk going is a real change.)
-        ChangedChunks.Add((g, pos.WorldOrigin, pos.WorldOrigin + new Vector3D<float>(S), hadSolid && !g.IsWorld, false));
+        ChangedChunks.Add((g, pos.WorldOrigin, pos.WorldOrigin + new Vector3D<float>(S), hadSolid && !g.IsWorld, false, false));
     }
 
     // Chunks to look at for surface bricks once a batch of removals is done (see BeginRemovals), or null outside one.
@@ -970,8 +986,9 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
     }
 
     /// <summary>A chunk's table entry: (occupancy slot or code, cx, cy, cz), then which 8³ bricks hold any solid, so
-    /// rays can step over empty bricks whole, its see-through bits' occupancy slot plus one (0: none) and its translucent
-    /// bits' likewise.</summary>
+    /// rays can step over empty bricks whole, its see-through bits' occupancy slot plus one (0: none), and in the last
+    /// word whether it's covered (bit 0, see <see cref="SetCovered"/>) and its translucent bits' occupancy slot plus one
+    /// (the rest, 0: none).</summary>
     private static void EntryWords(ChunkRecord rec, Span<int> e)
     {
         int code = rec.OccSlot >= 0 ? rec.OccSlot
@@ -979,7 +996,8 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
                  : rec.Air == 0 ? OccAllSolid
                  : OccUnloaded;
         e[0] = code; e[1] = rec.Pos.X; e[2] = rec.Pos.Y; e[3] = rec.Pos.Z;
-        e[4] = (int)(uint)rec.Solid; e[5] = (int)(uint)(rec.Solid >> 32); e[6] = rec.SeeSlot + 1; e[7] = rec.TranslucentSlot + 1;
+        e[4] = (int)(uint)rec.Solid; e[5] = (int)(uint)(rec.Solid >> 32); e[6] = rec.SeeSlot + 1;
+        e[7] = ((rec.TranslucentSlot + 1) << 1) | (rec.Covered ? 1 : 0);
     }
 
     private void WriteBrickRun(ChunkRecord rec)

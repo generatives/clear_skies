@@ -111,8 +111,10 @@ public sealed partial class GpuLightSystem
         foreach (var other in _lit)
         {
             var h = other.Handle;
-            // A low-resolution copy of the world is seen only by its own rays: the world it copies is already in everyone's.
-            bool include = h == lg.Handle || (h.IsWorld && !h.IsLowResolutionCopy);
+            // A level of terrain's rays see it and the coarser levels, not the finer ones (the world included): where a
+            // finer level is loaded too, each is lit by its own blocks (rays pass through a coarser level where it's
+            // covered, see GridStore.SetCovered). Ships' rays see every level.
+            bool include = h == lg.Handle || (h.IsWorld && (!lg.Handle.IsWorld || h.Scale > lg.Handle.Scale));
             if (!include && h.HasSolid)
             {
                 var st = _gridStates[h];
