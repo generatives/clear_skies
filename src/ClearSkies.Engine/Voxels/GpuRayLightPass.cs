@@ -79,7 +79,8 @@ fn chunkInfo(g: i32, c: vec3<i32>) -> vec4<i32> {
     let i = entryOf(g, c);
     if (i < 0) { return vec4<i32>(OCC_UNLOADED, 0, 0, 0); }
     let m = chunkTable[2 * i + 1];
-    if (skipCovered && m.w != 0) { return vec4<i32>(OCC_UNLOADED, 0, 0, 0); }
+    // m.w bit 0: covered (the rest is the translucent bits' slot, see GridStore.EntryWords).
+    if (skipCovered && (m.w & 1) != 0) { return vec4<i32>(OCC_UNLOADED, 0, 0, 0); }
     return vec4<i32>(chunkTable[2 * i].x, m.x, m.y, m.z);
 }
 

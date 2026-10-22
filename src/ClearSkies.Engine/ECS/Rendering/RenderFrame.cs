@@ -109,6 +109,17 @@ public sealed class RenderFrame : IDebugUiSystem
         ImGui.SliderFloat("Cloud coverage, near islands", ref SkySettings.CloudCoverageIslands, 0f, 0.5f);
         ImGui.SliderFloat("Cloud altitude (lowest layer)", ref SkySettings.CloudAltitude, -256f, 1800f);
         ImGui.SliderFloat("Wind speed (blocks/s)", ref SkySettings.WindSpeed, 0f, 30f);
+
+        ImGui.SeparatorText("Water");
+        ImGui.ColorEdit3("Deep water / underwater fog", ref WaterSettings.Color);
+        ImGui.SliderFloat("Clarity (blocks)", ref WaterSettings.Clarity, 0.5f, 16f, "%.1f");
+        ImGui.TextDisabled("How much water the view goes through to see only a third of what's behind it. Lower is murkier.");
+        ImGui.SliderFloat("Shallow opacity", ref WaterSettings.ShallowOpacity, 0f, 1f, "%.2f");
+        ImGui.SliderFloat("Shallow tint", ref WaterSettings.ShallowTint, 0f, 1f, "%.2f");
+        ImGui.TextDisabled("How far the thinnest water is already the deep colour (the rest is its texture).");
+        ImGui.SliderFloat("Murk variation", ref WaterSettings.MurkVariation, 0f, 1f, "%.2f");
+        ImGui.SliderFloat("Murk patch size (blocks)", ref WaterSettings.MurkSize, 1f, 32f, "%.1f");
+        ImGui.TextDisabled("Darker and clearer patches through the water, not on its surface.");
     }
 
     private static Vector3D<float> ToVector3D(System.Numerics.Vector3 v) => new(v.X, v.Y, v.Z);
@@ -145,6 +156,12 @@ public sealed class RenderFrame : IDebugUiSystem
             SeaThickness   = System.Math.Max(SkySettings.CloudSeaThickness, 1f),
             CloudFogStart  = CloudLayer.FogStart,
             CloudFogEnd    = CloudLayer.FogEnd,
+            WaterColor     = ToVector3D(WaterSettings.Color),
+            WaterClarity   = WaterSettings.Clarity,
+            WaterShallowOpacity = WaterSettings.ShallowOpacity,
+            WaterShallowTint    = WaterSettings.ShallowTint,
+            WaterMurkVariation  = WaterSettings.MurkVariation,
+            WaterMurkSize       = WaterSettings.MurkSize,
         };
         if (SkySettings.FogEnabled)
         {

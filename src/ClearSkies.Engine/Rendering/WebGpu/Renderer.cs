@@ -21,7 +21,7 @@ public sealed unsafe class Renderer : IDisposable
     private const int MaxObjects = 16384;
     private const ulong ModelStride = 256;   // >= minUniformBufferOffsetAlignment
     private const ulong BlockTableBytes = ChunkQuad.BlockTableSize * 16; // blockTable: one vec4<f32> per block
-    private const ulong CameraSize  = 272;   // two mat4x4<f32> (view, proj) + nine vec4<f32> (sun, light params, camera position, fog, zenith, horizon, haze, sea, light params 2)
+    private const ulong CameraSize  = 304;   // two mat4x4<f32> (view, proj) + eleven vec4<f32> (sun, light params, camera position, fog, zenith, horizon, haze, sea, light params 2, water, water 2)
     private const ulong ModelSize   = 96;    // mat4x4<f32> + vec3<i32> chunk + i32 grid + vec4<f32> params
 
     private static readonly string Wgsl = @"
@@ -38,11 +38,13 @@ const OPEN_AIR_GRID: i32 = -2;         // a chunk lit as open air, with no light
 // gradient (see SkySettings). horizon.w: the distance haze's strength (0-1), haze.rgb its colour, haze.w its distance.
 // sea: the cloud sea's altitude, coverage (0 = off), cell size and thickness, in blocks (see cloudSea).
 // lightParams2.x: exposure, a multiplier on lit surfaces before fog. lightParams2.y/.z: render pass debug toggles
-// (see shadeBlock).
+// (see shadeBlock). water.rgb: the deep water and underwater fog colour, .w its clarity; water2.x: the thinnest
+// water's opacity, .y its tint, .z how much its thickness varies through it, .w the size of those variations in blocks
+// (see WaterSettings and fs_chunk_transparent).
 struct Camera {
     view: mat4x4<f32>, proj: mat4x4<f32>, sunDir: vec4<f32>, lightParams: vec4<f32>,
     camPos: vec4<f32>, fog: vec4<f32>, zenith: vec4<f32>, horizon: vec4<f32>, haze: vec4<f32>, sea: vec4<f32>,
-    lightParams2: vec4<f32>,
+    lightParams2: vec4<f32>, water: vec4<f32>, water2: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 // Per block type (indexed by BlockId; see ChunkQuad.BuildBlockTable): its colour (sRGB, shown on untextured blocks) and
@@ -126,12 +128,11 @@ fn applyFog(color: vec3<f32>, worldPos: vec3<f32>) -> vec3<f32> {
 }
 
 // Underwater, as Minecraft does it: with the camera in water (camPos.w > 0, how far it sees), everything fades
-// linearly into the water's colour by that distance, the sky included. Like Minecraft's, the fade starts
+// linearly into the water's colour (camera.water.rgb) by that distance, the sky included. Like Minecraft's, the fade starts
 // WATER_FOG_START blocks behind the camera, so even what is right in front of it is tinted (by about a quarter on first
 // going under). The colour is dimmed with the daylight.
-const WATER_FOG: vec3<f32> = vec3<f32>(0.03, 0.10, 0.25);
 const WATER_FOG_START: f32 = -8.0;
-fn waterFogColor() -> vec3<f32> { return WATER_FOG * max(camera.lightParams.z, 0.8 * camera.sunDir.w); }
+fn waterFogColor() -> vec3<f32> { return camera.water.rgb * max(camera.lightParams.z, 0.8 * camera.sunDir.w); }
 fn applyWater(color: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
     if (camera.camPos.w <= 0.0) { return color; }
     let f = (length(d) - WATER_FOG_START) / (camera.camPos.w - WATER_FOG_START);
@@ -292,6 +293,9 @@ struct ChunkDraw { model: mat4x4<f32>, chunk: vec3<i32>, grid: i32, quadBase: u3
 // fragment entry point that lights, since chunk draws carry them per draw rather than in the model uniform.
 var<private> drawChunk: vec3<i32>;
 var<private> drawGrid: i32;
+// How much of a lit chunk face's colour is the underwater fog's instead (0-1), before the world's fog: set by
+// fs_chunk_transparent for deep water seen from above (see shadeBlock).
+var<private> waterShare: f32;
 
 // The shared voxel storage (see GridStore): occupancy pool, chunk table ((occupancy slot or code, chunk tag), then
 // ray-only data), brick table (light slot per 8³ brick), light pool and grid descriptors. Only a slot's display half
@@ -334,6 +338,9 @@ struct VSOut {
     @location(10) @interpolate(flat) lm: vec4<u32>,
     // Chunk draws: the share of its pixels dissolved (see dissolved), while one chunk swaps for another.
     @location(11) @interpolate(flat) dissolve: f32,
+    // Chunk draws: the direction from the camera to the fragment in the chunk's own (grid) space, not normalized (see
+    // waterPath).
+    @location(12) localView: vec3<f32>,
 };
 
 @vertex
@@ -455,6 +462,9 @@ fn chunkVertex(d: ChunkDraw, quad: vec2<u32>, corner: u32) -> VSOut {
     if (face < 6u && lightOffset != 0xFFFFu && d.lightBase != NO_LIGHTMAP) { o.lm.x = 2u * (d.lightBase + lightOffset); }
     o.quv         = vec2<f32>(cu, cv);
     o.dissolve    = d.dissolve;
+    // The model is a rotation, uniform scale and translation, so its transposed 3x3 turns a world direction back
+    // into a grid one (scaled, which normalizing undoes).
+    o.localView   = transpose(mat3x3<f32>(d.model[0].xyz, d.model[1].xyz, d.model[2].xyz)) * (world.xyz - camera.camPos.xyz);
     return o;
 }
 
@@ -630,14 +640,100 @@ fn fs_chunk_dissolve(in: VSOut) -> @location(0) vec4<f32> {
 // transparent layer and the draw order doesn't matter. Both sides are drawn; a face seen from behind (from inside the
 // water) is lit as facing the viewer, from the cell on the viewer's side, so it is lit like the water around it rather
 // than like the air beyond.
+//
+// Seen from outside, the water darkens and turns opaque with how much of it the view looks through, along the view
+// from the face to what's behind it (see waterPath). Seen from inside, the underwater fog does that
+// instead (see applyWater).
 @fragment
 fn fs_chunk_transparent(in: VSOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let c = blockColor(in);
-    let alpha = c.a * in.alpha;
+    var alpha = c.a * in.alpha;
     if (alpha < 0.004 || dissolved(in)) { discard; }
+    // Seen from outside: the view runs into the face against its normal (out of the water). Decided from the geometry
+    // rather than front_facing, so it holds whatever a face's winding.
+    if (dot(in.localView, in.localNormal) < 0.0 && in.cg.w >= 0) {
+        drawChunk = in.cg.xyz;
+        drawGrid  = in.cg.w;
+        let clear = exp(-waterPath(in.localPos, vec3<i32>(floor(in.localPos - 0.5 * in.localNormal)), normalize(in.localView)) / max(camera.water.w, 0.1));
+        alpha = 1.0 - (1.0 - camera.water2.x) * clear;
+        waterShare = 1.0 - (1.0 - camera.water2.y) * clear;
+    }
     var v = in;
     if (!front) { v.localNormal = -v.localNormal; v.worldNormal = -v.worldNormal; }
     return vec4<f32>(shadeBlock(v, c.rgb, true, !front), alpha);
+}
+
+// Water depth shading (fs_chunk_transparent): each camera.water.w blocks the view goes through cut what shows through
+// the water to about a third, and the water's own colour turns as much towards the underwater fog's (waterFogColor),
+// so deep water looks the same colour from above as from inside it. The thinnest water is camera.water2.x opaque and
+// already camera.water2.y of the way to the fog's colour (the rest its lit texture, for the ripples), so the shallows
+// are the depths' colour, only clearer. (See WaterSettings.) The view's walk through the water (waterPath) counts up
+// to WATER_MAX_PATH blocks of water, over at most WATER_REACH blocks.
+const WATER_MAX_PATH: f32 = 16.0;
+const WATER_REACH: f32 = 32.0;
+
+// How thick the water is at p (grid space), as a multiple of its clarity's: 1 give or take camera.water2.z, by smooth
+// noise camera.water2.w blocks across, so there are murkier and clearer stretches of water rather than one even body.
+fn waterDensity(p: vec3<f32>) -> f32 {
+    return 1.0 + camera.water2.z * (2.0 * valueNoise3(p / max(camera.water2.w, 0.5)) - 1.0);
+}
+
+// Smooth 3D value noise, 0-1, varying over about one unit of p.
+fn valueNoise3(p: vec3<f32>) -> f32 {
+    let i = vec3<i32>(floor(p));
+    let f = p - floor(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    var c: array<f32, 8>;
+    for (var k = 0; k < 8; k++) {
+        let o = vec3<i32>(k & 1, (k >> 1u) & 1, k >> 2u);
+        c[k] = f32(cellHash(i + o) & 1023u);
+    }
+    let x0 = mix(mix(c[0], c[1], u.x), mix(c[2], c[3], u.x), u.y);
+    let x1 = mix(mix(c[4], c[5], u.x), mix(c[6], c[7], u.x), u.y);
+    return mix(x0, x1, u.z) / 1023.0;
+}
+
+// What voxel v in this draw's grid holds: 2 a block that blocks light, 1 water (a translucent block: its chunk's
+// translucent bits, whose occupancy slot plus one is its chunk-table entry's second word's w less its covered bit, 0
+// for none; see GridStore.EntryWords), 0 anything else. One chunk lookup for both.
+fn waterOrSolid(v: vec3<i32>) -> i32 {
+    let i = entryOf(drawGrid, v >> vec3<u32>(5u));
+    if (i < 0) { return 0; }
+    let code = chunkTable[2 * i].x;
+    let l = v & vec3<i32>(31);
+    let w = u32(l.y + 32 * l.z);
+    if (code == OCC_ALL_SOLID) { return 2; }
+    if (code >= 0 && ((occPool[u32(code * WPC) + w] >> u32(l.x)) & 1u) == 1u) { return 2; }
+    let slot = chunkTable[2 * i + 1].w >> 1u;
+    if (slot > 0 && ((occPool[u32((slot - 1) * WPC) + w] >> u32(l.x)) & 1u) == 1u) { return 1; }
+    return 0;
+}
+
+// How much water the view goes through from p on a water face, into its cell (both chunk-local, so precise however
+// far the chunk is from the origin), along rd (normalized, grid space), in blocks, up to WATER_MAX_PATH: a walk
+// through the cells it crosses, adding up the water in them (not stopping where it first leaves the water, so a ragged
+// waterfall's air gaps don't break its shading into bands), each stretch weighed by how thick the water is there
+// (waterDensity), until a block that blocks light or WATER_REACH blocks.
+fn waterPath(p: vec3<f32>, start: vec3<i32>, rd: vec3<f32>) -> f32 {
+    var cell = start;
+    let stepC = vec3<i32>(select(-1, 1, rd.x > 0.0), select(-1, 1, rd.y > 0.0), select(-1, 1, rd.z > 0.0));
+    let tDelta = 1.0 / max(abs(rd), vec3<f32>(1e-6));
+    var tMax = abs(vec3<f32>(select(cell, cell + 1, rd > vec3<f32>(0.0))) - p) * tDelta;
+    var t = 0.0;
+    var path = 0.0;
+    let origin = vec3<f32>(drawChunk * 32);
+    for (var i = 0; i < 64; i++) {
+        let what = waterOrSolid(drawChunk * 32 + cell);
+        if (what == 2) { break; }
+        let tNext = min(tMax.x, min(tMax.y, tMax.z));
+        if (what == 1) { path += (tNext - t) * waterDensity(origin + p + rd * (0.5 * (t + tNext))); }
+        t = tNext;
+        if (path >= WATER_MAX_PATH || t >= WATER_REACH) { break; }
+        if (tMax.x <= tMax.y && tMax.x <= tMax.z) { tMax.x += tDelta.x; cell.x += stepC.x; }
+        else if (tMax.y <= tMax.z)                { tMax.y += tDelta.y; cell.y += stepC.y; }
+        else                                      { tMax.z += tDelta.z; cell.z += stepC.z; }
+    }
+    return min(path, WATER_MAX_PATH);
 }
 
 // Cut-out blocks' faces (RenderLayer.Cutout: leaves, grass, glass), in two passes, after the opaque world.
@@ -723,7 +819,7 @@ fn shadeBlock(in: VSOut, baseColor: vec3<f32>, see: bool, back: bool) -> vec3<f3
     // Ambient occlusion darkens inner corners / block junctions; lerp from AO_MIN so corners aren't pure black.
     let aoFactor = mix(AO_MIN, 1.0, ao);
 
-    let shaded = baseColor * lit * aoFactor * camera.lightParams2.x;
+    let shaded = mix(baseColor * lit * aoFactor * camera.lightParams2.x, waterFogColor(), waterShare);
     if ((dbg & 2u) != 0u) { return shaded; }
     return applyFog(shaded, in.worldPos);
 }

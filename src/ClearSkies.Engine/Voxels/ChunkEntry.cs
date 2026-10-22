@@ -10,13 +10,15 @@ internal readonly record struct EmitterVoxel(byte Lx, byte Ly, byte Lz, byte Lev
 
 /// <summary>A chunk's opacity packed for the GPU store (see <c>GridStore.Pack</c>).</summary>
 internal sealed class PackedOpacity(uint[] words, ulong solid, ulong air, List<EmitterVoxel> emitters,
-                                     uint[]? seeThrough = null, ulong seeThroughBricks = 0) : ChunkPreparation
+                                     uint[]? seeThrough = null, ulong seeThroughBricks = 0,
+                                     uint[]? translucent = null) : ChunkPreparation
 {
     public uint[] Words { get; } = words;
     public ulong Solid { get; } = solid;
     public ulong Air { get; } = air;
     public uint[]? SeeThrough { get; } = seeThrough;
     public ulong SeeThroughBricks { get; } = seeThroughBricks;
+    public uint[]? Translucent { get; } = translucent;
     public List<EmitterVoxel> Emitters { get; } = emitters;
 
     internal override void ApplyTo(ChunkEntry entry) => entry.SetPacked(this);
@@ -72,6 +74,10 @@ internal sealed class ChunkEntry
     public uint[]? PackedSeeThroughWords { get; private set; }
     public ulong BrickSeeThroughMask { get; private set; }
 
+    /// <summary>The <see cref="RenderLayer.Translucent"/> blocks (water), every one of them, packed like
+    /// <see cref="PackedOpacityWords"/>; null for a chunk with none. For the water shading (Renderer's waterPath).</summary>
+    public uint[]? PackedTranslucentWords { get; private set; }
+
     /// <summary>Chunk-local bounds (inclusive) of the blocks edited since the last GPU upload, so lighting relights
     /// around just those instead of the whole chunk. <see cref="HasEdits"/> false: nothing edited (a fresh load).</summary>
     public bool HasEdits { get; private set; }
@@ -96,6 +102,7 @@ internal sealed class ChunkEntry
         PackedOpacityWords = packed.Words;
         (BrickSolidMask, BrickAirMask) = (packed.Solid, packed.Air);
         (PackedSeeThroughWords, BrickSeeThroughMask) = (packed.SeeThrough, packed.SeeThroughBricks);
+        PackedTranslucentWords = packed.Translucent;
         Emitters.Clear();
         Emitters.AddRange(packed.Emitters);
     }
