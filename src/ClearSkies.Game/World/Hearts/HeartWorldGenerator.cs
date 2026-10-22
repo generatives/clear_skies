@@ -62,8 +62,12 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     /// <summary>About how far (blocks) a lake's sandy shore reaches from the middle of its sample cells (see Water).</summary>
     private const float ShoreReach = 3.5f;
 
-    /// <summary>How far under a river's level the ground may lie and still be its bed, not a drop it ends at.</summary>
-    private const int RiverGap = 8;
+    /// <summary>How far under a river's level the ground may lie and still be its bed; past that, down to RiverFall, a
+    /// hollow it falls into and pools in; further, a drop it ends at.</summary>
+    private const int RiverGap = 8, RiverFall = 24;
+
+    /// <summary>How near (blocks) a lake's water a river's comes level with it.</summary>
+    private const int MouthReach = 3;
 
     /// <summary>Where noise is under this (-1 to 1) a tundra lake is open water, not ice.</summary>
     private const float IceOpen = -0.25f;
@@ -256,6 +260,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     private void BuildProfile(int chunkX, int chunkZ)
     {
         _profileX = chunkX; _profileZ = chunkZ;
+        _topsX = _topsZ = int.MinValue;
         float x0 = chunkX * S, z0 = chunkZ * S;
 
         float top = float.MinValue;
@@ -308,17 +313,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             {
                 bool solid = false;
                 int step = 1;
-                if (y <= yTop)
-                {
-                    float t = WearBlend(y);
-                    float across = (FloorWear + (UpperWear - FloorWear) * t) * wearNoise + CrackSlack;
-                    float up = (FloorWearUp + (UpperWearUp - FloorWearUp) * t) * wearNoise * HeartGrid.VerticalScale + CrackSlack;
-                    solid = Solid(px, (y - _height[col] + lift) * HeartGrid.VerticalScale, pz, y, _height[col], across, up, out float clear);
-                    step = System.Math.Max(1, (int)clear);
-                    // Where wear grows with height, not so far that it grows by more than CrackSlack.
-                    if (y > HeartGrid.FloorTop + CrackFrom && y < HeartGrid.FloorTop + CrackFrom + CrackOver)
-                        step = System.Math.Min(step, CrackStepMax);
-                }
+                if (y <= yTop) solid = SolidAt(px, pz, lift, wearNoise, _height[col], y, out step);
                 if (solid && runLo == int.MinValue) runLo = y;
                 else if (!solid && runLo != int.MinValue)
                 {
@@ -359,7 +354,11 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         for (int col = 0; col < S * S; col++)
             _top[col] = _spanCount[col] == 0 ? int.MinValue : _spans[col * MaxSpans + _spanCount[col] - 1].Hi;
         for (int col = 0; col < S * S; col++)
-            if (_riverDepth[col] > 0 && (_top[col] == int.MinValue || _top[col] < _level[col] - RiverGap)) _level[col] = int.MinValue;
+        {
+            if (_riverDepth[col] == 0 || _level[col] == int.MinValue || _top[col] >= _level[col] - RiverGap) continue;
+            // (Where it falls into a hollow the samples missed, it pools at the bottom; over a cliff, it ends.)
+            _level[col] = _top[col] != int.MinValue && _top[col] >= _level[col] - RiverFall ? _top[col] + _riverDepth[col] : int.MinValue;
+        }
         // (Nor where the dry ground beside it is: it ends at the cliff's edge rather than standing over it.)
         for (int col = 0; col < S * S; col++)
             if (_riverDepth[col] > 0 && _level[col] != int.MinValue && Beside(col).Dry < _level[col] - RiverGap) _level[col] = int.MinValue;
@@ -401,11 +400,19 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             }
         }
 
-        // The lowest dry ground beside a river's column, and the highest water of a lake beside it.
+        // The lowest dry ground beside a river's column, and the highest water of a lake beside it or nearly (so the
+        // river's mouth is level with it, not a block under the shore between).
         (int Dry, int Lake) Beside(int col)
         {
             int dry = int.MaxValue, lake = int.MinValue;
             int lx = col % S, lz = col / S;
+            for (int nz = System.Math.Max(0, lz - MouthReach); nz <= System.Math.Min(S - 1, lz + MouthReach); nz++)
+            for (int nx = System.Math.Max(0, lx - MouthReach); nx <= System.Math.Min(S - 1, lx + MouthReach); nx++)
+            {
+                int nc = nx + S * nz;
+                if (_riverDepth[nc] == 0 && _level[nc] != int.MinValue && _top[nc] != int.MinValue && _level[nc] > _top[nc])
+                    lake = System.Math.Max(lake, _level[nc]);
+            }
             for (int n = 0; n < 4; n++)
             {
                 int nx = lx + (n == 0 ? 1 : n == 1 ? -1 : 0), nz = lz + (n == 2 ? 1 : n == 3 ? -1 : 0);
@@ -426,6 +433,62 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             }
             return (dry, lake);
         }
+    }
+
+    /// <summary>Whether block y of a column (wobbled to (px, pz), lifted by lift) is solid, and how many blocks up from
+    /// it nothing can change.</summary>
+    private bool SolidAt(float px, float pz, float lift, float wearNoise, float height, int y, out int step)
+    {
+        float t = WearBlend(y);
+        float across = (FloorWear + (UpperWear - FloorWear) * t) * wearNoise + CrackSlack;
+        float up = (FloorWearUp + (UpperWearUp - FloorWearUp) * t) * wearNoise * HeartGrid.VerticalScale + CrackSlack;
+        bool solid = Solid(px, (y - height + lift) * HeartGrid.VerticalScale, pz, y, height, across, up, out float clear);
+        step = System.Math.Max(1, (int)clear);
+        // Where wear grows with height, not so far that it grows by more than CrackSlack.
+        if (y > HeartGrid.FloorTop + CrackFrom && y < HeartGrid.FloorTop + CrackFrom + CrackOver)
+            step = System.Math.Min(step, CrackStepMax);
+        return solid;
+    }
+
+    private int _topsX = int.MinValue, _topsZ = int.MinValue; // the chunk column whose hearts Top last loaded
+
+    /// <summary>The top of the land at block column (x, z), before any water cuts it (the highest block of its top
+    /// span, as Prepare finds it), or null where there is none: worked out for that column alone, for Water.</summary>
+    internal int? Top(int x, int z)
+    {
+        int chunkX = x >> 5, chunkZ = z >> 5;
+        if (chunkX != _topsX || chunkZ != _topsZ)
+        {
+            _topsX = chunkX; _topsZ = chunkZ;
+            _profileX = _profileZ = int.MinValue; // (the hearts loaded no longer serve the profile last worked out)
+            float x0 = chunkX * S, z0 = chunkZ * S, top = float.MinValue;
+            for (int j = 0; j <= 2; j++)
+            for (int i = 0; i <= 2; i++)
+                top = MathF.Max(top, _terrain.Height(x0 + i * S * 0.5f, z0 + j * S * 0.5f));
+            top = MathF.Min(top + TerrainRiseMargin, HeartGrid.WorldTop - 1);
+            LoadHearts(x0 - WarpAcross, z0 - WarpAcross, x0 + S + WarpAcross, z0 + S + WarpAcross,
+                       HeartGrid.LowestBottom - top - WarpUp, WarpUp);
+        }
+        float wx = x, wz = z;
+        float height = MathF.Min(_terrain.Height(wx, wz), HeartGrid.WorldTop - 1);
+        float px = wx + WarpAcross * _warpX.GetNoise(wx, wz);
+        float pz = wz + WarpAcross * _warpZ.GetNoise(wx, wz);
+        float lift = WarpUp * _warpY.GetNoise(wx, wz);
+        float wearNoise = 0.6f + 0.4f * (_crack.GetNoise(wx, wz) + 1f);
+        _nearValid = false;
+        // Down the column to the first solid block with MinThickness under it (thinner runs are no span). (Going down
+        // in the steps that are safe going up, it can land under a run's top: it climbs back up to it.)
+        int bottom = (int)MathF.Ceiling(HeartGrid.LowestBottom), from = (int)MathF.Floor(height);
+        for (int y = from; y >= bottom;)
+        {
+            if (!SolidAt(px, pz, lift, wearNoise, height, y, out int step)) { y -= step; continue; }
+            while (y < from && SolidAt(px, pz, lift, wearNoise, height, y + 1, out _)) y++;
+            int run = 1;
+            while (run < MinThickness && y - run >= bottom && SolidAt(px, pz, lift, wearNoise, height, y - run, out _)) run++;
+            if (run >= MinThickness) return y;
+            y -= run;
+        }
+        return null;
     }
 
     /// <summary>0 in the floor to 1 in the broken ground above: how far wear goes from the floor's to the upper.</summary>

@@ -52,7 +52,7 @@ public sealed class Water
     private const float RainFrom = 0.3f, RainFull = 0.85f;
 
     /// <summary>A hollow fills if the rain gathering into it is at least LakeNeed times its own samples.</summary>
-    private const float LakeNeed = 6f;
+    private const float LakeNeed = 8f;
 
     // A river starts where RiverFrom samples' rain has gathered, RiverNarrowest blocks wide, widening by RiverWiden
     // blocks per square root of what it carries beyond that, up to RiverWidest; and some stretches up to RiverVary wider
@@ -72,6 +72,9 @@ public sealed class Water
 
     /// <summary>How many samples round a column to look for a river through it or beside it.</summary>
     private const int Search = 6;
+
+    /// <summary>How far under its piece's top (roughly) the land may be and still be its ground, not a hole.</summary>
+    private const float HoleDepth = 40f;
 
     /// <summary>The ground of a drain: lower than any land, so whatever reaches it spills out.</summary>
     private const float Drain = -1e6f;
@@ -118,6 +121,7 @@ public sealed class Water
         public byte[] Width = Array.Empty<byte>(); // its width, blocks
         public int[] Down = Array.Empty<int>();    // the sample its water goes on to, or -1
         public float[] Edge = Array.Empty<float>(); // 0 at its piece's crack to 1 well inside (see EdgeFade)
+        public float[] Ground = Array.Empty<float>(); // the land's real top over the sample, or Drain
     }
 
     /// <summary>The water at column (x, z): a lake over it or right beside it (water fills it from its ground up to
@@ -205,12 +209,25 @@ public sealed class Water
         return new(level, MathF.Sqrt(best), 0);
     }
 
-    /// <summary>The land's top at column (x, z), as its piece's top (see HeartWorldGenerator.PieceTop), or null where
-    /// no piece holds it.</summary>
+    /// <summary>The land's top at column (x, z), from its piece's samples round it (or, by a drain, as its piece's
+    /// top, see HeartWorldGenerator.PieceTop), or null where no piece holds it.</summary>
     public float? Ground(int x, int z)
     {
         float px = x + 0.5f, pz = z + 0.5f;
-        if (Nearest(px, pz, out _, out _) is not { Alive: true } h) return null;
+        if (Nearest(px, pz, out int hi, out int hk) is not { Alive: true } h) return null;
+        var piece = _pieces.GetOrAdd(Key(hi, hk), _ => Build(hi, hk));
+        float fi = px / Step - 0.5f - piece.X0, fk = pz / Step - 0.5f - piece.Z0;
+        int i = (int)MathF.Floor(fi), k = (int)MathF.Floor(fk);
+        if (i >= 0 && k >= 0 && i < Window - 1 && k < Window - 1)
+        {
+            float a = piece.Ground[i + Window * k], b = piece.Ground[i + 1 + Window * k];
+            float c = piece.Ground[i + Window * (k + 1)], d = piece.Ground[i + 1 + Window * (k + 1)];
+            if (a != Drain && b != Drain && c != Drain && d != Drain)
+            {
+                float tx = fi - i, tz = fk - k;
+                return (a + (b - a) * tx) * (1f - tz) + (c + (d - c) * tx) * tz;
+            }
+        }
         return HeartWorldGenerator.PieceTop(_terrain.Height(px, pz), h.Surface, h.Drop);
     }
 
@@ -252,10 +269,29 @@ public sealed class Water
             float x = (piece.X0 + i + 0.5f) * Step, z = (piece.Z0 + k + 0.5f) * Step;
             face[c] = FaceDistance(hearts, self, x, z);
             if (i == 0 || k == 0 || i == Window - 1 || k == Window - 1 || face[c] < FaceMargin) { ground[c] = Drain; continue; }
-            ground[c] = HeartWorldGenerator.PieceTop(_terrain.Height(x, z), self.Surface, self.Drop);
+            ground[c] = 0f; // (worked out below)
             rain[c] = Smoothstep(RainFrom, RainFull, _terrain.Wet(x, z));
             lean[c] = Wander * _wander.GetNoise(x, z) * EdgeFade(face[c]);
         }
+
+        // The ground is the land's real top (as HeartWorldGenerator makes it, rounded off by its faces and all), a
+        // chunk column at a time so the generator loads the hearts round each once. Where it is far under the piece's
+        // top, a hole into the caves under it, it is a drain too.
+        var generator = new HeartWorldGenerator(_seed);
+        int cx0 = FloorDiv(piece.X0 * Step, 32), cz0 = FloorDiv(piece.Z0 * Step, 32);
+        int cx1 = FloorDiv((piece.X0 + Window) * Step, 32), cz1 = FloorDiv((piece.Z0 + Window) * Step, 32);
+        for (int cz = cz0; cz <= cz1; cz++)
+        for (int cx = cx0; cx <= cx1; cx++)
+        for (int k = Math.Max(0, CeilDiv(cz * 32 - Step / 2, Step) - piece.Z0); k < Window && (piece.Z0 + k) * Step + Step / 2 < (cz + 1) * 32; k++)
+        for (int i = Math.Max(0, CeilDiv(cx * 32 - Step / 2, Step) - piece.X0); i < Window && (piece.X0 + i) * Step + Step / 2 < (cx + 1) * 32; i++)
+        {
+            int c = i + Window * k;
+            if (ground[c] == Drain) continue;
+            int x = (piece.X0 + i) * Step + Step / 2, z = (piece.Z0 + k) * Step + Step / 2;
+            float roughly = HeartWorldGenerator.PieceTop(_terrain.Height(x, z), self.Surface, self.Drop);
+            ground[c] = generator.Top(x, z) is int top && top > roughly - HoleDepth ? top + 0.5f : Drain;
+        }
+        piece.Ground = ground;
 
         // Priority flood from the drains inwards, lowest first: each sample filled to at least the level it was
         // reached at, so each hollow fills to its lowest way out, and its water goes back the way it was reached.
@@ -529,4 +565,6 @@ public sealed class Water
     }
 
     private static int FloorDiv(int a, int b) => a >= 0 ? a / b : (a - b + 1) / b;
+
+    private static int CeilDiv(int a, int b) => -FloorDiv(-a, b);
 }
