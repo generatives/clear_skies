@@ -39,7 +39,8 @@ const OPEN_AIR_GRID: i32 = -2;         // a chunk lit as open air, with no light
 // sea: the cloud sea's altitude, coverage (0 = off), cell size and thickness, in blocks (see cloudSea).
 // lightParams2.x: exposure, a multiplier on lit surfaces before fog. lightParams2.y/.z: render pass debug toggles
 // (see shadeBlock). water.rgb: the deep water and underwater fog colour, .w its clarity; water2.x: the thinnest
-// water's opacity, .y its tint (see WaterSettings and fs_chunk_transparent).
+// water's opacity, .y its tint, .z the strength of the pattern in its deep colour, .w that pattern's size in blocks
+// (see WaterSettings and fs_chunk_transparent).
 struct Camera {
     view: mat4x4<f32>, proj: mat4x4<f32>, sunDir: vec4<f32>, lightParams: vec4<f32>,
     camPos: vec4<f32>, fog: vec4<f32>, zenith: vec4<f32>, horizon: vec4<f32>, haze: vec4<f32>, sea: vec4<f32>,
@@ -282,6 +283,8 @@ var<private> drawGrid: i32;
 // How much of a lit chunk face's colour is the underwater fog's instead (0-1), before the world's fog: set by
 // fs_chunk_transparent for deep water seen from above (see shadeBlock).
 var<private> waterShare: f32;
+// How much brighter (or, below 0, darker) that fog colour is at this pixel: the water's pattern (see waterPattern).
+var<private> waterGrain: f32;
 
 // The shared voxel storage (see GridStore): occupancy pool, chunk table ((occupancy slot or code, chunk tag), then
 // ray-only data), brick table (light slot per 8³ brick), light pool and grid descriptors. Only a slot's display half
@@ -641,6 +644,7 @@ fn fs_chunk_transparent(in: VSOut, @builtin(front_facing) front: bool) -> @locat
         let clear = exp(-waterPath(in.localPos, vec3<i32>(floor(in.localPos - 0.5 * in.localNormal)), normalize(in.localView)) / max(camera.water.w, 0.1));
         alpha = 1.0 - (1.0 - camera.water2.x) * clear;
         waterShare = 1.0 - (1.0 - camera.water2.y) * clear;
+        waterGrain = camera.water2.z * (2.0 * waterPattern(vec3<f32>(drawChunk * 32) + in.localPos, in.localNormal) - 1.0);
     }
     var v = in;
     if (!front) { v.localNormal = -v.localNormal; v.worldNormal = -v.worldNormal; }
@@ -653,6 +657,27 @@ fn fs_chunk_transparent(in: VSOut, @builtin(front_facing) front: bool) -> @locat
 // already camera.water2.y of the way to the fog's colour (the rest its lit texture, for the ripples), so the shallows
 // are the depths' colour, only clearer. (See WaterSettings.)
 const WATER_MAX_PATH: f32 = 16.0;
+
+// The pattern in deep water's colour (0-1), so it isn't one flat colour where the water's texture has faded out: two
+// sizes of smooth noise (camera.water2.w blocks across, and a third of that), over the face's plane at p (grid space).
+fn waterPattern(p: vec3<f32>, n: vec3<f32>) -> f32 {
+    var uv = p.xz;
+    if (abs(n.x) > 0.5) { uv = p.zy; } else if (abs(n.z) > 0.5) { uv = p.xy; }
+    let q = uv / max(camera.water2.w, 0.5);
+    return 0.65 * valueNoise(q) + 0.35 * valueNoise(q * 3.0 + vec2<f32>(17.3, 5.1));
+}
+
+// Smooth value noise, 0-1, varying over about one unit of p.
+fn valueNoise(p: vec2<f32>) -> f32 {
+    let i = vec2<i32>(floor(p));
+    let f = p - floor(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let a = f32(cellHash(vec3<i32>(i.x,     0, i.y))     & 1023u);
+    let b = f32(cellHash(vec3<i32>(i.x + 1, 0, i.y))     & 1023u);
+    let c = f32(cellHash(vec3<i32>(i.x,     0, i.y + 1)) & 1023u);
+    let e = f32(cellHash(vec3<i32>(i.x + 1, 0, i.y + 1)) & 1023u);
+    return mix(mix(a, b, u.x), mix(c, e, u.x), u.y) / 1023.0;
+}
 const WATER_REACH: f32 = 32.0;
 
 // What voxel v in this draw's grid holds: 2 a block that blocks light, 1 water (a translucent block: its chunk's
@@ -779,7 +804,7 @@ fn shadeBlock(in: VSOut, baseColor: vec3<f32>, see: bool, back: bool) -> vec3<f3
     // Ambient occlusion darkens inner corners / block junctions; lerp from AO_MIN so corners aren't pure black.
     let aoFactor = mix(AO_MIN, 1.0, ao);
 
-    let shaded = mix(baseColor * lit * aoFactor * camera.lightParams2.x, waterFogColor(), waterShare);
+    let shaded = mix(baseColor * lit * aoFactor * camera.lightParams2.x, waterFogColor() * (1.0 + waterGrain), waterShare);
     if ((dbg & 2u) != 0u) { return shaded; }
     return applyFog(shaded, in.worldPos);
 }

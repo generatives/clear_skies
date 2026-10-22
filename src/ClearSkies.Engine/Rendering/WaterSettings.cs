@@ -22,4 +22,9 @@ public static class WaterSettings
     /// <summary>How far the thinnest water's colour is already towards <see cref="Color"/> (0-1); the rest is its lit
     /// texture, for the ripples.</summary>
     public static float ShallowTint = 0.7f;
+
+    /// <summary>How strong the pattern in the deep colour is (0-1: up to that much brighter or darker), so deep water
+    /// isn't one flat colour, and how big it is, in blocks.</summary>
+    public static float Pattern = 0.3f;
+    public static float PatternSize = 6f;
 }

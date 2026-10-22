@@ -117,6 +117,8 @@ public sealed class RenderFrame : IDebugUiSystem
         ImGui.SliderFloat("Shallow opacity", ref WaterSettings.ShallowOpacity, 0f, 1f, "%.2f");
         ImGui.SliderFloat("Shallow tint", ref WaterSettings.ShallowTint, 0f, 1f, "%.2f");
         ImGui.TextDisabled("How far the thinnest water is already the deep colour (the rest is its texture).");
+        ImGui.SliderFloat("Deep pattern", ref WaterSettings.Pattern, 0f, 1f, "%.2f");
+        ImGui.SliderFloat("Deep pattern size (blocks)", ref WaterSettings.PatternSize, 1f, 32f, "%.1f");
     }
 
     private static Vector3D<float> ToVector3D(System.Numerics.Vector3 v) => new(v.X, v.Y, v.Z);
@@ -157,6 +159,8 @@ public sealed class RenderFrame : IDebugUiSystem
             WaterClarity   = WaterSettings.Clarity,
             WaterShallowOpacity = WaterSettings.ShallowOpacity,
             WaterShallowTint    = WaterSettings.ShallowTint,
+            WaterPattern        = WaterSettings.Pattern,
+            WaterPatternSize    = WaterSettings.PatternSize,
         };
         if (SkySettings.FogEnabled)
         {
