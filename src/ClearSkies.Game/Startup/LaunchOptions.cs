@@ -53,9 +53,9 @@ public sealed record LaunchOptions
     public int Msaa { get; init; } = 1;
 
     /// <summary>--lod-levels N: distant terrain drawn coarse in N levels past full detail, which then loads only to 512
-    /// blocks: 1 (by default) to 2048 blocks; 2, to 1024 and 4096. --no-lod (0): full detail as far as the view.
+    /// blocks: 2 (by default) to 1024 and 2048 blocks; 1, to 2048. --no-lod (0): full detail as far as the view.
     /// --lod B: how far the coarsest level reaches (blocks, at most 4096). The Distant Terrain panel changes them all.</summary>
-    public int LodLevels { get; init; } = 1;
+    public int LodLevels { get; init; } = 2;
     public float? LodDistance { get; init; }
 
     /// <summary>--headless: no window, GPU, input or UI; just the simulation and the network, on a timer. Hosting, it's a

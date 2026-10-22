@@ -15,12 +15,13 @@ public sealed class DistantTerrainPanel(ChunkLoadSystem load, TerrainSwapSystem 
     /// <summary>How far full detail loads with distant terrain drawn coarse (blocks).</summary>
     public const float DefaultFullDetailRadius = 512f;
 
-    /// <summary>How far each level reaches by default (blocks): one level to 2048; two, to 1024 and 4096.</summary>
+    /// <summary>How far each level reaches by default (blocks): two (the game's default), to 1024 and 2048;
+    /// one, to 2048.</summary>
     public static float[] DefaultRadii(int levels) => levels switch
     {
         <= 0 => Array.Empty<float>(),
         1 => new[] { 2048f },
-        _ => new[] { 1024f, 4096f },
+        _ => new[] { 1024f, 2048f },
     };
 
     private float _fullDetail = DefaultFullDetailRadius;

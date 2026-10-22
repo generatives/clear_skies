@@ -6,6 +6,7 @@ using ClearSkies.Engine.Rendering.WebGpu;
 using ClearSkies.Engine.Voxels;
 using DefaultEcs;
 using ImGuiNET;
+using System.Runtime.InteropServices;
 using Silk.NET.Maths;
 
 namespace ClearSkies.Engine.ECS;
@@ -23,10 +24,10 @@ namespace ClearSkies.Engine.ECS;
 /// tested one by one.
 ///
 /// Whoever manages a static volume can say how each of its chunks is drawn each frame (see <see cref="ChunkDrawStates"/>):
-/// left out, dissolving in or out, and lit from its light maps, from the maps it last baked, or as open air. A scaled
-/// volume's light maps are baked nearest first up to <see cref="ScaledBakeQuadBudget"/> quads a frame; what the budget
-/// leaves goes to its chunks out of view never baked, so each is baked once in the end, and gets
-/// <see cref="LightmapsBakedFlag"/>: what waits for it to be drawable can tell.
+/// left out, dissolving in or out, and lit from its light maps, from the maps it last baked, or as open air. Static
+/// volumes' light maps (the world's and every level of detail's) are baked nearest first up to
+/// <see cref="BakeQuadBudget"/> quads a frame; what the budget leaves goes to their chunks out of view never baked, so
+/// each is baked once in the end, and gets <see cref="LightmapsBakedFlag"/>: what waits for it to be drawable can tell.
 /// </summary>
 public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
 {
@@ -51,23 +52,37 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     private readonly HashSet<Entity> _others = new();
     private int _columnsVisible, _columnCount;
 
-    // One visible chunk, collected so they can be drawn nearest first. Budgeted: a scaled volume's, whose light maps are
-    // baked to a budget (see ScaledBakeQuadBudget); Light says how it's lit (see ChunkDrawState).
+    // One visible chunk, collected so they can be drawn nearest first. Budgeted: a static volume's, whose light maps are
+    // baked to a budget (see BakeQuadBudget); Light says how it's lit (see ChunkDrawState).
     private readonly record struct ChunkDraw(float DistSq, GpuMesh? Mesh, GpuMesh? CutoutMesh, GpuMesh? TransparentMesh,
                                              ModelBlock[] Models, Mat4 Model, int Grid, ChunkPosition Chunk, GridHandle? Handle,
-                                             float Dissolve = 0f, ChunkLight Light = ChunkLight.Baked, bool Budgeted = false);
-    private readonly List<ChunkDraw> _draws = new();
+                                             float Dissolve = 0f, ChunkLight Light = ChunkLight.Baked, bool Budgeted = false,
+                                             int Level = -1);
+    private List<ChunkDraw> _draws = new(), _sorted = new();
     private readonly List<ChunkDraw> _translucentDraws = new(); // the visible chunks with translucent faces
-    private static readonly Comparison<ChunkDraw> NearestFirst = (a, b) => a.DistSq.CompareTo(b.DistSq);
+    // The sort's keys: each draw's distance and place in _draws (sorting the draws themselves moved ~150 bytes a swap).
+    private float[] _sortKeys = Array.Empty<float>();
+    private int[] _sortOrder = Array.Empty<int>();
     private int _modelBlocksDrawn;
+    // Per level of detail (0 full detail, k a low-resolution copy at 2^k; ships last), this frame's chunks drawn and their
+    // opaque and cut-out quads (all of them, before any are skipped as facing away), for the panel.
+    private const int LevelRows = 8;
+    private readonly (int Chunks, long Opaque, long Cutout)[] _levelCounts = new (int, long, long)[LevelRows + 1];
     private double _bakedMeshesEma, _bakedGroupsEma;
 
-    /// <summary>The most light-map quads of scaled volumes' chunks baked a frame (always at least one chunk's): a level
-    /// of distant terrain coming into view has far more than the world's chunks do, and baking them all at once was a
-    /// spike of several ms. A chunk past the budget keeps the maps it last baked, and one never baked waits.</summary>
-    public const int ScaledBakeQuadBudget = 65536;
-    private int _waitingFirstBake; // scaled volumes' chunks in view left out this frame: past the budget, never baked
-    // Scaled volumes' chunks with something to draw whose light maps were never baked, in the order they were meshed.
+    // Where RenderWorld's time goes (smoothed ms): choosing the chunks in view (less the draw-state calls, timed on
+    // their own), sorting, the light-map checks and the bake's encoding, and the draw calls; RenderTranslucent's draws.
+    private double _cullMs, _stateMs, _sortMs, _bakeCheckMs, _bakeEncodeMs, _submitMs, _modelsMs, _translucentMs;
+    private long _stateTicks;
+    private static double Ms(long a, long b) => (b - a) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+    private static void Smooth(ref double ema, double ms) => ema += 0.05 * (ms - ema);
+
+    /// <summary>The most light-map quads of static volumes' chunks baked a frame (always at least one chunk's): terrain
+    /// coming into view, a level of distant terrain above all, can have far more, and baking them all at once was a spike
+    /// of several ms. A chunk past the budget keeps the maps it last baked, and one never baked waits.</summary>
+    public const int BakeQuadBudget = 65536;
+    private int _waitingFirstBake; // static volumes' chunks in view left out this frame: past the budget, never baked
+    // Static volumes' chunks with something to draw whose light maps were never baked, in the order they were meshed.
     private readonly List<Entity> _unbaked = new();
     private int _bakedQuads;
 
@@ -100,7 +115,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     {
         var volume = e.Has<Chunk>() ? e.Get<Chunk>().Entry.Volume : null;
         if (volume == null || (volume != _world && !volume.IsLowResolutionCopy)) { _others.Add(e); return; }
-        if (volume.IsLowResolutionCopy && !rd.IsEmpty && !e.Has<LightmapsBakedFlag>()) _unbaked.Add(e);
+        if (!rd.IsEmpty && !e.Has<LightmapsBakedFlag>()) _unbaked.Add(e);
         var sv = StaticOf(volume);
         var key = (rd.ChunkPos.X, rd.ChunkPos.Z);
         if (!sv.Columns.TryGetValue(key, out var column)) { sv.Columns[key] = column = new WorldColumn(); _columnCount++; }
@@ -155,6 +170,8 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         _columnsVisible = 0;
         var size = new Vector3D<float>(ChunkData.Size);
         var half = size * 0.5f;
+        long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        _stateTicks = 0;
 
         foreach (var sv in _static.Values) DrawStatic(sv, frame);
 
@@ -184,40 +201,60 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
 
         // Nearest first, so the depth test rejects hidden fragments before the (expensive) lighting shader runs on
         // them instead of shading them and overwriting them later (and the nearest are baked first).
-        _draws.Sort(NearestFirst);
+        long t1 = System.Diagnostics.Stopwatch.GetTimestamp();
+        SortNearestFirst();
+        long t2 = System.Diagnostics.Stopwatch.GetTimestamp();
 
         // Light maps whose chunk's light changed since they were baked (or never baked) are baked before anything draws:
-        // only the chunks in view, so one out of view waits until it's seen. A scaled volume's go to a budget, and a
+        // only the chunks in view, so one out of view waits until it's seen. A static volume's go to a budget, and a
         // chunk of one never baked isn't drawn until it is.
         _bakedQuads = 0;
         _waitingFirstBake = 0;
         int kept = 0;
-        for (int i = 0; i < _draws.Count; i++)
+        var draws = CollectionsMarshal.AsSpan(_draws);
+        for (int i = 0; i < draws.Length; i++)
         {
-            var d = _draws[i];
-            if (!Bake(d)) continue;
-            _draws[kept++] = d;
+            ref readonly var d = ref draws[i];
+            if (!Bake(in d)) continue;
             if (d.TransparentMesh != null) _translucentDraws.Add(d);
+            if (kept != i) draws[kept] = d;
+            kept++;
         }
         _draws.RemoveRange(kept, _draws.Count - kept);
         BakeFirstTimes();
+        Array.Clear(_levelCounts);
+        foreach (ref readonly var d in CollectionsMarshal.AsSpan(_draws))
+        {
+            ref var c = ref _levelCounts[d.Level is >= 0 and < LevelRows ? d.Level : LevelRows];
+            c.Chunks++;
+            c.Opaque += d.Mesh?.QuadCount ?? 0;
+            c.Cutout += d.CutoutMesh?.QuadCount ?? 0;
+        }
+        long t3 = System.Diagnostics.Stopwatch.GetTimestamp();
         _renderer.BakeLightmaps();
+        long t4 = System.Diagnostics.Stopwatch.GetTimestamp();
         var (bakedMeshes, bakedGroups) = _renderer.LastLightmapBake;
         _bakedMeshesEma += 0.05 * (bakedMeshes - _bakedMeshesEma);
         _bakedGroupsEma += 0.05 * (bakedGroups - _bakedGroupsEma);
 
-        foreach (var d in _draws)
+        draws = CollectionsMarshal.AsSpan(_draws);
+        _renderer.Section("Render: opaque chunks");
+        foreach (ref readonly var d in draws)
             if (d.Mesh != null) _renderer.DrawChunkMesh(d.Mesh, d.Model, d.Grid, d.Chunk, d.Dissolve);
         // Cut-out faces after all the opaque ones: discarding texels costs the early depth test, so the opaque world is
         // drawn without it first. Their depth goes down first, so each pixel's nearest cut-out face is lit once rather
         // than every leaf behind it too (see Renderer.DrawCutoutChunkDepth).
-        foreach (var d in _draws)
+        _renderer.Section("Render: cut-out depth (leaves, grass)");
+        foreach (ref readonly var d in draws)
             if (d.CutoutMesh != null) _renderer.DrawCutoutChunkDepth(d.CutoutMesh, d.Model, d.Grid, d.Chunk, d.Dissolve);
-        foreach (var d in _draws)
+        _renderer.Section("Render: cut-out shaded");
+        foreach (ref readonly var d in draws)
             if (d.CutoutMesh != null) _renderer.DrawCutoutChunkMesh(d.CutoutMesh, d.Model, d.Grid, d.Chunk, d.Dissolve);
 
+        long t5 = System.Diagnostics.Stopwatch.GetTimestamp();
+        _renderer.Section("Render: model blocks");
         _modelBlocksDrawn = 0;
-        foreach (var d in _draws)
+        foreach (ref readonly var d in draws)
         {
             foreach (var m in d.Models)
             {
@@ -227,6 +264,30 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
                 _modelBlocksDrawn++;
             }
         }
+        _renderer.Section("Render: after the world (sky, ...)");
+        long t6 = System.Diagnostics.Stopwatch.GetTimestamp();
+
+        double stateMs = _stateTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        Smooth(ref _cullMs, Ms(t0, t1) - stateMs);
+        Smooth(ref _stateMs, stateMs);
+        Smooth(ref _sortMs, Ms(t1, t2));
+        Smooth(ref _bakeCheckMs, Ms(t2, t3));
+        Smooth(ref _bakeEncodeMs, Ms(t3, t4));
+        Smooth(ref _submitMs, Ms(t4, t5));
+        Smooth(ref _modelsMs, Ms(t5, t6));
+    }
+
+    /// <summary>Puts <see cref="_draws"/> nearest first, by sorting their distances and then moving each draw once.</summary>
+    private void SortNearestFirst()
+    {
+        int n = _draws.Count;
+        if (_sortKeys.Length < n) { _sortKeys = new float[n * 2]; _sortOrder = new int[n * 2]; }
+        var draws = CollectionsMarshal.AsSpan(_draws);
+        for (int i = 0; i < n; i++) { _sortKeys[i] = draws[i].DistSq; _sortOrder[i] = i; }
+        Array.Sort(_sortKeys, _sortOrder, 0, n);
+        _sorted.Clear();
+        for (int i = 0; i < n; i++) _sorted.Add(draws[_sortOrder[i]]);
+        (_draws, _sorted) = (_sorted, _draws);
     }
 
     /// <summary>Lists one static volume's chunks in view. It sits unrotated at its scale (see ChunkVolume), so a chunk's
@@ -236,6 +297,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         int k = sv.Volume.Scale, blocks = ChunkData.Size * k;
         var size = new Vector3D<float>(blocks);
         var scale = Mat4.Scale(new Vector3D<float>(k));
+        int level = System.Numerics.BitOperations.Log2((uint)k);
         var root = sv.Volume.Root;
         var state = root.Has<ChunkDrawStates>() ? root.Get<ChunkDrawStates>().Of : null;
         bool copy = sv.Volume.IsLowResolutionCopy;
@@ -252,7 +314,9 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
                 if (rd.IsEmpty) continue; // buried stone: nothing to draw
                 var origin = e.Get<Transform>().Position;
                 if (!frame.Frustum.Intersects(origin, origin + size)) continue;
+                long s0 = System.Diagnostics.Stopwatch.GetTimestamp();
                 var how = state?.Invoke(rd.ChunkPos) ?? ChunkDrawState.Whole;
+                _stateTicks += System.Diagnostics.Stopwatch.GetTimestamp() - s0;
                 if (how.Dissolve >= 1f) continue;
                 var model = Mat4.Multiply(Mat4.Translation(origin), scale);
                 // A scaled volume not in the light store yet has no light to show: lit as open air meanwhile.
@@ -261,12 +325,12 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
                 var centre = origin + size * 0.5f;
                 _draws.Add(new ChunkDraw(Vector3D.DistanceSquared(centre, frame.CameraPosition), rd.Mesh, rd.CutoutMesh,
                                          rd.TransparentMesh, rd.Models, model, grid, rd.ChunkPos, rd.Grid, how.Dissolve,
-                                         how.Light, Budgeted: copy));
+                                         how.Light, Budgeted: true, Level: level));
             }
         }
     }
 
-    /// <summary>Flags the scaled volumes' chunks whose light maps are now baked (<see cref="LightmapsBakedFlag"/>), and
+    /// <summary>Flags the static volumes' chunks whose light maps are now baked (<see cref="LightmapsBakedFlag"/>), and
     /// lists the next never baked, out of view or held back, for what's left of the frame's budget. A chunk not in the
     /// light store yet waits for its place there.</summary>
     private void BakeFirstTimes()
@@ -277,7 +341,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
             var e = _unbaked[i];
             if (!e.IsAlive || !e.Has<ChunkRenderData>()) continue;
             ref readonly var rd = ref e.Get<ChunkRenderData>();
-            if (!Baked(rd) && e.Has<ChunkUploadedFlag>() && _bakedQuads < ScaledBakeQuadBudget)
+            if (!Baked(rd) && e.Has<ChunkUploadedFlag>() && _bakedQuads < BakeQuadBudget)
             {
                 int stamp = _renderer.LightStampOf(rd.Grid, rd.ChunkPos);
                 foreach (var mesh in rd.Meshes())
@@ -297,20 +361,21 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
                && _renderer.LightmapEverBaked(rd.TransparentMesh);
     }
 
-    /// <summary>Lists a draw's stale light maps for baking, if it's lit from them. A scaled volume's go while the frame's
+    /// <summary>Lists a draw's stale light maps for baking, if it's lit from them. A static volume's go while the frame's
     /// budget lasts (always the first). Returns whether it can be drawn: its maps are baked, or were once.</summary>
-    private bool Bake(ChunkDraw d)
+    private bool Bake(in ChunkDraw d)
     {
         if (d.Light == ChunkLight.OpenAir) return true;
-        if (d.Light == ChunkLight.Kept) return Baked(d.Mesh) && Baked(d.CutoutMesh) && Baked(d.TransparentMesh);
+        if (d.Light == ChunkLight.Kept) return AllBaked(in d);
         int stamp = _renderer.LightStampOf(d.Handle, d.Chunk);
         if (d.Budgeted)
         {
-            int quads = Stale(d.Mesh) + Stale(d.CutoutMesh) + Stale(d.TransparentMesh);
+            int quads = Stale(d.Mesh, d.Handle, stamp) + Stale(d.CutoutMesh, d.Handle, stamp)
+                      + Stale(d.TransparentMesh, d.Handle, stamp);
             if (quads == 0) return true;
-            if (_bakedQuads > 0 && _bakedQuads + quads > ScaledBakeQuadBudget)
+            if (_bakedQuads > 0 && _bakedQuads + quads > BakeQuadBudget)
             {
-                bool drawn = Baked(d.Mesh) && Baked(d.CutoutMesh) && Baked(d.TransparentMesh);
+                bool drawn = AllBaked(in d);
                 if (!drawn) _waitingFirstBake++;
                 return drawn;
             }
@@ -320,18 +385,27 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         _renderer.PrepareLightmap(d.CutoutMesh, d.Handle, d.Chunk, stamp);
         _renderer.PrepareLightmap(d.TransparentMesh, d.Handle, d.Chunk, stamp);
         return true;
-
-        int Stale(GpuMesh? mesh) => _renderer.LightmapStale(mesh, d.Handle, stamp) ? (int)mesh!.QuadCount : 0;
-        bool Baked(GpuMesh? mesh) => _renderer.LightmapEverBaked(mesh);
     }
+
+    private int Stale(GpuMesh? mesh, GridHandle? grid, int stamp)
+        => _renderer.LightmapStale(mesh, grid, stamp) ? (int)mesh!.QuadCount : 0;
+
+    private bool AllBaked(in ChunkDraw d)
+        => _renderer.LightmapEverBaked(d.Mesh) && _renderer.LightmapEverBaked(d.CutoutMesh)
+           && _renderer.LightmapEverBaked(d.TransparentMesh);
 
     /// <summary>The translucent meshes of the chunks <see cref="RenderWorld"/> found visible this frame: their depth,
     /// then their colour where they're the nearest translucent face, so each pixel shows one translucent layer whatever
     /// order the chunks (and their faces) are drawn in.</summary>
     private void RenderTranslucent()
     {
+        long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        _renderer.Section("Render: translucent depth");
         foreach (var d in _translucentDraws) _renderer.DrawTransparentChunkDepth(d.TransparentMesh!, d.Model, d.Grid, d.Chunk, d.Dissolve);
+        _renderer.Section("Render: translucent");
         foreach (var d in _translucentDraws) _renderer.DrawTransparentChunkMesh(d.TransparentMesh!, d.Model, d.Grid, d.Chunk, d.Dissolve);
+        _renderer.Section("Render: after translucent (HUD, ImGui)");
+        Smooth(ref _translucentMs, Ms(t0, System.Diagnostics.Stopwatch.GetTimestamp()));
     }
 
     private static Mat4[] BuildOrientationPlacements()
@@ -355,10 +429,20 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         ImGui.Text($"Chunks visible: {_draws.Count:N0} of {_columnOf.Count + _others.Count:N0}; world columns visible: " +
                    $"{_columnsVisible:N0} of {_columnCount:N0}; ship chunks: {_others.Count:N0}");
         ImGui.Text($"Model blocks drawn: {_modelBlocksDrawn:N0}; chunks with translucent faces drawn: {_translucentDraws.Count:N0}");
+        ImGui.Text($"Main thread (smoothed): choosing {_cullMs:F2} ms + draw states {_stateMs:F2} ms, sort {_sortMs:F2} ms, " +
+                   $"light-map checks {_bakeCheckMs:F2} ms + bake encode {_bakeEncodeMs:F2} ms");
+        for (int i = 0; i <= LevelRows; i++)
+        {
+            var (chunks, opaque, cutout) = _levelCounts[i];
+            if (chunks == 0) continue;
+            string name = i == LevelRows ? "Ships" : i == 0 ? "Full detail" : $"Level {i}";
+            ImGui.Text($"{name}: {chunks:N0} chunks drawn, {opaque:N0} opaque quads, {cutout:N0} cut-out quads");
+        }
+        ImGui.Text($"Draw calls (smoothed): chunks {_submitMs:F2} ms, model blocks {_modelsMs:F2} ms, translucent {_translucentMs:F2} ms");
         var (used, capacity) = _renderer.LightmapArenaUse;
         ImGui.Text($"Light maps: {used * 4 / 1048576.0:F1} of {capacity * 4 / 1048576.0:F1} MB; baked per frame (smoothed): " +
                    $"{_bakedMeshesEma:F1} meshes, {_bakedGroupsEma * Renderer.LightmapQuadsPerGroup:N0} quads at most");
-        ImGui.Text($"Coarse chunks in view not drawn yet, waiting for their first bake (past {ScaledBakeQuadBudget:N0} " +
+        ImGui.Text($"Chunks in view not drawn yet, waiting for their first bake (past {BakeQuadBudget:N0} " +
                    $"quads this frame): {_waitingFirstBake:N0}; never baked in all: {_unbaked.Count:N0}");
     }
 }

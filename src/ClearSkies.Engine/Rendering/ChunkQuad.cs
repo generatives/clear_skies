@@ -71,6 +71,9 @@ public readonly struct ChunkQuad
     /// <summary>The quad's block.</summary>
     public BlockId Block => (BlockId)(B & 255);
 
+    /// <summary>The way it faces: 0 +X, 1 -X, 2 +Y, 3 -Y, 4 +Z, 5 -Z; 6 and 7 a cross block's diagonals.</summary>
+    public int Face => (int)((A >> 18) & 7);
+
     /// <summary>A <see cref="LightOffset"/> for a quad without a light map: a cross block's (lit flat from its cell), or
     /// one past what 16 bits reach in a huge mesh (lit flat from the cell in front of it).</summary>
     public const uint NoLightmap = 0xFFFF;

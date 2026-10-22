@@ -59,10 +59,11 @@ public sealed partial class ChunkMeshSystem : ISystem, IDebugUiSystem
     internal readonly record struct ModelCell(byte X, byte Y, byte Z, BlockId Block, BlockOrientation Orientation);
 
     /// <summary>One packed mesh: its quads as <see cref="ChunkQuad"/>s (rented; the first <see cref="Bytes"/> are used),
-    /// uploaded as one buffer, and the words its light map takes (see <see cref="ChunkQuad.AssignLightOffsets"/>).</summary>
-    internal readonly record struct Packed(byte[] Data, int Bytes, int QuadCount, uint LightWords)
+    /// uploaded as one buffer, and the words its light map takes (see <see cref="ChunkQuad.AssignLightOffsets"/>); its
+    /// quads grouped by the way they face, with where each group ends (see <see cref="GpuMesh.FaceEnds"/>).</summary>
+    internal readonly record struct Packed(byte[] Data, int Bytes, int QuadCount, uint LightWords, int[]? FaceEnds)
     {
-        public static readonly Packed None = new(Array.Empty<byte>(), 0, 0, 0);
+        public static readonly Packed None = new(Array.Empty<byte>(), 0, 0, 0, null);
     }
 
     /// <summary>A meshed chunk: its opaque, cut-out and translucent meshes, and its model blocks.</summary>
@@ -156,7 +157,8 @@ public sealed partial class ChunkMeshSystem : ISystem, IDebugUiSystem
 
     /// <summary>Packs a chunk mesh for upload, off the main thread: each of the mesher's quads (four vertices; the
     /// indices only ever join them as two triangles) as one 8-byte <see cref="ChunkQuad"/>, with its light map laid out
-    /// (both sides of each quad for a <paramref name="twoSided"/> mesh).</summary>
+    /// (both sides of each quad for a <paramref name="twoSided"/> mesh). The quads are grouped by the way they face (+X,
+    /// -X, +Y, -Y, +Z, -Z, then cross blocks'), so a draw can skip the groups facing away from the camera.</summary>
     private static Packed PackQuads(LayerMesh mesh, bool twoSided = false)
     {
         ReadOnlySpan<Vertex> verts = CollectionsMarshal.AsSpan(mesh.Vertices);
@@ -165,9 +167,17 @@ public sealed partial class ChunkMeshSystem : ISystem, IDebugUiSystem
         int bytes = quads * (int)ChunkQuad.SizeBytes;
         var packed = ArrayPool<byte>.Shared.Rent(bytes);
         var dst = MemoryMarshal.Cast<byte, ChunkQuad>(packed.AsSpan(0, bytes));
-        for (int q = 0; q < quads; q++) dst[q] = ChunkQuad.Pack(verts.Slice(4 * q, 4), mesh.Blocks[q]);
+        var ends = new int[GpuMesh.FaceGroups];
+        Span<int> at = stackalloc int[GpuMesh.FaceGroups];
+        for (int q = 0; q < quads; q++) ends[GpuMesh.FaceGroupOf(ChunkQuad.Pack(verts.Slice(4 * q, 4), mesh.Blocks[q]))]++;
+        for (int g = 0, sum = 0; g < ends.Length; g++) { at[g] = sum; sum += ends[g]; ends[g] = sum; }
+        for (int q = 0; q < quads; q++)
+        {
+            var quad = ChunkQuad.Pack(verts.Slice(4 * q, 4), mesh.Blocks[q]);
+            dst[at[GpuMesh.FaceGroupOf(quad)]++] = quad;
+        }
         uint lightWords = ChunkQuad.AssignLightOffsets(dst, twoSided);
-        return new Packed(packed, bytes, quads, lightWords);
+        return new Packed(packed, bytes, quads, lightWords, ends);
     }
 
     private static bool IsCoarse(in Chunk chunk) => chunk.Entry.Volume.IsLowResolutionCopy;
@@ -372,7 +382,7 @@ public sealed partial class ChunkMeshSystem : ISystem, IDebugUiSystem
     {
         if (p.QuadCount == 0) return null;
         long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-        var mesh = _renderer.UploadChunkQuads(p.Data.AsSpan(0, p.Bytes), (uint)p.QuadCount, p.LightWords, kind);
+        var mesh = _renderer.UploadChunkQuads(p.Data.AsSpan(0, p.Bytes), (uint)p.QuadCount, p.LightWords, kind, p.FaceEnds);
         _uploadMs += 0.05 * (System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds - _uploadMs);
         _createMs += 0.05 * (_renderer.LastCreateMs - _createMs);
         _writeMs  += 0.05 * (_renderer.LastWriteMs - _writeMs);

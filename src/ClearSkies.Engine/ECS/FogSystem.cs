@@ -28,6 +28,7 @@ public sealed class FogSystem : ISystem, IDebugUiSystem
     private readonly EntitySet _loadingColumns;
     private readonly EntitySet _chunksNotMeshedYet;
     private readonly EntitySet _chunksNotUploadedYet;
+    private readonly EntitySet _chunksNotBakedYet;
     private float _distance;
     private float _target;
 
@@ -40,6 +41,10 @@ public sealed class FogSystem : ISystem, IDebugUiSystem
         // Terrain chunks (each with its own presence; a grid's chunks inherit theirs) waiting to be meshed or uploaded
         // for the first time since they started being drawn: those meshed as they loaded wait only for the upload.
         _chunksNotMeshedYet = world.GetEntities().With<Chunk>().With<OwnPresence>().Without<ChunkMeshedFlag>().AsSet();
+        // And meshed, but not drawn till their light maps are baked once (see ChunkRenderSystem): only where something
+        // draws, since that's what flags them.
+        _chunksNotBakedYet = world.GetEntities().With<Chunk>().With<OwnPresence>().With<ChunkRenderData>()
+                            .Without<LightmapsBakedFlag>().AsSet();
         _chunksNotUploadedYet = world.GetEntities().With<Chunk>().With<OwnPresence>()
                                .With<NeedsGpuUploadFlag>().Without<ChunkUploadedFlag>().AsSet();
     }
@@ -71,6 +76,7 @@ public sealed class FogSystem : ISystem, IDebugUiSystem
         }
         target = MathF.Min(target, Nearest(_chunksNotMeshedYet, centre, radius));
         target = MathF.Min(target, Nearest(_chunksNotUploadedYet, centre, radius));
+        target = MathF.Min(target, Nearest(_chunksNotBakedYet, centre, radius));
         Ease(target, dt);
     }
 
