@@ -752,7 +752,12 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
                 Console.WriteLine($"[grid-store] chunk {pos} wraps onto loaded chunk {taken.Pos} in the world index; not stored.");
                 return null;
             }
-            if (g.WorldFree.Count == 0 && g.WorldNext == g.WorldCapacity) GrowWorldBlock(g);
+            if (g.WorldFree.Count == 0 && g.WorldNext == g.WorldCapacity)
+            {
+                // A scaled grid holds what it can: past that, its chunks go unlit rather than stopping the world.
+                if (g.IsLowResolutionCopy && g.WorldCapacity >= NoWorldSlot) return null;
+                GrowWorldBlock(g);
+            }
             rec.WorldSlot = g.WorldFree.Count > 0 ? g.WorldFree.Pop() : g.WorldNext++;
             rec.WorldCell = cell;
             rec.TableIndex = g.TableBase + rec.WorldSlot;

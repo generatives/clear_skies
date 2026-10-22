@@ -52,6 +52,10 @@ public sealed record LaunchOptions
     /// thin terrace steps on distant slopes); 1 or absent: off.</summary>
     public int Msaa { get; init; } = 1;
 
+    /// <summary>--lod-levels N: draws distant terrain coarse in N levels (1 to 3) past full detail, which then loads only
+    /// to 512 blocks; level k reaches 512 * 2^k blocks. 0 (off) by default: full detail as far as the view.</summary>
+    public int LodLevels { get; init; }
+
     /// <summary>--headless: no window, GPU, input or UI; just the simulation and the network, on a timer. Hosting, it's a
     /// dedicated server (no player of its own); joining, a player that stands where it spawns (a bot, for testing).
     /// </summary>
@@ -77,6 +81,7 @@ public sealed record LaunchOptions
         if (Value("--lighting") is { Length: > 0 } lighting) o = o with { LightingPreset = lighting };
         if (int.TryParse(Value("--checker-bounce"), out int checker)) o = o with { CheckerBounce = checker };
         if (int.TryParse(Value("--msaa"), out int msaa)) o = o with { Msaa = msaa };
+        if (int.TryParse(Value("--lod-levels"), out int levels)) o = o with { LodLevels = System.Math.Clamp(levels, 0, 3) };
         if (Value("--view-distance") is { } view) o = o with { ViewDistance = float.Parse(view, CultureInfo.InvariantCulture) };
         return o with { FlightTest = args.Contains("--flight-test") };
     }

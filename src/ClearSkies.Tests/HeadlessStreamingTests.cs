@@ -135,6 +135,69 @@ public class HeadlessStreamingTests
     }
 
     [Fact]
+    public void FullDetailLoadsInABallOfGroupsAroundTheView()
+    {
+        using var scene = new HeadlessScene();
+        using var db = SaveDatabase.InMemory();
+        var load = Streaming(scene, db, viewDistance: 256);
+        load.SetLevels(128, new[] { 512f }); // full detail to 2 groups of 2x2x2 chunks
+        var player = Interest(scene, 16, 16, View(256)); // in group (0, 0, 0); stone fills layers -8 to -1
+        Settle(load);
+        bool Loaded(int x, int y, int z) => scene.WorldVolume.IsLoaded(new ChunkPosition(x, y, z));
+        // Under the view, the groups 2 down: layers -4 to -1, not the stone below them.
+        Assert.True(Loaded(0, -1, 0) && Loaded(0, -4, 0));
+        Assert.False(Loaded(0, -5, 0));
+        // A group across, one down: layers -2 and -1 (group middles, from the middle of the view's chunk).
+        Assert.True(Loaded(2, -2, 0));
+        Assert.False(Loaded(2, -3, 0));
+        // Two groups across: only the view's own height, where there's no stone.
+        Assert.False(Loaded(4, -1, 0));
+
+        // Down among the stone, the ball goes with the view.
+        player.Get<Transform>().Position = new Vector3D<float>(16, -200, 16); // layer -7, group -4
+        Settle(load);
+        Assert.True(Loaded(0, -8, 0) && Loaded(2, -7, 0));
+        Assert.False(Loaded(0, -1, 0)); // 3 groups up
+    }
+
+    [Fact]
+    public void ACoarseLevelLoadsPastFullDetailAndIsLeftOutWhereFullDetailIs()
+    {
+        using var scene = new HeadlessScene();
+        using var db = SaveDatabase.InMemory();
+        var load = Streaming(scene, db, viewDistance: 256);
+        load.SetLevels(64, new[] { 256f }); // full detail to one group; level 1 (64-block chunks) to 4 chunks
+        var player = Interest(scene, 16, 16, View(256));
+        var deadline = DateTime.UtcNow.AddSeconds(20);
+        do { Settle(load); } while (!load.LevelsIdle && DateTime.UtcNow < deadline);
+        Assert.True(load.LevelsIdle);
+
+        var level = load.Levels[1];
+        Assert.Equal(2, level.Volume.Scale);
+        var near = new ChunkPosition(0, -1, 0); // over full chunks (0..1, -2..-1, 0..1), which full detail has
+        var far = new ChunkPosition(3, -1, 0);  // past full detail
+        Assert.True(level.Volume.IsLoaded(near) && level.Volume.IsLoaded(far));
+        Assert.True(level.Volume.GetData(far)!.IsUniform(out var block) && block == BlockId.Stone);
+        Assert.False(level.Volume.IsLoaded(new ChunkPosition(3, 0, 0))); // air
+        Assert.False(level.Volume.IsLoaded(new ChunkPosition(5, -1, 0))); // out of range
+        Assert.Equal(ChunkDrawState.Hidden, level.DrawState(near));
+        Assert.Equal(ChunkDrawState.Whole, level.DrawState(far));
+        Assert.Equal(ChunkDrawState.Whole, level.DrawState(new ChunkPosition(0, -4, 0))); // below full detail's ball
+
+        // The level streams with the view like full detail: what's left behind unloads.
+        player.Get<Transform>().Position = new Vector3D<float>(16 + 1024, 10, 16);
+        do { Settle(load); } while (!load.LevelsIdle && DateTime.UtcNow < deadline.AddSeconds(20));
+        Assert.False(level.Volume.IsLoaded(far));
+        Assert.True(level.Volume.IsLoaded(new ChunkPosition(16 + 3, -1, 0)));
+
+        // Off: full detail as far as the view again, and the level is gone.
+        load.SetLevels(0, Array.Empty<float>());
+        Assert.Null(load.FullDetailRadius);
+        Assert.Single(load.Levels); // full detail
+        Assert.False(level.Root.IsAlive);
+    }
+
+    [Fact]
     public void AColliderInterestAwayFromTheViewGetsItsTerrainUntilItLeaves()
     {
         using var scene = new HeadlessScene();

@@ -24,7 +24,26 @@ internal sealed class PackedOpacity(uint[] words, ulong solid, ulong air, List<E
 
 internal sealed class ChunkEntry
 {
-    public ChunkData  Data        { get; }
+    public ChunkData  Data        { get; private set; }
+
+    /// <summary>Whether <see cref="Data"/> was dropped (see <see cref="DropData"/>): it reads all air from then on, and
+    /// isn't this chunk's to release.</summary>
+    public bool DataDropped { get; private set; }
+
+    // What a dropped chunk's Data reads: all air, shared, never written or released.
+    private static readonly ChunkData Dropped = new();
+
+    /// <summary>Lets go of this chunk's blocks, for a chunk that won't need them again once meshed and in the GPU store
+    /// (a coarse level's, which is never edited, collided with or remeshed against a neighbour): its arrays go back to
+    /// the pool, and <see cref="Data"/> reads all air from then on.</summary>
+    public void DropData()
+    {
+        if (DataDropped) return;
+        var data = Data;
+        Data = Dropped;
+        DataDropped = true;
+        data.Release();
+    }
     public ChunkVolume Volume { get; }
     public ChunkPosition Position { get; }
     public Entity     Entity      { get; }
