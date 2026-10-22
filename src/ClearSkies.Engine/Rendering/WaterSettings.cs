@@ -23,8 +23,9 @@ public static class WaterSettings
     /// texture, for the ripples.</summary>
     public static float ShallowTint = 0.7f;
 
-    /// <summary>How strong the pattern in the deep colour is (0-1: up to that much brighter or darker), so deep water
-    /// isn't one flat colour, and how big it is, in blocks.</summary>
-    public static float Pattern = 0.2f;
+    /// <summary>How much the water's thickness varies through it (0-1: up to that much murkier or clearer than
+    /// <see cref="Clarity"/> says), so there are darker and lighter stretches of water rather than one even body, and
+    /// how big those stretches are, in blocks.</summary>
+    public static float Pattern = 0.6f;
     public static float PatternSize = 6f;
 }

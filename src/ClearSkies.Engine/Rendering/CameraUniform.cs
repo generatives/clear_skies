@@ -14,7 +14,7 @@ namespace ClearSkies.Engine.Rendering;
 /// haze's strength) + haze vec4 (rgb colour, w distance) + sea vec4 (the cloud sea: altitude, coverage (0 = off), cell
 /// size and thickness in blocks; see <see cref="SkySettings"/>) + lightParams2 vec4 (x: exposure; y, z: render pass
 /// debug toggles; w: the tint volume's origin z) + water vec4 (rgb colour, w clarity) + water2 vec4 (x shallow
-/// opacity, y shallow tint, z pattern strength, w pattern size; see <see cref="WaterSettings"/>).
+/// opacity, y shallow tint, z murk variation, w its size; see <see cref="WaterSettings"/>).
 /// SunDirection is the unit vector pointing FROM the sun TOWARD the scene (i.e. the light direction).
 /// The shader scales sky light by max(dot(worldNormal, -SunDirection), 0).
 /// SunStrength (the vec4's w component) is a 0-1 multiplier on the direct-sun term, read from
