@@ -523,15 +523,10 @@ public sealed class TerrainSwapSystem : ISystem
     /// <summary>What <see cref="FarReadyRadius"/> last found holding the fog in (for the panel).</summary>
     internal string FogHeldBy { get; private set; } = "nothing";
 
-    private (float Distance, float At, string By) _closestHold = (float.PositiveInfinity, float.NegativeInfinity, "nothing");
-    private const float ClosestHoldSeconds = 5f;
-
     /// <summary>For the fog while coarse levels are on (null otherwise): the nearest terrain not ready to be seen in any
     /// coarse level, out to the farthest level's radius. That's a column being made or queued (by its distance across, as
     /// which of its chunks are in range isn't known yet), or a chunk in range held back for its light, where nothing else
-    /// shows instead (the finer level's ready, or the coarser one drawn). Full detail not ready is covered by level 1. A
-    /// chunk of a coarser level wholly inside level 1's range only stands in there till level 1 is ready, so the fog waits
-    /// on level 1 there instead.</summary>
+    /// shows instead (the finer level's ready, or the coarser one drawn). Full detail not ready is covered by level 1.</summary>
     public float? FarReadyRadius(Vector3D<float> centre)
     {
         if (Levels.Count == 1) return null;
@@ -556,11 +551,10 @@ public sealed class TerrainSwapSystem : ISystem
             foreach (var (p, c) in SwapsOf(level))
             {
                 if (c.Quiet || c.WasReady || !Kept(level, p)) continue; // a quiet one doesn't wait
-                if (!Waits(level, c, p) && !(c.Drawn && Unbaked(level, p))) continue;
+                if (!Waits(level, c, p)) continue;
                 if (EntityOf(level, p) is { } e && e.Has<ChunkRenderData>() && e.Get<ChunkRenderData>().IsEmpty) continue;
                 if (coarser != null && Shows(coarser, new ChunkPosition(p.X >> 1, p.Y >> 1, p.Z >> 1))) continue;
                 float d = BoxDistance.ToChunk(centre, p.X, p.Y, p.Z, level.Blocks);
-                if (level.Finer is { Level: > 0 } finer && d + 1.5f * level.Blocks <= finer.Radius) continue;
                 if (d < best && d < ignoreFrom)
                     (best, FogHeldBy) = (d, $"level {level.Level} chunk waiting for {WaitsFor(level, c, p)}, {d:F0} blocks out");
             }
@@ -580,9 +574,6 @@ public sealed class TerrainSwapSystem : ISystem
                 return true;
             }
         }
-        // The nearest hold of the last few seconds, for the panel: a short one is gone before it can be read.
-        if (best <= _closestHold.Distance || _time - _closestHold.At > ClosestHoldSeconds)
-            _closestHold = (best, _time, FogHeldBy);
         return best;
     }
 
@@ -605,8 +596,7 @@ public sealed class TerrainSwapSystem : ISystem
         if (EntityOf(level, p) is not { } e || !e.Has<ChunkMeshedFlag>())
             return c.Settled ? "its mesh (lit already)" : "its mesh";
         if (!e.Has<ChunkUploadedFlag>()) return "the light store";
-        if (!c.Settled) return $"its light ({c.Waiting} frames)";
-        return "its light maps' first bake";
+        return $"its light ({c.Waiting} frames)";
     }
 
     /// <summary>Whether the level draws chunk <paramref name="p"/> now, lit: what's under it doesn't show.</summary>
@@ -619,7 +609,6 @@ public sealed class TerrainSwapSystem : ISystem
         float fade = FadeSeconds;
         if (ImGui.SliderFloat("Swap fade (seconds)", ref fade, 0f, 4f, "%.2f")) FadeSeconds = fade;
         ImGui.Text($"Fog held by: {FogHeldBy}");
-        ImGui.Text($"Nearest hold in the last {ClosestHoldSeconds:F0} s ({_time - _closestHold.At:F1} s ago): {_closestHold.By}");
         ImGui.Text($"Last frame: {_shown.Visited:N0} of {_shown.Swaps:N0} swaps looked at, {_shown.Readiness:N0} readiness checks, " +
                    $"{_shown.LitChecks:N0} light checks, {_shown.ShowFirst:N0} asked to light first, {_shown.Covers:N0} covers told");
         _steps.Draw();
