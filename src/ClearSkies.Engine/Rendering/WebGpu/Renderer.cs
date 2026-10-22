@@ -29,6 +29,7 @@ const MIN_AMBIENT: f32 = 0.00;        // floor so no geometry is ever fully blac
 const AO_MIN: f32 = 0.15;             // darkest ambient-occluded corner (1 = no AO). 0.15 provides exaggeration for evaluation;
                                       // 0.45 is the subtler default.
 const NO_LIGHTMAP: u32 = 0xFFFFFFFFu; // a quad without a light map (see VSOut.lm)
+const OPEN_AIR_GRID: i32 = -2;         // a chunk lit as open air, with no light data (Renderer.OpenAirGrid)
 
 // sunDir.w: sun strength (SunLight.Strength). lightParams.x: unused (ray AO is in the voxel light), .y: the climate
 // tint volume's origin x (lightParams2.w its z; see climateTinted), .z: ambient
@@ -269,7 +270,7 @@ struct Model { model: mat4x4<f32>, chunk: vec3<i32>, grid: i32, params: vec4<f32
 // and where it's drawn, so a run of chunk draws needs no bind group or uniform per draw. Their light maps (see
 // QuadLightmap) sit in another (lightArena, 16-bit corners two to a word), from the record's lightBase (in words;
 // NO_LIGHTMAP for a mesh without one).
-struct ChunkDraw { model: mat4x4<f32>, chunk: vec3<i32>, grid: i32, quadBase: u32, lightBase: u32, pad1: u32, pad2: u32 };
+struct ChunkDraw { model: mat4x4<f32>, chunk: vec3<i32>, grid: i32, quadBase: u32, lightBase: u32, dissolve: f32, pad2: u32 };
 @group(1) @binding(2) var<storage, read> chunkDraws: array<ChunkDraw>;
 @group(1) @binding(3) var<storage, read> quadArena: array<vec2<u32>>;
 @group(1) @binding(4) var<storage, read> lightArena: array<u32>;
@@ -318,6 +319,8 @@ struct VSOut {
     // light map: the first corner's index in lightArena (16-bit units; NO_LIGHTMAP for none), width and height.
     @location(9) quv: vec2<f32>,
     @location(10) @interpolate(flat) lm: vec4<u32>,
+    // Chunk draws: the share of its pixels dissolved (see dissolved), while one chunk swaps for another.
+    @location(11) @interpolate(flat) dissolve: f32,
 };
 
 @vertex
@@ -438,7 +441,20 @@ fn chunkVertex(d: ChunkDraw, quad: vec2<u32>, corner: u32) -> VSOut {
     o.lm          = vec4<u32>(NO_LIGHTMAP, w, h, select(0u, 1u, tintAll || (tintTop && face == 2u)));
     if (face < 6u && lightOffset != 0xFFFFu && d.lightBase != NO_LIGHTMAP) { o.lm.x = 2u * (d.lightBase + lightOffset); }
     o.quv         = vec2<f32>(cu, cv);
+    o.dissolve    = d.dissolve;
     return o;
+}
+
+// Whether this pixel of a dissolving chunk draw is left out: a 4x4 ordered dither on the screen. A chunk going away
+// (dissolve d > 0) leaves out the pixels under d; one coming in over it (dissolve -d) draws only those, so through a
+// swap each pixel shows one or the other, never both (see ChunkDrawStates).
+fn dissolved(in: VSOut) -> bool {
+    if (in.dissolve == 0.0) { return false; }
+    var bayer = array<f32, 16>(0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);
+    let p = vec2<u32>(in.pos.xy) & vec2<u32>(3u);
+    let b = (bayer[p.x + 4u * p.y] + 0.5) / 16.0;
+    if (in.dissolve > 0.0) { return b < in.dissolve; }
+    return b >= -in.dissolve;
 }
 
 // A well-mixed hash of a world cell, for per-cell variation that's the same wherever the cell is meshed.
@@ -585,6 +601,14 @@ fn fs_chunk(in: VSOut) -> @location(0) vec4<f32> {
     return vec4<f32>(shadeBlock(in, base, false, false), 1.0);
 }
 
+// Opaque chunk faces dissolving (one chunk swapping for another): its own pipeline, since a discard costs the early
+// depth test.
+@fragment
+fn fs_chunk_dissolve(in: VSOut) -> @location(0) vec4<f32> {
+    if (dissolved(in)) { discard; }
+    return vec4<f32>(shadeBlock(in, blockColor(in).rgb, false, false), 1.0);
+}
+
 // Translucent blocks' faces (see RenderLayer.Translucent), alpha-blended over the opaque world: lit like fs_main, with
 // the texture's alpha times the block's opacity. Fully clear texels are cut out. Drawn only where the face is the
 // nearest transparent one (fs_chunk_transparent_depth laid that depth down first), so every pixel blends exactly one
@@ -595,7 +619,7 @@ fn fs_chunk(in: VSOut) -> @location(0) vec4<f32> {
 fn fs_chunk_transparent(in: VSOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let c = blockColor(in);
     let alpha = c.a * in.alpha;
-    if (alpha < 0.004) { discard; }
+    if (alpha < 0.004 || dissolved(in)) { discard; }
     var v = in;
     if (!front) { v.localNormal = -v.localNormal; v.worldNormal = -v.worldNormal; }
     return vec4<f32>(shadeBlock(v, c.rgb, true, !front), alpha);
@@ -609,7 +633,7 @@ fn fs_chunk_transparent(in: VSOut, @builtin(front_facing) front: bool) -> @locat
 // and neither has fs_main.
 @fragment
 fn fs_cutout_depth(in: VSOut) -> @location(0) vec4<f32> {
-    if (blockColor(in).a < 0.5) { discard; }
+    if (blockColor(in).a < 0.5 || dissolved(in)) { discard; }
     return vec4<f32>(0.0);
 }
 
@@ -624,7 +648,7 @@ fn fs_cutout_shaded(in: VSOut) -> @location(0) vec4<f32> {
 // Transparent faces' depth pre-pass: the nearest transparent face at each pixel, without its fully clear texels.
 @fragment
 fn fs_chunk_transparent_depth(in: VSOut) -> @location(0) vec4<f32> {
-    if (blockColor(in).a * in.alpha < 0.004) { discard; }
+    if (blockColor(in).a * in.alpha < 0.004 || dissolved(in)) { discard; }
     return vec4<f32>(0.0);
 }
 
@@ -635,8 +659,8 @@ fn shadeBlock(in: VSOut, baseColor: vec3<f32>, see: bool, back: bool) -> vec3<f3
     drawGrid  = in.cg.w;
     let dbg = u32(camera.lightParams2.y);
 
-    // A chunk drawn without a grid has no light data: full-bright.
-    if (drawGrid < 0) { return baseColor; }
+    // A chunk drawn without a grid has no light data: full-bright; or lit as open air below (OPEN_AIR_GRID).
+    if (drawGrid < 0 && drawGrid != OPEN_AIR_GRID) { return baseColor; }
 
     let worldN = normalize(in.worldNormal);
     let ndotl  = max(dot(worldN, -(camera.sunDir.xyz)), 0.0);
@@ -644,8 +668,8 @@ fn shadeBlock(in: VSOut, baseColor: vec3<f32>, see: bool, back: bool) -> vec3<f3
     var ao: f32;
     let mode = i32(camera.lightParams2.z);
     let air = drawChunk * 32 + vec3<i32>(floor(in.localPos + 0.5 * in.localNormal));
-    if (mode == 3) {
-        // Debug: no voxel lighting at all (open sky, full sun, no AO).
+    if (mode == 3 || drawGrid == OPEN_AIR_GRID) {
+        // No voxel lighting at all (open sky, full sun, no AO): a debug view, and a chunk lit as open air.
         s.sky = camera.lightParams.z; s.rgb = vec3<f32>(0.0); s.sun = 1.0;
         ao = 1.0;
     } else if (in.cross.w != 0) {
@@ -843,6 +867,7 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
     private RenderPipeline* _particlePipeline;
     private RenderPipeline* _modelPipeline;
     private RenderPipeline* _chunkPipeline;          // vs_chunk: chunk meshes (ChunkQuad instances)
+    private RenderPipeline* _chunkDissolvePipeline;  // dissolving ones (fs_chunk_dissolve)
     private RenderPipeline* _chunkWireframePipeline;
     private RenderPipeline* _chunkOverdrawPipeline;  // debug overdraw view
     private RenderPipeline* _chunkCutoutDepthPipeline;  // their depth pre-pass (fs_cutout_depth)
@@ -961,6 +986,7 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
         _cloudPipeline     = CreateCloudPipeline();
         _particlePipeline  = CreateParticlePipeline();
         _chunkPipeline          = CreateChunkPipeline("vs_chunk", PrimitiveTopology.TriangleList, CullMode.Back, "fs_chunk");
+        _chunkDissolvePipeline  = CreateChunkPipeline("vs_chunk", PrimitiveTopology.TriangleList, CullMode.Back, "fs_chunk_dissolve");
         _chunkWireframePipeline = CreateChunkPipeline("vs_chunk_lines", PrimitiveTopology.LineList, CullMode.None, "fs_chunk");
         _chunkOverdrawPipeline  = CreateOverdrawPipeline();
         _chunkCutoutDepthPipeline = CreatePipeline("vs_chunk", "fs_cutout_depth", null, PrimitiveTopology.TriangleList, CullMode.Back,
@@ -1520,6 +1546,14 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
         _lightmap.Queue(mesh, grid.Index, chunk);
     }
 
+    /// <summary>Whether <see cref="PrepareLightmap"/> would list <paramref name="mesh"/> for baking (its light map hasn't
+    /// been baked at <paramref name="stamp"/>), for callers that bake to a budget.</summary>
+    public bool LightmapStale(GpuMesh? mesh, GridHandle? grid, int stamp)
+        => mesh?.Light != null && grid != null && grid.Index >= 0 && mesh.BakedStamp != ((long)_lightmapEpoch << 32 | (uint)stamp);
+
+    /// <summary>Whether <paramref name="mesh"/>'s light map has ever been baked (true for one without a light map).</summary>
+    public bool LightmapEverBaked(GpuMesh? mesh) => mesh?.Light == null || mesh.BakedStamp != -1;
+
     /// <summary>The light stamp <see cref="PrepareLightmap"/> takes for a chunk (see <see cref="GridStore.LightStampOf"/>).</summary>
     public int LightStampOf(GridHandle? grid, ChunkPosition chunk) => grid == null ? 0 : _gridStore?.LightStampOf(grid, chunk) ?? 0;
 
@@ -1800,22 +1834,29 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
         _cameraBuffer.Write<CameraUniform>(0, s);
     }
 
+    /// <summary>The grid a chunk is drawn with to be lit as open air (ambient and sun), when it has no voxel light to
+    /// show (see ChunkRenderSystem).</summary>
+    public const int OpenAirGrid = -2;
+
     /// <summary>
     /// Draws a chunk mesh lit from grid <paramref name="grid"/> (its <see cref="GridHandle.Index"/>; -1 draws it
-    /// full-bright). <paramref name="chunk"/> is the chunk's coordinate in that grid.
+    /// full-bright, <see cref="OpenAirGrid"/> lit as open air). <paramref name="chunk"/> is the chunk's coordinate in that grid.
+    /// <paramref name="dissolve"/> (here and in the other chunk draws), while one chunk swaps for another: 0 draws it
+    /// whole; d (0-1) leaves out that share of its pixels in an even screen dither (going away); -d draws only that
+    /// share, the very pixels d leaves out (coming in).
     /// </summary>
-    public void DrawChunkMesh(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk)
-        => DrawChunk(mesh, model, grid, chunk, _chunkPipeline);
+    public void DrawChunkMesh(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk, float dissolve = 0f)
+        => DrawChunk(mesh, model, grid, chunk, dissolve != 0f ? _chunkDissolvePipeline : _chunkPipeline, dissolve);
 
     /// <summary>
     /// Lays down a chunk's cut-out mesh's depth (<see cref="ChunkRenderData.CutoutMesh"/>), minus its texels under half
     /// alpha, so <see cref="DrawCutoutChunkMesh"/> lights only the nearest cut-out face at each pixel. Call for every
     /// visible chunk's cut-out mesh after the opaque chunk meshes. Skipped in the wireframe and overdraw views.
     /// </summary>
-    public void DrawCutoutChunkDepth(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk)
+    public void DrawCutoutChunkDepth(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk, float dissolve = 0f)
     {
         if (WireframeMode || OverdrawMode) return;
-        DrawChunk(mesh, model, grid, chunk, _chunkCutoutDepthPipeline);
+        DrawChunk(mesh, model, grid, chunk, _chunkCutoutDepthPipeline, dissolve);
     }
 
     /// <summary>
@@ -1823,18 +1864,18 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
     /// <see cref="DrawCutoutChunkDepth"/> laid it down (so minus its texels under half alpha). Call after every visible
     /// chunk's cut-out depth.
     /// </summary>
-    public void DrawCutoutChunkMesh(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk)
-        => DrawChunk(mesh, model, grid, chunk, _chunkCutoutShadedPipeline);
+    public void DrawCutoutChunkMesh(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk, float dissolve = 0f)
+        => DrawChunk(mesh, model, grid, chunk, _chunkCutoutShadedPipeline, dissolve);
 
     /// <summary>
     /// Lays down a chunk's transparent mesh's depth (<see cref="ChunkRenderData.TransparentMesh"/>), so
     /// <see cref="DrawTransparentChunkMesh"/> draws only the nearest transparent face at each pixel. Call for every
     /// visible chunk's transparent mesh first. Skipped in the wireframe and overdraw views.
     /// </summary>
-    public void DrawTransparentChunkDepth(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk)
+    public void DrawTransparentChunkDepth(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk, float dissolve = 0f)
     {
         if (WireframeMode || OverdrawMode) return;
-        DrawChunk(mesh, model, grid, chunk, _chunkTransparentDepthPipeline);
+        DrawChunk(mesh, model, grid, chunk, _chunkTransparentDepthPipeline, dissolve);
     }
 
     /// <summary>
@@ -1842,10 +1883,11 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
     /// face (see <see cref="DrawTransparentChunkDepth"/>). Call after the opaque world and <see cref="DrawSky"/> (the sky
     /// only fills pixels with no depth, so it would paint over them).
     /// </summary>
-    public void DrawTransparentChunkMesh(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk)
-        => DrawChunk(mesh, model, grid, chunk, _chunkTransparentPipeline);
+    public void DrawTransparentChunkMesh(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk, float dissolve = 0f)
+        => DrawChunk(mesh, model, grid, chunk, _chunkTransparentPipeline, dissolve);
 
-    private void DrawChunk(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk, RenderPipeline* solidPipeline)
+    private void DrawChunk(GpuMesh mesh, in Mat4 model, int grid, ChunkPosition chunk, RenderPipeline* solidPipeline,
+                           float dissolve = 0f)
     {
         if (_chunkDrawCount >= MaxChunkDraws || mesh.QuadCount == 0) return;
 
@@ -1866,7 +1908,7 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
         _chunkDrawStaging[record] = new ChunkDrawRecord
         {
             Model = model, ChunkX = chunk.X, ChunkY = chunk.Y, ChunkZ = chunk.Z, Grid = grid, QuadBase = mesh.QuadBase,
-            LightBase = mesh.Light != null ? mesh.LightBase : uint.MaxValue,
+            LightBase = mesh.Light != null ? mesh.LightBase : uint.MaxValue, Dissolve = dissolve,
         };
         if (wire && !OverdrawMode) _api.RenderPassEncoderDraw(_pass, 8u * mesh.QuadCount, 1, 0, record);
         else _api.RenderPassEncoderDrawIndexed(_pass, 6u * System.Math.Min(mesh.QuadCount, (uint)MaxChunkQuads), 1, 0, 0, record);
@@ -1896,6 +1938,7 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
         public Mat4 Model;
         public int ChunkX, ChunkY, ChunkZ, Grid;
         public uint QuadBase, LightBase;
+        public float Dissolve;
     }
 
     /// <summary>Stages this draw's model uniform for <see cref="EndFrame"/>'s single upload; returns its dynamic offset.</summary>
@@ -1977,6 +2020,7 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
         if (_wireframePipeline  != null) _api.RenderPipelineRelease(_wireframePipeline);
         if (_pipeline           != null) _api.RenderPipelineRelease(_pipeline);
         if (_chunkPipeline      != null) _api.RenderPipelineRelease(_chunkPipeline);
+        if (_chunkDissolvePipeline != null) _api.RenderPipelineRelease(_chunkDissolvePipeline);
         if (_chunkWireframePipeline != null) _api.RenderPipelineRelease(_chunkWireframePipeline);
         if (_chunkOverdrawPipeline != null) _api.RenderPipelineRelease(_chunkOverdrawPipeline);
         if (_chunkCutoutDepthPipeline != null) _api.RenderPipelineRelease(_chunkCutoutDepthPipeline);
