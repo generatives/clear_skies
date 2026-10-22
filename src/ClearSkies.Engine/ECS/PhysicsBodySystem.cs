@@ -121,6 +121,7 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
         foreach (ref readonly Entity entity in _dirtyChunks.GetEntities())
         {
             var entry = entity.Get<Chunk>().Entry;
+            if (entry.Volume.IsLowResolutionCopy) { _far.Add(entity); continue; } // nothing collides with it
             if (entry.Volume.Root.Has<DynamicGrid>()) { _grids.Add(entry.Volume.Root); _far.Add(entity); continue; }
             _staticVolume ??= entry.Volume;
             if (entity.Has<PhysicsPresence>()) _near.Add(entity);
@@ -349,9 +350,11 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
         foreach (var character in _removedCharacters) character.Dispose();
         _removedCharacters.Clear();
 
+        // Only the static world's chunks have colliders here, keyed by position: a ship's or a scaled volume's chunk at
+        // the same position isn't the world's.
         foreach (var entry in _removedChunks)
         {
-            if (_colliders.Remove(entry.Position, out var c))
+            if (entry.Volume == _staticVolume && _colliders.Remove(entry.Position, out var c))
                 _physics.RemoveStaticCompound(c.handle);
         }
         _removedChunks.Clear();

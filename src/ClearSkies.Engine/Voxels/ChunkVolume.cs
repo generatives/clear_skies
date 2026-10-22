@@ -17,7 +17,8 @@ namespace ClearSkies.Engine.Voxels;
 /// Every volume's <see cref="Root"/> entity carries a <see cref="Transform"/> placing the volume's own space in the
 /// world (identity for the static world): world = root.Position + root.Rotation·voxel. Everything that maps between
 /// volume space and world space (chunk placement, lighting, raycasts) goes through that, so none of it needs to know
-/// whether the volume is static or has a physics body. Volumes are rigid: root scale is ignored. A dynamic grid's
+/// whether the volume is static or has a physics body. Volumes are rigid, and the root's scale is the volume's
+/// <see cref="Scale"/>: 1 except for a low-resolution copy of the world (see <see cref="LowResolutionCopy"/>). A dynamic grid's
 /// body sits at its centre of mass inside that space (<see cref="PhysicsBodyComponent.Offset"/>); edits move the
 /// centre of mass, never the volume's space.
 ///
@@ -71,11 +72,35 @@ public class ChunkVolume : IReplicatedChildren
     internal ChunkPosition BoundsMax { get; private set; }
     private bool _boundsInitialised;
 
-    public ChunkVolume(Entity entity, World world)
+    /// <summary>How many blocks a side each of this volume's voxels is: 1 for the world and ships; a power of two for a
+    /// low-resolution copy of the world, whose root's Transform scale is this.</summary>
+    public int Scale { get; }
+
+    /// <summary>A low-resolution copy of the static world (see <see cref="CreateLowResolutionCopy"/>), not the world itself: its chunks
+    /// hold no block entities, and it is lit as a static grid at its scale (see GridStore.RegisterStatic).</summary>
+    public bool IsLowResolutionCopy { get; }
+
+    public ChunkVolume(Entity entity, World world) : this(entity, world, 1, false) { }
+
+    private ChunkVolume(Entity entity, World world, int scale, bool scaledCopy)
     {
         Root = entity;
         _world = world;
+        Scale = scale;
+        IsLowResolutionCopy = scaledCopy;
         if (!entity.Has<Transform>()) entity.Set(Transform.Identity);
+    }
+
+    /// <summary>Makes <paramref name="root"/> a low-resolution copy of the static world, its voxels <paramref name="scale"/>
+    /// blocks a side: a <see cref="ChunkGrid"/> flagged <see cref="LowResolutionCopy"/>, so systems that act on blocks leave
+    /// it out.</summary>
+    public static ChunkVolume CreateLowResolutionCopy(Entity root, World world, int scale)
+    {
+        var volume = new ChunkVolume(root, world, scale, true) { MeshIgnoresNeighbours = true };
+        root.Get<Transform>().Scale = new Vector3D<float>(scale);
+        root.Set(new ChunkGrid { Volume = volume });
+        root.Set<LowResolutionCopy>();
+        return volume;
     }
 
     public int  LoadedCount                => _chunks.Count;
@@ -282,7 +307,7 @@ public class ChunkVolume : IReplicatedChildren
         entry.Entity.Set(new NeedsRemeshFlag());
         entry.Entity.Set(new NeedsRecollideFlag());
         entry.Entity.Set(new NeedsGpuUploadFlag());
-        CreateBlockEntities(entry);
+        if (!IsLowResolutionCopy) CreateBlockEntities(entry);
 
         _chunks[pos] = entry;
         UpdateBounds(pos);
@@ -418,11 +443,11 @@ public class ChunkVolume : IReplicatedChildren
 
     /// <summary>Maps a point in this volume's space to world space for a root at <paramref name="root"/>.</summary>
     public Vector3D<float> VoxelToWorld(in Transform root, Vector3D<float> voxel)
-        => root.Position + Vec.Rotate(root.Rotation, voxel);
+        => root.Position + Vec.Rotate(root.Rotation, voxel * (float)Scale);
 
     /// <summary>Inverse of <see cref="VoxelToWorld"/>. Directions map with just the inverse rotation.</summary>
     public Vector3D<float> WorldToVoxel(in Transform root, Vector3D<float> world)
-        => Vec.Rotate(Vec.Conjugate(root.Rotation), world - root.Position);
+        => Vec.Rotate(Vec.Conjugate(root.Rotation), world - root.Position) / (float)Scale;
 
     // ── Helpers ────────────────────────────────────────────────────────────
 

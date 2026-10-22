@@ -79,7 +79,7 @@ public sealed class BlockActionSystem : ISystem, IDisposable, IDebugUiSystem
         _limits = limits;
         _selection = selection;
         _players = world.GetEntities().With<LocalPlayer>().With<PlayerInput>().With<Transform>().With<MouseLookComponent>().AsSet();
-        _volumes = world.GetEntities().With<ChunkGrid>().With<Transform>().With<EntityId>().AsSet();
+        _volumes = world.GetEntities().With<ChunkGrid>().Without<LowResolutionCopy>().With<Transform>().With<EntityId>().AsSet();
         _focusSubscription = world.Subscribe<InteractionFocus>((in InteractionFocus f) => _focus = f.Point);
     }
 

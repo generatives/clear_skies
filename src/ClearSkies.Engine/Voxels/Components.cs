@@ -10,6 +10,11 @@ public struct ChunkGrid
     public ChunkVolume Volume;
 }
 
+/// <summary>Flags a <see cref="ChunkGrid"/> as a low-resolution copy of the static world (its <see cref="ChunkVolume.Scale"/> is
+/// above 1): meshed, lit and drawn like the world, but never targeted, edited, grappled or collided with. Systems that
+/// act on blocks leave it out of their grids.</summary>
+public struct LowResolutionCopy { }
+
 public struct NeedsRemeshFlag { }
 public struct NeedsGpuUploadFlag { }
 
