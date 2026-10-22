@@ -656,37 +656,47 @@ const WATER_CLEAR: f32 = 5.0;
 const WATER_SHALLOW_ALPHA: f32 = 0.3;
 const WATER_SHALLOW_FOG: f32 = 0.6;
 const WATER_MAX_PATH: f32 = 16.0;
+const WATER_REACH: f32 = 32.0;
 
-// Whether voxel v in this draw's grid holds water (a translucent block): its chunk's translucent bits, whose occupancy
-// slot plus one is its chunk-table entry's second word's w (0 for none, see GridStore.EntryWords).
-fn isWater(v: vec3<i32>) -> bool {
+// What voxel v in this draw's grid holds: 2 a block that blocks light, 1 water (a translucent block: its chunk's
+// translucent bits, whose occupancy slot plus one is its chunk-table entry's second word's w, 0 for none; see
+// GridStore.EntryWords), 0 anything else. One chunk lookup for both.
+fn waterOrSolid(v: vec3<i32>) -> i32 {
     let i = entryOf(drawGrid, v >> vec3<u32>(5u));
-    if (i < 0) { return false; }
-    let slot = chunkTable[2 * i + 1].w;
-    if (slot <= 0) { return false; }
+    if (i < 0) { return 0; }
+    let code = chunkTable[2 * i].x;
     let l = v & vec3<i32>(31);
-    return ((occPool[u32((slot - 1) * WPC + l.y + 32 * l.z)] >> u32(l.x)) & 1u) == 1u;
+    let w = u32(l.y + 32 * l.z);
+    if (code == OCC_ALL_SOLID) { return 2; }
+    if (code >= 0 && ((occPool[u32(code * WPC) + w] >> u32(l.x)) & 1u) == 1u) { return 2; }
+    let slot = chunkTable[2 * i + 1].w;
+    if (slot > 0 && ((occPool[u32((slot - 1) * WPC) + w] >> u32(l.x)) & 1u) == 1u) { return 1; }
+    return 0;
 }
 
-// How far the view goes from p on a water face, into its cell (both chunk-local, so precise however far the chunk
-// is from the origin: in grid space, nudging p into the cell got lost in rounding there, and the walk started in the
-// air in front) along rd (normalized, grid space) before it leaves the water, onto the bed or out into air (through
-// a waterfall), in blocks, up to WATER_MAX_PATH: a walk through the cells it crosses.
+// How much water the view goes through from p on a water face, into its cell (both chunk-local, so precise however
+// far the chunk is from the origin), along rd (normalized, grid space), in blocks, up to WATER_MAX_PATH: a walk
+// through the cells it crosses, adding up the water in them (not stopping where it first leaves the water, so a ragged
+// waterfall's air gaps don't break its shading into bands), until a block that blocks light or WATER_REACH blocks.
 fn waterPath(p: vec3<f32>, start: vec3<i32>, rd: vec3<f32>) -> f32 {
     var cell = start;
     let stepC = vec3<i32>(select(-1, 1, rd.x > 0.0), select(-1, 1, rd.y > 0.0), select(-1, 1, rd.z > 0.0));
     let tDelta = 1.0 / max(abs(rd), vec3<f32>(1e-6));
     var tMax = abs(vec3<f32>(select(cell, cell + 1, rd > vec3<f32>(0.0))) - p) * tDelta;
     var t = 0.0;
+    var path = 0.0;
     for (var i = 0; i < 64; i++) {
-        if (!isWater(drawChunk * 32 + cell)) { return t; }
-        t = min(tMax.x, min(tMax.y, tMax.z));
-        if (t >= WATER_MAX_PATH) { break; }
+        let what = waterOrSolid(drawChunk * 32 + cell);
+        if (what == 2) { break; }
+        let tNext = min(tMax.x, min(tMax.y, tMax.z));
+        if (what == 1) { path += tNext - t; }
+        t = tNext;
+        if (path >= WATER_MAX_PATH || t >= WATER_REACH) { break; }
         if (tMax.x <= tMax.y && tMax.x <= tMax.z) { tMax.x += tDelta.x; cell.x += stepC.x; }
         else if (tMax.y <= tMax.z)                { tMax.y += tDelta.y; cell.y += stepC.y; }
         else                                      { tMax.z += tDelta.z; cell.z += stepC.z; }
     }
-    return WATER_MAX_PATH;
+    return min(path, WATER_MAX_PATH);
 }
 
 // Cut-out blocks' faces (RenderLayer.Cutout: leaves, grass, glass), in two passes, after the opaque world.
