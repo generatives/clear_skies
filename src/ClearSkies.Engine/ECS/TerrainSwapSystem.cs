@@ -35,6 +35,7 @@ public sealed class TerrainSwapSystem : ISystem
         public bool Baked;    // drawn lit from the store at least once
         public bool Covered;  // the finer level has it (see SetCovered)
         public bool WasReady; // its finer chunks were ready when last looked at, so they were drawn
+        public bool Waited;   // it couldn't be shown yet when last looked at (see Waits)
         public int Waiting;   // frames spent settling
         public int Leaving;   // frames its finer chunks have been ready while it's drawn (0: they aren't)
         public float FadeAt = float.NegativeInfinity; // when it last swapped in (while drawn) or out
@@ -236,12 +237,14 @@ public sealed class TerrainSwapSystem : ISystem
 
     private static bool Uploaded(TerrainLevel level, ChunkPosition p) => EntityOf(level, p) is { } e && e.Has<ChunkUploadedFlag>();
 
-    /// <summary>Whether a coarse chunk can't be shown yet: it isn't meshed, or (with lighting) it has faces and has
-    /// never been lit from the store. Drawn meanwhile it would show as open air, bright where it should be shadowed.</summary>
+    /// <summary>Whether a coarse chunk can't be shown yet: it isn't meshed, (with lighting) it has faces and has never
+    /// been lit from the store, or its light maps have never been baked (the renderer doesn't draw it till they are).
+    /// Drawn unlit it would show as open air, bright where it should be shadowed. Meanwhile the finer level stays.</summary>
     private bool Waits(TerrainLevel level, Swap c, ChunkPosition p)
     {
         if (EntityOf(level, p) is not { } e || !e.Has<ChunkMeshedFlag>()) return true;
-        return IsLit != null && !c.Baked && !c.Settled && e.Has<ChunkRenderData>() && !e.Get<ChunkRenderData>().IsEmpty;
+        return IsLit != null && !c.Baked && !c.Settled && e.Has<ChunkRenderData>() && !e.Get<ChunkRenderData>().IsEmpty
+               || Unbaked(level, p);
     }
 
     /// <summary>Whether the level's chunk <paramref name="p"/> can stand in for it in a coarser level's swap: the level
@@ -382,10 +385,12 @@ public sealed class TerrainSwapSystem : ISystem
                 {
                     c.Settled = ++c.Waiting >= MinSwapFrames && CheckNow(p)
                                 && (c.Waiting > (c.Baked ? MaxSwapFrames : MaxFirstLightFrames) || ChunkLit(level, p));
-                    // One held back for its light swaps in from when it's first shown (the finer level is held till then).
-                    if (c.Settled && !c.Baked && c.Drawn && float.IsFinite(c.FadeAt)) c.FadeAt = _time;
                 }
                 bool waits = Waits(level, c, p);
+                // One held back (for its mesh, light or first bake) swaps in from when it can be shown, not from when it
+                // was wanted: the finer level is held till then, and its fade would be over before it was seen.
+                if (c.Waited && !waits && c.Drawn && float.IsFinite(c.FadeAt)) c.FadeAt = _time;
+                c.Waited = waits;
                 // Terrain waiting to be shown is lit ahead of light changes on terrain already shown: this chunk while
                 // it's held back for its first light (it holds the fog there), with the chunks above and below it that
                 // ChunkLit looks at too.
