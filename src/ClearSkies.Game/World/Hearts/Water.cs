@@ -197,6 +197,8 @@ public sealed class Water
             bank = foot + (int)(bestBank * slope);
         }
         int depth = width >= 8 ? 3 : width >= 4 ? 2 : 1;
+        // (Shallower toward a lake, so its bed runs out onto the lake's rather than ending at a ledge under the water.)
+        depth = Math.Max(1, (int)MathF.Round(depth * (1f - mouth)));
         if (own != int.MinValue)
         {
             // Where a river comes in over the lake's shore, it runs on down to the lake's water (the ground round it
