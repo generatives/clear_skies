@@ -34,10 +34,6 @@ namespace ClearSkies.Engine.ECS;
 /// budget is full, the queue stops; and if the next queued column is nearer (to its nearest interest) than the farthest
 /// loaded one, the farthest is unloaded to make room. So the loaded world is always what's nearest an interest that fits.
 ///
-/// What's on its way is in the ECS for other systems (the fog, see <see cref="FogSystem"/>): each column queued or
-/// loading is an entity with <see cref="TerrainColumnLoading"/> until its chunks are added, and each interest gets
-/// <see cref="TerrainScanned"/>, how far around it every wanted column is known (queued, loading or loaded).
-///
 /// Edits ask it which chunks that aren't loaded are known to hold nothing (<see cref="IsKnownEmpty"/>): those an edit
 /// makes. Any other chunk an edit reaches is left to it (a <see cref="TerrainEditedElsewhere"/>): edited, loaded from
 /// the store from then on, and if its column was loading, that chunk is loaded again.
@@ -65,7 +61,7 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
 
     /// <summary>Main-thread time eviction may take per frame (ms): unloading a chunk (saving it, disposing its entity,
     /// releasing its storage) isn't free, and a full batch of chunks in one frame took ~14 ms. It stops after the column
-    /// that runs over, and carries on next frame; loading waits for the room meanwhile, which the fog covers.</summary>
+    /// that runs over, and carries on next frame; loading waits for the room meanwhile.</summary>
     private const double MaxEvictMsPerFrame = 2.0;
 
     private const int S = ChunkData.Size;
@@ -94,9 +90,6 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
     private readonly List<TerrainLevel> _levels = new();
     private TerrainLevel FullDetail => _levels[0];
 
-    /// <summary>The entity standing for each full-detail column queued or loading (see <see cref="TerrainColumnLoading"/>).</summary>
-    private readonly Dictionary<(int x, int z), Entity> _loading = new();
-
     /// <summary>Every chunk edited since it was generated, loaded from the store (read from it as streaming starts, then
     /// added to as chunks are edited here or elsewhere), and which hold a build.</summary>
     private readonly ChunkEdits _edits;
@@ -109,9 +102,6 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
     private readonly System.Diagnostics.Stopwatch _budget = new();
 
     private double BudgetLeft => System.Math.Max(MinStepMs, StreamBudgetMs - _budget.Elapsed.TotalMilliseconds);
-
-    // Each interest's last published scan radius (TerrainScanned) and the column it was around.
-    private readonly Dictionary<Entity, (float Radius, (int x, int z) Column)> _published = new();
 
     /// <param name="budget">What limits what's loaded in full detail.</param>
     /// <param name="pipeline">Where chunks are made (run by <see cref="ChunkPipelineSystem"/>, after this).</param>
@@ -197,6 +187,7 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         _frame++;
         if (!_editsRead) ReadEdits();
         TakeEditsElsewhere();
+        SetFog();
 
         _budget.Restart();
         _seen.Clear();
@@ -214,8 +205,6 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
             }
         }
         if (moved) _pipeline.Reprioritise(); // nearest first from where the view is now
-        if (_published.Count > _seen.Count)
-            foreach (var gone in _published.Keys.Where(k => !_seen.Contains(k)).ToList()) _published.Remove(gone);
         foreach (var level in _levels) UnloadSome(level, BudgetLeft);
         _steps.Lap(UnloadStep);
 
@@ -297,8 +286,6 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
 
         // Forget the columns no longer wanted: their air is re-learned on return.
         foreach (var key in level.Columns.Keys.Where(k => !Wanted(level, k.x, k.z)).ToList()) level.Columns.Remove(key);
-        if (level.Level == 0)
-            foreach (var key in _loading.Keys.Where(k => !Wanted(level, k.x, k.z)).ToList()) Loaded(key);
         _steps.Lap(UnloadStep);
 
         level.Queue.Clear();
@@ -309,22 +296,7 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         // A ball wants whole 2x2 groups, which reach up to two columns past its radius.
         level.ScanOffsets = level.Rings.Select(r => OffsetsByDistance(r.Radius + (r.Ball ? 2 : 0))).ToArray();
         level.ScanAt = new int[level.Rings.Count];
-        level.ScanCarry = new float[level.Rings.Count];
         level.ScanDone = false;
-        if (level.Level == 0)
-        {
-            for (int i = 0; i < level.Rings.Count; i++)
-            {
-                var r = level.Rings[i];
-                if (!_published.TryGetValue(r.Interest, out var last)) continue;
-                // Everything within the last radius of the old column was loaded or queued, and still is (only columns no
-                // longer wanted were dropped above), so within that radius less the move of the new one it's known.
-                float known = MathF.Min(last.Radius, r.Radius * S);
-                float dx = r.Centre.x - last.Column.x, dz = r.Centre.z - last.Column.z;
-                level.ScanCarry[i] = MathF.Max(0f, known - MathF.Sqrt(dx * dx + dz * dz) * S);
-            }
-            PublishScanned();
-        }
         _steps.Lap(QueueStep);
     }
 
@@ -380,7 +352,7 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         while (true)
         {
             // Checked every column: one seen for the first time asks the generator for its layers, which isn't cheap.
-            if (_steps.SinceLap() - start >= budgetMs) { if (level.Level == 0) PublishScanned(); return; }
+            if (_steps.SinceLap() - start >= budgetMs) return;
             int next = 0;
             for (int i = 1; i < offsets.Length; i++)
                 if (at[i] < offsets[i].Length && (at[next] >= offsets[next].Length || offsets[i][at[i]].d < offsets[next][at[next]].d))
@@ -395,12 +367,10 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
             {
                 if (level.Queue.Count == MaxQueued) { level.QueueTruncated = true; at[next]--; break; }
                 level.Queue.Add((x, z));
-                if (level.Level == 0) Loading((x, z));
             }
         }
         level.ScanDone = true;
         if (level.Level != 0) return;
-        PublishScanned();
         Console.WriteLine($"[load] rebuild: queued {level.Queue.Count}{(level.QueueTruncated ? "+" : "")} columns around {level.Rings.Count} " +
                           $"interests, loaded {_staticVolume.LoadedCount} chunks ({level.Budget!.Describe(_staticVolume)}), " +
                           $"unloaded {level.ToUnload.Count}, evicted {level.Evictions} columns so far");
@@ -426,41 +396,6 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
             if (near) chunk = last;
         }
         return level.InterestChunks[e] = chunk;
-    }
-
-    /// <summary>Gives each interest <see cref="TerrainScanned"/>: how far around it the full-detail scan has looked,
-    /// short of the first column it hasn't (or all of its load radius once it's looked at everything), and at least what
-    /// it's known to have from before the last rebuild (<see cref="TerrainLevel.ScanCarry"/>): another interest moving,
-    /// or this one moving a column, rebuilds the queue, and dropping to the new scan's progress pulled the fog in and out
-    /// every time.</summary>
-    private void PublishScanned()
-    {
-        var level = FullDetail;
-        for (int i = 0; i < level.Rings.Count; i++)
-        {
-            var e = level.Rings[i].Interest;
-            if (!e.IsAlive) continue;
-            var offsets = level.ScanOffsets[i];
-            float radius = level.ScanAt[i] >= offsets.Length ? float.PositiveInfinity
-                         : MathF.Max(level.ScanCarry[i], MathF.Max(0f, (MathF.Sqrt(offsets[level.ScanAt[i]].d) - 1f) * S));
-            _published[e] = (radius, (level.Rings[i].Centre.x, level.Rings[i].Centre.z));
-            if (!e.Has<TerrainScanned>() || e.Get<TerrainScanned>().Radius != radius) e.Set(new TerrainScanned { Radius = radius });
-        }
-    }
-
-    /// <summary>Full-detail column (x, z) is queued: it has an entity saying so (<see cref="TerrainColumnLoading"/>).</summary>
-    private void Loading((int x, int z) col)
-    {
-        if (_loading.ContainsKey(col)) return;
-        var e = _world.CreateEntity();
-        e.Set(new TerrainColumnLoading { X = col.x, Z = col.z });
-        _loading[col] = e;
-    }
-
-    /// <summary>Full-detail column (x, z) has loaded, or is no longer wanted, or had nothing to load: its entity goes.</summary>
-    private void Loaded((int x, int z) col)
-    {
-        if (_loading.Remove(col, out var e) && e.IsAlive) e.Dispose();
     }
 
     /// <summary>Whether ring <paramref name="ring"/>, <paramref name="distSq"/> from column (x, z), is the nearest ring
@@ -541,6 +476,30 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
     /// together. Null: full detail in whole columns as far as the view.</summary>
     public float? FullDetailRadius => _levels.Count > 1 ? FullDetail.Radius : null;
 
+    /// <summary>Puts the fog (<see cref="SkySettings.FogDistance"/>) where the terrain drawn around the view ends (the
+    /// first interest drawn): it hides the edge of the loaded world. Terrain still on its way in is left out until it's
+    /// shown, then dissolves in (see <see cref="ShownStage"/>).</summary>
+    private void SetFog()
+    {
+        foreach (ref readonly Entity e in _interests.GetEntities())
+        {
+            if (e.Get<TerrainInterest>().DrawRadius is var draw && draw <= 0) continue;
+            SkySettings.SetFogDistance(DrawnTo(draw));
+            return;
+        }
+    }
+
+    /// <summary>How far around an interest drawing to <paramref name="drawRadius"/> its terrain is always loaded to be
+    /// drawn (blocks): the farthest level's radius (or the draw radius, without coarse levels), less two of its chunks,
+    /// the most its range ends short of that (it's around the interest's chunk, kept a little after it leaves, and a
+    /// coarse level's ends in whole 2x2x2 groups).</summary>
+    internal float DrawnTo(float drawRadius)
+    {
+        var last = _levels[^1];
+        float reach = _levels.Count > 1 ? last.Radius : MathF.Min(drawRadius, _viewDistance);
+        return MathF.Max(0f, reach - 2 * last.Blocks);
+    }
+
     private static long Sq(int v) => (long)v * v;
 
     /// <summary>Distance squared, in the level's columns, from column <paramref name="c"/> to the nearest interest's.</summary>
@@ -617,7 +576,6 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         if (work.Count == 0)
         {
             Dequeue(level, ref i);
-            if (level.Level == 0 && !level.InFlight.ContainsKey(col)) Loaded(col);
             return true;
         }
         if (!Arrived(work, level)) { i++; waiting++; return true; }

@@ -69,11 +69,9 @@ public sealed partial class ChunkLoadSystem
 
         // The rebuild's scan of the wanted columns: per ring, its offsets and the next one to look at; and whether it has
         // looked at them all (or filled the queue). Columns nearer an interest than the scan's position are all queued,
-        // loading or loaded. Per ring, how far around it was known to be loaded or queued before the rebuild (full
-        // detail's, for TerrainScanned).
+        // loading or loaded.
         internal (short dx, short dz, int d)[][] ScanOffsets = Array.Empty<(short, short, int)[]>();
         internal int[] ScanAt = Array.Empty<int>();
-        internal float[] ScanCarry = Array.Empty<float>();
         internal bool ScanDone = true;
 
         /// <summary>Per wanted column (layer bits): what may hold something, and what turned out to be air. Dropped

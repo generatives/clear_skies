@@ -201,15 +201,12 @@ public class HeadlessStreamingTests
         // Nothing's meshed (headless): no level is shown yet, and the full detail is left whole.
         Assert.Equal(ChunkDrawState.Hidden, swaps.DrawState(level, far));
         Assert.Equal(ChunkDrawState.Whole, swaps.DrawState(fullDetail, new ChunkPosition(0, -1, 0)));
-        // The fog says what it's held by: a chunk nobody has meshed waits for that, not for its light.
-        swaps.FarReadyRadius(player.Get<Transform>().Position);
-        Assert.Contains("waiting for its mesh", swaps.FogHeldBy);
 
-        // Meshed (as the renderer would), with swaps at once: level 1 is drawn past full detail, and swaps out where full
-        // detail has its eight, which is drawn there; past it, full detail is left out under level 1.
+        // Meshed and shown (as the chunk pipeline would), with swaps at once: level 1 is drawn past full detail, and swaps
+        // out where full detail has its eight, which is drawn there; past it, full detail is left out under level 1.
         swaps.FadeSeconds = 0f;
-        foreach (var (_, entry) in scene.WorldVolume.All) entry.Entity.Set<ChunkMeshedFlag>();
-        foreach (var (_, entry) in level.Volume.All) entry.Entity.Set<ChunkMeshedFlag>();
+        foreach (var l in load.Levels)
+            foreach (var (_, entry) in l.Volume.All) { entry.Entity.Set<ChunkMeshedFlag>(); entry.Entity.Set<ShownAt>(); }
         for (int i = 0; i < 10; i++) { Frame(load); swaps.Update(1 / 60f); }
         Assert.Equal(1f, swaps.DrawState(level, near).Dissolve);
         Assert.Equal(0f, swaps.DrawState(level, far).Dissolve);
@@ -228,42 +225,6 @@ public class HeadlessStreamingTests
         Assert.Null(load.FullDetailRadius);
         Assert.Single(load.Levels); // full detail
         Assert.False(level.Root.IsAlive);
-    }
-
-    [Fact]
-    public void FlyingOverCoarseTerrainNewLevel1ColumnsShownByLevel2DoNotHoldTheFog()
-    {
-        using var scene = new HeadlessScene();
-        using var db = SaveDatabase.InMemory();
-        var load = Streaming(scene, db, viewDistance: 1024);
-        load.SetLevels(128, new[] { 512f, 1024f });
-        var swaps = new TerrainSwapSystem(scene.World, load) { FadeSeconds = 0f };
-        var player = Interest(scene, 16, 16, View(1024));
-        var at = new Vector3D<float>(16, 300, 16); // high over the ground: the level-2 chunk at the view's height is air
-        player.Get<Transform>().Position = at;
-        void LoadAndShow()
-        {
-            var deadline = DateTime.UtcNow.AddSeconds(30);
-            do
-            {
-                Settle(load, swaps: swaps);
-                foreach (var level in load.Levels) foreach (var (_, entry) in level.Volume.All) entry.Entity.Set<ChunkMeshedFlag>();
-                for (int i = 0; i < 5; i++) { Frame(load); swaps.Update(1 / 60f); }
-            } while (!load.LevelsIdle && DateTime.UtcNow < deadline);
-        }
-        LoadAndShow();
-
-        // Each move brings level-1 chunks in near the view, under level 2, which shows there meanwhile.
-        for (int step = 0; step < 6; step++)
-        {
-            at.X += 48;
-            player.Get<Transform>().Position = at;
-            Frame(load);
-            swaps.Update(1 / 60f);
-            swaps.FarReadyRadius(at);
-            Assert.DoesNotContain("level 1 column", swaps.FogHeldBy);
-            LoadAndShow();
-        }
     }
 
     [Fact]
@@ -340,34 +301,13 @@ public class HeadlessStreamingTests
     }
 
     [Fact]
-    public void ColumnsOnTheirWayAreEntitiesUntilTheyLoad()
+    public void TheFogSitsWhereTheDrawnTerrainEnds()
     {
         using var scene = new HeadlessScene();
         using var db = SaveDatabase.InMemory();
-        var load = Streaming(scene, db);
-        var loading = scene.World.GetEntities().With<TerrainColumnLoading>().AsSet();
-        var player = Interest(scene, 16, 16, View(64));
-        Frame(load); // the scan queues what's wanted, before anything has loaded
-        Assert.NotEqual(0, loading.Count);
-        Settle(load);
-        Assert.Equal(0, loading.Count);
-        Assert.Equal(float.PositiveInfinity, player.Get<TerrainScanned>().Radius);
-    }
-
-    [Fact]
-    public void TheFogSitsAtTheNearestColumnStillLoading()
-    {
-        using var scene = new HeadlessScene();
-        var fog = new FogSystem(scene.World, viewDistance: 500);
-        var player = Interest(scene, 16, 16, View(500));
-        player.Set(new TerrainScanned { Radius = float.PositiveInfinity });
-        var column = scene.World.CreateEntity();
-        column.Set(new TerrainColumnLoading { X = 4, Z = 0 }); // 112 blocks out (from x = 16 to the column's edge at 128)
-        for (int i = 0; i < 300; i++) fog.Update(1 / 60f);
-        Assert.InRange(fog.Distance, 110, 113);
-
-        column.Dispose(); // loaded: the fog opens out to the draw radius
-        for (int i = 0; i < 1200; i++) fog.Update(1 / 60f);
-        Assert.InRange(fog.Distance, 490, 500);
+        var load = Streaming(scene, db, viewDistance: 500);
+        Assert.Equal(300 - 2 * ChunkData.Size, load.DrawnTo(300)); // the draw radius, less two chunks
+        load.SetLevels(64, new[] { 256f, 1024f });
+        Assert.Equal(1024 - 2 * 128, load.DrawnTo(300)); // the farthest level, less two of its (128-block) chunks
     }
 }

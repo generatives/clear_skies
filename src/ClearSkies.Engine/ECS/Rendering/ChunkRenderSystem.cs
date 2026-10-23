@@ -23,7 +23,8 @@ namespace ClearSkies.Engine.ECS;
 /// a low-resolution copy of the world's (see <see cref="LowResolutionCopy"/>), drawn at their scale. Ships' chunks, which move, are
 /// tested one by one.
 ///
-/// Whoever manages a static volume can say how each of its chunks is drawn each frame (see <see cref="ChunkDrawStates"/>):
+/// A static volume's chunk is drawn once it's shown (<see cref="ShownAt"/>), dissolving in at first. Whoever manages a
+/// static volume can say how each of its chunks is drawn each frame (see <see cref="ChunkDrawStates"/>):
 /// left out, dissolving in or out, and lit from its light maps, from the maps it last baked, or as open air. A scaled
 /// volume's light maps are baked nearest first up to <see cref="ScaledBakeQuadBudget"/> quads a frame; then, with what's
 /// left of that, those of chunks waiting for their first bake (<see cref="BakeFirst"/>), in view or not.
@@ -309,7 +310,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
             _columnsVisible++;
             foreach (var e in column.Chunks)
             {
-                if (!e.Has<Rendered>()) continue; // not in the rendering layer (see EntityPresenceSystem)
+                if (!e.Has<Rendered>() || !e.Has<ShownAt>()) continue; // not in the rendering layer, or not ready yet
                 ref readonly var rd = ref e.Get<ChunkRenderData>();
                 if (rd.IsEmpty) continue; // buried stone: nothing to draw
                 var origin = e.Get<Transform>().Position;
@@ -318,6 +319,9 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
                 var how = state?.Invoke(rd.ChunkPos) ?? ChunkDrawState.Whole;
                 _stateTicks += System.Diagnostics.Stopwatch.GetTimestamp() - s0;
                 if (how.Dissolve >= 1f) continue;
+                // Just shown: dissolving in, unless it's swapping (which dissolves it already).
+                float arriving = 1f - (float)(frame.TimeSeconds - e.Get<ShownAt>().Seconds) / ShownStage.ArrivalSeconds;
+                if (how.Dissolve == 0f && arriving > 0f) how = how with { Dissolve = arriving };
                 var model = Mat4.Multiply(Mat4.Translation(origin), scale);
                 // A scaled volume not in the light store yet has no light to show: lit as open air meanwhile.
                 int grid = rd.Grid?.Index ?? -1;

@@ -133,7 +133,6 @@ public sealed partial class ChunkLoadSystem
         if (LevelOf(made) is not { } level) return; // its level went: released when the pipeline drops it
         var pos = made.Key.Pos;
         RemoveInFlight(level, pos);
-        if (level.Level == 0 && !level.InFlight.ContainsKey((pos.X, pos.Z))) Loaded((pos.X, pos.Z));
 
         if (!level.Wanting.Contains(pos)) // let go of while it was made: dropped at the end of the frame
         {

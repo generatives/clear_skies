@@ -51,24 +51,10 @@ public struct TerrainInterest
                                                                   : $"colliders to {ColliderRadius:0}";
 }
 
-/// <summary>On a terrain interest: how far around it (horizontally) every column it wants is known to
-/// <see cref="ChunkLoadSystem"/>, as queued, loading or loaded. Infinite once all of them are.</summary>
-public struct TerrainScanned
-{
-    public float Radius;
-}
-
 /// <summary>An edit changed a terrain chunk that wasn't here (not loaded, and not known to hold nothing), so it didn't
 /// change it here: an entity of its own until <see cref="ChunkLoadSystem"/> sees it and loads that chunk with the edit
 /// from then on.</summary>
 public struct TerrainEditedElsewhere
 {
     public Voxels.ChunkPosition Position;
-}
-
-/// <summary>A terrain column that <see cref="ChunkLoadSystem"/> is going to load, or is loading: an entity of its own
-/// from when the column is queued until its chunks are added.</summary>
-public struct TerrainColumnLoading
-{
-    public int X, Z;
 }
