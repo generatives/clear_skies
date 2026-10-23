@@ -43,8 +43,8 @@ public sealed class ChunkPipeline
     private readonly int[] _inFlight; // per worker
     private readonly List<((PipelineChunk, Stage) Item, (float, int) Priority)> _skipped = new();
 
-    /// <summary>On the background workers (see <see cref="BackgroundWork"/>), each chunk on the one <see cref="Worker"/>
-    /// picks.</summary>
+    /// <summary>On the background workers (see <see cref="BackgroundWork"/>), each chunk on the one for its ground (see
+    /// <see cref="WorkerOf"/>).</summary>
     public ChunkPipeline() : this(BackgroundWork.Queue, BackgroundWork.Workers) { }
 
     /// <param name="runOnWorker">Runs worker stages, all on one worker (tests run them in place).</param>
@@ -57,11 +57,18 @@ public sealed class ChunkPipeline
         _inFlight = new int[workers];
     }
 
-    /// <summary>Which worker makes a chunk (wrapped to the workers there are): chunks over the same ground on the same
-    /// one share its caches. By default, spread by position.</summary>
-    public Func<ChunkKey, int>? Worker { get; set; }
+    /// <summary>Chunks over the same column of this level's chunks (16 of the finest grid's columns) go to the same worker.</summary>
+    private const int WorkerColumnLevel = 2;
 
-    private int WorkerOf(ChunkKey key) => (int)((uint)(Worker?.Invoke(key) ?? key.Pos.GetHashCode()) % (uint)_inFlight.Length);
+    /// <summary>Which worker makes a chunk: the one for the column of level-<see cref="WorkerColumnLevel"/> chunks it's
+    /// in, so every grid's chunks over the same ground are made on the same worker, and share what its caches keep of
+    /// that ground (a generator's column profiles).</summary>
+    private int WorkerOf(ChunkKey key)
+    {
+        int shift = WorkerColumnLevel - _grids[key.Grid].Level;
+        int x = shift >= 0 ? key.Pos.X >> shift : key.Pos.X << -shift, z = shift >= 0 ? key.Pos.Z >> shift : key.Pos.Z << -shift;
+        return (int)((uint)(x * 73856093 ^ z * 19349663) % (uint)_inFlight.Length);
+    }
 
     /// <summary>Lower runs first: by default, all the same.</summary>
     public Func<ChunkKey, float>? Priority { get; set; }
