@@ -59,7 +59,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     /// <summary>One lava block in this many glows.</summary>
     private const int LavaGlowOdds = 40;
 
-    /// <summary>About how far (blocks) a lake's sandy shore reaches from the middle of its sample cells (see Lakes).</summary>
+    /// <summary>About how far (blocks) a lake's sandy shore reaches from the middle of its sample cells (see Water).</summary>
     private const float ShoreReach = 3.5f;
 
     /// <summary>Where noise is under this (-1 to 1) a tundra lake is open water, not ice.</summary>
@@ -70,14 +70,14 @@ public sealed class HeartWorldGenerator : IWorldGenerator
 
     private readonly ulong _seed;
     private readonly ContinentTerrain _terrain;
-    private readonly Lakes _lakes;
+    private readonly Water _water;
     private readonly FastNoiseLite _warpX, _warpY, _warpZ, _crack, _bottom;
 
     public HeartWorldGenerator(ulong seed)
     {
         _seed = seed;
         _terrain = ContinentTerrain.For(seed);
-        _lakes = Lakes.For(seed);
+        _water = Water.For(seed);
         _warpX = Noise(seed + 31, WarpFrequency);
         _warpY = Noise(seed + 32, WarpFrequency);
         _warpZ = Noise(seed + 33, WarpFrequency);
@@ -121,6 +121,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     private readonly (short Lo, short Hi)[] _spans = new (short, short)[S * S * MaxSpans];
     private readonly byte[] _spanCount = new byte[S * S];
     private readonly float[] _height = new float[S * S];
+    private readonly int[] _lake = new int[S * S];          // the level of a lake planned here or beside, or int.MinValue
+    private readonly int[] _cut = new int[S * S];           // the top of the ground once a river cuts it, or int.MaxValue
     private readonly float[] _bottomAt = new float[S * S];
 
     // The hearts around the chunk column being profiled, per layer: cells from (_cx0, _cy0, _cz0), _nx by _ny by _nz of
@@ -163,8 +165,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 if (s > 0 && lo - p.Spans[p.Start[col] + s - 1].Hi < ShadeReach && lo >= originY && lo < originY + S && Crystals.At(x, lo, z, _seed))
                     data.Set(lx, lo - originY, lz, crystal);
 
-                // A lake over the top span: water (lava in the volcanic wastes, partly iced over in tundra) up to its
-                // level on a bed of sand and gravel, with a sandy shore (grassy in a desert).
+                // A lake or river over the top span: water (lava in the volcanic wastes, partly iced over in tundra) up
+                // to its level on a bed of sand and gravel; a lake with a sandy shore (grassy in a desert).
                 BlockId? ground = null;
                 if (Lakeside(col, s))
                 {
@@ -178,7 +180,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                     bool oasis = biome is Biome.Desert or Biome.Badlands && hi >= level;
                     if (oasis && hi >= originY && hi < originY + S) data.Set(lx, hi - originY, lz, BlockId.Grass);
                     var liquid = biome == Biome.Volcanic ? BlockId.Lava : BlockId.Water;
-                    // A tundra lake's ice is broken, with open water between the floes.
+                    // Tundra ice is broken, with open water between the floes.
                     bool iced = biome == Biome.Tundra && _crack.GetNoise(x * 4f, z * 4f) > IceOpen;
                     for (int y = System.Math.Max(hi + 1, originY); y <= System.Math.Min(level, originY + S - 1); y++)
                     {
@@ -223,7 +225,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         }
     }
 
-    /// <summary>Whether span <paramref name="s"/> of column <paramref name="col"/> is under a lake or on its shore.</summary>
+    /// <summary>Whether span <paramref name="s"/> of column <paramref name="col"/> is under water or on a lake's shore.</summary>
     private bool Lakeside(int col, int s)
     {
         var p = _profile!;
@@ -245,6 +247,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     /// <summary>Works out a chunk column's solid spans and what fills them.</summary>
     private ColumnProfile BuildProfile(int chunkX, int chunkZ)
     {
+        _topsX = _topsZ = int.MinValue; // (the hearts Top loaded are replaced)
         float x0 = chunkX * S, z0 = chunkZ * S;
         var p = new ColumnProfile();
 
@@ -255,9 +258,12 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             int col = lx + S * lz;
             float wx = x0 + lx, wz = z0 + lz;
             _height[col] = MathF.Min(_terrain.Height(wx, wz), HeartGrid.WorldTop - 1);
-            p.Level[col] = _lakes.Level((int)wx, (int)wz, out float off);
-            // The shore reaches a ragged ShoreReach from the lake's sample cells, not their square outline.
-            p.Shore[col] = off < ShoreReach * (0.6f + 0.4f * (_crack.GetNoise(wx * 3f, wz * 3f) + 1f));
+            var water = _water.At((int)wx, (int)wz);
+            (p.Level[col], _cut[col]) = _water.Settled((int)wx, (int)wz);
+            _lake[col] = water.RiverDepth == 0 ? water.Level : int.MinValue;
+            // A lake's shore reaches a ragged ShoreReach from its sample cells, not their square outline; a river's
+            // banks stay as they are.
+            p.Shore[col] = water.RiverDepth == 0 && water.Off < ShoreReach * (0.6f + 0.4f * (_crack.GetNoise(wx * 3f, wz * 3f) + 1f));
             _bottomAt[col] = HeartGrid.LowestBottom + BottomRoughness * (0.5f + 0.5f * _bottom.GetNoise(wx, wz));
             top = MathF.Max(top, _height[col]);
         }
@@ -295,17 +301,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             {
                 bool solid = false;
                 int step = 1;
-                if (y <= yTop)
-                {
-                    float t = WearBlend(y);
-                    float across = (FloorWear + (UpperWear - FloorWear) * t) * wearNoise + CrackSlack;
-                    float up = (FloorWearUp + (UpperWearUp - FloorWearUp) * t) * wearNoise * HeartGrid.VerticalScale + CrackSlack;
-                    solid = Solid(px, (y - _height[col] + lift) * HeartGrid.VerticalScale, pz, y, _height[col], across, up, out float clear);
-                    step = System.Math.Max(1, (int)clear);
-                    // Where wear grows with height, not so far that it grows by more than CrackSlack.
-                    if (y > HeartGrid.FloorTop + CrackFrom && y < HeartGrid.FloorTop + CrackFrom + CrackOver)
-                        step = System.Math.Min(step, CrackStepMax);
-                }
+                if (y <= yTop) solid = SolidAt(px, pz, lift, wearNoise, _height[col], y, out step);
                 if (solid && runLo == int.MinValue) runLo = y;
                 else if (!solid && runLo != int.MinValue)
                 {
@@ -340,7 +336,73 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 p.Dry[at + sp] = Biomes.Dry(h, wet, Biomes.SandBlend);
             }
         }
+
+        // Rivers cut their beds and banks, and water stands as it settled (see WaterSettle); a lake's shore is sandy
+        // round it.
+        for (int col = 0; col < S * S; col++)
+        {
+            int spans = p.Count(col);
+            if (spans == 0) continue;
+            ref var topSpan = ref p.Spans[p.Start[col] + spans - 1];
+            if (_cut[col] != int.MaxValue) topSpan.Hi = (short)System.Math.Max(topSpan.Lo, System.Math.Min(topSpan.Hi, _cut[col]));
+            if (p.Level[col] == int.MinValue && _lake[col] != int.MinValue) p.Level[col] = System.Math.Min(_lake[col], topSpan.Hi);
+        }
         return p;
+    }
+
+    /// <summary>Whether block y of a column (wobbled to (px, pz), lifted by lift) is solid, and how many blocks up from
+    /// it nothing can change.</summary>
+    private bool SolidAt(float px, float pz, float lift, float wearNoise, float height, int y, out int step)
+    {
+        float t = WearBlend(y);
+        float across = (FloorWear + (UpperWear - FloorWear) * t) * wearNoise + CrackSlack;
+        float up = (FloorWearUp + (UpperWearUp - FloorWearUp) * t) * wearNoise * HeartGrid.VerticalScale + CrackSlack;
+        bool solid = Solid(px, (y - height + lift) * HeartGrid.VerticalScale, pz, y, height, across, up, out float clear);
+        step = System.Math.Max(1, (int)clear);
+        // Where wear grows with height, not so far that it grows by more than CrackSlack.
+        if (y > HeartGrid.FloorTop + CrackFrom && y < HeartGrid.FloorTop + CrackFrom + CrackOver)
+            step = System.Math.Min(step, CrackStepMax);
+        return solid;
+    }
+
+    private int _topsX = int.MinValue, _topsZ = int.MinValue; // the chunk column whose hearts Top last loaded
+
+    /// <summary>The top of the land at block column (x, z), before any water cuts it (the highest block of its top
+    /// span, as Prepare finds it), or null where there is none: worked out for that column alone, for Water.</summary>
+    internal int? Top(int x, int z)
+    {
+        int chunkX = x >> 5, chunkZ = z >> 5;
+        if (chunkX != _topsX || chunkZ != _topsZ)
+        {
+            _topsX = chunkX; _topsZ = chunkZ;
+            float x0 = chunkX * S, z0 = chunkZ * S, top = float.MinValue;
+            for (int j = 0; j <= 2; j++)
+            for (int i = 0; i <= 2; i++)
+                top = MathF.Max(top, _terrain.Height(x0 + i * S * 0.5f, z0 + j * S * 0.5f));
+            top = MathF.Min(top + TerrainRiseMargin, HeartGrid.WorldTop - 1);
+            LoadHearts(x0 - WarpAcross, z0 - WarpAcross, x0 + S + WarpAcross, z0 + S + WarpAcross,
+                       HeartGrid.LowestBottom - top - WarpUp, WarpUp);
+        }
+        float wx = x, wz = z;
+        float height = MathF.Min(_terrain.Height(wx, wz), HeartGrid.WorldTop - 1);
+        float px = wx + WarpAcross * _warpX.GetNoise(wx, wz);
+        float pz = wz + WarpAcross * _warpZ.GetNoise(wx, wz);
+        float lift = WarpUp * _warpY.GetNoise(wx, wz);
+        float wearNoise = 0.6f + 0.4f * (_crack.GetNoise(wx, wz) + 1f);
+        _nearValid = false;
+        // Down the column to the first solid block with MinThickness under it (thinner runs are no span). (Going down
+        // in the steps that are safe going up, it can land under a run's top: it climbs back up to it.)
+        int bottom = (int)MathF.Ceiling(HeartGrid.LowestBottom), from = (int)MathF.Floor(height);
+        for (int y = from; y >= bottom;)
+        {
+            if (!SolidAt(px, pz, lift, wearNoise, height, y, out int step)) { y -= step; continue; }
+            while (y < from && SolidAt(px, pz, lift, wearNoise, height, y + 1, out _)) y++;
+            int run = 1;
+            while (run < MinThickness && y - run >= bottom && SolidAt(px, pz, lift, wearNoise, height, y - run, out _)) run++;
+            if (run >= MinThickness) return y;
+            y -= run;
+        }
+        return null;
     }
 
     /// <summary>0 in the floor to 1 in the broken ground above: how far wear goes from the floor's to the upper.</summary>
@@ -599,8 +661,8 @@ internal sealed class ColumnProfile
     public Biome[] Biome = Array.Empty<Biome>();
     public readonly float[] Strata = new float[Columns], Patch = new float[Columns], Flora = new float[Columns],
                             Woods = new float[Columns], Kind = new float[Columns];
-    /// <summary>Per block column: the level of a lake here or beside, or int.MinValue (Lakes.Level); and whether a dry
-    /// column by a lake is its sandy shore.</summary>
+    /// <summary>Per block column: the level of water here (a lake here or beside, or a river), or int.MinValue; and
+    /// whether a dry column by a lake is its sandy shore.</summary>
     public readonly int[] Level = new int[Columns];
     public readonly bool[] Shore = new bool[Columns];
 
