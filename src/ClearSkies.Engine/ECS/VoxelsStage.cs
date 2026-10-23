@@ -40,7 +40,7 @@ public sealed class VoxelsStage(Func<IWorldGenerator> generatorFactory, IChunkSt
     public IWorldGenerator Generator => _generator.Value!;
 
     public override string Name => "Voxels";
-    public override bool AppliesTo(PipelineGrid grid) => !grid.FromVolume;
+    public override bool AppliesTo(PipelineGrid grid) => !grid.VolumeHoldsBlocks;
     public override IReadOnlyList<Pipeline.Input> InputsFor(PipelineGrid grid) => Array.Empty<Pipeline.Input>();
 
     public override ChunkVoxels Make(ChunkKey key, StageInputs inputs)

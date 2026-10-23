@@ -76,7 +76,7 @@ public sealed partial class ChunkLoadSystem
     /// they are from their level's nearest interest, across, in blocks).</summary>
     private float Distance(ChunkKey key)
     {
-        if (_pipeline.Grid(key.Grid).FromVolume) return 0f; // a ship's: small, and edited where people are
+        if (_pipeline.Grid(key.Grid).VolumeHoldsBlocks) return 0f; // a ship's: small, and edited where people are
         if (key.Grid >= _levels.Count) return float.PositiveInfinity;
         var level = _levels[key.Grid];
         long best = long.MaxValue;

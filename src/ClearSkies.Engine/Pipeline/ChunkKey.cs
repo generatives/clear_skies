@@ -9,7 +9,7 @@ public readonly record struct ChunkKey(int Grid, ChunkPosition Pos)
     public override string ToString() => $"{Grid}:{Pos}";
 }
 
-/// <summary>On a chunk entity the pipeline made (or took, see <see cref="PipelineGrid.FromVolume"/>): its key there, and
+/// <summary>On a chunk entity the pipeline made (or took, see <see cref="PipelineGrid.VolumeHoldsBlocks"/>): its key there, and
 /// the stage whose output holds its blocks (what an edit changes).</summary>
 public struct InPipeline
 {
@@ -27,7 +27,7 @@ public sealed class PipelineGrid
         Name = name;
         Finer = finer;
         Volume = volume;
-        FromVolume = volume != null;
+        VolumeHoldsBlocks = volume != null;
         Level = finer == null ? 0 : finer.Level + 1;
         if (finer != null) finer.Coarser = this;
     }
@@ -44,8 +44,9 @@ public sealed class PipelineGrid
     /// <summary>The volume its chunks go in, once there is one.</summary>
     public ChunkVolume? Volume { get; set; }
 
-    /// <summary>Its chunks' blocks are its volume's, made by edits (a ship's), not made by the pipeline (terrain's).</summary>
-    public bool FromVolume { get; }
+    /// <summary>Its volume holds its chunks' blocks, made by edits (a ship's): the pipeline takes them from there rather
+    /// than making them (as it does the terrain's).</summary>
+    public bool VolumeHoldsBlocks { get; }
 
     /// <summary>Taken out of the pipeline (see <see cref="ChunkPipeline.RemoveGrid"/>).</summary>
     public bool Removed { get; internal set; }

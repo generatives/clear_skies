@@ -28,7 +28,6 @@ public sealed class ChunkPipelineSystem : ISystem, IDebugUiSystem
     /// <summary>A ship chunk's blocks, as its volume has them.</summary>
     public VolumeBlocksStage ShipBlocks { get; }
 
-    private readonly Dictionary<ChunkVolume, PipelineGrid> _ships = new();
     private readonly IDisposable[] _subscriptions;
 
     public ChunkPipelineSystem(World world, ChunkPipeline? pipeline = null)
@@ -57,9 +56,7 @@ public sealed class ChunkPipelineSystem : ISystem, IDebugUiSystem
     {
         var volume = chunk.Entry.Volume;
         if (!volume.Root.Has<DynamicGrid>()) return;
-        if (!_ships.TryGetValue(volume, out var grid))
-            _ships[volume] = grid = Pipeline.AddGrid($"ship {volume.Root}", volume: volume);
-        var key = grid.Key(chunk.Entry.Position);
+        var key = Pipeline.GridFor(volume, $"ship {volume.Root}").Key(chunk.Entry.Position);
         e.Set(new InPipeline { Key = key, Blocks = ShipBlocks });
         Pipeline.Want(key, true);
         Pipeline.Invalidate(key, ShipBlocks); // one that left and came back has new blocks
@@ -68,7 +65,7 @@ public sealed class ChunkPipelineSystem : ISystem, IDebugUiSystem
     /// <summary>A ship's chunk left its volume (it's let go of), or the ship went (its grid goes).</summary>
     private void Disposed(in Entity e)
     {
-        if (e.Has<ChunkGrid>() && _ships.Remove(e.Get<ChunkGrid>().Volume, out var grid)) Pipeline.RemoveGrid(grid);
+        if (e.Has<ChunkGrid>() && Pipeline.GridOf(e.Get<ChunkGrid>().Volume) is { } grid) Pipeline.RemoveGrid(grid);
         else if (e.Has<InPipeline>() && e.Get<InPipeline>().Blocks == ShipBlocks) Pipeline.Want(e.Get<InPipeline>().Key, false);
     }
 

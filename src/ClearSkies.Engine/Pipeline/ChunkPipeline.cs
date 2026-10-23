@@ -23,6 +23,7 @@ public sealed class ChunkPipeline
 {
     private const int MaxSkipped = 1024; // ready chunks looked past a frame, for their worker being full
     private readonly List<PipelineGrid> _grids = new();
+    private readonly Dictionary<ChunkVolume, PipelineGrid> _byVolume = new();
     private readonly List<Stage> _stages = new();
     private readonly Dictionary<ChunkKey, PipelineChunk> _records = new();
     // Worked out from the grids and stages, before the first chunk (and for a grid added after, as it's added): each
@@ -78,11 +79,19 @@ public sealed class ChunkPipeline
     public int ChunkCount => _records.Count;
     public IEnumerable<PipelineChunk> Records => _records.Values;
 
-    /// <summary>Adds a grid, at any time. One whose chunks' blocks are already in <paramref name="volume"/> (a ship's)
-    /// is given it here (see <see cref="PipelineGrid.FromVolume"/>).</summary>
-    public PipelineGrid AddGrid(string name, PipelineGrid? finer = null, ChunkVolume? volume = null)
+    /// <summary>Adds a grid, at any time.</summary>
+    public PipelineGrid AddGrid(string name, PipelineGrid? finer = null) => Add(new PipelineGrid(_grids.Count, name, finer, null));
+
+    /// <summary>The grid of a volume that holds its chunks' blocks (a ship's, see
+    /// <see cref="PipelineGrid.VolumeHoldsBlocks"/>): the one it has, or a new one.</summary>
+    public PipelineGrid GridFor(ChunkVolume volume, string name)
+        => _byVolume.TryGetValue(volume, out var grid) ? grid : _byVolume[volume] = Add(new PipelineGrid(_grids.Count, name, null, volume));
+
+    /// <summary>The grid <see cref="GridFor"/> gave the volume, if it's still here.</summary>
+    public PipelineGrid? GridOf(ChunkVolume volume) => _byVolume.GetValueOrDefault(volume);
+
+    private PipelineGrid Add(PipelineGrid grid)
     {
-        var grid = new PipelineGrid(_grids.Count, name, finer, volume);
         _grids.Add(grid);
         if (_built) BuildGrid(grid);
         return grid;
@@ -94,6 +103,7 @@ public sealed class ChunkPipeline
         if (grid.Removed) return;
         foreach (var record in _records.Values.Where(r => r.Grid == grid).ToList()) Want(record.Key, false);
         grid.Removed = true;
+        if (grid.Volume != null && _byVolume.GetValueOrDefault(grid.Volume) == grid) _byVolume.Remove(grid.Volume);
         foreach (var readers in _readersOf) readers.RemoveAll(r => r.Grid == grid.Id);
     }
 
