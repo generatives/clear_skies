@@ -286,24 +286,25 @@ public sealed class ChunkPipeline
         foreach (var (item, priority) in _skipped) _ready[(int)Executor.Worker].Enqueue(item, priority);
         _skipped.Clear();
 
-        // Each one waiting is asked once at most, and those not reached are first next frame. Asking takes a share of
-        // the time at most, so a crowd of them leaves the frame stages their turn.
+        // Asking takes a share of the time at most, so a crowd of chunks waiting on other systems leaves the frame stages
+        // their turn. Those ready are asked first, nearest first (often done at once); then each one waiting is asked
+        // again once at most, and those not reached are first next frame.
         long asking = Stopwatch.GetTimestamp();
         bool AskingLeft() => MainLeft() && Stopwatch.GetElapsedTime(asking).TotalMilliseconds < budgets.MainMs * ExternalShare;
-        for (int n = _awaitingExternal.Count; n > 0 && AskingLeft(); n--)
-        {
-            var (record, stage) = _awaitingExternal.Dequeue();
-            if (record.Removed) continue;
-            if (!record.Needs(stage)) { record.At(stage.Id).Set(SlotFlags.Running, false); continue; }
-            if (!Ask(record, stage)) _awaitingExternal.Enqueue((record, stage));
-        }
-
+        int waitingBefore = _awaitingExternal.Count;
         while (AskingLeft() && TakeReady(Executor.External, out var record, out var stage, out _))
         {
             ref var slot = ref record.At(stage.Id);
             slot.Set(SlotFlags.Stale, false);
             slot.Set(SlotFlags.Running, true);
             if (!Ask(record, (ExternalStage)stage)) _awaitingExternal.Enqueue((record, (ExternalStage)stage));
+        }
+        for (int n = waitingBefore; n > 0 && AskingLeft(); n--)
+        {
+            var (record, stage) = _awaitingExternal.Dequeue();
+            if (record.Removed) continue;
+            if (!record.Needs(stage)) { record.At(stage.Id).Set(SlotFlags.Running, false); continue; }
+            if (!Ask(record, stage)) _awaitingExternal.Enqueue((record, stage));
         }
 
         var waiting = new List<((PipelineChunk, Stage) Item, (float, int) Priority)>();
