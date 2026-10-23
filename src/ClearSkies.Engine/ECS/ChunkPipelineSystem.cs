@@ -58,8 +58,8 @@ public sealed class ChunkPipelineSystem : ISystem, IDebugUiSystem
         if (!edit.Chunk.IsAlive || !edit.Chunk.Has<InPipeline>()) return;
         var key = edit.Chunk.Get<InPipeline>().Key;
         var grid = Pipeline.Grid(key.Grid);
-        foreach (var stage in Pipeline.Stages)
-            if (stage is IBlocksStage && stage.AppliesTo(grid)) Pipeline.OutputChanged(key, stage, new Change(edit.BorderFaces, edit.OpacityChanged, Urgent: true));
+        foreach (var stage in IBlocksStage.Of(Pipeline, grid))
+            Pipeline.OutputChanged(key, stage, new Change(edit.BorderFaces, edit.OpacityChanged, Urgent: true));
     }
 
     /// <summary>A chunk came into a ship's volume: wanted, in the ship's grid (made with its first chunk).</summary>

@@ -1,5 +1,6 @@
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Gui;
+using ClearSkies.Engine.Pipeline;
 using System.Diagnostics;
 using ClearSkies.Engine.Voxels;
 using DefaultEcs;
@@ -112,6 +113,9 @@ public sealed class TerrainSwapSystem : ISystem
 
     /// <summary>Whether a chunk of a grid is lit (GpuLightSystem.IsLit); without it, everything counts as lit.</summary>
     public Func<GridHandle, ChunkPosition, bool>? IsLit { get; set; }
+
+    /// <summary>Whether a chunk's first light is done in the chunk pipeline (see FirstLightStage).</summary>
+    public Func<ChunkKey, bool>? FirstLit { get; set; }
 
     /// <summary>Puts a chunk of a grid ahead of the light queues (GpuLightSystem.ShowFirst), asked every frame for
     /// terrain waiting to be shown: a coarse chunk held back for its first light, and what's swapping in for one.</summary>
@@ -268,10 +272,9 @@ public sealed class TerrainSwapSystem : ISystem
         return true;
     }
 
-    /// <summary>Whether a coarse chunk in the store shows its light: it, and the chunks above and below it that its top
-    /// and bottom faces read.</summary>
-    private bool ChunkLit(TerrainLevel level, ChunkPosition p)
-        => IsLit == null || Budgeted(level.Volume.Gpu, p) && Budgeted(level.Volume.Gpu, Above(p, 1)) && Budgeted(level.Volume.Gpu, Above(p, -1));
+    /// <summary>Whether a coarse chunk in the store shows its light: the chunk pipeline's first light is done on it
+    /// (FirstLightStage: it, and the chunks above and below it that its top and bottom faces read, are lit).</summary>
+    private bool ChunkLit(TerrainLevel level, ChunkPosition p) => IsLit == null || FirstLit?.Invoke(level.Key(p)) != false;
 
     private static ChunkPosition Above(ChunkPosition p, int dy) => new(p.X, p.Y + dy, p.Z);
 
@@ -376,7 +379,7 @@ public sealed class TerrainSwapSystem : ISystem
                 bool waits = Waits(level, c, p);
                 // Terrain waiting to be shown is lit ahead of light changes on terrain already shown: this chunk while
                 // it's held back for its first light (it holds the fog there), with the chunks above and below it that
-                // ChunkLit looks at too.
+                // its first light waits for too.
                 if (uploaded && waits && ShowFirst is { } first)
                 {
                     _counts.ShowFirst += 3;
