@@ -60,6 +60,18 @@ public sealed class WaterFlow
             _woken.Add(new Vector3D<int>(x, y, z));
     }
 
+    /// <summary>Wakes every flowing (not source) water cell in a chunk, and those around them.</summary>
+    public void WakeFlowing(ChunkPosition pos, ChunkData data)
+    {
+        if (data.BlocksAsBytes().IndexOf((byte)BlockId.Water) < 0) return;
+        const int S = ChunkData.Size;
+        for (int z = 0; z < S; z++)
+        for (int y = 0; y < S; y++)
+        for (int x = 0; x < S; x++)
+            if (data.Get(x, y, z) == BlockId.Water && !WaterLevel.IsSource(data.GetOrientation(x, y, z)))
+                Wake(new Vector3D<int>(pos.X * S + x, pos.Y * S + y, pos.Z * S + z));
+    }
+
     /// <summary>Forgets every woken cell (on a machine that doesn't run the water).</summary>
     public void Clear() => _woken.Clear();
 

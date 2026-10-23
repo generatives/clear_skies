@@ -171,6 +171,18 @@ public class WaterFlowTests
     }
 
     [Fact]
+    public void Water_left_flowing_wakes_when_its_chunk_loads()
+    {
+        using var pool = new Pool();
+        // A stream with no source, as if saved part way through draining.
+        for (int x = 1; x <= 3; x++) pool.Volume.SetBlock(x, 1, 0, BlockId.Water, WaterLevel.Flowing(x));
+        Assert.Equal(0, pool.Flow.Woken);
+        pool.Flow.WakeFlowing(new ChunkPosition(0, 0, 0), pool.Volume.GetData(new ChunkPosition(0, 0, 0))!);
+        pool.Settle();
+        for (int x = 1; x <= 3; x++) Assert.Equal(BlockId.Air, pool.Block(x, 1, 0));
+    }
+
+    [Fact]
     public void Flowing_water_drains_away_once_its_source_is_gone()
     {
         using var pool = new Pool();
