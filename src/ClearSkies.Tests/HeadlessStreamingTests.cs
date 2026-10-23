@@ -187,6 +187,7 @@ public class HeadlessStreamingTests
         using var drawn = scene.World.SubscribeComponentAdded((in DefaultEcs.Entity e, in Chunk _) => e.Set<Rendered>()); // as the game's view
         var time = new ClearSkies.Engine.Core.Time();
         var pipeline = PipelineOf(load).Pipeline;
+        pipeline.Clock = () => time.TotalSeconds;
         var baked = pipeline.Add(new BakedStandIn(pipeline, load.Voxels));
         pipeline.Add(new ShownStage(pipeline, time, baked, load));
         var player = Interest(scene, 16, 16, View(256));

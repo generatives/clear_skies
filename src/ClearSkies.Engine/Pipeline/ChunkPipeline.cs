@@ -313,6 +313,12 @@ public sealed class ChunkPipeline
         // again once at most, and those not reached are first next frame.
         long asking = Stopwatch.GetTimestamp();
         bool AskingLeft() => MainLeft() && Stopwatch.GetElapsedTime(asking).TotalMilliseconds < budgets.MainMs * ExternalShare;
+        double now = Clock();
+        while (_askAgain.TryPeek(out var again, out double at) && at <= now)
+        {
+            _askAgain.Dequeue();
+            if (!again.Record.Removed) MarkStale(again.Record, again.Stage.Id);
+        }
         int waitingBefore = _awaitingExternal.Count;
         while (AskingLeft() && TakeReady(Executor.External, out var record, out var stage, out _))
         {
@@ -515,14 +521,29 @@ public sealed class ChunkPipeline
         return true;
     }
 
-    /// <summary>Asks an external stage; true once it answered done (and is finished).</summary>
+    /// <summary>Asks an external stage; false if it's to be asked again next frame.</summary>
     private bool Ask(PipelineChunk record, ExternalStage stage)
     {
         using var timed = Timed(stage);
         var result = stage.Request(record);
         if (result.Finished) Finish(record, stage, result.Output, result.Change, result.Changed);
-        return result.Finished;
+        if (result.Again == 0) return result.Finished;
+        if (!result.Finished)
+        {
+            record.At(stage.Id).Set(SlotFlags.Running, false);
+            Check(record, stage.Id); // an input changed while it was asked
+        }
+        if (double.IsFinite(result.Again))
+            _askAgain.Enqueue((record, stage), Clock() + result.Again);
+        return true;
     }
+
+    // External stages to ask again, by when (see StageResult.Again).
+    private readonly PriorityQueue<(PipelineChunk Record, Stage Stage), double> _askAgain = new();
+
+    /// <summary>The time (seconds) that stages' <see cref="StageResult.Again"/> counts in: the game's, where they wait
+    /// on its clock (fades).</summary>
+    public Func<double> Clock { get; set; } = () => Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
 
     private void Finish(PipelineChunk record, Stage stage, object? output, Change change, bool changed = true)
     {

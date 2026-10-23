@@ -23,6 +23,7 @@ public static class LightStages
         Time time, ChunkLoadSystem terrain)
     {
         var pipeline = system.Pipeline;
+        pipeline.Clock = () => time.TotalSeconds; // a chunk's shown in game time (its fade)
         var store = pipeline.Add(new LightStoreStage(pipeline, residency));
         var firstLight = pipeline.Add(new FirstLightStage(pipeline, light, store));
         var firstBake = pipeline.Add(new FirstBakeStage(pipeline, renderer, upload, firstLight));

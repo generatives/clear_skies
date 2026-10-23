@@ -85,15 +85,20 @@ public abstract class WorkerStage<TOut> : WorkerStage where TOut : class
 }
 
 /// <summary>What a frame or external stage answers: done, with its output and what changed, or not yet (asked again
-/// next frame).</summary>
-public readonly record struct StageResult(bool Finished, object? Output, Change Change, bool Changed = true)
+/// next frame). An external stage can say when it's asked again instead (<see cref="Again"/>).</summary>
+public readonly record struct StageResult(bool Finished, object? Output, Change Change, bool Changed = true, double Again = 0)
 {
     public static StageResult Done(object? output = null) => new(true, output, Change.All);
     public static StageResult Done(object? output, Change change) => new(true, output, change);
     public static readonly StageResult Waiting = new(false, null, Change.All);
+    /// <summary>Not yet, and not till an input changes: it isn't asked again till then.</summary>
+    public static readonly StageResult WaitingForInputs = new(false, null, Change.All, Again: double.PositiveInfinity);
     /// <summary>Done, with nothing its readers read changed: they don't run again (two stages reading each other's
     /// output, on different chunks, settle).</summary>
     public static StageResult Same(object? output) => new(true, output, Change.All, Changed: false);
+
+    /// <summary>Asked again <paramref name="seconds"/> from now (or sooner, if an input changes), done or not.</summary>
+    public StageResult AskAgainIn(double seconds) => this with { Again = seconds };
 }
 
 /// <summary>A stage done on the main thread, under the frame's budget.</summary>
@@ -105,7 +110,7 @@ public abstract class FrameStage : Stage
 }
 
 /// <summary>A stage another system does in its own time (first light): the pipeline asks for it every frame until it
-/// answers done.</summary>
+/// answers done, or when it says (see <see cref="StageResult.Again"/>).</summary>
 public abstract class ExternalStage : Stage
 {
     public sealed override Executor RunsOn => Executor.External;

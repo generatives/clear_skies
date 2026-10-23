@@ -81,11 +81,11 @@ public sealed class ShownStage(ChunkPipeline pipeline, Time time, Stage ready, C
         var showing = record.Output<Showing>(this);
         bool first = showing == null;
         var over = Over(record);
-        if (first && over == null && !AboveShown(record)) return StageResult.Waiting;
+        if (first && over == null && !AboveShown(record)) return StageResult.WaitingForInputs;
         showing ??= new Showing(record.Key);
         var entry = showing.Entry = pipeline.EntryOf(record.Key);
-        bool wasOver = showing.Over, poll = false;
-        if (record.Grid.Finer is { } finer && entry != null) poll = Swap(record, showing, finer, first, now);
+        bool wasOver = showing.Over;
+        double again = record.Grid.Finer is { } finer && entry != null ? Swap(record, showing, finer, first, now) : 0;
 
         if (entry != null)
         {
@@ -98,11 +98,8 @@ public sealed class ShownStage(ChunkPipeline pipeline, Time time, Stage ready, C
         }
 
         // What's read of it (whether it's there, and drawn over the chunks under it) changed: they look again.
-        bool changed = first || showing.Over != wasOver;
-        if (!poll) return changed ? StageResult.Done(showing) : StageResult.Same(showing);
-        if (!changed) return StageResult.Waiting;
-        pipeline.Invalidate(record.Key, this); // asked again once this is taken
-        return StageResult.Done(showing);
+        var result = first || showing.Over != wasOver ? StageResult.Done(showing) : StageResult.Same(showing);
+        return again > 0 ? result.AskAgainIn(again) : result;
     }
 
     /// <summary>Whether a coarse chunk is drawn over the eight under it (rather than them); false before it's shown.</summary>
@@ -130,9 +127,13 @@ public sealed class ShownStage(ChunkPipeline pipeline, Time time, Stage ready, C
                || !above.Needs(this) || above.EverDone(this);
     }
 
-    /// <summary>Moves a coarse chunk's swap with the eight under it on (see the class summary); returns whether to look
-    /// again next frame: for the eight's light, or till it's in over them and can let go of them.</summary>
-    private bool Swap(PipelineChunk record, Showing showing, PipelineGrid finer, bool first, double now)
+    /// <summary>How often a coarse chunk ready to swap out looks to see if the eight under it are lit (seconds).</summary>
+    private const double LitEvery = 0.1;
+
+    /// <summary>Moves a coarse chunk's swap with the eight under it on (see the class summary); returns when to look
+    /// again (seconds from now; 0: once they change): for the eight's light, or when it's in over them and can let go
+    /// of them.</summary>
+    private double Swap(PipelineChunk record, Showing showing, PipelineGrid finer, bool first, double now)
     {
         // Ready: the finer level wants all eight, and has each shown (or air, never shown). Inside: it wants all eight.
         bool ready = true, inside = true;
@@ -143,17 +144,17 @@ public sealed class ShownStage(ChunkPipeline pipeline, Time time, Stage ready, C
             ready &= child is null or { Asked: true } && (child?.EverDone(this) == true || IsAir(key));
             inside &= child is { Asked: true } || child == null && terrain?.InRange(key) == true;
         }
-        bool poll = false;
+        bool waitingForLight = false;
         if (first) (showing.Over, showing.SwappedAt) = (!inside, inside ? double.NegativeInfinity : now);
         else if (showing.Over && ready)
         {
             if (Lit(finer, record.Key.Pos)) (showing.Over, showing.SwappedAt) = (false, now);
-            else poll = true;
+            else waitingForLight = true;
         }
         else if (!showing.Over && !ready && !inside) (showing.Over, showing.SwappedAt) = (true, now);
         bool fading = now - showing.SwappedAt < FadeSeconds;
         Hold(showing, finer, !showing.Over || fading);
-        return poll || showing.Over && fading && showing.Held != 0;
+        return waitingForLight ? LitEvery : showing.Over && fading && showing.Held != 0 ? showing.SwappedAt + FadeSeconds - now : 0;
     }
 
     /// <summary>Whether the level has the chunk and it's air (not drawn, so never shown): made so, or known to be.</summary>
