@@ -37,7 +37,7 @@ public class PipelineShipTests
         var records = system.Pipeline.Records.ToList();
         Assert.Equal(2, records.Count);
         var grid = records[0].Grid;
-        Assert.False(grid.Generated);
+        Assert.Same(system.ShipBlocks, grid.Blocks);
         Assert.Same(volume, grid.Volume);
         foreach (var record in records)
             Assert.Same(volume.GetData(record.Key.Pos), record.Output<ChunkVoxels>(system.ShipBlocks)!.Data);
