@@ -42,6 +42,7 @@ public static class DedicatedServerGame
         var levers = new LeverControlSystem(host.World, commands);
         var wheels = new SteeringWheelControlSystem(host.World, commands);
         var toggles = new ToggleControlSystem(host.World, commands);
+        host.AddSystem(world.WaterFlow, SystemStage.Simulation); // a step of flowing water (on the authority), sent as commands
         host.AddSystem(commands, SystemStage.Simulation);
         host.AddSystem(levers, SystemStage.Simulation);
         host.AddSystem(wheels, SystemStage.Simulation);
@@ -108,6 +109,7 @@ public static class BotClientGame
         var levers = new LeverControlSystem(host.World, commands);
         var wheels = new SteeringWheelControlSystem(host.World, commands);
         var toggles = new ToggleControlSystem(host.World, commands);
+        host.AddSystem(world.WaterFlow, SystemStage.Simulation); // a step of flowing water (on the authority), sent as commands
         host.AddSystem(commands, SystemStage.Simulation);
         host.AddSystem(levers, SystemStage.Simulation);
         host.AddSystem(wheels, SystemStage.Simulation);

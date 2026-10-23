@@ -70,6 +70,7 @@ public sealed class GameWorld
         AirShapes = new AirshipResistanceSystem(host.World, host.Physics);
         AirResistance = new AirResistanceSystem(host.World, host.Physics, Wind);
         RemoteBodies = new RemoteBodySystem(host.World, Registry, host.Clock);
+        WaterFlow = new WaterFlowSystem(StaticVolume, Commands);
         GameReplication.Register(Replicated);
     }
 
@@ -104,6 +105,9 @@ public sealed class GameWorld
 
     /// <summary>Drag from each ship's and player's velocity relative to the wind, before the physics step.</summary>
     public AirResistanceSystem AirResistance { get; }
+
+    /// <summary>The world's water, flowing on the authority.</summary>
+    public WaterFlowSystem WaterFlow { get; }
 
     /// <summary>Bodies owned elsewhere, placed from their snapshots about 100 ms behind.</summary>
     public RemoteBodySystem RemoteBodies { get; }
