@@ -666,7 +666,9 @@ fn fs_chunk_transparent(in: VSOut, @builtin(front_facing) front: bool) -> @locat
     if (dot(in.localView, in.localNormal) < 0.0 && in.cg.w >= 0) {
         drawChunk = in.cg.xyz;
         drawGrid  = in.cg.w;
-        let clear = exp(-waterPath(in.localPos, vec3<i32>(floor(in.localPos - 0.5 * in.localNormal)), normalize(in.localView)) / max(camera.water.w, 0.1));
+        // The walk starts in the face's own water cell: a hair behind the face, not half a block, since flowing water's
+        // lowered top can sit low in its cell (half a block back would be the cell under it).
+        let clear = exp(-waterPath(in.localPos, vec3<i32>(floor(in.localPos - 0.01 * in.localNormal)), normalize(in.localView)) / max(camera.water.w, 0.1));
         alpha = 1.0 - (1.0 - camera.water2.x) * clear;
         waterShare = 1.0 - (1.0 - camera.water2.y) * clear;
     }
