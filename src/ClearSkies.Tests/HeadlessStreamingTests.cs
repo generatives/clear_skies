@@ -61,7 +61,7 @@ public class HeadlessStreamingTests
         int quiet = 0, last = -1;
         for (int i = 0; (i < frames || quiet < 60) && DateTime.UtcNow < deadline; i++)
         {
-            load.Update(1 / 60f);
+            Frame(load);
             swaps?.Update(1 / 60f);
             bool idle = load.ColumnsInFlight == 0 && load.LoadedChunks == last;
             quiet = idle ? quiet + 1 : 0;
@@ -70,14 +70,25 @@ public class HeadlessStreamingTests
         }
     }
 
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<ChunkLoadSystem, ChunkPipelineSystem> Pipelines = new();
+
+    /// <summary>One frame of streaming: what's wanted, then the pipeline making it, as the game runs them.</summary>
+    internal static void Frame(ChunkLoadSystem load)
+    {
+        load.Update(1 / 60f);
+        Pipelines.GetValue(load, _ => throw new InvalidOperationException("Not made by Streaming")).Update(1 / 60f);
+    }
+
     internal static ChunkLoadSystem Streaming(HeadlessScene scene, SaveDatabase db, int maxChunks = 100_000, float viewDistance = 64) =>
         Streaming(scene, new SavedChunkStore(db), maxChunks, viewDistance);
 
     /// <summary>The scene's world streamed, as the game's: edits to it ask streaming what's there.</summary>
     internal static ChunkLoadSystem Streaming(HeadlessScene scene, IChunkStore store, int maxChunks = 100_000, float viewDistance = 64)
     {
-        var load = new ChunkLoadSystem(scene.World, scene.WorldVolume, new ChunkCountBudget(maxChunks), () => new Flat(), viewDistance,
-                                       minChunkY: 0, store);
+        var pipeline = new ChunkPipelineSystem();
+        var load = new ChunkLoadSystem(scene.World, scene.WorldVolume, new ChunkCountBudget(maxChunks), pipeline.Pipeline, () => new Flat(),
+                                       viewDistance, minChunkY: 0, store);
+        Pipelines.Add(load, pipeline);
         ((ClearSkies.Engine.Commands.Handlers.EditVoxelsHandler)scene.Commands.HandlerFor(ClearSkies.Engine.Commands.CommandIds.EditVoxels)!).Terrain = load;
         return load;
     }
@@ -195,7 +206,7 @@ public class HeadlessStreamingTests
         swaps.FadeSeconds = 0f;
         foreach (var (_, entry) in scene.WorldVolume.All) entry.Entity.Set<ChunkMeshedFlag>();
         foreach (var (_, entry) in level.Volume.All) entry.Entity.Set<ChunkMeshedFlag>();
-        for (int i = 0; i < 10; i++) { load.Update(1 / 60f); swaps.Update(1 / 60f); }
+        for (int i = 0; i < 10; i++) { Frame(load); swaps.Update(1 / 60f); }
         Assert.Equal(1f, swaps.DrawState(level, near).Dissolve);
         Assert.Equal(0f, swaps.DrawState(level, far).Dissolve);
         Assert.Equal(0f, swaps.DrawState(level, new ChunkPosition(0, -4, 0)).Dissolve); // below full detail's ball
@@ -233,7 +244,7 @@ public class HeadlessStreamingTests
             {
                 Settle(load, swaps: swaps);
                 foreach (var level in load.Levels) foreach (var (_, entry) in level.Volume.All) entry.Entity.Set<ChunkMeshedFlag>();
-                for (int i = 0; i < 5; i++) { load.Update(1 / 60f); swaps.Update(1 / 60f); }
+                for (int i = 0; i < 5; i++) { Frame(load); swaps.Update(1 / 60f); }
             } while (!load.LevelsIdle && DateTime.UtcNow < deadline);
         }
         LoadAndShow();
@@ -243,7 +254,7 @@ public class HeadlessStreamingTests
         {
             at.X += 48;
             player.Get<Transform>().Position = at;
-            load.Update(1 / 60f);
+            Frame(load);
             swaps.Update(1 / 60f);
             swaps.FarReadyRadius(at);
             Assert.DoesNotContain("level 1 column", swaps.FogHeldBy);
@@ -332,7 +343,7 @@ public class HeadlessStreamingTests
         var load = Streaming(scene, db);
         var loading = scene.World.GetEntities().With<TerrainColumnLoading>().AsSet();
         var player = Interest(scene, 16, 16, View(64));
-        load.Update(1 / 60f); // the scan queues what's wanted, before anything has loaded
+        Frame(load); // the scan queues what's wanted, before anything has loaded
         Assert.NotEqual(0, loading.Count);
         Settle(load);
         Assert.Equal(0, loading.Count);

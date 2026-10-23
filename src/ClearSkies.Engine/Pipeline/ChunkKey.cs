@@ -18,6 +18,7 @@ public sealed class PipelineGrid
         Id = id;
         Name = name;
         Finer = finer;
+        Level = finer == null ? 0 : finer.Level + 1;
         if (finer != null) finer.Coarser = this;
     }
 
@@ -27,6 +28,8 @@ public sealed class PipelineGrid
     public PipelineGrid? Finer { get; }
     /// <summary>The grid one of whose chunks covers 8 of this one's.</summary>
     public PipelineGrid? Coarser { get; private set; }
+    /// <summary>How many grids finer ones there are: a chunk here covers 2^Level of the finest grid's across.</summary>
+    public int Level { get; }
 
     public ChunkKey Key(ChunkPosition pos) => new(Id, pos);
     public override string ToString() => Name;

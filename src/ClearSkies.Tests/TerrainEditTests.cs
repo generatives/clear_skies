@@ -78,7 +78,7 @@ public class TerrainEditTests
         using var db = SaveDatabase.InMemory();
         var load = Streaming(scene, db);
         Interest(scene, 16, 16, View(64));
-        load.Update(1 / 60f); // the nearest columns are dispatched, and haven't been added yet
+        Frame(load); // the nearest columns are dispatched, and haven't been added yet
         Assert.NotEqual(0, load.ColumnsInFlight);
 
         // Meanwhile the chunk under the interest is edited elsewhere, and the store has it as edited (all wood).

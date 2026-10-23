@@ -67,6 +67,7 @@ public static class DedicatedServerGame
         host.AddSystem(world.Interpolation, SystemStage.Frame);
         host.AddSystem(world.Hierarchy, SystemStage.Frame);
         host.AddSystem(world.ChunkLoad, SystemStage.Frame);
+        host.AddSystem(world.ChunkPipeline, SystemStage.Frame);
 
         if (save.IsNew) TestScene.SpawnTestShip(world.Commands, WorldSpawn.For(save.Seed).Eye);
 
@@ -133,6 +134,7 @@ public static class BotClientGame
         host.AddSystem(world.Interpolation, SystemStage.Frame);
         host.AddSystem(world.Hierarchy, SystemStage.Frame);
         host.AddSystem(world.ChunkLoad, SystemStage.Frame);
+        host.AddSystem(world.ChunkPipeline, SystemStage.Frame);
 
         using (new QuitOnSignal(host)) world.Run();
     }

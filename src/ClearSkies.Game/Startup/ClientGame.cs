@@ -114,6 +114,7 @@ public static class ClientGame
         host.AddSystem(world.Interpolation, SystemStage.Frame);
         host.AddSystem(world.Hierarchy, SystemStage.Frame);
         host.AddSystem(world.ChunkLoad, SystemStage.Frame);
+        host.AddSystem(world.ChunkPipeline, SystemStage.Frame);
         host.AddSystem(world.TerrainSwaps, SystemStage.Frame);
         host.AddSystem(new FogSystem(host.World, world.Options.ViewDistance) { Far = world.TerrainSwaps.FarReadyRadius },
                        SystemStage.Frame); // at the nearest terrain not ready (in any level, with distant terrain drawn coarse)

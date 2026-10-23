@@ -111,20 +111,16 @@ public sealed class HeartWorldGenerator : IWorldGenerator
 
     // ── Generation ──────────────────────────────────────────────────────────
 
-    /// <summary>One chunk column's solid spans, per block column: computed once and reused for each of the column's
-    /// chunks (streaming generates a column's chunks one after another on one thread).</summary>
-    private int _profileX = int.MinValue, _profileZ = int.MinValue;
+    /// <summary>The chunk column last prepared, and the columns prepared lately (see <see cref="ProfileCache"/>): a
+    /// generator is used on one thread, and chunks over the same ground are made on the same one.</summary>
+    private ColumnProfile? _profile;
+    private readonly ProfileCache _profiles = new();
+
+    // While a column is worked out (see BuildProfile), per block column: its solid spans, before they're packed into
+    // its ColumnProfile, and the terrain's height and the world's rough bottom there.
     private readonly (short Lo, short Hi)[] _spans = new (short, short)[S * S * MaxSpans];
     private readonly byte[] _spanCount = new byte[S * S];
-    private readonly float[] _strata = new float[S * S];
-    private readonly float[] _patch = new float[S * S];
-    private readonly float[] _flora = new float[S * S], _kind = new float[S * S], _woods = new float[S * S];
-    private readonly float[] _bare = new float[S * S * MaxSpans];
-    private readonly Biome[] _biome = new Biome[S * S * MaxSpans]; // per span top
-    private readonly float[] _dry = new float[S * S * MaxSpans];   // per span top: how near a desert (Biomes.Dry)
     private readonly float[] _height = new float[S * S];
-    private readonly int[] _level = new int[S * S];         // the level of water here (a lake here or beside, or a river), or int.MinValue
-    private readonly bool[] _shore = new bool[S * S];       // whether a dry column by a lake is its sandy shore
     private readonly int[] _lake = new int[S * S];          // the level of a lake planned here or beside, or int.MinValue
     private readonly int[] _cut = new int[S * S];           // the top of the ground once a river cuts it, or int.MaxValue
     private readonly float[] _bottomAt = new float[S * S];
@@ -142,18 +138,19 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     public void Generate(ChunkData data, ChunkPosition pos)
     {
         Prepare(pos.X, pos.Z);
+        var p = _profile!;
 
         int originY = pos.Y * S;
         for (int lz = 0; lz < S; lz++)
         for (int lx = 0; lx < S; lx++)
         {
             int col = lx + S * lz;
-            for (int s = 0; s < _spanCount[col]; s++)
+            for (int s = 0; s < p.Count(col); s++)
             {
-                var (lo, hi) = _spans[col * MaxSpans + s];
+                var (lo, hi) = p.Spans[p.Start[col] + s];
                 int y0 = System.Math.Max(lo, originY), y1 = System.Math.Min(hi, originY + S - 1);
                 for (int y = y0; y <= y1; y++)
-                    data.Set(lx, y - originY, lz, ContinentTerrain.Block(y, hi, _strata[col], _patch[col], _bare[col * MaxSpans + s], _biome[col * MaxSpans + s], _dry[col * MaxSpans + s]));
+                    data.Set(lx, y - originY, lz, ContinentTerrain.Block(y, hi, p.Strata[col], p.Patch[col], p.Bare[p.Start[col] + s], p.Biome[p.Start[col] + s], p.Dry[p.Start[col] + s]));
 
                 int x = pos.X * S + lx, z = pos.Z * S + lz;
                 // Some of a lava pool glows: a lamp each, so only one block in LavaGlowOdds.
@@ -162,10 +159,10 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                     data.Set(lx, hi - originY, lz, BlockId.GlowingLava);
 
                 // Crystals in caves: in a floor under other land, and in a ceiling over another span.
-                var crystal = Crystals.For(_biome[col * MaxSpans + s]);
-                if (_bare[col * MaxSpans + s] == Shaded && hi >= originY && hi < originY + S && Crystals.At(x, hi, z, _seed))
+                var crystal = Crystals.For(p.Biome[p.Start[col] + s]);
+                if (p.Bare[p.Start[col] + s] == Shaded && hi >= originY && hi < originY + S && Crystals.At(x, hi, z, _seed))
                     data.Set(lx, hi - originY, lz, crystal);
-                if (s > 0 && lo - _spans[col * MaxSpans + s - 1].Hi < ShadeReach && lo >= originY && lo < originY + S && Crystals.At(x, lo, z, _seed))
+                if (s > 0 && lo - p.Spans[p.Start[col] + s - 1].Hi < ShadeReach && lo >= originY && lo < originY + S && Crystals.At(x, lo, z, _seed))
                     data.Set(lx, lo - originY, lz, crystal);
 
                 // A lake or river over the top span: water (lava in the volcanic wastes, partly iced over in tundra) up
@@ -173,9 +170,9 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 BlockId? ground = null;
                 if (Lakeside(col, s))
                 {
-                    int level = _level[col];
-                    var biome = _biome[col * MaxSpans + s];
-                    var bed = _patch[col] < 0.35f ? BlockId.Gravel : BlockId.Sand;
+                    int level = p.Level[col];
+                    var biome = p.Biome[p.Start[col] + s];
+                    var bed = p.Patch[col] < 0.35f ? BlockId.Gravel : BlockId.Sand;
                     if (biome == Biome.Volcanic) bed = BlockId.Ash;
                     for (int y = System.Math.Max(hi - 1, originY); y <= System.Math.Min(hi, originY + S - 1); y++)
                         data.Set(lx, y - originY, lz, bed);
@@ -198,9 +195,9 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 // What grows on the span's top, in the open cell above it.
                 int above = hi + 1;
                 if (above < originY || above >= originY + S) continue;
-                if (s + 1 < _spanCount[col] && _spans[col * MaxSpans + s + 1].Lo <= above) continue;
-                ground ??= ContinentTerrain.Block(hi, hi, _strata[col], _patch[col], _bare[col * MaxSpans + s], _biome[col * MaxSpans + s], _dry[col * MaxSpans + s]);
-                var plant = ContinentTerrain.Plant(ground.Value, pos.X * S + lx, above, pos.Z * S + lz, _flora[col], _kind[col], _seed);
+                if (s + 1 < p.Count(col) && p.Spans[p.Start[col] + s + 1].Lo <= above) continue;
+                ground ??= ContinentTerrain.Block(hi, hi, p.Strata[col], p.Patch[col], p.Bare[p.Start[col] + s], p.Biome[p.Start[col] + s], p.Dry[p.Start[col] + s]);
+                var plant = ContinentTerrain.Plant(ground.Value, pos.X * S + lx, above, pos.Z * S + lz, p.Flora[col], p.Kind[col], _seed);
                 if (plant != BlockId.Air) data.Set(lx, above - originY, lz, plant);
             }
         }
@@ -210,19 +207,19 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         for (int lx = Trees.Reach; lx < S - Trees.Reach; lx++)
         {
             int col = lx + S * lz;
-            for (int s = 0; s < _spanCount[col]; s++)
+            for (int s = 0; s < p.Count(col); s++)
             {
-                int hi = _spans[col * MaxSpans + s].Hi;
+                int hi = p.Spans[p.Start[col] + s].Hi;
                 if (hi + Trees.MaxHeight < originY || hi >= originY + S) continue;
-                var biome = _biome[col * MaxSpans + s];
-                var ground = ContinentTerrain.Block(hi, hi, _strata[col], _patch[col], _bare[col * MaxSpans + s], biome, _dry[col * MaxSpans + s]);
+                var biome = p.Biome[p.Start[col] + s];
+                var ground = ContinentTerrain.Block(hi, hi, p.Strata[col], p.Patch[col], p.Bare[p.Start[col] + s], biome, p.Dry[p.Start[col] + s]);
                 int x = pos.X * S + lx, z = pos.Z * S + lz;
-                var kind = Trees.At(ground, x, hi, z, _woods[col], _seed, biome);
+                var kind = Trees.At(ground, x, hi, z, p.Woods[col], _seed, biome);
                 if (kind == Trees.Kind.None) continue;
                 if (Lakeside(col, s)) continue;
                 int reach = Trees.ReachOf(kind);
                 if (lx < reach || lz < reach || lx >= S - reach || lz >= S - reach) continue;
-                if (s + 1 < _spanCount[col] && _spans[col * MaxSpans + s + 1].Lo <= hi + Trees.HeightOf(kind) + 1) continue;
+                if (s + 1 < p.Count(col) && p.Spans[p.Start[col] + s + 1].Lo <= hi + Trees.HeightOf(kind) + 1) continue;
                 Trees.Grow(data, originY, kind, lx, hi, lz, Trees.Hash(x, hi, z, _seed));
             }
         }
@@ -231,28 +228,28 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     /// <summary>Whether span <paramref name="s"/> of column <paramref name="col"/> is under water or on a lake's shore.</summary>
     private bool Lakeside(int col, int s)
     {
-        int level = _level[col], hi = _spans[col * MaxSpans + s].Hi;
-        return s == _spanCount[col] - 1 && level != int.MinValue && hi <= level + 2 && (hi < level || _shore[col]);
+        var p = _profile!;
+        int level = p.Level[col], hi = p.Spans[p.Start[col] + s].Hi;
+        return s == p.Count(col) - 1 && level != int.MinValue && hi <= level + 2 && (hi < level || p.Shore[col]);
     }
 
-    /// <summary>Works out chunk column (chunkX, chunkZ)'s solid spans, if it isn't the one last worked out.</summary>
-    public void Prepare(int chunkX, int chunkZ)
-    {
-        if (chunkX != _profileX || chunkZ != _profileZ) BuildProfile(chunkX, chunkZ);
-    }
+    /// <summary>Takes chunk column (chunkX, chunkZ)'s solid spans from the profiles worked out lately (see
+    /// <see cref="ProfileCache"/>), working them out if they aren't there.</summary>
+    public void Prepare(int chunkX, int chunkZ) => _profile = _profiles.Get(chunkX, chunkZ, () => BuildProfile(chunkX, chunkZ));
 
     /// <summary>The solid spans (bottom up) of block column (lx, lz) of the chunk column last prepared.</summary>
     public ReadOnlySpan<(short Lo, short Hi)> Spans(int lx, int lz)
     {
         int col = lx + S * lz;
-        return _spans.AsSpan(col * MaxSpans, _spanCount[col]);
+        return _profile!.Spans.AsSpan(_profile.Start[col], _profile.Count(col));
     }
 
-    private void BuildProfile(int chunkX, int chunkZ)
+    /// <summary>Works out a chunk column's solid spans and what fills them.</summary>
+    private ColumnProfile BuildProfile(int chunkX, int chunkZ)
     {
-        _profileX = chunkX; _profileZ = chunkZ;
-        _topsX = _topsZ = int.MinValue;
+        _topsX = _topsZ = int.MinValue; // (the hearts Top loaded are replaced)
         float x0 = chunkX * S, z0 = chunkZ * S;
+        var p = new ColumnProfile();
 
         float top = float.MinValue;
         for (int lz = 0; lz < S; lz++)
@@ -262,11 +259,11 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             float wx = x0 + lx, wz = z0 + lz;
             _height[col] = MathF.Min(_terrain.Height(wx, wz), HeartGrid.WorldTop - 1);
             var water = _water.At((int)wx, (int)wz);
-            (_level[col], _cut[col]) = _water.Settled((int)wx, (int)wz);
+            (p.Level[col], _cut[col]) = _water.Settled((int)wx, (int)wz);
             _lake[col] = water.RiverDepth == 0 ? water.Level : int.MinValue;
             // A lake's shore reaches a ragged ShoreReach from its sample cells, not their square outline; a river's
             // banks stay as they are.
-            _shore[col] = water.RiverDepth == 0 && water.Off < ShoreReach * (0.6f + 0.4f * (_crack.GetNoise(wx * 3f, wz * 3f) + 1f));
+            p.Shore[col] = water.RiverDepth == 0 && water.Off < ShoreReach * (0.6f + 0.4f * (_crack.GetNoise(wx * 3f, wz * 3f) + 1f));
             _bottomAt[col] = HeartGrid.LowestBottom + BottomRoughness * (0.5f + 0.5f * _bottom.GetNoise(wx, wz));
             top = MathF.Max(top, _height[col]);
         }
@@ -280,7 +277,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         if (!anyAlive)
         {
             Array.Clear(_spanCount);
-            return;
+            p.Pack(_spanCount, _spans, MaxSpans);
+            return p;
         }
 
         for (int lz = 0; lz < S; lz++)
@@ -313,21 +311,29 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 y = System.Math.Min(y + step, System.Math.Max(y + 1, yTop + 1));
             }
             _spanCount[col] = (byte)spans;
+        }
+
+        // Packed (only the spans there are, so profiles are small enough to share), then what's on each span's top.
+        p.Pack(_spanCount, _spans, MaxSpans);
+        for (int lz = 0; lz < S; lz++)
+        for (int lx = 0; lx < S; lx++)
+        {
+            int col = lx + S * lz, spans = p.Count(col), at = p.Start[col];
             if (spans == 0) continue;
-            _strata[col] = _terrain.Strata(wx, wz);
-            _patch[col] = _terrain.Patch(wx, wz);
-            _flora[col] = _terrain.Flora(wx, wz);
-            _woods[col] = _terrain.Woods(wx, wz);
-            _kind[col] = _terrain.Kind(wx, wz);
+            float wx = x0 + lx, wz = z0 + lz;
+            p.Strata[col] = _terrain.Strata(wx, wz);
+            p.Patch[col] = _terrain.Patch(wx, wz);
+            p.Flora[col] = _terrain.Flora(wx, wz);
+            p.Woods[col] = _terrain.Woods(wx, wz);
+            p.Kind[col] = _terrain.Kind(wx, wz);
             float heat = _terrain.Heat(wx, wz), wet = _terrain.Wet(wx, wz);
             for (int sp = 0; sp < spans; sp++)
             {
-                int hi = _spans[col * MaxSpans + sp].Hi;
-                float bare = sp + 1 < spans && _spans[col * MaxSpans + sp + 1].Lo - hi < ShadeReach ? Shaded : 0f;
-                _bare[col * MaxSpans + sp] = bare;
+                int hi = p.Spans[at + sp].Hi;
+                p.Bare[at + sp] = sp + 1 < spans && p.Spans[at + sp + 1].Lo - hi < ShadeReach ? Shaded : 0f;
                 float h = Biomes.Heat(hi, heat);
-                _biome[col * MaxSpans + sp] = Biomes.Pick(h, wet);
-                _dry[col * MaxSpans + sp] = Biomes.Dry(h, wet, Biomes.SandBlend);
+                p.Biome[at + sp] = Biomes.Pick(h, wet);
+                p.Dry[at + sp] = Biomes.Dry(h, wet, Biomes.SandBlend);
             }
         }
 
@@ -335,11 +341,13 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         // round it.
         for (int col = 0; col < S * S; col++)
         {
-            if (_spanCount[col] == 0) continue;
-            ref var topSpan = ref _spans[col * MaxSpans + _spanCount[col] - 1];
+            int spans = p.Count(col);
+            if (spans == 0) continue;
+            ref var topSpan = ref p.Spans[p.Start[col] + spans - 1];
             if (_cut[col] != int.MaxValue) topSpan.Hi = (short)System.Math.Max(topSpan.Lo, System.Math.Min(topSpan.Hi, _cut[col]));
-            if (_level[col] == int.MinValue && _lake[col] != int.MinValue) _level[col] = System.Math.Min(_lake[col], topSpan.Hi);
+            if (p.Level[col] == int.MinValue && _lake[col] != int.MinValue) p.Level[col] = System.Math.Min(_lake[col], topSpan.Hi);
         }
+        return p;
     }
 
     /// <summary>Whether block y of a column (wobbled to (px, pz), lifted by lift) is solid, and how many blocks up from
@@ -367,7 +375,6 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         if (chunkX != _topsX || chunkZ != _topsZ)
         {
             _topsX = chunkX; _topsZ = chunkZ;
-            _profileX = _profileZ = int.MinValue; // (the hearts loaded no longer serve the profile last worked out)
             float x0 = chunkX * S, z0 = chunkZ * S, top = float.MinValue;
             for (int j = 0; j <= 2; j++)
             for (int i = 0; i <= 2; i++)
@@ -624,6 +631,61 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             _hx[h] = heart.X; _hy[h] = -heart.Depth * HeartGrid.VerticalScale; _hz[h] = heart.Z;
             _alive[h] = heart.Alive; _exists[h] = heart.Exists; _drop[h] = heart.Drop; _hs[h] = heart.Surface;
         }
+    }
+}
+
+/// <summary>One chunk column of the hearts world worked out: per block column, its solid spans (bottom up, from
+/// <see cref="Start"/>) with each top's look, and what's on it. Never changed once made.</summary>
+internal sealed class ColumnProfile
+{
+    private const int Columns = ChunkData.Size * ChunkData.Size;
+
+    /// <summary>Takes the column's solid spans, <paramref name="counts"/> per block column at
+    /// <paramref name="perColumn"/> apart in <paramref name="spans"/>, packed one after another.</summary>
+    public void Pack(byte[] counts, (short Lo, short Hi)[] spans, int perColumn)
+    {
+        for (int col = 0; col < Columns; col++) Start[col + 1] = Start[col] + counts[col];
+        int total = Start[Columns];
+        Spans = new (short, short)[total];
+        Bare = new float[total];
+        Biome = new Biome[total];
+        Dry = new float[total];
+        for (int col = 0; col < Columns; col++)
+            Array.Copy(spans, col * perColumn, Spans, Start[col], counts[col]);
+    }
+
+    public readonly int[] Start = new int[Columns + 1];
+    public (short Lo, short Hi)[] Spans = Array.Empty<(short, short)>();
+    /// <summary>Per span top: how shaded it is, its biome, and how near a desert (Biomes.Dry).</summary>
+    public float[] Bare = Array.Empty<float>(), Dry = Array.Empty<float>();
+    public Biome[] Biome = Array.Empty<Biome>();
+    public readonly float[] Strata = new float[Columns], Patch = new float[Columns], Flora = new float[Columns],
+                            Woods = new float[Columns], Kind = new float[Columns];
+    /// <summary>Per block column: the level of water here (a lake here or beside, or a river), or int.MinValue; and
+    /// whether a dry column by a lake is its sandy shore.</summary>
+    public readonly int[] Level = new int[Columns];
+    public readonly bool[] Shore = new bool[Columns];
+
+    public int Count(int col) => Start[col + 1] - Start[col];
+}
+
+/// <summary>The column profiles one generator built lately, the oldest let go first.</summary>
+internal sealed class ProfileCache
+{
+    /// <summary>Columns kept: a profile is about 30 KB (more where there's lots of ground), so a few MB a generator.
+    /// Enough for the few level-2 columns (16 chunk columns each) a worker is making chunks over at once.</summary>
+    private const int Capacity = 128;
+
+    private readonly Dictionary<(int, int), ColumnProfile> _profiles = new();
+    private readonly Queue<(int, int)> _order = new();
+
+    public ColumnProfile Get(int x, int z, Func<ColumnProfile> build)
+    {
+        if (_profiles.TryGetValue((x, z), out var kept)) return kept;
+        var made = _profiles[(x, z)] = build();
+        _order.Enqueue((x, z));
+        if (_order.Count > Capacity) _profiles.Remove(_order.Dequeue());
+        return made;
     }
 }
 

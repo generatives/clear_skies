@@ -127,7 +127,7 @@ public class ClientTerrainTests
             foreach (var (load, chunks) in streams)
             {
                 int before = load.LoadedChunks;
-                load.Update(1 / 60f);
+                Frame(load);
                 idle &= load.ColumnsInFlight == 0 && chunks.Asked == 0 && load.LoadedChunks == before;
             }
             quiet = idle ? quiet + 1 : 0;
@@ -203,8 +203,8 @@ public class ClientTerrainTests
         {
             Dig();
             game.Tick();
-            hostLoad.Update(1 / 60f);
-            load.Update(1 / 60f);
+            Frame(hostLoad);
+            Frame(load);
             Thread.Sleep(0);
         }
         Settle(game, (hostLoad, hostChunks), (load, chunks));
