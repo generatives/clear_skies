@@ -74,6 +74,22 @@ public sealed class LoopbackGame : IDisposable
         }
     }
 
+    /// <summary>Ticks every machine until <paramref name="done"/>, as <see cref="HeadlessScene.TickUntil"/> does for
+    /// one: for <paramref name="max"/> ticks, and if it is waiting on background work, at least
+    /// <paramref name="minSeconds"/>.</summary>
+    public bool TickUntil(Func<bool> done, int max = 600, double minSeconds = 0)
+    {
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        for (int i = 0; i < max || clock.Elapsed.TotalSeconds < minSeconds; i++)
+        {
+            if (done()) return true;
+            Tick();
+            if (i < max) Thread.Sleep(0);
+            else Thread.Sleep(1);
+        }
+        return done();
+    }
+
     /// <summary>Saves, as on exit: the authority describes everything, and the Host writes it.</summary>
     public void SaveAll()
     {
