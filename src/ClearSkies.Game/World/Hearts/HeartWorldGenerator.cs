@@ -112,24 +112,16 @@ public sealed class HeartWorldGenerator : IWorldGenerator
 
     // ── Generation ──────────────────────────────────────────────────────────
 
-    /// <summary>The chunk column last prepared, and its profile: shared with every generator of the seed, as the
-    /// column's chunks are made on whichever worker thread is free.</summary>
-    private int _profileX = int.MinValue, _profileZ = int.MinValue;
+    /// <summary>The chunk column last prepared: shared with every generator of the seed (see <see cref="ProfileCache"/>),
+    /// as a column's chunks are made on whichever worker thread is free.</summary>
     private ColumnProfile? _profile;
     private readonly ProfileCache _profiles;
 
-    // The column being worked out, per block column (see BuildProfile), before it's packed into a ColumnProfile.
+    // While a column is worked out (see BuildProfile), per block column: its solid spans, before they're packed into
+    // its ColumnProfile, and the terrain's height and the world's rough bottom there.
     private readonly (short Lo, short Hi)[] _spans = new (short, short)[S * S * MaxSpans];
     private readonly byte[] _spanCount = new byte[S * S];
-    private readonly float[] _strata = new float[S * S];
-    private readonly float[] _patch = new float[S * S];
-    private readonly float[] _flora = new float[S * S], _kind = new float[S * S], _woods = new float[S * S];
-    private readonly float[] _bare = new float[S * S * MaxSpans];
-    private readonly Biome[] _biome = new Biome[S * S * MaxSpans]; // per span top
-    private readonly float[] _dry = new float[S * S * MaxSpans];   // per span top: how near a desert (Biomes.Dry)
     private readonly float[] _height = new float[S * S];
-    private readonly int[] _level = new int[S * S];         // the level of a lake here or beside, or int.MinValue (Lakes.Level)
-    private readonly bool[] _shore = new bool[S * S];       // whether a dry column by a lake is its sandy shore
     private readonly float[] _bottomAt = new float[S * S];
 
     // The hearts around the chunk column being profiled, per layer: cells from (_cx0, _cy0, _cz0), _nx by _ny by _nz of
@@ -240,14 +232,9 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         return s == p.Count(col) - 1 && level != int.MinValue && hi <= level + 2 && (hi < level || p.Shore[col]);
     }
 
-    /// <summary>Works out chunk column (chunkX, chunkZ)'s solid spans, or takes them from the profiles shared by every
-    /// generator of this seed (see <see cref="ProfileCache"/>), if it isn't the one last worked out.</summary>
-    public void Prepare(int chunkX, int chunkZ)
-    {
-        if (_profile != null && chunkX == _profileX && chunkZ == _profileZ) return;
-        _profileX = chunkX; _profileZ = chunkZ;
-        _profile = _profiles.Get(chunkX, chunkZ, () => BuildProfile(chunkX, chunkZ));
-    }
+    /// <summary>Takes chunk column (chunkX, chunkZ)'s solid spans from the profiles shared by every generator of this
+    /// seed (see <see cref="ProfileCache"/>), working them out if they aren't there.</summary>
+    public void Prepare(int chunkX, int chunkZ) => _profile = _profiles.Get(chunkX, chunkZ, () => BuildProfile(chunkX, chunkZ));
 
     /// <summary>The solid spans (bottom up) of block column (lx, lz) of the chunk column last prepared.</summary>
     public ReadOnlySpan<(short Lo, short Hi)> Spans(int lx, int lz)
@@ -256,10 +243,11 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         return _profile!.Spans.AsSpan(_profile.Start[col], _profile.Count(col));
     }
 
-    /// <summary>Works out a chunk column's solid spans (in this generator's scratch arrays) and what fills them.</summary>
+    /// <summary>Works out a chunk column's solid spans and what fills them.</summary>
     private ColumnProfile BuildProfile(int chunkX, int chunkZ)
     {
         float x0 = chunkX * S, z0 = chunkZ * S;
+        var p = new ColumnProfile();
 
         float top = float.MinValue;
         for (int lz = 0; lz < S; lz++)
@@ -268,9 +256,9 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             int col = lx + S * lz;
             float wx = x0 + lx, wz = z0 + lz;
             _height[col] = MathF.Min(_terrain.Height(wx, wz), HeartGrid.WorldTop - 1);
-            _level[col] = _lakes.Level((int)wx, (int)wz, out float off);
+            p.Level[col] = _lakes.Level((int)wx, (int)wz, out float off);
             // The shore reaches a ragged ShoreReach from the lake's sample cells, not their square outline.
-            _shore[col] = off < ShoreReach * (0.6f + 0.4f * (_crack.GetNoise(wx * 3f, wz * 3f) + 1f));
+            p.Shore[col] = off < ShoreReach * (0.6f + 0.4f * (_crack.GetNoise(wx * 3f, wz * 3f) + 1f));
             _bottomAt[col] = HeartGrid.LowestBottom + BottomRoughness * (0.5f + 0.5f * _bottom.GetNoise(wx, wz));
             top = MathF.Max(top, _height[col]);
         }
@@ -284,7 +272,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         if (!anyAlive)
         {
             Array.Clear(_spanCount);
-            return Pack();
+            p.Pack(_spanCount, _spans, MaxSpans);
+            return p;
         }
 
         for (int lz = 0; lz < S; lz++)
@@ -327,44 +316,29 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 y = System.Math.Min(y + step, System.Math.Max(y + 1, yTop + 1));
             }
             _spanCount[col] = (byte)spans;
+        }
+
+        // Packed (only the spans there are, so profiles are small enough to share), then what's on each span's top.
+        p.Pack(_spanCount, _spans, MaxSpans);
+        for (int lz = 0; lz < S; lz++)
+        for (int lx = 0; lx < S; lx++)
+        {
+            int col = lx + S * lz, spans = p.Count(col), at = p.Start[col];
             if (spans == 0) continue;
-            _strata[col] = _terrain.Strata(wx, wz);
-            _patch[col] = _terrain.Patch(wx, wz);
-            _flora[col] = _terrain.Flora(wx, wz);
-            _woods[col] = _terrain.Woods(wx, wz);
-            _kind[col] = _terrain.Kind(wx, wz);
+            float wx = x0 + lx, wz = z0 + lz;
+            p.Strata[col] = _terrain.Strata(wx, wz);
+            p.Patch[col] = _terrain.Patch(wx, wz);
+            p.Flora[col] = _terrain.Flora(wx, wz);
+            p.Woods[col] = _terrain.Woods(wx, wz);
+            p.Kind[col] = _terrain.Kind(wx, wz);
             float heat = _terrain.Heat(wx, wz), wet = _terrain.Wet(wx, wz);
             for (int sp = 0; sp < spans; sp++)
             {
-                int hi = _spans[col * MaxSpans + sp].Hi;
-                float bare = sp + 1 < spans && _spans[col * MaxSpans + sp + 1].Lo - hi < ShadeReach ? Shaded : 0f;
-                _bare[col * MaxSpans + sp] = bare;
+                int hi = p.Spans[at + sp].Hi;
+                p.Bare[at + sp] = sp + 1 < spans && p.Spans[at + sp + 1].Lo - hi < ShadeReach ? Shaded : 0f;
                 float h = Biomes.Heat(hi, heat);
-                _biome[col * MaxSpans + sp] = Biomes.Pick(h, wet);
-                _dry[col * MaxSpans + sp] = Biomes.Dry(h, wet, Biomes.SandBlend);
-            }
-        }
-        return Pack();
-    }
-
-    /// <summary>The column just worked out, packed: only the spans there are, so profiles are small enough to share.</summary>
-    private ColumnProfile Pack()
-    {
-        var start = new int[S * S + 1];
-        for (int col = 0; col < S * S; col++) start[col + 1] = start[col] + _spanCount[col];
-        int total = start[S * S];
-        var p = new ColumnProfile(start, total);
-        for (int col = 0; col < S * S; col++)
-        {
-            p.Level[col] = _level[col];
-            p.Shore[col] = _shore[col];
-            if (_spanCount[col] == 0) continue;
-            p.Strata[col] = _strata[col]; p.Patch[col] = _patch[col]; p.Flora[col] = _flora[col];
-            p.Woods[col] = _woods[col]; p.Kind[col] = _kind[col];
-            for (int sp = 0; sp < _spanCount[col]; sp++)
-            {
-                int from = col * MaxSpans + sp, to = start[col] + sp;
-                p.Spans[to] = _spans[from]; p.Bare[to] = _bare[from]; p.Biome[to] = _biome[from]; p.Dry[to] = _dry[from];
+                p.Biome[at + sp] = Biomes.Pick(h, wet);
+                p.Dry[at + sp] = Biomes.Dry(h, wet, Biomes.SandBlend);
             }
         }
         return p;
@@ -605,21 +579,29 @@ internal sealed class ColumnProfile
 {
     private const int Columns = ChunkData.Size * ChunkData.Size;
 
-    public ColumnProfile(int[] start, int spans)
+    /// <summary>Takes the column's solid spans, <paramref name="counts"/> per block column at
+    /// <paramref name="perColumn"/> apart in <paramref name="spans"/>, packed one after another.</summary>
+    public void Pack(byte[] counts, (short Lo, short Hi)[] spans, int perColumn)
     {
-        Start = start;
-        Spans = new (short, short)[spans];
-        Bare = new float[spans];
-        Biome = new Biome[spans];
-        Dry = new float[spans];
+        for (int col = 0; col < Columns; col++) Start[col + 1] = Start[col] + counts[col];
+        int total = Start[Columns];
+        Spans = new (short, short)[total];
+        Bare = new float[total];
+        Biome = new Biome[total];
+        Dry = new float[total];
+        for (int col = 0; col < Columns; col++)
+            Array.Copy(spans, col * perColumn, Spans, Start[col], counts[col]);
     }
 
-    public readonly int[] Start;
-    public readonly (short Lo, short Hi)[] Spans;
-    public readonly float[] Bare, Dry;
-    public readonly Biome[] Biome;
+    public readonly int[] Start = new int[Columns + 1];
+    public (short Lo, short Hi)[] Spans = Array.Empty<(short, short)>();
+    /// <summary>Per span top: how shaded it is, its biome, and how near a desert (Biomes.Dry).</summary>
+    public float[] Bare = Array.Empty<float>(), Dry = Array.Empty<float>();
+    public Biome[] Biome = Array.Empty<Biome>();
     public readonly float[] Strata = new float[Columns], Patch = new float[Columns], Flora = new float[Columns],
                             Woods = new float[Columns], Kind = new float[Columns];
+    /// <summary>Per block column: the level of a lake here or beside, or int.MinValue (Lakes.Level); and whether a dry
+    /// column by a lake is its sandy shore.</summary>
     public readonly int[] Level = new int[Columns];
     public readonly bool[] Shore = new bool[Columns];
 
