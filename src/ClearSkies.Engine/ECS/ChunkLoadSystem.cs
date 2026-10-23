@@ -45,10 +45,13 @@ namespace ClearSkies.Engine.ECS;
 /// </summary>
 public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
 {
-    /// <summary>Column jobs (loading or generating a column's missing chunks) in flight at once. Most of a first visit is
-    /// sky that generation rules out in microseconds, so this is well above the core count: the background workers queue
-    /// the excess.</summary>
+    /// <summary>Chunks being made on workers at once (see <see cref="ChunkPipeline"/>). Well above the core count: the
+    /// background workers queue the excess, and most of a first visit is sky that's ruled out in microseconds.</summary>
     private const int MaxInFlight = 64;
+
+    /// <summary>Chunks a coarse level asks for and doesn't have yet, at most: they're slow to make (a level-1 chunk is
+    /// eight full ones, level 2 sixty-four), and the pipeline makes them nearest first anyway.</summary>
+    private const int MaxLevelInFlight = 256;
 
     /// <summary>Columns queued at once. Far more than load before the centre next moves a column; when the queue runs
     /// out short of the view distance it is rebuilt from there.</summary>
@@ -100,13 +103,13 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
     private readonly Dictionary<(int x, int z), Entity> _loading = new();
 
     /// <summary>Every chunk edited since it was generated, loaded from the store (read from it as streaming starts, then
-    /// added to as chunks are edited here or elsewhere).</summary>
-    private readonly HashSet<ChunkPosition> _edited = new();
-    private readonly Dictionary<(int x, int z), ulong> _editedLayers = new(); // the same, as layer bits per column
+    /// added to as chunks are edited here or elsewhere). Concurrent: chunks are made on workers from them.</summary>
+    private readonly ConcurrentDictionary<ChunkPosition, byte> _edited = new();
+    private readonly ConcurrentDictionary<(int x, int z), ulong> _editedLayers = new(); // the same, as layer bits per column
     private bool _editsRead;
 
     /// <summary>Per column (layer bits): chunks holding a build — edited, with blocks.</summary>
-    private readonly Dictionary<(int x, int z), ulong> _built = new();
+    private readonly ConcurrentDictionary<(int x, int z), ulong> _built = new();
 
     /// <summary>Main-thread time per frame for the work that comes in bursts, shared: unloading what left view,
     /// adding finished columns, and scanning for columns to queue, in that order. What doesn't fit waits for the next
@@ -118,11 +121,6 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
 
     // Each interest's last published scan radius (TerrainScanned) and the column it was around.
     private readonly Dictionary<Entity, (float Radius, (int x, int z) Column)> _published = new();
-
-    private readonly ConcurrentQueue<(TerrainLevel Level, (int x, int z) Column, List<(ChunkPosition Pos, ChunkData? Data, ChunkPreparation? Prepared)> Chunks)> _results = new();
-
-    /// <summary>Full-detail chunks edited elsewhere while their column was loading: what loads is stale, so they load again.</summary>
-    private readonly HashSet<ChunkPosition> _stale = new();
 
     /// <param name="budget">What limits what's loaded in full detail.</param>
     /// <param name="viewDistance">The farthest out chunks are streamed in full detail to be drawn, in blocks
@@ -147,7 +145,8 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         _minY         = minChunkY - LayersBelow;
         _staticVolume.EditableLayers = (_minY, _minY + 63); // only what streaming can load back
         _viewDistance = viewDistance;
-        _levels.Add(new TerrainLevel(0, staticVolume, budget, _minY, _minY + 63) { Radius = viewDistance });
+        StartPipeline();
+        _levels.Add(new TerrainLevel(0, _grids[0], staticVolume, budget, _minY, _minY + 63) { Radius = viewDistance });
     }
 
     /// <summary>Column offsets within <paramref name="radius"/> columns, closest first.</summary>
@@ -180,7 +179,7 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         ImGui.Text($"Interests: {full.Rings.Count}   Draw limit: {_viewDistance:F0} blocks ({full.Columns.Count} columns known)");
         ImGui.Text($"Budget: {full.Budget!.Describe(_staticVolume)}" + (full.Full ? " (full)" : ""));
         ImGui.Text($"Loaded: {_staticVolume.LoadedCount:N0} chunks   Queued columns: {full.Queue.Count - full.QueueHead}" +
-                   $"{(full.QueueTruncated ? "+" : "")}   In flight: {full.InFlight.Count}");
+                   $"{(full.QueueTruncated ? "+" : "")}   Being made: {full.InFlightChunks} chunks");
         ImGui.Text($"Columns evicted: {full.Evictions}");
         ImGui.Text($"Edited chunks: {_edited.Count}   Layers: {_minY}..{_minY + 63}");
 
@@ -189,9 +188,9 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
     }
 
     // CPU time of each step, for the debug panel: which one a hitch while streaming came from.
-    private const int ApplyStep = 0, UnloadStep = 1, QueueStep = 2, DispatchStep = 3, EvictStep = 4, EvictOrderStep = 5,
+    private const int PipelineStep = 0, UnloadStep = 1, QueueStep = 2, DispatchStep = 3, EvictStep = 4, EvictOrderStep = 5,
                       LevelsStep = 6;
-    private readonly StepTimer _steps = new("Adding finished columns", "Rebuild: unloading what's unwanted",
+    private readonly StepTimer _steps = new("Making chunks (pipeline)", "Rebuild: unloading what's unwanted",
                                             "Rebuild: queueing columns", "Dispatching jobs", "Evicting far columns",
                                             "Evicting: ordering columns", "Dropping coarse blocks") { Owner = "Chunk Loading" };
 
@@ -207,12 +206,11 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         foreach (var level in _levels)
         {
             GatherRings(level);
-            bool idle = level.ScanDone && level.QueueHead == level.Queue.Count && level.InFlight.Count == 0;
-            if (!level.Current.SequenceEqual(level.Rings) || (idle && (level.SkippedInFlight || level.QueueTruncated)))
+            bool idle = level.ScanDone && level.QueueHead == level.Queue.Count && level.InFlightChunks == 0;
+            if (!level.Current.SequenceEqual(level.Rings) || (idle && level.QueueTruncated))
             {
                 level.Rings.Clear();
                 level.Rings.AddRange(level.Current);
-                level.SkippedInFlight = false;
                 Rebuild(level);
             }
         }
@@ -221,14 +219,14 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         foreach (var level in _levels) UnloadSome(level, BudgetLeft);
         _steps.Lap(UnloadStep);
 
-        ApplyResults(BudgetLeft);
-        _steps.Lap(ApplyStep);
-
         foreach (var level in _levels) ScanSome(level, BudgetLeft);
         _steps.Lap(QueueStep);
 
         Dispatch();
         _steps.Lap(DispatchStep);
+
+        _pipeline.Update(new Pipeline.FrameBudgets(MaxInFlight, BudgetLeft));
+        _steps.Lap(PipelineStep);
 
         DropSome();
         _steps.Lap(LevelsStep);
@@ -276,7 +274,7 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
     /// <summary>How many times the full-detail queue has been rebuilt (the view moved, or loading caught up).</summary>
     public int Rebuilds => FullDetail.Rebuilds;
 
-    /// <summary>Full-detail chunks loaded, and column jobs still loading.</summary>
+    /// <summary>Full-detail chunks loaded, and columns with chunks still being made.</summary>
     public int LoadedChunks => _staticVolume.LoadedCount;
     public int ColumnsInFlight => FullDetail.InFlight.Count;
 
@@ -298,8 +296,10 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         level.UnloadAt = 0;
         // (An edit that put blocks where there were none counts as a build once its chunk unloads. Until then the chunk
         // is loaded, so the queue doesn't need to know.)
-        foreach (var (p, _) in level.Volume.All)
+        foreach (var p in level.Wanting)
             if (!Wanted(level, p) && !level.Held.ContainsKey(p)) level.ToUnload.Add(p);
+        foreach (var (p, _) in level.Volume.All) // made by an edit, not the pipeline
+            if (!level.Wanting.Contains(p) && !Wanted(level, p) && !level.Held.ContainsKey(p)) level.ToUnload.Add(p);
 
         // Forget the columns no longer wanted: their air is re-learned on return.
         foreach (var key in level.Columns.Keys.Where(k => !Wanted(level, k.x, k.z)).ToList()) level.Columns.Remove(key);
@@ -342,7 +342,7 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         {
             var p = level.ToUnload[level.UnloadAt++];
             if (KeepLoaded?.Invoke(level, p) == true && level.Volume.IsLoaded(p)) { level.Held.TryAdd(p, _frame); continue; }
-            Unload(level, p); // a no-op if eviction already unloaded it
+            LetGoOf(level, p); // a no-op if eviction already let it go
         }
         // Held ones let go are unloaded under the same budget (a frame's share, even from Rebuild): many are let go at
         // once, as a ring of coarse chunks finishes fading in.
@@ -368,7 +368,7 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
             if (Wanted(level, p) || !level.Volume.IsLoaded(p)) { letGo.Add(p); continue; } // wanted again, or gone already
             if (KeepLoaded?.Invoke(level, p) == true && _frame - since <= MaxHoldFrames) continue;
             if (_steps.SinceLap() - start >= budgetMs) break;
-            Unload(level, p);
+            LetGoOf(level, p);
             letGo.Add(p);
         }
         foreach (var p in letGo) level.Held.Remove(p);
@@ -590,57 +590,44 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
 
     private void RecordEdited(ChunkPosition p, bool hasBlocks)
     {
-        _edited.Add(p);
+        _edited.TryAdd(p, 0);
         if (p.Y >= _minY && p.Y <= _minY + 63) _editedLayers[(p.X, p.Z)] = _editedLayers.GetValueOrDefault((p.X, p.Z)) | Bit(p);
         RecordBuild(p, hasBlocks);
     }
 
-    /// <summary>Hands queued columns to workers, one job per column: full detail's first, then the coarse levels',
-    /// nearest the view first across them (see <see cref="MaxLevelJobs"/>). A column whose edited chunks haven't
-    /// arrived stays where it is in its queue (they're asked for), and the columns after it go meanwhile, up to
-    /// MaxInFlight of them looked past.</summary>
+    /// <summary>Asks the pipeline for queued columns' chunks: full detail's, until its budget is full, then each coarse
+    /// level's, up to <see cref="MaxLevelInFlight"/> chunks. A column whose edited chunks haven't arrived stays where it
+    /// is in its queue (they're asked for), and the columns after it go meanwhile, up to MaxInFlight of them looked past.</summary>
     private void Dispatch()
     {
         var full = FullDetail;
         full.Full = false;
         int i = full.QueueHead, waiting = 0;
-        while (full.InFlight.Count < MaxInFlight && i < full.Queue.Count && waiting < MaxInFlight)
+        while (i < full.Queue.Count && waiting < MaxInFlight && BudgetLeft > MinStepMs)
             if (!DispatchAt(full, ref i, ref waiting)) break;
-        if (_levels.Count == 1) return;
-
-        Span<int> at = stackalloc int[_levels.Count], waits = stackalloc int[_levels.Count];
-        for (int k = 1; k < _levels.Count; k++) at[k] = _levels[k].QueueHead;
-        while (_levelJobs < MaxLevelJobs && full.InFlight.Count + _levelJobs < MaxInFlight)
+        foreach (var level in _levels.Skip(1))
         {
-            int next = -1;
-            float nearest = float.PositiveInfinity;
-            for (int k = 1; k < _levels.Count; k++)
-            {
-                var level = _levels[k];
-                if (at[k] >= level.Queue.Count || waits[k] >= MaxInFlight) continue;
-                float d = MathF.Sqrt(ColumnDistSq(level, level.Queue[at[k]])) * level.Blocks;
-                if (d < nearest) (next, nearest) = (k, d);
-            }
-            if (next < 0) return;
-            DispatchAt(_levels[next], ref at[next], ref waits[next]);
+            i = level.QueueHead;
+            waiting = 0;
+            while (level.InFlightChunks < MaxLevelInFlight && i < level.Queue.Count && waiting < MaxInFlight)
+                DispatchAt(level, ref i, ref waiting);
         }
     }
 
-    /// <summary>Dispatches the level's queued column at <paramref name="i"/>, or passes over it: done already, or
-    /// waiting for its edited chunks. False when the level's budget has no room (it stops; when the column is nearer than
-    /// the farthest loaded one, that's unloaded to make room).</summary>
+    /// <summary>Asks for the level's queued column at <paramref name="i"/>'s chunks, or passes over it: asked for
+    /// already, or waiting for its edited chunks. False when the level's budget has no room (it stops; when the column is
+    /// nearer than the farthest loaded one, that's let go to make room).</summary>
     private bool DispatchAt(TerrainLevel level, ref int i, ref int waiting)
     {
         var col = level.Queue[i];
-        if (level.InFlight.ContainsKey(col)) { level.SkippedInFlight = true; Dequeue(level, ref i); return true; } // re-queued by the next rebuild
         var work = Missing(level, col.x, col.z);
         if (work.Count == 0)
         {
             Dequeue(level, ref i);
-            if (level.Level == 0) Loaded(col);
+            if (level.Level == 0 && !level.InFlight.ContainsKey(col)) Loaded(col);
             return true;
         }
-        if (!Arrived(level, col, work)) { i++; waiting++; return true; }
+        if (!Arrived(work, level)) { i++; waiting++; return true; }
 
         if (level.Budget is { } budget)
         {
@@ -660,7 +647,7 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         }
 
         Dequeue(level, ref i);
-        DispatchColumn(level, col, work);
+        foreach (var (pos, _) in work) Want(level, pos);
         return true;
     }
 
@@ -672,92 +659,18 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         else level.Queue.RemoveAt(i);
     }
 
-    /// <summary>Whether the edited full chunks a column's job needs are all here to load; asks the store for any that
-    /// aren't.</summary>
-    private bool Arrived(TerrainLevel level, (int x, int z) col, List<(ChunkPosition Pos, bool Edited)> work)
+    /// <summary>Whether the edited full chunks that making <paramref name="work"/> reads are all here to load; asks the
+    /// store for any that aren't.</summary>
+    private bool Arrived(List<(ChunkPosition Pos, bool Edited)> work, TerrainLevel level)
     {
         bool all = true;
-        foreach (var pos in EditedUnder(level, col, work))
+        foreach (var pos in EditedUnder(level, work))
         {
             if (_chunkStore.IsReady(pos)) continue;
             _chunkStore.Request(pos);
             all = _chunkStore.IsReady(pos) && all; // a store on this machine may have it at once
         }
         return all;
-    }
-
-    /// <summary>Hands the level's column's missing chunks to a worker: in full detail, each loaded from the store if
-    /// edited, else generated; in a coarse level, made from the full chunks under them (see
-    /// <see cref="DispatchCoarseColumn"/>).</summary>
-    private void DispatchColumn(TerrainLevel level, (int x, int z) col, List<(ChunkPosition Pos, bool Edited)> work)
-    {
-        ulong layers = 0;
-        foreach (var (pos, _) in work) layers |= level.Bit(pos);
-        level.InFlight.Add(col, (work.Count, layers));
-        level.InFlightChunks += work.Count;
-        if (level.Level > 0) { DispatchCoarseColumn(level, col, layers); return; }
-        BackgroundWork.Queue(() =>
-        {
-            var loaded = new List<(ChunkPosition, ChunkData?, ChunkPreparation?)>(work.Count);
-            foreach (var (pos, edited) in work)
-            {
-                var data = _scratch.Value!;
-                if (!(edited && _chunkStore.TryLoad(pos, data)))
-                    _generator.Value!.Generate(data, pos);
-                data.Compact(); // stone inside an island, or sky, keeps one block instead of 64 KB
-                if (data.HasAnyNonAir())
-                {
-                    data.IsDirty = false;
-                    loaded.Add((pos, data, _preparer?.Prepare(data))); // off the main thread
-                    _scratch.Value = new ChunkData();
-                }
-                else
-                {
-                    loaded.Add((pos, null, null));
-                    // Generation only ever writes blocks, so an empty result leaves the buffer all air and ready to
-                    // reuse; a loaded edit may have overwritten more than blocks, so start that one afresh.
-                    if (edited) _scratch.Value = new ChunkData();
-                }
-            }
-            _results.Enqueue((level, col, loaded));
-        });
-    }
-
-    /// <summary>Adds finished columns, until <paramref name="budgetMs"/> is spent. A chunk is dropped if its level
-    /// went, the interests moved on while it was made, or an edit created it meanwhile; one that came out air is
-    /// remembered as air.</summary>
-    private void ApplyResults(double budgetMs)
-    {
-        double until = _steps.SinceLap() + budgetMs;
-        while (_steps.SinceLap() < until && _results.TryDequeue(out var job))
-        {
-            var level = job.Level;
-            level.InFlightChunks -= level.InFlight[job.Column].Chunks;
-            level.InFlight.Remove(job.Column);
-            if (level.Level > 0) _levelJobs--;
-            foreach (var (pos, data, prepared) in job.Chunks)
-            {
-                if (level.Removed) { data?.Release(); continue; }
-                if (level.Level == 0 && _stale.Remove(pos))
-                {
-                    // Edited elsewhere while it loaded: loaded again, edit and all.
-                    if (level.Queue.IndexOf(job.Column, level.QueueHead) < 0) { level.Queue.Insert(level.QueueHead, job.Column); Loading(job.Column); }
-                    data?.Release();
-                    continue;
-                }
-                if (data == null)
-                {
-                    if (level.Level == 0 && _edited.Contains(pos)) RecordBuild(pos, hasBlocks: false); // a build that was emptied out
-                    else if (level.Columns.TryGetValue((pos.X, pos.Z), out var col))
-                        level.Columns[(pos.X, pos.Z)] = (col.Generated, col.Air | level.Bit(pos));
-                    continue;
-                }
-                if (!Wanted(level, pos) || level.Volume.IsLoaded(pos)) { data.Release(); continue; }
-                level.Volume.AddChunk(pos, data, prepared);
-                if (level.Level > 0 && CanDrop(data)) level.ToDrop.Add(pos);
-            }
-            if (level.Level == 0) Loaded(job.Column);
-        }
     }
 
     /// <summary>Unloads the level's farthest loaded columns (not being loaded) that are more than a column farther than
@@ -781,7 +694,7 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
                 return;
             }
             var far = level.EvictOrder[level.EvictNext];
-            if (level.InFlight.ContainsKey(far)) { level.EvictNext++; continue; }
+            if (level.InFlight.ContainsKey(far)) { level.EvictNext++; continue; } // still being made
             // The time budget is checked per chunk: a column cut short stays next, and its unloaded chunks are
             // skipped when it comes up again.
             int unloaded = 0;
@@ -795,7 +708,7 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
                     return;
                 }
                 freedUnits += level.Budget!.CostOf(level.Volume, p);
-                Unload(level, p);
+                LetGoOf(level, p);
                 unloaded++;
                 freedChunks++;
             }
@@ -828,15 +741,15 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         return false;
     }
 
-    /// <summary>The level's column (x, z)'s wanted chunks that may hold something and aren't loaded yet, with whether
-    /// each is edited (full detail's only: a coarse chunk is made from the full chunks under it).</summary>
+    /// <summary>The level's column (x, z)'s wanted chunks that may hold something and aren't loaded or asked for yet,
+    /// with whether each is edited (full detail's only: a coarse chunk is made from the full chunks under it).</summary>
     private List<(ChunkPosition Pos, bool Edited)> Missing(TerrainLevel level, int x, int z)
     {
         var missing = new List<(ChunkPosition, bool)>();
         for (ulong bits = MaybeContent(level, x, z) & WantedLayers(level, x, z); bits != 0; bits &= bits - 1)
         {
             var p = new ChunkPosition(x, level.MinY + BitOperations.TrailingZeroCount(bits), z);
-            if (!level.Volume.IsLoaded(p)) missing.Add((p, level.Level == 0 && _edited.Contains(p)));
+            if (!level.Volume.IsLoaded(p) && !level.Wanting.Contains(p)) missing.Add((p, level.Level == 0 && _edited.ContainsKey(p)));
         }
         return missing;
     }
@@ -864,14 +777,14 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
     }
 
     /// <summary>An edit changed chunk <paramref name="pos"/> while it wasn't here: it's edited from now on (loaded
-    /// from the store, not generated), whatever the store had of it is stale, and if its column is loading, what loads
-    /// is stale too and loads again.</summary>
+    /// from the store, not generated), whatever the store had of it is stale, and if the pipeline is making it (or made
+    /// it air), it's made again.</summary>
     private void EditedElsewhere(ChunkPosition pos)
     {
         if (pos.Y < _minY || pos.Y > _minY + 63) return;
         RecordEdited(pos, hasBlocks: true);
         _chunkStore.Outdated(pos);
-        if (FullDetail.InFlight.ContainsKey((pos.X, pos.Z))) _stale.Add(pos);
+        if (FullDetail.Wanting.Contains(pos) && !_staticVolume.IsLoaded(pos)) _pipeline.Invalidate(FullDetail.Key(pos), _voxels);
     }
 
     /// <summary>Whether the terrain within <paramref name="radius"/> (horizontally) of <paramref name="centre"/> has
@@ -888,8 +801,6 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         }
         return true;
     }
-
-    public void Unload(ChunkPosition pos) => Unload(FullDetail, pos);
 
     private void Unload(TerrainLevel level, ChunkPosition pos)
     {

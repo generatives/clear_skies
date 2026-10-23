@@ -1,6 +1,7 @@
 using System.Numerics;
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Voxels;
+using ClearSkies.Engine.Pipeline;
 using DefaultEcs;
 using ImGuiNET;
 
@@ -10,9 +11,9 @@ namespace ClearSkies.Engine.ECS;
 /// The levels of detail streamed (see <see cref="SetLevels"/>). Level 0 is full detail, the world itself; level k is a
 /// low-resolution copy of it (a <see cref="ChunkVolume"/> with Scale 2^k, see <see cref="LowResolutionCopy"/>), meshed,
 /// lit and drawn by the same systems as the world, within a ball of its radius around the view. Every level streams
-/// the same way (its own rings, scan, queue, jobs and unloading, see ChunkLoadSystem); they differ in where a chunk
-/// comes from. A coarse level's column job makes its missing chunks from the full chunks under them (generated, or
-/// from the store if edited), shrinking each into the level above it (<see cref="CoarseTerrain"/>), and again for each
+/// the same way (its own rings, scan, queue and unloading, see ChunkLoadSystem, and its own grid in the chunk pipeline);
+/// they differ in where a chunk comes from. A coarse chunk is made from the full chunks under it (generated, or from
+/// the store if edited), shrinking each into the level above it (<see cref="CoarseTerrain"/>), and again for each
 /// level up to its own.
 ///
 /// A level's chunk swaps with the eight of the level nearer the view under it (see <see cref="TerrainSwapSystem"/>); every level
@@ -24,9 +25,10 @@ public sealed partial class ChunkLoadSystem
     /// <summary>One level of detail: its volume, how far it reaches, and its streaming.</summary>
     public sealed class TerrainLevel
     {
-        internal TerrainLevel(int level, ChunkVolume volume, IChunkBudget? budget, int minY, int maxY)
+        internal TerrainLevel(int level, PipelineGrid grid, ChunkVolume volume, IChunkBudget? budget, int minY, int maxY)
         {
             Level = level;
+            Grid = grid;
             Volume = volume;
             Budget = budget;
             MinY = minY;
@@ -42,6 +44,10 @@ public sealed partial class ChunkLoadSystem
 
         public ChunkVolume Volume { get; }
         internal Entity Root => Volume.Root;
+
+        /// <summary>Its chunks' grid in the chunk pipeline (the same grid for the level's every incarnation).</summary>
+        internal readonly PipelineGrid Grid;
+        internal ChunkKey Key(ChunkPosition p) => Grid.Key(p);
 
         internal TerrainLevel? Finer, Coarser;
         internal int Blocks => S << Level; // a chunk's size, in blocks
@@ -73,11 +79,14 @@ public sealed partial class ChunkLoadSystem
         /// once the column is no longer wanted, so returning re-learns its air.</summary>
         internal readonly Dictionary<(int x, int z), (ulong Generated, ulong Air)> Columns = new();
 
-        // Columns with chunks still to fetch, closest first, from QueueHead on; and the columns workers have now, with
-        // their chunks as a count and layer bits.
+        // Columns with chunks still to fetch, closest first, from QueueHead on.
         internal readonly List<(int x, int z)> Queue = new();
         internal int QueueHead;
-        internal bool QueueTruncated, SkippedInFlight;
+        internal bool QueueTruncated;
+
+        /// <summary>The chunks it wants of the pipeline; and of those, the ones not made yet, per column (a count and
+        /// layer bits) and in all.</summary>
+        internal readonly HashSet<ChunkPosition> Wanting = new();
         internal readonly Dictionary<(int x, int z), (int Chunks, ulong Layers)> InFlight = new();
         internal int InFlightChunks;
 
@@ -99,21 +108,15 @@ public sealed partial class ChunkLoadSystem
         internal readonly Dictionary<ChunkPosition, int> Held = new();
     }
 
-    /// <summary>Most coarse-level column jobs in flight at once: they're slow (a level-1 column generates four full
-    /// columns, level 2 sixteen), so fewer than the workers, leaving a worker for full detail.</summary>
-    private static readonly int MaxLevelJobs = System.Math.Max(1, BackgroundWork.Workers - 1);
-
     /// <summary>Coarse chunks looked at a frame for dropping their blocks.</summary>
     private const int DropChecksPerFrame = 256;
-
-    private int _levelJobs; // coarse column jobs in flight, of levels since removed too
 
     /// <summary>The levels of detail: full detail, then the coarse ones nearest the view first (see <see cref="SetLevels"/>).</summary>
     public IReadOnlyList<TerrainLevel> Levels => _levels;
 
     /// <summary>Whether every coarse level has made all its columns in range (nothing queued or in flight).</summary>
-    internal bool LevelsIdle => _levelJobs == 0 &&
-        _levels.Skip(1).All(l => l.Rings.Count > 0 && l.ScanDone && l.QueueHead == l.Queue.Count);
+    internal bool LevelsIdle =>
+        _levels.Skip(1).All(l => l.Rings.Count > 0 && l.ScanDone && l.QueueHead == l.Queue.Count && l.InFlightChunks == 0);
 
     /// <summary>Draws the view's distant terrain coarse: full detail to <paramref name="fullDetailRadius"/> (blocks),
     /// then a level per radius in <paramref name="radii"/> (level k to the k-th, in blocks, each farther than the
@@ -128,6 +131,7 @@ public sealed partial class ChunkLoadSystem
             _levels.RemoveRange(1, _levels.Count - 1);
             FullDetail.Coarser = null;
         }
+        if (radii.Count >= MaxLevels) throw new ArgumentOutOfRangeException(nameof(radii), $"At most {MaxLevels - 1} coarse levels.");
         if (radii.Count == 0)
         {
             FullDetail.Radius = _viewDistance;
@@ -152,7 +156,7 @@ public sealed partial class ChunkLoadSystem
         var root = _world.CreateEntity();
         var volume = ChunkVolume.CreateLowResolutionCopy(root, _world, 1 << k);
         root.Set<Rendered>();
-        var level = new TerrainLevel(k, volume, null, _minY >> k, (_minY + 63) >> k) { Finer = finer };
+        var level = new TerrainLevel(k, _grids[k], volume, null, _minY >> k, (_minY + 63) >> k) { Finer = finer };
         finer.Coarser = level;
         return level;
     }
@@ -160,6 +164,8 @@ public sealed partial class ChunkLoadSystem
     private void RemoveLevel(TerrainLevel level)
     {
         level.Removed = true;
+        foreach (var pos in level.Wanting) Forget(level, pos);
+        level.Wanting.Clear();
         foreach (var (pos, _) in level.Volume.All.ToList()) Unload(level, pos);
         if (level.Root.IsAlive) level.Root.Dispose();
     }
@@ -173,116 +179,89 @@ public sealed partial class ChunkLoadSystem
         return (maybe & level.Bit(p)) == 0 || level.Volume.IsLoaded(p);
     }
 
-    /// <summary>The edited full chunks a column's job needs: in full detail, its own; in a coarse level, those under
-    /// its chunks being made.</summary>
-    private IEnumerable<ChunkPosition> EditedUnder(TerrainLevel level, (int x, int z) col, List<(ChunkPosition Pos, bool Edited)> work)
+    /// <summary>The edited full chunks that making the level's chunks <paramref name="work"/> reads: in full detail,
+    /// those of them edited; in a coarse level, the edited ones under them.</summary>
+    private IEnumerable<ChunkPosition> EditedUnder(TerrainLevel level, List<(ChunkPosition Pos, bool Edited)> work)
     {
-        if (level.Level == 0)
+        foreach (var (pos, edited) in work)
         {
-            foreach (var (pos, edited) in work)
+            if (level.Level == 0)
+            {
                 if (edited) yield return pos;
-            yield break;
-        }
-        ulong layers = 0;
-        foreach (var (pos, _) in work) layers |= level.Bit(pos);
-        ulong under = FullLayersUnder(level, layers);
-        int n = 1 << level.Level;
-        for (int j = 0; j < n * n; j++)
-        {
-            int x = col.x * n + j % n, z = col.z * n + j / n;
-            for (ulong bits = _editedLayers.GetValueOrDefault((x, z)) & under; bits != 0; bits &= bits - 1)
-                yield return new ChunkPosition(x, _minY + BitOperations.TrailingZeroCount(bits), z);
+                continue;
+            }
+            int n = 1 << level.Level;
+            ulong under = FullLayersUnder(level.Level, pos.Y);
+            for (int j = 0; j < n * n; j++)
+            {
+                int x = pos.X * n + j % n, z = pos.Z * n + j / n;
+                for (ulong bits = _editedLayers.GetValueOrDefault((x, z)) & under; bits != 0; bits &= bits - 1)
+                    yield return new ChunkPosition(x, _minY + BitOperations.TrailingZeroCount(bits), z);
+            }
         }
     }
 
-    /// <summary>The full layers (bits from the lowest streamed one) under the level's <paramref name="layers"/>.</summary>
-    private ulong FullLayersUnder(TerrainLevel level, ulong layers)
+    /// <summary>The full layers (bits from the lowest streamed one) under layer <paramref name="y"/> of level
+    /// <paramref name="k"/>.</summary>
+    private ulong FullLayersUnder(int k, int y)
     {
         ulong full = 0;
-        for (; layers != 0; layers &= layers - 1)
-        {
-            int y = level.MinY + BitOperations.TrailingZeroCount(layers);
-            for (int fy = y << level.Level; fy < (y + 1) << level.Level; fy++)
-                if (fy >= _minY && fy <= _minY + 63) full |= 1UL << (fy - _minY);
-        }
+        for (int fy = y << k; fy < (y + 1) << k; fy++)
+            if (fy >= _minY && fy <= _minY + 63) full |= 1UL << (fy - _minY);
         return full;
     }
 
-    /// <summary>Makes a coarse column's missing chunks (<paramref name="layers"/>) on a worker: each full column under
-    /// it a full column at a time, bottom to top (the generator profiles a column once for all its chunks), only the
-    /// layers under those chunks, each full chunk shrunk into the level-1 chunk over it as it's made; then each level
-    /// shrunk into the next. A chunk that comes out air is reported as such.</summary>
-    private void DispatchCoarseColumn(TerrainLevel level, (int x, int z) col, ulong layers)
+    /// <summary>Makes coarse chunk <paramref name="pos"/> of level <paramref name="k"/> on a worker: each full column
+    /// under it, only the layers under it, each full chunk shrunk into the level-1 chunk over it as it's made; then each
+    /// level shrunk into the next. Null if it comes out air.</summary>
+    private ChunkData? MakeCoarse(int k, ChunkPosition pos)
     {
-        _levelJobs++;
-        int n = 1 << level.Level, steps = level.Level, minY = _minY;
-        ulong under = FullLayersUnder(level, layers);
-        // What the job needs of the main thread's state, captured now: each full column's builds and edits.
-        var built = new ulong[n * n];
-        var editedBits = new ulong[n * n];
-        for (int j = 0; j < n * n; j++)
+        int n = 1 << k;
+        ulong under = FullLayersUnder(k, pos.Y);
+        var coarse = new Dictionary<ChunkPosition, ChunkData>();
+        try
         {
-            var key = (col.x * n + j % n, col.z * n + j / n);
-            built[j] = _built.GetValueOrDefault(key);
-            editedBits[j] = _editedLayers.GetValueOrDefault(key);
+            for (int j = 0; j < n * n; j++)
+            {
+                int x = pos.X * n + j % n, z = pos.Z * n + j / n;
+                ulong edited = _editedLayers.GetValueOrDefault((x, z));
+                ulong bits = (_generator.Value!.ColumnLayers(x, z, _minY) | _built.GetValueOrDefault((x, z)) | edited) & under;
+                for (; bits != 0; bits &= bits - 1)
+                {
+                    int layer = BitOperations.TrailingZeroCount(bits);
+                    var at = new ChunkPosition(x, _minY + layer, z);
+                    var full = new ChunkData();
+                    if (!((edited >> layer & 1) != 0 && _chunkStore.TryLoad(at, full)))
+                        _generator.Value!.Generate(full, at);
+                    if (full.HasAnyNonAir()) CoarseTerrain.ShrinkInto(coarse, at, full, majority: true, plants: true);
+                    full.Release();
+                }
+            }
+            for (int step = 2; step <= k; step++)
+            {
+                var finer = coarse;
+                coarse = new Dictionary<ChunkPosition, ChunkData>();
+                foreach (var (p, chunk) in finer)
+                {
+                    if (chunk.HasAnyNonAir()) CoarseTerrain.ShrinkInto(coarse, p, chunk, majority: true, plants: true);
+                    chunk.Release();
+                }
+            }
+            if (!coarse.Remove(pos, out var made)) return null;
+            made.Compact();
+            if (made.HasAnyNonAir()) return made;
+            made.Release();
+            return null;
         }
-        BackgroundWork.Queue(() =>
+        catch (Exception e)
         {
-            var made = new List<(ChunkPosition, ChunkData?, ChunkPreparation?)>();
-            try
-            {
-                var coarse = new Dictionary<ChunkPosition, ChunkData>();
-                for (int j = 0; j < n * n; j++)
-                {
-                    int x = col.x * n + j % n, z = col.z * n + j / n;
-                    ulong bits = (_generator.Value!.ColumnLayers(x, z, minY) | built[j] | editedBits[j]) & under;
-                    for (; bits != 0; bits &= bits - 1)
-                    {
-                        int layer = BitOperations.TrailingZeroCount(bits);
-                        var pos = new ChunkPosition(x, minY + layer, z);
-                        var full = new ChunkData();
-                        if (!((editedBits[j] >> layer & 1) != 0 && _chunkStore.TryLoad(pos, full)))
-                            _generator.Value!.Generate(full, pos);
-                        if (full.HasAnyNonAir()) CoarseTerrain.ShrinkInto(coarse, pos, full, majority: true, plants: true);
-                        full.Release();
-                    }
-                }
-                for (int step = 2; step <= steps; step++)
-                {
-                    var finer = coarse;
-                    coarse = new Dictionary<ChunkPosition, ChunkData>();
-                    foreach (var (pos, chunk) in finer)
-                    {
-                        if (chunk.HasAnyNonAir()) CoarseTerrain.ShrinkInto(coarse, pos, chunk, majority: true, plants: true);
-                        chunk.Release();
-                    }
-                }
-                for (ulong bits = layers; bits != 0; bits &= bits - 1)
-                {
-                    var pos = new ChunkPosition(col.x, level.MinY + BitOperations.TrailingZeroCount(bits), col.z);
-                    if (coarse.Remove(pos, out var chunk))
-                    {
-                        chunk.Compact();
-                        if (chunk.HasAnyNonAir())
-                        {
-                            chunk.IsDirty = false;
-                            made.Add((pos, chunk, _preparer?.Prepare(chunk)));
-                            continue;
-                        }
-                        chunk.Release();
-                    }
-                    made.Add((pos, null, null));
-                }
-                foreach (var (_, chunk) in coarse) chunk.Release();
-            }
-            catch (Exception e)
-            {
-                Console.WriteLine($"[load] level {level.Level} column {col} failed: {e}");
-                foreach (var (_, data, _) in made) data?.Release();
-                made.Clear();
-            }
-            _results.Enqueue((level, col, made));
-        });
+            Console.WriteLine($"[load] level {k} chunk {pos} failed: {e}");
+            return null;
+        }
+        finally
+        {
+            foreach (var (_, chunk) in coarse) chunk.Release();
+        }
     }
 
     /// <summary>Whether a coarse chunk's blocks can go once it's meshed and uploaded. A chunk all one block, or of
@@ -323,10 +302,10 @@ public sealed partial class ChunkLoadSystem
     internal void DrawLevelsUi()
     {
         ImGui.Separator();
-        ImGui.Text($"Full detail to {FullDetailRadius:F0} blocks; coarse level jobs in flight: {_levelJobs}");
+        ImGui.Text($"Full detail to {FullDetailRadius:F0} blocks");
         foreach (var level in _levels.Skip(1))
             ImGui.Text($"Level {level.Level} (x{1 << level.Level}) to {level.Radius:F0} blocks: {level.Columns.Count} columns known, " +
-                       $"{level.Queue.Count - level.QueueHead} queued, {level.InFlight.Count} in flight, " +
+                       $"{level.Queue.Count - level.QueueHead} queued, {level.InFlightChunks} chunks being made, " +
                        $"{level.Volume.LoadedCount:N0} chunks ({level.Dropped:N0} with blocks dropped)");
     }
 }
