@@ -300,7 +300,7 @@ var<private> waterShare: f32;
 // The shared voxel storage (see GridStore): occupancy pool, chunk table ((occupancy slot or code, chunk tag), then
 // ray-only data), brick table (light slot per 8³ brick), light pool and grid descriptors. Only a slot's display half
 // is read here: one u16 per voxel, two per word (see LightCodecWgsl), sun visibility (0-3) in bits 14-15.
-" + GridStore.LookupWgsl + QuadLightmap.SmoothLightWgsl + @"
+" + GridStore.LookupWgsl + QuadLightmap.SmoothLightWgsl + ChunkQuad.Wgsl + @"
 fn ambientSky() -> f32 { return camera.lightParams.z; }
 @group(2) @binding(0) var<storage, read> occPool: array<u32>;
 @group(2) @binding(1) var<storage, read> chunkTable: array<vec4<i32>>;
@@ -392,8 +392,8 @@ fn chunkVertex(d: ChunkDraw, quad: vec2<u32>, corner: u32) -> VSOut {
     let a = quad.x;
     let c = quad.y;
     let face = (a >> 18u) & 7u;
-    let w = ((a >> 29u) | (((c >> 24u) & 3u) << 3u)) + 1u;
-    let h = ((c >> 26u) & 31u) + 1u;
+    let w = quadW(quad);
+    let h = quadH(quad);
     let du = f32(w);
     let dv = f32(h);
     // The mesher winds +X, -Y and +Z the other way round (FaceDesc.Flip), and a diagonal's front.
@@ -401,7 +401,7 @@ fn chunkVertex(d: ChunkDraw, quad: vec2<u32>, corner: u32) -> VSOut {
     let flip = face == 0u || face == 3u || face == 4u || (face >= 6u && !back);
     let cu = select(select(0.0, du, corner >= 2u), select(0.0, du, corner == 1u || corner == 2u), flip);
     let cv = select(select(0.0, dv, corner == 1u || corner == 2u), select(0.0, dv, corner >= 2u), flip);
-    var position = vec3<f32>(f32(a & 63u), f32((a >> 6u) & 63u), f32((a >> 12u) & 63u));
+    var position = vec3<f32>(quadOrigin(quad));
     let s = select(1.0, -1.0, (face & 1u) == 1u);
     var normal = vec3<f32>(0.0);
     var uv2: vec2<f32>;
@@ -437,6 +437,11 @@ fn chunkVertex(d: ChunkDraw, quad: vec2<u32>, corner: u32) -> VSOut {
         uv2 = vec2<f32>(cu, -(position.y + cv));
         position += vec3<f32>(r.x, cv * tall / cellBlocks, r.y);
         normal.y = 1.0;
+    }
+    if (quadShaped(quad)) {
+        // Flowing water: its corners lowered under the cell's top (side faces' textures cropped, not squashed).
+        position.y -= quadDrop(quad, corner);
+        if (face < 2u || face >= 4u) { uv2.y = -position.y; }
     }
     let layerBits = (a >> 21u) & 255u;
     let layer = select(f32(layerBits), -1.0, layerBits == 255u);

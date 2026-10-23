@@ -1,4 +1,5 @@
 using ClearSkies.Engine.ECS;
+using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Voxels;
 using DefaultEcs;
 using Silk.NET.Maths;
@@ -7,7 +8,7 @@ using Xunit;
 namespace ClearSkies.Tests;
 
 /// <summary>Flowing water (<see cref="WaterFlow"/>, <see cref="WaterLevel"/>): how it falls, spreads, runs downhill,
-/// drains and makes sources.</summary>
+/// drains and makes sources; and how its lowered surface is meshed.</summary>
 public class WaterFlowTests
 {
     /// <summary>A volume with a stone floor at y = 0 from -20 to 20, and its water.</summary>
@@ -147,5 +148,80 @@ public class WaterFlowTests
         using var pool = new Pool();
         for (int x = -2; x <= 2; x++) pool.Set(x, 0, 0, BlockId.Water); // a trench of sources in the floor
         Assert.Equal(0, pool.Settle());
+    }
+
+    private static List<ChunkQuad> WaterQuads(ChunkData data)
+    {
+        var mesh = new GreedyMesher().Mesh(data, null, null, null, null, null, null);
+        var quads = new List<ChunkQuad>();
+        for (int q = 0; q < mesh.Translucent.Blocks.Count; q++)
+            quads.Add(ChunkQuad.Pack(mesh.Translucent.Vertices.GetRange(4 * q, 4).ToArray(), mesh.Translucent.Blocks[q]));
+        return quads;
+    }
+
+    [Fact]
+    public void Source_water_meshes_flat_as_it_always_has()
+    {
+        var data = new ChunkData();
+        for (int x = 4; x <= 6; x++) data.Set(x, 4, 4, BlockId.Water);
+        var quads = WaterQuads(data);
+        Assert.DoesNotContain(quads, q => q.IsShaped);
+        Assert.Equal(6, quads.Count); // the row merges into one quad a face
+    }
+
+    [Fact]
+    public void Flowing_water_slopes_down_from_its_source()
+    {
+        var data = new ChunkData();
+        data.Set(4, 4, 4, BlockId.Water);
+        data.Set(5, 4, 4, BlockId.Water, WaterLevel.Flowing(4));
+        var quads = WaterQuads(data);
+        // The flowing cell's top: its +X corners at its own height (half), its -X corners shared with the source,
+        // (8 + 4) / 2 = 6 eighths.
+        var top = Assert.Single(quads, q => q.IsShaped && q.Face == 2 && q.Corner(0).Position.X >= 5f);
+        for (int k = 0; k < 4; k++)
+        {
+            var p = top.Corner(k).Position;
+            Assert.Equal(p.X > 5.5f ? 4f + 4 / 8f : 4f + 6 / 8f, p.Y, 3);
+        }
+        // The source's top slopes down to meet it: its +X corners lowered, its -X ones not.
+        var sourceTop = Assert.Single(quads, q => q.IsShaped && q.Face == 2 && q.Corner(0).Position.X < 5f);
+        for (int k = 0; k < 4; k++)
+        {
+            var p = sourceTop.Corner(k).Position;
+            Assert.Equal(p.X > 4.5f ? 4f + 6 / 8f : 5f, p.Y, 3);
+        }
+        // Its +X side stands only as high as its corners.
+        var side = Assert.Single(quads, q => q.Face == 0);
+        Assert.True(side.IsShaped);
+        Assert.Equal(4f + 4 / 8f, Enumerable.Range(0, 4).Max(k => side.Corner(k).Position.Y), 3);
+    }
+
+    [Fact]
+    public void Water_with_water_over_it_is_full_height()
+    {
+        var data = new ChunkData();
+        data.Set(4, 4, 4, BlockId.Water, WaterLevel.Flowing(0, falling: true));
+        data.Set(4, 5, 4, BlockId.Water, WaterLevel.Flowing(0, falling: true));
+        data.Set(5, 4, 4, BlockId.Water, WaterLevel.Flowing(1));
+        Assert.DoesNotContain(WaterQuads(data), q => q.IsShaped && q.Corner(0).Position.Y < 5f && q.Face == 2 && q.Corner(0).Position.X < 5f);
+    }
+
+    [Fact]
+    public void A_shaped_quad_packs_its_cell_and_drops_at_the_far_edge_of_a_chunk()
+    {
+        var data = new ChunkData();
+        data.Set(31, 31, 31, BlockId.Water, WaterLevel.Flowing(7));
+        var quads = WaterQuads(data);
+        var top = Assert.Single(quads, q => q.Face == 2);
+        Assert.True(top.IsShaped);
+        for (int k = 0; k < 4; k++)
+        {
+            Assert.Equal(7, top.Drop(k));
+            Assert.Equal(31f + 1 / 8f, top.Corner(k).Position.Y, 3);
+        }
+        var px = Assert.Single(quads, q => q.Face == 0);
+        Assert.Equal(32f, px.Corner(0).Position.X);
+        Assert.Equal(4, px.LightCorners);
     }
 }
