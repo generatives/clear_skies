@@ -99,25 +99,37 @@ public sealed class ChunkPipelineSystem : ISystem, IDebugUiSystem
 
     public string DebugName => "Chunk Pipeline";
 
+    // The panel's counts, worked out a few times a second: each walks every chunk (and the stages' counts, each stage).
+    private readonly List<string> _lines = new();
+    private readonly System.Diagnostics.Stopwatch _linesAge = new();
+    private const double LinesEveryMs = 250;
+
     /// <summary>Each stage's chunks by state, each grid's chunks, and the chunk that's waited its turn longest.</summary>
     public void DrawDebugUi()
     {
-        ImGui.Text($"Chunks: {Pipeline.ChunkCount:N0}   Worker jobs running: {Pipeline.WorkerJobs} ({WorkerSlots} a worker, {Core.BackgroundWork.Workers} workers)" +
+        if (!_linesAge.IsRunning || _linesAge.Elapsed.TotalMilliseconds >= LinesEveryMs) CountLines();
+        foreach (var line in _lines) ImGui.Text(line);
+        ImGui.Separator();
+        _steps.Draw();
+    }
+
+    private void CountLines()
+    {
+        _linesAge.Restart();
+        _lines.Clear();
+        _lines.Add($"Chunks: {Pipeline.ChunkCount:N0}   Worker jobs running: {Pipeline.WorkerJobs} ({WorkerSlots} a worker, {Core.BackgroundWork.Workers} workers)" +
                    (Pipeline.AwaitingExternal > 0 ? $"   Waiting on outside work: {Pipeline.AwaitingExternal}" : ""));
         foreach (var stage in Pipeline.Stages)
         {
             var (waiting, ready, running, done) = Pipeline.Count(stage);
-            ImGui.Text($"{stage.Name}: {ready:N0} ready, {running:N0} running, {waiting:N0} waiting for inputs, {done:N0} done");
+            _lines.Add($"{stage.Name}: {ready:N0} ready, {running:N0} running, {waiting:N0} waiting for inputs, {done:N0} done");
         }
         var byGrid = Pipeline.CountByGrid();
         for (int k = 0; k < byGrid.Length; k++)
             if (byGrid[k].Chunks > 0)
-                ImGui.Text($"{Pipeline.Grid(k).Name}: {byGrid[k].Chunks:N0} chunks, {byGrid[k].Making:N0} being made");
-        if (Pipeline.LongestReady() is var (record, longest, seconds))
-            ImGui.Text($"Longest ready: {record.Grid.Name} {record.Key.Pos} {longest.Name}, {seconds:F1} s");
-        else ImGui.Text("Longest ready: none");
-
-        ImGui.Separator();
-        _steps.Draw();
+                _lines.Add($"{Pipeline.Grid(k).Name}: {byGrid[k].Chunks:N0} chunks, {byGrid[k].Making:N0} being made");
+        _lines.Add(Pipeline.LongestReady() is var (record, longest, seconds)
+            ? $"Longest ready: {record.Grid.Name} {record.Key.Pos} {longest.Name}, {seconds:F1} s"
+            : "Longest ready: none");
     }
 }
