@@ -35,6 +35,7 @@ public sealed class TerrainSwapSystem : ISystem
         public bool Baked;    // drawn lit from the store at least once
         public bool Covered;  // the finer level has it (see SetCovered)
         public bool WasReady; // its finer chunks were ready when last looked at, so they were drawn
+        public bool Waited = true; // it couldn't be shown yet when last looked at (see Waits)
         public int Waiting;   // frames spent settling
         public int Leaving;   // frames its finer chunks have been ready while it's drawn (0: they aren't)
         public float FadeAt = float.NegativeInfinity; // when it last swapped in (while drawn) or out
@@ -235,21 +236,31 @@ public sealed class TerrainSwapSystem : ISystem
 
     private static bool Uploaded(TerrainLevel level, ChunkPosition p) => EntityOf(level, p) is { } e && e.Has<ChunkUploadedFlag>();
 
-    /// <summary>Whether a coarse chunk can't be shown yet: it isn't meshed, or (with lighting) it has faces and has
-    /// never been lit from the store. Drawn meanwhile it would show as open air, bright where it should be shadowed.</summary>
+    /// <summary>Whether a coarse chunk can't be shown yet: it isn't meshed and shown (see <see cref="ShownAt"/>), or
+    /// (with lighting) it has faces and has never been lit from the store. Drawn meanwhile it would show as open air, bright where it should be shadowed.</summary>
     private bool Waits(TerrainLevel level, Swap c, ChunkPosition p)
     {
-        if (EntityOf(level, p) is not { } e || !e.Has<ChunkMeshedFlag>()) return true;
+        if (EntityOf(level, p) is not { } e || !e.Has<ChunkMeshedFlag>() || !e.Has<ShownAt>()) return true;
         return IsLit != null && !c.Baked && !c.Settled && e.Has<ChunkRenderData>() && !e.Get<ChunkRenderData>().IsEmpty;
     }
 
     /// <summary>Whether the level's chunk <paramref name="p"/> can stand in for it in a coarser level's swap: the level
-    /// has it (wanted, and loaded or air), and it's shown (see <see cref="ShownAt"/>).</summary>
+    /// has it (wanted, and loaded or air), and it's meshed (a coarse level's: shown, see <see cref="Waits"/>). The
+    /// coarse chunk is covered in the light store from then, so the finer chunks are lit by their own blocks.</summary>
     private bool Ready(TerrainLevel level, ChunkPosition p)
     {
         if (!_load.Has(level, p)) return false;
         if (EntityOf(level, p) is not { } e) return true; // air
-        return e.Has<ShownAt>() && !(SwapsOf(level).TryGetValue(p, out var c) && Waits(level, c, p));
+        return SwapsOf(level).TryGetValue(p, out var c) ? !Waits(level, c, p) : e.Has<ChunkMeshedFlag>();
+    }
+
+    /// <summary>Whether the eight finer chunks under coarse chunk <paramref name="p"/> are shown (air, or
+    /// <see cref="ShownAt"/>): drawn once it's gone.</summary>
+    private bool ChildrenShown(TerrainLevel level, ChunkPosition p)
+    {
+        for (int j = 0; j < 8; j++)
+            if (EntityOf(level.Finer!, Child(p, j)) is { } e && !e.Has<ShownAt>()) return false;
+        return true;
     }
 
     /// <summary>Whether the eight finer chunks under coarse chunk <paramref name="p"/> are ready to be seen.</summary>
@@ -373,10 +384,11 @@ public sealed class TerrainSwapSystem : ISystem
                 {
                     c.Settled = ++c.Waiting >= MinSwapFrames && CheckNow(p)
                                 && (c.Waiting > (c.Baked ? MaxSwapFrames : MaxFirstLightFrames) || ChunkLit(level, p));
-                    // One held back for its light swaps in from when it's first shown (the finer level is held till then).
-                    if (c.Settled && !c.Baked && c.Drawn && float.IsFinite(c.FadeAt)) c.FadeAt = _time;
                 }
                 bool waits = Waits(level, c, p);
+                // One held back swaps in over what's under it from when it's first shown (the finer level is held till then).
+                if (c.Waited && !waits && c.Drawn) c.FadeAt = _time;
+                c.Waited = waits;
                 // Terrain waiting to be shown is lit ahead of light changes on terrain already shown: this chunk while
                 // it's held back for its first light, with the chunks above and below it that
                 // its first light waits for too.
@@ -402,7 +414,7 @@ public sealed class TerrainSwapSystem : ISystem
                         _counts.ShowFirst += 8;
                         for (int j = 0; j < 8; j++) first2(FullDetail.Volume.Gpu, Child(p, j));
                     }
-                    if (++c.Leaving >= MinSwapFrames && CheckNow(p) && (c.Leaving > MaxSwapFrames || ChildrenLit(level, p)))
+                    if (++c.Leaving >= MinSwapFrames && CheckNow(p) && ChildrenShown(level, p) && (c.Leaving > MaxSwapFrames || ChildrenLit(level, p)))
                     {
                         c.Drawn = false;
                         c.Leaving = 0;
