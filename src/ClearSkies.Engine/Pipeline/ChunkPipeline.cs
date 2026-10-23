@@ -257,9 +257,12 @@ public sealed class ChunkPipeline
     {
         long start = Stopwatch.GetTimestamp();
         bool MainLeft() => Stopwatch.GetElapsedTime(start).TotalMilliseconds < budgets.MainMs;
+        if (FrameMs.Length != _stages.Count + 1) FrameMs = new double[_stages.Count + 1];
+        Array.Clear(FrameMs);
 
         while (MainLeft() && (_madeUrgent.TryDequeue(out var made) || _made.TryDequeue(out made)))
         {
+            using var timed = Timed(made.Stage);
             if (made.Worker >= 0) _inFlight[made.Worker]--;
             if (made.Made is Exception e) throw new InvalidOperationException($"{made.Stage} failed on {made.Record}", e);
             if (made.Record.Removed) { made.Stage.Release(made.Made); continue; }
@@ -331,17 +334,32 @@ public sealed class ChunkPipeline
         foreach (var (item, priority) in _skipped) _ready[(int)Executor.Frame].Enqueue(item, priority);
         _skipped.Clear();
 
-        // Dropping lets go of what a chunk made, which can let go of holds on others: dropped too, in turn.
-        while (_maybeDrop.Count > 0)
+        // Dropping lets go of what a chunk made, which can let go of holds on others: dropped too, in turn. Within the
+        // frame's time, but some each frame whatever, so they don't pile up while the stages take it all.
+        long dropping = Stopwatch.GetTimestamp();
+        for (int dropped = 0; ; dropped++)
         {
-            _dropping.AddRange(_maybeDrop);
+            foreach (var record in _maybeDrop) _dropping.Enqueue(record);
             _maybeDrop.Clear();
-            foreach (var record in _dropping) DropIfUnneeded(record);
-            _dropping.Clear();
+            if (_dropping.Count == 0 || dropped >= MinDropsPerFrame && !MainLeft()) break;
+            DropIfUnneeded(_dropping.Dequeue()); // wanted again meanwhile: kept
         }
+        FrameMs[^1] = Stopwatch.GetElapsedTime(dropping).TotalMilliseconds;
     }
 
-    private readonly List<PipelineChunk> _dropping = new();
+    /// <summary>Main-thread time (ms) the last <see cref="Update"/> spent on each stage, by id (taking its finished
+    /// work, starting it, asking it or running it), then on dropping chunks: so a long frame can be traced to a stage.</summary>
+    public double[] FrameMs { get; private set; } = Array.Empty<double>();
+
+    private StageTime Timed(Stage stage) => new(FrameMs, stage.Id, Stopwatch.GetTimestamp());
+
+    private readonly struct StageTime(double[] ms, int stage, long start) : IDisposable
+    {
+        public void Dispose() => ms[stage] += Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+    }
+
+    private readonly Queue<PipelineChunk> _dropping = new();
+    private const int MinDropsPerFrame = 64;
 
     /// <summary>How many chunks have the stage in each state, for the panel.</summary>
     public (int Waiting, int Ready, int Running, int Done) Count(Stage stage)
@@ -467,6 +485,7 @@ public sealed class ChunkPipeline
 
     private void StartWorker(PipelineChunk record, WorkerStage stage, int worker)
     {
+        using var timed = Timed(stage);
         var inputs = Gather(record, stage);
         inputs.Prepared = stage.Prepare(record);
         ref var slot = ref record.At(stage.Id);
@@ -488,6 +507,7 @@ public sealed class ChunkPipeline
     /// <summary>Runs a frame stage; false if it can't yet (it's left stale, to run again next frame).</summary>
     private bool RunFrame(PipelineChunk record, FrameStage stage)
     {
+        using var timed = Timed(stage);
         var result = stage.Run(record, Gather(record, stage));
         if (!result.Finished) { record.At(stage.Id).Set(SlotFlags.Queued, true); return false; }
         record.At(stage.Id).Set(SlotFlags.Stale, false);
@@ -498,6 +518,7 @@ public sealed class ChunkPipeline
     /// <summary>Asks an external stage; true once it answered done (and is finished).</summary>
     private bool Ask(PipelineChunk record, ExternalStage stage)
     {
+        using var timed = Timed(stage);
         var result = stage.Request(record);
         if (result.Finished) Finish(record, stage, result.Output, result.Change, result.Changed);
         return result.Finished;

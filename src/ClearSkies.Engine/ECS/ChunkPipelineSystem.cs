@@ -86,15 +86,21 @@ public sealed class ChunkPipelineSystem : ISystem, IDebugUiSystem
         if (e.Has<InPipeline>()) _maybeDrawn.Add(e.Get<InPipeline>().Key);
     }
 
-    private readonly StepTimer _steps = new("Taking finished work and running stages") { Owner = "Chunk Pipeline" };
+    private readonly StepTimer _steps = new("Wanting chunks drawn or not", "Taking finished work and running stages") { Owner = "Chunk Pipeline" };
+    private StepTimer? _byStage; // the same frame's time by stage, made once the stages are all there
 
     public void Update(float dt)
     {
         _steps.Start();
         foreach (var key in _maybeDrawn) Pipeline.WantFor(key, Purpose.Draw, Pipeline.EntryOf(key)?.Entity.Has<Rendered>() == true);
         _maybeDrawn.Clear();
-        Pipeline.Update(new FrameBudgets(WorkerSlots, MainMs));
         _steps.Lap(0);
+        Pipeline.Update(new FrameBudgets(WorkerSlots, MainMs));
+        _steps.Lap(1);
+        if (_byStage?.Count != Pipeline.FrameMs.Length)
+            _byStage = new StepTimer(Pipeline.Stages.Select(s => s.Name).Append("Dropping chunks").ToArray()) { Owner = "Chunk Pipeline stages" };
+        _byStage.Start();
+        for (int i = 0; i < Pipeline.FrameMs.Length; i++) _byStage.Add(i, Pipeline.FrameMs[i]);
     }
 
     public string DebugName => "Chunk Pipeline";
@@ -111,6 +117,7 @@ public sealed class ChunkPipelineSystem : ISystem, IDebugUiSystem
         foreach (var line in _lines) ImGui.Text(line);
         ImGui.Separator();
         _steps.Draw();
+        _byStage?.Draw("By stage (ms):");
     }
 
     private void CountLines()
