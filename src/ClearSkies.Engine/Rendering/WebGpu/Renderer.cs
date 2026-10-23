@@ -682,9 +682,12 @@ fn fs_chunk_transparent(in: VSOut, @builtin(front_facing) front: bool) -> @locat
 // so deep water looks the same colour from above as from inside it. The thinnest water is camera.water2.x opaque and
 // already camera.water2.y of the way to the fog's colour (the rest its lit texture, for the ripples), so the shallows
 // are the depths' colour, only clearer. (See WaterSettings.) The view's walk through the water (waterPath) counts up
-// to WATER_MAX_PATH blocks of water, over at most WATER_REACH blocks.
+// to WATER_MAX_PATH blocks of water, over at most WATER_REACH blocks and WATER_MAX_STEPS cells: far enough to catch a
+// lake seen through a block of water a good way off (the lake's own surface isn't drawn behind the nearer one). Air
+// costs a lookup a cell.
 const WATER_MAX_PATH: f32 = 16.0;
-const WATER_REACH: f32 = 32.0;
+const WATER_REACH: f32 = 128.0;
+const WATER_MAX_STEPS: i32 = 256;
 
 // How thick the water is at p (grid space), as a multiple of its clarity's: 1 give or take camera.water2.z, by smooth
 // noise camera.water2.w blocks across, so there are murkier and clearer stretches of water rather than one even body.
@@ -736,7 +739,7 @@ fn waterPath(p: vec3<f32>, start: vec3<i32>, rd: vec3<f32>) -> f32 {
     var t = 0.0;
     var path = 0.0;
     let origin = vec3<f32>(drawChunk * 32);
-    for (var i = 0; i < 64; i++) {
+    for (var i = 0; i < WATER_MAX_STEPS; i++) {
         let what = waterOrSolid(drawChunk * 32 + cell);
         if (what == 2) { break; }
         let tNext = min(tMax.x, min(tMax.y, tMax.z));
