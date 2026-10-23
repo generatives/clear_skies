@@ -55,7 +55,9 @@ public sealed class ChunkPipelineSystem : ISystem, IDebugUiSystem
     {
         if (!edit.Chunk.IsAlive || !edit.Chunk.Has<InPipeline>()) return;
         var key = edit.Chunk.Get<InPipeline>().Key;
-        if (Pipeline.Grid(key.Grid).Blocks is { } blocks) Pipeline.OutputChanged(key, blocks, new Change(edit.BorderFaces, edit.OpacityChanged));
+        var grid = Pipeline.Grid(key.Grid);
+        foreach (var stage in Pipeline.Stages)
+            if (stage is IBlocksStage && stage.AppliesTo(grid)) Pipeline.OutputChanged(key, stage, new Change(edit.BorderFaces, edit.OpacityChanged));
     }
 
     /// <summary>A chunk came into a ship's volume: wanted, in the ship's grid (made with its first chunk).</summary>
@@ -63,7 +65,7 @@ public sealed class ChunkPipelineSystem : ISystem, IDebugUiSystem
     {
         var volume = chunk.Entry.Volume;
         if (!volume.Root.Has<DynamicGrid>()) return;
-        var key = Pipeline.GridFor(volume, $"ship {volume.Root}", ShipBlocks).Key(chunk.Entry.Position);
+        var key = Pipeline.GridFor(volume, $"ship {volume.Root}").Key(chunk.Entry.Position);
         e.Set(new InPipeline { Key = key });
         Pipeline.Want(key, true);
         Pipeline.Invalidate(key, ShipBlocks); // one that left and came back has new blocks
@@ -73,7 +75,7 @@ public sealed class ChunkPipelineSystem : ISystem, IDebugUiSystem
     private void Disposed(in Entity e)
     {
         if (e.Has<ChunkGrid>() && Pipeline.GridOf(e.Get<ChunkGrid>().Volume) is { } grid) Pipeline.RemoveGrid(grid);
-        else if (e.Has<InPipeline>() && Pipeline.Grid(e.Get<InPipeline>().Key.Grid).Blocks == ShipBlocks) Pipeline.Want(e.Get<InPipeline>().Key, false);
+        else if (e.Has<InPipeline>() && ShipBlocks.AppliesTo(Pipeline.Grid(e.Get<InPipeline>().Key.Grid))) Pipeline.Want(e.Get<InPipeline>().Key, false);
     }
 
     private readonly StepTimer _steps = new("Taking finished work and running stages") { Owner = "Chunk Pipeline" };

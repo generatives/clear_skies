@@ -80,12 +80,11 @@ public sealed class ChunkPipeline
     public IEnumerable<PipelineChunk> Records => _records.Values;
 
     /// <summary>Adds a grid, at any time.</summary>
-    public PipelineGrid AddGrid(string name, PipelineGrid? finer = null) => Add(new PipelineGrid(_grids.Count, name, finer, null, null));
+    public PipelineGrid AddGrid(string name, PipelineGrid? finer = null) => Add(new PipelineGrid(_grids.Count, name, finer, null));
 
-    /// <summary>The grid of a volume whose chunks' blocks <paramref name="blocks"/> gives (a ship's, taken from the
-    /// volume): the one it has, or a new one.</summary>
-    public PipelineGrid GridFor(ChunkVolume volume, string name, Stage blocks)
-        => _byVolume.TryGetValue(volume, out var grid) ? grid : _byVolume[volume] = Add(new PipelineGrid(_grids.Count, name, null, volume, blocks));
+    /// <summary>The grid of a volume (a ship's): the one it has, or a new one.</summary>
+    public PipelineGrid GridFor(ChunkVolume volume, string name)
+        => _byVolume.TryGetValue(volume, out var grid) ? grid : _byVolume[volume] = Add(new PipelineGrid(_grids.Count, name, null, volume));
 
     /// <summary>The grid <see cref="GridFor"/> gave the volume, if it's still here.</summary>
     public PipelineGrid? GridOf(ChunkVolume volume) => _byVolume.GetValueOrDefault(volume);
