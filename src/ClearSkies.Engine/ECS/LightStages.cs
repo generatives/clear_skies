@@ -24,10 +24,18 @@ public static class LightStages
     {
         var pipeline = system.Pipeline;
         var store = pipeline.Add(new LightStoreStage(pipeline, residency));
-        pipeline.Add(new CoverStage(pipeline, store, terrain, residency.SetCovered));
         var firstLight = pipeline.Add(new FirstLightStage(pipeline, light, store));
         var firstBake = pipeline.Add(new FirstBakeStage(pipeline, renderer, upload, firstLight));
-        pipeline.Add(new ShownStage(pipeline, time, firstBake, terrain) { IsLit = light.IsLit, ShowFirst = light.ShowFirst });
+        var shown = pipeline.Add(new ShownStage(pipeline, time, firstBake, terrain) { IsLit = light.IsLit, ShowFirst = light.ShowFirst });
+        var cover = pipeline.Add(new CoverStage(pipeline, store, shown, terrain, residency.SetCovered));
+        // Known air under a coarse chunk is never in the pipeline to say it came: its swap and cover look again.
+        terrain.LearnedAir += key =>
+        {
+            if (pipeline.Grid(key.Grid).Coarser is not { } coarser) return;
+            var over = coarser.Key(Relation.Over(key.Pos));
+            pipeline.Invalidate(over, shown);
+            pipeline.Invalidate(over, cover);
+        };
         pipeline.Add(new DropBlocksStage(pipeline, upload, store));
     }
 }

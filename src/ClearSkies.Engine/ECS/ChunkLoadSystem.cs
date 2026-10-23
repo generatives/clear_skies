@@ -477,12 +477,21 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         return best;
     }
 
+    /// <summary>A level's chunk the loader learned is air, as it first looked at its column: never in the pipeline, so
+    /// what waits on it there (a coarse chunk's swap with the eight under it, see ShownStage) is told.</summary>
+    internal event Action<Pipeline.ChunkKey>? LearnedAir;
+
     /// <summary>Chunks of the level's column (x, z) that may hold something: what the generator may fill, less what
     /// turned out to be air, plus builds. A coarse column may hold something anywhere until its job finds out.</summary>
     private ulong MaybeContent(TerrainLevel level, int x, int z)
     {
         if (!level.Columns.TryGetValue((x, z), out var col))
+        {
             level.Columns[(x, z)] = col = (level.Level == 0 ? _voxels.Generator.ColumnLayers(x, z, _minY) : level.AllLayers, 0UL);
+            if (LearnedAir != null && level.Coarser != null)
+                for (ulong air = ~col.Generated & level.AllLayers; air != 0; air &= air - 1)
+                    LearnedAir(level.Key(new ChunkPosition(x, level.MinY + BitOperations.TrailingZeroCount(air), z)));
+        }
         ulong maybe = col.Generated & ~col.Air;
         return level.Level == 0 ? maybe | _edits.BuiltLayers(x, z) : maybe;
     }

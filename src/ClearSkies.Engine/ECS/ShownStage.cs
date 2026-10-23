@@ -105,6 +105,9 @@ public sealed class ShownStage(ChunkPipeline pipeline, Time time, Stage ready, C
         return StageResult.Done(showing);
     }
 
+    /// <summary>Whether a coarse chunk is drawn over the eight under it (rather than them); false before it's shown.</summary>
+    internal bool DrawnOver(PipelineChunk record) => record.Output<Showing>(this) is { Over: true };
+
     public override void Release(object output)
     {
         var showing = (Showing)output;
@@ -190,9 +193,11 @@ public sealed class ShownStage(ChunkPipeline pipeline, Time time, Stage ready, C
 /// <summary>Covers a coarse chunk in the light store (<see cref="GridStore.SetCovered"/>) while the finer level has the
 /// eight under it there (or air): the finer grid's rays pass through it, so each level is lit by its own blocks. From
 /// before they're lit, so their first light is their own blocks', and while they're held, drawn as it swaps in over them
-/// (see <see cref="ShownStage"/>). Its output is the chunk while it's covered; let go of, it's uncovered.</summary>
-internal sealed class CoverStage(ChunkPipeline pipeline, Stage store, ChunkLoadSystem? terrain, Action<ChunkEntry, bool>? setCovered)
-    : FrameStage
+/// (see <see cref="ShownStage"/>). One not drawn over them is covered from when the finer level wants all eight, so the
+/// first of them in aren't lit in its shade (it isn't drawn till they're gone, see ShownStage). Its output is the chunk
+/// while it's covered; let go of, it's uncovered.</summary>
+internal sealed class CoverStage(ChunkPipeline pipeline, Stage store, ShownStage shown, ChunkLoadSystem? terrain,
+                                 Action<ChunkEntry, bool>? setCovered) : FrameStage
 {
     public override string Name => "Cover";
     public override Purpose Serves => Purpose.Draw;
@@ -202,18 +207,22 @@ internal sealed class CoverStage(ChunkPipeline pipeline, Stage store, ChunkLoadS
     {
         new(store, Relation.Self),
         new(store, Relation.Children, AcceptsMissing: true),
+        new(shown, Relation.Self, AcceptsMissing: true),
     };
 
     public override StageResult Run(PipelineChunk record, StageInputs inputs)
     {
         if (pipeline.EntryOf(record.Key) is not { } entry) return StageResult.Done(); // air
         var finer = record.Grid.Finer!;
+        bool stored = true, wanted = true;
         for (int j = 0; j < 8; j++)
         {
             var key = finer.Key(Relation.Child(record.Key.Pos, j));
-            if (pipeline.Get(key) is { Wanted: true } child ? !child.EverDone(store) : terrain?.Has(key) != true)
-                return StageResult.Done();
+            var child = pipeline.Get(key);
+            stored &= child is { Wanted: true } ? child.EverDone(store) : terrain?.Has(key) == true;
+            wanted &= child is { Asked: true } || child == null && terrain?.InRange(key) == true;
         }
+        if (!stored && !(wanted && !shown.DrawnOver(record))) return StageResult.Done();
         setCovered?.Invoke(entry, true); // again if it went into the store again
         return StageResult.Done(entry);
     }
