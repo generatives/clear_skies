@@ -419,7 +419,12 @@ public class CrewTests
         // Off onto terrain: the host has its colliders around them, so they stand on it there too.
         for (int x = 10; x < 14; x++) for (int z = 10; z < 14; z++) game.Host.WorldVolume.SetBlock(x, 40, z, BlockId.Stone);
         for (int x = 10; x < 14; x++) for (int z = 10; z < 14; z++) client.WorldVolume.SetBlock(x, 40, z, BlockId.Stone);
-        game.Tick(30); // the stone's colliders, built on each machine
+        // The stone's colliders, built on each machine's worker threads: on a busy machine they can take longer than
+        // any fixed tick count, and then the host's player falls through, or the client's lands late.
+        var stone = new Vector3(12, 40, 12);
+        Assert.True(game.TickUntil(() => game.Host.PhysicsBodies.CollidersReady(game.Host.WorldVolume, stone, 4f)
+                                         && client.PhysicsBodies.CollidersReady(client.WorldVolume, stone, 4f), 30, minSeconds: 10),
+                    "the stone's colliders were never built");
         PlaceCrew(game, crew, new Vector3(11.5f, 42f, 11.5f));
         game.Tick(90);
         var there = simulated.Get<CharacterControllerComponent>().Character.Position;
