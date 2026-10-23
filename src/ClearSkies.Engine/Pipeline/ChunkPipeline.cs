@@ -14,16 +14,15 @@ public readonly record struct FrameBudgets(int WorkerSlots, double MainMs);
 /// own copy of "is this ready".
 /// </summary>
 /// <remarks>
-/// A chunk is <see cref="Want">wanted</see> (all its stages run) or only needed by another chunk's stage that reads it
-/// (then only the stages that stage reads, and what they read, run). It's dropped once neither holds. A stage's last
-/// output stays in use while it runs again, so a chunk shown stays shown through its reruns.
+/// Only <see cref="Want">wanted</see> chunks are in it, and every stage they have runs. A stage reading another chunk
+/// waits until that one is wanted and done; it never loads it (a coarse chunk makes its own voxels, at its own
+/// resolution). A stage's last output stays in use while it runs again, so a chunk shown stays shown through its reruns.
 /// </remarks>
 public sealed class ChunkPipeline
 {
     private readonly List<PipelineGrid> _grids = new();
     private readonly List<Stage> _stages = new();
     private readonly Dictionary<ChunkKey, PipelineChunk> _records = new();
-    // Per stage T: the stages reading it, on which grid, through which input (to run again when T's output changes).
     // Worked out once, from the grids and stages, before the first chunk: per grid, each stage's slot in its chunks
     // (-1 where the grid doesn't have the stage) and the inputs it reads there; per stage T, the stages reading it, on
     // which grid, through which input (to run again when T's output changes).
@@ -96,15 +95,15 @@ public sealed class ChunkPipeline
 
     public PipelineChunk? Get(ChunkKey key) => _records.GetValueOrDefault(key);
 
-    /// <summary>Wants a chunk for itself (every stage it has runs), or no longer (it's dropped once nothing else needs it).</summary>
+    /// <summary>Wants a chunk (every stage it has runs), or no longer (it's dropped once no worker is making it).</summary>
     public void Want(ChunkKey key, bool wanted)
     {
         var record = wanted ? Ensure(key) : Get(key);
         if (record == null || record.Wanted == wanted) return;
         record.Wanted = wanted;
         for (int s = 0; s < _stages.Count; s++)
-            if (record.Has(s)) AddNeed(record, s, wanted ? 1 : -1);
-        // Inputs that accept a missing chunk only see wanted ones: to them it just came or went.
+            if (record.Has(s)) Check(record, s);
+        // Inputs that accept a missing chunk see it come or go.
         for (int s = 0; s < _stages.Count; s++)
             if (record.Has(s) && record.At(s).Version > 0) Propagate(record, _stages[s], Change.All, acceptsMissingOnly: true);
         if (!wanted) _maybeDrop.Add(record);
@@ -156,10 +155,9 @@ public sealed class ChunkPipeline
         while (!(workersFull && mainFull) && _ready.TryDequeue(out var item, out var priority))
         {
             var (record, stage) = item;
-            if (record.Removed) continue;
             ref var slot = ref record.At(stage.Id);
             slot.Set(SlotFlags.Queued, false);
-            if (slot.Is(SlotFlags.Running) || !slot.NeedsRun || !InputsThere(record, stage)) continue;
+            if (!record.Wanted || slot.Is(SlotFlags.Running) || !slot.Is(SlotFlags.Stale) || !InputsThere(record, stage)) continue;
             switch (stage)
             {
                 case WorkerStage worker when !workersFull:
@@ -217,44 +215,11 @@ public sealed class ChunkPipeline
         return record;
     }
 
-    /// <summary>Adds (or takes away) a reason for the stage to run on the chunk.</summary>
-    private void AddNeed(PipelineChunk record, int stage, int delta)
-    {
-        int neededBy = record.At(stage).NeededBy += delta;
-        KeepSourcesLoaded(record, stage);
-        Check(record, stage);
-        if (neededBy == 0) _maybeDrop.Add(record);
-    }
-
-    /// <summary>Keeps the stage's required sources loaded (adds to what needs them) while it needs to run or is running, and lets
-    /// them go once it's done. Relations pick the same sources every time, so letting go needs no list of them.</summary>
-    private void KeepSourcesLoaded(PipelineChunk record, int stage)
-    {
-        ref var slot = ref record.At(stage);
-        bool keep = slot.NeedsRun || slot.Is(SlotFlags.Running);
-        if (keep == slot.Is(SlotFlags.KeepingSourcesLoaded)) return;
-        slot.Set(SlotFlags.KeepingSourcesLoaded, keep);
-        AddNeedToSources(record, stage, keep ? 1 : -1);
-    }
-
-    private void AddNeedToSources(PipelineChunk record, int stage, int delta)
-    {
-        foreach (var input in InputsOf(_stages[stage], record.Key.Grid))
-        {
-            if (input.AcceptsMissing) continue;
-            foreach (var key in input.Of.Picked(this, record.Key))
-            {
-                var source = Ensure(key);
-                if (source.Has(input.Stage.Id)) AddNeed(source, input.Stage.Id, delta);
-            }
-        }
-    }
-
-    /// <summary>Queues the stage on the chunk if it needs to run and its inputs are there.</summary>
+    /// <summary>Queues the stage on the chunk if it's wanted, stale and its inputs are there.</summary>
     private void Check(PipelineChunk record, int stage)
     {
         ref var slot = ref record.At(stage);
-        if (record.Removed || slot.Is(SlotFlags.Queued | SlotFlags.Running) || !slot.NeedsRun
+        if (!record.Wanted || slot.Is(SlotFlags.Queued | SlotFlags.Running) || !slot.Is(SlotFlags.Stale)
             || !InputsThere(record, _stages[stage])) return;
         slot.Set(SlotFlags.Queued, true);
         _ready.Enqueue((record, _stages[stage]), (Priority?.Invoke(record.Key) ?? 0f, -stage));
@@ -266,7 +231,7 @@ public sealed class ChunkPipeline
         {
             if (input.AcceptsMissing) continue;
             foreach (var key in input.Of.Picked(this, record.Key))
-                if (Get(key) is not { } source || source.Has(input.Stage.Id) && source.At(input.Stage.Id).Version == 0) return false;
+                if (Get(key) is not { Wanted: true } source || source.Has(input.Stage.Id) && source.At(input.Stage.Id).Version == 0) return false;
         }
         return true;
     }
@@ -278,7 +243,7 @@ public sealed class ChunkPipeline
             foreach (var key in input.Of.Picked(this, record.Key))
             {
                 var source = Get(key);
-                bool seen = source != null && source.Has(input.Stage.Id) && (!input.AcceptsMissing || source.Wanted);
+                bool seen = source is { Wanted: true } && source.Has(input.Stage.Id);
                 read.Add(input.Stage, key, seen ? source!.At(input.Stage.Id).Output : null);
             }
         return read;
@@ -318,18 +283,17 @@ public sealed class ChunkPipeline
         slot.Output = output;
         slot.Version++;
         Propagate(record, stage, change, acceptsMissingOnly: false);
-        KeepSourcesLoaded(record, stage.Id);   // done: lets its sources go, unless it went stale meanwhile
-        Check(record, stage.Id);  // it did: runs again
+        Check(record, stage.Id);  // its inputs changed while it ran: runs again
         _maybeDrop.Add(record);
     }
 
     /// <summary>Marks what reads <paramref name="stage"/>'s output on the chunk, and cares about the change, to run again.</summary>
     private void Propagate(PipelineChunk record, Stage stage, Change change, bool acceptsMissingOnly)
     {
+        if (!record.Wanted && !acceptsMissingOnly) return; // on its way out: nothing reads it
         foreach (var (reader, grid, input) in _readersOf[stage.Id])
         {
             if (acceptsMissingOnly && !input.AcceptsMissing) continue;
-            if (input.AcceptsMissing && !acceptsMissingOnly && !record.Wanted) continue; // they don't see it
             foreach (var key in input.Of.Affected(this, record.Key, change))
                 if (key.Grid == grid && Get(key) is { } dependant)
                     MarkStale(dependant, reader.Id);
@@ -339,17 +303,15 @@ public sealed class ChunkPipeline
     private void MarkStale(PipelineChunk record, int stage)
     {
         record.At(stage).Set(SlotFlags.Stale, true);
-        KeepSourcesLoaded(record, stage);
         Check(record, stage);
     }
 
-    /// <summary>Drops a chunk nothing needs: not wanted, no stage elsewhere waiting on it, no worker making it.</summary>
+    /// <summary>Drops a chunk no longer wanted, once no worker is making anything for it.</summary>
     private void DropIfUnneeded(PipelineChunk record)
     {
         if (record.Removed || record.Wanted) return;
         foreach (var stage in _stages)
-            if (record.Has(stage.Id) && (record.At(stage.Id).NeededBy > 0
-                                         || record.At(stage.Id).Is(SlotFlags.Running) && stage is WorkerStage)) return;
+            if (stage is WorkerStage && record.Has(stage.Id) && record.At(stage.Id).Is(SlotFlags.Running)) return;
         record.Removed = true;
         _records.Remove(record.Key);
         foreach (var stage in _stages)
@@ -357,7 +319,6 @@ public sealed class ChunkPipeline
             if (!record.Has(stage.Id)) continue;
             ref var slot = ref record.At(stage.Id);
             _awaitingExternal.Remove((record, stage));
-            if (slot.Is(SlotFlags.KeepingSourcesLoaded)) { slot.Set(SlotFlags.KeepingSourcesLoaded, false); AddNeedToSources(record, stage.Id, -1); }
             if (slot.Output is { } output) { slot.Output = null; stage.Release(output); }
         }
         Dropped?.Invoke(record);

@@ -70,23 +70,25 @@ public class ChunkPipelineTests
     }
 
     [Fact]
-    public void A_coarse_chunk_loads_only_what_it_reads_of_its_children_and_lets_them_go()
+    public void A_stage_reading_other_chunks_waits_for_them_to_be_wanted_and_never_loads_them()
     {
         var pipeline = new ChunkPipeline(work => work());
         var fine = pipeline.AddGrid("full detail");
         var coarse = pipeline.AddGrid("level 1", finer: fine);
         var gen = pipeline.Add(new Gen(g => g.Finer == null));
         var shrink = pipeline.Add(new Reader("shrink", _ => new[] { new Input(gen, Relation.Children) }, g => g.Finer != null));
-        var mesh = pipeline.Add(new Reader("mesh", _ => new[] { new Input(gen, Relation.Self) }, g => g.Finer == null));
+        var parent = coarse.Key(P(0));
 
-        pipeline.Want(coarse.Key(P(0)), true);
-        for (int i = 0; i < 4; i++) pipeline.Update(Plenty);
+        pipeline.Want(parent, true);
+        for (int i = 0; i < 3; i++) pipeline.Update(Plenty);
+        Assert.Equal(0, gen.Runs);
+        Assert.Equal(0, shrink.Runs);
+        Assert.Equal(1, pipeline.ChunkCount);
 
-        Assert.Equal(8, gen.Runs);   // the 8 children, generated for the shrink
-        Assert.Equal(0, mesh.Runs);  // but not meshed: nothing wants them for themselves
+        for (int j = 0; j < 8; j++) pipeline.Want(fine.Key(Relation.Child(P(0), j)), true);
+        for (int i = 0; i < 3; i++) pipeline.Update(Plenty);
+        Assert.Equal(8, gen.Runs);
         Assert.Equal(1, shrink.Runs);
-        Assert.Equal(1, pipeline.ChunkCount); // and dropped once the shrink was done
-        Assert.Equal(8, gen.Released.Count);
     }
 
     [Fact]

@@ -1,10 +1,9 @@
 namespace ClearSkies.Engine.Pipeline;
 
 /// <summary>One input of a stage: stage <paramref name="Stage"/>'s output on the chunks <paramref name="Of"/> picks
-/// around the one being made. The stage runs only once every such output is there, and they're kept loaded for it
-/// (a coarse chunk's 8 finer chunks), unless <paramref name="AcceptsMissing"/>: then it runs without the ones that
-/// aren't (reading null) and runs again when they come or change. Those are only read from chunks wanted on their
-/// own (see <see cref="ChunkPipeline.Want"/>), and never kept loaded for it.</summary>
+/// around the one being made. Only wanted chunks are read (see <see cref="ChunkPipeline.Want"/>), and none is loaded
+/// for it. The stage runs only once every such output is there, unless <paramref name="AcceptsMissing"/>: then it runs
+/// without the ones that aren't (reading null) and runs again when they come, go or change.</summary>
 public readonly record struct Input(Stage Stage, Relation Of, bool AcceptsMissing = false);
 
 /// <summary>Where a stage's work is done.</summary>

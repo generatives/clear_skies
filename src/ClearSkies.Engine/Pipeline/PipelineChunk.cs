@@ -3,8 +3,7 @@ namespace ClearSkies.Engine.Pipeline;
 /// <summary>Where a stage is on one chunk.</summary>
 public enum SlotState
 {
-    /// <summary>Not run since its inputs last changed (or ever), and not ready: an input isn't there, or nothing
-    /// needs it.</summary>
+    /// <summary>Not run since its inputs last changed (or ever), and not ready: an input isn't there.</summary>
     Waiting,
     /// <summary>Its inputs are there; waiting its turn.</summary>
     Ready,
@@ -14,7 +13,7 @@ public enum SlotState
 }
 
 /// <summary>Everything the pipeline knows about one chunk: whether it's wanted, and each of its stages' progress and
-/// output. It lives from when the chunk is first wanted (or needed by another's stage) until nothing needs it.</summary>
+/// output. It lives from when the chunk is wanted until it isn't (and no worker is making anything for it).</summary>
 public sealed class PipelineChunk
 {
     internal PipelineChunk(ChunkKey key, PipelineGrid grid, int[] slotOf, int slots)
@@ -28,7 +27,7 @@ public sealed class PipelineChunk
 
     public ChunkKey Key { get; }
     public PipelineGrid Grid { get; }
-    /// <summary>Wanted for itself (in range), not only as another chunk's input: every stage it has runs.</summary>
+    /// <summary>In range: every stage it has runs. Once not, it's only waiting to be dropped, and nothing reads it.</summary>
     public bool Wanted { get; internal set; }
     /// <summary>Dropped by the pipeline: nothing needs it any more.</summary>
     public bool Removed { get; internal set; }
@@ -65,8 +64,6 @@ internal enum SlotFlags : byte
     Stale = 1,
     Queued = 2,
     Running = 4,
-    /// <summary>It's keeping its required sources loaded (adding itself to what needs them) while it needs to run.</summary>
-    KeepingSourcesLoaded = 8,
 }
 
 /// <summary>One stage's progress on one chunk. Only the pipeline writes it.</summary>
@@ -75,12 +72,8 @@ internal struct Slot
     public object? Output;
     /// <summary>Outputs taken so far; 0 until the first.</summary>
     public int Version;
-    /// <summary>What needs it run: 1 if its chunk is wanted, plus each stage elsewhere waiting on it.</summary>
-    public int NeededBy;
     public SlotFlags Flags;
 
     public readonly bool Is(SlotFlags flag) => (Flags & flag) != 0;
     public void Set(SlotFlags flag, bool on) => Flags = on ? Flags | flag : Flags & ~flag;
-    /// <summary>Something needs it run on inputs it hasn't run on yet.</summary>
-    public readonly bool NeedsRun => NeededBy > 0 && Is(SlotFlags.Stale);
 }
