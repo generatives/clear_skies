@@ -19,13 +19,12 @@ public struct InPipeline
 /// coarser so <see cref="Relation.Children"/> and <see cref="Relation.Parent"/> can reach them, or a ship's.</summary>
 public sealed class PipelineGrid
 {
-    internal PipelineGrid(int id, string name, PipelineGrid? finer, ChunkVolume? volume, Stage? blocks)
+    internal PipelineGrid(int id, string name, PipelineGrid? finer, ChunkVolume? volume)
     {
         Id = id;
         Name = name;
         Finer = finer;
         Volume = volume;
-        Blocks = blocks;
         Level = finer == null ? 0 : finer.Level + 1;
         if (finer != null) finer.Coarser = this;
     }
@@ -41,10 +40,6 @@ public sealed class PipelineGrid
 
     /// <summary>The volume its chunks go in, once there is one.</summary>
     public ChunkVolume? Volume { get; set; }
-
-    /// <summary>The stage that gives its chunks their blocks (what an edit changes, and what stages after it read):
-    /// generated for the terrain, taken from the volume for a ship. Set before its first chunk.</summary>
-    public Stage? Blocks { get; set; }
 
     /// <summary>Taken out of the pipeline (see <see cref="ChunkPipeline.RemoveGrid"/>).</summary>
     public bool Removed { get; internal set; }
