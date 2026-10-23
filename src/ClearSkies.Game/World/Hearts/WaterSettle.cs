@@ -19,6 +19,9 @@ internal sealed class WaterSettle
     /// hollow it falls into and pools in; further, a drop it ends at.</summary>
     private const int RiverGap = 8, RiverFall = 24;
 
+    /// <summary>How far (blocks) a river's water may stand over the water beside it: more, and it ends there.</summary>
+    private const int FallMost = 4;
+
     /// <summary>How far (blocks) from planned water it spreads into gaps lower than it.</summary>
     private const int FillReach = 2;
 
@@ -164,6 +167,10 @@ internal sealed class WaterSettle
                         {
                             if (kind[c] == Planned && kind[n] == Planned && Math.Abs(plan[n] - plan[c]) <= 1 && !raised[c] && !raised[n])
                                 w = Math.Min(w, level[n] + Math.Max(0, plan[c] - plan[n]));
+                            // (A river standing more than FallMost over the water beside it would be a wall of water:
+                            // it ends there, as over a drop.)
+                            // (And water spread into a gap drains into lower water beside it.)
+                            if ((depth[c] > 0 && level[c] - level[n] > FallMost) || (kind[c] == Filled && level[n] < level[c])) { ends = true; break; }
                             continue;
                         }
                         int g = ground[n];
