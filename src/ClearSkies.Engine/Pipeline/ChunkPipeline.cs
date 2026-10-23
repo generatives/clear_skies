@@ -15,7 +15,8 @@ public readonly record struct FrameBudgets(int WorkerSlots, double MainMs);
 /// own copy of "is this ready".
 /// </summary>
 /// <remarks>
-/// Only <see cref="Want">wanted</see> chunks are in it, and every stage they have runs. A stage reading another chunk
+/// Only <see cref="Want">wanted</see> chunks are in it, and every stage they need runs: those for any chunk, and those
+/// serving what it's wanted for (<see cref="WantFor"/>). A stage reading another chunk
 /// waits until that one is wanted and done; it never loads it (a coarse chunk makes its own voxels, at its own
 /// resolution). A stage's last output stays in use while it runs again, so a chunk shown stays shown through its reruns.
 /// </remarks>
@@ -145,15 +146,16 @@ public sealed class ChunkPipeline
 
     public PipelineChunk? Get(ChunkKey key) => _records.GetValueOrDefault(key);
 
-    /// <summary>Wanted, and every stage it has done on what it reads now.</summary>
-    public bool Settled(ChunkKey key) => Get(key) is { Wanted: true } record && _stages.All(s => record.State(s) == SlotState.Done);
+    /// <summary>Wanted, and every stage it needs done on what it reads now.</summary>
+    public bool Settled(ChunkKey key)
+        => Get(key) is { Wanted: true } record && _stages.All(s => !record.Needs(s) || record.State(s) == SlotState.Done);
 
     /// <summary>The chunk in its grid's volume that the pipeline made (or took) for <paramref name="key"/>, if it's there.</summary>
     internal ChunkEntry? EntryOf(ChunkKey key)
         => key.Grid < _grids.Count && _grids[key.Grid].Volume?.GetEntry(key.Pos) is { } entry
            && entry.Entity.Has<InPipeline>() && entry.Entity.Get<InPipeline>().Key == key ? entry : null;
 
-    /// <summary>Wants a chunk (every stage it has runs), or no longer (it's dropped once no worker is making it).</summary>
+    /// <summary>Wants a chunk (every stage it needs runs, see <see cref="WantFor"/>), or no longer (it's dropped once no worker is making it).</summary>
     public void Want(ChunkKey key, bool wanted)
     {
         var record = wanted ? Ensure(key) : Get(key);
@@ -165,6 +167,36 @@ public sealed class ChunkPipeline
         for (int s = 0; s < _stages.Count; s++)
             if (record.Has(s) && record.At(s).Version > 0) Propagate(record, _stages[s], Change.All, acceptsMissingOnly: true);
         if (!wanted) _maybeDrop.Add(record);
+    }
+
+    /// <summary>Wants a wanted chunk for <paramref name="purpose"/> too, or no longer: the stages serving it run on the
+    /// chunk while it is, and let go of what they made once it isn't (what reads that, on other chunks, sees it missing).
+    /// Nothing happens for a chunk not in the pipeline.</summary>
+    public void WantFor(ChunkKey key, Purpose purpose, bool wanted)
+    {
+        if (Get(key) is not { } record) return;
+        var before = record.Purposes;
+        record.Purposes = wanted ? before | purpose : before & ~purpose;
+        var changed = before ^ record.Purposes;
+        if (changed == Purpose.None) return;
+        foreach (var stage in _stages)
+        {
+            if (!record.Has(stage.Id) || (stage.Serves & changed) == Purpose.None) continue;
+            if (record.Needs(stage)) Check(record, stage.Id);
+            else Unmake(record, stage);
+        }
+    }
+
+    /// <summary>Lets go of what a stage made on a chunk that no longer needs it: it's as if never run (one running
+    /// finishes, and what it makes is let go of unless the chunk needs it again by then).</summary>
+    private void Unmake(PipelineChunk record, Stage stage)
+    {
+        ref var slot = ref record.At(stage.Id);
+        if (slot.Output is { } output) { slot.Output = null; stage.Release(output); }
+        bool made = slot.Version > 0;
+        slot.Version = 0;
+        slot.Flags = SlotFlags.Stale | (slot.Flags & SlotFlags.Running);
+        if (made) Propagate(record, stage, Change.All, acceptsMissingOnly: true);
     }
 
     /// <summary>The stage's output on the chunk changed in place (an edit wrote new blocks into its voxels): what reads
@@ -209,6 +241,12 @@ public sealed class ChunkPipeline
             if (made.Worker >= 0) _inFlight[made.Worker]--;
             if (made.Made is Exception e) throw new InvalidOperationException($"{made.Stage} failed on {made.Record}", e);
             if (made.Record.Removed) { made.Stage.Release(made.Made); continue; }
+            if (!made.Record.Needs(made.Stage)) // no longer wanted for what it serves
+            {
+                made.Record.At(made.Stage.Id).Set(SlotFlags.Running, false);
+                made.Stage.Release(made.Made);
+                continue;
+            }
             var change = made.Stage.AppliedAny(made.Record, made.Made, made.Record.At(made.Stage.Id).Output);
             Finish(made.Record, made.Stage, made.Made, change);
         }
@@ -249,7 +287,9 @@ public sealed class ChunkPipeline
         for (int n = _awaitingExternal.Count; n > 0 && MainLeft(); n--)
         {
             var (record, stage) = _awaitingExternal.Dequeue();
-            if (!record.Removed && !Ask(record, stage)) _awaitingExternal.Enqueue((record, stage));
+            if (record.Removed) continue;
+            if (!record.Needs(stage)) { record.At(stage.Id).Set(SlotFlags.Running, false); continue; }
+            if (!Ask(record, stage)) _awaitingExternal.Enqueue((record, stage));
         }
 
         while (MainLeft() && TakeReady(Executor.External, out var record, out var stage, out _))
@@ -275,7 +315,7 @@ public sealed class ChunkPipeline
         int w = 0, r = 0, run = 0, d = 0;
         foreach (var record in _records.Values)
         {
-            if (!record.Has(stage.Id)) continue;
+            if (!record.Needs(stage)) continue;
             switch (record.State(stage))
             {
                 case SlotState.Waiting: w++; break;
@@ -342,18 +382,19 @@ public sealed class ChunkPipeline
             (record, stage) = item;
             ref var slot = ref record.At(stage.Id);
             slot.Set(SlotFlags.Queued, false);
-            if (record.Wanted && !slot.Is(SlotFlags.Running) && slot.Is(SlotFlags.Stale) && InputsThere(record, stage))
+            if (record.Wanted && record.Needs(stage) && !slot.Is(SlotFlags.Running) && slot.Is(SlotFlags.Stale)
+                && InputsThere(record, stage))
                 return true;
         }
         (record, stage) = (null!, null!);
         return false;
     }
 
-    /// <summary>Queues the stage on the chunk if it's wanted, stale and its inputs are there.</summary>
+    /// <summary>Queues the stage on the chunk if it's wanted and needs it, it's stale and its inputs are there.</summary>
     private void Check(PipelineChunk record, int stage)
     {
         ref var slot = ref record.At(stage);
-        if (!record.Wanted || slot.Is(SlotFlags.Queued | SlotFlags.Running) || !slot.Is(SlotFlags.Stale)
+        if (!record.Wanted || !record.Needs(_stages[stage]) || slot.Is(SlotFlags.Queued | SlotFlags.Running) || !slot.Is(SlotFlags.Stale)
             || !InputsThere(record, _stages[stage])) return;
         slot.Set(SlotFlags.Queued, true);
         slot.QueuedAt = Stopwatch.GetTimestamp();

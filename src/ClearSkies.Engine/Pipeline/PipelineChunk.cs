@@ -29,6 +29,8 @@ public sealed class PipelineChunk
     public PipelineGrid Grid { get; }
     /// <summary>In range: every stage it has runs. Once not, it's only waiting to be dropped, and nothing reads it.</summary>
     public bool Wanted { get; internal set; }
+    /// <summary>What it's wanted for, beyond its blocks (see <see cref="ChunkPipeline.WantFor"/>).</summary>
+    public Purpose Purposes { get; internal set; }
     /// <summary>Dropped by the pipeline: nothing needs it any more.</summary>
     public bool Removed { get; internal set; }
 
@@ -38,6 +40,9 @@ public sealed class PipelineChunk
 
     internal bool Has(int stage) => SlotOf[stage] >= 0;
     internal ref Slot At(int stage) => ref Slots[SlotOf[stage]];
+
+    /// <summary>Whether it has the stage and is wanted for what the stage serves (wanted at all or not).</summary>
+    public bool Needs(Stage stage) => Has(stage.Id) && (stage.Serves == Purpose.None || (Purposes & stage.Serves) != 0);
 
     /// <summary>The stage's last output, which stays in use while a rerun is under way.</summary>
     public T? Output<T>(Stage stage) where T : class => Has(stage.Id) ? (T?)At(stage.Id).Output : null;
