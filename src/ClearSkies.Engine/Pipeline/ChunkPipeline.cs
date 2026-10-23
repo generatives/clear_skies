@@ -211,7 +211,7 @@ public sealed class ChunkPipeline
 
     /// <summary>The chunk and stage that's been ready longest without running, and for how long (seconds), for the
     /// panel: what a chunk that never seems to get made is stuck behind.</summary>
-    public (PipelineChunk Record, Stage Stage, double Seconds, float Priority)? LongestReady()
+    public (PipelineChunk Record, Stage Stage, double Seconds)? LongestReady()
     {
         (PipelineChunk, Stage, long)? oldest = null;
         foreach (var record in _records.Values)
@@ -220,7 +220,7 @@ public sealed class ChunkPipeline
                     && (oldest == null || record.At(stage.Id).QueuedAt < oldest.Value.Item3))
                     oldest = (record, stage, record.At(stage.Id).QueuedAt);
         if (oldest is not var (r, s, at)) return null;
-        return (r, s, Stopwatch.GetElapsedTime(at).TotalSeconds, Priority?.Invoke(r.Key) ?? 0f);
+        return (r, s, Stopwatch.GetElapsedTime(at).TotalSeconds);
     }
 
     /// <summary>Chunks in each grid, and of those, how many are being made (any stage ready or running), for the panel.</summary>

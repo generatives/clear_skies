@@ -1,16 +1,14 @@
-using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Pipeline;
-using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Voxels;
-using ImGuiNET;
 
 namespace ClearSkies.Engine.ECS;
 
 /// <summary>
-/// Where streamed chunks are made: the chunk pipeline (see <see cref="ChunkPipeline"/>), a grid per level and a Voxels
-/// stage that makes a chunk at its level's resolution and adds it to the level's volume. Streaming asks it for the
-/// chunks it wants (<see cref="Want"/>) and lets them go (<see cref="LetGoOf"/>); a chunk let go leaves its volume
-/// when the pipeline drops it.
+/// Where streamed chunks are made: the chunk pipeline (see <see cref="ChunkPipeline"/>, run by
+/// <see cref="ChunkPipelineSystem"/>), a grid per level, and the <see cref="VoxelsStage"/>, which makes a chunk at its
+/// level's resolution; streaming adds it to the level's volume. Streaming asks the pipeline for the chunks it wants
+/// (<see cref="Want"/>) and lets them go (<see cref="LetGoOf"/>); a chunk let go leaves its volume when the pipeline
+/// drops it.
 /// </summary>
 public sealed partial class ChunkLoadSystem
 {
@@ -19,18 +17,9 @@ public sealed partial class ChunkLoadSystem
 
     private const float CoarseAfter = 1e7f; // past any full-detail chunk's distance
 
-    private ChunkPipeline _pipeline = null!;
-    private PipelineGrid[] _grids = null!;
-    private VoxelsStage _voxels = null!;
-
-    private void StartPipeline()
-    {
-        _pipeline = new ChunkPipeline { Priority = Distance };
-        _grids = new PipelineGrid[MaxLevels];
-        for (int k = 0; k < MaxLevels; k++)
-            _grids[k] = _pipeline.AddGrid(k == 0 ? "full detail" : $"level {k}", k == 0 ? null : _grids[k - 1]);
-        _voxels = _pipeline.Add(new VoxelsStage(this));
-    }
+    private readonly ChunkPipeline _pipeline;
+    private readonly PipelineGrid[] _grids = new PipelineGrid[MaxLevels];
+    private readonly VoxelsStage _voxels;
 
     /// <summary>Asks the pipeline for the level's chunk <paramref name="p"/>.</summary>
     private void Want(TerrainLevel level, ChunkPosition p)
@@ -56,7 +45,7 @@ public sealed partial class ChunkLoadSystem
     private void Forget(TerrainLevel level, ChunkPosition p)
     {
         var key = level.Key(p);
-        if (_pipeline.Get(key)?.Output<MadeChunk>(_voxels) is { InVolume: true } made)
+        if (_pipeline.Get(key)?.Output<ChunkVoxels>(_voxels) is { InVolume: true } made)
         {
             made.InVolume = false;
             made.Data = null;
@@ -83,27 +72,6 @@ public sealed partial class ChunkLoadSystem
         level.InFlightChunks--;
     }
 
-    /// <summary>The pipeline's part of the Chunk Loading panel: each stage's chunks by state, each level's chunks, and
-    /// the chunk that's waited its turn longest.</summary>
-    private void DrawPipelineUi()
-    {
-        ImGui.Separator();
-        ImGui.Text($"Pipeline: {_pipeline.ChunkCount:N0} chunks, {_pipeline.WorkerJobs} of {MaxInFlight} worker jobs running" +
-                   (_pipeline.AwaitingExternal > 0 ? $", {_pipeline.AwaitingExternal} waiting on outside work" : ""));
-        foreach (var stage in _pipeline.Stages)
-        {
-            var (waiting, ready, running, done) = _pipeline.Count(stage);
-            ImGui.Text($"  {stage.Name}: {ready:N0} ready, {running:N0} running, {waiting:N0} waiting for inputs, {done:N0} done");
-        }
-        var byGrid = _pipeline.CountByGrid();
-        for (int k = 0; k < _levels.Count; k++)
-            ImGui.Text($"  {_grids[k].Name}: {byGrid[k].Chunks:N0} chunks, {byGrid[k].Making:N0} being made");
-        if (_pipeline.LongestReady() is var (record, longest, seconds, priority))
-            ImGui.Text($"  Longest ready: {_grids[record.Key.Grid].Name} {record.Key.Pos} {longest.Name}, {seconds:F1} s " +
-                       $"(now {priority - (record.Key.Grid == 0 ? 0 : CoarseAfter):F0} blocks out)");
-        else ImGui.Text("  Longest ready: none");
-    }
-
     /// <summary>The order the pipeline makes chunks in: full detail first, then coarse chunks nearest first (by how far
     /// they are from their level's nearest interest, across, in blocks).</summary>
     private float Distance(ChunkKey key)
@@ -116,83 +84,22 @@ public sealed partial class ChunkLoadSystem
         return MathF.Sqrt(best) * level.Blocks + (key.Grid == 0 ? 0f : CoarseAfter);
     }
 
-    /// <summary>A chunk made: its blocks (null if it came out air) and their packing for the GPU, and once added to its
-    /// level's volume, that it's there.</summary>
-    private sealed class MadeChunk(ChunkPosition pos, ChunkData? data, ChunkPreparation? prepared)
-    {
-        public readonly ChunkPosition Pos = pos;
-        public ChunkData? Data = data;
-        public readonly ChunkPreparation? Prepared = prepared;
-        public TerrainLevel? Level;
-        public bool InVolume, Replaced;
-    }
+    /// <summary>The level a chunk was made for, if it's still there.</summary>
+    private TerrainLevel? LevelOf(ChunkVoxels made) => made.Key.Grid < _levels.Count ? _levels[made.Key.Grid] : null;
 
-    /// <summary>Makes a chunk at its level's resolution: in full detail, loaded from the store if edited, else
-    /// generated; in a coarse level, shrunk from the full chunks under it. Then adds it to its level's volume.</summary>
-    private sealed class VoxelsStage(ChunkLoadSystem load) : WorkerStage<MadeChunk>
-    {
-        public override string Name => "Voxels";
-        public override IReadOnlyList<Pipeline.Input> InputsFor(PipelineGrid grid) => Array.Empty<Pipeline.Input>();
-
-        public override MadeChunk Make(ChunkKey key, StageInputs inputs)
-        {
-            try
-            {
-                var data = key.Grid == 0 ? load.MakeFull(key.Pos) : load.MakeCoarse(key.Grid, key.Pos);
-                if (data == null) return new MadeChunk(key.Pos, null, null);
-                data.IsDirty = false;
-                return new MadeChunk(key.Pos, data, load._preparer?.Prepare(data)); // off the main thread
-            }
-            catch (Exception e)
-            {
-                Console.WriteLine($"[load] {key} failed: {e}");
-                return new MadeChunk(key.Pos, null, null);
-            }
-        }
-
-        public override Change Applied(PipelineChunk record, MadeChunk made, MadeChunk? before)
-        {
-            load.Add(record.Key.Grid, made, before);
-            return Change.All;
-        }
-
-        public override void Release(object output) => load.Release((MadeChunk)output);
-    }
-
-    /// <summary>Full chunk <paramref name="pos"/>, on a worker: from the store if edited, else generated. Null if air.</summary>
-    private ChunkData? MakeFull(ChunkPosition pos)
-    {
-        bool edited = _edited.ContainsKey(pos);
-        var data = _scratch.Value!;
-        if (!(edited && _chunkStore.TryLoad(pos, data)))
-            _generator.Value!.Generate(data, pos);
-        data.Compact(); // stone inside an island, or sky, keeps one block instead of 64 KB
-        if (data.HasAnyNonAir())
-        {
-            _scratch.Value = new ChunkData();
-            return data;
-        }
-        // Generation only ever writes blocks, so an empty result leaves the buffer all air and ready to reuse; a loaded
-        // edit may have overwritten more than blocks, so start that one afresh.
-        if (edited) _scratch.Value = new ChunkData();
-        return null;
-    }
-
-    /// <summary>Adds a chunk made for level <paramref name="k"/> to its volume, in place of what was made before; one
-    /// that came out air is remembered as air.</summary>
-    private void Add(int k, MadeChunk made, MadeChunk? before)
+    /// <summary>Adds a chunk made for its level to the level's volume, in place of what was made before; one that came
+    /// out air is remembered as air.</summary>
+    private void Add(ChunkVoxels made, ChunkVoxels? before)
     {
         if (before != null)
         {
             before.Replaced = true;
-            if (before.InVolume && before.Level is { Removed: false } was) Unload(was, before.Pos); // made again: stale
+            if (before.InVolume && LevelOf(before) is { } was) Unload(was, before.Key.Pos); // made again: stale
             before.InVolume = false;
             before.Data = null;
         }
-        if (k >= _levels.Count) return; // its level went: released when the pipeline drops it
-        var level = _levels[k];
-        var pos = made.Pos;
-        made.Level = level;
+        if (LevelOf(made) is not { } level) return; // its level went: released when the pipeline drops it
+        var pos = made.Key.Pos;
         RemoveInFlight(level, pos);
         if (level.Level == 0 && !level.InFlight.ContainsKey((pos.X, pos.Z))) Loaded((pos.X, pos.Z));
 
@@ -205,7 +112,7 @@ public sealed partial class ChunkLoadSystem
         }
         if (made.Data == null)
         {
-            if (level.Level == 0 && _edited.ContainsKey(pos)) RecordBuild(pos, hasBlocks: false); // a build that was emptied out
+            if (level.Level == 0 && _edits.IsEdited(pos)) RecordBuild(pos, hasBlocks: false); // a build that was emptied out
             else if (level.Columns.TryGetValue((pos.X, pos.Z), out var col))
                 level.Columns[(pos.X, pos.Z)] = (col.Generated, col.Air | level.Bit(pos));
             return;
@@ -223,13 +130,13 @@ public sealed partial class ChunkLoadSystem
 
     /// <summary>A made chunk the pipeline let go of: replaced (already out of the volume), or dropped, when it leaves
     /// the volume (with one an edit made where it was air).</summary>
-    private void Release(MadeChunk made)
+    private void Release(ChunkVoxels made)
     {
-        var level = made.Level;
-        if (!made.Replaced && level is { Removed: false }
-            && (made.InVolume || (level.Volume.IsLoaded(made.Pos) && !level.Wanting.Contains(made.Pos))))
+        var level = LevelOf(made);
+        if (!made.Replaced && level != null
+            && (made.InVolume || (level.Volume.IsLoaded(made.Key.Pos) && !level.Wanting.Contains(made.Key.Pos))))
         {
-            Unload(level, made.Pos); // releases its blocks with it
+            Unload(level, made.Key.Pos); // releases its blocks with it
             made.InVolume = false;
             made.Data = null;
             return;

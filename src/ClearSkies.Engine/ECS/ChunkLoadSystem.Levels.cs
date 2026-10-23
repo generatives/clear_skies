@@ -175,7 +175,7 @@ public sealed partial class ChunkLoadSystem
     {
         if (!Wanted(level, p)) return false;
         if (!level.Columns.TryGetValue((p.X, p.Z), out var col)) return false;
-        ulong maybe = (col.Generated & ~col.Air) | (level.Level == 0 ? _built.GetValueOrDefault((p.X, p.Z)) : 0);
+        ulong maybe = (col.Generated & ~col.Air) | (level.Level == 0 ? _edits.BuiltLayers(p.X, p.Z) : 0);
         return (maybe & level.Bit(p)) == 0 || level.Volume.IsLoaded(p);
     }
 
@@ -191,76 +191,13 @@ public sealed partial class ChunkLoadSystem
                 continue;
             }
             int n = 1 << level.Level;
-            ulong under = FullLayersUnder(level.Level, pos.Y);
+            ulong under = _edits.FullLayersUnder(level.Level, pos.Y);
             for (int j = 0; j < n * n; j++)
             {
                 int x = pos.X * n + j % n, z = pos.Z * n + j / n;
-                for (ulong bits = _editedLayers.GetValueOrDefault((x, z)) & under; bits != 0; bits &= bits - 1)
+                for (ulong bits = _edits.EditedLayers(x, z) & under; bits != 0; bits &= bits - 1)
                     yield return new ChunkPosition(x, _minY + BitOperations.TrailingZeroCount(bits), z);
             }
-        }
-    }
-
-    /// <summary>The full layers (bits from the lowest streamed one) under layer <paramref name="y"/> of level
-    /// <paramref name="k"/>.</summary>
-    private ulong FullLayersUnder(int k, int y)
-    {
-        ulong full = 0;
-        for (int fy = y << k; fy < (y + 1) << k; fy++)
-            if (fy >= _minY && fy <= _minY + 63) full |= 1UL << (fy - _minY);
-        return full;
-    }
-
-    /// <summary>Makes coarse chunk <paramref name="pos"/> of level <paramref name="k"/> on a worker: each full column
-    /// under it, only the layers under it, each full chunk shrunk into the level-1 chunk over it as it's made; then each
-    /// level shrunk into the next. Null if it comes out air.</summary>
-    private ChunkData? MakeCoarse(int k, ChunkPosition pos)
-    {
-        int n = 1 << k;
-        ulong under = FullLayersUnder(k, pos.Y);
-        var coarse = new Dictionary<ChunkPosition, ChunkData>();
-        try
-        {
-            for (int j = 0; j < n * n; j++)
-            {
-                int x = pos.X * n + j % n, z = pos.Z * n + j / n;
-                ulong edited = _editedLayers.GetValueOrDefault((x, z));
-                ulong bits = (_generator.Value!.ColumnLayers(x, z, _minY) | _built.GetValueOrDefault((x, z)) | edited) & under;
-                for (; bits != 0; bits &= bits - 1)
-                {
-                    int layer = BitOperations.TrailingZeroCount(bits);
-                    var at = new ChunkPosition(x, _minY + layer, z);
-                    var full = new ChunkData();
-                    if (!((edited >> layer & 1) != 0 && _chunkStore.TryLoad(at, full)))
-                        _generator.Value!.Generate(full, at);
-                    if (full.HasAnyNonAir()) CoarseTerrain.ShrinkInto(coarse, at, full, majority: true, plants: true);
-                    full.Release();
-                }
-            }
-            for (int step = 2; step <= k; step++)
-            {
-                var finer = coarse;
-                coarse = new Dictionary<ChunkPosition, ChunkData>();
-                foreach (var (p, chunk) in finer)
-                {
-                    if (chunk.HasAnyNonAir()) CoarseTerrain.ShrinkInto(coarse, p, chunk, majority: true, plants: true);
-                    chunk.Release();
-                }
-            }
-            if (!coarse.Remove(pos, out var made)) return null;
-            made.Compact();
-            if (made.HasAnyNonAir()) return made;
-            made.Release();
-            return null;
-        }
-        catch (Exception e)
-        {
-            Console.WriteLine($"[load] level {k} chunk {pos} failed: {e}");
-            return null;
-        }
-        finally
-        {
-            foreach (var (_, chunk) in coarse) chunk.Release();
         }
     }
 

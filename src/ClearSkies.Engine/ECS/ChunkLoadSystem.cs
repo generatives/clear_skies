@@ -8,7 +8,6 @@ using ClearSkies.Engine.Persistence;
 using DefaultEcs;
 using ImGuiNET;
 using Silk.NET.Maths;
-using System.Collections.Concurrent;
 
 namespace ClearSkies.Engine.ECS;
 
@@ -45,8 +44,7 @@ namespace ClearSkies.Engine.ECS;
 /// </summary>
 public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStreaming
 {
-    /// <summary>Chunks being made on workers at once (see <see cref="ChunkPipeline"/>). Well above the core count: the
-    /// background workers queue the excess, and most of a first visit is sky that's ruled out in microseconds.</summary>
+    /// <summary>Full-detail columns looked past at most for one whose edited chunks have arrived.</summary>
     private const int MaxInFlight = 64;
 
     /// <summary>Chunks a coarse level asks for and doesn't have yet, at most: they're slow to make (a level-1 chunk is
@@ -77,9 +75,6 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
     private readonly EntitySet      _interests;
     private readonly EntitySet      _editedElsewhere;
     private readonly ChunkVolume    _staticVolume;
-    private readonly IChunkPreparer? _preparer;
-    private readonly ThreadLocal<IWorldGenerator> _generator;
-    private readonly ThreadLocal<ChunkData> _scratch = new(() => new ChunkData());
     private readonly int            _minY;      // the lowest streamed layer: bit 0 of a column's bits
 
     /// <summary>Column offsets from an interest's column, closest first, with their distance squared, by radius in
@@ -103,13 +98,9 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
     private readonly Dictionary<(int x, int z), Entity> _loading = new();
 
     /// <summary>Every chunk edited since it was generated, loaded from the store (read from it as streaming starts, then
-    /// added to as chunks are edited here or elsewhere). Concurrent: chunks are made on workers from them.</summary>
-    private readonly ConcurrentDictionary<ChunkPosition, byte> _edited = new();
-    private readonly ConcurrentDictionary<(int x, int z), ulong> _editedLayers = new(); // the same, as layer bits per column
+    /// added to as chunks are edited here or elsewhere), and which hold a build.</summary>
+    private readonly ChunkEdits _edits;
     private bool _editsRead;
-
-    /// <summary>Per column (layer bits): chunks holding a build — edited, with blocks.</summary>
-    private readonly ConcurrentDictionary<(int x, int z), ulong> _built = new();
 
     /// <summary>Main-thread time per frame for the work that comes in bursts, shared: unloading what left view,
     /// adding finished columns, and scanning for columns to queue, in that order. What doesn't fit waits for the next
@@ -123,6 +114,7 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
     private readonly Dictionary<Entity, (float Radius, (int x, int z) Column)> _published = new();
 
     /// <param name="budget">What limits what's loaded in full detail.</param>
+    /// <param name="pipeline">Where chunks are made (run by <see cref="ChunkPipelineSystem"/>, after this).</param>
     /// <param name="viewDistance">The farthest out chunks are streamed in full detail to be drawn, in blocks
     /// (horizontally): an interest's draw radius is capped at it (the GPU store's world index is sized for it).</param>
     /// <param name="minChunkY">Lowest chunk layer the generator fills. Streaming covers 64 layers from
@@ -131,8 +123,9 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
     /// <param name="chunkStore">Where edited chunks come from (the Host, which keeps them).</param>
     /// <param name="preparer">Work on each loaded chunk's data on the worker that loaded it (packing it for the GPU, for
     /// a drawn world).</param>
-    public ChunkLoadSystem(World world, ChunkVolume staticVolume, IChunkBudget budget, Func<IWorldGenerator> generatorFactory,
-                           float viewDistance, int minChunkY, IChunkStore chunkStore, IChunkPreparer? preparer = null)
+    public ChunkLoadSystem(World world, ChunkVolume staticVolume, IChunkBudget budget, Pipeline.ChunkPipeline pipeline,
+                           Func<IWorldGenerator> generatorFactory, float viewDistance, int minChunkY, IChunkStore chunkStore,
+                           IChunkPreparer? preparer = null)
     {
         _chunkStore = chunkStore;
         _world = world;
@@ -140,12 +133,16 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         _interests    = world.GetEntities().With<Transform>().With<TerrainInterest>().AsSet();
         _editedElsewhere = world.GetEntities().With<TerrainEditedElsewhere>().AsSet();
         _staticVolume = staticVolume;
-        _preparer     = preparer;
-        _generator    = new ThreadLocal<IWorldGenerator>(generatorFactory);
         _minY         = minChunkY - LayersBelow;
         _staticVolume.EditableLayers = (_minY, _minY + 63); // only what streaming can load back
         _viewDistance = viewDistance;
-        StartPipeline();
+        _edits        = new ChunkEdits(_minY);
+
+        _pipeline = pipeline;
+        _pipeline.Priority = Distance;
+        for (int k = 0; k < MaxLevels; k++)
+            _grids[k] = _pipeline.AddGrid(k == 0 ? "full detail" : $"level {k}", k == 0 ? null : _grids[k - 1]);
+        _voxels = _pipeline.Add(new VoxelsStage(generatorFactory, chunkStore, _edits, preparer) { Added = Add, Released = Release });
         _levels.Add(new TerrainLevel(0, _grids[0], staticVolume, budget, _minY, _minY + 63) { Radius = viewDistance });
     }
 
@@ -181,17 +178,15 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         ImGui.Text($"Loaded: {_staticVolume.LoadedCount:N0} chunks   Queued columns: {full.Queue.Count - full.QueueHead}" +
                    $"{(full.QueueTruncated ? "+" : "")}   Being made: {full.InFlightChunks} chunks");
         ImGui.Text($"Columns evicted: {full.Evictions}");
-        ImGui.Text($"Edited chunks: {_edited.Count}   Layers: {_minY}..{_minY + 63}");
-        DrawPipelineUi();
+        ImGui.Text($"Edited chunks: {_edits.Count}   Layers: {_minY}..{_minY + 63}");
 
         ImGui.Separator();
         _steps.Draw();
     }
 
     // CPU time of each step, for the debug panel: which one a hitch while streaming came from.
-    private const int PipelineStep = 0, UnloadStep = 1, QueueStep = 2, DispatchStep = 3, EvictStep = 4, EvictOrderStep = 5,
-                      LevelsStep = 6;
-    private readonly StepTimer _steps = new("Making chunks (pipeline)", "Rebuild: unloading what's unwanted",
+    private const int UnloadStep = 0, QueueStep = 1, DispatchStep = 2, EvictStep = 3, EvictOrderStep = 4, LevelsStep = 5;
+    private readonly StepTimer _steps = new("Rebuild: unloading what's unwanted",
                                             "Rebuild: queueing columns", "Dispatching jobs", "Evicting far columns",
                                             "Evicting: ordering columns", "Dropping coarse blocks") { Owner = "Chunk Loading" };
 
@@ -229,8 +224,6 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         Dispatch();
         _steps.Lap(DispatchStep);
 
-        _pipeline.Update(new Pipeline.FrameBudgets(MaxInFlight, BudgetLeft));
-        _steps.Lap(PipelineStep);
 
         DropSome();
         _steps.Lap(LevelsStep);
@@ -566,9 +559,9 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
     private ulong MaybeContent(TerrainLevel level, int x, int z)
     {
         if (!level.Columns.TryGetValue((x, z), out var col))
-            level.Columns[(x, z)] = col = (level.Level == 0 ? _generator.Value!.ColumnLayers(x, z, _minY) : level.AllLayers, 0UL);
+            level.Columns[(x, z)] = col = (level.Level == 0 ? _voxels.Generator.ColumnLayers(x, z, _minY) : level.AllLayers, 0UL);
         ulong maybe = col.Generated & ~col.Air;
-        return level.Level == 0 ? maybe | _built.GetValueOrDefault((x, z)) : maybe;
+        return level.Level == 0 ? maybe | _edits.BuiltLayers(x, z) : maybe;
     }
 
     private ulong Bit(ChunkPosition p) => 1UL << (p.Y - _minY);
@@ -579,8 +572,7 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
     {
         if (p.Y < _minY || p.Y > _minY + 63) return;
         ulong b = Bit(p);
-        ulong built = _built.GetValueOrDefault((p.X, p.Z));
-        _built[(p.X, p.Z)] = hasBlocks ? built | b : built & ~b;
+        _edits.RecordBuild(p, hasBlocks);
         if (FullDetail.Columns.TryGetValue((p.X, p.Z), out var col))
             FullDetail.Columns[(p.X, p.Z)] = (col.Generated, hasBlocks ? col.Air & ~b : col.Air | b);
         if (!hasBlocks) return;
@@ -594,8 +586,7 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
 
     private void RecordEdited(ChunkPosition p, bool hasBlocks)
     {
-        _edited.TryAdd(p, 0);
-        if (p.Y >= _minY && p.Y <= _minY + 63) _editedLayers[(p.X, p.Z)] = _editedLayers.GetValueOrDefault((p.X, p.Z)) | Bit(p);
+        _edits.RecordEdited(p);
         RecordBuild(p, hasBlocks);
     }
 
@@ -754,7 +745,7 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         for (ulong bits = MaybeContent(level, x, z) & WantedLayers(level, x, z); bits != 0; bits &= bits - 1)
         {
             var p = new ChunkPosition(x, level.MinY + BitOperations.TrailingZeroCount(bits), z);
-            if (!level.Volume.IsLoaded(p) && !level.Wanting.Contains(p)) missing.Add((p, level.Level == 0 && _edited.ContainsKey(p)));
+            if (!level.Volume.IsLoaded(p) && !level.Wanting.Contains(p)) missing.Add((p, level.Level == 0 && _edits.IsEdited(p)));
         }
         return missing;
     }
