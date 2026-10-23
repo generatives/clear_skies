@@ -71,6 +71,11 @@ public sealed class RenderFrame : IDebugUiSystem
     {
         ImGui.Text($"{_time.FramesPerSecond} fps");
         ImGui.Text($"Draw calls: {_renderer.DrawCount:N0}");
+        long drawn = _renderer.ChunkQuadsDrawn, skipped = _renderer.ChunkQuadsSkipped;
+        ImGui.Text($"Chunk quads drawn: {drawn:N0}, skipped facing away: {skipped:N0} " +
+                   $"({(drawn + skipped > 0 ? 100.0 * skipped / (drawn + skipped) : 0):F0}%)");
+        bool skip = _renderer.SkipFacingAway;
+        if (ImGui.Checkbox("Skip chunk faces facing away", ref skip)) _renderer.SkipFacingAway = skip;
         uint samples = _renderer.Context.SampleCount;
         ImGui.Text(samples > 1 ? $"Anti-aliasing: {samples}x MSAA" : "Anti-aliasing: off (launch with --msaa 4)");
         ImGui.Text($"Swapchain acquire wait: {_renderer.AcquireMs:F2} ms, present: {_renderer.PresentMs:F2} ms");
@@ -81,6 +86,9 @@ public sealed class RenderFrame : IDebugUiSystem
         if (ImGui.CollapsingHeader("Render pass cost (debug)"))
         {
             ImGui.TextDisabled("Flip these and watch the render pass in GPU timings.");
+            bool split = _renderer.SplitPassTimers;
+            if (ImGui.Checkbox("Time each part of the render pass", ref split)) _renderer.SplitPassTimers = split;
+            ImGui.TextDisabled("Splits it into passes (opaque, cut-out, model blocks, translucent, the rest), each timed.");
             ImGui.Combo("Terrain lighting", ref _dbgLighting, DbgLightingModes, DbgLightingModes.Length);
             ImGui.Checkbox("No textures", ref _dbgNoTextures);
             ImGui.Checkbox("No fog or haze", ref _dbgNoFog);

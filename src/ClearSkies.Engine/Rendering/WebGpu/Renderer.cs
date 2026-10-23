@@ -426,13 +426,16 @@ fn chunkVertex(d: ChunkDraw, quad: vec2<u32>, corner: u32) -> VSOut {
         let nudge = (vec2<f32>(f32((h >> 10u) & 255u), f32((h >> 18u) & 255u)) / 255.0 - 0.5) * 0.4
                   + loose * (vec2<f32>(f32((q >> 10u) & 255u), f32((q >> 18u) & 255u)) / 255.0 - 0.5) * 0.16;
         let tall = 0.75 + 0.4 * f32((h >> 26u) & 63u) / 63.0;
+        // In a low-resolution copy (scaled 2^k, see LowResolutionCopy) a cell is 2^k blocks across, but the plant stays
+        // a plant's height: it keeps the cell's width (the same patchy cover from afar) without standing 2^k blocks tall.
+        let cellBlocks = length(d.model[0].xyz);
         let d = vec2<f32>(select(0.5 - cu, cu - 0.5, face == 6u), cu - 0.5); // from the cell's middle, in x and z
         let cs = cos(turn);
         let sn = sin(turn);
         let r = vec2<f32>(cs * d.x - sn * d.y, sn * d.x + cs * d.y) + 0.5 + nudge;
         // V follows the unstretched height, so the sprite stretches with the quad rather than being cropped.
         uv2 = vec2<f32>(cu, -(position.y + cv));
-        position += vec3<f32>(r.x, cv * tall, r.y);
+        position += vec3<f32>(r.x, cv * tall / cellBlocks, r.y);
         normal.y = 1.0;
     }
     let layerBits = (a >> 21u) & 255u;
@@ -606,7 +609,11 @@ fn blockColor(in: VSOut) -> vec4<f32> {
     let dbg = u32(camera.lightParams2.y);
     let layer = max(i32(round(in.uv.z)), 0);
     var tex   = vec4<f32>(0.6, 0.6, 0.6, 1.0);
-    if ((dbg & 1u) == 0u) { tex = textureSample(atlasTex, atlasSamp, fract(in.uv.xy), layer); }
+    // The mip level comes from the unwrapped coordinates' gradients: fract's jump at every block edge would make the
+    // GPU pick the smallest mip along each edge (thin lines between blocks).
+    let gx = dpdx(in.uv.xy);
+    let gy = dpdy(in.uv.xy);
+    if ((dbg & 1u) == 0u) { tex = textureSampleGrad(atlasTex, atlasSamp, fract(in.uv.xy), layer, gx, gy); }
     return select(vec4<f32>(lin(in.color), 1.0), tex, in.uv.z >= 0.0);
 }
 
@@ -1507,16 +1514,18 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
             AddressModeU  = AddressMode.Repeat,
             AddressModeV  = AddressMode.Repeat,
             AddressModeW  = AddressMode.Repeat,
+            // Texels stay crisp up close (nearest within a level); farther away the mip levels (see MipChain) blend, so
+            // a pixel covering many texels shows their average instead of an arbitrary one (moiré on distant terrain).
             MagFilter     = FilterMode.Nearest,
             MinFilter     = FilterMode.Nearest,
-            MipmapFilter  = MipmapFilterMode.Nearest,
+            MipmapFilter  = MipmapFilterMode.Linear,
             LodMinClamp   = 0,
-            LodMaxClamp   = 1,
+            LodMaxClamp   = 32,
             Compare       = CompareFunction.Undefined,
             MaxAnisotropy = 1,
         };
         CreateTextureArray(tileWidth, tileHeight, layers, samplerDesc,
-                           out _atlasTexture, out _atlasTextureView, out _atlasSampler, out _atlasBindGroup);
+                           out _atlasTexture, out _atlasTextureView, out _atlasSampler, out _atlasBindGroup, mipmaps: true);
     }
 
     /// <summary>Block and model textures are authored in sRGB: on an sRGB surface they're stored as such, so sampling
@@ -1526,27 +1535,36 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
     /// <summary>Uploads <paramref name="layers"/> (RGBA8, <paramref name="width"/>×<paramref name="height"/> each) as a
     /// <c>texture_2d_array</c> and wraps it with a sampler in a bind group on the group-3 layout.</summary>
     private void CreateTextureArray(int width, int height, byte[][] layers, in SamplerDescriptor samplerDesc,
-                                    out Texture* texture, out TextureView* view, out Sampler* sampler, out BindGroup* bindGroup)
+                                    out Texture* texture, out TextureView* view, out Sampler* sampler, out BindGroup* bindGroup,
+                                    bool mipmaps = false)
     {
+        int levels = 1;
+        if (mipmaps) for (int m = System.Math.Max(width, height); m > 1; m >>= 1) levels++;
         var texDesc = new TextureDescriptor
         {
             Usage         = TextureUsage.TextureBinding | TextureUsage.CopyDst,
             Dimension     = TextureDimension.Dimension2D,
             Size          = new Extent3D((uint)width, (uint)height, (uint)layers.Length),
             Format        = TexelFormat, // sampled as linear colour when the surface is sRGB
-            MipLevelCount = 1,
+            MipLevelCount = (uint)levels,
             SampleCount   = 1,
         };
         texture = _api.DeviceCreateTexture(_ctx.Device, &texDesc);
 
         for (uint layer = 0; layer < layers.Length; layer++)
         {
-            fixed (byte* data = layers[layer])
+            byte[] pixels = layers[layer];
+            int w = width, h = height;
+            for (int level = 0; level < levels; level++)
             {
-                var dest = new ImageCopyTexture { Texture = texture, MipLevel = 0, Origin = new Origin3D(0, 0, layer), Aspect = TextureAspect.All };
-                var dataLayout = new TextureDataLayout { Offset = 0, BytesPerRow = (uint)(width * 4), RowsPerImage = (uint)height };
-                var writeSize = new Extent3D((uint)width, (uint)height, 1);
-                _api.QueueWriteTexture(_ctx.Queue, &dest, data, (nuint)layers[layer].Length, &dataLayout, &writeSize);
+                if (level > 0) (pixels, w, h) = MipChain.Halve(pixels, w, h, _ctx.SurfaceIsSrgb);
+                fixed (byte* data = pixels)
+                {
+                    var dest = new ImageCopyTexture { Texture = texture, MipLevel = (uint)level, Origin = new Origin3D(0, 0, layer), Aspect = TextureAspect.All };
+                    var dataLayout = new TextureDataLayout { Offset = 0, BytesPerRow = (uint)(w * 4), RowsPerImage = (uint)h };
+                    var writeSize = new Extent3D((uint)w, (uint)h, 1);
+                    _api.QueueWriteTexture(_ctx.Queue, &dest, data, (nuint)(w * h * 4), &dataLayout, &writeSize);
+                }
             }
         }
 
@@ -1555,7 +1573,7 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
             Format          = TexelFormat,
             Dimension       = TextureViewDimension.Dimension2DArray,
             BaseMipLevel    = 0,
-            MipLevelCount   = 1,
+            MipLevelCount   = (uint)levels,
             BaseArrayLayer  = 0,
             ArrayLayerCount = (uint)layers.Length,
             Aspect          = TextureAspect.All,
@@ -1621,7 +1639,8 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
     /// <see cref="ChunkQuad.AssignLightOffsets"/>), baked before it's first drawn; with no room there, the mesh is lit
     /// flat.
     /// </summary>
-    public GpuMesh? UploadChunkQuads(ReadOnlySpan<byte> quads, uint quadCount, uint lightWords, LightmapKind lightKind)
+    public GpuMesh? UploadChunkQuads(ReadOnlySpan<byte> quads, uint quadCount, uint lightWords, LightmapKind lightKind,
+                                     int[]? faceEnds = null)
     {
         long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
         var span = _quadArena.Allocate(quadCount);
@@ -1642,7 +1661,7 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
         long t2 = System.Diagnostics.Stopwatch.GetTimestamp();
         LastCreateMs = (t1 - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
         LastWriteMs  = (t2 - t1) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
-        return new GpuMesh(span, light, lightKind);
+        return new GpuMesh(span, light, lightKind) { FaceEnds = faceEnds };
     }
 
     /// <summary>Lists <paramref name="mesh"/>'s light map for <see cref="BakeLightmaps"/> if it hasn't been baked since
@@ -1885,6 +1904,9 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
         }
         _drawIndex = 0;
         _chunkDrawCount = 0;
+        ChunkQuadsDrawn = _quadsDrawn;
+        ChunkQuadsSkipped = _quadsSkipped;
+        _quadsDrawn = _quadsSkipped = 0;
         _chunkStateBound = false;
         EnsureVoxelBindGroup();
         // The flat ambient is baked into the light maps where there's no light storage: rebake them all when it moves.
@@ -1896,24 +1918,47 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
 
         var encDesc = new CommandEncoderDescriptor();
         _encoder = _api.DeviceCreateCommandEncoder(_ctx.Device, &encDesc);
+        _splitting = SplitPassTimers;
+        BeginPass(_splitting ? "Render: before the world" : "Render pass (world, sky, HUD, ImGui)", first: true);
+        return true;
+    }
 
+    /// <summary>Debug: <see cref="Section"/> ends the render pass and goes on in a new one, so the GPU timings show each
+    /// part of the frame on its own line. Each extra pass costs a little, so the parts add up to a bit more.</summary>
+    public bool SplitPassTimers { get; set; }
+    private bool _splitting; // SplitPassTimers as of this frame's BeginFrame
+
+    /// <summary>With <see cref="SplitPassTimers"/>, ends this part of the render pass and times what's drawn next as
+    /// <paramref name="name"/>; otherwise does nothing.</summary>
+    public void Section(string name)
+    {
+        if (!_splitting || _pass == null) return;
+        EndPass(resolve: false);
+        BeginPass(name, first: false);
+    }
+
+    /// <summary>Opens the frame's render pass (<paramref name="first"/>: clearing the targets), or, splitting it, the
+    /// next part of it, drawing over what the last part left.</summary>
+    private void BeginPass(string name, bool first)
+    {
         // With MSAA the pass draws into the multisampled target and resolves it into the swapchain image at the end; the
         // samples themselves needn't be kept.
         bool msaa = _ctx.MsaaView != null;
         var colorAtt = new RenderPassColorAttachment
         {
             View = msaa ? _ctx.MsaaView : _ctx.CurrentView,
-            ResolveTarget = msaa ? _ctx.CurrentView : null,
+            // Split into parts, the samples are kept for the next part, and resolved by an empty last one (EndPass).
+            ResolveTarget = msaa && !_splitting ? _ctx.CurrentView : null,
             DepthSlice = uint.MaxValue, // WGPU_DEPTH_SLICE_UNDEFINED
-            LoadOp = LoadOp.Clear,
-            StoreOp = msaa ? StoreOp.Discard : StoreOp.Store,
+            LoadOp = first ? LoadOp.Clear : LoadOp.Load,
+            StoreOp = msaa && !_splitting ? StoreOp.Discard : StoreOp.Store,
             // Sky blue; DrawSky paints over whatever the world leaves uncovered.
             ClearValue = OverdrawMode ? new Color { R = 0, G = 0, B = 0, A = 1 } : new Color { R = 0.10, G = 0.3078, B = 0.4804, A = 1.0 },
         };
         var depthAtt = new RenderPassDepthStencilAttachment
         {
             View = _ctx.DepthView,
-            DepthLoadOp = LoadOp.Clear,
+            DepthLoadOp = first ? LoadOp.Clear : LoadOp.Load,
             DepthStoreOp = StoreOp.Store,
             DepthClearValue = 0.0f, // reversed depth: 0 is the far plane
         };
@@ -1923,16 +1968,34 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
             ColorAttachments = &colorAtt,
             DepthStencilAttachment = &depthAtt,
         };
-        if (_ctx.Timer.TimeRender("Render pass (world, sky, HUD, ImGui)", out var tsw)) passDesc.TimestampWrites = &tsw;
+        if (_ctx.Timer.TimeRender(name, out var tsw)) passDesc.TimestampWrites = &tsw;
         _pass = _api.CommandEncoderBeginRenderPass(_encoder, &passDesc);
         _boundPipeline = null;
+        _chunkStateBound = false;
         SetPipeline(WireframeMode ? _wireframePipeline : _pipeline);
         _api.RenderPassEncoderSetBindGroup(_pass, 0, _cameraBindGroup, 0, null);
         // Groups 2 (voxel storage) and 3 (block texture array) are the same for every draw and persist across
         // pipeline switches (all pipelines share the layout), so bind them once here.
         _api.RenderPassEncoderSetBindGroup(_pass, 2, _voxelBindGroup, 0, null);
         _api.RenderPassEncoderSetBindGroup(_pass, 3, _atlasBindGroup, 0, null);
-        return true;
+    }
+
+    private void EndPass(bool resolve)
+    {
+        _api.RenderPassEncoderEnd(_pass);
+        _api.RenderPassEncoderRelease(_pass);
+        _pass = null;
+        if (!resolve || _ctx.MsaaView == null) return;
+        // Split into parts with MSAA: an empty pass resolves the samples into the swapchain image.
+        var colorAtt = new RenderPassColorAttachment
+        {
+            View = _ctx.MsaaView, ResolveTarget = _ctx.CurrentView, DepthSlice = uint.MaxValue,
+            LoadOp = LoadOp.Load, StoreOp = StoreOp.Discard,
+        };
+        var passDesc = new RenderPassDescriptor { ColorAttachmentCount = 1, ColorAttachments = &colorAtt };
+        var pass = _api.CommandEncoderBeginRenderPass(_encoder, &passDesc);
+        _api.RenderPassEncoderEnd(pass);
+        _api.RenderPassEncoderRelease(pass);
     }
 
     public void SetCameraUniform(in CameraUniform camera)
@@ -1940,6 +2003,7 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
         if (_pendingTint is { } tint) { UploadTint(tint.X, tint.Z, tint.Texels); _pendingTint = null; }
         Span<CameraUniform> s = stackalloc CameraUniform[1];
         s[0] = camera;
+        _cameraPosition = camera.CameraPosition;
         s[0].TintOriginX = _tintOriginX;
         s[0].TintOriginZ = _tintOriginZ;
         _cameraBuffer.Write<CameraUniform>(0, s);
@@ -2021,9 +2085,63 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
             Model = model, ChunkX = chunk.X, ChunkY = chunk.Y, ChunkZ = chunk.Z, Grid = grid, QuadBase = mesh.QuadBase,
             LightBase = mesh.Light != null ? mesh.LightBase : uint.MaxValue, Dissolve = dissolve,
         };
-        if (wire && !OverdrawMode) _api.RenderPassEncoderDraw(_pass, 8u * mesh.QuadCount, 1, 0, record);
-        else _api.RenderPassEncoderDrawIndexed(_pass, 6u * System.Math.Min(mesh.QuadCount, (uint)MaxChunkQuads), 1, 0, 0, record);
+        if (wire && !OverdrawMode) { _api.RenderPassEncoderDraw(_pass, 8u * mesh.QuadCount, 1, 0, record); return; }
+
+        // Back-face culled pipelines skip the face groups that can't point at the camera (see FacingCamera); each run of
+        // groups that can is one draw from its range of the shared index buffer (vertex index 4q + corner).
+        uint total = System.Math.Min(mesh.QuadCount, (uint)MaxChunkQuads);
+        int[]? ends = mesh.FaceEnds;
+        bool cull = SkipFacingAway && !OverdrawMode && ends != null && pipeline != _chunkTransparentPipeline
+                    && pipeline != _chunkTransparentDepthPipeline;
+        int mask = cull ? FacingCamera(model) | 1 << 6 : 0x7F;
+        if (mask == 0x7F || ends == null)
+        {
+            _api.RenderPassEncoderDrawIndexed(_pass, 6u * total, 1, 0, 0, record);
+            _quadsDrawn += total;
+            return;
+        }
+        uint drawn = 0;
+        for (int f = 0; f < GpuMesh.FaceGroups;)
+        {
+            if ((mask & (1 << f)) == 0) { f++; continue; }
+            int g = f;
+            while (g + 1 < GpuMesh.FaceGroups && (mask & (1 << (g + 1))) != 0) g++;
+            uint start = System.Math.Min(f == 0 ? 0u : (uint)ends[f - 1], total), end = System.Math.Min((uint)ends[g], total);
+            if (end > start)
+            {
+                _api.RenderPassEncoderDrawIndexed(_pass, 6u * (end - start), 1, 6u * start, 0, record);
+                drawn += end - start;
+            }
+            f = g + 1;
+        }
+        _quadsDrawn += drawn;
+        _quadsSkipped += total - drawn;
     }
+
+    /// <summary>Debug (panel): skip the chunk quads facing away from the camera (see <see cref="FacingCamera"/>).</summary>
+    public bool SkipFacingAway { get; set; } = true;
+
+    /// <summary>Which face groups of a chunk (bit f: +X, -X, +Y, -Y, +Z, -Z) can point at the camera: a +X face sits on a
+    /// plane x = 1..32 of the chunk (its local space), so none of them faces the camera unless it's at x > 0; a -X face on
+    /// x = 0..31, so only if it's at x < 32; and so on. The camera is brought into the chunk's space through the
+    /// transform's columns (rotation and uniform scale, as chunk transforms are).</summary>
+    private int FacingCamera(in Mat4 m)
+    {
+        var d = _cameraPosition - new Vector3D<float>(m.M12, m.M13, m.M14);
+        var c0 = new Vector3D<float>(m.M0, m.M1, m.M2);
+        var c1 = new Vector3D<float>(m.M4, m.M5, m.M6);
+        var c2 = new Vector3D<float>(m.M8, m.M9, m.M10);
+        float x = Vector3D.Dot(c0, d) / c0.LengthSquared, y = Vector3D.Dot(c1, d) / c1.LengthSquared,
+              z = Vector3D.Dot(c2, d) / c2.LengthSquared;
+        const float S = ChunkData.Size;
+        return (x > 0 ? 1 : 0) | (x < S ? 2 : 0) | (y > 0 ? 4 : 0) | (y < S ? 8 : 0) | (z > 0 ? 16 : 0) | (z < S ? 32 : 0);
+    }
+
+    /// <summary>Chunk quads drawn last frame, and skipped as facing away from the camera (for the panel).</summary>
+    public long ChunkQuadsDrawn { get; private set; }
+    public long ChunkQuadsSkipped { get; private set; }
+    private long _quadsDrawn, _quadsSkipped;
+    private Vector3D<float> _cameraPosition;
 
     /// <summary>The chunk draws' group-1 bind group over this frame's records, the shared quad buffer and the shared
     /// light map buffer, rebuilt when either buffer has been replaced (grown).</summary>
@@ -2061,9 +2179,7 @@ fn fs_particle(in: VSOut) -> @location(0) vec4<f32> {
 
     public void EndFrame()
     {
-        _api.RenderPassEncoderEnd(_pass);
-        _api.RenderPassEncoderRelease(_pass);
-        _pass = null;
+        EndPass(resolve: _splitting);
 
         // One upload for every draw's model uniform (queue writes land before the submit below), instead of a
         // QueueWriteBuffer per draw.
