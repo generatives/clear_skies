@@ -255,6 +255,14 @@ public sealed class TerrainSwapSystem : ISystem
         return SwapsOf(level).TryGetValue(p, out var c) ? !Waits(level, c, p) : e.Has<ChunkMeshedFlag>();
     }
 
+    /// <summary>Whether the finer level wants all eight chunks under coarse chunk <paramref name="p"/>.</summary>
+    private static bool ChildrenWanted(TerrainLevel level, ChunkPosition p)
+    {
+        for (int j = 0; j < 8; j++)
+            if (!ChunkLoadSystem.Wanted(level.Finer!, Child(p, j))) return false;
+        return true;
+    }
+
     /// <summary>Whether the eight finer chunks under coarse chunk <paramref name="p"/> are in the light store (or air).</summary>
     private bool ChildrenStored(TerrainLevel level, ChunkPosition p)
     {
@@ -388,6 +396,9 @@ public sealed class TerrainSwapSystem : ISystem
                 bool inBand = hasView && BoxDistance.ToChunk(view, p.X, p.Y, p.Z, level.Blocks) <= near;
                 if (inBand) _counts.Readiness++;
                 bool ready = inBand && ChildrenReady(level, p), stored = inBand && ChildrenStored(level, p);
+                // Inside the finer level's range, one not drawn isn't drawn till it leaves it: it would cover finer chunks
+                // already shown (and be lit in place of them) till the rest come, which they soon do.
+                bool inside = !c.Drawn && inBand && ChildrenWanted(level, p);
                 long t3 = Stopwatch.GetTimestamp();
                 _readyTicks += t3 - t2;
 
@@ -404,14 +415,14 @@ public sealed class TerrainSwapSystem : ISystem
                 // Terrain waiting to be shown is lit ahead of light changes on terrain already shown: this chunk while
                 // it's held back for its first light, with the chunks above and below it that
                 // its first light waits for too.
-                if (uploaded && waits && ShowFirst is { } first)
+                if (uploaded && waits && c.Drawn && ShowFirst is { } first)
                 {
                     _counts.ShowFirst += 3;
                     first(level.Volume.Gpu, p);
                     first(level.Volume.Gpu, Above(p, 1));
                     first(level.Volume.Gpu, Above(p, -1));
                 }
-                if (!ready)
+                if (!ready && !inside)
                 {
                     c.Leaving = 0;
                     if (!c.Drawn) c.FadeAt = c.WasReady ? _time : float.NegativeInfinity;
@@ -437,7 +448,7 @@ public sealed class TerrainSwapSystem : ISystem
                 // their first light is their own blocks'), and while that's still drawn as this swaps in over it: its rays
                 // then see only its own blocks there. (Uncovered at once, the finer level fading out was shadowed by the
                 // coarse blocks in it, and darkened.)
-                SetCover(level, p, c, uploaded, ready || stored || c.Drawn && (waits || Faded(c.FadeAt) < 1f));
+                SetCover(level, p, c, uploaded, ready || stored || inside || c.Drawn && (waits || Faded(c.FadeAt) < 1f));
                 c.WasReady = ready;
                 // Done: settled, shown, and swapped in or out with its fade over. Nothing changes for it now till the
                 // view moves or what's wanted does.
