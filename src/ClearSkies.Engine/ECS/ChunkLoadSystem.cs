@@ -142,7 +142,7 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         _pipeline.Priority = Distance;
         for (int k = 0; k < MaxLevels; k++)
             _grids[k] = _pipeline.AddGrid(k == 0 ? "full detail" : $"level {k}", k == 0 ? null : _grids[k - 1]);
-        _voxels = _pipeline.Add(new VoxelsStage(generatorFactory, chunkStore, _edits, preparer) { Added = Add, Released = Release });
+        _voxels = _pipeline.Add(new VoxelsStage(_grids, generatorFactory, chunkStore, _edits, preparer) { Added = Add, Released = Release });
         _levels.Add(new TerrainLevel(0, _grids[0], staticVolume, budget, _minY, _minY + 63) { Radius = viewDistance });
     }
 

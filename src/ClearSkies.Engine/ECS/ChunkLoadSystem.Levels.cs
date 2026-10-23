@@ -30,6 +30,7 @@ public sealed partial class ChunkLoadSystem
             Level = level;
             Grid = grid;
             Volume = volume;
+            grid.Volume = volume;
             Budget = budget;
             MinY = minY;
             MaxY = maxY;

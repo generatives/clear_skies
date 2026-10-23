@@ -9,15 +9,22 @@ public readonly record struct ChunkKey(int Grid, ChunkPosition Pos)
     public override string ToString() => $"{Grid}:{Pos}";
 }
 
+/// <summary>On a chunk entity in the pipeline: its key there.</summary>
+public struct InPipeline
+{
+    public ChunkKey Key;
+}
+
 /// <summary>A grid of chunks the pipeline makes: one of the terrain's levels, each linked to the next finer and
 /// coarser so <see cref="Relation.Children"/> and <see cref="Relation.Parent"/> can reach them, or a ship's.</summary>
 public sealed class PipelineGrid
 {
-    internal PipelineGrid(int id, string name, PipelineGrid? finer)
+    internal PipelineGrid(int id, string name, PipelineGrid? finer, ChunkVolume? volume)
     {
         Id = id;
         Name = name;
         Finer = finer;
+        Volume = volume;
         Level = finer == null ? 0 : finer.Level + 1;
         if (finer != null) finer.Coarser = this;
     }
@@ -31,15 +38,28 @@ public sealed class PipelineGrid
     /// <summary>How many grids finer ones there are: a chunk here covers 2^Level of the finest grid's across.</summary>
     public int Level { get; }
 
+    /// <summary>The volume its chunks go in, once there is one.</summary>
+    public ChunkVolume? Volume { get; set; }
+
+    /// <summary>Taken out of the pipeline (see <see cref="ChunkPipeline.RemoveGrid"/>).</summary>
+    public bool Removed { get; internal set; }
+
+    // Worked out as it's added (or before the first chunk, for those added before): each stage's slot in its chunks
+    // (-1 where it doesn't have the stage) and the inputs it reads here.
+    internal int[] SlotOf = Array.Empty<int>();
+    internal int SlotCount;
+    internal IReadOnlyList<Input>[] Inputs = Array.Empty<IReadOnlyList<Input>>();
+
     public ChunkKey Key(ChunkPosition pos) => new(Id, pos);
     public override string ToString() => Name;
 }
 
 /// <summary>What changed in a stage's output, so a dependant that only cares about part of it can skip a rerun: the
-/// faces whose border cells changed, as bits 0-5 in <see cref="Faces"/>'s order. New output changes them all.</summary>
-public readonly record struct Change(int BorderFaces)
+/// faces whose border cells changed, as bits 0-5 in <see cref="Faces"/>'s order, and whether what's all opaque may have
+/// changed (what buries a neighbour). New output changes them all.</summary>
+public readonly record struct Change(int BorderFaces, bool Opacity = false)
 {
-    public static readonly Change All = new(0b111111);
+    public static readonly Change All = new(0b111111, true);
     public bool Touches(int face) => (BorderFaces >> face & 1) != 0;
 }
 

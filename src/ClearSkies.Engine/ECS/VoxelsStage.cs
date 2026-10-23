@@ -17,14 +17,18 @@ public sealed class ChunkVoxels(ChunkKey key, ChunkData? data, ChunkPreparation?
     public bool InVolume, Replaced;
 }
 
+/// <summary>A stage whose output is its grids' chunks' blocks (<see cref="ChunkVoxels"/>): what an edit changes, and what
+/// the stages after read.</summary>
+public interface IBlocksStage;
+
 /// <summary>
 /// Makes a chunk's blocks at its grid's resolution, on a worker: grid 0 is full detail, loaded from the store if edited
 /// (see <see cref="ChunkEdits"/>), else generated; grid k is 2^k blocks a cell, made from the full chunks under it,
 /// shrunk a level at a time (<see cref="CoarseTerrain"/>). Whoever streams the chunks puts them where they go
 /// (<see cref="Added"/>) and takes them out again (<see cref="Released"/>).
 /// </summary>
-public sealed class VoxelsStage(Func<IWorldGenerator> generatorFactory, IChunkStore store, ChunkEdits edits,
-                                IChunkPreparer? preparer = null) : WorkerStage<ChunkVoxels>
+public sealed class VoxelsStage(IReadOnlyCollection<PipelineGrid> grids, Func<IWorldGenerator> generatorFactory, IChunkStore store,
+                                ChunkEdits edits, IChunkPreparer? preparer = null) : WorkerStage<ChunkVoxels>, IBlocksStage
 {
     private readonly ThreadLocal<IWorldGenerator> _generator = new(generatorFactory);
     private readonly ThreadLocal<ChunkData> _scratch = new(() => new ChunkData());
@@ -40,6 +44,7 @@ public sealed class VoxelsStage(Func<IWorldGenerator> generatorFactory, IChunkSt
     public IWorldGenerator Generator => _generator.Value!;
 
     public override string Name => "Voxels";
+    public override bool AppliesTo(PipelineGrid grid) => grids.Contains(grid);
     public override IReadOnlyList<Pipeline.Input> InputsFor(PipelineGrid grid) => Array.Empty<Pipeline.Input>();
 
     public override ChunkVoxels Make(ChunkKey key, StageInputs inputs)

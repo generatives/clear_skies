@@ -175,6 +175,30 @@ public class ChunkPipelineTests
     }
 
     [Fact]
+    public void A_grid_added_after_chunks_gets_its_stages_and_one_removed_lets_go_of_its_chunks()
+    {
+        var pipeline = new ChunkPipeline(work => work());
+        var world = pipeline.AddGrid("world");
+        var gen = pipeline.Add(new Gen(grid => grid.Name != "ship"));
+        var mesh = pipeline.Add(new Reader("mesh", _ => new[] { new Input(gen, Relation.Self) }, grid => grid.Name != "ship"));
+        pipeline.Want(world.Key(P(0)), true);
+        pipeline.Update(Plenty);
+
+        var ship = pipeline.AddGrid("ship");
+        var other = pipeline.AddGrid("other");
+        pipeline.Want(ship.Key(P(0)), true);
+        pipeline.Want(other.Key(P(0)), true);
+        for (int i = 0; i < 3; i++) pipeline.Update(Plenty);
+        Assert.Equal(SlotState.Done, pipeline.Get(other.Key(P(0)))!.State(mesh));
+        Assert.Equal(2, gen.Runs); // not on the ship's chunk
+
+        pipeline.RemoveGrid(other);
+        pipeline.Update(Plenty);
+        Assert.Null(pipeline.Get(other.Key(P(0))));
+        Assert.Single(gen.Released, r => r.StartsWith($"gen {other.Id}:"));
+    }
+
+    [Fact]
     public void A_chunk_no_longer_wanted_is_dropped_after_its_worker_finishes()
     {
         var jobs = new Queue<Action>();

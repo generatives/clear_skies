@@ -16,6 +16,11 @@ public struct ChunkGrid
 public struct LowResolutionCopy { }
 
 public struct NeedsRemeshFlag { }
+
+/// <summary>Published (see <see cref="DefaultEcs.World.Publish{T}"/>) when an edit changes a chunk's blocks: the
+/// faces whose border cells changed (bits 0-5, <see cref="ChunkVolume.FaceHasSolid"/>'s order), and whether the chunk
+/// stopped or started being all opaque.</summary>
+public readonly record struct ChunkBlocksChanged(DefaultEcs.Entity Chunk, int BorderFaces, bool OpacityChanged);
 public struct NeedsGpuUploadFlag { }
 
 /// <summary>The chunk has been meshed since it started being drawn, so it's on screen (with its last mesh while a

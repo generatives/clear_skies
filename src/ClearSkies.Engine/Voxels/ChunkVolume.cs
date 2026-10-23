@@ -217,7 +217,8 @@ public class ChunkVolume : IReplicatedChildren
 
         bool wasOpaque = entry.Data.IsAllOpaque;
         entry.Data.Set(lx, ly, lz, id, orientation);
-        if (entry.Data.IsAllOpaque != wasOpaque) MarkBuriedNeighbours(cp);
+        bool opacityChanged = entry.Data.IsAllOpaque != wasOpaque;
+        if (opacityChanged) MarkBuriedNeighbours(cp);
         SyncBlockEntity(entry, new Vector3D<int>(lx, ly, lz), id, orientation);
         entry.Entity.Set(new NeedsRemeshFlag());
         entry.Entity.Set(new NeedsRecollideFlag());
@@ -233,6 +234,8 @@ public class ChunkVolume : IReplicatedChildren
         if (ly == L) MarkBorderCell(cp.Offset( 0,  1,  0), lx, 0,  lz);
         if (lz == 0) MarkBorderCell(cp.Offset( 0,  0, -1), lx, ly, L);
         if (lz == L) MarkBorderCell(cp.Offset( 0,  0,  1), lx, ly, 0);
+        int faces = (lx == 0 ? 1 : 0) | (lx == L ? 2 : 0) | (ly == 0 ? 4 : 0) | (ly == L ? 8 : 0) | (lz == 0 ? 16 : 0) | (lz == L ? 32 : 0);
+        _world.Publish(new ChunkBlocksChanged(entry.Entity, faces, opacityChanged));
     }
 
     /// <summary>The orientation of the block at a cell (<see cref="BlockOrientation.Upright"/> where nothing is loaded).</summary>
@@ -277,7 +280,8 @@ public class ChunkVolume : IReplicatedChildren
             }
             if (!changed) continue;
 
-            if (entry.Data.IsAllOpaque != wasOpaque) MarkBuriedNeighbours(cp);
+            bool opacityChanged = entry.Data.IsAllOpaque != wasOpaque;
+            if (opacityChanged) MarkBuriedNeighbours(cp);
             entry.Entity.Set(new NeedsRemeshFlag());
             entry.Entity.Set(new NeedsRecollideFlag());
             entry.Entity.Set(new NeedsGpuUploadFlag());
@@ -289,6 +293,9 @@ public class ChunkVolume : IReplicatedChildren
             if (y1 == S - 1) MarkBorderFace(cp.Offset( 0,  1,  0), 2);
             if (z0 == 0)     MarkBorderFace(cp.Offset( 0,  0, -1), 5);
             if (z1 == S - 1) MarkBorderFace(cp.Offset( 0,  0,  1), 4);
+            int faces = (x0 == 0 ? 1 : 0) | (x1 == S - 1 ? 2 : 0) | (y0 == 0 ? 4 : 0) | (y1 == S - 1 ? 8 : 0)
+                      | (z0 == 0 ? 16 : 0) | (z1 == S - 1 ? 32 : 0);
+            _world.Publish(new ChunkBlocksChanged(entry.Entity, faces, opacityChanged));
         }
     }
 
