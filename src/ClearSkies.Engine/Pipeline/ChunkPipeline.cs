@@ -34,7 +34,8 @@ public sealed class ChunkPipeline
     private bool _built;
     private readonly PriorityQueue<(PipelineChunk Record, Stage Stage), (float, int)> _ready = new();
     private readonly ConcurrentQueue<(PipelineChunk Record, WorkerStage Stage, object Made)> _made = new();
-    private readonly HashSet<(PipelineChunk Record, Stage Stage)> _asking = new();
+    // External stages started and not yet reported: each is asked again every frame.
+    private readonly HashSet<(PipelineChunk Record, Stage Stage)> _awaitingExternal = new();
     private readonly HashSet<PipelineChunk> _maybeDrop = new();
     private readonly Action<Action> _runOnWorker;
     private int _inFlight;
@@ -129,7 +130,7 @@ public sealed class ChunkPipeline
     public void Report(ChunkKey key, Stage stage, object? output = null, Change? change = null)
     {
         if (Get(key) is not { } record || !record.Has(stage.Id) || !record.At(stage.Id).Is(SlotFlags.Running)) return;
-        _asking.Remove((record, stage));
+        _awaitingExternal.Remove((record, stage));
         Finish(record, stage, output, change ?? Change.All);
     }
 
@@ -148,7 +149,7 @@ public sealed class ChunkPipeline
             Finish(made.Record, made.Stage, made.Made, change);
         }
 
-        foreach (var (record, stage) in _asking) ((ExternalStage)stage).Request(record);
+        foreach (var (record, stage) in _awaitingExternal) ((ExternalStage)stage).Request(record);
 
         var later = new List<((PipelineChunk, Stage) Item, (float, int) Priority)>();
         bool workersFull = _inFlight >= budgets.WorkerSlots, mainFull = !MainLeft();
@@ -172,7 +173,7 @@ public sealed class ChunkPipeline
                 case ExternalStage external:
                     slot.Set(SlotFlags.Stale, false);
                     slot.Set(SlotFlags.Running, true);
-                    _asking.Add((record, external));
+                    _awaitingExternal.Add((record, external));
                     external.Request(record);
                     break;
                 default:
@@ -355,7 +356,7 @@ public sealed class ChunkPipeline
         {
             if (!record.Has(stage.Id)) continue;
             ref var slot = ref record.At(stage.Id);
-            _asking.Remove((record, stage));
+            _awaitingExternal.Remove((record, stage));
             if (slot.Is(SlotFlags.Holding)) { slot.Set(SlotFlags.Holding, false); DemandSources(record, stage.Id, -1); }
             if (slot.Output is { } output) { slot.Output = null; stage.Release(output); }
         }
