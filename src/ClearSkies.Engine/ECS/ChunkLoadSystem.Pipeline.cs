@@ -72,14 +72,16 @@ public sealed partial class ChunkLoadSystem
         level.InFlightChunks--;
     }
 
-    /// <summary>The order the pipeline makes chunks in: full detail first, then coarse chunks nearest first (by how far
-    /// they are from their level's nearest interest, across, in blocks).</summary>
+    /// <summary>The order the pipeline makes chunks in: full detail first, then coarse chunks, each nearest first (by how
+    /// far they are from their level's nearest interest, in blocks). In 3D, so a column's chunks are spread among the
+    /// columns around them: workers given its chunks at once each waited on its profile.</summary>
     private float Distance(ChunkKey key)
     {
         if (key.Grid >= _levels.Count) return float.PositiveInfinity;
         var level = _levels[key.Grid];
         long best = long.MaxValue;
-        foreach (var ring in level.Rings) best = System.Math.Min(best, Sq(key.Pos.X - ring.Centre.x) + Sq(key.Pos.Z - ring.Centre.z));
+        foreach (var ring in level.Rings)
+            best = System.Math.Min(best, Sq(key.Pos.X - ring.Centre.x) + Sq(key.Pos.Y - ring.Centre.y) + Sq(key.Pos.Z - ring.Centre.z));
         if (best == long.MaxValue) return float.PositiveInfinity;
         return MathF.Sqrt(best) * level.Blocks + (key.Grid == 0 ? 0f : CoarseAfter);
     }

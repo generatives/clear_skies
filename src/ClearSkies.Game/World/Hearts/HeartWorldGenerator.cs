@@ -619,23 +619,26 @@ internal sealed class ProfileCache
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, ProfileCache> BySeed = new();
     public static ProfileCache For(ulong seed) => BySeed.GetOrAdd(seed, _ => new ProfileCache());
 
-    private readonly Dictionary<(int, int), ColumnProfile> _profiles = new();
+    private readonly Dictionary<(int, int), Lazy<ColumnProfile>> _profiles = new();
     private readonly Queue<(int, int)> _order = new();
     private readonly object _lock = new();
 
-    public ColumnProfile Get(int x, int z, Func<ColumnProfile> build)
+    /// <summary>The column's profile, built once: a thread asking for one being built waits for it (chunks of a column
+    /// are near each other in the order they're made, so two workers often want the same one at once).</summary>
+    internal ColumnProfile Get(int x, int z, Func<ColumnProfile> build)
     {
-        lock (_lock)
-            if (_profiles.TryGetValue((x, z), out var kept)) return kept;
-        var made = build(); // outside the lock: other threads go on meanwhile
+        Lazy<ColumnProfile> lazy;
         lock (_lock)
         {
-            if (_profiles.TryGetValue((x, z), out var kept)) return kept;
-            _profiles[(x, z)] = made;
-            _order.Enqueue((x, z));
-            if (_order.Count > Capacity) _profiles.Remove(_order.Dequeue());
-            return made;
+            if (!_profiles.TryGetValue((x, z), out lazy!))
+            {
+                lazy = new Lazy<ColumnProfile>(build, LazyThreadSafetyMode.ExecutionAndPublication);
+                _profiles[(x, z)] = lazy;
+                _order.Enqueue((x, z));
+                if (_order.Count > Capacity) _profiles.Remove(_order.Dequeue());
+            }
         }
+        return lazy.Value; // built outside the lock: other columns go on meanwhile
     }
 }
 
