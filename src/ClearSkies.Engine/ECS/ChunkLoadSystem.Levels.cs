@@ -18,7 +18,7 @@ namespace ClearSkies.Engine.ECS;
 ///
 /// A level's chunk swaps with the eight of the level nearer the view under it (see <see cref="TerrainSwapSystem"/>); every level
 /// ends in whole 2x2x2 groups, so each chunk of the next swaps for its eight in one go. A coarse chunk's blocks are dropped once it's
-/// meshed and in the GPU store: it's never edited or collided with.
+/// meshed and in the GPU store (see <see cref="DropBlocksStage"/>): it's never edited or collided with.
 /// </summary>
 public sealed partial class ChunkLoadSystem
 {
@@ -101,16 +101,10 @@ public sealed partial class ChunkLoadSystem
         internal int EvictNext = -1, Evictions;
         internal bool NothingToEvict, Full;
 
-        internal readonly HashSet<ChunkPosition> ToDrop = new(); // loaded chunks whose blocks can go once they're meshed and uploaded
-        internal int Dropped;
-
         /// <summary>Chunks no longer wanted but held loaded (see <see cref="KeepLoaded"/>), with the frame each was
         /// first held.</summary>
         internal readonly Dictionary<ChunkPosition, int> Held = new();
     }
-
-    /// <summary>Coarse chunks looked at a frame for dropping their blocks.</summary>
-    private const int DropChecksPerFrame = 256;
 
     /// <summary>The levels of detail: full detail, then the coarse ones nearest the view first (see <see cref="SetLevels"/>).</summary>
     public IReadOnlyList<TerrainLevel> Levels => _levels;
@@ -202,41 +196,6 @@ public sealed partial class ChunkLoadSystem
         }
     }
 
-    /// <summary>Whether a coarse chunk's blocks can go once it's meshed and uploaded. A chunk all one block, or of
-    /// opaque cubes, keeps them: they're small, or say it's buried. So does one with see-through blocks on a side,
-    /// which remeshes when a neighbour comes.</summary>
-    private static bool CanDrop(ChunkData data)
-    {
-        if (data.IsUniform(out _) || data.IsAllOpaque) return false;
-        for (int f = 0; f < 6; f++)
-            if (ChunkVolume.FaceHasTransparent(data, f)) return false;
-        return true;
-    }
-
-    /// <summary>Drops the blocks of coarse chunks that are meshed and in the GPU store, a few a frame.</summary>
-    private void DropSome()
-    {
-        int checks = DropChecksPerFrame;
-        foreach (var level in _levels)
-        {
-            if (level.ToDrop.Count == 0) continue;
-            var done = new List<ChunkPosition>();
-            foreach (var pos in level.ToDrop)
-            {
-                if (checks-- <= 0) break;
-                var entry = level.Volume.GetEntry(pos);
-                if (entry == null) { done.Add(pos); continue; }
-                var e = entry.Entity;
-                if (!_pipeline.Settled(level.Key(pos)) || !e.Has<ChunkMeshedFlag>() || !e.Has<ChunkUploadedFlag>() || e.Has<NeedsGpuUploadFlag>())
-                    continue;
-                entry.DropData();
-                level.Dropped++;
-                done.Add(pos);
-            }
-            foreach (var pos in done) level.ToDrop.Remove(pos);
-        }
-    }
-
     internal void DrawLevelsUi()
     {
         ImGui.Separator();
@@ -244,6 +203,6 @@ public sealed partial class ChunkLoadSystem
         foreach (var level in _levels.Skip(1))
             ImGui.Text($"Level {level.Level} (x{1 << level.Level}) to {level.Radius:F0} blocks: {level.Columns.Count} columns known, " +
                        $"{level.Queue.Count - level.QueueHead} queued, {level.InFlightChunks} chunks being made, " +
-                       $"{level.Volume.LoadedCount:N0} chunks ({level.Dropped:N0} with blocks dropped)");
+                       $"{level.Volume.LoadedCount:N0} chunks");
     }
 }

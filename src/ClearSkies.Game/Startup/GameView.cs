@@ -1,5 +1,6 @@
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.ECS;
+using ClearSkies.Engine.Pipeline;
 using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Ui;
 using ClearSkies.Engine.Voxels;
@@ -87,13 +88,15 @@ public sealed class GameView : IDisposable
         var host = Host;
         var renderer = host.Renderer;
         var volume = world.StaticVolume;
-        host.AddSystem(new GpuResidencySystem(host.World, volume, GridStore), SystemStage.PreRender);
+        var residency = new GpuResidencySystem(host.World, volume, GridStore);
+        host.AddSystem(residency, SystemStage.PreRender);
         var light = new GpuLightSystem(host.World, volume, host.Context, GridStore);
         if (_lightingPreset != null && !light.ApplyPreset(_lightingPreset))
             Console.WriteLine($"Unknown lighting preset '{_lightingPreset}' (minimal, low, medium or high); using medium.");
         if (_checkerBounce is { } spread) light.BounceSpread = spread;
         host.AddSystem(light, SystemStage.PreRender);
-        MeshStages.Add(world.ChunkPipeline, Meshes); // every chunk meshed in the chunk pipeline
+        var (_, upload) = MeshStages.Add(world.ChunkPipeline, Meshes); // every chunk meshed in the chunk pipeline
+        var (_, firstLight, _) = LightStages.Add(world.ChunkPipeline, residency, light, renderer, upload); // and lit
         host.AddSystem(new BlockModelSystem(host.World, BlockModels), SystemStage.PreRender); // block entities -> RenderedModel
         host.AddSystem(new ClimateTintSystem(renderer, new BiomeTintMap(world.Seed)), SystemStage.RenderWorld); // grass and leaves coloured by biome
 
@@ -110,6 +113,7 @@ public sealed class GameView : IDisposable
         var load = world.ChunkLoad;
         var swaps = world.TerrainSwaps;
         swaps.IsLit = light.IsLit;                // swaps wait for the incoming terrain's light
+        swaps.FirstLit = key => world.ChunkPipeline.Pipeline.Get(key)?.State(firstLight) == SlotState.Done;
         swaps.ShowFirst = light.ShowFirst;        // terrain waiting to be shown is lit ahead of the rest
         swaps.SetCovered = GridStore.SetCovered;  // each level lit by its own blocks where a finer one is in
         if (_lodLevels > 0)

@@ -158,7 +158,6 @@ public sealed partial class ChunkLoadSystem
         _adding = true;
         var entry = level.Volume.AddChunk(pos, made.Data, made.Prepared);
         _adding = false;
-        if (level.Level > 0 && CanDrop(made.Data)) level.ToDrop.Add(pos);
         Adopt(made, entry);
     }
 

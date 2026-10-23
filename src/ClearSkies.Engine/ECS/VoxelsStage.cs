@@ -19,7 +19,12 @@ public sealed class ChunkVoxels(ChunkKey key, ChunkData? data, ChunkPreparation?
 
 /// <summary>A stage whose output is its grids' chunks' blocks (<see cref="ChunkVoxels"/>): what an edit changes, and what
 /// the stages after read.</summary>
-public interface IBlocksStage;
+public interface IBlocksStage
+{
+    /// <summary>The stages giving <paramref name="grid"/>'s chunks their blocks (one, for any grid that has blocks).</summary>
+    static IEnumerable<Stage> Of(ChunkPipeline pipeline, PipelineGrid grid)
+        => pipeline.Stages.Where(s => s is IBlocksStage && s.AppliesTo(grid));
+}
 
 /// <summary>
 /// Makes a chunk's blocks at its grid's resolution, on a worker: grid 0 is full detail, loaded from the store if edited

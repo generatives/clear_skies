@@ -37,7 +37,7 @@ public sealed class MeshStage(ChunkPipeline pipeline, ChunkMeshes meshes)
     /// <summary>The blocks of the chunk and its neighbours, from whichever stage gives the grid's blocks (generated
     /// terrain's, or a ship's).</summary>
     public override IReadOnlyList<Pipeline.Input> InputsFor(PipelineGrid grid)
-        => pipeline.Stages.Where(s => s is IBlocksStage && s.AppliesTo(grid)).SelectMany(blocks => new Pipeline.Input[]
+        => IBlocksStage.Of(pipeline, grid).SelectMany(blocks => new Pipeline.Input[]
         {
             new(blocks, Relation.Self),
             new(blocks, Relation.Neighbours.Where(Matters), AcceptsMissing: true),

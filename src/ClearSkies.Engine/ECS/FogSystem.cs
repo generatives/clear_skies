@@ -41,8 +41,8 @@ public sealed class FogSystem : ISystem, IDebugUiSystem
         // for the first time since they started being drawn.
         _chunksNotMeshedYet = world.GetEntities().With<Chunk>().With<OwnPresence>().With<Rendered>()
                              .Without<ChunkMeshedFlag>().AsSet();
-        _chunksNotUploadedYet = world.GetEntities().With<Chunk>().With<OwnPresence>()
-                               .With<NeedsGpuUploadFlag>().Without<ChunkUploadedFlag>().AsSet();
+        _chunksNotUploadedYet = world.GetEntities().With<Chunk>().With<OwnPresence>().With<Rendered>()
+                               .Without<ChunkUploadedFlag>().AsSet();
     }
 
     /// <summary>Distance from the view at which the loaded world stops, eased over time. Fog is total by here.</summary>

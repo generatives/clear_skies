@@ -23,6 +23,9 @@ public readonly record struct FrameBudgets(int WorkerSlots, double MainMs);
 public sealed class ChunkPipeline
 {
     private const int MaxSkipped = 1024; // ready chunks looked past a frame, for their worker being full
+    // The most of a frame's main-thread time spent asking external stages: thousands of chunks wait on their first
+    // light while the world loads, each asked every frame.
+    private const double ExternalShare = 0.25;
     private readonly List<PipelineGrid> _grids = new();
     private readonly Dictionary<ChunkVolume, PipelineGrid> _byVolume = new();
     private readonly List<Stage> _stages = new();
@@ -283,8 +286,11 @@ public sealed class ChunkPipeline
         foreach (var (item, priority) in _skipped) _ready[(int)Executor.Worker].Enqueue(item, priority);
         _skipped.Clear();
 
-        // Each one waiting is asked once at most, and those not reached are first next frame.
-        for (int n = _awaitingExternal.Count; n > 0 && MainLeft(); n--)
+        // Each one waiting is asked once at most, and those not reached are first next frame. Asking takes a share of
+        // the time at most, so a crowd of them leaves the frame stages their turn.
+        long asking = Stopwatch.GetTimestamp();
+        bool AskingLeft() => MainLeft() && Stopwatch.GetElapsedTime(asking).TotalMilliseconds < budgets.MainMs * ExternalShare;
+        for (int n = _awaitingExternal.Count; n > 0 && AskingLeft(); n--)
         {
             var (record, stage) = _awaitingExternal.Dequeue();
             if (record.Removed) continue;
@@ -292,7 +298,7 @@ public sealed class ChunkPipeline
             if (!Ask(record, stage)) _awaitingExternal.Enqueue((record, stage));
         }
 
-        while (MainLeft() && TakeReady(Executor.External, out var record, out var stage, out _))
+        while (AskingLeft() && TakeReady(Executor.External, out var record, out var stage, out _))
         {
             ref var slot = ref record.At(stage.Id);
             slot.Set(SlotFlags.Stale, false);

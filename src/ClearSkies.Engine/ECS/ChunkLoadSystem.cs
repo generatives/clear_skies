@@ -186,10 +186,10 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
     }
 
     // CPU time of each step, for the debug panel: which one a hitch while streaming came from.
-    private const int UnloadStep = 0, QueueStep = 1, DispatchStep = 2, EvictStep = 3, EvictOrderStep = 4, LevelsStep = 5;
+    private const int UnloadStep = 0, QueueStep = 1, DispatchStep = 2, EvictStep = 3, EvictOrderStep = 4;
     private readonly StepTimer _steps = new("Rebuild: unloading what's unwanted",
                                             "Rebuild: queueing columns", "Dispatching jobs", "Evicting far columns",
-                                            "Evicting: ordering columns", "Dropping coarse blocks") { Owner = "Chunk Loading" };
+                                            "Evicting: ordering columns") { Owner = "Chunk Loading" };
 
     public void Update(float dt)
     {
@@ -224,10 +224,6 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
 
         Dispatch();
         _steps.Lap(DispatchStep);
-
-
-        DropSome();
-        _steps.Lap(LevelsStep);
     }
 
     /// <summary>This frame's interests as <paramref name="level"/> streams them (<see cref="TerrainLevel.Current"/>, in
@@ -806,7 +802,6 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         // terrain (a bridge, a tower) comes back, and one that cleared a chunk out stops costing budget.
         if (level.Level == 0 && entry is not null && entry.Data.IsDirty) RecordEdited(pos, entry.Data.HasAnyNonAir());
         level.Volume.RemoveChunk(pos);
-        level.ToDrop.Remove(pos);
         if (entry is { DataDropped: false }) entry.Data.Release(); // its arrays go to the next chunk to load
     }
 }
