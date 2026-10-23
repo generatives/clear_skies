@@ -35,8 +35,8 @@ public sealed class ChunkPipeline
     private readonly PriorityQueue<(PipelineChunk Record, Stage Stage), (float, int)>[] _ready =
         Enum.GetValues<Executor>().Select(_ => new PriorityQueue<(PipelineChunk, Stage), (float, int)>()).ToArray();
     private readonly ConcurrentQueue<(PipelineChunk Record, WorkerStage Stage, object Made)> _made = new();
-    // External stages started and not yet reported: each is asked again every frame.
-    private readonly HashSet<(PipelineChunk Record, ExternalStage Stage)> _awaitingExternal = new();
+    // External stages asked and not done yet: asked again in turn, as far as each frame's time goes.
+    private readonly Queue<(PipelineChunk Record, ExternalStage Stage)> _awaitingExternal = new();
     private readonly HashSet<PipelineChunk> _maybeDrop = new();
     private readonly Action<Action> _runOnWorker;
     private int _inFlight;
@@ -142,24 +142,29 @@ public sealed class ChunkPipeline
             Finish(made.Record, made.Stage, made.Made, change);
         }
 
-        foreach (var (record, stage) in _awaitingExternal.ToList())
-            if (Ask(record, stage)) _awaitingExternal.Remove((record, stage));
-
-        while (_inFlight < budgets.WorkerSlots && TakeReady(Executor.Worker, out var record, out var stage, out _))
+        // Everything below is on the main thread, so all of it stops when the frame's time is spent.
+        while (MainLeft() && _inFlight < budgets.WorkerSlots && TakeReady(Executor.Worker, out var record, out var stage, out _))
             StartWorker(record, (WorkerStage)stage);
+
+        // Each one waiting is asked once at most, and those not reached are first next frame.
+        for (int n = _awaitingExternal.Count; n > 0 && MainLeft(); n--)
+        {
+            var (record, stage) = _awaitingExternal.Dequeue();
+            if (!record.Removed && !Ask(record, stage)) _awaitingExternal.Enqueue((record, stage));
+        }
+
+        while (MainLeft() && TakeReady(Executor.External, out var record, out var stage, out _))
+        {
+            ref var slot = ref record.At(stage.Id);
+            slot.Set(SlotFlags.Stale, false);
+            slot.Set(SlotFlags.Running, true);
+            if (!Ask(record, (ExternalStage)stage)) _awaitingExternal.Enqueue((record, (ExternalStage)stage));
+        }
 
         var waiting = new List<((PipelineChunk, Stage) Item, (float, int) Priority)>();
         while (MainLeft() && TakeReady(Executor.Frame, out var record, out var stage, out var priority))
             if (!RunFrame(record, (FrameStage)stage)) waiting.Add(((record, stage), priority));
         foreach (var (item, priority) in waiting) _ready[(int)Executor.Frame].Enqueue(item, priority);
-
-        while (TakeReady(Executor.External, out var record, out var stage, out _))
-        {
-            ref var slot = ref record.At(stage.Id);
-            slot.Set(SlotFlags.Stale, false);
-            slot.Set(SlotFlags.Running, true);
-            if (!Ask(record, (ExternalStage)stage)) _awaitingExternal.Add((record, (ExternalStage)stage));
-        }
 
         foreach (var record in _maybeDrop) DropIfUnneeded(record);
         _maybeDrop.Clear();
@@ -321,7 +326,6 @@ public sealed class ChunkPipeline
         {
             if (!record.Has(stage.Id)) continue;
             ref var slot = ref record.At(stage.Id);
-            if (stage is ExternalStage external) _awaitingExternal.Remove((record, external));
             if (slot.Output is { } output) { slot.Output = null; stage.Release(output); }
         }
         Dropped?.Invoke(record);
