@@ -82,8 +82,8 @@ public sealed class ChunkPipeline
     /// <summary>Adds a grid, at any time.</summary>
     public PipelineGrid AddGrid(string name, PipelineGrid? finer = null) => Add(new PipelineGrid(_grids.Count, name, finer, null));
 
-    /// <summary>The grid of a volume that holds its chunks' blocks (a ship's, see
-    /// <see cref="PipelineGrid.VolumeHoldsBlocks"/>): the one it has, or a new one.</summary>
+    /// <summary>The grid of a volume whose chunks are built, not generated (a ship's, see
+    /// <see cref="PipelineGrid.Generated"/>): the one it has, or a new one.</summary>
     public PipelineGrid GridFor(ChunkVolume volume, string name)
         => _byVolume.TryGetValue(volume, out var grid) ? grid : _byVolume[volume] = Add(new PipelineGrid(_grids.Count, name, null, volume));
 
