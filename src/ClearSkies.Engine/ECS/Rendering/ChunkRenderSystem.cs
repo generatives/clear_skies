@@ -205,8 +205,8 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         long t2 = System.Diagnostics.Stopwatch.GetTimestamp();
 
         // Light maps whose chunk's light changed since they were baked (or never baked) are baked before anything draws:
-        // only the chunks in view, so one out of view waits until it's seen. A scaled volume's go to a budget, and a
-        // chunk of one never baked isn't drawn until it is.
+        // only the chunks in view, so one out of view waits until it's seen. A scaled volume's go to a budget, but for
+        // new meshes.
         _bakedQuads = 0;
         int kept = 0;
         var draws = CollectionsMarshal.AsSpan(_draws);
@@ -335,18 +335,20 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     }
 
     /// <summary>Lists a draw's stale light maps for baking, if it's lit from them. A scaled volume's go while the frame's
-    /// budget lasts (always the first). Returns whether it can be drawn: its maps are baked, or were once.</summary>
+    /// budget lasts (always the first), except maps never baked: a chunk shown that's meshed again (an edit, or a
+    /// neighbour coming) has new meshes, baked at once rather than leaving it out (and popping back in) till there's
+    /// room. Returns whether it can be drawn.</summary>
     private bool Bake(in ChunkDraw d)
     {
         if (d.Light == ChunkLight.OpenAir) return true;
-        if (d.Light == ChunkLight.Kept) return AllBaked(in d);
+        if (d.Light == ChunkLight.Kept && AllBaked(in d)) return true;
         int stamp = _renderer.LightStampOf(d.Handle, d.Chunk);
         if (d.Budgeted)
         {
             int quads = Stale(d.Mesh, d.Handle, stamp) + Stale(d.CutoutMesh, d.Handle, stamp)
                       + Stale(d.TransparentMesh, d.Handle, stamp);
             if (quads == 0) return true;
-            if (_bakedQuads > 0 && _bakedQuads + quads > ScaledBakeQuadBudget) return AllBaked(in d);
+            if (_bakedQuads > 0 && _bakedQuads + quads > ScaledBakeQuadBudget && AllBaked(in d)) return true;
             _bakedQuads += quads;
         }
         _renderer.PrepareLightmap(d.Mesh, d.Handle, d.Chunk, stamp);
