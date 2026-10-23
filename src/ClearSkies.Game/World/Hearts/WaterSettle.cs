@@ -133,46 +133,10 @@ internal sealed class WaterSettle
         }
 
         // A thin strip of ground between a lake and a river beside it (a dam the samples were too coarse to see) is
-        // cut through, so the river runs into the lake; so is a rim just breaking a lake's surface. (What is cut is the
-        // lake's from then on, so a strip cut part way through is cut on through.)
-        for (bool cut = true; cut;)
-        {
-        cut = false;
-        for (int c = 0; c < N * N; c++)
-        {
-            if (kind[c] != Planned || depth[c] > 0) continue;
-            foreach (var (dx, dz) in new[] { (1, 0), (-1, 0), (0, 1), (0, -1) })
-            {
-                int i = c % N, k = c / N, s = 1, n = c;
-                for (; s <= DamWidth + 1; s++)
-                {
-                    int ni = i + s * dx, nk = k + s * dz;
-                    if (ni < 0 || nk < 0 || ni >= N || nk >= N) { s = int.MaxValue; break; }
-                    n = ni + N * nk;
-                    if (kind[n] != Dry) break;
-                    if (ground[n] == int.MinValue || ground[n] == int.MaxValue || ground[n] > level[c] + DamHeight) { s = int.MaxValue; break; }
-                }
-                if (s < 2 || s > DamWidth + 1 || kind[n] != Planned) continue;
-                // (Between two stretches of one lake, only a rim at about its level: a strip just breaking its surface.)
-                if (depth[n] == 0)
-                {
-                    bool rim = level[n] == level[c];
-                    for (int t = 1; t < s && rim; t++) rim = ground[c + t * (dx + N * dz)] <= level[c] + RimHeight;
-                    if (!rim) continue;
-                }
-                int w = Math.Min(level[c], level[n]);
-                for (int t = 1; t < s; t++)
-                {
-                    int d = c + t * (dx + N * dz);
-                    plan[d] = level[d] = w;
-                    depth[d] = 0;
-                    ground[d] = Math.Min(ground[d], w - 1);
-                    kind[d] = Planned;
-                    cut = true;
-                }
-            }
-        }
-        }
+        // cut through, so the river runs into the lake; so is a rim just breaking a lake's surface, and a single row of
+        // ground between two rivers, or two stretches of one. (What is cut by a lake is the lake's from then on, so a strip cut part
+        // way through is cut on through.)
+        Cut();
 
         // Water spreads into gaps beside it lower than it.
         var reach = Distance(c => kind[c] == Planned, FillReach);
@@ -195,7 +159,7 @@ internal sealed class WaterSettle
         var raised = new bool[N * N]; // (risen as below: no longer level with the rest of its stretch)
         for (int round = 0, settling = 1; settling == 1 && round < MaxRounds; round++)
         {
-            settling = 0;
+            settling = Cut() ? 1 : 0;
             // It stands no higher than the dry ground beside it: water lower than that comes down to it (and a lake,
             // or a stretch of river at about one level, comes down with it, no more than the block it was planned
             // over its neighbour); over a drop, it ends; spread into a gap that doesn't hold it, it drains back out.
@@ -289,6 +253,57 @@ internal sealed class WaterSettle
             settled.Ground[o] = ground[c] == int.MinValue || ground[c] >= top[c] ? short.MaxValue : (short)ground[c];
         }
         return settled;
+
+        // Cuts through the strips described above; whether it cut any.
+        bool Cut()
+        {
+            bool any = false;
+            for (bool cut = true; cut;)
+            {
+                cut = false;
+                for (int c = 0; c < N * N; c++)
+                {
+                    if (kind[c] != Planned) continue;
+                    foreach (var (dx, dz) in new[] { (1, 0), (-1, 0), (0, 1), (0, -1) })
+                    {
+                        int i = c % N, k = c / N, s = 1, n = c;
+                        for (; s <= DamWidth + 1; s++)
+                        {
+                            int ni = i + s * dx, nk = k + s * dz;
+                            if (ni < 0 || nk < 0 || ni >= N || nk >= N) { s = int.MaxValue; break; }
+                            n = ni + N * nk;
+                            if (kind[n] != Dry) break;
+                            if (ground[n] == int.MinValue || ground[n] == int.MaxValue || ground[n] > level[c] + DamHeight) { s = int.MaxValue; break; }
+                        }
+                        if (s < 2 || s > DamWidth + 1 || kind[n] != Planned) continue;
+                        if (depth[c] > 0 && depth[n] > 0)
+                        {
+                            // (Between two rivers, or two stretches of one, only a single row of ground.)
+                            if (s != 2 || Math.Abs(level[n] - level[c]) > FallMost) continue;
+                        }
+                        else if (depth[c] == 0 && depth[n] == 0)
+                        {
+                            // (Between two stretches of one lake, only a rim at about its level: a strip just breaking
+                            // its surface.)
+                            bool rim = level[n] == level[c];
+                            for (int t = 1; t < s && rim; t++) rim = ground[c + t * (dx + N * dz)] <= level[c] + RimHeight;
+                            if (!rim) continue;
+                        }
+                        int w = Math.Min(level[c], level[n]);
+                        for (int t = 1; t < s; t++)
+                        {
+                            int d = c + t * (dx + N * dz);
+                            plan[d] = level[d] = w;
+                            depth[d] = depth[c] > 0 && depth[n] > 0 ? 1 : 0;
+                            ground[d] = Math.Min(ground[d], w - 1);
+                            kind[d] = Planned;
+                            cut = any = true;
+                        }
+                    }
+                }
+            }
+            return any;
+        }
 
         // The first water higher than column c's going (dx, dz) from it over water no higher, within DipAcross
         // columns; or int.MinValue.
