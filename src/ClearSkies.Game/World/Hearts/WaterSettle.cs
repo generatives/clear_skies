@@ -75,7 +75,7 @@ internal sealed class WaterSettle
     public (int Level, int Ground) At(int x, int z)
     {
         int tx = FloorDiv(x, Tile), tz = FloorDiv(z, Tile);
-        var tile = _tiles.GetOrAdd(((long)tx << 32) ^ (uint)tz, _ => Build(tx, tz));
+        var tile = _tiles.GetOrAdd(((long)tx << 32) ^ (uint)tz, static (_, a) => a.Settle.Build(a.X, a.Z), (Settle: this, X: tx, Z: tz));
         int i = x - tx * Tile + Tile * (z - tz * Tile);
         short level = tile.Level[i], ground = tile.Ground[i];
         return (level == short.MinValue ? int.MinValue : level, ground == short.MaxValue ? int.MaxValue : ground);
