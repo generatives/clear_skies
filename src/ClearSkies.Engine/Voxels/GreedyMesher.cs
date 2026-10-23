@@ -24,6 +24,12 @@ namespace ClearSkies.Engine.Voxels;
 /// or another of its own type. An opaque model block hides faces against it like an opaque cube, since its model
 /// covers them.
 ///
+/// Flowing water (<see cref="WaterLevel"/>) stands lower than its cell: each corner of a water cell's top sits at the
+/// average height of the water cells around it (full height if any has water over it), so a stream slopes smoothly
+/// down. A water face with a lowered corner isn't merged but emitted on its own, a shaped quad (see
+/// <see cref="ChunkQuad"/>), and a lowered top is drawn even under a block. Source water is full height, so a lake
+/// meshes as it always has.
+///
 /// <see cref="BlockShape.Cross"/> blocks (plants) aren't greedy meshed: each gets two quads crossing diagonally through
 /// its cell, both sides of each (see <see cref="EmitCross"/>), in the cut-out mesh. They hide nothing and nothing hides
 /// them.
@@ -69,6 +75,10 @@ public sealed class GreedyMesher
 
     private readonly TextureAtlas? _atlas;
 
+    // The chunk being meshed and its neighbours (Faces' order), for water's corner heights.
+    private ChunkData _chunk = null!;
+    private readonly ChunkData?[] _around = new ChunkData?[6];
+
     public GreedyMesher(TextureAtlas? atlas = null)
     {
         _atlas = atlas;
@@ -91,6 +101,8 @@ public sealed class GreedyMesher
     {
         // Array order matches Faces[] (fi=0:+X, fi=1:-X, fi=2:+Y, fi=3:-Y, fi=4:+Z, fi=5:-Z).
         ChunkData?[] neighbors = { pX, nX, pY, nY, pZ, nZ };
+        _chunk = chunk;
+        neighbors.CopyTo(_around, 0);
 
         var verts   = _verts;
         var indices = _indices;
@@ -140,6 +152,13 @@ public sealed class GreedyMesher
                     else
                     {
                         adjId = GetBlock(chunk, face, adjSlice, u, v);
+                    }
+
+                    if (blockId == BlockId.Water && fi != 3 && WaterFaceLowered(face, fi, slice, u, v))
+                    {
+                        // A lowered top shows even under a block (there's a gap over it); a lowered side as usual.
+                        if (fi == 2 || !BlockRegistry.Get(adjId).HidesFaceOf(blockId)) EmitWaterFace(face, slice, u, v);
+                        continue;
                     }
 
                     if (!BlockRegistry.Get(adjId).HidesFaceOf(blockId))
@@ -235,6 +254,73 @@ public sealed class GreedyMesher
         return new ChunkMeshLayers(new LayerMesh(verts, indices, _blocks), new LayerMesh(_cVerts, _cIndices, _cBlocks),
                                    new LayerMesh(_tVerts, _tIndices, _tBlocks));
     }
+
+    /// <summary>Whether a water cell's face (not its bottom) has a corner lowered under the cell's top.</summary>
+    private bool WaterFaceLowered(in FaceDesc face, int fi, int slice, int u, int v)
+    {
+        var (x, y, z) = Cell(face, slice, u, v);
+        // The top corners the face has: the top all four, a side the two along it.
+        int x0 = fi == 0 ? x + 1 : x, x1 = fi == 1 ? x : x + 1;
+        int z0 = fi == 4 ? z + 1 : z, z1 = fi == 5 ? z : z + 1;
+        for (int gz = z0; gz <= z1; gz++)
+        for (int gx = x0; gx <= x1; gx++)
+            if (CornerDrop(gx, y, gz) > 0) return true;
+        return false;
+    }
+
+    /// <summary>A water cell's face on its own, its top corners lowered (see <see cref="CornerDrop"/>).</summary>
+    private void EmitWaterFace(in FaceDesc face, int slice, int u, int v)
+    {
+        var (_, y, _) = Cell(face, slice, u, v);
+        ref readonly var def = ref BlockRegistry.Get(BlockId.Water);
+        int start = _tVerts.Count;
+        EmitQuad(_tVerts, _tIndices, face, slice + face.FaceOffset, u, v, 1, 1, def.Color, Layer(def.Texture));
+        _tBlocks.Add(BlockId.Water);
+        for (int k = start; k < start + 4; k++)
+        {
+            var vertex = _tVerts[k];
+            if (vertex.Position.Y != y + 1) continue; // a side's bottom corner
+            vertex.Position.Y -= CornerDrop((int)vertex.Position.X, y, (int)vertex.Position.Z) / 8f;
+            _tVerts[k] = vertex;
+        }
+    }
+
+    /// <summary>How far (eighths) the top corner of layer <paramref name="y"/> at grid point (<paramref name="gx"/>,
+    /// <paramref name="gz"/>) sits under the layer's top: the average height of the water cells around it, rounded, or
+    /// none if any of them has water over it.</summary>
+    private int CornerDrop(int gx, int y, int gz)
+    {
+        int sum = 0, n = 0;
+        for (int dz = -1; dz <= 0; dz++)
+        for (int dx = -1; dx <= 0; dx++)
+        {
+            if (!WaterAt(gx + dx, y, gz + dz, out var state)) continue;
+            if (WaterAt(gx + dx, y + 1, gz + dz, out _)) return 0;
+            sum += WaterLevel.Height(state);
+            n++;
+        }
+        return n == 0 ? 0 : System.Math.Clamp(8 - (int)MathF.Floor((float)sum / n + 0.5f), 0, 7);
+    }
+
+    /// <summary>Whether a cell (chunk-local; up to one block into a neighbour, along one axis) holds water. Cells past
+    /// an edge and a corner of the chunk count as dry.</summary>
+    private bool WaterAt(int x, int y, int z, out BlockOrientation state)
+    {
+        const int S = ChunkData.Size;
+        var data = _chunk;
+        state = default;
+        bool ox = x < 0 || x >= S, oy = y < 0 || y >= S, oz = z < 0 || z >= S;
+        if ((ox ? 1 : 0) + (oy ? 1 : 0) + (oz ? 1 : 0) > 1) return false;
+        if (ox)      { data = _around[x < 0 ? 1 : 0]; x -= x < 0 ? -S : S; }
+        else if (oy) { data = _around[y < 0 ? 3 : 2]; y -= y < 0 ? -S : S; }
+        else if (oz) { data = _around[z < 0 ? 5 : 4]; z -= z < 0 ? -S : S; }
+        if (data is null || data.Get(x, y, z) != BlockId.Water) return false;
+        state = data.GetOrientation(x, y, z);
+        return true;
+    }
+
+    private static (int X, int Y, int Z) Cell(in FaceDesc face, int slice, int u, int v) =>
+        face.D == 0 ? (slice, u, v) : face.D == 1 ? (u, slice, v) : (u, v, slice);
 
     private float Layer(string? sprite) => _atlas != null && _atlas.TryGetLayer(sprite, out int l) ? l : -1f;
 

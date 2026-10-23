@@ -286,7 +286,7 @@ fn decodeCorner(e: u32) -> LmCorner {
 }
 ";
 
-    private static readonly string Wgsl = SmoothLightWgsl + GridStore.LookupWgsl + GridStore.LightCodecWgsl + @"
+    private static readonly string Wgsl = SmoothLightWgsl + GridStore.LookupWgsl + GridStore.LightCodecWgsl + ChunkQuad.Wgsl + @"
 @group(0) @binding(0) var<storage, read> occPool: array<u32>;
 @group(0) @binding(1) var<storage, read> chunkTable: array<vec4<i32>>;
 @group(0) @binding(2) var<storage, read> brickTable: array<u32>;
@@ -314,8 +314,6 @@ const GROUP: u32 = " + QuadsPerGroup + @"u;
 var<workgroup> cellEnd: array<u32, " + QuadsPerGroup + @">;
 
 fn lightOffset(q: vec2<u32>) -> u32 { return ((q.y >> 9u) & 0x7FFFu) | ((q.y >> 31u) << 15u); }
-fn quadW(q: vec2<u32>) -> u32 { return ((q.x >> 29u) | (((q.y >> 24u) & 3u) << 3u)) + 1u; }
-fn quadH(q: vec2<u32>) -> u32 { return ((q.y >> 26u) & 31u) + 1u; }
 
 // One workgroup per job. Each thread first clears its quad's light map (the corners are ORed in, two to a word),
 // then the job's cells are shared out evenly: a thread works out a cell's face corners and writes the ones the cell
@@ -385,7 +383,7 @@ fn bakeCell(job: Job, q: vec2<u32>, k: u32) {
     if (back) { N = -N; }
     // The quad's first corner is its lowest; the face lies on the block's side N points out of, so the open cell is
     // the one in front of the plane along N.
-    let o = vec3<i32>(i32(q.x & 63u), i32((q.x >> 6u) & 63u), i32((q.x >> 12u) & 63u));
+    let o = quadOrigin(q);
     let air0 = vec3<i32>(job.cx, job.cy, job.cz) * 32 + o + min(N, vec3<i32>(0));
     let see = (job.flags & 1u) != 0u;
 

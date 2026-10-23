@@ -339,6 +339,7 @@ public sealed class SimulationParticipant : IParticipant, ISystem, ICommandRoute
     private void OnApplied(CommandHandlerBase handler, EventMeta meta, object evt)
     {
         if (IsAuthority && evt is EditVoxels edit && edit.Volume == EntityRegistry.WorldVolume) DescribeChunks(edit);
+        if (IsAuthority && evt is FlowWater flow) DescribeChunks(flow);
         if (evt is not DespawnEntity despawn) return;
         Commands.ForgetEvents(despawn.Entity);
         // Gone for good (deleted, broken up), not released: out of the save too. Told next tick, after its event.
@@ -361,6 +362,20 @@ public sealed class SimulationParticipant : IParticipant, ISystem, ICommandRoute
             for (int x = lo.X; x <= hi.X; x++)
                 _editedChunks.Add(new ChunkPosition(x, y, z));
         }
+        SendEditedChunks(volume);
+    }
+
+    /// <summary>As <see cref="DescribeChunks(EditVoxels)"/>, for a step of flowing water.</summary>
+    private void DescribeChunks(FlowWater flow)
+    {
+        if (Registry.Find(EntityRegistry.WorldVolume) is not { } root) return;
+        _editedChunks.Clear();
+        foreach (var change in flow.Changes) _editedChunks.Add(ChunkPosition.FromVoxel(change.Cell));
+        SendEditedChunks(root.Get<ChunkGrid>().Volume);
+    }
+
+    private void SendEditedChunks(ChunkVolume volume)
+    {
         foreach (var pos in _editedChunks)
             if (volume.GetData(pos) is { } data)
                 _host.ChunkEdited(new ChunkMessage(MessageKind.ChunkEdited, pos, StaticWorldSerializer.ToBytes(data)));

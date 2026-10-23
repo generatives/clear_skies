@@ -4,7 +4,8 @@ namespace ClearSkies.Engine.Voxels;
 
 /// <summary>
 /// Amanatides &amp; Woo fast-voxel traversal. Advances along the ray one grid cell at a time,
-/// always stepping on the nearest cell boundary (X, Y, or Z), until a solid block is found
+/// always stepping on the nearest cell boundary (X, Y, or Z), until a targetable block (solid, not water; see
+/// <see cref="BlockDef.Targetable"/>) is found
 /// or <paramref name="maxDist"/> is exceeded.
 /// </summary>
 public static class VoxelRaycaster
@@ -49,7 +50,7 @@ public static class VoxelRaycaster
         {
             // Check the current cell.
             var id = volume.GetBlock(x, y, z);
-            if (id != BlockId.Air && BlockRegistry.Get(id).IsSolid)
+            if (id != BlockId.Air && BlockRegistry.Get(id).Targetable)
             {
                 hitBlock  = new(x, y, z);
                 hitNormal = normal;
