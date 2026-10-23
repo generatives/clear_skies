@@ -51,9 +51,10 @@ public sealed class MeshStage(ChunkPipeline pipeline, ChunkMeshes meshes)
         return data.IsAllOpaque && (change.Opacity || Blocks(source) is { IsAllOpaque: true });
     }
 
-    /// <summary>A wanted chunk's blocks as made (null if not made yet, or air).</summary>
+    /// <summary>A wanted chunk's blocks, from its volume (null if not there yet, or air). One let go of reads as missing,
+    /// though it's in the volume until it's dropped.</summary>
     private ChunkData? Blocks(ChunkKey key)
-        => pipeline.Get(key) is { Wanted: true } record ? record.Output<ChunkVoxels>(record.Grid.Blocks!)?.Data : null;
+        => pipeline.Get(key) is { Wanted: true } ? pipeline.EntryOf(key)?.Data : null;
 
     /// <summary>What a job meshes: the chunk's blocks and its neighbours', held until it's done.</summary>
     private sealed record Job(ChunkData Data, ChunkData?[] Around, bool Alone, ChunkPosition Pos);
@@ -66,21 +67,17 @@ public sealed class MeshStage(ChunkPipeline pipeline, ChunkMeshes meshes)
         var entry = pipeline.EntryOf(record.Key);
         if (entry == null || entry.DataDropped || !entry.Entity.Has<Rendered>()) return PackedChunkMesh.Unchanged;
         if (!entry.Data.HasAnyNonAir()) return null;
-        var volume = entry.Volume;
         var around = new ChunkData?[6];
         bool buried = entry.Data.IsAllOpaque;
         for (int f = 0; f < 6; f++)
         {
-            var key = record.Key with { Pos = Faces.Across(record.Key.Pos, f) };
-            // A neighbour let go of reads as missing already, though it's in the volume until it's dropped.
-            if (pipeline.Get(key) is { Wanted: true } n && n.Output<ChunkVoxels>(n.Grid.Blocks!) is { } made)
-                around[f] = made.Data ?? volume.GetData(key.Pos); // air, unless an edit made it since
+            around[f] = Blocks(record.Key with { Pos = Faces.Across(record.Key.Pos, f) });
             buried &= around[f] is { IsAllOpaque: true };
         }
         if (buried) return null;
         entry.Data.Retain();
         foreach (var data in around) data?.Retain();
-        return new Job(entry.Data, around, volume.MeshIgnoresNeighbours, entry.Position);
+        return new Job(entry.Data, around, entry.Volume.MeshIgnoresNeighbours, entry.Position);
     }
 
     public override PackedChunkMesh Make(ChunkKey key, StageInputs inputs)
