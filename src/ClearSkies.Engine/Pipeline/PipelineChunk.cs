@@ -65,8 +65,8 @@ internal enum SlotFlags : byte
     Stale = 1,
     Queued = 2,
     Running = 4,
-    /// <summary>It's keeping its required sources loaded (demanding them) while it needs to run.</summary>
-    Holding = 8,
+    /// <summary>It's keeping its required sources loaded (adding itself to what needs them) while it needs to run.</summary>
+    KeepingSourcesLoaded = 8,
 }
 
 /// <summary>One stage's progress on one chunk. Only the pipeline writes it.</summary>
@@ -76,11 +76,11 @@ internal struct Slot
     /// <summary>Outputs taken so far; 0 until the first.</summary>
     public int Version;
     /// <summary>What needs it run: 1 if its chunk is wanted, plus each stage elsewhere waiting on it.</summary>
-    public int Demand;
+    public int NeededBy;
     public SlotFlags Flags;
 
     public readonly bool Is(SlotFlags flag) => (Flags & flag) != 0;
     public void Set(SlotFlags flag, bool on) => Flags = on ? Flags | flag : Flags & ~flag;
     /// <summary>Something needs it run on inputs it hasn't run on yet.</summary>
-    public readonly bool NeedsRun => Demand > 0 && Is(SlotFlags.Stale);
+    public readonly bool NeedsRun => NeededBy > 0 && Is(SlotFlags.Stale);
 }

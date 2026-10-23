@@ -7,7 +7,7 @@ namespace ClearSkies.Engine.Pipeline;
 /// coarser chunk over it or the finer ones under it. Combined with | (either) and &amp; (both); a relation that tests
 /// rather than picks (<see cref="ChangedBorder"/>, or one made by <see cref="Where"/>) only narrows another.
 /// </summary>
-/// <remarks>The pipeline asks it both ways: which chunks the made one reads (to wait for and demand them), and which
+/// <remarks>The pipeline asks it both ways: which chunks the made one reads (to wait for and keep loaded), and which
 /// chunks read a source that just changed (to run again), the second filtered by what changed.</remarks>
 public abstract class Relation
 {

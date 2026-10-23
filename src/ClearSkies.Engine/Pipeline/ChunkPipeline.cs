@@ -103,7 +103,7 @@ public sealed class ChunkPipeline
         if (record == null || record.Wanted == wanted) return;
         record.Wanted = wanted;
         for (int s = 0; s < _stages.Count; s++)
-            if (record.Has(s)) Demand(record, s, wanted ? 1 : -1);
+            if (record.Has(s)) AddNeed(record, s, wanted ? 1 : -1);
         // Inputs that accept a missing chunk only see wanted ones: to them it just came or went.
         for (int s = 0; s < _stages.Count; s++)
             if (record.Has(s) && record.At(s).Version > 0) Propagate(record, _stages[s], Change.All, acceptsMissingOnly: true);
@@ -218,26 +218,26 @@ public sealed class ChunkPipeline
     }
 
     /// <summary>Adds (or takes away) a reason for the stage to run on the chunk.</summary>
-    private void Demand(PipelineChunk record, int stage, int delta)
+    private void AddNeed(PipelineChunk record, int stage, int delta)
     {
-        int demand = record.At(stage).Demand += delta;
-        Hold(record, stage);
+        int neededBy = record.At(stage).NeededBy += delta;
+        KeepSourcesLoaded(record, stage);
         Check(record, stage);
-        if (demand == 0) _maybeDrop.Add(record);
+        if (neededBy == 0) _maybeDrop.Add(record);
     }
 
-    /// <summary>Keeps the stage's required sources loaded (demanded) while it needs to run or is running, and lets
+    /// <summary>Keeps the stage's required sources loaded (adds to what needs them) while it needs to run or is running, and lets
     /// them go once it's done. Relations pick the same sources every time, so letting go needs no list of them.</summary>
-    private void Hold(PipelineChunk record, int stage)
+    private void KeepSourcesLoaded(PipelineChunk record, int stage)
     {
         ref var slot = ref record.At(stage);
-        bool hold = slot.NeedsRun || slot.Is(SlotFlags.Running);
-        if (hold == slot.Is(SlotFlags.Holding)) return;
-        slot.Set(SlotFlags.Holding, hold);
-        DemandSources(record, stage, hold ? 1 : -1);
+        bool keep = slot.NeedsRun || slot.Is(SlotFlags.Running);
+        if (keep == slot.Is(SlotFlags.KeepingSourcesLoaded)) return;
+        slot.Set(SlotFlags.KeepingSourcesLoaded, keep);
+        AddNeedToSources(record, stage, keep ? 1 : -1);
     }
 
-    private void DemandSources(PipelineChunk record, int stage, int delta)
+    private void AddNeedToSources(PipelineChunk record, int stage, int delta)
     {
         foreach (var input in InputsOf(_stages[stage], record.Key.Grid))
         {
@@ -245,7 +245,7 @@ public sealed class ChunkPipeline
             foreach (var key in input.Of.Picked(this, record.Key))
             {
                 var source = Ensure(key);
-                if (source.Has(input.Stage.Id)) Demand(source, input.Stage.Id, delta);
+                if (source.Has(input.Stage.Id)) AddNeed(source, input.Stage.Id, delta);
             }
         }
     }
@@ -318,7 +318,7 @@ public sealed class ChunkPipeline
         slot.Output = output;
         slot.Version++;
         Propagate(record, stage, change, acceptsMissingOnly: false);
-        Hold(record, stage.Id);   // done: lets its sources go, unless it went stale meanwhile
+        KeepSourcesLoaded(record, stage.Id);   // done: lets its sources go, unless it went stale meanwhile
         Check(record, stage.Id);  // it did: runs again
         _maybeDrop.Add(record);
     }
@@ -339,7 +339,7 @@ public sealed class ChunkPipeline
     private void MarkStale(PipelineChunk record, int stage)
     {
         record.At(stage).Set(SlotFlags.Stale, true);
-        Hold(record, stage);
+        KeepSourcesLoaded(record, stage);
         Check(record, stage);
     }
 
@@ -348,7 +348,7 @@ public sealed class ChunkPipeline
     {
         if (record.Removed || record.Wanted) return;
         foreach (var stage in _stages)
-            if (record.Has(stage.Id) && (record.At(stage.Id).Demand > 0
+            if (record.Has(stage.Id) && (record.At(stage.Id).NeededBy > 0
                                          || record.At(stage.Id).Is(SlotFlags.Running) && stage is WorkerStage)) return;
         record.Removed = true;
         _records.Remove(record.Key);
@@ -357,7 +357,7 @@ public sealed class ChunkPipeline
             if (!record.Has(stage.Id)) continue;
             ref var slot = ref record.At(stage.Id);
             _awaitingExternal.Remove((record, stage));
-            if (slot.Is(SlotFlags.Holding)) { slot.Set(SlotFlags.Holding, false); DemandSources(record, stage.Id, -1); }
+            if (slot.Is(SlotFlags.KeepingSourcesLoaded)) { slot.Set(SlotFlags.KeepingSourcesLoaded, false); AddNeedToSources(record, stage.Id, -1); }
             if (slot.Output is { } output) { slot.Output = null; stage.Release(output); }
         }
         Dropped?.Invoke(record);
