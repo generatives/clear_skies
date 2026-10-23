@@ -28,7 +28,7 @@ public static class LightStages
         var firstBake = pipeline.Add(new FirstBakeStage(pipeline, renderer, upload, firstLight));
         var shown = pipeline.Add(new ShownStage(pipeline, time, firstBake, terrain) { IsLit = light.IsLit, ShowFirst = light.ShowFirst });
         var cover = pipeline.Add(new CoverStage(pipeline, store, shown, terrain, residency.SetCovered));
-        // Known air under a coarse chunk is never in the pipeline to say it came: its swap and cover look again.
+        // Air under a coarse chunk is never drawn to say it came: its swap and cover look again.
         terrain.LearnedAir += key =>
         {
             if (pipeline.Grid(key.Grid).Coarser is not { } coarser) return;

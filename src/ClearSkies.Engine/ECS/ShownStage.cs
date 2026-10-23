@@ -134,18 +134,14 @@ public sealed class ShownStage(ChunkPipeline pipeline, Time time, Stage ready, C
     /// again next frame: for the eight's light, or till it's in over them and can let go of them.</summary>
     private bool Swap(PipelineChunk record, Showing showing, PipelineGrid finer, bool first, double now)
     {
-        // Ready: the finer level wants all eight, and has each shown (or air). Inside: it wants all eight.
+        // Ready: the finer level wants all eight, and has each shown (or air, never shown). Inside: it wants all eight.
         bool ready = true, inside = true;
         for (int j = 0; j < 8; j++)
         {
             var key = finer.Key(Relation.Child(record.Key.Pos, j));
             var child = pipeline.Get(key);
-            if (child is { Asked: true }) ready &= child.EverDone(this);
-            else
-            {
-                ready &= child == null && terrain?.Has(key) == true;
-                inside &= child == null && terrain?.InRange(key) == true;
-            }
+            ready &= child is null or { Asked: true } && (child?.EverDone(this) == true || IsAir(key));
+            inside &= child is { Asked: true } || child == null && terrain?.InRange(key) == true;
         }
         bool poll = false;
         if (first) (showing.Over, showing.SwappedAt) = (!inside, inside ? double.NegativeInfinity : now);
@@ -159,6 +155,9 @@ public sealed class ShownStage(ChunkPipeline pipeline, Time time, Stage ready, C
         Hold(showing, finer, !showing.Over || fading);
         return poll || showing.Over && fading && showing.Held != 0;
     }
+
+    /// <summary>Whether the level has the chunk and it's air (not drawn, so never shown): made so, or known to be.</summary>
+    internal bool IsAir(ChunkKey key) => pipeline.EntryOf(key) == null && terrain?.Has(key) == true;
 
     /// <summary>Holds the eight under a coarse chunk that are shown (or lets go of those it holds).</summary>
     private void Hold(Showing showing, PipelineGrid finer, bool hold)
@@ -219,7 +218,7 @@ internal sealed class CoverStage(ChunkPipeline pipeline, Stage store, ShownStage
         {
             var key = finer.Key(Relation.Child(record.Key.Pos, j));
             var child = pipeline.Get(key);
-            stored &= child is { Wanted: true } ? child.EverDone(store) : terrain?.Has(key) == true;
+            stored &= child is { Wanted: true } && child.EverDone(store) || shown.IsAir(key);
             wanted &= child is { Asked: true } || child == null && terrain?.InRange(key) == true;
         }
         if (!stored && !(wanted && !shown.DrawnOver(record))) return StageResult.Done();

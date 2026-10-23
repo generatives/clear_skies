@@ -155,6 +155,7 @@ public sealed partial class ChunkLoadSystem
             if (level.Level == 0 && _edits.IsEdited(pos)) RecordBuild(pos, hasBlocks: false); // a build that was emptied out
             else if (level.Columns.TryGetValue((pos.X, pos.Z), out var col))
                 level.Columns[(pos.X, pos.Z)] = (col.Generated, col.Air | level.Bit(pos));
+            LearnedAir?.Invoke(level.Key(pos));
             return;
         }
         _adding = true;

@@ -477,8 +477,8 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         return best;
     }
 
-    /// <summary>A level's chunk the loader learned is air, as it first looked at its column: never in the pipeline, so
-    /// what waits on it there (a coarse chunk's swap with the eight under it, see ShownStage) is told.</summary>
+    /// <summary>A level's chunk the loader learned is air, as it first looked at its column or as it was made: never
+    /// drawn, so what waits on it being drawn (a coarse chunk's swap with the eight under it, see ShownStage) is told.</summary>
     internal event Action<Pipeline.ChunkKey>? LearnedAir;
 
     /// <summary>Chunks of the level's column (x, z) that may hold something: what the generator may fill, less what
