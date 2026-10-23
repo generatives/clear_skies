@@ -118,7 +118,8 @@ public struct ShownAt
 
 /// <summary>Shows a chunk once it's lit and baked (<see cref="ShownAt"/>), the first time only: it's then drawn
 /// with its last mesh and light while it's made again (after an edit, or a neighbour coming). Not drawn any more, it's
-/// let go of and no longer shown.</summary>
+/// let go of and no longer shown. It waits for the chunk above it to be shown first (if that's wanted): underground
+/// chunks loaded before the surface showed through the gap, dimly lit.</summary>
 public sealed class ShownStage(ChunkPipeline pipeline, Time time, FirstBakeStage firstBake) : FrameStage
 {
     /// <summary>How long a chunk shown takes to dissolve in (seconds).</summary>
@@ -127,7 +128,8 @@ public sealed class ShownStage(ChunkPipeline pipeline, Time time, FirstBakeStage
     public override string Name => "Shown";
     public override Purpose Serves => Purpose.Draw;
 
-    public override IReadOnlyList<Pipeline.Input> InputsFor(PipelineGrid grid) => new Pipeline.Input[] { new(firstBake, Relation.Self) };
+    public override IReadOnlyList<Pipeline.Input> InputsFor(PipelineGrid grid)
+        => new Pipeline.Input[] { new(firstBake, Relation.Self), new(this, Relation.Above, AcceptsMissing: true) };
 
     public override StageResult Run(PipelineChunk record, StageInputs inputs)
     {
