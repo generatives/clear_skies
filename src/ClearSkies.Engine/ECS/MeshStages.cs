@@ -34,11 +34,14 @@ public sealed class MeshStage(ChunkPipeline pipeline, ChunkMeshes meshes)
 {
     public override string Name => "Mesh";
 
-    public override IReadOnlyList<Pipeline.Input> InputsFor(PipelineGrid grid) => new Pipeline.Input[]
-    {
-        new(grid.Blocks!, Relation.Self),
-        new(grid.Blocks!, Relation.Neighbours.Where(Matters), AcceptsMissing: true),
-    };
+    /// <summary>The blocks of the chunk and its neighbours, from whichever stage gives the grid's blocks (generated
+    /// terrain's, or a ship's).</summary>
+    public override IReadOnlyList<Pipeline.Input> InputsFor(PipelineGrid grid)
+        => pipeline.Stages.Where(s => s is IBlocksStage && s.AppliesTo(grid)).SelectMany(blocks => new Pipeline.Input[]
+        {
+            new(blocks, Relation.Self),
+            new(blocks, Relation.Neighbours.Where(Matters), AcceptsMissing: true),
+        }).ToArray();
 
     /// <summary>Whether a change to neighbour <paramref name="source"/>'s blocks can change <paramref name="made"/>'s mesh.</summary>
     private bool Matters(ChunkKey made, ChunkKey source, Change change)
