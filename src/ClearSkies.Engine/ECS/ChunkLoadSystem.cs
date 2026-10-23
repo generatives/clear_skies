@@ -145,6 +145,7 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         _voxels = _pipeline.Add(new VoxelsStage(generatorFactory, chunkStore, _edits, preparer) { Added = Add, Released = Release });
         foreach (var grid in _grids) grid.Blocks = _voxels;
         _levels.Add(new TerrainLevel(0, _grids[0], staticVolume, budget, _minY, _minY + 63) { Radius = viewDistance });
+        _chunkAdded = world.SubscribeComponentAdded<Chunk>(ChunkAdded);
     }
 
     /// <summary>Column offsets within <paramref name="radius"/> columns, closest first.</summary>
