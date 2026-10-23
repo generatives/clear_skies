@@ -115,6 +115,32 @@ public class WaterFlowTests
     }
 
     [Fact]
+    public void A_stream_down_a_hill_keeps_its_course_when_disturbed()
+    {
+        using var pool = new Pool();
+        // Steps down to +X, two blocks wide and two high, wide in z so water could spread sideways.
+        for (int step = 0; step < 4; step++)
+            pool.Volume.FillBox(new(-15, 1, -15), new(2 * step + 1, 8 - 2 * step, 15), BlockId.Stone, BlockOrientation.Upright);
+        pool.Set(0, 9, 0, BlockId.Water);
+        pool.Settle();
+        var before = Water(pool);
+        foreach (var cell in before.Where(c => !WaterLevel.IsSource(pool.State(c.X, c.Y, c.Z))).Take(6).ToList())
+        {
+            pool.Set(cell.X, cell.Y, cell.Z, BlockId.Air);
+            pool.Settle();
+            Assert.Equal(before, Water(pool));
+        }
+    }
+
+    private static HashSet<Vector3D<int>> Water(Pool pool)
+    {
+        var cells = new HashSet<Vector3D<int>>();
+        for (int x = -20; x <= 20; x++) for (int y = 1; y <= 12; y++) for (int z = -20; z <= 20; z++)
+            if (pool.Block(x, y, z) == BlockId.Water) cells.Add(new(x, y, z));
+        return cells;
+    }
+
+    [Fact]
     public void Flowing_water_drains_away_once_its_source_is_gone()
     {
         using var pool = new Pool();

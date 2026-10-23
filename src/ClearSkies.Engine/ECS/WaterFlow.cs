@@ -176,7 +176,7 @@ public sealed class WaterFlow
     /// going <paramref name="dir"/>) the nearest drop is, or more than <see cref="DropSearch"/> if none is that close.</summary>
     private int DropCost(Vector3D<int> cell, Vector3D<int> dir, int steps)
     {
-        if (TryGet(cell - Up, out var under, out _) && Open(under)) return steps;
+        if (IsDrop(cell)) return steps;
         if (steps >= DropSearch) return DropSearch + 1;
         int best = DropSearch + 1;
         foreach (var d in Sides)
@@ -188,6 +188,11 @@ public sealed class WaterFlow
         }
         return best;
     }
+
+    /// <summary>Whether water reaching a cell would fall from it: air or a plant under it, or flowing water (where
+    /// water already falls, so a stream keeps to its course once it has run down).</summary>
+    private bool IsDrop(Vector3D<int> cell) =>
+        TryGet(cell - Up, out var under, out var state) && (Open(under) || (under == BlockId.Water && !WaterLevel.IsSource(state)));
 
     /// <summary>Whether water could run on through a cell, looking for a drop: air, a plant, or flowing water.</summary>
     private bool Passable(Vector3D<int> cell) =>
