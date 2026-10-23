@@ -76,7 +76,6 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     public HeartWorldGenerator(ulong seed)
     {
         _seed = seed;
-        _profiles = ProfileCache.For(seed);
         _terrain = ContinentTerrain.For(seed);
         _lakes = Lakes.For(seed);
         _warpX = Noise(seed + 31, WarpFrequency);
@@ -112,10 +111,10 @@ public sealed class HeartWorldGenerator : IWorldGenerator
 
     // ── Generation ──────────────────────────────────────────────────────────
 
-    /// <summary>The chunk column last prepared: shared with every generator of the seed (see <see cref="ProfileCache"/>),
-    /// as a column's chunks are made on whichever worker thread is free.</summary>
+    /// <summary>The chunk column last prepared, and the columns prepared lately (see <see cref="ProfileCache"/>): a
+    /// generator is used on one thread, and chunks over the same ground are made on the same one.</summary>
     private ColumnProfile? _profile;
-    private readonly ProfileCache _profiles;
+    private readonly ProfileCache _profiles = new();
 
     // While a column is worked out (see BuildProfile), per block column: its solid spans, before they're packed into
     // its ColumnProfile, and the terrain's height and the world's rough bottom there.
@@ -232,8 +231,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         return s == p.Count(col) - 1 && level != int.MinValue && hi <= level + 2 && (hi < level || p.Shore[col]);
     }
 
-    /// <summary>Takes chunk column (chunkX, chunkZ)'s solid spans from the profiles shared by every generator of this
-    /// seed (see <see cref="ProfileCache"/>), working them out if they aren't there.</summary>
+    /// <summary>Takes chunk column (chunkX, chunkZ)'s solid spans from the profiles worked out lately (see
+    /// <see cref="ProfileCache"/>), working them out if they aren't there.</summary>
     public void Prepare(int chunkX, int chunkZ) => _profile = _profiles.Get(chunkX, chunkZ, () => BuildProfile(chunkX, chunkZ));
 
     /// <summary>The solid spans (bottom up) of block column (lx, lz) of the chunk column last prepared.</summary>
@@ -574,7 +573,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
 }
 
 /// <summary>One chunk column of the hearts world worked out: per block column, its solid spans (bottom up, from
-/// <see cref="Start"/>) with each top's look, and what's on it. Never changed once made, so threads share it.</summary>
+/// <see cref="Start"/>) with each top's look, and what's on it. Never changed once made.</summary>
 internal sealed class ColumnProfile
 {
     private const int Columns = ChunkData.Size * ChunkData.Size;
@@ -608,37 +607,23 @@ internal sealed class ColumnProfile
     public int Count(int col) => Start[col + 1] - Start[col];
 }
 
-/// <summary>The chunk columns of a seed worked out lately, shared by its generators (one per worker thread): a column's
-/// chunks are made on whichever thread is free, and working one out costs far more than filling a chunk from it. Keeps
-/// the last <see cref="Capacity"/> columns; two threads may work the same one out at once, and the first kept wins.</summary>
+/// <summary>The column profiles one generator built lately, the oldest let go first.</summary>
 internal sealed class ProfileCache
 {
-    /// <summary>Columns kept: a profile is about 30 KB (more where there's lots of ground), so a few tens of MB.</summary>
-    private const int Capacity = 1024;
+    /// <summary>Columns kept: a profile is about 30 KB (more where there's lots of ground), so a few MB a generator.
+    /// Enough for the few level-2 columns (16 chunk columns each) a worker is making chunks over at once.</summary>
+    private const int Capacity = 128;
 
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, ProfileCache> BySeed = new();
-    public static ProfileCache For(ulong seed) => BySeed.GetOrAdd(seed, _ => new ProfileCache());
-
-    private readonly Dictionary<(int, int), Lazy<ColumnProfile>> _profiles = new();
+    private readonly Dictionary<(int, int), ColumnProfile> _profiles = new();
     private readonly Queue<(int, int)> _order = new();
-    private readonly object _lock = new();
 
-    /// <summary>The column's profile, built once: a thread asking for one being built waits for it (chunks of a column
-    /// are near each other in the order they're made, so two workers often want the same one at once).</summary>
-    internal ColumnProfile Get(int x, int z, Func<ColumnProfile> build)
+    public ColumnProfile Get(int x, int z, Func<ColumnProfile> build)
     {
-        Lazy<ColumnProfile> lazy;
-        lock (_lock)
-        {
-            if (!_profiles.TryGetValue((x, z), out lazy!))
-            {
-                lazy = new Lazy<ColumnProfile>(build, LazyThreadSafetyMode.ExecutionAndPublication);
-                _profiles[(x, z)] = lazy;
-                _order.Enqueue((x, z));
-                if (_order.Count > Capacity) _profiles.Remove(_order.Dequeue());
-            }
-        }
-        return lazy.Value; // built outside the lock: other columns go on meanwhile
+        if (_profiles.TryGetValue((x, z), out var kept)) return kept;
+        var made = _profiles[(x, z)] = build();
+        _order.Enqueue((x, z));
+        if (_order.Count > Capacity) _profiles.Remove(_order.Dequeue());
+        return made;
     }
 }
 

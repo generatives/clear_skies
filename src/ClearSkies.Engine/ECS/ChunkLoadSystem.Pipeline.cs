@@ -72,18 +72,25 @@ public sealed partial class ChunkLoadSystem
         level.InFlightChunks--;
     }
 
-    /// <summary>The order the pipeline makes chunks in: full detail first, then coarse chunks, each nearest first (by how
-    /// far they are from their level's nearest interest, in blocks). In 3D, so a column's chunks are spread among the
-    /// columns around them: workers given its chunks at once each waited on its profile.</summary>
+    /// <summary>The order the pipeline makes chunks in: full detail first, then coarse chunks nearest first (by how far
+    /// they are from their level's nearest interest, across, in blocks).</summary>
     private float Distance(ChunkKey key)
     {
         if (key.Grid >= _levels.Count) return float.PositiveInfinity;
         var level = _levels[key.Grid];
         long best = long.MaxValue;
-        foreach (var ring in level.Rings)
-            best = System.Math.Min(best, Sq(key.Pos.X - ring.Centre.x) + Sq(key.Pos.Y - ring.Centre.y) + Sq(key.Pos.Z - ring.Centre.z));
+        foreach (var ring in level.Rings) best = System.Math.Min(best, Sq(key.Pos.X - ring.Centre.x) + Sq(key.Pos.Z - ring.Centre.z));
         if (best == long.MaxValue) return float.PositiveInfinity;
         return MathF.Sqrt(best) * level.Blocks + (key.Grid == 0 ? 0f : CoarseAfter);
+    }
+
+    /// <summary>Which worker makes a chunk: the one for the level-2 column it's in, so every level's chunks over the same
+    /// ground are made on the same worker, which keeps what the generator worked out about that ground.</summary>
+    private static int WorkerOf(ChunkKey key)
+    {
+        int shift = 2 - key.Grid; // to level-2 columns
+        int x = shift >= 0 ? key.Pos.X >> shift : key.Pos.X << -shift, z = shift >= 0 ? key.Pos.Z >> shift : key.Pos.Z << -shift;
+        return x * 73856093 ^ z * 19349663;
     }
 
     /// <summary>The level a chunk was made for, if it's still there.</summary>

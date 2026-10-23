@@ -4,8 +4,8 @@ using ClearSkies.Engine.Core;
 
 namespace ClearSkies.Engine.Pipeline;
 
-/// <summary>What one <see cref="ChunkPipeline.Update"/> may spend: worker jobs in flight at once, and main-thread time
-/// for applying worker results and running frame stages.</summary>
+/// <summary>What one <see cref="ChunkPipeline.Update"/> may spend: worker jobs in flight at once on each worker, and
+/// main-thread time for applying worker results and running frame stages.</summary>
 public readonly record struct FrameBudgets(int WorkerSlots, double MainMs);
 
 /// <summary>
@@ -20,6 +20,7 @@ public readonly record struct FrameBudgets(int WorkerSlots, double MainMs);
 /// </remarks>
 public sealed class ChunkPipeline
 {
+    private const int MaxSkipped = 1024; // ready chunks looked past a frame, for their worker being full
     private readonly List<PipelineGrid> _grids = new();
     private readonly List<Stage> _stages = new();
     private readonly Dictionary<ChunkKey, PipelineChunk> _records = new();
@@ -34,15 +35,33 @@ public sealed class ChunkPipeline
     // Ready stages, one queue per executor (by Executor), so one running out doesn't hold up the others.
     private readonly PriorityQueue<(PipelineChunk Record, Stage Stage), (float, int)>[] _ready =
         Enum.GetValues<Executor>().Select(_ => new PriorityQueue<(PipelineChunk, Stage), (float, int)>()).ToArray();
-    private readonly ConcurrentQueue<(PipelineChunk Record, WorkerStage Stage, object Made)> _made = new();
+    private readonly ConcurrentQueue<(PipelineChunk Record, WorkerStage Stage, int Worker, object Made)> _made = new();
     // External stages asked and not done yet: asked again in turn, as far as each frame's time goes.
     private readonly Queue<(PipelineChunk Record, ExternalStage Stage)> _awaitingExternal = new();
     private readonly HashSet<PipelineChunk> _maybeDrop = new();
-    private readonly Action<Action> _runOnWorker;
-    private int _inFlight;
+    private readonly Action<int, Action> _runOnWorker;
+    private readonly int[] _inFlight; // per worker
+    private readonly List<((PipelineChunk, Stage) Item, (float, int) Priority)> _skipped = new();
 
-    /// <param name="runOnWorker">Runs worker stages (tests run them in place); background workers by default.</param>
-    public ChunkPipeline(Action<Action>? runOnWorker = null) => _runOnWorker = runOnWorker ?? BackgroundWork.Queue;
+    /// <summary>On the background workers (see <see cref="BackgroundWork"/>), each chunk on the one <see cref="Worker"/>
+    /// picks.</summary>
+    public ChunkPipeline() : this(BackgroundWork.Queue, BackgroundWork.Workers) { }
+
+    /// <param name="runOnWorker">Runs worker stages, all on one worker (tests run them in place).</param>
+    public ChunkPipeline(Action<Action> runOnWorker) : this((_, work) => runOnWorker(work), 1) { }
+
+    /// <param name="runOnWorker">Runs a worker stage on the given worker, of <paramref name="workers"/>.</param>
+    public ChunkPipeline(Action<int, Action> runOnWorker, int workers)
+    {
+        _runOnWorker = runOnWorker;
+        _inFlight = new int[workers];
+    }
+
+    /// <summary>Which worker makes a chunk (wrapped to the workers there are): chunks over the same ground on the same
+    /// one share its caches. By default, spread by position.</summary>
+    public Func<ChunkKey, int>? Worker { get; set; }
+
+    private int WorkerOf(ChunkKey key) => (int)((uint)(Worker?.Invoke(key) ?? key.Pos.GetHashCode()) % (uint)_inFlight.Length);
 
     /// <summary>Lower runs first: by default, all the same.</summary>
     public Func<ChunkKey, float>? Priority { get; set; }
@@ -150,7 +169,7 @@ public sealed class ChunkPipeline
 
         while (MainLeft() && _made.TryDequeue(out var made))
         {
-            _inFlight--;
+            _inFlight[made.Worker]--;
             if (made.Made is Exception e) throw new InvalidOperationException($"{made.Stage} failed on {made.Record}", e);
             if (made.Record.Removed) { made.Stage.Release(made.Made); continue; }
             var change = made.Stage.AppliedAny(made.Record, made.Made, made.Record.At(made.Stage.Id).Output);
@@ -158,8 +177,24 @@ public sealed class ChunkPipeline
         }
 
         // Everything below is on the main thread, so all of it stops when the frame's time is spent.
-        while (MainLeft() && _inFlight < budgets.WorkerSlots && TakeReady(Executor.Worker, out var record, out var stage, out _))
-            StartWorker(record, (WorkerStage)stage);
+        // Nearest first, each to its worker; one whose worker is full waits its turn (looked past a bounded number of
+        // times a frame, so one busy worker doesn't cost the frame).
+        int full = _inFlight.Count(n => n >= budgets.WorkerSlots);
+        while (full < _inFlight.Length && _skipped.Count < MaxSkipped && MainLeft()
+               && TakeReady(Executor.Worker, out var record, out var stage, out var priority))
+        {
+            int worker = WorkerOf(record.Key);
+            if (_inFlight[worker] >= budgets.WorkerSlots)
+            {
+                record.At(stage.Id).Set(SlotFlags.Queued, true);
+                _skipped.Add(((record, stage), priority));
+                continue;
+            }
+            StartWorker(record, (WorkerStage)stage, worker);
+            if (_inFlight[worker] == budgets.WorkerSlots) full++;
+        }
+        foreach (var (item, priority) in _skipped) _ready[(int)Executor.Worker].Enqueue(item, priority);
+        _skipped.Clear();
 
         // Each one waiting is asked once at most, and those not reached are first next frame.
         for (int n = _awaitingExternal.Count; n > 0 && MainLeft(); n--)
@@ -204,7 +239,7 @@ public sealed class ChunkPipeline
     }
 
     /// <summary>Worker jobs running now.</summary>
-    public int WorkerJobs => _inFlight;
+    public int WorkerJobs => _inFlight.Sum();
 
     /// <summary>External stages asked and not done yet.</summary>
     public int AwaitingExternal => _awaitingExternal.Count;
@@ -298,20 +333,20 @@ public sealed class ChunkPipeline
         return read;
     }
 
-    private void StartWorker(PipelineChunk record, WorkerStage stage)
+    private void StartWorker(PipelineChunk record, WorkerStage stage, int worker)
     {
         var inputs = Gather(record, stage);
         ref var slot = ref record.At(stage.Id);
         slot.Set(SlotFlags.Stale, false);
         slot.Set(SlotFlags.Running, true);
-        _inFlight++;
+        _inFlight[worker]++;
         var key = record.Key;
-        _runOnWorker(() =>
+        _runOnWorker(worker, () =>
         {
             object made;
             try { made = stage.MakeAny(key, inputs); }
             catch (Exception e) { made = e; }
-            _made.Enqueue((record, stage, made));
+            _made.Enqueue((record, stage, worker, made));
         });
     }
 

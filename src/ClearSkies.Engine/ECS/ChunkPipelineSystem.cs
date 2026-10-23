@@ -9,9 +9,9 @@ namespace ClearSkies.Engine.ECS;
 /// <see cref="ChunkLoadSystem"/>), and shows where its chunks are.</summary>
 public sealed class ChunkPipelineSystem : ISystem, IDebugUiSystem
 {
-    /// <summary>Worker jobs running at once. Well above the core count: the background workers queue the excess, and
-    /// most of a first visit is sky that's ruled out in microseconds.</summary>
-    private const int WorkerSlots = 64;
+    /// <summary>Jobs given each worker at once: a few, so it has the next while the frame's results are taken (most of a
+    /// first visit is sky, ruled out in microseconds), and few enough that the nearest still go first.</summary>
+    private const int WorkerSlots = 8;
 
     /// <summary>Main-thread time per frame for taking finished work and running frame stages (ms).</summary>
     private const double MainMs = 1.5;
@@ -34,7 +34,7 @@ public sealed class ChunkPipelineSystem : ISystem, IDebugUiSystem
     /// <summary>Each stage's chunks by state, each grid's chunks, and the chunk that's waited its turn longest.</summary>
     public void DrawDebugUi()
     {
-        ImGui.Text($"Chunks: {Pipeline.ChunkCount:N0}   Worker jobs running: {Pipeline.WorkerJobs} of {WorkerSlots}" +
+        ImGui.Text($"Chunks: {Pipeline.ChunkCount:N0}   Worker jobs running: {Pipeline.WorkerJobs} ({WorkerSlots} a worker, {Core.BackgroundWork.Workers} workers)" +
                    (Pipeline.AwaitingExternal > 0 ? $"   Waiting on outside work: {Pipeline.AwaitingExternal}" : ""));
         foreach (var stage in Pipeline.Stages)
         {

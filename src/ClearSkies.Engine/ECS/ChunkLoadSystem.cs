@@ -140,6 +140,7 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
 
         _pipeline = pipeline;
         _pipeline.Priority = Distance;
+        _pipeline.Worker = WorkerOf;
         for (int k = 0; k < MaxLevels; k++)
             _grids[k] = _pipeline.AddGrid(k == 0 ? "full detail" : $"level {k}", k == 0 ? null : _grids[k - 1]);
         _voxels = _pipeline.Add(new VoxelsStage(generatorFactory, chunkStore, _edits, preparer) { Added = Add, Released = Release });
