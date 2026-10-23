@@ -54,7 +54,7 @@ public sealed class GameWorld
 
         // Islands cut out of a continental terrain around island hearts (see HeartWorldGenerator), streamed around the
         // view as far as the budget reaches.
-        ChunkPipeline = new ChunkPipelineSystem(); // where chunks are made, after streaming wants them
+        ChunkPipeline = new ChunkPipelineSystem(host.World); // where chunks are made, after streaming wants them
         ChunkLoad = new ChunkLoadSystem(host.World, StaticVolume, budget, ChunkPipeline.Pipeline, () => new HeartWorldGenerator(seed),
                                         options.ViewDistance, MinChunkY, chunkStore, chunkPreparer);
         ((EditVoxelsHandler)Commands.HandlerFor(CommandIds.EditVoxels)!).Terrain = ChunkLoad; // edits to the world ask it what's there

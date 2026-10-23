@@ -85,7 +85,7 @@ public class HeadlessStreamingTests
     /// <summary>The scene's world streamed, as the game's: edits to it ask streaming what's there.</summary>
     internal static ChunkLoadSystem Streaming(HeadlessScene scene, IChunkStore store, int maxChunks = 100_000, float viewDistance = 64)
     {
-        var pipeline = new ChunkPipelineSystem();
+        var pipeline = new ChunkPipelineSystem(scene.World);
         var load = new ChunkLoadSystem(scene.World, scene.WorldVolume, new ChunkCountBudget(maxChunks), pipeline.Pipeline, () => new Flat(),
                                        viewDistance, minChunkY: 0, store);
         Pipelines.Add(load, pipeline);

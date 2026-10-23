@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using ClearSkies.Engine.Core;
+using ClearSkies.Engine.Voxels;
 
 namespace ClearSkies.Engine.Pipeline;
 
@@ -24,12 +25,9 @@ public sealed class ChunkPipeline
     private readonly List<PipelineGrid> _grids = new();
     private readonly List<Stage> _stages = new();
     private readonly Dictionary<ChunkKey, PipelineChunk> _records = new();
-    // Worked out once, from the grids and stages, before the first chunk: per grid, each stage's slot in its chunks
-    // (-1 where the grid doesn't have the stage) and the inputs it reads there; per stage T, the stages reading it, on
-    // which grid, through which input (to run again when T's output changes).
-    private int[][] _slotOf = Array.Empty<int[]>();
-    private int[] _slotCount = Array.Empty<int>();
-    private IReadOnlyList<Input>[][] _inputs = Array.Empty<IReadOnlyList<Input>[]>();
+    // Worked out from the grids and stages, before the first chunk (and for a grid added after, as it's added): each
+    // grid's stage slots and inputs (on the grid), and per stage T, the stages reading it, on which grid, through which
+    // input (to run again when T's output changes).
     private List<(Stage Reader, int Grid, Input Input)>[] _readersOf = Array.Empty<List<(Stage, int, Input)>>();
     private bool _built;
     // Ready stages, one queue per executor (by Executor), so one running out doesn't hold up the others.
@@ -80,12 +78,23 @@ public sealed class ChunkPipeline
     public int ChunkCount => _records.Count;
     public IEnumerable<PipelineChunk> Records => _records.Values;
 
-    public PipelineGrid AddGrid(string name, PipelineGrid? finer = null)
+    /// <summary>Adds a grid, at any time. One whose chunks' blocks are already in <paramref name="volume"/> (a ship's)
+    /// is given it here (see <see cref="PipelineGrid.FromVolume"/>).</summary>
+    public PipelineGrid AddGrid(string name, PipelineGrid? finer = null, ChunkVolume? volume = null)
     {
-        if (_built) throw new InvalidOperationException("Grids are added before any chunk.");
-        var grid = new PipelineGrid(_grids.Count, name, finer);
+        var grid = new PipelineGrid(_grids.Count, name, finer, volume);
         _grids.Add(grid);
+        if (_built) BuildGrid(grid);
         return grid;
+    }
+
+    /// <summary>Takes a grid out (a ship that's gone): its chunks are let go of, and dropped as usual.</summary>
+    public void RemoveGrid(PipelineGrid grid)
+    {
+        if (grid.Removed) return;
+        foreach (var record in _records.Values.Where(r => r.Grid == grid).ToList()) Want(record.Key, false);
+        grid.Removed = true;
+        foreach (var readers in _readersOf) readers.RemoveAll(r => r.Grid == grid.Id);
     }
 
     public PipelineGrid Grid(int id) => _grids[id];
@@ -103,25 +112,29 @@ public sealed class ChunkPipeline
     private void Build()
     {
         _built = true;
-        _slotOf = new int[_grids.Count][];
-        _slotCount = new int[_grids.Count];
-        _inputs = new IReadOnlyList<Input>[_grids.Count][];
         _readersOf = _stages.Select(_ => new List<(Stage, int, Input)>()).ToArray();
-        foreach (var grid in _grids)
+        foreach (var grid in _grids) BuildGrid(grid);
+    }
+
+    private void BuildGrid(PipelineGrid grid)
+    {
+        grid.SlotOf = new int[_stages.Count];
+        grid.Inputs = new IReadOnlyList<Input>[_stages.Count];
+        foreach (var stage in _stages)
         {
-            var slotOf = _slotOf[grid.Id] = new int[_stages.Count];
-            _inputs[grid.Id] = new IReadOnlyList<Input>[_stages.Count];
-            foreach (var stage in _stages)
-            {
-                bool has = stage.AppliesTo(grid);
-                slotOf[stage.Id] = has ? _slotCount[grid.Id]++ : -1;
-                var inputs = _inputs[grid.Id][stage.Id] = has ? stage.InputsFor(grid) : Array.Empty<Input>();
-                foreach (var input in inputs) _readersOf[input.Stage.Id].Add((stage, grid.Id, input));
-            }
+            bool has = stage.AppliesTo(grid);
+            grid.SlotOf[stage.Id] = has ? grid.SlotCount++ : -1;
+            var inputs = grid.Inputs[stage.Id] = has ? stage.InputsFor(grid) : Array.Empty<Input>();
+            foreach (var input in inputs) _readersOf[input.Stage.Id].Add((stage, grid.Id, input));
         }
     }
 
     public PipelineChunk? Get(ChunkKey key) => _records.GetValueOrDefault(key);
+
+    /// <summary>The chunk in its grid's volume that the pipeline made (or took) for <paramref name="key"/>, if it's there.</summary>
+    internal ChunkEntry? EntryOf(ChunkKey key)
+        => key.Grid < _grids.Count && _grids[key.Grid].Volume?.GetEntry(key.Pos) is { } entry
+           && entry.Entity.Has<InPipeline>() && entry.Entity.Get<InPipeline>().Key == key ? entry : null;
 
     /// <summary>Wants a chunk (every stage it has runs), or no longer (it's dropped once no worker is making it).</summary>
     public void Want(ChunkKey key, bool wanted)
@@ -279,13 +292,15 @@ public sealed class ChunkPipeline
         return counts;
     }
 
-    private IReadOnlyList<Input> InputsOf(Stage stage, int grid) => _inputs[grid][stage.Id];
+    private IReadOnlyList<Input> InputsOf(Stage stage, int grid) => _grids[grid].Inputs[stage.Id];
 
     private PipelineChunk Ensure(ChunkKey key)
     {
         if (_records.TryGetValue(key, out var record)) return record;
         if (!_built) Build();
-        record = new PipelineChunk(key, _grids[key.Grid], _slotOf[key.Grid], _slotCount[key.Grid]);
+        var grid = _grids[key.Grid];
+        if (grid.Removed) throw new InvalidOperationException($"{grid} was removed.");
+        record = new PipelineChunk(key, grid, grid.SlotOf, grid.SlotCount);
         _records.Add(key, record);
         return record;
     }

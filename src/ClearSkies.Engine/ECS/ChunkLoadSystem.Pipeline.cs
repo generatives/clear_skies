@@ -76,6 +76,7 @@ public sealed partial class ChunkLoadSystem
     /// they are from their level's nearest interest, across, in blocks).</summary>
     private float Distance(ChunkKey key)
     {
+        if (_pipeline.Grid(key.Grid).FromVolume) return 0f; // a ship's: small, and edited where people are
         if (key.Grid >= _levels.Count) return float.PositiveInfinity;
         var level = _levels[key.Grid];
         long best = long.MaxValue;
@@ -123,7 +124,8 @@ public sealed partial class ChunkLoadSystem
             made.Data = null;
             return;
         }
-        level.Volume.AddChunk(pos, made.Data, made.Prepared);
+        var entry = level.Volume.AddChunk(pos, made.Data, made.Prepared);
+        entry.Entity.Set(new InPipeline { Key = made.Key, Blocks = _voxels });
         made.InVolume = true;
         if (level.Level > 0 && CanDrop(made.Data)) level.ToDrop.Add(pos);
     }
