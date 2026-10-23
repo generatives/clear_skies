@@ -218,10 +218,10 @@ public class ChunkPipelineTests
         pipeline.Want(grid.Key(P(1)), true);
         Settle();
         Assert.Equal(0, mesh.Runs);
-        Assert.True(pipeline.Settled(key)); // what it's wanted for is done
+        Assert.False(pipeline.Get(key)!.Needs(mesh));
 
         pipeline.WantFor(key, Purpose.Draw, true);
-        Assert.False(pipeline.Settled(key));
+        Assert.True(pipeline.Get(key)!.Needs(mesh));
         Settle();
         Assert.Equal(1, mesh.Runs);
         Assert.Equal(key.ToString(), pipeline.Get(key)!.Output<string>(mesh));
@@ -233,7 +233,7 @@ public class ChunkPipelineTests
         Assert.Null(pipeline.Get(key)!.Output<string>(mesh));
         Settle();
         Assert.StartsWith($"-{key} ", pipeline.Get(grid.Key(P(1)))!.Output<string>(near));
-        Assert.True(pipeline.Settled(key));
+        Assert.Equal(1, mesh.Runs);
 
         // Let go of while it's being made: what it makes is let go of too.
         pipeline.WantFor(key, Purpose.Draw, true);

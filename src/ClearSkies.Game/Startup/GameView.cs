@@ -96,7 +96,7 @@ public sealed class GameView : IDisposable
         if (_checkerBounce is { } spread) light.BounceSpread = spread;
         host.AddSystem(light, SystemStage.PreRender);
         var (_, upload) = MeshStages.Add(world.ChunkPipeline, Meshes); // every chunk meshed in the chunk pipeline
-        var (_, firstLight, _) = LightStages.Add(world.ChunkPipeline, residency, light, renderer, upload); // and lit
+        var firstLight = LightStages.Add(world.ChunkPipeline, residency, light, renderer, upload); // and lit
         host.AddSystem(new BlockModelSystem(host.World, BlockModels), SystemStage.PreRender); // block entities -> RenderedModel
         host.AddSystem(new ClimateTintSystem(renderer, new BiomeTintMap(world.Seed)), SystemStage.RenderWorld); // grass and leaves coloured by biome
 

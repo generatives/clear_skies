@@ -149,10 +149,6 @@ public sealed class ChunkPipeline
 
     public PipelineChunk? Get(ChunkKey key) => _records.GetValueOrDefault(key);
 
-    /// <summary>Wanted, and every stage it needs done on what it reads now.</summary>
-    public bool Settled(ChunkKey key)
-        => Get(key) is { Wanted: true } record && _stages.All(s => !record.Needs(s) || record.State(s) == SlotState.Done);
-
     /// <summary>The chunk in its grid's volume that the pipeline made (or took) for <paramref name="key"/>, if it's there.</summary>
     internal ChunkEntry? EntryOf(ChunkKey key)
         => key.Grid < _grids.Count && _grids[key.Grid].Volume?.GetEntry(key.Pos) is { } entry

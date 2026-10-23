@@ -13,16 +13,17 @@ namespace ClearSkies.Engine.ECS;
 /// </summary>
 public static class LightStages
 {
-    /// <summary>Adds the stages to the pipeline, after <see cref="MeshStages"/> (before it wants any chunk).</summary>
-    public static (LightStoreStage Store, FirstLightStage FirstLight, FirstBakeStage FirstBake) Add(
+    /// <summary>Adds the stages to the pipeline, after <see cref="MeshStages"/> (before it wants any chunk); returns first
+    /// light, which swaps wait for.</summary>
+    public static FirstLightStage Add(
         ChunkPipelineSystem system, GpuResidencySystem residency, GpuLightSystem light, Renderer renderer, UploadStage upload)
     {
         var pipeline = system.Pipeline;
         var store = pipeline.Add(new LightStoreStage(pipeline, residency));
         var firstLight = pipeline.Add(new FirstLightStage(pipeline, light, store));
-        var firstBake = pipeline.Add(new FirstBakeStage(pipeline, renderer, upload, firstLight));
+        pipeline.Add(new FirstBakeStage(pipeline, renderer, upload, firstLight));
         pipeline.Add(new DropBlocksStage(pipeline, upload, store));
-        return (store, firstLight, firstBake);
+        return firstLight;
     }
 }
 

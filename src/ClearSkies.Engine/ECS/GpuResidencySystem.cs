@@ -9,34 +9,31 @@ namespace ClearSkies.Engine.ECS;
 /// <summary>
 /// Keeps the shared <see cref="GridStore"/> in sync with drawn chunks. The chunk pipeline's Light store stage (see
 /// <see cref="LightStoreStage"/>) puts a drawn chunk's occupancy in it, and with it, which bricks get light storage
-/// (<see cref="Upload"/>), and takes it out once the chunk's no longer drawn (<see cref="Hide"/>). Each PreRender tick
-/// this releases what those left, the storage of ships that are no longer drawn or were despawned, and that of chunks
-/// that unloaded, oldest first for up to <see cref="ReleaseBudgetMs"/> per frame (flying unloads a ring of chunks at
-/// once; the rest wait). A chunk is released at once when one being uploaded needs its place: the same position, or
-/// its cell of the world index. Nothing is ever reallocated as the camera moves: the world's chunk table is toroidal,
+/// (<see cref="Upload"/>), and lets it go once the chunk's no longer drawn (<see cref="Hide"/>). Each PreRender tick
+/// this releases the storage of ships that are no longer drawn or were despawned, and that of chunks let go of or
+/// unloaded, oldest first for up to <see cref="ReleaseBudgetMs"/> per frame (flying unloads a ring of chunks at once;
+/// the rest wait). A chunk is released at once when one being uploaded needs its place: the same position, or its cell
+/// of the world index. Nothing is ever reallocated as the camera moves: the world's chunk table is toroidal,
 /// and every chunk takes and returns fixed-size slots.
 /// </summary>
 public sealed class GpuResidencySystem : ISystem, IDebugUiSystem
 {
     // CPU time of each step, and how many chunks went each way, for the debug panel.
     private readonly StepTimer _steps = new("Releasing removed chunks and grids") { Owner = "GPU residency" };
-    private int _released, _uploaded, _uploadedShown, _mostReleased;
+    private int _released, _mostReleased;
 
     public string DebugName => "GPU residency";
 
     public void DrawDebugUi()
     {
-        ImGui.Text($"Last frame: released {_released} chunks, uploaded {_uploadedShown}; " +
+        ImGui.Text($"Last frame: released {_released} chunks; " +
                    $"most released in a frame: {_mostReleased}; waiting to be released: {_waitingRemoval.Count}");
         _steps.Draw();
     }
 
     private readonly GridStore   _store;
     private readonly List<ChunkVolume> _removedGrids = new();
-    // Chunks no longer drawn, taken out of the store at the next tick with the rest of the frame's removals (unless
-    // drawn again first).
-    private readonly HashSet<(GridHandle Grid, ChunkPosition Pos)> _hidden = new();
-    // Chunks that unloaded, waiting to be released, oldest first from _removedAt; the map says which are still waiting
+    // Chunks let go of or unloaded, waiting to be released, oldest first from _removedAt; the map says which are still waiting
     // (one released early for an upload is taken out of it and skipped when its turn comes), with the light bricks
     // each held when it unloaded (see GridStore.WorldBricksReleasing).
     private readonly List<(GridHandle Grid, ChunkPosition Pos)> _removedChunks = new();
@@ -63,21 +60,21 @@ public sealed class GpuResidencySystem : ISystem, IDebugUiSystem
             _removedGrids.Add(grid);
         }
         
-        if (e.Has<Chunk>())
+        if (e.Has<Chunk>()) ReleaseSoon(e.Get<Chunk>().Entry);
+    }
+
+    /// <summary>Queues a chunk's storage to be released, in turn.</summary>
+    private void ReleaseSoon(ChunkEntry entry)
+    {
+        var key = (entry.Volume.Gpu, entry.Position);
+        if (_waitingRemoval.ContainsKey(key)) return;
+        int bricks = IsTheWorld(key.Gpu) ? _store.BricksOf(key.Gpu, key.Position) : 0;
+        _waitingRemoval[key] = bricks;
+        _removedChunks.Add(key);
+        if (IsTheWorld(key.Gpu) && key.Gpu.Chunks.ContainsKey(key.Position))
         {
-            var chunk = e.Get<Chunk>();
-            var entry = chunk.Entry;
-            var key = (entry.Volume.Gpu, entry.Position);
-            _hidden.Remove(key); // released in turn instead
-            if (_waitingRemoval.ContainsKey(key)) return;
-            int bricks = IsTheWorld(key.Gpu) ? _store.BricksOf(key.Gpu, key.Position) : 0;
-            _waitingRemoval[key] = bricks;
-            _removedChunks.Add(key);
-            if (IsTheWorld(key.Gpu) && key.Gpu.Chunks.ContainsKey(key.Position))
-            {
-                _store.WorldChunksReleasing++;
-                _store.WorldBricksReleasing += bricks;
-            }
+            _store.WorldChunksReleasing++;
+            _store.WorldBricksReleasing += bricks;
         }
     }
 
@@ -105,34 +102,28 @@ public sealed class GpuResidencySystem : ISystem, IDebugUiSystem
     {
         var grid = entry.Volume.Gpu;
         var pos = entry.Position;
-        _hidden.Remove((grid, pos));
         if (entry.Volume.IsLowResolutionCopy) _store.RegisterStatic(grid, entry.Volume.Scale); // lit as a static grid
         // Its position's (or its world index cell's) old chunk, if that is still waiting to be released, goes first.
         Release((grid, pos));
         if (_store.WorldCellHolder(grid, pos, out var holder)) Release((grid, holder));
         _store.UploadChunk(grid, pos, entry);
         entry.Entity.Set<ChunkUploadedFlag>();
-        _uploaded++;
     }
 
-    /// <summary>Takes a chunk that's no longer drawn out of the store, at the next tick.</summary>
+    /// <summary>Lets go of a chunk that's no longer drawn: released in turn, as one unloaded is (unless it's drawn again
+    /// first, see <see cref="Upload"/>).</summary>
     internal void Hide(ChunkEntry entry)
     {
-        if (!entry.Entity.IsAlive) return; // unloaded: released in turn (see OnEntityDisposed)
+        if (!entry.Entity.IsAlive) return; // unloaded: queued already (see OnEntityDisposed)
         entry.Entity.Remove<ChunkUploadedFlag>();
-        _hidden.Add((entry.Volume.Gpu, entry.Position));
+        ReleaseSoon(entry);
     }
 
     public void Update(float dt)
     {
         _steps.Start();
-        _uploadedShown = _uploaded;
-        _uploaded = 0;
         _store.BeginRemovals(); // the chunks next to those released are looked at once, at the end (see GridStore)
-        // No longer drawn: a chunk's storage and light bricks go, and a grid's whole GPU registration (re-registered on
-        // its first upload).
-        foreach (var (grid, pos) in _hidden) _store.RemoveChunk(grid, pos);
-        _hidden.Clear();
+        // A ship no longer drawn: its whole GPU registration goes (re-registered on its first upload).
         foreach (var e in _unrenderedGrids.GetEntities().ToArray())
             if (!e.Has<Rendered>()) _store.Unregister(e.Get<ChunkGrid>().Volume.Gpu);
         _unrenderedGrids.Complete();
