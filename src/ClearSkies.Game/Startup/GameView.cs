@@ -96,7 +96,7 @@ public sealed class GameView : IDisposable
         if (_checkerBounce is { } spread) light.BounceSpread = spread;
         host.AddSystem(light, SystemStage.PreRender);
         var (_, upload) = MeshStages.Add(world.ChunkPipeline, Meshes); // every chunk meshed in the chunk pipeline
-        var (store, shown) = LightStages.Add(world.ChunkPipeline, residency, light, renderer, upload, host.Time); // lit and shown
+        LightStages.Add(world.ChunkPipeline, residency, light, renderer, upload, host.Time, world.ChunkLoad); // lit and shown
         host.AddSystem(new BlockModelSystem(host.World, BlockModels), SystemStage.PreRender); // block entities -> RenderedModel
         host.AddSystem(new ClimateTintSystem(renderer, new BiomeTintMap(world.Seed)), SystemStage.RenderWorld); // grass and leaves coloured by biome
 
@@ -111,18 +111,13 @@ public sealed class GameView : IDisposable
         host.AddSystem(chunks, SystemStage.RenderWorld);
         // Distant terrain drawn coarse past full detail, in levels (--lod-levels, and the Distant Terrain panel).
         var load = world.ChunkLoad;
-        var swaps = world.TerrainSwaps;
-        swaps.AddStages(world.ChunkPipeline.Pipeline, store, shown);
-        swaps.IsLit = light.IsLit;                // swaps wait for the incoming terrain's light
-        swaps.ShowFirst = light.ShowFirst;        // which is lit ahead of the rest
-        swaps.SetCovered = GridStore.SetCovered;  // each level lit by its own blocks where a finer one is in
         if (_lodLevels > 0)
         {
             var radii = DistantTerrainPanel.DefaultRadii(_lodLevels);
             if (_lodDistance is { } far) radii[^1] = far;
             load.SetLevels(DistantTerrainPanel.DefaultFullDetailRadius, radii);
         }
-        host.AddSystem(new DistantTerrainPanel(load, swaps), SystemStage.Frame);
+        host.AddSystem(new DistantTerrainPanel(load), SystemStage.Frame);
         host.AddSystem(new ModelRenderSystem(host.World, renderer, host.Time), SystemStage.RenderWorld);
         host.AddSystem(_clouds, SystemStage.RenderWorld);
         host.AddSystem((IRenderSystem)_particles, SystemStage.RenderWorld);

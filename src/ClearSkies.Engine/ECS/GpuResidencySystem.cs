@@ -109,6 +109,10 @@ public sealed class GpuResidencySystem : ISystem, IDebugUiSystem
         _store.UploadChunk(grid, pos, entry);
     }
 
+    /// <summary>Covers a chunk of a low-resolution copy in the store, under the finer level, or not (see
+    /// <see cref="GridStore.SetCovered"/>).</summary>
+    internal void SetCovered(ChunkEntry entry, bool covered) => _store.SetCovered(entry.Volume.Gpu, entry.Position, covered);
+
     /// <summary>Lets go of a chunk that's no longer drawn: released in turn, as one unloaded is (unless it's drawn again
     /// first, see <see cref="Upload"/>).</summary>
     internal void Hide(ChunkEntry entry)

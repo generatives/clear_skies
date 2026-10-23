@@ -85,15 +85,15 @@ public abstract class WorkerStage<TOut> : WorkerStage where TOut : class
 }
 
 /// <summary>What a frame or external stage answers: done, with its output and what changed, or not yet (asked again
-/// next frame); a frame stage's done may also be for now (<see cref="Again"/>).</summary>
-public readonly record struct StageResult(bool Finished, object? Output, Change Change, bool RunsAgain = false)
+/// next frame).</summary>
+public readonly record struct StageResult(bool Finished, object? Output, Change Change, bool Changed = true)
 {
     public static StageResult Done(object? output = null) => new(true, output, Change.All);
     public static StageResult Done(object? output, Change change) => new(true, output, change);
     public static readonly StageResult Waiting = new(false, null, Change.All);
-    /// <summary>Done for now, and run again next frame: for a frame stage whose output goes on changing with time (a
-    /// fade).</summary>
-    public static StageResult Again(object? output) => new(true, output, Change.All, RunsAgain: true);
+    /// <summary>Done, with nothing its readers read changed: they don't run again (two stages reading each other's
+    /// output, on different chunks, settle).</summary>
+    public static StageResult Same(object? output) => new(true, output, Change.All, Changed: false);
 }
 
 /// <summary>A stage done on the main thread, under the frame's budget.</summary>

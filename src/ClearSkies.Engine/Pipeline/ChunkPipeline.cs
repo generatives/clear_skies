@@ -485,33 +485,25 @@ public sealed class ChunkPipeline
         _runOnWorker(worker, work);
     }
 
-    /// <summary>Runs a frame stage; false if it's to run again next frame (it can't yet, or it's done for now), left
-    /// stale and queued.</summary>
+    /// <summary>Runs a frame stage; false if it can't yet (it's left stale, to run again next frame).</summary>
     private bool RunFrame(PipelineChunk record, FrameStage stage)
     {
         var result = stage.Run(record, Gather(record, stage));
-        if (result.Finished)
-        {
-            record.At(stage.Id).Set(SlotFlags.Stale, false);
-            Finish(record, stage, result.Output, result.Change);
-            if (!result.RunsAgain) return true;
-        }
-        ref var slot = ref record.At(stage.Id);
-        slot.Set(SlotFlags.Stale, true);
-        if (slot.Is(SlotFlags.Queued)) return true; // queued again already, as its inputs changed
-        slot.Set(SlotFlags.Queued, true);
-        return false;
+        if (!result.Finished) { record.At(stage.Id).Set(SlotFlags.Queued, true); return false; }
+        record.At(stage.Id).Set(SlotFlags.Stale, false);
+        Finish(record, stage, result.Output, result.Change, result.Changed);
+        return true;
     }
 
     /// <summary>Asks an external stage; true once it answered done (and is finished).</summary>
     private bool Ask(PipelineChunk record, ExternalStage stage)
     {
         var result = stage.Request(record);
-        if (result.Finished) Finish(record, stage, result.Output, result.Change);
+        if (result.Finished) Finish(record, stage, result.Output, result.Change, result.Changed);
         return result.Finished;
     }
 
-    private void Finish(PipelineChunk record, Stage stage, object? output, Change change)
+    private void Finish(PipelineChunk record, Stage stage, object? output, Change change, bool changed = true)
     {
         ref var slot = ref record.At(stage.Id);
         slot.Set(SlotFlags.Running, false);
@@ -523,7 +515,7 @@ public sealed class ChunkPipeline
             change = change with { Urgent = true };
             if (!slot.Is(SlotFlags.Stale)) slot.Set(SlotFlags.Urgent, false); // else it runs again, still urgent
         }
-        Propagate(record, stage, change, acceptsMissingOnly: false);
+        if (changed) Propagate(record, stage, change, acceptsMissingOnly: false);
         Check(record, stage.Id);  // its inputs changed while it ran: runs again
         _maybeDrop.Add(record);
     }

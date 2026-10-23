@@ -58,7 +58,6 @@ public sealed class GameWorld
         ChunkLoad = new ChunkLoadSystem(host.World, StaticVolume, budget, ChunkPipeline.Pipeline, () => new HeartWorldGenerator(seed),
                                         options.ViewDistance, MinChunkY, chunkStore, chunkPreparer);
         ((EditVoxelsHandler)Commands.HandlerFor(CommandIds.EditVoxels)!).Terrain = ChunkLoad; // edits to the world ask it what's there
-        TerrainSwaps = new TerrainSwapSystem(ChunkLoad); // swaps coarse terrain in and out as full detail loads
 
         Interpolation = new TickInterpolationSystem(host.World, host.Time);
         Hierarchy = new HierarchyTransformSystem(host.World);
@@ -87,7 +86,6 @@ public sealed class GameWorld
     public EditLimits EditLimits { get; } = new();
     public ChunkLoadSystem ChunkLoad { get; }
     public ChunkPipelineSystem ChunkPipeline { get; }
-    public TerrainSwapSystem TerrainSwaps { get; }
 
     /// <summary>Records each tick's poses (in the tick), and draws between the last two (in the frame).</summary>
     public TickInterpolationSystem Interpolation { get; }

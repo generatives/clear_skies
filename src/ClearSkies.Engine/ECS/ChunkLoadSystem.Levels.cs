@@ -16,7 +16,7 @@ namespace ClearSkies.Engine.ECS;
 /// the store if edited), shrinking each into the level above it (<see cref="CoarseTerrain"/>), and again for each
 /// level up to its own.
 ///
-/// A level's chunk swaps with the eight of the level nearer the view under it (see <see cref="TerrainSwapSystem"/>); every level
+/// A level's chunk swaps with the eight of the level nearer the view under it (see <see cref="ShownStage"/>); every level
 /// ends in whole 2x2x2 groups, so each chunk of the next swaps for its eight in one go. A coarse chunk's blocks are dropped once it's
 /// meshed and in the GPU store (see <see cref="DropBlocksStage"/>): it's never edited or collided with.
 /// </summary>
@@ -160,6 +160,14 @@ public sealed partial class ChunkLoadSystem
         foreach (var (pos, _) in level.Volume.All.ToList()) Unload(level, pos);
         if (level.Root.IsAlive) level.Root.Dispose();
     }
+
+    /// <summary>Whether a level's chunk is in its range (see <see cref="Wanted(TerrainLevel, ChunkPosition)"/>), by its
+    /// pipeline key; and whether the level has it (see <see cref="Has(TerrainLevel, ChunkPosition)"/>). False for any
+    /// other grid's.</summary>
+    internal bool InRange(ChunkKey key) => LevelOf(key) is { } level && Wanted(level, key.Pos);
+    internal bool Has(ChunkKey key) => LevelOf(key) is { } level && Has(level, key.Pos);
+
+    private TerrainLevel? LevelOf(ChunkKey key) => key.Grid < _levels.Count && _levels[key.Grid].Grid.Id == key.Grid ? _levels[key.Grid] : null;
 
     /// <summary>Whether the level has chunk <paramref name="p"/>: it's wanted, and loaded or known to be air.</summary>
     internal bool Has(TerrainLevel level, ChunkPosition p)

@@ -120,7 +120,7 @@ public sealed partial class ChunkLoadSystem
     }
 
     /// <summary>The level a chunk was made for, if it's still there.</summary>
-    private TerrainLevel? LevelOf(ChunkVoxels made) => made.Key.Grid < _levels.Count ? _levels[made.Key.Grid] : null;
+    private TerrainLevel? LevelOf(ChunkVoxels made) => LevelOf(made.Key);
 
     /// <summary>Adds a chunk made for its level to the level's volume, in place of what was made before; one that came
     /// out air is remembered as air.</summary>

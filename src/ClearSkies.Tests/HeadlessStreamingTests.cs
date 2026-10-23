@@ -55,15 +55,15 @@ public class HeadlessStreamingTests
     private static TerrainInterest Colliders(float radius) => new() { ColliderRadius = radius };
 
     /// <summary>Runs streaming until it's quiet: nothing loading and nothing changing for a second of frames (at least
-    /// <paramref name="frames"/> frames, at most 20 s); with the swaps, if any, updated after it each frame.</summary>
-    internal static void Settle(ChunkLoadSystem load, int frames = 60, TerrainSwapSystem? swaps = null)
+    /// <paramref name="frames"/> frames, at most 20 s); with the clock, if any, moved on a frame each frame.</summary>
+    internal static void Settle(ChunkLoadSystem load, int frames = 60, ClearSkies.Engine.Core.Time? time = null)
     {
         var deadline = DateTime.UtcNow.AddSeconds(20);
         int quiet = 0, last = -1;
         for (int i = 0; (i < frames || quiet < 60) && DateTime.UtcNow < deadline; i++)
         {
             Frame(load);
-            swaps?.Update(1 / 60f);
+            time?.Advance(1 / 60.0);
             bool idle = load.ColumnsInFlight == 0 && load.LoadedChunks == last;
             quiet = idle ? quiet + 1 : 0;
             last = load.LoadedChunks;
@@ -184,14 +184,14 @@ public class HeadlessStreamingTests
         using var db = SaveDatabase.InMemory();
         var load = Streaming(scene, db, viewDistance: 256);
         load.SetLevels(64, new[] { 256f }); // full detail to one group; level 1 (64-block chunks) to 4 chunks
-        var swaps = new TerrainSwapSystem(load);
+        using var drawn = scene.World.SubscribeComponentAdded((in DefaultEcs.Entity e, in Chunk _) => e.Set<Rendered>()); // as the game's view
+        var time = new ClearSkies.Engine.Core.Time();
         var pipeline = PipelineOf(load).Pipeline;
-        var store = pipeline.Add(new StoredStandIn(pipeline, load.Voxels));
-        var shown = pipeline.Add(new ShownStandIn(pipeline, store));
-        swaps.AddStages(pipeline, store, shown);
+        var baked = pipeline.Add(new BakedStandIn(pipeline, load.Voxels));
+        pipeline.Add(new ShownStage(pipeline, time, baked, load));
         var player = Interest(scene, 16, 16, View(256));
         var deadline = DateTime.UtcNow.AddSeconds(20);
-        do { Settle(load, swaps: swaps); } while (!load.LevelsIdle && DateTime.UtcNow < deadline);
+        do { Settle(load, time: time); } while (!load.LevelsIdle && DateTime.UtcNow < deadline);
         Assert.True(load.LevelsIdle);
 
         var level = load.Levels[1];
@@ -203,37 +203,45 @@ public class HeadlessStreamingTests
         Assert.False(level.Volume.IsLoaded(new ChunkPosition(3, 0, 0))); // air
         Assert.False(level.Volume.IsLoaded(new ChunkPosition(5, -1, 0))); // out of range
         var fullDetail = load.Levels[0];
-        // Nothing's shown yet: no level is drawn, and the full detail is left whole.
-        Assert.Equal(ChunkDrawState.Hidden, swaps.DrawState(level, far));
-        Assert.Equal(ChunkDrawState.Whole, swaps.DrawState(fullDetail, new ChunkPosition(0, -1, 0)));
+        var under = new ChunkPosition(0, -1, 0);
+        // How each is drawn now: 1, not at all (see Shown.Dissolve).
+        float Drawn(ChunkLoadSystem.TerrainLevel l, ChunkPosition p)
+            => l.Volume.GetEntry(p)?.Entity is { } e && e.Has<Shown>() ? e.Get<Shown>().Dissolve(time.TotalSeconds) : 1f;
+        // Nothing's baked yet: nothing's drawn.
+        Assert.Equal(1f, Drawn(level, far));
+        Assert.Equal(1f, Drawn(fullDetail, under));
 
-        // Shown, with swaps at once: level 1 is drawn past full detail, and not where full detail has its eight, which
-        // is drawn there; past it, full detail is left out under level 1.
-        swaps.FadeSeconds = 0f;
-        shown.Show = true;
-        for (int i = 0; i < 10; i++) { Frame(load); swaps.Update(1 / 60f); }
-        Assert.Equal(1f, swaps.DrawState(level, near).Dissolve);
-        Assert.Equal(0f, swaps.DrawState(level, far).Dissolve);
-        Assert.Equal(0f, swaps.DrawState(level, new ChunkPosition(0, -4, 0)).Dissolve); // below full detail's ball
-        Assert.Equal(ChunkDrawState.Whole, swaps.DrawState(fullDetail, new ChunkPosition(0, -1, 0)));
-        Assert.Equal(ChunkDrawState.Hidden, swaps.DrawState(fullDetail, new ChunkPosition(0, -7, 0)));
+        var fade = ShownStage.FadeSeconds;
+        try
+        {
+            // Baked, with fades at once: level 1 is drawn past full detail, and not where full detail has its eight,
+            // which is drawn there.
+            ShownStage.FadeSeconds = 0f;
+            baked.Baked = true;
+            Frames(load, time, 10);
+            Assert.Equal(1f, Drawn(level, near));
+            Assert.Equal(0f, Drawn(level, far));
+            Assert.Equal(0f, Drawn(level, new ChunkPosition(0, -4, 0))); // below full detail's ball
+            Assert.Equal(0f, Drawn(fullDetail, under));
 
-        // Moving on a little, full detail leaves the near chunks behind: level 1 dissolves back in over them, and they're
-        // held till it's in.
-        swaps.FadeSeconds = 1f;
-        var behind = new ChunkPosition(0, -1, 0);
-        player.Get<Transform>().Position = new Vector3D<float>(16 + 128, 10, 16);
-        for (int i = 0; i < 10; i++) { Frame(load); swaps.Update(1 / 60f); }
-        Assert.True(fullDetail.Volume.IsLoaded(behind));
-        Assert.InRange(swaps.DrawState(level, near).Dissolve, -0.99f, -0.01f);
-        Assert.InRange(swaps.DrawState(fullDetail, behind).Dissolve, 0.01f, 0.99f);
-        for (int i = 0; i < 90; i++) { Frame(load); swaps.Update(1 / 60f); }
-        Assert.False(fullDetail.Volume.IsLoaded(behind));
-        Assert.Equal(ChunkDrawState.Whole, swaps.DrawState(level, near));
+            // Moving on a little, full detail leaves the near chunks behind: level 1 dissolves back in over them as they
+            // dissolve out, and they're held till it's in.
+            ShownStage.FadeSeconds = 1f;
+            player.Get<Transform>().Position = new Vector3D<float>(16 + 128, 10, 16);
+            Frames(load, time, 10);
+            Assert.True(fullDetail.Volume.IsLoaded(under));
+            float coming = Drawn(level, near), going = Drawn(fullDetail, under);
+            Assert.InRange(coming, 0.01f, 0.99f);
+            Assert.Equal(-coming, going); // the pixels it leaves out
+            Frames(load, time, 90);
+            Assert.False(fullDetail.Volume.IsLoaded(under));
+            Assert.Equal(0f, Drawn(level, near));
+        }
+        finally { ShownStage.FadeSeconds = fade; }
 
         // The level streams with the view like full detail: what's left behind unloads.
         player.Get<Transform>().Position = new Vector3D<float>(16 + 1024, 10, 16);
-        do { Settle(load, swaps: swaps); } while (!load.LevelsIdle && DateTime.UtcNow < deadline.AddSeconds(20));
+        do { Settle(load, time: time); } while (!load.LevelsIdle && DateTime.UtcNow < deadline.AddSeconds(20));
         Assert.False(level.Volume.IsLoaded(far));
         Assert.True(level.Volume.IsLoaded(new ChunkPosition(16 + 3, -1, 0)));
 
@@ -244,23 +252,24 @@ public class HeadlessStreamingTests
         Assert.False(level.Root.IsAlive);
     }
 
-    /// <summary>Stands in for the light store (which needs a GPU): a chunk's in it once it's made.</summary>
-    private sealed class StoredStandIn(ChunkPipeline pipeline, Stage voxels) : FrameStage
+    private static void Frames(ChunkLoadSystem load, ClearSkies.Engine.Core.Time time, int frames)
     {
-        public override bool AppliesTo(PipelineGrid grid) => voxels.AppliesTo(grid);
-        public override IReadOnlyList<ClearSkies.Engine.Pipeline.Input> InputsFor(PipelineGrid grid) => new ClearSkies.Engine.Pipeline.Input[] { new(voxels, Relation.Self) };
-        public override StageResult Run(PipelineChunk record, StageInputs inputs) => StageResult.Done(pipeline.EntryOf(record.Key));
+        for (int i = 0; i < frames; i++)
+        {
+            Frame(load);
+            time.Advance(1 / 60.0);
+        }
     }
 
-    /// <summary>Stands in for <see cref="ShownStage"/> (lit and baked, which need a GPU): a stored chunk's shown once
-    /// <see cref="Show"/> is set.</summary>
-    private sealed class ShownStandIn(ChunkPipeline pipeline, Stage stored) : FrameStage
+    /// <summary>Stands in for first bake (lit and baked, which need a GPU): a chunk's baked once <see cref="Baked"/>
+    /// is set.</summary>
+    private sealed class BakedStandIn(ChunkPipeline pipeline, Stage voxels) : FrameStage
     {
-        public bool Show;
-        public override bool AppliesTo(PipelineGrid grid) => stored.AppliesTo(grid);
-        public override IReadOnlyList<ClearSkies.Engine.Pipeline.Input> InputsFor(PipelineGrid grid) => new ClearSkies.Engine.Pipeline.Input[] { new(stored, Relation.Self) };
+        public bool Baked;
+        public override bool AppliesTo(PipelineGrid grid) => voxels.AppliesTo(grid);
+        public override IReadOnlyList<ClearSkies.Engine.Pipeline.Input> InputsFor(PipelineGrid grid) => new ClearSkies.Engine.Pipeline.Input[] { new(voxels, Relation.Self) };
         public override StageResult Run(PipelineChunk record, StageInputs inputs)
-            => Show ? StageResult.Done(pipeline.EntryOf(record.Key)) : StageResult.Waiting;
+            => Baked ? StageResult.Done(pipeline.EntryOf(record.Key)) : StageResult.Waiting;
     }
 
     [Fact]
@@ -281,14 +290,6 @@ public class HeadlessStreamingTests
         Assert.Same(level, load.Levels[1]);
         Assert.Equal(512f, level.Radius);
 
-        // Each level, and full detail while there are levels, says how its chunks are drawn (the swaps tell it).
-        var swaps = new TerrainSwapSystem(load);
-        swaps.Update(1 / 60f);
-        Assert.True(level.Root.Has<ChunkDrawStates>());
-        Assert.True(scene.WorldVolume.Root.Has<ChunkDrawStates>());
-        load.SetLevels(128, Array.Empty<float>());
-        swaps.Update(1 / 60f);
-        Assert.False(scene.WorldVolume.Root.Has<ChunkDrawStates>());
     }
 
     [Fact]
