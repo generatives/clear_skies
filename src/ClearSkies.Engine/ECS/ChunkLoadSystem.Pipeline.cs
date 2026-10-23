@@ -39,12 +39,15 @@ public sealed partial class ChunkLoadSystem
     }
 
     /// <summary>Lets go of the level's chunk <paramref name="p"/>: the pipeline drops it (and it leaves the volume) once
-    /// nothing's making it. One the pipeline didn't make (an edit did) is unloaded now.</summary>
+    /// nothing's making or holding it. One the pipeline didn't make (an edit did) is unloaded now.</summary>
     private void LetGoOf(TerrainLevel level, ChunkPosition p)
     {
-        if (!level.Wanting.Remove(p)) { Unload(level, p); return; }
-        RemoveInFlight(level, p);
-        _pipeline.Want(level.Key(p), false);
+        if (level.Wanting.Remove(p))
+        {
+            RemoveInFlight(level, p);
+            _pipeline.Want(level.Key(p), false);
+        }
+        else if (_pipeline.Get(level.Key(p)) == null) Unload(level, p);
     }
 
     /// <summary>Lets go of a removed level's chunk: the level unloads its volume itself, so what the pipeline made is

@@ -154,18 +154,38 @@ public sealed class ChunkPipeline
         => key.Grid < _grids.Count && _grids[key.Grid].Volume?.GetEntry(key.Pos) is { } entry
            && entry.Entity.Has<InPipeline>() && entry.Entity.Get<InPipeline>().Key == key ? entry : null;
 
-    /// <summary>Wants a chunk (every stage it needs runs, see <see cref="WantFor"/>), or no longer (it's dropped once no worker is making it).</summary>
+    /// <summary>Asks for a chunk (every stage it needs runs, see <see cref="WantFor"/>), or no longer: it's dropped once
+    /// it isn't held either (see <see cref="Hold"/>) and no worker is making it.</summary>
     public void Want(ChunkKey key, bool wanted)
     {
         var record = wanted ? Ensure(key) : Get(key);
-        if (record == null || record.Wanted == wanted) return;
-        record.Wanted = wanted;
-        for (int s = 0; s < _stages.Count; s++)
-            if (record.Has(s)) Check(record, s);
-        // Inputs that accept a missing chunk see it come or go.
+        if (record == null || record.Asked == wanted) return;
+        bool was = record.Wanted;
+        record.Asked = wanted;
+        Changed(record, was);
+    }
+
+    /// <summary>Holds a wanted chunk, or lets go of a hold: it stays in the pipeline while anything holds it, asked for
+    /// or not. A chunk not in the pipeline isn't held (a hold never makes one); false then.</summary>
+    public bool Hold(ChunkKey key, bool held)
+    {
+        if (Get(key) is not { Wanted: true } record || !held && record.Holds == 0) return false;
+        bool was = record.Wanted;
+        record.Holds += held ? 1 : -1;
+        if (record.Wanted != was) Changed(record, was);
+        return true;
+    }
+
+    /// <summary>A chunk was asked for or let go of, or its last hold went.</summary>
+    private void Changed(PipelineChunk record, bool wasWanted)
+    {
+        if (record.Wanted != wasWanted)
+            for (int s = 0; s < _stages.Count; s++)
+                if (record.Has(s)) Check(record, s);
+        // Inputs that accept a missing chunk see it come or go (or stay only held).
         for (int s = 0; s < _stages.Count; s++)
             if (record.Has(s) && record.At(s).Version > 0) Propagate(record, _stages[s], Change.All, acceptsMissingOnly: true);
-        if (!wanted) _maybeDrop.Add(record);
+        if (!record.Wanted) _maybeDrop.Add(record);
     }
 
     /// <summary>Wants a wanted chunk for <paramref name="purpose"/> too, or no longer: the stages serving it run on the
@@ -306,14 +326,22 @@ public sealed class ChunkPipeline
             if (!Ask(record, stage)) _awaitingExternal.Enqueue((record, stage));
         }
 
-        var waiting = new List<((PipelineChunk, Stage) Item, (float, int) Priority)>();
         while (MainLeft() && TakeReady(Executor.Frame, out var record, out var stage, out var priority))
-            if (!RunFrame(record, (FrameStage)stage)) waiting.Add(((record, stage), priority));
-        foreach (var (item, priority) in waiting) _ready[(int)Executor.Frame].Enqueue(item, priority);
+            if (!RunFrame(record, (FrameStage)stage)) _skipped.Add(((record, stage), priority));
+        foreach (var (item, priority) in _skipped) _ready[(int)Executor.Frame].Enqueue(item, priority);
+        _skipped.Clear();
 
-        foreach (var record in _maybeDrop) DropIfUnneeded(record);
-        _maybeDrop.Clear();
+        // Dropping lets go of what a chunk made, which can let go of holds on others: dropped too, in turn.
+        while (_maybeDrop.Count > 0)
+        {
+            _dropping.AddRange(_maybeDrop);
+            _maybeDrop.Clear();
+            foreach (var record in _dropping) DropIfUnneeded(record);
+            _dropping.Clear();
+        }
     }
+
+    private readonly List<PipelineChunk> _dropping = new();
 
     /// <summary>How many chunks have the stage in each state, for the panel.</summary>
     public (int Waiting, int Ready, int Running, int Done) Count(Stage stage)
@@ -457,14 +485,22 @@ public sealed class ChunkPipeline
         _runOnWorker(worker, work);
     }
 
-    /// <summary>Runs a frame stage; false if it can't yet (it's left stale, to run again next frame).</summary>
+    /// <summary>Runs a frame stage; false if it's to run again next frame (it can't yet, or it's done for now), left
+    /// stale and queued.</summary>
     private bool RunFrame(PipelineChunk record, FrameStage stage)
     {
         var result = stage.Run(record, Gather(record, stage));
-        if (!result.Finished) { record.At(stage.Id).Set(SlotFlags.Queued, true); return false; }
-        record.At(stage.Id).Set(SlotFlags.Stale, false);
-        Finish(record, stage, result.Output, result.Change);
-        return true;
+        if (result.Finished)
+        {
+            record.At(stage.Id).Set(SlotFlags.Stale, false);
+            Finish(record, stage, result.Output, result.Change);
+            if (!result.RunsAgain) return true;
+        }
+        ref var slot = ref record.At(stage.Id);
+        slot.Set(SlotFlags.Stale, true);
+        if (slot.Is(SlotFlags.Queued)) return true; // queued again already, as its inputs changed
+        slot.Set(SlotFlags.Queued, true);
+        return false;
     }
 
     /// <summary>Asks an external stage; true once it answered done (and is finished).</summary>

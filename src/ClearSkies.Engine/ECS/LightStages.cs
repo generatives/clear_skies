@@ -15,9 +15,9 @@ namespace ClearSkies.Engine.ECS;
 /// </summary>
 public static class LightStages
 {
-    /// <summary>Adds the stages to the pipeline, after <see cref="MeshStages"/> (before it wants any chunk); returns first
-    /// light, which swaps wait for.</summary>
-    public static FirstLightStage Add(
+    /// <summary>Adds the stages to the pipeline, after <see cref="MeshStages"/> (before it wants any chunk); returns the
+    /// light store and shown, which swaps read (see <see cref="TerrainSwapSystem.AddStages"/>).</summary>
+    public static (LightStoreStage Store, ShownStage Shown) Add(
         ChunkPipelineSystem system, GpuResidencySystem residency, GpuLightSystem light, Renderer renderer, UploadStage upload,
         Time time)
     {
@@ -25,9 +25,9 @@ public static class LightStages
         var store = pipeline.Add(new LightStoreStage(pipeline, residency));
         var firstLight = pipeline.Add(new FirstLightStage(pipeline, light, store));
         var firstBake = pipeline.Add(new FirstBakeStage(pipeline, renderer, upload, firstLight));
-        pipeline.Add(new ShownStage(pipeline, time, firstBake));
+        var shown = pipeline.Add(new ShownStage(pipeline, time, firstBake));
         pipeline.Add(new DropBlocksStage(pipeline, upload, store));
-        return firstLight;
+        return (store, shown);
     }
 }
 
@@ -53,7 +53,8 @@ public sealed class LightStoreStage(ChunkPipeline pipeline, GpuResidencySystem r
 
 /// <summary>Waits for a chunk in the store to be lit (see <see cref="GpuLightSystem.IsLit"/>): it, and the chunks above
 /// and below it that its top and bottom faces read. Asked from the frame after it's in the store, by when its bricks
-/// are marked for light.</summary>
+/// are marked for light. A coarse chunk's are lit ahead of light changes on terrain already shown
+/// (<see cref="GpuLightSystem.ShowFirst"/>): it's left out till then.</summary>
 public sealed class FirstLightStage(ChunkPipeline pipeline, GpuLightSystem light, LightStoreStage store) : ExternalStage
 {
     public override string Name => "First light";
@@ -70,9 +71,15 @@ public sealed class FirstLightStage(ChunkPipeline pipeline, GpuLightSystem light
         if (pipeline.EntryOf(record.Key) is not { } entry) return StageResult.Done();
         var g = entry.Volume.Gpu;
         var p = record.Key.Pos;
-        return light.IsLit(g, p) && light.IsLit(g, new ChunkPosition(p.X, p.Y + 1, p.Z)) && light.IsLit(g, new ChunkPosition(p.X, p.Y - 1, p.Z))
-            ? StageResult.Done()
-            : StageResult.Waiting;
+        ChunkPosition above = new(p.X, p.Y + 1, p.Z), below = new(p.X, p.Y - 1, p.Z);
+        if (light.IsLit(g, p) && light.IsLit(g, above) && light.IsLit(g, below)) return StageResult.Done();
+        if (record.Grid.Level > 0)
+        {
+            light.ShowFirst(g, p);
+            light.ShowFirst(g, above);
+            light.ShowFirst(g, below);
+        }
+        return StageResult.Waiting;
     }
 }
 

@@ -98,10 +98,6 @@ public sealed partial class ChunkLoadSystem
         internal readonly List<(int x, int z)> EvictOrder = new();
         internal int EvictNext = -1, Evictions;
         internal bool NothingToEvict, Full;
-
-        /// <summary>Chunks no longer wanted but held loaded (see <see cref="KeepLoaded"/>), with the frame each was
-        /// first held.</summary>
-        internal readonly Dictionary<ChunkPosition, int> Held = new();
     }
 
     /// <summary>The levels of detail: full detail, then the coarse ones nearest the view first (see <see cref="SetLevels"/>).</summary>
@@ -158,6 +154,8 @@ public sealed partial class ChunkLoadSystem
     {
         level.Removed = true;
         foreach (var pos in level.Wanting) Forget(level, pos);
+        foreach (var (pos, _) in level.Volume.All) // held by the pipeline, let go of already
+            if (!level.Wanting.Contains(pos) && _pipeline.Get(level.Key(pos)) != null) Forget(level, pos);
         level.Wanting.Clear();
         foreach (var (pos, _) in level.Volume.All.ToList()) Unload(level, pos);
         if (level.Root.IsAlive) level.Root.Dispose();

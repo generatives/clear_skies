@@ -27,8 +27,13 @@ public sealed class PipelineChunk
 
     public ChunkKey Key { get; }
     public PipelineGrid Grid { get; }
-    /// <summary>In range: every stage it has runs. Once not, it's only waiting to be dropped, and nothing reads it.</summary>
-    public bool Wanted { get; internal set; }
+    /// <summary>In the pipeline: asked for, or held. Every stage it has runs. Once not, it's only waiting to be dropped,
+    /// and nothing reads it.</summary>
+    public bool Wanted => Asked || Holds > 0;
+    /// <summary>Wanted by what asked for it (see <see cref="ChunkPipeline.Want"/>).</summary>
+    public bool Asked { get; internal set; }
+    /// <summary>Holds on it (see <see cref="ChunkPipeline.Hold"/>): what else keeps it while it's asked for or not.</summary>
+    internal int Holds;
     /// <summary>What it's wanted for, beyond its blocks (see <see cref="ChunkPipeline.WantFor"/>).</summary>
     public Purpose Purposes { get; internal set; }
     /// <summary>Dropped by the pipeline: nothing needs it any more.</summary>

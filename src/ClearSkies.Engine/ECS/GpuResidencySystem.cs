@@ -107,7 +107,6 @@ public sealed class GpuResidencySystem : ISystem, IDebugUiSystem
         Release((grid, pos));
         if (_store.WorldCellHolder(grid, pos, out var holder)) Release((grid, holder));
         _store.UploadChunk(grid, pos, entry);
-        entry.Entity.Set<ChunkUploadedFlag>();
     }
 
     /// <summary>Lets go of a chunk that's no longer drawn: released in turn, as one unloaded is (unless it's drawn again
@@ -115,7 +114,6 @@ public sealed class GpuResidencySystem : ISystem, IDebugUiSystem
     internal void Hide(ChunkEntry entry)
     {
         if (!entry.Entity.IsAlive) return; // unloaded: queued already (see OnEntityDisposed)
-        entry.Entity.Remove<ChunkUploadedFlag>();
         ReleaseSoon(entry);
     }
 

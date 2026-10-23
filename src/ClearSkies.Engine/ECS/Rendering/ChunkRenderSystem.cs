@@ -25,7 +25,7 @@ namespace ClearSkies.Engine.ECS;
 ///
 /// A static volume's chunk is drawn once it's shown (<see cref="Shown"/>), dissolving in at first. Whoever manages a
 /// static volume can say how each of its chunks is drawn each frame (see <see cref="ChunkDrawStates"/>):
-/// left out, dissolving in or out, and lit from its light maps, from the maps it last baked, or as open air. A scaled
+/// left out, or dissolving in or out. A scaled
 /// volume's light maps are baked nearest first up to <see cref="ScaledBakeQuadBudget"/> quads a frame; then, with what's
 /// left of that, those of chunks waiting for their first bake (<see cref="BakeFirst"/>), in view or not.
 /// </summary>
@@ -53,10 +53,10 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     private int _columnsVisible, _columnCount;
 
     // One visible chunk, collected so they can be drawn nearest first. Budgeted: a scaled volume's, whose light maps are
-    // baked to a budget (see ScaledBakeQuadBudget); Light says how it's lit (see ChunkDrawState).
+    // baked to a budget (see ScaledBakeQuadBudget).
     private readonly record struct ChunkDraw(float DistSq, GpuMesh? Mesh, GpuMesh? CutoutMesh, GpuMesh? TransparentMesh,
                                              ModelBlock[] Models, Mat4 Model, int Grid, ChunkPosition Chunk, GridHandle? Handle,
-                                             float Dissolve = 0f, ChunkLight Light = ChunkLight.Baked, bool Budgeted = false,
+                                             float Dissolve = 0f, bool Budgeted = false,
                                              int Level = -1);
     private List<ChunkDraw> _draws = new(), _sorted = new();
     private readonly List<ChunkDraw> _translucentDraws = new(); // the visible chunks with translucent faces
@@ -323,13 +323,13 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
                 float arriving = 1f - (float)(frame.TimeSeconds - e.Get<Shown>().FirstShownAt) / ShownStage.ArrivalSeconds;
                 if (how.Dissolve == 0f && arriving > 0f) how = how with { Dissolve = arriving };
                 var model = Mat4.Multiply(Mat4.Translation(origin), scale);
-                // A scaled volume not in the light store yet has no light to show: lit as open air meanwhile.
+                // A scaled volume not in the light store has no light to show: lit as open air.
                 int grid = rd.Grid?.Index ?? -1;
-                if (copy && (how.Light == ChunkLight.OpenAir || grid < 0)) { grid = Renderer.OpenAirGrid; how = how with { Light = ChunkLight.OpenAir }; }
+                if (copy && grid < 0) grid = Renderer.OpenAirGrid;
                 var centre = origin + size * 0.5f;
                 _draws.Add(new ChunkDraw(Vector3D.DistanceSquared(centre, frame.CameraPosition), rd.Mesh, rd.CutoutMesh,
                                          rd.TransparentMesh, rd.Models, model, grid, rd.ChunkPos, rd.Grid, how.Dissolve,
-                                         how.Light, Budgeted: copy, Level: level));
+                                         Budgeted: copy, Level: level));
             }
         }
     }
@@ -340,8 +340,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     /// room. Returns whether it can be drawn.</summary>
     private bool Bake(in ChunkDraw d)
     {
-        if (d.Light == ChunkLight.OpenAir) return true;
-        if (d.Light == ChunkLight.Kept && AllBaked(in d)) return true;
+        if (d.Grid == Renderer.OpenAirGrid) return true;
         int stamp = _renderer.LightStampOf(d.Handle, d.Chunk);
         if (d.Budgeted)
         {
@@ -430,22 +429,11 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     }
 }
 
-/// <summary>How a static volume's chunk is lit (see <see cref="ChunkDrawState"/>).</summary>
-public enum ChunkLight
-{
-    /// <summary>From its light maps, baked again whenever its light changes.</summary>
-    Baked,
-    /// <summary>From the light maps it last baked, not baked again (left out until it has some).</summary>
-    Kept,
-    /// <summary>As open air: ambient and full sun, with no light maps.</summary>
-    OpenAir,
-}
-
 /// <summary>How a static volume's chunk is drawn this frame (see <see cref="ChunkDrawStates"/>).
 /// <see cref="Dissolve"/>: 0 draws it whole; 1 leaves it out; d between 0 and 1 leaves out that share of its pixels in an
 /// even screen dither (going away); -d draws only that share, the very pixels d leaves out (coming in over something
 /// going away).</summary>
-public readonly record struct ChunkDrawState(float Dissolve, ChunkLight Light = ChunkLight.Baked)
+public readonly record struct ChunkDrawState(float Dissolve)
 {
     public static readonly ChunkDrawState Whole = new(0f);
     public static readonly ChunkDrawState Hidden = new(1f);
@@ -455,7 +443,7 @@ public readonly record struct ChunkDrawState(float Dissolve, ChunkLight Light = 
 public delegate ChunkDrawState ChunkDrawStateOf(ChunkPosition pos);
 
 /// <summary>On a static volume's root (the world's, or a low-resolution copy's): how each of its chunks is drawn, asked for each
-/// one in view every frame. Without it, they're all drawn whole, lit from their light maps.</summary>
+/// one in view every frame. Without it, they're all drawn whole.</summary>
 public struct ChunkDrawStates
 {
     public ChunkDrawStateOf Of;
