@@ -18,7 +18,8 @@ public readonly record struct WaterChange(Vector3D<int> Cell, BlockId Block, Blo
 /// <para>Only woken cells are looked at: those next to a change (see <see cref="Wake"/>), so water at rest, every lake
 /// generation made, costs nothing. A step reads the volume as it was and returns its changes, which the caller applies
 /// (through a command, so every machine sees them) before the next step; the cells they touch are woken for it. Cells
-/// whose chunk isn't loaded count as solid, so water stops at the edge of what's loaded.</para>
+/// whose chunk isn't loaded are left alone, and water over one neither falls nor spreads, so water stops at the
+/// edge of what's loaded (a stream poured off an island stops where the sky's empty chunks begin).</para>
 /// </summary>
 public sealed class WaterFlow
 {
@@ -103,16 +104,14 @@ public sealed class WaterFlow
 
         // Then it falls, or on ground spreads.
         var below = cell - Up;
-        if (TryGet(below, out var under, out var underState))
+        if (!TryGet(below, out var under, out var underState)) return; // over what isn't loaded (the sky, say) it waits
+        if (Open(under)) { Put(below, BlockId.Water, WaterLevel.Flowing(0, falling: true)); return; }
+        if (under == BlockId.Water)
         {
-            if (Open(under)) { Put(below, BlockId.Water, WaterLevel.Flowing(0, falling: true)); return; }
-            if (under == BlockId.Water)
-            {
-                // Onto weaker flowing water it falls, making it falling water; onto any other water it joins it.
-                if (!WaterLevel.IsSource(underState) && !WaterLevel.IsFalling(underState))
-                    Put(below, BlockId.Water, WaterLevel.Flowing(0, falling: true));
-                return;
-            }
+            // Onto weaker flowing water it falls, making it falling water; onto any other water it joins it.
+            if (!WaterLevel.IsSource(underState) && !WaterLevel.IsFalling(underState))
+                Put(below, BlockId.Water, WaterLevel.Flowing(0, falling: true));
+            return;
         }
 
         int spread = WaterLevel.SpreadLevel(state) + 1;

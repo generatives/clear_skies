@@ -141,6 +141,21 @@ public class WaterFlowTests
     }
 
     [Fact]
+    public void Water_falling_to_the_edge_of_what_is_loaded_stops_there()
+    {
+        using var pool = new Pool();
+        pool.Volume.FillBox(new(5, 0, -5), new(15, 0, 5), BlockId.Air, BlockOrientation.Upright); // a hole in the floor
+        pool.Set(4, 1, 0, BlockId.Water);
+        pool.Settle();
+        // It pours over the edge and down to y = 0, the bottom of what's loaded, and stops: no spreading over nothing,
+        // and nothing left changing.
+        Assert.True(WaterLevel.IsFalling(pool.State(5, 0, 0)));
+        Assert.Equal(BlockId.Air, pool.Block(6, 0, 0));
+        Assert.Equal(BlockId.Air, pool.Block(5, 0, 1));
+        Assert.Equal(0, pool.Flow.Woken);
+    }
+
+    [Fact]
     public void Flowing_water_drains_away_once_its_source_is_gone()
     {
         using var pool = new Pool();
