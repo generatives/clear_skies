@@ -34,7 +34,7 @@ public sealed class ChunkPipeline
     private readonly PriorityQueue<(PipelineChunk Record, Stage Stage), (float, int)> _ready = new();
     private readonly ConcurrentQueue<(PipelineChunk Record, WorkerStage Stage, object Made)> _made = new();
     // External stages started and not yet reported: each is asked again every frame.
-    private readonly HashSet<(PipelineChunk Record, Stage Stage)> _awaitingExternal = new();
+    private readonly HashSet<(PipelineChunk Record, ExternalStage Stage)> _awaitingExternal = new();
     private readonly HashSet<PipelineChunk> _maybeDrop = new();
     private readonly Action<Action> _runOnWorker;
     private int _inFlight;
@@ -125,14 +125,6 @@ public sealed class ChunkPipeline
         MarkStale(record, stage.Id);
     }
 
-    /// <summary>Finishes a stage that was left running: an external stage's work, or a frame stage's GPU work.</summary>
-    public void Report(ChunkKey key, Stage stage, object? output = null, Change? change = null)
-    {
-        if (Get(key) is not { } record || !record.Has(stage.Id) || !record.At(stage.Id).Is(SlotFlags.Running)) return;
-        _awaitingExternal.Remove((record, stage));
-        Finish(record, stage, output, change ?? Change.All);
-    }
-
     /// <summary>Takes finished worker results and runs ready stages, nearest first, within <paramref name="budgets"/>.</summary>
     public void Update(FrameBudgets budgets)
     {
@@ -148,7 +140,8 @@ public sealed class ChunkPipeline
             Finish(made.Record, made.Stage, made.Made, change);
         }
 
-        foreach (var (record, stage) in _awaitingExternal) ((ExternalStage)stage).Request(record);
+        foreach (var (record, stage) in _awaitingExternal.ToList())
+            if (Ask(record, stage)) _awaitingExternal.Remove((record, stage));
 
         var later = new List<((PipelineChunk, Stage) Item, (float, int) Priority)>();
         bool workersFull = _inFlight >= budgets.WorkerSlots, mainFull = !MainLeft();
@@ -165,14 +158,13 @@ public sealed class ChunkPipeline
                     workersFull = _inFlight >= budgets.WorkerSlots;
                     break;
                 case FrameStage frame when !mainFull:
-                    StartFrame(record, frame);
+                    if (!RunFrame(record, frame)) later.Add((item, priority));
                     mainFull = !MainLeft();
                     break;
                 case ExternalStage external:
                     slot.Set(SlotFlags.Stale, false);
                     slot.Set(SlotFlags.Running, true);
-                    _awaitingExternal.Add((record, external));
-                    external.Request(record);
+                    if (!Ask(record, external)) _awaitingExternal.Add((record, external));
                     break;
                 default:
                     later.Add((item, priority)); // its executor is spent this frame
@@ -266,13 +258,22 @@ public sealed class ChunkPipeline
         });
     }
 
-    private void StartFrame(PipelineChunk record, FrameStage stage)
+    /// <summary>Runs a frame stage; false if it can't yet (it's left stale, to run again next frame).</summary>
+    private bool RunFrame(PipelineChunk record, FrameStage stage)
     {
-        ref var slot = ref record.At(stage.Id);
-        slot.Set(SlotFlags.Stale, false);
-        slot.Set(SlotFlags.Running, true);
         var result = stage.Run(record, Gather(record, stage));
+        if (!result.Finished) { record.At(stage.Id).Set(SlotFlags.Queued, true); return false; }
+        record.At(stage.Id).Set(SlotFlags.Stale, false);
+        Finish(record, stage, result.Output, result.Change);
+        return true;
+    }
+
+    /// <summary>Asks an external stage; true once it answered done (and is finished).</summary>
+    private bool Ask(PipelineChunk record, ExternalStage stage)
+    {
+        var result = stage.Request(record);
         if (result.Finished) Finish(record, stage, result.Output, result.Change);
+        return result.Finished;
     }
 
     private void Finish(PipelineChunk record, Stage stage, object? output, Change change)
@@ -318,7 +319,7 @@ public sealed class ChunkPipeline
         {
             if (!record.Has(stage.Id)) continue;
             ref var slot = ref record.At(stage.Id);
-            _awaitingExternal.Remove((record, stage));
+            if (stage is ExternalStage external) _awaitingExternal.Remove((record, external));
             if (slot.Output is { } output) { slot.Output = null; stage.Release(output); }
         }
         Dropped?.Invoke(record);

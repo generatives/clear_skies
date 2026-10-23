@@ -40,10 +40,15 @@ public class ChunkPipelineTests
     private sealed class Asked : ExternalStage
     {
         public int Requests;
+        public bool Lit;
         private readonly Stage _after;
         public Asked(Stage after) => _after = after;
         public override IReadOnlyList<Input> InputsFor(PipelineGrid grid) => new[] { new Input(_after, Relation.Self) };
-        public override void Request(PipelineChunk record) => Requests++;
+        public override StageResult Request(PipelineChunk record)
+        {
+            Requests++;
+            return Lit ? StageResult.Done() : StageResult.Waiting;
+        }
     }
 
     private static ChunkPosition P(int x, int y = 0, int z = 0) => new(x, y, z);
@@ -210,7 +215,7 @@ public class ChunkPipelineTests
     }
 
     [Fact]
-    public void An_external_stage_is_asked_every_frame_until_reported()
+    public void An_external_stage_is_asked_every_frame_until_it_answers_done()
     {
         var pipeline = new ChunkPipeline(work => work());
         var grid = pipeline.AddGrid("world");
@@ -223,9 +228,11 @@ public class ChunkPipelineTests
         int asked = light.Requests;
         Assert.True(asked >= 2);
 
-        pipeline.Report(key, light);
+        light.Lit = true;
         pipeline.Update(Plenty);
         Assert.Equal(SlotState.Done, pipeline.Get(key)!.State(light));
-        Assert.Equal(asked, light.Requests);
+        Assert.Equal(asked + 1, light.Requests);
+        pipeline.Update(Plenty);
+        Assert.Equal(asked + 1, light.Requests); // not asked again
     }
 }

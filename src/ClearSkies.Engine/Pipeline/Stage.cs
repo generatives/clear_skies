@@ -13,8 +13,8 @@ public enum Executor
     Worker,
     /// <summary>On the main thread, under the frame's budget.</summary>
     Frame,
-    /// <summary>By another system: the pipeline asks (<see cref="ExternalStage.Request"/>) and it reports
-    /// (<see cref="ChunkPipeline.Report"/>).</summary>
+    /// <summary>By another system: the pipeline asks every frame (<see cref="ExternalStage.Request"/>) until it
+    /// answers done.</summary>
     External,
 }
 
@@ -64,28 +64,30 @@ public abstract class WorkerStage<TOut> : WorkerStage where TOut : class
         => Applied(record, (TOut)output, (TOut?)before);
 }
 
-/// <summary>What a <see cref="FrameStage"/> run did: finished with an output, or started work that's reported later.</summary>
-public readonly record struct FrameResult(bool Finished, object? Output, Change Change)
+/// <summary>What a frame or external stage answers: done, with its output and what changed, or not yet (asked again
+/// next frame).</summary>
+public readonly record struct StageResult(bool Finished, object? Output, Change Change)
 {
-    public static FrameResult Done(object? output = null) => new(true, output, Change.All);
-    public static FrameResult Done(object? output, Change change) => new(true, output, change);
-    /// <summary>Started; <see cref="ChunkPipeline.Report"/> finishes it (GPU work).</summary>
-    public static readonly FrameResult Later = new(false, null, Change.All);
+    public static StageResult Done(object? output = null) => new(true, output, Change.All);
+    public static StageResult Done(object? output, Change change) => new(true, output, change);
+    public static readonly StageResult Waiting = new(false, null, Change.All);
 }
 
 /// <summary>A stage done on the main thread, under the frame's budget.</summary>
 public abstract class FrameStage : Stage
 {
     public sealed override Executor RunsOn => Executor.Frame;
-    public abstract FrameResult Run(PipelineChunk record, StageInputs inputs);
+    /// <summary>Runs it; <see cref="StageResult.Waiting"/> if it can't yet, to run again next frame.</summary>
+    public abstract StageResult Run(PipelineChunk record, StageInputs inputs);
 }
 
-/// <summary>A stage another system does in its own time: the pipeline asks for it every frame it's waited on, and the
-/// system reports it done (<see cref="ChunkPipeline.Report"/>).</summary>
+/// <summary>A stage another system does in its own time (first light): the pipeline asks for it every frame until it
+/// answers done.</summary>
 public abstract class ExternalStage : Stage
 {
     public sealed override Executor RunsOn => Executor.External;
-    public abstract void Request(PipelineChunk record);
+    /// <summary>Asks for it (again): <see cref="StageResult.Waiting"/> until the system has done it.</summary>
+    public abstract StageResult Request(PipelineChunk record);
 }
 
 /// <summary>The outputs a stage reads, as they were when it started: per input, each chunk picked and its output
