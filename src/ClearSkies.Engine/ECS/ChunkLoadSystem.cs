@@ -603,7 +603,8 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         var full = FullDetail;
         full.Full = false;
         int i = full.QueueHead, waiting = 0;
-        while (i < full.Queue.Count && waiting < MaxInFlight && BudgetLeft > MinStepMs)
+        double until = _steps.SinceLap() + BudgetLeft; // a share of the frame, at least MinStepMs
+        while (i < full.Queue.Count && waiting < MaxInFlight && _steps.SinceLap() < until)
             if (!DispatchAt(full, ref i, ref waiting)) break;
         foreach (var level in _levels.Skip(1))
         {

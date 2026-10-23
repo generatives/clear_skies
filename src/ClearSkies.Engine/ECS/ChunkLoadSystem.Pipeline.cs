@@ -16,6 +16,8 @@ public sealed partial class ChunkLoadSystem
     /// <summary>Levels at most, full detail included: a pipeline grid each, made up front.</summary>
     private const int MaxLevels = 8;
 
+    private const float CoarseAfter = 1e7f; // past any full-detail chunk's distance
+
     private ChunkPipeline _pipeline = null!;
     private PipelineGrid[] _grids = null!;
     private VoxelsStage _voxels = null!;
@@ -80,14 +82,16 @@ public sealed partial class ChunkLoadSystem
         level.InFlightChunks--;
     }
 
-    /// <summary>How far a chunk is from its level's nearest interest, across (blocks): the pipeline makes nearest first.</summary>
+    /// <summary>The order the pipeline makes chunks in: full detail first, then coarse chunks nearest first (by how far
+    /// they are from their level's nearest interest, across, in blocks).</summary>
     private float Distance(ChunkKey key)
     {
         if (key.Grid >= _levels.Count) return float.PositiveInfinity;
         var level = _levels[key.Grid];
         long best = long.MaxValue;
         foreach (var ring in level.Rings) best = System.Math.Min(best, Sq(key.Pos.X - ring.Centre.x) + Sq(key.Pos.Z - ring.Centre.z));
-        return best == long.MaxValue ? float.PositiveInfinity : MathF.Sqrt(best) * level.Blocks;
+        if (best == long.MaxValue) return float.PositiveInfinity;
+        return MathF.Sqrt(best) * level.Blocks + (key.Grid == 0 ? 0f : CoarseAfter);
     }
 
     /// <summary>A chunk made: its blocks (null if it came out air) and their packing for the GPU, and once added to its
