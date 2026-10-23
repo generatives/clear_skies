@@ -2,6 +2,7 @@ using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Pipeline;
 using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Voxels;
+using ImGuiNET;
 
 namespace ClearSkies.Engine.ECS;
 
@@ -80,6 +81,27 @@ public sealed partial class ChunkLoadSystem
         if (job.Chunks == 1) level.InFlight.Remove(col);
         else level.InFlight[col] = (job.Chunks - 1, job.Layers & ~level.Bit(p));
         level.InFlightChunks--;
+    }
+
+    /// <summary>The pipeline's part of the Chunk Loading panel: each stage's chunks by state, each level's chunks, and
+    /// the chunk that's waited its turn longest.</summary>
+    private void DrawPipelineUi()
+    {
+        ImGui.Separator();
+        ImGui.Text($"Pipeline: {_pipeline.ChunkCount:N0} chunks, {_pipeline.WorkerJobs} of {MaxInFlight} worker jobs running" +
+                   (_pipeline.AwaitingExternal > 0 ? $", {_pipeline.AwaitingExternal} waiting on outside work" : ""));
+        foreach (var stage in _pipeline.Stages)
+        {
+            var (waiting, ready, running, done) = _pipeline.Count(stage);
+            ImGui.Text($"  {stage.Name}: {ready:N0} ready, {running:N0} running, {waiting:N0} waiting for inputs, {done:N0} done");
+        }
+        var byGrid = _pipeline.CountByGrid();
+        for (int k = 0; k < _levels.Count; k++)
+            ImGui.Text($"  {_grids[k].Name}: {byGrid[k].Chunks:N0} chunks, {byGrid[k].Making:N0} being made");
+        if (_pipeline.LongestReady() is var (record, longest, seconds, priority))
+            ImGui.Text($"  Longest ready: {_grids[record.Key.Grid].Name} {record.Key.Pos} {longest.Name}, {seconds:F1} s " +
+                       $"(now {priority - (record.Key.Grid == 0 ? 0 : CoarseAfter):F0} blocks out)");
+        else ImGui.Text("  Longest ready: none");
     }
 
     /// <summary>The order the pipeline makes chunks in: full detail first, then coarse chunks nearest first (by how far

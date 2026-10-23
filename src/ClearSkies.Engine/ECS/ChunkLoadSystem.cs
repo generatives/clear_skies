@@ -182,6 +182,7 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
                    $"{(full.QueueTruncated ? "+" : "")}   Being made: {full.InFlightChunks} chunks");
         ImGui.Text($"Columns evicted: {full.Evictions}");
         ImGui.Text($"Edited chunks: {_edited.Count}   Layers: {_minY}..{_minY + 63}");
+        DrawPipelineUi();
 
         ImGui.Separator();
         _steps.Draw();

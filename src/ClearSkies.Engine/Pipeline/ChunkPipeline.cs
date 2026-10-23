@@ -188,6 +188,40 @@ public sealed class ChunkPipeline
         return (w, r, run, d);
     }
 
+    /// <summary>Worker jobs running now.</summary>
+    public int WorkerJobs => _inFlight;
+
+    /// <summary>External stages asked and not done yet.</summary>
+    public int AwaitingExternal => _awaitingExternal.Count;
+
+    /// <summary>The chunk and stage that's been ready longest without running, and for how long (seconds), for the
+    /// panel: what a chunk that never seems to get made is stuck behind.</summary>
+    public (PipelineChunk Record, Stage Stage, double Seconds, float Priority)? LongestReady()
+    {
+        (PipelineChunk, Stage, long)? oldest = null;
+        foreach (var record in _records.Values)
+            foreach (var stage in _stages)
+                if (record.Has(stage.Id) && record.State(stage) == SlotState.Ready
+                    && (oldest == null || record.At(stage.Id).QueuedAt < oldest.Value.Item3))
+                    oldest = (record, stage, record.At(stage.Id).QueuedAt);
+        if (oldest is not var (r, s, at)) return null;
+        return (r, s, Stopwatch.GetElapsedTime(at).TotalSeconds, Priority?.Invoke(r.Key) ?? 0f);
+    }
+
+    /// <summary>Chunks in each grid, and of those, how many are being made (any stage ready or running), for the panel.</summary>
+    public (int Chunks, int Making)[] CountByGrid()
+    {
+        var counts = new (int, int)[_grids.Count];
+        foreach (var record in _records.Values)
+        {
+            ref var c = ref counts[record.Key.Grid];
+            c.Item1++;
+            foreach (var stage in _stages)
+                if (record.State(stage) is SlotState.Ready or SlotState.Running) { c.Item2++; break; }
+        }
+        return counts;
+    }
+
     private IReadOnlyList<Input> InputsOf(Stage stage, int grid) => _inputs[grid][stage.Id];
 
     private PipelineChunk Ensure(ChunkKey key)
@@ -221,6 +255,7 @@ public sealed class ChunkPipeline
         if (!record.Wanted || slot.Is(SlotFlags.Queued | SlotFlags.Running) || !slot.Is(SlotFlags.Stale)
             || !InputsThere(record, _stages[stage])) return;
         slot.Set(SlotFlags.Queued, true);
+        slot.QueuedAt = Stopwatch.GetTimestamp();
         _ready[(int)_stages[stage].RunsOn].Enqueue((record, _stages[stage]), (Priority?.Invoke(record.Key) ?? 0f, -stage));
     }
 
