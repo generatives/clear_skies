@@ -204,6 +204,7 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
 
         _budget.Restart();
         _seen.Clear();
+        bool moved = false;
         foreach (var level in _levels)
         {
             GatherRings(level);
@@ -213,8 +214,10 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
                 level.Rings.Clear();
                 level.Rings.AddRange(level.Current);
                 Rebuild(level);
+                moved = true;
             }
         }
+        if (moved) _pipeline.Reprioritise(); // nearest first from where the view is now
         if (_published.Count > _seen.Count)
             foreach (var gone in _published.Keys.Where(k => !_seen.Contains(k)).ToList()) _published.Remove(gone);
         foreach (var level in _levels) UnloadSome(level, BudgetLeft);

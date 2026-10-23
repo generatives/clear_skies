@@ -127,6 +127,21 @@ public sealed class ChunkPipeline
         MarkStale(record, stage.Id);
     }
 
+    /// <summary>Ranks everything waiting its turn again by <see cref="Priority"/> as it is now (it's ranked when queued):
+    /// for when what's nearest changes, as the view moves.</summary>
+    public void Reprioritise()
+    {
+        var items = new List<(PipelineChunk Record, Stage Stage)>();
+        foreach (var queue in _ready)
+        {
+            items.Clear();
+            foreach (var (item, _) in queue.UnorderedItems)
+                if (!item.Record.Removed) items.Add(item);
+            queue.Clear();
+            foreach (var item in items) queue.Enqueue(item, (Priority?.Invoke(item.Record.Key) ?? 0f, -item.Stage.Id));
+        }
+    }
+
     /// <summary>Takes finished worker results and runs ready stages, nearest first, within <paramref name="budgets"/>.</summary>
     public void Update(FrameBudgets budgets)
     {
