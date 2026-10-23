@@ -31,7 +31,9 @@ public sealed class ChunkPipeline
     private IReadOnlyList<Input>[][] _inputs = Array.Empty<IReadOnlyList<Input>[]>();
     private List<(Stage Reader, int Grid, Input Input)>[] _readersOf = Array.Empty<List<(Stage, int, Input)>>();
     private bool _built;
-    private readonly PriorityQueue<(PipelineChunk Record, Stage Stage), (float, int)> _ready = new();
+    // Ready stages, one queue per executor (by Executor), so one running out doesn't hold up the others.
+    private readonly PriorityQueue<(PipelineChunk Record, Stage Stage), (float, int)>[] _ready =
+        Enum.GetValues<Executor>().Select(_ => new PriorityQueue<(PipelineChunk, Stage), (float, int)>()).ToArray();
     private readonly ConcurrentQueue<(PipelineChunk Record, WorkerStage Stage, object Made)> _made = new();
     // External stages started and not yet reported: each is asked again every frame.
     private readonly HashSet<(PipelineChunk Record, ExternalStage Stage)> _awaitingExternal = new();
@@ -143,36 +145,21 @@ public sealed class ChunkPipeline
         foreach (var (record, stage) in _awaitingExternal.ToList())
             if (Ask(record, stage)) _awaitingExternal.Remove((record, stage));
 
-        var later = new List<((PipelineChunk, Stage) Item, (float, int) Priority)>();
-        bool workersFull = _inFlight >= budgets.WorkerSlots, mainFull = !MainLeft();
-        while (!(workersFull && mainFull) && _ready.TryDequeue(out var item, out var priority))
+        while (_inFlight < budgets.WorkerSlots && TakeReady(Executor.Worker, out var record, out var stage, out _))
+            StartWorker(record, (WorkerStage)stage);
+
+        var waiting = new List<((PipelineChunk, Stage) Item, (float, int) Priority)>();
+        while (MainLeft() && TakeReady(Executor.Frame, out var record, out var stage, out var priority))
+            if (!RunFrame(record, (FrameStage)stage)) waiting.Add(((record, stage), priority));
+        foreach (var (item, priority) in waiting) _ready[(int)Executor.Frame].Enqueue(item, priority);
+
+        while (TakeReady(Executor.External, out var record, out var stage, out _))
         {
-            var (record, stage) = item;
             ref var slot = ref record.At(stage.Id);
-            slot.Set(SlotFlags.Queued, false);
-            if (!record.Wanted || slot.Is(SlotFlags.Running) || !slot.Is(SlotFlags.Stale) || !InputsThere(record, stage)) continue;
-            switch (stage)
-            {
-                case WorkerStage worker when !workersFull:
-                    StartWorker(record, worker);
-                    workersFull = _inFlight >= budgets.WorkerSlots;
-                    break;
-                case FrameStage frame when !mainFull:
-                    if (!RunFrame(record, frame)) later.Add((item, priority));
-                    mainFull = !MainLeft();
-                    break;
-                case ExternalStage external:
-                    slot.Set(SlotFlags.Stale, false);
-                    slot.Set(SlotFlags.Running, true);
-                    if (!Ask(record, external)) _awaitingExternal.Add((record, external));
-                    break;
-                default:
-                    later.Add((item, priority)); // its executor is spent this frame
-                    slot.Set(SlotFlags.Queued, true);
-                    break;
-            }
+            slot.Set(SlotFlags.Stale, false);
+            slot.Set(SlotFlags.Running, true);
+            if (!Ask(record, (ExternalStage)stage)) _awaitingExternal.Add((record, (ExternalStage)stage));
         }
-        foreach (var (item, priority) in later) _ready.Enqueue(item, priority);
 
         foreach (var record in _maybeDrop) DropIfUnneeded(record);
         _maybeDrop.Clear();
@@ -207,6 +194,21 @@ public sealed class ChunkPipeline
         return record;
     }
 
+    /// <summary>The next stage ready to run on the executor, skipping any no longer ready.</summary>
+    private bool TakeReady(Executor executor, out PipelineChunk record, out Stage stage, out (float, int) priority)
+    {
+        while (_ready[(int)executor].TryDequeue(out var item, out priority))
+        {
+            (record, stage) = item;
+            ref var slot = ref record.At(stage.Id);
+            slot.Set(SlotFlags.Queued, false);
+            if (record.Wanted && !slot.Is(SlotFlags.Running) && slot.Is(SlotFlags.Stale) && InputsThere(record, stage))
+                return true;
+        }
+        (record, stage) = (null!, null!);
+        return false;
+    }
+
     /// <summary>Queues the stage on the chunk if it's wanted, stale and its inputs are there.</summary>
     private void Check(PipelineChunk record, int stage)
     {
@@ -214,7 +216,7 @@ public sealed class ChunkPipeline
         if (!record.Wanted || slot.Is(SlotFlags.Queued | SlotFlags.Running) || !slot.Is(SlotFlags.Stale)
             || !InputsThere(record, _stages[stage])) return;
         slot.Set(SlotFlags.Queued, true);
-        _ready.Enqueue((record, _stages[stage]), (Priority?.Invoke(record.Key) ?? 0f, -stage));
+        _ready[(int)_stages[stage].RunsOn].Enqueue((record, _stages[stage]), (Priority?.Invoke(record.Key) ?? 0f, -stage));
     }
 
     private bool InputsThere(PipelineChunk record, Stage stage)
