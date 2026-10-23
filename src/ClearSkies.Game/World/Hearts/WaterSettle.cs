@@ -132,25 +132,12 @@ internal sealed class WaterSettle
             kind[c] = Planned;
         }
 
-        // Water spreads into gaps beside it lower than it.
-        var reach = Distance(c => kind[c] == Planned, FillReach);
-        for (bool changed = true; changed;)
-        {
-            changed = false;
-            for (int c = 0; c < N * N; c++)
-            {
-                if (kind[c] != Dry || reach[c] > FillReach || ground[c] == int.MinValue || ground[c] == int.MaxValue) continue;
-                int best = int.MinValue;
-                foreach (int n in Neighbours(c)) if (kind[n] != Dry && level[n] > ground[c]) best = Math.Max(best, level[n]);
-                if (best == int.MinValue) continue;
-                level[c] = best;
-                kind[c] = Filled;
-                changed = true;
-            }
-        }
-
         // A thin strip of ground between a lake and a river beside it (a dam the samples were too coarse to see) is
-        // cut through, so the river runs into the lake; so is a rim just breaking a lake's surface.
+        // cut through, so the river runs into the lake; so is a rim just breaking a lake's surface. (What is cut is the
+        // lake's from then on, so a strip cut part way through is cut on through.)
+        for (bool cut = true; cut;)
+        {
+        cut = false;
         for (int c = 0; c < N * N; c++)
         {
             if (kind[c] != Planned || depth[c] > 0) continue;
@@ -178,10 +165,29 @@ internal sealed class WaterSettle
                 {
                     int d = c + t * (dx + N * dz);
                     plan[d] = level[d] = w;
-                    depth[d] = depth[n] == 0 ? 0 : 1;
+                    depth[d] = 0;
                     ground[d] = Math.Min(ground[d], w - 1);
                     kind[d] = Planned;
+                    cut = true;
                 }
+            }
+        }
+        }
+
+        // Water spreads into gaps beside it lower than it.
+        var reach = Distance(c => kind[c] == Planned, FillReach);
+        for (bool changed = true; changed;)
+        {
+            changed = false;
+            for (int c = 0; c < N * N; c++)
+            {
+                if (kind[c] != Dry || reach[c] > FillReach || ground[c] == int.MinValue || ground[c] == int.MaxValue) continue;
+                int best = int.MinValue;
+                foreach (int n in Neighbours(c)) if (kind[n] != Dry && level[n] > ground[c]) best = Math.Max(best, level[n]);
+                if (best == int.MinValue) continue;
+                level[c] = best;
+                kind[c] = Filled;
+                changed = true;
             }
         }
 
@@ -217,6 +223,12 @@ internal sealed class WaterSettle
                         if (g == int.MaxValue || g >= w) continue;
                         if (kind[c] == Filled || g == int.MinValue || g < w - RiverGap) { ends = true; break; }
                         w = g;
+                    }
+                    // (Water spread into a gap with no water left beside it as high, its source gone, drains too.)
+                    if (!ends && kind[c] == Filled)
+                    {
+                        ends = true;
+                        foreach (int n in Neighbours(c)) if (kind[n] != Dry && level[n] >= level[c]) ends = false;
                     }
                     if (!ends && w == level[c]) continue;
                     if (ends || w <= ground[c])
