@@ -250,4 +250,20 @@ public class WaterFlowTests
         Assert.Equal(32f, px.Corner(0).Position.X);
         Assert.Equal(4, px.LightCorners);
     }
+
+    [Fact]
+    public void Raycasts_pass_through_water_and_blocks_go_into_it()
+    {
+        using var world = new World();
+        var volume = new ChunkVolume(world.CreateEntity(), world);
+        volume.SetBlock(0, 0, 0, BlockId.Stone);
+        volume.SetBlock(0, 1, 0, BlockId.Water);
+        Assert.True(VoxelRaycaster.Cast(volume, new(0.5f, 3.5f, 0.5f), new(0, -1, 0), 10f, out var hit, out var normal, out _));
+        Assert.Equal(new Vector3D<int>(0, 0, 0), hit); // the stone under the water
+        Assert.Equal(new Vector3D<int>(0, 1, 0), normal);
+        var water = BlockRegistry.Get(BlockId.Water);
+        Assert.False(water.Targetable);
+        Assert.True(water.PlacedInto);
+        Assert.False(water.Replaceable); // so it isn't washed away by water, or by trees in generation
+    }
 }
