@@ -22,6 +22,10 @@ internal sealed class WaterSettle
     /// <summary>How far (blocks) a river's water may stand over the water beside it: more, and it ends there.</summary>
     private const int FallMost = 4;
 
+    /// <summary>How wide (blocks) and high over a lake a strip of ground between it and a river may be and be cut
+    /// through.</summary>
+    private const int DamWidth = 2, DamHeight = 3, RimHeight = 1;
+
     /// <summary>How far (blocks) from planned water it spreads into gaps lower than it.</summary>
     private const int FillReach = 2;
 
@@ -142,6 +146,42 @@ internal sealed class WaterSettle
                 level[c] = best;
                 kind[c] = Filled;
                 changed = true;
+            }
+        }
+
+        // A thin strip of ground between a lake and a river beside it (a dam the samples were too coarse to see) is
+        // cut through, so the river runs into the lake; so is a rim just breaking a lake's surface.
+        for (int c = 0; c < N * N; c++)
+        {
+            if (kind[c] != Planned || depth[c] > 0) continue;
+            foreach (var (dx, dz) in new[] { (1, 0), (-1, 0), (0, 1), (0, -1) })
+            {
+                int i = c % N, k = c / N, s = 1, n = c;
+                for (; s <= DamWidth + 1; s++)
+                {
+                    int ni = i + s * dx, nk = k + s * dz;
+                    if (ni < 0 || nk < 0 || ni >= N || nk >= N) { s = int.MaxValue; break; }
+                    n = ni + N * nk;
+                    if (kind[n] != Dry) break;
+                    if (ground[n] == int.MinValue || ground[n] == int.MaxValue || ground[n] > level[c] + DamHeight) { s = int.MaxValue; break; }
+                }
+                if (s < 2 || s > DamWidth + 1 || kind[n] != Planned) continue;
+                // (Between two stretches of one lake, only a rim at about its level: a strip just breaking its surface.)
+                if (depth[n] == 0)
+                {
+                    bool rim = level[n] == level[c];
+                    for (int t = 1; t < s && rim; t++) rim = ground[c + t * (dx + N * dz)] <= level[c] + RimHeight;
+                    if (!rim) continue;
+                }
+                int w = Math.Min(level[c], level[n]);
+                for (int t = 1; t < s; t++)
+                {
+                    int d = c + t * (dx + N * dz);
+                    plan[d] = level[d] = w;
+                    depth[d] = depth[n] == 0 ? 0 : 1;
+                    ground[d] = Math.Min(ground[d], w - 1);
+                    kind[d] = Planned;
+                }
             }
         }
 
