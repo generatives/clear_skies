@@ -11,10 +11,9 @@ namespace ClearSkies.Engine.ECS;
 /// furthest, since streaming loads closest first — first: removing an entity from a DefaultEcs set moves the set's
 /// last entity into its slot, so each frame's batch starts with the most recently flagged chunks.
 ///
-/// World chunks go by horizontal distance, height only breaking ties: the fog that hides the edge of what's drawn is
-/// horizontal (see ChunkLoadSystem), so this way whole columns come in nearest first, the order the fog clears in. By
-/// 3D distance, a chunk far below the camera's own column would wait behind everything nearer in 3D and hold the fog
-/// at the camera meanwhile, though no fog can hide it. A low-resolution copy of the world (a coarse level) goes by the nearest
+/// World chunks go by horizontal distance, height only breaking ties: terrain is streamed in whole columns, so this way
+/// they come in nearest first. By 3D distance, a chunk far below the camera's own column would wait behind everything
+/// nearer in 3D, leaving a hole at the camera meanwhile. A low-resolution copy of the world (a coarse level) goes by the nearest
 /// point of each chunk's footprint, and no nearer than <see cref="ChunkVolume.RankedFrom"/>.
 /// </summary>
 internal static class NearestChunks

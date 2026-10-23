@@ -218,16 +218,19 @@ public sealed class ChunkPipeline
     /// for when what's nearest changes, as the view moves.</summary>
     public void Reprioritise()
     {
-        var items = new List<(PipelineChunk Record, Stage Stage)>();
         foreach (var queue in _ready)
         {
-            items.Clear();
+            _reranked.Clear();
             foreach (var (item, _) in queue.UnorderedItems)
-                if (!item.Record.Removed) items.Add(item);
+                if (!item.Record.Removed) _reranked.Add((item, RankOf(item.Record, item.Stage)));
             queue.Clear();
-            foreach (var item in items) queue.Enqueue(item, RankOf(item.Record, item.Stage));
+            queue.EnqueueRange(_reranked);
         }
     }
+
+    // Reprioritise's items, kept: the queues hold hundreds of thousands while the view moves, re-ranked each time it
+    // moves a chunk, and a new list each time was most of what moving allocated.
+    private readonly List<((PipelineChunk Record, Stage Stage), (float, int))> _reranked = new();
 
     /// <summary>Takes finished worker results and runs ready stages, nearest first, within <paramref name="budgets"/>.</summary>
     public void Update(FrameBudgets budgets)

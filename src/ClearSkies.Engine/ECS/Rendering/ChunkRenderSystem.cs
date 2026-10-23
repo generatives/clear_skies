@@ -23,7 +23,8 @@ namespace ClearSkies.Engine.ECS;
 /// a low-resolution copy of the world's (see <see cref="LowResolutionCopy"/>), drawn at their scale. Ships' chunks, which move, are
 /// tested one by one.
 ///
-/// Whoever manages a static volume can say how each of its chunks is drawn each frame (see <see cref="ChunkDrawStates"/>):
+/// A static volume's chunk is drawn once it's shown (<see cref="Shown"/>), dissolving in at first. Whoever manages a
+/// static volume can say how each of its chunks is drawn each frame (see <see cref="ChunkDrawStates"/>):
 /// left out, dissolving in or out, and lit from its light maps, from the maps it last baked, or as open air. A scaled
 /// volume's light maps are baked nearest first up to <see cref="ScaledBakeQuadBudget"/> quads a frame; then, with what's
 /// left of that, those of chunks waiting for their first bake (<see cref="BakeFirst"/>), in view or not.
@@ -204,8 +205,8 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         long t2 = System.Diagnostics.Stopwatch.GetTimestamp();
 
         // Light maps whose chunk's light changed since they were baked (or never baked) are baked before anything draws:
-        // only the chunks in view, so one out of view waits until it's seen. A scaled volume's go to a budget, and a
-        // chunk of one never baked isn't drawn until it is.
+        // only the chunks in view, so one out of view waits until it's seen. A scaled volume's go to a budget, but for
+        // new meshes.
         _bakedQuads = 0;
         int kept = 0;
         var draws = CollectionsMarshal.AsSpan(_draws);
@@ -309,7 +310,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
             _columnsVisible++;
             foreach (var e in column.Chunks)
             {
-                if (!e.Has<Rendered>()) continue; // not in the rendering layer (see EntityPresenceSystem)
+                if (!e.Has<Rendered>() || !e.Has<Shown>()) continue; // not in the rendering layer, or not ready yet
                 ref readonly var rd = ref e.Get<ChunkRenderData>();
                 if (rd.IsEmpty) continue; // buried stone: nothing to draw
                 var origin = e.Get<Transform>().Position;
@@ -318,6 +319,9 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
                 var how = state?.Invoke(rd.ChunkPos) ?? ChunkDrawState.Whole;
                 _stateTicks += System.Diagnostics.Stopwatch.GetTimestamp() - s0;
                 if (how.Dissolve >= 1f) continue;
+                // Just shown: dissolving in, unless it's swapping (which dissolves it already).
+                float arriving = 1f - (float)(frame.TimeSeconds - e.Get<Shown>().FirstShownAt) / ShownStage.ArrivalSeconds;
+                if (how.Dissolve == 0f && arriving > 0f) how = how with { Dissolve = arriving };
                 var model = Mat4.Multiply(Mat4.Translation(origin), scale);
                 // A scaled volume not in the light store yet has no light to show: lit as open air meanwhile.
                 int grid = rd.Grid?.Index ?? -1;
@@ -331,18 +335,20 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     }
 
     /// <summary>Lists a draw's stale light maps for baking, if it's lit from them. A scaled volume's go while the frame's
-    /// budget lasts (always the first). Returns whether it can be drawn: its maps are baked, or were once.</summary>
+    /// budget lasts (always the first), except maps never baked: a chunk shown that's meshed again (an edit, or a
+    /// neighbour coming) has new meshes, baked at once rather than leaving it out (and popping back in) till there's
+    /// room. Returns whether it can be drawn.</summary>
     private bool Bake(in ChunkDraw d)
     {
         if (d.Light == ChunkLight.OpenAir) return true;
-        if (d.Light == ChunkLight.Kept) return AllBaked(in d);
+        if (d.Light == ChunkLight.Kept && AllBaked(in d)) return true;
         int stamp = _renderer.LightStampOf(d.Handle, d.Chunk);
         if (d.Budgeted)
         {
             int quads = Stale(d.Mesh, d.Handle, stamp) + Stale(d.CutoutMesh, d.Handle, stamp)
                       + Stale(d.TransparentMesh, d.Handle, stamp);
             if (quads == 0) return true;
-            if (_bakedQuads > 0 && _bakedQuads + quads > ScaledBakeQuadBudget) return AllBaked(in d);
+            if (_bakedQuads > 0 && _bakedQuads + quads > ScaledBakeQuadBudget && AllBaked(in d)) return true;
             _bakedQuads += quads;
         }
         _renderer.PrepareLightmap(d.Mesh, d.Handle, d.Chunk, stamp);

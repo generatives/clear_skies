@@ -885,7 +885,7 @@ public sealed partial class GpuLightSystem
     /// <summary>
     /// Puts chunk <paramref name="pos"/> of static grid <paramref name="g"/> ahead of the queues on the next lighting
     /// frame, within their caps: for terrain waiting to be shown until it's lit (a coarse level's chunk held back for
-    /// its first light, behind the fog; full detail waiting to swap in for one). Its bricks waiting for direct light are
+    /// its first light; full detail waiting to swap in for one). Its bricks waiting for direct light are
     /// relit, and those owed a bounce update get one, before any other queued brick, nearest the camera first. The rest
     /// of the queues (light changing on terrain already shown) go on with what's left. Ask every frame it's wanted.
     /// </summary>

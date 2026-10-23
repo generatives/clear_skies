@@ -142,7 +142,7 @@ public sealed class Water
     {
         float px = x + 0.5f, pz = z + 0.5f;
         if (Nearest(px, pz, out int hi, out int hk) is not { Alive: true }) return WaterColumn.None;
-        var piece = _pieces.GetOrAdd(Key(hi, hk), _ => Build(hi, hk));
+        var piece = PieceOf(hi, hk);
         int ci = FloorDiv(x, Step) - piece.X0, ck = FloorDiv(z, Step) - piece.Z0;
         if (ci < 1 || ck < 1 || ci >= Window - 1 || ck >= Window - 1) return WaterColumn.None;
         int own = piece.Lake[ci + Window * ck];
@@ -241,7 +241,7 @@ public sealed class Water
     {
         float px = x + 0.5f, pz = z + 0.5f;
         if (Nearest(px, pz, out int hi, out int hk) is not { Alive: true } h) return null;
-        var piece = _pieces.GetOrAdd(Key(hi, hk), _ => Build(hi, hk));
+        var piece = PieceOf(hi, hk);
         float fi = px / Step - 0.5f - piece.X0, fk = pz / Step - 0.5f - piece.Z0;
         int i = (int)MathF.Floor(fi), k = (int)MathF.Floor(fk);
         if (i >= 0 && k >= 0 && i < Window - 1 && k < Window - 1)
@@ -577,7 +577,13 @@ public sealed class Water
         return best;
     }
 
-    private Heart TopHeart(int i, int k) => _hearts.GetOrAdd(Key(i, k), _ => HeartGrid.At(_seed, 0, i, -1, k));
+    // Asked per block column: the lambdas are static, given what they need, so a lookup allocates nothing (one capturing
+    // hi and hk allocated a closure and a delegate every call, most of what generating terrain allocated).
+    private Heart TopHeart(int i, int k)
+        => _hearts.GetOrAdd(Key(i, k), static (_, a) => HeartGrid.At(a.Seed, 0, a.I, -1, a.K), (Seed: _seed, I: i, K: k));
+
+    private Piece PieceOf(int hi, int hk)
+        => _pieces.GetOrAdd(Key(hi, hk), static (_, a) => a.Water.Build(a.I, a.K), (Water: this, I: hi, K: hk));
 
     private static long Key(int i, int k) => ((long)i << 32) ^ (uint)k;
 
