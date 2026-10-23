@@ -27,7 +27,7 @@ public class PipelineShipTests
     private static GridVoxel Block(int x, int y, int z) => new(x, y, z, BlockId.Stone, BlockOrientation.Upright);
 
     [Fact]
-    public void A_ships_chunks_are_wanted_in_a_grid_of_its_own_with_its_volumes_blocks()
+    public void A_ships_chunks_are_wanted_in_a_grid_of_its_own()
     {
         var (world, system) = Pipeline();
         var ship = Ship(world, Block(0, 0, 0), Block(40, 0, 0));
@@ -40,7 +40,7 @@ public class PipelineShipTests
         Assert.True(system.ShipBlocks.AppliesTo(grid));
         Assert.Same(volume, grid.Volume);
         foreach (var record in records)
-            Assert.Same(volume.GetData(record.Key.Pos), record.Output<ChunkVoxels>(system.ShipBlocks)!.Data);
+            Assert.True(record.EverDone(system.ShipBlocks)); // the stages after read the volume
     }
 
     /// <summary>Counts its runs on the blocks it reads.</summary>
@@ -63,8 +63,6 @@ public class PipelineShipTests
         ship.Get<ChunkGrid>().Volume.SetBlock(1, 0, 0, BlockId.Wood);
         for (int i = 0; i < 3; i++) system.Update(1 / 60f);
         Assert.Equal(2, counter.Runs);
-        var record = system.Pipeline.Records.Single();
-        Assert.Equal(BlockId.Wood, record.Output<ChunkVoxels>(system.ShipBlocks)!.Data!.Get(1, 0, 0)); // the volume's, edited in place
     }
 
     [Fact]

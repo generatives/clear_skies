@@ -227,7 +227,7 @@ public sealed partial class ChunkLoadSystem
                 var entry = level.Volume.GetEntry(pos);
                 if (entry == null) { done.Add(pos); continue; }
                 var e = entry.Entity;
-                if (!e.Has<ChunkMeshedFlag>() || !e.Has<ChunkUploadedFlag>() || e.Has<NeedsRemeshFlag>() || e.Has<NeedsGpuUploadFlag>())
+                if (!_pipeline.Settled(level.Key(pos)) || !e.Has<ChunkUploadedFlag>() || e.Has<NeedsGpuUploadFlag>())
                     continue;
                 entry.DropData();
                 level.Dropped++;

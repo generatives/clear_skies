@@ -40,7 +40,7 @@ public sealed class FogSystem : ISystem, IDebugUiSystem
         // Terrain chunks (each with its own presence; a grid's chunks inherit theirs) waiting to be meshed or uploaded
         // for the first time since they started being drawn.
         _chunksNotMeshedYet = world.GetEntities().With<Chunk>().With<OwnPresence>()
-                             .With<NeedsRemeshFlag>().Without<ChunkMeshedFlag>().AsSet();
+                             .Without<ChunkMeshedFlag>().AsSet();
         _chunksNotUploadedYet = world.GetEntities().With<Chunk>().With<OwnPresence>()
                                .With<NeedsGpuUploadFlag>().Without<ChunkUploadedFlag>().AsSet();
     }

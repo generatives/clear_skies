@@ -76,8 +76,12 @@ public class HeadlessStreamingTests
     internal static void Frame(ChunkLoadSystem load)
     {
         load.Update(1 / 60f);
-        Pipelines.GetValue(load, _ => throw new InvalidOperationException("Not made by Streaming")).Update(1 / 60f);
+        PipelineOf(load).Update(1 / 60f);
     }
+
+    /// <summary>The pipeline system <see cref="Streaming(HeadlessScene, IChunkStore, int, float)"/> made for it.</summary>
+    internal static ChunkPipelineSystem PipelineOf(ChunkLoadSystem load)
+        => Pipelines.GetValue(load, _ => throw new InvalidOperationException("Not made by Streaming"));
 
     internal static ChunkLoadSystem Streaming(HeadlessScene scene, SaveDatabase db, int maxChunks = 100_000, float viewDistance = 64) =>
         Streaming(scene, new SavedChunkStore(db), maxChunks, viewDistance);

@@ -56,8 +56,9 @@ public sealed class PipelineGrid
 
 /// <summary>What changed in a stage's output, so a dependant that only cares about part of it can skip a rerun: the
 /// faces whose border cells changed, as bits 0-5 in <see cref="Faces"/>'s order, and whether what's all opaque may have
-/// changed (what buries a neighbour). New output changes them all.</summary>
-public readonly record struct Change(int BorderFaces, bool Opacity = false)
+/// changed (what buries a neighbour). New output changes them all. An urgent change is one someone is waiting to see
+/// (an edit): what it runs again goes before everything else, and so on through the stages after.</summary>
+public readonly record struct Change(int BorderFaces, bool Opacity = false, bool Urgent = false)
 {
     public static readonly Change All = new(0b111111, true);
     public bool Touches(int face) => (BorderFaces >> face & 1) != 0;

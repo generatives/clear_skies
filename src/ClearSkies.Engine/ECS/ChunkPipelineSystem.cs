@@ -12,7 +12,8 @@ namespace ClearSkies.Engine.ECS;
 /// <see cref="ChunkLoadSystem"/>), and shows where its chunks are. It turns what happens to chunks in the ECS into
 /// pipeline calls: an edit (<see cref="ChunkBlocksChanged"/>) is a change to the chunk's blocks, and a ship's chunks
 /// (those of a <see cref="DynamicGrid"/>'s volume, made by edits rather than streamed) are wanted as they come and go,
-/// each ship a grid of its own while it's here.
+/// each ship a grid of its own while it's here; a chunk that starts being drawn has the stages that need it drawn
+/// (<see cref="OnDrawn"/>) done again.
 /// </summary>
 public sealed class ChunkPipelineSystem : ISystem, IDebugUiSystem
 {
@@ -21,7 +22,7 @@ public sealed class ChunkPipelineSystem : ISystem, IDebugUiSystem
     private const int WorkerSlots = 8;
 
     /// <summary>Main-thread time per frame for taking finished work and running frame stages (ms).</summary>
-    private const double MainMs = 1.5;
+    private const double MainMs = 4.0;
 
     public ChunkPipeline Pipeline { get; }
 
@@ -29,6 +30,11 @@ public sealed class ChunkPipelineSystem : ISystem, IDebugUiSystem
     public VolumeBlocksStage ShipBlocks { get; }
 
     private readonly IDisposable[] _subscriptions;
+    private readonly EntitySet _drawn;
+
+    /// <summary>Stages that only do a chunk while it's drawn here (<see cref="Rendered"/>; on a host, other players' chunks
+    /// aren't): done again when it starts being drawn.</summary>
+    public List<Stage> OnDrawn { get; } = new();
 
     public ChunkPipelineSystem(World world, ChunkPipeline? pipeline = null)
     {
@@ -40,6 +46,7 @@ public sealed class ChunkPipelineSystem : ISystem, IDebugUiSystem
             world.SubscribeComponentAdded<Chunk>(ChunkAdded),
             world.SubscribeEntityDisposed(Disposed),
         };
+        _drawn = world.GetEntities().With<InPipeline>().WhenAdded<Rendered>().AsSet();
     }
 
     /// <summary>An edit wrote into a chunk in the pipeline: what reads its blocks runs again, as far as the edit
@@ -50,7 +57,7 @@ public sealed class ChunkPipelineSystem : ISystem, IDebugUiSystem
         var key = edit.Chunk.Get<InPipeline>().Key;
         var grid = Pipeline.Grid(key.Grid);
         foreach (var stage in Pipeline.Stages)
-            if (stage is IBlocksStage && stage.AppliesTo(grid)) Pipeline.OutputChanged(key, stage, new Change(edit.BorderFaces, edit.OpacityChanged));
+            if (stage is IBlocksStage && stage.AppliesTo(grid)) Pipeline.OutputChanged(key, stage, new Change(edit.BorderFaces, edit.OpacityChanged, Urgent: true));
     }
 
     /// <summary>A chunk came into a ship's volume: wanted, in the ship's grid (made with its first chunk).</summary>
@@ -76,6 +83,9 @@ public sealed class ChunkPipelineSystem : ISystem, IDebugUiSystem
     public void Update(float dt)
     {
         _steps.Start();
+        foreach (var e in _drawn.GetEntities())
+            foreach (var stage in OnDrawn) Pipeline.Invalidate(e.Get<InPipeline>().Key, stage);
+        _drawn.Complete();
         Pipeline.Update(new FrameBudgets(WorkerSlots, MainMs));
         _steps.Lap(0);
     }

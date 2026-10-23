@@ -1,5 +1,6 @@
 using ClearSkies.Engine.Pipeline;
 using ClearSkies.Engine.Voxels;
+using DefaultEcs;
 
 namespace ClearSkies.Engine.ECS;
 
@@ -20,6 +21,12 @@ public sealed partial class ChunkLoadSystem
     private readonly ChunkPipeline _pipeline;
     private readonly PipelineGrid[] _grids = new PipelineGrid[MaxLevels];
     private readonly VoxelsStage _voxels;
+
+    private readonly IDisposable _chunkAdded;
+    private bool _adding; // a chunk the pipeline made going into its volume
+
+    /// <summary>The stage that makes streamed chunks' blocks, for the stages after it to read.</summary>
+    public VoxelsStage Voxels => _voxels;
 
     /// <summary>Asks the pipeline for the level's chunk <paramref name="p"/>.</summary>
     private void Want(TerrainLevel level, ChunkPosition p)
@@ -72,9 +79,9 @@ public sealed partial class ChunkLoadSystem
         level.InFlightChunks--;
     }
 
-    /// <summary>The order the pipeline makes chunks in: full detail first, then coarse chunks nearest first (by how far
-    /// they are from their level's nearest interest, across, in blocks).</summary>
-    private float Distance(ChunkKey key)
+    /// <summary>The order the pipeline makes chunks in: nearest first (by how far they are from their level's nearest
+    /// interest, across, in blocks), except that full detail's blocks are all made before any coarse chunk's.</summary>
+    private float Distance(ChunkKey key, Stage stage)
     {
         if (!_voxels.AppliesTo(_pipeline.Grid(key.Grid))) return 0f; // a ship's: small, and edited where people are
         if (key.Grid >= _levels.Count) return float.PositiveInfinity;
@@ -82,7 +89,31 @@ public sealed partial class ChunkLoadSystem
         long best = long.MaxValue;
         foreach (var ring in level.Rings) best = System.Math.Min(best, Sq(key.Pos.X - ring.Centre.x) + Sq(key.Pos.Z - ring.Centre.z));
         if (best == long.MaxValue) return float.PositiveInfinity;
-        return MathF.Sqrt(best) * level.Blocks + (key.Grid == 0 ? 0f : CoarseAfter);
+        return MathF.Sqrt(best) * level.Blocks + (key.Grid == 0 || stage != _voxels ? 0f : CoarseAfter);
+    }
+
+    /// <summary>A chunk an edit made in the world: the pipeline takes it as what it made there (now, if it made air;
+    /// once it's made it, if it wasn't asked for, as the sky usually isn't), so it's meshed, and its edits reach its
+    /// neighbours, like the rest.</summary>
+    private void ChunkAdded(in Entity e, in Chunk chunk)
+    {
+        if (_adding || chunk.Entry.Volume != _staticVolume) return;
+        var full = FullDetail;
+        var pos = chunk.Entry.Position;
+        if (!full.Wanting.Contains(pos))
+        {
+            if (Wanted(full, pos)) Want(full, pos); // adopted as it's added (see Add)
+            return;
+        }
+        if (_pipeline.Get(full.Key(pos))?.Output<ChunkVoxels>(_voxels) is { Data: null, InVolume: false, Replaced: false } made)
+            Adopt(made, chunk.Entry);
+    }
+
+    private void Adopt(ChunkVoxels made, ChunkEntry entry)
+    {
+        made.Data = null; // the volume's now
+        made.InVolume = true;
+        entry.Entity.Set(new InPipeline { Key = made.Key });
     }
 
     /// <summary>The level a chunk was made for, if it's still there.</summary>
@@ -111,6 +142,12 @@ public sealed partial class ChunkLoadSystem
             _pipeline.Invalidate(level.Key(pos), _voxels); // made again if it's wanted again first
             return;
         }
+        if (level.Volume.GetEntry(pos) is { } edited) // an edit made it meanwhile: that's what it is
+        {
+            made.Data?.Release();
+            Adopt(made, edited);
+            return;
+        }
         if (made.Data == null)
         {
             if (level.Level == 0 && _edits.IsEdited(pos)) RecordBuild(pos, hasBlocks: false); // a build that was emptied out
@@ -118,16 +155,11 @@ public sealed partial class ChunkLoadSystem
                 level.Columns[(pos.X, pos.Z)] = (col.Generated, col.Air | level.Bit(pos));
             return;
         }
-        if (level.Volume.IsLoaded(pos)) // an edit made it meanwhile
-        {
-            made.Data.Release();
-            made.Data = null;
-            return;
-        }
+        _adding = true;
         var entry = level.Volume.AddChunk(pos, made.Data, made.Prepared);
-        entry.Entity.Set(new InPipeline { Key = made.Key });
-        made.InVolume = true;
+        _adding = false;
         if (level.Level > 0 && CanDrop(made.Data)) level.ToDrop.Add(pos);
+        Adopt(made, entry);
     }
 
     /// <summary>A made chunk the pipeline let go of: replaced (already out of the volume), or dropped, when it leaves

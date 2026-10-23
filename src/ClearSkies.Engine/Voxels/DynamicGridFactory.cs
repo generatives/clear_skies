@@ -13,7 +13,7 @@ public static class DynamicGridFactory
 {
     /// <summary>
     /// Creates a grid with entity ID <paramref name="id"/> from <paramref name="description"/>. Its chunks mesh,
-    /// light and get a body once its presence layers are decided (ChunkMeshSystem, GpuLightSystem, PhysicsBodySystem).
+    /// light and get a body once its presence layers are decided (the chunk pipeline, GpuLightSystem, PhysicsBodySystem).
     /// The grid's Transform (its block space) is the description's pose, so the grid stands exactly where it was
     /// described; PhysicsBodySystem then puts its body at the centre of mass within it.
     /// </summary>
