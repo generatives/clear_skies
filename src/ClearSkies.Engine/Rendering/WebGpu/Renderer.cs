@@ -300,7 +300,7 @@ var<private> waterShare: f32;
 // The shared voxel storage (see GridStore): occupancy pool, chunk table ((occupancy slot or code, chunk tag), then
 // ray-only data), brick table (light slot per 8³ brick), light pool and grid descriptors. Only a slot's display half
 // is read here: one u16 per voxel, two per word (see LightCodecWgsl), sun visibility (0-3) in bits 14-15.
-" + GridStore.LookupWgsl + QuadLightmap.SmoothLightWgsl + @"
+" + GridStore.LookupWgsl + QuadLightmap.SmoothLightWgsl + ChunkQuad.Wgsl + @"
 fn ambientSky() -> f32 { return camera.lightParams.z; }
 @group(2) @binding(0) var<storage, read> occPool: array<u32>;
 @group(2) @binding(1) var<storage, read> chunkTable: array<vec4<i32>>;
@@ -392,8 +392,8 @@ fn chunkVertex(d: ChunkDraw, quad: vec2<u32>, corner: u32) -> VSOut {
     let a = quad.x;
     let c = quad.y;
     let face = (a >> 18u) & 7u;
-    let w = ((a >> 29u) | (((c >> 24u) & 3u) << 3u)) + 1u;
-    let h = ((c >> 26u) & 31u) + 1u;
+    let w = quadW(quad);
+    let h = quadH(quad);
     let du = f32(w);
     let dv = f32(h);
     // The mesher winds +X, -Y and +Z the other way round (FaceDesc.Flip), and a diagonal's front.
@@ -401,7 +401,7 @@ fn chunkVertex(d: ChunkDraw, quad: vec2<u32>, corner: u32) -> VSOut {
     let flip = face == 0u || face == 3u || face == 4u || (face >= 6u && !back);
     let cu = select(select(0.0, du, corner >= 2u), select(0.0, du, corner == 1u || corner == 2u), flip);
     let cv = select(select(0.0, dv, corner == 1u || corner == 2u), select(0.0, dv, corner >= 2u), flip);
-    var position = vec3<f32>(f32(a & 63u), f32((a >> 6u) & 63u), f32((a >> 12u) & 63u));
+    var position = vec3<f32>(quadOrigin(quad));
     let s = select(1.0, -1.0, (face & 1u) == 1u);
     var normal = vec3<f32>(0.0);
     var uv2: vec2<f32>;
@@ -437,6 +437,11 @@ fn chunkVertex(d: ChunkDraw, quad: vec2<u32>, corner: u32) -> VSOut {
         uv2 = vec2<f32>(cu, -(position.y + cv));
         position += vec3<f32>(r.x, cv * tall / cellBlocks, r.y);
         normal.y = 1.0;
+    }
+    if (quadShaped(quad)) {
+        // Flowing water: its corners lowered under the cell's top (side faces' textures cropped, not squashed).
+        position.y -= quadDrop(quad, corner);
+        if (face < 2u || face >= 4u) { uv2.y = -position.y; }
     }
     let layerBits = (a >> 21u) & 255u;
     let layer = select(f32(layerBits), -1.0, layerBits == 255u);
@@ -661,7 +666,9 @@ fn fs_chunk_transparent(in: VSOut, @builtin(front_facing) front: bool) -> @locat
     if (dot(in.localView, in.localNormal) < 0.0 && in.cg.w >= 0) {
         drawChunk = in.cg.xyz;
         drawGrid  = in.cg.w;
-        let clear = exp(-waterPath(in.localPos, vec3<i32>(floor(in.localPos - 0.5 * in.localNormal)), normalize(in.localView)) / max(camera.water.w, 0.1));
+        // The walk starts in the face's own water cell: a hair behind the face, not half a block, since flowing water's
+        // lowered top can sit low in its cell (half a block back would be the cell under it).
+        let clear = exp(-waterPath(in.localPos, vec3<i32>(floor(in.localPos - 0.01 * in.localNormal)), normalize(in.localView)) / max(camera.water.w, 0.1));
         alpha = 1.0 - (1.0 - camera.water2.x) * clear;
         waterShare = 1.0 - (1.0 - camera.water2.y) * clear;
     }
@@ -675,9 +682,12 @@ fn fs_chunk_transparent(in: VSOut, @builtin(front_facing) front: bool) -> @locat
 // so deep water looks the same colour from above as from inside it. The thinnest water is camera.water2.x opaque and
 // already camera.water2.y of the way to the fog's colour (the rest its lit texture, for the ripples), so the shallows
 // are the depths' colour, only clearer. (See WaterSettings.) The view's walk through the water (waterPath) counts up
-// to WATER_MAX_PATH blocks of water, over at most WATER_REACH blocks.
+// to WATER_MAX_PATH blocks of water, over at most WATER_REACH blocks and WATER_MAX_STEPS cells: far enough to catch a
+// lake seen through a block of water a good way off (the lake's own surface isn't drawn behind the nearer one). Air
+// costs a lookup a cell.
 const WATER_MAX_PATH: f32 = 16.0;
-const WATER_REACH: f32 = 32.0;
+const WATER_REACH: f32 = 128.0;
+const WATER_MAX_STEPS: i32 = 256;
 
 // How thick the water is at p (grid space), as a multiple of its clarity's: 1 give or take camera.water2.z, by smooth
 // noise camera.water2.w blocks across, so there are murkier and clearer stretches of water rather than one even body.
@@ -729,7 +739,7 @@ fn waterPath(p: vec3<f32>, start: vec3<i32>, rd: vec3<f32>) -> f32 {
     var t = 0.0;
     var path = 0.0;
     let origin = vec3<f32>(drawChunk * 32);
-    for (var i = 0; i < 64; i++) {
+    for (var i = 0; i < WATER_MAX_STEPS; i++) {
         let what = waterOrSolid(drawChunk * 32 + cell);
         if (what == 2) { break; }
         let tNext = min(tMax.x, min(tMax.y, tMax.z));

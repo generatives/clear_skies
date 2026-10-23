@@ -121,6 +121,18 @@ public readonly struct BlockDef
     /// grass): clicking a tuft of grass puts the new block where the grass was, not on top of it. Cross blocks are.
     public bool Replaceable => IsCross;
 
+    /// True for a liquid (water): raycasts pass through it, so it can't be targeted, broken or placed against, and a
+    /// block placed into it replaces it (see <see cref="Targetable"/>, <see cref="PlacedInto"/>).
+    public bool            Liquid         { get; init; }
+
+    /// True for a block raycasts hit, so it can be targeted, placed against, broken and used: solid, but not a
+    /// <see cref="Liquid"/>.
+    public bool Targetable => IsSolid && !Liquid;
+
+    /// True for a cell a placed block may go into, replacing what's there (other than air): a <see cref="Replaceable"/>
+    /// block or a <see cref="Liquid"/>.
+    public bool PlacedInto => Replaceable || Liquid;
+
     /// True for blocks drawn as a full cube by <c>GreedyMesher</c>: solid, not a model block and not a
     /// <see cref="BlockShape.Cross"/>. The mesher's face culling (and the neighbour remeshing that depends on it) keys
     /// off this rather than IsSolid.

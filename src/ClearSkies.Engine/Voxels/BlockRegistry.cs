@@ -63,10 +63,10 @@ public static class BlockRegistry
         Register(new BlockDef { Id = BlockId.Sand,  Name = "Sand",  Color = new(0.66f, 0.50f, 0.32f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 2,
             Texture = "dirt_sand", TextureTop = "sand", TextureBottom = "dirt" });
         // Water is Translucent (drawn alpha-blended, its opaque texture faded by Alpha) and lets light through. It's
-        // Passable: raycasts still hit it (so it can be targeted, placed against and scooped up), but bodies sink
-        // through it instead of standing on it.
+        // Passable, so bodies sink through it instead of standing on it, and a Liquid: raycasts pass through it (it
+        // can't be targeted or broken), and a block placed into it replaces it.
         Register(new BlockDef { Id = BlockId.Water, Name = "Water", Color = new(0.20f, 0.45f, 0.85f), IsSolid = true, PlaceOriented = false, Passable = true, LightEmission = 0, Weight = 1,
-            Texture = "water", Layer = RenderLayer.Translucent, Alpha = 0.6f });
+            Texture = "water", Layer = RenderLayer.Translucent, Alpha = 0.6f, Liquid = true });
         // Plain "snow" on every face: a thick snowpack should read as snow all the way round, not a
         // rock/snow blend on the sides (that blend texture is reserved for a thin single-layer cap —
         // the world generator gives Snow multiple layers of depth, so this is the common case).

@@ -140,12 +140,12 @@ public sealed class BlockActionSystem : ISystem, IDisposable, IDebugUiSystem
         }
         else if (place)
         {
-            // Into the targeted cell if what's there is Replaceable (a tuft of grass), else against its face, into air
-            // or something Replaceable.
+            // Into the targeted cell if what's there is Replaceable (a tuft of grass), else against its face, into air,
+            // something Replaceable or water.
             bool replace = BlockRegistry.Get(hit.Volume.GetBlock(hit.Block.X, hit.Block.Y, hit.Block.Z)).Replaceable;
             var t = replace ? hit.Block : hit.Block + hit.Normal;
             var there = hit.Volume.GetBlock(t.X, t.Y, t.Z);
-            if (there == PlaceBlock || there != BlockId.Air && !BlockRegistry.Get(there).Replaceable) return;
+            if (there == PlaceBlock || there != BlockId.Air && !BlockRegistry.Get(there).PlacedInto) return;
             // Bottom on the face it was placed against: its top points away from that face, so e.g. a Fan placed
             // against a ship's east wall faces east, away from the ship. Then its north face turns towards the player
             // as far as it can while keeping that: onto whichever axis across the face is nearest the direction to

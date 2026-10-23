@@ -36,6 +36,7 @@ public static class GameCommands
         commands.Register(new SpawnGridHandler(world, registry, session, physics, selection));
         commands.Register(new SpawnPlayerHandler(world, registry, session, physics, playerModel));
         commands.Register(new DespawnEntityHandler(registry));
+        commands.Register(new FlowWaterHandler(blocks));
     }
 }
 
@@ -52,4 +53,5 @@ public static class CommandIds
     public const ushort SpawnPlayer = 8;
     public const ushort DespawnEntity = 9;
     public const ushort SetShipAnchored = 10;
+    public const ushort FlowWater = 11;
 }
