@@ -64,6 +64,8 @@ internal enum SlotFlags : byte
     Stale = 1,
     Queued = 2,
     Running = 4,
+    /// <summary>Stale for an urgent change (see <see cref="Change.Urgent"/>): goes first, and passes it on.</summary>
+    Urgent = 8,
 }
 
 /// <summary>One stage's progress on one chunk. Only the pipeline writes it.</summary>

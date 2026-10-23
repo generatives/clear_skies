@@ -219,6 +219,42 @@ public class ChunkPipelineTests
     }
 
     [Fact]
+    public void An_urgent_change_goes_before_queued_work_and_passes_on_through_the_stages_after()
+    {
+        var jobs = new Queue<Action>();
+        var urgent = new Queue<Action>();
+        var pipeline = new ChunkPipeline((_, work) => jobs.Enqueue(work), 1, urgent.Enqueue);
+        var grid = pipeline.AddGrid("world");
+        var gen = pipeline.Add(new Gen());
+        var mesh = pipeline.Add(new Reader("mesh", _ => new[] { new Input(gen, Relation.Self) }));
+        var upload = pipeline.Add(new Reader("upload", _ => new[] { new Input(mesh, Relation.Self) }));
+        var edited = grid.Key(P(0));
+        pipeline.Want(edited, true);
+        for (int i = 0; i < 3; i++) { pipeline.Update(Plenty); while (jobs.TryDequeue(out var job)) job(); }
+        pipeline.Update(Plenty);
+        Assert.Equal(1, upload.Runs);
+
+        var oneSlot = new FrameBudgets(WorkerSlots: 1, MainMs: 1000);
+        for (int x = 1; x <= 3; x++) pipeline.Want(grid.Key(P(x)), true);
+        pipeline.Update(oneSlot);
+        Assert.Single(jobs);                        // the worker is full
+
+        pipeline.OutputChanged(edited, gen, new Change(0b111111, Urgent: true));
+        pipeline.Update(oneSlot);
+        Assert.Single(jobs);
+        Assert.Single(urgent);                      // the mesh runs anyway, ahead of what's queued
+        jobs.Dequeue()();
+        urgent.Dequeue()();
+        pipeline.Update(oneSlot);                   // the urgent mesh is taken first, so its upload goes first too
+        Assert.Single(urgent);
+        Assert.Single(jobs);                        // and the next far chunk took the worker's slot
+        urgent.Dequeue()();
+        pipeline.Update(oneSlot);
+        Assert.Equal(2, upload.Runs);
+        Assert.Empty(urgent);
+    }
+
+    [Fact]
     public void The_nearest_chunk_goes_first_when_workers_are_short()
     {
         var jobs = new Queue<Action>();
