@@ -62,8 +62,8 @@ public sealed class TerrainSwapSystem : ISystem
         _load = load;
         _interests = world.GetEntities().With<Transform>().With<TerrainInterest>().AsSet();
         load.KeepLoaded = Holds;
-        // A chunk meshed, put in the light store or shown: a coarse one's swap moves on; a full-detail one may be the
-        // last of the eight a level-1 swap waits for.
+        // A chunk meshed, put in the light store or shown: a coarse one's swap moves on, and it may be the last of the
+        // eight the swap over it waits for.
         world.SubscribeComponentAdded((in Entity e, in ChunkMeshedFlag _) => Woken(e));
         world.SubscribeComponentAdded((in Entity e, in ChunkUploadedFlag _) => Woken(e));
         world.SubscribeComponentAdded((in Entity e, in ShownAt _) => Woken(e));
@@ -87,15 +87,16 @@ public sealed class TerrainSwapSystem : ISystem
         if (Levels.Count > 1 && e.Has<Chunk>()) _woken.Add((e.Get<Chunk>().Entry.Volume, e.Get<Chunk>().Entry.Position));
     }
 
-    /// <summary>Wakes the swaps whose chunks were meshed, put in the light store or shown, and the level-1 swaps over
-    /// full-detail chunks shown.</summary>
+    /// <summary>Wakes the swaps whose chunks were meshed, put in the light store or shown, and the swaps over them.</summary>
     private void Wake()
     {
         foreach (var (volume, p) in _woken)
-        {
-            if (volume == FullDetail.Volume && Levels.Count > 1) WakeSwap(Levels[1].Volume, new ChunkPosition(p.X >> 1, p.Y >> 1, p.Z >> 1));
-            else if (volume.IsLowResolutionCopy) WakeSwap(volume, p);
-        }
+            foreach (var level in Levels)
+            {
+                if (level.Volume != volume) continue;
+                if (level.Level > 0) WakeSwap(volume, p);
+                if (level.Coarser is { } coarser) WakeSwap(coarser.Volume, new ChunkPosition(p.X >> 1, p.Y >> 1, p.Z >> 1));
+            }
         _woken.Clear();
     }
 
@@ -254,6 +255,17 @@ public sealed class TerrainSwapSystem : ISystem
         return SwapsOf(level).TryGetValue(p, out var c) ? !Waits(level, c, p) : e.Has<ChunkMeshedFlag>();
     }
 
+    /// <summary>Whether the eight finer chunks under coarse chunk <paramref name="p"/> are in the light store (or air).</summary>
+    private bool ChildrenStored(TerrainLevel level, ChunkPosition p)
+    {
+        for (int j = 0; j < 8; j++)
+        {
+            var q = Child(p, j);
+            if (EntityOf(level.Finer!, q) is { } e ? !e.Has<ChunkUploadedFlag>() : !_load.Has(level.Finer!, q)) return false;
+        }
+        return true;
+    }
+
     /// <summary>Whether the eight finer chunks under coarse chunk <paramref name="p"/> are shown (air, or
     /// <see cref="ShownAt"/>): drawn once it's gone.</summary>
     private bool ChildrenShown(TerrainLevel level, ChunkPosition p)
@@ -375,7 +387,7 @@ public sealed class TerrainSwapSystem : ISystem
                 }
                 bool inBand = hasView && BoxDistance.ToChunk(view, p.X, p.Y, p.Z, level.Blocks) <= near;
                 if (inBand) _counts.Readiness++;
-                bool ready = inBand && ChildrenReady(level, p);
+                bool ready = inBand && ChildrenReady(level, p), stored = inBand && ChildrenStored(level, p);
                 long t3 = Stopwatch.GetTimestamp();
                 _readyTicks += t3 - t2;
 
@@ -421,10 +433,11 @@ public sealed class TerrainSwapSystem : ISystem
                         c.FadeAt = _time;
                     }
                 }
-                // Covered while the finer level is ready, and while that's still drawn as this swaps in over it: its rays
+                // Covered while the finer level has all its chunks here in the light store (from before they're lit, so
+                // their first light is their own blocks'), and while that's still drawn as this swaps in over it: its rays
                 // then see only its own blocks there. (Uncovered at once, the finer level fading out was shadowed by the
                 // coarse blocks in it, and darkened.)
-                SetCover(level, p, c, uploaded, ready || c.Drawn && (waits || Faded(c.FadeAt) < 1f));
+                SetCover(level, p, c, uploaded, ready || stored || c.Drawn && (waits || Faded(c.FadeAt) < 1f));
                 c.WasReady = ready;
                 // Done: settled, shown, and swapped in or out with its fade over. Nothing changes for it now till the
                 // view moves or what's wanted does.
