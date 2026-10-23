@@ -22,7 +22,6 @@ namespace ClearSkies.Engine.ECS;
 public sealed class GridPersistenceSystem : ISystem
 {
     private readonly World _world;
-    private readonly ChunkMeshSystem _meshSystem;
     private readonly PhysicsWorld _physics;
     private readonly GridSelection _selection;
     private readonly EntitySet _cameras;
@@ -35,12 +34,11 @@ public sealed class GridPersistenceSystem : ISystem
     private string? _chosenFile;
     private string _status = "";
 
-    public GridPersistenceSystem(World world, ChunkMeshSystem meshSystem, PhysicsWorld physics, GridSelection selection,
+    public GridPersistenceSystem(World world, PhysicsWorld physics, GridSelection selection,
                                  CommandSystem commands)
     {
         _commands   = commands;
         _world      = world;
-        _meshSystem = meshSystem;
         _physics    = physics;
         _selection  = selection;
         _cameras      = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();

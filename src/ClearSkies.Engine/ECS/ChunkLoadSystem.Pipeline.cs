@@ -28,11 +28,6 @@ public sealed partial class ChunkLoadSystem
     /// <summary>The stage that makes streamed chunks' blocks, for the stages after it to read.</summary>
     public VoxelsStage Voxels => _voxels;
 
-    /// <summary>The chunk the pipeline made for <paramref name="key"/>, if it's in its level's volume.</summary>
-    internal ChunkEntry? EntryOf(ChunkKey key)
-        => key.Grid < _levels.Count && _levels[key.Grid].Volume.GetEntry(key.Pos) is { } entry
-           && entry.Entity.Has<InPipeline>() && entry.Entity.Get<InPipeline>().Key == key ? entry : null;
-
     /// <summary>Asks the pipeline for the level's chunk <paramref name="p"/>.</summary>
     private void Want(TerrainLevel level, ChunkPosition p)
     {

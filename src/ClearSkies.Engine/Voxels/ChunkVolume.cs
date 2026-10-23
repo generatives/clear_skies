@@ -346,7 +346,7 @@ public class ChunkVolume : IReplicatedChildren
 
     /// <summary>Whether the chunk at <paramref name="pos"/> can't be seen: it and the loaded chunk on each of its six
     /// sides are all opaque cubes (<see cref="ChunkData.IsAllOpaque"/>), so every face it has is hidden, and it needs
-    /// no mesh (ChunkMeshSystem gives it none). Where neighbours are culled against anyway that's what meshing it would
+    /// no mesh (the Mesh stage gives it none). Where neighbours are culled against anyway that's what meshing it would
     /// find; where they aren't (<see cref="MeshIgnoresNeighbours"/>) it saves the six border sheets such a chunk would
     /// draw, deep inside an island. A missing neighbour counts as open air, so a chunk at the edge of what's loaded
     /// is drawn. Kept true by <see cref="MarkBuriedNeighbours"/>.</summary>

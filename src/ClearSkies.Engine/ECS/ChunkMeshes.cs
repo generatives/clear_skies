@@ -1,8 +1,5 @@
 using System.Buffers;
-using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
-using Silk.NET.WebGPU;
-using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Gui;
 using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Rendering.WebGpu;
@@ -13,108 +10,34 @@ using ImGuiNET;
 namespace ClearSkies.Engine.ECS;
 
 /// <summary>
-/// Remeshes chunks flagged dirty across all registered <see cref="ChunkVolume"/>s into their
-/// <see cref="ChunkRenderData"/>: the greedy-meshed cubes (one mesh per <see cref="RenderLayer"/>) plus the chunk's model blocks (found in the same worker
-/// job, resolved to their shared models through <see cref="BlockModelLibrary"/>). The greedy mesh itself
-/// (~0.65ms per non-empty chunk, see StreamingBenchmark) runs on thread-pool workers, one
-/// <see cref="GreedyMesher"/> per thread; only the GPU upload and the hand-back to the owning volume happen
-/// here on the main thread.
-///
-/// A chunk has at most one job in flight. Workers read <see cref="ChunkData"/> while the main thread may edit
-/// it; a torn read is harmless because any edit sets <see cref="ChunkEntry.NeedsRemesh"/> again, so the chunk
-/// is re-dispatched once its current job lands (whose result is still applied — it's newer than the mesh on
-/// screen). A result is dropped if its chunk was unloaded or its volume unregistered meanwhile.
+/// How chunks are meshed and their meshes put on screen, for the chunk pipeline's Mesh and Upload stages (see
+/// <see cref="MeshStage"/>): the greedy mesh (one per <see cref="RenderLayer"/>) plus the chunk's model blocks, found
+/// on a worker with one <see cref="GreedyMesher"/> a thread (~0.65ms per non-empty chunk, see StreamingBenchmark), then
+/// uploaded on the main thread into the chunk's <see cref="ChunkRenderData"/>. A chunk's meshes go with it.
 /// </summary>
-public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
+public sealed class ChunkMeshes : IDebugUiSystem
 {
-    /// <summary>Jobs in flight at once — bounds both worker load and the number of uploads landing per frame.</summary>
-    private static readonly int MaxInFlight = System.Math.Max(2, Environment.ProcessorCount / 2);
-
-    private readonly World _ecsWorld;
-    private EntitySet _dirtyChunks;
-    private readonly EntitySet _cameras;
-    private readonly List<Entity> _nearest = new();
     private readonly Renderer _renderer;
     private readonly BlockModelLibrary _blockModels;
     private readonly ThreadLocal<GreedyMesher> _meshers;
 
-    private int _inFlight = 0;
-    private int _meshes, _remeshes; // jobs started, and those for a chunk that already had a mesh
-    private readonly ConcurrentQueue<Result> _results = new();
-    private readonly List<GpuMesh> _removed = new();
-
     private int _totalMeshed;
     private double _uploadMs, _createMs, _writeMs, _uploadKb;
 
-    /// <summary>A meshed chunk, for one volume's chunk entity (see <see cref="Start"/>).</summary>
-    private sealed record Result(Entity Entity, PackedChunkMesh Mesh);
-
-    /// <summary>Main-thread time spent uploading meshes per frame, at most (at least one goes each frame): results past
-    /// it wait for the next frame, so a burst of finished jobs doesn't stall one.</summary>
-    private const double UploadBudgetMs = 4.0;
-
-    public ChunkMeshSystem(World ecsWorld, Renderer renderer, BlockModelLibrary blockModels)
+    public ChunkMeshes(World ecsWorld, Renderer renderer, BlockModelLibrary blockModels)
     {
-        _ecsWorld = ecsWorld;
-        // The pipeline's chunks are meshed by its stages (see TerrainMeshStages), and keep their meshes while not drawn.
-        _dirtyChunks = ecsWorld.GetEntities().With<Chunk>().Without<InPipeline>().With<Transform>().With<NeedsRemeshFlag>().With<Rendered>().AsSet();
-        _meshedChunks = ecsWorld.GetEntities().With<Chunk>().With<ChunkRenderData>().AsSet();
-        _unrendered = ecsWorld.GetEntities().With<Chunk>().Without<InPipeline>().WhenRemoved<Rendered>().AsSet();
-        _cameras = ecsWorld.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
         _renderer = renderer;
         _blockModels = blockModels;
         var atlas = renderer.Atlas;
         _meshers  = new ThreadLocal<GreedyMesher>(() => new GreedyMesher(atlas));
-
-        _ecsWorld.SubscribeEntityDisposed(EntityDisposed);
+        ecsWorld.SubscribeEntityDisposed(EntityDisposed);
     }
 
-    private readonly EntitySet _unrendered;
-
-    /// <summary>Chunks no longer drawn (their grid or chunk lost <see cref="Rendered"/>) give up their meshes. Without a
-    /// mesh they're out of date, so they're flagged: that's what gets them meshed again if they're drawn again. Nothing
-    /// is meshed meanwhile, because only drawn chunks are (<c>_dirtyChunks</c> requires Rendered).</summary>
-    private void ReleaseUnrendered()
-    {
-        foreach (var e in _unrendered.GetEntities().ToArray())
-        {
-            if (e.Has<Rendered>()) continue; // back again already
-            if (e.Has<ChunkRenderData>())
-            {
-                _removed.AddRange(e.Get<ChunkRenderData>().Meshes());
-                e.Remove<ChunkRenderData>();
-            }
-            e.Remove<ChunkMeshedFlag>();
-            e.Set<NeedsRemeshFlag>();
-        }
-        _unrendered.Complete();
-    }
-
-    private void EntityDisposed(in Entity e)
+    private static void EntityDisposed(in Entity e)
     {
         if (!e.Has<ChunkRenderData>()) return;
-        _removed.AddRange(e.Get<ChunkRenderData>().Meshes());
+        foreach (var mesh in e.Get<ChunkRenderData>().Meshes()) mesh.Dispose();
     }
-
-    public void Update(float dt)
-    {
-        ReleaseUnrendered();
-        long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-        ApplyResults();
-        long t1 = System.Diagnostics.Stopwatch.GetTimestamp();
-        Dispatch();
-        long t2 = System.Diagnostics.Stopwatch.GetTimestamp();
-        Cleanup();
-        long t3 = System.Diagnostics.Stopwatch.GetTimestamp();
-        _applyMs    += 0.05 * (Ms(t0, t1) - _applyMs);
-        _dispatchMs += 0.05 * (Ms(t1, t2) - _dispatchMs);
-        _cleanupMs  += 0.05 * (Ms(t2, t3) - _cleanupMs);
-    }
-
-    private static double Ms(long a, long b) => (b - a) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
-    private double _applyMs, _dispatchMs, _cleanupMs;
-
-    private readonly EntitySet _meshedChunks;
 
     /// <summary>Packs a chunk mesh for upload, off the main thread: each of the mesher's quads (four vertices; the
     /// indices only ever join them as two triangles) as one 8-byte <see cref="ChunkQuad"/>, with its light map laid out
@@ -141,57 +64,6 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
         return new PackedChunkMesh.Packed(packed, bytes, quads, lightWords, ends);
     }
 
-    private void Dispatch()
-    {
-        // Closest to the camera first (see NearestChunks); a few spare picks for all-air and buried chunks, which take
-        // no job.
-        int free = MaxInFlight - _inFlight;
-        if (free <= 0) return;
-        NearestChunks.Select(_dirtyChunks, _cameras, free + 4, _nearest);
-        foreach (var e in _nearest)
-            if (Start(e) && --free == 0) return;
-    }
-
-    /// <summary>Meshes a chunk: on a worker, or at once for an all-air or buried one. Whether it took a job.</summary>
-    private bool Start(Entity e)
-    {
-        var chunk = e.Get<Chunk>();
-        var entry = chunk.Entry;
-        var pos = entry.Position;
-        var volume = entry.Volume;
-
-        // Fast path: pure air chunk, or one buried in opaque chunks (see ChunkVolume.IsBuried), which shows nothing.
-        if (!entry.Data.HasAnyNonAir() || volume.IsBuried(pos))
-        {
-            ClearMesh(entry);
-            return false;
-        }
-
-        entry.Entity.Remove<NeedsRemeshFlag>();
-
-        _inFlight += 1;
-
-        var data = entry.Data;
-        _meshes++;
-        if (e.Has<ChunkRenderData>()) _remeshes++;
-        // A volume meshed without its neighbours (the streamed world) uses them only to cull transparent faces
-        // (see ChunkVolume.MeshIgnoresNeighbours): its other border faces are all drawn.
-        bool alone = volume.MeshIgnoresNeighbours;
-        var nX = volume.GetData(pos.Offset(-1, 0, 0)); var pX = volume.GetData(pos.Offset(1, 0, 0));
-        var nY = volume.GetData(pos.Offset(0, -1, 0)); var pY = volume.GetData(pos.Offset(0, 1, 0));
-        var nZ = volume.GetData(pos.Offset(0, 0, -1)); var pZ = volume.GetData(pos.Offset(0, 0, 1));
-        // Held until the job is done, so a chunk unloaded meanwhile doesn't hand its arrays to another chunk.
-        data.Retain(); nX?.Retain(); pX?.Retain(); nY?.Retain(); pY?.Retain(); nZ?.Retain(); pZ?.Retain();
-        BackgroundWork.Soon(() =>
-        {
-            try { _results.Enqueue(new Result(entry.Entity, MeshOnWorker(data, nX, pX, nY, pY, nZ, pZ, alone, pos))); }
-            finally
-            {
-                data.Unretain(); nX?.Unretain(); pX?.Unretain(); nY?.Unretain(); pY?.Unretain(); nZ?.Unretain(); pZ?.Unretain();
-            }
-        });
-        return true;
-    }
 
     /// <summary>Meshes and packs a chunk against its neighbours (null for one not loaded), on a worker; failures are
     /// returned, not thrown. A volume meshed without its neighbours (<paramref name="alone"/>) uses them only to cull
@@ -216,21 +88,6 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
         }
     }
 
-    private void ApplyResults()
-    {
-        long start = System.Diagnostics.Stopwatch.GetTimestamp();
-        while (Ms(start, System.Diagnostics.Stopwatch.GetTimestamp()) < UploadBudgetMs && _results.TryDequeue(out var r))
-        {
-            _inFlight -= 1;
-            var entity = r.Entity;
-            if (!entity.IsAlive || !entity.Has<Chunk>()) { r.Mesh.ReturnBuffers(); continue; } // unloaded while meshing
-            if (!entity.Has<Rendered>()) { r.Mesh.ReturnBuffers(); entity.Set<NeedsRemeshFlag>(); continue; } // no longer drawn
-            // Show clears NeedsRemesh, so preserve a re-dirty that arrived while this job was in flight.
-            bool redirtied = entity.Has<NeedsRemeshFlag>();
-            Show(entity.Get<Chunk>().Entry, r.Mesh);
-            if (redirtied) entity.Set<NeedsRemeshFlag>();
-        }
-    }
 
     /// <summary>Puts a chunk's new mesh in place of the one it had (main thread): uploads it, or clears the chunk's mesh
     /// if there's nothing to draw or the chunk was buried meanwhile (a neighbour loaded). Returns the packed buffers.
@@ -292,15 +149,6 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
         return mesh;
     }
 
-    private void Cleanup()
-    {
-        foreach (var gpuMesh in _removed)
-        {
-            gpuMesh.Dispose();
-        }
-
-        _removed.Clear();
-    }
 
     private static void ClearMesh(ChunkEntry entry)
     {   
@@ -355,21 +203,19 @@ public sealed class ChunkMeshSystem : ISystem, IDebugUiSystem
     }
 
     // ── debug UI ─────────────────────────────────────────────────────────────
+
+    // ── debug UI ─────────────────────────────────────────────────────────────
     public string DebugName => "Chunk Meshing";
 
     public void DrawDebugUi()
     {
-        ImGui.Text($"Jobs in flight: {_inFlight} / {MaxInFlight}, " +
-                   $"chunks waiting to mesh: {_dirtyChunks.Count:N0} (streamed terrain: see Chunk Pipeline)");
-        ImGui.Text($"Main thread (smoothed): results {_applyMs:F2} ms, choosing + dispatch {_dispatchMs:F2} ms, " +
-                   $"freeing meshes {_cleanupMs:F2} ms");
         ImGui.Text($"Upload (main thread, smoothed): {_uploadMs:F2} ms per chunk " +
                    $"(creating the buffer {_createMs:F2} ms, writing it {_writeMs:F2} ms, {_uploadKb:F0} KB)");
-        ImGui.Text($"Chunks meshed (lifetime): {_totalMeshed}; of the jobs, {_remeshes:N0} of {_meshes:N0} were remeshes");
+        ImGui.Text($"Chunks meshed (lifetime): {_totalMeshed:N0}");
     }
 }
 
-/// <summary>A chunk meshed and packed for upload (see <see cref="ChunkMeshSystem.MeshOnWorker"/>): its opaque, cut-out
+/// <summary>A chunk meshed and packed for upload (see <see cref="ChunkMeshes.MeshOnWorker"/>): its opaque, cut-out
 /// and translucent meshes, its model blocks, or what went wrong. Its buffers are rented until it's shown or let go of
 /// (<see cref="ReturnBuffers"/>).</summary>
 public sealed class PackedChunkMesh

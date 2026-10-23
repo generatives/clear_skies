@@ -5,7 +5,7 @@ using Silk.NET.Maths;
 
 /// <summary>
 /// Everything drawn for one loaded chunk (see ChunkRenderSystem): its greedy-meshed cubes and its model blocks.
-/// Set by ChunkMeshSystem whenever the chunk remeshes; absent while the chunk has nothing to draw.
+/// Set by the chunk pipeline's Upload stage (see ChunkMeshes) whenever the chunk remeshes; absent while the chunk has nothing to draw.
 /// </summary>
 public struct ChunkRenderData
 {

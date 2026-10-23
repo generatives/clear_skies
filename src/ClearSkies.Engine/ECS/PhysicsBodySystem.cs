@@ -173,7 +173,7 @@ public sealed class PhysicsBodySystem : ISystem, IDebugUiSystem
     // ── static terrain colliders (moved from StaticColliderSystem) ─────────────
     // Box decomposition and the BigCompound tree build (~0.2-0.35ms per non-empty chunk, spiking past 2ms on
     // dense ones — see StreamingBenchmark) run on thread-pool workers; only the cheap Shapes/Statics adds happen
-    // here. One job in flight per chunk, same pattern as ChunkMeshSystem: a chunk re-dirtied mid-job is
+    // here. One job in flight per chunk: a chunk re-dirtied mid-job is
     // re-dispatched once that job lands, and a result for a chunk unloaded meanwhile is dropped. A chunk's old
     // collider stays in place until its replacement arrives, so an edit never opens a hole for a frame.
     /// <summary>Starts (or, for a chunk with nothing that collides, completes) <paramref name="entry"/>'s collider

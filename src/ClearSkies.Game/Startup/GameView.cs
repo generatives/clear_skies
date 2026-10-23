@@ -29,7 +29,8 @@ public sealed class GameView : IDisposable
         // Model blocks' glTF models (BlockDef.Model paths are relative to Resources/Models — see the csproj's link of the
         // blockbench folder), loaded on first use.
         BlockModels = new BlockModelLibrary(host.Renderer, Path.Combine(AppContext.BaseDirectory, "Resources", "Models"));
-        Meshes = new ChunkMeshSystem(host.World, host.Renderer, BlockModels);
+        Meshes = new ChunkMeshes(host.World, host.Renderer, BlockModels);
+        host.Gui.RegisterDebugUi(Meshes);
         PlayerModel = new PlayerModel(host.Renderer);
 
         // Game UI (immediate mode, laid out by Clay).
@@ -55,7 +56,7 @@ public sealed class GameView : IDisposable
 
     public WindowedEngineHost Host { get; }
     public BlockModelLibrary BlockModels { get; }
-    public ChunkMeshSystem Meshes { get; }
+    public ChunkMeshes Meshes { get; }
     public PlayerModel PlayerModel { get; }
     public UiContext Ui { get; }
     public GridStore GridStore { get; }
@@ -92,8 +93,7 @@ public sealed class GameView : IDisposable
             Console.WriteLine($"Unknown lighting preset '{_lightingPreset}' (minimal, low, medium or high); using medium.");
         if (_checkerBounce is { } spread) light.BounceSpread = spread;
         host.AddSystem(light, SystemStage.PreRender);
-        host.AddSystem(Meshes, SystemStage.PreRender);
-        TerrainMeshStages.Add(world.ChunkPipeline, world.ChunkLoad, Meshes); // streamed terrain meshed in the chunk pipeline
+        MeshStages.Add(world.ChunkPipeline, Meshes); // every chunk meshed in the chunk pipeline
         host.AddSystem(new BlockModelSystem(host.World, BlockModels), SystemStage.PreRender); // block entities -> RenderedModel
         host.AddSystem(new ClimateTintSystem(renderer, new BiomeTintMap(world.Seed)), SystemStage.RenderWorld); // grass and leaves coloured by biome
 

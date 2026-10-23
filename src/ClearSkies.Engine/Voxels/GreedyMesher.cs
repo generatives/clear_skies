@@ -50,7 +50,7 @@ public sealed class GreedyMesher
     // Reusable scratch buffers — mesher is single-threaded per chunk. verts/indices are cleared and
     // refilled each Mesh() call rather than reallocated, so their backing arrays stabilize at whatever
     // the largest chunk seen needs instead of re-growing (doubling + copying) from empty every call.
-    // Safe to hand back directly: callers (ChunkMeshSystem) upload the span to the GPU synchronously
+    // Safe to hand back directly: callers (ChunkMeshes) upload the span to the GPU synchronously
     // before this mesher is invoked again.
     // A slice's faces. All air between slices: the merge below clears each cell as it takes it into a quad, so every
     // face it set is cleared again by the end of the slice (clearing the whole mask per slice was most of the time

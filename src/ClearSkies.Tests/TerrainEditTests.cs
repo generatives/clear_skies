@@ -73,7 +73,7 @@ public class TerrainEditTests
         // The pipeline takes the chunk the edit made as what it made there, so what reads its blocks sees it.
         Settle(load);
         Assert.Equal(BlockId.Wood, scene.WorldVolume.GetBlock(place.X, place.Y, place.Z));
-        var entry = load.EntryOf(new Engine.Pipeline.ChunkKey(0, sky));
+        var entry = PipelineOf(load).Pipeline.EntryOf(new Engine.Pipeline.ChunkKey(0, sky));
         Assert.NotNull(entry);
         Assert.Same(scene.WorldVolume.GetData(sky), entry!.Data);
     }
