@@ -156,6 +156,21 @@ public class WaterFlowTests
     }
 
     [Fact]
+    public void A_source_over_water_spreads_when_its_side_is_opened()
+    {
+        using var pool = new Pool();
+        // A well two deep in a block of stone, full of source water, like a river over its bed.
+        pool.Volume.FillBox(new(-3, 1, -3), new(3, 2, 3), BlockId.Stone, BlockOrientation.Upright);
+        pool.Volume.SetBlock(0, 1, 0, BlockId.Water);
+        pool.Volume.SetBlock(0, 2, 0, BlockId.Water);
+        Assert.Equal(0, pool.Settle());
+        pool.Set(1, 2, 0, BlockId.Air); // open its side at the top
+        pool.Settle();
+        Assert.True(WaterLevel.IsSource(pool.State(0, 2, 0)));
+        Assert.Equal(1, WaterLevel.Level(pool.State(1, 2, 0)));
+    }
+
+    [Fact]
     public void Flowing_water_drains_away_once_its_source_is_gone()
     {
         using var pool = new Pool();

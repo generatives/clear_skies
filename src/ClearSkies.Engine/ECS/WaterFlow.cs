@@ -108,10 +108,14 @@ public sealed class WaterFlow
         if (Open(under)) { Put(below, BlockId.Water, WaterLevel.Flowing(0, falling: true)); return; }
         if (under == BlockId.Water)
         {
-            // Onto weaker flowing water it falls, making it falling water; onto any other water it joins it.
+            // Onto weaker flowing water it falls, making it falling water. Over a source or falling water, flowing
+            // water joins it, but a source still spreads (so a river opened up at its side runs out).
             if (!WaterLevel.IsSource(underState) && !WaterLevel.IsFalling(underState))
+            {
                 Put(below, BlockId.Water, WaterLevel.Flowing(0, falling: true));
-            return;
+                return;
+            }
+            if (!WaterLevel.IsSource(state)) return;
         }
 
         int spread = WaterLevel.SpreadLevel(state) + 1;
