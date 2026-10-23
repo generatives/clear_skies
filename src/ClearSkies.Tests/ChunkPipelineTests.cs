@@ -225,7 +225,7 @@ public class ChunkPipelineTests
         var pipeline = new ChunkPipeline(jobs.Enqueue);
         var grid = pipeline.AddGrid("world");
         var gen = pipeline.Add(new Gen());
-        pipeline.Priority = key => Math.Abs(key.Pos.X);
+        pipeline.Priority = (key, _) => Math.Abs(key.Pos.X);
         pipeline.Want(grid.Key(P(5)), true);
         pipeline.Want(grid.Key(P(1)), true);
         pipeline.Want(grid.Key(P(3)), true);

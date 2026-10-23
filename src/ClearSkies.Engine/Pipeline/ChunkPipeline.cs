@@ -69,8 +69,8 @@ public sealed class ChunkPipeline
         return (int)((uint)(x * 73856093 ^ z * 19349663) % (uint)_inFlight.Length);
     }
 
-    /// <summary>Lower runs first: by default, all the same.</summary>
-    public Func<ChunkKey, float>? Priority { get; set; }
+    /// <summary>Lower runs first, per chunk and stage: by default, all the same.</summary>
+    public Func<ChunkKey, Stage, float>? Priority { get; set; }
 
     /// <summary>A chunk the pipeline dropped (its outputs released already).</summary>
     public event Action<PipelineChunk>? Dropped;
@@ -187,7 +187,7 @@ public sealed class ChunkPipeline
             foreach (var (item, _) in queue.UnorderedItems)
                 if (!item.Record.Removed) items.Add(item);
             queue.Clear();
-            foreach (var item in items) queue.Enqueue(item, (Priority?.Invoke(item.Record.Key) ?? 0f, -item.Stage.Id));
+            foreach (var item in items) queue.Enqueue(item, (Priority?.Invoke(item.Record.Key, item.Stage) ?? 0f, -item.Stage.Id));
         }
     }
 
@@ -338,7 +338,7 @@ public sealed class ChunkPipeline
             || !InputsThere(record, _stages[stage])) return;
         slot.Set(SlotFlags.Queued, true);
         slot.QueuedAt = Stopwatch.GetTimestamp();
-        _ready[(int)_stages[stage].RunsOn].Enqueue((record, _stages[stage]), (Priority?.Invoke(record.Key) ?? 0f, -stage));
+        _ready[(int)_stages[stage].RunsOn].Enqueue((record, _stages[stage]), (Priority?.Invoke(record.Key, _stages[stage]) ?? 0f, -stage));
     }
 
     private bool InputsThere(PipelineChunk record, Stage stage)
@@ -368,6 +368,7 @@ public sealed class ChunkPipeline
     private void StartWorker(PipelineChunk record, WorkerStage stage, int worker)
     {
         var inputs = Gather(record, stage);
+        inputs.Prepared = stage.Prepare(record);
         ref var slot = ref record.At(stage.Id);
         slot.Set(SlotFlags.Stale, false);
         slot.Set(SlotFlags.Running, true);

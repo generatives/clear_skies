@@ -21,6 +21,14 @@ public sealed partial class ChunkLoadSystem
     private readonly PipelineGrid[] _grids = new PipelineGrid[MaxLevels];
     private readonly VoxelsStage _voxels;
 
+    /// <summary>The stage that makes streamed chunks' blocks, for the stages after it to read.</summary>
+    public VoxelsStage Voxels => _voxels;
+
+    /// <summary>The chunk the pipeline made for <paramref name="key"/>, if it's in its level's volume.</summary>
+    internal ChunkEntry? EntryOf(ChunkKey key)
+        => key.Grid < _levels.Count && _levels[key.Grid].Volume.GetEntry(key.Pos) is { } entry
+           && entry.Entity.Has<InPipeline>() && entry.Entity.Get<InPipeline>().Key == key ? entry : null;
+
     /// <summary>Asks the pipeline for the level's chunk <paramref name="p"/>.</summary>
     private void Want(TerrainLevel level, ChunkPosition p)
     {
@@ -72,9 +80,9 @@ public sealed partial class ChunkLoadSystem
         level.InFlightChunks--;
     }
 
-    /// <summary>The order the pipeline makes chunks in: full detail first, then coarse chunks nearest first (by how far
-    /// they are from their level's nearest interest, across, in blocks).</summary>
-    private float Distance(ChunkKey key)
+    /// <summary>The order the pipeline makes chunks in: nearest first (by how far they are from their level's nearest
+    /// interest, across, in blocks), except that full detail's blocks are all made before any coarse chunk's.</summary>
+    private float Distance(ChunkKey key, Stage stage)
     {
         if (_pipeline.Grid(key.Grid).Blocks != _voxels) return 0f; // a ship's: small, and edited where people are
         if (key.Grid >= _levels.Count) return float.PositiveInfinity;
@@ -82,7 +90,7 @@ public sealed partial class ChunkLoadSystem
         long best = long.MaxValue;
         foreach (var ring in level.Rings) best = System.Math.Min(best, Sq(key.Pos.X - ring.Centre.x) + Sq(key.Pos.Z - ring.Centre.z));
         if (best == long.MaxValue) return float.PositiveInfinity;
-        return MathF.Sqrt(best) * level.Blocks + (key.Grid == 0 ? 0f : CoarseAfter);
+        return MathF.Sqrt(best) * level.Blocks + (key.Grid == 0 || stage != _voxels ? 0f : CoarseAfter);
     }
 
     /// <summary>The level a chunk was made for, if it's still there.</summary>

@@ -46,6 +46,12 @@ public abstract class Stage
 public abstract class WorkerStage : Stage
 {
     public sealed override Executor RunsOn => Executor.Worker;
+
+    /// <summary>On the main thread, as the chunk's job starts: whatever <see cref="WorkerStage{TOut}.Make"/> needs from
+    /// outside the pipeline (blocks held in a volume), handed to it as <see cref="StageInputs.Prepared"/>. Nothing, by
+    /// default.</summary>
+    public virtual object? Prepare(PipelineChunk record) => null;
+
     internal abstract object MakeAny(ChunkKey key, StageInputs inputs);
     internal abstract Change AppliedAny(PipelineChunk record, object output, object? before);
 }
@@ -97,6 +103,9 @@ public sealed class StageInputs
     private readonly List<(Stage Stage, ChunkKey Key, object? Output)> _read = new();
 
     internal void Add(Stage stage, ChunkKey key, object? output) => _read.Add((stage, key, output));
+
+    /// <summary>What the stage's <see cref="WorkerStage.Prepare"/> took for this job, if anything.</summary>
+    public object? Prepared { get; internal set; }
 
     /// <summary>The output of <paramref name="stage"/> on chunk <paramref name="key"/>, if it was read.</summary>
     public T? Get<T>(Stage stage, ChunkKey key) where T : class

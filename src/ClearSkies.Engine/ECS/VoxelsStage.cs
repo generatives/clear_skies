@@ -62,7 +62,8 @@ public sealed class VoxelsStage(Func<IWorldGenerator> generatorFactory, IChunkSt
     public override Change Applied(PipelineChunk record, ChunkVoxels made, ChunkVoxels? before)
     {
         Added?.Invoke(made, before);
-        return Change.All;
+        // A first one comes where nothing was, so it can only bury a neighbour if it's all opaque itself.
+        return before == null ? Change.All with { Opacity = false } : Change.All;
     }
 
     public override void Release(object output)
