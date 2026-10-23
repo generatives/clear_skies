@@ -206,7 +206,7 @@ public class HeadlessStreamingTests
         // out where full detail has its eight, which is drawn there; past it, full detail is left out under level 1.
         swaps.FadeSeconds = 0f;
         foreach (var l in load.Levels)
-            foreach (var (_, entry) in l.Volume.All) { entry.Entity.Set<ChunkMeshedFlag>(); entry.Entity.Set<ShownAt>(); }
+            foreach (var (_, entry) in l.Volume.All) { entry.Entity.Set<ChunkMeshedFlag>(); entry.Entity.Set<Shown>(); }
         for (int i = 0; i < 10; i++) { Frame(load); swaps.Update(1 / 60f); }
         Assert.Equal(1f, swaps.DrawState(level, near).Dissolve);
         Assert.Equal(0f, swaps.DrawState(level, far).Dissolve);

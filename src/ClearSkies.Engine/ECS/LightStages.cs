@@ -109,14 +109,16 @@ public sealed class FirstBakeStage(ChunkPipeline pipeline, Renderer renderer, Up
                          && renderer.LightmapEverBaked(rd.TransparentMesh);
 }
 
-/// <summary>On a chunk being drawn: since when (<see cref="Time.TotalSeconds"/>). It's left out until then, and
-/// dissolves in over <see cref="ShownStage.ArrivalSeconds"/> from then (see <see cref="ChunkRenderSystem"/>).</summary>
-public struct ShownAt
+/// <summary>A chunk being drawn that's ready to be seen (see <see cref="ShownStage"/>): it's left out until it has this,
+/// and dissolves in over <see cref="ShownStage.ArrivalSeconds"/> from <see cref="FirstShownAt"/> (see
+/// <see cref="ChunkRenderSystem"/>).</summary>
+public struct Shown
 {
-    public double Seconds;
+    /// <summary>When it was first shown (<see cref="Time.TotalSeconds"/>).</summary>
+    public double FirstShownAt;
 }
 
-/// <summary>Shows a chunk once it's lit and baked (<see cref="ShownAt"/>), the first time only: it's then drawn
+/// <summary>Shows a chunk once it's lit and baked (<see cref="Shown"/>), the first time only: it's then drawn
 /// with its last mesh and light while it's made again (after an edit, or a neighbour coming). Not drawn any more, it's
 /// let go of and no longer shown. It waits for the chunk above it to be shown first (if that's wanted): underground
 /// chunks loaded before the surface showed through the gap, dimly lit.</summary>
@@ -134,14 +136,14 @@ public sealed class ShownStage(ChunkPipeline pipeline, Time time, FirstBakeStage
     public override StageResult Run(PipelineChunk record, StageInputs inputs)
     {
         if (pipeline.EntryOf(record.Key) is not { } entry) return StageResult.Done(); // air
-        if (!entry.Entity.Has<ShownAt>()) entry.Entity.Set(new ShownAt { Seconds = time.TotalSeconds });
+        if (!entry.Entity.Has<Shown>()) entry.Entity.Set(new Shown { FirstShownAt = time.TotalSeconds });
         return StageResult.Done(entry);
     }
 
     public override void Release(object output)
     {
         var e = ((ChunkEntry)output).Entity;
-        if (e.IsAlive && e.Has<ShownAt>()) e.Remove<ShownAt>();
+        if (e.IsAlive && e.Has<Shown>()) e.Remove<Shown>();
     }
 }
 

@@ -66,7 +66,7 @@ public sealed class TerrainSwapSystem : ISystem
         // eight the swap over it waits for.
         world.SubscribeComponentAdded((in Entity e, in ChunkMeshedFlag _) => Woken(e));
         world.SubscribeComponentAdded((in Entity e, in ChunkUploadedFlag _) => Woken(e));
-        world.SubscribeComponentAdded((in Entity e, in ShownAt _) => Woken(e));
+        world.SubscribeComponentAdded((in Entity e, in Shown _) => Woken(e));
         // Coarse chunks loading and unloading, followed as they come (see Track).
         world.SubscribeComponentAdded((in Entity _, in Chunk c) =>
         {
@@ -237,11 +237,11 @@ public sealed class TerrainSwapSystem : ISystem
 
     private static bool Uploaded(TerrainLevel level, ChunkPosition p) => EntityOf(level, p) is { } e && e.Has<ChunkUploadedFlag>();
 
-    /// <summary>Whether a coarse chunk can't be shown yet: it isn't meshed and shown (see <see cref="ShownAt"/>), or
+    /// <summary>Whether a coarse chunk can't be shown yet: it isn't meshed and shown (see <see cref="Shown"/>), or
     /// (with lighting) it has faces and has never been lit from the store. Drawn meanwhile it would show as open air, bright where it should be shadowed.</summary>
     private bool Waits(TerrainLevel level, Swap c, ChunkPosition p)
     {
-        if (EntityOf(level, p) is not { } e || !e.Has<ChunkMeshedFlag>() || !e.Has<ShownAt>()) return true;
+        if (EntityOf(level, p) is not { } e || !e.Has<ChunkMeshedFlag>() || !e.Has<Shown>()) return true;
         return IsLit != null && !c.Baked && !c.Settled && e.Has<ChunkRenderData>() && !e.Get<ChunkRenderData>().IsEmpty;
     }
 
@@ -275,11 +275,11 @@ public sealed class TerrainSwapSystem : ISystem
     }
 
     /// <summary>Whether the eight finer chunks under coarse chunk <paramref name="p"/> are shown (air, or
-    /// <see cref="ShownAt"/>): drawn once it's gone.</summary>
+    /// <see cref="Shown"/>): drawn once it's gone.</summary>
     private bool ChildrenShown(TerrainLevel level, ChunkPosition p)
     {
         for (int j = 0; j < 8; j++)
-            if (EntityOf(level.Finer!, Child(p, j)) is { } e && !e.Has<ShownAt>()) return false;
+            if (EntityOf(level.Finer!, Child(p, j)) is { } e && !e.Has<Shown>()) return false;
         return true;
     }
 
