@@ -39,7 +39,7 @@ public sealed class FogSystem : ISystem, IDebugUiSystem
         _loadingColumns = world.GetEntities().With<TerrainColumnLoading>().AsSet();
         // Terrain chunks (each with its own presence; a grid's chunks inherit theirs) waiting to be meshed or uploaded
         // for the first time since they started being drawn.
-        _chunksNotMeshedYet = world.GetEntities().With<Chunk>().With<OwnPresence>()
+        _chunksNotMeshedYet = world.GetEntities().With<Chunk>().With<OwnPresence>().With<Rendered>()
                              .Without<ChunkMeshedFlag>().AsSet();
         _chunksNotUploadedYet = world.GetEntities().With<Chunk>().With<OwnPresence>()
                                .With<NeedsGpuUploadFlag>().Without<ChunkUploadedFlag>().AsSet();

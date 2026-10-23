@@ -21,10 +21,14 @@ public class ChunkPipelineTests
     }
 
     /// <summary>Reads stage <c>of</c> through the given inputs; its output lists what it read (- for missing).</summary>
-    private sealed class Reader(string name, Func<PipelineGrid, Input[]> inputs, Func<PipelineGrid, bool>? applies = null) : WorkerStage<string>
+    private sealed class Reader(string name, Func<PipelineGrid, Input[]> inputs, Func<PipelineGrid, bool>? applies = null,
+                                Purpose serves = Purpose.None) : WorkerStage<string>
     {
         public int Runs;
+        public readonly List<string> Released = new();
         public override string Name => name;
+        public override Purpose Serves => serves;
+        public override void Release(object output) => Released.Add((string)output);
         public override bool AppliesTo(PipelineGrid grid) => applies?.Invoke(grid) ?? true;
         public override IReadOnlyList<Input> InputsFor(PipelineGrid grid) => inputs(grid);
         public override string Make(ChunkKey key, StageInputs read)
@@ -196,6 +200,50 @@ public class ChunkPipelineTests
         pipeline.Update(Plenty);
         Assert.Null(pipeline.Get(other.Key(P(0))));
         Assert.Single(gen.Released, r => r.StartsWith($"gen {other.Id}:"));
+    }
+
+    [Fact]
+    public void A_stage_serving_a_purpose_runs_only_while_its_chunk_is_wanted_for_it()
+    {
+        var jobs = new Queue<Action>();
+        var pipeline = new ChunkPipeline(jobs.Enqueue);
+        var grid = pipeline.AddGrid("world");
+        var gen = pipeline.Add(new Gen());
+        var mesh = pipeline.Add(new Reader("mesh", _ => new[] { new Input(gen, Relation.Self) }, serves: Purpose.Draw));
+        var near = pipeline.Add(new Reader("near", _ => new[] { new Input(mesh, Relation.Neighbours, AcceptsMissing: true) }));
+        var key = grid.Key(P(0));
+        void Settle() { for (int i = 0; i < 4; i++) { pipeline.Update(Plenty); while (jobs.TryDequeue(out var job)) job(); } }
+
+        pipeline.Want(key, true);
+        pipeline.Want(grid.Key(P(1)), true);
+        Settle();
+        Assert.Equal(0, mesh.Runs);
+        Assert.True(pipeline.Settled(key)); // what it's wanted for is done
+
+        pipeline.WantFor(key, Purpose.Draw, true);
+        Assert.False(pipeline.Settled(key));
+        Settle();
+        Assert.Equal(1, mesh.Runs);
+        Assert.Equal(key.ToString(), pipeline.Get(key)!.Output<string>(mesh));
+        Assert.StartsWith($"{key} ", pipeline.Get(grid.Key(P(1)))!.Output<string>(near)); // its other neighbours aren't wanted
+
+        // No longer drawn: what it made is let go of, and what read it sees it missing.
+        pipeline.WantFor(key, Purpose.Draw, false);
+        Assert.Equal(new[] { key.ToString() }, mesh.Released);
+        Assert.Null(pipeline.Get(key)!.Output<string>(mesh));
+        Settle();
+        Assert.StartsWith($"-{key} ", pipeline.Get(grid.Key(P(1)))!.Output<string>(near));
+        Assert.True(pipeline.Settled(key));
+
+        // Let go of while it's being made: what it makes is let go of too.
+        pipeline.WantFor(key, Purpose.Draw, true);
+        pipeline.Update(Plenty);
+        pipeline.WantFor(key, Purpose.Draw, false);
+        while (jobs.TryDequeue(out var job)) job();
+        pipeline.Update(Plenty);
+        Assert.Equal(2, mesh.Released.Count);
+        Assert.Null(pipeline.Get(key)!.Output<string>(mesh));
+        Assert.Equal(SlotState.Waiting, pipeline.Get(key)!.State(mesh));
     }
 
     [Fact]

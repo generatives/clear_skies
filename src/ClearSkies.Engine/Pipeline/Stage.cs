@@ -6,6 +6,16 @@ namespace ClearSkies.Engine.Pipeline;
 /// without the ones that aren't (reading null) and runs again when they come, go or change.</summary>
 public readonly record struct Input(Stage Stage, Relation Of, bool AcceptsMissing = false);
 
+/// <summary>What a wanted chunk is wanted for, beyond its blocks (see <see cref="ChunkPipeline.WantFor"/>). A stage that
+/// serves one (<see cref="Stage.Serves"/>) runs on a chunk only while it's wanted for it.</summary>
+[Flags]
+public enum Purpose : byte
+{
+    None = 0,
+    /// <summary>Drawn here (on a host, other players' chunks aren't).</summary>
+    Draw = 1,
+}
+
 /// <summary>Where a stage's work is done.</summary>
 public enum Executor
 {
@@ -32,6 +42,10 @@ public abstract class Stage
 
     /// <summary>Whether the grid's chunks have this stage at all (a ship's have no shrink).</summary>
     public virtual bool AppliesTo(PipelineGrid grid) => true;
+
+    /// <summary>What it's for: <see cref="Purpose.None"/> (the default) for every wanted chunk; otherwise it runs on a
+    /// chunk only while the chunk's wanted for one of these, and lets go of what it made once it isn't.</summary>
+    public virtual Purpose Serves => Purpose.None;
 
     /// <summary>What it reads to make a chunk of <paramref name="grid"/> (asked once per grid).</summary>
     public abstract IReadOnlyList<Input> InputsFor(PipelineGrid grid);

@@ -7,7 +7,7 @@ namespace ClearSkies.Engine.ECS;
 /// Chunks' meshes, as pipeline stages after their blocks (the terrain's <see cref="VoxelsStage"/>, or a ship's
 /// <see cref="VolumeBlocksStage"/>): each chunk is meshed on a worker (<see cref="MeshStage"/>), then uploaded and put on
 /// its entity (<see cref="UploadStage"/>), with <see cref="ChunkMeshes"/>' steps. The old mesh stays on screen until the
-/// new one is up.
+/// new one is up. Both serve <see cref="Purpose.Draw"/>: a chunk not drawn here has no mesh.
 /// </summary>
 public static class MeshStages
 {
@@ -16,7 +16,6 @@ public static class MeshStages
     {
         var pipeline = system.Pipeline;
         var mesh = pipeline.Add(new MeshStage(pipeline, meshes));
-        system.OnDrawn.Add(mesh);
         var upload = pipeline.Add(new UploadStage(pipeline, meshes, mesh));
         return (mesh, upload);
     }
@@ -33,6 +32,7 @@ public sealed class MeshStage(ChunkPipeline pipeline, ChunkMeshes meshes)
     : WorkerStage<PackedChunkMesh>
 {
     public override string Name => "Mesh";
+    public override Purpose Serves => Purpose.Draw;
 
     /// <summary>The blocks of the chunk and its neighbours, from whichever stage gives the grid's blocks (generated
     /// terrain's, or a ship's).</summary>
@@ -63,12 +63,11 @@ public sealed class MeshStage(ChunkPipeline pipeline, ChunkMeshes meshes)
     private sealed record Job(ChunkData Data, ChunkData?[] Around, bool Alone, ChunkPosition Pos);
 
     /// <summary>The chunk's blocks and its neighbours', held for the job; nothing for one with nothing to draw (all air,
-    /// or buried), and <see cref="PackedChunkMesh.Unchanged"/> for one it doesn't mesh: not drawn here (meshed when it
-    /// is, see <see cref="ChunkPipelineSystem.OnDrawn"/>), its blocks dropped, or an edit made it.</summary>
+    /// or buried), and <see cref="PackedChunkMesh.Unchanged"/> for one it can't mesh: its blocks dropped, or gone.</summary>
     public override object? Prepare(PipelineChunk record)
     {
         var entry = pipeline.EntryOf(record.Key);
-        if (entry == null || entry.DataDropped || !entry.Entity.Has<Rendered>()) return PackedChunkMesh.Unchanged;
+        if (entry == null || entry.DataDropped) return PackedChunkMesh.Unchanged;
         if (!entry.Data.HasAnyNonAir()) return null;
         var around = new ChunkData?[6];
         bool buried = entry.Data.IsAllOpaque;
@@ -99,19 +98,24 @@ public sealed class MeshStage(ChunkPipeline pipeline, ChunkMeshes meshes)
     public override void Release(object output) => ((PackedChunkMesh)output).ReturnBuffers();
 }
 
-/// <summary>Uploads a chunk's new mesh and puts it on the chunk's entity in place of the old one (main thread).</summary>
+/// <summary>Uploads a chunk's new mesh and puts it on the chunk's entity in place of the old one (main thread). Its
+/// output is the chunk it's shown on, whose mesh goes when it's let go of (the chunk's no longer drawn).</summary>
 public sealed class UploadStage(ChunkPipeline pipeline, ChunkMeshes meshes, MeshStage mesh) : FrameStage
 {
     public override string Name => "Upload";
+    public override Purpose Serves => Purpose.Draw;
 
     public override IReadOnlyList<Pipeline.Input> InputsFor(PipelineGrid grid) => new Pipeline.Input[] { new(mesh, Relation.Self) };
 
     public override StageResult Run(PipelineChunk record, StageInputs inputs)
     {
         var packed = inputs.Get<PackedChunkMesh>(mesh, record.Key)!;
-        if (packed == PackedChunkMesh.Unchanged) return StageResult.Done();
-        if (pipeline.EntryOf(record.Key) is { } entry) meshes.Show(entry, packed);
+        var entry = pipeline.EntryOf(record.Key);
+        if (packed == PackedChunkMesh.Unchanged) { }
+        else if (entry != null) meshes.Show(entry, packed);
         else packed.ReturnBuffers(); // gone meanwhile
-        return StageResult.Done();
+        return StageResult.Done(entry);
     }
+
+    public override void Release(object output) => ChunkMeshes.Hide((ChunkEntry)output);
 }

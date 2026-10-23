@@ -33,6 +33,14 @@ public sealed class ChunkMeshes : IDebugUiSystem
         ecsWorld.SubscribeEntityDisposed(EntityDisposed);
     }
 
+    /// <summary>Meshes on workers only, with no renderer to show them (tests).</summary>
+    internal ChunkMeshes()
+    {
+        _renderer = null!;
+        _blockModels = null!;
+        _meshers = new ThreadLocal<GreedyMesher>(() => new GreedyMesher());
+    }
+
     private static void EntityDisposed(in Entity e)
     {
         if (!e.Has<ChunkRenderData>()) return;
@@ -147,6 +155,17 @@ public sealed class ChunkMeshes : IDebugUiSystem
         return mesh;
     }
 
+
+    /// <summary>Takes a chunk's mesh off it: it's no longer drawn (main thread).</summary>
+    internal static void Hide(ChunkEntry entry)
+    {
+        var e = entry.Entity;
+        if (!e.IsAlive) return; // gone with its mesh
+        e.Remove<ChunkMeshedFlag>();
+        if (e.Has<ChunkRenderData>())
+            foreach (var mesh in e.Get<ChunkRenderData>().Meshes()) mesh.Dispose();
+        e.Remove<ChunkRenderData>();
+    }
 
     private static void ClearMesh(ChunkEntry entry)
     {

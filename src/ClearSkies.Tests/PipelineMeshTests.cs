@@ -18,8 +18,8 @@ public class PipelineMeshTests
         new(-1, 0, 0), new(1, 0, 0), new(0, -1, 0), new(0, 1, 0), new(0, 0, -1), new(0, 0, 1),
     };
 
-    /// <summary>A volume in the pipeline (wanted as its chunks come and go, as a ship's are), meshed without its
-    /// neighbours. Its chunks aren't drawn, so meshing them makes nothing: what's seen is which ones mesh.</summary>
+    /// <summary>A volume in the pipeline (wanted as its chunks come and go, as a ship's are), drawn, and meshed without
+    /// its neighbours. Its meshes aren't shown (there's no Upload stage): what's seen is which chunks mesh.</summary>
     private sealed class Scene
     {
         private readonly Queue<Action> _jobs = new();
@@ -31,9 +31,10 @@ public class PipelineMeshTests
         {
             var world = new World();
             System = new ChunkPipelineSystem(world, new ChunkPipeline(_jobs.Enqueue));
-            Mesh = MeshStages.Add(System, null!).Mesh;
+            Mesh = System.Pipeline.Add(new MeshStage(System.Pipeline, new ChunkMeshes()));
             var root = world.CreateEntity();
             root.Set(new DynamicGrid());
+            root.Set<Rendered>();
             Volume = new ChunkVolume(root, world) { MeshIgnoresNeighbours = true };
         }
 
@@ -58,15 +59,8 @@ public class PipelineMeshTests
             return meshing;
         }
 
-        /// <summary>Whether the chunk at <paramref name="pos"/>, if drawn, would get no mesh: it's buried.</summary>
-        public bool Buried(ChunkPosition pos)
-        {
-            var entity = Volume.GetEntry(pos)!.Entity;
-            entity.Set<Rendered>();
-            var job = Mesh.Prepare(Record(pos));
-            entity.Remove<Rendered>();
-            return job == null;
-        }
+        /// <summary>Whether the chunk at <paramref name="pos"/> gets no mesh: it's buried.</summary>
+        public bool Buried(ChunkPosition pos) => Mesh.Prepare(Record(pos)) == null;
     }
 
     private static ChunkData Filled(BlockId id)
