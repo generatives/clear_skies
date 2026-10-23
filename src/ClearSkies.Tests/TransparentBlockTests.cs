@@ -7,8 +7,8 @@ using Xunit;
 namespace ClearSkies.Tests;
 
 /// <summary>Transparent blocks (glass, water): their registration, how GreedyMesher puts their faces in their layer's
-/// mesh and culls them, the neighbour remeshing that culling across chunk borders needs, and the opacity carried in a
-/// chunk vertex.</summary>
+/// mesh and culls them, and the opacity carried in a chunk vertex (the neighbour remeshing that culling across chunk
+/// borders needs is in PipelineMeshTests).</summary>
 public class TransparentBlockTests
 {
     [Fact]
@@ -182,52 +182,5 @@ public class TransparentBlockTests
 
         var mesh = mesher.Mesh(data, null, px, null, null, null, null, neighboursForTransparentOnly: true);
         Assert.Equal(5 * 4, mesh.Cutout.Vertices.Count); // no glass face drawn on top of the stone's
-    }
-
-    /// <summary>A streamed-world volume (meshes ignore their neighbours) with two chunks side by side along X, their
-    /// remesh flags cleared.</summary>
-    private static (ChunkVolume Volume, ChunkEntry A, ChunkEntry B) TwoStreamedChunks()
-    {
-        var world = new DefaultEcs.World();
-        var volume = new ChunkVolume(world.CreateEntity(), world) { MeshIgnoresNeighbours = true };
-        volume.SetBlock(0, 0, 0, BlockId.Stone);
-        volume.SetBlock(ChunkData.Size, 0, 0, BlockId.Stone);
-        var a = volume.GetEntry(new ChunkPosition(0, 0, 0))!;
-        var b = volume.GetEntry(new ChunkPosition(1, 0, 0))!;
-        a.Entity.Remove<NeedsRemeshFlag>();
-        b.Entity.Remove<NeedsRemeshFlag>();
-        return (volume, a, b);
-    }
-
-    [Fact]
-    public void An_edit_beside_a_transparent_block_across_a_border_remeshes_its_chunk()
-    {
-        int s = ChunkData.Size;
-        var (volume, a, b) = TwoStreamedChunks();
-        volume.SetBlock(s - 1, 4, 4, BlockId.Glass);
-        a.Entity.Remove<NeedsRemeshFlag>();
-        b.Entity.Remove<NeedsRemeshFlag>();
-
-        volume.SetBlock(s, 8, 4, BlockId.Stone); // on the border, but beside air
-        Assert.False(a.Entity.Has<NeedsRemeshFlag>());
-
-        volume.SetBlock(s, 4, 4, BlockId.Stone); // beside the glass: its face is now hidden
-        Assert.True(a.Entity.Has<NeedsRemeshFlag>());
-
-        a.Entity.Remove<NeedsRemeshFlag>();
-        volume.FillBox(new(s, 0, 0), new(s + 2, 6, 6), BlockId.Air, BlockOrientation.Upright);
-        Assert.True(a.Entity.Has<NeedsRemeshFlag>());
-    }
-
-    [Fact]
-    public void Loading_a_chunk_beside_a_transparent_border_remeshes_it()
-    {
-        int s = ChunkData.Size;
-        var (volume, a, _) = TwoStreamedChunks();
-        volume.SetBlock(4, 4, s - 1, BlockId.Glass); // on a's +Z border, where nothing is loaded yet
-        a.Entity.Remove<NeedsRemeshFlag>();
-
-        volume.AddChunk(new ChunkPosition(0, 0, 1), new ChunkData());
-        Assert.True(a.Entity.Has<NeedsRemeshFlag>());
     }
 }

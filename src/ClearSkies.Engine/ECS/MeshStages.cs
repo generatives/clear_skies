@@ -46,12 +46,12 @@ public sealed class MeshStage(ChunkPipeline pipeline, ChunkMeshes meshes)
     /// <summary>Whether a change to neighbour <paramref name="source"/>'s blocks can change <paramref name="made"/>'s mesh.</summary>
     private bool Matters(ChunkKey made, ChunkKey source, Change change)
     {
+        if (Blocks(made) is not { } data) return false;
+        if (data.IsAllOpaque && change.Opacity) return true; // it may be buried now, or dug out
         int face = Faces.Toward(source.Pos, made.Pos);
         if (!change.Touches(face)) return false;
         if (pipeline.Grid(made.Grid).Volume is { MeshIgnoresNeighbours: false }) return true;
-        if (Blocks(made) is not { } data) return false;
-        if (ChunkVolume.FaceHasTransparent(data, face ^ 1)) return true;
-        return data.IsAllOpaque && (change.Opacity || Blocks(source) is { IsAllOpaque: true });
+        return ChunkVolume.FaceHasTransparent(data, face ^ 1) || data.IsAllOpaque && Blocks(source) is { IsAllOpaque: true };
     }
 
     /// <summary>A wanted chunk's blocks, from its volume (null if not there yet, or air). One let go of reads as missing,

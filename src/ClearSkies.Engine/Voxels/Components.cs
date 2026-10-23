@@ -15,7 +15,6 @@ public struct ChunkGrid
 /// act on blocks leave it out of their grids.</summary>
 public struct LowResolutionCopy { }
 
-public struct NeedsRemeshFlag { }
 
 /// <summary>Published (see <see cref="DefaultEcs.World.Publish{T}"/>) when an edit changes a chunk's blocks: the
 /// faces whose border cells changed (bits 0-5, <see cref="ChunkVolume.FaceHasSolid"/>'s order), and whether the chunk

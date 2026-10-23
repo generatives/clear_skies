@@ -90,8 +90,7 @@ public sealed class ChunkMeshes : IDebugUiSystem
 
 
     /// <summary>Puts a chunk's new mesh in place of the one it had (main thread): uploads it, or clears the chunk's mesh
-    /// if there's nothing to draw or the chunk was buried meanwhile (a neighbour loaded). Returns the packed buffers.
-    /// Clears the chunk's <see cref="NeedsRemeshFlag"/>.</summary>
+    /// if there's nothing to draw. Returns the packed buffers.</summary>
     internal void Show(ChunkEntry entry, PackedChunkMesh packed)
     {
         try
@@ -102,7 +101,7 @@ public sealed class ChunkMeshes : IDebugUiSystem
                 return;
             }
             var models = ResolveModels(packed.Models);
-            if (packed.IsEmpty && models.Length == 0 || entry.Volume.IsBuried(entry.Position))
+            if (packed.IsEmpty && models.Length == 0)
             {
                 ClearMesh(entry);
                 return;
@@ -117,7 +116,6 @@ public sealed class ChunkMeshes : IDebugUiSystem
             var entity = entry.Entity;
             if (entity.Has<ChunkRenderData>())
                 foreach (var old in entity.Get<ChunkRenderData>().Meshes()) old.Dispose();
-            entity.Remove<NeedsRemeshFlag>();
             entity.Set<ChunkMeshedFlag>();
             entity.Set(new ChunkRenderData
             {
@@ -151,8 +149,7 @@ public sealed class ChunkMeshes : IDebugUiSystem
 
 
     private static void ClearMesh(ChunkEntry entry)
-    {   
-        entry.Entity.Remove<NeedsRemeshFlag>();
+    {
         entry.Entity.Set<ChunkMeshedFlag>();
         if (entry.Entity.Has<ChunkRenderData>())
             foreach (var mesh in entry.Entity.Get<ChunkRenderData>().Meshes()) mesh.Dispose();
@@ -201,8 +198,6 @@ public sealed class ChunkMeshes : IDebugUiSystem
                 result.Add(new ModelBlock(model, c.Block, c.X, c.Y, c.Z, c.Orientation));
         return result.ToArray();
     }
-
-    // ── debug UI ─────────────────────────────────────────────────────────────
 
     // ── debug UI ─────────────────────────────────────────────────────────────
     public string DebugName => "Chunk Meshing";

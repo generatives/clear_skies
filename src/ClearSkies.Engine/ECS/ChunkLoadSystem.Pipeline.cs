@@ -105,13 +105,13 @@ public sealed partial class ChunkLoadSystem
             if (Wanted(full, pos)) Want(full, pos); // adopted as it's added (see Add)
             return;
         }
-        if (_pipeline.Get(full.Key(pos))?.Output<ChunkVoxels>(_voxels) is { Data: null, Replaced: false } made)
+        if (_pipeline.Get(full.Key(pos))?.Output<ChunkVoxels>(_voxels) is { Data: null, InVolume: false, Replaced: false } made)
             Adopt(made, chunk.Entry);
     }
 
     private void Adopt(ChunkVoxels made, ChunkEntry entry)
     {
-        made.Data = entry.Data;
+        made.Data = null; // the volume's now
         made.InVolume = true;
         entry.Entity.Set(new InPipeline { Key = made.Key });
     }
@@ -158,8 +158,8 @@ public sealed partial class ChunkLoadSystem
         _adding = true;
         var entry = level.Volume.AddChunk(pos, made.Data, made.Prepared);
         _adding = false;
-        Adopt(made, entry);
         if (level.Level > 0 && CanDrop(made.Data)) level.ToDrop.Add(pos);
+        Adopt(made, entry);
     }
 
     /// <summary>A made chunk the pipeline let go of: replaced (already out of the volume), or dropped, when it leaves

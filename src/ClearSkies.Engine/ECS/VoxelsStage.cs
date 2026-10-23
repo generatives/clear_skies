@@ -7,13 +7,13 @@ using ClearSkies.Engine.Voxels;
 namespace ClearSkies.Engine.ECS;
 
 /// <summary>A chunk's blocks as the <see cref="VoxelsStage"/> made them (null if it came out air), with their packing
-/// for the GPU, and once added to its volume, that it's there.</summary>
+/// for the GPU, until they're added to its volume: then only that they're there (the volume has them).</summary>
 public sealed class ChunkVoxels(ChunkKey key, ChunkData? data, ChunkPreparation? prepared)
 {
     public readonly ChunkKey Key = key;
     public ChunkData? Data = data;
     public readonly ChunkPreparation? Prepared = prepared;
-    /// <summary>Added to its volume (which then owns <see cref="Data"/>); made again since (<see cref="Replaced"/>).</summary>
+    /// <summary>Added to its volume (which has the blocks now); made again since (<see cref="Replaced"/>).</summary>
     public bool InVolume, Replaced;
 }
 

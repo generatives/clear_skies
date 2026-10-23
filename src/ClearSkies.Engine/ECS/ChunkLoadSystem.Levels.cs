@@ -227,11 +227,9 @@ public sealed partial class ChunkLoadSystem
                 var entry = level.Volume.GetEntry(pos);
                 if (entry == null) { done.Add(pos); continue; }
                 var e = entry.Entity;
-                if (!e.Has<ChunkMeshedFlag>() || !e.Has<ChunkUploadedFlag>() || e.Has<NeedsRemeshFlag>() || e.Has<NeedsGpuUploadFlag>())
+                if (!_pipeline.Settled(level.Key(pos)) || !e.Has<ChunkUploadedFlag>() || e.Has<NeedsGpuUploadFlag>())
                     continue;
                 entry.DropData();
-                // What the pipeline made reads the same as the volume now (all air), not the blocks just released.
-                if (_pipeline.Get(level.Key(pos))?.Output<ChunkVoxels>(_voxels) is { } made) made.Data = entry.Data;
                 level.Dropped++;
                 done.Add(pos);
             }
