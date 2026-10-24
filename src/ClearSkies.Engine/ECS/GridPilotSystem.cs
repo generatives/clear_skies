@@ -40,7 +40,7 @@ public sealed class GridPilotSystem : ISystem
     private readonly CommandSystem _commands;
     private readonly PhysicsWorld _physics;
     private readonly ChunkVolume _staticVolume;
-    private readonly PhysicsBodySystem _physicsBody;
+    private readonly ColliderStage _colliders;
 
     private Entity _pilot;  // the player piloting, tagged Piloting
     private Entity _camera; // their camera, under the grid meanwhile
@@ -58,13 +58,13 @@ public sealed class GridPilotSystem : ISystem
     public bool IsPiloting => _isPiloting;
 
     public GridPilotSystem(World world, InputManager input, PhysicsWorld physics,
-                            ChunkVolume staticVolume, PhysicsBodySystem physicsBody, CommandSystem commands)
+                            ChunkVolume staticVolume, ColliderStage colliders, CommandSystem commands)
     {
         _commands        = commands;
         _input           = input;
         _physics         = physics;
         _staticVolume     = staticVolume;
-        _physicsBody     = physicsBody;
+        _colliders       = colliders;
         _players         = world.GetEntities().With<LocalPlayer>().With<MouseLookComponent>().AsSet();
         // Runs before the drawn poses are written, so the camera is drawn where the grid is this frame.
         _cameras         = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
@@ -242,7 +242,7 @@ public sealed class GridPilotSystem : ISystem
                     (int)MathF.Floor(pos.Y / ChunkData.Size),
                     (int)MathF.Floor(pos.Z / ChunkData.Size));
                 bool chunkLoaded = _staticVolume.IsLoaded(chunkPos);
-                bool hasCollider = _physicsBody.HasCollider(chunkPos);
+                bool hasCollider = _colliders.HasCollider(_staticVolume, chunkPos);
                 ImGui.Text($"Grid's chunk {chunkPos}: loaded={chunkLoaded}  hasCollider={hasCollider}");
             }
             break;
