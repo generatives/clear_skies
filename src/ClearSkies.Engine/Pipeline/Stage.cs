@@ -14,6 +14,8 @@ public enum Purpose : byte
     None = 0,
     /// <summary>Drawn here (on a host, other players' chunks aren't).</summary>
     Draw = 1,
+    /// <summary>Collided with here: near something that can touch it (see <see cref="ECS.EntityPresenceSystem"/>).</summary>
+    Collide = 2,
 }
 
 /// <summary>Where a stage's work is done.</summary>

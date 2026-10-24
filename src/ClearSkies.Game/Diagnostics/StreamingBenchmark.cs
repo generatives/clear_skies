@@ -13,7 +13,7 @@ namespace ClearSkies.Game.Diagnostics;
 /// ChunkLoadSystem's closest-first order at its per-frame budget while the camera flies along +X, marks
 /// neighbours dirty (with and without <see cref="ChunkVolume.FaceHasSolid"/>'s filter), and meshes at the old
 /// synchronous 4-per-frame budget — counting how many Mesh() calls the load order causes per chunk. Also splits the
-/// static-collider cost (PhysicsBodySystem) into decomposition, child Shapes.Add and the BigCompound tree build,
+/// static-collider cost (ColliderStages) into decomposition, child Shapes.Add and the BigCompound tree build,
 /// compares merged-block-type boxes and SweepBuild, times the shipped worker/main-thread split, and checks the
 /// worker-built tree matches BigCompound's own constructor.
 /// </summary>
@@ -175,7 +175,7 @@ public static class StreamingBenchmark
             Report($"collider total, merge={merge,-5} sweep={sweep,-5} boxes avg={counts.Average():F0} max={counts.Max()}", total);
         }
 
-        // ── Shipped split: worker half vs main-thread half (PhysicsBodySystem) ──
+        // ── Shipped split: worker half vs main-thread half (BoxesStage, ColliderStage) ──
         using var physics = new ClearSkies.Engine.Physics.PhysicsWorld(new Vector3(0, -6, 0), 1f / 60f);
         var worker = new List<double>(); var main = new List<double>();
         foreach (var d in cache.Values)

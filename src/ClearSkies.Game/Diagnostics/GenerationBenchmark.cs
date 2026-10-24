@@ -78,7 +78,7 @@ public static class GenerationBenchmark
         }
         double meshWallMs = overall.Elapsed.TotalMilliseconds;
 
-        // ── Stage 3: static-collider box decomposition (PhysicsBodySystem's per-loaded-chunk cost) ──
+        // ── Stage 3: static-collider box decomposition (BoxesStage's per-loaded-chunk cost) ──
         var decomposer  = new VoxelBoxDecomposer();
         var collideTimesUs = new List<double>();
 
