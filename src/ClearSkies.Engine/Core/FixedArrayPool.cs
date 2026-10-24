@@ -10,7 +10,8 @@ public sealed class FixedArrayPool<T>
     private readonly Stack<T[]> _free = new();
 
     /// <param name="length">The length of every array.</param>
-    /// <param name="maxKept">How many returned arrays are kept for reuse; any more are left to the collector.</param>
+    /// <param name="maxKept">How many returned arrays are kept for reuse; any more are left to the collector. It can be
+    /// changed as the need does (those already kept stay).</param>
     /// <param name="pinned">Whether new arrays go on the pinned object heap, where a collection never copies them: for
     /// large arrays that live long.</param>
     public FixedArrayPool(int length, int maxKept, bool pinned = false)
@@ -21,7 +22,7 @@ public sealed class FixedArrayPool<T>
     }
 
     public int Length { get; }
-    public int MaxKept { get; }
+    public int MaxKept { get; set; }
     public bool Pinned { get; }
 
     /// <summary>Arrays waiting to be reused.</summary>

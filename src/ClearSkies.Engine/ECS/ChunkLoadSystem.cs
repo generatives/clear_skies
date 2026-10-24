@@ -187,6 +187,9 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         if (!_editsRead) ReadEdits();
         TakeEditsElsewhere();
         SetFog();
+        int loaded = 0;
+        foreach (var level in _levels) loaded += level.Volume.LoadedCount;
+        ChunkData.KeepSpare(loaded);
 
         _budget.Restart();
         _seen.Clear();

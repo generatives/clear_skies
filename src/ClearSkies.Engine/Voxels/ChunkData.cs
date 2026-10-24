@@ -119,9 +119,20 @@ public sealed class ChunkData
     // Chunk-sized arrays from unloaded (or compacted) chunks, for the next chunks to load. While streaming, as many
     // chunks unload as load, so after a while nearly every chunk reuses an array instead of allocating one: fewer
     // allocations means fewer full collections, and those were the long pauses. New arrays go on the pinned object
-    // heap, where a collection never copies them. 1024 kept is 32 MB of each; streaming needs far fewer spare at once.
-    private static readonly FixedArrayPool<BlockId> BlockPool = new(Volume, maxKept: 1024, pinned: true);
-    private static readonly FixedArrayPool<BlockOrientation> OrientationPool = new(Volume, maxKept: 1024, pinned: true);
+    // heap, where a collection never copies them. 1024 kept is 32 MB of each, at least; streaming sizes it to what's
+    // loaded (see KeepSpare).
+    private static readonly FixedArrayPool<BlockId> BlockPool = new(Volume, maxKept: MinSpare, pinned: true);
+    private static readonly FixedArrayPool<BlockOrientation> OrientationPool = new(Volume, maxKept: MinSpare, pinned: true);
+    private const int MinSpare = 1024;
+
+    /// <summary>Keeps up to half as many spare block arrays as there are <paramref name="loaded"/> chunks (1024 at
+    /// least): moving on, a level unloads a few thousand at once that the chunks coming in take up soon after.</summary>
+    public static void KeepSpare(int loaded)
+    {
+        int spare = System.Math.Max(MinSpare, loaded / 2);
+        BlockPool.MaxKept = spare;
+        OrientationPool.MaxKept = spare;
+    }
 
     public static int Index(int x, int y, int z) => x + Size * (y + Size * z);
 
