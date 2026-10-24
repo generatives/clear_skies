@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using ClearSkies.Engine.Core;
 
 namespace ClearSkies.Game.Generation;
 
@@ -81,12 +82,25 @@ internal sealed class WaterSettle
         return (level == short.MinValue ? int.MinValue : level, ground == short.MaxValue ? int.MaxValue : ground);
     }
 
+    // A tile's working arrays, a column each of the tile and its margin (on the large object heap, where dropping them
+    // costs a full collection): rented for each tile settled, and cleared. Enough kept for a few settled at once.
+    private static readonly FixedArrayPool<int> Ints = new(N * N, maxKept: 40);
+    private static readonly FixedArrayPool<byte> Bytes = new(N * N, maxKept: 4);
+    private static readonly FixedArrayPool<bool> Bools = new(N * N, maxKept: 4);
+
+    private static T[] Rent<T>(FixedArrayPool<T> pool)
+    {
+        var a = pool.Rent();
+        Array.Clear(a);
+        return a;
+    }
+
     private Settled Build(int tx, int tz)
     {
         int x0 = tx * Tile - Margin, z0 = tz * Tile - Margin;
-        var plan = new int[N * N];      // the planned level, int.MinValue for none
-        var depth = new int[N * N];     // a river's bed under its level; 0 for a lake
-        var bank = new int[N * N];
+        var plan = Rent(Ints);  // the planned level, int.MinValue for none
+        var depth = Rent(Ints); // a river's bed under its level; 0 for a lake
+        var bank = Rent(Ints);
         bool any = false;
         for (int c = 0; c < N * N; c++)
         {
@@ -96,20 +110,24 @@ internal sealed class WaterSettle
             bank[c] = w.Bank;
             any |= w.Level != int.MinValue || w.Bank != int.MaxValue;
         }
-        if (!any) return Empty;
+        if (!any)
+        {
+            Ints.Return(plan); Ints.Return(depth); Ints.Return(bank);
+            return Empty;
+        }
 
         // The real top, where it matters: under and near the planned water and its banks.
         var near = Distance(c => plan[c] != int.MinValue || bank[c] != int.MaxValue, FillReach + 1);
-        var top = new int[N * N];
+        var top = Rent(Ints);
         var generator = _generator.Value!;
         for (int c = 0; c < N * N; c++)
             top[c] = near[c] > FillReach + 1 ? int.MaxValue : generator.Top(x0 + c % N, z0 + c / N) ?? int.MinValue;
 
         // Rivers cut their beds and banks; where the ground is far under a river, a hollow, it pools at the bottom; a
         // drop, it ends.
-        var ground = new int[N * N];
-        var level = new int[N * N];
-        var kind = new byte[N * N];
+        var ground = Rent(Ints);
+        var level = Rent(Ints);
+        var kind = Rent(Bytes);
         for (int c = 0; c < N * N; c++)
         {
             int t = top[c], p = plan[c];
@@ -156,7 +174,7 @@ internal sealed class WaterSettle
         }
 
         var fromLake = Distance(c => kind[c] == Planned && depth[c] == 0, MouthReach);
-        var raised = new bool[N * N]; // (risen as below: no longer level with the rest of its stretch)
+        var raised = Rent(Bools); // (risen as below: no longer level with the rest of its stretch)
         for (int round = 0, settling = 1; settling == 1 && round < MaxRounds; round++)
         {
             settling = Cut() ? 1 : 0;
@@ -227,7 +245,7 @@ internal sealed class WaterSettle
 
         // Where a river settled lower than planned, its banks come down as far with it (so they still slope down to its
         // water, not stand over it), though never under the water beside them.
-        var drop = new int[N * N];
+        var drop = Rent(Ints);
         for (int c = 0; c < N * N; c++)
             if (kind[c] == Planned && depth[c] > 0) drop[c] = Math.Max(0, plan[c] - level[c]);
         for (int pass = 0; pass < BankFar; pass++)
@@ -252,6 +270,9 @@ internal sealed class WaterSettle
             settled.Level[o] = level[c] == int.MinValue ? short.MinValue : (short)level[c];
             settled.Ground[o] = ground[c] == int.MinValue || ground[c] >= top[c] ? short.MaxValue : (short)ground[c];
         }
+        foreach (var a in (Span<int[]>)[plan, depth, bank, near, top, ground, level, reach, fromLake, drop]) Ints.Return(a);
+        Bytes.Return(kind);
+        Bools.Return(raised);
         return settled;
 
         // Cuts through the strips described above; whether it cut any.
@@ -264,7 +285,7 @@ internal sealed class WaterSettle
                 for (int c = 0; c < N * N; c++)
                 {
                     if (kind[c] != Planned) continue;
-                    foreach (var (dx, dz) in new[] { (1, 0), (-1, 0), (0, 1), (0, -1) })
+                    foreach (var (dx, dz) in Ways)
                     {
                         int i = c % N, k = c / N, s = 1, n = c;
                         for (; s <= DamWidth + 1; s++)
@@ -321,21 +342,40 @@ internal sealed class WaterSettle
         }
     }
 
-    /// <summary>The columns beside column c within the tile and its margin.</summary>
-    private static IEnumerable<int> Neighbours(int c)
+    private static readonly (int, int)[] Ways = { (1, 0), (-1, 0), (0, 1), (0, -1) };
+
+    /// <summary>The columns beside column c within the tile and its margin (a struct to go through with foreach, which
+    /// makes nothing: it's asked for every column, many times over).</summary>
+    private static NeighbourColumns Neighbours(int c) => new(c);
+
+    private struct NeighbourColumns(int c)
     {
-        int i = c % N, k = c / N;
-        if (i > 0) yield return c - 1;
-        if (i < N - 1) yield return c + 1;
-        if (k > 0) yield return c - N;
-        if (k < N - 1) yield return c + N;
+        private int _way = -1;
+        public int Current { get; private set; }
+        public readonly NeighbourColumns GetEnumerator() => this;
+
+        public bool MoveNext()
+        {
+            int i = c % N, k = c / N;
+            while (++_way < 4)
+            {
+                switch (_way)
+                {
+                    case 0 when i > 0: Current = c - 1; return true;
+                    case 1 when i < N - 1: Current = c + 1; return true;
+                    case 2 when k > 0: Current = c - N; return true;
+                    case 3 when k < N - 1: Current = c + N; return true;
+                }
+            }
+            return false;
+        }
     }
 
     /// <summary>How many steps (sideways, up to most) each column is from the nearest one that is; past most, most + 1.</summary>
     private static int[] Distance(Func<int, bool> from, int most)
     {
-        var d = new int[N * N];
-        var queue = new Queue<int>();
+        var d = Ints.Rent(); // (all of it set below)
+        var queue = t_queue ??= new Queue<int>();
         for (int c = 0; c < N * N; c++)
         {
             d[c] = from(c) ? 0 : most + 1;
@@ -350,6 +390,8 @@ internal sealed class WaterSettle
         }
         return d;
     }
+
+    [ThreadStatic] private static Queue<int>? t_queue; // Distance's, kept as big as it grows
 
     private static int FloorDiv(int a, int b) => a >= 0 ? a / b : (a - b + 1) / b;
 }

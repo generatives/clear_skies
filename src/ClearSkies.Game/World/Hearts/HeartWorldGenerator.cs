@@ -69,6 +69,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     private const float BottomRoughness = 30f;
 
     private readonly ulong _seed;
+    internal ulong Seed => _seed;
     private readonly ContinentTerrain _terrain;
     private readonly Water _water;
     private readonly FastNoiseLite _warpX, _warpY, _warpZ, _crack, _bottom;
@@ -235,7 +236,12 @@ public sealed class HeartWorldGenerator : IWorldGenerator
 
     /// <summary>Takes chunk column (chunkX, chunkZ)'s solid spans from the profiles worked out lately (see
     /// <see cref="ProfileCache"/>), working them out if they aren't there.</summary>
-    public void Prepare(int chunkX, int chunkZ) => _profile = _profiles.Get(chunkX, chunkZ, () => BuildProfile(chunkX, chunkZ));
+    public void Prepare(int chunkX, int chunkZ)
+    {
+        if (_profiles.TryGet(chunkX, chunkZ, out _profile)) return;
+        _profile = _profiles.Add(chunkX, chunkZ);
+        BuildProfile(_profile, chunkX, chunkZ);
+    }
 
     /// <summary>The solid spans (bottom up) of block column (lx, lz) of the chunk column last prepared.</summary>
     public ReadOnlySpan<(short Lo, short Hi)> Spans(int lx, int lz)
@@ -245,11 +251,11 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     }
 
     /// <summary>Works out a chunk column's solid spans and what fills them.</summary>
-    private ColumnProfile BuildProfile(int chunkX, int chunkZ)
+    private void BuildProfile(ColumnProfile p, int chunkX, int chunkZ)
     {
         _topsX = _topsZ = int.MinValue; // (the hearts Top loaded are replaced)
         float x0 = chunkX * S, z0 = chunkZ * S;
-        var p = new ColumnProfile();
+        p.Clear();
 
         float top = float.MinValue;
         for (int lz = 0; lz < S; lz++)
@@ -278,7 +284,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         {
             Array.Clear(_spanCount);
             p.Pack(_spanCount, _spans, MaxSpans);
-            return p;
+            return;
         }
 
         for (int lz = 0; lz < S; lz++)
@@ -347,7 +353,6 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             if (_cut[col] != int.MaxValue) topSpan.Hi = (short)System.Math.Max(topSpan.Lo, System.Math.Min(topSpan.Hi, _cut[col]));
             if (p.Level[col] == int.MinValue && _lake[col] != int.MinValue) p.Level[col] = System.Math.Min(_lake[col], topSpan.Hi);
         }
-        return p;
     }
 
     /// <summary>Whether block y of a column (wobbled to (px, pz), lifted by lift) is solid, and how many blocks up from
@@ -635,7 +640,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator
 }
 
 /// <summary>One chunk column of the hearts world worked out: per block column, its solid spans (bottom up, from
-/// <see cref="Start"/>) with each top's look, and what's on it. Never changed once made.</summary>
+/// <see cref="Start"/>) with each top's look, and what's on it. Not changed while it's kept (see
+/// <see cref="ProfileCache"/>); once let go of, it's made again for another column, its arrays reused.</summary>
 internal sealed class ColumnProfile
 {
     private const int Columns = ChunkData.Size * ChunkData.Size;
@@ -646,10 +652,14 @@ internal sealed class ColumnProfile
     {
         for (int col = 0; col < Columns; col++) Start[col + 1] = Start[col] + counts[col];
         int total = Start[Columns];
-        Spans = new (short, short)[total];
-        Bare = new float[total];
-        Biome = new Biome[total];
-        Dry = new float[total];
+        if (Spans.Length < total)
+        {
+            int length = System.Math.Max(total, 2 * Spans.Length); // (only as much as it needs at first)
+            Spans = new (short, short)[length];
+            Bare = new float[length];
+            Biome = new Biome[length];
+            Dry = new float[length];
+        }
         for (int col = 0; col < Columns; col++)
             Array.Copy(spans, col * perColumn, Spans, Start[col], counts[col]);
     }
@@ -667,9 +677,16 @@ internal sealed class ColumnProfile
     public readonly bool[] Shore = new bool[Columns];
 
     public int Count(int col) => Start[col + 1] - Start[col];
+
+    /// <summary>Clears what's only set where there are spans, for a profile made again.</summary>
+    public void Clear()
+    {
+        Array.Clear(Strata); Array.Clear(Patch); Array.Clear(Flora); Array.Clear(Woods); Array.Clear(Kind);
+    }
 }
 
-/// <summary>The column profiles one generator built lately, the oldest let go first.</summary>
+/// <summary>The column profiles one generator built lately, the oldest let go first and made again for the next column:
+/// they last long enough that the collector would carry each through its generations only to drop it.</summary>
 internal sealed class ProfileCache
 {
     /// <summary>Columns kept: a profile is about 30 KB (more where there's lots of ground), so a few MB a generator.
@@ -679,12 +696,15 @@ internal sealed class ProfileCache
     private readonly Dictionary<(int, int), ColumnProfile> _profiles = new();
     private readonly Queue<(int, int)> _order = new();
 
-    public ColumnProfile Get(int x, int z, Func<ColumnProfile> build)
+    public bool TryGet(int x, int z, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out ColumnProfile? kept)
+        => _profiles.TryGetValue((x, z), out kept);
+
+    /// <summary>A profile to make for column (x, z), kept from now on: the oldest one, let go of, once it's full.</summary>
+    public ColumnProfile Add(int x, int z)
     {
-        if (_profiles.TryGetValue((x, z), out var kept)) return kept;
-        var made = _profiles[(x, z)] = build();
+        var made = _order.Count < Capacity || !_profiles.Remove(_order.Dequeue(), out var oldest) ? new ColumnProfile() : oldest;
+        _profiles[(x, z)] = made;
         _order.Enqueue((x, z));
-        if (_order.Count > Capacity) _profiles.Remove(_order.Dequeue());
         return made;
     }
 }
