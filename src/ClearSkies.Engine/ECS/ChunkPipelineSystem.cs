@@ -95,12 +95,16 @@ public sealed class ChunkPipelineSystem : ISystem, IDebugUiSystem
         foreach (var key in _maybeDrawn) Pipeline.WantFor(key, Purpose.Draw, Pipeline.EntryOf(key)?.Entity.Has<Rendered>() == true);
         _maybeDrawn.Clear();
         _steps.Lap(0);
+        var gc = GC.GetTotalPauseDuration();
         Pipeline.Update(new FrameBudgets(WorkerSlots, MainMs));
         _steps.Lap(1);
-        if (_byStage?.Count != Pipeline.FrameMs.Length)
-            _byStage = new StepTimer(Pipeline.Stages.Select(s => s.Name).Append("Dropping chunks").ToArray()) { Owner = "Chunk Pipeline stages" };
+        int n = Pipeline.FrameMs.Length;
+        if (_byStage?.Count != n + 1)
+            _byStage = new StepTimer(Pipeline.Stages.Select(s => s.Name).Append("Dropping chunks")
+                                         .Append("GC pauses (in the times above)").ToArray()) { Owner = "Chunk Pipeline stages" };
         _byStage.Start();
-        for (int i = 0; i < Pipeline.FrameMs.Length; i++) _byStage.Add(i, Pipeline.FrameMs[i]);
+        for (int i = 0; i < n; i++) _byStage.Add(i, Pipeline.FrameMs[i]);
+        _byStage.Add(n, (GC.GetTotalPauseDuration() - gc).TotalMilliseconds); // a stage's spike may be the GC's
     }
 
     public string DebugName => "Chunk Pipeline";
