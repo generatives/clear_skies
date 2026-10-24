@@ -478,7 +478,7 @@ fn chunkVertex(d: ChunkDraw, quad: vec2<u32>, corner: u32) -> VSOut {
 
 // Whether this pixel of a dissolving chunk draw is left out: a 4x4 ordered dither on the screen. A chunk going away
 // (dissolve d > 0) leaves out the pixels under d; one coming in over it (dissolve -d) draws only those, so through a
-// swap each pixel shows one or the other, never both (see ChunkDrawStates).
+// swap each pixel shows one or the other, never both (see Shown.Dissolve).
 fn dissolved(in: VSOut) -> bool {
     if (in.dissolve == 0.0) { return false; }
     var bayer = array<f32, 16>(0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);

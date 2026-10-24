@@ -39,12 +39,15 @@ public sealed partial class ChunkLoadSystem
     }
 
     /// <summary>Lets go of the level's chunk <paramref name="p"/>: the pipeline drops it (and it leaves the volume) once
-    /// nothing's making it. One the pipeline didn't make (an edit did) is unloaded now.</summary>
+    /// nothing's making or holding it. One the pipeline didn't make (an edit did) is unloaded now.</summary>
     private void LetGoOf(TerrainLevel level, ChunkPosition p)
     {
-        if (!level.Wanting.Remove(p)) { Unload(level, p); return; }
-        RemoveInFlight(level, p);
-        _pipeline.Want(level.Key(p), false);
+        if (level.Wanting.Remove(p))
+        {
+            RemoveInFlight(level, p);
+            _pipeline.Want(level.Key(p), false);
+        }
+        else if (_pipeline.Get(level.Key(p)) == null) Unload(level, p);
     }
 
     /// <summary>Lets go of a removed level's chunk: the level unloads its volume itself, so what the pipeline made is
@@ -117,7 +120,7 @@ public sealed partial class ChunkLoadSystem
     }
 
     /// <summary>The level a chunk was made for, if it's still there.</summary>
-    private TerrainLevel? LevelOf(ChunkVoxels made) => made.Key.Grid < _levels.Count ? _levels[made.Key.Grid] : null;
+    private TerrainLevel? LevelOf(ChunkVoxels made) => LevelOf(made.Key);
 
     /// <summary>Adds a chunk made for its level to the level's volume, in place of what was made before; one that came
     /// out air is remembered as air.</summary>
@@ -152,6 +155,7 @@ public sealed partial class ChunkLoadSystem
             if (level.Level == 0 && _edits.IsEdited(pos)) RecordBuild(pos, hasBlocks: false); // a build that was emptied out
             else if (level.Columns.TryGetValue((pos.X, pos.Z), out var col))
                 level.Columns[(pos.X, pos.Z)] = (col.Generated, col.Air | level.Bit(pos));
+            LearnedAir?.Invoke(level.Key(pos));
             return;
         }
         _adding = true;

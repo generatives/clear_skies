@@ -267,6 +267,33 @@ public class ChunkPipelineTests
     }
 
     [Fact]
+    public void A_held_chunk_stays_after_it_is_let_go_of_until_its_last_hold_goes()
+    {
+        var pipeline = new ChunkPipeline(work => work());
+        var grid = pipeline.AddGrid("world");
+        var gen = pipeline.Add(new Gen());
+        var key = grid.Key(P(0));
+        Assert.False(pipeline.Hold(key, true)); // a hold never makes a chunk
+        Assert.Null(pipeline.Get(key));
+
+        pipeline.Want(key, true);
+        pipeline.Update(Plenty);
+        Assert.True(pipeline.Hold(key, true));
+        Assert.True(pipeline.Hold(key, true));
+        pipeline.Want(key, false);
+        pipeline.Update(Plenty);
+        Assert.True(pipeline.Get(key) is { Wanted: true, Asked: false });
+
+        pipeline.Hold(key, false);
+        pipeline.Update(Plenty);
+        Assert.NotNull(pipeline.Get(key));
+        pipeline.Hold(key, false);
+        pipeline.Update(Plenty);
+        Assert.Null(pipeline.Get(key));
+        Assert.Single(gen.Released);
+    }
+
+    [Fact]
     public void An_urgent_change_goes_before_queued_work_and_passes_on_through_the_stages_after()
     {
         var jobs = new Queue<Action>();
