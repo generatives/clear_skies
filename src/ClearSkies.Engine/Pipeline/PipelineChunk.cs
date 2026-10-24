@@ -22,7 +22,8 @@ public sealed class PipelineChunk
         Grid = grid;
         SlotOf = slotOf;
         Slots = new Slot[slots];
-        for (int i = 0; i < slots; i++) Slots[i].Flags = SlotFlags.Stale;
+        long now = System.Diagnostics.Stopwatch.GetTimestamp();
+        for (int i = 0; i < slots; i++) (Slots[i].Flags, Slots[i].Since) = (SlotFlags.Stale, now);
     }
 
     public ChunkKey Key { get; }
@@ -85,8 +86,9 @@ internal struct Slot
     /// <summary>Outputs taken so far; 0 until the first.</summary>
     public int Version;
     public SlotFlags Flags;
-    /// <summary>When it was last queued (Stopwatch ticks), for the panel: how long it's been waiting its turn.</summary>
-    public long QueuedAt;
+    /// <summary>When it was last done and its inputs changed (or the chunk came; Stopwatch ticks), for the panel: how
+    /// long it's been catching up.</summary>
+    public long Since;
 
     public readonly bool Is(SlotFlags flag) => (Flags & flag) != 0;
     public void Set(SlotFlags flag, bool on) => Flags = on ? Flags | flag : Flags & ~flag;

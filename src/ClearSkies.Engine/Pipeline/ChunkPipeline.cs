@@ -213,6 +213,7 @@ public sealed class ChunkPipeline
         ref var slot = ref record.At(stage.Id);
         if (slot.Output is { } output) { slot.Output = null; stage.Release(output); }
         bool made = slot.Version > 0;
+        if (!slot.Is(SlotFlags.Stale | SlotFlags.Queued | SlotFlags.Running)) slot.Since = Stopwatch.GetTimestamp();
         slot.Version = 0;
         slot.Flags = SlotFlags.Stale | (slot.Flags & SlotFlags.Running);
         if (made) Propagate(record, stage, Change.All, acceptsMissingOnly: true);
@@ -391,18 +392,49 @@ public sealed class ChunkPipeline
     /// <summary>External stages asked and not done yet.</summary>
     public int AwaitingExternal => _awaitingExternal.Count;
 
-    /// <summary>The chunk and stage that's been ready longest without running, and for how long (seconds), for the
-    /// panel: what a chunk that never seems to get made is stuck behind.</summary>
-    public (PipelineChunk Record, Stage Stage, double Seconds)? LongestReady()
+    /// <summary>Per stage, the chunks that have needed it and not had it for longer than <paramref name="seconds"/>,
+    /// and the one that's waited longest, for the panel: what a chunk that never seems to get made is stuck on.</summary>
+    public (int Count, PipelineChunk? Oldest, double Seconds)[] Stuck(double seconds)
     {
-        (PipelineChunk, Stage, long)? oldest = null;
+        var stuck = new (int Count, PipelineChunk? Oldest, double Seconds)[_stages.Count];
         foreach (var record in _records.Values)
+        {
+            if (!record.Wanted) continue;
             foreach (var stage in _stages)
-                if (record.Has(stage.Id) && record.State(stage) == SlotState.Ready
-                    && (oldest == null || record.At(stage.Id).QueuedAt < oldest.Value.Item3))
-                    oldest = (record, stage, record.At(stage.Id).QueuedAt);
-        if (oldest is not var (r, s, at)) return null;
-        return (r, s, Stopwatch.GetElapsedTime(at).TotalSeconds);
+            {
+                if (!record.Needs(stage) || record.State(stage) == SlotState.Done) continue;
+                double waited = Stopwatch.GetElapsedTime(record.At(stage.Id).Since).TotalSeconds;
+                if (waited < seconds) continue;
+                ref var s = ref stuck[stage.Id];
+                s.Count++;
+                if (waited > s.Seconds) (s.Oldest, s.Seconds) = (record, waited);
+            }
+        }
+        return stuck;
+    }
+
+    /// <summary>What the stage on the chunk waits on, in a few words, for the panel.</summary>
+    public string WaitsOn(PipelineChunk record, Stage stage)
+    {
+        switch (record.State(stage))
+        {
+            case SlotState.Ready: return "its turn";
+            case SlotState.Running: return stage is ExternalStage ? "the system doing it" : "a worker making it";
+            case SlotState.Done: return "nothing";
+        }
+        Span<ChunkKey> keys = stackalloc ChunkKey[Relation.MaxKeys];
+        foreach (var input in InputsOf(stage, record.Key.Grid))
+        {
+            if (input.AcceptsMissing) continue;
+            foreach (var key in input.Of.Picked(this, record.Key, keys))
+            {
+                var source = Get(key);
+                if (source is not { Wanted: true }) return $"{input.Stage.Name} of {key.Pos}, not in the pipeline";
+                if (source.Has(input.Stage.Id) && source.At(input.Stage.Id).Version == 0)
+                    return $"{input.Stage.Name} of {key.Pos} ({source.State(input.Stage)})";
+            }
+        }
+        return "being asked again (it said when)";
     }
 
     /// <summary>Chunks in each grid, and of those, how many are being made (any stage ready or running), for the panel.</summary>
@@ -455,7 +487,6 @@ public sealed class ChunkPipeline
         if (!record.Wanted || !record.Needs(_stages[stage]) || slot.Is(SlotFlags.Queued | SlotFlags.Running) || !slot.Is(SlotFlags.Stale)
             || !InputsThere(record, _stages[stage])) return;
         slot.Set(SlotFlags.Queued, true);
-        slot.QueuedAt = Stopwatch.GetTimestamp();
         _ready[(int)_stages[stage].RunsOn].Enqueue((record, _stages[stage]), RankOf(record, _stages[stage]));
     }
 
@@ -587,6 +618,7 @@ public sealed class ChunkPipeline
     private void MarkStale(PipelineChunk record, int stage, bool urgent = false)
     {
         ref var slot = ref record.At(stage);
+        if (!slot.Is(SlotFlags.Stale | SlotFlags.Queued | SlotFlags.Running)) slot.Since = Stopwatch.GetTimestamp(); // was done
         slot.Set(SlotFlags.Stale, true);
         if (urgent && !slot.Is(SlotFlags.Urgent))
         {
