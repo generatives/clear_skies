@@ -10,7 +10,7 @@ using StbImageWriteSharp;
 //   dotnet run -c Release --project tools/ClearSkies.Hydrology -- [--seed 1337] [--cell 1 -1] [--passes 20000]
 //       [--rain 0.002] [--report 500] [--out hydrology-out] [--snapshots]
 //       [--saturate 1] [--fill-hollows] [--local-steps] [--routing] [--shell 2|all] [--cascade 32,16] [--no-falls] [--soil-capacity 2]
-//       [--stone-capacity 0.05] [--air 0.15] [--soil 0.01] [--stone 0.0005]
+//       [--stone-capacity 0.05] [--air 0.15] [--soil 0.01] [--stone 0.0005] [--low-stone 0.00003] [--low-window 256]
 //
 // With no --cell it takes the spawn's landmass. --snapshots also writes the map at every report. It stops early once
 // as much water drains off the land as rains on it (within 1%, either way). --saturate N starts the ground full of
@@ -23,16 +23,23 @@ using StbImageWriteSharp;
 // passing --solve-air (default: as --air; several, comma separated, go up in steps); --check N then steps N passes from it to see how far it drifts. --last is
 // the cell size to end on (8). --export FILE writes the last size's solve problem out instead (see Settle.Export).
 // --carve N lowers the land where water runs over it and solves again, N times (--carve-from: how many columns' rain
-// must run through a column; --carve-depth, --carve-most: blocks a round).
+// must run through a column; --carve-depth, --carve-most: blocks a round; --carve-width: blocks either side a valley
+// reaches, sloping up to nothing at its rim, instead of the 3x3 half-depth sides). --pieces solves each piece of land
+// (land columns joined side by side, at the last cell size) on its own, through the whole cascade, and times each.
+// --erode N reshapes the land's top first: its broad shape (the surface blurred over --erode-blur blocks), carved by
+// rivers N rounds (stream power: each column cut towards the one it drains to, more the more drains through it,
+// --erode-k), then --erode-detail of the blurred-away detail added back. --erode-broad takes the broad shape from the
+// generator instead (ContinentTerrain.BroadHeight: its noise without bumps, crags and dells).
 
 ulong seed = 1337;
 (int X, int Z)? cell = null;
 int passes = 20000, report = 500;
 float rain = 0.002f;
 string outDir = "hydrology-out";
-bool snapshots = false, falls = true, hollows = false, localSteps = false, routing = false, solve = false;
-int last = 8, check = 0, carve = 0;
-float carveFrom = 20f, carveDepth = 2f, carveMost = 8f;
+bool snapshots = false, falls = true, hollows = false, localSteps = false, routing = false, solve = false, pieces = false;
+int last = 8, check = 0, carve = 0, erode = 0;
+float carveFrom = 20f, carveDepth = 2f, carveMost = 8f, carveWidth = 0f, erodeK = 0.02f, erodeBlur = 48f, erodeDetail = 0.3f;
+bool erodeBroad = false;
 string? writeChannels = null;
 float[] solveAir = { 0f };
 var solveSet = new List<Action<Settle>>();
@@ -63,6 +70,15 @@ for (int a = 0; a < args.Length; a++)
         case "--carve-from": carveFrom = float.Parse(args[++a]); break;
         case "--carve-depth": carveDepth = float.Parse(args[++a]); break;
         case "--carve-most": carveMost = float.Parse(args[++a]); break;
+        case "--carve-width": carveWidth = float.Parse(args[++a]); break;
+        case "--pieces": pieces = true; break;
+        case "--erode": erode = int.Parse(args[++a]); break;
+        case "--erode-k": erodeK = float.Parse(args[++a]); break;
+        case "--erode-blur": erodeBlur = float.Parse(args[++a]); break;
+        case "--erode-detail": erodeDetail = float.Parse(args[++a]); break;
+        case "--erode-broad": erodeBroad = true; break;
+        case "--new-tau": solveSet.Add(st => st.NewTau = true); break;
+        case "--coarse-scale": Settle.CoarseScale = double.Parse(args[++a]); break;
         case "--tau-growth": { var v = double.Parse(args[++a]); solveSet.Add(st => st.TauGrowth = v); break; }
         case "--start-fill": { var v = float.Parse(args[++a]); solveSet.Add(st => st.StartFill = v); break; }
         case "--rounds": { var v = int.Parse(args[++a]); solveSet.Add(st => st.SolveRounds = v); break; }
@@ -78,6 +94,8 @@ for (int a = 0; a < args.Length; a++)
         case "--soil-depth": m = m with { SoilDepth = int.Parse(args[++a]) }; break;
         case "--soil": m = m with { SoilPermeability = float.Parse(args[++a]) }; break;
         case "--stone": m = m with { StonePermeability = float.Parse(args[++a]) }; break;
+        case "--low-stone": m = m with { LowStone = float.Parse(args[++a]) }; break;
+        case "--low-window": m = m with { LowWindow = float.Parse(args[++a]) }; break;
         default: Console.Error.WriteLine($"Unknown argument {args[a]}"); return 1;
     }
 }
@@ -98,13 +116,16 @@ x0 = CoarseLand.FloorDiv(x0 - 64, 32) * 32; z0 = CoarseLand.FloorDiv(z0 - 64, 32
 x1 = CoarseLand.FloorDiv(x1 + 96, 32) * 32; z1 = CoarseLand.FloorDiv(z1 + 96, 32) * 32;
 Console.WriteLine($"Bounds x {x0}..{x1}, z {z0}..{z1} ({(x1 - x0) / 1000f:0.0} x {(z1 - z0) / 1000f:0.0} km)");
 
+var lift = erode > 0 ? Erode() : null;
+if (pieces) return SolvePieces();
+
 // Each cell size in turn, the last 8: each settles from the one before (see Settle.StartFrom).
 CoarseLand land = null!;
 Settle settle = null!, rough = null!;
 foreach (int size in cascade.Append(last))
 {
     var sw = Stopwatch.StartNew();
-    land = new CoarseLand(seed, landmass, x0, z0, x1, z1, shell, size);
+    land = new CoarseLand(seed, landmass, x0, z0, x1, z1, shell, size, lift: lift);
     int landColumns = 0;
     for (int c = 0; c < land.Columns; c++) if (land.HasLand(c)) landColumns++;
     Console.WriteLine($"{size}-block cells: sampled {land.Columns:N0} columns ({landColumns:N0} with land) in " +
@@ -175,15 +196,18 @@ for (int round = 1; round <= carve; round++)
     writeChannels = Path.Combine(outDir, $"channels-{round - 1}.png");
     var depth = Channels();
     var sides = (float[])depth.Clone();
+    int reach = carveWidth > 0f ? (int)MathF.Ceiling(carveWidth / land.Size) : 1;
     for (int j = 0; j < land.Nz; j++)
     for (int i = 0; i < land.Nx; i++)
     {
         int c = i + land.Nx * j;
-        for (int dj = -1; dj <= 1; dj++)
-        for (int di = -1; di <= 1; di++)
+        for (int dj = -reach; dj <= reach; dj++)
+        for (int di = -reach; di <= reach; di++)
         {
             int ni = i + di, nj = j + dj;
-            if (ni >= 0 && nj >= 0 && ni < land.Nx && nj < land.Nz) sides[c] = Math.Max(sides[c], 0.5f * depth[ni + land.Nx * nj]);
+            if (ni < 0 || nj < 0 || ni >= land.Nx || nj >= land.Nz) continue;
+            float share = carveWidth > 0f ? 1f - land.Size * MathF.Sqrt(di * di + dj * dj) / carveWidth : 0.5f;
+            if (share > 0f) sides[c] = Math.Max(sides[c], share * depth[ni + land.Nx * nj]);
         }
     }
     double carved = 0; int columnsCarved = 0;
@@ -204,6 +228,235 @@ WriteSection(Path.Combine(outDir, "section.png"));
 if (settle.Runs != null) WriteFlow(Path.Combine(outDir, "flow.png"));
 Console.WriteLine($"Wrote {Path.GetFullPath(outDir)}/map.png and section.png");
 return 0;
+
+// Each piece on its own: pieces are found as land columns joined side by side at the last cell size, then each one
+// goes through the cascade alone, its land sampled over its own bounds with only its columns kept.
+int SolvePieces()
+{
+    var sw = Stopwatch.StartNew();
+    var whole = new CoarseLand(seed, landmass, x0, z0, x1, z1, shell, last);
+    int nx = whole.Nx, nz = whole.Nz;
+    var piece = new int[whole.Columns];
+    Array.Fill(piece, -1);
+    var found = new List<(int Columns, int I0, int J0, int I1, int J1)>();
+    var stack = new Stack<int>();
+    for (int c0 = 0; c0 < whole.Columns; c0++)
+    {
+        if (!whole.HasLand(c0) || piece[c0] >= 0) continue;
+        int id = found.Count, count = 0, i0 = int.MaxValue, j0 = int.MaxValue, i1 = 0, j1 = 0;
+        piece[c0] = id; stack.Push(c0);
+        while (stack.TryPop(out int c))
+        {
+            int i = c % nx, j = c / nx;
+            count++; i0 = Math.Min(i0, i); j0 = Math.Min(j0, j); i1 = Math.Max(i1, i); j1 = Math.Max(j1, j);
+            foreach (int d in stackalloc[] { i + 1 < nx ? c + 1 : -1, i > 0 ? c - 1 : -1, j + 1 < nz ? c + nx : -1, j > 0 ? c - nx : -1 })
+                if (d >= 0 && whole.HasLand(d) && piece[d] < 0) { piece[d] = id; stack.Push(d); }
+        }
+        found.Add((count, i0, j0, i1, j1));
+    }
+    Console.WriteLine($"{found.Count} pieces at {last}-block cells in {sw.Elapsed.TotalSeconds:0.0} s, columns: " +
+                      string.Join(", ", found.Select(f => f.Columns).OrderDescending().Take(40)));
+
+    double slowest = 0, sum = 0;
+    int solved = 0;
+    foreach (int k in Enumerable.Range(0, found.Count).OrderByDescending(k => found[k].Columns))
+    {
+        var f = found[k];
+        if (f.Columns < 16) continue; // specks
+        int px0 = CoarseLand.FloorDiv(x0 + f.I0 * last - 64, 32) * 32, pz0 = CoarseLand.FloorDiv(z0 + f.J0 * last - 64, 32) * 32;
+        int px1 = CoarseLand.FloorDiv(x0 + (f.I1 + 1) * last + 95, 32) * 32, pz1 = CoarseLand.FloorDiv(z0 + (f.J1 + 1) * last + 95, 32) * 32;
+        bool Keep(int x, int z)
+        {
+            int i = CoarseLand.FloorDiv(x - x0, last), j = CoarseLand.FloorDiv(z - z0, last);
+            return i >= 0 && j >= 0 && i < nx && j < nz && piece[i + nx * j] == k;
+        }
+        var time = Stopwatch.StartNew();
+        Settle? before = null;
+        var output = Console.Out;
+        var log = new StringWriter();
+        Console.SetOut(log);
+        foreach (int size in cascade.Append(last))
+        {
+            var pland = new CoarseLand(seed, landmass, px0, pz0, px1, pz1, shell, size, Keep, lift);
+            var s = new Settle(pland, m, rain) { Falls = falls };
+            foreach (var set in solveSet) set(s);
+            if (before != null) s.StartHeadsFrom(before);
+            else if (saturate >= 0) s.Saturate(saturate);
+            s.SolveAir = solveAir[^1];
+            s.SolveSteady(fromHeads: before != null);
+            before = s;
+        }
+        Console.SetOut(output);
+        double t = time.Elapsed.TotalSeconds;
+        slowest = Math.Max(slowest, t); sum += t; solved++;
+        var lines = log.ToString().Split('\n');
+        var rounds = lines.Where(l => l.StartsWith("round")).ToList();
+        Console.WriteLine("  " + lines.LastOrDefault(l => l.StartsWith("Dry cells"))?.Trim());
+        Console.WriteLine($"piece {k}: {f.Columns:N0} columns, {before!.Land.Cells:N0} cells, {t:0.0} s, last size " +
+                          (rounds.Count > 0 ? rounds[^1].Trim() : "no rounds"));
+    }
+    Console.WriteLine($"{solved} pieces in {sum:0.0} s one after another, the slowest {slowest:0.0} s; total {total.Elapsed.TotalSeconds:0.0} s");
+    return 0;
+}
+
+// The land's top reshaped by rivers (see --erode): returns how far each column's top moves, by block position.
+Func<int, int, int> Erode()
+{
+    const int S = 8;
+    var sw = Stopwatch.StartNew();
+    var land8 = new CoarseLand(seed, landmass, x0, z0, x1, z1, shell, S);
+    int nx = land8.Nx, nz = land8.Nz, n = land8.Columns;
+    var has = new bool[n]; var h0 = new double[n];
+    for (int c = 0; c < n; c++)
+    {
+        has[c] = land8.HasLand(c);
+        if (has[c]) h0[c] = S * (land8.Top[c] + land8.Solid[land8.Index(c, land8.Top[c])]);
+    }
+    // The broad shape: a box blur over land only, three times each way (close to a gaussian).
+    int r = Math.Max(1, (int)(erodeBlur / S / 2));
+    var b = (double[])h0.Clone();
+    if (erodeBroad)
+    {
+        var terrain = ContinentTerrain.For(seed);
+        Parallel.For(0, n, c =>
+        {
+            if (!has[c]) return;
+            float x = x0 + c % nx * S + S / 2, z = z0 + c / nx * S + S / 2;
+            b[c] = h0[c] - (terrain.Height(x, z) - terrain.BroadHeight(x, z));
+        });
+    }
+    else for (int pass = 0; pass < 3; pass++) { b = Blur(b, true); b = Blur(b, false); }
+    var h = (double[])b.Clone();
+    var recv = new int[n]; var area = new double[n]; var level = new double[n];
+    var order = new List<int>(n);
+    int hollowsBefore = Route(h0);
+    for (int round = 0; round < erode; round++)
+    {
+        Route(h);
+        // Downstream first: each column moves towards where it drains (implicitly, so any K is stable).
+        foreach (int c in order)
+        {
+            int to = recv[c];
+            if (to < 0 || h[to] >= h[c]) continue; // an edge, or in a hollow
+            double dist = c % nx != to % nx && c / nx != to / nx ? 1.414 : 1.0;
+            double f = erodeK * Math.Sqrt(area[c]) / dist;
+            h[c] = (h[c] + f * h[to]) / (1 + f);
+        }
+    }
+    var final = new double[n];
+    var delta = new int[n];
+    double cut = 0; int moved = 0, most = 0;
+    for (int c = 0; c < n; c++)
+    {
+        if (!has[c]) continue;
+        final[c] = h[c] + erodeDetail * (h0[c] - b[c]);
+        delta[c] = (int)Math.Round(final[c] - h0[c]);
+        if (delta[c] != 0) moved++;
+        cut += Math.Abs(delta[c]); most = Math.Max(most, Math.Abs(delta[c]));
+    }
+    int hollowsAfter = Route(final);
+    Console.WriteLine($"Eroded {erode} rounds in {sw.Elapsed.TotalSeconds:0.0} s: {moved:N0} columns moved, {cut / Math.Max(1, moved):0} blocks on average " +
+                      $"(most {most}); columns in hollows {hollowsBefore:N0} before, {hollowsAfter:N0} after");
+    Directory.CreateDirectory(outDir);
+    Relief(Path.Combine(outDir, "relief-before.png"), h0);
+    Relief(Path.Combine(outDir, "relief-after.png"), final);
+    return (x, z) =>
+    {
+        int i = CoarseLand.FloorDiv(x - x0, S), j = CoarseLand.FloorDiv(z - z0, S);
+        return i >= 0 && j >= 0 && i < nx && j < nz ? delta[i + nx * j] : 0;
+    };
+
+    double[] Blur(double[] v, bool alongX)
+    {
+        var o = new double[n];
+        int lines = alongX ? nz : nx, len = alongX ? nx : nz;
+        Parallel.For(0, lines, line =>
+        {
+            for (int k = 0; k < len; k++)
+            {
+                int c = alongX ? k + nx * line : line + nx * k;
+                if (!has[c]) continue;
+                double sum = 0; int count = 0;
+                for (int q = Math.Max(0, k - r); q <= Math.Min(len - 1, k + r); q++)
+                {
+                    int d = alongX ? q + nx * line : line + nx * q;
+                    if (has[d]) { sum += v[d]; count++; }
+                }
+                o[c] = sum / count;
+            }
+        });
+        return o;
+    }
+
+    // Where each column drains (a priority flood in from the edges, so hollows drain by their spill points), the
+    // columns draining through each, and how many columns sit in hollows.
+    int Route(double[] height)
+    {
+        Array.Fill(recv, -1); Array.Fill(level, double.NaN); order.Clear();
+        var queue = new PriorityQueue<int, double>();
+        for (int c = 0; c < n; c++)
+        {
+            if (!has[c]) continue;
+            int i = c % nx, j = c / nx;
+            bool edge = false;
+            for (int dj = -1; dj <= 1 && !edge; dj++)
+            for (int di = -1; di <= 1 && !edge; di++)
+            {
+                int ni = i + di, nj = j + dj;
+                edge = ni < 0 || nj < 0 || ni >= nx || nj >= nz || !has[ni + nx * nj];
+            }
+            if (edge) { level[c] = height[c]; queue.Enqueue(c, height[c]); }
+        }
+        while (queue.TryDequeue(out int c, out double at))
+        {
+            order.Add(c);
+            int i = c % nx, j = c / nx;
+            for (int dj = -1; dj <= 1; dj++)
+            for (int di = -1; di <= 1; di++)
+            {
+                int ni = i + di, nj = j + dj;
+                if (ni < 0 || nj < 0 || ni >= nx || nj >= nz) continue;
+                int d = ni + nx * nj;
+                if (!has[d] || !double.IsNaN(level[d])) continue;
+                level[d] = Math.Max(at, height[d]);
+                recv[d] = c;
+                queue.Enqueue(d, level[d]);
+            }
+        }
+        Array.Clear(area);
+        for (int c = 0; c < n; c++) if (has[c]) area[c] = 1;
+        for (int k = order.Count - 1; k >= 0; k--) if (recv[order[k]] >= 0) area[recv[order[k]]] += area[order[k]];
+        int hollows = 0;
+        foreach (int c in order) if (level[c] > height[c] + 1) hollows++;
+        return hollows;
+    }
+
+    // Shaded relief: height as brightness, lit from the north-west, with where much drains through it blue.
+    void Relief(string path, double[] height)
+    {
+        Route(height);
+        var rgb = new byte[n * 3];
+        for (int c = 0; c < n; c++)
+        {
+            int o = c * 3, i = c % nx, j = c / nx;
+            if (!has[c]) { rgb[o] = 18; rgb[o + 1] = 22; rgb[o + 2] = 34; continue; }
+            double Hat(int di, int dj)
+            {
+                int ni = Math.Clamp(i + di, 0, nx - 1), nj = Math.Clamp(j + dj, 0, nz - 1), d = ni + nx * nj;
+                return has[d] ? height[d] : height[c];
+            }
+            double light = Math.Clamp(0.6 + ((Hat(-1, -1) - Hat(1, 1)) / (2 * S)) * 0.8, 0.15, 1.0);
+            double t = Math.Clamp((height[c] - 300) / 900, 0, 1);
+            double w = Math.Clamp(Math.Log10(Math.Max(area[c], 1)) / 3.5 - 0.3, 0, 1);
+            bool lake = level[c] > height[c] + 1;
+            double g = (90 + 130 * t) * light;
+            rgb[o] = (byte)(lake ? 50 : g * (1 - w) + 40 * w);
+            rgb[o + 1] = (byte)(lake ? 110 : g * (1 - w) + 120 * w);
+            rgb[o + 2] = (byte)(lake ? 210 : (g * 0.85) * (1 - w) + 255 * w);
+        }
+        Save(path, nx, nz, rgb);
+    }
+}
 
 // Top-down: land shaded by height and greener where its top cell is wetter, open water blue by depth, void dark.
 // Drainage lines over the land's surface: a priority flood in from the columns beside a crack or the void (where water

@@ -4,10 +4,13 @@ namespace ClearSkies.Hydrology;
 
 /// <summary>What the water model's materials are like. Capacity is how much water a cell holds (open air holds 1; soil,
 /// the top SoilDepth + 1 cells of a column's ground, can hold more, and stone very little);
-/// permeability is the share of a head difference (in cells) that crosses a face in one pass.</summary>
+/// permeability is the share of a head difference (in cells) that crosses a face in one pass. With LowStone, stone gets
+/// tighter the lower its column's ground is among the ground within LowWindow blocks: StonePermeability at the highest,
+/// LowStone at the lowest (between them, geometrically), so water sinks deep up high and comes out low down.</summary>
 public sealed record Materials(float SoilCapacity = 2f, float StoneCapacity = 0.05f, float AirPermeability = 0.15f,
                                float FallPermeability = 0.5f, float SoilPermeability = 0.01f,
-                               float StonePermeability = 0.0005f, int SoilDepth = 1);
+                               float StonePermeability = 0.0005f, int SoilDepth = 1, float LowStone = 0f,
+                               float LowWindow = 256f);
 
 /// <summary>
 /// The uniform water model on a <see cref="CoarseLand"/>: every cell holds water up to its capacity, and has a head,
@@ -44,6 +47,54 @@ public sealed partial class Settle
 
     public ReadOnlySpan<float> Water => _water;
     public CoarseLand Land => _land;
+
+    /// <summary>Each column's stone permeability by how high its ground is among its surroundings (see Materials).</summary>
+    private static void LowStone(CoarseLand land, Materials m, float[] stone)
+    {
+        int nx = land.Nx, nz = land.Nz, r = Math.Max(1, (int)(m.LowWindow / land.Size));
+        var top = new float[land.Columns];
+        for (int c = 0; c < land.Columns; c++) top[c] = land.HasLand(c) ? land.Top[c] : float.NaN;
+        // The lowest and highest ground in a square around each column: along rows, then along columns.
+        float[] Window(float[] v, bool lowest)
+        {
+            var rows = new float[v.Length]; var both = new float[v.Length];
+            Parallel.For(0, nz, j =>
+            {
+                for (int i = 0; i < nx; i++)
+                {
+                    float best = float.NaN;
+                    for (int k = Math.Max(0, i - r); k <= Math.Min(nx - 1, i + r); k++)
+                    {
+                        float x = v[k + nx * j];
+                        if (!float.IsNaN(x) && (float.IsNaN(best) || (lowest ? x < best : x > best))) best = x;
+                    }
+                    rows[i + nx * j] = best;
+                }
+            });
+            Parallel.For(0, nx, i =>
+            {
+                for (int j = 0; j < nz; j++)
+                {
+                    float best = float.NaN;
+                    for (int k = Math.Max(0, j - r); k <= Math.Min(nz - 1, j + r); k++)
+                    {
+                        float x = rows[i + nx * k];
+                        if (!float.IsNaN(x) && (float.IsNaN(best) || (lowest ? x < best : x > best))) best = x;
+                    }
+                    both[i + nx * j] = best;
+                }
+            });
+            return both;
+        }
+        var lo = Window(top, true); var hi = Window(top, false);
+        float a = MathF.Log(m.LowStone), b = MathF.Log(m.StonePermeability);
+        for (int c = 0; c < land.Columns; c++)
+        {
+            if (!land.HasLand(c)) continue;
+            float t = hi[c] > lo[c] ? (top[c] - lo[c]) / (hi[c] - lo[c]) : 1f;
+            stone[c] = MathF.Exp(a + (b - a) * t);
+        }
+    }
     public float Capacity(int i) => _capacity[i];
 
     public Settle(CoarseLand land, Materials m, float rain)
@@ -60,6 +111,9 @@ public sealed partial class Settle
         _drain = new float[n]; _fx = new float[n]; _fz = new float[n]; _fy = new float[n];
         _water = new float[n]; _next = new float[n];
         _rainCell = new int[land.Columns];
+        var stone = new float[land.Columns];
+        Array.Fill(stone, m.StonePermeability);
+        if (m.LowStone > 0f) LowStone(land, m, stone);
         Parallel.For(0, land.Columns, c =>
         {
             _rainCell[c] = -1;
@@ -70,7 +124,7 @@ public sealed partial class Settle
                 float s = land.Solid[i];
                 bool soil = land.Top[c] - y < m.SoilDepth + 1;
                 _capacity[i] = (1f - s) + s * (soil ? m.SoilCapacity : m.StoneCapacity);
-                float ground = soil ? m.SoilPermeability : m.StonePermeability;
+                float ground = soil ? m.SoilPermeability : stone[c];
                 // Partly solid cells blend geometrically: a thin floor of ground slows water nearly as much as a full one.
                 _permeability[i] = scale * MathF.Exp((1f - s) * MathF.Log(m.AirPermeability) + s * MathF.Log(ground));
             }

@@ -30,8 +30,10 @@ public sealed class CoarseLand
 
     /// <summary>Samples landmass <paramref name="cell"/> between blocks (x0, z0) and (x1, z1): each column at its
     /// middle block column, on all cores. Keeps solid cells up to <paramref name="shell"/> cells inside the ground
-    /// (int.MaxValue keeps them all).</summary>
-    public CoarseLand(ulong seed, (int X, int Z) cell, int x0, int z0, int x1, int z1, int shell = 2, int size = 8)
+    /// (int.MaxValue keeps them all), and only columns <paramref name="keep"/> takes (by their middle block), if given.
+    /// <paramref name="lift"/> moves each column's ground top up or down by that many blocks (by its middle block).</summary>
+    public CoarseLand(ulong seed, (int X, int Z) cell, int x0, int z0, int x1, int z1, int shell = 2, int size = 8,
+                      Func<int, int, bool>? keep = null, Func<int, int, int>? lift = null)
     {
         Size = size;
         X0 = x0; Z0 = z0; Nx = (x1 - x0) / Size; Nz = (z1 - z0) / Size; Shell = shell;
@@ -49,8 +51,9 @@ public sealed class CoarseLand
             for (int i = cx * PerChunk; i < System.Math.Min(Nx, cx * PerChunk + PerChunk); i++)
             {
                 int x = x0 + i * Size + Size / 2, z = z0 + j * Size + Size / 2;
-                if (HeartGrid.Landmass(seed, x, z) != cell) { spans[i + Nx * j] = Array.Empty<(short, short)>(); continue; }
+                if (HeartGrid.Landmass(seed, x, z) != cell || keep != null && !keep(x, z)) { spans[i + Nx * j] = Array.Empty<(short, short)>(); continue; }
                 gen.ColumnSpans(x, z, list);
+                if (lift != null && list.Count > 0) Lift(list, lift(x, z));
                 spans[i + Nx * j] = list.ToArray();
             }
         });
@@ -112,6 +115,15 @@ public sealed class CoarseLand
         RunY0 = y0.ToArray(); RunY1 = y1.ToArray(); RunCell = at.ToArray();
         Solid = keptSolid.ToArray();
         Cells = Solid.Length;
+    }
+
+    /// <summary>Moves the top of a column's ground (its spans, bottom up) by <paramref name="by"/> blocks.</summary>
+    private static void Lift(List<(short Lo, short Hi)> spans, int by)
+    {
+        if (by > 0) { spans[^1] = (spans[^1].Lo, (short)(spans[^1].Hi + by)); return; }
+        int top = spans[^1].Hi + by;
+        while (spans.Count > 1 && spans[^1].Lo > top) spans.RemoveAt(spans.Count - 1);
+        spans[^1] = (spans[^1].Lo, (short)System.Math.Max(spans[^1].Lo, System.Math.Min(spans[^1].Hi, top)));
     }
 
     /// <summary>Which cells to keep: all but solid ones more than Shell cells (steps across faces) from anything that

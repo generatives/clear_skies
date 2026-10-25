@@ -83,9 +83,14 @@ public sealed class ContinentTerrain
     /// mountain ranges a few kilometres across and several apart, peaking at up to about 1,300; smaller, shorter ranges
     /// in patches across the plains and highlands; lone peaks here and there; small bumps everywhere. How big the
     /// mountains are varies from region to region, so a range swells and dwindles along its length.</summary>
-    public float Height(float x, float z)
+    public float Height(float x, float z) => Height(x, z, false);
+
+    /// <summary>The height's broad shape alone, without its small bumps, crags and dells (see Height).</summary>
+    public float BroadHeight(float x, float z) => Height(x, z, true);
+
+    private float Height(float x, float z, bool broad)
     {
-        float plains = PlainsLevel + 45f * _plains.GetNoise(x, z) + 14f * _detail.GetNoise(x, z);
+        float plains = PlainsLevel + 45f * _plains.GetNoise(x, z) + (broad ? 0f : 14f * _detail.GetNoise(x, z));
         float spine = Spine(x, z);
         float high = 1f - Smoothstep(HighCore, HighEdge, spine);   // the long, gentle rise, with hills
         float core = RangeCore(spine);                             // the range itself
@@ -104,9 +109,9 @@ public sealed class ContinentTerrain
         // Crags: ridges and gullies a few hundred blocks apart, up to a seventh of a mountain's height, so its slopes
         // break into ribs and spurs rather than one smooth swell.
         float c = (_crags.GetNoise(x, z) + 1f) * 0.5f;
-        float crags = CragShare * (c * c - 0.4f) * (minor + knolls + mountains);
+        float crags = broad ? 0f : CragShare * (c * c - 0.4f) * (minor + knolls + mountains);
         // Dells: flat-bottomed dips a hundred or so blocks across, out of the ranges, for lakes to fill.
-        float dells = DellDepth * Smoothstep(DellFrom, DellFull, _dells.GetNoise(x, z)) * (1f - core);
+        float dells = broad ? 0f : DellDepth * Smoothstep(DellFrom, DellFull, _dells.GetNoise(x, z)) * (1f - core);
         return Math.Clamp(plains + hills + minor + knolls + mountains + crags - dells, HeartGrid.WorldBottom + 64f, HeartGrid.WorldTop - 32f);
     }
 

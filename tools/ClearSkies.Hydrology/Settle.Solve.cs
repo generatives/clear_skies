@@ -23,6 +23,8 @@ public sealed partial class Settle
     /// <summary>Ground facing cracks, cliffs and the void passes this share of its permeability (0: as any other).</summary>
     public float WallPermeability { get; set; }
     public double TauGrowth { get; set; } = 2;
+    /// <summary>Grow the step whenever a round helps (by 10%), even if only part of its step was taken.</summary>
+    public bool NewTau { get; set; }
     public int SolveRounds { get; set; } = 300;
     public double SolveShrink { get; set; } = 0.1; // how far each round's linear solve brings its residual down
     public double SolveTolerance { get; set; } = 0.01; // of the rain: how far from balanced the whole land may be
@@ -182,12 +184,16 @@ public sealed partial class Settle
         var ws = new Work(n);
         double wet = land.Size * WetFill, tau = 1;
         double off = Balance(h, f, false) / rainTotal;
+        var times = new double[4];
+        double before = 0;
+        var lap = System.Diagnostics.Stopwatch.StartNew();
         for (int round = 1; round <= SolveRounds; round++)
         {
-            var lap = System.Diagnostics.Stopwatch.StartNew();
+            lap.Restart();
             Console.Write($"round {round,3}: off balance {off:0.0000} of the rain, drained/rained {_drainedShare:0.000}, tau {tau:0.##E0}");
             if (off < SolveTolerance) { Console.WriteLine(" - settled"); break; }
             Balance(h, f, true);
+            times[0] += Lap(lap);
             double held = 1 + 1 / tau;
             // Only cells near their wet edge are held back: elsewhere (soaked through, or under water) the balance is
             // linear in the heads, and Newton's step is right however far it goes. A dry cell's own slope is next to
@@ -196,6 +202,7 @@ public sealed partial class Settle
                 if (h[i] - bottom[i] < 2 * wet) fine.Diag[i] = fine.Diag[i] * held + 1e-4 * _capacity[i] * PerBlock / tau;
             for (int l = 0; l + 1 < levels.Count; l++) Galerkin(levels[l], levels[l + 1]);
             Factor(levels[^1]);
+            times[1] += Lap(lap);
             Array.Clear(step);
             int its = BiCgStab(levels, f, step, ws, SolveShrink);
             if (Environment.GetEnvironmentVariable("HYD_DEBUG") != null)
@@ -203,12 +210,13 @@ public sealed partial class Settle
                 Residual(fine, f, step, fine.R);
                 Console.Write($" [linear left {SumAbs(fine.R) / SumAbs(f):0.###}, |step| max {step.Max(Math.Abs):0.##}]");
             }
-            // No more than a cell's height a round: the slope only says so much about heads further away.
             // No more than a cell's height a round: the slope only says so much about heads further away. If the
             // whole step makes things worse, try less of it.
+            times[2] += Lap(lap);
             double most = land.Size, next = double.MaxValue, lambda = 1;
-            for (int tries = 0; tries < 3; tries++, lambda *= 0.5)
+            for (int tries = 0; tries < 3; tries++)
             {
+                if (tries > 0) lambda *= 0.5;
                 for (int i = 0; i < n; i++) {
                     // Near its wet edge a cell moves little at a time: whether it's wet changes everything about it.
                     double reach = Math.Min(most, Math.Max(wet, Math.Abs(h[i] - bottom[i])));
@@ -217,11 +225,14 @@ public sealed partial class Settle
                 next = Balance(trial, ft, false) / rainTotal;
                 if (next < off) break;
             }
+            times[3] += Lap(lap);
             bool taken = next < 1.5 * off;
-            if (taken) { (h, trial) = (trial, h); tau = Math.Min(1e12, tau * (next < off && lambda == 1 ? TauGrowth : lambda == 1 ? 1 : 0.5)); off = next; }
+            if (taken) { (h, trial) = (trial, h); tau = Math.Min(1e12, tau * (NewTau ? (next < 0.9 * off ? TauGrowth : 1) : next < off && lambda == 1 ? TauGrowth : lambda == 1 ? 1 : 0.5)); off = next; }
             else tau = Math.Max(1e-4, tau / 4);
-            Console.WriteLine($", {its} solver steps{(taken ? lambda < 1 ? $", {lambda} of it" : "" : ", not taken")}, {lap.Elapsed.TotalSeconds:0.00} s");
+            Console.WriteLine($", {its} solver steps{(taken ? lambda < 1 ? $", {lambda} of it" : "" : ", not taken")}, {times.Sum() - before:0.00} s");
+            before = times.Sum();
         }
+        Console.WriteLine($"Time: slopes {times[0]:0.0} s, multigrid setup {times[1]:0.0} s, linear solves {times[2]:0.0} s, step search {times[3]:0.0} s");
         Balance(h, f, false);
         if (Environment.GetEnvironmentVariable("HYD_DEBUG") != null)
         {
@@ -257,6 +268,25 @@ public sealed partial class Settle
             _head[i] = (float)h[i];
             _water[i] = _capacity[i] * (float)Math.Clamp(h[i] * PerBlock - y[i], 0.0, 1.0);
         }
+        // How many cells ended dry, and how many of those only have dry neighbours (what an active set could leave out).
+        int dry = 0, dryAround = 0, full = 0, fullAround = 0;
+        for (int i = 0; i < n; i++)
+        {
+            if (h[i] >= bottom[i] + land.Size)
+            {
+                full++;
+                bool every = true;
+                for (int e = fine.Start[i]; e < fine.Start[i + 1] && every; e++) every = h[fine.Col[e]] >= bottom[fine.Col[e]] + land.Size;
+                if (every) fullAround++;
+            }
+            if (h[i] > bottom[i] + 1e-6) continue;
+            dry++;
+            bool all = true;
+            for (int e = fine.Start[i]; e < fine.Start[i + 1] && all; e++) all = h[fine.Col[e]] <= bottom[fine.Col[e]] + 1e-6;
+            if (all) dryAround++;
+        }
+        Console.WriteLine($"Dry cells: {100.0 * dry / n:0}%, with only dry neighbours {100.0 * dryAround / n:0}%; " +
+                          $"full {100.0 * full / n:0}%, with only full neighbours {100.0 * fullAround / n:0}%");
         Console.WriteLine($"Solved in {watch.Elapsed.TotalSeconds:0.00} s");
 
         // How wet a cell is to pass water (and how fast that changes with its head). Heads are never under a cell's
@@ -450,6 +480,8 @@ public sealed partial class Settle
     }
 
     private const double Omega = 0.6;
+    /// <summary>How much of the coarse level's correction to take (merging cells without smoothing undershoots).</summary>
+    public static double CoarseScale { get; set; } = 1;
 
     /// <summary>One V-cycle on level l: x roughly solves A x = b (x starts at zero).</summary>
     private static void Cycle(List<Level> levels, int l, double[] b, double[] x)
@@ -487,7 +519,7 @@ public sealed partial class Settle
             }
         });
         Cycle(levels, l + 1, C.B, C.X0);
-        Rows(L.N, (lo, hi) => { for (int i = lo; i < hi; i++) x[i] += C.X0[L.Agg[i]]; });
+        Rows(L.N, (lo, hi) => { for (int i = lo; i < hi; i++) x[i] += CoarseScale * C.X0[L.Agg[i]]; });
         Jacobi(L, b, x);
         Jacobi(L, b, x);
     }
