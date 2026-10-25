@@ -154,5 +154,18 @@ public sealed class CoarseLand
         return -1;
     }
 
+    private int[]? _cellY;
+    /// <summary>The height (cells) of kept cell i.</summary>
+    public int RunY0Of(int i)
+    {
+        if (_cellY == null)
+        {
+            var y = new int[Cells];
+            for (int r = 0; r < Runs; r++) for (int k = 0; k <= RunY1[r] - RunY0[r]; k++) y[RunCell[r] + k] = RunY0[r] + k;
+            _cellY = y;
+        }
+        return _cellY[i];
+    }
+
     public static int FloorDiv(int a, int b) => a >= 0 ? a / b : -((-a + b - 1) / b);
 }

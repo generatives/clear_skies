@@ -32,7 +32,7 @@ public sealed partial class Settle
     private float[]? _boost; // per cell, with local steps: how many times further than a pass it moves
     private readonly int[] _rainCell;
     private readonly int _raining;
-    private readonly float _fall, _airish;
+    private readonly float _fall, _airish, _airPermeability;
 
     public float Rain { get; set; }
 
@@ -78,6 +78,7 @@ public sealed partial class Settle
         });
         foreach (int r in _rainCell) if (r >= 0) _raining++;
         _fall = m.FallPermeability / m.AirPermeability;
+        _airPermeability = m.AirPermeability;
         _airish = scale * m.AirPermeability * 0.5f;
     }
 

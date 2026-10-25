@@ -19,14 +19,19 @@ using StbImageWriteSharp;
 // Settle.UseLocalSteps). --shell is how many cells into solid stone the model keeps (all: every cell). --cascade settles
 // on bigger cells first, each size starting from the one before, and 8-block cells from the last (stored water is
 // given in 8-block cells throughout). --routing routes water in open air instantly each pass (see Settle.Routing.cs):
-// only the ground is simulated.
+// only the ground is simulated. --solve solves for the settled state directly (see Settle.Solve.cs), with open air
+// passing --solve-air (default: as --air; several, comma separated, go up in steps); --check N then steps N passes from it to see how far it drifts. --last is
+// the cell size to end on (8).
 
 ulong seed = 1337;
 (int X, int Z)? cell = null;
 int passes = 20000, report = 500;
 float rain = 0.002f;
 string outDir = "hydrology-out";
-bool snapshots = false, falls = true, hollows = false, localSteps = false, routing = false;
+bool snapshots = false, falls = true, hollows = false, localSteps = false, routing = false, solve = false;
+int last = 8, check = 0;
+float[] solveAir = { 0f };
+var solveSet = new List<Action<Settle>>();
 int saturate = -1, shell = 2;
 int[] cascade = Array.Empty<int>();
 var m = new Materials();
@@ -45,6 +50,15 @@ for (int a = 0; a < args.Length; a++)
         case "--fill-hollows": hollows = true; break;
         case "--local-steps": localSteps = true; break;
         case "--routing": routing = true; break;
+        case "--solve": solve = true; break;
+        case "--solve-air": solveAir = args[++a].Split(',').Select(float.Parse).ToArray(); break;
+        case "--shrink": { var v = double.Parse(args[++a]); solveSet.Add(st => st.SolveShrink = v); break; }
+        case "--wet": { var v = float.Parse(args[++a]); solveSet.Add(st => st.WetFill = v); break; }
+        case "--tau-growth": { var v = double.Parse(args[++a]); solveSet.Add(st => st.TauGrowth = v); break; }
+        case "--start-fill": { var v = float.Parse(args[++a]); solveSet.Add(st => st.StartFill = v); break; }
+        case "--rounds": { var v = int.Parse(args[++a]); solveSet.Add(st => st.SolveRounds = v); break; }
+        case "--check": check = int.Parse(args[++a]); break;
+        case "--last": last = int.Parse(args[++a]); break;
         case "--shell": { string v = args[++a]; shell = v == "all" ? int.MaxValue : int.Parse(v); break; }
         case "--cascade": cascade = args[++a].Split(',').Select(int.Parse).ToArray(); break;
         case "--saturate": saturate = int.Parse(args[++a]); break;
@@ -76,7 +90,7 @@ Console.WriteLine($"Bounds x {x0}..{x1}, z {z0}..{z1} ({(x1 - x0) / 1000f:0.0} x
 // Each cell size in turn, the last 8: each settles from the one before (see Settle.StartFrom).
 CoarseLand land = null!;
 Settle settle = null!, rough = null!;
-foreach (int size in cascade.Append(8))
+foreach (int size in cascade.Append(last))
 {
     var sw = Stopwatch.StartNew();
     land = new CoarseLand(seed, landmass, x0, z0, x1, z1, shell, size);
@@ -97,6 +111,24 @@ foreach (int size in cascade.Append(8))
         if (hollows && !routing) Console.WriteLine($"Filled hollows: {settle.FillHollows():N0} columns under water");
     }
     Console.WriteLine($"Set up in {sw.Elapsed.TotalSeconds:0.00} s");
+    if (solve)
+    {
+        foreach (var set in solveSet) set(settle);
+        if (rough != null) settle.StartHeadsFrom(rough);
+        // Open air's permeability raised in steps (if given more than one), each solve starting from the one before:
+        // the further from where it starts, the harder the solve.
+        for (int s = 0; s < solveAir.Length; s++)
+        {
+            if (rough != null && s < solveAir.Length - 1) continue; // bigger cells already went up the steps
+            settle.SolveAir = solveAir[s];
+            Console.WriteLine($"Open air passes {(solveAir[s] > 0 ? solveAir[s] : m.AirPermeability)}");
+            settle.SolveSteady(fromHeads: rough != null || s > 0);
+        }
+        Console.WriteLine($"Total so far {total.Elapsed.TotalSeconds:0.0} s");
+        rough = settle;
+        if (size != last || check == 0) continue;
+        passes = check; // then step from the solve, to see how far it drifts
+    }
 
     sw.Restart();
     var window = Stopwatch.StartNew();
@@ -134,6 +166,7 @@ void WriteMap(string path)
 {
     var rgb = new byte[land.Columns * 3];
     var water = settle.Water;
+    var depths = new int[6]; // open water over land columns: none, under 1/4 block, 1, 4, 16 blocks, deeper
     for (int c = 0; c < land.Columns; c++)
     {
         int o = c * 3;
@@ -144,8 +177,10 @@ void WriteMap(string path)
         {
             int i = land.Index(c, y);
             if (i < 0) continue;
-            open += water[i] * (1f - land.Solid[i]) / settle.Capacity(i);
+            open += settle.Solved ? settle.OpenBlocks(i) / land.Size : water[i] * (1f - land.Solid[i]) / settle.Capacity(i);
         }
+        float blocks = open * land.Size;
+        depths[blocks <= 0.01f ? 0 : blocks < 0.25f ? 1 : blocks < 1 ? 2 : blocks < 4 ? 3 : blocks < 16 ? 4 : 5]++;
         float t = Math.Clamp((land.Top[c] * land.Size - 300f) / 900f, 0f, 1f);
         float wet = Math.Clamp(water[top] / settle.Capacity(top), 0f, 1f);
         if (open > 0.1f)
@@ -159,6 +194,9 @@ void WriteMap(string path)
         }
     }
     Save(path, land.Nx, land.Nz, rgb);
+    float all = depths.Sum() / 100f;
+    Console.WriteLine($"Open water over land columns: none {depths[0] / all:0}%, under 1/4 block {depths[1] / all:0}%, " +
+                      $"to 1 {depths[2] / all:0}%, 1-4 {depths[3] / all:0}%, 4-16 {depths[4] / all:0}%, deeper {depths[5] / all:0}%");
 }
 
 // A slice across x through the row with the most land: ground grey (bluer where wet), water blue, sky dark.
