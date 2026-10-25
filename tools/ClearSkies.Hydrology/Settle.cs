@@ -2,10 +2,11 @@ using System.Numerics;
 
 namespace ClearSkies.Hydrology;
 
-/// <summary>What the water model's materials are like. Capacity is how much water a cell holds (open air holds 1);
+/// <summary>What the water model's materials are like. Capacity is how much water a cell holds (open air holds 1; soil,
+/// the top SoilDepth + 1 cells of a column's ground, can hold more, and stone very little);
 /// permeability is the share of a head difference (in cells) that crosses a face in one pass.</summary>
-public sealed record Materials(float GroundCapacity = 2f, float AirPermeability = 0.15f, float FallPermeability = 0.5f,
-                               float SoilPermeability = 0.01f, float StonePermeability = 0.0005f, int SoilDepth = 1);
+public sealed record Materials(float SoilCapacity = 2f, float StoneCapacity = 0.05f, float AirPermeability = 0.15f,
+                               float FallPermeability = 0.5f, float SoilPermeability = 0.01f, float StonePermeability = 0.0005f, int SoilDepth = 1);
 
 /// <summary>
 /// The uniform water model on a <see cref="CoarseLand"/>: every cell holds water up to its capacity, and has a head,
@@ -26,6 +27,7 @@ public sealed class Settle
     private readonly float[] _capacity, _permeability, _head, _scale, _drain;
     private readonly float[] _fx, _fz, _fy; // flow out across +x, +z and up (negative: in)
     private float[] _water, _next;
+    private float[]? _boost; // per cell, with local steps: how many times further than a pass it moves
     private readonly int[] _rainCell;
     private readonly int _raining;
     private readonly float _fall, _airish;
@@ -57,8 +59,9 @@ public sealed class Settle
             {
                 int i = land.Index(c, y);
                 float s = land.Solid[i];
-                _capacity[i] = (1f - s) + s * m.GroundCapacity;
-                float ground = land.Top[c] - y < m.SoilDepth + 1 ? m.SoilPermeability : m.StonePermeability;
+                bool soil = land.Top[c] - y < m.SoilDepth + 1;
+                _capacity[i] = (1f - s) + s * (soil ? m.SoilCapacity : m.StoneCapacity);
+                float ground = soil ? m.SoilPermeability : m.StonePermeability;
                 // Partly solid cells blend geometrically: a thin floor of ground slows water nearly as much as a full one.
                 _permeability[i] = MathF.Exp((1f - s) * MathF.Log(m.AirPermeability) + s * MathF.Log(ground));
             }
@@ -68,6 +71,15 @@ public sealed class Settle
         foreach (int r in _rainCell) if (r >= 0) _raining++;
         _fall = m.FallPermeability / m.AirPermeability;
         _airish = m.AirPermeability * 0.5f;
+    }
+
+    /// <summary>Lets each cell step as far as it can stably go, rather than all as far as the fastest (open air): slow
+    /// ground then catches up in a few passes instead of thousands. Water isn't kept on the way (a cell takes its own
+    /// step), but where every cell's flows balance is unchanged, and that settled state is all that's wanted.</summary>
+    public void UseLocalSteps(float stable = 0.5f)
+    {
+        _boost = new float[_land.Cells];
+        Parallel.For(0, _land.Cells, i => _boost[i] = MathF.Max(1f, stable * _capacity[i] / (6f * _permeability[i])));
     }
 
     /// <summary>Starts the ground full of water up to <paramref name="depth"/> cells under each column's top, rather than
@@ -203,6 +215,7 @@ public sealed class Settle
                 if (ci > 0 && Overlap(c, c - 1, out int m1, out int t1, out int l1)) Backflow(_scale.AsSpan(m1, l1), _fx.AsSpan(t1, l1));
                 if (j > 0 && Overlap(c, c - nx, out int m2, out int t2, out int l2)) Backflow(_scale.AsSpan(m2, l2), _fz.AsSpan(t2, l2));
                 Backflow(_scale.AsSpan(s + 1, n - 1), _fy.AsSpan(s, n - 1));
+                if (_boost != null) Boost(sum, _boost.AsSpan(s, n));
                 Share(sum, _water.AsSpan(s, n));
             }
         });
@@ -225,6 +238,7 @@ public sealed class Settle
                 Move(_next.AsSpan(s, n - 1), _fy.AsSpan(s, n - 1), _scale.AsSpan(s, n - 1), _scale.AsSpan(s + 1, n - 1), -1f);
                 Move(_next.AsSpan(s + 1, n - 1), _fy.AsSpan(s, n - 1), _scale.AsSpan(s, n - 1), _scale.AsSpan(s + 1, n - 1), 1f);
                 if (_rainCell[c] >= 0) _next[_rainCell[c]] += Rain;
+                if (_boost != null) Step(next, _water.AsSpan(s, n), _boost.AsSpan(s, n));
                 acc.Item2 += Clamp(next);
             }
             return acc;
@@ -366,6 +380,25 @@ public sealed class Settle
             (new Vector<float>(next[v..]) + sv * moved).CopyTo(next[v..]);
         }
         for (; v < len; v++) next[v] += sign * f[v] * (f[v] > 0f ? from[v] : to[v]);
+    }
+
+    private static void Boost(Span<float> sum, ReadOnlySpan<float> boost)
+    {
+        int v = 0, w = Vector<float>.Count, len = sum.Length;
+        for (; v <= len - w; v += w) (new Vector<float>(sum[v..]) * new Vector<float>(boost[v..])).CopyTo(sum[v..]);
+        for (; v < len; v++) sum[v] *= boost[v];
+    }
+
+    /// <summary>Takes each cell's own step: its change this pass, times its boost.</summary>
+    private static void Step(Span<float> next, ReadOnlySpan<float> water, ReadOnlySpan<float> boost)
+    {
+        int v = 0, w = Vector<float>.Count, len = next.Length;
+        for (; v <= len - w; v += w)
+        {
+            var old = new Vector<float>(water[v..]);
+            (old + (new Vector<float>(next[v..]) - old) * new Vector<float>(boost[v..])).CopyTo(next[v..]);
+        }
+        for (; v < len; v++) next[v] = water[v] + (next[v] - water[v]) * boost[v];
     }
 
     private static double Clamp(Span<float> next)
