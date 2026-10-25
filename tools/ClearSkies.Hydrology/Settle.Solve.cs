@@ -25,6 +25,9 @@ public sealed partial class Settle
     public double TauGrowth { get; set; } = 2;
     /// <summary>Grow the step whenever a round helps (by 10%), even if only part of its step was taken.</summary>
     public bool NewTau { get; set; }
+    /// <summary>Solve each round's linear system only as well as the last round improved the balance (Eisenstat-Walker),
+    /// between 0.5 and SolveShrink.</summary>
+    public bool AdaptiveShrink { get; set; }
     public int SolveRounds { get; set; } = 300;
     public double SolveShrink { get; set; } = 0.1; // how far each round's linear solve brings its residual down
     public double SolveTolerance { get; set; } = 0.01; // of the rain: how far from balanced the whole land may be
@@ -79,6 +82,7 @@ public sealed partial class Settle
         public int[]? Agg, MemberStart, Members, Map;   // to the next level: each cell's, each coarse cell's, each entry's
         public double[] R = null!, B = null!, X0 = null!, T = null!;
         public double[]? Chol;
+        public int[][]? Colors; // for Gauss-Seidel: the cells of each color
     }
 
     /// <summary>Solves for the settled heads and sets the water from them. Starts from the heads already there
@@ -185,7 +189,7 @@ public sealed partial class Settle
         double wet = land.Size * WetFill, tau = 1;
         double off = Balance(h, f, false) / rainTotal;
         var times = new double[4];
-        double before = 0;
+        double before = 0, lastOff = off;
         var lap = System.Diagnostics.Stopwatch.StartNew();
         for (int round = 1; round <= SolveRounds; round++)
         {
@@ -204,7 +208,10 @@ public sealed partial class Settle
             Factor(levels[^1]);
             times[1] += Lap(lap);
             Array.Clear(step);
-            int its = BiCgStab(levels, f, step, ws, SolveShrink);
+            // Eisenstat-Walker: early on, while the balance is far off, a rough linear solve does as well.
+            double shrink = AdaptiveShrink && round > 1 ? Math.Clamp(0.9 * Math.Pow(off / lastOff, 2), SolveShrink, 0.5) : SolveShrink;
+            lastOff = off;
+            int its = BiCgStab(levels, f, step, ws, shrink);
             if (Environment.GetEnvironmentVariable("HYD_DEBUG") != null)
             {
                 Residual(fine, f, step, fine.R);
@@ -524,10 +531,36 @@ public sealed partial class Settle
         Jacobi(L, b, x);
     }
 
+    /// <summary>Smooth with red-black Gauss-Seidel instead of damped Jacobi (cells colored by x + y + z, so face
+    /// neighbours differ; at coarse levels, cells of different classes in one place can share a color).</summary>
+    public static bool GaussSeidel { get; set; }
+
     private static void Jacobi(Level L, double[] b, double[] x)
     {
+        if (GaussSeidel) { Sweep(L, b, x, 0); Sweep(L, b, x, 1); return; }
         Residual(L, b, x, L.T);
         Rows(L.N, (lo, hi) => { for (int i = lo; i < hi; i++) x[i] += Omega * L.T[i] / L.Diag[i]; });
+    }
+
+    private static void Sweep(Level L, double[] b, double[] x, int color)
+    {
+        if (L.Colors == null)
+        {
+            var red = new List<int>(); var black = new List<int>();
+            for (int i = 0; i < L.N; i++) ((L.X[i] + L.Y[i] + L.Z[i] & 1) == 0 ? red : black).Add(i);
+            L.Colors = new[] { red.ToArray(), black.ToArray() };
+        }
+        var cells = L.Colors[color];
+        Rows(cells.Length, (lo, hi) =>
+        {
+            for (int k = lo; k < hi; k++)
+            {
+                int i = cells[k];
+                double s = b[i];
+                for (int e = L.Start[i]; e < L.Start[i + 1]; e++) s -= L.Val[e] * x[L.Col[e]];
+                x[i] = s / L.Diag[i];
+            }
+        });
     }
 
     private static void Residual(Level L, double[] b, double[] x, double[] r)

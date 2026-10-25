@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using ClearSkies.Engine.Generation;
 using ClearSkies.Game.Generation;
 using ClearSkies.Hydrology;
 using StbImageWriteSharp;
@@ -29,7 +30,9 @@ using StbImageWriteSharp;
 // --erode N reshapes the land's top first: its broad shape (the surface blurred over --erode-blur blocks), carved by
 // rivers N rounds (stream power: each column cut towards the one it drains to, more the more drains through it,
 // --erode-k), then --erode-detail of the blurred-away detail added back. --erode-broad takes the broad shape from the
-// generator instead (ContinentTerrain.BroadHeight: its noise without bumps, crags and dells).
+// generator instead (ContinentTerrain.BroadHeight: its noise without bumps, crags and dells). --rivers then carves
+// the trunk streams (--river-from: columns draining through them) as channels, winding on flat ground (--meander
+// blocks of noise in the routing there), with lakes dammed along them (--lake-chance) and no detail added back in them.
 
 ulong seed = 1337;
 (int X, int Z)? cell = null;
@@ -39,7 +42,8 @@ string outDir = "hydrology-out";
 bool snapshots = false, falls = true, hollows = false, localSteps = false, routing = false, solve = false, pieces = false;
 int last = 8, check = 0, carve = 0, erode = 0;
 float carveFrom = 20f, carveDepth = 2f, carveMost = 8f, carveWidth = 0f, erodeK = 0.02f, erodeBlur = 48f, erodeDetail = 0.3f;
-bool erodeBroad = false;
+bool erodeBroad = false, rivers = false;
+float riverFrom = 200f, meander = 40f, lakeChance = 0.15f, marshDepth = 2f;
 string? writeChannels = null;
 float[] solveAir = { 0f };
 var solveSet = new List<Action<Settle>>();
@@ -77,8 +81,15 @@ for (int a = 0; a < args.Length; a++)
         case "--erode-blur": erodeBlur = float.Parse(args[++a]); break;
         case "--erode-detail": erodeDetail = float.Parse(args[++a]); break;
         case "--erode-broad": erodeBroad = true; break;
+        case "--rivers": rivers = true; break;
+        case "--marsh-depth": marshDepth = float.Parse(args[++a]); break;
+        case "--river-from": riverFrom = float.Parse(args[++a]); break;
+        case "--meander": meander = float.Parse(args[++a]); break;
+        case "--lake-chance": lakeChance = float.Parse(args[++a]); break;
         case "--new-tau": solveSet.Add(st => st.NewTau = true); break;
+        case "--adaptive": solveSet.Add(st => st.AdaptiveShrink = true); break;
         case "--coarse-scale": Settle.CoarseScale = double.Parse(args[++a]); break;
+        case "--gauss-seidel": Settle.GaussSeidel = true; break;
         case "--tau-growth": { var v = double.Parse(args[++a]); solveSet.Add(st => st.TauGrowth = v); break; }
         case "--start-fill": { var v = float.Parse(args[++a]); solveSet.Add(st => st.StartFill = v); break; }
         case "--rounds": { var v = int.Parse(args[++a]); solveSet.Add(st => st.SolveRounds = v); break; }
@@ -343,20 +354,24 @@ Func<int, int, int> Erode()
             h[c] = (h[c] + f * h[to]) / (1 + f);
         }
     }
+    var mask = new double[n];
+    int riverColumns = 0, lakes = 0;
+    if (rivers) (riverColumns, lakes) = Rivers(h, mask);
     var final = new double[n];
     var delta = new int[n];
     double cut = 0; int moved = 0, most = 0;
     for (int c = 0; c < n; c++)
     {
         if (!has[c]) continue;
-        final[c] = h[c] + erodeDetail * (h0[c] - b[c]);
+        final[c] = h[c] + erodeDetail * (1 - mask[c]) * (h0[c] - b[c]);
         delta[c] = (int)Math.Round(final[c] - h0[c]);
         if (delta[c] != 0) moved++;
         cut += Math.Abs(delta[c]); most = Math.Max(most, Math.Abs(delta[c]));
     }
     int hollowsAfter = Route(final);
     Console.WriteLine($"Eroded {erode} rounds in {sw.Elapsed.TotalSeconds:0.0} s: {moved:N0} columns moved, {cut / Math.Max(1, moved):0} blocks on average " +
-                      $"(most {most}); columns in hollows {hollowsBefore:N0} before, {hollowsAfter:N0} after");
+                      $"(most {most}); columns in hollows {hollowsBefore:N0} before, {hollowsAfter:N0} after" +
+                      (rivers ? $"; {riverColumns:N0} river columns, {lakes} lakes dammed" : ""));
     Directory.CreateDirectory(outDir);
     Relief(Path.Combine(outDir, "relief-before.png"), h0);
     Relief(Path.Combine(outDir, "relief-after.png"), final);
@@ -390,6 +405,96 @@ Func<int, int, int> Erode()
 
     // Where each column drains (a priority flood in from the edges, so hollows drain by their spill points), the
     // columns draining through each, and how many columns sit in hollows.
+    // Trunk rivers carved into the land: routed with noise on flat ground (so they wind), their beds never rising
+    // downstream, channels wider and deeper the more drains through them with banks sloping up into the land, and now
+    // and then a lake dammed where one runs down a valley. Marks where it carved (1 in channels, fading over the banks).
+    (int, int) Rivers(double[] height, double[] carved)
+    {
+        var noise = new FastNoiseLite(unchecked((int)seed + 77));
+        noise.SetNoiseType(FastNoiseLite.NoiseType.OpenSimplex2);
+        noise.SetFractalType(FastNoiseLite.FractalType.FBm);
+        noise.SetFractalOctaves(2);
+        noise.SetFrequency(1f / 300f);
+        var slope = new double[n]; var prio = new double[n];
+        for (int c = 0; c < n; c++)
+        {
+            if (!has[c]) continue;
+            int i = c % nx, j = c / nx;
+            double drop = 0;
+            for (int dj = -1; dj <= 1; dj++)
+            for (int di = -1; di <= 1; di++)
+            {
+                int ni = i + di, nj = j + dj;
+                if ((di | dj) == 0 || ni < 0 || nj < 0 || ni >= nx || nj >= nz || !has[ni + nx * nj]) continue;
+                drop = Math.Max(drop, (height[c] - height[ni + nx * nj]) / (S * Math.Sqrt(di * di + dj * dj)));
+            }
+            slope[c] = drop;
+            double flat = Math.Clamp(1 - drop / 0.05, 0, 1);
+            prio[c] = height[c] + meander * Math.Abs(noise.GetNoise(x0 + i * S, z0 + j * S)) * flat;
+        }
+        Route(prio);
+        var bed = new double[n];
+        Array.Fill(bed, double.NaN);
+        int columns = 0;
+        foreach (int c in order)
+        {
+            if (area[c] < riverFrom || slope[c] < 0.01 && area[c] < 5 * riverFrom) continue; // only big rivers on flats
+            double target = height[c] - Math.Min(10, 3 * Math.Sqrt(area[c] / riverFrom));
+            int to = recv[c];
+            bed[c] = to >= 0 && !double.IsNaN(bed[to]) ? Math.Max(bed[to], target) : target;
+            columns++;
+        }
+        var cut = (double[])height.Clone();
+        // Channels and banks.
+        const double BankReach = 24, BankGrade = 0.15;
+        foreach (int c in order)
+        {
+            if (double.IsNaN(bed[c])) continue;
+            double width = Math.Clamp(0.6 * Math.Sqrt(area[c] / riverFrom), 0.5, 4); // cells either side
+            int reach = (int)Math.Ceiling(width + BankReach / S), ci = c % nx, cj = c / nx;
+            for (int dj = -reach; dj <= reach; dj++)
+            for (int di = -reach; di <= reach; di++)
+            {
+                int ni = ci + di, nj = cj + dj;
+                if (ni < 0 || nj < 0 || ni >= nx || nj >= nz || !has[ni + nx * nj]) continue;
+                int k = ni + nx * nj;
+                double past = Math.Max(0, Math.Sqrt(di * di + dj * dj) - width) * S;
+                if (past > BankReach) continue;
+                cut[k] = Math.Min(cut[k], bed[c] + past * BankGrade);
+                carved[k] = Math.Max(carved[k], 1 - past / BankReach);
+            }
+        }
+        // Lakes: now and then, where a bigger river runs down a valley, a sill across it a little way downstream
+        // (a natural dam: a rockfall, a moraine) raised LakeDepth over the bed, so the river backs up behind it and
+        // fills the valley to that level, its shore wherever the land meets it.
+        int dug = 0;
+        var lakeAt = new List<int>();
+        const double LakeDepth = 8, LakeSpacing = 160;
+        foreach (int c in order)
+        {
+            if (double.IsNaN(bed[c]) || area[c] < 4 * riverFrom || slope[c] < 0.01 || slope[c] > 0.1) continue;
+            uint hash = (uint)(c * 2654435761u ^ (uint)seed);
+            if ((hash >> 8) / (double)(1 << 24) >= lakeChance) continue;
+            int sill = recv[c] >= 0 ? recv[recv[c]] : -1;
+            if (sill < 0 || double.IsNaN(bed[sill])) continue;
+            int si = sill % nx, sj = sill / nx;
+            if (lakeAt.Any(l => Math.Abs(l % nx - si) + Math.Abs(l / nx - sj) < LakeSpacing / S)) continue;
+            lakeAt.Add(sill); dug++;
+            double level = bed[c] + LakeDepth;
+            int reach = (int)Math.Ceiling(Math.Clamp(0.6 * Math.Sqrt(area[sill] / riverFrom), 0.5, 4) + 3);
+            for (int dj = -reach; dj <= reach; dj++)
+            for (int di = -reach; di <= reach; di++)
+            {
+                int ni = si + di, nj = sj + dj;
+                if (ni < 0 || nj < 0 || ni >= nx || nj >= nz || !has[ni + nx * nj] || di * di + dj * dj > reach * reach) continue;
+                int k = ni + nx * nj;
+                if (cut[k] < level) { cut[k] = level; carved[k] = 1; }
+            }
+        }
+        Array.Copy(cut, height, n);
+        return (columns, dug);
+    }
+
     int Route(double[] height)
     {
         Array.Fill(recv, -1); Array.Fill(level, double.NaN); order.Clear();
@@ -563,6 +668,7 @@ void WriteMap(string path)
     var rgb = new byte[land.Columns * 3];
     var water = settle.Water;
     var depths = new int[6]; // open water over land columns: none, under 1/4 block, 1, 4, 16 blocks, deeper
+    int marsh = 0;
     for (int c = 0; c < land.Columns; c++)
     {
         int o = c * 3;
@@ -577,6 +683,16 @@ void WriteMap(string path)
         }
         float blocks = open * land.Size;
         depths[blocks <= 0.01f ? 0 : blocks < 0.25f ? 1 : blocks < 1 ? 2 : blocks < 4 ? 3 : blocks < 16 ? 4 : 5]++;
+        // Marsh: shallow water standing on flat ground (its top within a cell of its neighbours'), shown as wet ground.
+        int ci = c % land.Nx, cj = c / land.Nx, rise = 0;
+        foreach (int d in new[] { ci + 1 < land.Nx ? c + 1 : -1, ci > 0 ? c - 1 : -1, cj + 1 < land.Nz ? c + land.Nx : -1, cj > 0 ? c - land.Nx : -1 })
+            if (d >= 0 && land.HasLand(d)) rise = Math.Max(rise, Math.Abs(land.Top[d] - land.Top[c]));
+        if (blocks > 0.01f && blocks < marshDepth && rise == 0)
+        {
+            marsh++;
+            rgb[o] = 95; rgb[o + 1] = 110; rgb[o + 2] = 60;
+            continue;
+        }
         float t = Math.Clamp((land.Top[c] * land.Size - 300f) / 900f, 0f, 1f);
         float wet = Math.Clamp(water[top] / settle.Capacity(top), 0f, 1f);
         if (open > 0.1f)
@@ -592,7 +708,8 @@ void WriteMap(string path)
     Save(path, land.Nx, land.Nz, rgb);
     float all = depths.Sum() / 100f;
     Console.WriteLine($"Open water over land columns: none {depths[0] / all:0}%, under 1/4 block {depths[1] / all:0}%, " +
-                      $"to 1 {depths[2] / all:0}%, 1-4 {depths[3] / all:0}%, 4-16 {depths[4] / all:0}%, deeper {depths[5] / all:0}%");
+                      $"to 1 {depths[2] / all:0}%, 1-4 {depths[3] / all:0}%, 4-16 {depths[4] / all:0}%, deeper {depths[5] / all:0}%; " +
+                      $"marsh (under {marshDepth} blocks on flat ground) {marsh / all:0}%");
 }
 
 // A slice across x through the row with the most land: ground grey (bluer where wet), water blue, sky dark.
