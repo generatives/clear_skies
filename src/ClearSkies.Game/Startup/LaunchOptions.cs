@@ -63,6 +63,12 @@ public sealed record LaunchOptions
     /// </summary>
     public bool Headless { get; init; }
 
+    /// <summary>--piece-size N: island pieces N times as wide as usual (500 blocks), as tall as ever; --crack-width N:
+    /// the cracks between them N times as wide. For trying out world shapes: they change the whole world, so use a new
+    /// --world, and a client needs the same ones as its host.</summary>
+    public float PieceSize { get; init; } = 1f;
+    public float CrackWidth { get; init; } = 1f;
+
     /// <summary>--flight-test: fly once the world has loaded, then quit.</summary>
     public bool FlightTest { get; init; }
 
@@ -86,6 +92,8 @@ public sealed record LaunchOptions
         if (int.TryParse(Value("--lod-levels"), out int levels)) o = o with { LodLevels = System.Math.Clamp(levels, 0, 2) };
         if (float.TryParse(Value("--lod"), NumberStyles.Float, CultureInfo.InvariantCulture, out float lod)) o = o with { LodDistance = lod };
         if (args.Contains("--no-lod")) o = o with { LodLevels = 0 };
+        if (float.TryParse(Value("--piece-size"), NumberStyles.Float, CultureInfo.InvariantCulture, out float pieces)) o = o with { PieceSize = pieces };
+        if (float.TryParse(Value("--crack-width"), NumberStyles.Float, CultureInfo.InvariantCulture, out float cracks)) o = o with { CrackWidth = cracks };
         if (Value("--view-distance") is { } view) o = o with { ViewDistance = float.Parse(view, CultureInfo.InvariantCulture) };
         return o with { FlightTest = args.Contains("--flight-test") };
     }

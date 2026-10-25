@@ -83,9 +83,15 @@ public sealed class ContinentTerrain
     /// mountain ranges a few kilometres across and several apart, peaking at up to about 1,300; smaller, shorter ranges
     /// in patches across the plains and highlands; lone peaks here and there; small bumps everywhere. How big the
     /// mountains are varies from region to region, so a range swells and dwindles along its length.</summary>
-    public float Height(float x, float z)
+    public float Height(float x, float z) => Height(x, z, out _);
+
+    /// <summary>The height (see Height) and, in <paramref name="broad"/>, its broad shape alone: without its small
+    /// bumps, crags and dells, the detail <see cref="Erosion"/> takes off before it wears the land and puts partly
+    /// back after.</summary>
+    public float Height(float x, float z, out float broad)
     {
-        float plains = PlainsLevel + 45f * _plains.GetNoise(x, z) + 14f * _detail.GetNoise(x, z);
+        float bumps = 14f * _detail.GetNoise(x, z);
+        float plains = PlainsLevel + 45f * _plains.GetNoise(x, z);
         float spine = Spine(x, z);
         float high = 1f - Smoothstep(HighCore, HighEdge, spine);   // the long, gentle rise, with hills
         float core = RangeCore(spine);                             // the range itself
@@ -107,7 +113,9 @@ public sealed class ContinentTerrain
         float crags = CragShare * (c * c - 0.4f) * (minor + knolls + mountains);
         // Dells: flat-bottomed dips a hundred or so blocks across, out of the ranges, for lakes to fill.
         float dells = DellDepth * Smoothstep(DellFrom, DellFull, _dells.GetNoise(x, z)) * (1f - core);
-        return Math.Clamp(plains + hills + minor + knolls + mountains + crags - dells, HeartGrid.WorldBottom + 64f, HeartGrid.WorldTop - 32f);
+        float shape = plains + hills + minor + knolls + mountains;
+        broad = Math.Clamp(shape, HeartGrid.WorldBottom + 64f, HeartGrid.WorldTop - 32f);
+        return Math.Clamp(shape + bumps + crags - dells, HeartGrid.WorldBottom + 64f, HeartGrid.WorldTop - 32f);
     }
 
     /// <summary>0-1: how far into a mountain range (x, z) is: 1 on its spine, 0 past its edge.</summary>

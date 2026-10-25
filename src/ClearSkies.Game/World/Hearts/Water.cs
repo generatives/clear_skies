@@ -30,15 +30,15 @@ public sealed class Water
     public const int Step = 4;
 
     /// <summary>How far past its heart's cell (blocks) a piece's ground can reach: the window worked out round it.</summary>
-    private const int Reach = 400;
-    private const int Window = (500 + 2 * Reach) / Step;
+    private static int Reach => (int)(0.8f * HeartGrid.Layers[0].CellSize);
+    private static int Window => ((int)HeartGrid.Layers[0].CellSize + 2 * Reach) / Step;
 
     /// <summary>How near a piece's side face (scaled space, see HeartWorldGenerator.Solid) counts as its crack, for
     /// rivers: more than the wear and the wobble of its outline together.</summary>
-    private const float FaceMargin = 44f;
+    private static float FaceMargin => 44f + 24f * (HeartWorldGenerator.CrackWidth - 1f);
 
     /// <summary>How far from its piece's faces a lake keeps, further than a river: the rounding of its rim as well.</summary>
-    private const float LakeMargin = 64f;
+    private static float LakeMargin => FaceMargin + 20f;
 
     private const float MinDepth = 5f, FedDepth = 2f;     // shallower hollows hold no lake (FedDepth: one a river feeds)
     private const int MinCells = 16, MaxCells = 600;      // lakes of about 250 to 10,000 square blocks
@@ -75,7 +75,7 @@ public sealed class Water
     private const float MouthReach = 16f, MouthWiden = 1f;
 
     /// <summary>How many samples round a column to look for a river through it or beside it.</summary>
-    private const int Search = 6;
+    private const int Search = 10; // (as far as the widest channel Erosion wears reaches)
 
     /// <summary>How far under its piece's top (roughly) the land may be and still be its ground, not a hole.</summary>
     private const float HoleDepth = 40f;
@@ -254,7 +254,15 @@ public sealed class Water
                 return (a + (b - a) * tx) * (1f - tz) + (c + (d - c) * tx) * tz;
             }
         }
-        return HeartWorldGenerator.PieceTop(_terrain.Height(px, pz), h.Surface, h.Drop);
+        return RoughTop(px, pz, h);
+    }
+
+    /// <summary>Roughly the top of heart <paramref name="h"/>'s piece at (x, z): the generator's, before its edges are
+    /// rounded and water cuts it.</summary>
+    private float RoughTop(float x, float z, Heart h)
+    {
+        float height = _terrain.Height(x, z, out float broad);
+        return HeartWorldGenerator.PieceTop(height, h.Surface, h.Drop) + Erosion.For(_seed).Of(x, z).Shift(x, z, height - broad);
     }
 
     private static float Off(int ci, int ck, float px, float pz, Piece piece)
@@ -274,7 +282,7 @@ public sealed class Water
     /// <summary>Works out the water of the piece of the top row's heart in cell (hi, hk).</summary>
     private Piece Build(int hi, int hk)
     {
-        const int N = Window * Window;
+        int N = Window * Window;
         float size = HeartGrid.Layers[0].CellSize;
         var piece = new Piece { X0 = FloorDiv(hi * (int)size - Reach, Step), Z0 = FloorDiv(hk * (int)size - Reach, Step) };
         var self = TopHeart(hi, hk);
@@ -314,7 +322,7 @@ public sealed class Water
             int c = i + Window * k;
             if (ground[c] == Drain) continue;
             int x = (piece.X0 + i) * Step + Step / 2, z = (piece.Z0 + k) * Step + Step / 2;
-            float roughly = HeartWorldGenerator.PieceTop(_terrain.Height(x, z), self.Surface, self.Drop);
+            float roughly = RoughTop(x, z, self);
             ground[c] = generator.Top(x, z) is int top && top > roughly - HoleDepth ? top + 0.5f : Drain;
         }
         piece.Ground = ground;
@@ -459,6 +467,7 @@ public sealed class Water
         piece.Edge = new float[N];
         for (int c = 0; c < N; c++) piece.Edge[c] = EdgeFade(face[c]);
         Array.Fill(piece.River, int.MaxValue);
+        var erosion = Erosion.For(_seed);
         for (int o = count - 1; o >= 0; o--)
         {
             int c = order[o];
@@ -470,7 +479,11 @@ public sealed class Water
                 lakeBeside = Math.Max(lakeBeside, piece.Lake[i + Window * k]);
             piece.River[c] = Math.Max(Math.Min(piece.River[c], (int)MathF.Floor(ground[c]) - 1), lakeBeside);
             float vary = 1f + RiverVary * _widths.GetNoise((piece.X0 + ci) * Step, (piece.Z0 + ck) * Step);
-            piece.Width[c] = (byte)Math.Clamp(MathF.Round((RiverNarrowest + RiverWiden * MathF.Sqrt(gathered[c] - RiverFrom)) * vary), 2f, RiverWidest);
+            float width = Math.Clamp(MathF.Round((RiverNarrowest + RiverWiden * MathF.Sqrt(gathered[c] - RiverFrom)) * vary), 2f, RiverWidest);
+            // (In a channel the land was worn for, as wide as it, less a block either side.)
+            float sx = (piece.X0 + ci + 0.5f) * Step, sz = (piece.Z0 + ck + 0.5f) * Step;
+            erosion.Of(sx, sz).Channel(sx, sz, out float channel);
+            piece.Width[c] = (byte)MathF.Max(width, channel - 2f);
             int d = down[c];
             if (d >= 0 && piece.River[d] != int.MinValue) piece.River[d] = Math.Min(piece.River[d], piece.River[c]);
         }
@@ -486,7 +499,7 @@ public sealed class Water
     /// in the order of their level plus their lean, which bends the ways (and so the fill is only roughly right).</summary>
     private static int Flood(float[] ground, float[] filled, int[] down, int[] order, Func<int, float> source, float[]? lean = null)
     {
-        const int N = Window * Window;
+        int N = Window * Window;
         var done = new bool[N];
         var queue = new PriorityQueue<int, float>();
         var isSource = new bool[N];
@@ -558,7 +571,8 @@ public sealed class Water
 
     /// <summary>The top row's heart nearest (x, z) at the surface (counting depth VerticalScale times over), and its
     /// cell.</summary>
-    private Heart? Nearest(float x, float z, out int hi, out int hk)
+    /// <summary>The top row's heart whose piece holds (x, z) at the surface, and its cell (hi, hk); null if none.</summary>
+    internal Heart? Nearest(float x, float z, out int hi, out int hk)
     {
         float size = HeartGrid.Layers[0].CellSize;
         int i0 = (int)MathF.Floor(x / size), k0 = (int)MathF.Floor(z / size);

@@ -79,10 +79,10 @@ public class TreeTests
         }
         static bool Wet(BlockId b) => b is BlockId.Water or BlockId.Ice or BlockId.Lava or BlockId.GlowingLava;
 
-        // A lake with a river out of it, in a wet part of this seed's spawn continent.
+        // A lake dammed in a valley worn by its rivers (see Erosion), in a wet part of this seed's spawn continent.
         int lakes = 0, rivers = 0;
-        for (int z = -5856; z < -5728; z++)
-        for (int x = 9456; x < 9584; x++)
+        for (int z = -5792; z < -5664; z++)
+        for (int x = 9440; x < 9568; x++)
         {
             var w = water.At(x, z);
             if (w.Level == int.MinValue) continue;
