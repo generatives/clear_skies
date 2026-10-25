@@ -379,6 +379,12 @@ Func<int, int, int> Erode()
         cut += Math.Abs(delta[c]); most = Math.Max(most, Math.Abs(delta[c]));
     }
     int hollowsAfter = Route(final);
+    {
+        int land = 0, deep = 0; foreach (int c in order) { land++; if (level[c] > final[c] + 8) deep++; }
+        int bare = Route(h); int bareDeep = 0; foreach (int c in order) if (level[c] > h[c] + 8) bareDeep++;
+        Route(final);
+        Console.WriteLine($"Hollow check: {land:N0} land columns; final {hollowsAfter:N0} (over 8 deep {deep:N0}); eroded without detail {bare:N0} (over 8 deep {bareDeep:N0})");
+    }
     Console.WriteLine($"Eroded {erode} rounds in {sw.Elapsed.TotalSeconds:0.0} s: {moved:N0} columns moved, {cut / Math.Max(1, moved):0} blocks on average " +
                       $"(most {most}); columns in hollows {hollowsBefore:N0} before, {hollowsAfter:N0} after" +
                       (rivers ? $"; {riverColumns:N0} river columns, {lakes} lakes dammed" : ""));
@@ -444,22 +450,27 @@ Func<int, int, int> Erode()
         }
         Route(prio);
         var bed = new double[n];
+        var uncut = new bool[n];
         Array.Fill(bed, double.NaN);
         int columns = 0;
         foreach (int c in order)
         {
-            if (area[c] < riverFrom || slope[c] < 0.01 && area[c] < 5 * riverFrom) continue; // only big rivers on flats
-            double target = height[c] - Math.Min(10, 3 * Math.Sqrt(area[c] / riverFrom));
+            if (area[c] < riverFrom) continue;
+            // Only big rivers are cut into flats; a smaller one crossing a flat keeps its bed at the ground there, so
+            // the channel above it stays above it too (rather than ending in a pit that fills as a round pond).
+            bool cutHere = slope[c] >= 0.01 || area[c] >= 5 * riverFrom;
+            double target = cutHere ? height[c] - Math.Min(10, 3 * Math.Sqrt(area[c] / riverFrom)) : height[c];
             int to = recv[c];
             bed[c] = to >= 0 && !double.IsNaN(bed[to]) ? Math.Max(bed[to], target) : target;
-            columns++;
+            if (cutHere) columns++;
+            else uncut[c] = true;
         }
         var cut = (double[])height.Clone();
         // Channels and banks.
         const double BankReach = 24, BankGrade = 0.15;
         foreach (int c in order)
         {
-            if (double.IsNaN(bed[c])) continue;
+            if (double.IsNaN(bed[c]) || uncut[c]) continue;
             double width = Math.Clamp(0.6 * Math.Sqrt(area[c] / riverFrom), 0.5, 4); // cells either side
             int reach = (int)Math.Ceiling(width + BankReach / S), ci = c % nx, cj = c / nx;
             for (int dj = -reach; dj <= reach; dj++)
