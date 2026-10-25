@@ -20,6 +20,7 @@ public sealed class CoarseLand
     public readonly int[] RunStart;         // per column: its first run (RunStart[Nx * Nz] is the run count)
     public readonly int[] RunY0, RunY1, RunCell;
     public readonly float[] Solid;          // per cell: how much of it is ground, 0-1
+    public readonly int[] Piece;            // per column: which piece its top is in (hashed; 0 for no land)
     public readonly int Shell;
     public readonly long Spanned;           // cells between every column's Lo and Hi, kept or not
 
@@ -38,6 +39,7 @@ public sealed class CoarseLand
         Size = size;
         X0 = x0; Z0 = z0; Nx = (x1 - x0) / Size; Nz = (z1 - z0) / Size; Shell = shell;
         var spans = new (short Lo, short Hi)[Columns][];
+        Piece = new int[Columns];
         // A chunk's worth of columns at a time, so each sampler loads that chunk's hearts once.
         int PerChunk = System.Math.Max(1, 32 / Size);
         int chunksX = (Nx + PerChunk - 1) / PerChunk, chunksZ = (Nz + PerChunk - 1) / PerChunk;
@@ -53,6 +55,7 @@ public sealed class CoarseLand
                 int x = x0 + i * Size + Size / 2, z = z0 + j * Size + Size / 2;
                 if (HeartGrid.Landmass(seed, x, z) != cell || keep != null && !keep(x, z)) { spans[i + Nx * j] = Array.Empty<(short, short)>(); continue; }
                 gen.ColumnSpans(x, z, list);
+                Piece[i + Nx * j] = gen.TopPiece;
                 if (lift != null && list.Count > 0) Lift(list, lift(x, z));
                 spans[i + Nx * j] = list.ToArray();
             }

@@ -407,8 +407,15 @@ public sealed class HeartWorldGenerator : IWorldGenerator
 
     /// <summary>The solid spans (bottom up) of block column (x, z), as Prepare finds them but before any water cuts
     /// them: worked out for that column alone, for sampling the land coarsely (see the hydrology tool).</summary>
+    /// <summary>Which piece the top of the last column ColumnSpans walked belongs to (its heart's position, hashed),
+    /// or 0 if it had no ground, for tools that need pieces told apart (see tools/ClearSkies.Hydrology).</summary>
+    public int TopPiece { get; private set; }
+
+    private int _lastHeart;
+
     public void ColumnSpans(int x, int z, List<(short Lo, short Hi)> into)
     {
+        TopPiece = 0;
         into.Clear();
         int chunkX = x >> 5, chunkZ = z >> 5;
         float x0 = chunkX * S, z0 = chunkZ * S;
@@ -443,6 +450,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             bool solid = false;
             int step = 1;
             if (y <= yTop) solid = SolidAt(px, pz, lift, wearNoise, height, y, out step);
+            if (solid) TopPiece = HashCode.Combine(_hx[_lastHeart], _hy[_lastHeart], _hz[_lastHeart]) | 1;
             if (solid && runLo == int.MinValue) runLo = y;
             else if (!solid && runLo != int.MinValue)
             {
@@ -558,6 +566,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         clear = 0f;
         if (bn < 0) return false;
         int bi = _near[bn];
+        _lastHeart = bi;
         if (bn != _facesFor) FaceConstants(bn);
 
         // Distances to the planes halfway between the nearest heart and each other: its piece's faces, each less the

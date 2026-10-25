@@ -44,7 +44,16 @@ public static class HeartGrid
     public const float DeepTop = ContinentTerrain.PlainsLevel - 150f;
 
     /// <summary>How much more a vertical offset counts than a horizontal one when finding a block's nearest heart.</summary>
-    public const float VerticalScale = 1.6f;
+    public static float VerticalScale { get; private set; } = 1.6f;
+
+    /// <summary>Makes pieces <paramref name="across"/> times wider without making them taller (the heart grid's cells
+    /// that much wider, depth counted that much more), for trying out bigger pieces (see tools/ClearSkies.Hydrology).
+    /// Call before generating anything.</summary>
+    public static void WidenPieces(float across)
+    {
+        Layers[0] = Layers[0] with { CellSize = 500f * across };
+        VerticalScale = 1.6f * across;
+    }
 
     /// <summary>How far a heart may sit from its cell's middle, as a share of the cell: under 1, so no two are
     /// too close together.</summary>

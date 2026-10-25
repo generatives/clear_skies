@@ -25,6 +25,8 @@ public sealed partial class Settle
     public double TauGrowth { get; set; } = 2;
     /// <summary>Grow the step whenever a round helps (by 10%), even if only part of its step was taken.</summary>
     public bool NewTau { get; set; }
+    /// <summary>Treat side faces between columns of different pieces (CoarseLand.Piece) as the void.</summary>
+    public bool SeparatePieces { get; set; }
     /// <summary>Solve each round's linear system only as well as the last round improved the balance (Eisenstat-Walker),
     /// between 0.5 and SolveShrink.</summary>
     public bool AdaptiveShrink { get; set; }
@@ -124,9 +126,11 @@ public sealed partial class Settle
                 if (land.RunY0[r] == land.Lo[c]) voidK[s] += 1;
                 foreach (int nc in stackalloc[] { ci + 1 < nx ? c + 1 : -1, ci > 0 ? c - 1 : -1, cj + 1 < nz ? c + nx : -1, cj > 0 ? c - nx : -1 })
                 {
+                    // Another piece beside it is across a crack, however narrow: the void, as far as water goes.
+                    bool apart = SeparatePieces && nc >= 0 && land.Piece[nc] != land.Piece[c];
                     for (int yy = land.RunY0[r]; yy <= land.RunY1[r]; yy++)
-                        if (nc < 0 || !land.HasLand(nc) || yy < land.Lo[nc]) voidK[s + yy - land.RunY0[r]] += 1;
-                    if (nc < c) continue; // each side face once, from the lower column
+                        if (nc < 0 || apart || !land.HasLand(nc) || yy < land.Lo[nc]) voidK[s + yy - land.RunY0[r]] += 1;
+                    if (nc < c || apart) continue; // each side face once, from the lower column
                     for (int q = land.RunStart[nc]; q < land.RunStart[nc + 1]; q++)
                         if (Overlap(r, q, out int mine, out int theirs, out int ln))
                             for (int v = 0; v < ln; v++) pairs.Add((mine + v, theirs + v));

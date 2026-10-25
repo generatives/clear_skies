@@ -27,7 +27,7 @@ using StbImageWriteSharp;
 // must run through a column; --carve-depth, --carve-most: blocks a round; --carve-width: blocks either side a valley
 // reaches, sloping up to nothing at its rim, instead of the 3x3 half-depth sides). --pieces solves each piece of land
 // (land columns joined side by side, at the last cell size) on its own, through the whole cascade, and times each.
-// --erode N reshapes the land's top first: its broad shape (the surface blurred over --erode-blur blocks), carved by
+// --piece-scale N makes the generator's pieces N times wider (HeartGrid.WidenPieces). --erode N reshapes the land's top first: its broad shape (the surface blurred over --erode-blur blocks), carved by
 // rivers N rounds (stream power: each column cut towards the one it drains to, more the more drains through it,
 // --erode-k), then --erode-detail of the blurred-away detail added back. --erode-broad takes the broad shape from the
 // generator instead (ContinentTerrain.BroadHeight: its noise without bumps, crags and dells). --rivers then carves
@@ -76,6 +76,7 @@ for (int a = 0; a < args.Length; a++)
         case "--carve-most": carveMost = float.Parse(args[++a]); break;
         case "--carve-width": carveWidth = float.Parse(args[++a]); break;
         case "--pieces": pieces = true; break;
+        case "--piece-scale": HeartGrid.WidenPieces(float.Parse(args[++a])); break;
         case "--erode": erode = int.Parse(args[++a]); break;
         case "--erode-k": erodeK = float.Parse(args[++a]); break;
         case "--erode-blur": erodeBlur = float.Parse(args[++a]); break;
@@ -88,6 +89,7 @@ for (int a = 0; a < args.Length; a++)
         case "--lake-chance": lakeChance = float.Parse(args[++a]); break;
         case "--new-tau": solveSet.Add(st => st.NewTau = true); break;
         case "--adaptive": solveSet.Add(st => st.AdaptiveShrink = true); break;
+        case "--separate-pieces": solveSet.Add(st => st.SeparatePieces = true); break;
         case "--coarse-scale": Settle.CoarseScale = double.Parse(args[++a]); break;
         case "--gauss-seidel": Settle.GaussSeidel = true; break;
         case "--tau-growth": { var v = double.Parse(args[++a]); solveSet.Add(st => st.TauGrowth = v); break; }
@@ -141,7 +143,8 @@ foreach (int size in cascade.Append(last))
     for (int c = 0; c < land.Columns; c++) if (land.HasLand(c)) landColumns++;
     Console.WriteLine($"{size}-block cells: sampled {land.Columns:N0} columns ({landColumns:N0} with land) in " +
                       $"{sw.Elapsed.TotalSeconds:0.00} s: {land.Cells:N0} cells kept of {land.Spanned:N0}, " +
-                      $"{land.Cells * 10L * 4 / 1e6:0} MB as the model holds them (10 floats a cell)");
+                      $"{land.Cells * 10L * 4 / 1e6:0} MB as the model holds them (10 floats a cell), " +
+                      $"{land.Piece.Where((p, c) => land.HasLand(c)).Distinct().Count()} pieces on top");
 
     sw.Restart();
     settle = new Settle(land, m, rain) { Falls = falls };
@@ -318,6 +321,7 @@ Func<int, int, int> Erode()
     var land8 = new CoarseLand(seed, landmass, x0, z0, x1, z1, shell, S);
     int nx = land8.Nx, nz = land8.Nz, n = land8.Columns;
     var has = new bool[n]; var h0 = new double[n];
+    var piece = land8.Piece; // cracks between pieces are edges, however narrow
     for (int c = 0; c < n; c++)
     {
         has[c] = land8.HasLand(c);
@@ -339,6 +343,9 @@ Func<int, int, int> Erode()
     else for (int pass = 0; pass < 3; pass++) { b = Blur(b, true); b = Blur(b, false); }
     var h = (double[])b.Clone();
     var recv = new int[n]; var area = new double[n]; var level = new double[n];
+    const double EdgeDrop = 64, EdgeKeep = 48;
+    var floor = new double[n];
+    for (int c = 0; c < n; c++) floor[c] = has[c] ? S * land8.Lo[c] + EdgeKeep : 0;
     var order = new List<int>(n);
     int hollowsBefore = Route(h0);
     for (int round = 0; round < erode; round++)
@@ -348,10 +355,13 @@ Func<int, int, int> Erode()
         foreach (int c in order)
         {
             int to = recv[c];
-            if (to < 0 || h[to] >= h[c]) continue; // an edge, or in a hollow
-            double dist = c % nx != to % nx && c / nx != to / nx ? 1.414 : 1.0;
+            // An edge drains over the cliff into the void: it wears down towards the land's underside (keeping
+            // EdgeKeep blocks of it), so big rivers notch the piece's edge and the hollows behind it drain.
+            double below = to < 0 ? Math.Max(floor[c], h[c] - EdgeDrop) : h[to];
+            if (below >= h[c]) continue; // in a hollow
+            double dist = to >= 0 && c % nx != to % nx && c / nx != to / nx ? 1.414 : 1.0;
             double f = erodeK * Math.Sqrt(area[c]) / dist;
-            h[c] = (h[c] + f * h[to]) / (1 + f);
+            h[c] = Math.Max(floor[c], (h[c] + f * below) / (1 + f));
         }
     }
     var mask = new double[n];
@@ -508,7 +518,7 @@ Func<int, int, int> Erode()
             for (int di = -1; di <= 1 && !edge; di++)
             {
                 int ni = i + di, nj = j + dj;
-                edge = ni < 0 || nj < 0 || ni >= nx || nj >= nz || !has[ni + nx * nj];
+                edge = ni < 0 || nj < 0 || ni >= nx || nj >= nz || !has[ni + nx * nj] || piece[ni + nx * nj] != piece[c];
             }
             if (edge) { level[c] = height[c]; queue.Enqueue(c, height[c]); }
         }
@@ -522,7 +532,7 @@ Func<int, int, int> Erode()
                 int ni = i + di, nj = j + dj;
                 if (ni < 0 || nj < 0 || ni >= nx || nj >= nz) continue;
                 int d = ni + nx * nj;
-                if (!has[d] || !double.IsNaN(level[d])) continue;
+                if (!has[d] || piece[d] != piece[c] || !double.IsNaN(level[d])) continue;
                 level[d] = Math.Max(at, height[d]);
                 recv[d] = c;
                 queue.Enqueue(d, level[d]);
@@ -706,6 +716,16 @@ void WriteMap(string path)
         }
     }
     Save(path, land.Nx, land.Nz, rgb);
+    if (Environment.GetEnvironmentVariable("HYD_DUMP") is { } dump)
+        using (var w = new StreamWriter(dump))
+            for (int c = 0; c < land.Columns; c++)
+            {
+                if (!land.HasLand(c)) continue;
+                float open = 0f;
+                for (int y = land.Top[c]; y <= land.Hi[c]; y++) { int i = land.Index(c, y); if (i >= 0 && settle.Solved) open += settle.OpenBlocks(i); }
+                int top = land.Index(c, land.Top[c]);
+                w.WriteLine($"{c % land.Nx},{c / land.Nx},{land.Size * (land.Top[c] + land.Solid[top]):0},{open:0.0},{land.Lo[c] * land.Size}");
+            }
     float all = depths.Sum() / 100f;
     Console.WriteLine($"Open water over land columns: none {depths[0] / all:0}%, under 1/4 block {depths[1] / all:0}%, " +
                       $"to 1 {depths[2] / all:0}%, 1-4 {depths[3] / all:0}%, 4-16 {depths[4] / all:0}%, deeper {depths[5] / all:0}%; " +
