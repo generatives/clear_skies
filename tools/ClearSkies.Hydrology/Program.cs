@@ -503,11 +503,17 @@ Func<int, int, int> Erode()
             lakeAt.Add(sill); dug++;
             double level = bed[c] + LakeDepth;
             int reach = (int)Math.Ceiling(Math.Clamp(0.6 * Math.Sqrt(area[sill] / riverFrom), 0.5, 4) + 3);
+            // A wall across the valley (square to the river there), not a disc: only the wall rises, so the lake's
+            // shore is wherever the land meets its level.
+            int down = recv[sill] >= 0 ? recv[sill] : sill;
+            double fx = down % nx - c % nx, fz = down / nx - c / nx, fl = Math.Max(1e-6, Math.Sqrt(fx * fx + fz * fz));
+            fx /= fl; fz /= fl;
             for (int dj = -reach; dj <= reach; dj++)
             for (int di = -reach; di <= reach; di++)
             {
                 int ni = si + di, nj = sj + dj;
-                if (ni < 0 || nj < 0 || ni >= nx || nj >= nz || !has[ni + nx * nj] || di * di + dj * dj > reach * reach) continue;
+                if (ni < 0 || nj < 0 || ni >= nx || nj >= nz || !has[ni + nx * nj] || Math.Abs(di * fx + dj * fz) > 0.75 ||
+                    Math.Abs(di * fz - dj * fx) > reach) continue;
                 int k = ni + nx * nj;
                 if (cut[k] < level) { cut[k] = level; carved[k] = 1; }
             }
