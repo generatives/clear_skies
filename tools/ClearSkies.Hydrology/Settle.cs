@@ -6,18 +6,20 @@ namespace ClearSkies.Hydrology;
 /// the top SoilDepth + 1 cells of a column's ground, can hold more, and stone very little);
 /// permeability is the share of a head difference (in cells) that crosses a face in one pass.</summary>
 public sealed record Materials(float SoilCapacity = 2f, float StoneCapacity = 0.05f, float AirPermeability = 0.15f,
-                               float FallPermeability = 0.5f, float SoilPermeability = 0.01f, float StonePermeability = 0.0005f, int SoilDepth = 1);
+                               float FallPermeability = 0.5f, float SoilPermeability = 0.01f,
+                               float StonePermeability = 0.0005f, int SoilDepth = 1);
 
 /// <summary>
 /// The uniform water model on a <see cref="CoarseLand"/>: every cell holds water up to its capacity, and has a head,
 /// the height its water stands to (in blocks): its bottom plus how full it is, or where it's full under more water,
 /// the head of the water over it (the pressure). Each pass, water moves across every face from the higher head to the
 /// lower, the permeability of that face times the difference, never more than a cell holds. Rain falls on every
-/// column's ground; water leaving the land (off its edge or out of its bottom) is gone.
+/// column's ground; water leaving the land (off its edge or out of its bottom) is gone. The inert stone the land
+/// leaves out passes nothing, like a wall.
 /// A pass is four sweeps over all columns on all cores, the way GPU compute passes would be: down each column, falls
 /// and heads; the flow across each cell's +x, +z and upper faces (and out of it into the void); how much of what each
-/// cell would send it can; and the new water. A column's cells are contiguous, and so is the run of them beside any
-/// neighbouring column's, so the last three sweeps go a SIMD vector of cells at a time.
+/// cell would send it can; and the new water. A run's cells are contiguous, and so are the ones beside any run of a
+/// neighbouring column, so the last three sweeps go a SIMD vector of cells at a time.
 /// </summary>
 public sealed class Settle
 {
@@ -54,10 +56,10 @@ public sealed class Settle
         Parallel.For(0, land.Columns, c =>
         {
             _rainCell[c] = -1;
-            if (land.Count(c) == 0) return;
-            for (int y = land.Lo[c]; y <= land.Hi[c]; y++)
+            if (!land.HasLand(c)) return;
+            for (int r = land.RunStart[c]; r < land.RunStart[c + 1]; r++)
+            for (int y = land.RunY0[r], i = land.RunCell[r]; y <= land.RunY1[r]; y++, i++)
             {
-                int i = land.Index(c, y);
                 float s = land.Solid[i];
                 bool soil = land.Top[c] - y < m.SoilDepth + 1;
                 _capacity[i] = (1f - s) + s * (soil ? m.SoilCapacity : m.StoneCapacity);
@@ -89,11 +91,9 @@ public sealed class Settle
         var land = _land;
         Parallel.For(0, land.Columns, c =>
         {
-            for (int y = land.Lo[c]; y <= System.Math.Min(land.Hi[c], land.Top[c] - depth); y++)
-            {
-                int i = land.Index(c, y);
+            for (int r = land.RunStart[c]; r < land.RunStart[c + 1]; r++)
+            for (int y = land.RunY0[r], i = land.RunCell[r]; y <= System.Math.Min(land.RunY1[r], land.Top[c] - depth); y++, i++)
                 if (land.Solid[i] > 0f) _water[i] = _capacity[i];
-            }
         });
     }
 
@@ -109,10 +109,10 @@ public sealed class Settle
         for (int c = 0; c < land.Columns; c++)
         {
             level[c] = float.NaN;
-            if (land.Count(c) == 0) continue;
+            if (!land.HasLand(c)) continue;
             int i = c % nx, j = c / nx;
             bool edge = i == 0 || j == 0 || i == nx - 1 || j == nz - 1
-                     || land.Count(c - 1) == 0 || land.Count(c + 1) == 0 || land.Count(c - nx) == 0 || land.Count(c + nx) == 0;
+                     || !land.HasLand(c - 1) || !land.HasLand(c + 1) || !land.HasLand(c - nx) || !land.HasLand(c + nx);
             if (!edge) continue;
             level[c] = Surface(c);
             queue.Enqueue(c, level[c]);
@@ -122,7 +122,7 @@ public sealed class Settle
             int i = c % nx, j = c / nx;
             foreach (int n in stackalloc[] { i + 1 < nx ? c + 1 : -1, i > 0 ? c - 1 : -1, j + 1 < nz ? c + nx : -1, j > 0 ? c - nx : -1 })
             {
-                if (n < 0 || land.Count(n) == 0 || !float.IsNaN(level[n])) continue;
+                if (n < 0 || !land.HasLand(n) || !float.IsNaN(level[n])) continue;
                 level[n] = MathF.Max(Surface(n), l);
                 queue.Enqueue(n, level[n]);
             }
@@ -135,6 +135,7 @@ public sealed class Settle
             for (int y = land.Top[c]; y <= land.Hi[c]; y++)
             {
                 int k = land.Index(c, y);
+                if (k < 0) break;
                 float bottom = CoarseLand.Size * (y + land.Solid[k]);
                 float open = MathF.Min(level[c], CoarseLand.Size * (y + 1)) - bottom;
                 if (open <= 0f) break;
@@ -149,76 +150,98 @@ public sealed class Settle
     /// <summary>The height (blocks) of column c's top: its top cell's bottom plus the ground in it.</summary>
     private float Surface(int c) => CoarseLand.Size * (_land.Top[c] + _land.Solid[_land.Index(c, _land.Top[c])]);
 
+    /// <summary>Seconds spent in each of a pass's four sweeps, over every pass so far.</summary>
+    public readonly double[] SweepSeconds = new double[4];
+
+    private static double Lap(System.Diagnostics.Stopwatch watch)
+    {
+        double s = watch.Elapsed.TotalSeconds;
+        watch.Restart();
+        return s;
+    }
+
     public void Pass()
     {
+        var watch = System.Diagnostics.Stopwatch.StartNew();
         var land = _land;
         int nx = land.Nx, nz = land.Nz;
         // 1. Down each column: free water falls to the bottom of its run of open air (all the way, in one pass), then
-        // heads: a full cell under water stands to that water's head.
+        // heads: a full cell under water stands to that water's head (not through inert stone, which holds none).
         Parallel.For(0, land.Columns, c =>
         {
-            if (Falls)
-                for (int y = land.Hi[c]; y >= land.Lo[c];)
-                {
-                    int i = land.Start[c] + y - land.Lo[c];
-                    if (land.Solid[i] > 0f) { y--; continue; }
-                    int top = i;
-                    float carry = 0f;
-                    for (; y >= land.Lo[c] && land.Solid[i] == 0f; y--, i--) { carry += _water[i]; _water[i] = 0f; }
-                    for (int r = i + 1; r <= top && carry > 0f; r++)
-                    {
-                        float put = MathF.Min(carry, _capacity[r]);
-                        _water[r] = put;
-                        carry -= put;
-                    }
-                    _water[top] += carry;
-                }
-            float above = float.NaN;
-            for (int y = land.Hi[c]; y >= land.Lo[c]; y--)
+            for (int r = land.RunStart[c + 1] - 1; r >= land.RunStart[c]; r--)
             {
-                int i = land.Start[c] + y - land.Lo[c];
-                float fill = _water[i] / _capacity[i];
-                float h = CoarseLand.Size * (y + fill);
-                if (fill >= 1f && !float.IsNaN(above)) h = MathF.Max(h, above);
-                _head[i] = h;
-                above = _water[i] > 0f ? h : float.NaN;
+                int y0 = land.RunY0[r], first = land.RunCell[r], last = first + land.RunY1[r] - y0;
+                if (Falls)
+                    for (int i = last; i >= first;)
+                    {
+                        if (land.Solid[i] > 0f) { i--; continue; }
+                        int top = i;
+                        float carry = 0f;
+                        for (; i >= first && land.Solid[i] == 0f; i--) { carry += _water[i]; _water[i] = 0f; }
+                        for (int k = i + 1; k <= top && carry > 0f; k++)
+                        {
+                            float put = MathF.Min(carry, _capacity[k]);
+                            _water[k] = put;
+                            carry -= put;
+                        }
+                        _water[top] += carry;
+                    }
+                float above = float.NaN;
+                for (int i = last; i >= first; i--)
+                {
+                    float fill = _water[i] / _capacity[i];
+                    float h = CoarseLand.Size * (y0 + i - first + fill);
+                    if (fill >= 1f && !float.IsNaN(above)) h = MathF.Max(h, above);
+                    _head[i] = h;
+                    above = _water[i] > 0f ? h : float.NaN;
+                }
             }
         });
+        SweepSeconds[0] += Lap(watch);
         // 2. Flow across each cell's +x, +z and upper faces, and out into the void across any face.
         Parallel.For(0, nz, j =>
         {
             for (int ci = 0; ci < nx; ci++)
             {
-                int c = ci + nx * j, n = land.Count(c);
-                if (n == 0) continue;
-                int s = land.Start[c];
-                _drain.AsSpan(s, n).Clear();
-                Side(c, ci + 1 < nx ? c + 1 : -1, _fx);
-                Side(c, j + 1 < nz ? c + nx : -1, _fz);
-                Side(c, ci > 0 ? c - 1 : -1, null);
-                Side(c, j > 0 ? c - nx : -1, null);
-                Vertical(s, n - 1);
-                _fy[s + n - 1] = 0f;
-                Drain(s, 1, land.Lo[c], down: true);
+                int c = ci + nx * j;
+                for (int r = land.RunStart[c]; r < land.RunStart[c + 1]; r++)
+                {
+                    int s = land.RunCell[r], n = land.RunY1[r] - land.RunY0[r] + 1;
+                    _drain.AsSpan(s, n).Clear();
+                    Side(r, c, ci + 1 < nx ? c + 1 : -1, _fx);
+                    Side(r, c, j + 1 < nz ? c + nx : -1, _fz);
+                    Side(r, c, ci > 0 ? c - 1 : -1, null);
+                    Side(r, c, j > 0 ? c - nx : -1, null);
+                    Vertical(s, n - 1);
+                    _fy[s + n - 1] = 0f;
+                    if (land.RunY0[r] == land.Lo[c]) Drain(s, 1, land.Lo[c], down: true);
+                }
             }
         });
+        SweepSeconds[1] += Lap(watch);
         // 3. The share of what each cell would send out that it can.
         Parallel.For(0, nz, j =>
         {
             for (int ci = 0; ci < nx; ci++)
             {
-                int c = ci + nx * j, n = land.Count(c);
-                if (n == 0) continue;
-                int s = land.Start[c];
-                var sum = _scale.AsSpan(s, n);
-                Outflow(sum, _drain.AsSpan(s, n), _fx.AsSpan(s, n), _fz.AsSpan(s, n), _fy.AsSpan(s, n));
-                if (ci > 0 && Overlap(c, c - 1, out int m1, out int t1, out int l1)) Backflow(_scale.AsSpan(m1, l1), _fx.AsSpan(t1, l1));
-                if (j > 0 && Overlap(c, c - nx, out int m2, out int t2, out int l2)) Backflow(_scale.AsSpan(m2, l2), _fz.AsSpan(t2, l2));
-                Backflow(_scale.AsSpan(s + 1, n - 1), _fy.AsSpan(s, n - 1));
-                if (_boost != null) Boost(sum, _boost.AsSpan(s, n));
-                Share(sum, _water.AsSpan(s, n));
+                int c = ci + nx * j;
+                for (int r = land.RunStart[c]; r < land.RunStart[c + 1]; r++)
+                {
+                    int s = land.RunCell[r], n = land.RunY1[r] - land.RunY0[r] + 1;
+                    var sum = _scale.AsSpan(s, n);
+                    Outflow(sum, _drain.AsSpan(s, n), _fx.AsSpan(s, n), _fz.AsSpan(s, n), _fy.AsSpan(s, n));
+                    if (ci > 0) for (int q = land.RunStart[c - 1], end = land.RunStart[c]; q < end; q++)
+                        if (Overlap(r, q, out int mine, out int theirs, out int len)) Backflow(_scale.AsSpan(mine, len), _fx.AsSpan(theirs, len));
+                    if (j > 0) for (int q = land.RunStart[c - nx], end = land.RunStart[c - nx + 1]; q < end; q++)
+                        if (Overlap(r, q, out int mine, out int theirs, out int len)) Backflow(_scale.AsSpan(mine, len), _fz.AsSpan(theirs, len));
+                    Backflow(_scale.AsSpan(s + 1, n - 1), _fy.AsSpan(s, n - 1));
+                    if (_boost != null) Boost(sum, _boost.AsSpan(s, n));
+                    Share(sum, _water.AsSpan(s, n));
+                }
             }
         });
+        SweepSeconds[2] += Lap(watch);
         // 4. Each cell loses what it sends and gathers what its neighbours send it.
         double drained = 0, stored = 0;
         var gate = new object();
@@ -226,53 +249,59 @@ public sealed class Settle
         {
             for (int ci = 0; ci < nx; ci++)
             {
-                int c = ci + nx * j, n = land.Count(c);
-                if (n == 0) continue;
-                int s = land.Start[c];
-                var next = _next.AsSpan(s, n);
-                acc.Item1 += Start(next, _water.AsSpan(s, n), _scale.AsSpan(s, n), _drain.AsSpan(s, n));
-                if (ci + 1 < nx && Overlap(c, c + 1, out int m3, out int t3, out int l3)) Move(_next.AsSpan(m3, l3), _fx.AsSpan(m3, l3), _scale.AsSpan(m3, l3), _scale.AsSpan(t3, l3), -1f);
-                if (j + 1 < nz && Overlap(c, c + nx, out int m4, out int t4, out int l4)) Move(_next.AsSpan(m4, l4), _fz.AsSpan(m4, l4), _scale.AsSpan(m4, l4), _scale.AsSpan(t4, l4), -1f);
-                if (ci > 0 && Overlap(c, c - 1, out int m5, out int t5, out int l5)) Move(_next.AsSpan(m5, l5), _fx.AsSpan(t5, l5), _scale.AsSpan(t5, l5), _scale.AsSpan(m5, l5), 1f);
-                if (j > 0 && Overlap(c, c - nx, out int m6, out int t6, out int l6)) Move(_next.AsSpan(m6, l6), _fz.AsSpan(t6, l6), _scale.AsSpan(t6, l6), _scale.AsSpan(m6, l6), 1f);
-                Move(_next.AsSpan(s, n - 1), _fy.AsSpan(s, n - 1), _scale.AsSpan(s, n - 1), _scale.AsSpan(s + 1, n - 1), -1f);
-                Move(_next.AsSpan(s + 1, n - 1), _fy.AsSpan(s, n - 1), _scale.AsSpan(s, n - 1), _scale.AsSpan(s + 1, n - 1), 1f);
-                if (_rainCell[c] >= 0) _next[_rainCell[c]] += Rain;
-                if (_boost != null) Step(next, _water.AsSpan(s, n), _boost.AsSpan(s, n));
-                acc.Item2 += Clamp(next);
+                int c = ci + nx * j;
+                for (int r = land.RunStart[c]; r < land.RunStart[c + 1]; r++)
+                {
+                    int s = land.RunCell[r], n = land.RunY1[r] - land.RunY0[r] + 1;
+                    var next = _next.AsSpan(s, n);
+                    acc.Item1 += Start(next, _water.AsSpan(s, n), _scale.AsSpan(s, n), _drain.AsSpan(s, n));
+                    if (ci + 1 < nx) for (int q = land.RunStart[c + 1], end = land.RunStart[c + 2]; q < end; q++)
+                        if (Overlap(r, q, out int mine, out int theirs, out int len)) Move(_next.AsSpan(mine, len), _fx.AsSpan(mine, len), _scale.AsSpan(mine, len), _scale.AsSpan(theirs, len), -1f);
+                    if (j + 1 < nz) for (int q = land.RunStart[c + nx], end = land.RunStart[c + nx + 1]; q < end; q++)
+                        if (Overlap(r, q, out int mine, out int theirs, out int len)) Move(_next.AsSpan(mine, len), _fz.AsSpan(mine, len), _scale.AsSpan(mine, len), _scale.AsSpan(theirs, len), -1f);
+                    if (ci > 0) for (int q = land.RunStart[c - 1], end = land.RunStart[c]; q < end; q++)
+                        if (Overlap(r, q, out int mine, out int theirs, out int len)) Move(_next.AsSpan(mine, len), _fx.AsSpan(theirs, len), _scale.AsSpan(theirs, len), _scale.AsSpan(mine, len), 1f);
+                    if (j > 0) for (int q = land.RunStart[c - nx], end = land.RunStart[c - nx + 1]; q < end; q++)
+                        if (Overlap(r, q, out int mine, out int theirs, out int len)) Move(_next.AsSpan(mine, len), _fz.AsSpan(theirs, len), _scale.AsSpan(theirs, len), _scale.AsSpan(mine, len), 1f);
+                    Move(_next.AsSpan(s, n - 1), _fy.AsSpan(s, n - 1), _scale.AsSpan(s, n - 1), _scale.AsSpan(s + 1, n - 1), -1f);
+                    Move(_next.AsSpan(s + 1, n - 1), _fy.AsSpan(s, n - 1), _scale.AsSpan(s, n - 1), _scale.AsSpan(s + 1, n - 1), 1f);
+                    int rain = _rainCell[c];
+                    if (rain >= s && rain < s + n) _next[rain] += Rain;
+                    if (_boost != null) Step(next, _water.AsSpan(s, n), _boost.AsSpan(s, n));
+                    acc.Item2 += Clamp(next);
+                }
             }
             return acc;
         }, acc => { lock (gate) { drained += acc.Item1; stored += acc.Item2; } });
+        SweepSeconds[3] += Lap(watch);
         (_water, _next) = (_next, _water);
         RainedLastPass = _raining * (double)Rain;
         DrainedLastPass = drained;
         Stored = stored;
     }
 
-    /// <summary>The cells column c has beside column nc's: the first of each, and how many.</summary>
-    private bool Overlap(int c, int nc, out int mine, out int theirs, out int len)
+    /// <summary>The stretch of run r beside run q (of a neighbouring column): the first cell of each, and how many.</summary>
+    private bool Overlap(int r, int q, out int mine, out int theirs, out int len)
     {
         var land = _land;
-        mine = theirs = len = 0;
-        if (land.Count(nc) == 0) return false;
-        int lo = System.Math.Max(land.Lo[c], land.Lo[nc]), hi = System.Math.Min(land.Hi[c], land.Hi[nc]);
-        if (lo > hi) return false;
-        mine = land.Start[c] + lo - land.Lo[c]; theirs = land.Start[nc] + lo - land.Lo[nc]; len = hi - lo + 1;
-        return true;
+        int lo = System.Math.Max(land.RunY0[r], land.RunY0[q]), hi = System.Math.Min(land.RunY1[r], land.RunY1[q]);
+        mine = land.RunCell[r] + lo - land.RunY0[r]; theirs = land.RunCell[q] + lo - land.RunY0[q]; len = hi - lo + 1;
+        return lo <= hi;
     }
 
-    /// <summary>The side face of column c towards column nc (-1: off the land's bounds): flow across it into f (or
-    /// none for a face the other column keeps), and into the void where there is no land beside or under it there.
-    /// Above the column beside is a wall.</summary>
-    private void Side(int c, int nc, float[]? f)
+    /// <summary>Run r's (of column c) side face towards column nc (-1: off the land's bounds): flow across it into f
+    /// (or none for a face the other column keeps), and into the void where there is no land beside or under it there.
+    /// Beside the other column's inert stone, or over it, is a wall.</summary>
+    private void Side(int r, int c, int nc, float[]? f)
     {
         var land = _land;
-        int lo = land.Lo[c], hi = land.Hi[c], s = land.Start[c];
-        int voidTop = nc < 0 || land.Count(nc) == 0 ? hi : System.Math.Min(hi, land.Lo[nc] - 1);
-        if (voidTop >= lo) Drain(s, voidTop - lo + 1, lo, down: false);
+        int y0 = land.RunY0[r], y1 = land.RunY1[r], s = land.RunCell[r];
+        int voidTop = nc < 0 || !land.HasLand(nc) ? y1 : System.Math.Min(y1, land.Lo[nc] - 1);
+        if (voidTop >= y0) Drain(s, voidTop - y0 + 1, y0, down: false);
         if (f == null) return;
-        f.AsSpan(s, land.Count(c)).Clear();
-        if (nc >= 0 && Overlap(c, nc, out int m7, out int t7, out int l7)) Flux(f.AsSpan(m7, l7), m7, t7, l7);
+        f.AsSpan(s, y1 - y0 + 1).Clear();
+        if (nc >= 0) for (int q = land.RunStart[nc], end = land.RunStart[nc + 1]; q < end; q++)
+                        if (Overlap(r, q, out int mine, out int theirs, out int len)) Flux(f.AsSpan(mine, len), mine, theirs, len);
     }
 
     // ── The vector loops ──────────────────────────────────────────────────

@@ -9,14 +9,14 @@ using StbImageWriteSharp;
 //
 //   dotnet run -c Release --project tools/ClearSkies.Hydrology -- [--seed 1337] [--cell 1 -1] [--passes 20000]
 //       [--rain 0.002] [--report 500] [--out hydrology-out] [--snapshots]
-//       [--saturate 1] [--fill-hollows] [--local-steps] [--no-falls] [--soil-capacity 2]
+//       [--saturate 1] [--fill-hollows] [--local-steps] [--shell 2|all] [--no-falls] [--soil-capacity 2]
 //       [--stone-capacity 0.05] [--air 0.15] [--soil 0.01] [--stone 0.0005]
 //
 // With no --cell it takes the spawn's landmass. --snapshots also writes the map at every report. It stops early once
 // as much water drains off the land as rains on it (within 1%, either way). --saturate N starts the ground full of
 // water up to N cells under its top; --fill-hollows starts every hollow in the land's top full; --no-falls makes free
 // water fall a cell or so a pass, as it spreads. --local-steps lets slow ground take bigger steps (see
-// Settle.UseLocalSteps).
+// Settle.UseLocalSteps). --shell is how many cells into solid stone the model keeps (all: every cell).
 
 ulong seed = 1337;
 (int X, int Z)? cell = null;
@@ -24,7 +24,7 @@ int passes = 20000, report = 500;
 float rain = 0.002f;
 string outDir = "hydrology-out";
 bool snapshots = false, falls = true, hollows = false, localSteps = false;
-int saturate = -1;
+int saturate = -1, shell = 2;
 var m = new Materials();
 for (int a = 0; a < args.Length; a++)
 {
@@ -40,6 +40,7 @@ for (int a = 0; a < args.Length; a++)
         case "--no-falls": falls = false; break;
         case "--fill-hollows": hollows = true; break;
         case "--local-steps": localSteps = true; break;
+        case "--shell": { string v = args[++a]; shell = v == "all" ? int.MaxValue : int.Parse(v); break; }
         case "--saturate": saturate = int.Parse(args[++a]); break;
         case "--soil-capacity": m = m with { SoilCapacity = float.Parse(args[++a]) }; break;
         case "--stone-capacity": m = m with { StoneCapacity = float.Parse(args[++a]) }; break;
@@ -67,11 +68,12 @@ x1 = CoarseLand.FloorDiv(x1 + 96, 32) * 32; z1 = CoarseLand.FloorDiv(z1 + 96, 32
 Console.WriteLine($"Bounds x {x0}..{x1}, z {z0}..{z1} ({(x1 - x0) / 1000f:0.0} x {(z1 - z0) / 1000f:0.0} km)");
 
 var sw = Stopwatch.StartNew();
-var land = new CoarseLand(seed, landmass, x0, z0, x1, z1);
+var land = new CoarseLand(seed, landmass, x0, z0, x1, z1, shell);
 int landColumns = 0;
-for (int c = 0; c < land.Columns; c++) if (land.Count(c) > 0) landColumns++;
+for (int c = 0; c < land.Columns; c++) if (land.HasLand(c)) landColumns++;
 Console.WriteLine($"Sampled {land.Columns:N0} columns ({landColumns:N0} with land) in {sw.Elapsed.TotalSeconds:0.00} s: " +
-                  $"{land.Cells:N0} cells, {land.Cells * 5L * 4 / 1e6:0} MB as the model holds them (5 floats a cell)");
+                  $"{land.Cells:N0} cells kept of {land.Spanned:N0} (stone over {shell} cells inside the ground left out), " +
+                  $"{land.Cells * 10L * 4 / 1e6:0} MB as the model holds them (10 floats a cell)");
 
 sw.Restart();
 var settle = new Settle(land, m, rain) { Falls = falls };
@@ -100,6 +102,8 @@ for (int p = 1; p <= passes; p++)
 }
 Console.WriteLine($"{done} passes in {sw.Elapsed.TotalSeconds:0.0} s ({sw.Elapsed.TotalMilliseconds / done:0.0} ms/pass); " +
                   $"total {total.Elapsed.TotalSeconds:0.0} s");
+Console.WriteLine("Per pass: " + string.Join(", ", new[] { "falls and heads", "flows", "shares", "update" }
+    .Select((name, k) => $"{name} {settle.SweepSeconds[k] * 1000 / done:0.0} ms")));
 
 Directory.CreateDirectory(outDir);
 WriteMap(Path.Combine(outDir, "map.png"));
@@ -115,12 +119,13 @@ void WriteMap(string path)
     for (int c = 0; c < land.Columns; c++)
     {
         int o = c * 3;
-        if (land.Count(c) == 0) { rgb[o] = 18; rgb[o + 1] = 22; rgb[o + 2] = 34; continue; }
+        if (!land.HasLand(c)) { rgb[o] = 18; rgb[o + 1] = 22; rgb[o + 2] = 34; continue; }
         int top = land.Index(c, land.Top[c]);
         float open = 0f;
         for (int y = land.Top[c]; y <= land.Hi[c]; y++)
         {
             int i = land.Index(c, y);
+            if (i < 0) continue;
             open += water[i] * (1f - land.Solid[i]) / settle.Capacity(i);
         }
         float t = Math.Clamp((land.Top[c] * CoarseLand.Size - 300f) / 900f, 0f, 1f);
@@ -145,13 +150,13 @@ void WriteSection(string path)
     for (int r = 0; r < land.Nz; r++)
     {
         int count = 0;
-        for (int i = 0; i < land.Nx; i++) if (land.Count(i + land.Nx * r) > 0) count++;
+        for (int i = 0; i < land.Nx; i++) if (land.HasLand(i + land.Nx * r)) count++;
         if (count > most) { most = count; j = r; }
     }
     for (int i = 0; i < land.Nx; i++)
     {
         int c = i + land.Nx * j;
-        if (land.Count(c) == 0) continue;
+        if (!land.HasLand(c)) continue;
         lo = Math.Min(lo, land.Lo[c]); hi = Math.Max(hi, land.Hi[c]);
     }
     if (lo > hi) return;
@@ -163,7 +168,14 @@ void WriteSection(string path)
     {
         int o = ((hi - y) * land.Nx + i) * 3;
         int k = land.Index(i + land.Nx * j, y);
-        if (k < 0) { rgb[o] = 18; rgb[o + 1] = 22; rgb[o + 2] = 34; continue; }
+        if (k < 0)
+        {
+            // Inert stone, or nothing.
+            int c = i + land.Nx * j;
+            bool inert = land.HasLand(c) && y >= land.Lo[c] && y <= land.Hi[c];
+            rgb[o] = (byte)(inert ? 85 : 18); rgb[o + 1] = (byte)(inert ? 80 : 22); rgb[o + 2] = (byte)(inert ? 78 : 34);
+            continue;
+        }
         float s = land.Solid[k], fill = Math.Clamp(water[k] / settle.Capacity(k), 0f, 1f);
         if (s > 0.5f) { rgb[o] = (byte)(130 - 60 * fill); rgb[o + 1] = (byte)(125 - 30 * fill); rgb[o + 2] = (byte)(120 + 60 * fill); }
         else if (fill > 0.05f) { rgb[o] = 40; rgb[o + 1] = (byte)(90 + 60 * fill); rgb[o + 2] = 230; }
