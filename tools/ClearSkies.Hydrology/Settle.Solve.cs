@@ -25,8 +25,36 @@ public sealed partial class Settle
     public double SolveShrink { get; set; } = 0.1; // how far each round's linear solve brings its residual down
     public double SolveTolerance { get; set; } = 0.01; // of the rain: how far from balanced the whole land may be
 
+    /// <summary>Instead of solving, write the problem out (for trying other solvers): see Export.</summary>
+    public string? ExportTo { get; set; }
+
+    /// <summary>Writes the cell graph: a JSON header (sizes, cell size, rain, air permeability) then raw little-endian
+    /// arrays in order: per face a, b (int32); per cell permeability, solid, capacity (float32), void faces, height,
+    /// column (int32), rain (float64).</summary>
+    private void Export(string path, List<(int, int)> pairs, double[] voidFaces, int[] y, int[] column, double[] rain)
+    {
+        int n = _land.Cells;
+        using var w = new BinaryWriter(File.Create(path));
+        var header = System.Text.Encoding.UTF8.GetBytes(
+            $"{{\"cells\":{n},\"faces\":{pairs.Count},\"size\":{_land.Size},\"rain\":{Rain},\"air\":{_airPermeability},\"nx\":{_land.Nx},\"nz\":{_land.Nz}}}\n");
+        w.Write(header);
+        foreach (var (a, _) in pairs) w.Write(a);
+        foreach (var (_, b) in pairs) w.Write(b);
+        foreach (float v in _permeability) w.Write(v);
+        foreach (float v in _land.Solid) w.Write(v);
+        foreach (float v in _capacity) w.Write(v);
+        foreach (double v in voidFaces) w.Write((int)v);
+        foreach (int v in y) w.Write(v);
+        foreach (int v in column) w.Write(v);
+        foreach (double v in rain) w.Write(v);
+        Console.WriteLine($"Wrote {path}: {n:N0} cells, {pairs.Count:N0} faces");
+    }
+
     private double[]? _solved; // per cell: the heads, once solved
     private double _drainedShare;
+
+    /// <summary>Once solved, per column: water out of its ground into open cells, and across its open cells' sides.</summary>
+    public float[]? Springs, Runs;
 
     /// <summary>The open water in cell i (blocks deep): its head over the ground in it, taking that ground to fill the
     /// cell's bottom. Only once solved.</summary>
@@ -108,6 +136,7 @@ public sealed partial class Settle
             faceK[fill[a]] = kf; fine.Col[fill[a]++] = b;
             faceK[fill[b]] = kf; fine.Col[fill[b]++] = a;
         }
+        if (ExportTo != null) { Export(ExportTo, pairs, voidK, y, column, rain); return; }
         pairs = null;
         for (int i = 0; i < n; i++) voidK[i] *= k[i] * PerBlock;
         fine.X = new int[n]; fine.Z = new int[n]; fine.Y = y; fine.Cls = new int[n];
@@ -185,6 +214,22 @@ public sealed partial class Settle
             }
         }
         _solved = h;
+        // Per column: how much water runs through its open cells (out across their sides), and how much comes out of
+        // its ground into them (springs).
+        Springs = new float[land.Columns]; Runs = new float[land.Columns];
+        for (int i = 0; i < n; i++)
+        {
+            bool open = land.Solid[i] < 0.5f;
+            for (int e = fine.Start[i]; e < fine.Start[i + 1]; e++)
+            {
+                int j = fine.Col[e];
+                if (h[i] <= h[j]) continue;
+                double q = faceK[e] * Kr(i, h[i]) * (h[i] - h[j]);
+                bool openJ = land.Solid[j] < 0.5f;
+                if (!open && openJ) Springs[column[j]] += (float)q;
+                else if (open && openJ && column[i] != column[j]) Runs[column[i]] += (float)q;
+            }
+        }
         for (int i = 0; i < n; i++)
         {
             _head[i] = (float)h[i];

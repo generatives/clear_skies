@@ -21,7 +21,7 @@ using StbImageWriteSharp;
 // given in 8-block cells throughout). --routing routes water in open air instantly each pass (see Settle.Routing.cs):
 // only the ground is simulated. --solve solves for the settled state directly (see Settle.Solve.cs), with open air
 // passing --solve-air (default: as --air; several, comma separated, go up in steps); --check N then steps N passes from it to see how far it drifts. --last is
-// the cell size to end on (8).
+// the cell size to end on (8). --export FILE writes the last size's solve problem out instead (see Settle.Export).
 
 ulong seed = 1337;
 (int X, int Z)? cell = null;
@@ -59,12 +59,14 @@ for (int a = 0; a < args.Length; a++)
         case "--rounds": { var v = int.Parse(args[++a]); solveSet.Add(st => st.SolveRounds = v); break; }
         case "--check": check = int.Parse(args[++a]); break;
         case "--last": last = int.Parse(args[++a]); break;
+        case "--export": { var v = args[++a]; solveSet.Add(st => st.ExportTo = v); break; }
         case "--shell": { string v = args[++a]; shell = v == "all" ? int.MaxValue : int.Parse(v); break; }
         case "--cascade": cascade = args[++a].Split(',').Select(int.Parse).ToArray(); break;
         case "--saturate": saturate = int.Parse(args[++a]); break;
         case "--soil-capacity": m = m with { SoilCapacity = float.Parse(args[++a]) }; break;
         case "--stone-capacity": m = m with { StoneCapacity = float.Parse(args[++a]) }; break;
         case "--air": m = m with { AirPermeability = float.Parse(args[++a]) }; break;
+        case "--soil-depth": m = m with { SoilDepth = int.Parse(args[++a]) }; break;
         case "--soil": m = m with { SoilPermeability = float.Parse(args[++a]) }; break;
         case "--stone": m = m with { StonePermeability = float.Parse(args[++a]) }; break;
         default: Console.Error.WriteLine($"Unknown argument {args[a]}"); return 1;
@@ -158,10 +160,32 @@ foreach (int size in cascade.Append(last))
 Directory.CreateDirectory(outDir);
 WriteMap(Path.Combine(outDir, "map.png"));
 WriteSection(Path.Combine(outDir, "section.png"));
+if (settle.Runs != null) WriteFlow(Path.Combine(outDir, "flow.png"));
 Console.WriteLine($"Wrote {Path.GetFullPath(outDir)}/map.png and section.png");
 return 0;
 
 // Top-down: land shaded by height and greener where its top cell is wetter, open water blue by depth, void dark.
+// Where water goes, once solved: land grey by height, water running over it blue (brighter, more of it, on a log
+// scale from a column's own rain to a thousand columns' worth), springs (water out of the ground) red.
+void WriteFlow(string path)
+{
+    var rgb = new byte[land.Columns * 3];
+    float unit = settle.Rain;
+    for (int c = 0; c < land.Columns; c++)
+    {
+        int o = c * 3;
+        if (!land.HasLand(c)) { rgb[o] = 18; rgb[o + 1] = 22; rgb[o + 2] = 34; continue; }
+        float t = Math.Clamp((land.Top[c] * land.Size - 300f) / 900f, 0f, 1f);
+        float run = Math.Clamp(MathF.Log10(Math.Max(settle.Runs![c] / unit, 1f)) / 3f, 0f, 1f);
+        float spring = Math.Clamp(MathF.Log10(Math.Max(settle.Springs![c] / unit, 1f)) / 2f, 0f, 1f);
+        float g = 70 + 60 * t;
+        rgb[o] = (byte)Math.Clamp(g * (1 - run) + 40 * run + 200 * spring, 0, 255);
+        rgb[o + 1] = (byte)Math.Clamp(g * (1 - run) + 140 * run, 0, 255);
+        rgb[o + 2] = (byte)Math.Clamp(g * (1 - run) + 255 * run, 0, 255);
+    }
+    Save(path, land.Nx, land.Nz, rgb);
+}
+
 void WriteMap(string path)
 {
     var rgb = new byte[land.Columns * 3];
