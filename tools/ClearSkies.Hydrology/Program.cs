@@ -9,7 +9,7 @@ using StbImageWriteSharp;
 //
 //   dotnet run -c Release --project tools/ClearSkies.Hydrology -- [--seed 1337] [--cell 1 -1] [--passes 20000]
 //       [--rain 0.002] [--report 500] [--out hydrology-out] [--snapshots]
-//       [--saturate 1] [--fill-hollows] [--local-steps] [--shell 2|all] [--cascade 32,16] [--no-falls] [--soil-capacity 2]
+//       [--saturate 1] [--fill-hollows] [--local-steps] [--routing] [--shell 2|all] [--cascade 32,16] [--no-falls] [--soil-capacity 2]
 //       [--stone-capacity 0.05] [--air 0.15] [--soil 0.01] [--stone 0.0005]
 //
 // With no --cell it takes the spawn's landmass. --snapshots also writes the map at every report. It stops early once
@@ -18,14 +18,15 @@ using StbImageWriteSharp;
 // water fall a cell or so a pass, as it spreads. --local-steps lets slow ground take bigger steps (see
 // Settle.UseLocalSteps). --shell is how many cells into solid stone the model keeps (all: every cell). --cascade settles
 // on bigger cells first, each size starting from the one before, and 8-block cells from the last (stored water is
-// given in 8-block cells throughout).
+// given in 8-block cells throughout). --routing routes water in open air instantly each pass (see Settle.Routing.cs):
+// only the ground is simulated.
 
 ulong seed = 1337;
 (int X, int Z)? cell = null;
 int passes = 20000, report = 500;
 float rain = 0.002f;
 string outDir = "hydrology-out";
-bool snapshots = false, falls = true, hollows = false, localSteps = false;
+bool snapshots = false, falls = true, hollows = false, localSteps = false, routing = false;
 int saturate = -1, shell = 2;
 int[] cascade = Array.Empty<int>();
 var m = new Materials();
@@ -43,6 +44,7 @@ for (int a = 0; a < args.Length; a++)
         case "--no-falls": falls = false; break;
         case "--fill-hollows": hollows = true; break;
         case "--local-steps": localSteps = true; break;
+        case "--routing": routing = true; break;
         case "--shell": { string v = args[++a]; shell = v == "all" ? int.MaxValue : int.Parse(v); break; }
         case "--cascade": cascade = args[++a].Split(',').Select(int.Parse).ToArray(); break;
         case "--saturate": saturate = int.Parse(args[++a]); break;
@@ -86,12 +88,13 @@ foreach (int size in cascade.Append(8))
 
     sw.Restart();
     settle = new Settle(land, m, rain) { Falls = falls };
+    if (routing) settle.UseRouting();
     if (localSteps) settle.UseLocalSteps();
     if (rough != null) settle.StartFrom(rough);
     else
     {
         if (saturate >= 0) settle.Saturate(saturate);
-        if (hollows) Console.WriteLine($"Filled hollows: {settle.FillHollows():N0} columns under water");
+        if (hollows && !routing) Console.WriteLine($"Filled hollows: {settle.FillHollows():N0} columns under water");
     }
     Console.WriteLine($"Set up in {sw.Elapsed.TotalSeconds:0.00} s");
 

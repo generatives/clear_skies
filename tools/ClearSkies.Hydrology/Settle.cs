@@ -21,7 +21,7 @@ public sealed record Materials(float SoilCapacity = 2f, float StoneCapacity = 0.
 /// cell would send it can; and the new water. A run's cells are contiguous, and so are the ones beside any run of a
 /// neighbouring column, so the last three sweeps go a SIMD vector of cells at a time.
 /// </summary>
-public sealed class Settle
+public sealed partial class Settle
 {
     private readonly float PerBlock; // 1 / the cell size: head differences are in blocks
 
@@ -169,6 +169,7 @@ public sealed class Settle
             for (int r = land.RunStart[c]; r < land.RunStart[c + 1]; r++)
             for (int y = land.RunY0[r], i = land.RunCell[r]; y <= land.RunY1[r]; y++, i++)
             {
+                if (_routes != null && IsOpen(i)) continue; // the routing sets those
                 int k = big.Index(bc, CoarseLand.FloorDiv(y * land.Size + land.Size / 2, big.Size));
                 if (k < 0 || rough._water[k] <= 0f) continue;
                 float fill = Math.Clamp((rough._head[k] - y * land.Size) * PerBlock, 0f, 1f);
@@ -202,7 +203,7 @@ public sealed class Settle
             for (int r = land.RunStart[c + 1] - 1; r >= land.RunStart[c]; r--)
             {
                 int y0 = land.RunY0[r], first = land.RunCell[r], last = first + land.RunY1[r] - y0;
-                if (Falls)
+                if (Falls && _routes == null)
                     for (int i = last; i >= first;)
                     {
                         if (land.Solid[i] > 0f) { i--; continue; }
@@ -296,7 +297,7 @@ public sealed class Settle
                     Move(_next.AsSpan(s, n - 1), _fy.AsSpan(s, n - 1), _scale.AsSpan(s, n - 1), _scale.AsSpan(s + 1, n - 1), -1f);
                     Move(_next.AsSpan(s + 1, n - 1), _fy.AsSpan(s, n - 1), _scale.AsSpan(s, n - 1), _scale.AsSpan(s + 1, n - 1), 1f);
                     int rain = _rainCell[c];
-                    if (rain >= s && rain < s + n) _next[rain] += Rain;
+                    if (rain >= s && rain < s + n && _routes == null) _next[rain] += Rain;
                     if (_boost != null) Step(next, _water.AsSpan(s, n), _boost.AsSpan(s, n));
                     acc.Item2 += Clamp(next);
                 }
@@ -306,6 +307,7 @@ public sealed class Settle
         SweepSeconds[3] += Lap(watch);
         (_water, _next) = (_next, _water);
         RainedLastPass = _raining * (double)Rain;
+        if (_routes != null) { Route(); drained += _routes.Drained; }
         DrainedLastPass = drained;
         Stored = stored;
     }
@@ -342,8 +344,12 @@ public sealed class Settle
         var hi = _head.AsSpan(i, len); var hn = _head.AsSpan(n, len);
         int v = 0, w = Vector<float>.Count;
         for (; v <= len - w; v += w)
-            (Vector.Min(new Vector<float>(ki[v..]), new Vector<float>(kn[v..])) * (new Vector<float>(hi[v..]) - new Vector<float>(hn[v..])) * PerBlock).CopyTo(f[v..]);
-        for (; v < len; v++) f[v] = MathF.Min(ki[v], kn[v]) * (hi[v] - hn[v]) * PerBlock;
+        {
+            var k = Vector.Min(new Vector<float>(ki[v..]), new Vector<float>(kn[v..]));
+            k = Vector.ConditionalSelect(Vector.LessThan(k, new Vector<float>(Open)), k, Vector<float>.Zero); // routed between open cells
+            (k * (new Vector<float>(hi[v..]) - new Vector<float>(hn[v..])) * PerBlock).CopyTo(f[v..]);
+        }
+        for (; v < len; v++) { float k = MathF.Min(ki[v], kn[v]); f[v] = k < Open ? k * (hi[v] - hn[v]) * PerBlock : 0f; }
     }
 
     /// <summary>Flow up from each of cells s.. (count) to the one over it; water falls through open air faster.</summary>
@@ -358,6 +364,7 @@ public sealed class Settle
         for (; v <= count - w; v += w)
         {
             var k = Vector.Min(new Vector<float>(k0[v..]), new Vector<float>(k1[v..]));
+            k = Vector.ConditionalSelect(Vector.LessThan(k, new Vector<float>(Open)), k, Vector<float>.Zero);
             var dh = new Vector<float>(h0[v..]) - new Vector<float>(h1[v..]);
             var falling = Vector.LessThan(dh, Vector<float>.Zero) & Vector.GreaterThanOrEqual(k, airish);
             (Vector.ConditionalSelect(falling, k * fall, k) * dh * PerBlock).CopyTo(f[v..]);
@@ -365,6 +372,7 @@ public sealed class Settle
         for (; v < count; v++)
         {
             float k = MathF.Min(k0[v], k1[v]), dh = h0[v] - h1[v];
+            if (k >= Open) k = 0f;
             if (dh < 0f && k >= _airish) k *= _fall;
             f[v] = k * dh * PerBlock;
         }
@@ -377,6 +385,7 @@ public sealed class Settle
         for (int v = 0; v < count; v++)
         {
             float kk = k[v], dh = h[v] - _land.Size * (y0 + v - 1);
+            if (kk >= Open) continue; // routed
             if (down && kk >= _airish) kk *= _fall;
             if (dh > 0f) d[v] += kk * dh * PerBlock;
         }
