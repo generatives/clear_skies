@@ -9,14 +9,16 @@ using StbImageWriteSharp;
 //
 //   dotnet run -c Release --project tools/ClearSkies.Hydrology -- [--seed 1337] [--cell 1 -1] [--passes 20000]
 //       [--rain 0.002] [--report 500] [--out hydrology-out] [--snapshots]
-//       [--saturate 1] [--fill-hollows] [--local-steps] [--shell 2|all] [--no-falls] [--soil-capacity 2]
+//       [--saturate 1] [--fill-hollows] [--local-steps] [--shell 2|all] [--cascade 32,16] [--no-falls] [--soil-capacity 2]
 //       [--stone-capacity 0.05] [--air 0.15] [--soil 0.01] [--stone 0.0005]
 //
 // With no --cell it takes the spawn's landmass. --snapshots also writes the map at every report. It stops early once
 // as much water drains off the land as rains on it (within 1%, either way). --saturate N starts the ground full of
 // water up to N cells under its top; --fill-hollows starts every hollow in the land's top full; --no-falls makes free
 // water fall a cell or so a pass, as it spreads. --local-steps lets slow ground take bigger steps (see
-// Settle.UseLocalSteps). --shell is how many cells into solid stone the model keeps (all: every cell).
+// Settle.UseLocalSteps). --shell is how many cells into solid stone the model keeps (all: every cell). --cascade settles
+// on bigger cells first, each size starting from the one before, and 8-block cells from the last (stored water is
+// given in 8-block cells throughout).
 
 ulong seed = 1337;
 (int X, int Z)? cell = null;
@@ -25,6 +27,7 @@ float rain = 0.002f;
 string outDir = "hydrology-out";
 bool snapshots = false, falls = true, hollows = false, localSteps = false;
 int saturate = -1, shell = 2;
+int[] cascade = Array.Empty<int>();
 var m = new Materials();
 for (int a = 0; a < args.Length; a++)
 {
@@ -41,6 +44,7 @@ for (int a = 0; a < args.Length; a++)
         case "--fill-hollows": hollows = true; break;
         case "--local-steps": localSteps = true; break;
         case "--shell": { string v = args[++a]; shell = v == "all" ? int.MaxValue : int.Parse(v); break; }
+        case "--cascade": cascade = args[++a].Split(',').Select(int.Parse).ToArray(); break;
         case "--saturate": saturate = int.Parse(args[++a]); break;
         case "--soil-capacity": m = m with { SoilCapacity = float.Parse(args[++a]) }; break;
         case "--stone-capacity": m = m with { StoneCapacity = float.Parse(args[++a]) }; break;
@@ -67,43 +71,54 @@ x0 = CoarseLand.FloorDiv(x0 - 64, 32) * 32; z0 = CoarseLand.FloorDiv(z0 - 64, 32
 x1 = CoarseLand.FloorDiv(x1 + 96, 32) * 32; z1 = CoarseLand.FloorDiv(z1 + 96, 32) * 32;
 Console.WriteLine($"Bounds x {x0}..{x1}, z {z0}..{z1} ({(x1 - x0) / 1000f:0.0} x {(z1 - z0) / 1000f:0.0} km)");
 
-var sw = Stopwatch.StartNew();
-var land = new CoarseLand(seed, landmass, x0, z0, x1, z1, shell);
-int landColumns = 0;
-for (int c = 0; c < land.Columns; c++) if (land.HasLand(c)) landColumns++;
-Console.WriteLine($"Sampled {land.Columns:N0} columns ({landColumns:N0} with land) in {sw.Elapsed.TotalSeconds:0.00} s: " +
-                  $"{land.Cells:N0} cells kept of {land.Spanned:N0} (stone over {shell} cells inside the ground left out), " +
-                  $"{land.Cells * 10L * 4 / 1e6:0} MB as the model holds them (10 floats a cell)");
-
-sw.Restart();
-var settle = new Settle(land, m, rain) { Falls = falls };
-if (localSteps) settle.UseLocalSteps();
-if (saturate >= 0) settle.Saturate(saturate);
-if (hollows) Console.WriteLine($"Filled hollows: {settle.FillHollows():N0} columns under water");
-Console.WriteLine($"Set up materials in {sw.Elapsed.TotalSeconds:0.00} s");
-
-sw.Restart();
-var window = Stopwatch.StartNew();
-double rained = 0, drained = 0;
-int done = 0;
-for (int p = 1; p <= passes; p++)
+// Each cell size in turn, the last 8: each settles from the one before (see Settle.StartFrom).
+CoarseLand land = null!;
+Settle settle = null!, rough = null!;
+foreach (int size in cascade.Append(8))
 {
-    settle.Pass();
-    rained += settle.RainedLastPass; drained += settle.DrainedLastPass;
-    done = p;
-    if (p % report != 0) continue;
-    double ratio = rained > 0 ? drained / rained : 0;
-    Console.WriteLine($"pass {p,6}: {window.Elapsed.TotalMilliseconds / report:0.0} ms/pass, stored {settle.Stored:0}, " +
-                      $"drained/rained over the last {report} {ratio:0.000}");
-    if (snapshots) { Directory.CreateDirectory(outDir); WriteMap(Path.Combine(outDir, $"map-{p:D6}.png")); }
-    window.Restart();
-    if (Math.Abs(ratio - 1) < 0.01) { Console.WriteLine($"Settled: as much drains as rains, after {p} passes"); break; }
-    rained = drained = 0;
+    var sw = Stopwatch.StartNew();
+    land = new CoarseLand(seed, landmass, x0, z0, x1, z1, shell, size);
+    int landColumns = 0;
+    for (int c = 0; c < land.Columns; c++) if (land.HasLand(c)) landColumns++;
+    Console.WriteLine($"{size}-block cells: sampled {land.Columns:N0} columns ({landColumns:N0} with land) in " +
+                      $"{sw.Elapsed.TotalSeconds:0.00} s: {land.Cells:N0} cells kept of {land.Spanned:N0}, " +
+                      $"{land.Cells * 10L * 4 / 1e6:0} MB as the model holds them (10 floats a cell)");
+
+    sw.Restart();
+    settle = new Settle(land, m, rain) { Falls = falls };
+    if (localSteps) settle.UseLocalSteps();
+    if (rough != null) settle.StartFrom(rough);
+    else
+    {
+        if (saturate >= 0) settle.Saturate(saturate);
+        if (hollows) Console.WriteLine($"Filled hollows: {settle.FillHollows():N0} columns under water");
+    }
+    Console.WriteLine($"Set up in {sw.Elapsed.TotalSeconds:0.00} s");
+
+    sw.Restart();
+    var window = Stopwatch.StartNew();
+    double rained = 0, drained = 0;
+    int done = 0;
+    for (int p = 1; p <= passes; p++)
+    {
+        settle.Pass();
+        rained += settle.RainedLastPass; drained += settle.DrainedLastPass;
+        done = p;
+        if (p % report != 0) continue;
+        double ratio = rained > 0 ? drained / rained : 0;
+        Console.WriteLine($"pass {p,6}: {window.Elapsed.TotalMilliseconds / report:0.0} ms/pass, stored {settle.Stored * size * size * size / 512:0}, " +
+                          $"drained/rained over the last {report} {ratio:0.000}");
+        if (snapshots) { Directory.CreateDirectory(outDir); WriteMap(Path.Combine(outDir, $"map-{size}-{p:D6}.png")); }
+        window.Restart();
+        if (Math.Abs(ratio - 1) < 0.01) { Console.WriteLine($"Settled: as much drains as rains, after {p} passes"); break; }
+        rained = drained = 0;
+    }
+    Console.WriteLine($"{done} passes in {sw.Elapsed.TotalSeconds:0.0} s ({sw.Elapsed.TotalMilliseconds / done:0.0} ms/pass); " +
+                      $"total so far {total.Elapsed.TotalSeconds:0.0} s");
+    Console.WriteLine("Per pass: " + string.Join(", ", new[] { "falls and heads", "flows", "shares", "update" }
+        .Select((name, k) => $"{name} {settle.SweepSeconds[k] * 1000 / done:0.0} ms")));
+    rough = settle;
 }
-Console.WriteLine($"{done} passes in {sw.Elapsed.TotalSeconds:0.0} s ({sw.Elapsed.TotalMilliseconds / done:0.0} ms/pass); " +
-                  $"total {total.Elapsed.TotalSeconds:0.0} s");
-Console.WriteLine("Per pass: " + string.Join(", ", new[] { "falls and heads", "flows", "shares", "update" }
-    .Select((name, k) => $"{name} {settle.SweepSeconds[k] * 1000 / done:0.0} ms")));
 
 Directory.CreateDirectory(outDir);
 WriteMap(Path.Combine(outDir, "map.png"));
@@ -128,7 +143,7 @@ void WriteMap(string path)
             if (i < 0) continue;
             open += water[i] * (1f - land.Solid[i]) / settle.Capacity(i);
         }
-        float t = Math.Clamp((land.Top[c] * CoarseLand.Size - 300f) / 900f, 0f, 1f);
+        float t = Math.Clamp((land.Top[c] * land.Size - 300f) / 900f, 0f, 1f);
         float wet = Math.Clamp(water[top] / settle.Capacity(top), 0f, 1f);
         if (open > 0.1f)
         {

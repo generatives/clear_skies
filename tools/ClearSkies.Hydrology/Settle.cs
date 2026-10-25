@@ -23,7 +23,7 @@ public sealed record Materials(float SoilCapacity = 2f, float StoneCapacity = 0.
 /// </summary>
 public sealed class Settle
 {
-    private const float PerBlock = 1f / CoarseLand.Size;
+    private readonly float PerBlock; // 1 / the cell size: head differences are in blocks
 
     private readonly CoarseLand _land;
     private readonly float[] _capacity, _permeability, _head, _scale, _drain;
@@ -42,12 +42,18 @@ public sealed class Settle
     public double Stored, RainedLastPass, DrainedLastPass;
 
     public ReadOnlySpan<float> Water => _water;
+    public CoarseLand Land => _land;
     public float Capacity(int i) => _capacity[i];
 
     public Settle(CoarseLand land, Materials m, float rain)
     {
         _land = land;
-        Rain = rain;
+        PerBlock = 1f / land.Size;
+        // Rain and permeability are given for 8-block cells. The same depth of rain is less of a bigger cell; and a
+        // bigger cell's faces pass as much water per block of head difference over their area, but it's less of the
+        // cell: settling on bigger cells comes to about the same as on 8-block ones.
+        float scale = 8f / land.Size;
+        Rain = rain * scale;
         int n = land.Cells;
         _capacity = new float[n]; _permeability = new float[n]; _head = new float[n]; _scale = new float[n];
         _drain = new float[n]; _fx = new float[n]; _fz = new float[n]; _fy = new float[n];
@@ -65,14 +71,14 @@ public sealed class Settle
                 _capacity[i] = (1f - s) + s * (soil ? m.SoilCapacity : m.StoneCapacity);
                 float ground = soil ? m.SoilPermeability : m.StonePermeability;
                 // Partly solid cells blend geometrically: a thin floor of ground slows water nearly as much as a full one.
-                _permeability[i] = MathF.Exp((1f - s) * MathF.Log(m.AirPermeability) + s * MathF.Log(ground));
+                _permeability[i] = scale * MathF.Exp((1f - s) * MathF.Log(m.AirPermeability) + s * MathF.Log(ground));
             }
             int top = land.Index(c, land.Top[c]);
             _rainCell[c] = land.Solid[top] < 1f ? top : land.Index(c, land.Top[c] + 1);
         });
         foreach (int r in _rainCell) if (r >= 0) _raining++;
         _fall = m.FallPermeability / m.AirPermeability;
-        _airish = m.AirPermeability * 0.5f;
+        _airish = scale * m.AirPermeability * 0.5f;
     }
 
     /// <summary>Lets each cell step as far as it can stably go, rather than all as far as the fastest (open air): slow
@@ -136,19 +142,43 @@ public sealed class Settle
             {
                 int k = land.Index(c, y);
                 if (k < 0) break;
-                float bottom = CoarseLand.Size * (y + land.Solid[k]);
-                float open = MathF.Min(level[c], CoarseLand.Size * (y + 1)) - bottom;
+                float bottom = _land.Size * (y + land.Solid[k]);
+                float open = MathF.Min(level[c], _land.Size * (y + 1)) - bottom;
                 if (open <= 0f) break;
                 // Its ground soaked, and its open part filled to the level.
                 float ground = _capacity[k] - (1f - land.Solid[k]);
-                _water[k] = MathF.Min(_capacity[k], ground + open / CoarseLand.Size);
+                _water[k] = MathF.Min(_capacity[k], ground + open / _land.Size);
             }
         }
         return wet;
     }
 
+    /// <summary>Starts from a settle on bigger cells over the same ground: each cell full up to the head of the bigger
+    /// cell it's in (if that holds any water), so only local detail is left to settle.</summary>
+    public void StartFrom(Settle rough)
+    {
+        var land = _land; var big = rough._land;
+        Parallel.For(0, land.Columns, c =>
+        {
+            if (!land.HasLand(c)) return;
+            int bx = CoarseLand.FloorDiv(land.X0 + (c % land.Nx) * land.Size + land.Size / 2 - big.X0, big.Size);
+            int bz = CoarseLand.FloorDiv(land.Z0 + (c / land.Nx) * land.Size + land.Size / 2 - big.Z0, big.Size);
+            if (bx < 0 || bz < 0 || bx >= big.Nx || bz >= big.Nz) return;
+            int bc = bx + big.Nx * bz;
+            if (!big.HasLand(bc)) return;
+            for (int r = land.RunStart[c]; r < land.RunStart[c + 1]; r++)
+            for (int y = land.RunY0[r], i = land.RunCell[r]; y <= land.RunY1[r]; y++, i++)
+            {
+                int k = big.Index(bc, CoarseLand.FloorDiv(y * land.Size + land.Size / 2, big.Size));
+                if (k < 0 || rough._water[k] <= 0f) continue;
+                float fill = Math.Clamp((rough._head[k] - y * land.Size) * PerBlock, 0f, 1f);
+                _water[i] = fill * _capacity[i];
+            }
+        });
+    }
+
     /// <summary>The height (blocks) of column c's top: its top cell's bottom plus the ground in it.</summary>
-    private float Surface(int c) => CoarseLand.Size * (_land.Top[c] + _land.Solid[_land.Index(c, _land.Top[c])]);
+    private float Surface(int c) => _land.Size * (_land.Top[c] + _land.Solid[_land.Index(c, _land.Top[c])]);
 
     /// <summary>Seconds spent in each of a pass's four sweeps, over every pass so far.</summary>
     public readonly double[] SweepSeconds = new double[4];
@@ -191,7 +221,7 @@ public sealed class Settle
                 for (int i = last; i >= first; i--)
                 {
                     float fill = _water[i] / _capacity[i];
-                    float h = CoarseLand.Size * (y0 + i - first + fill);
+                    float h = _land.Size * (y0 + i - first + fill);
                     if (fill >= 1f && !float.IsNaN(above)) h = MathF.Max(h, above);
                     _head[i] = h;
                     above = _water[i] > 0f ? h : float.NaN;
@@ -346,7 +376,7 @@ public sealed class Settle
         var k = _permeability.AsSpan(s, count); var h = _head.AsSpan(s, count); var d = _drain.AsSpan(s, count);
         for (int v = 0; v < count; v++)
         {
-            float kk = k[v], dh = h[v] - CoarseLand.Size * (y0 + v - 1);
+            float kk = k[v], dh = h[v] - _land.Size * (y0 + v - 1);
             if (down && kk >= _airish) kk *= _fall;
             if (dh > 0f) d[v] += kk * dh * PerBlock;
         }

@@ -3,7 +3,8 @@ using ClearSkies.Game.Generation;
 namespace ClearSkies.Hydrology;
 
 /// <summary>
-/// One landmass sampled into cells <see cref="Size"/> blocks on a side. Each coarse column (Size by Size blocks) spans
+/// One landmass sampled into cells <see cref="Size"/> blocks on a side (8 for the model itself, more for a rough first
+/// settle to start it from). Each coarse column (Size by Size blocks) spans
 /// from the bottom of its lowest ground (Lo) up to just above the highest ground around it (Hi); over that is open sky,
 /// under it the void. Of those cells only the ones water can reach are kept: solid stone more than
 /// <see cref="Shell"/> cells inside the ground is left out (inert: it holds and passes no water). What's kept is in
@@ -12,7 +13,7 @@ namespace ClearSkies.Hydrology;
 /// </summary>
 public sealed class CoarseLand
 {
-    public const int Size = 8;
+    public readonly int Size;               // blocks on a side of a cell
 
     public readonly int X0, Z0, Nx, Nz;     // the first column's corner (blocks) and the columns across and along
     public readonly int[] Lo, Hi, Top;      // per column: its lowest and highest cell, and its ground's top cell
@@ -30,12 +31,13 @@ public sealed class CoarseLand
     /// <summary>Samples landmass <paramref name="cell"/> between blocks (x0, z0) and (x1, z1): each column at its
     /// middle block column, on all cores. Keeps solid cells up to <paramref name="shell"/> cells inside the ground
     /// (int.MaxValue keeps them all).</summary>
-    public CoarseLand(ulong seed, (int X, int Z) cell, int x0, int z0, int x1, int z1, int shell = 2)
+    public CoarseLand(ulong seed, (int X, int Z) cell, int x0, int z0, int x1, int z1, int shell = 2, int size = 8)
     {
+        Size = size;
         X0 = x0; Z0 = z0; Nx = (x1 - x0) / Size; Nz = (z1 - z0) / Size; Shell = shell;
         var spans = new (short Lo, short Hi)[Columns][];
         // A chunk's worth of columns at a time, so each sampler loads that chunk's hearts once.
-        const int PerChunk = 32 / Size;
+        int PerChunk = System.Math.Max(1, 32 / Size);
         int chunksX = (Nx + PerChunk - 1) / PerChunk, chunksZ = (Nz + PerChunk - 1) / PerChunk;
         var generators = new ThreadLocal<(HeartWorldGenerator Gen, List<(short, short)> List)>(
             () => (new HeartWorldGenerator(seed), new List<(short, short)>()));
