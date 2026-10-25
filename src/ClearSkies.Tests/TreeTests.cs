@@ -81,8 +81,8 @@ public class TreeTests
 
         // A lake with a river out of it, in a wet part of this seed's spawn continent.
         int lakes = 0, rivers = 0;
-        for (int z = -8030; z < -7902; z++)
-        for (int x = 9690; x < 9818; x++)
+        for (int z = -5856; z < -5728; z++)
+        for (int x = 9456; x < 9584; x++)
         {
             var w = water.At(x, z);
             if (w.Level == int.MinValue) continue;

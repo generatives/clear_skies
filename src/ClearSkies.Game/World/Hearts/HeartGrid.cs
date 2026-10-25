@@ -87,6 +87,14 @@ public static class HeartGrid
     // ContinentEdgeLow, fading in until ContinentEdgeHigh.
     private const float ContinentSpacing = 24000f, ContinentDetail = 7500f, ContinentEdgeLow = 0.46f, ContinentEdgeHigh = 0.56f;
 
+    /// <summary>Landmasses: the world is cut into cells about this many blocks across, each one jittered grid point's
+    /// nearest ground, with open sky along their borders, so no land is bigger than one cell (see LandmassBorder).</summary>
+    public const float LandmassSpacing = 6500f;
+    // How far a landmass's point may sit from its cell's middle (a share of the cell); hearts within LandmassGap of a
+    // border are dead, coming back over LandmassFade, so the pieces either side (up to a cell's reach of their hearts)
+    // never meet.
+    private const float LandmassJitter = 0.6f, LandmassGap = 600f, LandmassFade = 600f;
+
     // Clumps: value noise at these spacings (blocks). Clusters: blobs of value noise at ClusterSpacing, their edges
     // roughened by a finer one at ClusterDetail, gathered where the clumps are.
     private const float ClumpSpacing = 16000f, ClumpDetail = 5000f, ClusterSpacing = 3500f, ClusterDetail = 1100f;
@@ -108,12 +116,59 @@ public static class HeartGrid
         return new Heart(x, -y, z, surface, alive, exists, rng.NextFloat01());
     }
 
-    /// <summary>How likely a heart at (x, y, z) is to be alive: by height and the mountain ranges, within a continent.</summary>
+    /// <summary>How likely a heart at (x, y, z) is to be alive: by height and the mountain ranges, within a continent,
+    /// dying off towards its landmass's border.</summary>
     public static float AliveChance(ulong seed, float x, float y, float z)
     {
         float continent = Continent(seed, x, z);
         if (continent <= 0f) return 0f;
-        return continent * LandChance(seed, x, y, z);
+        float inside = Smoothstep(LandmassGap, LandmassGap + LandmassFade, LandmassBorder(seed, x, z, out _));
+        if (inside <= 0f) return 0f;
+        return continent * inside * LandChance(seed, x, y, z);
+    }
+
+    /// <summary>Which landmass (x, z) belongs to: the cell of the jittered <see cref="LandmassSpacing"/> grid whose
+    /// point is nearest. No land crosses from one to another (see <see cref="LandmassBorder"/>).</summary>
+    public static (int X, int Z) Landmass(ulong seed, float x, float z)
+    {
+        LandmassBorder(seed, x, z, out var cell);
+        return cell;
+    }
+
+    /// <summary>How far (x, z) is inside its landmass: the distance to the nearest edge of its cell, the line halfway
+    /// to a neighbouring cell's point. Hearts within LandmassGap of it are dead, so there is always open sky between
+    /// two landmasses and none is wider than about <see cref="LandmassSpacing"/> times (1 + LandmassJitter).</summary>
+    public static float LandmassBorder(ulong seed, float x, float z, out (int X, int Z) cell)
+    {
+        int ci = (int)MathF.Floor(x / LandmassSpacing), cj = (int)MathF.Floor(z / LandmassSpacing);
+        cell = (ci, cj);
+        float bestX = 0f, bestZ = 0f, best = float.MaxValue;
+        for (int j = cj - 1; j <= cj + 1; j++)
+        for (int i = ci - 1; i <= ci + 1; i++)
+        {
+            var (sx, sz) = LandmassPoint(seed, i, j);
+            float d = (sx - x) * (sx - x) + (sz - z) * (sz - z);
+            if (d < best) { best = d; bestX = sx; bestZ = sz; cell = (i, j); }
+        }
+        float border = float.MaxValue;
+        for (int j = cell.Z - 2; j <= cell.Z + 2; j++)
+        for (int i = cell.X - 2; i <= cell.X + 2; i++)
+        {
+            if (i == cell.X && j == cell.Z) continue;
+            var (sx, sz) = LandmassPoint(seed, i, j);
+            float nx = sx - bestX, nz = sz - bestZ, len = MathF.Sqrt(nx * nx + nz * nz);
+            // How far short of the halfway line to that point (x, z) is, along the line between the two points.
+            float d = ((0.5f * (sx + bestX) - x) * nx + (0.5f * (sz + bestZ) - z) * nz) / len;
+            border = MathF.Min(border, d);
+        }
+        return border;
+    }
+
+    private static (float X, float Z) LandmassPoint(ulong seed, int i, int j)
+    {
+        var rng = new SplitMix64Rng(HashCell(seed, 306, i, 0, j));
+        return ((i + 0.5f + LandmassJitter * (rng.NextFloat01() - 0.5f)) * LandmassSpacing,
+                (j + 0.5f + LandmassJitter * (rng.NextFloat01() - 0.5f)) * LandmassSpacing);
     }
 
     /// <summary>0-1: how far inside a continent (x, z) is. Continents are land many kilometres across; between them are
