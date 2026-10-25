@@ -405,6 +405,54 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         return null;
     }
 
+    /// <summary>The solid spans (bottom up) of block column (x, z), as Prepare finds them but before any water cuts
+    /// them: worked out for that column alone, for sampling the land coarsely (see the hydrology tool).</summary>
+    public void ColumnSpans(int x, int z, List<(short Lo, short Hi)> into)
+    {
+        into.Clear();
+        int chunkX = x >> 5, chunkZ = z >> 5;
+        float x0 = chunkX * S, z0 = chunkZ * S;
+        if (chunkX != _topsX || chunkZ != _topsZ)
+        {
+            _topsX = chunkX; _topsZ = chunkZ;
+            float top = float.MinValue;
+            for (int j = 0; j <= 2; j++)
+            for (int i = 0; i <= 2; i++)
+                top = MathF.Max(top, _terrain.Height(x0 + i * S * 0.5f, z0 + j * S * 0.5f));
+            top = MathF.Min(top + TerrainRiseMargin, HeartGrid.WorldTop - 1);
+            LoadHearts(x0 - WarpAcross, z0 - WarpAcross, x0 + S + WarpAcross, z0 + S + WarpAcross,
+                       HeartGrid.LowestBottom - top - WarpUp, WarpUp);
+        }
+        bool anyAlive = false;
+        foreach (bool a in _alive.AsSpan(0, _heartCount)) if (a) { anyAlive = true; break; }
+        if (!anyAlive) return;
+
+        float wx = x, wz = z;
+        float height = MathF.Min(_terrain.Height(wx, wz), HeartGrid.WorldTop - 1);
+        float px = wx + WarpAcross * _warpX.GetNoise(wx, wz);
+        float pz = wz + WarpAcross * _warpZ.GetNoise(wx, wz);
+        float lift = WarpUp * _warpY.GetNoise(wx, wz);
+        float wearNoise = 0.6f + 0.4f * (_crack.GetNoise(wx, wz) + 1f);
+        _nearValid = false;
+        // The same walk as BuildProfile's.
+        int runLo = int.MinValue;
+        int yBottom = (int)MathF.Ceiling(HeartGrid.LowestBottom + BottomRoughness * (0.5f + 0.5f * _bottom.GetNoise(wx, wz)));
+        int yTop = (int)MathF.Floor(height);
+        for (int y = yBottom; y <= yTop + 1;)
+        {
+            bool solid = false;
+            int step = 1;
+            if (y <= yTop) solid = SolidAt(px, pz, lift, wearNoise, height, y, out step);
+            if (solid && runLo == int.MinValue) runLo = y;
+            else if (!solid && runLo != int.MinValue)
+            {
+                if (into.Count < MaxSpans && y - runLo >= MinThickness) into.Add(((short)runLo, (short)(y - 1)));
+                runLo = int.MinValue;
+            }
+            y = System.Math.Min(y + step, System.Math.Max(y + 1, yTop + 1));
+        }
+    }
+
     /// <summary>0 in the floor to 1 in the broken ground above: how far wear goes from the floor's to the upper.</summary>
     private static float WearBlend(float y)
     {
