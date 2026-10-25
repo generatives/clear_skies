@@ -28,8 +28,8 @@ public struct Shown
 /// Shows a chunk once it's lit and baked (<see cref="Shown"/>), dissolving in, and swaps the levels of detail the chunk
 /// loader streams (see <see cref="ChunkLoadSystem.SetLevels"/>), each chunk deciding as the levels around it change:
 /// <list type="bullet">
-/// <item>Under a coarser chunk drawn over it, it's left out; it comes in as that swaps out, from the same time, so each
-/// pixel shows one of them.</item>
+/// <item>Under a coarser chunk drawn over it, at any level up, it's left out; it comes in as that swaps out, from the
+/// same time, so each pixel shows one of them.</item>
 /// <item>A coarse chunk is drawn over the eight finer chunks under it until they're all shown (or air) and lit, then
 /// swaps out for them; once the finer level lets go of them, it swaps back in. It holds them in the pipeline
 /// (<see cref="ChunkPipeline.Hold"/>) while it's out, and till it's in, so they don't vanish first. One first shown
@@ -61,6 +61,10 @@ public sealed class ShownStage(ChunkPipeline pipeline, Time time, Stage ready, C
         public ChunkEntry? Entry; // null: air
         public bool Over;         // a coarse chunk drawn over the eight under it, rather than them
         public double SwappedAt = double.NegativeInfinity;
+        public bool Hidden;       // under a coarser chunk drawn over it
+        // Whether what's under it is left out (it, or one over it, is drawn over them), and since when.
+        public bool HidesBelow => Over || Hidden;
+        public double BelowAt = double.NegativeInfinity;
         public byte Held;         // which of the eight it holds, a bit each (see Relation.Child)
     }
 
@@ -84,21 +88,23 @@ public sealed class ShownStage(ChunkPipeline pipeline, Time time, Stage ready, C
         if (first && over == null && !AboveShown(record)) return StageResult.WaitingForInputs;
         showing ??= new Showing(record.Key);
         var entry = showing.Entry = pipeline.EntryOf(record.Key);
-        bool wasOver = showing.Over;
+        bool wasOver = showing.Over, wasBelow = showing.HidesBelow;
         double again = record.Grid.Finer is { } finer && entry != null ? Swap(record, showing, finer, first, now) : 0;
+        showing.Hidden = over is { HidesBelow: true };
+        if (showing.HidesBelow != wasBelow) showing.BelowAt = showing.Over != wasOver ? showing.SwappedAt : over?.BelowAt ?? now;
 
         if (entry != null)
         {
-            bool visible = over is not { Over: true } && (record.Grid.Finer == null || showing.Over);
-            // From when the chunk over it swapped, while that's still fading, so the two dissolve into each other.
-            double at = over != null && now - over.SwappedAt < FadeSeconds ? over.SwappedAt : now;
+            bool visible = !showing.Hidden && (record.Grid.Finer == null || showing.Over);
+            // From when what's over it swapped, while that's still fading, so the two dissolve into each other.
+            double at = over != null && now - over.BelowAt < FadeSeconds ? over.BelowAt : now;
             var e = entry.Entity;
             if (!e.Has<Shown>()) e.Set(new Shown { Visible = visible, At = visible ? at : double.NegativeInfinity });
             else if (e.Get<Shown>().Visible != visible) e.Set(new Shown { Visible = visible, At = at });
         }
 
-        // What's read of it (whether it's there, and drawn over the chunks under it) changed: they look again.
-        var result = first || showing.Over != wasOver ? StageResult.Done(showing) : StageResult.Same(showing);
+        // What's read of it (whether it's there, drawn over the chunks under it, or hides them) changed: they look again.
+        var result = first || showing.Over != wasOver || showing.HidesBelow != wasBelow ? StageResult.Done(showing) : StageResult.Same(showing);
         return again > 0 ? result.AskAgainIn(again) : result;
     }
 
