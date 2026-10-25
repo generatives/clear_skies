@@ -154,6 +154,23 @@ public sealed class CoarseLand
         return -1;
     }
 
+    /// <summary>Takes <paramref name="blocks"/> of ground off the top of column c (taking its ground as filling each cell
+    /// from the bottom), no deeper than its kept cells go. Returns how much it took.</summary>
+    public float Carve(int c, float blocks)
+    {
+        float took = 0f;
+        while (blocks > 0f && HasLand(c))
+        {
+            int i = Index(c, Top[c]), below = Index(c, Top[c] - 1);
+            if (i < 0 || below < 0 || Index(c, Top[c] - 2) < 0) break; // keep some kept ground under it
+            float ground = Solid[i] * Size, take = Math.Min(blocks, ground);
+            Solid[i] = (ground - take) / Size;
+            took += take; blocks -= take;
+            if (Solid[i] <= 0f) { Solid[i] = 0f; Top[c]--; }
+        }
+        return took;
+    }
+
     private int[]? _cellY;
     /// <summary>The height (cells) of kept cell i.</summary>
     public int RunY0Of(int i)

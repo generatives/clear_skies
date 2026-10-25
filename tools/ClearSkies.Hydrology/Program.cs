@@ -22,6 +22,8 @@ using StbImageWriteSharp;
 // only the ground is simulated. --solve solves for the settled state directly (see Settle.Solve.cs), with open air
 // passing --solve-air (default: as --air; several, comma separated, go up in steps); --check N then steps N passes from it to see how far it drifts. --last is
 // the cell size to end on (8). --export FILE writes the last size's solve problem out instead (see Settle.Export).
+// --carve N lowers the land where water runs over it and solves again, N times (--carve-from: how many columns' rain
+// must run through a column; --carve-depth, --carve-most: blocks a round).
 
 ulong seed = 1337;
 (int X, int Z)? cell = null;
@@ -29,7 +31,9 @@ int passes = 20000, report = 500;
 float rain = 0.002f;
 string outDir = "hydrology-out";
 bool snapshots = false, falls = true, hollows = false, localSteps = false, routing = false, solve = false;
-int last = 8, check = 0;
+int last = 8, check = 0, carve = 0;
+float carveFrom = 20f, carveDepth = 2f, carveMost = 8f;
+string? writeChannels = null;
 float[] solveAir = { 0f };
 var solveSet = new List<Action<Settle>>();
 int saturate = -1, shell = 2;
@@ -55,6 +59,10 @@ for (int a = 0; a < args.Length; a++)
         case "--shrink": { var v = double.Parse(args[++a]); solveSet.Add(st => st.SolveShrink = v); break; }
         case "--wet": { var v = float.Parse(args[++a]); solveSet.Add(st => st.WetFill = v); break; }
         case "--walls": { var v = float.Parse(args[++a]); solveSet.Add(st => st.WallPermeability = v); break; }
+        case "--carve": carve = int.Parse(args[++a]); break;
+        case "--carve-from": carveFrom = float.Parse(args[++a]); break;
+        case "--carve-depth": carveDepth = float.Parse(args[++a]); break;
+        case "--carve-most": carveMost = float.Parse(args[++a]); break;
         case "--tau-growth": { var v = double.Parse(args[++a]); solveSet.Add(st => st.TauGrowth = v); break; }
         case "--start-fill": { var v = float.Parse(args[++a]); solveSet.Add(st => st.StartFill = v); break; }
         case "--rounds": { var v = int.Parse(args[++a]); solveSet.Add(st => st.SolveRounds = v); break; }
@@ -158,6 +166,38 @@ foreach (int size in cascade.Append(last))
     rough = settle;
 }
 
+// Carving: where water runs over the land, lower it (more, the more runs), the valley sides too, then solve again
+// from where it was; the water gathers into what's carved, and the next round carves that deeper.
+for (int round = 1; round <= carve; round++)
+{
+    Directory.CreateDirectory(outDir);
+    if (settle.Runs != null) WriteFlow(Path.Combine(outDir, $"flow-{round - 1}.png"));
+    writeChannels = Path.Combine(outDir, $"channels-{round - 1}.png");
+    var depth = Channels();
+    var sides = (float[])depth.Clone();
+    for (int j = 0; j < land.Nz; j++)
+    for (int i = 0; i < land.Nx; i++)
+    {
+        int c = i + land.Nx * j;
+        for (int dj = -1; dj <= 1; dj++)
+        for (int di = -1; di <= 1; di++)
+        {
+            int ni = i + di, nj = j + dj;
+            if (ni >= 0 && nj >= 0 && ni < land.Nx && nj < land.Nz) sides[c] = Math.Max(sides[c], 0.5f * depth[ni + land.Nx * nj]);
+        }
+    }
+    double carved = 0; int columnsCarved = 0;
+    for (int c = 0; c < land.Columns; c++)
+        if (sides[c] > 0f) { carved += land.Carve(c, sides[c]); columnsCarved++; }
+    Console.WriteLine($"Carving round {round}: {columnsCarved:N0} columns lowered, {carved / Math.Max(1, columnsCarved):0.0} blocks on average");
+    var before = settle;
+    settle = new Settle(land, m, rain) { Falls = falls };
+    foreach (var set in solveSet) set(settle);
+    settle.SolveAir = solveAir[^1];
+    settle.StartHeadsFrom(before);
+    settle.SolveSteady(fromHeads: true);
+}
+
 Directory.CreateDirectory(outDir);
 WriteMap(Path.Combine(outDir, "map.png"));
 WriteSection(Path.Combine(outDir, "section.png"));
@@ -166,6 +206,84 @@ Console.WriteLine($"Wrote {Path.GetFullPath(outDir)}/map.png and section.png");
 return 0;
 
 // Top-down: land shaded by height and greener where its top cell is wetter, open water blue by depth, void dark.
+// Drainage lines over the land's surface: a priority flood in from the columns beside a crack or the void (where water
+// leaves) gives each column the one it drains to (over hollows, by their spill point); water coming out of the ground
+// (springs) is added up along those, and columns carrying enough get a channel, deeper the more (lakes left alone).
+float[] Channels()
+{
+    int nx = land.Nx, nz = land.Nz, n = land.Columns;
+    var surface = new float[n];
+    for (int c = 0; c < n; c++)
+        if (land.HasLand(c)) surface[c] = land.Size * (land.Top[c] + land.Solid[land.Index(c, land.Top[c])]);
+    var level = new float[n]; var to = new int[n]; var order = new List<int>(n);
+    Array.Fill(level, float.NaN); Array.Fill(to, -1);
+    var queue = new PriorityQueue<int, float>();
+    for (int c = 0; c < n; c++)
+    {
+        if (!land.HasLand(c)) continue;
+        int i = c % nx, j = c / nx;
+        bool edge = false;
+        for (int dj = -1; dj <= 1 && !edge; dj++)
+        for (int di = -1; di <= 1 && !edge; di++)
+        {
+            int ni = i + di, nj = j + dj;
+            edge = ni < 0 || nj < 0 || ni >= nx || nj >= nz || !land.HasLand(ni + nx * nj);
+        }
+        if (edge) { level[c] = surface[c]; queue.Enqueue(c, surface[c]); }
+    }
+    while (queue.TryDequeue(out int c, out float at))
+    {
+        order.Add(c);
+        int i = c % nx, j = c / nx;
+        for (int dj = -1; dj <= 1; dj++)
+        for (int di = -1; di <= 1; di++)
+        {
+            int ni = i + di, nj = j + dj;
+            if (ni < 0 || nj < 0 || ni >= nx || nj >= nz) continue;
+            int d = ni + nx * nj;
+            if (!land.HasLand(d) || !float.IsNaN(level[d])) continue;
+            level[d] = Math.Max(at, surface[d]);
+            to[d] = c;
+            queue.Enqueue(d, level[d]);
+        }
+    }
+    var gathered = new float[n];
+    for (int k = order.Count - 1; k >= 0; k--)
+    {
+        int c = order[k];
+        gathered[c] += settle.Springs![c];
+        if (to[c] >= 0) gathered[to[c]] += gathered[c];
+    }
+    var depth = new float[n];
+    int channels = 0;
+    for (int c = 0; c < n; c++)
+    {
+        float columns = gathered[c] / settle.Rain;
+        bool lake = level[c] > surface[c] + 1f;
+        if (lake || columns < carveFrom) continue;
+        depth[c] = Math.Min(carveMost, carveDepth * MathF.Pow(columns / carveFrom, 0.4f));
+        channels++;
+    }
+    Console.WriteLine($"Channels: {channels:N0} columns carry {carveFrom} columns' rain or more");
+    if (writeChannels != null)
+    {
+        var rgb = new byte[n * 3];
+        for (int c = 0; c < n; c++)
+        {
+            int o = c * 3;
+            if (!land.HasLand(c)) { rgb[o] = 18; rgb[o + 1] = 22; rgb[o + 2] = 34; continue; }
+            float t = Math.Clamp((surface[c] - 300f) / 900f, 0f, 1f), g = 70 + 60 * t;
+            float w = Math.Clamp(MathF.Log10(Math.Max(gathered[c] / settle.Rain, 1f)) / 3.5f, 0f, 1f);
+            bool lake = level[c] > surface[c] + 1f;
+            rgb[o] = (byte)(lake ? 40 : g * (1 - w) + 60 * w); rgb[o + 1] = (byte)(lake ? 90 : g * (1 - w) + 160 * w);
+            rgb[o + 2] = (byte)(lake ? 200 : g * (1 - w) + 255 * w);
+        }
+        Save(writeChannels, nx, nz, rgb);
+        writeChannels = null;
+    }
+    return depth;
+}
+
 // Where water goes, once solved: land grey by height, water running over it blue (brighter, more of it, on a log
 // scale from a column's own rain to a thousand columns' worth), springs (water out of the ground) red.
 void WriteFlow(string path)
