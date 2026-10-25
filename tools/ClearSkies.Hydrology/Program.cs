@@ -9,18 +9,19 @@ using StbImageWriteSharp;
 //
 //   dotnet run -c Release --project tools/ClearSkies.Hydrology -- [--seed 1337] [--cell 1 -1] [--passes 20000]
 //       [--rain 0.002] [--report 500] [--out hydrology-out] [--snapshots]
-//       [--saturate 1] [--no-falls] [--ground-capacity 2] [--air 0.15] [--soil 0.01] [--stone 0.0005]
+//       [--saturate 1] [--fill-hollows] [--no-falls] [--ground-capacity 2] [--air 0.15] [--soil 0.01] [--stone 0.0005]
 //
 // With no --cell it takes the spawn's landmass. --snapshots also writes the map at every report. It stops early once
 // as much water drains off the land as rains on it (within 1%, either way). --saturate N starts the ground full of
-// water up to N cells under its top; --no-falls makes free water fall a cell or so a pass, as it spreads.
+// water up to N cells under its top; --fill-hollows starts every hollow in the land's top full; --no-falls makes free
+// water fall a cell or so a pass, as it spreads.
 
 ulong seed = 1337;
 (int X, int Z)? cell = null;
 int passes = 20000, report = 500;
 float rain = 0.002f;
 string outDir = "hydrology-out";
-bool snapshots = false, falls = true;
+bool snapshots = false, falls = true, hollows = false;
 int saturate = -1;
 var m = new Materials();
 for (int a = 0; a < args.Length; a++)
@@ -35,6 +36,7 @@ for (int a = 0; a < args.Length; a++)
         case "--out": outDir = args[++a]; break;
         case "--snapshots": snapshots = true; break;
         case "--no-falls": falls = false; break;
+        case "--fill-hollows": hollows = true; break;
         case "--saturate": saturate = int.Parse(args[++a]); break;
         case "--ground-capacity": m = m with { GroundCapacity = float.Parse(args[++a]) }; break;
         case "--air": m = m with { AirPermeability = float.Parse(args[++a]) }; break;
@@ -70,6 +72,7 @@ Console.WriteLine($"Sampled {land.Columns:N0} columns ({landColumns:N0} with lan
 sw.Restart();
 var settle = new Settle(land, m, rain) { Falls = falls };
 if (saturate >= 0) settle.Saturate(saturate);
+if (hollows) Console.WriteLine($"Filled hollows: {settle.FillHollows():N0} columns under water");
 Console.WriteLine($"Set up materials in {sw.Elapsed.TotalSeconds:0.00} s");
 
 sw.Restart();

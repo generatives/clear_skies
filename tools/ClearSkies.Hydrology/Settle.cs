@@ -85,6 +85,58 @@ public sealed class Settle
         });
     }
 
+    /// <summary>Starts every hollow in the land's top full of water to where it would spill (a priority flood in from
+    /// the land's edges and cracks), so lakes don't have to fill a raindrop at a time. Returns how many columns hold
+    /// some.</summary>
+    public int FillHollows()
+    {
+        var land = _land;
+        int nx = land.Nx, nz = land.Nz;
+        var level = new float[land.Columns];
+        var queue = new PriorityQueue<int, float>();
+        for (int c = 0; c < land.Columns; c++)
+        {
+            level[c] = float.NaN;
+            if (land.Count(c) == 0) continue;
+            int i = c % nx, j = c / nx;
+            bool edge = i == 0 || j == 0 || i == nx - 1 || j == nz - 1
+                     || land.Count(c - 1) == 0 || land.Count(c + 1) == 0 || land.Count(c - nx) == 0 || land.Count(c + nx) == 0;
+            if (!edge) continue;
+            level[c] = Surface(c);
+            queue.Enqueue(c, level[c]);
+        }
+        while (queue.TryDequeue(out int c, out float l))
+        {
+            int i = c % nx, j = c / nx;
+            foreach (int n in stackalloc[] { i + 1 < nx ? c + 1 : -1, i > 0 ? c - 1 : -1, j + 1 < nz ? c + nx : -1, j > 0 ? c - nx : -1 })
+            {
+                if (n < 0 || land.Count(n) == 0 || !float.IsNaN(level[n])) continue;
+                level[n] = MathF.Max(Surface(n), l);
+                queue.Enqueue(n, level[n]);
+            }
+        }
+        int wet = 0;
+        for (int c = 0; c < land.Columns; c++)
+        {
+            if (float.IsNaN(level[c]) || level[c] <= Surface(c) + 0.5f) continue;
+            wet++;
+            for (int y = land.Top[c]; y <= land.Hi[c]; y++)
+            {
+                int k = land.Index(c, y);
+                float bottom = CoarseLand.Size * (y + land.Solid[k]);
+                float open = MathF.Min(level[c], CoarseLand.Size * (y + 1)) - bottom;
+                if (open <= 0f) break;
+                // Its ground soaked, and its open part filled to the level.
+                float ground = _capacity[k] - (1f - land.Solid[k]);
+                _water[k] = MathF.Min(_capacity[k], ground + open / CoarseLand.Size);
+            }
+        }
+        return wet;
+    }
+
+    /// <summary>The height (blocks) of column c's top: its top cell's bottom plus the ground in it.</summary>
+    private float Surface(int c) => CoarseLand.Size * (_land.Top[c] + _land.Solid[_land.Index(c, _land.Top[c])]);
+
     public void Pass()
     {
         var land = _land;
