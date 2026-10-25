@@ -33,6 +33,7 @@ public sealed partial class Settle
     private readonly int[] _rainCell;
     private readonly int _raining;
     private readonly float _fall, _airish, _airPermeability;
+    private readonly int _soilDepth;
 
     public float Rain { get; set; }
 
@@ -79,6 +80,7 @@ public sealed partial class Settle
         foreach (int r in _rainCell) if (r >= 0) _raining++;
         _fall = m.FallPermeability / m.AirPermeability;
         _airPermeability = m.AirPermeability;
+        _soilDepth = m.SoilDepth;
         _airish = scale * m.AirPermeability * 0.5f;
     }
 

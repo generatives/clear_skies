@@ -54,6 +54,7 @@ for (int a = 0; a < args.Length; a++)
         case "--solve-air": solveAir = args[++a].Split(',').Select(float.Parse).ToArray(); break;
         case "--shrink": { var v = double.Parse(args[++a]); solveSet.Add(st => st.SolveShrink = v); break; }
         case "--wet": { var v = float.Parse(args[++a]); solveSet.Add(st => st.WetFill = v); break; }
+        case "--walls": { var v = float.Parse(args[++a]); solveSet.Add(st => st.WallPermeability = v); break; }
         case "--tau-growth": { var v = double.Parse(args[++a]); solveSet.Add(st => st.TauGrowth = v); break; }
         case "--start-fill": { var v = float.Parse(args[++a]); solveSet.Add(st => st.StartFill = v); break; }
         case "--rounds": { var v = int.Parse(args[++a]); solveSet.Add(st => st.SolveRounds = v); break; }

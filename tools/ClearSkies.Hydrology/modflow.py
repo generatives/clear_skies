@@ -62,7 +62,8 @@ os.makedirs(args.work, exist_ok=True)
 sim = flopy.mf6.MFSimulation(sim_name="settle", exe_name=args.mf6, sim_ws=args.work, verbosity_level=0)
 flopy.mf6.ModflowTdis(sim, nper=1, perioddata=[(1.0, 1, 1.0)])
 flopy.mf6.ModflowIms(sim, complexity=args.complexity, outer_maximum=args.outer, inner_maximum=200,
-                     outer_dvclose=0.01, inner_dvclose=0.001, linear_acceleration="BICGSTAB")
+                     outer_dvclose=0.01, inner_dvclose=0.001, linear_acceleration="BICGSTAB",
+                     csv_outer_output_filerecord="outer.csv", csv_inner_output_filerecord="inner.csv")
 gwf = flopy.mf6.ModflowGwf(sim, modelname="land", newtonoptions="UNDER_RELAXATION", save_flows=False)
 flopy.mf6.ModflowGwfdisu(gwf, nodes=n, nja=nja, top=bottom + size, bot=bottom, area=np.full(n, size * size),
                          iac=iac, ja=ja, ihc=ihc, cl12=cl12, hwva=hwva)
@@ -81,6 +82,12 @@ print(f"wrote the model in {time.time() - t:.1f} s")
 t = time.time()
 ok, out = sim.run_simulation(silent=True, report=True)
 print(f"MODFLOW {'converged' if ok else 'FAILED'} in {time.time() - t:.1f} s")
+try:
+    outer = sum(1 for _ in open(os.path.join(args.work, "outer.csv"))) - 1
+    inner = sum(1 for _ in open(os.path.join(args.work, "inner.csv"))) - 1
+    print(f"  {outer} outer (Newton) iterations, {inner} inner (linear) iterations")
+except OSError:
+    pass
 for line in out:
     if "OUTER" in line.upper() and "ITERATION" in line.upper() or "converge" in line.lower() or "TOTAL" in line:
         print("  " + line.strip())

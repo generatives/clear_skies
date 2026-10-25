@@ -20,6 +20,8 @@ public sealed partial class Settle
     /// <summary>How full (of a cell) a cell must be to pass water freely; emptier, it passes proportionally less.</summary>
     public float WetFill { get; set; } = 0.1f;
     public float StartFill { get; set; } = 0f;
+    /// <summary>Ground facing cracks, cliffs and the void passes this share of its permeability (0: as any other).</summary>
+    public float WallPermeability { get; set; }
     public double TauGrowth { get; set; } = 2;
     public int SolveRounds { get; set; } = 300;
     public double SolveShrink { get; set; } = 0.1; // how far each round's linear solve brings its residual down
@@ -128,6 +130,26 @@ public sealed partial class Settle
         foreach (var (a, b) in pairs) { counts[a + 1]++; counts[b + 1]++; }
         for (int i = 0; i < n; i++) counts[i + 1] += counts[i];
         var fine = new Level { N = n, Start = counts, Col = new int[counts[n]], Val = new double[counts[n]], Diag = new double[n] };
+        if (WallPermeability > 0)
+        {
+            // Watertight walls: ground facing the void, or open air beside or under it below the soil (cracks, cliffs,
+            // overhangs, caves), passes next to nothing, so ground water stays in and comes out inland.
+            var wall = new bool[n];
+            bool Ground(int i) => land.Solid[i] >= 0.5f;
+            bool Deep(int i) => land.Top[column[i]] - y[i] > _soilDepth;
+            for (int i = 0; i < n; i++) if (voidK[i] > 0 && Ground(i)) wall[i] = true;
+            foreach (var (p, q) in pairs)
+            {
+                if (Ground(p) == Ground(q)) continue;
+                int g = Ground(p) ? p : q, o = g == p ? q : p;
+                bool under = column[g] == column[o] && y[o] < y[g];
+                bool beside = column[g] != column[o] && Deep(g);
+                if (under || beside) wall[g] = true;
+            }
+            int walls = 0;
+            for (int i = 0; i < n; i++) if (wall[i]) { k[i] *= WallPermeability; walls++; }
+            Console.WriteLine($"Watertight walls: {walls:N0} cells");
+        }
         var faceK = new double[counts[n]];
         var fill = (int[])counts.Clone();
         foreach (var (a, b) in pairs)
