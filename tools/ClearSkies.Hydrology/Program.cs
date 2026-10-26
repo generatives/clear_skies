@@ -32,7 +32,7 @@ using StbImageWriteSharp;
 // --erode-k), then --erode-detail of the blurred-away detail added back. --erode-broad takes the broad shape from the
 // generator instead (ContinentTerrain.BroadHeight: its noise without bumps, crags and dells). --rivers then carves
 // the trunk streams (--river-from: columns draining through them) as channels, winding on flat ground (--meander
-// blocks of noise in the routing there), with lakes dammed along them (--lake-chance); channels cut up to --river-depth blocks (10) into the land and no detail added back in them.
+// blocks of noise in the routing there), with lakes dammed along them (--lake-chance); channels cut up to --river-depth blocks (10) into the land, up to --river-width cells (4) either side, banks rising --bank-grade (0.15) a block and no detail added back in them.
 
 ulong seed = 1337;
 (int X, int Z)? cell = null;
@@ -43,7 +43,7 @@ bool snapshots = false, falls = true, hollows = false, localSteps = false, routi
 int last = 8, check = 0, carve = 0, erode = 0;
 float carveFrom = 20f, carveDepth = 2f, carveMost = 8f, carveWidth = 0f, erodeK = 0.02f, erodeBlur = 48f, erodeDetail = 0.3f;
 bool erodeBroad = false, rivers = false;
-float riverFrom = 200f, meander = 40f, lakeChance = 0.15f, marshDepth = 2f, riverDepth = 10f;
+float riverFrom = 200f, meander = 40f, lakeChance = 0.15f, marshDepth = 2f, riverDepth = 10f, riverWidth = 4f, bankGrade = 0.15f;
 string? writeChannels = null;
 float[] solveAir = { 0f };
 var solveSet = new List<Action<Settle>>();
@@ -88,6 +88,8 @@ for (int a = 0; a < args.Length; a++)
         case "--meander": meander = float.Parse(args[++a]); break;
         case "--lake-chance": lakeChance = float.Parse(args[++a]); break;
         case "--river-depth": riverDepth = float.Parse(args[++a]); break;
+        case "--river-width": riverWidth = float.Parse(args[++a]); break;
+        case "--bank-grade": bankGrade = float.Parse(args[++a]); break;
         case "--new-tau": solveSet.Add(st => st.NewTau = true); break;
         case "--adaptive": solveSet.Add(st => st.AdaptiveShrink = true); break;
         case "--separate-pieces": solveSet.Add(st => st.SeparatePieces = true); break;
@@ -473,11 +475,11 @@ Func<int, int, int> Erode()
         }
         var cut = (double[])height.Clone();
         // Channels and banks.
-        const double BankReach = 24, BankGrade = 0.15;
+        const double BankReach = 24;
         foreach (int c in order)
         {
             if (double.IsNaN(bed[c]) || uncut[c]) continue;
-            double width = Math.Clamp(0.6 * Math.Sqrt(area[c] / riverFrom), 0.5, 4); // cells either side
+            double width = Math.Clamp(0.6 * Math.Sqrt(area[c] / riverFrom), 0.5, riverWidth); // cells either side
             int reach = (int)Math.Ceiling(width + BankReach / S), ci = c % nx, cj = c / nx;
             for (int dj = -reach; dj <= reach; dj++)
             for (int di = -reach; di <= reach; di++)
@@ -487,7 +489,7 @@ Func<int, int, int> Erode()
                 int k = ni + nx * nj;
                 double past = Math.Max(0, Math.Sqrt(di * di + dj * dj) - width) * S;
                 if (past > BankReach) continue;
-                cut[k] = Math.Min(cut[k], bed[c] + past * BankGrade);
+                cut[k] = Math.Min(cut[k], bed[c] + past * bankGrade);
                 carved[k] = Math.Max(carved[k], 1 - past / BankReach);
             }
         }
@@ -508,7 +510,7 @@ Func<int, int, int> Erode()
             if (lakeAt.Any(l => Math.Abs(l % nx - si) + Math.Abs(l / nx - sj) < LakeSpacing / S)) continue;
             lakeAt.Add(sill); dug++;
             double level = bed[c] + LakeDepth;
-            int reach = (int)Math.Ceiling(Math.Clamp(0.6 * Math.Sqrt(area[sill] / riverFrom), 0.5, 4) + 3);
+            int reach = (int)Math.Ceiling(Math.Clamp(0.6 * Math.Sqrt(area[sill] / riverFrom), 0.5, riverWidth) + 3);
             // A wall across the valley (square to the river there), not a disc: only the wall rises, so the lake's
             // shore is wherever the land meets its level.
             int down = recv[sill] >= 0 ? recv[sill] : sill;
