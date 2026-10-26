@@ -29,6 +29,7 @@ public static class LightStages
         var firstBake = pipeline.Add(new FirstBakeStage(pipeline, renderer, upload, firstLight));
         var shown = pipeline.Add(new ShownStage(pipeline, time, firstBake, terrain) { IsLit = light.IsLit, ShowFirst = light.ShowFirst });
         var cover = pipeline.Add(new CoverStage(pipeline, store, shown, terrain, residency.SetCovered));
+        firstLight.Cover = cover;
         // Air under a coarse chunk is never drawn to say it came: its swap and cover look again.
         terrain.LearnedAir += key =>
         {
@@ -64,10 +65,16 @@ public sealed class LightStoreStage(ChunkPipeline pipeline, GpuResidencySystem r
 /// <summary>Waits for a chunk in the store to be lit (see <see cref="GpuLightSystem.IsLit"/>): it, and the chunks above
 /// and below it that its top and bottom faces read. Asked from the frame after it's in the store, by when its bricks
 /// are marked for light. A coarse chunk's are lit ahead of light changes on terrain already shown
-/// (<see cref="GpuLightSystem.ShowFirst"/>): it's left out till then.</summary>
+/// (<see cref="GpuLightSystem.ShowFirst"/>): it's left out till then. Under a coarser chunk in the store, it waits for
+/// that to be covered (see <see cref="CoverStage"/>) first: lit before, it's in the coarse blocks' shade, and its
+/// light maps are baked so, showing the coarse level's shadows till they're baked again.</summary>
 public sealed class FirstLightStage(ChunkPipeline pipeline, GpuLightSystem light, LightStoreStage store) : ExternalStage
 {
     public override string Name => "First light";
+
+    /// <summary>Covers the coarser chunk over a chunk (added after this stage, so not an input: it's looked at each time
+    /// it's asked).</summary>
+    internal CoverStage? Cover { get; set; }
     public override Purpose Serves => Purpose.Draw;
 
     public override IReadOnlyList<Pipeline.Input> InputsFor(PipelineGrid grid) => new Pipeline.Input[]
@@ -79,6 +86,10 @@ public sealed class FirstLightStage(ChunkPipeline pipeline, GpuLightSystem light
     public override StageResult Request(PipelineChunk record)
     {
         if (pipeline.EntryOf(record.Key) is not { } entry) return StageResult.Done();
+        if (Cover != null && record.Grid.Coarser is { } coarser
+            && pipeline.Get(coarser.Key(Relation.Over(record.Key.Pos))) is { Wanted: true } over
+            && over.EverDone(store) && pipeline.EntryOf(over.Key) != null && over.Output<ChunkEntry>(Cover) == null)
+            return StageResult.Waiting;
         var g = entry.Volume.Gpu;
         var p = record.Key.Pos;
         ChunkPosition above = new(p.X, p.Y + 1, p.Z), below = new(p.X, p.Y - 1, p.Z);
