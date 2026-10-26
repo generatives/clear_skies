@@ -58,8 +58,30 @@ public sealed class BoxesStage(ChunkPipeline pipeline) : WorkerStage<PhysicsWorl
     }
 }
 
-/// <summary>Adds a chunk's collider to the physics world in place of its old one (main thread); the collider goes when
-/// it's let go of (the chunk's out of range, or gone).</summary>
+/// <summary>On a terrain chunk's entity while its static collider is in the physics world (see <see cref="ColliderStage"/>).</summary>
+public struct StaticCollider
+{
+    public StaticHandle Handle;
+
+    /// <summary>Whether every loaded chunk of <paramref name="volume"/> with colliding blocks within
+    /// <paramref name="radius"/> of <paramref name="centre"/> has its collider, so a body placed there won't fall through.
+    /// (A chunk of only passable blocks, e.g. levers, has blocks but never gets a collider.)</summary>
+    public static bool ReadyAround(ChunkVolume volume, Vector3 centre, float radius)
+    {
+        const int S = ChunkData.Size;
+        int r = (int)MathF.Ceiling(radius / S);
+        int cx = (int)MathF.Floor(centre.X / S), cy = (int)MathF.Floor(centre.Y / S), cz = (int)MathF.Floor(centre.Z / S);
+        for (int dz = -r; dz <= r; dz++) for (int dy = -r; dy <= r; dy++) for (int dx = -r; dx <= r; dx++)
+        {
+            if (volume.GetEntry(new ChunkPosition(cx + dx, cy + dy, cz + dz)) is { } entry && entry.Data.HasAnyColliding()
+                && !entry.Entity.Has<StaticCollider>()) return false;
+        }
+        return true;
+    }
+}
+
+/// <summary>Adds a chunk's collider to the physics world in place of its old one (main thread), and marks its entity
+/// (<see cref="StaticCollider"/>); the collider goes when it's let go of (the chunk's out of range, or gone).</summary>
 public sealed class ColliderStage(ChunkPipeline pipeline, PhysicsWorld physics, BoxesStage boxes) : FrameStage
 {
     public override string Name => "Collider";
@@ -68,37 +90,23 @@ public sealed class ColliderStage(ChunkPipeline pipeline, PhysicsWorld physics, 
 
     public override IReadOnlyList<Pipeline.Input> InputsFor(PipelineGrid grid) => new Pipeline.Input[] { new(boxes, Relation.Self) };
 
-    private sealed record Collider(StaticHandle Handle);
+    private sealed record Collider(ChunkEntry Entry, StaticHandle Handle);
 
     public override StageResult Run(PipelineChunk record, StageInputs inputs)
     {
         var build = inputs.Get<PhysicsWorld.StaticCompoundBuild>(boxes, record.Key)!;
-        if (build.BoxCount == 0) return StageResult.Done(); // the old one goes
+        if (build.BoxCount == 0 || pipeline.EntryOf(record.Key) is not { } entry) return StageResult.Done(); // the old one goes
         var o = record.Key.Pos.WorldOrigin;
-        return StageResult.Done(new Collider(physics.AddStaticCompound(build, new Vector3(o.X, o.Y, o.Z))));
+        var handle = physics.AddStaticCompound(build, new Vector3(o.X, o.Y, o.Z));
+        entry.Entity.Set(new StaticCollider { Handle = handle });
+        return StageResult.Done(new Collider(entry, handle));
     }
 
-    public override void Release(object output) => physics.RemoveStaticCompound(((Collider)output).Handle);
-
-    /// <summary>Whether <paramref name="volume"/>'s chunk at <paramref name="pos"/> has its collider in: is the ground
-    /// under something actually collidable, as opposed to just loaded or drawn.</summary>
-    public bool HasCollider(ChunkVolume volume, ChunkPosition pos)
-        => volume.GetEntry(pos)?.Entity is { } e && e.Has<InPipeline>()
-           && pipeline.Get(e.Get<InPipeline>().Key)?.Output<Collider>(this) != null;
-
-    /// <summary>Whether every loaded chunk of <paramref name="volume"/> with colliding blocks within
-    /// <paramref name="radius"/> of <paramref name="centre"/> has its collider, so a body placed there won't fall through.
-    /// (A chunk of only passable blocks, e.g. levers, has blocks but never gets a collider.)</summary>
-    public bool CollidersReady(ChunkVolume volume, Vector3 centre, float radius)
+    public override void Release(object output)
     {
-        const int S = ChunkData.Size;
-        int r = (int)MathF.Ceiling(radius / S);
-        int cx = (int)MathF.Floor(centre.X / S), cy = (int)MathF.Floor(centre.Y / S), cz = (int)MathF.Floor(centre.Z / S);
-        for (int dz = -r; dz <= r; dz++) for (int dy = -r; dy <= r; dy++) for (int dx = -r; dx <= r; dx++)
-        {
-            var pos = new ChunkPosition(cx + dx, cy + dy, cz + dz);
-            if (volume.GetEntry(pos) is { } entry && entry.Data.HasAnyColliding() && !HasCollider(volume, pos)) return false;
-        }
-        return true;
+        var (entry, handle) = (Collider)output;
+        physics.RemoveStaticCompound(handle);
+        if (entry.Entity is { IsAlive: true } e && e.Has<StaticCollider>() && e.Get<StaticCollider>().Handle.Equals(handle))
+            e.Remove<StaticCollider>(); // not its replacement's
     }
 }

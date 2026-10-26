@@ -30,9 +30,8 @@ public sealed class HeadlessScene : IDisposable
     public readonly EntityPresenceSystem Presence;
     public readonly PhysicsBodySystem PhysicsBodies;
     /// <summary>The world's chunks, wanted as they're added unless the world's streamed (see <see cref="Streamed"/>);
-    /// they get colliders from it.</summary>
+    /// they get colliders from it (see <see cref="StaticCollider"/>).</summary>
     public readonly ChunkPipelineSystem ChunkPipeline;
-    public readonly ColliderStage Colliders;
     /// <summary>Set before any chunk's added when the world's streamed: its chunks are then the streaming's grids'.</summary>
     internal bool Streamed;
     public readonly CommandSystem Commands;
@@ -64,7 +63,7 @@ public sealed class HeadlessScene : IDisposable
             if (!Streamed && c.Entry.Volume == WorldVolume) ChunkPipeline!.Pipeline.GridFor(WorldVolume, "world");
         });
         ChunkPipeline = new ChunkPipelineSystem(World);
-        Colliders = ColliderStages.Add(ChunkPipeline, Physics);
+        ColliderStages.Add(ChunkPipeline, Physics);
         var root = World.CreateEntity();
         WorldVolume = new ChunkVolume(root, World) { ChunksOwnPresence = true };
         root.Set(new ChunkGrid { Volume = WorldVolume });
