@@ -203,6 +203,7 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
                 level.Rings.Clear();
                 level.Rings.AddRange(level.Current);
                 Rebuild(level);
+                if (level == FullDetail) _voxels.Generator.FocusOn(level.Rings.Select(r => (r.Centre.x, r.Centre.z)).ToArray());
                 moved = true;
             }
         }

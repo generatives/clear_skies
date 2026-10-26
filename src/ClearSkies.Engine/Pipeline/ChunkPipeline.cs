@@ -22,7 +22,6 @@ public readonly record struct FrameBudgets(int WorkerSlots, double MainMs);
 /// </remarks>
 public sealed class ChunkPipeline
 {
-    private const int MaxSkipped = 1024; // ready chunks looked past a frame, for their worker being full
     // The most of a frame's main-thread time spent asking external stages: thousands of chunks wait on their first
     // light while the world loads, each asked every frame.
     private const double ExternalShare = 0.25;
@@ -48,8 +47,7 @@ public sealed class ChunkPipeline
     private readonly int[] _inFlight; // per worker
     private readonly List<((PipelineChunk, Stage) Item, (float, int) Priority)> _skipped = new();
 
-    /// <summary>On the background workers (see <see cref="BackgroundWork"/>), each chunk on the one for its ground (see
-    /// <see cref="WorkerOf"/>).</summary>
+    /// <summary>On the background workers (see <see cref="BackgroundWork"/>), each job on the one with the fewest.</summary>
     public ChunkPipeline() : this(BackgroundWork.Queue, BackgroundWork.Workers, BackgroundWork.Soon) { }
 
     /// <param name="runOnWorker">Runs worker stages, all on one worker (tests run them in place).</param>
@@ -65,17 +63,12 @@ public sealed class ChunkPipeline
         _inFlight = new int[workers];
     }
 
-    /// <summary>Chunks over the same column of this level's chunks (16 of the finest grid's columns) go to the same worker.</summary>
-    private const int WorkerColumnLevel = 2;
-
-    /// <summary>Which worker makes a chunk: the one for the column of level-<see cref="WorkerColumnLevel"/> chunks it's
-    /// in, so every grid's chunks over the same ground are made on the same worker, and share what its caches keep of
-    /// that ground (a generator's column profiles).</summary>
-    private int WorkerOf(ChunkKey key)
+    /// <summary>The worker with the fewest jobs.</summary>
+    private int LeastBusy()
     {
-        int shift = WorkerColumnLevel - _grids[key.Grid].Level;
-        int x = shift >= 0 ? key.Pos.X >> shift : key.Pos.X << -shift, z = shift >= 0 ? key.Pos.Z >> shift : key.Pos.Z << -shift;
-        return (int)((uint)(x * 73856093 ^ z * 19349663) % (uint)_inFlight.Length);
+        int best = 0;
+        for (int w = 1; w < _inFlight.Length; w++) if (_inFlight[w] < _inFlight[best]) best = w;
+        return best;
     }
 
     /// <summary>Lower runs first, per chunk and stage: by default, all the same.</summary>
@@ -295,22 +288,9 @@ public sealed class ChunkPipeline
             }
             StartWorker(record, (WorkerStage)stage, -1);
         }
-        int full = _inFlight.Count(n => n >= budgets.WorkerSlots);
-        while (full < _inFlight.Length && _skipped.Count < MaxSkipped && MainLeft()
-               && TakeReady(Executor.Worker, out var record, out var stage, out var priority))
-        {
-            int worker = WorkerOf(record.Key);
-            if (_inFlight[worker] >= budgets.WorkerSlots)
-            {
-                record.At(stage.Id).Set(SlotFlags.Queued, true);
-                _skipped.Add(((record, stage), priority));
-                continue;
-            }
-            StartWorker(record, (WorkerStage)stage, worker);
-            if (_inFlight[worker] == budgets.WorkerSlots) full++;
-        }
-        foreach (var (item, priority) in _skipped) _ready[(int)Executor.Worker].Enqueue(item, priority);
-        _skipped.Clear();
+        while (_inFlight[LeastBusy()] < budgets.WorkerSlots && MainLeft()
+               && TakeReady(Executor.Worker, out var record, out var stage, out _))
+            StartWorker(record, (WorkerStage)stage, LeastBusy());
 
         // Asking takes a share of the time at most, so a crowd of chunks waiting on other systems leaves the frame stages
         // their turn. Those ready are asked first, nearest first (often done at once); then each one waiting is asked

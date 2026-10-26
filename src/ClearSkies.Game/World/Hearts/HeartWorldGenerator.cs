@@ -74,9 +74,11 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     private readonly Water _water;
     private readonly FastNoiseLite _warpX, _warpY, _warpZ, _crack, _bottom;
 
-    public HeartWorldGenerator(ulong seed)
+    /// <param name="profiles">Shared with the other workers' generators; by default, this one's own.</param>
+    public HeartWorldGenerator(ulong seed, ProfileCache? profiles = null)
     {
         _seed = seed;
+        _profiles = profiles ?? new ProfileCache();
         _terrain = ContinentTerrain.For(seed);
         _water = Water.For(seed);
         _warpX = Noise(seed + 31, WarpFrequency);
@@ -112,10 +114,10 @@ public sealed class HeartWorldGenerator : IWorldGenerator
 
     // ── Generation ──────────────────────────────────────────────────────────
 
-    /// <summary>The chunk column last prepared, and the columns prepared lately (see <see cref="ProfileCache"/>): a
-    /// generator is used on one thread, and chunks over the same ground are made on the same one.</summary>
+    /// <summary>The chunk column last prepared (held), and the columns prepared lately (see <see cref="ProfileCache"/>):
+    /// a generator is used on one thread, the cache maybe shared with others.</summary>
     private ColumnProfile? _profile;
-    private readonly ProfileCache _profiles = new();
+    private readonly ProfileCache _profiles;
 
     // While a column is worked out (see BuildProfile), per block column: its solid spans, before they're packed into
     // its ColumnProfile, and the terrain's height and the world's rough bottom there.
@@ -238,10 +240,23 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     /// <see cref="ProfileCache"/>), working them out if they aren't there.</summary>
     public void Prepare(int chunkX, int chunkZ)
     {
-        if (_profiles.TryGet(chunkX, chunkZ, out _profile)) return;
-        _profile = _profiles.Add(chunkX, chunkZ);
-        BuildProfile(_profile, chunkX, chunkZ);
+        if (_profile is { } held)
+        {
+            if (held.Column == (chunkX, chunkZ)) return;
+            _profiles.Release(held);
+            _profile = null;
+        }
+        var p = _profiles.Take(chunkX, chunkZ, out bool make);
+        if (make)
+        {
+            bool ok = false;
+            try { BuildProfile(p, chunkX, chunkZ); ok = true; }
+            finally { _profiles.Made(p, ok); if (!ok) _profiles.Release(p); }
+        }
+        _profile = p;
     }
+
+    public void FocusOn(IReadOnlyList<(int X, int Z)> columns) => _profiles.FocusOn(columns);
 
     /// <summary>The solid spans (bottom up) of block column (lx, lz) of the chunk column last prepared.</summary>
     public ReadOnlySpan<(short Lo, short Hi)> Spans(int lx, int lz)
@@ -642,7 +657,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
 /// <summary>One chunk column of the hearts world worked out: per block column, its solid spans (bottom up, from
 /// <see cref="Start"/>) with each top's look, and what's on it. Not changed while it's kept (see
 /// <see cref="ProfileCache"/>); once let go of, it's made again for another column, its arrays reused.</summary>
-internal sealed class ColumnProfile
+public sealed class ColumnProfile
 {
     private const int Columns = ChunkData.Size * ChunkData.Size;
 
@@ -678,6 +693,12 @@ internal sealed class ColumnProfile
 
     public int Count(int col) => Start[col + 1] - Start[col];
 
+    // Kept by ProfileCache, under its lock.
+    internal (int X, int Z) Column;
+    internal bool Ready;
+    internal int Holds;
+    internal long LastTake, Distance;
+
     /// <summary>Clears what's only set where there are spans, for a profile made again.</summary>
     public void Clear()
     {
@@ -685,27 +706,91 @@ internal sealed class ColumnProfile
     }
 }
 
-/// <summary>The column profiles one generator built lately, the oldest let go first and made again for the next column:
-/// they last long enough that the collector would carry each through its generations only to drop it.</summary>
-internal sealed class ProfileCache
+/// <summary>
+/// The column profiles generators have built lately, shared by the generators given it (one per worker): a chunk is
+/// made from its column's profile whichever worker built it, and a coarse chunk from the profiles its full chunks used.
+/// Once full, those not used lately go, farthest from the view first (see <see cref="FocusOn"/>), and are made again for
+/// other columns: they last long enough that the collector would carry each through its generations only to drop it.
+/// A profile isn't changed while it's kept, so workers read it at once; only taking and letting go of one locks.
+/// </summary>
+public sealed class ProfileCache
 {
-    /// <summary>Columns kept: a profile is about 30 KB (more where there's lots of ground), so a few MB a generator.
-    /// Enough for the few level-2 columns (16 chunk columns each) a worker is making chunks over at once.</summary>
-    private const int Capacity = 128;
+    /// <summary>Columns kept: a profile is about 30 KB (more where there's lots of ground), so tens of MB. More than
+    /// full detail's columns round the view, and the columns being made further out.</summary>
+    private const int Capacity = 2048;
+
+    /// <summary>Profiles used within this many takes aren't let go of: the columns being made now.</summary>
+    private const int Recent = Capacity / 4;
 
     private readonly Dictionary<(int, int), ColumnProfile> _profiles = new();
-    private readonly Queue<(int, int)> _order = new();
+    private readonly Stack<ColumnProfile> _spare = new();
+    private readonly List<ColumnProfile> _byKeep = new();
+    private (int X, int Z)[] _focus = [];
+    private long _takes;
 
-    public bool TryGet(int x, int z, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out ColumnProfile? kept)
-        => _profiles.TryGetValue((x, z), out kept);
-
-    /// <summary>A profile to make for column (x, z), kept from now on: the oldest one, let go of, once it's full.</summary>
-    public ColumnProfile Add(int x, int z)
+    /// <summary>Where the view is, as chunk columns: the profiles nearest them are kept longest.</summary>
+    public void FocusOn(IReadOnlyList<(int X, int Z)> columns)
     {
-        var made = _order.Count < Capacity || !_profiles.Remove(_order.Dequeue(), out var oldest) ? new ColumnProfile() : oldest;
-        _profiles[(x, z)] = made;
-        _order.Enqueue((x, z));
-        return made;
+        lock (_profiles) _focus = columns.ToArray();
+    }
+
+    /// <summary>Column (x, z)'s profile, held until <see cref="Release"/>d. If it isn't kept, a profile for
+    /// the taker to make (<paramref name="make"/>), then <see cref="Made"/>; if another is making it, once it's made.</summary>
+    public ColumnProfile Take(int x, int z, out bool make)
+    {
+        lock (_profiles)
+        {
+            ColumnProfile? kept;
+            while (_profiles.TryGetValue((x, z), out kept) && !kept.Ready) Monitor.Wait(_profiles);
+            make = kept == null;
+            if (kept == null)
+            {
+                if (_profiles.Count >= Capacity) Evict();
+                kept = _spare.TryPop(out var spare) ? spare : new ColumnProfile();
+                kept.Column = (x, z);
+                kept.Ready = false;
+                _profiles[(x, z)] = kept;
+            }
+            kept.Holds++;
+            kept.LastTake = ++_takes;
+            return kept;
+        }
+    }
+
+    /// <summary>A profile <see cref="Take"/> gave to make is made (or, <paramref name="ok"/> false, failed).</summary>
+    public void Made(ColumnProfile profile, bool ok = true)
+    {
+        lock (_profiles)
+        {
+            profile.Ready = ok;
+            if (!ok) _profiles.Remove(profile.Column);
+            Monitor.PulseAll(_profiles);
+        }
+    }
+
+    public void Release(ColumnProfile profile)
+    {
+        lock (_profiles) profile.Holds--;
+    }
+
+    /// <summary>Lets go of an eighth of the profiles, of those not held or used lately: farthest from the view first.</summary>
+    private void Evict()
+    {
+        foreach (var p in _profiles.Values)
+            if (p.Holds == 0 && p.Ready && p.LastTake < _takes - Recent)
+            {
+                p.Distance = long.MaxValue;
+                foreach (var (fx, fz) in _focus)
+                    p.Distance = System.Math.Min(p.Distance, (long)(p.Column.X - fx) * (p.Column.X - fx) + (long)(p.Column.Z - fz) * (p.Column.Z - fz));
+                _byKeep.Add(p);
+            }
+        _byKeep.Sort((a, b) => b.Distance != a.Distance ? b.Distance.CompareTo(a.Distance) : a.LastTake.CompareTo(b.LastTake));
+        for (int i = 0; i < System.Math.Min(Capacity / 8, _byKeep.Count); i++)
+        {
+            _profiles.Remove(_byKeep[i].Column);
+            _spare.Push(_byKeep[i]);
+        }
+        _byKeep.Clear();
     }
 }
 
