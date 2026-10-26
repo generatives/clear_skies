@@ -33,9 +33,10 @@ public sealed class Erosion
     /// <summary>How much of the land's detail is put back, outside the channels.</summary>
     private const float DetailKept = 0.3f;
 
-    // A piece's edge, where its water leaves it, wears down towards NotchDepth under where it was, but keeps at least
-    // KeepUnder of its ground under it; as does all the land, so no valley cuts through its piece.
-    private const double NotchDepth = 64, KeepUnder = 48;
+    // A piece's edge stays where it is, except where a stream leaves it: there it wears down towards a notch up to
+    // NotchDepth deep, the deepest where NotchFrom times RiverFrom samples drain out. All the land keeps at least
+    // KeepUnder of its ground under it, so no valley cuts through its piece.
+    private const double NotchDepth = 16, NotchFrom = 1, KeepUnder = 48;
 
     /// <summary>How far under its piece's top (roughly) the land may be and still be its ground, not a hole (as Water).</summary>
     private const float HoleDepth = 40f;
@@ -258,12 +259,16 @@ public sealed class Erosion
         {
             Route(h);
             // Downstream first: each sample moves towards where it drains (implicitly, so any Wear is stable). An edge
-            // drains off its piece: it wears towards a notch.
+            // drains off its piece: where a stream leaves, it wears towards a notch.
             foreach (int c in order)
             {
                 int to = recv[c];
                 double target, dist = 1;
-                if (to < 0) target = Math.Max(h0[c] - NotchDepth, under[c] + KeepUnder);
+                if (to < 0)
+                {
+                    double notch = NotchDepth * Math.Clamp(area[c] / (NotchFrom * RiverFrom), 0, 1);
+                    target = Math.Max(b[c] - notch, under[c] + KeepUnder);
+                }
                 else
                 {
                     target = h[to];
