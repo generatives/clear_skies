@@ -27,6 +27,9 @@ public sealed class Erosion
 
     private const int Rounds = 30;
 
+    /// <summary>The steepest the wearing may cut into the land, blocks down per block across (see Build).</summary>
+    private const float MaxCutSlope = 1f;
+
     /// <summary>How fast land wears towards where it drains, per square root of the samples draining through it.</summary>
     private const double Wear = 0.02;
 
@@ -119,14 +122,17 @@ public sealed class Erosion
             float shift = Bilinear(Worn, c, tx, tz) - detail + kept;
             int near = c + (tx >= 0.5f ? 1 : 0) + (tz >= 0.5f ? Nx : 0);
             if (!NearRiver[near]) return shift;
-            float channel = Channel(x, z, out _);
+            float ground = Bilinear(Top, c, tx, tz) + kept;
+            float channel = Channel(x, z, out _, ground);
             if (channel == float.MaxValue) return shift;
-            return shift + MathF.Min(0f, channel - (Bilinear(Top, c, tx, tz) + kept));
+            return shift + MathF.Min(0f, channel - ground);
         }
 
         /// <summary>The bed of a channel or its bank at (x, z) (world Y), or float.MaxValue where there is none; and the
-        /// channel's width there (blocks), 0 on a bank.</summary>
-        public float Channel(float x, float z, out float width)
+        /// channel's width there (blocks), 0 on a bank. Given the <paramref name="ground"/> there, a bank rises steeper
+        /// where the ground stands high over the channel, so it meets the ground within its reach rather than leaving a
+        /// wall at the end.</summary>
+        public float Channel(float x, float z, out float width, float ground = float.NaN)
         {
             width = 0f;
             // (The line bent a little by noise, so a channel doesn't run dead straight between samples.)
@@ -146,7 +152,8 @@ public sealed class Erosion
                 float half = Half[c] + t * (halfTo - Half[c]);
                 float past = MathF.Max(0f, dist - half);
                 if (past > BankReach) continue;
-                float bed = Bed[c] + t * (bedTo - Bed[c]) + past * BankGrade;
+                float foot = Bed[c] + t * (bedTo - Bed[c]);
+                float bed = foot + past * (float.IsNaN(ground) ? BankGrade : MathF.Max(BankGrade, (ground - foot) / BankReach));
                 if (bed < best) { best = bed; width = past > 0f ? 0f : 2f * half; }
             }
             return best;
@@ -312,6 +319,25 @@ public sealed class Erosion
                 worn[e] = worn[c]; top[e] = top[c]; m[e] = m[c];
                 queue.Enqueue(e);
             }
+        }
+        // No steeper a cut than MaxCutSlope blocks down per block across, so where the land is worn far down it falls
+        // away in slopes, not walls: a sample is raised to within that of its neighbours' (two sweeps each way spread
+        // it across the field).
+        for (int pass = 0; pass < 2; pass++)
+        for (int dir = 0; dir < 2; dir++)
+        for (int q = 0; q < n; q++)
+        {
+            int c = dir == 0 ? q : n - 1 - q, i = c % nx, k = c / nx, step = dir == 0 ? -1 : 1;
+            float least = worn[c];
+            for (int di = -1; di <= 1; di++)
+            {
+                int ni = i + di, nk = k + step;
+                if (ni >= 0 && ni < nx && nk >= 0 && nk < nz)
+                    least = MathF.Max(least, worn[ni + nx * nk] - MaxCutSlope * Cell * (di == 0 ? 1f : 1.414f));
+            }
+            if (i + step >= 0 && i + step < nx) least = MathF.Max(least, worn[c + step] - MaxCutSlope * Cell);
+            float raised = least - worn[c];
+            worn[c] = least; top[c] += raised;
         }
         // Which samples a channel's search can find one from.
         for (int c = 0; c < n; c++)
