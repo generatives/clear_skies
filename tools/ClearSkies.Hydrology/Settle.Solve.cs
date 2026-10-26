@@ -116,6 +116,7 @@ public sealed partial class Settle
         var counts = new int[n + 1];
         var pairs = new List<(int, int)>(n * 3);
         int nx = land.Nx, nz = land.Nz;
+        Span<int> around = stackalloc int[4]; // once, not per pass: a stackalloc in a loop keeps growing the stack
         for (int c = 0; c < land.Columns; c++)
         {
             int ci = c % nx, cj = c / nx;
@@ -124,7 +125,11 @@ public sealed partial class Settle
                 int s = land.RunCell[r], len = land.RunY1[r] - land.RunY0[r] + 1;
                 for (int v = 0; v + 1 < len; v++) pairs.Add((s + v, s + v + 1));
                 if (land.RunY0[r] == land.Lo[c]) voidK[s] += 1;
-                foreach (int nc in stackalloc[] { ci + 1 < nx ? c + 1 : -1, ci > 0 ? c - 1 : -1, cj + 1 < nz ? c + nx : -1, cj > 0 ? c - nx : -1 })
+                around[0] = ci + 1 < nx ? c + 1 : -1;
+                around[1] = ci > 0 ? c - 1 : -1;
+                around[2] = cj + 1 < nz ? c + nx : -1;
+                around[3] = cj > 0 ? c - nx : -1;
+                foreach (int nc in around)
                 {
                     // Another piece beside it is across a crack, however narrow: the void, as far as water goes.
                     bool apart = SeparatePieces && nc >= 0 && land.Piece[nc] != land.Piece[c];
@@ -535,26 +540,40 @@ public sealed partial class Settle
         Jacobi(L, b, x);
     }
 
-    /// <summary>Smooth with red-black Gauss-Seidel instead of damped Jacobi (cells colored by x + y + z, so face
-    /// neighbours differ; at coarse levels, cells of different classes in one place can share a color).</summary>
+    /// <summary>Smooth with multicolor Gauss-Seidel instead of damped Jacobi (cells colored greedily so no two
+    /// neighbours share a color, so each color updates in parallel without races).</summary>
     public static bool GaussSeidel { get; set; }
 
     private static void Jacobi(Level L, double[] b, double[] x)
     {
-        if (GaussSeidel) { Sweep(L, b, x, 0); Sweep(L, b, x, 1); return; }
+        if (GaussSeidel)
+        {
+            L.Colors ??= Color(L);
+            foreach (var cells in L.Colors) Sweep(L, b, x, cells);
+            return;
+        }
         Residual(L, b, x, L.T);
         Rows(L.N, (lo, hi) => { for (int i = lo; i < hi; i++) x[i] += Omega * L.T[i] / L.Diag[i]; });
     }
 
-    private static void Sweep(Level L, double[] b, double[] x, int color)
+    private static int[][] Color(Level L)
     {
-        if (L.Colors == null)
+        var color = new int[L.N];
+        var used = new List<bool>();
+        var groups = new List<List<int>>();
+        for (int i = 0; i < L.N; i++)
         {
-            var red = new List<int>(); var black = new List<int>();
-            for (int i = 0; i < L.N; i++) ((L.X[i] + L.Y[i] + L.Z[i] & 1) == 0 ? red : black).Add(i);
-            L.Colors = new[] { red.ToArray(), black.ToArray() };
+            for (int k = 0; k < used.Count; k++) used[k] = false;
+            for (int e = L.Start[i]; e < L.Start[i + 1]; e++) if (L.Col[e] < i) used[color[L.Col[e]]] = true;
+            int c = used.IndexOf(false);
+            if (c < 0) { c = used.Count; used.Add(false); groups.Add(new List<int>()); }
+            color[i] = c; groups[c].Add(i);
         }
-        var cells = L.Colors[color];
+        return groups.Select(g => g.ToArray()).ToArray();
+    }
+
+    private static void Sweep(Level L, double[] b, double[] x, int[] cells)
+    {
         Rows(cells.Length, (lo, hi) =>
         {
             for (int k = lo; k < hi; k++)

@@ -32,7 +32,7 @@ using StbImageWriteSharp;
 // --erode-k), then --erode-detail of the blurred-away detail added back. --erode-broad takes the broad shape from the
 // generator instead (ContinentTerrain.BroadHeight: its noise without bumps, crags and dells). --rivers then carves
 // the trunk streams (--river-from: columns draining through them) as channels, winding on flat ground (--meander
-// blocks of noise in the routing there), with lakes dammed along them (--lake-chance) and no detail added back in them.
+// blocks of noise in the routing there), with lakes dammed along them (--lake-chance); channels cut up to --river-depth blocks (10) into the land and no detail added back in them.
 
 ulong seed = 1337;
 (int X, int Z)? cell = null;
@@ -43,7 +43,7 @@ bool snapshots = false, falls = true, hollows = false, localSteps = false, routi
 int last = 8, check = 0, carve = 0, erode = 0;
 float carveFrom = 20f, carveDepth = 2f, carveMost = 8f, carveWidth = 0f, erodeK = 0.02f, erodeBlur = 48f, erodeDetail = 0.3f;
 bool erodeBroad = false, rivers = false;
-float riverFrom = 200f, meander = 40f, lakeChance = 0.15f, marshDepth = 2f;
+float riverFrom = 200f, meander = 40f, lakeChance = 0.15f, marshDepth = 2f, riverDepth = 10f;
 string? writeChannels = null;
 float[] solveAir = { 0f };
 var solveSet = new List<Action<Settle>>();
@@ -87,6 +87,7 @@ for (int a = 0; a < args.Length; a++)
         case "--river-from": riverFrom = float.Parse(args[++a]); break;
         case "--meander": meander = float.Parse(args[++a]); break;
         case "--lake-chance": lakeChance = float.Parse(args[++a]); break;
+        case "--river-depth": riverDepth = float.Parse(args[++a]); break;
         case "--new-tau": solveSet.Add(st => st.NewTau = true); break;
         case "--adaptive": solveSet.Add(st => st.AdaptiveShrink = true); break;
         case "--separate-pieces": solveSet.Add(st => st.SeparatePieces = true); break;
@@ -254,6 +255,7 @@ int SolvePieces()
     Array.Fill(piece, -1);
     var found = new List<(int Columns, int I0, int J0, int I1, int J1)>();
     var stack = new Stack<int>();
+    Span<int> around = stackalloc int[4]; // once, not per pass: a stackalloc in a loop keeps growing the stack
     for (int c0 = 0; c0 < whole.Columns; c0++)
     {
         if (!whole.HasLand(c0) || piece[c0] >= 0) continue;
@@ -263,7 +265,11 @@ int SolvePieces()
         {
             int i = c % nx, j = c / nx;
             count++; i0 = Math.Min(i0, i); j0 = Math.Min(j0, j); i1 = Math.Max(i1, i); j1 = Math.Max(j1, j);
-            foreach (int d in stackalloc[] { i + 1 < nx ? c + 1 : -1, i > 0 ? c - 1 : -1, j + 1 < nz ? c + nx : -1, j > 0 ? c - nx : -1 })
+            around[0] = i + 1 < nx ? c + 1 : -1;
+            around[1] = i > 0 ? c - 1 : -1;
+            around[2] = j + 1 < nz ? c + nx : -1;
+            around[3] = j > 0 ? c - nx : -1;
+            foreach (int d in around)
                 if (d >= 0 && whole.HasLand(d) && piece[d] < 0) { piece[d] = id; stack.Push(d); }
         }
         found.Add((count, i0, j0, i1, j1));
@@ -459,7 +465,7 @@ Func<int, int, int> Erode()
             // Only big rivers are cut into flats; a smaller one crossing a flat keeps its bed at the ground there, so
             // the channel above it stays above it too (rather than ending in a pit that fills as a round pond).
             bool cutHere = slope[c] >= 0.01 || area[c] >= 5 * riverFrom;
-            double target = cutHere ? height[c] - Math.Min(10, 3 * Math.Sqrt(area[c] / riverFrom)) : height[c];
+            double target = cutHere ? height[c] - Math.Min(riverDepth, 0.3 * riverDepth * Math.Sqrt(area[c] / riverFrom)) : height[c];
             int to = recv[c];
             bed[c] = to >= 0 && !double.IsNaN(bed[to]) ? Math.Max(bed[to], target) : target;
             if (cutHere) columns++;

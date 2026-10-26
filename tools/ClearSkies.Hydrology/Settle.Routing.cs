@@ -79,12 +79,17 @@ public sealed partial class Settle
         var voidPass = new float[n];
         Array.Fill(voidPass, float.PositiveInfinity);
         int nx = land.Nx, nz = land.Nz;
+        Span<int> around = stackalloc int[4]; // once, not per pass: a stackalloc in a loop keeps growing the stack
         for (int g = 0; g < n; g++)
         {
             edgeAt[g] = edgeTo.Count;
             int c = r.Column[g], ci = c % nx, cj = c / nx;
             int top = r.Y1[g] == land.Hi[c] ? int.MaxValue : r.Y1[g]; // a top gap reaches up into the open sky
-            foreach (int nc in stackalloc[] { ci + 1 < nx ? c + 1 : -1, ci > 0 ? c - 1 : -1, cj + 1 < nz ? c + nx : -1, cj > 0 ? c - nx : -1 })
+            around[0] = ci + 1 < nx ? c + 1 : -1;
+            around[1] = ci > 0 ? c - 1 : -1;
+            around[2] = cj + 1 < nz ? c + nx : -1;
+            around[3] = cj > 0 ? c - nx : -1;
+            foreach (int nc in around)
             {
                 if (nc < 0 || !land.HasLand(nc) || r.Y0[g] < land.Lo[nc]) { voidPass[g] = r.Floor[g]; continue; }
                 for (int h = gapsAt[nc]; h < gapsAt[nc + 1]; h++)

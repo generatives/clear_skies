@@ -180,10 +180,15 @@ public sealed partial class Settle
             level[c] = Surface(c);
             queue.Enqueue(c, level[c]);
         }
+        Span<int> around = stackalloc int[4]; // once, not per pass: a stackalloc in a loop keeps growing the stack
         while (queue.TryDequeue(out int c, out float l))
         {
             int i = c % nx, j = c / nx;
-            foreach (int n in stackalloc[] { i + 1 < nx ? c + 1 : -1, i > 0 ? c - 1 : -1, j + 1 < nz ? c + nx : -1, j > 0 ? c - nx : -1 })
+            around[0] = i + 1 < nx ? c + 1 : -1;
+            around[1] = i > 0 ? c - 1 : -1;
+            around[2] = j + 1 < nz ? c + nx : -1;
+            around[3] = j > 0 ? c - nx : -1;
+            foreach (int n in around)
             {
                 if (n < 0 || !land.HasLand(n) || !float.IsNaN(level[n])) continue;
                 level[n] = MathF.Max(Surface(n), l);
