@@ -103,8 +103,12 @@ public sealed class ShownStage(ChunkPipeline pipeline, Time time, Stage ready, C
             else if (e.Get<Shown>().Visible != visible) e.Set(new Shown { Visible = visible, At = at });
         }
 
-        // What's read of it (whether it's there, drawn over the chunks under it, or hides them) changed: they look again.
-        var result = first || showing.Over != wasOver || showing.HidesBelow != wasBelow ? StageResult.Done(showing) : StageResult.Same(showing);
+        // What's read of it (whether it's there, drawn over the chunks under it, or hides them) changed: they look again,
+        // ahead of everything else for a swap, so they dissolve with it rather than when their turn comes (seconds later,
+        // far out, while loading): a gap, or both drawn at once.
+        var result = first ? StageResult.Done(showing)
+                   : showing.Over != wasOver || showing.HidesBelow != wasBelow ? StageResult.Done(showing, Change.All with { Urgent = true })
+                   : StageResult.Same(showing);
         return again > 0 ? result.AskAgainIn(again) : result;
     }
 
