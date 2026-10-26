@@ -65,16 +65,14 @@ public sealed class ChunkPipeline
         _inFlight = new int[workers];
     }
 
-    /// <summary>Chunks over the same column of this level's chunks (16 of the finest grid's columns) go to the same worker.</summary>
-    private const int WorkerColumnLevel = 2;
-
-    /// <summary>Which worker makes a chunk: the one for the column of level-<see cref="WorkerColumnLevel"/> chunks it's
-    /// in, so every grid's chunks over the same ground are made on the same worker, and share what its caches keep of
-    /// that ground (a generator's column profiles).</summary>
+    /// <summary>Which worker makes a chunk: the one for the column of the finest grid it's over (a coarse chunk's first),
+    /// so every grid's chunks over the same ground are made on the same worker, and share what its caches keep of that
+    /// column (a generator's column profiles). Columns this narrow spread the nearest chunks, which go first, over every
+    /// worker: per 16 columns, the nearest thousand reached only 8 of 14.</summary>
     private int WorkerOf(ChunkKey key)
     {
-        int shift = WorkerColumnLevel - _grids[key.Grid].Level;
-        int x = shift >= 0 ? key.Pos.X >> shift : key.Pos.X << -shift, z = shift >= 0 ? key.Pos.Z >> shift : key.Pos.Z << -shift;
+        int level = _grids[key.Grid].Level;
+        int x = key.Pos.X << level, z = key.Pos.Z << level;
         return (int)((uint)(x * 73856093 ^ z * 19349663) % (uint)_inFlight.Length);
     }
 
