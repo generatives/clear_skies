@@ -29,7 +29,13 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     // How far each piece is worn back from its faces, in blocks, so there are cracks twice that wide between
     // neighbouring pieces and small or thin pieces wear away altogether: across (from side faces) and up and down (from
     // top and bottom faces), in the floor and higher up, varied by noise.
-    private const float FloorWear = 18f, UpperWear = 24f, FloorWearUp = 13f, UpperWearUp = 18f;
+    private const float FloorWearUp = 13f, UpperWearUp = 18f;
+    private static float FloorWear => 18f * CrackWidth;
+    private static float UpperWear => 24f * CrackWidth;
+
+    /// <summary>How many times wider than usual the cracks between pieces are (--crack-width). Before any world is
+    /// generated.</summary>
+    public static float CrackWidth { get; set; } = 1f;
 
     /// <summary>How far round a piece's edges and corners are worn, in scaled space (see Solid).</summary>
     private const float Rounding = 14f;
@@ -71,13 +77,17 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     private readonly ulong _seed;
     private readonly ContinentTerrain _terrain;
     private readonly Water _water;
+    private readonly Erosion? _erosion;
     private readonly FastNoiseLite _warpX, _warpY, _warpZ, _crack, _bottom;
 
-    public HeartWorldGenerator(ulong seed)
+    /// <param name="eroded">Whether pieces' tops are worn by their rivers (see <see cref="Erosion"/>); not while that is
+    /// being worked out from them.</param>
+    public HeartWorldGenerator(ulong seed, bool eroded = true)
     {
         _seed = seed;
         _terrain = ContinentTerrain.For(seed);
         _water = Water.For(seed);
+        _erosion = eroded ? Erosion.For(seed) : null;
         _warpX = Noise(seed + 31, WarpFrequency);
         _warpY = Noise(seed + 32, WarpFrequency);
         _warpZ = Noise(seed + 33, WarpFrequency);
@@ -121,6 +131,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     private readonly (short Lo, short Hi)[] _spans = new (short, short)[S * S * MaxSpans];
     private readonly byte[] _spanCount = new byte[S * S];
     private readonly float[] _height = new float[S * S];
+    private readonly float[] _shift = new float[S * S];     // how far erosion moves its piece's top
     private readonly int[] _lake = new int[S * S];          // the level of a lake planned here or beside, or int.MinValue
     private readonly int[] _cut = new int[S * S];           // the top of the ground once a river cuts it, or int.MaxValue
     private readonly float[] _bottomAt = new float[S * S];
@@ -252,12 +263,15 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         var p = new ColumnProfile();
 
         float top = float.MinValue;
+        var worn = _erosion?.Of(x0 + S / 2, z0 + S / 2);
         for (int lz = 0; lz < S; lz++)
         for (int lx = 0; lx < S; lx++)
         {
             int col = lx + S * lz;
             float wx = x0 + lx, wz = z0 + lz;
-            _height[col] = MathF.Min(_terrain.Height(wx, wz), HeartGrid.WorldTop - 1);
+            float height = _terrain.Height(wx, wz, out float broad);
+            _height[col] = MathF.Min(height, HeartGrid.WorldTop - 1);
+            _shift[col] = worn?.Shift(wx, wz, height - broad) ?? 0f;
             var water = _water.At((int)wx, (int)wz);
             (p.Level[col], _cut[col]) = _water.Settled((int)wx, (int)wz);
             _lake[col] = water.RiverDepth == 0 ? water.Level : int.MinValue;
@@ -296,12 +310,13 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             // Up the column, skipping as far as nothing can change: each test also says how many blocks further up it
             // could, at the nearest piece face or crack above.
             int spans = 0, runLo = int.MinValue;
-            int yBottom = (int)MathF.Ceiling(_bottomAt[col]), yTop = (int)MathF.Floor(_height[col]);
+            int yBottom = (int)MathF.Ceiling(_bottomAt[col]);
+            int yTop = (int)MathF.Floor(MathF.Min(_height[col] + MathF.Max(_shift[col], 0f), HeartGrid.WorldTop - 1));
             for (int y = yBottom; y <= yTop + 1;)
             {
                 bool solid = false;
                 int step = 1;
-                if (y <= yTop) solid = SolidAt(px, pz, lift, wearNoise, _height[col], y, out step);
+                if (y <= yTop) solid = SolidAt(px, pz, lift, wearNoise, _height[col], _shift[col], y, out step);
                 if (solid && runLo == int.MinValue) runLo = y;
                 else if (!solid && runLo != int.MinValue)
                 {
@@ -352,12 +367,12 @@ public sealed class HeartWorldGenerator : IWorldGenerator
 
     /// <summary>Whether block y of a column (wobbled to (px, pz), lifted by lift) is solid, and how many blocks up from
     /// it nothing can change.</summary>
-    private bool SolidAt(float px, float pz, float lift, float wearNoise, float height, int y, out int step)
+    private bool SolidAt(float px, float pz, float lift, float wearNoise, float height, float shift, int y, out int step)
     {
         float t = WearBlend(y);
         float across = (FloorWear + (UpperWear - FloorWear) * t) * wearNoise + CrackSlack;
         float up = (FloorWearUp + (UpperWearUp - FloorWearUp) * t) * wearNoise * HeartGrid.VerticalScale + CrackSlack;
-        bool solid = Solid(px, (y - height + lift) * HeartGrid.VerticalScale, pz, y, height, across, up, out float clear);
+        bool solid = Solid(px, (y - height + lift) * HeartGrid.VerticalScale, pz, y, height, shift, across, up, out float clear);
         step = System.Math.Max(1, (int)clear);
         // Where wear grows with height, not so far that it grows by more than CrackSlack.
         if (y > HeartGrid.FloorTop + CrackFrom && y < HeartGrid.FloorTop + CrackFrom + CrackOver)
@@ -366,25 +381,37 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     }
 
     private int _topsX = int.MinValue, _topsZ = int.MinValue; // the chunk column whose hearts Top last loaded
+    private Erosion.Field? _topsWorn;                         // and its landmass worn
+
+    /// <summary>Loads the hearts round chunk column (chunkX, chunkZ) for Top and ColumnSpans, unless they are.</summary>
+    private void LoadColumnHearts(int chunkX, int chunkZ)
+    {
+        if (chunkX == _topsX && chunkZ == _topsZ) return;
+        _topsX = chunkX; _topsZ = chunkZ;
+        float x0 = chunkX * S, z0 = chunkZ * S, top = float.MinValue;
+        for (int j = 0; j <= 2; j++)
+        for (int i = 0; i <= 2; i++)
+            top = MathF.Max(top, _terrain.Height(x0 + i * S * 0.5f, z0 + j * S * 0.5f));
+        top = MathF.Min(top + TerrainRiseMargin, HeartGrid.WorldTop - 1);
+        LoadHearts(x0 - WarpAcross, z0 - WarpAcross, x0 + S + WarpAcross, z0 + S + WarpAcross,
+                   HeartGrid.LowestBottom - top - WarpUp, WarpUp);
+        _topsWorn = _erosion?.Of(x0 + S / 2, z0 + S / 2);
+    }
+
+    /// <summary>The terrain's height at block column (x, z) and how far erosion moves its piece's top there.</summary>
+    private (float Height, float Shift) ColumnHeight(float wx, float wz)
+    {
+        float height = _terrain.Height(wx, wz, out float broad);
+        return (MathF.Min(height, HeartGrid.WorldTop - 1), _topsWorn?.Shift(wx, wz, height - broad) ?? 0f);
+    }
 
     /// <summary>The top of the land at block column (x, z), before any water cuts it (the highest block of its top
     /// span, as Prepare finds it), or null where there is none: worked out for that column alone, for Water.</summary>
     internal int? Top(int x, int z)
     {
-        int chunkX = x >> 5, chunkZ = z >> 5;
-        if (chunkX != _topsX || chunkZ != _topsZ)
-        {
-            _topsX = chunkX; _topsZ = chunkZ;
-            float x0 = chunkX * S, z0 = chunkZ * S, top = float.MinValue;
-            for (int j = 0; j <= 2; j++)
-            for (int i = 0; i <= 2; i++)
-                top = MathF.Max(top, _terrain.Height(x0 + i * S * 0.5f, z0 + j * S * 0.5f));
-            top = MathF.Min(top + TerrainRiseMargin, HeartGrid.WorldTop - 1);
-            LoadHearts(x0 - WarpAcross, z0 - WarpAcross, x0 + S + WarpAcross, z0 + S + WarpAcross,
-                       HeartGrid.LowestBottom - top - WarpUp, WarpUp);
-        }
+        LoadColumnHearts(x >> 5, z >> 5);
         float wx = x, wz = z;
-        float height = MathF.Min(_terrain.Height(wx, wz), HeartGrid.WorldTop - 1);
+        var (height, shift) = ColumnHeight(wx, wz);
         float px = wx + WarpAcross * _warpX.GetNoise(wx, wz);
         float pz = wz + WarpAcross * _warpZ.GetNoise(wx, wz);
         float lift = WarpUp * _warpY.GetNoise(wx, wz);
@@ -392,17 +419,54 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         _nearValid = false;
         // Down the column to the first solid block with MinThickness under it (thinner runs are no span). (Going down
         // in the steps that are safe going up, it can land under a run's top: it climbs back up to it.)
-        int bottom = (int)MathF.Ceiling(HeartGrid.LowestBottom), from = (int)MathF.Floor(height);
+        int bottom = (int)MathF.Ceiling(HeartGrid.LowestBottom);
+        int from = (int)MathF.Floor(MathF.Min(height + MathF.Max(shift, 0f), HeartGrid.WorldTop - 1));
         for (int y = from; y >= bottom;)
         {
-            if (!SolidAt(px, pz, lift, wearNoise, height, y, out int step)) { y -= step; continue; }
-            while (y < from && SolidAt(px, pz, lift, wearNoise, height, y + 1, out _)) y++;
+            if (!SolidAt(px, pz, lift, wearNoise, height, shift, y, out int step)) { y -= step; continue; }
+            while (y < from && SolidAt(px, pz, lift, wearNoise, height, shift, y + 1, out _)) y++;
             int run = 1;
-            while (run < MinThickness && y - run >= bottom && SolidAt(px, pz, lift, wearNoise, height, y - run, out _)) run++;
+            while (run < MinThickness && y - run >= bottom && SolidAt(px, pz, lift, wearNoise, height, shift, y - run, out _)) run++;
             if (run >= MinThickness) return y;
             y -= run;
         }
         return null;
+    }
+
+    /// <summary>The solid spans (bottom up) of block column (x, z), as Prepare finds them but before any water cuts
+    /// them: worked out for that column alone, for sampling the land coarsely (see Erosion).</summary>
+    internal void ColumnSpans(int x, int z, List<(short Lo, short Hi)> into)
+    {
+        into.Clear();
+        LoadColumnHearts(x >> 5, z >> 5);
+        bool anyAlive = false;
+        foreach (bool a in _alive.AsSpan(0, _heartCount)) if (a) { anyAlive = true; break; }
+        if (!anyAlive) return;
+
+        float wx = x, wz = z;
+        var (height, shift) = ColumnHeight(wx, wz);
+        float px = wx + WarpAcross * _warpX.GetNoise(wx, wz);
+        float pz = wz + WarpAcross * _warpZ.GetNoise(wx, wz);
+        float lift = WarpUp * _warpY.GetNoise(wx, wz);
+        float wearNoise = 0.6f + 0.4f * (_crack.GetNoise(wx, wz) + 1f);
+        _nearValid = false;
+        // The same walk as BuildProfile's.
+        int runLo = int.MinValue;
+        int yBottom = (int)MathF.Ceiling(HeartGrid.LowestBottom + BottomRoughness * (0.5f + 0.5f * _bottom.GetNoise(wx, wz)));
+        int yTop = (int)MathF.Floor(MathF.Min(height + MathF.Max(shift, 0f), HeartGrid.WorldTop - 1));
+        for (int y = yBottom; y <= yTop + 1;)
+        {
+            bool solid = false;
+            int step = 1;
+            if (y <= yTop) solid = SolidAt(px, pz, lift, wearNoise, height, shift, y, out step);
+            if (solid && runLo == int.MinValue) runLo = y;
+            else if (!solid && runLo != int.MinValue)
+            {
+                if (into.Count < MaxSpans && y - runLo >= MinThickness) into.Add(((short)runLo, (short)(y - 1)));
+                runLo = int.MinValue;
+            }
+            y = System.Math.Min(y + step, System.Math.Max(y + 1, yTop + 1));
+        }
     }
 
     /// <summary>0 in the floor to 1 in the broken ground above: how far wear goes from the floor's to the upper.</summary>
@@ -475,7 +539,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     /// <summary>Whether the point at scaled position (sx, sy, sz) is in a live piece, worn back from its faces by
     /// <paramref name="wearAcross"/> and <paramref name="wearUp"/> (scaled space), and how many blocks straight up it
     /// stays so (<paramref name="clear"/>).</summary>
-    private bool Solid(float sx, float sy, float sz, float y, float surface, float wearAcross, float wearUp, out float clear)
+    private bool Solid(float sx, float sy, float sz, float y, float surface, float shift, float wearAcross, float wearUp, out float clear)
     {
         // The hearts to search: those in the cells around the point in each layer whose band is within a cell of it.
         // Going up, that set changes at the next cell boundary of a searched layer, or where another layer comes
@@ -552,9 +616,9 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             return false;
         }
 
-        // The piece's top, worn down from the terrain: a face like the others, so the rim where it meets the sides is
-        // rounded too (but not worn back: the top is where it is).
-        float top = PieceTop(surface, _hs[bi], _drop[bi]);
+        // The piece's top, worn down from the terrain and moved by erosion: a face like the others, so the rim where it
+        // meets the sides is rounded too (but not worn back: the top is where it is).
+        float top = PieceTop(surface, _hs[bi], _drop[bi]) + shift;
         rates[faces] = HeartGrid.VerticalScale;
         worn[faces] = (top - y) * HeartGrid.VerticalScale;
         least = MathF.Min(least, worn[faces++]);

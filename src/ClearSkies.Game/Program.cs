@@ -48,6 +48,9 @@ System.Runtime.GCSettings.LatencyMode = System.Runtime.GCLatencyMode.SustainedLo
 }
 
 var options = LaunchOptions.Parse(args);
+// (The world's shape, before anything generates it.)
+if (options.PieceSize != 1f) ClearSkies.Game.Generation.HeartGrid.WidenPieces(options.PieceSize);
+ClearSkies.Game.Generation.HeartWorldGenerator.CrackWidth = options.CrackWidth;
 if (options.Headless)
 {
     // No window, GPU, input or UI: just the simulation and the network, on a timer.
