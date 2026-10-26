@@ -211,7 +211,7 @@ public sealed class ChunkPipeline
     private void Unmake(PipelineChunk record, Stage stage)
     {
         ref var slot = ref record.At(stage.Id);
-        if (slot.Output is { } output) { slot.Output = null; stage.Release(output); }
+        if (slot.Output is { } output) { slot.Output = null; Release(stage, output); }
         bool made = slot.Version > 0;
         if (!slot.Is(SlotFlags.Stale | SlotFlags.Queued | SlotFlags.Running)) slot.Since = Stopwatch.GetTimestamp();
         slot.Version = 0;
@@ -257,6 +257,7 @@ public sealed class ChunkPipeline
     public void Update(FrameBudgets budgets)
     {
         long start = Stopwatch.GetTimestamp();
+        _inStages = 0;
         bool MainLeft() => Stopwatch.GetElapsedTime(start).TotalMilliseconds < budgets.MainMs;
         if (FrameMs.Length != _stages.Count + 1) FrameMs = new double[_stages.Count + 1];
         Array.Clear(FrameMs);
@@ -266,14 +267,16 @@ public sealed class ChunkPipeline
             using var timed = Timed(made.Stage);
             if (made.Worker >= 0) _inFlight[made.Worker]--;
             if (made.Made is Exception e) throw new InvalidOperationException($"{made.Stage} failed on {made.Record}", e);
-            if (made.Record.Removed) { made.Stage.Release(made.Made); continue; }
+            if (made.Record.Removed) { Release(made.Stage, made.Made); continue; }
             if (!made.Record.Needs(made.Stage)) // no longer wanted for what it serves
             {
                 made.Record.At(made.Stage.Id).Set(SlotFlags.Running, false);
-                made.Stage.Release(made.Made);
+                Release(made.Stage, made.Made);
                 continue;
             }
+            long t = Stopwatch.GetTimestamp();
             var change = made.Stage.AppliedAny(made.Record, made.Made, made.Record.At(made.Stage.Id).Output);
+            _inStages += Stopwatch.GetTimestamp() - t;
             Finish(made.Record, made.Stage, made.Made, change);
         }
 
@@ -352,6 +355,21 @@ public sealed class ChunkPipeline
             DropIfUnneeded(_dropping.Dequeue()); // wanted again meanwhile: kept
         }
         FrameMs[^1] = Stopwatch.GetElapsedTime(dropping).TotalMilliseconds;
+        BookkeepingMs = (Stopwatch.GetTimestamp() - start - _inStages) * 1000.0 / Stopwatch.Frequency;
+    }
+
+    // Time in the stages' own code this frame (applying, preparing, running, asking, releasing), in timestamp ticks.
+    private long _inStages;
+
+    /// <summary>Main-thread time (ms) the last <see cref="Update"/> spent outside the stages' own code: working out
+    /// what's ready, passing changes on, gathering inputs and dropping chunks.</summary>
+    public double BookkeepingMs { get; private set; }
+
+    private void Release(Stage stage, object output)
+    {
+        long t = Stopwatch.GetTimestamp();
+        stage.Release(output);
+        _inStages += Stopwatch.GetTimestamp() - t;
     }
 
     /// <summary>Main-thread time (ms) the last <see cref="Update"/> spent on each stage, by id (taking its finished
@@ -532,7 +550,9 @@ public sealed class ChunkPipeline
     {
         using var timed = Timed(stage);
         var inputs = Gather(record, stage);
+        long t = Stopwatch.GetTimestamp();
         inputs.Prepared = stage.Prepare(record);
+        _inStages += Stopwatch.GetTimestamp() - t;
         ref var slot = ref record.At(stage.Id);
         slot.Set(SlotFlags.Stale, false);
         slot.Set(SlotFlags.Running, true);
@@ -553,7 +573,10 @@ public sealed class ChunkPipeline
     private bool RunFrame(PipelineChunk record, FrameStage stage)
     {
         using var timed = Timed(stage);
-        var result = stage.Run(record, Gather(record, stage));
+        var inputs = Gather(record, stage);
+        long t = Stopwatch.GetTimestamp();
+        var result = stage.Run(record, inputs);
+        _inStages += Stopwatch.GetTimestamp() - t;
         if (!result.Finished) { record.At(stage.Id).Set(SlotFlags.Queued, true); return false; }
         record.At(stage.Id).Set(SlotFlags.Stale, false);
         Finish(record, stage, result.Output, result.Change, result.Changed);
@@ -564,7 +587,9 @@ public sealed class ChunkPipeline
     private bool Ask(PipelineChunk record, ExternalStage stage)
     {
         using var timed = Timed(stage);
+        long t = Stopwatch.GetTimestamp();
         var result = stage.Request(record);
+        _inStages += Stopwatch.GetTimestamp() - t;
         if (result.Finished) Finish(record, stage, result.Output, result.Change, result.Changed);
         if (result.Again == 0) return result.Finished;
         if (!result.Finished)
@@ -588,7 +613,7 @@ public sealed class ChunkPipeline
     {
         ref var slot = ref record.At(stage.Id);
         slot.Set(SlotFlags.Running, false);
-        if (slot.Output is { } before && !ReferenceEquals(before, output)) stage.Release(before);
+        if (slot.Output is { } before && !ReferenceEquals(before, output)) Release(stage, before);
         slot.Output = output;
         slot.Version++;
         if (slot.Is(SlotFlags.Urgent))
@@ -640,7 +665,7 @@ public sealed class ChunkPipeline
         {
             if (!record.Has(stage.Id)) continue;
             ref var slot = ref record.At(stage.Id);
-            if (slot.Output is { } output) { slot.Output = null; stage.Release(output); }
+            if (slot.Output is { } output) { slot.Output = null; Release(stage, output); }
         }
         Dropped?.Invoke(record);
     }
