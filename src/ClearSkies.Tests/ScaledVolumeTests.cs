@@ -10,6 +10,9 @@ namespace ClearSkies.Tests;
 /// invisible to everything but meshing, lighting and drawing.</summary>
 public class ScaledVolumeTests
 {
+    private static bool HasCollider(HeadlessScene scene, ChunkPosition pos)
+        => scene.WorldVolume.GetEntry(pos)?.Entity.Has<StaticCollider>() == true;
+
     private static ChunkVolume Scaled(HeadlessScene scene, int scale)
     {
         var root = scene.World.CreateEntity();
@@ -50,7 +53,7 @@ public class ScaledVolumeTests
         scene.SpawnLocalPlayer(new Vector3(16, 40, 16), freeFly: true);
         scene.WorldVolume.SetBlock(16, 32, 16, BlockId.Stone);
         var pos = new ChunkPosition(0, 1, 0);
-        Assert.True(scene.TickUntil(() => scene.Colliders.HasCollider(scene.WorldVolume, pos)));
+        Assert.True(scene.TickUntil(() => HasCollider(scene, pos)));
 
         // A scaled chunk at the same position comes and goes: the world's collider stays.
         var volume = Scaled(scene, 2);
@@ -59,7 +62,7 @@ public class ScaledVolumeTests
         Assert.False(entry.Entity.Has<NeedsRecollideFlag>());
         volume.RemoveChunk(pos);
         scene.Tick(5);
-        Assert.True(scene.Colliders.HasCollider(scene.WorldVolume, pos));
+        Assert.True(HasCollider(scene, pos));
     }
 
     [Fact]
