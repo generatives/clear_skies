@@ -468,10 +468,13 @@ public sealed class ChunkPipeline
 
     private bool InputsThere(PipelineChunk record, Stage stage)
     {
-        foreach (var input in InputsOf(stage, record.Key.Grid))
+        Span<ChunkKey> keys = stackalloc ChunkKey[Relation.MaxKeys];
+        var inputs = InputsOf(stage, record.Key.Grid);
+        for (int i = 0; i < inputs.Count; i++) // (not foreach: an interface's enumerator is made each time)
         {
+            var input = inputs[i];
             if (input.AcceptsMissing) continue;
-            foreach (var key in input.Of.Picked(this, record.Key))
+            foreach (var key in input.Of.Picked(this, record.Key, keys))
                 if (Get(key) is not { Wanted: true } source || source.Has(input.Stage.Id) && source.At(input.Stage.Id).Version == 0) return false;
         }
         return true;
@@ -480,13 +483,18 @@ public sealed class ChunkPipeline
     private StageInputs Gather(PipelineChunk record, Stage stage)
     {
         var read = new StageInputs();
-        foreach (var input in InputsOf(stage, record.Key.Grid))
-            foreach (var key in input.Of.Picked(this, record.Key))
+        Span<ChunkKey> keys = stackalloc ChunkKey[Relation.MaxKeys];
+        var inputs = InputsOf(stage, record.Key.Grid);
+        for (int i = 0; i < inputs.Count; i++)
+        {
+            var input = inputs[i];
+            foreach (var key in input.Of.Picked(this, record.Key, keys))
             {
                 var source = Get(key);
                 bool seen = source is { Wanted: true } && source.Has(input.Stage.Id);
                 read.Add(input.Stage, key, seen ? source!.At(input.Stage.Id).Output : null);
             }
+        }
         return read;
     }
 
@@ -567,10 +575,11 @@ public sealed class ChunkPipeline
     private void Propagate(PipelineChunk record, Stage stage, Change change, bool acceptsMissingOnly)
     {
         if (!record.Wanted && !acceptsMissingOnly) return; // on its way out: nothing reads it
+        Span<ChunkKey> keys = stackalloc ChunkKey[Relation.MaxKeys];
         foreach (var (reader, grid, input) in _readersOf[stage.Id])
         {
             if (acceptsMissingOnly && !input.AcceptsMissing) continue;
-            foreach (var key in input.Of.Affected(this, record.Key, change))
+            foreach (var key in input.Of.Affected(this, record.Key, change, keys))
                 if (key.Grid == grid && Get(key) is { } dependant)
                     MarkStale(dependant, reader.Id, change.Urgent);
         }

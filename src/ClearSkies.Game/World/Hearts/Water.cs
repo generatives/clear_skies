@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Generation;
 
 namespace ClearSkies.Game.Generation;
@@ -271,6 +272,23 @@ public sealed class Water
         return MathF.Sqrt(dx * dx + dz * dz);
     }
 
+    // A piece's working arrays, a window's samples each (on the large object heap, where dropping them costs a full
+    // collection): rented for each piece worked out, and cleared. Enough kept for a few worked out at once.
+    private static readonly FixedArrayPool<float> Floats = new(Window * Window, maxKept: 24);
+    private static readonly FixedArrayPool<int> Ints = new(Window * Window, maxKept: 8);
+    private static readonly FixedArrayPool<bool> Bools = new(Window * Window, maxKept: 8);
+
+    private static T[] Rent<T>(FixedArrayPool<T> pool)
+    {
+        var a = pool.Rent();
+        Array.Clear(a);
+        return a;
+    }
+
+    // Each worker's generator for the pieces' ground, and its queue for the floods (kept as big as they grow).
+    [ThreadStatic] private static HeartWorldGenerator? t_generator;
+    [ThreadStatic] private static PriorityQueue<int, float>? t_queue;
+
     /// <summary>Works out the water of the piece of the top row's heart in cell (hi, hk).</summary>
     private Piece Build(int hi, int hk)
     {
@@ -285,9 +303,7 @@ public sealed class Water
 
         // The piece's ground, and how far each sample is from its faces; elsewhere drains.
         var ground = new float[N];
-        var face = new float[N];
-        var rain = new float[N];
-        var lean = new float[N];
+        float[] face = Rent(Floats), rain = Rent(Floats), lean = Rent(Floats);
         for (int k = 0; k < Window; k++)
         for (int i = 0; i < Window; i++)
         {
@@ -303,7 +319,7 @@ public sealed class Water
         // The ground is the land's real top (as HeartWorldGenerator makes it, rounded off by its faces and all), a
         // chunk column at a time so the generator loads the hearts round each once. Where it is far under the piece's
         // top, a hole into the caves under it, it is a drain too.
-        var generator = new HeartWorldGenerator(_seed);
+        var generator = t_generator is { } kept && kept.Seed == _seed ? kept : t_generator = new HeartWorldGenerator(_seed);
         int cx0 = FloorDiv(piece.X0 * Step, 32), cz0 = FloorDiv(piece.Z0 * Step, 32);
         int cx1 = FloorDiv((piece.X0 + Window) * Step, 32), cz1 = FloorDiv((piece.Z0 + Window) * Step, 32);
         for (int cz = cz0; cz <= cz1; cz++)
@@ -321,13 +337,13 @@ public sealed class Water
 
         // Priority flood from the drains inwards, lowest first: each sample filled to at least the level it was
         // reached at, so each hollow fills to its lowest way out, and its water goes back the way it was reached.
-        var filled = new float[N];
+        var filled = Rent(Floats);
         var down = new int[N];
-        var order = new int[N];
+        var order = Rent(Ints);
         int count = Flood(ground, filled, down, order, c => ground[c] == Drain ? Drain : float.NaN);
 
         // The hollows: samples filled over their ground, joined side by side.
-        var hollow = new int[N];
+        var hollow = Rent(Ints);
         Array.Fill(hollow, -1);
         var cellsOf = new List<List<int>>();
         var deepest = new List<float>();
@@ -357,7 +373,7 @@ public sealed class Water
         }
 
         // Rain gathers down the ways, from the furthest upstream first, through every hollow: how much reaches each.
-        var gathered = new float[N];
+        var gathered = Rent(Floats);
         var inflow = new float[cellsOf.Count];
         Array.Copy(rain, gathered, N);
         for (int o = count - 1; o >= 0; o--)
@@ -426,7 +442,7 @@ public sealed class Water
             }
             lean[c] *= Math.Clamp((near - 1f) / (ShoreLean - 1f), 0f, 1f);
         }
-        var surface = new float[N];
+        var surface = Rent(Floats);
         for (int c = 0; c < N; c++)
         {
             int h = hollow[c];
@@ -476,6 +492,10 @@ public sealed class Water
         }
         for (int c = 0; c < N; c++)
             if (piece.River[c] == int.MaxValue) piece.River[c] = int.MinValue;
+        Floats.Return(face); Floats.Return(rain); Floats.Return(lean);
+        Floats.Return(filled); Floats.Return(gathered); Floats.Return(surface);
+        Ints.Return(order);
+        Ints.Return(hollow);
         return piece;
     }
 
@@ -487,9 +507,8 @@ public sealed class Water
     private static int Flood(float[] ground, float[] filled, int[] down, int[] order, Func<int, float> source, float[]? lean = null)
     {
         const int N = Window * Window;
-        var done = new bool[N];
-        var queue = new PriorityQueue<int, float>();
-        var isSource = new bool[N];
+        bool[] done = Rent(Bools), isSource = Rent(Bools);
+        var queue = t_queue ??= new PriorityQueue<int, float>();
         for (int c = 0; c < N; c++)
         {
             down[c] = -1;
@@ -517,6 +536,8 @@ public sealed class Water
                 queue.Enqueue(nc, filled[nc] + (lean?[nc] ?? 0f));
             }
         }
+        Bools.Return(done);
+        Bools.Return(isSource);
         return count;
     }
 
