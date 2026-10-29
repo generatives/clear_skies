@@ -57,7 +57,7 @@ public sealed class Erosion
     private const float BankReach = 24f, BankGrade = 0.15f;
 
     /// <summary>How far a channel's bed rises from its middle to its edges, per block of its half-width.</summary>
-    private const float EdgeRise = 0.3f;
+    private const float EdgeRise = 0.5f;
 
     /// <summary>How many times a river's line is eased towards its neighbours' (see Field).</summary>
     private const int RiverEasing = 4;
