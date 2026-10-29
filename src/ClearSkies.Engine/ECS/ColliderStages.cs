@@ -38,23 +38,15 @@ public sealed class BoxesStage(ChunkPipeline pipeline) : WorkerStage<PhysicsWorl
 
     private readonly ThreadLocal<VoxelBoxDecomposer> _decomposers = new(() => new VoxelBoxDecomposer());
 
-    /// <summary>The chunk's blocks, held for the job; nothing for one with none that collide (air, or only levers).</summary>
-    public override object? Prepare(PipelineChunk record)
-    {
-        if (pipeline.EntryOf(record.Key) is not { } entry || !entry.Data.HasAnyColliding()) return null;
-        entry.Data.Retain(); // see ChunkData.Release: an unloaded chunk's arrays wait for this job
-        return entry.Data;
-    }
+    /// <summary>The chunk's blocks, as they are now; nothing for one with none that collide (air, or only levers).</summary>
+    public override object? Prepare(PipelineChunk record, StageInputs inputs)
+        => inputs.Get<ChunkVoxels>(record.Key)?.Data is { } data && data.HasAnyColliding() ? data : null;
 
     public override PhysicsWorld.StaticCompoundBuild Make(ChunkKey key, StageInputs inputs)
     {
         if (inputs.Prepared is not ChunkData data) return PhysicsWorld.StaticCompoundBuild.None;
-        try
-        {
-            var boxes = _decomposers.Value!.Decompose(data, mergeBlockTypes: true);
-            return boxes.Count > 0 ? PhysicsWorld.PrepareStaticCompound(boxes) : PhysicsWorld.StaticCompoundBuild.None;
-        }
-        finally { data.Unretain(); }
+        var boxes = _decomposers.Value!.Decompose(data, mergeBlockTypes: true);
+        return boxes.Count > 0 ? PhysicsWorld.PrepareStaticCompound(boxes) : PhysicsWorld.StaticCompoundBuild.None;
     }
 }
 

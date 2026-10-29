@@ -87,14 +87,15 @@ public class HeadlessStreamingTests
     internal static ChunkLoadSystem Streaming(HeadlessScene scene, SaveDatabase db, int maxChunks = 100_000, float viewDistance = 64) =>
         Streaming(scene, new SavedChunkStore(db), maxChunks, viewDistance);
 
-    /// <summary>The scene's world streamed, as the game's: edits to it ask streaming what's there.</summary>
+    /// <summary>The scene's world streamed, as the game's (each frame, see <see cref="HeadlessScene.Terrain"/>): edits to
+    /// it ask streaming what's there.</summary>
     internal static ChunkLoadSystem Streaming(HeadlessScene scene, IChunkStore store, int maxChunks = 100_000, float viewDistance = 64)
     {
         var pipeline = scene.ChunkPipeline;
-        scene.Streamed = true;
         var load = new ChunkLoadSystem(scene.World, scene.WorldVolume, new ChunkCountBudget(maxChunks), pipeline.Pipeline, () => new Flat(),
                                        viewDistance, minChunkY: 0, store);
         Pipelines.Add(load, pipeline);
+        scene.Terrain = load;
         ((ClearSkies.Engine.Commands.Handlers.EditVoxelsHandler)scene.Commands.HandlerFor(ClearSkies.Engine.Commands.CommandIds.EditVoxels)!).Terrain = load;
         return load;
     }

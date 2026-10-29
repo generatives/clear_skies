@@ -51,15 +51,11 @@ public sealed partial class ChunkLoadSystem
     }
 
     /// <summary>Lets go of a removed level's chunk: the level unloads its volume itself, so what the pipeline made is
-    /// no longer in it, and is made again if the level comes back.</summary>
+    /// no longer in it (its blocks go with it, once dropped), and is made again if the level comes back.</summary>
     private void Forget(TerrainLevel level, ChunkPosition p)
     {
         var key = level.Key(p);
-        if (_pipeline.Get(key)?.Output<ChunkVoxels>(_voxels) is { InVolume: true } made)
-        {
-            made.InVolume = false;
-            made.Data = null;
-        }
+        if (_pipeline.Get(key)?.Output<ChunkVoxels>(_voxels) is { } made) made.InVolume = false;
         RemoveInFlight(level, p);
         _pipeline.Invalidate(key, _voxels);
         _pipeline.Want(key, false);
@@ -114,7 +110,7 @@ public sealed partial class ChunkLoadSystem
 
     private void Adopt(ChunkVoxels made, ChunkEntry entry)
     {
-        made.Data = null; // the volume's now
+        made.Data = entry.Data; // shared with the volume, and released with what was made (see Release)
         made.InVolume = true;
         entry.Entity.Set(new InPipeline { Key = made.Key });
     }
@@ -130,8 +126,7 @@ public sealed partial class ChunkLoadSystem
         {
             before.Replaced = true;
             if (before.InVolume && LevelOf(before) is { } was) Unload(was, before.Key.Pos); // made again: stale
-            before.InVolume = false;
-            before.Data = null;
+            before.InVolume = false; // its blocks go once the pipeline lets go of it
         }
         if (LevelOf(made) is not { } level) return; // its level went: released when the pipeline drops it
         var pos = made.Key.Pos;
@@ -164,20 +159,15 @@ public sealed partial class ChunkLoadSystem
         Adopt(made, entry);
     }
 
-    /// <summary>A made chunk the pipeline let go of: replaced (already out of the volume), or dropped, when it leaves
-    /// the volume (with one an edit made where it was air).</summary>
+    /// <summary>A made chunk the pipeline let go of (once no job reads it): replaced (already out of the volume), or
+    /// dropped, when it leaves the volume (with one an edit made where it was air). Its blocks are released.</summary>
     private void Release(ChunkVoxels made)
     {
-        var level = LevelOf(made);
-        if (!made.Replaced && level != null
+        if (!made.Replaced && LevelOf(made) is { } level
             && (made.InVolume || (level.Volume.IsLoaded(made.Key.Pos) && !level.Wanting.Contains(made.Key.Pos))))
-        {
-            Unload(level, made.Key.Pos); // releases its blocks with it
-            made.InVolume = false;
-            made.Data = null;
-            return;
-        }
-        if (!made.InVolume) made.Data?.Release();
+            Unload(level, made.Key.Pos);
+        made.InVolume = false;
+        made.Data?.Release();
         made.Data = null;
     }
 }

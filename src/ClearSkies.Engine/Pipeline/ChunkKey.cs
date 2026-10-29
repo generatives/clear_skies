@@ -25,7 +25,6 @@ public sealed class PipelineGrid
         Name = name;
         Finer = finer;
         Volume = volume;
-        ForVolume = volume != null;
         Level = finer == null ? 0 : finer.Level + 1;
         if (finer != null) finer.Coarser = this;
     }
@@ -38,10 +37,6 @@ public sealed class PipelineGrid
     public PipelineGrid? Coarser { get; private set; }
     /// <summary>How many grids finer ones there are: a chunk here covers 2^Level of the finest grid's across.</summary>
     public int Level { get; }
-
-    /// <summary>Made for a volume whose chunks are put there by hand (a ship's, see <see cref="ChunkPipeline.GridFor"/>),
-    /// not made by the pipeline.</summary>
-    public bool ForVolume { get; }
 
     /// <summary>The volume its chunks go in, once there is one.</summary>
     public ChunkVolume? Volume { get; set; }

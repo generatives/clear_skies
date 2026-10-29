@@ -38,7 +38,7 @@ public static class LightStages
             pipeline.Invalidate(over, shown);
             pipeline.Invalidate(over, cover);
         };
-        pipeline.Add(new DropBlocksStage(pipeline, upload, store));
+        pipeline.Add(new DropBlocksStage(pipeline, terrain.Voxels, upload, store));
     }
 }
 
@@ -139,8 +139,8 @@ public sealed class FirstBakeStage(ChunkPipeline pipeline, Renderer renderer, Up
 
 /// <summary>Drops a coarse chunk's blocks once it's meshed and in the GPU store: it's never edited or collided with. A
 /// chunk all one block, or of opaque cubes, keeps them: they're small, or say it's buried. So does one with see-through
-/// blocks on a side, which meshes again when a neighbour comes.</summary>
-public sealed class DropBlocksStage(ChunkPipeline pipeline, UploadStage upload, LightStoreStage store) : FrameStage
+/// blocks on a side, which meshes again when a neighbour comes. The blocks go back to the pool once no job reads them.</summary>
+public sealed class DropBlocksStage(ChunkPipeline pipeline, VoxelsStage voxels, UploadStage upload, LightStoreStage store) : FrameStage
 {
     public override string Name => "Drop coarse blocks";
     public override Purpose Serves => Purpose.Draw; // an undrawn chunk is meshed when it's drawn, from its blocks
@@ -148,12 +148,17 @@ public sealed class DropBlocksStage(ChunkPipeline pipeline, UploadStage upload, 
     public override bool AppliesTo(PipelineGrid grid) => grid.Level > 0;
 
     public override IReadOnlyList<Pipeline.Input> InputsFor(PipelineGrid grid)
-        => new Pipeline.Input[] { new(upload, Relation.Self), new(store, Relation.Self) };
+        => new Pipeline.Input[] { new(voxels, Relation.Self), new(upload, Relation.Self), new(store, Relation.Self) };
 
     public override StageResult Run(PipelineChunk record, StageInputs inputs)
     {
-        if (pipeline.EntryOf(record.Key) is { DataDropped: false } entry && entry.Entity.Has<ChunkMeshedFlag>() && CanDrop(entry.Data))
+        if (pipeline.EntryOf(record.Key) is { DataDropped: false } entry && entry.Entity.Has<ChunkMeshedFlag>() && CanDrop(entry.Data)
+            && inputs.Get<ChunkVoxels>(voxels, record.Key) is { Data: { } data } made)
+        {
             entry.DropData();
+            made.Data = null;
+            pipeline.OnceUnread(made, data.Release);
+        }
         return StageResult.Done();
     }
 

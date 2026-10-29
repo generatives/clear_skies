@@ -64,14 +64,12 @@ public sealed class ChunkPipelineSystem : ISystem, IDebugUiSystem
             Pipeline.OutputChanged(key, stage, new Change(edit.BorderFaces, edit.OpacityChanged, Urgent: true));
     }
 
-    /// <summary>A chunk came into a ship's volume, or another given a grid by hand (<see cref="ChunkPipeline.GridFor"/>, a
-    /// test's world): wanted, in that grid (a ship's is made with its first chunk).</summary>
+    /// <summary>A chunk came into a ship's volume: wanted, in the ship's grid (made with its first chunk).</summary>
     private void ChunkAdded(in Entity e, in Chunk chunk)
     {
         var volume = chunk.Entry.Volume;
-        var grid = Pipeline.GridOf(volume);
-        if (grid == null && !volume.Root.Has<DynamicGrid>()) return;
-        var key = (grid ?? Pipeline.GridFor(volume, $"ship {volume.Root}")).Key(chunk.Entry.Position);
+        if (!volume.Root.Has<DynamicGrid>()) return;
+        var key = Pipeline.GridFor(volume, $"ship {volume.Root}").Key(chunk.Entry.Position);
         e.Set(new InPipeline { Key = key });
         Pipeline.Want(key, true);
         Pipeline.Invalidate(key, ShipBlocks); // one that left and came back has new blocks

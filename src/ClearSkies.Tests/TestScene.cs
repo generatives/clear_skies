@@ -29,11 +29,11 @@ public sealed class HeadlessScene : IDisposable
     public readonly ChunkVolume WorldVolume;
     public readonly EntityPresenceSystem Presence;
     public readonly PhysicsBodySystem PhysicsBodies;
-    /// <summary>The world's chunks, wanted as they're added unless the world's streamed (see <see cref="Streamed"/>);
-    /// they get colliders from it (see <see cref="StaticCollider"/>).</summary>
+    /// <summary>Makes ships' chunks, and the world's once it's streamed (see <see cref="HeadlessStreamingTests.Streaming"/>):
+    /// their colliders among them (see <see cref="StaticCollider"/>).</summary>
     public readonly ChunkPipelineSystem ChunkPipeline;
-    /// <summary>Set before any chunk's added when the world's streamed: its chunks are then the streaming's grids'.</summary>
-    internal bool Streamed;
+    /// <summary>The world's streaming, once it's streamed: run each frame before the pipeline, as the game's.</summary>
+    internal ChunkLoadSystem? Terrain;
     public readonly CommandSystem Commands;
     public readonly BlockEntities Blocks;
     public readonly AnchorSystem Anchors;
@@ -57,11 +57,6 @@ public sealed class HeadlessScene : IDisposable
         Registry.RequestBlock = Ids.NextBlock;
         Selection = new GridSelection(World);
 
-        // The world's grid is made with its first chunk (before the pipeline sees it), unless it's streamed.
-        World.SubscribeComponentAdded((in Entity _, in Chunk c) =>
-        {
-            if (!Streamed && c.Entry.Volume == WorldVolume) ChunkPipeline!.Pipeline.GridFor(WorldVolume, "world");
-        });
         ChunkPipeline = new ChunkPipelineSystem(World);
         ColliderStages.Add(ChunkPipeline, Physics);
         var root = World.CreateEntity();
@@ -168,6 +163,7 @@ public sealed class HeadlessScene : IDisposable
     {
         Time.Alpha = Clock.Alpha;
         Interpolation.Update(SystemStage.Frame, dt);
+        Terrain?.Update(dt);
         ChunkPipeline.Update(dt);
     }
 
