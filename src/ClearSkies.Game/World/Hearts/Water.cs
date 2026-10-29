@@ -7,11 +7,10 @@ namespace ClearSkies.Game.Generation;
 /// <summary>What water there is at a block column (see <see cref="Water.At"/>).</summary>
 /// <param name="Level">World Y of the top water block, or int.MinValue for none.</param>
 /// <param name="Off">For a lake, how far (blocks) the column is from the middle of the lake's nearest sample cell.</param>
-/// <param name="RiverDepth">For a river, how deep its bed is cut under its level; 0 for a lake.</param>
-/// <param name="Bank">Beside a river, the highest its bank may stand here, or int.MaxValue.</param>
-public readonly record struct WaterColumn(int Level, float Off, int RiverDepth, int Bank = int.MaxValue)
+/// <param name="River">Whether it is a river's (running in a channel Erosion wore), not a lake's.</param>
+public readonly record struct WaterColumn(int Level, float Off, bool River)
 {
-    public static readonly WaterColumn None = new(int.MinValue, float.MaxValue, 0);
+    public static readonly WaterColumn None = new(int.MinValue, float.MaxValue, false);
 }
 
 /// <summary>
@@ -19,10 +18,10 @@ public readonly record struct WaterColumn(int Level, float Off, int RiverDepth, 
 /// ground held by one of the top row's hearts, see <see cref="HeartGrid"/>) is ringed by cracks, so whatever rains on
 /// it drains off its own edges: it is a watershed of its own, worked out whole once and cached, so every chunk agrees.
 ///
-/// The lakes and how much water runs where come from <see cref="Hydrology"/>, which settles the water over the whole
-/// landmass; this lays them over the piece's real top (as HeartWorldGenerator wears it down), sampled every
-/// <see cref="Step"/> blocks. A lake fills the samples under its level; where enough runs it is a river, wider the more
-/// it carries, its level running down a block under its ground, its bed cut a little under that.
+/// The lakes come from <see cref="Hydrology"/>, which settles the water over the whole landmass; this lays them over
+/// the piece's real top (as HeartWorldGenerator wears it down), sampled every <see cref="Step"/> blocks: a lake fills
+/// the samples under its level. Rivers run in the channels <see cref="Erosion"/> wore for them, filling each to the
+/// brims of its bed. Nothing here cuts the land: the water only lies in what the erosion made.
 /// </summary>
 public sealed class Water
 {
@@ -35,25 +34,6 @@ public sealed class Water
     /// <summary>How near a piece's side face (scaled space, see HeartWorldGenerator.Solid) counts as its crack, for
     /// rivers: more than the wear and the wobble of its outline together.</summary>
     private static float FaceMargin => 44f + 24f * (HeartWorldGenerator.CrackWidth - 1f);
-
-    /// <summary>How far from its piece's faces a lake keeps, further than a river: the rounding of its rim as well.</summary>
-    private static float LakeMargin => FaceMargin + 20f;
-
-    // A river starts where RiverFrom columns' rain runs (see Hydrology), RiverNarrowest blocks wide, widening by RiverWiden
-    // blocks per square root of what it carries beyond that, up to RiverWidest; and some stretches up to RiverVary wider
-    // or narrower.
-    private const float RiverFrom = (float)Erosion.RiverFrom, RiverNarrowest = 2f, RiverWiden = 0.25f, RiverWidest = 10f, RiverVary = 0.35f;
-
-    // A river winds up to Meander blocks either side of the way its water goes; its banks slope up from a block over
-    // it by BankSlope blocks per block out, or steeper to meet the ground within its reach: BankNear blocks (a cut) to
-    // BankFar (a gentle slope), varying along the river by noise.
-    private const float Meander = 9f, BankSlope = 0.6f, BankNear = 6f, BankFar = 18f;
-
-    /// <summary>How far from a lake (blocks) a river widens, up to MouthWiden times wider, and wears down to it.</summary>
-    private const float MouthReach = 16f, MouthWiden = 1f;
-
-    /// <summary>How many samples round a column to look for a river through it or beside it.</summary>
-    private const int Search = 10; // (as far as the widest channel Erosion wears reaches)
 
     /// <summary>How far under its piece's top (roughly) the land may be and still be its ground, not a hole.</summary>
     private const float HoleDepth = 40f;
@@ -70,46 +50,27 @@ public sealed class Water
     private readonly ContinentTerrain _terrain;
     private readonly ConcurrentDictionary<long, Heart> _hearts = new();
     private readonly ConcurrentDictionary<long, Piece> _pieces = new();
-    private readonly FastNoiseLite _meanderX, _meanderZ, _widths, _banks;
 
     private Water(ulong seed)
     {
         _seed = seed;
         _terrain = ContinentTerrain.For(seed);
-        _meanderX = Noise(seed + 41, 0.018f);
-        _meanderZ = Noise(seed + 42, 0.018f);
-        _widths = Noise(seed + 43, 0.01f);
-        _banks = Noise(seed + 45, 0.006f);
         _settle = new WaterSettle(this, seed);
     }
 
     private readonly WaterSettle _settle;
 
-    /// <summary>The water at column (x, z) once it has settled on the blocks (see <see cref="WaterSettle"/>): its level,
-    /// or int.MinValue for none; and the top of the ground there once a river has cut it, or int.MaxValue.</summary>
-    public (int Level, int Ground) Settled(int x, int z) => _settle.At(x, z);
-
-    private static FastNoiseLite Noise(ulong seed, float frequency)
-    {
-        var n = new FastNoiseLite(unchecked((int)seed));
-        n.SetNoiseType(FastNoiseLite.NoiseType.OpenSimplex2);
-        n.SetFractalType(FastNoiseLite.FractalType.FBm);
-        n.SetFractalOctaves(2);
-        n.SetFrequency(frequency);
-        return n;
-    }
+    /// <summary>The water's level at column (x, z) once it has settled on the blocks (see <see cref="WaterSettle"/>), or
+    /// int.MinValue for none.</summary>
+    public int Settled(int x, int z) => _settle.At(x, z);
 
     /// <summary>One piece's water, per sample of its window (cells from (X0, Z0), world sample coordinates).</summary>
     private sealed class Piece
     {
         public int X0, Z0;
         public int[] Lake = Array.Empty<int>();    // level of the lake over the sample, or int.MinValue
-        public int[] River = Array.Empty<int>();   // level of the river through the sample, or int.MinValue
-        public byte[] Width = Array.Empty<byte>(); // its width, blocks
-        public int[] Down = Array.Empty<int>();    // the sample its water goes on to, or -1
-        public float[] RiverX = Array.Empty<float>(), RiverZ = Array.Empty<float>(); // where a river's line runs through
-        public float[] Edge = Array.Empty<float>(); // 0 at its piece's crack to 1 well inside (see EdgeFade)
         public float[] Ground = Array.Empty<float>(); // the land's real top over the sample, or Drain
+        public Erosion.Field Worn = null!;          // its landmass worn, rivers' channels and all
     }
 
     /// <summary>The water at column (x, z): a lake over it or right beside it (water fills it from its ground up to
@@ -122,78 +83,10 @@ public sealed class Water
         int ci = FloorDiv(x, Step) - piece.X0, ck = FloorDiv(z, Step) - piece.Z0;
         if (ci < 1 || ck < 1 || ci >= Window - 1 || ck >= Window - 1) return WaterColumn.None;
         int own = piece.Lake[ci + Window * ck];
-
-        // A river: within half its width of the line from a sample's middle to the next one's down its way, that line
-        // bent by noise so the river winds (less so near a lake, so it still meets it, and near its piece's crack, so
-        // it doesn't wind out onto the cliff's lip). Its banks slope up from the nearest river.
-        float nearLake = float.MaxValue;
-        int lakeLevel = int.MinValue;
-        for (int dk = -4; dk <= 4; dk++)
-        for (int di = -4; di <= 4; di++)
-        {
-            int l = piece.Lake[Math.Clamp(ci + di, 0, Window - 1) + Window * Math.Clamp(ck + dk, 0, Window - 1)];
-            float dd = MathF.Sqrt(di * di + dk * dk) * Step;
-            if (l != int.MinValue && dd < nearLake) { nearLake = dd; lakeLevel = l; }
-        }
-        // (Coming into a lake, a river widens and wears its way down to the lake's level, cutting a bay into the
-        // shore rather than tumbling over it.)
-        float mouth = Math.Clamp(1f - nearLake / MouthReach, 0f, 1f);
-        float bend = Meander * Math.Clamp((nearLake - 2f * Step) / (2f * Step), 0f, 1f) * piece.Edge[ci + Window * ck];
-        float qx = px + bend * _meanderX.GetNoise(px, pz), qz = pz + bend * _meanderZ.GetNoise(px, pz);
-        int qi = FloorDiv((int)MathF.Floor(qx), Step) - piece.X0, qk = FloorDiv((int)MathF.Floor(qz), Step) - piece.Z0;
-        int riverLevel = int.MinValue, width = 0, bank = int.MaxValue, riverLow = 0, bankLow = 0;
-        float bestRiver = float.MaxValue, bestBank = float.MaxValue, riverX = 0f, riverZ = 0f, bankX = 0f, bankZ = 0f;
-        for (int dk = -Search; dk <= Search; dk++)
-        for (int di = -Search; di <= Search; di++)
-        {
-            int i = qi + di, k = qk + dk;
-            if (i < 0 || k < 0 || i >= Window || k >= Window) continue;
-            int c = i + Window * k;
-            if (piece.Width[c] == 0) continue;
-            float ax = piece.RiverX[c], az = piece.RiverZ[c];
-            float bx = ax, bz = az;
-            int d = piece.Down[c];
-            if (d >= 0) { bx = piece.RiverX[d]; bz = piece.RiverZ[d]; }
-            float dist = SegmentDistance(qx, qz, ax, az, bx, bz, out float t), half = piece.Width[c] * 0.5f * (1f + MouthWiden * mouth);
-            // (Its level runs down from this sample's to the next one's, or to the lake's it flows into: no higher
-            // than the first, no lower than the straight line between them.)
-            int to = d < 0 ? piece.River[c] : piece.River[d] != int.MinValue ? piece.River[d] : piece.Lake[d] != int.MinValue ? piece.Lake[d] : piece.River[c];
-            int low = (int)MathF.Floor(piece.River[c] + t * (to - piece.River[c]));
-            // (The point on the river's middle line this column is across from, back in the column's own space.)
-            float mx = ax + t * (bx - ax) + px - qx, mz = az + t * (bz - az) + pz - qz;
-            if (dist <= half && dist < bestRiver) { bestRiver = dist; riverLevel = piece.River[c]; riverLow = low; width = piece.Width[c]; riverX = mx; riverZ = mz; }
-            else if (dist > half && dist - half < MathF.Min(BankFar, bestBank)) { bestBank = dist - half; bank = piece.River[c]; bankLow = low; bankX = mx; bankZ = mz; }
-        }
-        // Between those, a block under the ground on the river's middle line: so the water follows the ground's steps
-        // down, neither sinking under them nor standing over them, and lies level across the river.
-        float? ground = riverLevel != int.MinValue || bank != int.MaxValue ? Ground(x, z) : null;
-        int Follow(int high, int low, float mx, float mz)
-        {
-            int l = Ground((int)MathF.Floor(mx), (int)MathF.Floor(mz)) is float g ? Math.Clamp((int)MathF.Floor(g) - 1, Math.Min(low, high), high) : high;
-            return mouth > 0f && lakeLevel < l ? (int)MathF.Round(l + (lakeLevel - l) * mouth) : l;
-        }
-        if (riverLevel != int.MinValue) riverLevel = Follow(riverLevel, riverLow, riverX, riverZ);
-        float reach = BankNear + (BankFar - BankNear) * Smoothstep(-0.3f, 0.3f, _banks.GetNoise(px, pz));
-        if (bank != int.MaxValue && bestBank >= reach) bank = int.MaxValue;
-        if (bank != int.MaxValue)
-        {
-            // (Steeper where the ground stands high over the river, so the bank meets it within its reach rather than
-            // leaving a wall at the end.)
-            int foot = Follow(bank, bankLow, bankX, bankZ) + 1;
-            float slope = ground is float g ? MathF.Max(BankSlope, (g - foot) / reach) : BankSlope;
-            bank = foot + (int)(bestBank * slope);
-        }
-        int depth = width >= 8 ? 3 : width >= 4 ? 2 : 1;
-        // (Shallower toward a lake, so its bed runs out onto the lake's rather than ending at a ledge under the water.)
-        depth = Math.Max(1, (int)MathF.Round(depth * (1f - mouth)));
-        if (own != int.MinValue)
-        {
-            // Where a river comes in over the lake's shore, it runs on down to the lake's water (the ground round it
-            // letting it down) rather than standing back behind the shore.
-            if (riverLevel != int.MinValue && ground is float g && g >= own) return new(Math.Max(riverLevel, own), 0f, depth);
-            return new(own, Off(ci, ck, px, pz, piece), 0);
-        }
-        if (riverLevel != int.MinValue) return new(riverLevel, 0f, depth);
+        if (own != int.MinValue) return new(own, Off(ci, ck, px, pz, piece), false);
+        // A river: in its channel, as high as the channel's bed is all across.
+        float stream = piece.Worn.Stream(px, pz);
+        if (!float.IsNaN(stream)) return new((int)MathF.Floor(stream), 0f, true);
 
         // Just past a lake's sampled cells the ground can still dip under its level between samples: fill those too.
         int level = int.MinValue;
@@ -207,30 +100,7 @@ public sealed class Water
             float dd = cx * cx + cz * cz;
             if (dd < best) { best = dd; level = l; }
         }
-        if (level == int.MinValue) return bank == int.MaxValue ? WaterColumn.None : WaterColumn.None with { Bank = bank };
-        return new(level, MathF.Sqrt(best), 0);
-    }
-
-    /// <summary>The land's top at column (x, z), from its piece's samples round it (or, by a drain, as its piece's
-    /// top, see HeartWorldGenerator.PieceTop), or null where no piece holds it.</summary>
-    public float? Ground(int x, int z)
-    {
-        float px = x + 0.5f, pz = z + 0.5f;
-        if (Nearest(px, pz, out int hi, out int hk) is not { Alive: true } h) return null;
-        var piece = PieceOf(hi, hk);
-        float fi = px / Step - 0.5f - piece.X0, fk = pz / Step - 0.5f - piece.Z0;
-        int i = (int)MathF.Floor(fi), k = (int)MathF.Floor(fk);
-        if (i >= 0 && k >= 0 && i < Window - 1 && k < Window - 1)
-        {
-            float a = piece.Ground[i + Window * k], b = piece.Ground[i + 1 + Window * k];
-            float c = piece.Ground[i + Window * (k + 1)], d = piece.Ground[i + 1 + Window * (k + 1)];
-            if (a != Drain && b != Drain && c != Drain && d != Drain)
-            {
-                float tx = fi - i, tz = fk - k;
-                return (a + (b - a) * tx) * (1f - tz) + (c + (d - c) * tx) * tz;
-            }
-        }
-        return RoughTop(px, pz, h);
+        return level == int.MinValue ? WaterColumn.None : new(level, MathF.Sqrt(best), false);
     }
 
     /// <summary>Roughly the top of heart <paramref name="h"/>'s piece at (x, z): the generator's, before its edges are
@@ -245,14 +115,6 @@ public sealed class Water
     {
         float cx = (piece.X0 + ci + 0.5f) * Step - px, cz = (piece.Z0 + ck + 0.5f) * Step - pz;
         return MathF.Sqrt(cx * cx + cz * cz);
-    }
-
-    private static float SegmentDistance(float px, float pz, float ax, float az, float bx, float bz, out float t)
-    {
-        float vx = bx - ax, vz = bz - az, len2 = vx * vx + vz * vz;
-        t = len2 > 0f ? Math.Clamp(((px - ax) * vx + (pz - az) * vz) / len2, 0f, 1f) : 0f;
-        float dx = px - (ax + t * vx), dz = pz - (az + t * vz);
-        return MathF.Sqrt(dx * dx + dz * dz);
     }
 
     // A piece's working array, a window's samples (on the large object heap, where dropping it costs a full
@@ -317,17 +179,9 @@ public sealed class Water
         // landmass (see Hydrology), over the land as worn (see Erosion).
         var erosion = Erosion.For(_seed).Of(self.X, self.Z);
         var hydrology = erosion.Water;
+        piece.Worn = erosion;
         piece.Lake = new int[N];
-        piece.River = new int[N];
-        piece.Width = new byte[N];
-        piece.Down = new int[N];
-        piece.Edge = new float[N];
-        piece.RiverX = new float[N];
-        piece.RiverZ = new float[N];
         Array.Fill(piece.Lake, int.MinValue);
-        Array.Fill(piece.River, int.MinValue);
-        Array.Fill(piece.Down, -1);
-        for (int c = 0; c < N; c++) piece.Edge[c] = EdgeFade(face[c]);
         int ColumnOf(int c) => hydrology.ColumnAt((piece.X0 + c % Window + 0.5f) * Step, (piece.Z0 + c / Window + 0.5f) * Step);
 
         // A lake fills every sample its ground is under that is joined to its cells by others its ground is under: as
@@ -394,78 +248,6 @@ public sealed class Water
             foreach (int e in body) piece.Lake[e] = lowest;
         }
 
-        // A river runs where enough runs over a cell, through one sample per cell (the one its line runs through: in
-        // a channel, the channel's, else the cell's middle), on to the cell its water goes to.
-        int SampleAt(float x, float z)
-        {
-            int i = FloorDiv((int)MathF.Floor(x), Step) - piece.X0, k = FloorDiv((int)MathF.Floor(z), Step) - piece.Z0;
-            return i < 0 || k < 0 || i >= Window || k >= Window ? -1 : i + Window * k;
-        }
-        var sampleOf = new Dictionary<int, int>();
-        int ColumnSample(int column)
-        {
-            if (sampleOf.TryGetValue(column, out int s)) return s;
-            bool channel = !float.IsNaN(erosion.Bed[column]);
-            float x = channel ? erosion.RiverX[column] : hydrology.X0 + column % hydrology.Nx * Hydrology.Cell + Hydrology.Cell / 2f;
-            float z = channel ? erosion.RiverZ[column] : hydrology.Z0 + column / hydrology.Nx * Hydrology.Cell + Hydrology.Cell / 2f;
-            s = SampleAt(x, z);
-            if (s >= 0) { piece.RiverX[s] = x; piece.RiverZ[s] = z; }
-            return sampleOf[column] = s;
-        }
-        var rivers = new List<int>();
-        var flowOf = new Dictionary<int, float>();
-        for (int c = 0; c < N; c++)
-        {
-            if (ground[c] == Drain || piece.Lake[c] != int.MinValue || c % 2 != 0 || c / Window % 2 != 0) continue;
-            // (Each cell once: from its corner sample.)
-            int column = ColumnOf(c);
-            if (column < 0 || hydrology.Flow[column] < RiverFrom || !float.IsNaN(hydrology.Lake[column])) continue;
-            int s = ColumnSample(column);
-            if (s < 0 || ground[s] == Drain || piece.Lake[s] != int.MinValue || flowOf.ContainsKey(s)) continue;
-            flowOf[s] = hydrology.Flow[column];
-            rivers.Add(s);
-            int down = hydrology.Down[column];
-            int d = down >= 0 ? ColumnSample(down) : -1;
-            piece.Down[s] = d >= 0 && ground[d] != Drain ? d : -1;
-        }
-
-        // Each river's level is a block under its ground, never rising on its way (worked from upstream down), and not
-        // under a lake it meets.
-        foreach (int c in rivers) piece.River[c] = int.MaxValue; // (worked out below)
-        // (Upstream first: the furthest from where its river ends.)
-        var along = new Dictionary<int, int>();
-        int Along(int c)
-        {
-            if (along.TryGetValue(c, out int a)) return a;
-            along[c] = 0; // (so a loop ends)
-            int d = piece.Down[c];
-            return along[c] = d >= 0 && piece.River[d] != int.MinValue ? Along(d) + 1 : 0;
-        }
-        rivers.Sort((a, b) => Along(b).CompareTo(Along(a)));
-        foreach (int c in rivers)
-        {
-            int ci = c % Window, ck = c / Window, d = piece.Down[c];
-            int lakeBeside = int.MinValue;
-            for (int k = Math.Max(0, ck - 2); k <= Math.Min(Window - 1, ck + 2); k++)
-            for (int i = Math.Max(0, ci - 2); i <= Math.Min(Window - 1, ci + 2); i++)
-                lakeBeside = Math.Max(lakeBeside, piece.Lake[i + Window * k]);
-            piece.River[c] = Math.Max(Math.Min(piece.River[c], (int)MathF.Floor(ground[c]) - 1), lakeBeside);
-            float vary = 1f + RiverVary * _widths.GetNoise((piece.X0 + ci) * Step, (piece.Z0 + ck) * Step);
-            float flow = flowOf[c];
-            float width = Math.Clamp(MathF.Round((RiverNarrowest + RiverWiden * MathF.Sqrt(flow - RiverFrom)) * vary), 2f, RiverWidest);
-            // (In a channel the land was worn for, as wide as it, less a block either side.)
-            erosion.Channel(piece.RiverX[c], piece.RiverZ[c], out float channel);
-            piece.Width[c] = (byte)MathF.Max(width, channel - 2f);
-            if (d >= 0 && piece.River[d] != int.MinValue) piece.River[d] = Math.Min(piece.River[d], piece.River[c]);
-        }
-        // The cells' ways go only straight across, so a river drawn cell to cell would go in steps: each sample's line
-        // runs on to the sample two on instead, cutting across the corners.
-        var next = (int[])piece.Down.Clone();
-        foreach (int c in rivers)
-        {
-            int d = next[c];
-            if (d >= 0 && piece.River[d] != int.MinValue && next[d] >= 0) piece.Down[c] = next[d];
-        }
         Floats.Return(face);
         return piece;
     }
@@ -520,16 +302,6 @@ public sealed class Water
         => _pieces.GetOrAdd(Key(hi, hk), static (_, a) => a.Water.Build(a.I, a.K), (Water: this, I: hi, K: hk));
 
     private static long Key(int i, int k) => ((long)i << 32) ^ (uint)k;
-
-    /// <summary>How freely a river may wander at this far from its piece's faces: not at all where they count as its
-    /// crack, fully once as far in as a lake keeps.</summary>
-    private static float EdgeFade(float face) => Math.Clamp((face - FaceMargin) / (LakeMargin - FaceMargin), 0f, 1f);
-
-    private static float Smoothstep(float edge0, float edge1, float x)
-    {
-        float t = Math.Clamp((x - edge0) / (edge1 - edge0), 0f, 1f);
-        return t * t * (3f - 2f * t);
-    }
 
     private static int FloorDiv(int a, int b) => a >= 0 ? a / b : (a - b + 1) / b;
 

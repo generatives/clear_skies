@@ -89,7 +89,7 @@ public class TreeTests
             int y = w.Level; // (a river may stand lower, under its banks)
             while (y > w.Level - 12 && !Wet(At(x, y, z))) y--;
             if (!Wet(At(x, y, z))) continue;
-            if (w.RiverDepth > 0) rivers++; else lakes++;
+            if (w.River) rivers++; else lakes++;
             int bed = y;
             while (Wet(At(x, bed, z))) bed--;
             Assert.NotEqual(BlockId.Air, At(x, bed, z)); // on the ground, not hanging in the air

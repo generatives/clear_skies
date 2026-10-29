@@ -143,9 +143,22 @@ public sealed class Erosion
         /// channel's width there (blocks), 0 on a bank. Given the <paramref name="ground"/> there, a bank rises steeper
         /// where the ground stands high over the channel, so it meets the ground within its reach rather than leaving a
         /// wall at the end.</summary>
-        public float Channel(float x, float z, out float width, float ground = float.NaN)
+        public float Channel(float x, float z, out float width, float ground = float.NaN) => Channel(x, z, out width, out _, ground);
+
+        /// <summary>The level of a river's water at (x, z) (world Y): filling its channel to the brims of its bed, where
+        /// its banks start; or NaN outside a channel.</summary>
+        public float Stream(float x, float z)
+        {
+            int i = (int)MathF.Floor((x - X0) / Cell), k = (int)MathF.Floor((z - Z0) / Cell);
+            if (i < 0 || k < 0 || i >= Nx || k >= Nz || !NearRiver[i + Nx * k]) return float.NaN;
+            Channel(x, z, out float width, out float surface);
+            return width > 0f ? surface : float.NaN;
+        }
+
+        private float Channel(float x, float z, out float width, out float surface, float ground = float.NaN)
         {
             width = 0f;
+            surface = float.NaN;
             // (The line bent a little by noise, so a channel doesn't run dead straight between samples.)
             float qx = x + Bend * _bendX.GetNoise(x, z), qz = z + Bend * _bendZ.GetNoise(x, z);
             int ci = (int)MathF.Floor((qx - X0) / Cell), ck = (int)MathF.Floor((qz - Z0) / Cell);
@@ -168,7 +181,12 @@ public sealed class Erosion
                 float across = MathF.Min(dist / MathF.Max(half, 1f), 1f);
                 float foot = Bed[c] + t * (bedTo - Bed[c]) + EdgeRise * half * across * across;
                 float bed = foot + past * (float.IsNaN(ground) ? BankGrade : MathF.Max(BankGrade, (ground - foot) / BankReach));
-                if (bed < best) { best = bed; width = past > 0f ? 0f : 2f * half; }
+                if (bed < best)
+                {
+                    best = bed;
+                    width = past > 0f ? 0f : 2f * half;
+                    surface = Bed[c] + t * (bedTo - Bed[c]) + EdgeRise * half;
+                }
             }
             return best;
         }

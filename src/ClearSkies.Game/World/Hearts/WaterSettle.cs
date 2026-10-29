@@ -4,13 +4,12 @@ using ClearSkies.Engine.Core;
 namespace ClearSkies.Game.Generation;
 
 /// <summary>
-/// Water as it settles on the blocks: Water plans where lakes and rivers are (over samples every few blocks), and
-/// this pours that water onto the real top, a tile of the world at a time (with a margin round it, so neighbouring
-/// tiles agree), and lets it settle. Rivers cut their beds first, and their banks slope down to them. Then water
-/// spreads into small gaps beside it, stands no higher than the dry ground round it (so it never stands against
-/// air), and a lake, or a stretch of river at one level, comes down whole to its lowest edge. Where a river would
-/// dip under the water either side of it, or come into a lake under the lake's level, it rises as far as the ground
-/// round it lets it.
+/// Water as it settles on the blocks: Water plans where lakes and rivers are (lakes over samples every few blocks,
+/// rivers in the channels Erosion wore), and this pours that water onto the real top, a tile of the world at a time
+/// (with a margin round it, so neighbouring tiles agree), and lets it settle. It never cuts the land. Water spreads
+/// into small gaps beside it, stands no higher than the dry ground round it (so it never stands against air), and a
+/// lake, or a stretch of river at one level, comes down whole to its lowest edge. Where a river would dip under the
+/// water either side of it, or come into a lake under the lake's level, it rises as far as the ground round it lets it.
 /// </summary>
 internal sealed class WaterSettle
 {
@@ -23,10 +22,6 @@ internal sealed class WaterSettle
     /// <summary>How far (blocks) a river's water may stand over the water beside it: more, and it ends there.</summary>
     private const int FallMost = 4;
 
-    /// <summary>How wide (blocks) and high over a lake a strip of ground between it and a river may be and be cut
-    /// through.</summary>
-    private const int DamWidth = 2, DamHeight = 3, RimHeight = 1;
-
     /// <summary>How far (blocks) from planned water it spreads into gaps lower than it.</summary>
     private const int FillReach = 2;
 
@@ -36,19 +31,15 @@ internal sealed class WaterSettle
     /// <summary>How many columns across water may dip under the water either side and still be filled up.</summary>
     private const int DipAcross = 3;
 
-    /// <summary>How far (blocks) out a river's banks reach at most (see Water).</summary>
-    private const int BankFar = 18;
-
     private const int Dry = 0, Planned = 1, Filled = 2;
 
     /// <summary>At most this many rounds of coming down and rising (it settles in a few).</summary>
     private const int MaxRounds = 20;
 
-    /// <summary>One tile's settled water: per column its level (int.MinValue for none) and the top of its ground once
-    /// rivers have cut it (int.MaxValue where it isn't cut).</summary>
+    /// <summary>One tile's settled water: per column its level (int.MinValue for none).</summary>
     private sealed class Settled
     {
-        public readonly short[] Level = new short[Tile * Tile], Ground = new short[Tile * Tile];
+        public readonly short[] Level = new short[Tile * Tile];
     }
 
     private static readonly Settled Empty = new();
@@ -61,7 +52,6 @@ internal sealed class WaterSettle
     static WaterSettle()
     {
         Array.Fill(Empty.Level, short.MinValue);
-        Array.Fill(Empty.Ground, short.MaxValue);
     }
 
     public WaterSettle(Water water, ulong seed)
@@ -71,22 +61,20 @@ internal sealed class WaterSettle
         _generator = new ThreadLocal<HeartWorldGenerator>(() => new HeartWorldGenerator(_seed));
     }
 
-    /// <summary>The water's level at column (x, z), or int.MinValue for none; and the top of the ground there once a
-    /// river has cut it, or int.MaxValue where none has.</summary>
-    public (int Level, int Ground) At(int x, int z)
+    /// <summary>The water's level at column (x, z), or int.MinValue for none.</summary>
+    public int At(int x, int z)
     {
         int tx = FloorDiv(x, Tile), tz = FloorDiv(z, Tile);
         var tile = _tiles.GetOrAdd(((long)tx << 32) ^ (uint)tz, static (_, a) => a.Settle.Build(a.X, a.Z), (Settle: this, X: tx, Z: tz));
-        int i = x - tx * Tile + Tile * (z - tz * Tile);
-        short level = tile.Level[i], ground = tile.Ground[i];
-        return (level == short.MinValue ? int.MinValue : level, ground == short.MaxValue ? int.MaxValue : ground);
+        short level = tile.Level[x - tx * Tile + Tile * (z - tz * Tile)];
+        return level == short.MinValue ? int.MinValue : level;
     }
 
     // A tile's working arrays, a column each of the tile and its margin (on the large object heap, where dropping them
     // costs a full collection): rented for each tile settled, and cleared. Enough kept for a few settled at once.
     private static readonly FixedArrayPool<int> Ints = new(N * N, maxKept: 40);
-    private static readonly FixedArrayPool<byte> Bytes = new(N * N, maxKept: 4);
-    private static readonly FixedArrayPool<bool> Bools = new(N * N, maxKept: 4);
+    private static readonly FixedArrayPool<byte> Bytes = new(N * N, maxKept: 8);
+    private static readonly FixedArrayPool<bool> Bools = new(N * N, maxKept: 8);
 
     private static T[] Rent<T>(FixedArrayPool<T> pool)
     {
@@ -98,63 +86,42 @@ internal sealed class WaterSettle
     private Settled Build(int tx, int tz)
     {
         int x0 = tx * Tile - Margin, z0 = tz * Tile - Margin;
-        var plan = Rent(Ints);  // the planned level, int.MinValue for none
-        var depth = Rent(Ints); // a river's bed under its level; 0 for a lake
-        var bank = Rent(Ints);
+        var plan = Rent(Ints);   // the planned level, int.MinValue for none
+        var river = Rent(Bools); // whether it's a river's
         bool any = false;
         for (int c = 0; c < N * N; c++)
         {
             var w = _water.At(x0 + c % N, z0 + c / N);
             plan[c] = w.Level;
-            depth[c] = w.RiverDepth;
-            bank[c] = w.Bank;
-            any |= w.Level != int.MinValue || w.Bank != int.MaxValue;
+            river[c] = w.River;
+            any |= w.Level != int.MinValue;
         }
         if (!any)
         {
-            Ints.Return(plan); Ints.Return(depth); Ints.Return(bank);
+            Ints.Return(plan); Bools.Return(river);
             return Empty;
         }
 
-        // The real top, where it matters: under and near the planned water and its banks.
-        var near = Distance(c => plan[c] != int.MinValue || bank[c] != int.MaxValue, FillReach + 1);
-        var top = Rent(Ints);
+        // The real top, where it matters: under and near the planned water.
+        var near = Distance(c => plan[c] != int.MinValue, FillReach + 1);
+        var ground = Rent(Ints);
         var generator = _generator.Value!;
         for (int c = 0; c < N * N; c++)
-            top[c] = near[c] > FillReach + 1 ? int.MaxValue : generator.Top(x0 + c % N, z0 + c / N) ?? int.MinValue;
+            ground[c] = near[c] > FillReach + 1 ? int.MaxValue : generator.Top(x0 + c % N, z0 + c / N) ?? int.MinValue;
 
-        // Rivers cut their beds and banks; where the ground is far under a river, a hollow, it pools at the bottom; a
-        // drop, it ends.
-        var ground = Rent(Ints);
+        // Where the ground is far under a river, a hollow, it pools at the bottom; a drop, it ends.
         var level = Rent(Ints);
         var kind = Rent(Bytes);
         for (int c = 0; c < N * N; c++)
         {
-            int t = top[c], p = plan[c];
-            ground[c] = t;
+            int t = ground[c], p = plan[c];
             level[c] = int.MinValue;
-            if (t == int.MinValue || t == int.MaxValue) continue;
-            if (p == int.MinValue)
-            {
-                ground[c] = Math.Min(t, bank[c]);
-                continue;
-            }
-            if (depth[c] > 0)
-            {
-                if (t < p - RiverGap) p = t >= p - RiverFall ? t + depth[c] : int.MinValue;
-                if (p == int.MinValue) continue;
-                ground[c] = Math.Min(t, p - depth[c]);
-            }
-            if (p <= ground[c]) continue;
+            if (t == int.MinValue || t == int.MaxValue || p == int.MinValue) continue;
+            if (river[c] && t < p - RiverGap) p = t >= p - RiverFall ? t + 1 : int.MinValue;
+            if (p <= t) continue;
             level[c] = p;
             kind[c] = Planned;
         }
-
-        // A thin strip of ground between a lake and a river beside it (a dam the samples were too coarse to see) is
-        // cut through, so the river runs into the lake; so is a rim just breaking a lake's surface, and a single row of
-        // ground between two rivers, or two stretches of one. (What is cut by a lake is the lake's from then on, so a strip cut part
-        // way through is cut on through.)
-        Cut();
 
         // Water spreads into gaps beside it lower than it.
         var reach = Distance(c => kind[c] == Planned, FillReach);
@@ -173,11 +140,11 @@ internal sealed class WaterSettle
             }
         }
 
-        var fromLake = Distance(c => kind[c] == Planned && depth[c] == 0, MouthReach);
+        var fromLake = Distance(c => kind[c] == Planned && !river[c], MouthReach);
         var raised = Rent(Bools); // (risen as below: no longer level with the rest of its stretch)
         for (int round = 0, settling = 1; settling == 1 && round < MaxRounds; round++)
         {
-            settling = Cut() ? 1 : 0;
+            settling = 0;
             // It stands no higher than the dry ground beside it: water lower than that comes down to it (and a lake,
             // or a stretch of river at about one level, comes down with it, no more than the block it was planned
             // over its neighbour); over a drop, it ends; spread into a gap that doesn't hold it, it drains back out.
@@ -198,7 +165,7 @@ internal sealed class WaterSettle
                             // (A river standing more than FallMost over the water beside it would be a wall of water:
                             // it ends there, as over a drop.)
                             // (And water spread into a gap drains into lower water beside it.)
-                            if ((depth[c] > 0 && level[c] - level[n] > FallMost) || (kind[c] == Filled && level[n] < level[c])) { ends = true; break; }
+                            if ((river[c] && level[c] - level[n] > FallMost) || (kind[c] == Filled && level[n] < level[c])) { ends = true; break; }
                             continue;
                         }
                         int g = ground[n];
@@ -217,7 +184,6 @@ internal sealed class WaterSettle
                     {
                         kind[c] = Dry;
                         level[c] = int.MinValue;
-                        ground[c] = top[c]; // (a river's bed it no longer fills isn't cut)
                     }
                     else level[c] = w;
                     changed = true;
@@ -243,106 +209,18 @@ internal sealed class WaterSettle
             }
         }
 
-        // Where a river settled lower than planned, its banks come down as far with it (so they still slope down to its
-        // water, not stand over it), though never under the water beside them.
-        var drop = Rent(Ints);
-        for (int c = 0; c < N * N; c++)
-            if (kind[c] == Planned && depth[c] > 0) drop[c] = Math.Max(0, plan[c] - level[c]);
-        for (int pass = 0; pass < BankFar; pass++)
-            for (int c = 0; c < N * N; c++)
-            {
-                if (kind[c] != Dry || bank[c] == int.MaxValue || plan[c] != int.MinValue) continue;
-                foreach (int n in Neighbours(c)) drop[c] = Math.Max(drop[c], kind[n] != Dry || bank[n] != int.MaxValue ? drop[n] : 0);
-            }
-        for (int c = 0; c < N * N; c++)
-        {
-            if (drop[c] == 0 || kind[c] != Dry || bank[c] == int.MaxValue || top[c] == int.MaxValue || top[c] == int.MinValue) continue;
-            int g = Math.Min(ground[c], bank[c] - drop[c]);
-            foreach (int n in Neighbours(c)) if (kind[n] != Dry) g = Math.Max(g, level[n]);
-            ground[c] = Math.Min(ground[c], g);
-        }
-
-        // No dry ground left standing a single block wide between ground cut lower either side of it (a river's bed
-        // it dried out of, between stretches of it that didn't): it comes down to the higher side.
-        for (int pass = 0; pass < 2; pass++)
-            for (int k = 1; k < N - 1; k++)
-            for (int i = 1; i < N - 1; i++)
-            {
-                int c = i + N * k;
-                if (kind[c] != Dry || ground[c] == int.MinValue || ground[c] == int.MaxValue) continue;
-                int g = ground[c];
-                foreach (int across in (ReadOnlySpan<int>)[1, N])
-                {
-                    int a = ground[c - across], b = ground[c + across];
-                    if (a == int.MinValue || b == int.MinValue || a == int.MaxValue || b == int.MaxValue) continue;
-                    if (a < top[c - across] && b < top[c + across]) g = Math.Min(g, Math.Max(a, b));
-                }
-                ground[c] = g;
-            }
-
         var settled = new Settled();
         for (int k = 0; k < Tile; k++)
         for (int i = 0; i < Tile; i++)
         {
-            int c = i + Margin + N * (k + Margin), o = i + Tile * k;
-            settled.Level[o] = level[c] == int.MinValue ? short.MinValue : (short)level[c];
-            settled.Ground[o] = ground[c] == int.MinValue || ground[c] >= top[c] ? short.MaxValue : (short)ground[c];
+            int c = i + Margin + N * (k + Margin);
+            settled.Level[i + Tile * k] = level[c] == int.MinValue ? short.MinValue : (short)level[c];
         }
-        foreach (var a in (Span<int[]>)[plan, depth, bank, near, top, ground, level, reach, fromLake, drop]) Ints.Return(a);
+        foreach (var a in (Span<int[]>)[plan, near, ground, level, reach, fromLake]) Ints.Return(a);
         Bytes.Return(kind);
+        Bools.Return(river);
         Bools.Return(raised);
         return settled;
-
-        // Cuts through the strips described above; whether it cut any.
-        bool Cut()
-        {
-            bool any = false;
-            for (bool cut = true; cut;)
-            {
-                cut = false;
-                for (int c = 0; c < N * N; c++)
-                {
-                    if (kind[c] != Planned) continue;
-                    foreach (var (dx, dz) in Ways)
-                    {
-                        int i = c % N, k = c / N, s = 1, n = c;
-                        for (; s <= DamWidth + 1; s++)
-                        {
-                            int ni = i + s * dx, nk = k + s * dz;
-                            if (ni < 0 || nk < 0 || ni >= N || nk >= N) { s = int.MaxValue; break; }
-                            n = ni + N * nk;
-                            if (kind[n] != Dry) break;
-                            if (ground[n] == int.MinValue || ground[n] == int.MaxValue || ground[n] > level[c] + DamHeight) { s = int.MaxValue; break; }
-                        }
-                        if (s < 2 || s > DamWidth + 1 || kind[n] != Planned) continue;
-                        if (depth[c] > 0 && depth[n] > 0)
-                        {
-                            // (Between two rivers, or two stretches of one, only a single row of ground.)
-                            if (s != 2 || Math.Abs(level[n] - level[c]) > FallMost) continue;
-                        }
-                        else if (depth[c] == 0 && depth[n] == 0)
-                        {
-                            // (Between two stretches of one lake, only a rim at about its level: a strip just breaking
-                            // its surface.)
-                            bool rim = level[n] == level[c];
-                            for (int t = 1; t < s && rim; t++) rim = ground[c + t * (dx + N * dz)] <= level[c] + RimHeight;
-                            if (!rim) continue;
-                        }
-                        int w = Math.Min(level[c], level[n]);
-                        for (int t = 1; t < s; t++)
-                        {
-                            int d = c + t * (dx + N * dz);
-                            plan[d] = level[d] = w;
-                            depth[d] = depth[c] > 0 && depth[n] > 0 ? 1 : 0;
-                            ground[d] = Math.Min(ground[d], w - 1);
-                            kind[d] = Planned;
-                            cut = any = true;
-                        }
-                    }
-                }
-            }
-            return any;
-        }
 
         // The first water higher than column c's going (dx, dz) from it over water no higher, within DipAcross
         // columns; or int.MinValue.
@@ -359,8 +237,6 @@ internal sealed class WaterSettle
             return int.MinValue;
         }
     }
-
-    private static readonly (int, int)[] Ways = { (1, 0), (-1, 0), (0, 1), (0, -1) };
 
     /// <summary>The columns beside column c within the tile and its margin (a struct to go through with foreach, which
     /// makes nothing: it's asked for every column, many times over).</summary>

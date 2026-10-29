@@ -136,7 +136,6 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     private readonly float[] _height = new float[S * S];
     private readonly float[] _shift = new float[S * S];     // how far erosion moves its piece's top
     private readonly int[] _lake = new int[S * S];          // the level of a lake planned here or beside, or int.MinValue
-    private readonly int[] _cut = new int[S * S];           // the top of the ground once a river cuts it, or int.MaxValue
     private readonly float[] _bottomAt = new float[S * S];
 
     // The hearts around the chunk column being profiled, per layer: cells from (_cx0, _cy0, _cz0), _nx by _ny by _nz of
@@ -294,11 +293,11 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             _height[col] = MathF.Min(height, HeartGrid.WorldTop - 1);
             _shift[col] = worn?.Shift(wx, wz, height - broad) ?? 0f;
             var water = _water.At((int)wx, (int)wz);
-            (p.Level[col], _cut[col]) = _water.Settled((int)wx, (int)wz);
-            _lake[col] = water.RiverDepth == 0 ? water.Level : int.MinValue;
+            p.Level[col] = _water.Settled((int)wx, (int)wz);
+            _lake[col] = water.River ? int.MinValue : water.Level;
             // A lake's shore reaches a ragged ShoreReach from its sample cells, not their square outline; a river's
             // banks stay as they are.
-            p.Shore[col] = water.RiverDepth == 0 && water.Off < ShoreReach * (0.6f + 0.4f * (_crack.GetNoise(wx * 3f, wz * 3f) + 1f));
+            p.Shore[col] = !water.River && water.Off < ShoreReach * (0.6f + 0.4f * (_crack.GetNoise(wx * 3f, wz * 3f) + 1f));
             _bottomAt[col] = HeartGrid.LowestBottom + BottomRoughness * (0.5f + 0.5f * _bottom.GetNoise(wx, wz));
             top = MathF.Max(top, _height[col]);
         }
@@ -373,14 +372,13 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             }
         }
 
-        // Rivers cut their beds and banks, and water stands as it settled (see WaterSettle); a lake's shore is sandy
+        // Water stands as it settled (see WaterSettle); a lake's shore is sandy
         // round it.
         for (int col = 0; col < S * S; col++)
         {
             int spans = p.Count(col);
             if (spans == 0) continue;
             ref var topSpan = ref p.Spans[p.Start[col] + spans - 1];
-            if (_cut[col] != int.MaxValue) topSpan.Hi = (short)System.Math.Max(topSpan.Lo, System.Math.Min(topSpan.Hi, _cut[col]));
             if (p.Level[col] == int.MinValue && _lake[col] != int.MinValue) p.Level[col] = System.Math.Min(_lake[col], topSpan.Hi);
         }
     }
