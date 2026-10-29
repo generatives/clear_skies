@@ -23,6 +23,11 @@ public sealed class Flood
     public double Evaporation { get; set; } = 2;
     /// <summary>How much a column's ground soaks up (columns' rain) where it isn't soaked already.</summary>
     public double Soak { get; set; } = 0.5;
+    /// <summary>How many cells under its column's top ground still trades water sideways with open air.</summary>
+    public int SoilDepth { get; set; } = 1;
+    /// <summary>How much seeping water (columns' rain) a cell of ground passes on for each block it drops a block.</summary>
+    public double SeepEase { get; set; } = 8000;
+    public int Turns { get; set; } = 8;
     public bool[] Soaked = null!;
     public double[] GroundFlow = null!;
 
@@ -74,6 +79,16 @@ public sealed class Flood
             }
         }
 
+        // Ground only trades water with open cells over it, or beside it near its column's top (its soil): ground
+        // facing open air under or beside it deeper down (overhangs, cave roofs, cliffs) is sealed, as it faces the
+        // void, so water in the ground comes out of the land's top.
+        bool Sealed(int i, int d, int k)
+        {
+            if (IsOpen(i) == IsOpen(d)) return false;
+            int g = IsOpen(i) ? d : i;
+            bool openAbove = IsOpen(i) ? k == 0 : k == 1; // the open one is over the ground one
+            return !openAbove && (k < 2 || land.Top[Column[g]] - Y[g] > SoilDepth);
+        }
         var noise = new FastNoiseLite(_seed + 91);
         noise.SetNoiseType(FastNoiseLite.NoiseType.OpenSimplex2);
         noise.SetFractalType(FastNoiseLite.FractalType.FBm);
@@ -110,7 +125,7 @@ public sealed class Flood
                 for (int k = 0; k < 6; k++)
                 {
                     int d = Neighbour(i, k);
-                    if (d < 0 || done[d] || !ground && !IsOpen(d)) continue;
+                    if (d < 0 || done[d] || !ground && !IsOpen(d) || Sealed(i, d, k)) continue;
                     double l = Math.Max(at + (IsOpen(d) ? 0 : seep), Floor[d]);
                     if (!double.IsNaN(level[d]) && level[d] <= l) continue;
                     level[d] = l; recv[d] = i;
@@ -125,10 +140,8 @@ public sealed class Flood
         Level = levelG; Receiver = recvA; Order = orderA;
         double flooded = watch.Elapsed.TotalSeconds;
 
-        // Per column: the open cell its rain lands in (just over the ground), the ground cell under that, and whether
-        // that ground is soaked to the top (the water in it stands at the ground's top: it takes no more).
-        var surface = new int[land.Columns]; var under = new int[land.Columns];
-        Soaked = new bool[land.Columns];
+        // Per column: the open cell its rain lands in (just over the ground), and the ground cell under that.
+        var surface = new int[land.Columns]; var under = new int[land.Columns]; var top = new double[land.Columns];
         Array.Fill(surface, -1); Array.Fill(under, -1);
         for (int c = 0; c < land.Columns; c++)
         {
@@ -138,8 +151,7 @@ public sealed class Flood
             if (IsOpen(t)) { surface[c] = t; under[c] = land.Top[c] > land.Lo[c] ? land.Index(c, land.Top[c] - 1) : -1; }
             else { under[c] = t; surface[c] = land.Top[c] < land.Hi[c] ? land.Index(c, land.Top[c] + 1) : -1; }
             if (under[c] >= 0 && IsOpen(under[c])) under[c] = -1;
-            double top = S * (land.Top[c] + land.Solid[t]);
-            Soaked[c] = under[c] >= 0 && levelG[under[c]] >= top - 0.5;
+            top[c] = S * (land.Top[c] + land.Solid[t]);
         }
 
         // Lakes: open cells under their level, joined with the one they go on to when that's the same lake (as level).
@@ -154,19 +166,32 @@ public sealed class Flood
             else { Lake[i] = members.Count; members.Add(new List<int>()); }
             members[Lake[i]].Add(i);
         }
-        // A lake's surface: each column once, at its lowest floor in it; and how much of it soaks in.
-        var lakeFloors = new double[members.Count][]; var lakeSoaks = new int[members.Count];
+        // A lake's surface: each column once, at its lowest floor in it.
+        var lakeFloors = new double[members.Count][]; var lakeColumns = new int[members.Count][];
         for (int l = 0; l < members.Count; l++)
         {
             var floors = new Dictionary<int, double>();
             foreach (int m in members[l])
                 floors[Column[m]] = floors.TryGetValue(Column[m], out double f) ? Math.Min(f, Floor[m]) : Floor[m];
             lakeFloors[l] = floors.Values.OrderBy(v => v).ToArray();
-            lakeSoaks[l] = floors.Keys.Count(c => !Soaked[c] && under[c] >= 0);
+            lakeColumns[l] = floors.Keys.ToArray();
         }
-        var soakCell = new int[n]; // the ground an open cell soaks into (-1: none, or soaked already)
-        Array.Fill(soakCell, -1);
-        for (int c = 0; c < land.Columns; c++) if (surface[c] >= 0 && under[c] >= 0 && !Soaked[c]) soakCell[surface[c]] = under[c];
+
+        // Where the water in the ground stands at the ground's top (soaked: it takes no more), what each open cell
+        // soaks into (-1: none, or soaked already), and how many of each lake's columns soak in.
+        Soaked = new bool[land.Columns];
+        var soakCell = new int[n]; var lakeSoaks = new int[members.Count];
+        void Wet()
+        {
+            Array.Fill(soakCell, -1);
+            for (int c = 0; c < land.Columns; c++)
+            {
+                Soaked[c] = under[c] >= 0 && levelG[under[c]] >= top[c] - 0.5;
+                if (surface[c] >= 0 && under[c] >= 0 && !Soaked[c]) soakCell[surface[c]] = under[c];
+            }
+            for (int l = 0; l < members.Count; l++) lakeSoaks[l] = lakeColumns[l].Count(c => !Soaked[c] && under[c] >= 0);
+        }
+        Wet();
 
         // In turns: running water downhill (soaking in up to Soak a column as it goes, lakes losing Evaporation and
         // Soak a column), then soaked-in water through the ground to where it comes out into open cells (springs),
@@ -175,7 +200,8 @@ public sealed class Flood
         var springs = new double[n]; var soaked = new double[n]; var ground = new double[n];
         LakeLevel = new double[members.Count];
         double drained = 0, evaporated = 0, sprung = 0;
-        for (int turn = 0; turn < 4; turn++)
+        var seeping = new double[n]; // what seeps through each cell of ground, eased in over the turns
+        for (int turn = 0; turn < Turns; turn++)
         {
             Array.Clear(Flow); Array.Clear(soaked);
             for (int c = 0; c < land.Columns; c++) if (surface[c] >= 0) Flow[surface[c]] += 1;
@@ -219,11 +245,39 @@ public sealed class Flood
             {
                 int i = orderG[k];
                 if (IsOpen(i) || ground[i] == 0) continue;
-                int to = recvG[i];
+                int to = recvG[i], c = Column[i];
                 if (to < 0) continue;
+                // Ground soaked to its top lets out what more comes to it, over it (a spring).
+                if (Soaked[c] && under[c] == i && surface[c] >= 0) { springs[surface[c]] += ground[i]; sprung += ground[i]; continue; }
                 if (IsOpen(to)) { springs[to] += ground[i]; sprung += ground[i]; }
                 else ground[to] += ground[i];
             }
+            // The more seeps through ground, the steeper it must drop to pass it on: water stands higher in ground
+            // carrying more. Eased in half a turn at a time, or the ground would flip between soaked and not.
+            for (int k = 0; k < orderG.Length; k++)
+            {
+                int i = orderG[k], to = recvG[i];
+                seeping[i] = turn == 0 ? ground[i] : 0.5 * (seeping[i] + ground[i]);
+                if (to < 0) continue;
+                double drop = IsOpen(i) ? 0 : S * (SeepSlope + seeping[i] / SeepEase);
+                levelG[i] = Math.Max(levelG[to] + drop, Floor[i]);
+                int c = Column[i];
+                if (Soaked[c] && under[c] == i) levelG[i] = Math.Min(levelG[i], Math.Max(top[c], Floor[i]));
+            }
+            Wet();
+            if (Environment.GetEnvironmentVariable("HYD_DEBUG") != null)
+                Console.WriteLine($"turn {turn}: soaked in {soaked.Sum():N0}, sprung {sprung:N0}, drained {drained:N0}, soaked columns {Soaked.Count(b => b):N0}");
+        }
+        if (Environment.GetEnvironmentVariable("HYD_DEBUG") != null)
+        {
+            var gaps = new List<double>(); int nan = 0;
+            for (int c = 0; c < land.Columns; c++)
+            {
+                if (under[c] < 0) continue;
+                if (double.IsNaN(levelG[under[c]])) nan++; else gaps.Add(levelG[under[c]] - top[c]);
+            }
+            gaps.Sort();
+            Console.WriteLine($"water table under the top, blocks: unreached {nan}, " + string.Join(", ", new[] { 0.01, 0.1, 0.5, 0.9, 0.99 }.Select(q => $"{q:P0} {gaps[(int)(q * (gaps.Count - 1))]:0.0}")));
         }
         GroundFlow = ground;
         int land_ = 0;

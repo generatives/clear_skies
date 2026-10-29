@@ -43,7 +43,7 @@ bool snapshots = false, falls = true, hollows = false, localSteps = false, routi
 int last = 8, check = 0, carve = 0, erode = 0;
 float carveFrom = 20f, carveDepth = 2f, carveMost = 8f, carveWidth = 0f, erodeK = 0.02f, erodeBlur = 48f, erodeDetail = 0.3f;
 bool erodeBroad = false, rivers = false, flood = false;
-double seepSlope = 0.02, evaporation = 2, soak = 0.5;
+double seepEase = 8000, seepSlope = 0.02, evaporation = 2, soak = 0.5;
 float riverFrom = 200f, meander = 40f, lakeChance = 0.15f, marshDepth = 2f, riverDepth = 10f, riverWidth = 4f, bankGrade = 0.15f;
 string? writeChannels = null;
 float[] solveAir = { 0f };
@@ -91,6 +91,7 @@ for (int a = 0; a < args.Length; a++)
         case "--river-depth": riverDepth = float.Parse(args[++a]); break;
         case "--flood": flood = true; break;
         case "--seep-slope": seepSlope = double.Parse(args[++a]); break;
+        case "--seep-ease": seepEase = double.Parse(args[++a]); break;
         case "--evap": evaporation = double.Parse(args[++a]); break;
         case "--soak": soak = double.Parse(args[++a]); break;
         case "--river-width": riverWidth = float.Parse(args[++a]); break;
@@ -145,7 +146,7 @@ if (flood)
     var sampled = Stopwatch.StartNew();
     var fl = new CoarseLand(seed, landmass, x0, z0, x1, z1, int.MaxValue, last, lift: lift);
     Console.WriteLine($"{last}-block cells: {fl.Cells:N0} sampled in {sampled.Elapsed.TotalSeconds:0.0} s");
-    var f = new Flood(fl, unchecked((int)seed)) { SeepSlope = seepSlope, Evaporation = evaporation, Soak = soak };
+    var f = new Flood(fl, unchecked((int)seed)) { SeepSlope = seepSlope, SeepEase = seepEase, Evaporation = evaporation, Soak = soak };
     f.Run(solveSet.Count > 0 && args.Contains("--separate-pieces"));
     Directory.CreateDirectory(outDir);
     f.WriteMap(Path.Combine(outDir, "flood.png"));
