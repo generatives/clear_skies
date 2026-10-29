@@ -38,8 +38,11 @@ public sealed class ChunkPipeline
     // Ready stages, one queue per executor (by Executor), so one running out doesn't hold up the others.
     private readonly PriorityQueue<(PipelineChunk Record, Stage Stage), (float, int)>[] _ready =
         Enum.GetValues<Executor>().Select(_ => new PriorityQueue<(PipelineChunk, Stage), (float, int)>()).ToArray();
-    // Finished worker results; urgent ones (run on no particular worker, -1) taken first.
-    private readonly ConcurrentQueue<(PipelineChunk Record, WorkerStage Stage, int Worker, object Made)> _made = new(), _madeUrgent = new();
+    // Finished worker results, with what each read; urgent ones (run on no particular worker, -1) taken first.
+    private readonly ConcurrentQueue<(PipelineChunk Record, WorkerStage Stage, int Worker, StageInputs Read, object Made)> _made = new(), _madeUrgent = new();
+    // Outputs running worker jobs read, and how many read each; what to do with one once none does (see OnceUnread).
+    private readonly Dictionary<object, int> _readers = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<object, Action> _onceUnread = new(ReferenceEqualityComparer.Instance);
     // External stages asked and not done yet: asked again in turn, as far as each frame's time goes.
     private readonly Queue<(PipelineChunk Record, ExternalStage Stage)> _awaitingExternal = new();
     private readonly HashSet<PipelineChunk> _maybeDrop = new();
@@ -211,7 +214,7 @@ public sealed class ChunkPipeline
     private void Unmake(PipelineChunk record, Stage stage)
     {
         ref var slot = ref record.At(stage.Id);
-        if (slot.Output is { } output) { slot.Output = null; stage.Release(output); }
+        if (slot.Output is { } output) { slot.Output = null; Release(stage, output); }
         bool made = slot.Version > 0;
         if (!slot.Is(SlotFlags.Stale | SlotFlags.Queued | SlotFlags.Running)) slot.Since = Stopwatch.GetTimestamp();
         slot.Version = 0;
@@ -265,6 +268,7 @@ public sealed class ChunkPipeline
         {
             using var timed = Timed(made.Stage);
             if (made.Worker >= 0) _inFlight[made.Worker]--;
+            Unread(made.Read);
             if (made.Made is Exception e) throw new InvalidOperationException($"{made.Stage} failed on {made.Record}", e);
             if (made.Record.Removed) { made.Stage.Release(made.Made); continue; }
             if (!made.Record.Needs(made.Stage)) // no longer wanted for what it serves
@@ -533,7 +537,9 @@ public sealed class ChunkPipeline
     {
         using var timed = Timed(stage);
         var inputs = Gather(record, stage);
-        inputs.Prepared = stage.Prepare(record);
+        inputs.Prepared = stage.Prepare(record, inputs);
+        foreach (var (_, _, output) in inputs.Read)
+            if (output != null) _readers[output] = _readers.GetValueOrDefault(output) + 1;
         ref var slot = ref record.At(stage.Id);
         slot.Set(SlotFlags.Stale, false);
         slot.Set(SlotFlags.Running, true);
@@ -543,7 +549,7 @@ public sealed class ChunkPipeline
             object made;
             try { made = stage.MakeAny(key, inputs); }
             catch (Exception e) { made = e; }
-            (worker < 0 ? _madeUrgent : _made).Enqueue((record, stage, worker, made));
+            (worker < 0 ? _madeUrgent : _made).Enqueue((record, stage, worker, inputs, made));
         };
         if (worker < 0) { _runUrgent(work); return; }
         _inFlight[worker]++;
@@ -589,7 +595,7 @@ public sealed class ChunkPipeline
     {
         ref var slot = ref record.At(stage.Id);
         slot.Set(SlotFlags.Running, false);
-        if (slot.Output is { } before && !ReferenceEquals(before, output)) stage.Release(before);
+        if (slot.Output is { } before && !ReferenceEquals(before, output)) Release(stage, before);
         slot.Output = output;
         slot.Version++;
         if (slot.Is(SlotFlags.Urgent))
@@ -600,6 +606,35 @@ public sealed class ChunkPipeline
         if (changed) Propagate(record, stage, change, acceptsMissingOnly: false);
         Check(record, stage.Id);  // its inputs changed while it ran: runs again
         _maybeDrop.Add(record);
+    }
+
+    /// <summary>Does <paramref name="release"/> once no running worker job reads <paramref name="output"/> (now, if
+    /// none does): for letting go of what an output holds (a chunk's blocks) while a job may still be reading it.</summary>
+    public void OnceUnread(object output, Action release)
+    {
+        if (!_readers.ContainsKey(output)) release();
+        else if (_onceUnread.TryGetValue(output, out var before)) _onceUnread[output] = before + release;
+        else _onceUnread[output] = release;
+    }
+
+    /// <summary>Lets go of a stage's output, once no running job reads it.</summary>
+    private void Release(Stage stage, object output)
+    {
+        if (_readers.ContainsKey(output)) OnceUnread(output, () => stage.Release(output));
+        else stage.Release(output);
+    }
+
+    /// <summary>A worker job that read <paramref name="read"/> finished.</summary>
+    private void Unread(StageInputs read)
+    {
+        foreach (var (_, _, output) in read.Read)
+        {
+            if (output == null) continue;
+            int n = _readers[output] - 1;
+            if (n > 0) { _readers[output] = n; continue; }
+            _readers.Remove(output);
+            if (_onceUnread.Remove(output, out var release)) release();
+        }
     }
 
     /// <summary>Marks what reads <paramref name="stage"/>'s output on the chunk, and cares about the change, to run again.</summary>
@@ -641,7 +676,7 @@ public sealed class ChunkPipeline
         {
             if (!record.Has(stage.Id)) continue;
             ref var slot = ref record.At(stage.Id);
-            if (slot.Output is { } output) { slot.Output = null; stage.Release(output); }
+            if (slot.Output is { } output) { slot.Output = null; Release(stage, output); }
         }
         Dropped?.Invoke(record);
     }

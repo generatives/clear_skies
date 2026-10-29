@@ -36,15 +36,12 @@ internal sealed class ChunkEntry
     private static readonly ChunkData Dropped = new();
 
     /// <summary>Lets go of this chunk's blocks, for a chunk that won't need them again once meshed and in the GPU store
-    /// (a coarse level's, which is never edited, collided with or remeshed against a neighbour): its arrays go back to
-    /// the pool, and <see cref="Data"/> reads all air from then on.</summary>
+    /// (a coarse level's, which is never edited, collided with or remeshed against a neighbour): <see cref="Data"/>
+    /// reads all air from then on, and whoever owns the blocks releases them.</summary>
     public void DropData()
     {
-        if (DataDropped) return;
-        var data = Data;
         Data = Dropped;
         DataDropped = true;
-        data.Release();
     }
     public ChunkVolume Volume { get; }
     public ChunkPosition Position { get; }
