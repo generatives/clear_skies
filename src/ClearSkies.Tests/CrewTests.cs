@@ -9,6 +9,7 @@ using ClearSkies.Engine.Serialization;
 using ClearSkies.Engine.Voxels;
 using ClearSkies.Net.Protocol;
 using ClearSkies.Net.Sync;
+using ClearSkies.Net.Session;
 using DefaultEcs;
 using Silk.NET.Maths;
 using Xunit;
@@ -21,9 +22,12 @@ public class CrewTests
 
     /// <summary>A host with a ship (an 8×8 deck with a lever, a second lever on its axis and a wheel) and a player on it,
     /// and a client whose player walks on the same deck.</summary>
-    internal static (LoopbackGame game, Entity ship, HeadlessScene client, Entity crew) ShipWithCrew(double latencyMs = 50)
+    /// <param name="streamed">Whether the world's terrain is streamed, on the host and the client, as the game's.</param>
+    internal static (LoopbackGame game, Entity ship, HeadlessScene client, Entity crew) ShipWithCrew(double latencyMs = 50, bool streamed = false)
     {
-        var game = new LoopbackGame(latencyMs);
+        var hostChunks = streamed ? new HostChunkStore() : null;
+        var game = new LoopbackGame(latencyMs, hostChunks: hostChunks);
+        if (hostChunks != null) HeadlessStreamingTests.Streaming(game.Host, hostChunks);
         var voxels = new List<GridVoxel>();
         for (int x = 0; x < 8; x++) for (int z = 0; z < 8; z++) voxels.Add(new(x, 0, z, BlockId.Wood, BlockOrientation.Upright));
         voxels.Add(new(0, 1, 7, BlockId.Lever, BlockOrientation.From(Direction.Up, Direction.North)));
@@ -32,7 +36,13 @@ public class CrewTests
         var ship = game.Host.SpawnGrid(GridDescription.FromVoxels(new Vector3(0, 50, 0), voxels));
         game.Host.SpawnLocalPlayer(new Vector3(2, 52, 2)); // walking on deck
         game.Tick(2);
-        var (client, _) = game.Join("crew");
+        var chunks = streamed ? new HostChunkStore() : null;
+        var (client, net) = game.Join("crew", wait: !streamed, chunks: chunks);
+        if (chunks != null)
+        {
+            HeadlessStreamingTests.Streaming(client, chunks); // before the ship comes
+            Assert.True(game.TickUntil(() => net.Joined));
+        }
         var crew = LocalPlayerOf(client);
         PlaceCrew(game, crew, new Vector3(-1, 51.4f, -1));
         game.Tick(60);
@@ -408,7 +418,7 @@ public class CrewTests
     [Fact]
     public void AClientsPlayerIsSimulatedOnTheHostAndPredictedOnTheClient()
     {
-        var (game, ship, client, crew) = ShipWithCrew();
+        var (game, ship, client, crew) = ShipWithCrew(streamed: true);
         using var _ = game;
         var simulated = Simulated(game, crew);
         Assert.Equal(PhysicsMode.Simulated, simulated.Get<PhysicsPresence>().Mode);
@@ -422,8 +432,8 @@ public class CrewTests
         // The stone's colliders, built on each machine's worker threads: on a busy machine they can take longer than
         // any fixed tick count, and then the host's player falls through, or the client's lands late.
         var stone = new Vector3(12, 40, 12);
-        Assert.True(game.TickUntil(() => game.Host.PhysicsBodies.CollidersReady(game.Host.WorldVolume, stone, 4f)
-                                         && client.PhysicsBodies.CollidersReady(client.WorldVolume, stone, 4f), 30, minSeconds: 10),
+        Assert.True(game.TickUntil(() => StaticCollider.ReadyAround(game.Host.WorldVolume, stone, 4f)
+                                         && StaticCollider.ReadyAround(client.WorldVolume, stone, 4f), 30, minSeconds: 10),
                     "the stone's colliders were never built");
         PlaceCrew(game, crew, new Vector3(11.5f, 42f, 11.5f));
         game.Tick(90);

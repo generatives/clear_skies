@@ -14,6 +14,8 @@ public enum Purpose : byte
     None = 0,
     /// <summary>Drawn here (on a host, other players' chunks aren't).</summary>
     Draw = 1,
+    /// <summary>Collided with here: near something that can touch it (see <see cref="ECS.EntityPresenceSystem"/>).</summary>
+    Collide = 2,
 }
 
 /// <summary>Where a stage's work is done.</summary>
@@ -61,10 +63,10 @@ public abstract class WorkerStage : Stage
 {
     public sealed override Executor RunsOn => Executor.Worker;
 
-    /// <summary>On the main thread, as the chunk's job starts: whatever <see cref="WorkerStage{TOut}.Make"/> needs from
-    /// outside the pipeline (blocks held in a volume), handed to it as <see cref="StageInputs.Prepared"/>. Nothing, by
-    /// default.</summary>
-    public virtual object? Prepare(PipelineChunk record) => null;
+    /// <summary>On the main thread, as the chunk's job starts: whatever <see cref="WorkerStage{TOut}.Make"/> needs taken
+    /// now (what its inputs hold as they are now, or something outside the pipeline), handed to it as
+    /// <see cref="StageInputs.Prepared"/>. Nothing, by default.</summary>
+    public virtual object? Prepare(PipelineChunk record, StageInputs inputs) => null;
 
     internal abstract object MakeAny(ChunkKey key, StageInputs inputs);
     internal abstract Change AppliedAny(PipelineChunk record, object output, object? before);
@@ -85,12 +87,20 @@ public abstract class WorkerStage<TOut> : WorkerStage where TOut : class
 }
 
 /// <summary>What a frame or external stage answers: done, with its output and what changed, or not yet (asked again
-/// next frame).</summary>
-public readonly record struct StageResult(bool Finished, object? Output, Change Change)
+/// next frame). An external stage can say when it's asked again instead (<see cref="Again"/>).</summary>
+public readonly record struct StageResult(bool Finished, object? Output, Change Change, bool Changed = true, double Again = 0)
 {
     public static StageResult Done(object? output = null) => new(true, output, Change.All);
     public static StageResult Done(object? output, Change change) => new(true, output, change);
     public static readonly StageResult Waiting = new(false, null, Change.All);
+    /// <summary>Not yet, and not till an input changes: it isn't asked again till then.</summary>
+    public static readonly StageResult WaitingForInputs = new(false, null, Change.All, Again: double.PositiveInfinity);
+    /// <summary>Done, with nothing its readers read changed: they don't run again (two stages reading each other's
+    /// output, on different chunks, settle).</summary>
+    public static StageResult Same(object? output) => new(true, output, Change.All, Changed: false);
+
+    /// <summary>Asked again <paramref name="seconds"/> from now (or sooner, if an input changes), done or not.</summary>
+    public StageResult AskAgainIn(double seconds) => this with { Again = seconds };
 }
 
 /// <summary>A stage done on the main thread, under the frame's budget.</summary>
@@ -102,7 +112,7 @@ public abstract class FrameStage : Stage
 }
 
 /// <summary>A stage another system does in its own time (first light): the pipeline asks for it every frame until it
-/// answers done.</summary>
+/// answers done, or when it says (see <see cref="StageResult.Again"/>).</summary>
 public abstract class ExternalStage : Stage
 {
     public sealed override Executor RunsOn => Executor.External;
@@ -111,7 +121,8 @@ public abstract class ExternalStage : Stage
 }
 
 /// <summary>The outputs a stage reads, as they were when it started: per input, each chunk picked and its output
-/// (null where it accepts one missing and there's none).</summary>
+/// (null where it accepts one missing and there's none). A worker job's are kept until it's done: one let go of
+/// meanwhile is released after (see <see cref="ChunkPipeline.OnceUnread"/>).</summary>
 public sealed class StageInputs
 {
     private readonly List<(Stage Stage, ChunkKey Key, object? Output)> _read = new();
@@ -128,6 +139,17 @@ public sealed class StageInputs
             if (r.Stage == stage && r.Key == key) return (T?)r.Output;
         return null;
     }
+
+    /// <summary>The output read on chunk <paramref name="key"/> of the stage giving <typeparamref name="T"/>s, if any.</summary>
+    public T? Get<T>(ChunkKey key) where T : class
+    {
+        foreach (var r in _read)
+            if (r.Key == key && r.Output is T output) return output;
+        return null;
+    }
+
+    /// <summary>Everything read, in order.</summary>
+    internal List<(Stage Stage, ChunkKey Key, object? Output)> Read => _read;
 
     /// <summary>Every chunk read of <paramref name="stage"/>, with its output (null if missing).</summary>
     public IEnumerable<(ChunkKey Key, T? Output)> All<T>(Stage stage) where T : class

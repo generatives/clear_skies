@@ -11,4 +11,8 @@ public interface IWorldGenerator
     /// include layers that turn out to be air, but must not leave out any that don't. Called for every column in view,
     /// so it should be cheap: bounds, not generation.</summary>
     ulong ColumnLayers(int chunkX, int chunkZ, int minChunkY);
+
+    /// <summary>Where the view is, as chunk columns, when it moves: what the generator keeps of the ground nearest them
+    /// is kept longest.</summary>
+    void FocusOn(IReadOnlyList<(int X, int Z)> columns) { }
 }

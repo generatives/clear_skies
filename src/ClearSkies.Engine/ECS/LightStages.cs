@@ -9,25 +9,36 @@ namespace ClearSkies.Engine.ECS;
 /// A drawn chunk's light, as pipeline stages after its blocks and mesh, all serving <see cref="Purpose.Draw"/>: its
 /// occupancy goes in the GPU store, which gives its bricks light storage (<see cref="LightStoreStage"/>); it's lit
 /// (<see cref="FirstLightStage"/>); its light maps are baked once, in view or not (<see cref="FirstBakeStage"/>); it's
-/// shown, dissolving in (<see cref="ShownStage"/>); and a coarse chunk's blocks are dropped once it's meshed and in the
-/// store (<see cref="DropBlocksStage"/>). Light that changes after is baked as the chunk's seen (see
+/// shown, dissolving in, and swaps with the finer chunks under it or the coarser one over it (<see cref="ShownStage"/>,
+/// with a coarse chunk covered in the store under the finer level, <see cref="CoverStage"/>); and a coarse chunk's blocks
+/// are dropped once it's meshed and in the store (<see cref="DropBlocksStage"/>). Light that changes after is baked as the chunk's seen (see
 /// <see cref="ChunkRenderSystem"/>).
 /// </summary>
 public static class LightStages
 {
-    /// <summary>Adds the stages to the pipeline, after <see cref="MeshStages"/> (before it wants any chunk); returns first
-    /// light, which swaps wait for.</summary>
-    public static FirstLightStage Add(
+    /// <summary>Adds the stages to the pipeline, after <see cref="MeshStages"/> (before it wants any chunk). The terrain
+    /// says what's in range, and known air, for a coarse chunk's swap with the finer chunks under it.</summary>
+    public static void Add(
         ChunkPipelineSystem system, GpuResidencySystem residency, GpuLightSystem light, Renderer renderer, UploadStage upload,
-        Time time)
+        Time time, ChunkLoadSystem terrain)
     {
         var pipeline = system.Pipeline;
+        pipeline.Clock = () => time.TotalSeconds; // a chunk's shown in game time (its fade)
         var store = pipeline.Add(new LightStoreStage(pipeline, residency));
         var firstLight = pipeline.Add(new FirstLightStage(pipeline, light, store));
         var firstBake = pipeline.Add(new FirstBakeStage(pipeline, renderer, upload, firstLight));
-        pipeline.Add(new ShownStage(pipeline, time, firstBake));
-        pipeline.Add(new DropBlocksStage(pipeline, upload, store));
-        return firstLight;
+        var shown = pipeline.Add(new ShownStage(pipeline, time, firstBake, terrain) { IsLit = light.IsLit, ShowFirst = light.ShowFirst });
+        var cover = pipeline.Add(new CoverStage(pipeline, store, shown, terrain, residency.SetCovered));
+        firstLight.Cover = cover;
+        // Air under a coarse chunk is never drawn to say it came: its swap and cover look again.
+        terrain.LearnedAir += key =>
+        {
+            if (pipeline.Grid(key.Grid).Coarser is not { } coarser) return;
+            var over = coarser.Key(Relation.Over(key.Pos));
+            pipeline.Invalidate(over, shown);
+            pipeline.Invalidate(over, cover);
+        };
+        pipeline.Add(new DropBlocksStage(pipeline, terrain.Voxels, upload, store));
     }
 }
 
@@ -53,10 +64,17 @@ public sealed class LightStoreStage(ChunkPipeline pipeline, GpuResidencySystem r
 
 /// <summary>Waits for a chunk in the store to be lit (see <see cref="GpuLightSystem.IsLit"/>): it, and the chunks above
 /// and below it that its top and bottom faces read. Asked from the frame after it's in the store, by when its bricks
-/// are marked for light.</summary>
+/// are marked for light. A coarse chunk's are lit ahead of light changes on terrain already shown
+/// (<see cref="GpuLightSystem.ShowFirst"/>): it's left out till then. Under a coarser chunk in the store, it waits for
+/// that to be covered (see <see cref="CoverStage"/>) first: lit before, it's in the coarse blocks' shade, and its
+/// light maps are baked so, showing the coarse level's shadows till they're baked again.</summary>
 public sealed class FirstLightStage(ChunkPipeline pipeline, GpuLightSystem light, LightStoreStage store) : ExternalStage
 {
     public override string Name => "First light";
+
+    /// <summary>Covers the coarser chunk over a chunk (added after this stage, so not an input: it's looked at each time
+    /// it's asked).</summary>
+    internal CoverStage? Cover { get; set; }
     public override Purpose Serves => Purpose.Draw;
 
     public override IReadOnlyList<Pipeline.Input> InputsFor(PipelineGrid grid) => new Pipeline.Input[]
@@ -68,11 +86,21 @@ public sealed class FirstLightStage(ChunkPipeline pipeline, GpuLightSystem light
     public override StageResult Request(PipelineChunk record)
     {
         if (pipeline.EntryOf(record.Key) is not { } entry) return StageResult.Done();
+        if (Cover != null && record.Grid.Coarser is { } coarser
+            && pipeline.Get(coarser.Key(Relation.Over(record.Key.Pos))) is { Wanted: true } over
+            && over.EverDone(store) && pipeline.EntryOf(over.Key) != null && over.Output<ChunkEntry>(Cover) == null)
+            return StageResult.Waiting;
         var g = entry.Volume.Gpu;
         var p = record.Key.Pos;
-        return light.IsLit(g, p) && light.IsLit(g, new ChunkPosition(p.X, p.Y + 1, p.Z)) && light.IsLit(g, new ChunkPosition(p.X, p.Y - 1, p.Z))
-            ? StageResult.Done()
-            : StageResult.Waiting;
+        ChunkPosition above = new(p.X, p.Y + 1, p.Z), below = new(p.X, p.Y - 1, p.Z);
+        if (light.IsLit(g, p) && light.IsLit(g, above) && light.IsLit(g, below)) return StageResult.Done();
+        if (record.Grid.Level > 0)
+        {
+            light.ShowFirst(g, p);
+            light.ShowFirst(g, above);
+            light.ShowFirst(g, below);
+        }
+        return StageResult.Waiting;
     }
 }
 
@@ -109,48 +137,10 @@ public sealed class FirstBakeStage(ChunkPipeline pipeline, Renderer renderer, Up
                          && renderer.LightmapEverBaked(rd.TransparentMesh);
 }
 
-/// <summary>A chunk being drawn that's ready to be seen (see <see cref="ShownStage"/>): it's left out until it has this,
-/// and dissolves in over <see cref="ShownStage.ArrivalSeconds"/> from <see cref="FirstShownAt"/> (see
-/// <see cref="ChunkRenderSystem"/>).</summary>
-public struct Shown
-{
-    /// <summary>When it was first shown (<see cref="Time.TotalSeconds"/>).</summary>
-    public double FirstShownAt;
-}
-
-/// <summary>Shows a chunk once it's lit and baked (<see cref="Shown"/>), the first time only: it's then drawn
-/// with its last mesh and light while it's made again (after an edit, or a neighbour coming). Not drawn any more, it's
-/// let go of and no longer shown. It waits for the chunk above it to be shown first (if that's wanted): underground
-/// chunks loaded before the surface showed through the gap, dimly lit.</summary>
-public sealed class ShownStage(ChunkPipeline pipeline, Time time, FirstBakeStage firstBake) : FrameStage
-{
-    /// <summary>How long a chunk shown takes to dissolve in (seconds).</summary>
-    public const float ArrivalSeconds = 1f;
-
-    public override string Name => "Shown";
-    public override Purpose Serves => Purpose.Draw;
-
-    public override IReadOnlyList<Pipeline.Input> InputsFor(PipelineGrid grid)
-        => new Pipeline.Input[] { new(firstBake, Relation.Self), new(this, Relation.Above, AcceptsMissing: true) };
-
-    public override StageResult Run(PipelineChunk record, StageInputs inputs)
-    {
-        if (pipeline.EntryOf(record.Key) is not { } entry) return StageResult.Done(); // air
-        if (!entry.Entity.Has<Shown>()) entry.Entity.Set(new Shown { FirstShownAt = time.TotalSeconds });
-        return StageResult.Done(entry);
-    }
-
-    public override void Release(object output)
-    {
-        var e = ((ChunkEntry)output).Entity;
-        if (e.IsAlive && e.Has<Shown>()) e.Remove<Shown>();
-    }
-}
-
 /// <summary>Drops a coarse chunk's blocks once it's meshed and in the GPU store: it's never edited or collided with. A
 /// chunk all one block, or of opaque cubes, keeps them: they're small, or say it's buried. So does one with see-through
-/// blocks on a side, which meshes again when a neighbour comes.</summary>
-public sealed class DropBlocksStage(ChunkPipeline pipeline, UploadStage upload, LightStoreStage store) : FrameStage
+/// blocks on a side, which meshes again when a neighbour comes. The blocks go back to the pool once no job reads them.</summary>
+public sealed class DropBlocksStage(ChunkPipeline pipeline, VoxelsStage voxels, UploadStage upload, LightStoreStage store) : FrameStage
 {
     public override string Name => "Drop coarse blocks";
     public override Purpose Serves => Purpose.Draw; // an undrawn chunk is meshed when it's drawn, from its blocks
@@ -158,12 +148,17 @@ public sealed class DropBlocksStage(ChunkPipeline pipeline, UploadStage upload, 
     public override bool AppliesTo(PipelineGrid grid) => grid.Level > 0;
 
     public override IReadOnlyList<Pipeline.Input> InputsFor(PipelineGrid grid)
-        => new Pipeline.Input[] { new(upload, Relation.Self), new(store, Relation.Self) };
+        => new Pipeline.Input[] { new(voxels, Relation.Self), new(upload, Relation.Self), new(store, Relation.Self) };
 
     public override StageResult Run(PipelineChunk record, StageInputs inputs)
     {
-        if (pipeline.EntryOf(record.Key) is { DataDropped: false } entry && entry.Entity.Has<ChunkMeshedFlag>() && CanDrop(entry.Data))
+        if (pipeline.EntryOf(record.Key) is { DataDropped: false } entry && entry.Entity.Has<ChunkMeshedFlag>() && CanDrop(entry.Data)
+            && inputs.Get<ChunkVoxels>(voxels, record.Key) is { Data: { } data } made)
+        {
             entry.DropData();
+            made.Data = null;
+            pipeline.OnceUnread(made, data.Release);
+        }
         return StageResult.Done();
     }
 

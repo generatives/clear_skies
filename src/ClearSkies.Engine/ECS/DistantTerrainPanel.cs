@@ -8,9 +8,9 @@ namespace ClearSkies.Engine.ECS;
 /// <summary>
 /// One "Distant Terrain" window for the coarse levels of terrain drawn past full detail (see
 /// <see cref="ChunkLoadSystem.SetLevels"/>): whether they're on and how many, how far full detail and each level reach,
-/// the swap fade, and each level's counts. Purely UI: the loader and the swaps update the levels.
+/// the fade, and each level's counts. Purely UI: the loader updates the levels.
 /// </summary>
-public sealed class DistantTerrainPanel(ChunkLoadSystem load, TerrainSwapSystem swaps) : ISystem, IDebugUiSystem
+public sealed class DistantTerrainPanel(ChunkLoadSystem load) : ISystem, IDebugUiSystem
 {
     /// <summary>How far full detail loads with distant terrain drawn coarse (blocks).</summary>
     public const float DefaultFullDetailRadius = 512f;
@@ -65,7 +65,8 @@ public sealed class DistantTerrainPanel(ChunkLoadSystem load, TerrainSwapSystem 
         }
 
         ImGui.Separator();
-        swaps.DrawUi();
+        float fade = ShownStage.FadeSeconds;
+        if (ImGui.SliderFloat("Fade in, out and between levels (seconds)", ref fade, 0f, 4f, "%.2f")) ShownStage.FadeSeconds = fade;
         load.DrawLevelsUi();
     }
 }

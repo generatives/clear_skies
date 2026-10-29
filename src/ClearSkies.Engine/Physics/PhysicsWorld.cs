@@ -319,6 +319,8 @@ public sealed class PhysicsWorld : ISystem, IDisposable, Gui.IDebugUiSystem
         internal readonly byte[]? Tree; // null: single box, tree built on add
         internal StaticCompoundBuild((Vector3, Vector3)[] boxes, byte[]? tree) { Boxes = boxes; Tree = tree; }
         public int BoxCount => Boxes.Length;
+        /// <summary>No boxes: nothing to add.</summary>
+        public static readonly StaticCompoundBuild None = new(Array.Empty<(Vector3, Vector3)>(), null);
     }
 
     /// <summary>The serialized tree inside a <see cref="StaticCompoundBuild"/>, for StreamingBenchmark's check that

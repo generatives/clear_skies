@@ -94,7 +94,7 @@ internal static class HostedGame
         host.AddSystem(new StreamingFlightTest(host, world.StaticVolume, view.GridStore, flightTest,
                                                flightTest ? () => host.Quit() : null, (spawn.Yaw, spawn.Pitch)),
                        SystemStage.Frame);
-        var pilot = new GridPilotSystem(host.World, input, host.Physics, world.StaticVolume, world.PhysicsBody, commands)
+        var pilot = new GridPilotSystem(host.World, input, host.Physics, world.StaticVolume, commands)
         {
             Disabled = () => net.OthersConnected,
         };
@@ -104,7 +104,6 @@ internal static class HostedGame
         host.AddSystem(world.Hierarchy, SystemStage.Frame);
         host.AddSystem(world.ChunkLoad, SystemStage.Frame);
         host.AddSystem(world.ChunkPipeline, SystemStage.Frame);
-        host.AddSystem(world.TerrainSwaps, SystemStage.Frame);
         // What the player points at and uses, the HUD (crosshair, hotbar), grids saved and loaded, and the debug panels.
         host.AddSystem(new BlockTargetSystem(host.World, input, renderer, world.BlockActions, world.EditLimits), SystemStage.Frame);
         host.AddSystem(new HudUi(view.Ui, input, world.BlockActions, pilot, renderer.Atlas,

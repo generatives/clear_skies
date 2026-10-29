@@ -29,6 +29,11 @@ public sealed class HeadlessScene : IDisposable
     public readonly ChunkVolume WorldVolume;
     public readonly EntityPresenceSystem Presence;
     public readonly PhysicsBodySystem PhysicsBodies;
+    /// <summary>Makes ships' chunks, and the world's once it's streamed (see <see cref="HeadlessStreamingTests.Streaming"/>):
+    /// their colliders among them (see <see cref="StaticCollider"/>).</summary>
+    public readonly ChunkPipelineSystem ChunkPipeline;
+    /// <summary>The world's streaming, once it's streamed: run each frame before the pipeline, as the game's.</summary>
+    internal ChunkLoadSystem? Terrain;
     public readonly CommandSystem Commands;
     public readonly BlockEntities Blocks;
     public readonly AnchorSystem Anchors;
@@ -52,6 +57,8 @@ public sealed class HeadlessScene : IDisposable
         Registry.RequestBlock = Ids.NextBlock;
         Selection = new GridSelection(World);
 
+        ChunkPipeline = new ChunkPipelineSystem(World);
+        ColliderStages.Add(ChunkPipeline, Physics);
         var root = World.CreateEntity();
         WorldVolume = new ChunkVolume(root, World) { ChunksOwnPresence = true };
         root.Set(new ChunkGrid { Volume = WorldVolume });
@@ -156,6 +163,8 @@ public sealed class HeadlessScene : IDisposable
     {
         Time.Alpha = Clock.Alpha;
         Interpolation.Update(SystemStage.Frame, dt);
+        Terrain?.Update(dt);
+        ChunkPipeline.Update(dt);
     }
 
     /// <summary>Runs ticks until <paramref name="done"/> or <paramref name="max"/> ticks, and if that is waiting on

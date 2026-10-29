@@ -29,24 +29,16 @@ public sealed class ChunkData
 
     public bool IsDirty { get; set; }
 
-    // The owner's reference plus one per background job reading this chunk (see Retain); the arrays go back to the
-    // pool once the owner has released the chunk and the last job is done with it.
-    private int _refs = 1;
-
-    /// <summary>Keeps the arrays from being recycled while a background job reads them; pair with
-    /// <see cref="Unretain"/> when the job is done.</summary>
-    public void Retain() => Interlocked.Increment(ref _refs);
-    public void Unretain() { if (Interlocked.Decrement(ref _refs) == 0) Recycle(); }
-
-    /// <summary>The owner is done with this chunk (it was unloaded): its arrays return to the pool for the next chunk
-    /// once no background job is reading them. Only for a chunk nothing else will keep using; anyone still holding it
-    /// afterwards sees all air.</summary>
-    public void Release() => Unretain();
-
-    private void Recycle()
+    /// <summary>The owner is done with this chunk (it was unloaded): its arrays return to the pool for the next chunk.
+    /// Only for a chunk nothing else will keep using, a worker included (a chunk the pipeline made is released once no
+    /// job reads it, see <see cref="Pipeline.ChunkPipeline.OnceUnread"/>); anyone still holding it afterwards sees all
+    /// air.</summary>
+    public void Release()
     {
-        BlockPool.Return(Interlocked.Exchange(ref _blocks, null));
-        OrientationPool.Return(Interlocked.Exchange(ref _orientations, null));
+        BlockPool.Return(_blocks);
+        OrientationPool.Return(_orientations);
+        _blocks = null;
+        _orientations = null;
         _uniformBlock = BlockId.Air;
         _uniformOrientation = BlockOrientation.Upright;
     }
@@ -119,9 +111,20 @@ public sealed class ChunkData
     // Chunk-sized arrays from unloaded (or compacted) chunks, for the next chunks to load. While streaming, as many
     // chunks unload as load, so after a while nearly every chunk reuses an array instead of allocating one: fewer
     // allocations means fewer full collections, and those were the long pauses. New arrays go on the pinned object
-    // heap, where a collection never copies them. 1024 kept is 32 MB of each; streaming needs far fewer spare at once.
-    private static readonly FixedArrayPool<BlockId> BlockPool = new(Volume, maxKept: 1024, pinned: true);
-    private static readonly FixedArrayPool<BlockOrientation> OrientationPool = new(Volume, maxKept: 1024, pinned: true);
+    // heap, where a collection never copies them. 1024 kept is 32 MB of each, at least; streaming sizes it to what's
+    // loaded (see KeepSpare).
+    private static readonly FixedArrayPool<BlockId> BlockPool = new(Volume, maxKept: MinSpare, pinned: true);
+    private static readonly FixedArrayPool<BlockOrientation> OrientationPool = new(Volume, maxKept: MinSpare, pinned: true);
+    private const int MinSpare = 1024;
+
+    /// <summary>Keeps up to half as many spare block arrays as there are <paramref name="loaded"/> chunks (1024 at
+    /// least): moving on, a level unloads a few thousand at once that the chunks coming in take up soon after.</summary>
+    public static void KeepSpare(int loaded)
+    {
+        int spare = System.Math.Max(MinSpare, loaded / 2);
+        BlockPool.MaxKept = spare;
+        OrientationPool.MaxKept = spare;
+    }
 
     public static int Index(int x, int y, int z) => x + Size * (y + Size * z);
 

@@ -59,10 +59,11 @@ public sealed class GameWorld
         // now. See Erosion and Hydrology.)
         var spawn = WorldSpawn.For(seed).Eye;
         Task.Run(() => Hydrology.For(seed).Of(spawn.X, spawn.Z));
-        ChunkLoad = new ChunkLoadSystem(host.World, StaticVolume, budget, ChunkPipeline.Pipeline, () => new HeartWorldGenerator(seed),
+        var profiles = new ProfileCache(); // every worker's generator shares what's worked out of the ground
+        ChunkLoad = new ChunkLoadSystem(host.World, StaticVolume, budget, ChunkPipeline.Pipeline, () => new HeartWorldGenerator(seed, profiles),
                                         options.ViewDistance, MinChunkY, chunkStore, chunkPreparer);
         ((EditVoxelsHandler)Commands.HandlerFor(CommandIds.EditVoxels)!).Terrain = ChunkLoad; // edits to the world ask it what's there
-        TerrainSwaps = new TerrainSwapSystem(host.World, ChunkLoad); // swaps coarse terrain in and out as full detail loads
+        ColliderStages.Add(ChunkPipeline, host.Physics); // terrain colliders, in the chunk pipeline
 
         Interpolation = new TickInterpolationSystem(host.World, host.Time);
         Hierarchy = new HierarchyTransformSystem(host.World);
@@ -91,7 +92,6 @@ public sealed class GameWorld
     public EditLimits EditLimits { get; } = new();
     public ChunkLoadSystem ChunkLoad { get; }
     public ChunkPipelineSystem ChunkPipeline { get; }
-    public TerrainSwapSystem TerrainSwaps { get; }
 
     /// <summary>Records each tick's poses (in the tick), and draws between the last two (in the frame).</summary>
     public TickInterpolationSystem Interpolation { get; }
@@ -125,7 +125,7 @@ public sealed class GameWorld
     /// <summary>Whether the terrain around a point has loaded with colliders, so a body there won't fall through it
     /// (each spawn simulated here waits on it, see SpawnQueue).</summary>
     public bool TerrainReadyFor(System.Numerics.Vector3 p) =>
-        ChunkLoad.IsTerrainLoaded(new Vector3D<float>(p.X, p.Y, p.Z), 64f) && PhysicsBody.CollidersReady(StaticVolume, p, 64f);
+        ChunkLoad.IsTerrainLoaded(new Vector3D<float>(p.X, p.Y, p.Z), 64f) && StaticCollider.ReadyAround(StaticVolume, p, 64f);
 
     /// <summary>Presence layers (bodies, drawing, terrain interest and colliders). Entities are drawn as far as the
     /// terrain, but no further than the View Volume, past which the Host sends none.</summary>

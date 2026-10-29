@@ -179,6 +179,68 @@ public class ChunkPipelineTests
     }
 
     [Fact]
+    public void A_chunk_let_go_of_while_a_worker_makes_it_is_dropped_once_that_finishes()
+    {
+        var jobs = new Queue<Action>();
+        var pipeline = new ChunkPipeline(jobs.Enqueue);
+        var grid = pipeline.AddGrid("world");
+        var gen = pipeline.Add(new Gen());
+        var mesh = pipeline.Add(new Reader("mesh", _ => new[] { new Input(gen, Relation.Self) }, serves: Purpose.Draw));
+        var key = grid.Key(P(0));
+        pipeline.Want(key, true);
+        pipeline.WantFor(key, Purpose.Draw, true);
+        pipeline.Update(Plenty);
+        jobs.Dequeue()();
+        pipeline.Update(Plenty);              // gen taken; mesh started
+        pipeline.WantFor(key, Purpose.Draw, false);
+        pipeline.Want(key, false);
+        pipeline.Update(Plenty);              // not dropped: mesh is running
+        Assert.NotNull(pipeline.Get(key));
+        jobs.Dequeue()();
+        pipeline.Update(Plenty);              // mesh taken, let go of, and the chunk dropped
+        Assert.Null(pipeline.Get(key));
+        Assert.Single(gen.Released);
+        Assert.Single(mesh.Released);
+    }
+
+    [Fact]
+    public void An_output_replaced_while_a_job_reads_it_is_released_once_that_job_is_done()
+    {
+        var jobs = new List<Action>();
+        var pipeline = new ChunkPipeline(jobs.Add);
+        var grid = pipeline.AddGrid("world");
+        var gen = pipeline.Add(new Gen());
+        var mesh = pipeline.Add(new Reader("mesh", _ => new[] { new Input(gen, Relation.Self | Relation.Neighbours, AcceptsMissing: true) }));
+        pipeline.Want(grid.Key(P(0)), true);
+        pipeline.Want(grid.Key(P(1)), true);
+        pipeline.Update(Plenty);
+        RunAll();
+        pipeline.Update(Plenty);              // both gens taken; both meshes started, each reading both chunks
+        var meshing = jobs.ToList();
+        jobs.Clear();
+
+        pipeline.Invalidate(grid.Key(P(1)), gen);
+        pipeline.Update(Plenty);
+        RunAll();
+        pipeline.Update(Plenty);              // chunk 1 made again: its old output is still read
+        Assert.Empty(gen.Released);
+
+        meshing[0]();
+        pipeline.Update(Plenty);
+        Assert.Empty(gen.Released);           // the other mesh still reads it
+        meshing[1]();
+        pipeline.Update(Plenty);
+        Assert.Single(gen.Released);
+
+        void RunAll()
+        {
+            var now = jobs.ToList();
+            jobs.Clear();
+            foreach (var job in now) job();
+        }
+    }
+
+    [Fact]
     public void A_grid_added_after_chunks_gets_its_stages_and_one_removed_lets_go_of_its_chunks()
     {
         var pipeline = new ChunkPipeline(work => work());
@@ -261,6 +323,33 @@ public class ChunkPipelineTests
         Assert.NotNull(pipeline.Get(key)); // its worker is still making it
 
         jobs.Dequeue()();
+        pipeline.Update(Plenty);
+        Assert.Null(pipeline.Get(key));
+        Assert.Single(gen.Released);
+    }
+
+    [Fact]
+    public void A_held_chunk_stays_after_it_is_let_go_of_until_its_last_hold_goes()
+    {
+        var pipeline = new ChunkPipeline(work => work());
+        var grid = pipeline.AddGrid("world");
+        var gen = pipeline.Add(new Gen());
+        var key = grid.Key(P(0));
+        Assert.False(pipeline.Hold(key, true)); // a hold never makes a chunk
+        Assert.Null(pipeline.Get(key));
+
+        pipeline.Want(key, true);
+        pipeline.Update(Plenty);
+        Assert.True(pipeline.Hold(key, true));
+        Assert.True(pipeline.Hold(key, true));
+        pipeline.Want(key, false);
+        pipeline.Update(Plenty);
+        Assert.True(pipeline.Get(key) is { Wanted: true, Asked: false });
+
+        pipeline.Hold(key, false);
+        pipeline.Update(Plenty);
+        Assert.NotNull(pipeline.Get(key));
+        pipeline.Hold(key, false);
         pipeline.Update(Plenty);
         Assert.Null(pipeline.Get(key));
         Assert.Single(gen.Released);

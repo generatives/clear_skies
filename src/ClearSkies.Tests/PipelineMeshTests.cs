@@ -59,8 +59,12 @@ public class PipelineMeshTests
             return meshing;
         }
 
-        /// <summary>Whether the chunk at <paramref name="pos"/> gets no mesh: it's buried.</summary>
-        public bool Buried(ChunkPosition pos) => Mesh.Prepare(Record(pos)) == null;
+        /// <summary>Whether the chunk at <paramref name="pos"/> gets no mesh, once settled: it's buried.</summary>
+        public bool Buried(ChunkPosition pos)
+        {
+            Settle();
+            return Record(pos).Output<PackedChunkMesh>(Mesh)!.IsEmpty;
+        }
     }
 
     private static ChunkData Filled(BlockId id)

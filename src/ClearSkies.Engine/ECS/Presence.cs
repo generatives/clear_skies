@@ -21,7 +21,8 @@ public enum PhysicsMode : byte
     Static,
 }
 
-/// <summary>Physics layer: a Bepu body in this mode (see PhysicsBodySystem).</summary>
+/// <summary>Physics layer: a Bepu body in this mode (see PhysicsBodySystem), or a terrain chunk's static collider (see
+/// ColliderStages).</summary>
 public struct PhysicsPresence
 {
     public PhysicsMode Mode;

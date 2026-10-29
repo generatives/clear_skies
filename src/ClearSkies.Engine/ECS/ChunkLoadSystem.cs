@@ -184,10 +184,12 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
     public void Update(float dt)
     {
         _steps.Start();
-        _frame++;
         if (!_editsRead) ReadEdits();
         TakeEditsElsewhere();
         SetFog();
+        int loaded = 0;
+        foreach (var level in _levels) loaded += level.Volume.LoadedCount;
+        ChunkData.KeepSpare(loaded);
 
         _budget.Restart();
         _seen.Clear();
@@ -201,6 +203,7 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
                 level.Rings.Clear();
                 level.Rings.AddRange(level.Current);
                 Rebuild(level);
+                if (level == FullDetail) _voxels.Generator.FocusOn(level.Rings.Select(r => (r.Centre.x, r.Centre.z)).ToArray());
                 moved = true;
             }
         }
@@ -280,9 +283,9 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         // (An edit that put blocks where there were none counts as a build once its chunk unloads. Until then the chunk
         // is loaded, so the queue doesn't need to know.)
         foreach (var p in level.Wanting)
-            if (!Wanted(level, p) && !level.Held.ContainsKey(p)) level.ToUnload.Add(p);
-        foreach (var (p, _) in level.Volume.All) // made by an edit, not the pipeline
-            if (!level.Wanting.Contains(p) && !Wanted(level, p) && !level.Held.ContainsKey(p)) level.ToUnload.Add(p);
+            if (!Wanted(level, p)) level.ToUnload.Add(p);
+        foreach (var (p, _) in level.Volume.All) // made by an edit, not the pipeline (or held there)
+            if (!level.Wanting.Contains(p) && !Wanted(level, p)) level.ToUnload.Add(p);
 
         // Forget the columns no longer wanted: their air is re-learned on return.
         foreach (var key in level.Columns.Keys.Where(k => !Wanted(level, k.x, k.z)).ToList()) level.Columns.Remove(key);
@@ -305,39 +308,7 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
     {
         double start = _steps.SinceLap();
         while (level.UnloadAt < level.ToUnload.Count && _steps.SinceLap() - start < budgetMs)
-        {
-            var p = level.ToUnload[level.UnloadAt++];
-            if (KeepLoaded?.Invoke(level, p) == true && level.Volume.IsLoaded(p)) { level.Held.TryAdd(p, _frame); continue; }
-            LetGoOf(level, p); // a no-op if eviction already let it go
-        }
-        // Held ones let go are unloaded under the same budget (a frame's share, even from Rebuild): many are let go at
-        // once, as a ring of coarse chunks finishes fading in.
-        LetGo(level, start, System.Math.Min(budgetMs, StreamBudgetMs));
-    }
-
-    /// <summary>Whether a level's chunk no longer wanted stays loaded for now (see <see cref="TerrainSwapSystem"/>:
-    /// until the coarser level has faded in over it, so it doesn't vanish first). Unset: everything unloads at once.</summary>
-    public Func<TerrainLevel, ChunkPosition, bool>? KeepLoaded { get; set; }
-
-    // Chunks are held at most this long, in case what they're held for never comes.
-    private const int MaxHoldFrames = 600;
-    private int _frame;
-
-    /// <summary>Lets go of the level's held chunks once they needn't stay (or they're wanted again, or held too long),
-    /// unloading them until <paramref name="budgetMs"/> after <paramref name="start"/>.</summary>
-    private void LetGo(TerrainLevel level, double start, double budgetMs)
-    {
-        if (level.Held.Count == 0) return;
-        var letGo = new List<ChunkPosition>();
-        foreach (var (p, since) in level.Held)
-        {
-            if (Wanted(level, p) || !level.Volume.IsLoaded(p)) { letGo.Add(p); continue; } // wanted again, or gone already
-            if (KeepLoaded?.Invoke(level, p) == true && _frame - since <= MaxHoldFrames) continue;
-            if (_steps.SinceLap() - start >= budgetMs) break;
-            LetGoOf(level, p);
-            letGo.Add(p);
-        }
-        foreach (var p in letGo) level.Held.Remove(p);
+            LetGoOf(level, level.ToUnload[level.UnloadAt++]); // a no-op if eviction already let it go
     }
 
     /// <summary>Carries on the level's scan of the wanted columns, closest to an interest first, for up to
@@ -510,12 +481,21 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         return best;
     }
 
+    /// <summary>A level's chunk the loader learned is air, as it first looked at its column or as it was made: never
+    /// drawn, so what waits on it being drawn (a coarse chunk's swap with the eight under it, see ShownStage) is told.</summary>
+    internal event Action<Pipeline.ChunkKey>? LearnedAir;
+
     /// <summary>Chunks of the level's column (x, z) that may hold something: what the generator may fill, less what
     /// turned out to be air, plus builds. A coarse column may hold something anywhere until its job finds out.</summary>
     private ulong MaybeContent(TerrainLevel level, int x, int z)
     {
         if (!level.Columns.TryGetValue((x, z), out var col))
+        {
             level.Columns[(x, z)] = col = (level.Level == 0 ? _voxels.Generator.ColumnLayers(x, z, _minY) : level.AllLayers, 0UL);
+            if (LearnedAir != null && level.Coarser != null)
+                for (ulong air = ~col.Generated & level.AllLayers; air != 0; air &= air - 1)
+                    LearnedAir(level.Key(new ChunkPosition(x, level.MinY + BitOperations.TrailingZeroCount(air), z)));
+        }
         ulong maybe = col.Generated & ~col.Air;
         return level.Level == 0 ? maybe | _edits.BuiltLayers(x, z) : maybe;
     }
@@ -684,26 +664,36 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         level.EvictNext = 0;
     }
 
-    /// <summary>Whether the level's column (x, z) has wanted chunks that may hold something and aren't loaded yet.</summary>
+    /// <summary>Whether the level's column (x, z) has wanted chunks that may hold something and aren't loaded yet (or
+    /// are only held, see <see cref="HeldOnly"/>).</summary>
     private bool HasMissing(TerrainLevel level, int x, int z)
     {
         for (ulong bits = MaybeContent(level, x, z) & WantedLayers(level, x, z); bits != 0; bits &= bits - 1)
-            if (!level.Volume.IsLoaded(new ChunkPosition(x, level.MinY + BitOperations.TrailingZeroCount(bits), z))) return true;
+        {
+            var p = new ChunkPosition(x, level.MinY + BitOperations.TrailingZeroCount(bits), z);
+            if (!level.Volume.IsLoaded(p) || HeldOnly(level, p)) return true;
+        }
         return false;
     }
 
-    /// <summary>The level's column (x, z)'s wanted chunks that may hold something and aren't loaded or asked for yet,
-    /// with whether each is edited (full detail's only: a coarse chunk is made from the full chunks under it).</summary>
+    /// <summary>The level's column (x, z)'s wanted chunks that may hold something and aren't asked for yet, with whether
+    /// each is edited (full detail's only: a coarse chunk is made from the full chunks under it).</summary>
     private List<(ChunkPosition Pos, bool Edited)> Missing(TerrainLevel level, int x, int z)
     {
         var missing = new List<(ChunkPosition, bool)>();
         for (ulong bits = MaybeContent(level, x, z) & WantedLayers(level, x, z); bits != 0; bits &= bits - 1)
         {
             var p = new ChunkPosition(x, level.MinY + BitOperations.TrailingZeroCount(bits), z);
-            if (!level.Volume.IsLoaded(p) && !level.Wanting.Contains(p)) missing.Add((p, level.Level == 0 && _edits.IsEdited(p)));
+            if (!level.Volume.IsLoaded(p) && !level.Wanting.Contains(p) || HeldOnly(level, p))
+                missing.Add((p, level.Level == 0 && _edits.IsEdited(p)));
         }
         return missing;
     }
+
+    /// <summary>Whether the level's chunk is loaded only as the pipeline holds it, let go of (see
+    /// <see cref="Pipeline.ChunkPipeline.Hold"/>): asked for again when it's wanted again.</summary>
+    private bool HeldOnly(TerrainLevel level, ChunkPosition p)
+        => !level.Wanting.Contains(p) && level.Volume.IsLoaded(p) && _pipeline.Get(level.Key(p)) != null;
 
     /// <summary>Whether full chunk <paramref name="pos"/> (not loaded) is known to hold nothing: its column is wanted
     /// and not loading, and it's neither something the generator may fill nor a build. Where streaming doesn't reach, or
@@ -759,7 +749,9 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         // Edited while loaded: it loads from the store next time (the Host has every edit), so an edit off the island's
         // terrain (a bridge, a tower) comes back, and one that cleared a chunk out stops costing budget.
         if (level.Level == 0 && entry is not null && entry.Data.IsDirty) RecordEdited(pos, entry.Data.HasAnyNonAir());
+        // Its arrays go to the next chunk to load: now, unless the pipeline made it (then once no job reads them).
+        bool released = entry is { DataDropped: false } && !entry.Entity.Has<Pipeline.InPipeline>();
         level.Volume.RemoveChunk(pos);
-        if (entry is { DataDropped: false }) entry.Data.Release(); // its arrays go to the next chunk to load
+        if (released) entry!.Data.Release();
     }
 }

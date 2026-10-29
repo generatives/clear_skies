@@ -22,13 +22,19 @@ public sealed class PipelineChunk
         Grid = grid;
         SlotOf = slotOf;
         Slots = new Slot[slots];
-        for (int i = 0; i < slots; i++) Slots[i].Flags = SlotFlags.Stale;
+        long now = System.Diagnostics.Stopwatch.GetTimestamp();
+        for (int i = 0; i < slots; i++) (Slots[i].Flags, Slots[i].Since) = (SlotFlags.Stale, now);
     }
 
     public ChunkKey Key { get; }
     public PipelineGrid Grid { get; }
-    /// <summary>In range: every stage it has runs. Once not, it's only waiting to be dropped, and nothing reads it.</summary>
-    public bool Wanted { get; internal set; }
+    /// <summary>In the pipeline: asked for, or held. Every stage it has runs. Once not, it's only waiting to be dropped,
+    /// and nothing reads it.</summary>
+    public bool Wanted => Asked || Holds > 0;
+    /// <summary>Wanted by what asked for it (see <see cref="ChunkPipeline.Want"/>).</summary>
+    public bool Asked { get; internal set; }
+    /// <summary>Holds on it (see <see cref="ChunkPipeline.Hold"/>): what else keeps it while it's asked for or not.</summary>
+    internal int Holds;
     /// <summary>What it's wanted for, beyond its blocks (see <see cref="ChunkPipeline.WantFor"/>).</summary>
     public Purpose Purposes { get; internal set; }
     /// <summary>Dropped by the pipeline: nothing needs it any more.</summary>
@@ -80,8 +86,9 @@ internal struct Slot
     /// <summary>Outputs taken so far; 0 until the first.</summary>
     public int Version;
     public SlotFlags Flags;
-    /// <summary>When it was last queued (Stopwatch ticks), for the panel: how long it's been waiting its turn.</summary>
-    public long QueuedAt;
+    /// <summary>When it was last done and its inputs changed (or the chunk came; Stopwatch ticks), for the panel: how
+    /// long it's been catching up.</summary>
+    public long Since;
 
     public readonly bool Is(SlotFlags flag) => (Flags & flag) != 0;
     public void Set(SlotFlags flag, bool on) => Flags = on ? Flags | flag : Flags & ~flag;

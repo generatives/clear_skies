@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Generation;
 
 namespace ClearSkies.Game.Generation;
@@ -253,6 +254,20 @@ public sealed class Water
         return MathF.Sqrt(dx * dx + dz * dz);
     }
 
+    // A piece's working array, a window's samples (on the large object heap, where dropping it costs a full
+    // collection): rented for each piece worked out, and cleared. Enough kept for a few worked out at once.
+    private static readonly FixedArrayPool<float> Floats = new(Window * Window, maxKept: 8);
+
+    private static T[] Rent<T>(FixedArrayPool<T> pool)
+    {
+        var a = pool.Rent();
+        Array.Clear(a);
+        return a;
+    }
+
+    // Each worker's generator for the pieces' ground.
+    [ThreadStatic] private static HeartWorldGenerator? t_generator;
+
     /// <summary>Works out the water of the piece of the top row's heart in cell (hi, hk).</summary>
     private Piece Build(int hi, int hk)
     {
@@ -267,7 +282,7 @@ public sealed class Water
 
         // The piece's ground, and how far each sample is from its faces; elsewhere drains.
         var ground = new float[N];
-        var face = new float[N];
+        var face = Rent(Floats);
         for (int k = 0; k < Window; k++)
         for (int i = 0; i < Window; i++)
         {
@@ -281,7 +296,7 @@ public sealed class Water
         // The ground is the land's real top (as HeartWorldGenerator makes it, rounded off by its faces and all), a
         // chunk column at a time so the generator loads the hearts round each once. Where it is far under the piece's
         // top, a hole into the caves under it, it is a drain too.
-        var generator = new HeartWorldGenerator(_seed);
+        var generator = t_generator is { } kept && kept.Seed == _seed ? kept : t_generator = new HeartWorldGenerator(_seed);
         int cx0 = FloorDiv(piece.X0 * Step, 32), cz0 = FloorDiv(piece.Z0 * Step, 32);
         int cx1 = FloorDiv((piece.X0 + Window) * Step, 32), cz1 = FloorDiv((piece.Z0 + Window) * Step, 32);
         for (int cz = cz0; cz <= cz1; cz++)
@@ -378,6 +393,7 @@ public sealed class Water
             int d = next[c];
             if (d >= 0 && piece.River[d] != int.MinValue && next[d] >= 0) piece.Down[c] = next[d];
         }
+        Floats.Return(face);
         return piece;
     }
 
