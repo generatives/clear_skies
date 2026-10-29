@@ -268,10 +268,59 @@ public class HeadlessStreamingTests
     private sealed class BakedStandIn(ChunkPipeline pipeline, Stage voxels) : FrameStage
     {
         public bool Baked;
+        public Func<PipelineGrid, bool> BakedIn = _ => true; // the grids whose chunks bake
         public override bool AppliesTo(PipelineGrid grid) => voxels.AppliesTo(grid);
         public override IReadOnlyList<ClearSkies.Engine.Pipeline.Input> InputsFor(PipelineGrid grid) => new ClearSkies.Engine.Pipeline.Input[] { new(voxels, Relation.Self) };
         public override StageResult Run(PipelineChunk record, StageInputs inputs)
-            => Baked ? StageResult.Done(pipeline.EntryOf(record.Key)) : StageResult.Waiting;
+            => Baked && BakedIn(record.Grid) ? StageResult.Done(pipeline.EntryOf(record.Key)) : StageResult.Waiting;
+    }
+
+    [Fact]
+    public void FullDetailUnderACoarseChunkDrawnOverItIsHiddenWhileTheLevelBetweenIsNotShownYet()
+    {
+        using var scene = new HeadlessScene();
+        using var db = SaveDatabase.InMemory();
+        var load = Streaming(scene, db, viewDistance: 1024);
+        load.SetLevels(64, new[] { 256f, 1024f });
+        using var drawn = scene.World.SubscribeComponentAdded((in DefaultEcs.Entity e, in Chunk _) => e.Set<Rendered>());
+        var time = new ClearSkies.Engine.Core.Time();
+        var pipeline = PipelineOf(load).Pipeline;
+        pipeline.Clock = () => time.TotalSeconds;
+        var baked = pipeline.Add(new BakedStandIn(pipeline, load.Voxels) { Baked = true });
+        pipeline.Add(new ShownStage(pipeline, time, baked, load));
+        var fade = ShownStage.FadeSeconds;
+        try
+        {
+            ShownStage.FadeSeconds = 0f;
+            // From afar, the ground by the origin is level 2's, drawn.
+            var player = Interest(scene, 16 + 640, 16, View(1024));
+            var deadline = DateTime.UtcNow.AddSeconds(20);
+            do { Settle(load, time: time); } while (!load.LevelsIdle && DateTime.UtcNow < deadline);
+            float Drawn(int level, ChunkPosition p)
+                => load.Levels[level].Volume.GetEntry(p)?.Entity is { } e && e.Has<Shown>() ? e.Get<Shown>().Dissolve(time.TotalSeconds) : 1f;
+            var full = new ChunkPosition(0, -1, 0);
+            var level2 = Relation.Over(Relation.Over(full));
+            Assert.Equal(0f, Drawn(2, level2));
+
+            // Coming near, full detail is made there before level 1 is: it waits under level 2, not drawn with it.
+            baked.BakedIn = grid => grid.Level != 1;
+            player.Get<Transform>().Position = new Vector3D<float>(16, 10, 16);
+            deadline = DateTime.UtcNow.AddSeconds(20);
+            do Frames(load, time, 10);
+            while (!(load.Levels[0].Volume.IsLoaded(full) && load.Levels[1].Volume.IsLoaded(Relation.Over(full))) && DateTime.UtcNow < deadline);
+            Frames(load, time, 10);
+            Assert.True(load.Levels[0].Volume.IsLoaded(full));
+            Assert.Equal(0f, Drawn(2, level2));
+            Assert.Equal(1f, Drawn(0, full));
+
+            // Level 1 comes, and the levels swap down to full detail.
+            baked.BakedIn = _ => true;
+            deadline = DateTime.UtcNow.AddSeconds(20);
+            do Frames(load, time, 10); while (Drawn(0, full) != 0f && DateTime.UtcNow < deadline);
+            Assert.Equal(0f, Drawn(0, full));
+            Assert.Equal(1f, Drawn(2, level2));
+        }
+        finally { ShownStage.FadeSeconds = fade; }
     }
 
     [Fact]
