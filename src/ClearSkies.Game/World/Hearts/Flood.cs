@@ -136,8 +136,11 @@ public sealed class Flood
             }
             return (level, recv, order.ToArray());
         }
-        var (levelG, recvG, orderG) = Spread(true);
-        var (levelA, recvA, orderA) = Spread(false);
+        // (The two at once: neither changes what the other reads.)
+        (double[] level, int[] recv, int[] order) groundFlood = default, openFlood = default;
+        Parallel.Invoke(() => groundFlood = Spread(true), () => openFlood = Spread(false));
+        var (levelG, recvG, orderG) = groundFlood;
+        var (levelA, recvA, orderA) = openFlood;
         Level = levelG; OpenLevel = levelA; Receiver = recvA; Order = orderA;
 
         // Per column: the open cell its rain lands in (just over the ground), and the ground cell under that.
@@ -179,6 +182,13 @@ public sealed class Flood
                 floors[Column[m]] = floors.TryGetValue(Column[m], out double f) ? Math.Min(f, Floor[m]) : Floor[m];
             lakeFloors[l] = floors.Values.OrderBy(v => v).ToArray();
             lakeColumns[l] = floors.Keys.ToArray();
+        }
+        // Where what a lake's bed takes goes: into the ground under its lowest cell.
+        var lakeBed = new int[members.Count];
+        for (int l = 0; l < members.Count; l++)
+        {
+            int deepest = members[l].OrderBy(m => Floor[m]).First();
+            lakeBed[l] = Y[deepest] > land.Lo[Column[deepest]] ? land.Index(Column[deepest], Y[deepest] - 1) : -1;
         }
 
         // Where the water in the ground stands at the ground's top (soaked: it takes no more), what each open cell
@@ -229,10 +239,8 @@ public sealed class Flood
                         LakeLevel[lake] = keep == 0 ? floors[0] : Math.Min(levelA[i], floors[Math.Min(keep, floors.Length - 1)]);
                         loses = inflow; Flow[i] = 0;
                     }
-                    // What a lake's bed takes goes into the ground under its lowest column.
                     double intoGround = loses * (Soak * lakeSoaks[lake] / floors.Length) / perColumn;
-                    int deepest = members[lake].OrderBy(m => Floor[m]).First();
-                    int bed = Y[deepest] > land.Lo[Column[deepest]] ? land.Index(Column[deepest], Y[deepest] - 1) : -1;
+                    int bed = lakeBed[lake];
                     if (bed >= 0 && !IsOpen(bed)) soaked[bed] += intoGround;
                 }
                 if (to >= 0) Flow[to] += Flow[i];
