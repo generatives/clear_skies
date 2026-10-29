@@ -146,7 +146,10 @@ if (flood)
     var sampled = Stopwatch.StartNew();
     var fl = new CoarseLand(seed, landmass, x0, z0, x1, z1, int.MaxValue, last, lift: lift);
     Console.WriteLine($"{last}-block cells: {fl.Cells:N0} sampled in {sampled.Elapsed.TotalSeconds:0.0} s");
-    var f = new Flood(fl, unchecked((int)seed)) { SeepSlope = seepSlope, SeepEase = seepEase, Evaporation = evaporation, Soak = soak };
+    var f = new Flood(fl, unchecked((int)seed)) {
+        // Rain by the climate's wetness (as biomes use it): none at 0.3 or drier, a full column's at 0.85 or wetter.
+        Rain = args.Contains("--even-rain") ? null : (x, z) => { double w = Math.Clamp((ContinentTerrain.For(seed).Wet(x, z) - 0.3) / 0.55, 0, 1); return w * w * (3 - 2 * w); },
+        SeepSlope = seepSlope, SeepEase = seepEase, Evaporation = evaporation, Soak = soak };
     f.Run(solveSet.Count > 0 && args.Contains("--separate-pieces"));
     Directory.CreateDirectory(outDir);
     f.WriteMap(Path.Combine(outDir, "flood.png"));

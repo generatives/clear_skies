@@ -28,6 +28,8 @@ public sealed class Flood
     /// <summary>How much seeping water (columns' rain) a cell of ground passes on for each block it drops a block.</summary>
     public double SeepEase { get; set; } = 8000;
     public int Turns { get; set; } = 8;
+    /// <summary>Rain on a column (columns' rain) by its middle block (x, z); a full column's everywhere if not given.</summary>
+    public Func<int, int, double>? Rain { get; set; }
     public bool[] Soaked = null!;
     public double[] GroundFlow = null!;
 
@@ -154,6 +156,11 @@ public sealed class Flood
             top[c] = S * (land.Top[c] + land.Solid[t]);
         }
 
+        var rain = new double[land.Columns];
+        for (int c = 0; c < land.Columns; c++)
+            if (land.HasLand(c)) rain[c] = Rain?.Invoke(land.X0 + c % nx * S + S / 2, land.Z0 + c / nx * S + S / 2) ?? 1;
+        double rained = rain.Sum();
+
         // Lakes: open cells under their level, joined with the one they go on to when that's the same lake (as level).
         Lake = new int[n];
         Array.Fill(Lake, -1);
@@ -204,7 +211,7 @@ public sealed class Flood
         for (int turn = 0; turn < Turns; turn++)
         {
             Array.Clear(Flow); Array.Clear(soaked);
-            for (int c = 0; c < land.Columns; c++) if (surface[c] >= 0) Flow[surface[c]] += 1;
+            for (int c = 0; c < land.Columns; c++) if (surface[c] >= 0) Flow[surface[c]] += rain[c];
             for (int i = 0; i < n; i++) Flow[i] += springs[i];
             drained = evaporated = 0;
             for (int k = orderA.Length - 1; k >= 0; k--)
@@ -283,8 +290,8 @@ public sealed class Flood
         int land_ = 0;
         for (int c = 0; c < land.Columns; c++) if (land.HasLand(c)) land_++;
         Console.WriteLine($"Floods in {flooded:0.0} s, settled in {watch.Elapsed.TotalSeconds - flooded:0.0} s: {n:N0} cells, " +
-                          $"{members.Count:N0} hollows; of {land_:N0} columns' rain {drained / land_:P0} runs off the land, " +
-                          $"{evaporated / land_:P0} evaporates, {sprung / land_:P0} comes out of the ground (springs)");
+                          $"{members.Count:N0} hollows; {land_:N0} columns, {rained / land_:P0} of a column's rain each; of it {drained / rained:P0} runs off the land, " +
+                          $"{evaporated / rained:P0} evaporates, {sprung / rained:P0} comes out of the ground (springs)");
     }
 
     /// <summary>Top-down: lakes blue by depth, running water by how much runs (columns' rain), ground where the soaked
