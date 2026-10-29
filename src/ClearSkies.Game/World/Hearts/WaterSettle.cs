@@ -10,8 +10,8 @@ namespace ClearSkies.Game.Generation;
 /// into small gaps beside it, stands no higher than the dry ground round it (so it never stands against air), and a
 /// lake, or a stretch of river at one level, comes down whole to its lowest edge. Where a river would dip under the
 /// water either side of it, or come into a lake under the lake's level, it rises as far as the ground round it lets it.
-/// Where a river comes to a drop (its piece's edge, a hole, a cliff), it doesn't stop short: it runs to the lip and
-/// spills over it (that water flows, see WaterFlow, falling from there).
+/// A river never comes down to lower ground beside it, nor stops short of a drop (its piece's edge, a hole, a cliff):
+/// it spills over into it (that water flows, see WaterFlow, falling from there).
 /// </summary>
 internal sealed class WaterSettle
 {
@@ -154,8 +154,8 @@ internal sealed class WaterSettle
             settling = 0;
             // It stands no higher than the dry ground beside it: water lower than that comes down to it (and a lake,
             // or a stretch of river at about one level, comes down with it, no more than the block it was planned
-            // over its neighbour); at a drop a river spills over, anything else ends; spread into a gap that doesn't
-            // hold it, it drains back out.
+            // over its neighbour), over a drop it ends; but a river spills over lower ground beside it instead; spread
+            // into a gap that doesn't hold it, it drains back out.
             for (bool changed = true; changed;)
             {
                 changed = false;
@@ -180,7 +180,9 @@ internal sealed class WaterSettle
                         }
                         int g = ground[n];
                         if (g == int.MaxValue || g >= w) continue;
-                        if (runs && (g == int.MinValue || g < w - RiverGap)) { spill = true; continue; }
+                        // (A river doesn't come down to lower ground beside it, nor end at a drop: it spills over
+                        // into it, so a dip beside it can't drain a whole river down step by step.)
+                        if (runs) { spill = true; continue; }
                         if (kind[c] == Filled || g == int.MinValue || g < w - RiverGap) { ends = true; break; }
                         w = g;
                     }

@@ -85,7 +85,7 @@ public class TreeTests
         for (int x = 9440; x < 9568; x++)
         {
             var w = water.At(x, z);
-            if (w.Level == int.MinValue) continue;
+            if (w.Level == int.MinValue || water.Settled(x, z).Spills) continue; // (spilling water flows on, see WaterFlow)
             int y = w.Level; // (a river may stand lower, under its banks)
             while (y > w.Level - 12 && !Wet(At(x, y, z))) y--;
             if (!Wet(At(x, y, z))) continue;
