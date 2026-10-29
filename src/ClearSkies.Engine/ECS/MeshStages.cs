@@ -22,7 +22,7 @@ public static class MeshStages
 }
 
 /// <summary>
-/// Meshes a chunk on a worker, from its blocks and its neighbours' (held for the job). A ship's chunks cull their faces
+/// Meshes a chunk on a worker, from its blocks and its neighbours'. A ship's chunks cull their faces
 /// against their neighbours, so any change on a border they share meshes them again. Streamed terrain is meshed
 /// without its neighbours (<see cref="ChunkVolume.MeshIgnoresNeighbours"/>): one only matters where this chunk has
 /// see-through blocks on the face they share, or where both are all opaque (this one is buried once all six are, and
@@ -59,27 +59,24 @@ public sealed class MeshStage(ChunkPipeline pipeline, ChunkMeshes meshes)
     private ChunkData? Blocks(ChunkKey key)
         => pipeline.Get(key) is { Wanted: true } ? pipeline.EntryOf(key)?.Data : null;
 
-    /// <summary>What a job meshes: the chunk's blocks and its neighbours', held until it's done.</summary>
+    /// <summary>What a job meshes: the chunk's blocks and its neighbours' (null where it doesn't read one).</summary>
     private sealed record Job(ChunkData Data, ChunkData?[] Around, bool Alone, ChunkPosition Pos);
 
-    /// <summary>The chunk's blocks and its neighbours', held for the job; nothing for one with nothing to draw (all air,
+    /// <summary>The chunk's blocks and its neighbours', as they are now; nothing for one with nothing to draw (all air,
     /// or buried), and <see cref="PackedChunkMesh.Unchanged"/> for one it can't mesh: its blocks dropped, or gone.</summary>
-    public override object? Prepare(PipelineChunk record)
+    public override object? Prepare(PipelineChunk record, StageInputs inputs)
     {
         var entry = pipeline.EntryOf(record.Key);
         if (entry == null || entry.DataDropped) return PackedChunkMesh.Unchanged;
-        if (!entry.Data.HasAnyNonAir()) return null;
+        if (inputs.Get<ChunkVoxels>(record.Key)?.Data is not { } data || !data.HasAnyNonAir()) return null;
         var around = new ChunkData?[6];
-        bool buried = entry.Data.IsAllOpaque;
+        bool buried = data.IsAllOpaque;
         for (int f = 0; f < 6; f++)
         {
-            around[f] = Blocks(record.Key with { Pos = Faces.Across(record.Key.Pos, f) });
+            around[f] = inputs.Get<ChunkVoxels>(record.Key with { Pos = Faces.Across(record.Key.Pos, f) })?.Data;
             buried &= around[f] is { IsAllOpaque: true };
         }
-        if (buried) return null;
-        entry.Data.Retain();
-        foreach (var data in around) data?.Retain();
-        return new Job(entry.Data, around, entry.Volume.MeshIgnoresNeighbours, entry.Position);
+        return buried ? null : new Job(data, around, entry.Volume.MeshIgnoresNeighbours, entry.Position);
     }
 
     public override PackedChunkMesh Make(ChunkKey key, StageInputs inputs)
@@ -87,12 +84,7 @@ public sealed class MeshStage(ChunkPipeline pipeline, ChunkMeshes meshes)
         if (inputs.Prepared is PackedChunkMesh unchanged) return unchanged;
         if (inputs.Prepared is not Job job) return PackedChunkMesh.Nothing();
         var a = job.Around;
-        try { return meshes.MeshOnWorker(job.Data, a[0], a[1], a[2], a[3], a[4], a[5], job.Alone, job.Pos); }
-        finally
-        {
-            job.Data.Unretain();
-            foreach (var data in a) data?.Unretain();
-        }
+        return meshes.MeshOnWorker(job.Data, a[0], a[1], a[2], a[3], a[4], a[5], job.Alone, job.Pos);
     }
 
     public override void Release(object output) => ((PackedChunkMesh)output).ReturnBuffers();

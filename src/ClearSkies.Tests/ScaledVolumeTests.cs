@@ -1,6 +1,7 @@
 using System.Numerics;
 using ClearSkies.Engine.ECS;
 using ClearSkies.Engine.Voxels;
+using ClearSkies.Engine.Persistence;
 using Silk.NET.Maths;
 using Xunit;
 
@@ -10,6 +11,9 @@ namespace ClearSkies.Tests;
 /// invisible to everything but meshing, lighting and drawing.</summary>
 public class ScaledVolumeTests
 {
+    private static bool HasCollider(HeadlessScene scene, ChunkPosition pos)
+        => scene.WorldVolume.GetEntry(pos)?.Entity.Has<StaticCollider>() == true;
+
     private static ChunkVolume Scaled(HeadlessScene scene, int scale)
     {
         var root = scene.World.CreateEntity();
@@ -47,10 +51,14 @@ public class ScaledVolumeTests
     public void ItsChunksGetNoCollidersAndLeaveTheWorldsAlone()
     {
         using var scene = new HeadlessScene();
+        using var db = SaveDatabase.InMemory();
+        HeadlessStreamingTests.Streaming(scene, db);
         scene.SpawnLocalPlayer(new Vector3(16, 40, 16), freeFly: true);
+        scene.Tick(); // streaming around them
         scene.WorldVolume.SetBlock(16, 32, 16, BlockId.Stone);
         var pos = new ChunkPosition(0, 1, 0);
-        Assert.True(scene.TickUntil(() => scene.PhysicsBodies.HasCollider(pos)));
+        // Built on worker threads: on a busy machine they can take longer than any fixed tick count.
+        Assert.True(scene.TickUntil(() => HasCollider(scene, pos), minSeconds: 10));
 
         // A scaled chunk at the same position comes and goes: the world's collider stays.
         var volume = Scaled(scene, 2);
@@ -59,7 +67,7 @@ public class ScaledVolumeTests
         Assert.False(entry.Entity.Has<NeedsRecollideFlag>());
         volume.RemoveChunk(pos);
         scene.Tick(5);
-        Assert.True(scene.PhysicsBodies.HasCollider(pos));
+        Assert.True(HasCollider(scene, pos));
     }
 
     [Fact]
@@ -74,7 +82,7 @@ public class ScaledVolumeTests
     }
 
     [Fact]
-    public void DroppingItsBlocksLeavesAllAirAndReleasesThem()
+    public void DroppingItsBlocksLeavesAllAir()
     {
         using var scene = new HeadlessScene();
         var volume = Scaled(scene, 2);
@@ -83,7 +91,6 @@ public class ScaledVolumeTests
         entry.DropData();
         Assert.True(entry.DataDropped);
         Assert.False(entry.Data.HasAnyNonAir());
-        Assert.Equal(BlockId.Air, data.Get(0, 0, 0)); // its arrays went back to the pool
         volume.RemoveChunk(new ChunkPosition(0, 0, 0));
     }
 }

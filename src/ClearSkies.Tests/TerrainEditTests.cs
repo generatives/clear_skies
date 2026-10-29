@@ -109,7 +109,7 @@ public class TerrainEditTests
         using var db = SaveDatabase.InMemory();
         var load = Streaming(scene, db);
         var player = scene.SpawnLocalPlayer(new Vector3(16, 5, 16), freeFly: true);
-        scene.Tick(); // its terrain interest, but nothing streamed yet
+        scene.Tick(); // its terrain interest, but nothing streamed yet (it's being made)
         var edit = new EditVoxels
         {
             Volume = EntityRegistry.WorldVolume, Editor = player.Get<EntityId>(),
@@ -119,9 +119,9 @@ public class TerrainEditTests
         scene.Commands.Send(edit);
         scene.Tick();
         Assert.Equal(rejected + 1, scene.Commands.Stats.Rejected);
-        Assert.False(scene.WorldVolume.IsLoaded(new ChunkPosition(0, -1, 0)));
 
         Settle(load);
+        Assert.Equal(BlockId.Stone, scene.WorldVolume.GetBlock(16, -2, 16)); // the edit turned down left it as it was
         scene.Commands.Send(edit);
         scene.Tick();
         Assert.Equal(rejected + 1, scene.Commands.Stats.Rejected);

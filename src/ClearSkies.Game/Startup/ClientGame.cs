@@ -106,7 +106,7 @@ public static class ClientGame
         host.AddSystem(new StreamingFlightTest(host, world.StaticVolume, view.GridStore, flightTest,
                                                flightTest ? () => host.Quit() : null, (spawn.Yaw, spawn.Pitch)),
                        SystemStage.Frame);
-        var pilot = new GridPilotSystem(host.World, input, host.Physics, world.StaticVolume, world.PhysicsBody, commands)
+        var pilot = new GridPilotSystem(host.World, input, host.Physics, world.StaticVolume, commands)
         {
             Disabled = () => net.OthersConnected,
         };

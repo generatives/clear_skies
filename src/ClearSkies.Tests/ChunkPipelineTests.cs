@@ -204,6 +204,43 @@ public class ChunkPipelineTests
     }
 
     [Fact]
+    public void An_output_replaced_while_a_job_reads_it_is_released_once_that_job_is_done()
+    {
+        var jobs = new List<Action>();
+        var pipeline = new ChunkPipeline(jobs.Add);
+        var grid = pipeline.AddGrid("world");
+        var gen = pipeline.Add(new Gen());
+        var mesh = pipeline.Add(new Reader("mesh", _ => new[] { new Input(gen, Relation.Self | Relation.Neighbours, AcceptsMissing: true) }));
+        pipeline.Want(grid.Key(P(0)), true);
+        pipeline.Want(grid.Key(P(1)), true);
+        pipeline.Update(Plenty);
+        RunAll();
+        pipeline.Update(Plenty);              // both gens taken; both meshes started, each reading both chunks
+        var meshing = jobs.ToList();
+        jobs.Clear();
+
+        pipeline.Invalidate(grid.Key(P(1)), gen);
+        pipeline.Update(Plenty);
+        RunAll();
+        pipeline.Update(Plenty);              // chunk 1 made again: its old output is still read
+        Assert.Empty(gen.Released);
+
+        meshing[0]();
+        pipeline.Update(Plenty);
+        Assert.Empty(gen.Released);           // the other mesh still reads it
+        meshing[1]();
+        pipeline.Update(Plenty);
+        Assert.Single(gen.Released);
+
+        void RunAll()
+        {
+            var now = jobs.ToList();
+            jobs.Clear();
+            foreach (var job in now) job();
+        }
+    }
+
+    [Fact]
     public void A_grid_added_after_chunks_gets_its_stages_and_one_removed_lets_go_of_its_chunks()
     {
         var pipeline = new ChunkPipeline(work => work());
