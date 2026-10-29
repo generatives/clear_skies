@@ -106,12 +106,14 @@ public sealed class ChunkPipelineSystem : ISystem, IDebugUiSystem
         Pipeline.Update(new FrameBudgets(WorkerSlots, MainMs));
         _steps.Lap(1);
         int n = Pipeline.FrameMs.Length;
-        if (_byStage?.Count != n + 1)
+        if (_byStage?.Count != n + 2)
             _byStage = new StepTimer(Pipeline.Stages.Select(s => s.Name).Append("Dropping chunks")
-                                         .Append("GC pauses (in the times above)").ToArray()) { Owner = "Chunk Pipeline stages" };
+                                         .Append("GC pauses (in the times above)")
+                                         .Append("Pipeline bookkeeping (in the times above)").ToArray()) { Owner = "Chunk Pipeline stages" };
         _byStage.Start();
         for (int i = 0; i < n; i++) _byStage.Add(i, Pipeline.FrameMs[i]);
         _byStage.Add(n, (GC.GetTotalPauseDuration() - gc).TotalMilliseconds); // a stage's spike may be the GC's
+        _byStage.Add(n + 1, Pipeline.BookkeepingMs); // outside the stages' own code: what could move off the main thread
     }
 
     public string DebugName => "Chunk Pipeline";
