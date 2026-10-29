@@ -63,7 +63,7 @@ public sealed class GameWorld
 
         Interpolation = new TickInterpolationSystem(host.World, host.Time);
         Hierarchy = new HierarchyTransformSystem(host.World);
-        PhysicsBody = new PhysicsBodySystem(host.World, host.Physics);
+        PhysicsBody = new PhysicsBodySystem(host.World, host.Physics, ChunkPipeline);
         BlockActions = new BlockActionSystem(host.World, Commands, EditLimits, Selection);
         Flight = new AirshipFlightSystem(host.World, host.Physics);
         // Wind runs on the shared tick clock (clock sync lines a client's up with the host's), so every machine computes

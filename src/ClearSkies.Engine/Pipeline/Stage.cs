@@ -49,6 +49,10 @@ public abstract class Stage
     /// chunk only while the chunk's wanted for one of these, and lets go of what it made once it isn't.</summary>
     public virtual Purpose Serves => Purpose.None;
 
+    /// <summary>Whether it always goes before everything else, as an urgent change's work does (see
+    /// <see cref="Change.Urgent"/>): for what the game waits on (a ship's body).</summary>
+    public virtual bool Urgent => false;
+
     /// <summary>What it reads to make a chunk of <paramref name="grid"/> (asked once per grid).</summary>
     public abstract IReadOnlyList<Input> InputsFor(PipelineGrid grid);
 

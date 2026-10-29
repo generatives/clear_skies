@@ -64,7 +64,7 @@ public class ScaledVolumeTests
         var volume = Scaled(scene, 2);
         var entry = volume.AddChunk(pos, Solid());
         scene.Tick(5);
-        Assert.False(entry.Entity.Has<NeedsRecollideFlag>());
+        Assert.False(entry.Entity.Has<StaticCollider>());
         volume.RemoveChunk(pos);
         scene.Tick(5);
         Assert.True(HasCollider(scene, pos));

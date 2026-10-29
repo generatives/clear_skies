@@ -49,8 +49,8 @@ public class AirResistanceTests
         using var _ = scene;
         Assert.Equal(1f, grid.Get<ResistsAir>().Faces[ResistsAir.Index(0, true)].Area);
         grid.Get<ChunkGrid>().Volume.SetBlock(0, 1, 0, BlockId.Wood);
-        scene.Tick();
-        Assert.Equal(2f, grid.Get<ResistsAir>().Faces[ResistsAir.Index(0, true)].Area);
+        // Once its body's built again from the edited chunk's boxes (made on a worker).
+        Assert.True(scene.TickUntil(() => grid.Get<ResistsAir>().Faces[ResistsAir.Index(0, true)].Area == 2f, 60));
     }
 
     [Fact]

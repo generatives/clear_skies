@@ -24,4 +24,3 @@ public readonly record struct ChunkBlocksChanged(DefaultEcs.Entity Chunk, int Bo
 /// <summary>The chunk has been meshed since it started being drawn, so it's on screen (with its last mesh while a
 /// remesh is pending). Removed when it stops being drawn.</summary>
 public struct ChunkMeshedFlag { }
-public struct NeedsRecollideFlag { }
