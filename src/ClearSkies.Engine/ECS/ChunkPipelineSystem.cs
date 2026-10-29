@@ -86,15 +86,25 @@ public sealed class ChunkPipelineSystem : ISystem, IDebugUiSystem
         if (e.Has<InPipeline>()) _maybeDrawn.Add(e.Get<InPipeline>().Key);
     }
 
-    private readonly StepTimer _steps = new("Taking finished work and running stages") { Owner = "Chunk Pipeline" };
+    private readonly StepTimer _steps = new("Wanting chunks drawn or not", "Taking finished work and running stages") { Owner = "Chunk Pipeline" };
+    private StepTimer? _byStage; // the same frame's time by stage, made once the stages are all there
 
     public void Update(float dt)
     {
         _steps.Start();
         foreach (var key in _maybeDrawn) Pipeline.WantFor(key, Purpose.Draw, Pipeline.EntryOf(key)?.Entity.Has<Rendered>() == true);
         _maybeDrawn.Clear();
-        Pipeline.Update(new FrameBudgets(WorkerSlots, MainMs));
         _steps.Lap(0);
+        var gc = GC.GetTotalPauseDuration();
+        Pipeline.Update(new FrameBudgets(WorkerSlots, MainMs));
+        _steps.Lap(1);
+        int n = Pipeline.FrameMs.Length;
+        if (_byStage?.Count != n + 1)
+            _byStage = new StepTimer(Pipeline.Stages.Select(s => s.Name).Append("Dropping chunks")
+                                         .Append("GC pauses (in the times above)").ToArray()) { Owner = "Chunk Pipeline stages" };
+        _byStage.Start();
+        for (int i = 0; i < n; i++) _byStage.Add(i, Pipeline.FrameMs[i]);
+        _byStage.Add(n, (GC.GetTotalPauseDuration() - gc).TotalMilliseconds); // a stage's spike may be the GC's
     }
 
     public string DebugName => "Chunk Pipeline";
@@ -111,6 +121,7 @@ public sealed class ChunkPipelineSystem : ISystem, IDebugUiSystem
         foreach (var line in _lines) ImGui.Text(line);
         ImGui.Separator();
         _steps.Draw();
+        _byStage?.Draw("By stage (ms):");
     }
 
     private void CountLines()
