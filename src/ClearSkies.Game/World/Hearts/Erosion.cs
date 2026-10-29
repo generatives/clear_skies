@@ -14,8 +14,8 @@ namespace ClearSkies.Game.Generation;
 /// <see cref="Rounds"/> rounds: each round a priority flood from each piece's edges gives every sample the way its
 /// water goes, and each moves towards the one it drains to, the faster the more land drains through it (stream power).
 /// Each piece drains to its own edges: its rivers notch down into its rim where they leave it. Then the bigger rivers
-/// cut channels with sloping banks, winding where the land is flat, and here and there a sill across a valley dams a
-/// lake. Some of the detail is put back, none in the channels.
+/// cut channels with sloping banks, winding where the land is flat. Some of the detail is put back, none in the
+/// channels.
 ///
 /// What's kept is how far each sample's top moved, less its detail; HeartWorldGenerator moves its pieces' tops by that
 /// (see <see cref="Field.Shift"/>), with the detail worked out per block, so only the valleys come from the samples.
@@ -53,11 +53,6 @@ public sealed class Erosion
     /// <summary>How many times a river's line is eased towards its neighbours' (see Field).</summary>
     private const int RiverEasing = 4;
 
-    // Lakes: where a river of LakeFrom times RiverFrom runs down a valley (slope LakeSlopeMin to LakeSlopeMax), one in
-    // LakeChance gets a sill across it two samples on, SillThickness samples thick and LakeDepth over the bed,
-    // LakeSpacing blocks from any other.
-    private const double SillThickness = 1.5;
-    private const double LakeFrom = 4, LakeSlopeMin = 0.01, LakeSlopeMax = 0.1, LakeChance = 0.15, LakeDepth = 8, LakeSpacing = 160;
 
     private static readonly ConcurrentDictionary<ulong, Erosion> BySeed = new();
 
@@ -76,7 +71,7 @@ public sealed class Erosion
         _fields.GetOrAdd(landmass, l => new Lazy<Field>(() => Build(l), LazyThreadSafetyMode.ExecutionAndPublication)).Value;
 
     /// <summary>One landmass worn: per sample (from block (X0, Z0), Nx by Nz of them), how far its top moved less its
-    /// detail (Worn), its top worn (Top, with the detail kept), and how much it is channel (Mask, 1 in a channel or lake,
+    /// detail (Worn), its top worn (Top, with the detail kept), and how much it is channel (Mask, 1 in a channel,
     /// fading over the banks). Samples off the land take the nearest land's, so tops by a crack read them smoothly.
     /// The rivers' channels are cut per block, not by sample: each river sample has its bed (Bed, NaN for none), its
     /// half-width in blocks, the sample it runs on to (Down, -1 for none) and where its line runs through (RiverX,
@@ -90,10 +85,9 @@ public sealed class Erosion
         internal readonly bool[] NearRiver; // a river sample within Search samples
         private readonly FastNoiseLite _bendX, _bendZ;
 
-        /// <summary>How long it took to work out, seconds; and how many river samples and lakes it has.</summary>
+        /// <summary>How long it took to work out, seconds; and how many river samples it has.</summary>
         public double Seconds { get; internal set; }
         public int RiverSamples { get; internal set; }
-        public int Lakes { get; internal set; }
 
         internal Field(ulong seed, int x0, int z0, int nx, int nz)
         {
@@ -388,8 +382,8 @@ public sealed class Erosion
         }
 
         // Trunk rivers cut into the land: routed with noise on flat ground (so they wind), their beds never rising
-        // downstream, channels wider and deeper the more drains through them with banks sloping up into the land, and
-        // now and then a lake dammed where one runs down a valley. Marks where it cut (1 in channels, fading over the
+        // downstream, channels wider and deeper the more drains through them with banks sloping up into the land. Marks
+        // where it cut (1 in channels, fading over the
         // banks).
         void Rivers(double[] height, double[] carved)
         {
@@ -475,48 +469,7 @@ public sealed class Erosion
                 }
                 foreach (int c in order) { field.RiverX[c] = easedX[c]; field.RiverZ[c] = easedZ[c]; }
             }
-            var cut = (double[])height.Clone();
-            // Lakes: now and then, where a bigger river runs down a valley, a sill across it a little way downstream
-            // (a rockfall, a moraine) raised LakeDepth over the bed, so the river backs up behind it and fills the
-            // valley to that level, its shore wherever the land meets it.
-            var lakes = new List<int>();
-            foreach (int c in order)
-            {
-                if (double.IsNaN(bed[c]) || area[c] < LakeFrom * RiverFrom || slope[c] < LakeSlopeMin || slope[c] > LakeSlopeMax) continue;
-                uint hash = (uint)((uint)(c + x0 * 31 + z0 * 17) * 2654435761u ^ (uint)_seed);
-                if ((hash >> 8) / (double)(1 << 24) >= LakeChance) continue;
-                int sill = recv[c] >= 0 ? recv[recv[c]] : -1;
-                if (sill < 0 || double.IsNaN(bed[sill])) continue;
-                int si = sill % nx, sk = sill / nx;
-                if (lakes.Any(l => Math.Abs(l % nx - si) + Math.Abs(l / nx - sk) < LakeSpacing / Cell)) continue;
-                double lakeLevel = bed[c] + LakeDepth;
-                int reach = (int)Math.Ceiling(Math.Clamp(0.6 * Math.Sqrt(area[sill] / RiverFrom), 0.5, 4) + 3);
-                // (A band across the valley, SillThickness samples thick along the way the river runs, not a mound.)
-                double ax = si - c % nx, az = sk - c / nx, len = Math.Sqrt(ax * ax + az * az);
-                ax /= len; az /= len;
-                // (Only where the valley's sides stand over the lake at both ends of the sill, or it would be a ridge
-                // on open ground, damming nothing.)
-                if (!Walled(-1) || !Walled(1)) continue;
-                bool Walled(int side)
-                {
-                    int ei = si + (int)Math.Round(-az * side * reach), ek = sk + (int)Math.Round(ax * side * reach);
-                    return !Joined(sill, ei, ek) || cut[ei + nx * ek] >= lakeLevel;
-                }
-                lakes.Add(sill);
-                for (int dk = -reach; dk <= reach; dk++)
-                for (int di = -reach; di <= reach; di++)
-                {
-                    if (di * di + dk * dk > reach * reach || Math.Abs(di * ax + dk * az) > SillThickness / 2
-                        || !Joined(sill, si + di, sk + dk)) continue;
-                    int e = si + di + nx * (sk + dk);
-                    if (cut[e] < lakeLevel) { cut[e] = lakeLevel; carved[e] = 1; }
-                    // (Nor does a channel cut through it: its bed is the sill.)
-                    if (!float.IsNaN(field.Bed[e])) field.Bed[e] = MathF.Max(field.Bed[e], (float)lakeLevel);
-                }
-            }
-            Array.Copy(cut, height, n);
             field.RiverSamples = rivers;
-            field.Lakes = lakes.Count;
         }
     }
 

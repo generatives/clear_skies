@@ -11,14 +11,13 @@ public class ErosionTests
     public ErosionTests(ITestOutputHelper output) => _out = output;
 
     [Fact]
-    public void The_spawn_landmass_wears_into_valleys_with_rivers_and_lakes()
+    public void The_spawn_landmass_wears_into_valleys_with_rivers()
     {
         var field = Erosion.For(1337).Of(11250f, -6250f);
-        _out.WriteLine($"{field.Nx} x {field.Nz} samples in {field.Seconds:0.0} s: {field.RiverSamples} river samples, {field.Lakes} lakes");
+        _out.WriteLine($"{field.Nx} x {field.Nz} samples in {field.Seconds:0.0} s: {field.RiverSamples} river samples");
         Assert.True(field.RiverSamples > 1000);
-        Assert.True(field.Lakes > 0);
 
-        // Mostly worn down, by up to a few hundred blocks, and never raised by more than a lake's sill.
+        // Mostly worn down, by up to a few hundred blocks, and never raised by much.
         float least = 0f, most = 0f;
         for (int k = 0; k < field.Nz; k++)
         for (int i = 0; i < field.Nx; i++)
