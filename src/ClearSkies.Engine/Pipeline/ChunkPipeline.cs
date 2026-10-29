@@ -258,40 +258,11 @@ public sealed class ChunkPipeline
         if (FrameMs.Length != _stages.Count + 1) FrameMs = new double[_stages.Count + 1];
         Array.Clear(FrameMs);
 
-        while (MainLeft() && (_madeUrgent.TryDequeue(out var made) || _made.TryDequeue(out made)))
-        {
-            using var timed = Timed(made.Stage);
-            if (made.Worker >= 0) _inFlight[made.Worker]--;
-            Unread(made.Read);
-            if (made.Made is Exception e) throw new InvalidOperationException($"{made.Stage} failed on {made.Record}", e);
-            if (made.Record.Removed) { Release(made.Stage, made.Made); continue; }
-            if (!made.Record.Needs(made.Stage)) // no longer wanted for what it serves
-            {
-                made.Record.At(made.Stage.Id).Set(SlotFlags.Running, false);
-                Release(made.Stage, made.Made);
-                _maybeDrop.Add(made.Record); // let go of while this ran: dropped now
-                continue;
-            }
-            long t = Stopwatch.GetTimestamp();
-            var change = made.Stage.AppliedAny(made.Record, made.Made, made.Record.At(made.Stage.Id).Output);
-            _inStages += Stopwatch.GetTimestamp() - t;
-            Finish(made.Record, made.Stage, made.Made, change);
-        }
+        TakeMade(urgentOnly: false);
 
         // Everything below is on the main thread, so all of it stops when the frame's time is spent.
-        // Nearest first, each to the least busy worker, while one has room.
-        // Urgent work first, whether or not the workers are full: it goes before what's queued on them already.
-        while (MainLeft() && _ready[(int)Executor.Worker].TryPeek(out _, out var first) && first.Item1 == Urgent
-               && TakeReady(Executor.Worker, out var record, out var stage, out var priority))
-        {
-            if (priority.Item1 != Urgent)
-            {
-                record.At(stage.Id).Set(SlotFlags.Queued, true);
-                _ready[(int)Executor.Worker].Enqueue((record, stage), priority);
-                break;
-            }
-            StartWorker(record, (WorkerStage)stage, -1);
-        }
+        // Urgent work first; then nearest first, each to the least busy worker, while one has room.
+        StartUrgent();
         while (_inFlight[LeastBusy()] < budgets.WorkerSlots && MainLeft()
                && TakeReady(Executor.Worker, out var record, out var stage, out _))
             StartWorker(record, (WorkerStage)stage, LeastBusy());
@@ -327,6 +298,7 @@ public sealed class ChunkPipeline
             if (!RunFrame(record, (FrameStage)stage)) _skipped.Add(((record, stage), priority));
         foreach (var (item, priority) in _skipped) _ready[(int)Executor.Frame].Enqueue(item, priority);
         _skipped.Clear();
+        StartUrgent(); // what the frame stages made ready (a ship's blocks): on a worker now, not next frame
 
         // Dropping lets go of what a chunk made, which can let go of holds on others: dropped too, in turn. Within the
         // frame's time, but some each frame whatever, so they don't pile up while the stages take it all.
@@ -339,7 +311,48 @@ public sealed class ChunkPipeline
             DropIfUnneeded(_dropping.Dequeue()); // wanted again meanwhile: kept
         }
         FrameMs[^1] = Stopwatch.GetElapsedTime(dropping).TotalMilliseconds;
+        TakeMade(urgentOnly: true); // urgent work done meanwhile is used this frame
         BookkeepingMs = (Stopwatch.GetTimestamp() - start - _inStages) * 1000.0 / Stopwatch.Frequency;
+
+        // Finished worker results (only the urgent ones', at the end of the frame).
+        void TakeMade(bool urgentOnly)
+        {
+            while (MainLeft() && (_madeUrgent.TryDequeue(out var made) || !urgentOnly && _made.TryDequeue(out made)))
+            {
+                using var timed = Timed(made.Stage);
+                if (made.Worker >= 0) _inFlight[made.Worker]--;
+                Unread(made.Read);
+                if (made.Made is Exception e) throw new InvalidOperationException($"{made.Stage} failed on {made.Record}", e);
+                if (made.Record.Removed) { Release(made.Stage, made.Made); continue; }
+                if (!made.Record.Needs(made.Stage)) // no longer wanted for what it serves
+                {
+                    made.Record.At(made.Stage.Id).Set(SlotFlags.Running, false);
+                    Release(made.Stage, made.Made);
+                    _maybeDrop.Add(made.Record); // let go of while this ran: dropped now
+                    continue;
+                }
+                long t = Stopwatch.GetTimestamp();
+                var change = made.Stage.AppliedAny(made.Record, made.Made, made.Record.At(made.Stage.Id).Output);
+                _inStages += Stopwatch.GetTimestamp() - t;
+                Finish(made.Record, made.Stage, made.Made, change);
+            }
+        }
+
+        // Urgent work, whether or not the workers are full: it goes before what's queued on them already.
+        void StartUrgent()
+        {
+            while (MainLeft() && _ready[(int)Executor.Worker].TryPeek(out _, out var first) && first.Item1 == Urgent
+                   && TakeReady(Executor.Worker, out var record, out var stage, out var priority))
+            {
+                if (priority.Item1 != Urgent)
+                {
+                    record.At(stage.Id).Set(SlotFlags.Queued, true);
+                    _ready[(int)Executor.Worker].Enqueue((record, stage), priority);
+                    break;
+                }
+                StartWorker(record, (WorkerStage)stage, -1);
+            }
+        }
     }
 
     // Time in the stages' own code this frame (applying, preparing, running, asking, releasing), in timestamp ticks.
@@ -498,7 +511,7 @@ public sealed class ChunkPipeline
     private const float Urgent = float.NegativeInfinity;
 
     private (float, int) RankOf(PipelineChunk record, Stage stage)
-        => (record.At(stage.Id).Is(SlotFlags.Urgent) ? Urgent : Priority?.Invoke(record.Key, stage) ?? 0f, -stage.Id);
+        => (record.At(stage.Id).Is(SlotFlags.Urgent) || stage.Urgent ? Urgent : Priority?.Invoke(record.Key, stage) ?? 0f, -stage.Id);
 
     private bool InputsThere(PipelineChunk record, Stage stage)
     {

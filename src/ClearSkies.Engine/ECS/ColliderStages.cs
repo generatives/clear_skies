@@ -50,6 +50,48 @@ public sealed class BoxesStage(ChunkPipeline pipeline) : WorkerStage<PhysicsWorl
     }
 }
 
+/// <summary>A ship chunk's boxes, in its grid's block space, each of one block type with that block's weight (see
+/// <see cref="ShipBoxesStage"/>): what its ship's body is built from (see <see cref="PhysicsBodySystem"/>).</summary>
+public sealed record ShipBoxes(ChunkVolume Volume, (Vector3 Center, Vector3 Size, float Mass)[] Boxes);
+
+/// <summary>Splits a ship chunk's colliding blocks into boxes of one block type each, with their mass, on a worker, before
+/// anything else (it's what a ship's body waits on): an edit splits only the chunk it changed. Its ship's body is built
+/// again as each comes, or goes (<paramref name="changed"/>).</summary>
+public sealed class ShipBoxesStage(VolumeBlocksStage blocks, Action<ChunkVolume> changed)
+    : WorkerStage<ShipBoxes>
+{
+    public override string Name => "Ship boxes";
+    public override bool Urgent => true;
+    public override bool AppliesTo(PipelineGrid grid) => blocks.AppliesTo(grid);
+    public override IReadOnlyList<Pipeline.Input> InputsFor(PipelineGrid grid) => new Pipeline.Input[] { new(blocks, Relation.Self) };
+
+    private readonly ThreadLocal<VoxelBoxDecomposer> _decomposers = new(() => new VoxelBoxDecomposer());
+
+    private sealed record Job(ChunkVolume Volume, ChunkData? Data);
+
+    /// <summary>The chunk's ship, and its blocks as they are now.</summary>
+    public override object? Prepare(PipelineChunk record, StageInputs inputs)
+        => new Job(record.Grid.Volume!, inputs.Get<ChunkVoxels>(record.Key)?.Data);
+
+    public override ShipBoxes Make(ChunkKey key, StageInputs inputs)
+    {
+        var (volume, data) = (Job)inputs.Prepared!;
+        if (data == null || !data.HasAnyColliding()) return new ShipBoxes(volume, Array.Empty<(Vector3, Vector3, float)>());
+        var o = key.Pos.WorldOrigin;
+        var origin = new Vector3(o.X, o.Y, o.Z);
+        return new ShipBoxes(volume, _decomposers.Value!.Decompose(data)
+            .Select(b => (origin + b.center, b.size, b.size.X * b.size.Y * b.size.Z * BlockRegistry.Get(b.Id).Weight)).ToArray());
+    }
+
+    public override Change Applied(PipelineChunk record, ShipBoxes made, ShipBoxes? before)
+    {
+        changed(made.Volume);
+        return Change.All;
+    }
+
+    public override void Release(object output) => changed(((ShipBoxes)output).Volume);
+}
+
 /// <summary>On a terrain chunk's entity while its static collider is in the physics world (see <see cref="ColliderStage"/>).</summary>
 public struct StaticCollider
 {

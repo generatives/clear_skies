@@ -43,6 +43,9 @@ public class CrewTests
             HeadlessStreamingTests.Streaming(client, chunks); // before the ship comes
             Assert.True(game.TickUntil(() => net.Joined));
         }
+        // The ship's copy gets its body once its boxes are made, on the client's workers.
+        Assert.True(game.TickUntil(() => client.Registry.Find(ship.Get<EntityId>()) is { } copy && copy.Has<PhysicsBodyComponent>(),
+                                   minSeconds: 10));
         var crew = LocalPlayerOf(client);
         PlaceCrew(game, crew, new Vector3(-1, 51.4f, -1));
         game.Tick(60);
@@ -473,13 +476,15 @@ public class CrewTests
         var editor = byTheCrew ? crew : game.Host.World.GetEntities().With<LocalPlayer>().AsEnumerable().Single();
         (byTheCrew ? client : game.Host).Commands.Send(new EditVoxels { Volume = id, Editor = editor.Get<EntityId>(),
             Ops = new[] { VoxelOp.FillBox(new(1, 2, 1), 1, BlockId.Stone, BlockOrientation.Upright) } });
-        for (int i = 0; i < 40; i++)
+        // Till both bodies are built again (on each machine's workers), and 40 ticks after.
+        int after = 0;
+        Assert.True(game.TickUntil(() =>
         {
-            game.Tick();
             float off = Vector3.Distance(DrawnOrigin(copy), before);
-            Assert.True(off < 0.01f, $"{i} ticks after the edit the copy is drawn {off} blocks off");
-        }
-        Assert.True(Vector3D.Distance(Com(copy), com) > 0.5f); // the edit did move its centre of mass
+            Assert.True(off < 0.01f, $"the copy is drawn {off} blocks off after the edit");
+            bool moved = Vector3D.Distance(Com(copy), com) > 0.5f && Vector3D.Distance(Com(ship), com) > 0.5f;
+            return moved && ++after > 40;
+        }, minSeconds: 10)); // the edit did move its centre of mass
     }
 
     [Fact]
@@ -488,10 +493,14 @@ public class CrewTests
         var (game, ship, client, crew) = ShipWithCrew();
         using var _ = game;
         var id = ship.Get<EntityId>();
+        var copy = client.Registry.Find(id)!.Value;
+        var com = Com(copy);
         client.Commands.Send(new EditVoxels { Volume = id, Editor = crew.Get<EntityId>(),
             Ops = new[] { VoxelOp.FillBox(new(1, 2, 1), 1, BlockId.Stone, BlockOrientation.Upright) } });
+        // Both bodies built again, on each machine's workers; then a second for the copy to follow.
+        Assert.True(game.TickUntil(() => Vector3D.Distance(Com(copy), com) > 0.5f && Vector3D.Distance(Com(ship), com) > 0.5f,
+                                   minSeconds: 10));
         game.Tick(60);
-        var copy = client.Registry.Find(id)!.Value;
         var a = Com(ship);
         var b = Com(copy);
         Assert.True(Vector3D.Distance(a, b) < 1e-3f, $"host centre of mass {a}, client centre of mass {b}");

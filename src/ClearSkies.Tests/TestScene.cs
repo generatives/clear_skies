@@ -71,7 +71,7 @@ public sealed class HeadlessScene : IDisposable
         GameCommands.RegisterAll(Commands, World, Session, Blocks, Limits, Registry, Physics, Selection);
         var hierarchy = new HierarchyTransformSystem(World);
         _tick.Add(hierarchy);
-        PhysicsBodies = new PhysicsBodySystem(World, Physics);
+        PhysicsBodies = new PhysicsBodySystem(World, Physics, ChunkPipeline);
         _tick.Add(PhysicsBodies);
         _tick.Add(new PlayerMovementSystem(World, Commands));
         _tick.Add(new GrappleSystem(World, Physics));
@@ -199,7 +199,22 @@ public sealed class HeadlessScene : IDisposable
         var id = Registry.Allocate();
         var handler = (SpawnGridHandler)Commands.HandlerFor(CommandIds.SpawnGrid)!;
         handler.Apply(new Spawn<GridDescription> { Id = id, Owner = Session.LocalPeer, Description = description }, default);
-        return Registry.Find(id) ?? throw new InvalidOperationException("The grid didn't spawn.");
+        var grid = Registry.Find(id) ?? throw new InvalidOperationException("The grid didn't spawn.");
+        AwaitBoxes(grid);
+        return grid;
+    }
+
+    /// <summary>Runs the chunk pipeline, as frames would, until every chunk of <paramref name="grid"/> has its boxes (made
+    /// on workers, see <see cref="ShipBoxesStage"/>), so its body is built in the next tick.</summary>
+    public void AwaitBoxes(Entity grid)
+    {
+        var pipeline = ChunkPipeline.Pipeline;
+        var boxes = pipeline.Stages.OfType<ShipBoxesStage>().Single();
+        bool Ready() => grid.Get<ChunkGrid>().Volume.All.All(c => c.Value.Entity.Has<Engine.Pipeline.InPipeline>()
+            && pipeline.Get(c.Value.Entity.Get<Engine.Pipeline.InPipeline>().Key)?.EverDone(boxes) == true);
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (!Ready() && DateTime.UtcNow < deadline) ChunkPipeline.Update(Dt);
+        if (!Ready()) throw new TimeoutException("The grid's boxes were never made.");
     }
 
     /// <summary>The local player, walking unless <paramref name="freeFly"/>, with its capsule centre at

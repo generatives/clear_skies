@@ -3,36 +3,39 @@ using BepuPhysics;
 using ClearSkies.Engine.Core;
 using ClearSkies.Engine.Physics;
 using ClearSkies.Engine.Physics.Characters;
+using ClearSkies.Engine.Pipeline;
 using ClearSkies.Engine.Voxels;
 using DefaultEcs;
 
 namespace ClearSkies.Engine.ECS;
 
 /// <summary>
-/// Owns every BepuPhysics body create-or-rebuild call for grids (reacting to <see cref="NeedsRecollideFlag"/> on their
-/// chunks), and removes a disposed entity's <see cref="PhysicsBodyComponent"/> body and shape. A grid's body is one
-/// compound of its chunks' boxes, mass from each block's weight. Terrain chunks' static colliders are pipeline stages
-/// (see <see cref="ColliderStages"/>).
+/// Owns every BepuPhysics body create-or-rebuild call for grids, and removes a disposed entity's
+/// <see cref="PhysicsBodyComponent"/> body and shape. A grid's body is one compound of its chunks' boxes, made in the chunk
+/// pipeline (see <see cref="ShipBoxesStage"/>), built again as they change. Terrain chunks' static colliders are
+/// pipeline stages too (see <see cref="ColliderStages"/>).
 /// </summary>
 public sealed class PhysicsBodySystem : ISystem
 {
-    private readonly EntitySet         _dirtyChunks;
     private readonly HashSet<Entity>   _grids = new();
+    private readonly HashSet<Entity>   _boxesChanged = new();
     private readonly PhysicsWorld      _physics;
-    private readonly VoxelBoxDecomposer _decomposer = new();
+    private readonly ChunkPipeline     _pipeline;
+    private readonly ShipBoxesStage    _boxes;
     private readonly List<(Vector3 center, Vector3 size, float mass)> _dynamicBoxes = new();
     private readonly List<BodyHandle> _removedBodies = new();
-    private readonly List<Entity> _clean = new();
 
     private readonly EntitySet _gridsGainedPresence;
     private readonly EntitySet _gridsLostPresence;
     private readonly EntitySet _bodyOverrides;
     private readonly List<PlayerCharacter> _removedCharacters = new();
 
-    public PhysicsBodySystem(World world, PhysicsWorld physics)
+    /// <summary>Adds the ship boxes stage to <paramref name="chunks"/>' pipeline (before it wants any chunk).</summary>
+    public PhysicsBodySystem(World world, PhysicsWorld physics, ChunkPipelineSystem chunks)
     {
         _physics = physics;
-        _dirtyChunks = world.GetEntities().With<Chunk>().With<NeedsRecollideFlag>().AsSet();
+        _pipeline = chunks.Pipeline;
+        _boxes = _pipeline.Add(new ShipBoxesStage(chunks.ShipBlocks, volume => _boxesChanged.Add(volume.Root)));
         _gridsGainedPresence = world.GetEntities().With<DynamicGrid>().With<ChunkGrid>().WhenAdded<PhysicsPresence>().WhenChanged<PhysicsPresence>().AsSet();
         _gridsLostPresence = world.GetEntities().With<DynamicGrid>().With<PhysicsBodyComponent>().WhenRemoved<PhysicsPresence>().AsSet();
         _bodyOverrides = world.GetEntities().With<BodyStateOverride>().With<PhysicsBodyComponent>().With<Transform>().AsSet();
@@ -68,16 +71,9 @@ public sealed class PhysicsBodySystem : ISystem
         }
         _gridsLostPresence.Complete();
 
-        // A ship's chunks are rebuilt with their grid; other chunks' flags just go (terrain's colliders follow its blocks
-        // in the pipeline).
-        _clean.Clear();
-        foreach (ref readonly Entity entity in _dirtyChunks.GetEntities())
-        {
-            var root = entity.Get<Chunk>().Entry.Volume.Root;
-            if (root.Has<DynamicGrid>()) _grids.Add(root);
-            _clean.Add(entity);
-        }
-        foreach (var entity in _clean) entity.Remove<NeedsRecollideFlag>();
+        // A ship whose chunks' boxes changed (edited, or come or gone).
+        _grids.UnionWith(_boxesChanged);
+        _boxesChanged.Clear();
 
         // A grid's body: simulated here, or a kinematic copy following its owner's snapshots. A grid with neither has no
         // body here: its Transform alone places it.
@@ -124,23 +120,20 @@ public sealed class PhysicsBodySystem : ISystem
             return;
         }
 
-        // Gather merged boxes across all chunks, expressed in grid-local space. Each box is
-        // homogeneous in BlockId (see VoxelBoxDecomposer), so its mass is volume * that block's
-        // Weight — real per-block-type density instead of uniform volume.
+        // Its chunks' boxes, in grid-local space, each of one block type with its weight (see ShipBoxesStage). Not till
+        // every chunk with colliding blocks has its boxes: the body is never built from part of the ship. An edited
+        // chunk's old boxes count until its new ones come.
         _dynamicBoxes.Clear();
-
-        var chunkVolume = entity.Get<ChunkGrid>().Volume;
         ref var grid = ref entity.Get<DynamicGrid>();
-
-        foreach (var (pos, entry) in chunkVolume.All)
+        foreach (var (_, entry) in entity.Get<ChunkGrid>().Volume.All)
         {
-            if (!entry.Data.HasAnyColliding()) continue;
-            var o = pos.WorldOrigin;
-            foreach (var (c, s, id) in _decomposer.Decompose(entry.Data))
+            var boxes = entry.Entity.Has<InPipeline>() ? _pipeline.Get(entry.Entity.Get<InPipeline>().Key)?.Output<ShipBoxes>(_boxes) : null;
+            if (boxes == null)
             {
-                float volume = s.X * s.Y * s.Z;
-                _dynamicBoxes.Add((new Vector3(o.X + c.X, o.Y + c.Y, o.Z + c.Z), s, volume * BlockRegistry.Get(id).Weight));
+                if (entry.Data.HasAnyColliding()) return; // built once its boxes come
+                continue;
             }
+            _dynamicBoxes.AddRange(boxes.Boxes);
         }
 
         if (_dynamicBoxes.Count == 0)

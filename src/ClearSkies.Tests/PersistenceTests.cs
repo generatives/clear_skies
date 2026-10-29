@@ -324,8 +324,7 @@ public class SpawnQueueTests
         Assert.True(game.Host.World.GetEntities().With<TerrainInterest>().AsEnumerable().Any()); // its terrain is loading meanwhile
         Assert.True(client.Registry.IsLive(d.Id)); // only drawn there: it needs nothing
         ready = true;
-        game.Tick(5);
-        Assert.True(game.Host.Registry.Find(d.Id)!.Value.Has<PhysicsBodyComponent>());
+        Assert.True(game.TickUntil(() => game.Host.Registry.Find(d.Id) is { } grid && grid.Has<PhysicsBodyComponent>(), 60, minSeconds: 10));
         Assert.True(client.Registry.IsLive(d.Id));
     }
 

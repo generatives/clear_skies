@@ -218,7 +218,6 @@ public class ChunkVolume : IReplicatedChildren
         entry.Data.Set(lx, ly, lz, id, orientation);
         bool opacityChanged = entry.Data.IsAllOpaque != wasOpaque;
         SyncBlockEntity(entry, new Vector3D<int>(lx, ly, lz), id, orientation);
-        entry.Entity.Set(new NeedsRecollideFlag());
         entry.PackedOpacityWords  = null; // block data actually changed -- cached opacity is stale
         entry.AddEdit(lx, ly, lz, placedSolid: BlockRegistry.Get(id).BlocksLight);
 
@@ -271,7 +270,6 @@ public class ChunkVolume : IReplicatedChildren
             if (!changed) continue;
 
             bool opacityChanged = entry.Data.IsAllOpaque != wasOpaque;
-            entry.Entity.Set(new NeedsRecollideFlag());
             entry.PackedOpacityWords = null;
             int faces = (x0 == 0 ? 1 : 0) | (x1 == S - 1 ? 2 : 0) | (y0 == 0 ? 4 : 0) | (y1 == S - 1 ? 8 : 0)
                       | (z0 == 0 ? 16 : 0) | (z1 == S - 1 ? 32 : 0);
@@ -296,7 +294,6 @@ public class ChunkVolume : IReplicatedChildren
         if (ChunksOwnPresence) entity.Set<OwnPresence>();
         Hierarchy.SetParent(entity, Root, ChunkLocal(pos));
         entity.Set(new Chunk() { Entry = entry });
-        entry.Entity.Set(new NeedsRecollideFlag());
         if (!IsLowResolutionCopy) CreateBlockEntities(entry);
 
         _chunks[pos] = entry;
