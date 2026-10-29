@@ -37,6 +37,7 @@ public sealed class Water
     private readonly ulong _seed;
     private readonly ConcurrentDictionary<long, Heart> _hearts = new();
     private readonly ConcurrentDictionary<(Hydrology.Field, int), float> _lowest = new();
+    private readonly ConcurrentDictionary<Hydrology.Field, float[]> _lakes = new();
 
     private Water(ulong seed) => _seed = seed;
 
@@ -45,7 +46,8 @@ public sealed class Water
     {
         int own = field.ColumnAt(x + 0.5f, z + 0.5f);
         if (own < 0) return WaterColumn.None;
-        if (!float.IsNaN(field.Lake[own])) return new((int)MathF.Round(field.Lake[own]) - 1, true);
+        var lakes = Lakes(field);
+        if (!float.IsNaN(lakes[own])) return new((int)MathF.Round(lakes[own]) - 1, true);
         int oi = own % field.Nx, ok = own / field.Nx;
         // A lake in a cell beside it (of its piece) reaches into it where its ground is under the lake (the cells are
         // coarser than the ground's dips and rises).
@@ -53,8 +55,8 @@ public sealed class Water
         for (int dk = -1; dk <= 1; dk++)
         for (int di = -1; di <= 1; di++)
         {
-            int c = Beside(field, own, oi + di, ok + dk);
-            if (c >= 0 && !(lake >= field.Lake[c])) lake = field.Lake[c];
+            int c = Beside(field, lakes, own, oi + di, ok + dk);
+            if (c >= 0 && !(lake >= lakes[c])) lake = lakes[c];
         }
         // Running water: as low as any of the four cells round it with water stands (of its piece), so it lies level
         // across its river rather than banking up on the higher cells at its sides.
@@ -76,17 +78,53 @@ public sealed class Water
     }
 
     /// <summary>Cell (i, k) if it holds a lake and is of cell own's piece, else -1.</summary>
-    private static int Beside(Hydrology.Field field, int own, int i, int k)
+    private static int Beside(Hydrology.Field field, float[] lakes, int own, int i, int k)
     {
         if (i < 0 || k < 0 || i >= field.Nx || k >= field.Nz) return -1;
         int c = i + field.Nx * k;
-        return field.Piece[c] == field.Piece[own] && !float.IsNaN(field.Lake[c]) ? c : -1;
+        return field.Piece[c] == field.Piece[own] && !float.IsNaN(lakes[c]) ? c : -1;
     }
+
+    /// <summary>Each cell's lake level: lakes in cells side by side (of one piece) are one body of water, at the lowest
+    /// of their levels (the water over that would run off into it).</summary>
+    private float[] Lakes(Hydrology.Field field) => _lakes.GetOrAdd(field, static f =>
+    {
+        var lakes = (float[])f.Lake.Clone();
+        var done = new bool[lakes.Length];
+        var body = new List<int>();
+        var queue = new Queue<int>();
+        for (int c = 0; c < lakes.Length; c++)
+        {
+            if (float.IsNaN(lakes[c]) || done[c]) continue;
+            body.Clear();
+            done[c] = true; queue.Enqueue(c);
+            float lowest = float.MaxValue;
+            while (queue.TryDequeue(out int e))
+            {
+                body.Add(e);
+                lowest = MathF.Min(lowest, lakes[e]);
+                int i = e % f.Nx, k = e / f.Nx;
+                foreach (var (di, dk) in Ways)
+                {
+                    int ni = i + di, nk = k + dk;
+                    if (ni < 0 || nk < 0 || ni >= f.Nx || nk >= f.Nz) continue;
+                    int n = ni + f.Nx * nk;
+                    if (done[n] || float.IsNaN(lakes[n]) || f.Piece[n] != f.Piece[e]) continue;
+                    done[n] = true; queue.Enqueue(n);
+                }
+            }
+            foreach (int e in body) lakes[e] = lowest;
+        }
+        return lakes;
+    });
+
+    private static readonly (int, int)[] Ways = { (1, 0), (-1, 0), (0, 1), (0, -1) };
 
     /// <summary>The water's surface over cell c (world Y, blocks' tops), or NaN where none stands or runs.</summary>
     private double Surface(Hydrology.Field field, int c)
     {
-        if (!float.IsNaN(field.Lake[c])) return field.Lake[c];
+        var lakes = Lakes(field);
+        if (!float.IsNaN(lakes[c])) return lakes[c];
         double runs = field.Flow[c];
         if (runs < RiverFrom) return double.NaN;
         return Lowest(field, c) + Math.Min(FlowDeepest, FlowDepth * Math.Sqrt(runs / RiverFrom));

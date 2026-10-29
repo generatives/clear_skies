@@ -64,6 +64,9 @@ public sealed class Erosion
     /// <summary>How far a channel's bed rises from its middle to its edges, per block of its half-width.</summary>
     private const float EdgeRise = 0.5f;
 
+    /// <summary>How many samples into a lake a channel runs on.</summary>
+    private const int MouthSamples = 3;
+
     /// <summary>How many times a river's line is eased towards its neighbours' (see Field).</summary>
     private const int RiverEasing = 4;
 
@@ -489,6 +492,14 @@ public sealed class Erosion
                 int to = recv[c];
                 bed[c] = to >= 0 && !double.IsNaN(bed[to]) ? Math.Max(bed[to], target) : target;
                 count++;
+            }
+            // Into a lake, a channel runs on MouthSamples further at its own bed (or the lake's, where lower), so no
+            // uncut ground is left between it and the lake where the lake's edge isn't quite where it was.
+            foreach (int c in order)
+            {
+                if (double.IsNaN(bed[c])) continue;
+                for (int d = recv[c], step = 0; d >= 0 && step < MouthSamples && !float.IsNaN(rivers.Lake[d]) && double.IsNaN(bed[d]); d = recv[d], step++)
+                    bed[d] = Math.Min(bed[c], height[d]);
             }
             // The channels themselves are cut per block (see Field.Channel): here, only where they are, so less of the
             // detail comes back there.
