@@ -55,9 +55,10 @@ public sealed class GameWorld
         // Islands cut out of a continental terrain around island hearts (see HeartWorldGenerator), streamed around the
         // view as far as the budget reaches.
         ChunkPipeline = new ChunkPipelineSystem(host.World); // where chunks are made, after streaming wants them
-        // (The spawn's landmass is worn by its rivers before its chunks can be made: start on it now. See Erosion.)
+        // (The spawn's landmass is worn by its rivers and its water settled before its chunks can be made: start on it
+        // now. See Erosion and Hydrology.)
         var spawn = WorldSpawn.For(seed).Eye;
-        Task.Run(() => Erosion.For(seed).Of(spawn.X, spawn.Z));
+        Task.Run(() => Hydrology.For(seed).Of(spawn.X, spawn.Z));
         ChunkLoad = new ChunkLoadSystem(host.World, StaticVolume, budget, ChunkPipeline.Pipeline, () => new HeartWorldGenerator(seed),
                                         options.ViewDistance, MinChunkY, chunkStore, chunkPreparer);
         ((EditVoxelsHandler)Commands.HandlerFor(CommandIds.EditVoxels)!).Terrain = ChunkLoad; // edits to the world ask it what's there
