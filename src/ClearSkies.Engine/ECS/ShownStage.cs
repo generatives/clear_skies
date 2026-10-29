@@ -106,18 +106,29 @@ public sealed class ShownStage(ChunkPipeline pipeline, Time time, Stage ready, C
     {
         showing.Hidden = over is { HidesBelow: true };
         if (showing.HidesBelow != wasBelow) showing.BelowAt = swapped ? showing.SwappedAt : over?.BelowAt ?? now;
-        if (showing.Entry?.Entity is not { IsAlive: true } e) return; // air: never drawn, and hides nothing (see Over)
-        bool visible = !showing.Hidden && (grid.Finer == null || showing.Over);
-        // From when what's over it swapped, while that's still fading, so the two dissolve into each other.
-        double at = over != null && now - over.BelowAt < FadeSeconds ? over.BelowAt : now;
-        if (!e.Has<Shown>()) e.Set(new Shown { Visible = visible, At = visible ? at : double.NegativeInfinity });
-        else if (e.Get<Shown>().Visible != visible) e.Set(new Shown { Visible = visible, At = at });
+        if (showing.Entry?.Entity is { IsAlive: true } e)
+        {
+            bool visible = !showing.Hidden && (grid.Finer == null || showing.Over);
+            // From when what's over it swapped, while that's still fading, so the two dissolve into each other.
+            double at = over != null && now - over.BelowAt < FadeSeconds ? over.BelowAt : now;
+            if (!e.Has<Shown>()) e.Set(new Shown { Visible = visible, At = visible ? at : double.NegativeInfinity });
+            else if (e.Get<Shown>().Visible != visible) e.Set(new Shown { Visible = visible, At = at });
+        }
 
-        if (showing.HidesBelow == wasBelow || grid.Finer is not { } finer) return;
+        if (showing.HidesBelow != wasBelow && grid.Finer is { } finer) ShowUnder(finer, showing.Key.Pos, showing, now);
+    }
+
+    /// <summary>Sets whether the chunks under coarse chunk <paramref name="p"/> are seen, now that whether
+    /// <paramref name="over"/> hides them changed: past those not shown yet (or air) to the ones under them.</summary>
+    private void ShowUnder(PipelineGrid finer, ChunkPosition p, Showing over, double now)
+    {
         for (int j = 0; j < 8; j++)
-            if (pipeline.Get(finer.Key(Relation.Child(showing.Key.Pos, j))) is { Wanted: true } child
-                && child.Output<Showing>(this) is { } under)
-                Show(finer, under, showing, under.HidesBelow, false, now);
+        {
+            var key = finer.Key(Relation.Child(p, j));
+            if (pipeline.Get(key) is not { Wanted: true } child) continue;
+            if (child.Output<Showing>(this) is { } under) Show(finer, under, over, under.HidesBelow, false, now);
+            else if (finer.Finer is { } finest) ShowUnder(finest, key.Pos, over, now);
+        }
     }
 
     /// <summary>Whether a coarse chunk is drawn over the eight under it (rather than them); false before it's shown.</summary>
@@ -130,13 +141,19 @@ public sealed class ShownStage(ChunkPipeline pipeline, Time time, Stage ready, C
         if (showing.Entry?.Entity is { IsAlive: true } e && e.Has<Shown>()) e.Remove<Shown>();
     }
 
-    /// <summary>The coarser chunk's showing over this one, if it's there and shown (not air).</summary>
+    /// <summary>The nearest coarser chunk's showing over this one that's shown (not air), past those not shown yet:
+    /// a chunk under one that isn't, under one drawn, is hidden like the one under it. Null if there's none.</summary>
     private Showing? Over(PipelineChunk record)
-        => record.Grid.Coarser is { } coarser
-           && pipeline.Get(coarser.Key(Relation.Over(record.Key.Pos))) is { Wanted: true } parent
-           && parent.Output<Showing>(this) is { Entry: not null } showing
-            ? showing
-            : null;
+    {
+        var p = record.Key.Pos;
+        for (var coarser = record.Grid.Coarser; coarser != null; coarser = coarser.Coarser)
+        {
+            p = Relation.Over(p);
+            if (pipeline.Get(coarser.Key(p)) is not { Wanted: true } over) return null;
+            if (over.Output<Showing>(this) is { Entry: not null } showing) return showing;
+        }
+        return null;
+    }
 
     private bool AboveShown(PipelineChunk record)
     {
