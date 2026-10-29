@@ -13,9 +13,10 @@ namespace ClearSkies.Game.Generation;
 /// cracks and holes, the detail (bumps, crags, dells) is taken off, and what's left is worn down by rain for
 /// <see cref="Rounds"/> rounds: each round a priority flood from each piece's edges gives every sample the way its
 /// water goes, and each moves towards the one it drains to, the faster the more land drains through it (stream power).
-/// Each piece drains to its own edges: its rivers notch down into its rim where they leave it. Then the bigger rivers
-/// cut channels with sloping banks, winding where the land is flat. Some of the detail is put back, none in the
-/// channels.
+/// Each piece drains to its own edges: its rivers notch down into its rim where they leave it. Where much drains over
+/// gentle ground, its floor is also scoured down under where it spills, so basins open behind steeper rims for lakes.
+/// Then the bigger rivers cut channels with sloping banks, winding where the land is flat. Some of the detail is put
+/// back, none in the channels.
 ///
 /// What's kept is how far each sample's top moved, less its detail; HeartWorldGenerator moves its pieces' tops by that
 /// (see <see cref="Field.Shift"/>), with the detail worked out per block, so only the valleys come from the samples.
@@ -32,6 +33,10 @@ public sealed class Erosion
 
     /// <summary>How fast land wears towards where it drains, per square root of the samples draining through it.</summary>
     private const double Wear = 0.02;
+
+    // Scour: where ScourFrom times RiverFrom samples drain over ground flatter than ScourSlope, its floor is cut down by
+    // up to Scour blocks a round (twice that for the biggest), to at most ScourMost under where it spills.
+    private const double ScourFrom = 1, ScourSlope = 0.02, Scour = 1, ScourMost = 24;
 
     /// <summary>How much of the land's detail is put back, outside the channels.</summary>
     private const float DetailKept = 0.3f;
@@ -278,6 +283,19 @@ public sealed class Erosion
                 if (target >= h[c]) continue; // in a hollow
                 double f = Wear * Math.Sqrt(area[c]) / dist;
                 h[c] = Math.Max((h[c] + f * target) / (1 + f), Math.Min(h[c], under[c] + KeepUnder));
+            }
+            // Scour: where much drains over gentle ground, its floor is cut down by how much, even under where it
+            // spills out (the steeper rim downstream is left), so basins open behind the rims; at most ScourMost
+            // under where they spill.
+            foreach (int c in order)
+            {
+                int to = recv[c];
+                if (to < 0 || area[c] < ScourFrom * RiverFrom) continue;
+                double dist = c % nx != to % nx && c / nx != to / nx ? 1.414 : 1;
+                double slope = (h[c] - h[to]) / (dist * Cell);
+                if (slope >= ScourSlope) continue;
+                double by = Scour * Math.Min(1 - Math.Max(slope, 0) / ScourSlope, 1) * Math.Min(Math.Sqrt(area[c] / (ScourFrom * RiverFrom)), 2);
+                h[c] = Math.Max(h[c] - by, Math.Max(level[c] - ScourMost, under[c] + KeepUnder));
             }
         }
 
