@@ -67,7 +67,7 @@ public class DescriptionTests
         using var b = new HeadlessScene();
         Spawn(b, d);
         var copy = b.Registry.Find(d.Id)!.Value;
-        Assert.True(b.TickUntil(() => copy.Has<PhysicsBodyComponent>(), 60)); // once its boxes are made, on a worker
+        Assert.True(b.TickUntil(() => copy.Has<PhysicsBodyComponent>(), 60, minSeconds: 10)); // once its boxes are made, on a worker
         var (p, _) = b.Physics.GetBodyPose(copy.Get<PhysicsBodyComponent>().Body);
         var (original, _) = a.Physics.GetBodyPose(grid.Get<PhysicsBodyComponent>().Body);
         Assert.True(Vector3.Distance(p, original) < 1e-3f);

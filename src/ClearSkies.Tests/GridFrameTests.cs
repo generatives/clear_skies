@@ -47,7 +47,7 @@ public class GridFrameTests
         var comBefore = Com(grid);
 
         for (int y = 1; y <= 4; y++) volume.SetBlock(7, y, 7, BlockId.Stone);
-        scene.Tick(2);
+        Assert.True(scene.TickUntil(() => Com(grid) != comBefore, minSeconds: 10)); // built again from the new boxes
 
         ref readonly var after = ref grid.Get<Transform>();
         Near(V(before.Position), V(after.Position));
