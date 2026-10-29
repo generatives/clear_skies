@@ -1,8 +1,8 @@
 namespace ClearSkies.Game.Generation;
 
 /// <summary>
-/// One landmass sampled into cells <see cref="Size"/> blocks on a side, for <see cref="Flood"/>: its pieces as
-/// HeartWorldGenerator makes them, worn by <see cref="Erosion"/>. Each coarse column (Size by Size blocks) spans
+/// One landmass in cells <see cref="Size"/> blocks on a side, for <see cref="Flood"/>: its pieces as
+/// <see cref="Erosion"/> samples and wears them. Each coarse column (Size by Size blocks) spans
 /// from the bottom of its lowest ground (Lo) up to just above the highest ground around it (Hi); over that is open sky,
 /// under it the void. Of those cells only the ones water can reach are kept: solid stone more than
 /// <see cref="Shell"/> cells inside the ground is left out (inert: it holds and passes no water). What's kept is in
@@ -21,8 +21,6 @@ public sealed class CoarseLand
     public readonly long[] Piece;           // per column: which top-row heart's piece its top is in
     public readonly int Shell;
 
-    /// <summary>How far under its piece's top (roughly) a column's top may be and still be its ground (as Erosion).</summary>
-    private const float HoleDepth = 40f;
     public readonly long Spanned;           // cells between every column's Lo and Hi, kept or not
 
     public int Columns => Nx * Nz;
@@ -30,40 +28,15 @@ public sealed class CoarseLand
     public int Cells { get; }
     public bool HasLand(int c) => Hi[c] >= Lo[c];
 
-    /// <summary>Samples landmass <paramref name="cell"/> between blocks (x0, z0) and (x1, z1): each column at its
-    /// middle block column, on all cores. A column whose top is far under its piece's (a hole into the caves under it,
-    /// or a crack's floor) has no land: water there leaves the land. Keeps solid cells up to <paramref name="shell"/>
-    /// cells inside the ground (int.MaxValue keeps them all).</summary>
-    public CoarseLand(ulong seed, (int X, int Z) cell, int x0, int z0, int x1, int z1, int shell = int.MaxValue, int size = 8)
+    /// <summary>The land whose block columns' solid spans (bottom up), one per Size by Size column from block
+    /// (x0, z0), are <paramref name="spans"/> (empty where there's no land), and <paramref name="piece"/> which piece
+    /// each column's top is in: water passes only between columns of one piece. Keeps solid cells up to
+    /// <paramref name="shell"/> cells inside the ground (int.MaxValue keeps them all).</summary>
+    public CoarseLand(int x0, int z0, int nx, int nz, (short Lo, short Hi)[][] spans, long[] piece, int shell = int.MaxValue, int size = 8)
     {
         Size = size;
-        X0 = x0; Z0 = z0; Nx = (x1 - x0) / Size; Nz = (z1 - z0) / Size; Shell = shell;
-        var spans = new (short Lo, short Hi)[Columns][];
-        Piece = new long[Columns];
-        var water = Water.For(seed);
-        // A chunk's worth of columns at a time, so each sampler loads that chunk's hearts once.
-        int PerChunk = System.Math.Max(1, 32 / Size);
-        int chunksX = (Nx + PerChunk - 1) / PerChunk, chunksZ = (Nz + PerChunk - 1) / PerChunk;
-        var generators = new ThreadLocal<(HeartWorldGenerator Gen, List<(short Lo, short Hi)> List)>(
-            () => (new HeartWorldGenerator(seed), new List<(short Lo, short Hi)>()));
-        Parallel.For(0, chunksX * chunksZ, k =>
-        {
-            var (gen, list) = generators.Value;
-            int cx = k % chunksX, cz = k / chunksX;
-            for (int j = cz * PerChunk; j < System.Math.Min(Nz, cz * PerChunk + PerChunk); j++)
-            for (int i = cx * PerChunk; i < System.Math.Min(Nx, cx * PerChunk + PerChunk); i++)
-            {
-                int c = i + Nx * j, x = x0 + i * Size + Size / 2, z = z0 + j * Size + Size / 2;
-                spans[c] = Array.Empty<(short, short)>();
-                if (HeartGrid.Landmass(seed, x, z) != cell) continue;
-                if (water.Nearest(x, z, out int hi, out int hk) is not { Alive: true } heart) continue;
-                gen.ColumnSpans(x, z, list);
-                if (list.Count == 0 || list[^1].Hi <= water.RoughTop(x, z, heart) - HoleDepth) continue;
-                Piece[c] = ((long)hi << 32) ^ (uint)hk;
-                spans[c] = list.ToArray();
-            }
-        });
-        generators.Dispose();
+        X0 = x0; Z0 = z0; Nx = nx; Nz = nz; Shell = shell;
+        Piece = piece;
 
         Lo = new int[Columns]; Hi = new int[Columns]; Top = new int[Columns];
         for (int c = 0; c < Columns; c++)
@@ -122,6 +95,19 @@ public sealed class CoarseLand
         RunY0 = y0.ToArray(); RunY1 = y1.ToArray(); RunCell = at.ToArray();
         Solid = keptSolid.ToArray();
         Cells = Solid.Length;
+    }
+
+    /// <summary>Spans (bottom up) with their top moved by <paramref name="by"/> blocks: raised, or cut down through
+    /// whatever spans that takes off.</summary>
+    public static (short Lo, short Hi)[] Lift((short Lo, short Hi)[] spans, int by)
+    {
+        if (spans.Length == 0 || by == 0) return spans;
+        var list = new List<(short Lo, short Hi)>(spans);
+        if (by > 0) { list[^1] = (list[^1].Lo, (short)(list[^1].Hi + by)); return list.ToArray(); }
+        int top = list[^1].Hi + by;
+        while (list.Count > 1 && list[^1].Lo > top) list.RemoveAt(list.Count - 1);
+        list[^1] = (list[^1].Lo, (short)Math.Max(list[^1].Lo, Math.Min(list[^1].Hi, top)));
+        return list.ToArray();
     }
 
     /// <summary>Which cells to keep: all but solid ones more than Shell cells (steps across faces) from anything that

@@ -34,7 +34,7 @@ public sealed class Flood
     public double[] GroundFlow = null!;
 
     private readonly CoarseLand _land;
-    public double[] Level = null!, Flow = null!, Floor = null!;
+    public double[] Level = null!, OpenLevel = null!, Flow = null!, Floor = null!;
     public int[] Receiver = null!, Lake = null!, Column = null!, Y = null!;
     public double[] LakeLevel = null!;
     public int[] Order = null!;
@@ -138,7 +138,7 @@ public sealed class Flood
         }
         var (levelG, recvG, orderG) = Spread(true);
         var (levelA, recvA, orderA) = Spread(false);
-        Level = levelG; Receiver = recvA; Order = orderA;
+        Level = levelG; OpenLevel = levelA; Receiver = recvA; Order = orderA;
 
         // Per column: the open cell its rain lands in (just over the ground), and the ground cell under that.
         var surface = new int[land.Columns]; var under = new int[land.Columns]; var top = new double[land.Columns];

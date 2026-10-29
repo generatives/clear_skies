@@ -42,7 +42,7 @@ public sealed class Water
     // A river starts where RiverFrom columns' rain runs (see Hydrology), RiverNarrowest blocks wide, widening by RiverWiden
     // blocks per square root of what it carries beyond that, up to RiverWidest; and some stretches up to RiverVary wider
     // or narrower.
-    private const float RiverFrom = 40f, RiverNarrowest = 2f, RiverWiden = 0.25f, RiverWidest = 10f, RiverVary = 0.35f;
+    private const float RiverFrom = (float)Erosion.RiverFrom, RiverNarrowest = 2f, RiverWiden = 0.25f, RiverWidest = 10f, RiverVary = 0.35f;
 
     // A river winds up to Meander blocks either side of the way its water goes; its banks slope up from a block over
     // it by BankSlope blocks per block out, or steeper to meet the ground within its reach: BankNear blocks (a cut) to
@@ -107,6 +107,7 @@ public sealed class Water
         public int[] River = Array.Empty<int>();   // level of the river through the sample, or int.MinValue
         public byte[] Width = Array.Empty<byte>(); // its width, blocks
         public int[] Down = Array.Empty<int>();    // the sample its water goes on to, or -1
+        public float[] RiverX = Array.Empty<float>(), RiverZ = Array.Empty<float>(); // where a river's line runs through
         public float[] Edge = Array.Empty<float>(); // 0 at its piece's crack to 1 well inside (see EdgeFade)
         public float[] Ground = Array.Empty<float>(); // the land's real top over the sample, or Drain
     }
@@ -149,10 +150,10 @@ public sealed class Water
             if (i < 0 || k < 0 || i >= Window || k >= Window) continue;
             int c = i + Window * k;
             if (piece.Width[c] == 0) continue;
-            float ax = (piece.X0 + i + 0.5f) * Step, az = (piece.Z0 + k + 0.5f) * Step;
+            float ax = piece.RiverX[c], az = piece.RiverZ[c];
             float bx = ax, bz = az;
             int d = piece.Down[c];
-            if (d >= 0) { bx = (piece.X0 + d % Window + 0.5f) * Step; bz = (piece.Z0 + d / Window + 0.5f) * Step; }
+            if (d >= 0) { bx = piece.RiverX[d]; bz = piece.RiverZ[d]; }
             float dist = SegmentDistance(qx, qz, ax, az, bx, bz, out float t), half = piece.Width[c] * 0.5f * (1f + MouthWiden * mouth);
             // (Its level runs down from this sample's to the next one's, or to the lake's it flows into: no higher
             // than the first, no lower than the straight line between them.)
@@ -312,52 +313,99 @@ public sealed class Water
         }
         piece.Ground = ground;
 
-        // The lakes and the water running over the land, as Hydrology settles them a cell at a time over its whole
-        // landmass: a lake fills each sample of a lake's cell its ground is under; a river runs where enough runs over
-        // a cell, through one sample per cell (the one over the cell's middle), on to the cell its water goes to.
-        var hydrology = Hydrology.For(_seed).Of(self.X, self.Z);
+        // The lakes and the water running over the land, as the flood settles them a cell at a time over its whole
+        // landmass (see Hydrology), over the land as worn (see Erosion).
+        var erosion = Erosion.For(_seed).Of(self.X, self.Z);
+        var hydrology = erosion.Water;
         piece.Lake = new int[N];
         piece.River = new int[N];
         piece.Width = new byte[N];
         piece.Down = new int[N];
         piece.Edge = new float[N];
+        piece.RiverX = new float[N];
+        piece.RiverZ = new float[N];
         Array.Fill(piece.Lake, int.MinValue);
         Array.Fill(piece.River, int.MinValue);
         Array.Fill(piece.Down, -1);
         for (int c = 0; c < N; c++) piece.Edge[c] = EdgeFade(face[c]);
-        int Sample(int column) // a cell's middle sample in the window, or -1
+        int ColumnOf(int c) => hydrology.ColumnAt((piece.X0 + c % Window + 0.5f) * Step, (piece.Z0 + c / Window + 0.5f) * Step);
+
+        // A lake fills every sample its ground is under that is joined to its cells by others its ground is under: as
+        // high as its level, or lower if it would reach a drain (a crack, a hole) at that, as its rim at the blocks
+        // lets it.
+        var seen = new HashSet<float>();
+        var fill = new List<int>();
+        var queue = new Queue<int>();
+        for (int c = 0; c < N; c++)
         {
-            int i = (hydrology.X0 + column % hydrology.Nx * Hydrology.Cell + Hydrology.Cell / 2) / Step - piece.X0;
-            int k = (hydrology.Z0 + column / hydrology.Nx * Hydrology.Cell + Hydrology.Cell / 2) / Step - piece.Z0;
+            if (ground[c] == Drain || piece.Lake[c] != int.MinValue) continue;
+            int column = ColumnOf(c);
+            if (column < 0 || float.IsNaN(hydrology.Lake[column]) || !seen.Add(hydrology.Lake[column])) continue;
+            int level = (int)MathF.Floor(hydrology.Lake[column]) - 1;
+            for (; level > ground[c]; level--)
+            {
+                fill.Clear(); queue.Clear();
+                var reached = new HashSet<int> { c };
+                queue.Enqueue(c);
+                bool leaks = false;
+                while (queue.TryDequeue(out int e) && !leaks)
+                {
+                    fill.Add(e);
+                    int ei = e % Window, ek = e / Window;
+                    for (int d = 0; d < 4 && !leaks; d++)
+                    {
+                        int ni = ei + (d == 0 ? 1 : d == 1 ? -1 : 0), nk = ek + (d == 2 ? 1 : d == 3 ? -1 : 0);
+                        if (ni < 0 || nk < 0 || ni >= Window || nk >= Window) { leaks = true; break; }
+                        int ne = ni + Window * nk;
+                        if (ground[ne] >= level || reached.Contains(ne)) continue;
+                        if (ground[ne] == Drain) { leaks = true; break; }
+                        reached.Add(ne); queue.Enqueue(ne);
+                    }
+                }
+                if (leaks) continue;
+                foreach (int e in fill) piece.Lake[e] = Math.Max(piece.Lake[e], level);
+                break;
+            }
+        }
+
+        // A river runs where enough runs over a cell, through one sample per cell (the one its line runs through: in
+        // a channel, the channel's, else the cell's middle), on to the cell its water goes to.
+        int SampleAt(float x, float z)
+        {
+            int i = FloorDiv((int)MathF.Floor(x), Step) - piece.X0, k = FloorDiv((int)MathF.Floor(z), Step) - piece.Z0;
             return i < 0 || k < 0 || i >= Window || k >= Window ? -1 : i + Window * k;
         }
-        var rivers = new List<int>();
-        for (int k = 0; k < Window; k++)
-        for (int i = 0; i < Window; i++)
+        var sampleOf = new Dictionary<int, int>();
+        int ColumnSample(int column)
         {
-            int c = i + Window * k;
-            if (ground[c] == Drain) continue;
-            int column = hydrology.ColumnAt((piece.X0 + i + 0.5f) * Step, (piece.Z0 + k + 0.5f) * Step);
-            if (column < 0) continue;
-            float lake = hydrology.Lake[column];
-            if (!float.IsNaN(lake))
-            {
-                int level = (int)MathF.Floor(lake) - 1;
-                if (ground[c] < level) piece.Lake[c] = level;
-            }
-            else if (hydrology.Flow[column] >= RiverFrom && Sample(column) == c) rivers.Add(c);
+            if (sampleOf.TryGetValue(column, out int s)) return s;
+            bool channel = !float.IsNaN(erosion.Bed[column]);
+            float x = channel ? erosion.RiverX[column] : hydrology.X0 + column % hydrology.Nx * Hydrology.Cell + Hydrology.Cell / 2f;
+            float z = channel ? erosion.RiverZ[column] : hydrology.Z0 + column / hydrology.Nx * Hydrology.Cell + Hydrology.Cell / 2f;
+            s = SampleAt(x, z);
+            if (s >= 0) { piece.RiverX[s] = x; piece.RiverZ[s] = z; }
+            return sampleOf[column] = s;
+        }
+        var rivers = new List<int>();
+        var flowOf = new Dictionary<int, float>();
+        for (int c = 0; c < N; c++)
+        {
+            if (ground[c] == Drain || piece.Lake[c] != int.MinValue || c % 2 != 0 || c / Window % 2 != 0) continue;
+            // (Each cell once: from its corner sample.)
+            int column = ColumnOf(c);
+            if (column < 0 || hydrology.Flow[column] < RiverFrom || !float.IsNaN(hydrology.Lake[column])) continue;
+            int s = ColumnSample(column);
+            if (s < 0 || ground[s] == Drain || piece.Lake[s] != int.MinValue || flowOf.ContainsKey(s)) continue;
+            flowOf[s] = hydrology.Flow[column];
+            rivers.Add(s);
+            int down = hydrology.Down[column];
+            int d = down >= 0 ? ColumnSample(down) : -1;
+            piece.Down[s] = d >= 0 && ground[d] != Drain ? d : -1;
         }
 
         // Each river's level is a block under its ground, never rising on its way (worked from upstream down), and not
         // under a lake it meets.
-        var erosion = Erosion.For(_seed);
         foreach (int c in rivers) piece.River[c] = int.MaxValue; // (worked out below)
-        int ColumnOf(int c) => hydrology.ColumnAt((piece.X0 + c % Window + 0.5f) * Step, (piece.Z0 + c / Window + 0.5f) * Step);
-        foreach (int c in rivers)
-        {
-            int column = ColumnOf(c), d = hydrology.Down[column] >= 0 ? Sample(hydrology.Down[column]) : -1;
-            piece.Down[c] = d >= 0 && ground[d] != Drain ? d : -1;
-        }
         // (Upstream first: the furthest from where its river ends.)
         var along = new Dictionary<int, int>();
         int Along(int c)
@@ -370,18 +418,17 @@ public sealed class Water
         rivers.Sort((a, b) => Along(b).CompareTo(Along(a)));
         foreach (int c in rivers)
         {
-            int column = ColumnOf(c), ci = c % Window, ck = c / Window, d = piece.Down[c];
+            int ci = c % Window, ck = c / Window, d = piece.Down[c];
             int lakeBeside = int.MinValue;
             for (int k = Math.Max(0, ck - 2); k <= Math.Min(Window - 1, ck + 2); k++)
             for (int i = Math.Max(0, ci - 2); i <= Math.Min(Window - 1, ci + 2); i++)
                 lakeBeside = Math.Max(lakeBeside, piece.Lake[i + Window * k]);
             piece.River[c] = Math.Max(Math.Min(piece.River[c], (int)MathF.Floor(ground[c]) - 1), lakeBeside);
             float vary = 1f + RiverVary * _widths.GetNoise((piece.X0 + ci) * Step, (piece.Z0 + ck) * Step);
-            float flow = hydrology.Flow[column];
+            float flow = flowOf[c];
             float width = Math.Clamp(MathF.Round((RiverNarrowest + RiverWiden * MathF.Sqrt(flow - RiverFrom)) * vary), 2f, RiverWidest);
             // (In a channel the land was worn for, as wide as it, less a block either side.)
-            float sx = (piece.X0 + ci + 0.5f) * Step, sz = (piece.Z0 + ck + 0.5f) * Step;
-            erosion.Of(sx, sz).Channel(sx, sz, out float channel);
+            erosion.Channel(piece.RiverX[c], piece.RiverZ[c], out float channel);
             piece.Width[c] = (byte)MathF.Max(width, channel - 2f);
             if (d >= 0 && piece.River[d] != int.MinValue) piece.River[d] = Math.Min(piece.River[d], piece.River[c]);
         }

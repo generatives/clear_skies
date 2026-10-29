@@ -27,17 +27,18 @@ public sealed class Erosion
     /// <summary>Blocks on a side of a sample.</summary>
     public const int Cell = 8;
 
-    private const int Rounds = 30;
+    // Rounds of wearing, and how many between the flood settling the water again over the land as worn so far.
+    private const int Rounds = 6, FloodEvery = 3;
 
     /// <summary>The steepest the wearing may cut into the land, blocks down per block across (see Build).</summary>
     private const float MaxCutSlope = 1f;
 
     /// <summary>How fast land wears towards where it drains, per square root of the rain draining through it (samples' worth).</summary>
-    private const double Wear = 0.02;
+    private const double Wear = 0.1;
 
     // Scour: where ScourFrom times RiverFrom samples drain over ground flatter than ScourSlope, its floor is cut down by
     // up to Scour blocks a round (twice that for the biggest), to at most ScourMost under where it spills.
-    private const double ScourFrom = 1, ScourSlope = 0.02, Scour = 1, ScourMost = 24;
+    private const double ScourFrom = 1, ScourSlope = 0.02, Scour = 5, ScourMost = 24;
 
     /// <summary>How much of the land's detail is put back, outside the channels.</summary>
     private const float DetailKept = 0.3f;
@@ -50,10 +51,9 @@ public sealed class Erosion
     /// <summary>How far under its piece's top (roughly) the land may be and still be its ground, not a hole (as Water).</summary>
     private const float HoleDepth = 40f;
 
-    // Rivers: a channel is cut where RiverFrom samples' rain drains through (FlatFactor times that where the land is flatter
-    // than FlatSlope), up to RiverDepth blocks deep; routed over the land raised by up to Meander blocks of noise where it
-    // is flat, so they wind. Banks rise BankGrade blocks per block for BankReach blocks.
-    private const double RiverFrom = 200, FlatFactor = 5, FlatSlope = 0.01, RiverDepth = 10, Meander = 40;
+    // Rivers: a channel is cut where RiverFrom columns' rain runs (FlatFactor times that where the land is flatter than
+    // FlatSlope), up to RiverDepth blocks deep. Banks rise BankGrade blocks per block for BankReach blocks.
+    internal const double RiverFrom = 40, FlatFactor = 5, FlatSlope = 0.01, RiverDepth = 10;
     private const float BankReach = 24f, BankGrade = 0.15f;
 
     /// <summary>How far a channel's bed rises from its middle to its edges, per block of its half-width.</summary>
@@ -97,6 +97,9 @@ public sealed class Erosion
         /// <summary>How long it took to work out, seconds; and how many river samples it has.</summary>
         public double Seconds { get; internal set; }
         public int RiverSamples { get; internal set; }
+
+        /// <summary>The water over the land as worn (see Hydrology).</summary>
+        public Hydrology.Field Water { get; internal set; } = null!;
 
         internal Field(ulong seed, int x0, int z0, int nx, int nz)
         {
@@ -220,6 +223,8 @@ public sealed class Erosion
         var detail = new double[n];  // the terrain's detail there
         var rain = new double[n];    // the rain on it (see Hydrology.Rain)
         var piece = new long[n];     // which top-row heart's piece it is
+        var columns = new (short Lo, short Hi)[n][]; // its solid spans
+        Array.Fill(columns, Array.Empty<(short, short)>());
         var terrain = ContinentTerrain.For(_seed);
         var water = Water.For(_seed);
         const int PerChunk = 32 / Cell;
@@ -248,34 +253,27 @@ public sealed class Erosion
                 detail[c] = height - broad;
                 rain[c] = Hydrology.Rain(terrain, x, z);
                 piece[c] = ((long)hi << 32) ^ (uint)hk;
+                columns[c] = spans.ToArray();
             }
         });
         samplers.Dispose();
 
-        // The broad shape: the tops less their detail. Worn down from there.
+        // The broad shape: the tops less their detail. Worn down from there, round by round, by the water as the flood
+        // settles it over the land as worn so far (every FloodEvery rounds): each sample moves towards the one its water
+        // goes on to, the faster the more runs through it (stream power); where much runs over gentle ground, its floor
+        // is scoured down, even under where it spills, so basins open behind steeper rims.
         var b = new double[n];
         for (int c = 0; c < n; c++) if (has[c]) b[c] = h0[c] - detail[c];
         var h = (double[])b.Clone();
-        var recv = new int[n];
-        var area = new double[n];
-        var level = new double[n];
-        var edge = new bool[n];
-        var order = new List<int>(n);
-        for (int c = 0; c < n; c++)
-        {
-            if (!has[c]) continue;
-            int i = c % nx, k = c / nx;
-            for (int dk = -1; dk <= 1 && !edge[c]; dk++)
-            for (int di = -1; di <= 1 && !edge[c]; di++)
-                edge[c] = !Joined(c, i + di, k + dk);
-        }
-
+        Hydrology.Field settled = null!;
         for (int round = 0; round < Rounds; round++)
         {
-            Route(h);
-            // Downstream first: each sample moves towards where it drains (implicitly, so any Wear is stable). An edge
-            // drains off its piece: where a stream leaves, it wears towards a notch.
-            foreach (int c in order)
+            if (round % FloodEvery == 0) settled = Settle(c => h[c] + DetailKept * detail[c]);
+            var recv = settled.Down;
+            var area = settled.Flow;
+            // Downstream first, implicitly (so any Wear is stable). An edge drains off its piece: where a stream
+            // leaves, it wears towards a notch.
+            foreach (int c in settled.Order)
             {
                 int to = recv[c];
                 double target, dist = 1;
@@ -293,23 +291,20 @@ public sealed class Erosion
                 double f = Wear * Math.Sqrt(area[c]) / dist;
                 h[c] = Math.Max((h[c] + f * target) / (1 + f), Math.Min(h[c], under[c] + KeepUnder));
             }
-            // Scour: where much drains over gentle ground, its floor is cut down by how much, even under where it
-            // spills out (the steeper rim downstream is left), so basins open behind the rims; at most ScourMost
-            // under where they spill.
-            foreach (int c in order)
+            foreach (int c in settled.Order)
             {
                 int to = recv[c];
                 if (to < 0 || area[c] < ScourFrom * RiverFrom) continue;
-                double dist = c % nx != to % nx && c / nx != to / nx ? 1.414 : 1;
-                double slope = (h[c] - h[to]) / (dist * Cell);
+                double slope = (h[c] - h[to]) / Cell;
                 if (slope >= ScourSlope) continue;
                 double by = Scour * Math.Min(1 - Math.Max(slope, 0) / ScourSlope, 1) * Math.Min(Math.Sqrt(area[c] / (ScourFrom * RiverFrom)), 2);
-                h[c] = Math.Max(h[c] - by, Math.Max(level[c] - ScourMost, under[c] + KeepUnder));
+                h[c] = Math.Max(h[c] - by, Math.Max(settled.Spill[c] - ScourMost, under[c] + KeepUnder));
             }
         }
 
+        // The rivers' channels, where the water runs over the land as worn.
         var mask = new double[n];
-        Rivers(h, mask);
+        Rivers(h, mask, Settle(c => h[c] + DetailKept * detail[c]));
 
         // What's kept: how far each top moved less its detail, its top worn, and the channels; spread out over the
         // samples off the land from the nearest on it.
@@ -369,10 +364,30 @@ public sealed class Erosion
             for (int di = -Search; di <= Search; di++)
                 if (i + di >= 0 && k + dk >= 0 && i + di < nx && k + dk < nz) field.NearRiver[i + di + nx * (k + dk)] = true;
         }
+
+        // And the water once more, over the land as the generator makes it now (its tops moved, as at each sample's
+        // middle, channels and all), for Water to lay out.
+        field.Water = Settle(c =>
+        {
+            float x = x0 + c % nx * Cell + Cell / 2, z = z0 + c / nx * Cell + Cell / 2;
+            return h0[c] + field.Shift(x, z, (float)detail[c]);
+        });
         field.Seconds = clock.Elapsed.TotalSeconds;
         return field;
 
-        // Whether sample c and sample (i, k) are on the same piece's land, so water goes between them.
+        // The water the flood settles over the land with each sample's top at the height given.
+        Hydrology.Field Settle(Func<int, double> height)
+        {
+            var spans = new (short Lo, short Hi)[n][];
+            for (int c = 0; c < n; c++)
+                spans[c] = has[c] ? CoarseLand.Lift(columns[c], (int)Math.Round(height(c) - h0[c])) : columns[c];
+            var land = new CoarseLand(x0, z0, nx, nz, spans, piece, size: Cell);
+            var flood = new Flood(land, unchecked((int)_seed)) { Rain = (x, z) => Hydrology.Rain(terrain, x, z) };
+            flood.Run();
+            return new Hydrology.Field(land, flood);
+        }
+
+        // Whether sample c and sample (i, k) are on the same piece's land.
         bool Joined(int c, int i, int k)
         {
             if (i < 0 || k < 0 || i >= nx || k >= nz) return false;
@@ -380,47 +395,15 @@ public sealed class Erosion
             return has[e] && piece[e] == piece[c];
         }
 
-        // Where each sample drains (a priority flood in from its piece's edges, so hollows drain by their spill points),
-        // in order, downstream first, and the rain draining through each (samples' worth, see Hydrology.Rain).
-        void Route(double[] height)
-        {
-            Array.Fill(recv, -1); Array.Fill(level, double.NaN); order.Clear();
-            var flood = new PriorityQueue<int, double>();
-            for (int c = 0; c < n; c++)
-                if (edge[c]) { level[c] = height[c]; flood.Enqueue(c, height[c]); }
-            while (flood.TryDequeue(out int c, out double at))
-            {
-                order.Add(c);
-                int i = c % nx, k = c / nx;
-                for (int dk = -1; dk <= 1; dk++)
-                for (int di = -1; di <= 1; di++)
-                {
-                    if ((di | dk) == 0 || !Joined(c, i + di, k + dk)) continue;
-                    int d = i + di + nx * (k + dk);
-                    if (!double.IsNaN(level[d])) continue;
-                    level[d] = Math.Max(at, height[d]);
-                    recv[d] = c;
-                    flood.Enqueue(d, level[d]);
-                }
-            }
-            Array.Clear(area);
-            foreach (int c in order) area[c] = rain[c];
-            for (int q = order.Count - 1; q >= 0; q--) if (recv[order[q]] >= 0) area[recv[order[q]]] += area[order[q]];
-        }
-
-        // Trunk rivers cut into the land: routed with noise on flat ground (so they wind), their beds never rising
-        // downstream, channels wider and deeper the more drains through them with banks sloping up into the land. Marks
-        // where it cut (1 in channels, fading over the
+        // Channels cut into the land where the rivers run: their beds never rising downstream, wider and deeper the more
+        // runs through them, with banks sloping up into the land. Marks where it cut (1 in channels, fading over the
         // banks).
-        void Rivers(double[] height, double[] carved)
+        void Rivers(double[] height, double[] carved, Hydrology.Field rivers)
         {
-            var noise = new FastNoiseLite(unchecked((int)_seed + 77));
-            noise.SetNoiseType(FastNoiseLite.NoiseType.OpenSimplex2);
-            noise.SetFractalType(FastNoiseLite.FractalType.FBm);
-            noise.SetFractalOctaves(2);
-            noise.SetFrequency(1f / 300f);
+            var recv = rivers.Down;
+            var area = rivers.Flow;
+            var order = rivers.Order;
             var slope = new double[n];
-            var prio = new double[n];
             for (int c = 0; c < n; c++)
             {
                 if (!has[c]) continue;
@@ -433,23 +416,21 @@ public sealed class Erosion
                     drop = Math.Max(drop, (height[c] - height[i + di + nx * (k + dk)]) / (Cell * Math.Sqrt(di * di + dk * dk)));
                 }
                 slope[c] = drop;
-                double flat = Math.Clamp(1 - drop / 0.05, 0, 1);
-                prio[c] = height[c] + Meander * Math.Abs(noise.GetNoise(x0 + i * Cell, z0 + k * Cell)) * flat;
             }
-            Route(prio);
             var bed = new double[n];
             Array.Fill(bed, double.NaN);
-            int rivers = 0;
+            int count = 0;
             foreach (int c in order)
             {
-                if (area[c] < RiverFrom) continue;
-                // (Too small to carve across flat ground, a stream runs over it, its bed the ground: so the channel above
-                // doesn't end in a pit, nor do beds upstream dig under it.)
+                // (None in a lake: its water stands over its bed. Too small to carve across flat ground, a stream runs
+                // over it, its bed the ground: so the channel above doesn't end in a pit, nor do beds upstream dig
+                // under it.)
+                if (area[c] < RiverFrom || !float.IsNaN(rivers.Lake[c])) continue;
                 double target = slope[c] < FlatSlope && area[c] < FlatFactor * RiverFrom ? height[c]
                     : Math.Max(height[c] - Math.Min(RiverDepth, 3 * Math.Sqrt(area[c] / RiverFrom)), under[c] + KeepUnder);
                 int to = recv[c];
                 bed[c] = to >= 0 && !double.IsNaN(bed[to]) ? Math.Max(bed[to], target) : target;
-                rivers++;
+                count++;
             }
             // The channels themselves are cut per block (see Field.Channel): here, only where they are, so less of the
             // detail comes back there.
@@ -472,7 +453,8 @@ public sealed class Erosion
                 }
             }
             // The rivers' lines: each sample's middle, eased a few times towards the middle of its neighbours up and
-            // down the river (up it, the one most drains from).
+            // down the river (up it, the one most runs from): the flood's ways go only straight across, so they'd
+            // go in steps.
             var up = new int[n];
             Array.Fill(up, -1);
             foreach (int c in order)
@@ -496,7 +478,7 @@ public sealed class Erosion
                 }
                 foreach (int c in order) { field.RiverX[c] = easedX[c]; field.RiverZ[c] = easedZ[c]; }
             }
-            field.RiverSamples = rivers;
+            field.RiverSamples = count;
         }
     }
 
