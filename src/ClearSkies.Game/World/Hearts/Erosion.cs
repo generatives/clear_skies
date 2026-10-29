@@ -12,7 +12,8 @@ namespace ClearSkies.Game.Generation;
 /// never by this). Over the landmass's real piece tops, sampled every <see cref="Cell"/> blocks with their worn edges,
 /// cracks and holes, the detail (bumps, crags, dells) is taken off, and what's left is worn down by rain for
 /// <see cref="Rounds"/> rounds: each round a priority flood from each piece's edges gives every sample the way its
-/// water goes, and each moves towards the one it drains to, the faster the more land drains through it (stream power).
+/// water goes, and each moves towards the one it drains to, the faster the more rain drains through it (stream power;
+/// rain as the climate's wetness gives it, see Hydrology.Rain, so dry land hardly wears).
 /// Each piece drains to its own edges: its rivers notch down into its rim where they leave it. Where much drains over
 /// gentle ground, its floor is also scoured down under where it spills, so basins open behind steeper rims for lakes.
 /// Then the bigger rivers cut channels with sloping banks, winding where the land is flat. Some of the detail is put
@@ -31,7 +32,7 @@ public sealed class Erosion
     /// <summary>The steepest the wearing may cut into the land, blocks down per block across (see Build).</summary>
     private const float MaxCutSlope = 1f;
 
-    /// <summary>How fast land wears towards where it drains, per square root of the samples draining through it.</summary>
+    /// <summary>How fast land wears towards where it drains, per square root of the rain draining through it (samples' worth).</summary>
     private const double Wear = 0.02;
 
     // Scour: where ScourFrom times RiverFrom samples drain over ground flatter than ScourSlope, its floor is cut down by
@@ -49,11 +50,14 @@ public sealed class Erosion
     /// <summary>How far under its piece's top (roughly) the land may be and still be its ground, not a hole (as Water).</summary>
     private const float HoleDepth = 40f;
 
-    // Rivers: a channel is cut where RiverFrom samples drain through (FlatFactor times that where the land is flatter
+    // Rivers: a channel is cut where RiverFrom samples' rain drains through (FlatFactor times that where the land is flatter
     // than FlatSlope), up to RiverDepth blocks deep; routed over the land raised by up to Meander blocks of noise where it
     // is flat, so they wind. Banks rise BankGrade blocks per block for BankReach blocks.
     private const double RiverFrom = 200, FlatFactor = 5, FlatSlope = 0.01, RiverDepth = 10, Meander = 40;
     private const float BankReach = 24f, BankGrade = 0.15f;
+
+    /// <summary>How far a channel's bed rises from its middle to its edges, per block of its half-width.</summary>
+    private const float EdgeRise = 0.3f;
 
     /// <summary>How many times a river's line is eased towards its neighbours' (see Field).</summary>
     private const int RiverEasing = 4;
@@ -151,7 +155,10 @@ public sealed class Erosion
                 float half = Half[c] + t * (halfTo - Half[c]);
                 float past = MathF.Max(0f, dist - half);
                 if (past > BankReach) continue;
-                float foot = Bed[c] + t * (bedTo - Bed[c]);
+                // (Deepest down its middle line, rising across it to EdgeRise times its half-width at its edges, where
+                // the banks start: a rounded bed, not a flat one.)
+                float across = MathF.Min(dist / MathF.Max(half, 1f), 1f);
+                float foot = Bed[c] + t * (bedTo - Bed[c]) + EdgeRise * half * across * across;
                 float bed = foot + past * (float.IsNaN(ground) ? BankGrade : MathF.Max(BankGrade, (ground - foot) / BankReach));
                 if (bed < best) { best = bed; width = past > 0f ? 0f : 2f * half; }
             }
@@ -211,6 +218,7 @@ public sealed class Erosion
         var h0 = new double[n];      // the top
         var under = new double[n];   // the bottom of its top span
         var detail = new double[n];  // the terrain's detail there
+        var rain = new double[n];    // the rain on it (see Hydrology.Rain)
         var piece = new long[n];     // which top-row heart's piece it is
         var terrain = ContinentTerrain.For(_seed);
         var water = Water.For(_seed);
@@ -238,6 +246,7 @@ public sealed class Erosion
                 h0[c] = top + 1;
                 under[c] = spans[^1].Lo;
                 detail[c] = height - broad;
+                rain[c] = Hydrology.Rain(terrain, x, z);
                 piece[c] = ((long)hi << 32) ^ (uint)hk;
             }
         });
@@ -372,7 +381,7 @@ public sealed class Erosion
         }
 
         // Where each sample drains (a priority flood in from its piece's edges, so hollows drain by their spill points),
-        // in order, downstream first, and the samples draining through each.
+        // in order, downstream first, and the rain draining through each (samples' worth, see Hydrology.Rain).
         void Route(double[] height)
         {
             Array.Fill(recv, -1); Array.Fill(level, double.NaN); order.Clear();
@@ -395,7 +404,7 @@ public sealed class Erosion
                 }
             }
             Array.Clear(area);
-            foreach (int c in order) area[c] = 1;
+            foreach (int c in order) area[c] = rain[c];
             for (int q = order.Count - 1; q >= 0; q--) if (recv[order[q]] >= 0) area[recv[order[q]]] += area[order[q]];
         }
 

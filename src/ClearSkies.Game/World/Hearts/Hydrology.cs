@@ -60,6 +60,14 @@ public sealed class Hydrology
         }
     }
 
+    /// <summary>How much rain falls at (x, z), as a share of the most: none where the climate is as dry as 0.3 or
+    /// drier, all of it from 0.85 (see ContinentTerrain.Wet). Erosion wears by it too.</summary>
+    public static double Rain(ContinentTerrain terrain, float x, float z)
+    {
+        double w = Math.Clamp((terrain.Wet(x, z) - 0.3) / 0.55, 0, 1);
+        return w * w * (3 - 2 * w);
+    }
+
     private Field Build((int X, int Z) landmass)
     {
         var clock = Stopwatch.StartNew();
@@ -68,7 +76,7 @@ public sealed class Hydrology
         var terrain = ContinentTerrain.For(_seed);
         var flood = new Flood(land, unchecked((int)_seed))
         {
-            Rain = (x, z) => { double w = Math.Clamp((terrain.Wet(x, z) - 0.3) / 0.55, 0, 1); return w * w * (3 - 2 * w); },
+            Rain = (x, z) => Rain(terrain, x, z),
         };
         flood.Run();
 
