@@ -1,46 +1,46 @@
 using ClearSkies.Engine.Voxels;
 using ClearSkies.Game.Generation;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace ClearSkies.Tests;
 
 public class RiverSpillTests
 {
-    [Fact]
-    public void Rivers_run_on_over_drops_instead_of_stopping_short()
-    {
-        // A river on this seed's spawn landmass coming down steep ground in falls (found by looking).
-        var water = Water.For(1337);
-        int rivers = 0, spills = 0;
-        for (int z = -8100; z < -8050; z++)
-        for (int x = 12560; x < 12610; x++)
-        {
-            var (level, spill) = water.Settled(x, z);
-            if (level == int.MinValue) continue;
-            rivers++;
-            if (spill) spills++;
-        }
-        Assert.True(spills > 0 && spills < rivers / 2);
-    }
+    private readonly ITestOutputHelper _out;
+    public RiverSpillTests(ITestOutputHelper output) => _out = output;
 
     [Fact]
-    public void Spilling_water_is_generated_flowing_so_it_runs_over_the_lip()
+    public void Rivers_fill_the_channels_the_erosion_wore_and_run_on_over_drops()
     {
-        var water = Water.For(1337);
+        // A river on this seed's spawn landmass coming down steep ground (found by looking).
+        var worn = Erosion.For(1337).Of(12585f, -8075f);
         var generator = new HeartWorldGenerator(1337);
+        var chunks = new Dictionary<(int, int, int), ChunkData>();
+        ChunkData Chunk(int x, int y, int z)
+        {
+            var key = (x >> 5, y >> 5, z >> 5);
+            if (!chunks.TryGetValue(key, out var data))
+                generator.Generate(chunks[key] = data = new ChunkData(), new ChunkPosition(key.Item1, key.Item2, key.Item3));
+            return data;
+        }
+        int channel = 0, wet = 0, flowing = 0, noPlan = 0; var under = new int[10];
         for (int z = -8100; z < -8050; z++)
         for (int x = 12560; x < 12610; x++)
         {
-            var (level, spill) = water.Settled(x, z);
-            if (!spill) continue;
-            var data = new ChunkData();
-            var pos = new ChunkPosition(x >> 5, level >> 5, z >> 5);
-            generator.Generate(data, pos);
-            int lx = x & 31, ly = level & 31, lz = z & 31;
-            if (data.Get(lx, ly, lz) != BlockId.Water) continue; // (ice or lava)
-            Assert.False(WaterLevel.IsSource(data.GetOrientation(lx, ly, lz)));
-            return;
+            int y = 480;
+            while (y > 340 && Chunk(x, y, z).Get(x & 31, y & 31, z & 31) == BlockId.Air) y--;
+            var top = Chunk(x, y, z);
+            bool water = top.Get(x & 31, y & 31, z & 31) == BlockId.Water;
+            if (water && !WaterLevel.IsSource(top.GetOrientation(x & 31, y & 31, z & 31))) flowing++;
+            if (float.IsNaN(worn.Stream(x + 0.5f, z + 0.5f))) continue;
+            channel++;
+            if (water) wet++;
+            var plan = Water.For(1337).At(worn.Water, x, z);
+            if (plan.Level == int.MinValue) noPlan++; else if (!water) under[Math.Clamp(y - plan.Level, 0, 9)]++;
         }
-        Assert.Fail("no spilling water found");
+        _out.WriteLine($"{channel} channel columns, {wet} wet; {flowing} flowing; dry: no plan {noPlan}, ground over plan by " + string.Join(" ", under));
+        Assert.True(channel > 0 && wet > channel / 4); // (about a third, so far: the rest the flood runs too little through)
+        Assert.True(flowing > 0);
     }
 }

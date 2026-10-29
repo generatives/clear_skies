@@ -66,7 +66,6 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     private const int LavaGlowOdds = 40;
 
     /// <summary>About how far (blocks) a lake's sandy shore reaches from the middle of its sample cells (see Water).</summary>
-    private const float ShoreReach = 3.5f;
 
     /// <summary>Where noise is under this (-1 to 1) a tundra lake is open water, not ice.</summary>
     private const float IceOpen = -0.25f;
@@ -135,7 +134,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     private readonly byte[] _spanCount = new byte[S * S];
     private readonly float[] _height = new float[S * S];
     private readonly float[] _shift = new float[S * S];     // how far erosion moves its piece's top
-    private readonly int[] _lake = new int[S * S];          // the level of a lake planned here or beside, or int.MinValue
+    private readonly WaterColumn[] _planned = new WaterColumn[S * S]; // the water planned over each column
     private readonly float[] _bottomAt = new float[S * S];
 
     // The hearts around the chunk column being profiled, per layer: cells from (_cx0, _cy0, _cz0), _nx by _ny by _nz of
@@ -294,12 +293,9 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             float height = _terrain.Height(wx, wz, out float broad);
             _height[col] = MathF.Min(height, HeartGrid.WorldTop - 1);
             _shift[col] = worn?.Shift(wx, wz, height - broad) ?? 0f;
-            var water = _water.At((int)wx, (int)wz);
-            (p.Level[col], p.Spills[col]) = _water.Settled((int)wx, (int)wz);
-            _lake[col] = water.River ? int.MinValue : water.Level;
-            // A lake's shore reaches a ragged ShoreReach from its sample cells, not their square outline; a river's
-            // banks stay as they are.
-            p.Shore[col] = !water.River && water.Off < ShoreReach * (0.6f + 0.4f * (_crack.GetNoise(wx * 3f, wz * 3f) + 1f));
+            _planned[col] = worn is null ? WaterColumn.None : _water.At(worn.Water, (int)wx, (int)wz);
+            p.Level[col] = int.MinValue; // (laid out once the spans are, below)
+            p.Shore[col] = p.Spills[col] = false;
             _bottomAt[col] = HeartGrid.LowestBottom + BottomRoughness * (0.5f + 0.5f * _bottom.GetNoise(wx, wz));
             top = MathF.Max(top, _height[col]);
         }
@@ -374,16 +370,49 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             }
         }
 
-        // Water stands as it settled (see WaterSettle); a lake's shore is sandy
-        // round it.
+        // Water fills each column up to where it's planned over it, where the ground is under that (see Water); a
+        // lake's shore just over its level is sandy. Water over lower dry ground beside it, or over water more than a
+        // step lower, runs on over it.
         for (int col = 0; col < S * S; col++)
         {
-            int spans = p.Count(col);
-            if (spans == 0) continue;
-            ref var topSpan = ref p.Spans[p.Start[col] + spans - 1];
-            if (p.Level[col] == int.MinValue && _lake[col] != int.MinValue) p.Level[col] = System.Math.Min(_lake[col], topSpan.Hi);
+            int spans = p.Count(col), level = _planned[col].Level;
+            if (spans == 0 || level == int.MinValue) continue;
+            int hi = p.Spans[p.Start[col] + spans - 1].Hi;
+            if (hi < level) p.Level[col] = level;
+            else if (_planned[col].Lake && hi <= level + ShoreRise) { p.Level[col] = hi; p.Shore[col] = true; }
+        }
+        for (int lz = 0; lz < S; lz++)
+        for (int lx = 0; lx < S; lx++)
+        {
+            int col = lx + S * lz, level = p.Level[col];
+            if (level == int.MinValue || p.Shore[col]) continue;
+            foreach (var (dx, dz) in Beside)
+            {
+                int nx = lx + dx, nz = lz + dz;
+                bool dryUnder;
+                if (nx >= 0 && nz >= 0 && nx < S && nz < S)
+                {
+                    int n = nx + S * nz, ns = p.Count(n);
+                    bool dry = p.Level[n] == int.MinValue || p.Shore[n];
+                    dryUnder = dry ? ns == 0 || p.Spans[p.Start[n] + ns - 1].Hi < level : p.Level[n] < level - 1;
+                }
+                else
+                {
+                    // (Past this chunk column: its ground and water as that one's will be.)
+                    int x = (int)x0 + nx, z = (int)z0 + nz;
+                    int? ground = Top(x, z);
+                    var there = worn is null ? WaterColumn.None : _water.At(worn.Water, x, z);
+                    dryUnder = ground is not int g || g < level && !(there.Level > g && there.Level >= level - 1);
+                }
+                if (dryUnder) { p.Spills[col] = true; break; }
+            }
         }
     }
+
+    private static readonly (int, int)[] Beside = { (1, 0), (-1, 0), (0, 1), (0, -1) };
+
+    /// <summary>How far over a lake's level its sandy shore reaches.</summary>
+    private const int ShoreRise = 2;
 
     /// <summary>Whether block y of a column (wobbled to (px, pz), lifted by lift) is solid, and how many blocks up from
     /// it nothing can change.</summary>

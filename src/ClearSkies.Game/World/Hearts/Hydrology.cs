@@ -32,6 +32,7 @@ public static class Hydrology
         public readonly float[] Lake, Flow, Spill;
         public readonly int[] Down;
         public readonly int[] Order;
+        public readonly long[] Piece; // which piece each column's top is in
 
         /// <summary>How many columns hold a lake.</summary>
         public int LakeColumns { get; }
@@ -40,6 +41,7 @@ public static class Hydrology
         internal Field(CoarseLand land, Flood flood)
         {
             X0 = land.X0; Z0 = land.Z0; Nx = land.Nx; Nz = land.Nz;
+            Piece = land.Piece;
             int n = Nx * Nz;
             Lake = new float[n]; Flow = new float[n]; Spill = new float[n]; Down = new int[n];
             Array.Fill(Lake, float.NaN); Array.Fill(Down, -1);
