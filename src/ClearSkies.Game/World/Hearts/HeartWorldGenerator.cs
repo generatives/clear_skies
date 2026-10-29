@@ -199,7 +199,9 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                     {
                         var b = y < level ? liquid : iced ? BlockId.Ice
                               : liquid == BlockId.Lava && Trees.Hash(x, y, z, _seed ^ 0x1A7A) % LavaGlowOdds == 0 ? BlockId.GlowingLava : liquid;
-                        data.Set(lx, y - originY, lz, b);
+                        // (Spilling over a drop beside it, its top flows, so it runs over the lip and falls.)
+                        if (b == BlockId.Water && y == level && p.Spills[col]) data.Set(lx, y - originY, lz, b, WaterLevel.Flowing(1));
+                        else data.Set(lx, y - originY, lz, b);
                     }
                     if (level > hi) continue; // nothing grows under water
                     if (oasis) ground = BlockId.Grass;
@@ -293,7 +295,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             _height[col] = MathF.Min(height, HeartGrid.WorldTop - 1);
             _shift[col] = worn?.Shift(wx, wz, height - broad) ?? 0f;
             var water = _water.At((int)wx, (int)wz);
-            p.Level[col] = _water.Settled((int)wx, (int)wz);
+            (p.Level[col], p.Spills[col]) = _water.Settled((int)wx, (int)wz);
             _lake[col] = water.River ? int.MinValue : water.Level;
             // A lake's shore reaches a ragged ShoreReach from its sample cells, not their square outline; a river's
             // banks stay as they are.
@@ -748,10 +750,10 @@ public sealed class ColumnProfile
     public Biome[] Biome = Array.Empty<Biome>();
     public readonly float[] Strata = new float[Columns], Patch = new float[Columns], Flora = new float[Columns],
                             Woods = new float[Columns], Kind = new float[Columns];
-    /// <summary>Per block column: the level of water here (a lake here or beside, or a river), or int.MinValue; and
-    /// whether a dry column by a lake is its sandy shore.</summary>
+    /// <summary>Per block column: the level of water here (a lake here or beside, or a river), or int.MinValue;
+    /// whether a dry column by a lake is its sandy shore; and whether its water spills over a drop beside it.</summary>
     public readonly int[] Level = new int[Columns];
-    public readonly bool[] Shore = new bool[Columns];
+    public readonly bool[] Shore = new bool[Columns], Spills = new bool[Columns];
 
     public int Count(int col) => Start[col + 1] - Start[col];
 

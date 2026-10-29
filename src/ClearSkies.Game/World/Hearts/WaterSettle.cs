@@ -10,6 +10,8 @@ namespace ClearSkies.Game.Generation;
 /// into small gaps beside it, stands no higher than the dry ground round it (so it never stands against air), and a
 /// lake, or a stretch of river at one level, comes down whole to its lowest edge. Where a river would dip under the
 /// water either side of it, or come into a lake under the lake's level, it rises as far as the ground round it lets it.
+/// Where a river comes to a drop (its piece's edge, a hole, a cliff), it doesn't stop short: it runs to the lip and
+/// spills over it (that water flows, see WaterFlow, falling from there).
 /// </summary>
 internal sealed class WaterSettle
 {
@@ -36,10 +38,12 @@ internal sealed class WaterSettle
     /// <summary>At most this many rounds of coming down and rising (it settles in a few).</summary>
     private const int MaxRounds = 20;
 
-    /// <summary>One tile's settled water: per column its level (int.MinValue for none).</summary>
+    /// <summary>One tile's settled water: per column its level (int.MinValue for none), and whether it spills over a
+    /// drop beside it.</summary>
     private sealed class Settled
     {
         public readonly short[] Level = new short[Tile * Tile];
+        public readonly bool[] Spills = new bool[Tile * Tile];
     }
 
     private static readonly Settled Empty = new();
@@ -61,13 +65,15 @@ internal sealed class WaterSettle
         _generator = new ThreadLocal<HeartWorldGenerator>(() => new HeartWorldGenerator(_seed));
     }
 
-    /// <summary>The water's level at column (x, z), or int.MinValue for none.</summary>
-    public int At(int x, int z)
+    /// <summary>The water's level at column (x, z), or int.MinValue for none; and whether it spills over a drop beside
+    /// it.</summary>
+    public (int Level, bool Spills) At(int x, int z)
     {
         int tx = FloorDiv(x, Tile), tz = FloorDiv(z, Tile);
         var tile = _tiles.GetOrAdd(((long)tx << 32) ^ (uint)tz, static (_, a) => a.Settle.Build(a.X, a.Z), (Settle: this, X: tx, Z: tz));
-        short level = tile.Level[x - tx * Tile + Tile * (z - tz * Tile)];
-        return level == short.MinValue ? int.MinValue : level;
+        int i = x - tx * Tile + Tile * (z - tz * Tile);
+        short level = tile.Level[i];
+        return (level == short.MinValue ? int.MinValue : level, tile.Spills[i]);
     }
 
     // A tile's working arrays, a column each of the tile and its margin (on the large object heap, where dropping them
@@ -142,12 +148,14 @@ internal sealed class WaterSettle
 
         var fromLake = Distance(c => kind[c] == Planned && !river[c], MouthReach);
         var raised = Rent(Bools); // (risen as below: no longer level with the rest of its stretch)
+        var spills = Rent(Bools); // (a river at a drop: it spills over)
         for (int round = 0, settling = 1; settling == 1 && round < MaxRounds; round++)
         {
             settling = 0;
             // It stands no higher than the dry ground beside it: water lower than that comes down to it (and a lake,
             // or a stretch of river at about one level, comes down with it, no more than the block it was planned
-            // over its neighbour); over a drop, it ends; spread into a gap that doesn't hold it, it drains back out.
+            // over its neighbour); at a drop a river spills over, anything else ends; spread into a gap that doesn't
+            // hold it, it drains back out.
             for (bool changed = true; changed;)
             {
                 changed = false;
@@ -155,21 +163,24 @@ internal sealed class WaterSettle
                 {
                     if (kind[c] == Dry) continue;
                     int w = level[c];
-                    bool ends = false;
+                    bool ends = false, spill = false;
+                    bool runs = river[c] && kind[c] == Planned;
                     foreach (int n in Neighbours(c))
                     {
                         if (kind[n] != Dry)
                         {
                             if (kind[c] == Planned && kind[n] == Planned && Math.Abs(plan[n] - plan[c]) <= 1 && !raised[c] && !raised[n])
                                 w = Math.Min(w, level[n] + Math.Max(0, plan[c] - plan[n]));
-                            // (A river standing more than FallMost over the water beside it would be a wall of water:
-                            // it ends there, as over a drop.)
+                            // (A river standing more than FallMost over the water beside it spills down to it, as over
+                            // a drop.)
+                            if (runs && level[c] - level[n] > FallMost) { spill = true; continue; }
                             // (And water spread into a gap drains into lower water beside it.)
                             if ((river[c] && level[c] - level[n] > FallMost) || (kind[c] == Filled && level[n] < level[c])) { ends = true; break; }
                             continue;
                         }
                         int g = ground[n];
                         if (g == int.MaxValue || g >= w) continue;
+                        if (runs && (g == int.MinValue || g < w - RiverGap)) { spill = true; continue; }
                         if (kind[c] == Filled || g == int.MinValue || g < w - RiverGap) { ends = true; break; }
                         w = g;
                     }
@@ -179,11 +190,13 @@ internal sealed class WaterSettle
                         ends = true;
                         foreach (int n in Neighbours(c)) if (kind[n] != Dry && level[n] >= level[c]) ends = false;
                     }
+                    if (spills[c] != spill) { spills[c] = spill; changed = true; }
                     if (!ends && w == level[c]) continue;
                     if (ends || w <= ground[c])
                     {
                         kind[c] = Dry;
                         level[c] = int.MinValue;
+                        spills[c] = false;
                     }
                     else level[c] = w;
                     changed = true;
@@ -215,11 +228,13 @@ internal sealed class WaterSettle
         {
             int c = i + Margin + N * (k + Margin);
             settled.Level[i + Tile * k] = level[c] == int.MinValue ? short.MinValue : (short)level[c];
+            settled.Spills[i + Tile * k] = spills[c];
         }
         foreach (var a in (Span<int[]>)[plan, near, ground, level, reach, fromLake]) Ints.Return(a);
         Bytes.Return(kind);
         Bools.Return(river);
         Bools.Return(raised);
+        Bools.Return(spills);
         return settled;
 
         // The first water higher than column c's going (dx, dz) from it over water no higher, within DipAcross

@@ -61,8 +61,8 @@ public sealed class Water
     private readonly WaterSettle _settle;
 
     /// <summary>The water's level at column (x, z) once it has settled on the blocks (see <see cref="WaterSettle"/>), or
-    /// int.MinValue for none.</summary>
-    public int Settled(int x, int z) => _settle.At(x, z);
+    /// int.MinValue for none; and whether it spills over a drop beside it (a river running off its land's edge).</summary>
+    public (int Level, bool Spills) Settled(int x, int z) => _settle.At(x, z);
 
     /// <summary>One piece's water, per sample of its window (cells from (X0, Z0), world sample coordinates).</summary>
     private sealed class Piece
