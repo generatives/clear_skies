@@ -114,6 +114,9 @@ public sealed class ChunkPipelineSystem : ISystem, IDebugUiSystem
     private readonly System.Diagnostics.Stopwatch _linesAge = new();
     private const double LinesEveryMs = 250;
 
+    /// <summary>How long a chunk waits on a stage before the panel counts it stuck (seconds).</summary>
+    private const double StuckSeconds = 5;
+
     /// <summary>Each stage's chunks by state, each grid's chunks, and the chunk that's waited its turn longest.</summary>
     public void DrawDebugUi()
     {
@@ -139,8 +142,15 @@ public sealed class ChunkPipelineSystem : ISystem, IDebugUiSystem
         for (int k = 0; k < byGrid.Length; k++)
             if (byGrid[k].Chunks > 0)
                 _lines.Add($"{Pipeline.Grid(k).Name}: {byGrid[k].Chunks:N0} chunks, {byGrid[k].Making:N0} being made");
-        _lines.Add(Pipeline.LongestReady() is var (record, longest, seconds)
-            ? $"Longest ready: {record.Grid.Name} {record.Key.Pos} {longest.Name}, {seconds:F1} s"
-            : "Longest ready: none");
+        var stuck = Pipeline.Stuck(StuckSeconds);
+        int all = stuck.Sum(s => s.Count);
+        _lines.Add(all == 0 ? $"Stuck (over {StuckSeconds:F0} s): none" : $"Stuck (over {StuckSeconds:F0} s): {all:N0}");
+        for (int i = 0; i < stuck.Length; i++)
+            if (stuck[i] is { Count: > 0, Oldest: { } oldest } s)
+            {
+                var stage = Pipeline.Stages[i];
+                _lines.Add($"  {stage.Name}: {s.Count:N0}; longest {oldest.Grid.Name} {oldest.Key.Pos}, {s.Seconds:F0} s, " +
+                           $"waiting on {Pipeline.WaitsOn(oldest, stage)}");
+            }
     }
 }
