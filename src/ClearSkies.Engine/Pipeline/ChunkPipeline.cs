@@ -275,9 +275,8 @@ public sealed class ChunkPipeline
         }
 
         // Everything below is on the main thread, so all of it stops when the frame's time is spent.
-        // Nearest first, each to its worker; one whose worker is full waits its turn (looked past a bounded number of
-        // times a frame, so one busy worker doesn't cost the frame).
-        // Urgent work first, whether or not its worker is full: it goes before what's queued on the workers already.
+        // Nearest first, each to the least busy worker, while one has room.
+        // Urgent work first, whether or not the workers are full: it goes before what's queued on them already.
         while (MainLeft() && _ready[(int)Executor.Worker].TryPeek(out _, out var first) && first.Item1 == Urgent
                && TakeReady(Executor.Worker, out var record, out var stage, out var priority))
         {
