@@ -42,7 +42,8 @@ string outDir = "hydrology-out";
 bool snapshots = false, falls = true, hollows = false, localSteps = false, routing = false, solve = false, pieces = false;
 int last = 8, check = 0, carve = 0, erode = 0;
 float carveFrom = 20f, carveDepth = 2f, carveMost = 8f, carveWidth = 0f, erodeK = 0.02f, erodeBlur = 48f, erodeDetail = 0.3f;
-bool erodeBroad = false, rivers = false;
+bool erodeBroad = false, rivers = false, flood = false;
+double seepSlope = 0.02, evaporation = 2, soak = 0.5;
 float riverFrom = 200f, meander = 40f, lakeChance = 0.15f, marshDepth = 2f, riverDepth = 10f, riverWidth = 4f, bankGrade = 0.15f;
 string? writeChannels = null;
 float[] solveAir = { 0f };
@@ -88,6 +89,10 @@ for (int a = 0; a < args.Length; a++)
         case "--meander": meander = float.Parse(args[++a]); break;
         case "--lake-chance": lakeChance = float.Parse(args[++a]); break;
         case "--river-depth": riverDepth = float.Parse(args[++a]); break;
+        case "--flood": flood = true; break;
+        case "--seep-slope": seepSlope = double.Parse(args[++a]); break;
+        case "--evap": evaporation = double.Parse(args[++a]); break;
+        case "--soak": soak = double.Parse(args[++a]); break;
         case "--river-width": riverWidth = float.Parse(args[++a]); break;
         case "--bank-grade": bankGrade = float.Parse(args[++a]); break;
         case "--new-tau": solveSet.Add(st => st.NewTau = true); break;
@@ -134,6 +139,19 @@ Console.WriteLine($"Bounds x {x0}..{x1}, z {z0}..{z1} ({(x1 - x0) / 1000f:0.0} x
 
 var lift = erode > 0 ? Erode() : null;
 if (pieces) return SolvePieces();
+if (flood)
+{
+    // The settled water under local rules (see Flood), found directly: on the last cell size only.
+    var sampled = Stopwatch.StartNew();
+    var fl = new CoarseLand(seed, landmass, x0, z0, x1, z1, int.MaxValue, last, lift: lift);
+    Console.WriteLine($"{last}-block cells: {fl.Cells:N0} sampled in {sampled.Elapsed.TotalSeconds:0.0} s");
+    var f = new Flood(fl, unchecked((int)seed)) { SeepSlope = seepSlope, Evaporation = evaporation, Soak = soak };
+    f.Run(solveSet.Count > 0 && args.Contains("--separate-pieces"));
+    Directory.CreateDirectory(outDir);
+    f.WriteMap(Path.Combine(outDir, "flood.png"));
+    Console.WriteLine($"Total {total.Elapsed.TotalSeconds:0.0} s");
+    return 0;
+}
 
 // Each cell size in turn, the last 8: each settles from the one before (see Settle.StartFrom).
 CoarseLand land = null!;
