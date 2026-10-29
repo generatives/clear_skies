@@ -367,6 +367,32 @@ public sealed class Water
                 break;
             }
         }
+        // Lakes whose fills meet are one body of water, at one level: the lowest of theirs (the water over it would
+        // run off into it).
+        var body = new List<int>();
+        var joined = new bool[N];
+        for (int c = 0; c < N; c++)
+        {
+            if (piece.Lake[c] == int.MinValue || joined[c]) continue;
+            body.Clear(); queue.Clear();
+            joined[c] = true; queue.Enqueue(c);
+            int lowest = int.MaxValue;
+            while (queue.TryDequeue(out int e))
+            {
+                body.Add(e);
+                lowest = Math.Min(lowest, piece.Lake[e]);
+                int ei = e % Window, ek = e / Window;
+                for (int d = 0; d < 4; d++)
+                {
+                    int ni = ei + (d == 0 ? 1 : d == 1 ? -1 : 0), nk = ek + (d == 2 ? 1 : d == 3 ? -1 : 0);
+                    if (ni < 0 || nk < 0 || ni >= Window || nk >= Window) continue;
+                    int ne = ni + Window * nk;
+                    if (piece.Lake[ne] == int.MinValue || joined[ne]) continue;
+                    joined[ne] = true; queue.Enqueue(ne);
+                }
+            }
+            foreach (int e in body) piece.Lake[e] = lowest;
+        }
 
         // A river runs where enough runs over a cell, through one sample per cell (the one its line runs through: in
         // a channel, the channel's, else the cell's middle), on to the cell its water goes to.

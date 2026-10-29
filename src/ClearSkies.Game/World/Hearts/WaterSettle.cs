@@ -262,6 +262,24 @@ internal sealed class WaterSettle
             ground[c] = Math.Min(ground[c], g);
         }
 
+        // No dry ground left standing a single block wide between ground cut lower either side of it (a river's bed
+        // it dried out of, between stretches of it that didn't): it comes down to the higher side.
+        for (int pass = 0; pass < 2; pass++)
+            for (int k = 1; k < N - 1; k++)
+            for (int i = 1; i < N - 1; i++)
+            {
+                int c = i + N * k;
+                if (kind[c] != Dry || ground[c] == int.MinValue || ground[c] == int.MaxValue) continue;
+                int g = ground[c];
+                foreach (int across in (ReadOnlySpan<int>)[1, N])
+                {
+                    int a = ground[c - across], b = ground[c + across];
+                    if (a == int.MinValue || b == int.MinValue || a == int.MaxValue || b == int.MaxValue) continue;
+                    if (a < top[c - across] && b < top[c + across]) g = Math.Min(g, Math.Max(a, b));
+                }
+                ground[c] = g;
+            }
+
         var settled = new Settled();
         for (int k = 0; k < Tile; k++)
         for (int i = 0; i < Tile; i++)

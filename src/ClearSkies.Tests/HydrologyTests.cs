@@ -20,7 +20,7 @@ public class HydrologyTests
         {
             if (field.Flow[c] > 0f) land++;
             if (field.Flow[c] >= 40f && float.IsNaN(field.Lake[c])) creeks++;
-            if (field.Flow[c] >= 1000f && float.IsNaN(field.Lake[c])) rivers++;
+            if (field.Flow[c] >= 300f && float.IsNaN(field.Lake[c])) rivers++;
         }
         _out.WriteLine($"{field.Nx} x {field.Nz} columns in {worn.Seconds:0.0} s (with erosion): {land} wet, {field.LakeColumns} lake, {creeks} creek, {rivers} river");
         Assert.True(field.LakeColumns > 0);

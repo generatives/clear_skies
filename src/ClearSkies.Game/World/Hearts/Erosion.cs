@@ -38,7 +38,12 @@ public sealed class Erosion
 
     // Scour: where ScourFrom times RiverFrom samples drain over ground flatter than ScourSlope, its floor is cut down by
     // up to Scour blocks a round (twice that for the biggest), to at most ScourMost under where it spills.
-    private const double ScourFrom = 1, ScourSlope = 0.02, Scour = 5, ScourMost = 24;
+    private const double ScourFrom = 1, ScourSlope = 0.02, Scour = 3, ScourMost = 24;
+
+    // A lake's bed scours fully LakeScourDepth blocks under its level (less towards its shores), and every scour is
+    // spread ScourAcross samples either side.
+    private const double LakeScourDepth = 8;
+    private const int ScourAcross = 2;
 
     /// <summary>How much of the land's detail is put back, outside the channels.</summary>
     private const float DetailKept = 0.3f;
@@ -291,15 +296,50 @@ public sealed class Erosion
                 double f = Wear * Math.Sqrt(area[c]) / dist;
                 h[c] = Math.Max((h[c] + f * target) / (1 + f), Math.Min(h[c], under[c] + KeepUnder));
             }
+            // Scour: along the streams where they run gentle, and over a lake's whole bed by what runs out of it (its
+            // water isn't in a line through it), the more the deeper, so the bowl deepens without cutting its shores;
+            // each cut spread across ScourAcross samples, so a stream wears a trough, not a notch.
+            var cut = new double[n];
+            var outflow = new Dictionary<float, double>();
             foreach (int c in settled.Order)
             {
                 int to = recv[c];
+                float lake = settled.Lake[c];
+                if (!float.IsNaN(lake) && (to < 0 || settled.Lake[to] != lake))
+                    outflow[lake] = Math.Max(outflow.GetValueOrDefault(lake), area[c]);
+            }
+            foreach (int c in settled.Order)
+            {
+                int to = recv[c];
+                float lake = settled.Lake[c];
+                if (!float.IsNaN(lake))
+                {
+                    double runs = outflow.GetValueOrDefault(lake);
+                    if (runs >= ScourFrom * RiverFrom)
+                        cut[c] = Scour * Math.Min(Math.Sqrt(runs / (ScourFrom * RiverFrom)), 2) * Math.Clamp((lake - h[c]) / LakeScourDepth, 0, 1);
+                    continue;
+                }
                 if (to < 0 || area[c] < ScourFrom * RiverFrom) continue;
                 double slope = (h[c] - h[to]) / Cell;
                 if (slope >= ScourSlope) continue;
-                double by = Scour * Math.Min(1 - Math.Max(slope, 0) / ScourSlope, 1) * Math.Min(Math.Sqrt(area[c] / (ScourFrom * RiverFrom)), 2);
-                h[c] = Math.Max(h[c] - by, Math.Max(settled.Spill[c] - ScourMost, under[c] + KeepUnder));
+                cut[c] = Scour * Math.Min(1 - Math.Max(slope, 0) / ScourSlope, 1) * Math.Min(Math.Sqrt(area[c] / (ScourFrom * RiverFrom)), 2);
             }
+            var spread = new double[n];
+            for (int c = 0; c < n; c++)
+            {
+                if (!has[c]) continue;
+                int ci = c % nx, ck = c / nx;
+                for (int dk = -ScourAcross; dk <= ScourAcross; dk++)
+                for (int di = -ScourAcross; di <= ScourAcross; di++)
+                {
+                    if (!Joined(c, ci + di, ck + dk)) continue;
+                    double across = Math.Sqrt(di * di + dk * dk) / (ScourAcross + 1);
+                    if (across < 1) spread[c] = Math.Max(spread[c], cut[ci + di + nx * (ck + dk)] * (1 - across * across));
+                }
+            }
+            for (int c = 0; c < n; c++)
+                if (spread[c] > 0)
+                    h[c] = Math.Max(h[c] - spread[c], Math.Min(h[c], Math.Max(settled.Spill[c] - ScourMost, under[c] + KeepUnder)));
         }
 
         // The rivers' channels, where the water runs over the land as worn.
