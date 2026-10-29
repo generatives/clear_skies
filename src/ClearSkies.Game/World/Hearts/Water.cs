@@ -46,11 +46,21 @@ public sealed class Water
         int own = field.ColumnAt(x + 0.5f, z + 0.5f);
         if (own < 0) return WaterColumn.None;
         if (!float.IsNaN(field.Lake[own])) return new((int)MathF.Round(field.Lake[own]) - 1, true);
-        // Between the middles of the four cells round it, of its own cell's piece.
+        int oi = own % field.Nx, ok = own / field.Nx;
+        // A lake in a cell beside it (of its piece) reaches into it where its ground is under the lake (the cells are
+        // coarser than the ground's dips and rises).
+        double lake = double.NaN;
+        for (int dk = -1; dk <= 1; dk++)
+        for (int di = -1; di <= 1; di++)
+        {
+            int c = Beside(field, own, oi + di, ok + dk);
+            if (c >= 0 && !(lake >= field.Lake[c])) lake = field.Lake[c];
+        }
+        // Running water: as low as any of the four cells round it with water stands (of its piece), so it lies level
+        // across its river rather than banking up on the higher cells at its sides.
         float fx = (x + 0.5f - field.X0) / Cell - 0.5f, fz = (z + 0.5f - field.Z0) / Cell - 0.5f;
         int i0 = (int)MathF.Floor(fx), k0 = (int)MathF.Floor(fz);
-        float tx = fx - i0, tz = fz - k0;
-        double sum = 0, weights = 0;
+        double runs = double.NaN;
         for (int dk = 0; dk <= 1; dk++)
         for (int di = 0; di <= 1; di++)
         {
@@ -59,11 +69,18 @@ public sealed class Water
             int c = i + field.Nx * k;
             if (field.Piece[c] != field.Piece[own]) continue;
             double s = Surface(field, c);
-            if (double.IsNaN(s)) continue;
-            double w = (di == 0 ? 1 - tx : tx) * (dk == 0 ? 1 - tz : tz);
-            sum += w * s; weights += w;
+            if (!double.IsNaN(s)) runs = double.IsNaN(runs) ? s : Math.Min(runs, s);
         }
-        return weights <= 0 ? WaterColumn.None : new((int)Math.Round(sum / weights) - 1, false);
+        if (!double.IsNaN(lake) && !(runs > lake)) return new((int)Math.Round(lake) - 1, true);
+        return double.IsNaN(runs) ? WaterColumn.None : new((int)Math.Round(runs) - 1, false);
+    }
+
+    /// <summary>Cell (i, k) if it holds a lake and is of cell own's piece, else -1.</summary>
+    private static int Beside(Hydrology.Field field, int own, int i, int k)
+    {
+        if (i < 0 || k < 0 || i >= field.Nx || k >= field.Nz) return -1;
+        int c = i + field.Nx * k;
+        return field.Piece[c] == field.Piece[own] && !float.IsNaN(field.Lake[c]) ? c : -1;
     }
 
     /// <summary>The water's surface over cell c (world Y, blocks' tops), or NaN where none stands or runs.</summary>
