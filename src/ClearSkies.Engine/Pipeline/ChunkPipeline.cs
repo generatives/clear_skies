@@ -265,6 +265,7 @@ public sealed class ChunkPipeline
             {
                 made.Record.At(made.Stage.Id).Set(SlotFlags.Running, false);
                 Release(made.Stage, made.Made);
+                _maybeDrop.Add(made.Record); // let go of while this ran: dropped now
                 continue;
             }
             long t = Stopwatch.GetTimestamp();
