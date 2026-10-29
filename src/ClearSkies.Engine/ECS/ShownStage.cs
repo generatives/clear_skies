@@ -90,26 +90,34 @@ public sealed class ShownStage(ChunkPipeline pipeline, Time time, Stage ready, C
         var entry = showing.Entry = pipeline.EntryOf(record.Key);
         bool wasOver = showing.Over, wasBelow = showing.HidesBelow;
         double again = record.Grid.Finer is { } finer && entry != null ? Swap(record, showing, finer, first, now) : 0;
-        showing.Hidden = over is { HidesBelow: true };
-        if (showing.HidesBelow != wasBelow) showing.BelowAt = showing.Over != wasOver ? showing.SwappedAt : over?.BelowAt ?? now;
+        Show(record.Grid, showing, over, wasBelow, showing.Over != wasOver, now);
 
-        if (entry != null)
-        {
-            bool visible = !showing.Hidden && (record.Grid.Finer == null || showing.Over);
-            // From when what's over it swapped, while that's still fading, so the two dissolve into each other.
-            double at = over != null && now - over.BelowAt < FadeSeconds ? over.BelowAt : now;
-            var e = entry.Entity;
-            if (!e.Has<Shown>()) e.Set(new Shown { Visible = visible, At = visible ? at : double.NegativeInfinity });
-            else if (e.Get<Shown>().Visible != visible) e.Set(new Shown { Visible = visible, At = at });
-        }
-
-        // What's read of it (whether it's there, drawn over the chunks under it, or hides them) changed: they look again,
-        // ahead of everything else for a swap, so they dissolve with it rather than when their turn comes (seconds later,
-        // far out, while loading): a gap, or both drawn at once.
         var result = first ? StageResult.Done(showing)
-                   : showing.Over != wasOver || showing.HidesBelow != wasBelow ? StageResult.Done(showing, Change.All with { Urgent = true })
+                   : showing.Over != wasOver || showing.HidesBelow != wasBelow ? StageResult.Done(showing)
                    : StageResult.Same(showing);
         return again > 0 ? result.AskAgainIn(again) : result;
+    }
+
+    /// <summary>Sets whether a chunk is seen, from the chunk over it (<paramref name="over"/>); then, if whether it hides
+    /// the chunks under it changed (<paramref name="wasBelow"/>), theirs, all the way down, at once: a swap dissolves
+    /// both levels from the same frame. (Left to their own turns, which can be frames later while loading, both would
+    /// be drawn whole for a while, z-fighting, or neither, a gap.)</summary>
+    private void Show(PipelineGrid grid, Showing showing, Showing? over, bool wasBelow, bool swapped, double now)
+    {
+        showing.Hidden = over is { HidesBelow: true };
+        if (showing.HidesBelow != wasBelow) showing.BelowAt = swapped ? showing.SwappedAt : over?.BelowAt ?? now;
+        if (showing.Entry?.Entity is not { IsAlive: true } e) return; // air: never drawn, and hides nothing (see Over)
+        bool visible = !showing.Hidden && (grid.Finer == null || showing.Over);
+        // From when what's over it swapped, while that's still fading, so the two dissolve into each other.
+        double at = over != null && now - over.BelowAt < FadeSeconds ? over.BelowAt : now;
+        if (!e.Has<Shown>()) e.Set(new Shown { Visible = visible, At = visible ? at : double.NegativeInfinity });
+        else if (e.Get<Shown>().Visible != visible) e.Set(new Shown { Visible = visible, At = at });
+
+        if (showing.HidesBelow == wasBelow || grid.Finer is not { } finer) return;
+        for (int j = 0; j < 8; j++)
+            if (pipeline.Get(finer.Key(Relation.Child(showing.Key.Pos, j))) is { Wanted: true } child
+                && child.Output<Showing>(this) is { } under)
+                Show(finer, under, showing, under.HidesBelow, false, now);
     }
 
     /// <summary>Whether a coarse chunk is drawn over the eight under it (rather than them); false before it's shown.</summary>
