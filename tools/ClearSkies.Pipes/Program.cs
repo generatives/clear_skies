@@ -67,6 +67,7 @@ for (int a = 0; a < args.Length; a++)
         case "--ease": { var v = float.Parse(args[++a]); settings.Add(p => p.Ease = v); break; }
         case "--scour": { var v = float.Parse(args[++a]); settings.Add(p => p.Scour = v); break; }
         case "--focus": { var v = float.Parse(args[++a]); settings.Add(p => p.Focus = v); break; }
+        case "--incise": { var v = float.Parse(args[++a]); settings.Add(p => p.Incise = v); break; }
         case "--creep": { var v = float.Parse(args[++a]); settings.Add(p => p.Creep = v); break; }
         case "--speedup": { var v = float.Parse(args[++a]); settings.Add(p => p.Speedup = v); break; }
         case "--rain": { var v = float.Parse(args[++a]); settings.Add(p => p.Rain = v); break; }

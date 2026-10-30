@@ -62,6 +62,11 @@ public sealed partial class Pipes
         return Math.Max(Math.Min(floor, land.Base[n] + MinThickness), floor - wear);
     }
 
+    /// <summary>Running water cuts its bed by Incise × √(what runs through it, blocks³ a second) × its slope, blocks a
+    /// second (stream power), slowing as it's worn deeper (see Hardening). Like scour, what it cuts is gone. Small
+    /// streams on slopes cut small valleys, which gather their water: networks of creeks.</summary>
+    public float Incise = 0f;
+
     /// <summary>Water carries (so wears) more where its neighbours' water runs the same way: up to 1 + Focus times as much where
     /// every neighbour agrees (see Agreement). So the middle of a sheet of running water cuts down more than its edges,
     /// and the water gathers into the cut: sheets turn into channels.</summary>
@@ -185,7 +190,8 @@ public sealed partial class Pipes
                     continue;
                 }
                 float speed = through / (2 * _width * h); // through a column's width each way
-                slope = Math.Max(FlattestCut, slope / through);
+                float surface = slope / through; // the water's own slope, for incision
+                slope = Math.Max(FlattestCut, surface);
                 float can = Carry * speed * slope * h * _area;
                 if (Focus > 0f) can *= 1f + Focus * _agree![n];
                 if (can > s)
@@ -204,6 +210,12 @@ public sealed partial class Pipes
                     slid[n] = Math.Min(land.Ceiling[n] - 1f, land.Floor[n] + speedup * put / _area);
                 }
                 next[n] = s;
+                if (Incise > 0f)
+                {
+                    float worn = Math.Max(0f, startFloor[n] - slid[n]);
+                    float cut = Incise * MathF.Sqrt(through) * surface * dt * ease / (1 + worn / Hardening);
+                    slid[n] = Math.Max(Math.Min(slid[n], land.Base[n] + MinThickness), slid[n] - cut);
+                }
                 slid[n] = Scoured(n, h, slid[n], dt * ease);
             }
         });
