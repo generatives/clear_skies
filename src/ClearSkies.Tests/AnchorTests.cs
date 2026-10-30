@@ -411,19 +411,17 @@ public class AnchorTests
             using (var game = new LoopbackGame(save: SaveDatabase.Open(path)))
             {
                 game.Join("crew", wait: false);
+                // Loading waits on the ships' bodies, made on workers.
+                Assert.True(game.TickUntil(() => game.Host.Registry.Find(dinghyId) is not null, 300, minSeconds: 10), "never loaded");
                 float worst = 0f;
-                bool both = false;
                 for (int i = 0; i < 300; i++)
                 {
-                    game.Tick();
                     var carrier = game.Host.Registry.Find(carrierId);
-                    var dinghy = game.Host.Registry.Find(dinghyId);
-                    if (dinghy is null) continue;
+                    var dinghy = game.Host.Registry.Find(dinghyId)!.Value;
                     Assert.NotNull(carrier); // never aboard nothing
-                    both = true;
-                    worst = MathF.Max(worst, Vector3.Distance(On(dinghy.Value, carrier!.Value), new Vector3(3, 1, 3)));
+                    worst = MathF.Max(worst, Vector3.Distance(On(dinghy, carrier!.Value), new Vector3(3, 1, 3)));
+                    game.Tick();
                 }
-                Assert.True(both, "never loaded");
                 var back = game.Host.Registry.Find(dinghyId)!.Value;
                 Assert.True(Anchored(back));
                 Assert.Equal((true, false), game.Host.Anchors.HoldOn(back, carrierId));
