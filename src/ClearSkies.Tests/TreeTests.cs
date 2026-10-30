@@ -65,40 +65,41 @@ public class TreeTests
     }
 
     [Fact]
-    public void Lakes_and_rivers_rest_on_the_ground_and_stay_in_their_banks()
+    public void Water_rests_on_the_ground_and_never_stands_against_air_but_runs_on()
     {
-        var water = Water.For(1337);
         var generator = new HeartWorldGenerator(1337);
         var chunks = new Dictionary<(int, int, int), ChunkData>();
-        BlockId At(int x, int y, int z)
+        ChunkData Chunk(int x, int y, int z)
         {
             var key = (x >> 5, y >> 5, z >> 5);
             if (!chunks.TryGetValue(key, out var data))
                 generator.Generate(chunks[key] = data = new ChunkData(), new ChunkPosition(key.Item1, key.Item2, key.Item3));
-            return data.Get(x & 31, y & 31, z & 31);
+            return data;
         }
+        BlockId At(int x, int y, int z) => Chunk(x, y, z).Get(x & 31, y & 31, z & 31);
+        bool Source(int x, int y, int z) => WaterLevel.IsSource(Chunk(x, y, z).GetOrientation(x & 31, y & 31, z & 31));
         static bool Wet(BlockId b) => b is BlockId.Water or BlockId.Ice or BlockId.Lava or BlockId.GlowingLava;
 
-        // A lake with a river out of it, in a wet part of this seed's spawn continent.
-        int lakes = 0, rivers = 0;
-        for (int z = -5856; z < -5728; z++)
-        for (int x = 9456; x < 9584; x++)
+        // Lakes and rivers in a wet part of this seed's spawn continent.
+        int wet = 0;
+        for (int z = -5792; z < -5664; z++)
+        for (int x = 9440; x < 9568; x++)
         {
-            var w = water.At(x, z);
-            if (w.Level == int.MinValue) continue;
-            int y = w.Level; // (a river may stand lower, under its banks)
-            while (y > w.Level - 12 && !Wet(At(x, y, z))) y--;
+            int y = 560;
+            while (y > 300 && At(x, y, z) == BlockId.Air) y--;
             if (!Wet(At(x, y, z))) continue;
-            if (w.RiverDepth > 0) rivers++; else lakes++;
+            wet++;
             int bed = y;
             while (Wet(At(x, bed, z))) bed--;
             Assert.NotEqual(BlockId.Air, At(x, bed, z)); // on the ground, not hanging in the air
-            // No water stands against air beside it, except over more water a step down a river.
+            // No still water stands against air beside it, except over more water a step down; water that does flows
+            // (WaterFlow runs it on).
+            if (At(x, y, z) == BlockId.Water && !Source(x, y, z)) continue;
             foreach (var (nx, nz) in new[] { (x + 1, z), (x - 1, z), (x, z + 1), (x, z - 1) })
             for (int yy = bed + 1; yy <= y; yy++)
                 Assert.True(At(nx, yy, nz) != BlockId.Air || Enumerable.Range(0, 12).Any(d => Wet(At(nx, yy - d, nz))));
         }
-        Assert.True(lakes > 0 && rivers > 0);
+        Assert.True(wet > 0);
     }
 
     [Fact]
