@@ -370,16 +370,33 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             }
         }
 
-        // Water fills each column up to where it's planned over it, where the ground is under that (see Water); the
-        // shore just over it is sandy. Water over lower dry ground beside it, or over water more than a
-        // step lower, runs on over it.
+        // Water fills each column up to where it's planned over it, where the ground is under that (see Water); ground
+        // beside water and less than ShoreRise over it is its sandy shore. Water over lower dry ground beside it, or over
+        // lower water, runs on over it.
         for (int col = 0; col < S * S; col++)
         {
             int spans = p.Count(col), level = _planned[col].Level;
-            if (spans == 0 || level == int.MinValue) continue;
+            if (spans > 0 && level != int.MinValue && p.Spans[p.Start[col] + spans - 1].Hi < level) p.Level[col] = level;
+        }
+        for (int lz = 0; lz < S; lz++)
+        for (int lx = 0; lx < S; lx++)
+        {
+            int col = lx + S * lz, spans = p.Count(col), level = _planned[col].Level;
+            if (spans == 0 || level == int.MinValue || p.Level[col] != int.MinValue) continue;
             int hi = p.Spans[p.Start[col] + spans - 1].Hi;
-            if (hi < level) p.Level[col] = level;
-            else if (hi <= level + ShoreRise) { p.Level[col] = hi; p.Shore[col] = true; }
+            if (hi > level + ShoreRise) continue;
+            foreach (var (dx, dz) in Beside)
+            {
+                int nx = lx + dx, nz = lz + dz;
+                bool water;
+                if (nx >= 0 && nz >= 0 && nx < S && nz < S) water = p.Level[nx + S * nz] != int.MinValue && !p.Shore[nx + S * nz];
+                else
+                {
+                    int x = (int)x0 + nx, z = (int)z0 + nz;
+                    water = worn is not null && Top(x, z) is int g && _water.At(worn.Water, x, z).Level > g;
+                }
+                if (water) { p.Level[col] = hi; p.Shore[col] = true; break; }
+            }
         }
         for (int lz = 0; lz < S; lz++)
         for (int lx = 0; lx < S; lx++)
@@ -394,7 +411,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 {
                     int n = nx + S * nz, ns = p.Count(n);
                     bool dry = p.Level[n] == int.MinValue || p.Shore[n];
-                    dryUnder = dry ? ns == 0 || p.Spans[p.Start[n] + ns - 1].Hi < level : p.Level[n] < level - 1;
+                    dryUnder = dry ? ns == 0 || p.Spans[p.Start[n] + ns - 1].Hi < level : p.Level[n] < level;
                 }
                 else
                 {
@@ -402,7 +419,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                     int x = (int)x0 + nx, z = (int)z0 + nz;
                     int? ground = Top(x, z);
                     var there = worn is null ? WaterColumn.None : _water.At(worn.Water, x, z);
-                    dryUnder = ground is not int g || g < level && !(there.Level > g && there.Level >= level - 1);
+                    dryUnder = ground is not int g || g < level && !(there.Level > g && there.Level >= level);
                 }
                 if (dryUnder) { p.Spills[col] = true; break; }
             }
@@ -411,7 +428,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
 
     private static readonly (int, int)[] Beside = { (1, 0), (-1, 0), (0, 1), (0, -1) };
 
-    /// <summary>How far over the water's level its sandy shore reaches.</summary>
+    /// <summary>How far over the water beside it its sandy shore reaches.</summary>
     private const int ShoreRise = 2;
 
     /// <summary>Whether block y of a column (wobbled to (px, pz), lifted by lift) is solid, and how many blocks up from

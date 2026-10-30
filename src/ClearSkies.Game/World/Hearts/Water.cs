@@ -13,10 +13,12 @@ public readonly record struct WaterColumn(int Level)
 /// <summary>
 /// Where water stands, read off the landmass's cells (see <see cref="Hydrology"/>: the flood settles it per cell over
 /// the land as <see cref="Erosion"/> wore it, each cell with one water surface, its ground where it's dry). A block
-/// column's water surface is blended between the four cells round it (of its piece), but no higher than the highest
-/// water among them. The generator fills it with water where the ground is under
-/// that, and lets it run on where it would still stand over lower dry ground. Nothing here cuts the land, and nothing
-/// is told apart: lakes and rivers are just where the cells' water stands over their ground.
+/// column is read from where <see cref="Erosion.Warped"/> moves it (as the land's wear is), from the four cells round
+/// that (of its piece): its water surface is the blend of theirs (a dry cell's at its ground, so water rises in a
+/// channel between higher banks), but no lower than the blend of just the wet ones' (so ground lower than standing water
+/// beside it doesn't drag it down) and no higher than the highest of them. The generator fills it with water where the
+/// ground is under that, and lets it run on where it would still stand over lower dry ground. Nothing here cuts the
+/// land, and nothing is told apart: lakes and rivers are just where the cells' water stands over their ground.
 /// </summary>
 public sealed class Water
 {
@@ -35,12 +37,13 @@ public sealed class Water
     /// <summary>The water over column (x, z) of the landmass whose water is <paramref name="field"/>.</summary>
     public WaterColumn At(Hydrology.Field field, int x, int z)
     {
-        int own = field.ColumnAt(x + 0.5f, z + 0.5f);
+        var (wx, wz) = Erosion.Warped(x + 0.5f, z + 0.5f);
+        int own = field.ColumnAt(wx, wz);
         if (own < 0) return WaterColumn.None;
-        float fx = (x + 0.5f - field.X0) / Cell - 0.5f, fz = (z + 0.5f - field.Z0) / Cell - 0.5f;
+        float fx = (wx - field.X0) / Cell - 0.5f, fz = (wz - field.Z0) / Cell - 0.5f;
         int i0 = (int)MathF.Floor(fx), k0 = (int)MathF.Floor(fz);
         float tx = fx - i0, tz = fz - k0;
-        double sum = 0, weights = 0, highest = double.NegativeInfinity;
+        double all = 0, allWeights = 0, wet = 0, wetWeights = 0, highest = double.NegativeInfinity;
         for (int dk = 0; dk <= 1; dk++)
         for (int di = 0; di <= 1; di++)
         {
@@ -49,11 +52,14 @@ public sealed class Water
             int c = i + field.Nx * k;
             float s = field.Surface[c];
             if (field.Piece[c] != field.Piece[own] || float.IsNaN(s)) continue;
-            if (s > field.Ground[c]) highest = Math.Max(highest, s);
             double w = (di == 0 ? 1 - tx : tx) * (dk == 0 ? 1 - tz : tz);
-            sum += w * s; weights += w;
+            all += w * s; allWeights += w;
+            if (!(s > field.Ground[c])) continue;
+            wet += w * s; wetWeights += w;
+            highest = Math.Max(highest, s);
         }
-        return double.IsNegativeInfinity(highest) ? WaterColumn.None : new((int)Math.Round(Math.Min(sum / weights, highest)) - 1);
+        if (wetWeights == 0) return WaterColumn.None;
+        return new((int)Math.Round(Math.Min(Math.Max(all / allWeights, wet / wetWeights), highest)) - 1);
     }
 
     /// <summary>The top row's heart whose piece holds (x, z) at the surface (nearest, counting depth VerticalScale

@@ -47,6 +47,27 @@ public sealed class Erosion
     /// <summary>How far under its piece's top (roughly) the land may be and still be its ground, not a hole.</summary>
     private const float HoleDepth = 40f;
 
+    /// <summary>How far (blocks, at most about) a block column reads the samples from somewhere else, by noise, so
+    /// what's worn and the water in it wander off the sample grid's lines.</summary>
+    private const float WarpAcross = 6f;
+
+    private static readonly Engine.Generation.FastNoiseLite WarpX = WarpNoise(71), WarpZ = WarpNoise(72);
+
+    private static Engine.Generation.FastNoiseLite WarpNoise(int seed)
+    {
+        var noise = new Engine.Generation.FastNoiseLite(seed);
+        noise.SetNoiseType(Engine.Generation.FastNoiseLite.NoiseType.OpenSimplex2);
+        noise.SetFractalType(Engine.Generation.FastNoiseLite.FractalType.FBm);
+        noise.SetFractalOctaves(2);
+        noise.SetFrequency(1f / 40f);
+        return noise;
+    }
+
+    /// <summary>Where block position (x, z) reads the samples (see <see cref="WarpAcross"/>): the land's wear and its
+    /// water are read from the same place, so the water stays in what's worn.</summary>
+    public static (float X, float Z) Warped(float x, float z)
+        => (x + WarpAcross * WarpX.GetNoise(x, z), z + WarpAcross * WarpZ.GetNoise(x, z));
+
     private static readonly ConcurrentDictionary<ulong, Erosion> BySeed = new();
 
     /// <summary>The erosion of the world with this seed.</summary>
@@ -86,6 +107,7 @@ public sealed class Erosion
         /// shape, see ContinentTerrain.Height) is <paramref name="detail"/>.</summary>
         public float Shift(float x, float z, float detail)
         {
+            (x, z) = Warped(x, z);
             float fx = (x - X0) / Cell - 0.5f, fz = (z - Z0) / Cell - 0.5f;
             int i = (int)MathF.Floor(fx), k = (int)MathF.Floor(fz);
             if (i < 0 || k < 0 || i >= Nx - 1 || k >= Nz - 1) return 0f;
