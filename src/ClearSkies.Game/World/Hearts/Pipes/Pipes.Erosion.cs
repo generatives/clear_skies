@@ -32,6 +32,9 @@ public sealed partial class Pipes
     public float Carry = 0.05f, Pick = 0.02f, Drop = 0.02f, Speedup = 900f;
     /// <summary>Slopes count as no steeper than this (falls and cliffs too), so they don't cut without end.</summary>
     public float SteepestCut = 1f;
+    /// <summary>Running water's slope counts as at least this, so water crossing a flat still cuts (most where it runs
+    /// deepest and fastest, so it gathers there into a channel).</summary>
+    public float FlattestCut = 0f;
     public float MinThickness = 6f;
     /// <summary>The fastest a floor wears, in blocks a second (with Speedup).</summary>
     public float MostWear = 0.04f;
@@ -182,7 +185,7 @@ public sealed partial class Pipes
                     continue;
                 }
                 float speed = through / (2 * _width * h); // through a column's width each way
-                slope /= through;
+                slope = Math.Max(FlattestCut, slope / through);
                 float can = Carry * speed * slope * h * _area;
                 if (Focus > 0f) can *= 1f + Focus * _agree![n];
                 if (can > s)
