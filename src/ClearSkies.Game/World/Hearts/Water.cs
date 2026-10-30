@@ -5,9 +5,15 @@ namespace ClearSkies.Game.Generation;
 /// <summary>The water planned over a block column (see <see cref="Water.At"/>).</summary>
 /// <param name="Level">World Y of the top water block, or int.MinValue for none near: water fills the column up to it
 /// where the ground is under it.</param>
-public readonly record struct WaterColumn(int Level)
+/// <param name="Rise">How deep running water stands over the column's own ground at most (blocks; int.MaxValue for
+/// standing water, which is level).</param>
+public readonly record struct WaterColumn(int Level, int Rise = int.MaxValue)
 {
     public static readonly WaterColumn None = new(int.MinValue);
+
+    /// <summary>The top water block over ground whose top block is <paramref name="ground"/>: running water follows
+    /// the ground down a slope, standing water is level.</summary>
+    public int Over(int ground) => Level == int.MinValue || Rise == int.MaxValue ? Level : Math.Min(Level, ground + Rise);
 }
 
 /// <summary>
@@ -17,7 +23,8 @@ public readonly record struct WaterColumn(int Level)
 /// that (of its piece): its water surface is the blend of theirs (a dry cell's at its ground, so water rises in a
 /// channel between higher banks), but no lower than the blend of just the wet ones' (so ground lower than standing water
 /// beside it doesn't drag it down) and no higher than the highest of them. The generator fills it with water where the
-/// ground is under that, and lets it run on where it would still stand over lower dry ground. Nothing here cuts the
+/// ground is under that (running water no deeper over each block's ground than the cells' running depth, so it follows
+/// a slope down rather than standing level across a cell), and lets it run on where it would still stand over lower dry ground. Nothing here cuts the
 /// land, and nothing is told apart: lakes and rivers are just where the cells' water stands over their ground.
 /// </summary>
 public sealed class Water
@@ -45,7 +52,8 @@ public sealed class Water
         float fx = (wx - field.X0) / Cell - 0.5f, fz = (wz - field.Z0) / Cell - 0.5f;
         int i0 = (int)MathF.Floor(fx), k0 = (int)MathF.Floor(fz);
         float tx = fx - i0, tz = fz - k0;
-        double all = 0, allWeights = 0, wet = 0, wetWeights = 0, highest = double.NegativeInfinity;
+        double all = 0, allWeights = 0, wet = 0, wetWeights = 0, highest = double.NegativeInfinity, deep = 0;
+        bool standing = false;
         for (int dk = 0; dk <= 1; dk++)
         for (int di = 0; di <= 1; di++)
         {
@@ -59,9 +67,12 @@ public sealed class Water
             if (!(s >= field.Ground[c] + MinDepth)) continue; // (a film too thin for a block of water is dry)
             wet += w * s; wetWeights += w;
             highest = Math.Max(highest, s);
+            deep += w * (s - field.Ground[c]);
+            standing |= !float.IsNaN(field.Lake[c]);
         }
         if (wetWeights == 0) return WaterColumn.None;
-        return new((int)Math.Round(Math.Min(Math.Max(all / allWeights, wet / wetWeights), highest)) - 1);
+        int level = (int)Math.Round(Math.Min(Math.Max(all / allWeights, wet / wetWeights), highest)) - 1;
+        return new(level, standing ? int.MaxValue : Math.Max(1, (int)Math.Round(deep / wetWeights)));
     }
 
     /// <summary>The top row's heart whose piece holds (x, z) at the surface (nearest, counting depth VerticalScale

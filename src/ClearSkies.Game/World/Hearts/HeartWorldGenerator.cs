@@ -375,8 +375,10 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         // lower water, runs on over it.
         for (int col = 0; col < S * S; col++)
         {
-            int spans = p.Count(col), level = _planned[col].Level;
-            if (spans > 0 && level != int.MinValue && p.Spans[p.Start[col] + spans - 1].Hi < level) p.Level[col] = level;
+            int spans = p.Count(col);
+            if (spans == 0) continue;
+            int hi = p.Spans[p.Start[col] + spans - 1].Hi, level = _planned[col].Over(hi);
+            if (level != int.MinValue && hi < level) p.Level[col] = level;
         }
         for (int lz = 0; lz < S; lz++)
         for (int lx = 0; lx < S; lx++)
@@ -393,7 +395,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 else
                 {
                     int x = (int)x0 + nx, z = (int)z0 + nz;
-                    water = worn is not null && Top(x, z) is int g && _water.At(worn.Water, x, z).Level > g;
+                    water = worn is not null && Top(x, z) is int g && _water.At(worn.Water, x, z).Over(g) > g;
                 }
                 if (water) { p.Level[col] = hi; p.Shore[col] = true; break; }
             }
@@ -419,7 +421,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                     int x = (int)x0 + nx, z = (int)z0 + nz;
                     int? ground = Top(x, z);
                     var there = worn is null ? WaterColumn.None : _water.At(worn.Water, x, z);
-                    dryUnder = ground is not int g || g < level && !(there.Level > g && there.Level >= level);
+                    dryUnder = ground is not int g || g < level && !(there.Over(g) > g && there.Over(g) >= level);
                 }
                 if (dryUnder) { p.Spills[col] = true; break; }
             }
