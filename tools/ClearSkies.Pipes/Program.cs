@@ -1,6 +1,6 @@
 using System.Diagnostics;
 using ClearSkies.Game.Generation;
-using ClearSkies.Pipes;
+
 using StbImageWriteSharp;
 
 // Prototype of the pipes water model (see Pipes) on the distance lattice terrain: samples one landmass cell (see
@@ -20,8 +20,10 @@ ulong seed = 1337;
 (int X, int Z)? cell = null;
 int size = 8;
 double hours = 6, report = 600, erodeHours = 0, settleMinutes = 20;
-bool fill = true, snapshots = false, ground = false, denseBench = false;
+bool fill = true, snapshots = false, ground = false;
 string outDir = "pipes-out";
+(int X, int Z, int Width)? blocks = null;
+string? terrain = null;
 var settings = new List<Action<Pipes>>();
 bool widened = false;
 for (int a = 0; a < args.Length; a++)
@@ -49,7 +51,8 @@ for (int a = 0; a < args.Length; a++)
         case "--hardening": { var v = float.Parse(args[++a]); settings.Add(p => p.Hardening = v); break; }
         case "--erode-every": { var v = int.Parse(args[++a]); settings.Add(p => p.ErodeEvery = v); break; }
         case "--ground": ground = true; break;
-        case "--dense-bench": denseBench = true; break;
+        case "--blocks": blocks = (int.Parse(args[++a]), int.Parse(args[++a]), int.Parse(args[++a])); break;
+        case "--terrain": terrain = args[++a]; break;
         case "--permeability": { var v = float.Parse(args[++a]); settings.Add(p => p.Permeability = v); break; }
         case "--shell": { var v = float.Parse(args[++a]); settings.Add(p => p.Shell = v); break; }
         case "--porosity": { var v = float.Parse(args[++a]); settings.Add(p => p.Porosity = v); break; }
@@ -66,19 +69,10 @@ for (int a = 0; a < args.Length; a++)
 if (!widened) HeartGrid.WidenPieces(2f); // pieces twice the game's width unless told otherwise
 var landmass = cell ?? HeartGrid.Landmass(seed, 11250f, -6250f);
 Console.WriteLine($"Seed {seed}, landmass {landmass}, {Environment.ProcessorCount} cores");
+if (blocks is { } area) { Directory.CreateDirectory(outDir); BlockMap.Write(seed, LandscapeSettings.Parse(terrain), area.X, area.Z, area.Width, Path.Combine(outDir, "blocks.png")); return 0; }
 
-// The cell's bounds: where its own ground can be, found on a coarse grid around it.
 var total = Stopwatch.StartNew();
-float spacing = HeartGrid.LandmassSpacing;
-int x0 = int.MaxValue, z0 = int.MaxValue, x1 = int.MinValue, z1 = int.MinValue;
-for (float z = (landmass.Z - 0.7f) * spacing; z <= (landmass.Z + 1.7f) * spacing; z += 64f)
-for (float x = (landmass.X - 0.7f) * spacing; x <= (landmass.X + 1.7f) * spacing; x += 64f)
-{
-    if (HeartGrid.Landmass(seed, x, z) != landmass) continue;
-    x0 = Math.Min(x0, (int)x); z0 = Math.Min(z0, (int)z); x1 = Math.Max(x1, (int)x); z1 = Math.Max(z1, (int)z);
-}
-int FloorTo(int v, int step) => (int)Math.Floor(v / (double)step) * step;
-x0 = FloorTo(x0 - 64, 32); z0 = FloorTo(z0 - 64, 32); x1 = FloorTo(x1 + 96, 32); z1 = FloorTo(z1 + 96, 32);
+var (x0, z0, x1, z1) = Landscape.Bounds(seed, landmass);
 Console.WriteLine($"Bounds x {x0}..{x1}, z {z0}..{z1} ({(x1 - x0) / 1000f:0.0} x {(z1 - z0) / 1000f:0.0} km)");
 
 var sw = Stopwatch.StartNew();
@@ -87,7 +81,6 @@ int landColumns = Enumerable.Range(0, land.Columns).Count(land.HasLand);
 Console.WriteLine($"{size}-block columns: {land.Columns:N0} ({landColumns:N0} with land), {land.Nodes:N0} nodes, " +
                   $"{land.Links:N0} links, sampled in {sw.Elapsed.TotalSeconds:0.0} s");
 
-if (denseBench) { DenseBench.Run(land, 2000, 2.4f); return 0; }
 var pipes = new Pipes(land);
 foreach (var set in settings) set(pipes);
 if (ground) pipes.UseGroundwater();

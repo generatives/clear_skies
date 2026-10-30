@@ -1,4 +1,4 @@
-namespace ClearSkies.Pipes;
+namespace ClearSkies.Game.Generation;
 
 /// <summary>
 /// Surface water on a <see cref="Land"/> by the pipes rule: each face (each link, see Land) carries a flow that remembers itself from step to
@@ -210,6 +210,18 @@ public sealed partial class Pipes
             }
         });
         (Flow, _limited) = (_limited, Flow);
+    }
+
+    /// <summary>Sets the public number or switch called <paramref name="name"/> (any case, dashes ignored: "slide-rate"
+    /// is SlideRate) to <paramref name="value"/>. False if there's none by that name. With no pipes, only checks.</summary>
+    public static bool Set(Pipes? pipes, string name, string value)
+    {
+        var field = typeof(Pipes).GetFields().FirstOrDefault(f => !f.IsInitOnly && !f.IsLiteral &&
+            string.Equals(f.Name, name.Replace("-", ""), StringComparison.OrdinalIgnoreCase));
+        if (field == null || !(field.FieldType == typeof(float) || field.FieldType == typeof(int) || field.FieldType == typeof(bool))) return false;
+        object set = Convert.ChangeType(value, field.FieldType, System.Globalization.CultureInfo.InvariantCulture);
+        if (pipes != null) field.SetValue(pipes, set);
+        return true;
     }
 
     private float Deepest()

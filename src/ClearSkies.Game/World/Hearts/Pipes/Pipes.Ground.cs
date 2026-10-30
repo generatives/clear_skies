@@ -1,4 +1,4 @@
-namespace ClearSkies.Pipes;
+namespace ClearSkies.Game.Generation;
 
 /// <summary>
 /// Groundwater, by the same face rule with the ground's numbers: water in the ground under each node (down to Shell

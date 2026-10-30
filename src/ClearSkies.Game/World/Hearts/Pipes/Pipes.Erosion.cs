@@ -1,4 +1,4 @@
-namespace ClearSkies.Pipes;
+namespace ClearSkies.Game.Generation;
 
 /// <summary>
 /// Erosion in the same model (after Mei et al. 2007): water carries ground as sediment. How much a node's water can

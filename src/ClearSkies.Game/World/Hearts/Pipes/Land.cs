@@ -1,6 +1,4 @@
-using ClearSkies.Game.Generation;
-
-namespace ClearSkies.Pipes;
+namespace ClearSkies.Game.Generation;
 
 /// <summary>
 /// One landmass as the pipes model sees it: columns of Size blocks on a side, each sampled at its middle block column,

@@ -48,6 +48,7 @@ System.Runtime.GCSettings.LatencyMode = System.Runtime.GCLatencyMode.SustainedLo
 }
 
 var options = LaunchOptions.Parse(args);
+ClearSkies.Game.Generation.HeartGrid.WidenPieces(options.PieceSize); // before any ground is generated
 if (options.Headless)
 {
     // No window, GPU, input or UI: just the simulation and the network, on a timer.

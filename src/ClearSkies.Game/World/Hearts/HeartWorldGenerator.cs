@@ -16,6 +16,9 @@ namespace ClearSkies.Game.Generation;
 /// the corners of cells <see cref="DistanceLattice.Cell"/> blocks on a side, and blocks between take it interpolated
 /// from those: per chunk column, block column by block column, as solid spans (runs of solid blocks), then filled in
 /// chunk by chunk.
+///
+/// Given a <see cref="Landscape"/>, the land is worn as it says (each corner's top moved by the wear under it, see
+/// Wear) and water fills to the levels it leaves over each top (see <see cref="Shaped.WaterLevel"/>).
 /// </summary>
 public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
 {
@@ -63,13 +66,16 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
 
     private readonly ulong _seed;
     internal ulong Seed => _seed;
+    private readonly Landscape? _landscape;
     private readonly ContinentTerrain _terrain;
     private readonly FastNoiseLite _warpX, _warpY, _warpZ, _crack, _bottom;
 
     /// <param name="profiles">Shared with the other workers' generators; by default, this one's own.</param>
-    public HeartWorldGenerator(ulong seed, ProfileCache? profiles = null)
+    /// <param name="landscape">How the land is worn and watered; none, as the hearts leave it.</param>
+    public HeartWorldGenerator(ulong seed, ProfileCache? profiles = null, Landscape? landscape = null)
     {
         _seed = seed;
+        _landscape = landscape;
         _profiles = profiles ?? new ProfileCache();
         _terrain = ContinentTerrain.For(seed);
         _warpX = Noise(seed + 31, WarpFrequency);
@@ -162,10 +168,16 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
                 if (s > 0 && lo - p.Spans[p.Start[col] + s - 1].Hi < ShadeReach && lo >= originY && lo < originY + S && Crystals.At(x, lo, z, _seed))
                     data.Set(lx, lo - originY, lz, crystal);
 
+                // Water over the top span, up to the level the landscape left (see Landscape).
+                bool topSpan = s + 1 == p.Count(col);
+                int water = topSpan ? WaterTop(p.Water[col], hi) : int.MinValue;
+                for (int y = System.Math.Max(hi + 1, originY); y <= System.Math.Min(water, originY + S - 1); y++)
+                    data.Set(lx, y - originY, lz, BlockId.Water);
+
                 // What grows on the span's top, in the open cell above it.
                 int above = hi + 1;
-                if (above < originY || above >= originY + S) continue;
-                if (s + 1 < p.Count(col) && p.Spans[p.Start[col] + s + 1].Lo <= above) continue;
+                if (above < originY || above >= originY + S || water > hi) continue;
+                if (!topSpan && p.Spans[p.Start[col] + s + 1].Lo <= above) continue;
                 var ground = ContinentTerrain.Block(hi, hi, p.Strata[col], p.Patch[col], p.Bare[p.Start[col] + s], p.Biome[p.Start[col] + s], p.Dry[p.Start[col] + s]);
                 var plant = ContinentTerrain.Plant(ground, pos.X * S + lx, above, pos.Z * S + lz, p.Flora[col], p.Kind[col], _seed);
                 if (plant != BlockId.Air) data.Set(lx, above - originY, lz, plant);
@@ -181,6 +193,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             {
                 int hi = p.Spans[p.Start[col] + s].Hi;
                 if (hi + Trees.MaxHeight < originY || hi >= originY + S) continue;
+                if (s + 1 == p.Count(col) && WaterTop(p.Water[col], hi) > hi) continue;
                 var biome = p.Biome[p.Start[col] + s];
                 var ground = ContinentTerrain.Block(hi, hi, p.Strata[col], p.Patch[col], p.Bare[p.Start[col] + s], biome, p.Dry[p.Start[col] + s]);
                 int x = pos.X * S + lx, z = pos.Z * S + lz;
@@ -211,7 +224,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             {
                 int x = bx0 + u * c + c / 2, z = bz0 + v * c + c / 2;
                 int count = ColumnSpans(x - cx * S, z - cz * S, spans);
-                if (count > 0) CoarseColumn(data, u, v, x, z, c, by0, spans[..count]);
+                if (count > 0) CoarseColumn(data, u, v, x, z, c, by0, spans[..count], WaterAt(x, z));
             }
         }
         if (c <= S) CoarseTrees(data, pos, level);
@@ -304,7 +317,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
     /// <summary>Fills coarse column (u, v) of a coarse chunk (voxels <paramref name="c"/> blocks on a side, the lowest
     /// at world Y <paramref name="by0"/>) from block column (x, z)'s <paramref name="spans"/>: a voxel at least half
     /// filled by a span takes the block showing at its top; then plants.</summary>
-    private void CoarseColumn(ChunkData data, int u, int v, int x, int z, int c, int by0, ReadOnlySpan<(short Lo, short Hi)> spans)
+    private void CoarseColumn(ChunkData data, int u, int v, int x, int z, int c, int by0, ReadOnlySpan<(short Lo, short Hi)> spans, float water)
     {
         // (Most of a column's voxels are in the chunks over and under this one: nothing to look up if none of its ground
         // or what grows on it is in this one.)
@@ -327,6 +340,18 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
                 int y0 = by0 + w * c, y1 = y0 + c - 1, top = System.Math.Min(hi, y1);
                 if (2 * (top - System.Math.Max(lo, y0) + 1) >= c)
                     data.Set(u, w, v, ContinentTerrain.Block(top, hi, strata, patch, bare, biome, dry));
+            }
+
+            // Over the top span, water: a voxel at least half under it.
+            if (s + 1 == spans.Length && WaterTop(water, hi) is var surface && surface > hi)
+            {
+                for (int w = System.Math.Max(Voxel(hi + 1), 0); w <= System.Math.Min(Voxel(surface), S - 1); w++)
+                {
+                    int y0 = by0 + w * c, y1 = y0 + c - 1;
+                    if (2 * (System.Math.Min(surface, y1) - System.Math.Max(hi + 1, y0) + 1) >= c && data.Get(u, w, v) == BlockId.Air)
+                        data.Set(u, w, v, BlockId.Water);
+                }
+                continue;
             }
 
             // Over the top, in the open: a plant.
@@ -381,16 +406,6 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         return ColumnSpans(x & (S - 1), z & (S - 1), into);
     }
 
-    /// <summary>The top of the land at block column (x, z) (the highest block of its top span, as Prepare finds it), or
-    /// null where there is none: for Water, which isn't called while lakes and rivers wait to come back on the lattice.</summary>
-    internal int? Top(int x, int z)
-    {
-        if (!FillLattice(x >> 5, z >> 5)) return null;
-        Span<(short Lo, short Hi)> spans = stackalloc (short, short)[MaxSpans];
-        int count = ColumnSpans(x & (S - 1), z & (S - 1), spans);
-        return count == 0 ? null : spans[count - 1].Hi;
-    }
-
     /// <summary>The solid spans (bottom up) of block column (lx, lz) of the chunk column last prepared.</summary>
     public ReadOnlySpan<(short Lo, short Hi)> Spans(int lx, int lz)
     {
@@ -419,6 +434,10 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
 
         // Packed (only the spans there are, so profiles are small enough to share), then what's on each span's top.
         p.Pack(_spanCount, _spans, MaxSpans);
+        var shaped = _landscape?.At(x0 + S / 2, z0 + S / 2);
+        for (int lz = 0; lz < S; lz++)
+        for (int lx = 0; lx < S; lx++)
+            p.Water[lx + S * lz] = shaped?.WaterLevel((int)x0 + lx, (int)z0 + lz) ?? float.NaN;
         for (int lz = 0; lz < S; lz++)
         for (int lx = 0; lx < S; lx++)
         {
@@ -500,8 +519,52 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
                 for (int n = 0; n < same && j < lattice.Levels; n++) column[j++] = clamped;
             }
         }
+        if (_landscape != null) Wear(lattice, _landscape.At(x0 + S / 2, z0 + S / 2));
         return true;
     }
+
+    /// <summary>Moves each corner's top (where its distance last falls through zero going up) by the wear under it
+    /// (see <see cref="Shaped.Shift"/>): worn down, it's cut to a flat face that much lower; built up, filled to one
+    /// that much higher. Ground under the top stays as it is.</summary>
+    private static void Wear(DistanceLattice lattice, Shaped shaped)
+    {
+        const int N = DistanceLattice.Corners, Cell = DistanceLattice.Cell;
+        float scale = HeartGrid.VerticalScale, reach = DistanceLattice.Reach;
+        for (int c = 0; c < N * N; c++)
+        {
+            var column = lattice.Column(c);
+            float top = float.NaN;
+            for (int j = lattice.Levels - 2; j >= 0; j--)
+            {
+                float a = column[j], b = column[j + 1];
+                if (a > 0f && b <= 0f) { top = (lattice.First + j) * Cell + Cell * a / (a - b); break; }
+            }
+            if (float.IsNaN(top)) continue;
+            int wx = lattice.ChunkX * S + c % N * Cell, wz = lattice.ChunkZ * S + c / N * Cell;
+            float shift = shaped.Shift(wx, wz, top);
+            if (MathF.Abs(shift) < 0.01f) continue;
+            float moved = top + shift;
+            for (int j = 0; j < lattice.Levels; j++)
+            {
+                float y = (lattice.First + j) * Cell;
+                float face = Math.Clamp((moved - y) * scale, -reach, reach);
+                if (shift < 0) column[j] = MathF.Min(column[j], face);
+                else if (y >= top - Cell) column[j] = MathF.Max(column[j], face);
+            }
+        }
+    }
+
+    /// <summary>The top water block over ground topped at <paramref name="hi"/> with water to <paramref name="level"/>
+    /// (blocks under half under it stay dry), or int.MinValue for none.</summary>
+    public static int WaterTop(float level, int hi)
+    {
+        if (float.IsNaN(level)) return int.MinValue;
+        int top = (int)MathF.Floor(level - 0.5f);
+        return top > hi ? top : int.MinValue;
+    }
+
+    /// <summary>The landscape's water level over block column (x, z), or NaN.</summary>
+    public float WaterAt(int x, int z) => _landscape?.At(x, z).WaterLevel(x, z) ?? float.NaN;
 
     /// <summary>The solid spans (bottom up) of block column (lx, lz) of the chunk column whose lattice was last worked
     /// out (see FillLattice): where its distances, interpolated between the lattice's corners, are positive. Runs thinner
@@ -751,6 +814,8 @@ public sealed class ColumnProfile
     public Biome[] Biome = Array.Empty<Biome>();
     public readonly float[] Strata = new float[Columns], Patch = new float[Columns], Flora = new float[Columns],
                             Woods = new float[Columns], Kind = new float[Columns];
+    /// <summary>Per block column, the level water stands to over its top span (see Landscape), or NaN.</summary>
+    public readonly float[] Water = new float[Columns];
 
     public int Count(int col) => Start[col + 1] - Start[col];
 
