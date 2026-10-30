@@ -42,6 +42,20 @@ public sealed partial class Pipes
     public float[]? Sediment;
     private float[]? _carried, _sedimentRatio, _nextSediment;
 
+    /// <summary>Standing water wears its bed: Scour blocks a second per block of water over it (up to ScourDepth),
+    /// slowing as it's worn deeper (see Hardening). What it wears is gone, not carried: in still water it would only
+    /// settle back. So hollows where water stands deepen into bowls.</summary>
+    public float Scour = 0f, ScourDepth = 4f;
+
+    private float Scoured(int n, float h, float floor, float dt)
+    {
+        if (Scour <= 0f) return floor;
+        var land = _land;
+        float worn = Math.Max(0f, _startFloor![n] - floor);
+        float wear = Scour * Math.Min(h, ScourDepth) * dt / (1 + worn / Hardening);
+        return Math.Max(Math.Min(floor, land.Base[n] + MinThickness), floor - wear);
+    }
+
     private void Erode(float dt)
     {
         var land = _land;
@@ -101,6 +115,7 @@ public sealed partial class Pipes
                     // Dry or still: drops everything.
                     slid[n] = Math.Min(land.Ceiling[n] - 1f, land.Floor[n] + speedup * s / _area);
                     next[n] = 0;
+                    if (h >= 0.02f) slid[n] = Scoured(n, h, slid[n], dt * ease);
                     continue;
                 }
                 float speed = through / (2 * _width * h); // through a column's width each way
@@ -122,6 +137,7 @@ public sealed partial class Pipes
                     slid[n] = Math.Min(land.Ceiling[n] - 1f, land.Floor[n] + speedup * put / _area);
                 }
                 next[n] = s;
+                slid[n] = Scoured(n, h, slid[n], dt * ease);
             }
         });
         (Sediment, _nextSediment) = (next, sediment);
