@@ -650,8 +650,13 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
                 int col = lx + S * lz, count = p.Count(col);
                 if (count == 0) continue;
                 int top = p.Spans[p.Start[col] + count - 1].Hi;
-                int water = (int)MathF.Floor(from + t * (to - from) + 1f); // a block over the line's ground (or where that stands up to a block over it)
-                if (water > top && water <= top + 2 && water > p.Water[col]) p.Water[col] = water;
+                // A block over the line's ground, or over the block column's own where that stands up to Hump over the
+                // line (the ground between columns is blended, so it rises a little over the line in places).
+                const float Hump = 4f;
+                float line = from + t * (to - from);
+                if (top + 1 - line > Hump) continue;
+                int water = Math.Max(top + 1, (int)MathF.Floor(line + 1f));
+                if (water <= top + 2 && water > p.Water[col]) p.Water[col] = water;
             }
         }
     }
