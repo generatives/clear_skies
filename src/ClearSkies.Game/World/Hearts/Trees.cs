@@ -38,10 +38,19 @@ public static class Trees
     /// standing alone in the open.</summary>
     public static Kind At(BlockId ground, int x, int top, int z, float woods, ulong seed, Biome biome = Biome.Temperate)
     {
-        ulong h = Hash(x, top, z, seed);
-        float r = (h & 0xFFFFFF) / 16777216f;
-        return r < Odds(ground, top, woods, biome) ? KindOn(ground, top, biome, ((h >> 24) & 0xFFFF) / 65536f) : Kind.None;
+        if (Roll(x, z, seed) >= Odds(ground, top, woods, biome)) return Kind.None;
+        return KindOn(ground, top, biome, ((Hash(x, top, z, seed) >> 24) & 0xFFFF) / 65536f);
     }
+
+    /// <summary>The most <see cref="Odds"/> ever is.</summary>
+    private const float MostOdds = 0.037f;
+
+    /// <summary>Whether anything may grow in block column (x, z) at all, whatever its ground: by its roll alone, so most
+    /// columns are ruled out without looking at the ground (see HeartWorldGenerator.GenerateCoarse).</summary>
+    public static bool MayGrow(int x, int z, ulong seed) => Roll(x, z, seed) < MostOdds;
+
+    /// <summary>Block column (x, z)'s roll against the odds of something growing there, 0-1.</summary>
+    private static float Roll(int x, int z, ulong seed) => (Hash(x, 0, z, seed) & 0xFFFFFF) / 16777216f;
 
     /// <summary>The chance that something grows from the open cell above (x, top, z) (see <see cref="At"/>).</summary>
     public static float Odds(BlockId ground, int top, float woods, Biome biome = Biome.Temperate)
@@ -77,15 +86,6 @@ public static class Trees
         },
         BlockId.Sand or BlockId.RedSand => Kind.Cactus,
         _ => Kind.Pine,
-    };
-
-    /// <summary>The block that shows of a <paramref name="kind"/> from afar: its leaves (a cactus, itself).</summary>
-    public static BlockId Crown(Kind kind) => kind switch
-    {
-        Kind.Pine => BlockId.PineLeaves,
-        Kind.Birch => BlockId.AutumnLeaves,
-        Kind.Cactus => BlockId.Cactus,
-        _ => BlockId.Leaves,
     };
 
     /// <summary>Grows a <paramref name="kind"/> on (x, top, z) (x and z within the chunk, at least <see cref="Reach"/>

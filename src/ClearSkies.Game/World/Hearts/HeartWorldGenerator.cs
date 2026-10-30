@@ -214,12 +214,96 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
                 if (count > 0) CoarseColumn(data, u, v, x, z, c, by0, spans[..count]);
             }
         }
+        if (c <= S) CoarseTrees(data, pos, level);
+    }
+
+    // While a coarse chunk's trees are shrunk (see CoarseTrees), per voxel: how many log and leaf blocks fall in it, and
+    // which.
+    private readonly int[] _logs = new int[S * S * S], _leaves = new int[S * S * S];
+    private readonly BlockId[] _logBlock = new BlockId[S * S * S], _leafBlock = new BlockId[S * S * S];
+
+    /// <summary>The trees and cacti of a coarse chunk (voxels 2^level blocks on a side), as they grow in full detail
+    /// (see Generate), shrunk: each one's blocks counted into the voxels they fall in. An open voxel takes its logs, or
+    /// else its leaves, if there are enough of them to cover about half a face of it: so trunks show where they're thick
+    /// enough to see from that far, and crowns stay about their size.</summary>
+    private void CoarseTrees(ChunkData data, ChunkPosition pos, int level)
+    {
+        int c = 1 << level;
+        int bx0 = pos.X * S * c, by0 = pos.Y * S * c, bz0 = pos.Z * S * c, by1 = by0 + S * c - 1;
+        Array.Clear(_logs); Array.Clear(_leaves);
+        bool any = false;
+        Span<(short Lo, short Hi)> spans = stackalloc (short, short)[MaxSpans];
+        // Over each chunk column under it, the columns trees grow from there (as Generate), most ruled out by their
+        // roll alone before their ground is looked at.
+        for (int cz = 0; cz < c; cz++)
+        for (int cx = 0; cx < c; cx++)
+        {
+            int chunkX = pos.X * c + cx, chunkZ = pos.Z * c + cz;
+            if (!FillLattice(chunkX, chunkZ)) continue;
+            for (int lz = Trees.Reach; lz < S - Trees.Reach; lz++)
+            for (int lx = Trees.Reach; lx < S - Trees.Reach; lx++)
+            {
+                int x = chunkX * S + lx, z = chunkZ * S + lz;
+                if (!Trees.MayGrow(x, z, _seed)) continue;
+                int count = ColumnSpans(lx, lz, spans);
+                for (int s = 0; s < count; s++)
+                {
+                    int hi = spans[s].Hi;
+                    if (hi + Trees.MaxHeight < by0 || hi > by1) continue;
+                    float heat = Biomes.Heat(hi, _terrain.Heat(x, z)), wet = _terrain.Wet(x, z);
+                    var biome = Biomes.Pick(heat, wet);
+                    float bare = s + 1 < count && spans[s + 1].Lo - hi < ShadeReach ? Shaded : 0f;
+                    var ground = ContinentTerrain.Block(hi, hi, _terrain.Strata(x, z), _terrain.Patch(x, z), bare, biome,
+                                                        Biomes.Dry(heat, wet, Biomes.SandBlend));
+                    var kind = Trees.At(ground, x, hi, z, _terrain.Woods(x, z), _seed, biome);
+                    if (kind == Trees.Kind.None) continue;
+                    int reach = Trees.ReachOf(kind);
+                    if (lx < reach || lz < reach || lx >= S - reach || lz >= S - reach) continue;
+                    if (s + 1 < count && spans[s + 1].Lo <= hi + Trees.HeightOf(kind) + 1) continue;
+                    CountTree(kind, x, hi, z, c, bx0, by0, bz0);
+                    any = true;
+                }
+            }
+        }
+        if (!any) return;
+
+        int toFill = System.Math.Max(2, c * c / 2);
+        for (int i = 0; i < S * S * S; i++)
+        {
+            if (_logs[i] < toFill && _leaves[i] < toFill) continue;
+            int u = i % S, w = i / S % S, v = i / (S * S);
+            if (IsOpen(data.Get(u, w, v))) data.Set(u, w, v, _logs[i] >= toFill ? _logBlock[i] : _leafBlock[i]);
+        }
+    }
+
+    /// <summary>Grows a <paramref name="kind"/> on (x, top, z) in a chunk of its own, and counts its blocks into the
+    /// voxels (c blocks on a side, from world (bx0, by0, bz0)) they fall in.</summary>
+    private void CountTree(Trees.Kind kind, int x, int top, int z, int c, int bx0, int by0, int bz0)
+    {
+        const int Middle = S / 2;
+        int originY = top - 1, reach = Trees.ReachOf(kind), height = Trees.HeightOf(kind) + 2;
+        var tree = new ChunkData();
+        Trees.Grow(tree, originY, kind, Middle, top, Middle, Trees.Hash(x, top, z, _seed));
+        for (int ty = 0; ty <= System.Math.Min(height, S - 1); ty++)
+        for (int tz = Middle - reach; tz <= Middle + reach; tz++)
+        for (int tx = Middle - reach; tx <= Middle + reach; tx++)
+        {
+            var id = tree.Get(tx, ty, tz);
+            if (id == BlockId.Air) continue;
+            int u = x + tx - Middle - bx0, w = originY + ty - by0, v = z + tz - Middle - bz0;
+            if (u < 0 || w < 0 || v < 0) continue;
+            u /= c; w /= c; v /= c;
+            if (u >= S || w >= S || v >= S) continue;
+            int i = u + S * (w + S * v);
+            if (BlockRegistry.Get(id).ShowsInnerFaces) { _leaves[i]++; _leafBlock[i] = id; }
+            else { _logs[i]++; _logBlock[i] = id; }
+        }
+        tree.Release();
     }
 
     /// <summary>Fills coarse column (u, v) of a coarse chunk (voxels <paramref name="c"/> blocks on a side, the lowest
     /// at world Y <paramref name="by0"/>) from block column (x, z)'s <paramref name="spans"/>: a voxel at least half
-    /// filled by a span takes the block showing at its top; then plants, and the crowns of trees as often as they cover
-    /// ground round there.</summary>
+    /// filled by a span takes the block showing at its top; then plants.</summary>
     private void CoarseColumn(ChunkData data, int u, int v, int x, int z, int c, int by0, ReadOnlySpan<(short Lo, short Hi)> spans)
     {
         // (Most of a column's voxels are in the chunks over and under this one: nothing to look up if none of its ground
@@ -229,7 +313,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         foreach (var (lo, hi) in spans) any |= lo <= by1 && hi + Trees.MaxHeight >= by0;
         if (!any) return;
         float strata = _terrain.Strata(x, z), patch = _terrain.Patch(x, z), flora = _terrain.Flora(x, z);
-        float woods = _terrain.Woods(x, z), kind = _terrain.Kind(x, z), heat = _terrain.Heat(x, z), wet = _terrain.Wet(x, z);
+        float kind = _terrain.Kind(x, z), heat = _terrain.Heat(x, z), wet = _terrain.Wet(x, z);
         int Voxel(int y) => (int)MathF.Floor((y - by0) / (float)c);
         for (int s = 0; s < spans.Length; s++)
         {
@@ -245,7 +329,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
                     data.Set(u, w, v, ContinentTerrain.Block(top, hi, strata, patch, bare, biome, dry));
             }
 
-            // Over the top, in the open: a plant, and above it a tree's crown.
+            // Over the top, in the open: a plant.
             int roof = s + 1 < spans.Length ? spans[s + 1].Lo : int.MaxValue;
             var ground = ContinentTerrain.Block(hi, hi, strata, patch, bare, biome, dry);
             int above = Voxel(hi + 1);
@@ -261,13 +345,6 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
                     break;
                 }
             }
-            ulong hash = Trees.Hash(x, hi, z, _seed ^ 0xC20A);
-            var tree = Trees.KindOn(ground, hi, biome, ((hash >> 24) & 0xFFFF) / 65536f);
-            int reach = tree == Trees.Kind.Cactus ? 0 : Trees.ReachOf(tree), height = Trees.HeightOf(tree);
-            float cover = 1f - MathF.Exp(-Trees.Odds(ground, hi, woods, biome) * (2 * reach + 1) * (2 * reach + 1));
-            int crown = Voxel(hi + (int)(0.7f * height));
-            if ((hash & 0xFFFFFF) / 16777216f < cover && hi + height < roof && (uint)crown < S && IsOpen(data.Get(u, crown, v)))
-                data.Set(u, crown, v, Trees.Crown(tree));
         }
     }
 
