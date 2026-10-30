@@ -109,6 +109,11 @@ public static class BlockMap
             }
             return (slope / Math.Max(1, count), 100.0 * steep / Math.Max(1, count), relief / Math.Max(1, squares));
         }
+        var terrain = ContinentTerrain.For(seed);
+        var surface = new int[width * width];
+        Parallel.For(0, width, j => { for (int i = 0; i < width; i++) surface[i + width * j] = top[i + width * j] == int.MinValue ? int.MinValue : (int)MathF.Floor(terrain.Height(x0 + i, z0 + j)); });
+        var (sT, stT, rT) = Relief(surface);
+        Console.WriteLine($"Terrain surface (no pieces), where there's land: slope {sT:0.00}, steeper than 1: {stT:0.0}%, relief per 64 blocks {rT:0.0}");
         var (s0, st0, r0) = Relief(before);
         var (s1, st1, r1) = Relief(top);
         Console.WriteLine($"Relief before: slope {s0:0.00}, steeper than 1: {st0:0.0}%, relief per 64 blocks {r0:0.0}; after: {s1:0.00}, {st1:0.0}%, {r1:0.0}");
