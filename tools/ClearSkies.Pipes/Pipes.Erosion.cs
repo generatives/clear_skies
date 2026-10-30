@@ -9,12 +9,15 @@ namespace ClearSkies.Pipes;
 /// the deeper it's worn (Pick falls to half Hardening blocks under where it started), so gorges don't cut without end.
 /// Loose ground slides: where wear has left a floor standing over a neighbour's more steeply than Slide blocks a block
 /// (and than it stood at the start), some of the difference moves down each step, so cuts widen into valleys. Ground
-/// that started steeper keeps its slope: cliffs and steep hills stand.
+/// that started steeper keeps its slope: cliffs and steep hills stand. Ground that started gentler also creeps: it
+/// moves towards its neighbours' heights at Creep blocks² a second (soil creep), smoothing bumps the water leaves.
+/// Erosion follows each face's flow averaged over the last FlowMemory seconds, not the step's own, so water sloshing
+/// back and forth doesn't dig speckles.
 /// </summary>
 public sealed partial class Pipes
 {
     public bool Eroding;
-    public int ErodeEvery = 2;
+    public int ErodeEvery = 4;
     private float _erodeTime;
     public float Carry = 0.05f, Pick = 0.02f, Drop = 0.02f, Speedup = 900f;
     /// <summary>Slopes count as no steeper than this (falls and cliffs too), so they don't cut without end.</summary>
@@ -22,12 +25,12 @@ public sealed partial class Pipes
     public float MinThickness = 6f;
     /// <summary>The fastest a floor wears, in blocks a second (with Speedup).</summary>
     public float MostWear = 0.04f;
-    public float Hardening = 8f, Slide = 1f, SlideRate = 0.002f;
+    public float Hardening = 8f, Slide = 1f, SlideRate = 0.002f, Creep = 1e-4f, FlowMemory = 300f;
 
     private float[]? _startFloor, _slid;
 
     public float[]? Sediment;
-    private float[]? _carried, _sedimentRatio, _nextSediment;
+    private float[]? _carried, _sedimentRatio, _nextSediment, _meanFlow;
 
     private void Erode(float dt)
     {
@@ -38,6 +41,8 @@ public sealed partial class Pipes
         _startFloor ??= (float[])land.Floor.Clone();
         _slid ??= new float[land.Nodes];
         var startFloor = _startFloor; var slid = _slid;
+        var mean = _meanFlow ??= (float[])Flow.Clone();
+        float remember = Math.Min(1f, dt / FlowMemory);
 
         // What share of its sediment each node's water sends out this step (all of it at most).
         Parallel.For(0, (land.Nodes + 4095) / 4096, block =>
@@ -50,7 +55,8 @@ public sealed partial class Pipes
                 float outs = 0;
                 for (int k = _faceStart[n]; k < _faceStart[n + 1]; k++)
                 {
-                    float q = Flow[k];
+                    // A face's two links average alike, so they stay opposite.
+                    float q = mean[k] += (Flow[k] - mean[k]) * remember;
                     if (q > 0) outs += q;
                 }
                 float sends = outs * dt * carried[n];
@@ -69,7 +75,7 @@ public sealed partial class Pipes
                 float level = land.Floor[n] + Depth[n];
                 for (int k = _faceStart[n]; k < _faceStart[n + 1]; k++)
                 {
-                    float q = Flow[k];
+                    float q = mean[k];
                     int m = _other[k];
                     if (q > 0) s -= q * dt * carried[n] * ratio[n];
                     else if (q < 0 && m >= 0) s -= q * dt * carried[m] * ratio[m];
@@ -110,8 +116,9 @@ public sealed partial class Pipes
         });
         (Sediment, _nextSediment) = (next, sediment);
 
-        // Slides: each node gives ground to lower neighbours it stands too steeply over, and takes from higher ones.
-        float slideStep = Math.Min(0.25f, SlideRate * Speedup * dt);
+        // Slides and creep: each node gives ground to lower neighbours it stands too steeply over, and takes from higher
+        // ones; on ground that started gentle, it also creeps towards its neighbours' heights.
+        float slideStep = Math.Min(0.25f, SlideRate * Speedup * dt), creep = Creep * Speedup * dt;
         Parallel.For(0, (land.Nodes + 4095) / 4096, block =>
         {
             int end = Math.Min(land.Nodes, (block + 1) * 4096);
@@ -122,8 +129,10 @@ public sealed partial class Pipes
                 {
                     int m = _other[k];
                     if (m < 0) continue;
-                    float d = slid[n] - slid[m], ad = Math.Abs(d);
-                    float stood = Math.Max(Slide * land.LinkLength[k], Math.Abs(startFloor[n] - startFloor[m]));
+                    float d = slid[n] - slid[m], ad = Math.Abs(d), length = land.LinkLength[k];
+                    float started = Math.Abs(startFloor[n] - startFloor[m]);
+                    if (started <= Slide * length) change -= Math.Min(0.05f, creep / (length * length)) * d;
+                    float stood = Math.Max(Slide * length, started);
                     if (ad <= stood) continue;
                     float move = slideStep * (ad - stood) / 2;
                     change += d > 0 ? -move : move;
