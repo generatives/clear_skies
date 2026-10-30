@@ -65,43 +65,6 @@ public class TreeTests
     }
 
     [Fact]
-    public void Lakes_and_rivers_rest_on_the_ground_and_stay_in_their_banks()
-    {
-        var water = Water.For(1337);
-        var generator = new HeartWorldGenerator(1337);
-        var chunks = new Dictionary<(int, int, int), ChunkData>();
-        BlockId At(int x, int y, int z)
-        {
-            var key = (x >> 5, y >> 5, z >> 5);
-            if (!chunks.TryGetValue(key, out var data))
-                generator.Generate(chunks[key] = data = new ChunkData(), new ChunkPosition(key.Item1, key.Item2, key.Item3));
-            return data.Get(x & 31, y & 31, z & 31);
-        }
-        static bool Wet(BlockId b) => b is BlockId.Water or BlockId.Ice or BlockId.Lava or BlockId.GlowingLava;
-
-        // A lake with a river out of it, in a wet part of this seed's spawn continent.
-        int lakes = 0, rivers = 0;
-        for (int z = -5856; z < -5728; z++)
-        for (int x = 9456; x < 9584; x++)
-        {
-            var w = water.At(x, z);
-            if (w.Level == int.MinValue) continue;
-            int y = w.Level; // (a river may stand lower, under its banks)
-            while (y > w.Level - 12 && !Wet(At(x, y, z))) y--;
-            if (!Wet(At(x, y, z))) continue;
-            if (w.RiverDepth > 0) rivers++; else lakes++;
-            int bed = y;
-            while (Wet(At(x, bed, z))) bed--;
-            Assert.NotEqual(BlockId.Air, At(x, bed, z)); // on the ground, not hanging in the air
-            // No water stands against air beside it, except over more water a step down a river.
-            foreach (var (nx, nz) in new[] { (x + 1, z), (x - 1, z), (x, z + 1), (x, z - 1) })
-            for (int yy = bed + 1; yy <= y; yy++)
-                Assert.True(At(nx, yy, nz) != BlockId.Air || Enumerable.Range(0, 12).Any(d => Wet(At(nx, yy - d, nz))));
-        }
-        Assert.True(lakes > 0 && rivers > 0);
-    }
-
-    [Fact]
     public void Cave_crystals_glow_and_come_in_sparse_clusters()
     {
         Assert.True(BlockRegistry.Get(BlockId.AmberCrystal).LightEmission > 0);

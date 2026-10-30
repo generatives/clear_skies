@@ -38,35 +38,55 @@ public static class Trees
     /// standing alone in the open.</summary>
     public static Kind At(BlockId ground, int x, int top, int z, float woods, ulong seed, Biome biome = Biome.Temperate)
     {
-        ulong h = Hash(x, top, z, seed);
-        float r = (h & 0xFFFFFF) / 16777216f;
-        float pick = ((h >> 24) & 0xFFFF) / 65536f;
+        if (Roll(x, z, seed) >= Odds(ground, top, woods, biome)) return Kind.None;
+        return KindOn(ground, top, biome, ((Hash(x, top, z, seed) >> 24) & 0xFFFF) / 65536f);
+    }
+
+    /// <summary>The most <see cref="Odds"/> ever is.</summary>
+    private const float MostOdds = 0.037f;
+
+    /// <summary>Whether anything may grow in block column (x, z) at all, whatever its ground: by its roll alone, so most
+    /// columns are ruled out without looking at the ground (see HeartWorldGenerator.GenerateCoarse).</summary>
+    public static bool MayGrow(int x, int z, ulong seed) => Roll(x, z, seed) < MostOdds;
+
+    /// <summary>Block column (x, z)'s roll against the odds of something growing there, 0-1.</summary>
+    private static float Roll(int x, int z, ulong seed) => (Hash(x, 0, z, seed) & 0xFFFFFF) / 16777216f;
+
+    /// <summary>The chance that something grows from the open cell above (x, top, z) (see <see cref="At"/>).</summary>
+    public static float Odds(BlockId ground, int top, float woods, Biome biome = Biome.Temperate)
+    {
         switch (ground)
         {
             case BlockId.Grass:
-            {
-                if (top < ContinentTerrain.DryLine && biome != Biome.Jungle) return Kind.None;
-                switch (biome)
+                if (top < ContinentTerrain.DryLine && biome != Biome.Jungle) return 0f;
+                return biome switch
                 {
-                    case Biome.Jungle: return r < 0.002f + 0.035f * Grove(woods) ? Kind.Jungle : Kind.None;
-                    case Biome.Tundra: return r < 0.0005f + 0.012f * Grove(woods) ? Kind.Pine : Kind.None;
-                    case Biome.Steppe: return r < 0.0003f ? Kind.Pine : Kind.None;
-                }
-                if (r >= 0.001f + 0.03f * Grove(woods)) return Kind.None;
-                return pick < Smoothstep(PineStart, PineFull, top) ? Kind.Pine : biome == Biome.Autumn ? Kind.Birch : Kind.Oak;
-            }
-            case BlockId.Snow:
-                return r < 0.001f + 0.02f * Grove(woods) ? Kind.Pine : Kind.None;
-            case BlockId.SnowyDirt:
-                return r < 0.0005f + 0.008f * Grove(woods) ? Kind.Pine : Kind.None;
-            case BlockId.Sand:
-                return r < 0.001f + 0.012f * Grove(woods) ? Kind.Cactus : Kind.None;
-            case BlockId.RedSand:
-                return r < 0.0005f + 0.004f * Grove(woods) ? Kind.Cactus : Kind.None;
-            default:
-                return Kind.None;
+                    Biome.Jungle => 0.002f + 0.035f * Grove(woods),
+                    Biome.Tundra => 0.0005f + 0.012f * Grove(woods),
+                    Biome.Steppe => 0.0003f,
+                    _ => 0.001f + 0.03f * Grove(woods),
+                };
+            case BlockId.Snow: return 0.001f + 0.02f * Grove(woods);
+            case BlockId.SnowyDirt: return 0.0005f + 0.008f * Grove(woods);
+            case BlockId.Sand: return 0.001f + 0.012f * Grove(woods);
+            case BlockId.RedSand: return 0.0005f + 0.004f * Grove(woods);
+            default: return 0f;
         }
     }
+
+    /// <summary>What grows on <paramref name="ground"/> at <paramref name="top"/> where anything does, by
+    /// <paramref name="pick"/> (0-1).</summary>
+    public static Kind KindOn(BlockId ground, int top, Biome biome, float pick) => ground switch
+    {
+        BlockId.Grass => biome switch
+        {
+            Biome.Jungle => Kind.Jungle,
+            Biome.Tundra or Biome.Steppe => Kind.Pine,
+            _ => pick < Smoothstep(PineStart, PineFull, top) ? Kind.Pine : biome == Biome.Autumn ? Kind.Birch : Kind.Oak,
+        },
+        BlockId.Sand or BlockId.RedSand => Kind.Cactus,
+        _ => Kind.Pine,
+    };
 
     /// <summary>Grows a <paramref name="kind"/> on (x, top, z) (x and z within the chunk, at least <see cref="Reach"/>
     /// in from its sides; top in world Y): sets whatever of it falls in <paramref name="data"/>, whose bottom is at world
