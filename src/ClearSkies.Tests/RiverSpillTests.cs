@@ -11,7 +11,7 @@ public class RiverSpillTests
     public RiverSpillTests(ITestOutputHelper output) => _out = output;
 
     [Fact]
-    public void Rivers_fill_the_channels_the_erosion_wore_and_run_on_over_drops()
+    public void Running_water_lies_where_it_runs_and_runs_on_over_drops()
     {
         // A river on this seed's spawn landmass coming down steep ground (found by looking).
         var worn = Erosion.For(1337).Of(12585f, -8075f);
@@ -33,7 +33,8 @@ public class RiverSpillTests
             var top = Chunk(x, y, z);
             bool water = top.Get(x & 31, y & 31, z & 31) == BlockId.Water;
             if (water && !WaterLevel.IsSource(top.GetOrientation(x & 31, y & 31, z & 31))) flowing++;
-            if (float.IsNaN(worn.Stream(x + 0.5f, z + 0.5f))) continue;
+            int cell = worn.Water.ColumnAt(x + 0.5f, z + 0.5f);
+            if (cell < 0 || worn.Water.Flow[cell] < 40f) continue;
             channel++;
             if (water) wet++;
             var plan = Water.For(1337).At(worn.Water, x, z);

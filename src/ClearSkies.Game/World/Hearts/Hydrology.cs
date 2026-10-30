@@ -11,6 +11,10 @@ public static class Hydrology
     /// <summary>Blocks on a side of a cell.</summary>
     public const int Cell = Erosion.Cell;
 
+    // Running water: where RiverFrom columns' rain runs, FlowDepth times the square root of how many times that deep,
+    // at most FlowDeepest.
+    private const double RiverFrom = Erosion.RiverFrom, FlowDepth = 1.5, FlowDeepest = 6;
+
     /// <summary>The water of the landmass (x, z) is on (see Erosion: worked out with it).</summary>
     public static Field Of(ulong seed, float x, float z) => Erosion.For(seed).Of(x, z).Water;
 
@@ -34,6 +38,11 @@ public static class Hydrology
         public readonly int[] Order;
         public readonly long[] Piece; // which piece each column's top is in
 
+        /// <summary>Per column: its ground (world Y over its top), and its water's surface: where it stands (a lake's
+        /// level), or where enough runs (RiverFrom columns' rain), FlowDepth times the square root of how many times
+        /// that over the ground, at most FlowDeepest; the ground where it's dry. NaN off the land.</summary>
+        public readonly float[] Ground, Surface;
+
         /// <summary>How many columns hold a lake.</summary>
         public int LakeColumns { get; }
 
@@ -44,7 +53,9 @@ public static class Hydrology
             Piece = land.Piece;
             int n = Nx * Nz;
             Lake = new float[n]; Flow = new float[n]; Spill = new float[n]; Down = new int[n];
+            Ground = new float[n]; Surface = new float[n];
             Array.Fill(Lake, float.NaN); Array.Fill(Down, -1);
+            Array.Fill(Ground, float.NaN); Array.Fill(Surface, float.NaN);
             var rank = new int[land.Cells];
             Array.Fill(rank, int.MaxValue);
             for (int k = 0; k < flood.Order.Length; k++) rank[flood.Order[k]] = k;
@@ -73,6 +84,9 @@ public static class Hydrology
                 while (to >= 0 && flood.Column[to] == c) to = flood.Receiver[to];
                 Down[c] = to >= 0 ? flood.Column[to] : -1;
                 if (!float.IsNaN(Lake[c])) LakeColumns++;
+                Ground[c] = ground;
+                float runs = Flow[c] >= RiverFrom ? ground + (float)Math.Min(FlowDeepest, FlowDepth * Math.Sqrt(Flow[c] / RiverFrom)) : ground;
+                Surface[c] = MathF.Max(runs, float.IsNaN(Lake[c]) ? ground : Lake[c]);
             }
             Order = Enumerable.Range(0, n).Where(c => first[c] != int.MaxValue).OrderBy(c => first[c]).ToArray();
         }

@@ -14,8 +14,9 @@ public class ErosionTests
     public void The_spawn_landmass_wears_into_valleys_with_rivers()
     {
         var field = Erosion.For(1337).Of(11250f, -6250f);
-        _out.WriteLine($"{field.Nx} x {field.Nz} samples in {field.Seconds:0.0} s: {field.RiverSamples} river samples");
-        Assert.True(field.RiverSamples > 100); // (a dry landmass: few)
+        int running = field.Water.Flow.Count(f => f >= 40f);
+        _out.WriteLine($"{field.Nx} x {field.Nz} samples in {field.Seconds:0.0} s: {running} with water running");
+        Assert.True(running > 100); // (a dry landmass: few)
 
         // Mostly worn down, by up to a few hundred blocks, and raised by no more than the dells filled in.
         float least = 0f, most = 0f;

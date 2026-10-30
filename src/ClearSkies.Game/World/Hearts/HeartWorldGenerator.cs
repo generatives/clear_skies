@@ -370,8 +370,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             }
         }
 
-        // Water fills each column up to where it's planned over it, where the ground is under that (see Water); a
-        // lake's shore just over its level is sandy. Water over lower dry ground beside it, or over water more than a
+        // Water fills each column up to where it's planned over it, where the ground is under that (see Water); the
+        // shore just over it is sandy. Water over lower dry ground beside it, or over water more than a
         // step lower, runs on over it.
         for (int col = 0; col < S * S; col++)
         {
@@ -379,7 +379,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             if (spans == 0 || level == int.MinValue) continue;
             int hi = p.Spans[p.Start[col] + spans - 1].Hi;
             if (hi < level) p.Level[col] = level;
-            else if (_planned[col].Lake && hi <= level + ShoreRise) { p.Level[col] = hi; p.Shore[col] = true; }
+            else if (hi <= level + ShoreRise) { p.Level[col] = hi; p.Shore[col] = true; }
         }
         for (int lz = 0; lz < S; lz++)
         for (int lx = 0; lx < S; lx++)
@@ -411,7 +411,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
 
     private static readonly (int, int)[] Beside = { (1, 0), (-1, 0), (0, 1), (0, -1) };
 
-    /// <summary>How far over a lake's level its sandy shore reaches.</summary>
+    /// <summary>How far over the water's level its sandy shore reaches.</summary>
     private const int ShoreRise = 2;
 
     /// <summary>Whether block y of a column (wobbled to (px, pz), lifted by lift) is solid, and how many blocks up from
