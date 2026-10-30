@@ -1,7 +1,8 @@
 namespace ClearSkies.Game.Generation;
 
 /// <summary>
-/// One landmass as the pipes model sees it: columns of Size blocks on a side, each sampled at its middle block column,
+/// One landmass as the pipes model sees it: columns of Size blocks on a side, each sampled at the block column at its
+/// middle, which is on a corner of the generator's lattice (see DistanceLattice; column i's middle is X0 + i Size),
 /// and in each column the open gaps above its solid spans (nodes). A node's floor is the top of the span under it and
 /// its ceiling the bottom of the span over it (none for the top one, open to the sky). Nodes of neighbouring columns
 /// whose gaps overlap share a face (a link from each side). Where a node's gap reaches down into the open space under all of a neighbour's land
@@ -56,7 +57,7 @@ public sealed class Land
             for (int j = cz * perChunk; j < Math.Min(Nz, (cz + 1) * perChunk); j++)
             for (int i = cx * perChunk; i < Math.Min(Nx, (cx + 1) * perChunk); i++)
             {
-                int x = x0 + i * size + size / 2, z = z0 + j * size + size / 2;
+                int x = x0 + i * size, z = z0 + j * size;
                 // Other landmasses' ground is left out: void here.
                 int n = HeartGrid.Landmass(seed, x, z) == landmass ? gen.SpansAt(x, z, into) : 0;
                 spans[i + Nx * j] = into[..n].ToArray();
@@ -127,7 +128,7 @@ public sealed class Land
         {
             for (int i = 0; i < Nx; i++)
             {
-                float w = Math.Clamp((climate.Wet(X0 + i * size + size / 2f, Z0 + j * size + size / 2f) - 0.3f) / 0.55f, 0f, 1f);
+                float w = Math.Clamp((climate.Wet(X0 + i * size, Z0 + j * size) - 0.3f) / 0.55f, 0f, 1f);
                 Wetness[i + Nx * j] = w * w * (3 - 2 * w);
             }
         });

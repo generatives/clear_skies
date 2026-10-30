@@ -435,6 +435,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         // Packed (only the spans there are, so profiles are small enough to share), then what's on each span's top.
         p.Pack(_spanCount, _spans, MaxSpans);
         PlaceWater(p, _landscape?.At(x0 + S / 2, z0 + S / 2), (int)x0, (int)z0);
+        FillLattice(chunkX, chunkZ); // (placing water may have looked into the neighbours')
         for (int lz = 0; lz < S; lz++)
         for (int lx = 0; lx < S; lx++)
         {
@@ -554,24 +555,39 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
     /// <summary>Each landscape column's water (see <see cref="Shaped.Volume"/>) into its own lowest blocks first: to
     /// the level that holds it over the tops of the column's block columns, so a little fills only the deepest few
     /// and a lot the whole column. A block column holds water where it stands at least half a block over its top.
-    /// (Landscape columns line up with chunk columns, so each one's block columns are all here.)</summary>
-    private static void PlaceWater(ColumnProfile p, Shaped? shaped, int x0, int z0)
+    /// Columns are centred on the lattice's corners, where the ground's wear is (see Wear): a channel's lowest blocks
+    /// run down its middle. Those along the chunk column's edges reach into its neighbours, whose block columns are
+    /// worked out for it here, so both sides place the same water.</summary>
+    private void PlaceWater(ColumnProfile p, Shaped? shaped, int x0, int z0)
     {
         Array.Fill(p.Water, int.MinValue);
         if (shaped == null) return;
-        int size = shaped.Size;
-        Span<int> ground = stackalloc int[size * size];
-        for (int cz = 0; cz < S; cz += size)
-        for (int cx = 0; cx < S; cx += size)
+        int size = shaped.Size, half = size / 2;
+        Span<float> ground = stackalloc float[size * size];
+        Span<int> tops = stackalloc int[size * size];
+        Span<(short Lo, short Hi)> spans = stackalloc (short, short)[MaxSpans];
+        for (int mz = 0; mz <= S; mz += size)
+        for (int mx = 0; mx <= S; mx += size)
         {
-            float volume = shaped.Volume(x0 + cx, z0 + cz, out _, out _);
+            float volume = shaped.Volume(x0 + mx, z0 + mz);
             if (volume <= 0f) continue;
             int n = 0;
-            for (int lz = cz; lz < cz + size; lz++)
-            for (int lx = cx; lx < cx + size; lx++)
+            for (int dz = -half; dz < half; dz++)
+            for (int dx = -half; dx < half; dx++)
             {
-                int col = lx + S * lz, count = p.Count(col);
-                if (count > 0) ground[n++] = p.Spans[p.Start[col] + count - 1].Hi + 1;
+                int lx = mx + dx, lz = mz + dz, top;
+                if (lx >= 0 && lz >= 0 && lx < S && lz < S)
+                {
+                    int col = lx + S * lz, count = p.Count(col);
+                    top = count > 0 ? p.Spans[p.Start[col] + count - 1].Hi : int.MinValue;
+                }
+                else
+                {
+                    int count = SpansAt(x0 + lx, z0 + lz, spans);
+                    top = count > 0 ? spans[count - 1].Hi : int.MinValue;
+                }
+                tops[(dx + half) + size * (dz + half)] = top;
+                if (top != int.MinValue) ground[n++] = top + 1;
             }
             if (n == 0) continue;
             var g = ground[..n];
@@ -584,12 +600,12 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
                 level = (volume + sum) / m;
                 if (m == n || level <= g[m]) break;
             }
-            int top = (int)MathF.Floor(level - 0.5f);
-            for (int lz = cz; lz < cz + size; lz++)
-            for (int lx = cx; lx < cx + size; lx++)
+            int water = (int)MathF.Floor(level - 0.5f);
+            for (int dz = -half; dz < half; dz++)
+            for (int dx = -half; dx < half; dx++)
             {
-                int col = lx + S * lz, count = p.Count(col);
-                if (count > 0 && top > p.Spans[p.Start[col] + count - 1].Hi) p.Water[col] = top;
+                int lx = mx + dx, lz = mz + dz, top = tops[(dx + half) + size * (dz + half)];
+                if (lx >= 0 && lz >= 0 && lx < S && lz < S && top != int.MinValue && water > top) p.Water[lx + S * lz] = water;
             }
         }
     }

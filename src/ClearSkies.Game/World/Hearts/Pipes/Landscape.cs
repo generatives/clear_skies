@@ -76,45 +76,45 @@ public sealed class Shaped(Land land, float[] startFloor, float[] depth, float d
     /// <summary>A column's width, in blocks.</summary>
     public int Size => land.Size;
 
-    /// <summary>How far the ground near world corner (x, z) (on the 8-block lines between columns) moved, from the
-    /// columns round it whose top stood within Near blocks of <paramref name="top"/> (the corner's own top before):
-    /// their moves averaged. 0 where none did.</summary>
+    /// <summary>How far the ground at lattice corner (x, z) (on the 8-block lines, the middle of a column) moved, if
+    /// the column's top stood within Near blocks of <paramref name="top"/> (the corner's own top before); else 0.</summary>
     public float Shift(int x, int z, float top)
     {
         const float Near = 16f;
-        int size = land.Size, i = (x - land.X0) / size, k = (z - land.Z0) / size;
-        float sum = 0; int count = 0;
-        for (int dk = -1; dk <= 0; dk++)
-        for (int di = -1; di <= 0; di++)
-        {
-            int ci = i + di, ck = k + dk;
-            if (ci < 0 || ck < 0 || ci >= land.Nx || ck >= land.Nz) continue;
-            int t = land.TopNode(ci + land.Nx * ck);
-            if (t < 0 || MathF.Abs(startFloor[t] - top) > Near) continue;
-            sum += land.Floor[t] - startFloor[t];
-            count++;
-        }
-        return count == 0 ? 0f : sum / count;
+        int t = TopNodeAt(x, z);
+        return t < 0 || MathF.Abs(startFloor[t] - top) > Near ? 0f : land.Floor[t] - startFloor[t];
     }
 
-    /// <summary>How much water (blocks³) the column holding block column (x, z) has, and the world X and Z of its
-    /// corner; 0 where there's none.</summary>
-    public float Volume(int x, int z, out int cornerX, out int cornerZ)
+    /// <summary>The middle of the column holding block column (x, z) (the column round a lattice corner, Size/2 blocks
+    /// either way: half a block more one way than the other).</summary>
+    public (int X, int Z) Middle(int x, int z)
     {
-        int size = land.Size, i = (int)MathF.Floor((x - land.X0) / (float)size), k = (int)MathF.Floor((z - land.Z0) / (float)size);
-        cornerX = land.X0 + i * size; cornerZ = land.Z0 + k * size;
-        if (i < 0 || k < 0 || i >= land.Nx || k >= land.Nz) return 0f;
-        int t = land.TopNode(i + land.Nx * k);
-        return t < 0 ? 0f : Math.Max(0f, depth[t] - damp) * size * size;
+        int size = land.Size;
+        return (land.X0 + (int)MathF.Floor((x - land.X0 + size / 2f) / size) * size,
+                land.Z0 + (int)MathF.Floor((z - land.Z0 + size / 2f) / size) * size);
+    }
+
+    /// <summary>How much water (blocks³) the column with its middle at (x, z) has; 0 where there's none.</summary>
+    public float Volume(int x, int z)
+    {
+        int t = TopNodeAt(x, z);
+        return t < 0 ? 0f : Math.Max(0f, depth[t] - damp) * land.Size * land.Size;
     }
 
     /// <summary>The water's surface over the column holding block column (x, z) (blocks), or NaN where it's dry.</summary>
     public float Surface(int x, int z)
     {
-        int size = land.Size, i = (int)MathF.Floor((x - land.X0) / (float)size), k = (int)MathF.Floor((z - land.Z0) / (float)size);
-        if (i < 0 || k < 0 || i >= land.Nx || k >= land.Nz) return float.NaN;
-        int t = land.TopNode(i + land.Nx * k);
+        var (mx, mz) = Middle(x, z);
+        int t = TopNodeAt(mx, mz);
         return t < 0 || depth[t] <= 0f ? float.NaN : land.Floor[t] + depth[t];
+    }
+
+    /// <summary>The top node of the column with its middle at (x, z), or -1.</summary>
+    private int TopNodeAt(int x, int z)
+    {
+        int size = land.Size, i = (x - land.X0) / size, k = (z - land.Z0) / size;
+        if (x < land.X0 || z < land.Z0 || i >= land.Nx || k >= land.Nz) return -1;
+        return land.TopNode(i + land.Nx * k);
     }
 }
 
