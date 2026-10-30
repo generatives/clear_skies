@@ -54,6 +54,22 @@ public static class BlockMap
             }
             else { rgb[o] = (byte)(g * 0.95); rgb[o + 1] = (byte)g; rgb[o + 2] = (byte)(g * 0.8); }
         }
+        var depths = new List<int>();
+        for (int c = 0; c < top.Length; c++) if (top[c] != int.MinValue && water[c] > top[c]) depths.Add(water[c] - top[c]);
+        depths.Sort();
+        if (depths.Count > 0)
+            Console.WriteLine($"Water blocks deep: median {depths[depths.Count / 2]}, 90% {depths[depths.Count * 9 / 10]}, most {depths[^1]}; " +
+                              $"1 deep {100.0 * depths.Count(d => d == 1) / depths.Count:0}%, 2 deep {100.0 * depths.Count(d => d == 2) / depths.Count:0}%");
+        {
+            int shallow = 0, deep = 0; double shallowMoved = 0, deepMoved = 0;
+            for (int c = 0; c < top.Length; c++)
+            {
+                if (top[c] == int.MinValue || before[c] == int.MinValue || water[c] <= top[c]) continue;
+                if (water[c] - top[c] <= 2) { shallow++; shallowMoved += top[c] - before[c]; }
+                else { deep++; deepMoved += top[c] - before[c]; }
+            }
+            Console.WriteLine($"Ground under shallow water (1-2 deep) moved {shallowMoved / Math.Max(1, shallow):+0.0;-0.0} blocks on average, under deeper {deepMoved / Math.Max(1, deep):+0.0;-0.0}");
+        }
         int both = 0, moved = 0, most = 0; double sum = 0;
         for (int c = 0; c < top.Length; c++)
         {

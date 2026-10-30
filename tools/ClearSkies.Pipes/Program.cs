@@ -18,8 +18,10 @@ using StbImageWriteSharp;
 
 ulong seed = 1337;
 (int X, int Z)? cell = null;
+(float X, float Z)? at = null;
 int size = 8;
 double hours = 6, report = 600, erodeHours = 0, settleMinutes = 20;
+float settleRain = 1;
 bool fill = true, snapshots = false, ground = false;
 string outDir = "pipes-out";
 (int X, int Z, int Width)? blocks = null;
@@ -32,6 +34,7 @@ for (int a = 0; a < args.Length; a++)
     {
         case "--seed": seed = ulong.Parse(args[++a]); break;
         case "--cell": cell = (int.Parse(args[++a]), int.Parse(args[++a])); break;
+        case "--at": at = (float.Parse(args[++a]), float.Parse(args[++a])); break;
         case "--size": size = int.Parse(args[++a]); break;
         case "--hours": hours = double.Parse(args[++a]); break;
         case "--report": report = double.Parse(args[++a]); break;
@@ -43,6 +46,7 @@ for (int a = 0; a < args.Length; a++)
         case "--wave-depth": { var v = float.Parse(args[++a]); settings.Add(p => p.WaveDepth = v); break; }
         case "--erode": erodeHours = double.Parse(args[++a]); break;
         case "--settle": settleMinutes = double.Parse(args[++a]); break;
+        case "--settle-rain": settleRain = float.Parse(args[++a]); break;
         case "--carry": { var v = float.Parse(args[++a]); settings.Add(p => p.Carry = v); break; }
         case "--pick": { var v = float.Parse(args[++a]); settings.Add(p => p.Pick = v); break; }
         case "--drop": { var v = float.Parse(args[++a]); settings.Add(p => p.Drop = v); break; }
@@ -68,7 +72,7 @@ for (int a = 0; a < args.Length; a++)
     }
 }
 if (!widened) HeartGrid.WidenPieces(2f); // pieces twice the game's width unless told otherwise
-var landmass = cell ?? HeartGrid.Landmass(seed, 11250f, -6250f);
+var landmass = cell ?? (at is { } p ? HeartGrid.Landmass(seed, p.X, p.Z) : HeartGrid.Landmass(seed, 11250f, -6250f));
 Console.WriteLine($"Seed {seed}, landmass {landmass}, {Environment.ProcessorCount} cores");
 if (blocks is { } area) { Directory.CreateDirectory(outDir); BlockMap.Write(seed, LandscapeSettings.Parse(terrain), area.X, area.Z, area.Width, Path.Combine(outDir, "blocks.png")); return 0; }
 
@@ -104,10 +108,28 @@ if (erodeHours > 0)
     // Lakes whose outlets were cut start at their new spill level rather than draining down to it.
     if (fill) pipes.FillHollows();
     Console.WriteLine("Settling the water on the worn land");
+    pipes.Rain *= settleRain;
     Run(pipes.Time + settleMinutes * 60, stopWhenSettled: false);
     WriteWear(Path.Combine(outDir, "wear.png"));
 }
 WriteMap(Path.Combine(outDir, "pipes.png"));
+{
+    // Standing water: how deep, and how much its bed moved.
+    var depths = new List<float>(); double raised = 0, lowered = 0;
+    float column = pipes.Rain * size * size;
+    for (int c = 0; c < land.Columns; c++)
+    {
+        int n = land.TopNode(c);
+        if (n < 0 || pipes.Depth[n] < 0.5f || pipes.Through(n) / column >= 200) continue;
+        depths.Add(pipes.Depth[n]);
+        float moved = land.Floor[n] - startFloor[n];
+        if (moved > 0) raised += moved; else lowered -= moved;
+    }
+    depths.Sort();
+    float At(double q) => depths.Count == 0 ? 0 : depths[(int)(q * (depths.Count - 1))];
+    Console.WriteLine($"Standing water: {depths.Count:N0} columns, depth median {At(0.5):0.0}, 90% {At(0.9):0.0}, deepest {At(1):0.0} blocks; " +
+                      $"beds raised {raised / Math.Max(1, depths.Count):0.0} and lowered {lowered / Math.Max(1, depths.Count):0.0} blocks a column on average");
+}
 if (ground) Console.WriteLine($"Ground balance: {pipes.GroundBalance()}");
 Console.WriteLine($"Steps: flow {pipes.FlowTime.Elapsed.TotalSeconds:0.0} s, apply {pipes.ApplyTime.Elapsed.TotalSeconds:0.0} s, " +
                   $"ground {pipes.GroundTime.Elapsed.TotalSeconds:0.0} s, erosion {pipes.ErodeTime.Elapsed.TotalSeconds:0.0} s");
