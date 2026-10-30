@@ -203,6 +203,7 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
                 level.Rings.Clear();
                 level.Rings.AddRange(level.Current);
                 Rebuild(level);
+                if (level == FullDetail) _voxels.Generator.FocusOn(level.Rings.Select(r => (r.Centre.x, r.Centre.z)).ToArray());
                 moved = true;
             }
         }
@@ -748,7 +749,9 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         // Edited while loaded: it loads from the store next time (the Host has every edit), so an edit off the island's
         // terrain (a bridge, a tower) comes back, and one that cleared a chunk out stops costing budget.
         if (level.Level == 0 && entry is not null && entry.Data.IsDirty) RecordEdited(pos, entry.Data.HasAnyNonAir());
+        // Its arrays go to the next chunk to load: now, unless the pipeline made it (then once no job reads them).
+        bool released = entry is { DataDropped: false } && !entry.Entity.Has<Pipeline.InPipeline>();
         level.Volume.RemoveChunk(pos);
-        if (entry is { DataDropped: false }) entry.Data.Release(); // its arrays go to the next chunk to load
+        if (released) entry!.Data.Release();
     }
 }

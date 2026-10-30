@@ -22,7 +22,6 @@ public readonly record struct FrameBudgets(int WorkerSlots, double MainMs);
 /// </remarks>
 public sealed class ChunkPipeline
 {
-    private const int MaxSkipped = 1024; // ready chunks looked past a frame, for their worker being full
     // The most of a frame's main-thread time spent asking external stages: thousands of chunks wait on their first
     // light while the world loads, each asked every frame.
     private const double ExternalShare = 0.25;
@@ -38,8 +37,11 @@ public sealed class ChunkPipeline
     // Ready stages, one queue per executor (by Executor), so one running out doesn't hold up the others.
     private readonly PriorityQueue<(PipelineChunk Record, Stage Stage), (float, int)>[] _ready =
         Enum.GetValues<Executor>().Select(_ => new PriorityQueue<(PipelineChunk, Stage), (float, int)>()).ToArray();
-    // Finished worker results; urgent ones (run on no particular worker, -1) taken first.
-    private readonly ConcurrentQueue<(PipelineChunk Record, WorkerStage Stage, int Worker, object Made)> _made = new(), _madeUrgent = new();
+    // Finished worker results, with what each read; urgent ones (run on no particular worker, -1) taken first.
+    private readonly ConcurrentQueue<(PipelineChunk Record, WorkerStage Stage, int Worker, StageInputs Read, object Made)> _made = new(), _madeUrgent = new();
+    // Outputs running worker jobs read, and how many read each; what to do with one once none does (see OnceUnread).
+    private readonly Dictionary<object, int> _readers = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<object, Action> _onceUnread = new(ReferenceEqualityComparer.Instance);
     // External stages asked and not done yet: asked again in turn, as far as each frame's time goes.
     private readonly Queue<(PipelineChunk Record, ExternalStage Stage)> _awaitingExternal = new();
     private readonly HashSet<PipelineChunk> _maybeDrop = new();
@@ -48,8 +50,7 @@ public sealed class ChunkPipeline
     private readonly int[] _inFlight; // per worker
     private readonly List<((PipelineChunk, Stage) Item, (float, int) Priority)> _skipped = new();
 
-    /// <summary>On the background workers (see <see cref="BackgroundWork"/>), each chunk on the one for its ground (see
-    /// <see cref="WorkerOf"/>).</summary>
+    /// <summary>On the background workers (see <see cref="BackgroundWork"/>), each job on the one with the fewest.</summary>
     public ChunkPipeline() : this(BackgroundWork.Queue, BackgroundWork.Workers, BackgroundWork.Soon) { }
 
     /// <param name="runOnWorker">Runs worker stages, all on one worker (tests run them in place).</param>
@@ -65,17 +66,12 @@ public sealed class ChunkPipeline
         _inFlight = new int[workers];
     }
 
-    /// <summary>Chunks over the same column of this level's chunks (16 of the finest grid's columns) go to the same worker.</summary>
-    private const int WorkerColumnLevel = 2;
-
-    /// <summary>Which worker makes a chunk: the one for the column of level-<see cref="WorkerColumnLevel"/> chunks it's
-    /// in, so every grid's chunks over the same ground are made on the same worker, and share what its caches keep of
-    /// that ground (a generator's column profiles).</summary>
-    private int WorkerOf(ChunkKey key)
+    /// <summary>The worker with the fewest jobs.</summary>
+    private int LeastBusy()
     {
-        int shift = WorkerColumnLevel - _grids[key.Grid].Level;
-        int x = shift >= 0 ? key.Pos.X >> shift : key.Pos.X << -shift, z = shift >= 0 ? key.Pos.Z >> shift : key.Pos.Z << -shift;
-        return (int)((uint)(x * 73856093 ^ z * 19349663) % (uint)_inFlight.Length);
+        int best = 0;
+        for (int w = 1; w < _inFlight.Length; w++) if (_inFlight[w] < _inFlight[best]) best = w;
+        return best;
     }
 
     /// <summary>Lower runs first, per chunk and stage: by default, all the same.</summary>
@@ -211,7 +207,7 @@ public sealed class ChunkPipeline
     private void Unmake(PipelineChunk record, Stage stage)
     {
         ref var slot = ref record.At(stage.Id);
-        if (slot.Output is { } output) { slot.Output = null; stage.Release(output); }
+        if (slot.Output is { } output) { slot.Output = null; Release(stage, output); }
         bool made = slot.Version > 0;
         if (!slot.Is(SlotFlags.Stale | SlotFlags.Queued | SlotFlags.Running)) slot.Since = Stopwatch.GetTimestamp();
         slot.Version = 0;
@@ -257,58 +253,19 @@ public sealed class ChunkPipeline
     public void Update(FrameBudgets budgets)
     {
         long start = Stopwatch.GetTimestamp();
+        _inStages = 0;
         bool MainLeft() => Stopwatch.GetElapsedTime(start).TotalMilliseconds < budgets.MainMs;
         if (FrameMs.Length != _stages.Count + 1) FrameMs = new double[_stages.Count + 1];
         Array.Clear(FrameMs);
 
-        while (MainLeft() && (_madeUrgent.TryDequeue(out var made) || _made.TryDequeue(out made)))
-        {
-            using var timed = Timed(made.Stage);
-            if (made.Worker >= 0) _inFlight[made.Worker]--;
-            if (made.Made is Exception e) throw new InvalidOperationException($"{made.Stage} failed on {made.Record}", e);
-            if (made.Record.Removed) { made.Stage.Release(made.Made); continue; }
-            if (!made.Record.Needs(made.Stage)) // no longer wanted for what it serves
-            {
-                made.Record.At(made.Stage.Id).Set(SlotFlags.Running, false);
-                made.Stage.Release(made.Made);
-                _maybeDrop.Add(made.Record); // let go of while this ran: dropped now
-                continue;
-            }
-            var change = made.Stage.AppliedAny(made.Record, made.Made, made.Record.At(made.Stage.Id).Output);
-            Finish(made.Record, made.Stage, made.Made, change);
-        }
+        TakeMade(urgentOnly: false);
 
         // Everything below is on the main thread, so all of it stops when the frame's time is spent.
-        // Nearest first, each to its worker; one whose worker is full waits its turn (looked past a bounded number of
-        // times a frame, so one busy worker doesn't cost the frame).
-        // Urgent work first, whether or not its worker is full: it goes before what's queued on the workers already.
-        while (MainLeft() && _ready[(int)Executor.Worker].TryPeek(out _, out var first) && first.Item1 == Urgent
-               && TakeReady(Executor.Worker, out var record, out var stage, out var priority))
-        {
-            if (priority.Item1 != Urgent)
-            {
-                record.At(stage.Id).Set(SlotFlags.Queued, true);
-                _ready[(int)Executor.Worker].Enqueue((record, stage), priority);
-                break;
-            }
-            StartWorker(record, (WorkerStage)stage, -1);
-        }
-        int full = _inFlight.Count(n => n >= budgets.WorkerSlots);
-        while (full < _inFlight.Length && _skipped.Count < MaxSkipped && MainLeft()
-               && TakeReady(Executor.Worker, out var record, out var stage, out var priority))
-        {
-            int worker = WorkerOf(record.Key);
-            if (_inFlight[worker] >= budgets.WorkerSlots)
-            {
-                record.At(stage.Id).Set(SlotFlags.Queued, true);
-                _skipped.Add(((record, stage), priority));
-                continue;
-            }
-            StartWorker(record, (WorkerStage)stage, worker);
-            if (_inFlight[worker] == budgets.WorkerSlots) full++;
-        }
-        foreach (var (item, priority) in _skipped) _ready[(int)Executor.Worker].Enqueue(item, priority);
-        _skipped.Clear();
+        // Urgent work first; then nearest first, each to the least busy worker, while one has room.
+        StartUrgent();
+        while (_inFlight[LeastBusy()] < budgets.WorkerSlots && MainLeft()
+               && TakeReady(Executor.Worker, out var record, out var stage, out _))
+            StartWorker(record, (WorkerStage)stage, LeastBusy());
 
         // Asking takes a share of the time at most, so a crowd of chunks waiting on other systems leaves the frame stages
         // their turn. Those ready are asked first, nearest first (often done at once); then each one waiting is asked
@@ -341,6 +298,7 @@ public sealed class ChunkPipeline
             if (!RunFrame(record, (FrameStage)stage)) _skipped.Add(((record, stage), priority));
         foreach (var (item, priority) in _skipped) _ready[(int)Executor.Frame].Enqueue(item, priority);
         _skipped.Clear();
+        StartUrgent(); // what the frame stages made ready (a ship's blocks): on a worker now, not next frame
 
         // Dropping lets go of what a chunk made, which can let go of holds on others: dropped too, in turn. Within the
         // frame's time, but some each frame whatever, so they don't pile up while the stages take it all.
@@ -353,6 +311,64 @@ public sealed class ChunkPipeline
             DropIfUnneeded(_dropping.Dequeue()); // wanted again meanwhile: kept
         }
         FrameMs[^1] = Stopwatch.GetElapsedTime(dropping).TotalMilliseconds;
+        TakeMade(urgentOnly: true); // urgent work done meanwhile is used this frame
+        BookkeepingMs = (Stopwatch.GetTimestamp() - start - _inStages) * 1000.0 / Stopwatch.Frequency;
+
+        // Finished worker results (only the urgent ones', at the end of the frame).
+        void TakeMade(bool urgentOnly)
+        {
+            while (MainLeft() && (_madeUrgent.TryDequeue(out var made) || !urgentOnly && _made.TryDequeue(out made)))
+            {
+                using var timed = Timed(made.Stage);
+                if (made.Worker >= 0) _inFlight[made.Worker]--;
+                Unread(made.Read);
+                if (made.Made is Exception e) throw new InvalidOperationException($"{made.Stage} failed on {made.Record}", e);
+                if (made.Record.Removed) { Release(made.Stage, made.Made); continue; }
+                if (!made.Record.Needs(made.Stage)) // no longer wanted for what it serves
+                {
+                    made.Record.At(made.Stage.Id).Set(SlotFlags.Running, false);
+                    Release(made.Stage, made.Made);
+                    _maybeDrop.Add(made.Record); // let go of while this ran: dropped now
+                    continue;
+                }
+                long t = Stopwatch.GetTimestamp();
+                var change = made.Stage.AppliedAny(made.Record, made.Made, made.Record.At(made.Stage.Id).Output);
+                _inStages += Stopwatch.GetTimestamp() - t;
+                Finish(made.Record, made.Stage, made.Made, change);
+            }
+        }
+
+        // Urgent work, whether or not the workers are full: it goes before what's queued on them already.
+        void StartUrgent()
+        {
+            while (MainLeft() && _ready[(int)Executor.Worker].TryPeek(out _, out var first) && first.Item1 == Urgent
+                   && TakeReady(Executor.Worker, out var record, out var stage, out var priority))
+            {
+                if (priority.Item1 != Urgent)
+                {
+                    record.At(stage.Id).Set(SlotFlags.Queued, true);
+                    _ready[(int)Executor.Worker].Enqueue((record, stage), priority);
+                    break;
+                }
+                StartWorker(record, (WorkerStage)stage, -1);
+            }
+        }
+    }
+
+    // Time in the stages' own code this frame (applying, preparing, running, asking, releasing), in timestamp ticks.
+    private long _inStages;
+
+    /// <summary>Main-thread time (ms) the last <see cref="Update"/> spent outside the stages' own code: working out
+    /// what's ready, passing changes on, gathering inputs and dropping chunks.</summary>
+    public double BookkeepingMs { get; private set; }
+
+    /// <summary>Lets go of a stage's output, once no running job reads it.</summary>
+    private void Release(Stage stage, object output)
+    {
+        if (_readers.ContainsKey(output)) { OnceUnread(output, () => Release(stage, output)); return; }
+        long t = Stopwatch.GetTimestamp();
+        stage.Release(output);
+        _inStages += Stopwatch.GetTimestamp() - t;
     }
 
     /// <summary>Main-thread time (ms) the last <see cref="Update"/> spent on each stage, by id (taking its finished
@@ -495,7 +511,7 @@ public sealed class ChunkPipeline
     private const float Urgent = float.NegativeInfinity;
 
     private (float, int) RankOf(PipelineChunk record, Stage stage)
-        => (record.At(stage.Id).Is(SlotFlags.Urgent) ? Urgent : Priority?.Invoke(record.Key, stage) ?? 0f, -stage.Id);
+        => (record.At(stage.Id).Is(SlotFlags.Urgent) || stage.Urgent ? Urgent : Priority?.Invoke(record.Key, stage) ?? 0f, -stage.Id);
 
     private bool InputsThere(PipelineChunk record, Stage stage)
     {
@@ -533,7 +549,11 @@ public sealed class ChunkPipeline
     {
         using var timed = Timed(stage);
         var inputs = Gather(record, stage);
-        inputs.Prepared = stage.Prepare(record);
+        long t = Stopwatch.GetTimestamp();
+        inputs.Prepared = stage.Prepare(record, inputs);
+        _inStages += Stopwatch.GetTimestamp() - t;
+        foreach (var (_, _, output) in inputs.Read)
+            if (output != null) _readers[output] = _readers.GetValueOrDefault(output) + 1;
         ref var slot = ref record.At(stage.Id);
         slot.Set(SlotFlags.Stale, false);
         slot.Set(SlotFlags.Running, true);
@@ -543,7 +563,7 @@ public sealed class ChunkPipeline
             object made;
             try { made = stage.MakeAny(key, inputs); }
             catch (Exception e) { made = e; }
-            (worker < 0 ? _madeUrgent : _made).Enqueue((record, stage, worker, made));
+            (worker < 0 ? _madeUrgent : _made).Enqueue((record, stage, worker, inputs, made));
         };
         if (worker < 0) { _runUrgent(work); return; }
         _inFlight[worker]++;
@@ -554,7 +574,10 @@ public sealed class ChunkPipeline
     private bool RunFrame(PipelineChunk record, FrameStage stage)
     {
         using var timed = Timed(stage);
-        var result = stage.Run(record, Gather(record, stage));
+        var inputs = Gather(record, stage);
+        long t = Stopwatch.GetTimestamp();
+        var result = stage.Run(record, inputs);
+        _inStages += Stopwatch.GetTimestamp() - t;
         if (!result.Finished) { record.At(stage.Id).Set(SlotFlags.Queued, true); return false; }
         record.At(stage.Id).Set(SlotFlags.Stale, false);
         Finish(record, stage, result.Output, result.Change, result.Changed);
@@ -565,7 +588,9 @@ public sealed class ChunkPipeline
     private bool Ask(PipelineChunk record, ExternalStage stage)
     {
         using var timed = Timed(stage);
+        long t = Stopwatch.GetTimestamp();
         var result = stage.Request(record);
+        _inStages += Stopwatch.GetTimestamp() - t;
         if (result.Finished) Finish(record, stage, result.Output, result.Change, result.Changed);
         if (result.Again == 0) return result.Finished;
         if (!result.Finished)
@@ -589,7 +614,7 @@ public sealed class ChunkPipeline
     {
         ref var slot = ref record.At(stage.Id);
         slot.Set(SlotFlags.Running, false);
-        if (slot.Output is { } before && !ReferenceEquals(before, output)) stage.Release(before);
+        if (slot.Output is { } before && !ReferenceEquals(before, output)) Release(stage, before);
         slot.Output = output;
         slot.Version++;
         if (slot.Is(SlotFlags.Urgent))
@@ -600,6 +625,28 @@ public sealed class ChunkPipeline
         if (changed) Propagate(record, stage, change, acceptsMissingOnly: false);
         Check(record, stage.Id);  // its inputs changed while it ran: runs again
         _maybeDrop.Add(record);
+    }
+
+    /// <summary>Does <paramref name="release"/> once no running worker job reads <paramref name="output"/> (now, if
+    /// none does): for letting go of what an output holds (a chunk's blocks) while a job may still be reading it.</summary>
+    public void OnceUnread(object output, Action release)
+    {
+        if (!_readers.ContainsKey(output)) release();
+        else if (_onceUnread.TryGetValue(output, out var before)) _onceUnread[output] = before + release;
+        else _onceUnread[output] = release;
+    }
+
+    /// <summary>A worker job that read <paramref name="read"/> finished.</summary>
+    private void Unread(StageInputs read)
+    {
+        foreach (var (_, _, output) in read.Read)
+        {
+            if (output == null) continue;
+            int n = _readers[output] - 1;
+            if (n > 0) { _readers[output] = n; continue; }
+            _readers.Remove(output);
+            if (_onceUnread.Remove(output, out var release)) release();
+        }
     }
 
     /// <summary>Marks what reads <paramref name="stage"/>'s output on the chunk, and cares about the change, to run again.</summary>
@@ -641,7 +688,7 @@ public sealed class ChunkPipeline
         {
             if (!record.Has(stage.Id)) continue;
             ref var slot = ref record.At(stage.Id);
-            if (slot.Output is { } output) { slot.Output = null; stage.Release(output); }
+            if (slot.Output is { } output) { slot.Output = null; Release(stage, output); }
         }
         Dropped?.Invoke(record);
     }

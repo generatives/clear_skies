@@ -6,8 +6,8 @@ using ClearSkies.Engine.Voxels;
 
 namespace ClearSkies.Engine.ECS;
 
-/// <summary>A chunk's blocks as the <see cref="VoxelsStage"/> made them (null if it came out air), with their packing
-/// for the GPU, until they're added to its volume: then only that they're there (the volume has them).</summary>
+/// <summary>A chunk's blocks as the <see cref="VoxelsStage"/> made them (null if it came out air, or once dropped), with
+/// their packing for the GPU. Once added to its volume, the volume shares them; they're released with this.</summary>
 public sealed class ChunkVoxels(ChunkKey key, ChunkData? data, ChunkPreparation? prepared)
 {
     public readonly ChunkKey Key = key;

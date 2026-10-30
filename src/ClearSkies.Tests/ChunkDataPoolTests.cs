@@ -3,23 +3,10 @@ using Xunit;
 
 namespace ClearSkies.Tests;
 
-/// <summary>An unloaded chunk's arrays are recycled only once no background job still reads them.</summary>
+/// <summary>An unloaded chunk's arrays go to the next chunk.</summary>
 public class ChunkDataPoolTests
 {
     private static BlockId Solid => (BlockId)1;
-
-    [Fact]
-    public void ReleasedChunkKeepsItsBlocksWhileRetained()
-    {
-        var data = new ChunkData();
-        data.Set(3, 4, 5, Solid);
-        data.Retain();
-        data.Release();
-        Assert.Equal(Solid, data.Get(3, 4, 5)); // a mesh job still reading sees the chunk as it was
-
-        data.Unretain();
-        Assert.Equal(BlockId.Air, data.Get(3, 4, 5)); // recycled: a stale holder sees air, never another chunk
-    }
 
     [Fact]
     public void ReusedArraysStartFilled()

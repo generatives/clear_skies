@@ -13,7 +13,7 @@ namespace ClearSkies.Engine.ECS;
 /// pipeline calls: an edit (<see cref="ChunkBlocksChanged"/>) is a change to the chunk's blocks, and a ship's chunks
 /// (those of a <see cref="DynamicGrid"/>'s volume, made by edits rather than streamed) are wanted as they come and go,
 /// each ship a grid of its own while it's here; and a chunk is wanted for <see cref="Purpose.Draw"/> while its entity is
-/// <see cref="Rendered"/>.
+/// <see cref="Rendered"/>, and for <see cref="Purpose.Collide"/> while it has a <see cref="PhysicsPresence"/>.
 /// </summary>
 public sealed class ChunkPipelineSystem : ISystem, IDebugUiSystem
 {
@@ -30,10 +30,10 @@ public sealed class ChunkPipelineSystem : ISystem, IDebugUiSystem
     public VolumeBlocksStage ShipBlocks { get; }
 
     private readonly IDisposable[] _subscriptions;
-    // Chunks that may have started or stopped being drawn: their entity came, went, or was drawn or no longer. Each is
-    // looked at as the pipeline runs, so a chunk replaced by another in the same place is wanted for drawing as its
-    // entity is then.
-    private readonly HashSet<ChunkKey> _maybeDrawn = new();
+    // Chunks that may have started or stopped being drawn or collided with: their entity came, went, or gained or lost
+    // the layer. Each is looked at as the pipeline runs, so a chunk replaced by another in the same place is wanted for
+    // what its entity is then.
+    private readonly HashSet<ChunkKey> _maybeWantedFor = new();
 
     public ChunkPipelineSystem(World world, ChunkPipeline? pipeline = null)
     {
@@ -44,10 +44,12 @@ public sealed class ChunkPipelineSystem : ISystem, IDebugUiSystem
             world.Subscribe<ChunkBlocksChanged>(Edited),
             world.SubscribeComponentAdded<Chunk>(ChunkAdded),
             world.SubscribeEntityDisposed(Disposed),
-            world.SubscribeComponentAdded((in Entity e, in InPipeline _) => MaybeDrawn(e)),
-            world.SubscribeComponentChanged((in Entity e, in InPipeline _, in InPipeline _) => MaybeDrawn(e)),
-            world.SubscribeComponentAdded((in Entity e, in Rendered _) => MaybeDrawn(e)),
-            world.SubscribeComponentRemoved((in Entity e, in Rendered _) => MaybeDrawn(e)),
+            world.SubscribeComponentAdded((in Entity e, in InPipeline _) => MaybeWantedFor(e)),
+            world.SubscribeComponentChanged((in Entity e, in InPipeline _, in InPipeline _) => MaybeWantedFor(e)),
+            world.SubscribeComponentAdded((in Entity e, in Rendered _) => MaybeWantedFor(e)),
+            world.SubscribeComponentRemoved((in Entity e, in Rendered _) => MaybeWantedFor(e)),
+            world.SubscribeComponentAdded((in Entity e, in PhysicsPresence _) => MaybeWantedFor(e)),
+            world.SubscribeComponentRemoved((in Entity e, in PhysicsPresence _) => MaybeWantedFor(e)),
         };
     }
 
@@ -76,35 +78,42 @@ public sealed class ChunkPipelineSystem : ISystem, IDebugUiSystem
     /// <summary>A ship's chunk left its volume (it's let go of), or the ship went (its grid goes).</summary>
     private void Disposed(in Entity e)
     {
-        MaybeDrawn(e);
+        MaybeWantedFor(e);
         if (e.Has<ChunkGrid>() && Pipeline.GridOf(e.Get<ChunkGrid>().Volume) is { } grid) Pipeline.RemoveGrid(grid);
         else if (e.Has<InPipeline>() && ShipBlocks.AppliesTo(Pipeline.Grid(e.Get<InPipeline>().Key.Grid))) Pipeline.Want(e.Get<InPipeline>().Key, false);
     }
 
-    private void MaybeDrawn(in Entity e)
+    private void MaybeWantedFor(in Entity e)
     {
-        if (e.Has<InPipeline>()) _maybeDrawn.Add(e.Get<InPipeline>().Key);
+        if (e.Has<InPipeline>()) _maybeWantedFor.Add(e.Get<InPipeline>().Key);
     }
 
-    private readonly StepTimer _steps = new("Wanting chunks drawn or not", "Taking finished work and running stages") { Owner = "Chunk Pipeline" };
+    private readonly StepTimer _steps = new("Wanting chunks drawn and collided or not", "Taking finished work and running stages") { Owner = "Chunk Pipeline" };
     private StepTimer? _byStage; // the same frame's time by stage, made once the stages are all there
 
     public void Update(float dt)
     {
         _steps.Start();
-        foreach (var key in _maybeDrawn) Pipeline.WantFor(key, Purpose.Draw, Pipeline.EntryOf(key)?.Entity.Has<Rendered>() == true);
-        _maybeDrawn.Clear();
+        foreach (var key in _maybeWantedFor)
+        {
+            var entity = Pipeline.EntryOf(key)?.Entity;
+            Pipeline.WantFor(key, Purpose.Draw, entity?.Has<Rendered>() == true);
+            Pipeline.WantFor(key, Purpose.Collide, entity?.Has<PhysicsPresence>() == true);
+        }
+        _maybeWantedFor.Clear();
         _steps.Lap(0);
         var gc = GC.GetTotalPauseDuration();
         Pipeline.Update(new FrameBudgets(WorkerSlots, MainMs));
         _steps.Lap(1);
         int n = Pipeline.FrameMs.Length;
-        if (_byStage?.Count != n + 1)
+        if (_byStage?.Count != n + 2)
             _byStage = new StepTimer(Pipeline.Stages.Select(s => s.Name).Append("Dropping chunks")
-                                         .Append("GC pauses (in the times above)").ToArray()) { Owner = "Chunk Pipeline stages" };
+                                         .Append("GC pauses (in the times above)")
+                                         .Append("Pipeline bookkeeping (in the times above)").ToArray()) { Owner = "Chunk Pipeline stages" };
         _byStage.Start();
         for (int i = 0; i < n; i++) _byStage.Add(i, Pipeline.FrameMs[i]);
         _byStage.Add(n, (GC.GetTotalPauseDuration() - gc).TotalMilliseconds); // a stage's spike may be the GC's
+        _byStage.Add(n + 1, Pipeline.BookkeepingMs); // outside the stages' own code: what could move off the main thread
     }
 
     public string DebugName => "Chunk Pipeline";

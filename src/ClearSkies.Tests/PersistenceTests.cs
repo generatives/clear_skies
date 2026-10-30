@@ -324,8 +324,7 @@ public class SpawnQueueTests
         Assert.True(game.Host.World.GetEntities().With<TerrainInterest>().AsEnumerable().Any()); // its terrain is loading meanwhile
         Assert.True(client.Registry.IsLive(d.Id)); // only drawn there: it needs nothing
         ready = true;
-        game.Tick(5);
-        Assert.True(game.Host.Registry.Find(d.Id)!.Value.Has<PhysicsBodyComponent>());
+        Assert.True(game.TickUntil(() => game.Host.Registry.Find(d.Id) is { } grid && grid.Has<PhysicsBodyComponent>(), 60, minSeconds: 10));
         Assert.True(client.Registry.IsLive(d.Id));
     }
 
@@ -335,10 +334,13 @@ public class SpawnQueueTests
         // A chunk of nothing but levers has blocks but no collider (levers are passable): it mustn't hold back the grids
         // near it forever.
         using var scene = new HeadlessScene();
+        using var db = SaveDatabase.InMemory();
+        HeadlessStreamingTests.Streaming(scene, db);
         scene.SpawnLocalPlayer(new Vector3(0, 60, 0), freeFly: true);
+        scene.Tick(); // streaming around them
         scene.WorldVolume.SetBlock(4, 40, 4, BlockId.Lever);
         scene.WorldVolume.SetBlock(4, 10, 4, BlockId.Stone);
-        Assert.True(scene.TickUntil(() => scene.PhysicsBodies.CollidersReady(scene.WorldVolume, new Vector3(4, 40, 4), 64f), 120,
+        Assert.True(scene.TickUntil(() => StaticCollider.ReadyAround(scene.WorldVolume, new Vector3(4, 40, 4), 64f), 120,
                                      minSeconds: 10));
     }
 }
