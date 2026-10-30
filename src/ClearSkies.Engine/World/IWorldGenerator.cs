@@ -12,3 +12,14 @@ public interface IWorldGenerator
     /// so it should be cheap: bounds, not generation.</summary>
     ulong ColumnLayers(int chunkX, int chunkZ, int minChunkY);
 }
+
+/// <summary>A generator that can make a level of distant terrain's chunk itself, without the full chunks under it (see
+/// <see cref="ECS.VoxelsStage"/>).</summary>
+public interface ICoarseWorldGenerator
+{
+    /// <summary>Fills level <paramref name="level"/>'s chunk <paramref name="pos"/> (each voxel 2^level blocks on a
+    /// side, in that level's chunks) with roughly what shrinking the full chunks under it would (see
+    /// <see cref="Voxels.CoarseTerrain"/>): a voxel holds the ground that fills at least half of it, and plants and
+    /// trees show as they would from afar.</summary>
+    void GenerateCoarse(ChunkData data, ChunkPosition pos, int level);
+}

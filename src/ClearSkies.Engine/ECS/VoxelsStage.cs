@@ -101,11 +101,21 @@ public sealed class VoxelsStage(IReadOnlyCollection<PipelineGrid> grids, Func<IW
         return null;
     }
 
-    /// <summary>Level <paramref name="k"/>'s chunk <paramref name="pos"/>, from the full chunks under it. Null if air.</summary>
+    /// <summary>Level <paramref name="k"/>'s chunk <paramref name="pos"/>, from the full chunks under it (or from the
+    /// generator itself, if it can and none of them is edited or built in). Null if air.</summary>
     private ChunkData? MakeCoarse(int k, ChunkPosition pos)
     {
         int n = 1 << k;
         ulong under = edits.FullLayersUnder(k, pos.Y);
+        if (Generator is ICoarseWorldGenerator direct && !AnyKept(n, pos, under))
+        {
+            var made = new ChunkData();
+            direct.GenerateCoarse(made, pos, k);
+            made.Compact();
+            if (made.HasAnyNonAir()) return made;
+            made.Release();
+            return null;
+        }
         var coarse = new Dictionary<ChunkPosition, ChunkData>();
         try
         {
@@ -145,5 +155,17 @@ public sealed class VoxelsStage(IReadOnlyCollection<PipelineGrid> grids, Func<IW
         {
             foreach (var (_, chunk) in coarse) chunk.Release();
         }
+    }
+
+    /// <summary>Whether any of the full chunks under coarse chunk <paramref name="pos"/> (n by n columns of them, in the
+    /// layers <paramref name="under"/>) is kept in the store: edited, or holding a build.</summary>
+    private bool AnyKept(int n, ChunkPosition pos, ulong under)
+    {
+        for (int j = 0; j < n * n; j++)
+        {
+            int x = pos.X * n + j % n, z = pos.Z * n + j / n;
+            if (((edits.EditedLayers(x, z) | edits.BuiltLayers(x, z)) & under) != 0) return true;
+        }
+        return false;
     }
 }

@@ -17,7 +17,7 @@ namespace ClearSkies.Game.Generation;
 /// from those: per chunk column, block column by block column, as solid spans (runs of solid blocks), then filled in
 /// chunk by chunk.
 /// </summary>
-public sealed class HeartWorldGenerator : IWorldGenerator
+public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
 {
     private const int S = ChunkData.Size;
     private const int MaxSpans = 32; // per block column
@@ -102,16 +102,22 @@ public sealed class HeartWorldGenerator : IWorldGenerator
 
     // ── Generation ──────────────────────────────────────────────────────────
 
-    /// <summary>The chunk column last prepared, and the columns prepared lately (see <see cref="ProfileCache"/>): a
-    /// generator is used on one thread, and chunks over the same ground are made on the same one.</summary>
+    /// <summary>The chunk column last prepared, and the columns prepared lately (see <see cref="ColumnCache{T}"/>): a
+    /// generator is used on one thread, and chunks over the same ground are made on the same one. A profile is about
+    /// 30 KB (more where there's lots of ground), so a few MB a generator: enough for the few level-2 columns (16 chunk
+    /// columns each) a worker is making chunks over at once.</summary>
     private ColumnProfile? _profile;
-    private readonly ProfileCache _profiles = new();
+    private readonly ColumnCache<ColumnProfile> _profiles = new(128);
+
+    /// <summary>The lattice last worked out (see FillLattice), and the ones worked out lately: about 15 KB each, kept for
+    /// more columns than a level-4 chunk of distant terrain covers (see GenerateCoarse), so the chunks over it reuse them.</summary>
+    private DistanceLattice _lattice = new();
+    private readonly ColumnCache<DistanceLattice> _lattices = new(320);
 
     // While a column is worked out (see BuildProfile), per block column: its solid spans, before they're packed into
     // its ColumnProfile; and the column's lattice, and one block column's distances interpolated from it, per level.
     private readonly (short Lo, short Hi)[] _spans = new (short, short)[S * S * MaxSpans];
     private readonly byte[] _spanCount = new byte[S * S];
-    private readonly DistanceLattice _lattice = new();
     private float[] _levels = Array.Empty<float>();
 
     // The hearts around the chunk column being profiled, per layer: cells from (_cx0, _cy0, _cz0), _nx by _ny by _nz of
@@ -186,8 +192,88 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         }
     }
 
+    public void GenerateCoarse(ChunkData data, ChunkPosition pos, int level)
+    {
+        // Each voxel by the block column through its middle: its spans from the lattice, as BuildProfile has them, and
+        // what's on their tops. The voxels over one chunk column are done together, so its lattice is worked out once.
+        int c = 1 << level, group = System.Math.Max(1, S / c); // blocks a voxel; voxels a side over one chunk column
+        int bx0 = pos.X * S * c, by0 = pos.Y * S * c, bz0 = pos.Z * S * c;
+        Span<(short Lo, short Hi)> spans = stackalloc (short, short)[MaxSpans];
+        for (int gz = 0; gz < S; gz += group)
+        for (int gx = 0; gx < S; gx += group)
+        {
+            int cx = (bx0 + gx * c + c / 2) >> 5, cz = (bz0 + gz * c + c / 2) >> 5;
+            if (!FillLattice(cx, cz)) continue;
+            for (int v = gz; v < gz + group; v++)
+            for (int u = gx; u < gx + group; u++)
+            {
+                int x = bx0 + u * c + c / 2, z = bz0 + v * c + c / 2;
+                int count = ColumnSpans(x - cx * S, z - cz * S, spans);
+                if (count > 0) CoarseColumn(data, u, v, x, z, c, by0, spans[..count]);
+            }
+        }
+    }
+
+    /// <summary>Fills coarse column (u, v) of a coarse chunk (voxels <paramref name="c"/> blocks on a side, the lowest
+    /// at world Y <paramref name="by0"/>) from block column (x, z)'s <paramref name="spans"/>: a voxel at least half
+    /// filled by a span takes the block showing at its top; then plants, and the crowns of trees as often as they cover
+    /// ground round there.</summary>
+    private void CoarseColumn(ChunkData data, int u, int v, int x, int z, int c, int by0, ReadOnlySpan<(short Lo, short Hi)> spans)
+    {
+        // (Most of a column's voxels are in the chunks over and under this one: nothing to look up if none of its ground
+        // or what grows on it is in this one.)
+        int by1 = by0 + S * c - 1;
+        bool any = false;
+        foreach (var (lo, hi) in spans) any |= lo <= by1 && hi + Trees.MaxHeight >= by0;
+        if (!any) return;
+        float strata = _terrain.Strata(x, z), patch = _terrain.Patch(x, z), flora = _terrain.Flora(x, z);
+        float woods = _terrain.Woods(x, z), kind = _terrain.Kind(x, z), heat = _terrain.Heat(x, z), wet = _terrain.Wet(x, z);
+        int Voxel(int y) => (int)MathF.Floor((y - by0) / (float)c);
+        for (int s = 0; s < spans.Length; s++)
+        {
+            var (lo, hi) = spans[s];
+            float bare = s + 1 < spans.Length && spans[s + 1].Lo - hi < ShadeReach ? Shaded : 0f;
+            float h = Biomes.Heat(hi, heat);
+            var biome = Biomes.Pick(h, wet);
+            float dry = Biomes.Dry(h, wet, Biomes.SandBlend);
+            for (int w = System.Math.Max(Voxel(lo), 0); w <= System.Math.Min(Voxel(hi), S - 1); w++)
+            {
+                int y0 = by0 + w * c, y1 = y0 + c - 1, top = System.Math.Min(hi, y1);
+                if (2 * (top - System.Math.Max(lo, y0) + 1) >= c)
+                    data.Set(u, w, v, ContinentTerrain.Block(top, hi, strata, patch, bare, biome, dry));
+            }
+
+            // Over the top, in the open: a plant, and above it a tree's crown.
+            int roof = s + 1 < spans.Length ? spans[s + 1].Lo : int.MaxValue;
+            var ground = ContinentTerrain.Block(hi, hi, strata, patch, bare, biome, dry);
+            int above = Voxel(hi + 1);
+            if (hi + 1 < roof && (uint)above < S && data.Get(u, above, v) == BlockId.Air)
+            {
+                // (A voxel keeps a plant if any of its blocks has one: tried at a few of its columns, not just one.)
+                int near = c / 4 - c / 2, far = 3 * c / 4 - c / 2; // (from the middle column)
+                for (int t = 0; t < 4; t++)
+                {
+                    var plant = ContinentTerrain.Plant(ground, x + ((t & 1) == 0 ? near : far), hi + 1, z + (t < 2 ? near : far), flora, kind, _seed);
+                    if (plant == BlockId.Air) continue;
+                    data.Set(u, above, v, plant);
+                    break;
+                }
+            }
+            ulong hash = Trees.Hash(x, hi, z, _seed ^ 0xC20A);
+            var tree = Trees.KindOn(ground, hi, biome, ((hash >> 24) & 0xFFFF) / 65536f);
+            int reach = tree == Trees.Kind.Cactus ? 0 : Trees.ReachOf(tree), height = Trees.HeightOf(tree);
+            float cover = 1f - MathF.Exp(-Trees.Odds(ground, hi, woods, biome) * (2 * reach + 1) * (2 * reach + 1));
+            int crown = Voxel(hi + (int)(0.7f * height));
+            if ((hash & 0xFFFFFF) / 16777216f < cover && hi + height < roof && (uint)crown < S && IsOpen(data.Get(u, crown, v)))
+                data.Set(u, crown, v, Trees.Crown(tree));
+        }
+    }
+
+    /// <summary>Whether a coarse voxel is open (air or a plant), for a tree's crown.</summary>
+    private static bool IsOpen(BlockId id) => id == BlockId.Air || BlockRegistry.Get(id).IsCross;
+
     /// <summary>Takes chunk column (chunkX, chunkZ)'s solid spans from the profiles worked out lately (see
-    /// <see cref="ProfileCache"/>), working them out if they aren't there.</summary>
+    /// <see cref="ColumnCache{T}"/>), working them out if they aren't there.</summary>
     public void Prepare(int chunkX, int chunkZ)
     {
         if (_profiles.TryGet(chunkX, chunkZ, out _profile)) return;
@@ -246,13 +332,16 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         }
     }
 
-    /// <summary>Works out chunk column (chunkX, chunkZ)'s <see cref="DistanceLattice"/>: false (and nothing worked out)
-    /// where no live heart is near it, as between islands.</summary>
+    /// <summary>Takes chunk column (chunkX, chunkZ)'s <see cref="DistanceLattice"/> from those worked out lately, working
+    /// it out if it isn't there: false where no live heart is near it (so it has nothing), as between islands.</summary>
     private bool FillLattice(int chunkX, int chunkZ)
     {
+        if (_lattices.TryGet(chunkX, chunkZ, out var kept)) { _lattice = kept; return kept.Levels > 0; }
+        _lattice = _lattices.Add(chunkX, chunkZ);
         const int N = DistanceLattice.Corners, Cell = DistanceLattice.Cell;
         float x0 = chunkX * S, z0 = chunkZ * S;
         var lattice = _lattice;
+        lattice.Reset(chunkX, chunkZ, 0, 0);
 
         // The corners' columns: the terrain's height, the world's rough bottom and the wobble there.
         Span<float> height = stackalloc float[N * N], bottom = stackalloc float[N * N];
@@ -522,7 +611,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
 
 /// <summary>One chunk column of the hearts world worked out: per block column, its solid spans (bottom up, from
 /// <see cref="Start"/>) with each top's look, and what's on it. Not changed while it's kept (see
-/// <see cref="ProfileCache"/>); once let go of, it's made again for another column, its arrays reused.</summary>
+/// <see cref="ColumnCache{T}"/>); once let go of, it's made again for another column, its arrays reused.</summary>
 internal sealed class ColumnProfile
 {
     private const int Columns = ChunkData.Size * ChunkData.Size;
@@ -562,25 +651,22 @@ internal sealed class ColumnProfile
     }
 }
 
-/// <summary>The column profiles one generator built lately, the oldest let go first and made again for the next column:
-/// they last long enough that the collector would carry each through its generations only to drop it.</summary>
-internal sealed class ProfileCache
+/// <summary>What one generator worked out lately per chunk column (its profiles, its lattices), the oldest let go first
+/// and made again for the next column: they last long enough that the collector would carry each through its
+/// generations only to drop it.</summary>
+internal sealed class ColumnCache<T>(int capacity) where T : class, new()
 {
-    /// <summary>Columns kept: a profile is about 30 KB (more where there's lots of ground), so a few MB a generator.
-    /// Enough for the few level-2 columns (16 chunk columns each) a worker is making chunks over at once.</summary>
-    private const int Capacity = 128;
-
-    private readonly Dictionary<(int, int), ColumnProfile> _profiles = new();
+    private readonly Dictionary<(int, int), T> _kept = new();
     private readonly Queue<(int, int)> _order = new();
 
-    public bool TryGet(int x, int z, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out ColumnProfile? kept)
-        => _profiles.TryGetValue((x, z), out kept);
+    public bool TryGet(int x, int z, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out T? kept)
+        => _kept.TryGetValue((x, z), out kept);
 
-    /// <summary>A profile to make for column (x, z), kept from now on: the oldest one, let go of, once it's full.</summary>
-    public ColumnProfile Add(int x, int z)
+    /// <summary>One to make for column (x, z), kept from now on: the oldest one, let go of, once it's full.</summary>
+    public T Add(int x, int z)
     {
-        var made = _order.Count < Capacity || !_profiles.Remove(_order.Dequeue(), out var oldest) ? new ColumnProfile() : oldest;
-        _profiles[(x, z)] = made;
+        var made = _order.Count < capacity || !_kept.Remove(_order.Dequeue(), out var oldest) ? new T() : oldest;
+        _kept[(x, z)] = made;
         _order.Enqueue((x, z));
         return made;
     }
