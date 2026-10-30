@@ -20,7 +20,7 @@ ulong seed = 1337;
 (int X, int Z)? cell = null;
 int size = 8;
 double hours = 6, report = 600, erodeHours = 0, settleMinutes = 20;
-bool fill = true, snapshots = false, ground = false;
+bool fill = true, snapshots = false, ground = false, denseBench = false;
 string outDir = "pipes-out";
 var settings = new List<Action<Pipes>>();
 bool widened = false;
@@ -49,6 +49,7 @@ for (int a = 0; a < args.Length; a++)
         case "--hardening": { var v = float.Parse(args[++a]); settings.Add(p => p.Hardening = v); break; }
         case "--erode-every": { var v = int.Parse(args[++a]); settings.Add(p => p.ErodeEvery = v); break; }
         case "--ground": ground = true; break;
+        case "--dense-bench": denseBench = true; break;
         case "--permeability": { var v = float.Parse(args[++a]); settings.Add(p => p.Permeability = v); break; }
         case "--shell": { var v = float.Parse(args[++a]); settings.Add(p => p.Shell = v); break; }
         case "--porosity": { var v = float.Parse(args[++a]); settings.Add(p => p.Porosity = v); break; }
@@ -87,6 +88,7 @@ int landColumns = Enumerable.Range(0, land.Columns).Count(land.HasLand);
 Console.WriteLine($"{size}-block columns: {land.Columns:N0} ({landColumns:N0} with land), {land.Nodes:N0} nodes, " +
                   $"{land.Links:N0} links, sampled in {sw.Elapsed.TotalSeconds:0.0} s");
 
+if (denseBench) { DenseBench.Run(land, 2000, 2.4f); return 0; }
 var pipes = new Pipes(land);
 foreach (var set in settings) set(pipes);
 if (ground) pipes.UseGroundwater();
