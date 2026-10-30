@@ -601,9 +601,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             depths[i + corners * k] = volume / (size * size);
             if (volume > 0f) wet[i + corners * k] = any = true;
         }
-        if (!any) return;
         // Each block column's water: the surface plus its corners' offsets, blended between them as the ground is.
-        for (int lz = 0; lz < S; lz++)
+        for (int lz = 0; lz < S && any; lz++)
         for (int lx = 0; lx < S; lx++)
         {
             int i = lx / size, k = lz / size, c = i + corners * k;
@@ -621,6 +620,39 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             if (float.IsNaN(surface)) continue;
             int water = (int)MathF.Floor(surface - 0.5f);
             if (water > top) p.Water[col] = water;
+        }
+        PlaceStreams(p, shaped, x0, z0);
+    }
+
+    /// <summary>Each landscape column's stream (see <see cref="Shaped.Stream"/>): a block deep over the ground along the
+    /// line from its middle to the middle of the column it runs to, as wide as its flow keeps it. Columns are wider
+    /// than creeks, so a creek's water spreads too thin over one to fill blocks by its volume: this draws it.</summary>
+    private void PlaceStreams(ColumnProfile p, Shaped shaped, int x0, int z0)
+    {
+        int size = shaped.Size;
+        for (int mz = -size; mz <= S + size; mz += size)
+        for (int mx = -size; mx <= S + size; mx += size)
+        {
+            var (width, toX, toZ, from, to) = shaped.Stream(x0 + mx, z0 + mz);
+            float half = MathF.Min(width, size) / 2;
+            if (half < 0.5f) continue;
+            // Along the line between the two middles (block centres), each block column within half the width of it.
+            float ax = mx + 0.5f, az = mz + 0.5f, dx = toX - x0 + 0.5f - ax, dz = toZ - z0 + 0.5f - az, length2 = dx * dx + dz * dz;
+            int lx0 = Math.Max(0, (int)MathF.Floor(MathF.Min(ax, ax + dx) - half)), lx1 = Math.Min(S - 1, (int)MathF.Ceiling(MathF.Max(ax, ax + dx) + half));
+            int lz0 = Math.Max(0, (int)MathF.Floor(MathF.Min(az, az + dz) - half)), lz1 = Math.Min(S - 1, (int)MathF.Ceiling(MathF.Max(az, az + dz) + half));
+            for (int lz = lz0; lz <= lz1; lz++)
+            for (int lx = lx0; lx <= lx1; lx++)
+            {
+                float px = lx + 0.5f - ax, pz = lz + 0.5f - az;
+                float t = Math.Clamp((px * dx + pz * dz) / length2, 0f, 1f);
+                float ox = px - t * dx, oz = pz - t * dz;
+                if (ox * ox + oz * oz > half * half) continue;
+                int col = lx + S * lz, count = p.Count(col);
+                if (count == 0) continue;
+                int top = p.Spans[p.Start[col] + count - 1].Hi;
+                int water = (int)MathF.Floor(from + t * (to - from) + 1f); // a block over the line's ground (or where that stands up to a block over it)
+                if (water > top && water <= top + 2 && water > p.Water[col]) p.Water[col] = water;
+            }
         }
     }
 

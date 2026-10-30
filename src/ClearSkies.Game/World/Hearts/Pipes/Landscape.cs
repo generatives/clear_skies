@@ -47,7 +47,36 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
         double until = pipes.Time + settings.SettleMinutes * 60;
         while (pipes.Time < until) pipes.Step();
         Console.WriteLine($"Landscape: landmass {landmass} worn and watered in {sw.Elapsed.TotalSeconds:0.0} s ({pipes.Steps:N0} steps)");
-        return new Shaped(land, start, pipes.Depth, settings.Damp);
+        // Each node's stream: how much rain runs through it (in columns' worth) and the node it sends most to.
+        var flow = new float[land.Nodes];
+        var down = new int[land.Nodes];
+        float column = pipes.Rain * settings.Size * settings.Size;
+        for (int n = 0; n < land.Nodes; n++)
+        {
+            flow[n] = pipes.Through(n) / column;
+            down[n] = -1;
+            float most = 0;
+            for (int k = land.LinkStart[n]; k < land.LinkStart[n + 1]; k++)
+                if (land.LinkTo[k] >= 0 && pipes.Flow[k] > most) { most = pipes.Flow[k]; down[n] = land.LinkTo[k]; }
+        }
+        // A stream shows only down the middle of the water running beside it: where it carries more than the columns on
+        // either side across its way (a sheet down a hillside shows one line, not one per column).
+        var shown = new float[land.Nodes];
+        for (int c = 0; c < land.Columns; c++)
+        {
+            int n = land.TopNode(c);
+            if (n < 0 || down[n] < 0) continue;
+            int d = land.ColumnOf[down[n]], i = c % land.Nx, j = c / land.Nx;
+            int di = d % land.Nx - i, dj = d / land.Nx - j;
+            float FlowAt(int ci, int cj)
+            {
+                if (ci < 0 || cj < 0 || ci >= land.Nx || cj >= land.Nz) return 0f;
+                int m = land.TopNode(ci + land.Nx * cj);
+                return m < 0 ? 0f : flow[m];
+            }
+            if (flow[n] > FlowAt(i - dj, j + di) && flow[n] >= FlowAt(i + dj, j - di)) shown[n] = flow[n];
+        }
+        return new Shaped(land, start, pipes.Depth, shown, down, settings);
     }
 
     /// <summary>A landmass's bounds (blocks, on 32-block lines): where its own ground can be, found on a coarse grid
@@ -71,8 +100,19 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
 /// column's water goes into its own lowest blocks first, lowest under the model's sloping surface (see
 /// HeartWorldGenerator.PlaceWater): a little (a creek) fills only the deepest few, a lot (a lake) its whole footprint. The first Damp blocks of it only dampen
 /// the ground: thin water running over a slope shows as none.</summary>
-public sealed class Shaped(Land land, float[] startFloor, float[] depth, float damp)
+public sealed class Shaped(Land land, float[] startFloor, float[] depth, float[] flow, int[] down, LandscapeSettings settings)
 {
+    /// <summary>The stream of the column with its middle at (x, z): how wide it runs (sqrt(flow / StreamFlow) blocks;
+    /// 0 for none), the middle of the column it runs to, and the ground at both ends.</summary>
+    public (float Width, int ToX, int ToZ, float From, float To) Stream(int x, int z)
+    {
+        int t = TopNodeAt(x, z);
+        if (t < 0 || settings.StreamFlow <= 0 || down[t] < 0) return default;
+        int to = down[t], c = land.ColumnOf[to];
+        return (MathF.Sqrt(flow[t] / settings.StreamFlow), land.X0 + c % land.Nx * land.Size, land.Z0 + c / land.Nx * land.Size,
+                land.Floor[t], land.Floor[to]);
+    }
+
     /// <summary>A column's width, in blocks.</summary>
     public int Size => land.Size;
 
@@ -98,7 +138,7 @@ public sealed class Shaped(Land land, float[] startFloor, float[] depth, float d
     public float Volume(int x, int z)
     {
         int t = TopNodeAt(x, z);
-        return t < 0 ? 0f : Math.Max(0f, depth[t] - damp) * land.Size * land.Size;
+        return t < 0 ? 0f : Math.Max(0f, depth[t] - settings.Damp) * land.Size * land.Size;
     }
 
     /// <summary>The water's surface over the column holding block column (x, z) (blocks), or NaN where it's dry.</summary>
@@ -149,6 +189,10 @@ public sealed class LandscapeSettings
     public bool Groundwater = true;
     /// <summary>How deep water over a column only dampens its ground, in blocks: the rest goes into its blocks.</summary>
     public float Damp = 0.1f;
+    /// <summary>How much rain (in columns' worth) runs through a column whose stream shows a block wide: each column's
+    /// stream shows as a block-deep line from its middle to the column it runs to, sqrt(flow / StreamFlow) blocks wide
+    /// (narrower than a block shows nothing). 0 for no streams.</summary>
+    public float StreamFlow = 10f;
     public int Size = 8;
     public readonly List<(string Name, string Value)> Pipes = new();
 
@@ -169,6 +213,7 @@ public sealed class LandscapeSettings
                 case "settle-rain": s.SettleRain = float.Parse(value, c); break;
                 case "groundwater": s.Groundwater = bool.Parse(value); break;
                 case "damp": s.Damp = float.Parse(value, c); break;
+                case "stream-flow": s.StreamFlow = float.Parse(value, c); break;
                 case "size": s.Size = int.Parse(value, c); break;
                 default:
                     if (!Generation.Pipes.Set(null, name, value)) throw new ArgumentException($"--terrain: no setting called {name}");
