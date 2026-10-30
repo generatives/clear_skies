@@ -14,6 +14,19 @@ namespace ClearSkies.Game.Generation;
 public sealed partial class Pipes
 {
     public bool Eroding;
+    /// <summary>How much stronger erosion starts than it ends: it eases from Ease times as strong to 1/Ease times
+    /// over the time it's given (see StartEroding), so the big shapes form fast and the end only smooths them.</summary>
+    public float Ease = 1f;
+    private double _erodeStart, _erodeLength = 1;
+
+    /// <summary>Erodes from now, for <paramref name="seconds"/> (simulated).</summary>
+    public void StartEroding(double seconds)
+    {
+        Eroding = true;
+        _erodeStart = Time;
+        _erodeLength = Math.Max(1, seconds);
+    }
+
     public int ErodeEvery = 2;
     private float _erodeTime;
     public float Carry = 0.05f, Pick = 0.02f, Drop = 0.02f, Speedup = 900f;
@@ -32,6 +45,9 @@ public sealed partial class Pipes
     private void Erode(float dt)
     {
         var land = _land;
+        // Strongest at the start, easing down (see Ease).
+        float ease = Ease == 1f ? 1f : MathF.Pow(Ease, 1f - 2f * (float)Math.Clamp((Time - _erodeStart) / _erodeLength, 0, 1));
+        float speedup = Speedup * ease;
         Sediment ??= new float[land.Nodes];
         _carried ??= new float[land.Nodes]; _sedimentRatio ??= new float[land.Nodes]; _nextSediment ??= new float[land.Nodes];
         var sediment = Sediment; var carried = _carried; var ratio = _sedimentRatio; var next = _nextSediment;
@@ -83,7 +99,7 @@ public sealed partial class Pipes
                 if (h < 0.02f || through <= 0)
                 {
                     // Dry or still: drops everything.
-                    slid[n] = Math.Min(land.Ceiling[n] - 1f, land.Floor[n] + Speedup * s / _area);
+                    slid[n] = Math.Min(land.Ceiling[n] - 1f, land.Floor[n] + speedup * s / _area);
                     next[n] = 0;
                     continue;
                 }
@@ -94,16 +110,16 @@ public sealed partial class Pipes
                 {
                     float worn = Math.Max(0f, startFloor[n] - land.Floor[n]);
                     float take = Pick * (can - s) * dt / (1 + worn / Hardening);
-                    float most = Math.Max(0f, land.Floor[n] - land.Base[n] - MinThickness) * _area / Speedup;
-                    take = Math.Min(take, Math.Min(most, MostWear * dt * _area / Speedup)); // no more than MostWear blocks a second
+                    float most = Math.Max(0f, land.Floor[n] - land.Base[n] - MinThickness) * _area / speedup;
+                    take = Math.Min(take, Math.Min(most, MostWear * ease * dt * _area / speedup)); // no more than MostWear blocks a second
                     s += take;
-                    slid[n] = land.Floor[n] - Speedup * take / _area;
+                    slid[n] = land.Floor[n] - speedup * take / _area;
                 }
                 else
                 {
                     float put = Drop * (s - can) * dt;
                     s -= put;
-                    slid[n] = Math.Min(land.Ceiling[n] - 1f, land.Floor[n] + Speedup * put / _area);
+                    slid[n] = Math.Min(land.Ceiling[n] - 1f, land.Floor[n] + speedup * put / _area);
                 }
                 next[n] = s;
             }
@@ -111,7 +127,7 @@ public sealed partial class Pipes
         (Sediment, _nextSediment) = (next, sediment);
 
         // Slides: each node gives ground to lower neighbours it stands too steeply over, and takes from higher ones.
-        float slideStep = Math.Min(0.25f, SlideRate * Speedup * dt), creep = Creep * Speedup * dt;
+        float slideStep = Math.Min(0.25f, SlideRate * speedup * dt), creep = Creep * speedup * dt;
         Parallel.For(0, (land.Nodes + 4095) / 4096, block =>
         {
             int end = Math.Min(land.Nodes, (block + 1) * 4096);

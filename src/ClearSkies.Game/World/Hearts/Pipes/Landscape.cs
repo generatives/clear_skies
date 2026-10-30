@@ -38,7 +38,7 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
         pipes.FillHollows();
         if (settings.ErodeHours > 0)
         {
-            pipes.Eroding = true;
+            pipes.StartEroding(settings.ErodeHours * 3600);
             while (pipes.Time < settings.ErodeHours * 3600) pipes.Step();
             pipes.Eroding = false;
             pipes.FillHollows(); // lakes whose outlets were cut start at their new spill level
