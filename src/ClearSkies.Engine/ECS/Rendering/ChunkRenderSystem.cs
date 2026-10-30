@@ -83,6 +83,10 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     private readonly EntitySet _bakeFirst, _cameras;
     private readonly List<Entity> _nearestToBake = new();
     private const int FirstBakesLooked = 64;
+    // For the panel: every chunk marked to be baked first (some may be left out of _bakeFirst), and of last frame's
+    // nearest looked at, how many were listed, had nothing to bake, or weren't in the light store.
+    private readonly EntitySet _markedBakeFirst;
+    private int _firstListed, _firstNothing, _firstNoStore;
 
     /// <summary>Cell-local placement per <see cref="BlockOrientation"/> (indexed by its byte): a model block's model is
     /// authored Blockbench-style (x/z centred on the origin, standing on y = 0, 1 unit = 1 block), so it is rotated
@@ -99,6 +103,7 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         world.SubscribeEntityDisposed((in Entity e) => Forget(e));
         _bakeFirst = world.GetEntities().With<BakeFirst>().With<ChunkRenderData>().With<Chunk>().With<Rendered>().AsSet();
         _cameras = world.GetEntities().With<Transform>().With<CameraComponent>().AsSet();
+        _markedBakeFirst = world.GetEntities().With<BakeFirst>().AsSet();
     }
 
     private StaticVolume StaticOf(ChunkVolume volume)
@@ -214,10 +219,16 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
             kept++;
         }
         _draws.RemoveRange(kept, _draws.Count - kept);
-        // Then chunks waiting for their first bake, in view or not, nearest first, with what's left of the budget.
+        // Then chunks waiting for their first bake, in view or not, nearest first, with what's left of the budget. One
+        // listed (or with nothing to bake) is let go of at once: it waits only for its stage to be asked again, and kept,
+        // the nearest would be looked at each frame with nothing to bake while those behind them waited.
         NearestChunks.Select(_bakeFirst, _cameras, FirstBakesLooked, _nearestToBake);
+        _firstListed = _firstNothing = _firstNoStore = 0;
         foreach (var e in _nearestToBake)
+        {
             if (!BakeFirstTime(in e.Get<ChunkRenderData>())) break;
+            e.Remove<BakeFirst>();
+        }
         Array.Clear(_levelCounts);
         foreach (ref readonly var d in CollectionsMarshal.AsSpan(_draws))
         {
@@ -345,12 +356,13 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
     /// <summary>Lists a chunk's stale light maps for baking while the frame's budget lasts; false once it's spent.</summary>
     private bool BakeFirstTime(in ChunkRenderData rd)
     {
-        if (rd.Grid is not { Index: >= 0 } grid) return true; // not in the light store (any more)
+        if (rd.Grid is not { Index: >= 0 } grid) { _firstNoStore++; return true; } // not in the light store (any more)
         int stamp = _renderer.LightStampOf(grid, rd.ChunkPos);
         int quads = Stale(rd.Mesh, grid, stamp) + Stale(rd.CutoutMesh, grid, stamp) + Stale(rd.TransparentMesh, grid, stamp);
-        if (quads == 0) return true;
+        if (quads == 0) { _firstNothing++; return true; }
         if (_bakedQuads > 0 && _bakedQuads + quads > ScaledBakeQuadBudget) return false;
         _bakedQuads += quads;
+        _firstListed++;
         _renderer.PrepareLightmap(rd.Mesh, grid, rd.ChunkPos, stamp);
         _renderer.PrepareLightmap(rd.CutoutMesh, grid, rd.ChunkPos, stamp);
         _renderer.PrepareLightmap(rd.TransparentMesh, grid, rd.ChunkPos, stamp);
@@ -409,6 +421,9 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
             ImGui.Text($"{name}: {chunks:N0} chunks drawn, {opaque:N0} opaque quads, {cutout:N0} cut-out quads");
         }
         ImGui.Text($"Draw calls (smoothed): chunks {_submitMs:F2} ms, model blocks {_modelsMs:F2} ms, translucent {_translucentMs:F2} ms");
+        ImGui.Text($"First bakes: {_markedBakeFirst.Count:N0} marked, {_bakeFirst.Count:N0} of them meshed and Rendered; of the " +
+                   $"{_nearestToBake.Count} nearest looked at, {_firstListed} listed, {_firstNothing} with nothing to bake, " +
+                   $"{_firstNoStore} not in the light store; {_bakedQuads:N0} quads listed this frame");
         var (used, capacity) = _renderer.LightmapArenaUse;
         ImGui.Text($"Light maps: {used * 4 / 1048576.0:F1} of {capacity * 4 / 1048576.0:F1} MB; baked per frame (smoothed): " +
                    $"{_bakedMeshesEma:F1} meshes, {_bakedGroupsEma * Renderer.LightmapQuadsPerGroup:N0} quads at most");
