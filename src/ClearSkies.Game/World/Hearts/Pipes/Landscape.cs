@@ -76,6 +76,15 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
             }
             if (flow[n] > FlowAt(i - dj, j + di) && flow[n] >= FlowAt(i + dj, j - di)) shown[n] = flow[n];
         }
+        // ...and only where it runs on into water or another shown stream (lowest first, so what it runs to is
+        // settled): a stream that shows ends in water, not in a dash on a slope.
+        var lowest = Enumerable.Range(0, land.Nodes).Where(n => shown[n] > 0).OrderBy(n => land.Floor[n]).ToArray();
+        float least = settings.StreamFlow;
+        foreach (int n in lowest)
+        {
+            int to = down[n];
+            if (shown[to] < least && pipes.Depth[to] <= settings.Damp + 0.5f) shown[n] = 0;
+        }
         return new Shaped(land, start, pipes.Depth, shown, down, settings);
     }
 
