@@ -26,6 +26,7 @@ bool fill = true, snapshots = false, ground = false;
 string outDir = "pipes-out";
 (int X, int Z, int Width)? blocks = null;
 string? terrain = null;
+(int X0, int Z0, int X1, int Z1)? probe = null;
 var settings = new List<Action<Pipes>>();
 bool widened = false;
 for (int a = 0; a < args.Length; a++)
@@ -55,6 +56,7 @@ for (int a = 0; a < args.Length; a++)
         case "--hardening": { var v = float.Parse(args[++a]); settings.Add(p => p.Hardening = v); break; }
         case "--erode-every": { var v = int.Parse(args[++a]); settings.Add(p => p.ErodeEvery = v); break; }
         case "--ground": ground = true; break;
+        case "--probe": probe = (int.Parse(args[++a]), int.Parse(args[++a]), int.Parse(args[++a]), int.Parse(args[++a])); break;
         case "--blocks": blocks = (int.Parse(args[++a]), int.Parse(args[++a]), int.Parse(args[++a])); break;
         case "--terrain": terrain = args[++a]; break;
         case "--permeability": { var v = float.Parse(args[++a]); settings.Add(p => p.Permeability = v); break; }
@@ -147,6 +149,26 @@ WriteMap(Path.Combine(outDir, "pipes.png"));
     float At(double q) => depths.Count == 0 ? 0 : depths[(int)(q * (depths.Count - 1))];
     Console.WriteLine($"Standing water: {depths.Count:N0} columns, depth median {At(0.5):0.0}, 90% {At(0.9):0.0}, deepest {At(1):0.0} blocks; " +
                       $"beds raised {raised / Math.Max(1, depths.Count):0.0} and lowered {lowered / Math.Max(1, depths.Count):0.0} blocks a column on average");
+}
+if (probe is { } box)
+{
+    // Each column in the box: where it is, its floor before and after, its water, how much rain runs through it
+    // (in columns' worth) and its water surface's steepest drop to a neighbour.
+    using var csv = new StreamWriter(Path.Combine(outDir, "probe.csv"));
+    csv.WriteLine("x,z,start,floor,depth,through,drop");
+    float column = pipes.Rain * size * size;
+    for (int c = 0; c < land.Columns; c++)
+    {
+        int x = x0 + c % land.Nx * size, z = z0 + c / land.Nx * size, n = land.TopNode(c);
+        if (n < 0 || x < box.X0 || x > box.X1 || z < box.Z0 || z > box.Z1) continue;
+        float level = land.Floor[n] + pipes.Depth[n], drop = 0;
+        for (int k = land.LinkStart[n]; k < land.LinkStart[n + 1]; k++)
+        {
+            int m = land.LinkTo[k];
+            if (m >= 0) drop = Math.Max(drop, (level - land.Floor[m] - pipes.Depth[m]) / land.LinkLength[k]);
+        }
+        csv.WriteLine($"{x},{z},{startFloor[n]:0.00},{land.Floor[n]:0.00},{pipes.Depth[n]:0.000},{pipes.Through(n) / column:0.0},{drop:0.000}");
+    }
 }
 if (ground) Console.WriteLine($"Ground balance: {pipes.GroundBalance()}");
 Console.WriteLine($"Steps: flow {pipes.FlowTime.Elapsed.TotalSeconds:0.0} s, apply {pipes.ApplyTime.Elapsed.TotalSeconds:0.0} s, " +
