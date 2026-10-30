@@ -10,9 +10,9 @@ namespace ClearSkies.Engine.ECS;
 /// <summary>
 /// Runs the world's water (<see cref="WaterFlow"/>) on the machine with authority over the world, a step every
 /// <see cref="StepTicks"/> ticks, and sends each step's changes as <see cref="FlowWater"/> commands, so every machine
-/// sees the same water. Edits to the world wake the cells around them, and a chunk loading wakes its flowing water (left
-/// part way when it was saved); anywhere else, nothing is looked at. Runs
-/// before the command system in the tick, so a step's changes apply in the same tick.
+/// sees the same water. Edits to the world wake the cells around them, and a saved chunk loading wakes its flowing water
+/// (left part way when it was saved); anywhere else, nothing is looked at. Runs before the command system in the tick,
+/// so a step's changes apply in the same tick.
 /// </summary>
 public sealed class WaterFlowSystem : ISystem, IDisposable
 {
@@ -44,9 +44,10 @@ public sealed class WaterFlowSystem : ISystem, IDisposable
     public void Update(float dt)
     {
         if (!IsAuthority) { Flow.Clear(); _loaded.Clear(); return; }
-        // Water saved part way through flowing picks up where it left off once its chunk loads.
+        // Water saved part way through flowing picks up where it left off once its chunk loads. Generated water is left
+        // as it was made (its flowing tops show water running on), until an edit wakes it.
         foreach (var entry in _loaded)
-            if (!entry.DataDropped && _world.GetData(entry.Position) == entry.Data) Flow.WakeFlowing(entry.Position, entry.Data);
+            if (!entry.DataDropped && entry.Data.Saved && _world.GetData(entry.Position) == entry.Data) Flow.WakeFlowing(entry.Position, entry.Data);
         _loaded.Clear();
         if (++_ticks < StepTicks) return;
         _ticks = 0;
