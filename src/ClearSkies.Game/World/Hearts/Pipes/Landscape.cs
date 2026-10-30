@@ -41,9 +41,9 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
             pipes.StartEroding(settings.ErodeHours * 3600);
             while (pipes.Time < settings.ErodeHours * 3600) pipes.Step();
             pipes.Eroding = false;
-            pipes.FillHollows(); // lakes whose outlets were cut start at their new spill level
         }
         pipes.Rain *= settings.SettleRain;
+        pipes.FillHollows(); // lakes start at their new levels: outlets were cut, and the rain changed
         double until = pipes.Time + settings.SettleMinutes * 60;
         while (pipes.Time < until) pipes.Step();
         Console.WriteLine($"Landscape: landmass {landmass} worn and watered in {sw.Elapsed.TotalSeconds:0.0} s ({pipes.Steps:N0} steps)");

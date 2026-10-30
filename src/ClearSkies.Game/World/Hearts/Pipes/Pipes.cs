@@ -60,37 +60,84 @@ public sealed partial class Pipes
         for (int c = 0; c < land.Columns; c++) if (land.HasLand(c)) _rain[land.TopNode(c)] = land.Wetness[c];
     }
 
-    /// <summary>Sets every hollow full to where it spills (a priority flood from the drains): lakes don't have to fill
-    /// or drain at the rain's pace. Water outside hollows (streams) is left as it is. Returns how many nodes are in
-    /// hollows.</summary>
+    /// <summary>Sets each hollow's water to where what runs into it balances what it soaks away, up to where it spills
+    /// (so lakes don't have to fill or drain at the rain's pace). A priority flood from the drains finds where each
+    /// hollow spills and the way water runs out of every node; the rain is then gathered down those ways (losing Soak
+    /// at each node it wets) into the hollows. A hollow fed enough to keep N of its nodes wet holds water over its N
+    /// lowest; one fed more than its whole spills the rest on downstream. Water outside hollows (streams) is left as it
+    /// is. Returns how many nodes it wets.</summary>
     public int FillHollows()
     {
         var land = _land;
         var spill = new float[land.Nodes];
+        var parent = new int[land.Nodes];
+        var order = new List<int>(land.Nodes);
         Array.Fill(spill, float.PositiveInfinity);
+        Array.Fill(parent, -1);
         var queue = new PriorityQueue<int, float>();
         for (int n = 0; n < land.Nodes; n++)
             for (int k = _faceStart[n]; k < _faceStart[n + 1]; k++)
                 if (_other[k] < 0 && land.Floor[n] < spill[n]) { spill[n] = land.Floor[n]; queue.Enqueue(n, spill[n]); }
+        var done = new bool[land.Nodes];
         while (queue.TryDequeue(out int n, out float level))
         {
-            if (level > spill[n]) continue;
+            if (done[n] || level > spill[n]) continue;
+            done[n] = true;
+            order.Add(n);
             for (int k = _faceStart[n]; k < _faceStart[n + 1]; k++)
             {
                 int m = _other[k];
-                if (m < 0) continue;
+                if (m < 0 || done[m]) continue;
                 float to = Math.Max(level, land.LinkBottom(n, k));
-                if (to < spill[m]) { spill[m] = to; queue.Enqueue(m, to); }
+                if (to < spill[m]) { spill[m] = to; parent[m] = n; queue.Enqueue(m, to); }
             }
         }
-        int wet = 0;
-        for (int n = 0; n < land.Nodes; n++)
+
+        // Each hollow: the nodes under its spill level, named by the one its water leaves by (following the ways out
+        // while the level stays the same), lowest floor first.
+        const float Under = 1e-3f;
+        bool Flooded(int n) => !float.IsInfinity(spill[n]) && spill[n] - land.Floor[n] > Under;
+        var hollow = new int[land.Nodes];
+        Array.Fill(hollow, -1);
+        foreach (int n in order)
         {
-            if (float.IsInfinity(spill[n])) continue;
-            float full = Math.Min(spill[n], land.Ceiling[n]) - land.Floor[n];
-            if (full <= 0) continue;
-            Depth[n] = full;
-            wet++;
+            if (!Flooded(n)) continue;
+            int p = parent[n];
+            hollow[n] = p >= 0 && Flooded(p) && Math.Abs(spill[p] - spill[n]) <= Under ? hollow[p] : n;
+        }
+        var members = new Dictionary<int, List<int>>();
+        foreach (int n in order)
+        {
+            if (hollow[n] < 0) continue;
+            if (!members.TryGetValue(hollow[n], out var list)) members[hollow[n]] = list = new List<int>();
+            list.Add(n);
+        }
+        foreach (var list in members.Values) list.Sort((a, b) => land.Floor[a].CompareTo(land.Floor[b]));
+
+        // The rain, gathered down the ways out (the reverse of the flood's order reaches each node after all that run into it).
+        var gathered = new double[land.Nodes];
+        double rain = Rain * _area, soak = Soak * _area;
+        int wet = 0;
+        for (int i = order.Count - 1; i >= 0; i--)
+        {
+            int n = order[i];
+            double into = gathered[n] + rain * _rain[n];
+            if (hollow[n] < 0) into = Math.Max(0, into - soak);
+            else if (hollow[n] == n)
+            {
+                var list = members[n];
+                int keeps = (int)Math.Min(list.Count, Math.Floor(into / soak));
+                float level = keeps >= list.Count ? spill[n] : land.Floor[list[keeps]];
+                for (int j = 0; j < list.Count; j++)
+                {
+                    int m = list[j];
+                    float full = j < keeps ? Math.Min(level, land.Ceiling[m]) - land.Floor[m] : 0f;
+                    Depth[m] = Math.Max(0f, full);
+                    if (full > 0) wet++;
+                }
+                into = Math.Max(0, into - keeps * soak);
+            }
+            if (parent[n] >= 0) gathered[parent[n]] += into;
         }
         return wet;
     }
