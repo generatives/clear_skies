@@ -55,7 +55,8 @@ public sealed partial class Pipes
             }
         });
 
-        // Sediment through the faces, then each node's exchange with its floor.
+        // Sediment through the faces, then each node's exchange with its floor (the new floors kept apart until all are
+        // worked out).
         Parallel.For(0, (land.Nodes + 4095) / 4096, block =>
         {
             int end = Math.Min(land.Nodes, (block + 1) * 4096);
@@ -74,18 +75,18 @@ public sealed partial class Pipes
                     float abs = Math.Abs(q);
                     through += abs;
                     float drop = m >= 0 ? Math.Abs(level - land.Floor[m] - Depth[m]) : 0f;
-                    slope += abs * Math.Min(SteepestCut, drop / _width);
+                    slope += abs * Math.Min(SteepestCut, drop / land.FaceLength[f]);
                 }
                 s = Math.Max(0f, s);
                 float h = Depth[n];
                 if (h < 0.02f || through <= 0)
                 {
                     // Dry or still: drops everything.
-                    land.Floor[n] = Math.Min(land.Ceiling[n] - 1f, land.Floor[n] + Speedup * s / _area);
+                    slid[n] = Math.Min(land.Ceiling[n] - 1f, land.Floor[n] + Speedup * s / _area);
                     next[n] = 0;
                     continue;
                 }
-                float speed = through / (2 * _width * h);
+                float speed = through / (2 * _width * h); // through a column's width each way
                 slope /= through;
                 float can = Carry * speed * slope * h * _area;
                 if (can > s)
@@ -95,18 +96,19 @@ public sealed partial class Pipes
                     float most = Math.Max(0f, land.Floor[n] - land.Base[n] - MinThickness) * _area / Speedup;
                     take = Math.Min(take, Math.Min(most, 0.05f * _area / Speedup)); // no more than 0.05 blocks a step
                     s += take;
-                    land.Floor[n] -= Speedup * take / _area;
+                    slid[n] = land.Floor[n] - Speedup * take / _area;
                 }
                 else
                 {
                     float put = Drop * (s - can) * dt;
                     s -= put;
-                    land.Floor[n] = Math.Min(land.Ceiling[n] - 1f, land.Floor[n] + Speedup * put / _area);
+                    slid[n] = Math.Min(land.Ceiling[n] - 1f, land.Floor[n] + Speedup * put / _area);
                 }
                 next[n] = s;
             }
         });
         Array.Copy(next, sediment, land.Nodes);
+        Array.Copy(slid, land.Floor, land.Nodes);
 
         // Slides: each node gives ground to lower neighbours it stands too steeply over, and takes from higher ones.
         float slideStep = Math.Min(0.25f, SlideRate * Speedup * dt);
@@ -122,7 +124,7 @@ public sealed partial class Pipes
                     int m = land.FaceA[f] == n ? land.FaceB[f] : land.FaceA[f];
                     if (m < 0) continue;
                     float d = land.Floor[n] - land.Floor[m], ad = Math.Abs(d);
-                    float stood = Math.Max(Slide * _width, Math.Abs(startFloor[n] - startFloor[m]));
+                    float stood = Math.Max(Slide * land.FaceLength[f], Math.Abs(startFloor[n] - startFloor[m]));
                     if (ad <= stood) continue;
                     float move = slideStep * (ad - stood) / 2;
                     change += d > 0 ? -move : move;

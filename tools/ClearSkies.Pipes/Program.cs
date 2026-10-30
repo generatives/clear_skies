@@ -8,19 +8,18 @@ using StbImageWriteSharp;
 // top-down map of the result.
 //
 //   dotnet run -c Release --project tools/ClearSkies.Pipes -- [--seed 1337] [--cell 1 -1] [--size 8] [--hours 6]
-//       [--piece-size 2] [--implicit 60] [--relax 1.5] [--sweeps 400] [--tolerance 0.001] [--rain 3e-4] [--soak 1.5e-4] [--manning 0.035] [--no-fill] [--report 600] [--out pipes-out] [--snapshots]
+//       [--piece-size 2] [--rain 3e-4] [--soak 1.5e-4] [--manning 0.035] [--no-fill] [--report 600] [--out pipes-out] [--snapshots]
 //
 // With no --cell it takes the spawn's landmass. It runs until --hours of simulated time pass, or until as much water
 // leaves the land (over its edges and into the ground) as rains on it, within 1%. --no-fill starts the land dry instead
 // of with every hollow full to where it spills. --erode H then wears the land for H more hours (see Pipes.Erosion;
-// --carry, --pick, --drop, --speedup) and settles the water again on it. --implicit S takes steps of S seconds, each level found with the
-// neighbours' (see Pipes.StepImplicit) by up to --sweeps sweeps overshooting by --relax, to --tolerance blocks.
+// --carry, --pick, --drop, --speedup) and settles the water again on it.
 
 ulong seed = 1337;
 (int X, int Z)? cell = null;
 int size = 8;
 double hours = 6, report = 600, erodeHours = 0;
-bool fill = true, snapshots = false, implicitSteps = false;
+bool fill = true, snapshots = false;
 string outDir = "pipes-out";
 var settings = new List<Action<Pipes>>();
 bool widened = false;
@@ -37,7 +36,6 @@ for (int a = 0; a < args.Length; a++)
         case "--snapshots": snapshots = true; break;
         case "--no-fill": fill = false; break;
         case "--piece-size": HeartGrid.WidenPieces(float.Parse(args[++a])); widened = true; break;
-        case "--implicit": { implicitSteps = true; var v = float.Parse(args[++a]); settings.Add(p => p.ImplicitStep = v); break; }
         case "--wave-depth": { var v = float.Parse(args[++a]); settings.Add(p => p.WaveDepth = v); break; }
         case "--erode": erodeHours = double.Parse(args[++a]); break;
         case "--carry": { var v = float.Parse(args[++a]); settings.Add(p => p.Carry = v); break; }
@@ -47,9 +45,6 @@ for (int a = 0; a < args.Length; a++)
         case "--slide-rate": { var v = float.Parse(args[++a]); settings.Add(p => p.SlideRate = v); break; }
         case "--hardening": { var v = float.Parse(args[++a]); settings.Add(p => p.Hardening = v); break; }
         case "--speedup": { var v = float.Parse(args[++a]); settings.Add(p => p.Speedup = v); break; }
-        case "--relax": { var v = float.Parse(args[++a]); settings.Add(p => p.Relax = v); break; }
-        case "--sweeps": { var v = int.Parse(args[++a]); settings.Add(p => p.MostSweeps = v); break; }
-        case "--tolerance": { var v = float.Parse(args[++a]); settings.Add(p => p.Tolerance = v); break; }
         case "--rain": { var v = float.Parse(args[++a]); settings.Add(p => p.Rain = v); break; }
         case "--soak": { var v = float.Parse(args[++a]); settings.Add(p => p.Soak = v); break; }
         case "--manning": { var v = float.Parse(args[++a]); settings.Add(p => p.Manning = v); break; }
@@ -91,7 +86,6 @@ if (fill)
 }
 
 var startFloor = (float[])land.Floor.Clone();
-long sweeps = 0;
 Run(hours * 3600, stopWhenSettled: true);
 if (erodeHours > 0)
 {
@@ -117,12 +111,12 @@ void Run(double until, bool stopWhenSettled)
     bool settled = false;
     while (pipes.Time < until)
     {
-        if (implicitSteps) { pipes.StepImplicit(); sweeps += pipes.LastSweeps; } else pipes.Step();
+        pipes.Step();
         if (pipes.Time < nextReport) continue;
         nextReport += report;
         var b = pipes.Budget();
         double off = (b.Drained + b.Soaked - b.Rain) / b.Rain;
-        Console.WriteLine($"{pipes.Time / 60,6:0} min, {pipes.Steps,7:N0} steps ({sweeps,8:N0} sweeps), {sw.Elapsed.TotalSeconds,6:0.0} s: rain {b.Rain:0} " +
+        Console.WriteLine($"{pipes.Time / 60,6:0} min, {pipes.Steps,7:N0} steps, {sw.Elapsed.TotalSeconds,6:0.0} s: rain {b.Rain:0} " +
                           $"drained {b.Drained:0} soaked {b.Soaked:0} ({100 * off:+0.0;-0.0}%), stored {b.Stored / 1e6:0.00} M" +
                           (pipes.Eroding ? $", sediment {pipes.Sediment!.Sum() / 1e3:0.0} k" : ""));
         if (snapshots) WriteMap(Path.Combine(outDir, $"pipes-{pipes.Time / 60:00000}.png"));

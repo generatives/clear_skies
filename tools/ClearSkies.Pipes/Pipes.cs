@@ -98,7 +98,7 @@ public sealed partial class Pipes
         var land = _land;
         if (Steps % 16 == 0) _deepest = Deepest();
         float dt = Math.Min(MostStep, Courant * _width / MathF.Sqrt(G * Math.Clamp(_deepest, 0.01f, WaveDepth)));
-        float weir = 0.385f * MathF.Sqrt(2 * G) * _width, n2 = Manning * Manning;
+        float weir = 0.385f * MathF.Sqrt(2 * G), n2 = Manning * Manning;
 
         // Each face's flow.
         Parallel.For(0, (land.Faces + 4095) / 4096, block =>
@@ -107,7 +107,7 @@ public sealed partial class Pipes
             for (int f = block * 4096; f < end; f++)
             {
                 int a = land.FaceA[f], b = land.FaceB[f];
-                float bottom = land.FaceBottom[f];
+                float bottom = land.FaceBottom[f], width = land.FaceWidth[f];
                 float upA = land.Floor[a] + Depth[a], upB = b >= 0 ? land.Floor[b] + Depth[b] : float.NegativeInfinity;
                 float high = Math.Max(upA, upB), low = Math.Min(upA, upB);
                 float h = Math.Min(high, land.FaceTop[f]) - bottom;
@@ -115,15 +115,15 @@ public sealed partial class Pipes
                 if (low < bottom)
                 {
                     // Pours over the edge from the higher side.
-                    float q = weir * h * MathF.Sqrt(h);
+                    float q = weir * width * h * MathF.Sqrt(h);
                     Flow[f] = upA >= upB ? q : -q;
                     continue;
                 }
                 h = Math.Min(h, WaveDepth);
-                float old = Flow[f] / _width, slope = (upB - upA) / _width;
+                float old = Flow[f] / width, slope = (upB - upA) / land.FaceLength[f];
                 float next = (old - G * dt * h * slope) / (1 + G * dt * n2 * Math.Abs(old) / MathF.Pow(h, 7f / 3f));
                 float most = h * MathF.Sqrt(G * h); // no faster than a wave
-                Flow[f] = Math.Clamp(next, -most, most) * _width;
+                Flow[f] = Math.Clamp(next, -most, most) * width;
             }
         });
 
