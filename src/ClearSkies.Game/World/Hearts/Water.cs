@@ -23,6 +23,8 @@ public readonly record struct WaterColumn(int Level)
 public sealed class Water
 {
     private const int Cell = Hydrology.Cell;
+    /// <summary>How deep a cell's water must stand over its ground to count as wet: under half a block it rounds to none.</summary>
+    private const float MinDepth = 0.5f;
 
     private static readonly ConcurrentDictionary<ulong, Water> BySeed = new();
 
@@ -54,7 +56,7 @@ public sealed class Water
             if (field.Piece[c] != field.Piece[own] || float.IsNaN(s)) continue;
             double w = (di == 0 ? 1 - tx : tx) * (dk == 0 ? 1 - tz : tz);
             all += w * s; allWeights += w;
-            if (!(s > field.Ground[c])) continue;
+            if (!(s >= field.Ground[c] + MinDepth)) continue; // (a film too thin for a block of water is dry)
             wet += w * s; wetWeights += w;
             highest = Math.Max(highest, s);
         }
