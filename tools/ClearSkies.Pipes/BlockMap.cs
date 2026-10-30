@@ -28,7 +28,7 @@ public static class BlockMap
                 top[c] = n == 0 ? int.MinValue : spans[n - 1].Hi;
                 int m = raw.Value!.SpansAt(x, z, spans);
                 before[c] = m == 0 ? int.MinValue : spans[m - 1].Hi;
-                water[c] = n == 0 ? int.MinValue : HeartWorldGenerator.WaterTop(gen.WaterAt(x, z), top[c]);
+                water[c] = n == 0 ? int.MinValue : gen.WaterTopAt(x, z);
             }
         });
         var rgb = new byte[width * width * 3];

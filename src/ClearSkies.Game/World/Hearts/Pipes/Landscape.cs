@@ -47,7 +47,7 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
         double until = pipes.Time + settings.SettleMinutes * 60;
         while (pipes.Time < until) pipes.Step();
         Console.WriteLine($"Landscape: landmass {landmass} worn and watered in {sw.Elapsed.TotalSeconds:0.0} s ({pipes.Steps:N0} steps)");
-        return new Shaped(land, start, pipes.Depth, settings.MinDepth);
+        return new Shaped(land, start, pipes.Depth, settings.Damp);
     }
 
     /// <summary>A landmass's bounds (blocks, on 32-block lines): where its own ground can be, found on a coarse grid
@@ -67,9 +67,15 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
     }
 }
 
-/// <summary>One landmass as the model left it: each column's top floor before and after, and the water over it.</summary>
-public sealed class Shaped(Land land, float[] startFloor, float[] depth, float minDepth)
+/// <summary>One landmass as the model left it: each column's top floor before and after, and the water over it. A
+/// column's water goes into its own lowest blocks first (see HeartWorldGenerator.PlaceWater): a little (a creek) fills
+/// only the deepest few, a lot (a lake) its whole footprint to one level. The first Damp blocks of it only dampen
+/// the ground: thin water running over a slope shows as none.</summary>
+public sealed class Shaped(Land land, float[] startFloor, float[] depth, float damp)
 {
+    /// <summary>A column's width, in blocks.</summary>
+    public int Size => land.Size;
+
     /// <summary>How far the ground near world corner (x, z) (on the 8-block lines between columns) moved, from the
     /// columns round it whose top stood within Near blocks of <paramref name="top"/> (the corner's own top before):
     /// their moves averaged. 0 where none did.</summary>
@@ -91,32 +97,29 @@ public sealed class Shaped(Land land, float[] startFloor, float[] depth, float m
         return count == 0 ? 0f : sum / count;
     }
 
-    /// <summary>The water's surface (blocks) over block column (x, z): the levels of the wet ones of the four columns
-    /// round it, blended by nearness; none (NaN) where it's nearer dry ones.</summary>
-    public float WaterLevel(int x, int z)
+    /// <summary>How much water (blocks³) the column holding block column (x, z) has, and the world X and Z of its
+    /// corner; 0 where there's none.</summary>
+    public float Volume(int x, int z, out int cornerX, out int cornerZ)
     {
-        int size = land.Size;
-        float fx = (x + 0.5f - land.X0) / size - 0.5f, fz = (z + 0.5f - land.Z0) / size - 0.5f;
-        int i = (int)MathF.Floor(fx), k = (int)MathF.Floor(fz);
-        float tx = fx - i, tz = fz - k, weight = 0, level = 0;
-        for (int dk = 0; dk <= 1; dk++)
-        for (int di = 0; di <= 1; di++)
-        {
-            int ci = i + di, ck = k + dk;
-            if (ci < 0 || ck < 0 || ci >= land.Nx || ck >= land.Nz) continue;
-            int t = land.TopNode(ci + land.Nx * ck);
-            if (t < 0 || depth[t] < minDepth) continue;
-            float w = (di == 0 ? 1 - tx : tx) * (dk == 0 ? 1 - tz : tz);
-            weight += w;
-            level += w * (land.Floor[t] + depth[t]);
-        }
-        return weight < 0.5f ? float.NaN : level / weight;
+        int size = land.Size, i = (int)MathF.Floor((x - land.X0) / (float)size), k = (int)MathF.Floor((z - land.Z0) / (float)size);
+        cornerX = land.X0 + i * size; cornerZ = land.Z0 + k * size;
+        if (i < 0 || k < 0 || i >= land.Nx || k >= land.Nz) return 0f;
+        int t = land.TopNode(i + land.Nx * k);
+        return t < 0 ? 0f : Math.Max(0f, depth[t] - damp) * size * size;
+    }
+
+    /// <summary>The water's surface over the column holding block column (x, z) (blocks), or NaN where it's dry.</summary>
+    public float Surface(int x, int z)
+    {
+        int size = land.Size, i = (int)MathF.Floor((x - land.X0) / (float)size), k = (int)MathF.Floor((z - land.Z0) / (float)size);
+        if (i < 0 || k < 0 || i >= land.Nx || k >= land.Nz) return float.NaN;
+        int t = land.TopNode(i + land.Nx * k);
+        return t < 0 || depth[t] <= 0f ? float.NaN : land.Floor[t] + depth[t];
     }
 }
 
 /// <summary>What the landscape model does (see <see cref="Landscape"/>), from --terrain: comma-separated name=value
-/// pairs. off turns it off; erode-hours, settle-minutes, settle-rain (times the rain while settling), groundwater (true/false), min-depth (the least water that
-/// shows, in blocks) and size (column width) are the landscape's own; any other name is one of Pipes' numbers (e.g.
+/// pairs. off turns it off; erode-hours, settle-minutes, settle-rain (times the rain while settling), groundwater (true/false), damp (how deep water only dampens the ground) and size (column width) are the landscape's own; any other name is one of Pipes' numbers (e.g.
 /// creep=1e-5, speedup=900, rain=3e-4, manning=0.035, carry=0.05; dashes ignored, any case).</summary>
 public sealed class LandscapeSettings
 {
@@ -125,7 +128,8 @@ public sealed class LandscapeSettings
     /// <summary>How many times as much rain falls while the water settles, after the erosion.</summary>
     public float SettleRain = 1f;
     public bool Groundwater = true;
-    public float MinDepth = 0.3f;
+    /// <summary>How deep water over a column only dampens its ground, in blocks: the rest goes into its blocks.</summary>
+    public float Damp = 0.1f;
     public int Size = 8;
     public readonly List<(string Name, string Value)> Pipes = new();
 
@@ -145,7 +149,7 @@ public sealed class LandscapeSettings
                 case "settle-minutes": s.SettleMinutes = double.Parse(value, c); break;
                 case "settle-rain": s.SettleRain = float.Parse(value, c); break;
                 case "groundwater": s.Groundwater = bool.Parse(value); break;
-                case "min-depth": s.MinDepth = float.Parse(value, c); break;
+                case "damp": s.Damp = float.Parse(value, c); break;
                 case "size": s.Size = int.Parse(value, c); break;
                 default:
                     if (!Generation.Pipes.Set(null, name, value)) throw new ArgumentException($"--terrain: no setting called {name}");

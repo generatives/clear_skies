@@ -170,7 +170,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
 
                 // Water over the top span, up to the level the landscape left (see Landscape).
                 bool topSpan = s + 1 == p.Count(col);
-                int water = topSpan ? WaterTop(p.Water[col], hi) : int.MinValue;
+                int water = topSpan ? p.Water[col] : int.MinValue;
                 for (int y = System.Math.Max(hi + 1, originY); y <= System.Math.Min(water, originY + S - 1); y++)
                     data.Set(lx, y - originY, lz, BlockId.Water);
 
@@ -193,7 +193,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             {
                 int hi = p.Spans[p.Start[col] + s].Hi;
                 if (hi + Trees.MaxHeight < originY || hi >= originY + S) continue;
-                if (s + 1 == p.Count(col) && WaterTop(p.Water[col], hi) > hi) continue;
+                if (s + 1 == p.Count(col) && p.Water[col] > hi) continue;
                 var biome = p.Biome[p.Start[col] + s];
                 var ground = ContinentTerrain.Block(hi, hi, p.Strata[col], p.Patch[col], p.Bare[p.Start[col] + s], biome, p.Dry[p.Start[col] + s]);
                 int x = pos.X * S + lx, z = pos.Z * S + lz;
@@ -434,10 +434,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
 
         // Packed (only the spans there are, so profiles are small enough to share), then what's on each span's top.
         p.Pack(_spanCount, _spans, MaxSpans);
-        var shaped = _landscape?.At(x0 + S / 2, z0 + S / 2);
-        for (int lz = 0; lz < S; lz++)
-        for (int lx = 0; lx < S; lx++)
-            p.Water[lx + S * lz] = shaped?.WaterLevel((int)x0 + lx, (int)z0 + lz) ?? float.NaN;
+        PlaceWater(p, _landscape?.At(x0 + S / 2, z0 + S / 2), (int)x0, (int)z0);
         for (int lz = 0; lz < S; lz++)
         for (int lx = 0; lx < S; lx++)
         {
@@ -554,6 +551,49 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         }
     }
 
+    /// <summary>Each landscape column's water (see <see cref="Shaped.Volume"/>) into its own lowest blocks first: to
+    /// the level that holds it over the tops of the column's block columns, so a little fills only the deepest few
+    /// and a lot the whole column. A block column holds water where it stands at least half a block over its top.
+    /// (Landscape columns line up with chunk columns, so each one's block columns are all here.)</summary>
+    private static void PlaceWater(ColumnProfile p, Shaped? shaped, int x0, int z0)
+    {
+        Array.Fill(p.Water, int.MinValue);
+        if (shaped == null) return;
+        int size = shaped.Size;
+        Span<int> ground = stackalloc int[size * size];
+        for (int cz = 0; cz < S; cz += size)
+        for (int cx = 0; cx < S; cx += size)
+        {
+            float volume = shaped.Volume(x0 + cx, z0 + cz, out _, out _);
+            if (volume <= 0f) continue;
+            int n = 0;
+            for (int lz = cz; lz < cz + size; lz++)
+            for (int lx = cx; lx < cx + size; lx++)
+            {
+                int col = lx + S * lz, count = p.Count(col);
+                if (count > 0) ground[n++] = p.Spans[p.Start[col] + count - 1].Hi + 1;
+            }
+            if (n == 0) continue;
+            var g = ground[..n];
+            g.Sort();
+            // Flooding the lowest m: level (volume + their grounds) / m, if that's no higher than the next one's ground.
+            float sum = 0, level = 0;
+            for (int m = 1; m <= n; m++)
+            {
+                sum += g[m - 1];
+                level = (volume + sum) / m;
+                if (m == n || level <= g[m]) break;
+            }
+            int top = (int)MathF.Floor(level - 0.5f);
+            for (int lz = cz; lz < cz + size; lz++)
+            for (int lx = cx; lx < cx + size; lx++)
+            {
+                int col = lx + S * lz, count = p.Count(col);
+                if (count > 0 && top > p.Spans[p.Start[col] + count - 1].Hi) p.Water[col] = top;
+            }
+        }
+    }
+
     /// <summary>The top water block over ground topped at <paramref name="hi"/> with water to <paramref name="level"/>
     /// (blocks under half under it stay dry), or int.MinValue for none.</summary>
     public static int WaterTop(float level, int hi)
@@ -563,8 +603,16 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         return top > hi ? top : int.MinValue;
     }
 
-    /// <summary>The landscape's water level over block column (x, z), or NaN.</summary>
-    public float WaterAt(int x, int z) => _landscape?.At(x, z).WaterLevel(x, z) ?? float.NaN;
+    /// <summary>The landscape's water surface over the column holding block column (x, z), or NaN (for distant
+    /// terrain, whose voxels are as wide as columns or wider: there, a column's water is level).</summary>
+    public float WaterAt(int x, int z) => _landscape?.At(x, z).Surface(x, z) ?? float.NaN;
+
+    /// <summary>The top water block over block column (x, z), as Generate places it (see PlaceWater), or int.MinValue.</summary>
+    public int WaterTopAt(int x, int z)
+    {
+        Prepare(x >> 5, z >> 5);
+        return _profile!.Water[(x & (S - 1)) + S * (z & (S - 1))];
+    }
 
     /// <summary>The solid spans (bottom up) of block column (lx, lz) of the chunk column whose lattice was last worked
     /// out (see FillLattice): where its distances, interpolated between the lattice's corners, are positive. Runs thinner
@@ -814,8 +862,8 @@ public sealed class ColumnProfile
     public Biome[] Biome = Array.Empty<Biome>();
     public readonly float[] Strata = new float[Columns], Patch = new float[Columns], Flora = new float[Columns],
                             Woods = new float[Columns], Kind = new float[Columns];
-    /// <summary>Per block column, the level water stands to over its top span (see Landscape), or NaN.</summary>
-    public readonly float[] Water = new float[Columns];
+    /// <summary>Per block column, the top water block over its top span (see Landscape), or int.MinValue.</summary>
+    public readonly int[] Water = new int[Columns];
 
     public int Count(int col) => Start[col + 1] - Start[col];
 
