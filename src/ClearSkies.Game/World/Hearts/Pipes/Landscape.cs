@@ -62,28 +62,38 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
         // A stream shows only down the middle of the water running beside it: where it carries more than the columns on
         // either side across its way (a sheet down a hillside shows one line, not one per column).
         var shown = new float[land.Nodes];
+        var beside = new (int A, int B)[land.Nodes]; // the top nodes either side of each one's way, or -1
+        int TopAt(int ci, int cj) => ci < 0 || cj < 0 || ci >= land.Nx || cj >= land.Nz ? -1 : land.TopNode(ci + land.Nx * cj);
         for (int c = 0; c < land.Columns; c++)
         {
             int n = land.TopNode(c);
-            if (n < 0 || down[n] < 0) continue;
+            if (n < 0) continue;
+            beside[n] = (-1, -1);
+            if (down[n] < 0) continue;
             int d = land.ColumnOf[down[n]], i = c % land.Nx, j = c / land.Nx;
             int di = d % land.Nx - i, dj = d / land.Nx - j;
-            float FlowAt(int ci, int cj)
-            {
-                if (ci < 0 || cj < 0 || ci >= land.Nx || cj >= land.Nz) return 0f;
-                int m = land.TopNode(ci + land.Nx * cj);
-                return m < 0 ? 0f : flow[m];
-            }
-            if (flow[n] > FlowAt(i - dj, j + di) && flow[n] >= FlowAt(i + dj, j - di)) shown[n] = flow[n];
+            beside[n] = (TopAt(i - dj, j + di), TopAt(i + dj, j - di));
+        }
+        float FlowOf(int m) => m < 0 ? 0f : flow[m];
+        for (int n = 0; n < land.Nodes; n++)
+        {
+            var (a, b) = beside[n];
+            // The middle of the water running beside it, it carries that water too (a river spread over a few columns
+            // shows as one, as wide as all of them).
+            if (down[n] >= 0 && flow[n] > FlowOf(a) && flow[n] >= FlowOf(b)) shown[n] = flow[n] + FlowOf(a) + FlowOf(b);
         }
         // ...and only where it runs on into water or another shown stream (lowest first, so what it runs to is
         // settled): a stream that shows ends in water, not in a dash on a slope.
         var lowest = Enumerable.Range(0, land.Nodes).Where(n => shown[n] > 0).OrderBy(n => land.Floor[n]).ToArray();
         float least = settings.StreamFlow;
+        bool Shown(int m) => m >= 0 && shown[m] >= least;
         foreach (int n in lowest)
         {
             int to = down[n];
-            if (shown[to] < least && pipes.Depth[to] <= settings.Damp + 0.5f) shown[n] = 0;
+            // (A stream half a column wide or more spreads over the columns beside its way too: running on into one of
+            // those does.)
+            bool wide = MathF.Sqrt(shown[n] / least) >= settings.Size / 2f;
+            if (!Shown(to) && !(wide && (Shown(beside[to].A) || Shown(beside[to].B))) && pipes.Depth[to] <= settings.Damp + 0.5f) shown[n] = 0;
         }
         return new Shaped(land, start, pipes.Depth, shown, down, settings);
     }
