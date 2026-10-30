@@ -128,6 +128,7 @@ public sealed partial class Pipes
         });
 
         Apply(dt);
+        if (Groundwater != null) Seep(dt);
         // Ground moves slowly next to water: worn every ErodeEvery steps, by those steps' time together.
         _erodeTime += dt;
         if (Eroding && Steps % ErodeEvery == 0) { Erode(_erodeTime); _erodeTime = 0; }
@@ -181,7 +182,14 @@ public sealed partial class Pipes
                     net += land.FaceA[f] == n ? -Flow[f] : Flow[f];
                 }
                 float d = Depth[n] + dt * (net / _area + Rain * _rain[n]);
-                Depth[n] = d > 0 ? Math.Max(0f, d - Soak * dt) : 0f;
+                if (Groundwater != null)
+                {
+                    // Soaks into the ground under it, and springs come up where the ground is full.
+                    float soaks = Math.Clamp(d, 0f, Soak * dt);
+                    Soaking![n] = soaks * _area / dt;
+                    Depth[n] = Math.Max(0f, d - soaks) + Springs![n] * dt / _area;
+                }
+                else Depth[n] = d > 0 ? Math.Max(0f, d - Soak * dt) : 0f;
             }
         });
     }
@@ -208,7 +216,8 @@ public sealed partial class Pipes
         for (int n = 0; n < land.Nodes; n++)
         {
             rain += Rain * _rain[n] * _area;
-            if (Depth[n] > 0) soaked += Soak * _area;
+            if (Groundwater != null) soaked += Soaking![n] - Springs![n];
+            else if (Depth[n] > 0) soaked += Soak * _area;
             stored += Depth[n] * _area;
         }
         for (int f = 0; f < land.Faces; f++) if (land.FaceB[f] < 0 && Flow[f] > 0) drained += Flow[f];

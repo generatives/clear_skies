@@ -13,13 +13,14 @@ using StbImageWriteSharp;
 // With no --cell it takes the spawn's landmass. It runs until --hours of simulated time pass, or until as much water
 // leaves the land (over its edges and into the ground) as rains on it, within 1%. --no-fill starts the land dry instead
 // of with every hollow full to where it spills. --erode H then wears the land for H more hours (see Pipes.Erosion;
-// --carry, --pick, --drop, --speedup) and settles the water again on it.
+// --carry, --pick, --drop, --speedup) and settles the water again on it. --ground adds groundwater (see Pipes.Ground;
+// --permeability, --shell, --porosity, --storage) in place of soaking away.
 
 ulong seed = 1337;
 (int X, int Z)? cell = null;
 int size = 8;
 double hours = 6, report = 600, erodeHours = 0;
-bool fill = true, snapshots = false;
+bool fill = true, snapshots = false, ground = false;
 string outDir = "pipes-out";
 var settings = new List<Action<Pipes>>();
 bool widened = false;
@@ -45,6 +46,11 @@ for (int a = 0; a < args.Length; a++)
         case "--slide-rate": { var v = float.Parse(args[++a]); settings.Add(p => p.SlideRate = v); break; }
         case "--hardening": { var v = float.Parse(args[++a]); settings.Add(p => p.Hardening = v); break; }
         case "--erode-every": { var v = int.Parse(args[++a]); settings.Add(p => p.ErodeEvery = v); break; }
+        case "--ground": ground = true; break;
+        case "--permeability": { var v = float.Parse(args[++a]); settings.Add(p => p.Permeability = v); break; }
+        case "--shell": { var v = float.Parse(args[++a]); settings.Add(p => p.Shell = v); break; }
+        case "--porosity": { var v = float.Parse(args[++a]); settings.Add(p => p.Porosity = v); break; }
+        case "--storage": { var v = float.Parse(args[++a]); settings.Add(p => p.Storage = v); break; }
         case "--speedup": { var v = float.Parse(args[++a]); settings.Add(p => p.Speedup = v); break; }
         case "--rain": { var v = float.Parse(args[++a]); settings.Add(p => p.Rain = v); break; }
         case "--soak": { var v = float.Parse(args[++a]); settings.Add(p => p.Soak = v); break; }
@@ -78,6 +84,7 @@ Console.WriteLine($"{size}-block columns: {land.Columns:N0} ({landColumns:N0} wi
 
 var pipes = new Pipes(land);
 foreach (var set in settings) set(pipes);
+if (ground) pipes.UseGroundwater();
 Directory.CreateDirectory(outDir);
 if (fill)
 {
@@ -99,6 +106,7 @@ if (erodeHours > 0)
     WriteWear(Path.Combine(outDir, "wear.png"));
 }
 WriteMap(Path.Combine(outDir, "pipes.png"));
+if (ground) Console.WriteLine($"Ground balance: {pipes.GroundBalance()}");
 Console.WriteLine($"Total {total.Elapsed.TotalSeconds:0.0} s");
 return 0;
 
@@ -121,7 +129,9 @@ void Run(double until, bool stopWhenSettled)
                           $"drained {b.Drained:0} soaked {b.Soaked:0} ({100 * off:+0.0;-0.0}%), stored {b.Stored / 1e6:0.00} M" +
                           (pipes.Eroding ? $", sediment {pipes.Sediment!.Sum() / 1e3:0.0} k" : ""));
         if (snapshots) WriteMap(Path.Combine(outDir, $"pipes-{pipes.Time / 60:00000}.png"));
-        if (stopWhenSettled && Math.Abs(off) < 0.01 && Math.Abs(b.Stored - stored) < 0.01 * b.Stored) { settled = true; break; }
+        // With groundwater, also once the ground takes in as much as it gives back.
+        bool groundSettled = pipes.Groundwater == null || Math.Abs(b.Soaked) < 0.01 * b.Rain;
+        if (stopWhenSettled && groundSettled && Math.Abs(off) < 0.01 && Math.Abs(b.Stored - stored) < 0.01 * b.Stored) { settled = true; break; }
         stored = b.Stored;
     }
     steps = pipes.Steps - steps;
@@ -156,13 +166,13 @@ void WriteWear(string path)
 }
 
 // Top-down: the land shaded by height and slope, standing water (half a block or more) blue by depth, running water
-// by how much runs through (in columns' worth of the wettest rain).
+// by how much runs through (in columns' worth of the wettest rain), ground full to the top green.
 void WriteMap(string path)
 {
     int nx = land.Nx, nz = land.Nz;
     var rgb = new byte[land.Columns * 3];
     float column = pipes.Rain * size * size;
-    int columns = 0, lakes = 0, creeks = 0, streams = 0, rivers = 0;
+    int columns = 0, lakes = 0, creeks = 0, streams = 0, rivers = 0, full = 0, springing = 0;
     float Ground(int c) => land.Floor[land.TopNode(c)];
     for (int c = 0; c < land.Columns; c++)
     {
@@ -170,6 +180,8 @@ void WriteMap(string path)
         if (!land.HasLand(c)) { rgb[o] = 18; rgb[o + 1] = 22; rgb[o + 2] = 34; continue; }
         columns++;
         int n = land.TopNode(c);
+        if (pipes.Groundwater != null && pipes.Groundwater[n] >= land.Floor[n] - 0.01f) full++;
+        if (pipes.Springs != null && pipes.Springs[n] > 0) springing++;
         float ground = Ground(c), depth = pipes.Depth[n], runs = pipes.Through(n) / column;
         float Hat(int di, int dj)
         {
@@ -193,10 +205,16 @@ void WriteMap(string path)
             double w = Math.Clamp(Math.Log10(runs / 40) / 2, 0.35, 1);
             rgb[o] = (byte)(g * (1 - w) + 40 * w); rgb[o + 1] = (byte)(g * (1 - w) + 120 * w); rgb[o + 2] = (byte)(g * 0.85 * (1 - w) + 255 * w);
         }
+        else if (pipes.Groundwater != null && pipes.Groundwater[n] >= land.Floor[n] - 0.01f)
+        {
+            // Ground full to the top (springs, marsh): greener.
+            rgb[o] = (byte)(g * 0.5); rgb[o + 1] = (byte)(g * 0.85); rgb[o + 2] = (byte)(g * 0.55);
+        }
         else { rgb[o] = (byte)(g * 0.95); rgb[o + 1] = (byte)g; rgb[o + 2] = (byte)(g * 0.8); }
     }
     using (var f = File.Create(path))
         new ImageWriter().WritePng(rgb, nx, nz, ColorComponents.RedGreenBlue, f);
     Console.WriteLine($"Of {columns:N0} land columns: standing water {100.0 * lakes / columns:0.0}%, creeks (40+ columns' rain) " +
-                      $"{100.0 * creeks / columns:0.0}%, streams (200+) {100.0 * streams / columns:0.0}%, rivers (1000+) {100.0 * rivers / columns:0.0}%");
+                      $"{100.0 * creeks / columns:0.0}%, streams (200+) {100.0 * streams / columns:0.0}%, rivers (1000+) {100.0 * rivers / columns:0.0}%" +
+                      (pipes.Groundwater != null ? $", ground full {100.0 * full / columns:0.0}%, springs {100.0 * springing / columns:0.0}%" : ""));
 }
