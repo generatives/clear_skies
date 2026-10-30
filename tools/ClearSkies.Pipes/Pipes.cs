@@ -1,7 +1,7 @@
 namespace ClearSkies.Pipes;
 
 /// <summary>
-/// Surface water on a <see cref="Land"/> by the pipes rule: each face carries a flow that remembers itself from step to
+/// Surface water on a <see cref="Land"/> by the pipes rule: each face (each link, see Land) carries a flow that remembers itself from step to
 /// step, pushed by the difference in water level across it and held back by friction (the local inertial form of
 /// shallow water, Bates et al. 2010):
 ///
@@ -29,7 +29,8 @@ public sealed partial class Pipes
     public float WaveDepth = 1f;
 
     public readonly float[] Depth;
-    /// <summary>Each face's flow over the last step, in blocks³ a second (positive from its A to its B).</summary>
+    /// <summary>Each link's flow over the last step, in blocks³ a second, out of its node (so a face's two links carry
+    /// it with opposite signs).</summary>
     public float[] Flow { get; private set; }
     private float[] _limited; // where Apply writes the flows it limits, then swapped with Flow
     public double Time;
@@ -40,9 +41,7 @@ public sealed partial class Pipes
     private readonly Land _land;
     private readonly float[] _level;
     private readonly float _width, _area;
-    private readonly int[] _faceStart, _faceOf; // per node, its faces (CSR)
-    private readonly int[] _other; // per CSR entry: the node on the face's other side (-1: off the land)
-    private readonly float[] _side; // per CSR entry: 1 where the node is the face's A, -1 where it's B
+    private readonly int[] _faceStart, _other; // the land's LinkStart and LinkTo
     private readonly float[] _rain, _ratio;
     private float _deepest;
 
@@ -51,27 +50,11 @@ public sealed partial class Pipes
         _land = land;
         _width = land.Size; _area = land.Size * land.Size;
         Depth = new float[land.Nodes];
-        Flow = new float[land.Faces];
-        _limited = new float[land.Faces];
+        Flow = new float[land.Links];
+        _limited = new float[land.Links];
         _ratio = new float[land.Nodes];
         _level = new float[land.Nodes];
-
-        var count = new int[land.Nodes + 1];
-        for (int f = 0; f < land.Faces; f++) { count[land.FaceA[f] + 1]++; if (land.FaceB[f] >= 0) count[land.FaceB[f] + 1]++; }
-        for (int n = 0; n < land.Nodes; n++) count[n + 1] += count[n];
-        _faceStart = (int[])count.Clone();
-        _faceOf = new int[count[land.Nodes]];
-        var at = (int[])count.Clone();
-        for (int f = 0; f < land.Faces; f++) { _faceOf[at[land.FaceA[f]]++] = f; if (land.FaceB[f] >= 0) _faceOf[at[land.FaceB[f]]++] = f; }
-        _other = new int[_faceOf.Length]; _side = new float[_faceOf.Length];
-        for (int n = 0; n < land.Nodes; n++)
-        for (int k = _faceStart[n]; k < _faceStart[n + 1]; k++)
-        {
-            int f = _faceOf[k];
-            bool isA = land.FaceA[f] == n;
-            _other[k] = isA ? land.FaceB[f] : land.FaceA[f];
-            _side[k] = isA ? 1f : -1f;
-        }
+        _faceStart = land.LinkStart; _other = land.LinkTo;
 
         _rain = new float[land.Nodes];
         for (int c = 0; c < land.Columns; c++) if (land.HasLand(c)) _rain[land.TopNode(c)] = land.Wetness[c];
@@ -86,17 +69,17 @@ public sealed partial class Pipes
         var spill = new float[land.Nodes];
         Array.Fill(spill, float.PositiveInfinity);
         var queue = new PriorityQueue<int, float>();
-        for (int f = 0; f < land.Faces; f++)
-            if (land.FaceB[f] < 0 && land.Floor[land.FaceA[f]] < spill[land.FaceA[f]])
-            { spill[land.FaceA[f]] = land.Floor[land.FaceA[f]]; queue.Enqueue(land.FaceA[f], spill[land.FaceA[f]]); }
+        for (int n = 0; n < land.Nodes; n++)
+            for (int k = _faceStart[n]; k < _faceStart[n + 1]; k++)
+                if (_other[k] < 0 && land.Floor[n] < spill[n]) { spill[n] = land.Floor[n]; queue.Enqueue(n, spill[n]); }
         while (queue.TryDequeue(out int n, out float level))
         {
             if (level > spill[n]) continue;
             for (int k = _faceStart[n]; k < _faceStart[n + 1]; k++)
             {
-                int f = _faceOf[k], m = _other[k];
+                int m = _other[k];
                 if (m < 0) continue;
-                float to = Math.Max(level, land.FaceBottom(f));
+                float to = Math.Max(level, land.LinkBottom(n, k));
                 if (to < spill[m]) { spill[m] = to; queue.Enqueue(m, to); }
             }
         }
@@ -120,35 +103,44 @@ public sealed partial class Pipes
         float dt = Math.Min(MostStep, Courant * _width / MathF.Sqrt(G * Math.Clamp(_deepest, 0.01f, WaveDepth)));
         float weir = 0.385f * MathF.Sqrt(2 * G), n2 = Manning * Manning;
 
-        // Each face's flow.
+        // Each face's flow, worked out by the node on its lower-numbered side (or the node a drain leads from) and written
+        // to both its links.
         FlowTime.Start();
-        var flow = Flow; var depth = Depth; var floor = land.Floor; var faceA = land.FaceA; var faceB = land.FaceB;
-        var faceTop = land.FaceTop; var faceWidth = land.FaceWidth; var faceLength = land.FaceLength;
-        float waveDepth = WaveDepth;
-        Parallel.For(0, (land.Faces + 4095) / 4096, block =>
+        var flow = Flow; var depth = Depth; var floor = land.Floor; var start = _faceStart; var other = _other;
+        var back = land.LinkBack; var linkTop = land.LinkTop; var linkLength = land.LinkLength;
+        float waveDepth = WaveDepth, width = land.FaceWidth;
+        Parallel.For(0, (land.Nodes + 1023) / 1024, block =>
         {
-            int end = Math.Min(flow.Length, (block + 1) * 4096);
-            for (int f = block * 4096; f < end; f++)
+            int end = Math.Min(depth.Length, (block + 1) * 1024);
+            for (int a = block * 1024; a < end; a++)
             {
-                int a = faceA[f], b = faceB[f];
-                float width = faceWidth[f], floorA = floor[a];
-                float bottom = b >= 0 ? Math.Max(floorA, floor[b]) : floorA;
-                float upA = floorA + depth[a], upB = b >= 0 ? floor[b] + depth[b] : float.NegativeInfinity;
-                float high = Math.Max(upA, upB), low = Math.Min(upA, upB);
-                float h = Math.Min(high, faceTop[f]) - bottom;
-                if (h <= 1e-4f) { flow[f] = 0; continue; }
-                if (low < bottom)
+                float floorA = floor[a], upA = floorA + depth[a];
+                for (int k = start[a]; k < start[a + 1]; k++)
                 {
-                    // Pours over the edge from the higher side.
-                    float q = weir * width * h * MathF.Sqrt(h);
-                    flow[f] = upA >= upB ? q : -q;
-                    continue;
+                    int b = other[k];
+                    if (b >= 0 && b < a) continue; // the other side's
+                    float bottom = b >= 0 ? Math.Max(floorA, floor[b]) : floorA;
+                    float upB = b >= 0 ? floor[b] + depth[b] : float.NegativeInfinity;
+                    float high = Math.Max(upA, upB), low = Math.Min(upA, upB);
+                    float h = Math.Min(high, linkTop[k]) - bottom, q;
+                    if (h <= 1e-4f) q = 0;
+                    else if (low < bottom)
+                    {
+                        // Pours over the edge from the higher side.
+                        q = weir * width * h * MathF.Sqrt(h);
+                        if (upA < upB) q = -q;
+                    }
+                    else
+                    {
+                        h = Math.Min(h, waveDepth);
+                        float old = flow[k] / width, slope = (upB - upA) / linkLength[k];
+                        float next = (old - G * dt * h * slope) / (1 + G * dt * n2 * Math.Abs(old) / (h * h * MathF.Cbrt(h)));
+                        float most = h * MathF.Sqrt(G * h); // no faster than a wave
+                        q = Math.Clamp(next, -most, most) * width;
+                    }
+                    flow[k] = q;
+                    if (b >= 0) flow[back[k]] = -q;
                 }
-                h = Math.Min(h, waveDepth);
-                float old = flow[f] / width, slope = (upB - upA) / faceLength[f];
-                float next = (old - G * dt * h * slope) / (1 + G * dt * n2 * Math.Abs(old) / (h * h * MathF.Cbrt(h)));
-                float most = h * MathF.Sqrt(G * h); // no faster than a wave
-                flow[f] = Math.Clamp(next, -most, most) * width;
             }
         });
 
@@ -175,8 +167,8 @@ public sealed partial class Pipes
     {
         var land = _land;
         // Locals, so the loops keep them in registers.
-        var flow = Flow; var depth = Depth; var ratio = _ratio; var rainOn = _rain; var start = _faceStart; var faceOf = _faceOf;
-        var side = _side; var other = _other; var limited = _limited;
+        var flow = Flow; var depth = Depth; var ratio = _ratio; var rainOn = _rain; var start = _faceStart;
+        var other = _other; var limited = _limited;
         float area = _area, rain = Rain * dt;
         Parallel.For(0, (land.Nodes + 4095) / 4096, block =>
         {
@@ -184,11 +176,7 @@ public sealed partial class Pipes
             for (int n = block * 4096; n < end; n++)
             {
                 float outs = 0;
-                for (int k = start[n]; k < start[n + 1]; k++)
-                {
-                    float q = side[k] * flow[faceOf[k]];
-                    if (q > 0) outs += q;
-                }
+                for (int k = start[n]; k < start[n + 1]; k++) outs += Math.Max(0f, flow[k]);
                 float has = (depth[n] + rain * rainOn[n]) * area;
                 ratio[n] = outs * dt > has ? has / (outs * dt) : 1f;
             }
@@ -201,15 +189,14 @@ public sealed partial class Pipes
             int end = Math.Min(depth.Length, (block + 1) * 4096);
             for (int n = block * 4096; n < end; n++)
             {
-                // Each face's flow cut down by the share its giving side can give; the face's A side writes it.
-                float net = 0;
+                // Each link's flow cut down by the share its giving side can give (both links of a face come out the same).
+                float net = 0, mine = ratio[n];
                 for (int k = start[n]; k < start[n + 1]; k++)
                 {
-                    int f = faceOf[k];
-                    float q = side[k] * flow[f]; // out of n
-                    if (q > 0) q *= ratio[n]; else if (q < 0) q *= ratio[other[k]];
+                    float q = flow[k]; // out of n
+                    if (q > 0) q *= mine; else if (q < 0) q *= ratio[other[k]];
                     net -= q;
-                    if (side[k] > 0) limited[f] = q;
+                    limited[k] = q;
                 }
                 float d = depth[n] + net * dt / area + rain * rainOn[n];
                 if (soaking != null)
@@ -251,19 +238,17 @@ public sealed partial class Pipes
             else if (Depth[n] > 0) soaked += Soak * _area;
             stored += Depth[n] * _area;
         }
-        for (int f = 0; f < land.Faces; f++) if (land.FaceB[f] < 0 && Flow[f] > 0) drained += Flow[f];
+        for (int k = 0; k < land.Links; k++) if (_other[k] < 0 && Flow[k] > 0) drained += Flow[k];
         return (rain, drained, soaked, stored);
     }
 
     /// <summary>How much water runs through node n (the larger of what comes in and what goes out), in blocks³ a second.</summary>
     public float Through(int n)
     {
-        var land = _land;
         float ins = 0, outs = 0;
         for (int k = _faceStart[n]; k < _faceStart[n + 1]; k++)
         {
-            int f = _faceOf[k];
-            float q = _side[k] * Flow[f];
+            float q = Flow[k];
             if (q > 0) outs += q; else ins -= q;
         }
         return Math.Max(ins, outs);

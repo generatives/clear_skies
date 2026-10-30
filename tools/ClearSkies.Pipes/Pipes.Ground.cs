@@ -39,17 +39,17 @@ public sealed partial class Pipes
         }
     }
 
-    /// <summary>How much face f passes per block of difference in table: through the wet part of the height its two
+    /// <summary>How much link k (of node n, to m) passes per block of difference in table: through the wet part of the height its two
     /// shells share (wet on the higher table's side). Shells that don't overlap, like a ledge's and the ground at its
     /// foot, pass nothing.</summary>
-    private float Conductance(int f, int n, int m, float bottomN, float bottomM)
+    private float Conductance(int k, int n, int m, float bottomN, float bottomM)
     {
         var land = _land; var table = Groundwater!;
         float low = Math.Max(bottomN, bottomM);
         float shared = Math.Min(land.Floor[n], land.Floor[m]) - low;
         float wet = Math.Max(table[n], table[m]) - low; // on the higher table's side
         float through = Math.Min(shared, wet);
-        return through <= 0 ? 0 : Permeability * land.FaceWidth[f] * through / land.FaceLength[f];
+        return through <= 0 ? 0 : Permeability * land.FaceWidth * through / land.LinkLength[k];
     }
 
     /// <summary>One sweep of the water tables, alternating direction; blocks of nodes in parallel.</summary>
@@ -70,10 +70,9 @@ public sealed partial class Pipes
                 double sum = stored, rhs = stored * table[n] + soaking[n];
                 for (int k = _faceStart[n]; k < _faceStart[n + 1]; k++)
                 {
-                    int f = _faceOf[k];
                     int m = _other[k];
                     if (m < 0) continue; // edges pass nothing
-                    float c = Conductance(f, n, m, under, bottom[m]);
+                    float c = Conductance(k, n, m, under, bottom[m]);
                     if (c <= 0) continue;
                     sum += c; rhs += c * table[m];
                 }
@@ -104,10 +103,9 @@ public sealed partial class Pipes
             double net = 0;
             for (int k = _faceStart[n]; k < _faceStart[n + 1]; k++)
             {
-                int f = _faceOf[k];
                 int m = _other[k];
                 if (m < 0) continue;
-                net += Conductance(f, n, m, bottom[n], bottom[m]) * (table[m] - table[n]);
+                net += Conductance(k, n, m, bottom[n], bottom[m]) * (table[m] - table[n]);
             }
             soak += Soaking![n]; springs += Springs![n]; sideways += net;
             double balance = net + Soaking[n];

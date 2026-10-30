@@ -6,7 +6,7 @@ namespace ClearSkies.Pipes;
 /// One landmass as the pipes model sees it: columns of Size blocks on a side, each sampled at its middle block column,
 /// and in each column the open gaps above its solid spans (nodes). A node's floor is the top of the span under it and
 /// its ceiling the bottom of the span over it (none for the top one, open to the sky). Nodes of neighbouring columns
-/// whose gaps overlap share a face. Where a node's gap reaches down into the open space under all of a neighbour's land
+/// whose gaps overlap share a face (a link from each side). Where a node's gap reaches down into the open space under all of a neighbour's land
 /// (or the neighbour has none), it has a drain face there: water through it falls off the land.
 /// </summary>
 public sealed class Land
@@ -24,14 +24,17 @@ public sealed class Land
     public readonly int[] ColumnOf;
     public int Nodes => Floor.Length;
 
-    /// <summary>Faces: water through face f goes from node FaceA[f] to FaceB[f] (-1: off the land) when positive.</summary>
-    public readonly int[] FaceA, FaceB;
-    /// <summary>The top of each face's opening (the lower of its nodes' ceilings; see FaceBottom for its bottom).</summary>
-    public readonly float[] FaceTop;
-    /// <summary>Each face's width and the distance between its nodes' middles: columns are taken as octagons, so water
-    /// runs to all eight neighbours alike and doesn't line up with the grid.</summary>
-    public readonly float[] FaceWidth, FaceLength;
-    public int Faces => FaceA.Length;
+    /// <summary>Links: node n's are LinkStart[n] .. LinkStart[n + 1] - 1, one for each face it shares with a
+    /// neighbouring node (LinkTo, whose link back is LinkBack) or drain (LinkTo and LinkBack -1). Each face so has a link
+    /// from both its sides, and everything a node needs lies in its own run of links.</summary>
+    public readonly int[] LinkStart, LinkTo, LinkBack;
+    /// <summary>The top of each link's opening (the lower of its nodes' ceilings; see LinkBottom for its bottom) and the
+    /// distance between its nodes' middles.</summary>
+    public readonly float[] LinkTop, LinkLength;
+    public int Links => LinkTo.Length;
+    /// <summary>Every face's width: columns are taken as octagons, all of whose sides are (√2 - 1) of its width, so
+    /// water runs to all eight neighbours alike and doesn't line up with the grid.</summary>
+    public readonly float FaceWidth;
 
     /// <summary>Rain on each column's top node, as a fraction of the most (by the climate's wetness).</summary>
     public readonly float[] Wetness;
@@ -79,44 +82,46 @@ public sealed class Land
             }
         }
 
-        // Faces to the neighbours east, south-east, south and south-west (and drains on all eight sides, including off
-        // the sampled area). An octagon's sides are all (√2 - 1) of its width.
-        var a = new List<int>(nodes * 3); var b = new List<int>(nodes * 3);
-        var top = new List<float>(nodes * 3); var length = new List<float>(nodes * 3);
+        // Links to the nodes of all eight neighbouring columns whose gaps overlap this one's, and drains (including off
+        // the sampled area).
+        var start = new int[nodes + 1];
+        var to = new List<int>(nodes * 9); var top = new List<float>(nodes * 9); var length = new List<float>(nodes * 9);
         var sides = new[] { (1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, -1), (-1, 1), (1, -1) };
         float LowestLo(int c) => spans[c].Length > 0 ? spans[c][0].Lo : NoCeiling;
-        for (int j = 0; j < Nz; j++)
-        for (int i = 0; i < Nx; i++)
+        for (int n = 0; n < nodes; n++)
         {
-            int c = i + Nx * j;
-            for (int n = NodeStart[c]; n < NodeStart[c + 1]; n++)
+            start[n] = to.Count;
+            int c = ColumnOf[n], i = c % Nx, j = c / Nx;
+            foreach (var (di, dj) in sides)
             {
-                foreach (var (di, dj) in sides)
+                float apart = size * (di != 0 && dj != 0 ? MathF.Sqrt(2) : 1f);
+                int ni = i + di, nj = j + dj;
+                int d = ni >= 0 && nj >= 0 && ni < Nx && nj < Nz ? ni + Nx * nj : -1;
+                // Drain: the gap reaches below all of the neighbour's land.
+                float under = d < 0 ? NoCeiling : LowestLo(d);
+                if (Floor[n] < under) { to.Add(-1); top.Add(Math.Min(Ceiling[n], under)); length.Add(apart); }
+                if (d < 0) continue;
+                for (int m = NodeStart[d]; m < NodeStart[d + 1]; m++)
                 {
-                    float apart = size * (di != 0 && dj != 0 ? MathF.Sqrt(2) : 1f);
-                    int ni = i + di, nj = j + dj;
-                    bool inside = ni >= 0 && nj >= 0 && ni < Nx && nj < Nz;
-                    int d = inside ? ni + Nx * nj : -1;
-                    // Drain: the gap reaches below all of the neighbour's land.
-                    float under = d < 0 ? NoCeiling : LowestLo(d);
-                    if (Floor[n] < under)
-                    {
-                        a.Add(n); b.Add(-1); top.Add(Math.Min(Ceiling[n], under)); length.Add(apart);
-                    }
-                    if (d < 0 || dj < 0 || (dj == 0 && di < 0)) continue; // each pair once
-                    for (int m = NodeStart[d]; m < NodeStart[d + 1]; m++)
-                    {
-                        float lo = Math.Max(Floor[n], Floor[m]), hi = Math.Min(Ceiling[n], Ceiling[m]);
-                        if (hi <= lo) continue;
-                        a.Add(n); b.Add(m); top.Add(hi); length.Add(apart);
-                    }
+                    float lo = Math.Max(Floor[n], Floor[m]), hi = Math.Min(Ceiling[n], Ceiling[m]);
+                    if (hi <= lo) continue;
+                    to.Add(m); top.Add(hi); length.Add(apart);
                 }
             }
         }
-        FaceA = a.ToArray(); FaceB = b.ToArray(); FaceTop = top.ToArray();
-        FaceLength = length.ToArray();
-        FaceWidth = new float[FaceA.Length];
-        Array.Fill(FaceWidth, size * (MathF.Sqrt(2) - 1));
+        start[nodes] = to.Count;
+        LinkStart = start; LinkTo = to.ToArray(); LinkTop = top.ToArray(); LinkLength = length.ToArray();
+        LinkBack = new int[LinkTo.Length];
+        for (int n = 0; n < nodes; n++)
+        for (int k = start[n]; k < start[n + 1]; k++)
+        {
+            int m = LinkTo[k];
+            LinkBack[k] = -1;
+            if (m < 0) continue;
+            for (int r = start[m]; r < start[m + 1]; r++)
+                if (LinkTo[r] == n && LinkLength[r] == LinkLength[k] && LinkTop[r] == LinkTop[k]) { LinkBack[k] = r; break; }
+        }
+        FaceWidth = size * (MathF.Sqrt(2) - 1);
 
         var climate = ContinentTerrain.For(seed);
         Wetness = new float[columns];
@@ -130,8 +135,9 @@ public sealed class Land
         });
     }
 
-    /// <summary>The bottom of face f's opening: the higher of its nodes' floors (as they are now; erosion moves them).</summary>
-    public float FaceBottom(int f) => FaceB[f] >= 0 ? Math.Max(Floor[FaceA[f]], Floor[FaceB[f]]) : Floor[FaceA[f]];
+    /// <summary>The bottom of node n's link k's opening: the higher of its nodes' floors (as they are now; erosion moves
+    /// them).</summary>
+    public float LinkBottom(int n, int k) => LinkTo[k] >= 0 ? Math.Max(Floor[n], Floor[LinkTo[k]]) : Floor[n];
 
     public bool HasLand(int c) => NodeStart[c + 1] > NodeStart[c];
 

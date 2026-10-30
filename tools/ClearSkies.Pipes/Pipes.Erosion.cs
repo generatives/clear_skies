@@ -50,8 +50,7 @@ public sealed partial class Pipes
                 float outs = 0;
                 for (int k = _faceStart[n]; k < _faceStart[n + 1]; k++)
                 {
-                    int f = _faceOf[k];
-                    float q = _side[k] * Flow[f];
+                    float q = Flow[k];
                     if (q > 0) outs += q;
                 }
                 float sends = outs * dt * carried[n];
@@ -70,15 +69,14 @@ public sealed partial class Pipes
                 float level = land.Floor[n] + Depth[n];
                 for (int k = _faceStart[n]; k < _faceStart[n + 1]; k++)
                 {
-                    int f = _faceOf[k];
-                    float q = _side[k] * Flow[f];
+                    float q = Flow[k];
                     int m = _other[k];
                     if (q > 0) s -= q * dt * carried[n] * ratio[n];
                     else if (q < 0 && m >= 0) s -= q * dt * carried[m] * ratio[m];
                     float abs = Math.Abs(q);
                     through += abs;
                     float drop = m >= 0 ? Math.Abs(level - land.Floor[m] - Depth[m]) : 0f;
-                    slope += abs * Math.Min(SteepestCut, drop / land.FaceLength[f]);
+                    slope += abs * Math.Min(SteepestCut, drop / land.LinkLength[k]);
                 }
                 s = Math.Max(0f, s);
                 float h = Depth[n];
@@ -122,11 +120,10 @@ public sealed partial class Pipes
                 float change = 0;
                 for (int k = _faceStart[n]; k < _faceStart[n + 1]; k++)
                 {
-                    int f = _faceOf[k];
                     int m = _other[k];
                     if (m < 0) continue;
                     float d = slid[n] - slid[m], ad = Math.Abs(d);
-                    float stood = Math.Max(Slide * land.FaceLength[f], Math.Abs(startFloor[n] - startFloor[m]));
+                    float stood = Math.Max(Slide * land.LinkLength[k], Math.Abs(startFloor[n] - startFloor[m]));
                     if (ad <= stood) continue;
                     float move = slideStep * (ad - stood) / 2;
                     change += d > 0 ? -move : move;

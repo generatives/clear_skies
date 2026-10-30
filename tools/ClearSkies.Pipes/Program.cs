@@ -83,7 +83,7 @@ var sw = Stopwatch.StartNew();
 var land = new Land(seed, landmass, x0, z0, x1, z1, size);
 int landColumns = Enumerable.Range(0, land.Columns).Count(land.HasLand);
 Console.WriteLine($"{size}-block columns: {land.Columns:N0} ({landColumns:N0} with land), {land.Nodes:N0} nodes, " +
-                  $"{land.Faces:N0} faces, sampled in {sw.Elapsed.TotalSeconds:0.0} s");
+                  $"{land.Links:N0} links, sampled in {sw.Elapsed.TotalSeconds:0.0} s");
 
 var pipes = new Pipes(land);
 foreach (var set in settings) set(pipes);
