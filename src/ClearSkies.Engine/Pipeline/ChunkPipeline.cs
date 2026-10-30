@@ -16,7 +16,7 @@ public readonly record struct FrameBudgets(int WorkerSlots, double MainMs);
 /// </summary>
 /// <remarks>
 /// Only <see cref="Want">wanted</see> chunks are in it, and every stage they need runs: those for any chunk, and those
-/// serving what it's wanted for (<see cref="WantFor"/>). A stage reading another chunk
+/// serving what it's wanted for (see <see cref="Want"/>). A stage reading another chunk
 /// waits until that one is wanted and done; it never loads it (a coarse chunk makes its own voxels, at its own
 /// resolution). A stage's last output stays in use while it runs again, so a chunk shown stays shown through its reruns.
 /// </remarks>
@@ -105,7 +105,7 @@ public sealed class ChunkPipeline
     public void RemoveGrid(PipelineGrid grid)
     {
         if (grid.Removed) return;
-        foreach (var record in _records.Values.Where(r => r.Grid == grid).ToList()) Want(record.Key, false);
+        foreach (var record in _records.Values.Where(r => r.Grid == grid).ToList()) Want(record.Key, Purpose.None);
         grid.Removed = true;
         if (grid.Volume != null && _byVolume.GetValueOrDefault(grid.Volume) == grid) _byVolume.Remove(grid.Volume);
         foreach (var readers in _readersOf) readers.RemoveAll(r => r.Grid == grid.Id);
@@ -150,12 +150,17 @@ public sealed class ChunkPipeline
         => key.Grid < _grids.Count && _grids[key.Grid].Volume?.GetEntry(key.Pos) is { } entry
            && entry.Entity.Has<InPipeline>() && entry.Entity.Get<InPipeline>().Key == key ? entry : null;
 
-    /// <summary>Asks for a chunk (every stage it needs runs, see <see cref="WantFor"/>), or no longer: it's dropped once
-    /// it isn't held either (see <see cref="Hold"/>) and no worker is making it.</summary>
-    public void Want(ChunkKey key, bool wanted)
+    /// <summary>Asks for a chunk for <paramref name="purposes"/>: every stage serving none runs on it, and those serving
+    /// one of them, which let go of what they made once it isn't wanted for that (what reads it, on other chunks, sees it
+    /// missing). None lets go of it: it's dropped once it isn't held either (see <see cref="Hold"/>) and no worker is
+    /// making it, and keeps its purposes till then.</summary>
+    public void Want(ChunkKey key, Purpose purposes)
     {
+        bool wanted = purposes != Purpose.None;
         var record = wanted ? Ensure(key) : Get(key);
-        if (record == null || record.Asked == wanted) return;
+        if (record == null) return;
+        if (wanted) WantFor(record, purposes);
+        if (record.Asked == wanted) return;
         bool was = record.Wanted;
         record.Asked = wanted;
         Changed(record, was);
@@ -184,16 +189,11 @@ public sealed class ChunkPipeline
         if (!record.Wanted) _maybeDrop.Add(record);
     }
 
-    /// <summary>Wants a wanted chunk for <paramref name="purpose"/> too, or no longer: the stages serving it run on the
-    /// chunk while it is, and let go of what they made once it isn't (what reads that, on other chunks, sees it missing).
-    /// Nothing happens for a chunk not in the pipeline.</summary>
-    public void WantFor(ChunkKey key, Purpose purpose, bool wanted)
+    private void WantFor(PipelineChunk record, Purpose purposes)
     {
-        if (Get(key) is not { } record) return;
-        var before = record.Purposes;
-        record.Purposes = wanted ? before | purpose : before & ~purpose;
-        var changed = before ^ record.Purposes;
+        var changed = record.Purposes ^ purposes;
         if (changed == Purpose.None) return;
+        record.Purposes = purposes;
         foreach (var stage in _stages)
         {
             if (!record.Has(stage.Id) || (stage.Serves & changed) == Purpose.None) continue;
