@@ -12,13 +12,14 @@ using StbImageWriteSharp;
 //
 // With no --cell it takes the spawn's landmass. It runs until --hours of simulated time pass, or until as much water
 // leaves the land (over its edges and into the ground) as rains on it, within 1%. --no-fill starts the land dry instead
-// of with every hollow full to where it spills. --implicit S takes steps of S seconds, each level found with the
+// of with every hollow full to where it spills. --erode H then wears the land for H more hours (see Pipes.Erosion;
+// --carry, --pick, --drop, --speedup) and settles the water again on it. --implicit S takes steps of S seconds, each level found with the
 // neighbours' (see Pipes.StepImplicit) by up to --sweeps sweeps overshooting by --relax, to --tolerance blocks.
 
 ulong seed = 1337;
 (int X, int Z)? cell = null;
 int size = 8;
-double hours = 6, report = 600;
+double hours = 6, report = 600, erodeHours = 0;
 bool fill = true, snapshots = false, implicitSteps = false;
 string outDir = "pipes-out";
 var settings = new List<Action<Pipes>>();
@@ -38,6 +39,14 @@ for (int a = 0; a < args.Length; a++)
         case "--piece-size": HeartGrid.WidenPieces(float.Parse(args[++a])); widened = true; break;
         case "--implicit": { implicitSteps = true; var v = float.Parse(args[++a]); settings.Add(p => p.ImplicitStep = v); break; }
         case "--wave-depth": { var v = float.Parse(args[++a]); settings.Add(p => p.WaveDepth = v); break; }
+        case "--erode": erodeHours = double.Parse(args[++a]); break;
+        case "--carry": { var v = float.Parse(args[++a]); settings.Add(p => p.Carry = v); break; }
+        case "--pick": { var v = float.Parse(args[++a]); settings.Add(p => p.Pick = v); break; }
+        case "--drop": { var v = float.Parse(args[++a]); settings.Add(p => p.Drop = v); break; }
+        case "--slide": { var v = float.Parse(args[++a]); settings.Add(p => p.Slide = v); break; }
+        case "--slide-rate": { var v = float.Parse(args[++a]); settings.Add(p => p.SlideRate = v); break; }
+        case "--hardening": { var v = float.Parse(args[++a]); settings.Add(p => p.Hardening = v); break; }
+        case "--speedup": { var v = float.Parse(args[++a]); settings.Add(p => p.Speedup = v); break; }
         case "--relax": { var v = float.Parse(args[++a]); settings.Add(p => p.Relax = v); break; }
         case "--sweeps": { var v = int.Parse(args[++a]); settings.Add(p => p.MostSweeps = v); break; }
         case "--tolerance": { var v = float.Parse(args[++a]); settings.Add(p => p.Tolerance = v); break; }
@@ -81,30 +90,75 @@ if (fill)
     Console.WriteLine($"Filled hollows: {wet:N0} nodes wet, in {sw.Elapsed.TotalSeconds:0.00} s");
 }
 
-sw.Restart();
-double nextReport = report;
-bool settled = false;
-double stored = 0;
+var startFloor = (float[])land.Floor.Clone();
 long sweeps = 0;
-while (pipes.Time < hours * 3600)
+Run(hours * 3600, stopWhenSettled: true);
+if (erodeHours > 0)
 {
-    if (implicitSteps) { pipes.StepImplicit(); sweeps += pipes.LastSweeps; } else pipes.Step();
-    if (pipes.Time < nextReport) continue;
-    nextReport += report;
-    var b = pipes.Budget();
-    double off = (b.Drained + b.Soaked - b.Rain) / b.Rain;
-    Console.WriteLine($"{pipes.Time / 60,6:0} min, {pipes.Steps,7:N0} steps ({sweeps,8:N0} sweeps), {sw.Elapsed.TotalSeconds,6:0.0} s: rain {b.Rain:0} " +
-                      $"drained {b.Drained:0} soaked {b.Soaked:0} ({100 * off:+0.0;-0.0}%), stored {b.Stored / 1e6:0.00} M");
-    if (snapshots) WriteMap(Path.Combine(outDir, $"pipes-{pipes.Time / 60:00000}.png"));
-    // Settled once the budget balances and the water stored has stopped changing (both within 1%).
-    if (Math.Abs(off) < 0.01 && Math.Abs(b.Stored - stored) < 0.01 * b.Stored) { settled = true; break; }
-    stored = b.Stored;
+    pipes.Eroding = true;
+    Console.WriteLine($"Eroding for {erodeHours} h");
+    Run(pipes.Time + erodeHours * 3600, stopWhenSettled: false);
+    pipes.Eroding = false;
+    Console.WriteLine("Settling the water on the worn land");
+    Run(pipes.Time + 3600, stopWhenSettled: true);
+    WriteWear(Path.Combine(outDir, "wear.png"));
 }
-Console.WriteLine($"{(settled ? "Settled" : "Stopped")} after {pipes.Time / 3600:0.00} h simulated, {pipes.Steps:N0} steps, " +
-                  $"{sw.Elapsed.TotalSeconds:0.0} s ({sw.Elapsed.TotalMilliseconds / pipes.Steps:0.00} ms a step)");
 WriteMap(Path.Combine(outDir, "pipes.png"));
 Console.WriteLine($"Total {total.Elapsed.TotalSeconds:0.0} s");
 return 0;
+
+// Steps until the given time, reporting every so often; stops early once settled, if asked: when the budget balances
+// and the water stored has stopped changing (both within 1%).
+void Run(double until, bool stopWhenSettled)
+{
+    sw.Restart();
+    int steps = pipes.Steps;
+    double nextReport = pipes.Time + report, stored = 0;
+    bool settled = false;
+    while (pipes.Time < until)
+    {
+        if (implicitSteps) { pipes.StepImplicit(); sweeps += pipes.LastSweeps; } else pipes.Step();
+        if (pipes.Time < nextReport) continue;
+        nextReport += report;
+        var b = pipes.Budget();
+        double off = (b.Drained + b.Soaked - b.Rain) / b.Rain;
+        Console.WriteLine($"{pipes.Time / 60,6:0} min, {pipes.Steps,7:N0} steps ({sweeps,8:N0} sweeps), {sw.Elapsed.TotalSeconds,6:0.0} s: rain {b.Rain:0} " +
+                          $"drained {b.Drained:0} soaked {b.Soaked:0} ({100 * off:+0.0;-0.0}%), stored {b.Stored / 1e6:0.00} M" +
+                          (pipes.Eroding ? $", sediment {pipes.Sediment!.Sum() / 1e3:0.0} k" : ""));
+        if (snapshots) WriteMap(Path.Combine(outDir, $"pipes-{pipes.Time / 60:00000}.png"));
+        if (stopWhenSettled && Math.Abs(off) < 0.01 && Math.Abs(b.Stored - stored) < 0.01 * b.Stored) { settled = true; break; }
+        stored = b.Stored;
+    }
+    steps = pipes.Steps - steps;
+    Console.WriteLine($"{(settled ? "Settled" : "Stopped")} at {pipes.Time / 3600:0.00} h simulated, {steps:N0} steps, " +
+                      $"{sw.Elapsed.TotalSeconds:0.0} s ({sw.Elapsed.TotalMilliseconds / Math.Max(1, steps):0.00} ms a step)");
+}
+
+// Top-down: how far each column's top floor moved: worn (red) or built up (green), up to 16 blocks.
+void WriteWear(string path)
+{
+    int nx = land.Nx;
+    var rgb = new byte[land.Columns * 3];
+    double worn = 0, built = 0, deepest = 0;
+    for (int c = 0; c < land.Columns; c++)
+    {
+        int o = c * 3;
+        if (!land.HasLand(c)) { rgb[o] = 18; rgb[o + 1] = 22; rgb[o + 2] = 34; continue; }
+        for (int n = land.NodeStart[c]; n < land.NodeStart[c + 1]; n++)
+        {
+            float d = land.Floor[n] - startFloor[n];
+            if (d < 0) worn -= d; else built += d;
+            deepest = Math.Max(deepest, -d);
+        }
+        int t = land.TopNode(c);
+        float moved = land.Floor[t] - startFloor[t];
+        double w = Math.Clamp(Math.Abs(moved) / 16, 0, 1);
+        rgb[o] = (byte)(110 + (moved < 0 ? 145 * w : -60 * w)); rgb[o + 1] = (byte)(110 + (moved > 0 ? 145 * w : -60 * w)); rgb[o + 2] = (byte)(110 - 60 * w);
+    }
+    using (var f = File.Create(path))
+        new ImageWriter().WritePng(rgb, nx, land.Nz, ColorComponents.RedGreenBlue, f);
+    Console.WriteLine($"Worn {worn * size * size / 1e6:0.00} M blocks, built up {built * size * size / 1e6:0.00} M, deepest cut {deepest:0.0} blocks");
+}
 
 // Top-down: the land shaded by height and slope, standing water (half a block or more) blue by depth, running water
 // by how much runs through (in columns' worth of the wettest rain).

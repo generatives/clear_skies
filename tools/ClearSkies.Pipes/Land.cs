@@ -19,6 +19,8 @@ public sealed class Land
     /// <summary>Nodes of column c are NodeStart[c] .. NodeStart[c + 1] - 1, bottom up.</summary>
     public readonly int[] NodeStart;
     public readonly float[] Floor, Ceiling;
+    /// <summary>The bottom of the span each node stands on: its floor can't be worn lower than a little over this.</summary>
+    public readonly float[] Base;
     public readonly int[] ColumnOf;
     public int Nodes => Floor.Length;
 
@@ -60,7 +62,7 @@ public sealed class Land
         NodeStart = new int[columns + 1];
         for (int c = 0; c < columns; c++) NodeStart[c + 1] = NodeStart[c] + spans[c].Length;
         int nodes = NodeStart[columns];
-        Floor = new float[nodes]; Ceiling = new float[nodes]; ColumnOf = new int[nodes];
+        Floor = new float[nodes]; Ceiling = new float[nodes]; Base = new float[nodes]; ColumnOf = new int[nodes];
         for (int c = 0; c < columns; c++)
         {
             var s = spans[c];
@@ -68,6 +70,7 @@ public sealed class Land
             {
                 int n = NodeStart[c] + k;
                 Floor[n] = s[k].Hi + 1;
+                Base[n] = s[k].Lo;
                 Ceiling[n] = k + 1 < s.Length ? s[k + 1].Lo : NoCeiling;
                 ColumnOf[n] = c;
             }

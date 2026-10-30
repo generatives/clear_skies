@@ -20,13 +20,13 @@ public sealed partial class Pipes
     /// <summary>Rain on the wettest land, in blocks a second.</summary>
     public float Rain = 3e-4f;
     /// <summary>What every wet node loses into the ground, in blocks a second.</summary>
-    public float Soak = 1.5e-4f;
+    public float Soak = 5e-5f;
     /// <summary>Fraction of the step a shallow-water wave may cross a cell in (the Courant number).</summary>
     public float Courant = 0.7f;
     public float MostStep = 30f;
     /// <summary>Water deeper than this levels out (and runs) as if it were this deep: deep lakes would otherwise set
     /// the step length by how fast a wave crosses them.</summary>
-    public float WaveDepth = float.PositiveInfinity;
+    public float WaveDepth = 2f;
 
     public readonly float[] Depth, Flow;
     public double Time;
@@ -128,6 +128,7 @@ public sealed partial class Pipes
         });
 
         Apply(dt);
+        if (Eroding) Erode(dt);
         Time += dt;
         Steps++;
         return dt;
