@@ -46,13 +46,16 @@ public sealed partial class Pipes
     /// slowing as it's worn deeper (see Hardening). What it wears is gone, not carried: in still water it would only
     /// settle back. So hollows where water stands deepen into bowls.</summary>
     public float Scour = 0f, ScourDepth = 4f;
+    /// <summary>How steeply scour grows with depth: as (depth / ScourDepth) to this power. Over 1, the deepest line of a
+    /// sheet of water wears faster than its edges, so the water gathers there and cuts a channel.</summary>
+    public float ScourPower = 1f;
 
     private float Scoured(int n, float h, float floor, float dt)
     {
         if (Scour <= 0f) return floor;
         var land = _land;
         float worn = Math.Max(0f, _startFloor![n] - floor);
-        float wear = Scour * Math.Min(h, ScourDepth) * dt / (1 + worn / Hardening);
+        float wear = Scour * ScourDepth * MathF.Pow(Math.Min(h, ScourDepth) / ScourDepth, ScourPower) * dt / (1 + worn / Hardening);
         return Math.Max(Math.Min(floor, land.Base[n] + MinThickness), floor - wear);
     }
 
