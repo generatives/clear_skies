@@ -62,6 +62,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
     private const float BottomRoughness = 30f;
 
     private readonly ulong _seed;
+    internal ulong Seed => _seed;
     private readonly ContinentTerrain _terrain;
     private readonly FastNoiseLite _warpX, _warpY, _warpZ, _crack, _bottom;
 
@@ -279,6 +280,16 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         if (_profiles.TryGet(chunkX, chunkZ, out _profile)) return;
         _profile = _profiles.Add(chunkX, chunkZ);
         BuildProfile(_profile, chunkX, chunkZ);
+    }
+
+    /// <summary>The top of the land at block column (x, z) (the highest block of its top span, as Prepare finds it), or
+    /// null where there is none: for Water, which isn't called while lakes and rivers wait to come back on the lattice.</summary>
+    internal int? Top(int x, int z)
+    {
+        if (!FillLattice(x >> 5, z >> 5)) return null;
+        Span<(short Lo, short Hi)> spans = stackalloc (short, short)[MaxSpans];
+        int count = ColumnSpans(x & (S - 1), z & (S - 1), spans);
+        return count == 0 ? null : spans[count - 1].Hi;
     }
 
     /// <summary>The solid spans (bottom up) of block column (lx, lz) of the chunk column last prepared.</summary>
