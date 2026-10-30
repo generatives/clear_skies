@@ -43,6 +43,7 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
             pipes.Eroding = false;
             pipes.FillHollows(); // lakes whose outlets were cut start at their new spill level
         }
+        pipes.Rain *= settings.SettleRain;
         double until = pipes.Time + settings.SettleMinutes * 60;
         while (pipes.Time < until) pipes.Step();
         Console.WriteLine($"Landscape: landmass {landmass} worn and watered in {sw.Elapsed.TotalSeconds:0.0} s ({pipes.Steps:N0} steps)");
@@ -114,13 +115,15 @@ public sealed class Shaped(Land land, float[] startFloor, float[] depth, float m
 }
 
 /// <summary>What the landscape model does (see <see cref="Landscape"/>), from --terrain: comma-separated name=value
-/// pairs. off turns it off; erode-hours, settle-minutes, groundwater (true/false), min-depth (the least water that
+/// pairs. off turns it off; erode-hours, settle-minutes, settle-rain (times the rain while settling), groundwater (true/false), min-depth (the least water that
 /// shows, in blocks) and size (column width) are the landscape's own; any other name is one of Pipes' numbers (e.g.
 /// creep=1e-5, speedup=900, rain=3e-4, manning=0.035, carry=0.05; dashes ignored, any case).</summary>
 public sealed class LandscapeSettings
 {
     public bool Enabled = true;
     public double ErodeHours = 1, SettleMinutes = 20;
+    /// <summary>How many times as much rain falls while the water settles, after the erosion.</summary>
+    public float SettleRain = 1f;
     public bool Groundwater = true;
     public float MinDepth = 0.3f;
     public int Size = 8;
@@ -140,6 +143,7 @@ public sealed class LandscapeSettings
                 case "off": s.Enabled = false; break;
                 case "erode-hours": s.ErodeHours = double.Parse(value, c); break;
                 case "settle-minutes": s.SettleMinutes = double.Parse(value, c); break;
+                case "settle-rain": s.SettleRain = float.Parse(value, c); break;
                 case "groundwater": s.Groundwater = bool.Parse(value); break;
                 case "min-depth": s.MinDepth = float.Parse(value, c); break;
                 case "size": s.Size = int.Parse(value, c); break;
