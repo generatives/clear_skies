@@ -16,7 +16,7 @@ public sealed partial class Pipes
 {
     public const float G = 9.81f;
 
-    public float Manning = 0.035f;
+    public float Manning = 0.14f;
     /// <summary>Rain on the wettest land, in blocks a second.</summary>
     public float Rain = 3e-4f;
     /// <summary>What every wet node loses into the ground, in blocks a second.</summary>

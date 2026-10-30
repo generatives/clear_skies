@@ -16,7 +16,7 @@ public sealed partial class Pipes
     public bool Eroding;
     /// <summary>How much stronger erosion starts than it ends: it eases from Ease times as strong to 1/Ease times
     /// over the time it's given (see StartEroding), so the big shapes form fast and the end only smooths them.</summary>
-    public float Ease = 1f;
+    public float Ease = 3f;
     private double _erodeStart, _erodeLength = 1;
 
     /// <summary>Erodes from now, for <paramref name="seconds"/> (simulated).</summary>
@@ -29,16 +29,16 @@ public sealed partial class Pipes
 
     public int ErodeEvery = 2;
     private float _erodeTime;
-    public float Carry = 0.05f, Pick = 0.02f, Drop = 0.02f, Speedup = 900f;
+    public float Carry = 0.05f, Pick = 0.02f, Drop = 0.001f, Speedup = 900f;
     /// <summary>Slopes count as no steeper than this (falls and cliffs too), so they don't cut without end.</summary>
     public float SteepestCut = 1f;
     /// <summary>Running water's slope counts as at least this, so water crossing a flat still cuts (most where it runs
     /// deepest and fastest, so it gathers there into a channel).</summary>
-    public float FlattestCut = 0f;
+    public float FlattestCut = 0.15f;
     public float MinThickness = 6f;
     /// <summary>The fastest a floor wears, in blocks a second (with Speedup).</summary>
     public float MostWear = 0.04f;
-    public float Hardening = 8f, Slide = 1f, SlideRate = 0.002f, Creep = 0f;
+    public float Hardening = 8f, Slide = 2f, SlideRate = 0.002f, Creep = 1e-5f;
 
     private float[]? _startFloor, _slid;
 
@@ -48,7 +48,7 @@ public sealed partial class Pipes
     /// <summary>Standing water wears its bed: Scour blocks a second per block of water over it (up to ScourDepth),
     /// slowing as it's worn deeper (see Hardening). What it wears is gone, not carried: in still water it would only
     /// settle back. So hollows where water stands deepen into bowls.</summary>
-    public float Scour = 0f, ScourDepth = 4f;
+    public float Scour = 5e-4f, ScourDepth = 4f;
     /// <summary>How steeply scour grows with depth: as (depth / ScourDepth) to this power. Over 1, the deepest line of a
     /// sheet of water wears faster than its edges, so the water gathers there and cuts a channel.</summary>
     public float ScourPower = 1f;

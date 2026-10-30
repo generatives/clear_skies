@@ -145,7 +145,7 @@ public sealed class LandscapeSettings
     public bool Enabled = true;
     public double ErodeHours = 1, SettleMinutes = 20;
     /// <summary>How many times as much rain falls while the water settles, after the erosion.</summary>
-    public float SettleRain = 1f;
+    public float SettleRain = 0.35f;
     public bool Groundwater = true;
     /// <summary>How deep water over a column only dampens its ground, in blocks: the rest goes into its blocks.</summary>
     public float Damp = 0.1f;
