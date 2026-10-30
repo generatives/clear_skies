@@ -552,42 +552,39 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         }
     }
 
-    /// <summary>Each landscape column's water (see <see cref="Shaped.Volume"/>) into its own lowest blocks first: to
-    /// the level that holds it over the tops of the column's block columns, so a little fills only the deepest few
-    /// and a lot the whole column. A block column holds water where it stands at least half a block over its top.
-    /// Columns are centred on the lattice's corners, where the ground's wear is (see Wear): a channel's lowest blocks
-    /// run down its middle. Those along the chunk column's edges reach into its neighbours, whose block columns are
-    /// worked out for it here, so both sides place the same water.</summary>
+    /// <summary>Each landscape column's water (see <see cref="Shaped.Volume"/>) into its own lowest blocks first, lowest
+    /// measured under the model's water surface blended between columns (see <see cref="Shaped.Plane"/>), so on a
+    /// slope a stream's water runs down its channel instead of pooling at the low end of each column. Each column's
+    /// volume sets how far over or under that surface its water stands (a dry column's: at its lowest block), and
+    /// each block column blends that between its four columns as the ground blends, so water has no column edges. A
+    /// block column holds water where it stands at least half a block over its top. Columns are centred on the
+    /// lattice's corners, where the ground's wear is (see Wear). Those along the chunk column's edges reach into its
+    /// neighbours, whose block columns are worked out for it here, so both sides place the same water.</summary>
     private void PlaceWater(ColumnProfile p, Shaped? shaped, int x0, int z0)
     {
         Array.Fill(p.Water, int.MinValue);
         if (shaped == null) return;
-        int size = shaped.Size, half = size / 2;
+        int size = shaped.Size, half = size / 2, corners = S / size + 1;
         Span<float> ground = stackalloc float[size * size];
-        Span<int> tops = stackalloc int[size * size];
+        Span<float> offsets = stackalloc float[corners * corners];
+        Span<float> depths = stackalloc float[corners * corners];
+        Span<bool> wet = stackalloc bool[corners * corners];
         Span<(short Lo, short Hi)> spans = stackalloc (short, short)[MaxSpans];
-        for (int mz = 0; mz <= S; mz += size)
-        for (int mx = 0; mx <= S; mx += size)
+        bool any = false;
+        // Each corner's column: how far over or under the model's surface (see Shaped.Plane) its water stands once its
+        // volume fills its lowest blocks (lowest under that surface) first.
+        for (int k = 0; k < corners; k++)
+        for (int i = 0; i < corners; i++)
         {
+            int mx = i * size, mz = k * size;
             float volume = shaped.Volume(x0 + mx, z0 + mz);
-            if (volume <= 0f) continue;
             int n = 0;
             for (int dz = -half; dz < half; dz++)
             for (int dx = -half; dx < half; dx++)
             {
-                int lx = mx + dx, lz = mz + dz, top;
-                if (lx >= 0 && lz >= 0 && lx < S && lz < S)
-                {
-                    int col = lx + S * lz, count = p.Count(col);
-                    top = count > 0 ? p.Spans[p.Start[col] + count - 1].Hi : int.MinValue;
-                }
-                else
-                {
-                    int count = SpansAt(x0 + lx, z0 + lz, spans);
-                    top = count > 0 ? spans[count - 1].Hi : int.MinValue;
-                }
-                tops[(dx + half) + size * (dz + half)] = top;
-                if (top != int.MinValue) ground[n++] = top + 1;
+                int top = TopAt(p, x0, z0, mx + dx, mz + dz, spans);
+                float plane = shaped.Plane(x0 + mx + dx, z0 + mz + dz);
+                if (top != int.MinValue && !float.IsNaN(plane)) ground[n++] = top + 1 - plane;
             }
             if (n == 0) continue;
             var g = ground[..n];
@@ -600,14 +597,45 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
                 level = (volume + sum) / m;
                 if (m == n || level <= g[m]) break;
             }
-            int water = (int)MathF.Floor(level - 0.5f);
-            for (int dz = -half; dz < half; dz++)
-            for (int dx = -half; dx < half; dx++)
-            {
-                int lx = mx + dx, lz = mz + dz, top = tops[(dx + half) + size * (dz + half)];
-                if (lx >= 0 && lz >= 0 && lx < S && lz < S && top != int.MinValue && water > top) p.Water[lx + S * lz] = water;
-            }
+            offsets[i + corners * k] = level;
+            depths[i + corners * k] = volume / (size * size);
+            if (volume > 0f) wet[i + corners * k] = any = true;
         }
+        if (!any) return;
+        // Each block column's water: the surface plus its corners' offsets, blended between them as the ground is.
+        for (int lz = 0; lz < S; lz++)
+        for (int lx = 0; lx < S; lx++)
+        {
+            int i = lx / size, k = lz / size, c = i + corners * k;
+            if (!wet[c] && !wet[c + 1] && !wet[c + corners] && !wet[c + corners + 1]) continue;
+            int col = lx + S * lz, count = p.Count(col);
+            if (count == 0) continue;
+            float fx = (lx - i * size) / (float)size, fz = (lz - k * size) / (float)size;
+            float offset = (1 - fz) * ((1 - fx) * offsets[c] + fx * offsets[c + 1])
+                         + fz * ((1 - fx) * offsets[c + corners] + fx * offsets[c + corners + 1]);
+            // (No deeper than its deepest corner's water: where the ground drops off between corners, as at a cliff,
+            // the blended surface stands far over it.)
+            int top = p.Spans[p.Start[col] + count - 1].Hi;
+            float deepest = MathF.Max(MathF.Max(depths[c], depths[c + 1]), MathF.Max(depths[c + corners], depths[c + corners + 1]));
+            float surface = MathF.Min(shaped.Plane(x0 + lx, z0 + lz) + offset, top + 1 + deepest);
+            if (float.IsNaN(surface)) continue;
+            int water = (int)MathF.Floor(surface - 0.5f);
+            if (water > top) p.Water[col] = water;
+        }
+    }
+
+    /// <summary>The top block of block column (lx, lz) of chunk column (x0, z0) (in it or a neighbour), or int.MinValue.</summary>
+    private int TopAt(ColumnProfile p, int x0, int z0, int lx, int lz, Span<(short Lo, short Hi)> spans)
+    {
+        int count;
+        if (lx >= 0 && lz >= 0 && lx < S && lz < S)
+        {
+            int col = lx + S * lz;
+            count = p.Count(col);
+            return count > 0 ? p.Spans[p.Start[col] + count - 1].Hi : int.MinValue;
+        }
+        count = SpansAt(x0 + lx, z0 + lz, spans);
+        return count > 0 ? spans[count - 1].Hi : int.MinValue;
     }
 
     /// <summary>The top water block over ground topped at <paramref name="hi"/> with water to <paramref name="level"/>
