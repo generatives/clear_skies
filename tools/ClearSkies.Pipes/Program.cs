@@ -64,6 +64,7 @@ for (int a = 0; a < args.Length; a++)
         case "--ground-every": { var v = int.Parse(args[++a]); settings.Add(p => p.GroundEvery = v); break; }
         case "--ease": { var v = float.Parse(args[++a]); settings.Add(p => p.Ease = v); break; }
         case "--scour": { var v = float.Parse(args[++a]); settings.Add(p => p.Scour = v); break; }
+        case "--focus": { var v = float.Parse(args[++a]); settings.Add(p => p.Focus = v); break; }
         case "--creep": { var v = float.Parse(args[++a]); settings.Add(p => p.Creep = v); break; }
         case "--speedup": { var v = float.Parse(args[++a]); settings.Add(p => p.Speedup = v); break; }
         case "--rain": { var v = float.Parse(args[++a]); settings.Add(p => p.Rain = v); break; }
@@ -126,6 +127,22 @@ WriteMap(Path.Combine(outDir, "pipes.png"));
         float moved = land.Floor[n] - startFloor[n];
         if (moved > 0) raised += moved; else lowered -= moved;
     }
+    // Running water: how many of its columns sit in a dip (a floor lower than every neighbour it flows to or from).
+    int running = 0, dips = 0;
+    for (int c = 0; c < land.Columns; c++)
+    {
+        int n = land.TopNode(c);
+        if (n < 0 || pipes.Through(n) / column < 40 || pipes.Through(n) / column >= 1000) continue;
+        running++;
+        bool dip = true;
+        for (int k = land.LinkStart[n]; k < land.LinkStart[n + 1]; k++)
+        {
+            int m = land.LinkTo[k];
+            if (m >= 0 && Math.Abs(pipes.Flow[k]) > 1e-3f && land.Floor[m] <= land.Floor[n]) { dip = false; break; }
+        }
+        if (dip) dips++;
+    }
+    Console.WriteLine($"Streams (40-1000 columns' rain): {running:N0} columns, {100.0 * dips / Math.Max(1, running):0.0}% in a dip of the bed");
     depths.Sort();
     float At(double q) => depths.Count == 0 ? 0 : depths[(int)(q * (depths.Count - 1))];
     Console.WriteLine($"Standing water: {depths.Count:N0} columns, depth median {At(0.5):0.0}, 90% {At(0.9):0.0}, deepest {At(1):0.0} blocks; " +

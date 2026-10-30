@@ -56,6 +56,64 @@ public sealed partial class Pipes
         return Math.Max(Math.Min(floor, land.Base[n] + MinThickness), floor - wear);
     }
 
+    /// <summary>Water carries (so wears) more where its neighbours' water runs the same way: up to 1 + Focus times as much where
+    /// every neighbour agrees (see Agreement). So the middle of a sheet of running water cuts down more than its edges,
+    /// and the water gathers into the cut: sheets turn into channels.</summary>
+    public float Focus = 0f;
+
+    private float[]? _flowX, _flowZ, _agree, _dirX, _dirZ;
+
+    /// <summary>How much each node's neighbours' water runs the way its own does: the mean over its links of how much
+    /// the neighbour's way agrees with its own (0 for a dry neighbour, or one running across or against it), 0 to 1.</summary>
+    private void Agreement()
+    {
+        var land = _land;
+        if (_dirX == null)
+        {
+            // Each link's way across the ground, a unit along X and Z (none for a drain).
+            _dirX = new float[land.Links]; _dirZ = new float[land.Links];
+            for (int n = 0; n < land.Nodes; n++)
+            for (int k = land.LinkStart[n]; k < land.LinkStart[n + 1]; k++)
+            {
+                int m = land.LinkTo[k];
+                if (m < 0) continue;
+                int c = land.ColumnOf[n], d = land.ColumnOf[m];
+                float dx = d % land.Nx - c % land.Nx, dz = d / land.Nx - c / land.Nx, l = MathF.Sqrt(dx * dx + dz * dz);
+                _dirX[k] = dx / l; _dirZ[k] = dz / l;
+            }
+            _flowX = new float[land.Nodes]; _flowZ = new float[land.Nodes]; _agree = new float[land.Nodes];
+        }
+        var fx = _flowX!; var fz = _flowZ!; var agree = _agree; var dirX = _dirX; var dirZ = _dirZ!; var flow = Flow;
+        // Each node's way: its links' flows out, summed as vectors, made a unit.
+        Parallel.For(0, (land.Nodes + 4095) / 4096, block =>
+        {
+            int end = Math.Min(land.Nodes, (block + 1) * 4096);
+            for (int n = block * 4096; n < end; n++)
+            {
+                float x = 0, z = 0;
+                for (int k = _faceStart[n]; k < _faceStart[n + 1]; k++) { x += flow[k] * dirX[k]; z += flow[k] * dirZ[k]; }
+                float l = MathF.Sqrt(x * x + z * z);
+                fx[n] = l > 1e-6f ? x / l : 0f; fz[n] = l > 1e-6f ? z / l : 0f;
+            }
+        });
+        Parallel.For(0, (land.Nodes + 4095) / 4096, block =>
+        {
+            int end = Math.Min(land.Nodes, (block + 1) * 4096);
+            for (int n = block * 4096; n < end; n++)
+            {
+                float sum = 0; int links = 0;
+                for (int k = _faceStart[n]; k < _faceStart[n + 1]; k++)
+                {
+                    int m = _other[k];
+                    if (m < 0) continue;
+                    links++;
+                    sum += Math.Max(0f, fx[n] * fx[m] + fz[n] * fz[m]);
+                }
+                agree[n] = links == 0 ? 0f : sum / links;
+            }
+        });
+    }
+
     private void Erode(float dt)
     {
         var land = _land;
@@ -68,6 +126,8 @@ public sealed partial class Pipes
         _startFloor ??= (float[])land.Floor.Clone();
         _slid ??= new float[land.Nodes];
         var startFloor = _startFloor; var slid = _slid;
+
+        if (Focus > 0f) Agreement();
 
         // What share of its sediment each node's water sends out this step (all of it at most).
         Parallel.For(0, (land.Nodes + 4095) / 4096, block =>
@@ -121,6 +181,7 @@ public sealed partial class Pipes
                 float speed = through / (2 * _width * h); // through a column's width each way
                 slope /= through;
                 float can = Carry * speed * slope * h * _area;
+                if (Focus > 0f) can *= 1f + Focus * _agree![n];
                 if (can > s)
                 {
                     float worn = Math.Max(0f, startFloor[n] - land.Floor[n]);
