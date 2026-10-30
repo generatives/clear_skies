@@ -35,7 +35,7 @@ public sealed class Flood
     public int LaterTurns { get; set; } = 2;
     /// <summary>How much water (columns' rain) a face passes per square block of depth over it per block it drops
     /// (see Run): running water stands as deep as it must to pass what runs through it.</summary>
-    public double Pass { get; set; } = 6;
+    public double Pass { get; set; } = 60;
     /// <summary>The least drop (blocks a cell on) running water is taken to have, so it doesn't stand endlessly deep on
     /// the flat.</summary>
     public double Flattest { get; set; } = 0.25;
@@ -154,6 +154,27 @@ public sealed class Flood
             Tight[i] = rim && leak.GetNoise(land.X0 + c % nx * S, Y[i] * S, land.Z0 + c / nx * S) < leakFrom;
         }
 
+        // Each open cell's links, and the cells water leaves from (beside the void), worked out once: the floods ask
+        // for them again and again.
+        var linkStart = new int[n + 1];
+        var linkList = new List<int>(n);
+        var exits = new List<int>();
+        for (int i = 0; i < n; i++)
+        {
+            linkStart[i] = linkList.Count;
+            if (Tight[i]) continue;
+            for (int k = 0; k < 6; k++)
+                if (k != 1 && Neighbour(i, k) == -2) { exits.Add(i); break; }
+            if (!IsOpen(i)) continue;
+            for (int k = 0; k < 14; k++)
+            {
+                int d = Link(i, k);
+                if (d >= 0) linkList.Add(d);
+            }
+        }
+        linkStart[n] = linkList.Count;
+        var links = linkList.ToArray();
+
         // Two floods in from where water leaves: through open cells only (where running and standing water goes),
         // and through ground too (where soaked-in water goes, and how high it stands in the ground).
         (double[] level, int[] recv, int[] order) Spread(bool ground)
@@ -164,12 +185,8 @@ public sealed class Flood
             // reached, give or take the noise: water on a flat heads for its way out, wandering a little.
             var steps = new int[n];
             var queue = new PriorityQueue<int, (double Level, double Steps)>();
-            for (int i = 0; i < n; i++)
-            {
-                if (!ground && !IsOpen(i) || Tight[i]) continue;
-                for (int k = 0; k < 6; k++)
-                    if (k != 1 && Neighbour(i, k) == -2) { level[i] = Floor[i]; queue.Enqueue(i, (Floor[i], wander[Column[i]])); break; }
-            }
+            foreach (int i in exits)
+                if (ground || IsOpen(i)) { level[i] = Floor[i]; queue.Enqueue(i, (Floor[i], wander[Column[i]])); }
             var order = new List<int>(n);
             var done = new bool[n];
             double seep = SeepSlope * S;
@@ -179,9 +196,10 @@ public sealed class Flood
                 done[i] = true;
                 double at = key.Level;
                 order.Add(i);
-                for (int k = 0; k < 14; k++)
+                bool open = IsOpen(i);
+                for (int k = open ? linkStart[i] : 0, end = open ? linkStart[i + 1] : 6; k < end; k++)
                 {
-                    int d = Link(i, k);
+                    int d = open ? links[k] : Neighbour(i, k);
                     if (d < 0 || done[d] || !ground && !IsOpen(d) || Tight[d]) continue;
                     double l = Math.Max(at + (IsOpen(d) ? 0 : seep), Floor[d]);
                     if (!double.IsNaN(level[d]) && level[d] <= l) continue;
@@ -271,9 +289,9 @@ public sealed class Flood
                 while (reach.TryDequeue(out int m))
                 {
                     body.Add(m);
-                    for (int k = 0; k < 14; k++)
+                    for (int k = linkStart[m]; k < linkStart[m + 1]; k++)
                     {
-                        int d = Link(m, k);
+                        int d = links[k];
                         if (d < 0 || Lake[d] >= 0 || !IsOpen(d) || !(levelA[d] > Floor[d] + 0.01) || Math.Abs(levelA[d] - levelA[i]) > 1e-6) continue;
                         Lake[d] = Lake[i];
                         reach.Enqueue(d);
