@@ -9,10 +9,11 @@ namespace ClearSkies.Game.Generation;
 /// is flat, and fills until it overflows at its lowest rim), Soak (columns' rain) through a face between open air and
 /// ground that isn't full, and through ground only if it's SeepSlope lower a cell further, more the more passes. So in
 /// ground it stands higher the further it is from a way out, and comes out where it reaches open air (a spring), or
-/// out of ground full to its top. Rain falls on each column; open water loses Evaporation a column of surface; the
-/// void takes whatever reaches it. Most of the stone is watertight (it passes nothing, as if it weren't there): all of it
-/// more than Permeable cells under its column's top, and the rim facing the void but for stretches of it (RimLeak), so
-/// ground water mostly comes out in springs on the land, and the flood has far fewer cells to cover.
+/// out of ground full to its top. Rain falls on each column; the void takes whatever reaches it. Most of the stone is
+/// watertight (it passes nothing, as if it weren't there): all of it more than Permeable cells under its column's top,
+/// and the rim facing the void but for stretches of it (RimLeak), so ground water mostly comes out in springs on the
+/// land, and the flood has far fewer cells to cover. Open water stands over the ground in its cell, and over the top
+/// of a ground cell under it as far as that isn't solid, meeting the open water beside it there.
 /// Two priority floods in from where water leaves the land (cells beside the void), one through open cells only (as
 /// free as they are, they carry all the water ground can't) and one through ground too, give each cell the lowest
 /// level water there must reach to get out, and the cell it goes on to (on flats: the nearest way out, wandering by
@@ -24,7 +25,6 @@ namespace ClearSkies.Game.Generation;
 public sealed class Flood
 {
     public double SeepSlope { get; set; } = 0.02;
-    public double Evaporation { get; set; } = 2;
     /// <summary>How much water (columns' rain) passes from an open cell into a ground cell beside it, through their
     /// face, where the ground isn't full.</summary>
     public double Soak { get; set; } = 0.25;
@@ -65,8 +65,15 @@ public sealed class Flood
         for (int c = 0; c < land.Columns; c++)
             for (int r = land.RunStart[c]; r < land.RunStart[c + 1]; r++)
                 for (int y = land.RunY0[r], i = land.RunCell[r]; y <= land.RunY1[r]; y++, i++) { Column[i] = c; Y[i] = y; }
-        // Water stands in an open cell over the ground in it; in ground, from the cell's bottom (it fills the pores).
-        for (int i = 0; i < n; i++) Floor[i] = S * (Y[i] + (IsOpen(i) ? land.Solid[i] : 0f));
+        // Water stands in an open cell over the ground in it, or with none in it, over the ground cell under it (whose
+        // top is open as far as it isn't solid); in ground, from the cell's bottom (it fills the pores).
+        for (int i = 0; i < n; i++)
+        {
+            int below = Y[i] > land.Lo[Column[i]] ? land.Index(Column[i], Y[i] - 1) : -1;
+            Floor[i] = !IsOpen(i) ? S * Y[i]
+                     : land.Solid[i] == 0 && below >= 0 && !IsOpen(below) ? S * (Y[i] - 1 + land.Solid[below])
+                     : S * (Y[i] + land.Solid[i]);
+        }
 
         // A cell's neighbours (-1: none, rock or kept-out stone; -2: the void). Sideways over a lower column's top is
         // that column's top cell (water there falls onto it).
@@ -88,6 +95,24 @@ public sealed class Flood
                 case 4: return Side(c, cj + 1 < nz ? c + nx : -1, y);
                 default: return Side(c, cj > 0 ? c - nx : -1, y);
             }
+        }
+
+        // Open water's neighbours: the six above, and where an open cell's water dips under its bottom (over a ground
+        // cell not full to its top), the open cells beside it a layer down, whose water it meets (both ways).
+        int Link(int i, int k)
+        {
+            if (k < 6) return Neighbour(i, k);
+            if (!IsOpen(i)) return -1;
+            int c = Column[i], ci = c % nx, cj = c / nx, side = 2 + (k - 6) % 4;
+            int nc = side switch { 2 => ci + 1 < nx ? c + 1 : -1, 3 => ci > 0 ? c - 1 : -1, 4 => cj + 1 < nz ? c + nx : -1, _ => cj > 0 ? c - nx : -1 };
+            if (k < 10)
+            {
+                if (!(Floor[i] < S * Y[i]) || Y[i] - 1 < land.Lo[c]) return -1;
+                int d = Side(c, nc, Y[i] - 1);
+                return d >= 0 && IsOpen(d) ? d : -1;
+            }
+            int u = Y[i] + 1 > land.Hi[c] ? -1 : Side(c, nc, Y[i] + 1);
+            return u >= 0 && IsOpen(u) && Y[u] == Y[i] + 1 && Floor[u] < S * Y[u] ? u : -1;
         }
 
         var noise = new FastNoiseLite(_seed + 91);
@@ -139,9 +164,9 @@ public sealed class Flood
                 done[i] = true;
                 double at = key.Level;
                 order.Add(i);
-                for (int k = 0; k < 6; k++)
+                for (int k = 0; k < 14; k++)
                 {
-                    int d = Neighbour(i, k);
+                    int d = Link(i, k);
                     if (d < 0 || done[d] || !ground && !IsOpen(d) || Tight[d]) continue;
                     double l = Math.Max(at + (IsOpen(d) ? 0 : seep), Floor[d]);
                     if (!double.IsNaN(level[d]) && level[d] <= l) continue;
@@ -220,9 +245,9 @@ public sealed class Flood
             while (reach.TryDequeue(out int m))
             {
                 body.Add(m);
-                for (int k = 0; k < 6; k++)
+                for (int k = 0; k < 14; k++)
                 {
-                    int d = Neighbour(m, k);
+                    int d = Link(m, k);
                     if (d < 0 || Lake[d] >= 0 || !IsOpen(d) || !(levelA[d] > Floor[d] + 0.01) || Math.Abs(levelA[d] - levelA[i]) > 1e-6) continue;
                     Lake[d] = Lake[i];
                     reach.Enqueue(d);
@@ -243,7 +268,7 @@ public sealed class Flood
         }
 
         // In turns: running water downhill (each open cell soaking Soak into each of its ground faces that isn't full,
-        // a lake losing Evaporation a column and Soak a face), then soaked-in water through the ground to where it
+        // a lake losing Soak a face), then soaked-in water through the ground to where it
         // comes out into open cells (springs, and full ground letting out what more reaches it), which the next turn
         // runs on from.
         Flow = new double[n];
@@ -274,7 +299,7 @@ public sealed class Flood
                     int keep = 0;
                     for (; keep < floors.Length; keep++)
                     {
-                        double column = Evaporation;
+                        double column = 0;
                         foreach (int m in lakeCells[lake][keep])
                             foreach (int g in groundFaces[m]) if (!full[g]) column += Soak;
                         if (loses + column > inflow) break;

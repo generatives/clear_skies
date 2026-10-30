@@ -13,8 +13,15 @@ public class RiverSpillTests
     [Fact]
     public void Running_water_lies_where_it_runs_and_runs_on_over_drops()
     {
-        // A river on this seed's spawn landmass coming down steep ground (found by looking).
+        // A river on this seed's spawn landmass: around the column running the most water, off any lake.
         var worn = Erosion.For(1337).Of(12585f, -8075f);
+        var field = worn.Water;
+        int at = -1;
+        for (int c = 0; c < field.Nx * field.Nz; c++)
+            if (field.Down[c] >= 0 && float.IsNaN(field.Lake[c]) && (at < 0 || field.Flow[c] > field.Flow[at])) at = c;
+        Assert.True(at >= 0);
+        int x0 = field.X0 + at % field.Nx * Hydrology.Cell - 25, z0 = field.Z0 + at / field.Nx * Hydrology.Cell - 25;
+        int yTop = (int)field.Ground[at] + 40, yBottom = yTop - 140;
         var generator = new HeartWorldGenerator(1337);
         var chunks = new Dictionary<(int, int, int), ChunkData>();
         ChunkData Chunk(int x, int y, int z)
@@ -25,11 +32,11 @@ public class RiverSpillTests
             return data;
         }
         int channel = 0, wet = 0, flowing = 0, noPlan = 0; var under = new int[10];
-        for (int z = -8100; z < -8050; z++)
-        for (int x = 12560; x < 12610; x++)
+        for (int z = z0; z < z0 + 50; z++)
+        for (int x = x0; x < x0 + 50; x++)
         {
-            int y = 480;
-            while (y > 340 && Chunk(x, y, z).Get(x & 31, y & 31, z & 31) == BlockId.Air) y--;
+            int y = yTop;
+            while (y > yBottom && Chunk(x, y, z).Get(x & 31, y & 31, z & 31) == BlockId.Air) y--;
             var top = Chunk(x, y, z);
             bool water = top.Get(x & 31, y & 31, z & 31) == BlockId.Water;
             if (water && !WaterLevel.IsSource(top.GetOrientation(x & 31, y & 31, z & 31))) flowing++;
