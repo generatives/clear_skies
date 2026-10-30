@@ -29,6 +29,9 @@ public sealed class Erosion
     /// <summary>How fast land wears towards where it drains, per square root of the rain draining through it (samples' worth).</summary>
     private const double Wear = 0.1;
 
+    /// <summary>How steeply (blocks a block) a channel's banks may stand over it: it wears no deeper than that under them.</summary>
+    private const double Steepest = 1;
+
     /// <summary>Where water runs: RiverFrom samples' rain (see Water too).</summary>
     internal const double RiverFrom = 40;
 
@@ -198,7 +201,20 @@ public sealed class Erosion
                 double dist = to >= 0 && c % nx != to % nx && c / nx != to / nx ? 1.414 : 1;
                 if (target >= h[c]) continue; // in a hollow
                 double f = Wear * Math.Sqrt(area[c]) / dist;
-                h[c] = Math.Max((h[c] + f * target) / (1 + f), Math.Min(h[c], under[c] + KeepUnder));
+                // No deeper than its banks (the samples either side, across where it runs) stand over it, Steepest a
+                // sample: a channel only cuts deeper as its banks wear down too.
+                double floor = under[c] + KeepUnder;
+                int ci = c % nx, ck = c / nx, dx = 0, dz = 0;
+                if (to >= 0) { dx = to % nx - ci; dz = to / nx - ck; }
+                else // (off the land: across the way to the void)
+                    foreach (var (ox, oz) in new[] { (1, 0), (-1, 0), (0, 1), (0, -1) })
+                        if (!Joined(c, ci + ox, ck + oz)) { dx = ox; dz = oz; break; }
+                if (dx != 0 || dz != 0)
+                {
+                    foreach (var (bi, bk) in new[] { (ci - dz, ck + dx), (ci + dz, ck - dx) })
+                        if (Joined(c, bi, bk)) floor = Math.Max(floor, h[bi + nx * bk] - Steepest * Cell * dist);
+                }
+                h[c] = Math.Max((h[c] + f * target) / (1 + f), Math.Min(h[c], floor));
             }
             // And down into its floor where it runs gently, spread across the samples beside it.
             var cut = new double[n];
