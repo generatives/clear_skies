@@ -214,10 +214,15 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
             kept++;
         }
         _draws.RemoveRange(kept, _draws.Count - kept);
-        // Then chunks waiting for their first bake, in view or not, nearest first, with what's left of the budget.
+        // Then chunks waiting for their first bake, in view or not, nearest first, with what's left of the budget. One
+        // listed (or with nothing to bake) is let go of at once: it waits only for its stage to be asked again, and kept,
+        // the nearest would be looked at each frame with nothing to bake while those behind them waited.
         NearestChunks.Select(_bakeFirst, _cameras, FirstBakesLooked, _nearestToBake);
         foreach (var e in _nearestToBake)
+        {
             if (!BakeFirstTime(in e.Get<ChunkRenderData>())) break;
+            e.Remove<BakeFirst>();
+        }
         Array.Clear(_levelCounts);
         foreach (ref readonly var d in CollectionsMarshal.AsSpan(_draws))
         {

@@ -108,8 +108,8 @@ public sealed class FirstLightStage(ChunkPipeline pipeline, GpuLightSystem light
 public struct BakeFirst;
 
 /// <summary>Has a lit chunk's light maps baked once, in view or not: it's marked <see cref="BakeFirst"/>, which
-/// <see cref="ChunkRenderSystem"/> bakes nearest first with what's left of its budget, until each of its meshes has
-/// been baked. Again for each new mesh.</summary>
+/// <see cref="ChunkRenderSystem"/> bakes nearest first with what's left of its budget, taking the mark off once it's
+/// listed the bake; asked again, it's done once each of its meshes has been baked. Again for each new mesh.</summary>
 public sealed class FirstBakeStage(ChunkPipeline pipeline, Renderer renderer, UploadStage upload, FirstLightStage firstLight)
     : ExternalStage
 {
