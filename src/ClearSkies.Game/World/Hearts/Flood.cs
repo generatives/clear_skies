@@ -203,17 +203,33 @@ public sealed class Flood
         }
         Fill();
 
-        // Lakes: open cells under their level, joined with the one they go on to when that's the same lake (as level).
+        // Lakes: open cells under their level, joined with the open cells beside them under the same level (one body
+        // of water). Each runs out where it was first reached from: whatever else of it the flood reached from outside
+        // goes there too.
         Lake = new int[n];
         Array.Fill(Lake, -1);
         var members = new List<List<int>>();
+        var reach = new Queue<int>();
         foreach (int i in orderA)
         {
-            if (!(levelA[i] > Floor[i] + 0.01)) continue;
-            int to = recvA[i];
-            if (to >= 0 && Lake[to] >= 0 && Math.Abs(levelA[to] - levelA[i]) < 1e-6) Lake[i] = Lake[to];
-            else { Lake[i] = members.Count; members.Add(new List<int>()); }
-            members[Lake[i]].Add(i);
+            if (Lake[i] >= 0 || !(levelA[i] > Floor[i] + 0.01)) continue;
+            var body = new List<int>();
+            Lake[i] = members.Count;
+            members.Add(body);
+            reach.Enqueue(i);
+            while (reach.TryDequeue(out int m))
+            {
+                body.Add(m);
+                for (int k = 0; k < 6; k++)
+                {
+                    int d = Neighbour(m, k);
+                    if (d < 0 || Lake[d] >= 0 || !IsOpen(d) || !(levelA[d] > Floor[d] + 0.01) || Math.Abs(levelA[d] - levelA[i]) > 1e-6) continue;
+                    Lake[d] = Lake[i];
+                    reach.Enqueue(d);
+                }
+            }
+            foreach (int m in body)
+                if (m != i && (recvA[m] < 0 || Lake[recvA[m]] != Lake[i])) recvA[m] = i;
         }
         // A lake's columns, lowest floor first: each with that floor and its cells in the lake, which fill as the lake
         // rises over it.
