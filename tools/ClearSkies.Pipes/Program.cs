@@ -44,6 +44,7 @@ for (int a = 0; a < args.Length; a++)
         case "--slide": { var v = float.Parse(args[++a]); settings.Add(p => p.Slide = v); break; }
         case "--slide-rate": { var v = float.Parse(args[++a]); settings.Add(p => p.SlideRate = v); break; }
         case "--hardening": { var v = float.Parse(args[++a]); settings.Add(p => p.Hardening = v); break; }
+        case "--erode-every": { var v = int.Parse(args[++a]); settings.Add(p => p.ErodeEvery = v); break; }
         case "--speedup": { var v = float.Parse(args[++a]); settings.Add(p => p.Speedup = v); break; }
         case "--rain": { var v = float.Parse(args[++a]); settings.Add(p => p.Rain = v); break; }
         case "--soak": { var v = float.Parse(args[++a]); settings.Add(p => p.Soak = v); break; }

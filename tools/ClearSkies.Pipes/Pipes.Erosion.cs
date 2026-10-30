@@ -14,10 +14,14 @@ namespace ClearSkies.Pipes;
 public sealed partial class Pipes
 {
     public bool Eroding;
-    public float Carry = 0.05f, Pick = 0.02f, Drop = 0.02f, Speedup = 100f;
+    public int ErodeEvery = 4;
+    private float _erodeTime;
+    public float Carry = 0.05f, Pick = 0.02f, Drop = 0.02f, Speedup = 600f;
     /// <summary>Slopes count as no steeper than this (falls and cliffs too), so they don't cut without end.</summary>
     public float SteepestCut = 1f;
     public float MinThickness = 6f;
+    /// <summary>The fastest a floor wears, in blocks a second (with Speedup).</summary>
+    public float MostWear = 0.04f;
     public float Hardening = 8f, Slide = 1f, SlideRate = 0.002f;
 
     private float[]? _startFloor, _slid;
@@ -94,7 +98,7 @@ public sealed partial class Pipes
                     float worn = Math.Max(0f, startFloor[n] - land.Floor[n]);
                     float take = Pick * (can - s) * dt / (1 + worn / Hardening);
                     float most = Math.Max(0f, land.Floor[n] - land.Base[n] - MinThickness) * _area / Speedup;
-                    take = Math.Min(take, Math.Min(most, 0.05f * _area / Speedup)); // no more than 0.05 blocks a step
+                    take = Math.Min(take, Math.Min(most, MostWear * dt * _area / Speedup)); // no more than MostWear blocks a second
                     s += take;
                     slid[n] = land.Floor[n] - Speedup * take / _area;
                 }

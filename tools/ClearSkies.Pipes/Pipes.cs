@@ -128,7 +128,9 @@ public sealed partial class Pipes
         });
 
         Apply(dt);
-        if (Eroding) Erode(dt);
+        // Ground moves slowly next to water: worn every ErodeEvery steps, by those steps' time together.
+        _erodeTime += dt;
+        if (Eroding && Steps % ErodeEvery == 0) { Erode(_erodeTime); _erodeTime = 0; }
         Time += dt;
         Steps++;
         return dt;
