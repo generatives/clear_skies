@@ -31,6 +31,8 @@ public sealed class Flood
     /// <summary>How much seeping water (columns' rain) a cell of ground passes on for each block it drops a block.</summary>
     public double SeepEase { get; set; } = 8000;
     public int Turns { get; set; } = 8;
+    /// <summary>Turns in each later round (see Pass), carrying on from the last.</summary>
+    public int LaterTurns { get; set; } = 2;
     /// <summary>How much water (columns' rain) a face passes per square block of depth over it per block it drops
     /// (see Run): running water stands as deep as it must to pass what runs through it.</summary>
     public double Pass { get; set; } = 6;
@@ -190,6 +192,53 @@ public sealed class Flood
             }
             return (level, recv, order.ToArray());
         }
+        double[] levelG = null!, levelA = null!;
+        int[] recvG = null!, orderG = null!, recvA = null!, orderA = null!;
+        // Per column: the open cell its rain lands in (just over the ground), and its top ground cell.
+        var surface = new int[land.Columns]; var under = new int[land.Columns];
+        Array.Fill(surface, -1); Array.Fill(under, -1);
+        for (int c = 0; c < land.Columns; c++)
+        {
+            if (!land.HasLand(c)) continue;
+            int t = land.Index(c, land.Top[c]);
+            if (t < 0) continue;
+            if (IsOpen(t)) { surface[c] = t; under[c] = land.Top[c] > land.Lo[c] ? land.Index(c, land.Top[c] - 1) : -1; }
+            else { under[c] = t; surface[c] = land.Top[c] < land.Hi[c] ? land.Index(c, land.Top[c] + 1) : -1; }
+            if (under[c] >= 0 && IsOpen(under[c])) under[c] = -1;
+        }
+
+        var rain = new double[land.Columns];
+        for (int c = 0; c < land.Columns; c++)
+            if (land.HasLand(c)) rain[c] = Rain?.Invoke(land.X0 + c % nx * S + S / 2, land.Z0 + c / nx * S + S / 2) ?? 1;
+
+        // Each cell's faces where water passes between open air and ground: an open cell's ground neighbours, and a
+        // ground cell's open neighbour it lets out to when it's full (the one over it if open, else beside it, else
+        // under it). Ground is full when the water in it stands at its top.
+        var groundFaces = new int[n][];
+        var outlet = new int[n];
+        Array.Fill(outlet, -1);
+        var faces = new List<int>(6);
+        for (int i = 0; i < n; i++)
+        {
+            faces.Clear();
+            foreach (int k in new[] { 1, 2, 3, 4, 5, 0 })
+            {
+                int d = Neighbour(i, k);
+                if (d < 0 || IsOpen(d) == IsOpen(i) || Tight[d] || Tight[i]) continue;
+                if (IsOpen(i)) faces.Add(d);
+                else if (outlet[i] < 0) outlet[i] = d;
+            }
+            groundFaces[i] = faces.Count == 0 ? Array.Empty<int>() : faces.ToArray();
+        }
+        double CellTop(int g) => S * (Y[g] + land.Solid[g]);
+        var full = new bool[n];
+        void Fill()
+        {
+            for (int i = 0; i < n; i++) full[i] = !IsOpen(i) && levelG[i] >= CellTop(i) - 0.5;
+        }
+        var springs = new double[n]; var soaked = new double[n]; var ground = new double[n];
+        var seeping = new double[n]; // what seeps through each cell of ground, eased in over the turns
+
         // In rounds: the floods and the water settled by them, then running water stands as deep over its ground as it
         // must to pass what runs through it (see Pass), and the next round floods over that (so a river standing over
         // a low bank spills over it), until the routes (all but a few) no longer change.
@@ -197,56 +246,13 @@ public sealed class Flood
         int[]? routes = null;
         for (int round = 0; ; round++)
         {
-            // (The two at once: neither changes what the other reads.)
-            (double[] level, int[] recv, int[] order) groundFlood = default, openFlood = default;
-            Parallel.Invoke(() => groundFlood = Spread(true), () => openFlood = Spread(false));
-            var (levelG, recvG, orderG) = groundFlood;
-            var (levelA, recvA, orderA) = openFlood;
+            // (The two at once: neither changes what the other reads. The ground's only the first round: running water's
+            // depth hardly changes where soaked-in water goes, and it carries on from where it got to.)
+            if (round == 0) Parallel.Invoke(() => (levelG, recvG, orderG) = Spread(true), () => (levelA, recvA, orderA) = Spread(false));
+            else (levelA, recvA, orderA) = Spread(false);
             Level = levelG; OpenLevel = levelA; Receiver = recvA; Order = orderA;
+            if (round == 0) Fill();
 
-            // Per column: the open cell its rain lands in (just over the ground), and its top ground cell.
-            var surface = new int[land.Columns]; var under = new int[land.Columns];
-            Array.Fill(surface, -1); Array.Fill(under, -1);
-            for (int c = 0; c < land.Columns; c++)
-            {
-                if (!land.HasLand(c)) continue;
-                int t = land.Index(c, land.Top[c]);
-                if (t < 0) continue;
-                if (IsOpen(t)) { surface[c] = t; under[c] = land.Top[c] > land.Lo[c] ? land.Index(c, land.Top[c] - 1) : -1; }
-                else { under[c] = t; surface[c] = land.Top[c] < land.Hi[c] ? land.Index(c, land.Top[c] + 1) : -1; }
-                if (under[c] >= 0 && IsOpen(under[c])) under[c] = -1;
-            }
-
-            var rain = new double[land.Columns];
-            for (int c = 0; c < land.Columns; c++)
-                if (land.HasLand(c)) rain[c] = Rain?.Invoke(land.X0 + c % nx * S + S / 2, land.Z0 + c / nx * S + S / 2) ?? 1;
-
-            // Each cell's faces where water passes between open air and ground: an open cell's ground neighbours, and a
-            // ground cell's open neighbour it lets out to when it's full (the one over it if open, else beside it, else
-            // under it). Ground is full when the water in it stands at its top.
-            var groundFaces = new int[n][];
-            var outlet = new int[n];
-            Array.Fill(outlet, -1);
-            var faces = new List<int>(6);
-            for (int i = 0; i < n; i++)
-            {
-                faces.Clear();
-                foreach (int k in new[] { 1, 2, 3, 4, 5, 0 })
-                {
-                    int d = Neighbour(i, k);
-                    if (d < 0 || IsOpen(d) == IsOpen(i) || Tight[d] || Tight[i]) continue;
-                    if (IsOpen(i)) faces.Add(d);
-                    else if (outlet[i] < 0) outlet[i] = d;
-                }
-                groundFaces[i] = faces.Count == 0 ? Array.Empty<int>() : faces.ToArray();
-            }
-            double CellTop(int g) => S * (Y[g] + land.Solid[g]);
-            var full = new bool[n];
-            void Fill()
-            {
-                for (int i = 0; i < n; i++) full[i] = !IsOpen(i) && levelG[i] >= CellTop(i) - 0.5;
-            }
-            Fill();
 
             // Lakes: open cells under their level, joined with the open cells beside them under the same level (one body
             // of water). Each runs out where it was first reached from: whatever else of it the flood reached from outside
@@ -292,10 +298,8 @@ public sealed class Flood
             // comes out into open cells (springs, and full ground letting out what more reaches it), which the next turn
             // runs on from.
             Flow = new double[n];
-            var springs = new double[n]; var soaked = new double[n]; var ground = new double[n];
             LakeLevel = new double[members.Count];
-            var seeping = new double[n]; // what seeps through each cell of ground, eased in over the turns
-            for (int turn = 0; turn < Turns; turn++)
+            for (int turn = 0; turn < (round == 0 ? Turns : LaterTurns); turn++)
             {
                 Array.Clear(Flow); Array.Clear(soaked);
                 for (int c = 0; c < land.Columns; c++) if (surface[c] >= 0) Flow[surface[c]] += rain[c];
@@ -351,7 +355,7 @@ public sealed class Flood
                 for (int k = 0; k < orderG.Length; k++)
                 {
                     int i = orderG[k], to = recvG[i];
-                    seeping[i] = turn == 0 ? ground[i] : 0.5 * (seeping[i] + ground[i]);
+                    seeping[i] = round == 0 && turn == 0 ? ground[i] : 0.5 * (seeping[i] + ground[i]);
                     if (to < 0) continue;
                     double drop = IsOpen(i) ? 0 : S * (SeepSlope + seeping[i] / SeepEase);
                     levelG[i] = Math.Max(levelG[to] + drop, Floor[i]);
