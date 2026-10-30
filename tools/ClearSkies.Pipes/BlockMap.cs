@@ -79,6 +79,39 @@ public static class BlockMap
             if (Math.Abs(d) > 2) moved++;
         }
         Console.WriteLine($"Ground moved: mean {sum / Math.Max(1, both):0.0} blocks, {100.0 * moved / Math.Max(1, both):0.0}% of columns over 2 blocks, most {most}");
+        // Relief, before and after: mean slope (blocks a block, to the next column along X and Z), share steeper than
+        // 1, and local relief (highest less lowest top in each 64-block square, averaged).
+        (double Slope, double Steep, double Relief) Relief(int[] h)
+        {
+            double slope = 0, steep = 0, relief = 0; int count = 0, squares = 0;
+            for (int j = 0; j + 1 < width; j++)
+            for (int i = 0; i + 1 < width; i++)
+            {
+                int c = i + width * j;
+                if (h[c] == int.MinValue || h[c + 1] == int.MinValue || h[c + width] == int.MinValue) continue;
+                double s = (Math.Abs(h[c + 1] - h[c]) + Math.Abs(h[c + width] - h[c])) / 2.0;
+                if (s > 8) continue; // a cliff between pieces
+                slope += s; if (s > 1) steep++; count++;
+            }
+            for (int j = 0; j + 64 <= width; j += 64)
+            for (int i = 0; i + 64 <= width; i += 64)
+            {
+                int lo = int.MaxValue, hi = int.MinValue, n = 0;
+                for (int b = j; b < j + 64; b++)
+                for (int a = i; a < i + 64; a++)
+                {
+                    int v = h[a + width * b];
+                    if (v == int.MinValue) continue;
+                    lo = Math.Min(lo, v); hi = Math.Max(hi, v); n++;
+                }
+                if (n < 64 * 64) continue;
+                relief += hi - lo; squares++;
+            }
+            return (slope / Math.Max(1, count), 100.0 * steep / Math.Max(1, count), relief / Math.Max(1, squares));
+        }
+        var (s0, st0, r0) = Relief(before);
+        var (s1, st1, r1) = Relief(top);
+        Console.WriteLine($"Relief before: slope {s0:0.00}, steeper than 1: {st0:0.0}%, relief per 64 blocks {r0:0.0}; after: {s1:0.00}, {st1:0.0}%, {r1:0.0}");
         using (var f = File.Create(path))
             new ImageWriter().WritePng(rgb, width, width, ColorComponents.RedGreenBlue, f);
         Console.WriteLine($"Blocks {width}x{width} from ({x0}, {z0}) in {sw.Elapsed.TotalSeconds:0.0} s: water over {100.0 * wet / Math.Max(1, land):0.0}% of land");
