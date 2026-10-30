@@ -9,13 +9,15 @@ namespace ClearSkies.Pipes;
 /// rest comes up as springs.
 ///
 /// Only where the tables end up matters here, so they're found by sweeps rather than stepped through time: one sweep
-/// a water step, each node setting its table to balance its faces at its neighbours' latest tables (Gauss-Seidel),
+/// every GroundEvery water steps, each node setting its table to balance its faces at its neighbours' latest tables (Gauss-Seidel),
 /// slowed only by a little storage (Storage seconds' worth) so it moves smoothly. (Overshooting each move, to speed
 /// it up, made water from nothing: springs ran on tables that hadn't settled.)
 /// </summary>
 public sealed partial class Pipes
 {
     public float Shell = 24f, Permeability = 1e-3f, Porosity = 0.3f, Storage = 3600f;
+    /// <summary>The ground is swept once every this many water steps: it changes slowly.</summary>
+    public int GroundEvery = 4;
 
     /// <summary>Each node's water table (in blocks; at its shell's bottom when dry, at its floor when full), or null
     /// without groundwater.</summary>
@@ -69,7 +71,7 @@ public sealed partial class Pipes
                 for (int k = _faceStart[n]; k < _faceStart[n + 1]; k++)
                 {
                     int f = _faceOf[k];
-                    int m = land.FaceA[f] == n ? land.FaceB[f] : land.FaceA[f];
+                    int m = _other[k];
                     if (m < 0) continue; // edges pass nothing
                     float c = Conductance(f, n, m, under, bottom[m]);
                     if (c <= 0) continue;
@@ -103,7 +105,7 @@ public sealed partial class Pipes
             for (int k = _faceStart[n]; k < _faceStart[n + 1]; k++)
             {
                 int f = _faceOf[k];
-                int m = land.FaceA[f] == n ? land.FaceB[f] : land.FaceA[f];
+                int m = _other[k];
                 if (m < 0) continue;
                 net += Conductance(f, n, m, bottom[n], bottom[m]) * (table[m] - table[n]);
             }

@@ -26,8 +26,8 @@ public sealed class Land
 
     /// <summary>Faces: water through face f goes from node FaceA[f] to FaceB[f] (-1: off the land) when positive.</summary>
     public readonly int[] FaceA, FaceB;
-    /// <summary>The bottom of each face's opening (the higher of its nodes' floors) and its top (the lower ceiling).</summary>
-    public readonly float[] FaceBottom, FaceTop;
+    /// <summary>The top of each face's opening (the lower of its nodes' ceilings; see FaceBottom for its bottom).</summary>
+    public readonly float[] FaceTop;
     /// <summary>Each face's width and the distance between its nodes' middles: columns are taken as octagons, so water
     /// runs to all eight neighbours alike and doesn't line up with the grid.</summary>
     public readonly float[] FaceWidth, FaceLength;
@@ -82,7 +82,7 @@ public sealed class Land
         // Faces to the neighbours east, south-east, south and south-west (and drains on all eight sides, including off
         // the sampled area). An octagon's sides are all (√2 - 1) of its width.
         var a = new List<int>(nodes * 3); var b = new List<int>(nodes * 3);
-        var bottom = new List<float>(nodes * 3); var top = new List<float>(nodes * 3); var length = new List<float>(nodes * 3);
+        var top = new List<float>(nodes * 3); var length = new List<float>(nodes * 3);
         var sides = new[] { (1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, -1), (-1, 1), (1, -1) };
         float LowestLo(int c) => spans[c].Length > 0 ? spans[c][0].Lo : NoCeiling;
         for (int j = 0; j < Nz; j++)
@@ -101,19 +101,19 @@ public sealed class Land
                     float under = d < 0 ? NoCeiling : LowestLo(d);
                     if (Floor[n] < under)
                     {
-                        a.Add(n); b.Add(-1); bottom.Add(Floor[n]); top.Add(Math.Min(Ceiling[n], under)); length.Add(apart);
+                        a.Add(n); b.Add(-1); top.Add(Math.Min(Ceiling[n], under)); length.Add(apart);
                     }
                     if (d < 0 || dj < 0 || (dj == 0 && di < 0)) continue; // each pair once
                     for (int m = NodeStart[d]; m < NodeStart[d + 1]; m++)
                     {
                         float lo = Math.Max(Floor[n], Floor[m]), hi = Math.Min(Ceiling[n], Ceiling[m]);
                         if (hi <= lo) continue;
-                        a.Add(n); b.Add(m); bottom.Add(lo); top.Add(hi); length.Add(apart);
+                        a.Add(n); b.Add(m); top.Add(hi); length.Add(apart);
                     }
                 }
             }
         }
-        FaceA = a.ToArray(); FaceB = b.ToArray(); FaceBottom = bottom.ToArray(); FaceTop = top.ToArray();
+        FaceA = a.ToArray(); FaceB = b.ToArray(); FaceTop = top.ToArray();
         FaceLength = length.ToArray();
         FaceWidth = new float[FaceA.Length];
         Array.Fill(FaceWidth, size * (MathF.Sqrt(2) - 1));
@@ -129,6 +129,9 @@ public sealed class Land
             }
         });
     }
+
+    /// <summary>The bottom of face f's opening: the higher of its nodes' floors (as they are now; erosion moves them).</summary>
+    public float FaceBottom(int f) => FaceB[f] >= 0 ? Math.Max(Floor[FaceA[f]], Floor[FaceB[f]]) : Floor[FaceA[f]];
 
     public bool HasLand(int c) => NodeStart[c + 1] > NodeStart[c];
 

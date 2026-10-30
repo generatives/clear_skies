@@ -14,9 +14,9 @@ namespace ClearSkies.Pipes;
 public sealed partial class Pipes
 {
     public bool Eroding;
-    public int ErodeEvery = 4;
+    public int ErodeEvery = 2;
     private float _erodeTime;
-    public float Carry = 0.05f, Pick = 0.02f, Drop = 0.02f, Speedup = 600f;
+    public float Carry = 0.05f, Pick = 0.02f, Drop = 0.02f, Speedup = 900f;
     /// <summary>Slopes count as no steeper than this (falls and cliffs too), so they don't cut without end.</summary>
     public float SteepestCut = 1f;
     public float MinThickness = 6f;
@@ -51,7 +51,7 @@ public sealed partial class Pipes
                 for (int k = _faceStart[n]; k < _faceStart[n + 1]; k++)
                 {
                     int f = _faceOf[k];
-                    float q = land.FaceA[f] == n ? Flow[f] : -Flow[f];
+                    float q = _side[k] * Flow[f];
                     if (q > 0) outs += q;
                 }
                 float sends = outs * dt * carried[n];
@@ -59,8 +59,8 @@ public sealed partial class Pipes
             }
         });
 
-        // Sediment through the faces, then each node's exchange with its floor (the new floors kept apart until all are
-        // worked out).
+        // Sediment through the faces, then each node's exchange with its floor (the new floors kept apart, in slid,
+        // until all are worked out; the slides then work from them).
         Parallel.For(0, (land.Nodes + 4095) / 4096, block =>
         {
             int end = Math.Min(land.Nodes, (block + 1) * 4096);
@@ -71,9 +71,8 @@ public sealed partial class Pipes
                 for (int k = _faceStart[n]; k < _faceStart[n + 1]; k++)
                 {
                     int f = _faceOf[k];
-                    bool isA = land.FaceA[f] == n;
-                    float q = isA ? Flow[f] : -Flow[f];
-                    int m = isA ? land.FaceB[f] : land.FaceA[f];
+                    float q = _side[k] * Flow[f];
+                    int m = _other[k];
                     if (q > 0) s -= q * dt * carried[n] * ratio[n];
                     else if (q < 0 && m >= 0) s -= q * dt * carried[m] * ratio[m];
                     float abs = Math.Abs(q);
@@ -111,8 +110,7 @@ public sealed partial class Pipes
                 next[n] = s;
             }
         });
-        Array.Copy(next, sediment, land.Nodes);
-        Array.Copy(slid, land.Floor, land.Nodes);
+        (Sediment, _nextSediment) = (next, sediment);
 
         // Slides: each node gives ground to lower neighbours it stands too steeply over, and takes from higher ones.
         float slideStep = Math.Min(0.25f, SlideRate * Speedup * dt);
@@ -125,28 +123,16 @@ public sealed partial class Pipes
                 for (int k = _faceStart[n]; k < _faceStart[n + 1]; k++)
                 {
                     int f = _faceOf[k];
-                    int m = land.FaceA[f] == n ? land.FaceB[f] : land.FaceA[f];
+                    int m = _other[k];
                     if (m < 0) continue;
-                    float d = land.Floor[n] - land.Floor[m], ad = Math.Abs(d);
+                    float d = slid[n] - slid[m], ad = Math.Abs(d);
                     float stood = Math.Max(Slide * land.FaceLength[f], Math.Abs(startFloor[n] - startFloor[m]));
                     if (ad <= stood) continue;
                     float move = slideStep * (ad - stood) / 2;
                     change += d > 0 ? -move : move;
                 }
                 float lowest = land.Base[n] + MinThickness;
-                slid[n] = Math.Max(lowest, Math.Min(land.Ceiling[n] - 1f, land.Floor[n] + change));
-            }
-        });
-        Array.Copy(slid, land.Floor, land.Nodes);
-
-        // Faces open from the higher of their floors.
-        Parallel.For(0, (land.Faces + 4095) / 4096, block =>
-        {
-            int end = Math.Min(land.Faces, (block + 1) * 4096);
-            for (int f = block * 4096; f < end; f++)
-            {
-                int a = land.FaceA[f], b = land.FaceB[f];
-                land.FaceBottom[f] = b >= 0 ? Math.Max(land.Floor[a], land.Floor[b]) : land.Floor[a];
+                land.Floor[n] = Math.Max(lowest, Math.Min(land.Ceiling[n] - 1f, slid[n] + change));
             }
         });
     }

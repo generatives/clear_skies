@@ -13,13 +13,13 @@ using StbImageWriteSharp;
 // With no --cell it takes the spawn's landmass. It runs until --hours of simulated time pass, or until as much water
 // leaves the land (over its edges and into the ground) as rains on it, within 1%. --no-fill starts the land dry instead
 // of with every hollow full to where it spills. --erode H then wears the land for H more hours (see Pipes.Erosion;
-// --carry, --pick, --drop, --speedup) and settles the water again on it. --ground adds groundwater (see Pipes.Ground;
+// --carry, --pick, --drop, --speedup), refills the hollows to their new spill levels and lets the water run --settle minutes (20) more. --ground adds groundwater (see Pipes.Ground;
 // --permeability, --shell, --porosity, --storage) in place of soaking away.
 
 ulong seed = 1337;
 (int X, int Z)? cell = null;
 int size = 8;
-double hours = 6, report = 600, erodeHours = 0;
+double hours = 6, report = 600, erodeHours = 0, settleMinutes = 20;
 bool fill = true, snapshots = false, ground = false;
 string outDir = "pipes-out";
 var settings = new List<Action<Pipes>>();
@@ -37,8 +37,10 @@ for (int a = 0; a < args.Length; a++)
         case "--snapshots": snapshots = true; break;
         case "--no-fill": fill = false; break;
         case "--piece-size": HeartGrid.WidenPieces(float.Parse(args[++a])); widened = true; break;
+        case "--courant": { var v = float.Parse(args[++a]); settings.Add(p => p.Courant = v); break; }
         case "--wave-depth": { var v = float.Parse(args[++a]); settings.Add(p => p.WaveDepth = v); break; }
         case "--erode": erodeHours = double.Parse(args[++a]); break;
+        case "--settle": settleMinutes = double.Parse(args[++a]); break;
         case "--carry": { var v = float.Parse(args[++a]); settings.Add(p => p.Carry = v); break; }
         case "--pick": { var v = float.Parse(args[++a]); settings.Add(p => p.Pick = v); break; }
         case "--drop": { var v = float.Parse(args[++a]); settings.Add(p => p.Drop = v); break; }
@@ -51,6 +53,7 @@ for (int a = 0; a < args.Length; a++)
         case "--shell": { var v = float.Parse(args[++a]); settings.Add(p => p.Shell = v); break; }
         case "--porosity": { var v = float.Parse(args[++a]); settings.Add(p => p.Porosity = v); break; }
         case "--storage": { var v = float.Parse(args[++a]); settings.Add(p => p.Storage = v); break; }
+        case "--ground-every": { var v = int.Parse(args[++a]); settings.Add(p => p.GroundEvery = v); break; }
         case "--speedup": { var v = float.Parse(args[++a]); settings.Add(p => p.Speedup = v); break; }
         case "--rain": { var v = float.Parse(args[++a]); settings.Add(p => p.Rain = v); break; }
         case "--soak": { var v = float.Parse(args[++a]); settings.Add(p => p.Soak = v); break; }
@@ -101,37 +104,48 @@ if (erodeHours > 0)
     Console.WriteLine($"Eroding for {erodeHours} h");
     Run(pipes.Time + erodeHours * 3600, stopWhenSettled: false);
     pipes.Eroding = false;
+    // Lakes whose outlets were cut start at their new spill level rather than draining down to it.
+    if (fill) pipes.FillHollows();
     Console.WriteLine("Settling the water on the worn land");
-    Run(pipes.Time + 3600, stopWhenSettled: true);
+    Run(pipes.Time + settleMinutes * 60, stopWhenSettled: false);
     WriteWear(Path.Combine(outDir, "wear.png"));
 }
 WriteMap(Path.Combine(outDir, "pipes.png"));
 if (ground) Console.WriteLine($"Ground balance: {pipes.GroundBalance()}");
+Console.WriteLine($"Steps: flow {pipes.FlowTime.Elapsed.TotalSeconds:0.0} s, apply {pipes.ApplyTime.Elapsed.TotalSeconds:0.0} s, " +
+                  $"ground {pipes.GroundTime.Elapsed.TotalSeconds:0.0} s, erosion {pipes.ErodeTime.Elapsed.TotalSeconds:0.0} s");
 Console.WriteLine($"Total {total.Elapsed.TotalSeconds:0.0} s");
 return 0;
 
-// Steps until the given time, reporting every so often; stops early once settled, if asked: when the budget balances
-// and the water stored has stopped changing (both within 1%).
+// Steps until the given time, reporting every so often; stops early once settled, if asked: checked every Check
+// simulated seconds, when the budget balances within 1% and the water stored changes by under 1% in 15 minutes.
 void Run(double until, bool stopWhenSettled)
 {
+    const double Check = 300;
     sw.Restart();
     int steps = pipes.Steps;
-    double nextReport = pipes.Time + report, stored = 0;
+    double nextReport = pipes.Time + report, nextCheck = pipes.Time + Check, stored = 0;
     bool settled = false;
     while (pipes.Time < until)
     {
         pipes.Step();
-        if (pipes.Time < nextReport) continue;
-        nextReport += report;
+        bool reporting = pipes.Time >= nextReport, checking = stopWhenSettled && pipes.Time >= nextCheck;
+        if (!reporting && !checking) continue;
         var b = pipes.Budget();
         double off = (b.Drained + b.Soaked - b.Rain) / b.Rain;
-        Console.WriteLine($"{pipes.Time / 60,6:0} min, {pipes.Steps,7:N0} steps, {sw.Elapsed.TotalSeconds,6:0.0} s: rain {b.Rain:0} " +
-                          $"drained {b.Drained:0} soaked {b.Soaked:0} ({100 * off:+0.0;-0.0}%), stored {b.Stored / 1e6:0.00} M" +
-                          (pipes.Eroding ? $", sediment {pipes.Sediment!.Sum() / 1e3:0.0} k" : ""));
-        if (snapshots) WriteMap(Path.Combine(outDir, $"pipes-{pipes.Time / 60:00000}.png"));
+        if (reporting)
+        {
+            nextReport += report;
+            Console.WriteLine($"{pipes.Time / 60,6:0} min, {pipes.Steps,7:N0} steps, {sw.Elapsed.TotalSeconds,6:0.0} s: rain {b.Rain:0} " +
+                              $"drained {b.Drained:0} soaked {b.Soaked:0} ({100 * off:+0.0;-0.0}%), stored {b.Stored / 1e6:0.00} M" +
+                              (pipes.Eroding ? $", sediment {pipes.Sediment!.Sum() / 1e3:0.0} k" : ""));
+            if (snapshots) WriteMap(Path.Combine(outDir, $"pipes-{pipes.Time / 60:00000}.png"));
+        }
+        if (!checking) continue;
+        nextCheck += Check;
         // With groundwater, also once the ground takes in as much as it gives back.
         bool groundSettled = pipes.Groundwater == null || Math.Abs(b.Soaked) < 0.01 * b.Rain;
-        if (stopWhenSettled && groundSettled && Math.Abs(off) < 0.01 && Math.Abs(b.Stored - stored) < 0.01 * b.Stored) { settled = true; break; }
+        if (groundSettled && Math.Abs(off) < 0.01 && Math.Abs(b.Stored - stored) < 0.01 * b.Stored * Check / 900) { settled = true; break; }
         stored = b.Stored;
     }
     steps = pipes.Steps - steps;
