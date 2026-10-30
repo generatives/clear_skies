@@ -373,6 +373,14 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
 
     public void FocusOn(IReadOnlyList<(int X, int Z)> columns) => _profiles.FocusOn(columns);
 
+    /// <summary>The solid spans (bottom up) of block column (x, z), as Prepare finds them: worked out for that column
+    /// alone, from its chunk column's lattice. Returns how many (at most <paramref name="into"/>'s length).</summary>
+    public int SpansAt(int x, int z, Span<(short Lo, short Hi)> into)
+    {
+        if (!FillLattice(x >> 5, z >> 5)) return 0;
+        return ColumnSpans(x & (S - 1), z & (S - 1), into);
+    }
+
     /// <summary>The top of the land at block column (x, z) (the highest block of its top span, as Prepare finds it), or
     /// null where there is none: for Water, which isn't called while lakes and rivers wait to come back on the lattice.</summary>
     internal int? Top(int x, int z)
@@ -471,7 +479,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
 
         // Up each corner's column. Going up a level, a distance changes by no more than Steepest (see Inside), so where
         // it's further than that past Reach it's still past Reach a level up: as far as that goes, no need to work it out.
-        const float Steepest = Cell * (HeartGrid.VerticalScale + 0.5f);
+        float steepest = Cell * (HeartGrid.VerticalScale + 0.5f);
         for (int k = 0; k < N; k++)
         for (int i = 0; i < N; i++)
         {
@@ -488,7 +496,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
                 float y = (first + j) * Cell;
                 float d = MathF.Min(InsideAt(px, pz, lift, wearNoise, height[c], y), (y - bottom[c]) * HeartGrid.VerticalScale);
                 float clamped = Math.Clamp(d, -DistanceLattice.Reach, DistanceLattice.Reach);
-                int same = 1 + System.Math.Max(0, (int)((MathF.Abs(d) - DistanceLattice.Reach) / Steepest));
+                int same = 1 + System.Math.Max(0, (int)((MathF.Abs(d) - DistanceLattice.Reach) / steepest));
                 for (int n = 0; n < same && j < lattice.Levels; n++) column[j++] = clamped;
             }
         }
