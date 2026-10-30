@@ -22,7 +22,7 @@ public sealed partial class Pipes
     public float MinThickness = 6f;
     /// <summary>The fastest a floor wears, in blocks a second (with Speedup).</summary>
     public float MostWear = 0.04f;
-    public float Hardening = 8f, Slide = 1f, SlideRate = 0.002f;
+    public float Hardening = 8f, Slide = 1f, SlideRate = 0.002f, Creep = 0f;
 
     private float[]? _startFloor, _slid;
 
@@ -111,7 +111,7 @@ public sealed partial class Pipes
         (Sediment, _nextSediment) = (next, sediment);
 
         // Slides: each node gives ground to lower neighbours it stands too steeply over, and takes from higher ones.
-        float slideStep = Math.Min(0.25f, SlideRate * Speedup * dt);
+        float slideStep = Math.Min(0.25f, SlideRate * Speedup * dt), creep = Creep * Speedup * dt;
         Parallel.For(0, (land.Nodes + 4095) / 4096, block =>
         {
             int end = Math.Min(land.Nodes, (block + 1) * 4096);
@@ -122,8 +122,10 @@ public sealed partial class Pipes
                 {
                     int m = _other[k];
                     if (m < 0) continue;
-                    float d = slid[n] - slid[m], ad = Math.Abs(d);
-                    float stood = Math.Max(Slide * land.LinkLength[k], Math.Abs(startFloor[n] - startFloor[m]));
+                    float d = slid[n] - slid[m], ad = Math.Abs(d), length = land.LinkLength[k];
+                    float started = Math.Abs(startFloor[n] - startFloor[m]);
+                    if (started <= Slide * length) change -= Math.Min(0.05f, creep / (length * length)) * d;
+                    float stood = Math.Max(Slide * length, started);
                     if (ad <= stood) continue;
                     float move = slideStep * (ad - stood) / 2;
                     change += d > 0 ? -move : move;
