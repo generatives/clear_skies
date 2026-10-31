@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using ClearSkies.Engine.Voxels;
 using ClearSkies.Game.Generation;
 using StbImageWriteSharp;
 
@@ -68,22 +69,8 @@ public static class BlockMap
                 if (top[d] != int.MinValue && water[d] <= top[d] && top[d] < water[c]) hangs = true;
             if (hangs) { hanging++; if (water[c] - top[c] == 1) thin++; else walls++; }
         }
-        // Distant terrain's water (see HeartWorldGenerator.GenerateCoarse): each column's water over its own top.
-        int farWet = 0, farLand = 0, lone = 0, fw = width / 4;
-        var far = generators.Value!;
-        var farWater = new bool[fw * fw];
-        for (int j = 0; j < fw; j++)
-        for (int i = 0; i < fw; i++)
-        {
-            int c = 4 * i + width * 4 * j;
-            if (top[c] == int.MinValue) continue;
-            farLand++;
-            if (HeartWorldGenerator.WaterTop(far.WaterAt(x0 + 4 * i, z0 + 4 * j), top[c]) > top[c]) { farWet++; farWater[i + fw * j] = true; }
-        }
-        for (int j = 1; j < fw - 1; j++)
-        for (int i = 1; i < fw - 1; i++)
-            if (farWater[i + fw * j] && !farWater[i - 1 + fw * j] && !farWater[i + 1 + fw * j] && !farWater[i + fw * (j - 1)] && !farWater[i + fw * (j + 1)]) lone++;
-        Console.WriteLine($"Distant terrain (4-block voxels) water over {100.0 * farWet / Math.Max(1, farLand):0.0}% of land, {100.0 * lone / Math.Max(1, farWet):0.0}% of it lone voxels");
+        // Distant terrain's water: levels 1 to 3 as GenerateCoarse makes them, each voxel column by its top voxel.
+        for (int level = 1; level <= 3; level++) DistantLevel(generators, x0, z0, width, top, wet, land, level, path);
         {
             int falls = 0; long fallBlocks = 0; var heights = new List<int>();
             foreach (var f in fall) if (f.Top != int.MinValue && f.Top >= f.Bottom) { falls++; fallBlocks += f.Top - f.Bottom + 1; heights.Add(f.Top - f.Bottom + 1); }
@@ -174,5 +161,66 @@ public static class BlockMap
         using (var f = File.Create(path))
             new ImageWriter().WritePng(rgb, width, width, ColorComponents.RedGreenBlue, f);
         Console.WriteLine($"Blocks {width}x{width} from ({x0}, {z0}) in {sw.Elapsed.TotalSeconds:0.0} s: water over {100.0 * wet / Math.Max(1, land):0.0}% of land");
+    }
+
+    /// <summary>Level <paramref name="level"/>'s voxel columns over the area: how many show water on top against full
+    /// detail's share, and a map of them (blocks-level{level}.png, scaled up to the area's width).</summary>
+    private static void DistantLevel(ThreadLocal<HeartWorldGenerator> generators, int x0, int z0, int width, int[] top, int wet, int land, int level, string path)
+    {
+        const int S = ChunkData.Size;
+        int c = 1 << level, span = S * c, n = width / c;
+        int lo = int.MaxValue, hi = int.MinValue;
+        foreach (int t in top) if (t != int.MinValue) { lo = Math.Min(lo, t); hi = Math.Max(hi, t); }
+        var shown = new BlockId[n * n]; var height = new int[n * n];
+        Array.Fill(height, int.MinValue);
+        int cx0 = (int)Math.Floor(x0 / (double)span), cz0 = (int)Math.Floor(z0 / (double)span);
+        int cx1 = (int)Math.Floor((x0 + width - 1) / (double)span), cz1 = (int)Math.Floor((z0 + width - 1) / (double)span);
+        int cy0 = (int)Math.Floor((lo - 16) / (double)span), cy1 = (int)Math.Floor((hi + 16) / (double)span);
+        var gate = new object();
+        Parallel.For(0, (cx1 - cx0 + 1) * (cz1 - cz0 + 1), k =>
+        {
+            int px = cx0 + k % (cx1 - cx0 + 1), pz = cz0 + k / (cx1 - cx0 + 1);
+            for (int py = cy0; py <= cy1; py++)
+            {
+                var data = new ChunkData();
+                generators.Value!.GenerateCoarse(data, new ChunkPosition(px, py, pz), level);
+                for (int v = 0; v < S; v++)
+                for (int u = 0; u < S; u++)
+                {
+                    int i = (px * span + u * c - x0) / c, j = (pz * span + v * c - z0) / c;
+                    if (px * span + u * c < x0 || pz * span + v * c < z0 || i >= n || j >= n) continue;
+                    for (int w = S - 1; w >= 0; w--)
+                    {
+                        var id = data.Get(u, w, v);
+                        if (id == BlockId.Air || !BlockRegistry.Get(id).IsFullCube) continue;
+                        int y = py * span + w * c;
+                        lock (gate) if (y > height[i + n * j]) { height[i + n * j] = y; shown[i + n * j] = id; }
+                        break;
+                    }
+                }
+                data.Release();
+            }
+        });
+        int farLand = 0, farWet = 0;
+        var rgb = new byte[width * width * 3];
+        for (int j = 0; j < n; j++)
+        for (int i = 0; i < n; i++)
+        {
+            int k = i + n * j;
+            if (height[k] == int.MinValue) continue;
+            farLand++;
+            bool water = shown[k] == BlockId.Water;
+            if (water) farWet++;
+            double g = 90 + 130 * Math.Clamp((height[k] - 300) / 900.0, 0, 1);
+            for (int b = 0; b < c; b++) for (int a = 0; a < c; a++)
+            {
+                int o = (i * c + a + width * (j * c + b)) * 3;
+                if (water) { rgb[o] = 40; rgb[o + 1] = 110; rgb[o + 2] = 230; }
+                else { rgb[o] = (byte)(g * 0.95); rgb[o + 1] = (byte)g; rgb[o + 2] = (byte)(g * 0.8); }
+            }
+        }
+        Console.WriteLine($"Distant level {level} ({c}-block voxels): water on {100.0 * farWet / Math.Max(1, farLand):0.0}% of voxel columns (full detail {100.0 * wet / Math.Max(1, land):0.0}%)");
+        using var f = File.Create(Path.Combine(Path.GetDirectoryName(path)!, $"blocks-level{level}.png"));
+        new ImageWriter().WritePng(rgb, width, width, ColorComponents.RedGreenBlue, f);
     }
 }

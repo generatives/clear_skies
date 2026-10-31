@@ -232,6 +232,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         int c = 1 << level, group = System.Math.Max(1, S / c); // blocks a voxel; voxels a side over one chunk column
         int bx0 = pos.X * S * c, by0 = pos.Y * S * c, bz0 = pos.Z * S * c;
         Span<(short Lo, short Hi)> spans = stackalloc (short, short)[MaxSpans];
+        var shaped = _landscape?.At(bx0 + S * c / 2, bz0 + S * c / 2);
         for (int gz = 0; gz < S; gz += group)
         for (int gx = 0; gx < S; gx += group)
         {
@@ -242,7 +243,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             {
                 int x = bx0 + u * c + c / 2, z = bz0 + v * c + c / 2;
                 int count = ColumnSpans(x - cx * S, z - cz * S, spans);
-                if (count > 0) CoarseColumn(data, u, v, x, z, c, by0, spans[..count], WaterAt(x, z));
+                if (count > 0) CoarseColumn(data, u, v, x, z, c, by0, spans[..count], CoarseWater(shaped, x, z, spans[count - 1].Hi, c));
             }
         }
         CoarseFalls(data, c, bx0, by0, bz0);
@@ -282,7 +283,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
                 {
                     int hi = spans[s].Hi;
                     if (hi + Trees.MaxHeight < by0 || hi > by1) continue;
-                    if (s + 1 == count && WaterTop(WaterAt(x, z), hi) > hi) continue; // (not in water, as CoarseColumn has it)
+                    if (s + 1 == count && CoarseWater(_landscape?.At(x, z), x, z, hi, 1) > hi) continue; // (not in water)
                     float heat = Biomes.Heat(hi, _terrain.Heat(x, z)), wet = _terrain.Wet(x, z);
                     var biome = Biomes.Pick(heat, wet);
                     float bare = s + 1 < count && spans[s + 1].Lo - hi < ShadeReach ? Shaded : 0f;
@@ -337,7 +338,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
     /// <summary>Fills coarse column (u, v) of a coarse chunk (voxels <paramref name="c"/> blocks on a side, the lowest
     /// at world Y <paramref name="by0"/>) from block column (x, z)'s <paramref name="spans"/>: a voxel at least half
     /// filled by a span takes the block showing at its top; then plants.</summary>
-    private void CoarseColumn(ChunkData data, int u, int v, int x, int z, int c, int by0, ReadOnlySpan<(short Lo, short Hi)> spans, float water)
+    private void CoarseColumn(ChunkData data, int u, int v, int x, int z, int c, int by0, ReadOnlySpan<(short Lo, short Hi)> spans, int water)
     {
         // (Most of a column's voxels are in the chunks over and under this one: nothing to look up if none of its ground
         // or what grows on it is in this one.)
@@ -355,27 +356,20 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             float h = Biomes.Heat(hi, heat);
             var biome = Biomes.Pick(h, wet);
             float dry = Biomes.Dry(h, wet, Biomes.SandBlend);
-            // (Under water, its top is a bed of sand and gravel, as in full detail.)
-            bool under = s + 1 == spans.Length && WaterTop(water, hi) > hi;
+            // Ground and the water over the top span count together: a voxel at least half full of them is filled,
+            // with water where water is its top block, so a film of water or a stream shows wherever it tips its voxel
+            // over half. (Under water, the ground's top is a bed of sand and gravel, as in full detail.)
+            bool under = s + 1 == spans.Length && water > hi;
+            int surface = under ? water : hi;
             var bed = biome == Biome.Volcanic ? BlockId.Ash : patch < 0.35f ? BlockId.Gravel : BlockId.Sand;
-            for (int w = System.Math.Max(Voxel(lo), 0); w <= System.Math.Min(Voxel(hi), S - 1); w++)
+            for (int w = System.Math.Max(Voxel(lo), 0); w <= System.Math.Min(Voxel(surface), S - 1); w++)
             {
-                int y0 = by0 + w * c, y1 = y0 + c - 1, top = System.Math.Min(hi, y1);
-                if (2 * (top - System.Math.Max(lo, y0) + 1) >= c)
-                    data.Set(u, w, v, under && top >= hi - 1 ? bed : ContinentTerrain.Block(top, hi, strata, patch, bare, biome, dry));
+                int y0 = by0 + w * c, y1 = y0 + c - 1, top = System.Math.Min(surface, y1);
+                if (2 * (top - System.Math.Max(lo, y0) + 1) < c) continue;
+                if (top > hi) { if (data.Get(u, w, v) == BlockId.Air) data.Set(u, w, v, BlockId.Water); }
+                else data.Set(u, w, v, under && top >= hi - c ? bed : ContinentTerrain.Block(top, hi, strata, patch, bare, biome, dry));
             }
-
-            // Over the top span, water: a voxel at least half under it.
-            if (s + 1 == spans.Length && WaterTop(water, hi) is var surface && surface > hi)
-            {
-                for (int w = System.Math.Max(Voxel(hi + 1), 0); w <= System.Math.Min(Voxel(surface), S - 1); w++)
-                {
-                    int y0 = by0 + w * c, y1 = y0 + c - 1;
-                    if (2 * (System.Math.Min(surface, y1) - System.Math.Max(hi + 1, y0) + 1) >= c && data.Get(u, w, v) == BlockId.Air)
-                        data.Set(u, w, v, BlockId.Water);
-                }
-                continue;
-            }
+            if (under) continue;
 
             // Over the top, in the open: a plant.
             int roof = s + 1 < spans.Length ? spans[s + 1].Lo : int.MaxValue;
@@ -757,6 +751,10 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         }
     }
 
+    // (A stream's numbers, see PlaceStreams.)
+    private const float StreamHump = 2f, StreamWide = 3f;
+    private const int StreamDeep = 2;
+
     /// <summary>Each landscape column's stream (see <see cref="Shaped.Stream"/>): a band Wide times its width along the
     /// line from its middle to the middle of the column it runs to (wandering up to Wander blocks either side). Its
     /// surface runs a block over the line's ground; every block column in the band whose ground stands less than Hump
@@ -766,8 +764,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
     /// by its volume: this draws it.</summary>
     private void PlaceStreams(Shaped shaped, int x0, int z0)
     {
-        const float Hump = 2f, Wide = 3f, Wander = 2f;
-        const int Deep = 2;
+        const float Hump = StreamHump, Wide = StreamWide, Wander = 2f;
+        const int Deep = StreamDeep;
         int size = shaped.Size;
         for (int mz = -2 * size; mz <= S + 2 * size; mz += size)
         for (int mx = -2 * size; mx <= S + 2 * size; mx += size)
@@ -820,6 +818,34 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         if (float.IsNaN(level)) return int.MinValue;
         int top = (int)MathF.Floor(level - 0.5f);
         return top > hi ? top : int.MinValue;
+    }
+
+    /// <summary>The top water block over ground topped at <paramref name="hi"/> at block column (x, z), for distant
+    /// terrain with voxels <paramref name="c"/> blocks wide, or int.MinValue: the landscape's still water there, or a
+    /// stream's (as PlaceStreams has it, without its wander) on any voxel whose middle is within half a voxel of its
+    /// band, so a stream thinner than a voxel still shows.</summary>
+    private int CoarseWater(Shaped? shaped, int x, int z, int hi, int c)
+    {
+        if (shaped == null) return int.MinValue;
+        int best = WaterTop(shaped.Surface(x, z), hi), size = shaped.Size;
+        int bx = (int)MathF.Floor(x / (float)size) * size, bz = (int)MathF.Floor(z / (float)size) * size;
+        for (int j = -2; j <= 2; j++)
+        for (int i = -2; i <= 2; i++)
+        {
+            int mx = bx + i * size, mz = bz + j * size;
+            var (width, toX, toZ, from, to) = shaped.Stream(mx, mz);
+            float half = MathF.Min(width * StreamWide, size) / 2;
+            if (half < 0.5f) continue;
+            float reach = half + c / 2f, dx = toX - mx, dz = toZ - mz, length2 = dx * dx + dz * dz;
+            float px = x - mx, pz = z - mz;
+            float t = length2 > 0 ? Math.Clamp((px * dx + pz * dz) / length2, 0f, 1f) : 0f;
+            float ox = px - t * dx, oz = pz - t * dz;
+            if (ox * ox + oz * oz > reach * reach) continue;
+            float surface = from + t * (to - from) + 1f;
+            if (hi + 1 - surface > StreamHump - 1) continue;
+            best = Math.Max(best, Math.Max(hi + 1, Math.Min((int)MathF.Ceiling(surface) - 1, hi + StreamDeep)));
+        }
+        return best;
     }
 
     /// <summary>The landscape's water surface over the column holding block column (x, z), or NaN (for distant
