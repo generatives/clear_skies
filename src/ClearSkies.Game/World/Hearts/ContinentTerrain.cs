@@ -155,13 +155,16 @@ public sealed class ContinentTerrain
     /// or cooler than their height alone would make them.</summary>
     public float Heat(float x, float z) { Warp(ref x, ref z); return _heat.GetNoise(x, z); }
 
-    /// <summary>0-1 at column (x, z), for <see cref="Biomes.Pick"/>: how wet the region is.</summary>
-    public float Wet(float x, float z) { Warp(ref x, ref z); return Math.Clamp(0.5f + 0.9f * _wet.GetNoise(x, z), 0f, 1f); }
+    /// <summary>0-1 at column (x, z): how much rain the region gets. It waters the landscape (see <see cref="Land"/>), and
+    /// is how wet the ground is away from water (see <see cref="Biomes.Wet"/>).</summary>
+    public float Rain(float x, float z) { Warp(ref x, ref z); return Math.Clamp(0.5f + 0.9f * _wet.GetNoise(x, z), 0f, 1f); }
 
-    private void Warp(ref float x, ref float z)
+    /// <summary>Moves (x, z) by up to <paramref name="amount"/> blocks along the climate's warp: borders read through it
+    /// come out ragged.</summary>
+    public void Warp(ref float x, ref float z, float amount = ClimateWarp)
     {
         float wx = _climateWarpX.GetNoise(x, z), wz = _climateWarpZ.GetNoise(x, z);
-        x += ClimateWarp * wx; z += ClimateWarp * wz;
+        x += amount * wx; z += amount * wz;
     }
 
     /// <summary>0-1 at column (x, z), for <see cref="Plant"/>: which kind of plant a stand is mostly made of.</summary>

@@ -6,8 +6,8 @@ public enum Biome : byte { Temperate, Autumn, Desert, Badlands, Tundra, Steppe, 
 /// <summary>
 /// Biomes by climate: each sits at a point of heat and wetness, and a top takes the nearest. Heat goes mostly by
 /// height, cold up high and hot deep down (the underworld's caves run to desert, badlands, jungle and, deepest, volcanic wastes; the heights to tundra and steppe), shifted by a broad
-/// regional field; wetness is a broad field of its own (see <see cref="ContinentTerrain.Heat"/> and
-/// <see cref="ContinentTerrain.Wet"/>). Snow and bare rock still come with height, over whatever biome is there.
+/// regional field (see <see cref="ContinentTerrain.Heat"/>); wetness is the region's rain, raised near the water the
+/// landscape left (see <see cref="Wet"/>), so the land is green where water runs and dry where none does. Snow and bare rock still come with height, over whatever biome is there.
 ///
 /// Each biome also tints grass, leaves and plants (see <see cref="Tint"/>), blended between nearby biomes by how near
 /// each is in the climate, so the colour shifts gradually across a border while the ground blocks change at it.
@@ -34,6 +34,15 @@ public static class Biomes
     /// <summary>How hot a top at <paramref name="top"/> is, with <paramref name="regional"/> (-1 to 1) from
     /// <see cref="ContinentTerrain.Heat"/>: cooler by a unit every 900 blocks up from the plains.</summary>
     public static float Heat(float top, float regional) => 0.6f - (top - ContinentTerrain.PlainsLevel) / 900f + 0.6f * regional;
+
+    /// <summary>How far a column's nearness to water is read off from it, in blocks: ragged edges to the green along
+    /// shores and banks, without moving it off the water.</summary>
+    public const float ShoreWarp = 24f;
+
+    /// <summary>0-1: how wet the ground is, from the region's <paramref name="rain"/> (see <see cref="ContinentTerrain.Rain"/>)
+    /// and how near water it is (<paramref name="watered"/>, see <see cref="Shaped.Watered"/>): wet by water even where
+    /// little rain falls, so a river through a desert is green along its banks.</summary>
+    public static float Wet(float rain, float watered) => rain + (1f - rain) * watered;
 
     /// <summary>The biome nearest to (heat, wet).</summary>
     public static Biome Pick(float heat, float wet)
