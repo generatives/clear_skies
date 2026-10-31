@@ -171,6 +171,13 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
                 // Water over the top span, up to the level the landscape left (see Landscape).
                 bool topSpan = s + 1 == p.Count(col);
                 int water = topSpan ? p.Water[col] : int.MinValue;
+                // Under it, a bed of sand and gravel (ash in the volcanic wastes).
+                if (water > hi)
+                {
+                    var bed = p.Biome[p.Start[col] + s] == Biome.Volcanic ? BlockId.Ash : p.Patch[col] < 0.35f ? BlockId.Gravel : BlockId.Sand;
+                    for (int y = System.Math.Max(System.Math.Max(hi - 1, lo), originY); y <= System.Math.Min(hi, originY + S - 1); y++)
+                        data.Set(lx, y - originY, lz, bed);
+                }
                 for (int y = System.Math.Max(hi + 1, originY); y <= System.Math.Min(water, originY + S - 1); y++)
                     data.Set(lx, y - originY, lz, BlockId.Water,
                              y == water && p.WaterHeight[col] < 8 ? WaterLevel.Flowing(8 - p.WaterHeight[col]) : WaterLevel.Source);
@@ -346,11 +353,14 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             float h = Biomes.Heat(hi, heat);
             var biome = Biomes.Pick(h, wet);
             float dry = Biomes.Dry(h, wet, Biomes.SandBlend);
+            // (Under water, its top is a bed of sand and gravel, as in full detail.)
+            bool under = s + 1 == spans.Length && WaterTop(water, hi) > hi;
+            var bed = biome == Biome.Volcanic ? BlockId.Ash : patch < 0.35f ? BlockId.Gravel : BlockId.Sand;
             for (int w = System.Math.Max(Voxel(lo), 0); w <= System.Math.Min(Voxel(hi), S - 1); w++)
             {
                 int y0 = by0 + w * c, y1 = y0 + c - 1, top = System.Math.Min(hi, y1);
                 if (2 * (top - System.Math.Max(lo, y0) + 1) >= c)
-                    data.Set(u, w, v, ContinentTerrain.Block(top, hi, strata, patch, bare, biome, dry));
+                    data.Set(u, w, v, under && top >= hi - 1 ? bed : ContinentTerrain.Block(top, hi, strata, patch, bare, biome, dry));
             }
 
             // Over the top span, water: a voxel at least half under it.

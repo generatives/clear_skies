@@ -98,7 +98,8 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
                 if (m >= 0 && (Standing(m) || Falls(m) || flow[m] > flow[best]) && !Standing(best) && !Falls(best)) best = m;
             }
             next[n] = best;
-            if (!Standing(best) && shown[best] == 0 && way[best] != (0, 0)) shown[best] = flow[best];
+            // (No wider than what runs in: a lake's edge carries the lake's water round too, which isn't the stream's.)
+            if (!Standing(best) && shown[best] == 0 && way[best] != (0, 0)) shown[best] = Math.Min(flow[best], shown[n]);
         }
         // ...and only where it runs on into water, over the edge or into another shown stream (lowest first, so what it
         // runs to is settled): a stream that shows ends in water, not in a dash on a slope.
