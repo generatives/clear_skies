@@ -712,10 +712,11 @@ fn valueNoise3(p: vec3<f32>) -> f32 {
 
 // What voxel v in this draw's grid holds: 2 a block that blocks light, 1 water (a translucent block: its chunk's
 // translucent bits, whose occupancy slot plus one is its chunk-table entry's second word's w less its covered bit, 0
-// for none; see GridStore.EntryWords), 0 anything else. One chunk lookup for both.
+// for none; see GridStore.EntryWords), 0 anything else, -1 not known (no chunk of this grid there: not loaded, or
+// shown at another level of detail). One chunk lookup for both.
 fn waterOrSolid(v: vec3<i32>) -> i32 {
     let i = entryOf(drawGrid, v >> vec3<u32>(5u));
-    if (i < 0) { return 0; }
+    if (i < 0) { return -1; }
     let code = chunkTable[2 * i].x;
     let l = v & vec3<i32>(31);
     let w = u32(l.y + 32 * l.z);
@@ -730,7 +731,9 @@ fn waterOrSolid(v: vec3<i32>) -> i32 {
 // far the chunk is from the origin), along rd (normalized, grid space), in blocks, up to WATER_MAX_PATH: a walk
 // through the cells it crosses, adding up the water in them (not stopping where it first leaves the water, so a ragged
 // waterfall's air gaps don't break its shading into bands), each stretch weighed by how thick the water is there
-// (waterDensity), until a block that blocks light or WATER_REACH blocks.
+// (waterDensity), until a block that blocks light or WATER_REACH blocks. Where it walks out of this grid's chunks
+// (past what's loaded, or into a chunk shown at another level), it takes what it was last in to carry on: water seen
+// across a border with another level would otherwise look clear along it, as if the water ended there.
 fn waterPath(p: vec3<f32>, start: vec3<i32>, rd: vec3<f32>) -> f32 {
     var cell = start;
     let stepC = vec3<i32>(select(-1, 1, rd.x > 0.0), select(-1, 1, rd.y > 0.0), select(-1, 1, rd.z > 0.0));
@@ -739,8 +742,11 @@ fn waterPath(p: vec3<f32>, start: vec3<i32>, rd: vec3<f32>) -> f32 {
     var t = 0.0;
     var path = 0.0;
     let origin = vec3<f32>(drawChunk * 32);
+    var last = 1;
     for (var i = 0; i < WATER_MAX_STEPS; i++) {
-        let what = waterOrSolid(drawChunk * 32 + cell);
+        var what = waterOrSolid(drawChunk * 32 + cell);
+        if (what < 0) { what = last; }
+        last = what;
         if (what == 2) { break; }
         let tNext = min(tMax.x, min(tMax.y, tMax.z));
         if (what == 1) { path += (tNext - t) * waterDensity(origin + p + rd * (0.5 * (t + tNext))); }
