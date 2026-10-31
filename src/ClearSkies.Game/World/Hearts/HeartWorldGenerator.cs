@@ -237,6 +237,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
                 if (count > 0) CoarseColumn(data, u, v, x, z, c, by0, spans[..count], WaterAt(x, z));
             }
         }
+        CoarseFalls(data, c, bx0, by0, bz0);
         if (c <= S) CoarseTrees(data, pos, level);
     }
 
@@ -638,13 +639,10 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
     }
 
     /// <summary>Each landscape column's waterfall (see <see cref="Shaped.Fall"/>): as wide as its stream, in the first
-    /// block columns past the lip (whose ground, if any, is more than Drop under the column's floor), down the land's
-    /// outer face to its underside, or to the ground under it.</summary>
+    /// block columns past the lip (see PastLip), down the land's outer face to its underside, or to the ground under it.</summary>
     private void PlaceFalls(ColumnProfile p, Shaped shaped, int x0, int z0)
     {
-        const int Drop = 3;
         int size = shaped.Size;
-        Span<(short Lo, short Hi)> spans = stackalloc (short, short)[MaxSpans];
         for (int mz = -size; mz <= S + size; mz += size)
         for (int mx = -size; mx <= S + size; mx += size)
         {
@@ -652,26 +650,71 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             float half = MathF.Min(width, size) / 2;
             if (half < 0.5f) continue;
             int top = (int)MathF.Floor(surface - 0.5f); // the top water block going over
-            // Across the way it leaves, a line of block columns half the width either side of the middle; along each,
-            // out from the middle to the first column past the lip.
+            // Across the way it leaves, a line of block columns half the width either side of the middle.
             float length = MathF.Sqrt(dx * dx + dz * dz), ux = dx / length, uz = dz / length;
             for (float o = -half + 0.5f; o <= half - 0.5f + 1e-3f; o += 1f)
             {
-                float sx = mx + 0.5f - uz * o, sz = mz + 0.5f + ux * o;
-                for (float a = 0f; a <= size * 1.5f; a += 0.5f)
+                if (PastLip(x0 + mx + 0.5f - uz * o, z0 + mz + 0.5f + ux * o, ux, uz, top, floor, bottom, size,
+                            (x, z) => TopAt(p, x0, z0, x - x0, z - z0, _fallSpans)) is not var (x, z, low)) continue;
+                int lx = x - x0, lz = z - z0;
+                if (lx < 0 || lz < 0 || lx >= S || lz >= S) continue;
+                int col = lx + S * lz;
+                p.FallTop[col] = Math.Max(p.FallTop[col], top);
+                p.FallBottom[col] = low;
+            }
+        }
+    }
+
+    private readonly (short Lo, short Hi)[] _fallSpans = new (short, short)[MaxSpans];
+
+    /// <summary>Out from (sx, sz) along (ux, uz), the first block column past a lip: whose ground (<paramref name="groundAt"/>,
+    /// int.MinValue for none) is more than Drop under the <paramref name="floor"/> of the water going over; and the
+    /// bottom of the water falling there: the ground's top, or with none the land's <paramref name="bottom"/>. Null if
+    /// a bank or hill stands over the water first, or there's no lip within a column and a half.</summary>
+    private static (int X, int Z, int Bottom)? PastLip(float sx, float sz, float ux, float uz, int top, float floor, float bottom,
+                                                       int size, Func<int, int, int> groundAt)
+    {
+        const int Drop = 3;
+        for (float a = 0f; a <= size * 1.5f; a += 0.5f)
+        {
+            int x = (int)MathF.Floor(sx + ux * a), z = (int)MathF.Floor(sz + uz * a);
+            int ground = groundAt(x, z);
+            if (ground > top + 1) return null;
+            if (ground >= floor - Drop) continue; // still on the land: further out
+            return (x, z, ground == int.MinValue ? (int)bottom : ground + 1);
+        }
+        return null;
+    }
+
+    /// <summary>The waterfalls of a coarse chunk (voxels <paramref name="c"/> blocks on a side, from world (bx0, by0,
+    /// bz0)): each as PlaceFalls finds it down its middle, in the voxel column that holds it, where it's at least half
+    /// a voxel wide; a voxel at least half under it.</summary>
+    private void CoarseFalls(ChunkData data, int c, int bx0, int by0, int bz0)
+    {
+        var shaped = _landscape?.At(bx0 + S * c / 2, bz0 + S * c / 2);
+        if (shaped == null) return;
+        int size = shaped.Size;
+        Span<(short Lo, short Hi)> spans = stackalloc (short, short)[MaxSpans];
+        int mx0 = (int)MathF.Floor((bx0 - size) / (float)size) * size, mz0 = (int)MathF.Floor((bz0 - size) / (float)size) * size;
+        for (int mz = mz0; mz <= bz0 + S * c + size; mz += size)
+        for (int mx = mx0; mx <= bx0 + S * c + size; mx += size)
+        {
+            var (width, dx, dz, surface, floor, bottom) = shaped.Fall(mx, mz);
+            if (width < System.Math.Max(1f, c / 2f)) continue;
+            int top = (int)MathF.Floor(surface - 0.5f);
+            float length = MathF.Sqrt(dx * dx + dz * dz);
+            if (PastLip(mx + 0.5f, mz + 0.5f, dx / length, dz / length, top, floor, bottom, size, (x, z) =>
                 {
-                    int lx = (int)MathF.Floor(sx + ux * a), lz = (int)MathF.Floor(sz + uz * a);
-                    int ground = TopAt(p, x0, z0, lx, lz, spans);
-                    if (ground > top + 1) break; // a bank or hill in the way
-                    if (ground >= floor - Drop) continue; // still on the land: further out
-                    if (lx >= 0 && lz >= 0 && lx < S && lz < S)
-                    {
-                        int col = lx + S * lz;
-                        p.FallTop[col] = Math.Max(p.FallTop[col], top);
-                        p.FallBottom[col] = ground == int.MinValue ? (int)bottom : ground + 1;
-                    }
-                    break;
-                }
+                    int n = SpansAt(x, z, _fallSpans);
+                    return n > 0 ? _fallSpans[n - 1].Hi : int.MinValue;
+                }) is not var (fx, fz, low)) continue;
+            int u = (int)MathF.Floor((fx - bx0) / (float)c), v = (int)MathF.Floor((fz - bz0) / (float)c);
+            if ((uint)u >= S || (uint)v >= S) continue;
+            for (int w = System.Math.Max((low - by0) / c, 0); w <= System.Math.Min((top - by0) / c, S - 1); w++)
+            {
+                int y0 = by0 + w * c, y1 = y0 + c - 1;
+                if (2 * (System.Math.Min(top, y1) - System.Math.Max(low, y0) + 1) >= c && data.Get(u, w, v) == BlockId.Air)
+                    data.Set(u, w, v, BlockId.Water, WaterLevel.Flowing(0, falling: true));
             }
         }
     }
