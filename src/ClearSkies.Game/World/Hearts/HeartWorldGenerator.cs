@@ -751,50 +751,55 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         }
     }
 
-    // (A stream's numbers, see PlaceStreams.)
-    private const float StreamHump = 2f, StreamWide = 3f;
-    private const int StreamDeep = 2;
-
-    /// <summary>Each landscape column's stream (see <see cref="Shaped.Stream"/>): a band Wide times its width along the
-    /// line from its middle to the middle of the column it runs to (wandering up to Wander blocks either side). Its
-    /// surface runs a block over the line's ground; every block column in the band whose ground stands less than Hump
-    /// over that surface gets water to the surface, at least a block and at most Deep blocks deep, and its bed sinks a
-    /// block (see PlaceWater) so it runs in a trench level with the ground beside it. Whole blocks only: a stream steps
-    /// down with the ground. Columns are wider than creeks, so a creek's water spreads too thin over one to fill blocks
-    /// by its volume: this draws it.</summary>
+    /// <summary>Places the streams (see <see cref="StreamWater"/>) over the chunk column at (x0, z0) and Pad round it;
+    /// each stream's bed sinks a block (see PlaceWater), so it runs in a trench level with the ground beside it.</summary>
     private void PlaceStreams(Shaped shaped, int x0, int z0)
     {
-        const float Hump = StreamHump, Wide = StreamWide, Wander = 2f;
-        const int Deep = StreamDeep;
-        int size = shaped.Size;
-        for (int mz = -2 * size; mz <= S + 2 * size; mz += size)
-        for (int mx = -2 * size; mx <= S + 2 * size; mx += size)
+        for (int lz = -Pad; lz < S + Pad; lz++)
+        for (int lx = -Pad; lx < S + Pad; lx++)
         {
-            var (width, toX, toZ, from, to) = shaped.Stream(x0 + mx, z0 + mz);
+            int col = PadAt(lx, lz), top = _padTop[col];
+            if (top == int.MinValue) continue;
+            int water = StreamWater(shaped, x0 + lx, z0 + lz, top, 0f);
+            if (water == int.MinValue) continue;
+            _padCarve[col] = true;
+            if (water > _padWater[col]) { _padWater[col] = water; _padHeight[col] = 8; }
+        }
+    }
+
+    /// <summary>The top water block of the streams over block column (x, z), whose ground is topped at
+    /// <paramref name="top"/>, or int.MinValue: full detail and distant terrain both place streams by this. Each
+    /// landscape column's stream (see <see cref="Shaped.Stream"/>) is a band Wide times its width along the line from
+    /// its middle to the middle of the column it runs to, wandering up to Wander blocks either side, and
+    /// <paramref name="widen"/> blocks wider each side (distant terrain widens by half a voxel, so a stream thinner
+    /// than a voxel still shows). Its surface runs a block over the line's ground; a column in the band whose ground
+    /// stands less than Hump over that surface gets water to the surface, at least a block and at most Deep blocks
+    /// deep. Whole blocks only: a stream steps down with the ground. Columns are wider than creeks, so a creek's water
+    /// spreads too thin over one to fill blocks by its volume: this draws it.</summary>
+    private int StreamWater(Shaped shaped, int x, int z, int top, float widen)
+    {
+        const float Hump = 2f, Wide = 3f, Wander = 2f;
+        const int Deep = 2;
+        int size = shaped.Size, best = int.MinValue, r = 2 + (int)MathF.Ceiling(widen / size);
+        int bx = (int)MathF.Floor(x / (float)size) * size, bz = (int)MathF.Floor(z / (float)size) * size;
+        float wx = x + Wander * _crack.GetNoise(x * 2.5f, z * 2.5f), wz = z + Wander * _crack.GetNoise(x * 2.5f + 1000f, z * 2.5f);
+        for (int j = -r; j <= r; j++)
+        for (int i = -r; i <= r; i++)
+        {
+            int mx = bx + i * size, mz = bz + j * size;
+            var (width, toX, toZ, from, to) = shaped.Stream(mx, mz);
             float half = MathF.Min(width * Wide, size) / 2;
             if (half < 0.5f) continue;
-            // Along the line between the two middles (block centres), wandering up to Wander blocks either side of it.
-            float reach = half + Wander;
-            float ax = mx + 0.5f, az = mz + 0.5f, dx = toX - x0 + 0.5f - ax, dz = toZ - z0 + 0.5f - az, length2 = dx * dx + dz * dz;
-            int lx0 = Math.Max(-Pad, (int)MathF.Floor(MathF.Min(ax, ax + dx) - reach)), lx1 = Math.Min(S + Pad - 1, (int)MathF.Ceiling(MathF.Max(ax, ax + dx) + reach));
-            int lz0 = Math.Max(-Pad, (int)MathF.Floor(MathF.Min(az, az + dz) - reach)), lz1 = Math.Min(S + Pad - 1, (int)MathF.Ceiling(MathF.Max(az, az + dz) + reach));
-            for (int lz = lz0; lz <= lz1; lz++)
-            for (int lx = lx0; lx <= lx1; lx++)
-            {
-                float wx = x0 + lx, wz = z0 + lz;
-                float px = lx + 0.5f + Wander * _crack.GetNoise(wx * 2.5f, wz * 2.5f) - ax;
-                float pz = lz + 0.5f + Wander * _crack.GetNoise(wx * 2.5f + 1000f, wz * 2.5f) - az;
-                float t = Math.Clamp((px * dx + pz * dz) / length2, 0f, 1f);
-                float ox = px - t * dx, oz = pz - t * dz;
-                if (ox * ox + oz * oz > half * half) continue;
-                int col = PadAt(lx, lz), top = _padTop[col];
-                float surface = from + t * (to - from) + 1f;
-                if (top == int.MinValue || top + 1 - surface > Hump - 1) continue;
-                int water = Math.Max(top + 1, Math.Min((int)MathF.Ceiling(surface) - 1, top + Deep));
-                _padCarve[col] = true;
-                if (water > _padWater[col]) { _padWater[col] = water; _padHeight[col] = 8; }
-            }
+            float reach = half + widen, dx = toX - mx, dz = toZ - mz, length2 = dx * dx + dz * dz;
+            float px = wx - mx, pz = wz - mz;
+            float t = length2 > 0 ? Math.Clamp((px * dx + pz * dz) / length2, 0f, 1f) : 0f;
+            float ox = px - t * dx, oz = pz - t * dz;
+            if (ox * ox + oz * oz > reach * reach) continue;
+            float surface = from + t * (to - from) + 1f;
+            if (top + 1 - surface > Hump - 1) continue;
+            best = Math.Max(best, Math.Max(top + 1, Math.Min((int)MathF.Ceiling(surface) - 1, top + Deep)));
         }
+        return best;
     }
 
     /// <summary>The top block of block column (lx, lz) of chunk column (x0, z0) (in it or a neighbour), or int.MinValue.</summary>
@@ -822,31 +827,9 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
 
     /// <summary>The top water block over ground topped at <paramref name="hi"/> at block column (x, z), for distant
     /// terrain with voxels <paramref name="c"/> blocks wide, or int.MinValue: the landscape's still water there, or a
-    /// stream's (as PlaceStreams has it, without its wander) on any voxel whose middle is within half a voxel of its
-    /// band, so a stream thinner than a voxel still shows.</summary>
+    /// stream's (see StreamWater) on any voxel whose middle is within half a voxel of its band.</summary>
     private int CoarseWater(Shaped? shaped, int x, int z, int hi, int c)
-    {
-        if (shaped == null) return int.MinValue;
-        int best = WaterTop(shaped.Surface(x, z), hi), size = shaped.Size;
-        int bx = (int)MathF.Floor(x / (float)size) * size, bz = (int)MathF.Floor(z / (float)size) * size;
-        for (int j = -2; j <= 2; j++)
-        for (int i = -2; i <= 2; i++)
-        {
-            int mx = bx + i * size, mz = bz + j * size;
-            var (width, toX, toZ, from, to) = shaped.Stream(mx, mz);
-            float half = MathF.Min(width * StreamWide, size) / 2;
-            if (half < 0.5f) continue;
-            float reach = half + c / 2f, dx = toX - mx, dz = toZ - mz, length2 = dx * dx + dz * dz;
-            float px = x - mx, pz = z - mz;
-            float t = length2 > 0 ? Math.Clamp((px * dx + pz * dz) / length2, 0f, 1f) : 0f;
-            float ox = px - t * dx, oz = pz - t * dz;
-            if (ox * ox + oz * oz > reach * reach) continue;
-            float surface = from + t * (to - from) + 1f;
-            if (hi + 1 - surface > StreamHump - 1) continue;
-            best = Math.Max(best, Math.Max(hi + 1, Math.Min((int)MathF.Ceiling(surface) - 1, hi + StreamDeep)));
-        }
-        return best;
-    }
+        => shaped == null ? int.MinValue : Math.Max(WaterTop(shaped.Surface(x, z), hi), StreamWater(shaped, x, z, hi, c / 2f));
 
     /// <summary>The landscape's water surface over the column holding block column (x, z), or NaN (for distant
     /// terrain, whose voxels are as wide as columns or wider: there, a column's water is level).</summary>
