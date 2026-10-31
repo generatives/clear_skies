@@ -118,6 +118,16 @@ public sealed class GreedyMesher
         int sz      = ChunkData.Size;
         if (_maskInUse) Array.Clear(_mask);
         _maskInUse = true;
+        // Streamed terrain: per column, the lowest water in it (sz for none). Ground under water draws no side faces
+        // on the chunk's border (see below).
+        if (neighboursForTransparentOnly)
+            for (int z = 0; z < sz; z++)
+            for (int x = 0; x < sz; x++)
+            {
+                int y = 0;
+                while (y < sz && chunk.Get(x, y, z) != BlockId.Water) y++;
+                _waterFrom[x + sz * z] = y;
+            }
 
         for (int fi = 0; fi < Faces.Length; fi++)
         {
@@ -148,6 +158,11 @@ public sealed class GreedyMesher
                             // Only transparent faces are culled across the border.
                             if (neighboursForTransparentOnly && !blockDef.Transparent) adjId = BlockId.Air;
                         }
+                        // Streamed terrain draws its ground's border faces as if the neighbour were air, so a step where
+                        // the next chunk (perhaps another level's, coarser) stands lower is closed; except under water,
+                        // where those faces would show through it as lines along the border. There the water closes it.
+                        if (neighboursForTransparentOnly && !blockDef.Transparent && face.D != 1 && Submerged(face, slice, u, v))
+                            continue;
                     }
                     else
                     {
@@ -383,6 +398,23 @@ public sealed class GreedyMesher
     // direct branch instead of a stackalloc'd Span avoids a per-voxel indirect-index round trip in what
     // is by far the hottest loop in meshing (called twice — self + adjacent — for every voxel of every
     // slice of every face: 6 * 32 * 32 * 32 = ~196k times per chunk).
+    // Per column of the chunk being meshed (streamed terrain): the lowest water block in it, or Size for none.
+    private readonly int[] _waterFrom = new int[ChunkData.Size * ChunkData.Size];
+
+    /// <summary>Whether the cell at (slice, u, v) of <paramref name="face"/> is just under water in its column (the
+    /// SubmergedDepth cells under it: deeper, past a lake's bed, could be a cave wall).</summary>
+    private bool Submerged(in FaceDesc face, int slice, int u, int v)
+    {
+        int x, y, z;
+        if (face.D == 0)      { x = slice; y = u; z = v; }
+        else if (face.D == 1) { y = slice; x = u; z = v; }
+        else                  { z = slice; x = u; y = v; }
+        int from = _waterFrom[x + ChunkData.Size * z];
+        return y < from && y >= from - SubmergedDepth;
+    }
+
+    private const int SubmergedDepth = 4;
+
     private static BlockId GetBlock(ChunkData chunk, in FaceDesc face, int slice, int u, int v)
     {
         int x, y, z;

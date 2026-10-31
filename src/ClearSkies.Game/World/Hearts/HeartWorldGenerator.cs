@@ -282,6 +282,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
                 {
                     int hi = spans[s].Hi;
                     if (hi + Trees.MaxHeight < by0 || hi > by1) continue;
+                    if (s + 1 == count && WaterTop(WaterAt(x, z), hi) > hi) continue; // (not in water, as CoarseColumn has it)
                     float heat = Biomes.Heat(hi, _terrain.Heat(x, z)), wet = _terrain.Wet(x, z);
                     var biome = Biomes.Pick(heat, wet);
                     float bare = s + 1 < count && spans[s + 1].Lo - hi < ShadeReach ? Shaded : 0f;
