@@ -179,12 +179,13 @@ public sealed class Shaped(Land land, float[] startFloor, float[] depth, float[]
         return t < 0 ? 0f : Math.Max(0f, depth[t] - settings.Damp) * land.Size * land.Size;
     }
 
-    /// <summary>The water's surface over the column holding block column (x, z) (blocks), or NaN where it's dry.</summary>
+    /// <summary>The water's surface over the column holding block column (x, z) (blocks), or NaN where it's dry: as
+    /// <see cref="Volume"/>, its water past the damp that wets all ground.</summary>
     public float Surface(int x, int z)
     {
         var (mx, mz) = Middle(x, z);
         int t = TopNodeAt(mx, mz);
-        return t < 0 || depth[t] <= 0f ? float.NaN : land.Floor[t] + depth[t];
+        return t < 0 || depth[t] <= settings.Damp ? float.NaN : land.Floor[t] + depth[t] - settings.Damp;
     }
 
     /// <summary>The model's water surface (its ground where dry) blended between the four column middles round block

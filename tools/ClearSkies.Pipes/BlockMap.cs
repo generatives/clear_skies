@@ -66,6 +66,22 @@ public static class BlockMap
                 if (top[d] != int.MinValue && water[d] <= top[d] && top[d] < water[c]) hangs = true;
             if (hangs) { hanging++; if (water[c] - top[c] == 1) thin++; }
         }
+        // Distant terrain's water (see HeartWorldGenerator.GenerateCoarse): each column's water over its own top.
+        int farWet = 0, farLand = 0, lone = 0, fw = width / 4;
+        var far = generators.Value!;
+        var farWater = new bool[fw * fw];
+        for (int j = 0; j < fw; j++)
+        for (int i = 0; i < fw; i++)
+        {
+            int c = 4 * i + width * 4 * j;
+            if (top[c] == int.MinValue) continue;
+            farLand++;
+            if (HeartWorldGenerator.WaterTop(far.WaterAt(x0 + 4 * i, z0 + 4 * j), top[c]) > top[c]) { farWet++; farWater[i + fw * j] = true; }
+        }
+        for (int j = 1; j < fw - 1; j++)
+        for (int i = 1; i < fw - 1; i++)
+            if (farWater[i + fw * j] && !farWater[i - 1 + fw * j] && !farWater[i + 1 + fw * j] && !farWater[i + fw * (j - 1)] && !farWater[i + fw * (j + 1)]) lone++;
+        Console.WriteLine($"Distant terrain (4-block voxels) water over {100.0 * farWet / Math.Max(1, farLand):0.0}% of land, {100.0 * lone / Math.Max(1, farWet):0.0}% of it lone voxels");
         Console.WriteLine($"Hanging water columns: {hanging:N0} ({thin:N0} of them 1 block deep)");
         var depths = new List<int>();
         for (int c = 0; c < top.Length; c++) if (top[c] != int.MinValue && water[c] > top[c]) depths.Add(water[c] - top[c]);
