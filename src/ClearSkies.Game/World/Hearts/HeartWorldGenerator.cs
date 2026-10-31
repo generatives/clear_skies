@@ -747,25 +747,26 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         }
     }
 
-    /// <summary>Each landscape column's stream (see <see cref="Shaped.Stream"/>): a block deep over the ground along the
-    /// line from its middle to the middle of the column it runs to, as wide as its flow keeps it. Columns are wider
-    /// than creeks, so a creek's water spreads too thin over one to fill blocks by its volume: this draws it.</summary>
+    /// <summary>Each landscape column's stream (see <see cref="Shaped.Stream"/>): its surface runs a block over the
+    /// ground along the line from its middle to the middle of the column it runs to, and every block column near the
+    /// line whose ground is under that surface fills to it, Deep blocks deep at most (out to half a column past its
+    /// width: the stream fills its bed). Within its width, ground standing over the surface by less than Hump gets a film, so the stream runs on
+    /// over it. Columns are wider than creeks, so a creek's water spreads too thin over one to fill blocks by its volume:
+    /// this draws it.</summary>
     private void PlaceStreams(Shaped shaped, int x0, int z0)
     {
-        const float Hump = 4f, Steep = 0.5f, Wander = 2f;
+        const float Hump = 4f, Wander = 2f;
+        const int Deep = 2;
         int size = shaped.Size;
         for (int mz = -2 * size; mz <= S + 2 * size; mz += size)
         for (int mx = -2 * size; mx <= S + 2 * size; mx += size)
         {
-            var (width, toX, toZ, from, to, head) = shaped.Stream(x0 + mx, z0 + mz);
+            var (width, toX, toZ, from, to) = shaped.Stream(x0 + mx, z0 + mz);
             float half = MathF.Min(width, size) / 2;
             if (half < 0.5f) continue;
-            // Along the line between the two middles (block centres), each block column within half the width of it,
-            // or half a column more where its ground lies under the stream's surface (the stream fills its bed). Where
-            // it starts, it widens from nothing; and it wanders up to Wander blocks either side of the straight line.
+            // Along the line between the two middles (block centres), wandering up to Wander blocks either side of it.
             float reach = half + size / 2f + Wander;
             float ax = mx + 0.5f, az = mz + 0.5f, dx = toX - x0 + 0.5f - ax, dz = toZ - z0 + 0.5f - az, length2 = dx * dx + dz * dz;
-            bool steep = MathF.Abs(from - to) > Steep * MathF.Sqrt(length2);
             int lx0 = Math.Max(-Pad, (int)MathF.Floor(MathF.Min(ax, ax + dx) - reach)), lx1 = Math.Min(S + Pad - 1, (int)MathF.Ceiling(MathF.Max(ax, ax + dx) + reach));
             int lz0 = Math.Max(-Pad, (int)MathF.Floor(MathF.Min(az, az + dz) - reach)), lz1 = Math.Min(S + Pad - 1, (int)MathF.Ceiling(MathF.Max(az, az + dz) + reach));
             for (int lz = lz0; lz <= lz1; lz++)
@@ -775,24 +776,19 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
                 float px = lx + 0.5f + Wander * _crack.GetNoise(wx * 2.5f, wz * 2.5f) - ax;
                 float pz = lz + 0.5f + Wander * _crack.GetNoise(wx * 2.5f + 1000f, wz * 2.5f) - az;
                 float t = Math.Clamp((px * dx + pz * dz) / length2, 0f, 1f);
-                float ox = px - t * dx, oz = pz - t * dz, off2 = ox * ox + oz * oz;
-                float side = head ? half * t : half, fill = side + size / 2f;
+                float ox = px - t * dx, oz = pz - t * dz, off2 = ox * ox + oz * oz, fill = half + size / 2f;
                 if (off2 > fill * fill) continue;
                 int col = PadAt(lx, lz), top = _padTop[col];
                 if (top == int.MinValue) continue;
-                // The stream's surface: a block over the line's ground, sloping with it (its top block's height in
-                // eighths, so it runs down smoothly instead of in steps). Ground in the middle that stands over it, up to
-                // Hump (the ground between columns is blended, so it rises a little over the line in places), gets a
-                // film of water so the stream runs on over it. Down a steep slope it's a block deep at most.
+                // (The top block's height in eighths, so it runs down smoothly instead of in steps.)
                 float surface = from + t * (to - from) + 1f;
                 int water, height;
                 if (top + 1 < surface)
                 {
-                    water = Math.Min(steep ? top + 1 : top + 2, (int)MathF.Ceiling(surface) - 1);
+                    water = Math.Min((int)MathF.Ceiling(surface) - 1, top + Deep);
                     height = water < (int)MathF.Ceiling(surface) - 1 ? 8 : Math.Clamp((int)MathF.Round((surface - water) * 8), 1, 8);
-                    if (steep) height = (byte)Math.Min(height, 4);
                 }
-                else if (off2 <= side * side && top + 1 - surface <= Hump - 1) { water = top + 1; height = 1; }
+                else if (off2 <= half * half && top + 1 - surface <= Hump - 1) { water = top + 1; height = 1; }
                 else continue;
                 if (water > _padWater[col] || (water == _padWater[col] && height > _padHeight[col]))
                 {
