@@ -756,26 +756,26 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         }
     }
 
-    /// <summary>Each landscape column's stream (see <see cref="Shaped.Stream"/>): its surface runs a block over the
-    /// ground along the line from its middle to the middle of the column it runs to, and every block column near the
-    /// line whose ground is under that surface fills to it, Deep blocks deep at most (out to half a column past its
-    /// width: the stream fills its bed). Within its width, ground standing over the surface by less than Hump gets a
-    /// block of water too, so the stream runs on over it, and the bed sinks a block (see PlaceWater). Whole blocks only:
-    /// a stream steps down with the ground. Columns are wider than creeks, so a creek's water spreads too thin over one
-    /// to fill blocks by its volume: this draws it.</summary>
+    /// <summary>Each landscape column's stream (see <see cref="Shaped.Stream"/>): a band Wide times its width along the
+    /// line from its middle to the middle of the column it runs to (wandering up to Wander blocks either side). Its
+    /// surface runs a block over the line's ground; every block column in the band whose ground stands less than Hump
+    /// over that surface gets water to the surface, at least a block and at most Deep blocks deep, and its bed sinks a
+    /// block (see PlaceWater) so it runs in a trench level with the ground beside it. Whole blocks only: a stream steps
+    /// down with the ground. Columns are wider than creeks, so a creek's water spreads too thin over one to fill blocks
+    /// by its volume: this draws it.</summary>
     private void PlaceStreams(Shaped shaped, int x0, int z0)
     {
-        const float Hump = 4f, Wander = 2f;
+        const float Hump = 2f, Wide = 3f, Wander = 2f;
         const int Deep = 2;
         int size = shaped.Size;
         for (int mz = -2 * size; mz <= S + 2 * size; mz += size)
         for (int mx = -2 * size; mx <= S + 2 * size; mx += size)
         {
             var (width, toX, toZ, from, to) = shaped.Stream(x0 + mx, z0 + mz);
-            float half = MathF.Min(width, size) / 2;
+            float half = MathF.Min(width * Wide, size) / 2;
             if (half < 0.5f) continue;
             // Along the line between the two middles (block centres), wandering up to Wander blocks either side of it.
-            float reach = half + size / 2f + Wander;
+            float reach = half + Wander;
             float ax = mx + 0.5f, az = mz + 0.5f, dx = toX - x0 + 0.5f - ax, dz = toZ - z0 + 0.5f - az, length2 = dx * dx + dz * dz;
             int lx0 = Math.Max(-Pad, (int)MathF.Floor(MathF.Min(ax, ax + dx) - reach)), lx1 = Math.Min(S + Pad - 1, (int)MathF.Ceiling(MathF.Max(ax, ax + dx) + reach));
             int lz0 = Math.Max(-Pad, (int)MathF.Floor(MathF.Min(az, az + dz) - reach)), lz1 = Math.Min(S + Pad - 1, (int)MathF.Ceiling(MathF.Max(az, az + dz) + reach));
@@ -786,16 +786,13 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
                 float px = lx + 0.5f + Wander * _crack.GetNoise(wx * 2.5f, wz * 2.5f) - ax;
                 float pz = lz + 0.5f + Wander * _crack.GetNoise(wx * 2.5f + 1000f, wz * 2.5f) - az;
                 float t = Math.Clamp((px * dx + pz * dz) / length2, 0f, 1f);
-                float ox = px - t * dx, oz = pz - t * dz, off2 = ox * ox + oz * oz, fill = half + size / 2f;
-                if (off2 > fill * fill) continue;
+                float ox = px - t * dx, oz = pz - t * dz;
+                if (ox * ox + oz * oz > half * half) continue;
                 int col = PadAt(lx, lz), top = _padTop[col];
-                if (top == int.MinValue) continue;
                 float surface = from + t * (to - from) + 1f;
-                int water;
-                if (top + 1 < surface) water = Math.Min((int)MathF.Ceiling(surface) - 1, top + Deep);
-                else if (off2 <= half * half && top + 1 - surface <= Hump - 1) water = top + 1;
-                else continue;
-                if (off2 <= half * half) _padCarve[col] = true;
+                if (top == int.MinValue || top + 1 - surface > Hump - 1) continue;
+                int water = Math.Max(top + 1, Math.Min((int)MathF.Ceiling(surface) - 1, top + Deep));
+                _padCarve[col] = true;
                 if (water > _padWater[col]) { _padWater[col] = water; _padHeight[col] = 8; }
             }
         }
