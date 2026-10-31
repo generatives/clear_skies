@@ -172,7 +172,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
                 bool topSpan = s + 1 == p.Count(col);
                 int water = topSpan ? p.Water[col] : int.MinValue;
                 for (int y = System.Math.Max(hi + 1, originY); y <= System.Math.Min(water, originY + S - 1); y++)
-                    data.Set(lx, y - originY, lz, BlockId.Water);
+                    data.Set(lx, y - originY, lz, BlockId.Water,
+                             y == water && p.WaterHeight[col] < 8 ? WaterLevel.Flowing(8 - p.WaterHeight[col]) : WaterLevel.Source);
 
                 // What grows on the span's top, in the open cell above it.
                 int above = hi + 1;
@@ -563,6 +564,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
     private void PlaceWater(ColumnProfile p, Shaped? shaped, int x0, int z0)
     {
         Array.Fill(p.Water, int.MinValue);
+        Array.Fill(p.WaterHeight, (byte)8);
         if (shaped == null) return;
         int size = shaped.Size, half = size / 2, corners = S / size + 1;
         Span<float> ground = stackalloc float[size * size];
@@ -636,27 +638,41 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             var (width, toX, toZ, from, to) = shaped.Stream(x0 + mx, z0 + mz);
             float half = MathF.Min(width, size) / 2;
             if (half < 0.5f) continue;
-            // Along the line between the two middles (block centres), each block column within half the width of it.
+            // Along the line between the two middles (block centres), each block column within half the width of it,
+            // or half a column more where its ground lies under the stream's surface (the stream fills its bed).
+            float reach = half + size / 2f;
             float ax = mx + 0.5f, az = mz + 0.5f, dx = toX - x0 + 0.5f - ax, dz = toZ - z0 + 0.5f - az, length2 = dx * dx + dz * dz;
-            int lx0 = Math.Max(0, (int)MathF.Floor(MathF.Min(ax, ax + dx) - half)), lx1 = Math.Min(S - 1, (int)MathF.Ceiling(MathF.Max(ax, ax + dx) + half));
-            int lz0 = Math.Max(0, (int)MathF.Floor(MathF.Min(az, az + dz) - half)), lz1 = Math.Min(S - 1, (int)MathF.Ceiling(MathF.Max(az, az + dz) + half));
+            int lx0 = Math.Max(0, (int)MathF.Floor(MathF.Min(ax, ax + dx) - reach)), lx1 = Math.Min(S - 1, (int)MathF.Ceiling(MathF.Max(ax, ax + dx) + reach));
+            int lz0 = Math.Max(0, (int)MathF.Floor(MathF.Min(az, az + dz) - reach)), lz1 = Math.Min(S - 1, (int)MathF.Ceiling(MathF.Max(az, az + dz) + reach));
             for (int lz = lz0; lz <= lz1; lz++)
             for (int lx = lx0; lx <= lx1; lx++)
             {
                 float px = lx + 0.5f - ax, pz = lz + 0.5f - az;
                 float t = Math.Clamp((px * dx + pz * dz) / length2, 0f, 1f);
-                float ox = px - t * dx, oz = pz - t * dz;
-                if (ox * ox + oz * oz > half * half) continue;
+                float ox = px - t * dx, oz = pz - t * dz, off2 = ox * ox + oz * oz;
+                if (off2 > reach * reach) continue;
                 int col = lx + S * lz, count = p.Count(col);
                 if (count == 0) continue;
                 int top = p.Spans[p.Start[col] + count - 1].Hi;
-                // A block over the line's ground, or over the block column's own where that stands up to Hump over the
-                // line (the ground between columns is blended, so it rises a little over the line in places).
+                // The stream's surface: a block over the line's ground, sloping with it (its top block's height in
+                // eighths, so it runs down smoothly instead of in steps). Ground in the middle that stands over it, up to
+                // Hump (the ground between columns is blended, so it rises a little over the line in places), gets a
+                // film of water so the stream runs on over it.
                 const float Hump = 4f;
-                float line = from + t * (to - from);
-                if (top + 1 - line > Hump) continue;
-                int water = Math.Max(top + 1, (int)MathF.Floor(line + 1f));
-                if (water <= top + 2 && water > p.Water[col]) p.Water[col] = water;
+                float surface = from + t * (to - from) + 1f;
+                int water, height;
+                if (top + 1 < surface)
+                {
+                    water = Math.Min(top + 2, (int)MathF.Ceiling(surface) - 1);
+                    height = water == top + 2 ? 8 : Math.Clamp((int)MathF.Round((surface - water) * 8), 1, 8);
+                }
+                else if (off2 <= half * half && top + 1 - surface <= Hump - 1) { water = top + 1; height = 1; }
+                else continue;
+                if (water > p.Water[col] || (water == p.Water[col] && height > p.WaterHeight[col]))
+                {
+                    p.Water[col] = water;
+                    p.WaterHeight[col] = (byte)height;
+                }
             }
         }
     }
@@ -945,6 +961,8 @@ public sealed class ColumnProfile
                             Woods = new float[Columns], Kind = new float[Columns];
     /// <summary>Per block column, the top water block over its top span (see Landscape), or int.MinValue.</summary>
     public readonly int[] Water = new int[Columns];
+    /// <summary>How high water stands in each column's top water block, in eighths (8 full; less is flowing water).</summary>
+    public readonly byte[] WaterHeight = new byte[Columns];
 
     public int Count(int col) => Start[col + 1] - Start[col];
 

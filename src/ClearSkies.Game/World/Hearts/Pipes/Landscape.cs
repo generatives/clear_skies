@@ -74,7 +74,8 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
             int di = d % land.Nx - i, dj = d / land.Nx - j;
             beside[n] = (TopAt(i - dj, j + di), TopAt(i + dj, j - di));
         }
-        float FlowOf(int m) => m < 0 ? 0f : flow[m];
+        // (Standing water beside it shows as water anyway, so it doesn't count: a creek running down beside a lake shows.)
+        float FlowOf(int m) => m < 0 || pipes.Depth[m] > settings.Damp + 0.5f ? 0f : flow[m];
         for (int n = 0; n < land.Nodes; n++)
         {
             var (a, b) = beside[n];
