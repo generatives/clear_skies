@@ -643,65 +643,28 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         }
     }
 
-    /// <summary>Each landscape column's water by its volume, as the model left it (see Shaped.Volume, Shaped.Plane).</summary>
+    /// <summary>Standing water (see Shaped.Level): level, blended between the standing columns round each block column,
+    /// over every block under it.</summary>
     private void PlaceStanding(ColumnProfile p, Shaped shaped, int x0, int z0)
     {
-        // Corners (column middles) from one column before the chunk column to one after, so the pad has its own.
-        int size = shaped.Size, half = size / 2, corners = S / size + 3;
-        Span<float> ground = stackalloc float[size * size];
-        Span<float> offsets = stackalloc float[corners * corners];
-        Span<float> depths = stackalloc float[corners * corners];
-        Span<bool> wet = stackalloc bool[corners * corners];
-        Span<(short Lo, short Hi)> spans = stackalloc (short, short)[MaxSpans];
-        bool any = false;
-        // Each corner's column: how far over or under the model's surface (see Shaped.Plane) its water stands once its
-        // volume fills its lowest blocks (lowest under that surface) first.
-        for (int k = 0; k < corners; k++)
-        for (int i = 0; i < corners; i++)
-        {
-            int mx = (i - 1) * size, mz = (k - 1) * size;
-            float volume = shaped.Volume(x0 + mx, z0 + mz);
-            int n = 0;
-            for (int dz = -half; dz < half; dz++)
-            for (int dx = -half; dx < half; dx++)
-            {
-                int top = TopAt(p, x0, z0, mx + dx, mz + dz, spans);
-                float plane = shaped.Plane(x0 + mx + dx, z0 + mz + dz);
-                if (top != int.MinValue && !float.IsNaN(plane)) ground[n++] = top + 1 - plane;
-            }
-            if (n == 0) continue;
-            var g = ground[..n];
-            g.Sort();
-            // Flooding the lowest m: level (volume + their grounds) / m, if that's no higher than the next one's ground.
-            float sum = 0, level = 0;
-            for (int m = 1; m <= n; m++)
-            {
-                sum += g[m - 1];
-                level = (volume + sum) / m;
-                if (m == n || level <= g[m]) break;
-            }
-            offsets[i + corners * k] = level;
-            depths[i + corners * k] = volume / (size * size);
-            if (volume > 0f) wet[i + corners * k] = any = true;
-        }
-        if (!any) return;
-        // Each block column's water: the surface plus its corners' offsets, blended between them as the ground is.
+        int size = shaped.Size;
         for (int lz = -Pad; lz < S + Pad; lz++)
         for (int lx = -Pad; lx < S + Pad; lx++)
         {
-            int i = (lx + size) / size, k = (lz + size) / size, c = i + corners * k; // (corner i is at (i - 1) size)
-            if (!wet[c] && !wet[c + 1] && !wet[c + corners] && !wet[c + corners + 1]) continue;
             int at = PadAt(lx, lz), top = _padTop[at];
             if (top == int.MinValue) continue;
-            float fx = (lx - (i - 1) * size) / (float)size, fz = (lz - (k - 1) * size) / (float)size;
-            float offset = (1 - fz) * ((1 - fx) * offsets[c] + fx * offsets[c + 1])
-                         + fz * ((1 - fx) * offsets[c + corners] + fx * offsets[c + corners + 1]);
-            // (No deeper than its deepest corner's water: where the ground drops off between corners, as at a cliff,
-            // the blended surface stands far over it.)
-            float deepest = MathF.Max(MathF.Max(depths[c], depths[c + 1]), MathF.Max(depths[c + corners], depths[c + corners + 1]));
-            float surface = MathF.Min(shaped.Plane(x0 + lx, z0 + lz) + offset, top + 1 + deepest);
-            if (float.IsNaN(surface)) continue;
-            int water = (int)MathF.Floor(surface - 0.5f);
+            int x = x0 + lx, z = z0 + lz;
+            int cx = (int)MathF.Floor((float)x / size) * size, cz = (int)MathF.Floor((float)z / size) * size;
+            float fx = (x - cx) / (float)size, fz = (z - cz) / (float)size, sum = 0, weights = 0;
+            for (int c = 0; c < 4; c++)
+            {
+                float level = shaped.Level(cx + (c & 1) * size, cz + (c >> 1) * size);
+                if (float.IsNaN(level)) continue;
+                float w = ((c & 1) == 0 ? 1 - fx : fx) * ((c >> 1) == 0 ? 1 - fz : fz) + 1e-4f;
+                sum += w * level; weights += w;
+            }
+            if (weights <= 0f) continue;
+            int water = WaterTop(sum / weights, top);
             if (water > top) _padWater[at] = water;
         }
     }
