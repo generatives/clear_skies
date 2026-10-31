@@ -63,24 +63,7 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
         }
         bool Falls(int m) => m >= 0 && down[m] < 0 && way[m] != (0, 0);
         bool Standing(int m) => pipes.Depth[m] > settings.Damp + 0.5f;
-        // What each column carries: handed down the tree of main ways, highest water first, with what the model gains
-        // or loses there on its way (rain and springs in, soak out); and what standing water beside it lets out to it
-        // past what it takes back (a lake's outlet, not its edge, where its water only goes round).
-        var carried = new float[land.Nodes];
-        foreach (int n in Enumerable.Range(0, land.Nodes).OrderByDescending(n => land.Floor[n] + pipes.Depth[n]))
-        {
-            if (Standing(n)) continue;
-            float ins = 0, outs = 0, fromStanding = 0;
-            for (int k = land.LinkStart[n]; k < land.LinkStart[n + 1]; k++)
-            {
-                float q = pipes.Flow[k] / column;
-                if (q > 0) outs += q; else ins -= q;
-                if (land.LinkTo[k] >= 0 && Standing(land.LinkTo[k])) fromStanding -= q;
-            }
-            carried[n] += Math.Max(0f, outs - ins) + Math.Max(0f, fromStanding);
-            if (down[n] >= 0 && !Standing(down[n])) carried[down[n]] += carried[n];
-        }
-        // A stream shows down the middle of the water running beside it: where it carries more than the columns on
+        // A stream shows only down the middle of the water running beside it: where it carries more than the columns on
         // either side across its way (a sheet down a hillside shows one line, not one per column).
         var shown = new float[land.Nodes];
         var beside = new (int A, int B)[land.Nodes]; // the top nodes either side of each one's way, or -1
@@ -92,15 +75,46 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
             int i = c % land.Nx, j = c / land.Nx, di = way[n].X, dj = way[n].Z;
             beside[n] = way[n] == (0, 0) ? (-1, -1) : (TopAt(i - dj, j + di), TopAt(i + dj, j - di));
         }
-        float least = settings.StreamFlow;
-        float CarriedBy(int m) => m < 0 ? 0f : carried[m];
+        float FlowOf(int m) => m < 0 ? 0f : flow[m];
         for (int n = 0; n < land.Nodes; n++)
         {
             var (a, b) = beside[n];
-            if (way[n] != (0, 0) && carried[n] >= least) shown[n] = carried[n];
+            // The middle of the water running beside it, it carries that water too (a river spread over a few columns
+            // shows as one, as wide as all of them).
+            if (way[n] != (0, 0) && flow[n] > FlowOf(a) && flow[n] >= FlowOf(b)) shown[n] = flow[n] + FlowOf(a) + FlowOf(b);
         }
-        var next = down;
+        // A shown stream carries on to whichever of the three columns ahead of it (its way and either side of it) carries
+        // most, until it reaches standing water or the land's edge (highest first, so it carries on from each column it
+        // reaches): where its water fans out, or a lake's edge carries the lake's water too, it still runs on to the water.
+        var next = (int[])down.Clone();
+        foreach (int n in Enumerable.Range(0, land.Nodes).Where(n => down[n] >= 0).OrderByDescending(n => land.Floor[n]))
+        {
+            if (shown[n] <= 0 || Standing(down[n]) || Falls(down[n])) continue;
+            int c = land.ColumnOf[n], i = c % land.Nx, j = c / land.Nx, di = way[n].X, dj = way[n].Z;
+            int best = down[n];
+            foreach (var (si, sj) in new[] { (Math.Clamp(di - dj, -1, 1), Math.Clamp(dj + di, -1, 1)), (Math.Clamp(di + dj, -1, 1), Math.Clamp(dj - di, -1, 1)) })
+            {
+                int m = TopAt(i + si, j + sj);
+                if (m >= 0 && (Standing(m) || Falls(m) || flow[m] > flow[best]) && !Standing(best) && !Falls(best)) best = m;
+            }
+            next[n] = best;
+            // (No wider than what runs in: a lake's edge carries the lake's water round too, which isn't the stream's.)
+            if (!Standing(best) && shown[best] == 0 && way[best] != (0, 0)) shown[best] = Math.Min(flow[best], shown[n]);
+        }
+        // ...and only where it runs on into water, over the edge or into another shown stream (lowest first, so what it
+        // runs to is settled): a stream that shows ends in water, not in a dash on a slope.
+        var lowest = Enumerable.Range(0, land.Nodes).Where(n => shown[n] > 0).OrderBy(n => land.Floor[n]).ToArray();
+        float least = settings.StreamFlow;
         bool Shown(int m) => m >= 0 && shown[m] >= least;
+        foreach (int n in lowest)
+        {
+            if (Falls(n)) continue;
+            int to = next[n];
+            // (A stream half a column wide or more spreads over the columns beside its way too: running on into one of
+            // those does.)
+            bool wide = MathF.Sqrt(shown[n] / least) >= settings.Size / 2f;
+            if (!Shown(to) && !(wide && (Shown(beside[to].A) || Shown(beside[to].B))) && !Standing(to)) shown[n] = 0;
+        }
         // Streams nothing shown runs into start there (see Shaped.Stream).
         var fed = new bool[land.Nodes];
         for (int n = 0; n < land.Nodes; n++)
