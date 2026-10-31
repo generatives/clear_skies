@@ -573,14 +573,9 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         }
     }
 
-    /// <summary>Each landscape column's water (see <see cref="Shaped.Volume"/>) into its own lowest blocks first, lowest
-    /// measured under the model's water surface blended between columns (see <see cref="Shaped.Plane"/>), so on a
-    /// slope a stream's water runs down its channel instead of pooling at the low end of each column. Each column's
-    /// volume sets how far over or under that surface its water stands (a dry column's: at its lowest block), and
-    /// each block column blends that between its four columns as the ground blends, so water has no column edges. A
-    /// block column holds water where it stands at least half a block over its top. Columns are centred on the
-    /// lattice's corners, where the ground's wear is (see Wear). Those along the chunk column's edges reach into its
-    /// neighbours, whose block columns are worked out for it here, so both sides place the same water.</summary>
+    /// <summary>The landscape's water over chunk column (x0, z0): standing water at its level (see PlaceStanding),
+    /// streams along their lines (PlaceStreams) and waterfalls past the land's edge (PlaceFalls), then settled (see
+    /// Settle). Worked out over the chunk column and Pad blocks round it, so both sides of a chunk border agree.</summary>
     private void PlaceWater(ColumnProfile p, Shaped? shaped, int x0, int z0)
     {
         Array.Fill(p.Water, int.MinValue);

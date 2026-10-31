@@ -143,10 +143,9 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
     }
 }
 
-/// <summary>One landmass as the model left it: each column's top floor before and after, and the water over it. A
-/// column's water goes into its own lowest blocks first, lowest under the model's sloping surface (see
-/// HeartWorldGenerator.PlaceWater): a little (a creek) fills only the deepest few, a lot (a lake) its whole footprint. The first Damp blocks of it only dampen
-/// the ground: thin water running over a slope shows as none.</summary>
+/// <summary>One landmass as the model left it: each column's top floor before and after, the water over it, and its
+/// stream and waterfall (see HeartWorldGenerator.PlaceWater). The first Damp blocks of water only dampen the ground:
+/// thin water running over a slope shows as none.</summary>
 public sealed class Shaped(Land land, float[] startFloor, float[] depth, float[] flow, int[] down, (sbyte X, sbyte Z)[] way,
                            float[] falls, bool[] fed, LandscapeSettings settings)
 {
@@ -208,13 +207,6 @@ public sealed class Shaped(Land land, float[] startFloor, float[] depth, float[]
                 land.Z0 + (int)MathF.Floor((z - land.Z0 + size / 2f) / size) * size);
     }
 
-    /// <summary>How much water (blocks³) the column with its middle at (x, z) has; 0 where there's none.</summary>
-    public float Volume(int x, int z)
-    {
-        int t = TopNodeAt(x, z);
-        return t < 0 ? 0f : Math.Max(0f, depth[t] - settings.Damp) * land.Size * land.Size;
-    }
-
     /// <summary>The level of standing water (deeper than half a block past the damp) in the column with its middle at
     /// (x, z), or NaN.</summary>
     public float Level(int x, int z)
@@ -223,32 +215,13 @@ public sealed class Shaped(Land land, float[] startFloor, float[] depth, float[]
         return t < 0 || depth[t] <= settings.Damp + 0.5f ? float.NaN : land.Floor[t] + depth[t] - settings.Damp;
     }
 
-    /// <summary>The water's surface over the column holding block column (x, z) (blocks), or NaN where it's dry: as
-    /// <see cref="Volume"/>, its water past the damp that wets all ground.</summary>
+    /// <summary>The water's surface over the column holding block column (x, z) (blocks), or NaN where it's dry: its
+    /// water past the damp that wets all ground.</summary>
     public float Surface(int x, int z)
     {
         var (mx, mz) = Middle(x, z);
         int t = TopNodeAt(mx, mz);
         return t < 0 || depth[t] <= settings.Damp ? float.NaN : land.Floor[t] + depth[t] - settings.Damp;
-    }
-
-    /// <summary>The model's water surface (its ground where dry) blended between the four column middles round block
-    /// column (x, z): a surface as smooth as the ground's, sloping with the water. NaN off the landmass.</summary>
-    public float Plane(int x, int z)
-    {
-        int size = land.Size;
-        int i = (int)MathF.Floor((x - land.X0) / (float)size), k = (int)MathF.Floor((z - land.Z0) / (float)size);
-        float fx = (x - land.X0 - i * size) / (float)size, fz = (z - land.Z0 - k * size) / (float)size;
-        float sum = 0, weights = 0;
-        for (int c = 0; c < 4; c++)
-        {
-            int t = TopNodeAt(land.X0 + (i + (c & 1)) * size, land.Z0 + (k + (c >> 1)) * size);
-            if (t < 0) continue;
-            float w = ((c & 1) == 0 ? 1 - fx : fx) * ((c >> 1) == 0 ? 1 - fz : fz);
-            sum += w * (land.Floor[t] + depth[t]);
-            weights += w;
-        }
-        return weights > 1e-4f ? sum / weights : float.NaN;
     }
 
     /// <summary>The top node of the column with its middle at (x, z), or -1.</summary>
