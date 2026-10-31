@@ -361,19 +361,17 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             for (int w = System.Math.Max(Voxel(lo), 0); w <= System.Math.Min(Voxel(hi), S - 1); w++)
             {
                 int y0 = by0 + w * c, y1 = y0 + c - 1, top = System.Math.Min(hi, y1);
-                // (Under water, only a voxel wholly ground below its top: the bed rounds down, so it never stands over
-                // a finer level's bed beside it, where the step would show through the water.)
-                if (2 * (top - System.Math.Max(lo, y0) + 1) >= c && (!under || top == y1))
-                    data.Set(u, w, v, under && y1 > hi - c ? bed : ContinentTerrain.Block(top, hi, strata, patch, bare, biome, dry));
+                if (2 * (top - System.Math.Max(lo, y0) + 1) >= c)
+                    data.Set(u, w, v, under && top >= hi - 1 ? bed : ContinentTerrain.Block(top, hi, strata, patch, bare, biome, dry));
             }
 
-            // Over the top span, water: a voxel at least half under it (the bed's voxel too, which it took, see above).
+            // Over the top span, water: a voxel at least half under it.
             if (s + 1 == spans.Length && WaterTop(water, hi) is var surface && surface > hi)
             {
                 for (int w = System.Math.Max(Voxel(hi + 1), 0); w <= System.Math.Min(Voxel(surface), S - 1); w++)
                 {
                     int y0 = by0 + w * c, y1 = y0 + c - 1;
-                    if (2 * (System.Math.Min(surface, y1) - y0 + 1) >= c && data.Get(u, w, v) == BlockId.Air)
+                    if (2 * (System.Math.Min(surface, y1) - System.Math.Max(hi + 1, y0) + 1) >= c && data.Get(u, w, v) == BlockId.Air)
                         data.Set(u, w, v, BlockId.Water);
                 }
                 continue;
