@@ -25,7 +25,7 @@ public static class BlockMap
             for (int i = 0; i < width; i++)
             {
                 int x = x0 + i, z = z0 + j, n = gen.SpansAt(x, z, spans), c = i + width * j;
-                top[c] = n == 0 ? int.MinValue : spans[n - 1].Hi;
+                top[c] = n == 0 ? int.MinValue : spans[n - 1].Hi - (gen.CarvedAt(x, z) ? 1 : 0);
                 int m = raw.Value!.SpansAt(x, z, spans);
                 before[c] = m == 0 ? int.MinValue : spans[m - 1].Hi;
                 water[c] = n == 0 ? int.MinValue : gen.WaterTopAt(x, z);

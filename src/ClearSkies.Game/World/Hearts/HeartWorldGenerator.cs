@@ -151,6 +151,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             for (int s = 0; s < p.Count(col); s++)
             {
                 var (lo, hi) = p.Spans[p.Start[col] + s];
+                if (p.Carved[col] && s + 1 == p.Count(col)) hi--;
                 int y0 = System.Math.Max(lo, originY), y1 = System.Math.Min(hi, originY + S - 1);
                 for (int y = y0; y <= y1; y++)
                     data.Set(lx, y - originY, lz, ContinentTerrain.Block(y, hi, p.Strata[col], p.Patch[col], p.Bare[p.Start[col] + s], p.Biome[p.Start[col] + s], p.Dry[p.Start[col] + s]));
@@ -581,6 +582,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         Array.Fill(p.Water, int.MinValue);
         Array.Fill(p.WaterHeight, (byte)8);
         Array.Fill(p.FallTop, int.MinValue);
+        Array.Clear(p.Carved);
         if (shaped == null) return;
         // Worked out over the chunk column and Pad blocks round it (see Settle), in _pad*.
         Span<(short Lo, short Hi)> spans = stackalloc (short, short)[MaxSpans];
@@ -590,6 +592,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         Array.Fill(_padWater, int.MinValue);
         Array.Fill(_padHeight, (byte)8);
         Array.Fill(_padFall, int.MinValue);
+        Array.Clear(_padCarve);
         PlaceStanding(p, shaped, x0, z0);
         PlaceStreams(shaped, x0, z0);
         PlaceFalls(p, shaped, x0, z0);
@@ -600,6 +603,11 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             int col = lx + S * lz, at = PadAt(lx, lz);
             p.Water[col] = _padWater[at];
             p.WaterHeight[col] = _padHeight[at];
+            // A stream sinks a block into its bed, so it runs in a trench level with the ground beside it.
+            int count = p.Count(col);
+            p.Carved[col] = _padCarve[at] && _padWater[at] > _padTop[at] && count > 0
+                            && p.Spans[p.Start[col] + count - 1].Hi > p.Spans[p.Start[col] + count - 1].Lo;
+            if (p.Carved[col]) p.Water[col]--;
         }
     }
 
@@ -610,6 +618,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
     private readonly int[] _padTop = new int[PadSide * PadSide], _padWater = new int[PadSide * PadSide],
                            _padFall = new int[PadSide * PadSide], _padSettled = new int[PadSide * PadSide];
     private readonly byte[] _padHeight = new byte[PadSide * PadSide];
+    private readonly bool[] _padCarve = new bool[PadSide * PadSide];
     private static int PadAt(int lx, int lz) => lx + Pad + PadSide * (lz + Pad);
 
     /// <summary>Water settles: none stands more than a block deep over a dry neighbour's ground, where it would run
@@ -750,9 +759,10 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
     /// <summary>Each landscape column's stream (see <see cref="Shaped.Stream"/>): its surface runs a block over the
     /// ground along the line from its middle to the middle of the column it runs to, and every block column near the
     /// line whose ground is under that surface fills to it, Deep blocks deep at most (out to half a column past its
-    /// width: the stream fills its bed). Within its width, ground standing over the surface by less than Hump gets a film, so the stream runs on
-    /// over it. Columns are wider than creeks, so a creek's water spreads too thin over one to fill blocks by its volume:
-    /// this draws it.</summary>
+    /// width: the stream fills its bed). Within its width, ground standing over the surface by less than Hump gets a
+    /// block of water too, so the stream runs on over it, and the bed sinks a block (see PlaceWater). Whole blocks only:
+    /// a stream steps down with the ground. Columns are wider than creeks, so a creek's water spreads too thin over one
+    /// to fill blocks by its volume: this draws it.</summary>
     private void PlaceStreams(Shaped shaped, int x0, int z0)
     {
         const float Hump = 4f, Wander = 2f;
@@ -780,21 +790,13 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
                 if (off2 > fill * fill) continue;
                 int col = PadAt(lx, lz), top = _padTop[col];
                 if (top == int.MinValue) continue;
-                // (The top block's height in eighths, so it runs down smoothly instead of in steps.)
                 float surface = from + t * (to - from) + 1f;
-                int water, height;
-                if (top + 1 < surface)
-                {
-                    water = Math.Min((int)MathF.Ceiling(surface) - 1, top + Deep);
-                    height = water < (int)MathF.Ceiling(surface) - 1 ? 8 : Math.Clamp((int)MathF.Round((surface - water) * 8), 1, 8);
-                }
-                else if (off2 <= half * half && top + 1 - surface <= Hump - 1) { water = top + 1; height = 1; }
+                int water;
+                if (top + 1 < surface) water = Math.Min((int)MathF.Ceiling(surface) - 1, top + Deep);
+                else if (off2 <= half * half && top + 1 - surface <= Hump - 1) water = top + 1;
                 else continue;
-                if (water > _padWater[col] || (water == _padWater[col] && height > _padHeight[col]))
-                {
-                    _padWater[col] = water;
-                    _padHeight[col] = (byte)height;
-                }
+                if (off2 <= half * half) _padCarve[col] = true;
+                if (water > _padWater[col]) { _padWater[col] = water; _padHeight[col] = 8; }
             }
         }
     }
@@ -831,6 +833,13 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
     {
         Prepare(x >> 5, z >> 5);
         return _profile!.Water[(x & (S - 1)) + S * (z & (S - 1))];
+    }
+
+    /// <summary>Whether a stream sank block column (x, z)'s top block (see PlaceWater).</summary>
+    public bool CarvedAt(int x, int z)
+    {
+        Prepare(x >> 5, z >> 5);
+        return _profile!.Carved[(x & (S - 1)) + S * (z & (S - 1))];
     }
 
     /// <summary>The waterfall in block column (x, z), as Generate places it (see PlaceFalls): its top and bottom water
@@ -1096,6 +1105,8 @@ public sealed class ColumnProfile
     public readonly byte[] WaterHeight = new byte[Columns];
     /// <summary>Per block column, falling water over the land's edge: from FallBottom up to FallTop (none if under).</summary>
     public readonly int[] FallTop = new int[Columns], FallBottom = new int[Columns];
+    /// <summary>Per block column, whether a stream sank its top span's top block (see PlaceWater).</summary>
+    public readonly bool[] Carved = new bool[Columns];
 
     public int Count(int col) => Start[col + 1] - Start[col];
 
