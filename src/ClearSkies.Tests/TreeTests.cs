@@ -48,6 +48,7 @@ public class TreeTests
         Assert.Equal(Biome.Tundra, Biomes.Pick(0.05f, 0.5f));
         Assert.Equal(Biome.Steppe, Biomes.Pick(0.15f, 0.05f));
         Assert.Equal(Biome.Jungle, Biomes.Pick(1.05f, 0.8f));
+        Assert.Equal(Biome.Savanna, Biomes.Pick(0.9f, 0.575f)); // halfway from desert to jungle
         Assert.Equal(Biome.Volcanic, Biomes.Pick(1.4f, 0.3f));
 
         Assert.Equal(BlockId.SnowyDirt, ContinentTerrain.Block(600, 600, 0f, 0.2f, 0f, Biome.Tundra));

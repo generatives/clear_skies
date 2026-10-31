@@ -174,7 +174,7 @@ public sealed class ContinentTerrain
     /// height (whether it is the terrain surface or a support's own top; those are to be decorated differently
     /// later), then rock layers (<paramref name="strata"/> from <see cref="Strata"/>, <paramref name="patch"/> from
     /// <see cref="Patch"/>). <paramref name="bare"/>, 0-1, is how little the top is out in the open. Deserts are sand,
-    /// badlands red sand over red rock, tundra grass among snowy dirt and ice, steppe grass among gravel and the
+    /// badlands red sand over red rock, savanna dry grass among bare earth, tundra grass among snowy dirt and ice, steppe grass among gravel and the
     /// volcanic wastes ash with pools of lava (see <see cref="Biomes"/>), all under the same snow and bare rock up
     /// high; jungle has temperate ground.</summary>
     public static BlockId Block(int y, int top, float strata, float patch, float bare, Biome biome = Biome.Temperate, float dry = 0f)
@@ -198,6 +198,12 @@ public sealed class ContinentTerrain
         else if (!rocky && biome == Biome.Steppe)
         {
             if (depth == 0) return patch < 0.35f ? BlockId.Gravel : BlockId.Grass;
+            if (depth < 3) return BlockId.Dirt;
+        }
+        else if (!rocky && biome == Biome.Savanna)
+        {
+            // Dry grass among patches of bare earth.
+            if (depth == 0) return patch < 0.3f ? BlockId.Dirt : BlockId.Grass;
             if (depth < 3) return BlockId.Dirt;
         }
         else if (!rocky && biome == Biome.Volcanic)

@@ -1,11 +1,11 @@
 namespace ClearSkies.Game.Generation;
 
 /// <summary>What the land on a top is like (see <see cref="Biomes"/>).</summary>
-public enum Biome : byte { Temperate, Autumn, Desert, Badlands, Tundra, Steppe, Jungle, Volcanic }
+public enum Biome : byte { Temperate, Autumn, Desert, Badlands, Tundra, Steppe, Jungle, Volcanic, Savanna }
 
 /// <summary>
 /// Biomes by climate: each sits at a point of heat and wetness, and a top takes the nearest. Heat goes mostly by
-/// height, cold up high and hot deep down (the underworld's caves run to desert, badlands, jungle and, deepest, volcanic wastes; the heights to tundra and steppe), shifted by a broad
+/// height, cold up high and hot deep down (the underworld's caves run to desert, savanna, badlands, jungle and, deepest, volcanic wastes; the heights to tundra and steppe), shifted by a broad
 /// regional field (see <see cref="ContinentTerrain.Heat"/>); wetness is the region's rain, raised near the water the
 /// landscape left (see <see cref="Wet"/>), so the land is green where water runs and dry where none does. Snow and bare rock still come with height, over whatever biome is there.
 ///
@@ -26,6 +26,8 @@ public static class Biomes
         (Biome.Steppe,    0.15f, 0.05f, 0.72f, 0.68f, 0.36f, 0.75f),
         (Biome.Jungle,    1.05f, 0.80f, 0.12f, 0.62f, 0.12f, 0.6f),
         (Biome.Volcanic,  1.35f, 0.30f, 0.45f, 0.42f, 0.36f, 0.6f),
+        // (Between desert and jungle, so the one doesn't border the other.)
+        (Biome.Savanna,   0.95f, 0.50f, 0.80f, 0.72f, 0.30f, 0.7f),
     };
 
     /// <summary>How far apart in the climate (squared) biomes' tints mix over.</summary>
