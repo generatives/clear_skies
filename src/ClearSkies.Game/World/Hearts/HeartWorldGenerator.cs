@@ -587,7 +587,67 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         Array.Fill(p.WaterHeight, (byte)8);
         Array.Fill(p.FallTop, int.MinValue);
         if (shaped == null) return;
-        int size = shaped.Size, half = size / 2, corners = S / size + 1;
+        // Worked out over the chunk column and Pad blocks round it (see Settle), in _pad*.
+        Span<(short Lo, short Hi)> spans = stackalloc (short, short)[MaxSpans];
+        for (int lz = -Pad; lz < S + Pad; lz++)
+        for (int lx = -Pad; lx < S + Pad; lx++)
+            _padTop[PadAt(lx, lz)] = TopAt(p, x0, z0, lx, lz, spans);
+        Array.Fill(_padWater, int.MinValue);
+        Array.Fill(_padHeight, (byte)8);
+        Array.Fill(_padFall, int.MinValue);
+        PlaceStanding(p, shaped, x0, z0);
+        PlaceStreams(shaped, x0, z0);
+        PlaceFalls(p, shaped, x0, z0);
+        Settle();
+        for (int lz = 0; lz < S; lz++)
+        for (int lx = 0; lx < S; lx++)
+        {
+            int col = lx + S * lz, at = PadAt(lx, lz);
+            p.Water[col] = _padWater[at];
+            p.WaterHeight[col] = _padHeight[at];
+        }
+    }
+
+    // While a column's water is placed (see PlaceWater): per block column over it and Pad round it, its top block, top
+    // water block (int.MinValue for none) and that block's height in eighths, and the top of any waterfall in it.
+    private const int Pad = 2, PadSide = S + 2 * Pad;
+    private const byte Thin = 2;
+    private readonly int[] _padTop = new int[PadSide * PadSide], _padWater = new int[PadSide * PadSide],
+                           _padFall = new int[PadSide * PadSide], _padSettled = new int[PadSide * PadSide];
+    private readonly byte[] _padHeight = new byte[PadSide * PadSide];
+    private static int PadAt(int lx, int lz) => lx + Pad + PadSide * (lz + Pad);
+
+    /// <summary>Water settles: none stands more than a block deep over a dry neighbour's ground, where it would run
+    /// off: it sinks to that ground, or to a thin film (Thin eighths) running over its own. Pad rounds, each reaching a
+    /// block further, so the chunk column's own blocks come out the same as its neighbours' do.</summary>
+    private void Settle()
+    {
+        for (int round = 0; round < Pad; round++)
+        {
+            Array.Copy(_padWater, _padSettled, _padWater.Length);
+            for (int z = round + 1; z < PadSide - round - 1; z++)
+            for (int x = round + 1; x < PadSide - round - 1; x++)
+            {
+                int c = x + PadSide * z, top = _padTop[c], water = _padWater[c];
+                if (top == int.MinValue || water <= top) continue;
+                foreach (int d in (ReadOnlySpan<int>)[c - 1, c + 1, c - PadSide, c + PadSide])
+                {
+                    bool wet = _padTop[d] != int.MinValue && _padWater[d] > _padTop[d] || _padFall[d] >= water;
+                    if (!wet && _padTop[d] < water) water = System.Math.Max(_padTop[d], top + 1);
+                }
+                if (water == _padWater[c]) continue;
+                _padSettled[c] = water;
+                _padHeight[c] = water == top + 1 ? Thin : (byte)8;
+            }
+            Array.Copy(_padSettled, _padWater, _padWater.Length);
+        }
+    }
+
+    /// <summary>Each landscape column's water by its volume, as the model left it (see Shaped.Volume, Shaped.Plane).</summary>
+    private void PlaceStanding(ColumnProfile p, Shaped shaped, int x0, int z0)
+    {
+        // Corners (column middles) from one column before the chunk column to one after, so the pad has its own.
+        int size = shaped.Size, half = size / 2, corners = S / size + 3;
         Span<float> ground = stackalloc float[size * size];
         Span<float> offsets = stackalloc float[corners * corners];
         Span<float> depths = stackalloc float[corners * corners];
@@ -599,7 +659,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         for (int k = 0; k < corners; k++)
         for (int i = 0; i < corners; i++)
         {
-            int mx = i * size, mz = k * size;
+            int mx = (i - 1) * size, mz = (k - 1) * size;
             float volume = shaped.Volume(x0 + mx, z0 + mz);
             int n = 0;
             for (int dz = -half; dz < half; dz++)
@@ -624,28 +684,26 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             depths[i + corners * k] = volume / (size * size);
             if (volume > 0f) wet[i + corners * k] = any = true;
         }
+        if (!any) return;
         // Each block column's water: the surface plus its corners' offsets, blended between them as the ground is.
-        for (int lz = 0; lz < S && any; lz++)
-        for (int lx = 0; lx < S; lx++)
+        for (int lz = -Pad; lz < S + Pad; lz++)
+        for (int lx = -Pad; lx < S + Pad; lx++)
         {
-            int i = lx / size, k = lz / size, c = i + corners * k;
+            int i = (lx + size) / size, k = (lz + size) / size, c = i + corners * k; // (corner i is at (i - 1) size)
             if (!wet[c] && !wet[c + 1] && !wet[c + corners] && !wet[c + corners + 1]) continue;
-            int col = lx + S * lz, count = p.Count(col);
-            if (count == 0) continue;
-            float fx = (lx - i * size) / (float)size, fz = (lz - k * size) / (float)size;
+            int at = PadAt(lx, lz), top = _padTop[at];
+            if (top == int.MinValue) continue;
+            float fx = (lx - (i - 1) * size) / (float)size, fz = (lz - (k - 1) * size) / (float)size;
             float offset = (1 - fz) * ((1 - fx) * offsets[c] + fx * offsets[c + 1])
                          + fz * ((1 - fx) * offsets[c + corners] + fx * offsets[c + corners + 1]);
             // (No deeper than its deepest corner's water: where the ground drops off between corners, as at a cliff,
             // the blended surface stands far over it.)
-            int top = p.Spans[p.Start[col] + count - 1].Hi;
             float deepest = MathF.Max(MathF.Max(depths[c], depths[c + 1]), MathF.Max(depths[c + corners], depths[c + corners + 1]));
             float surface = MathF.Min(shaped.Plane(x0 + lx, z0 + lz) + offset, top + 1 + deepest);
             if (float.IsNaN(surface)) continue;
             int water = (int)MathF.Floor(surface - 0.5f);
-            if (water > top) p.Water[col] = water;
+            if (water > top) _padWater[at] = water;
         }
-        PlaceStreams(p, shaped, x0, z0);
-        PlaceFalls(p, shaped, x0, z0);
     }
 
     /// <summary>Each landscape column's waterfall (see <see cref="Shaped.Fall"/>): as wide as its stream, in the first
@@ -653,8 +711,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
     private void PlaceFalls(ColumnProfile p, Shaped shaped, int x0, int z0)
     {
         int size = shaped.Size;
-        for (int mz = -size; mz <= S + size; mz += size)
-        for (int mx = -size; mx <= S + size; mx += size)
+        for (int mz = -2 * size; mz <= S + 2 * size; mz += size)
+        for (int mx = -2 * size; mx <= S + 2 * size; mx += size)
         {
             var (width, dx, dz, surface, floor, bottom) = shaped.Fall(x0 + mx, z0 + mz);
             float half = MathF.Min(width, size) / 2;
@@ -667,6 +725,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
                 if (PastLip(x0 + mx + 0.5f - uz * o, z0 + mz + 0.5f + ux * o, ux, uz, top, floor, bottom, size,
                             (x, z) => TopAt(p, x0, z0, x - x0, z - z0, _fallSpans)) is not var (x, z, low)) continue;
                 int lx = x - x0, lz = z - z0;
+                if (lx < -Pad || lz < -Pad || lx >= S + Pad || lz >= S + Pad) continue;
+                _padFall[PadAt(lx, lz)] = Math.Max(_padFall[PadAt(lx, lz)], top);
                 if (lx < 0 || lz < 0 || lx >= S || lz >= S) continue;
                 int col = lx + S * lz;
                 p.FallTop[col] = Math.Max(p.FallTop[col], top);
@@ -732,49 +792,54 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
     /// <summary>Each landscape column's stream (see <see cref="Shaped.Stream"/>): a block deep over the ground along the
     /// line from its middle to the middle of the column it runs to, as wide as its flow keeps it. Columns are wider
     /// than creeks, so a creek's water spreads too thin over one to fill blocks by its volume: this draws it.</summary>
-    private void PlaceStreams(ColumnProfile p, Shaped shaped, int x0, int z0)
+    private void PlaceStreams(Shaped shaped, int x0, int z0)
     {
+        const float Hump = 4f, Steep = 0.5f, Wander = 2f;
         int size = shaped.Size;
-        for (int mz = -size; mz <= S + size; mz += size)
-        for (int mx = -size; mx <= S + size; mx += size)
+        for (int mz = -2 * size; mz <= S + 2 * size; mz += size)
+        for (int mx = -2 * size; mx <= S + 2 * size; mx += size)
         {
-            var (width, toX, toZ, from, to) = shaped.Stream(x0 + mx, z0 + mz);
+            var (width, toX, toZ, from, to, head) = shaped.Stream(x0 + mx, z0 + mz);
             float half = MathF.Min(width, size) / 2;
             if (half < 0.5f) continue;
             // Along the line between the two middles (block centres), each block column within half the width of it,
-            // or half a column more where its ground lies under the stream's surface (the stream fills its bed).
-            float reach = half + size / 2f;
+            // or half a column more where its ground lies under the stream's surface (the stream fills its bed). Where
+            // it starts, it widens from nothing; and it wanders up to Wander blocks either side of the straight line.
+            float reach = half + size / 2f + Wander;
             float ax = mx + 0.5f, az = mz + 0.5f, dx = toX - x0 + 0.5f - ax, dz = toZ - z0 + 0.5f - az, length2 = dx * dx + dz * dz;
-            int lx0 = Math.Max(0, (int)MathF.Floor(MathF.Min(ax, ax + dx) - reach)), lx1 = Math.Min(S - 1, (int)MathF.Ceiling(MathF.Max(ax, ax + dx) + reach));
-            int lz0 = Math.Max(0, (int)MathF.Floor(MathF.Min(az, az + dz) - reach)), lz1 = Math.Min(S - 1, (int)MathF.Ceiling(MathF.Max(az, az + dz) + reach));
+            bool steep = MathF.Abs(from - to) > Steep * MathF.Sqrt(length2);
+            int lx0 = Math.Max(-Pad, (int)MathF.Floor(MathF.Min(ax, ax + dx) - reach)), lx1 = Math.Min(S + Pad - 1, (int)MathF.Ceiling(MathF.Max(ax, ax + dx) + reach));
+            int lz0 = Math.Max(-Pad, (int)MathF.Floor(MathF.Min(az, az + dz) - reach)), lz1 = Math.Min(S + Pad - 1, (int)MathF.Ceiling(MathF.Max(az, az + dz) + reach));
             for (int lz = lz0; lz <= lz1; lz++)
             for (int lx = lx0; lx <= lx1; lx++)
             {
-                float px = lx + 0.5f - ax, pz = lz + 0.5f - az;
+                float wx = x0 + lx, wz = z0 + lz;
+                float px = lx + 0.5f + Wander * _crack.GetNoise(wx * 2.5f, wz * 2.5f) - ax;
+                float pz = lz + 0.5f + Wander * _crack.GetNoise(wx * 2.5f + 1000f, wz * 2.5f) - az;
                 float t = Math.Clamp((px * dx + pz * dz) / length2, 0f, 1f);
                 float ox = px - t * dx, oz = pz - t * dz, off2 = ox * ox + oz * oz;
-                if (off2 > reach * reach) continue;
-                int col = lx + S * lz, count = p.Count(col);
-                if (count == 0) continue;
-                int top = p.Spans[p.Start[col] + count - 1].Hi;
+                float side = head ? half * t : half, fill = side + size / 2f;
+                if (off2 > fill * fill) continue;
+                int col = PadAt(lx, lz), top = _padTop[col];
+                if (top == int.MinValue) continue;
                 // The stream's surface: a block over the line's ground, sloping with it (its top block's height in
                 // eighths, so it runs down smoothly instead of in steps). Ground in the middle that stands over it, up to
                 // Hump (the ground between columns is blended, so it rises a little over the line in places), gets a
-                // film of water so the stream runs on over it.
-                const float Hump = 4f;
+                // film of water so the stream runs on over it. Down a steep slope it's a block deep at most.
                 float surface = from + t * (to - from) + 1f;
                 int water, height;
                 if (top + 1 < surface)
                 {
-                    water = Math.Min(top + 2, (int)MathF.Ceiling(surface) - 1);
-                    height = water == top + 2 ? 8 : Math.Clamp((int)MathF.Round((surface - water) * 8), 1, 8);
+                    water = Math.Min(steep ? top + 1 : top + 2, (int)MathF.Ceiling(surface) - 1);
+                    height = water < (int)MathF.Ceiling(surface) - 1 ? 8 : Math.Clamp((int)MathF.Round((surface - water) * 8), 1, 8);
+                    if (steep) height = (byte)Math.Min(height, 4);
                 }
-                else if (off2 <= half * half && top + 1 - surface <= Hump - 1) { water = top + 1; height = 1; }
+                else if (off2 <= side * side && top + 1 - surface <= Hump - 1) { water = top + 1; height = 1; }
                 else continue;
-                if (water > p.Water[col] || (water == p.Water[col] && height > p.WaterHeight[col]))
+                if (water > _padWater[col] || (water == _padWater[col] && height > _padHeight[col]))
                 {
-                    p.Water[col] = water;
-                    p.WaterHeight[col] = (byte)height;
+                    _padWater[col] = water;
+                    _padHeight[col] = (byte)height;
                 }
             }
         }

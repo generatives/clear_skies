@@ -115,11 +115,15 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
             bool wide = MathF.Sqrt(shown[n] / least) >= settings.Size / 2f;
             if (!Shown(to) && !(wide && (Shown(beside[to].A) || Shown(beside[to].B))) && !Standing(to)) shown[n] = 0;
         }
+        // Streams nothing shown runs into start there (see Shaped.Stream).
+        var fed = new bool[land.Nodes];
+        for (int n = 0; n < land.Nodes; n++)
+            if (Shown(n) && next[n] >= 0) fed[next[n]] = true;
         // Water falls over the edge where a shown stream or standing water leaves the land.
         var falls = new float[land.Nodes];
         for (int n = 0; n < land.Nodes; n++)
             if (Falls(n) && (shown[n] >= least || Standing(n))) falls[n] = Math.Max(shown[n], flow[n]);
-        return new Shaped(land, start, pipes.Depth, shown, next, way, falls, settings);
+        return new Shaped(land, start, pipes.Depth, shown, next, way, falls, fed, settings);
     }
 
     /// <summary>A landmass's bounds (blocks, on 32-block lines): where its own ground can be, found on a coarse grid
@@ -144,12 +148,12 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
 /// HeartWorldGenerator.PlaceWater): a little (a creek) fills only the deepest few, a lot (a lake) its whole footprint. The first Damp blocks of it only dampen
 /// the ground: thin water running over a slope shows as none.</summary>
 public sealed class Shaped(Land land, float[] startFloor, float[] depth, float[] flow, int[] down, (sbyte X, sbyte Z)[] way,
-                           float[] falls, LandscapeSettings settings)
+                           float[] falls, bool[] fed, LandscapeSettings settings)
 {
     /// <summary>The stream of the column with its middle at (x, z): how wide it runs (sqrt(flow / StreamFlow) blocks;
-    /// 0 for none), the middle of the column it runs to, and the ground at both ends. A stream that runs over the land's
-    /// edge runs on level to the middle of the column past it.</summary>
-    public (float Width, int ToX, int ToZ, float From, float To) Stream(int x, int z)
+    /// 0 for none), the middle of the column it runs to, the ground at both ends, and whether it starts there (no shown
+    /// stream runs into it). A stream that runs over the land's edge runs on level to the middle of the column past it.</summary>
+    public (float Width, int ToX, int ToZ, float From, float To, bool Head) Stream(int x, int z)
     {
         int t = TopNodeAt(x, z);
         if (t < 0 || settings.StreamFlow <= 0 || flow[t] <= 0f) return default;
@@ -157,9 +161,9 @@ public sealed class Shaped(Land land, float[] startFloor, float[] depth, float[]
         int cx = land.X0 + c % land.Nx * size, cz = land.Z0 + c / land.Nx * size;
         float width = MathF.Sqrt(flow[t] / settings.StreamFlow);
         if (down[t] < 0)
-            return way[t] == (0, 0) ? default : (width, cx + way[t].X * size, cz + way[t].Z * size, land.Floor[t], land.Floor[t]);
+            return way[t] == (0, 0) ? default : (width, cx + way[t].X * size, cz + way[t].Z * size, land.Floor[t], land.Floor[t], !fed[t]);
         int to = down[t], d = land.ColumnOf[to];
-        return (width, land.X0 + d % land.Nx * size, land.Z0 + d / land.Nx * size, land.Floor[t], land.Floor[to]);
+        return (width, land.X0 + d % land.Nx * size, land.Z0 + d / land.Nx * size, land.Floor[t], land.Floor[to], !fed[t]);
     }
 
     /// <summary>The waterfall over the land's edge from the column with its middle at (x, z): how wide it is (as a

@@ -57,7 +57,7 @@ public static class BlockMap
             else { rgb[o] = (byte)(g * 0.95); rgb[o + 1] = (byte)g; rgb[o + 2] = (byte)(g * 0.8); }
         }
         // Water standing over a dry neighbour's ground: water that would run off.
-        int hanging = 0, thin = 0;
+        int hanging = 0, thin = 0, walls = 0;
         for (int j = 1; j < width - 1; j++)
         for (int i = 1; i < width - 1; i++)
         {
@@ -66,7 +66,7 @@ public static class BlockMap
             bool hangs = false;
             foreach (int d in new[] { c - 1, c + 1, c - width, c + width })
                 if (top[d] != int.MinValue && water[d] <= top[d] && top[d] < water[c]) hangs = true;
-            if (hangs) { hanging++; if (water[c] - top[c] == 1) thin++; }
+            if (hangs) { hanging++; if (water[c] - top[c] == 1) thin++; else walls++; }
         }
         // Distant terrain's water (see HeartWorldGenerator.GenerateCoarse): each column's water over its own top.
         int farWet = 0, farLand = 0, lone = 0, fw = width / 4;
@@ -90,7 +90,24 @@ public static class BlockMap
             heights.Sort();
             Console.WriteLine($"Waterfalls: {falls:N0} block columns, {fallBlocks:N0} water blocks" + (falls > 0 ? $", height median {heights[falls / 2]}, most {heights[^1]}" : ""));
         }
-        Console.WriteLine($"Hanging water columns: {hanging:N0} ({thin:N0} of them 1 block deep)");
+        {
+            // Steps in the water's surface between neighbouring wet columns, by where they fall against the 8-block
+            // lines of the landscape's columns (even spread: 12.5% each).
+            var phase = new int[8]; int steps = 0, big = 0;
+            for (int j = 0; j < width - 1; j++)
+            for (int i = 0; i < width - 1; i++)
+            {
+                int c = i + width * j;
+                if (top[c] == int.MinValue || water[c] <= top[c]) continue;
+                foreach (var (d, ph) in new[] { (c + 1, (x0 + i) & 7), (c + width, (z0 + j) & 7) })
+                {
+                    if (top[d] == int.MinValue || water[d] <= top[d] || water[d] == water[c]) continue;
+                    steps++; phase[ph]++; if (Math.Abs(water[d] - water[c]) >= 2) big++;
+                }
+            }
+            Console.WriteLine($"Water surface steps: {steps:N0} ({big:N0} of 2 or more); by 8-block phase: " + string.Join(" ", phase.Select(v => $"{100.0 * v / Math.Max(1, steps):0.0}")));
+        }
+        Console.WriteLine($"Hanging water columns: {hanging:N0} ({thin:N0} of them 1 block deep, {walls:N0} deeper)");
         var depths = new List<int>();
         for (int c = 0; c < top.Length; c++) if (top[c] != int.MinValue && water[c] > top[c]) depths.Add(water[c] - top[c]);
         depths.Sort();
