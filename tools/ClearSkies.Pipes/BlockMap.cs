@@ -54,6 +54,19 @@ public static class BlockMap
             }
             else { rgb[o] = (byte)(g * 0.95); rgb[o + 1] = (byte)g; rgb[o + 2] = (byte)(g * 0.8); }
         }
+        // Water standing over a dry neighbour's ground: water that would run off.
+        int hanging = 0, thin = 0;
+        for (int j = 1; j < width - 1; j++)
+        for (int i = 1; i < width - 1; i++)
+        {
+            int c = i + width * j;
+            if (top[c] == int.MinValue || water[c] <= top[c]) continue;
+            bool hangs = false;
+            foreach (int d in new[] { c - 1, c + 1, c - width, c + width })
+                if (top[d] != int.MinValue && water[d] <= top[d] && top[d] < water[c]) hangs = true;
+            if (hangs) { hanging++; if (water[c] - top[c] == 1) thin++; }
+        }
+        Console.WriteLine($"Hanging water columns: {hanging:N0} ({thin:N0} of them 1 block deep)");
         var depths = new List<int>();
         for (int c = 0; c < top.Length; c++) if (top[c] != int.MinValue && water[c] > top[c]) depths.Add(water[c] - top[c]);
         depths.Sort();

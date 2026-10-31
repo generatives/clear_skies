@@ -74,14 +74,32 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
             int di = d % land.Nx - i, dj = d / land.Nx - j;
             beside[n] = (TopAt(i - dj, j + di), TopAt(i + dj, j - di));
         }
-        // (Standing water beside it shows as water anyway, so it doesn't count: a creek running down beside a lake shows.)
-        float FlowOf(int m) => m < 0 || pipes.Depth[m] > settings.Damp + 0.5f ? 0f : flow[m];
+        float FlowOf(int m) => m < 0 ? 0f : flow[m];
         for (int n = 0; n < land.Nodes; n++)
         {
             var (a, b) = beside[n];
             // The middle of the water running beside it, it carries that water too (a river spread over a few columns
             // shows as one, as wide as all of them).
             if (down[n] >= 0 && flow[n] > FlowOf(a) && flow[n] >= FlowOf(b)) shown[n] = flow[n] + FlowOf(a) + FlowOf(b);
+        }
+        // A shown stream carries on to whichever of the three columns ahead of it (its way and either side of it) carries
+        // most, until it reaches standing water (highest first, so it carries on from each column it reaches): where its
+        // water fans out, or a lake's edge carries the lake's water too, it still runs on to the water.
+        bool Standing(int m) => pipes.Depth[m] > settings.Damp + 0.5f;
+        var next = (int[])down.Clone();
+        foreach (int n in Enumerable.Range(0, land.Nodes).Where(n => down[n] >= 0).OrderByDescending(n => land.Floor[n]))
+        {
+            if (shown[n] <= 0 || Standing(down[n])) continue;
+            int c = land.ColumnOf[n], d = land.ColumnOf[down[n]], i = c % land.Nx, j = c / land.Nx;
+            int di = d % land.Nx - i, dj = d / land.Nx - j;
+            int best = down[n];
+            foreach (var (si, sj) in new[] { (Math.Clamp(di - dj, -1, 1), Math.Clamp(dj + di, -1, 1)), (Math.Clamp(di + dj, -1, 1), Math.Clamp(dj - di, -1, 1)) })
+            {
+                int m = TopAt(i + si, j + sj);
+                if (m >= 0 && (Standing(m) || flow[m] > flow[best]) && !Standing(best)) best = m;
+            }
+            next[n] = best;
+            if (!Standing(best) && shown[best] == 0 && down[best] >= 0) shown[best] = flow[best];
         }
         // ...and only where it runs on into water or another shown stream (lowest first, so what it runs to is
         // settled): a stream that shows ends in water, not in a dash on a slope.
@@ -90,13 +108,13 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
         bool Shown(int m) => m >= 0 && shown[m] >= least;
         foreach (int n in lowest)
         {
-            int to = down[n];
+            int to = next[n];
             // (A stream half a column wide or more spreads over the columns beside its way too: running on into one of
             // those does.)
             bool wide = MathF.Sqrt(shown[n] / least) >= settings.Size / 2f;
-            if (!Shown(to) && !(wide && (Shown(beside[to].A) || Shown(beside[to].B))) && pipes.Depth[to] <= settings.Damp + 0.5f) shown[n] = 0;
+            if (!Shown(to) && !(wide && (Shown(beside[to].A) || Shown(beside[to].B))) && !Standing(to)) shown[n] = 0;
         }
-        return new Shaped(land, start, pipes.Depth, shown, down, settings);
+        return new Shaped(land, start, pipes.Depth, shown, next, settings);
     }
 
     /// <summary>A landmass's bounds (blocks, on 32-block lines): where its own ground can be, found on a coarse grid
