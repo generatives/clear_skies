@@ -14,7 +14,7 @@ public static class BlockMap
         landscape?.At(x0 + width / 2, z0 + width / 2); // worked out up front, so the timing below is just the blocks
         Console.WriteLine($"Landscape ready in {sw.Elapsed.TotalSeconds:0.0} s");
         sw.Restart();
-        var top = new int[width * width]; var water = new int[width * width]; var before = new int[width * width];
+        var top = new int[width * width]; var water = new int[width * width]; var fall = new (int Top, int Bottom)[width * width]; var before = new int[width * width];
         var raw = new ThreadLocal<HeartWorldGenerator>(() => new HeartWorldGenerator(seed));
         var generators = new ThreadLocal<HeartWorldGenerator>(() => new HeartWorldGenerator(seed, null, landscape));
         Parallel.For(0, (width + 31) / 32, band =>
@@ -29,6 +29,7 @@ public static class BlockMap
                 int m = raw.Value!.SpansAt(x, z, spans);
                 before[c] = m == 0 ? int.MinValue : spans[m - 1].Hi;
                 water[c] = n == 0 ? int.MinValue : gen.WaterTopAt(x, z);
+                fall[c] = gen.FallAt(x, z);
             }
         });
         var rgb = new byte[width * width * 3];
@@ -37,6 +38,7 @@ public static class BlockMap
         for (int i = 0; i < width; i++)
         {
             int c = i + width * j, o = c * 3;
+            if (fall[c].Top != int.MinValue && fall[c].Top >= fall[c].Bottom) { rgb[o] = 255; rgb[o + 1] = 60; rgb[o + 2] = 200; continue; }
             if (top[c] == int.MinValue) { rgb[o] = 18; rgb[o + 1] = 22; rgb[o + 2] = 34; continue; }
             land++;
             int Hat(int di, int dj)
@@ -82,6 +84,12 @@ public static class BlockMap
         for (int i = 1; i < fw - 1; i++)
             if (farWater[i + fw * j] && !farWater[i - 1 + fw * j] && !farWater[i + 1 + fw * j] && !farWater[i + fw * (j - 1)] && !farWater[i + fw * (j + 1)]) lone++;
         Console.WriteLine($"Distant terrain (4-block voxels) water over {100.0 * farWet / Math.Max(1, farLand):0.0}% of land, {100.0 * lone / Math.Max(1, farWet):0.0}% of it lone voxels");
+        {
+            int falls = 0; long fallBlocks = 0; var heights = new List<int>();
+            foreach (var f in fall) if (f.Top != int.MinValue && f.Top >= f.Bottom) { falls++; fallBlocks += f.Top - f.Bottom + 1; heights.Add(f.Top - f.Bottom + 1); }
+            heights.Sort();
+            Console.WriteLine($"Waterfalls: {falls:N0} block columns, {fallBlocks:N0} water blocks" + (falls > 0 ? $", height median {heights[falls / 2]}, most {heights[^1]}" : ""));
+        }
         Console.WriteLine($"Hanging water columns: {hanging:N0} ({thin:N0} of them 1 block deep)");
         var depths = new List<int>();
         for (int c = 0; c < top.Length; c++) if (top[c] != int.MinValue && water[c] > top[c]) depths.Add(water[c] - top[c]);

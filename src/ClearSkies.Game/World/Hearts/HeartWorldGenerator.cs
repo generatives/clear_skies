@@ -185,6 +185,15 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             }
         }
 
+        // Waterfalls over the land's edge (see PlaceFalls), in the open.
+        for (int col = 0; col < S * S; col++)
+        {
+            int lx = col % S, lz = col / S;
+            for (int y = System.Math.Max(p.FallBottom[col], originY); y <= System.Math.Min(p.FallTop[col], originY + S - 1); y++)
+                if (data.Get(lx, y - originY, lz) == BlockId.Air)
+                    data.Set(lx, y - originY, lz, BlockId.Water, WaterLevel.Flowing(0, falling: true));
+        }
+
         // Trees and cacti, over the ground and plants, on tops with room above them (see Trees).
         for (int lz = Trees.Reach; lz < S - Trees.Reach; lz++)
         for (int lx = Trees.Reach; lx < S - Trees.Reach; lx++)
@@ -565,6 +574,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
     {
         Array.Fill(p.Water, int.MinValue);
         Array.Fill(p.WaterHeight, (byte)8);
+        Array.Fill(p.FallTop, int.MinValue);
         if (shaped == null) return;
         int size = shaped.Size, half = size / 2, corners = S / size + 1;
         Span<float> ground = stackalloc float[size * size];
@@ -624,6 +634,46 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             if (water > top) p.Water[col] = water;
         }
         PlaceStreams(p, shaped, x0, z0);
+        PlaceFalls(p, shaped, x0, z0);
+    }
+
+    /// <summary>Each landscape column's waterfall (see <see cref="Shaped.Fall"/>): as wide as its stream, in the first
+    /// block columns past the lip (whose ground, if any, is more than Drop under the column's floor), down the land's
+    /// outer face to its underside, or to the ground under it.</summary>
+    private void PlaceFalls(ColumnProfile p, Shaped shaped, int x0, int z0)
+    {
+        const int Drop = 3;
+        int size = shaped.Size;
+        Span<(short Lo, short Hi)> spans = stackalloc (short, short)[MaxSpans];
+        for (int mz = -size; mz <= S + size; mz += size)
+        for (int mx = -size; mx <= S + size; mx += size)
+        {
+            var (width, dx, dz, surface, floor, bottom) = shaped.Fall(x0 + mx, z0 + mz);
+            float half = MathF.Min(width, size) / 2;
+            if (half < 0.5f) continue;
+            int top = (int)MathF.Floor(surface - 0.5f); // the top water block going over
+            // Across the way it leaves, a line of block columns half the width either side of the middle; along each,
+            // out from the middle to the first column past the lip.
+            float length = MathF.Sqrt(dx * dx + dz * dz), ux = dx / length, uz = dz / length;
+            for (float o = -half + 0.5f; o <= half - 0.5f + 1e-3f; o += 1f)
+            {
+                float sx = mx + 0.5f - uz * o, sz = mz + 0.5f + ux * o;
+                for (float a = 0f; a <= size * 1.5f; a += 0.5f)
+                {
+                    int lx = (int)MathF.Floor(sx + ux * a), lz = (int)MathF.Floor(sz + uz * a);
+                    int ground = TopAt(p, x0, z0, lx, lz, spans);
+                    if (ground > top + 1) break; // a bank or hill in the way
+                    if (ground >= floor - Drop) continue; // still on the land: further out
+                    if (lx >= 0 && lz >= 0 && lx < S && lz < S)
+                    {
+                        int col = lx + S * lz;
+                        p.FallTop[col] = Math.Max(p.FallTop[col], top);
+                        p.FallBottom[col] = ground == int.MinValue ? (int)bottom : ground + 1;
+                    }
+                    break;
+                }
+            }
+        }
     }
 
     /// <summary>Each landscape column's stream (see <see cref="Shaped.Stream"/>): a block deep over the ground along the
@@ -709,6 +759,15 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
     {
         Prepare(x >> 5, z >> 5);
         return _profile!.Water[(x & (S - 1)) + S * (z & (S - 1))];
+    }
+
+    /// <summary>The waterfall in block column (x, z), as Generate places it (see PlaceFalls): its top and bottom water
+    /// blocks, or Top int.MinValue for none.</summary>
+    public (int Top, int Bottom) FallAt(int x, int z)
+    {
+        Prepare(x >> 5, z >> 5);
+        int col = (x & (S - 1)) + S * (z & (S - 1));
+        return (_profile!.FallTop[col], _profile.FallBottom[col]);
     }
 
     /// <summary>The solid spans (bottom up) of block column (lx, lz) of the chunk column whose lattice was last worked
@@ -963,6 +1022,8 @@ public sealed class ColumnProfile
     public readonly int[] Water = new int[Columns];
     /// <summary>How high water stands in each column's top water block, in eighths (8 full; less is flowing water).</summary>
     public readonly byte[] WaterHeight = new byte[Columns];
+    /// <summary>Per block column, falling water over the land's edge: from FallBottom up to FallTop (none if under).</summary>
+    public readonly int[] FallTop = new int[Columns], FallBottom = new int[Columns];
 
     public int Count(int col) => Start[col + 1] - Start[col];
 

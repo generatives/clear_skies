@@ -30,6 +30,8 @@ public sealed class Land
     /// <summary>The top of each link's opening (the lower of its nodes' ceilings; see LinkBottom for its bottom) and the
     /// distance between its nodes' middles.</summary>
     public readonly float[] LinkTop, LinkLength;
+    /// <summary>Which neighbouring column each link faces: (LinkDx, LinkDz), each -1, 0 or 1.</summary>
+    public readonly sbyte[] LinkDx, LinkDz;
     public int Links => LinkTo.Length;
     /// <summary>Every face's width: columns are taken as octagons, all of whose sides are (√2 - 1) of its width, so
     /// water runs to all eight neighbours alike and doesn't line up with the grid.</summary>
@@ -85,6 +87,7 @@ public sealed class Land
         // the sampled area).
         var start = new int[nodes + 1];
         var to = new List<int>(nodes * 9); var top = new List<float>(nodes * 9); var length = new List<float>(nodes * 9);
+        var dx = new List<sbyte>(nodes * 9); var dz = new List<sbyte>(nodes * 9);
         var sides = new[] { (1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, -1), (-1, 1), (1, -1) };
         float LowestLo(int c) => spans[c].Length > 0 ? spans[c][0].Lo : NoCeiling;
         for (int n = 0; n < nodes; n++)
@@ -98,18 +101,19 @@ public sealed class Land
                 int d = ni >= 0 && nj >= 0 && ni < Nx && nj < Nz ? ni + Nx * nj : -1;
                 // Drain: the gap reaches below all of the neighbour's land.
                 float under = d < 0 ? NoCeiling : LowestLo(d);
-                if (Floor[n] < under) { to.Add(-1); top.Add(Math.Min(Ceiling[n], under)); length.Add(apart); }
+                if (Floor[n] < under) { to.Add(-1); top.Add(Math.Min(Ceiling[n], under)); length.Add(apart); dx.Add((sbyte)di); dz.Add((sbyte)dj); }
                 if (d < 0) continue;
                 for (int m = NodeStart[d]; m < NodeStart[d + 1]; m++)
                 {
                     float lo = Math.Max(Floor[n], Floor[m]), hi = Math.Min(Ceiling[n], Ceiling[m]);
                     if (hi <= lo) continue;
-                    to.Add(m); top.Add(hi); length.Add(apart);
+                    to.Add(m); top.Add(hi); length.Add(apart); dx.Add((sbyte)di); dz.Add((sbyte)dj);
                 }
             }
         }
         start[nodes] = to.Count;
         LinkStart = start; LinkTo = to.ToArray(); LinkTop = top.ToArray(); LinkLength = length.ToArray();
+        LinkDx = dx.ToArray(); LinkDz = dz.ToArray();
         LinkBack = new int[LinkTo.Length];
         for (int n = 0; n < nodes; n++)
         for (int k = start[n]; k < start[n + 1]; k++)
