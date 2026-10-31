@@ -24,10 +24,10 @@ public static class Biomes
         (Biome.Badlands,  0.95f, 0.10f, 0.80f, 0.50f, 0.26f, 0.75f),
         (Biome.Tundra,    0.05f, 0.50f, 0.62f, 0.78f, 0.70f, 0.65f),
         (Biome.Steppe,    0.15f, 0.05f, 0.72f, 0.68f, 0.36f, 0.75f),
-        (Biome.Jungle,    1.05f, 0.80f, 0.12f, 0.62f, 0.12f, 0.6f),
+        (Biome.Jungle,    1.05f, 0.95f, 0.12f, 0.62f, 0.12f, 0.6f),
         (Biome.Volcanic,  1.35f, 0.30f, 0.45f, 0.42f, 0.36f, 0.6f),
         // (Between desert and jungle, so the one doesn't border the other.)
-        (Biome.Savanna,   0.95f, 0.50f, 0.80f, 0.72f, 0.30f, 0.7f),
+        (Biome.Savanna,   0.95f, 0.60f, 0.80f, 0.72f, 0.30f, 0.7f),
     };
 
     /// <summary>How far apart in the climate (squared) biomes' tints mix over.</summary>
@@ -41,10 +41,13 @@ public static class Biomes
     /// shores and banks, without moving it off the water.</summary>
     public const float ShoreWarp = 24f;
 
+    /// <summary>How much wetter than its rain makes it the ground beside water is.</summary>
+    public const float WaterWet = 0.35f;
+
     /// <summary>0-1: how wet the ground is, from the region's <paramref name="rain"/> (see <see cref="ContinentTerrain.Rain"/>)
-    /// and how near water it is (<paramref name="watered"/>, see <see cref="Shaped.Watered"/>): wet by water even where
-    /// little rain falls, so a river through a desert is green along its banks.</summary>
-    public static float Wet(float rain, float watered) => rain + (1f - rain) * watered;
+    /// raised by up to <see cref="WaterWet"/> near water (<paramref name="watered"/>, see <see cref="Shaped.Watered"/>):
+    /// a river through a desert runs through a band of savanna, not straight into jungle.</summary>
+    public static float Wet(float rain, float watered) => MathF.Min(1f, rain + WaterWet * watered);
 
     /// <summary>The biome nearest to (heat, wet).</summary>
     public static Biome Pick(float heat, float wet)

@@ -300,7 +300,7 @@ public sealed class LandscapeSettings
     public int Size = 8;
     /// <summary>How far water wets the land round it for the biomes, in blocks (see Landscape.Watered), and how many
     /// blocks across each block climbed out of it counts as.</summary>
-    public float WaterReach = 48f, WaterClimb = 3f;
+    public float WaterReach = 96f, WaterClimb = 3f;
     public readonly List<(string Name, string Value)> Pipes = new();
 
     public static LandscapeSettings Parse(string? text)
