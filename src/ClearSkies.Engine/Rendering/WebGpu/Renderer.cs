@@ -710,12 +710,11 @@ fn valueNoise3(p: vec3<f32>) -> f32 {
     return mix(x0, x1, u.z) / 1023.0;
 }
 
-// What voxel v in this draw's grid holds: 2 a block that blocks light, 1 water (a translucent block: its chunk's
-// translucent bits, whose occupancy slot plus one is its chunk-table entry's second word's w less its covered bit, 0
-// for none; see GridStore.EntryWords), 0 anything else, -1 not known (no chunk of this grid there: not loaded, or
-// shown at another level of detail). One chunk lookup for both.
-fn waterOrSolid(v: vec3<i32>) -> i32 {
-    let i = entryOf(drawGrid, v >> vec3<u32>(5u));
+// What voxel v in grid g holds: 2 a block that blocks light, 1 water (a translucent block: its chunk's translucent
+// bits, whose occupancy slot plus one is its chunk-table entry's second word's w less its covered bit, 0 for none; see
+// GridStore.EntryWords), 0 anything else, -1 not known (no chunk of g there). One chunk lookup for both.
+fn waterOrSolidIn(g: i32, v: vec3<i32>) -> i32 {
+    let i = entryOf(g, v >> vec3<u32>(5u));
     if (i < 0) { return -1; }
     let code = chunkTable[2 * i].x;
     let l = v & vec3<i32>(31);
@@ -727,13 +726,29 @@ fn waterOrSolid(v: vec3<i32>) -> i32 {
     return 0;
 }
 
+// What voxel v in this draw's grid holds (as waterOrSolidIn). Where this grid has no chunk (the world there is shown at
+// another level of detail), the next finer level's voxel at the middle of v, else the next coarser's; 0 if neither has
+// one (nothing loaded there).
+fn waterOrSolid(v: vec3<i32>) -> i32 {
+    let here = waterOrSolidIn(drawGrid, v);
+    if (here >= 0) { return here; }
+    let levels = grids[drawGrid].bmax.w;
+    let world = grids[drawGrid].v2w * vec4<f32>(vec3<f32>(v) + 0.5, 1.0);
+    for (var k = 0u; k < 2u; k++) {
+        let g = ((levels >> (16u * k)) & 0xFFFF) - 1;
+        if (g < 0) { continue; }
+        let other = waterOrSolidIn(g, vec3<i32>(floor((grids[g].w2v * world).xyz)));
+        if (other >= 0) { return other; }
+    }
+    return 0;
+}
+
 // How much water the view goes through from p on a water face, into its cell (both chunk-local, so precise however
 // far the chunk is from the origin), along rd (normalized, grid space), in blocks, up to WATER_MAX_PATH: a walk
 // through the cells it crosses, adding up the water in them (not stopping where it first leaves the water, so a ragged
 // waterfall's air gaps don't break its shading into bands), each stretch weighed by how thick the water is there
-// (waterDensity), until a block that blocks light or WATER_REACH blocks. Where it walks out of this grid's chunks
-// (past what's loaded, or into a chunk shown at another level), it takes what it was last in to carry on: water seen
-// across a border with another level would otherwise look clear along it, as if the water ended there.
+// (waterDensity), until a block that blocks light or WATER_REACH blocks. Past this grid's chunks it reads the next
+// level of detail's (see waterOrSolid), so water seen across a border between levels doesn't end there.
 fn waterPath(p: vec3<f32>, start: vec3<i32>, rd: vec3<f32>) -> f32 {
     var cell = start;
     let stepC = vec3<i32>(select(-1, 1, rd.x > 0.0), select(-1, 1, rd.y > 0.0), select(-1, 1, rd.z > 0.0));
@@ -742,11 +757,8 @@ fn waterPath(p: vec3<f32>, start: vec3<i32>, rd: vec3<f32>) -> f32 {
     var t = 0.0;
     var path = 0.0;
     let origin = vec3<f32>(drawChunk * 32);
-    var last = 1;
     for (var i = 0; i < WATER_MAX_STEPS; i++) {
-        var what = waterOrSolid(drawChunk * 32 + cell);
-        if (what < 0) { what = last; }
-        last = what;
+        let what = waterOrSolid(drawChunk * 32 + cell);
         if (what == 2) { break; }
         let tNext = min(tMax.x, min(tMax.y, tMax.z));
         if (what == 1) { path += (tNext - t) * waterDensity(origin + p + rd * (0.5 * (t + tNext))); }
