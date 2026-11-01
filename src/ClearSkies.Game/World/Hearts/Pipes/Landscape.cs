@@ -16,6 +16,8 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
 {
     public ulong Seed => seed;
     public LandscapeSettings Settings => settings;
+    /// <summary>How far (blocks) a stream drops to the column it runs to before it falls there instead.</summary>
+    private const float FallDrop = 4f;
 
     private readonly ConcurrentDictionary<(int X, int Z), Lazy<Shaped>> _landmasses = new();
 
@@ -111,10 +113,13 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
             var (a, b) = beside[n];
             if (way[n] != (0, 0) && carried[n] >= least && carried[n] > CarriedBy(a) && carried[n] >= CarriedBy(b)) shown[n] = carried[n];
         }
-        // Water falls over the edge where a shown stream or standing water leaves the land.
+        // Water falls over the edge where a shown stream or standing water leaves the land, and where a shown stream
+        // drops more than FallDrop blocks to the column it runs to (down a cliff, which a stream can't follow).
         var falls = new float[land.Nodes];
         for (int n = 0; n < land.Nodes; n++)
-            if (Falls(n) && (shown[n] >= least || Standing(n))) falls[n] = Math.Max(shown[n], flow[n]);
+            if (Falls(n) && (shown[n] >= least || Standing(n))
+                || shown[n] >= least && down[n] >= 0 && land.Floor[n] - land.Floor[down[n]] > FallDrop)
+                falls[n] = Math.Max(shown[n], flow[n]);
         return new Shaped(land, start, pipes.Depth, shown, down, way, falls, settings);
     }
 
@@ -157,7 +162,7 @@ public sealed class Shaped(Land land, float[] startFloor, float[] depth, float[]
         return (width, land.X0 + d % land.Nx * size, land.Z0 + d / land.Nx * size, land.Floor[t], land.Floor[to]);
     }
 
-    /// <summary>The waterfall over the land's edge from the column with its middle at (x, z): how wide it is (as a
+    /// <summary>The waterfall over the land's edge, or down a cliff, from the column with its middle at (x, z): how wide it is (as a
     /// stream's; 0 for none), which way it leaves (to a neighbouring column), the top of the water going over, the
     /// column's floor and the bottom of its land (the island's underside there, where it falls to).</summary>
     public (float Width, int Dx, int Dz, float Top, float Floor, float Bottom) Fall(int x, int z)
