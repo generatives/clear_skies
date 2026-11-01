@@ -253,26 +253,30 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
 
     // While a coarse chunk's stream falls are drawn (see CoarseStreamFalls), per voxel column: the top and bottom of
     // its fall (int.MinValue for none).
-    private readonly int[] _voxFallTop = new int[S * S], _voxFallBottom = new int[S * S];
+    private readonly int[] _voxFallTop = new int[S * S], _voxFallBottom = new int[S * S], _voxFallColumns = new int[S * S];
 
     /// <summary>The streams' waterfalls (see StreamFalls) in a coarse chunk (voxels <paramref name="c"/> blocks on a
-    /// side, from world (bx0, by0, bz0)): a voxel column holding any fall column falls from the highest top to the
-    /// lowest bottom of those in it, in its voxels at least half under that.</summary>
+    /// side, from world (bx0, by0, bz0)): a voxel column holding at least half a voxel's width of fall columns falls
+    /// from the highest top to the lowest bottom of those in it, in its voxels at least half under that; so a fall
+    /// thinner than half a voxel isn't drawn that far off, rather than drawn a voxel wide.</summary>
     private void CoarseStreamFalls(ChunkData data, Shaped? shaped, int c, int bx0, int by0, int bz0)
     {
         Array.Fill(_voxFallTop, int.MinValue);
+        Array.Clear(_voxFallColumns);
+        var seen = new HashSet<(int, int)>();
         StreamFalls(shaped, bx0, bz0, (x, z, top, bottom) =>
         {
             int u = (int)MathF.Floor((x - bx0) / (float)c), v = (int)MathF.Floor((z - bz0) / (float)c);
             if ((uint)u >= S || (uint)v >= S) return;
             int i = u + S * v;
+            if (seen.Add((x, z))) _voxFallColumns[i]++;
             _voxFallBottom[i] = _voxFallTop[i] == int.MinValue ? bottom : System.Math.Min(_voxFallBottom[i], bottom);
             _voxFallTop[i] = System.Math.Max(_voxFallTop[i], top);
         }, S * c);
         for (int i = 0; i < S * S; i++)
         {
             int top = _voxFallTop[i], bottom = _voxFallBottom[i], u = i % S, v = i / S;
-            if (top == int.MinValue) continue;
+            if (top == int.MinValue || 2 * _voxFallColumns[i] < c) continue;
             for (int w = System.Math.Max((int)MathF.Floor((bottom - by0) / (float)c), 0); w <= System.Math.Min((int)MathF.Floor((top - by0) / (float)c), S - 1); w++)
             {
                 int y0 = by0 + w * c, y1 = y0 + c - 1;
@@ -726,7 +730,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
     /// <summary>The top water block of the streams over block column (x, z), whose ground is topped at
     /// <paramref name="top"/>, or int.MinValue: full detail and distant terrain both place streams by this. Each
     /// landscape column's stream (see <see cref="Shaped.Stream"/>) is a band Wide times its width along the line from
-    /// its middle to the middle of the column it runs to, wandering up to Wander blocks either side, and
+    /// its middle to the middle of the column it runs to (both bent by their meanders, see Shaped.Stream), and
     /// <paramref name="widen"/> blocks wider each side (distant terrain widens by half a voxel, so a stream thinner
     /// than a voxel still shows). Its surface runs a block over the line's ground; a column in the band whose ground
     /// stands less than Hump over that surface gets water to the surface, at least a block and at most Deep blocks
@@ -734,20 +738,19 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
     /// spreads too thin over one to fill blocks by its volume: this draws it.</summary>
     private int StreamWater(Shaped shaped, int x, int z, int top, float widen)
     {
-        const float Hump = 2f, Wide = StreamWide, Wander = 2f;
+        const float Hump = 2f, Wide = StreamWide;
         const int Deep = 2;
         int size = shaped.Size, best = int.MinValue, r = 2 + (int)MathF.Ceiling(widen / size);
         int bx = (int)MathF.Floor(x / (float)size) * size, bz = (int)MathF.Floor(z / (float)size) * size;
-        float wx = x + Wander * _crack.GetNoise(x * 2.5f, z * 2.5f), wz = z + Wander * _crack.GetNoise(x * 2.5f + 1000f, z * 2.5f);
         for (int j = -r; j <= r; j++)
         for (int i = -r; i <= r; i++)
         {
             int mx = bx + i * size, mz = bz + j * size;
-            var (width, toX, toZ, from, to) = shaped.Stream(mx, mz);
+            var (width, ax, az, toX, toZ, from, to) = shaped.Stream(mx, mz);
             float half = MathF.Min(width * Wide, size) / 2;
             if (half < 0.5f) continue;
-            float reach = half + widen, dx = toX - mx, dz = toZ - mz, length2 = dx * dx + dz * dz;
-            float px = wx - mx, pz = wz - mz;
+            float reach = half + widen, dx = toX - ax, dz = toZ - az, length2 = dx * dx + dz * dz;
+            float px = x + 0.5f - ax, pz = z + 0.5f - az;
             float t = length2 > 0 ? Math.Clamp((px * dx + pz * dz) / length2, 0f, 1f) : 0f;
             float ox = px - t * dx, oz = pz - t * dz;
             if (ox * ox + oz * oz > reach * reach) continue;
@@ -780,15 +783,14 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
     private const int FallDrop = 4;
 
     /// <summary>The waterfalls of the streams (see <see cref="Shaped.Stream"/>) whose lines pass near the chunk column
-    /// (or coarse chunk) at (x0, z0), <paramref name="span"/> blocks wide: walking each line (where its band runs, with
-    /// the wander) from its column's middle to the middle of the one it runs to, every block column whose ground stands
-    /// more than FallDrop under the last one's, or that has none, starts a fall as wide as the stream, across its line:
-    /// from the stream's top water block over the last column down to each column's ground, or with none to the
-    /// bottom of the last column's land. The walk carries on down a ledge and stops where ground rises over the water
-    /// or there is none. Each fall column goes to <paramref name="fall"/> (x, z, top, bottom).</summary>
+    /// (or coarse chunk) at (x0, z0), <paramref name="span"/> blocks wide. Walking each line from its column to the one
+    /// it runs to, every block column whose ground stands more than FallDrop under the last one's, or that has none,
+    /// starts a fall as wide as the stream (its band is a few times wider), across its line: from the stream's top water
+    /// block over the last column down to each column's ground, or with none to the bottom of the last column's land.
+    /// The walk carries on down a ledge and stops where ground rises over the water or there is none. Each fall column
+    /// goes to <paramref name="fall"/> (x, z, top, bottom).</summary>
     private void StreamFalls(Shaped? shaped, int x0, int z0, Action<int, int, int, int> fall, int span = S)
     {
-        const float Wander = 2f;
         if (shaped == null) return;
         int size = shaped.Size;
         Span<(short Lo, short Hi)> spans = stackalloc (short, short)[MaxSpans];
@@ -796,19 +798,16 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         for (int mz = mz0; mz <= z0 + span + 2 * size; mz += size)
         for (int mx = mx0; mx <= x0 + span + 2 * size; mx += size)
         {
-            var (width, toX, toZ, from, to) = shaped.Stream(mx, mz);
-            float half = MathF.Min(width * StreamWide, size) / 2; // (as wide as its band, see StreamWater)
-            if (half < 0.5f) continue;
-            float dx = toX - mx, dz = toZ - mz, length = MathF.Sqrt(dx * dx + dz * dz);
+            var (width, ax, az, toX, toZ, _, _) = shaped.Stream(mx, mz);
+            if (MathF.Min(width * StreamWide, size) < 1f) continue; // (no band, see StreamWater)
+            float half = MathF.Max(0.5f, MathF.Min(width, size) / 2); // (as wide as the stream: its band is wider)
+            float dx = toX - ax, dz = toZ - az, length = MathF.Sqrt(dx * dx + dz * dz);
             if (length <= 0) continue;
             float ux = dx / length, uz = dz / length;
             int lastX = int.MinValue, lastZ = int.MinValue, lastTop = int.MinValue, lastUnder = 0, water = 0;
             for (float a = 0; a <= length + 0.01f; a += 0.5f)
             {
-                float px = mx + 0.5f + ux * a, pz = mz + 0.5f + uz * a;
-                // (Where the band runs here: StreamWater wanders the point it looks from, so the band moves the other way.)
-                px -= Wander * _crack.GetNoise(px * 2.5f, pz * 2.5f);
-                pz -= Wander * _crack.GetNoise(px * 2.5f + 1000f, pz * 2.5f);
+                float px = ax + ux * a, pz = az + uz * a;
                 int x = (int)MathF.Floor(px), z = (int)MathF.Floor(pz);
                 if (x == lastX && z == lastZ) continue;
                 int n = SpansAt(x, z, spans);

@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
+using ClearSkies.Engine.Generation;
 
 namespace ClearSkies.Game.Generation;
 
@@ -16,6 +17,10 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
 {
     public ulong Seed => seed;
     public LandscapeSettings Settings => settings;
+
+    /// <summary>How far (blocks) a stream's line bends off a column's middle at most, and how quickly (per column) that
+    /// changes from column to column: its meanders.</summary>
+    private const float Meander = 2.5f, MeanderFrequency = 0.35f;
 
     private readonly ConcurrentDictionary<(int X, int Z), Lazy<Shaped>> _landmasses = new();
 
@@ -109,7 +114,17 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
             var (a, b) = beside[n];
             if (way[n] != (0, 0) && carried[n] >= least && carried[n] > CarriedBy(a) && carried[n] >= CarriedBy(b)) shown[n] = carried[n];
         }
-        return new Shaped(land, start, pipes.Depth, shown, down, way, settings);
+        // Each column's meander: how far its stream's line bends off the column's middle, across its way.
+        var bendNoise = new FastNoiseLite(unchecked((int)seed + 77));
+        bendNoise.SetNoiseType(FastNoiseLite.NoiseType.OpenSimplex2);
+        bendNoise.SetFrequency(MeanderFrequency);
+        var bend = new float[land.Nodes];
+        for (int n = 0; n < land.Nodes; n++)
+        {
+            int c = land.ColumnOf[n];
+            bend[n] = Meander * bendNoise.GetNoise(c % land.Nx, c / land.Nx);
+        }
+        return new Shaped(land, start, pipes.Depth, shown, down, way, bend, settings);
     }
 
     /// <summary>A landmass's bounds (blocks, on 32-block lines): where its own ground can be, found on a coarse grid
@@ -133,22 +148,43 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
 /// stream (see HeartWorldGenerator.PlaceWater). The first Damp blocks of water only dampen the ground:
 /// thin water running over a slope shows as none.</summary>
 public sealed class Shaped(Land land, float[] startFloor, float[] depth, float[] flow, int[] down, (sbyte X, sbyte Z)[] way,
-                           LandscapeSettings settings)
+                           float[] bend, LandscapeSettings settings)
 {
-    /// <summary>The stream of the column with its middle at (x, z): how wide it runs (sqrt(flow / StreamFlow) blocks;
-    /// 0 for none), the middle of the column it runs to and the ground at both ends. A stream that runs over the land's
-    /// edge runs on level to the middle of the column past it.</summary>
-    public (float Width, int ToX, int ToZ, float From, float To) Stream(int x, int z)
+    /// <summary>The stream of the column holding (x, z): how wide it runs (sqrt(flow / StreamFlow) blocks; 0 for
+    /// none), its line, from the column's middle bent across its way by the column's meander to the same point of the
+    /// column it runs to (in blocks, block centres at .5), and the ground at both ends. A stream that runs over the
+    /// land's edge runs on level to the middle of the column past it.</summary>
+    public (float Width, float FromX, float FromZ, float ToX, float ToZ, float From, float To) Stream(int x, int z)
     {
         int t = TopNodeAt(x, z);
-        if (t < 0 || settings.StreamFlow <= 0 || flow[t] <= 0f) return default;
-        int c = land.ColumnOf[t], size = land.Size;
-        int cx = land.X0 + c % land.Nx * size, cz = land.Z0 + c / land.Nx * size;
+        if (t < 0 || settings.StreamFlow <= 0 || flow[t] <= 0f || way[t] == (0, 0)) return default;
         float width = MathF.Sqrt(flow[t] / settings.StreamFlow);
+        var (fx, fz) = Bent(t);
         if (down[t] < 0)
-            return way[t] == (0, 0) ? default : (width, cx + way[t].X * size, cz + way[t].Z * size, land.Floor[t], land.Floor[t]);
-        int to = down[t], d = land.ColumnOf[to];
-        return (width, land.X0 + d % land.Nx * size, land.Z0 + d / land.Nx * size, land.Floor[t], land.Floor[to]);
+        {
+            var (mx, mz) = Middle(t);
+            return (width, fx, fz, mx + way[t].X * land.Size, mz + way[t].Z * land.Size, land.Floor[t], land.Floor[t]);
+        }
+        var (tx, tz) = Bent(down[t]);
+        return (width, fx, fz, tx, tz, land.Floor[t], land.Floor[down[t]]);
+    }
+
+    /// <summary>The middle of node <paramref name="n"/>'s column (a block centre).</summary>
+    private (float X, float Z) Middle(int n)
+    {
+        int c = land.ColumnOf[n], size = land.Size;
+        return (land.X0 + c % land.Nx * size + 0.5f, land.Z0 + c / land.Nx * size + 0.5f);
+    }
+
+    /// <summary>Where node <paramref name="n"/>'s stream passes through its column: the middle, bent across its way by
+    /// its meander.</summary>
+    private (float X, float Z) Bent(int n)
+    {
+        var (mx, mz) = Middle(n);
+        var (wx, wz) = way[n];
+        if (wx == 0 && wz == 0) return (mx, mz);
+        float length = MathF.Sqrt(wx * wx + wz * wz);
+        return (mx - wz / length * bend[n], mz + wx / length * bend[n]);
     }
 
     /// <summary>A column's width, in blocks.</summary>
