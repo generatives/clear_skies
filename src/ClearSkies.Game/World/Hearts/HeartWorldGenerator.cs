@@ -645,7 +645,31 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             p.WaterHeight[col] = _padHeight[at];
             if (_padTop[at] < _padGround[at]) p.Cut[col] = _padTop[at];
         }
-        PlaceSprings(p, shaped, x0, z0);
+        // Water standing more than a block over a neighbour's surface (its water, or its ground if dry) falls down that
+        // neighbour's side to it, rather than showing an open face; past the land's edge, to the underside of the land
+        // it falls from.
+        Span<(short Lo, short Hi)> under = stackalloc (short, short)[MaxSpans];
+        for (int lz = 0; lz < S; lz++)
+        for (int lx = 0; lx < S; lx++)
+        {
+            int col = lx + S * lz, at = PadAt(lx, lz), top = _padTop[at];
+            int surface = top == int.MinValue ? int.MinValue : System.Math.Max(top, _padWater[at]);
+            int high = int.MinValue, from = 0;
+            for (int k = 0; k < 4; k++)
+            {
+                int d = at + (k == 0 ? -1 : k == 1 ? 1 : k == 2 ? -PadSide : PadSide);
+                if (_padTop[d] != int.MinValue && _padWater[d] > _padTop[d] && _padWater[d] > high) { high = _padWater[d]; from = k; }
+            }
+            if (high == int.MinValue || (surface != int.MinValue && high <= surface + 1)) continue;
+            int bottom = surface + 1;
+            if (surface == int.MinValue)
+            {
+                int n = SpansAt(x0 + lx + (from == 0 ? -1 : from == 1 ? 1 : 0), z0 + lz + (from == 2 ? -1 : from == 3 ? 1 : 0), under);
+                bottom = n == 0 ? high : under[n - 1].Lo;
+            }
+            p.FallBottom[col] = p.FallTop[col] == int.MinValue ? bottom : System.Math.Min(p.FallBottom[col], bottom);
+            p.FallTop[col] = System.Math.Max(p.FallTop[col], high);
+        }
         StreamFalls(shaped, x0, z0, (x, z, top, bottom, landed) =>
         {
             int lx = x - x0, lz = z - z0;
