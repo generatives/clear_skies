@@ -583,7 +583,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         Span<(short Lo, short Hi)> spans = stackalloc (short, short)[MaxSpans];
         for (int lz = -Pad; lz < S + Pad; lz++)
         for (int lx = -Pad; lx < S + Pad; lx++)
-            _padTop[PadAt(lx, lz)] = TopAt(p, x0, z0, lx, lz, spans);
+            (_padUnder[PadAt(lx, lz)], _padTop[PadAt(lx, lz)]) = TopAt(p, x0, z0, lx, lz, spans);
         Array.Fill(_padWater, int.MinValue);
         Array.Fill(_padHeight, (byte)8);
         Array.Fill(_padFall, int.MinValue);
@@ -592,6 +592,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         PlaceStreams(shaped, x0, z0);
         PlaceFalls(p, shaped, x0, z0);
         Settle();
+        Spill(p);
         for (int lz = 0; lz < S; lz++)
         for (int lx = 0; lx < S; lx++)
         {
@@ -610,7 +611,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
     // water block (int.MinValue for none) and that block's height in eighths, and the top of any waterfall in it.
     private const int Pad = 2, PadSide = S + 2 * Pad;
     private const byte Thin = 2;
-    private readonly int[] _padTop = new int[PadSide * PadSide], _padWater = new int[PadSide * PadSide],
+    private readonly int[] _padTop = new int[PadSide * PadSide], _padUnder = new int[PadSide * PadSide], _padWater = new int[PadSide * PadSide],
                            _padFall = new int[PadSide * PadSide], _padSettled = new int[PadSide * PadSide];
     private readonly byte[] _padHeight = new byte[PadSide * PadSide];
     private readonly bool[] _padCarve = new bool[PadSide * PadSide];
@@ -685,7 +686,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             for (float o = -half + 0.5f; o <= half - 0.5f + 1e-3f; o += 1f)
             {
                 if (PastLip(x0 + mx + 0.5f - uz * o, z0 + mz + 0.5f + ux * o, ux, uz, top, floor, bottom, size,
-                            (x, z) => TopAt(p, x0, z0, x - x0, z - z0, _fallSpans)) is not var (x, z, low)) continue;
+                            (x, z) => TopAt(p, x0, z0, x - x0, z - z0, _fallSpans).Hi) is not var (x, z, low)) continue;
                 int lx = x - x0, lz = z - z0;
                 if (lx < -Pad || lz < -Pad || lx >= S + Pad || lz >= S + Pad) continue;
                 _padFall[PadAt(lx, lz)] = Math.Max(_padFall[PadAt(lx, lz)], top);
@@ -802,18 +803,43 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         return best;
     }
 
-    /// <summary>The top block of block column (lx, lz) of chunk column (x0, z0) (in it or a neighbour), or int.MinValue.</summary>
-    private int TopAt(ColumnProfile p, int x0, int z0, int lx, int lz, Span<(short Lo, short Hi)> spans)
+    /// <summary>The top span of block column (lx, lz) of chunk column (x0, z0) (in it or a neighbour): its bottom
+    /// and top blocks, or int.MinValue for both.</summary>
+    private (int Lo, int Hi) TopAt(ColumnProfile p, int x0, int z0, int lx, int lz, Span<(short Lo, short Hi)> spans)
     {
         int count;
         if (lx >= 0 && lz >= 0 && lx < S && lz < S)
         {
             int col = lx + S * lz;
             count = p.Count(col);
-            return count > 0 ? p.Spans[p.Start[col] + count - 1].Hi : int.MinValue;
+            return count > 0 ? p.Spans[p.Start[col] + count - 1] : (int.MinValue, int.MinValue);
         }
         count = SpansAt(x0 + lx, z0 + lz, spans);
-        return count > 0 ? spans[count - 1].Hi : int.MinValue;
+        return count > 0 ? spans[count - 1] : (int.MinValue, int.MinValue);
+    }
+
+    /// <summary>Water spills over a drop: a dry block column of the chunk column beside a wet one whose ground stands
+    /// more than FallDrop under that water, or that has none, gets water falling from that water's top to its
+    /// ground, or with none to the bottom of the wet column's land.</summary>
+    private void Spill(ColumnProfile p)
+    {
+        const int FallDrop = 4;
+        for (int lz = 0; lz < S; lz++)
+        for (int lx = 0; lx < S; lx++)
+        {
+            int at = PadAt(lx, lz), top = _padTop[at], col = lx + S * lz;
+            if (top != int.MinValue && _padWater[at] > top) continue; // (wet itself: nothing to fall through)
+            foreach (int d in (ReadOnlySpan<int>)[at - 1, at + 1, at - PadSide, at + PadSide])
+            {
+                // (A stream's carved bed and its water sit a block lower, see PlaceWater.)
+                if (_padTop[d] == int.MinValue || _padWater[d] <= _padTop[d]) continue;
+                int water = _padWater[d] - (_padCarve[d] ? 1 : 0);
+                if (top != int.MinValue && top >= water - FallDrop) continue;
+                int bottom = top != int.MinValue ? top + 1 : _padUnder[d];
+                p.FallBottom[col] = p.FallTop[col] == int.MinValue ? bottom : System.Math.Min(p.FallBottom[col], bottom);
+                p.FallTop[col] = System.Math.Max(p.FallTop[col], water);
+            }
+        }
     }
 
     /// <summary>The top water block over ground topped at <paramref name="hi"/> with water to <paramref name="level"/>
