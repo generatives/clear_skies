@@ -222,6 +222,13 @@ public sealed class Shaped(Land land, float[] startFloor, float[] depth, float[]
         return t < 0 || depth[t] <= settings.Damp + 0.5f ? float.NaN : land.Floor[t] + depth[t] - settings.Damp;
     }
 
+    /// <summary>The floor (blocks) of the column with its middle at (x, z), or NaN.</summary>
+    public float Floor(int x, int z)
+    {
+        int t = TopNodeAt(x, z);
+        return t < 0 ? float.NaN : land.Floor[t];
+    }
+
     /// <summary>The water's surface over the column holding block column (x, z) (blocks), or NaN where it's dry: its
     /// water past the damp that wets all ground.</summary>
     public float Surface(int x, int z)

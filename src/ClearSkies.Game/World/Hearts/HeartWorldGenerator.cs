@@ -755,7 +755,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             for (int c = 0; c < 4; c++)
             {
                 float level = shaped.Level(cx + (c & 1) * size, cz + (c >> 1) * size);
-                if (float.IsNaN(level)) continue;
+                if (float.IsNaN(level) || top < shaped.Floor(cx + (c & 1) * size, cz + (c >> 1) * size) - size) continue; // (ground below its basin: past an edge)
                 float w = ((c & 1) == 0 ? 1 - fx : fx) * ((c >> 1) == 0 ? 1 - fz : fz) + 1e-4f;
                 sum += w * level; weights += w;
             }
@@ -913,7 +913,12 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
     /// terrain with voxels <paramref name="c"/> blocks wide, or int.MinValue: the landscape's still water there, or a
     /// stream's (see StreamWater) on any voxel whose middle is within half a voxel of its band.</summary>
     private int CoarseWater(Shaped? shaped, int x, int z, int hi, int c)
-        => shaped == null ? int.MinValue : Math.Max(WaterTop(shaped.Surface(x, z), hi), StreamWater(shaped, x, z, hi, c / 2f));
+    {
+        if (shaped == null) return int.MinValue;
+        var (mx, mz) = shaped.Middle(x, z);
+        int still = hi < shaped.Floor(mx, mz) - shaped.Size ? int.MinValue : WaterTop(shaped.Surface(x, z), hi); // (as PlaceStanding)
+        return Math.Max(still, StreamWater(shaped, x, z, hi, c / 2f));
+    }
 
     /// <summary>The landscape's water surface over the column holding block column (x, z), or NaN (for distant
     /// terrain, whose voxels are as wide as columns or wider: there, a column's water is level).</summary>
