@@ -200,6 +200,12 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             for (int y = System.Math.Max(p.FallBottom[col], originY); y <= System.Math.Min(p.FallTop[col], originY + S - 1); y++)
                 if (data.Get(lx, y - originY, lz) == BlockId.Air)
                     data.Set(lx, y - originY, lz, BlockId.Water, WaterLevel.Flowing(0, falling: true));
+            // A spring's tunnel (see PlaceSprings): water on its floor, open over it.
+            int spring = p.Spring[col];
+            if (spring == int.MinValue) continue;
+            int open = System.Math.Min(spring + SpringRoom, System.Math.Min(p.Spans[p.Start[col + 1] - 1].Hi, p.Cut[col]) - 1);
+            for (int y = System.Math.Max(spring, originY); y <= System.Math.Min(open, originY + S - 1); y++)
+                data.Set(lx, y - originY, lz, y == spring ? BlockId.Water : BlockId.Air, y == spring ? WaterLevel.Source : default);
         }
 
         // Trees and cacti, over the ground and plants, on tops with room above them (see Trees).
@@ -211,7 +217,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             {
                 int hi = p.Spans[p.Start[col] + s].Hi;
                 if (hi + Trees.MaxHeight < originY || hi >= originY + S) continue;
-                if (s + 1 == p.Count(col) && p.Water[col] > hi) continue;
+                if (s + 1 == p.Count(col) && (p.Water[col] > hi || p.Spring[col] != int.MinValue)) continue;
                 var biome = p.Biome[p.Start[col] + s];
                 var ground = ContinentTerrain.Block(hi, hi, p.Strata[col], p.Patch[col], p.Bare[p.Start[col] + s], biome, p.Dry[p.Start[col] + s]);
                 int x = pos.X * S + lx, z = pos.Z * S + lz;
@@ -614,6 +620,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         Array.Fill(p.WaterHeight, (byte)8);
         Array.Fill(p.FallTop, int.MinValue);
         Array.Fill(p.Cut, int.MaxValue);
+        Array.Fill(p.Spring, int.MinValue);
         if (shaped == null) return;
         // Worked out over the chunk column and Pad blocks round it (see Settle), in _pad*.
         Span<(short Lo, short Hi)> spans = stackalloc (short, short)[MaxSpans];
@@ -629,7 +636,6 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         // A stream sinks a block into its bed, so it runs in a trench level with the ground beside it.
         for (int i = 0; i < _padTop.Length; i++)
             if (_padCarve[i] && _padTop[i] != int.MinValue && _padWater[i] > _padTop[i]) { _padTop[i]--; _padWater[i]--; }
-        PlaceSprings(shaped, x0, z0);
         Settle();
         for (int lz = 0; lz < S; lz++)
         for (int lx = 0; lx < S; lx++)
@@ -639,6 +645,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             p.WaterHeight[col] = _padHeight[at];
             if (_padTop[at] < _padGround[at]) p.Cut[col] = _padTop[at];
         }
+        PlaceSprings(p, shaped, x0, z0);
         StreamFalls(shaped, x0, z0, (x, z, top, bottom, landed) =>
         {
             int lx = x - x0, lz = z - z0;
@@ -658,40 +665,39 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
     // (How deep a plunge pool is, see PlaceWater.)
     private const int PoolDepth = 2;
 
-    /// <summary>Springs: where a stream starts (see Shaped.Stream's Head), it comes out of a slot cut back into the
-    /// hill behind its start, as wide as the stream: going back along its line, ground over the stream's water is cut
-    /// down to just under it, with water over it level with the stream's, until the ground stands more than SpringDepth
-    /// over the water (or SpringReach blocks back). The ground either side is left, so the slot has walls.</summary>
-    private void PlaceSprings(Shaped shaped, int x0, int z0)
+    // (How far back a spring's tunnel goes into the hill, its width at least, and the room over its water, see PlaceSprings.)
+    private const float SpringReach = 6f, SpringWide = 2f;
+    private const int SpringRoom = 2;
+
+    /// <summary>Springs: where a stream starts (see Shaped.Stream's Head), it comes out of a tunnel in the hill behind
+    /// its start, as wide as the stream (SpringWide at least): going back along its line SpringReach blocks, each column
+    /// with ground over the water is open from the water up SpringRoom blocks, always under at least its top block: so
+    /// the water comes out from under the ground, through a crack where the hill is low and a tunnel where it's high.</summary>
+    private void PlaceSprings(ColumnProfile p, Shaped shaped, int x0, int z0)
     {
-        const float SpringReach = 10f;
-        const int SpringDepth = 5;
         int size = shaped.Size;
-        int mx0 = (int)MathF.Floor((x0 - Pad - size) / (float)size) * size, mz0 = (int)MathF.Floor((z0 - Pad - size) / (float)size) * size;
-        for (int mz = mz0; mz <= z0 + S + Pad + size; mz += size)
-        for (int mx = mx0; mx <= x0 + S + Pad + size; mx += size)
+        Span<(short Lo, short Hi)> spans = stackalloc (short, short)[MaxSpans];
+        int mx0 = (int)MathF.Floor((x0 - size) / (float)size) * size, mz0 = (int)MathF.Floor((z0 - size) / (float)size) * size;
+        for (int mz = mz0; mz <= z0 + S + size; mz += size)
+        for (int mx = mx0; mx <= x0 + S + size; mx += size)
         {
             var (width, ax, az, toX, toZ, from, _, head) = shaped.Stream(mx, mz);
             if (!head || MathF.Min(width * StreamWide, size) < 1f) continue;
-            float half = MathF.Max(0.5f, MathF.Min(width, size) / 2);
+            float half = MathF.Max(SpringWide, MathF.Min(width, size)) / 2;
             float dx = toX - ax, dz = toZ - az, length = MathF.Sqrt(dx * dx + dz * dz);
             if (length <= 0) continue;
             float ux = dx / length, uz = dz / length;
             int water = (int)MathF.Ceiling(from + 1f) - 2; // (the stream's top water block at its start, sunk a block)
             for (float a = 0; a <= SpringReach; a += 0.5f)
+            for (float o = -half + 0.5f; o <= half - 0.5f + 1e-3f; o += 1f)
             {
-                // (How deep the slot is here, by the ground on its line, the same each side of the border.)
-                int n = SpansAt((int)MathF.Floor(ax - ux * a), (int)MathF.Floor(az - uz * a), _fallSpans);
-                if (n == 0 || _fallSpans[n - 1].Hi - (water - 1) > SpringDepth) break;
-                for (float o = -half + 0.5f; o <= half - 0.5f + 1e-3f; o += 1f)
-                {
-                    int lx = (int)MathF.Floor(ax - ux * a - uz * o) - x0, lz = (int)MathF.Floor(az - uz * a + ux * o) - z0;
-                    if (lx < -Pad || lz < -Pad || lx >= S + Pad || lz >= S + Pad) continue;
-                    int at = PadAt(lx, lz), top = _padTop[at];
-                    if (top == int.MinValue || top - (water - 1) > SpringDepth) continue;
-                    if (top >= water) _padTop[at] = water - 1;
-                    if (water > _padWater[at]) { _padWater[at] = water; _padHeight[at] = 8; }
-                }
+                int lx = (int)MathF.Floor(ax - ux * a - uz * o) - x0, lz = (int)MathF.Floor(az - uz * a + ux * o) - z0;
+                if ((uint)lx >= S || (uint)lz >= S) continue;
+                int col = lx + S * lz;
+                if (p.Spring[col] != int.MinValue) continue;
+                int top = System.Math.Min(TopAt(p, x0, z0, lx, lz, spans), p.Cut[col]);
+                if (top == int.MinValue || top <= water) continue; // (no roof)
+                p.Spring[col] = water;
             }
         }
     }
@@ -918,6 +924,13 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
     {
         Prepare(x >> 5, z >> 5);
         return _profile!.Water[(x & (S - 1)) + S * (z & (S - 1))];
+    }
+
+    /// <summary>The water block of a spring's tunnel through block column (x, z) (see PlaceSprings), or int.MinValue.</summary>
+    public int SpringAt(int x, int z)
+    {
+        Prepare(x >> 5, z >> 5);
+        return _profile!.Spring[(x & (S - 1)) + S * (z & (S - 1))];
     }
 
     /// <summary>Where water cut block column (x, z)'s top down to (see ColumnProfile.Cut), or int.MaxValue.</summary>
@@ -1190,10 +1203,12 @@ public sealed class ColumnProfile
     public readonly byte[] WaterHeight = new byte[Columns];
     /// <summary>Per block column, falling water over the land's edge: from FallBottom up to FallTop (none if under).</summary>
     public readonly int[] FallTop = new int[Columns], FallBottom = new int[Columns];
-    /// <summary>Per block column, whether a stream sank its top span's top block (see PlaceWater).</summary>
     /// <summary>Per block column, where its top span's top is cut down to by water (int.MaxValue for nowhere): a stream's
-    /// bed, a spring's notch, a plunge pool.</summary>
+    /// bed, a plunge pool.</summary>
     public readonly int[] Cut = new int[Columns];
+    /// <summary>Per block column, a spring's tunnel through it (see PlaceSprings): water at Spring, open for up to
+    /// SpringRoom blocks over it, under its top block (int.MinValue for none).</summary>
+    public readonly int[] Spring = new int[Columns];
 
     public int Count(int col) => Start[col + 1] - Start[col];
 
@@ -1208,7 +1223,7 @@ public sealed class ColumnProfile
     {
         Array.Clear(Strata); Array.Clear(Patch); Array.Clear(Flora); Array.Clear(Woods); Array.Clear(Kind);
         // (Water too: a column with no land never gets to PlaceWater, and a profile is reused.)
-        Array.Fill(Water, int.MinValue); Array.Fill(WaterHeight, (byte)8); Array.Fill(FallTop, int.MinValue); Array.Fill(Cut, int.MaxValue);
+        Array.Fill(Water, int.MinValue); Array.Fill(WaterHeight, (byte)8); Array.Fill(FallTop, int.MinValue); Array.Fill(Cut, int.MaxValue); Array.Fill(Spring, int.MinValue);
     }
 }
 

@@ -124,10 +124,12 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
             int c = land.ColumnOf[n];
             bend[n] = Meander * bendNoise.GetNoise(c % land.Nx, c / land.Nx);
         }
-        // A stream's head: a shown stream no shown stream runs into, where it springs from the ground.
+        // A stream's head: a shown stream out of no water, neither a shown stream nor standing water running into it (nor
+        // standing in it), where it springs from the ground.
+        bool Wet(int n) => shown[n] > 0 || pipes.Depth[n] > settings.Damp;
         var head = new bool[land.Nodes];
-        for (int n = 0; n < land.Nodes; n++) head[n] = shown[n] > 0;
-        for (int n = 0; n < land.Nodes; n++) if (shown[n] > 0 && down[n] >= 0) head[down[n]] = false;
+        for (int n = 0; n < land.Nodes; n++) head[n] = shown[n] > 0 && pipes.Depth[n] <= settings.Damp;
+        for (int n = 0; n < land.Nodes; n++) if (Wet(n) && down[n] >= 0) head[down[n]] = false;
         return new Shaped(land, start, pipes.Depth, shown, down, way, bend, head, settings);
     }
 
