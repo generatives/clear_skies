@@ -645,31 +645,6 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             p.WaterHeight[col] = _padHeight[at];
             if (_padTop[at] < _padGround[at]) p.Cut[col] = _padTop[at];
         }
-        // Water standing more than a block over a neighbour's surface (its water, or its ground if dry) falls down that
-        // neighbour's side to it, rather than showing an open face; past the land's edge, to the underside of the land
-        // it falls from.
-        Span<(short Lo, short Hi)> under = stackalloc (short, short)[MaxSpans];
-        for (int lz = 0; lz < S; lz++)
-        for (int lx = 0; lx < S; lx++)
-        {
-            int col = lx + S * lz, at = PadAt(lx, lz), top = _padTop[at];
-            int surface = top == int.MinValue ? int.MinValue : System.Math.Max(top, _padWater[at]);
-            int high = int.MinValue, from = 0;
-            for (int k = 0; k < 4; k++)
-            {
-                int d = at + (k == 0 ? -1 : k == 1 ? 1 : k == 2 ? -PadSide : PadSide);
-                if (_padTop[d] != int.MinValue && _padWater[d] > _padTop[d] && _padWater[d] > high) { high = _padWater[d]; from = k; }
-            }
-            if (high == int.MinValue || (surface != int.MinValue && high <= surface + 1)) continue;
-            int bottom = surface + 1;
-            if (surface == int.MinValue)
-            {
-                int n = SpansAt(x0 + lx + (from == 0 ? -1 : from == 1 ? 1 : 0), z0 + lz + (from == 2 ? -1 : from == 3 ? 1 : 0), under);
-                bottom = n == 0 ? high : under[n - 1].Lo;
-            }
-            p.FallBottom[col] = p.FallTop[col] == int.MinValue ? bottom : System.Math.Min(p.FallBottom[col], bottom);
-            p.FallTop[col] = System.Math.Max(p.FallTop[col], high);
-        }
         StreamFalls(shaped, x0, z0, (x, z, top, bottom, landed) =>
         {
             int lx = x - x0, lz = z - z0;
@@ -811,9 +786,10 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
     /// its middle to the middle of the column it runs to (both bent by their meanders, see Shaped.Stream), and
     /// <paramref name="widen"/> blocks wider each side (distant terrain widens by half a voxel, so a stream thinner
     /// than a voxel still shows). Its surface runs a block over the line's ground; a column in the band whose ground
-    /// stands less than Hump over that surface gets water to the surface, at least a block and at most Deep blocks
-    /// deep. Whole blocks only: a stream steps down with the ground. Columns are wider than creeks, so a creek's water
-    /// spreads too thin over one to fill blocks by its volume: this draws it.</summary>
+    /// stands less than Hump over that surface, and no more than a column's width under it (past a lip), gets water to
+    /// the surface, at least a block and at most Deep blocks deep. Whole blocks only: a stream steps down with the
+    /// ground. Columns are wider than creeks, so a creek's water spreads too thin over one to fill blocks by its volume:
+    /// this draws it.</summary>
     private int StreamWater(Shaped shaped, int x, int z, int top, float widen)
     {
         const float Hump = 2f, Wide = StreamWide;
@@ -835,6 +811,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             // (Ground up to its upper end's surface keeps it, so it runs on to a lip and falls there, see StreamFalls.)
             float surface = from + t * (to - from) + 1f;
             if (top + 1 - (MathF.Max(from, to) + 1f) > Hump - 1) continue;
+            if (surface - top > size) continue; // (ground far under it: past a lip)
             best = Math.Max(best, Math.Max(top + 1, Math.Min((int)MathF.Ceiling(surface) - 1, top + Deep)));
         }
         return best;
@@ -915,7 +892,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
                 {
                     int fx = (int)MathF.Floor(px - uz * o), fz = (int)MathF.Floor(pz + ux * o);
                     int m = SpansAt(fx, fz, spans), ground = m == 0 ? int.MinValue : spans[m - 1].Hi;
-                    if (ground != int.MinValue && ground >= water - FallDrop) continue;
+                    if (ground != int.MinValue && ground >= last.Top - FallDrop) continue; // (by the lip, not past it)
                     fall(fx, fz, water, ground == int.MinValue ? last.Under : ground + 1, ground != int.MinValue);
                 }
                 if (_fallPath[foot].Top == int.MinValue) break; // over the edge

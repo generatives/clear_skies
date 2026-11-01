@@ -21,6 +21,8 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
     /// <summary>How far (blocks) a stream's line bends off a column's middle at most, and how quickly (per column) that
     /// changes from column to column: its meanders.</summary>
     private const float Meander = 2.5f, MeanderFrequency = 0.35f;
+    // (How much lower a neighbour's water may stand with a column's water still standing, see Shape.)
+    private const float Flat = 0.5f;
 
     private readonly ConcurrentDictionary<(int X, int Z), Lazy<Shaped>> _landmasses = new();
 
@@ -130,7 +132,22 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
         var head = new bool[land.Nodes];
         for (int n = 0; n < land.Nodes; n++) head[n] = shown[n] > 0 && pipes.Depth[n] <= settings.Damp;
         for (int n = 0; n < land.Nodes; n++) if (Wet(n) && down[n] >= 0) head[down[n]] = false;
-        return new Shaped(land, start, pipes.Depth, shown, down, way, bend, head, settings);
+        // Still water: deeper than half a block past the damp, with its surface level with every wet neighbour's (none
+        // lower by more than Flat) and none of it pouring over the land's edge. Water running downhill, however deep, is
+        // a stream (see Shaped.Stream).
+        var still = new bool[land.Nodes];
+        for (int n = 0; n < land.Nodes; n++)
+        {
+            float level = land.Floor[n] + pipes.Depth[n];
+            if (pipes.Depth[n] <= settings.Damp + 0.5f) continue;
+            still[n] = true;
+            for (int k = land.LinkStart[n]; k < land.LinkStart[n + 1]; k++)
+            {
+                int m = land.LinkTo[k];
+                if (m < 0 || pipes.Depth[m] > settings.Damp && land.Floor[m] + pipes.Depth[m] < level - Flat) { still[n] = false; break; }
+            }
+        }
+        return new Shaped(land, start, pipes.Depth, shown, down, way, bend, head, still, settings);
     }
 
     /// <summary>A landmass's bounds (blocks, on 32-block lines): where its own ground can be, found on a coarse grid
@@ -154,7 +171,7 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
 /// stream (see HeartWorldGenerator.PlaceWater). The first Damp blocks of water only dampen the ground:
 /// thin water running over a slope shows as none.</summary>
 public sealed class Shaped(Land land, float[] startFloor, float[] depth, float[] flow, int[] down, (sbyte X, sbyte Z)[] way,
-                           float[] bend, bool[] head, LandscapeSettings settings)
+                           float[] bend, bool[] head, bool[] still, LandscapeSettings settings)
 {
     /// <summary>The stream of the column holding (x, z): how wide it runs (sqrt(flow / StreamFlow) blocks; 0 for
     /// none), its line, from the column's middle bent across its way by the column's meander to the same point of the
@@ -214,12 +231,11 @@ public sealed class Shaped(Land land, float[] startFloor, float[] depth, float[]
                 land.Z0 + (int)MathF.Floor((z - land.Z0 + size / 2f) / size) * size);
     }
 
-    /// <summary>The level of standing water (deeper than half a block past the damp) in the column with its middle at
-    /// (x, z), or NaN.</summary>
+    /// <summary>The level of still water (see Shape's still) in the column with its middle at (x, z), or NaN.</summary>
     public float Level(int x, int z)
     {
         int t = TopNodeAt(x, z);
-        return t < 0 || depth[t] <= settings.Damp + 0.5f ? float.NaN : land.Floor[t] + depth[t] - settings.Damp;
+        return t < 0 || !still[t] ? float.NaN : land.Floor[t] + depth[t] - settings.Damp;
     }
 
     /// <summary>The floor (blocks) of the column with its middle at (x, z), or NaN.</summary>
@@ -229,13 +245,13 @@ public sealed class Shaped(Land land, float[] startFloor, float[] depth, float[]
         return t < 0 ? float.NaN : land.Floor[t];
     }
 
-    /// <summary>The water's surface over the column holding block column (x, z) (blocks), or NaN where it's dry: its
-    /// water past the damp that wets all ground.</summary>
+    /// <summary>The still water's surface over the column holding block column (x, z) (blocks), or NaN where there's
+    /// none.</summary>
     public float Surface(int x, int z)
     {
         var (mx, mz) = Middle(x, z);
         int t = TopNodeAt(mx, mz);
-        return t < 0 || depth[t] <= settings.Damp ? float.NaN : land.Floor[t] + depth[t] - settings.Damp;
+        return t < 0 || !still[t] ? float.NaN : land.Floor[t] + depth[t] - settings.Damp;
     }
 
     /// <summary>The top node of the column with its middle at (x, z), or -1.</summary>
