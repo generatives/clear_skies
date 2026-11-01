@@ -16,8 +16,6 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
 {
     public ulong Seed => seed;
     public LandscapeSettings Settings => settings;
-    /// <summary>How far (blocks) a stream drops to the column it runs to before it falls there instead.</summary>
-    private const float FallDrop = 4f;
 
     private readonly ConcurrentDictionary<(int X, int Z), Lazy<Shaped>> _landmasses = new();
 
@@ -63,8 +61,6 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
             for (int k = land.LinkStart[n]; k < land.LinkStart[n + 1]; k++)
                 if (pipes.Flow[k] > most) { most = pipes.Flow[k]; down[n] = land.LinkTo[k]; way[n] = (land.LinkDx[k], land.LinkDz[k]); }
         }
-        bool Falls(int m) => m >= 0 && down[m] < 0 && way[m] != (0, 0);
-        bool Standing(int m) => pipes.Depth[m] > settings.Damp + 0.5f;
         // What each column carries: what the model gains there (rain and springs: what it lets out past what comes in)
         // plus everything handed to it down the tree of main ways. A column hands on once everything handed to it has
         // arrived (up the tree first). Lakes carry too: water going round in one gains nothing, so only what runs in
@@ -113,14 +109,7 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
             var (a, b) = beside[n];
             if (way[n] != (0, 0) && carried[n] >= least && carried[n] > CarriedBy(a) && carried[n] >= CarriedBy(b)) shown[n] = carried[n];
         }
-        // Water falls over the edge where a shown stream or standing water leaves the land, and where a shown stream
-        // drops more than FallDrop blocks to the column it runs to (down a cliff, which a stream can't follow).
-        var falls = new float[land.Nodes];
-        for (int n = 0; n < land.Nodes; n++)
-            if (Falls(n) && (shown[n] >= least || Standing(n))
-                || shown[n] >= least && down[n] >= 0 && land.Floor[n] - land.Floor[down[n]] > FallDrop)
-                falls[n] = Math.Max(shown[n], flow[n]);
-        return new Shaped(land, start, pipes.Depth, shown, down, way, falls, settings);
+        return new Shaped(land, start, pipes.Depth, shown, down, way, settings);
     }
 
     /// <summary>A landmass's bounds (blocks, on 32-block lines): where its own ground can be, found on a coarse grid
@@ -141,10 +130,10 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
 }
 
 /// <summary>One landmass as the model left it: each column's top floor before and after, the water over it, and its
-/// stream and waterfall (see HeartWorldGenerator.PlaceWater). The first Damp blocks of water only dampen the ground:
+/// stream (see HeartWorldGenerator.PlaceWater). The first Damp blocks of water only dampen the ground:
 /// thin water running over a slope shows as none.</summary>
 public sealed class Shaped(Land land, float[] startFloor, float[] depth, float[] flow, int[] down, (sbyte X, sbyte Z)[] way,
-                           float[] falls, LandscapeSettings settings)
+                           LandscapeSettings settings)
 {
     /// <summary>The stream of the column with its middle at (x, z): how wide it runs (sqrt(flow / StreamFlow) blocks;
     /// 0 for none), the middle of the column it runs to and the ground at both ends. A stream that runs over the land's
@@ -160,27 +149,6 @@ public sealed class Shaped(Land land, float[] startFloor, float[] depth, float[]
             return way[t] == (0, 0) ? default : (width, cx + way[t].X * size, cz + way[t].Z * size, land.Floor[t], land.Floor[t]);
         int to = down[t], d = land.ColumnOf[to];
         return (width, land.X0 + d % land.Nx * size, land.Z0 + d / land.Nx * size, land.Floor[t], land.Floor[to]);
-    }
-
-    /// <summary>The waterfall over the land's edge, or down a cliff, from the column with its middle at (x, z): how wide it is (as a
-    /// stream's; 0 for none), which way it leaves (to a neighbouring column), the top of the water going over, the
-    /// column's floor and the bottom of its land (the island's underside there, where it falls to).</summary>
-    public (float Width, int Dx, int Dz, float Top, float Floor, float Bottom) Fall(int x, int z)
-    {
-        int t = TopNodeAt(x, z);
-        if (t < 0 || settings.StreamFlow <= 0 || falls[t] <= 0f) return default;
-        // (The underside: the lowest land of the columns round it, as the face under a lip often leans out.)
-        int c = land.ColumnOf[t], i = c % land.Nx, j = c / land.Nx;
-        float bottom = land.Floor[t];
-        for (int dj = -1; dj <= 1; dj++)
-        for (int di = -1; di <= 1; di++)
-        {
-            int ni = i + di, nj = j + dj;
-            if (ni < 0 || nj < 0 || ni >= land.Nx || nj >= land.Nz || !land.HasLand(ni + land.Nx * nj)) continue;
-            bottom = Math.Min(bottom, land.Base[land.NodeStart[ni + land.Nx * nj]]);
-        }
-        return (MathF.Sqrt(falls[t] / settings.StreamFlow), way[t].X, way[t].Z, land.Floor[t] + Math.Max(1f, depth[t] - settings.Damp),
-                land.Floor[t], bottom);
     }
 
     /// <summary>A column's width, in blocks.</summary>

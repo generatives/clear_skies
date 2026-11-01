@@ -193,7 +193,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             }
         }
 
-        // Waterfalls over the land's edge (see PlaceFalls), in the open.
+        // Waterfalls over drops (see Spill), in the open.
         for (int col = 0; col < S * S; col++)
         {
             int lx = col % S, lz = col / S;
@@ -251,7 +251,6 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
                 CoarseColumn(data, u, v, x, z, c, by0, spans[..count], water);
             }
         }
-        CoarseFalls(data, c, bx0, by0, bz0);
         CoarseSpill(data, shaped, c, bx0, by0, bz0);
         if (c <= S) CoarseTrees(data, pos, level);
     }
@@ -623,8 +622,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
     }
 
     /// <summary>The landscape's water over chunk column (x0, z0): standing water at its level (see PlaceStanding),
-    /// streams along their lines (PlaceStreams) and waterfalls past the land's edge (PlaceFalls), then settled (see
-    /// Settle). Worked out over the chunk column and Pad blocks round it, so both sides of a chunk border agree.</summary>
+    /// streams along their lines (PlaceStreams), then settled (see
+    /// Settle), and spilling over drops (Spill). Worked out over the chunk column and Pad blocks round it, so both sides of a chunk border agree.</summary>
     private void PlaceWater(ColumnProfile p, Shaped? shaped, int x0, int z0)
     {
         Array.Fill(p.Water, int.MinValue);
@@ -639,11 +638,9 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             (_padUnder[PadAt(lx, lz)], _padTop[PadAt(lx, lz)]) = TopAt(p, x0, z0, lx, lz, spans);
         Array.Fill(_padWater, int.MinValue);
         Array.Fill(_padHeight, (byte)8);
-        Array.Fill(_padFall, int.MinValue);
         Array.Clear(_padCarve);
         PlaceStanding(p, shaped, x0, z0);
         PlaceStreams(shaped, x0, z0);
-        PlaceFalls(p, shaped, x0, z0);
         Settle();
         Spill(p);
         for (int lz = 0; lz < S; lz++)
@@ -665,7 +662,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
     private const int Pad = 2, PadSide = S + 2 * Pad;
     private const byte Thin = 2;
     private readonly int[] _padTop = new int[PadSide * PadSide], _padUnder = new int[PadSide * PadSide], _padWater = new int[PadSide * PadSide],
-                           _padFall = new int[PadSide * PadSide], _padSettled = new int[PadSide * PadSide];
+                           _padSettled = new int[PadSide * PadSide];
     private readonly byte[] _padHeight = new byte[PadSide * PadSide];
     private readonly bool[] _padCarve = new bool[PadSide * PadSide];
     private static int PadAt(int lx, int lz) => lx + Pad + PadSide * (lz + Pad);
@@ -685,7 +682,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
                 if (top == int.MinValue || water <= top) continue;
                 foreach (int d in (ReadOnlySpan<int>)[c - 1, c + 1, c - PadSide, c + PadSide])
                 {
-                    bool wet = _padTop[d] != int.MinValue && _padWater[d] > _padTop[d] || _padFall[d] >= water;
+                    bool wet = _padTop[d] != int.MinValue && _padWater[d] > _padTop[d];
                     if (!wet && _padTop[d] < water) water = System.Math.Max(_padTop[d], top + 1);
                 }
                 if (water == _padWater[c]) continue;
@@ -719,89 +716,6 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             if (weights <= 0f) continue;
             int water = WaterTop(sum / weights, top);
             if (water > top) _padWater[at] = water;
-        }
-    }
-
-    /// <summary>Each landscape column's waterfall (see <see cref="Shaped.Fall"/>): as wide as its stream, in the first
-    /// block columns past the lip (see PastLip), down the land's outer face to its underside, or to the ground under it.</summary>
-    private void PlaceFalls(ColumnProfile p, Shaped shaped, int x0, int z0)
-    {
-        int size = shaped.Size;
-        for (int mz = -2 * size; mz <= S + 2 * size; mz += size)
-        for (int mx = -2 * size; mx <= S + 2 * size; mx += size)
-        {
-            var (width, dx, dz, surface, floor, bottom) = shaped.Fall(x0 + mx, z0 + mz);
-            float half = MathF.Min(width, size) / 2;
-            if (half < 0.5f) continue;
-            int top = (int)MathF.Floor(surface - 0.5f); // the top water block going over
-            // Across the way it leaves, a line of block columns half the width either side of the middle.
-            float length = MathF.Sqrt(dx * dx + dz * dz), ux = dx / length, uz = dz / length;
-            for (float o = -half + 0.5f; o <= half - 0.5f + 1e-3f; o += 1f)
-            {
-                if (PastLip(x0 + mx + 0.5f - uz * o, z0 + mz + 0.5f + ux * o, ux, uz, top, floor, bottom, size,
-                            (x, z) => TopAt(p, x0, z0, x - x0, z - z0, _fallSpans).Hi) is not var (x, z, low)) continue;
-                int lx = x - x0, lz = z - z0;
-                if (lx < -Pad || lz < -Pad || lx >= S + Pad || lz >= S + Pad) continue;
-                _padFall[PadAt(lx, lz)] = Math.Max(_padFall[PadAt(lx, lz)], top);
-                if (lx < 0 || lz < 0 || lx >= S || lz >= S) continue;
-                int col = lx + S * lz;
-                p.FallTop[col] = Math.Max(p.FallTop[col], top);
-                p.FallBottom[col] = low;
-            }
-        }
-    }
-
-    private readonly (short Lo, short Hi)[] _fallSpans = new (short, short)[MaxSpans];
-
-    /// <summary>Out from (sx, sz) along (ux, uz), the first block column past a lip: whose ground (<paramref name="groundAt"/>,
-    /// int.MinValue for none) is more than Drop under the <paramref name="floor"/> of the water going over; and the
-    /// bottom of the water falling there: the ground's top, or with none the land's <paramref name="bottom"/>. Null if
-    /// a bank or hill stands over the water first, or there's no lip within a column and a half.</summary>
-    private static (int X, int Z, int Bottom)? PastLip(float sx, float sz, float ux, float uz, int top, float floor, float bottom,
-                                                       int size, Func<int, int, int> groundAt)
-    {
-        const int Drop = 3;
-        for (float a = 0f; a <= size * 1.5f; a += 0.5f)
-        {
-            int x = (int)MathF.Floor(sx + ux * a), z = (int)MathF.Floor(sz + uz * a);
-            int ground = groundAt(x, z);
-            if (ground > top + 1) return null;
-            if (ground >= floor - Drop) continue; // still on the land: further out
-            return (x, z, ground == int.MinValue ? (int)bottom : ground + 1);
-        }
-        return null;
-    }
-
-    /// <summary>The waterfalls of a coarse chunk (voxels <paramref name="c"/> blocks on a side, from world (bx0, by0,
-    /// bz0)): each as PlaceFalls finds it down its middle, in the voxel column that holds it, where it's at least half
-    /// a voxel wide; a voxel at least half under it.</summary>
-    private void CoarseFalls(ChunkData data, int c, int bx0, int by0, int bz0)
-    {
-        var shaped = _landscape?.At(bx0 + S * c / 2, bz0 + S * c / 2);
-        if (shaped == null) return;
-        int size = shaped.Size;
-        Span<(short Lo, short Hi)> spans = stackalloc (short, short)[MaxSpans];
-        int mx0 = (int)MathF.Floor((bx0 - size) / (float)size) * size, mz0 = (int)MathF.Floor((bz0 - size) / (float)size) * size;
-        for (int mz = mz0; mz <= bz0 + S * c + size; mz += size)
-        for (int mx = mx0; mx <= bx0 + S * c + size; mx += size)
-        {
-            var (width, dx, dz, surface, floor, bottom) = shaped.Fall(mx, mz);
-            if (width < System.Math.Max(1f, c / 2f)) continue;
-            int top = (int)MathF.Floor(surface - 0.5f);
-            float length = MathF.Sqrt(dx * dx + dz * dz);
-            if (PastLip(mx + 0.5f, mz + 0.5f, dx / length, dz / length, top, floor, bottom, size, (x, z) =>
-                {
-                    int n = SpansAt(x, z, _fallSpans);
-                    return n > 0 ? _fallSpans[n - 1].Hi : int.MinValue;
-                }) is not var (fx, fz, low)) continue;
-            int u = (int)MathF.Floor((fx - bx0) / (float)c), v = (int)MathF.Floor((fz - bz0) / (float)c);
-            if ((uint)u >= S || (uint)v >= S) continue;
-            for (int w = System.Math.Max((low - by0) / c, 0); w <= System.Math.Min((top - by0) / c, S - 1); w++)
-            {
-                int y0 = by0 + w * c, y1 = y0 + c - 1;
-                if (2 * (System.Math.Min(top, y1) - System.Math.Max(low, y0) + 1) >= c && data.Get(u, w, v) == BlockId.Air)
-                    data.Set(u, w, v, BlockId.Water, WaterLevel.Flowing(0, falling: true));
-            }
         }
     }
 
@@ -849,8 +763,9 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             float t = length2 > 0 ? Math.Clamp((px * dx + pz * dz) / length2, 0f, 1f) : 0f;
             float ox = px - t * dx, oz = pz - t * dz;
             if (ox * ox + oz * oz > reach * reach) continue;
+            // (Ground up to its upper end's surface keeps it, so it runs on to a lip and spills there, see Spill.)
             float surface = from + t * (to - from) + 1f;
-            if (top + 1 - surface > Hump - 1) continue;
+            if (top + 1 - (MathF.Max(from, to) + 1f) > Hump - 1) continue;
             best = Math.Max(best, Math.Max(top + 1, Math.Min((int)MathF.Ceiling(surface) - 1, top + Deep)));
         }
         return best;
@@ -930,7 +845,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         return _profile!.Carved[(x & (S - 1)) + S * (z & (S - 1))];
     }
 
-    /// <summary>The waterfall in block column (x, z), as Generate places it (see PlaceFalls): its top and bottom water
+    /// <summary>The waterfall in block column (x, z), as Generate places it (see Spill): its top and bottom water
     /// blocks, or Top int.MinValue for none.</summary>
     public (int Top, int Bottom) FallAt(int x, int z)
     {
