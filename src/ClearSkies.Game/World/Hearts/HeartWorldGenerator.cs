@@ -246,12 +246,14 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
                 int x = bx0 + u * c + c / 2, z = bz0 + v * c + c / 2;
                 int count = ColumnSpans(x - cx * S, z - cz * S, spans);
                 if (count == 0) continue;
-                int at = VoxAt(u, v), water = CoarseWater(shaped, x, z, spans[count - 1].Hi, c);
-                (_voxUnder[at], _voxTop[at], _voxWater[at]) = (spans[count - 1].Lo, spans[count - 1].Hi, water);
+                int at = VoxAt(u, v);
+                var (water, stream) = CoarseWater(shaped, x, z, spans[count - 1].Hi, c);
+                (_voxUnder[at], _voxTop[at], _voxWater[at], _voxStream[at]) = (spans[count - 1].Lo, spans[count - 1].Hi, water, stream);
                 CoarseColumn(data, u, v, x, z, c, by0, spans[..count], water);
             }
         }
         CoarseSpill(data, shaped, c, bx0, by0, bz0);
+        CoarseStreamFalls(data, shaped, c, bx0, by0, bz0);
         if (c <= S) CoarseTrees(data, pos, level);
     }
 
@@ -259,13 +261,15 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
     // top blocks) and top water block (int.MinValue for none).
     private const int VoxSide = S + 2;
     private readonly int[] _voxUnder = new int[VoxSide * VoxSide], _voxTop = new int[VoxSide * VoxSide], _voxWater = new int[VoxSide * VoxSide];
+    private readonly bool[] _voxStream = new bool[VoxSide * VoxSide];
+    private readonly int[] _voxFallTop = new int[S * S], _voxFallBottom = new int[S * S];
     private static int VoxAt(int u, int v) => u + 1 + VoxSide * (v + 1);
 
     /// <summary>Water spills over a drop in a coarse chunk (voxels <paramref name="c"/> blocks on a side, from world
     /// (bx0, by0, bz0)), as Spill has it in full detail, voxel column by voxel column: a dry one beside a wet one whose
     /// ground stands more than SpillDrop blocks a voxel under that water, or that has none, gets the voxels at least
     /// half under the water falling from that water's top to its ground, or with none to the bottom of the wet one's
-    /// land.</summary>
+    /// land. Still water only: a stream falls as its stream does (see CoarseStreamFalls).</summary>
     private void CoarseSpill(ChunkData data, Shaped? shaped, int c, int bx0, int by0, int bz0)
     {
         if (shaped == null) return;
@@ -277,7 +281,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             int x = bx0 + u * c + c / 2, z = bz0 + v * c + c / 2, count = SpansAt(x, z, spans), at = VoxAt(u, v);
             if (count == 0) { _voxTop[at] = int.MinValue; continue; }
             (_voxUnder[at], _voxTop[at]) = (spans[count - 1].Lo, spans[count - 1].Hi);
-            _voxWater[at] = CoarseWater(shaped, x, z, _voxTop[at], c);
+            (_voxWater[at], _voxStream[at]) = CoarseWater(shaped, x, z, _voxTop[at], c);
         }
         for (int v = 0; v < S; v++)
         for (int u = 0; u < S; u++)
@@ -288,7 +292,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             foreach (int d in (ReadOnlySpan<int>)[at - 1, at + 1, at - VoxSide, at + VoxSide])
             {
                 int water = _voxWater[d];
-                if (_voxTop[d] == int.MinValue || water <= _voxTop[d] || top != int.MinValue && top >= water - SpillDrop * c) continue;
+                if (_voxTop[d] == int.MinValue || water <= _voxTop[d] || _voxStream[d] || top != int.MinValue && top >= water - SpillDrop * c) continue;
                 fallTop = System.Math.Max(fallTop, water);
                 bottom = System.Math.Min(bottom, top != int.MinValue ? top + 1 : _voxUnder[d]);
             }
@@ -297,6 +301,33 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             {
                 int y0 = by0 + w * c, y1 = y0 + c - 1;
                 if (2 * (System.Math.Min(fallTop, y1) - System.Math.Max(bottom, y0) + 1) >= c && data.Get(u, w, v) == BlockId.Air)
+                    data.Set(u, w, v, BlockId.Water, WaterLevel.Flowing(0, falling: true));
+            }
+        }
+    }
+
+    /// <summary>The streams' waterfalls (see StreamFalls) in a coarse chunk (voxels <paramref name="c"/> blocks on a
+    /// side, from world (bx0, by0, bz0)): a voxel column holding any fall column falls from the highest top to the
+    /// lowest bottom of those in it, in its voxels at least half under that.</summary>
+    private void CoarseStreamFalls(ChunkData data, Shaped? shaped, int c, int bx0, int by0, int bz0)
+    {
+        Array.Fill(_voxFallTop, int.MinValue);
+        StreamFalls(shaped, bx0, bz0, (x, z, top, bottom) =>
+        {
+            int u = (int)MathF.Floor((x - bx0) / (float)c), v = (int)MathF.Floor((z - bz0) / (float)c);
+            if ((uint)u >= S || (uint)v >= S) return;
+            int i = u + S * v;
+            _voxFallBottom[i] = _voxFallTop[i] == int.MinValue ? bottom : System.Math.Min(_voxFallBottom[i], bottom);
+            _voxFallTop[i] = System.Math.Max(_voxFallTop[i], top);
+        }, S * c);
+        for (int i = 0; i < S * S; i++)
+        {
+            int top = _voxFallTop[i], bottom = _voxFallBottom[i], u = i % S, v = i / S;
+            if (top == int.MinValue) continue;
+            for (int w = System.Math.Max((int)MathF.Floor((bottom - by0) / (float)c), 0); w <= System.Math.Min((int)MathF.Floor((top - by0) / (float)c), S - 1); w++)
+            {
+                int y0 = by0 + w * c, y1 = y0 + c - 1;
+                if (2 * (System.Math.Min(top, y1) - System.Math.Max(bottom, y0) + 1) >= c && data.Get(u, w, v) == BlockId.Air)
                     data.Set(u, w, v, BlockId.Water, WaterLevel.Flowing(0, falling: true));
             }
         }
@@ -335,7 +366,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
                 {
                     int hi = spans[s].Hi;
                     if (hi + Trees.MaxHeight < by0 || hi > by1) continue;
-                    if (s + 1 == count && CoarseWater(_landscape?.At(x, z), x, z, hi, 1) > hi) continue; // (not in water)
+                    if (s + 1 == count && CoarseWater(_landscape?.At(x, z), x, z, hi, 1).Water > hi) continue; // (not in water)
                     float heat = Biomes.Heat(hi, _terrain.Heat(x, z)), wet = _terrain.Wet(x, z);
                     var biome = Biomes.Pick(heat, wet);
                     float bare = s + 1 < count && spans[s + 1].Lo - hi < ShadeReach ? Shaded : 0f;
@@ -643,6 +674,15 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         PlaceStreams(shaped, x0, z0);
         Settle();
         Spill(p);
+        StreamFalls(shaped, x0, z0, (x, z, top, bottom) =>
+        {
+            int lx = x - x0, lz = z - z0;
+            if ((uint)lx >= S || (uint)lz >= S) return;
+            int col = lx + S * lz;
+            if (_padTop[PadAt(lx, lz)] != int.MinValue && _padWater[PadAt(lx, lz)] >= top) return; // (under water already)
+            p.FallBottom[col] = p.FallTop[col] == int.MinValue ? bottom : System.Math.Min(p.FallBottom[col], bottom);
+            p.FallTop[col] = System.Math.Max(p.FallTop[col], top);
+        });
         for (int lz = 0; lz < S; lz++)
         for (int lx = 0; lx < S; lx++)
         {
@@ -746,7 +786,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
     /// spreads too thin over one to fill blocks by its volume: this draws it.</summary>
     private int StreamWater(Shaped shaped, int x, int z, int top, float widen)
     {
-        const float Hump = 2f, Wide = 3f, Wander = 2f;
+        const float Hump = 2f, Wide = StreamWide, Wander = 2f;
         const int Deep = 2;
         int size = shaped.Size, best = int.MinValue, r = 2 + (int)MathF.Ceiling(widen / size);
         int bx = (int)MathF.Floor(x / (float)size) * size, bz = (int)MathF.Floor(z / (float)size) * size;
@@ -786,12 +826,16 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         return count > 0 ? spans[count - 1] : (int.MinValue, int.MinValue);
     }
 
+    // (How many times a stream's width its band is, see StreamWater.)
+    private const float StreamWide = 3f;
+
     // (How far, in blocks a block or voxel, ground stands under water beside it before the water spills.)
     private const int SpillDrop = 4;
 
     /// <summary>Water spills over a drop: a dry block column of the chunk column beside a wet one whose ground stands
     /// more than SpillDrop under that water, or that has none, gets water falling from that water's top to its
-    /// ground, or with none to the bottom of the wet column's land.</summary>
+    /// ground, or with none to the bottom of the wet column's land. Still water only: a stream falls as its stream
+    /// (see StreamFalls).</summary>
     private void Spill(ColumnProfile p)
     {
         for (int lz = 0; lz < S; lz++)
@@ -802,12 +846,70 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             foreach (int d in (ReadOnlySpan<int>)[at - 1, at + 1, at - PadSide, at + PadSide])
             {
                 // (A stream's carved bed and its water sit a block lower, see PlaceWater.)
-                if (_padTop[d] == int.MinValue || _padWater[d] <= _padTop[d]) continue;
-                int water = _padWater[d] - (_padCarve[d] ? 1 : 0);
+                if (_padTop[d] == int.MinValue || _padWater[d] <= _padTop[d] || _padCarve[d]) continue; // (streams: StreamFalls)
+                int water = _padWater[d];
                 if (top != int.MinValue && top >= water - SpillDrop) continue;
                 int bottom = top != int.MinValue ? top + 1 : _padUnder[d];
                 p.FallBottom[col] = p.FallTop[col] == int.MinValue ? bottom : System.Math.Min(p.FallBottom[col], bottom);
                 p.FallTop[col] = System.Math.Max(p.FallTop[col], water);
+            }
+        }
+    }
+
+    /// <summary>The waterfalls of the streams (see <see cref="Shaped.Stream"/>) whose lines pass near the chunk column
+    /// (or coarse chunk) at (x0, z0), <paramref name="span"/> blocks wide: walking each line (where its band runs, with
+    /// the wander) from its column's middle to the middle of the one it runs to, every block column whose ground stands
+    /// more than SpillDrop under the last one's, or that has none, starts a fall as wide as the stream, across its line:
+    /// from the stream's top water block over the last column down to each column's ground, or with none to the
+    /// bottom of the last column's land. The walk carries on down a ledge and stops where ground rises over the water
+    /// or there is none. Each fall column goes to <paramref name="fall"/> (x, z, top, bottom).</summary>
+    private void StreamFalls(Shaped? shaped, int x0, int z0, Action<int, int, int, int> fall, int span = S)
+    {
+        const float Wander = 2f;
+        if (shaped == null) return;
+        int size = shaped.Size;
+        Span<(short Lo, short Hi)> spans = stackalloc (short, short)[MaxSpans];
+        int mx0 = (int)MathF.Floor((x0 - 2 * size) / (float)size) * size, mz0 = (int)MathF.Floor((z0 - 2 * size) / (float)size) * size;
+        for (int mz = mz0; mz <= z0 + span + 2 * size; mz += size)
+        for (int mx = mx0; mx <= x0 + span + 2 * size; mx += size)
+        {
+            var (width, toX, toZ, from, to) = shaped.Stream(mx, mz);
+            float half = MathF.Min(width * StreamWide, size) / 2; // (as wide as its band, see StreamWater)
+            if (half < 0.5f) continue;
+            float dx = toX - mx, dz = toZ - mz, length = MathF.Sqrt(dx * dx + dz * dz);
+            if (length <= 0) continue;
+            float ux = dx / length, uz = dz / length;
+            int lastX = int.MinValue, lastZ = int.MinValue, lastTop = int.MinValue, lastUnder = 0, water = 0;
+            for (float a = 0; a <= length + 0.01f; a += 0.5f)
+            {
+                float px = mx + 0.5f + ux * a, pz = mz + 0.5f + uz * a;
+                // (Where the band runs here: StreamWater wanders the point it looks from, so the band moves the other way.)
+                px -= Wander * _crack.GetNoise(px * 2.5f, pz * 2.5f);
+                pz -= Wander * _crack.GetNoise(px * 2.5f + 1000f, pz * 2.5f);
+                int x = (int)MathF.Floor(px), z = (int)MathF.Floor(pz);
+                if (x == lastX && z == lastZ) continue;
+                int n = SpansAt(x, z, spans);
+                int top = n == 0 ? int.MinValue : spans[n - 1].Hi;
+                if (lastX != int.MinValue)
+                {
+                    if (top != int.MinValue && top > water) break; // a bank over the water
+                    if (top == int.MinValue || lastTop - top > SpillDrop)
+                    {
+                        // Across the line, the stream's width of columns.
+                        for (float o = -half + 0.5f; o <= half - 0.5f + 1e-3f; o += 1f)
+                        {
+                            int fx = (int)MathF.Floor(px - uz * o), fz = (int)MathF.Floor(pz + ux * o);
+                            int m = SpansAt(fx, fz, spans), ground = m == 0 ? int.MinValue : spans[m - 1].Hi;
+                            if (ground != int.MinValue && ground >= water - SpillDrop) continue;
+                            fall(fx, fz, water, ground == int.MinValue ? lastUnder : ground + 1);
+                        }
+                        if (top == int.MinValue) break; // over the edge
+                    }
+                }
+                (lastX, lastZ, lastTop) = (x, z, top);
+                if (n > 0) lastUnder = spans[n - 1].Lo;
+                int w = StreamWater(shaped, x, z, top, 0f);
+                water = w > top ? w : top + 1;
             }
         }
     }
@@ -823,9 +925,14 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
 
     /// <summary>The top water block over ground topped at <paramref name="hi"/> at block column (x, z), for distant
     /// terrain with voxels <paramref name="c"/> blocks wide, or int.MinValue: the landscape's still water there, or a
-    /// stream's (see StreamWater) on any voxel whose middle is within half a voxel of its band.</summary>
-    private int CoarseWater(Shaped? shaped, int x, int z, int hi, int c)
-        => shaped == null ? int.MinValue : Math.Max(WaterTop(shaped.Surface(x, z), hi), StreamWater(shaped, x, z, hi, c / 2f));
+    /// stream's (see StreamWater) on any voxel whose middle is within half a voxel of its band; and whether it's a
+    /// stream's (which falls as its stream does, see StreamFalls, rather than spilling).</summary>
+    private (int Water, bool Stream) CoarseWater(Shaped? shaped, int x, int z, int hi, int c)
+    {
+        if (shaped == null) return (int.MinValue, false);
+        int still = WaterTop(shaped.Surface(x, z), hi), stream = StreamWater(shaped, x, z, hi, c / 2f);
+        return stream > still ? (stream, true) : (still, false);
+    }
 
     /// <summary>The landscape's water surface over the column holding block column (x, z), or NaN (for distant
     /// terrain, whose voxels are as wide as columns or wider: there, a column's water is level).</summary>
