@@ -124,7 +124,11 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
             int c = land.ColumnOf[n];
             bend[n] = Meander * bendNoise.GetNoise(c % land.Nx, c / land.Nx);
         }
-        return new Shaped(land, start, pipes.Depth, shown, down, way, bend, settings);
+        // A stream's head: a shown stream no shown stream runs into, where it springs from the ground.
+        var head = new bool[land.Nodes];
+        for (int n = 0; n < land.Nodes; n++) head[n] = shown[n] > 0;
+        for (int n = 0; n < land.Nodes; n++) if (shown[n] > 0 && down[n] >= 0) head[down[n]] = false;
+        return new Shaped(land, start, pipes.Depth, shown, down, way, bend, head, settings);
     }
 
     /// <summary>A landmass's bounds (blocks, on 32-block lines): where its own ground can be, found on a coarse grid
@@ -148,13 +152,13 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
 /// stream (see HeartWorldGenerator.PlaceWater). The first Damp blocks of water only dampen the ground:
 /// thin water running over a slope shows as none.</summary>
 public sealed class Shaped(Land land, float[] startFloor, float[] depth, float[] flow, int[] down, (sbyte X, sbyte Z)[] way,
-                           float[] bend, LandscapeSettings settings)
+                           float[] bend, bool[] head, LandscapeSettings settings)
 {
     /// <summary>The stream of the column holding (x, z): how wide it runs (sqrt(flow / StreamFlow) blocks; 0 for
     /// none), its line, from the column's middle bent across its way by the column's meander to the same point of the
     /// column it runs to (in blocks, block centres at .5), and the ground at both ends. A stream that runs over the
-    /// land's edge runs on level to the middle of the column past it.</summary>
-    public (float Width, float FromX, float FromZ, float ToX, float ToZ, float From, float To) Stream(int x, int z)
+    /// land's edge runs on level to the middle of the column past it. Head: no stream runs into it (it springs here).</summary>
+    public (float Width, float FromX, float FromZ, float ToX, float ToZ, float From, float To, bool Head) Stream(int x, int z)
     {
         int t = TopNodeAt(x, z);
         if (t < 0 || settings.StreamFlow <= 0 || flow[t] <= 0f || way[t] == (0, 0)) return default;
@@ -163,10 +167,10 @@ public sealed class Shaped(Land land, float[] startFloor, float[] depth, float[]
         if (down[t] < 0)
         {
             var (mx, mz) = Middle(t);
-            return (width, fx, fz, mx + way[t].X * land.Size, mz + way[t].Z * land.Size, land.Floor[t], land.Floor[t]);
+            return (width, fx, fz, mx + way[t].X * land.Size, mz + way[t].Z * land.Size, land.Floor[t], land.Floor[t], head[t]);
         }
         var (tx, tz) = Bent(down[t]);
-        return (width, fx, fz, tx, tz, land.Floor[t], land.Floor[down[t]]);
+        return (width, fx, fz, tx, tz, land.Floor[t], land.Floor[down[t]], head[t]);
     }
 
     /// <summary>The middle of node <paramref name="n"/>'s column (a block centre).</summary>

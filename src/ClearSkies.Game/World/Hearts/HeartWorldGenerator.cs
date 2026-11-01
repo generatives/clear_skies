@@ -151,7 +151,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             for (int s = 0; s < p.Count(col); s++)
             {
                 var (lo, hi) = p.Spans[p.Start[col] + s];
-                if (p.Carved[col] && s + 1 == p.Count(col)) hi--;
+                if (s + 1 == p.Count(col) && p.Cut[col] < hi) hi = (short)System.Math.Max(p.Cut[col], lo); // (see PlaceWater)
                 int y0 = System.Math.Max(lo, originY), y1 = System.Math.Min(hi, originY + S - 1);
                 for (int y = y0; y <= y1; y++)
                     data.Set(lx, y - originY, lz, ContinentTerrain.Block(y, hi, p.Strata[col], p.Patch[col], p.Bare[p.Start[col] + s], p.Biome[p.Start[col] + s], p.Dry[p.Start[col] + s]));
@@ -264,7 +264,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         Array.Fill(_voxFallTop, int.MinValue);
         Array.Clear(_voxFallColumns);
         var seen = new HashSet<(int, int)>();
-        StreamFalls(shaped, bx0, bz0, (x, z, top, bottom) =>
+        StreamFalls(shaped, bx0, bz0, (x, z, top, bottom, _) =>
         {
             int u = (int)MathF.Floor((x - bx0) / (float)c), v = (int)MathF.Floor((z - bz0) / (float)c);
             if ((uint)u >= S || (uint)v >= S) return;
@@ -613,39 +613,80 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         Array.Fill(p.Water, int.MinValue);
         Array.Fill(p.WaterHeight, (byte)8);
         Array.Fill(p.FallTop, int.MinValue);
-        Array.Clear(p.Carved);
+        Array.Fill(p.Cut, int.MaxValue);
         if (shaped == null) return;
         // Worked out over the chunk column and Pad blocks round it (see Settle), in _pad*.
         Span<(short Lo, short Hi)> spans = stackalloc (short, short)[MaxSpans];
         for (int lz = -Pad; lz < S + Pad; lz++)
         for (int lx = -Pad; lx < S + Pad; lx++)
             _padTop[PadAt(lx, lz)] = TopAt(p, x0, z0, lx, lz, spans);
+        Array.Copy(_padTop, _padGround, _padTop.Length);
         Array.Fill(_padWater, int.MinValue);
         Array.Fill(_padHeight, (byte)8);
         Array.Clear(_padCarve);
         PlaceStanding(p, shaped, x0, z0);
         PlaceStreams(shaped, x0, z0);
+        // A stream sinks a block into its bed, so it runs in a trench level with the ground beside it.
+        for (int i = 0; i < _padTop.Length; i++)
+            if (_padCarve[i] && _padTop[i] != int.MinValue && _padWater[i] > _padTop[i]) { _padTop[i]--; _padWater[i]--; }
+        PlaceSprings(shaped, x0, z0);
         Settle();
-        StreamFalls(shaped, x0, z0, (x, z, top, bottom) =>
-        {
-            int lx = x - x0, lz = z - z0;
-            if ((uint)lx >= S || (uint)lz >= S) return;
-            int col = lx + S * lz;
-            if (_padTop[PadAt(lx, lz)] != int.MinValue && _padWater[PadAt(lx, lz)] >= top) return; // (under water already)
-            p.FallBottom[col] = p.FallTop[col] == int.MinValue ? bottom : System.Math.Min(p.FallBottom[col], bottom);
-            p.FallTop[col] = System.Math.Max(p.FallTop[col], top);
-        });
         for (int lz = 0; lz < S; lz++)
         for (int lx = 0; lx < S; lx++)
         {
             int col = lx + S * lz, at = PadAt(lx, lz);
             p.Water[col] = _padWater[at];
             p.WaterHeight[col] = _padHeight[at];
-            // A stream sinks a block into its bed, so it runs in a trench level with the ground beside it.
-            int count = p.Count(col);
-            p.Carved[col] = _padCarve[at] && _padWater[at] > _padTop[at] && count > 0
-                            && p.Spans[p.Start[col] + count - 1].Hi > p.Spans[p.Start[col] + count - 1].Lo;
-            if (p.Carved[col]) p.Water[col]--;
+            if (_padTop[at] < _padGround[at]) p.Cut[col] = _padTop[at];
+        }
+        StreamFalls(shaped, x0, z0, (x, z, top, bottom, landed) =>
+        {
+            int lx = x - x0, lz = z - z0;
+            if ((uint)lx >= S || (uint)lz >= S) return;
+            int col = lx + S * lz;
+            if (p.Water[col] != int.MinValue && p.Water[col] >= top) return; // (under water already)
+            p.FallBottom[col] = p.FallTop[col] == int.MinValue ? bottom : System.Math.Min(p.FallBottom[col], bottom);
+            p.FallTop[col] = System.Math.Max(p.FallTop[col], top);
+            if (!landed) return;
+            // A plunge pool where it lands: the ground sinks PoolDepth blocks, full of water to where it was.
+            int ground = bottom - 1;
+            p.Cut[col] = System.Math.Min(p.Cut[col], ground - PoolDepth);
+            if (ground > p.Water[col]) { p.Water[col] = ground; p.WaterHeight[col] = 8; }
+        });
+    }
+
+    // (How deep a plunge pool is, see PlaceWater.)
+    private const int PoolDepth = 2;
+
+    /// <summary>Springs: where a stream starts (see Shaped.Stream's Head), it comes out of a notch cut back into the
+    /// ground up to SpringReach blocks behind its start, as wide as its band: ground there over the stream's water is cut
+    /// down to just under it (if no more than SpringDepth blocks), and water put over it, level with the stream's.</summary>
+    private void PlaceSprings(Shaped shaped, int x0, int z0)
+    {
+        const float SpringReach = 4f;
+        const int SpringDepth = 6;
+        int size = shaped.Size;
+        int mx0 = (int)MathF.Floor((x0 - Pad - size) / (float)size) * size, mz0 = (int)MathF.Floor((z0 - Pad - size) / (float)size) * size;
+        for (int mz = mz0; mz <= z0 + S + Pad + size; mz += size)
+        for (int mx = mx0; mx <= x0 + S + Pad + size; mx += size)
+        {
+            var (width, ax, az, toX, toZ, from, _, head) = shaped.Stream(mx, mz);
+            float half = MathF.Min(width * StreamWide, size) / 2;
+            if (!head || half < 0.5f) continue;
+            float dx = toX - ax, dz = toZ - az, length = MathF.Sqrt(dx * dx + dz * dz);
+            if (length <= 0) continue;
+            float ux = dx / length, uz = dz / length;
+            int water = (int)MathF.Ceiling(from + 1f) - 2; // (the stream's top water block at its start, sunk a block)
+            for (float a = 0; a <= SpringReach; a += 0.5f)
+            for (float o = -half; o <= half; o += 0.5f)
+            {
+                int lx = (int)MathF.Floor(ax - ux * a - uz * o) - x0, lz = (int)MathF.Floor(az - uz * a + ux * o) - z0;
+                if (lx < -Pad || lz < -Pad || lx >= S + Pad || lz >= S + Pad) continue;
+                int at = PadAt(lx, lz), top = _padTop[at];
+                if (top == int.MinValue || top - (water - 1) > SpringDepth) continue;
+                if (top >= water) _padTop[at] = water - 1;
+                if (water > _padWater[at]) { _padWater[at] = water; _padHeight[at] = 8; }
+            }
         }
     }
 
@@ -657,6 +698,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
                            _padSettled = new int[PadSide * PadSide];
     private readonly byte[] _padHeight = new byte[PadSide * PadSide];
     private readonly bool[] _padCarve = new bool[PadSide * PadSide];
+    private readonly int[] _padGround = new int[PadSide * PadSide]; // (the top block before any cut)
     private static int PadAt(int lx, int lz) => lx + Pad + PadSide * (lz + Pad);
 
     /// <summary>Water settles: none stands more than a block deep over a dry neighbour's ground, where it would run
@@ -746,7 +788,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         for (int i = -r; i <= r; i++)
         {
             int mx = bx + i * size, mz = bz + j * size;
-            var (width, ax, az, toX, toZ, from, to) = shaped.Stream(mx, mz);
+            var (width, ax, az, toX, toZ, from, to, _) = shaped.Stream(mx, mz);
             float half = MathF.Min(width * Wide, size) / 2;
             if (half < 0.5f) continue;
             float reach = half + widen, dx = toX - ax, dz = toZ - az, length2 = dx * dx + dz * dz;
@@ -788,8 +830,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
     /// starts a fall as wide as the stream (its band is a few times wider), across its line: from the stream's top water
     /// block over the last column down to each column's ground, or with none to the bottom of the last column's land.
     /// The walk carries on down a ledge and stops where ground rises over the water or there is none. Each fall column
-    /// goes to <paramref name="fall"/> (x, z, top, bottom).</summary>
-    private void StreamFalls(Shaped? shaped, int x0, int z0, Action<int, int, int, int> fall, int span = S)
+    /// goes to <paramref name="fall"/> (x, z, top, bottom, whether it lands on ground).</summary>
+    private void StreamFalls(Shaped? shaped, int x0, int z0, Action<int, int, int, int, bool> fall, int span = S)
     {
         if (shaped == null) return;
         int size = shaped.Size;
@@ -798,7 +840,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         for (int mz = mz0; mz <= z0 + span + 2 * size; mz += size)
         for (int mx = mx0; mx <= x0 + span + 2 * size; mx += size)
         {
-            var (width, ax, az, toX, toZ, _, _) = shaped.Stream(mx, mz);
+            var (width, ax, az, toX, toZ, _, _, _) = shaped.Stream(mx, mz);
             if (MathF.Min(width * StreamWide, size) < 1f) continue; // (no band, see StreamWater)
             float half = MathF.Max(0.5f, MathF.Min(width, size) / 2); // (as wide as the stream: its band is wider)
             float dx = toX - ax, dz = toZ - az, length = MathF.Sqrt(dx * dx + dz * dz);
@@ -823,7 +865,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
                             int fx = (int)MathF.Floor(px - uz * o), fz = (int)MathF.Floor(pz + ux * o);
                             int m = SpansAt(fx, fz, spans), ground = m == 0 ? int.MinValue : spans[m - 1].Hi;
                             if (ground != int.MinValue && ground >= water - FallDrop) continue;
-                            fall(fx, fz, water, ground == int.MinValue ? lastUnder : ground + 1);
+                            fall(fx, fz, water, ground == int.MinValue ? lastUnder : ground + 1, ground != int.MinValue);
                         }
                         if (top == int.MinValue) break; // over the edge
                     }
@@ -862,11 +904,11 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         return _profile!.Water[(x & (S - 1)) + S * (z & (S - 1))];
     }
 
-    /// <summary>Whether a stream sank block column (x, z)'s top block (see PlaceWater).</summary>
-    public bool CarvedAt(int x, int z)
+    /// <summary>Where water cut block column (x, z)'s top down to (see ColumnProfile.Cut), or int.MaxValue.</summary>
+    public int CutAt(int x, int z)
     {
         Prepare(x >> 5, z >> 5);
-        return _profile!.Carved[(x & (S - 1)) + S * (z & (S - 1))];
+        return _profile!.Cut[(x & (S - 1)) + S * (z & (S - 1))];
     }
 
     /// <summary>The waterfall in block column (x, z), as Generate places it (see StreamFalls): its top and bottom water
@@ -1133,7 +1175,9 @@ public sealed class ColumnProfile
     /// <summary>Per block column, falling water over the land's edge: from FallBottom up to FallTop (none if under).</summary>
     public readonly int[] FallTop = new int[Columns], FallBottom = new int[Columns];
     /// <summary>Per block column, whether a stream sank its top span's top block (see PlaceWater).</summary>
-    public readonly bool[] Carved = new bool[Columns];
+    /// <summary>Per block column, where its top span's top is cut down to by water (int.MaxValue for nowhere): a stream's
+    /// bed, a spring's notch, a plunge pool.</summary>
+    public readonly int[] Cut = new int[Columns];
 
     public int Count(int col) => Start[col + 1] - Start[col];
 
