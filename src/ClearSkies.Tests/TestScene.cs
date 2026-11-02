@@ -60,12 +60,12 @@ public sealed class HeadlessScene : IDisposable
         ChunkPipeline = new ChunkPipelineSystem(World);
         ColliderStages.Add(ChunkPipeline, Physics);
         var root = World.CreateEntity();
-        WorldVolume = new ChunkVolume(root, World) { ChunksOwnPresence = true };
+        WorldVolume = new ChunkVolume(root, World);
         root.Set(new ChunkGrid { Volume = WorldVolume });
         root.Set(EntityRegistry.WorldVolume);
         root.Set<Rendered>();
 
-        Presence = new EntityPresenceSystem(World, Session, WorldVolume, viewDistance: 500f);
+        Presence = new EntityPresenceSystem(World, Session, viewDistance: 500f);
         Commands = new CommandSystem(Session, Registry, () => Clock.Tick);
         Blocks = new BlockEntities(World, Registry);
         GameCommands.RegisterAll(Commands, World, Session, Blocks, Limits, Registry, Physics, Selection);

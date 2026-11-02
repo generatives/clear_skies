@@ -54,7 +54,7 @@ public class HeadlessStreamingTests
     internal static TerrainInterest View(float radius) => new() { ColliderRadius = 16, DrawRadius = radius };
     private static TerrainInterest Colliders(float radius) => new() { ColliderRadius = radius };
 
-    /// <summary>Runs streaming until it's quiet: nothing loading and nothing changing for a second of frames (at least
+    /// <summary>Runs streaming until it's quiet: nothing loading or being made and nothing changing for a second of frames (at least
     /// <paramref name="frames"/> frames, at most 20 s); with the clock, if any, moved on a frame each frame.</summary>
     internal static void Settle(ChunkLoadSystem load, int frames = 60, ClearSkies.Engine.Core.Time? time = null)
     {
@@ -64,10 +64,10 @@ public class HeadlessStreamingTests
         {
             Frame(load);
             time?.Advance(1 / 60.0);
-            bool idle = load.ColumnsInFlight == 0 && load.LoadedChunks == last;
+            bool idle = load.ColumnsInFlight == 0 && PipelineOf(load).Pipeline.WorkerJobs == 0 && load.LoadedChunks == last;
             quiet = idle ? quiet + 1 : 0;
             last = load.LoadedChunks;
-            if (load.ColumnsInFlight > 0) Thread.Sleep(1);
+            if (!idle) Thread.Sleep(1);
         }
     }
 
@@ -355,7 +355,7 @@ public class HeadlessStreamingTests
         int viewOnly = load.LoadedChunks;
 
         var far = new Vector3D<float>(3200, 0, 3200);
-        var ship = Interest(scene, far.X, far.Z, Colliders(48));
+        var ship = Interest(scene, far.X, far.Z, Colliders(96));
         Settle(load);
         Assert.True(load.IsTerrainLoaded(far, 32));
         Assert.True(load.LoadedChunks > viewOnly);
@@ -382,7 +382,7 @@ public class HeadlessStreamingTests
         var limited = Streaming(scene2, db, maxChunks: view - 4 * 8, viewDistance: 160);
         Interest(scene2, 16, 16, View(160));
         var far = new Vector3D<float>(3200, 0, 3200);
-        Interest(scene2, far.X, far.Z, Colliders(48));
+        Interest(scene2, far.X, far.Z, Colliders(96));
         Settle(limited);
         Assert.True(limited.IsTerrainLoaded(far, 32));
         Assert.True(limited.IsTerrainLoaded(new Vector3D<float>(16, 0, 16), 64));

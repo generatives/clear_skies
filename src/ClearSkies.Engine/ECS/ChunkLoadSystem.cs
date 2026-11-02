@@ -5,6 +5,7 @@ using ClearSkies.Engine.Rendering;
 using ClearSkies.Engine.Voxels;
 using ClearSkies.Engine.Generation;
 using ClearSkies.Engine.Persistence;
+using ClearSkies.Engine.Pipeline;
 using DefaultEcs;
 using ImGuiNET;
 using Silk.NET.Maths;
@@ -78,10 +79,11 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
     private readonly Dictionary<int, (short dx, short dz, int d)[]> _offsetsByDistance = new();
     private readonly float _viewDistance; // the farthest anything is drawn in full detail
 
-    /// <summary>An interest as a level streams it: its entity, the chunk it's streamed around (in the level's chunks),
-    /// and its radius in chunks: either whole columns within it, or a ball of 2x2x2 groups of chunks (the view's, while
-    /// there are coarse levels, see <see cref="InRange"/>), so each chunk of the next level has its eight together.</summary>
-    internal readonly record struct Ring(Entity Interest, (int x, int y, int z) Centre, int Radius, bool Ball);
+    /// <summary>An interest as a level streams it, for one purpose (its chunks are drawn, or collided with): its entity,
+    /// the chunk it's streamed around (in the level's chunks), and its radius in chunks: either whole columns within it,
+    /// or a ball of 2x2x2 groups of chunks (colliders', and the view's while there are coarse levels, see
+    /// <see cref="InRange"/>), so each chunk of the next level has its eight together.</summary>
+    internal readonly record struct Ring(Entity Interest, (int x, int y, int z) Centre, int Radius, bool Ball, Purpose For);
 
     private readonly HashSet<Entity> _seen = new();
     private readonly World _world;
@@ -224,37 +226,28 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
     private void GatherRings(TerrainLevel level)
     {
         level.Current.Clear();
-        foreach (ref readonly Entity e in _interests.GetEntities())
+        foreach (var e in _interests.GetEntities())
         {
             var interest = e.Get<TerrainInterest>();
-            var position = e.Get<Transform>().Position;
+            var centre = InterestChunk(level, e, e.Get<Transform>().Position);
             _seen.Add(e);
-            int radius;
-            bool ball = false;
+            float draw = MathF.Min(interest.DrawRadius, _viewDistance);
             if (level.Level == 0)
             {
-                float draw = MathF.Min(interest.DrawRadius, _viewDistance);
-                if (draw > 0 && FullDetailRadius is { } full)
-                {
-                    draw = MathF.Min(draw, full);
-                    ball = draw >= interest.ColliderRadius;
-                }
-                radius = (int)MathF.Ceiling(MathF.Max(interest.ColliderRadius, draw) / S);
+                // Drawn out to the view (or as far as full detail goes), and collided with near it.
+                if (FullDetailRadius is { } full) draw = MathF.Min(draw, full);
+                if (draw > 0) AddRing(draw / S, ball: FullDetailRadius != null, Purpose.Draw);
+                if (interest.ColliderRadius > 0) AddRing(interest.ColliderRadius / S, ball: true, Purpose.Collide);
             }
-            else
-            {
-                if (interest.DrawRadius <= 0) continue;
-                radius = (int)MathF.Ceiling(level.Radius / level.Blocks);
-                ball = true;
-            }
-            var centre = InterestChunk(level, e, position);
-            if (!ball) centre.y = 0; // whole columns: moving up or down changes nothing
-            level.Current.Add(new Ring(e, centre, radius, ball));
+            else if (draw > 0) AddRing(level.Radius / level.Blocks, ball: true, Purpose.Draw);
+
+            void AddRing(float radius, bool ball, Purpose purpose) // whole columns: moving up or down changes nothing
+                => level.Current.Add(new Ring(e, ball ? centre : centre with { y = 0 }, (int)MathF.Ceiling(radius), ball, purpose));
         }
         if (level.InterestChunks.Count > _seen.Count)
             foreach (var gone in level.InterestChunks.Keys.Where(k => !_seen.Contains(k)).ToList()) level.InterestChunks.Remove(gone);
-        level.Current.Sort((a, b) => (a.Centre, a.Radius, a.Ball, a.Interest.GetHashCode())
-                                     .CompareTo((b.Centre, b.Radius, b.Ball, b.Interest.GetHashCode())));
+        level.Current.Sort((a, b) => (a.Centre, a.Radius, a.Ball, a.For, a.Interest.GetHashCode())
+                                     .CompareTo((b.Centre, b.Radius, b.Ball, b.For, b.Interest.GetHashCode())));
     }
 
     /// <summary>How many times the full-detail queue has been rebuilt (the view moved, or loading caught up).</summary>
@@ -283,7 +276,11 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         // (An edit that put blocks where there were none counts as a build once its chunk unloads. Until then the chunk
         // is loaded, so the queue doesn't need to know.)
         foreach (var p in level.Wanting)
-            if (!Wanted(level, p)) level.ToUnload.Add(p);
+        {
+            var purposes = Purposes(level, p);
+            if (purposes == Purpose.None) level.ToUnload.Add(p);
+            else _pipeline.Want(level.Key(p), purposes); // drawn, or collided with, from here on or no longer
+        }
         foreach (var (p, _) in level.Volume.All) // made by an edit, not the pipeline (or held there)
             if (!level.Wanting.Contains(p) && !Wanted(level, p)) level.ToUnload.Add(p);
 
@@ -392,8 +389,18 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
     }
 
     /// <summary>The level's chunk <paramref name="p"/> is within an interest's load radius.</summary>
-    internal static bool Wanted(TerrainLevel level, ChunkPosition p)
-        => p.Y >= level.MinY && p.Y <= level.MaxY && (WantedLayers(level, p.X, p.Z) & level.Bit(p)) != 0;
+    internal static bool Wanted(TerrainLevel level, ChunkPosition p) => Purposes(level, p) != Purpose.None;
+
+    /// <summary>What the level's chunk <paramref name="p"/> is wanted for: drawn, collided with, both, or (out of every
+    /// interest's reach) neither.</summary>
+    internal static Purpose Purposes(TerrainLevel level, ChunkPosition p)
+    {
+        var purposes = Purpose.None;
+        if (p.Y < level.MinY || p.Y > level.MaxY) return purposes;
+        foreach (var ring in level.Rings)
+            if ((LayersBy(level, ring, p.X, p.Z) & level.Bit(p)) != 0) purposes |= ring.For;
+        return purposes;
+    }
 
     /// <summary>The layers of the level's column (x, z) within an interest's load radius, as bits from its lowest
     /// streamed layer.</summary>
@@ -750,7 +757,7 @@ public sealed partial class ChunkLoadSystem : ISystem, IDebugUiSystem, IChunkStr
         // terrain (a bridge, a tower) comes back, and one that cleared a chunk out stops costing budget.
         if (level.Level == 0 && entry is not null && entry.Data.IsDirty) RecordEdited(pos, entry.Data.HasAnyNonAir());
         // Its arrays go to the next chunk to load: now, unless the pipeline made it (then once no job reads them).
-        bool released = entry is { DataDropped: false } && !entry.Entity.Has<Pipeline.InPipeline>();
+        bool released = entry is { DataDropped: false } && !entry.Entity.Has<InPipeline>();
         level.Volume.RemoveChunk(pos);
         if (released) entry!.Data.Release();
     }

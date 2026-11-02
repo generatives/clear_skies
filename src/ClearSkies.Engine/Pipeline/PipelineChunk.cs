@@ -35,7 +35,7 @@ public sealed class PipelineChunk
     public bool Asked { get; internal set; }
     /// <summary>Holds on it (see <see cref="ChunkPipeline.Hold"/>): what else keeps it while it's asked for or not.</summary>
     internal int Holds;
-    /// <summary>What it's wanted for, beyond its blocks (see <see cref="ChunkPipeline.WantFor"/>).</summary>
+    /// <summary>What it's wanted for (see <see cref="ChunkPipeline.Want"/>).</summary>
     public Purpose Purposes { get; internal set; }
     /// <summary>Dropped by the pipeline: nothing needs it any more.</summary>
     public bool Removed { get; internal set; }

@@ -66,7 +66,7 @@ public class ChunkPipelineTests
         var mesh = pipeline.Add(new Reader("mesh", _ => new[] { new Input(gen, Relation.Self) }));
         var key = grid.Key(P(0));
 
-        pipeline.Want(key, true);
+        pipeline.Want(key, Purpose.Draw);
         pipeline.Update(Plenty);
         Assert.Equal(1, gen.Runs);
         Assert.Equal(0, mesh.Runs); // gen's result is taken next update, then mesh is ready
@@ -88,13 +88,13 @@ public class ChunkPipelineTests
         var shrink = pipeline.Add(new Reader("shrink", _ => new[] { new Input(gen, Relation.Children) }, g => g.Finer != null));
         var parent = coarse.Key(P(0));
 
-        pipeline.Want(parent, true);
+        pipeline.Want(parent, Purpose.Draw);
         for (int i = 0; i < 3; i++) pipeline.Update(Plenty);
         Assert.Equal(0, gen.Runs);
         Assert.Equal(0, shrink.Runs);
         Assert.Equal(1, pipeline.ChunkCount);
 
-        for (int j = 0; j < 8; j++) pipeline.Want(fine.Key(Relation.Child(P(0), j)), true);
+        for (int j = 0; j < 8; j++) pipeline.Want(fine.Key(Relation.Child(P(0), j)), Purpose.Draw);
         for (int i = 0; i < 3; i++) pipeline.Update(Plenty);
         Assert.Equal(8, gen.Runs);
         Assert.Equal(1, shrink.Runs);
@@ -112,12 +112,12 @@ public class ChunkPipelineTests
         }));
         ChunkKey a = grid.Key(P(0)), b = grid.Key(P(1));
 
-        pipeline.Want(a, true);
+        pipeline.Want(a, Purpose.Draw);
         for (int i = 0; i < 3; i++) pipeline.Update(Plenty);
         Assert.Equal($"{a} -{b}", pipeline.Get(a)!.Output<string>(mesh));
         Assert.Null(pipeline.Get(b)); // never loaded for it
 
-        pipeline.Want(b, true);
+        pipeline.Want(b, Purpose.Draw);
         for (int i = 0; i < 3; i++) pipeline.Update(Plenty);
         Assert.Equal($"{a} {b}", pipeline.Get(a)!.Output<string>(mesh));
     }
@@ -133,8 +133,8 @@ public class ChunkPipelineTests
             new Input(gen, Relation.Self), new Input(gen, Relation.ChangedBorder, AcceptsMissing: true),
         }));
         ChunkKey a = grid.Key(P(0)), b = grid.Key(P(1));
-        pipeline.Want(a, true);
-        pipeline.Want(b, true);
+        pipeline.Want(a, Purpose.Draw);
+        pipeline.Want(b, Purpose.Draw);
         for (int i = 0; i < 3; i++) pipeline.Update(Plenty);
         int before = mesh.Runs;
 
@@ -156,7 +156,7 @@ public class ChunkPipelineTests
         var gen = pipeline.Add(new Gen());
         var mesh = pipeline.Add(new Reader("mesh", _ => new[] { new Input(gen, Relation.Self) }));
         var key = grid.Key(P(0));
-        pipeline.Want(key, true);
+        pipeline.Want(key, Purpose.Draw);
         pipeline.Update(Plenty);
         jobs.Dequeue()();
         pipeline.Update(Plenty);              // gen taken; mesh started
@@ -187,13 +187,11 @@ public class ChunkPipelineTests
         var gen = pipeline.Add(new Gen());
         var mesh = pipeline.Add(new Reader("mesh", _ => new[] { new Input(gen, Relation.Self) }, serves: Purpose.Draw));
         var key = grid.Key(P(0));
-        pipeline.Want(key, true);
-        pipeline.WantFor(key, Purpose.Draw, true);
+        pipeline.Want(key, Purpose.Draw);
         pipeline.Update(Plenty);
         jobs.Dequeue()();
         pipeline.Update(Plenty);              // gen taken; mesh started
-        pipeline.WantFor(key, Purpose.Draw, false);
-        pipeline.Want(key, false);
+        pipeline.Want(key, Purpose.None);
         pipeline.Update(Plenty);              // not dropped: mesh is running
         Assert.NotNull(pipeline.Get(key));
         jobs.Dequeue()();
@@ -211,8 +209,8 @@ public class ChunkPipelineTests
         var grid = pipeline.AddGrid("world");
         var gen = pipeline.Add(new Gen());
         var mesh = pipeline.Add(new Reader("mesh", _ => new[] { new Input(gen, Relation.Self | Relation.Neighbours, AcceptsMissing: true) }));
-        pipeline.Want(grid.Key(P(0)), true);
-        pipeline.Want(grid.Key(P(1)), true);
+        pipeline.Want(grid.Key(P(0)), Purpose.Draw);
+        pipeline.Want(grid.Key(P(1)), Purpose.Draw);
         pipeline.Update(Plenty);
         RunAll();
         pipeline.Update(Plenty);              // both gens taken; both meshes started, each reading both chunks
@@ -247,13 +245,13 @@ public class ChunkPipelineTests
         var world = pipeline.AddGrid("world");
         var gen = pipeline.Add(new Gen(grid => grid.Name != "ship"));
         var mesh = pipeline.Add(new Reader("mesh", _ => new[] { new Input(gen, Relation.Self) }, grid => grid.Name != "ship"));
-        pipeline.Want(world.Key(P(0)), true);
+        pipeline.Want(world.Key(P(0)), Purpose.Draw);
         pipeline.Update(Plenty);
 
         var ship = pipeline.AddGrid("ship");
         var other = pipeline.AddGrid("other");
-        pipeline.Want(ship.Key(P(0)), true);
-        pipeline.Want(other.Key(P(0)), true);
+        pipeline.Want(ship.Key(P(0)), Purpose.Draw);
+        pipeline.Want(other.Key(P(0)), Purpose.Draw);
         for (int i = 0; i < 3; i++) pipeline.Update(Plenty);
         Assert.Equal(SlotState.Done, pipeline.Get(other.Key(P(0)))!.State(mesh));
         Assert.Equal(2, gen.Runs); // not on the ship's chunk
@@ -276,13 +274,13 @@ public class ChunkPipelineTests
         var key = grid.Key(P(0));
         void Settle() { for (int i = 0; i < 4; i++) { pipeline.Update(Plenty); while (jobs.TryDequeue(out var job)) job(); } }
 
-        pipeline.Want(key, true);
-        pipeline.Want(grid.Key(P(1)), true);
+        pipeline.Want(key, Purpose.Collide);
+        pipeline.Want(grid.Key(P(1)), Purpose.Collide);
         Settle();
         Assert.Equal(0, mesh.Runs);
         Assert.False(pipeline.Get(key)!.Needs(mesh));
 
-        pipeline.WantFor(key, Purpose.Draw, true);
+        pipeline.Want(key, Purpose.Collide | Purpose.Draw);
         Assert.True(pipeline.Get(key)!.Needs(mesh));
         Settle();
         Assert.Equal(1, mesh.Runs);
@@ -290,7 +288,7 @@ public class ChunkPipelineTests
         Assert.StartsWith($"{key} ", pipeline.Get(grid.Key(P(1)))!.Output<string>(near)); // its other neighbours aren't wanted
 
         // No longer drawn: what it made is let go of, and what read it sees it missing.
-        pipeline.WantFor(key, Purpose.Draw, false);
+        pipeline.Want(key, Purpose.Collide);
         Assert.Equal(new[] { key.ToString() }, mesh.Released);
         Assert.Null(pipeline.Get(key)!.Output<string>(mesh));
         Settle();
@@ -298,9 +296,9 @@ public class ChunkPipelineTests
         Assert.Equal(1, mesh.Runs);
 
         // Let go of while it's being made: what it makes is let go of too.
-        pipeline.WantFor(key, Purpose.Draw, true);
+        pipeline.Want(key, Purpose.Collide | Purpose.Draw);
         pipeline.Update(Plenty);
-        pipeline.WantFor(key, Purpose.Draw, false);
+        pipeline.Want(key, Purpose.Collide);
         while (jobs.TryDequeue(out var job)) job();
         pipeline.Update(Plenty);
         Assert.Equal(2, mesh.Released.Count);
@@ -316,9 +314,9 @@ public class ChunkPipelineTests
         var grid = pipeline.AddGrid("world");
         var gen = pipeline.Add(new Gen());
         var key = grid.Key(P(0));
-        pipeline.Want(key, true);
+        pipeline.Want(key, Purpose.Draw);
         pipeline.Update(Plenty);
-        pipeline.Want(key, false);
+        pipeline.Want(key, Purpose.None);
         pipeline.Update(Plenty);
         Assert.NotNull(pipeline.Get(key)); // its worker is still making it
 
@@ -338,11 +336,11 @@ public class ChunkPipelineTests
         Assert.False(pipeline.Hold(key, true)); // a hold never makes a chunk
         Assert.Null(pipeline.Get(key));
 
-        pipeline.Want(key, true);
+        pipeline.Want(key, Purpose.Draw);
         pipeline.Update(Plenty);
         Assert.True(pipeline.Hold(key, true));
         Assert.True(pipeline.Hold(key, true));
-        pipeline.Want(key, false);
+        pipeline.Want(key, Purpose.None);
         pipeline.Update(Plenty);
         Assert.True(pipeline.Get(key) is { Wanted: true, Asked: false });
 
@@ -366,13 +364,13 @@ public class ChunkPipelineTests
         var mesh = pipeline.Add(new Reader("mesh", _ => new[] { new Input(gen, Relation.Self) }));
         var upload = pipeline.Add(new Reader("upload", _ => new[] { new Input(mesh, Relation.Self) }));
         var edited = grid.Key(P(0));
-        pipeline.Want(edited, true);
+        pipeline.Want(edited, Purpose.Draw);
         for (int i = 0; i < 3; i++) { pipeline.Update(Plenty); while (jobs.TryDequeue(out var job)) job(); }
         pipeline.Update(Plenty);
         Assert.Equal(1, upload.Runs);
 
         var oneSlot = new FrameBudgets(WorkerSlots: 1, MainMs: 1000);
-        for (int x = 1; x <= 3; x++) pipeline.Want(grid.Key(P(x)), true);
+        for (int x = 1; x <= 3; x++) pipeline.Want(grid.Key(P(x)), Purpose.Draw);
         pipeline.Update(oneSlot);
         Assert.Single(jobs);                        // the worker is full
 
@@ -399,9 +397,9 @@ public class ChunkPipelineTests
         var grid = pipeline.AddGrid("world");
         var gen = pipeline.Add(new Gen());
         pipeline.Priority = (key, _) => Math.Abs(key.Pos.X);
-        pipeline.Want(grid.Key(P(5)), true);
-        pipeline.Want(grid.Key(P(1)), true);
-        pipeline.Want(grid.Key(P(3)), true);
+        pipeline.Want(grid.Key(P(5)), Purpose.Draw);
+        pipeline.Want(grid.Key(P(1)), Purpose.Draw);
+        pipeline.Want(grid.Key(P(3)), Purpose.Draw);
 
         pipeline.Update(new FrameBudgets(WorkerSlots: 1, MainMs: 1000));
         Assert.Single(jobs);
@@ -419,7 +417,7 @@ public class ChunkPipelineTests
         var gen = pipeline.Add(new Gen());
         var light = pipeline.Add(new Asked(gen));
         var key = grid.Key(P(0));
-        pipeline.Want(key, true);
+        pipeline.Want(key, Purpose.Draw);
         for (int i = 0; i < 4; i++) pipeline.Update(Plenty);
         Assert.Equal(SlotState.Running, pipeline.Get(key)!.State(light));
         int asked = light.Requests;

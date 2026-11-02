@@ -6,7 +6,7 @@ namespace ClearSkies.Engine.Pipeline;
 /// without the ones that aren't (reading null) and runs again when they come, go or change.</summary>
 public readonly record struct Input(Stage Stage, Relation Of, bool AcceptsMissing = false);
 
-/// <summary>What a wanted chunk is wanted for, beyond its blocks (see <see cref="ChunkPipeline.WantFor"/>). A stage that
+/// <summary>What a wanted chunk is wanted for (see <see cref="ChunkPipeline.Want"/>). A stage that
 /// serves one (<see cref="Stage.Serves"/>) runs on a chunk only while it's wanted for it.</summary>
 [Flags]
 public enum Purpose : byte
@@ -14,7 +14,7 @@ public enum Purpose : byte
     None = 0,
     /// <summary>Drawn here (on a host, other players' chunks aren't).</summary>
     Draw = 1,
-    /// <summary>Collided with here: near something that can touch it (see <see cref="ECS.EntityPresenceSystem"/>).</summary>
+    /// <summary>Collided with here: near something that can touch it (see <see cref="ECS.ChunkLoadSystem"/>).</summary>
     Collide = 2,
 }
 

@@ -50,6 +50,7 @@ public class ShipDrawingTests
         game.Tick(60);
         if (holdingControls) crew.Set(new LookLockedComponent());
         var copy = client.Registry.Find(ship.Get<EntityId>())!.Value;
+        Assert.True(game.TickUntil(() => copy.Has<PhysicsBodyComponent>(), 60, minSeconds: 10), "the copy never got its body");
         var crewOnHost = game.Host.Registry.Find(crew.Get<EntityId>())!.Value;
         var body = ship.Get<PhysicsBodyComponent>().Body;
         game.Host.Physics.SetBodyLinearVelocity(body, new Vector3(Speed, 0, 0));
