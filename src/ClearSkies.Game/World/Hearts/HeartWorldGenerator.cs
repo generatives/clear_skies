@@ -560,7 +560,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         lattice.Reset(chunkX, chunkZ, first, last - first + 1);
         if (_levels.Length < lattice.Levels) _levels = new float[lattice.Levels];
 
-        // Up each corner's column. Going up a level, a distance changes by no more than Steepest (see Inside), so where
+        // Up each corner's column. Going up a level, a distance changes by no more than steepest (see Inside), so where
         // it's further than that past Reach it's still past Reach a level up: as far as that goes, no need to work it out.
         float steepest = Cell * (HeartGrid.VerticalScale + 0.5f);
         for (int k = 0; k < N; k++)
