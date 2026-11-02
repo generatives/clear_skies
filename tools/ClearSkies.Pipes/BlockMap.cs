@@ -69,7 +69,7 @@ public static class BlockMap
                 if (top[d] != int.MinValue && water[d] <= top[d] && top[d] < water[c]) hangs = true;
             if (hangs) { hanging++; if (water[c] - top[c] == 1) thin++; else walls++; }
         }
-        // Distant terrain's water: levels 1 to 3 as GenerateCoarse makes them, each voxel column by its top voxel.
+        // Distant terrain's water: levels 1 to 3 as Generate makes them, each voxel column by its top voxel.
         for (int level = 1; level <= 3; level++) DistantLevel(generators, x0, z0, width, top, wet, land, level, path);
         {
             int falls = 0; long fallBlocks = 0; var heights = new List<int>();
@@ -183,7 +183,7 @@ public static class BlockMap
             for (int py = cy0; py <= cy1; py++)
             {
                 var data = new ChunkData();
-                generators.Value!.GenerateCoarse(data, new ChunkPosition(px, py, pz), level);
+                generators.Value!.Generate(data, new ChunkPosition(px, py, pz), level);
                 for (int v = 0; v < S; v++)
                 for (int u = 0; u < S; u++)
                 {
