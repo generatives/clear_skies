@@ -322,6 +322,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         {
             int chunkX = pos.X * c + cx, chunkZ = pos.Z * c + cz;
             if (!FillLattice(chunkX, chunkZ)) continue;
+            var shaped = _landscape?.At(chunkX * S + S / 2, chunkZ * S + S / 2);
             for (int lz = Trees.Reach; lz < S - Trees.Reach; lz++)
             for (int lx = Trees.Reach; lx < S - Trees.Reach; lx++)
             {
@@ -333,7 +334,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
                     int hi = spans[s].Hi;
                     if (hi + Trees.MaxHeight < by0 || hi > by1) continue;
                     if (s + 1 == count && _landscape?.At(x, z).Water(x, z, hi, 0f) is var (w, bed) && (w > hi || bed < hi)) continue; // (not in water or a channel)
-                    float heat = Biomes.Heat(hi, _terrain.Heat(x, z)), wet = _terrain.Wet(x, z);
+                    float heat = Biomes.Heat(hi, _terrain.Heat(x, z)), wet = Wet(x, z, shaped);
                     var biome = Biomes.Pick(heat, wet);
                     float bare = s + 1 < count && spans[s + 1].Lo - hi < ShadeReach ? Shaded : 0f;
                     var ground = ContinentTerrain.Block(hi, hi, _terrain.Strata(x, z), _terrain.Patch(x, z), bare, biome,
@@ -396,7 +397,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         foreach (var (lo, hi) in spans) any |= lo <= by1 && hi + Trees.MaxHeight >= by0;
         if (!any) return;
         float strata = _terrain.Strata(x, z), patch = _terrain.Patch(x, z), flora = _terrain.Flora(x, z);
-        float kind = _terrain.Kind(x, z), heat = _terrain.Heat(x, z), wet = _terrain.Wet(x, z);
+        float kind = _terrain.Kind(x, z), heat = _terrain.Heat(x, z), wet = Wet(x, z, _landscape?.At(x, z));
         int Voxel(int y) => (int)MathF.Floor((y - by0) / (float)c);
         for (int s = 0; s < spans.Length; s++)
         {
@@ -441,6 +442,16 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
 
     /// <summary>Whether a coarse voxel is open (air or a plant), for a tree's crown.</summary>
     private static bool IsOpen(BlockId id) => id == BlockId.Air || BlockRegistry.Get(id).IsCross;
+
+    /// <summary>How wet the ground at column (x, z) is for its biome (see <see cref="Biomes.Wet"/>): by the rain alone
+    /// without a landscape.</summary>
+    private float Wet(float x, float z, Shaped? shaped)
+    {
+        float rain = _terrain.Rain(x, z);
+        if (shaped == null) return rain;
+        _terrain.Warp(ref x, ref z, Biomes.ShoreWarp);
+        return Biomes.Wet(rain, shaped.Watered(x, z));
+    }
 
     /// <summary>Takes chunk column (chunkX, chunkZ)'s solid spans from the profiles worked out lately (see
     /// <see cref="ProfileCache"/>), working them out if they aren't there.</summary>
@@ -500,7 +511,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
 
         // Packed (only the spans there are, so profiles are small enough to share), then what's on each span's top.
         p.Pack(_spanCount, _spans, MaxSpans);
-        PlaceWater(p, _landscape?.At(x0 + S / 2, z0 + S / 2), (int)x0, (int)z0);
+        var shaped = _landscape?.At(x0 + S / 2, z0 + S / 2);
+        PlaceWater(p, shaped, (int)x0, (int)z0);
         FillLattice(chunkX, chunkZ); // (placing water may have looked into the neighbours')
         for (int lz = 0; lz < S; lz++)
         for (int lx = 0; lx < S; lx++)
@@ -513,7 +525,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             p.Flora[col] = _terrain.Flora(wx, wz);
             p.Woods[col] = _terrain.Woods(wx, wz);
             p.Kind[col] = _terrain.Kind(wx, wz);
-            float heat = _terrain.Heat(wx, wz), wet = _terrain.Wet(wx, wz);
+            float heat = _terrain.Heat(wx, wz), wet = Wet(wx, wz, shaped);
             for (int sp = 0; sp < spans; sp++)
             {
                 int hi = p.Spans[at + sp].Hi;
@@ -748,6 +760,10 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
     // (How far a fall drops onto dry ground before it digs a plunge pool, see PlaceWater.)
     private const int FallDrop = 4;
 
+    /// <summary>The biome of a top at height <paramref name="top"/> in column (x, z), as the blocks have it.</summary>
+    public Biome BiomeAt(float x, float z, float top) =>
+        Biomes.Pick(Biomes.Heat(top, _terrain.Heat(x, z)), Wet(x, z, _landscape?.At(x, z)));
+
     /// <summary>The top water block over block column (x, z), as Generate places it (see PlaceWater), or int.MinValue.</summary>
     public int WaterTopAt(int x, int z)
     {
@@ -813,7 +829,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             int wx = lattice.ChunkX * S + lx, wz = lattice.ChunkZ * S + lz;
             var shaped = _landscape.At(wx, wz);
             float steep = Math.Clamp(shaped.Steepness(wx, wz) / RoughSlope, 0f, 1f);
-            if (steep > 0f && !shaped.Watered(wx, wz))
+            if (steep > 0f && !shaped.NearWater(wx, wz))
             {
                 var (rlo, rhi) = into[count - 1];
                 float n = _rough.GetNoise(wx, wz);

@@ -27,12 +27,22 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
     private const float EdgeSlope = 4f;
 
     private readonly ConcurrentDictionary<(int X, int Z), Lazy<Shaped>> _landmasses = new();
+    private readonly ConcurrentDictionary<(int X, int Z), Shaped> _done = new();
+    private int _finished;
+
+    /// <summary>How many landmasses have been worked out so far.</summary>
+    public int Finished => Volatile.Read(ref _finished);
+
+    /// <summary>The landmass (x, z) is on if it's been worked out, else null (without working it out).</summary>
+    public Shaped? Done(float x, float z) => _done.TryGetValue(HeartGrid.Landmass(seed, x, z), out var shaped) ? shaped : null;
 
     /// <summary>The landmass (x, z) is on, worked out if it hasn't been.</summary>
     public Shaped At(float x, float z)
     {
         var key = HeartGrid.Landmass(seed, x, z);
-        return _landmasses.GetOrAdd(key, k => new Lazy<Shaped>(() => Shape(k), LazyThreadSafetyMode.ExecutionAndPublication)).Value;
+        var shaped = _landmasses.GetOrAdd(key, k => new Lazy<Shaped>(() => Shape(k), LazyThreadSafetyMode.ExecutionAndPublication)).Value;
+        if (_done.TryAdd(key, shaped)) Interlocked.Increment(ref _finished);
+        return shaped;
     }
 
     private Shaped Shape((int X, int Z) landmass)
@@ -180,7 +190,7 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
         var head = new bool[land.Nodes];
         for (int n = 0; n < land.Nodes; n++) head[n] = shown[n] > 0 && pipes.Depth[n] <= settings.Damp;
         for (int n = 0; n < land.Nodes; n++) if (Wet(n) && down[n] >= 0) head[down[n]] = false;
-        return new Shaped(land, start, shown, down, up, way, bend, wide, head, pipes.Depth, settings);
+        return new Shaped(land, start, shown, down, up, way, bend, wide, head, pipes.Depth, Watered(land, n => Shows(n) || shown[n] > 0f, settings), settings);
     }
 
     /// <summary>A number in [0, 1) from <paramref name="seed"/> and <paramref name="n"/>, the same every time.</summary>
@@ -189,6 +199,42 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
         ulong h = seed ^ (ulong)n * 0x9E3779B97F4A7C15UL;
         h ^= h >> 33; h *= 0xFF51AFD7ED558CCDUL; h ^= h >> 33; h *= 0xC4CEB9FE1A85EC53UL; h ^= h >> 33;
         return (h >> 11) * (1.0 / (1UL << 53));
+    }
+
+
+    /// <summary>0-1 per column: how near water it is, 1 in it, falling off over WaterReach blocks (see
+    /// <see cref="Biomes.Wet"/>). Each block climbed on the way out of the water counts as WaterClimb blocks across, so
+    /// a river greens its valley floor and not the ridges over it.</summary>
+    private static float[] Watered(Land land, Func<int, bool> wet, LandscapeSettings settings)
+    {
+        var distance = new float[land.Columns];
+        Array.Fill(distance, float.PositiveInfinity);
+        var open = new PriorityQueue<int, float>();
+        for (int c = 0; c < land.Columns; c++)
+        {
+            int t = land.TopNode(c);
+            if (t >= 0 && wet(t)) { distance[c] = 0f; open.Enqueue(c, 0f); }
+        }
+        float far = settings.WaterReach * 4f, diagonal = land.Size * MathF.Sqrt(2f);
+        while (open.TryDequeue(out int c, out float d))
+        {
+            if (d > distance[c] || d > far) continue;
+            int i = c % land.Nx, j = c / land.Nx;
+            float floor = land.Floor[land.TopNode(c)];
+            for (int dj = -1; dj <= 1; dj++)
+            for (int di = -1; di <= 1; di++)
+            {
+                int ni = i + di, nj = j + dj;
+                if ((di | dj) == 0 || ni < 0 || nj < 0 || ni >= land.Nx || nj >= land.Nz) continue;
+                int n = ni + land.Nx * nj, t = land.TopNode(n);
+                if (t < 0) continue;
+                float step = (di != 0 && dj != 0 ? diagonal : land.Size) + settings.WaterClimb * MathF.Max(0f, land.Floor[t] - floor);
+                if (d + step < distance[n]) { distance[n] = d + step; open.Enqueue(n, d + step); }
+            }
+        }
+        var watered = new float[land.Columns];
+        for (int c = 0; c < land.Columns; c++) watered[c] = MathF.Exp(-distance[c] / settings.WaterReach);
+        return watered;
     }
 
     /// <summary>A landmass's bounds (blocks, on 32-block lines): where its own ground can be, found on a coarse grid
@@ -212,7 +258,7 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
 /// stream (see HeartWorldGenerator.PlaceWater). The first Damp blocks of water only dampen the ground:
 /// thin water running over a slope shows as none.</summary>
 public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] down, int[] up, (sbyte X, sbyte Z)[] way,
-                           float[] bend, float[] wide, bool[] head, float[] depth, LandscapeSettings settings)
+                           float[] bend, float[] wide, bool[] head, float[] depth, float[] watered, LandscapeSettings settings)
 {
     // (How wide a spring's stream is per sqrt(flow / StreamFlow), see HeartWorldGenerator.PlaceSprings.)
     public const float StreamWide = 3f;
@@ -226,6 +272,17 @@ public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] do
     private const float ShowsFrom = 0.25f;
     // (How narrow a channel is at least.)
     private const float LeastWide = 2f;
+
+    /// <summary>0-1 at block column (x, z): how near water it is (see Landscape.Watered), blended between the columns'
+    /// middles round it; 0 off the land.</summary>
+    public float Watered(float x, float z)
+    {
+        float u = (x - land.X0) / land.Size, v = (z - land.Z0) / land.Size;
+        int i = (int)MathF.Floor(u), j = (int)MathF.Floor(v);
+        float fu = u - i, fv = v - j;
+        float At(int a, int b) => a < 0 || b < 0 || a >= land.Nx || b >= land.Nz ? 0f : watered[a + land.Nx * b];
+        return (1 - fv) * ((1 - fu) * At(i, j) + fu * At(i + 1, j)) + fv * ((1 - fu) * At(i, j + 1) + fu * At(i + 1, j + 1));
+    }
 
     /// <summary>The top water block over block column (x, z), whose ground is topped at <paramref name="top"/>, or
     /// int.MinValue, and the block its ground is cut down to (int.MaxValue for none): full detail and distant terrain
@@ -455,7 +512,7 @@ public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] do
 
     /// <summary>Whether any of the columns round block column (x, z) or beside those has water over it or a stream
     /// through it (water reaches that far across: a stream's channel, the model's surface blended between columns).</summary>
-    public bool Watered(int x, int z)
+    public bool NearWater(int x, int z)
     {
         for (int c = 0; c < 16; c++)
         {
@@ -475,7 +532,7 @@ public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] do
 }
 
 /// <summary>What the landscape model does (see <see cref="Landscape"/>), from --terrain: comma-separated name=value
-/// pairs. off turns it off; erode-hours, settle-minutes, settle-rain (times the rain while settling), groundwater (true/false), damp (how deep water only dampens the ground) and size (column width) are the landscape's own; any other name is one of Pipes' numbers (e.g.
+/// pairs. off turns it off; erode-hours, settle-minutes, settle-rain (times the rain while settling), groundwater (true/false), damp (how deep water only dampens the ground), water-reach and water-climb (see WaterReach) and size (column width) are the landscape's own; any other name is one of Pipes' numbers (e.g.
 /// creep=1e-5, speedup=900, rain=3e-4, manning=0.035, carry=0.05; dashes ignored, any case).</summary>
 public sealed class LandscapeSettings
 {
@@ -491,6 +548,9 @@ public sealed class LandscapeSettings
     /// (narrower than a block shows nothing). 0 for no streams.</summary>
     public float StreamFlow = 10f;
     public int Size = 8;
+    /// <summary>How far water wets the land round it for the biomes, in blocks (see Landscape.Watered), and how many
+    /// blocks across each block climbed out of it counts as.</summary>
+    public float WaterReach = 96f, WaterClimb = 3f;
     public readonly List<(string Name, string Value)> Pipes = new();
 
     public static LandscapeSettings Parse(string? text)
@@ -511,6 +571,8 @@ public sealed class LandscapeSettings
                 case "groundwater": s.Groundwater = bool.Parse(value); break;
                 case "damp": s.Damp = float.Parse(value, c); break;
                 case "stream-flow": s.StreamFlow = float.Parse(value, c); break;
+                case "water-reach": s.WaterReach = float.Parse(value, c); break;
+                case "water-climb": s.WaterClimb = float.Parse(value, c); break;
                 case "size": s.Size = int.Parse(value, c); break;
                 default:
                     if (!Generation.Pipes.Set(null, name, value)) throw new ArgumentException($"--terrain: no setting called {name}");

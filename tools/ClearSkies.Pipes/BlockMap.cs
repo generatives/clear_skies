@@ -161,6 +161,32 @@ public static class BlockMap
         using (var f = File.Create(path))
             new ImageWriter().WritePng(rgb, width, width, ColorComponents.RedGreenBlue, f);
         Console.WriteLine($"Blocks {width}x{width} from ({x0}, {z0}) in {sw.Elapsed.TotalSeconds:0.0} s: water over {100.0 * wet / Math.Max(1, land):0.0}% of land");
+
+        // Biomes side by side: by the rain alone (left), and as the blocks have them, wetter near water (right).
+        var biomes = new byte[width * 2 * width * 3];
+        Parallel.For(0, width, j =>
+        {
+            for (int i = 0; i < width; i++)
+            {
+                int c = i + width * j;
+                for (int side = 0; side < 2; side++)
+                {
+                    int o = (j * width * 2 + side * width + i) * 3;
+                    if (top[c] == int.MinValue) { biomes[o] = 18; biomes[o + 1] = 22; biomes[o + 2] = 34; continue; }
+                    var (r, g, b) = side == 1 && water[c] > top[c] ? (50, 110, 220)
+                        : BiomeColour((side == 0 ? raw.Value! : generators.Value!).BiomeAt(x0 + i, z0 + j, top[c]));
+                    int Hat(int di, int dj)
+                    {
+                        int ni = Math.Clamp(i + di, 0, width - 1), nj = Math.Clamp(j + dj, 0, width - 1), d = ni + width * nj;
+                        return top[d] == int.MinValue ? top[c] : top[d];
+                    }
+                    double light = Math.Clamp(0.75 + (Hat(-1, -1) - Hat(1, 1)) * 0.15, 0.35, 1.1);
+                    biomes[o] = (byte)Math.Min(255, r * light); biomes[o + 1] = (byte)Math.Min(255, g * light); biomes[o + 2] = (byte)Math.Min(255, b * light);
+                }
+            }
+        });
+        using (var f = File.Create(Path.Combine(Path.GetDirectoryName(path)!, "biomes.png")))
+            new ImageWriter().WritePng(biomes, width * 2, width, ColorComponents.RedGreenBlue, f);
     }
 
     /// <summary>Level <paramref name="level"/>'s voxel columns over the area: how many show water on top against full
@@ -223,4 +249,17 @@ public static class BlockMap
         using var f = File.Create(Path.Combine(Path.GetDirectoryName(path)!, $"blocks-level{level}.png"));
         new ImageWriter().WritePng(rgb, width, width, ColorComponents.RedGreenBlue, f);
     }
+
+    private static (int R, int G, int B) BiomeColour(Biome biome) => biome switch
+    {
+        Biome.Temperate => (90, 170, 70),
+        Biome.Autumn => (210, 120, 40),
+        Biome.Desert => (230, 205, 120),
+        Biome.Badlands => (190, 90, 50),
+        Biome.Tundra => (200, 220, 225),
+        Biome.Steppe => (170, 165, 95),
+        Biome.Jungle => (20, 110, 30),
+        Biome.Savanna => (175, 175, 60),
+        _ => (90, 80, 75),
+    };
 }
