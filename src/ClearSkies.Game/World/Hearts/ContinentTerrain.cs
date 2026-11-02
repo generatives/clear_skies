@@ -155,13 +155,16 @@ public sealed class ContinentTerrain
     /// or cooler than their height alone would make them.</summary>
     public float Heat(float x, float z) { Warp(ref x, ref z); return _heat.GetNoise(x, z); }
 
-    /// <summary>0-1 at column (x, z), for <see cref="Biomes.Pick"/>: how wet the region is.</summary>
-    public float Wet(float x, float z) { Warp(ref x, ref z); return Math.Clamp(0.5f + 0.9f * _wet.GetNoise(x, z), 0f, 1f); }
+    /// <summary>0-1 at column (x, z): how much rain the region gets. It waters the landscape (see <see cref="Land"/>), and
+    /// is how wet the ground is away from water (see <see cref="Biomes.Wet"/>).</summary>
+    public float Rain(float x, float z) { Warp(ref x, ref z); return Math.Clamp(0.5f + 0.9f * _wet.GetNoise(x, z), 0f, 1f); }
 
-    private void Warp(ref float x, ref float z)
+    /// <summary>Moves (x, z) by up to <paramref name="amount"/> blocks along the climate's warp: borders read through it
+    /// come out ragged.</summary>
+    public void Warp(ref float x, ref float z, float amount = ClimateWarp)
     {
         float wx = _climateWarpX.GetNoise(x, z), wz = _climateWarpZ.GetNoise(x, z);
-        x += ClimateWarp * wx; z += ClimateWarp * wz;
+        x += amount * wx; z += amount * wz;
     }
 
     /// <summary>0-1 at column (x, z), for <see cref="Plant"/>: which kind of plant a stand is mostly made of.</summary>
@@ -171,7 +174,7 @@ public sealed class ContinentTerrain
     /// height (whether it is the terrain surface or a support's own top; those are to be decorated differently
     /// later), then rock layers (<paramref name="strata"/> from <see cref="Strata"/>, <paramref name="patch"/> from
     /// <see cref="Patch"/>). <paramref name="bare"/>, 0-1, is how little the top is out in the open. Deserts are sand,
-    /// badlands red sand over red rock, tundra grass among snowy dirt and ice, steppe grass among gravel and the
+    /// badlands red sand over red rock, savanna dry grass among bare earth, tundra grass among snowy dirt and ice, steppe grass among gravel and the
     /// volcanic wastes ash with pools of lava (see <see cref="Biomes"/>), all under the same snow and bare rock up
     /// high; jungle has temperate ground.</summary>
     public static BlockId Block(int y, int top, float strata, float patch, float bare, Biome biome = Biome.Temperate, float dry = 0f)
@@ -195,6 +198,12 @@ public sealed class ContinentTerrain
         else if (!rocky && biome == Biome.Steppe)
         {
             if (depth == 0) return patch < 0.35f ? BlockId.Gravel : BlockId.Grass;
+            if (depth < 3) return BlockId.Dirt;
+        }
+        else if (!rocky && biome == Biome.Savanna)
+        {
+            // Dry grass among patches of bare earth.
+            if (depth == 0) return patch < 0.3f ? BlockId.Dirt : BlockId.Grass;
             if (depth < 3) return BlockId.Dirt;
         }
         else if (!rocky && biome == Biome.Volcanic)
