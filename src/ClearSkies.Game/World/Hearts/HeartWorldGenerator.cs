@@ -327,7 +327,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
                 {
                     int hi = spans[s].Hi;
                     if (hi + Trees.MaxHeight < by0 || hi > by1) continue;
-                    if (s + 1 == count && (_landscape?.At(x, z).WaterTop(x, z, hi, 0f) ?? int.MinValue) > hi) continue; // (not in water)
+                    if (s + 1 == count && _landscape?.At(x, z).Water(x, z, hi, 0f) is var (w, bed) && (w > hi || bed < hi)) continue; // (not in water or a channel)
                     float heat = Biomes.Heat(hi, _terrain.Heat(x, z)), wet = _terrain.Wet(x, z);
                     var biome = Biomes.Pick(heat, wet);
                     float bare = s + 1 < count && spans[s + 1].Lo - hi < ShadeReach ? Shaded : 0f;
@@ -614,7 +614,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
     }
 
     /// <summary>The landscape's water over chunk column (x0, z0): each block column to the level of the water that
-    /// reaches it (see Shaped.WaterTop), as a thin film where it's beside dry ground lower than it, springs at streams'
+    /// reaches it, its ground cut down where a stream's channel runs (see Shaped.Water), as a thin film where it's beside dry ground lower than it, springs at streams'
     /// heads (PlaceSprings), and falls wherever water would stand
     /// in a face: a column beside water more than a block over its own surface (its water, or its ground if dry) has
     /// water falling down it from that water to its surface, or past the land's edge to the bottom of the land it falls
@@ -633,8 +633,10 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         for (int lx = -Pad; lx < S + Pad; lx++)
         {
             int at = PadAt(lx, lz), top = TopAt(p, x0, z0, lx, lz, spans);
-            _padTop[at] = top;
-            _padWater[at] = top == int.MinValue ? int.MinValue : shaped.WaterTop(x0 + lx, z0 + lz, top, 0f);
+            var (water, bed) = top == int.MinValue ? (int.MinValue, int.MaxValue) : shaped.Water(x0 + lx, z0 + lz, top, 0f);
+            _padTop[at] = System.Math.Min(top, bed); // (a stream's channel cuts its ground)
+            _padWater[at] = water;
+            if ((uint)lx < S && (uint)lz < S) p.Cut[lx + S * lz] = bed;
         }
         for (int col = 0; col < S * S; col++)
         {
