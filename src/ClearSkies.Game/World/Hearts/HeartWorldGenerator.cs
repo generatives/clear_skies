@@ -256,7 +256,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
                 int x = bx0 + u * c + c / 2, z = bz0 + v * c + c / 2;
                 int count = ColumnSpans(x - cx * S, z - cz * S, spans);
                 if (count == 0) continue;
-                int top = spans[count - 1].Hi, water = shaped?.WaterTop(x, z, top, c / 2f) ?? int.MinValue;
+                int top = spans[count - 1].Hi, water = shaped?.Water(x, z, top, c / 2f).Water ?? int.MinValue;
                 _voxTop[u + S * v] = top; _voxWater[u + S * v] = water; _voxLo[u + S * v] = spans[count - 1].Lo;
                 CoarseColumn(data, u, v, x, z, c, by0, spans[..count], water);
             }
@@ -281,7 +281,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             int i = u + S * v, top = _voxTop[i];
             int surface = top == int.MinValue ? int.MinValue : System.Math.Max(top, _voxWater[i]);
             int high = int.MinValue, lo = 0;
-            foreach (var (du, dv) in ((int, int)[])[(-1, 0), (1, 0), (0, -1), (0, 1)])
+            foreach (var (du, dv) in Sides)
             {
                 int nu = u + du, nv = v + dv;
                 if ((uint)nu >= S || (uint)nv >= S) continue;
@@ -595,7 +595,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
                 for (int n = 0; n < same && j < lattice.Levels; n++) column[j++] = clamped;
             }
         }
-        if (_landscape != null) Wear(lattice, _landscape.At(x0 + S / 2, z0 + S / 2));
+        if (_landscape != null) Wear(lattice, lattice.Worn = _landscape.At(x0 + S / 2, z0 + S / 2));
         return true;
     }
 
@@ -630,13 +630,13 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         }
     }
 
-    /// <summary>The landscape's water over chunk column (x0, z0): each block column to the level of the water that
-    /// reaches it, its ground cut down where a stream's channel runs (see Shaped.Water), as a thin film where it's beside dry ground lower than it, springs at streams'
-    /// heads (PlaceSprings), and falls wherever water would stand
-    /// in a face: a column beside water more than a block over its own surface (its water, or its ground if dry) has
-    /// water falling down it from that water to its surface, or past the land's edge to the bottom of the land it falls
-    /// from. A fall that drops more than FallDrop onto dry ground lands in a plunge pool. Worked out over the chunk
-    /// column and Pad blocks round it, so both sides of a chunk border agree.</summary>
+    /// <summary>The landscape's water over chunk column (x0, z0): each block column's water and the ground cut under it
+    /// (see Shaped.Water), a thin film where it's beside dry ground lower than it, springs at streams' heads
+    /// (PlaceSprings), and falls wherever water would stand in a face: a column beside water more than a block over its
+    /// own surface (its water, or its ground if dry) has water falling down it from that water to its surface, or past
+    /// the land's edge to the bottom of the land it falls from. A fall that drops more than FallDrop onto dry ground
+    /// lands in a plunge pool. Worked out over the chunk column and Pad blocks round it, so both sides of a chunk border
+    /// agree.</summary>
     private void PlaceWater(ColumnProfile p, Shaped? shaped, int x0, int z0)
     {
         Array.Fill(p.Water, int.MinValue);
@@ -661,8 +661,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             p.Water[col] = water;
             if (water <= _padTop[at]) continue;
             // Water over a dry neighbour's ground runs off it: its top block is a thin film (Thin eighths), not a cube.
-            foreach (int d in (ReadOnlySpan<int>)[at - 1, at + 1, at - PadSide, at + PadSide])
-                if (_padWater[d] <= _padTop[d] && _padTop[d] < water) { p.WaterHeight[col] = Thin; break; }
+            foreach (var (sx, sz) in Sides)
+                if (at + sx + PadSide * sz is var d && _padWater[d] <= _padTop[d] && _padTop[d] < water) { p.WaterHeight[col] = Thin; break; }
         }
         PlaceSprings(p, shaped, x0, z0);
         for (int lz = 0; lz < S; lz++)
@@ -673,14 +673,14 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             int high = int.MinValue, from = 0;
             for (int k = 0; k < 4; k++)
             {
-                int d = at + (k == 0 ? -1 : k == 1 ? 1 : k == 2 ? -PadSide : PadSide);
+                int d = at + Sides[k].X + PadSide * Sides[k].Z;
                 if (_padTop[d] != int.MinValue && _padWater[d] > _padTop[d] && _padWater[d] > high) { high = _padWater[d]; from = k; }
             }
             if (high == int.MinValue || (surface != int.MinValue && high <= surface + 1)) continue;
             int bottom = surface + 1;
             if (surface == int.MinValue)
             {
-                int n = SpansAt(x0 + lx + (from == 0 ? -1 : from == 1 ? 1 : 0), z0 + lz + (from == 2 ? -1 : from == 3 ? 1 : 0), spans);
+                int n = SpansAt(x0 + lx + Sides[from].X, z0 + lz + Sides[from].Z, spans);
                 bottom = n == 0 ? high : spans[n - 1].Lo;
             }
             p.FallBottom[col] = bottom;
@@ -698,6 +698,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
 
     // (How deep a plunge pool is, see PlaceWater.)
     private const int PoolDepth = 2;
+    private static readonly (int X, int Z)[] Sides = [(-1, 0), (1, 0), (0, -1), (0, 1)];
 
     // (How far back a spring's tunnel goes into the hill, its width at least, and the room over its water, see PlaceSprings.)
     private const float SpringReach = 6f, SpringWide = 2f;
@@ -716,12 +717,12 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         for (int mx = mx0; mx <= x0 + S + size; mx += size)
         {
             var (width, ax, az, toX, toZ, from, _, head) = shaped.Stream(mx, mz);
-            if (!head || MathF.Min(width * Shaped.StreamWide, size) < 1f) continue;
+            if (!head) continue;
             float half = MathF.Max(SpringWide, MathF.Min(width, size)) / 2;
             float dx = toX - ax, dz = toZ - az, length = MathF.Sqrt(dx * dx + dz * dz);
             if (length <= 0) continue;
             float ux = dx / length, uz = dz / length;
-            int water = (int)MathF.Ceiling(from + 1f) - 2; // (the stream's top water block at its start, sunk a block)
+            int water = (int)MathF.Round(from) - 1; // (the stream's top water block at its start, as its channel has it)
             for (float a = 0; a <= SpringReach; a += 0.5f)
             for (float o = -half + 0.5f; o <= half - 0.5f + 1e-3f; o += 1f)
             {
@@ -821,13 +822,12 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             }
         }
         // The top roughened on slopes: blended between corners, a cell's slope is a flat face; moved up or down by slow,
-        // smooth noise (as much as Rough where the landscape's ground is RoughSlope steep), it breaks up. Flat ground, and ground the landscape's
-        // water runs or stands on, stays as it is. (Only once the landscape is worn: the landscape itself is worked out
-        // from the ground as it was, unroughened.)
-        if (count > 0 && _landscape != null)
+        // smooth noise (as much as Rough where the landscape's ground is RoughSlope steep), it breaks up. Flat ground,
+        // and ground near the landscape's water, stays as it is. (Only on worn ground: the landscape itself is worked
+        // out from the ground as it was, unroughened.)
+        if (count > 0 && lattice.Worn is { } shaped)
         {
             int wx = lattice.ChunkX * S + lx, wz = lattice.ChunkZ * S + lz;
-            var shaped = _landscape.At(wx, wz);
             float steep = Math.Clamp(shaped.Steepness(wx, wz) / RoughSlope, 0f, 1f);
             if (steep > 0f && !shaped.NearWater(wx, wz))
             {

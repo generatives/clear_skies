@@ -11,7 +11,7 @@ namespace ClearSkies.Game.Generation;
 /// <see cref="Pipes"/>) for <see cref="LandscapeSettings.ErodeHours"/>, its hollows filled to where they spill, and its
 /// water let run <see cref="LandscapeSettings.SettleMinutes"/> more. Worked out whole the first time any of it is
 /// asked for (tens of seconds) and kept, so every chunk of it agrees. HeartWorldGenerator moves its ground by the
-/// wear (see <see cref="Shift"/>) and fills water to the level the model left (see <see cref="WaterLevel"/>).
+/// wear (see <see cref="Shift"/>) and places water as the model left it (see <see cref="Shaped.Water"/>).
 /// </summary>
 public sealed class Landscape(ulong seed, LandscapeSettings settings)
 {
@@ -66,15 +66,13 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
         double until = pipes.Time + settings.SettleMinutes * 60;
         while (pipes.Time < until) pipes.Step();
         Console.WriteLine($"Landscape: landmass {landmass} worn and watered in {sw.Elapsed.TotalSeconds:0.0} s ({pipes.Steps:N0} steps)");
-        // Each node's stream: how much rain runs through it (in columns' worth), the way it sends most (to a neighbouring
-        // column), and the node there it sends it to, or -1 if that's a drain: over the land's edge.
-        var flow = new float[land.Nodes];
+        // Each node's way: the way it sends most (to a neighbouring column), and the node there it sends it to, or -1 if
+        // that's a drain: over the land's edge.
         var down = new int[land.Nodes];
         var way = new (sbyte X, sbyte Z)[land.Nodes];
         float column = pipes.Rain * settings.Size * settings.Size;
         for (int n = 0; n < land.Nodes; n++)
         {
-            flow[n] = pipes.Through(n) / column;
             down[n] = -1;
             float most = 0;
             for (int k = land.LinkStart[n]; k < land.LinkStart[n + 1]; k++)
@@ -84,22 +82,18 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
             // the slope.
             if (most / column >= settings.StreamFlow) continue;
             float surface = land.Floor[n] + pipes.Depth[n], total = 0f;
+            float Slope(int k) => land.LinkTo[k] is var m && m < 0 ? EdgeSlope : (surface - land.Floor[m] - pipes.Depth[m]) / land.LinkLength[k];
             for (int k = land.LinkStart[n]; k < land.LinkStart[n + 1]; k++)
-            {
-                int m = land.LinkTo[k];
-                float slope = m < 0 ? EdgeSlope : (surface - land.Floor[m] - pipes.Depth[m]) / land.LinkLength[k];
-                if (slope > 0) total += slope * slope;
-            }
+                if (Slope(k) is var slope && slope > 0) total += slope * slope;
             if (total <= 0f) continue;
             // (A way down picked at random, weighted by the square of its slope, the same every time: steep ways
             // mostly, but not one straight line down an even slope.)
             float pick = (float)(Hash(seed, n) * total);
             for (int k = land.LinkStart[n]; k < land.LinkStart[n + 1]; k++)
             {
-                int m = land.LinkTo[k];
-                float slope = m < 0 ? EdgeSlope : (surface - land.Floor[m] - pipes.Depth[m]) / land.LinkLength[k];
+                float slope = Slope(k);
                 if (slope <= 0) continue;
-                down[n] = m; way[n] = (land.LinkDx[k], land.LinkDz[k]);
+                down[n] = land.LinkTo[k]; way[n] = (land.LinkDx[k], land.LinkDz[k]);
                 if ((pick -= slope * slope) <= 0f) break;
             }
         }
@@ -201,7 +195,6 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
         return (h >> 11) * (1.0 / (1UL << 53));
     }
 
-
     /// <summary>0-1 per column: how near water it is, 1 in it, falling off over WaterReach blocks (see
     /// <see cref="Biomes.Wet"/>). Each block climbed on the way out of the water counts as WaterClimb blocks across, so
     /// a river greens its valley floor and not the ridges over it.</summary>
@@ -260,8 +253,6 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
 public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] down, int[] up, (sbyte X, sbyte Z)[] way,
                            float[] bend, float[] wide, bool[] head, float[] depth, float[] watered, LandscapeSettings settings)
 {
-    // (How wide a spring's stream is per sqrt(flow / StreamFlow), see HeartWorldGenerator.PlaceSprings.)
-    public const float StreamWide = 3f;
     // (How far ground on a stream's line may stand over its line's ground and still be cut through; how deep a
     // channel is cut at most.)
     private const float Hump = 3f, MostDeep = 4f;
@@ -277,27 +268,25 @@ public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] do
     /// middles round it; 0 off the land.</summary>
     public float Watered(float x, float z)
     {
-        float u = (x - land.X0) / land.Size, v = (z - land.Z0) / land.Size;
-        int i = (int)MathF.Floor(u), j = (int)MathF.Floor(v);
-        float fu = u - i, fv = v - j;
+        var (i, k, fx, fz) = Cell(x, z);
         float At(int a, int b) => a < 0 || b < 0 || a >= land.Nx || b >= land.Nz ? 0f : watered[a + land.Nx * b];
-        return (1 - fv) * ((1 - fu) * At(i, j) + fu * At(i + 1, j)) + fv * ((1 - fu) * At(i, j + 1) + fu * At(i + 1, j + 1));
+        return (1 - fz) * ((1 - fx) * At(i, k) + fx * At(i + 1, k)) + fz * ((1 - fx) * At(i, k + 1) + fx * At(i + 1, k + 1));
     }
 
     /// <summary>The top water block over block column (x, z), whose ground is topped at <paramref name="top"/>, or
-    /// int.MinValue, and the block its ground is cut down to (int.MaxValue for none): full detail and distant terrain
-    /// both place water by this (distant terrain <paramref name="widen"/>s by half a voxel, so water thinner than a
-    /// voxel still shows, and doesn't cut). Two rules:
-    /// - wet columns (the model's water deeper than Shallow past the damp, running or standing) show the model's
-    ///   own surface, blended between the nearest wet columns (see WetLevel): a river fills its valley as deep and
-    ///   wide as the model has it, and a lake is level; a block lower than the model's surface, its water taking the
-    ///   top ground block's place (a block cut where it's that shallow), so its edges sit level with the ground beside;
-    /// - every stream runs in a channel cut along its line: the model's water across its column (the column's width
-    ///   times its depth) gathered into a channel three times as wide as it's deep (a column wide and MostDeep deep at
-    ///   most, LeastWide wide and a block deep at least), along its curve (see Curve), its bed rounded, its surface flat across and level with the line's ground: the
-    ///   valley floor keeps its banks and the stream sits in it. Ground up to Hump blocks over the line's is cut
-    ///   through, so it runs on unbroken over small rises; higher ground, down a steep drop (its curve falling more than half a
-    ///   column; no higher than the drop's top), it runs down over along its line, a block deep. Under the model's own surface nothing is cut.</summary>
+    /// int.MinValue, and the block its ground is cut down to (int.MaxValue for none). Full detail and distant terrain
+    /// both place water by this (distant terrain <paramref name="widen"/>s by half a voxel, so water thinner than a voxel
+    /// still shows, and cuts nothing). Two rules:
+    /// - the model's own surface, a block lower, blended between the nearest columns so it thins into the ground
+    ///   wherever it ends (see WetLevel): a river fills its valley as the model has it, and a lake is level. Its water
+    ///   takes the top ground block's place (a block cut where it's that shallow), so its edges sit level with the
+    ///   ground beside;
+    /// - every stream runs in a channel cut along its curve (see Curve): the model's water across its column (the
+    ///   column's width times its depth) gathered three times as wide as it's deep (LeastWide wide and a block deep at
+    ///   least, a column wide and MostDeep deep at most), its bed rounded and its surface level with the line's ground,
+    ///   a block down. Ground up to Hump over the line is cut through, so it runs on over small rises; down a steep
+    ///   drop (its curve falling more than half a column) it runs over the ground along its line, uncut, no higher
+    ///   than the drop's top. Under the model's own surface nothing is cut.</summary>
     public (int Water, int Bed) Water(int x, int z, int top, float widen)
     {
         // (The shown surface is a block under the model's: its water takes the top ground block's place, as a stream's
@@ -405,9 +394,6 @@ public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] do
                          a * c[0].Wide + b * c[1].Wide + e * c[2].Wide);
     }
 
-    /// <summary>The top water block over block column (x, z) (see Water).</summary>
-    public int WaterTop(int x, int z, int top, float widen) => Water(x, z, top, widen).Water;
-
     /// <summary>The surface the model's water shows over block column (x, z), a block under its own (Shallow past
     /// the damp), or NaN: each of the four nearest columns' shown water (none where it's that shallow) on its floor,
     /// blended by how near each is, shown where that's at least ShowsFrom deep. Every column counts alike, wet or dry, so
@@ -417,16 +403,13 @@ public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] do
     /// (not past its edge).</summary>
     private float WetLevel(int x, int z, int top)
     {
-        int size = land.Size;
-        float gx = (x - land.X0) / (float)size, gz = (z - land.Z0) / (float)size;
-        int i0 = (int)MathF.Floor(gx), k0 = (int)MathF.Floor(gz);
-        float fx = gx - i0, fz = gz - k0, highest = float.NaN, past = settings.Damp + Shallow;
+        var (i0, k0, fx, fz) = Cell(x, z);
+        float highest = float.NaN, past = settings.Damp + Shallow;
         Span<int> corner = stackalloc int[4];
         for (int c = 0; c < 4; c++)
         {
-            int i = i0 + (c & 1), k = k0 + (c >> 1);
-            int t = i < 0 || k < 0 || i >= land.Nx || k >= land.Nz ? -1 : land.TopNode(i + land.Nx * k);
-            corner[c] = t = t < 0 || top < land.Floor[t] - size ? -1 : t;
+            int t = TopNode(i0 + (c & 1), k0 + (c >> 1));
+            corner[c] = t = t < 0 || top < land.Floor[t] - land.Size ? -1 : t;
             if (t >= 0 && depth[t] > past && !(land.Floor[t] + depth[t] - past <= highest)) highest = land.Floor[t] + depth[t] - past;
         }
         if (float.IsNaN(highest)) return float.NaN;
@@ -494,19 +477,15 @@ public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] do
     /// nearest columns' floors blended (0 where one has none).</summary>
     public float Steepness(int x, int z)
     {
-        int size = land.Size;
-        float gx = (x - land.X0) / (float)size, gz = (z - land.Z0) / (float)size;
-        int i0 = (int)MathF.Floor(gx), k0 = (int)MathF.Floor(gz);
-        float fx = gx - i0, fz = gz - k0;
+        var (i0, k0, fx, fz) = Cell(x, z);
         Span<float> f = stackalloc float[4];
         for (int c = 0; c < 4; c++)
         {
-            int i = i0 + (c & 1), k = k0 + (c >> 1);
-            int t = i < 0 || k < 0 || i >= land.Nx || k >= land.Nz ? -1 : land.TopNode(i + land.Nx * k);
+            int t = TopNode(i0 + (c & 1), k0 + (c >> 1));
             if (t < 0) return 0f;
             f[c] = land.Floor[t];
         }
-        float dx = ((1 - fz) * (f[1] - f[0]) + fz * (f[3] - f[2])) / size, dz = ((1 - fx) * (f[2] - f[0]) + fx * (f[3] - f[1])) / size;
+        float dx = ((1 - fz) * (f[1] - f[0]) + fz * (f[3] - f[2])) / land.Size, dz = ((1 - fx) * (f[2] - f[0]) + fx * (f[3] - f[1])) / land.Size;
         return MathF.Sqrt(dx * dx + dz * dz);
     }
 
@@ -514,13 +493,39 @@ public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] do
     /// through it (water reaches that far across: a stream's channel, the model's surface blended between columns).</summary>
     public bool NearWater(int x, int z)
     {
-        for (int c = 0; c < 16; c++)
-        {
-            int t = TopNodeAt(x + (c % 4 - 1) * land.Size, z + (c / 4 - 1) * land.Size);
-            if (t >= 0 && (depth[t] > settings.Damp || flow[t] > 0f)) return true;
-        }
-        return false;
+        var (i, k, _, _) = Cell(x, z);
+        return i >= 0 && k >= 0 && i < land.Nx && k < land.Nz && _nearWater[i + land.Nx * k];
     }
+
+    private readonly bool[] _nearWater = NearWater(land, n => depth[n] > settings.Damp || flow[n] > 0f);
+
+    // (Per cell, by its first column: whether any of the 4 by 4 columns round it is watered.)
+    private static bool[] NearWater(Land land, Func<int, bool> watered)
+    {
+        var near = new bool[land.Columns];
+        for (int c = 0; c < land.Columns; c++)
+        {
+            int t = land.TopNode(c);
+            if (t < 0 || !watered(t)) continue;
+            int i = c % land.Nx, k = c / land.Nx;
+            for (int b = k - 2; b <= k + 1; b++)
+            for (int a = i - 2; a <= i + 1; a++)
+                if (a >= 0 && b >= 0 && a < land.Nx && b < land.Nz) near[a + land.Nx * b] = true;
+        }
+        return near;
+    }
+
+    /// <summary>The cell of columns block column (x, z) is in: its first column (i0, k0), and how far across it is toward
+    /// the next ones (fx, fz, 0-1), for blending the four (i0..i0 + 1, k0..k0 + 1).</summary>
+    private (int I0, int K0, float Fx, float Fz) Cell(float x, float z)
+    {
+        float gx = (x - land.X0) / land.Size, gz = (z - land.Z0) / land.Size;
+        int i0 = (int)MathF.Floor(gx), k0 = (int)MathF.Floor(gz);
+        return (i0, k0, gx - i0, gz - k0);
+    }
+
+    /// <summary>Column (i, k)'s top node, or -1 (none, or off the land).</summary>
+    private int TopNode(int i, int k) => i < 0 || k < 0 || i >= land.Nx || k >= land.Nz ? -1 : land.TopNode(i + land.Nx * k);
 
     /// <summary>The top node of the column with its middle at (x, z), or -1.</summary>
     private int TopNodeAt(int x, int z)
