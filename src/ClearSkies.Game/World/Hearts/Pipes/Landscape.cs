@@ -116,8 +116,13 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
         }
         // A shown stream runs on down its way to wherever it goes, even past a column beside it that carries as much (a
         // stream stepping across the grid diagonally runs beside itself).
+        // And water the model shows (see Shaped.WetLevel) running out over dry ground runs on as a stream, however
+        // little it carries: a pond's outlet doesn't break off.
+        bool Shows(int n) => pipes.Depth[n] > settings.Damp + Shaped.Shallow;
         for (int n = 0; n < land.Nodes; n++)
-            for (int m = shown[n] > 0 ? down[n] : -1; m >= 0 && shown[m] <= 0 && way[m] != (0, 0); m = down[m]) shown[m] = carried[m];
+            if (Shows(n) && way[n] != (0, 0) && down[n] >= 0 && !Shows(down[n]) && shown[n] <= 0) shown[n] = MathF.Max(carried[n], 1e-3f);
+        for (int n = 0; n < land.Nodes; n++)
+            for (int m = shown[n] > 0 ? down[n] : -1; m >= 0 && shown[m] <= 0 && way[m] != (0, 0); m = down[m]) shown[m] = MathF.Max(carried[m], 1e-3f);
         // Each shown stream's main one running into it (the one carrying most), or -1: its line curves on from that one's.
         var up = new int[land.Nodes];
         Array.Fill(up, -1);
@@ -146,7 +151,7 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
         // model's own surface, running or standing.
         var level = new float[land.Nodes];
         for (int n = 0; n < land.Nodes; n++)
-            level[n] = pipes.Depth[n] > settings.Damp + Shaped.Shallow ? land.Floor[n] + pipes.Depth[n] - settings.Damp : float.NaN;
+            level[n] = Shows(n) ? land.Floor[n] + pipes.Depth[n] - settings.Damp : float.NaN;
         return new Shaped(land, start, shown, down, up, way, bend, head, pipes.Depth, level, settings);
     }
 
