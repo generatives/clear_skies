@@ -614,7 +614,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
     }
 
     /// <summary>The landscape's water over chunk column (x0, z0): each block column to the level of the water that
-    /// reaches it (see Shaped.WaterTop), springs at streams' heads (PlaceSprings), and falls wherever water would stand
+    /// reaches it (see Shaped.WaterTop), as a thin film where it's beside dry ground lower than it, springs at streams'
+    /// heads (PlaceSprings), and falls wherever water would stand
     /// in a face: a column beside water more than a block over its own surface (its water, or its ground if dry) has
     /// water falling down it from that water to its surface, or past the land's edge to the bottom of the land it falls
     /// from. A fall that drops more than FallDrop onto dry ground lands in a plunge pool. Worked out over the chunk
@@ -635,7 +636,15 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             _padTop[at] = top;
             _padWater[at] = top == int.MinValue ? int.MinValue : shaped.WaterTop(x0 + lx, z0 + lz, top, 0f);
         }
-        for (int col = 0; col < S * S; col++) p.Water[col] = _padWater[PadAt(col % S, col / S)];
+        for (int col = 0; col < S * S; col++)
+        {
+            int at = PadAt(col % S, col / S), water = _padWater[at];
+            p.Water[col] = water;
+            if (water <= _padTop[at]) continue;
+            // Water over a dry neighbour's ground runs off it: its top block is a thin film (Thin eighths), not a cube.
+            foreach (int d in (ReadOnlySpan<int>)[at - 1, at + 1, at - PadSide, at + PadSide])
+                if (_padWater[d] <= _padTop[d] && _padTop[d] < water) { p.WaterHeight[col] = Thin; break; }
+        }
         PlaceSprings(p, shaped, x0, z0);
         for (int lz = 0; lz < S; lz++)
         for (int lx = 0; lx < S; lx++)
@@ -663,6 +672,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
             {
                 p.Cut[col] = top - PoolDepth;
                 p.Water[col] = top;
+                p.WaterHeight[col] = 8;
             }
         }
     }
@@ -710,6 +720,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
     // While a column's water is placed (see PlaceWater): per block column over it and Pad round it, its top block and
     // top water block (int.MinValue for none).
     private const int Pad = 1, PadSide = S + 2 * Pad;
+    private const byte Thin = 2;
     private readonly int[] _padTop = new int[PadSide * PadSide], _padWater = new int[PadSide * PadSide];
     private static int PadAt(int lx, int lz) => lx + Pad + PadSide * (lz + Pad);
 

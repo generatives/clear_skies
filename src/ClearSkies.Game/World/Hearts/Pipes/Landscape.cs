@@ -254,19 +254,27 @@ public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] do
 {
     // (A stream's band: StreamWide times its width, a column wide at most; ground up to a block over its line keeps it.)
     public const float StreamWide = 3f;
+    // (How far ground in a stream's band may stand over its line's ground, or its level, and still have it run over.)
+    private const float Hump = 2f;
 
     /// <summary>The top water block over block column (x, z), whose ground is topped at <paramref name="top"/>, or
     /// int.MinValue: full detail and distant terrain both place water by this (distant terrain <paramref name="widen"/>s
     /// by half a voxel, so water thinner than a voxel still shows). Each wet node nearby has a level (see Landscape's
     /// Levels); the column takes the highest of those that reach it, where its ground is under it:
     /// - still water's level, blended between the nearest still columns (see StillLevel);
-    /// - a stream's level along its line, from its node's to the next one's, out to its reach each side;
+    /// - a stream's level along its line, from its node's to the next one's, out to its reach each side: the nearest
+    ///   line's, so where a river's pieces overlap round a bend its surface runs on smoothly rather than the higher
+    ///   one standing over the lower;
     /// - and over the stream's own band (StreamWide times its width), a block over its line's ground at least, on any
-    ///   ground up to a block over the higher end's: a creek too narrow for a level to show still runs, on to its lip.
+    ///   ground up to Hump blocks over the higher end's (or its level): a creek too narrow for a level to show still
+    ///   runs, unbroken over small rises, on to its lip.
+    /// Under still water, only the still water's level counts: streams running in end at it.
     /// None stands over ground more than a column under the node's floor (land far below: past its edge).</summary>
     public int WaterTop(int x, int z, int top, float widen)
     {
         int size = land.Size, best = Top(StillLevel(x, z, top), top), r = 3 + (int)MathF.Ceiling(widen / size);
+        if (best != int.MinValue) return best; // (under still water: a stream running in ends at its level)
+        float nearest = float.MaxValue, river = float.NaN;
         int ic = (int)MathF.Round((x - land.X0) / (float)size), kc = (int)MathF.Round((z - land.Z0) / (float)size);
         for (int k = kc - r; k <= kc + r; k++)
         for (int i = ic - r; i <= ic + r; i++)
@@ -287,12 +295,12 @@ public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] do
             // (How far off the line, blocks, left of it or right: round its ends, the whole way to the nearest end.)
             float off = MathF.Sqrt(ox * ox + oz * oz), side = dx * oz - dz * ox >= 0 ? off : -off;
             float l = level[t] + along * (toLevel - level[t]), g = land.Floor[t] + along * (toFloor - land.Floor[t]);
-            if (side <= left[t] + widen && -side <= right[t] + widen) best = Math.Max(best, Top(l, top));
+            if (side <= left[t] + widen && -side <= right[t] + widen && off < nearest) { nearest = off; river = l; }
             float half = MathF.Min(flow[t] > 0 ? MathF.Sqrt(flow[t] / settings.StreamFlow) * StreamWide : 0f, size) / 2 + widen;
-            if (half >= 0.5f && off <= half && top <= MathF.Max(land.Floor[t], toFloor) + 1f)
+            if (half >= 0.5f && off <= half && top <= MathF.Max(MathF.Max(land.Floor[t], toFloor), l) + Hump)
                 best = Math.Max(best, Math.Max(top + 1, (int)MathF.Ceiling(MathF.Max(l, g + 1f)) - 1));
         }
-        return best;
+        return Math.Max(best, Top(river, top));
     }
 
     /// <summary>Still water's level over block column (x, z) (ground topped at <paramref name="top"/>), or NaN: the
