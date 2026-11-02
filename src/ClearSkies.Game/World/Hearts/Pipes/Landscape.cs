@@ -177,10 +177,11 @@ public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] do
     ///   times its depth) gathered into a channel three times as wide as it's deep (a column wide and MostDeep deep at
     ///   most, a block each at least), its bed rounded, its surface flat across and level with the line's ground: the
     ///   valley floor keeps its banks and the stream sits in it. Ground up to Hump blocks over the line's is cut
-    ///   through, so it runs on unbroken over small rises.</summary>
+    ///   through, so it runs on unbroken over small rises. Under the model's own surface nothing is cut.</summary>
     public (int Water, int Bed) Water(int x, int z, int top, float widen)
     {
         int size = land.Size, water = Top(WetLevel(x, z, top), top), bed = int.MaxValue, r = 2 + (int)MathF.Ceiling(widen / size);
+        bool shows = water != int.MinValue;
         int ic = (int)MathF.Round((x - land.X0) / (float)size), kc = (int)MathF.Round((z - land.Z0) / (float)size);
         for (int k = kc - r; k <= kc + r; k++)
         for (int i = ic - r; i <= ic + r; i++)
@@ -206,7 +207,7 @@ public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] do
             if (off2 > half * half) continue;
             int surface = (int)MathF.Round(g) - 1; // (the line's top ground block: water takes its place)
             water = Math.Max(water, widen > 0f ? Math.Max(surface, top + 1) : surface); // (distant terrain: over its voxel)
-            if (widen <= 0f)
+            if (widen <= 0f && !shows) // (under water the model already shows, nothing is cut)
                 bed = Math.Min(bed, surface - Math.Max(1, (int)MathF.Round(deep * (1f - off2 / (half * half)))));
         }
         if (water <= Math.Min(top, bed)) return (int.MinValue, int.MaxValue);
