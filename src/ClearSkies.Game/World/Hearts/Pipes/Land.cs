@@ -18,7 +18,8 @@ public sealed class Land
     /// <summary>Nodes of column c are NodeStart[c] .. NodeStart[c + 1] - 1, bottom up.</summary>
     public readonly int[] NodeStart;
     public readonly float[] Floor, Ceiling;
-    /// <summary>The bottom of the span each node stands on: its floor can't be worn lower than a little over this.</summary>
+    /// <summary>The bottom of the span each node stands on, or of a neighbour's beside it if higher: its floor can't be
+    /// worn lower than a little over this.</summary>
     public readonly float[] Base;
     public readonly int[] ColumnOf;
     public int Nodes => Floor.Length;
@@ -123,6 +124,15 @@ public sealed class Land
             if (m < 0) continue;
             for (int r = start[m]; r < start[m + 1]; r++)
                 if (LinkTo[r] == n && LinkLength[r] == LinkLength[k] && LinkTop[r] == LinkTop[k]) { LinkBack[k] = r; break; }
+        }
+        // Blocks between columns are blended from both, so a floor stays clear of its neighbours' bottoms too: where the
+        // land's underside slopes, a floor worn near its own bottom would leave the blocks beside it too thin to stand.
+        var own = (float[])Base.Clone();
+        for (int n = 0; n < nodes; n++)
+        for (int k = start[n]; k < start[n + 1]; k++)
+        {
+            int m = LinkTo[k];
+            if (m >= 0 && own[m] < Floor[n]) Base[n] = Math.Max(Base[n], own[m]);
         }
         FaceWidth = size * (MathF.Sqrt(2) - 1);
 

@@ -380,7 +380,7 @@ public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] do
             int t = corner[c];
             if (t < 0) continue;
             float w = ((c & 1) == 0 ? 1 - fx : fx) * ((c >> 1) == 0 ? 1 - fz : fz) + 1e-4f;
-            sum += w * (float.IsNaN(level[t]) ? MathF.Min(land.Floor[t], highest) : level[t]); weights += w;
+            sum += w * (float.IsNaN(level[t]) ? MathF.Min(land.Floor[t] + MathF.Max(0f, depth[t] - settings.Damp), highest) : level[t]); weights += w;
         }
         return sum / weights;
     }
