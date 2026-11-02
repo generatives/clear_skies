@@ -236,7 +236,8 @@ public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] do
     /// voxel still shows, and doesn't cut). Two rules:
     /// - wet columns (the model's water deeper than Shallow past the damp, running or standing) show the model's
     ///   own surface, blended between the nearest wet columns (see WetLevel): a river fills its valley as deep and
-    ///   wide as the model has it, and a lake is level;
+    ///   wide as the model has it, and a lake is level; a block lower than the model's surface, its water taking the
+    ///   top ground block's place (a block cut where it's that shallow), so its edges sit level with the ground beside;
     /// - every stream runs in a channel cut along its line: the model's water across its column (the column's width
     ///   times its depth) gathered into a channel three times as wide as it's deep (a column wide and MostDeep deep at
     ///   most, LeastWide wide and a block deep at least), along its curve (see Curve), its bed rounded, its surface flat across and level with the line's ground: the
@@ -247,6 +248,13 @@ public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] do
     {
         int size = land.Size, water = Top(WetLevel(x, z, top), top), bed = int.MaxValue, r = 2 + (int)MathF.Ceiling(widen / size);
         bool shows = water != int.MinValue;
+        if (shows && widen <= 0f)
+        {
+            // (Its water takes the top ground block's place, as a stream's does: a shallow edge sits level with the
+            // ground beside it, not a block over it.)
+            water--;
+            if (water <= top) bed = water - 1;
+        }
         int ic = (int)MathF.Round((x - land.X0) / (float)size), kc = (int)MathF.Round((z - land.Z0) / (float)size);
         float px = x + 0.5f, pz = z + 0.5f;
         Span<Point> curve = stackalloc Point[3];
