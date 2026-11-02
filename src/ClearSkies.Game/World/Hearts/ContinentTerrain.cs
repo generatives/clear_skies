@@ -43,8 +43,11 @@ public sealed class ContinentTerrain
     private readonly FastNoiseLite _heat, _wet;   // the climate's broad regional fields (see Biomes)
     private readonly FastNoiseLite _climateWarpX, _climateWarpZ; // bend the borders between biomes
 
+    private readonly ulong _seed;
+
     private ContinentTerrain(ulong seed)
     {
+        _seed = seed;
         _plains = Noise(seed + 11, FastNoiseLite.FractalType.FBm, 3, 0.0004f);
         _hills = Noise(seed + 12, FastNoiseLite.FractalType.FBm, 3, 0.0012f);
         _ranges = Noise(seed + 13, FastNoiseLite.FractalType.FBm, 1, 0.00007f);
@@ -151,13 +154,28 @@ public sealed class ContinentTerrain
     /// piece (no islands of one stranded in another).</summary>
     public const float ClimateWarp = 200f;
 
-    /// <summary>-1 to 1 at column (x, z), for <see cref="Biomes.Heat"/>: regions a few kilometres across that run hotter
-    /// or cooler than their height alone would make them.</summary>
-    public float Heat(float x, float z) { Warp(ref x, ref z); return _heat.GetNoise(x, z); }
+    // Each landmass has one climate, read off the broad fields at its middle (so neighbours are alike), varied across
+    // it only a little (by the same fields, warped, at the column): its biomes then change mostly with height and
+    // water, and only a landmass where the fields run to an extreme is desert, badlands or jungle.
+    private const float IslandHeat = 1.2f, IslandRain = 0.65f, LocalHeat = 0.15f, LocalRain = 0.1f, RainMiddle = 0.57f;
 
-    /// <summary>0-1 at column (x, z): how much rain the region gets. It waters the landscape (see <see cref="Land"/>), and
-    /// is how wet the ground is away from water (see <see cref="Biomes.Wet"/>).</summary>
-    public float Rain(float x, float z) { Warp(ref x, ref z); return Math.Clamp(0.5f + 0.9f * _wet.GetNoise(x, z), 0f, 1f); }
+    /// <summary>About -1 to 1 at column (x, z), for <see cref="Biomes.Heat"/>: how much hotter or cooler than its height
+    /// alone would make it its landmass runs, varied a little across it.</summary>
+    public float Heat(float x, float z)
+    {
+        var (cx, cz) = HeartGrid.LandmassCentre(_seed, x, z);
+        Warp(ref x, ref z);
+        return IslandHeat * _heat.GetNoise(cx, cz) + LocalHeat * _heat.GetNoise(x * 4f, z * 4f);
+    }
+
+    /// <summary>0-1 at column (x, z): how much rain its landmass gets, varied a little across it. It waters the landscape
+    /// (see <see cref="Land"/>), and is how wet the ground is away from water (see <see cref="Biomes.Wet"/>).</summary>
+    public float Rain(float x, float z)
+    {
+        var (cx, cz) = HeartGrid.LandmassCentre(_seed, x, z);
+        Warp(ref x, ref z);
+        return Math.Clamp(RainMiddle + IslandRain * _wet.GetNoise(cx, cz) + LocalRain * _wet.GetNoise(x * 4f, z * 4f), 0f, 1f);
+    }
 
     /// <summary>Moves (x, z) by up to <paramref name="amount"/> blocks along the climate's warp: borders read through it
     /// come out ragged.</summary>

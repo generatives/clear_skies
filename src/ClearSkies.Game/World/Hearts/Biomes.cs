@@ -20,22 +20,22 @@ public static class Biomes
     {
         (Biome.Temperate, 0.55f, 0.55f, 0f,    0f,    0f,    0f),
         (Biome.Autumn,    0.30f, 0.75f, 0.93f, 0.52f, 0.18f, 0.85f),
-        (Biome.Desert,    0.75f, 0.35f, 0.88f, 0.76f, 0.30f, 0.85f),
-        (Biome.Badlands,  0.95f, 0.10f, 0.80f, 0.50f, 0.26f, 0.75f),
+        (Biome.Desert,    0.85f, 0.10f, 0.88f, 0.76f, 0.30f, 0.85f),
+        (Biome.Badlands,  1.05f, 0.00f, 0.80f, 0.50f, 0.26f, 0.75f),
         (Biome.Tundra,    0.05f, 0.50f, 0.62f, 0.78f, 0.70f, 0.65f),
-        (Biome.Steppe,    0.15f, 0.05f, 0.72f, 0.68f, 0.36f, 0.75f),
+        (Biome.Steppe,    0.30f, 0.25f, 0.72f, 0.68f, 0.36f, 0.75f),
         (Biome.Jungle,    1.05f, 0.95f, 0.12f, 0.62f, 0.12f, 0.6f),
         (Biome.Volcanic,  1.35f, 0.30f, 0.45f, 0.42f, 0.36f, 0.6f),
         // (Between desert and jungle, so the one doesn't border the other.)
-        (Biome.Savanna,   0.95f, 0.60f, 0.80f, 0.72f, 0.30f, 0.7f),
+        (Biome.Savanna,   0.85f, 0.50f, 0.80f, 0.72f, 0.30f, 0.7f),
     };
 
     /// <summary>How far apart in the climate (squared) biomes' tints mix over.</summary>
     private const float TintBlend = 0.002f;
 
-    /// <summary>How hot a top at <paramref name="top"/> is, with <paramref name="regional"/> (-1 to 1) from
-    /// <see cref="ContinentTerrain.Heat"/>: cooler by a unit every 900 blocks up from the plains.</summary>
-    public static float Heat(float top, float regional) => 0.6f - (top - ContinentTerrain.PlainsLevel) / 900f + 0.6f * regional;
+    /// <summary>How hot a top at <paramref name="top"/> is, with <paramref name="regional"/> (about -1 to 1) from
+    /// <see cref="ContinentTerrain.Heat"/>: cooler by a unit every 1600 blocks up from the plains.</summary>
+    public static float Heat(float top, float regional) => 0.5f - (top - ContinentTerrain.PlainsLevel) / 1600f + 0.6f * regional;
 
     /// <summary>How far a column's nearness to water is read off from it, in blocks: ragged edges to the green along
     /// shores and banks, without moving it off the water.</summary>

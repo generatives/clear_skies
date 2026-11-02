@@ -173,6 +173,22 @@ public static class HeartGrid
         return border;
     }
 
+    /// <summary>The point of the landmass (x, z) belongs to (see <see cref="Landmass"/>): somewhere near its middle.</summary>
+    public static (float X, float Z) LandmassCentre(ulong seed, float x, float z)
+    {
+        int ci = (int)MathF.Floor(x / LandmassSpacing), cj = (int)MathF.Floor(z / LandmassSpacing);
+        (float X, float Z) nearest = default;
+        float best = float.MaxValue;
+        for (int j = cj - 1; j <= cj + 1; j++)
+        for (int i = ci - 1; i <= ci + 1; i++)
+        {
+            var (sx, sz) = LandmassPoint(seed, i, j);
+            float d = (sx - x) * (sx - x) + (sz - z) * (sz - z);
+            if (d < best) { best = d; nearest = (sx, sz); }
+        }
+        return nearest;
+    }
+
     private static (float X, float Z) LandmassPoint(ulong seed, int i, int j)
     {
         var rng = new SplitMix64Rng(HashCell(seed, 306, i, 0, j));
