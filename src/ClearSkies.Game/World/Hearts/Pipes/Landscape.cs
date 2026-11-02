@@ -433,6 +433,26 @@ public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] do
         return t < 0 || MathF.Abs(startFloor[t] - top) > Near ? 0f : land.Floor[t] - startFloor[t];
     }
 
+    /// <summary>How steep the ground is at block column (x, z), blocks up per block across: the slope of its four
+    /// nearest columns' floors blended (0 where one has none).</summary>
+    public float Steepness(int x, int z)
+    {
+        int size = land.Size;
+        float gx = (x - land.X0) / (float)size, gz = (z - land.Z0) / (float)size;
+        int i0 = (int)MathF.Floor(gx), k0 = (int)MathF.Floor(gz);
+        float fx = gx - i0, fz = gz - k0;
+        Span<float> f = stackalloc float[4];
+        for (int c = 0; c < 4; c++)
+        {
+            int i = i0 + (c & 1), k = k0 + (c >> 1);
+            int t = i < 0 || k < 0 || i >= land.Nx || k >= land.Nz ? -1 : land.TopNode(i + land.Nx * k);
+            if (t < 0) return 0f;
+            f[c] = land.Floor[t];
+        }
+        float dx = ((1 - fz) * (f[1] - f[0]) + fz * (f[3] - f[2])) / size, dz = ((1 - fx) * (f[2] - f[0]) + fx * (f[3] - f[1])) / size;
+        return MathF.Sqrt(dx * dx + dz * dz);
+    }
+
     /// <summary>Whether any of the columns round block column (x, z) or beside those has water over it or a stream
     /// through it (water reaches that far across: a stream's channel, the model's surface blended between columns).</summary>
     public bool Watered(int x, int z)

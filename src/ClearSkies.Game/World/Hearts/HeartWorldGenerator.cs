@@ -46,7 +46,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
     private const int MinThickness = 6;
     // Slopes roughened (see ColumnSpans): how far a top moves up or down at most, on ground at least RoughSlope steep
     // (less on gentler ground, none on flat), and how fine the roughness is.
-    private const float Rough = 1.5f, RoughSlope = 1f, RoughFrequency = 0.12f;
+    private const float Rough = 2.5f, RoughSlope = 1f, RoughFrequency = 0.05f;
 
     // A piece's top is the terrain worn down: where the terrain there stands above the terrain at its heart, only
     // Flatten of the difference is left, and the whole top is lowered by up to MaxDrop (each piece its own amount).
@@ -87,6 +87,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         _crack = Noise(seed + 34, 0.03f);
         _bottom = Noise(seed + 35, 0.02f);
         _rough = Noise(seed + 36, RoughFrequency);
+        _rough.SetFractalType(FastNoiseLite.FractalType.None); // (one smooth octave: bumps, not speckle)
     }
 
     private static FastNoiseLite Noise(ulong seed, float frequency)
@@ -803,15 +804,16 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
                 lo = int.MinValue;
             }
         }
-        // The top roughened on slopes: blended between corners, a cell's slope is a flat face; moved up or down a little
-        // by noise (as much as Rough where it's RoughSlope steep), it breaks up. Flat ground, and ground the landscape's
+        // The top roughened on slopes: blended between corners, a cell's slope is a flat face; moved up or down by slow,
+        // smooth noise (as much as Rough where the landscape's ground is RoughSlope steep), it breaks up. Flat ground, and ground the landscape's
         // water runs or stands on, stays as it is. (Only once the landscape is worn: the landscape itself is worked out
         // from the ground as it was, unroughened.)
         if (count > 0 && _landscape != null)
         {
             int wx = lattice.ChunkX * S + lx, wz = lattice.ChunkZ * S + lz;
-            float steep = Math.Clamp(lattice.Slope(lx, lz) / RoughSlope, 0f, 1f);
-            if (steep > 0f && !_landscape.At(wx, wz).Watered(wx, wz))
+            var shaped = _landscape.At(wx, wz);
+            float steep = Math.Clamp(shaped.Steepness(wx, wz) / RoughSlope, 0f, 1f);
+            if (steep > 0f && !shaped.Watered(wx, wz))
             {
                 var (rlo, rhi) = into[count - 1];
                 float n = _rough.GetNoise(wx, wz);
