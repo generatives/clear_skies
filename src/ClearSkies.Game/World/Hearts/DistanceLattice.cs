@@ -23,8 +23,6 @@ internal sealed class DistanceLattice
     public int ChunkZ { get; private set; }
     public int First { get; private set; }
     public int Levels { get; private set; }
-    /// <summary>The landscape that wore it, or null (not worn).</summary>
-    public Shaped? Worn { get; set; }
 
     private float[] _distance = Array.Empty<float>(); // corner column c's levels from c * Levels
     private readonly sbyte[] _diagonal = new sbyte[(Corners - 1) * (Corners - 1)]; // each cell's split: 0 not worked out, 1 a-d, 2 b-c
@@ -32,7 +30,7 @@ internal sealed class DistanceLattice
     /// <summary>Makes it ready for chunk column (chunkX, chunkZ), from level first, levels high.</summary>
     public void Reset(int chunkX, int chunkZ, int first, int levels)
     {
-        ChunkX = chunkX; ChunkZ = chunkZ; First = first; Levels = levels; Worn = null;
+        ChunkX = chunkX; ChunkZ = chunkZ; First = first; Levels = levels;
         if (_distance.Length < Corners * Corners * levels) _distance = new float[Corners * Corners * levels];
         Array.Clear(_diagonal);
     }
