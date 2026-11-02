@@ -157,7 +157,8 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
     /// floors, the land's edge a wall), filled from the lowest level up until the water over the ground round the line
     /// fills its cross-section: RiverArea square blocks times its width (sqrt(flow / StreamFlow)), so a creek a block
     /// deep over its width and a big river many blocks deep and wide; the reach is where that level meets the ground,
-    /// no further than StreamWide times its width (on a slope with no valley, it doesn't spread across the hillside). Then, from the heads down
+    /// no further than StreamWide times its width, and the level no higher than the lower bank (on a hillside, with no bank below, it
+    /// stays at its floor and runs in its band). Then, from the heads down
     /// the tree, no stream stands higher than the highest of those running into it.</summary>
     private (float[] Level, float[] Left, float[] Right) Levels(Land land, float[] depth, float[] shown, int[] down,
                                                                 (sbyte X, sbyte Z)[] way, bool[] still)
@@ -205,6 +206,12 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
             }
             float lo = bottom, hi = bottom + 64f;
             for (int it = 0; it < 24; it++) { float mid = (lo + hi) / 2; if (Fill(mid).Water < water) lo = mid; else hi = mid; }
+            // No higher than the lower bank: the highest ground each side (on a hillside, with no bank below, none over
+            // its floor: it runs in its band).
+            float bankRight = float.NegativeInfinity, bankLeft = float.NegativeInfinity;
+            for (int b = 0; b < steps; b++) if (!float.IsNaN(profile[b])) bankRight = MathF.Max(bankRight, profile[b]);
+            for (int b = steps + 1; b < profile.Count; b++) if (!float.IsNaN(profile[b])) bankLeft = MathF.Max(bankLeft, profile[b]);
+            hi = MathF.Max(bottom, MathF.Min(hi, MathF.Min(bankRight, bankLeft)));
             var (_, a, z) = Fill(hi);
             level[n] = hi;
             float widest = MathF.Sqrt(shown[n] / settings.StreamFlow) * Shaped.StreamWide / 2; // (no wider than its band would be)
@@ -268,6 +275,9 @@ public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] do
     /// - and over the stream's own band (StreamWide times its width), a block over its line's ground at least, on any
     ///   ground up to Hump blocks over the higher end's (or its level): a creek too narrow for a level to show still
     ///   runs, unbroken over small rises, on to its lip.
+    /// A stream is never deeper over a column than over its line's ground at either end (a block at least): down a drop
+    /// it runs down the ground rather than standing out over it. Still water with flow through it (a slow, shallow
+    /// river) runs in its band too, on ground up to Hump over its floor.
     /// Under still water, only the still water's level counts: streams running in end at it.
     /// None stands over ground more than a column under the node's floor (land far below: past its edge).</summary>
     public int WaterTop(int x, int z, int top, float widen)
@@ -281,7 +291,7 @@ public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] do
         {
             if (i < 0 || k < 0 || i >= land.Nx || k >= land.Nz) continue;
             int t = land.TopNode(i + land.Nx * k);
-            if (t < 0 || still[t] || float.IsNaN(level[t]) || top < land.Floor[t] - size) continue;
+            if (t < 0 || still[t] && flow[t] <= 0 || float.IsNaN(level[t])) continue;
             var (fx, fz) = Bent(t);
             int d = down[t];
             float tx, tz, toFloor, toLevel;
@@ -294,11 +304,16 @@ public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] do
             float ox = px - along * dx, oz = pz - along * dz;
             // (How far off the line, blocks, left of it or right: round its ends, the whole way to the nearest end.)
             float off = MathF.Sqrt(ox * ox + oz * oz), side = dx * oz - dz * ox >= 0 ? off : -off;
-            float l = level[t] + along * (toLevel - level[t]), g = land.Floor[t] + along * (toFloor - land.Floor[t]);
+            if (top < land.Floor[t] + along * (toFloor - land.Floor[t]) - size) continue; // (land far below its line: past its edge)
+            float l = level[t] + along * (toLevel - level[t]);
+            // (Never deeper over the column's ground than over its line's at either end, a block at least: down a drop it runs down
+            // the ground rather than standing out over it.)
+            float deep = MathF.Max(1f, MathF.Min(level[t] - land.Floor[t], toLevel - toFloor));
+            l = MathF.Min(l, top + 0.5f + deep);
             if (side <= left[t] + widen && -side <= right[t] + widen && off < nearest) { nearest = off; river = l; }
             float half = MathF.Min(flow[t] > 0 ? MathF.Sqrt(flow[t] / settings.StreamFlow) * StreamWide : 0f, size) / 2 + widen;
-            if (half >= 0.5f && off <= half && top <= MathF.Max(MathF.Max(land.Floor[t], toFloor), l) + Hump)
-                best = Math.Max(best, Math.Max(top + 1, (int)MathF.Ceiling(MathF.Max(l, g + 1f)) - 1));
+            if (half >= 0.5f && off <= half && top <= MathF.Max(MathF.Max(land.Floor[t], toFloor), still[t] ? float.MinValue : l) + Hump)
+                best = Math.Max(best, Math.Max(top + 1, Top(l, top)));
         }
         return Math.Max(best, Top(river, top));
     }
