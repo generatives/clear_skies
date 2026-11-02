@@ -419,6 +419,48 @@ public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] do
         return t < 0 || MathF.Abs(startFloor[t] - top) > Near ? 0f : land.Floor[t] - startFloor[t];
     }
 
+    /// <summary>How steep the ground is at block column (x, z), blocks up per block across: the slope of its four
+    /// nearest columns' floors blended (0 where one has none).</summary>
+    public float Steepness(int x, int z)
+    {
+        var (i0, k0, fx, fz) = Cell(x, z);
+        Span<float> f = stackalloc float[4];
+        for (int c = 0; c < 4; c++)
+        {
+            int t = TopNode(i0 + (c & 1), k0 + (c >> 1));
+            if (t < 0) return 0f;
+            f[c] = land.Floor[t];
+        }
+        float dx = ((1 - fz) * (f[1] - f[0]) + fz * (f[3] - f[2])) / land.Size, dz = ((1 - fx) * (f[2] - f[0]) + fx * (f[3] - f[1])) / land.Size;
+        return MathF.Sqrt(dx * dx + dz * dz);
+    }
+
+    /// <summary>Whether any of the columns round block column (x, z) or beside those has water over it or a stream
+    /// through it (water reaches that far across: a stream's channel, the model's surface blended between columns).</summary>
+    public bool NearWater(int x, int z)
+    {
+        var (i, k, _, _) = Cell(x, z);
+        return i >= 0 && k >= 0 && i < land.Nx && k < land.Nz && _nearWater[i + land.Nx * k];
+    }
+
+    private readonly bool[] _nearWater = NearWater(land, n => depth[n] > settings.Damp || flow[n] > 0f);
+
+    // (Per cell, by its first column: whether any of the 4 by 4 columns round it is watered.)
+    private static bool[] NearWater(Land land, Func<int, bool> watered)
+    {
+        var near = new bool[land.Columns];
+        for (int c = 0; c < land.Columns; c++)
+        {
+            int t = land.TopNode(c);
+            if (t < 0 || !watered(t)) continue;
+            int i = c % land.Nx, k = c / land.Nx;
+            for (int b = k - 2; b <= k + 1; b++)
+            for (int a = i - 2; a <= i + 1; a++)
+                if (a >= 0 && b >= 0 && a < land.Nx && b < land.Nz) near[a + land.Nx * b] = true;
+        }
+        return near;
+    }
+
     /// <summary>The cell of columns block column (x, z) is in: its first column (i0, k0), and how far across it is toward
     /// the next ones (fx, fz, 0-1), for blending the four (i0..i0 + 1, k0..k0 + 1).</summary>
     private (int I0, int K0, float Fx, float Fz) Cell(float x, float z)
