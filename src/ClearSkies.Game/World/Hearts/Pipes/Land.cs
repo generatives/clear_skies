@@ -142,7 +142,7 @@ public sealed class Land
         {
             for (int i = 0; i < Nx; i++)
             {
-                float w = Math.Clamp((climate.Rain(X0 + i * size, Z0 + j * size) - 0.3f) / 0.55f, 0f, 1f);
+                float w = Math.Clamp((climate.Wet(X0 + i * size, Z0 + j * size) - 0.3f) / 0.55f, 0f, 1f);
                 Wetness[i + Nx * j] = w * w * (3 - 2 * w);
             }
         });

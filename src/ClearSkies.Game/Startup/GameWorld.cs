@@ -57,7 +57,7 @@ public sealed class GameWorld
         ChunkPipeline = new ChunkPipelineSystem(host.World); // where chunks are made, after streaming wants them
         var profiles = new ProfileCache(); // every worker's generator shares what's worked out of the ground
         // Worn and watered landmass by landmass, as each is first reached (see Landscape).
-        var landscape = Landscape = options.Terrain.Enabled ? new Landscape(seed, options.Terrain) : null;
+        var landscape = options.Terrain.Enabled ? new Landscape(seed, options.Terrain) : null;
         ChunkLoad = new ChunkLoadSystem(host.World, StaticVolume, budget, ChunkPipeline.Pipeline, () => new HeartWorldGenerator(seed, profiles, landscape),
                                         options.ViewDistance, MinChunkY, chunkStore, chunkPreparer);
         ((EditVoxelsHandler)Commands.HandlerFor(CommandIds.EditVoxels)!).Terrain = ChunkLoad; // edits to the world ask it what's there
@@ -82,8 +82,6 @@ public sealed class GameWorld
     public LaunchOptions Options { get; }
     public Session Session { get; }
     public ulong Seed { get; }
-    /// <summary>The worn and watered landmasses (see <see cref="Generation.Landscape"/>), or null with --terrain off.</summary>
-    public Landscape? Landscape { get; }
     public EntityRegistry Registry { get; }
     public CommandSystem Commands { get; }
     public ChunkVolume StaticVolume { get; }

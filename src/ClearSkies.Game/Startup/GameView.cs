@@ -98,7 +98,7 @@ public sealed class GameView : IDisposable
         var (_, upload) = MeshStages.Add(world.ChunkPipeline, Meshes); // every chunk meshed in the chunk pipeline
         LightStages.Add(world.ChunkPipeline, residency, light, renderer, upload, host.Time, world.ChunkLoad); // lit and shown
         host.AddSystem(new BlockModelSystem(host.World, BlockModels), SystemStage.PreRender); // block entities -> RenderedModel
-        host.AddSystem(new ClimateTintSystem(renderer, new BiomeTintMap(world.Seed, world.Landscape)), SystemStage.RenderWorld); // grass and leaves coloured by biome
+        host.AddSystem(new ClimateTintSystem(renderer, new BiomeTintMap(world.Seed)), SystemStage.RenderWorld); // grass and leaves coloured by biome
 
         SkySettings.CloudAltitude = 1550f; // the islands are mostly low: clouds among the hills
         SkySettings.CloudSeaAltitude = HeartGrid.CloudSeaAltitude; // below its lowest islands

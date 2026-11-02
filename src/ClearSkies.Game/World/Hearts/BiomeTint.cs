@@ -3,24 +3,17 @@ using ClearSkies.Engine.Rendering;
 
 namespace ClearSkies.Game.Generation;
 
-/// <summary>The biomes' tints (<see cref="Biomes.Tint"/>) for the renderer's climate tint, by each column's climate,
-/// height and nearness to water: water from the <see cref="Landscape"/>'s landmasses as they are worked out (the tint
-/// is sampled again as each one is; none is worked out just for the tint).</summary>
-public sealed class BiomeTintMap(ulong seed, Landscape? landscape = null) : IClimateTintMap
+/// <summary>The biomes' tints (<see cref="Biomes.Tint"/>) for the renderer's climate tint, by each column's climate
+/// and height.</summary>
+public sealed class BiomeTintMap : IClimateTintMap
 {
-    private readonly ContinentTerrain _terrain = ContinentTerrain.For(seed);
+    private readonly ContinentTerrain _terrain;
 
-    public int Version => landscape?.Finished ?? 0;
+    public BiomeTintMap(ulong seed) => _terrain = ContinentTerrain.For(seed);
 
     public void Column(float x, float z, ReadOnlySpan<float> heights, Span<Vector4> tints)
     {
-        float regional = _terrain.Heat(x, z), wet = _terrain.Rain(x, z);
-        if (landscape?.Done(x, z) is { } shaped)
-        {
-            float wx = x, wz = z;
-            _terrain.Warp(ref wx, ref wz, Biomes.ShoreWarp);
-            wet = Biomes.Wet(wet, shaped.Watered(wx, wz));
-        }
+        float regional = _terrain.Heat(x, z), wet = _terrain.Wet(x, z);
         for (int j = 0; j < heights.Length; j++)
         {
             var (r, g, b, a) = Biomes.Tint(Biomes.Heat(heights[j], regional), wet);

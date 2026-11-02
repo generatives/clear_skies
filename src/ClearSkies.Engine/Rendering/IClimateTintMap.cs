@@ -13,8 +13,4 @@ public interface IClimateTintMap
     /// <summary>Fills <paramref name="tints"/> with the tint of column (x, z) at each of <paramref name="heights"/>:
     /// rgb a colour (sRGB, 0-1) and w how strongly it applies (0 none, 1 fully).</summary>
     void Column(float x, float z, ReadOnlySpan<float> heights, Span<Vector4> tints);
-
-    /// <summary>Changes whenever the map has learnt more of the world, so what was sampled before should be sampled
-    /// again.</summary>
-    int Version => 0;
 }

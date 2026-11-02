@@ -64,7 +64,6 @@ public static class Trees
                     Biome.Jungle => 0.002f + 0.035f * Grove(woods),
                     Biome.Tundra => 0.0005f + 0.012f * Grove(woods),
                     Biome.Steppe => 0.0003f,
-                    Biome.Savanna => 0.0004f + 0.005f * Grove(woods), // lone trees, a few loose clumps
                     _ => 0.001f + 0.03f * Grove(woods),
                 };
             case BlockId.Snow: return 0.001f + 0.02f * Grove(woods);

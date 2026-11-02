@@ -14,7 +14,7 @@ namespace ClearSkies.Engine.ECS;
 /// distant terrain is drawn coarse, a far volume around the same middle takes over: as many texels, each
 /// <see cref="FarCellXZ"/> blocks across; past that, the nearest edge texel's tint applies. Both are rebuilt on a worker
 /// whenever the camera has gone <see cref="Recentre"/> blocks from the middle of the last ones, which leaves it well
-/// inside the near box, and whenever the map's <see cref="IClimateTintMap.Version"/> changes.
+/// inside the near box.
 /// </summary>
 public sealed class ClimateTintSystem : IRenderSystem
 {
@@ -31,7 +31,6 @@ public sealed class ClimateTintSystem : IRenderSystem
     private readonly Renderer _renderer;
     private readonly IClimateTintMap _map;
     private float _centreX = float.NaN, _centreZ = float.NaN;
-    private int _version;
     private Task<(float X, float Z, byte[] Texels)>? _building;
 
     public ClimateTintSystem(Renderer renderer, IClimateTintMap map)
@@ -50,9 +49,7 @@ public sealed class ClimateTintSystem : IRenderSystem
             _renderer.SetClimateTint(x, z, texels);
         }
         var focus = frame.CameraPosition;
-        int version = _map.Version;
-        if (version == _version && MathF.Abs(focus.X - _centreX) < Recentre && MathF.Abs(focus.Z - _centreZ) < Recentre) return;
-        _version = version;
+        if (MathF.Abs(focus.X - _centreX) < Recentre && MathF.Abs(focus.Z - _centreZ) < Recentre) return;
         const float Half = SizeXZ * CellXZ / 2f;
         float originX = MathF.Floor((focus.X - Half) / CellXZ) * CellXZ;
         float originZ = MathF.Floor((focus.Z - Half) / CellXZ) * CellXZ;
