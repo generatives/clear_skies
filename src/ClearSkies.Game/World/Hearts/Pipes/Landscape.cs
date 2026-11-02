@@ -21,6 +21,8 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
     /// <summary>How far (blocks) a stream's line bends off a column's middle at most, and how quickly (per column) that
     /// changes from column to column: its meanders.</summary>
     private const float Meander = 4f, MeanderFrequency = 0.35f;
+    // (How much of its meander a stream keeps along a hillside, and how much its width varies, see Shape.)
+    private const float Hillside = 0.3f, Widen = 0.4f;
 
     private readonly ConcurrentDictionary<(int X, int Z), Lazy<Shaped>> _landmasses = new();
 
@@ -138,12 +140,14 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
         bendNoise.SetNoiseType(FastNoiseLite.NoiseType.OpenSimplex2);
         bendNoise.SetFrequency(MeanderFrequency);
         var bend = new float[land.Nodes];
+        var wide = new float[land.Nodes]; // (each column's stream's width, times)
         for (int n = 0; n < land.Nodes; n++)
         {
             int c = land.ColumnOf[n];
             var (a, b) = beside[n];
             float sides = a < 0 || b < 0 ? 0f : MathF.Min(land.Floor[a], land.Floor[b]) - land.Floor[n];
-            bend[n] = Meander * bendNoise.GetNoise(c % land.Nx, c / land.Nx) * Math.Clamp(sides / (settings.Size / 2f), 0f, 1f);
+            bend[n] = Meander * bendNoise.GetNoise(c % land.Nx, c / land.Nx) * (Hillside + (1 - Hillside) * Math.Clamp(sides / (settings.Size / 2f), 0f, 1f));
+            wide[n] = 1f + Widen * bendNoise.GetNoise(c % land.Nx + 500f, c / land.Nx - 500f);
         }
         // A stream's head: a shown stream out of no water, neither a shown stream nor standing water running into it (nor
         // standing in it), where it springs from the ground.
@@ -156,7 +160,7 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
         var level = new float[land.Nodes];
         for (int n = 0; n < land.Nodes; n++)
             level[n] = Shows(n) ? land.Floor[n] + pipes.Depth[n] - settings.Damp : float.NaN;
-        return new Shaped(land, start, shown, down, up, way, bend, head, pipes.Depth, level, settings);
+        return new Shaped(land, start, shown, down, up, way, bend, wide, head, pipes.Depth, level, settings);
     }
 
     /// <summary>A landmass's bounds (blocks, on 32-block lines): where its own ground can be, found on a coarse grid
@@ -180,13 +184,13 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
 /// stream (see HeartWorldGenerator.PlaceWater). The first Damp blocks of water only dampen the ground:
 /// thin water running over a slope shows as none.</summary>
 public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] down, int[] up, (sbyte X, sbyte Z)[] way,
-                           float[] bend, bool[] head, float[] depth, float[] level, LandscapeSettings settings)
+                           float[] bend, float[] wide, bool[] head, float[] depth, float[] level, LandscapeSettings settings)
 {
     // (How wide a spring's stream is per sqrt(flow / StreamFlow), see HeartWorldGenerator.PlaceSprings.)
     public const float StreamWide = 3f;
     // (How far ground on a stream's line may stand over its line's ground and still be cut through; how deep a
     // channel is cut at most.)
-    private const float Hump = 2f, MostDeep = 4f;
+    private const float Hump = 3f, MostDeep = 4f;
     /// <summary>How deep (past the damp) the model's water must be to show as its own surface: shallower, it runs in
     /// its stream's channel (a channel that deep would be a column wide).</summary>
     public const float Shallow = 1f;
@@ -204,8 +208,8 @@ public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] do
     ///   times its depth) gathered into a channel three times as wide as it's deep (a column wide and MostDeep deep at
     ///   most, LeastWide wide and a block deep at least), along its curve (see Curve), its bed rounded, its surface flat across and level with the line's ground: the
     ///   valley floor keeps its banks and the stream sits in it. Ground up to Hump blocks over the line's is cut
-    ///   through, so it runs on unbroken over small rises; higher ground, down a drop (no higher than the drop's top),
-    ///   it runs down over, a block deep. Under the model's own surface nothing is cut.</summary>
+    ///   through, so it runs on unbroken over small rises; higher ground, down a steep drop (its curve falling more than half a
+    ///   column; no higher than the drop's top), it runs down over along its line, a block deep. Under the model's own surface nothing is cut.</summary>
     public (int Water, int Bed) Water(int x, int z, int top, float widen)
     {
         int size = land.Size, water = Top(WetLevel(x, z, top), top), bed = int.MaxValue, r = 2 + (int)MathF.Ceiling(widen / size);
@@ -235,13 +239,16 @@ public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] do
             }
             var on = At(curve, bestAt);
             float g = on.Floor, highest = MathF.Max(curve[0].Floor, MathF.Max(curve[1].Floor, curve[2].Floor));
-            if (top < g - size || top > highest - 1 + Hump) continue; // (land far below its line: past its edge; or a hill)
+            float lowest = MathF.Min(curve[0].Floor, MathF.Min(curve[1].Floor, curve[2].Floor));
+            bool steep = highest - lowest > size / 2f;
+            if (top < g - size || top > (steep ? highest : g) - 1 + Hump) continue; // (land far below its line: past its edge; or a hill)
             float area = size * MathF.Max(0f, on.Depth);
-            float width = Math.Clamp(MathF.Sqrt(3f * area), LeastWide, size), deep = Math.Clamp(1.5f * area / width, 1f, MostDeep);
+            float width = Math.Clamp(MathF.Sqrt(3f * area) * on.Wide, LeastWide, size), deep = Math.Clamp(1.5f * area / width, 1f, MostDeep);
             float half = width / 2 + widen, off2 = best2;
             if (off2 > half * half) continue;
             if (top > g - 1 + Hump)
             {
+                if (off2 > 1f) continue; // (only down its line itself, down a steep drop: not up its banks)
                 // (Ground over its line's down a steep drop, no higher than its top: it runs down over it, uncut.)
                 water = Math.Max(water, top + 1);
                 continue;
@@ -256,7 +263,7 @@ public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] do
     }
 
     /// <summary>A point on a stream's line: where it is, and the ground and the model's water depth there.</summary>
-    private readonly record struct Point(float X, float Z, float Floor, float Depth);
+    private readonly record struct Point(float X, float Z, float Floor, float Depth, float Wide);
 
     /// <summary>Node <paramref name="n"/>'s stream's line, as the three points of a curve (a quadratic Bézier): from
     /// halfway between it and its main stream in (its own middle, bent by its meander, at a head) round its middle to
@@ -271,7 +278,7 @@ public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] do
         if (d < 0)
         {
             var (mx, mz) = Middle(n);
-            curve[2] = new Point(mx + way[n].X * land.Size, mz + way[n].Z * land.Size, b.Floor, b.Depth);
+            curve[2] = new Point(mx + way[n].X * land.Size, mz + way[n].Z * land.Size, b.Floor, b.Depth, b.Wide);
         }
         else if (up[d] == n || flow[d] <= 0) curve[2] = Half(b, Here(d));
         else
@@ -289,17 +296,18 @@ public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] do
         int u = up[n], d = down[n];
         curve[0] = u < 0 ? b : Half(Here(u), b);
         curve[1] = b;
-        if (d < 0) { var (mx, mz) = Middle(n); curve[2] = new Point(mx + way[n].X * land.Size, mz + way[n].Z * land.Size, b.Floor, b.Depth); }
+        if (d < 0) { var (mx, mz) = Middle(n); curve[2] = new Point(mx + way[n].X * land.Size, mz + way[n].Z * land.Size, b.Floor, b.Depth, b.Wide); }
         else curve[2] = Half(b, Here(d));
     }
 
-    private Point Here(int n) { var (x, z) = Bent(n); return new Point(x, z, land.Floor[n], depth[n]); }
-    private static Point Half(Point a, Point b) => new((a.X + b.X) / 2, (a.Z + b.Z) / 2, (a.Floor + b.Floor) / 2, (a.Depth + b.Depth) / 2);
+    private Point Here(int n) { var (x, z) = Bent(n); return new Point(x, z, land.Floor[n], depth[n], wide[n]); }
+    private static Point Half(Point a, Point b) => new((a.X + b.X) / 2, (a.Z + b.Z) / 2, (a.Floor + b.Floor) / 2, (a.Depth + b.Depth) / 2, (a.Wide + b.Wide) / 2);
     private static Point At(ReadOnlySpan<Point> c, float s)
     {
         float a = (1 - s) * (1 - s), b = 2 * s * (1 - s), e = s * s;
         return new Point(a * c[0].X + b * c[1].X + e * c[2].X, a * c[0].Z + b * c[1].Z + e * c[2].Z,
-                         a * c[0].Floor + b * c[1].Floor + e * c[2].Floor, a * c[0].Depth + b * c[1].Depth + e * c[2].Depth);
+                         a * c[0].Floor + b * c[1].Floor + e * c[2].Floor, a * c[0].Depth + b * c[1].Depth + e * c[2].Depth,
+                         a * c[0].Wide + b * c[1].Wide + e * c[2].Wide);
     }
 
     /// <summary>The top water block over block column (x, z) (see Water).</summary>
