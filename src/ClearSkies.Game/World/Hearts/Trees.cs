@@ -46,7 +46,7 @@ public static class Trees
     private const float MostOdds = 0.037f;
 
     /// <summary>Whether anything may grow in block column (x, z) at all, whatever its ground: by its roll alone, so most
-    /// columns are ruled out without looking at the ground (see HeartWorldGenerator.GenerateCoarse).</summary>
+    /// columns are ruled out without looking at the ground (see HeartWorldGenerator.Generate).</summary>
     public static bool MayGrow(int x, int z, ulong seed) => Roll(x, z, seed) < MostOdds;
 
     /// <summary>Block column (x, z)'s roll against the odds of something growing there, 0-1.</summary>
