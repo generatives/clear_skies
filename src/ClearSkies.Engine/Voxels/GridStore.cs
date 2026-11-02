@@ -174,8 +174,8 @@ struct GridDesc {
     w2v: mat4x4<f32>,
     table: vec4<i32>,  // x: chunk-table base, yzw: section (or world index) dims in chunks (0 = unused descriptor)
     bmin: vec4<i32>,   // xyz: voxel bounds [bmin, bmax) of the grid's chunks, grid space; w: the world index's
-    bmax: vec4<i32>,   // position in chunkTable (vec4s), 0 for a ship's plain section
-};
+    bmax: vec4<i32>,   // position in chunkTable (vec4s), 0 for a ship's plain section. bmax.w: a static grid's next
+};                     // finer and next coarser static grids' indexes plus one (low and high 16 bits; 0 for none)
 
 // a mod n in [0, n). Unsigned arithmetic only: signed % returns wrong results for negative operands on at least
 // one backend (measured: -1887 % 19 gave 0), which broke every lookup at negative coordinates.
@@ -502,6 +502,15 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
 
     internal GridHandle? GridAt(int index) => index >= 0 && index < _grids.Length ? _grids[index] : null;
 
+    /// <summary>The index of the static grid (the world or a low-resolution copy) whose voxels are
+    /// <paramref name="scale"/> blocks a side, or -1.</summary>
+    private int StaticAt(int scale)
+    {
+        if (scale < 1) return -1;
+        int slot = System.Numerics.BitOperations.Log2((uint)scale);
+        return slot < IndexSlots && _indexOwners[slot] is { } g ? g.Index : -1;
+    }
+
     /// <summary>Sets a grid's transforms for this frame's descriptor upload (see <see cref="UploadGrids"/>).</summary>
     internal void SetPose(GridHandle g, in Mat4 voxelToWorld, in Mat4 worldToVoxel)
     {
@@ -527,6 +536,7 @@ fn entryOf(g: i32, c: vec3<i32>) -> i32 {
             d.TableBase = g.TableBase; d.TDX = g.TDX; d.TDY = g.TDY; d.TDZ = g.TDZ;
             if (!g.Posed || g.TableBase < 0) d.TDX = d.TDY = d.TDZ = 0;
             d.WorldIndex = g.IndexSlot >= 0 ? (int)(IndexOffset(g) / 16) : 0;
+            d.Levels = g.IsWorld ? StaticAt(g.Scale / 2) + 1 | (StaticAt(g.Scale * 2) + 1) << 16 : 0;
             g.Posed = false;
             if (g.HasBox)
             {
@@ -1408,6 +1418,6 @@ fn init_slots(@builtin(workgroup_id) wg: vec3<u32>, @builtin(num_workgroups) nw:
         public Mat4 WorldToVoxel;
         public int TableBase, TDX, TDY, TDZ;
         public int MinX, MinY, MinZ, WorldIndex;     // voxel bounds [min, max), grid space; world index (0 for ships)
-        public int MaxX, MaxY, MaxZ, _unused;
+        public int MaxX, MaxY, MaxZ, Levels;          // Levels: next finer and coarser static grid + 1 (16 bits each)
     }
 }
