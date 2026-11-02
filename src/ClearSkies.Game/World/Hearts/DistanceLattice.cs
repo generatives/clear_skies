@@ -19,27 +19,44 @@ internal sealed class DistanceLattice
     /// is never cut short.</summary>
     public const float Reach = 64f;
 
-    public int ChunkX { get; private set; }
-    public int ChunkZ { get; private set; }
-    public int First { get; private set; }
-    public int Levels { get; private set; }
+    public int ChunkX { get; }
+    public int ChunkZ { get; }
+    public int First { get; }
+    public int Levels { get; }
     /// <summary>The landscape that wore it, or null (not worn).</summary>
     public Shaped? Worn { get; set; }
 
-    private float[] _distance = Array.Empty<float>(); // corner column c's levels from c * Levels
-    private readonly sbyte[] _diagonal = new sbyte[(Corners - 1) * (Corners - 1)]; // each cell's split: 0 not worked out, 1 a-d, 2 b-c
+    private readonly float[] _distance; // corner column c's levels from c * Levels
+    private readonly bool[] _byAd = new bool[(Corners - 1) * (Corners - 1)]; // each cell's split: a-d, or else b-c
 
-    /// <summary>Makes it ready for chunk column (chunkX, chunkZ), from level first, levels high.</summary>
-    public void Reset(int chunkX, int chunkZ, int first, int levels)
+    /// <summary>Chunk column (chunkX, chunkZ)'s, from level first, levels high: its distances to fill in (see
+    /// <see cref="Column"/>), then <see cref="Split"/>.</summary>
+    public DistanceLattice(int chunkX, int chunkZ, int first, int levels)
     {
-        ChunkX = chunkX; ChunkZ = chunkZ; First = first; Levels = levels; Worn = null;
-        if (_distance.Length < Corners * Corners * levels) _distance = new float[Corners * Corners * levels];
-        Array.Clear(_diagonal);
+        ChunkX = chunkX; ChunkZ = chunkZ; First = first; Levels = levels;
+        _distance = new float[Corners * Corners * levels];
     }
 
     /// <summary>Corner column c's distances (c = i + Corners * k, i along X and k along Z, from the chunk column's
     /// corner), bottom up.</summary>
     public Span<float> Column(int c) => _distance.AsSpan(c * Levels, Levels);
+
+    /// <summary>Picks each cell's diagonal (see <see cref="Interpolate"/>), once its distances are filled in. It isn't
+    /// changed after that, so it can be shared between threads.</summary>
+    public void Split()
+    {
+        for (int k = 0; k < Corners - 1; k++)
+        for (int i = 0; i < Corners - 1; i++)
+        {
+            var a = Column(i + Corners * k);
+            var b = Column(i + 1 + Corners * k);
+            var c = Column(i + Corners * (k + 1));
+            var d = Column(i + 1 + Corners * (k + 1));
+            float ad = 0, bc = 0;
+            for (int j = 0; j < Levels; j++) { ad += a[j] + d[j]; bc += b[j] + c[j]; }
+            _byAd[i + (Corners - 1) * k] = ad <= bc;
+        }
+    }
 
     /// <summary>Block column (lx, lz)'s distances, per level: its cell's corner columns' blended. Each cell is split
     /// into two triangles along the diagonal between its two lower corners (the less ground over them), and a block
@@ -53,14 +70,8 @@ internal sealed class DistanceLattice
         var b = Column(i + 1 + Corners * k);
         var c = Column(i + Corners * (k + 1));
         var d = Column(i + 1 + Corners * (k + 1));
-        if (_diagonal[cell] == 0)
-        {
-            float ad = 0, bc = 0;
-            for (int j = 0; j < Levels; j++) { ad += a[j] + d[j]; bc += b[j] + c[j]; }
-            _diagonal[cell] = (sbyte)(ad <= bc ? 1 : 2);
-        }
         float wa, wb, wc, wd;
-        if (_diagonal[cell] == 1)
+        if (_byAd[cell])
         {
             if (tx >= tz) { wa = 1 - tx; wb = tx - tz; wc = 0; wd = tz; }
             else { wa = 1 - tz; wb = 0; wc = tz - tx; wd = tx; }
