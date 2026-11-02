@@ -313,25 +313,35 @@ public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] do
     /// <summary>The top water block over block column (x, z) (see Water).</summary>
     public int WaterTop(int x, int z, int top, float widen) => Water(x, z, top, widen).Water;
 
-    /// <summary>The model's water level over block column (x, z) (ground topped at <paramref name="top"/>), or NaN:
-    /// the levels of the wet columns among the four whose middles are nearest, blended by how near each is; a column
-    /// counts only over ground no more than a column under its floor (not past its edge).</summary>
+    /// <summary>The model's water level over block column (x, z) (ground topped at <paramref name="top"/>), or NaN
+    /// where none of the four columns whose middles are nearest is wet: their levels blended by how near each is, a dry
+    /// one's its ground (no higher than the highest wet one's), so the surface runs down into the ground toward dry
+    /// columns rather than ending in a face on the grid's lines; a column counts only over ground no more than a
+    /// column under its floor (not past its edge).</summary>
     private float WetLevel(int x, int z, int top)
     {
         int size = land.Size;
         float gx = (x + 0.5f - land.X0 - 0.5f) / size, gz = (z + 0.5f - land.Z0 - 0.5f) / size;
         int i0 = (int)MathF.Floor(gx), k0 = (int)MathF.Floor(gz);
-        float fx = gx - i0, fz = gz - k0, sum = 0f, weights = 0f;
+        float fx = gx - i0, fz = gz - k0, highest = float.NaN;
+        Span<int> corner = stackalloc int[4];
         for (int c = 0; c < 4; c++)
         {
             int i = i0 + (c & 1), k = k0 + (c >> 1);
-            if (i < 0 || k < 0 || i >= land.Nx || k >= land.Nz) continue;
-            int t = land.TopNode(i + land.Nx * k);
-            if (t < 0 || float.IsNaN(level[t]) || top < land.Floor[t] - size) continue;
-            float w = ((c & 1) == 0 ? 1 - fx : fx) * ((c >> 1) == 0 ? 1 - fz : fz) + 1e-4f;
-            sum += w * level[t]; weights += w;
+            int t = i < 0 || k < 0 || i >= land.Nx || k >= land.Nz ? -1 : land.TopNode(i + land.Nx * k);
+            corner[c] = t < 0 || top < land.Floor[t] - size ? -1 : t;
+            if (corner[c] >= 0 && !float.IsNaN(level[t]) && !(level[t] <= highest)) highest = level[t];
         }
-        return weights > 0f ? sum / weights : float.NaN;
+        if (float.IsNaN(highest)) return float.NaN;
+        float sum = 0f, weights = 0f;
+        for (int c = 0; c < 4; c++)
+        {
+            int t = corner[c];
+            if (t < 0) continue;
+            float w = ((c & 1) == 0 ? 1 - fx : fx) * ((c >> 1) == 0 ? 1 - fz : fz) + 1e-4f;
+            sum += w * (float.IsNaN(level[t]) ? MathF.Min(land.Floor[t], highest) : level[t]); weights += w;
+        }
+        return sum / weights;
     }
 
     /// <summary>The top water block under <paramref name="level"/> over ground topped at <paramref name="top"/> (blocks
