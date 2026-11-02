@@ -171,7 +171,8 @@ public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] do
     /// - wet columns (the model's water deeper than half a block past the damp, running or standing) show the model's
     ///   own surface, blended between the nearest wet columns (see WetLevel): a river fills its valley as deep and
     ///   wide as the model has it, and a lake is level;
-    /// - a stream too thin for that runs along its line, a block deep over its band (StreamWide times its width), on
+    /// - every stream (wet or not: a shallow river's surface may not reach a block) also runs along its line, a block
+    ///   deep at least over its band (StreamWide times its width), on
     ///   any ground up to Hump blocks over the higher end's: unbroken over small rises, on to its lip.</summary>
     public int WaterTop(int x, int z, int top, float widen)
     {
@@ -183,7 +184,7 @@ public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] do
         {
             if (i < 0 || k < 0 || i >= land.Nx || k >= land.Nz) continue;
             int t = land.TopNode(i + land.Nx * k);
-            if (t < 0 || flow[t] <= 0 || !float.IsNaN(level[t])) continue; // (wet columns show their own surface)
+            if (t < 0 || flow[t] <= 0) continue;
             var (fx, fz) = Bent(t);
             int d = down[t];
             float tx, tz, toFloor;
