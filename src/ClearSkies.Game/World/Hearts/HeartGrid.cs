@@ -34,17 +34,26 @@ public static class HeartGrid
     }
 
     /// <summary>The layers: one grid, all through the ground under the surface.</summary>
-    public static readonly Layer[] Layers =
-    {
-        new(500f, float.MinValue, 0f),
-    };
+    public static Layer[] Layers { get; private set; } = { new(PieceSize, float.MinValue, 0f) };
+
+    /// <summary>How wide a heart's cell is, and so its piece, by default (blocks).</summary>
+    private const float PieceSize = 500f;
 
     /// <summary>The top of the underworld: below it, under the plains' top layer of pieces, most are gone, leaving
     /// caves hundreds of blocks high with the remaining pieces standing and hanging in them.</summary>
     public const float DeepTop = ContinentTerrain.PlainsLevel - 150f;
 
     /// <summary>How much more a vertical offset counts than a horizontal one when finding a block's nearest heart.</summary>
-    public const float VerticalScale = 1.6f;
+    public static float VerticalScale { get; private set; } = 1.6f;
+
+    /// <summary>Makes pieces <paramref name="across"/> times as wide, keeping their height: for trying sizes out
+    /// (--piece-size). Before any world is generated. (Landmasses stay as they are, so wide pieces near a border are
+    /// cut off straight by it.)</summary>
+    public static void WidenPieces(float across)
+    {
+        Layers = new[] { new Layer(PieceSize * across, float.MinValue, 0f) };
+        VerticalScale = 1.6f * across;
+    }
 
     /// <summary>How far a heart may sit from its cell's middle, as a share of the cell: under 1, so no two are
     /// too close together.</summary>
