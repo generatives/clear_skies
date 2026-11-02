@@ -38,7 +38,7 @@ public class DistanceLatticeTests
             }
             var a = shrunk.GetValueOrDefault(pos) ?? new ChunkData();
             var b = new ChunkData();
-            direct.GenerateCoarse(b, pos, level);
+            direct.Generate(b, pos, level);
             for (int z = 0; z < 32; z++)
             for (int y = 0; y < 32; y++)
             for (int x = 0; x < 32; x++)
