@@ -184,7 +184,8 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
         var head = new bool[land.Nodes];
         for (int n = 0; n < land.Nodes; n++) head[n] = shown[n] > 0 && pipes.Depth[n] <= settings.Damp;
         for (int n = 0; n < land.Nodes; n++) if (Wet(n) && down[n] >= 0) head[down[n]] = false;
-        return new Shaped(land, start, shown, down, up, way, bend, wide, head, pipes.Depth, Watered(land, n => Shows(n) || shown[n] > 0f, settings), settings);
+        var (watered, marsh) = Watered(land, n => Shows(n) || shown[n] > 0f, n => land.Floor[n] + pipes.Depth[n], settings);
+        return new Shaped(land, start, shown, down, up, way, bend, wide, head, pipes.Depth, watered, marsh, settings);
     }
 
     /// <summary>A number in [0, 1) from <paramref name="seed"/> and <paramref name="n"/>, the same every time.</summary>
@@ -197,16 +198,21 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
 
     /// <summary>0-1 per column: how near water it is, 1 in it, falling off over WaterReach blocks (see
     /// <see cref="Biomes.Wet"/>). Each block climbed on the way out of the water counts as WaterClimb blocks across, so
-    /// a river greens its valley floor and not the ridges over it.</summary>
-    private static float[] Watered(Land land, Func<int, bool> wet, LandscapeSettings settings)
+    /// a river greens its valley floor and not the ridges over it.
+    ///
+    /// And 0-1 per column: how marshy it is, 1 where it is within MarshReach blocks of water, stands no more than
+    /// MarshRise blocks over that water and is flat (rising no more than MarshSlope a block to its neighbours), fading
+    /// out past each.</summary>
+    private static (float[] Watered, float[] Marsh) Watered(Land land, Func<int, bool> wet, Func<int, float> level, LandscapeSettings settings)
     {
         var distance = new float[land.Columns];
+        var source = new float[land.Columns]; // the level of the water nearest each column
         Array.Fill(distance, float.PositiveInfinity);
         var open = new PriorityQueue<int, float>();
         for (int c = 0; c < land.Columns; c++)
         {
             int t = land.TopNode(c);
-            if (t >= 0 && wet(t)) { distance[c] = 0f; open.Enqueue(c, 0f); }
+            if (t >= 0 && wet(t)) { distance[c] = 0f; source[c] = level(t); open.Enqueue(c, 0f); }
         }
         float far = settings.WaterReach * 4f, diagonal = land.Size * MathF.Sqrt(2f);
         while (open.TryDequeue(out int c, out float d))
@@ -222,13 +228,34 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
                 int n = ni + land.Nx * nj, t = land.TopNode(n);
                 if (t < 0) continue;
                 float step = (di != 0 && dj != 0 ? diagonal : land.Size) + settings.WaterClimb * MathF.Max(0f, land.Floor[t] - floor);
-                if (d + step < distance[n]) { distance[n] = d + step; open.Enqueue(n, d + step); }
+                if (d + step < distance[n]) { distance[n] = d + step; source[n] = source[c]; open.Enqueue(n, d + step); }
             }
         }
         var watered = new float[land.Columns];
-        for (int c = 0; c < land.Columns; c++) watered[c] = MathF.Exp(-distance[c] / settings.WaterReach);
-        return watered;
+        var marsh = new float[land.Columns];
+        static float Fade(float v) { v = Math.Clamp(v, 0f, 1f); return v * v * (3 - 2 * v); }
+        for (int c = 0; c < land.Columns; c++)
+        {
+            watered[c] = MathF.Exp(-distance[c] / settings.WaterReach);
+            int t = land.TopNode(c);
+            if (t < 0 || float.IsInfinity(distance[c])) continue;
+            int i = c % land.Nx, j = c / land.Nx;
+            float floor = land.Floor[t], steepest = 0f;
+            for (int dj = -1; dj <= 1; dj++)
+            for (int di = -1; di <= 1; di++)
+            {
+                int ni = i + di, nj = j + dj;
+                if ((di | dj) == 0 || ni < 0 || nj < 0 || ni >= land.Nx || nj >= land.Nz) continue;
+                int u = land.TopNode(ni + land.Nx * nj);
+                if (u >= 0) steepest = MathF.Max(steepest, MathF.Abs(land.Floor[u] - floor) / (land.Size * MathF.Sqrt(di * di + dj * dj)));
+            }
+            marsh[c] = Fade(2f - 2f * distance[c] / MarshReach) * Fade(2f - 2f * (floor - source[c]) / MarshRise)
+                     * Fade(2f - 2f * steepest / MarshSlope);
+        }
+        return (watered, marsh);
     }
+
+    private const float MarshReach = 48f, MarshRise = 3f, MarshSlope = 0.25f;
 
     /// <summary>A landmass's bounds (blocks, on 32-block lines): where its own ground can be, found on a coarse grid
     /// round it, with a margin.</summary>
@@ -251,7 +278,7 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
 /// stream (see HeartWorldGenerator.PlaceWater). The first Damp blocks of water only dampen the ground:
 /// thin water running over a slope shows as none.</summary>
 public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] down, int[] up, (sbyte X, sbyte Z)[] way,
-                           float[] bend, float[] wide, bool[] head, float[] depth, float[] watered, LandscapeSettings settings)
+                           float[] bend, float[] wide, bool[] head, float[] depth, float[] watered, float[] marsh, LandscapeSettings settings)
 {
     // (How far ground on a stream's line may stand over its line's ground and still be cut through; how deep a
     // channel is cut at most.)
@@ -266,10 +293,15 @@ public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] do
 
     /// <summary>0-1 at block column (x, z): how near water it is (see Landscape.Watered), blended between the columns'
     /// middles round it; 0 off the land.</summary>
-    public float Watered(float x, float z)
+    public float Watered(float x, float z) => Blend(watered, x, z);
+
+    /// <summary>0-1 at block column (x, z): how marshy it is (see Landscape.Watered), blended as <see cref="Watered"/>.</summary>
+    public float Marsh(float x, float z) => Blend(marsh, x, z);
+
+    private float Blend(float[] values, float x, float z)
     {
         var (i, k, fx, fz) = Cell(x, z);
-        float At(int a, int b) => a < 0 || b < 0 || a >= land.Nx || b >= land.Nz ? 0f : watered[a + land.Nx * b];
+        float At(int a, int b) => a < 0 || b < 0 || a >= land.Nx || b >= land.Nz ? 0f : values[a + land.Nx * b];
         return (1 - fz) * ((1 - fx) * At(i, k) + fx * At(i + 1, k)) + fz * ((1 - fx) * At(i, k + 1) + fx * At(i + 1, k + 1));
     }
 
@@ -513,7 +545,7 @@ public sealed class LandscapeSettings
     public int Size = 8;
     /// <summary>How far water wets the land round it for the biomes, in blocks (see Landscape.Watered), and how many
     /// blocks across each block climbed out of it counts as.</summary>
-    public float WaterReach = 96f, WaterClimb = 3f;
+    public float WaterReach = 64f, WaterClimb = 3f;
     public readonly List<(string Name, string Value)> Pipes = new();
 
     public static LandscapeSettings Parse(string? text)

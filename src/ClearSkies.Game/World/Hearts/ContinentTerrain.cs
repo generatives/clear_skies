@@ -168,13 +168,22 @@ public sealed class ContinentTerrain
         return IslandHeat * _heat.GetNoise(cx, cz) + LocalHeat * _heat.GetNoise(x * 4f, z * 4f);
     }
 
-    /// <summary>0-1 at column (x, z): how much rain its landmass gets, varied a little across it. It waters the landscape
-    /// (see <see cref="Land"/>), and is how wet the ground is away from water (see <see cref="Biomes.Wet"/>).</summary>
+    /// <summary>0-1 at column (x, z): how much rain its landmass gets, varied a little across it: how wet the ground is
+    /// away from water (see <see cref="Biomes.Wet"/>).</summary>
     public float Rain(float x, float z)
     {
         var (cx, cz) = HeartGrid.LandmassCentre(_seed, x, z);
         Warp(ref x, ref z);
         return Math.Clamp(RainMiddle + IslandRain * _wet.GetNoise(cx, cz) + LocalRain * _wet.GetNoise(x * 4f, z * 4f), 0f, 1f);
+    }
+
+    /// <summary>0-1 at column (x, z): the rain that waters the landscape (see <see cref="Land"/>), from the broad field
+    /// as it is at the column, not its landmass's (see <see cref="Rain"/>): how much water stands and runs on the land
+    /// is tuned to it.</summary>
+    public float LandscapeRain(float x, float z)
+    {
+        Warp(ref x, ref z);
+        return Math.Clamp(0.5f + 0.9f * _wet.GetNoise(x, z), 0f, 1f);
     }
 
     /// <summary>Moves (x, z) by up to <paramref name="amount"/> blocks along the climate's warp: borders read through it
@@ -192,7 +201,7 @@ public sealed class ContinentTerrain
     /// height (whether it is the terrain surface or a support's own top; those are to be decorated differently
     /// later), then rock layers (<paramref name="strata"/> from <see cref="Strata"/>, <paramref name="patch"/> from
     /// <see cref="Patch"/>). <paramref name="bare"/>, 0-1, is how little the top is out in the open. Deserts are sand,
-    /// badlands red sand over red rock, savanna dry grass among bare earth, tundra grass among snowy dirt and ice, steppe grass among gravel and the
+    /// badlands red sand over red rock, savanna dry grass among bare earth, marsh grass among shallow pools, tundra grass among snowy dirt and ice, steppe grass among gravel and the
     /// volcanic wastes ash with pools of lava (see <see cref="Biomes"/>), all under the same snow and bare rock up
     /// high; jungle has temperate ground.</summary>
     public static BlockId Block(int y, int top, float strata, float patch, float bare, Biome biome = Biome.Temperate, float dry = 0f)
@@ -222,6 +231,12 @@ public sealed class ContinentTerrain
         {
             // Dry grass among patches of bare earth.
             if (depth == 0) return patch < 0.3f ? BlockId.Dirt : BlockId.Grass;
+            if (depth < 3) return BlockId.Dirt;
+        }
+        else if (!rocky && biome == Biome.Marsh)
+        {
+            // Grass with shallow pools in the hollows of the patch field, over mud.
+            if (depth == 0) return patch > 0.72f ? BlockId.Water : BlockId.Grass;
             if (depth < 3) return BlockId.Dirt;
         }
         else if (!rocky && biome == Biome.Volcanic)

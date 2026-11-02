@@ -14,16 +14,17 @@ public sealed class BiomeTintMap(ulong seed, Landscape? landscape = null) : ICli
 
     public void Column(float x, float z, ReadOnlySpan<float> heights, Span<Vector4> tints)
     {
-        float regional = _terrain.Heat(x, z), wet = _terrain.Rain(x, z);
+        float regional = _terrain.Heat(x, z), wet = _terrain.Rain(x, z), marsh = 0f;
         if (landscape?.Done(x, z) is { } shaped)
         {
             float wx = x, wz = z;
             _terrain.Warp(ref wx, ref wz, Biomes.ShoreWarp);
             wet = Biomes.Wet(wet, shaped.Watered(wx, wz));
+            marsh = shaped.Marsh(wx, wz);
         }
         for (int j = 0; j < heights.Length; j++)
         {
-            var (r, g, b, a) = Biomes.Tint(Biomes.Heat(heights[j], regional), wet);
+            var (r, g, b, a) = Biomes.Tint(Biomes.Heat(heights[j], regional), wet, marsh);
             tints[j] = new Vector4(r, g, b, a);
         }
     }

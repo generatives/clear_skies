@@ -1,7 +1,7 @@
 namespace ClearSkies.Game.Generation;
 
 /// <summary>What the land on a top is like (see <see cref="Biomes"/>).</summary>
-public enum Biome : byte { Temperate, Autumn, Desert, Badlands, Tundra, Steppe, Jungle, Volcanic, Savanna }
+public enum Biome : byte { Temperate, Autumn, Desert, Badlands, Tundra, Steppe, Jungle, Volcanic, Savanna, Marsh }
 
 /// <summary>
 /// Biomes by climate: each sits at a point of heat and wetness, and a top takes the nearest. Heat goes mostly by
@@ -42,7 +42,7 @@ public static class Biomes
     public const float ShoreWarp = 24f;
 
     /// <summary>How much wetter than its rain makes it the ground beside water is.</summary>
-    public const float WaterWet = 0.35f;
+    public const float WaterWet = 0.2f;
 
     /// <summary>0-1: how wet the ground is, from the region's <paramref name="rain"/> (see <see cref="ContinentTerrain.Rain"/>)
     /// raised by up to <see cref="WaterWet"/> near water (<paramref name="watered"/>, see <see cref="Shaped.Watered"/>):
@@ -62,6 +62,19 @@ public static class Biomes
         return best;
     }
 
+    /// <summary>The biome at (heat, wet) on ground <paramref name="marsh"/> marshy (0-1, see <see cref="Shaped.Marsh"/>):
+    /// marsh where it is marshy enough and the climate is mild to hot and not dry, else by the climate.</summary>
+    public static Biome Pick(float heat, float wet, float marsh)
+    {
+        var biome = Pick(heat, wet);
+        return marsh > 0.5f && MarshFits(biome) ? Biome.Marsh : biome;
+    }
+
+    private static bool MarshFits(Biome biome) => biome is Biome.Temperate or Biome.Autumn or Biome.Savanna or Biome.Jungle;
+
+    // A marsh's tint: dark olive.
+    private const float MarshR = 0.42f, MarshG = 0.52f, MarshB = 0.22f, MarshStrength = 0.6f;
+
     /// <summary>How far apart in the climate (squared) a desert's sandy fringe reaches, and its drying grass.</summary>
     public const float SandBlend = 0.008f, DryBlend = 0.008f;
 
@@ -80,7 +93,7 @@ public static class Biomes
 
     /// <summary>The tint at (heat, wet): each biome's weighted by how near it is, the nearest most, so it shifts across
     /// a border over a few dozen blocks. rgb is the colour (sRGB) and a how strongly it applies, all 0-1.</summary>
-    public static (float R, float G, float B, float A) Tint(float heat, float wet)
+    public static (float R, float G, float B, float A) Tint(float heat, float wet, float marsh = 0f)
     {
         float nearest = float.MaxValue;
         foreach (var e in Table) nearest = MathF.Min(nearest, (heat - e.Heat) * (heat - e.Heat) + (wet - e.Wet) * (wet - e.Wet));
@@ -102,6 +115,13 @@ public static class Biomes
             float k = a / dry;
             r = desert.R + k * (r - desert.R); g = desert.G + k * (g - desert.G); b = desert.B + k * (b - desert.B);
             a = dry;
+        }
+        // Marshy ground darkens toward olive over the last half of its marshiness (see Pick), fully in a marsh.
+        float m = MarshFits(Pick(heat, wet)) ? Math.Clamp((marsh - 0.25f) / 0.5f, 0f, 1f) : 0f;
+        if (m > 0f)
+        {
+            r += m * (MarshR - r); g += m * (MarshG - g); b += m * (MarshB - b);
+            a += m * (MarshStrength - a);
         }
         return (r, g, b, a);
     }

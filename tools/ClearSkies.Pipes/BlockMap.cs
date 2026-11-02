@@ -260,6 +260,7 @@ public static class BlockMap
         Biome.Steppe => (170, 165, 95),
         Biome.Jungle => (20, 110, 30),
         Biome.Savanna => (175, 175, 60),
+        Biome.Marsh => (150, 90, 170),
         _ => (90, 80, 75),
     };
 }
