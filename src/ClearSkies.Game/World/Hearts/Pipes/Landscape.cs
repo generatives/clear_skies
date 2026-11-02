@@ -131,7 +131,9 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
             int d = down[n];
             if (shown[n] > 0 && d >= 0 && shown[d] > 0 && (up[d] < 0 || shown[n] > shown[up[d]])) up[d] = n;
         }
-        // Each column's meander: how far its stream's line bends off the column's middle, across its way.
+        // Each column's meander: how far its stream's line bends off the column's middle, across its way: all of it in a
+        // valley's bottom (the ground either side of its way Size / 2 or more over its own), none along a hillside (the
+        // ground lower on one side), where bending across its way would take it up and down the slope.
         var bendNoise = new FastNoiseLite(unchecked((int)seed + 77));
         bendNoise.SetNoiseType(FastNoiseLite.NoiseType.OpenSimplex2);
         bendNoise.SetFrequency(MeanderFrequency);
@@ -139,7 +141,9 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
         for (int n = 0; n < land.Nodes; n++)
         {
             int c = land.ColumnOf[n];
-            bend[n] = Meander * bendNoise.GetNoise(c % land.Nx, c / land.Nx);
+            var (a, b) = beside[n];
+            float sides = a < 0 || b < 0 ? 0f : MathF.Min(land.Floor[a], land.Floor[b]) - land.Floor[n];
+            bend[n] = Meander * bendNoise.GetNoise(c % land.Nx, c / land.Nx) * Math.Clamp(sides / (settings.Size / 2f), 0f, 1f);
         }
         // A stream's head: a shown stream out of no water, neither a shown stream nor standing water running into it (nor
         // standing in it), where it springs from the ground.
