@@ -102,15 +102,15 @@ public sealed class VoxelsStage(IReadOnlyCollection<PipelineGrid> grids, Func<IW
     }
 
     /// <summary>Level <paramref name="k"/>'s chunk <paramref name="pos"/>, from the full chunks under it (or from the
-    /// generator itself, if it can and none of them is edited or built in). Null if air.</summary>
+    /// generator itself, if none of them is edited or built in). Null if air.</summary>
     private ChunkData? MakeCoarse(int k, ChunkPosition pos)
     {
         int n = 1 << k;
         ulong under = edits.FullLayersUnder(k, pos.Y);
-        if (Generator is ICoarseWorldGenerator direct && !AnyKept(n, pos, under))
+        if (!AnyKept(n, pos, under))
         {
             var made = new ChunkData();
-            direct.GenerateCoarse(made, pos, k);
+            Generator.Generate(made, pos, k);
             made.Compact();
             if (made.HasAnyNonAir()) return made;
             made.Release();
