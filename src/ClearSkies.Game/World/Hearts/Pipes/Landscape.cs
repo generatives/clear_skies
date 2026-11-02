@@ -23,6 +23,8 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
     private const float Meander = 4f, MeanderFrequency = 0.35f;
     // (How much of its meander a stream keeps along a hillside, and how much its width varies, see Shape.)
     private const float Hillside = 0.3f, Widen = 0.4f;
+    // (How steep the way over the land's edge counts as, for a way picked by slope, see Shape: a cliff.)
+    private const float EdgeSlope = 4f;
 
     private readonly ConcurrentDictionary<(int X, int Z), Lazy<Shaped>> _landmasses = new();
 
@@ -67,6 +69,29 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
             float most = 0;
             for (int k = land.LinkStart[n]; k < land.LinkStart[n + 1]; k++)
                 if (pipes.Flow[k] > most) { most = pipes.Flow[k]; down[n] = land.LinkTo[k]; way[n] = (land.LinkDx[k], land.LinkDz[k]); }
+            // Where the model hardly runs any water out (less than a stream's worth: what reaches it soaked in), its way
+            // is a way down instead: what little moves there is noise, and a stream handed on would follow it across
+            // the slope.
+            if (most / column >= settings.StreamFlow) continue;
+            float surface = land.Floor[n] + pipes.Depth[n], total = 0f;
+            for (int k = land.LinkStart[n]; k < land.LinkStart[n + 1]; k++)
+            {
+                int m = land.LinkTo[k];
+                float slope = m < 0 ? EdgeSlope : (surface - land.Floor[m] - pipes.Depth[m]) / land.LinkLength[k];
+                if (slope > 0) total += slope * slope;
+            }
+            if (total <= 0f) continue;
+            // (A way down picked at random, weighted by the square of its slope, the same every time: steep ways
+            // mostly, but not one straight line down an even slope.)
+            float pick = (float)(Hash(seed, n) * total);
+            for (int k = land.LinkStart[n]; k < land.LinkStart[n + 1]; k++)
+            {
+                int m = land.LinkTo[k];
+                float slope = m < 0 ? EdgeSlope : (surface - land.Floor[m] - pipes.Depth[m]) / land.LinkLength[k];
+                if (slope <= 0) continue;
+                down[n] = m; way[n] = (land.LinkDx[k], land.LinkDz[k]);
+                if ((pick -= slope * slope) <= 0f) break;
+            }
         }
         // What each column carries: what the model gains there (rain and springs: what it lets out past what comes in)
         // plus everything handed to it down the tree of main ways. A column hands on once everything handed to it has
@@ -161,6 +186,14 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
         for (int n = 0; n < land.Nodes; n++)
             level[n] = Shows(n) ? land.Floor[n] + pipes.Depth[n] - settings.Damp : float.NaN;
         return new Shaped(land, start, shown, down, up, way, bend, wide, head, pipes.Depth, level, settings);
+    }
+
+    /// <summary>A number in [0, 1) from <paramref name="seed"/> and <paramref name="n"/>, the same every time.</summary>
+    private static double Hash(ulong seed, int n)
+    {
+        ulong h = seed ^ (ulong)n * 0x9E3779B97F4A7C15UL;
+        h ^= h >> 33; h *= 0xFF51AFD7ED558CCDUL; h ^= h >> 33; h *= 0xC4CEB9FE1A85EC53UL; h ^= h >> 33;
+        return (h >> 11) * (1.0 / (1UL << 53));
     }
 
     /// <summary>A landmass's bounds (blocks, on 32-block lines): where its own ground can be, found on a coarse grid
