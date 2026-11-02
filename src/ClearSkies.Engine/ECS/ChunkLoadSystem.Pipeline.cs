@@ -28,14 +28,15 @@ public sealed partial class ChunkLoadSystem
     /// <summary>The stage that makes streamed chunks' blocks, for the stages after it to read.</summary>
     public VoxelsStage Voxels => _voxels;
 
-    /// <summary>Asks the pipeline for the level's chunk <paramref name="p"/>.</summary>
+    /// <summary>Asks the pipeline for the level's chunk <paramref name="p"/>, for what it's in an interest's reach for.</summary>
     private void Want(TerrainLevel level, ChunkPosition p)
     {
-        if (!level.Wanting.Add(p)) return;
+        var purposes = Purposes(level, p);
+        if (purposes == Purpose.None || !level.Wanting.Add(p)) return;
         var key = level.Key(p);
         // Let go of and wanted again before it was dropped: it still has what it made.
         if (_pipeline.Get(key) is not { } record || record.State(_voxels) != SlotState.Done) AddInFlight(level, p);
-        _pipeline.Want(key, true);
+        _pipeline.Want(key, purposes);
     }
 
     /// <summary>Lets go of the level's chunk <paramref name="p"/>: the pipeline drops it (and it leaves the volume) once
@@ -45,7 +46,7 @@ public sealed partial class ChunkLoadSystem
         if (level.Wanting.Remove(p))
         {
             RemoveInFlight(level, p);
-            _pipeline.Want(level.Key(p), false);
+            _pipeline.Want(level.Key(p), Purpose.None);
         }
         else if (_pipeline.Get(level.Key(p)) == null) Unload(level, p);
     }
@@ -58,7 +59,7 @@ public sealed partial class ChunkLoadSystem
         if (_pipeline.Get(key)?.Output<ChunkVoxels>(_voxels) is { } made) made.InVolume = false;
         RemoveInFlight(level, p);
         _pipeline.Invalidate(key, _voxels);
-        _pipeline.Want(key, false);
+        _pipeline.Want(key, Purpose.None);
     }
 
     private void AddInFlight(TerrainLevel level, ChunkPosition p)

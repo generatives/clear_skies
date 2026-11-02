@@ -279,9 +279,6 @@ public class ChunkVolume : IReplicatedChildren
 
     // ── Chunk lifecycle ────────────────────────────────────────────────────
 
-    /// <summary>True for the static world: each of its chunks gets <see cref="OwnPresence"/>.</summary>
-    public bool ChunksOwnPresence { get; init; }
-
     /// <param name="prepared">What was made of the chunk's data off the main thread as it loaded (its opacity packed
     /// for the GPU store, say), if anything; otherwise whatever needs it makes it later.</param>
     internal ChunkEntry AddChunk(ChunkPosition pos, ChunkData data, ChunkPreparation? prepared = null)
@@ -289,9 +286,6 @@ public class ChunkVolume : IReplicatedChildren
         var entity = _world.CreateEntity();
         var entry = new ChunkEntry(data, entity, this, pos);
         prepared?.ApplyTo(entry);
-        // The world's chunks spread across the whole world, so each decides its own presence layers (see
-        // EntityPresenceSystem); a grid's chunks inherit the grid's.
-        if (ChunksOwnPresence) entity.Set<OwnPresence>();
         Hierarchy.SetParent(entity, Root, ChunkLocal(pos));
         entity.Set(new Chunk() { Entry = entry });
         if (!IsLowResolutionCopy) CreateBlockEntities(entry);

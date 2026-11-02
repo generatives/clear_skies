@@ -12,8 +12,8 @@ namespace ClearSkies.Engine.ECS;
 /// <see cref="ChunkLoadSystem"/>), and shows where its chunks are. It turns what happens to chunks in the ECS into
 /// pipeline calls: an edit (<see cref="ChunkBlocksChanged"/>) is a change to the chunk's blocks, and a ship's chunks
 /// (those of a <see cref="DynamicGrid"/>'s volume, made by edits rather than streamed) are wanted as they come and go,
-/// each ship a grid of its own while it's here; and a chunk is wanted for <see cref="Purpose.Draw"/> while its entity is
-/// <see cref="Rendered"/>, and for <see cref="Purpose.Collide"/> while it has a <see cref="PhysicsPresence"/>.
+/// each ship a grid of its own while it's here: for <see cref="Purpose.Collide"/> (its body is built from them), and for
+/// <see cref="Purpose.Draw"/> while the chunk's entity is <see cref="Rendered"/>.
 /// </summary>
 public sealed class ChunkPipelineSystem : ISystem, IDebugUiSystem
 {
@@ -30,9 +30,9 @@ public sealed class ChunkPipelineSystem : ISystem, IDebugUiSystem
     public VolumeBlocksStage ShipBlocks { get; }
 
     private readonly IDisposable[] _subscriptions;
-    // Chunks that may have started or stopped being drawn or collided with: their entity came, went, or gained or lost
-    // the layer. Each is looked at as the pipeline runs, so a chunk replaced by another in the same place is wanted for
-    // what its entity is then.
+    // Ship chunks that may have started or stopped being drawn: their entity came, went, or gained or lost the layer.
+    // Each is looked at as the pipeline runs, so a chunk replaced by another in the same place is wanted for what its
+    // entity is then.
     private readonly HashSet<ChunkKey> _maybeWantedFor = new();
 
     public ChunkPipelineSystem(World world, ChunkPipeline? pipeline = null)
@@ -48,8 +48,6 @@ public sealed class ChunkPipelineSystem : ISystem, IDebugUiSystem
             world.SubscribeComponentChanged((in Entity e, in InPipeline _, in InPipeline _) => MaybeWantedFor(e)),
             world.SubscribeComponentAdded((in Entity e, in Rendered _) => MaybeWantedFor(e)),
             world.SubscribeComponentRemoved((in Entity e, in Rendered _) => MaybeWantedFor(e)),
-            world.SubscribeComponentAdded((in Entity e, in PhysicsPresence _) => MaybeWantedFor(e)),
-            world.SubscribeComponentRemoved((in Entity e, in PhysicsPresence _) => MaybeWantedFor(e)),
         };
     }
 
@@ -71,7 +69,7 @@ public sealed class ChunkPipelineSystem : ISystem, IDebugUiSystem
         if (!volume.Root.Has<DynamicGrid>()) return;
         var key = Pipeline.GridFor(volume, $"ship {volume.Root}").Key(chunk.Entry.Position);
         e.Set(new InPipeline { Key = key });
-        Pipeline.Want(key, true);
+        Pipeline.Want(key, Purpose.Collide);
         Pipeline.Invalidate(key, ShipBlocks); // one that left and came back has new blocks
     }
 
@@ -80,7 +78,7 @@ public sealed class ChunkPipelineSystem : ISystem, IDebugUiSystem
     {
         MaybeWantedFor(e);
         if (e.Has<ChunkGrid>() && Pipeline.GridOf(e.Get<ChunkGrid>().Volume) is { } grid) Pipeline.RemoveGrid(grid);
-        else if (e.Has<InPipeline>() && ShipBlocks.AppliesTo(Pipeline.Grid(e.Get<InPipeline>().Key.Grid))) Pipeline.Want(e.Get<InPipeline>().Key, false);
+        else if (e.Has<InPipeline>() && ShipBlocks.AppliesTo(Pipeline.Grid(e.Get<InPipeline>().Key.Grid))) Pipeline.Want(e.Get<InPipeline>().Key, Purpose.None);
     }
 
     private void MaybeWantedFor(in Entity e)
@@ -88,18 +86,15 @@ public sealed class ChunkPipelineSystem : ISystem, IDebugUiSystem
         if (e.Has<InPipeline>()) _maybeWantedFor.Add(e.Get<InPipeline>().Key);
     }
 
-    private readonly StepTimer _steps = new("Wanting chunks drawn and collided or not", "Taking finished work and running stages") { Owner = "Chunk Pipeline" };
+    private readonly StepTimer _steps = new("Wanting ship chunks drawn or not", "Taking finished work and running stages") { Owner = "Chunk Pipeline" };
     private StepTimer? _byStage; // the same frame's time by stage, made once the stages are all there
 
     public void Update(float dt)
     {
         _steps.Start();
         foreach (var key in _maybeWantedFor)
-        {
-            var entity = Pipeline.EntryOf(key)?.Entity;
-            Pipeline.WantFor(key, Purpose.Draw, entity?.Has<Rendered>() == true);
-            Pipeline.WantFor(key, Purpose.Collide, entity?.Has<PhysicsPresence>() == true);
-        }
+            if (Pipeline.EntryOf(key)?.Entity is { } entity && ShipBlocks.AppliesTo(Pipeline.Grid(key.Grid)))
+                Pipeline.Want(key, Purpose.Collide | (entity.Has<Rendered>() ? Purpose.Draw : Purpose.None));
         _maybeWantedFor.Clear();
         _steps.Lap(0);
         var gc = GC.GetTotalPauseDuration();

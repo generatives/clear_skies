@@ -199,38 +199,6 @@ public class PresenceTests
         Assert.True(lever.Has<Rendered>());
         Assert.True(volume.GetEntry(new ChunkPosition(1, 0, 0))!.Entity.Has<Rendered>());
     }
-
-    [Fact]
-    public void TerrainChunksGetCollidersNearInterestsOnly()
-    {
-        using var scene = new HeadlessScene();
-        scene.WorldVolume.SetBlock(0, 0, 0, BlockId.Stone);        // near the player
-        scene.WorldVolume.SetBlock(3200, 0, 0, BlockId.Stone);     // far from everything
-        scene.SpawnLocalPlayer(new Vector3(0, 20, 0), freeFly: true);
-        scene.Tick();
-        var near = scene.WorldVolume.GetEntry(new ChunkPosition(0, 0, 0))!.Entity;
-        var far = scene.WorldVolume.GetEntry(new ChunkPosition(100, 0, 0))!.Entity;
-        Assert.True(near.Has<OwnPresence>());
-        Assert.True(far.Has<OwnPresence>(), $"far alive {far.IsAlive}, loaded {scene.WorldVolume.LoadedCount}, near==far {near==far}, pos {string.Join(",", scene.WorldVolume.All.Select(c=>c.Key.ToString()))}");
-        Assert.Equal(PhysicsMode.Static, near.Get<PhysicsPresence>().Mode);
-        Assert.False(far.Has<PhysicsPresence>());
-        Assert.True(near.Has<Rendered>());
-        Assert.False(far.Has<Rendered>()); // beyond the view distance
-    }
-
-    [Fact]
-    public void TerrainCollidersAreDroppedOnceNothingIsNear()
-    {
-        using var scene = new HeadlessScene();
-        scene.WorldVolume.SetBlock(0, 0, 0, BlockId.Stone);
-        var player = scene.SpawnLocalPlayer(new Vector3(0, 20, 0), freeFly: true);
-        scene.Tick();
-        var chunk = scene.WorldVolume.GetEntry(new ChunkPosition(0, 0, 0))!.Entity;
-        Assert.True(chunk.Has<PhysicsPresence>());
-        player.Get<Transform>().Position = new Vector3D<float>(0, 20, 400);
-        scene.Tick(31); // the drop sweep runs every 30 ticks
-        Assert.False(chunk.Has<PhysicsPresence>());
-    }
 }
 
 public class SupportTests

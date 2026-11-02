@@ -40,9 +40,9 @@ public sealed class GameWorld
         Commands = new CommandSystem(session, Registry, () => host.Clock.Tick);
 
         // The static world is a volume like any other, with an identity Transform (set by ChunkVolume), and a reserved
-        // entity ID. Its chunks each decide their own presence layers (see EntityPresenceSystem).
+        // entity ID.
         var staticEntity = host.World.CreateEntity();
-        StaticVolume = new ChunkVolume(staticEntity, host.World) { MeshIgnoresNeighbours = true, ChunksOwnPresence = true };
+        StaticVolume = new ChunkVolume(staticEntity, host.World) { MeshIgnoresNeighbours = true };
         staticEntity.Set(new ChunkGrid { Volume = StaticVolume });
         staticEntity.Set(EntityRegistry.WorldVolume);
         staticEntity.Set(session.OwnerFor(PeerId.Host));
@@ -126,7 +126,7 @@ public sealed class GameWorld
     /// <summary>Presence layers (bodies, drawing, terrain interest and colliders). Entities are drawn as far as the
     /// terrain, but no further than the View Volume, past which the Host sends none.</summary>
     public EntityPresenceSystem CreatePresence() =>
-        new(Host.World, Session, StaticVolume, Options.ViewDistance) { RenderDistanceLimit = ClearSkies.Net.Session.Host.ViewRadius };
+        new(Host.World, Session, Options.ViewDistance) { RenderDistanceLimit = ClearSkies.Net.Session.Host.ViewRadius };
 
     /// <summary>Runs the game until it quits, then stops background work (no chunk still loading while what it loads
     /// into is freed).</summary>

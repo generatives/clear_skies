@@ -8,7 +8,7 @@ namespace ClearSkies.Engine.ECS;
 
 /// <summary>
 /// Terrain chunks' static colliders, as pipeline stages after their blocks, serving <see cref="Purpose.Collide"/> (a
-/// chunk near something that can touch it, see <see cref="EntityPresenceSystem"/>): its boxes and their tree are built on
+/// chunk near something that can touch it, see <see cref="ChunkLoadSystem"/>): its boxes and their tree are built on
 /// a worker (<see cref="BoxesStage"/>), then added to the physics world (<see cref="ColliderStage"/>). The old collider
 /// stays until the new one's in, so an edit never opens a hole for a frame. A ship's body is built whole, from all its
 /// chunks (see <see cref="PhysicsBodySystem"/>).
@@ -19,7 +19,7 @@ public static class ColliderStages
     public static ColliderStage Add(ChunkPipelineSystem system, PhysicsWorld physics)
     {
         var pipeline = system.Pipeline;
-        var boxes = pipeline.Add(new BoxesStage(pipeline));
+        var boxes = pipeline.Add(new BoxesStage(pipeline, system.ShipBlocks));
         return pipeline.Add(new ColliderStage(pipeline, physics, boxes));
     }
 }
@@ -27,11 +27,12 @@ public static class ColliderStages
 /// <summary>Splits a chunk's colliding blocks into boxes and builds their tree, on a worker (~0.2-0.35 ms a chunk, past
 /// 2 ms on dense ones; see StreamingBenchmark). Terrain needs no mass, so a box may span block types: about half the
 /// boxes.</summary>
-public sealed class BoxesStage(ChunkPipeline pipeline) : WorkerStage<PhysicsWorld.StaticCompoundBuild>
+public sealed class BoxesStage(ChunkPipeline pipeline, VolumeBlocksStage ships) : WorkerStage<PhysicsWorld.StaticCompoundBuild>
 {
     public override string Name => "Boxes";
     public override Purpose Serves => Purpose.Collide;
-    public override bool AppliesTo(PipelineGrid grid) => grid.Level == 0; // nothing collides with coarse terrain
+    // Nothing collides with coarse terrain, and a ship's chunks are its body's (see ShipBoxesStage).
+    public override bool AppliesTo(PipelineGrid grid) => grid.Level == 0 && !ships.AppliesTo(grid);
 
     public override IReadOnlyList<Pipeline.Input> InputsFor(PipelineGrid grid)
         => IBlocksStage.Of(pipeline, grid).Select(blocks => new Pipeline.Input(blocks, Relation.Self)).ToArray();
@@ -61,6 +62,7 @@ public sealed class ShipBoxesStage(VolumeBlocksStage blocks, Action<ChunkVolume>
     : WorkerStage<ShipBoxes>
 {
     public override string Name => "Ship boxes";
+    public override Purpose Serves => Purpose.Collide;
     public override bool Urgent => true;
     public override bool AppliesTo(PipelineGrid grid) => blocks.AppliesTo(grid);
     public override IReadOnlyList<Pipeline.Input> InputsFor(PipelineGrid grid) => new Pipeline.Input[] { new(blocks, Relation.Self) };
@@ -120,7 +122,7 @@ public sealed class ColliderStage(ChunkPipeline pipeline, PhysicsWorld physics, 
 {
     public override string Name => "Collider";
     public override Purpose Serves => Purpose.Collide;
-    public override bool AppliesTo(PipelineGrid grid) => grid.Level == 0;
+    public override bool AppliesTo(PipelineGrid grid) => boxes.AppliesTo(grid);
 
     public override IReadOnlyList<Pipeline.Input> InputsFor(PipelineGrid grid) => new Pipeline.Input[] { new(boxes, Relation.Self) };
 
