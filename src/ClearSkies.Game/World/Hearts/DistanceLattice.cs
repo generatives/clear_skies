@@ -26,6 +26,7 @@ internal sealed class DistanceLattice
 
     private float[] _distance = Array.Empty<float>(); // corner column c's levels from c * Levels
     private readonly sbyte[] _diagonal = new sbyte[(Corners - 1) * (Corners - 1)]; // each cell's split: 0 not worked out, 1 a-d, 2 b-c
+    private readonly float[] _slope = new float[(Corners - 1) * (Corners - 1)]; // each cell's steepness: NaN not worked out
 
     /// <summary>Makes it ready for chunk column (chunkX, chunkZ), from level first, levels high.</summary>
     public void Reset(int chunkX, int chunkZ, int first, int levels)
@@ -33,6 +34,27 @@ internal sealed class DistanceLattice
         ChunkX = chunkX; ChunkZ = chunkZ; First = first; Levels = levels;
         if (_distance.Length < Corners * Corners * levels) _distance = new float[Corners * Corners * levels];
         Array.Clear(_diagonal);
+        Array.Fill(_slope, float.NaN);
+    }
+
+    /// <summary>How steep the ground's top is across the cell holding block column (lx, lz): the most its corners' tops
+    /// differ, per block across (0 where a corner has none).</summary>
+    public float Slope(int lx, int lz)
+    {
+        int i = lx / Cell, k = lz / Cell, cell = i + (Corners - 1) * k;
+        if (!float.IsNaN(_slope[cell])) return _slope[cell];
+        float a = Top(i + Corners * k), b = Top(i + 1 + Corners * k), c = Top(i + Corners * (k + 1)), d = Top(i + 1 + Corners * (k + 1));
+        float most = MathF.Max(MathF.Max(a, b), MathF.Max(c, d)) - MathF.Min(MathF.Min(a, b), MathF.Min(c, d));
+        return _slope[cell] = float.IsNaN(most) ? 0f : most / Cell;
+    }
+
+    // (Corner column c's top: where its distance last falls through zero going up, in blocks; NaN for none.)
+    private float Top(int c)
+    {
+        var column = Column(c);
+        for (int j = Levels - 2; j >= 0; j--)
+            if (column[j] > 0f && column[j + 1] <= 0f) return (First + j) * Cell + Cell * column[j] / (column[j] - column[j + 1]);
+        return float.NaN;
     }
 
     /// <summary>Corner column c's distances (c = i + Corners * k, i along X and k along Z, from the chunk column's

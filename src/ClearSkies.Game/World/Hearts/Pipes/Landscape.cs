@@ -180,12 +180,7 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
         var head = new bool[land.Nodes];
         for (int n = 0; n < land.Nodes; n++) head[n] = shown[n] > 0 && pipes.Depth[n] <= settings.Damp;
         for (int n = 0; n < land.Nodes; n++) if (Wet(n) && down[n] >= 0) head[down[n]] = false;
-        // Wet: deeper than Shallow past the damp (shallower water runs in its stream's channel). Its level is the
-        // model's own surface, running or standing.
-        var level = new float[land.Nodes];
-        for (int n = 0; n < land.Nodes; n++)
-            level[n] = Shows(n) ? land.Floor[n] + pipes.Depth[n] - settings.Damp : float.NaN;
-        return new Shaped(land, start, shown, down, up, way, bend, wide, head, pipes.Depth, level, settings);
+        return new Shaped(land, start, shown, down, up, way, bend, wide, head, pipes.Depth, settings);
     }
 
     /// <summary>A number in [0, 1) from <paramref name="seed"/> and <paramref name="n"/>, the same every time.</summary>
@@ -217,7 +212,7 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
 /// stream (see HeartWorldGenerator.PlaceWater). The first Damp blocks of water only dampen the ground:
 /// thin water running over a slope shows as none.</summary>
 public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] down, int[] up, (sbyte X, sbyte Z)[] way,
-                           float[] bend, float[] wide, bool[] head, float[] depth, float[] level, LandscapeSettings settings)
+                           float[] bend, float[] wide, bool[] head, float[] depth, LandscapeSettings settings)
 {
     // (How wide a spring's stream is per sqrt(flow / StreamFlow), see HeartWorldGenerator.PlaceSprings.)
     public const float StreamWide = 3f;
@@ -227,6 +222,8 @@ public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] do
     /// <summary>How deep (past the damp) the model's water must be to show as its own surface: shallower, it runs in
     /// its stream's channel (a channel that deep would be a column wide).</summary>
     public const float Shallow = 1f;
+    // (How deep the shown water blended over a block column must be for it to show there, see WetLevel.)
+    private const float ShowsFrom = 0.25f;
     // (How narrow a channel is at least.)
     private const float LeastWide = 2f;
 
@@ -246,15 +243,15 @@ public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] do
     ///   column; no higher than the drop's top), it runs down over along its line, a block deep. Under the model's own surface nothing is cut.</summary>
     public (int Water, int Bed) Water(int x, int z, int top, float widen)
     {
-        int size = land.Size, water = Top(WetLevel(x, z, top), top), bed = int.MaxValue, r = 2 + (int)MathF.Ceiling(widen / size);
+        // (The shown surface is a block under the model's: its water takes the top ground block's place, as a stream's
+        // does, so a shallow edge sits level with the ground beside it, not a block over it; distant terrain, which
+        // doesn't cut, keeps it over its voxel.)
+        float shown = WetLevel(x, z, top);
+        int size = land.Size, bed = int.MaxValue, r = 2 + (int)MathF.Ceiling(widen / size);
+        int water = float.IsNaN(shown) ? int.MinValue : (int)MathF.Floor(shown + (widen > 0f ? 0.5f : -0.5f));
+        if (water < top || (widen > 0f && water == top)) water = int.MinValue;
         bool shows = water != int.MinValue;
-        if (shows && widen <= 0f)
-        {
-            // (Its water takes the top ground block's place, as a stream's does: a shallow edge sits level with the
-            // ground beside it, not a block over it.)
-            water--;
-            if (water <= top) bed = water - 1;
-        }
+        if (shows && widen <= 0f && water <= top) bed = water - 1;
         int ic = (int)MathF.Round((x - land.X0) / (float)size), kc = (int)MathF.Round((z - land.Z0) / (float)size);
         float px = x + 0.5f, pz = z + 0.5f;
         Span<Point> curve = stackalloc Point[3];
@@ -354,44 +351,37 @@ public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] do
     /// <summary>The top water block over block column (x, z) (see Water).</summary>
     public int WaterTop(int x, int z, int top, float widen) => Water(x, z, top, widen).Water;
 
-    /// <summary>The model's water level over block column (x, z) (ground topped at <paramref name="top"/>), or NaN
-    /// where none of the four columns whose middles are nearest is wet: their levels blended by how near each is, a dry
-    /// one's its ground (no higher than the highest wet one's), so the surface runs down into the ground toward dry
-    /// columns rather than ending in a face on the grid's lines; a column counts only over ground no more than a
-    /// column under its floor (not past its edge).</summary>
+    /// <summary>The surface the model's water shows over block column (x, z), a block under its own (Shallow past
+    /// the damp), or NaN: each of the four nearest columns' shown water (none where it's that shallow) on its floor,
+    /// blended by how near each is, shown where that's at least ShowsFrom deep. Every column counts alike, wet or dry, so
+    /// the surface runs down into the ground toward dry columns as the water thins, wherever it ends, rather than in a
+    /// face on the grid's lines; a dry column's ground counts no higher than the highest wet one's surface (water doesn't
+    /// climb hills), and a column counts only over ground (<paramref name="top"/>) no more than a column under its floor
+    /// (not past its edge).</summary>
     private float WetLevel(int x, int z, int top)
     {
         int size = land.Size;
-        float gx = (x + 0.5f - land.X0 - 0.5f) / size, gz = (z + 0.5f - land.Z0 - 0.5f) / size;
+        float gx = (x - land.X0) / (float)size, gz = (z - land.Z0) / (float)size;
         int i0 = (int)MathF.Floor(gx), k0 = (int)MathF.Floor(gz);
-        float fx = gx - i0, fz = gz - k0, highest = float.NaN;
+        float fx = gx - i0, fz = gz - k0, highest = float.NaN, past = settings.Damp + Shallow;
         Span<int> corner = stackalloc int[4];
         for (int c = 0; c < 4; c++)
         {
             int i = i0 + (c & 1), k = k0 + (c >> 1);
             int t = i < 0 || k < 0 || i >= land.Nx || k >= land.Nz ? -1 : land.TopNode(i + land.Nx * k);
-            corner[c] = t < 0 || top < land.Floor[t] - size ? -1 : t;
-            if (corner[c] >= 0 && !float.IsNaN(level[t]) && !(level[t] <= highest)) highest = level[t];
+            corner[c] = t = t < 0 || top < land.Floor[t] - size ? -1 : t;
+            if (t >= 0 && depth[t] > past && !(land.Floor[t] + depth[t] - past <= highest)) highest = land.Floor[t] + depth[t] - past;
         }
         if (float.IsNaN(highest)) return float.NaN;
-        float sum = 0f, weights = 0f;
+        float sum = 0f, deep = 0f, weights = 0f;
         for (int c = 0; c < 4; c++)
         {
             int t = corner[c];
             if (t < 0) continue;
-            float w = ((c & 1) == 0 ? 1 - fx : fx) * ((c >> 1) == 0 ? 1 - fz : fz) + 1e-4f;
-            sum += w * (float.IsNaN(level[t]) ? MathF.Min(land.Floor[t] + MathF.Max(0f, depth[t] - settings.Damp), highest) : level[t]); weights += w;
+            float w = ((c & 1) == 0 ? 1 - fx : fx) * ((c >> 1) == 0 ? 1 - fz : fz) + 1e-4f, d = MathF.Max(0f, depth[t] - past);
+            sum += w * MathF.Min(land.Floor[t] + d, highest); deep += w * d; weights += w;
         }
-        return sum / weights;
-    }
-
-    /// <summary>The top water block under <paramref name="level"/> over ground topped at <paramref name="top"/> (blocks
-    /// under half under it stay dry), or int.MinValue.</summary>
-    private static int Top(float level, int top)
-    {
-        if (float.IsNaN(level)) return int.MinValue;
-        int water = (int)MathF.Floor(level - 0.5f);
-        return water > top ? water : int.MinValue;
+        return deep < ShowsFrom * weights ? float.NaN : sum / weights;
     }
 
     /// <summary>The stream of the column holding (x, z): how wide it runs (sqrt(flow / StreamFlow) blocks; 0 for
@@ -441,6 +431,18 @@ public sealed class Shaped(Land land, float[] startFloor, float[] flow, int[] do
         const float Near = 16f;
         int t = TopNodeAt(x, z);
         return t < 0 || MathF.Abs(startFloor[t] - top) > Near ? 0f : land.Floor[t] - startFloor[t];
+    }
+
+    /// <summary>Whether any of the columns round block column (x, z) or beside those has water over it or a stream
+    /// through it (water reaches that far across: a stream's channel, the model's surface blended between columns).</summary>
+    public bool Watered(int x, int z)
+    {
+        for (int c = 0; c < 16; c++)
+        {
+            int t = TopNodeAt(x + (c % 4 - 1) * land.Size, z + (c / 4 - 1) * land.Size);
+            if (t >= 0 && (depth[t] > settings.Damp || flow[t] > 0f)) return true;
+        }
+        return false;
     }
 
     /// <summary>The top node of the column with its middle at (x, z), or -1.</summary>

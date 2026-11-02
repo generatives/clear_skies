@@ -44,6 +44,9 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
 
     /// <summary>Solid runs thinner than this are worn away: slivers where the terrain surface just grazes a piece.</summary>
     private const int MinThickness = 6;
+    // Slopes roughened (see ColumnSpans): how far a top moves up or down at most, on ground at least RoughSlope steep
+    // (less on gentler ground, none on flat), and how fine the roughness is.
+    private const float Rough = 1.5f, RoughSlope = 1f, RoughFrequency = 0.12f;
 
     // A piece's top is the terrain worn down: where the terrain there stands above the terrain at its heart, only
     // Flatten of the difference is left, and the whole top is lowered by up to MaxDrop (each piece its own amount).
@@ -68,7 +71,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
     internal ulong Seed => _seed;
     private readonly Landscape? _landscape;
     private readonly ContinentTerrain _terrain;
-    private readonly FastNoiseLite _warpX, _warpY, _warpZ, _crack, _bottom;
+    private readonly FastNoiseLite _warpX, _warpY, _warpZ, _crack, _bottom, _rough;
 
     /// <param name="profiles">Shared with the other workers' generators; by default, this one's own.</param>
     /// <param name="landscape">How the land is worn and watered; none, as the hearts leave it.</param>
@@ -83,6 +86,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
         _warpZ = Noise(seed + 33, WarpFrequency);
         _crack = Noise(seed + 34, 0.03f);
         _bottom = Noise(seed + 35, 0.02f);
+        _rough = Noise(seed + 36, RoughFrequency);
     }
 
     private static FastNoiseLite Noise(ulong seed, float frequency)
@@ -797,6 +801,22 @@ public sealed class HeartWorldGenerator : IWorldGenerator, ICoarseWorldGenerator
                 int hi = System.Math.Min((int)MathF.Ceiling(y) - 1, HeartGrid.WorldTop - 1);
                 if (lo != int.MinValue && hi - lo + 1 >= MinThickness && count < into.Length) into[count++] = ((short)lo, (short)hi);
                 lo = int.MinValue;
+            }
+        }
+        // The top roughened on slopes: blended between corners, a cell's slope is a flat face; moved up or down a little
+        // by noise (as much as Rough where it's RoughSlope steep), it breaks up. Flat ground, and ground the landscape's
+        // water runs or stands on, stays as it is. (Only once the landscape is worn: the landscape itself is worked out
+        // from the ground as it was, unroughened.)
+        if (count > 0 && _landscape != null)
+        {
+            int wx = lattice.ChunkX * S + lx, wz = lattice.ChunkZ * S + lz;
+            float steep = Math.Clamp(lattice.Slope(lx, lz) / RoughSlope, 0f, 1f);
+            if (steep > 0f && !_landscape.At(wx, wz).Watered(wx, wz))
+            {
+                var (rlo, rhi) = into[count - 1];
+                float n = _rough.GetNoise(wx, wz);
+                int moved = rhi + (int)MathF.Round(Rough * steep * n);
+                into[count - 1] = (rlo, (short)Math.Clamp(moved, rlo + MinThickness - 1, HeartGrid.WorldTop - 1));
             }
         }
         return count;
