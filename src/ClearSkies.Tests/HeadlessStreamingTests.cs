@@ -29,10 +29,10 @@ internal sealed class SavedChunkStore(SaveDatabase db) : IChunkStore
 /// <summary>Terrain streaming with nothing drawn (headless): limited by a count of chunks.</summary>
 public class HeadlessStreamingTests
 {
-    /// <summary>Stone below y = 0, air above.</summary>
+    /// <summary>Stone below y = 0, air above (at any level).</summary>
     internal sealed class Flat : IWorldGenerator
     {
-        public void Generate(ChunkData data, ChunkPosition pos)
+        public void Generate(ChunkData data, ChunkPosition pos, int level = 0)
         {
             if (pos.Y >= 0) return;
             for (int z = 0; z < ChunkData.Size; z++) for (int y = 0; y < ChunkData.Size; y++) for (int x = 0; x < ChunkData.Size; x++)
