@@ -58,7 +58,8 @@ public sealed partial class Pipes
         if (Scour <= 0f) return floor;
         var coarse = _coarse;
         float worn = Math.Max(0f, _coarse.StartFloor[n] - floor);
-        float wear = Scour * ScourDepth * MathF.Pow(Math.Min(h, ScourDepth) / ScourDepth, ScourPower) * dt / (1 + worn / Hardening);
+        float share = Math.Min(h, ScourDepth) / ScourDepth;
+        float wear = Scour * ScourDepth * (ScourPower == 1f ? share : ExactMath.Pow(share, ScourPower)) * dt / (1 + worn / Hardening);
         return Math.Max(Math.Min(floor, coarse.Base[n] + MinThickness), floor - wear);
     }
 
@@ -66,7 +67,7 @@ public sealed partial class Pipes
     {
         var coarse = _coarse;
         // Strongest at the start, easing down (see Ease).
-        float ease = Ease == 1f ? 1f : MathF.Pow(Ease, 1f - 2f * (float)Math.Clamp((Time - _erodeStart) / _erodeLength, 0, 1));
+        float ease = Ease == 1f ? 1f : ExactMath.Pow(Ease, 1f - 2f * (float)Math.Clamp((Time - _erodeStart) / _erodeLength, 0, 1));
         float speedup = Speedup * ease;
         Sediment ??= new float[coarse.Nodes];
         _carried ??= new float[coarse.Nodes]; _sedimentRatio ??= new float[coarse.Nodes]; _nextSediment ??= new float[coarse.Nodes];
