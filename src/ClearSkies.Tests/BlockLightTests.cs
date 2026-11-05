@@ -10,6 +10,7 @@ public class BlockLightTests
     [Theory]
     [InlineData(BlockId.Stone, true)]   // opaque cube
     [InlineData(BlockId.Lamp, true)]
+    [InlineData(BlockId.StoneBrick, true)] // ruin walls
     [InlineData(BlockId.Fan, true)]     // opaque model
     [InlineData(BlockId.Lever, false)]  // model
     [InlineData(BlockId.SteeringWheel, false)]

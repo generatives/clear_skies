@@ -139,6 +139,11 @@ public static class BlockRegistry
             Texture = "lava" });
         Register(new BlockDef { Id = BlockId.GlowingLava, Name = "Glowing Lava", Color = new(1.00f, 0.45f, 0.10f), IsSolid = true, PlaceOriented = false, LightEmission = 13, Weight = 4,
             LightColor = new(1.00f, 0.45f, 0.15f), Texture = "lava" });
+
+        // Ruins: dressed grey stone brick for the walls of the ancient ruins inside landmasses, distinct from the
+        // natural Stone and Rock around them.
+        Register(new BlockDef { Id = BlockId.StoneBrick, Name = "Stone Brick", Color = new(0.50f, 0.50f, 0.52f), IsSolid = true, PlaceOriented = false, LightEmission = 0, Weight = 6,
+            Texture = "brick_grey" });
     }
 
     private static void RegisterCross(BlockId id, string name, string texture, Vector3D<float> color, string[]? variants = null, bool rigid = false, bool tint = false) =>

@@ -62,4 +62,7 @@ public enum BlockId : byte
     Ash           = 44,
     Lava          = 45,
     GlowingLava   = 46,
+
+    // Ruins: the dressed stone walls of the ancient ruins inside landmasses.
+    StoneBrick    = 47,
 }
