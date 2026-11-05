@@ -421,9 +421,14 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
             ImGui.Text($"{name}: {chunks:N0} chunks drawn, {opaque:N0} opaque quads, {cutout:N0} cut-out quads");
         }
         ImGui.Text($"Draw calls (smoothed): chunks {_submitMs:F2} ms, model blocks {_modelsMs:F2} ms, translucent {_translucentMs:F2} ms");
-        ImGui.Text($"First bakes: {_markedBakeFirst.Count:N0} marked, {_bakeFirst.Count:N0} of them meshed and Rendered; of the " +
-                   $"{_nearestToBake.Count} nearest looked at, {_firstListed} listed, {_firstNothing} with nothing to bake, " +
-                   $"{_firstNoStore} not in the light store; {_bakedQuads:N0} quads listed this frame");
+        ImGui.Text("First bakes:");
+        ImGui.Text($"  marked                {_markedBakeFirst.Count,8:N0}");
+        ImGui.Text($"  meshed and Rendered   {_bakeFirst.Count,8:N0}");
+        ImGui.Text($"  nearest looked at     {_nearestToBake.Count,8}");
+        ImGui.Text($"    listed              {_firstListed,8}");
+        ImGui.Text($"    nothing to bake     {_firstNothing,8}");
+        ImGui.Text($"    not in light store  {_firstNoStore,8}");
+        ImGui.Text($"  quads listed (frame)  {_bakedQuads,8:N0}");
         var (used, capacity) = _renderer.LightmapArenaUse;
         ImGui.Text($"Light maps: {used * 4 / 1048576.0:F1} of {capacity * 4 / 1048576.0:F1} MB; baked per frame (smoothed): " +
                    $"{_bakedMeshesEma:F1} meshes, {_bakedGroupsEma * Renderer.LightmapQuadsPerGroup:N0} quads at most");
