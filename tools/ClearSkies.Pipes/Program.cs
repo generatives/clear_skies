@@ -66,8 +66,6 @@ for (int a = 0; a < args.Length; a++)
         case "--ground-every": { var v = int.Parse(args[++a]); settings.Add(p => p.GroundEvery = v); break; }
         case "--ease": { var v = float.Parse(args[++a]); settings.Add(p => p.Ease = v); break; }
         case "--scour": { var v = float.Parse(args[++a]); settings.Add(p => p.Scour = v); break; }
-        case "--focus": { var v = float.Parse(args[++a]); settings.Add(p => p.Focus = v); break; }
-        case "--incise": { var v = float.Parse(args[++a]); settings.Add(p => p.Incise = v); break; }
         case "--creep": { var v = float.Parse(args[++a]); settings.Add(p => p.Creep = v); break; }
         case "--speedup": { var v = float.Parse(args[++a]); settings.Add(p => p.Speedup = v); break; }
         case "--rain": { var v = float.Parse(args[++a]); settings.Add(p => p.Rain = v); break; }
@@ -86,7 +84,7 @@ var (x0, z0, x1, z1) = Landscape.Bounds(seed, landmass);
 Console.WriteLine($"Bounds x {x0}..{x1}, z {z0}..{z1} ({(x1 - x0) / 1000f:0.0} x {(z1 - z0) / 1000f:0.0} km)");
 
 var sw = Stopwatch.StartNew();
-var land = new Land(seed, landmass, x0, z0, x1, z1, size);
+var land = CoarseLandmass.Build(seed, landmass, x0, z0, x1, z1, new LandscapeSettings { Size = size });
 int landColumns = Enumerable.Range(0, land.Columns).Count(land.HasLand);
 Console.WriteLine($"{size}-block columns: {land.Columns:N0} ({landColumns:N0} with land), {land.Nodes:N0} nodes, " +
                   $"{land.Links:N0} links, sampled in {sw.Elapsed.TotalSeconds:0.0} s");
