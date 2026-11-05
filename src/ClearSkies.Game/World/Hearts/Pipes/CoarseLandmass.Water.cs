@@ -207,20 +207,14 @@ public sealed partial class CoarseLandmass
         return t < 0 || MathF.Abs(StartFloor[t] - top) > Near ? 0f : Floor[t] - StartFloor[t];
     }
 
-    /// <summary>How steep the ground is at block column (x, z), blocks up per block across: the slope of its four
-    /// nearest columns' floors blended (0 where one has none).</summary>
-    public float Steepness(int x, int z)
+    /// <summary>How steep the ground is at the column with its middle at (x, z), blocks up per block across: its
+    /// neighbours' floors either side, each way (0 where one has none).</summary>
+    public float Slope(int x, int z)
     {
-        var (i0, k0, fx, fz) = Cell(x, z);
-        Span<float> floors = stackalloc float[4];
-        for (int corner = 0; corner < 4; corner++)
-        {
-            int t = TopNode(i0 + (corner & 1), k0 + (corner >> 1));
-            if (t < 0) return 0f;
-            floors[corner] = Floor[t];
-        }
-        float dx = ((1 - fz) * (floors[1] - floors[0]) + fz * (floors[3] - floors[2])) / Size;
-        float dz = ((1 - fx) * (floors[2] - floors[0]) + fx * (floors[3] - floors[1])) / Size;
+        var (i, k, _, _) = Cell(x, z);
+        int east = TopNode(i + 1, k), west = TopNode(i - 1, k), south = TopNode(i, k + 1), north = TopNode(i, k - 1);
+        if (east < 0 || west < 0 || south < 0 || north < 0) return 0f;
+        float dx = (Floor[east] - Floor[west]) / (2 * Size), dz = (Floor[south] - Floor[north]) / (2 * Size);
         return MathF.Sqrt(dx * dx + dz * dz);
     }
 

@@ -553,14 +553,15 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 for (int n = 0; n < same && j < lattice.Levels; n++) column[j++] = clamped;
             }
         }
-        if (_landscape != null) Wear(lattice, lattice.Worn = _landscape.At(x0 + S / 2, z0 + S / 2));
+        if (_landscape != null) Wear(lattice, _landscape.At(x0 + S / 2, z0 + S / 2));
         lattice.Split();
         return lattice;
     }
 
     /// <summary>Moves each corner's top (where its distance last falls through zero going up) by the wear under it
     /// (see <see cref="CoarseLandmass.Shift"/>): worn down, it's cut to a flat face that much lower; built up, filled to one
-    /// that much higher. Ground under the top stays as it is.</summary>
+    /// that much higher. Ground under the top stays as it is. Also how rough each corner's top is (see ColumnSpans): by
+    /// the landscape's slope there, up to RoughSlope; none near its water.</summary>
     private static void Wear(DistanceLattice lattice, CoarseLandmass shaped)
     {
         const int N = DistanceLattice.Corners, Cell = DistanceLattice.Cell;
@@ -576,6 +577,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             }
             if (float.IsNaN(top)) continue;
             int wx = lattice.ChunkX * S + c % N * Cell, wz = lattice.ChunkZ * S + c / N * Cell;
+            if (!shaped.NearWater(wx, wz)) lattice.SetRoughness(c, Math.Clamp(shaped.Slope(wx, wz) / RoughSlope, 0f, 1f));
             float shift = shaped.Shift(wx, wz, top);
             if (MathF.Abs(shift) < 0.01f) continue;
             float moved = top + shift;
@@ -769,18 +771,15 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             }
         }
         // The top roughened on slopes: blended between corners, a cell's slope is a flat face; moved up or down by slow,
-        // smooth noise (as much as Rough where the landscape's ground is RoughSlope steep), it breaks up. Flat ground,
-        // and ground near the landscape's water, stays as it is. (Only on worn ground: the landscape itself is worked
-        // out from the ground as it was, unroughened.)
-        if (count > 0 && lattice.Worn is { } shaped)
+        // smooth noise (as much as Rough where the lattice's roughness is 1, see Wear), it breaks up.
+        if (count > 0)
         {
-            int wx = lattice.ChunkX * S + lx, wz = lattice.ChunkZ * S + lz;
-            float steep = Math.Clamp(shaped.Steepness(wx, wz) / RoughSlope, 0f, 1f);
-            if (steep > 0f && !shaped.NearWater(wx, wz))
+            float rough = lattice.Roughness(lx, lz);
+            if (rough > 0f)
             {
                 var (rlo, rhi) = into[count - 1];
-                float n = _rough.GetNoise(wx, wz);
-                int moved = rhi + (int)MathF.Round(Rough * steep * n);
+                float n = _rough.GetNoise(lattice.ChunkX * S + lx, lattice.ChunkZ * S + lz);
+                int moved = rhi + (int)MathF.Round(Rough * rough * n);
                 into[count - 1] = (rlo, (short)Math.Clamp(moved, rlo + MinThickness - 1, HeartGrid.WorldTop - 1));
             }
         }
