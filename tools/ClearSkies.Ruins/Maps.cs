@@ -125,29 +125,42 @@ public static class Maps
         Write(path, rgb, W, h);
     }
 
-    /// <summary>Images in rows (top floor first, left to right), a gap between, each numbered with tick marks along its top
-    /// edge: a long one per five, a short one per one.</summary>
+    // 3 x 5 digits, a row of three bits per line, top line first.
+    private static readonly int[][] Digits =
+    [
+        [7, 5, 5, 5, 7], [2, 6, 2, 2, 7], [7, 1, 7, 4, 7], [7, 1, 7, 1, 7], [5, 5, 7, 1, 1],
+        [7, 4, 7, 1, 7], [7, 4, 7, 5, 7], [7, 1, 1, 1, 1], [7, 5, 7, 5, 7], [7, 5, 7, 1, 7],
+    ];
+
+    /// <summary>Images in rows (top floor first, left to right), each labelled with its floor number above it.</summary>
     public static void Sheet(string path, IReadOnlyList<byte[]> images, int w, int h)
     {
-        const int gap = 12;
+        int px = Math.Max(3, w / 80), label = px * 7;
         int cols = Math.Max(1, (int)Math.Ceiling(Math.Sqrt(images.Count * (double)h / w)));
         int rows = (images.Count + cols - 1) / cols;
-        int W = cols * w + (cols - 1) * gap, H = rows * (h + gap);
+        int gap = px * 3, W = cols * w + (cols - 1) * gap, H = rows * (h + label);
         var rgb = new byte[W * H * 3];
         for (int k = 0; k < rgb.Length; k += 3) { rgb[k] = Sky.R; rgb[k + 1] = Sky.G; rgb[k + 2] = Sky.B; }
         for (int n = 0; n < images.Count; n++)
         {
-            int ox = n % cols * (w + gap), oy = n / cols * (h + gap) + gap;
+            int ox = n % cols * (w + gap), oy = n / cols * (h + label) + label;
             for (int y = 0; y < h; y++)
                 Array.Copy(images[n], y * w * 3, rgb, ((oy + y) * W + ox) * 3, w * 3);
-            // The floor's number: n + 1 ticks above it, every fifth taller.
-            for (int t = 0; t <= n; t++)
-            for (int y = (t + 1) % 5 == 0 ? 1 : 5; y < gap - 2; y++)
-            for (int x = 0; x < 2; x++)
+            string text = n.ToString();
+            for (int d = 0; d < text.Length; d++)
             {
-                int px = ox + 2 + t * 4 + x, py = oy - gap + y;
-                if (px >= W) continue;
-                int o = (px + W * py) * 3; rgb[o] = 240; rgb[o + 1] = 240; rgb[o + 2] = 240;
+                var glyph = Digits[text[d] - '0'];
+                for (int gy = 0; gy < 5; gy++)
+                for (int gx = 0; gx < 3; gx++)
+                {
+                    if ((glyph[gy] >> (2 - gx) & 1) == 0) continue;
+                    for (int yy = 0; yy < px; yy++)
+                    for (int xx = 0; xx < px; xx++)
+                    {
+                        int x = ox + px + (d * 4 + gx) * px + xx, y = oy - label + px + gy * px + yy;
+                        int o = (x + W * y) * 3; rgb[o] = 240; rgb[o + 1] = 240; rgb[o + 2] = 240;
+                    }
+                }
             }
         }
         Write(path, rgb, W, H);
