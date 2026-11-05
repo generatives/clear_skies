@@ -1,50 +1,63 @@
 namespace ClearSkies.Game.Generation;
 
-/// <summary>One island heart: it holds up the ground under the terrain nearer to it than to any other heart (its
-/// piece), at world blocks (X, Z), if it is <paramref name="Alive"/>. <paramref name="Surface"/> is the terrain
-/// surface's height there, <paramref name="Drop"/> how far its piece's top is worn down (0-1 of the most, see
-/// HeartWorldGenerator), and <paramref name="Depth"/> how deep its piece hangs under its top at its deepest.</summary>
-public readonly record struct Heart(float X, float Z, float Surface, float Drop, float Depth, bool Alive);
+/// <summary>One island heart: it holds up the ground nearer to it than to any other heart (its piece), if it is
+/// <paramref name="Alive"/>. X and Z are world blocks; <paramref name="Depth"/> is how far below the terrain surface at
+/// (X, Z) it sits, and <paramref name="Surface"/> that surface's height. <paramref name="Drop"/> is how far its piece's
+/// top is worn down, 0-1 of the most (see HeartWorldGenerator).</summary>
+public readonly record struct Heart(float X, float Depth, float Z, float Surface, bool Alive, float Drop);
 
 /// <summary>
-/// Where island hearts are. The world is a <see cref="ContinentTerrain"/> broken into pieces: one heart per cell of a
-/// 2D grid, each holding the ground nearest to it, so the pieces fit together like Voronoi cells, with a crack between
-/// neighbours (see HeartWorldGenerator). A piece hangs about <see cref="ColumnDepth"/> under its top, wherever that
-/// is, so there's as much ground under a mountain as under the plains, its underside rising to its edges.
+/// Where island hearts are. The world is a <see cref="ContinentTerrain"/> broken into pieces: hearts sit through the
+/// ground, one per cell of a 3D grid, and each holds the ground nearest to it, so the pieces fit together like 3D
+/// Voronoi cells, with a crack between neighbours (see HeartWorldGenerator). The grid's rows go down from the terrain
+/// surface, not up from a fixed height, so the top row's pieces always hold the surface and the cracks under them
+/// follow the land's shape. Distances count depth <see cref="VerticalScale"/> times over, so pieces are wide and flat
+/// rather than cubes.
 ///
-/// Whether a piece is there goes by the height of the land at its heart: nearly all are in the plains, so they're a
-/// floor of land cracked into pieces; above it they die off gradually, so the highlands break up into scattered
-/// pieces, gathered by the <see cref="ClusterField"/> into clusters with open sky between. In the mountain ranges most
-/// are there again, so each range holds together, cracked.
+/// Only hearts less than <see cref="ColumnDepth"/> under the surface can be alive, wherever the surface is, so there's
+/// as much ground under the plains as under a mountain; those under it are dead, so the pieces' undersides are faces
+/// of cells like the rest. Whether a heart is alive goes by the height of the land over it: nearly all are in the
+/// plains, so they're a floor of land cracked into pieces; above it they die off gradually, so the highlands break up
+/// into scattered pieces, gathered by the <see cref="ClusterField"/> into clusters with open sky between. In the
+/// mountain ranges most are alive again, so each range holds together, cracked.
 /// </summary>
 public static class HeartGrid
 {
-    /// <summary>How wide a heart's cell is, and so its piece, and how deep a piece hangs under its top, by default
-    /// (blocks).</summary>
-    public const float DefaultPieceWidth = 1000f, DefaultColumnDepth = 800f;
+    /// <summary>How wide and how tall a heart's cell is, and so its piece, and how deep under the surface hearts can be
+    /// alive, by default (blocks).</summary>
+    public const float DefaultPieceWidth = 1000f, DefaultPieceHeight = 312.5f, DefaultColumnDepth = 800f;
 
     /// <summary>How wide a heart's cell is (blocks).</summary>
     public static float PieceWidth { get; private set; } = DefaultPieceWidth;
 
-    /// <summary>About how deep a piece hangs under its top (blocks): each its own, from 1 - DepthSpread/2 to
-    /// 1 + DepthSpread/2 of it.</summary>
+    /// <summary>How tall a heart's cell is (blocks).</summary>
+    public static float PieceHeight { get; private set; } = DefaultPieceHeight;
+
+    /// <summary>How deep under the surface hearts can be alive (blocks).</summary>
     public static float ColumnDepth { get; private set; } = DefaultColumnDepth;
 
-    private const float DepthSpread = 0.1f;
+    /// <summary>How much more a vertical offset counts than a horizontal one when finding a block's nearest heart: a
+    /// cell's width over its height.</summary>
+    public static float VerticalScale => PieceWidth / PieceHeight;
 
-    /// <summary>Sets how wide pieces are and how deep they hang (blocks; --piece-width, --column-depth), before any
-    /// world is generated. (Landmasses stay as they are, so wide pieces near a border are cut off straight by it.)</summary>
-    public static void SetPieceSize(float width, float depth = DefaultColumnDepth)
+    /// <summary>Sets how wide and tall pieces are and how deep they go (blocks; --piece-width, --piece-height,
+    /// --column-depth), before any world is generated. (Landmasses stay as they are, so wide pieces near a border are
+    /// cut off straight by it.)</summary>
+    public static void SetPieceSize(float width, float height, float depth)
     {
         PieceWidth = width;
+        PieceHeight = height;
         ColumnDepth = depth;
     }
 
     public static int CellOf(float x) => (int)MathF.Floor(x / PieceWidth);
 
-    /// <summary>How far a heart may sit from its cell's middle, as a share of the cell: under 1, so no two are
-    /// too close together.</summary>
-    private const float Jitter = 0.8f;
+    /// <summary>Row of a heart at <paramref name="depth"/> under the surface: -1 is the top row.</summary>
+    public static int RowOf(float depth) => (int)MathF.Floor(-depth / PieceHeight);
+
+    /// <summary>How far a heart may sit from its cell's middle, as a share of the cell, across and up and down: under
+    /// 1, so no two are too close together; less up and down, so a top row's piece is never very thin.</summary>
+    private const float Jitter = 0.8f, JitterUp = 0.5f;
 
     /// <summary>The streamed world's vertical band, in blocks (chunk layers -15..48, see GameWorld): nothing generates
     /// outside it. Low enough that the plains have a full ColumnDepth under them.</summary>
@@ -96,16 +109,17 @@ public static class HeartGrid
     // roughened by a finer one at ClusterDetail, gathered where the clumps are.
     private const float ClumpSpacing = 16000f, ClumpDetail = 5000f, ClusterSpacing = 3500f, ClusterDetail = 1100f;
 
-    /// <summary>The heart of cell (cx, cz).</summary>
-    public static Heart At(ulong seed, int cx, int cz)
+    /// <summary>The heart of cell (cx, cy, cz). Row cy is minus its depth below the surface, in cells: -1 is the top row,
+    /// and there are none above it.</summary>
+    public static Heart At(ulong seed, int cx, int cy, int cz)
     {
-        var rng = new SplitMix64Rng(HashCell(seed, 200, cx, 0, cz));
+        var rng = new SplitMix64Rng(HashCell(seed, 200, cx, cy, cz));
         float x = (cx + 0.5f + Jitter * (rng.NextFloat01() - 0.5f)) * PieceWidth;
+        float y = (cy + 0.5f + JitterUp * (rng.NextFloat01() - 0.5f)) * PieceHeight;
         float z = (cz + 0.5f + Jitter * (rng.NextFloat01() - 0.5f)) * PieceWidth;
         float surface = ContinentTerrain.For(seed).Height(x, z);
-        bool alive = rng.NextFloat01() < AliveChance(seed, x, surface, z);
-        float depth = ColumnDepth * (1f + DepthSpread * (rng.NextFloat01() - 0.5f));
-        return new Heart(x, z, surface, rng.NextFloat01(), depth, alive);
+        bool alive = -y < ColumnDepth && rng.NextFloat01() < AliveChance(seed, x, surface, z);
+        return new Heart(x, -y, z, surface, alive, rng.NextFloat01());
     }
 
     /// <summary>How likely a heart at (x, y, z) is to be alive: by height and the mountain ranges, within a continent,
