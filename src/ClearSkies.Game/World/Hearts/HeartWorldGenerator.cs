@@ -124,6 +124,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     private readonly (short Lo, short Hi)[] _spans = new (short, short)[S * S * MaxSpans];
     private readonly byte[] _spanCount = new byte[S * S];
     private float[] _levels = Array.Empty<float>();
+    private readonly DistanceLattice.Rows _rows = new(); // (see DistanceLattice.Interpolate)
 
     // The hearts around the chunk column being profiled: cells from (_cx0, _cz0) across, _nx by _nz of them, and from
     // the top row down, _ny rows; each one's scaled position (depth below the surface times VerticalScale, negative),
@@ -518,21 +519,22 @@ public sealed class HeartWorldGenerator : IWorldGenerator
 
     private DistanceLattice? BuildLattice(int chunkX, int chunkZ)
     {
-        const int N = DistanceLattice.Corners, Cell = DistanceLattice.Cell;
+        const int N = DistanceLattice.Corners, M = DistanceLattice.Side, Cell = DistanceLattice.Cell;
         float x0 = chunkX * S, z0 = chunkZ * S;
 
-        // The corners' columns: the terrain's height there.
-        Span<float> height = stackalloc float[N * N];
+        // The corners' columns (with the ring round them, see DistanceLattice): the terrain's height there.
+        Span<float> height = stackalloc float[M * M];
         float top = float.MinValue, lowest = float.MaxValue;
-        for (int k = 0; k < N; k++)
-        for (int i = 0; i < N; i++)
+        for (int k = -1; k <= N; k++)
+        for (int i = -1; i <= N; i++)
         {
             float wx = x0 + i * Cell, wz = z0 + k * Cell;
-            height[i + N * k] = MathF.Min(_terrain.Height(wx, wz), HeartGrid.WorldTop - 1);
-            top = MathF.Max(top, height[i + N * k]);
-            lowest = MathF.Min(lowest, height[i + N * k]);
+            int c = DistanceLattice.Index(i, k);
+            height[c] = MathF.Min(_terrain.Height(wx, wz), HeartGrid.WorldTop - 1);
+            top = MathF.Max(top, height[c]);
+            lowest = MathF.Min(lowest, height[c]);
         }
-        LoadHearts(x0 - WarpAcross, z0 - WarpAcross, x0 + S + WarpAcross, z0 + S + WarpAcross);
+        LoadHearts(x0 - Cell - WarpAcross, z0 - Cell - WarpAcross, x0 + S + Cell + WarpAcross, z0 + S + Cell + WarpAcross);
         bool anyAlive = false;
         for (int h = 0; h < _nx * _ny * _nz && !anyAlive; h++) anyAlive = _alive[h];
         if (!anyAlive) return null;
@@ -547,10 +549,10 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         // smooth minimum of them changes no faster than the fastest), so where it's further than that past Reach it's
         // still past Reach a level up: as far as that goes, no need to work it out.
         float steepest = Cell * 1.5f;
-        for (int k = 0; k < N; k++)
-        for (int i = 0; i < N; i++)
+        for (int k = -1; k <= N; k++)
+        for (int i = -1; i <= N; i++)
         {
-            int c = i + N * k;
+            int c = DistanceLattice.Index(i, k);
             float wx = x0 + i * Cell, wz = z0 + k * Cell;
             float px = wx + WarpAcross * _warpX.GetNoise(wx, wz);
             float pz = wz + WarpAcross * _warpZ.GetNoise(wx, wz);
@@ -568,7 +570,6 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             }
         }
         if (_landscape != null) Wear(lattice, _landscape.At(x0 + S / 2, z0 + S / 2));
-        lattice.Split();
         return lattice;
     }
 
@@ -578,9 +579,9 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     /// the landscape's slope there, up to RoughSlope; none near its water.</summary>
     private static void Wear(DistanceLattice lattice, CoarseLandmass shaped)
     {
-        const int N = DistanceLattice.Corners, Cell = DistanceLattice.Cell;
+        const int M = DistanceLattice.Side, Cell = DistanceLattice.Cell;
         float reach = DistanceLattice.Reach;
-        for (int c = 0; c < N * N; c++)
+        for (int c = 0; c < M * M; c++)
         {
             var column = lattice.Column(c);
             float top = float.NaN;
@@ -590,7 +591,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 if (a > 0f && b <= 0f) { top = (lattice.First + j) * Cell + Cell * a / (a - b); break; }
             }
             if (float.IsNaN(top)) continue;
-            int wx = lattice.ChunkX * S + c % N * Cell, wz = lattice.ChunkZ * S + c / N * Cell;
+            int wx = lattice.ChunkX * S + (c % M - 1) * Cell, wz = lattice.ChunkZ * S + (c / M - 1) * Cell;
             if (!shaped.NearWater(wx, wz)) lattice.SetRoughness(c, Math.Clamp(shaped.Slope(wx, wz) / RoughSlope, 0f, 1f));
             float shift = shaped.Shift(wx, wz, top);
             if (MathF.Abs(shift) < 0.01f) continue;
@@ -769,7 +770,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     {
         int levels = lattice.Levels, cell = DistanceLattice.Cell;
         if (_levels.Length < levels) _levels = new float[levels];
-        lattice.Interpolate(lx, lz, _levels.AsSpan(0, levels));
+        lattice.Interpolate(lx, lz, _levels.AsSpan(0, levels), _rows);
         var d = _levels;
 
         // Between levels a distance is linear: a run starts at the first block over where it rises through zero and
