@@ -45,7 +45,7 @@ public static class Biomes
     public const float WaterWet = 0.2f;
 
     /// <summary>0-1: how wet the ground is, from the region's <paramref name="rain"/> (see <see cref="ContinentTerrain.Rain"/>)
-    /// raised by up to <see cref="WaterWet"/> near water (<paramref name="watered"/>, see <see cref="Shaped.Watered"/>):
+    /// raised by up to <see cref="WaterWet"/> near water (<paramref name="watered"/>, see <see cref="CoarseLandmass.Watered"/>):
     /// a river through a desert runs through a band of savanna, not straight into jungle.</summary>
     public static float Wet(float rain, float watered) => MathF.Min(1f, rain + WaterWet * watered);
 
@@ -62,7 +62,7 @@ public static class Biomes
         return best;
     }
 
-    /// <summary>The biome at (heat, wet) on ground <paramref name="marsh"/> marshy (0-1, see <see cref="Shaped.Marsh"/>):
+    /// <summary>The biome at (heat, wet) on ground <paramref name="marsh"/> marshy (0-1, see <see cref="CoarseLandmass.Marsh"/>):
     /// marsh where it is marshy enough and the climate is mild to hot and not dry, else by the climate.</summary>
     public static Biome Pick(float heat, float wet, float marsh)
     {

@@ -20,23 +20,26 @@ public sealed partial class Pipes
     public int GroundEvery = 4;
 
     /// <summary>Each node's water table (in blocks; at its shell's bottom when dry, at its floor when full), or null
-    /// without groundwater.</summary>
-    public float[]? Groundwater;
+    /// without groundwater (the landmass model's, see <see cref="CoarseLandmass.Groundwater"/>).</summary>
+    public float[]? Groundwater { get => _coarse.Groundwater; private set => _coarse.Groundwater = value; }
     /// <summary>What each node's surface water soaks in and what comes up from its ground, in blocks³ a second.</summary>
     public float[]? Soaking, Springs;
     private float[]? _shellBottom;
     private int _sweeps;
     private float[]? _tableBefore;
+    /// <summary>How many nodes a sweep's parallel task takes. Part of the result, not only of the speed: a node reads its
+    /// own block's tables as they're swept and other blocks' as they were before the sweep.</summary>
+    private const int SweepBlock = 2048;
 
     public void UseGroundwater()
     {
-        var land = _land;
-        Groundwater = new float[land.Nodes]; Soaking = new float[land.Nodes]; Springs = new float[land.Nodes];
-        _shellBottom = new float[land.Nodes];
-        for (int n = 0; n < land.Nodes; n++)
+        var coarse = _coarse;
+        Groundwater = new float[coarse.Nodes]; Soaking = new float[coarse.Nodes]; Springs = new float[coarse.Nodes];
+        _shellBottom = new float[coarse.Nodes];
+        for (int n = 0; n < coarse.Nodes; n++)
         {
-            _shellBottom[n] = Math.Max(land.Base[n], land.Floor[n] - Shell);
-            Groundwater[n] = (_shellBottom[n] + land.Floor[n]) / 2; // half full to start
+            _shellBottom[n] = Math.Max(coarse.Base[n], coarse.Floor[n] - Shell);
+            Groundwater[n] = (_shellBottom[n] + coarse.Floor[n]) / 2; // half full to start
         }
     }
 
@@ -45,37 +48,36 @@ public sealed partial class Pipes
     /// foot, pass nothing.</summary>
     private float Conductance(int k, int n, int m, float bottomN, float bottomM, float tableN, float tableM)
     {
-        var land = _land;
+        var coarse = _coarse;
         float low = Math.Max(bottomN, bottomM);
-        float shared = Math.Min(land.Floor[n], land.Floor[m]) - low;
+        float shared = Math.Min(coarse.Floor[n], coarse.Floor[m]) - low;
         float wet = Math.Max(tableN, tableM) - low; // on the higher table's side
         float through = Math.Min(shared, wet);
-        return through <= 0 ? 0 : Permeability * land.FaceWidth * through / land.LinkLength[k];
+        return through <= 0 ? 0 : Permeability * coarse.FaceWidth * through / coarse.LinkLength[k];
     }
 
     /// <summary>One sweep of the water tables, alternating direction; blocks of nodes in parallel. A node in another
     /// block is read as it was before the sweep, so the result doesn't depend on which block runs first.</summary>
     private void Seep(float dt)
     {
-        var land = _land;
+        var coarse = _coarse;
         var table = Groundwater!; var bottom = _shellBottom!; var soaking = Soaking!; var springs = Springs!;
-        var before = _tableBefore ??= new float[land.Nodes];
+        var before = _tableBefore ??= new float[coarse.Nodes];
         bool forward = (_sweeps++ & 1) == 0;
         float stored = Porosity * _area / Storage;
         // Erosion moves floors: the shells follow.
-        Parallel.For(0, (land.Nodes + 4095) / 4096, block =>
+        ForBlocks(coarse.Nodes, (first, end) =>
         {
-            int end = Math.Min(land.Nodes, (block + 1) * 4096);
-            for (int n = block * 4096; n < end; n++) bottom[n] = Math.Max(land.Base[n], land.Floor[n] - Shell);
+            for (int n = first; n < end; n++) bottom[n] = Math.Max(coarse.Base[n], coarse.Floor[n] - Shell);
         });
-        Array.Copy(table, before, land.Nodes);
-        Parallel.For(0, (land.Nodes + 2047) / 2048, block =>
+        Array.Copy(table, before, coarse.Nodes);
+        Parallel.For(0, (coarse.Nodes + SweepBlock - 1) / SweepBlock, block =>
         {
-            int start = block * 2048, end = Math.Min(land.Nodes, start + 2048);
+            int start = block * SweepBlock, end = Math.Min(coarse.Nodes, start + SweepBlock);
             for (int i = 0; i < end - start; i++)
             {
                 int n = forward ? start + i : end - 1 - i;
-                float floor = land.Floor[n], under = bottom[n];
+                float floor = coarse.Floor[n], under = bottom[n];
                 double sum = stored, rhs = stored * table[n] + soaking[n];
                 for (int k = _faceStart[n]; k < _faceStart[n + 1]; k++)
                 {
@@ -106,9 +108,9 @@ public sealed partial class Pipes
     /// (zero if no water is made or lost), and the shortfall of dry nodes (giving more than they get).</summary>
     public (double Soak, double Springs, double Sideways, double DryShort, double FullShort) GroundBalance()
     {
-        var land = _land; var table = Groundwater!; var bottom = _shellBottom!;
+        var coarse = _coarse; var table = Groundwater!; var bottom = _shellBottom!;
         double soak = 0, springs = 0, sideways = 0, dry = 0, fullShort = 0;
-        for (int n = 0; n < land.Nodes; n++)
+        for (int n = 0; n < coarse.Nodes; n++)
         {
             double net = 0;
             for (int k = _faceStart[n]; k < _faceStart[n + 1]; k++)
@@ -120,7 +122,7 @@ public sealed partial class Pipes
             soak += Soaking![n]; springs += Springs![n]; sideways += net;
             double balance = net + Soaking[n];
             if (table[n] <= bottom[n] + 1e-3f && balance < 0) dry += balance;
-            if (table[n] >= land.Floor[n] - 1e-3f) fullShort += balance - Springs[n];
+            if (table[n] >= coarse.Floor[n] - 1e-3f) fullShort += balance - Springs[n];
         }
         return (soak, springs, sideways, dry, fullShort);
     }
