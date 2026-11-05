@@ -26,6 +26,7 @@ public sealed partial class Pipes
     public float[]? Soaking, Springs;
     private float[]? _shellBottom;
     private int _sweeps;
+    private float[]? _tableBefore;
 
     public void UseGroundwater()
     {
@@ -42,39 +43,48 @@ public sealed partial class Pipes
     /// <summary>How much link k (of node n, to m) passes per block of difference in table: through the wet part of the height its two
     /// shells share (wet on the higher table's side). Shells that don't overlap, like a ledge's and the ground at its
     /// foot, pass nothing.</summary>
-    private float Conductance(int k, int n, int m, float bottomN, float bottomM)
+    private float Conductance(int k, int n, int m, float bottomN, float bottomM, float tableN, float tableM)
     {
-        var land = _land; var table = Groundwater!;
+        var land = _land;
         float low = Math.Max(bottomN, bottomM);
         float shared = Math.Min(land.Floor[n], land.Floor[m]) - low;
-        float wet = Math.Max(table[n], table[m]) - low; // on the higher table's side
+        float wet = Math.Max(tableN, tableM) - low; // on the higher table's side
         float through = Math.Min(shared, wet);
         return through <= 0 ? 0 : Permeability * land.FaceWidth * through / land.LinkLength[k];
     }
 
-    /// <summary>One sweep of the water tables, alternating direction; blocks of nodes in parallel.</summary>
+    /// <summary>One sweep of the water tables, alternating direction; blocks of nodes in parallel. A node in another
+    /// block is read as it was before the sweep, so the result doesn't depend on which block runs first.</summary>
     private void Seep(float dt)
     {
         var land = _land;
         var table = Groundwater!; var bottom = _shellBottom!; var soaking = Soaking!; var springs = Springs!;
+        var before = _tableBefore ??= new float[land.Nodes];
         bool forward = (_sweeps++ & 1) == 0;
         float stored = Porosity * _area / Storage;
+        // Erosion moves floors: the shells follow.
+        Parallel.For(0, (land.Nodes + 4095) / 4096, block =>
+        {
+            int end = Math.Min(land.Nodes, (block + 1) * 4096);
+            for (int n = block * 4096; n < end; n++) bottom[n] = Math.Max(land.Base[n], land.Floor[n] - Shell);
+        });
+        Array.Copy(table, before, land.Nodes);
         Parallel.For(0, (land.Nodes + 2047) / 2048, block =>
         {
             int start = block * 2048, end = Math.Min(land.Nodes, start + 2048);
             for (int i = 0; i < end - start; i++)
             {
                 int n = forward ? start + i : end - 1 - i;
-                // Erosion moves floors: the shell follows.
-                float floor = land.Floor[n], under = bottom[n] = Math.Max(land.Base[n], floor - Shell);
+                float floor = land.Floor[n], under = bottom[n];
                 double sum = stored, rhs = stored * table[n] + soaking[n];
                 for (int k = _faceStart[n]; k < _faceStart[n + 1]; k++)
                 {
                     int m = _other[k];
                     if (m < 0) continue; // edges pass nothing
-                    float c = Conductance(k, n, m, under, bottom[m]);
+                    float tableM = m >= start && m < end ? table[m] : before[m];
+                    float c = Conductance(k, n, m, under, bottom[m], table[n], tableM);
                     if (c <= 0) continue;
-                    sum += c; rhs += c * table[m];
+                    sum += c; rhs += c * tableM;
                 }
                 float next = (float)(rhs / sum);
                 if (next >= floor)
@@ -105,7 +115,7 @@ public sealed partial class Pipes
             {
                 int m = _other[k];
                 if (m < 0) continue;
-                net += Conductance(k, n, m, bottom[n], bottom[m]) * (table[m] - table[n]);
+                net += Conductance(k, n, m, bottom[n], bottom[m], table[n], table[m]) * (table[m] - table[n]);
             }
             soak += Soaking![n]; springs += Springs![n]; sideways += net;
             double balance = net + Soaking[n];
