@@ -29,6 +29,10 @@ public sealed class ChunkData
 
     public bool IsDirty { get; set; }
 
+    /// <summary>Loaded from the save (edited since it was generated), not freshly generated: only then may its water be
+    /// part way through flowing.</summary>
+    public bool Saved { get; set; }
+
     /// <summary>The owner is done with this chunk (it was unloaded): its arrays return to the pool for the next chunk.
     /// Only for a chunk nothing else will keep using, a worker included (a chunk the pipeline made is released once no
     /// job reads it, see <see cref="Pipeline.ChunkPipeline.OnceUnread"/>); anyone still holding it afterwards sees all

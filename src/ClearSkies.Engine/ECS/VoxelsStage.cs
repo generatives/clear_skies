@@ -87,8 +87,8 @@ public sealed class VoxelsStage(IReadOnlyCollection<PipelineGrid> grids, Func<IW
     {
         bool edited = edits.IsEdited(pos);
         var data = _scratch.Value!;
-        if (!(edited && store.TryLoad(pos, data)))
-            Generator.Generate(data, pos);
+        data.Saved = edited && store.TryLoad(pos, data);
+        if (!data.Saved) Generator.Generate(data, pos);
         data.Compact(); // stone inside an island, or sky, keeps one block instead of 64 KB
         if (data.HasAnyNonAir())
         {

@@ -26,7 +26,10 @@ public static class MeshStages
 /// against their neighbours, so any change on a border they share meshes them again. Streamed terrain is meshed
 /// without its neighbours (<see cref="ChunkVolume.MeshIgnoresNeighbours"/>): one only matters where this chunk has
 /// see-through blocks on the face they share, or where both are all opaque (this one is buried once all six are, and
-/// has no mesh). So that's when a neighbour coming, going or being edited meshes it again.
+/// has no mesh). So that's when a neighbour coming, going or being edited meshes it again. A distant level's chunk
+/// (<see cref="ChunkVolume.IsLowResolutionCopy"/>) doesn't cull its see-through faces against neighbours either: the
+/// one beside it may be hidden under a finer level whose water sits at another height, so its water keeps its sides
+/// on every border and closes the step. Only being buried reads its neighbours.
 /// </summary>
 public sealed class MeshStage(ChunkPipeline pipeline, ChunkMeshes meshes)
     : WorkerStage<PackedChunkMesh>
@@ -50,8 +53,10 @@ public sealed class MeshStage(ChunkPipeline pipeline, ChunkMeshes meshes)
         if (data.IsAllOpaque && change.Opacity) return true; // it may be buried now, or dug out
         int face = Faces.Toward(source.Pos, made.Pos);
         if (!change.Touches(face)) return false;
-        if (pipeline.Grid(made.Grid).Volume is { MeshIgnoresNeighbours: false }) return true;
-        return ChunkVolume.FaceHasTransparent(data, face ^ 1) || data.IsAllOpaque && Blocks(source) is { IsAllOpaque: true };
+        var volume = pipeline.Grid(made.Grid).Volume;
+        if (volume is { MeshIgnoresNeighbours: false }) return true;
+        if (volume is not { IsLowResolutionCopy: true } && ChunkVolume.FaceHasTransparent(data, face ^ 1)) return true;
+        return data.IsAllOpaque && Blocks(source) is { IsAllOpaque: true };
     }
 
     /// <summary>A wanted chunk's blocks, from its volume (null if not there yet, or air). One let go of reads as missing,
@@ -76,7 +81,9 @@ public sealed class MeshStage(ChunkPipeline pipeline, ChunkMeshes meshes)
             around[f] = inputs.Get<ChunkVoxels>(record.Key with { Pos = Faces.Across(record.Key.Pos, f) })?.Data;
             buried &= around[f] is { IsAllOpaque: true };
         }
-        return buried ? null : new Job(data, around, entry.Volume.MeshIgnoresNeighbours, entry.Position);
+        if (buried) return null;
+        if (entry.Volume.IsLowResolutionCopy) Array.Clear(around); // keeps every border's water sides
+        return new Job(data, around, entry.Volume.MeshIgnoresNeighbours, entry.Position);
     }
 
     public override PackedChunkMesh Make(ChunkKey key, StageInputs inputs)
