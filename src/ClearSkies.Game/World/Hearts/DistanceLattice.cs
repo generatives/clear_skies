@@ -4,8 +4,8 @@ namespace ClearSkies.Game.Generation;
 
 /// <summary>
 /// One chunk column's DistanceToSurface on a lattice: how far inside the ground (positive) or outside it (negative) each
-/// corner of its cells <see cref="Cell"/> blocks on a side is, as HeartWorldGenerator works it out (in its scaled space:
-/// across in blocks, up and down VerticalScale times over; clamped to <see cref="Reach"/> either way). A chunk column
+/// corner of its cells <see cref="Cell"/> blocks on a side is, as HeartWorldGenerator works it out (in blocks,
+/// clamped to <see cref="Reach"/> either way). A chunk column
 /// has <see cref="Corners"/> by <see cref="Corners"/> corner columns, shared with its neighbours along its edges, each
 /// from level <see cref="First"/> (world Y First * Cell) up, <see cref="Levels"/> of them. Blocks between corners take
 /// it interpolated (see <see cref="Interpolate"/>).

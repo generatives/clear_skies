@@ -18,7 +18,7 @@ public class DistanceLatticeTests
         int n = 1 << level;
         int px = 11250 / (32 * n), pz = -6250 / (32 * n) - 1;
         long solid = 0, differ = 0;
-        for (int py = 384 / (32 * n); py <= 896 / (32 * n); py++)
+        for (int py = -256 / (32 * n); py <= 896 / (32 * n); py++) // (the whole column, under spawn's plains)
         {
             var pos = new ChunkPosition(px, py, pz);
             var shrunk = new Dictionary<ChunkPosition, ChunkData>();
@@ -49,7 +49,9 @@ public class DistanceLatticeTests
             }
         }
         Assert.True(solid > 10000);
-        Assert.InRange(differ, 0, solid / 50);
+        // Shrinking counts a voxel half full as full, at every step, so the deep walls of the cracks between pieces come
+        // out a little thicker the coarser it gets: level 3 is let off a little more.
+        Assert.InRange(differ, 0, solid / (level < 3 ? 50 : 20));
 
         static bool Ground(BlockId id) => id != BlockId.Air && !BlockRegistry.Get(id).IsCross && !BlockRegistry.Get(id).ShowsInnerFaces;
     }
