@@ -1,3 +1,5 @@
+using System.Runtime.Intrinsics;
+
 namespace ClearSkies.Game.Generation;
 
 /// <summary>
@@ -43,6 +45,14 @@ public sealed partial class Pipes
     private readonly float _width, _area;
     private readonly int[] _faceStart, _other; // the landmass model's LinkStart and LinkTo
     private readonly float[] _rain, _ratio;
+
+    // Faces, for the flow pass (see Step): each one's nodes (B -1 for a drain), its link from A and the link back (-1 for
+    // a drain), the top of its opening and the distance between its nodes; padded to whole vectors.
+    private const int Lanes = 8;
+    private readonly int _faces;
+    private readonly int[] _faceA, _faceB, _faceLink, _faceBack;
+    private readonly float[] _faceTop, _faceLength;
+
     private float _deepest;
 
     public Pipes(CoarseLandmass coarse)
@@ -53,6 +63,23 @@ public sealed partial class Pipes
         _ratio = new float[coarse.Nodes];
         _level = new float[coarse.Nodes];
         _faceStart = coarse.LinkStart; _other = coarse.LinkTo;
+
+        // Faces: each link to a lower-numbered node's is that node's face, so one link of each (a drain's only link).
+        var faces = new List<(int Node, int Link)>(coarse.Links / 2);
+        for (int a = 0; a < coarse.Nodes; a++)
+            for (int k = _faceStart[a]; k < _faceStart[a + 1]; k++)
+                if (_other[k] < 0 || _other[k] > a) faces.Add((a, k));
+        _faces = faces.Count;
+        int padded = (_faces + Lanes - 1) / Lanes * Lanes; // (the last lanes read node 0 and are never written)
+        _faceA = new int[padded]; _faceB = new int[padded]; _faceLink = new int[padded]; _faceBack = new int[padded];
+        _faceTop = new float[padded]; _faceLength = new float[padded];
+        Array.Fill(_faceB, -1); Array.Fill(_faceBack, -1); Array.Fill(_faceLength, 1f);
+        for (int f = 0; f < _faces; f++)
+        {
+            var (a, k) = faces[f];
+            _faceA[f] = a; _faceB[f] = _other[k]; _faceLink[f] = k;
+            _faceBack[f] = coarse.LinkBack[k]; _faceTop[f] = coarse.LinkTop[k]; _faceLength[f] = coarse.LinkLength[k];
+        }
 
         _rain = new float[coarse.Nodes];
         for (int c = 0; c < coarse.Columns; c++) if (coarse.HasLand(c)) _rain[coarse.TopNode(c)] = coarse.Wetness[c];
@@ -148,42 +175,55 @@ public sealed partial class Pipes
         float dt = Math.Min(MostStep, Courant * _width / MathF.Sqrt(G * Math.Clamp(_deepest, 0.01f, WaveDepth)));
         float weir = 0.385f * MathF.Sqrt(2 * G), n2 = Manning * Manning;
 
-        // Each face's flow, worked out by the node on its lower-numbered side (or the node a drain leads from) and written
-        // to both its links.
+        // Each face's flow, written to both its links: eight faces at a time (their nodes read one by one, the sums
+        // done together), each lane doing exactly what one face alone would.
         FlowTime.Start();
-        var flow = Flow; var depth = Depth; var floor = coarse.Floor; var start = _faceStart; var other = _other;
-        var back = coarse.LinkBack; var linkTop = coarse.LinkTop; var linkLength = coarse.LinkLength;
+        var flow = Flow; var depth = Depth; var floor = coarse.Floor;
+        var faceA = _faceA; var faceB = _faceB; var faceLink = _faceLink; var faceBack = _faceBack;
+        var faceTop = _faceTop; var faceLength = _faceLength;
+        int faceCount = _faces;
         float waveDepth = WaveDepth, width = coarse.FaceWidth;
-        ForBlocks(coarse.Nodes, (first, end) =>
+        Vector256<float> vWeir = Vector256.Create(weir * width), vWidth = Vector256.Create(width), vWave = Vector256.Create(waveDepth),
+                         vGdt = Vector256.Create(G * dt), vGdtN2 = Vector256.Create(G * dt * n2), vG = Vector256.Create(G),
+                         vDry = Vector256.Create(1e-4f), vOne = Vector256.Create(1f);
+        ForBlocks(faceCount, (first, end) =>
         {
-            for (int a = first; a < end; a++)
+            Span<float> fa = stackalloc float[Lanes], da = stackalloc float[Lanes], fb = stackalloc float[Lanes],
+                        db = stackalloc float[Lanes], was = stackalloc float[Lanes], q = stackalloc float[Lanes];
+            for (int f0 = first; f0 < end; f0 += Lanes)
             {
-                float floorA = floor[a], upA = floorA + depth[a];
-                for (int k = start[a]; k < start[a + 1]; k++)
+                for (int l = 0; l < Lanes; l++)
                 {
-                    int b = other[k];
-                    if (b >= 0 && b < a) continue; // the other side's
-                    float bottom = b >= 0 ? Math.Max(floorA, floor[b]) : floorA;
-                    float upB = b >= 0 ? floor[b] + depth[b] : float.NegativeInfinity;
-                    float high = Math.Max(upA, upB), low = Math.Min(upA, upB);
-                    float h = Math.Min(high, linkTop[k]) - bottom, q;
-                    if (h <= 1e-4f) q = 0;
-                    else if (low < bottom)
-                    {
-                        // Pours over the edge from the higher side.
-                        q = weir * width * h * MathF.Sqrt(h);
-                        if (upA < upB) q = -q;
-                    }
-                    else
-                    {
-                        h = Math.Min(h, waveDepth);
-                        float old = flow[k] / width, slope = (upB - upA) / linkLength[k];
-                        float next = (old - G * dt * h * slope) / (1 + G * dt * n2 * Math.Abs(old) / (h * h * ExactMath.Cbrt(h)));
-                        float most = h * MathF.Sqrt(G * h); // no faster than a wave
-                        q = Math.Clamp(next, -most, most) * width;
-                    }
-                    flow[k] = q;
-                    if (b >= 0) flow[back[k]] = -q;
+                    int f = f0 + l, a = faceA[f], b = faceB[f];
+                    fa[l] = floor[a]; da[l] = depth[a];
+                    fb[l] = b >= 0 ? floor[b] : float.NegativeInfinity; db[l] = b >= 0 ? depth[b] : 0f;
+                    was[l] = f < faceCount ? flow[faceLink[f]] : 0f;
+                }
+                var floorA = Vector256.Create<float>(fa); var floorB = Vector256.Create<float>(fb);
+                var upA = floorA + Vector256.Create<float>(da); var upB = floorB + Vector256.Create<float>(db);
+                var bottom = Vector256.Max(floorA, floorB);
+                var high = Vector256.Max(upA, upB); var low = Vector256.Min(upA, upB);
+                var h = Vector256.Min(high, Vector256.Create<float>(faceTop.AsSpan(f0, Lanes))) - bottom;
+                if (Vector256.LessThanOrEqualAll(h, vDry)) q.Clear(); // (as most faces are: air, and dry ground)
+                else
+                {
+                    // Pours over the edge from the higher side.
+                    var poured = vWeir * h * Vector256.Sqrt(h);
+                    poured = Vector256.ConditionalSelect(Vector256.LessThan(upA, upB), -poured, poured);
+                    // Else pushed by the slope, held back by friction, no faster than a wave.
+                    var deep = Vector256.Min(h, vWave);
+                    var old = Vector256.Create<float>(was) / vWidth;
+                    var slope = (upB - upA) / Vector256.Create<float>(faceLength.AsSpan(f0, Lanes));
+                    var next = (old - vGdt * deep * slope) / (vOne + vGdtN2 * Vector256.Abs(old) / (deep * deep * ExactMath.Cbrt(deep)));
+                    var most = deep * Vector256.Sqrt(vG * deep);
+                    var pushed = Vector256.Min(Vector256.Max(next, -most), most) * vWidth;
+                    Vector256.ConditionalSelect(Vector256.LessThanOrEqual(h, vDry), Vector256<float>.Zero, Vector256.ConditionalSelect(Vector256.LessThan(low, bottom), poured, pushed)).CopyTo(q);
+                }
+                for (int l = 0; l < Lanes && f0 + l < faceCount; l++)
+                {
+                    int f = f0 + l;
+                    flow[faceLink[f]] = q[l];
+                    if (faceBack[f] >= 0) flow[faceBack[f]] = -q[l];
                 }
             }
         });
