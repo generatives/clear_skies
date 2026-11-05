@@ -81,6 +81,8 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
 
     // Chunks waiting for their first bake (see FirstBakeStage), and how many of the nearest are looked at a frame.
     private readonly EntitySet _bakeFirst, _cameras;
+    /// <summary>A chunk waiting for its first bake had its light maps listed (see <see cref="FirstBakeStage.Baked"/>).</summary>
+    public event Action<Entity>? FirstBaked;
     private readonly List<Entity> _nearestToBake = new();
     private const int FirstBakesLooked = 64;
     // For the panel: every chunk marked to be baked first (some may be left out of _bakeFirst), and of last frame's
@@ -219,15 +221,15 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
             kept++;
         }
         _draws.RemoveRange(kept, _draws.Count - kept);
-        // Then chunks waiting for their first bake, in view or not, nearest first, with what's left of the budget. One
-        // listed (or with nothing to bake) is let go of at once: it waits only for its stage to be asked again, and kept,
-        // the nearest would be looked at each frame with nothing to bake while those behind them waited.
+        // Then chunks waiting for their first bake, in view or not, nearest first, with what's left of the budget; each
+        // one listed (or with nothing to bake) is let go of, and its stage told.
         NearestChunks.Select(_bakeFirst, _cameras, FirstBakesLooked, _nearestToBake);
         _firstListed = _firstNothing = _firstNoStore = 0;
         foreach (var e in _nearestToBake)
         {
             if (!BakeFirstTime(in e.Get<ChunkRenderData>())) break;
             e.Remove<BakeFirst>();
+            FirstBaked?.Invoke(e);
         }
         Array.Clear(_levelCounts);
         foreach (ref readonly var d in CollectionsMarshal.AsSpan(_draws))

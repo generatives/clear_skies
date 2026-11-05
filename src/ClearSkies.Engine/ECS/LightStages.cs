@@ -17,8 +17,9 @@ namespace ClearSkies.Engine.ECS;
 public static class LightStages
 {
     /// <summary>Adds the stages to the pipeline, after <see cref="MeshStages"/> (before it wants any chunk). The terrain
-    /// says what's in range, and known air, for a coarse chunk's swap with the finer chunks under it.</summary>
-    public static void Add(
+    /// says what's in range, and known air, for a coarse chunk's swap with the finer chunks under it. Returns the first
+    /// bake, for the chunk renderer to say when it's baked a chunk.</summary>
+    public static FirstBakeStage Add(
         ChunkPipelineSystem system, GpuResidencySystem residency, GpuLightSystem light, Renderer renderer, UploadStage upload,
         Time time, ChunkLoadSystem terrain)
     {
@@ -39,6 +40,7 @@ public static class LightStages
             pipeline.Invalidate(over, cover);
         };
         pipeline.Add(new DropBlocksStage(pipeline, terrain.Voxels, upload, store));
+        return firstBake;
     }
 }
 
@@ -108,8 +110,8 @@ public sealed class FirstLightStage(ChunkPipeline pipeline, GpuLightSystem light
 public struct BakeFirst;
 
 /// <summary>Has a lit chunk's light maps baked once, in view or not: it's marked <see cref="BakeFirst"/>, which
-/// <see cref="ChunkRenderSystem"/> bakes nearest first with what's left of its budget, taking the mark off once it's
-/// listed the bake; asked again, it's done once each of its meshes has been baked. Again for each new mesh.</summary>
+/// <see cref="ChunkRenderSystem"/> bakes nearest first with what's left of its budget, taking the mark off and saying so
+/// (<see cref="Baked(Entity)"/>) once it's listed the bake. Again for each new mesh.</summary>
 public sealed class FirstBakeStage(ChunkPipeline pipeline, Renderer renderer, UploadStage upload, FirstLightStage firstLight)
     : ExternalStage
 {
@@ -129,7 +131,16 @@ public sealed class FirstBakeStage(ChunkPipeline pipeline, Renderer renderer, Up
             return StageResult.Done();
         }
         e.Set<BakeFirst>();
-        return StageResult.Waiting;
+        return StageResult.Started;
+    }
+
+    /// <summary>A chunk marked <see cref="BakeFirst"/> had its light maps listed for baking: done, unless one couldn't be
+    /// (it's not in the light store yet), when it's marked again.</summary>
+    public void Baked(DefaultEcs.Entity e)
+    {
+        if (!e.Has<InPipeline>() || !e.Has<ChunkRenderData>()) return;
+        if (Baked(in e.Get<ChunkRenderData>())) pipeline.Finished(e.Get<InPipeline>().Key, this);
+        else e.Set<BakeFirst>();
     }
 
     private bool Baked(in ChunkRenderData rd)

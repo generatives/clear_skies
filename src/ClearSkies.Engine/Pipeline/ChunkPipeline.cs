@@ -211,7 +211,7 @@ public sealed class ChunkPipeline
         bool made = slot.Version > 0;
         if (!slot.Is(SlotFlags.Stale | SlotFlags.Queued | SlotFlags.Running)) slot.Since = Stopwatch.GetTimestamp();
         slot.Version = 0;
-        slot.Flags = SlotFlags.Stale | (slot.Flags & SlotFlags.Running);
+        slot.Flags = SlotFlags.Stale | (slot.Is(SlotFlags.Started) ? 0 : slot.Flags & SlotFlags.Running); // a system's is let go of
         if (made) Propagate(record, stage, Change.All, acceptsMissingOnly: true);
     }
 
@@ -592,6 +592,7 @@ public sealed class ChunkPipeline
         var result = stage.Request(record);
         _inStages += Stopwatch.GetTimestamp() - t;
         if (result.Finished) Finish(record, stage, result.Output, result.Change, result.Changed);
+        if (result.CallsBack) { record.At(stage.Id).Set(SlotFlags.Started, true); return true; }
         if (result.Again == 0) return result.Finished;
         if (!result.Finished)
         {
@@ -601,6 +602,15 @@ public sealed class ChunkPipeline
         if (double.IsFinite(result.Again))
             _askAgain.Enqueue((record, stage), Clock() + result.Again);
         return true;
+    }
+
+    /// <summary>An external stage's system has done what it was asked for on the chunk (see
+    /// <see cref="StageResult.Started"/>). Nothing, unless it's waiting on it: a chunk dropped, or asked again since.</summary>
+    public void Finished(ChunkKey key, ExternalStage stage, object? output = null)
+    {
+        if (Get(key) is not { } record || !record.Has(stage.Id) || !record.At(stage.Id).Is(SlotFlags.Started)) return;
+        record.At(stage.Id).Set(SlotFlags.Started, false);
+        Finish(record, stage, output, Change.All);
     }
 
     // External stages to ask again, by when (see StageResult.Again).
@@ -668,6 +678,7 @@ public sealed class ChunkPipeline
         ref var slot = ref record.At(stage);
         if (!slot.Is(SlotFlags.Stale | SlotFlags.Queued | SlotFlags.Running)) slot.Since = Stopwatch.GetTimestamp(); // was done
         slot.Set(SlotFlags.Stale, true);
+        if (slot.Is(SlotFlags.Started)) slot.Set(SlotFlags.Started | SlotFlags.Running, false); // asked again, for what's new
         if (urgent && !slot.Is(SlotFlags.Urgent))
         {
             slot.Set(SlotFlags.Urgent, true);
