@@ -414,8 +414,12 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             {
                 int y0 = by0 + w * c, y1 = y0 + c - 1, top = System.Math.Min(surface, y1);
                 if (2 * (top - System.Math.Max(lo, y0) + 1) < c) continue;
+                // Depth is counted from where the coarse surface is: the voxel boundary nearest the top, half a voxel
+                // over this one's top when the one above is left open. So the top voxel shows the surface block, as
+                // full detail's top does, not the dirt under it.
+                int at = System.Math.Min(top + c / 2, hi);
                 if (top > hi) { if (data.Get(u, w, v) == BlockId.Air) data.Set(u, w, v, BlockId.Water); }
-                else data.Set(u, w, v, under && top >= hi - c ? bed : ContinentTerrain.Block(top, hi, strata, patch, bare, biome, dry));
+                else data.Set(u, w, v, under && top >= hi - c ? bed : ContinentTerrain.Block(at, hi, strata, patch, bare, biome, dry));
             }
             if (under) continue;
 
