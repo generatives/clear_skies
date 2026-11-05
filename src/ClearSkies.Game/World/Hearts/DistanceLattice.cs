@@ -4,16 +4,23 @@ namespace ClearSkies.Game.Generation;
 
 /// <summary>
 /// One chunk column's DistanceToSurface on a lattice: how far inside the ground (positive) or outside it (negative) each
-/// corner of its cells <see cref="Cell"/> blocks on a side is, as HeartWorldGenerator works it out (in its scaled space:
-/// across in blocks, up and down VerticalScale times over; clamped to <see cref="Reach"/> either way). A chunk column
-/// has <see cref="Corners"/> by <see cref="Corners"/> corner columns, shared with its neighbours along its edges, each
-/// from level <see cref="First"/> (world Y First * Cell) up, <see cref="Levels"/> of them. Blocks between corners take
-/// it interpolated (see <see cref="Interpolate"/>).
+/// corner of its cells <see cref="Cell"/> blocks on a side is, as HeartWorldGenerator works it out (in blocks, clamped
+/// to <see cref="Reach"/> either way). A chunk column has <see cref="Corners"/> by <see cref="Corners"/> corner columns
+/// of its own, shared with its neighbours along its edges, and a ring of one more round them (so <see cref="Side"/> by
+/// <see cref="Side"/> in all), each from level <see cref="First"/> (world Y First * Cell) up, <see cref="Levels"/> of
+/// them. Blocks between corners take it interpolated smoothly across (see <see cref="Interpolate"/>), so the ground has
+/// no 8-block facets.
 /// </summary>
 internal sealed class DistanceLattice
 {
     public const int Cell = 8;
     public const int Corners = ChunkData.Size / Cell + 1;
+
+    /// <summary>Corner columns a side, with the ring round the chunk column's own: corner (i, k), i and k from -1 to
+    /// Corners, is column <see cref="Index"/>(i, k).</summary>
+    public const int Side = Corners + 2;
+
+    public static int Index(int i, int k) => i + 1 + Side * (k + 1);
 
     /// <summary>How far either way a distance is kept: well over a cell, so interpolation between corners near the surface
     /// is never cut short.</summary>
@@ -24,19 +31,17 @@ internal sealed class DistanceLattice
     public int First { get; }
     public int Levels { get; }
     private readonly float[] _distance; // corner column c's levels from c * Levels
-    private readonly float[] _rough = new float[Corners * Corners]; // corner column c's (see Roughness)
-    private readonly bool[] _byAd = new bool[(Corners - 1) * (Corners - 1)]; // each cell's split: a-d, or else b-c
+    private readonly float[] _rough = new float[Side * Side]; // corner column c's (see Roughness)
 
     /// <summary>Chunk column (chunkX, chunkZ)'s, from level first, levels high: its distances to fill in (see
-    /// <see cref="Column"/>), then <see cref="Split"/>.</summary>
+    /// <see cref="Column"/>).</summary>
     public DistanceLattice(int chunkX, int chunkZ, int first, int levels)
     {
         ChunkX = chunkX; ChunkZ = chunkZ; First = first; Levels = levels;
-        _distance = new float[Corners * Corners * levels];
+        _distance = new float[Side * Side * levels];
     }
 
-    /// <summary>Corner column c's distances (c = i + Corners * k, i along X and k along Z, from the chunk column's
-    /// corner), bottom up.</summary>
+    /// <summary>Corner column c's distances (see <see cref="Index"/>), bottom up.</summary>
     public Span<float> Column(int c) => _distance.AsSpan(c * Levels, Levels);
 
     /// <summary>How rough corner column c's top is, 0 (smooth) to 1, as the landscape that wore it says (see
@@ -48,48 +53,57 @@ internal sealed class DistanceLattice
     {
         int i = Math.Min(lx / Cell, Corners - 2), k = Math.Min(lz / Cell, Corners - 2);
         float tx = (lx - i * Cell) / (float)Cell, tz = (lz - k * Cell) / (float)Cell;
-        float near = _rough[i + Corners * k] + (_rough[i + 1 + Corners * k] - _rough[i + Corners * k]) * tx;
-        float far = _rough[i + Corners * (k + 1)] + (_rough[i + 1 + Corners * (k + 1)] - _rough[i + Corners * (k + 1)]) * tx;
+        float near = _rough[Index(i, k)] + (_rough[Index(i + 1, k)] - _rough[Index(i, k)]) * tx;
+        float far = _rough[Index(i, k + 1)] + (_rough[Index(i + 1, k + 1)] - _rough[Index(i, k + 1)]) * tx;
         return near + (far - near) * tz;
     }
 
-    /// <summary>Picks each cell's diagonal (see <see cref="Interpolate"/>), once its distances are filled in. It isn't
-    /// changed after that, so it can be shared between threads.</summary>
-    public void Split()
+    /// <summary>Block column (lx, lz)'s distances, per level: the corner columns round its cell blended, four by four,
+    /// on Catmull-Rom curves across and along. Unlike blending a cell's own corners, that's smooth from cell to cell (and
+    /// chunk column to chunk column, the ring round it being its neighbours' corners), so a slope doesn't show as flat
+    /// facets 8 blocks across. Blended along z first, a row of corner columns at a time, kept in
+    /// <paramref name="rows"/> for the next block column in the same row.</summary>
+    public void Interpolate(int lx, int lz, Span<float> into, Rows rows)
     {
-        for (int k = 0; k < Corners - 1; k++)
-        for (int i = 0; i < Corners - 1; i++)
+        int i = Math.Min(lx / Cell, Corners - 2);
+        if (rows.Lattice != this || rows.Lz != lz)
         {
-            var a = Column(i + Corners * k);
-            var b = Column(i + 1 + Corners * k);
-            var c = Column(i + Corners * (k + 1));
-            var d = Column(i + 1 + Corners * (k + 1));
-            float ad = 0, bc = 0;
-            for (int j = 0; j < Levels; j++) { ad += a[j] + d[j]; bc += b[j] + c[j]; }
-            _byAd[i + (Corners - 1) * k] = ad <= bc;
+            rows.Lattice = this; rows.Lz = lz;
+            if (rows.Blend.Length < Side * Levels) rows.Blend = new float[Side * Levels];
+            int k = Math.Min(lz / Cell, Corners - 2);
+            Span<float> wz = stackalloc float[4];
+            Weights((lz - k * Cell) / (float)Cell, wz);
+            for (int c = 0; c < Side; c++)
+            {
+                var blend = rows.Blend.AsSpan(c * Levels, Levels);
+                var a = Column(Index(c - 1, k - 1)); var b = Column(Index(c - 1, k));
+                var d = Column(Index(c - 1, k + 1)); var e = Column(Index(c - 1, k + 2));
+                for (int j = 0; j < Levels; j++) blend[j] = wz[0] * a[j] + wz[1] * b[j] + wz[2] * d[j] + wz[3] * e[j];
+            }
         }
+        Span<float> wx = stackalloc float[4];
+        Weights((lx - i * Cell) / (float)Cell, wx);
+        // (Ring column c is corner i = c - 1, so corners i - 1 .. i + 2 are rows i .. i + 3.)
+        var r0 = rows.Blend.AsSpan(i * Levels, Levels); var r1 = rows.Blend.AsSpan((i + 1) * Levels, Levels);
+        var r2 = rows.Blend.AsSpan((i + 2) * Levels, Levels); var r3 = rows.Blend.AsSpan((i + 3) * Levels, Levels);
+        for (int j = 0; j < Levels; j++) into[j] = wx[0] * r0[j] + wx[1] * r1[j] + wx[2] * r2[j] + wx[3] * r3[j];
     }
 
-    /// <summary>Block column (lx, lz)'s distances, per level: its cell's corner columns' blended. Each cell is split
-    /// into two triangles along the diagonal between its two lower corners (the less ground over them), and a block
-    /// column blends its triangle's three: a valley running diagonally keeps its floor across the cell, where blending
-    /// all four would raise a saddle from the banks in its middle.</summary>
-    public void Interpolate(int lx, int lz, Span<float> into)
+    /// <summary>What <see cref="Interpolate"/> keeps between block columns in the same row: a worker's own.</summary>
+    public sealed class Rows
     {
-        int i = lx / Cell, k = lz / Cell, cell = i + (Corners - 1) * k;
-        float tx = (lx - i * Cell) / (float)Cell, tz = (lz - k * Cell) / (float)Cell;
-        var a = Column(i + Corners * k);
-        var b = Column(i + 1 + Corners * k);
-        var c = Column(i + Corners * (k + 1));
-        var d = Column(i + 1 + Corners * (k + 1));
-        float wa, wb, wc, wd;
-        if (_byAd[cell])
-        {
-            if (tx >= tz) { wa = 1 - tx; wb = tx - tz; wc = 0; wd = tz; }
-            else { wa = 1 - tz; wb = 0; wc = tz - tx; wd = tx; }
-        }
-        else if (tx + tz <= 1) { wa = 1 - tx - tz; wb = tx; wc = tz; wd = 0; }
-        else { wa = 0; wb = 1 - tz; wc = 1 - tx; wd = tx + tz - 1; }
-        for (int j = 0; j < Levels; j++) into[j] = wa * a[j] + wb * b[j] + wc * c[j] + wd * d[j];
+        public DistanceLattice? Lattice;
+        public int Lz;
+        public float[] Blend = Array.Empty<float>();
+    }
+
+    /// <summary>Catmull-Rom weights of the four corners round a point t (0-1) of the way from the second to the third.</summary>
+    private static void Weights(float t, Span<float> w)
+    {
+        float t2 = t * t, t3 = t2 * t;
+        w[0] = 0.5f * (-t3 + 2f * t2 - t);
+        w[1] = 0.5f * (3f * t3 - 5f * t2 + 2f);
+        w[2] = 0.5f * (-3f * t3 + 4f * t2 + t);
+        w[3] = 0.5f * (t3 - t2);
     }
 }

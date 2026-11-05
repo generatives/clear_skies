@@ -131,8 +131,8 @@ public sealed class ContinentTerrain
     private const float DellDepth = 14f, DellFrom = 0.25f, DellFull = 0.6f;
     private const float HighRise = 250f, RangeRise = 500f, MinorRise = 320f, KnollRise = 260f, CragShare = 0.25f;
 
-    /// <summary>The plains' average height: a floor of land under the broken-up highlands and ranges, with a sparse
-    /// underworld below it, open caves hundreds of blocks high, down to the cloud sea.</summary>
+    /// <summary>The plains' average height: a floor of land under the broken-up highlands and ranges, with open sky
+    /// under it, down to the cloud sea.</summary>
     public const float PlainsLevel = 450f;
 
     /// <summary>How far the rock layers at column (x, z) are shifted up or down, for <see cref="Block"/>.</summary>
