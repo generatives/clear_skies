@@ -63,9 +63,10 @@ public sealed record LaunchOptions
     /// </summary>
     public bool Headless { get; init; }
 
-    /// <summary>--piece-size N: pieces of land N times as wide (and tall) as the hearts grid's own (see
-    /// HeartGrid.WidenPieces). 2 by default.</summary>
-    public float PieceSize { get; init; } = 2f;
+    /// <summary>--piece-width W, --piece-height H: how wide and tall pieces of land are, in blocks (see
+    /// HeartGrid.SetPieceSize).</summary>
+    public float PieceWidth { get; init; } = ClearSkies.Game.Generation.HeartGrid.DefaultPieceWidth;
+    public float PieceHeight { get; init; } = ClearSkies.Game.Generation.HeartGrid.DefaultPieceHeight;
 
     /// <summary>--flight-test: fly once the world has loaded, then quit.</summary>
     public bool FlightTest { get; init; }
@@ -90,7 +91,8 @@ public sealed record LaunchOptions
         if (int.TryParse(Value("--lod-levels"), out int levels)) o = o with { LodLevels = System.Math.Clamp(levels, 0, 2) };
         if (float.TryParse(Value("--lod"), NumberStyles.Float, CultureInfo.InvariantCulture, out float lod)) o = o with { LodDistance = lod };
         if (args.Contains("--no-lod")) o = o with { LodLevels = 0 };
-        if (Value("--piece-size") is { } piece) o = o with { PieceSize = float.Parse(piece, CultureInfo.InvariantCulture) };
+        if (Value("--piece-width") is { } width) o = o with { PieceWidth = float.Parse(width, CultureInfo.InvariantCulture) };
+        if (Value("--piece-height") is { } height) o = o with { PieceHeight = float.Parse(height, CultureInfo.InvariantCulture) };
         if (Value("--view-distance") is { } view) o = o with { ViewDistance = float.Parse(view, CultureInfo.InvariantCulture) };
         return o with { FlightTest = args.Contains("--flight-test") };
     }
