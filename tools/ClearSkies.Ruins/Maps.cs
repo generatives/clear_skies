@@ -6,7 +6,7 @@ public static class Maps
 {
     private static readonly (byte R, byte G, byte B) Sky = (18, 22, 34), Gap = (44, 50, 78), Partial = (72, 74, 82),
         Solid = (104, 106, 112), Hall = (222, 212, 186), Avenue = (250, 242, 214), Hub = (255, 200, 90),
-        Bridge = (255, 128, 40), Core = (60, 220, 230), Entrance = (90, 255, 120);
+        Bridge = (255, 128, 40), Outside = (54, 60, 78), Core = (60, 220, 230), Entrance = (90, 255, 120);
     private static readonly (byte R, byte G, byte B)[] Uses = [(196, 146, 96), (156, 116, 206), (206, 76, 76)];
 
     /// <summary>The whole landmass, a pixel per cell: land grey, other islands darker, the region tinted.</summary>
@@ -52,7 +52,11 @@ public static class Maps
         for (int j = 0; j < site.Nz; j++)
         for (int i = 0; i < site.Nx; i++)
         {
-            var c = site.At(floor, i, j) switch
+            var g = site.At(floor, i, j);
+            // Outside the ruin: the island's land, faint, so the ruin's extent shows against it.
+            int li = (site.X0 - site.Sample.X0) / RuinSite.Cell + i, lj = (site.Z0 - site.Sample.Z0) / RuinSite.Cell + j;
+            bool land = g == RuinSite.Ground.Out && site.Sample.Land[li + site.Sample.Nx * lj];
+            var c = land ? Outside : g switch
             {
                 RuinSite.Ground.Out => Sky, RuinSite.Ground.Open => Gap, RuinSite.Ground.Partial => Partial, _ => Solid,
             };

@@ -45,6 +45,8 @@ public sealed class RuinSite
     public const int BridgeCells = 8;
     /// <summary>A drop (blocks) between neighbouring cells that parts pieces: a crack's edge, with land far below.</summary>
     public const int Cliff = 16;
+    /// <summary>Cells of border the grid keeps round the ruin (so maps show the land round it).</summary>
+    public const int Border = 24;
     /// <summary>Cells across a blob of the growth's rough cost.</summary>
     public const int RoughScale = 24;
 
@@ -256,7 +258,7 @@ public sealed class RuinSite
             int i = c % fnx, j = c / fnx;
             ri0 = Math.Min(ri0, i); rj0 = Math.Min(rj0, j); ri1 = Math.Max(ri1, i); rj1 = Math.Max(rj1, j);
         }
-        ri0 = Math.Max(0, ri0 - 1); rj0 = Math.Max(0, rj0 - 1); ri1 = Math.Min(fnx - 1, ri1 + 1); rj1 = Math.Min(fnz - 1, rj1 + 1);
+        ri0 = Math.Max(0, ri0 - Border); rj0 = Math.Max(0, rj0 - Border); ri1 = Math.Min(fnx - 1, ri1 + Border); rj1 = Math.Min(fnz - 1, rj1 + Border);
         Nx = ri1 - ri0 + 1; Nz = rj1 - rj0 + 1;
         X0 = sample.X0 + ri0 * Cell; Z0 = sample.Z0 + rj0 * Cell;
         int n = Nx * Nz;
