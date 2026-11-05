@@ -23,8 +23,8 @@ namespace ClearSkies.Game.Startup;
 /// </summary>
 public sealed class GameWorld
 {
-    /// <summary>The islands stream from layer 0 (blocks -256..1792: HeartGrid's WorldBottom..WorldTop).</summary>
-    private const int MinChunkY = 0;
+    /// <summary>The islands stream from layer -7 (layers -15..48, blocks -480..1568: HeartGrid's WorldBottom..WorldTop).</summary>
+    private const int MinChunkY = -7;
 
     /// <param name="budget">What limits how much of the world loads.</param>
     /// <param name="chunkPreparer">Work on each loaded chunk as it loads (the view's packing for the GPU).</param>

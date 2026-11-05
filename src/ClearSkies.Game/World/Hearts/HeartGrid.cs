@@ -21,7 +21,7 @@ public static class HeartGrid
 {
     /// <summary>How wide a heart's cell is, and so its piece, and how deep a piece hangs under its top, by default
     /// (blocks).</summary>
-    public const float DefaultPieceWidth = 1000f, DefaultColumnDepth = 600f;
+    public const float DefaultPieceWidth = 1000f, DefaultColumnDepth = 800f;
 
     /// <summary>How wide a heart's cell is (blocks).</summary>
     public static float PieceWidth { get; private set; } = DefaultPieceWidth;
@@ -30,7 +30,7 @@ public static class HeartGrid
     /// 1 + DepthSpread/2 of it.</summary>
     public static float ColumnDepth { get; private set; } = DefaultColumnDepth;
 
-    private const float DepthSpread = 0.3f;
+    private const float DepthSpread = 0.1f;
 
     /// <summary>Sets how wide pieces are and how deep they hang (blocks; --piece-width, --column-depth), before any
     /// world is generated. (Landmasses stay as they are, so wide pieces near a border are cut off straight by it.)</summary>
@@ -46,16 +46,17 @@ public static class HeartGrid
     /// too close together.</summary>
     private const float Jitter = 0.8f;
 
-    /// <summary>The streamed world's vertical band, in blocks (chunk layers -8..55): nothing generates outside it.</summary>
-    public const int WorldBottom = -256;
-    public const int WorldTop    = 1792;
+    /// <summary>The streamed world's vertical band, in blocks (chunk layers -15..48, see GameWorld): nothing generates
+    /// outside it. Low enough that the plains have a full ColumnDepth under them.</summary>
+    public const int WorldBottom = -480;
+    public const int WorldTop    = 1568;
 
     /// <summary>The lowest an island may reach: above the hearts world's cloud sea (<see cref="CloudSeaAltitude"/>).</summary>
-    internal const float LowestBottom = WorldBottom + 56f;
+    internal const float LowestBottom = WorldBottom + 16f;
 
     /// <summary>The hearts world's cloud sea (see SkySettings.CloudSeaAltitude): its layer ends a good way below the
     /// lowest islands, so none sits in it.</summary>
-    public const float CloudSeaAltitude = -300f;
+    public const float CloudSeaAltitude = WorldBottom - 60f;
 
     // Alive by height: FloorChance up to FloorTop, easing over FloorFade to UpperChance (in the middle of a cluster),
     // and thinning further to half of that ThinOver blocks higher. Inside a mountain range, MountainChance instead,

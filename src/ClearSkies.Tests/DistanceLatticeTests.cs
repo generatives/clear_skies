@@ -18,7 +18,7 @@ public class DistanceLatticeTests
         int n = 1 << level;
         int px = 11250 / (32 * n), pz = -6250 / (32 * n) - 1;
         long solid = 0, differ = 0;
-        for (int py = -256 / (32 * n); py <= 896 / (32 * n); py++) // (the whole column, under spawn's plains)
+        for (int py = -480 / (32 * n); py <= 896 / (32 * n); py++) // (the whole column, under spawn's plains)
         {
             var pos = new ChunkPosition(px, py, pz);
             var shrunk = new Dictionary<ChunkPosition, ChunkData>();

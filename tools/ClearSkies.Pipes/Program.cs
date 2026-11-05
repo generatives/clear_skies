@@ -8,7 +8,7 @@ using StbImageWriteSharp;
 // top-down map of the result.
 //
 //   dotnet run -c Release --project tools/ClearSkies.Pipes -- [--seed 1337] [--cell 1 -1] [--size 8] [--hours 6]
-//       [--piece-width 1000] [--column-depth 600] [--rain 3e-4] [--soak 1.5e-4] [--manning 0.035] [--no-fill] [--report 600] [--out pipes-out] [--snapshots]
+//       [--piece-width 1000] [--column-depth 800] [--rain 3e-4] [--soak 1.5e-4] [--manning 0.035] [--no-fill] [--report 600] [--out pipes-out] [--snapshots]
 //
 // With no --cell it takes the spawn's landmass. It runs until --hours of simulated time pass, or until as much water
 // leaves the land (over its edges and into the ground) as rains on it, within 1%. --no-fill starts the land dry instead
