@@ -64,13 +64,18 @@ public static class RuinLayout
         sw.Restart();
 
         int n = site.Nx * site.Nz;
+        var floorHalls = new List<Part>[site.Floors];
+        for (int f = 0; f < site.Floors; f++)
+        {
+            floorHalls[f] = [];
+            foreach (var (rect, kind) in sk.Halls) ClipHall(site, f, rect, kind, floorHalls[f]);
+        }
+        JoinFloors(site, floorHalls, cores);
         var occupied = new bool[n];
-        var halls = new List<Part>();
         for (int f = 0; f < site.Floors; f++)
         {
             Array.Clear(occupied);
-            halls.Clear();
-            foreach (var (rect, kind) in sk.Halls) ClipHall(site, f, rect, kind, halls);
+            var halls = floorHalls[f];
             foreach (var h in halls) Mark(occupied, site.Nx, h.Rect);
             foreach (var c in cores)
                 if (f >= c.Floor && f <= c.LastFloor) Mark(occupied, site.Nx, c.Rect);
@@ -89,13 +94,8 @@ public static class RuinLayout
         for (int i = r.I0; i < r.I1; i++) occupied[i + nx * j] = true;
     }
 
-    /// <summary>Extra entrances: cores whose top floor is at most ExtraEntranceDepth blocks under the ground over them,
-    /// at least ExtraEntranceSpacing cells from every other entrance.</summary>
-    public const int ExtraEntranceDepth = 24, ExtraEntranceSpacing = 100;
-
-    /// <summary>Stair cores, each reaching down through every floor from the top while its ground isn't open: the main
-    /// entrance at the site's <see cref="RuinSite.Centre"/> (joined to the nearest hall), then one on a hall about every
-    /// CoreSpacing square. Cores where the ground over the top floor is thin become extra entrances.</summary>
+    /// <summary>Stair cores, each reaching from the first floor it has ground on down while its ground isn't open: the
+    /// site's entrances (each joined to the nearest hall on its piece), then one on a hall about every CoreSpacing square.</summary>
     private static List<Part> PlaceCores(RuinSite site, Skeleton sk, RuinPlan plan)
     {
         int nx = site.Nx, nz = site.Nz, half = CoreSize / 2;
@@ -107,16 +107,21 @@ public static class RuinLayout
                 if (site.At(f, i, j) is RuinSite.Ground.Out or RuinSite.Ground.Open) return false;
             return true;
         }
-        Part Core(int i, int j, bool entrance)
+        Part? Core(int i, int j, int top, bool entrance)
         {
             var rect = new CellRect(i - half, j - half, i - half + CoreSize, j - half + CoreSize);
-            int last = 0;
+            while (top < site.Floors && !Fits(top, rect)) top++;
+            if (top >= site.Floors) return null;
+            int last = top;
             while (last + 1 < site.Floors && Fits(last + 1, rect)) last++;
-            return new Part { Rect = rect, Kind = PartKind.Core, Floor = 0, LastFloor = (byte)last, District = -1, Entrance = entrance };
+            return new Part { Rect = rect, Kind = PartKind.Core, Floor = (byte)top, LastFloor = (byte)last, District = -1, Entrance = entrance };
         }
-        int ei = site.Centre % nx, ej = site.Centre / nx;
-        LinkToHalls(site, sk, ei, ej, c => site.Region[c]);
-        cores.Add(Core(ei, ej, true));
+        foreach (var (cell, floor) in site.Entrances)
+        {
+            int ei = cell % nx, ej = cell / nx, p = site.PieceOf[cell];
+            LinkToHalls(site, sk, ei, ej, c => site.Region[c] && (p < 0 || site.PieceOf[c] == p));
+            if (Core(ei, ej, floor, true) is { } e) cores.Add(e);
+        }
 
         var hall = HallMask(site, sk);
         for (int bj = 0; bj < nz; bj += CoreSpacing)
@@ -127,35 +132,183 @@ public static class RuinLayout
             for (int i = bi; i < Math.Min(nx, bi + CoreSpacing); i++)
             {
                 int c = i + nx * j;
-                if (!hall[c] || site.At(0, i, j) != RuinSite.Ground.Solid) continue;
+                if (!hall[c] || !SolidSomewhere(site, i, j)) continue;
                 int d = (i - ci) * (i - ci) + (j - cj) * (j - cj);
                 if (d < bestD) { bestD = d; best = c; }
             }
             if (best < 0) continue;
             int bi2 = best % nx, bj2 = best / nx;
-            if ((bi2 - ei) * (bi2 - ei) + (bj2 - ej) * (bj2 - ej) < CoreSpacing * CoreSpacing / 4) continue;
-            var core = Core(bi2, bj2, false);
-            if (!Fits(0, core.Rect)) continue;
-            cores.Add(core);
-        }
-
-        // Extra entrances, shallowest first.
-        int ceiling = site.FloorY(0) + RuinSite.FloorPitch - 1;
-        int Depth(Part p)
-        {
-            int surface = int.MinValue;
-            for (int j = p.Rect.J0; j < p.Rect.J1; j++)
-            for (int i = p.Rect.I0; i < p.Rect.I1; i++) surface = Math.Max(surface, site.Surface[i + nx * j]);
-            return surface - ceiling;
-        }
-        foreach (int k in Enumerable.Range(1, cores.Count - 1).OrderBy(k => Depth(cores[k])))
-        {
-            if (Depth(cores[k]) > ExtraEntranceDepth) break;
-            var r = cores[k].Rect;
-            if (cores.Any(o => o.Entrance && Math.Abs(o.Rect.I0 - r.I0) + Math.Abs(o.Rect.J0 - r.J0) < ExtraEntranceSpacing)) continue;
-            var e = cores[k]; e.Entrance = true; cores[k] = e;
+            if (cores.Any(o => o.Entrance && (o.Rect.I0 + half - bi2) * (o.Rect.I0 + half - bi2) + (o.Rect.J0 + half - bj2) * (o.Rect.J0 + half - bj2)
+                    < CoreSpacing * CoreSpacing / 4)) continue;
+            if (Core(bi2, bj2, 0, false) is { } core && core.LastFloor > core.Floor) cores.Add(core);
         }
         return cores;
+    }
+
+    private static bool SolidSomewhere(RuinSite site, int i, int j)
+    {
+        for (int f = 0; f < site.Floors; f++) if (site.At(f, i, j) == RuinSite.Ground.Solid) return true;
+        return false;
+    }
+
+    private static bool Fits(RuinSite site, int f, CellRect r)
+    {
+        for (int j = r.J0; j < r.J1; j++)
+        for (int i = r.I0; i < r.I1; i++)
+            if (site.At(f, i, j) is RuinSite.Ground.Out or RuinSite.Ground.Open) return false;
+        return true;
+    }
+
+    /// <summary>Makes sure every floor's halls can be got to: walks from the entrances (along halls, up and down cores),
+    /// and for each stretch of hall it doesn't reach, floor by floor from the top, adds a lane to the nearest hall it does
+    /// reach on that floor, or else a core down to it from a floor above where the walk got to, if there's rock for one.</summary>
+    /// <summary>Farthest (cells) a lane goes to join a cut-off stretch of hall to the rest.</summary>
+    public const int LaneReach = 30;
+
+    private static void JoinFloors(RuinSite site, List<Part>[] floorHalls, List<Part> cores)
+    {
+        int nx = site.Nx, nz = site.Nz, n = nx * nz, floors = site.Floors, half = CoreSize / 2;
+        var walk = new bool[floors * n];
+        var shaft = new bool[floors * n];
+        var reach = new bool[floors * n];
+        var q = new Queue<int>();
+        void Rect(bool[] into, int f, CellRect r)
+        {
+            r = r.Clip(nx, nz);
+            for (int j = r.J0; j < r.J1; j++)
+            for (int i = r.I0; i < r.I1; i++) into[f * n + i + nx * j] = true;
+        }
+        void Seed(int k) { if (walk[k] && !reach[k]) { reach[k] = true; q.Enqueue(k); } }
+        void AddCore(Part c)
+        {
+            for (int f = c.Floor; f <= c.LastFloor; f++)
+            {
+                Rect(walk, f, c.Rect);
+                if (f < c.LastFloor) Rect(shaft, f, c.Rect);
+            }
+        }
+        void Flood()
+        {
+            while (q.TryDequeue(out int k))
+            {
+                int f = k / n, c = k % n, i = c % nx, j = c / nx;
+                if (i > 0) Seed(k - 1);
+                if (i < nx - 1) Seed(k + 1);
+                if (j > 0) Seed(k - nx);
+                if (j < nz - 1) Seed(k + nx);
+                if (shaft[k]) Seed(k + n);
+                if (f > 0 && shaft[k - n]) Seed(k - n);
+            }
+        }
+        for (int f = 0; f < floors; f++) foreach (var h in floorHalls[f]) Rect(walk, f, h.Rect);
+        foreach (var c in cores) AddCore(c);
+        foreach (var c in cores)
+            if (c.Entrance)
+            {
+                var r = c.Rect.Clip(nx, nz);
+                for (int j = r.J0; j < r.J1; j++)
+                for (int i = r.I0; i < r.I1; i++) Seed(c.Floor * n + i + nx * j);
+            }
+        Flood();
+
+        var tried = new bool[n];
+        var part = new List<int>();
+        var seen = new int[n]; int stamp = 0;
+        var bq = new Queue<int>();
+        var from = new int[n];
+        bool Ground(int f, int c) => site.Grounds[f][c] is RuinSite.Ground.Solid or RuinSite.Ground.Partial;
+        // A lane on floor f from the stretch to the nearest reached hall within LaneReach cells of ground: an L if one fits
+        // on ground, else the way the search found.
+        bool Lane(int f, List<int> stretch)
+        {
+            stamp++;
+            bq.Clear();
+            foreach (int c in stretch) { seen[c] = stamp; from[c] = -1; bq.Enqueue(c); }
+            int found = -1, steps = 0, layer = bq.Count;
+            while (found < 0 && steps <= LaneReach && bq.TryDequeue(out int c))
+            {
+                int i = c % nx, j = c / nx;
+                foreach (int e in (ReadOnlySpan<int>)[i > 0 ? c - 1 : -1, i < nx - 1 ? c + 1 : -1, j > 0 ? c - nx : -1, j < nz - 1 ? c + nx : -1])
+                {
+                    if (e < 0 || seen[e] == stamp) continue;
+                    seen[e] = stamp; from[e] = c;
+                    if (reach[f * n + e]) { found = e; break; }
+                    if (Ground(f, e)) bq.Enqueue(e);
+                }
+                if (--layer == 0) { steps++; layer = bq.Count; }
+            }
+            if (found < 0) return false;
+            int start = found;
+            while (from[start] >= 0) start = from[start];
+            int ai = start % nx, aj = start / nx, bi = found % nx, bj = found / nx;
+            bool On(CellRect r)
+            {
+                for (int j = r.J0; j < r.J1; j++)
+                for (int i = r.I0; i < r.I1; i++) if (!Ground(f, i + nx * j) && !reach[f * n + i + nx * j]) return false;
+                return true;
+            }
+            CellRect[] a = [new(Math.Min(ai, bi), aj, Math.Max(ai, bi) + 1, aj + 1), new(bi, Math.Min(aj, bj), bi + 1, Math.Max(aj, bj) + 1)];
+            CellRect[] b = [new(ai, Math.Min(aj, bj), ai + 1, Math.Max(aj, bj) + 1), new(Math.Min(ai, bi), bj, Math.Max(ai, bi) + 1, bj + 1)];
+            var legs = new List<CellRect>();
+            if (a.All(On)) legs.AddRange(a);
+            else if (b.All(On)) legs.AddRange(b);
+            else for (int c = found; c >= 0; c = from[c]) legs.Add(new CellRect(c % nx, c / nx, c % nx + 1, c / nx + 1));
+            foreach (var r in legs)
+            {
+                floorHalls[f].Add(new Part { Rect = r, Kind = PartKind.Hall, Floor = (byte)f, LastFloor = (byte)f, District = -1 });
+                Rect(walk, f, r);
+            }
+            q.Enqueue(f * n + found);
+            Flood();
+            return true;
+        }
+        for (int f = 0; f < floors; f++)
+        {
+            Array.Clear(tried);
+            for (int s = 0; s < n; s++)
+            {
+                if (!walk[f * n + s] || reach[f * n + s] || tried[s]) continue;
+                // One stretch of hall the walk hasn't reached.
+                part.Clear();
+                var cq = new Queue<int>();
+                tried[s] = true; cq.Enqueue(s);
+                while (cq.TryDequeue(out int c))
+                {
+                    part.Add(c);
+                    int i = c % nx, j = c / nx;
+                    foreach (int e in (ReadOnlySpan<int>)[i > 0 ? c - 1 : -1, i < nx - 1 ? c + 1 : -1, j > 0 ? c - nx : -1, j < nz - 1 ? c + nx : -1])
+                        if (e >= 0 && !tried[e] && walk[f * n + e] && !reach[f * n + e]) { tried[e] = true; cq.Enqueue(e); }
+                }
+                // A core down to it from the nearest floor above where its top lands on a reached hall.
+                if (Lane(f, part)) continue;
+                // (A full core where it fits, else a narrow stair of 2 x 2 cells.)
+                bool placed = false;
+                foreach (int size in (ReadOnlySpan<int>)[CoreSize, 2])
+                foreach (int c in part)
+                {
+                    if (placed) break;
+                    int i = c % nx, j = c / nx;
+                    var rect = size == CoreSize ? new CellRect(i - half, j - half, i - half + CoreSize, j - half + CoreSize) : default;
+                    for (int o = 0; o < (size == CoreSize ? 1 : 4) && !placed; o++)
+                    {
+                        if (size != CoreSize) rect = new CellRect(i - (o & 1), j - (o >> 1), i - (o & 1) + 2, j - (o >> 1) + 2);
+                        if (rect.I0 < 0 || rect.J0 < 0 || rect.I1 > nx || rect.J1 > nz || !Fits(site, f, rect)) continue;
+                        int top = -1;
+                        for (int g = f - 1; g >= 0 && Fits(site, g, rect); g--)
+                            if (reach[g * n + c]) { top = g; break; }
+                        if (top < 0) continue;
+                        int last = f;
+                        while (last + 1 < floors && Fits(site, last + 1, rect)) last++;
+                        var core = new Part { Rect = rect, Kind = PartKind.Core, Floor = (byte)top, LastFloor = (byte)last, District = -1 };
+                        cores.Add(core);
+                        AddCore(core);
+                        q.Enqueue(top * n + c);
+                        Flood();
+                        placed = true;
+                    }
+                }
+            }
+        }
     }
 
     internal static bool[] HallMask(RuinSite site, Skeleton sk)
@@ -210,31 +363,22 @@ public static class RuinLayout
         foreach (var leg in Good(acrossFirst) >= Good(alongFirst) ? acrossFirst : alongFirst) sk.Halls.Add((leg, kind));
     }
 
-    /// <summary>Ground on the top floor (lower floors share its halls), and its pieces: 4-way connected, so cracks part
-    /// them. (Ground on any floor would join pieces whose rounded edges overlap at different heights.)</summary>
+    /// <summary>Ground on any floor (they share their halls), and its pieces (see <see cref="RuinSite.PieceOf"/>),
+    /// renumbered 0.. with their sizes in ground cells.</summary>
     internal static (bool[] Ground, int[] Piece, List<int> Sizes) Pieces(RuinSite site)
     {
-        int nx = site.Nx, nz = site.Nz, n = nx * nz;
+        int n = site.Nx * site.Nz;
         var ground = new bool[n];
-        for (int c = 0; c < n; c++) ground[c] = site.Grounds[0][c] is RuinSite.Ground.Solid or RuinSite.Ground.Partial;
+        foreach (var g in site.Grounds)
+            for (int c = 0; c < n; c++) ground[c] |= g[c] is RuinSite.Ground.Solid or RuinSite.Ground.Partial;
         var piece = new int[n]; Array.Fill(piece, -1);
+        var ids = new Dictionary<int, int>();
         var sizes = new List<int>();
-        var q = new Queue<int>();
-        for (int s = 0; s < n; s++)
+        for (int c = 0; c < n; c++)
         {
-            if (!ground[s] || piece[s] >= 0) continue;
-            int id = sizes.Count, size = 0;
-            piece[s] = id; q.Enqueue(s);
-            while (q.TryDequeue(out int c))
-            {
-                size++;
-                int i = c % nx, j = c / nx;
-                if (i > 0 && ground[c - 1] && piece[c - 1] < 0) { piece[c - 1] = id; q.Enqueue(c - 1); }
-                if (i < nx - 1 && ground[c + 1] && piece[c + 1] < 0) { piece[c + 1] = id; q.Enqueue(c + 1); }
-                if (j > 0 && ground[c - nx] && piece[c - nx] < 0) { piece[c - nx] = id; q.Enqueue(c - nx); }
-                if (j < nz - 1 && ground[c + nx] && piece[c + nx] < 0) { piece[c + nx] = id; q.Enqueue(c + nx); }
-            }
-            sizes.Add(size);
+            if (!ground[c] || site.PieceOf[c] < 0) { ground[c] = false; continue; }
+            if (!ids.TryGetValue(site.PieceOf[c], out int id)) { ids[site.PieceOf[c]] = id = sizes.Count; sizes.Add(0); }
+            piece[c] = id; sizes[id]++;
         }
         return (ground, piece, sizes);
     }
@@ -497,13 +641,16 @@ public sealed class CityGridModel : ILayoutModel
 /// or a piece's most interior cell) along the land's backbone, preferring cells far from its edges, to the far reaches
 /// of each piece, branching where the land forks: each next road goes to the ground farthest (walking) from the roads so
 /// far, until none is more than MajorReach away, and is laid as few long straight legs as keep it on the ground (no leg
-/// shorter than MinLeg is split further), so roads run long and square rather than stepping along diagonals. Minor roads leave the major ones every MinorSpacing cells, square to them, out to the ground's edge; then the
+/// shorter than MinLeg is split further), so roads run long and square rather than stepping along diagonals. Minor roads leave the major ones every MinorSpacing cells, square to them, and wind out from there
+/// (straight runs and turns, joining other roads where they meet them, so they loop, and forking now and then); then the
 /// ground still far from any road gets lanes to the nearest one. Districts are the major roads' reaches.
 /// </summary>
 public sealed class ArterialModel : ILayoutModel
 {
     public const int MajorWidth = 3, MajorReach = 50, MinLeg = 16, MinDepth = 4, MinorSpacing = 16, MinMinor = 6,
-        InfillReach = 16, MinPiece = 150;
+        InfillReach = 16, MinPiece = 150, MaxMinor = 60;
+    /// <summary>Minor roads go straight this many cells between turns.</summary>
+    public static readonly (int Lo, int Hi) MinorRun = (5, 12);
     public string Name => "arterial";
 
     public Skeleton Build(RuinSite site, ref LayoutRng rng)
@@ -571,7 +718,8 @@ public sealed class ArterialModel : ILayoutModel
         var legs = new List<(int Ai, int Aj, int Bi, int Bj)>();
         foreach (int p in Enumerable.Range(0, sizes.Count).Where(p => sizes[p] >= MinPiece).OrderByDescending(p => sizes[p]))
         {
-            int root = piece[site.Centre] == p ? site.Centre : -1;
+            int root = -1;
+            foreach (var (cell, _) in site.Entrances) if (root < 0 && piece[cell] == p) root = cell;
             if (root < 0)
                 for (int c = 0; c < n; c++) if (piece[c] == p && (root < 0 || depth[c] > depth[root])) root = c;
             // Walking cost: dearer near the edge, so roads keep to the backbone; a tree of cheapest ways from the root.
@@ -643,17 +791,52 @@ public sealed class ArterialModel : ILayoutModel
             }
         }
 
-        // Minor roads: square off every major leg's straight runs, both sides, out to the ground's edge or a road.
-        void Minor(int i, int j, int di, int dj)
+        // Minor roads: off every major leg's straight runs, both sides, winding: runs of MinorRun cells, then a turn
+        // (or not), never back the way they came, until they reach the ground's edge (ending there) or a road (joining
+        // it, so roads loop) or MaxMinor cells; now and then a fork off a bend.
+        var mrng = rng;
+        var mine = new HashSet<int>();
+        void Minor(int i, int j, int di, int dj, int forks)
         {
-            int len = 0;
-            while (G(i + di * (len + 1), j + dj * (len + 1)) && !hall[(i + di * (len + 1)) + nx * (j + dj * (len + 1))]) len++;
-            bool meets = i + di * (len + 1) >= 0 && j + dj * (len + 1) >= 0 && i + di * (len + 1) < nx && j + dj * (len + 1) < nz
-                && hall[(i + di * (len + 1)) + nx * (j + dj * (len + 1))];
-            if (len < MinMinor) return;
-            int end = meets ? len + 1 : len;
-            Lay(di != 0 ? new CellRect(Math.Min(i + di, i + di * end), j, Math.Max(i + di, i + di * end) + 1, j + 1)
-                        : new CellRect(i, Math.Min(j + dj, j + dj * end), i + 1, Math.Max(j + dj, j + dj * end) + 1), PartKind.Hall, -1);
+            var runs = new List<CellRect>();
+            mine.Clear();
+            int ci = i, cj = j, ddi = di, ddj = dj, total = 0;
+            bool met = false, stop = false;
+            var bends = new List<(int I, int J, int Di, int Dj)>();
+            while (!stop && total < MaxMinor)
+            {
+                int run = mrng.Range(MinorRun.Lo, MinorRun.Hi), si = ci, sj = cj, k = 0;
+                for (; k < run; k++)
+                {
+                    int ni = ci + ddi, nj = cj + ddj;
+                    if (!G(ni, nj)) { stop = true; break; }
+                    int e = ni + nx * nj;
+                    // Not alongside its own last run (that'd make a double-wide road).
+                    if (hall[e] || mine.Contains(e)) { ci = ni; cj = nj; k++; met = true; stop = true; break; }
+                    ci = ni; cj = nj; mine.Add(e);
+                }
+                if (k > 0)
+                {
+                    int ri0 = Math.Min(si + ddi, ci), ri1 = Math.Max(si + ddi, ci), rj0 = Math.Min(sj + ddj, cj), rj1 = Math.Max(sj + ddj, cj);
+                    runs.Add(new CellRect(ri0, rj0, ri1 + 1, rj1 + 1));
+                    total += k;
+                }
+                if (stop) break;
+                // Turn left, right, or keep on; never back against the way it set out.
+                int roll = mrng.Next(3);
+                if (roll < 2)
+                {
+                    int ti = roll == 0 ? -ddj : ddj, tj = roll == 0 ? ddi : -ddi;
+                    if (ti == -di && tj == -dj) { ti = -ti; tj = -tj; }
+                    bends.Add((ci, cj, -ti, -tj));
+                    ddi = ti; ddj = tj;
+                }
+            }
+            if (total < MinMinor && !met) return;
+            foreach (var r in runs) Lay(r, PartKind.Hall, -1);
+            if (forks > 0)
+                foreach (var (bi, bj, fi, fj) in bends)
+                    if (mrng.Next(3) == 0 && G(bi + fi, bj + fj) && !hall[(bi + fi) + nx * (bj + fj)]) Minor(bi, bj, fi, fj, forks - 1);
         }
         foreach (var (ai, aj, bi, bj) in legs)
         {
@@ -667,8 +850,8 @@ public sealed class ArterialModel : ILayoutModel
                     int ci = alongI ? t : i0, cj = alongI ? j0 : t;
                     if (!G(ci, cj) || !hall[ci + nx * cj]) continue;
                     int off = MajorWidth / 2 + 1;
-                    if (alongI) { Minor(ci, cj - off + 1, 0, -1); Minor(ci, cj + off - 1, 0, 1); }
-                    else { Minor(ci - off + 1, cj, -1, 0); Minor(ci + off - 1, cj, 1, 0); }
+                    if (alongI) { Minor(ci, cj - off + 1, 0, -1, 1); Minor(ci, cj + off - 1, 0, 1, 1); }
+                    else { Minor(ci - off + 1, cj, -1, 0, 1); Minor(ci + off - 1, cj, 1, 0, 1); }
                 }
             }
         }

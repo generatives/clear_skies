@@ -8,8 +8,8 @@ using ClearSkies.Game.Ruins;
 // lays it out with each layout model, and reports how long each step takes, how long carving its chunks takes next to
 // generating them, and how good each layout is. Writes a map of the region and of every floor of every layout.
 //
-//   dotnet run -c Release --project tools/ClearSkies.Ruins -- [--seed 1337] [--cell 1 -1] [--share 0.3]
-//       [--population 150000] [--area-per-person 40] [--max-floors 12] [--island 0] [--model all|grid|arterial|hub|spine] [--gen-sample 200]
+//   dotnet run -c Release --project tools/ClearSkies.Ruins -- [--seed 1337] [--cell 1 -1] [--aspect 2] [--gap-cost 8] [--roughness 0.7] [--piece-entrance 40000]
+//       [--population 150000] [--area-per-person 40] [--max-floors 40] [--island 0] [--model all|grid|arterial|hub|spine] [--gen-sample 200]
 //       [--out ruins-out]
 //
 // With no --cell it takes the spawn's landmass; --island picks one of its islands (0 is the biggest). RUINS_DEBUG=1 also
@@ -28,7 +28,10 @@ for (int a = 0; a < args.Length; a++)
     {
         case "--seed": seed = ulong.Parse(args[++a]); break;
         case "--cell": cell = (int.Parse(args[++a]), int.Parse(args[++a])); break;
-        case "--share": settings.Share = float.Parse(args[++a]); break;
+        case "--aspect": settings.Aspect = float.Parse(args[++a]); break;
+        case "--roughness": settings.Roughness = float.Parse(args[++a]); break;
+        case "--gap-cost": settings.GapCost = float.Parse(args[++a]); break;
+        case "--piece-entrance": settings.PieceEntranceArea = int.Parse(args[++a]); break;
         case "--population": settings.Population = int.Parse(args[++a]); break;
         case "--area-per-person": settings.AreaPerPerson = float.Parse(args[++a]); break;
         case "--max-floors": settings.MaxFloors = int.Parse(args[++a]); break;
@@ -54,13 +57,21 @@ var site = RuinSite.Build(sample, island, settings);
 Console.WriteLine($"Island {island}, region: {site.RegionLandCells * (long)C * C / 1e6:0.00} M blocks² of land ({100.0 * site.RegionLandCells / site.IslandLandCells:0}%), " +
                   $"{(site.RegionCells - site.RegionLandCells) * (long)C * C / 1e6:0.00} M of gaps, {site.Nx * C} x {site.Nz * C} blocks; picked in {site.RegionTime.TotalSeconds:0.00} s");
 {
-    var tops = Enumerable.Range(0, site.Nx * site.Nz).Where(c => site.Grounds.Length > 0 && site.Grounds[0][c] != RuinSite.Ground.Out && site.Surface[c] != short.MinValue)
+    var tops = Enumerable.Range(0, site.Nx * site.Nz).Where(c => site.Region[c] && site.Surface[c] != short.MinValue)
         .Select(c => (int)site.Surface[c]).Order().ToArray();
     if (tops.Length > 0)
         Console.WriteLine($"Region surface: 10% {tops[tops.Length / 10]}, median {tops[tops.Length / 2]}, 90% {tops[tops.Length * 9 / 10]}");
 }
 Console.WriteLine($"Needs {site.TargetArea / 1e6:0.00} M blocks² of floor ({settings.Population:N0} people x {settings.AreaPerPerson} blocks²): " +
                   $"{site.Floors} floors from y {site.TopY} down to {site.FloorY(site.Floors - 1)}");
+Console.WriteLine($"{site.Entrances.Count} entrances: " + string.Join(", ", site.Entrances.Select(e =>
+    $"({site.X0 + e.Cell % site.Nx * C}, {site.Z0 + e.Cell / site.Nx * C}) to floor {e.Floor}")));
+{
+    int w = 0;
+    for (int c = 0; c < site.Nx * site.Nz; c++) if (site.Region[c]) w++;
+    double across = 2 * Math.Sqrt(w * (double)C * C / Math.PI);
+    Console.WriteLine($"Shape: about {across:0} blocks across (as a disc of its footprint) by {site.Floors * RuinSite.FloorPitch} deep");
+}
 for (int f = 0; f < site.Floors; f++)
 {
     var g = site.Grounds[f];
@@ -122,12 +133,15 @@ foreach (var m in models)
         Maps.Slices(carving, ex - 128, ez - 128, site.TopY + 2, 256, surface + 12, surface + 12 - site.FloorY(site.Floors - 1) + 4, ez,
             Path.Combine(outDir, $"{m.Name}-slices.png"));
     }
+    var floorImages = new List<byte[]>();
     for (int f = 0; f < site.Floors; f++)
     {
         var img = Maps.Floor(plan, f, scale);
         Maps.Write(Path.Combine(outDir, $"{m.Name}-floor{f}.png"), img, site.Nx * scale, site.Nz * scale);
+        floorImages.Add(img);
         if (f == 0) floor0.Add(img);
     }
+    Maps.Sheet(Path.Combine(outDir, $"{m.Name}-floors.png"), floorImages, site.Nx * scale, site.Nz * scale);
 }
 if (floor0.Count > 1) Maps.Row(Path.Combine(outDir, "compare-floor0.png"), floor0, site.Nx * scale, site.Nz * scale);
 File.WriteAllLines(Path.Combine(outDir, "metrics.csv"),

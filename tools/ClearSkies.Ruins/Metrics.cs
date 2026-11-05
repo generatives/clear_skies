@@ -28,7 +28,7 @@ public sealed record LayoutMetrics(
                 int c = f * n + i + nx * j;
                 way[c] = true;
                 if (p.Kind == PartKind.Core && f < p.LastFloor) shaft[c] = true;
-                if (p.Kind == PartKind.Core && p.Entrance && f == 0) entrance.Add(c);
+                if (p.Kind == PartKind.Core && p.Entrance && f == p.Floor) entrance.Add(c);
             }
             if (p.Kind != PartKind.Core) hallArea += p.Rect.Area * (long)(C * C);
             if (p.Kind == PartKind.Bridge) { bridges++; bridgeCells += p.Rect.Width >= p.Rect.Depth ? p.Rect.Width : p.Rect.Depth; }

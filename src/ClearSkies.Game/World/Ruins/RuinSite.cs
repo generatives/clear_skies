@@ -3,27 +3,35 @@ using ClearSkies.Game.Generation;
 
 namespace ClearSkies.Game.Ruins;
 
-/// <summary>What a ruin is asked for: how much of its landmass it spreads over, and how much floor it needs.</summary>
+/// <summary>What a ruin is asked for: how much floor it needs, and the shape it grows in.</summary>
 public sealed class RuinSettings
 {
-    /// <summary>Share of its island's land the ruin's region covers (0-1).</summary>
-    public float Share = 0.3f;
-
-    /// <summary>Stand-in for the population stages: the ruin needs Population × AreaPerPerson blocks² of floor, and
-    /// stacks floors until it has that much (or the ground runs out, or <see cref="MaxFloors"/>).</summary>
+    /// <summary>Stand-in for the population stages: the ruin needs Population × AreaPerPerson blocks² of floor.</summary>
     public int Population = 150_000;
     public float AreaPerPerson = 40f;
-    public int MaxFloors = 12;
+    /// <summary>Deepest it goes, in floors below the top floor.</summary>
+    public int MaxFloors = 40;
+    /// <summary>Width over height: going down a block costs Aspect / 2 blocks across, so it grows to about Aspect
+    /// times as wide as it is deep.</summary>
+    public float Aspect = 2f;
+    /// <summary>Each cell of gap crossed costs this many times a cell of ground, so it stays on its piece until going
+    /// on is dearer than bridging.</summary>
+    public float GapCost = 8f;
+    /// <summary>Another piece gets its own entrance (and grows from it) once this much of its ground (blocks²) is in.</summary>
+    public int PieceEntranceArea = 40_000;
+    /// <summary>How much the cost of a step varies (0-1), in blobs of RuinSite.RoughScale cells: a ragged edge.</summary>
+    public float Roughness = 0.7f;
 }
 
 /// <summary>
 /// Where a ruin can go on one island of a landmass (see <see cref="LandmassSample"/>), on a grid of
-/// <see cref="Cell"/>-block cells. It starts from its entrance (see <see cref="Centre"/>): the top floor sits
-/// <see cref="Cover"/> under the ground there, and floors go down from it, flat, <see cref="FloorPitch"/> blocks apart.
-/// Each floor's region grows out through whatever ground there is at its height (crossing gaps up to
-/// <see cref="BridgeCells"/>), from the entrance for the top floor and from the floor above's for the rest, so the ruin
-/// follows the rock. For each floor, what the ground is like in each cell (see <see cref="Ground"/>); the grid covers
-/// the floors' bounds only.
+/// <see cref="Cell"/>-block cells and floors <see cref="FloorPitch"/> blocks apart. It grows out from its entrance (the
+/// island's most interior point thick enough; the top floor sits <see cref="Cover"/> under the ground there) one cell
+/// or floor at a time, cheapest first: a step across costs its length, a step down costs
+/// <see cref="RuinSettings.Aspect"/> / 2 times its height (through rock solid on both floors), a step across a gap
+/// costs <see cref="RuinSettings.GapCost"/> times more (and gaps over <see cref="BridgeCells"/> aren't crossed). It
+/// stops once it holds the floor it needs. A piece it bridges onto gets its own entrance once enough of it is in. For
+/// each floor, what the ground is like in each cell (see <see cref="Ground"/>); the grid covers the ruin's bounds only.
 /// </summary>
 public sealed class RuinSite
 {
@@ -35,6 +43,10 @@ public sealed class RuinSite
     public const int Margin = 2;
     /// <summary>Widest gap (in cells) a bridge crosses, and so the widest crack the region grows across.</summary>
     public const int BridgeCells = 8;
+    /// <summary>A drop (blocks) between neighbouring cells that parts pieces: a crack's edge, with land far below.</summary>
+    public const int Cliff = 16;
+    /// <summary>Cells across a blob of the growth's rough cost.</summary>
+    public const int RoughScale = 24;
 
     public enum Ground : byte
     {
@@ -57,8 +69,13 @@ public sealed class RuinSite
     public readonly Ground[][] Grounds;
     /// <summary>Per cell: the top of its highest ground (short.MinValue for none).</summary>
     public readonly short[] Surface;
-    /// <summary>The main entrance's cell, which the floors grew from: the island's most interior point thick enough.</summary>
-    public readonly int Centre;
+    /// <summary>Per cell: which piece of land it's on (-1 for none): land joined 4-way at the surface where it doesn't drop
+    /// more than <see cref="Cliff"/>, so cracks part it.</summary>
+    public readonly int[] PieceOf;
+    /// <summary>The entrances, the main one first: cell, and the floor its stairs come down to.</summary>
+    public readonly List<(int Cell, int Floor)> Entrances = [];
+    /// <summary>The main entrance's cell.</summary>
+    public int Centre => Entrances[0].Cell;
     public readonly int IslandLandCells;
     public readonly int RegionCells, RegionLandCells;
     public readonly long TargetArea;
@@ -95,71 +112,138 @@ public sealed class RuinSite
             }
             return g;
         }
+        bool Thick(int c) => sample.Land[c] && sample.TopHi[c] - sample.TopLo[c] >= Cover + FloorPitch + 2 * Margin;
 
-        // The entrance: the island's most interior cell whose ground is thick enough to hold the top floor under Cover.
+        // Pieces: the island's land, joined 4-way where the ground doesn't drop more than Cliff between cells (a crack with
+        // land far below it parts pieces too). How far each cell is from such an edge, or the sky.
+        bool Joined(int a, int b) => sample.Land[a] && sample.Land[b] && Math.Abs(sample.TopHi[a] - sample.TopHi[b]) <= Cliff;
+        var inner = LandmassSample.Distances(fnx, fnz, c =>
+        {
+            if (!sample.Land[c]) return true;
+            int i = c % fnx, j = c / fnx;
+            return i == 0 || j == 0 || i == fnx - 1 || j == fnz - 1
+                || !Joined(c, c - 1) || !Joined(c, c + 1) || !Joined(c, c - fnx) || !Joined(c, c + fnx);
+        });
+        var pieceOf = new int[fn]; Array.Fill(pieceOf, -1);
+        var pieceDeep = new List<int>();
+        {
+            var q = new Queue<int>();
+            for (int s = 0; s < fn; s++)
+            {
+                if (!sample.Land[s] || sample.IslandOf[s] != island || pieceOf[s] >= 0) continue;
+                int id = pieceDeep.Count, deep = -1;
+                pieceOf[s] = id; q.Enqueue(s);
+                while (q.TryDequeue(out int c))
+                {
+                    if (Thick(c) && (deep < 0 || inner[c] > inner[deep])) deep = c;
+                    int i = c % fnx, j = c / fnx;
+                    void Visit(int e) { if (pieceOf[e] < 0 && Joined(c, e)) { pieceOf[e] = id; q.Enqueue(e); } }
+                    if (i > 0) Visit(c - 1);
+                    if (i < fnx - 1) Visit(c + 1);
+                    if (j > 0) Visit(c - fnx);
+                    if (j < fnz - 1) Visit(c + fnx);
+                }
+                pieceDeep.Add(deep);
+            }
+        }
+
+        // The main entrance: the island's most interior cell (farthest from sky and cliffs) whose ground is thick enough
+        // to hold the top floor under Cover.
         int entrance = -1;
         for (int c = 0; c < fn; c++)
-        {
-            if (sample.IslandOf[c] != island || !sample.Land[c] || sample.TopHi[c] - sample.TopLo[c] < Cover + FloorPitch + 2 * Margin) continue;
-            if (entrance < 0 || sample.FromSky[c] > sample.FromSky[entrance]) entrance = c;
-        }
+            if (sample.IslandOf[c] == island && Thick(c) && (entrance < 0 || inner[c] > inner[entrance])) entrance = c;
         if (entrance < 0) entrance = sample.IslandCentre[island];
         TopY = Math.Max(sample.TopHi[entrance] - Cover - FloorPitch + 1, sample.TopLo[entrance] + Margin);
+        int maxFloors = Math.Clamp(settings.MaxFloors, 1, 255);
+        int YOf(int f) => TopY - f * FloorPitch;
 
-        // Floors, top down, each grown out from the entrance (the top floor) or from the floor above wherever it has
-        // solid ground under it: nearest first, through any ground at its height and across gaps up to BridgeCells, until
-        // it holds the asked share of the island's land in solid cells or runs out. They stop once they hold the floor the
-        // ruin needs (rooms take roughly RoomShare of solid ground) or one comes out too small.
+        // Growth, cheapest first, over (floor, cell) nodes. Each node's best cost so far and the gap cells run into it.
         const float RoomShare = 0.45f;
         TargetArea = (long)(settings.Population * settings.AreaPerPerson);
-        int want = (int)(settings.Share * IslandLandCells), least = Math.Max(500, IslandLandCells / 100);
-        int ei = entrance % fnx, ej = entrance / fnx;
-        var regions = new List<bool[]>();
-        var run = new byte[fn];
-        var queue = new PriorityQueue<int, float>();
-        double area = 0;
-        while (regions.Count < settings.MaxFloors && area < TargetArea)
+        float down = FloorPitch * settings.Aspect / 2, diag = MathF.Sqrt(2);
+        // Smooth noise on the cost of each step, so the edge wanders instead of tracing an octagon.
+        float Rough(int c, int f)
         {
-            int y = TopY - regions.Count * FloorPitch, solid = 0;
-            var inFloor = new bool[fn];
-            queue.Clear();
-            void Seed(int c) { inFloor[c] = true; run[c] = 0; float dx = c % fnx - ei, dz = c / fnx - ej; queue.Enqueue(c, dx * dx + dz * dz); }
-            if (regions.Count == 0) { if (GroundAt(entrance, y) == Ground.Solid) Seed(entrance); }
-            else
+            float x = (c % fnx) / (float)RoughScale, z = (c / fnx) / (float)RoughScale, w = f / 3f;
+            int x0 = (int)MathF.Floor(x), z0 = (int)MathF.Floor(z), w0 = (int)MathF.Floor(w);
+            float fx = x - x0, fz = z - z0, fw = w - w0;
+            fx = fx * fx * (3 - 2 * fx); fz = fz * fz * (3 - 2 * fz); fw = fw * fw * (3 - 2 * fw);
+            float H(int a, int b, int d)
             {
-                var above = regions[^1];
-                for (int c = 0; c < fn; c++) if (above[c] && GroundAt(c, y) == Ground.Solid) Seed(c);
+                ulong h = Seed ^ (ulong)(uint)a * 0x9E3779B97F4A7C15UL ^ (ulong)(uint)b * 0xC2B2AE3D27D4EB4FUL ^ (ulong)(uint)d * 0x165667B19E3779F9UL;
+                h ^= h >> 31; h *= 0xBF58476D1CE4E5B9UL; h ^= h >> 29;
+                return (h >> 40) / (float)(1 << 24);
             }
-            while (solid < want && queue.TryDequeue(out int c, out _))
-            {
-                if (GroundAt(c, y) == Ground.Solid) solid++;
-                int i = c % fnx, j = c / fnx;
-                for (int dj = -1; dj <= 1; dj++)
-                for (int di = -1; di <= 1; di++)
-                {
-                    int ni = i + di, nj = j + dj;
-                    if (ni < 0 || nj < 0 || ni >= fnx || nj >= fnz) continue;
-                    int d = ni + fnx * nj;
-                    if (inFloor[d] || sample.IslandOf[d] != island) continue;
-                    int r = GroundAt(d, y) == Ground.Open ? run[c] + 1 : 0;
-                    if (r > BridgeCells) continue;
-                    inFloor[d] = true; run[d] = (byte)r;
-                    float dx = ni - ei, dz = nj - ej;
-                    queue.Enqueue(d, dx * dx + dz * dz);
-                }
-            }
-            // Cells queued but never reached aren't in it.
-            while (queue.TryDequeue(out int c, out _)) inFloor[c] = false;
-            if (solid < least) break;
-            regions.Add(inFloor);
-            area += solid * (double)(Cell * Cell) * RoomShare;
+            float L(float a, float b, float t) => a + (b - a) * t;
+            float v = L(L(L(H(x0, z0, w0), H(x0 + 1, z0, w0), fx), L(H(x0, z0 + 1, w0), H(x0 + 1, z0 + 1, w0), fx), fz),
+                        L(L(H(x0, z0, w0 + 1), H(x0 + 1, z0, w0 + 1), fx), L(H(x0, z0 + 1, w0 + 1), H(x0 + 1, z0 + 1, w0 + 1), fx), fz), fw);
+            return 1 + settings.Roughness * (2 * v - 1);
         }
-        Floors = regions.Count;
-
-        // The region is every floor's together; crop to its bounds (a cell of margin).
+        var best = new Dictionary<long, (float Cost, byte Run)>();
+        var done = new HashSet<long>();
+        var queue = new PriorityQueue<long, float>();
+        long Key(int f, int c) => (long)f * fn + c;
+        void Offer(int f, int c, float cost, int run)
+        {
+            long k = Key(f, c);
+            if (done.Contains(k) || (best.TryGetValue(k, out var b) && b.Cost <= cost)) return;
+            best[k] = (cost, (byte)run);
+            queue.Enqueue(k, cost);
+        }
+        var entranceOf = new Dictionary<int, int> { [pieceOf[entrance]] = 0 };
+        Entrances.Add((entrance, 0));
+        var pieceSolid = new Dictionary<int, int>();
+        int pieceEntranceCells = Math.Max(1, settings.PieceEntranceArea / (Cell * Cell));
+        if (GroundAt(entrance, TopY) == Ground.Solid) Offer(0, entrance, 0, 0);
+        double area = 0;
+        int deepest = 0;
+        while (area < TargetArea && queue.TryDequeue(out long k, out float d))
+        {
+            if (!done.Add(k)) continue;
+            int f = (int)(k / fn), c = (int)(k % fn), run = best[k].Run;
+            var g = GroundAt(c, YOf(f));
+            deepest = Math.Max(deepest, f);
+            if (g == Ground.Solid)
+            {
+                area += Cell * Cell * RoomShare;
+                int p = pieceOf[c];
+                if (p >= 0 && !entranceOf.ContainsKey(p) && (pieceSolid[p] = pieceSolid.GetValueOrDefault(p) + 1) >= pieceEntranceCells
+                    && pieceDeep[p] >= 0)
+                {
+                    // Enough of this piece is in: it gets its own entrance, its top floor Cover under the ground there,
+                    // and grows from it from now on.
+                    int e = pieceDeep[p];
+                    int ef = Math.Max(0, (int)Math.Ceiling((TopY - (sample.TopHi[e] - Cover - FloorPitch + 1)) / (double)FloorPitch));
+                    while (ef < maxFloors && GroundAt(e, YOf(ef)) != Ground.Solid) ef++;
+                    entranceOf[p] = Entrances.Count;
+                    if (ef < maxFloors) { Entrances.Add((e, ef)); Offer(ef, e, d, 0); }
+                }
+                // Down and up a floor, through rock on both.
+                if (f + 1 < maxFloors && GroundAt(c, YOf(f + 1)) == Ground.Solid) Offer(f + 1, c, d + down, 0);
+                if (f > 0 && GroundAt(c, YOf(f - 1)) == Ground.Solid) Offer(f - 1, c, d + down, 0);
+            }
+            int i = c % fnx, j = c / fnx;
+            for (int dj = -1; dj <= 1; dj++)
+            for (int di = -1; di <= 1; di++)
+            {
+                int ni = i + di, nj = j + dj;
+                if ((di | dj) == 0 || ni < 0 || nj < 0 || ni >= fnx || nj >= fnz) continue;
+                int e = ni + fnx * nj;
+                if (sample.IslandOf[e] != island) continue;
+                bool open = GroundAt(e, YOf(f)) == Ground.Open;
+                int r = open ? run + 1 : 0;
+                if (r > BridgeCells) continue;
+                float step = Cell * (di != 0 && dj != 0 ? diag : 1) * (open ? settings.GapCost : 1) * Rough(e, f);
+                Offer(f, e, d + step, r);
+            }
+        }
+        Floors = deepest + 1;
+        // (Gap cells it reached without getting across stay in: halls clip them away.)
+        var regions = new bool[Floors][];
+        for (int f = 0; f < Floors; f++) regions[f] = new bool[fn];
+        foreach (long k in done) regions[k / fn][k % fn] = true;
         var union = new bool[fn];
         foreach (var r in regions) for (int c = 0; c < fn; c++) union[c] |= r[c];
-        union[entrance] = true;
         LandmassRegion = union;
         int ri0 = int.MaxValue, rj0 = int.MaxValue, ri1 = int.MinValue, rj1 = int.MinValue;
         for (int c = 0; c < fn; c++)
@@ -187,7 +271,14 @@ public sealed class RuinSite
             for (int f = 0; f < Floors; f++)
                 if (regions[f][g]) Grounds[f][c] = GroundAt(g, FloorY(f));
         }
-        Centre = (ei - ri0) + Nx * (ej - rj0);
+        PieceOf = new int[n];
+        for (int j = 0; j < Nz; j++)
+        for (int i = 0; i < Nx; i++) PieceOf[i + Nx * j] = pieceOf[(i + ri0) + fnx * (j + rj0)];
+        for (int e = 0; e < Entrances.Count; e++)
+        {
+            var (c, f) = Entrances[e];
+            Entrances[e] = ((c % fnx - ri0) + Nx * (c / fnx - rj0), f);
+        }
         RegionTime = sw.Elapsed;
     }
 
