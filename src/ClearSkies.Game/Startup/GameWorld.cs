@@ -56,7 +56,9 @@ public sealed class GameWorld
         // view as far as the budget reaches.
         ChunkPipeline = new ChunkPipelineSystem(host.World); // where chunks are made, after streaming wants them
         var ground = new GroundCache(); // every worker's generator shares what's worked out of the ground
-        ChunkLoad = new ChunkLoadSystem(host.World, StaticVolume, budget, ChunkPipeline.Pipeline, () => new HeartWorldGenerator(seed, ground),
+        // Worn and watered landmass by landmass, as each is first reached (see Landscape).
+        var landscape = options.Terrain.Enabled ? new Landscape(seed, options.Terrain) : null;
+        ChunkLoad = new ChunkLoadSystem(host.World, StaticVolume, budget, ChunkPipeline.Pipeline, () => new HeartWorldGenerator(seed, ground, landscape),
                                         options.ViewDistance, MinChunkY, chunkStore, chunkPreparer);
         ((EditVoxelsHandler)Commands.HandlerFor(CommandIds.EditVoxels)!).Terrain = ChunkLoad; // edits to the world ask it what's there
         ColliderStages.Add(ChunkPipeline, host.Physics); // terrain colliders, in the chunk pipeline
