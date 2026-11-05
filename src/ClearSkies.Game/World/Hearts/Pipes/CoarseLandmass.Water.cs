@@ -221,6 +221,44 @@ public sealed partial class CoarseLandmass
         return t < 0 || MathF.Abs(StartFloor[t] - top) > Near ? 0f : Floor[t] - StartFloor[t];
     }
 
+    /// <summary>How steep the ground is at the column with its middle at (x, z), blocks up per block across: its
+    /// neighbours' floors either side, each way (0 where one has none).</summary>
+    public float Slope(int x, int z)
+    {
+        var (i, k, _, _) = Cell(x, z);
+        int east = TopNode(i + 1, k), west = TopNode(i - 1, k), south = TopNode(i, k + 1), north = TopNode(i, k - 1);
+        if (east < 0 || west < 0 || south < 0 || north < 0) return 0f;
+        float dx = (Floor[east] - Floor[west]) / (2 * Size), dz = (Floor[south] - Floor[north]) / (2 * Size);
+        return MathF.Sqrt(dx * dx + dz * dz);
+    }
+
+    /// <summary>Whether any of the columns round block column (x, z) or beside those has water over it or a stream
+    /// through it (water reaches that far across: a stream's channel, the model's surface blended between columns).</summary>
+    public bool NearWater(int x, int z)
+    {
+        var (i, k, _, _) = Cell(x, z);
+        return i >= 0 && k >= 0 && i < Nx && k < Nz && (_nearWater ??= NearWaterTable())[i + Nx * k];
+    }
+
+    // (Per cell, by its first column: whether any of the 4 by 4 columns round it is watered. Worked out when first
+    // asked, once the water and streams are in.)
+    private bool[]? _nearWater;
+
+    private bool[] NearWaterTable()
+    {
+        var near = new bool[Columns];
+        for (int column = 0; column < Columns; column++)
+        {
+            int t = TopNode(column);
+            if (t < 0 || !(Depth[t] > Settings.Damp || Shown[t] > 0f)) continue;
+            int i = column % Nx, k = column / Nx;
+            for (int b = k - 2; b <= k + 1; b++)
+            for (int a = i - 2; a <= i + 1; a++)
+                if (a >= 0 && b >= 0 && a < Nx && b < Nz) near[a + Nx * b] = true;
+        }
+        return near;
+    }
+
     /// <summary>The cell of columns block column (x, z) is in: its first column (i0, k0), and how far across it is toward
     /// the next ones (fx, fz, 0-1), for blending the four (i0..i0 + 1, k0..k0 + 1).</summary>
     private (int I0, int K0, float Fx, float Fz) Cell(float x, float z)

@@ -44,6 +44,9 @@ public sealed class HeartWorldGenerator : IWorldGenerator
 
     /// <summary>Solid runs thinner than this are worn away: slivers where the terrain surface just grazes a piece.</summary>
     private const int MinThickness = 6;
+    // Slopes roughened (see ColumnSpans): how far a top moves up or down at most, on ground at least RoughSlope steep
+    // (less on gentler ground, none on flat), and how fine the roughness is.
+    private const float Rough = 2.5f, RoughSlope = 1f, RoughFrequency = 0.05f;
 
     // A piece's top is the terrain worn down: where the terrain there stands above the terrain at its heart, only
     // Flatten of the difference is left, and the whole top is lowered by up to MaxDrop (each piece its own amount).
@@ -68,7 +71,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     internal ulong Seed => _seed;
     private readonly Landscape? _landscape;
     private readonly ContinentTerrain _terrain;
-    private readonly FastNoiseLite _warpX, _warpY, _warpZ, _crack, _bottom;
+    private readonly FastNoiseLite _warpX, _warpY, _warpZ, _crack, _bottom, _rough;
 
     /// <param name="cache">Shared with the other workers' generators; by default, this one's own.</param>
     /// <param name="landscape">How the land is worn and watered; none, as the hearts leave it.</param>
@@ -83,6 +86,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         _warpZ = Noise(seed + 33, WarpFrequency);
         _crack = Noise(seed + 34, 0.03f);
         _bottom = Noise(seed + 35, 0.02f);
+        _rough = Noise(seed + 36, RoughFrequency);
+        _rough.SetFractalType(FastNoiseLite.FractalType.None); // (one smooth octave: bumps, not speckle)
     }
 
     private static FastNoiseLite Noise(ulong seed, float frequency)
@@ -571,7 +576,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator
 
     /// <summary>Moves each corner's top (where its distance last falls through zero going up) by the wear under it
     /// (see <see cref="CoarseLandmass.Shift"/>): worn down, it's cut to a flat face that much lower; built up, filled to one
-    /// that much higher. Ground under the top stays as it is.</summary>
+    /// that much higher. Ground under the top stays as it is. Also how rough each corner's top is (see ColumnSpans): by
+    /// the landscape's slope there, up to RoughSlope; none near its water.</summary>
     private static void Wear(DistanceLattice lattice, CoarseLandmass shaped)
     {
         const int N = DistanceLattice.Corners, Cell = DistanceLattice.Cell;
@@ -587,6 +593,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             }
             if (float.IsNaN(top)) continue;
             int wx = lattice.ChunkX * S + c % N * Cell, wz = lattice.ChunkZ * S + c / N * Cell;
+            if (!shaped.NearWater(wx, wz)) lattice.SetRoughness(c, Math.Clamp(shaped.Slope(wx, wz) / RoughSlope, 0f, 1f));
             float shift = shaped.Shift(wx, wz, top);
             if (MathF.Abs(shift) < 0.01f) continue;
             float moved = top + shift;
@@ -781,6 +788,19 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 int hi = System.Math.Min((int)MathF.Ceiling(y) - 1, HeartGrid.WorldTop - 1);
                 if (lo != int.MinValue && hi - lo + 1 >= MinThickness && count < into.Length) into[count++] = ((short)lo, (short)hi);
                 lo = int.MinValue;
+            }
+        }
+        // The top roughened on slopes: blended between corners, a cell's slope is a flat face; moved up or down by slow,
+        // smooth noise (as much as Rough where the lattice's roughness is 1, see Wear), it breaks up.
+        if (count > 0)
+        {
+            float rough = lattice.Roughness(lx, lz);
+            if (rough > 0f)
+            {
+                var (rlo, rhi) = into[count - 1];
+                float n = _rough.GetNoise(lattice.ChunkX * S + lx, lattice.ChunkZ * S + lz);
+                int moved = rhi + (int)MathF.Round(Rough * rough * n);
+                into[count - 1] = (rlo, (short)Math.Clamp(moved, rlo + MinThickness - 1, HeartGrid.WorldTop - 1));
             }
         }
         return count;
