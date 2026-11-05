@@ -20,6 +20,20 @@ public sealed partial class CoarseLandmass
     // (How narrow a channel is at least.)
     private const float LeastWide = 2f;
 
+    /// <summary>0-1 at block column (x, z): how near water it is (see Watering), blended between the columns'
+    /// middles round it; 0 off the land.</summary>
+    public float Watered(float x, float z) => Blend(ColumnWatered, x, z);
+
+    /// <summary>0-1 at block column (x, z): how marshy it is (see Watering), blended as <see cref="Watered"/>.</summary>
+    public float Marsh(float x, float z) => Blend(ColumnMarsh, x, z);
+
+    private float Blend(float[] values, float x, float z)
+    {
+        var (i, k, fx, fz) = Cell(x, z);
+        float At(int a, int b) => a < 0 || b < 0 || a >= Nx || b >= Nz ? 0f : values[a + Nx * b];
+        return (1 - fz) * ((1 - fx) * At(i, k) + fx * At(i + 1, k)) + fz * ((1 - fx) * At(i, k + 1) + fx * At(i + 1, k + 1));
+    }
+
     /// <summary>The top water block over block column (x, z), whose ground is topped at <paramref name="top"/>, or
     /// int.MinValue, and the block its ground is cut down to (int.MaxValue for none). Full detail and distant terrain
     /// both place water by this (distant terrain <paramref name="widen"/>s by half a voxel, so water thinner than a voxel

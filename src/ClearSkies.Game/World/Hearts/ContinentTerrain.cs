@@ -43,8 +43,11 @@ public sealed class ContinentTerrain
     private readonly FastNoiseLite _heat, _wet;   // the climate's broad regional fields (see Biomes)
     private readonly FastNoiseLite _climateWarpX, _climateWarpZ; // bend the borders between biomes
 
+    private readonly ulong _seed;
+
     private ContinentTerrain(ulong seed)
     {
+        _seed = seed;
         _plains = Noise(seed + 11, FastNoiseLite.FractalType.FBm, 3, 0.0004f);
         _hills = Noise(seed + 12, FastNoiseLite.FractalType.FBm, 3, 0.0012f);
         _ranges = Noise(seed + 13, FastNoiseLite.FractalType.FBm, 1, 0.00007f);
@@ -151,17 +154,44 @@ public sealed class ContinentTerrain
     /// piece (no islands of one stranded in another).</summary>
     public const float ClimateWarp = 200f;
 
-    /// <summary>-1 to 1 at column (x, z), for <see cref="Biomes.Heat"/>: regions a few kilometres across that run hotter
-    /// or cooler than their height alone would make them.</summary>
-    public float Heat(float x, float z) { Warp(ref x, ref z); return _heat.GetNoise(x, z); }
+    // Each landmass has one climate, read off the broad fields at its middle (so neighbours are alike), varied across
+    // it only a little (by the same fields, warped, at the column): its biomes then change mostly with height and
+    // water, and only a landmass where the fields run to an extreme is desert, badlands or jungle.
+    private const float IslandHeat = 1.2f, IslandRain = 0.65f, LocalHeat = 0.15f, LocalRain = 0.1f, RainMiddle = 0.57f;
 
-    /// <summary>0-1 at column (x, z), for <see cref="Biomes.Pick"/>: how wet the region is.</summary>
-    public float Wet(float x, float z) { Warp(ref x, ref z); return Math.Clamp(0.5f + 0.9f * _wet.GetNoise(x, z), 0f, 1f); }
+    /// <summary>About -1 to 1 at column (x, z), for <see cref="Biomes.Heat"/>: how much hotter or cooler than its height
+    /// alone would make it its landmass runs, varied a little across it.</summary>
+    public float Heat(float x, float z)
+    {
+        var (cx, cz) = HeartGrid.LandmassCentre(_seed, x, z);
+        Warp(ref x, ref z);
+        return IslandHeat * _heat.GetNoise(cx, cz) + LocalHeat * _heat.GetNoise(x * 4f, z * 4f);
+    }
 
-    private void Warp(ref float x, ref float z)
+    /// <summary>0-1 at column (x, z): how much rain its landmass gets, varied a little across it: how wet the ground is
+    /// away from water (see <see cref="Biomes.Wet"/>).</summary>
+    public float Rain(float x, float z)
+    {
+        var (cx, cz) = HeartGrid.LandmassCentre(_seed, x, z);
+        Warp(ref x, ref z);
+        return Math.Clamp(RainMiddle + IslandRain * _wet.GetNoise(cx, cz) + LocalRain * _wet.GetNoise(x * 4f, z * 4f), 0f, 1f);
+    }
+
+    /// <summary>0-1 at column (x, z): the rain that waters the landscape (see <see cref="Land"/>), from the broad field
+    /// as it is at the column, not its landmass's (see <see cref="Rain"/>): how much water stands and runs on the land
+    /// is tuned to it.</summary>
+    public float LandscapeRain(float x, float z)
+    {
+        Warp(ref x, ref z);
+        return Math.Clamp(0.5f + 0.9f * _wet.GetNoise(x, z), 0f, 1f);
+    }
+
+    /// <summary>Moves (x, z) by up to <paramref name="amount"/> blocks along the climate's warp: borders read through it
+    /// come out ragged.</summary>
+    public void Warp(ref float x, ref float z, float amount = ClimateWarp)
     {
         float wx = _climateWarpX.GetNoise(x, z), wz = _climateWarpZ.GetNoise(x, z);
-        x += ClimateWarp * wx; z += ClimateWarp * wz;
+        x += amount * wx; z += amount * wz;
     }
 
     /// <summary>0-1 at column (x, z), for <see cref="Plant"/>: which kind of plant a stand is mostly made of.</summary>
@@ -171,7 +201,7 @@ public sealed class ContinentTerrain
     /// height (whether it is the terrain surface or a support's own top; those are to be decorated differently
     /// later), then rock layers (<paramref name="strata"/> from <see cref="Strata"/>, <paramref name="patch"/> from
     /// <see cref="Patch"/>). <paramref name="bare"/>, 0-1, is how little the top is out in the open. Deserts are sand,
-    /// badlands red sand over red rock, tundra grass among snowy dirt and ice, steppe grass among gravel and the
+    /// badlands red sand over red rock, savanna dry grass among bare earth, marsh grass among shallow pools, tundra grass among snowy dirt and ice, steppe grass among gravel and the
     /// volcanic wastes ash with pools of lava (see <see cref="Biomes"/>), all under the same snow and bare rock up
     /// high; jungle has temperate ground.</summary>
     public static BlockId Block(int y, int top, float strata, float patch, float bare, Biome biome = Biome.Temperate, float dry = 0f)
@@ -195,6 +225,18 @@ public sealed class ContinentTerrain
         else if (!rocky && biome == Biome.Steppe)
         {
             if (depth == 0) return patch < 0.35f ? BlockId.Gravel : BlockId.Grass;
+            if (depth < 3) return BlockId.Dirt;
+        }
+        else if (!rocky && biome == Biome.Savanna)
+        {
+            // Dry grass among patches of bare earth.
+            if (depth == 0) return patch < 0.3f ? BlockId.Dirt : BlockId.Grass;
+            if (depth < 3) return BlockId.Dirt;
+        }
+        else if (!rocky && biome == Biome.Marsh)
+        {
+            // Grass with shallow pools in the hollows of the patch field, over mud.
+            if (depth == 0) return patch > 0.72f ? BlockId.Water : BlockId.Grass;
             if (depth < 3) return BlockId.Dirt;
         }
         else if (!rocky && biome == Biome.Volcanic)

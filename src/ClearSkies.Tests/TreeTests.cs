@@ -25,7 +25,7 @@ public class TreeTests
     public void Biomes_go_by_heat_and_wetness_and_set_what_grows()
     {
         Assert.Equal(Biome.Badlands, Biomes.Pick(1.2f, 0f));
-        Assert.Equal(Biome.Desert, Biomes.Pick(0.8f, 0.3f));
+        Assert.Equal(Biome.Desert, Biomes.Pick(0.85f, 0.15f));
         Assert.Equal(Biome.Autumn, Biomes.Pick(0.2f, 0.8f));
         Assert.Equal(Biome.Temperate, Biomes.Pick(0.55f, 0.5f));
         Assert.True(Biomes.Heat(200f, 0f) > Biomes.Heat(1200f, 0f)); // hotter deep down
@@ -38,8 +38,8 @@ public class TreeTests
         Assert.True(Biomes.Tint(0.3f, 0.75f).A > 0.8f);                     // autumn tints strongly
         Assert.InRange(Biomes.Tint(0.425f, 0.65f).A, 0.2f, 0.6f);           // and halfway it blends
         Assert.Equal(BlockId.Sand, ContinentTerrain.Block(500, 500, 0f, 0.5f, 0f, Biome.Desert));
-        var edge = Biomes.Tint(0.645f, 0.455f);                             // grass by a desert's edge dries yellow
-        Assert.True(Biomes.Pick(0.645f, 0.455f) == Biome.Temperate && edge.A > 0.5f && edge.R > edge.B);
+        var edge = Biomes.Tint(0.85f, 0.31f);                               // grass by a desert's edge dries yellow
+        Assert.True(Biomes.Pick(0.85f, 0.31f) == Biome.Savanna && edge.A > 0.5f && edge.R > edge.B);
     }
 
     [Fact]
@@ -48,7 +48,11 @@ public class TreeTests
         Assert.Equal(Biome.Tundra, Biomes.Pick(0.05f, 0.5f));
         Assert.Equal(Biome.Steppe, Biomes.Pick(0.15f, 0.05f));
         Assert.Equal(Biome.Jungle, Biomes.Pick(1.05f, 0.8f));
+        Assert.Equal(Biome.Savanna, Biomes.Pick(0.95f, 0.525f)); // halfway from desert to jungle
         Assert.Equal(Biome.Volcanic, Biomes.Pick(1.4f, 0.3f));
+        Assert.Equal(Biome.Marsh, Biomes.Pick(0.55f, 0.55f, 0.8f));  // marshy ground in a mild climate
+        Assert.Equal(Biome.Tundra, Biomes.Pick(0.05f, 0.5f, 0.8f));  // but not where it's cold
+        Assert.Equal(Biome.Desert, Biomes.Pick(0.85f, 0.15f, 0.8f)); // or dry
 
         Assert.Equal(BlockId.SnowyDirt, ContinentTerrain.Block(600, 600, 0f, 0.2f, 0f, Biome.Tundra));
         Assert.Equal(BlockId.Ice, ContinentTerrain.Block(600, 600, 0f, 0.9f, 0f, Biome.Tundra));

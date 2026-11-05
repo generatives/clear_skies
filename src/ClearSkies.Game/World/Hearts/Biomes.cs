@@ -1,13 +1,13 @@
 namespace ClearSkies.Game.Generation;
 
 /// <summary>What the land on a top is like (see <see cref="Biomes"/>).</summary>
-public enum Biome : byte { Temperate, Autumn, Desert, Badlands, Tundra, Steppe, Jungle, Volcanic }
+public enum Biome : byte { Temperate, Autumn, Desert, Badlands, Tundra, Steppe, Jungle, Volcanic, Savanna, Marsh }
 
 /// <summary>
 /// Biomes by climate: each sits at a point of heat and wetness, and a top takes the nearest. Heat goes mostly by
-/// height, cold up high and hot deep down (the underworld's caves run to desert, badlands, jungle and, deepest, volcanic wastes; the heights to tundra and steppe), shifted by a broad
-/// regional field; wetness is a broad field of its own (see <see cref="ContinentTerrain.Heat"/> and
-/// <see cref="ContinentTerrain.Wet"/>). Snow and bare rock still come with height, over whatever biome is there.
+/// height, cold up high and hot deep down (the underworld's caves run to desert, savanna, badlands, jungle and, deepest, volcanic wastes; the heights to tundra and steppe), shifted by a broad
+/// regional field (see <see cref="ContinentTerrain.Heat"/>); wetness is the region's rain, raised near the water the
+/// landscape left (see <see cref="Wet"/>), so the land is green where water runs and dry where none does. Snow and bare rock still come with height, over whatever biome is there.
 ///
 /// Each biome also tints grass, leaves and plants (see <see cref="Tint"/>), blended between nearby biomes by how near
 /// each is in the climate, so the colour shifts gradually across a border while the ground blocks change at it.
@@ -20,20 +20,34 @@ public static class Biomes
     {
         (Biome.Temperate, 0.55f, 0.55f, 0f,    0f,    0f,    0f),
         (Biome.Autumn,    0.30f, 0.75f, 0.93f, 0.52f, 0.18f, 0.85f),
-        (Biome.Desert,    0.75f, 0.35f, 0.88f, 0.76f, 0.30f, 0.85f),
-        (Biome.Badlands,  0.95f, 0.10f, 0.80f, 0.50f, 0.26f, 0.75f),
+        (Biome.Desert,    0.85f, 0.10f, 0.88f, 0.76f, 0.30f, 0.85f),
+        (Biome.Badlands,  1.05f, 0.00f, 0.80f, 0.50f, 0.26f, 0.75f),
         (Biome.Tundra,    0.05f, 0.50f, 0.62f, 0.78f, 0.70f, 0.65f),
-        (Biome.Steppe,    0.15f, 0.05f, 0.72f, 0.68f, 0.36f, 0.75f),
-        (Biome.Jungle,    1.05f, 0.80f, 0.12f, 0.62f, 0.12f, 0.6f),
+        (Biome.Steppe,    0.30f, 0.25f, 0.72f, 0.68f, 0.36f, 0.75f),
+        (Biome.Jungle,    1.05f, 0.95f, 0.12f, 0.62f, 0.12f, 0.6f),
         (Biome.Volcanic,  1.35f, 0.30f, 0.45f, 0.42f, 0.36f, 0.6f),
+        // (Between desert and jungle, so the one doesn't border the other.)
+        (Biome.Savanna,   0.85f, 0.50f, 0.80f, 0.72f, 0.30f, 0.7f),
     };
 
     /// <summary>How far apart in the climate (squared) biomes' tints mix over.</summary>
     private const float TintBlend = 0.002f;
 
-    /// <summary>How hot a top at <paramref name="top"/> is, with <paramref name="regional"/> (-1 to 1) from
-    /// <see cref="ContinentTerrain.Heat"/>: cooler by a unit every 900 blocks up from the plains.</summary>
-    public static float Heat(float top, float regional) => 0.6f - (top - ContinentTerrain.PlainsLevel) / 900f + 0.6f * regional;
+    /// <summary>How hot a top at <paramref name="top"/> is, with <paramref name="regional"/> (about -1 to 1) from
+    /// <see cref="ContinentTerrain.Heat"/>: cooler by a unit every 1600 blocks up from the plains.</summary>
+    public static float Heat(float top, float regional) => 0.5f - (top - ContinentTerrain.PlainsLevel) / 1600f + 0.6f * regional;
+
+    /// <summary>How far a column's nearness to water is read off from it, in blocks: ragged edges to the green along
+    /// shores and banks, without moving it off the water.</summary>
+    public const float ShoreWarp = 24f;
+
+    /// <summary>How much wetter than its rain makes it the ground beside water is.</summary>
+    public const float WaterWet = 0.2f;
+
+    /// <summary>0-1: how wet the ground is, from the region's <paramref name="rain"/> (see <see cref="ContinentTerrain.Rain"/>)
+    /// raised by up to <see cref="WaterWet"/> near water (<paramref name="watered"/>, see <see cref="CoarseLandmass.Watered"/>):
+    /// a river through a desert runs through a band of savanna, not straight into jungle.</summary>
+    public static float Wet(float rain, float watered) => MathF.Min(1f, rain + WaterWet * watered);
 
     /// <summary>The biome nearest to (heat, wet).</summary>
     public static Biome Pick(float heat, float wet)
@@ -47,6 +61,19 @@ public static class Biomes
         }
         return best;
     }
+
+    /// <summary>The biome at (heat, wet) on ground <paramref name="marsh"/> marshy (0-1, see <see cref="CoarseLandmass.Marsh"/>):
+    /// marsh where it is marshy enough and the climate is mild to hot and not dry, else by the climate.</summary>
+    public static Biome Pick(float heat, float wet, float marsh)
+    {
+        var biome = Pick(heat, wet);
+        return marsh > 0.5f && MarshFits(biome) ? Biome.Marsh : biome;
+    }
+
+    private static bool MarshFits(Biome biome) => biome is Biome.Temperate or Biome.Autumn or Biome.Savanna or Biome.Jungle;
+
+    // A marsh's tint: dark olive.
+    private const float MarshR = 0.42f, MarshG = 0.52f, MarshB = 0.22f, MarshStrength = 0.6f;
 
     /// <summary>How far apart in the climate (squared) a desert's sandy fringe reaches, and its drying grass.</summary>
     public const float SandBlend = 0.008f, DryBlend = 0.008f;
@@ -66,7 +93,7 @@ public static class Biomes
 
     /// <summary>The tint at (heat, wet): each biome's weighted by how near it is, the nearest most, so it shifts across
     /// a border over a few dozen blocks. rgb is the colour (sRGB) and a how strongly it applies, all 0-1.</summary>
-    public static (float R, float G, float B, float A) Tint(float heat, float wet)
+    public static (float R, float G, float B, float A) Tint(float heat, float wet, float marsh = 0f)
     {
         float nearest = float.MaxValue;
         foreach (var e in Table) nearest = MathF.Min(nearest, (heat - e.Heat) * (heat - e.Heat) + (wet - e.Wet) * (wet - e.Wet));
@@ -88,6 +115,13 @@ public static class Biomes
             float k = a / dry;
             r = desert.R + k * (r - desert.R); g = desert.G + k * (g - desert.G); b = desert.B + k * (b - desert.B);
             a = dry;
+        }
+        // Marshy ground darkens toward olive over the last half of its marshiness (see Pick), fully in a marsh.
+        float m = MarshFits(Pick(heat, wet)) ? Math.Clamp((marsh - 0.25f) / 0.5f, 0f, 1f) : 0f;
+        if (m > 0f)
+        {
+            r += m * (MarshR - r); g += m * (MarshG - g); b += m * (MarshB - b);
+            a += m * (MarshStrength - a);
         }
         return (r, g, b, a);
     }

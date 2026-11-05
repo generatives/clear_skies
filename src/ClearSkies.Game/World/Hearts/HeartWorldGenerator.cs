@@ -176,7 +176,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 // Under it, a bed of sand and gravel (ash in the volcanic wastes).
                 if (water > hi)
                 {
-                    var bed = p.Biome[p.Start[col] + s] == Biome.Volcanic ? BlockId.Ash : p.Patch[col] < 0.35f ? BlockId.Gravel : BlockId.Sand;
+                    var bed = p.Biome[p.Start[col] + s] == Biome.Volcanic ? BlockId.Ash : p.Biome[p.Start[col] + s] == Biome.Marsh ? BlockId.Dirt : p.Patch[col] < 0.35f ? BlockId.Gravel : BlockId.Sand;
                     for (int y = System.Math.Max(System.Math.Max(hi - 1, lo), originY); y <= System.Math.Min(hi, originY + S - 1); y++)
                         data.Set(lx, y - originY, lz, bed);
                 }
@@ -321,6 +321,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         {
             int chunkX = pos.X * c + cx, chunkZ = pos.Z * c + cz;
             if (Lattice(chunkX, chunkZ) is not { } lattice) continue;
+            var shaped = _landscape?.At(chunkX * S + S / 2, chunkZ * S + S / 2);
             for (int lz = Trees.Reach; lz < S - Trees.Reach; lz++)
             for (int lx = Trees.Reach; lx < S - Trees.Reach; lx++)
             {
@@ -332,8 +333,9 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                     int hi = spans[s].Hi;
                     if (hi + Trees.MaxHeight < by0 || hi > by1) continue;
                     if (s + 1 == count && _landscape?.At(x, z).Water(x, z, hi, 0f) is var (w, bed) && (w > hi || bed < hi)) continue; // (not in water or a channel)
-                    float heat = Biomes.Heat(hi, _terrain.Heat(x, z)), wet = _terrain.Wet(x, z);
-                    var biome = Biomes.Pick(heat, wet);
+                    float heat = Biomes.Heat(hi, _terrain.Heat(x, z));
+                    var (wet, marsh) = Wet(x, z, shaped);
+                    var biome = Biomes.Pick(heat, wet, marsh);
                     float bare = s + 1 < count && spans[s + 1].Lo - hi < ShadeReach ? Shaded : 0f;
                     var ground = ContinentTerrain.Block(hi, hi, _terrain.Strata(x, z), _terrain.Patch(x, z), bare, biome,
                                                         Biomes.Dry(heat, wet, Biomes.SandBlend));
@@ -395,21 +397,22 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         foreach (var (lo, hi) in spans) any |= lo <= by1 && hi + Trees.MaxHeight >= by0;
         if (!any) return;
         float strata = _terrain.Strata(x, z), patch = _terrain.Patch(x, z), flora = _terrain.Flora(x, z);
-        float kind = _terrain.Kind(x, z), heat = _terrain.Heat(x, z), wet = _terrain.Wet(x, z);
+        float kind = _terrain.Kind(x, z), heat = _terrain.Heat(x, z);
+        var (wet, marsh) = Wet(x, z, _landscape?.At(x, z));
         int Voxel(int y) => (int)MathF.Floor((y - by0) / (float)c);
         for (int s = 0; s < spans.Length; s++)
         {
             var (lo, hi) = spans[s];
             float bare = s + 1 < spans.Length && spans[s + 1].Lo - hi < ShadeReach ? Shaded : 0f;
             float h = Biomes.Heat(hi, heat);
-            var biome = Biomes.Pick(h, wet);
+            var biome = Biomes.Pick(h, wet, marsh);
             float dry = Biomes.Dry(h, wet, Biomes.SandBlend);
             // Ground and the water over the top span count together: a voxel at least half full of them is filled,
             // with water where water is its top block, so a film of water or a stream shows wherever it tips its voxel
             // over half. (Under water, the ground's top is a bed of sand and gravel, as in full detail.)
             bool under = s + 1 == spans.Length && water > hi;
             int surface = under ? water : hi;
-            var bed = biome == Biome.Volcanic ? BlockId.Ash : patch < 0.35f ? BlockId.Gravel : BlockId.Sand;
+            var bed = biome == Biome.Volcanic ? BlockId.Ash : biome == Biome.Marsh ? BlockId.Dirt : patch < 0.35f ? BlockId.Gravel : BlockId.Sand;
             for (int w = System.Math.Max(Voxel(lo), 0); w <= System.Math.Min(Voxel(surface), S - 1); w++)
             {
                 int y0 = by0 + w * c, y1 = y0 + c - 1, top = System.Math.Min(surface, y1);
@@ -440,6 +443,16 @@ public sealed class HeartWorldGenerator : IWorldGenerator
 
     /// <summary>Whether a coarse voxel is open (air or a plant), for a tree's crown.</summary>
     private static bool IsOpen(BlockId id) => id == BlockId.Air || BlockRegistry.Get(id).IsCross;
+
+    /// <summary>How wet the ground at column (x, z) is for its biome (see <see cref="Biomes.Wet"/>), and how marshy (see
+    /// <see cref="CoarseLandmass.Marsh"/>): by the rain alone, and not marshy, without a landscape.</summary>
+    private (float Wet, float Marsh) Wet(float x, float z, CoarseLandmass? shaped)
+    {
+        float rain = _terrain.Rain(x, z);
+        if (shaped == null) return (rain, 0f);
+        _terrain.Warp(ref x, ref z, Biomes.ShoreWarp);
+        return (Biomes.Wet(rain, shaped.Watered(x, z)), shaped.Marsh(x, z));
+    }
 
     /// <summary>Chunk column (chunkX, chunkZ)'s solid spans and what fills them, worked out if they aren't kept.</summary>
     private ColumnProfile Profile(int chunkX, int chunkZ) => _cache.Profiles.Get(chunkX, chunkZ, () => BuildProfile(chunkX, chunkZ))!;
@@ -473,7 +486,8 @@ public sealed class HeartWorldGenerator : IWorldGenerator
 
         // Packed (only the spans there are, so profiles are small enough to share), then what's on each span's top.
         p.Pack(_spanCount, _spans, MaxSpans);
-        PlaceWater(p, _landscape?.At(x0 + S / 2, z0 + S / 2), (int)x0, (int)z0);
+        var shaped = _landscape?.At(x0 + S / 2, z0 + S / 2);
+        PlaceWater(p, shaped, (int)x0, (int)z0);
         for (int lz = 0; lz < S; lz++)
         for (int lx = 0; lx < S; lx++)
         {
@@ -485,13 +499,15 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             p.Flora[col] = _terrain.Flora(wx, wz);
             p.Woods[col] = _terrain.Woods(wx, wz);
             p.Kind[col] = _terrain.Kind(wx, wz);
-            float heat = _terrain.Heat(wx, wz), wet = _terrain.Wet(wx, wz);
+            float heat = _terrain.Heat(wx, wz);
+            var (wet, marsh) = Wet(wx, wz, shaped);
             for (int sp = 0; sp < spans; sp++)
             {
                 int hi = p.Spans[at + sp].Hi;
                 p.Bare[at + sp] = sp + 1 < spans && p.Spans[at + sp + 1].Lo - hi < ShadeReach ? Shaded : 0f;
                 float h = Biomes.Heat(hi, heat);
-                p.Biome[at + sp] = Biomes.Pick(h, wet);
+                // (Marsh only on the top span: it's by the water there.)
+                p.Biome[at + sp] = Biomes.Pick(h, wet, sp + 1 == spans ? marsh : 0f);
                 p.Dry[at + sp] = Biomes.Dry(h, wet, Biomes.SandBlend);
             }
         }
@@ -716,6 +732,10 @@ public sealed class HeartWorldGenerator : IWorldGenerator
 
     // (How far a fall drops onto dry ground before it digs a plunge pool, see PlaceWater.)
     private const int FallDrop = 4;
+
+    /// <summary>The biome of a top at height <paramref name="top"/> in column (x, z), as the blocks have it.</summary>
+    public Biome BiomeAt(float x, float z, float top) =>
+        Wet(x, z, _landscape?.At(x, z)) is var (wet, marsh) ? Biomes.Pick(Biomes.Heat(top, _terrain.Heat(x, z)), wet, marsh) : default;
 
     /// <summary>The top water block over block column (x, z), as Generate places it (see PlaceWater), or int.MinValue.</summary>
     public int WaterTopAt(int x, int z)

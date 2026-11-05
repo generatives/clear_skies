@@ -19,12 +19,22 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
     public LandscapeSettings Settings => settings;
 
     private readonly ConcurrentDictionary<(int X, int Z), Lazy<CoarseLandmass>> _landmasses = new();
+    private readonly ConcurrentDictionary<(int X, int Z), CoarseLandmass> _done = new();
+    private int _finished;
+
+    /// <summary>How many landmasses have been worked out so far.</summary>
+    public int Finished => Volatile.Read(ref _finished);
+
+    /// <summary>The landmass (x, z) is on if it's been worked out, else null (without working it out).</summary>
+    public CoarseLandmass? Done(float x, float z) => _done.TryGetValue(HeartGrid.Landmass(seed, x, z), out var coarse) ? coarse : null;
 
     /// <summary>The landmass (x, z) is on, worked out if it hasn't been.</summary>
     public CoarseLandmass At(float x, float z)
     {
         var key = HeartGrid.Landmass(seed, x, z);
-        return _landmasses.GetOrAdd(key, k => new Lazy<CoarseLandmass>(() => Shape(k), LazyThreadSafetyMode.ExecutionAndPublication)).Value;
+        var coarse = _landmasses.GetOrAdd(key, k => new Lazy<CoarseLandmass>(() => Shape(k), LazyThreadSafetyMode.ExecutionAndPublication)).Value;
+        if (_done.TryAdd(key, coarse)) Interlocked.Increment(ref _finished);
+        return coarse;
     }
 
     private CoarseLandmass Shape((int X, int Z) landmass)
@@ -48,6 +58,7 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
         while (pipes.Time < until) pipes.Step();
         FlowTree.Build(coarse, pipes.Rain, seed);
         Streams.Build(coarse, seed);
+        Watering.Build(coarse);
         Console.WriteLine($"Landscape: landmass {landmass} worn and watered in {sw.Elapsed.TotalSeconds:0.0} s ({pipes.Steps:N0} steps)");
         return coarse;
     }
@@ -70,7 +81,7 @@ public sealed class Landscape(ulong seed, LandscapeSettings settings)
 }
 
 /// <summary>What the landscape model does (see <see cref="Landscape"/>), from --terrain: comma-separated name=value
-/// pairs. off turns it off; erode-hours, settle-minutes, settle-rain (times the rain while settling), groundwater (true/false), damp (how deep water only dampens the ground) and size (column width) are the landscape's own; any other name is one of Pipes' numbers (e.g.
+/// pairs. off turns it off; erode-hours, settle-minutes, settle-rain (times the rain while settling), groundwater (true/false), damp (how deep water only dampens the ground), water-reach and water-climb (see WaterReach) and size (column width) are the landscape's own; any other name is one of Pipes' numbers (e.g.
 /// creep=1e-5, speedup=900, rain=3e-4, manning=0.035, carry=0.05; dashes ignored, any case).</summary>
 public sealed class LandscapeSettings
 {
@@ -86,6 +97,9 @@ public sealed class LandscapeSettings
     /// (narrower than a block shows nothing). 0 for no streams.</summary>
     public float StreamFlow = 10f;
     public int Size = 8;
+    /// <summary>How far water wets the land round it for the biomes, in blocks (see Landscape.Watered), and how many
+    /// blocks across each block climbed out of it counts as.</summary>
+    public float WaterReach = 64f, WaterClimb = 3f;
     public readonly List<(string Name, string Value)> Pipes = new();
 
     public static LandscapeSettings Parse(string? text)
@@ -106,6 +120,8 @@ public sealed class LandscapeSettings
                 case "groundwater": s.Groundwater = bool.Parse(value); break;
                 case "damp": s.Damp = float.Parse(value, c); break;
                 case "stream-flow": s.StreamFlow = float.Parse(value, c); break;
+                case "water-reach": s.WaterReach = float.Parse(value, c); break;
+                case "water-climb": s.WaterClimb = float.Parse(value, c); break;
                 case "size": s.Size = int.Parse(value, c); break;
                 default:
                     if (!Generation.Pipes.Set(null, name, value)) throw new ArgumentException($"--terrain: no setting called {name}");

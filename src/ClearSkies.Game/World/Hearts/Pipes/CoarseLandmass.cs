@@ -70,6 +70,9 @@ public sealed partial class CoarseLandmass
     public float[] Bend = [], Wide = [];
     public bool[] Head = [];
 
+    /// <summary>Per column, for the biomes (see <see cref="Watering"/>): how near water it is and how marshy, 0-1.</summary>
+    public float[] ColumnWatered = [], ColumnMarsh = [];
+
     /// <summary>Samples landmass <paramref name="landmass"/>'s ground over (x0, z0) to (x1, z1) in columns
     /// settings.Size blocks wide: seconds, for a whole landmass.</summary>
     public static CoarseLandmass Build(ulong seed, (int X, int Z) landmass, int x0, int z0, int x1, int z1, LandscapeSettings settings) =>
@@ -178,7 +181,7 @@ public sealed partial class CoarseLandmass
         {
             for (int i = 0; i < Nx; i++)
             {
-                float w = Math.Clamp((climate.Wet(X0 + i * size, Z0 + j * size) - 0.3f) / 0.55f, 0f, 1f);
+                float w = Math.Clamp((climate.LandscapeRain(X0 + i * size, Z0 + j * size) - 0.3f) / 0.55f, 0f, 1f);
                 Wetness[i + Nx * j] = w * w * (3 - 2 * w);
             }
         });
