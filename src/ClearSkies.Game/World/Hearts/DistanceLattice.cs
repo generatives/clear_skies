@@ -23,8 +23,8 @@ internal sealed class DistanceLattice
     public int ChunkZ { get; }
     public int First { get; }
     public int Levels { get; }
-
     private readonly float[] _distance; // corner column c's levels from c * Levels
+    private readonly float[] _rough = new float[Corners * Corners]; // corner column c's (see Roughness)
     private readonly bool[] _byAd = new bool[(Corners - 1) * (Corners - 1)]; // each cell's split: a-d, or else b-c
 
     /// <summary>Chunk column (chunkX, chunkZ)'s, from level first, levels high: its distances to fill in (see
@@ -38,6 +38,20 @@ internal sealed class DistanceLattice
     /// <summary>Corner column c's distances (c = i + Corners * k, i along X and k along Z, from the chunk column's
     /// corner), bottom up.</summary>
     public Span<float> Column(int c) => _distance.AsSpan(c * Levels, Levels);
+
+    /// <summary>How rough corner column c's top is, 0 (smooth) to 1, as the landscape that wore it says (see
+    /// HeartWorldGenerator.Wear); 0 unless set.</summary>
+    public void SetRoughness(int c, float rough) => _rough[c] = rough;
+
+    /// <summary>How rough block column (lx, lz)'s top is: its cell's corners' blended.</summary>
+    public float Roughness(int lx, int lz)
+    {
+        int i = Math.Min(lx / Cell, Corners - 2), k = Math.Min(lz / Cell, Corners - 2);
+        float tx = (lx - i * Cell) / (float)Cell, tz = (lz - k * Cell) / (float)Cell;
+        float near = _rough[i + Corners * k] + (_rough[i + 1 + Corners * k] - _rough[i + Corners * k]) * tx;
+        float far = _rough[i + Corners * (k + 1)] + (_rough[i + 1 + Corners * (k + 1)] - _rough[i + Corners * (k + 1)]) * tx;
+        return near + (far - near) * tz;
+    }
 
     /// <summary>Picks each cell's diagonal (see <see cref="Interpolate"/>), once its distances are filled in. It isn't
     /// changed after that, so it can be shared between threads.</summary>
