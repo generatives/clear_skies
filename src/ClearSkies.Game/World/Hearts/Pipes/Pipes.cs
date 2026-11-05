@@ -1,7 +1,7 @@
 namespace ClearSkies.Game.Generation;
 
 /// <summary>
-/// Surface water on a <see cref="Land"/> by the pipes rule: each face (each link, see Land) carries a flow that remembers itself from step to
+/// Surface water on a <see cref="CoarseLandmass"/> by the pipes rule: each face (each link, see CoarseLandmass) carries a flow that remembers itself from step to
 /// step, pushed by the difference in water level across it and held back by friction (the local inertial form of
 /// shallow water, Bates et al. 2010):
 ///
@@ -28,36 +28,34 @@ public sealed partial class Pipes
     /// the step length by how fast a wave crosses them.</summary>
     public float WaveDepth = 1f;
 
-    public readonly float[] Depth;
-    /// <summary>Each link's flow over the last step, in blocks³ a second, out of its node (so a face's two links carry
-    /// it with opposite signs).</summary>
-    public float[] Flow { get; private set; }
+    /// <summary>Each node's water (the landmass model's, see <see cref="CoarseLandmass.Depth"/>).</summary>
+    public float[] Depth => _coarse.Depth;
+    /// <summary>Each link's flow over the last step (the landmass model's, see <see cref="CoarseLandmass.Flow"/>).</summary>
+    public float[] Flow { get => _coarse.Flow; private set => _coarse.Flow = value; }
     private float[] _limited; // where Apply writes the flows it limits, then swapped with Flow
     public double Time;
     /// <summary>Time spent in each part of a step, for finding what's slow.</summary>
     public readonly System.Diagnostics.Stopwatch FlowTime = new(), ApplyTime = new(), GroundTime = new(), ErodeTime = new();
     public int Steps;
 
-    private readonly Land _land;
+    private readonly CoarseLandmass _coarse;
     private readonly float[] _level;
     private readonly float _width, _area;
-    private readonly int[] _faceStart, _other; // the land's LinkStart and LinkTo
+    private readonly int[] _faceStart, _other; // the landmass model's LinkStart and LinkTo
     private readonly float[] _rain, _ratio;
     private float _deepest;
 
-    public Pipes(Land land)
+    public Pipes(CoarseLandmass coarse)
     {
-        _land = land;
-        _width = land.Size; _area = land.Size * land.Size;
-        Depth = new float[land.Nodes];
-        Flow = new float[land.Links];
-        _limited = new float[land.Links];
-        _ratio = new float[land.Nodes];
-        _level = new float[land.Nodes];
-        _faceStart = land.LinkStart; _other = land.LinkTo;
+        _coarse = coarse;
+        _width = coarse.Size; _area = coarse.Size * coarse.Size;
+        _limited = new float[coarse.Links];
+        _ratio = new float[coarse.Nodes];
+        _level = new float[coarse.Nodes];
+        _faceStart = coarse.LinkStart; _other = coarse.LinkTo;
 
-        _rain = new float[land.Nodes];
-        for (int c = 0; c < land.Columns; c++) if (land.HasLand(c)) _rain[land.TopNode(c)] = land.Wetness[c];
+        _rain = new float[coarse.Nodes];
+        for (int c = 0; c < coarse.Columns; c++) if (coarse.HasLand(c)) _rain[coarse.TopNode(c)] = coarse.Wetness[c];
     }
 
     /// <summary>Sets each hollow's water to where what runs into it balances what it soaks away, up to where it spills
@@ -68,17 +66,17 @@ public sealed partial class Pipes
     /// is. Returns how many nodes it wets.</summary>
     public int FillHollows()
     {
-        var land = _land;
-        var spill = new float[land.Nodes];
-        var parent = new int[land.Nodes];
-        var order = new List<int>(land.Nodes);
+        var coarse = _coarse;
+        var spill = new float[coarse.Nodes];
+        var parent = new int[coarse.Nodes];
+        var order = new List<int>(coarse.Nodes);
         Array.Fill(spill, float.PositiveInfinity);
         Array.Fill(parent, -1);
         var queue = new PriorityQueue<int, float>();
-        for (int n = 0; n < land.Nodes; n++)
+        for (int n = 0; n < coarse.Nodes; n++)
             for (int k = _faceStart[n]; k < _faceStart[n + 1]; k++)
-                if (_other[k] < 0 && land.Floor[n] < spill[n]) { spill[n] = land.Floor[n]; queue.Enqueue(n, spill[n]); }
-        var done = new bool[land.Nodes];
+                if (_other[k] < 0 && coarse.Floor[n] < spill[n]) { spill[n] = coarse.Floor[n]; queue.Enqueue(n, spill[n]); }
+        var done = new bool[coarse.Nodes];
         while (queue.TryDequeue(out int n, out float level))
         {
             if (done[n] || level > spill[n]) continue;
@@ -88,7 +86,7 @@ public sealed partial class Pipes
             {
                 int m = _other[k];
                 if (m < 0 || done[m]) continue;
-                float to = Math.Max(level, land.LinkBottom(n, k));
+                float to = Math.Max(level, coarse.LinkBottom(n, k));
                 if (to < spill[m]) { spill[m] = to; parent[m] = n; queue.Enqueue(m, to); }
             }
         }
@@ -96,8 +94,8 @@ public sealed partial class Pipes
         // Each hollow: the nodes under its spill level, named by the one its water leaves by (following the ways out
         // while the level stays the same), lowest floor first.
         const float Under = 1e-3f;
-        bool Flooded(int n) => !float.IsInfinity(spill[n]) && spill[n] - land.Floor[n] > Under;
-        var hollow = new int[land.Nodes];
+        bool Flooded(int n) => !float.IsInfinity(spill[n]) && spill[n] - coarse.Floor[n] > Under;
+        var hollow = new int[coarse.Nodes];
         Array.Fill(hollow, -1);
         foreach (int n in order)
         {
@@ -112,10 +110,10 @@ public sealed partial class Pipes
             if (!members.TryGetValue(hollow[n], out var list)) members[hollow[n]] = list = new List<int>();
             list.Add(n);
         }
-        foreach (var list in members.Values) list.Sort((a, b) => land.Floor[a].CompareTo(land.Floor[b]));
+        foreach (var list in members.Values) list.Sort((a, b) => coarse.Floor[a].CompareTo(coarse.Floor[b]));
 
         // The rain, gathered down the ways out (the reverse of the flood's order reaches each node after all that run into it).
-        var gathered = new double[land.Nodes];
+        var gathered = new double[coarse.Nodes];
         double rain = Rain * _area, soak = Soak * _area;
         int wet = 0;
         for (int i = order.Count - 1; i >= 0; i--)
@@ -127,11 +125,11 @@ public sealed partial class Pipes
             {
                 var list = members[n];
                 int keeps = (int)Math.Min(list.Count, Math.Floor(into / soak));
-                float level = keeps >= list.Count ? spill[n] : land.Floor[list[keeps]];
+                float level = keeps >= list.Count ? spill[n] : coarse.Floor[list[keeps]];
                 for (int j = 0; j < list.Count; j++)
                 {
                     int m = list[j];
-                    float full = j < keeps ? Math.Min(level, land.Ceiling[m]) - land.Floor[m] : 0f;
+                    float full = j < keeps ? Math.Min(level, coarse.Ceiling[m]) - coarse.Floor[m] : 0f;
                     Depth[m] = Math.Max(0f, full);
                     if (full > 0) wet++;
                 }
@@ -145,7 +143,7 @@ public sealed partial class Pipes
     /// <summary>One step of the whole model; returns its length in seconds.</summary>
     public float Step()
     {
-        var land = _land;
+        var coarse = _coarse;
         if (Steps % 16 == 0) _deepest = Deepest();
         float dt = Math.Min(MostStep, Courant * _width / MathF.Sqrt(G * Math.Clamp(_deepest, 0.01f, WaveDepth)));
         float weir = 0.385f * MathF.Sqrt(2 * G), n2 = Manning * Manning;
@@ -153,13 +151,12 @@ public sealed partial class Pipes
         // Each face's flow, worked out by the node on its lower-numbered side (or the node a drain leads from) and written
         // to both its links.
         FlowTime.Start();
-        var flow = Flow; var depth = Depth; var floor = land.Floor; var start = _faceStart; var other = _other;
-        var back = land.LinkBack; var linkTop = land.LinkTop; var linkLength = land.LinkLength;
-        float waveDepth = WaveDepth, width = land.FaceWidth;
-        Parallel.For(0, (land.Nodes + 1023) / 1024, block =>
+        var flow = Flow; var depth = Depth; var floor = coarse.Floor; var start = _faceStart; var other = _other;
+        var back = coarse.LinkBack; var linkTop = coarse.LinkTop; var linkLength = coarse.LinkLength;
+        float waveDepth = WaveDepth, width = coarse.FaceWidth;
+        ForBlocks(coarse.Nodes, (first, end) =>
         {
-            int end = Math.Min(depth.Length, (block + 1) * 1024);
-            for (int a = block * 1024; a < end; a++)
+            for (int a = first; a < end; a++)
             {
                 float floorA = floor[a], upA = floorA + depth[a];
                 for (int k = start[a]; k < start[a + 1]; k++)
@@ -212,15 +209,14 @@ public sealed partial class Pipes
     /// depth changes by what flows in and out, rain and soak.</summary>
     private void Apply(float dt)
     {
-        var land = _land;
+        var coarse = _coarse;
         // Locals, so the loops keep them in registers.
         var flow = Flow; var depth = Depth; var ratio = _ratio; var rainOn = _rain; var start = _faceStart;
         var other = _other; var limited = _limited;
         float area = _area, rain = Rain * dt;
-        Parallel.For(0, (land.Nodes + 4095) / 4096, block =>
+        ForBlocks(coarse.Nodes, (first, end) =>
         {
-            int end = Math.Min(depth.Length, (block + 1) * 4096);
-            for (int n = block * 4096; n < end; n++)
+            for (int n = first; n < end; n++)
             {
                 float outs = 0;
                 for (int k = start[n]; k < start[n + 1]; k++) outs += Math.Max(0f, flow[k]);
@@ -231,10 +227,9 @@ public sealed partial class Pipes
         // Each node's water.
         var soaking = Soaking; var springs = Springs;
         float soak = Soak * dt;
-        Parallel.For(0, (land.Nodes + 4095) / 4096, block =>
+        ForBlocks(coarse.Nodes, (first, end) =>
         {
-            int end = Math.Min(depth.Length, (block + 1) * 4096);
-            for (int n = block * 4096; n < end; n++)
+            for (int n = first; n < end; n++)
             {
                 // Each link's flow cut down by the share its giving side can give (both links of a face come out the same).
                 float net = 0, mine = ratio[n];
@@ -274,30 +269,32 @@ public sealed partial class Pipes
     private float Deepest()
     {
         float most = 0;
-        object gate = new();
-        Parallel.For(0, (_land.Nodes + 65535) / 65536, () => 0f, (block, _, local) =>
-        {
-            int end = Math.Min(_land.Nodes, (block + 1) * 65536);
-            for (int n = block * 65536; n < end; n++) local = Math.Max(local, Depth[n]);
-            return local;
-        }, local => { lock (gate) most = Math.Max(most, local); });
+        foreach (float depth in Depth) most = Math.Max(most, depth);
         return most;
     }
+
+    /// <summary>How many nodes each parallel task takes (see ForBlocks).</summary>
+    private const int Block = 4096;
+
+    /// <summary>Runs <paramref name="body"/> over nodes 0 to <paramref name="count"/> in parallel, Block at a time (each
+    /// call given its first node and the one past its last).</summary>
+    private static void ForBlocks(int count, Action<int, int> body) =>
+        Parallel.For(0, (count + Block - 1) / Block, block => body(block * Block, Math.Min(count, (block + 1) * Block)));
 
     /// <summary>The water budget right now, in blocks³ a second: rain on the land, what leaves it over its edges, and
     /// what soaks in.</summary>
     public (double Rain, double Drained, double Soaked, double Stored) Budget()
     {
-        var land = _land;
+        var coarse = _coarse;
         double rain = 0, drained = 0, soaked = 0, stored = 0;
-        for (int n = 0; n < land.Nodes; n++)
+        for (int n = 0; n < coarse.Nodes; n++)
         {
             rain += Rain * _rain[n] * _area;
             if (Groundwater != null) soaked += Soaking![n] - Springs![n];
             else if (Depth[n] > 0) soaked += Soak * _area;
             stored += Depth[n] * _area;
         }
-        for (int k = 0; k < land.Links; k++) if (_other[k] < 0 && Flow[k] > 0) drained += Flow[k];
+        for (int k = 0; k < coarse.Links; k++) if (_other[k] < 0 && Flow[k] > 0) drained += Flow[k];
         return (rain, drained, soaked, stored);
     }
 

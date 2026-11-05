@@ -1,14 +1,18 @@
 namespace ClearSkies.Game.Generation;
 
 /// <summary>
-/// One landmass as the pipes model sees it: columns of Size blocks on a side, each sampled at the block column at its
+/// One landmass's coarse model, the one kept for it (see <see cref="Landscape"/>): columns of Size blocks on a side, each sampled at the block column at its
 /// middle, which is on a corner of the generator's lattice (see DistanceLattice; column i's middle is X0 + i Size),
 /// and in each column the open gaps above its solid spans (nodes). A node's floor is the top of the span under it and
 /// its ceiling the bottom of the span over it (none for the top one, open to the sky). Nodes of neighbouring columns
 /// whose gaps overlap share a face (a link from each side). Where a node's gap reaches down into the open space under all of a neighbour's land
 /// (or the neighbour has none), it has a drain face there: water through it falls off the land.
+///
+/// Built by <see cref="Build"/> (seconds: it samples the whole landmass), then worked on in place: the pipes model
+/// (see <see cref="Pipes"/>) wears its floors and runs its water, <see cref="FlowTree"/> and <see cref="Streams"/> add
+/// where the water goes, and HeartWorldGenerator reads blocks' ground and water from it (see CoarseLandmass.Water.cs).
 /// </summary>
-public sealed class Land
+public sealed partial class CoarseLandmass
 {
     public const float NoCeiling = 1e9f;
 
@@ -41,8 +45,40 @@ public sealed class Land
     /// <summary>Rain on each column's top node, as a fraction of the most (by the climate's wetness).</summary>
     public readonly float[] Wetness;
 
-    public Land(ulong seed, (int X, int Z) landmass, int x0, int z0, int x1, int z1, int size)
+    public readonly LandscapeSettings Settings;
+
+    /// <summary>Each node's floor as sampled, before it was worn.</summary>
+    public readonly float[] StartFloor;
+
+    /// <summary>Each node's water over its floor, and each link's flow (blocks³ a second, out of its node, so a face's
+    /// two links carry it with opposite signs), as the pipes model leaves them.</summary>
+    public readonly float[] Depth;
+    public float[] Flow;
+    /// <summary>Each node's water table, if the model runs groundwater.</summary>
+    public float[]? Groundwater;
+
+    /// <summary>The flow tree (see <see cref="FlowTree"/>): each node's main way out, the node there (-1 over the land's
+    /// edge, or none), and the water it carries, in columns' worth of rain.</summary>
+    public int[] Down = [];
+    public (sbyte X, sbyte Z)[] Way = [];
+    public float[] Carried = [];
+
+    /// <summary>Streams (see <see cref="Streams"/>): each node's shown stream's flow (0 for none), its main stream in
+    /// (-1 for none), its meander and width factor, and whether it springs here.</summary>
+    public float[] Shown = [];
+    public int[] Up = [];
+    public float[] Bend = [], Wide = [];
+    public bool[] Head = [];
+
+    /// <summary>Samples landmass <paramref name="landmass"/>'s ground over (x0, z0) to (x1, z1) in columns
+    /// settings.Size blocks wide: seconds, for a whole landmass.</summary>
+    public static CoarseLandmass Build(ulong seed, (int X, int Z) landmass, int x0, int z0, int x1, int z1, LandscapeSettings settings) =>
+        new(seed, landmass, x0, z0, x1, z1, settings);
+
+    private CoarseLandmass(ulong seed, (int X, int Z) landmass, int x0, int z0, int x1, int z1, LandscapeSettings settings)
     {
+        int size = settings.Size;
+        Settings = settings;
         Size = size; X0 = x0; Z0 = z0;
         Nx = (x1 - x0) / size; Nz = (z1 - z0) / size;
         int columns = Nx * Nz;
@@ -146,6 +182,9 @@ public sealed class Land
                 Wetness[i + Nx * j] = w * w * (3 - 2 * w);
             }
         });
+        StartFloor = (float[])Floor.Clone();
+        Depth = new float[nodes];
+        Flow = new float[LinkTo.Length];
     }
 
     /// <summary>The bottom of node n's link k's opening: the higher of its nodes' floors (as they are now; erosion moves
