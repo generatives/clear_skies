@@ -178,7 +178,7 @@ public sealed partial class Pipes
                     {
                         h = Math.Min(h, waveDepth);
                         float old = flow[k] / width, slope = (upB - upA) / linkLength[k];
-                        float next = (old - G * dt * h * slope) / (1 + G * dt * n2 * Math.Abs(old) / (h * h * MathF.Cbrt(h)));
+                        float next = (old - G * dt * h * slope) / (1 + G * dt * n2 * Math.Abs(old) / (h * h * ExactMath.Cbrt(h)));
                         float most = h * MathF.Sqrt(G * h); // no faster than a wave
                         q = Math.Clamp(next, -most, most) * width;
                     }
