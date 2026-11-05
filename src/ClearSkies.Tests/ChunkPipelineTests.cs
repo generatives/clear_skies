@@ -44,14 +44,14 @@ public class ChunkPipelineTests
     private sealed class Asked : ExternalStage
     {
         public int Requests;
-        public bool Lit;
+        public bool Lit, CallsBack;
         private readonly Stage _after;
         public Asked(Stage after) => _after = after;
         public override IReadOnlyList<Input> InputsFor(PipelineGrid grid) => new[] { new Input(_after, Relation.Self) };
         public override StageResult Request(PipelineChunk record)
         {
             Requests++;
-            return Lit ? StageResult.Done() : StageResult.Waiting;
+            return Lit ? StageResult.Done() : CallsBack ? StageResult.Started : StageResult.Waiting;
         }
     }
 
@@ -429,5 +429,30 @@ public class ChunkPipelineTests
         Assert.Equal(asked + 1, light.Requests);
         pipeline.Update(Plenty);
         Assert.Equal(asked + 1, light.Requests); // not asked again
+    }
+
+    [Fact]
+    public void An_external_stage_started_is_not_asked_again_until_its_system_finishes_it_or_an_input_changes()
+    {
+        var pipeline = new ChunkPipeline(work => work());
+        var grid = pipeline.AddGrid("world");
+        var gen = pipeline.Add(new Gen());
+        var bake = pipeline.Add(new Asked(gen) { CallsBack = true });
+        var key = grid.Key(P(0));
+        pipeline.Want(key, Purpose.Draw);
+        for (int i = 0; i < 4; i++) pipeline.Update(Plenty);
+        Assert.Equal(SlotState.Running, pipeline.Get(key)!.State(bake));
+        Assert.Equal(1, bake.Requests);
+
+        // An input changing asks it again; a finish for that ask then makes it done, once.
+        pipeline.Invalidate(key, gen);
+        for (int i = 0; i < 4; i++) pipeline.Update(Plenty);
+        Assert.Equal(2, bake.Requests);
+        pipeline.Finished(key, bake);
+        Assert.Equal(SlotState.Done, pipeline.Get(key)!.State(bake));
+        pipeline.Finished(key, bake); // not waiting on it: nothing
+        pipeline.Update(Plenty);
+        Assert.Equal(2, bake.Requests);
+        Assert.Equal(SlotState.Done, pipeline.Get(key)!.State(bake));
     }
 }

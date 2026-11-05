@@ -91,14 +91,19 @@ public abstract class WorkerStage<TOut> : WorkerStage where TOut : class
 }
 
 /// <summary>What a frame or external stage answers: done, with its output and what changed, or not yet (asked again
-/// next frame). An external stage can say when it's asked again instead (<see cref="Again"/>).</summary>
-public readonly record struct StageResult(bool Finished, object? Output, Change Change, bool Changed = true, double Again = 0)
+/// next frame). An external stage can say when it's asked again instead (<see cref="Again"/>), or that its system will
+/// say when it's done (<see cref="CallsBack"/>).</summary>
+public readonly record struct StageResult(bool Finished, object? Output, Change Change, bool Changed = true, double Again = 0,
+                                          bool CallsBack = false)
 {
     public static StageResult Done(object? output = null) => new(true, output, Change.All);
     public static StageResult Done(object? output, Change change) => new(true, output, change);
     public static readonly StageResult Waiting = new(false, null, Change.All);
     /// <summary>Not yet, and not till an input changes: it isn't asked again till then.</summary>
     public static readonly StageResult WaitingForInputs = new(false, null, Change.All, Again: double.PositiveInfinity);
+    /// <summary>Not yet, and its system has it: it isn't asked again till the system says it's done (see
+    /// <see cref="ChunkPipeline.Finished"/>), or an input changes.</summary>
+    public static readonly StageResult Started = new(false, null, Change.All, CallsBack: true);
     /// <summary>Done, with nothing its readers read changed: they don't run again (two stages reading each other's
     /// output, on different chunks, settle).</summary>
     public static StageResult Same(object? output) => new(true, output, Change.All, Changed: false);
@@ -116,7 +121,8 @@ public abstract class FrameStage : Stage
 }
 
 /// <summary>A stage another system does in its own time (first light): the pipeline asks for it every frame until it
-/// answers done, or when it says (see <see cref="StageResult.Again"/>).</summary>
+/// answers done, or when it says (see <see cref="StageResult.Again"/>), or till the system says it's done (see
+/// <see cref="StageResult.Started"/>).</summary>
 public abstract class ExternalStage : Stage
 {
     public sealed override Executor RunsOn => Executor.External;

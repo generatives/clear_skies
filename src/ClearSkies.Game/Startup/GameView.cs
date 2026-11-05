@@ -96,7 +96,7 @@ public sealed class GameView : IDisposable
         if (_checkerBounce is { } spread) light.BounceSpread = spread;
         host.AddSystem(light, SystemStage.PreRender);
         var (_, upload) = MeshStages.Add(world.ChunkPipeline, Meshes); // every chunk meshed in the chunk pipeline
-        LightStages.Add(world.ChunkPipeline, residency, light, renderer, upload, host.Time, world.ChunkLoad); // lit and shown
+        var firstBake = LightStages.Add(world.ChunkPipeline, residency, light, renderer, upload, host.Time, world.ChunkLoad); // lit and shown
         host.AddSystem(new BlockModelSystem(host.World, BlockModels), SystemStage.PreRender); // block entities -> RenderedModel
         host.AddSystem(new ClimateTintSystem(renderer, new BiomeTintMap(world.Seed, world.Landscape)), SystemStage.RenderWorld); // grass and leaves coloured by biome
 
@@ -108,6 +108,7 @@ public sealed class GameView : IDisposable
         host.AddSystem(new ThrusterFlameSystem(host.World), SystemStage.Frame); // aims each Fan's flames
         host.AddSystem((ISystem)_particles, SystemStage.Frame); // moves every emitter's particles
         var chunks = new ChunkRenderSystem(host.World, renderer, volume);
+        chunks.FirstBaked += firstBake.Baked;
         host.AddSystem(chunks, SystemStage.RenderWorld);
         // Distant terrain drawn coarse past full detail, in levels (--lod-levels, and the Distant Terrain panel).
         var load = world.ChunkLoad;
