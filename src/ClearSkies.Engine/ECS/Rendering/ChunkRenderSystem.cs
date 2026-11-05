@@ -423,6 +423,8 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         ImGui.Text($"Draw calls (smoothed): chunks {_submitMs:F2} ms, model blocks {_modelsMs:F2} ms, translucent {_translucentMs:F2} ms");
         // One count a row, each at a fixed place, so the rows don't shift as the numbers change.
         ImGui.Text("First bakes:");
+        // Past the longest label, in this font's size.
+        float numbersAt = ImGui.GetCursorPosX() + ImGui.CalcTextSize("  quads listed this frame").X + 2 * ImGui.GetStyle().ItemSpacing.X;
         Row("  marked", _markedBakeFirst.Count);
         Row("  meshed and Rendered", _bakeFirst.Count);
         Row("  nearest looked at", _nearestToBake.Count);
@@ -430,10 +432,10 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
         Row("    nothing to bake", _firstNothing);
         Row("    not in light store", _firstNoStore);
         Row("  quads listed this frame", _bakedQuads);
-        static void Row(string label, int value)
+        void Row(string label, int value)
         {
             ImGui.Text(label);
-            ImGui.SameLine(220);
+            ImGui.SameLine(numbersAt);
             ImGui.Text($"{value:N0}");
         }
         var (used, capacity) = _renderer.LightmapArenaUse;
