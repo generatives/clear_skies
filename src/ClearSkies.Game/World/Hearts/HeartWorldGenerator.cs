@@ -440,9 +440,9 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         int first = (int)MathF.Floor(low / Cell) - 1, last = (int)MathF.Ceiling(top / Cell) + 1;
         var lattice = new DistanceLattice(chunkX, chunkZ, first, last - first + 1);
 
-        // Up each corner's column. Going up a level, a distance changes by no more than Steepest (see Inside), so where
+        // Up each corner's column. Going up a level, a distance changes by no more than steepest (see Inside), so where
         // it's further than that past Reach it's still past Reach a level up: as far as that goes, no need to work it out.
-        const float Steepest = Cell * (HeartGrid.VerticalScale + 0.5f);
+        float steepest = Cell * (HeartGrid.VerticalScale + 0.5f);
         for (int k = 0; k < N; k++)
         for (int i = 0; i < N; i++)
         {
@@ -459,7 +459,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 float y = (first + j) * Cell;
                 float d = MathF.Min(InsideAt(px, pz, lift, wearNoise, height[c], y), (y - bottom[c]) * HeartGrid.VerticalScale);
                 float clamped = Math.Clamp(d, -DistanceLattice.Reach, DistanceLattice.Reach);
-                int same = 1 + System.Math.Max(0, (int)((MathF.Abs(d) - DistanceLattice.Reach) / Steepest));
+                int same = 1 + System.Math.Max(0, (int)((MathF.Abs(d) - DistanceLattice.Reach) / steepest));
                 for (int n = 0; n < same && j < lattice.Levels; n++) column[j++] = clamped;
             }
         }
