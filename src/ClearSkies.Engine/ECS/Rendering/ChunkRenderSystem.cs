@@ -421,14 +421,21 @@ public sealed class ChunkRenderSystem : IRenderSystem, IDebugUiSystem
             ImGui.Text($"{name}: {chunks:N0} chunks drawn, {opaque:N0} opaque quads, {cutout:N0} cut-out quads");
         }
         ImGui.Text($"Draw calls (smoothed): chunks {_submitMs:F2} ms, model blocks {_modelsMs:F2} ms, translucent {_translucentMs:F2} ms");
+        // One count a row, each at a fixed place, so the rows don't shift as the numbers change.
         ImGui.Text("First bakes:");
-        ImGui.Text($"  marked                {_markedBakeFirst.Count,8:N0}");
-        ImGui.Text($"  meshed and Rendered   {_bakeFirst.Count,8:N0}");
-        ImGui.Text($"  nearest looked at     {_nearestToBake.Count,8}");
-        ImGui.Text($"    listed              {_firstListed,8}");
-        ImGui.Text($"    nothing to bake     {_firstNothing,8}");
-        ImGui.Text($"    not in light store  {_firstNoStore,8}");
-        ImGui.Text($"  quads listed (frame)  {_bakedQuads,8:N0}");
+        Row("  marked", _markedBakeFirst.Count);
+        Row("  meshed and Rendered", _bakeFirst.Count);
+        Row("  nearest looked at", _nearestToBake.Count);
+        Row("    listed", _firstListed);
+        Row("    nothing to bake", _firstNothing);
+        Row("    not in light store", _firstNoStore);
+        Row("  quads listed this frame", _bakedQuads);
+        static void Row(string label, int value)
+        {
+            ImGui.Text(label);
+            ImGui.SameLine(220);
+            ImGui.Text($"{value:N0}");
+        }
         var (used, capacity) = _renderer.LightmapArenaUse;
         ImGui.Text($"Light maps: {used * 4 / 1048576.0:F1} of {capacity * 4 / 1048576.0:F1} MB; baked per frame (smoothed): " +
                    $"{_bakedMeshesEma:F1} meshes, {_bakedGroupsEma * Renderer.LightmapQuadsPerGroup:N0} quads at most");
