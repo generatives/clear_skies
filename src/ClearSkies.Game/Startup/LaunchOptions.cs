@@ -64,9 +64,10 @@ public sealed record LaunchOptions
     /// </summary>
     public bool Headless { get; init; }
 
-    /// <summary>--piece-size N: pieces of land N times as wide (and tall) as the hearts grid's own (see
-    /// HeartGrid.WidenPieces). 2 by default.</summary>
-    public float PieceSize { get; init; } = 2f;
+    /// <summary>--piece-width W, --piece-height H: how wide and tall pieces of land are, in blocks (see
+    /// HeartGrid.SetPieceSize).</summary>
+    public float PieceWidth { get; init; } = ClearSkies.Game.Generation.HeartGrid.DefaultPieceWidth;
+    public float PieceHeight { get; init; } = ClearSkies.Game.Generation.HeartGrid.DefaultPieceHeight;
 
     /// <summary>--terrain name=value,...: how landmasses are worn and watered (see LandscapeSettings), e.g.
     /// --terrain creep=1e-5,erode-hours=2 or --terrain off. A world's chunks already saved keep their old ground: try
@@ -96,7 +97,8 @@ public sealed record LaunchOptions
         if (int.TryParse(Value("--lod-levels"), out int levels)) o = o with { LodLevels = System.Math.Clamp(levels, 0, 2) };
         if (float.TryParse(Value("--lod"), NumberStyles.Float, CultureInfo.InvariantCulture, out float lod)) o = o with { LodDistance = lod };
         if (args.Contains("--no-lod")) o = o with { LodLevels = 0 };
-        if (Value("--piece-size") is { } piece) o = o with { PieceSize = float.Parse(piece, CultureInfo.InvariantCulture) };
+        if (Value("--piece-width") is { } width) o = o with { PieceWidth = float.Parse(width, CultureInfo.InvariantCulture) };
+        if (Value("--piece-height") is { } height) o = o with { PieceHeight = float.Parse(height, CultureInfo.InvariantCulture) };
         if (Value("--terrain") is { } terrain) o = o with { Terrain = LandscapeSettings.Parse(terrain) };
         if (Value("--view-distance") is { } view) o = o with { ViewDistance = float.Parse(view, CultureInfo.InvariantCulture) };
         return o with { FlightTest = args.Contains("--flight-test") };
