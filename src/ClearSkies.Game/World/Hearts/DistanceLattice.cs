@@ -24,7 +24,7 @@ internal sealed class DistanceLattice
     public int First { get; }
     public int Levels { get; }
     /// <summary>The landscape that wore it, or null (not worn).</summary>
-    public Shaped? Worn { get; set; }
+    public CoarseLandmass? Worn { get; set; }
 
     private readonly float[] _distance; // corner column c's levels from c * Levels
     private readonly bool[] _byAd = new bool[(Corners - 1) * (Corners - 1)]; // each cell's split: a-d, or else b-c
