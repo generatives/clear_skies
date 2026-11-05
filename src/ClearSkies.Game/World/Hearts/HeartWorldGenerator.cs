@@ -18,7 +18,7 @@ namespace ClearSkies.Game.Generation;
 /// chunk by chunk.
 ///
 /// Given a <see cref="Landscape"/>, the land is worn as it says (each corner's top moved by the wear under it, see
-/// Wear) and water fills to the levels it leaves over each top (see <see cref="Shaped.WaterLevel"/>).
+/// Wear) and water fills to the levels it leaves over each top (see <see cref="CoarseLandmass.WaterLevel"/>).
 /// </summary>
 public sealed class HeartWorldGenerator : IWorldGenerator
 {
@@ -554,9 +554,9 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     }
 
     /// <summary>Moves each corner's top (where its distance last falls through zero going up) by the wear under it
-    /// (see <see cref="Shaped.Shift"/>): worn down, it's cut to a flat face that much lower; built up, filled to one
+    /// (see <see cref="CoarseLandmass.Shift"/>): worn down, it's cut to a flat face that much lower; built up, filled to one
     /// that much higher. Ground under the top stays as it is.</summary>
-    private static void Wear(DistanceLattice lattice, Shaped shaped)
+    private static void Wear(DistanceLattice lattice, CoarseLandmass shaped)
     {
         const int N = DistanceLattice.Corners, Cell = DistanceLattice.Cell;
         float scale = HeartGrid.VerticalScale, reach = DistanceLattice.Reach;
@@ -585,13 +585,13 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     }
 
     /// <summary>The landscape's water over chunk column (x0, z0): each block column's water and the ground cut under it
-    /// (see Shaped.Water), a thin film where it's beside dry ground lower than it, springs at streams' heads
+    /// (see CoarseLandmass.Water), a thin film where it's beside dry ground lower than it, springs at streams' heads
     /// (PlaceSprings), and falls wherever water would stand in a face: a column beside water more than a block over its
     /// own surface (its water, or its ground if dry) has water falling down it from that water to its surface, or past
     /// the land's edge to the bottom of the land it falls from. A fall that drops more than FallDrop onto dry ground
     /// lands in a plunge pool. Worked out over the chunk column and Pad blocks round it, so both sides of a chunk border
     /// agree.</summary>
-    private void PlaceWater(ColumnProfile p, Shaped? shaped, int x0, int z0)
+    private void PlaceWater(ColumnProfile p, CoarseLandmass? shaped, int x0, int z0)
     {
         if (shaped == null) return;
         Span<(short Lo, short Hi)> spans = stackalloc (short, short)[MaxSpans];
@@ -653,11 +653,11 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     private const float SpringReach = 6f, SpringWide = 2f;
     private const int SpringRoom = 2;
 
-    /// <summary>Springs: where a stream starts (see Shaped.Stream's Head), it comes out of a tunnel in the hill behind
+    /// <summary>Springs: where a stream starts (see CoarseLandmass.Stream's Head), it comes out of a tunnel in the hill behind
     /// its start, as wide as the stream (SpringWide at least): going back along its line SpringReach blocks, each column
     /// with ground over the water is open from the water up SpringRoom blocks, always under at least its top block: so
     /// the water comes out from under the ground, through a crack where the hill is low and a tunnel where it's high.</summary>
-    private void PlaceSprings(ColumnProfile p, Shaped shaped, int x0, int z0)
+    private void PlaceSprings(ColumnProfile p, CoarseLandmass shaped, int x0, int z0)
     {
         int size = shaped.Size;
         Span<(short Lo, short Hi)> spans = stackalloc (short, short)[MaxSpans];
