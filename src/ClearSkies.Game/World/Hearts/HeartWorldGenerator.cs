@@ -304,9 +304,9 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     private readonly BlockId[] _logBlock = new BlockId[S * S * S], _leafBlock = new BlockId[S * S * S];
 
     /// <summary>The trees and cacti of a coarse chunk (voxels 2^level blocks on a side), as they grow in full detail
-    /// (see Generate), shrunk: each one's blocks counted into the voxels they fall in. An open voxel takes its logs, or
-    /// else its leaves, if there are enough of them to cover about half a face of it: so trunks show where they're thick
-    /// enough to see from that far, and crowns stay about their size.</summary>
+    /// (see Generate), shrunk: each one's blocks counted into the voxels they fall in. An open voxel takes its leaves, or
+    /// else its logs, if there are enough of them to cover about half a face of it: so crowns stay about their size and
+    /// hide the trunk inside them (as full detail's do), and trunks show where they're thick enough to see from that far.</summary>
     private void CoarseTrees(ChunkData data, ChunkPosition pos, int level)
     {
         int c = 1 << level;
@@ -354,7 +354,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         {
             if (_logs[i] < toFill && _leaves[i] < toFill) continue;
             int u = i % S, w = i / S % S, v = i / (S * S);
-            if (IsOpen(data.Get(u, w, v))) data.Set(u, w, v, _logs[i] >= toFill ? _logBlock[i] : _leafBlock[i]);
+            if (IsOpen(data.Get(u, w, v))) data.Set(u, w, v, _leaves[i] >= toFill ? _leafBlock[i] : _logBlock[i]);
         }
     }
 

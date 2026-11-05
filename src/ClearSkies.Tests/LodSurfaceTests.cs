@@ -50,4 +50,35 @@ public class LodSurfaceTests
         Assert.True(same >= counted * 97 / 100, $"{same} of {counted} coarse tops are full detail's");
         Assert.True(dirt <= counted / 200, $"{dirt} of {counted} coarse tops are dirt");
     }
+
+    [Theory, InlineData(1), InlineData(2), InlineData(3)]
+    public void ACoarseTreesTopIsLeavesNotTrunk(int level)
+    {
+        int c = 1 << level;
+        var generator = new HeartWorldGenerator(1337);
+        int trees = 0, bare = 0;
+        // Woods east of the spawn plains.
+        for (int px = 12000 / (S * c) - 1; px <= 12000 / (S * c); px++)
+        for (int pz = -5500 / (S * c) - 1; pz <= -5500 / (S * c); pz++)
+        for (int py = -256 / (S * c) - 1; py <= 1792 / (S * c); py++)
+        {
+            var coarse = new ChunkData();
+            generator.Generate(coarse, new ChunkPosition(px, py, pz), level);
+            for (int v = 1; v < S - 1; v++) for (int u = 1; u < S - 1; u++) for (int w = 0; w < S - 1; w++)
+            {
+                var id = coarse.Get(u, w, v);
+                if (Leaf(id)) trees++;
+                if (id is not (BlockId.Log or BlockId.BirchLog)) continue;
+                // A trunk's top in the open, in a crown (leaves beside it). (Roots and stumps stand alone, as in full
+                // detail.)
+                var above = coarse.Get(u, w + 1, v);
+                bool crown = Leaf(coarse.Get(u - 1, w, v)) || Leaf(coarse.Get(u + 1, w, v)) || Leaf(coarse.Get(u, w, v - 1)) || Leaf(coarse.Get(u, w, v + 1));
+                if (crown && (above == BlockId.Air || BlockRegistry.Get(above).IsCross)) bare++;
+            }
+        }
+        Assert.True(trees > 100, $"only {trees} leaf voxels");
+        Assert.Equal(0, bare);
+
+        static bool Leaf(BlockId id) => BlockRegistry.Get(id).ShowsInnerFaces;
+    }
 }
