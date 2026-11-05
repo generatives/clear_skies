@@ -9,10 +9,11 @@ using ClearSkies.Game.Ruins;
 // generating them, and how good each layout is. Writes a map of the region and of every floor of every layout.
 //
 //   dotnet run -c Release --project tools/ClearSkies.Ruins -- [--seed 1337] [--cell 1 -1] [--share 0.3]
-//       [--population 150000] [--area-per-person 40] [--max-floors 12] [--model all|grid|hub|spine] [--gen-sample 200]
+//       [--population 150000] [--area-per-person 40] [--max-floors 12] [--island 0] [--model all|grid|arterial|hub|spine] [--gen-sample 200]
 //       [--out ruins-out]
 //
-// With no --cell it takes the spawn's landmass.
+// With no --cell it takes the spawn's landmass; --island picks one of its islands (0 is the biggest). RUINS_DEBUG=1 also
+// prints how many rooms are reachable on each floor.
 
 CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
 CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;

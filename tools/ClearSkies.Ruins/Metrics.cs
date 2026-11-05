@@ -57,6 +57,19 @@ public sealed record LayoutMetrics(
             if (f > 0 && shaft[c - n]) Go(c - n, Down);
         }
         var walks = new List<double>();
+        if (Environment.GetEnvironmentVariable("RUINS_DEBUG") != null)
+            for (int f = 0; f < floors; f++)
+            {
+                int all = 0, got = 0;
+                foreach (var p in plan.Parts)
+                {
+                    if (p.Kind != PartKind.Room || p.Floor != f) continue;
+                    all++;
+                    int hi2 = p.DoorI + p.DoorDi, hj2 = p.DoorJ + p.DoorDj;
+                    if (dist[f * n + hi2 + nx * hj2] < float.MaxValue) got++;
+                }
+                Console.Error.WriteLine($"  floor {f}: {got}/{all} rooms reached");
+            }
         foreach (var p in plan.Parts)
         {
             if (p.Kind != PartKind.Room) continue;
