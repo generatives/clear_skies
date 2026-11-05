@@ -7,12 +7,11 @@ namespace ClearSkies.Game.Generation;
 /// <summary>
 /// Generates the "island hearts" world: a <see cref="ContinentTerrain"/> broken into pieces by the hearts of
 /// <see cref="HeartGrid"/>. Each piece is the ground nearest its heart across (with the block's position wobbled by
-/// noise so piece edges are ragged rather than straight), from its top (the terrain worn down, see PieceTop) to
-/// <see cref="HeartGrid.ColumnDepth"/> under it, cut across into layers (see HeartGrid.Split). A block is solid if it
-/// is inside a piece whose heart holds it, worn back from every face but the top, so there are cracks between
-/// neighbours and between layers, and above the world's rough bottom. So neighbouring pieces fit together like Voronoi
-/// cells, their tops continue the terrain, there's as much ground under a mountain as under the plains, and where hearts
-/// hold nothing there are holes.
+/// noise so piece edges are ragged rather than straight), from its top (the terrain worn down, see PieceTop) down to
+/// an underside about <see cref="HeartGrid.ColumnDepth"/> under it, rising to its edges. A block is solid if it is
+/// inside a piece whose heart is alive, worn back from its sides, so there are cracks between neighbours. So
+/// neighbouring pieces fit together like Voronoi cells, their tops continue the terrain, there's as much ground under a
+/// mountain as under the plains, and where hearts are dead there are holes.
 ///
 /// How far inside a live piece a point is (its <see cref="DistanceLattice"/>, negative outside) is worked out only at
 /// the corners of cells <see cref="DistanceLattice.Cell"/> blocks on a side, and blocks between take it interpolated
@@ -33,10 +32,9 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     // Wobble of a block's position before finding its nearest heart, in blocks: across, and up and down.
     private const float WarpAcross = 18f, WarpUp = 6f, WarpFrequency = 0.012f;
 
-    // How far each piece is worn back from its faces, in blocks, so there are cracks twice that wide between
-    // neighbouring pieces and small or thin pieces wear away altogether: across (from side faces) and up and down (from
-    // top and bottom faces), in the floor and higher up, varied by noise.
-    private const float FloorWear = 18f, UpperWear = 24f, FloorWearUp = 13f, UpperWearUp = 18f;
+    // How far each piece is worn back from its sides, in blocks, so there are cracks twice that wide between
+    // neighbouring pieces and small or thin pieces wear away altogether: in the floor and higher up, varied by noise.
+    private const float FloorWear = 18f, UpperWear = 24f;
 
     /// <summary>How far round a piece's edges and corners are worn, in blocks (see InsideAt): more than a lattice cell,
     /// so they stay round between its corners.</summary>
@@ -67,14 +65,15 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     /// <summary>One lava block in this many glows.</summary>
     private const int LavaGlowOdds = 40;
 
-    /// <summary>How far above <see cref="HeartGrid.LowestBottom"/> the world's rough bottom reaches.</summary>
-    private const float BottomRoughness = 30f;
+    /// <summary>How far in from its cracks a piece's underside comes down to its full depth (blocks): it rises to them
+    /// on a curve, steepest at the edge, so a piece hangs under its top like a rounded island rather than a block.</summary>
+    private const float Taper = 400f;
 
     private readonly ulong _seed;
     internal ulong Seed => _seed;
     private readonly Landscape? _landscape;
     private readonly ContinentTerrain _terrain;
-    private readonly FastNoiseLite _warpX, _warpY, _warpZ, _crack, _bottom, _rough;
+    private readonly FastNoiseLite _warpX, _warpY, _warpZ, _crack, _rough;
 
     /// <param name="cache">Shared with the other workers' generators; by default, this one's own.</param>
     /// <param name="landscape">How the land is worn and watered; none, as the hearts leave it.</param>
@@ -88,7 +87,6 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         _warpY = Noise(seed + 32, WarpFrequency);
         _warpZ = Noise(seed + 33, WarpFrequency);
         _crack = Noise(seed + 34, 0.03f);
-        _bottom = Noise(seed + 35, 0.02f);
         _rough = Noise(seed + 36, RoughFrequency);
         _rough.SetFractalType(FastNoiseLite.FractalType.None); // (one smooth octave: bumps, not speckle)
     }
@@ -129,12 +127,11 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     private float[] _levels = Array.Empty<float>();
 
     // The hearts around the chunk column being profiled: cells from (_cx0, _cz0), _nx by _nz of them, each one's
-    // position, terrain height at it, Drop and how many of its layers are there; and its column's cracks (see
-    // HeartGrid.Split), MaxLayers per heart.
+    // position, terrain height at it, Drop, Depth and whether it's alive.
     private int _cx0, _cz0, _nx, _nz;
-    private float[] _hx = Array.Empty<float>(), _hz = Array.Empty<float>(), _hs = Array.Empty<float>(), _drop = Array.Empty<float>();
-    private int[] _layers = Array.Empty<int>();
-    private float[] _split = Array.Empty<float>();
+    private float[] _hx = Array.Empty<float>(), _hz = Array.Empty<float>(), _hs = Array.Empty<float>(),
+                    _drop = Array.Empty<float>(), _depth = Array.Empty<float>();
+    private bool[] _alive = Array.Empty<bool>();
 
     public void Generate(ChunkData data, ChunkPosition pos, int level = 0)
     {
@@ -524,30 +521,28 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         const int N = DistanceLattice.Corners, Cell = DistanceLattice.Cell;
         float x0 = chunkX * S, z0 = chunkZ * S;
 
-        // The corners' columns: the terrain's height, the world's rough bottom and the wobble there.
-        Span<float> height = stackalloc float[N * N], bottom = stackalloc float[N * N];
-        float top = float.MinValue, low = float.MaxValue, lowest = float.MaxValue;
+        // The corners' columns: the terrain's height there.
+        Span<float> height = stackalloc float[N * N];
+        float top = float.MinValue, lowest = float.MaxValue;
         for (int k = 0; k < N; k++)
         for (int i = 0; i < N; i++)
         {
             float wx = x0 + i * Cell, wz = z0 + k * Cell;
             height[i + N * k] = MathF.Min(_terrain.Height(wx, wz), HeartGrid.WorldTop - 1);
-            bottom[i + N * k] = HeartGrid.LowestBottom + BottomRoughness * (0.5f + 0.5f * _bottom.GetNoise(wx, wz));
             top = MathF.Max(top, height[i + N * k]);
             lowest = MathF.Min(lowest, height[i + N * k]);
-            low = MathF.Min(low, bottom[i + N * k]);
         }
         LoadHearts(x0 - WarpAcross, z0 - WarpAcross, x0 + S + WarpAcross, z0 + S + WarpAcross);
         bool anyAlive = false;
-        float deepest = float.MaxValue; // the lowest a live piece's reference (see PieceRef) can be
+        float deepest = float.MaxValue; // the lowest a live piece's underside can be
         for (int h = 0; h < _nx * _nz; h++)
         {
-            if (_layers[h] == 0) continue;
+            if (!_alive[h]) continue;
             anyAlive = true;
-            deepest = MathF.Min(deepest, MathF.Min(_hs[h] - MaxDrop * _drop[h], PieceTop(lowest, _hs[h], _drop[h])) - _split[h * HeartGrid.MaxLayers + HeartGrid.LayerCount - 1]);
+            deepest = MathF.Min(deepest, MathF.Min(_hs[h] - MaxDrop * _drop[h], PieceTop(lowest, _hs[h], _drop[h])) - _depth[h]);
         }
         if (!anyAlive) return null;
-        low = MathF.Max(low, deepest - WarpUp);
+        float low = MathF.Max(HeartGrid.LowestBottom, deepest - WarpUp);
 
         // From a level under the lowest bottom to one over the highest top, so the ends are outside the ground.
         int first = (int)MathF.Floor(low / Cell) - 1, last = (int)MathF.Ceiling(top / Cell) + 1;
@@ -566,12 +561,12 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             float pz = wz + WarpAcross * _warpZ.GetNoise(wx, wz);
             float lift = WarpUp * _warpY.GetNoise(wx, wz);
             float wearNoise = 0.6f + 0.4f * (_crack.GetNoise(wx, wz) + 1f);
-            ColumnPieces(px, pz, height[c]);
+            ColumnPieces(px, pz, wx, wz, height[c]);
             var column = lattice.Column(c);
             for (int j = 0; j < lattice.Levels;)
             {
                 float y = (first + j) * Cell;
-                float d = MathF.Min(InsideAt(wearNoise, lift, height[c], y), y - bottom[c]);
+                float d = MathF.Min(InsideAt(wearNoise, lift, height[c], y), y - HeartGrid.LowestBottom);
                 float clamped = Math.Clamp(d, -DistanceLattice.Reach, DistanceLattice.Reach);
                 int same = 1 + System.Math.Max(0, (int)((MathF.Abs(d) - DistanceLattice.Reach) / steepest));
                 for (int n = 0; n < same && j < lattice.Levels; n++) column[j++] = clamped;
@@ -815,29 +810,30 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     }
 
     /// <summary>A live piece near the column being worked out (see ColumnPieces): which heart, how far inside its 2D
-    /// cell the column is (a smooth minimum over its side faces, not yet worn), its top there (see PieceTop) and the
-    /// level its cracks are measured down from (see PieceRef).</summary>
-    private struct Near { public int Heart; public float Sides, Top, Ref; }
+    /// cell the column is (a smooth minimum over its side faces, not yet worn; Inward, the same unwobbled), its top there (see PieceTop) and the
+    /// level its underside is measured down from (see PieceRef).</summary>
+    private struct Near { public int Heart; public float Sides, Inward, Top, Ref; }
     private readonly Near[] _near = new Near[9];
     private int _nearCount;
 
-    /// <summary>The live pieces whose cells are around the column wobbled to (px, pz), where the terrain is
+    /// <summary>The live pieces whose cells are around column (x, z), wobbled to (px, pz), where the terrain is
     /// <paramref name="height"/>: what InsideAt needs of each that doesn't change going up the column.</summary>
-    private void ColumnPieces(float px, float pz, float height)
+    private void ColumnPieces(float px, float pz, float x, float z, float height)
     {
         _nearCount = 0;
         int ci = HeartGrid.CellOf(px) - _cx0, ck = HeartGrid.CellOf(pz) - _cz0;
-        Span<float> f = stackalloc float[8];
+        Span<float> f = stackalloc float[8], g = stackalloc float[8];
         for (int k = ck - 1; k <= ck + 1; k++)
         for (int i = ci - 1; i <= ci + 1; i++)
         {
             int h = i + _nx * k;
-            if (_layers[h] == 0) continue;
+            if (!_alive[h]) continue;
             float ax = px - _hx[h], az = pz - _hz[h], a2 = ax * ax + az * az;
+            float ux = x - _hx[h], uz = z - _hz[h], u2 = ux * ux + uz * uz;
             // Each face is the line halfway to a neighbour's heart; inside by a smooth minimum of the distances to them
             // (least - Rounding * ln(sum of e^-(f - least) / Rounding)), kept as least and the sum.
             int faces = 0;
-            float least = float.MaxValue;
+            float least = float.MaxValue, inward = float.MaxValue;
             for (int nk = k - 1; nk <= k + 1; nk++)
             for (int ni = i - 1; ni <= i + 1; ni++)
             {
@@ -845,32 +841,34 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 int n = ni + _nx * nk;
                 float ex = _hx[n] - _hx[h], ez = _hz[n] - _hz[h];
                 float bx = px - _hx[n], bz = pz - _hz[n];
-                float d = (bx * bx + bz * bz - a2) / (2f * MathF.Sqrt(ex * ex + ez * ez));
+                float twice = 2f * MathF.Sqrt(ex * ex + ez * ez);
+                float d = (bx * bx + bz * bz - a2) / twice;
+                float cx = x - _hx[n], cz = z - _hz[n];
+                g[faces] = (cx * cx + cz * cz - u2) / twice;
+                inward = MathF.Min(inward, g[faces]);
                 f[faces++] = d;
                 least = MathF.Min(least, d);
             }
             _near[_nearCount++] = new Near
             {
-                Heart = h, Sides = SmoothMin(f[..faces], least),
+                Heart = h, Sides = SmoothMin(f[..faces], least), Inward = SmoothMin(g[..faces], inward),
                 Top = PieceTop(height, _hs[h], _drop[h]), Ref = PieceRef(height, h),
             };
         }
     }
 
-    /// <summary>Where piece h's cracks are measured down from, where the terrain is <paramref name="height"/>: its top,
-    /// but no higher than its top at its heart, so a peak on it makes it thicker rather than raising what's under it.</summary>
+    /// <summary>Where piece h's underside is measured down from, where the terrain is <paramref name="height"/>: its
+    /// top, but no higher than its top at its heart, so a peak on it makes it thicker rather than raising its underside.</summary>
     private float PieceRef(float height, int h) => MathF.Min(PieceTop(height, _hs[h], _drop[h]), _hs[h] - MaxDrop * _drop[h]);
 
-    /// <summary>How far inside a live piece block y of the column ColumnPieces worked out is (lifted by
-    /// <paramref name="lift"/> for its cracks across), in blocks: positive inside, negative outside. The most of the
-    /// near pieces': each is inside its cell's sides and the layer of its column y is in, worn back from all of them
-    /// but its top (so there are cracks between neighbours), and rounded where they meet.</summary>
+    /// <summary>How far inside a live piece block y of the column ColumnPieces worked out is (its underside lifted by
+    /// <paramref name="lift"/>), in blocks: positive inside, negative outside. The most of the near pieces': each is
+    /// inside its cell's sides (worn back, so there are cracks between neighbours), under its top and over its
+    /// underside, rounded where they meet.</summary>
     private float InsideAt(float wearNoise, float lift, float height, float y)
     {
         float t = WearBlend(y);
         float across = (FloorWear + (UpperWear - FloorWear) * t) * wearNoise;
-        float up = (FloorWearUp + (UpperWearUp - FloorWearUp) * t) * wearNoise;
-        float yl = y + lift;
         float best = -DistanceLattice.Reach;
         Span<float> f = stackalloc float[3];
         for (int n = 0; n < _nearCount; n++)
@@ -878,15 +876,13 @@ public sealed class HeartWorldGenerator : IWorldGenerator
             ref var p = ref _near[n];
             float sides = p.Sides - across;
             if (sides < best) continue; // (a smooth minimum is no more than its least)
-            // The layer y is in: the deepest whose top crack is over it, but no deeper than the last one there.
-            var split = _split.AsSpan(p.Heart * HeartGrid.MaxLayers, HeartGrid.MaxLayers);
-            int layers = _layers[p.Heart], l = 0;
-            float depth = p.Ref - yl;
-            while (l + 1 < layers && depth > split[l]) l++;
-            float top = l == 0 ? p.Top - y : p.Ref - split[l - 1] - up - yl;
-            float bottom = l + 1 == HeartGrid.LayerCount ? yl - (p.Ref - split[l]) : yl - (p.Ref - split[l]) - up;
-            f[0] = sides; f[1] = top; f[2] = bottom;
-            float d = SmoothMin(f, MathF.Min(sides, MathF.Min(top, bottom)));
+            // The underside: s(2 - s) of the piece's depth, s how far in from its sides it is (up to Taper, not
+            // wobbled: wobbled, its steep slope would turn the wobble into teeth); as a distance, over how steep it is.
+            float depth = _depth[p.Heart], s = Math.Clamp(p.Inward / Taper, 0f, 1f);
+            float slope = depth * 2f * (1f - s) / Taper;
+            float bottom = (y + lift - (p.Ref - depth * s * (2f - s))) / MathF.Sqrt(1f + slope * slope);
+            f[0] = sides; f[1] = p.Top - y; f[2] = bottom;
+            float d = SmoothMin(f, MathF.Min(sides, MathF.Min(f[1], bottom)));
             if (d > best) best = d;
         }
         return best;
@@ -922,15 +918,15 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         if (_hx.Length < total)
         {
             _hx = new float[total]; _hz = new float[total]; _hs = new float[total]; _drop = new float[total];
-            _layers = new int[total]; _split = new float[total * HeartGrid.MaxLayers];
+            _depth = new float[total]; _alive = new bool[total];
         }
         for (int k = 0; k < _nz; k++)
         for (int i = 0; i < _nx; i++)
         {
             int h = i + _nx * k;
             var heart = HeartGrid.At(_seed, _cx0 + i, _cz0 + k);
-            _hx[h] = heart.X; _hz[h] = heart.Z; _hs[h] = heart.Surface; _drop[h] = heart.Drop; _layers[h] = heart.Layers;
-            for (int l = 0; l < HeartGrid.LayerCount; l++) _split[h * HeartGrid.MaxLayers + l] = HeartGrid.Split(_seed, _cx0 + i, _cz0 + k, l + 1);
+            _hx[h] = heart.X; _hz[h] = heart.Z; _hs[h] = heart.Surface; _drop[h] = heart.Drop;
+            _depth[h] = heart.Depth; _alive[h] = heart.Alive;
         }
     }
 }

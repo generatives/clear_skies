@@ -8,7 +8,7 @@ using StbImageWriteSharp;
 // top-down map of the result.
 //
 //   dotnet run -c Release --project tools/ClearSkies.Pipes -- [--seed 1337] [--cell 1 -1] [--size 8] [--hours 6]
-//       [--piece-width 1000] [--piece-height 312.5] [--column-depth 600] [--rain 3e-4] [--soak 1.5e-4] [--manning 0.035] [--no-fill] [--report 600] [--out pipes-out] [--snapshots]
+//       [--piece-width 1000] [--column-depth 600] [--rain 3e-4] [--soak 1.5e-4] [--manning 0.035] [--no-fill] [--report 600] [--out pipes-out] [--snapshots]
 //
 // With no --cell it takes the spawn's landmass. It runs until --hours of simulated time pass, or until as much water
 // leaves the land (over its edges and into the ground) as rains on it, within 1%. --no-fill starts the land dry instead
@@ -28,7 +28,7 @@ string outDir = "pipes-out";
 string? terrain = null;
 (int X0, int Z0, int X1, int Z1)? probe = null;
 var settings = new List<Action<Pipes>>();
-float pieceWidth = HeartGrid.DefaultPieceWidth, pieceHeight = HeartGrid.DefaultPieceHeight, columnDepth = HeartGrid.DefaultColumnDepth;
+float pieceWidth = HeartGrid.DefaultPieceWidth, columnDepth = HeartGrid.DefaultColumnDepth;
 for (int a = 0; a < args.Length; a++)
 {
     switch (args[a])
@@ -43,7 +43,6 @@ for (int a = 0; a < args.Length; a++)
         case "--snapshots": snapshots = true; break;
         case "--no-fill": fill = false; break;
         case "--piece-width": pieceWidth = float.Parse(args[++a]); break;
-        case "--piece-height": pieceHeight = float.Parse(args[++a]); break;
         case "--column-depth": columnDepth = float.Parse(args[++a]); break;
         case "--courant": { var v = float.Parse(args[++a]); settings.Add(p => p.Courant = v); break; }
         case "--wave-depth": { var v = float.Parse(args[++a]); settings.Add(p => p.WaveDepth = v); break; }
@@ -76,7 +75,7 @@ for (int a = 0; a < args.Length; a++)
         default: Console.Error.WriteLine($"Unknown argument {args[a]}"); return 1;
     }
 }
-HeartGrid.SetPieceSize(pieceWidth, pieceHeight, columnDepth);
+HeartGrid.SetPieceSize(pieceWidth, columnDepth);
 var landmass = cell ?? (at is { } p ? HeartGrid.Landmass(seed, p.X, p.Z) : HeartGrid.Landmass(seed, 11250f, -6250f));
 Console.WriteLine($"Seed {seed}, landmass {landmass}, {Environment.ProcessorCount} cores");
 if (blocks is { } area) { Directory.CreateDirectory(outDir); BlockMap.Write(seed, LandscapeSettings.Parse(terrain), area.X, area.Z, area.Width, Path.Combine(outDir, "blocks.png")); return 0; }

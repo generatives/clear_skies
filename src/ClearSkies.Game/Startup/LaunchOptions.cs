@@ -64,10 +64,9 @@ public sealed record LaunchOptions
     /// </summary>
     public bool Headless { get; init; }
 
-    /// <summary>--piece-width W, --piece-height H, --column-depth D: how wide pieces of land are, about how thick each
-    /// layer of them is, and how deep they go under their tops, in blocks (see HeartGrid.SetPieceSize).</summary>
+    /// <summary>--piece-width W, --column-depth D: how wide pieces of land are and about how deep they hang under
+    /// their tops, in blocks (see HeartGrid.SetPieceSize).</summary>
     public float PieceWidth { get; init; } = ClearSkies.Game.Generation.HeartGrid.DefaultPieceWidth;
-    public float PieceHeight { get; init; } = ClearSkies.Game.Generation.HeartGrid.DefaultPieceHeight;
     public float ColumnDepth { get; init; } = ClearSkies.Game.Generation.HeartGrid.DefaultColumnDepth;
 
     /// <summary>--terrain name=value,...: how landmasses are worn and watered (see LandscapeSettings), e.g.
@@ -99,7 +98,6 @@ public sealed record LaunchOptions
         if (float.TryParse(Value("--lod"), NumberStyles.Float, CultureInfo.InvariantCulture, out float lod)) o = o with { LodDistance = lod };
         if (args.Contains("--no-lod")) o = o with { LodLevels = 0 };
         if (Value("--piece-width") is { } width) o = o with { PieceWidth = float.Parse(width, CultureInfo.InvariantCulture) };
-        if (Value("--piece-height") is { } height) o = o with { PieceHeight = float.Parse(height, CultureInfo.InvariantCulture) };
         if (Value("--column-depth") is { } depth) o = o with { ColumnDepth = float.Parse(depth, CultureInfo.InvariantCulture) };
         if (Value("--terrain") is { } terrain) o = o with { Terrain = LandscapeSettings.Parse(terrain) };
         if (Value("--view-distance") is { } view) o = o with { ViewDistance = float.Parse(view, CultureInfo.InvariantCulture) };
