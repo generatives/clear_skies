@@ -496,13 +496,13 @@ public sealed class CityGridModel : ILayoutModel
 /// Arterial: roads grown out from the entrance along the shape of the land. Major roads run from a root (the entrance,
 /// or a piece's most interior cell) along the land's backbone, preferring cells far from its edges, to the far reaches
 /// of each piece, branching where the land forks: each next road goes to the ground farthest (walking) from the roads so
-/// far, until none is more than MajorReach away, and is laid as straight legs between points Step cells apart along its
-/// way. Minor roads leave the major ones every MinorSpacing cells, square to them, out to the ground's edge; then the
+/// far, until none is more than MajorReach away, and is laid as few long straight legs as keep it on the ground (no leg
+/// shorter than MinLeg is split further), so roads run long and square rather than stepping along diagonals. Minor roads leave the major ones every MinorSpacing cells, square to them, out to the ground's edge; then the
 /// ground still far from any road gets lanes to the nearest one. Districts are the major roads' reaches.
 /// </summary>
 public sealed class ArterialModel : ILayoutModel
 {
-    public const int MajorWidth = 3, MajorReach = 50, Step = 12, MinDepth = 4, MinorSpacing = 16, MinMinor = 6,
+    public const int MajorWidth = 3, MajorReach = 50, MinLeg = 16, MinDepth = 4, MinorSpacing = 16, MinMinor = 6,
         InfillReach = 16, MinPiece = 150;
     public string Name => "arterial";
 
@@ -549,6 +549,21 @@ public sealed class ArterialModel : ILayoutModel
             CellRect a1 = H(ai, bi, aj), a2 = V(bi, aj, bj), b1 = V(ai, aj, bj), b2 = H(ai, bi, bj);
             if (OnGround(a1) + OnGround(a2) >= OnGround(b1) + OnGround(b2)) { Lay(a1, kind, id); Lay(a2, kind, id); }
             else { Lay(b1, kind, id); Lay(b2, kind, id); }
+        }
+
+        // Whether an L (either way round) from a to b keeps its middle line on ground at least MajorWidth/2 + 1 from the edge.
+        bool LFits(int a, int b)
+        {
+            int ai = a % nx, aj = a / nx, bi = b % nx, bj = b / nx;
+            bool Clear(int i, int j) => G(i, j) && depth[i + nx * j] > MajorWidth / 2;
+            bool Run(int i0, int j0, int i1, int j1)
+            {
+                for (int i = Math.Min(i0, i1); i <= Math.Max(i0, i1); i++)
+                for (int j = Math.Min(j0, j1); j <= Math.Max(j0, j1); j++)
+                    if (!Clear(i, j)) return false;
+                return true;
+            }
+            return Run(ai, aj, bi, aj) && Run(bi, aj, bi, bj) || Run(ai, aj, ai, bj) && Run(ai, bj, bi, bj);
         }
 
         // Major roads, piece by piece (biggest first), from each piece's root.
@@ -604,12 +619,19 @@ public sealed class ArterialModel : ILayoutModel
                 for (int c = 0; c < n; c++)
                     if (piece[c] == p && depth[c] >= MinDepth && cost[c] < float.MaxValue && (target < 0 || far[c] > far[target])) target = c;
                 if (target < 0 || far[target] <= MajorReach) break;
-                // Its way back along the tree to the roads so far, as points Step apart, joined by legs.
+                // Its way back along the tree to the roads so far.
                 var way = new List<int>();
                 for (int c = target; c >= 0; c = parent[c]) { way.Add(c); if (onRoad[c]) break; }
-                var points = new List<int>();
-                for (int k = 0; k < way.Count; k += Step) points.Add(way[k]);
-                if (points[^1] != way[^1]) points.Add(way[^1]);
+                // As few long, straight legs as will do: join the ends with one L if it keeps to ground away from the
+                // edge; if not, split the way at its middle and do each half the same way.
+                var points = new List<int> { way[0] };
+                void Simplify(int lo, int hi)
+                {
+                    if (hi - lo <= MinLeg || LFits(way[lo], way[hi])) { points.Add(way[hi]); return; }
+                    int mid = (lo + hi) / 2;
+                    Simplify(lo, mid); Simplify(mid, hi);
+                }
+                Simplify(0, way.Count - 1);
                 int id = majors++;
                 for (int k = 0; k + 1 < points.Count; k++)
                     Leg(points[k] % nx, points[k] / nx, points[k + 1] % nx, points[k + 1] / nx, MajorWidth, PartKind.Avenue, id);
