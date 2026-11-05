@@ -19,7 +19,7 @@ public sealed record LayoutMetrics(
         var entrance = new List<int>();
         foreach (var p in plan.Parts)
         {
-            if (p.Kind == PartKind.Room) { rooms++; roomArea += p.Rect.Area * (long)(C * C); continue; }
+            if (p.Kind == PartKind.Plot) { rooms++; roomArea += p.Rect.Area * (long)(C * C); continue; }
             for (int f = p.Floor; f <= p.LastFloor; f++)
             for (int j = p.Rect.J0; j < p.Rect.J1; j++)
             for (int i = p.Rect.I0; i < p.Rect.I1; i++)
@@ -63,7 +63,7 @@ public sealed record LayoutMetrics(
                 int all = 0, got = 0;
                 foreach (var p in plan.Parts)
                 {
-                    if (p.Kind != PartKind.Room || p.Floor != f) continue;
+                    if (p.Kind != PartKind.Plot || p.Floor != f) continue;
                     all++;
                     int hi2 = p.DoorI + p.DoorDi, hj2 = p.DoorJ + p.DoorDj;
                     if (dist[f * n + hi2 + nx * hj2] < float.MaxValue) got++;
@@ -72,7 +72,7 @@ public sealed record LayoutMetrics(
             }
         foreach (var p in plan.Parts)
         {
-            if (p.Kind != PartKind.Room) continue;
+            if (p.Kind != PartKind.Plot) continue;
             int hi = p.DoorI + p.DoorDi, hj = p.DoorJ + p.DoorDj;
             if (hi < 0 || hj < 0 || hi >= nx || hj >= site.Nz) continue;
             float d = dist[p.Floor * n + hi + nx * hj];

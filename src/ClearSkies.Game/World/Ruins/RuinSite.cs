@@ -158,7 +158,9 @@ public sealed class RuinSite
         int YOf(int f) => TopY - f * FloorPitch;
 
         // Growth, cheapest first, over (floor, cell) nodes. Each node's best cost so far and the gap cells run into it.
-        const float RoomShare = 0.45f;
+        // Share of solid ground that ends up as plots: about 0.45 where plots are packed, times the layout's thinning
+        // (RuinLayout.Fill leaves about 30% of plot spots bare).
+        const float PlotShare = 0.45f * 0.7f;
         TargetArea = (long)(settings.Population * settings.AreaPerPerson);
         float down = FloorPitch * settings.Aspect / 2, diag = MathF.Sqrt(2);
         // Smooth noise on the cost of each step, so the edge wanders instead of tracing an octagon.
@@ -205,7 +207,7 @@ public sealed class RuinSite
             deepest = Math.Max(deepest, f);
             if (g == Ground.Solid)
             {
-                area += Cell * Cell * RoomShare;
+                area += Cell * Cell * PlotShare;
                 int p = pieceOf[c];
                 if (p >= 0 && !entranceOf.ContainsKey(p) && (pieceSolid[p] = pieceSolid.GetValueOrDefault(p) + 1) >= pieceEntranceCells
                     && pieceDeep[p] >= 0)

@@ -21,7 +21,8 @@ public enum PartKind : byte
     Hub,
     /// <summary>A hall across a gap in the ground: brick deck and roof, open sides.</summary>
     Bridge,
-    Room,
+    /// <summary>A plot: one door onto a hall, for now a single room; later a home or complex fills it with rooms of its own.</summary>
+    Plot,
     /// <summary>A shaft through floors (see <see cref="Part.Floor"/> to <see cref="Part.LastFloor"/>).</summary>
     Core,
 }

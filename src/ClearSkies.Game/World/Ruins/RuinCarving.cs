@@ -53,7 +53,7 @@ public sealed class RuinCarving
             int y = site.FloorY(p.Floor);
             switch (p.Kind)
             {
-                case PartKind.Room:
+                case PartKind.Plot:
                 {
                     boxes.Add(new BlockBox(x0, y, z0, x1, y + P, z1, BoxOp.Room));
                     int cx = site.X0 + p.DoorI * C + C / 2, cz = site.Z0 + p.DoorJ * C + C / 2;

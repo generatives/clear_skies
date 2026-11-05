@@ -60,12 +60,12 @@ public static class Maps
         }
         foreach (var p in plan.Parts)
         {
-            if (p.Floor != floor || p.Kind is PartKind.Room or PartKind.Core) continue;
+            if (p.Floor != floor || p.Kind is PartKind.Plot or PartKind.Core) continue;
             Fill(p.Rect, p.Kind switch { PartKind.Avenue => Avenue, PartKind.Hub => Hub, PartKind.Bridge => Bridge, _ => Hall }, false);
         }
         foreach (var p in plan.Parts)
         {
-            if (p.Floor != floor || p.Kind != PartKind.Room) continue;
+            if (p.Floor != floor || p.Kind != PartKind.Plot) continue;
             var use = p.District >= 0 ? Uses[(int)plan.Uses[p.District]] : Uses[0];
             Fill(p.Rect, use, scale > 1);
             if (scale > 1) Px(p.DoorI * scale + scale / 2 + p.DoorDi * (scale / 2), p.DoorJ * scale + scale / 2 + p.DoorDj * (scale / 2), Hall);

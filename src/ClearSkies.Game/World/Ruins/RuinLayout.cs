@@ -41,7 +41,12 @@ public static class RuinLayout
 {
     /// <summary>Stair cores: one about every CoreSpacing cells, CoreSize cells square.</summary>
     public const int CoreSpacing = 40, CoreSize = 3;
+    /// <summary>Between floors with halls of their own, a flight of stairs about every StairSpacing cells square.</summary>
+    public const int StairSpacing = 64;
     public const int MinRoom = 3, MaxRoomWidth = 6, MaxRoomDepth = 7;
+    /// <summary>Fill (see <see cref="Fill"/>): the sparsest share of room spots used, and the size of its patches
+    /// (cells across, floors deep).</summary>
+    public const float MinFill = 0.15f, FillScale = 36, FillFloors = 4;
 
     public static ILayoutModel[] Models => [new CityGridModel(), new ArterialModel(), new HubSpokeModel(), new SpineModel()];
 
@@ -73,7 +78,7 @@ public static class RuinLayout
             foreach (var (rect, kind) in sk.Halls) ClipHall(site, f, rect, kind, floorHalls[f]);
             if (sk.FloorHalls?[f] is { } own) foreach (var (rect, kind) in own) ClipHall(site, f, rect, kind, floorHalls[f]);
         }
-        JoinFloors(site, floorHalls, cores);
+        JoinFloors(site, floorHalls, cores, stagger: sk.FloorHalls != null);
         var occupied = new bool[n];
         for (int f = 0; f < site.Floors; f++)
         {
@@ -122,7 +127,8 @@ public static class RuinLayout
         foreach (var (cell, floor) in site.Entrances)
         {
             int ei = cell % nx, ej = cell / nx, p = site.PieceOf[cell];
-            LinkToHalls(site, sk, ei, ej, c => site.Region[c] && (p < 0 || site.PieceOf[c] == p));
+            // (A model with its own halls per floor roots its roads at the entrances already.)
+            if (sk.FloorHalls == null) LinkToHalls(site, sk, ei, ej, c => site.Region[c] && (p < 0 || site.PieceOf[c] == p));
             if (Core(ei, ej, floor, true) is { } e) cores.Add(e);
         }
 
@@ -168,7 +174,7 @@ public static class RuinLayout
     /// <summary>Farthest (cells) a lane goes to join a cut-off stretch of hall to the rest.</summary>
     public const int LaneReach = 30;
 
-    private static void JoinFloors(RuinSite site, List<Part>[] floorHalls, List<Part> cores)
+    private static void JoinFloors(RuinSite site, List<Part>[] floorHalls, List<Part> cores, bool stagger)
     {
         int nx = site.Nx, nz = site.Nz, n = nx * nz, floors = site.Floors, half = CoreSize / 2;
         var walk = new bool[floors * n];
@@ -205,6 +211,34 @@ public static class RuinLayout
         }
         for (int f = 0; f < floors; f++) foreach (var h in floorHalls[f]) Rect(walk, f, h.Rect);
         foreach (var c in cores) AddCore(c);
+        if (stagger)
+        {
+            // Floors with halls of their own: a flight of stairs between each floor and the next, about every
+            // StairSpacing square, wherever both floors' halls cross the same spot; so flights don't line up.
+            for (int f = 0; f + 1 < floors; f++)
+            for (int bj = (f * 13) % StairSpacing - StairSpacing; bj < nz; bj += StairSpacing)
+            for (int bi = (f * 29) % StairSpacing - StairSpacing; bi < nx; bi += StairSpacing)
+            {
+                int ci = bi + StairSpacing / 2, cj = bj + StairSpacing / 2, best = -1, bestD = int.MaxValue;
+                for (int j = Math.Max(0, bj); j < Math.Min(nz, bj + StairSpacing); j++)
+                for (int i = Math.Max(0, bi); i < Math.Min(nx, bi + StairSpacing); i++)
+                {
+                    int c = i + nx * j;
+                    if (!walk[f * n + c] || !walk[(f + 1) * n + c]) continue;
+                    int d = (i - ci) * (i - ci) + (j - cj) * (j - cj);
+                    if (d >= bestD) continue;
+                    var r = new CellRect(i - half, j - half, i - half + CoreSize, j - half + CoreSize);
+                    if (r.I0 < 0 || r.J0 < 0 || r.I1 > nx || r.J1 > nz || !Fits(site, f, r) || !Fits(site, f + 1, r)) continue;
+                    bestD = d; best = c;
+                }
+                if (best < 0) continue;
+                int i2 = best % nx, j2 = best / nx;
+                var core = new Part { Rect = new CellRect(i2 - half, j2 - half, i2 - half + CoreSize, j2 - half + CoreSize), Kind = PartKind.Core,
+                    Floor = (byte)f, LastFloor = (byte)(f + 1), District = -1 };
+                cores.Add(core);
+                AddCore(core);
+            }
+        }
         foreach (var c in cores)
             if (c.Entrance)
             {
@@ -396,7 +430,7 @@ public static class RuinLayout
     /// <summary>Joins pieces (at least <paramref name="minPiece"/> cells) across short gaps: from every edge cell of a
     /// piece, straight out each way through what isn't ground; where that reaches another piece within BridgeCells,
     /// that's a crossing. The shortest few per pair of pieces get an avenue across, joined to each side's halls.</summary>
-    internal static void LinkPieces(RuinSite site, Skeleton sk, bool[] ground, int[] piece, List<int> pieceSizes, int minPiece)
+    internal static void LinkPieces(RuinSite site, Skeleton sk, bool[] ground, int[] piece, List<int> pieceSizes, int minPiece, bool joinEnds = true)
     {
         int nx = site.Nx, nz = site.Nz, n = nx * nz;
         const int AvenueWidth = LinkWidth;
@@ -438,8 +472,11 @@ public static class RuinLayout
                 chosen.Add((ai, aj));
                 int bi = ai + di * (len + 1), bj = aj + dj * (len + 1);
                 // (Joined to each side's halls first: once the crossing is a hall, its ends already count as halls.)
-                LinkToHalls(site, sk, ai, aj, c => ground[c]);
-                LinkToHalls(site, sk, bi, bj, c => ground[c]);
+                if (joinEnds)
+                {
+                    LinkToHalls(site, sk, ai, aj, c => ground[c]);
+                    LinkToHalls(site, sk, bi, bj, c => ground[c]);
+                }
                 sk.Halls.Add((di != 0 ? new CellRect(ai, aj, bi + 1, aj + AvenueWidth) : new CellRect(ai, aj, ai + AvenueWidth, bj + 1), PartKind.Avenue));
             }
         }
@@ -481,7 +518,7 @@ public static class RuinLayout
     }
 
     /// <summary>Rooms along both sides of a hall, as deep and wide as free solid cells allow (MinRoom to MaxRoom*), each
-    /// with its door in the middle of the side facing the hall.</summary>
+    /// with its door in the middle of the side facing the hall; a spot is left bare as often as <see cref="Fill"/> says.</summary>
     private static void LineRooms(RuinSite site, int f, CellRect hall, bool[] occupied, ref LayoutRng rng, RuinPlan plan)
     {
         int nx = site.Nx, nz = site.Nz;
@@ -509,9 +546,11 @@ public static class RuinLayout
                         ? side < 0 ? new CellRect(t, hall.J0 - dd, t + ww, hall.J0) : new CellRect(t, hall.J1, t + ww, hall.J1 + dd)
                         : side < 0 ? new CellRect(hall.I0 - dd, t, hall.I0, t + ww) : new CellRect(hall.I1, t, hall.I1 + dd, t + ww);
                     if (!Fits(r)) continue;
+                    // Sparse here: leave the spot as rock.
+                    if (rng.Range(0f, 1f) > Fill(site, (r.I0 + r.I1) / 2, (r.J0 + r.J1) / 2, f)) { t += ww; placed = true; break; }
                     Mark(occupied, nx, r);
                     int mid = t + ww / 2;
-                    var p = new Part { Rect = r, Kind = PartKind.Room, Floor = (byte)f, LastFloor = (byte)f };
+                    var p = new Part { Rect = r, Kind = PartKind.Plot, Floor = (byte)f, LastFloor = (byte)f };
                     if (alongI) { p.DoorI = (short)mid; p.DoorJ = (short)(side < 0 ? hall.J0 - 1 : hall.J1); p.DoorDj = (sbyte)-side; }
                     else { p.DoorJ = (short)mid; p.DoorI = (short)(side < 0 ? hall.I0 - 1 : hall.I1); p.DoorDi = (sbyte)-side; }
                     int ci = (r.I0 + r.I1) / 2, cj = (r.J0 + r.J1) / 2;
@@ -523,6 +562,34 @@ public static class RuinLayout
                 if (!placed) t++;
             }
         }
+    }
+
+    /// <summary>Smooth value noise in 0..1 over cells (blobs <paramref name="scale"/> cells across) and floors (blobs
+    /// <paramref name="floorScale"/> floors deep).</summary>
+    internal static float Blobs(ulong seed, int i, int j, int f, float scale, float floorScale)
+    {
+        float x = i / scale, z = j / scale, w = f / floorScale;
+        int x0 = (int)MathF.Floor(x), z0 = (int)MathF.Floor(z), w0 = (int)MathF.Floor(w);
+        float fx = x - x0, fz = z - z0, fw = w - w0;
+        fx = fx * fx * (3 - 2 * fx); fz = fz * fz * (3 - 2 * fz); fw = fw * fw * (3 - 2 * fw);
+        float H(int a, int b, int d)
+        {
+            ulong h = seed ^ (ulong)(uint)a * 0x9E3779B97F4A7C15UL ^ (ulong)(uint)b * 0xC2B2AE3D27D4EB4FUL ^ (ulong)(uint)d * 0x165667B19E3779F9UL;
+            h ^= h >> 31; h *= 0xBF58476D1CE4E5B9UL; h ^= h >> 29;
+            return (h >> 40) / (float)(1 << 24);
+        }
+        static float L(float a, float b, float t) => a + (b - a) * t;
+        return L(L(L(H(x0, z0, w0), H(x0 + 1, z0, w0), fx), L(H(x0, z0 + 1, w0), H(x0 + 1, z0 + 1, w0), fx), fz),
+                 L(L(H(x0, z0, w0 + 1), H(x0 + 1, z0, w0 + 1), fx), L(H(x0, z0 + 1, w0 + 1), H(x0 + 1, z0 + 1, w0 + 1), fx), fz), fw);
+    }
+
+    /// <summary>How full of rooms the ruin is round cell (i, j) on floor f, MinFill..1: patches of dense rooms and
+    /// patches where halls run through mostly bare rock.</summary>
+    internal static float Fill(RuinSite site, int i, int j, int f)
+    {
+        float v = Blobs(site.Seed ^ 0xF111UL, i, j, f, FillScale, FillFloors);
+        float t = Math.Clamp((v - 0.3f) / 0.4f, 0, 1);
+        return MinFill + (1 - MinFill) * t * t * (3 - 2 * t);
     }
 
     internal static bool InRegion(RuinSite site, int i, int j) =>
@@ -655,6 +722,8 @@ public sealed class CityGridModel : ILayoutModel
 /// </summary>
 public sealed class ArterialModel : ILayoutModel
 {
+    /// <summary>Cells across a blob of the roughness that makes major roads take a different way on every floor.</summary>
+    public const float MajorRough = 30;
     public const int MajorWidth = 3, MajorReach = 36, MinLeg = 16, MaxLeg = 28, MinDepth = 4, MinorSpacing = 16, MinMinor = 6,
         InfillReach = 16, MinPiece = 150, MaxMinor = 60;
     /// <summary>Minor roads go straight this many cells between turns.</summary>
@@ -667,12 +736,22 @@ public sealed class ArterialModel : ILayoutModel
     {
         int nx = site.Nx, nz = site.Nz, n = nx * nz;
         var sk = new Skeleton(n);
-        var (ground, piece, sizes) = RuinLayout.Pieces(site);
+        var (unionGround, piece, sizes) = RuinLayout.Pieces(site);
+        // The floor being laid out's ground.
+        var ground = new bool[n];
         bool G(int i, int j) => i >= 0 && j >= 0 && i < nx && j < nz && ground[i + nx * j];
+        // Pieces join on every floor alike (crossings clip to each floor's ground), first, so roads can meet them.
+        RuinLayout.LinkPieces(site, sk, unionGround, piece, sizes, MinPiece, joinEnds: false);
+        var sharedHall = RuinLayout.HallMask(site, sk);
+        sk.FloorHalls = new List<(CellRect, PartKind)>[site.Floors];
+        List<(CellRect Rect, PartKind Kind)> own = [];
+        ulong floorSeed = (ulong)rng.Next(int.MaxValue) << 20;
 
         // Steps to the ground's edge.
         var depth = new int[n];
         var q = new Queue<int>();
+        void Depths()
+        {
         for (int c = 0; c < n; c++) if (!ground[c]) q.Enqueue(c); else depth[c] = int.MaxValue;
         while (q.TryDequeue(out int c))
         {
@@ -685,6 +764,7 @@ public sealed class ArterialModel : ILayoutModel
                 if (depth[e] == int.MaxValue) { depth[e] = depth[c] + 1; q.Enqueue(e); }
             }
         }
+        }
 
         var hall = new bool[n];
         var road = new int[n]; Array.Fill(road, -1); // which major road a cell is on
@@ -692,7 +772,7 @@ public sealed class ArterialModel : ILayoutModel
         {
             r = r.Clip(nx, nz);
             if (r.IsEmpty) return;
-            sk.Halls.Add((r, kind));
+            own.Add((r, kind));
             for (int j = r.J0; j < r.J1; j++)
             for (int i = r.I0; i < r.I1; i++) { hall[i + nx * j] = true; if (id >= 0) road[i + nx * j] = id; }
         }
@@ -723,14 +803,24 @@ public sealed class ArterialModel : ILayoutModel
             return Run(ai, aj, bi, aj) && Run(bi, aj, bi, bj) || Run(ai, aj, ai, bj) && Run(ai, bj, bi, bj);
         }
 
-        // Major roads, piece by piece (biggest first), from each piece's root.
-        var jrng = new LayoutRng((ulong)rng.Next(int.MaxValue) * 7919 + 1);
+        // Major roads, piece by piece (biggest first), from each piece's root (its entrance, if that comes down this far,
+        // else its most interior cell), along a walking cost roughened differently on every floor.
+        var jrng = rng;
         int majors = 0;
         var legs = new List<(int Ai, int Aj, int Bi, int Bj)>();
-        foreach (int p in Enumerable.Range(0, sizes.Count).Where(p => sizes[p] >= MinPiece).OrderByDescending(p => sizes[p]))
+        var fsizes = new int[sizes.Count];
+        void Majors(int f)
+        {
+        jrng = new LayoutRng(floorSeed * 3 + (ulong)f * 7919 + 1);
+        majors = 0;
+        legs.Clear();
+        Array.Fill(road, -1);
+        Array.Clear(fsizes);
+        for (int c = 0; c < n; c++) if (ground[c]) fsizes[piece[c]]++;
+        foreach (int p in Enumerable.Range(0, sizes.Count).Where(p => fsizes[p] >= MinPiece).OrderByDescending(p => fsizes[p]))
         {
             int root = -1;
-            foreach (var (cell, _) in site.Entrances) if (root < 0 && piece[cell] == p) root = cell;
+            foreach (var (cell, ef) in site.Entrances) if (root < 0 && ef <= f && piece[cell] == p && ground[cell]) root = cell;
             if (root < 0)
                 for (int c = 0; c < n; c++) if (piece[c] == p && (root < 0 || depth[c] > depth[root])) root = c;
             // Walking cost: dearer near the edge, so roads keep to the backbone; a tree of cheapest ways from the root.
@@ -747,7 +837,7 @@ public sealed class ArterialModel : ILayoutModel
                     int a = i + di, b = j + dj;
                     if (!G(a, b) || piece[a + nx * b] != p) continue;
                     int e = a + nx * b;
-                    float step = 1 + 8f / (1 + depth[e]);
+                    float step = (1 + 8f / (1 + depth[e])) * (0.7f + 0.6f * RuinLayout.Blobs(floorSeed, a, b, f, MajorRough, 1));
                     if (d + step < cost[e]) { cost[e] = d + step; parent[e] = c; pq.Enqueue(e, d + step); }
                 }
             }
@@ -803,7 +893,7 @@ public sealed class ArterialModel : ILayoutModel
                     int m = G(ji, jj) && depth[ji + nx * jj] > MajorWidth / 2 && LFits(a, ji + nx * jj) && LFits(ji + nx * jj, b) ? ji + nx * jj : mi + nx * mj;
                     Jog(a, m, depthLeft - 1); Jog(m, b, depthLeft - 1);
                 }
-                for (int k = 0; k + 1 < points.Count; k++) Jog(points[k], points[k + 1], 4);
+                for (int k = 0; k + 1 < points.Count; k++) Jog(points[k], points[k + 1], 1);
                 points = jogged;
                 int id = majors++;
                 for (int k = 0; k + 1 < points.Count; k++)
@@ -815,20 +905,16 @@ public sealed class ArterialModel : ILayoutModel
                 FromRoads(laid.Concat(way), false);
             }
         }
+        }
 
-        // Pieces join shared, before the streets, so streets can meet their crossings.
-        RuinLayout.LinkPieces(site, sk, ground, piece, sizes, MinPiece);
-        var majorHall = RuinLayout.HallMask(site, sk);
-
-        // Streets, laid fresh on every floor over that floor's ground (the major roads and crossings are the same on all
-        // floors, so stairs line up): minor roads off the major ones, then lanes to ground still far from any road.
-        sk.FloorHalls = new List<(CellRect, PartKind)>[site.Floors];
-        ulong floorSeed = (ulong)rng.Next(int.MaxValue) << 20;
-        var gf = new bool[n];
+        // Every floor is laid out on its own ground: major roads, then minor roads off them, then lanes to ground still
+        // far from any road. (Stairs between floors come after, where the floors' halls line up; see RuinLayout.)
+        var gf = ground;
         var reach = new int[n];
         var mine = new HashSet<int>();
-        List<(CellRect Rect, PartKind Kind)> own = [];
         var mrng = rng;
+        var road0 = new int[n];
+        int majors0 = 0;
         bool GF(int i, int j) => i >= 0 && j >= 0 && i < nx && j < nz && gf[i + nx * j];
         void LayF(CellRect r)
         {
@@ -842,8 +928,11 @@ public sealed class ArterialModel : ILayoutModel
         {
             own = sk.FloorHalls[f] = [];
             mrng = new LayoutRng(floorSeed + (ulong)f);
-            for (int c = 0; c < n; c++) gf[c] = ground[c] && site.Grounds[f][c] is RuinSite.Ground.Solid or RuinSite.Ground.Partial;
-            Array.Copy(majorHall, hall, n);
+            for (int c = 0; c < n; c++) gf[c] = unionGround[c] && site.Grounds[f][c] is RuinSite.Ground.Solid or RuinSite.Ground.Partial;
+            Array.Copy(sharedHall, hall, n);
+            Depths();
+            Majors(f);
+            if (f == 0) { Array.Copy(road, road0, n); majors0 = majors; }
             // Minor roads: off every major leg's straight runs, both sides, winding: runs of MinorRun cells, then a turn
             // (or not), never back the way they came, until they reach the ground's edge (ending there) or a road (joining
             // it, so roads loop) or MaxMinor cells; now and then a fork off a bend.
@@ -946,9 +1035,10 @@ public sealed class ArterialModel : ILayoutModel
 
         }
 
-        // Districts: the major road each cell is nearest to.
+        // Districts: the top floor's major road each cell is nearest to.
         var dq = new Queue<int>();
-        for (int c = 0; c < n; c++) if (road[c] >= 0) { sk.DistrictOf[c] = road[c]; dq.Enqueue(c); }
+        Array.Copy(unionGround, ground, n);
+        for (int c = 0; c < n; c++) if (road0[c] >= 0) { sk.DistrictOf[c] = road0[c]; dq.Enqueue(c); }
         while (dq.TryDequeue(out int c))
         {
             int i = c % nx, j = c / nx;
@@ -959,7 +1049,7 @@ public sealed class ArterialModel : ILayoutModel
                 sk.DistrictOf[a + nx * b] = sk.DistrictOf[c]; dq.Enqueue(a + nx * b);
             }
         }
-        sk.Districts = majors;
+        sk.Districts = majors0;
         return sk;
     }
 

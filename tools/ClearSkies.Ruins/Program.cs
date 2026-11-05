@@ -116,9 +116,9 @@ foreach (var m in models)
                       $"{plan.Parts.Count:N0} parts, {carving.Boxes.Length:N0} boxes in {carving.ByChunk.Count:N0} chunks, indexed in {indexTime.TotalMilliseconds:0} ms, ~{carving.MemoryBytes / 1e6:0.0} MB");
     Console.WriteLine($"  carving: mean {times.Average():0.0} µs, 99% {times[(int)(0.99 * (times.Count - 1))]:0.0} µs, worst {times[^1]:0.0} µs a chunk; " +
                       $"{air / 1e6:0.0} M blocks of air, {brick / 1e6:0.0} M of brick");
-    Console.WriteLine($"  {mt.Rooms:N0} rooms ({mt.RoomArea / 1e6:0.00} M blocks², {100 * mt.Coverage:0}% of solid ground), halls {mt.HallArea / 1e6:0.00} M blocks², " +
+    Console.WriteLine($"  {mt.Rooms:N0} plots ({mt.RoomArea / 1e6:0.00} M blocks², {100 * mt.Coverage:0}% of solid ground), halls {mt.HallArea / 1e6:0.00} M blocks², " +
                       $"{mt.Bridges} bridges ({mt.BridgeCells * C} blocks), {mt.Districts} districts");
-    Console.WriteLine($"  reachable from the entrance: {100.0 * mt.Reached / Math.Max(1, mt.Rooms):0.0}% of rooms; walk mean {mt.MeanWalk:0} blocks, 90% {mt.P90Walk:0}, worst {mt.MaxWalk:0}");
+    Console.WriteLine($"  reachable from the entrance: {100.0 * mt.Reached / Math.Max(1, mt.Rooms):0.0}% of plots; walk mean {mt.MeanWalk:0} blocks, 90% {mt.P90Walk:0}, worst {mt.MaxWalk:0}");
     rows.Add(string.Join(",", m.Name, plan.SkeletonTime.TotalMilliseconds.ToString("0.0"), plan.RoomsTime.TotalMilliseconds.ToString("0.0"),
         indexTime.TotalMilliseconds.ToString("0.0"), carving.Boxes.Length, carving.ByChunk.Count, (carving.MemoryBytes / 1e6).ToString("0.00"),
         times.Average().ToString("0.0"), times[(int)(0.99 * (times.Count - 1))].ToString("0.0"),
