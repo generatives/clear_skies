@@ -33,7 +33,7 @@ public sealed class RuinSite
     /// <summary>Rock a cell needs under its floor and over its ceiling to hold a room.</summary>
     public const int Margin = 2;
     /// <summary>Widest gap (in cells) a bridge crosses, and so the widest crack the region grows across.</summary>
-    public const int BridgeCells = 16;
+    public const int BridgeCells = 8;
 
     public enum Ground : byte
     {
