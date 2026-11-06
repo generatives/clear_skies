@@ -75,6 +75,10 @@ public sealed record LaunchOptions
     /// settings out in a new --world.</summary>
     public LandscapeSettings Terrain { get; init; } = new();
 
+    /// <summary>--ruins name=value,...: ruins under the islands (see RuinWorldSettings), e.g. --ruins model=grid or
+    /// --ruins off. Like --terrain, a world's chunks already saved keep what they had.</summary>
+    public ClearSkies.Game.Ruins.RuinWorldSettings Ruins { get; init; } = new();
+
     /// <summary>--flight-test: fly once the world has loaded, then quit.</summary>
     public bool FlightTest { get; init; }
 
@@ -102,6 +106,7 @@ public sealed record LaunchOptions
         if (Value("--piece-height") is { } height) o = o with { PieceHeight = float.Parse(height, CultureInfo.InvariantCulture) };
         if (Value("--column-depth") is { } depth) o = o with { ColumnDepth = float.Parse(depth, CultureInfo.InvariantCulture) };
         if (Value("--terrain") is { } terrain) o = o with { Terrain = LandscapeSettings.Parse(terrain) };
+        if (Value("--ruins") is { } ruins) o = o with { Ruins = ClearSkies.Game.Ruins.RuinWorldSettings.Parse(ruins) };
         if (Value("--view-distance") is { } view) o = o with { ViewDistance = float.Parse(view, CultureInfo.InvariantCulture) };
         return o with { FlightTest = args.Contains("--flight-test") };
     }

@@ -58,7 +58,9 @@ public sealed class GameWorld
         var ground = new GroundCache(); // every worker's generator shares what's worked out of the ground
         // Worn and watered landmass by landmass, as each is first reached (see Landscape).
         var landscape = Landscape = options.Terrain.Enabled ? new Landscape(seed, options.Terrain) : null;
-        ChunkLoad = new ChunkLoadSystem(host.World, StaticVolume, budget, ChunkPipeline.Pipeline, () => new HeartWorldGenerator(seed, ground, landscape),
+        // Ruins under the islands, landmass by landmass as each is first reached (see RuinWorld).
+        var ruins = options.Ruins.Enabled ? new ClearSkies.Game.Ruins.RuinWorld(seed, options.Ruins) : null;
+        ChunkLoad = new ChunkLoadSystem(host.World, StaticVolume, budget, ChunkPipeline.Pipeline, () => new HeartWorldGenerator(seed, ground, landscape, ruins),
                                         options.ViewDistance, MinChunkY, chunkStore, chunkPreparer);
         ((EditVoxelsHandler)Commands.HandlerFor(CommandIds.EditVoxels)!).Terrain = ChunkLoad; // edits to the world ask it what's there
         ColliderStages.Add(ChunkPipeline, host.Physics); // terrain colliders, in the chunk pipeline
