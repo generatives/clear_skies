@@ -71,15 +71,18 @@ public sealed class HeartWorldGenerator : IWorldGenerator
     private readonly ulong _seed;
     internal ulong Seed => _seed;
     private readonly Landscape? _landscape;
+    private readonly ClearSkies.Game.Ruins.RuinWorld? _ruins;
     private readonly ContinentTerrain _terrain;
     private readonly FastNoiseLite _warpX, _warpY, _warpZ, _crack, _rough;
 
     /// <param name="cache">Shared with the other workers' generators; by default, this one's own.</param>
     /// <param name="landscape">How the land is worn and watered; none, as the hearts leave it.</param>
-    public HeartWorldGenerator(ulong seed, GroundCache? cache = null, Landscape? landscape = null)
+    /// <param name="ruins">Ruins carved into the land; none by default.</param>
+    public HeartWorldGenerator(ulong seed, GroundCache? cache = null, Landscape? landscape = null, ClearSkies.Game.Ruins.RuinWorld? ruins = null)
     {
         _seed = seed;
         _landscape = landscape;
+        _ruins = ruins;
         _cache = cache ?? new GroundCache();
         _terrain = ContinentTerrain.For(seed);
         _warpX = Noise(seed + 31, WarpFrequency);
@@ -229,6 +232,9 @@ public sealed class HeartWorldGenerator : IWorldGenerator
                 Trees.Grow(data, originY, kind, lx, hi, lz, Trees.Hash(x, hi, z, _seed));
             }
         }
+
+        // Ruins, carved into it all (see RuinWorld).
+        _ruins?.Carve(data, pos);
     }
 
     /// <summary>Level <paramref name="level"/>'s chunk <paramref name="pos"/> of distant terrain (each voxel 2^level

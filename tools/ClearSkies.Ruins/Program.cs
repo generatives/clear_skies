@@ -10,9 +10,10 @@ using ClearSkies.Game.Ruins;
 //
 //   dotnet run -c Release --project tools/ClearSkies.Ruins -- [--seed 1337] [--cell 1 -1] [--aspect 2] [--gap-cost 8] [--roughness 0.7] [--piece-entrance 40000]
 //       [--population 150000] [--area-per-person 40] [--max-floors 40] [--island 0] [--model all|grid|arterial|hub|spine] [--gen-sample 200]
-//       [--out ruins-out]
+//       [--out ruins-out] [--in-world]
 //
-// With no --cell it takes the spawn's landmass; --island picks one of its islands (0 is the biggest). RUINS_DEBUG=1 also
+// --in-world also generates real chunks through the game's generator with ruins on (see RuinWorld) and draws an upright
+// slice through the main entrance (world-slice.png). With no --cell it takes the spawn's landmass; --island picks one of its islands (0 is the biggest). RUINS_DEBUG=1 also
 // prints how many rooms are reachable on each floor.
 
 CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
@@ -21,6 +22,7 @@ ulong seed = 1337;
 (int X, int Z)? cell = null;
 var settings = new RuinSettings();
 string model = "all", outDir = "ruins-out";
+bool inWorld = false;
 int genSample = 200, island = 0;
 for (int a = 0; a < args.Length; a++)
 {
@@ -39,6 +41,7 @@ for (int a = 0; a < args.Length; a++)
         case "--gen-sample": genSample = int.Parse(args[++a]); break;
         case "--out": outDir = args[++a]; break;
         case "--island": island = int.Parse(args[++a]); break;
+        case "--in-world": inWorld = true; break;
         default: Console.Error.WriteLine($"Unknown argument {args[a]}"); return 1;
     }
 }
@@ -169,5 +172,51 @@ if (touched is { Count: > 0 } && genSample > 0)
     times.Sort();
     Console.WriteLine();
     Console.WriteLine($"Generating {keys.Length} of those chunks (no landscape): mean {times.Average() / 1000:0.00} ms, median {times[times.Count / 2] / 1000:0.00} ms a chunk");
+}
+
+// Through the game's own generator, ruins and all: an upright slice of real blocks through the main entrance.
+if (inWorld)
+{
+    var world = new RuinWorld(seed, new RuinWorldSettings { Model = model == "all" ? "arterial" : model, Ruin = settings });
+    var gen = new HeartWorldGenerator(seed, null, null, world);
+    int ex = site.X0 + site.Centre % site.Nx * C, ez = site.Z0 + site.Centre / site.Nx * C;
+    var sw = Stopwatch.StartNew();
+    world.At(ex, ez);
+    Console.WriteLine($"In world: ruins for the landmass in {sw.Elapsed.TotalSeconds:0.0} s");
+    const int W = 640, Top = 40;
+    int yTop = site.Surface[site.Centre] + Top, yBottom = site.FloorY(site.Floors - 1) - 16, H = yTop - yBottom;
+    var chunks = new Dictionary<(int, int, int), ChunkData>();
+    long brick = 0;
+    var times = new List<double>();
+    ChunkData Chunk(int cx, int cy, int cz)
+    {
+        if (chunks.TryGetValue((cx, cy, cz), out var d)) return d;
+        d = new ChunkData();
+        long t0 = Stopwatch.GetTimestamp();
+        gen.Generate(d, new ChunkPosition(cx, cy, cz));
+        times.Add(Stopwatch.GetElapsedTime(t0).TotalMilliseconds);
+        return chunks[(cx, cy, cz)] = d;
+    }
+    var rgb = new byte[W * H * 3];
+    for (int py = 0; py < H; py++)
+    for (int px = 0; px < W; px++)
+    {
+        int x = ex - W / 2 + px, y = yTop - py;
+        var b = Chunk(x >> 5, y >> 5, ez >> 5).Get(x & 31, y & 31, ez & 31);
+        (byte, byte, byte) col = b switch
+        {
+            BlockId.Air => ((byte)24, (byte)26, (byte)34),
+            BlockId.StoneBrick => ((byte)196, (byte)150, (byte)110),
+            BlockId.Water => ((byte)50, (byte)90, (byte)200),
+            BlockId.Grass or BlockId.Dirt => ((byte)80, (byte)130, (byte)60),
+            _ => ((byte)90, (byte)92, (byte)98),
+        };
+        if (b == BlockId.StoneBrick) brick++;
+        int o = (px + W * py) * 3; rgb[o] = col.Item1; rgb[o + 1] = col.Item2; rgb[o + 2] = col.Item3;
+    }
+    Maps.Write(Path.Combine(outDir, "world-slice.png"), rgb, W, H);
+    times.Sort();
+    Console.WriteLine($"In world: {chunks.Count} chunks generated with ruins, mean {times.Average():0.00} ms, median {times[times.Count / 2]:0.00} ms; " +
+                      $"{brick} brick in the slice (x {ex - W / 2}..{ex + W / 2}, z {ez}, y {yBottom}..{yTop})");
 }
 return 0;
