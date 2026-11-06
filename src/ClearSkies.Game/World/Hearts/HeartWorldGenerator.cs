@@ -267,6 +267,7 @@ public sealed class HeartWorldGenerator : IWorldGenerator
         }
         CoarseFalls(data, c, by0);
         if (c <= S) CoarseTrees(data, pos, level);
+        _ruins?.CarveCoarse(data, pos, level); // (the entrance towers)
     }
 
     // While a coarse chunk is made (see GenerateCoarse), per voxel column: its top block, top water block and the bottom

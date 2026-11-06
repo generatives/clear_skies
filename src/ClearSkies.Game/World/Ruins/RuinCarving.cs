@@ -31,6 +31,8 @@ public sealed class RuinCarving
 
     public readonly RuinPlan Plan;
     public readonly BlockBox[] Boxes;
+    /// <summary>The entrances' towers (their brick outsides): what of the ruin shows from afar.</summary>
+    public readonly List<BlockBox> Towers = [];
     public readonly Dictionary<long, int[]> ByChunk;
 
     public static long Key(int cx, int cy, int cz) => ((long)(cx & 0x1FFFFF) << 42) | ((long)(cy & 0x1FFFFF) << 21) | (uint)(cz & 0x1FFFFF);
@@ -84,6 +86,7 @@ public sealed class RuinCarving
                         for (int i = p.Rect.I0; i < p.Rect.I1; i++) surface = Math.Max(surface, site.Surface[i + site.Nx * j]);
                         int top = Math.Max(surface, y + P) + TowerHeight;
                         boxes.Add(new BlockBox(x0 - 1, y + P - 1, z0 - 1, x1 + 1, top + 1, z1 + 1, BoxOp.Room));
+                        Towers.Add(new BlockBox(x0 - 1, surface + 1, z0 - 1, x1 + 1, top + 1, z1 + 1, BoxOp.Room));
                         int mx = (x0 + x1) / 2;
                         boxes.Add(new BlockBox(mx - DoorWidth / 2, surface + 1, z0 - 1, mx - DoorWidth / 2 + DoorWidth, surface + 1 + DoorHeight, z0, BoxOp.Air));
                         // Its floor is the top floor's: open the shaft into it.

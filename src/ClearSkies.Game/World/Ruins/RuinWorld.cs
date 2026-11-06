@@ -89,6 +89,27 @@ public sealed class RuinWorld(ulong seed, RuinWorldSettings settings)
         return ruins.ToArray();
     }
 
+    /// <summary>The ruins in a distant chunk at LOD <paramref name="level"/> (voxels 2^level blocks on a side): just the
+    /// entrance towers above the ground, each voxel whose middle is inside one made brick where it's open.</summary>
+    public void CarveCoarse(ChunkData data, ChunkPosition pos, int level)
+    {
+        const int S = ChunkData.Size;
+        int c = 1 << level, span = S * c, bx0 = pos.X * span, by0 = pos.Y * span, bz0 = pos.Z * span;
+        foreach (var ruin in At(bx0 + span / 2, bz0 + span / 2))
+        foreach (var t in ruin.Towers)
+        {
+            if (t.X1 <= bx0 || t.X0 >= bx0 + span || t.Y1 <= by0 || t.Y0 >= by0 + span || t.Z1 <= bz0 || t.Z0 >= bz0 + span) continue;
+            for (int v = Math.Max(0, (t.Z0 - bz0) / c); v < Math.Min(S, (t.Z1 - bz0 + c - 1) / c); v++)
+            for (int w = Math.Max(0, (t.Y0 - by0) / c); w < Math.Min(S, (t.Y1 - by0 + c - 1) / c); w++)
+            for (int u = Math.Max(0, (t.X0 - bx0) / c); u < Math.Min(S, (t.X1 - bx0 + c - 1) / c); u++)
+            {
+                int x = bx0 + u * c + c / 2, y = by0 + w * c + c / 2, z = bz0 + v * c + c / 2;
+                if (x < t.X0 || x >= t.X1 || y < t.Y0 || y >= t.Y1 || z < t.Z0 || z >= t.Z1) continue;
+                if (data.Get(u, w, v) == BlockId.Air) data.Set(u, w, v, BlockId.StoneBrick);
+            }
+        }
+    }
+
     /// <summary>Carves whatever ruins reach into chunk <paramref name="pos"/>, freshly generated.</summary>
     public void Carve(ChunkData data, ChunkPosition pos)
     {

@@ -234,6 +234,17 @@ if (inWorld)
         int o = (px + W * py) * 3; rgb[o] = col.Item1; rgb[o + 1] = col.Item2; rgb[o + 2] = col.Item3;
     }
     Maps.Write(Path.Combine(outDir, "world-slice.png"), rgb, W, H);
+    // The towers from afar: brick voxels round the main entrance at each LOD level.
+    for (int level = 1; level <= 3; level++)
+    {
+        int span = ChunkData.Size << level, n2 = 0;
+        int sy = site.Surface[site.Centre] + 3;
+        var d = new ChunkData();
+        gen.Generate(d, new ChunkPosition((int)Math.Floor(ex / (double)span), (int)Math.Floor(sy / (double)span), (int)Math.Floor(ez / (double)span)), level);
+        for (int z = 0; z < ChunkData.Size; z++) for (int y = 0; y < ChunkData.Size; y++) for (int x = 0; x < ChunkData.Size; x++)
+            if (d.Get(x, y, z) == BlockId.StoneBrick) n2++;
+        Console.WriteLine($"In world: LOD {level} chunk over the main entrance has {n2} brick voxels");
+    }
     times.Sort();
     Console.WriteLine($"In world: {chunks.Count} chunks generated with ruins, mean {times.Average():0.00} ms, median {times[times.Count / 2]:0.00} ms; " +
                       $"{brick} brick in the slice (x {ex - W / 2}..{ex + W / 2}, z {ez}, y {yBottom}..{yTop})");
