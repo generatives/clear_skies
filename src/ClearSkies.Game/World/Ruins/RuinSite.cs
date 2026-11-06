@@ -42,7 +42,7 @@ public sealed class RuinSite
     /// <summary>Rock a cell needs under its floor and over its ceiling to hold a room.</summary>
     public const int Margin = 2;
     /// <summary>Widest gap (in cells) a bridge crosses, and so the widest crack the region grows across.</summary>
-    public const int BridgeCells = 8;
+    public const int BridgeCells = 16;
     /// <summary>A drop (blocks) between neighbouring cells that parts pieces: a crack's edge, with land far below.</summary>
     public const int Cliff = 16;
     /// <summary>Cells of border the grid keeps round the ruin (so maps show the land round it).</summary>

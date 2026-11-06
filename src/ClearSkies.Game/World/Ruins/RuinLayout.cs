@@ -78,7 +78,8 @@ public static class RuinLayout
             foreach (var (rect, kind) in sk.Halls) ClipHall(site, f, rect, kind, floorHalls[f]);
             if (sk.FloorHalls?[f] is { } own) foreach (var (rect, kind) in own) ClipHall(site, f, rect, kind, floorHalls[f]);
         }
-        JoinFloors(site, floorHalls, cores, stagger: sk.FloorHalls != null);
+        var dropped = KeepFewBridges(site, floorHalls);
+        JoinFloors(site, floorHalls, cores, stagger: sk.FloorHalls != null, dropped);
         var occupied = new bool[n];
         for (int f = 0; f < site.Floors; f++)
         {
@@ -171,10 +172,54 @@ public static class RuinLayout
     /// <summary>Makes sure every floor's halls can be got to: walks from the entrances (along halls, up and down cores),
     /// and for each stretch of hall it doesn't reach, floor by floor from the top, adds a lane to the nearest hall it does
     /// reach on that floor, or else a core down to it from a floor above where the walk got to, if there's rock for one.</summary>
-    /// <summary>Farthest (cells) a lane goes to join a cut-off stretch of hall to the rest.</summary>
-    public const int LaneReach = 30;
+    /// <summary>Bridges between two pieces: at most this many per pair over the whole ruin, at least BridgeApart cells
+    /// across or BridgeFloorsApart floors from each other.</summary>
+    public const int BridgesPerPair = 3, BridgeApart = 40, BridgeFloorsApart = 6;
 
-    private static void JoinFloors(RuinSite site, List<Part>[] floorHalls, List<Part> cores, bool stagger)
+    /// <summary>Thins bridges (over the whole ruin, all floors) to a few per pair of pieces they join (or per piece, for
+    /// a chasm inside one), shortest first and spread out, so each crossing is a landmark; the halls they'd have
+    /// joined end at the gap, and other ways round (lanes, stairs) are found after.</summary>
+    private static List<Part> KeepFewBridges(RuinSite site, List<Part>[] floorHalls)
+    {
+        int nx = site.Nx, nz = site.Nz;
+        int PieceAt(int i, int j) => i < 0 || j < 0 || i >= nx || j >= nz ? -1 : site.PieceOf[i + nx * j];
+        var spans = new List<(int Floor, int Index, int Len, int A, int B, int I, int J)>();
+        for (int f = 0; f < floorHalls.Length; f++)
+            for (int k = 0; k < floorHalls[f].Count; k++)
+            {
+                var p = floorHalls[f][k];
+                if (p.Kind != PartKind.Bridge) continue;
+                var r = p.Rect;
+                int mi = (r.I0 + r.I1) / 2, mj = (r.J0 + r.J1) / 2;
+                // Its two ends: the ground just past it, whichever way it has ground at both ends.
+                int a = PieceAt(r.I0 - 1, mj), b = PieceAt(r.I1, mj), len = r.Width;
+                if (a < 0 || b < 0) { a = PieceAt(mi, r.J0 - 1); b = PieceAt(mi, r.J1); len = r.Depth; }
+                spans.Add((f, k, len, Math.Min(a, b), Math.Max(a, b), mi, mj));
+            }
+        var drop = new HashSet<(int, int)>();
+        foreach (var pair in spans.GroupBy(s => (s.A, s.B)))
+        {
+            var kept = new List<(int Floor, int I, int J)>();
+            foreach (var s in pair.OrderBy(s => s.Len).ThenBy(s => s.Floor))
+            {
+                bool ok = kept.Count < BridgesPerPair && kept.All(o =>
+                    Math.Abs(o.Floor - s.Floor) >= BridgeFloorsApart || Math.Abs(o.I - s.I) + Math.Abs(o.J - s.J) >= BridgeApart);
+                if (ok) kept.Add((s.Floor, s.I, s.J)); else drop.Add((s.Floor, s.Index));
+            }
+        }
+        var dropped = new List<Part>();
+        for (int f = 0; f < floorHalls.Length; f++)
+        {
+            int k = 0;
+            floorHalls[f].RemoveAll(p => { bool d = drop.Contains((f, k++)); if (d) dropped.Add(p); return d; });
+        }
+        return dropped;
+    }
+
+    /// <summary>Farthest (cells) a lane goes to join a cut-off stretch of hall to the rest.</summary>
+    public const int LaneReach = 200;
+
+    private static void JoinFloors(RuinSite site, List<Part>[] floorHalls, List<Part> cores, bool stagger, List<Part> dropped)
     {
         int nx = site.Nx, nz = site.Nz, n = nx * nz, floors = site.Floors, half = CoreSize / 2;
         var walk = new bool[floors * n];
@@ -299,6 +344,40 @@ public static class RuinLayout
             Flood();
             return true;
         }
+        // Failing a lane: a bridge straight across a gap (open at this floor, up to BridgeCells) from the stretch to a
+        // reached hall, the shortest there is.
+        bool BridgeOver(int f, List<int> stretch)
+        {
+            int best = -1, bestLen = int.MaxValue, bdi = 0, bdj = 0;
+            foreach (int c in stretch)
+            {
+                int i = c % nx, j = c / nx;
+                foreach (var (di, dj) in (ReadOnlySpan<(int, int)>)[(1, 0), (-1, 0), (0, 1), (0, -1)])
+                    for (int k = 1; k <= RuinSite.BridgeCells + 1 && k < bestLen + 1; k++)
+                    {
+                        int a = i + di * k, b = j + dj * k;
+                        var g = site.At(f, a, b);
+                        if (g == RuinSite.Ground.Out) break;
+                        int e = a + nx * b;
+                        if (g == RuinSite.Ground.Open) continue;
+                        if (k > 1 && reach[f * n + e]) { best = c; bestLen = k - 1; bdi = di; bdj = dj; }
+                        break;
+                    }
+            }
+            if (best < 0) return false;
+            int bi = best % nx + bdi, bj = best / nx + bdj, ei = best % nx + bdi * bestLen, ej = best / nx + bdj * bestLen;
+            var r = new CellRect(Math.Min(bi, ei), Math.Min(bj, ej), Math.Max(bi, ei) + 1, Math.Max(bj, ej) + 1);
+            floorHalls[f].Add(new Part { Rect = r, Kind = PartKind.Bridge, Floor = (byte)f, LastFloor = (byte)f, District = -1 });
+            Rect(walk, f, r);
+            int far = (best % nx + bdi * (bestLen + 1)) + nx * (best / nx + bdj * (bestLen + 1));
+            q.Enqueue(f * n + far);
+            Flood();
+            return true;
+        }
+        // Twice over: a stretch cut off from every floor above may be reachable from below once lower floors are done.
+        void Fix()
+        {
+        for (int pass = 0; pass < 2; pass++)
         for (int f = 0; f < floors; f++)
         {
             Array.Clear(tried);
@@ -316,8 +395,9 @@ public static class RuinLayout
                     foreach (int e in (ReadOnlySpan<int>)[i > 0 ? c - 1 : -1, i < nx - 1 ? c + 1 : -1, j > 0 ? c - nx : -1, j < nz - 1 ? c + nx : -1])
                         if (e >= 0 && !tried[e] && walk[f * n + e] && !reach[f * n + e]) { tried[e] = true; cq.Enqueue(e); }
                 }
-                // A core down to it from the nearest floor above where its top lands on a reached hall.
-                if (Lane(f, part)) continue;
+                // A lane to a reached hall on this floor, else a core down to it from the nearest floor above where its
+                // top lands on a reached hall (or up to it from below).
+                if (Lane(f, part) || BridgeOver(f, part)) continue;
                 // (A full core where it fits, else a narrow stair of 2 x 2 cells.)
                 bool placed = false;
                 foreach (int size in (ReadOnlySpan<int>)[CoreSize, 2])
@@ -330,22 +410,71 @@ public static class RuinLayout
                     {
                         if (size != CoreSize) rect = new CellRect(i - (o & 1), j - (o >> 1), i - (o & 1) + 2, j - (o >> 1) + 2);
                         if (rect.I0 < 0 || rect.J0 < 0 || rect.I1 > nx || rect.J1 > nz || !Fits(site, f, rect)) continue;
-                        int top = -1;
+                        int top = -1, last = f;
                         for (int g = f - 1; g >= 0 && Fits(site, g, rect); g--)
                             if (reach[g * n + c]) { top = g; break; }
-                        if (top < 0) continue;
-                        int last = f;
-                        while (last + 1 < floors && Fits(site, last + 1, rect)) last++;
+                        if (top >= 0)
+                            while (last + 1 < floors && Fits(site, last + 1, rect)) last++;
+                        else
+                        {
+                            // Else up to it from the nearest floor below that's reached.
+                            for (int g = f + 1; g < floors && Fits(site, g, rect); g++)
+                                if (reach[g * n + c]) { last = g; break; }
+                            if (last == f) continue;
+                            top = f;
+                        }
                         var core = new Part { Rect = rect, Kind = PartKind.Core, Floor = (byte)top, LastFloor = (byte)last, District = -1 };
                         cores.Add(core);
                         AddCore(core);
-                        q.Enqueue(top * n + c);
+                        q.Enqueue((reach[top * n + c] ? top : last) * n + c);
                         Flood();
                         placed = true;
                     }
                 }
             }
         }
+        }
+        Fix();
+        // Bridges thinned out that turn out to be the only way to somewhere: put back (each joining a reached hall to
+        // one not reached), then try again.
+        int Past(Part b, bool far)
+        {
+            var r = b.Rect;
+            int mi = (r.I0 + r.I1) / 2, mj = (r.J0 + r.J1) / 2;
+            int ai = r.I0 - 1, bi = r.I1, aj = r.J0 - 1, bj = r.J1;
+            bool across = ai >= 0 && bi < nx && walk[b.Floor * n + ai + nx * mj] && walk[b.Floor * n + bi + nx * mj];
+            if (across) return b.Floor * n + (far ? bi : ai) + nx * mj;
+            if (aj < 0 || bj >= nz) return -1;
+            return b.Floor * n + mi + nx * (far ? bj : aj);
+        }
+        for (bool added = true; added;)
+        {
+            added = false;
+            for (int k = dropped.Count - 1; k >= 0; k--)
+            {
+                var b = dropped[k];
+                int a = Past(b, false), z = Past(b, true);
+                if (a < 0 || z < 0 || !walk[a] || !walk[z] || reach[a] == reach[z]) continue;
+                floorHalls[b.Floor].Add(b);
+                Rect(walk, b.Floor, b.Rect);
+                dropped.RemoveAt(k);
+                q.Enqueue(reach[a] ? a : z);
+                Flood();
+                added = true;
+            }
+            if (added) Fix();
+        }
+
+        // Whatever's still cut off (pockets the ruin reached through rock too narrow for stairs) is left as rock: its
+        // halls go, so no plots line them.
+        for (int f = 0; f < floors; f++)
+            floorHalls[f].RemoveAll(h =>
+            {
+                var r = h.Rect.Clip(nx, nz);
+                for (int j = r.J0; j < r.J1; j++)
+                for (int i = r.I0; i < r.I1; i++) if (reach[f * n + i + nx * j]) return false;
+                return true;
+            });
     }
 
     internal static bool[] HallMask(RuinSite site, Skeleton sk)
@@ -743,6 +872,7 @@ public sealed class ArterialModel : ILayoutModel
         // Pieces join on every floor alike (crossings clip to each floor's ground), first, so roads can meet them.
         RuinLayout.LinkPieces(site, sk, unionGround, piece, sizes, MinPiece, joinEnds: false);
         var sharedHall = RuinLayout.HallMask(site, sk);
+        var crossings = sk.Halls.ToList();
         sk.FloorHalls = new List<(CellRect, PartKind)>[site.Floors];
         List<(CellRect Rect, PartKind Kind)> own = [];
         ulong floorSeed = (ulong)rng.Next(int.MaxValue) << 20;
@@ -1033,6 +1163,25 @@ public sealed class ArterialModel : ILayoutModel
                 Spread();
             }
 
+            // Each crossing between pieces joined, at both ends, to this floor's own roads.
+            var mineOnly = new bool[n];
+            for (int c = 0; c < n; c++) mineOnly[c] = hall[c] && !sharedHall[c];
+            foreach (var (rect, _) in crossings)
+            {
+                bool alongI = rect.Width >= rect.Depth;
+                foreach (var (ei, ej) in alongI ? [(rect.I0, rect.J0), (rect.I1 - 1, rect.J0)] : new[] { (rect.I0, rect.J0), (rect.I0, rect.J1 - 1) })
+                {
+                    if (!GF(ei, ej)) continue;
+                    int before = own.Count;
+                    RuinLayout.Link(nx, nz, ei, ej, c => gf[c], mineOnly, own, 1, PartKind.Hall);
+                    for (int k = before; k < own.Count; k++)
+                    {
+                        var r = own[k].Rect.Clip(nx, nz);
+                        for (int j = r.J0; j < r.J1; j++)
+                        for (int i = r.I0; i < r.I1; i++) { hall[i + nx * j] = true; mineOnly[i + nx * j] = true; }
+                    }
+                }
+            }
         }
 
         // Districts: the top floor's major road each cell is nearest to.
