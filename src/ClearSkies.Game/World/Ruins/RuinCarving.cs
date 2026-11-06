@@ -29,6 +29,7 @@ public sealed class RuinCarving
     /// <summary>How high the entrance's tower stands over the ground.</summary>
     public const int TowerHeight = 6;
 
+    public readonly RuinPlan Plan;
     public readonly BlockBox[] Boxes;
     public readonly Dictionary<long, int[]> ByChunk;
 
@@ -44,6 +45,7 @@ public sealed class RuinCarving
 
     public RuinCarving(RuinPlan plan)
     {
+        Plan = plan;
         var site = plan.Site;
         const int C = RuinSite.Cell, P = RuinSite.FloorPitch;
         var boxes = new List<BlockBox>(plan.Parts.Count * 2);

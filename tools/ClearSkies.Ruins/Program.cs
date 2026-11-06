@@ -42,6 +42,25 @@ for (int a = 0; a < args.Length; a++)
         case "--out": outDir = args[++a]; break;
         case "--island": island = int.Parse(args[++a]); break;
         case "--in-world": inWorld = true; break;
+        case "--at":
+        {
+            // Every ruin the game makes on the landmass (x, z) is on, and where their entrances are; then stop.
+            float ax = float.Parse(args[++a]), az = float.Parse(args[++a]);
+            var lm = HeartGrid.Landmass(seed, ax, az);
+            Console.WriteLine($"Seed {seed}: ({ax}, {az}) is on landmass {lm}");
+            var w = new RuinWorld(seed, new RuinWorldSettings { Ruin = settings });
+            foreach (var r in w.At(ax, az))
+            {
+                var st = r.Plan.Site;
+                Console.WriteLine($"  island {st.Island}: {st.Floors} floors, y {st.TopY} down to {st.FloorY(st.Floors - 1)}, {st.Nx * RuinSite.Cell} x {st.Nz * RuinSite.Cell} blocks from ({st.X0}, {st.Z0})");
+                foreach (var (ec, fl) in st.Entrances)
+                {
+                    int x = st.X0 + ec % st.Nx * RuinSite.Cell + RuinSite.Cell / 2, z = st.Z0 + ec / st.Nx * RuinSite.Cell + RuinSite.Cell / 2;
+                    Console.WriteLine($"    entrance at ({x}, {z}), ground y {st.Surface[ec]}, down to floor {fl}; {Math.Sqrt((x - ax) * (x - ax) + (z - az) * (z - az)):0} blocks away");
+                }
+            }
+            return 0;
+        }
         default: Console.Error.WriteLine($"Unknown argument {args[a]}"); return 1;
     }
 }
